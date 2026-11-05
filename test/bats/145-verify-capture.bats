@@ -152,8 +152,86 @@ EOS
   assert_line 'RC=0'
   assert_line 'LAST_OUT=[provision complete]'
   # Verbose mode must still SHOW the output live (that is its whole purpose), so
-  # the line appears twice: once from the tail -f view, once from the capture.
+  # the line appears twice: once from the live view, once from the capture.
   assert_line 'provision complete'
+}
+
+@test "verify-capture: delayed reader drains every byte including final no-newline output" {
+  _require_timeout
+  run "$TIMEOUT_BIN" 20 bash -c "$(_harness_prelude)"'
+    # Delay the real reader beyond the old kill-after-0.2s window. The producer
+    # waits for entry into the reader, not a scheduler-dependent startup guess.
+    wc() {
+      : > "$VERIFY_STATE/reader-started"
+      sleep 0.5
+      command wc "$@"
+    }
+    # Also inject the delay into the old implementation for regression checks.
+    tail() {
+      : > "$VERIFY_STATE/reader-started"
+      sleep 0.5
+      command tail "$@"
+    }
+    {
+      for ((i=0; i<2000; i++)); do
+        printf "line-%04d: %s\n" "$i" "spaces  and \\backslashes"
+      done
+      printf "final fragment without newline"
+    } > "$VERIFY_STATE/expected"
+    producer() {
+      while [ ! -f "$VERIFY_STATE/reader-started" ]; do sleep 0.01; done
+      command cat "$VERIFY_STATE/expected"
+      return 7
+    }
+    VERBOSE=1
+    _run_captured producer 2> "$VERIFY_STATE/live"
+    rc=$?
+    [ "$rc" -eq 7 ] || exit 91
+    cmp "$VERIFY_STATE/expected" "$VERIFY_STATE/live" || exit 92
+    printf "%s" "$LAST_OUT" > "$VERIFY_STATE/captured"
+    cmp "$VERIFY_STATE/expected" "$VERIFY_STATE/captured" || exit 93
+    [ -z "$(find "$VERIFY_STATE" -name "run-captured.*" -print)" ] || exit 94
+    printf "DELAYED_DRAIN_EXACT=yes\n"
+  ' _ "$STUBDIR" "$_RUN_ACQ_AWK"
+  assert_success
+  assert_line 'EXTRACTED_OK=yes'
+  assert_line 'DELAYED_DRAIN_EXACT=yes'
+}
+
+@test "verify-capture: final burst after a live drain is neither lost nor replayed" {
+  _require_timeout
+  run "$TIMEOUT_BIN" 20 bash -c "$(_harness_prelude)"'
+    # Acknowledge only a completed nonempty read, forcing two distinct drains.
+    dd() {
+      command dd "$@" || return
+      case " $* " in
+        *" count=0 "*) ;;
+        *) : > "$VERIFY_STATE/drained" ;;
+      esac
+    }
+    {
+      for ((i=0; i<2000; i++)); do printf "burst-%04d\n" "$i"; done
+      printf "unterminated-final-fragment"
+    } > "$VERIFY_STATE/burst"
+    {
+      printf "early output\n"
+      command cat "$VERIFY_STATE/burst"
+    } > "$VERIFY_STATE/expected"
+    producer() {
+      printf "early output\n"
+      while [ ! -f "$VERIFY_STATE/drained" ]; do sleep 0.01; done
+      command cat "$VERIFY_STATE/burst"
+    }
+    VERBOSE=1
+    _run_captured producer 2> "$VERIFY_STATE/live" || exit 91
+    cmp "$VERIFY_STATE/expected" "$VERIFY_STATE/live" || exit 92
+    printf "%s" "$LAST_OUT" > "$VERIFY_STATE/captured"
+    cmp "$VERIFY_STATE/expected" "$VERIFY_STATE/captured" || exit 93
+    printf "FINAL_BURST_EXACT=yes\n"
+  ' _ "$STUBDIR" "$_RUN_ACQ_AWK"
+  assert_success
+  assert_line 'EXTRACTED_OK=yes'
+  assert_line 'FINAL_BURST_EXACT=yes'
 }
 
 @test "verify-capture: piped stdin still reaches acq (the secret-seeding path)" {

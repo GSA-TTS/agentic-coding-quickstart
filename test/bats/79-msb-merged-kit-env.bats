@@ -38,11 +38,11 @@ _env_merge_provision() {
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     acq_test_stub_provider_input_boundary
-    ZSCALER_KIT=k1; USAI_KIT=k2; PLAYBOOK_KIT=k3; GITSSHSIGN_KIT=k4
+    ZSCALER_KIT=k1; USAI_KIT=/k2; ACQ_PROVIDER_KIT_DEFAULT=/k2; PLAYBOOK_KIT=k3; GITSSHSIGN_KIT=k4
     nk="'"$STUBDIR"'/mergenokit"; mkdir -p "$nk"
     printf "schemaVersion: \"hybrid/v1\"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n" > "$nk/spec.yaml"
     _acq_msb_fetch_kit() {
-      case "$1" in k1) printf "%s\n" "$a" ;; k2) printf "%s\n" "$b" ;; *) printf "%s\n" "$nk" ;; esac
+      case "$1" in k1) printf "%s\n" "$a" ;; /k2) printf "%s\n" "$b" ;; *) printf "%s\n" "$nk" ;; esac
     }
     acq_backend_provision "$sandbox" shell /tmp >/dev/null 2>&1
   ' _ "$a" "$b" "$sandbox"

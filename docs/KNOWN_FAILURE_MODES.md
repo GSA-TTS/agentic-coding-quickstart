@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-10-22"
+last_updated: "2026-10-31"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -13,6 +13,49 @@ keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 This document captures real-world failure patterns when using Docker SBX + USAi + agent frameworks. If you're hitting something weird, it's probably in here.
 
 ---
+
+## Read-only host-config probe misclassifies a denied write
+
+### Symptoms and cause
+
+Readonly kit staging reports that the host-config mount looks writable even
+though host `msb inspect` records a read-only bind and direct writes fail with
+`Read-only file system`. A POSIX shell can exit with status 2 when redirection
+on the special builtin `:` fails. The original probe used that same status to
+signal a successful write, confusing denial with writability.
+
+`acq.backends/msb.sh::_acq_msb_host_config_mount_probe` now isolates the write
+attempt in a subshell. Only an actual successful write selects status 2;
+denial returns 0, while missing/inaccessible mounts and transport errors remain
+refusals. Host mount-record, version and platform checks still apply. The
+real-shell regression is in `test/bats/84-msb-ro-mount-qualification.bats`.
+
+Measured with MSB 0.7.11 on macOS ARM64: the root guest write to a readonly
+canary was denied, a writable control succeeded, and the host sentinel remained
+unchanged. With the fixed probe, the existing OCI kit installed Podman and
+passed its rootless startup self-test. This does not qualify all inner-container
+isolation controls or prove general read-only enforcement across platforms.
+
+## Rootless nested Podman lacks cgroup delegation
+
+The OCI kit may install successfully and pass its storage self-test while an
+inner container with explicit memory/CPU/PID limits still cannot start. In the
+measured MSB 0.7.11 guest, Podman 5.7.0 reported cgroup v2, cgroupfs and an empty
+delegated controller list. The bounded network-off test was refused:
+
+```text
+unable to apply cgroup configuration: rootless needs no limits + no cgrouppath
+when no permission is granted for cgroups
+```
+
+Do not remove mandatory limits to label this a successful isolated runner.
+The outer sandbox owner must provide a reviewed cgroup-delegation path, or use
+another qualified backend, before rootless inner containers can satisfy that
+resource contract. Reopen qualification when delegation is available; verify
+effective memory, CPU and PID enforcement alongside network/source/credential
+separation and cleanup. Kit installation and rootless storage readiness alone
+are insufficient evidence. No host engine socket or privileged-host workaround
+is required or authorized by this guidance.
 
 ## Provider-input validator dependencies are missing
 
@@ -760,12 +803,15 @@ create or a cold start, exec fails with `inspect exec: context deadline
 exceeded` for a few seconds; `acq` polls until a trivial exec succeeds) so a
 cold-start delay is not misread as "kit absent".
 
-> **Detecting a pre-kit sandbox.** `acq` decides a kit is missing by checking for
-> the kit's footprint (e.g. the USAi config file), classifying on the probe's
-> **stdout** (`present`/`absent`), never its exit status — `test -f` exits
-> non-zero when the file is absent, which is indistinguishable from a genuine
-> exec failure, so an exit-status check would wrongly treat "file absent" as
-> "probe failed" and skip healing.
+> **Detecting a pre-kit sandbox.** `acq` decides a built-in kit is missing from
+> the **host** `builtin-kits` record (kit name plus the pinned ref applied),
+> written at create and after a successful heal. A guest-side footprint probe
+> (e.g. the USAi config file) can be forged by the sandbox's passwordless-sudo
+> agent, so it is not authoritative: it runs only under `ACQ_DEBUG` as a
+> diagnostic and never changes the heal decision. Where the diagnostic runs it
+> classifies on the probe's **stdout** (`present`/`absent`), never its exit
+> status — `test -f` exits non-zero when the file is absent, which is
+> indistinguishable from a genuine exec failure.
 
 [sbx133]: https://github.com/docker/sbx-releases/issues/133
 
@@ -1773,6 +1819,34 @@ acq rm <sandbox>
 acq run <agent> <workspace>
 ```
 
+### Edge cases for a sandbox created before the migration
+
+acq reads none of the old guest markers (`/var/lib/acq/*`, `~/.acq-extra-kits`),
+so there is no data migration. Each missing host-config key degrades as follows
+(derived from `acq.backends/msb.sh` and `acq.backends/sbx.sh`; the offline tests
+named below pin the behavior, and none of it was re-verified against a live
+sandbox):
+
+| Backend | Missing host state | Observed behavior | Recovery |
+| --- | --- | --- | --- |
+| msb | `ssh-auth-sock` | No fallback. `SSH_AUTH_SOCK` is not set in sessions until a heal writes the key. `acq run`, `acq start`, and `acq restart` heal it only when a host ssh-agent forward is requested (`SSH_AUTH_SOCK` names an existing socket) **and** the sandbox has the create-time ssh-agent `--vsock` route. Without a host forward the heal is a silent no-op; with a forward but no route acq warns and leaves it unset. `acq exec` and `acq shell` run no heal, so they stay without it until a heal has run. | Run `acq run <sandbox>` with `SSH_AUTH_SOCK` set. With no route, recreate (see KFM §35). |
+| msb | `install-<cksum>` | Each install-phase kit command runs once more on the first heal, then the host gate is written. A command that fails is not recorded and is retried on every heal. The gate records only that the guest reported a zero exit, so it is a run-once cache, not proof the step worked: `ACQ_FORCE_KIT_REAPPLY=1` (set by `acq kit update` and the stale-bundle refresh) bypasses it and re-runs install commands. acq does not check that third-party install commands are idempotent. | None needed for kits written to be idempotent. To force a re-run on a sandbox whose bundle is stale, `acq kit update <sandbox>`; otherwise `ACQ_FORCE_KIT_REAPPLY=1 acq run <sandbox>`, or `acq rm` and recreate. |
+| msb | `agent-user-ready` | No longer used. The agent-user and passwordless-sudo setup is idempotent and runs on every provision and heal instead of being skipped on a recorded gate, because a gate could only record a guest-reported exit. An existing `agent` user is reused. Sandboxes carrying an old `agent-user-ready` key are unaffected (it is ignored). | None needed. |
+| msb | `kit-env` | `acq exec`, `acq shell`, and attach replay no kit `environment[]` until a full heal rebuilds the key from the current kits. | Run `acq run <sandbox>` once. |
+| sbx | `generic-opencode` launch mode, agent recorded as `opencode` | Attach fails closed with `cannot determine OpenCode launch mode` and runs no `sbx run`. acq cannot tell a pre-ADR-0030 template sandbox from a generic one whose host state was lost, and it does not trust a guest value. Other agents are not affected. | `acq rm <sandbox>` then `acq run opencode <workspace>`. |
+| sbx | `builtin-kits` | A sandbox created before the record has none. On sbx 0.38 or later the first re-attach tries to re-apply the three heal-consulted built-ins (Zscaler CA, USAi provider, playbook); `sbx kit add` refuses startup-bearing kits, so acq prints the recreate notice on every attach until the sandbox is recreated. | Recreate to get the record (and the current bundle). |
+| sbx | `extra-kits` (replaces the guest `~/.acq-extra-kits`) | The old marker is ignored. With `ACQ_EXTRA_KITS` set, the first heal tries `sbx kit add` for each extra kit. On sbx 0.38 or later a startup-bearing kit is refused and acq prints the recreate notice. `--kit` refs are create-time only on sbx and are not re-driven. | Recreate if the notice appears. |
+
+Orphaned guest files under `/var/lib/acq/` stay in the guest. acq never reads
+them, so they are harmless.
+
+Offline coverage: `test/bats/82-msb-legacy-sandbox.bats` (msb `ssh-auth-sock`,
+`install-<cksum>`, and `agent-user-ready` rows), `test/bats/72-msb-agent-user.bats` (provenance fallback),
+`test/bats/115-ssh-agent-forward.bats` (heal re-drives the forward), and
+`test/bats/140-opencode-migration-gate.bats` (sbx launch-mode refusal), and
+`test/bats/90-sbx-startup-kit.bats` (sbx `builtin-kits` record, refusal, and
+recreate notice).
+
 ### Prevention / Status
 
 - Fixed without trusting legacy guest state. A one-time idempotent replay after
@@ -1909,7 +1983,7 @@ For a single sandbox, pass the pinned kit ref with `--kit` or include it in
 `ACQ_EXTRA_KITS`:
 
 ```bash
-acq run opencode . --kit 'git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=a1206c52ec82ae7ce080ad44a6e6ac6f951e6d20&dir=integrations/isolation/acq-kits/oci-engine'
+acq run opencode . --kit 'git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=941a286f912b99475429c3c00db49a99af5b241e&dir=integrations/isolation/acq-kits/oci-engine'
 ```
 
 Existing sandboxes that were created before this change keep whatever podman
@@ -2117,11 +2191,15 @@ Three issues compounded:
   diagnostic rather than being hidden. `acq kit update` fails with the same
   guidance. acq does **not** auto-recreate (a recreate discards the sandbox's
   session/context — it stays a deliberate, user-consented action).
-- Probes the playbook with `test -e "$HOME/.agentic-coding-playbook/AGENTS.md"`,
-  which matches **both** the historical git-clone and the current tarball
-  delivery.
-- Writes `~/.acq-extra-kits` at **create** for every extra/CLI kit, so re-attach
-  correctly sees them as already applied.
+- Decides which built-in kits to re-apply from the host `builtin-kits` record
+  (written at **create** and after a successful heal), not from guest state. The
+  guest footprint probe (including the playbook check
+  `test -e "$HOME/.agentic-coding-playbook/AGENTS.md"`, which matches both the
+  historical git-clone and the current tarball delivery) remains only as a
+  debug-only diagnostic under `ACQ_DEBUG`.
+- Writes the host `extra-kits` key at **create** for every extra/CLI kit, so
+  re-attach correctly sees them as already applied. It replaces the old guest
+  `~/.acq-extra-kits` marker, which acq no longer reads.
 
 To pick up a refreshed built-in bundle on sbx 0.38 you must recreate the sandbox
 (this discards its session/context):
@@ -2516,6 +2594,13 @@ Any workflow whose job backs a required status check must either have no
 gate-job pattern. A conditional trigger and "required" are structurally
 incompatible in GitHub Actions; check new required workflows for this before
 adding them to branch protection.
+
+The `changes` job's path list is the other half of this contract: a file the
+real suite reads but the list omits skips the 3.2 run while the gate stays
+green. Add every new input (script, requirements file, key, submodule pin) to
+the `git diff` pathspecs. `test/bats/158-bash32-relevance-paths.bats` fails when
+a known entry is missing and when a new tracked file is neither listed nor
+declared a non-input.
 
 ---
 
@@ -2956,6 +3041,226 @@ large inspect document with the route near the start (this test failed before
 the fix), and covers a transient and a persistent inspect failure via the stub's
 `STUB_MSB_INSPECT_FAIL_TIMES` knob. In new code, do not pipe into `grep -q`
 (or `head`) under `pipefail` when the writer may still be producing output.
+
+## 46. `acq kit-source rm` Refuses to Finish (Backend Allowlist Still Permits the Owner)
+
+### Symptoms
+
+```text
+acq: error: could not write kit.allowedSources, so sbx kit.allowedSources still permits 'github.com/acme/'.
+     Revocation is NOT complete: the source stays registered ...
+acq: kit source 'github.com/acme/kits' was NOT removed (still registered).
+```
+
+### Root Cause
+
+sbx allowlists kit sources by **owner prefix** (`host/owner/`), while `acq` trusts
+**repositories**. Removing a source must therefore also drop the owner prefix from
+sbx, but only if no other trusted repository (and no `ACQ_EXTRA_KIT_SOURCES`
+entry) still needs it. When `acq` cannot read, write, or verify that backend
+setting (`jq` or `sbx` missing, a non-array value, or `sbx settings set` failing),
+it refuses to report the source as removed rather than leave a silently stale
+grant.
+
+### Fix
+
+Install the missing tool, or run the `sbx settings set kit.allowedSources '<json>'`
+command the error prints, then re-run `acq kit-source rm <repo>` (it is
+idempotent). `acq kit-source ls` shows the source until the removal completes.
+
+### Prevention
+
+Regression tests in `test/bats/149-kit-source.bats` cover shared-prefix removal
+and the read/write/`jq` failure paths.
+
+---
+
+## 47. msb Session Shell Is Read From the Guest Passwd Entry (Accepted Residual Risk)
+
+**Status:** Accepted / observed. No code change: a host-recorded shell was
+evaluated and rejected.
+
+### Observation
+
+`_acq_msb_agent_passwd_shell` reads the `agent` account's login shell from the
+guest (`getent passwd agent` / `/etc/passwd` via `msb exec`). The value is
+charset-guarded to a word-safe absolute path (anything else becomes `/bin/sh`),
+exported as `SHELL`, and the session then runs that shell as the unprivileged
+`agent` user inside the guest. A passwordless-sudo guest can therefore choose
+which shell binary its own next interactive session starts.
+
+### Why this is accepted
+
+- **No privilege or boundary change.** The shell runs as `agent`, the same user
+  and filesystem the guest already controls. The agent can equally edit
+  `~/.profile`, `~/.bashrc`, or any binary on its `PATH`; choosing the login shell
+  grants nothing new. No host path, host credential, or acq decision (agent,
+  workspace, SSH socket, kit environment, run-once gates) is derived from it.
+- **A host record would be wrong, not safer.** The passwd shell is legitimately
+  guest state: `chsh`, image defaults, and `_acq_msb_ensure_agent_shell` (which
+  prefers bash when the image has it) all change it, and a host copy would go
+  stale or override a deliberate in-guest choice.
+- **The charset guard and `/bin/sh` fallback already bound it** to a plain
+  absolute path in argv, never shell syntax.
+- **The session environment is already visible to the agent user.** The forwarded
+  SSH socket path and kit environment are in the session shell's environment, and
+  that is the same exposure the `agent` user already has; choosing the shell adds
+  none.
+
+### Revisit if
+
+A future acq feature runs the shell as root or with host-derived secrets in its
+environment, or uses the shell path as an input to a host-side decision.
+
+---
+
+## 48. SBX Startup Barrier Is a Guest File Check (Accepted Residual Risk)
+
+**Status:** Accepted / observed for the barrier itself. No host-authoritative
+startup signal exists; the barrier no longer decides the kit records.
+
+### Observation
+
+After `sbx create`, acq waits for `/tmp/acq/startup-complete` inside the sandbox
+to contain a per-create token (`_acq_sbx_wait_for_startup_barrier`). The token
+is generated on the host (not a secret: PID, epoch and shell random values) and
+delivered in a generated barrier kit whose startup command writes it, so it is
+present in the guest's own startup registration. The host side of the comparison
+is authoritative, but the signal itself is a guest file. A guest that can read
+the token (the normal case, not a hypothetical) or that can alter how the startup
+command is replayed (unverified on sbx) could make acq believe startup finished.
+
+### What the barrier does and does not guarantee
+
+- **It guarantees only** that acq does not attach, or keep the sandbox, until a
+  guest file contains this create's token. That is an ordering aid for honest
+  guests; it is not evidence that any kit's startup commands succeeded.
+- **It does not decide the kit records.** The `extra-kits` and `builtin-kits`
+  records are written from what the host observed: the `sbx create` it ran
+  succeeded with those kit flags. They are seeded before the barrier is
+  consulted, so a guest that satisfies the barrier early (or never runs its
+  startup commands) changes neither. Provenance and the launch-mode record are
+  also host-derived but are written after the barrier succeeds; the barrier
+  decides only whether acq goes on to write them or removes the sandbox and its
+  host state.
+- **What a record therefore means:** "these kits were passed to a create that
+  succeeded", not "these kits' startup commands ran and finished". A heal that
+  trusts the record will not re-apply those kits on its own initiative; the
+  recovery for a damaged guest is `acq rm` and recreate (and on sbx 0.38 a
+  re-apply of a startup-bearing kit is refused anyway, see section 36).
+
+### Why this is accepted
+
+- **Nothing in the guest is a trust anchor.** The sandbox is the boundary, and a
+  guest can already damage its own setup by editing its filesystem after create.
+  The barrier adds no new way to do that.
+- **No acq trust decision reads the barrier.** The values acq acts on across
+  restarts (`extra-kits`, `builtin-kits`, `generic-opencode`, provenance) are
+  host-written from host-observed status and independent of this file.
+- **A host-authoritative signal needs sbx support not verified here.** The only
+  candidates are a backend-reported startup status or a host-visible channel out
+  of the guest. Neither was found in the sbx documentation or CLI help consulted
+  for this repository (not exhaustively checked), and adding one by guessing would
+  trade a low-impact residual risk for an unverifiable mechanism. The related
+  trusted-startup question for SBX is analyzed in the SBX trusted-startup parity
+  ADR (`docs/adr/0037-sbx-trusted-startup-parity.md`).
+
+### Revisit if
+
+sbx exposes a startup-complete status through `sbx inspect` or an equivalent
+host-side API, or a read-only host channel into the sandbox.
+
+---
+
+## 49. msb: Readonly Kit Files Are Refused When msb's Own Record Does Not Show a Read-Only Mount
+
+**Status:** Fail closed by design. Applies to a kit with `files[]` entries marked
+`readonly: true` on an msb sandbox created with the read-only host-config mount.
+
+### Symptoms
+
+```text
+acq(msb): error: cannot place read-only kit file '<path>' for '<sandbox>': <reason>.
+acq(msb):   acq will not run trusted code from a mount msb does not report as read-only. ...
+acq(msb):   No guest-copy fallback is taken because the sandbox was created with a read-only host config; recreate the sandbox.
+```
+
+`<reason>` names the cause, one of: msb is below the minimum version (or its version
+is a prerelease or unreadable); `msb inspect` failed, returned unparsable output, an
+unexpected shape, or a null `active_config` that stayed null; `python3` is missing;
+msb lists no mount, or more than one, at `/var/lib/acq/host`; the mount is not a Bind
+mount, is not recorded read-only, or is backed by a directory other than this
+sandbox's acq host config directory; a writable mount overlaps it; or this platform
+(Windows) was not reviewed. The guest probe can add two more: the mount "looks
+WRITABLE" or "is not a confirmed read-only mount". The kit does not fully apply; for
+built-in kits at provision this is a warning, and a heal reports it on each
+re-attach. No shipped built-in kit marks a file `readonly: true`, so default
+sandboxes are not affected.
+
+### Root Cause
+
+acq runs `readonly: true` kit code from a host directory mounted into the guest
+`:ro`. In msb that flag is enforced on the host by the filesystem server that exports
+the directory, not by the guest kernel (ADR-0035), so a guest root can relabel its own
+mount without gaining write access. acq therefore does not trust anything the guest
+says about the mount. It trusts what **msb itself recorded** for this sandbox, read by
+the host with `msb inspect --format json`, together with a version floor. If that
+record does not show the one read-only Bind of acq's host config directory at the
+guest path, acq refuses rather than staging, running, or copying that code.
+
+### Fix
+
+Match the reason to the step:
+
+1. **Version:** update msb (acq installs the pinned release; the floor is
+   `MSB_RO_MOUNT_MIN_VERSION`).
+2. **`inspect` failed, null `active_config`, or unparsable output:** make sure the
+   sandbox is running (`acq start <sandbox>`), that `msb inspect <sandbox> --format
+   json` works on the host, and that `python3` is installed; then re-run.
+3. **Mount missing, duplicated, not read-only, wrong directory, or overlapped by a
+   writable mount:** the sandbox was not created the way acq creates it (for example
+   an extra `--volume` over `/var/lib/acq`). Recreate it with `acq rm` and `acq run`.
+4. **Guest probe says writable or unconfirmed:** the sandbox may be damaged or not
+   running; restart it and retry, and recreate it if it persists.
+
+### Prevention / Status
+
+The gate confirms what msb was asked to enforce; it does not independently prove
+enforcement, so an upstream regression would not be caught by it. The optional,
+non-gating `scripts/qualify-msb-ro-mount` canary corroborates enforcement on a given
+msb release (output goes to a gitignored `tmp/qualify-msb-ro-mount-<stamp>/` under the
+repo, ending with a pasteable `RESULT ...` line); run it when adopting a new msb.
+Windows is not covered. One canary run on msb 0.7.7 (macOS arm64, default image,
+fresh create) is recorded in ADR-0035.
+
+---
+
+## 50. SBX: Readonly Kit Files Are Guest-Resident Copies (Accepted Residual Risk)
+
+**Status:** Accepted interim state (ADR-0037, Option D). Applies to a kit with
+`files[]` entries marked `readonly: true` (the opt-in `oci-engine` kit in Patterns
+v1.18.0 is the first) on an sbx sandbox.
+
+### Symptoms
+
+```text
+acq(sbx): WARNING: kit '<kit>' marks startup files readonly: <guest paths>
+acq(sbx):   On sbx these are guest-resident copies with NO integrity guarantee
+```
+
+The kit still applies. The warning is printed once per kit on create or kit-add.
+
+### Root Cause
+
+msb stages `readonly: true` files from a read-only host mount. sbx has no validated
+equivalent yet, so the translated kit copies them into the guest, where a
+passwordless-sudo agent can rewrite them before a root startup command runs them.
+
+### Fix / Mitigation
+
+Use the msb backend (`ACQ_BACKEND=msb`) when the tamper-resistance of those files
+matters, or do not enable the kit on sbx. The sbx read-only mount (ADR-0037, Option B)
+is gated on live sbx validation.
 
 ---
 

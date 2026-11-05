@@ -175,10 +175,49 @@ _mk_sentinel_repo() { # PATH
 }
 
 @test "kit fetch: refuses / as a destination" {
-  run kit_translate_fetch \
-    'git+https://example.invalid/x.git#ref=deadbeef&dir=kits/a' '/'
-  assert_failure
-  assert_output --partial 'refusing to fetch into /'
+  local dest
+  for dest in / // /. /./ /usr/..; do
+    run kit_translate_fetch \
+      'git+https://example.invalid/x.git#ref=deadbeef&dir=kits/a' "$dest"
+    assert_failure
+    assert_output --partial 'refusing to fetch into /'
+  done
+}
+
+@test "kit fetch: refuses symlink payload destinations including dot and slash aliases" {
+  mkdir -p "$STUBDIR/payload"
+  printf 'keep\n' > "$STUBDIR/payload/sentinel"
+  ln -s "$STUBDIR/payload" "$STUBDIR/link"
+  local dest
+  for dest in "$STUBDIR/link" "$STUBDIR/link/" "$STUBDIR/link/." "$STUBDIR/link//./."; do
+    run kit_translate_fetch \
+      'git+https://example.invalid/x.git#ref=deadbeef&dir=kits/a' "$dest"
+    assert_failure
+    assert_output --partial 'refusing to fetch into a symlink destination'
+    assert_equal "$(cat "$STUBDIR/payload/sentinel")" keep
+    assert [ -L "$STUBDIR/link" ]
+  done
+}
+
+@test "kit fetch: refuses linked-worktree gitfiles and broken metadata without mkdir" {
+  local repo="$STUBDIR/parent" linked="$STUBDIR/linked" dest
+  _mk_sentinel_repo "$repo"
+  git -C "$repo" worktree add -q --detach "$linked" HEAD
+  mkdir -p "$STUBDIR/broken"
+  printf 'gitdir: /missing/metadata\n' > "$STUBDIR/broken/.git"
+  mkdir -p "$STUBDIR/symlinked" "$STUBDIR/external-metadata/objects"
+  ln -s "$STUBDIR/external-metadata" "$STUBDIR/symlinked/.git"
+  for dest in "$linked" "$linked/new/child" "$STUBDIR/broken/new/child" \
+      "$STUBDIR/symlinked/.git/objects/new"; do
+    run kit_translate_fetch \
+      'git+https://example.invalid/x.git#ref=deadbeef&dir=kits/a' "$dest"
+    assert_failure
+    assert_output --partial 'refusing to fetch into a git repository'
+  done
+  assert [ ! -e "$linked/new" ]
+  assert [ ! -e "$STUBDIR/broken/new" ]
+  assert [ ! -e "$STUBDIR/external-metadata/objects/new" ]
+  assert_equal "$(cat "$linked/sentinel.txt")" sentinel
 }
 
 @test "kit fetch: still accepts a clean scratch destination" {
@@ -190,4 +229,28 @@ _mk_sentinel_repo() { # PATH
   assert_failure
   refute_output --partial 'refusing to fetch into'
   assert [ -d "$scratch" ]
+}
+
+@test "kit fetch: recursive inspection fails closed on partial find output" {
+  mkdir -p "$STUBDIR/dest/nested"
+  printf 'keep\n' > "$STUBDIR/dest/nested/sentinel"
+  find() { printf '%s\0' "$STUBDIR/dest"; return 1; }
+  run kit_translate_fetch \
+    'git+https://example.invalid/x.git#ref=deadbeef&dir=kits/a' "$STUBDIR/dest"
+  assert_failure
+  assert_output --partial 'refusing to fetch into an uninspectable destination'
+  assert_equal "$(cat "$STUBDIR/dest/nested/sentinel")" keep
+}
+
+@test "kit fetch: subtree detection supports newline names and incomplete bare layouts" {
+  local dest="$STUBDIR/tree" child
+  child="$dest/"$'nested\nrepo'
+  mkdir -p "$child/objects" "$child/refs"
+  ln -s /missing "$child/HEAD"
+  run kit_translate_fetch \
+    'git+https://example.invalid/x.git#ref=deadbeef&dir=kits/a' "$dest"
+  assert_failure
+  assert_output --partial 'refusing to fetch into a git repository subtree'
+  assert [ -L "$child/HEAD" ]
+  assert [ -d "$child/objects" ]
 }

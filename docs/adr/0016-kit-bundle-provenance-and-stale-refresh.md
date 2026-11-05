@@ -2,6 +2,7 @@
 title: "Record Kit-Bundle Provenance and Offer a Safe Stale-Sandbox Refresh"
 status: accepted
 date: 2026-07-30
+last_updated: "2026-10-25"
 decision_makers: ["William Zujkowski"]
 category: maintainability
 nist_controls: ["CM-2", "CM-3", "CM-8", "SA-10", "SI-7"]
@@ -23,8 +24,9 @@ patterns repo), **new** sandboxes get the new bundle. **Existing** sandboxes do
 not:
 
 - On **sbx**, `acq_backend_ensure_kits_applied` only injects kits that are
-  *absent* (a feature-probe). A kit that is present but built from an older ref is
-  never refreshed.
+  *not recorded* as applied at the current ref in the host `builtin-kits` record
+  (the guest feature-probe is a debug-only diagnostic). A kit that is already
+  recorded but built from an older ref is never refreshed.
 - On **msb**, every kit is re-applied idempotently each run, so the files can
   update — but nothing tells the user it happened, and there was no way to answer
   the basic question "is this sandbox on my current pin?"

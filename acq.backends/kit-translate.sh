@@ -44,27 +44,199 @@
 #
 # These read the spec file each call (kits are tiny; simplicity over caching).
 
+# Run only in the fetch subshell: hook-local Git variables must neither hide a
+# destination repository nor redirect private init/read-tree writes into it.
+_kit_fetch_clear_git_env() {
+  local vars v
+  vars=$(git rev-parse --local-env-vars 2>/dev/null) || return 1
+  for v in $vars; do unset "$v"; done
+  unset GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM
+}
+
+# Do not depend on Git discovery: safe.bareRepository=explicit disables it.
+# Treat even incomplete/symlinked entries in this layout conservatively.
+_kit_fetch_bare_layout() {
+  { [ -e "$1/HEAD" ] || [ -L "$1/HEAD" ]; } &&
+    { [ -e "$1/objects" ] || [ -L "$1/objects" ]; } &&
+    { [ -e "$1/refs" ] || [ -L "$1/refs" ]; }
+}
+
+# Replacement discards the whole destination, not just its root. Enumerate
+# without following payload symlinks, using NUL records for arbitrary names.
+# Capture find's status separately: a partial traversal is never permission to
+# delete the tree. Any .git entry (including a broken symlink) is protected.
+_kit_fetch_tree_safe() (
+  local listing entry
+  listing=$(mktemp "${TMPDIR:-/tmp}/acq-kit-inspect.XXXXXX") || return 1
+  trap 'rm -f -- "$listing"' EXIT
+  if ! find -P "$1" \( -name .git -o -type d \) -print0 > "$listing" 2>/dev/null; then
+    echo 'kit-translate: refusing to fetch into an uninspectable destination' >&2
+    return 1
+  fi
+  while IFS= read -r -d '' entry; do
+    if [ "${entry##*/}" = .git ] || _kit_fetch_bare_layout "$entry"; then
+      echo 'kit-translate: refusing to fetch into a git repository subtree' >&2
+      return 1
+    fi
+    if [ ! -r "$entry" ] || [ ! -x "$entry" ]; then
+      echo 'kit-translate: refusing to fetch into an uninspectable destination' >&2
+      return 1
+    fi
+  done < "$listing"
+)
+
+# Existing non-repository payload directories may be refreshed. No marker in a
+# consumer destination grants permission to replace a repository. Inspect the
+# nearest existing ancestor before mkdir, including physical metadata ancestors
+# (Git discovery alone can stop at filesystem boundaries or miss broken .git).
+_kit_fetch_destination() {
+  local dest="$1" probe resolved
+  if [ -z "$dest" ]; then
+    echo 'kit-translate: refusing to fetch into an empty destination' >&2
+    return 1
+  fi
+  case "$dest" in /*) ;; *) dest="$PWD/$dest" ;; esac
+  case "$dest/" in */.git/*)
+    echo "kit-translate: refusing to fetch into a git repository: $dest" >&2
+    return 1 ;;
+  esac
+  while [ "${dest%/}" != "$dest" ] && [ "$dest" != / ]; do dest="${dest%/}"; done
+  probe="$dest"
+  while [ ! -e "$probe" ] && [ ! -L "$probe" ]; do
+    # Do not create missing components of a traversal spelling before deciding
+    # whether it resolves to a protected directory.
+    case "$probe/" in */../*) echo 'kit-translate: refusing to fetch into an unresolved traversal destination' >&2; return 1 ;; esac
+    probe=$(dirname "$probe") || return 1
+  done
+  resolved=$(cd -P -- "$probe" 2>/dev/null && pwd -P) || return 1
+  if [ "$probe" = "$dest" ] && [ "$resolved" = / ]; then
+    echo 'kit-translate: refusing to fetch into /' >&2
+    return 1
+  fi
+  probe="$resolved"
+  while :; do
+    if [ -e "$probe/.git" ] || [ -L "$probe/.git" ] ||
+        [ "${probe##*/}" = .git ] ||
+        _kit_fetch_bare_layout "$probe" ||
+        [ -n "$(git -C "$probe" rev-parse --absolute-git-dir 2>/dev/null)" ]; then
+      echo "kit-translate: refusing to fetch into a git repository: $dest" >&2
+      return 1
+    fi
+    if [ ! -r "$probe" ] || [ ! -x "$probe" ]; then
+      echo 'kit-translate: refusing to fetch into an uninspectable destination' >&2
+      return 1
+    fi
+    [ "$probe" != / ] || break
+    probe=$(dirname "$probe") || return 1
+  done
+  probe="$dest"
+  while :; do
+    case "$probe" in */.) probe="${probe%/.}" ;; */) probe="${probe%/}" ;; *) break ;; esac
+  done
+  if [ -L "$probe" ]; then
+    echo 'kit-translate: refusing to fetch into a symlink destination' >&2
+    return 1
+  fi
+  [ ! -d "$dest" ] || _kit_fetch_tree_safe "$resolved" || return 1
+  mkdir -p -- "$dest" || return 1
+  (cd -P -- "$dest" && pwd -P)
+}
+
+# This helper accepts ONLY a newly allocated private stage, never a consumer
+# destination. A retry starts with fresh metadata and never checks out into a
+# user tree. Both attempts are prompt-disabled; only the retry retains helpers
+# and URL rewrites from system config.
+_kit_git_fetch() (
+  local stage="$1" url="$2" ref="$3" dir="$4" cfg="$5"
+  cd -- "$stage" || exit 1
+  export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/echo GCM_INTERACTIVE=never
+  rm -rf -- .git || exit 1
+  git init -q --template= || exit 1
+  git remote add origin "$url" || exit 1
+  git config core.sparseCheckout true || exit 1
+  mkdir -p .git/info || exit 1
+  printf '%s/*\n' "$dir" > .git/info/sparse-checkout || exit 1
+  # shellcheck disable=SC2086
+  git $cfg fetch --depth 1 origin "$ref" || exit 1
+  git -c core.hooksPath=/dev/null checkout -q FETCH_HEAD
+)
+
+# Publish metadata only inside a private invocation/direct-fetch root, and only
+# after fetching and verifying. Failed or wrong-revision attempts leave no
+# reusable source behind, so the next call can retry normally.
+_kit_fetch_source() (
+  local source="$1" url="$2" ref="$3" dir="$4" stage actual ferr
+  stage=$(mktemp -d "${source}.XXXXXX") || return 1
+  trap 'rm -rf -- "$stage"' EXIT
+  if ferr=$(_kit_git_fetch "$stage" "$url" "$ref" "$dir" '-c credential.helper= -c url.https://github.com/.insteadOf=' 2>&1); then
+    :
+  elif ferr=$(_kit_git_fetch "$stage" "$url" "$ref" "$dir" '' 2>&1); then
+    :
+  else
+    echo 'kit-translate: failed to fetch remote kit' >&2
+    # Credential helpers and URL rewrites can print credentials. Never replay
+    # their raw diagnostics into terminal or CI logs.
+    [ -z "$ferr" ] || echo 'kit-translate:   git fetch failed (details suppressed)' >&2
+    cat >&2 <<'EOM'
+kit-translate: If you saw a "Username for 'https://github.com'" prompt, plain git
+kit-translate:   (not gh) is trying to authenticate. gh auth authenticates the gh
+kit-translate:   CLI, not git. Fixes:
+kit-translate:     - run once:  gh auth setup-git
+kit-translate:     - or check for a rewrite:  git config --global --get-regexp 'url\..*insteadOf'
+kit-translate:   If the kit source requires auth, ensure your git credential
+kit-translate:   helper is configured (a prompt-less helper).
+EOM
+    return 1
+  fi
+  actual=$(git -C "$stage" rev-parse HEAD 2>/dev/null) || return 1
+  if [[ "$ref" =~ ^[0-9a-f]{40}$ ]] && [ "$actual" != "$ref" ]; then
+    echo 'kit-translate: failed to fetch remote kit' >&2
+    echo 'kit-translate:   fetched revision does not match pinned commit' >&2
+    return 1
+  fi
+  : > "$stage/.git/acq-verified" || return 1
+  mv -- "$stage" "$source"
+)
+
 # Only full immutable commit IDs participate. Symbolic/abbreviated refs keep
 # their original per-call fetch semantics. The owning acq shell creates and
 # cleans this private root; command substitutions share files, not shell state.
 _kit_fetch_reuse() {
-  local kitref="$1" destdir="$2" url="$3" ref="$4" dir="$5"
-  local key source actual
+  local destdir="$1" url="$2" ref="$3" dir="$4"
+  local key source
   key=$(printf '%s\0%s' "$url" "$ref" | git hash-object --stdin) || return 1
   source="$_ACQ_KIT_FETCH_ROOT/$key"
   if [ ! -f "$source/.git/acq-verified" ]; then
-    # Fetch into a private source, never a consumer's mutable destination.
-    # The empty root disables recursion without affecting the owning shell.
-    _ACQ_KIT_FETCH_ROOT='' kit_translate_fetch "$kitref" "$source" >/dev/null || return 1
-    actual=$(git -C "$source" rev-parse HEAD 2>/dev/null) || return 1
-    if [ "$actual" != "$ref" ]; then
-      echo 'kit-translate: failed to fetch remote kit' >&2
-      echo 'kit-translate:   fetched revision does not match pinned commit' >&2
-      return 1
-    fi
-    : > "$source/.git/acq-verified" || return 1
+    rm -rf -- "$source" || return 1
+    _kit_fetch_source "$source" "$url" "$ref" "$dir" || return 1
   fi
   _kit_fetch_materialize "$source" "$ref" "$dir" "$destdir"
+}
+
+# Never let an EXIT cleanup discard an old payload if publication or rollback
+# failed. %q escapes control characters in the recovery path for safe reporting.
+_kit_fetch_publication_cleanup() {
+  if [ -e "$1/backup" ] || [ -L "$1/backup" ]; then
+    printf 'kit-translate: previous payload retained at %q\n' "$1/backup" >&2
+  else
+    rm -rf -- "$1"
+  fi
+}
+
+# Both renames are within the destination filesystem. A failed publish restores
+# the old directory; a failed restore leaves its private backup for recovery.
+# This does not claim safety against concurrent writers to the destination.
+_kit_fetch_publish() {
+  local stage="$1" dest="$2"
+  mv -- "$dest" "$stage/backup" 2>/dev/null || return 1
+  if ! mv -- "$stage/payload" "$dest" 2>/dev/null; then
+    echo 'kit-translate: failed to publish remote kit' >&2
+    if [ ! -e "$dest" ] && [ ! -L "$dest" ]; then
+      mv -- "$stage/backup" "$dest" 2>/dev/null || return 1
+    fi
+    return 1
+  fi
+  rm -rf -- "$stage/backup"
 }
 
 # Read committed objects, not the source working tree. Never hand that tree to
@@ -82,8 +254,11 @@ _kit_fetch_materialize() (
     echo 'kit-translate: remote kit directory not found' >&2
     return 1
   fi
-  stage=$(mktemp -d "$_ACQ_KIT_FETCH_ROOT/materialize.XXXXXX") || return 1
-  trap 'rm -rf -- "$stage"' EXIT
+  # Build the complete payload next to its destination, even if the private
+  # source lives on another filesystem. No cross-device move can lose the old
+  # payload after it has been renamed to the backup.
+  stage=$(mktemp -d "$(dirname "$destdir")/.acq-kit-publish.XXXXXX") || return 1
+  trap '_kit_fetch_publication_cleanup "$stage"' EXIT
   mkdir -p "$stage/payload/$dir" || return 1
   # checkout-index preserves files marked export-ignore/export-subst, unlike
   # git archive. A private index also leaves the verified source untouched.
@@ -94,9 +269,10 @@ _kit_fetch_materialize() (
     return 1
   fi
   rm -f -- "$stage/index" || return 1
-  mkdir -p "$(dirname "$destdir")" || return 1
-  rm -rf -- "$destdir" || return 1
-  mv -- "$stage/payload" "$destdir" || return 1
+  unset GIT_INDEX_FILE
+  # Recheck after fetching, before replacing the old metadata-free payload.
+  destdir=$(_kit_fetch_destination "$destdir") || return 1
+  _kit_fetch_publish "$stage" "$destdir" || return 1
   printf '%s/%s\n' "$destdir" "$dir"
 )
 
@@ -104,10 +280,10 @@ _kit_fetch_materialize() (
 # kit_translate_fetch KITREF DESTDIR
 # ---------------------------------------------------------------------------
 # Materialize a kit's directory locally. KITREF is either:
-#   - git+https://HOST/REPO.git#ref=SHA&dir=PATH  (remote, sparse-checked-out)
+#   - git+https://HOST/REPO.git#ref=SHA&dir=PATH  (remote, metadata-free payload)
 #   - /absolute/or/relative/local/path            (used verbatim)
 # On success prints the local kit directory path to stdout and returns 0.
-kit_translate_fetch() {
+kit_translate_fetch() (
   local kitref="$1" destdir="$2"
 
   case "$kitref" in
@@ -154,92 +330,19 @@ kit_translate_fetch() {
         echo "kit-translate: unsafe kit dir (illegal characters): $dir" >&2
         return 1
       fi
+      _kit_fetch_clear_git_env || return 1
+      destdir=$(_kit_fetch_destination "$destdir") || return 1
       if [ -n "${_ACQ_KIT_FETCH_ROOT:-}" ] && [[ "$ref" =~ ^[0-9a-f]{40}$ ]]; then
-        _kit_fetch_reuse "$kitref" "$destdir" "$url" "$ref" "$dir"
+        _kit_fetch_reuse "$destdir" "$url" "$ref" "$dir"
         return $?
       fi
       command -v acq_debug >/dev/null 2>&1 && acq_debug "fetch: ref=$ref dir=$dir -> $destdir"
-      # Fail closed on a destination that is not a disposable scratch directory.
-      # The fetch below runs `rm -rf .git` then `git init` + `git checkout
-      # FETCH_HEAD` inside $destdir, so a destination resolving to a real
-      # repository would have its Git metadata replaced and its tracked files
-      # overwritten with the kit bundle's tree. Refuse before any of that runs.
-      # Reject: empty, root, and any destination inside an existing Git
-      # work tree or Git metadata directory, including bare repositories.
-      if [ -z "$destdir" ]; then
-        echo "kit-translate: refusing to fetch into an empty destination" >&2
-        return 1
-      fi
-      case "$destdir" in
-        /) echo "kit-translate: refusing to fetch into /" >&2; return 1 ;;
-      esac
-      mkdir -p "$destdir" || return 1
-      local _dest_repo
-      _dest_repo=$(cd "$destdir" 2>/dev/null && git rev-parse --absolute-git-dir 2>/dev/null) || _dest_repo=""
-      if [ -n "$_dest_repo" ]; then
-        echo "kit-translate: refusing to fetch into a git repository: $destdir" >&2
-        echo "kit-translate:   resolved Git directory: $_dest_repo" >&2
-        return 1
-      fi
-      # Fetch NON-INTERACTIVELY. We MUST NOT drop into an interactive git
-      # credential prompt (which hangs, or fails on GitHub's disabled password
-      # auth) just because the user has a global git credential helper or a
-      # url.<x>.insteadOf rewrite — `gh auth login` authenticates the gh CLI,
-      # not plain git. See docs/KNOWN_FAILURE_MODES.md.
-      #
-      # Attempt 1 (anonymous): prompts disabled + inherited credential helper and
-      # github.com insteadOf rewrite neutralized, so an unauthenticated fetch
-      # proceeds without prompting.
-      # Attempt 2 (authed retry): if attempt 1 genuinely fails (a source that
-      # needs auth / egress-restricted enterprise mirror that needs the rewrite),
-      # retry with the system git config intact but STILL prompt-disabled, so a
-      # configured credential helper can supply creds without ever hanging.
-      _kit_git_fetch() {
-        # $1 = extra git -c flags (as a single string, word-split intentionally)
-        local _cfg="$1"
-        (
-          cd "$destdir" || exit 1
-          export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/echo GCM_INTERACTIVE=never
-          rm -rf .git 2>/dev/null
-          git init -q
-          git remote add origin "$url" 2>/dev/null || git remote set-url origin "$url"
-          git config core.sparseCheckout true
-          # `git init` does not always create .git/info/ (platform-dependent),
-          # so create it before writing the sparse-checkout file — otherwise the
-          # redirect fails with ".git/info/sparse-checkout: No such file or
-          # directory" (harmless-but-noisy; fetch still fell back).
-          mkdir -p .git/info
-          printf '%s/*\n' "$dir" > .git/info/sparse-checkout
-          # shellcheck disable=SC2086
-          git $_cfg fetch --depth 1 origin "$ref" 2>&1 || exit 1
-          git checkout -q FETCH_HEAD 2>&1 || exit 1
-        )
-      }
-      local _ferr _anon_cfg
-      _anon_cfg="-c credential.helper= -c url.https://github.com/.insteadOf="
-      if _ferr=$(_kit_git_fetch "$_anon_cfg"); then
-        :
-      elif _ferr=$(_kit_git_fetch ""); then
-        # authed retry (system config) succeeded
-        :
-      else
-        echo "kit-translate: failed to fetch remote kit" >&2
-        # The authenticated retry inherits credential helpers and URL rewrites.
-        # Their diagnostics can contain credential-bearing URLs, so never replay
-        # raw git stderr into terminal or CI logs.
-        [ -z "$_ferr" ] || echo "kit-translate:   git fetch failed (details suppressed)" >&2
-        cat >&2 <<'EOM'
-kit-translate: If you saw a "Username for 'https://github.com'" prompt, plain git
-kit-translate:   (not gh) is trying to authenticate. gh auth authenticates the gh
-kit-translate:   CLI, not git. Fixes:
-kit-translate:     - run once:  gh auth setup-git
-kit-translate:     - or check for a rewrite:  git config --global --get-regexp 'url\..*insteadOf'
-kit-translate:   If the kit source requires auth, ensure your git credential
-kit-translate:   helper is configured (a prompt-less helper).
-EOM
-        return 1
-      fi
-      printf '%s/%s\n' "$destdir" "$dir"
+      local root
+      root=$(mktemp -d "${TMPDIR:-/tmp}/acq-kit-direct.XXXXXX") || return 1
+      trap 'rm -rf -- "$root"' EXIT
+      root=$(cd -- "$root" && pwd -P) || return 1
+      _kit_fetch_source "$root/source" "$url" "$ref" "$dir" || return 1
+      _kit_fetch_materialize "$root/source" HEAD "$dir" "$destdir"
       ;;
     *)
       # Local path — use as-is.
@@ -250,7 +353,7 @@ EOM
       printf '%s\n' "$kitref"
       ;;
   esac
-}
+)
 
 # ---------------------------------------------------------------------------
 # kit_spec_field SPEC KEY

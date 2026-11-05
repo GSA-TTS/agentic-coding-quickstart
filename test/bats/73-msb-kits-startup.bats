@@ -445,10 +445,10 @@ commands:
 SPEC
     mkdir -p "'"$STUBDIR"'/nokit"
     printf "schemaVersion: \"hybrid/v1\"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n" > "'"$STUBDIR"'/nokit/spec.yaml"
-    USAI_KIT="k1"; PLAYBOOK_KIT="k2"; ZSCALER_KIT="k3"; GITSSHSIGN_KIT="k4"
+    USAI_KIT="/k1"; ACQ_PROVIDER_KIT_DEFAULT="/k1"; PLAYBOOK_KIT="k2"; ZSCALER_KIT="k3"; GITSSHSIGN_KIT="k4"
     _acq_msb_fetch_kit() {
       case "$1" in
-        k1) printf "%s\n" "$mk1" ;;
+        /k1) printf "%s\n" "$mk1" ;;
         k2) printf "%s\n" "$mk2" ;;
         *)  printf "%s\n" "'"$STUBDIR"'/nokit" ;;
       esac
@@ -543,9 +543,9 @@ environment:
 SPEC
     nk="'"$STUBDIR"'/stagenokit"; mkdir -p "$nk"
     printf "schemaVersion: \"hybrid/v1\"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n" > "$nk/spec.yaml"
-    ZSCALER_KIT=k1; USAI_KIT=k2; PLAYBOOK_KIT=k3; GITSSHSIGN_KIT=k4
+    ZSCALER_KIT=k1; USAI_KIT=/k2; ACQ_PROVIDER_KIT_DEFAULT=/k2; PLAYBOOK_KIT=k3; GITSSHSIGN_KIT=k4
     _acq_msb_fetch_kit() {
-      case "$1" in k1) printf "%s\n" "$sk" ;; k2) printf "%s\n" "$ck" ;; *) printf "%s\n" "$nk" ;; esac
+      case "$1" in k1) printf "%s\n" "$sk" ;; /k2) printf "%s\n" "$ck" ;; *) printf "%s\n" "$nk" ;; esac
     }
     acq_backend_provision stagemergebox shell /tmp >/dev/null 2>&1
   '
@@ -607,9 +607,9 @@ environment:
 SPEC
     nk="'"$STUBDIR"'/gvnokit"; mkdir -p "$nk"
     printf "schemaVersion: \"hybrid/v1\"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n" > "$nk/spec.yaml"
-    ZSCALER_KIT=k1; USAI_KIT=k2; PLAYBOOK_KIT=k3; GITSSHSIGN_KIT=k4
+    ZSCALER_KIT=k1; USAI_KIT=/k2; ACQ_PROVIDER_KIT_DEFAULT=/k2; PLAYBOOK_KIT=k3; GITSSHSIGN_KIT=k4
     _acq_msb_fetch_kit() {
-      case "$1" in k1) printf "%s\n" "$sk" ;; k2) printf "%s\n" "$bk" ;; *) printf "%s\n" "$nk" ;; esac
+      case "$1" in k1) printf "%s\n" "$sk" ;; /k2) printf "%s\n" "$bk" ;; *) printf "%s\n" "$nk" ;; esac
     }
     acq_backend_provision gvstagebox shell /tmp >/dev/null 2>&1
   '

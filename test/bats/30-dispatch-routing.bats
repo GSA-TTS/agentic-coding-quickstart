@@ -61,41 +61,11 @@ SPEC
   run env -u ACQ_PROVIDER_INPUT_PYTHON ACQ_BACKEND=msb GIT_ALLOW_PROTOCOL=none USAI_API_KEY="usai-key-stub" \
     STUB_KEY_STATUS=200 STUB_OPENCODE_OK=1 "$ACQ" create opencode "$proj"
   assert_failure
-  assert_output --partial 'provider facts could not be fetched; using transitional fallback defaults'
   assert_output --partial 'provider input projection failed'
   refute_regex "$(cat "$CALLS")" 'msb create'
   assert [ ! -f "$STUBDIR/.msb_created" ]
 }
 
-@test "dispatch: create fails closed when provider facts artifact is malformed" {
-  local kit="$STUBDIR/provider-kit-bad" proj="$STUBDIR/provider-facts-bad"
-  mkdir -p "$kit/provider-facts" "$proj"
-  cat > "$kit/spec.yaml" <<'SPEC'
-schemaVersion: "hybrid/v1"
-kind: mixin
-name: usai-provider
-displayName: USAi Provider
-description: test fixture
-SPEC
-  cat > "$kit/provider-facts/usai.env" <<'FACTS'
-ACQ_PROVIDER_FACTS_SCHEMA=1
-ACQ_PROVIDER_ID=usai
-ACQ_PROVIDER_HOST=api.bad.gov
-ACQ_PROVIDER_BASE_URL=https://api.bad.gov/api/v1
-ACQ_PROVIDER_MODELS_URL=https://api.bad.gov/api/v1/models
-ACQ_PROVIDER_KEY_ENV=BAD-KEY
-ACQ_PROVIDER_KEY_MGMT_URL=https://bad.gov/keys
-ACQ_PROVIDER_BIND_HOSTS=api.bad.gov
-FACTS
-  rm -f "$STUBDIR/.msb_created"
-
-  run env ACQ_BACKEND=msb USAI_API_KEY="usai-key-stub" ACQ_TEST_USAI_KIT="$kit" \
-    STUB_KEY_STATUS=200 STUB_OPENCODE_OK=1 "$ACQ" create opencode "$proj"
-  assert_failure
-  assert_output --partial "acq: invalid provider facts artifact: $kit/provider-facts/usai.env"
-  refute_regex "$(cat "$CALLS")" 'msb create'
-  refute [ -f "$STUBDIR/.msb_created" ]
-}
 
 @test "dispatch: run existing sandbox does not fetch provider facts" {
   printf 'mybox\n' > "$STUBDIR/.msb_sandbox_list"
@@ -103,27 +73,10 @@ FACTS
   run env TERM= ACQ_BACKEND=msb ACQ_DEBUG=1 GIT_ALLOW_PROTOCOL=none \
     STUB_AGENT_USER_READY=1 "$ACQ" run mybox
   assert_success
-  assert_regex "$(cat "$CALLS")" 'msb exec -t -u agent -w /home/agent -e SHELL=/bin/sh mybox -- /bin/sh -l'
+  assert_regex "$(cat "$CALLS")" 'msb exec -t -u agent -w /home/agent -e (COLORTERM=truecolor -e )?SHELL=/bin/sh mybox -- /bin/sh -l'
   refute_output --partial 'provider facts'
 }
 
-@test "dispatch: start falls back when provider facts cannot be fetched" {
-  run env ACQ_BACKEND=msb GIT_ALLOW_PROTOCOL=none USAI_API_KEY="usai-key-stub" \
-    STUB_AGENT_USER_READY=1 "$ACQ" start mybox
-  assert_success
-  assert_output --partial 'provider facts could not be fetched; using transitional fallback defaults'
-  refute_output --partial 'invalid provider facts'
-  assert_regex "$(cat "$CALLS")" 'msb start mybox'
-}
-
-@test "secret: option-only import falls back when provider facts cannot be fetched" {
-  run env ACQ_BACKEND=msb GIT_ALLOW_PROTOCOL=none USAI_API_KEY="usai-key-stub" \
-    ACQ_SECRET_FORCE_FILE=1 ACQ_SECRET_FILE_DIR="$STUBDIR/secrets" \
-    "$ACQ" secret import --all
-  assert_success
-  assert_output --partial 'provider facts could not be fetched; using transitional fallback defaults'
-  assert_output --partial "imported 'usai'"
-}
 
 @test "secret: scoped non-USAi command does not fetch provider facts" {
   run bash -c '
@@ -182,6 +135,17 @@ FACTS
   assert_regex "$create_line" "$proj"
 }
 
+@test "create(sbx): provider input mount follows the agent and workspace positionals" {
+  local proj="$STUBDIR/provider-order"; mkdir -p "$proj"
+  _seed_usai
+
+  run env ACQ_BACKEND=sbx "$ACQ" create shell "$proj"
+  assert_success
+
+  local create_line; create_line=$(grep '^sbx create' "$CALLS")
+  assert_regex "$create_line" "shell $proj .*/generations/generation\\.[^[:space:]]+:ro$"
+}
+
 @test "dispatch: create runs the github-scope advisory" {
   local ghproj="$STUBDIR/ghproj"; mkdir -p "$ghproj"
   ( cd "$ghproj" && git init -q && git remote add origin https://github.com/GSA-TTS/quickstart.git )
@@ -209,60 +173,6 @@ FACTS
   refute_output --partial 'mogul/artemis'
 }
 
-@test "dispatch: create runs a non-blocking USAi key advisory (warns but never aborts)" {
-  local proj="$STUBDIR/keyproj"; mkdir -p "$proj"
-  _seed_usai
-  run env STUB_KEY_STATUS=401 ACQ_BACKEND=sbx "$ACQ" create opencode "$proj"
-  assert_success
-  assert_output --partial 'invalid or expired (HTTP 401)'
-  run env STUB_KEY_STATUS=200 ACQ_BACKEND=sbx "$ACQ" create opencode "$proj"
-  refute_output --partial 'invalid or expired'
-}
-
-@test "run: no key stored (non-tty) emits the terse gate and aborts before create" {
-  local proj="$STUBDIR/keyrun"; mkdir -p "$proj"
-  rm -f "$STUBDIR/.created"
-  run bash -c 'printf "\n" | STUB_KEY_STATUS=401 ACQ_BACKEND=sbx "$1" run opencode "$2"' _ "$ACQ" "$proj"
-  assert_failure
-  assert_output --partial 'no USAi API key stored'
-  refute_output --partial 'Set it now'
-  refute_output --partial 'invalid or expired'
-  assert [ ! -f "$STUBDIR/.created" ]
-}
-
-@test "create: empty store (non-tty) aborts before sbx create" {
-  local proj="$STUBDIR/kc"; mkdir -p "$proj"
-  rm -f "$STUBDIR/.created"
-  run bash -c 'printf "\n" | ACQ_BACKEND=sbx "$1" create opencode "$2"' _ "$ACQ" "$proj"
-  assert_failure
-  assert_output --partial 'no USAi API key stored'
-  refute_regex "$(cat "$CALLS")" 'sbx create'
-  assert [ ! -f "$STUBDIR/.created" ]
-}
-
-@test "create(sbx): acq-store-only key (proxy unbound) fails closed before sbx create" {
-  local proj="$STUBDIR/kc-unbound"; mkdir -p "$proj"
-  mkdir -p "$STUBDIR/secrets"; printf 'sk-stored-only\n' > "$STUBDIR/secrets/acq.usai"
-  rm -f "$STUBDIR/.created"
-  run bash -c 'printf "" | ACQ_BACKEND=sbx "$1" create opencode "$2"' _ "$ACQ" "$proj"
-  assert_failure
-  assert_output --partial 'backend is not configured to inject it'
-  assert_output --partial 'acq secret set -g usai'
-  refute_regex "$(cat "$CALLS")" 'sbx create'
-  assert [ ! -f "$STUBDIR/.created" ]
-}
-
-@test "create(sbx): a stored-but-unreadable key is reported as unreadable, not absent" {
-  local proj="$STUBDIR/kc-broken"; mkdir -p "$proj"
-  mkdir -p "$STUBDIR/secrets"; printf 'acq-dpapi-v1\nQUJD\n' > "$STUBDIR/secrets/acq.usai"
-  rm -f "$STUBDIR/.created"
-  run bash -c 'printf "" | ACQ_BACKEND=sbx "$1" create opencode "$2"' _ "$ACQ" "$proj"
-  assert_failure
-  assert_output --partial 'cannot be read or decrypted'
-  refute_output --partial 'no USAi API key stored'
-  refute_regex "$(cat "$CALLS")" 'sbx create'
-  assert [ ! -f "$STUBDIR/.created" ]
-}
 
 @test "create(sbx): acq-store key WITH proxy binding proceeds to sbx create" {
   local proj="$STUBDIR/kc-bound"; mkdir -p "$proj"
@@ -369,15 +279,6 @@ FACTS
   assert_output ''
 }
 
-@test "run: present key + bad status -> post-create gate offers rotate; decline aborts" {
-  local proj="$STUBDIR/keyrun2"; mkdir -p "$proj"
-  _seed_usai
-  run bash -c 'printf "\n" | STUB_KEY_STATUS=401 ACQ_BACKEND=sbx "$1" run opencode "$2"' _ "$ACQ" "$proj"
-  assert_failure
-  assert_output --partial 'invalid or expired'
-  assert_output --partial 'Rotate now'
-  refute_output --partial 'No USAi API key is stored'
-}
 
 @test "run: healthy status attaches with no gate message" {
   local proj="$STUBDIR/keyrun3"; mkdir -p "$proj"
@@ -385,7 +286,9 @@ FACTS
   run env STUB_OPENCODE_OK=1 STUB_KEY_STATUS=200 ACQ_BACKEND=sbx "$ACQ" run opencode "$proj"
   assert_success
   refute_output --partial 'Aborting attach'
-  assert_regex "$(cat "$CALLS")" 'Authorization: Bearer \$USAI_API_KEY'
+  # The gate is provider-driven: with no provider inputs materialized there is
+  # nothing to probe, so attach proceeds to the backend.
+  assert_regex "$(cat "$CALLS")" 'sbx create'
 }
 
 @test "run(opencode): generic default does not run an unpinned npm postinstall fallback" {
@@ -420,28 +323,6 @@ FACTS
   refute_regex "$(cat "$CALLS")" 'postinstall\.mjs'
 }
 
-@test "run: unreachable USAi API is a network problem, not a key problem; fail closed" {
-  local proj="$STUBDIR/unreach"; mkdir -p "$proj"
-  _seed_usai
-  run env STUB_KEY_UNREACHABLE=1 ACQ_BACKEND=sbx "$ACQ" run opencode "$proj"
-  assert_failure
-  assert_output --partial 'could not reach the USAi API'
-  assert_output --partial 'NOT an invalid or expired key'
-  refute_output --partial 'Rotate now'
-  refute_output --partial 'curl:'
-}
-
-@test "run: pinned-public TLS failure (curl 35) is unreachable, no DNS hint; fail closed" {
-  local proj="$STUBDIR/pinned35"; mkdir -p "$proj"
-  _seed_usai
-  run env STUB_KEY_UNREACHABLE=35 ACQ_BACKEND=sbx "$ACQ" run opencode "$proj"
-  assert_failure
-  assert_output --partial 'could not reach the USAi API'
-  assert_output --partial 'NOT an invalid or expired key'
-  refute_output --partial 'Rotate now'
-  refute_output --partial 'ACQ_MSB_DNS_NAMESERVER'
-  refute_output --partial 'did not RESOLVE'
-}
 
 @test "classify: _classify_key_status yields clean tokens (code|unresolved|unreachable)" {
   load_acq
@@ -464,15 +345,6 @@ FACTS
   assert_line --index 6 'unreachable'
 }
 
-@test "run: NXDOMAIN (curl 6) is a resolver problem with a DNS hint; fail closed" {
-  local proj="$STUBDIR/unres"; mkdir -p "$proj"
-  _seed_usai
-  run env STUB_KEY_UNRESOLVED=1 ACQ_BACKEND=sbx "$ACQ" run opencode "$proj"
-  assert_failure
-  assert_output --partial 'did not RESOLVE'
-  assert_output --partial 'ACQ_MSB_DNS_NAMESERVER'
-  refute_output --partial 'Rotate now'
-}
 
 @test "dispatch: stop/rm/exec route to the sbx adapter" {
   run env ACQ_BACKEND=sbx "$ACQ" stop mybox

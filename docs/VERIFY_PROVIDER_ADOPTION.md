@@ -1,0 +1,417 @@
+---
+title: "Provider-Neutral Adoption Validation"
+description: "Offline and live procedures for validating provider-input adoption on SBX and MSB"
+status: draft
+tier: 2
+last_updated: "2026-10-27"
+audience: "developers"
+keywords: ["provider", "validation", "sbx", "msb", "opencode", "offline"]
+related_files: ["scripts/verify-backends", "test/bats/146-provider-verification.bats", "test/bats/147-provider-input-projection.bats", "docs/howto/acq.md"]
+load_priority: "on-demand"
+review_cycle: "quarterly"
+---
+
+# Provider-Neutral Adoption Validation
+
+This procedure separates the preparatory offline checks from the live backend
+validation required before provider-input adoption can be considered complete.
+Its status is recorded in the Merge Gate section below.
+The Bats cases named below are **offline seam tests**. They use local fixtures
+and stubs to verify internal wiring and control-flow; they are not E2E tests and
+do not prove that SBX, MSB, USAi, or a fresh OpenCode process works on a real
+host. Real projected parser validation requires a live backend run (see
+"Live Validation Record" below).
+
+## Merge Gate
+
+**Status: the required live runs were done at tested revision `8a594932`
+(`8a594932e47745ed8f670a477f9da974121f3506`) and passed on both backends,** with
+the SBX version captured (v0.48.0). An earlier run at `ec8d5e17` also passed and
+is kept as history. The gate's required runs are satisfied for `8a594932` only.
+Offline Bats seam tests remain separate from the live evidence; they prove acq's
+decision logic with stubbed backends, not live SBX or MSB behavior.
+
+**Required before merge, and their status at `8a594932`**
+
+1. Run the updated `scripts/verify-backends` identity-bound model check
+   (projected snapshot vs rendered OpenCode config vs `opencode models`) on a
+   real SBX host and a real MSB host. **Done, PASS on both** (2026-10-27).
+2. Run the `--no-provider-kits` removal procedure (the **Provider removal**
+   paragraph in the live-commands block below) on real SBX and MSB, including
+   all three omission assertions. **Done, PASS on both** (2026-10-27).
+3. Record each result as `PASS`, `FAIL`, or `BLOCKED`, with the backend version,
+   timestamp, and the **tested revision SHA**. **Done** in the Live Validation
+   Record below (SBX v0.48.0, MSB 0.7.7).
+
+**Why a re-run at `8a594932`.** Between `ec8d5e17` and `8a594932` the branch
+merged a newer `main`, which changed, among other files, `acq`,
+`acq.backends/kit-translate.sh` and `acq.backends/msb.sh`; the earlier result did not cover those changes, so the
+live checks were run again on the merged head.
+
+**Applying this to later heads.** A result for a different revision does not
+satisfy the gate by itself. Any commit after `8a594932` must be judged by what it
+changes: a commit that only edits this document does not change the tested code,
+but a change to `acq`, `acq.backends/`, `scripts/verify-backends`, the pinned
+kits, or provider-input handling needs its effect judged and, where it could
+change the checked behavior, a re-run.
+
+**Evidence.** The earlier live PASS rows (2026-10-24 and 2026-10-25) were
+observed on earlier heads and used the previous prefix-only model check
+(`opencode models | grep "^usai/"`) or a manual `opencode models`; they make no
+claim about the identity-bound check or these revisions. The 2026-10-27 rows
+(see the table) were produced by the maintainer running a validation script on a
+real host; raw results are kept in gitignored host directories (see the rows) and
+are not committed.
+
+## Offline Checks
+
+Run the focused provider checks after initializing the Bats submodules:
+
+```bash
+./scripts/test-acq-bats test/bats/146-provider-verification.bats
+./scripts/test-acq-bats test/bats/147-provider-input-projection.bats
+```
+
+Expected result: both commands complete successfully, with every Bats case
+reported as `ok`. These checks prove that provider facts and projected inputs
+are wired correctly in offline stubs, that URL and environment inputs flow
+through the expected code paths, and that malformed facts fail closed without
+invoking a backend or a network service. They do NOT prove that a real provider
+kit returns valid values, that a real projected parser accepts or rejects
+specific inputs, or that a live SBX or MSB run succeeds.
+
+## Live Validation Record
+
+Run on a sandbox-capable host (Docker for SBX, KVM/HVF for MSB), outside any
+sandbox. Use a throwaway workspace created specifically for this validation; the
+workspace directory must be removed after the run. Never paste or print a real
+provider key; the verifier seeds a synthetic dummy value that only tests binding
+and transport plumbing.
+
+Record the observed command output, timestamp, backend version, and one of
+`PASS`, `FAIL`, or `BLOCKED` for every row. `BLOCKED` is required when the
+backend, virtualization, credentials, or released provider kit is unavailable
+and the step cannot run. Do not use `PASS` for a row unless you observed the
+actual command output.
+
+`PENDING` marks a check that is implemented but has not been run on a live host;
+it is not a result and must be replaced by `PASS`, `FAIL`, or `BLOCKED`. No row
+is PENDING at `ec8d5e17` or `8a594932`.
+
+| Check | SBX | MSB | Observed output / notes |
+|---|---|---|---|
+| Fresh `acq run opencode .` startup | PASS | PASS | 2026-10-25: both backends launched interactive OpenCode sessions from the final validation worktree. USAi models were visible and a model request returned successfully on each backend. |
+| Fresh OpenCode sandbox create + name reattach | PASS | PASS | 2026-10-25: OpenCode sandboxes were created, then reattached by derived name. SBX recorded 13 passes; MSB recorded 18 passes. |
+| Fresh OpenCode process starts | PASS | PASS | `acq run <name> -- --version` succeeded on both backends. |
+| `acq exec NAME -- opencode models` consumes projected provider input | PASS | PASS | 2026-10-24: `opencode models` listed projected `usai/` models on both backends. |
+| Fresh authoritative-empty provider selection has no USAi models | PASS | PASS | 2026-10-25: `--no-provider-kits` created fresh OpenCode sandboxes with no USAi kit, credential gate, or models on either backend. |
+| Malformed provider input is rejected before startup | PASS | PASS | 2026-10-25: both backends rejected malformed `provider-input.json` before backend creation with `acq: invalid provider input manifest ... invalid JSON at line 1 column 2`. |
+| `scripts/verify-backends --only <backend>` | PASS | PASS | Final combined branch: SBX transcript `tmp/provider-neutral-validation.TCY2fZvE/sbx.log` (13 pass, 0 fail, 1 skip); MSB transcript `tmp/provider-neutral-validation.8MP6vbkX/msb.log` (18 pass, 0 fail, 1 skip). |
+| Identity-bound provider model check in `scripts/verify-backends` (snapshot vs rendered config vs `opencode models`) | PASS | PASS | History, superseded by the `8a594932` rows below. 2026-10-27, tested revision `ec8d5e177a520a69e1b835895763a9aac520af1b`, run by the maintainer on a real host. SBX: `verify-backends` 13 passed, 0 failed, 1 skipped (SBX version not captured in that run; captured in the `8a594932` rows). MSB 0.7.7: 18 passed, 0 failed, 1 skipped. Both printed `rendered config and opencode models match the projected usai snapshot (24 models)`. The skip on both is the playbook fetch (no GitHub token available to the run). The earlier PASS rows above used the prefix-only check and are not evidence for this row. Raw results: `tmp/validate-611-results-20261027T100924Z/results.tsv`, in a gitignored host-side directory (not committed). |
+| `--no-provider-kits` removal procedure with the three explicit omission assertions (no USAi kit/credential text, no `usai` projection, no `usai/` models) | PASS | PASS | History, superseded by the `8a594932` rows below. 2026-10-27, tested revision `ec8d5e177a520a69e1b835895763a9aac520af1b`, same run and host as the row above (SBX version not captured in that run, captured in the `8a594932` rows; MSB 0.7.7). All three assertions passed on each backend. The earlier 2026-10-25 omission row used its own checks and is a separate observation. Raw results: same gitignored `results.tsv`. |
+| Identity-bound provider model check in `scripts/verify-backends` (snapshot vs rendered config vs `opencode models`), re-run on the merged head | PASS | PASS | 2026-10-27 (run started 15:26Z), tested revision `8a594932e47745ed8f670a477f9da974121f3506`, run by the maintainer on a real host under bash 3.2.57 with a guard that the checked-out revision matched. SBX v0.48.0 (`5caf923e0587d376848f6f388eca3e0f5ca00e2d`): `verify-backends` 13 passed, 0 failed, 1 skipped. MSB 0.7.7: 18 passed, 0 failed, 1 skipped (its `oci-engine` kit checks also passed). Both printed `rendered config and opencode models match the projected usai snapshot (24 models)`. The skip on both is the playbook fetch (no GitHub token available to the run). The earlier `ec8d5e17` row is history and this row supersedes it for the merged head. Raw results: `tmp/validate-611-results-20261027T152646Z/` in a gitignored host-side directory (not committed). |
+| `--no-provider-kits` removal procedure with the three omission assertions, re-run on the merged head | PASS | PASS | 2026-10-27, tested revision `8a594932e47745ed8f670a477f9da974121f3506`, same run and host as the row above (SBX v0.48.0, MSB 0.7.7). All three assertions passed on each backend. |
+
+### Earlier Failed Live Evidence (2026-10-24)
+
+The full host transcripts remain in the gitignored Quickstart `tmp/` directory.
+The decisive output is preserved here so review does not depend on those local
+files.
+
+SBX reached provider validation, then failed before sandbox creation:
+
+```text
+provider input contract: validated 1 bundle(s)
+error: primary workspace must be read/write (remove ':ro' or ':readonly')
+```
+
+MSB version `0.7.7` reached provider validation, then failed before sandbox
+creation because the host-config bind source retained macOS `/var` spelling:
+
+```text
+provider input contract: validated 1 bundle(s)
+error: invalid config: bind mount host path /var/folders/... goes through symlink /var;
+use the resolved path /private/var/folders/... or add follow-root-symlinks
+```
+
+These were product failures, not environmental blocks. Both backend fixes are
+included in this draft and the later successful run below advanced past them.
+
+### Successful Live Evidence (2026-10-24)
+
+The combined validation worktree included the v1.17.0 pin, OpenCode renderer,
+macOS alias fix, validator installer, and the SBX/MSB fixes consolidated here.
+
+SBX observed output:
+
+```text
+ok sbx: provider input facts projected and readable
+ok sbx: USAi host reachable from guest (HTTP 401; auth rewritten on wire)
+ok sbx: opencode binary installed and on PATH
+ok sbx: OpenCode kit generated the global config
+ok sbx: acq run re-attaches opencode sandbox and launches --version
+passed: 12 failed: 0 skipped: 1 warnings: 0
+```
+
+MSB observed output:
+
+```text
+ok msb: provider input facts projected and readable
+ok msb: USAi host reachable from guest (HTTP 401; auth rewritten on wire)
+ok msb: opencode binary installed and on PATH
+ok msb: OpenCode kit generated the global config
+ok msb: acq run re-attaches opencode sandbox and launches --version
+passed: 17 failed: 0 skipped: 1 warnings: 0
+```
+
+The skipped row on each backend was the private playbook fetch because `gh` was
+not logged in on the host. It does not affect provider-neutral OpenCode evidence.
+Provider omission is independently observed below; it is not inferred from the
+successful default-provider startup run.
+
+### Final Live Evidence with Model Listing (2026-10-25)
+
+The final validation worktree included the v1.17.0 renderer, macOS alias fix,
+validator installer, and the consolidated SBX/MSB backend fixes, including the
+SBX positional provider-mount correction.
+
+```text
+SBX: opencode models lists projected USAi models
+SBX totals: passed 13, failed 0, skipped 1, warnings 0
+MSB: opencode models lists projected USAi models
+MSB totals: passed 18, failed 0, skipped 1, warnings 0
+```
+
+Host result files:
+
+```text
+tmp/provider-neutral-validation.TCY2fZvE/results.tsv
+tmp/provider-neutral-validation.8MP6vbkX/results.tsv
+```
+
+Provider omission evidence is recorded below; it is not inferred from the
+successful positive-provider matrix.
+
+### Malformed Provider Input Evidence (2026-10-25)
+
+The bounded host runner executed on both backends and rejected the candidate
+before any sandbox creation:
+
+```text
+SBX: acq: invalid provider input manifest: provider-input.json: invalid JSON at line 1 column 2
+MSB: acq: invalid provider input manifest: provider-input.json: invalid JSON at line 1 column 2
+```
+
+Result files:
+
+```text
+tmp/malformed-provider-validation.fFFNukSX/results.tsv
+tmp/malformed-provider-validation.GQGSRccw/results.tsv
+```
+
+Both rows are `PASS`; no backend create command was reached.
+
+### Authoritative Empty Provider Evidence (2026-10-25)
+
+The supported host-side `--no-provider-kits` selection created fresh OpenCode
+sandboxes with an immutable empty provider generation on both backends. The
+applied kit lists omitted `usai-provider`, no USAi credential gate ran, and
+`opencode models` returned successfully with no USAi model, endpoint, or
+credential marker.
+
+```text
+SBX: PASS
+MSB: PASS
+```
+
+Result files:
+
+```text
+tmp/provider-omission-validation.4AJo3ZKd/results.tsv
+tmp/provider-omission-validation.fO13wRpW/results.tsv
+```
+
+### Literal Credential Flow (2026-10-25)
+
+The literal host command completed on both backends from the final validation
+worktree:
+
+```text
+bash ./acq --backend msb run opencode .
+```
+
+Observed MSB behavior:
+
+```text
+provider input contract: validated 1 bundle(s)
+acq: Creating sandbox 'opencode-validate-601-final-r2'… done
+opencode-kit(install): opencode 2.0.30 (arm64) installed and runnable
+Starting background server...
+```
+
+Inside the launched OpenCode session, USAi models were visible and a model
+request returned a successful response. The same interactive checks then passed
+on SBX after its USAi secret was updated through the supported rotation flow.
+This fulfills the literal credential-flow row for both backends. No credential
+value, secret placeholder, or session identifier is retained in this record.
+
+### Negative-Validation Procedure (malformed provider input)
+
+This procedure proves that host-side provider validation rejects a malformed
+selected kit before backend creation. It does not modify the read-only guest
+projection. Run it separately for `sbx` and `msb` on a sandbox-capable host.
+
+```bash
+set -eu
+VERIFY_PROVIDER_ADOPTION_ROOT=$(mktemp -d \
+  "${TMPDIR:-/tmp}/acq-provider-adoption.XXXXXX")
+case "$VERIFY_PROVIDER_ADOPTION_ROOT" in
+  "${TMPDIR:-/tmp}"/acq-provider-adoption.*) ;;
+  *) echo "unsafe validation root" >&2; exit 1 ;;
+esac
+cleanup_provider_adoption() {
+  case "${VERIFY_PROVIDER_ADOPTION_ROOT:-}" in
+    "${TMPDIR:-/tmp}"/acq-provider-adoption.*)
+      chmod -R u+w "$VERIFY_PROVIDER_ADOPTION_ROOT" 2>/dev/null || true
+      rm -rf -- "$VERIFY_PROVIDER_ADOPTION_ROOT"
+      ;;
+  esac
+}
+trap cleanup_provider_adoption EXIT INT TERM
+
+VERIFY_PROVIDER_ADOPTION_WS="$VERIFY_PROVIDER_ADOPTION_ROOT/workspace"
+VERIFY_PROVIDER_ADOPTION_KIT="$VERIFY_PROVIDER_ADOPTION_ROOT/malformed-kit"
+mkdir -p "$VERIFY_PROVIDER_ADOPTION_WS" "$VERIFY_PROVIDER_ADOPTION_KIT"
+git -C "$VERIFY_PROVIDER_ADOPTION_WS" init -q
+git -C "$VERIFY_PROVIDER_ADOPTION_WS" config user.email test@example.com
+git -C "$VERIFY_PROVIDER_ADOPTION_WS" config user.name "acq verify"
+printf '# provider adoption validation\n' \
+  > "$VERIFY_PROVIDER_ADOPTION_WS/README.md"
+
+cat > "$VERIFY_PROVIDER_ADOPTION_KIT/spec.yaml" <<'YAML'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: malformed-provider-validation
+displayName: Malformed provider validation
+description: Deliberately malformed host-side provider input
+YAML
+printf '{this-is-not-json\n' \
+  > "$VERIFY_PROVIDER_ADOPTION_KIT/provider-input.json"
+
+BACKEND=sbx # repeat the procedure with BACKEND=msb
+SANDBOX=provider-adoption-malformed-${BACKEND}
+VALIDATION_LOG="$VERIFY_PROVIDER_ADOPTION_ROOT/malformed-${BACKEND}.log"
+if ./acq --backend "$BACKEND" create opencode \
+    "$VERIFY_PROVIDER_ADOPTION_WS" --name "$SANDBOX" \
+    --kit "$VERIFY_PROVIDER_ADOPTION_KIT" \
+    >"$VALIDATION_LOG" 2>&1; then
+  echo "FAIL: malformed provider input reached backend creation" >&2
+  ./acq --backend "$BACKEND" rm "$SANDBOX" >/dev/null 2>&1 || true
+  exit 1
+fi
+cat "$VALIDATION_LOG"
+if grep -Fq 'provider-input.json' "$VALIDATION_LOG" \
+    && grep -Eqi 'json (decode|parse|syntax)|invalid json|schema validation|does not match.*schema' \
+      "$VALIDATION_LOG"; then
+  echo "PASS: malformed provider input was rejected before startup"
+elif grep -Eqi 'not installed|unavailable|requires python|credential|virtualization|cannot connect|CLI not found on PATH' \
+    "$VALIDATION_LOG"; then
+  echo "BLOCKED: backend or host prerequisite prevented validation" >&2
+  exit 2
+else
+  echo "FAIL: create failed without the expected provider-input diagnostic" >&2
+  exit 1
+fi
+```
+
+Record the non-zero exit status and exact host-side validation diagnostic. If
+the selected backend or its host prerequisites are unavailable, record
+`BLOCKED`; do not substitute an offline seam test. The guarded `EXIT` trap
+removes only the uniquely named temporary root created by this procedure.
+
+Run the positive live verifier separately, outside any sandbox:
+
+```bash
+./scripts/verify-backends --only sbx
+./scripts/verify-backends --only msb
+```
+
+For the remaining positive and removal rows, run these commands once per
+backend. Use a fresh throwaway workspace and record the real sandbox name from
+`acq run` output:
+
+```bash
+BACKEND=sbx # repeat with BACKEND=msb
+LIVE_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/acq-provider-live.XXXXXX")
+case "$LIVE_ROOT" in
+  "${TMPDIR:-/tmp}"/acq-provider-live.*) ;;
+  *) echo "unsafe live validation root" >&2; exit 1 ;;
+esac
+cleanup_provider_live() {
+  case "${LIVE_ROOT:-}" in
+    "${TMPDIR:-/tmp}"/acq-provider-live.*)
+      chmod -R u+w "$LIVE_ROOT" 2>/dev/null || true
+      rm -rf -- "$LIVE_ROOT"
+      ;;
+  esac
+}
+trap cleanup_provider_live EXIT INT TERM
+
+git -C "$LIVE_ROOT" init -q
+git -C "$LIVE_ROOT" config user.email test@example.com
+git -C "$LIVE_ROOT" config user.name "acq verify"
+printf '# live provider adoption validation\n' > "$LIVE_ROOT/README.md"
+
+./acq --backend "$BACKEND" run opencode "$LIVE_ROOT"
+SANDBOX='<sandbox-name-from-acq-output>'
+./acq --backend "$BACKEND" exec "$SANDBOX" -- opencode models
+./acq --backend "$BACKEND" rm "$SANDBOX"
+```
+
+**Provider removal.** To verify provider removal, create a second fresh
+sandbox with the supported
+`--no-provider-kits` flag (`acq run`/`acq create`; see `docs/howto/acq.md`,
+"Provider kits"). Run it with no USAi credential available to acq (remove any
+global USAi secret first, or use a clean host profile), so a credential gate
+would show up as a prompt or failure. Run the block as a script, not pasted into
+an interactive shell: its failure paths use `exit`, and a failed run leaves the
+sandbox in place for inspection (remove it with `acq rm`). Then assert omission
+explicitly; any failed assertion is a failure, not `BLOCKED`:
+
+```bash
+BACKEND=sbx # repeat with BACKEND=msb
+RUN_OUT=$(mktemp "${TMPDIR:-/tmp}/acq-provider-omit.XXXXXX")
+./acq --backend "$BACKEND" run opencode --no-provider-kits "$LIVE_ROOT" \
+  -- --version >"$RUN_OUT" 2>&1 || { echo "FAIL: create/run failed" >&2; cat "$RUN_OUT"; exit 1; }
+SANDBOX='<sandbox-name-from-acq-output>' # edit before continuing; do not paste unedited
+case "$SANDBOX" in '<'*) echo "set SANDBOX first" >&2; exit 2 ;; esac
+
+# 1) No USAi kit and no USAi credential gate in the create output. This is a
+#    best-effort text check; assertions 2 and 3 are the substantive ones.
+! grep -Eiq 'usai-provider|USAI_API_KEY|usai credential' "$RUN_OUT" \
+  || { echo "FAIL: USAi kit or credential gate appeared" >&2; exit 1; }
+
+# 2) The projected provider root has no USAi provider directory.
+./acq --backend "$BACKEND" exec "$SANDBOX" -- sh -c \
+  'test -d "$ACQ_PROVIDER_INPUT_ROOT/models/providers" && test ! -e "$ACQ_PROVIDER_INPUT_ROOT/models/providers/usai"' \
+  || { echo "FAIL: usai projection present or provider root missing" >&2; exit 1; }
+
+# 3) No usai models in `opencode models` (the command itself must succeed).
+MODELS=$(./acq --backend "$BACKEND" exec "$SANDBOX" -- opencode models) \
+  || { echo "FAIL: opencode models failed" >&2; exit 1; }
+! printf '%s\n' "$MODELS" | grep -q '^usai/' \
+  || { echo "FAIL: usai models listed" >&2; exit 1; }
+
+./acq --backend "$BACKEND" rm "$SANDBOX"
+rm -f "$RUN_OUT"
+```
+
+Record the backend version and the output of each assertion. If the backend or
+its host prerequisites are unavailable, record `BLOCKED`; do not edit the
+read-only guest projection or claim a mocked result as live evidence.
+
+**Outcome recording:** Update the Live Validation Record table above with the
+observed output, timestamp, and backend version for each row that ran. Do not
+mark any row `PASS` from the offline Bats suite. Update the table only after the
+real SBX/MSB flows have run and their output has been retained in the draft PR
+verification transcript.

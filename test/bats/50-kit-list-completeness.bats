@@ -27,6 +27,44 @@ load 'helper'
   assert_regex "${KITS[0]}" 'acq-kits/zscaler-ca-certificate'
 }
 
+@test "provider selection: unset preserves the USAi default" {
+  load_acq
+  # shellcheck disable=SC2034 # _build_kit_list reads this global dynamically
+  unset ACQ_PROVIDER_KITS_FROM_ENV ACQ_PROVIDER_KITS_FROM_CLI
+  # shellcheck disable=SC2034 # _build_kit_list reads this global dynamically
+  ACQ_PROVIDER_KITS=""
+  _build_kit_list
+
+  assert_equal "${KITS[1]}" "$USAI_KIT"
+  assert_equal "$ACQ_BUILTIN_SUPPORT_KIT_COUNT" "4"
+}
+
+@test "provider selection: explicit empty omits every provider kit" {
+  load_acq
+  # shellcheck disable=SC2034 # _build_kit_list reads this global dynamically
+  ACQ_PROVIDER_KITS=""
+  # shellcheck disable=SC2034 # _build_kit_list reads this global dynamically
+  ACQ_PROVIDER_KITS_FROM_ENV=1
+  # shellcheck disable=SC2034 # _build_kit_list reads this global dynamically
+  ACQ_PROVIDER_KITS_FROM_CLI=""
+  _build_kit_list
+
+  assert_equal "$ACQ_BUILTIN_SUPPORT_KIT_COUNT" "3"
+  refute_regex "$(printf '%s\n' "${KITS[@]}")" 'acq-kits/usai-provider'
+  refute acq_usai_provider_selected
+}
+
+@test "provider selection: an explicit ref replaces the default provider ref" {
+  load_acq
+  # shellcheck disable=SC2034 # _build_kit_list reads this global dynamically
+  ACQ_PROVIDER_KITS="$STUBDIR/missing-provider-kit"
+  # shellcheck disable=SC2034 # _build_kit_list reads this global dynamically
+  ACQ_PROVIDER_KITS_FROM_ENV=1
+
+  _build_kit_list
+  assert_equal "${KITS[1]}" "$STUBDIR/missing-provider-kit"
+}
+
 @test "kits: count matches the documented set and no doc hardcodes an English count" {
   assert_equal "${#ACQ_KIT_NAMES[@]}" "4"
   local doc bad
@@ -36,276 +74,18 @@ load 'helper'
   done
 }
 
-@test "provider-facts: transitional USAi fallback defaults remain neutral" {
-  load_acq
-
-  assert_equal "$USAI_PROVIDER_KIT_NAME" "usai-provider"
-  assert_equal "$USAI_PROVIDER_HOST" "api.gsa.usai.gov"
-  assert_equal "$USAI_PROVIDER_BASE_URL" "https://api.gsa.usai.gov/api/v1"
-  assert_equal "$USAI_PROVIDER_KEY_ENV" "USAI_API_KEY"
-  assert_equal "$USAI_PROVIDER_MODELS_URL" "https://api.gsa.usai.gov/api/v1/models"
-  assert_equal "$USAI_PROVIDER_KEY_MGMT_URL" "https://gsa.usai.gov/console/key-management"
-  assert_equal "$USAI_PROVIDER_BIND_HOSTS" "api.gsa.usai.gov"
-  assert_equal "$USAI_PROVIDER_FACTS_SOURCE" "fallback"
-  assert_regex "$USAI_KIT" "acq-kits/${USAI_PROVIDER_KIT_NAME}$"
-  refute_regex "$USAI_PROVIDER_MODELS_URL" 'opencode'
-}
-
-@test "provider-facts: valid artifact overrides fallback defaults" {
-  load_acq
-  local facts="$STUBDIR/usai.env"
-  cat > "$facts" <<'FACTS'
-ACQ_PROVIDER_FACTS_SCHEMA=1
-ACQ_PROVIDER_ID=usai
-ACQ_PROVIDER_HOST=api.example.gov
-ACQ_PROVIDER_BASE_URL=https://api.example.gov/api/v1
-ACQ_PROVIDER_MODELS_URL=https://api.example.gov/api/v1/models
-ACQ_PROVIDER_KEY_ENV=EXAMPLE_API_KEY
-ACQ_PROVIDER_KEY_MGMT_URL=https://example.gov/keys
-ACQ_PROVIDER_BIND_HOSTS=api.example.gov,models.example.gov
-FACTS
-
-  acq_provider_facts_load "$facts"
-  assert_equal "$USAI_PROVIDER_HOST" "api.example.gov"
-  assert_equal "$USAI_PROVIDER_BASE_URL" "https://api.example.gov/api/v1"
-  assert_equal "$USAI_PROVIDER_MODELS_URL" "https://api.example.gov/api/v1/models"
-  assert_equal "$USAI_PROVIDER_KEY_ENV" "EXAMPLE_API_KEY"
-  assert_equal "$USAI_PROVIDER_KEY_MGMT_URL" "https://example.gov/keys"
-  assert_equal "$USAI_PROVIDER_BIND_HOSTS" "api.example.gov,models.example.gov"
-  assert_equal "$USAI_PROVIDER_FACTS_SOURCE" "$facts"
-}
-
-@test "provider-facts: URL syntax accepted by the shared contract reaches the verifier" {
-  load_acq
-  local facts="$STUBDIR/usai-url.env"
-  cat > "$facts" <<'FACTS'
-ACQ_PROVIDER_FACTS_SCHEMA=1
-ACQ_PROVIDER_ID=usai
-ACQ_PROVIDER_HOST=api.example.gov
-ACQ_PROVIDER_BASE_URL=https://api.example.gov/api/v1
-ACQ_PROVIDER_MODELS_URL=https://api.example.gov/api/v1/models%2Fbeta+preview~v1?view=full&tag=a%2Bb
-ACQ_PROVIDER_KEY_ENV=EXAMPLE_API_KEY
-ACQ_PROVIDER_KEY_MGMT_URL=https://example.gov/keys
-ACQ_PROVIDER_BIND_HOSTS=api.example.gov
-FACTS
-
-  acq_provider_facts_load "$facts"
-  assert_equal "$USAI_PROVIDER_MODELS_URL" "https://api.example.gov/api/v1/models%2Fbeta+preview~v1?view=full&tag=a%2Bb"
-}
-
-@test "provider-facts: malformed or injection-shaped URL fails before verifier use" {
-  load_acq
-  local facts="$STUBDIR/usai-bad-url.env"
-  cat > "$facts" <<'FACTS'
-ACQ_PROVIDER_FACTS_SCHEMA=1
-ACQ_PROVIDER_ID=usai
-ACQ_PROVIDER_HOST=api.example.gov
-ACQ_PROVIDER_BASE_URL=https://api.example.gov/api/v1
-ACQ_PROVIDER_MODELS_URL=https://api.example.gov/api/v1/models$(touch injected)
-ACQ_PROVIDER_KEY_ENV=EXAMPLE_API_KEY
-ACQ_PROVIDER_KEY_MGMT_URL=https://example.gov/keys
-ACQ_PROVIDER_BIND_HOSTS=api.example.gov
-FACTS
-
-  run acq_provider_facts_load "$facts"
-  assert_failure
-  assert_equal "$USAI_PROVIDER_MODELS_URL" "https://api.gsa.usai.gov/api/v1/models"
-  refute [ -e "$STUBDIR/injected" ]
-}
-
-@test "provider-facts: missing artifact leaves fallback path available" {
-  load_acq
-  run acq_provider_facts_load "$STUBDIR/missing.env"
-  assert_failure 2
-  assert_equal "$USAI_PROVIDER_HOST" "api.gsa.usai.gov"
-  assert_equal "$USAI_PROVIDER_FACTS_SOURCE" "fallback"
-}
-
-@test "provider-facts: invalid artifact fails closed without partial override" {
-  load_acq
-  local facts="$STUBDIR/bad-usai.env"
-  cat > "$facts" <<'FACTS'
-ACQ_PROVIDER_FACTS_SCHEMA=1
-ACQ_PROVIDER_ID=usai
-ACQ_PROVIDER_HOST=api.bad.gov
-ACQ_PROVIDER_BASE_URL=https://api.bad.gov/api/v1
-ACQ_PROVIDER_MODELS_URL=https://api.bad.gov/api/v1/models
-ACQ_PROVIDER_KEY_ENV=bad-key-name
-ACQ_PROVIDER_KEY_MGMT_URL=https://bad.gov/keys
-ACQ_PROVIDER_BIND_HOSTS=api.bad.gov
-FACTS
-
-  run acq_provider_facts_load "$facts"
-  assert_failure
-  assert_equal "$USAI_PROVIDER_HOST" "api.gsa.usai.gov"
-  assert_equal "$USAI_PROVIDER_KEY_ENV" "USAI_API_KEY"
-  assert_equal "$USAI_PROVIDER_FACTS_SOURCE" "fallback"
-}
-
-@test "provider-facts: kit loader consumes artifact from a fetched kit" {
-  load_acq
-  local kit="$STUBDIR/provider-kit" cache="$STUBDIR/provider-cache"
-  mkdir -p "$kit/provider-facts"
-  cat > "$kit/provider-facts/usai.env" <<'FACTS'
-ACQ_PROVIDER_FACTS_SCHEMA=1
-ACQ_PROVIDER_ID=usai
-ACQ_PROVIDER_HOST=api.kit.gov
-ACQ_PROVIDER_BASE_URL=https://api.kit.gov/api/v1
-ACQ_PROVIDER_MODELS_URL=https://api.kit.gov/api/v1/models
-ACQ_PROVIDER_KEY_ENV=KIT_API_KEY
-ACQ_PROVIDER_KEY_MGMT_URL=https://kit.gov/keys
-ACQ_PROVIDER_BIND_HOSTS=api.kit.gov
-FACTS
-
-  acq_provider_facts_load_from_kit "$kit" "$cache"
-  assert_equal "$USAI_PROVIDER_HOST" "api.kit.gov"
-  assert_equal "$USAI_PROVIDER_KEY_ENV" "KIT_API_KEY"
-  assert_equal "$USAI_PROVIDER_FACTS_SOURCE" "$kit/provider-facts/usai.env"
-}
-
-@test "provider-facts: kit loader keeps fallback when artifact is absent" {
-  load_acq
-  local kit="$STUBDIR/provider-kit-empty" cache="$STUBDIR/provider-cache-empty"
-  mkdir -p "$kit"
-
-  run acq_provider_facts_load_from_kit "$kit" "$cache"
-  assert_failure 2
-  assert_equal "$USAI_PROVIDER_HOST" "api.gsa.usai.gov"
-  assert_equal "$USAI_PROVIDER_FACTS_SOURCE" "fallback"
-}
-
-@test "provider-facts: kit loader fails closed for invalid artifact" {
-  load_acq
-  local kit="$STUBDIR/provider-kit-bad" cache="$STUBDIR/provider-cache-bad"
-  mkdir -p "$kit/provider-facts"
-  cat > "$kit/provider-facts/usai.env" <<'FACTS'
-ACQ_PROVIDER_FACTS_SCHEMA=1
-ACQ_PROVIDER_ID=usai
-ACQ_PROVIDER_HOST=api.bad.gov
-ACQ_PROVIDER_BASE_URL=https://api.bad.gov/api/v1
-ACQ_PROVIDER_MODELS_URL=https://api.bad.gov/api/v1/models
-ACQ_PROVIDER_KEY_ENV=BAD-KEY
-ACQ_PROVIDER_KEY_MGMT_URL=https://bad.gov/keys
-ACQ_PROVIDER_BIND_HOSTS=api.bad.gov
-FACTS
-
-  run acq_provider_facts_load_from_kit "$kit" "$cache"
-  assert_failure
-  assert_equal "$USAI_PROVIDER_HOST" "api.gsa.usai.gov"
-  assert_equal "$USAI_PROVIDER_FACTS_SOURCE" "fallback"
-}
 
 
-@test "provider-facts: wrapper preserves assignments from successful kit load (regression for #551)" {
-  load_acq
-  local kit="$STUBDIR/provider-kit-ok" cache="$STUBDIR/provider-cache-ok"
-  mkdir -p "$kit/provider-facts"
-  cat > "$kit/provider-facts/usai.env" <<'FACTS'
-ACQ_PROVIDER_FACTS_SCHEMA=1
-ACQ_PROVIDER_ID=usai
-ACQ_PROVIDER_HOST=custom.example.gov
-ACQ_PROVIDER_BASE_URL=https://custom.example.gov/api/v1
-ACQ_PROVIDER_MODELS_URL=https://custom.example.gov/api/v1/models
-ACQ_PROVIDER_KEY_ENV=CUSTOM_API_KEY
-ACQ_PROVIDER_KEY_MGMT_URL=https://custom.example.gov/keys
-ACQ_PROVIDER_BIND_HOSTS=custom.example.gov,models.custom.example.gov
-FACTS
 
-  acq_provider_facts_load_from_kit_or_fallback "$kit" "$cache"
-  assert_equal "$USAI_PROVIDER_HOST" "custom.example.gov"
-  assert_equal "$USAI_PROVIDER_BASE_URL" "https://custom.example.gov/api/v1"
-  assert_equal "$USAI_PROVIDER_MODELS_URL" "https://custom.example.gov/api/v1/models"
-  assert_equal "$USAI_PROVIDER_KEY_ENV" "CUSTOM_API_KEY"
-  assert_equal "$USAI_PROVIDER_KEY_MGMT_URL" "https://custom.example.gov/keys"
-  assert_equal "$USAI_PROVIDER_BIND_HOSTS" "custom.example.gov,models.custom.example.gov"
-  assert_equal "$USAI_PROVIDER_FACTS_SOURCE" "$kit/provider-facts/usai.env"
-}
 
-@test "provider-facts: wrapper preserves IFS and caller shell state (regression for #551 indirect)" {
-  load_acq
-  local kit="$STUBDIR/provider-kit-ok" cache="$STUBDIR/provider-cache-ok"
-  mkdir -p "$kit/provider-facts"
-  cat > "$kit/provider-facts/usai.env" <<'FACTS'
-ACQ_PROVIDER_FACTS_SCHEMA=1
-ACQ_PROVIDER_ID=usai
-ACQ_PROVIDER_HOST=api.example.gov
-ACQ_PROVIDER_BASE_URL=https://api.example.gov/api/v1
-ACQ_PROVIDER_MODELS_URL=https://api.example.gov/api/v1/models
-ACQ_PROVIDER_KEY_ENV=EXAMPLE_API_KEY
-ACQ_PROVIDER_KEY_MGMT_URL=https://api.example.gov/keys
-ACQ_PROVIDER_BIND_HOSTS=api.example.gov
-FACTS
 
-  # Snapshot IFS before call
-  local _before_ifs="$IFS"
-  # Call the wrapper
-  acq_provider_facts_load_from_kit_or_fallback "$kit" "$cache"
-  # Verify IFS is restored
-  assert_equal "$IFS" "$_before_ifs"
-  # Verify provider vars are assigned
-  assert_equal "$USAI_PROVIDER_HOST" "api.example.gov"
-}
 
-@test "provider-facts: wrapper classifies loader results under errexit with custom IFS" {
-  load_acq
-  local diagnostics="$STUBDIR/provider-facts-diagnostics" rc actual_rc
-  local _before_ifs
 
-  for rc in 0 1 2 3 7; do
-    USAI_PROVIDER_HOST="before.example.gov"
-    USAI_PROVIDER_FACTS_SOURCE="before"
-    IFS='|'
-    _before_ifs="$IFS"
-    acq_provider_facts_load_from_kit() {
-      printf 'loader diagnostic for rc %s\n' "$rc" >&2
-      if [ "$rc" -eq 0 ]; then
-        USAI_PROVIDER_HOST="loaded.example.gov"
-        USAI_PROVIDER_FACTS_SOURCE="loaded"
-      fi
-      return "$rc"
-    }
 
-    set -e
-    if acq_provider_facts_load_from_kit_or_fallback kit cache 2>"$diagnostics"; then
-      actual_rc=0
-    else
-      actual_rc=$?
-    fi
 
-    assert_equal "$IFS" "$_before_ifs"
-    case "$rc" in
-      0)
-        assert_equal "$actual_rc" "0"
-        assert_equal "$USAI_PROVIDER_HOST" "loaded.example.gov"
-        assert_equal "$USAI_PROVIDER_FACTS_SOURCE" "loaded"
-        grep -Fqx "loader diagnostic for rc 0" "$diagnostics"
-        ;;
-      1)
-        assert_equal "$actual_rc" "1"
-        assert_equal "$USAI_PROVIDER_HOST" "before.example.gov"
-        grep -Fqx "loader diagnostic for rc 1" "$diagnostics"
-        ;;
-      2)
-        assert_equal "$actual_rc" "0"
-        assert_equal "$USAI_PROVIDER_HOST" "api.gsa.usai.gov"
-        assert_equal "$USAI_PROVIDER_FACTS_SOURCE" "fallback"
-        grep -Fqx "loader diagnostic for rc 2" "$diagnostics"
-        ;;
-      3)
-        assert_equal "$actual_rc" "0"
-        assert_equal "$USAI_PROVIDER_HOST" "api.gsa.usai.gov"
-        assert_equal "$USAI_PROVIDER_FACTS_SOURCE" "fallback"
-        grep -Fq "provider facts could not be fetched" "$diagnostics"
-        grep -Fq "loader diagnostic for rc 3" "$diagnostics"
-        ;;
-      7)
-        assert_equal "$actual_rc" "7"
-        assert_equal "$USAI_PROVIDER_HOST" "before.example.gov"
-        grep -Fqx "loader diagnostic for rc 7" "$diagnostics"
-        ;;
-    esac
-  done
-}
+
+
+
 
 @test "agent-kits: default kit list is support-only" {
   load_acq
@@ -387,41 +167,4 @@ SPEC
   run acq_selected_agent_kit_summary shell
   assert_failure
   assert_regex "$(printf '%s\n' "${KITS[@]}")" '/tmp/opencode'
-}
-
-@test "provider-facts: wrapper preserves unset caller IFS under set -u" {
-  load_acq
-
-  (
-    set -u
-    unset IFS
-    acq_provider_facts_load_from_kit() {
-      IFS='|'
-      USAI_PROVIDER_HOST="loaded.example.gov"
-      USAI_PROVIDER_FACTS_SOURCE="loaded"
-      return 0
-    }
-
-    acq_provider_facts_load_from_kit_or_fallback kit cache
-
-    [ -z "${IFS+x}" ]
-    [ "$USAI_PROVIDER_HOST" = "loaded.example.gov" ]
-    [ "$USAI_PROVIDER_FACTS_SOURCE" = "loaded" ]
-  )
-}
-
-@test "provider-facts: fallback preserves unset caller IFS under set -u" {
-  load_acq
-
-  (
-    set -u
-    unset IFS
-    acq_provider_facts_load_from_kit() { IFS='|'; return 2; }
-
-    acq_provider_facts_load_from_kit_or_fallback kit cache
-
-    [ -z "${IFS+x}" ]
-    [ "$USAI_PROVIDER_HOST" = "api.gsa.usai.gov" ]
-    [ "$USAI_PROVIDER_FACTS_SOURCE" = "fallback" ]
-  )
 }
