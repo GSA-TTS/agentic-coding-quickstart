@@ -3,10 +3,10 @@ title: "Provider-Neutral Adoption Validation"
 description: "Offline and live procedures for validating provider-input adoption on SBX and MSB"
 status: draft
 tier: 2
-last_updated: "2026-10-27"
+last_updated: "2026-11-05"
 audience: "developers"
 keywords: ["provider", "validation", "sbx", "msb", "opencode", "offline"]
-related_files: ["scripts/verify-backends", "test/bats/146-provider-verification.bats", "test/bats/147-provider-input-projection.bats", "docs/howto/acq.md"]
+related_files: ["scripts/verify-backends", "scripts/verify-host-authority-live", "test/bats/146-provider-verification.bats", "test/bats/147-provider-input-projection.bats", "docs/howto/acq.md"]
 load_priority: "on-demand"
 review_cycle: "quarterly"
 ---
@@ -111,6 +111,40 @@ is PENDING at `ec8d5e17` or `8a594932`.
 | `--no-provider-kits` removal procedure with the three explicit omission assertions (no USAi kit/credential text, no `usai` projection, no `usai/` models) | PASS | PASS | History, superseded by the `8a594932` rows below. 2026-10-27, tested revision `ec8d5e177a520a69e1b835895763a9aac520af1b`, same run and host as the row above (SBX version not captured in that run, captured in the `8a594932` rows; MSB 0.7.7). All three assertions passed on each backend. The earlier 2026-10-25 omission row used its own checks and is a separate observation. Raw results: same gitignored `results.tsv`. |
 | Identity-bound provider model check in `scripts/verify-backends` (snapshot vs rendered config vs `opencode models`), re-run on the merged head | PASS | PASS | 2026-10-27 (run started 15:26Z), tested revision `8a594932e47745ed8f670a477f9da974121f3506`, run by the maintainer on a real host under bash 3.2.57 with a guard that the checked-out revision matched. SBX v0.48.0 (`5caf923e0587d376848f6f388eca3e0f5ca00e2d`): `verify-backends` 13 passed, 0 failed, 1 skipped. MSB 0.7.7: 18 passed, 0 failed, 1 skipped (its `oci-engine` kit checks also passed). Both printed `rendered config and opencode models match the projected usai snapshot (24 models)`. The skip on both is the playbook fetch (no GitHub token available to the run). The earlier `ec8d5e17` row is history and this row supersedes it for the merged head. Raw results: `tmp/validate-611-results-20261027T152646Z/` in a gitignored host-side directory (not committed). |
 | `--no-provider-kits` removal procedure with the three omission assertions, re-run on the merged head | PASS | PASS | 2026-10-27, tested revision `8a594932e47745ed8f670a477f9da974121f3506`, same run and host as the row above (SBX v0.48.0, MSB 0.7.7). All three assertions passed on each backend. |
+
+### Host Authority Live Validation Record (GSA-TTS/agentic-coding-quickstart#639)
+
+These rows track the items under "Still unverified on a real host" in
+GSA-TTS/agentic-coding-quickstart#639 (ADR-0035 on msb, ADR-0037 on sbx). Every row
+starts as `BLOCKED` (unrun): nothing here has been run live. A human on a
+sandbox-capable host runs `scripts/verify-host-authority-live` (see its `--help`
+and `--dry-run`), then copies each row from the `results.tsv` it writes into this
+table: replace `BLOCKED`/`unrun` with the observed result, the tested revision, the
+backend and its version, the date, and the transcript path (kept in a gitignored
+`tmp/` directory, not committed). File each FAIL as its own issue. Do not mark a row
+`PASS` from the offline Bats suite or from a dry run.
+
+| Step id | Backend | Revision | Backend version | Date | Result | Transcript path |
+|---|---|---|---|---|---|---|
+| `msb-ro-kit-create` (readonly kit file end to end on create) | msb | unrun | unrun | unrun | BLOCKED | unrun |
+| `msb-inspect-shape` (`.active_config.mounts` and `.config.mounts`) | msb | unrun | unrun | unrun | BLOCKED | unrun |
+| `msb-exit-code` (guest exit 2 passes through `msb exec`) | msb | unrun | unrun | unrun | BLOCKED | unrun |
+| `msb-ro-kit-heal` (readonly kit file on heal after restart) | msb | unrun | unrun | unrun | BLOCKED | unrun |
+| `msb-forged-markers` (forged legacy guest markers, exec sessions) | msb | unrun | unrun | unrun | BLOCKED | unrun |
+| `msb-install-gate` (deleted host install keys re-run the install) | msb | unrun | unrun | unrun | BLOCKED | unrun |
+| `msb-ro-oci` (shipped `oci-engine` readonly files) | msb | unrun | unrun | unrun | BLOCKED | unrun |
+| `sbx-baseline` (fresh create seeds `builtin-kits`) | sbx | unrun | unrun | unrun | BLOCKED | unrun |
+| `sbx-forged-heal` (removed guest files not re-applied) | sbx | unrun | unrun | unrun | BLOCKED | unrun |
+| `sbx-record-change` (altered host record triggers `kit add`) | sbx | unrun | unrun | unrun | BLOCKED | unrun |
+| `sbx-stale-refresh` (stale-bundle refresh re-applies all kits) | sbx | unrun | unrun | unrun | BLOCKED | unrun |
+| `sbx-legacy-reseed` (legacy notice, then `acq rm` and fresh create re-seed) | sbx | unrun | unrun | unrun | BLOCKED | unrun |
+| MANUAL 1: msb forged markers on interactive attach and agent key | msb | unrun | unrun | unrun | BLOCKED | unrun |
+| MANUAL 2: msb forged ssh socket with a live ssh-agent forward | msb | unrun | unrun | unrun | BLOCKED | unrun |
+| MANUAL 3: msb persistence across a host reboot | msb | unrun | unrun | unrun | BLOCKED | unrun |
+| MANUAL 4: Linux hosts and msb versions other than 0.7.7 | msb | unrun | unrun | unrun | BLOCKED | unrun |
+| MANUAL 5: ADR-0037 steps 1-4 and 6 (mount form, enforcement under sudo, permissions, restart, clone and mountless modes) | sbx | unrun | unrun | unrun | BLOCKED | unrun |
+| MANUAL 6: ADR-0037 steps 5 and 8 (native replay integrity, negative control) | sbx | unrun | unrun | unrun | BLOCKED | unrun |
+| MANUAL 7: ADR-0037 step 7 (Windows path forms) | sbx | unrun | unrun | unrun | BLOCKED | unrun |
 
 ### Earlier Failed Live Evidence (2026-10-24)
 
