@@ -188,7 +188,7 @@ sudo guest. The kit still applies unchanged; kits with no `readonly: true`
 files stay silent. The first kit to opt in is `oci-engine` (first shipped in the
 Patterns v1.18.0 pin; v1.19.0 is current).
 Regression coverage: `test/bats/91-sbx-readonly-warning.bats`. Option B (the
-read-only mount) remains unimplemented and gated on the live validation below.
+read-only mount) is unimplemented and not scheduled; see the reopening conditions above.
 
 ## Live Validation Required Before Reopening Option B
 
@@ -231,7 +231,8 @@ fixture kit and an SBX tamper step, mirroring the msb live fixture.
 ### Positive
 
 - The SBX gap affecting the opted-in kit is named and made visible by the
-  warning, while stronger enforcement remains gated on concrete validation.
+  warning, while stronger enforcement is not scheduled and would require the live
+  validation below.
 - Reuses an existing, shipped sbx mechanism if validation passes.
 - Validation step 5 resolves whether native replay is trustworthy independent of
   this ADR's outcome.
