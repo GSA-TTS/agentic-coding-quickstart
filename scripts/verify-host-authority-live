@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+# verify-host-authority-live — HOST-RUN live validation of the host-authoritative
+# sandbox configuration work (ADR-0035 msb, ADR-0037 sbx). It walks the checklist of
+# items that offline tests cannot prove ("Still unverified on a real host") and prints
+# PASS / FAIL / BLOCKED per step, with the tested acq revision and backend version.
+#
+# It does NOT repeat what is already validated live: the msb 0.7.7 read-only mount
+# canary (scripts/qualify-msb-ro-mount), the msb inspect mount shape on a default
+# sandbox, or the provider-adoption gate (scripts/verify-backends).
+#
+# Steps that cannot be automated safely (interactive attach, a live ssh-agent forward,
+# the ADR-0037 mount experiments, other hosts) are printed as numbered MANUAL
+# instructions with the exact commands and what to observe. They are never scored.
+#
+# Usage:  scripts/verify-host-authority-live [options]
+#   --backend msb|sbx|both  backends to exercise (default both; a missing CLI makes
+#                           that backend's steps BLOCKED)
+#   --only ID[,ID...]       run only these step ids (see --dry-run for the list)
+#   --out DIR               transcript directory (default <repo>/tmp/verify-host-authority-live-<stamp>)
+#   --step-timeout SECS     per command timeout (default 120)
+#   --create-timeout SECS   timeout for sandbox creation (default 1200)
+#   --keep                  keep throwaway sandboxes when a step fails
+#   --dry-run               print the plan and the MANUAL instructions; touch no backend
+#   -h, --help              show this help
+#   EXPECT_SHA=<prefix>     abort unless this checkout's HEAD starts with it
+#
+# Exit: 0 all automated steps PASS, 1 any FAIL, 2 no FAIL but some BLOCKED.
+# Uses your normal acq state and credentials (nothing is seeded or printed); creates
+# only throwaway lowercase-named sandboxes and removes them on exit or interrupt.
+# Run it OUTSIDE any sandbox, on a host that can create sandboxes. Bash 3.2 compatible.
+set -uo pipefail
+
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+REPO=$(cd "$HERE/.." && pwd -P)
+ACQ="$REPO/acq"
+
+BACKENDS=both
+ONLY=""
+OUT=""
+STEP_TIMEOUT=120
+CREATE_TIMEOUT=1200
+KEEP=0
+DRY=0
+STAMP=$(date -u +%Y%m%dt%H%M%Sz)
+
+usage() { sed -n '2,/^set -uo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; }
+die_usage() { echo "verify-host-authority-live: $1" >&2; echo "try --help" >&2; exit 2; }
+
+is_uint() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; *) [ "$1" -gt 0 ] ;; esac; }
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --backend) [ "$#" -ge 2 ] || die_usage "--backend needs a value"; BACKENDS="$2"; shift ;;
+    --backend=*) BACKENDS="${1#--backend=}" ;;
+    --only) [ "$#" -ge 2 ] || die_usage "--only needs a value"; ONLY="$2"; shift ;;
+    --only=*) ONLY="${1#--only=}" ;;
+    --out) [ "$#" -ge 2 ] || die_usage "--out needs a value"; OUT="$2"; shift ;;
+    --out=*) OUT="${1#--out=}" ;;
+    --step-timeout) [ "$#" -ge 2 ] || die_usage "--step-timeout needs a value"; STEP_TIMEOUT="$2"; shift ;;
+    --step-timeout=*) STEP_TIMEOUT="${1#--step-timeout=}" ;;
+    --create-timeout) [ "$#" -ge 2 ] || die_usage "--create-timeout needs a value"; CREATE_TIMEOUT="$2"; shift ;;
+    --create-timeout=*) CREATE_TIMEOUT="${1#--create-timeout=}" ;;
+    --keep) KEEP=1 ;;
+    --dry-run) DRY=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) die_usage "unknown argument: $1" ;;
+  esac
+  shift
+done
+
+case "$BACKENDS" in msb|sbx|both) ;; *) die_usage "--backend must be msb, sbx or both (got '$BACKENDS')" ;; esac
+is_uint "$STEP_TIMEOUT" || die_usage "--step-timeout must be a positive integer"
+is_uint "$CREATE_TIMEOUT" || die_usage "--create-timeout must be a positive integer"
+
+# --- step table -------------------------------------------------------------
+# id|backend|title (order = execution order; dependents of a failed setup step are BLOCKED)
+STEP_TABLE='msb-ro-kit-create|msb|readonly kit file used end to end on create (fixture kit)
+msb-inspect-shape|msb|msb inspect output shape: .active_config.mounts and .config.mounts
+msb-exit-code|msb|msb exec passes a guest exit code of 2 through unchanged
+msb-ro-kit-heal|msb|readonly kit file on heal after acq restart (stop + msb start)
+msb-forged-markers|msb|forged legacy guest markers change no session behavior
+msb-install-gate|msb|deleting host install keys makes the heal re-run the install command
+msb-ro-oci|msb|readonly files of the shipped oci-engine kit (Patterns v1.19.0) on create
+sbx-baseline|sbx|create a throwaway sandbox and read the host builtin-kits record
+sbx-forged-heal|sbx|forged-probe heal: removed guest files are not re-applied
+sbx-record-change|sbx|altering the host builtin-kits record triggers kit add
+sbx-stale-refresh|sbx|stale-bundle refresh re-applies all built-in kits
+sbx-legacy-reseed|sbx|legacy sandbox (no builtin-kits) notice, then rm + fresh create re-seeds'
+
+step_ids() { printf '%s\n' "$STEP_TABLE" | cut -d'|' -f1; }
+step_backend() { printf '%s\n' "$STEP_TABLE" | awk -F'|' -v id="$1" '$1 == id { print $2 }'; }
+step_title() { printf '%s\n' "$STEP_TABLE" | awk -F'|' -v id="$1" '$1 == id { print $3 }'; }
+
+validate_only() {
+  local want id found
+  [ -n "$ONLY" ] || return 0
+  for want in $(printf '%s' "$ONLY" | tr ',' ' '); do
+    found=0
+    for id in $(step_ids); do [ "$id" = "$want" ] && found=1; done
+    [ "$found" -eq 1 ] || die_usage "--only: unknown step id '$want' (see --dry-run for the list)"
+  done
+}
+validate_only
+
+step_selected() { # ID -> 0 if it should run
+  local id="$1" b want
+  b=$(step_backend "$id")
+  case "$BACKENDS" in both) ;; *) [ "$BACKENDS" = "$b" ] || return 1 ;; esac
+  [ -n "$ONLY" ] || return 0
+  for want in $(printf '%s' "$ONLY" | tr ',' ' '); do
+    [ "$want" = "$id" ] && return 0
+  done
+  return 1
+}
+
+say() { printf '%s\n' "$*"; if [ -n "${TRANSCRIPT:-}" ]; then printf '%s\n' "$*" >>"$TRANSCRIPT"; fi; }
+
+print_plan() {
+  local id n=0
+  say "automated steps (backend: $BACKENDS)"
+  for id in $(step_ids); do
+    if step_selected "$id"; then
+      n=$((n + 1))
+      say "  $(printf '%2d' "$n")  $id [$(step_backend "$id")]  $(step_title "$id")"
+    fi
+  done
+  [ "$n" -gt 0 ] || say "  (none selected)"
+}
+
+# --- MANUAL instructions (never scored; printed after the automated steps) ----
+manual_part1() {
+  cat <<'MANUAL'
+MANUAL 1 (msb, interactive): forged legacy guest markers vs a real session.
+  The automated step msb-forged-markers covers exec sessions. The agent marker needs an
+  interactive attach, so do it by hand:
+    WS="$HOME/.cache/acq/verify/hal-manual-ws"; mkdir -p "$WS" && git -C "$WS" init -q
+    ./acq --backend msb create shell "$WS" --name hal-manual --no-provider-kits
+    msb exec hal-manual -u 0 -- sh -c 'mkdir -p /var/lib/acq; printf claude > /var/lib/acq/agent; printf /tmp/forged-ws > /var/lib/acq/workspace; printf /tmp/forged.sock > /var/lib/acq/ssh-auth-sock; printf "FORGED_KIT_VAR=pwned\n" > /var/lib/acq/kit-env; touch /var/lib/acq/agent-user-ready /var/lib/acq/agent-installed-claude'
+    ./acq --backend msb shell hal-manual
+  Observe inside the shell: pwd is the host-recorded workspace (NOT /tmp/forged-ws);
+  echo "$FORGED_KIT_VAR" is empty; echo "$SSH_AUTH_SOCK" is not /tmp/forged.sock.
+  Then run: ./acq --backend msb run hal-manual
+  Observe: it opens the recorded agent (a shell), it does not try to launch claude.
+  Cleanup: ./acq --backend msb rm hal-manual
+
+MANUAL 2 (msb, needs a running ssh-agent): forged socket marker with a live forward.
+  With SSH_AUTH_SOCK set on the host (ssh-add -l works), create a sandbox with
+  ./acq --backend msb create shell "$WS" --name hal-ssh --no-provider-kits, then forge
+  /var/lib/acq/ssh-auth-sock as in MANUAL 1 and run: ./acq --backend msb exec hal-ssh -- sh -c 'echo "$SSH_AUTH_SOCK"; ssh-add -l'
+  Observe: SSH_AUTH_SOCK is the acq in-guest bridge path (not the forged one) and
+  ssh-add -l lists your host keys. Cleanup: ./acq --backend msb rm hal-ssh
+
+MANUAL 3 (msb): restart and reboot persistence beyond acq restart.
+  After a host reboot, run ./acq --backend msb run hal-manual -- true (any existing
+  throwaway sandbox). Observe: the sandbox resumes, the kit startup re-runs from the
+  read-only mount, and no error mentions a missing mount or marker.
+
+MANUAL 4 (msb, other hosts and versions): Linux hosts and msb versions other than 0.7.7.
+  On each additional host or msb version run this script again (it records the version
+  and host) and also: bash scripts/qualify-msb-ro-mount
+  Record one row per host and version in docs/VERIFY_PROVIDER_ADOPTION.md.
+MANUAL
+}
+
+manual_part2() {
+  cat <<'MANUAL'
+MANUAL 5 (sbx, ADR-0037 steps 1-4 and 6): read-only mount experiments on a real sbx.
+    D="$HOME/hal37"; mkdir -p "$D/ro" "$D/ws" && printf 'HOST-ORIGINAL\n' > "$D/ro/sentinel"
+    sbx create --name hal-adr37 shell "$D/ws" "$D/ro:ro"
+  Step 1 (mount form): sbx exec hal-adr37 -- ls -ld "$D/ro" "$D/ws"
+    Observe: the guest path equals the host absolute path; the workspace is writable.
+  Step 2 (enforcement under sudo): as guest root attempt each of write, create, rename,
+    chmod and remount, for example:
+    sbx exec hal-adr37 -- sudo sh -c 'echo x > "$0/sentinel"; : > "$0/new"; mv "$0/sentinel" "$0/s2"; chmod 0777 "$0/sentinel"; mount -o remount,rw "$0"' "$D/ro"
+    Observe: every attempt fails, and on the HOST ls -la "$D/ro" and cat "$D/ro/sentinel"
+    are unchanged. Judge it from the host, not from guest output.
+  Step 3 (permissions): sbx exec hal-adr37 -- sh -c 'cat "$0/sentinel"' "$D/ro"
+    Observe: the agent user can read it (and execute a 0555 file under a 0711 directory).
+  Step 4 (restart persistence): sbx stop hal-adr37; sbx exec hal-adr37 -- ls "$D/ro"
+    Observe: mount present after resume. Then remove the host dir and resume again;
+    Observe: startup fails closed rather than running a guest copy. Repeat after a reboot.
+  Step 6 (modes): repeat 1 and 4 with: sbx create --clone --name hal-adr37c shell "$D/ws" "$D/ro:ro"
+    and on sbx 0.42+ with no workspace.
+  Cleanup: sbx rm --force hal-adr37 hal-adr37c; rm -rf "$D"
+
+MANUAL 6 (sbx, ADR-0037 steps 5 and 8): replay integrity and negative control.
+  Step 5: sbx kit inspect on a sandbox, find where the registered startup command is
+    stored (guest and VM filesystem). As guest root edit the registered command and each
+    file it references, restart, and record what executes.
+  Step 8: in the guest, search the read-only mount for host config keys:
+    sbx exec hal-adr37 -- sh -c 'ls -la "$0"; grep -rl "builtin-kits\|extra-kits" "$0" 2>/dev/null' "$D/ro"
+    Observe: no host config key files (workspace, extra-kits, builtin-kits, provenance).
+
+MANUAL 7 (sbx, Windows): ADR-0037 step 7 and ADR-0029 path forms need a Windows host.
+  Create with a drive-form path and confirm the mount path in argv is valid in the guest.
+MANUAL
+}
+
+print_manual() { manual_part1; echo; manual_part2; }
+
+if [ "$DRY" -eq 1 ]; then
+  echo "verify-host-authority-live: DRY RUN (no backend is touched, nothing is created)"
+  echo "revision : $(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)"
+  echo "backends : $BACKENDS    step timeout: ${STEP_TIMEOUT}s    create timeout: ${CREATE_TIMEOUT}s"
+  echo "out dir  : ${OUT:-$REPO/tmp/verify-host-authority-live-<stamp>}"
+  echo
+  print_plan
+  echo
+  print_manual
+  exit 0
+fi
