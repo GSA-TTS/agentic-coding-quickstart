@@ -307,3 +307,61 @@ CLEAN
 }
 trap 'cleanup' EXIT
 trap 'echo; echo "interrupted; removing throwaway sandboxes"; cleanup; exit 130' INT TERM
+
+# --- recording ---------------------------------------------------------------
+ANY_BLOCKED=0
+MSB_VER=""; SBX_VER=""
+n_pass=0; n_fail=0; n_blocked=0
+
+record() { # ID RESULT DETAIL
+  local id="$1" res="$2" detail="$3" b ver
+  b=$(step_backend "$id")
+  case "$b" in msb) ver="$MSB_VER" ;; sbx) ver="$SBX_VER" ;; *) ver="" ;; esac
+  detail=$(printf '%s' "$detail" | tr '\t\r\n' '   ')
+  case "$res" in
+    PASS) n_pass=$((n_pass + 1)) ;;
+    FAIL) n_fail=$((n_fail + 1)); ANY_FAIL=1 ;;
+    *) n_blocked=$((n_blocked + 1)); ANY_BLOCKED=1 ;;
+  esac
+  say ""
+  say "==> $res  $id: $detail"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$b" "${ver:-unknown}" "$REVISION$DIRTY" "$RUN_DATE" "$res" "$detail" "$TRANSCRIPT" >>"$RESULTS"
+}
+
+acq_var() { # NAME -> value of an acq variable after sourcing acq
+  # shellcheck disable=SC1090
+  ( ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO" . "$ACQ" >/dev/null 2>&1; eval "printf '%s' \"\${$1:-}\"" ) 2>/dev/null
+}
+
+# ver_ge A B : dotted numeric A >= B
+ver_ge() {
+  awk -v a="$1" -v b="$2" 'BEGIN {
+    na = split(a, x, "."); nb = split(b, y, ".");
+    for (i = 1; i <= 3; i++) { xv = (i <= na) ? x[i] + 0 : 0; yv = (i <= nb) ? y[i] + 0 : 0;
+      if (xv > yv) exit 0; if (xv < yv) exit 1 }
+    exit 0 }'
+}
+
+mk_workspace() { # TAG -> path of a fresh git workspace (canonical, under $HOME)
+  local d="$WS_ROOT/$1"
+  mkdir -p "$d" || return 1
+  ( cd "$d" && git init -q && git config user.email hal@example.invalid \
+      && git config user.name "acq verify" && echo hi > README.md ) >/dev/null 2>&1 || true
+  ( cd "$d" && pwd -P )
+}
+
+# --- msb fixture kit: one readonly startup file + one install-phase file -------
+FIXTURE="$OUT/fixture-ro-kit"
+write_fixture() {
+  mkdir -p "$FIXTURE/files" || return 1
+  printf '#!/bin/sh\nprintf "%%s\\n" "$0" >> /home/agent/.hal-ro-proof\n' >"$FIXTURE/files/ro-proof.sh"
+  printf '#!/bin/sh\nprintf "run\\n" >> /home/agent/.hal-install-proof\n' >"$FIXTURE/files/install-proof.sh"
+  {
+    printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: hal-ro-fixture\n'
+    printf 'displayName: HAL RO Fixture\ndescription: readonly startup file plus install file\n'
+    printf 'files:\n  - path: /home/agent/hal/ro-proof.sh\n    mode: "0755"\n    source: files/ro-proof.sh\n    readonly: true\n'
+    printf '  - path: /home/agent/hal/install-proof.sh\n    mode: "0755"\n    source: files/install-proof.sh\n'
+    printf 'commands:\n  - phase: install\n    user: "0"\n    command:\n      - sh\n      - /home/agent/hal/install-proof.sh\n'
+    printf '  - phase: startup\n    user: "0"\n    command:\n      - sh\n      - /home/agent/hal/ro-proof.sh\n'
+  } >"$FIXTURE/spec.yaml"
+}
