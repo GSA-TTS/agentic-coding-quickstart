@@ -54,37 +54,26 @@ def _invoke(capsys, *argv):
 # ---------------------------------------------------------------------------
 
 def test_provider_credential_value_never_in_argv_or_output(monkeypatch, tmp_path, capsys):
-    # The hard guarantee on the backend that stores provider credentials (sbx,
-    # via `secret set-custom`): a credential VALUE appears only as the backend
-    # child's stdin, never argv/output. msb has no equivalent subcommand and
-    # fails closed with unsupported_capability (see test_provider_credential_msb_unsupported).
-    from acq_py import sbx
-
+    # Neither backend stores a provider credential non-interactively (sbx
+    # `secret set-custom` has no stdin path), so `provider-credential set` fails
+    # closed with unsupported_capability and the value is never read into argv or
+    # output. The hard "value on stdin only" guarantee is asserted for the
+    # working built-in `secret set` path in test_secret.py.
+    _env(monkeypatch, tmp_path)
     monkeypatch.setenv("ACQ_SBX_BIN", "__stub__")
     monkeypatch.setenv("ACQ_SBX_VERSION", "0.39.0")
     monkeypatch.setenv("ACQ_SBX_INSTALLED", "1")
     monkeypatch.setenv("ACQ_MSB_INSTALLED", "0")
-    monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("SBX_HOME", str(tmp_path / "sbx-home"))
-    captured: dict = {}
-    real_run = sbx._run
-
-    def spy(argv, *, timeout=None, input_text=None):
-        captured["argv"] = list(argv)
-        captured["input_text"] = input_text
-        return real_run(argv, timeout=timeout, input_text=input_text)
-
-    monkeypatch.setattr(sbx, "_run", spy)
     monkeypatch.setattr(sys, "stdin", io.StringIO("TOP-SECRET-PROVIDER-KEY\n"))
 
-    rc = cli.main(
-        ["--backend", "sbx", "provider-credential", "set", "usai", "USAI_API_KEY", "--host", "api.gsa.usai.gov", "--json"]
+    rc, doc = _invoke(
+        capsys, "--backend", "sbx", "provider-credential", "set", "usai", "USAI_API_KEY", "--host", "api.gsa.usai.gov", "--json"
     )
     out, err = capsys.readouterr()
 
-    assert rc == 0
-    assert captured["input_text"] == "TOP-SECRET-PROVIDER-KEY"
-    assert "TOP-SECRET-PROVIDER-KEY" not in captured["argv"]
+    assert rc == 1
+    assert doc["error"]["code"] == "unsupported_capability"
     assert "TOP-SECRET-PROVIDER-KEY" not in out
     assert "TOP-SECRET-PROVIDER-KEY" not in err
 
@@ -106,25 +95,11 @@ def test_provider_credential_msb_unsupported(monkeypatch, tmp_path, capsys):
 
 
 def test_provider_credential_set_ls_reports_binding_only(monkeypatch, tmp_path, capsys):
+    # `provider-credential ls` is host-side (no backend value store): seed the
+    # binding directly and assert it reports provider/key_env/hosts/source_layer,
+    # never a value.
     _env(monkeypatch, tmp_path)
-    monkeypatch.setenv("ACQ_SBX_BIN", "__stub__")
-    monkeypatch.setenv("ACQ_SBX_VERSION", "0.39.0")
-    monkeypatch.setenv("ACQ_SBX_INSTALLED", "1")
-    monkeypatch.setenv("ACQ_MSB_INSTALLED", "0")
-    monkeypatch.setenv("SBX_HOME", str(tmp_path / "sbx-home"))
-    monkeypatch.setattr(sys, "stdin", io.StringIO("value-1\n"))
-
-    rc, doc = _invoke(
-        capsys, "--backend", "sbx", "provider-credential", "set", "usai", "USAI_API_KEY", "--host", "api.gsa.usai.gov", "--json"
-    )
-    assert rc == 0
-    assert doc["data"]["provider"] == "usai"
-    assert doc["data"]["key_env"] == "USAI_API_KEY"
-    assert doc["data"]["hosts"] == ["api.gsa.usai.gov"]
-    assert doc["data"]["source_layer"] == "provider-credentials"
-    # The value itself is never a field.
-    assert "value" not in doc["data"]
-    assert "value-1" not in json.dumps(doc)
+    provider_creds.set_binding("usai", "USAI_API_KEY", ["api.gsa.usai.gov"])
 
     rc, doc = _invoke(capsys, "provider-credential", "ls", "--json")
     assert rc == 0
@@ -168,26 +143,6 @@ def test_provider_credential_rm_newer_schema_fails_closed(monkeypatch, tmp_path,
     )
 
     rc, doc = _invoke(capsys, "provider-credential", "rm", "usai", "--json")
-    assert rc == 1
-    assert doc["error"]["code"] == "state_schema_unsupported"
-
-
-def test_provider_credential_set_newer_schema_fails_closed(monkeypatch, tmp_path, capsys):
-    _env(monkeypatch, tmp_path)
-    monkeypatch.setenv("ACQ_SBX_BIN", "__stub__")
-    monkeypatch.setenv("ACQ_SBX_VERSION", "0.39.0")
-    monkeypatch.setenv("ACQ_SBX_INSTALLED", "1")
-    monkeypatch.setenv("ACQ_MSB_INSTALLED", "0")
-    monkeypatch.setenv("SBX_HOME", str(tmp_path / "sbx-home"))
-    _write_binding_record(
-        tmp_path, "usai",
-        {"schema": 99, "provider": "usai", "key_env": "USAI_API_KEY", "hosts": ["api.gsa.usai.gov"]},
-    )
-    monkeypatch.setattr(sys, "stdin", io.StringIO("value-1\n"))
-
-    rc, doc = _invoke(
-        capsys, "--backend", "sbx", "provider-credential", "set", "usai", "USAI_API_KEY", "--host", "api.gsa.usai.gov", "--json"
-    )
     assert rc == 1
     assert doc["error"]["code"] == "state_schema_unsupported"
 
@@ -275,8 +230,9 @@ def test_provider_credential_set_missing_host(monkeypatch, tmp_path, capsys):
 
 
 def test_provider_credential_sbx(monkeypatch, tmp_path, capsys):
-    # provider-credential set is a common capability: it runs against the sbx
-    # adapter too, reporting the binding only and never the value (ADR-0040m).
+    # sbx `secret set-custom` has no stdin path, so `provider-credential set`
+    # fails closed with unsupported_capability (value never read, never in
+    # argv/output), mirroring the Bash reference's refusal to pipe set-custom.
     _env(monkeypatch, tmp_path)
     monkeypatch.setenv("ACQ_SBX_BIN", "__stub__")
     monkeypatch.setenv("ACQ_SBX_VERSION", "0.39.0")
@@ -288,11 +244,8 @@ def test_provider_credential_sbx(monkeypatch, tmp_path, capsys):
     rc, doc = _invoke(
         capsys, "--backend", "sbx", "provider-credential", "set", "usai", "USAI_API_KEY", "--host", "api.gsa.usai.gov", "--json"
     )
-    assert rc == 0
-    assert doc["data"]["provider"] == "usai"
-    assert doc["data"]["key_env"] == "USAI_API_KEY"
-    assert doc["data"]["hosts"] == ["api.gsa.usai.gov"]
-    assert "value" not in doc["data"]
+    assert rc == 1
+    assert doc["error"]["code"] == "unsupported_capability"
     assert "value-1" not in json.dumps(doc)
 
 

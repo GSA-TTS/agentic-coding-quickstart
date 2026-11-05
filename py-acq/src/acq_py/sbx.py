@@ -149,11 +149,27 @@ def list_names() -> list[str] | None:
 
 
 def running_names() -> list[str] | None:
-    """Return running sandbox names, or ``None`` if ``sbx ls --running -q`` failed."""
-    proc = _run(["ls", "--running", "-q"])
+    """Return running sandbox names, or ``None`` if ``sbx ls --json`` failed.
+
+    The real ``sbx ls`` has no ``--running`` flag (only ``--format``/``--json``/
+    ``-q``), so running state is derived from ``sbx ls --json``, whose entries
+    carry a ``status`` field. A wrong-shape or unparseable listing is ``None``
+    (the caller treats it as "cannot determine", never as "all stopped").
+    """
+    proc = _run(["ls", "--json"])
     if proc.returncode != 0:
         return None
-    return [line for line in proc.stdout.splitlines() if line]
+    try:
+        doc = json.loads(proc.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(doc, list):
+        return None
+    return [
+        entry["name"]
+        for entry in doc
+        if isinstance(entry, dict) and entry.get("status") == "running" and isinstance(entry.get("name"), str)
+    ]
 
 
 def exists(name: str) -> bool:
@@ -338,11 +354,15 @@ def _secret_scope_argv(scope: str) -> list[str]:
 
 
 def _secret_list_docs() -> list[dict]:
-    """Run ``sbx secret ls --json`` and return the parsed entry list.
+    """Run ``sbx secret ls --json`` and flatten its object envelope.
 
-    An inspect that *fails* or returns unparseable/wrong-shape output raises
-    :class:`SbxError` with ``secret_unreadable`` (ADR-0038m §48 drops
-    "inspection-failure-as-empty"). The listing never carries a value.
+    The real ``sbx secret ls --json`` returns an OBJECT, not a list:
+    ``{secrets: [], custom_secrets: [], shadowed_services: [], env_only_count: 0}``.
+    Each ``secrets``/``custom_secrets`` entry is ``{scope, type, name, secret:
+    "(stored)"}`` — the value is never present. This flattens those entries into
+    ``{scope, service, value_state}``. An inspect that *fails* or returns
+    unparseable/wrong-shape output raises :class:`SbxError` with
+    ``secret_unreadable`` (ADR-0038m §48 drops "inspection-failure-as-empty").
     """
     proc = _run(["secret", "ls", "--json"])
     if proc.returncode != 0:
@@ -359,27 +379,47 @@ def _secret_list_docs() -> list[dict]:
             "could not parse the secret store listing",
             "the backend returned an unreadable secret list; check backend logs and retry",
         )
-    if not isinstance(doc, list):
+    if not isinstance(doc, dict):
         raise SbxError(
             errors.SECRET_UNREADABLE,
             "could not parse the secret store listing",
             "the backend returned an unexpected secret-list shape; check backend logs and retry",
         )
     out: list[dict] = []
-    for entry in doc:
-        if not isinstance(entry, dict) or "scope" not in entry or "service" not in entry:
+    for key in ("secrets", "custom_secrets"):
+        entries = doc.get(key)
+        if entries is None:
+            # `custom_secrets` may be absent on older sbx; `secrets` is always
+            # present. A missing `secrets` key is a wrong shape, not an empty list.
+            if key == "secrets":
+                raise SbxError(
+                    errors.SECRET_UNREADABLE,
+                    "could not parse the secret store listing",
+                    "the backend returned an unexpected secret-list shape; check backend logs and retry",
+                )
+            continue
+        if not isinstance(entries, list):
             raise SbxError(
                 errors.SECRET_UNREADABLE,
                 "could not parse the secret store listing",
-                "the backend returned an unexpected secret-list entry; check backend logs and retry",
+                "the backend returned an unexpected secret-list shape; check backend logs and retry",
             )
-        out.append(
-            {
-                "scope": entry["scope"],
-                "service": entry["service"],
-                "value_state": entry.get("value_state", "set"),
-            }
-        )
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise SbxError(
+                    errors.SECRET_UNREADABLE,
+                    "could not parse the secret store listing",
+                    "the backend returned an unexpected secret-list entry; check backend logs and retry",
+                )
+            scope = entry.get("scope")
+            service = entry.get("name") or entry.get("service") or entry.get("env")
+            if scope is None or service is None:
+                raise SbxError(
+                    errors.SECRET_UNREADABLE,
+                    "could not parse the secret store listing",
+                    "the backend returned an unexpected secret-list entry; check backend logs and retry",
+                )
+            out.append({"scope": scope, "service": service, "value_state": "set"})
     return out
 
 
@@ -388,8 +428,17 @@ def secret_set(scope: str, service: str, value: str, *, timeout: float | None = 
 
     Reconciles with the real sbx ``secret set SERVICE [--sandbox NAME]``: the
     service is the sole positional, the value is read from stdin, and the global
-    scope is the default (no flag).
+    scope is the default (no flag). The real sbx prompts "Overwrite? (y/N)" when
+    the secret already exists (it has no stdin ``--force``), which would consume
+    the piped value as the answer — so presence is pre-checked and an existing
+    secret fails closed (never piped into the prompt).
     """
+    if key_present(scope, service):
+        raise SbxError(
+            errors.FAILURE,
+            f"secret '{service}' already exists in scope '{scope}'",
+            f"remove it first (e.g. 'acq secret rm -g {service}'), then re-set",
+        )
     proc = _run(["secret", "set", *_secret_scope_argv(scope), service], input_text=value, timeout=timeout)
     if proc.returncode != 0:
         raise SbxError(
@@ -419,6 +468,12 @@ def secret_ls(scope: str | None = None) -> list[dict]:
 
     ``scope`` is an optional filter (``"global"`` or a sandbox name); ``None``
     lists every scope. Never returns a value.
+
+    NOTE: the scope filter is applied CLIENT-SIDE — the adapter lists all scopes
+    once and filters, rather than passing ``-g``/``--sandbox`` to ``sbx secret
+    ls``. This keeps ``key_present`` (which also reads the full list) and
+    ``secret_ls`` on the same single listing, and avoids the set/rm-vs-ls scope
+    asymmetry (set/rm use a global default with no flag; ``ls`` has ``-g``).
     """
     docs = _secret_list_docs()
     if scope is None:
@@ -464,34 +519,37 @@ def secret_rm_raw(placeholder: str) -> None:
 # ---------------------------------------------------------------------------
 
 def provider_credential_set(provider: str, key_env: str, hosts: list[str], value: str) -> None:
-    """Store a provider credential value, pinned to ``key_env`` + ``hosts``.
+    """Provider-credential binding fails closed on sbx (no compliant value path).
 
-    Reconciles with the real sbx ``secret set-custom --host H --env KEY_ENV``
-    (the custom-endpoint placeholder mechanism, ADR-0012): the value travels on
-    stdin only and is never echoed. ``key_env`` and ``hosts`` are non-secret
-    identifiers carried on argv. NOTE: the real sbx ``set-custom`` reads the value
-    via ``--value``/interactive/``--ref`` rather than stdin — a Tier-3 live gap;
-    the offline vectors drive the deterministic stub, which reads stdin to keep
-    the value off argv (ADR-0038m §7).
+    The real sbx ``secret set-custom`` reads the value only via ``--value``/
+    ``--token``/``--ref``/``--command`` (or an interactive prompt) — there is NO
+    stdin path. Piping the value on stdin would either hang on the prompt or
+    require placing it on argv (which violates ADR-0038m §7 "never in argv"). The
+    Bash reference refuses to feed a piped ``set-custom`` for exactly this reason;
+    mirror it and fail closed with ``unsupported_capability`` rather than
+    half-succeeding or leaking the value.
     """
-    argv = ["secret", "set-custom", "--env", key_env]
-    for host in hosts:
-        argv += ["--host", host]
-    proc = _run(argv, input_text=value)
-    if proc.returncode != 0:
-        raise SbxError(
-            errors.FAILURE,
-            f"could not store the credential for provider '{provider}'",
-            "check backend logs and retry",
-        )
+    raise SbxError(
+        errors.UNSUPPORTED,
+        f"provider-credential storage is not supported on the sbx backend for provider '{provider}'",
+        "sbx secret set-custom has no non-interactive stdin path; provider credentials land with a later slice",
+    )
 
 
 def github_scope(sandbox: str, value: str) -> None:
     """Store a sandbox-scoped GitHub token (ADR-0013); value travels on stdin only.
 
     Reconciles with the real sbx ``secret set github --sandbox NAME`` (github is a
-    built-in sbx service); the token is bound to ``sandbox`` (never global).
+    built-in sbx service); the token is bound to ``sandbox`` (never global). The
+    same "Overwrite?" pre-check as :func:`secret_set` applies (the value must never
+    be consumed by the prompt).
     """
+    if key_present(sandbox, "github"):
+        raise SbxError(
+            errors.FAILURE,
+            f"GitHub token already exists for sandbox '{sandbox}'",
+            f"remove it first (acq secret rm {sandbox} github), then re-scope",
+        )
     proc = _run(["secret", "set", "--sandbox", sandbox, "github"], input_text=value)
     if proc.returncode != 0:
         raise SbxError(

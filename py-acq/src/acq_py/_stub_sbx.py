@@ -332,9 +332,19 @@ def _secret_main(args: list[str]) -> int:
             if scope is not None and sc != scope:
                 continue
             for svc, state in services.items():
-                entries.append({"scope": sc, "service": svc, "value_state": state})
-        entries.sort(key=lambda e: (e["scope"], e["service"]))
-        print(json.dumps(entries))
+                # Mirrors the real `sbx secret ls --json` entry: {scope, type,
+                # name, secret:"(stored)"} — the value is never emitted.
+                entries.append({"scope": sc, "type": "service", "name": svc, "secret": "(stored)"})
+        entries.sort(key=lambda e: (e["scope"], e["name"]))
+        # The real `sbx secret ls --json` is an OBJECT envelope, not a bare list.
+        print(json.dumps(
+            {
+                "secrets": entries,
+                "custom_secrets": [],
+                "shadowed_services": [],
+                "env_only_count": 0,
+            }
+        ))
         return 0
 
     print(f"sbx: unrecognized secret subcommand '{sub}'", file=sys.stderr)
@@ -401,10 +411,14 @@ def main(argv: list[str]) -> int:
     catalog = _load()
 
     if cmd in ("ls", "list"):
-        running_only = "--running" in args
+        # Real `sbx ls` has only --format/--json/-q (NO --running); --json emits a
+        # list of {name, status} objects, and -q/table emit names one per line.
+        if "--json" in args or "--format" in args:
+            entries = [{"name": name, "status": state} for name, state in catalog.items()]
+            entries.sort(key=lambda e: e["name"])
+            print(json.dumps(entries))
+            return 0
         for name, state in catalog.items():
-            if running_only and state != "running":
-                continue
             print(name)
         return 0
 
