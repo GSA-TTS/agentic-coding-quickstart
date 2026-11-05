@@ -40,7 +40,7 @@ supersedes: []
 > `docker.io/docker/sandbox-templates:shell-docker` only if the derived image is
 > not found. This shortens startup for agents (e.g. `opencode`) whose template
 > already bakes in the agent binary. See ADR-0022 and `docs/BACKEND_GUIDE.md`.
-
+>
 > **Historical note (2026-11-05):** Where the "Agent install + base-image
 > contract" section below calls the msb agent-user, passwordless-sudo, and
 > proxy-preserve setup "marker-gated", that is no longer current. That setup is
