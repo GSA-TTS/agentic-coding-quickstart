@@ -365,3 +365,46 @@ write_fixture() {
     printf '  - phase: startup\n    user: "0"\n    command:\n      - sh\n      - /home/agent/hal/ro-proof.sh\n'
   } >"$FIXTURE/spec.yaml"
 }
+
+# --- shared helpers -----------------------------------------------------------
+create_sandbox() { # BACKEND NAME WS [extra create args...]
+  local b="$1" n="$2" ws="$3"; shift 3
+  track_sandbox "$b" "$n"
+  run_cmd "$CREATE_TIMEOUT" "$ACQ" --backend "$b" create shell "$ws" --name "$n" --no-provider-kits "$@"
+}
+
+msb_inspect_check() { # NAME -> 0 if msb reports the read-only host-config Bind
+  local n="$1" hc js
+  hc=$(hc_dir msb "$n"); js="$OUT/inspect-$n.json"
+  "${TO[@]}" "$STEP_TIMEOUT" msb inspect "$n" --format json </dev/null >"$js" 2>>"$TRANSCRIPT" || return 1
+  python3 - "$js" "$hc" <<'PY'
+import json, os, sys
+d = json.load(open(sys.argv[1]))
+mounts = (d.get("active_config") or {}).get("mounts") or []
+hit = [m for m in mounts if isinstance(m, dict) and m.get("guest") == "/var/lib/acq/host"]
+ok = (len(hit) == 1 and hit[0].get("type") == "Bind"
+      and (hit[0].get("options") or {}).get("readonly") is True
+      and os.path.realpath(hit[0].get("host", "")) == os.path.realpath(sys.argv[2]))
+sys.exit(0 if ok else 1)
+PY
+}
+
+guest_root() { # NAME CMD... (msb): run as root in the guest, output live
+  local n="$1"; shift
+  run_cmd "$STEP_TIMEOUT" msb exec "$n" -u 0 -- "$@"
+}
+
+MSB_READY=0; MSB_A=""; MSB_A_OK=0
+msb_preflight() {
+  if ! command -v msb >/dev/null 2>&1; then say "msb: not on PATH"; return 0; fi
+  MSB_VER=$(msb --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?([+-][^[:space:]]*)?' | head -n1)
+  [ -n "$MSB_VER" ] || MSB_VER="unparsed"
+  if ! command -v python3 >/dev/null 2>&1; then say "msb: python3 missing (acq's read-only gate needs it)"; return 0; fi
+  if ! msb doctor >/dev/null 2>&1; then say "msb: 'msb doctor' reports the host is not ready"; return 0; fi
+  MSB_READY=1
+}
+
+block_if_not_ready() { # ID BACKEND_READY_VAR REASON
+  [ "$2" -eq 1 ] || { record "$1" BLOCKED "$3"; return 1; }
+  return 0
+}
