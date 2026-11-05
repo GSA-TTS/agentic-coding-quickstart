@@ -202,8 +202,8 @@ network), built on [bats-core](https://github.com/bats-core/bats-core) (ADR-0025
   ```
 
   To run only part of the suite, set `ACQ_BATS_SHARD=I/N`, e.g. `ACQ_BATS_SHARD=2/3
-  ./scripts/test-acq-bats`. The bash 3.2 CI job uses this to split the suite across
-  a matrix of three shard legs (ADR-0039).
+  ./scripts/test-acq-bats`. This lets a CI matrix split the work across jobs; the
+  bash 3.2 CI job does not use it yet and still runs the whole suite.
   `scripts/bats-shard` derives each shard from the `.bats` files on disk (balanced
   by `@test` count; no checked-in table), so a new test file joins a shard
   automatically, and an invalid spec or empty shard fails closed with exit 2.
@@ -266,7 +266,7 @@ network), built on [bats-core](https://github.com/bats-core/bats-core) (ADR-0025
   > it as `PATH="/usr/bin:$PATH" ./scripts/test-acq-bats` and compare.
 
 **Check Bash 3.2 compatibility before pushing.** macOS ships Bash 3.2.57 and the CI
-gate runs the suite under it, sharded across a matrix (ADR-0039). Get the same
+gate runs the suite under it (9 to 16 minutes per round trip). Get the same
 feedback locally with `scripts/test-acq-bash32 --syntax` (seconds) or
 `scripts/test-acq-bash32 [test/bats/file.bats ...]` (focused or full suite under a
 verified 3.2.57; set `ACQ_BASH32=/path/to/bash` or run `--install`). It checks the

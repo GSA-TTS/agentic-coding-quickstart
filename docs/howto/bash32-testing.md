@@ -6,7 +6,7 @@ tier: 2
 last_updated: "2026-10-29"
 audience: "developers"
 keywords: ["bash 3.2", "macos", "bats", "test-acq-bash32", "compatibility", "sandbox"]
-related_files: ["scripts/test-acq-bash32", "scripts/scan-heredoc-subst.py", "scripts/fetch-bash32-oci.py", "test/bats/152-bash32-runner.bats", "test/bats/159-bash32-oci-and-scanner.bats", "docs/adr/0038-local-bash32-test-runner.md", "docs/adr/0039-bash32-ci-shard-matrix-and-interpreter-handoff.md", "CONTRIBUTING.md"]
+related_files: ["scripts/test-acq-bash32", "scripts/scan-heredoc-subst.py", "scripts/fetch-bash32-oci.py", "test/bats/152-bash32-runner.bats", "test/bats/159-bash32-oci-and-scanner.bats", "docs/adr/0038-local-bash32-test-runner.md", "CONTRIBUTING.md"]
 load_priority: "on-demand"
 review_cycle: "quarterly"
 ---
@@ -15,11 +15,8 @@ review_cycle: "quarterly"
 
 macOS ships GNU Bash 3.2.57, so `acq` and its adapters must run on it. Newer bash
 accepts code that 3.2 rejects, so the problem normally shows up only in the CI
-gate ("acq offline suite under bash 3.2"). CI builds the interpreter from source once
-and runs the suite as a matrix of three shards
-([ADR-0039](../adr/0039-bash32-ci-shard-matrix-and-interpreter-handoff.md)).
-`scripts/test-acq-bash32` gives the same interpreter locally. To reproduce one CI leg,
-run `ACQ_BATS_SHARD=<i>/3 scripts/test-acq-bash32`.
+gate ("acq offline suite under bash 3.2", built from source, 9 to 16 minutes per
+round trip). `scripts/test-acq-bash32` gives the same interpreter locally.
 
 ## Commands
 

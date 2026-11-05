@@ -3273,7 +3273,7 @@ for, which is not proof that the sandbox owns that host port.
 
 - The required check `acq offline suite under bash 3.2` is red, and the run has a
   `Prepare bash 3.2.57 interpreter` job and matrix legs named
-  `acq offline suite under bash 3.2 (build N/3)`.
+  `acq offline suite under bash 3.2 (build N/M)`.
 - One of:
   - a single leg fails with test failures: the failing `not ok` line is in that
     leg's log, and its job summary has a `bats timing (shard: NofM)` table;

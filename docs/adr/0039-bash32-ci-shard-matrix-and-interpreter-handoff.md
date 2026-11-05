@@ -20,7 +20,7 @@ related_files: [".github/workflows/bash32-compat.yml", "scripts/bats-shard", "sc
 ## Context and Problem Statement
 
 The required check `acq offline suite under bash 3.2` runs the whole offline suite
-(about 1,100 tests in 66 files, and growing) under a bash 3.2.57 built from source,
+(about 1,160 tests in 69 files at the time of writing, and growing) under a bash 3.2.57 built from source,
 in one job. The same code took 9 to 18 minutes depending on runner speed, and a
 merge-queue run was cancelled at the old 15-minute limit with no failing test. The
 suite already runs files in parallel with `xargs -P` (4 workers in the logged
@@ -87,7 +87,9 @@ Chosen: **option 3**, together with a 3-leg matrix.
   relevant diff, prepare and the matrix job must both be `success` (the matrix job is
   `success` only if every leg is); for an irrelevant diff, both must be `skipped`;
   any other combination, including a prepare failure that skips the matrix, fails
-  the gate. The shell logic was exercised against all 256 result combinations.
+  the gate. The shell logic was exercised against every combination of the four job results of
+  `changes`, `prepare-bash32` and the matrix job with the relevance output, and of the
+  three leg results behind the matrix result (4,096 cases).
 
 Why not the others:
 
