@@ -7,6 +7,25 @@
 
 load 'helper'
 
+# `--which` prints "<path> (<version>)"; drop only that trailing version suffix so a
+# path containing spaces survives intact.
+which_path() { printf '%s' "${1% (3.2.57)}"; }
+
+resolve_real32() {
+  local out
+  out="$("$REPO_ROOT/scripts/test-acq-bash32" --which 2>/dev/null)" || return 1
+  which_path "$out"
+}
+
+# Resolve ONCE, before any test runs: acq_setup_stubs repoints HOME (and the default
+# cache prefix under it), so resolving later would miss an interpreter installed in
+# the real ~/.cache and wrongly skip the genuine-parser tests.
+setup_file() {
+  REAL32_RESOLVED="$(resolve_real32)" || REAL32_RESOLVED=""
+  export REAL32_RESOLVED
+  export PRISTINE_PATH="$PATH"
+}
+
 setup() {
   acq_setup_stubs
   RUNNER="$REPO_ROOT/scripts/test-acq-bash32"
@@ -23,32 +42,21 @@ setup() {
     chmod +x "$p"
     printf '%s' "$p"
   }
-  # Remember the caller's real-interpreter settings, then point resolution at an
-  # empty prefix so a developer's install cannot leak into resolution tests.
-  OUTER_BASH32="${ACQ_BASH32:-}"
-  OUTER_PREFIX="${ACQ_BASH32_PREFIX:-}"
+  # Point resolution at an empty prefix so a developer's install cannot leak into
+  # the resolution tests; need_real_bash32 uses the value resolved in setup_file.
   export ACQ_BASH32_PREFIX="$STUBDIR/no-prefix"
   unset ACQ_BASH32
 }
 
 teardown() { acq_teardown_stubs; }
 
-# `--which` prints "<path> (<version>)"; drop only that trailing version suffix so a
-# path containing spaces survives intact.
-which_path() { printf '%s' "${1% (3.2.57)}"; }
-
-# Success only when the caller's environment resolves a genuine 3.2.57; used to
-# gate the tests that depend on real bash 3.2 parsing.
+# Success only when the interpreter resolved in setup_file is a genuine 3.2.57; used
+# to gate the tests that depend on real bash 3.2 parsing.
 need_real_bash32() {
-  local real
-  real="$(
-    unset ACQ_BASH32 ACQ_BASH32_PREFIX
-    [ -z "$OUTER_BASH32" ] || export ACQ_BASH32="$OUTER_BASH32"
-    [ -z "$OUTER_PREFIX" ] || export ACQ_BASH32_PREFIX="$OUTER_PREFIX"
-    "$RUNNER" --which 2>/dev/null
-  )" || skip "no real GNU Bash 3.2.57 available (set ACQ_BASH32=/path/to/bash or run scripts/test-acq-bash32 --install)"
-  REAL32="$(which_path "$real")"
-  [ -x "$REAL32" ] || fail "resolved interpreter path is not executable: '$REAL32' (from '$real')"
+  [ -n "${REAL32_RESOLVED:-}" ] ||
+    skip "no real GNU Bash 3.2.57 available (set ACQ_BASH32=/path/to/bash or run scripts/test-acq-bash32 --install)"
+  REAL32="$REAL32_RESOLVED"
+  [ -x "$REAL32" ] || fail "resolved interpreter path is not executable: '$REAL32'"
 }
 
 @test "bash32: rejects an ACQ_BASH32 interpreter with the wrong version (fail closed)" {
@@ -100,17 +108,36 @@ need_real_bash32() {
   [ -x "$(which_path "$out")" ]
 }
 
-@test "bash32: a real bash 3.2 reached through a path with a space is not truncated by need_real_bash32" {
+@test "bash32: a real bash 3.2 reached through a path with a space is not truncated by --which" {
   need_real_bash32
-  local link="$STUBDIR/real space dir/bash"
+  local link="$STUBDIR/real space dir/bash" out
   mkdir -p "$(dirname "$link")"
   ln -s "$REAL32" "$link"
-  OUTER_BASH32="$link"
-  need_real_bash32
-  [ "$REAL32" = "$link" ]
-  run "$REAL32" -c 'printf %s "$BASH_VERSION"'
+  out="$(env ACQ_BASH32="$link" "$RUNNER" --which)"
+  [ "$(which_path "$out")" = "$link" ]
+  run "$link" -c 'printf %s "$BASH_VERSION"'
   assert_success
   assert_output --partial "3.2.57"
+}
+
+@test "bash32: the real interpreter is resolved before the stubs repoint HOME (default-cache install is found)" {
+  local realhome="$STUBDIR/realhome" cache
+  cache="$realhome/.cache/acq/bash-3.2.57/bin"
+  mkdir -p "$cache"
+  {
+    printf '#!/bin/sh\n'
+    printf 'if [ "$1" = -c ]; then printf %%s "3.2.57(1)-release"; exit 0; fi\n'
+    printf 'exec "%s" "$@"\n' "$REAL_BASH"
+  } > "$cache/bash"
+  chmod +x "$cache/bash"
+  # Nested bats with a real HOME holding the shim in the default cache and no
+  # override: setup_file must find it, so the probe test runs instead of skipping.
+  run env -i PATH="$PRISTINE_PATH" HOME="$realhome" \
+    "$REPO_ROOT/test/vendor/bats-core/bin/bats" --tap \
+    --filter "reached through a path with a space" "$BATS_TEST_FILENAME"
+  assert_success
+  assert_output --partial "ok 1 bash32: a real bash 3.2 reached through a path with a space"
+  refute_output --partial "# skip"
 }
 
 @test "bash32: cache prefix interpreter is used when it reports 3.2.57" {
@@ -296,6 +323,20 @@ STUB
   assert_output --partial "3.2.57"
 }
 
+@test "bash32: the resolved interpreter is exported to the suite as ACQ_BASH32 (found via the cache prefix)" {
+  local root="$STUBDIR/root2" fake
+  mkdir -p "$root/scripts" "$root/test/vendor/bats-core/bin" "$ACQ_BASH32_PREFIX/bin"
+  cp "$RUNNER" "$root/scripts/test-acq-bash32"
+  cp "$REPO_ROOT/scripts/test-acq-bats" "$root/scripts/test-acq-bats"
+  printf '#!/bin/sh\nprintf "ACQ_BASH32=%%s\\n" "${ACQ_BASH32:-<unset>}"\n' > "$root/test/vendor/bats-core/bin/bats"
+  chmod +x "$root/test/vendor/bats-core/bin/bats"
+  fake="$(make_fake_bash 3.2.57)"
+  cp "$fake" "$ACQ_BASH32_PREFIX/bin/bash"
+  run env -u ACQ_BASH32 "$root/scripts/test-acq-bash32" x.bats
+  assert_success
+  assert_output --partial "ACQ_BASH32=$ACQ_BASH32_PREFIX/bin/bash"
+}
+
 @test "bash32: the PATH shim directory is removed after a successful and after a failing run" {
   local root="$STUBDIR/root" fake tmp="$STUBDIR/tmp"
   mkdir -p "$root/scripts" "$root/test/vendor/bats-core/bin" "$tmp"
@@ -353,7 +394,5 @@ STUB
   assert_output --partial "unterminated here-document 'E'"
 }
 
-# CI relevance coverage for scripts/test-acq-bash32, fetch-bash32-oci.py and
-# scan-heredoc-subst.py is enforced (fail, never skip) by 158-bash32-relevance-paths.bats,
-# which parses the workflow's pathspec list and requires them in REQUIRED_PATHSPECS.
-# The OCI launcher and scanner-robustness tests live in 159-bash32-oci-and-scanner.bats.
+# CI relevance coverage of these scripts is enforced (fail, never skip) by
+# 158-bash32-relevance-paths.bats; the OCI launcher and scanner tests live in 159.

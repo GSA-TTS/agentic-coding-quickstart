@@ -226,4 +226,7 @@ if [ "$MODE" = syntax ]; then
   exit "$rc"
 fi
 
+# Hand the resolved interpreter to the suite: the tests repoint HOME, so they could
+# not rediscover one installed in the default cache.
+export ACQ_BASH32="$INTERP"
 "$INTERP" "${_dir}/test-acq-bats" "$@"
