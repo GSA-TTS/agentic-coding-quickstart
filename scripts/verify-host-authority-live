@@ -15,7 +15,8 @@
 # Usage:  scripts/verify-host-authority-live [options]
 #   --backend msb|sbx|both  backends to exercise (default both; a missing CLI makes
 #                           that backend's steps BLOCKED)
-#   --only ID[,ID...]       run only these step ids (see --dry-run for the list)
+#   --only ID[,ID...]       run only these step ids (see --dry-run for the list); steps
+#                           that reuse an earlier step's sandbox report BLOCKED alone
 #   --out DIR               transcript directory (default <repo>/tmp/verify-host-authority-live-<stamp>)
 #   --step-timeout SECS     per command timeout (default 120)
 #   --create-timeout SECS   timeout for sandbox creation (default 1200)
@@ -494,18 +495,20 @@ step_msb_forged_markers() {
   [ "$MSB_A_OK" -eq 1 ] || { record "$id" BLOCKED "needs the sandbox from msb-ro-kit-create"; return 0; }
   ws="$WS_ROOT/a"
   ws=$(cd "$ws" && pwd -P)
-  guest_root "$MSB_A" sh -c 'mkdir -p /var/lib/acq; printf claude > /var/lib/acq/agent; printf /tmp/forged-ws > /var/lib/acq/workspace; printf /tmp/forged.sock > /var/lib/acq/ssh-auth-sock; printf "FORGED_KIT_VAR=pwned\n" > /var/lib/acq/kit-env; touch /var/lib/acq/agent-user-ready /var/lib/acq/agent-installed-claude /var/lib/acq/install-1; echo FORGED'
-  last_has FORGED || { record "$id" BLOCKED "could not plant the forged markers"; return 0; }
+  guest_root "$MSB_A" sh -c 'mkdir -p /var/lib/acq; printf claude > /var/lib/acq/agent; printf /tmp/forged-ws > /var/lib/acq/workspace; printf /tmp/forged.sock > /var/lib/acq/ssh-auth-sock; printf "FORGED_KIT_VAR=pwned\n" > /var/lib/acq/kit-env && touch /var/lib/acq/agent-user-ready /var/lib/acq/agent-installed-claude /var/lib/acq/install-1 && cat /var/lib/acq/workspace'
+  if [ "$LAST_RC" -ne 0 ] || ! last_has /tmp/forged-ws; then record "$id" BLOCKED "could not plant (and read back) the forged markers"; return 0; fi
   run_cmd "$STEP_TIMEOUT" "$ACQ" --backend msb exec "$MSB_A" -- pwd
   cwd=$(last_out | tail -n 1 | tr -d '[:space:]')
+  if [ "$LAST_RC" -ne 0 ] || [ -z "$cwd" ]; then record "$id" BLOCKED "acq exec pwd failed or printed nothing (rc $LAST_RC)"; return 0; fi
   [ "$cwd" != "/tmp/forged-ws" ] || why="session started in the forged workspace; "
   [ "$cwd" = "$ws" ] || say "  note: session cwd '$cwd' differs from the host workspace '$ws' (recorded as evidence, not scored when not forged)"
   run_cmd "$STEP_TIMEOUT" "$ACQ" --backend msb exec "$MSB_A" -- sh -c 'echo "FKV=[$FORGED_KIT_VAR] SOCK=[$SSH_AUTH_SOCK]"'
+  if [ "$LAST_RC" -ne 0 ] || ! last_has 'FKV=['; then record "$id" BLOCKED "acq exec env probe failed (rc $LAST_RC)"; return 0; fi
   last_has "FKV=[pwned]" && why="${why}the forged kit-env variable reached the session; "
   last_has "SOCK=[/tmp/forged.sock]" && why="${why}the forged ssh socket reached the session; "
   run_cmd "$STEP_TIMEOUT" "$ACQ" --backend msb exec "$MSB_A" -- sh -c 'command -v claude >/dev/null 2>&1 && echo CLAUDE-PRESENT || echo no-claude'
   run_cmd "$STEP_TIMEOUT" "$ACQ" --backend msb exec "$MSB_A" -- id -un
-  last_out | grep -qx agent || why="${why}exec no longer runs as the agent user; "
+  [ "$LAST_RC" -eq 0 ] && last_out | grep -qx agent || why="${why}exec no longer runs as the agent user; "
   if [ -z "$why" ]; then record "$id" PASS "forged agent/workspace/ssh-socket/kit-env/ready markers changed no exec-session behavior (attach and agent-key cases: MANUAL 1)"
   else record "$id" FAIL "$why"; fi
 }
@@ -544,8 +547,9 @@ step_msb_ro_oci() {
   create_sandbox msb "$n" "$ws" --kit "$ref"
   if last_has "cannot place read-only kit file"; then record "$id" FAIL "acq refused a readonly oci-engine file on create"; return 0; fi
   if [ "$LAST_RC" -ne 0 ]; then record "$id" BLOCKED "acq create with oci-engine exited $LAST_RC (see transcript)"; return 0; fi
-  run_cmd "$STEP_TIMEOUT" msb exec "$n" -u 0 -- sh -c 'ls -l /var/lib/acq/host/kit-files 2>&1 | head -n 10; test ! -e /home/agent/oci-engine-grant-devs.sh && echo NO-GUEST-COPY-OF-GRANT-SCRIPT'
-  if msb_inspect_check "$n" && last_has NO-GUEST-COPY-OF-GRANT-SCRIPT; then
+  run_cmd "$STEP_TIMEOUT" msb exec "$n" -u 0 -- sh -c 'ls /var/lib/acq/host/kit-files 2>&1; test ! -e /home/agent/oci-engine-grant-devs.sh && echo NO-GUEST-COPY-OF-GRANT-SCRIPT'
+  if [ "$LAST_RC" -eq 0 ] && last_has 'home-agent-oci-engine-grant-devs-sh.' && last_has 'home-agent-oci-engine-storage-driver-sh.' \
+      && last_has NO-GUEST-COPY-OF-GRANT-SCRIPT && msb_inspect_check "$n"; then
     record "$id" PASS "oci-engine readonly files were staged on the read-only mount, not copied to the guest, and inspect shows the read-only Bind"
   else
     record "$id" FAIL "oci-engine readonly files were not staged as expected, or inspect lacks the read-only Bind"
@@ -588,6 +592,7 @@ step_sbx_forged_heal() {
   before=$(cksum <"$(sbx_record_path "$SBX_A")")
   run_cmd "$CREATE_TIMEOUT" "$ACQ" --backend sbx run "$SBX_A" -- --version
   after=$(cksum <"$(sbx_record_path "$SBX_A")")
+  if [ "$LAST_RC" -ne 0 ]; then record "$id" BLOCKED "re-attach did not complete (rc $LAST_RC), so the heal was not exercised"; return 0; fi
   if last_has "injecting with 'sbx kit add'" || last_has "injected into"; then
     record "$id" FAIL "re-attach re-applied a kit although the host record was current"; return 0
   fi
@@ -681,6 +686,7 @@ say "SUMMARY: PASS=$n_pass FAIL=$n_fail BLOCKED=$n_blocked   revision=$REVISION$
 say "results : $RESULTS"
 say "transcript: $TRANSCRIPT"
 say "Paste the results rows into the Host Authority Live Validation Record in docs/VERIFY_PROVIDER_ADOPTION.md."
+if [ $((n_pass + n_fail + n_blocked)) -eq 0 ]; then say "no steps ran (empty selection): nothing was verified"; exit 2; fi
 if [ "$n_fail" -gt 0 ]; then exit 1; fi
 if [ "$n_blocked" -gt 0 ]; then exit 2; fi
 exit 0
