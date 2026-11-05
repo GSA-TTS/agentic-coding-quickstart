@@ -849,7 +849,7 @@ def _create_sandbox(
     adapter = _adapter(backend)
     error_cls = sbx.SbxError if backend == "sbx" else msb.MsbError
     if backend == "sbx":
-        adapter.create(name, image, workspace)
+        adapter.create(name, image, workspace, agent=agent)
     else:
         adapter.create(name, image, workspace, memory=msb.DEFAULT_MEMORY, cpus=msb.DEFAULT_CPUS)
     if not _wait_exec_ready(backend, name):
@@ -1705,23 +1705,24 @@ def run_secret_ls(parsed, emit_json: bool, backend: str) -> int:
 
     An unreadable or unparseable backend listing fails closed with
     ``secret_unreadable`` (ADR-0040m) rather than being reported as empty.
-    ``secret ls`` realizes the ``secret-list`` obligation, which is msb-only
-    (ADR-0040m): on sbx it fails closed with ``unsupported_capability``.
+    ``secret ls`` realizes the ``secret-list`` obligation: supported on sbx
+    (``sbx secret ls``), unsupported on msb (no ``secret`` subcommand), where it
+    fails closed with ``unsupported_capability``.
     """
     if not _supports(backend, "secret-list"):
         return _operational_failure(
             "secret ls",
             errors.UNSUPPORTED,
-            "secret listing is not supported on the sbx backend",
-            "secret ls is msb-only (ADR-0040m secret_ls); on sbx use 'acq secret has' to check presence",
+            f"secret listing is not supported on the {backend} backend",
+            "sbx exposes 'sbx secret ls'; msb has no standalone secret store",
             emit_json,
         )
     scope, ok = _parse_secret_ls_scope(parsed.global_scope, parsed.args)
     if not ok:
         return _usage_failure("secret ls", "usage: acq secret ls [-g | SANDBOX]", emit_json)
     try:
-        secrets = msb.secret_ls(scope)
-    except msb.MsbError as exc:
+        secrets = _adapter(backend).secret_ls(scope)
+    except _ADAPTER_ERRORS as exc:
         return _operational_failure("secret ls", exc.code, exc.message, exc.remediation, emit_json)
     data = {"secrets": secrets}
     if emit_json:

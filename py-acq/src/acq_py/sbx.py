@@ -13,11 +13,12 @@ crosses the adapter boundary only as the child's stdin — never argv, never out
 This mirrors ``msb.py``'s ``_run``/``_run_stream`` + stdin-value discipline. The
 command names differ where the two backends genuinely differ (``ls``/``rm``/``cp``/
 ``ports`` vs msb's ``list``/``remove``/``copy``/``inspect``), and sbx adds
-proxy-table mechanics msb has no equivalent of (``key_present``, raw-placeholder
-removal, and the ``kit.allowedSources`` revocation). The real sbx ``create``
-translation (positional agent, ``--template`` image, ``--env`` workspace markers)
-is a Tier-3 live concern and is not synthesized here; the offline vectors drive the
-deterministic ``__stub__`` instead.
+proxy-table mechanics msb has no equivalent of (``key_present``, ``secret_ls``,
+raw-placeholder removal, and the ``kit.allowedSources`` revocation via
+``sbx settings``). sbx HAS a ``secret`` subcommand (``set``/``ls``/``rm``), so the
+secret verbs work here (value on stdin), while ``create`` maps to the positional
+``sbx create AGENT [PATH] --name N -t IMAGE`` form and rotation (no ``rotate``
+subcommand) fails closed with ``unsupported_capability``.
 
 The ``sbx`` executable is overridable via ``ACQ_SBX_BIN`` for reproducible, offline
 contract vectors. ``__stub__`` routes to the bundled deterministic fake
@@ -98,8 +99,12 @@ def _run(
 # The declared capability map. Support levels: ``required`` (implemented and
 # conformance-asserted), ``optional`` (declared but not part of the shipped
 # surface), ``unsupported`` (fails closed with ``unsupported_capability``).
-# ``secret-list``/``start`` are msb-only obligations; ``key-present``/
-# ``kit-source-revoke`` are sbx-only (ADR-0040m).
+#
+# Reconcile with the real sbx 0.50.1 CLI: sbx HAS a ``secret`` subcommand with
+# ``set``/``ls``/``rm`` (so ``secret-list`` is required, not msb-only), but it has
+# NO ``rotate`` subcommand (``key-rotate`` is unsupported) and no ``kit-source-revoke``
+# subcommand — the kit ``allowedSources`` allowlist is managed via
+# ``sbx settings get/set kit.allowedSources``, which ``kit_source_revoked`` drives.
 def capability_record(version: str | None = None) -> dict:
     return {
         "backend": "sbx",
@@ -119,10 +124,10 @@ def capability_record(version: str | None = None) -> dict:
             "kit-apply": "unsupported",  # deferred to the kit-apply slice
             "secret-write": "required",
             "secret-rm": "required",
-            "secret-list": "unsupported",  # msb-only (secret_ls)
-            "key-rotate": "required",
-            "key-present": "required",  # sbx-only
-            "kit-source-revoke": "required",  # sbx-only
+            "secret-list": "required",  # sbx has `secret ls`
+            "key-rotate": "unsupported",  # no `rotate` subcommand on sbx
+            "key-present": "required",  # sbx-only (via `secret ls --json`)
+            "kit-source-revoke": "required",  # sbx-only (via `sbx settings`)
             "start": "unsupported",  # msb-only
             "restart": "unsupported",  # msb-only
             "provenance": "required",
@@ -156,23 +161,28 @@ def exists(name: str) -> bool:
     return names is not None and name in names
 
 
-def create(name: str, image: str, workspace: str, memory: str | None = None, cpus: str | None = None) -> None:
+def create(
+    name: str,
+    image: str,
+    workspace: str,
+    memory: str | None = None,
+    cpus: str | None = None,
+    agent: str | None = None,
+) -> None:
     """Create a sandbox. Raises :class:`SbxError` on backend failure.
 
-    ``memory``/``cpus`` are accepted for signature parity with :mod:`acq_py.msb`
-    but are not forwarded: sbx derives guest sizing from its templates. The real
-    sbx create translation (positional agent, ``--template`` image) is a Tier-3
-    concern; the stub models ``--image``/``--volume`` for the offline vectors.
+    Reconciles with the real sbx 0.50.1 ``create AGENT [PATH] --name N -t IMAGE``:
+    the agent and workspace path are *positional*, the name is ``--name``, and the
+    container image is ``-t/--template``. ``memory``/``cpus`` are accepted for
+    signature parity with :mod:`acq_py.msb` but not forwarded (sbx derives guest
+    sizing from its templates).
     """
-    argv = [
-        "create",
-        "--name",
-        name,
-        "--image",
-        image,
-        "--volume",
-        f"{workspace}:{workspace}",
-    ]
+    argv = ["create"]
+    if agent:
+        argv.append(agent)
+    argv.append(workspace)
+    argv += ["--name", name]
+    argv += ["-t", image]
     proc = _run(argv)
     if proc.returncode != 0:
         raise SbxError(
@@ -316,17 +326,70 @@ def ports(name: str) -> list[dict]:
 # boundary except on the child's stdin (ADR-0038m §user story #7).
 # ---------------------------------------------------------------------------
 
-# ``sbx secret …`` takes the scope as either the ``--global`` flag or a leading
-# positional sandbox name (mirrors msb).
+# ``sbx secret …`` takes a sandbox scope as the ``--sandbox NAME`` flag; the
+# GLOBAL scope is the DEFAULT (no flag) on ``set``/``rm`` (the real sbx dropped
+# the ``-g``/``--global`` flag on those verbs). ``secret ls`` still takes ``-g``.
 _GLOBAL_SCOPE = "global"
 
 
 def _secret_scope_argv(scope: str) -> list[str]:
-    return ["--global"] if scope == _GLOBAL_SCOPE else [scope]
+    """Encode a scope for ``sbx secret set/rm`` (global is the default, no flag)."""
+    return [] if scope == _GLOBAL_SCOPE else ["--sandbox", scope]
+
+
+def _secret_list_docs() -> list[dict]:
+    """Run ``sbx secret ls --json`` and return the parsed entry list.
+
+    An inspect that *fails* or returns unparseable/wrong-shape output raises
+    :class:`SbxError` with ``secret_unreadable`` (ADR-0038m §48 drops
+    "inspection-failure-as-empty"). The listing never carries a value.
+    """
+    proc = _run(["secret", "ls", "--json"])
+    if proc.returncode != 0:
+        raise SbxError(
+            errors.SECRET_UNREADABLE,
+            "could not read the secret store",
+            "check backend logs and retry",
+        )
+    try:
+        doc = json.loads(proc.stdout)
+    except (json.JSONDecodeError, ValueError):
+        raise SbxError(
+            errors.SECRET_UNREADABLE,
+            "could not parse the secret store listing",
+            "the backend returned an unreadable secret list; check backend logs and retry",
+        )
+    if not isinstance(doc, list):
+        raise SbxError(
+            errors.SECRET_UNREADABLE,
+            "could not parse the secret store listing",
+            "the backend returned an unexpected secret-list shape; check backend logs and retry",
+        )
+    out: list[dict] = []
+    for entry in doc:
+        if not isinstance(entry, dict) or "scope" not in entry or "service" not in entry:
+            raise SbxError(
+                errors.SECRET_UNREADABLE,
+                "could not parse the secret store listing",
+                "the backend returned an unexpected secret-list entry; check backend logs and retry",
+            )
+        out.append(
+            {
+                "scope": entry["scope"],
+                "service": entry["service"],
+                "value_state": entry.get("value_state", "set"),
+            }
+        )
+    return out
 
 
 def secret_set(scope: str, service: str, value: str, *, timeout: float | None = None) -> None:
-    """Store a secret for ``(scope, service)``. The value travels on stdin only."""
+    """Store a secret for ``(scope, service)``. The value travels on stdin only.
+
+    Reconciles with the real sbx ``secret set SERVICE [--sandbox NAME]``: the
+    service is the sole positional, the value is read from stdin, and the global
+    scope is the default (no flag).
+    """
     proc = _run(["secret", "set", *_secret_scope_argv(scope), service], input_text=value, timeout=timeout)
     if proc.returncode != 0:
         raise SbxError(
@@ -337,8 +400,12 @@ def secret_set(scope: str, service: str, value: str, *, timeout: float | None = 
 
 
 def secret_rm(scope: str, service: str) -> None:
-    """Remove a managed secret for ``(scope, service)``. Raises on backend failure."""
-    proc = _run(["secret", "rm", *_secret_scope_argv(scope), service])
+    """Remove a managed secret for ``(scope, service)``. Raises on backend failure.
+
+    Reconciles with the real sbx ``secret rm SERVICE [--sandbox NAME] -f`` (the
+    ``-f`` suppresses the interactive confirm prompt).
+    """
+    proc = _run(["secret", "rm", *_secret_scope_argv(scope), service, "-f"])
     if proc.returncode != 0:
         raise SbxError(
             errors.FAILURE,
@@ -347,26 +414,31 @@ def secret_rm(scope: str, service: str) -> None:
         )
 
 
+def secret_ls(scope: str | None = None) -> list[dict]:
+    """``secret-list`` on sbx (``sbx secret ls --json``): scope/service/value_state.
+
+    ``scope`` is an optional filter (``"global"`` or a sandbox name); ``None``
+    lists every scope. Never returns a value.
+    """
+    docs = _secret_list_docs()
+    if scope is None:
+        return docs
+    return [d for d in docs if d["scope"] == scope]
+
+
 def key_present(scope: str, service: str) -> bool:
     """sbx-only ``key_present`` obligation (ADR-0040m): is the sbx key present?
 
-    Reports presence, never the value. On sbx there is no ``secret-list``
-    capability (that obligation is msb-only), so presence is a thin exit-status
-    predicate over ``sbx secret has`` (which reads the proxy table). Tri-state at
-    the caller's level: presence is a bool, but a backend that *cannot answer*
-    raises :class:`SbxError` so the seam never conflates "the backend is down"
-    with "the secret is absent".
+    Reports presence, never the value. sbx has no ``secret has`` subcommand, so
+    presence is a predicate over the ``secret ls --json`` listing. Tri-state at the
+    caller's level: presence is a bool, but a backend that *cannot answer* raises
+    :class:`SbxError` so the seam never conflates "the backend is down" with "the
+    secret is absent".
     """
-    proc = _run(["secret", "has", *_secret_scope_argv(scope), service])
-    if proc.returncode == 0:
-        return True
-    if proc.returncode == 1:
-        return False
-    raise SbxError(
-        errors.FAILURE,
-        f"could not query secret '{service}' for scope '{scope}'",
-        "check backend logs and retry",
-    )
+    for entry in _secret_list_docs():
+        if entry["scope"] == scope and entry["service"] == service:
+            return True
+    return False
 
 
 def secret_rm_raw(placeholder: str) -> None:
@@ -394,14 +466,18 @@ def secret_rm_raw(placeholder: str) -> None:
 def provider_credential_set(provider: str, key_env: str, hosts: list[str], value: str) -> None:
     """Store a provider credential value, pinned to ``key_env`` + ``hosts``.
 
-    The value travels on stdin only; ``key_env`` and ``hosts`` are non-secret
-    identifiers carried on argv. The real sbx translation (``secret set-custom``)
-    is a Tier-3 concern; the stub models the neutral verb for the offline vectors.
+    Reconciles with the real sbx ``secret set-custom --host H --env KEY_ENV``
+    (the custom-endpoint placeholder mechanism, ADR-0012): the value travels on
+    stdin only and is never echoed. ``key_env`` and ``hosts`` are non-secret
+    identifiers carried on argv. NOTE: the real sbx ``set-custom`` reads the value
+    via ``--value``/interactive/``--ref`` rather than stdin — a Tier-3 live gap;
+    the offline vectors drive the deterministic stub, which reads stdin to keep
+    the value off argv (ADR-0038m §7).
     """
-    proc = _run(
-        ["provider-credential", "set", provider, key_env, "--host", ",".join(hosts)],
-        input_text=value,
-    )
+    argv = ["secret", "set-custom", "--env", key_env]
+    for host in hosts:
+        argv += ["--host", host]
+    proc = _run(argv, input_text=value)
     if proc.returncode != 0:
         raise SbxError(
             errors.FAILURE,
@@ -411,8 +487,12 @@ def provider_credential_set(provider: str, key_env: str, hosts: list[str], value
 
 
 def github_scope(sandbox: str, value: str) -> None:
-    """Store a sandbox-scoped GitHub token (ADR-0013); value travels on stdin only."""
-    proc = _run(["github-scope", sandbox], input_text=value)
+    """Store a sandbox-scoped GitHub token (ADR-0013); value travels on stdin only.
+
+    Reconciles with the real sbx ``secret set github --sandbox NAME`` (github is a
+    built-in sbx service); the token is bound to ``sandbox`` (never global).
+    """
+    proc = _run(["secret", "set", "--sandbox", sandbox, "github"], input_text=value)
     if proc.returncode != 0:
         raise SbxError(
             errors.FAILURE,
@@ -422,31 +502,15 @@ def github_scope(sandbox: str, value: str) -> None:
 
 
 def rotate_key(value: str) -> None:
-    """Rotate the USAi key: validate the new key, then replace the old (ADR-0012).
+    """USAi key rotation fails closed on sbx (no ``rotate`` subcommand, ADR-0012).
 
-    Mirrors :func:`acq_py.msb.rotate_key`'s exit-code mapping to the stable
-    rotation codes (ADR-0040m): ``provider_unreachable`` / ``provider_auth_failed``
-    when the provider cannot be reached or rejects the new key, else ``failure``.
+    The new key is never read or placed on argv. Raises :class:`SbxError` with
+    ``unsupported_capability``.
     """
-    proc = _run(["rotate"], input_text=value)
-    if proc.returncode == 0:
-        return
-    if proc.returncode == 2:
-        raise SbxError(
-            errors.PROVIDER_UNREACHABLE,
-            "the USAi provider endpoint could not be reached during rotation; the old key was left in place",
-            "check network/proxy access to the provider, then retry",
-        )
-    if proc.returncode == 3:
-        raise SbxError(
-            errors.PROVIDER_AUTH_FAILED,
-            "the USAi provider rejected the new key during rotation; the old key was left in place",
-            "mint a valid key and retry",
-        )
     raise SbxError(
-        errors.FAILURE,
-        "the USAi key rotation failed",
-        "check backend logs and retry",
+        errors.UNSUPPORTED,
+        "USAi key rotation is not supported on the sbx backend",
+        "rotation is a provider-credential operation with no sbx subcommand equivalent",
     )
 
 
@@ -465,17 +529,43 @@ def _owner_prefix(repo: str) -> str:
 def kit_source_revoked(repo: str) -> str:
     """Revoke a trusted kit source from sbx's ``kit.allowedSources``.
 
-    sbx's allowlist is owner-granular and acq only ever *unions* onto it, so a
-    source removed from the acq registry stays fetchable until the owner prefix is
-    dropped here. Returns the revoked owner prefix (the "revoked ref") on success;
-    raises :class:`SbxError` on any inability to revoke — never a quiet 0.
+    sbx has no ``kit-source-revoke`` subcommand: the allowlist lives under
+    ``sbx settings`` as a JSON array at ``kit.allowedSources``, so revocation is a
+    read-modify-write of that setting (owner-granular, ``host/owner/``). acq only
+    ever *unions* onto the allowlist, so a source removed from the acq registry
+    stays fetchable until the owner prefix is dropped here. Returns the revoked
+    owner prefix (the "revoked ref") on success; raises :class:`SbxError` on any
+    inability to revoke — never a quiet 0.
     """
-    proc = _run(["kit-source-revoke", repo])
+    prefix = _owner_prefix(repo)
+    proc = _run(["settings", "get", "kit.allowedSources"])
     if proc.returncode != 0:
         raise SbxError(
             errors.FAILURE,
-            f"could not revoke kit source '{repo}' from the sbx backend",
+            f"could not read sbx kit.allowedSources to revoke '{repo}'",
             "check sbx logs and retry",
         )
-    revoked = proc.stdout.strip()
-    return revoked or _owner_prefix(repo)
+    try:
+        sources = json.loads(proc.stdout)
+    except (json.JSONDecodeError, ValueError):
+        raise SbxError(
+            errors.FAILURE,
+            f"could not parse sbx kit.allowedSources to revoke '{repo}'",
+            "check sbx logs and retry",
+        )
+    if not isinstance(sources, list):
+        raise SbxError(
+            errors.FAILURE,
+            f"could not parse sbx kit.allowedSources to revoke '{repo}'",
+            "check sbx logs and retry",
+        )
+    if prefix in sources:
+        desired = json.dumps([s for s in sources if s != prefix])
+        proc = _run(["settings", "set", "kit.allowedSources", desired])
+        if proc.returncode != 0:
+            raise SbxError(
+                errors.FAILURE,
+                f"could not write sbx kit.allowedSources to revoke '{repo}'",
+                "check sbx logs and retry",
+            )
+    return prefix

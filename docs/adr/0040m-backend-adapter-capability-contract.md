@@ -37,10 +37,22 @@ The declared capability set is: detect, version, provision, list, exec,
 attach, shell, stop, remove, copy, ports, kit-apply, secret-write/rm,
 secret-list, key-rotate, key-present, kit-source-revoke, start/restart,
 provenance, and doctor. The 23 common obligations and 4 backend-specific
-obligations (`start`/`secret_ls` msb-only; `key_present`/
+obligations (`start`/`restart` msb-only; `key_present`/
 `kit_source_revoked` sbx-only) realize these capabilities. An
 `unsupported` or absent capability requested by a user fails closed with
 exit 1, the `unsupported_capability` code, and remediation.
+
+> **Reconciliation note (2026-11-05):** the initial capability assignment
+> (`secret_ls` msb-only, `secret-list` unsupported on sbx) was written against the
+> deterministic stubs, which assumed an msb `secret` subcommand that does not
+> exist. Live verification against the real CLIs (msb 0.7.11 / sbx 0.50.1)
+> inverted it: sbx has `secret set/ls/rm` and so owns `secret-list` (msb has no
+> standalone secret store — its secrets are per-sandbox `--secret ENV@HOST`
+> bindings on create/start plus `--secret-rm` on `modify`, a provider-credential
+> concern). `key-rotate` (the `rotate` subcommand) exists on neither backend and
+> is unsupported on both. `kit-apply` is msb-only in this slice and runs in-guest
+> via `msb exec` (no `kit-apply` subcommand); `kit-source-revoke` is sbx-only via
+> `sbx settings get/set kit.allowedSources` (no `kit-source-revoke` subcommand).
 
 The record is a declaration; conformance is proven, not trusted: each
 declared capability is asserted by a Tier-1 subprocess vector (working, or

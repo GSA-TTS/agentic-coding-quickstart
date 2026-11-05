@@ -6,7 +6,13 @@
   "backend": null,
   "platform": "any",
   "invoke": {
-    "argv": ["{acq}", "--backend", "msb", "usai-rotate-api-key", "--json"],
+    "argv": [
+      "{acq}",
+      "--backend",
+      "msb",
+      "usai-rotate-api-key",
+      "--json"
+    ],
     "env": {
       "ACQ_MSB_BIN": "__stub__",
       "ACQ_MSB_VERSION": "0.7.7",
@@ -14,7 +20,18 @@
       "ACQ_SBX_INSTALLED": "0",
       "ACQ_MSB_STUB_ROTATE": "auth_failed"
     },
-    "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "MSB_HOME", "ACQ_IMAGE", "ACQ_MSB_IMAGE", "ACQ_MSB_READY_TIMEOUT", "ACQ_MSB_STUB_CATALOG", "ACQ_MSB_STUB_FAIL", "ACQ_MSB_STUB_SECRETS", "ACQ_MSB_STUB_SECRET_LS_RAW"],
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "MSB_HOME",
+      "ACQ_IMAGE",
+      "ACQ_MSB_IMAGE",
+      "ACQ_MSB_READY_TIMEOUT",
+      "ACQ_MSB_STUB_CATALOG",
+      "ACQ_MSB_STUB_FAIL",
+      "ACQ_MSB_STUB_SECRETS",
+      "ACQ_MSB_STUB_SECRET_LS_RAW"
+    ],
     "stdin": "placeholder-new-key-2468\n",
     "timeout_ms": 5000
   },
@@ -25,15 +42,27 @@
       "value": {
         "schema_version": 1,
         "command": "usai-rotate-api-key",
-        "error": {"code": "provider_auth_failed"}
+        "error": {
+          "code": "unsupported_capability"
+        }
       },
       "normalize": []
     },
-    "stderr": {"mode": "exact", "value": "", "normalize": []}
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
   },
   "isolation": {
     "offline": true,
     "ssh_stubs": false,
-    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME"
+    ]
   }
 }
