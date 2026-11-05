@@ -26,7 +26,7 @@
 #
 # Exit: 0 all automated steps PASS, 1 any FAIL, 2 no FAIL but some BLOCKED.
 # Uses your normal acq state and credentials (nothing is seeded or printed). msb steps
-# create sandboxes with --no-provider-kits; sbx steps use your existing USAi setup (a
+# create shell sandboxes with --no-provider-kits; sbx steps create an opencode sandbox and use your existing USAi setup (a
 # create that fails for lack of it makes the sbx steps BLOCKED). Only throwaway
 # lowercase-named sandboxes are created, and they are removed on exit or interrupt.
 # Run it OUTSIDE any sandbox, on a host that can create sandboxes. Bash 3.2 compatible.
@@ -369,7 +369,11 @@ write_fixture() {
 create_sandbox() { # BACKEND NAME WS [extra create args...]
   local b="$1" n="$2" ws="$3"; shift 3
   track_sandbox "$b" "$n"
-  run_cmd "$CREATE_TIMEOUT" "$ACQ" --backend "$b" create shell "$ws" --name "$n" --no-provider-kits "$@"
+  if [ "$b" = msb ]; then
+    run_cmd "$CREATE_TIMEOUT" "$ACQ" --backend msb create shell "$ws" --name "$n" --no-provider-kits "$@"
+  else
+    run_cmd "$CREATE_TIMEOUT" "$ACQ" --backend sbx create opencode "$ws" --name "$n" "$@"
+  fi
 }
 
 msb_inspect_check() { # NAME -> 0 if msb reports the read-only host-config Bind
@@ -583,10 +587,10 @@ step_sbx_baseline() {
 step_sbx_forged_heal() {
   local id=sbx-forged-heal before after
   [ "$SBX_A_OK" -eq 1 ] || { record "$id" BLOCKED "needs the sandbox from sbx-baseline"; return 0; }
-  run_cmd "$STEP_TIMEOUT" sbx exec "$SBX_A" -- sudo sh -c 'rm -f /usr/local/share/ca-certificates/zscaler-ca.crt /home/agent/usai-config/opencode.jsonc; rm -rf "$HOME/.agentic-coding-playbook/AGENTS.md"; echo REMOVED'
+  run_cmd "$STEP_TIMEOUT" sbx exec "$SBX_A" -- sudo sh -c 'rm -f /usr/local/share/ca-certificates/zscaler-ca.crt /home/agent/usai-config/opencode.jsonc; rm -f /home/agent/.agentic-coding-playbook/AGENTS.md; echo REMOVED'
   last_has REMOVED || { record "$id" BLOCKED "could not remove the guest files as root (sudo unavailable?)"; return 0; }
   before=$(cksum <"$(sbx_record_path "$SBX_A")")
-  run_cmd "$CREATE_TIMEOUT" "$ACQ" --backend sbx run "$SBX_A" -- true
+  run_cmd "$CREATE_TIMEOUT" "$ACQ" --backend sbx run "$SBX_A" -- --version
   after=$(cksum <"$(sbx_record_path "$SBX_A")")
   if last_has "injecting with 'sbx kit add'" || last_has "injected into"; then
     record "$id" FAIL "re-attach re-applied a kit although the host record was current"; return 0
@@ -603,7 +607,7 @@ step_sbx_record_change() {
   cp "$rec" "$OUT/builtin-kits.saved"
   sed 's/#ref=[0-9a-f]\{40\}/#ref=0000000000000000000000000000000000000000/' "$OUT/builtin-kits.saved" >"$rec.new" && mv -f "$rec.new" "$rec"
   say "  altered the host builtin-kits record (refs replaced with zeros); original saved in $OUT"
-  run_cmd "$CREATE_TIMEOUT" "$ACQ" --backend sbx run "$SBX_A" -- true
+  run_cmd "$CREATE_TIMEOUT" "$ACQ" --backend sbx run "$SBX_A" -- --version
   if last_has "sbx kit add" || last_has "sbx >= 0.38" || last_has "injecting with"; then
     record "$id" PASS "altering the host record triggered the kit add path (output above shows add or the 0.38+ recreate notice)"
   else
@@ -628,7 +632,7 @@ step_sbx_legacy_reseed() {
   [ "$SBX_A_OK" -eq 1 ] || { record "$id" BLOCKED "needs the sandbox from sbx-baseline"; return 0; }
   rec=$(sbx_record_path "$SBX_A")
   rm -f "$rec"
-  run_cmd "$CREATE_TIMEOUT" "$ACQ" --backend sbx run "$SBX_A" -- true
+  run_cmd "$CREATE_TIMEOUT" "$ACQ" --backend sbx run "$SBX_A" -- --version
   if ver_ge "${SBX_VER#v}" 0.38.0; then
     if [ "$(last_count 'sbx >= 0.38')" -ne 1 ]; then record "$id" FAIL "expected exactly one consolidated recreate notice on sbx $SBX_VER, saw $(last_count 'sbx >= 0.38')"; return 0; fi
   fi
