@@ -1,6 +1,6 @@
 ---
 title: "SBX Trusted-Startup Parity (read-only host mount vs native replay vs exec-time injection)"
-status: proposed
+status: accepted
 date: 2026-10-25
 decision_makers: ["Bret Mogilefsky"]
 category: architecture
@@ -38,15 +38,15 @@ start. Two facts about that path are **not established**:
 
 Scope today is small. An audit of Patterns v1.17.0 found no
 `acq-kits/*/spec.yaml` that declares `readonly: true`, so Mechanism 2 had no
-consumer on either backend. The v1.18.0 pin changes that: the opt-in `oci-engine`
-kit now declares `readonly: true` on its root startup grant script and storage
-helper. On msb those run from the read-only mount; on sbx the translator still
-ignores the field, so the kit's startup command takes its legacy branch and runs
-the root-owned copies published at create. The SBX gap is therefore no longer
-latent for that one opt-in kit. Re-check this against the pin in force when the ADR
-is accepted.
-This ADR proposes the enforcement direction for opted-in kits; the implemented
-SBX warning makes the weaker guarantee visible without claiming parity.
+consumer on either backend. From the v1.18.0 pin onward (v1.19.0 is the pin in
+force when this ADR was accepted), the opt-in `oci-engine` kit declares
+`readonly: true` on its root startup grant script and storage helper, and it is the
+only shipped kit that does. On msb those run from the read-only mount; on sbx the
+translator ignores the field, so the kit's startup command takes its legacy branch
+and runs the root-owned copies published at create. The SBX gap is therefore real
+for that one opt-in kit.
+This ADR records the accepted position for opted-in kits on SBX: the implemented
+warning makes the weaker guarantee visible without claiming parity.
 
 `sbx kit add` of startup-bearing kits is refused on sbx 0.38
 (`docs/KNOWN_FAILURE_MODES.md` section 36), so on that version mid-life repair is
@@ -149,34 +149,48 @@ represent the field as enforced until a mechanism is validated.
 - Pros: does not introduce an unverified enforcement mechanism; makes the
   existing limitation visible.
 - Cons: SBX users get weaker restart integrity than msb for any kit that opts in.
-- Verdict: **implemented interim state** for the opt-in `oci-engine` kit as well
-  as future consumers; the warning does not provide trusted-restart parity.
+- Verdict: **accepted** for the opt-in `oci-engine` kit as well as future
+  consumers; the warning does not provide trusted-restart parity.
 
-## Decision Outcome (proposed)
+## Decision Outcome
 
-**Retain the implemented Option D warning and propose Option B as the
-enforcement path, gated on live validation.** The first shipped consumer,
-`oci-engine`, already sets `readonly: true`. Do not
-implement Option C. Do not implement runtime code for Option B until the live
-validation below passes, because its integrity claim rests on sbx behavior
-(mount enforcement under a sudo guest, restart persistence) that has not been
-observed.
+**Option D is accepted.** On SBX, kit `files[]` entries marked `readonly: true`
+are delivered as guest-resident copies, and acq does not claim or enforce
+trusted-restart integrity for them. The SBX translator keeps emitting the visible
+per-kit warning (`docs/KNOWN_FAILURE_MODES.md` section 50), and MUST NOT silently
+treat `readonly: true` as satisfied. Users who need tamper-resistant kit startup
+code use the msb backend. Option C is rejected. Option B is not scheduled.
 
-Until then the SBX translator MUST NOT silently treat `readonly: true` as
-satisfied. The SBX path emits a visible warning that the file is a guest copy;
-replacing that warning-only behavior with Option B requires the validation below.
+Option B may be reopened only if live validation on a real sbx host (the steps in
+"Live Validation Required Before Reopening Option B" below, at minimum steps 2 and
+5, with results recorded in the live validation record in
+`docs/VERIFY_PROVIDER_ADOPTION.md`) shows both of the following:
 
-**Implementation status (interim, Option D):** the visible warning is
+1. the `:ro` mount is enforced on the host side against a passwordless-sudo guest,
+   judged from the host and not from guest-reported output; and
+2. the guest cannot alter the startup command sbx registered at create, nor the
+   files it references.
+
+Option B also depends on a kit-side change. The `oci-engine` startup classifier
+accepts only tokens under `/var/lib/acq/host/kit-files/` or `/home/agent/`, while
+an sbx `:ro` positional is mounted at the host's absolute path (see Option B
+above), so a rewritten token would be refused. The kit (in the Patterns
+repository) would have to accept the mounted path, and an acq-side rewrite alone
+is not enough. Any reopening supersedes this ADR with a new decision record, and
+the integrity claim stays unmade until the checks above pass.
+
+**Implementation status (Option D):** the visible warning is
 implemented. `_acq_sbx_translate_kit` in `acq.backends/sbx.sh` writes one
 stderr warning per kit translation (so once per kit per create or kit-add) that
 names the kit and the guest path of every `readonly: true` file and states that
 on SBX they are guest-resident copies with no integrity guarantee against a
 sudo guest. The kit still applies unchanged; kits with no `readonly: true`
-files stay silent. The first kit to opt in is `oci-engine` (Patterns v1.18.0).
+files stay silent. The first kit to opt in is `oci-engine` (first shipped in the
+Patterns v1.18.0 pin; v1.19.0 is current).
 Regression coverage: `test/bats/91-sbx-readonly-warning.bats`. Option B (the
 read-only mount) remains unimplemented and gated on the live validation below.
 
-## Live Validation Required Before Implementing Option B
+## Live Validation Required Before Reopening Option B
 
 Run on a real sbx host (cannot run inside a sandbox). Record exact sbx version.
 
@@ -224,12 +238,12 @@ fixture kit and an SBX tamper step, mirroring the msb live fixture.
 
 ### Negative / risks
 
-- Until Option B lands, an SBX sandbox running a kit with trusted startup code
+- Because Option B is not scheduled, an SBX sandbox running a kit with trusted startup code
   restarts guest-resident code with no integrity guarantee beyond sbx's own.
-- The mount path embeds a host path in the guest, which leaks the host username
+- If Option B is ever reopened, the mount path embeds a host path in the guest, which leaks the host username
   and directory layout to the guest (already true for the workspace mount).
-- The `kit-files` directory must stay free of sensitive content; this constraint
-  already applies on msb.
+- If Option B is ever reopened, the `kit-files` directory must stay free of
+  sensitive content; this constraint already applies on msb.
 
 ### Neutral
 
