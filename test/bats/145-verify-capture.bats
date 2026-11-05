@@ -65,10 +65,13 @@ _harness_prelude() {
     TRACE=""
     LAST_OUT=""
     trace() { :; }
+    eval "$(awk '/^_capture_[a-z]+\(\) \{$/,/^\}$/' "$REPO_ROOT/scripts/verify-backends")"
     eval "$(awk "/^_run_captured\(\) \{$/,/^\}$/" "$REPO_ROOT/scripts/verify-backends")"
     _src=$(awk "$AWK_PROG" "$REPO_ROOT/scripts/verify-backends")
     eval "$_src"
-    if command -v run_acq >/dev/null 2>&1 && command -v _run_captured >/dev/null 2>&1; then
+    if command -v run_acq >/dev/null 2>&1 && command -v _run_captured >/dev/null 2>&1 &&
+       command -v _capture_bytes >/dev/null 2>&1 && command -v _capture_size >/dev/null 2>&1 &&
+       command -v _capture_stream >/dev/null 2>&1; then
       printf 'EXTRACTED_OK=yes\n'
     else
       printf 'EXTRACTED_OK=no\n'
@@ -255,6 +258,111 @@ EOS
   assert_line 'SEEN=[acq-verify-dummy-usai-key]'
 }
 
+@test "verify-capture: publication and read failures fail closed and preserve producer errors" {
+  _require_timeout
+  local fault producer_rc
+  for fault in publish marker-write reader-size reader-read final-size final-read; do
+    for producer_rc in 0 7; do
+      run "$TIMEOUT_BIN" 20 bash -c "$(_harness_prelude)"'
+        fault="$1"; producer_rc="$2"
+        mv() {
+          [ "$fault" != publish ] || return 1
+          command mv "$@"
+        }
+        printf() {
+          if [ "$fault" = marker-write ] && [ "${FUNCNAME[1]:-}" = _run_captured ]; then
+            return 1
+          fi
+          builtin printf "$@"
+        }
+        wc() {
+          case "$fault:${_reader_pid:-}" in
+            reader-size:) : > "$VERIFY_STATE/injected"; return 1 ;;
+            final-size:?*) return 1 ;;
+          esac
+          command wc "$@"
+        }
+        dd() {
+          case "$fault:${_reader_pid:-}" in
+            reader-read:) : > "$VERIFY_STATE/injected"; return 1 ;;
+            final-read:?*) return 1 ;;
+          esac
+          command dd "$@"
+        }
+        producer() {
+          builtin printf "foreground bytes"
+          case "$fault" in
+            reader-*)
+              while [ ! -f "$VERIFY_STATE/injected" ]; do sleep 0.01; done ;;
+          esac
+          return "$producer_rc"
+        }
+        VERBOSE=1
+        _run_captured producer 2> "$VERIFY_STATE/live"
+        rc=$?
+        expected=$producer_rc
+        [ "$expected" -ne 0 ] || expected=1
+        [ "$rc" -eq "$expected" ] || exit 91
+        [ -z "$LAST_OUT" ] || exit 92
+        grep -Fq "verify-backends: output capture failed" "$VERIFY_STATE/live" || exit 93
+        # wait must have consumed the background reader, including error paths.
+        [ -z "$(jobs -pr)" ] || exit 94
+        [ -z "$(find "$VERIFY_STATE" -name "run-captured.*" -print)" ] || exit 95
+        builtin printf "FAILURE_HANDLED=yes\n"
+      ' _ "$STUBDIR" "$_RUN_ACQ_AWK" "$fault" "$producer_rc"
+      assert_success
+      assert_line 'FAILURE_HANDLED=yes'
+      rm -f "$STUBDIR/injected"
+    done
+  done
+}
+
+@test "verify-capture: an actively appending daemon cannot extend the final cutoff" {
+  _require_timeout
+  run "$TIMEOUT_BIN" 20 bash -c "$(_harness_prelude)"'
+    daemon=""
+    cleanup() {
+      if [ -n "$daemon" ]; then
+        kill "$daemon" 2>/dev/null || true
+        wait "$daemon" 2>/dev/null || true
+      fi
+    }
+    trap cleanup EXIT
+    trap "exit 99" TERM INT
+    # Delay streaming until the final cutoff is published: exact live/captured
+    # equality then proves both consume that cutoff, not a later size snapshot.
+    stream_src=$(declare -f _capture_stream)
+    eval "${stream_src/_capture_stream/_real_capture_stream}"
+    _capture_stream() {
+      while [ ! -f "$1.done" ]; do sleep 0.01; done
+      : > "$VERIFY_STATE/release-daemon"
+      while [ ! -f "$VERIFY_STATE/appended" ]; do sleep 0.01; done
+      _real_capture_stream "$@"
+    }
+    producer() {
+      printf "foreground-final-no-newline"
+      (
+        while [ ! -f "$VERIFY_STATE/release-daemon" ]; do sleep 0.01; done
+        printf "post-cutoff"
+        : > "$VERIFY_STATE/appended"
+        while :; do printf "daemon-bytes"; sleep 0.01; done
+      ) &
+      daemon=$!
+    }
+    VERBOSE=1
+    _run_captured producer 2> "$VERIFY_STATE/live" || exit 91
+    [ "$LAST_OUT" = foreground-final-no-newline ] || exit 92
+    printf "%s" "$LAST_OUT" > "$VERIFY_STATE/expected"
+    cmp "$VERIFY_STATE/expected" "$VERIFY_STATE/live" || exit 93
+    kill -0 "$daemon" || exit 94
+    cleanup
+    daemon=""
+    printf "ACTIVE_DAEMON_BOUNDED=yes\n"
+  ' _ "$STUBDIR" "$_RUN_ACQ_AWK"
+  assert_success
+  assert_line 'ACTIVE_DAEMON_BOUNDED=yes'
+}
+
 @test "verify-capture: a non-zero acq status propagates to the caller" {
   _require_timeout
   run "$TIMEOUT_BIN" 20 bash -c "$(_harness_prelude)"'
@@ -389,6 +497,7 @@ _grammar_harness() {
     dump() { :; }
 
     # _run_captured is the shared capture helper the function now uses.
+    eval "$(awk "/^_capture_[a-z]+\(\) \{\$/,/^\}\$/" "$real_root/scripts/verify-backends")"
     eval "$(awk "/^_run_captured\(\) \{\$/,/^\}\$/" "$real_root/scripts/verify-backends")"
     _src=$(awk "$awk_prog" "$real_root/scripts/verify-backends")
     eval "$_src"

@@ -96,6 +96,10 @@ _kit_fetch_destination() {
     return 1
   fi
   case "$dest" in /*) ;; *) dest="$PWD/$dest" ;; esac
+  case "$dest" in *$'\n'*)
+    echo 'kit-translate: refusing to fetch into a newline-bearing destination' >&2
+    return 1 ;;
+  esac
   case "$dest/" in */.git/*)
     echo "kit-translate: refusing to fetch into a git repository: $dest" >&2
     return 1 ;;
@@ -108,7 +112,15 @@ _kit_fetch_destination() {
     case "$probe/" in */../*) echo 'kit-translate: refusing to fetch into an unresolved traversal destination' >&2; return 1 ;; esac
     probe=$(dirname "$probe") || return 1
   done
-  resolved=$(cd -P -- "$probe" 2>/dev/null && pwd -P) || return 1
+  # Keep pathname newlines through command substitution with a non-newline
+  # sentinel, then remove only that sentinel and pwd's one record terminator.
+  resolved=$(cd -P -- "$probe" 2>/dev/null && pwd -P && printf '.') || return 1
+  resolved=${resolved%.}
+  resolved=${resolved%$'\n'}
+  case "$resolved" in *$'\n'*)
+    echo 'kit-translate: refusing to fetch into a newline-bearing destination' >&2
+    return 1 ;;
+  esac
   if [ "$probe" = "$dest" ] && [ "$resolved" = / ]; then
     echo 'kit-translate: refusing to fetch into /' >&2
     return 1

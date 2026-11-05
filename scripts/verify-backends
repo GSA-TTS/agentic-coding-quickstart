@@ -300,51 +300,92 @@ fi
 # secret set`) reaches it unchanged, and a regular-file reader provides the live
 # view. Its byte-count snapshots bound each drain even if a daemon keeps writing.
 #
+# Read a bounded byte count from a regular-file descriptor, without decoding
+# bytes in shell variables. Both dd calls share the same input file offset.
+_capture_bytes() {
+  local bytes="$1"
+  if [ "$bytes" -ge 4096 ]; then
+    dd bs=4096 count=$((bytes / 4096)) 2>/dev/null || return 1
+  fi
+  if [ "$((bytes % 4096))" -gt 0 ]; then
+    dd bs=1 count=$((bytes % 4096)) 2>/dev/null || return 1
+  fi
+  return 0
+}
+
+_capture_size() {
+  local size
+  size=$(wc -c <"$1") || return 1
+  size=${size//[[:space:]]/}
+  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$size"
+}
+
+_capture_stream() {
+  local out="$1" offset=0 done=0 size
+  while :; do
+    size=$(_capture_size "$out") || return 1
+    # Recheck after sizing, so a published cutoff supersedes the live snapshot.
+    if [ -f "$out.done" ]; then
+      IFS= read -r size <"$out.done" || return 1
+      case "$size" in ''|*[!0-9]*) return 1 ;; esac
+      done=1
+    fi
+    if [ "$size" -gt "$offset" ]; then
+      _capture_bytes "$((size - offset))" <&3 || return 1
+      offset=$size
+    fi
+    # Bytes already streamed during publication cannot be recalled. Only that
+    # live race may include post-cutoff daemon output; the final read never does.
+    [ "$done" -eq 0 ] || return 0
+    sleep 0.1
+  done
+}
+
 # Every capture in this script MUST go through here. A second hand-rolled
 # `$( ... | tee )` would reintroduce exactly the hang this replaced.
 _run_captured() {
-  local _rc _out _reader_pid=""
+  local _rc _out _cutoff _failed=0 _reader_pid=""
   # Clear the previous step's capture FIRST. Otherwise an early return below
   # leaves LAST_OUT holding the PRIOR step's output, and a caller that dumps
   # LAST_OUT on failure would print a stale, unrelated transcript.
   LAST_OUT=""
-  _out=$(mktemp "${VERIFY_STATE}/run-captured.XXXXXX") || return 1
-  : >"$_out"
+  _out=$(mktemp "${VERIFY_STATE}/run-captured.XXXXXX") || {
+    echo 'verify-backends: output capture failed' >&2; return 1;
+  }
+  # Reserve the completion inode before starting the producer.
+  # Rename publishes completion atomically, with no post-producer inode allocation.
+  if ! { : >"$_out.pending"; } 2>/dev/null; then
+    rm -f "$_out" "$_out.pending"
+    echo 'verify-backends: output capture failed' >&2
+    return 1
+  fi
   if [ -n "$VERBOSE" ]; then
-    (
-      _offset=0
-      while :; do
-        # Check completion BEFORE sizing: the final snapshot must include every
-        # producer write. An open daemon descriptor never delays completion.
-        _done=0
-        [ ! -f "$_out.done" ] || _done=1
-        _size=$(wc -c <"$_out") || exit 1
-        _bytes=$((_size - _offset))
-        if [ "$_bytes" -gt 0 ]; then
-          # Both dd calls share one open file offset. No shell string decoding,
-          # line buffering, replay, or lost final fragment (including NUL bytes).
-          if [ "$_bytes" -ge 4096 ]; then
-            dd bs=4096 count=$((_bytes / 4096)) <&3 2>/dev/null || exit 1
-          fi
-          if [ "$((_bytes % 4096))" -gt 0 ]; then
-            dd bs=1 count=$((_bytes % 4096)) <&3 2>/dev/null || exit 1
-          fi
-          _offset=$_size
-        fi
-        [ "$_done" -eq 0 ] || break
-        sleep 0.1
-      done
-    ) 3<"$_out" >&2 &
+    _capture_stream "$_out" 3<"$_out" >&2 2>/dev/null &
     _reader_pid=$!
   fi
   "$@" >"$_out" 2>&1
   _rc=$?
+  _cutoff=$(_capture_size "$_out" 2>/dev/null) || _failed=1
   if [ -n "$_reader_pid" ]; then
-    : >"$_out.done"
-    wait "$_reader_pid" 2>/dev/null || true
+    if [ "$_failed" -ne 0 ] ||
+       ! { printf '%s\n' "$_cutoff" >"$_out.pending" &&
+           mv -f "$_out.pending" "$_out.done"; } 2>/dev/null; then
+      _failed=1
+      kill "$_reader_pid" 2>/dev/null || true
+    fi
+    wait "$_reader_pid" 2>/dev/null || _failed=1
   fi
-  LAST_OUT=$(cat "$_out")
-  rm -f "$_out" "$_out.done" 2>/dev/null || true
+  case "${_cutoff:-}" in ''|*[!0-9]*) _failed=1 ;; esac
+  if [ "$_failed" -eq 0 ]; then
+    LAST_OUT=$(_capture_bytes "$_cutoff" <"$_out" 2>/dev/null) || _failed=1
+  fi
+  rm -f "$_out" "$_out.pending" "$_out.done" 2>/dev/null || true
+  if [ "$_failed" -ne 0 ]; then
+    LAST_OUT=""
+    echo 'verify-backends: output capture failed' >&2
+    [ "$_rc" -ne 0 ] || _rc=1
+  fi
   # Normalize CRLF -> LF in the captured output. Guest command output reaches us
   # over msb's PTY/ssh transport, which terminates lines with CRLF; the trailing
   # CR survives into LAST_OUT and silently breaks downstream parses that compare

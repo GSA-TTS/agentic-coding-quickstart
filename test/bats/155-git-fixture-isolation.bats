@@ -159,6 +159,35 @@ _mk_sentinel_repo() { # PATH
   refute [ -e "$bare/.git" ]
 }
 
+@test "kit fetch: newline destination cannot replace its stripped sibling" {
+  local sibling="$STUBDIR/payload" dest
+  mkdir -p "$sibling"
+  printf 'keep sibling\n' > "$sibling/sentinel"
+  for dest in "$sibling"$'\n' "$STUBDIR/embedded"$'\n'"/child"; do
+    run _kit_fetch_destination "$dest"
+    assert_failure
+    assert_output 'kit-translate: refusing to fetch into a newline-bearing destination'
+    refute [ -e "$dest" ]
+    assert_equal "$(cat "$sibling/sentinel")" 'keep sibling'
+  done
+  refute [ -e "$STUBDIR/embedded"$'\n' ]
+}
+
+@test "kit fetch: physical ancestor newline is rejected before mkdir or sibling inspection" {
+  local sibling="$STUBDIR/physical" physical="$STUBDIR/physical"$'\n'
+  mkdir -p "$sibling" "$physical"
+  printf 'keep sibling\n' > "$sibling/sentinel"
+  printf 'keep target\n' > "$physical/sentinel"
+  ln -s "$physical" "$STUBDIR/alias"
+  run _kit_fetch_destination "$STUBDIR/alias/new/child"
+  assert_failure
+  assert_output 'kit-translate: refusing to fetch into a newline-bearing destination'
+  refute [ -e "$physical/new" ]
+  refute [ -e "$sibling/new" ]
+  assert_equal "$(cat "$sibling/sentinel")" 'keep sibling'
+  assert_equal "$(cat "$physical/sentinel")" 'keep target'
+}
+
 @test "kit fetch: refuses a symlink into bare repository metadata" {
   local bare="$STUBDIR/empty.git" alias="$STUBDIR/alias"
   git init -q --bare "$bare"
