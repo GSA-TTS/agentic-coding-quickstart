@@ -81,6 +81,8 @@ This project operates under professional standards of conduct. All contributors:
 | `install.sh`                        | One-line `curl \| sh` installer (auto-selects brew/npm/clone; direct `sh install.sh` still installs the default release tag from the repo, not the current checkout) |
 | `scripts/rotate-apikey`             | Rotate your USAi API key secret (`acq usai-rotate-api-key`) |
 | `scripts/test-acq-bats`             | Offline unit suite for acq (bats-core) |
+| `scripts/test-acq-bash32`           | Same suite, or a syntax preflight, under a verified Bash 3.2.57 (helpers: `scan-heredoc-subst.py`, `fetch-bash32-oci.py`) |
+| `scripts/bats-shard`                | Picks the `test/bats` files for shard `I/N` (used by `ACQ_BATS_SHARD=I/N`) |
 | `scripts/verify-backends`           | Live end-to-end backend verification (needs Docker or KVM) |
 | `.pre-commit-config.yaml`           | Optional pre-commit hooks (secret detection, file hygiene) |
 | `AGENTS.md`                         | Rules for working **on this quickstart repo**              |
@@ -199,11 +201,32 @@ network), built on [bats-core](https://github.com/bats-core/bats-core) (ADR-0025
   ./scripts/test-acq-bats --timing test/bats/90-sbx-startup-kit.bats
   ```
 
+  To run only part of the suite, set `ACQ_BATS_SHARD=I/N`, e.g. `ACQ_BATS_SHARD=2/3
+  ./scripts/test-acq-bats`. The bash 3.2 CI job uses this to split the suite across
+  a matrix of three shard legs (ADR-0039).
+  `scripts/bats-shard` derives each shard from the `.bats` files on disk (balanced
+  by `@test` count; no checked-in table), so a new test file joins a shard
+  automatically, and an invalid spec or empty shard fails closed with exit 2.
+
   Timing mode reports the worker count and Bats' per-test elapsed time, including
   setup and teardown. Explicit file/flag arguments still pass directly to Bats;
   they do not implicitly enable parallelism. CI enables timing and verbose
   pre-commit output so successful runs retain measurements. The fallback buffers
   output per file, so log-arrival timestamps are not test durations.
+
+  `scripts/summarize-bats-timing` turns the timing output into a Markdown table
+  (slowest tests and files, summed vs wall time, margin to a job timeout) and a
+  JSON record for comparing runs. It is advisory and always exits 0. Run it with
+  `ACQ_BATS_TIMING=1 ./scripts/test-acq-bats 2>&1 | tee bats.log` and then
+  `python3 scripts/summarize-bats-timing --log bats.log --timeout-minutes 25`.
+  Files are attributed by matching test names against `test/bats/*.bats`.
+  It reads both timing formats the pinned bats prints: `ok N name in 123ms`
+  (plain `bats --timing`, `--jobs`, and the xargs fallback) and
+  `ok N name # in 123 ms` (the `tap` formatter behind `--report-formatter`).
+  Real captures live in `test/bats/fixtures/` and are checked in
+  `test/bats/155-summarize-bats-timing.bats`. The tool is split into
+  `scripts/summarize-bats-timing` (entry point) and `scripts/bats_timing_core.py` /
+  `scripts/bats_timing_render.py` to stay within the size limits in Development Standards.
 
   The shared harness uses an offline Git transport fixture for the exact pinned
   Patterns kit fetch. Local fixture repositories still use real Git; unhandled
@@ -241,6 +264,14 @@ network), built on [bats-core](https://github.com/bats-core/bats-core) (ADR-0025
   > `~/.local/bin/env`), the whole suite exits **0 having run nothing** — a
   > silent false green. If `./scripts/test-acq-bats` prints no TAP output, run
   > it as `PATH="/usr/bin:$PATH" ./scripts/test-acq-bats` and compare.
+
+**Check Bash 3.2 compatibility before pushing.** macOS ships Bash 3.2.57 and the CI
+gate runs the suite under it, sharded across a matrix (ADR-0039). Get the same
+feedback locally with `scripts/test-acq-bash32 --syntax` (seconds) or
+`scripts/test-acq-bash32 [test/bats/file.bats ...]` (focused or full suite under a
+verified 3.2.57; set `ACQ_BASH32=/path/to/bash` or run `--install`). It checks the
+bash interpreter only, not BSD/macOS utilities; CI stays authoritative. See
+[`docs/howto/bash32-testing.md`](docs/howto/bash32-testing.md).
 
 To verify the backends end-to-end against the **real** toolchain (requires a
 host that can create sandboxes — Docker for sbx, or KVM for msb):

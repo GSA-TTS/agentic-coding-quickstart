@@ -18,18 +18,18 @@
 #   - 3.2.57 built against glibc on the runner is the exact version macOS ships;
 #     the docker `bash:3.2` image is musl (aarch64-unknown-linux-musl), a
 #     different libc, and a digest-pinned image is content-pinned but not
-#     signer-authenticated (see ADR-0039, which also records why the
-#     Docker-Hub fetch in scripts/fetch-bash32-oci.py is a local-dev
-#     convenience and not used here).
+#     signer-authenticated (ADR-0039 records why the Docker Hub fetch in
+#     scripts/fetch-bash32-oci.py is a local-development convenience and is
+#     not used here).
 #   - The suite needs real git + python3 + coreutils (git-identity, GitHub
 #     down-scoping, and the AF_UNIX socket tests). ubuntu-latest already has all
 #     three, so nothing is stubbed/SKIPped; the Alpine image would need a
 #     network `apk add`.
 #
-# Shape of the run (ADR-0039): `changes` -> `prepare-bash32` (builds or
-# restores the interpreter ONCE and publishes it as a sha256-verified run
-# artifact) -> `test-acq-bash32` (a matrix of shard legs, each running its share
-# of test/bats under that interpreter) -> `gate` (the required check).
+# Shape of the run (ADR-0039): `changes` -> `prepare-bash32` (restores or
+# builds the interpreter ONCE and publishes it as a sha256-checked run artifact)
+# -> `test-acq-bash32` (a matrix of shard legs, each running its share of
+# test/bats under that interpreter) -> `gate` (the required check).
 #
 # Supply-chain: the source tarball is authenticated with GNU's detached OpenPGP
 # signature, trust-anchored to Chet Ramey's release-signing key by full
@@ -103,7 +103,8 @@ env:
 jobs:
   # Cheap relevance check: does the PR or merge-group diff touch anything the bash 3.2
   # interpreter-build + acq-offline-suite job actually needs to re-verify?
-  # Mirrors the path list the old workflow-level `paths:` filter encoded.
+  # The path list started as the old workflow-level `paths:` filter and now
+  # covers every input of the job below (see the comment at the `git diff`).
   # Uses a plain `git diff --name-only`, matching the existing in-repo
   # precedent in markdown-quality.yml's link-check job, rather than adding a
   # marketplace paths-filter action — consistent with this repo's minimal-
@@ -138,17 +139,47 @@ jobs:
             exit 1
           fi
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          # Every input the build + suite job reads must be listed: an unlisted
+          # file lets a PR skip the real bash 3.2 run while the gate stays green.
+          # test/bats/158-bash32-relevance-paths.bats pins this list; keep one
+          # quoted pathspec per line. test/vendor matches the bats submodule
+          # pins (a gitlink change reports as the submodule path).
           changed="$(git diff --name-only "$BASE_SHA" -- \
             'acq' \
             'acq.backends' \
+            'acq.cmd' \
+            'acq.ps1' \
+            'install.sh' \
+            'install.ps1' \
+            'README.md' \
+            'AGENTS.md' \
             'scripts/test-acq-lib.sh' \
             'scripts/test-acq-bats' \
-            'scripts/bats-shard' \
-            'scripts/summarize-bats-timing' \
             'scripts/test-acq-bash32' \
-            'scripts/scan-heredoc-subst.py' \
+            'scripts/bats-shard' \
             'scripts/fetch-bash32-oci.py' \
+            'scripts/scan-heredoc-subst.py' \
+            'scripts/bats_timing_core.py' \
+            'scripts/bats_timing_render.py' \
+            'scripts/summarize-bats-timing' \
+            'scripts/run-shellcheck' \
+            'scripts/fix-exec-bits' \
+            'scripts/verify-backends' \
+            'scripts/qualify-msb-ro-mount' \
+            'scripts/rotate-apikey' \
+            'scripts/probe-msb-node-startup' \
+            'scripts/test-probe-msb-node-startup.py' \
+            'scripts/setup-provider-input-validator' \
+            'scripts/install-provider-input-wheelhouse' \
+            'scripts/provider-input-validator-requirements.txt' \
+            'scripts/provider-input-validator-requirements-linux.txt' \
+            'scripts/provider-input-validator-requirements-macos.txt' \
+            'scripts/provider-input-validator-requirements-windows.txt' \
             'test/bats' \
+            'test/vendor' \
+            '.gitmodules' \
+            '.github/keys/chet-ramey-bash-release-signing-key.asc' \
+            '.github/workflows/release.yml' \
             '.github/workflows/bash32-compat.yml')"
           if [ -n "$changed" ]; then
             echo "relevant=true" >>"$GITHUB_OUTPUT"
@@ -160,15 +191,16 @@ jobs:
           fi
 
   # Provide the bash 3.2.57 interpreter ONCE per run, for all shard legs.
-  # This job is the only one that touches the actions/cache entry (so there is
-  # no concurrent-save race) and the only one that can compile: it restores the
-  # cached build or builds from source with the OpenPGP-verified tarball, then
-  # packs /opt/bash32 into a tarball and hands THAT to the legs as a run
-  # artifact, with its sha256 as a job output. A failed upload fails this job,
-  # and a leg that cannot download or verify the tarball fails closed; no leg
-  # ever falls back to another bash. Why a source build and not the Docker Hub
-  # bash:3.2.57 image, and why an artifact and not a per-leg cache restore:
-  # docs/adr/0039-bash32-ci-shard-matrix-and-interpreter-handoff.md.
+  # This is the only job that touches the actions/cache entry (so there is no
+  # concurrent-save race) and the only one that compiles: it restores the cached
+  # build or builds from source with the OpenPGP-verified tarball, then packs
+  # /opt/bash32 into a tarball and hands THAT to the legs as a run artifact, with
+  # its sha256 as a job output. A merge-group run always misses the cache (caches
+  # are per ref), so the compile cost is paid once there instead of per leg. A
+  # failed upload fails this job, and a leg that cannot download or verify the
+  # tarball fails closed; no leg ever falls back to another bash. Why a source
+  # build and not the Docker Hub bash:3.2.57 image, and why an artifact and not a
+  # per-leg cache restore: docs/adr/0039-bash32-ci-shard-matrix-and-interpreter-handoff.md.
   prepare-bash32:
     name: Prepare bash 3.2.57 interpreter
     needs: changes
@@ -183,11 +215,13 @@ jobs:
           persist-credentials: false
 
       # Cache the built interpreter so the compile only happens on a version bump.
+      # The -gnu89 suffix is the build recipe (see the build step): bump it when
+      # the compiler flags change so a binary built the old way is never reused.
       - id: cache-bash32
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /opt/bash32
-          key: bash32-${{ runner.os }}-${{ env.BASH32_VERSION }}
+          key: bash32-${{ runner.os }}-${{ env.BASH32_VERSION }}-gnu89
 
       - name: Build bash ${{ env.BASH32_VERSION }} from source
         if: steps.cache-bash32.outputs.cache-hit != 'true'
@@ -239,8 +273,16 @@ jobs:
 
           tar -xzf "$tarball"
           cd "bash-${BASH32_VERSION}"
-          # bash 3.2.57 (2007) predates modern GCC defaults; relax the two
-          # errors-by-default (implicit function/int) so it configures & builds.
+          # bash 3.2.57 (2007) is pre-ANSI K&R C and predates modern GCC
+          # defaults. GCC 15 (ubuntu-26.04) defaults to -std=gnu23, where an
+          # empty parameter list `()` means `(void)` ("too many arguments to
+          # function 'list_reverse'"), and GCC 14+ makes `return;` in an int
+          # function an error in C99+ modes (gnu89 keeps it a warning). Pin the
+          # language via CC, not CFLAGS: bash builds helper tools (mkbuiltins,
+          # ...) with CC_FOR_BUILD=$(CC) and CFLAGS_FOR_BUILD, which ignore
+          # CFLAGS. gnu89 also keeps configure's RETSIGTYPE=void/VOID_SIGHANDLER
+          # answers (gnu23 flips them). The two -Wno flags only cut noise.
+          CC="gcc -std=gnu89" \
           CFLAGS="-Wno-implicit-function-declaration -Wno-implicit-int" \
             ./configure --prefix=/opt/bash32
           make -j"$(nproc)"
@@ -269,8 +311,8 @@ jobs:
           name: bash32-interpreter
           path: ${{ runner.temp }}/bash32.tar.gz
           if-no-files-found: error
-          # Not keyed by run_attempt: "re-run failed jobs" re-runs only the legs
-          # and must still find this attempt-1 artifact (its sha256 output is
+          # Not keyed by run_attempt: "Re-run failed jobs" re-runs only the legs
+          # and must still find this attempt's artifact (its sha256 output is
           # preserved too). Short retention; after it expires a leg fails closed
           # and a full re-run rebuilds it.
           retention-days: 2
@@ -281,7 +323,7 @@ jobs:
   # from test/bats at run time, so new test files are included automatically; the
   # shard count is the length of `matrix.shard` and every leg derives "I/N" from
   # it, so there is no second number to keep in sync. Legs are named
-  # "... (build N/M)" — deliberately NOT the required context — and `gate`
+  # "... (build N/M)" -- deliberately NOT the required context -- and `gate`
   # (below) aggregates them. Only runs when `changes` found a relevant diff.
   # Renamed from the required-check name (which lives on `gate`) to avoid two
   # jobs in one run racing to post the same context.
@@ -304,7 +346,7 @@ jobs:
           persist-credentials: false
           # The suite runs under bats-core, vendored as submodules.
           submodules: true
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
 

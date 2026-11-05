@@ -594,7 +594,7 @@ interpreter built once, then a matrix of shard legs, each with a timing summary
 with `scripts/test-acq-bash32` (ADR-0038, `docs/howto/bash32-testing.md`). The
 workflow's trust model (signer-authenticated source build) is not interchangeable
 with the local convenience route (digest-pinned Docker Hub image); do not switch CI
-to it without a new ADR. Diagnosis: `docs/KNOWN_FAILURE_MODES.md` section 50.
+to it without a new ADR. Diagnosis: `docs/KNOWN_FAILURE_MODES.md` section 52.
 
 **ADR location:** `docs/adr/`
 

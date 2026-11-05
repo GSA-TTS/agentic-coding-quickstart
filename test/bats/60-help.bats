@@ -99,12 +99,29 @@ load 'helper'
     'version|acq version — show acq version'
     'doctor|acq doctor — backend health check'
   )
+  # Each acq invocation spends ~1s in its exit-time kit-fetch guardian teardown,
+  # which is wall-clock waiting, not CPU. The invocations are independent, so
+  # start them all and assert each result afterwards; every verb is still run
+  # and checked individually.
+  local i=0 pids=() c status
+  for c in "${cases[@]}"; do
+    verb="${c%%|*}"
+    ( rc=0
+      env ACQ_BACKEND=msb "$ACQ" "$verb" --help > "$STUBDIR/help-$i.out" 2>&1 || rc=$?
+      echo "$rc" > "$STUBDIR/help-$i.rc" ) &
+    pids+=("$!")
+    i=$((i + 1))
+  done
+  wait "${pids[@]}"
+  i=0
   for c in "${cases[@]}"; do
     verb="${c%%|*}"; sub="${c#*|}"
-    run env ACQ_BACKEND=msb "$ACQ" "$verb" --help
-    assert_success
+    status=$(cat "$STUBDIR/help-$i.rc")
+    output=$(cat "$STUBDIR/help-$i.out")
+    [ "$status" -eq 0 ] || { echo "acq $verb --help exited $status" >&2; return 1; }
     assert_output --partial "$sub"
     refute_output --partial 'Global flags (before the subcommand):'
+    i=$((i + 1))
   done
 }
 

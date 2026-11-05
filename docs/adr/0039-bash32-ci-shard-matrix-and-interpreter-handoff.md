@@ -20,17 +20,19 @@ related_files: [".github/workflows/bash32-compat.yml", "scripts/bats-shard", "sc
 ## Context and Problem Statement
 
 The required check `acq offline suite under bash 3.2` runs the whole offline suite
-(about 1,060 tests in 60 files, and growing) under a bash 3.2.57 built from source,
-in one job. The same code took 8.5 to 16 minutes depending on runner speed, and a
+(about 1,100 tests in 66 files, and growing) under a bash 3.2.57 built from source,
+in one job. The same code took 9 to 18 minutes depending on runner speed, and a
 merge-queue run was cancelled at the old 15-minute limit with no failing test. The
-suite already runs files in parallel with `xargs -P`, but a hosted runner has two
-cores, so the longest files bound the wall time.
+suite already runs files in parallel with `xargs -P` (4 workers in the logged
+runs), so the longest files bound the wall time. The compile is not the cost: on
+recent runs it takes 30 to 40 seconds, against 540 to 1,040 seconds for the suite.
 
 Splitting the suite across a job matrix fixes that, but it raises a provisioning
 question. Today the one job restores or builds the interpreter itself
-(`actions/cache`). With N parallel legs that means either N source builds on a cold
-cache, all trying to save the same cache key, or a different way to get the
-interpreter to each leg. The local runner added in ADR-0038 also has a digest-pinned
+(`actions/cache`). A merge-queue run always misses that cache (caches are scoped to
+a ref, and the queue's temporary refs have none), so every queue run compiles. With
+N parallel legs that means N source builds, all trying to save the same cache key,
+or a different way to get the interpreter to each leg. The local runner added in ADR-0038 also has a digest-pinned
 Docker Hub route (`scripts/fetch-bash32-oci.py`, no compile); the question is
 whether CI should use it.
 
@@ -62,9 +64,12 @@ is recorded here.
 
 Chosen: **option 3**, together with a 3-leg matrix.
 
-- `changes` is unchanged (relevance filter; new scripts added to its path list).
+- `changes` is unchanged (its relevance list is pinned by
+  `test/bats/158-bash32-relevance-paths.bats`).
 - `prepare-bash32` restores the cached build or builds from source with the same
-  signature-verified procedure as before, confirms `BASH_VERSION` is exactly
+  signature-verified procedure as before (including the `gnu89` compiler pin and the
+  matching `-gnu89` cache-key suffix, pinned by
+  `test/bats/160-bash32-build-toolchain.bats`), confirms `BASH_VERSION` is exactly
   `3.2.57`, packs `/opt/bash32` into a tarball, and uploads it as the run artifact
   `bash32-interpreter`. Its sha256 is a job output. It is the only job that touches
   the cache entry, so there is no concurrent-save race.
@@ -86,9 +91,9 @@ Chosen: **option 3**, together with a 3-leg matrix.
 
 Why not the others:
 
-- **Option 1** triples the 47-second build on a cold cache and makes three jobs race
-  to save one cache key (the losers only warn, so it is wasteful rather than broken,
-  but it is exactly the race to remove).
+- **Option 1** triples the roughly 35-second build on every cache miss (every merge
+  queue run) and makes three jobs race to save one cache key (the losers only warn,
+  so it is wasteful rather than broken, but it is exactly the race to remove).
 - **Option 2** is rejected for CI, kept as the local convenience in ADR-0038:
   - *Authentication.* The source route verifies Chet Ramey's detached signature
     against a key pinned by full fingerprint, so it authenticates the signer. The
@@ -127,25 +132,35 @@ two days; after that a leg fails closed and a full re-run rebuilds it.
 
 Good:
 
-- Estimated wall time per shard, from logged per-file timings and a 4-worker
-  scheduling simulation: about 2.8 to 3.3 minutes of test time on a fast runner and
-  4.3 to 5.6 minutes on a slow one, against 8.2 and 15 minutes unsharded. A leg also
-  spends about a minute on checkout, submodules, Python, the artifact download and
-  the validator checkout (the logged unsharded job spent about a minute before its
-  first test), and the prepare job takes about a minute with a warm cache (about 47
-  seconds longer on a cold one). End to end that is roughly 5 to 6 minutes (fast)
-  and 7 to 8 minutes (slow), excluding queue time. Each leg keeps the 25-minute
-  timeout.
-- The cache race is gone, the interpreter is built at most once per run, and no leg
-  depends on a GNU mirror or on Docker Hub.
+- Estimated critical path, from the recorded jobs of recent runs of the single-job
+  workflow (suite step 543 to 688 seconds on merge-queue runs and 911 to 1,036
+  seconds on slow pull-request runners; build step 27 to 38 seconds on a cache miss;
+  about 15 seconds of other setup) and from the shard balance measured earlier (the
+  slowest of three shards ran about 40 to 42 percent of the unsharded suite time under
+  the same 4-worker schedule):
+  - Merge-queue run, cache miss: `changes` about 5 seconds, then `prepare-bash32`
+    about 55 to 65 seconds (checkout, compile, pack, upload), then the slowest leg:
+    about 25 seconds of setup plus 230 to 290 seconds of tests, then the gate. Roughly
+    5.5 to 6.5 minutes, against 10 to 12 minutes now.
+  - Pull-request run, cache hit, fast runner: `prepare-bash32` about 30 seconds, so
+    roughly 5 to 5.5 minutes. On a slow runner the legs take 365 to 415 seconds of
+    tests, so roughly 8 to 9 minutes against 16 to 18 now.
+  - These are extrapolations from per-step timings, not a measurement of the new
+    workflow; the first real runs replace them. Each leg keeps the 25-minute timeout.
+- The cache race is gone, the interpreter is built at most once per run (including on
+  the merge queue, where the cache always misses), and no leg depends on a GNU mirror
+  or on Docker Hub.
 - The shard-selection script derives shards from the files on disk, so new test files
   join a shard automatically; balance is by `@test` count and may drift from wall
   time, which the per-leg timing summaries make visible.
 
 Bad / to watch:
 
-- One more job on the critical path (`prepare-bash32`, about a minute with a warm
-  cache) and an extra artifact upload and download per run.
+- One more job on the critical path (`prepare-bash32`, about 30 seconds on a cache hit
+  and about a minute on a miss) and an extra artifact upload and download per run.
+  The saving is real but not a factor of three: the fixed per-run cost (relevance
+  check, prepare, per-leg setup) is about 1.5 minutes, and the slowest shard is about
+  40 percent of the suite rather than a third.
 - Three runners' setup cost (checkout with submodules, `setup-python`, pip) is paid
   three times; it is cheap, but total runner minutes rise.
 - The required check is still one name, but a failing leg now needs its own job log;
@@ -162,16 +177,17 @@ Compliance:
   workflow change is reviewed as CI configuration (CM-3) and needs a human with the
   `workflow` scope to push it.
 
-## Prerequisites
+## Dependencies
 
-The workflow relies on `scripts/bats-shard` and `ACQ_BATS_SHARD` support in
-`scripts/test-acq-bats`, on `scripts/summarize-bats-timing`, and on the ADR-0038
-local runner it cross-references. Land those first; the run step fails closed if a
-leg's runner did not report running its shard.
+The workflow uses `scripts/bats-shard` and the `ACQ_BATS_SHARD` support in
+`scripts/test-acq-bats`, and `scripts/summarize-bats-timing`. The run step fails
+closed if a leg's runner did not report running its shard, so a checkout without
+that support cannot silently run the whole suite on every leg.
 
 ## Links
 
 - [ADR-0025](0025-adopt-bats-core-for-test-suite.md): the bats suite and its parallelism.
-- [ADR-0038](0038-local-bash32-test-runner.md): the local runner and its OCI route.
+- [ADR-0038](0038-local-bash32-test-runner.md): the local runner and its OCI route
+  (not duplicated here).
 - [Known failure modes](../KNOWN_FAILURE_MODES.md): the required-check gate pattern and
   how to diagnose a shard or interpreter hand-off failure.

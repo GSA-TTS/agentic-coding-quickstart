@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-10-29"
+last_updated: "2026-11-05"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -13,6 +13,49 @@ keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 This document captures real-world failure patterns when using Docker SBX + USAi + agent frameworks. If you're hitting something weird, it's probably in here.
 
 ---
+
+## Read-only host-config probe misclassifies a denied write
+
+### Symptoms and cause
+
+Readonly kit staging reports that the host-config mount looks writable even
+though host `msb inspect` records a read-only bind and direct writes fail with
+`Read-only file system`. A POSIX shell can exit with status 2 when redirection
+on the special builtin `:` fails. The original probe used that same status to
+signal a successful write, confusing denial with writability.
+
+`acq.backends/msb.sh::_acq_msb_host_config_mount_probe` now isolates the write
+attempt in a subshell. Only an actual successful write selects status 2;
+denial returns 0, while missing/inaccessible mounts and transport errors remain
+refusals. Host mount-record, version and platform checks still apply. The
+real-shell regression is in `test/bats/84-msb-ro-mount-qualification.bats`.
+
+Measured with MSB 0.7.11 on macOS ARM64: the root guest write to a readonly
+canary was denied, a writable control succeeded, and the host sentinel remained
+unchanged. With the fixed probe, the existing OCI kit installed Podman and
+passed its rootless startup self-test. This does not qualify all inner-container
+isolation controls or prove general read-only enforcement across platforms.
+
+## Rootless nested Podman lacks cgroup delegation
+
+The OCI kit may install successfully and pass its storage self-test while an
+inner container with explicit memory/CPU/PID limits still cannot start. In the
+measured MSB 0.7.11 guest, Podman 5.7.0 reported cgroup v2, cgroupfs and an empty
+delegated controller list. The bounded network-off test was refused:
+
+```text
+unable to apply cgroup configuration: rootless needs no limits + no cgrouppath
+when no permission is granted for cgroups
+```
+
+Do not remove mandatory limits to label this a successful isolated runner.
+The outer sandbox owner must provide a reviewed cgroup-delegation path, or use
+another qualified backend, before rootless inner containers can satisfy that
+resource contract. Reopen qualification when delegation is available; verify
+effective memory, CPU and PID enforcement alongside network/source/credential
+separation and cleanup. Kit installation and rootless storage readiness alone
+are insufficient evidence. No host engine socket or privileged-host workaround
+is required or authorized by this guidance.
 
 ## Provider-input validator dependencies are missing
 
@@ -1940,7 +1983,7 @@ For a single sandbox, pass the pinned kit ref with `--kit` or include it in
 `ACQ_EXTRA_KITS`:
 
 ```bash
-acq run opencode . --kit 'git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=a1206c52ec82ae7ce080ad44a6e6ac6f951e6d20&dir=integrations/isolation/acq-kits/oci-engine'
+acq run opencode . --kit 'git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=941a286f912b99475429c3c00db49a99af5b241e&dir=integrations/isolation/acq-kits/oci-engine'
 ```
 
 Existing sandboxes that were created before this change keep whatever podman
@@ -2516,7 +2559,7 @@ dependabot bump) needed an admin-bypass merge to get past it.
 ### Fix
 
 Removed the workflow-level `paths:` filter so the workflow always triggers,
-and split the single job into a chain (the job set has since grown; see section 50 and
+and split the single job into a chain (the job set has since grown; see section 52 and
 ADR-0039 for the current shape):
 1. `changes` — a cheap job that computes relevance via `git diff --name-only`
    against the PR base (same technique `markdown-quality.yml`'s link-check job
@@ -2542,7 +2585,7 @@ gate's shell logic directly against every `(changes result, test result)`
 combination, confirming it passes only on `(success, success)` and
 `(success, skipped)` and fails on every other combination including the
 failure-laundering case `(failure, skipped)` (the gate has since been extended to the
-three-job form; the same exhaustive check was repeated for it, see section 50).
+three-job form; the same exhaustive check was repeated for it, see section 52).
 
 ### Prevention
 
@@ -2552,51 +2595,12 @@ gate-job pattern. A conditional trigger and "required" are structurally
 incompatible in GitHub Actions; check new required workflows for this before
 adding them to branch protection.
 
----
-
-## 43. A Second Parallel Sandbox From the Same Kit Is Unreachable on Its Published Port (msb)
-
-### Symptoms
-
-- Two sandboxes created from the same kit both start cleanly, with no error.
-- `acq ports` reports the **same** host port for both, e.g.
-  `sandbox 6767 -> host 127.0.0.1:6767` in each.
-- `http://127.0.0.1:6767` serves the **first** sandbox's service. The second
-  sandbox's UI/API is simply unreachable, and nothing said so.
-- Also: a developer already running their own service on that port owns it, and
-  the sandbox's mapping silently loses.
-
-### Root Cause
-
-acq's neutral `publishedPorts` parser defaulted an omitted `host:` to the
-**guest** port, so every sandbox built from one kit requested the same host port.
-msb accepts the duplicate mapping without complaint — first writer wins, the rest
-are inert.
-
-### Fix
-
-Fixed in acq: an entry that omits `host:` now gets a **free** loopback host port
-chosen per sandbox, and an explicitly requested host port that is already in use
-**fails the create** instead of producing a dead mapping. Upgrade acq and
-recreate the sandboxes (`acq rm NAME` then `acq run …`) — the mapping is baked
-into the create arguments, so an existing sandbox keeps its old one.
-
-To pin a predictable host port per sandbox instead of taking the free one:
-
-```bash
-acq run opencode --publish 6868:6767 ~/projects/app-one
-acq run opencode --publish 6869:6767 ~/projects/app-two
-```
-
-`--publish` is msb-only and create-time only. See
-[ADR-0034](adr/0034-host-port-selection-and-publish-override.md).
-
-### Prevention
-
-Never hardcode a published host port in a script — read it back from
-`acq ports NAME`, or request it explicitly with `--publish` and let a contended
-port fail loudly. Note that `acq ports` prints the mapping msb was **asked**
-for, which is not proof that the sandbox owns that host port.
+The `changes` job's path list is the other half of this contract: a file the
+real suite reads but the list omits skips the 3.2 run while the gate stays
+green. Add every new input (script, requirements file, key, submodule pin) to
+the `git diff` pathspecs. `test/bats/158-bash32-relevance-paths.bats` fails when
+a known entry is missing and when a new tracked file is neither listed nor
+declared a non-input.
 
 ---
 
@@ -3185,7 +3189,82 @@ fresh create) is recorded in ADR-0035.
 
 ---
 
-## 50. A Bash 3.2 Shard Leg or the Interpreter Hand-Off Fails (`acq offline suite under bash 3.2`)
+## 50. SBX: Readonly Kit Files Are Guest-Resident Copies (Accepted Residual Risk)
+
+**Status:** Accepted interim state (ADR-0037, Option D). Applies to a kit with
+`files[]` entries marked `readonly: true` (the opt-in `oci-engine` kit in Patterns
+v1.18.0 is the first) on an sbx sandbox.
+
+### Symptoms
+
+```text
+acq(sbx): WARNING: kit '<kit>' marks startup files readonly: <guest paths>
+acq(sbx):   On sbx these are guest-resident copies with NO integrity guarantee
+```
+
+The kit still applies. The warning is printed once per kit on create or kit-add.
+
+### Root Cause
+
+msb stages `readonly: true` files from a read-only host mount. sbx has no validated
+equivalent yet, so the translated kit copies them into the guest, where a
+passwordless-sudo agent can rewrite them before a root startup command runs them.
+
+### Fix / Mitigation
+
+Use the msb backend (`ACQ_BACKEND=msb`) when the tamper-resistance of those files
+matters, or do not enable the kit on sbx. The sbx read-only mount (ADR-0037, Option B)
+is gated on live sbx validation.
+
+---
+
+## 51. A Second Parallel Sandbox From the Same Kit Is Unreachable on Its Published Port (msb)
+
+### Symptoms
+
+- Two sandboxes created from the same kit both start cleanly, with no error.
+- `acq ports` reports the **same** host port for both, e.g.
+  `sandbox 6767 -> host 127.0.0.1:6767` in each.
+- `http://127.0.0.1:6767` serves the **first** sandbox's service. The second
+  sandbox's UI/API is simply unreachable, and nothing said so.
+- Also: a developer already running their own service on that port owns it, and
+  the sandbox's mapping silently loses.
+
+### Root Cause
+
+acq's neutral `publishedPorts` parser defaulted an omitted `host:` to the
+**guest** port, so every sandbox built from one kit requested the same host port.
+msb accepts the duplicate mapping without complaint — first writer wins, the rest
+are inert.
+
+### Fix
+
+Fixed in acq: an entry that omits `host:` now gets a **free** loopback host port
+chosen per sandbox, and an explicitly requested host port that is already in use
+**fails the create** instead of producing a dead mapping. Upgrade acq and
+recreate the sandboxes (`acq rm NAME` then `acq run …`) — the mapping is baked
+into the create arguments, so an existing sandbox keeps its old one.
+
+To pin a predictable host port per sandbox instead of taking the free one:
+
+```bash
+acq run opencode --publish 6868:6767 ~/projects/app-one
+acq run opencode --publish 6869:6767 ~/projects/app-two
+```
+
+`--publish` is msb-only and create-time only. See
+[ADR-0034](adr/0034-host-port-selection-and-publish-override.md).
+
+### Prevention
+
+Never hardcode a published host port in a script — read it back from
+`acq ports NAME`, or request it explicitly with `--publish` and let a contended
+port fail loudly. Note that `acq ports` prints the mapping msb was **asked**
+for, which is not proof that the sandbox owns that host port.
+
+---
+
+## 52. A Bash 3.2 Shard Leg or the Interpreter Hand-Off Fails (`acq offline suite under bash 3.2`)
 
 **Status:** Fail closed by design. Applies to the CI workflow
 `.github/workflows/bash32-compat.yml` (design: ADR-0039).

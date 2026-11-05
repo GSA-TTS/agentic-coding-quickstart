@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""Summarize bats `--timing` TAP output as Markdown plus a JSON record.
+
+Reads the TAP stream scripts/test-acq-bats prints when ACQ_BATS_TIMING=1
+(`ok N <name> in Xms` or `ok N <name> # in X ms`), from a file or stdin, and reports the slowest tests,
+the slowest files, and the margin to the CI job timeout, so a slowdown is
+visible long before it hits the timeout. Python 3 standard library only.
+
+This tool is advisory. It ALWAYS exits 0 (a bad argument, a missing log, or an
+internal error becomes a short note in the summary, never a failed job).
+
+Untrusted text: test names come from repository content and the output is
+rendered Markdown in the Actions UI. Every name is sanitized and escaped before
+it reaches Markdown or JSON, and the only workflow command this tool can print
+(`::warning`) is built from numbers alone, never from the log.
+
+Files are attributed by matching each test name against the `@test` lines in
+--tests-dir (default test/bats): the TAP stream carries no file names, and the
+runner's parallel and fallback paths number tests differently.
+
+Usage:
+  summarize-bats-timing --log bats.log --timeout-minutes 25 \\
+      --summary-file "$GITHUB_STEP_SUMMARY" --json timing.json
+"""
+
+import argparse
+import json
+import math
+import os
+import sys
+
+sys.dont_write_bytecode = True  # keep __pycache__ out of scripts/
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+try:
+    from bats_timing_core import SHARD_RE, Note, Stats, clean, consume, load_name_map
+    from bats_timing_render import build_json, fmt_secs, render, wall_seconds
+except BaseException as exc:  # advisory tool: a broken install must not fail the job
+    sys.stderr.write("summarize-bats-timing: cannot load modules (%s)\n" % type(exc).__name__)
+    sys.stdout.write("## bats timing\n\nThe timing summary could not be produced (module load failed).\n")
+    sys.stdout.flush()
+    os._exit(0)
+
+
+def write_text(path, text, append):
+    try:
+        with open(path, "a" if append else "w", encoding="utf-8") as fh:
+            fh.write(text)
+    except (OSError, UnicodeError) as exc:
+        safe_stderr("summarize-bats-timing: cannot write %s (%s)\n" % (clean(path, 200), type(exc).__name__))
+
+
+def open_input(path):
+    if path in (None, "-"):
+        return sys.stdin
+    try:
+        return open(path, encoding="utf-8", errors="replace")
+    except OSError:
+        raise Note("No bats log was found (the test step may not have started).")
+
+
+def run(args):
+    shard = SHARD_RE.sub("_", args.shard or "all")[:40] or "all"
+    stats = Stats(load_name_map(args.tests_dir))
+    notes = []
+    try:
+        stream = open_input(args.log)
+        try:
+            consume(stream, stats)
+        finally:
+            if stream is not sys.stdin:
+                stream.close()
+    except Note as note:
+        notes.append(str(note))
+    wall = wall_seconds(args, stats)
+    lines = render(args, stats, wall, shard, notes)
+    text = "\n".join(lines) + "\n"
+    if args.summary_file:
+        write_text(args.summary_file, text + "\n", append=True)
+    else:
+        sys.stdout.write(text)
+    if args.json:
+        write_text(args.json, json.dumps(build_json(args, stats, wall, shard), indent=1, allow_nan=False) + "\n", append=False)
+    if wall is not None and args.timeout_minutes and args.warn_fraction > 0:
+        frac = wall / (args.timeout_minutes * 60.0)
+        if frac >= args.warn_fraction:
+            sys.stdout.write(
+                "::warning title=bats suite slow::suite wall time %s is %.0f%% of the %g minute job timeout\n"
+                % (fmt_secs(wall), 100.0 * frac, args.timeout_minutes)
+            )
+
+
+def finite_number(text):
+    value = float(text)
+    if not math.isfinite(value) or value < 0 or value > 1e9:
+        raise ValueError(text)
+    return value
+
+
+class QuietParser(argparse.ArgumentParser):
+    def error(self, message):
+        raise Note("Invalid arguments to summarize-bats-timing; no summary produced.")
+
+
+def parse_args(argv):
+    default_tests = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "test", "bats")
+    p = QuietParser(description="Summarize bats --timing TAP output.", allow_abbrev=False, add_help=False)
+    p.add_argument("--log", default="-", help="TAP log file (default: stdin)")
+    p.add_argument("--tests-dir", default=default_tests, help="directory of .bats files for file attribution")
+    p.add_argument("--timeout-minutes", type=finite_number, default=None, help="job timeout, for the margin")
+    p.add_argument("--warn-fraction", type=finite_number, default=0.7, help="emit ::warning at this fraction of the timeout (0 disables)")
+    p.add_argument("--wall-seconds", type=finite_number, default=None, help="explicit suite wall time")
+    p.add_argument("--start-epoch-file", default=None, help="file with the suite start epoch; the log mtime is the end")
+    p.add_argument("--summary-file", default=None, help="append Markdown here (e.g. $GITHUB_STEP_SUMMARY); default stdout")
+    p.add_argument("--json", default=None, help="write the machine-readable record here")
+    p.add_argument("--shard", default=os.environ.get("ACQ_SHARD_ID") or "all", help="shard label (default $ACQ_SHARD_ID or 'all')")
+    return p.parse_args(argv)
+
+
+def safe_stderr(text):
+    try:
+        sys.stderr.write(text)
+    except Exception:
+        pass
+
+
+def fallback_note(summary_file, text):
+    note = "## bats timing\n\n%s\n" % text
+    if summary_file:
+        write_text(summary_file, note + "\n", append=True)
+    else:
+        try:
+            sys.stdout.write(note)
+        except Exception:
+            pass
+
+
+def argv_value(argv, flag):
+    for i, item in enumerate(argv[:-1]):
+        if item == flag:
+            return argv[i + 1]
+    return None
+
+
+def main(argv):
+    for stream in (sys.stdout, sys.stdin):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    try:
+        run(parse_args(argv))
+    except Note as note:
+        fallback_note(argv_value(argv, "--summary-file"), str(note))
+    except BaseException as exc:  # advisory tool: never fail the job
+        safe_stderr("summarize-bats-timing: internal error (%s)\n" % type(exc).__name__)
+        fallback_note(
+            argv_value(argv, "--summary-file"),
+            "The timing summary could not be produced (%s)." % type(exc).__name__,
+        )
+    try:
+        sys.stdout.flush()
+    except Exception:
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    code = main(sys.argv[1:])
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:
+            pass
+    os._exit(code)

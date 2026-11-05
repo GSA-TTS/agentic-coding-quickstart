@@ -470,6 +470,46 @@ YAML
   [ -f "$output/models/providers/usai/facts.json" ]
 }
 
+@test "pinned Patterns validator accepts and projects neutral catalog capability fields" {
+  [ -n "${ACQ_TEST_PATTERNS_REPO:-}" ] || skip "pinned Patterns checkout is provided by required CI"
+  [ -n "${ACQ_TEST_PROVIDER_INPUT_PYTHON:-}" ] || skip "pinned validator Python is provided by required CI"
+  local release="$ACQ_TEST_PATTERNS_REPO" kit="$STUBDIR/capability-real-kit" root
+  [ "$(git -C "$release" rev-parse HEAD)" = "$PATTERNS_KIT_REF" ]
+  mkdir -p "$kit/provider-input" "$kit/scripts" "$kit/files"
+  cat > "$kit/provider-input.json" <<'JSON'
+{"providerId":"usai","schemaVersion":"acq-provider-input-bundle/v2","providerPath":"models/providers/usai","factsPath":"provider-input/facts.json","normalizerPath":"scripts/normalize","snapshotPath":"files/snapshot.json","credentialEnvNames":["USAI_API_KEY"]}
+JSON
+  cat > "$kit/provider-input/facts.json" <<'JSON'
+{"schemaVersion":"acq-provider-facts/v1","providerId":"usai","apiProtocol":"openai-compatible","host":"api.gsa.usai.gov","baseUrl":"https://api.gsa.usai.gov/api/v1","modelsUrl":"https://api.gsa.usai.gov/api/v1/models","keyEnv":"USAI_API_KEY"}
+JSON
+  cat > "$kit/files/snapshot.json" <<'JSON'
+{"schemaVersion":"acq-neutral-model-catalog/v1","providerId":"usai","models":[{"id":"reasoner","name":"Reasoner","reasoning":true,"inputModalities":["text","image"]},{"id":"plain","name":"Plain","reasoning":false,"inputModalities":["text"]},{"id":"unknown","name":"Unknown"}]}
+JSON
+  printf '#!/bin/sh\nexit 0\n' > "$kit/scripts/normalize"; chmod 755 "$kit/scripts/normalize"
+  cat > "$kit/spec.yaml" <<'YAML'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: usai
+displayName: USAi
+description: USAi provider capability fixture
+caps:
+  network:
+    allow:
+      - api.gsa.usai.gov
+YAML
+  _acq_provider_input_control_plane() { printf '%s\n' "$release"; }
+  KITS=("$kit")
+  ACQ_PROVIDER_INPUT_PYTHON="$ACQ_TEST_PROVIDER_INPUT_PYTHON" \
+    acq_provider_input_prepare sbx capabilityprepare \
+    > "$STUBDIR/prepare.stdout" 2> "$STUBDIR/prepare.stderr"
+  output=$(cat "$STUBDIR/prepare.stdout")
+  grep -Fq 'validated 1 bundle' "$STUBDIR/prepare.stderr"
+  root=$(acq_provider_input_root sbx capabilityprepare)
+  case "$output" in "$root"/generations/generation.*) ;; *) false ;; esac
+  grep -Fq '"inputModalities":["text","image"]' "$output/models/providers/usai/snapshot.json"
+  grep -Fq '"reasoning":true' "$output/models/providers/usai/snapshot.json"
+}
+
 @test "parent exit cannot make a live transaction lock recoverable" {
   local script="$STUBDIR/lock-orchestrator.sh"
   cat > "$script" <<EOF

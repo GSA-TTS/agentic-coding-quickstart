@@ -2175,8 +2175,11 @@ _acq_msb_host_config_mount_probe() {
   _acq_msb_cli exec "$name" -u agent -- sh -c \
     "test -d '$ACQ_HOST_CONFIG_GUEST_DIR' && test -x '$ACQ_HOST_CONFIG_GUEST_DIR'" \
     </dev/null >/dev/null 2>&1 || return 1
+  # A failed redirection on the special builtin ':' terminates some POSIX
+  # shells with status 2. Contain it in a subshell so only a successful write
+  # selects our explicit WRITABLE status; denial returns the probe's status 0.
   _acq_msb_cli exec "$name" -u 0 -- sh -c \
-    '_dir=$1; _tmp="$_dir/.acq-ro-probe.$$"; if : > "$_tmp" 2>/dev/null; then rm -f "$_tmp" 2>/dev/null; exit 2; fi; exit 0' \
+    '_dir=$1; _tmp="$_dir/.acq-ro-probe.$$"; if ( : > "$_tmp" ) 2>/dev/null; then rm -f "$_tmp" 2>/dev/null; exit 2; fi; exit 0' \
     sh "$ACQ_HOST_CONFIG_GUEST_DIR" </dev/null >/dev/null 2>&1
 }
 
@@ -5875,6 +5878,8 @@ _acq_msb_ports_from_inspect() {
     # `?//empty` keeps a missing path from erroring; each port -> "H:G".
     # `|| true`: acq runs under `set -euo pipefail`; a jq that emits nothing (no
     # ports) can still exit non-zero and would otherwise abort this query.
+    # `tr -d '\r'`: a native Windows jq (used from Git Bash) ends each line with
+    # CRLF; a trailing CR would fail the digit guard below and drop the port.
     lines=$(printf '%s' "$json" | jq -r '
       [ ((.active_config.network.ports?) // (.config.network.ports?)
           // .ports? // .portMappings? // .publishedPorts? // [])[]?
@@ -5883,7 +5888,7 @@ _acq_msb_ports_from_inspect() {
             (((.host_port // .hostPort // .host)|tostring) + ":" +
              ((.guest_port // .guestPort // .guest // .container)|tostring))
           else empty end ]
-      | .[]?' 2>/dev/null) || true
+      | .[]?' 2>/dev/null | tr -d '\r') || true
   fi
   if [ -z "$lines" ]; then
     # jq absent/failed: dependency-free. Read the ports array as flat key:value
