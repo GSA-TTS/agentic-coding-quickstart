@@ -74,14 +74,13 @@ test/vendor
 '
 
 # TEMPORARY ALLOWLIST — delete this variable (and the `pending` handling in the
-# existence test) once the file below has landed on main.
+# existence test) once it has stayed empty and nothing needs it.
 # These pathspecs are listed ahead of time (a git pathspec that matches no file
-# is harmless) for a script that only exists on the open bats-sharding change.
-# While absent, the existence check must not demand it. As soon as it EXISTS it
-# must leave this list (see the existence test), so the allowlist cannot outlive
-# the file it covers.
+# is harmless) for scripts that only exist on a not-yet-merged change. While
+# absent, the existence check must not demand them. As soon as one EXISTS it must
+# leave this list (see the existence test), so the allowlist cannot outlive the
+# files it covers. It is empty now that every listed script is on main.
 PENDING_PATHSPECS='
-scripts/bats-shard
 '
 
 # Tracked files that the real suite does NOT read, so they correctly stay out of

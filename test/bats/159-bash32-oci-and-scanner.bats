@@ -214,3 +214,16 @@ _run_install_recording() { # [CC value]; sets $INSTALL_LOG
   assert_failure 2
   assert_output --partial "needs 'no-such-compiler' on PATH"
 }
+
+@test "bash32 --install: the local build recipe matches the CI workflow (same -std pin in CC, same CFLAGS)" {
+  local wf="$REPO_ROOT/.github/workflows/bash32-compat.yml" ci_flags our_flags ci_std our_std
+  ci_flags="$(sed -n 's/^[[:space:]]*CFLAGS="\([^"]*\)" \\$/\1/p' "$wf")"
+  our_flags="$(sed -n 's/.*CFLAGS="\([^"]*\)" \.\/configure.*/\1/p' "$RUNNER")"
+  [ -n "$ci_flags" ] || fail "no CFLAGS=\"...\" line found in the workflow's build step"
+  [ -n "$our_flags" ] || fail "no CFLAGS=\"...\" ./configure found in scripts/test-acq-bash32"
+  [ "$ci_flags" = "$our_flags" ] || fail "CFLAGS differ: workflow '$ci_flags' vs runner '$our_flags'"
+  ci_std="$(sed -n 's/^[[:space:]]*CC="[a-z]* \(-std=[a-z0-9]*\)" \\$/\1/p' "$wf")"
+  our_std="$(sed -n 's/.*CC="\${CC:-cc} \(-std=[a-z0-9]*\)".*/\1/p' "$RUNNER")"
+  [ -n "$ci_std" ] || fail "no CC=\"... -std=...\" line found in the workflow's build step"
+  [ "$ci_std" = "$our_std" ] || fail "C dialect pin differs: workflow '$ci_std' vs runner '$our_std'"
+}
