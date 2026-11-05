@@ -3,10 +3,10 @@ title: "Run the acq suite under Bash 3.2 locally"
 description: "How to catch Bash 3.2.57 (macOS system bash) incompatibilities before CI, with scripts/test-acq-bash32"
 status: canonical
 tier: 2
-last_updated: "2026-10-29"
+last_updated: "2026-11-05"
 audience: "developers"
 keywords: ["bash 3.2", "macos", "bats", "test-acq-bash32", "compatibility", "sandbox"]
-related_files: ["scripts/test-acq-bash32", "scripts/scan-heredoc-subst.py", "scripts/fetch-bash32-oci.py", "test/bats/152-bash32-runner.bats", "test/bats/159-bash32-oci-and-scanner.bats", "docs/adr/0038-local-bash32-test-runner.md", "CONTRIBUTING.md"]
+related_files: ["scripts/test-acq-bash32", "scripts/scan-heredoc-subst.py", "scripts/fetch-bash32-oci.py", "test/bats/152-bash32-runner.bats", "test/bats/159-bash32-oci-and-scanner.bats", "docs/adr/0038-local-bash32-test-runner.md", "docs/adr/0039-bash32-ci-shard-matrix-and-interpreter-handoff.md", "CONTRIBUTING.md"]
 load_priority: "on-demand"
 review_cycle: "quarterly"
 ---
@@ -15,8 +15,9 @@ review_cycle: "quarterly"
 
 macOS ships GNU Bash 3.2.57, so `acq` and its adapters must run on it. Newer bash
 accepts code that 3.2 rejects, so the problem normally shows up only in the CI
-gate ("acq offline suite under bash 3.2", built from source, 9 to 16 minutes per
-round trip). `scripts/test-acq-bash32` gives the same interpreter locally.
+gate ("acq offline suite under bash 3.2"). `scripts/test-acq-bash32` gives the same
+interpreter locally. How the gate itself is built is described in
+[The CI gate](#the-ci-gate) below.
 
 ## Commands
 
@@ -87,6 +88,54 @@ Both install routes reach the network (GNU mirrors, or `auth.docker.io` and
 `registry-1.docker.io`). In an agent session these are outside the project's
 authorized endpoints, so ask the user before running them.
 
+## The CI gate
+
+The required check `acq offline suite under bash 3.2` is a small chain of jobs
+([ADR-0039](../adr/0039-bash32-ci-shard-matrix-and-interpreter-handoff.md)):
+
+1. `changes` decides whether the diff touches anything the suite reads. If not, the
+   rest is skipped and the check still reports (it is posted by the last job).
+2. `prepare-bash32` builds the interpreter once from the signature-verified GNU
+   source, or restores it from the cache, and hands it to the next job as a run
+   artifact with a sha256 check. The build recipe, including the compiler pin, is
+   described under [Get a Bash 3.2.57](#get-a-bash-3257) and in the ADR, not repeated
+   here.
+3. `acq offline suite under bash 3.2 (build N/M)` is a matrix of three legs. Each
+   leg checks the artifact, confirms the interpreter reports exactly `3.2.57`, and
+   runs its share of `test/bats` with `ACQ_BATS_SHARD=<i>/<n>` (the shard count is
+   the length of the matrix, so it is not written anywhere else).
+4. The last job, named exactly `acq offline suite under bash 3.2`, passes only if
+   every leg passed (or the whole run was legitimately skipped); a failed, cancelled
+   or missing leg fails it.
+
+**Reproduce one leg locally.** The shard selection is the same code CI runs:
+
+```sh
+scripts/test-acq-bash32 --which                      # confirm the 3.2.57 interpreter
+ACQ_BATS_SHARD=2/3 scripts/test-acq-bash32           # shard 2 of 3 under bash 3.2
+scripts/bats-shard 2/3                               # just list shard 2's files
+```
+
+`ACQ_BATS_SHARD` is ignored when you pass file arguments, and an invalid spec
+(`0/3`, `4/3`, `x`) or an empty shard exits 2 without running anything. The runner
+prints `test-acq-bats: shard 2/3: <n> file(s)` and the file names first, so you can
+confirm which shard ran.
+
+**Where the timing shows up.** Every leg runs `scripts/summarize-bats-timing` after
+the suite (also when the suite failed or was cancelled). It writes a table to that
+leg's job summary headed `bats timing (shard: <i>of<n>)`: totals, summed test time
+against wall time, the slowest tests and files, and the margin to the job timeout. It
+also uploads the JSON record as the artifact `bats-timing-<i>of<n>-<run attempt>`
+(30 days). It is advisory: it always exits 0 and never changes the job result. To
+produce the same table from a local run, see `CONTRIBUTING.md`.
+
+**What has been measured.** Before sharding, the single job's suite step took 543 to
+688 seconds on merge-queue runs and 911 to 1,036 seconds on slower pull-request
+runners (runs of 2026-11-04 and 2026-11-05), and the interpreter build took 27 to 38
+seconds whenever the cache missed, which is every merge-queue run. The sharded
+timings are not measured yet: ADR-0039 gives an estimate, and the per-leg timing
+artifacts from the first real runs replace it.
+
 ## What each level proves
 
 | Level | Command | Catches |
@@ -94,7 +143,7 @@ authorized endpoints, so ask the user before running them.
 | Heredoc scan | `--lint` | A here-document inside `$( )` or `<( )` whose body has an odd `'` or `"`, an unpaired backtick, or unbalanced parentheses. 3.2 fails at parse time; newer bash does not. |
 | Syntax | `--syntax` | Anything bash 3.2 cannot parse (for example `;&` in `case`), in `acq`, `acq.backends/*.sh`, `install.sh`, bash/sh scripts under `scripts/`, and `test/bats/helper.bash`. |
 | Focused or full bats | file args or none | Runtime differences, such as expanding an empty array under `set -u` (`"${arr[@]}"`), which 3.2 treats as unbound. |
-| CI gate | pull request | The authoritative, source-authenticated check. |
+| CI gate | pull request | The authoritative, source-authenticated check ([The CI gate](#the-ci-gate)). |
 
 The heredoc scan is a best-effort line-based heuristic, not a shell parser. It can
 miss exotic layouts and can report a false positive; `--syntax FILE` asks the real
