@@ -44,6 +44,10 @@ Resolution order (first match wins; each must report `BASH_VERSION` exactly `3.2
 3. `/bin/bash` on macOS.
 4. `/opt/bash32/bin/bash` (the CI location).
 
+When it runs the suite, the runner exports the interpreter it resolved as
+`ACQ_BASH32`, because the tests repoint `HOME` and could not otherwise rediscover
+an interpreter installed in the default cache.
+
 If none exists, install one:
 
 | Situation | Command |
