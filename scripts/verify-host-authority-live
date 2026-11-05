@@ -440,8 +440,7 @@ step_msb_inspect_shape() {
   local id=msb-inspect-shape js
   [ "$MSB_A_OK" -eq 1 ] || { record "$id" BLOCKED "needs the sandbox from msb-ro-kit-create"; return 0; }
   js="$OUT/inspect-$MSB_A.json"
-  run_cmd "$STEP_TIMEOUT" msb inspect "$MSB_A" --format json
-  : >"$js.keys"
+: >"$js.keys"
   "${TO[@]}" "$STEP_TIMEOUT" msb inspect "$MSB_A" --format json </dev/null 2>/dev/null | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
@@ -471,4 +470,63 @@ step_msb_exit_code() {
   run_cmd "$STEP_TIMEOUT" msb exec "$MSB_A" -- sh -c 'exit 7'; r7=$LAST_RC
   if [ "$r2" -eq 2 ] && [ "$r7" -eq 7 ]; then record "$id" PASS "guest exit codes 2 and 7 passed through msb exec unchanged on msb $MSB_VER"
   else record "$id" FAIL "guest exit 2 became $r2 and exit 7 became $r7 on msb $MSB_VER (affects only the wording of a refusal)"; fi
+}
+
+INSTALL_BASE=0; INSTALL_RERAN_ON_HEAL=0
+step_msb_ro_kit_heal() {
+  local id=msb-ro-kit-heal r0 r1 i0 i1 why=""
+  [ "$MSB_A_OK" -eq 1 ] || { record "$id" BLOCKED "needs the sandbox from msb-ro-kit-create"; return 0; }
+  r0=$(proof_lines "$MSB_A" /home/agent/.hal-ro-proof); i0=$(proof_lines "$MSB_A" /home/agent/.hal-install-proof)
+  run_cmd "$CREATE_TIMEOUT" "$ACQ" --backend msb restart "$MSB_A"
+  if last_has "cannot place read-only kit file"; then record "$id" FAIL "acq refused the readonly fixture file on heal after restart"; return 0; fi
+  [ "$LAST_RC" -eq 0 ] || { record "$id" BLOCKED "acq restart exited $LAST_RC (see transcript)"; return 0; }
+  r1=$(proof_lines "$MSB_A" /home/agent/.hal-ro-proof); i1=$(proof_lines "$MSB_A" /home/agent/.hal-install-proof)
+  say "  readonly startup proof lines: $r0 -> $r1; install proof lines: $i0 -> $i1"
+  [ "${r1:-0}" -gt "${r0:-0}" ] || why="the readonly startup command did not re-run on heal; "
+  run_cmd "$STEP_TIMEOUT" msb exec "$MSB_A" -u 0 -- tail -n 1 /home/agent/.hal-ro-proof
+  last_has "/var/lib/acq/host/kit-files/" || why="${why}the heal ran the file from somewhere other than the read-only mount; "
+  msb_inspect_check "$MSB_A" || why="${why}msb inspect no longer shows the read-only Bind after restart; "
+  [ "${i1:-0}" -gt "${i0:-0}" ] && INSTALL_RERAN_ON_HEAL=1
+  if [ -z "$why" ]; then record "$id" PASS "after stop/start the readonly startup file re-ran from the :ro mount and the mount record held (msb $MSB_VER)"
+  else record "$id" FAIL "$why"; fi
+}
+
+step_msb_forged_markers() {
+  local id=msb-forged-markers ws why="" cwd
+  [ "$MSB_A_OK" -eq 1 ] || { record "$id" BLOCKED "needs the sandbox from msb-ro-kit-create"; return 0; }
+  ws="$WS_ROOT/a"
+  ws=$(cd "$ws" && pwd -P)
+  guest_root "$MSB_A" sh -c 'mkdir -p /var/lib/acq; printf claude > /var/lib/acq/agent; printf /tmp/forged-ws > /var/lib/acq/workspace; printf /tmp/forged.sock > /var/lib/acq/ssh-auth-sock; printf "FORGED_KIT_VAR=pwned\n" > /var/lib/acq/kit-env; touch /var/lib/acq/agent-user-ready /var/lib/acq/agent-installed-claude /var/lib/acq/install-1; echo FORGED'
+  last_has FORGED || { record "$id" BLOCKED "could not plant the forged markers"; return 0; }
+  run_cmd "$STEP_TIMEOUT" "$ACQ" --backend msb exec "$MSB_A" -- pwd
+  cwd=$(last_out | tail -n 1 | tr -d '[:space:]')
+  [ "$cwd" != "/tmp/forged-ws" ] || why="session started in the forged workspace; "
+  [ "$cwd" = "$ws" ] || say "  note: session cwd '$cwd' differs from the host workspace '$ws' (recorded as evidence, not scored when not forged)"
+  run_cmd "$STEP_TIMEOUT" "$ACQ" --backend msb exec "$MSB_A" -- sh -c 'echo "FKV=[$FORGED_KIT_VAR] SOCK=[$SSH_AUTH_SOCK]"'
+  last_has "FKV=[pwned]" && why="${why}the forged kit-env variable reached the session; "
+  last_has "SOCK=[/tmp/forged.sock]" && why="${why}the forged ssh socket reached the session; "
+  run_cmd "$STEP_TIMEOUT" "$ACQ" --backend msb exec "$MSB_A" -- sh -c 'command -v claude >/dev/null 2>&1 && echo CLAUDE-PRESENT || echo no-claude'
+  run_cmd "$STEP_TIMEOUT" "$ACQ" --backend msb exec "$MSB_A" -- id -un
+  last_has agent || why="${why}exec no longer runs as the agent user; "
+  if [ -z "$why" ]; then record "$id" PASS "forged agent/workspace/ssh-socket/kit-env/ready markers changed no exec-session behavior (attach and agent-key cases: MANUAL 1)"
+  else record "$id" FAIL "$why"; fi
+}
+
+step_msb_install_gate() {
+  local id=msb-install-gate hc i0 i1 n
+  [ "$MSB_A_OK" -eq 1 ] || { record "$id" BLOCKED "needs the sandbox from msb-ro-kit-create"; return 0; }
+  if [ "$INSTALL_RERAN_ON_HEAL" -eq 1 ]; then
+    record "$id" BLOCKED "the install command re-ran on a plain heal, so key deletion cannot be told apart (see msb-ro-kit-heal output)"; return 0
+  fi
+  hc=$(hc_dir msb "$MSB_A")
+  n=$(find "$hc" -maxdepth 1 -type f -name 'install-*' 2>/dev/null | wc -l | tr -d ' ')
+  [ "${n:-0}" -gt 0 ] || { record "$id" BLOCKED "no install-* key exists in the host config dir $hc (nothing to delete)"; return 0; }
+  say "  deleting $n host install key(s) under $hc"
+  find "$hc" -maxdepth 1 -type f -name 'install-*' -exec rm -f {} + 2>>"$TRANSCRIPT"
+  i0=$(proof_lines "$MSB_A" /home/agent/.hal-install-proof)
+  run_cmd "$CREATE_TIMEOUT" "$ACQ" --backend msb restart "$MSB_A"
+  i1=$(proof_lines "$MSB_A" /home/agent/.hal-install-proof)
+  say "  install proof lines: $i0 -> $i1"
+  if [ "${i1:-0}" -gt "${i0:-0}" ]; then record "$id" PASS "install command re-ran after the host install key was deleted"
+  else record "$id" FAIL "install command did not re-run after the host install key was deleted"; fi
 }
