@@ -408,3 +408,67 @@ block_if_not_ready() { # ID BACKEND_READY_VAR REASON
   [ "$2" -eq 1 ] || { record "$1" BLOCKED "$3"; return 1; }
   return 0
 }
+
+# --- MSB steps ------------------------------------------------------------------
+msb_a_ws=""
+proof_lines() { # NAME FILE -> line count in the guest (0 if absent)
+  msb exec "$1" -u 0 -- sh -c "wc -l < $2 2>/dev/null || echo 0" </dev/null 2>/dev/null | tr -d '\r[:space:]'
+}
+
+step_msb_ro_kit_create() {
+  local id=msb-ro-kit-create n ws why=""
+  block_if_not_ready "$id" "$MSB_READY" "msb unavailable (missing msb, python3, or msb doctor not ready)" || return 0
+  write_fixture || { record "$id" BLOCKED "cannot write the fixture kit under $OUT"; return 0; }
+  n=$(sandbox_name a); MSB_A="$n"
+  ws=$(mk_workspace a) || { record "$id" BLOCKED "cannot create a workspace under $WS_ROOT"; return 0; }
+  create_sandbox msb "$n" "$ws" --kit "$FIXTURE"
+  if last_has "cannot place read-only kit file"; then record "$id" FAIL "acq refused the readonly fixture file on create"; return 0; fi
+  if [ "$LAST_RC" -ne 0 ]; then record "$id" BLOCKED "acq create exited $LAST_RC before the readonly file could be judged (see transcript)"; return 0; fi
+  MSB_A_OK=1
+  run_cmd "$STEP_TIMEOUT" msb exec "$n" -u 0 -- cat /home/agent/.hal-ro-proof
+  last_has "/var/lib/acq/host/kit-files/" || why="startup did not run from the read-only mount path; "
+  run_cmd "$STEP_TIMEOUT" msb exec "$n" -u 0 -- sh -c 'test ! -e /home/agent/hal/ro-proof.sh && echo NO-GUEST-COPY'
+  last_has NO-GUEST-COPY || why="${why}the readonly file was also copied into the guest; "
+  run_cmd "$STEP_TIMEOUT" msb exec "$n" -u 0 -- sh -c 'test -x /home/agent/hal/install-proof.sh && echo PLAIN-COPY-OK'
+  last_has PLAIN-COPY-OK || why="${why}the plain (non-readonly) file was not copied; "
+  msb_inspect_check "$n" || why="${why}msb inspect does not show the read-only host-config Bind; "
+  if [ -z "$why" ]; then record "$id" PASS "readonly fixture file ran from the :ro mount on create, no guest copy, plain file copied, inspect shows the read-only Bind"
+  else record "$id" FAIL "$why"; fi
+}
+
+step_msb_inspect_shape() {
+  local id=msb-inspect-shape js
+  [ "$MSB_A_OK" -eq 1 ] || { record "$id" BLOCKED "needs the sandbox from msb-ro-kit-create"; return 0; }
+  js="$OUT/inspect-$MSB_A.json"
+  run_cmd "$STEP_TIMEOUT" msb inspect "$MSB_A" --format json
+  : >"$js.keys"
+  "${TO[@]}" "$STEP_TIMEOUT" msb inspect "$MSB_A" --format json </dev/null 2>/dev/null | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+ac = d.get("active_config"); cf = d.get("config")
+def host_ro(x):
+    ms = (x or {}).get("mounts") if isinstance(x, dict) else None
+    if not isinstance(ms, list): return "absent"
+    h = [m for m in ms if isinstance(m, dict) and m.get("guest") == "/var/lib/acq/host"]
+    if len(h) != 1: return "no-single-host-mount"
+    return "readonly-bind" if (h[0].get("type") == "Bind" and (h[0].get("options") or {}).get("readonly") is True) else "not-readonly-bind"
+print("TOPLEVEL-KEYS " + " ".join(sorted(d.keys())))
+print("ACTIVE_CONFIG.MOUNTS " + host_ro(ac))
+print("CONFIG.MOUNTS " + host_ro(cf))
+' >"$js.keys" 2>>"$TRANSCRIPT"
+  while IFS= read -r line; do say "  $line"; done <"$js.keys"
+  if grep -q '^ACTIVE_CONFIG.MOUNTS readonly-bind$' "$js.keys"; then
+    record "$id" PASS "active_config.mounts shape matches the gate on msb $MSB_VER; $(grep '^CONFIG.MOUNTS' "$js.keys"); $(grep '^TOPLEVEL-KEYS' "$js.keys")"
+  else
+    record "$id" FAIL "active_config.mounts is not the expected read-only Bind on msb $MSB_VER; $(grep '^ACTIVE_CONFIG' "$js.keys")"
+  fi
+}
+
+step_msb_exit_code() {
+  local id=msb-exit-code r2 r7
+  [ "$MSB_A_OK" -eq 1 ] || { record "$id" BLOCKED "needs the sandbox from msb-ro-kit-create"; return 0; }
+  run_cmd "$STEP_TIMEOUT" msb exec "$MSB_A" -- sh -c 'exit 2'; r2=$LAST_RC
+  run_cmd "$STEP_TIMEOUT" msb exec "$MSB_A" -- sh -c 'exit 7'; r7=$LAST_RC
+  if [ "$r2" -eq 2 ] && [ "$r7" -eq 7 ]; then record "$id" PASS "guest exit codes 2 and 7 passed through msb exec unchanged on msb $MSB_VER"
+  else record "$id" FAIL "guest exit 2 became $r2 and exit 7 became $r7 on msb $MSB_VER (affects only the wording of a refusal)"; fi
+}
