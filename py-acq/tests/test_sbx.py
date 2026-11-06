@@ -73,14 +73,16 @@ def test_capability_record_declares_sbx_obligations():
     # sbx-only obligations are required.
     assert caps["key-present"] == "required"
     assert caps["kit-source-revoke"] == "required"
+    # sbx HAS a `secret` subcommand (set/ls/rm), so secret-list is required.
+    assert caps["secret-list"] == "required"
+    # sbx has NO `rotate` subcommand (key-rotate is unsupported).
+    assert caps["key-rotate"] == "unsupported"
     # msb-only obligations are unsupported on sbx.
-    assert caps["secret-list"] == "unsupported"
     assert caps["start"] == "unsupported"
     assert caps["restart"] == "unsupported"
     # Common obligations are required.
     assert caps["secret-write"] == "required"
     assert caps["secret-rm"] == "required"
-    assert caps["key-rotate"] == "required"
     assert caps["provision"] == "required"
 
 
@@ -221,11 +223,13 @@ def test_secret_value_never_in_argv_or_output_sbx(monkeypatch, tmp_path, capsys)
 # secret ls is msb-only: unsupported_capability on sbx.
 # ---------------------------------------------------------------------------
 
-def test_secret_ls_unsupported_on_sbx(monkeypatch, tmp_path, capsys):
-    _env(monkeypatch, tmp_path)
+def test_secret_ls_supported_on_sbx(monkeypatch, tmp_path, capsys):
+    # sbx HAS a `secret ls` (the secret-list capability); it lists scope/service/
+    # value_state, never a value.
+    _env(monkeypatch, tmp_path, secrets={"global": {"usai": "set"}})
     rc, doc = _invoke(capsys, "--backend", "sbx", "secret", "ls", "--json")
-    assert rc == 1
-    assert doc["error"]["code"] == "unsupported_capability"
+    assert rc == 0
+    assert doc["data"]["secrets"] == [{"scope": "global", "service": "usai", "value_state": "set"}]
 
 
 # ---------------------------------------------------------------------------

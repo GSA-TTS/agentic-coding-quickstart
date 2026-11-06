@@ -1,14 +1,23 @@
-"""MSB backend adapter — subprocess-calling lifecycle + secret side (ADR-0040m).
+"""MSB backend adapter — subprocess-calling lifecycle side (ADR-0040m).
 
 The read side (detection + version floor) lives in ``backends.py``; this module
 owns the mutating/lifecycle verbs the seam drives — ``create``, ``list``,
 ``exec`` (readiness probe + agent launch), ``stop``, ``remove``, ``copy``, and
-``ports`` — plus the secret verbs ``secret_set``/``secret_has``/``secret_rm``/
-``secret_ls`` — by invoking the ``msb`` CLI as a subprocess. The adapter reports
+``ports`` — plus the in-guest ``kit_apply``/``provision_substrate`` (both driven
+via ``msb exec``) — by invoking the ``msb`` CLI as a subprocess. The adapter reports
 outcomes and never decides trust: sandbox identity, agent, and workspace
 authority stay host-side in the seam (``cli.py`` + ``state.py``), per ADR-0040m
-§trust ownership. A secret VALUE crosses the adapter boundary only as the child's
-stdin — never argv, never output.
+§trust ownership.
+
+Reconciliation with the real msb 0.7.11 CLI: the image is *positional* on
+``create``, the workspace is a ``--volume HOST:POSIX-GUEST`` mapping, memory/cpus
+are ``-m``/``-c``, and there is NO ``secret``/``kit-apply``/``substrate-provision``/
+``provider-credential``/``github-scope``/``rotate`` subcommand. The secret verbs
+(``secret_set``/``secret_has``/``secret_rm``/``secret_ls``) and the credential
+verbs (``provider_credential_set``/``github_scope``/``rotate_key``) therefore fail
+closed with ``unsupported_capability`` (msb's secrets are per-sandbox ``--secret
+ENV@HOST`` bindings, a provider-credential concern that lands with a later slice).
+A secret VALUE never crosses this boundary.
 
 The ``msb`` executable is overridable via ``ACQ_MSB_BIN`` for reproducible,
 offline contract vectors. ``__stub__`` routes to the bundled deterministic fake
@@ -36,6 +45,25 @@ DEFAULT_CPUS = "2"
 # Exec-ready gate budget (seconds): `msb create` returns 0 even on async boot
 # failure, so readiness is proven by a successful `msb exec` (ADR-0011).
 READY_TIMEOUT_S = float(os.environ.get("ACQ_MSB_READY_TIMEOUT", "30"))
+
+
+def _guest_path(host: str) -> str:
+    """Translate a native host path into its POSIX guest form (ADR-0029).
+
+    msb's ``--volume HOST:GUEST`` maps a native host source to a distinct POSIX
+    guest destination; the same POSIX form is the ``-w``/``--workdir`` start
+    directory. On POSIX the two forms are identical. On Windows a drive-form path
+    (``C:\\Users\\me\\proj``) becomes the microVM's POSIX form (``/c/Users/me/proj``)
+    so the guest side is never a drive path. This mirrors the Bash adapter's
+    ``canonicalize_path`` (``cygpath -u``); the native Python adapter is not under
+    MSYS, so it computes the form directly.
+    """
+    if os.name == "nt":
+        drive, sep, rest = host.partition(":")
+        if sep and len(drive) == 1 and drive.isalpha():
+            return "/" + drive.lower() + rest.replace("\\", "/")
+        return host.replace("\\", "/")
+    return host
 
 
 class MsbError(Exception):
@@ -72,10 +100,14 @@ def msb_command() -> list[str]:
 # The declared capability map. Support levels: ``required`` (implemented and
 # conformance-asserted), ``optional`` (declared but not part of the shipped
 # surface), ``unsupported`` (fails closed with ``unsupported_capability``).
-# ``secret-list``/``start``/``restart`` are msb-only obligations; ``key-present``/
-# ``kit-source-revoke`` are sbx-only (ADR-0040m). ``kit-apply`` is required here
-# so ``_supports("msb", "kit-apply")`` resolves from the record, not the
-# ``record_fn is None → True`` fallback.
+#
+# Reconcile with the real msb 0.7.11 CLI: msb has NO standalone ``secret``
+# subcommand and no ``provider-credential``/``github-scope``/``rotate``
+# subcommands, so those obligations fail closed (``unsupported``). Secrets on msb
+# are per-sandbox ``--secret ENV@HOST`` bindings on create/start plus
+# ``--secret-rm`` on ``modify`` — a provider-credential concern that lands with a
+# later slice, not a standalone key/value store. ``kit-apply`` is implemented
+# in-guest via ``msb exec`` (no ``kit-apply`` subcommand), so it stays required.
 def capability_record(version: str | None = None) -> dict:
     return {
         "backend": "msb",
@@ -93,12 +125,12 @@ def capability_record(version: str | None = None) -> dict:
             "copy": "required",
             "ports": "required",
             "kit-apply": "required",
-            "secret-write": "required",
-            "secret-rm": "required",
-            "secret-list": "required",  # msb-only (secret_ls)
-            "key-rotate": "required",
-            "key-present": "unsupported",  # sbx-only
-            "kit-source-revoke": "unsupported",  # sbx-only
+            "secret-write": "unsupported",  # no `secret` subcommand on msb
+            "secret-rm": "unsupported",
+            "secret-list": "unsupported",
+            "key-rotate": "unsupported",  # no `rotate` subcommand on msb
+            "key-present": "unsupported",
+            "kit-source-revoke": "unsupported",
             "start": "required",  # msb-only
             "restart": "required",  # msb-only
             "provenance": "required",
@@ -153,21 +185,39 @@ def exists(name: str) -> bool:
     return names is not None and name in names
 
 
-def create(name: str, image: str, workspace: str, memory: str | None = None, cpus: str | None = None) -> None:
-    """Create a sandbox. Raises :class:`MsbError` on backend failure."""
+def create(
+    name: str,
+    image: str,
+    workspace: str,
+    memory: str | None = None,
+    cpus: str | None = None,
+    guest_workspace: str | None = None,
+) -> None:
+    """Create a sandbox. Raises :class:`MsbError` on backend failure.
+
+    Reconciles with the real msb 0.7.11 ``create``: the image is *positional*
+    (``msb create --name X IMAGE``), the workspace is a ``--volume
+    HOST:POSIX-GUEST`` mapping (distinct host source vs guest destination, never
+    the same path twice), the start directory is ``-w`` (the same POSIX guest
+    form), and memory/cpus are ``-m``/``-c``. ``workspace`` is a native host path;
+    ``guest_workspace`` overrides the derived POSIX guest form (ADR-0029,
+    ADR-0038m §4 host/guest path types are distinct).
+    """
+    guest = guest_workspace or _guest_path(workspace)
     argv = [
         "create",
         "--name",
         name,
-        "--image",
-        image,
         "--volume",
-        f"{workspace}:{workspace}",
+        f"{workspace}:{guest}",
+        "-w",
+        guest,
     ]
     if memory:
-        argv += ["--memory", memory]
+        argv += ["-m", memory]
     if cpus:
-        argv += ["--cpus", cpus]
+        argv += ["-c", cpus]
+    argv.append(image)  # positional image (last)
     proc = _run(argv)
     if proc.returncode != 0:
         # `failure` is the ADR-0038m usage/failure minimum's generic
@@ -209,7 +259,9 @@ def kit_apply(name: str, kit: str, install_cmd: list[str]) -> None:
     backend re-runs a genuinely idempotent install when asked, and the host record
     is the durable "already applied" signal.
     """
-    proc = _run(["kit-apply", name, kit, "--", *install_cmd])
+    # Reconciles with the real msb 0.7.11 CLI: there is NO `kit-apply` subcommand.
+    # The pinned install command runs in-guest via `msb exec -u agent NAME -- …`.
+    proc = _run(["exec", "-u", "agent", name, "--", *install_cmd])
     if proc.returncode != 0:
         raise MsbError(
             errors.FAILURE,
@@ -227,16 +279,16 @@ def provision_substrate(name: str, steps: list[list[str]]) -> None:
     never a credential) and run in-guest via the backend seam; acq never executes
     them on the host. Raises :class:`MsbError` on backend failure.
     """
-    argv = ["substrate-provision", name]
+    # Reconciles with the real msb 0.7.11 CLI: there is NO `substrate-provision`
+    # subcommand. Each bootstrap step runs in-guest via `msb exec -u agent NAME -- …`.
     for step in steps:
-        argv += ["--", *step]
-    proc = _run(argv)
-    if proc.returncode != 0:
-        raise MsbError(
-            errors.FAILURE,
-            f"could not provision the substrate for sandbox '{name}'",
-            "check msb logs and retry",
-        )
+        proc = _run(["exec", "-u", "agent", name, "--", *step])
+        if proc.returncode != 0:
+            raise MsbError(
+                errors.FAILURE,
+                f"could not provision the substrate for sandbox '{name}'",
+                "check msb logs and retry",
+            )
 
 
 def stop(name: str) -> None:
@@ -302,7 +354,10 @@ def exec_command(name: str, command: list[str], *, workspace: str | None = None,
     """
     argv = ["exec", "-u", "agent"]
     if workspace:
-        argv += ["-w", workspace]
+        # `-w` is the POSIX *guest* start directory (ADR-0029): the adapter owns
+        # the host->guest translation, so the native host path the seam passed is
+        # converted to its guest form here (never a drive path).
+        argv += ["-w", _guest_path(workspace)]
     argv += [name, "--", *command]
     return _run_stream(argv, json_mode=json_mode)
 
@@ -399,6 +454,23 @@ def ports(name: str) -> list[dict]:
 # exposure").
 # ---------------------------------------------------------------------------
 
+def _secret_unsupported(verb: str) -> MsbError:
+    """The fail-closed refusal for every secret verb on msb (ADR-0040m).
+
+    msb 0.7.11 has no standalone ``secret`` subcommand and no secret store: secrets
+    are per-sandbox ``--secret ENV@HOST`` bindings on create/start plus
+    ``--secret-rm`` on ``modify``, whose destination host comes from the
+    provider-credential binding (a later slice). Until that slice lands, a secret
+    request fails closed with ``unsupported_capability`` rather than inventing a
+    backend store msb does not have.
+    """
+    return MsbError(
+        errors.UNSUPPORTED,
+        f"secret {verb} is not supported on the msb backend",
+        "msb has no standalone secret store; per-sandbox --secret ENV@HOST bindings land with the provider-credential slice",
+    )
+
+
 # ``msb secret …`` takes the scope as either the ``--global`` flag or a leading
 # positional sandbox name; a global scope is encoded as the flag so a sandbox
 # whose name happens to be ``--global`` can never be confused with the flag.
@@ -411,19 +483,13 @@ def _secret_scope_argv(scope: str) -> list[str]:
 
 
 def secret_set(scope: str, service: str, value: str, *, timeout: float | None = None) -> None:
-    """Store a secret for ``(scope, service)``. The value travels on stdin only.
+    """``secret-write`` fails closed on msb (no ``secret`` subcommand, ADR-0040m).
 
-    Raises :class:`MsbError` on a backend failure. ``value`` is never logged or
-    echoed; the raw backend stderr is deliberately not surfaced (ADR-0040m: raw
-    backend text is never a portable field).
+    The value is never read, logged, or placed on argv: the refusal happens before
+    the value crosses the boundary. Raises :class:`MsbError` with
+    ``unsupported_capability``.
     """
-    proc = _run(["secret", "set", *_secret_scope_argv(scope), service], input_text=value, timeout=timeout)
-    if proc.returncode != 0:
-        raise MsbError(
-            errors.FAILURE,
-            f"could not store secret '{service}' for scope '{scope}'",
-            "check backend logs and retry",
-        )
+    raise _secret_unsupported("set")
 
 
 def secret_has(scope: str, service: str) -> bool:
@@ -435,21 +501,11 @@ def secret_has(scope: str, service: str) -> bool:
     conflates "the backend is down" with "the secret is absent" (ADR-0040m: fail
     closed, but with the accurate code).
 
-    There is no dedicated `secret has` capability: on msb, presence is read
-    through the ``secret-list`` capability (ADR-0040m's ``key_present`` obligation
-    is sbx-only), so ``secret has`` is a thin exit-status predicate over
-    ``msb secret has``.
+    There is no dedicated `secret has` capability on msb: msb has no standalone
+    secret store, so presence cannot be answered and fails closed with
+    ``unsupported_capability`` (never a silent "absent").
     """
-    proc = _run(["secret", "has", *_secret_scope_argv(scope), service])
-    if proc.returncode == 0:
-        return True
-    if proc.returncode == 1:
-        return False
-    raise MsbError(
-        errors.FAILURE,
-        f"could not query secret '{service}' for scope '{scope}'",
-        "check backend logs and retry",
-    )
+    raise _secret_unsupported("has")
 
 
 def secret_rm(scope: str, service: str) -> None:
@@ -458,74 +514,19 @@ def secret_rm(scope: str, service: str) -> None:
     The seam (:func:`cli.run_secret_rm`) checks presence first and reports
     ``secret_missing`` for an absent secret; a nonzero exit here is a generic
     backend failure, not a missing-secret signal (mirrors the sandbox
-    exists-then-remove pattern).
+    exists-then-remove pattern). On msb the whole store is unsupported, so this
+    fails closed with ``unsupported_capability`` before any removal.
     """
-    proc = _run(["secret", "rm", *_secret_scope_argv(scope), service])
-    if proc.returncode != 0:
-        raise MsbError(
-            errors.FAILURE,
-            f"could not remove secret '{service}' for scope '{scope}'",
-            "check backend logs and retry",
-        )
+    raise _secret_unsupported("rm")
 
 
 def secret_ls(scope: str | None = None) -> list[dict]:
-    """Return ``[{scope, service, value_state}, …]`` — never a value.
+    """``secret-list`` fails closed on msb (no ``secret`` subcommand, ADR-0040m).
 
-    ``scope`` is an optional filter (``"global"`` or a sandbox name); ``None``
-    lists every scope. An inspect that *fails* or returns unparseable output, or a
-    wrong-shape document *or entry*, raises :class:`MsbError` with
-    ``secret_unreadable`` so the seam fails closed rather than swallowing the
-    store status as an empty list (ADR-0038m §48 drops
-    "inspection-failure-as-empty").
+    Raises :class:`MsbError` with ``unsupported_capability``. The listing never
+    returns a value, and on msb it never returns a listing at all.
     """
-    argv = ["secret", "ls"]
-    if scope is not None:
-        argv += _secret_scope_argv(scope)
-    proc = _run(argv)
-    if proc.returncode != 0:
-        raise MsbError(
-            errors.SECRET_UNREADABLE,
-            "could not read the secret store",
-            "check backend logs and retry",
-        )
-    try:
-        doc = json.loads(proc.stdout)
-    except (json.JSONDecodeError, ValueError):
-        raise MsbError(
-            errors.SECRET_UNREADABLE,
-            "could not parse the secret store listing",
-            "the backend returned an unreadable secret list; check backend logs and retry",
-        )
-    if not isinstance(doc, list):
-        raise MsbError(
-            errors.SECRET_UNREADABLE,
-            "could not parse the secret store listing",
-            "the backend returned an unexpected secret-list shape; check backend logs and retry",
-        )
-    out: list[dict] = []
-    for entry in doc:
-        # A wrong-shape *entry* (non-dict, or missing scope/service) fails closed
-        # too — never silently dropped (ADR-0038m §48 drops
-        # "inspection-failure-as-empty"; a partially-readable listing is treated as
-        # unreadable, not as an empty result). NOTE: ``ports()`` still skips
-        # individual wrong-shape port entries; it should be aligned to fail closed
-        # the same way in a later pass (left unchanged here to keep this slice
-        # focused on the secret surface).
-        if not isinstance(entry, dict) or "scope" not in entry or "service" not in entry:
-            raise MsbError(
-                errors.SECRET_UNREADABLE,
-                "could not parse the secret store listing",
-                "the backend returned an unexpected secret-list entry; check backend logs and retry",
-            )
-        out.append(
-            {
-                "scope": entry["scope"],
-                "service": entry["service"],
-                "value_state": entry.get("value_state", "set"),
-            }
-        )
-    return out
+    raise _secret_unsupported("ls")
 
 
 # ---------------------------------------------------------------------------
@@ -537,65 +538,41 @@ def secret_ls(scope: str | None = None) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def provider_credential_set(provider: str, key_env: str, hosts: list[str], value: str) -> None:
-    """Store a provider credential value, pinned to ``key_env`` + ``hosts``.
+    """Provider-credential binding fails closed on msb (no equivalent subcommand).
 
-    The value travels on stdin only; ``key_env`` and ``hosts`` are non-secret
-    identifiers carried on argv so the backend binds the credential to its
-    destination. Raises :class:`MsbError` on a backend failure; ``value`` is
-    never logged or echoed.
+    The value is never read or placed on argv. msb binds provider credentials as
+    per-sandbox ``--secret ENV@HOST`` references (a later slice); there is no
+    ``provider-credential`` subcommand, so this raises :class:`MsbError` with
+    ``unsupported_capability``.
     """
-    proc = _run(
-        ["provider-credential", "set", provider, key_env, "--host", ",".join(hosts)],
-        input_text=value,
+    raise MsbError(
+        errors.UNSUPPORTED,
+        f"provider-credential storage is not supported on the msb backend for provider '{provider}'",
+        "msb binds provider credentials via --secret ENV@HOST at create/start (provider-credential slice)",
     )
-    if proc.returncode != 0:
-        raise MsbError(
-            errors.FAILURE,
-            f"could not store the credential for provider '{provider}'",
-            "check backend logs and retry",
-        )
 
 
 def github_scope(sandbox: str, value: str) -> None:
-    """Store a sandbox-scoped GitHub token (ADR-0013); value travels on stdin only.
+    """GitHub per-sandbox scoping fails closed on msb (no ``github-scope`` subcommand).
 
-    The token is bound to ``sandbox`` (never global) and never logged or echoed.
+    The token is never read or placed on argv; the refusal happens before the value
+    crosses the boundary. Raises :class:`MsbError` with ``unsupported_capability``.
     """
-    proc = _run(["github-scope", sandbox], input_text=value)
-    if proc.returncode != 0:
-        raise MsbError(
-            errors.FAILURE,
-            f"could not store the scoped GitHub token for sandbox '{sandbox}'",
-            "check backend logs and retry",
-        )
+    raise MsbError(
+        errors.UNSUPPORTED,
+        f"GitHub token scoping is not supported on the msb backend for sandbox '{sandbox}'",
+        "msb binds GitHub credentials via --secret GITHUB_TOKEN@github.com,... at create/start (provider-credential slice)",
+    )
 
 
 def rotate_key(value: str) -> None:
-    """Rotate the USAi key: validate the new key, then replace the old (ADR-0012).
+    """USAi key rotation fails closed on msb (no ``rotate`` subcommand, ADR-0012).
 
-    The backend validates the new key against the provider before storing it, so
-    the old key is only ever replaced after the new one is confirmed. The new key
-    travels on stdin only and is never echoed. Failure maps to the stable
-    rotation codes (ADR-0040m): ``provider_unreachable`` / ``provider_auth_failed``
-    when the provider cannot be reached or rejects the new key, else ``failure``.
+    The new key is never read or placed on argv. Raises :class:`MsbError` with
+    ``unsupported_capability``.
     """
-    proc = _run(["rotate"], input_text=value)
-    if proc.returncode == 0:
-        return
-    if proc.returncode == 2:
-        raise MsbError(
-            errors.PROVIDER_UNREACHABLE,
-            "the USAi provider endpoint could not be reached during rotation; the old key was left in place",
-            "check network/proxy access to the provider, then retry",
-        )
-    if proc.returncode == 3:
-        raise MsbError(
-            errors.PROVIDER_AUTH_FAILED,
-            "the USAi provider rejected the new key during rotation; the old key was left in place",
-            "mint a valid key and retry",
-        )
     raise MsbError(
-        errors.FAILURE,
-        "the USAi key rotation failed",
-        "check backend logs and retry",
+        errors.UNSUPPORTED,
+        "USAi key rotation is not supported on the msb backend",
+        "rotation is a provider-credential operation with no msb subcommand equivalent",
     )

@@ -5,17 +5,17 @@ catalog at ``$SBX_HOME/.docker-sbx/catalog.json`` (or ``$HOME/.docker-sbx/...``)
 which the vector runner redirects to a throwaway directory. An initial catalog can
 be seeded in-memory via ``ACQ_SBX_STUB_CATALOG`` (JSON ``{name: state}``).
 
-sbx differs from msb in three command names the adapter translates (``ls``/``rm``/
-``cp``/``ports`` vs msb's ``list``/``remove``/``copy``/``inspect``) and adds two
-sbx-specific proxy-table mechanics the seam exercises:
+Mirrors the real sbx 0.50.1 CLI surface:
 
-* **raw-placeholder removal** — ``secret rm --placeholder TOKEN`` removes a raw
-  placeholder from sbx's custom-secrets table (ADR-0038m §48) and never touches
-  the acq store. Seeded via ``ACQ_SBX_STUB_RAW_PLACEHOLDERS``.
-* **kit-source allowlist** — ``kit-source-revoke REPO`` drops the repo's owner
-  prefix from ``kit.allowedSources`` so the backend can no longer fetch from that
-  owner (ADR-0040m ``kit_source_revoked``). Seeded via
-  ``ACQ_SBX_STUB_ALLOWED_SOURCES``.
+* ``sbx create AGENT [PATH] --name N -t IMAGE`` — the agent + path are positional,
+  the name is ``--name``, and the image is ``-t/--template``.
+* ``sbx secret set SERVICE [--sandbox NAME]`` (value on stdin, global default),
+  ``sbx secret rm SERVICE [--sandbox NAME] -f``, ``sbx secret ls [-g|--sandbox]
+  --json``, ``sbx secret rm --placeholder TOKEN``, and ``sbx secret set-custom
+  --host H --env E [--sandbox NAME]`` (value on stdin). There is NO ``secret has``.
+* ``sbx settings get/set kit.allowedSources`` — the owner-granular kit allowlist
+  the adapter's ``kit_source_revoked`` drives (there is no ``kit-source-revoke``
+  subcommand).
 
 The catalog and secret store are backend-native state, not acq authority: acq never
 reads them as configuration (ADR-0040m §trust ownership). They are never secrets and
@@ -35,7 +35,7 @@ PORTS_ENV = "ACQ_SBX_STUB_PORTS"
 INSPECT_RAW_ENV = "ACQ_SBX_STUB_PORTS_RAW"
 
 # Secret-store knobs. ``ACQ_SBX_STUB_SECRETS`` seeds ``{scope: {service: "set"}}``
-# so a single-invocation vector can exercise ``secret ls``/``has``/``rm`` against
+# so a single-invocation vector can exercise ``secret ls``/``rm`` against
 # pre-existing entries. ``ACQ_SBX_STUB_SECRET_LS_RAW`` forces ``secret ls`` to emit
 # a raw (wrong-shape) document. The stub records ONLY scope/service/state — it never
 # stores or echoes a secret value (it discards stdin after reading it).
@@ -48,10 +48,6 @@ RAW_PLACEHOLDERS_ENV = "ACQ_SBX_STUB_RAW_PLACEHOLDERS"
 # ``exec``/``cp`` markers to simulate a real agent writing to stdout/stderr.
 EXEC_MARKER = "[stub sbx exec]"
 COPY_MARKER = "[stub sbx copy]"
-
-# Rotation probe knob (mirrors the msb stub): "ok" stores the new key;
-# "unreachable" / "auth_failed" fail before any store (exit 2 / 3).
-ROTATE_ENV = "ACQ_SBX_STUB_ROTATE"
 
 # When ``ACQ_SBX_STUB_FAIL`` names a command, that command fails with a
 # distinctive raw stderr line (simulating a backend-native failure).
@@ -215,30 +211,18 @@ def _arg_after(args: list[str], flag: str) -> str | None:
     return None
 
 
-def _owner_prefix(repo: str) -> str:
-    """sbx's kit.allowedSources is owner-granular: ``host/owner/``."""
-    parts = [p for p in repo.split("/") if p]
-    if len(parts) >= 2:
-        return "/".join(parts[:2]) + "/"
-    return repo + "/"
+def _secret_scope(args: list[str]) -> str:
+    """Resolve the scope for ``secret set/rm/set-custom``: ``--sandbox NAME`` else global."""
+    sbx = _arg_after(args, "--sandbox")
+    return sbx if sbx is not None else "global"
 
 
-def _secret_scope_service(args: list[str]) -> tuple[str | None, str | None]:
-    """Parse ``[--global | SANDBOX] SERVICE`` into ``(scope, service)``."""
-    if not args:
-        return None, None
-    if args[0] in ("-g", "--global"):
-        return "global", (args[1] if len(args) > 1 else None)
-    return args[0], (args[1] if len(args) > 1 else None)
-
-
-def _secret_scope_only(args: list[str]) -> str | None:
-    """Parse an optional ``[--global | SANDBOX]`` scope filter (``secret ls``)."""
-    if not args:
-        return None
-    if args[0] in ("-g", "--global"):
-        return "global"
-    return args[0]
+def _discard_stdin() -> None:
+    """Read stdin to completion and discard it (a value must never be stored)."""
+    try:
+        sys.stdin.read()
+    except OSError:
+        pass
 
 
 def _secret_main(args: list[str]) -> int:
@@ -251,17 +235,41 @@ def _secret_main(args: list[str]) -> int:
     secrets = _load_secrets()
 
     if sub == "set":
-        # The value arrives on stdin and is read then discarded: it is never
-        # stored, echoed, or logged. Only (scope, service) -> "set" is recorded.
-        try:
-            sys.stdin.read()
-        except OSError:
-            pass
-        scope, service = _secret_scope_service(rest)
-        if scope is None or service is None:
-            print("sbx: secret set requires a scope and service", file=sys.stderr)
+        # ``sbx secret set SERVICE [--sandbox NAME]`` — the value arrives on stdin
+        # and is read then discarded: never stored, echoed, or logged. Only
+        # (scope, service) -> "set" is recorded.
+        _discard_stdin()
+        # SERVICE is the first non-flag positional.
+        service = None
+        i = 0
+        while i < len(rest):
+            if rest[i] in ("--sandbox", "-f", "--force") and i + 1 < len(rest):
+                i += 2
+                continue
+            if rest[i].startswith("-"):
+                i += 1
+                continue
+            service = rest[i]
+            break
+        if service is None:
+            print("sbx: secret set requires a service", file=sys.stderr)
             return 1
+        scope = _secret_scope(rest)
         secrets.setdefault(scope, {})[service] = "set"
+        _save_secrets(secrets)
+        return 0
+
+    if sub == "set-custom":
+        # ``sbx secret set-custom --host H --env E [--sandbox NAME]`` — value on
+        # stdin (discarded). The service is keyed by the --env var name so the
+        # adapter's key_present / secret ls can find it.
+        _discard_stdin()
+        env = _arg_after(rest, "--env")
+        if env is None:
+            print("sbx: secret set-custom requires --env", file=sys.stderr)
+            return 1
+        scope = _secret_scope(rest)
+        secrets.setdefault(scope, {})[env] = "set"
         _save_secrets(secrets)
         return 0
 
@@ -278,10 +286,22 @@ def _secret_main(args: list[str]) -> int:
                 placeholders.remove(token)
                 _save_raw_placeholders(placeholders)
             return 0  # idempotent: an absent placeholder is not an error
-        scope, service = _secret_scope_service(rest)
-        if scope is None or service is None:
-            print("sbx: secret rm requires a scope and service", file=sys.stderr)
+        # ``sbx secret rm SERVICE [--sandbox NAME] -f``.
+        service = None
+        i = 0
+        while i < len(rest):
+            if rest[i] in ("--sandbox",) and i + 1 < len(rest):
+                i += 2
+                continue
+            if rest[i].startswith("-"):
+                i += 1
+                continue
+            service = rest[i]
+            break
+        if service is None:
+            print("sbx: secret rm requires a service", file=sys.stderr)
             return 1
+        scope = _secret_scope(rest)
         if service not in secrets.get(scope, {}):
             print("sbx: no such secret", file=sys.stderr)
             return 1
@@ -299,105 +319,77 @@ def _secret_main(args: list[str]) -> int:
         if raw is not None:
             print(raw)
             return 0
-        scope = _secret_scope_only(rest)
+        # Scope filter: -g/--global -> "global", --sandbox NAME -> NAME, else all.
+        scope: str | None = None
+        if "-g" in rest or "--global" in rest:
+            scope = "global"
+        else:
+            sbx = _arg_after(rest, "--sandbox")
+            if sbx is not None:
+                scope = sbx
         entries: list[dict] = []
         for sc, services in secrets.items():
             if scope is not None and sc != scope:
                 continue
             for svc, state in services.items():
-                entries.append({"scope": sc, "service": svc, "value_state": state})
-        entries.sort(key=lambda e: (e["scope"], e["service"]))
-        print(json.dumps(entries))
+                # Mirrors the real `sbx secret ls --json` entry: {scope, type,
+                # name, secret:"(stored)"} — the value is never emitted.
+                entries.append({"scope": sc, "type": "service", "name": svc, "secret": "(stored)"})
+        entries.sort(key=lambda e: (e["scope"], e["name"]))
+        # The real `sbx secret ls --json` is an OBJECT envelope, not a bare list.
+        print(json.dumps(
+            {
+                "secrets": entries,
+                "custom_secrets": [],
+                "shadowed_services": [],
+                "env_only_count": 0,
+            }
+        ))
         return 0
-
-    if sub == "has":
-        scope, service = _secret_scope_service(rest)
-        if scope is None or service is None:
-            print("sbx: secret has requires a scope and service", file=sys.stderr)
-            return 1
-        return 0 if service in secrets.get(scope, {}) else 1
 
     print(f"sbx: unrecognized secret subcommand '{sub}'", file=sys.stderr)
     return 1
 
 
-def _discard_stdin() -> None:
-    """Read stdin to completion and discard it (a value must never be stored)."""
-    try:
-        sys.stdin.read()
-    except OSError:
-        pass
-
-
-def _provider_credential_main(args: list[str]) -> int:
-    """Handle ``sbx provider-credential <subcommand> …`` (metadata only, never a value)."""
+def _settings_main(args: list[str]) -> int:
+    """Handle ``sbx settings get/set kit.allowedSources`` (owner-granular allowlist)."""
     if not args:
-        print("sbx: provider-credential requires a subcommand", file=sys.stderr)
+        print("sbx: settings requires a subcommand", file=sys.stderr)
         return 1
     sub = args[0]
-    if sub != "set":
-        print(f"sbx: unrecognized provider-credential subcommand '{sub}'", file=sys.stderr)
-        return 1
     rest = args[1:]
-    provider = rest[0] if rest else None
-    key_env = rest[1] if len(rest) > 1 else None
-    if provider is None or key_env is None:
-        print("sbx: provider-credential set requires a provider and key_env", file=sys.stderr)
+    if sub == "get":
+        if _should_fail("settings get"):
+            print(RAW_FAIL_STDERR, file=sys.stderr)
+            return 1
+        if rest and rest[0] == "kit.allowedSources":
+            print(json.dumps(_load_allowed_sources()))
+            return 0
+        print("sbx: unsupported settings key", file=sys.stderr)
         return 1
-    _discard_stdin()
-    secrets = _load_secrets()
-    secrets.setdefault("global", {})[provider] = "set"
-    _save_secrets(secrets)
-    return 0
-
-
-def _github_scope_main(args: list[str]) -> int:
-    """Handle ``sbx github-scope SANDBOX`` (sandbox-scoped metadata only)."""
-    sandbox = args[0] if args else None
-    if sandbox is None:
-        print("sbx: github-scope requires a sandbox name", file=sys.stderr)
+    if sub == "set":
+        if _should_fail("settings set"):
+            print(RAW_FAIL_STDERR, file=sys.stderr)
+            return 1
+        if rest and rest[0] == "kit.allowedSources":
+            value = rest[1] if len(rest) > 1 else None
+            if value is None:
+                print("sbx: settings set requires a value", file=sys.stderr)
+                return 1
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                print("sbx: kit.allowedSources must be a JSON array", file=sys.stderr)
+                return 1
+            if not isinstance(parsed, list):
+                print("sbx: kit.allowedSources must be a JSON array", file=sys.stderr)
+                return 1
+            _save_allowed_sources([s for s in parsed if isinstance(s, str)])
+            return 0
+        print("sbx: unsupported settings key", file=sys.stderr)
         return 1
-    _discard_stdin()
-    secrets = _load_secrets()
-    secrets.setdefault(sandbox, {})["github"] = "set"
-    _save_secrets(secrets)
-    return 0
-
-
-def _rotate_main(args: list[str]) -> int:
-    """Handle ``sbx rotate`` — probe the new key, then store only on success."""
-    _discard_stdin()
-    outcome = os.environ.get(ROTATE_ENV, "ok")
-    if outcome == "unreachable":
-        print(RAW_FAIL_STDERR, file=sys.stderr)
-        return 2
-    if outcome == "auth_failed":
-        print(RAW_FAIL_STDERR, file=sys.stderr)
-        return 3
-    secrets = _load_secrets()
-    secrets.setdefault("global", {})["usai"] = "set"
-    _save_secrets(secrets)
-    return 0
-
-
-def _kit_source_revoke_main(args: list[str]) -> int:
-    """Handle ``sbx kit-source-revoke REPO`` — drop the owner prefix from the allowlist.
-
-    Idempotent: an absent prefix is not an error. Reports the revoked owner prefix
-    on stdout (the "revoked ref") so the adapter can surface it; the repo's kit
-    *value* (its ref) is host-held and never crosses this boundary.
-    """
-    repo = args[0] if args else None
-    if repo is None:
-        print("sbx: kit-source-revoke requires a repository", file=sys.stderr)
-        return 1
-    prefix = _owner_prefix(repo)
-    sources = _load_allowed_sources()
-    if prefix in sources:
-        sources = [s for s in sources if s != prefix]
-        _save_allowed_sources(sources)
-    print(f"revoked {prefix}")
-    return 0
+    print(f"sbx: unrecognized settings subcommand '{sub}'", file=sys.stderr)
+    return 1
 
 
 def main(argv: list[str]) -> int:
@@ -413,25 +405,20 @@ def main(argv: list[str]) -> int:
     if cmd == "secret":
         return _secret_main(args[1:])
 
-    if cmd == "provider-credential":
-        return _provider_credential_main(args[1:])
-
-    if cmd == "github-scope":
-        return _github_scope_main(args[1:])
-
-    if cmd == "rotate":
-        return _rotate_main(args[1:])
-
-    if cmd == "kit-source-revoke":
-        return _kit_source_revoke_main(args[1:])
+    if cmd == "settings":
+        return _settings_main(args[1:])
 
     catalog = _load()
 
     if cmd in ("ls", "list"):
-        running_only = "--running" in args
+        # Real `sbx ls` has only --format/--json/-q (NO --running); --json emits a
+        # list of {name, status} objects, and -q/table emit names one per line.
+        if "--json" in args or "--format" in args:
+            entries = [{"name": name, "status": state} for name, state in catalog.items()]
+            entries.sort(key=lambda e: e["name"])
+            print(json.dumps(entries))
+            return 0
         for name, state in catalog.items():
-            if running_only and state != "running":
-                continue
             print(name)
         return 0
 
@@ -439,6 +426,8 @@ def main(argv: list[str]) -> int:
         if _should_fail("create"):
             print(RAW_FAIL_STDERR, file=sys.stderr)
             return 1
+        # ``sbx create AGENT [PATH] --name N -t IMAGE`` — the agent/path/image are
+        # positional/flags the stub does not need; the name is the catalog key.
         name = _arg_after(args, "--name")
         if name is None:
             print("sbx: create requires --name", file=sys.stderr)
@@ -451,9 +440,9 @@ def main(argv: list[str]) -> int:
         return 0
 
     if cmd == "exec":
-        # `sbx exec [-u USER] [-w DIR] NAME -- CMD...` — exit 0 when NAME exists,
-        # else 1. The command after `--` is echoed to stdout and the exit status is
-        # driven by ``ACQ_SBX_STUB_EXEC_EXIT``.
+        # `sbx exec [-u USER] [-w DIR] [-e K=V] NAME [-- CMD...]` — exit 0 when
+        # NAME exists, else 1. The command after `--` is echoed to stdout and the
+        # exit status is driven by ``ACQ_SBX_STUB_EXEC_EXIT``.
         try:
             sep = args.index("--")
         except ValueError:

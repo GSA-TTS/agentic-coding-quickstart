@@ -6,29 +6,65 @@
   "backend": null,
   "platform": "any",
   "invoke": {
-    "argv": ["{acq}", "--backend", "msb", "github-scope", "mybox", ".", "--json"],
+    "argv": [
+      "{acq}",
+      "--backend",
+      "msb",
+      "github-scope",
+      "mybox",
+      ".",
+      "--json"
+    ],
     "env": {
       "ACQ_MSB_BIN": "__stub__",
       "ACQ_MSB_VERSION": "0.7.7",
       "ACQ_MSB_INSTALLED": "1",
       "ACQ_SBX_INSTALLED": "0"
     },
-    "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "MSB_HOME", "ACQ_IMAGE", "ACQ_MSB_IMAGE", "ACQ_MSB_READY_TIMEOUT", "ACQ_MSB_STUB_CATALOG", "ACQ_MSB_STUB_FAIL", "ACQ_MSB_STUB_SECRETS", "ACQ_MSB_STUB_SECRET_LS_RAW", "ACQ_MSB_STUB_ROTATE"],
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "MSB_HOME",
+      "ACQ_IMAGE",
+      "ACQ_MSB_IMAGE",
+      "ACQ_MSB_READY_TIMEOUT",
+      "ACQ_MSB_STUB_CATALOG",
+      "ACQ_MSB_STUB_FAIL",
+      "ACQ_MSB_STUB_SECRETS",
+      "ACQ_MSB_STUB_SECRET_LS_RAW",
+      "ACQ_MSB_STUB_ROTATE"
+    ],
     "stdin": "ghp_synthetic-scoped-token-5678\n",
     "timeout_ms": 5000
   },
   "expect": {
-    "exit": 0,
+    "exit": 1,
     "stdout": {
-      "mode": "exact",
-      "value": "{\"command\":\"github-scope\",\"data\":{\"backend\":\"msb\",\"sandbox\":\"mybox\",\"scoped\":true},\"schema_version\":1}",
-      "normalize": ["json"]
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "github-scope",
+        "error": {
+          "code": "unsupported_capability"
+        }
+      },
+      "normalize": []
     },
-    "stderr": {"mode": "exact", "value": "", "normalize": []}
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
   },
   "isolation": {
     "offline": true,
     "ssh_stubs": false,
-    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME"
+    ]
   }
 }

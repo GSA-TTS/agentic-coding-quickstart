@@ -446,7 +446,7 @@ def test_kit_apply_capability_maps_through_seam():
     rec = msb.capability_record("0.7.7")
     assert rec["backend"] == "msb"
     assert rec["capabilities"]["kit-apply"] == "required"
-    assert rec["capabilities"]["secret-list"] == "required"  # msb-only
+    assert rec["capabilities"]["secret-list"] == "unsupported"  # msb has no `secret` subcommand
     assert rec["capabilities"]["key-present"] == "unsupported"  # sbx-only
     assert cli._supports("msb", "kit-apply") is True
     assert cli._supports("sbx", "kit-apply") is False
@@ -488,9 +488,10 @@ def test_kit_apply_reapply_is_noop(monkeypatch, tmp_path, capsys):
 
 def test_kit_apply_backend_failure_fails_closed(monkeypatch, tmp_path, capsys):
     # Raw backend text never reaches the envelope (ADR-0040m): a failing
-    # kit-apply maps to a stable code, not the stub's raw stderr.
+    # in-guest install (now driven via `msb exec`) maps to a stable code, not the
+    # stub's raw stderr.
     _env(monkeypatch, tmp_path, catalog={"mybox": "running"})
-    monkeypatch.setenv("ACQ_MSB_STUB_FAIL", "kit-apply")
+    monkeypatch.setenv("ACQ_MSB_STUB_FAIL", "exec")
 
     rc, doc = _invoke(capsys, "--backend", "msb", "kit", "apply", "mybox", "opencode", "--json")
     assert rc == 1

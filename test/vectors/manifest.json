@@ -180,8 +180,8 @@
       "vectors": ["cli/secret-rm-missing", "cli/secret-ls-unreadable", "cli/secret-ls-bad-shape", "cli/secret-ls-entry-bad-shape"]
     },
     {
-      "contract": "ADR-0040m unsupported-capability fail-closed for secret listing on a non-msb backend (secret-list is msb-only)",
-      "vectors": ["cli/secret-sbx-unsupported"]
+      "contract": "ADR-0040m unsupported-capability fail-closed for secret listing on msb (msb has no `secret` subcommand; secret-list is sbx)",
+      "vectors": ["cli/secret-msb-unsupported"]
     },
     {
       "contract": "ADR-0038m §2 provider-credential set success: value on stdin only, binding reports provider/key_env/hosts/source_layer, never a value",

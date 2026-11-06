@@ -60,6 +60,19 @@ def test_sandbox_ref_typing():
         assert cli._sandbox_ref("C:/host/file.txt") is None
 
 
+def test_guest_path_translation():
+    # ADR-0029: the adapter derives the POSIX guest form of a native host path.
+    from acq_py import msb
+
+    if __import__("os").name == "nt":
+        assert msb._guest_path("C:\\Users\\me\\proj") == "/c/Users/me/proj"
+        assert msb._guest_path("C:/Users/me/proj") == "/c/Users/me/proj"
+    else:
+        assert msb._guest_path("/Users/me/proj") == "/Users/me/proj"
+    # A value that is already POSIX is unchanged on every platform.
+    assert msb._guest_path("/home/agent") == "/home/agent"
+
+
 # ---------------------------------------------------------------------------
 # Host-authoritative record reads (ADR-0041m: guest-writable state is never
 # authority; a missing record defaults the workspace, a newer schema refuses).
