@@ -1,0 +1,336 @@
+#!/usr/bin/env python3
+"""Per-cell Tier-3 qualification oracle for the acq v1 Python replacement.
+
+Drives the SHIPPED CLI (``python -m acq_py``) as subprocesses against a real
+msb or sbx backend and returns 0 (PASS), 2 (BLOCKED), or 1 (FAIL). It is the
+same oracle that produced the Windows x64 PASS: a human, or an agent on a
+macOS/Linux host, runs it under the qualification harness, which emits the
+verbatim ``RESULT`` transcript line (ADR-0044m):
+
+    python -m qualification run --backend msb \
+        --backend-version "$(msb --version)" --os Linux --os-build … --arch … \
+        --hypervisor kvm --rev "$(git rev-parse HEAD)" --image IMG \
+        -- scripts/qualify-backend-cell --backend msb
+
+The oracle itself only reports an exit status and never emits the ``RESULT``
+line; that is the harness's job. What it does verify, per ADR-0044m:
+
+    * boot contract      — create/ls/exec/rm round-trip against the default
+                           shell image (oracle 3: real backend behaviour).
+    * secret non-exposure — secret set/ls/rm and (sbx only) provider-credential
+                           set/ls/rm round-trips, asserting the throwaway value
+                           never appears in any captured stdout or stderr
+                           (oracle 2).
+    * cleanup discipline — the sbx provider-credential ``rm`` removes only the
+                           host-side binding, NOT the underlying sbx custom
+                           secret; the teardown therefore also removes that raw
+                           custom secret via ``sbx secret rm --placeholder …``
+                           so repeated runs stay idempotent.
+
+Exit codes (mirroring ``scripts/qualify-msb-ro-mount`` and ADR-0044m): 0 PASS,
+2 BLOCKED (the backend CLI is not runnable — a missing prerequisite), 1 FAIL
+(any step failed, printed as ``FAIL: <step>`` on stderr). A secret VALUE is a
+throwaway ``TIER3_MARKER_<hex>`` and must never appear in captured output.
+
+Portability: the workspace is a fresh ``tempfile`` directory (never a hardcoded
+host path); the CLI is run with ``PYTHONPATH`` pointing at ``py-acq/src``
+relative to this script's own location; no shell-specific or Windows-specific
+path assumptions are made. Never prints a real secret.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import secrets
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+# The default shell image every boot-contract cell creates against (the same
+# image ``scripts/qualify-msb-ro-mount`` uses).
+IMAGE = "docker.io/docker/sandbox-templates:shell-docker"
+
+# Non-secret identifiers for the secret/provider-credential round-trips. The
+# VALUE is always a throwaway ``TIER3_MARKER_<hex>`` generated per run.
+SERVICE = "SVC"
+PROVIDER = "opencode-go"
+KEY_ENV = "KEY"
+CRED_HOST = "api.example.com"
+
+# The first ``create`` pulls the image and boots a microVM; other steps are
+# quick. These are the oracle's own per-step budgets (the harness's outer
+# ``--timeout`` still bounds the whole run, so a fresh host should pass a
+# larger ``--timeout`` to ``qualification run``).
+CREATE_TIMEOUT = 600.0
+STEP_TIMEOUT = 120.0
+
+
+def _repo_root() -> Path:
+    """The repository root, relative to this script's own location."""
+    return Path(__file__).resolve().parent.parent
+
+
+def _cli_env() -> dict[str, str]:
+    """Run ``python -m acq_py`` with ``py-acq/src`` on ``PYTHONPATH``."""
+    env = dict(os.environ)
+    src = str(_repo_root() / "py-acq" / "src")
+    previous = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = src if not previous else src + os.pathsep + previous
+    return env
+
+
+def _run_acq(argv: list[str], *, stdin: str | None = None, timeout: float = STEP_TIMEOUT):
+    """Run the shipped CLI as a subprocess; return a CompletedProcess or None
+    (internal timeout). Captures stdout and stderr so a secret can be checked."""
+    try:
+        return subprocess.run(
+            [sys.executable, "-m", "acq_py", *argv],
+            env=_cli_env(),
+            input=stdin,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+
+
+def _run_raw(argv: list[str], *, stdin: str | None = None, timeout: float = STEP_TIMEOUT):
+    """Run a raw backend CLI (not through acq) for the teardown path."""
+    try:
+        return subprocess.run(
+            list(argv),
+            input=stdin,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+
+
+def _fail(step: str, detail: str = "") -> int:
+    message = f"FAIL: {step}"
+    if detail:
+        message += f": {detail}"
+    print(message, file=sys.stderr)
+    return 1
+
+
+def _blocked(reason: str) -> int:
+    print(f"BLOCKED: {reason}", file=sys.stderr)
+    return 2
+
+
+def _output_contains(proc, token: str) -> bool:
+    """True when ``token`` appears in a completed process's captured output."""
+    if proc is None:
+        return False
+    return token in (proc.stdout or "") or token in (proc.stderr or "")
+
+
+def _assert_value_not_exposed(step: str, value: str, proc) -> int | None:
+    """Return a FAIL exit code when the secret VALUE leaked; else None."""
+    if _output_contains(proc, value):
+        return _fail(step, "the secret value appeared in captured output")
+    return None
+
+
+def _remove_sbx_custom_secret(key_env: str) -> None:
+    """Best-effort removal of the sbx custom secret acq created for ``key_env``.
+
+    ``provider-credential rm`` drops only the host-side binding (documented
+    legacy split); the underlying sbx custom secret must be removed separately
+    for repeated runs to stay idempotent. The placeholder is read from the raw
+    ``sbx secret ls --json`` ``custom_secrets`` table (its value is masked), then
+    removed with ``sbx secret rm --placeholder <placeholder> -f``. Never reads a
+    secret value; failures are deliberately swallowed (teardown only).
+    """
+    proc = _run_raw(["sbx", "secret", "ls", "--json"], timeout=STEP_TIMEOUT)
+    if proc is None or proc.returncode != 0:
+        return
+    try:
+        doc = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return
+    custom = doc.get("custom_secrets") if isinstance(doc, dict) else None
+    if not isinstance(custom, list):
+        return
+    for entry in custom:
+        if not isinstance(entry, dict) or entry.get("env") != key_env:
+            continue
+        placeholder = entry.get("placeholder")
+        if isinstance(placeholder, str) and placeholder:
+            _run_raw(["sbx", "secret", "rm", "--placeholder", placeholder, "-f"])
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="qualify-backend-cell",
+        description="Per-cell Tier-3 qualification oracle (ADR-0044m): boot "
+        "contract + secret/provider-credential non-exposure.",
+    )
+    parser.add_argument("--backend", required=True, choices=["msb", "sbx"], help="backend to qualify")
+    args = parser.parse_args(argv)
+    backend: str = args.backend
+
+    # --- BLOCKED precondition: the backend CLI must be runnable (exit 2). ---
+    bin_name = "msb" if backend == "msb" else "sbx"
+    version_argv = ["--version"] if backend == "msb" else ["version"]
+    if shutil.which(bin_name) is None:
+        return _blocked(f"{bin_name} CLI is not on PATH")
+    probe = _run_raw([bin_name, *version_argv], timeout=15.0)
+    if probe is None or probe.returncode != 0:
+        return _blocked(f"{bin_name} CLI did not run ({' '.join(version_argv)})")
+
+    # Per-run throwaway identifiers. The secret VALUE is a throwaway marker and
+    # must never appear in captured output.
+    nonce = secrets.token_hex(4)
+    value = f"TIER3_MARKER_{nonce}"
+    sandbox_name = f"acq-qual-{backend}-{nonce}"
+    workspace: str | None = None
+    created_secret = False
+    did_provider_credential = False
+
+    try:
+        # --- oracle 3: boot contract (create/ls/exec/rm) ---------------------
+        workspace = tempfile.mkdtemp(prefix="acq-qual-ws-")
+
+        created = _run_acq(
+            ["--backend", backend, "create", "shell", workspace,
+             "--name", sandbox_name, "--image", IMAGE, "--json"],
+            timeout=CREATE_TIMEOUT,
+        )
+        if created is None:
+            return _fail("create", "timed out")
+        if created.returncode != 0:
+            return _fail("create", f"exit {created.returncode}")
+
+        listed = _run_acq(["--backend", backend, "ls", "--json"])
+        if listed is None:
+            return _fail("ls", "timed out")
+        if listed.returncode != 0:
+            return _fail("ls", f"exit {listed.returncode}")
+        try:
+            listing = json.loads(listed.stdout)
+            names = [
+                entry.get("name")
+                for entry in listing.get("data", {}).get("sandboxes", [])
+                if isinstance(entry, dict)
+            ]
+        except json.JSONDecodeError:
+            return _fail("ls", "unparseable listing")
+        if sandbox_name not in names:
+            return _fail("ls", f"sandbox '{sandbox_name}' not present after create")
+
+        executed = _run_acq(
+            ["--backend", backend, "exec", sandbox_name, "--", "echo", f"hello-from-{backend}"]
+        )
+        if executed is None:
+            return _fail("exec", "timed out")
+        if executed.returncode != 0:
+            return _fail("exec", f"exit {executed.returncode}")
+        if f"hello-from-{backend}" not in (executed.stdout or ""):
+            return _fail("exec", f"missing 'hello-from-{backend}' marker in output")
+
+        removed = _run_acq(["--backend", backend, "rm", sandbox_name, "--json"])
+        if removed is None:
+            return _fail("rm", "timed out")
+        if removed.returncode != 0:
+            return _fail("rm", f"exit {removed.returncode}")
+
+        # --- oracle 2: secret non-exposure (sbx only; msb has no store) -----
+        if backend == "sbx":
+            set_proc = _run_acq(
+                ["--backend", "sbx", "secret", "set", "-g", SERVICE, "--json"],
+                stdin=value + "\n",
+            )
+            if set_proc is None:
+                return _fail("secret set", "timed out")
+            if set_proc.returncode != 0:
+                return _fail("secret set", f"exit {set_proc.returncode}")
+            created_secret = True
+            leak = _assert_value_not_exposed("secret set", value, set_proc)
+            if leak is not None:
+                return leak
+
+            ls_proc = _run_acq(["--backend", "sbx", "secret", "ls", "--json"])
+            if ls_proc is None:
+                return _fail("secret ls", "timed out")
+            if ls_proc.returncode != 0:
+                return _fail("secret ls", f"exit {ls_proc.returncode}")
+            leak = _assert_value_not_exposed("secret ls", value, ls_proc)
+            if leak is not None:
+                return leak
+
+            rm_proc = _run_acq(
+                ["--backend", "sbx", "secret", "rm", "-g", SERVICE, "--json"]
+            )
+            if rm_proc is None:
+                return _fail("secret rm", "timed out")
+            if rm_proc.returncode != 0:
+                return _fail("secret rm", f"exit {rm_proc.returncode}")
+            created_secret = False
+            leak = _assert_value_not_exposed("secret rm", value, rm_proc)
+            if leak is not None:
+                return leak
+
+            # sbx-only provider-credential round-trip.
+            pc_set = _run_acq(
+                ["--backend", "sbx", "provider-credential", "set", PROVIDER, KEY_ENV,
+                 "--host", CRED_HOST, "--json"],
+                stdin=value + "\n",
+            )
+            if pc_set is None:
+                return _fail("provider-credential set", "timed out")
+            if pc_set.returncode != 0:
+                return _fail("provider-credential set", f"exit {pc_set.returncode}")
+            did_provider_credential = True
+            leak = _assert_value_not_exposed("provider-credential set", value, pc_set)
+            if leak is not None:
+                return leak
+
+            pc_ls = _run_acq(["--backend", "sbx", "provider-credential", "ls", "--json"])
+            if pc_ls is None:
+                return _fail("provider-credential ls", "timed out")
+            if pc_ls.returncode != 0:
+                return _fail("provider-credential ls", f"exit {pc_ls.returncode}")
+            leak = _assert_value_not_exposed("provider-credential ls", value, pc_ls)
+            if leak is not None:
+                return leak
+
+            pc_rm = _run_acq(
+                ["--backend", "sbx", "provider-credential", "rm", PROVIDER, "--json"]
+            )
+            if pc_rm is None:
+                return _fail("provider-credential rm", "timed out")
+            if pc_rm.returncode != 0:
+                return _fail("provider-credential rm", f"exit {pc_rm.returncode}")
+            leak = _assert_value_not_exposed("provider-credential rm", value, pc_rm)
+            if leak is not None:
+                return leak
+
+        print(f"qualify-backend-cell: PASS backend={backend}")
+        return 0
+    finally:
+        # Cleanup discipline: leave the host exactly as found, even on failure.
+        # Remove the sandbox (best-effort) and the throwaway workspace.
+        if sandbox_name:
+            _run_acq(["--backend", backend, "rm", sandbox_name, "--json"], timeout=STEP_TIMEOUT)
+        if workspace:
+            shutil.rmtree(workspace, ignore_errors=True)
+        # Remove the regular secret if a step failed before its rm.
+        if created_secret:
+            _run_acq(["--backend", "sbx", "secret", "rm", "-g", SERVICE, "--json"], timeout=STEP_TIMEOUT)
+        # ``provider-credential rm`` removed the host binding; drop the raw sbx
+        # custom secret it left behind so a re-run stays idempotent.
+        if did_provider_credential:
+            _remove_sbx_custom_secret(KEY_ENV)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
