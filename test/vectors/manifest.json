@@ -208,6 +208,10 @@
       "vectors": ["cli/provider-credential-sbx-set"]
     },
     {
+      "contract": "ADR-0040m per-capability version floor: provider-credential set on sbx requires sbx >= 0.51.0 (set-custom --value-stdin); an older sbx fails closed with backend_version_unsupported",
+      "vectors": ["cli/provider-credential-sbx-set-version-floor"]
+    },
+    {
       "contract": "ADR-0013 per-sandbox GitHub token scoping: github-scope records a sandbox-scoped (never global) scope with the token never exposed",
       "vectors": ["cli/github-scope-json"]
     },

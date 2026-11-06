@@ -785,13 +785,18 @@ Feeding the **sbx** proxy depends on the sbx secret type (per the sbx CLI):
   exists, `acq` stops and prints the exact `sbx secret rm …` command rather than
   answering sbx's overwrite prompt.
 - **Custom endpoints** (`usai` and any `--host/--env` service): `sbx secret
-  set-custom` has **no stdin input** — the value would have to go on argv via
-  `--value` (visible in shell history), which violates the no-argv rule. So
-  `acq` stores the value in the acq store and then, from a **terminal**, runs
-  `sbx secret set-custom` interactively so you enter it once at sbx's own
-  prompt. When piped non-interactively (or on the msb backend), `acq` stores the
-  value and prints the exact `sbx secret set-custom …` command for you to run.
-  (On msb no sbx step is needed — msb reads the acq store directly.)
+  set-custom` gained a `--value-stdin` flag in sbx **0.51.0**, so the value can
+  be piped on stdin (never argv). The Python acq v1 adapter uses
+  `--value-stdin` for `provider-credential set`, gated by a per-capability
+  version floor of **sbx ≥ 0.51.0** (below it, the command fails closed with
+  `backend_version_unsupported`). On older sbx the Bash adapter has no stdin
+  path — the value would have to go on argv via `--value` (visible in shell
+  history), which violates the no-argv rule — so it stores the value in the acq
+  store and then, from a **terminal**, runs `sbx secret set-custom` interactively
+  so you enter it once at sbx's own prompt. When piped non-interactively (or on
+  the msb backend), `acq` stores the value and prints the exact `sbx secret
+  set-custom …` command for you to run. (On msb no sbx step is needed — msb reads
+  the acq store directly.)
 
 This is the bash subset of the design's §7.5 unified secret model; the full
 Go/keychain MITM component (age fallback, `CredentialRewriteRule`,

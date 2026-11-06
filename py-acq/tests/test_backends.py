@@ -79,3 +79,28 @@ def test_check_version_not_found(monkeypatch):
     monkeypatch.setenv("ACQ_SBX_INSTALLED", "0")
     problem = backends.check_version(sbx)
     assert problem is not None and problem.code == "backend_not_found"
+
+
+def test_check_capability_floor(monkeypatch):
+    sbx = backends.BACKENDS["sbx"]
+
+    # A capability with no declared floor passes at the global floor.
+    monkeypatch.setenv("ACQ_SBX_VERSION", "0.39.0")
+    assert backends.check_capability_floor(sbx, "secret-write") is None
+
+    # provider-credential-set needs sbx >= 0.51.0 (`secret set-custom --value-stdin`).
+    monkeypatch.setenv("ACQ_SBX_VERSION", "0.50.1")
+    problem = backends.check_capability_floor(sbx, "provider-credential-set")
+    assert problem is not None and problem.code == "backend_version_unsupported"
+
+    monkeypatch.setenv("ACQ_SBX_VERSION", "0.51.0")
+    assert backends.check_capability_floor(sbx, "provider-credential-set") is None
+
+    # An unknown version is the global floor's refusal, not this capability's.
+    monkeypatch.setenv("ACQ_SBX_VERSION", "garbage")
+    assert backends.check_capability_floor(sbx, "provider-credential-set") is None
+
+    # msb declares no per-capability floors.
+    msb = backends.BACKENDS["msb"]
+    monkeypatch.setenv("ACQ_MSB_VERSION", "0.7.7")
+    assert backends.check_capability_floor(msb, "provider-credential-set") is None

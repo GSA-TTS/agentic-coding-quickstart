@@ -224,6 +224,7 @@ def test_provider_credential_set_uses_value_stdin(monkeypatch, tmp_path, capsys)
     # (v0.51.0): the hosts map to repeated `--host`, key_env maps to `--env`, and
     # the value travels on the child's stdin only — never argv, never output.
     _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_SBX_VERSION", "0.51.0")
     captured: dict = {}
     real_run = sbx._run
 

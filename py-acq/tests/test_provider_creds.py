@@ -62,7 +62,7 @@ def test_provider_credential_value_never_in_argv_or_output(monkeypatch, tmp_path
 
     _env(monkeypatch, tmp_path)
     monkeypatch.setenv("ACQ_SBX_BIN", "__stub__")
-    monkeypatch.setenv("ACQ_SBX_VERSION", "0.39.0")
+    monkeypatch.setenv("ACQ_SBX_VERSION", "0.51.0")
     monkeypatch.setenv("ACQ_SBX_INSTALLED", "1")
     monkeypatch.setenv("ACQ_MSB_INSTALLED", "0")
     monkeypatch.setenv("SBX_HOME", str(tmp_path / "sbx-home"))
@@ -249,7 +249,7 @@ def test_provider_credential_sbx(monkeypatch, tmp_path, capsys):
     # reporting provider/key_env/hosts/source_layer — never a value.
     _env(monkeypatch, tmp_path)
     monkeypatch.setenv("ACQ_SBX_BIN", "__stub__")
-    monkeypatch.setenv("ACQ_SBX_VERSION", "0.39.0")
+    monkeypatch.setenv("ACQ_SBX_VERSION", "0.51.0")
     monkeypatch.setenv("ACQ_SBX_INSTALLED", "1")
     monkeypatch.setenv("ACQ_MSB_INSTALLED", "0")
     monkeypatch.setenv("SBX_HOME", str(tmp_path / "sbx-home"))
@@ -266,6 +266,27 @@ def test_provider_credential_sbx(monkeypatch, tmp_path, capsys):
         "source_layer": "provider-credentials",
     }
     # The value never appears in the success envelope.
+    assert "value-1" not in json.dumps(doc)
+
+
+def test_provider_credential_sbx_version_floor(monkeypatch, tmp_path, capsys):
+    # `provider-credential set` on sbx requires sbx >= 0.51.0 (the version that
+    # added `secret set-custom --value-stdin`). An older sbx fails closed with
+    # backend_version_unsupported BEFORE the backend is invoked, so the value is
+    # never read, never placed on argv, never in output.
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_SBX_BIN", "__stub__")
+    monkeypatch.setenv("ACQ_SBX_VERSION", "0.50.1")
+    monkeypatch.setenv("ACQ_SBX_INSTALLED", "1")
+    monkeypatch.setenv("ACQ_MSB_INSTALLED", "0")
+    monkeypatch.setenv("SBX_HOME", str(tmp_path / "sbx-home"))
+    monkeypatch.setattr(sys, "stdin", io.StringIO("value-1\n"))
+
+    rc, doc = _invoke(
+        capsys, "--backend", "sbx", "provider-credential", "set", "usai", "USAI_API_KEY", "--host", "api.gsa.usai.gov", "--json"
+    )
+    assert rc == 1
+    assert doc["error"]["code"] == "backend_version_unsupported"
     assert "value-1" not in json.dumps(doc)
 
 

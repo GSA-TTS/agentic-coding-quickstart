@@ -522,9 +522,12 @@ The raw value only reaches the container if you deliberately bypass the
 sanctioned flow:
 
 - Passing `sbx secret set-custom … --value <the-secret>` on the command line
-  puts the value in argv (and shell history). `acq` never does this — it prompts
-  interactively or stores the value in the acq store and prints the manual
-  command as a last resort; it does not echo the value on argv.
+  puts the value in argv (and shell history). `acq` never does this — on sbx
+  **0.51.0+** the Python acq v1 adapter pipes the value via `--value-stdin`
+  (never argv, gated by a per-capability version floor of sbx ≥ 0.51.0, below
+  which it fails closed with `backend_version_unsupported`); the Bash adapter
+  prompts interactively or stores the value in the acq store and prints the
+  manual command as a last resort. Neither echoes the value on argv.
 - A hand-rolled setup that exports the raw key into the container env (e.g.
   `export USAI_API_KEY=<real-key>` in a profile, or `--value` in a script)
   defeats the placeholder mechanism.
@@ -550,6 +553,9 @@ acq secret set usai
 
 # Equivalent raw sbx command (interactive prompt for the value — no --value):
 sbx secret set-custom --host api.gsa.usai.gov --env USAI_API_KEY
+
+# On sbx 0.51.0+, you can pipe the value on stdin instead (keeps it off argv):
+printf '%s' "$USAI_API_KEY" | sbx secret set-custom --host api.gsa.usai.gov --env USAI_API_KEY --value-stdin
 ```
 
 Your `opencode.jsonc` should use variable substitution:

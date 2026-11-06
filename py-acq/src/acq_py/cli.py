@@ -772,7 +772,12 @@ def _launch_token(backend: str, name: str, agent: str) -> str:
 
 
 def _resolve_backend_for_mutation(
-    explicit: str | None, emit_json: bool, command: str, *, domain: str = "lifecycle"
+    explicit: str | None,
+    emit_json: bool,
+    command: str,
+    *,
+    domain: str = "lifecycle",
+    capability: str | None = None,
 ) -> tuple[str | None, int | None]:
     """Resolve the backend for a mutating verb and enforce the version floor.
 
@@ -780,6 +785,8 @@ def _resolve_backend_for_mutation(
     failure was already emitted (unknown backend -> usage, no backend /
     unsupported version -> operational, all fail-closed before mutation).
     ``domain`` names the verb family for the no-backend remediation prose.
+    ``capability`` (when set) additionally enforces that capability's per-capability
+    version floor (``backends.CAPABILITY_FLOORS``) above the global floor.
     """
     if explicit is not None and explicit not in backends.BACKENDS:
         return None, _usage_failure(
@@ -799,6 +806,12 @@ def _resolve_backend_for_mutation(
     problem = backends.check_version(backends.BACKENDS[name])
     if problem is not None:
         return None, _operational_failure(command, problem.code, problem.message, problem.remediation, emit_json)
+    if capability is not None:
+        cap_problem = backends.check_capability_floor(backends.BACKENDS[name], capability)
+        if cap_problem is not None:
+            return None, _operational_failure(
+                command, cap_problem.code, cap_problem.message, cap_problem.remediation, emit_json
+            )
     return name, None
 
 
@@ -2627,7 +2640,8 @@ def main(argv: list[str] | None = None) -> int:
         if subcmd == "rm":
             return run_provider_credential_rm(parsed, emit_json)
         _backend, exit_code = _resolve_backend_for_mutation(
-            backend_override, emit_json, "provider-credential set", domain="provider credentials"
+            backend_override, emit_json, "provider-credential set", domain="provider credentials",
+            capability="provider-credential-set",
         )
         if exit_code is not None:
             return exit_code

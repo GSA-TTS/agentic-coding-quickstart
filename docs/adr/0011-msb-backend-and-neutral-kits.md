@@ -13,6 +13,15 @@ supersedes: []
 
 # ADR-0011: Add msb (microsandbox) Backend and Neutral hybrid/v1 Kit Translation
 
+> **Update (2026-11-05):** `sbx secret set-custom` gained a `--value-stdin` flag in
+> sbx 0.51.0, so a custom endpoint's value no longer has to be placed on argv
+> (`--value`) or entered at an interactive prompt. The Python acq v1 adapter
+> (`acq_py`, ADR-0040m) stores a provider credential via `secret set-custom
+> --value-stdin` (value on stdin only, never argv), gated by a per-capability
+> version floor of **sbx ≥ 0.51.0** — below that floor it fails closed with
+> `backend_version_unsupported`. The Bash adapter's interactive /
+> print-the-command fallback described below remains for older sbx releases.
+
 > **Update (2026-09-01):** The macOS acq secret store now uses
 > `/usr/bin/security -i` for Keychain writes. The secret value is embedded in the
 > `security -i` stdin command stream and the stream is terminated by EOF, keeping

@@ -100,11 +100,15 @@ def _run(
 # conformance-asserted), ``optional`` (declared but not part of the shipped
 # surface), ``unsupported`` (fails closed with ``unsupported_capability``).
 #
-# Reconcile with the real sbx 0.50.1 CLI: sbx HAS a ``secret`` subcommand with
+# Reconcile with the real sbx CLI: sbx HAS a ``secret`` subcommand with
 # ``set``/``ls``/``rm`` (so ``secret-list`` is required, not msb-only), but it has
 # NO ``rotate`` subcommand (``key-rotate`` is unsupported) and no ``kit-source-revoke``
 # subcommand — the kit ``allowedSources`` allowlist is managed via
 # ``sbx settings get/set kit.allowedSources``, which ``kit_source_revoked`` drives.
+# ``secret-write`` (the ``secret set`` path) works from the global floor, but
+# ``provider-credential set`` is version-gated to sbx >= 0.51.0: its value path is
+# ``secret set-custom --value-stdin``, which only exists from 0.51.0 (see
+# ``backends.CAPABILITY_FLOORS``).
 def capability_record(version: str | None = None) -> dict:
     return {
         "backend": "sbx",
@@ -528,10 +532,18 @@ def provider_credential_set(provider: str, key_env: str, hosts: list[str], value
     value is piped on the child's stdin only (never argv, never output), per
     ADR-0038m §7 "never in argv". The secret is global (the ``set-custom``
     default — no ``--sandbox`` flag), matching the host-side binding's
-    destination-pinned (not sandbox-pinned) authority. An already-present entry
-    is the backend's own fail-closed error (``set-custom`` has no overwrite
-    prompt to consume the piped value), surfaced as a stable ``failure`` code.
+    destination-pinned (not sandbox-pinned) authority.
+
+    The same ``key_present`` pre-check as :func:`secret_set`/:func:`github_scope`
+    applies: an already-present credential fails closed before the value is piped,
+    so the value is never consumed by a (future) overwrite prompt.
     """
+    if key_present(_GLOBAL_SCOPE, key_env):
+        raise SbxError(
+            errors.FAILURE,
+            f"provider credential '{key_env}' already exists for provider '{provider}'",
+            "remove the existing sbx custom secret first (sbx secret ls, then sbx secret rm --placeholder <placeholder> --force), then re-set",
+        )
     argv = ["secret", "set-custom"]
     for host in hosts:
         argv += ["--host", host]
