@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 #
-# 91-sbx-readonly-warning.bats — ADR-0037 interim state (Option D): sbx has no
+# 91-sbx-readonly-warning.bats — ADR-0037 accepted state (Option D): sbx has no
 # trusted read-only mount for kit `readonly: true` files, so the sbx translation
 # path must warn visibly (stderr) that those files are guest-resident copies.
 # The kit must still translate and apply unchanged. Offline; no sbx needed.
