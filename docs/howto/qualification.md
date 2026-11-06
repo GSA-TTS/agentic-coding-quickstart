@@ -66,7 +66,7 @@ musl libc, and sbx on macOS x86_64 and Linux aarch64.
 |---|--------|----------------|------------------|
 | 1 | ro-mount canary | msb enforces a `:ro` trusted-config mount | msb on KVM/HVF |
 | 2 | secret non-exposure | secret set/ls/rm + provider-credential set/ls/rm round-trip; the value never appears in argv or output | sbx |
-| 3 | real backend behaviour | create/ls/exec/rm boot contract, kit apply, attach, version fail-closed | msb and sbx |
+| 3 | real backend behaviour | create/ls/exec/rm boot contract + secret/provider-credential non-exposure (the committed cell oracle); kit apply, attach, version fail-closed asserted elsewhere | msb and sbx |
 | 4 | offline completeness | network-blocked install + smoke | **blocked** (release automation) |
 | 5 | security-exception recreation | strip the read-only-mount record, fail closed, recreate preserving secrets/identity | msb (ADR-0035) |
 | 6 | native-Windows ordinary-user operation | ordinary-user (non-admin) Windows x64 | **done** |
@@ -110,9 +110,18 @@ python -m qualification run \
 
 ### Oracle 3 — real backend behaviour
 
-Exercises the create/ls/exec/rm boot contract, kit apply, attach, and version
-fail-closed through the shipped CLI against a real backend. Run it once per
-backend:
+The committed `scripts/qualify-backend-cell` oracle exercises the
+create/ls/exec/rm boot contract and (on sbx) the secret/provider-credential
+non-exposure round-trips. ADR-0044m's oracle 3 also names **kit apply**,
+**attach**, and **version fail-closed**, which the cell oracle does **not**
+exercise — those facets are asserted elsewhere:
+
+- **version fail-closed** — Tier-1 subprocess vectors (`test/vectors`,
+  `py-acq/tests/test_backends.py`).
+- **attach** — Tier-2 implementation tests (`py-acq/tests/test_exec.py`).
+- **kit apply** — the ADR-0030 devenv-base slice.
+
+Run the cell oracle once per backend:
 
 ```bash
 for B in msb sbx; do
@@ -188,7 +197,7 @@ never copy them from another host:
 | `--artifact-sha256` | SHA-256 of `git archive HEAD` (or of the release asset under acceptance) |
 | `--os` | `uname -s` (Linux/Darwin); `Windows` on Windows |
 | `--os-build` | `uname -r` (Linux); `sw_vers -productVersion` (macOS); `(Get-CimInstance Win32_OperatingSystem).Version` (Windows) |
-| `--arch` | `uname -m` (x86_64/aarch64/arm64); `x64` on Windows |
+| `--arch` | `uname -m` (x86_64/aarch64/arm64) — the harness's raw value; the ADR matrix *platform token* `windows-x64` is separate naming, not this value |
 | `--hypervisor` | `kvm` (Linux, `/dev/kvm` present), `hvf` (macOS), `wsl2` (Windows) |
 | `--backend-version` | `msb --version` / `sbx version`, passing the numeric core (e.g. `0.7.11`, `0.51.0`) |
 
@@ -234,20 +243,21 @@ under acceptance; regenerate it then.
 
 The two green Windows x64 cells (run on this host with `--timeout 900`) produced
 these reference `RESULT` lines; every host regenerates its own with its own
-`--rev`, `--artifact-sha256`, `--os-build`, and `--hypervisor`:
+`--rev`, `--artifact-sha256`, `--os-build`, `--arch`, and `--hypervisor`:
 
 ```text
 OUTCOME PASS
-RESULT PASS msb=0.7.11 image=docker.io/docker/sandbox-templates:shell-docker host=Windows x64 rev=8b65b313b67241696ef4f2398b3ec0444e75bec8 dir=<transcript-dir>
+RESULT PASS msb=0.7.11 image=docker.io/docker/sandbox-templates:shell-docker host=Windows x86_64 rev=8b65b313b67241696ef4f2398b3ec0444e75bec8 dir=<transcript-dir>
 
 OUTCOME PASS
-RESULT PASS sbx=0.51.0 image=docker.io/docker/sandbox-templates:shell-docker host=Windows x64 rev=8b65b313b67241696ef4f2398b3ec0444e75bec8 dir=<transcript-dir>
+RESULT PASS sbx=0.51.0 image=docker.io/docker/sandbox-templates:shell-docker host=Windows x86_64 rev=8b65b313b67241696ef4f2398b3ec0444e75bec8 dir=<transcript-dir>
 ```
 
 Identity fields recorded in those transcripts (not on the `RESULT` line itself):
 
 - `artifact-sha256`: `f6227011994a575d79bb177f8d8f48819d2a023cd4a12e96bdaf4aeb8abc4d09`
 - `os-build`: `10.0.26200`
+- `arch`: `x86_64`
 - `hypervisor`: `wsl2`
 
 ---

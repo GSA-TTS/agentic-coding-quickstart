@@ -147,8 +147,22 @@ def _remove_sbx_custom_secret(key_env: str) -> None:
     legacy split); the underlying sbx custom secret must be removed separately
     for repeated runs to stay idempotent. The placeholder is read from the raw
     ``sbx secret ls --json`` ``custom_secrets`` table (its value is masked), then
-    removed with ``sbx secret rm --placeholder <placeholder> -f``. Never reads a
-    secret value; failures are deliberately swallowed (teardown only).
+    removed with ``sbx secret rm --placeholder <placeholder> --force``.
+
+    Field assumption (verified live against sbx 0.51.0): a ``custom_secrets``
+    entry is keyed by ``env`` and removed by ``placeholder`` — it has no ``name``
+    field. The real shape is::
+
+        {"scope": "global",
+         "targets": ["api.example.com"],
+         "env": "<KEY_ENV>",
+         "placeholder": "sbx-cs-…",
+         "secret": "<masked>"}
+
+    so ``env`` is the lookup key for the entry this run created and
+    ``placeholder`` is the token ``sbx secret rm --placeholder`` accepts. Never
+    reads a secret value (the ``secret`` field is masked); failures are
+    deliberately swallowed (teardown only).
     """
     proc = _run_raw(["sbx", "secret", "ls", "--json"], timeout=STEP_TIMEOUT)
     if proc is None or proc.returncode != 0:
@@ -165,7 +179,9 @@ def _remove_sbx_custom_secret(key_env: str) -> None:
             continue
         placeholder = entry.get("placeholder")
         if isinstance(placeholder, str) and placeholder:
-            _run_raw(["sbx", "secret", "rm", "--placeholder", placeholder, "-f"])
+            # ``--force`` suppresses sbx's interactive confirm prompt, which is
+            # required in a non-interactive subprocess.
+            _run_raw(["sbx", "secret", "rm", "--placeholder", placeholder, "--force"])
 
 
 def main(argv: list[str] | None = None) -> int:
