@@ -100,11 +100,15 @@ def _run(
 # conformance-asserted), ``optional`` (declared but not part of the shipped
 # surface), ``unsupported`` (fails closed with ``unsupported_capability``).
 #
-# Reconcile with the real sbx 0.50.1 CLI: sbx HAS a ``secret`` subcommand with
+# Reconcile with the real sbx CLI: sbx HAS a ``secret`` subcommand with
 # ``set``/``ls``/``rm`` (so ``secret-list`` is required, not msb-only), but it has
 # NO ``rotate`` subcommand (``key-rotate`` is unsupported) and no ``kit-source-revoke``
 # subcommand — the kit ``allowedSources`` allowlist is managed via
 # ``sbx settings get/set kit.allowedSources``, which ``kit_source_revoked`` drives.
+# ``secret-write`` (the ``secret set`` path) works from the global floor, but
+# ``provider-credential set`` is version-gated to sbx >= 0.51.0: its value path is
+# ``secret set-custom --value-stdin``, which only exists from 0.51.0 (see
+# ``backends.CAPABILITY_FLOORS``).
 def capability_record(version: str | None = None) -> dict:
     return {
         "backend": "sbx",
@@ -519,23 +523,38 @@ def secret_rm_raw(placeholder: str) -> None:
 # ---------------------------------------------------------------------------
 
 def provider_credential_set(provider: str, key_env: str, hosts: list[str], value: str) -> None:
-    """Provider-credential binding fails closed on sbx (no compliant value path).
+    """Store a destination-pinned provider credential; value travels on stdin only.
 
-    The real sbx ``secret set-custom`` reads the value only via ``--value``/
-    ``--token`` (argv-visible), ``--ref`` (a 1Password ``op://`` reference or an
-    AWS Secrets Manager ARN — NOT a host env var name, live-verified), ``--command``
-    (a host shell command, whose subprocess cannot read acq's piped stdin —
-    live-verified), or an interactive prompt. There is NO stdin path. Piping the
-    value on stdin would either hang on the prompt or require placing it on argv
-    (which violates ADR-0038m §7 "never in argv"). The Bash reference refuses to
-    feed a piped ``set-custom`` for exactly this reason; mirror it and fail closed
-    with ``unsupported_capability`` rather than half-succeeding or leaking the value.
+    Reconciles with the real sbx 0.51.0 ``secret set-custom``: sbx added a
+    ``--value-stdin`` flag (v0.51.0) that reads the secret value from stdin,
+    keeping it out of shell history and the process list. The provider's ``hosts``
+    list maps to repeated ``--host`` flags and ``key_env`` maps to ``--env``; the
+    value is piped on the child's stdin only (never argv, never output), per
+    ADR-0038m §7 "never in argv". The secret is global (the ``set-custom``
+    default — no ``--sandbox`` flag), matching the host-side binding's
+    destination-pinned (not sandbox-pinned) authority.
+
+    The same ``key_present`` pre-check as :func:`secret_set`/:func:`github_scope`
+    applies: an already-present credential fails closed before the value is piped,
+    so the value is never consumed by a (future) overwrite prompt.
     """
-    raise SbxError(
-        errors.UNSUPPORTED,
-        f"provider-credential storage is not supported on the sbx backend for provider '{provider}'",
-        "sbx secret set-custom has no non-interactive stdin path; provider credentials land with a later slice",
-    )
+    if key_present(_GLOBAL_SCOPE, key_env):
+        raise SbxError(
+            errors.FAILURE,
+            f"provider credential '{key_env}' already exists for provider '{provider}'",
+            "remove the existing sbx custom secret first (sbx secret ls, then sbx secret rm --placeholder <placeholder> --force), then re-set",
+        )
+    argv = ["secret", "set-custom"]
+    for host in hosts:
+        argv += ["--host", host]
+    argv += ["--env", key_env, "--value-stdin"]
+    proc = _run(argv, input_text=value)
+    if proc.returncode != 0:
+        raise SbxError(
+            errors.FAILURE,
+            f"could not store provider credential '{key_env}' for provider '{provider}'",
+            "check backend logs and retry",
+        )
 
 
 def github_scope(sandbox: str, value: str) -> None:

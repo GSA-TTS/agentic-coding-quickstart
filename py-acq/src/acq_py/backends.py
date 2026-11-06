@@ -139,6 +139,20 @@ BACKENDS: dict[str, BackendSpec] = {
 # Deterministic reporting order (matches the legacy `acq backend list` order).
 BACKEND_ORDER = ("sbx", "msb")
 
+# Per-capability version floors (ADR-0040m §version floor). A capability listed
+# here requires a NEWER backend than the global ``min_version``; requesting it on
+# an older backend fails closed with ``backend_version_unsupported`` BEFORE the
+# backend is invoked (the global floor is the base; these are additive).
+CAPABILITY_FLOORS: dict[str, dict[str, Version]] = {
+    "sbx": {
+        # `sbx secret set-custom --value-stdin` landed in sbx 0.51.0; a
+        # provider-credential value can only reach sbx safely (stdin, never
+        # argv) from that release.
+        "provider-credential-set": Version(0, 51, 0, True),
+    },
+    "msb": {},
+}
+
 
 @dataclass(frozen=True)
 class BackendStatus:
@@ -261,3 +275,28 @@ def check_version(spec: BackendSpec) -> VersionProblem | None:
             f"install a final {spec.name} release and retry",
         )
     return None
+
+
+def check_capability_floor(spec: BackendSpec, capability: str) -> VersionProblem | None:
+    """Enforce a per-capability version floor, fail closed (ADR-0040m).
+
+    Returns ``None`` when the capability has no floor, the backend is absent or
+    its version is unknown (the global ``check_version`` floor already refuses
+    those before this is called), or the detected version meets the floor; else a
+    :class:`VersionProblem` carrying ``backend_version_unsupported`` and a clear
+    remediation. No mutation occurs.
+    """
+    floor = CAPABILITY_FLOORS.get(spec.name, {}).get(capability)
+    if floor is None:
+        return None
+    status = detect(spec)
+    if status.parsed is None:
+        return None  # absent/unknown is the global floor's refusal, not this one
+    if version_ge(status.parsed, floor):
+        return None
+    return VersionProblem(
+        errors.BACKEND_VERSION_UNSUPPORTED,
+        f"acq requires {spec.name} >= {floor.string} for '{capability}', "
+        f"but found {status.parsed.string}",
+        f"upgrade {spec.name} to {floor.string} or newer and retry",
+    )

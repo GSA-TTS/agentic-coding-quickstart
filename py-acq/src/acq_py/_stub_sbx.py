@@ -5,14 +5,14 @@ catalog at ``$SBX_HOME/.docker-sbx/catalog.json`` (or ``$HOME/.docker-sbx/...``)
 which the vector runner redirects to a throwaway directory. An initial catalog can
 be seeded in-memory via ``ACQ_SBX_STUB_CATALOG`` (JSON ``{name: state}``).
 
-Mirrors the real sbx 0.50.1 CLI surface:
+Mirrors the real sbx 0.51.0 CLI surface:
 
 * ``sbx create AGENT [PATH] --name N -t IMAGE`` — the agent + path are positional,
   the name is ``--name``, and the image is ``-t/--template``.
 * ``sbx secret set SERVICE [--sandbox NAME]`` (value on stdin, global default),
   ``sbx secret rm SERVICE [--sandbox NAME] -f``, ``sbx secret ls [-g|--sandbox]
   --json``, ``sbx secret rm --placeholder TOKEN``, and ``sbx secret set-custom
-  --host H --env E [--sandbox NAME]`` (value on stdin). There is NO ``secret has``.
+  --host H --env E --value-stdin [--sandbox NAME]`` (value on stdin). There is NO ``secret has``.
 * ``sbx settings get/set kit.allowedSources`` — the owner-granular kit allowlist
   the adapter's ``kit_source_revoked`` drives (there is no ``kit-source-revoke``
   subcommand).
@@ -260,14 +260,17 @@ def _secret_main(args: list[str]) -> int:
         return 0
 
     if sub == "set-custom":
-        # ``sbx secret set-custom --host H --env E [--sandbox NAME]`` — value on
-        # stdin (discarded). The service is keyed by the --env var name so the
-        # adapter's key_present / secret ls can find it.
-        _discard_stdin()
+        # ``sbx secret set-custom --host H --env E --value-stdin [--sandbox NAME]``
+        # — the value arrives on stdin ONLY when the v0.51.0 ``--value-stdin``
+        # flag is present; it is read then discarded (never stored/echoed/logged).
+        # Only (scope, env) -> "set" metadata is recorded, keyed by the --env var
+        # name so the adapter's key_present / secret ls can find it.
         env = _arg_after(rest, "--env")
         if env is None:
             print("sbx: secret set-custom requires --env", file=sys.stderr)
             return 1
+        if "--value-stdin" in rest:
+            _discard_stdin()
         scope = _secret_scope(rest)
         secrets.setdefault(scope, {})[env] = "set"
         _save_secrets(secrets)

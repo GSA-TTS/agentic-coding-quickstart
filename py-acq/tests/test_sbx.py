@@ -219,6 +219,47 @@ def test_secret_value_never_in_argv_or_output_sbx(monkeypatch, tmp_path, capsys)
     assert "TOP-SECRET-VALUE" not in err
 
 
+def test_provider_credential_set_uses_value_stdin(monkeypatch, tmp_path, capsys):
+    # `provider-credential set` on sbx drives `secret set-custom --value-stdin`
+    # (v0.51.0): the hosts map to repeated `--host`, key_env maps to `--env`, and
+    # the value travels on the child's stdin only — never argv, never output.
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_SBX_VERSION", "0.51.0")
+    captured: dict = {}
+    real_run = sbx._run
+
+    def spy(argv, *, timeout=None, input_text=None):
+        captured["argv"] = list(argv)
+        captured["input_text"] = input_text
+        return real_run(argv, timeout=timeout, input_text=input_text)
+
+    monkeypatch.setattr(sbx, "_run", spy)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("TOP-SECRET-PROVIDER-KEY\n"))
+
+    rc = cli.main(
+        [
+            "--backend", "sbx", "provider-credential", "set", "acme", "ACME_API_KEY",
+            "--host", "api.acme.example", "--host", "models.acme.example", "--json",
+        ]
+    )
+    out, err = capsys.readouterr()
+
+    assert rc == 0
+    assert captured["input_text"] == "TOP-SECRET-PROVIDER-KEY"
+    assert captured["argv"][:2] == ["secret", "set-custom"]
+    # Every host maps to a repeated --host flag; key_env maps to --env; the value
+    # is requested on stdin via --value-stdin.
+    assert captured["argv"].count("--host") == 2
+    assert "api.acme.example" in captured["argv"]
+    assert "models.acme.example" in captured["argv"]
+    assert "ACME_API_KEY" in captured["argv"]
+    assert "--value-stdin" in captured["argv"]
+    # The value never reaches argv, stdout, or stderr.
+    assert "TOP-SECRET-PROVIDER-KEY" not in captured["argv"]
+    assert "TOP-SECRET-PROVIDER-KEY" not in out
+    assert "TOP-SECRET-PROVIDER-KEY" not in err
+
+
 # ---------------------------------------------------------------------------
 # secret ls is msb-only: unsupported_capability on sbx.
 # ---------------------------------------------------------------------------
