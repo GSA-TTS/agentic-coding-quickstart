@@ -2559,33 +2559,33 @@ dependabot bump) needed an admin-bypass merge to get past it.
 ### Fix
 
 Removed the workflow-level `paths:` filter so the workflow always triggers,
-and split the single job into three:
-
+and split the single job into a chain (the job set has since grown; see section 52 and
+ADR-0039 for the current shape):
 1. `changes` — a cheap job that computes relevance via `git diff --name-only`
    against the PR base (same technique `markdown-quality.yml`'s link-check job
    already uses; no new marketplace action). Fails closed: any error in
    computing the diff is a job **failure**, never a silent "not relevant."
-2. `test-acq-bash32` — the real, expensive job (builds bash 3.2.57 from
-   source, runs the offline suite) — now conditional on `needs.changes`
-   reporting relevant, unchanged otherwise.
+2. The real, expensive work — originally one job, `test-acq-bash32`, that built bash
+   3.2.57 from source and ran the offline suite. It is conditional on `needs.changes`
+   reporting relevant, and is now `prepare-bash32` (builds the interpreter once)
+   plus a matrix of `test-acq-bash32` shard legs.
 3. `gate` — an always-running job (`if: always()`) that is what branch
    protection actually requires, posted under the **same** required-check name
    the old single job used (`acq offline suite under bash 3.2`) — so this fix
    needed **no** out-of-band branch-protection/ruleset update. It fails unless
-   `needs.changes.result == 'success'` **and**
-   `needs.test-acq-bash32.result` is `success` or `skipped` — checking both
-   upstream jobs, not just the expensive one, so a failure in the cheap
-   relevance-detection step can't be laundered into a passing gate via the
-   downstream job's consequent skip.
+   `needs.changes.result == 'success'` **and** the downstream jobs have the outcome
+   the relevance output predicts, so a failure in the cheap relevance-detection
+   step can't be laundered into a passing gate via a downstream skip.
 
 Verified locally (not just read from docs) before merging: reproduced both
 branches of the `changes` job's `git diff` logic against real commits (one
 touching only a workflow file → empty diff → `relevant=false`; one touching
 `acq.backends/msb.sh` → non-empty diff → `relevant=true`), and exercised the
-gate's shell logic directly against all five `(changes result, test result)`
-combinations, confirming it passes only on `(success, success)` and
+gate's shell logic directly against every `(changes result, test result)`
+combination, confirming it passes only on `(success, success)` and
 `(success, skipped)` and fails on every other combination including the
-failure-laundering case `(failure, skipped)`.
+failure-laundering case `(failure, skipped)` (the gate has since been extended to the
+three-job form; the same exhaustive check was repeated for it, see section 52).
 
 ### Prevention
 
@@ -3261,6 +3261,67 @@ Never hardcode a published host port in a script — read it back from
 `acq ports NAME`, or request it explicitly with `--publish` and let a contended
 port fail loudly. Note that `acq ports` prints the mapping msb was **asked**
 for, which is not proof that the sandbox owns that host port.
+
+---
+
+## 52. A Bash 3.2 Shard Leg or the Interpreter Hand-Off Fails (`acq offline suite under bash 3.2`)
+
+**Status:** Fail closed by design. Applies to the CI workflow
+`.github/workflows/bash32-compat.yml` (design: ADR-0039).
+
+### Symptoms
+
+- The required check `acq offline suite under bash 3.2` is red, and the run has a
+  `Prepare bash 3.2.57 interpreter` job and matrix legs named
+  `acq offline suite under bash 3.2 (build N/M)`.
+- One of:
+  - a single leg fails with test failures: the failing `not ok` line is in that
+    leg's log, and its job summary has a `bats timing (shard: NofM)` table;
+  - every leg fails at *Download the prepared interpreter* or *Install and confirm
+    bash 3.2.57*: `Artifact not found`, `sha256sum: ... did NOT match`, or
+    `interpreter reports X, need 3.2.57`;
+  - the gate reports `relevant diff but prepare=failure, offline suite=skipped`: the
+    prepare job failed, so the legs never started.
+
+### Root Cause
+
+The suite is split into shards (`scripts/bats-shard`, `ACQ_BATS_SHARD=I/N`), and the
+interpreter is built once by `prepare-bash32` and handed to the legs as a run
+artifact whose sha256 is a job output. Every link fails closed: a missing or
+altered tarball, or an interpreter that does not report exactly `3.2.57`, stops the
+leg rather than running on some other bash. The matrix job's result is `success`
+only if every leg succeeded, and the gate also requires the prepare job to have
+succeeded whenever the diff is relevant. The artifact is kept two days, so a leg
+re-run after that fails with `Artifact not found`.
+
+### Fix
+
+1. **Test failures in one leg:** reproduce with the same shard locally,
+   `ACQ_BATS_SHARD=<I>/<N> scripts/test-acq-bats`, or run the failing file under a
+   local 3.2.57 with `scripts/test-acq-bash32 test/bats/<file>.bats`
+   (see `docs/howto/bash32-testing.md`).
+2. **Artifact missing (expired or deleted):** use "Re-run all jobs", which rebuilds the
+   interpreter; "Re-run failed jobs" cannot recreate it.
+3. **sha256 mismatch or wrong version:** treat as an integrity problem, not a flake.
+   Do not bypass the check; re-run all jobs, and if it recurs, investigate the prepare
+   job's build log and the cache entry `bash32-Linux-3.2.57`.
+4. **Prepare job failed during the source build:** the log names the GNU mirror
+   fetch, the OpenPGP signature check, or the compile. A transient mirror failure is
+   retried across five mirrors; a signature or fingerprint failure must be
+   escalated, never worked around.
+5. **One shard consistently much slower than the others:** the shards are balanced by
+   `@test` count, not measured time. Compare the legs' timing artifacts
+   (`bats-timing-<I>of<N>-<attempt>`) and adjust the weighting in `scripts/bats-shard`
+   or add a leg (change `matrix.shard` only; the shard count is derived from it).
+
+### Prevention / Status
+
+The gate's logic was checked against every combination of the three job results and
+the relevance output, and passes only for an all-success relevant run or an
+all-skipped irrelevant one. Adding a test file needs no CI change: shards are
+re-derived from `test/bats` on every run. The OCI-fetched interpreter used by
+`scripts/test-acq-bash32 --install-oci` is deliberately not used in CI (ADR-0039):
+it is a musl build and is content-pinned rather than signer-authenticated.
 
 ---
 

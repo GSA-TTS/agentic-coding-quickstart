@@ -33,7 +33,7 @@
 #   ACQ_BATS_SHARD=1/2 ./scripts/test-acq-bats  # only shard 1 of 2 (see below)
 #
 # SHARDING: ACQ_BATS_SHARD=I/N runs only the files scripts/bats-shard assigns to
-# shard I of N, so CI can split the suite across a job matrix. Selection is
+# shard I of N; the bash 3.2 CI job runs one shard per matrix leg. Selection is
 # recomputed from test/bats/*.bats on every run (no checked-in table), so a new
 # file joins a shard automatically; an invalid spec or empty shard fails closed
 # (exit 2). Ignored when explicit file arguments are given.
