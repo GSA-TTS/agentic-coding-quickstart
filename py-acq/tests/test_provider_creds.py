@@ -54,26 +54,40 @@ def _invoke(capsys, *argv):
 # ---------------------------------------------------------------------------
 
 def test_provider_credential_value_never_in_argv_or_output(monkeypatch, tmp_path, capsys):
-    # Neither backend stores a provider credential non-interactively (sbx
-    # `secret set-custom` has no stdin path), so `provider-credential set` fails
-    # closed with unsupported_capability and the value is never read into argv or
-    # output. The hard "value on stdin only" guarantee is asserted for the
-    # working built-in `secret set` path in test_secret.py.
+    # The hard guarantee on the backend that stores provider credentials (sbx
+    # `secret set-custom --value-stdin`, v0.51.0): the value appears ONLY as the
+    # backend child's stdin, never argv/output. Mirrors the working `secret set`
+    # mutation proof in test_secret.py.
+    from acq_py import sbx
+
     _env(monkeypatch, tmp_path)
     monkeypatch.setenv("ACQ_SBX_BIN", "__stub__")
     monkeypatch.setenv("ACQ_SBX_VERSION", "0.39.0")
     monkeypatch.setenv("ACQ_SBX_INSTALLED", "1")
     monkeypatch.setenv("ACQ_MSB_INSTALLED", "0")
     monkeypatch.setenv("SBX_HOME", str(tmp_path / "sbx-home"))
+    captured: dict = {}
+    real_run = sbx._run
+
+    def spy(argv, *, timeout=None, input_text=None):
+        captured["argv"] = list(argv)
+        captured["input_text"] = input_text
+        return real_run(argv, timeout=timeout, input_text=input_text)
+
+    monkeypatch.setattr(sbx, "_run", spy)
     monkeypatch.setattr(sys, "stdin", io.StringIO("TOP-SECRET-PROVIDER-KEY\n"))
 
-    rc, doc = _invoke(
-        capsys, "--backend", "sbx", "provider-credential", "set", "usai", "USAI_API_KEY", "--host", "api.gsa.usai.gov", "--json"
+    rc = cli.main(
+        ["--backend", "sbx", "provider-credential", "set", "usai", "USAI_API_KEY", "--host", "api.gsa.usai.gov", "--json"]
     )
     out, err = capsys.readouterr()
 
-    assert rc == 1
-    assert doc["error"]["code"] == "unsupported_capability"
+    assert rc == 0
+    assert captured["input_text"] == "TOP-SECRET-PROVIDER-KEY"
+    assert captured["argv"][:2] == ["secret", "set-custom"]
+    assert "--value-stdin" in captured["argv"]
+    assert captured["argv"].count("--host") == 1
+    assert "TOP-SECRET-PROVIDER-KEY" not in captured["argv"]
     assert "TOP-SECRET-PROVIDER-KEY" not in out
     assert "TOP-SECRET-PROVIDER-KEY" not in err
 
@@ -230,9 +244,9 @@ def test_provider_credential_set_missing_host(monkeypatch, tmp_path, capsys):
 
 
 def test_provider_credential_sbx(monkeypatch, tmp_path, capsys):
-    # sbx `secret set-custom` has no stdin path, so `provider-credential set`
-    # fails closed with unsupported_capability (value never read, never in
-    # argv/output), mirroring the Bash reference's refusal to pipe set-custom.
+    # sbx `secret set-custom --value-stdin` (v0.51.0) reads the value on stdin,
+    # so `provider-credential set` succeeds and records the binding host-side,
+    # reporting provider/key_env/hosts/source_layer — never a value.
     _env(monkeypatch, tmp_path)
     monkeypatch.setenv("ACQ_SBX_BIN", "__stub__")
     monkeypatch.setenv("ACQ_SBX_VERSION", "0.39.0")
@@ -244,8 +258,14 @@ def test_provider_credential_sbx(monkeypatch, tmp_path, capsys):
     rc, doc = _invoke(
         capsys, "--backend", "sbx", "provider-credential", "set", "usai", "USAI_API_KEY", "--host", "api.gsa.usai.gov", "--json"
     )
-    assert rc == 1
-    assert doc["error"]["code"] == "unsupported_capability"
+    assert rc == 0
+    assert doc["data"] == {
+        "provider": "usai",
+        "key_env": "USAI_API_KEY",
+        "hosts": ["api.gsa.usai.gov"],
+        "source_layer": "provider-credentials",
+    }
+    # The value never appears in the success envelope.
     assert "value-1" not in json.dumps(doc)
 
 
