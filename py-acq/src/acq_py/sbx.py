@@ -362,9 +362,15 @@ def _secret_list_docs() -> list[dict]:
 
     The real ``sbx secret ls --json`` returns an OBJECT, not a list:
     ``{secrets: [], custom_secrets: [], shadowed_services: [], env_only_count: 0}``.
-    Each ``secrets``/``custom_secrets`` entry is ``{scope, type, name, secret:
-    "(stored)"}`` — the value is never present. This flattens those entries into
-    ``{scope, service, value_state}``. An inspect that *fails* or returns
+    The two entry shapes differ (verified against sbx 0.51.0):
+
+    * ``secrets`` entries are ``{scope, type, name, secret: "(stored)"}``;
+    * ``custom_secrets`` entries are ``{scope, targets, env, placeholder,
+      secret: "(masked)"}`` — keyed by ``env``, with no ``type``/``name`` field.
+
+    In both, the value is never present. This flattens those entries into
+    ``{scope, service, value_state}`` (using ``name`` for ``secrets`` and ``env``
+    for ``custom_secrets``). An inspect that *fails* or returns
     unparseable/wrong-shape output raises :class:`SbxError` with
     ``secret_unreadable`` (ADR-0038m §48 drops "inspection-failure-as-empty").
     """
