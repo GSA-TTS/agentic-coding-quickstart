@@ -522,12 +522,14 @@ def provider_credential_set(provider: str, key_env: str, hosts: list[str], value
     """Provider-credential binding fails closed on sbx (no compliant value path).
 
     The real sbx ``secret set-custom`` reads the value only via ``--value``/
-    ``--token``/``--ref``/``--command`` (or an interactive prompt) — there is NO
-    stdin path. Piping the value on stdin would either hang on the prompt or
-    require placing it on argv (which violates ADR-0038m §7 "never in argv"). The
-    Bash reference refuses to feed a piped ``set-custom`` for exactly this reason;
-    mirror it and fail closed with ``unsupported_capability`` rather than
-    half-succeeding or leaking the value.
+    ``--token`` (argv-visible), ``--ref`` (a 1Password ``op://`` reference or an
+    AWS Secrets Manager ARN — NOT a host env var name, live-verified), ``--command``
+    (a host shell command, whose subprocess cannot read acq's piped stdin —
+    live-verified), or an interactive prompt. There is NO stdin path. Piping the
+    value on stdin would either hang on the prompt or require placing it on argv
+    (which violates ADR-0038m §7 "never in argv"). The Bash reference refuses to
+    feed a piped ``set-custom`` for exactly this reason; mirror it and fail closed
+    with ``unsupported_capability`` rather than half-succeeding or leaking the value.
     """
     raise SbxError(
         errors.UNSUPPORTED,
