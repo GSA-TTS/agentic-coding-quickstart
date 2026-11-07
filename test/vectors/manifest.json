@@ -108,8 +108,8 @@
       "vectors": ["cli/cp-in", "cli/cp-out"]
     },
     {
-      "contract": "ADR-0038m §4 cp lossy-conversion failure: UNC/network host path fails closed",
-      "vectors": ["cli/cp-lossy-unc"]
+      "contract": "ADR-0029 cp forwards a UNC/network host path verbatim to the backend (resolved natively), accepted like a plain-drive path",
+      "vectors": ["cli/cp-unc-host"]
     },
     {
       "contract": "ADR-0038m §4 cp requires exactly one NAME:/guest reference (usage error otherwise)",

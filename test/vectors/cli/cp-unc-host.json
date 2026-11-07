@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "id": "cli/cp-lossy-unc",
-  "oracle": "ADR-0038m §4 lossy-conversion failure: a UNC/network host path requires separate qualification and fails closed (validation_failed)",
+  "id": "cli/cp-unc-host",
+  "oracle": "ADR-0029 UNC host path: cp forwards a UNC/network host path verbatim to the backend (resolved natively), accepted like a plain-drive path",
   "tier": 1,
   "backend": null,
   "platform": "any",
@@ -19,13 +19,13 @@
     "timeout_ms": 5000
   },
   "expect": {
-    "exit": 1,
+    "exit": 0,
     "stdout": {
       "mode": "json",
       "value": {
         "schema_version": 1,
         "command": "cp",
-        "error": {"code": "validation_failed"}
+        "data": {"name": "box", "host": "//server/share/file.txt", "guest": "/tmp/dest.txt", "direction": "in", "exit_code": 0}
       },
       "normalize": []
     },

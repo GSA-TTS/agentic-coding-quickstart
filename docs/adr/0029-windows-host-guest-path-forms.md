@@ -176,18 +176,23 @@ drive/UNC translation. A device path (`\\.\...`) names a device, not a
 filesystem directory, so the adapter fails closed with ``validation_failed``
 rather than emitting a bogus mount.
 
-**Asymmetry (tracked, not yet resolved):** ``acq cp`` still refuses a host UNC
-path (ADR-0038m §4, "UNC/network paths require separate qualification"), while
-``--volume``/``-w`` now accept and mount one. A UNC workspace can therefore be
-created, recorded, and launched, but a subsequent ``acq cp`` into that same
-sandbox refuses the host side. The Bash adapter also still emits the Cygwin
-`//server/share/...` form for UNC (``common.sh`` ``cygpath -u``), so the two
-implementations diverge until the Bash adapter is updated.
+**Resolved for ``acq cp`` (2026-11-07):** ``acq cp`` no longer refuses a host
+UNC path. Its host side is forwarded verbatim to the backend (``msb copy`` /
+``sbx cp``), which resolves it natively on the host; there is no host→guest
+translation on the ``cp`` host side, so a UNC/network host path
+(``\\server\share\...`` / ``//server/share/...``) is accepted the same way a
+plain-drive path is. This removes the asymmetry where ``--volume``/``-w``
+accepted a UNC workspace but ``cp`` refused its host side: a UNC workspace can
+now be created, recorded, launched, *and* copied into/out of through ``cp``.
+
+The Bash adapter still emits the Cygwin ``//server/share/...`` form for UNC
+(``common.sh`` ``cygpath -u``), so the two implementations diverge until the
+Bash adapter is updated (tracked separately, see Links).
 
 ## Links
 
 - mogul/agentic-coding-quickstart#85 — Bash adapter UNC divergence (tracked).
-- mogul/agentic-coding-quickstart#86 — `acq cp` UNC asymmetry (tracked).
+- mogul/agentic-coding-quickstart#86 — `acq cp` UNC asymmetry (resolved by this amendment).
 - GSA-TTS/agentic-coding-quickstart#463 — the review that surfaced the
   single-form bug and the MSYS rewriting behavior.
 - [ADR-0011: msb backend and neutral kits](0011-msb-backend-and-neutral-kits.md)
