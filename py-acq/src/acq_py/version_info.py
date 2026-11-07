@@ -1,8 +1,8 @@
 """Version/identity assembly for ``acq version`` (ADR-0042m).
 
-``version`` reports: ``acq_version`` (SemVer), ``source_revision`` (the baked
-release commit SHA), nullable ``backend``/``backend_version``, and
-``kit_control_plane_ref``.
+``version`` reports: ``impl`` (the implementation marker, always "python" here),
+``acq_version`` (SemVer), ``source_revision`` (the baked release commit SHA),
+nullable ``backend``/``backend_version``, and ``kit_control_plane_ref``.
 
 The two baked values may be overridden via the ``ACQ_VERSION`` and
 ``ACQ_SOURCE_REVISION`` environment variables for reproducible builds/tests.
@@ -50,10 +50,13 @@ def source_revision() -> str | None:
 def version_data() -> dict:
     """Assemble the ``version`` command's required result data (ADR-0038m).
 
+    ``impl`` is the implementation marker ("python") so a bug report is
+    unambiguous about which implementation produced the output (ADR-0047m).
     ``backend``, ``backend_version``, and ``kit_control_plane_ref`` are nullable
     until the backend adapters and kit control plane land.
     """
     return {
+        "impl": "python",
         "acq_version": acq_version(),
         "source_revision": source_revision(),
         "backend": None,
@@ -77,6 +80,7 @@ def run_version(emit_json: bool) -> int:
         return errors.EXIT_SUCCESS
     print("acq v1 (Python skeleton)")
     print(f"  acq version:       {data['acq_version']}")
+    print(f"  impl:              {data['impl']}")
     print(f"  source revision:   {data['source_revision'] or '(not a git clone)'}")
     print(f"  backend:           {data['backend'] or 'none'}")
     print(f"  backend version:   {data['backend_version'] or 'none'}")

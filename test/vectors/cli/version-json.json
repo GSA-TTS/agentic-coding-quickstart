@@ -23,6 +23,7 @@
         "schema_version": 1,
         "command": "version",
         "data": {
+          "impl": "python",
           "acq_version": "0.1.0",
           "source_revision": "0000000000000000000000000000000000000000",
           "backend": null,
