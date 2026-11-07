@@ -77,8 +77,14 @@ Exit status: `0` every selected backend passed or was already current, `1` a
 failed and nothing ran). Alpine/musl hosts and an x86_64 Python under Rosetta are
 refused, since they would mislabel the cell.
 
-The transcripts stay on the host, under `tmp/qualify-out-<time>/`; keep them, since
-the ledger holds only their hashes. The sections below are what that command runs,
+The ledger PR carries each `transcript.json` inline, in a collapsed block with its
+SHA-256, so the hash the ledger records can be checked against the evidence it
+stands for. The copies the run leaves under `tmp/qualify-out-<time>/` are therefore
+disposable — delete them whenever you like. (A transcript is ~1 KB of metadata and
+hashes: verdict, the oracle's argv, versions, host identity, commit and artifact
+SHA, and a *digest* of the observed output. The harness never records raw output or
+the environment, so a transcript cannot carry a secret. The one field with no
+evidentiary value, the absolute `transcript_dir` path, is scrubbed from the PR.) The sections below are what that command runs,
 for reference and for debugging a single step.
 
 ## What this is

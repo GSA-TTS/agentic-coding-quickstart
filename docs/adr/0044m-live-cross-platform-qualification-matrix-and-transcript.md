@@ -161,5 +161,6 @@ waivers for a claimed cell that has no current transcript; a waiver lowers the
 bar, is reported as such, and blocks again once it expires. The ledger is
 self-reported and committed, so its integrity is a review control (CODEOWNERS
 requires an admin's review of `docs/qualification-ledger.json`), not a technical
-one; `transcript_sha256` helps only if the transcripts attached to the release
-are audited against it. A run must be recorded at a commit that is on `main`.
+one; `transcript_sha256` is auditable because the ledger PR inlines the
+transcript it hashes (a PR body is not a committed file), so a recorded hash can
+always be checked against the evidence it stands for. A run must be recorded at a commit that is on `main`.

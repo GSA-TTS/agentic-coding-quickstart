@@ -18,7 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 from qualification import host, publish as pub  # noqa: E402
-from qualification.ledger import load_ledger, latest_entry  # noqa: E402
+from qualification.ledger import entry_from_transcript, latest_entry, load_ledger  # noqa: E402
 
 CELLS = [("msb", "macos-arm64"), ("sbx", "macos-arm64")]
 
@@ -717,3 +717,78 @@ def test_publish_still_uses_the_tested_rev_for_the_entries(tmp_path, monkeypatch
     ledger = json.loads(run(fork, "show", f"{branch}:docs/qualification-ledger.json"))
     for e in ledger["entries"]:
         assert e["rev"] == head, "the entry must record the revision that was tested"
+
+
+# ---- the PR body carries the transcripts (so host copies are disposable) -------
+
+def test_pr_body_inlines_each_transcript_with_its_hash(tmp_path):
+    msb_run = make_transcript(tmp_path, "msb")
+    sbx_run = make_transcript(tmp_path, "sbx")
+    _title, body = host.pr_text(macos(), [msb_run, sbx_run], "a" * 40)
+
+    import hashlib
+
+    for run in (msb_run, sbx_run):
+        digest = hashlib.sha256(run.transcript.read_bytes()).hexdigest()
+        assert digest in body, f"{run.backend}: the transcript's sha256 is not in the body"
+        assert f"transcript.json</code> — {run.backend}" in body
+    assert body.count("<details>") == 2 and body.count("</details>") == 2
+    # the evidence itself, not just a reference to it
+    assert '"outcome": "PASS"' in body and '"output_sha256"' in body
+
+
+def test_pr_body_scrubs_the_local_path_from_the_transcript_and_the_result_line(tmp_path):
+    run = make_transcript(tmp_path, "msb")
+    doc = json.loads(run.transcript.read_text())
+    doc["attempts"][0]["environment"]["transcript_dir"] = "/Users/someone/private/path"
+    run.transcript.write_text(json.dumps(doc))
+    run.result_line = "RESULT PASS msb=0.7.7 image=i host=h rev=r dir=/Users/someone/private/path"
+
+    _title, body = host.pr_text(macos(), [run], "a" * 40)
+    assert "/Users/someone" not in body
+    assert body.count(host.SCRUBBED_DIR) >= 2  # the RESULT line and the transcript field
+    # scrubbing must not disturb the file on disk: the ledger's hash is of the real bytes
+    assert json.loads(run.transcript.read_text())["attempts"][0]["environment"]["transcript_dir"] \
+        == "/Users/someone/private/path"
+
+
+def test_pr_body_survives_an_unreadable_transcript(tmp_path):
+    good = make_transcript(tmp_path, "msb")
+    bad = make_transcript(tmp_path, "sbx")
+    bad.transcript.write_text("{not json")
+    _title, body = host.pr_text(macos(), [good, bad], "a" * 40)
+    assert "transcript unreadable" in body       # reported, never silently dropped
+    assert body.count("<details>") == 1          # the good one is still inlined
+
+
+def test_transcript_evidence_carries_no_environment_dump_or_raw_output(tmp_path):
+    # The harness digests observed output and never records os.environ; the PR body
+    # must not reintroduce either. This guards the "transcripts are not sensitive"
+    # claim the inlining rests on.
+    run = make_transcript(tmp_path, "msb")
+    doc = json.loads(run.transcript.read_text())
+    recorded_fields = set(doc["attempts"][0]["environment"])
+    assert recorded_fields == {
+        "os", "os_build", "arch", "hypervisor", "backend", "backend_version", "image",
+        "glibc_floor", "rev", "artifact_sha256", "transcript_dir",
+    }
+    blocks = "\n".join(host.transcript_evidence([run]))
+    assert "output_sha256" in blocks          # the digest, which is all that is kept
+    assert "os.environ" not in blocks         # never an environment dump
+    assert '"stdout"' not in blocks and '"stderr"' not in blocks  # never raw output
+
+
+def test_the_inlined_hash_is_of_the_real_file_so_a_reviewer_can_verify_it(tmp_path):
+    # The hash in the PR body must be of the transcript's bytes ON DISK — the same
+    # value the ledger entry records — not of the scrubbed copy shown beside it.
+    # Otherwise `sha256sum transcript.json` would not match and the audit path the
+    # inlining exists to provide would be broken.
+    import hashlib
+    import re
+
+    run = make_transcript(tmp_path, "msb")
+    on_disk = hashlib.sha256(run.transcript.read_bytes()).hexdigest()
+    entry = entry_from_transcript(json.loads(run.transcript.read_bytes()), run.transcript.read_bytes())
+    blocks = "\n".join(host.transcript_evidence([run]))
+    shown = re.search(r"sha256 <code>([0-9a-f]{64})</code>", blocks).group(1)
+    assert shown == on_disk == entry.transcript_sha256
