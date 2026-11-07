@@ -1189,12 +1189,22 @@ workspace_paths() {
 canonicalize_path() {
   local p="${1:-}" _out=""
   [ -n "$p" ] || return 0
-  if command -v realpath >/dev/null 2>&1; then
-    _out=$(realpath "$p" 2>/dev/null) || _out=""
-  elif command -v readlink >/dev/null 2>&1; then
-    _out=$(readlink -f "$p" 2>/dev/null) || _out=""
-  fi
-  [ -n "$_out" ] && p="$_out"
+  # A UNC host path (\\server\share or //server/share) is already absolute in
+  # the Windows sense and names a network path realpath cannot resolve. A POSIX
+  # host's realpath would treat the backslash form as a RELATIVE path and mangle
+  # it (resolving \\server\share under the cwd), so skip the realpath/readlink
+  # step for UNC and let it flow straight to cygpath -u (ADR-0029 amendment).
+  case "$p" in
+    \\\\*|//[^/]*) : ;;
+    *)
+      if command -v realpath >/dev/null 2>&1; then
+        _out=$(realpath "$p" 2>/dev/null) || _out=""
+      elif command -v readlink >/dev/null 2>&1; then
+        _out=$(readlink -f "$p" 2>/dev/null) || _out=""
+      fi
+      [ -n "$_out" ] && p="$_out"
+      ;;
+  esac
   if command -v cygpath >/dev/null 2>&1; then
     _out=$(cygpath -u "$p" 2>/dev/null) || _out=""
     [ -n "$_out" ] && p="$_out"
