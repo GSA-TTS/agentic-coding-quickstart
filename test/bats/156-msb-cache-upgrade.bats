@@ -107,6 +107,7 @@ _assert_payload() {
 }
 
 @test "msb cache: symbolic refs refresh payload while preserving legacy checkout" {
+  LEGACY="$ACQ_MSB_KIT_CACHE/git_https___example.test_kits.git_ref_HEAD_dir_kits_one"
   _seed_legacy_cache
   _snapshot_legacy
   local path again
@@ -193,4 +194,18 @@ _assert_payload() {
   export ACQ_MSB_KIT_LOCAL_DIR="$SOURCE_REPO/kits/one"
   assert_equal "$(_acq_msb_fetch_kit "$REF")" "$ACQ_MSB_KIT_LOCAL_DIR"
   assert [ ! -s "$FETCH_LOG" ]
+}
+
+@test "msb cache: repository namespace refuses upgrade without legacy fallback" {
+  _seed_legacy_cache
+  _snapshot_legacy
+  mkdir -p "$ACQ_MSB_KIT_CACHE/payload-v2"
+  "$ACQ_TEST_REAL_GIT" -C "$ACQ_MSB_KIT_CACHE/payload-v2" init -q --template=
+  cp -pR "$ACQ_MSB_KIT_CACHE/payload-v2" "$STUBDIR/namespace-before"
+  run _acq_msb_fetch_kit "$REF"
+  assert_failure
+  assert_output --partial 'refusing to fetch into a git repository'
+  assert [ ! -s "$FETCH_LOG" ]
+  diff -r "$STUBDIR/namespace-before" "$ACQ_MSB_KIT_CACHE/payload-v2"
+  _assert_legacy_unchanged
 }
