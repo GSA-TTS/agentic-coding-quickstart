@@ -332,6 +332,27 @@ def test_touches_surface_distinguishes_release_commits():
     assert not touches_surface(["scripts/qualify-backend-cell-x"])
 
 
+def test_touches_surface_version_output_is_not_surface():
+    # ADR-0044m: no oracle asserts the `version` command's exact output fields, and
+    # its data + human/JSON output live together in version_info.py (run_version was
+    # split out of cli.py). A version-output-only change must not expire a transcript.
+    assert not touches_surface(["py-acq/src/acq_py/version_info.py"])
+    assert not touches_surface(["py-acq/src/acq_py/version_info.py", "py-acq/src/acq_py/__init__.py"])
+    # doctor/runtime and the deterministic test backends are likewise off-surface.
+    assert not touches_surface(["py-acq/src/acq_py/doctor.py", "py-acq/src/acq_py/runtime.py"])
+    assert not touches_surface(["py-acq/src/acq_py/_stub_msb.py", "py-acq/src/acq_py/_stub_sbx.py"])
+
+
+def test_touches_surface_contract_modules_are_surface():
+    # A diff to a genuinely contract-bearing module must still trigger the surface.
+    for module in (
+        "__main__.py", "backends.py", "cli.py", "config.py", "envelope.py",
+        "errors.py", "kits.py", "lock.py", "migration.py", "msb.py",
+        "provider_creds.py", "sbx.py", "security.py", "state.py",
+    ):
+        assert touches_surface([f"py-acq/src/acq_py/{module}"]), module
+
+
 def test_failed_transcript_is_blocked_in_matrix():
     red = make_transcript(Verdict.FAIL)
     assert cell_state("msb", "linux-x86_64", transcript=red, now=NOW) is MatrixState.BLOCKED

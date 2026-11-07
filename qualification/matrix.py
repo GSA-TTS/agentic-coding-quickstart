@@ -86,8 +86,34 @@ MAX_AGE_DAYS = 90
 # them must not expire the evidence they evaluate. Narrow or widen this list when
 # the oracle's reach changes. The default image is a mutable tag, so an upstream
 # image change is bounded only by the age limit.
+#
+# The ``acq_py`` entries are a whitelist of the *contract-bearing* modules the
+# live oracle (``scripts/qualify-backend-cell``: create/ls/exec/rm, secret,
+# provider-credential) actually exercises, rather than the whole package. These
+# modules are deliberately OFF the surface (no oracle asserts their behaviour):
+# ``__init__.py`` (the package version constant — a version bump is release-only),
+# ``version_info.py`` (the ``version`` command's data + output, owned end to end
+# after ADR-0044m's split of ``run_version`` out of ``cli.py``), ``doctor.py``
+# and ``runtime.py`` (``acq doctor``, reached only through ``doctor.py``), and
+# ``_stub_*.py`` (deterministic test-only backends, not the real CLI the oracle
+# drives). ``test_every_acq_py_module_is_classified_as_surface_or_off_surface``
+# asserts every ``acq_py/*.py`` file is classified one way or the other, so a new
+# module cannot silently fall off the surface.
 TIER3_SURFACE = (
-    "py-acq/src/acq_py/",
+    "py-acq/src/acq_py/__main__.py",
+    "py-acq/src/acq_py/backends.py",
+    "py-acq/src/acq_py/cli.py",
+    "py-acq/src/acq_py/config.py",
+    "py-acq/src/acq_py/envelope.py",
+    "py-acq/src/acq_py/errors.py",
+    "py-acq/src/acq_py/kits.py",
+    "py-acq/src/acq_py/lock.py",
+    "py-acq/src/acq_py/migration.py",
+    "py-acq/src/acq_py/msb.py",
+    "py-acq/src/acq_py/provider_creds.py",
+    "py-acq/src/acq_py/sbx.py",
+    "py-acq/src/acq_py/security.py",
+    "py-acq/src/acq_py/state.py",
     "scripts/qualify-backend-cell",
     "scripts/qualify-msb-ro-mount",
     "qualification/__init__.py",

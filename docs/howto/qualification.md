@@ -348,7 +348,7 @@ on every PR, every push to `main`, and weekly. It needs no live run: for each of
 the eight claimed cells it takes the latest ledger entry and passes it only if the
 verdict is `PASS`, it is under 90 days old, its backend `major.minor` equals
 `accepted_backend_versions` in the ledger, and no file on the Tier-3 surface
-(`TIER3_SURFACE` in `qualification/matrix.py`: the CLI source, the two oracles, and the harness's run path) changed between its recorded
+(`TIER3_SURFACE` in `qualification/matrix.py`: the contract-bearing CLI modules, the two oracles, and the harness's run path) changed between its recorded
 revision and `HEAD`. A release-please commit changes none of those, so releases do
 not expire anything. Anything the gate cannot establish fails closed.
 

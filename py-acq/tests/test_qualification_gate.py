@@ -252,21 +252,23 @@ def test_git_changed_paths_sees_moves_and_non_ascii_paths(tmp_path, monkeypatch)
 
     surface = tmp_path / "py-acq" / "src" / "acq_py"
     surface.mkdir(parents=True)
-    (surface / "a.py").write_text("x = 1\n" * 20)
+    (surface / "cli.py").write_text("x = 1\n" * 20)
     git("init", "-q")
     git("add", "-A")
     git("commit", "-qm", "one")
     first = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True).stdout.strip()
-    git("mv", "py-acq/src/acq_py/a.py", "elsewhere.py")  # moved OUT of the surface
+    git("mv", "py-acq/src/acq_py/cli.py", "elsewhere.py")  # moved OUT of the surface
     (surface / "é.py").write_text("y = 2\n")
     git("add", "-A")
     git("commit", "-qm", "two")
     monkeypatch.chdir(tmp_path)
     paths = gate.git_changed_paths(first)
-    assert "py-acq/src/acq_py/a.py" in paths  # the old side of a move is listed
+    assert "py-acq/src/acq_py/cli.py" in paths  # the old side of a move is listed
     assert "py-acq/src/acq_py/é.py" in paths  # not quoted or octal-escaped
     from qualification.matrix import touches_surface
 
+    # The moved cli.py is a contract-bearing module, so it still counts as surface;
+    # é.py is not a real module and is off-surface (whitelist, ADR-0044m).
     assert touches_surface(paths)
 
 
@@ -344,6 +346,26 @@ def test_every_harness_module_is_classified_as_surface_or_read_only():
         rel = f"qualification/{path.name}"
         assert rel in TIER3_SURFACE or rel in read_only, f"{rel} is not classified"
     assert not read_only & set(TIER3_SURFACE)
+
+
+def test_every_acq_py_module_is_classified_as_surface_or_off_surface():
+    # A new acq_py module must be added to TIER3_SURFACE (contract-bearing) or
+    # explicitly listed here as off-surface (no live oracle asserts it); otherwise
+    # editing it would silently not expire any evidence (ADR-0044m narrowed surface).
+    from qualification.matrix import TIER3_SURFACE
+
+    off_surface = {
+        "py-acq/src/acq_py/__init__.py",      # package version constant (release-only)
+        "py-acq/src/acq_py/version_info.py",  # `version` data + output (no oracle asserts it)
+        "py-acq/src/acq_py/doctor.py",        # `acq doctor` (no oracle asserts it)
+        "py-acq/src/acq_py/runtime.py",       # managed-runtime resolution (only via doctor)
+        "py-acq/src/acq_py/_stub_msb.py",     # deterministic test backend, not the live CLI
+        "py-acq/src/acq_py/_stub_sbx.py",     # deterministic test backend, not the live CLI
+    }
+    for path in sorted((REPO_ROOT / "py-acq" / "src" / "acq_py").glob("*.py")):
+        rel = f"py-acq/src/acq_py/{path.name}"
+        assert rel in TIER3_SURFACE or rel in off_surface, f"{rel} is not classified"
+    assert not off_surface & set(TIER3_SURFACE)
 
 
 def test_rendered_summary_cannot_be_broken_by_a_waiver_reason():

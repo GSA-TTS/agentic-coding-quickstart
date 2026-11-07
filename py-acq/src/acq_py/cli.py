@@ -383,20 +383,6 @@ def _operational_failure(
     return exit_code
 
 
-def run_version(emit_json: bool) -> int:
-    data = version_info.version_data()
-    if emit_json:
-        print(json.dumps(envelope.success("version", data)))
-        return errors.EXIT_SUCCESS
-    print("acq v1 (Python skeleton)")
-    print(f"  acq version:       {data['acq_version']}")
-    print(f"  source revision:   {data['source_revision'] or '(not a git clone)'}")
-    print(f"  backend:           {data['backend'] or 'none'}")
-    print(f"  backend version:   {data['backend_version'] or 'none'}")
-    print(f"  kit control plane: {data['kit_control_plane_ref'] or 'none'}")
-    return errors.EXIT_SUCCESS
-
-
 def _resolve_active_backend(explicit: str | None) -> str | None:
     """Resolve the active backend for read-only reporting.
 
@@ -2577,7 +2563,9 @@ def main(argv: list[str] | None = None) -> int:
         return _usage_failure(None, str(exc), emit_json)
 
     if parsed.version or parsed.command == "version":
-        return run_version(emit_json)
+        # The `version` command lives in version_info.py (data + output), so a
+        # version-output-only change never touches this dispatch (ADR-0044m).
+        return version_info.run_version(emit_json)
 
     if parsed.command == "backend":
         if backend_override is not None and backend_override not in backends.BACKENDS:
