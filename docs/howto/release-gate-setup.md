@@ -39,6 +39,30 @@ release is stalled until the cell is re-qualified.
 
 What remains is repository configuration, which only a maintainer can do.
 
+## 0. Releases are upstream's job (why nothing releases on the fork)
+
+The acq v1 rewrite merges into `GSA-TTS/agentic-coding-quickstart`, and **upstream's**
+release-please numbers it there, so upstream users keep one unbroken SemVer line: they
+upgrade from one version to the next as always, and somewhere in that sequence the
+default implementation becomes the Python one.
+
+A fork release would be a second, conflicting version line for the same tool. It also
+cannot produce a sane number: the fork has no tags and branched just after upstream
+4.1.1, while upstream has since shipped 4.2.0 and 4.2.1, so release-please on the fork
+walks all of history and proposes a *downgrade* (it proposed `4.0.1` against a manifest
+of `4.1.1`; that PR was closed).
+
+So every job in `release.yml` is gated on the repository variable
+`ENABLE_RELEASES == 'true'`, which is **unset on the fork**. The workflow and the gate
+are maintained here and contributed upstream; upstream sets the variable (Settings >
+Secrets and variables > Actions > Variables) or drops the condition. The steps below
+are what upstream — or this fork, if it ever does cut its own releases — needs.
+
+Each job's structure was exercised once on the fork before the variable was
+introduced: `Release PR`, `Tier-3 release gate (release)` and `Release Tag` all ran
+green, the gate ran before the tag, and the release PR carried the gate check. Only
+the version number it proposed was wrong.
+
 ## 1. Let release-please open its PR (required — releases are broken without it)
 
 If `release.yml` fails on `main` with:

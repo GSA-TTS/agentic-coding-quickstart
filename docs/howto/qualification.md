@@ -363,7 +363,8 @@ recorded.
 
 Making it hold a release (maintainer setup is collected in
 [`docs/howto/release-gate-setup.md`](release-gate-setup.md)): `release.yml` already
-consults the gate. It is split into `Release PR` -> `Tier-3 release gate (release)`
+consults the gate, though no job runs on this fork — releases are upstream's job, so
+every job is gated on the `ENABLE_RELEASES` repository variable. It is split into `Release PR` -> `Tier-3 release gate (release)`
 -> `Release Tag`, so a stale cell leaves no tag and no GitHub Release.
 
 Making it a **required status check** on `main` is a separate step, and the order
