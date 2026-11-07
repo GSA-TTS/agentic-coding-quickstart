@@ -85,13 +85,18 @@ class Environment:
 @dataclass(frozen=True)
 class Transcript:
     """One run's record: a verdict, the environment identity, the command line,
-    and a SHA-256 digest of observed output (never the raw output)."""
+    and a SHA-256 digest of observed output (never the raw output).
+
+    ``recorded_at`` is the UTC ISO 8601 time the run finished; staleness is judged
+    from it (``matrix.is_current``). Empty means unknown, which is never current.
+    """
 
     verdict: Verdict
     environment: Environment
     commands: tuple[str, ...]
     output_sha256: str
     detail: str = ""
+    recorded_at: str = ""
 
     def result_line(self) -> str:
         return format_result_line(self.verdict.value, self.environment)

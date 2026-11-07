@@ -16,7 +16,16 @@ credential.
 
 from __future__ import annotations
 
-from .matrix import MatrixState, cell_state, is_claimed, report_matrix
+from .matrix import (
+    MAX_AGE_DAYS,
+    TIER3_SURFACE,
+    MatrixState,
+    cell_state,
+    is_claimed,
+    is_current,
+    report_matrix,
+    touches_surface,
+)
 from .model import (
     BINDING_FIELDS,
     Environment,
@@ -50,20 +59,24 @@ __all__ = [
     "EXIT_FAIL",
     "EXIT_FLAKY",
     "EXIT_PASS",
+    "MAX_AGE_DAYS",
     "MatrixState",
     "Outcome",
     "ReproResult",
     "Transcript",
+    "TIER3_SURFACE",
     "Verdict",
     "cell_state",
     "classify_exit",
     "exit_code_for",
     "format_result_line",
     "is_claimed",
+    "is_current",
     "report_matrix",
     "reproduce",
     "result_verdict",
     "run_cell",
     "sha256_hex",
+    "touches_surface",
     "transcript_document",
 ]

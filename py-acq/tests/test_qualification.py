@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # The harness is repo-root tooling (not part of the acq_py package); make it
@@ -31,10 +32,12 @@ from qualification import (  # noqa: E402
     classify_exit,
     format_result_line,
     is_claimed,
+    is_current,
     report_matrix,
     reproduce,
     run_cell,
     sha256_hex,
+    touches_surface,
     transcript_document,
 )
 
@@ -56,13 +59,19 @@ def make_env(**overrides) -> Environment:
     return Environment(**base)
 
 
-def make_transcript(verdict: Verdict, env: Environment | None = None) -> Transcript:
+NOW = datetime(2026, 11, 7, 12, 0, tzinfo=timezone.utc)
+
+
+def make_transcript(
+    verdict: Verdict, env: Environment | None = None, recorded_at: datetime | None = None
+) -> Transcript:
     return Transcript(
         verdict,
         env or make_env(),
         ("cmd",),
         "c" * 64,
         "detail",
+        (recorded_at or NOW - timedelta(days=1)).isoformat(),
     )
 
 
@@ -205,7 +214,7 @@ def test_pass_and_blocked_on_first_attempt_are_final():
 # --- matrix states ------------------------------------------------------------
 
 def test_matrix_reports_unqualified_cells_honestly():
-    reports = report_matrix({}, rev="a" * 40, artifact_sha256="b" * 64)
+    reports = report_matrix({}, now=NOW)
     by_cell = {(r.backend, r.platform): r for r in reports}
 
     # Windows ARM64 and musl are unqualified for every backend.
@@ -226,43 +235,108 @@ def test_matrix_reports_unqualified_cells_honestly():
 
 
 def test_claimed_cell_is_qualified_only_with_green_current_transcript():
-    env = make_env(rev="a" * 40, artifact_sha256="b" * 64)
-    green = make_transcript(Verdict.PASS, env)
-
-    qualified = cell_state(
-        "msb", "linux-x86_64", transcript=green, rev="a" * 40, artifact_sha256="b" * 64
-    )
-    assert qualified is MatrixState.QUALIFIED
+    green = make_transcript(Verdict.PASS)
+    state = cell_state("msb", "linux-x86_64", transcript=green, now=NOW)
+    assert state is MatrixState.QUALIFIED
 
 
-def test_stale_transcript_is_blocked_not_qualified():
-    env = make_env(rev="a" * 40, artifact_sha256="b" * 64)
-    green = make_transcript(Verdict.PASS, env)
+def test_commit_and_artifact_do_not_expire_a_transcript():
+    # A release commit changes the SHA and artifact hash but not behaviour; the
+    # transcript recorded for another rev/artifact stays current.
+    green = make_transcript(Verdict.PASS, make_env(rev="a" * 40, artifact_sha256="b" * 64))
+    assert is_current(green, now=NOW)
+    assert cell_state("msb", "linux-x86_64", transcript=green, now=NOW) is MatrixState.QUALIFIED
 
-    stale = cell_state(
-        "msb",
-        "linux-x86_64",
-        transcript=green,
-        rev="d" * 40,  # artifact under acceptance moved on
-        artifact_sha256="b" * 64,
-    )
-    assert stale is MatrixState.BLOCKED
+
+def test_transcript_older_than_the_window_is_stale():
+    old = make_transcript(Verdict.PASS, recorded_at=NOW - timedelta(days=91))
+    assert not is_current(old, now=NOW)
+    assert cell_state("msb", "linux-x86_64", transcript=old, now=NOW) is MatrixState.BLOCKED
+    edge = make_transcript(Verdict.PASS, recorded_at=NOW - timedelta(days=90))
+    assert is_current(edge, now=NOW)
+
+
+def test_backend_minor_change_is_stale_patch_is_not():
+    green = make_transcript(Verdict.PASS, make_env(backend_version="0.7.7"))
+    assert is_current(green, now=NOW, backend_version="0.7.11")
+    assert not is_current(green, now=NOW, backend_version="0.8.0")
+    assert not is_current(green, now=NOW, backend_version="1.7.7")
+    assert is_current(green, now=NOW)  # no version under acceptance -> not checked
+
+
+def test_tier3_surface_change_is_stale():
+    green = make_transcript(Verdict.PASS)
+    assert not is_current(green, now=NOW, surface_changed=True)
+    state = cell_state("msb", "linux-x86_64", transcript=green, now=NOW, surface_changed=True)
+    assert state is MatrixState.BLOCKED
+
+
+def test_unparseable_backend_versions_fail_closed():
+    for recorded in ("unknown", "", "0.7.7-rc1", "0.7.7+build", "v0.7.7", "msb 0.7.7"):
+        t = make_transcript(Verdict.PASS, make_env(backend_version=recorded))
+        assert not is_current(t, now=NOW, backend_version="0.7.7"), recorded
+    green = make_transcript(Verdict.PASS, make_env(backend_version="0.7.7"))
+    for under_acceptance in ("unknown", "", "0.7.7-rc1", "garbage"):
+        assert not is_current(green, now=NOW, backend_version=under_acceptance), under_acceptance
+    both = make_transcript(Verdict.PASS, make_env(backend_version="unknown"))
+    assert not is_current(both, now=NOW, backend_version="garbage")
+
+
+def test_future_dated_transcript_is_never_current():
+    future = make_transcript(Verdict.PASS, recorded_at=NOW + timedelta(days=1))
+    assert not is_current(future, now=NOW)
+
+
+def test_naive_now_is_a_programming_error():
+    import pytest
+
+    with pytest.raises(ValueError):
+        is_current(make_transcript(Verdict.PASS), now=datetime(2026, 11, 7, 12, 0))
+
+
+def test_report_matrix_propagates_version_and_surface_inputs():
+    green = make_transcript(Verdict.PASS, make_env(backend_version="0.7.7"))
+    cells = {("msb", "linux-x86_64"): green}
+
+    def state(**kw):
+        reports = report_matrix(cells, now=NOW, **kw)
+        return {(r.backend, r.platform): r.state for r in reports}[("msb", "linux-x86_64")]
+
+    assert state() is MatrixState.QUALIFIED
+    assert state(backend_versions={"msb": "0.7.11"}) is MatrixState.QUALIFIED
+    assert state(backend_versions={"msb": "0.8.0"}) is MatrixState.BLOCKED
+    assert state(surface_changed=True) is MatrixState.BLOCKED
+
+
+def test_unknown_or_naive_recorded_at_is_never_current():
+    green = make_transcript(Verdict.PASS)
+    for bad in ("", "not-a-date", "2026-11-06T12:00:00"):
+        t = Transcript(Verdict.PASS, green.environment, green.commands, green.output_sha256, "", bad)
+        assert not is_current(t, now=NOW)
+
+
+def test_touches_surface_distinguishes_release_commits():
+    release_commit = [
+        ".release-please-manifest.json", "CHANGELOG.md", "README.md",
+        "docs/howto/acq.md", "install.sh", "install.ps1", "package.json",
+    ]
+    assert not touches_surface(release_commit)
+    assert not touches_surface(["py-acq/tests/test_lifecycle.py", ".github/workflows/release.yml"])
+    assert touches_surface(["py-acq/src/acq_py/cli.py"])
+    assert touches_surface(["scripts/qualify-backend-cell"])
+    assert touches_surface(["qualification/matrix.py", "README.md"])
+    assert not touches_surface(["py-acq/src_other/x.py"])
+    assert not touches_surface(["scripts/qualify-backend-cell-x"])
 
 
 def test_failed_transcript_is_blocked_in_matrix():
     red = make_transcript(Verdict.FAIL)
-    state = cell_state(
-        "msb", "linux-x86_64", transcript=red, rev="a" * 40, artifact_sha256="b" * 64
-    )
-    assert state is MatrixState.BLOCKED
+    assert cell_state("msb", "linux-x86_64", transcript=red, now=NOW) is MatrixState.BLOCKED
 
 
 def test_unqualified_cell_is_never_qualified_even_with_green_transcript():
     green = make_transcript(Verdict.PASS)
-    state = cell_state(
-        "sbx", "macos-x86_64", transcript=green, rev="a" * 40, artifact_sha256="b" * 64
-    )
-    assert state is MatrixState.UNQUALIFIED
+    assert cell_state("sbx", "macos-x86_64", transcript=green, now=NOW) is MatrixState.UNQUALIFIED
 
 
 def test_is_claimed_matches_adr_qualified_matrix():
@@ -301,6 +375,7 @@ def test_transcript_never_records_the_environment(monkeypatch):
         "os", "os_build", "arch", "hypervisor", "backend", "backend_version",
         "image", "glibc_floor", "rev", "artifact_sha256", "transcript_dir",
     }
+    assert doc["attempts"][0]["recorded_at"]
     assert SECRET not in format_result_line("PASS", result.environment)
 
 

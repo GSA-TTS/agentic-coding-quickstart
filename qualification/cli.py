@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .matrix import is_claimed, report_matrix
@@ -62,8 +63,6 @@ def _build_parser() -> argparse.ArgumentParser:
 
     matrix_p = sub.add_parser("matrix", help="print the qualification matrix")
     matrix_p.add_argument("--json", action="store_true")
-    matrix_p.add_argument("--rev", default=_DEFAULT_REV)
-    matrix_p.add_argument("--artifact-sha256", default=_DEFAULT_ARTIFACT)
     return parser
 
 
@@ -119,9 +118,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
 
 def _cmd_matrix(args: argparse.Namespace) -> int:
-    reports = report_matrix(
-        {}, rev=args.rev, artifact_sha256=args.artifact_sha256
-    )
+    reports = report_matrix({}, now=datetime.now(timezone.utc))
     if args.json:
         cells = [
             {
