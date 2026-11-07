@@ -68,21 +68,9 @@ acq_setup_stubs() {
 # acq_clear_git_local_env — drop Git's repository-local environment so a fixture
 # repo created by this suite can never be redirected at another repository.
 #
-# `git -C <dir>` changes the working directory but does NOT override an inherited
-# GIT_DIR. Git exports its repository-local variables to hooks, so a suite run
-# from a pre-commit hook inherits a GIT_DIR pointing at the invoking repository;
-# every `git -C "$fixture" init`/`commit` in this suite would then target that
-# repository instead of the fixture. Observed consequences: fixture commits
-# landing on the real branch under the fixture's throwaway identity, and
-# core.worktree being written into the invoking repository's config, which
-# redirects later Git commands (including a real kit fetch's checkout) at the
-# wrong tree.
-#
-# Git's documented remedy is to clear `git rev-parse --local-env-vars` before
-# operating on a different repository. Read into a variable first so the unset
-# loop runs in THIS shell: a `while read` fed by a pipeline runs in a subshell on
-# Bash 3.2, where the unsets would be discarded. Process substitution is avoided
-# for the same portability reason.
+# `git -C <dir>` does not override hook-inherited GIT_DIR. Clear Git's documented
+# local-env-vars before fixture operations. Capture the list first so unsets run
+# in the current shell, not a pipeline subshell that discards them on Bash 3.2.
 acq_clear_git_local_env() {
   local _vars _v
   _vars=$(git rev-parse --local-env-vars 2>/dev/null) || return 0

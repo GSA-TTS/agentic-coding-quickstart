@@ -3,17 +3,8 @@
 # 155-git-fixture-isolation.bats — the suite's own git fixtures must never be
 # redirected at another repository by an inherited Git environment.
 #
-# Git exports its repository-local variables (GIT_DIR, GIT_WORK_TREE,
-# GIT_INDEX_FILE, ...) to hooks. A suite run from a pre-commit hook therefore
-# inherits a GIT_DIR pointing at the invoking repository, and `git -C <fixture>`
-# does NOT override it: the -C only changes directory. Without clearing that
-# environment, every fixture `git init`/`commit` in this suite targets the
-# invoking repository instead of the fixture — committing throwaway fixture
-# identities onto a real branch, and writing core.worktree into the real
-# repository's config, which then redirects later Git commands (including a real
-# kit fetch's checkout) at the wrong tree.
-#
-# These tests assert the harness clears that environment, and that the
+# Exercise acq_clear_git_local_env with a sentinel repository and an uncleared
+# negative control. Also assert that the
 # kit-fetch destination guard refuses a destination inside a real repository.
 #
 # shellcheck shell=bats
