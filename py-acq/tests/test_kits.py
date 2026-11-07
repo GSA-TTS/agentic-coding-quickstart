@@ -81,7 +81,7 @@ def test_kit_source_add_requires_full_ref(monkeypatch, tmp_path, capsys):
     # Nothing was persisted by a refused add.
     assert kits.source_record(TEAM_REPO) is None
 
-    rc, doc = _invoke(capsys, "kit-source", "add", TEAM_REPO, "--ref", "7dd2ddc", "--json")
+    rc, doc = _invoke(capsys, "kit-source", "add", TEAM_REPO, "--ref", "941a286", "--json")
     assert rc == 1
     assert doc["error"]["code"] == "kit_ref_not_pinned"
 
@@ -383,13 +383,13 @@ def test_validate_kit_raises_kit_spec_error_for_unreadable(monkeypatch, tmp_path
 # ---------------------------------------------------------------------------
 
 def test_is_full_ref():
-    assert kits.is_full_ref("7dd2ddc034b6597e97f450fa716e7d47c9a38287")
+    assert kits.is_full_ref("941a286f912b99475429c3c00db49a99af5b241e")
     assert kits.is_full_ref("A" * 40)
     assert kits.is_full_ref("f" * 64)
-    assert not kits.is_full_ref("7dd2ddc")  # abbreviated
+    assert not kits.is_full_ref("941a286")  # abbreviated
     assert not kits.is_full_ref("main")
-    assert not kits.is_full_ref("v1.18.0")
-    assert not kits.is_full_ref("7dd2ddc034b6597e97f450fa716e7d47c9a38287x")  # 41 chars
+    assert not kits.is_full_ref("v1.19.0")
+    assert not kits.is_full_ref("941a286f912b99475429c3c00db49a99af5b241ex")  # 41 chars
 
 
 def test_normalize_repo():

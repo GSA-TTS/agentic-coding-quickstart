@@ -22,7 +22,7 @@
         "schema_version": 1,
         "command": "kit list",
         "data": {
-          "control_plane_ref": "git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=7dd2ddc034b6597e97f450fa716e7d47c9a38287&dir=integrations/isolation/acq-kits",
+          "control_plane_ref": "git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=941a286f912b99475429c3c00db49a99af5b241e&dir=integrations/isolation/acq-kits",
           "built_in": ["zscaler-ca-certificate", "agentic-coding-playbook", "git-ssh-sign"],
           "provider": ["usai-provider"],
           "extra": ["./local-kit", "git+https://github.com/acme/kits.git#ref=x&dir=k"]

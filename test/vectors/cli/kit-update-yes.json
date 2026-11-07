@@ -28,7 +28,7 @@
         "data": {
           "sandbox": "mybox",
           "backend": "msb",
-          "consented_ref": "7dd2ddc034b6597e97f450fa716e7d47c9a38287",
+          "consented_ref": "941a286f912b99475429c3c00db49a99af5b241e",
           "status": "deferred",
           "action": "consent_recorded"
         }
