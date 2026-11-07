@@ -401,6 +401,26 @@ otherwise corrupt colon-delimited mounts and guest-only paths. See
 [ADR-0029](adr/0029-windows-host-guest-path-forms.md). On macOS/Linux the two
 forms are identical.
 
+**Windows provider-input boundary:** on macOS/Linux the host-owned provider-input
+tree and the fetched kit are walked with descriptor-relative, no-follow opens, and
+the snapshot reads the very descriptor it validated. Native Windows Python has no
+equivalent, so `acq` falls back to a component-by-component walk that rejects
+symlinks, junctions, and any other reparse point at every level (creating missing
+directories one level at a time), and rejects backslash and drive-qualified
+manifest paths. Git Bash would otherwise convert a POSIX-looking argument to a
+native path before Python sees it, and that conversion resolves an intermediate
+junction or symlink, so the walk would never observe it. `acq` therefore runs
+these helpers with argument conversion disabled and translates the path to its
+native form lexically (only the leading drive or mount component goes through
+`cygpath`; everything below it is appended as a string), so the walk checks the
+literal path the caller passed. That fallback validates by name and then opens by
+name, so it is weaker than the POSIX path: it assumes the staging and projection directories are
+private to the current user. It is exercised on a real Windows runner only by the
+Windows-guarded tests; the Linux suite covers the same walk's symlink handling by
+forcing the portable code path and simulates the argument conversion with a shim.
+That real Git Bash honors the conversion opt-out for this call can only be
+confirmed on Windows.
+
 ### Disposable primary (`--clone`)
 
 msb has no native clone mode, so the neutral `--clone`
