@@ -242,3 +242,57 @@ def test_image_override_precedence(monkeypatch):
     assert cli._resolve_image(None, "opencode") == "acq-image"
 
     assert cli._resolve_image("flag-image", "opencode") == "flag-image"
+
+
+def _symlinked_workspace(tmp_path):
+    real = tmp_path / "real-target"
+    real.mkdir()
+    link = tmp_path / "proj"
+    try:
+        link.symlink_to(real, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable on this host")
+    return link, real
+
+
+def test_msb_create_mounts_and_records_the_real_workspace_path(monkeypatch, tmp_path, capsys):
+    link, real = _symlinked_workspace(tmp_path)
+    _env(monkeypatch, tmp_path)
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "create", "opencode", str(link), "--name", "linked", "--json")
+    assert rc == 0
+    assert doc["data"]["workspace"] == str(real.resolve())
+    assert state.record_read("msb", "linked")["workspace"] == str(real.resolve())
+
+
+def test_msb_sandbox_name_derives_from_the_path_as_typed(monkeypatch, tmp_path, capsys):
+    link, real = _symlinked_workspace(tmp_path)
+    _env(monkeypatch, tmp_path)
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "create", "opencode", str(link), "--json")
+    assert rc == 0
+    assert doc["data"]["name"] == cli._derive_name("opencode", str(link))
+    assert "real-target" not in doc["data"]["name"]
+
+
+def test_sbx_workspace_is_not_canonicalized(monkeypatch, tmp_path):
+    link, _real = _symlinked_workspace(tmp_path)
+
+    assert cli._mount_workspace("sbx", str(link)) == str(link)
+    assert cli._mount_workspace("msb", str(link)) == str(link.resolve())
+
+
+def test_msb_adapter_receives_the_real_workspace_path(monkeypatch, tmp_path, capsys):
+    link, real = _symlinked_workspace(tmp_path)
+    _env(monkeypatch, tmp_path)
+    seen = {}
+    original = cli.msb.create
+
+    def spy(name, image, workspace, **kwargs):
+        seen["workspace"] = workspace
+        return original(name, image, workspace, **kwargs)
+
+    monkeypatch.setattr(cli.msb, "create", spy)
+    rc, _doc = _invoke(capsys, "--backend", "msb", "create", "opencode", str(link), "--name", "spy", "--json")
+    assert rc == 0
+    assert seen["workspace"] == str(real.resolve())

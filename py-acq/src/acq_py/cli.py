@@ -844,6 +844,18 @@ def _validate_workspace(command: str, path: str | None, emit_json: bool) -> tupl
     return resolved, None
 
 
+def _mount_workspace(backend: str, workspace: str) -> str:
+    """The host path to mount and record for ``workspace``.
+
+    msb cannot mount a symlinked host path (notably the macOS ``$TMPDIR``,
+    ``/var/folders`` -> ``/private/var/folders``), so it gets the real path; the
+    guest ``-w`` start directory is derived from the same value. sbx keeps the
+    path as typed. Call this AFTER deriving the sandbox name, which must come
+    from the path the user typed.
+    """
+    return os.path.realpath(workspace) if backend == "msb" else workspace
+
+
 def _wait_exec_ready(backend: str, name: str) -> bool:
     adapter = _adapter(backend)
     deadline = time.monotonic() + adapter.READY_TIMEOUT_S
@@ -915,6 +927,7 @@ def run_create(parsed, emit_json: bool, backend: str) -> int:
     if kit_name is None:
         kit_name = kits.agent_kit_for(parsed.agent)  # implicit inference (built-in only)
     name = parsed.name or _derive_name(parsed.agent, workspace)
+    workspace = _mount_workspace(backend, workspace)
     adapter = _adapter(backend)
     if adapter.exists(name):
         return _operational_failure(
@@ -1025,6 +1038,9 @@ def run_recreate(parsed, emit_json: bool, backend: str) -> int:
 
     agent = record.get("agent") or "shell"
     workspace = record.get("workspace") or DEFAULT_GUEST_WORKSPACE
+    if record.get("workspace"):
+        # Records written before msb workspaces were canonicalized hold the symlink form.
+        workspace = _mount_workspace(backend, workspace)
     image = record.get("image") or _default_image_for_agent(agent)
     ro_host_config = bool(record.get("ro_host_config"))
     # Fail closed BEFORE recreation when the recorded agent needs a kit the
@@ -1093,6 +1109,7 @@ def run_run(parsed, emit_json: bool, backend: str) -> int:
         if exit_code is not None:
             return exit_code
         name = parsed.name or _derive_name(target, workspace)
+        workspace = _mount_workspace(backend, workspace)
         action = "reattached" if adapter.exists(name) else "created"
         image: str | None = None
         entrypoint: str | None = None
@@ -1935,7 +1952,7 @@ def _github_scope_workspace(parsed, backend: str, emit_json: bool) -> tuple[str 
     """Resolve the workspace for ``github-scope`` (PATH, else the recorded one)."""
     sandbox = parsed.sandbox
     if parsed.path:
-        resolved = os.path.abspath(parsed.path)
+        resolved = _mount_workspace(backend, os.path.abspath(parsed.path))
         if not os.path.isdir(resolved):
             return None, _operational_failure(
                 "github-scope",
