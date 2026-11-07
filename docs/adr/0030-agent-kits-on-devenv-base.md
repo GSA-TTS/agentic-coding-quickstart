@@ -162,7 +162,7 @@ acq
    ├─ built-in bundle
    │  ├─ neutral: CA trust, playbook, git signing, shared security policy
    │  ├─ OCI engine: podman or equivalent (optional, not in the default set)
-   │  ├─ agent: opencode | pi | goose | prime-agent | ...
+   │  ├─ agent: opencode | pi | goose | ...
    │  └─ provider facts: USAi endpoint, key env var, model catalog
    └─ extra kits
       ├─ team kit

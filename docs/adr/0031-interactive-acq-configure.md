@@ -71,8 +71,9 @@ Chosen: **option 3**.
   documented defaults and never blocks.
 - **Opt-in kit catalog** — sourced from the already-pinned patterns bundle
   (`PATTERNS_KIT_REF` / `PATTERNS_KIT_DIR`, `integrations/isolation/acq-kits/`):
-  `openchamber`, `paseo`. `prime-agent` is a skeleton at the current pin and is
-  intentionally omitted until functional. Custom refs remain available through
+  `openchamber`, `paseo` (`prime-agent` was a non-functional skeleton at the
+  time and was subsequently retired in `GSA-TTS/agentic-coding-patterns#584`).
+  Custom refs remain available through
   `ACQ_EXTRA_KITS` and `--kit`, but are not stored in durable config. The four
   built-ins are shown **inline as frozen rows** at the top of the same picker —
   always checked, dimmed, tagged

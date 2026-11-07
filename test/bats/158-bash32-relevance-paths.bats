@@ -109,7 +109,6 @@ governance/
 .gitleaks.repo.toml
 .gitleaks.toml
 .markdown-link-check.json
-.markdownlint-cli2.yaml
 .markdownlint.jsonc
 .markdownlintignore
 .pre-commit-config.yaml
