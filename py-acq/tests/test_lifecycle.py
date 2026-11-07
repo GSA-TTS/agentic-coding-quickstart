@@ -282,6 +282,55 @@ def test_sbx_workspace_is_not_canonicalized(monkeypatch, tmp_path):
     assert cli._mount_workspace("msb", str(link)) == str(link.resolve())
 
 
+def test_msb_windows_path_families_resolve_to_guest_forms(monkeypatch):
+    """mapped / subst / 8.3-case Windows workspaces each resolve and mount correctly.
+
+    On Windows ``os.path.realpath`` rewrites each of the three families to a
+    distinct native form, and ``_guest_path`` must translate every one of them:
+    a mapped drive resolves to its UNC share (``/unc``), a ``subst`` drive to its
+    plain-drive target (existing drive branch -> ``/c``), and an 8.3/case path to
+    its expanded, normalised form (also the drive branch). ``realpath`` is mocked
+    to simulate Windows on a POSIX host, and the ``msb.WINDOWS`` seam makes the
+    translation run regardless of host OS.
+    """
+    from acq_py import msb
+    from acq_py.commands import common
+
+    realpath_map = {
+        "Z:\\proj": "\\\\server\\share\\proj",  # mapped drive -> UNC share
+        "X:\\proj": "C:\\actual\\proj",  # subst drive -> plain drive target
+        "C:\\PROGRA~1\\acq": "C:\\Program Files\\acq",  # 8.3 + case -> expanded
+    }
+    monkeypatch.setattr(common, "REALPATH", lambda p: realpath_map.get(p, p))
+    monkeypatch.setattr(msb, "WINDOWS", True)
+
+    # Mapped drive: realpath yields the UNC form, which mounts under /unc.
+    assert cli._mount_workspace("msb", "Z:\\proj") == "\\\\server\\share\\proj"
+    assert msb._guest_path("\\\\server\\share\\proj") == "/unc/server/share/proj"
+
+    # subst drive: realpath yields a plain drive, taking the existing drive branch.
+    assert cli._mount_workspace("msb", "X:\\proj") == "C:\\actual\\proj"
+    assert msb._guest_path("C:\\actual\\proj") == "/c/actual/proj"
+
+    # 8.3/case: realpath expands and normalises; the guest form is the drive branch.
+    assert cli._mount_workspace("msb", "C:\\PROGRA~1\\acq") == "C:\\Program Files\\acq"
+    assert msb._guest_path("C:\\Program Files\\acq") == "/c/Program Files/acq"
+
+
+def test_msb_83_case_name_derives_from_typed_path():
+    """The 8.3/case rewrite is benign because the sandbox name uses the typed path.
+
+    ``_derive_name`` runs before ``_mount_workspace`` (see ``commands.lifecycle``),
+    so a realpath expansion/normalisation changes only the recorded workspace
+    string — never the sandbox name. Forward-slash forms keep ``os.path.basename``
+    deterministic on a POSIX host while still distinguishing the two spellings.
+    """
+    typed = "C:/PROGRA~1"
+    expanded = "C:/Program Files"
+    assert cli._derive_name("opencode", typed) == "opencode-progra-1"
+    assert cli._derive_name("opencode", expanded) == "opencode-program-files"
+
+
 def test_msb_adapter_receives_the_real_workspace_path(monkeypatch, tmp_path, capsys):
     link, real = _symlinked_workspace(tmp_path)
     _env(monkeypatch, tmp_path)

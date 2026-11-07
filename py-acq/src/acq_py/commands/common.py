@@ -244,6 +244,13 @@ def _validate_workspace(command: str, path: str | None, emit_json: bool) -> tupl
     return resolved, None
 
 
+# Module-local seam for path canonicalization. ``_mount_workspace`` reads this
+# instead of ``os.path.realpath`` directly so a test can substitute a Windows
+# ``realpath`` simulation without mutating the process-wide ``os.path.realpath``
+# (the same pattern as ``msb.WINDOWS``, ADR-0029).
+REALPATH = os.path.realpath
+
+
 def _mount_workspace(backend: str, workspace: str) -> str:
     """The host path to mount and record for ``workspace``.
 
@@ -253,11 +260,17 @@ def _mount_workspace(backend: str, workspace: str) -> str:
     ``realpath`` is what lets msb mount a Windows ``subst`` or mapped drive: msb's
     mount backend rejects a ``subst``/mapped drive letter (``X:\\...`` fails with
     os error 22) but accepts the resolved plain-drive or UNC path ``realpath``
-    yields, and ``_guest_path`` translates either form. sbx keeps the path as
-    typed. Call this AFTER deriving the sandbox name, which must come from the
-    path the user typed.
+    yields, and ``_guest_path`` translates either form. On Windows ``realpath``
+    also expands 8.3 short names and normalises case (``C:\\PROGRA~1\\x`` ->
+    ``C:\\Program Files\\x``), so the *recorded* workspace string can differ from
+    what the user typed; that is benign — the sandbox name derives from the typed
+    path (``_derive_name`` runs before this), and exec/attach/shell/reattach all
+    read the same recorded realpath back, so host and guest stay self-consistent
+    and only the user-visible string changes. sbx keeps the path as typed. Call
+    this AFTER deriving the sandbox name, which must come from the path the user
+    typed.
     """
-    return os.path.realpath(workspace) if backend == "msb" else workspace
+    return REALPATH(workspace) if backend == "msb" else workspace
 
 
 def _launch_token(backend: str, name: str, agent: str) -> str:
