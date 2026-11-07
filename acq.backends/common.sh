@@ -124,11 +124,10 @@ fi
 #
 # Parallel arrays (bash 3.2 safe — no associative arrays): NAME[i] is the kit
 # directory under PATTERNS_KIT_DIR; DESC[i] is the one-line picker description.
-# `prime-agent` is intentionally omitted: it is a skeleton at the current pin
-# (see the patterns kits.yaml parity note) and would be non-functional if
-# offered. Add it here once it is functional. Heavier kits such as `oci-engine`
-# still belong here when they are functional; the picker description must make
-# their create-time cost clear.
+# `prime-agent` is omitted: it was retired in agentic-coding-patterns#584
+# (#585) in favor of `opencode` and `pi-coding-agent`. Heavier kits such as
+# `oci-engine` still belong here when they are functional; the picker
+# description must make their create-time cost clear.
 # shellcheck disable=SC2034  # consumed by `acq configure` (cross-function reader)
 ACQ_OPTIN_KIT_NAMES=(openchamber paseo oci-engine)
 # shellcheck disable=SC2034
