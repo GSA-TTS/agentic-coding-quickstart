@@ -71,7 +71,7 @@ SPEC
   printf 'mybox\n' > "$STUBDIR/.msb_sandbox_list"
   printf 'mybox\n' > "$STUBDIR/.msb_running_list"
   run env TERM= ACQ_BACKEND=msb ACQ_DEBUG=1 GIT_ALLOW_PROTOCOL=none \
-    STUB_AGENT_USER_READY=1 "$ACQ" run mybox
+    "$ACQ" run mybox
   assert_success
   assert_regex "$(cat "$CALLS")" 'msb exec -t -u agent -w /home/agent -e (COLORTERM=truecolor -e )?SHELL=/bin/sh mybox -- /bin/sh -l'
   refute_output --partial 'provider facts'

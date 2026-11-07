@@ -589,11 +589,11 @@ on each installed backend with `--image`, and confirms the custom image booted).
 `acq run opencode .` uses the same immutable generic base on both backends:
 
 ```text
-ghcr.io/gsa-tts/agentic-coding-patterns/devenv-shell@sha256:7b923fb5e722ad27c751ead836f24145c4cea3fac015a3ba753bd7473891e1e7
+ghcr.io/gsa-tts/agentic-coding-patterns/devenv-shell@sha256:0b5f4cc95c8fa7dd7f3ffd02b56e63d0caf9b151421ff6ea3cb34b2139e3966c
 ```
 
-The digest was derived from `ghcr.io/gsa-tts/agentic-coding-patterns/devenv-shell:2.0.0`
-on 2026-10-14 and covers published Linux amd64 and arm64 manifests. `acq` applies
+The digest was derived from `ghcr.io/gsa-tts/agentic-coding-patterns/devenv-shell:2.1.0`
+on 2026-10-30 and covers published Linux amd64 and arm64 manifests. `acq` applies
 the pinned OpenCode agent kit with the support kits and fails before provisioning
 if that kit cannot be fetched, is malformed, or does not declare the expected
 OpenCode metadata and entrypoint. Passing `--kit` adds a kit; it cannot remove the
@@ -725,7 +725,7 @@ You can also apply it for one sandbox by passing the pinned kit ref through
 `--kit`, or by exporting that same ref in `ACQ_EXTRA_KITS`:
 
 ```bash
-acq run opencode . --kit 'git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=a1206c52ec82ae7ce080ad44a6e6ac6f951e6d20&dir=integrations/isolation/acq-kits/oci-engine'
+acq run opencode . --kit 'git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=941a286f912b99475429c3c00db49a99af5b241e&dir=integrations/isolation/acq-kits/oci-engine'
 ```
 
 The kit provisions **rootless podman** and aliases `docker` to `podman`, so
