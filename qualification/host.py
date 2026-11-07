@@ -1,7 +1,7 @@
 """Qualify THIS host in one command, on any OS (ADR-0044m).
 
     python -m qualification.host                 # run, record, open a ledger PR
-    python -m qualification.host --dry-run       # show the plan, run nothing
+    python -m qualification.host --dry-run       # show the plan and any refusal; run nothing
     python -m qualification.host --only-stale    # skip cells that are already current
     python -m qualification.host --no-publish    # record in this checkout only
 
@@ -324,7 +324,14 @@ def _run(args: argparse.Namespace) -> int:
         remote, slug = pub.choose_remote(root, args.remote)
         pub.check_identity(root)
         pub.check_remote_reachable(root, remote)
-    rev = pub.check_checkout(root, remote)
+    refusal = None
+    try:
+        rev = pub.check_checkout(root, remote)
+    except HostError as exc:
+        if not args.dry_run:
+            raise
+        # A preview should still show the rest of the plan; remember that a real run refuses.
+        refusal, rev = str(exc), pub.git(root, "rev-parse", "HEAD").strip()
     sha = pub.artifact_sha256(root)
     versions = {b: backend_version(b) for b in backends}
     to_run, results, proposed, notes = plan(root, host, backends, versions, args.only_stale, args.accept_backend_version)
@@ -337,6 +344,9 @@ def _run(args: argparse.Namespace) -> int:
         print("  cells that would stop being qualified: " + (", ".join(blast_radius(root, proposed, host)) or "none"))
     print("publish: " + (f"{remote} ({slug}) -> PR into {slug}:main" if remote else "no"))
     if args.dry_run:
+        if refusal:
+            print(f"\nWOULD REFUSE a real run: {refusal}")
+            return 2
         return 0
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")

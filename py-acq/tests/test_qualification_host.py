@@ -648,3 +648,19 @@ def test_a_current_cell_that_also_has_a_waiver_keeps_it_when_skipped(tmp_path, m
     run(work, "add", "-A"); run(work, "commit", "-qm", "l")
     to_run, skipped, _, _ = host.plan(work, macos(), ["msb"], {"msb": "0.7.7"}, True, False)
     assert to_run == [] and skipped[0].status == "CURRENT"
+
+
+def test_dry_run_previews_the_plan_even_when_a_real_run_would_refuse(tmp_path, monkeypatch, capsys):
+    work, fork, head = setup_cli(tmp_path, monkeypatch, ledger_doc())
+    run(work, "switch", "-q", "-c", "feature")
+    (work / "f.txt").write_text("1")
+    run(work, "add", "-A"); run(work, "commit", "-qm", "only on a feature branch")
+    monkeypatch.setattr(host, "backend_version", lambda b: "0.7.7" if b == "msb" else "0.51.0")
+    monkeypatch.setattr(host, "run_backend", lambda *a, **k: pytest.fail("must not run"))
+    assert host.main(["--dry-run", "--no-publish"]) == 2
+    out = capsys.readouterr().out
+    assert "cell=macos-arm64" in out and "msb: 0.7.7" in out  # the plan is still shown
+    assert "WOULD REFUSE a real run" in out and "not on a remote main branch" in out
+    # the same HEAD is a hard error without --dry-run, and runs nothing
+    assert host.main(["--no-publish"]) == 2
+    assert "not on a remote main branch" in capsys.readouterr().err
