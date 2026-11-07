@@ -56,6 +56,32 @@
       "artifact_sha256": "ae61405886581366ed844a2e493978e238c776ccb9996ee0d27eb041da834bd5",
       "recorded_at": "2026-11-07T09:02:19+00:00",
       "transcript_sha256": "abb5e532790297746d3c3e99821ea285012ef82f7d096320417724ca6f61521a"
+    },
+    {
+      "backend": "msb",
+      "platform": "windows-x64",
+      "verdict": "PASS",
+      "backend_version": "0.7.11",
+      "os_build": "10.0.26200",
+      "arch": "x86_64",
+      "hypervisor": "wsl2",
+      "rev": "ad4f66bd6c927deefcfb5dce6791db55899f2007",
+      "artifact_sha256": "0628ca1764b1820dca7ddd4d58a157bf860a9be8fdebc76c990b4b462f25434a",
+      "recorded_at": "2026-11-07T18:42:57+00:00",
+      "transcript_sha256": "96d901c52f466933304c0a29d299cef21775eb685192e3a396889f94208330e3"
+    },
+    {
+      "backend": "sbx",
+      "platform": "windows-x64",
+      "verdict": "PASS",
+      "backend_version": "0.51.0",
+      "os_build": "10.0.26200",
+      "arch": "x86_64",
+      "hypervisor": "wsl2",
+      "rev": "ad4f66bd6c927deefcfb5dce6791db55899f2007",
+      "artifact_sha256": "0628ca1764b1820dca7ddd4d58a157bf860a9be8fdebc76c990b4b462f25434a",
+      "recorded_at": "2026-11-07T18:43:10+00:00",
+      "transcript_sha256": "f9f4d7445ca168af06adf4160f21b36dbd3b31259b4888b07357cec2429e9e19"
     }
   ],
   "waivers": [
@@ -81,22 +107,8 @@
       "issue": "mogul/agentic-coding-quickstart#60"
     },
     {
-      "backend": "msb",
-      "platform": "windows-x64",
-      "reason": "no current Tier-3 transcript recorded yet",
-      "expires": "2027-02-05",
-      "issue": "mogul/agentic-coding-quickstart#60"
-    },
-    {
       "backend": "sbx",
       "platform": "linux-x86_64",
-      "reason": "no current Tier-3 transcript recorded yet",
-      "expires": "2027-02-05",
-      "issue": "mogul/agentic-coding-quickstart#60"
-    },
-    {
-      "backend": "sbx",
-      "platform": "windows-x64",
       "reason": "no current Tier-3 transcript recorded yet",
       "expires": "2027-02-05",
       "issue": "mogul/agentic-coding-quickstart#60"
