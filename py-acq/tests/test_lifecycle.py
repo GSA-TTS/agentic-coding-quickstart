@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from acq_py import cli, state
+from acq_py import cli, migration, state
 
 
 def _env(monkeypatch, tmp_path, *, catalog=None):
@@ -324,3 +324,69 @@ def test_run_reattach_without_a_record_falls_back_to_the_typed_path(monkeypatch,
     rc, doc = _invoke(capsys, "--backend", "msb", "run", "opencode", str(real), "--name", "orphan", "--json")
     assert rc == 0
     assert launched["workspace"] == str(real.resolve())
+
+
+_SEC_RECORD = {
+    "schema": 1,
+    "name": "sec",
+    "backend": "msb",
+    "agent": "opencode",
+    "workspace": "/w",
+    "ro_host_config": True,
+}
+
+
+def _seed_record(doc):
+    path = state.record_path("msb", doc["name"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(doc))
+
+
+def _forbid_launch(monkeypatch):
+    def launch(*_a, **_k):
+        raise AssertionError("launch must not be reached")
+
+    monkeypatch.setattr(cli.msb, "launch", launch)
+
+
+@pytest.mark.parametrize("mount", ["missing", "unknown"])
+def test_run_typed_path_reattach_refuses_missing_trusted_mount(monkeypatch, tmp_path, capsys, mount):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _env(monkeypatch, tmp_path, catalog={"sec": "running"})
+    _seed_record(_SEC_RECORD)
+    monkeypatch.setenv("ACQ_SECURITY_MOUNT_STATE", json.dumps({"sec": mount}))
+    _forbid_launch(monkeypatch)
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "run", "opencode", str(ws), "--name", "sec", "--json")
+    assert rc == 1
+    assert doc["error"]["code"] == "security_exception"
+
+
+def test_run_typed_path_reattach_allowed_when_trusted_mount_ok(monkeypatch, tmp_path, capsys):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _env(monkeypatch, tmp_path, catalog={"sec": "running"})
+    _seed_record(_SEC_RECORD)
+    monkeypatch.setenv("ACQ_SECURITY_MOUNT_STATE", json.dumps({"sec": "ok"}))
+    launched = {}
+    monkeypatch.setattr(cli.msb, "launch", lambda name, workspace, agent, **kw: launched.update(workspace=workspace) or 0)
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "run", "opencode", str(ws), "--name", "sec", "--json")
+    assert rc == 0
+    assert launched["workspace"] == "/w"
+
+
+def test_run_typed_path_reattach_fails_closed_on_newer_schema(monkeypatch, tmp_path, capsys):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _env(monkeypatch, tmp_path, catalog={"future": "running"})
+    # Mark the tree migrated so the migration pre-step does not trip on the record
+    # first; this test must reach the typed-path reattach's own schema check.
+    migration.write_generation(migration.TARGET_SCHEMA)
+    _seed_record({**_SEC_RECORD, "name": "future", "schema": 99, "ro_host_config": False})
+    _forbid_launch(monkeypatch)
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "run", "opencode", str(ws), "--name", "future", "--json")
+    assert rc == 1
+    assert doc["error"]["code"] == "state_schema_unsupported"
