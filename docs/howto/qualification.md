@@ -6,7 +6,7 @@ tier: 3
 last_updated: "2026-11-07"
 audience: "developers"
 keywords: ["qualification", "tier-3", "transcript", "msb", "sbx", "oracle", "adr-0044m", "matrix"]
-related_files: ["docs/adr/0044m-live-cross-platform-qualification-matrix-and-transcript.md", "qualification/README.md", "docs/qualification-ledger.json", ".github/workflows/tier3-release-gate.yml", "scripts/qualify-backend-cell", "scripts/qualify-msb-ro-mount", "docs/KNOWN_FAILURE_MODES.md", "docs/adr/0035-host-authoritative-sandbox-config.md", "docs/adr/0041m-configuration-and-state-migration-behavior.md"]
+related_files: ["docs/howto/release-gate-setup.md", "docs/adr/0044m-live-cross-platform-qualification-matrix-and-transcript.md", "qualification/README.md", "docs/qualification-ledger.json", ".github/workflows/tier3-release-gate.yml", "scripts/qualify-backend-cell", "scripts/qualify-msb-ro-mount", "docs/KNOWN_FAILURE_MODES.md", "docs/adr/0035-host-authoritative-sandbox-config.md", "docs/adr/0041m-configuration-and-state-migration-behavior.md"]
 load_priority: "on-demand"
 review_cycle: "quarterly"
 ---
@@ -361,15 +361,18 @@ but is reported as `waived` in the job summary, and a waiver that has expired bl
 again. Waivers lower the bar; keep them short and remove each one as its cell is
 recorded.
 
-Making it hold a release: the check only informs unless `Tier-3 release gate` is a
-required status check on `main` (repository settings, not code). **Do not require
-it yet.** release-please opens its PR with the default `GITHUB_TOKEN`, and GitHub
-does not run `pull_request` workflows for PRs that token creates, so the check
-would never report on the release PR and a required check would leave it
-unmergeable. First give release-please a PAT or GitHub App token (the `token`
-input of `release-please-action` in `release.yml`); then the check runs on the
-release PR and can be required. Until then the gate runs on every push to `main`
-and weekly, and `release.yml` does not consult it.
+Making it hold a release (maintainer setup is collected in
+[`docs/howto/release-gate-setup.md`](release-gate-setup.md)): `release.yml` already
+consults the gate. It is split into `Release PR` -> `Tier-3 release gate (release)`
+-> `Release Tag`, so a stale cell leaves no tag and no GitHub Release.
+
+Making it a **required status check** on `main` is a separate step, and the order
+matters. A release PR opened with the default `GITHUB_TOKEN` may not get
+`pull_request` checks at all, or may get them held for approval (both have been seen
+upstream), and a required check that never reports leaves the PR unmergeable. Set the
+`RELEASE_PLEASE_TOKEN` secret first (`release.yml` already prefers it over
+`github.token`), watch one real release PR report the check, and only then require
+it. See [`release-gate-setup.md`](release-gate-setup.md).
 
 ## Honest BLOCKED handling
 
