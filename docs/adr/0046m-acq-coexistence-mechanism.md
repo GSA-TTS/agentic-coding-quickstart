@@ -34,9 +34,11 @@ an `ACQ_IMPL` environment variable:
 - any other value — fail closed with exit 2 and a clear message.
 
 The Python implementation has a distinct, resolvable identity so it never
-collides with the `acq` name: an `acq-python` launcher (checked into the repo
-root and linked by the installer as `acq-python`) that runs the managed runtime
-`python -m acq_py` against `py-acq/src`. The dispatcher's resolution order is:
+collides with the `acq` name: an `acq-python` launcher — a distinct script
+(checked into the repo root and shipped in the release archive as an enumerated
+component, then linked by the installer as `acq-python`, never as an alias of
+`acq`) that runs the managed runtime `python -m acq_py` against `py-acq/src`.
+The dispatcher's resolution order is:
 
 1. `$ACQ_SCRIPT_DIR/acq-python` — the installer-linked launcher (the distinct
    identity);
@@ -45,15 +47,18 @@ root and linked by the installer as `acq-python`) that runs the managed runtime
    `$ACQ_SCRIPT_DIR/py-acq/src`.
 
 `ACQ_RUNTIME` is the single interpreter-path override, reused from
-`acq_py/runtime.py`. On Windows the `acq.ps1` launcher resolves `python` the same
-way natively (the managed `py-acq\runtime\python.exe`, else `python` on `PATH`).
+`acq_py/runtime.py`. On Windows there is no separate `acq-python` file: the
+distinct identity is realized by the `acq.ps1` launcher's `ACQ_IMPL=python`
+preamble, which resolves the same interpreter natively (the managed
+`py-acq\runtime\python.exe`, else `python` on `PATH`) and runs `python -m acq_py`.
 
 The installers (`install.sh` / `install.ps1`) accept a `--channel` flag. `python`
 is the only channel and the default, so it parses and installs exactly what the
 installer installs today; any other value fails closed with exit 2. On this fork
 the flag is plumbing — it establishes the stable `--channel` interface upstream
-will extend, and links the Python launcher under its `acq-python` identity
-alongside the existing `acq` link.
+will extend. On POSIX the installer links the distinct `acq-python` launcher to
+`$INSTALL_DIR/acq-python` (the archive's enumerated `acq-python` component, never
+the `acq` launcher) alongside the existing `acq` link.
 
 The Python CLI's `version` output reports `"impl": "python"` (JSON and human) so
 a bug report is unambiguous about which implementation produced it.

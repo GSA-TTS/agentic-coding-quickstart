@@ -43,6 +43,7 @@ pytestmark = pytest.mark.skipif(not _have_tools(), reason="POSIX shell/toolchain
 # reports in its fail-closed "missing" diagnostic.
 _COMPONENTS = {
     "launcher": ("acq", "#!/bin/sh\necho acq test launcher\n"),
+    "acq-python": ("acq-python", "#!/bin/sh\necho acq-python test launcher\n"),
     "runtime": ("py-acq/runtime/bin/python3", "#!/bin/sh\necho acq test runtime\n"),
     "source": ("py-acq/src/acq_py/__init__.py", '__version__ = "0.1.0"\n'),
     "wheelhouse": ("wheelhouse/placeholder.whl", "placeholder wheel\n"),
@@ -218,6 +219,13 @@ def test_offline_install_succeeds(tmp_path):
     # The bundled runtime and the launcher are laid down.
     assert (_install_dir(tmp_path) / "py-acq" / "runtime" / "bin" / "python3").exists()
     assert (_bin_dir(tmp_path) / "acq").is_symlink()
+    # The coexistence seam links the Python implementation's distinct identity
+    # (ADR-0046m): `acq-python` points at its OWN launcher, never an alias of
+    # `acq`. The two installed names must resolve to distinct files.
+    assert (_bin_dir(tmp_path) / "acq-python").is_symlink()
+    assert (_bin_dir(tmp_path) / "acq").resolve() == (_install_dir(tmp_path) / "acq").resolve()
+    assert (_bin_dir(tmp_path) / "acq-python").resolve() == (_install_dir(tmp_path) / "acq-python").resolve()
+    assert (_bin_dir(tmp_path) / "acq").resolve() != (_bin_dir(tmp_path) / "acq-python").resolve()
 
 
 def test_checksum_mismatch_fails_closed(tmp_path):
@@ -240,6 +248,7 @@ def test_missing_checksum_entry_fails_closed(tmp_path):
     "omit,needle",
     [
         ("launcher", "launcher"),
+        ("acq-python", "acq-python"),
         ("runtime", "runtime"),
         ("source", "source tree"),
         ("wheelhouse", "wheelhouse"),

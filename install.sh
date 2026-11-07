@@ -289,7 +289,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
   printf '  [dry-run] extract %s into %s\n' "$ARCHIVE" "$INSTALL_DIR"
   printf '  [dry-run] verify the enumerated set (launcher, runtime, source, wheelhouse) is present\n'
   printf '  [dry-run] link %s/acq -> %s/acq\n' "$BIN_DIR" "$INSTALL_DIR"
-  printf '  [dry-run] link %s/acq-python -> %s/acq\n' "$BIN_DIR" "$INSTALL_DIR"
+  printf '  [dry-run] link %s/acq-python -> %s/acq-python\n' "$BIN_DIR" "$INSTALL_DIR"
   if path_has_bindir; then
     ok "  $BIN_DIR is already on your PATH."
   else
@@ -381,6 +381,7 @@ fi
 # "install" and fail later — so each is a fail-closed gate. (The provenance
 # manifest was fetched alongside SHA256SUMS above.)
 [ -e "$staging/acq" ] || die "release archive is missing the 'acq' launcher"
+[ -e "$staging/acq-python" ] || die "release archive is missing the 'acq-python' launcher"
 [ -e "$staging/py-acq/runtime/bin/python3" ] || die "release archive is missing the bundled runtime (py-acq/runtime/bin/python3)"
 [ -e "$staging/py-acq/src/acq_py/__init__.py" ] || die "release archive is missing the acq source tree (py-acq/src/acq_py/)"
 [ -d "$staging/wheelhouse" ] || die "release archive is missing the dependency wheelhouse (wheelhouse/)"
@@ -400,9 +401,9 @@ step "Linking the acq launcher"
 
 run mkdir -p "$BIN_DIR"
 run ln -sf "$INSTALL_DIR/acq" "$BIN_DIR/acq"
-run ln -sf "$INSTALL_DIR/acq" "$BIN_DIR/acq-python"
+run ln -sf "$INSTALL_DIR/acq-python" "$BIN_DIR/acq-python"
 ok "  linked $BIN_DIR/acq -> $INSTALL_DIR/acq"
-ok "  linked $BIN_DIR/acq-python -> $INSTALL_DIR/acq"
+ok "  linked $BIN_DIR/acq-python -> $INSTALL_DIR/acq-python"
 
 # ---------------------------------------------------------------------------
 # PATH handling — never modified without consent.

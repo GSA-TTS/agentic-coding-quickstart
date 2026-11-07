@@ -57,6 +57,7 @@ _install_dir() {
   # The bundled runtime and the launcher are laid down.
   [ -e "$(_install_dir)/py-acq/runtime/bin/python3" ]
   [ -L "$HOME/.local/bin/acq" ]
+  [ -L "$HOME/.local/bin/acq-python" ]
 }
 
 @test "installer: a checksum mismatch fails closed (exit 1, no install)" {

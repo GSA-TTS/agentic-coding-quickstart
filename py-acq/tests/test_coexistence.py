@@ -74,6 +74,23 @@ def test_impl_python_forwards_json_and_exit_status():
     assert doc["data"]["impl"] == "python"
 
 
+def test_acq_python_launcher_runs_python():
+    # ADR-0046m: the distinct `acq-python` identity runs the Python implementation
+    # (never the Bash body), so the two entry points are observably distinct.
+    acq_python = REPO_ROOT / "acq-python"
+    proc = subprocess.run(
+        ["bash", str(acq_python), "version"],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "acq v1 (Python skeleton)" in proc.stdout
+    assert "impl:" in proc.stdout
+    assert "script:" not in proc.stdout
+
+
 def test_impl_unknown_fails_closed_exit_2():
     proc = _run_acq({"ACQ_IMPL": "bogus"}, "version")
     assert proc.returncode == 2

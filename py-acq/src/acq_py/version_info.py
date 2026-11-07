@@ -1,8 +1,8 @@
 """Version/identity assembly for ``acq version`` (ADR-0042m).
 
-``version`` reports: ``acq_version`` (SemVer), ``source_revision`` (the baked
-release commit SHA), nullable ``backend``/``backend_version``, and
-``kit_control_plane_ref``.
+``version`` reports: ``impl`` (the implementation marker, always "python" here),
+``acq_version`` (SemVer), ``source_revision`` (the baked release commit SHA),
+nullable ``backend``/``backend_version``, and ``kit_control_plane_ref``.
 
 The two baked values may be overridden via the ``ACQ_VERSION`` and
 ``ACQ_SOURCE_REVISION`` environment variables for reproducible builds/tests.
