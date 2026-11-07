@@ -121,6 +121,12 @@ def _minor(version: str) -> tuple[str, str] | None:
     return (str(int(match[1])), str(int(match[2]))) if match else None
 
 
+def same_minor(a: str, b: str) -> bool:
+    """Whether two final ``X.Y.Z`` versions share ``major.minor`` (unparseable never does)."""
+    left = _minor(a)
+    return left is not None and left == _minor(b)
+
+
 def staleness(
     transcript: Transcript,
     *,

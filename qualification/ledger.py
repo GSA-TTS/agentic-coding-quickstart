@@ -210,12 +210,36 @@ def entry_from_transcript(
     return _parse_entry(entry, 0)
 
 
-def append_entry(path: str | Path, entry: Entry) -> None:
-    """Append ``entry`` to the ledger file, preserving everything else."""
-    target = Path(path)
-    ledger = load_ledger(target)
-    if any(e.transcript_sha256 == entry.transcript_sha256 for e in ledger.entries):
-        raise LedgerError("this transcript is already recorded")
+def _rewrite(target: Path, mutate) -> None:
+    """Re-read the ledger document, apply ``mutate(doc)``, and write it back."""
     doc = json.loads(target.read_text(encoding="utf-8"))
-    doc.setdefault("entries", []).append(asdict(entry))
+    mutate(doc)
     target.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+
+
+def append_entry(path: str | Path, entry: Entry, *, retire_waiver: bool = False) -> None:
+    """Append ``entry`` to the ledger file, preserving everything else.
+
+    ``retire_waiver`` also drops any waiver for the entry's cell (a no-op when
+    there is none), used when the entry is a green run.
+    """
+    target = Path(path)
+    if any(e.transcript_sha256 == entry.transcript_sha256 for e in load_ledger(target).entries):
+        raise LedgerError("this transcript is already recorded")
+
+    def mutate(doc: dict) -> None:
+        doc.setdefault("entries", []).append(asdict(entry))
+        if retire_waiver:
+            doc["waivers"] = [
+                w for w in doc.get("waivers", [])
+                if (w.get("backend"), w.get("platform")) != (entry.backend, entry.platform)
+            ]
+
+    _rewrite(target, mutate)
+
+
+def set_accepted_version(path: str | Path, backend: str, version: str) -> None:
+    """Move the backend version under acceptance (expires cells recorded at the old minor)."""
+    if backend not in (MSB, SBX) or not _FINAL_VERSION.fullmatch(version):
+        raise LedgerError(f"cannot accept {backend} {version!r}: need msb/sbx and a final X.Y.Z version")
+    _rewrite(Path(path), lambda doc: doc.setdefault("accepted_backend_versions", {}).__setitem__(backend, version))

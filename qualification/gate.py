@@ -57,7 +57,7 @@ class CellStatus:
     reason: str = ""
 
 
-def git_changed_paths(rev: str) -> list[str] | None:
+def git_changed_paths(rev: str, cwd=None) -> list[str] | None:
     """Paths that differ between ``rev`` and ``HEAD``; ``None`` if git cannot say."""
     if not _REV.fullmatch(rev):
         return None
@@ -66,6 +66,7 @@ def git_changed_paths(rev: str) -> list[str] | None:
     proc = subprocess.run(
         ["git", "-c", "core.quotePath=false", "diff", "--name-only", "--no-renames", "-z", rev, "HEAD", "--"],
         capture_output=True,
+        cwd=cwd,
     )
     if proc.returncode != 0:
         return None
