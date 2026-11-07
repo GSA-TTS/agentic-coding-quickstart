@@ -4,7 +4,8 @@ The ADR claims a specific set of platform/backend cells; every other cell is
 unqualified (not claimed). Windows ARM64 and musl are explicitly unqualified.
 Each cell is in exactly one of three states: ``qualified`` (green current
 transcript), ``unqualified`` (not claimed), or ``blocked`` (attempted, no green
-verdict — this holds the release gate).
+verdict — this holds the release gate). "Current" is age, backend minor version,
+and Tier-3 surface changes — not the commit SHA (see :func:`is_current`).
 
 The report is a pure function of the transcripts it is handed, so it is testable
 offline with fake transcripts and never fabricates a live result.
@@ -12,7 +13,9 @@ offline with fake transcripts and never fabricates a live result.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import Mapping
 
@@ -71,11 +74,81 @@ def is_claimed(backend: str, platform: str) -> bool:
     return platform in QUALIFIED.get(backend, frozenset())
 
 
-def is_current(transcript: Transcript, *, rev: str, artifact_sha256: str) -> bool:
-    """A transcript is current iff its recorded identity matches the artifact
-    under acceptance (ADR-0044m staleness: rev and artifact SHA must match)."""
-    env = transcript.environment
-    return env.rev == rev and env.artifact_sha256 == artifact_sha256
+# A transcript stays current for this long: the quarterly re-verification cadence
+# (AGENTS.md "Periodic Re-Verification").
+MAX_AGE_DAYS = 90
+
+# The Tier-3 surface: what a live run actually exercises. A change to any of these
+# after a transcript was recorded makes it stale; a release-only commit (version
+# bump, changelog, docs, tests, CI) does not. Narrow or widen this list when the
+# oracle's reach changes.
+# The default image is a mutable tag, so an upstream image change is bounded only
+# by the age limit.
+TIER3_SURFACE = (
+    "py-acq/src/acq_py/",
+    "scripts/qualify-backend-cell",
+    "scripts/qualify-msb-ro-mount",
+    "qualification/",
+)
+
+
+def touches_surface(changed_paths) -> bool:
+    """Whether any changed path (repo-relative, ``/``-separated) is on the Tier-3 surface."""
+    return any(
+        path == entry or (entry.endswith("/") and path.startswith(entry))
+        for path in changed_paths
+        for entry in TIER3_SURFACE
+    )
+
+
+_FINAL_VERSION = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+
+
+def _minor(version: str) -> tuple[str, str] | None:
+    """``(major, minor)`` of a final ``X.Y.Z`` version, else ``None``.
+
+    Anything else (``unknown``, a pre-release such as ``0.7.7-rc1``, build
+    metadata, a prefixed string) is unparseable and therefore never matches.
+    """
+    match = _FINAL_VERSION.fullmatch(version)
+    return (str(int(match[1])), str(int(match[2]))) if match else None
+
+
+def is_current(
+    transcript: Transcript,
+    *,
+    now: datetime,
+    backend_version: str | None = None,
+    surface_changed: bool = False,
+    max_age_days: int = MAX_AGE_DAYS,
+) -> bool:
+    """Whether a transcript still counts as current evidence (ADR-0044m staleness).
+
+    It is current while all hold: it was recorded within ``max_age_days`` (and not
+    in the future); its backend ``major.minor`` matches ``backend_version``, the
+    final ``X.Y.Z`` version under acceptance (patch releases do not expire it,
+    ``None`` skips the check, and an unparseable version on either side fails
+    closed); and no Tier-3 surface change landed after it. ``surface_changed`` is
+    computed by the caller for this transcript: the changes since the transcript's
+    recorded ``rev`` (see :func:`touches_surface`). The artifact SHA-256 is
+    provenance only. An unknown or naive ``recorded_at`` is never current.
+    ``now`` must be timezone-aware.
+    """
+    if now.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+    try:
+        recorded = datetime.fromisoformat(transcript.recorded_at)
+    except ValueError:
+        return False
+    if recorded.tzinfo is None or recorded > now:
+        return False
+    if now - recorded > timedelta(days=max_age_days):
+        return False
+    if backend_version is not None:
+        recorded_minor = _minor(transcript.environment.backend_version)
+        if recorded_minor is None or recorded_minor != _minor(backend_version):
+            return False
+    return not surface_changed
 
 
 def cell_state(
@@ -83,8 +156,9 @@ def cell_state(
     platform: str,
     *,
     transcript: Transcript | None,
-    rev: str,
-    artifact_sha256: str,
+    now: datetime,
+    backend_version: str | None = None,
+    surface_changed: bool = False,
 ) -> MatrixState:
     """The matrix state of one cell.
 
@@ -97,7 +171,9 @@ def cell_state(
     if (
         transcript is not None
         and transcript.verdict is Verdict.PASS
-        and is_current(transcript, rev=rev, artifact_sha256=artifact_sha256)
+        and is_current(
+            transcript, now=now, backend_version=backend_version, surface_changed=surface_changed
+        )
     ):
         return MatrixState.QUALIFIED
     return MatrixState.BLOCKED
@@ -114,19 +190,21 @@ class CellReport:
 def report_matrix(
     transcripts: Mapping[tuple[str, str], Transcript] | None = None,
     *,
-    rev: str,
-    artifact_sha256: str,
+    now: datetime,
+    backend_versions: Mapping[str, str] | None = None,
+    surface_changed: bool = False,
 ) -> list[CellReport]:
     """The full matrix report, one ``CellReport`` per backend x platform cell.
 
-    ``transcripts`` maps ``(backend, platform)`` to the cell's current transcript;
+    ``transcripts`` maps ``(backend, platform)`` to the cell's latest transcript;
     missing cells report blocked (claimed) or unqualified (unclaimed).
+    ``backend_versions`` maps a backend to the version under acceptance.
     """
     transcripts = transcripts or {}
+    backend_versions = backend_versions or {}
     reports: list[CellReport] = []
     for backend in (MSB, SBX):
         for platform in PLATFORMS:
-            transcript = transcripts.get((backend, platform))
             reports.append(
                 CellReport(
                     backend=backend,
@@ -135,9 +213,10 @@ def report_matrix(
                     state=cell_state(
                         backend,
                         platform,
-                        transcript=transcript,
-                        rev=rev,
-                        artifact_sha256=artifact_sha256,
+                        transcript=transcripts.get((backend, platform)),
+                        now=now,
+                        backend_version=backend_versions.get(backend),
+                        surface_changed=surface_changed,
                     ),
                 )
             )

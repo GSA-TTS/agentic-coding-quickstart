@@ -3,7 +3,7 @@ title: "Cross-Platform Qualification How-To (Tier-3)"
 description: "How to run the six ADR-0044m Tier-3 qualification oracles and record honest PASS/FAIL/BLOCKED transcripts on macOS and Linux hosts"
 status: canonical
 tier: 3
-last_updated: "2026-11-05"
+last_updated: "2026-11-07"
 audience: "developers"
 keywords: ["qualification", "tier-3", "transcript", "msb", "sbx", "oracle", "adr-0044m", "matrix"]
 related_files: ["docs/adr/0044m-live-cross-platform-qualification-matrix-and-transcript.md", "qualification/README.md", "scripts/qualify-backend-cell", "scripts/qualify-msb-ro-mount", "docs/KNOWN_FAILURE_MODES.md", "docs/adr/0035-host-authoritative-sandbox-config.md", "docs/adr/0041m-configuration-and-state-migration-behavior.md"]
@@ -187,7 +187,7 @@ no further host is needed.
 
 ## Computing the identity fields honestly
 
-Every transcript binds to a commit SHA, artifact SHA-256, backend version, OS
+Every transcript records a commit SHA, artifact SHA-256, backend version, OS
 build, arch, and hypervisor state (ADR-0044m). Compute them on the target host —
 never copy them from another host:
 
@@ -227,15 +227,18 @@ release/PR artifact plus its hashes and attestations.
    ```
 
 2. Attach the transcript directory (and, where available, an attestation) to the
-   release and — for a PR touching a Tier-3 oracle — to that PR as an artifact.
+   release and — for a PR touching the Tier-3 surface — to that PR as an artifact.
 3. Record the `RESULT` line plus the identity hashes in the release/PR notes;
    do not commit the transcript files themselves.
 
 A `FAIL` is confirmed real only by reproducing on the same environment within
 three attempts with matching identity fields (a diverging result is escalated
-`FLAKY`, never softened). A transcript expires when its recorded commit SHA,
-artifact SHA-256, backend version, or OS build no longer matches the artifact
-under acceptance; regenerate it then.
+`FLAKY`, never softened). A transcript is current for 90 days, until the
+backend's `major.minor` version changes, and until a change lands on the Tier-3
+surface (`py-acq/src/acq_py/`, the two `scripts/qualify-*` oracles, and
+`qualification/`); regenerate it then. The commit SHA and artifact SHA-256 are
+provenance only: a release-please commit changes both without expiring
+anything.
 
 ---
 

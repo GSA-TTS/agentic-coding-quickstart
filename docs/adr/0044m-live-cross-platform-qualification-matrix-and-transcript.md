@@ -48,30 +48,63 @@ line already emitted by `scripts/qualify-msb-ro-mount`:
 `RESULT <PASS|FAIL|BLOCKED> msb=<ver> image=<image> host=<os arch>
 rev=<sha> dir=<abs path>` (the backend token generalises `msb=` to `sbx=`
 for sbx cells). Transcripts are attached to the release and, for a PR
-touching a Tier-3 oracle, to that PR as artifacts with attestations where
+touching the Tier-3 surface, to that PR as artifacts with attestations where
 available; they are not committed.
 
 BLOCKED is a first-class recorded outcome, never a pass, distinct from an
 unqualified (unclaimed) cell. The release gate is every qualified cell
-holding a green current transcript; a PR touching a Tier-3 oracle attaches
-a fresh transcript; re-verification runs quarterly; the developer owns and
-runs the fleet. An unavailable qualified cell records blocked and holds
-the gate.
+holding a green current transcript; a PR touching the Tier-3 surface (below)
+attaches a fresh transcript; the developer owns and runs the fleet. An unavailable
+qualified cell records blocked and holds the gate.
 
-Staleness is detected, not trusted: a transcript expires when its recorded
-commit SHA, artifact SHA-256, backend version, or OS build no longer
-matches the artifact under acceptance, and is regenerated. A FAIL is
-confirmed real by re-running up to three attempts where the commit SHA,
-artifact SHA-256, backend version, and OS build plus hypervisor state must
-match (wall-clock time, transcript directory, nonce, and sandbox name may
-differ); a result diverging across three attempts is flaky and is
-escalated to a tracking issue plus KNOWN_FAILURE_MODES, never softened.
+A transcript is *current* while all of the following hold; otherwise it is
+stale and the cell is blocked until regenerated:
+
+- it was recorded within the last 90 days (the quarterly re-verification
+  cadence, so re-verification is simply the age limit);
+- its backend `major.minor` version equals the version under acceptance (a
+  patch release does not expire it; a minor or major upgrade does);
+- no change to the Tier-3 surface landed after it was recorded. The surface is
+  the CLI source (`py-acq/src/acq_py/`), the cell and ro-mount oracles
+  (`scripts/qualify-backend-cell`, `scripts/qualify-msb-ro-mount`), and the
+  harness (`qualification/`). A commit that touches none of these (a
+  release-please version bump, changelog, docs, tests, CI) does not expire
+  anything.
+
+The commit SHA and artifact SHA-256 are recorded as provenance, not as part of
+the currency test: every release commit changes both without changing
+behaviour, and treating them as binding would force a full live re-run of every
+cell for each release. The same host fields (OS build, arch, hypervisor)
+remain in the transcript; a different OS major version or hypervisor is a
+different environment and is qualified by its own run. The trade-off, accepted
+here, is that a release can ship non-surface changes that no live run covered;
+those are covered by the Tier-1 vectors and Tier-2 tests, and a surface change
+always requires a fresh transcript. The default sandbox image is a mutable tag,
+so an upstream image change is bounded only by the 90-day limit. Backend
+versions are compared as final `X.Y.Z`; an unknown, pre-release, or otherwise
+unparseable version on either side is never current.
+
+"No surface change since the transcript" is computed per transcript from its
+recorded commit: the changes between that commit and the commit under
+acceptance, restricted to the surface paths. The recorded commit SHA is
+therefore the anchor for that computation (and provenance), even though it no
+longer decides currency by itself.
+
+A FAIL is confirmed real by re-running up to three attempts where the commit
+SHA, artifact SHA-256, backend version, and OS build plus hypervisor state
+must match (wall-clock time, transcript directory, nonce, and sandbox name may
+differ); a result diverging across three attempts is flaky and is escalated to
+a tracking issue plus KNOWN_FAILURE_MODES, never softened. (Within one run
+these fields are fixed, so the rule detects genuinely nondeterministic
+results.)
 
 ## Consequences
 
-A release cannot be declared ready without green live transcripts on every
-qualified cell, and a security-oracle change cannot merge without fresh
-live evidence. Cells that cannot reach a verdict are visible as blocked,
+A release cannot be declared ready without a green current transcript on every
+qualified cell, and a Tier-3 surface change cannot merge without fresh live
+evidence. A release that changes none of the Tier-3 surface needs no new live
+run, which lets the release gate be evaluated automatically from existing
+transcripts (where the gate reads them from is a separate decision). Cells that cannot reach a verdict are visible as blocked,
 not silently dropped. The repository does not accumulate transcript files;
 the durable reference is the release/PR artifact plus its hashes and
 attestations.
@@ -79,5 +112,9 @@ attestations.
 ## Verification
 
 The matrix and the reproduction rule are themselves asserted by the
-transcripts they govern: a green transcript per qualified cell per release,
-and a fresh transcript on any PR touching a Tier-3 oracle.
+transcripts they govern: a green current transcript per qualified cell at
+release, and a fresh transcript on any PR touching the Tier-3 surface.
+`qualification.is_current` and `touches_surface` implement the currency test and
+are covered by `py-acq/tests/test_qualification.py`. Not yet implemented:
+loading stored transcripts, computing the per-transcript surface diff from git,
+and the automated release gate that would call them (tracked separately).

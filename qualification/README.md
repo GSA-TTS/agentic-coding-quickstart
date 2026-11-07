@@ -57,7 +57,9 @@ records `BLOCKED`.
 `python -m qualification matrix` reports every platform/backend cell in exactly
 one of three states:
 
-* `qualified` — a claimed cell holding a green *current* transcript;
+* `qualified` — a claimed cell holding a green *current* transcript (recorded
+  within 90 days, at the backend's current `major.minor`, with no Tier-3 surface
+  change since; the commit SHA and artifact hash are provenance only);
 * `unqualified` — a cell that is not claimed (reported honestly, never a pass);
 * `blocked` — a claimed cell without a green current transcript (holds the gate).
 

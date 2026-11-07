@@ -67,7 +67,7 @@ records were merged to the most complete definition rather than kept twice.
 
 - **Qualification matrix** — the set of qualified cells plus the backend version floor each must be at-or-above. *(Source: ADR-0044m)*
 
-- **Qualified** — a *(platform × backend × backend-version)* cell holding a green, current Tier-3 transcript against the artifact/commit under acceptance. Supported ≠ qualified. *(Source: ADR-0044m)*
+- **Qualified** — a *(platform × backend × backend-version)* cell holding a green, current Tier-3 transcript (recorded within 90 days, at the backend's current major.minor, with no Tier-3 surface change since). Supported ≠ qualified. *(Source: ADR-0044m)*
 
 - **Qualified / Unqualified / Blocked** — the three matrix states. *(Source: ADR-0044m)*
 
@@ -83,7 +83,7 @@ records were merged to the most complete definition rather than kept twice.
 
 - **Semantic migration** — Preservation of supported settings, credentials, and live state across implementation/format changes without treating internal filenames or encodings as public contracts. *(Source: ADR-0038m)*
 
-- **Stale transcript** — a transcript whose recorded commit/artifact/backend-version/OS-build no longer matches what is under acceptance. *(Source: ADR-0044m)*
+- **Stale transcript** — a transcript older than 90 days, recorded at a different backend major.minor, or predating a change to the Tier-3 surface. The commit SHA and artifact hash alone never make it stale. *(Source: ADR-0044m)*
 
 - **State-schema version** — the integer stamped as the first field of a record, describing the encoding that wrote it. Distinct from the §2 structured-output **result-schema version** (`schema_version`); the two never share a number space. *(Source: ADR-0041m)*
 

@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Sequence
 
 from .model import Environment, Outcome, Transcript, Verdict, classify_exit, sha256_hex
@@ -32,6 +33,11 @@ EXIT_FLAKY = 3
 # a fixture can branch deterministically on the attempt. It is a nonce, never a
 # secret.
 ATTEMPT_ENV = "ACQ_QUALIFY_ATTEMPT"
+
+
+def _now() -> str:
+    """The current UTC time as ISO 8601 (the transcript's ``recorded_at``)."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 @dataclass(frozen=True)
@@ -56,7 +62,7 @@ def _single_run(
     """Run the oracle once and return its transcript (never its raw output)."""
     if not command:
         return Transcript(
-            Verdict.BLOCKED, environment, (), "", "no command supplied"
+            Verdict.BLOCKED, environment, (), "", "no command supplied", _now()
         )
     child_env = dict(os.environ)
     child_env[ATTEMPT_ENV] = str(attempt)
@@ -69,11 +75,11 @@ def _single_run(
         )
     except FileNotFoundError:
         return Transcript(
-            Verdict.BLOCKED, environment, tuple(command), "", "command not found"
+            Verdict.BLOCKED, environment, tuple(command), "", "command not found", _now()
         )
     except subprocess.TimeoutExpired:
         return Transcript(
-            Verdict.BLOCKED, environment, tuple(command), "", "command timed out"
+            Verdict.BLOCKED, environment, tuple(command), "", "command timed out", _now()
         )
 
     verdict = classify_exit(proc.returncode)
@@ -81,7 +87,7 @@ def _single_run(
     # is never persisted.
     output_sha256 = sha256_hex(proc.stdout + proc.stderr)
     detail = f"exit {proc.returncode}"
-    return Transcript(verdict, environment, tuple(command), output_sha256, detail)
+    return Transcript(verdict, environment, tuple(command), output_sha256, detail, _now())
 
 
 def run_cell(
@@ -105,6 +111,7 @@ def run_cell(
             tuple(command),
             "",
             "unqualified cell: not claimed",
+            _now(),
         )
         return CellResult(Outcome.BLOCKED, (blocked,))
 
@@ -156,6 +163,7 @@ def transcript_document(result: CellResult) -> dict:
                 "commands": list(t.commands),
                 "output_sha256": t.output_sha256,
                 "detail": t.detail,
+                "recorded_at": t.recorded_at,
             }
         )
     return {
