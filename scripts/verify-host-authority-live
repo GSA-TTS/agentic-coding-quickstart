@@ -378,14 +378,23 @@ create_sandbox() { # BACKEND NAME WS [extra create args...]
   fi
 }
 
-msb_inspect_check() { # NAME -> 0 if msb reports the read-only host-config Bind
+# msb_inspect_check NAME : 0 = msb reports the read-only host-config Bind; 1 = it does
+# not (a finding); 2 = the probe itself failed, timed out or returned unusable output
+# (the caller must report BLOCKED, never FAIL).
+msb_inspect_check() {
   local n="$1" hc js
   hc=$(hc_dir msb "$n"); js="$OUT/inspect-$n.json"
-  "${TO[@]}" "$STEP_TIMEOUT" msb inspect "$n" --format json </dev/null >"$js" 2>>"$TRANSCRIPT" || return 1
-  [ -s "$js" ] || return 1
+  [ -n "$hc" ] || return 2
+  "${TO[@]}" "$STEP_TIMEOUT" msb inspect "$n" --format json </dev/null >"$js" 2>>"$TRANSCRIPT" || return 2
+  [ -s "$js" ] || return 2
   python3 - "$js" "$hc" <<'PY'
 import json, os, sys
-d = json.load(open(sys.argv[1]))
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(2)
+if not isinstance(d, dict):
+    sys.exit(2)
 mounts = (d.get("active_config") or {}).get("mounts") or []
 hit = [m for m in mounts if isinstance(m, dict) and m.get("guest") == "/var/lib/acq/host"]
 ok = (len(hit) == 1 and hit[0].get("type") == "Bind"
@@ -443,22 +452,25 @@ proof_lines() {
 }
 
 step_msb_ro_kit_create() {
-  local id=msb-ro-kit-create n ws why=""
+  local id=msb-ro-kit-create n ws why="" irc
   block_if_not_ready "$id" "$MSB_READY" "msb unavailable (missing msb, python3, or msb doctor not ready)" || return 0
   write_fixture || { record "$id" BLOCKED "cannot write the fixture kit under $OUT"; return 0; }
   n=$(sandbox_name a); MSB_A="$n"
   ws=$(mk_workspace a) || { record "$id" BLOCKED "cannot create a workspace under $WS_ROOT"; return 0; }
   create_sandbox msb "$n" "$ws" --kit "$FIXTURE"
   if last_has "cannot place read-only kit file"; then record "$id" FAIL "acq refused the readonly fixture file on create"; return 0; fi
-  if [ "$LAST_RC" -ne 0 ]; then record "$id" BLOCKED "acq create exited $LAST_RC before the readonly file could be judged (see transcript)"; return 0; fi
+  need_rc0 "$id" "acq create" || return 0
   MSB_A_OK=1
   run_cmd "$STEP_TIMEOUT" msb exec "$n" -u 0 -- cat /home/agent/.hal-ro-proof
+  need_rc0 "$id" "reading the readonly proof file" || return 0
   last_has "/var/lib/acq/host/kit-files/" || why="startup did not run from the read-only mount path; "
   run_cmd "$STEP_TIMEOUT" msb exec "$n" -u 0 -- sh -c 'test ! -e /home/agent/hal/ro-proof.sh && echo NO-GUEST-COPY'
   last_has NO-GUEST-COPY || why="${why}the readonly file was also copied into the guest; "
   run_cmd "$STEP_TIMEOUT" msb exec "$n" -u 0 -- sh -c 'test -x /home/agent/hal/install-proof.sh && echo PLAIN-COPY-OK'
   last_has PLAIN-COPY-OK || why="${why}the plain (non-readonly) file was not copied; "
-  msb_inspect_check "$n" || why="${why}msb inspect does not show the read-only host-config Bind; "
+  msb_inspect_check "$n"; irc=$?
+  [ "$irc" -ne 2 ] || { record "$id" BLOCKED "msb inspect failed, timed out, or returned unusable output"; return 0; }
+  [ "$irc" -eq 0 ] || why="${why}msb inspect does not show the read-only host-config Bind; "
   if [ -z "$why" ]; then record "$id" PASS "readonly fixture file ran from the :ro mount on create, no guest copy, plain file copied, inspect shows the read-only Bind"
   else record "$id" FAIL "$why"; fi
 }
@@ -467,8 +479,9 @@ step_msb_inspect_shape() {
   local id=msb-inspect-shape js
   [ "$MSB_A_OK" -eq 1 ] || { record "$id" BLOCKED "needs the sandbox from msb-ro-kit-create"; return 0; }
   js="$OUT/inspect-$MSB_A.json"
-: >"$js.keys"
-  "${TO[@]}" "$STEP_TIMEOUT" msb inspect "$MSB_A" --format json </dev/null 2>/dev/null | python3 -c '
+  "${TO[@]}" "$STEP_TIMEOUT" msb inspect "$MSB_A" --format json </dev/null >"$js" 2>>"$TRANSCRIPT" \
+    || { record "$id" BLOCKED "msb inspect failed or timed out"; return 0; }
+  python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 ac = d.get("active_config"); cf = d.get("config")
@@ -481,7 +494,8 @@ def host_ro(x):
 print("TOPLEVEL-KEYS " + " ".join(sorted(d.keys())))
 print("ACTIVE_CONFIG.MOUNTS " + host_ro(ac))
 print("CONFIG.MOUNTS " + host_ro(cf))
-' >"$js.keys" 2>>"$TRANSCRIPT"
+' <"$js" >"$js.keys" 2>>"$TRANSCRIPT" \
+    || { record "$id" BLOCKED "msb inspect output was not parseable JSON"; return 0; }
   while IFS= read -r line; do say "  $line"; done <"$js.keys"
   if grep -q '^ACTIVE_CONFIG.MOUNTS readonly-bind$' "$js.keys"; then
     record "$id" PASS "active_config.mounts shape matches the gate on msb $MSB_VER; $(grep '^CONFIG.MOUNTS' "$js.keys"); $(grep '^TOPLEVEL-KEYS' "$js.keys")"
@@ -495,6 +509,7 @@ step_msb_exit_code() {
   [ "$MSB_A_OK" -eq 1 ] || { record "$id" BLOCKED "needs the sandbox from msb-ro-kit-create"; return 0; }
   run_cmd "$STEP_TIMEOUT" msb exec "$MSB_A" -- sh -c 'exit 2'; r2=$LAST_RC
   run_cmd "$STEP_TIMEOUT" msb exec "$MSB_A" -- sh -c 'exit 7'; r7=$LAST_RC
+  if [ "$r2" -eq 124 ] || [ "$r7" -eq 124 ]; then record "$id" BLOCKED "msb exec timed out; exit-code passthrough was not exercised"; return 0; fi
   if [ "$r2" -eq 2 ] && [ "$r7" -eq 7 ]; then record "$id" PASS "guest exit codes 2 and 7 passed through msb exec unchanged on msb $MSB_VER"
   else record "$id" FAIL "guest exit 2 became $r2 and exit 7 became $r7 on msb $MSB_VER (affects only the wording of a refusal)"; fi
 }
@@ -552,7 +567,8 @@ step_msb_forged_markers() {
   last_has "SOCK=[/tmp/forged.sock]" && why="${why}the forged ssh socket reached the session; "
   run_cmd "$STEP_TIMEOUT" "$ACQ" --backend msb exec "$MSB_A" -- sh -c 'command -v claude >/dev/null 2>&1 && echo CLAUDE-PRESENT || echo no-claude'
   run_cmd "$STEP_TIMEOUT" "$ACQ" --backend msb exec "$MSB_A" -- id -un
-  [ "$LAST_RC" -eq 0 ] && last_out | grep -qx agent || why="${why}exec no longer runs as the agent user; "
+  need_rc0 "$id" "id -un via acq exec" || return 0
+  last_out | grep -qx agent || why="${why}exec no longer runs as the agent user; "
   if [ -z "$why" ]; then record "$id" PASS "forged agent/workspace/ssh-socket/kit-env/ready markers changed no exec-session behavior (attach and agent-key cases: MANUAL 1)"
   else record "$id" FAIL "$why"; fi
 }
@@ -581,7 +597,7 @@ step_msb_install_gate() {
 }
 
 step_msb_ro_oci() {
-  local id=msb-ro-oci n ws ref
+  local id=msb-ro-oci n ws ref irc
   block_if_not_ready "$id" "$MSB_READY" "msb unavailable" || return 0
   ref=$(
     # shellcheck disable=SC1090
@@ -596,8 +612,12 @@ step_msb_ro_oci() {
   if last_has "cannot place read-only kit file"; then record "$id" FAIL "acq refused a readonly oci-engine file on create"; return 0; fi
   if [ "$LAST_RC" -ne 0 ]; then record "$id" BLOCKED "acq create with oci-engine exited $LAST_RC (see transcript)"; return 0; fi
   run_cmd "$STEP_TIMEOUT" msb exec "$n" -u 0 -- sh -c 'ls /var/lib/acq/host/kit-files 2>&1; test ! -e /home/agent/oci-engine-grant-devs.sh && echo NO-GUEST-COPY-OF-GRANT-SCRIPT'
-  if [ "$LAST_RC" -eq 0 ] && last_has 'home-agent-oci-engine-grant-devs-sh.' && last_has 'home-agent-oci-engine-config-oci-engine-storage-driver-sh.' \
-      && last_has NO-GUEST-COPY-OF-GRANT-SCRIPT && msb_inspect_check "$n"; then
+  need_rc0 "$id" "listing the staged oci-engine files" || return 0
+  if last_has 'home-agent-oci-engine-grant-devs-sh.' && last_has 'home-agent-oci-engine-config-oci-engine-storage-driver-sh.' \
+      && last_has NO-GUEST-COPY-OF-GRANT-SCRIPT; then
+    msb_inspect_check "$n"; irc=$?
+    if [ "$irc" -eq 2 ]; then record "$id" BLOCKED "msb inspect failed, timed out, or returned unusable output"; return 0; fi
+    if [ "$irc" -ne 0 ]; then record "$id" FAIL "inspect does not show the read-only Bind"; return 0; fi
     record "$id" PASS "oci-engine readonly files were staged on the read-only mount, not copied to the guest, and inspect shows the read-only Bind"
   else
     record "$id" FAIL "oci-engine readonly files were not staged as expected, or inspect lacks the read-only Bind"
