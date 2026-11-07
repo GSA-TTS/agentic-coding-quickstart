@@ -30,6 +30,32 @@
       "artifact_sha256": "233aea93cd807efbb554c60f3c5587c545c32217cc66ef34f7a72509c5a4b23d",
       "recorded_at": "2026-11-07T07:04:20+00:00",
       "transcript_sha256": "a2c33720b5d9e8ceba97a2e7cc9ead5a44936fc6a5cb4891bdda9a8fb389ea10"
+    },
+    {
+      "backend": "msb",
+      "platform": "macos-arm64",
+      "verdict": "PASS",
+      "backend_version": "0.7.7",
+      "os_build": "26.7.2",
+      "arch": "arm64",
+      "hypervisor": "hvf",
+      "rev": "afa08afb6c3102a2011ccdf392f734d4594f8898",
+      "artifact_sha256": "ae61405886581366ed844a2e493978e238c776ccb9996ee0d27eb041da834bd5",
+      "recorded_at": "2026-11-07T09:02:08+00:00",
+      "transcript_sha256": "58c53763f4a5d5d013ae469178d7d4d2338e00f70980177d2579b36b3d472798"
+    },
+    {
+      "backend": "sbx",
+      "platform": "macos-arm64",
+      "verdict": "PASS",
+      "backend_version": "0.51.0",
+      "os_build": "26.7.2",
+      "arch": "arm64",
+      "hypervisor": "hvf",
+      "rev": "afa08afb6c3102a2011ccdf392f734d4594f8898",
+      "artifact_sha256": "ae61405886581366ed844a2e493978e238c776ccb9996ee0d27eb041da834bd5",
+      "recorded_at": "2026-11-07T09:02:19+00:00",
+      "transcript_sha256": "abb5e532790297746d3c3e99821ea285012ef82f7d096320417724ca6f61521a"
     }
   ],
   "waivers": [
@@ -43,13 +69,6 @@
     {
       "backend": "msb",
       "platform": "linux-aarch64",
-      "reason": "no current Tier-3 transcript recorded yet",
-      "expires": "2027-02-05",
-      "issue": "mogul/agentic-coding-quickstart#60"
-    },
-    {
-      "backend": "msb",
-      "platform": "macos-arm64",
       "reason": "no current Tier-3 transcript recorded yet",
       "expires": "2027-02-05",
       "issue": "mogul/agentic-coding-quickstart#60"
@@ -71,13 +90,6 @@
     {
       "backend": "sbx",
       "platform": "linux-x86_64",
-      "reason": "no current Tier-3 transcript recorded yet",
-      "expires": "2027-02-05",
-      "issue": "mogul/agentic-coding-quickstart#60"
-    },
-    {
-      "backend": "sbx",
-      "platform": "macos-arm64",
       "reason": "no current Tier-3 transcript recorded yet",
       "expires": "2027-02-05",
       "issue": "mogul/agentic-coding-quickstart#60"
