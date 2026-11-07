@@ -500,20 +500,36 @@ step_msb_exit_code() {
 }
 
 INSTALL_RERAN_ON_HEAL=0
+# need_rc0 ID WHAT : after run_cmd, record BLOCKED (never FAIL) and return 1 unless the
+# command exited 0; a timeout (124) is named as such.
+need_rc0() {
+  [ "$LAST_RC" -eq 0 ] && return 0
+  if [ "$LAST_RC" -eq 124 ]; then record "$1" BLOCKED "$2 timed out; the step was not exercised to a conclusion"
+  else record "$1" BLOCKED "$2 exited $LAST_RC; the step was not exercised to a conclusion (see transcript)"; fi
+  return 1
+}
+
 step_msb_ro_kit_heal() {
   local id=msb-ro-kit-heal r0 r1 i0 i1 why=""
   [ "$MSB_A_OK" -eq 1 ] || { record "$id" BLOCKED "needs the sandbox from msb-ro-kit-create"; return 0; }
-  r0=$(proof_lines "$MSB_A" /home/agent/.hal-ro-proof); i0=$(proof_lines "$MSB_A" /home/agent/.hal-install-proof)
+  proof_lines "$MSB_A" /home/agent/.hal-ro-proof || { record "$id" BLOCKED "could not read the readonly proof file before restart"; return 0; }
+  r0=$PROOF_N
+  proof_lines "$MSB_A" /home/agent/.hal-install-proof || { record "$id" BLOCKED "could not read the install proof file before restart"; return 0; }
+  i0=$PROOF_N
   run_cmd "$CREATE_TIMEOUT" "$ACQ" --backend msb restart "$MSB_A"
   if last_has "cannot place read-only kit file"; then record "$id" FAIL "acq refused the readonly fixture file on heal after restart"; return 0; fi
-  [ "$LAST_RC" -eq 0 ] || { record "$id" BLOCKED "acq restart exited $LAST_RC (see transcript)"; return 0; }
-  r1=$(proof_lines "$MSB_A" /home/agent/.hal-ro-proof); i1=$(proof_lines "$MSB_A" /home/agent/.hal-install-proof)
+  need_rc0 "$id" "acq restart" || return 0
+  proof_lines "$MSB_A" /home/agent/.hal-ro-proof || { record "$id" BLOCKED "could not read the readonly proof file after restart"; return 0; }
+  r1=$PROOF_N
+  proof_lines "$MSB_A" /home/agent/.hal-install-proof || { record "$id" BLOCKED "could not read the install proof file after restart"; return 0; }
+  i1=$PROOF_N
   say "  readonly startup proof lines: $r0 -> $r1; install proof lines: $i0 -> $i1"
-  [ "${r1:-0}" -gt "${r0:-0}" ] || why="the readonly startup command did not re-run on heal; "
+  [ "$r1" -gt "$r0" ] || why="the readonly startup command did not re-run on heal; "
   run_cmd "$STEP_TIMEOUT" msb exec "$MSB_A" -u 0 -- tail -n 1 /home/agent/.hal-ro-proof
+  need_rc0 "$id" "reading the last readonly proof line" || return 0
   last_has "/var/lib/acq/host/kit-files/" || why="${why}the heal ran the file from somewhere other than the read-only mount; "
   msb_inspect_check "$MSB_A" || why="${why}msb inspect no longer shows the read-only Bind after restart; "
-  [ "${i1:-0}" -gt "${i0:-0}" ] && INSTALL_RERAN_ON_HEAL=1
+  [ "$i1" -gt "$i0" ] && INSTALL_RERAN_ON_HEAL=1
   if [ -z "$why" ]; then record "$id" PASS "after stop/start the readonly startup file re-ran from the :ro mount and the mount record held (msb $MSB_VER)"
   else record "$id" FAIL "$why"; fi
 }
@@ -548,15 +564,19 @@ step_msb_install_gate() {
     record "$id" BLOCKED "the install command re-ran on a plain heal, so key deletion cannot be told apart (see msb-ro-kit-heal output)"; return 0
   fi
   hc=$(hc_dir msb "$MSB_A")
+  [ -n "$hc" ] && [ -d "$hc" ] || { record "$id" BLOCKED "host config dir for $MSB_A not found"; return 0; }
   n=$(find "$hc" -maxdepth 1 -type f -name 'install-*' 2>/dev/null | wc -l | tr -d ' ')
   [ "${n:-0}" -gt 0 ] || { record "$id" BLOCKED "no install-* key exists in the host config dir $hc (nothing to delete)"; return 0; }
+  proof_lines "$MSB_A" /home/agent/.hal-install-proof || { record "$id" BLOCKED "could not read the install proof file before restart"; return 0; }
+  i0=$PROOF_N
   say "  deleting $n host install key(s) under $hc"
   find "$hc" -maxdepth 1 -type f -name 'install-*' -exec rm -f {} + 2>>"$TRANSCRIPT"
-  i0=$(proof_lines "$MSB_A" /home/agent/.hal-install-proof)
   run_cmd "$CREATE_TIMEOUT" "$ACQ" --backend msb restart "$MSB_A"
-  i1=$(proof_lines "$MSB_A" /home/agent/.hal-install-proof)
+  need_rc0 "$id" "acq restart" || return 0
+  proof_lines "$MSB_A" /home/agent/.hal-install-proof || { record "$id" BLOCKED "could not read the install proof file after restart"; return 0; }
+  i1=$PROOF_N
   say "  install proof lines: $i0 -> $i1"
-  if [ "${i1:-0}" -gt "${i0:-0}" ]; then record "$id" PASS "install command re-ran after the host install key was deleted"
+  if [ "$i1" -gt "$i0" ]; then record "$id" PASS "install command re-ran after the host install key was deleted (restart exited 0)"
   else record "$id" FAIL "install command did not re-run after the host install key was deleted"; fi
 }
 
