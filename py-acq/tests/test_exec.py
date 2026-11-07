@@ -73,6 +73,21 @@ def test_guest_path_translation():
     assert msb._guest_path("/home/agent") == "/home/agent"
 
 
+def test_guest_path_unc_form(monkeypatch):
+    # A mapped network drive resolves to a UNC path under ``os.path.realpath``
+    # (e.g. ``Z:`` -> ``\\server\share\proj``); its guest form collapses the
+    # leading double backslash to a single slash so the server name is the first
+    # component — never a leading ``//``, whose meaning is implementation-defined
+    # in the guest. The conversion is Windows-only, so patch ``os.name`` to "nt"
+    # to assert it on every host, not just a Windows CI (the drive-form branch is
+    # exercised by ``test_guest_path_translation`` under ``os.name == "nt"``).
+    from acq_py import msb
+
+    monkeypatch.setattr(msb.os, "name", "nt")
+    assert msb._guest_path("\\\\server\\share\\proj") == "/server/share/proj"
+    assert msb._guest_path("\\\\server\\share") == "/server/share"
+
+
 # ---------------------------------------------------------------------------
 # Host-authoritative record reads (ADR-0041m: guest-writable state is never
 # authority; a missing record defaults the workspace, a newer schema refuses).

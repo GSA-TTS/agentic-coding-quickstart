@@ -849,9 +849,13 @@ def _mount_workspace(backend: str, workspace: str) -> str:
 
     msb cannot mount a symlinked host path (notably the macOS ``$TMPDIR``,
     ``/var/folders`` -> ``/private/var/folders``), so it gets the real path; the
-    guest ``-w`` start directory is derived from the same value. sbx keeps the
-    path as typed. Call this AFTER deriving the sandbox name, which must come
-    from the path the user typed.
+    guest ``-w`` start directory is derived from the same value. The same
+    ``realpath`` is what lets msb mount a Windows ``subst`` or mapped drive: msb's
+    mount backend rejects a ``subst``/mapped drive letter (``X:\\...`` fails with
+    os error 22) but accepts the resolved plain-drive or UNC path ``realpath``
+    yields, and ``_guest_path`` translates either form. sbx keeps the path as
+    typed. Call this AFTER deriving the sandbox name, which must come from the
+    path the user typed.
     """
     return os.path.realpath(workspace) if backend == "msb" else workspace
 

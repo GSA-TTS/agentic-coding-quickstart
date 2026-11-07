@@ -54,11 +54,21 @@ def _guest_path(host: str) -> str:
     guest destination; the same POSIX form is the ``-w``/``--workdir`` start
     directory. On POSIX the two forms are identical. On Windows a drive-form path
     (``C:\\Users\\me\\proj``) becomes the microVM's POSIX form (``/c/Users/me/proj``)
-    so the guest side is never a drive path. This mirrors the Bash adapter's
+    so the guest side is never a drive path. A UNC path (``\\\\server\\share\\proj``
+    — the form ``os.path.realpath`` yields for a mapped network drive) becomes
+    ``/server/share/proj``: the guest has no drive or UNC vocabulary, so the server
+    name is just the first path component and the leading double backslash collapses
+    to a single slash (never a leading ``//``, whose meaning is
+    implementation-defined in the guest). This mirrors the Bash adapter's
     ``canonicalize_path`` (``cygpath -u``); the native Python adapter is not under
     MSYS, so it computes the form directly.
     """
     if os.name == "nt":
+        if host.startswith("\\\\"):
+            # UNC form: the leading double backslash is the server prefix, not two
+            # separators — collapse it to one slash so the server name is the first
+            # component instead of an empty component (``//server``).
+            return "/" + host[2:].replace("\\", "/")
         drive, sep, rest = host.partition(":")
         if sep and len(drive) == 1 and drive.isalpha():
             return "/" + drive.lower() + rest.replace("\\", "/")
