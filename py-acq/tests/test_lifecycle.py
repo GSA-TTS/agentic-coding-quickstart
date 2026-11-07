@@ -296,3 +296,31 @@ def test_msb_adapter_receives_the_real_workspace_path(monkeypatch, tmp_path, cap
     rc, _doc = _invoke(capsys, "--backend", "msb", "create", "opencode", str(link), "--name", "spy", "--json")
     assert rc == 0
     assert seen["workspace"] == str(real.resolve())
+
+
+def test_run_reattach_launches_in_the_recorded_workspace(monkeypatch, tmp_path, capsys):
+    link, real = _symlinked_workspace(tmp_path)
+    _env(monkeypatch, tmp_path)
+    assert _invoke(capsys, "--backend", "msb", "create", "opencode", str(real), "--name", "legacy", "--json")[0] == 0
+    # An older build recorded the symlink form of the workspace.
+    legacy = str(link)
+    state.record_write("msb", "legacy", agent="opencode", workspace=legacy, image=None)
+    launched = {}
+    monkeypatch.setattr(cli.msb, "launch", lambda name, workspace, agent, **kw: launched.update(workspace=workspace) or 0)
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "run", "opencode", str(link), "--name", "legacy", "--json")
+    assert rc == 0
+    assert doc["data"]["action"] == "reattached"
+    assert launched["workspace"] == legacy
+    assert doc["data"]["workspace"] == legacy
+
+
+def test_run_reattach_without_a_record_falls_back_to_the_typed_path(monkeypatch, tmp_path, capsys):
+    _link, real = _symlinked_workspace(tmp_path)
+    _env(monkeypatch, tmp_path, catalog={"orphan": "running"})
+    launched = {}
+    monkeypatch.setattr(cli.msb, "launch", lambda name, workspace, agent, **kw: launched.update(workspace=workspace) or 0)
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "run", "opencode", str(real), "--name", "orphan", "--json")
+    assert rc == 0
+    assert launched["workspace"] == str(real.resolve())
