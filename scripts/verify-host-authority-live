@@ -453,12 +453,45 @@ CLEAN
     "$OUT"/ws.?*) [ -d "$WS_ROOT" ] && rm -rf -- "$WS_ROOT" ;;
   esac
 }
-trap 'cleanup' EXIT
-trap 'echo; echo "interrupted; removing throwaway sandboxes"; cleanup; exit 130' INT TERM
-
-# --- recording ---------------------------------------------------------------
+SUMMARY_DONE=0
+INTERRUPTED=0
 MSB_VER=""; SBX_VER=""
 n_pass=0; n_fail=0; n_blocked=0
+# finish runs on every exit path (normal, usage error after setup, interrupt): cleanup is
+# bounded, then the summary is printed exactly once.
+finish() {
+  local rc=$?
+  trap '' INT TERM
+  [ "$SUMMARY_DONE" -eq 0 ] || return 0
+  SUMMARY_DONE=1
+  B_LIVE=0
+  if [ "$INTERRUPTED" -eq 1 ]; then rc=130; fi
+  cleanup
+  say ""
+  if [ "$INTERRUPTED" -eq 0 ]; then print_manual | while IFS= read -r l; do printf '%s\n' "$l" >>"$TRANSCRIPT"; printf '%s\n' "$l"; done; say ""; fi
+  say "SUMMARY: PASS=$n_pass FAIL=$n_fail BLOCKED=$n_blocked   revision=$REVISION$DIRTY msb=${MSB_VER:-none} sbx=${SBX_VER:-none}$( [ "$INTERRUPTED" -eq 1 ] && printf '   INTERRUPTED' )"
+  say "results : $RESULTS"
+  say "transcript: $TRANSCRIPT"
+  if [ "$INTERRUPTED" -eq 1 ]; then exit 130; fi
+  say "Paste the results rows into the Host Authority Live Validation Record in docs/VERIFY_PROVIDER_ADOPTION.md."
+  if [ $((n_pass + n_fail + n_blocked)) -eq 0 ]; then say "no steps ran (empty selection): nothing was verified"; exit 2; fi
+  if [ "$n_fail" -gt 0 ]; then exit 1; fi
+  if [ "$n_blocked" -gt 0 ]; then exit 2; fi
+  exit "$rc"
+}
+
+trap 'finish' EXIT
+trap 'on_signal' INT TERM
+on_signal() {
+  trap '' INT TERM
+  INTERRUPTED=1
+  B_LIVE=0
+  echo; say "interrupted: stopping the running command, removing throwaway sandboxes"
+  if [ -n "$CUR_PID" ]; then reap_tree "$CUR_PID"; fi
+  exit 130
+}
+
+# --- recording ---------------------------------------------------------------
 
 record() { # ID RESULT DETAIL
   local id="$1" res="$2" detail="$3" b ver
@@ -688,7 +721,7 @@ INSTALL_RERAN_ON_HEAL=0
 need_rc0() {
   [ "$LAST_RC" -eq 0 ] && return 0
   if [ "$LAST_RC" -eq 125 ]; then record "$1" BLOCKED "$2 was refused (sandbox name in use, or the backend listing failed)"
-  elif [ "$LAST_RC" -eq 124 ]; then record "$1" BLOCKED "$2 timed out; the step was not exercised to a conclusion"
+  elif [ "$LAST_RC" -eq 124 ]; then record "$1" BLOCKED "BLOCKED(timeout): $2 timed out or the step's wall-clock budget ran out; the step was not exercised to a conclusion"
   else record "$1" BLOCKED "$2 exited $LAST_RC; the step was not exercised to a conclusion (see transcript)"; fi
   return 1
 }
@@ -938,7 +971,10 @@ run_step() { # ID FUNCTION
   step_selected "$1" || return 0
   say ""
   say "--- $1: $(step_title "$1") ---"
+  STEP_TIMED_OUT=0; STEP_DEADLINE=$((SECONDS + STEP_BUDGET))
   "$2"
+  STEP_DEADLINE=0
+  if [ "$STEP_TIMED_OUT" -eq 1 ]; then say "!! BLOCKED(timeout): $1 had a command time out (budget ${STEP_BUDGET}s per step); see the transcript above"; fi
 }
 run_step msb-ro-kit-create step_msb_ro_kit_create
 run_step msb-inspect-shape step_msb_inspect_shape
@@ -953,15 +989,4 @@ run_step sbx-record-change step_sbx_record_change
 run_step sbx-stale-refresh step_sbx_stale_refresh
 run_step sbx-legacy-reseed step_sbx_legacy_reseed
 
-cleanup
-say ""
-print_manual | while IFS= read -r l; do printf '%s\n' "$l" >>"$TRANSCRIPT"; printf '%s\n' "$l"; done
-say ""
-say "SUMMARY: PASS=$n_pass FAIL=$n_fail BLOCKED=$n_blocked   revision=$REVISION$DIRTY msb=${MSB_VER:-none} sbx=${SBX_VER:-none}"
-say "results : $RESULTS"
-say "transcript: $TRANSCRIPT"
-say "Paste the results rows into the Host Authority Live Validation Record in docs/VERIFY_PROVIDER_ADOPTION.md."
-if [ $((n_pass + n_fail + n_blocked)) -eq 0 ]; then say "no steps ran (empty selection): nothing was verified"; exit 2; fi
-if [ "$n_fail" -gt 0 ]; then exit 1; fi
-if [ "$n_blocked" -gt 0 ]; then exit 2; fi
 exit 0
