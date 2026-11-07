@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "id": "coexistence/impl-unknown",
-  "oracle": "ADR-0046m coexistence: an unknown ACQ_IMPL value fails closed with exit 2",
+  "oracle": "ADR-0047m coexistence: an unknown ACQ_IMPL value fails closed with exit 2",
   "tier": 1,
   "backend": null,
   "platform": "linux",

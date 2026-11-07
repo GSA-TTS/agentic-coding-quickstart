@@ -59,7 +59,10 @@ one of three states:
 
 * `qualified` — a claimed cell holding a green *current* transcript (recorded
   within 90 days, at the backend's current `major.minor`, with no Tier-3 surface
-  change since; the commit SHA and artifact hash are provenance only);
+  change since, where the surface is the CLI source tree, the two oracles, and
+  this harness's run path, minus the `version`/`doctor` command modules — the
+  exact list is `TIER3_SURFACE` in `qualification/matrix.py`; the commit SHA and
+  artifact hash are provenance only);
 * `unqualified` — a cell that is not claimed (reported honestly, never a pass);
 * `blocked` — a claimed cell without a green current transcript (holds the gate).
 
@@ -67,6 +70,19 @@ The claimed cells are (ADR-0044m): msb on Linux x86_64, Linux aarch64, macOS
 arm64, macOS x86_64, and Windows x64; sbx on Linux x86_64, macOS arm64, and
 Windows x64. Windows ARM64, musl, and sbx on macOS x86_64 and Linux aarch64 are
 unqualified (not claimed).
+
+## Qualify a host
+
+`python -m qualification.host` runs the cell oracle for this host, records the
+green runs in the ledger, and opens the ledger PR. See
+[`docs/howto/qualification.md`](../docs/howto/qualification.md).
+
+## The ledger and the release gate
+
+`python -m qualification.gate record transcript.json` appends a run to
+`docs/qualification-ledger.json` (metadata and the transcript's hash). `python -m
+qualification.gate check` evaluates the release gate from that ledger. See
+[`docs/howto/qualification.md`](../docs/howto/qualification.md).
 
 ## No secret value
 

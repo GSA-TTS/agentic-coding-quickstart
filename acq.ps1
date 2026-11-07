@@ -5,7 +5,7 @@
 
 $ErrorActionPreference = "Stop"
 
-# ACQ_IMPL runtime switch — the coexistence seam (ADR-0046m). On Windows the Bash
+# ACQ_IMPL runtime switch — the coexistence seam (ADR-0047m). On Windows the Bash
 # `acq` dispatches via Git Bash; here the Python implementation runs natively:
 # the managed runtime `py-acq\runtime\python.exe -m acq_py`, else `python` on
 # PATH. Unset / `bash` keeps the existing Git Bash path below; any other value

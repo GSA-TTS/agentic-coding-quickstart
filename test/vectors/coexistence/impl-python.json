@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "id": "coexistence/impl-python",
-  "oracle": "ADR-0046m coexistence: ACQ_IMPL=python dispatches to the Python implementation",
+  "oracle": "ADR-0047m coexistence: ACQ_IMPL=python dispatches to the Python implementation",
   "tier": 1,
   "backend": null,
   "platform": "linux",

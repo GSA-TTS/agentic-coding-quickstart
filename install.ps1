@@ -239,7 +239,7 @@ if ($Help) {
     exit 0
 }
 
-# The -Channel flag is the update-channel seam (ADR-0046m). On this fork the only
+# The -Channel flag is the update-channel seam (ADR-0047m). On this fork the only
 # channel is `python` (the default); any other value fails closed.
 if ($Channel -ne "python") {
     [Console]::Error.WriteLine("unknown channel '$Channel' (only 'python' is supported on this fork)")

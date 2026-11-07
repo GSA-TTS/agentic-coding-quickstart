@@ -1,4 +1,4 @@
-"""Tier-2 implementation tests for the ACQ_IMPL coexistence switch (ADR-0046m).
+"""Tier-2 implementation tests for the ACQ_IMPL coexistence switch (ADR-0047m).
 
 These drive the repo-root Bash ``acq`` dispatcher as a subprocess to prove the
 runtime switch end to end: unset/``bash`` runs the Bash body, ``python`` execs
@@ -75,7 +75,7 @@ def test_impl_python_forwards_json_and_exit_status():
 
 
 def test_acq_python_launcher_runs_python():
-    # ADR-0046m: the distinct `acq-python` identity runs the Python implementation
+    # ADR-0047m: the distinct `acq-python` identity runs the Python implementation
     # (never the Bash body), so the two entry points are observably distinct.
     acq_python = REPO_ROOT / "acq-python"
     proc = subprocess.run(

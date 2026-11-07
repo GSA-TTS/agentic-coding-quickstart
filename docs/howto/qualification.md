@@ -6,7 +6,7 @@ tier: 3
 last_updated: "2026-11-07"
 audience: "developers"
 keywords: ["qualification", "tier-3", "transcript", "msb", "sbx", "oracle", "adr-0044m", "matrix"]
-related_files: ["docs/adr/0044m-live-cross-platform-qualification-matrix-and-transcript.md", "qualification/README.md", "scripts/qualify-backend-cell", "scripts/qualify-msb-ro-mount", "docs/KNOWN_FAILURE_MODES.md", "docs/adr/0035-host-authoritative-sandbox-config.md", "docs/adr/0041m-configuration-and-state-migration-behavior.md"]
+related_files: ["docs/howto/release-gate-setup.md", "docs/adr/0044m-live-cross-platform-qualification-matrix-and-transcript.md", "qualification/README.md", "docs/qualification-ledger.json", ".github/workflows/tier3-release-gate.yml", "scripts/qualify-backend-cell", "scripts/qualify-msb-ro-mount", "docs/KNOWN_FAILURE_MODES.md", "docs/adr/0035-host-authoritative-sandbox-config.md", "docs/adr/0041m-configuration-and-state-migration-behavior.md"]
 load_priority: "on-demand"
 review_cycle: "quarterly"
 ---
@@ -22,6 +22,64 @@ review_cycle: "quarterly"
 > the remaining cells need macOS/Linux hosts.
 
 ---
+
+## Qualify this host in one command
+
+On any macOS, Linux (with `/dev/kvm`) or Windows x64 host that has `msb` and/or
+`sbx` installed and logged in, with Python >= 3.12 (`python3` on macOS and Linux, where plain `python` is often
+absent; `py -3.12` on Windows) and `gh` logged in to your fork,
+from the root of a clean checkout whose `HEAD` is on your fork's `main`
+(`git fetch <fork> && git switch --detach <fork>/main`; an older checkout that predates
+this tool has no `qualification/` directory, and `python3 -m qualification.host` fails
+with "No module named 'qualification'"):
+
+```bash
+python3 -m qualification.host       # Windows: py -3.12 -m qualification.host
+```
+
+It detects the host (OS build, architecture, hypervisor), runs the cell oracle
+through the harness for each backend claimed on this platform, records the green
+runs in the ledger (retiring the cell's waiver if it has one), then commits the
+ledger change in a throwaway worktree branched from your fork's **current** `main`
+(not the revision tested, so a run that finishes while another host's ledger PR lands
+still merges cleanly and keeps that host's entries), pushes a new
+`chore/ledger-<platform>-<time>` branch to your **fork** remote, and opens a PR **into the fork's `main`** (with `gh`,
+or it prints the URL). Merge that PR as usual. It never pushes to the upstream
+repository (every fetch and push URL of the remote is checked), never touches your
+checkout, and records only green runs unless you pass `--record-failures`.
+
+It works from any ledger state, so use it for the first run of a cell, to renew a
+stale or expiring one, after a Tier-3 surface change, and after a backend upgrade.
+Re-running is safe. A backend whose CLI is missing is reported `SKIPPED`, not
+recorded. If the installed backend's `major.minor` is not the ledger's accepted one it
+stops before the long run; install the accepted version or pass
+`--accept-backend-version`. That moves the accepted version in the same PR, only for a
+backend whose run went green, and the PR lists the cells on other platforms that stop
+being qualified because of it (they must be re-run). If publishing fails after a long
+run, the transcripts are kept and the error prints the `gate record` commands to use.
+Remotes must be plain `https://github.com/<you>/<repo>` or `git@github.com:<you>/<repo>`
+URLs for a personal fork (ssh host aliases, enterprise hosts and the upstream
+organisation are refused).
+
+| Option | Effect |
+|--------|--------|
+| `--dry-run` | print the host, revision, per-cell state and the PR target; run nothing. A condition that would stop a real run is reported as `WOULD REFUSE` (exit 2) after the plan, so a preview from any branch still shows the plan |
+| `--only-stale` | skip cells that are already current |
+| `--no-publish` | record into this checkout's ledger only; no branch, push or PR |
+| `--backend msb` / `--backend sbx` | run one backend (repeatable) |
+| `--remote NAME` | fork remote to publish to (default: the only non-upstream remote) |
+| `--record-failures` | also record `FAIL`/`FLAKY` outcomes (published like any other) |
+| `--accept-backend-version` | move the ledger's accepted backend version to the installed one |
+| `--timeout SECONDS` | per attempt (a `FAIL` is retried up to 3 times; default 900) |
+
+Exit status: `0` every selected backend passed or was already current, `1` a
+`FAIL`/`FLAKY`, `2` anything else (a skipped or blocked backend, or a precondition
+failed and nothing ran). Alpine/musl hosts and an x86_64 Python under Rosetta are
+refused, since they would mislabel the cell.
+
+The transcripts stay on the host, under `tmp/qualify-out-<time>/`; keep them, since
+the ledger holds only their hashes. The sections below are what that command runs,
+for reference and for debugging a single step.
 
 ## What this is
 
@@ -235,8 +293,10 @@ A `FAIL` is confirmed real only by reproducing on the same environment within
 three attempts with matching identity fields (a diverging result is escalated
 `FLAKY`, never softened). A transcript is current for 90 days, until the
 backend's `major.minor` version changes, and until a change lands on the Tier-3
-surface (`py-acq/src/acq_py/`, the two `scripts/qualify-*` oracles, and
-`qualification/`); regenerate it then. The commit SHA and artifact SHA-256 are
+surface (the CLI source tree, the two `scripts/qualify-*` oracles, and the
+harness's run path — minus the `version`/`doctor` command modules; the exact
+list is `TIER3_SURFACE`/`TIER3_SURFACE_EXCLUSIONS` in `qualification/matrix.py`);
+regenerate it then. The commit SHA and artifact SHA-256 are
 provenance only: a release-please commit changes both without expiring
 anything.
 
@@ -264,6 +324,60 @@ Identity fields recorded in those transcripts (not on the `RESULT` line itself):
 - `hypervisor`: `wsl2`
 
 ---
+
+## Recording a run and the release gate
+
+A live run is evidence only once it is in the ledger, `docs/qualification-ledger.json`
+(metadata and the SHA-256 of each `transcript.json`; never the transcript itself,
+which goes on the release). After a green run on a host:
+
+```bash
+python3 -m qualification.gate record path/to/transcript.json   # Windows: py -3.12 -m ...
+```
+
+It derives the cell from the transcript's OS and architecture (pass `--platform`
+to override) and appends one entry. Run the cell at a commit that is on `main`
+(`--rev "$(git rev-parse HEAD)"`, as in the commands above): `record` refuses the
+harness's all-zero default, and a commit that only existed on a squash-merged PR
+branch is not in `main`'s history, so the gate could not resolve it. Every outcome
+is recorded, not only `PASS`: the latest entry for a cell decides, so a recorded
+`FAIL`, `BLOCKED` or `FLAKY` blocks a cell that had a current `PASS`. Commit the
+ledger change through a normal PR; CODEOWNERS requires an admin's review of it,
+because the ledger is self-reported evidence.
+Per-attempt timestamps are in the transcript; for one written by an older harness,
+pass `--recorded-at <ISO 8601 UTC>`.
+
+The gate, `python3 -m qualification.gate check`, runs in CI (`Tier-3 release gate`)
+on every PR, every push to `main`, and weekly. It needs no live run: for each of
+the eight claimed cells it takes the latest ledger entry and passes it only if the
+verdict is `PASS`, it is under 90 days old, its backend `major.minor` equals
+`accepted_backend_versions` in the ledger, and no file on the Tier-3 surface
+(`TIER3_SURFACE` in `qualification/matrix.py` — the CLI source tree, the two oracles, and the harness's run path, minus the `version`/`doctor` command modules) changed between its recorded
+revision and `HEAD`. A release-please commit changes none of those, so releases do
+not expire anything. Anything the gate cannot establish fails closed.
+
+When a backend is upgraded, change `accepted_backend_versions` in the same PR:
+cells recorded at the old `major.minor` become blocked until re-run.
+
+A cell without a current transcript can carry a **waiver** in the ledger: a reason,
+an `expires` date, and optionally an issue. A waived cell does not block the gate
+but is reported as `waived` in the job summary, and a waiver that has expired blocks
+again. Waivers lower the bar; keep them short and remove each one as its cell is
+recorded.
+
+Making it hold a release (maintainer setup is collected in
+[`docs/howto/release-gate-setup.md`](release-gate-setup.md)): `release.yml` already
+consults the gate, though no job runs on this fork — releases are upstream's job, so
+every job is gated on the `ENABLE_RELEASES` repository variable. It is split into `Release PR` -> `Tier-3 release gate (release)`
+-> `Release Tag`, so a stale cell leaves no tag and no GitHub Release.
+
+Making it a **required status check** on `main` is a separate step, and the order
+matters. A release PR opened with the default `GITHUB_TOKEN` may not get
+`pull_request` checks at all, or may get them held for approval (both have been seen
+upstream), and a required check that never reports leaves the PR unmergeable. Set the
+`RELEASE_PLEASE_TOKEN` secret first (`release.yml` already prefers it over
+`github.token`), watch one real release PR report the check, and only then require
+it. See [`release-gate-setup.md`](release-gate-setup.md).
 
 ## Honest BLOCKED handling
 

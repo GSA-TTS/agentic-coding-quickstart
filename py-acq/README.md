@@ -29,7 +29,7 @@ Bash wrapper is retired (the "cutover" slice). ADR-0041m is explicit that v1
 replaces Bash and maintains no coexistence guarantee; this naming defers that
 rename so the two can never collide on a user's `PATH`.
 
-The coexistence mechanism (ADR-0046m) adds a runtime switch on the repo-root
+The coexistence mechanism (ADR-0047m) adds a runtime switch on the repo-root
 Bash `acq`: `ACQ_IMPL=python` resolves and execs this Python implementation, so
 the two can coexist behind one `acq` name. The Python implementation also has a
 distinct, installer-linked identity — an `acq-python` launcher that runs the

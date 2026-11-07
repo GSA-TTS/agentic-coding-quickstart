@@ -1,0 +1,202 @@
+"""The Tier-3 release gate and ledger recorder (ADR-0044m).
+
+``python -m qualification.gate check`` decides, from the committed ledger alone,
+whether every claimed cell holds a current green transcript, so a release can be
+evaluated on a hosted runner with no live run. ``record`` turns a run's
+``transcript.json`` into a ledger entry.
+
+A claimed cell is ``qualified`` (current green transcript), ``waived`` (an
+unexpired maintainer waiver in the ledger), or ``blocked``. The gate passes iff
+no claimed cell is blocked. Anything it cannot establish fails closed: a
+missing accepted backend version, a revision git does not know, a malformed
+ledger.
+
+Exit codes: 0 gate passes, 1 a cell is blocked, 2 the ledger or input is
+unusable.
+
+The ledger is self-reported and committed: its integrity is a review control
+(CODEOWNERS on the ledger file), not a technical one. ``transcript_sha256`` only
+helps if the transcripts attached to the release are audited against it. A
+recorded ``rev`` must be a commit on the branch the gate runs on, so record a run
+at a commit that is on ``main`` (a squash-merged branch commit is not).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Callable, Iterable
+
+from .ledger import (
+    DEFAULT_LEDGER,
+    Ledger,
+    LedgerError,
+    append_entry,
+    entry_from_transcript,
+    latest_entry,
+    load_ledger,
+)
+from .matrix import MSB, PLATFORMS, SBX, is_claimed, staleness, touches_surface
+from .model import Environment, Transcript, Verdict
+
+_REV = re.compile(r"[0-9a-f]{7,64}")
+
+ChangedPaths = Callable[[str], "Iterable[str] | None"]
+
+
+@dataclass(frozen=True)
+class CellStatus:
+    backend: str
+    platform: str
+    status: str  # qualified | waived | blocked
+    reason: str = ""
+
+
+def git_changed_paths(rev: str, cwd=None) -> list[str] | None:
+    """Paths that differ between ``rev`` and ``HEAD``; ``None`` if git cannot say."""
+    if not _REV.fullmatch(rev):
+        return None
+    # --no-renames lists both sides of a move (a file moved out of the surface must
+    # still count); -z and quotePath=false avoid git's quoting of non-ASCII paths.
+    proc = subprocess.run(
+        ["git", "-c", "core.quotePath=false", "diff", "--name-only", "--no-renames", "-z", rev, "HEAD", "--"],
+        capture_output=True,
+        cwd=cwd,
+    )
+    if proc.returncode != 0:
+        return None
+    return [p for p in proc.stdout.decode("utf-8", "surrogateescape").split("\0") if p]
+
+
+def _transcript_of(entry) -> Transcript:
+    env = Environment(
+        os=entry.platform,
+        os_build=entry.os_build,
+        arch=entry.arch,
+        hypervisor=entry.hypervisor,
+        backend=entry.backend,
+        backend_version=entry.backend_version,
+        image="",
+        rev=entry.rev,
+        artifact_sha256=entry.artifact_sha256,
+        transcript_dir="",
+    )
+    return Transcript(Verdict.PASS, env, (), "", "", entry.recorded_at)
+
+
+def _why_not_current(ledger: Ledger, entry, now: datetime, changed_paths: ChangedPaths) -> str | None:
+    if entry is None:
+        return "no transcript recorded"
+    if entry.verdict != "PASS":
+        return f"latest transcript is {entry.verdict}"
+    version = ledger.accepted_backend_versions.get(entry.backend)
+    if version is None:
+        return f"accepted_backend_versions has no entry for {entry.backend}"
+    paths = changed_paths(entry.rev)
+    if paths is None:
+        return f"revision {entry.rev[:12]} is not in the git history (fetch full history)"
+    return staleness(
+        _transcript_of(entry), now=now, backend_version=version, surface_changed=touches_surface(paths)
+    )
+
+
+def evaluate(ledger: Ledger, *, now: datetime, changed_paths: ChangedPaths = git_changed_paths) -> list[CellStatus]:
+    """The status of every claimed cell."""
+    results: list[CellStatus] = []
+    for backend in (MSB, SBX):
+        for platform in PLATFORMS:
+            if not is_claimed(backend, platform):
+                continue
+            entry = latest_entry(ledger, backend, platform)
+            reason = _why_not_current(ledger, entry, now, changed_paths)
+            if reason is None:
+                results.append(CellStatus(backend, platform, "qualified"))
+                continue
+            waiver = max(
+                (w for w in ledger.waivers if (w.backend, w.platform) == (backend, platform)),
+                key=lambda w: w.expires,
+                default=None,
+            )
+            if waiver is None:
+                results.append(CellStatus(backend, platform, "blocked", reason))
+            elif waiver.expires < now.date():
+                results.append(
+                    CellStatus(backend, platform, "blocked", f"{reason}; waiver expired {waiver.expires}")
+                )
+            else:
+                note = f"{reason}; waived until {waiver.expires}: {waiver.reason}"
+                results.append(CellStatus(backend, platform, "waived", note))
+    return results
+
+
+def render(statuses: list[CellStatus]) -> str:
+    lines = ["| backend | platform | status | detail |", "|---|---|---|---|"]
+    lines += [
+        f"| {s.backend} | {s.platform} | {s.status} | {s.reason.replace('|', '/').replace(chr(10), ' ')} |"
+        for s in statuses
+    ]
+    blocked = sum(s.status == "blocked" for s in statuses)
+    waived = sum(s.status == "waived" for s in statuses)
+    lines.append("")
+    lines.append(
+        f"{len(statuses)} claimed cells: {len(statuses) - blocked - waived} qualified, "
+        f"{waived} waived, {blocked} blocked. Gate {'FAILS' if blocked else 'passes'}."
+    )
+    return "\n".join(lines)
+
+
+def _cmd_check(args: argparse.Namespace) -> int:
+    ledger = load_ledger(args.ledger)
+    statuses = evaluate(ledger, now=datetime.now(timezone.utc))
+    if args.json:
+        sys.stdout.write(json.dumps([s.__dict__ for s in statuses]) + "\n")
+    else:
+        sys.stdout.write(render(statuses) + "\n")
+    return 1 if any(s.status == "blocked" for s in statuses) else 0
+
+
+def _cmd_record(args: argparse.Namespace) -> int:
+    with open(args.transcript, "rb") as handle:
+        raw = handle.read()
+    try:
+        doc = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise LedgerError(f"{args.transcript} is not JSON: {exc}") from None
+    entry = entry_from_transcript(doc, raw, platform=args.platform, recorded_at=args.recorded_at)
+    append_entry(args.ledger, entry)
+    sys.stdout.write(
+        f"recorded {entry.verdict} {entry.backend}/{entry.platform} backend={entry.backend_version} "
+        f"rev={entry.rev[:12]} in {args.ledger}\n"
+    )
+    return 0
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="qualification.gate", description=__doc__.split("\n")[0])
+    parser.add_argument("--ledger", default=DEFAULT_LEDGER)
+    sub = parser.add_subparsers(dest="subcommand", required=True)
+    check = sub.add_parser("check", help="evaluate the release gate from the ledger")
+    check.add_argument("--json", action="store_true")
+    record = sub.add_parser("record", help="append a run's transcript.json to the ledger")
+    record.add_argument("transcript")
+    record.add_argument("--platform", default=None, help="matrix platform token (default: derived from os/arch)")
+    record.add_argument("--recorded-at", default=None, help="ISO 8601 UTC time (default: from the transcript)")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
+    try:
+        return _cmd_check(args) if args.subcommand == "check" else _cmd_record(args)
+    except (LedgerError, OSError, ValueError, TypeError, KeyError) as exc:
+        sys.stderr.write(f"qualification.gate: {exc}\n")
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

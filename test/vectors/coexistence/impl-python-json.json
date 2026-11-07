@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "id": "coexistence/impl-python-json",
-  "oracle": "ADR-0046m coexistence: ACQ_IMPL=python forwards --json and version reports the impl field",
+  "oracle": "ADR-0047m coexistence: ACQ_IMPL=python forwards --json and version reports the impl field",
   "tier": 1,
   "backend": null,
   "platform": "linux",

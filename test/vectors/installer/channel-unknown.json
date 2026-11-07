@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "id": "installer/channel-unknown",
-  "oracle": "ADR-0046m installer --channel: an unknown channel fails closed with exit 2",
+  "oracle": "ADR-0047m installer --channel: an unknown channel fails closed with exit 2",
   "tier": 1,
   "backend": null,
   "platform": "linux",

@@ -177,7 +177,7 @@ def test_unknown_option_is_a_usage_error(tmp_path):
 
 
 def test_channel_python_dry_run_surfaces_channel(tmp_path):
-    # ADR-0046m: --channel python is the only (and default) channel; it parses,
+    # ADR-0047m: --channel python is the only (and default) channel; it parses,
     # surfaces the channel in the plan, and installs exactly what the no-flag
     # default installs today.
     proc = _run_installer(tmp_path, "--channel", "python", "--dry-run")
@@ -198,7 +198,7 @@ def test_channel_python_offline_install_succeeds(tmp_path):
     assert _VERIFIED.search(proc.stdout.decode())
     assert (_bin_dir(tmp_path) / "acq").is_symlink()
     # The coexistence seam also links the Python implementation's distinct
-    # identity (ADR-0046m).
+    # identity (ADR-0047m).
     assert (_bin_dir(tmp_path) / "acq-python").is_symlink()
 
 
@@ -220,7 +220,7 @@ def test_offline_install_succeeds(tmp_path):
     assert (_install_dir(tmp_path) / "py-acq" / "runtime" / "bin" / "python3").exists()
     assert (_bin_dir(tmp_path) / "acq").is_symlink()
     # The coexistence seam links the Python implementation's distinct identity
-    # (ADR-0046m): `acq-python` points at its OWN launcher, never an alias of
+    # (ADR-0047m): `acq-python` points at its OWN launcher, never an alias of
     # `acq`. The two installed names must resolve to distinct files.
     assert (_bin_dir(tmp_path) / "acq-python").is_symlink()
     assert (_bin_dir(tmp_path) / "acq").resolve() == (_install_dir(tmp_path) / "acq").resolve()

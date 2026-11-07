@@ -10,7 +10,7 @@ runner and `scripts/run-vectors`) carry the *how*.
 ## Sections
 
 * `cli/` — contract vectors driving the CLI-under-test (`{acq}`).
-* `coexistence/` — coexistence-mechanism vectors (ADR-0046m): drive the Bash `acq`
+* `coexistence/` — coexistence-mechanism vectors (ADR-0047m): drive the Bash `acq`
   dispatcher directly (`bash acq …`) to prove the `ACQ_IMPL` runtime switch —
   unset/`bash` runs the Bash body, `python` dispatches to the Python
   implementation, and any other value fails closed.

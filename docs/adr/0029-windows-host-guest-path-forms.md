@@ -148,8 +148,46 @@ is defined there too.
   `common.sh` degrades to the identity form rather than erroring; production
   always loads `common.sh` first.
 
+## Amendment (2026-11-07) — UNC and extended-length host forms
+
+The native Python adapter (``py-acq/src/acq_py/msb.py``) resolves a Windows
+workspace with ``os.path.realpath`` before deriving its guest form. On Windows
+that ``realpath`` can return four prefix families, classified with
+``ntpath.splitroot``:
+
+| host form | guest form | note |
+|---|---|---|
+| `C:\Users\me\proj` | `/c/Users/me/proj` | drive |
+| `\\server\share\proj` | `/unc/server/share/proj` | UNC, namespaced |
+| `\\?\C:\Users\me\proj` | `/c/Users/me/proj` | extended-length drive |
+| `\\?\UNC\server\share\proj` | `/unc/server/share/proj` | extended-length UNC |
+| `\\.\PIPE\x` | *(fails closed)* | device path, no guest form |
+
+The UNC guest form is **namespaced** under `/unc` rather than emitted at the
+guest root: `/server/share/...` would let a server (or alias) named `home`,
+`etc`, or `usr` mount over a guest system directory — `\\home\agent\proj` would
+become `/home/agent/proj`, the agent HOME (`DEFAULT_GUEST_WORKSPACE`). The
+`/unc` prefix avoids both that collision and a leading `//`, whose meaning is
+implementation-defined in the Linux guest.
+
+The extended-length (`\\?\`) prefix is a Win32 signal (for >MAX_PATH and
+trailing-dot/space paths), not a path component; it is stripped before the
+drive/UNC translation. A device path (`\\.\...`) names a device, not a
+filesystem directory, so the adapter fails closed with ``validation_failed``
+rather than emitting a bogus mount.
+
+**Asymmetry (tracked, not yet resolved):** ``acq cp`` still refuses a host UNC
+path (ADR-0038m §4, "UNC/network paths require separate qualification"), while
+``--volume``/``-w`` now accept and mount one. A UNC workspace can therefore be
+created, recorded, and launched, but a subsequent ``acq cp`` into that same
+sandbox refuses the host side. The Bash adapter also still emits the Cygwin
+`//server/share/...` form for UNC (``common.sh`` ``cygpath -u``), so the two
+implementations diverge until the Bash adapter is updated.
+
 ## Links
 
+- mogul/agentic-coding-quickstart#85 — Bash adapter UNC divergence (tracked).
+- mogul/agentic-coding-quickstart#86 — `acq cp` UNC asymmetry (tracked).
 - GSA-TTS/agentic-coding-quickstart#463 — the review that surfaced the
   single-form bug and the MSYS rewriting behavior.
 - [ADR-0011: msb backend and neutral kits](0011-msb-backend-and-neutral-kits.md)

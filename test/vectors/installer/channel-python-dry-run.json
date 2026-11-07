@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "id": "installer/channel-python-dry-run",
-  "oracle": "ADR-0046m installer --channel: --channel python parses, surfaces the channel, and dry-runs unchanged",
+  "oracle": "ADR-0047m installer --channel: --channel python parses, surfaces the channel, and dry-runs unchanged",
   "tier": 1,
   "backend": null,
   "platform": "linux",

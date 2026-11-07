@@ -11,7 +11,7 @@ risk_treatment: mitigate
 supersedes: []
 ---
 
-# ADR-0046m: acq coexistence mechanism
+# ADR-0047m: acq coexistence mechanism
 
 ## Context and Problem Statement
 

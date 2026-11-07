@@ -137,7 +137,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# The `--channel` flag is the update-channel seam (ADR-0046m). On this fork the
+# The `--channel` flag is the update-channel seam (ADR-0047m). On this fork the
 # only channel is `python` (the default), so any other value fails closed.
 case "$CHANNEL" in
   python) ;;

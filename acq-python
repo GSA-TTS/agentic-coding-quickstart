@@ -1,6 +1,6 @@
 #!/bin/sh
 # acq-python — launcher for the Python acq v1 implementation (coexistence seam,
-# ADR-0046m).
+# ADR-0047m).
 #
 # The Python implementation has a distinct, resolvable identity so it never
 # collides with the Bash `acq` name on a user's PATH. The Bash `acq` dispatcher

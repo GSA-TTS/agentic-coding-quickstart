@@ -707,7 +707,7 @@ acq_propagate_usai_rotation() {
 if [ -n "${ACQ_SOURCE_ONLY:-}" ]; then return 0 2>/dev/null || exit 0; fi
 
 # ---------------------------------------------------------------------------
-# ACQ_IMPL runtime switch — the coexistence seam (ADR-0046m). `acq` is the
+# ACQ_IMPL runtime switch — the coexistence seam (ADR-0047m). `acq` is the
 # neutral entry point over two implementations:
 #   * unset / `bash`   the existing Bash body below (default unchanged)
 #   * `python`         the Python acq v1 replacement (py-acq/src/acq_py)
