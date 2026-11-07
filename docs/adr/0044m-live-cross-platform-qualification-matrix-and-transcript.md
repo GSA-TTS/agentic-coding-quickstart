@@ -33,10 +33,11 @@ the security-exception recreation flow (ADR-0041m); and native-Windows
 ordinary-user operation.
 
 The qualified matrix is: msb on Linux x86_64, Linux aarch64, macOS arm64,
-macOS x86_64, and Windows x64 (floor ≥ 0.6.9, refusing 0.7.0–0.7.2, with
+and Windows x64 (floor ≥ 0.6.9, refusing 0.7.0–0.7.2, with
 oracles 1–3 at ≥ 0.7.7); sbx on Linux x86_64, macOS arm64, and Windows x64
-(floor ≥ 0.39.0). sbx on macOS x86_64 and Linux aarch64 is unqualified
-(not claimed). Each matrix cell is in exactly one of three states:
+(floor ≥ 0.39.0). macOS x86_64 (Intel Mac) is unqualified for every backend,
+and sbx on Linux aarch64 is unqualified (not claimed). Each matrix cell is in
+exactly one of three states:
 qualified (green current transcript), unqualified (not claimed), or
 blocked (attempted, no verdict).
 

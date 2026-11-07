@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "id": "qualification/matrix-unqualified",
-  "oracle": "ADR-0044m the matrix reports unqualified cells honestly (Windows ARM64 and musl, and unclaimed sbx cells)",
+  "oracle": "ADR-0044m the matrix reports unqualified cells honestly (Windows ARM64, musl, and other unclaimed cells)",
   "tier": 1,
   "backend": null,
   "platform": "any",
@@ -25,7 +25,7 @@
             {"backend": "msb", "platform": "linux-aarch64", "claimed": true, "state": "blocked"},
             {"backend": "msb", "platform": "linux-musl", "claimed": false, "state": "unqualified"},
             {"backend": "msb", "platform": "macos-arm64", "claimed": true, "state": "blocked"},
-            {"backend": "msb", "platform": "macos-x86_64", "claimed": true, "state": "blocked"},
+            {"backend": "msb", "platform": "macos-x86_64", "claimed": false, "state": "unqualified"},
             {"backend": "msb", "platform": "windows-x64", "claimed": true, "state": "blocked"},
             {"backend": "msb", "platform": "windows-arm64", "claimed": false, "state": "unqualified"},
             {"backend": "sbx", "platform": "linux-x86_64", "claimed": true, "state": "blocked"},

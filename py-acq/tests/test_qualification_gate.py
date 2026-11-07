@@ -31,7 +31,7 @@ from qualification.ledger import (  # noqa: E402
 
 NOW = datetime(2026, 11, 7, 12, 0, tzinfo=timezone.utc)
 CLAIMED = [
-    ("msb", p) for p in ("linux-x86_64", "linux-aarch64", "macos-arm64", "macos-x86_64", "windows-x64")
+    ("msb", p) for p in ("linux-x86_64", "linux-aarch64", "macos-arm64", "windows-x64")
 ] + [("sbx", p) for p in ("linux-x86_64", "macos-arm64", "windows-x64")]
 
 
@@ -75,7 +75,7 @@ def full_green():
 
 def test_all_current_cells_pass_the_gate():
     statuses = gate.evaluate(parse_ledger(full_green()), now=NOW, changed_paths=lambda rev: [])
-    assert len(statuses) == 8
+    assert len(statuses) == 7
     assert {s.status for s in statuses} == {"qualified"}
 
 

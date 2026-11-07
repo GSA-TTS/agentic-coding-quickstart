@@ -178,13 +178,6 @@
       "issue": "mogul/agentic-coding-quickstart#60"
     },
     {
-      "backend": "msb",
-      "platform": "macos-x86_64",
-      "reason": "no current Tier-3 transcript recorded yet",
-      "expires": "2027-02-05",
-      "issue": "mogul/agentic-coding-quickstart#60"
-    },
-    {
       "backend": "sbx",
       "platform": "linux-x86_64",
       "reason": "no current Tier-3 transcript recorded yet",

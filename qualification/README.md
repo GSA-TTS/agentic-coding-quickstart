@@ -67,8 +67,8 @@ one of three states:
 * `blocked` — a claimed cell without a green current transcript (holds the gate).
 
 The claimed cells are (ADR-0044m): msb on Linux x86_64, Linux aarch64, macOS
-arm64, macOS x86_64, and Windows x64; sbx on Linux x86_64, macOS arm64, and
-Windows x64. Windows ARM64, musl, and sbx on macOS x86_64 and Linux aarch64 are
+arm64, and Windows x64; sbx on Linux x86_64, macOS arm64, and Windows x64.
+Windows ARM64, musl, macOS x86_64 (every backend), and sbx on Linux aarch64 are
 unqualified (not claimed).
 
 ## Qualify a host

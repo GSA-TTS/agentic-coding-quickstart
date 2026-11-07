@@ -102,7 +102,7 @@ The qualified matrix (ADR-0044m `QUALIFIED`):
 
 | Backend | Claimed cells | Version floor | Windows x64 |
 |---------|---------------|---------------|-------------|
-| **msb** | linux-x86_64, linux-aarch64, macos-arm64, macos-x86_64, windows-x64 | ≥ 0.6.9 (refusing 0.7.0–0.7.2; oracles 1–3 need ≥ 0.7.7) | ✅ PASS |
+| **msb** | linux-x86_64, linux-aarch64, macos-arm64, windows-x64 | ≥ 0.6.9 (refusing 0.7.0–0.7.2; oracles 1–3 need ≥ 0.7.7) | ✅ PASS |
 | **sbx** | linux-x86_64, macos-arm64, windows-x64 | ≥ 0.39.0 (provider-credential set needs ≥ 0.51.0) | ✅ PASS |
 
 **Already green:** `windows-x64` (both backends), produced by the same oracle
@@ -110,11 +110,11 @@ that is committed here (`scripts/qualify-backend-cell`).
 
 **Remaining (need macOS/Linux hosts):**
 
-- msb: `linux-x86_64`, `linux-aarch64`, `macos-arm64`, `macos-x86_64`
+- msb: `linux-x86_64`, `linux-aarch64`, `macos-arm64`
 - sbx: `linux-x86_64`, `macos-arm64`
 
 **Unqualified (not claimed, reported honestly, never a pass):** Windows ARM64,
-musl libc, and sbx on macOS x86_64 and Linux aarch64.
+musl libc, macOS x86_64 (Intel Mac, every backend), and sbx on Linux aarch64.
 
 ---
 
