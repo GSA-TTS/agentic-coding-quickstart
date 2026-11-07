@@ -367,11 +367,12 @@ consults the gate. It is split into `Release PR` -> `Tier-3 release gate (releas
 -> `Release Tag`, so a stale cell leaves no tag and no GitHub Release.
 
 Making it a **required status check** on `main` is a separate step, and the order
-matters: release-please opens its PR with the default `GITHUB_TOKEN`, and GitHub does
-not run `pull_request` workflows for PRs that token creates, so the check would never
-report on the release PR and a required check would leave it unmergeable. Set the
+matters. A release PR opened with the default `GITHUB_TOKEN` may not get
+`pull_request` checks at all, or may get them held for approval (both have been seen
+upstream), and a required check that never reports leaves the PR unmergeable. Set the
 `RELEASE_PLEASE_TOKEN` secret first (`release.yml` already prefers it over
-`github.token`); then the check runs on the release PR and can be required.
+`github.token`), watch one real release PR report the check, and only then require
+it. See [`release-gate-setup.md`](release-gate-setup.md).
 
 ## Honest BLOCKED handling
 

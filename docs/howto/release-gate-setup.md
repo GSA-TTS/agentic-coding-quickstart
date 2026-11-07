@@ -30,13 +30,12 @@ the GitHub Release exist**:
 A failing gate therefore leaves **no tag and no Release**. `tier3-release-gate.yml`
 reports the same check on pull requests, pushes to `main`, and weekly.
 
-Where you see the failure depends on step 2 below. With `RELEASE_PLEASE_TOKEN` set,
-the check appears on the release PR and you fix the cell before merging. Without it,
-the check cannot run on the PR, so the first failure happens on the push after you
-merge: the release PR is merged but untagged, and no new release PR is opened until
-the gate passes and `Release Tag` runs. That state resolves itself on the next green
-push to `main` — nothing is lost, but the release is stalled until the cell is
-re-qualified.
+Where you see the failure depends on whether checks run on the release PR itself
+(step 2). If they do, you fix the cell before merging. If they do not, the first
+failure happens on the push after you merge: the release PR is merged but untagged,
+and no new release PR is opened until the gate passes and `Release Tag` runs. That
+state resolves itself on the next green push to `main` — nothing is lost, but the
+release is stalled until the cell is re-qualified.
 
 What remains is repository configuration, which only a maintainer can do.
 
@@ -57,10 +56,23 @@ then no release PR is created at all. Fix it either way:
 Verify: re-run the latest `Release` workflow (Actions > Release > Re-run all jobs) and
 confirm a `chore(main): release X.Y.Z` PR appears.
 
-## 2. Give release-please its own token (needed for step 3)
+## 2. Give release-please its own token (recommended before step 3)
 
-A PR opened with the default `GITHUB_TOKEN` does **not** trigger `pull_request`
-workflows, so the gate never reports on the release PR and cannot be required.
+The documented behaviour is that a PR opened with the default `GITHUB_TOKEN` does not
+trigger `pull_request` workflows, which would mean the gate never reports on the
+release PR and so cannot be required.
+
+**Observed upstream, this is not absolute.** On
+`GSA-TTS/agentic-coding-quickstart`, whose `release.yml` has no `token:` input, the
+release PRs do get `pull_request` runs: PR #683's checks were created four seconds
+after the PR, but as `action_required` — held for approval — and a maintainer then
+approved them, after which they passed. An older one (#592) ran unapproved. The
+mechanism is not clear; treat it as "checks may or may not run, and may need a
+click".
+
+Either way a PAT removes the question: the PR is authored by a real account, so its
+checks run like any other PR's. **Before making the gate a required check, watch one
+real release PR and confirm `Tier-3 release gate` reports on it.**
 
 1. Create a fine-grained PAT on the account that should author release PRs, scoped
    to this repository, with **Contents: read and write** and **Pull requests: read
@@ -75,7 +87,7 @@ Both release-please jobs already use `secrets.RELEASE_PLEASE_TOKEN || github.tok
 so adding the secret is the whole change; nothing to edit.
 
 Verify: the next release PR shows the token owner as author, and the
-`Tier-3 release gate` check appears on it.
+`Tier-3 release gate` check appears on it without needing approval.
 
 ## 3. Require the gate on `main` (do this only after step 2)
 
