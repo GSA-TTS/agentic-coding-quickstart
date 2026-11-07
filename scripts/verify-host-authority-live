@@ -382,6 +382,7 @@ msb_inspect_check() { # NAME -> 0 if msb reports the read-only host-config Bind
   local n="$1" hc js
   hc=$(hc_dir msb "$n"); js="$OUT/inspect-$n.json"
   "${TO[@]}" "$STEP_TIMEOUT" msb inspect "$n" --format json </dev/null >"$js" 2>>"$TRANSCRIPT" || return 1
+  [ -s "$js" ] || return 1
   python3 - "$js" "$hc" <<'PY'
 import json, os, sys
 d = json.load(open(sys.argv[1]))
@@ -400,12 +401,26 @@ guest_root() { # NAME CMD... (msb): run as root in the guest, output live
 }
 
 MSB_READY=0; MSB_A=""; MSB_A_OK=0
+# probe SECS CMD... : quiet bounded probe (stdin closed). Sets PROBE_OUT and PROBE_RC;
+# a timeout is rc 124. Never prints the output; callers decide what to say.
+PROBE_OUT=""; PROBE_RC=0
+probe() {
+  local secs="$1"; shift
+  PROBE_OUT=$("${TO[@]}" "$secs" "$@" </dev/null 2>&1); PROBE_RC=$?
+  PROBE_OUT=$(printf '%s' "$PROBE_OUT" | tr -d '\r')
+  if [ "$PROBE_RC" -eq 124 ]; then say "[probe timed out after ${secs}s: $*]"; fi
+  return 0
+}
+
 msb_preflight() {
   if ! command -v msb >/dev/null 2>&1; then say "msb: not on PATH"; return 0; fi
-  MSB_VER=$(msb --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?([+-][^[:space:]]*)?' | head -n1)
+  probe "$STEP_TIMEOUT" msb --version
+  if [ "$PROBE_RC" -ne 0 ]; then say "msb: 'msb --version' failed or timed out (rc $PROBE_RC)"; return 0; fi
+  MSB_VER=$(printf '%s\n' "$PROBE_OUT" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?([+-][^[:space:]]*)?' | head -n1)
   [ -n "$MSB_VER" ] || MSB_VER="unparsed"
   if ! command -v python3 >/dev/null 2>&1; then say "msb: python3 missing (acq's read-only gate needs it)"; return 0; fi
-  if ! msb doctor >/dev/null 2>&1; then say "msb: 'msb doctor' reports the host is not ready"; return 0; fi
+  probe "$STEP_TIMEOUT" msb doctor
+  if [ "$PROBE_RC" -ne 0 ]; then say "msb: 'msb doctor' failed, timed out, or reports the host is not ready (rc $PROBE_RC)"; return 0; fi
   MSB_READY=1
 }
 
@@ -415,8 +430,16 @@ block_if_not_ready() { # ID BACKEND_READY_VAR REASON
 }
 
 # --- MSB steps ------------------------------------------------------------------
-proof_lines() { # NAME FILE -> line count in the guest (0 if absent)
-  msb exec "$1" -u 0 -- sh -c "wc -l < $2 2>/dev/null || echo 0" </dev/null 2>/dev/null | tr -d '\r[:space:]'
+# proof_lines NAME FILE : set PROOF_N to the line count of FILE in the guest (0 if the
+# file is absent). Returns non-zero when the probe itself failed or timed out, so the
+# caller can report BLOCKED instead of comparing garbage.
+PROOF_N=""
+proof_lines() {
+  PROOF_N=""
+  probe "$STEP_TIMEOUT" msb exec "$1" -u 0 -- sh -c "if [ -e $2 ]; then wc -l < $2; else echo 0; fi"
+  [ "$PROBE_RC" -eq 0 ] || return 1
+  PROOF_N=$(printf '%s' "$PROBE_OUT" | tr -dc '0-9')
+  [ -n "$PROOF_N" ]
 }
 
 step_msb_ro_kit_create() {
@@ -565,7 +588,9 @@ step_msb_ro_oci() {
 SBX_READY=0; SBX_A=""; SBX_A_OK=0
 sbx_preflight() {
   if ! command -v sbx >/dev/null 2>&1; then say "sbx: not on PATH"; return 0; fi
-  SBX_VER=$(sbx version 2>/dev/null | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
+  probe "$STEP_TIMEOUT" sbx version
+  if [ "$PROBE_RC" -ne 0 ]; then say "sbx: 'sbx version' failed or timed out (rc $PROBE_RC)"; return 0; fi
+  SBX_VER=$(printf '%s\n' "$PROBE_OUT" | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
   [ -n "$SBX_VER" ] || SBX_VER="unparsed"
   SBX_READY=1
 }
