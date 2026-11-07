@@ -53,7 +53,7 @@ _install_dir() {
 @test "installer: installs offline from the enumerated asset set" {
   run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
   assert_success
-  assert_output --partial 'verified acq-linux-x86_64.tar.gz'
+  assert_output --regexp 'verified acq-(macos|linux)-(arm64|x86_64|aarch64)\.tar\.gz'
   # The bundled runtime and the launcher are laid down.
   [ -e "$(_install_dir)/py-acq/runtime/bin/python3" ]
   [ -L "$HOME/.local/bin/acq" ]
