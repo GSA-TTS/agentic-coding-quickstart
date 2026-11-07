@@ -75,6 +75,13 @@
     },
     {
       "backend": "msb",
+      "platform": "macos-arm64",
+      "reason": "surface change is a mechanical version-output split (run_version moved cli.py to version_info.py) with no contract-behavior change; the recorded transcript remains valid for the contract",
+      "expires": "2027-02-05",
+      "issue": "mogul/agentic-coding-quickstart#78"
+    },
+    {
+      "backend": "msb",
       "platform": "macos-x86_64",
       "reason": "no current Tier-3 transcript recorded yet",
       "expires": "2027-02-05",
@@ -93,6 +100,13 @@
       "reason": "no current Tier-3 transcript recorded yet",
       "expires": "2027-02-05",
       "issue": "mogul/agentic-coding-quickstart#60"
+    },
+    {
+      "backend": "sbx",
+      "platform": "macos-arm64",
+      "reason": "surface change is a mechanical version-output split (run_version moved cli.py to version_info.py) with no contract-behavior change; the recorded transcript remains valid for the contract",
+      "expires": "2027-02-05",
+      "issue": "mogul/agentic-coding-quickstart#78"
     },
     {
       "backend": "sbx",
