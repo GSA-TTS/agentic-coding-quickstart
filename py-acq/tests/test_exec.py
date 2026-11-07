@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from acq_py import cli, state
 
 
@@ -73,19 +75,39 @@ def test_guest_path_translation():
     assert msb._guest_path("/home/agent") == "/home/agent"
 
 
-def test_guest_path_unc_form(monkeypatch):
-    # A mapped network drive resolves to a UNC path under ``os.path.realpath``
-    # (e.g. ``Z:`` -> ``\\server\share\proj``); its guest form collapses the
-    # leading double backslash to a single slash so the server name is the first
-    # component — never a leading ``//``, whose meaning is implementation-defined
-    # in the guest. The conversion is Windows-only, so patch ``os.name`` to "nt"
-    # to assert it on every host, not just a Windows CI (the drive-form branch is
-    # exercised by ``test_guest_path_translation`` under ``os.name == "nt"``).
+# The Windows prefix families (ADR-0029 amendment). Each is asserted against the
+# module-local ``msb.WINDOWS`` seam so the Windows-only translation runs on every
+# host — there is no Windows pytest job in CI (python-vectors.yml is
+# ubuntu-latest), so an ``os.name == "nt"`` gate would skip these everywhere.
+@pytest.mark.parametrize(
+    "host, expected",
+    [
+        # drive
+        ("C:\\Users\\me\\proj", "/c/Users/me/proj"),
+        ("C:/Users/me/proj", "/c/Users/me/proj"),
+        # UNC (the realpath form of a mapped network drive), namespaced under /unc
+        ("\\\\server\\share\\proj", "/unc/server/share/proj"),
+        ("\\\\server\\share", "/unc/server/share"),
+        # extended-length drive
+        ("\\\\?\\C:\\Users\\me\\proj", "/c/Users/me/proj"),
+        # extended-length UNC
+        ("\\\\?\\UNC\\server\\share\\proj", "/unc/server/share/proj"),
+    ],
+)
+def test_guest_path_windows_forms(monkeypatch, host, expected):
     from acq_py import msb
 
-    monkeypatch.setattr(msb.os, "name", "nt")
-    assert msb._guest_path("\\\\server\\share\\proj") == "/server/share/proj"
-    assert msb._guest_path("\\\\server\\share") == "/server/share"
+    monkeypatch.setattr(msb, "WINDOWS", True)
+    assert msb._guest_path(host) == expected
+
+
+def test_guest_path_device_path_fails_closed(monkeypatch):
+    from acq_py import msb
+
+    monkeypatch.setattr(msb, "WINDOWS", True)
+    with pytest.raises(msb.MsbError) as excinfo:
+        msb._guest_path("\\\\.\\PIPE\\x")
+    assert excinfo.value.code == "validation_failed"
 
 
 # ---------------------------------------------------------------------------

@@ -28,6 +28,7 @@ internal test seam, never a secret, never written to acq output.
 from __future__ import annotations
 
 import json
+import ntpath
 import os
 import shlex
 import subprocess
@@ -46,34 +47,62 @@ DEFAULT_CPUS = "2"
 # failure, so readiness is proven by a successful `msb exec` (ADR-0011).
 READY_TIMEOUT_S = float(os.environ.get("ACQ_MSB_READY_TIMEOUT", "30"))
 
+# Module-local seam for the host OS class. ``_guest_path`` reads this instead of
+# ``os.name`` so the Windows-only translation is testable on a POSIX host without
+# mutating the process-wide ``os`` module (``msb.os`` is ``os``).
+WINDOWS = os.name == "nt"
+
 
 def _guest_path(host: str) -> str:
     """Translate a native host path into its POSIX guest form (ADR-0029).
 
     msb's ``--volume HOST:GUEST`` maps a native host source to a distinct POSIX
     guest destination; the same POSIX form is the ``-w``/``--workdir`` start
-    directory. On POSIX the two forms are identical. On Windows a drive-form path
-    (``C:\\Users\\me\\proj``) becomes the microVM's POSIX form (``/c/Users/me/proj``)
-    so the guest side is never a drive path. A UNC path (``\\\\server\\share\\proj``
-    — the form ``os.path.realpath`` yields for a mapped network drive) becomes
-    ``/server/share/proj``: the guest has no drive or UNC vocabulary, so the server
-    name is just the first path component and the leading double backslash collapses
-    to a single slash (never a leading ``//``, whose meaning is
-    implementation-defined in the guest). This mirrors the Bash adapter's
-    ``canonicalize_path`` (``cygpath -u``); the native Python adapter is not under
-    MSYS, so it computes the form directly.
+    directory. On POSIX the two forms are identical. On Windows the host prefix is
+    classified with ``ntpath.splitroot`` and each family maps to a guest form that
+    is never a drive path and never a leading ``//`` (whose meaning is
+    implementation-defined in the guest):
+
+    * drive (``C:\\Users\\me\\proj``) -> ``/c/Users/me/proj``;
+    * UNC (``\\\\server\\share\\proj`` — the form ``os.path.realpath`` yields for a
+      mapped network drive) -> ``/unc/server/share/proj``, namespaced under
+      ``/unc`` so a share named after a guest system directory (``\\\\home\\...``)
+      can never shadow the agent HOME (``DEFAULT_GUEST_WORKSPACE``);
+    * extended-length (``\\\\?\\C:\\...`` and ``\\\\?\\UNC\\server\\share\\...``) —
+      ``realpath`` returns these for >MAX_PATH and trailing-dot/space paths; the
+      ``\\\\?\\`` prefix is a Win32 signal, not a path component, so it is stripped
+      before the same drive/UNC translation above.
+
+    A device path (``\\\\.\\PIPE\\x``) names a device, not a filesystem directory,
+    and has no POSIX guest form, so it fails closed rather than emitting a bogus
+    mount. The Bash adapter is NOT a reference here: its ``cygpath -u`` still emits
+    the Cygwin ``//server/share/...`` form for UNC (tracked separately).
     """
-    if os.name == "nt":
-        if host.startswith("\\\\"):
-            # UNC form: the leading double backslash is the server prefix, not two
-            # separators — collapse it to one slash so the server name is the first
-            # component instead of an empty component (``//server``).
-            return "/" + host[2:].replace("\\", "/")
-        drive, sep, rest = host.partition(":")
-        if sep and len(drive) == 1 and drive.isalpha():
-            return "/" + drive.lower() + rest.replace("\\", "/")
-        return host.replace("\\", "/")
-    return host
+    if not WINDOWS:
+        return host
+    drive, root, tail = ntpath.splitroot(host)
+    if drive.startswith("\\\\.\\"):
+        raise MsbError(
+            errors.VALIDATION_FAILED,
+            f"cannot mount a Windows device path: {host}",
+            "pass a filesystem directory, not a device path",
+        )
+    if drive.startswith("\\\\?\\"):
+        rest = drive[4:]  # strip the extended-length prefix
+        if rest.upper().startswith("UNC\\"):
+            return "/unc/" + (rest[4:] + root + tail).replace("\\", "/")
+        if len(rest) == 2 and rest[1] == ":" and rest[0].isalpha():
+            return "/" + rest[0].lower() + (root + tail).replace("\\", "/")
+        raise MsbError(
+            errors.VALIDATION_FAILED,
+            f"cannot translate an unknown extended-length path: {host}",
+            "pass a plain drive or UNC path instead",
+        )
+    if drive.startswith("\\\\"):
+        return "/unc/" + (drive[2:] + root + tail).replace("\\", "/")
+    if len(drive) == 2 and drive[1] == ":" and drive[0].isalpha():
+        return "/" + drive[0].lower() + (root + tail).replace("\\", "/")
+    return host.replace("\\", "/")
 
 
 class MsbError(Exception):
