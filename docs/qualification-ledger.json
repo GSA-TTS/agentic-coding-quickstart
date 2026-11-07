@@ -108,6 +108,32 @@
       "artifact_sha256": "e16105d279e6993da749c0f6d363256fc28d9c5b4fe9afa26774f5fb0022e9e6",
       "recorded_at": "2026-11-07T19:10:37+00:00",
       "transcript_sha256": "1128ea4105921fef743ee462776d1c776bb38ea2b8c524b2685ae5ea54953bce"
+    },
+    {
+      "backend": "msb",
+      "platform": "macos-arm64",
+      "verdict": "PASS",
+      "backend_version": "0.7.7",
+      "os_build": "26.7.2",
+      "arch": "arm64",
+      "hypervisor": "hvf",
+      "rev": "004e0f1a362051ef86f01d2dbd38dc3e4615e259",
+      "artifact_sha256": "600f6d23b58ed167fcdeb3c70c728694c63a510b0d653ba75b4fd9a9efe4b804",
+      "recorded_at": "2026-11-07T20:49:51+00:00",
+      "transcript_sha256": "97810339e97d977af1fbcd110b7dfa4122cb88e3b2e3852ae0d2899a7157444a"
+    },
+    {
+      "backend": "sbx",
+      "platform": "macos-arm64",
+      "verdict": "PASS",
+      "backend_version": "0.51.0",
+      "os_build": "26.7.2",
+      "arch": "arm64",
+      "hypervisor": "hvf",
+      "rev": "004e0f1a362051ef86f01d2dbd38dc3e4615e259",
+      "artifact_sha256": "600f6d23b58ed167fcdeb3c70c728694c63a510b0d653ba75b4fd9a9efe4b804",
+      "recorded_at": "2026-11-07T20:50:04+00:00",
+      "transcript_sha256": "1f87d7c6c70b400921d070ac314b7574ea205a155a4ad92f86a38e83807184df"
     }
   ],
   "waivers": [
