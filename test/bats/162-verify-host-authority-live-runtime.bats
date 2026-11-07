@@ -51,11 +51,13 @@ case "$verb" in
     exit "${STUB_CREATE_RC:-0}" ;;
   rm) grep -vxF -- "$name" "$HS/list.$b" >"$HS/l.tmp"; mv "$HS/l.tmp" "$HS/list.$b"; exit 0 ;;
   restart)
+    touch "$HS/restarted"
     if [ "${STUB_RESTART_INSTALL:-0}" = 1 ]; then echo $(( $(cat "$HS/install.count" 2>/dev/null || echo 1) + 1 )) >"$HS/install.count"; fi
     [ -n "${STUB_RESTART_SLEEP:-}" ] && sleep "$STUB_RESTART_SLEEP"
     exit "${STUB_RESTART_RC:-0}" ;;
   run)
     for x in "Zscaler CA kit" "provider kit" "playbook kit"; do
+      [ "${STUB_RUN_MODE:-full}" = quiet ] && break
       [ "${STUB_RUN_MODE:-full}" = partial ] && [ "$x" = "playbook kit" ] && continue
       echo "acq: '$name' is missing the $x; injecting with 'sbx kit add'..."
     done
@@ -89,6 +91,12 @@ echo "sbx $*" >>"$HS/calls"
 case "$1" in
   version) echo "sbx version: v0.48.0 abc123" ;;
   ls) cat "$HS/list.sbx" ;;
+  exec) all="$*"
+    case "$all" in
+      *"echo PRESENT"*) [ -n "${STUB_NO_PROVIDER_CFG:-}" ] || echo PRESENT ;;
+      *"echo REMOVED"*) echo REMOVED ;;
+      *"echo STILL-ABSENT"*) echo STILL-ABSENT ;;
+    esac ;;
   rm) shift; for a in "$@"; do case "$a" in -*) ;; *) grep -vxF -- "$a" "$HS/list.sbx" >"$HS/l.tmp"; mv "$HS/l.tmp" "$HS/list.sbx" ;; esac; done ;;
 esac
 exit 0
@@ -103,6 +111,8 @@ case "$1" in
   ls) cat "$HS/list.msb" ;;
   remove|rm) exit 0 ;;
   inspect)
+    [ -n "${STUB_INSPECT_FAIL_AFTER_RESTART:-}" ] && [ -f "$HS/restarted" ] && exit 1
+    [ -n "${STUB_INSPECT_NULL:-}" ] && { echo '{"active_config":null}'; exit 0; }
     hc=$(cat "$HS/hcdir.$2" 2>/dev/null)
     printf '{"active_config":{"mounts":[{"guest":"/var/lib/acq/host","type":"Bind","host":"%s","options":{"readonly":true}}]},"config":{}}\n' "$hc" ;;
   exec)
@@ -224,4 +234,30 @@ _sbx_pf() { ( ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$REPO_ROOT/acq" >
 @test "runtime: an empty selection exits 2" {
   _hal --backend msb --only sbx-baseline
   assert_failure 2
+}
+
+@test "runtime: forged-heal PASSes with a present provider config, current record and no re-apply" {
+  STUB_RUN_MODE=quiet _hal --backend sbx --only sbx-baseline,sbx-forged-heal
+  [ "$(_res sbx-forged-heal)" = PASS ]
+}
+
+@test "runtime: forged-heal is BLOCKED when the provider config never existed (removal would prove nothing)" {
+  STUB_RUN_MODE=quiet STUB_NO_PROVIDER_CFG=1 _hal --backend sbx --only sbx-baseline,sbx-forged-heal
+  [ "$(_res sbx-forged-heal)" = BLOCKED ]
+}
+
+@test "runtime: forged-heal is FAIL when the re-attach re-applies a kit although the record is current" {
+  STUB_RUN_MODE=full _hal --backend sbx --only sbx-baseline,sbx-forged-heal
+  [ "$(_res sbx-forged-heal)" = FAIL ]
+}
+
+@test "runtime: heal step reports a failing msb inspect after restart as BLOCKED, not FAIL" {
+  STUB_INSPECT_FAIL_AFTER_RESTART=1 _hal --backend msb --only msb-ro-kit-create,msb-ro-kit-heal
+  [ "$(_res msb-ro-kit-create)" = PASS ]
+  [ "$(_res msb-ro-kit-heal)" = BLOCKED ]
+}
+
+@test "runtime: a null active_config is BLOCKED for inspect-shape, never FAIL" {
+  STUB_INSPECT_NULL=1 _hal --backend msb --only msb-ro-kit-create,msb-inspect-shape
+  [ "$(_res msb-inspect-shape)" = BLOCKED ]
 }

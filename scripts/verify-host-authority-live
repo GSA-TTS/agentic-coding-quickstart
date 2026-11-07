@@ -424,6 +424,8 @@ except Exception:
     sys.exit(2)
 if not isinstance(d, dict):
     sys.exit(2)
+if d.get("active_config") is None:
+    sys.exit(2)
 mounts = (d.get("active_config") or {}).get("mounts") or []
 hit = [m for m in mounts if isinstance(m, dict) and m.get("guest") == "/var/lib/acq/host"]
 ok = (len(hit) == 1 and hit[0].get("type") == "Bind"
@@ -476,7 +478,7 @@ proof_lines() {
   PROOF_N=""
   probe "$STEP_TIMEOUT" msb exec "$1" -u 0 -- sh -c "if [ -e $2 ]; then wc -l < $2; else echo 0; fi"
   [ "$PROBE_RC" -eq 0 ] || return 1
-  PROOF_N=$(printf '%s' "$PROBE_OUT" | tr -dc '0-9')
+  PROOF_N=$(printf '%s\n' "$PROBE_OUT" | tail -n 1 | tr -dc '0-9')
   [ -n "$PROOF_N" ]
 }
 
@@ -521,12 +523,14 @@ def host_ro(x):
     if len(h) != 1: return "no-single-host-mount"
     return "readonly-bind" if (h[0].get("type") == "Bind" and (h[0].get("options") or {}).get("readonly") is True) else "not-readonly-bind"
 print("TOPLEVEL-KEYS " + " ".join(sorted(d.keys())))
-print("ACTIVE_CONFIG.MOUNTS " + host_ro(ac))
+print("ACTIVE_CONFIG.MOUNTS " + ("null" if ac is None else host_ro(ac)))
 print("CONFIG.MOUNTS " + host_ro(cf))
 ' <"$js" >"$js.keys" 2>>"$TRANSCRIPT" \
     || { record "$id" BLOCKED "msb inspect output was not parseable JSON"; return 0; }
   while IFS= read -r line; do say "  $line"; done <"$js.keys"
-  if grep -q '^ACTIVE_CONFIG.MOUNTS readonly-bind$' "$js.keys"; then
+  if grep -q '^ACTIVE_CONFIG.MOUNTS null$' "$js.keys"; then
+    record "$id" BLOCKED "msb reports a null active_config (sandbox not settled); retry later"
+  elif grep -q '^ACTIVE_CONFIG.MOUNTS readonly-bind$' "$js.keys"; then
     record "$id" PASS "active_config.mounts shape matches the gate on msb $MSB_VER; $(grep '^CONFIG.MOUNTS' "$js.keys"); $(grep '^TOPLEVEL-KEYS' "$js.keys")"
   else
     record "$id" FAIL "active_config.mounts is not the expected read-only Bind on msb $MSB_VER; $(grep '^ACTIVE_CONFIG' "$js.keys")"
@@ -555,7 +559,7 @@ need_rc0() {
 }
 
 step_msb_ro_kit_heal() {
-  local id=msb-ro-kit-heal r0 r1 i0 i1 why=""
+  local id=msb-ro-kit-heal r0 r1 i0 i1 why="" irc
   [ "$MSB_A_OK" -eq 1 ] || { record "$id" BLOCKED "needs the sandbox from msb-ro-kit-create"; return 0; }
   proof_lines "$MSB_A" /home/agent/.hal-ro-proof || { record "$id" BLOCKED "could not read the readonly proof file before restart"; return 0; }
   r0=$PROOF_N
@@ -573,7 +577,9 @@ step_msb_ro_kit_heal() {
   run_cmd "$STEP_TIMEOUT" msb exec "$MSB_A" -u 0 -- tail -n 1 /home/agent/.hal-ro-proof
   need_rc0 "$id" "reading the last readonly proof line" || return 0
   last_has "/var/lib/acq/host/kit-files/" || why="${why}the heal ran the file from somewhere other than the read-only mount; "
-  msb_inspect_check "$MSB_A" || why="${why}msb inspect no longer shows the read-only Bind after restart; "
+  msb_inspect_check "$MSB_A"; irc=$?
+  [ "$irc" -ne 2 ] || { record "$id" BLOCKED "msb inspect failed, timed out, or returned unusable output after restart"; return 0; }
+  [ "$irc" -eq 0 ] || why="${why}msb inspect no longer shows the read-only Bind after restart; "
   [ "$i1" -gt "$i0" ] && INSTALL_RERAN_ON_HEAL=1
   if [ -z "$why" ]; then record "$id" PASS "after stop/start the readonly startup file re-ran from the :ro mount and the mount record held (msb $MSB_VER)"
   else record "$id" FAIL "$why"; fi
@@ -687,13 +693,18 @@ step_sbx_baseline() {
 step_sbx_forged_heal() {
   local id=sbx-forged-heal before after
   [ "$SBX_A_OK" -eq 1 ] || { record "$id" BLOCKED "needs the sandbox from sbx-baseline"; return 0; }
+  run_cmd "$STEP_TIMEOUT" sbx exec "$SBX_A" -- sh -c 'test -e /home/agent/usai-config/opencode.jsonc && echo PRESENT'
+  need_rc0 "$id" "probing that the provider config exists" || return 0
+  last_has PRESENT || { record "$id" BLOCKED "the provider config did not exist before removal, so its absence afterwards proves nothing"; return 0; }
   run_cmd "$STEP_TIMEOUT" sbx exec "$SBX_A" -- sudo sh -c 'rm -f /usr/local/share/ca-certificates/zscaler-ca.crt /home/agent/usai-config/opencode.jsonc; rm -f /home/agent/.agentic-coding-playbook/AGENTS.md; echo REMOVED'
   need_rc0 "$id" "removing the guest files as root" || return 0
   last_has REMOVED || { record "$id" BLOCKED "could not remove the guest files as root (sudo unavailable?)"; return 0; }
+  [ -s "$(sbx_record_path "$SBX_A")" ] || { record "$id" BLOCKED "host builtin-kits record is missing before the re-attach"; return 0; }
   before=$(cksum <"$(sbx_record_path "$SBX_A")")
   run_cmd "$CREATE_TIMEOUT" "$ACQ" --backend sbx run "$SBX_A" -- --version
   after=$(cksum <"$(sbx_record_path "$SBX_A")")
   need_rc0 "$id" "re-attach" || return 0
+  [ -s "$(sbx_record_path "$SBX_A")" ] || { record "$id" FAIL "the host builtin-kits record disappeared after re-attach"; return 0; }
   if last_has "injecting with 'sbx kit add'" || last_has "injected into"; then
     record "$id" FAIL "re-attach re-applied a kit although the host record was current"; return 0
   fi
@@ -760,6 +771,7 @@ step_sbx_legacy_reseed() {
   rm -f "$rec"
   run_cmd "$CREATE_TIMEOUT" "$ACQ" --backend sbx run "$SBX_A" -- --version
   need_rc0 "$id" "acq run (re-attach of the legacy sandbox)" || return 0
+  [ "$SBX_VER" != unparsed ] || { record "$id" BLOCKED "sbx version could not be parsed, so the 0.38+ notice expectation cannot be applied"; return 0; }
   if ver_ge "${SBX_VER#v}" 0.38.0; then
     if [ "$(last_count 'sbx >= 0.38')" -ne 1 ]; then record "$id" FAIL "expected exactly one consolidated recreate notice on sbx $SBX_VER, saw $(last_count 'sbx >= 0.38')"; return 0; fi
   fi
