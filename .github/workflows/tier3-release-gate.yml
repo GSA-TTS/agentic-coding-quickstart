@@ -1,0 +1,63 @@
+# Tier-3 release gate (ADR-0044m): every claimed platform/backend cell must hold a
+# current green live transcript in docs/qualification-ledger.json, or an unexpired
+# maintainer waiver. Evaluated from the committed ledger alone on a hosted runner,
+# so no live run happens here and merging a release PR needs no manual step when
+# every cell is current.
+#
+# It also runs weekly, so a cell that ages past 90 days is reported before the next
+# release PR instead of at it.
+#
+# Note: a PR opened by release-please with the default GITHUB_TOKEN does not
+# trigger pull_request workflows (GitHub's recursion guard), so this check does not
+# appear on the release PR until release-please is given a PAT or GitHub App token.
+# Do not make it a required status check before then; see
+# docs/howto/qualification.md.
+
+name: Tier-3 release gate
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: tier3-release-gate-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: Tier-3 release gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Full history: the gate diffs each transcript's recorded revision against
+      # HEAD to see whether the Tier-3 surface changed since it was recorded.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Evaluate the gate
+        run: |
+          rc=0
+          python -m qualification.gate check > gate.md 2>&1 || rc=$?
+          cat gate.md
+          {
+            echo '### Tier-3 release gate'
+            echo
+            cat gate.md
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"

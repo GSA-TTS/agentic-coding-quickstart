@@ -12,3 +12,6 @@
 /.github/workflows/ @GSA-TTS/agentic-coding-admins
 /AGENTS.md @GSA-TTS/agentic-coding-admins
 /SECURITY.md @GSA-TTS/agentic-coding-admins
+# The Tier-3 ledger is self-reported evidence for the release gate, so changes to it
+# (entries, waivers, accepted backend versions) need an admin's review.
+/docs/qualification-ledger.json @GSA-TTS/agentic-coding-admins

@@ -324,7 +324,10 @@ def test_touches_surface_distinguishes_release_commits():
     assert not touches_surface(["py-acq/tests/test_lifecycle.py", ".github/workflows/release.yml"])
     assert touches_surface(["py-acq/src/acq_py/cli.py"])
     assert touches_surface(["scripts/qualify-backend-cell"])
-    assert touches_surface(["qualification/matrix.py", "README.md"])
+    assert touches_surface(["qualification/runner.py", "README.md"])
+    assert touches_surface(["qualification/cli.py"])
+    # The matrix, ledger and gate only read transcripts; they are not the surface.
+    assert not touches_surface(["qualification/matrix.py", "qualification/ledger.py", "qualification/gate.py"])
     assert not touches_surface(["py-acq/src_other/x.py"])
     assert not touches_surface(["scripts/qualify-backend-cell-x"])
 

@@ -6,7 +6,7 @@ tier: 3
 last_updated: "2026-11-07"
 audience: "developers"
 keywords: ["qualification", "tier-3", "transcript", "msb", "sbx", "oracle", "adr-0044m", "matrix"]
-related_files: ["docs/adr/0044m-live-cross-platform-qualification-matrix-and-transcript.md", "qualification/README.md", "scripts/qualify-backend-cell", "scripts/qualify-msb-ro-mount", "docs/KNOWN_FAILURE_MODES.md", "docs/adr/0035-host-authoritative-sandbox-config.md", "docs/adr/0041m-configuration-and-state-migration-behavior.md"]
+related_files: ["docs/adr/0044m-live-cross-platform-qualification-matrix-and-transcript.md", "qualification/README.md", "docs/qualification-ledger.json", ".github/workflows/tier3-release-gate.yml", "scripts/qualify-backend-cell", "scripts/qualify-msb-ro-mount", "docs/KNOWN_FAILURE_MODES.md", "docs/adr/0035-host-authoritative-sandbox-config.md", "docs/adr/0041m-configuration-and-state-migration-behavior.md"]
 load_priority: "on-demand"
 review_cycle: "quarterly"
 ---
@@ -264,6 +264,56 @@ Identity fields recorded in those transcripts (not on the `RESULT` line itself):
 - `hypervisor`: `wsl2`
 
 ---
+
+## Recording a run and the release gate
+
+A live run is evidence only once it is in the ledger, `docs/qualification-ledger.json`
+(metadata and the SHA-256 of each `transcript.json`; never the transcript itself,
+which goes on the release). After a green run on a host:
+
+```bash
+python -m qualification.gate record path/to/transcript.json
+```
+
+It derives the cell from the transcript's OS and architecture (pass `--platform`
+to override) and appends one entry. Run the cell at a commit that is on `main`
+(`--rev "$(git rev-parse HEAD)"`, as in the commands above): `record` refuses the
+harness's all-zero default, and a commit that only existed on a squash-merged PR
+branch is not in `main`'s history, so the gate could not resolve it. Every outcome
+is recorded, not only `PASS`: the latest entry for a cell decides, so a recorded
+`FAIL`, `BLOCKED` or `FLAKY` blocks a cell that had a current `PASS`. Commit the
+ledger change through a normal PR; CODEOWNERS requires an admin's review of it,
+because the ledger is self-reported evidence.
+Per-attempt timestamps are in the transcript; for one written by an older harness,
+pass `--recorded-at <ISO 8601 UTC>`.
+
+The gate, `python -m qualification.gate check`, runs in CI (`Tier-3 release gate`)
+on every PR, every push to `main`, and weekly. It needs no live run: for each of
+the eight claimed cells it takes the latest ledger entry and passes it only if the
+verdict is `PASS`, it is under 90 days old, its backend `major.minor` equals
+`accepted_backend_versions` in the ledger, and no file on the Tier-3 surface
+(`TIER3_SURFACE` in `qualification/matrix.py`: the CLI source, the two oracles, and the harness's run path) changed between its recorded
+revision and `HEAD`. A release-please commit changes none of those, so releases do
+not expire anything. Anything the gate cannot establish fails closed.
+
+When a backend is upgraded, change `accepted_backend_versions` in the same PR:
+cells recorded at the old `major.minor` become blocked until re-run.
+
+A cell without a current transcript can carry a **waiver** in the ledger: a reason,
+an `expires` date, and optionally an issue. A waived cell does not block the gate
+but is reported as `waived` in the job summary, and a waiver that has expired blocks
+again. Waivers lower the bar; keep them short and remove each one as its cell is
+recorded.
+
+Making it hold a release: the check only informs unless `Tier-3 release gate` is a
+required status check on `main` (repository settings, not code). **Do not require
+it yet.** release-please opens its PR with the default `GITHUB_TOKEN`, and GitHub
+does not run `pull_request` workflows for PRs that token creates, so the check
+would never report on the release PR and a required check would leave it
+unmergeable. First give release-please a PAT or GitHub App token (the `token`
+input of `release-please-action` in `release.yml`); then the check runs on the
+release PR and can be required. Until then the gate runs on every push to `main`
+and weekly, and `release.yml` does not consult it.
 
 ## Honest BLOCKED handling
 
