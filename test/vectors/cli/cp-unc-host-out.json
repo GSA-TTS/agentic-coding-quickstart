@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "id": "cli/cp-unc-host-out",
+  "oracle": "ADR-0029 UNC host path: cp forwards a UNC/network host path verbatim to the backend in the out direction (guest -> UNC host), accepted like a plain-drive path",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{acq}", "--backend", "msb", "--json", "cp", "box:/tmp/src.txt", "//server/share/file.txt"],
+    "env": {
+      "ACQ_MSB_BIN": "__stub__",
+      "ACQ_MSB_VERSION": "0.7.7",
+      "ACQ_MSB_INSTALLED": "1",
+      "ACQ_SBX_INSTALLED": "0",
+      "ACQ_MSB_STUB_CATALOG": "{\"box\":\"running\"}"
+    },
+    "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "MSB_HOME", "ACQ_IMAGE", "ACQ_MSB_IMAGE", "ACQ_MSB_STUB_CATALOG", "ACQ_MSB_READY_TIMEOUT", "ACQ_MSB_STUB_FAIL", "ACQ_MSB_STUB_EXEC_EXIT", "ACQ_MSB_STUB_COPY_EXIT", "ACQ_MSB_STUB_EXIT_CODE", "ACQ_MSB_STUB_PORTS"],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "cp",
+        "data": {"name": "box", "host": "//server/share/file.txt", "guest": "/tmp/src.txt", "direction": "out", "exit_code": 0}
+      },
+      "normalize": []
+    },
+    "stderr": {"mode": "exact", "value": "", "normalize": []}
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+  }
+}

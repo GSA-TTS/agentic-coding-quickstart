@@ -101,7 +101,10 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
 * `acq-py shell NAME [--json]` — open a login shell (`/bin/sh -l`) in a sandbox.
 * `acq-py cp SRC DST [--json]` — copy between a native host path and a POSIX
   guest path. Exactly one side is a `NAME:/guest/path` reference; host and guest
-  types stay distinct and a UNC/network host path fails closed (ADR-0038m §4).
+  types stay distinct (ADR-0038m §4). The host side is forwarded verbatim to the
+  backend, which resolves it natively on the host, so a UNC/network host path
+  (`\\server\share\...` / `//server/share/...`) is accepted the same way a
+  plain-drive path is — consistent with the UNC workspace mount (ADR-0029).
   The `msb copy` status is preserved.
 * `acq-py ports NAME [--json]` — report a sandbox's *declared* host/guest port
   mappings with origin (create-time), never listener health (ADR-0038m §2). A

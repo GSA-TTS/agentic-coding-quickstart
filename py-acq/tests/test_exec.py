@@ -233,6 +233,31 @@ def test_cp_direction_typing(monkeypatch, tmp_path, capsys):
     assert doc["data"]["direction"] == "out"
 
 
+@pytest.mark.parametrize(
+    "host",
+    [
+        "\\\\server\\share\\file.txt",  # Windows UNC host form
+        "//server/share/file.txt",  # slash UNC host form
+    ],
+)
+def test_cp_unc_host_path_forwards_natively(monkeypatch, tmp_path, capsys, host):
+    # ADR-0029: cp's host side is forwarded verbatim to the backend (resolved
+    # natively on the host), so a UNC/network host path is accepted the same way
+    # a plain-drive path is — consistent with the UNC workspace mount.
+    _env(monkeypatch, tmp_path, catalog={"box": "running"})
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "--json", "cp", host, "box:/tmp/dest.txt")
+    assert rc == 0
+    assert doc["data"]["direction"] == "in"
+    assert doc["data"]["host"] == host
+    assert doc["data"]["guest"] == "/tmp/dest.txt"
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "--json", "cp", "box:/tmp/src.txt", host)
+    assert rc == 0
+    assert doc["data"]["direction"] == "out"
+    assert doc["data"]["host"] == host
+
+
 def test_passthrough_forwards_unknown_verb(monkeypatch, tmp_path, capfd):
     _env(monkeypatch, tmp_path)
 
