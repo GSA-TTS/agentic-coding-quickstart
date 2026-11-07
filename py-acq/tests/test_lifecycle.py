@@ -301,7 +301,7 @@ def test_msb_windows_path_families_resolve_to_guest_forms(monkeypatch):
         "X:\\proj": "C:\\actual\\proj",  # subst drive -> plain drive target
         "C:\\PROGRA~1\\acq": "C:\\Program Files\\acq",  # 8.3 + case -> expanded
     }
-    monkeypatch.setattr(common.os.path, "realpath", lambda p: realpath_map.get(p, p))
+    monkeypatch.setattr(common, "REALPATH", lambda p: realpath_map.get(p, p))
     monkeypatch.setattr(msb, "WINDOWS", True)
 
     # Mapped drive: realpath yields the UNC form, which mounts under /unc.

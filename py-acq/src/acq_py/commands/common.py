@@ -244,6 +244,13 @@ def _validate_workspace(command: str, path: str | None, emit_json: bool) -> tupl
     return resolved, None
 
 
+# Module-local seam for path canonicalization. ``_mount_workspace`` reads this
+# instead of ``os.path.realpath`` directly so a test can substitute a Windows
+# ``realpath`` simulation without mutating the process-wide ``os.path.realpath``
+# (the same pattern as ``msb.WINDOWS``, ADR-0029).
+REALPATH = os.path.realpath
+
+
 def _mount_workspace(backend: str, workspace: str) -> str:
     """The host path to mount and record for ``workspace``.
 
@@ -263,7 +270,7 @@ def _mount_workspace(backend: str, workspace: str) -> str:
     this AFTER deriving the sandbox name, which must come from the path the user
     typed.
     """
-    return os.path.realpath(workspace) if backend == "msb" else workspace
+    return REALPATH(workspace) if backend == "msb" else workspace
 
 
 def _launch_token(backend: str, name: str, agent: str) -> str:
