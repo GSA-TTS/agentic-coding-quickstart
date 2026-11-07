@@ -84,6 +84,17 @@ _msys_provision() { # NAME WS
   assert_line 'host=C:/Users/me/proj'
 }
 
+@test "msys: canonicalize_path maps a UNC host path to the /unc/ guest namespace" {
+  _plant_cygpath_stub
+  run bash -c '
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    printf "unc=%s\n" "$(canonicalize_path "//server/share/proj")"
+  '
+  assert_success
+  assert_output 'unc=/unc/server/share/proj'
+}
+
 @test "msys: a mount uses the host form for SOURCE and the guest form for TARGET" {
   _plant_cygpath_stub
   mkdir -p "$STUBDIR/msysws"

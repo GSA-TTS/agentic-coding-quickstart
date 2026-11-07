@@ -176,17 +176,19 @@ drive/UNC translation. A device path (`\\.\...`) names a device, not a
 filesystem directory, so the adapter fails closed with ``validation_failed``
 rather than emitting a bogus mount.
 
-**Asymmetry (tracked, not yet resolved):** ``acq cp`` still refuses a host UNC
-path (ADR-0038m §4, "UNC/network paths require separate qualification"), while
+**Remaining asymmetry (tracked):** ``acq cp`` still refuses a host UNC path
+(ADR-0038m §4, "UNC/network paths require separate qualification"), while
 ``--volume``/``-w`` now accept and mount one. A UNC workspace can therefore be
 created, recorded, and launched, but a subsequent ``acq cp`` into that same
-sandbox refuses the host side. The Bash adapter also still emits the Cygwin
-`//server/share/...` form for UNC (``common.sh`` ``cygpath -u``), so the two
-implementations diverge until the Bash adapter is updated.
+sandbox refuses the host side. The two adapters now agree on the UNC guest
+form: the Bash adapter's ``common.sh`` ``canonicalize_path`` re-namespaces
+``cygpath -u``'s ``//server/share/...`` UNC output to ``/unc/server/share/...``
+(single leading slash, ``unc`` namespace), matching the Python adapter.
 
 ## Links
 
-- mogul/agentic-coding-quickstart#85 — Bash adapter UNC divergence (tracked).
+- mogul/agentic-coding-quickstart#85 — Bash adapter UNC divergence (resolved by
+  the ``/unc/`` re-namespacing above).
 - mogul/agentic-coding-quickstart#86 — `acq cp` UNC asymmetry (tracked).
 - GSA-TTS/agentic-coding-quickstart#463 — the review that surfaced the
   single-form bug and the MSYS rewriting behavior.
