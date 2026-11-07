@@ -283,14 +283,17 @@ sandbox_name() { printf 'hal-%s-%s' "$RUN_ID" "$1"; }
 # KILLs whatever ignored it. timeout(1) (-k) stays as an outer backstop only.
 POLL=1
 if sleep 0.1 2>/dev/null; then POLL=0.1; fi
-STEP_DEADLINE=0; STEP_TIMED_OUT=0; CUR_PID=""; B_LIVE=0; B_SHOWN=0; IN_DIAG=0
+STEP_DEADLINE=0; STEP_TIMED_OUT=0; CUR_PID=""; STUCK_PID=""; B_LIVE=0; B_SHOWN=0; IN_DIAG=0
 PROBE_F="$OUT/.probe-out"
 
 descendants() { # PID -> PID and every descendant, one per line
   local c
   echo "$1"
-  command -v pgrep >/dev/null 2>&1 || return 0
-  for c in $(pgrep -P "$1" 2>/dev/null); do descendants "$c"; done
+  if command -v pgrep >/dev/null 2>&1; then
+    for c in $(pgrep -P "$1" 2>/dev/null); do descendants "$c"; done
+  else
+    for c in $(ps -axo pid=,ppid= 2>/dev/null | awk -v p="$1" '$2 == p { print $1 }'); do descendants "$c"; done
+  fi
 }
 any_alive() { local p; for p in "$@"; do kill -0 "$p" 2>/dev/null && return 0; done; return 1; }
 reap_tree() { # PID : TERM the tree, wait KILL_GRACE, KILL survivors (and fresh children)
@@ -323,7 +326,7 @@ b_show() { # OUTFILE : echo the bytes not yet shown to the terminal and the tran
 hang_diag() { # called with the stuck command still alive
   local f="$OUT/.diag" s_pid="$CUR_PID" s_shown="$B_SHOWN" s_live="$B_LIVE" s_rc="$LAST_RC" s_to="$STEP_TIMED_OUT" s_dl="$STEP_DEADLINE" l
   [ "$HANG_DIAG" -eq 1 ] && [ "$IN_DIAG" -eq 0 ] || return 0
-  IN_DIAG=1; STEP_DEADLINE=0; B_LIVE=0
+  IN_DIAG=1; STEP_DEADLINE=0; B_LIVE=0; STUCK_PID="$s_pid"
   say "--- hang diagnostics $(date -u +%Y-%m-%dT%H:%M:%SZ): ps (acq|msb|sbx|socat|sleep), msb ls, sbx ls ---"
   run_bounded 15 "$f" "" ps -axo pid,ppid,etime,stat,command
   grep -E 'acq|msb|sbx|socat|sleep' "$f" 2>/dev/null | grep -v 'grep -E' >"$f.sel"
@@ -337,7 +340,7 @@ hang_diag() { # called with the stuck command still alive
     while IFS= read -r l; do say "    $l"; done <"$f"
   fi
   say "--- end hang diagnostics ---"
-  CUR_PID="$s_pid"; B_SHOWN="$s_shown"; B_LIVE="$s_live"; LAST_RC="$s_rc"; STEP_TIMED_OUT="$s_to"; STEP_DEADLINE="$s_dl"; IN_DIAG=0
+  CUR_PID="$s_pid"; B_SHOWN="$s_shown"; B_LIVE="$s_live"; LAST_RC="$s_rc"; STEP_TIMED_OUT="$s_to"; STEP_DEADLINE="$s_dl"; IN_DIAG=0; STUCK_PID=""
 }
 
 # run_bounded SECS OUTFILE ERRFILE CMD... : stdin closed, stdout (and stderr, unless
@@ -488,6 +491,7 @@ on_signal() {
   B_LIVE=0
   echo; say "interrupted: stopping the running command, removing throwaway sandboxes"
   if [ -n "$CUR_PID" ]; then reap_tree "$CUR_PID"; fi
+  if [ -n "$STUCK_PID" ]; then reap_tree "$STUCK_PID"; fi
   exit 130
 }
 
@@ -497,6 +501,9 @@ record() { # ID RESULT DETAIL
   local id="$1" res="$2" detail="$3" b ver
   b=$(step_backend "$id")
   case "$b" in msb) ver="$MSB_VER" ;; sbx) ver="$SBX_VER" ;; *) ver="" ;; esac
+  if [ "$STEP_TIMED_OUT" -eq 1 ] && [ "$res" != BLOCKED ]; then
+    detail="BLOCKED(timeout): a command in this step timed out, so the $res verdict is withheld. Was: $detail"; res=BLOCKED
+  fi
   detail=$(printf '%s' "$detail" | tr '\t\r\n' '   ')
   case "$res" in
     PASS) n_pass=$((n_pass + 1)) ;;

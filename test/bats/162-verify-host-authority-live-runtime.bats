@@ -126,7 +126,7 @@ case "$1" in
       *".hal-install-proof"*"if [ -e"*|*"if [ -e"*".hal-install-proof"*) [ -n "${STUB_PROOF_FAIL:-}" ] && exit 1; cat "$HS/install.count" 2>/dev/null || echo 1 ;;
       *"if [ -e"*) echo 1 ;;
       *"cat /home/agent/.hal-ro-proof"*) echo "/var/lib/acq/host/kit-files/home-agent-hal-ro-proof-sh.1" ;;
-      *NO-GUEST-COPY*) echo NO-GUEST-COPY ;;
+      *NO-GUEST-COPY*) [ -n "${STUB_MSB_EXEC_HANG:-}" ] && sleep 30.42; echo NO-GUEST-COPY ;;
       *PLAIN-COPY-OK*) echo PLAIN-COPY-OK ;;
     esac ;;
 esac
@@ -325,4 +325,12 @@ _hang_run() { # extra script args... ; sets HANG_SECS
   grep -q 'interrupted' "$HS/int.log"
   grep -q 'SUMMARY:.*INTERRUPTED' "$HS/int.log"
   grep -q 'acq --backend msb rm hal-t1-a' "$HS/calls"
+}
+
+@test "runtime: a timed-out check inside a step downgrades its FAIL to BLOCKED(timeout)" {
+  STUB_MSB_EXEC_HANG="1"; export STUB_MSB_EXEC_HANG
+  HAL_KILL_GRACE=2 _hal --backend msb --step-timeout 2 --only msb-ro-kit-create
+  [ "$(_res msb-ro-kit-create)" = BLOCKED ]
+  assert_output --partial 'BLOCKED(timeout)'
+  assert_failure 2
 }
