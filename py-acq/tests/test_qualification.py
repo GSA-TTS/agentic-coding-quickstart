@@ -223,7 +223,8 @@ def test_matrix_reports_unqualified_cells_honestly():
         assert by_cell[(backend, "windows-arm64")].claimed is False
         assert by_cell[(backend, "linux-musl")].state is MatrixState.UNQUALIFIED
 
-    # sbx on macOS x86_64 and Linux aarch64 are unqualified (not claimed).
+    # macOS x86_64 (every backend) and sbx on Linux aarch64 are unqualified.
+    assert by_cell[("msb", "macos-x86_64")].state is MatrixState.UNQUALIFIED
     assert by_cell[("sbx", "macos-x86_64")].state is MatrixState.UNQUALIFIED
     assert by_cell[("sbx", "linux-aarch64")].state is MatrixState.UNQUALIFIED
 
@@ -369,13 +370,14 @@ def test_failed_transcript_is_blocked_in_matrix():
 def test_unqualified_cell_is_never_qualified_even_with_green_transcript():
     green = make_transcript(Verdict.PASS)
     assert cell_state("sbx", "macos-x86_64", transcript=green, now=NOW) is MatrixState.UNQUALIFIED
+    assert cell_state("msb", "macos-x86_64", transcript=green, now=NOW) is MatrixState.UNQUALIFIED
 
 
 def test_is_claimed_matches_adr_qualified_matrix():
     assert is_claimed("msb", "linux-x86_64")
     assert is_claimed("msb", "linux-aarch64")
     assert is_claimed("msb", "macos-arm64")
-    assert is_claimed("msb", "macos-x86_64")
+    assert not is_claimed("msb", "macos-x86_64")
     assert is_claimed("msb", "windows-x64")
     assert not is_claimed("msb", "windows-arm64")
     assert not is_claimed("msb", "linux-musl")

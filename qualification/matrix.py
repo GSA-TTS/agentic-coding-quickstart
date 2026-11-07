@@ -50,7 +50,6 @@ QUALIFIED = {
         "linux-x86_64",
         "linux-aarch64",
         "macos-arm64",
-        "macos-x86_64",
         "windows-x64",
     }),
     SBX: frozenset({
