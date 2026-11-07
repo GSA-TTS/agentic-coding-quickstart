@@ -234,7 +234,7 @@ _sbx_pf() { ( ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$REPO_ROOT/acq" >
 @test "runtime: a hanging 'msb --version' preflight is bounded and leaves msb steps BLOCKED" {
   STUB_MSB_VER_SLEEP=10 _hal --backend msb --step-timeout 1 --only msb-ro-kit-create
   [ "$(_res msb-ro-kit-create)" = BLOCKED ]
-  assert_output --partial 'probe timed out'
+  assert_output --partial 'timed out after 1s: msb --version'
 }
 
 @test "runtime: an empty selection exits 2" {
@@ -266,4 +266,64 @@ _sbx_pf() { ( ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$REPO_ROOT/acq" >
 @test "runtime: a null active_config is BLOCKED for inspect-shape, never FAIL" {
   STUB_INSPECT_NULL=1 _hal --backend msb --only msb-ro-kit-create,msb-inspect-shape
   [ "$(_res msb-inspect-shape)" = BLOCKED ]
+}
+
+# --- unbounded-wait regressions: a hung create whose backgrounded, TERM-ignoring helper
+# holds the output open must not keep the script alive past timeout + grace. The old
+# `timeout ... | tee` pipeline returned only when the sleeper exited (~30s here).
+_hang_run() { # extra script args... ; sets HANG_SECS
+  local t0=$SECONDS
+  HAL_KILL_GRACE=2 STUB_CREATE_HANG="$STUB_CREATE_HANG" _hal --backend msb --create-timeout 3 --step-timeout 3 "$@"
+  HANG_SECS=$((SECONDS - t0))
+}
+
+@test "runtime: a hung create with a TERM-ignoring background helper returns within timeout plus grace" {
+  STUB_CREATE_HANG=bg _hang_run --only msb-ro-kit-create
+  [ "$HANG_SECS" -lt 20 ]
+  [ "$(_res msb-ro-kit-create)" = BLOCKED ]
+  assert_output --partial 'BLOCKED(timeout)'
+  assert_output --partial 'timed out after 3s'
+  assert_output --partial 'SUMMARY:'
+}
+
+@test "runtime: a hung create whose parent also ignores TERM is KILLed within the bound" {
+  STUB_CREATE_HANG=ignore _hang_run --only msb-ro-kit-create
+  [ "$HANG_SECS" -lt 20 ]
+  [ "$(_res msb-ro-kit-create)" = BLOCKED ]
+}
+
+@test "runtime: a timeout writes hang diagnostics into the transcript, and --no-hang-diagnostics omits them" {
+  STUB_CREATE_HANG=bg _hang_run --only msb-ro-kit-create
+  grep -q -- '--- hang diagnostics' "$HS/out/transcript.log"
+  grep -q 'msb ls (rc' "$HS/out/transcript.log"
+  STUB_CREATE_HANG=bg _hang_run --no-hang-diagnostics --only msb-ro-kit-create
+  ! grep -q -- '--- hang diagnostics' "$HS/out/transcript.log"
+}
+
+@test "runtime: cleanup after a timed-out create still removes the tracked sandbox" {
+  STUB_CREATE_HANG=bg _hang_run --only msb-ro-kit-create
+  grep -q 'cleanup: removing msb sandbox hal-t1-a' "$HS/out/transcript.log"
+  grep -q 'acq --backend msb rm hal-t1-a' "$HS/calls"
+}
+
+@test "runtime: SIGINT during a hung command still prints the summary, cleans up and exits 130" {
+  rm -rf "$HS/out"
+  # set -m gives the job default signal dispositions, as a script started from a terminal
+  # has (a plain background job ignores SIGINT). The harness stubs sleep, so wait with
+  # `command sleep`.
+  set -m
+  HAL_KILL_GRACE=2 STUB_CREATE_HANG=ignore bash "$REPO_ROOT/scripts/verify-host-authority-live" --out "$HS/out" \
+    --step-timeout 30 --create-timeout 60 --backend msb --only msb-ro-kit-create >"$HS/int.log" 2>&1 &
+  local pid=$! i=0 rc=0
+  set +m
+  while [ "$i" -lt 150 ] && ! grep -q 'Applying configuration kits' "$HS/int.log" 2>/dev/null; do command sleep 0.2; i=$((i + 1)); done
+  grep -q 'Applying configuration kits' "$HS/int.log"
+  kill -INT "$pid"
+  i=0; while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 100 ]; do command sleep 0.2; i=$((i + 1)); done
+  ! kill -0 "$pid" 2>/dev/null
+  wait "$pid" || rc=$?
+  [ "$rc" -eq 130 ]
+  grep -q 'interrupted' "$HS/int.log"
+  grep -q 'SUMMARY:.*INTERRUPTED' "$HS/int.log"
+  grep -q 'acq --backend msb rm hal-t1-a' "$HS/calls"
 }

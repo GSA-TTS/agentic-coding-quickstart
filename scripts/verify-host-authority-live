@@ -327,7 +327,7 @@ hang_diag() { # called with the stuck command still alive
   say "--- hang diagnostics $(date -u +%Y-%m-%dT%H:%M:%SZ): ps (acq|msb|sbx|socat|sleep), msb ls, sbx ls ---"
   run_bounded 15 "$f" "" ps -axo pid,ppid,etime,stat,command
   grep -E 'acq|msb|sbx|socat|sleep' "$f" 2>/dev/null | grep -v 'grep -E' >"$f.sel"
-  while IFS= read -r l; do say "  $l"; done <"$f.sel"
+  while IFS= read -r l; do say "  $(printf '%s' "$l" | cut -c1-200)"; done <"$f.sel"
   if command -v msb >/dev/null 2>&1; then
     run_bounded 15 "$f" "" msb ls; say "  msb ls (rc $LAST_RC):"
     while IFS= read -r l; do say "    $l"; done <"$f"
