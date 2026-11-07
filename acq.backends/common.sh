@@ -2031,7 +2031,13 @@ acq_resolve_backend() {
         echo "     If it is already installed elsewhere, add its directory to PATH," >&2
         echo "     e.g.:  export PATH=\"\$HOME/.local/bin:\$PATH\"" >&2
         echo "     Run 'acq doctor' for installation hints." >&2
-        exit 1
+        # Return, not exit: acq_resolve_backend is a RESOLUTION function. A bare
+        # caller (the mutating verbs) still fails via `set -e`; a best-effort
+        # caller (`acq version` / `doctor` / `configure` / help) wraps the call
+        # in `… || true` and must be able to recover and report "unknown"
+        # rather than dying mid-report. An `exit 1` here would terminate the
+        # shell and bypass that `|| true` (see the coexistence `version` oracle).
+        return 1
       }
       name="$ACQ_AUTODETECT_BACKEND"
       autodetected=1
