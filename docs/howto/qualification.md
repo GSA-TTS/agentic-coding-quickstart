@@ -61,7 +61,7 @@ organisation are refused).
 
 | Option | Effect |
 |--------|--------|
-| `--dry-run` | print the host, revision, per-cell state and the PR target; run nothing |
+| `--dry-run` | print the host, revision, per-cell state and the PR target; run nothing. A condition that would stop a real run is reported as `WOULD REFUSE` (exit 2) after the plan, so a preview from any branch still shows the plan |
 | `--only-stale` | skip cells that are already current |
 | `--no-publish` | record into this checkout's ledger only; no branch, push or PR |
 | `--backend msb` / `--backend sbx` | run one backend (repeatable) |
