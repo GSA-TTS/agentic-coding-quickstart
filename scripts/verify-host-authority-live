@@ -20,12 +20,19 @@
 #   --out DIR               transcript directory (default <repo>/tmp/verify-host-authority-live-<stamp>)
 #   --step-timeout SECS     per command timeout (default 120)
 #   --create-timeout SECS   timeout for sandbox creation (default 1200)
+#   --step-budget SECS      wall-clock budget for one whole step (default 2*create-timeout
+#                           + 10*step-timeout); an exhausted budget is BLOCKED(timeout)
+#   --no-hang-diagnostics   do not capture ps / msb ls / sbx ls when a command times out
+#                           (the capture is ON by default and goes into the transcript)
 #   --keep                  keep throwaway sandboxes when a step fails
 #   --dry-run               print the plan and the MANUAL instructions; touch no backend
 #   -h, --help              show this help
 #   EXPECT_SHA=<prefix>     abort unless this checkout's HEAD starts with it
 #
-# Exit: 0 all automated steps PASS, 1 any FAIL, 2 no FAIL but some BLOCKED.
+# Exit: 0 all automated steps PASS, 1 any FAIL, 2 no FAIL but some BLOCKED, 130 interrupted.
+# Every command writes to a file, never to a pipe a descendant could hold open; a command
+# that outlives its timeout (plus HAL_KILL_GRACE, default 10s) is KILLed with its children,
+# and the summary always prints, also after an interrupt.
 # Uses your normal acq state and credentials (nothing is seeded or printed). msb steps
 # create shell sandboxes with --no-provider-kits; sbx steps create an opencode sandbox and use your existing USAi setup (a
 # create that fails for lack of it makes the sbx steps BLOCKED). Only throwaway
@@ -43,6 +50,9 @@ ONLY=""
 OUT=""
 STEP_TIMEOUT=120
 CREATE_TIMEOUT=1200
+STEP_BUDGET=""
+HANG_DIAG=1
+KILL_GRACE="${HAL_KILL_GRACE:-10}"   # HAL_KILL_GRACE: also an offline test seam
 KEEP=0
 DRY=0
 STAMP=$(date -u +%Y%m%dt%H%M%Sz)
@@ -65,6 +75,10 @@ while [ "$#" -gt 0 ]; do
     --step-timeout=*) STEP_TIMEOUT="${1#--step-timeout=}" ;;
     --create-timeout) [ "$#" -ge 2 ] || die_usage "--create-timeout needs a value"; CREATE_TIMEOUT="$2"; shift ;;
     --create-timeout=*) CREATE_TIMEOUT="${1#--create-timeout=}" ;;
+    --step-budget) [ "$#" -ge 2 ] || die_usage "--step-budget needs a value"; STEP_BUDGET="$2"; shift ;;
+    --step-budget=*) STEP_BUDGET="${1#--step-budget=}" ;;
+    --hang-diagnostics) HANG_DIAG=1 ;;
+    --no-hang-diagnostics) HANG_DIAG=0 ;;
     --keep) KEEP=1 ;;
     --dry-run) DRY=1 ;;
     -h|--help) usage; exit 0 ;;
@@ -76,6 +90,9 @@ done
 case "$BACKENDS" in msb|sbx|both) ;; *) die_usage "--backend must be msb, sbx or both (got '$BACKENDS')" ;; esac
 is_uint "$STEP_TIMEOUT" || die_usage "--step-timeout must be a positive integer"
 is_uint "$CREATE_TIMEOUT" || die_usage "--create-timeout must be a positive integer"
+is_uint "$KILL_GRACE" || die_usage "HAL_KILL_GRACE must be a positive integer"
+[ -n "$STEP_BUDGET" ] || STEP_BUDGET=$((2 * CREATE_TIMEOUT + 10 * STEP_TIMEOUT))
+is_uint "$STEP_BUDGET" || die_usage "--step-budget must be a positive integer"
 
 # --- step table -------------------------------------------------------------
 # id|backend|title (order = execution order; dependents of a failed setup step are BLOCKED)

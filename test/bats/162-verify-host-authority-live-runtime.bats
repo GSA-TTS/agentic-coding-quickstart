@@ -48,6 +48,12 @@ case "$verb" in
       printf '1' >"$hc/install-123"
     fi
     echo "$name" >>"$HS/list.$b"
+    if [ -n "${STUB_CREATE_HANG:-}" ]; then
+      echo "acq: Applying configuration kits"
+      ( trap '' TERM; sleep 30.42 ) &
+      [ "$STUB_CREATE_HANG" = ignore ] && trap '' TERM
+      sleep 60.42
+    fi
     exit "${STUB_CREATE_RC:-0}" ;;
   rm) grep -vxF -- "$name" "$HS/list.$b" >"$HS/l.tmp"; mv "$HS/l.tmp" "$HS/list.$b"; exit 0 ;;
   restart)
