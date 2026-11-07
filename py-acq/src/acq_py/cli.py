@@ -856,6 +856,21 @@ def _mount_workspace(backend: str, workspace: str) -> str:
     return os.path.realpath(workspace) if backend == "msb" else workspace
 
 
+def _recorded_workspace(backend: str, name: str) -> str | None:
+    """The workspace recorded for an existing sandbox, or ``None`` when unknown.
+
+    A re-attach must start in the directory the sandbox was created with, not the
+    path the user typed this time: an older build may have recorded a form (e.g. a
+    symlink path) that differs from what ``_mount_workspace`` now yields. An absent
+    or unreadable record falls back to the typed path.
+    """
+    try:
+        record = state.record_read(backend, name)
+    except state.StateSchemaError:
+        return None
+    return (record or {}).get("workspace") or None
+
+
 def _wait_exec_ready(backend: str, name: str) -> bool:
     adapter = _adapter(backend)
     deadline = time.monotonic() + adapter.READY_TIMEOUT_S
@@ -1111,6 +1126,8 @@ def run_run(parsed, emit_json: bool, backend: str) -> int:
         name = parsed.name or _derive_name(target, workspace)
         workspace = _mount_workspace(backend, workspace)
         action = "reattached" if adapter.exists(name) else "created"
+        if action == "reattached":
+            workspace = _recorded_workspace(backend, name) or workspace
         image: str | None = None
         entrypoint: str | None = None
         if not adapter.exists(name):
