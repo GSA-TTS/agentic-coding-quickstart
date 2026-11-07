@@ -108,8 +108,8 @@
       "vectors": ["cli/cp-in", "cli/cp-out"]
     },
     {
-      "contract": "ADR-0029 cp forwards a UNC/network host path verbatim to the backend (resolved natively), accepted like a plain-drive path",
-      "vectors": ["cli/cp-unc-host"]
+      "contract": "ADR-0029 cp forwards a UNC/network host path verbatim to the backend (resolved natively), accepted like a plain-drive path — slash and backslash forms, in and out, msb and sbx",
+      "vectors": ["cli/cp-unc-host", "cli/cp-unc-host-backslash", "cli/cp-unc-host-out", "cli/cp-unc-host-sbx"]
     },
     {
       "contract": "ADR-0038m §4 cp requires exactly one NAME:/guest reference (usage error otherwise)",
