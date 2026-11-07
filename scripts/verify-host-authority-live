@@ -275,15 +275,125 @@ case "$WS_ROOT" in "$OUT"/ws.?*) ;; *) echo "verify-host-authority-live: unexpec
 
 sandbox_name() { printf 'hal-%s-%s' "$RUN_ID" "$1"; }
 
-# run_cmd SECS CMD... : run with a per-command timeout, stdin closed, output shown
-# live and appended to the transcript; the exit status lands in LAST_RC.
+# --- bounded execution core ---------------------------------------------------
+# Nothing here ever reads a pipe that a descendant of the command could hold open. The
+# command's output goes to a FILE, it runs in the background, and this shell waits for
+# that one PID only, polling against a wall-clock deadline. At the deadline it records
+# hang diagnostics, TERMs the command and every descendant (found with pgrep -P), then
+# KILLs whatever ignored it. timeout(1) (-k) stays as an outer backstop only.
+POLL=1
+if sleep 0.1 2>/dev/null; then POLL=0.1; fi
+STEP_DEADLINE=0; STEP_TIMED_OUT=0; CUR_PID=""; B_LIVE=0; B_SHOWN=0; IN_DIAG=0
+PROBE_F="$OUT/.probe-out"
+
+descendants() { # PID -> PID and every descendant, one per line
+  local c
+  echo "$1"
+  command -v pgrep >/dev/null 2>&1 || return 0
+  for c in $(pgrep -P "$1" 2>/dev/null); do descendants "$c"; done
+}
+any_alive() { local p; for p in "$@"; do kill -0 "$p" 2>/dev/null && return 0; done; return 1; }
+reap_tree() { # PID : TERM the tree, wait KILL_GRACE, KILL survivors (and fresh children)
+  local list p t
+  list=$(descendants "$1")
+  for p in $list; do kill -TERM "$p" 2>/dev/null; done
+  t=$((SECONDS + KILL_GRACE))
+  # shellcheck disable=SC2086
+  while [ "$SECONDS" -le "$t" ] && any_alive $list; do sleep "$POLL"; done
+  if kill -0 "$1" 2>/dev/null; then list="$list
+$(descendants "$1")"; fi
+  for p in $list; do kill -KILL "$p" 2>/dev/null; done
+  sleep "$POLL"
+  return 0
+}
+
+b_show() { # OUTFILE : echo the bytes not yet shown to the terminal and the transcript
+  local f="$1" size n
+  [ "$B_LIVE" -eq 1 ] || return 0
+  size=$(wc -c <"$f" 2>/dev/null | tr -d ' ')
+  [ -n "$size" ] || return 0
+  n=$((size - B_SHOWN))
+  [ "$n" -gt 0 ] || return 0
+  tail -c +$((B_SHOWN + 1)) "$f" 2>/dev/null | head -c "$n" >"$OUT/.chunk"
+  cat "$OUT/.chunk"
+  cat "$OUT/.chunk" >>"$TRANSCRIPT"
+  B_SHOWN=$size
+}
+
+hang_diag() { # called with the stuck command still alive
+  local f="$OUT/.diag" s_pid="$CUR_PID" s_shown="$B_SHOWN" s_live="$B_LIVE" s_rc="$LAST_RC" s_to="$STEP_TIMED_OUT" s_dl="$STEP_DEADLINE" l
+  [ "$HANG_DIAG" -eq 1 ] && [ "$IN_DIAG" -eq 0 ] || return 0
+  IN_DIAG=1; STEP_DEADLINE=0; B_LIVE=0
+  say "--- hang diagnostics $(date -u +%Y-%m-%dT%H:%M:%SZ): ps (acq|msb|sbx|socat|sleep), msb ls, sbx ls ---"
+  run_bounded 15 "$f" "" ps -axo pid,ppid,etime,stat,command
+  grep -E 'acq|msb|sbx|socat|sleep' "$f" 2>/dev/null | grep -v 'grep -E' >"$f.sel"
+  while IFS= read -r l; do say "  $l"; done <"$f.sel"
+  if command -v msb >/dev/null 2>&1; then
+    run_bounded 15 "$f" "" msb ls; say "  msb ls (rc $LAST_RC):"
+    while IFS= read -r l; do say "    $l"; done <"$f"
+  fi
+  if command -v sbx >/dev/null 2>&1; then
+    run_bounded 15 "$f" "" sbx ls; say "  sbx ls (rc $LAST_RC):"
+    while IFS= read -r l; do say "    $l"; done <"$f"
+  fi
+  say "--- end hang diagnostics ---"
+  CUR_PID="$s_pid"; B_SHOWN="$s_shown"; B_LIVE="$s_live"; LAST_RC="$s_rc"; STEP_TIMED_OUT="$s_to"; STEP_DEADLINE="$s_dl"; IN_DIAG=0
+}
+
+# run_bounded SECS OUTFILE ERRFILE CMD... : stdin closed, stdout (and stderr, unless
+# ERRFILE is given) go to OUTFILE. LAST_RC is the exit status; 124 means timed out, or
+# the step's wall-clock budget was exhausted (the command is then not started).
+run_bounded() {
+  local secs="$1" outf="$2" errf="$3" pid dl left rc=0 timedout=0
+  shift 3
+  if [ "$STEP_DEADLINE" -gt 0 ]; then
+    left=$((STEP_DEADLINE - SECONDS))
+    if [ "$left" -le 0 ]; then
+      say "[step wall-clock budget (${STEP_BUDGET}s) exhausted; not running: $*]"
+      : >"$outf"; STEP_TIMED_OUT=1; LAST_RC=124; return 0
+    fi
+    [ "$secs" -le "$left" ] || secs=$left
+  fi
+  : >"$outf"; B_SHOWN=0
+  if [ -n "$errf" ]; then
+    : >"$errf"
+    "${TO[@]}" -k "$KILL_GRACE" "$((secs + KILL_GRACE + 5))" "$@" </dev/null >"$outf" 2>"$errf" &
+  else
+    "${TO[@]}" -k "$KILL_GRACE" "$((secs + KILL_GRACE + 5))" "$@" </dev/null >"$outf" 2>&1 &
+  fi
+  pid=$!; CUR_PID=$pid; dl=$((SECONDS + secs))
+  while kill -0 "$pid" 2>/dev/null; do
+    b_show "$outf"
+    if [ "$SECONDS" -gt "$dl" ]; then
+      timedout=1
+      say "[timed out after ${secs}s: $*]"
+      hang_diag
+      reap_tree "$pid"
+      break
+    fi
+    sleep "$POLL"
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    say "[could not kill pid $pid; abandoning it]"; rc=137
+  else
+    wait "$pid" 2>/dev/null; rc=$?
+  fi
+  b_show "$outf"
+  CUR_PID=""
+  if [ "$timedout" -eq 1 ]; then rc=124; fi
+  if [ "$rc" -eq 124 ]; then STEP_TIMED_OUT=1; fi
+  LAST_RC=$rc
+  return 0
+}
+
+# run_cmd SECS CMD... : run bounded, stdin closed, output shown live and appended to the
+# transcript; the output is also kept in $CAP and the exit status lands in LAST_RC.
 run_cmd() {
   local secs="$1"; shift
   say "\$ $*"
-  : >"$CAP"
-  "${TO[@]}" "$secs" "$@" </dev/null 2>&1 | tee -a "$TRANSCRIPT" "$CAP"
-  LAST_RC=${PIPESTATUS[0]}
-  if [ "$LAST_RC" -eq 124 ]; then say "[timed out after ${secs}s]"; fi
+  B_LIVE=1
+  run_bounded "$secs" "$CAP" "" "$@"
+  B_LIVE=0
   return 0
 }
 last_out() { tr -d '\r' <"$CAP"; }
@@ -309,11 +419,15 @@ $1:$2
 }
 
 remove_sandbox() { # BACKEND NAME
-  "${TO[@]}" 120 "$ACQ" --backend "$1" rm "$2" </dev/null >/dev/null 2>&1 || true
+  local f="$OUT/.rm-out"
+  STEP_DEADLINE=0
+  run_bounded 120 "$f" "" "$ACQ" --backend "$1" rm "$2"
+  say "cleanup: acq rm $2 rc=$LAST_RC"
   case "$1" in
-    msb) "${TO[@]}" 60 msb remove --force "$2" </dev/null >/dev/null 2>&1 || true ;;
-    sbx) "${TO[@]}" 60 sbx rm --force "$2" </dev/null >/dev/null 2>&1 || true ;;
+    msb) run_bounded 60 "$f" "" msb remove --force "$2" ;;
+    sbx) run_bounded 60 "$f" "" sbx rm --force "$2" ;;
   esac
+  say "cleanup: $1 remove $2 rc=$LAST_RC"
 }
 
 ANY_FAIL=0
@@ -431,7 +545,9 @@ msb_inspect_check() {
   local n="$1" hc js
   hc=$(hc_dir msb "$n"); js="$OUT/inspect-$n.json"
   [ -n "$hc" ] || return 2
-  "${TO[@]}" "$STEP_TIMEOUT" msb inspect "$n" --format json </dev/null >"$js" 2>>"$TRANSCRIPT" || return 2
+  run_bounded "$STEP_TIMEOUT" "$js" "$OUT/.inspect-err" msb inspect "$n" --format json
+  cat "$OUT/.inspect-err" >>"$TRANSCRIPT" 2>/dev/null
+  [ "$LAST_RC" -eq 0 ] || return 2
   [ -s "$js" ] || return 2
   python3 - "$js" "$hc" <<'PY'
 import json, os, sys
@@ -463,9 +579,9 @@ MSB_READY=0; MSB_A=""; MSB_A_OK=0
 PROBE_OUT=""; PROBE_RC=0
 probe() {
   local secs="$1"; shift
-  PROBE_OUT=$("${TO[@]}" "$secs" "$@" </dev/null 2>&1); PROBE_RC=$?
-  PROBE_OUT=$(printf '%s' "$PROBE_OUT" | tr -d '\r')
-  if [ "$PROBE_RC" -eq 124 ]; then say "[probe timed out after ${secs}s: $*]"; fi
+  run_bounded "$secs" "$PROBE_F" "" "$@"
+  PROBE_RC=$LAST_RC
+  PROBE_OUT=$(tr -d '\r' <"$PROBE_F")
   return 0
 }
 
@@ -527,7 +643,9 @@ step_msb_inspect_shape() {
   local id=msb-inspect-shape js
   [ "$MSB_A_OK" -eq 1 ] || { record "$id" BLOCKED "needs the sandbox from msb-ro-kit-create"; return 0; }
   js="$OUT/inspect-$MSB_A.json"
-  "${TO[@]}" "$STEP_TIMEOUT" msb inspect "$MSB_A" --format json </dev/null >"$js" 2>>"$TRANSCRIPT" \
+  run_bounded "$STEP_TIMEOUT" "$js" "$OUT/.inspect-err" msb inspect "$MSB_A" --format json
+  cat "$OUT/.inspect-err" >>"$TRANSCRIPT" 2>/dev/null
+  [ "$LAST_RC" -eq 0 ] \
     || { record "$id" BLOCKED "msb inspect failed or timed out"; return 0; }
   python3 -c '
 import json, sys
