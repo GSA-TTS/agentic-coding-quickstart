@@ -339,7 +339,7 @@ def test_every_harness_module_is_classified_as_surface_or_read_only():
     # as read-only; otherwise editing it would silently not expire any evidence.
     from qualification.matrix import TIER3_SURFACE
 
-    read_only = {"qualification/matrix.py", "qualification/ledger.py", "qualification/gate.py"}
+    read_only = {"qualification/matrix.py", "qualification/ledger.py", "qualification/gate.py", "qualification/host.py", "qualification/publish.py"}
     for path in sorted((REPO_ROOT / "qualification").glob("*.py")):
         rel = f"qualification/{path.name}"
         assert rel in TIER3_SURFACE or rel in read_only, f"{rel} is not classified"

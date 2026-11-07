@@ -69,6 +69,12 @@ arm64, macOS x86_64, and Windows x64; sbx on Linux x86_64, macOS arm64, and
 Windows x64. Windows ARM64, musl, and sbx on macOS x86_64 and Linux aarch64 are
 unqualified (not claimed).
 
+## Qualify a host
+
+`python -m qualification.host` runs the cell oracle for this host, records the
+green runs in the ledger, and opens the ledger PR. See
+[`docs/howto/qualification.md`](../docs/howto/qualification.md).
+
 ## The ledger and the release gate
 
 `python -m qualification.gate record transcript.json` appends a run to

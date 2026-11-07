@@ -23,6 +23,59 @@ review_cycle: "quarterly"
 
 ---
 
+## Qualify this host in one command
+
+On any macOS, Linux (with `/dev/kvm`) or Windows x64 host that has `msb` and/or
+`sbx` installed and logged in, with Python >= 3.12 and `gh` logged in to your fork,
+from a clean checkout whose `HEAD` is on your fork's `main`
+(`git fetch <fork> && git switch --detach <fork>/main`):
+
+```bash
+python -m qualification.host        # Windows: py -3.12 -m qualification.host
+```
+
+It detects the host (OS build, architecture, hypervisor), runs the cell oracle
+through the harness for each backend claimed on this platform, records the green
+runs in the ledger (retiring the cell's waiver if it has one), then commits the
+ledger change in a throwaway worktree, pushes a new `chore/ledger-<platform>-<time>`
+branch to your **fork** remote, and opens a PR **into the fork's `main`** (with `gh`,
+or it prints the URL). Merge that PR as usual. It never pushes to the upstream
+repository (every fetch and push URL of the remote is checked), never touches your
+checkout, and records only green runs unless you pass `--record-failures`.
+
+It works from any ledger state, so use it for the first run of a cell, to renew a
+stale or expiring one, after a Tier-3 surface change, and after a backend upgrade.
+Re-running is safe. A backend whose CLI is missing is reported `SKIPPED`, not
+recorded. If the installed backend's `major.minor` is not the ledger's accepted one it
+stops before the long run; install the accepted version or pass
+`--accept-backend-version`. That moves the accepted version in the same PR, only for a
+backend whose run went green, and the PR lists the cells on other platforms that stop
+being qualified because of it (they must be re-run). If publishing fails after a long
+run, the transcripts are kept and the error prints the `gate record` commands to use.
+Remotes must be plain `https://github.com/<you>/<repo>` or `git@github.com:<you>/<repo>`
+URLs for a personal fork (ssh host aliases, enterprise hosts and the upstream
+organisation are refused).
+
+| Option | Effect |
+|--------|--------|
+| `--dry-run` | print the host, revision, per-cell state and the PR target; run nothing |
+| `--only-stale` | skip cells that are already current |
+| `--no-publish` | record into this checkout's ledger only; no branch, push or PR |
+| `--backend msb` / `--backend sbx` | run one backend (repeatable) |
+| `--remote NAME` | fork remote to publish to (default: the only non-upstream remote) |
+| `--record-failures` | also record `FAIL`/`FLAKY` outcomes (published like any other) |
+| `--accept-backend-version` | move the ledger's accepted backend version to the installed one |
+| `--timeout SECONDS` | per attempt (a `FAIL` is retried up to 3 times; default 900) |
+
+Exit status: `0` every selected backend passed or was already current, `1` a
+`FAIL`/`FLAKY`, `2` anything else (a skipped or blocked backend, or a precondition
+failed and nothing ran). Alpine/musl hosts and an x86_64 Python under Rosetta are
+refused, since they would mislabel the cell.
+
+The transcripts stay on the host, under `tmp/qualify-out-<time>/`; keep them, since
+the ledger holds only their hashes. The sections below are what that command runs,
+for reference and for debugging a single step.
+
 ## What this is
 
 The acq v1 rewrite is functionally complete and the on-host Tier-3 milestone is
