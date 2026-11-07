@@ -242,7 +242,11 @@ def pr_text(
 
 
 def _cells_qualified(worktree: Path, host: Host, backends: list[str]) -> str | None:
-    """None if every listed backend's cell is qualified in the edited ledger; else why not."""
+    """None if every listed backend's cell is qualified in the edited ledger; else why not.
+
+    Run inside the publish worktree, so the surface diff is evaluated against the
+    branch point (the remote's current ``main``) — the same comparison CI will make.
+    """
     proc = subprocess.run(
         [sys.executable, "-m", "qualification.gate", "--ledger", DEFAULT_LEDGER, "check", "--json"],
         cwd=worktree, capture_output=True, text=True,

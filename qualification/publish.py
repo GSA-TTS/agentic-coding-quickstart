@@ -123,21 +123,55 @@ def check_remote_reachable(root: Path, remote: str) -> None:
     git(root, "ls-remote", "--exit-code", remote, "refs/heads/main", env={"GIT_TERMINAL_PROMPT": "0"})
 
 
+def remote_main_tip(root: Path, remote: str, fallback: str) -> str:
+    """The commit to branch the ledger change from: ``<remote>/main``, freshly fetched.
+
+    Falls back to the existing remote-tracking ref when the fetch fails (offline), and
+    to ``fallback`` (the tested revision) when there is no tracking ref either, so an
+    unreachable remote degrades to the old behaviour instead of aborting a long run.
+    """
+    fetched = subprocess.run(
+        ["git", "fetch", "-q", remote, "main"], cwd=root, capture_output=True, text=True,
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+    ).returncode == 0
+    for ref in (["FETCH_HEAD"] if fetched else []) + [f"refs/remotes/{remote}/main"]:
+        proc = subprocess.run(["git", "rev-parse", "--verify", "--quiet", ref], cwd=root,
+                              capture_output=True, text=True)
+        if proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout.strip()
+    sys.stderr.write(
+        f"qualification.host: cannot resolve {remote}/main; branching from the tested "
+        f"revision {fallback[:12]}, which may conflict with a concurrent ledger change\n"
+    )
+    return fallback
+
+
 def publish(
     root: Path, *, remote: str, slug: str, rev: str, platform: str, title: str, body: str,
     edit: Callable[[Path], None], verify: Callable[[Path], str | None],
 ) -> str:
     """Commit an edited ledger on a new branch of the fork and open a PR; return its branch.
 
-    ``edit(path)`` changes the ledger inside a throwaway worktree at ``rev``;
-    ``verify(worktree)`` returns a reason to abort (nothing is pushed) or ``None``.
+    The branch is cut from the **remote's current** ``main``, not from ``rev``: two
+    hosts recording at the same time (or one recording while another's ledger PR
+    merges) both rewrite the whole of ``docs/qualification-ledger.json``, so a branch
+    cut from the tested revision conflicts with whatever landed meanwhile. ``rev`` is
+    still what was tested and what each ledger entry records; only the branch point
+    moves, and ``edit`` appends to the ledger as it stands on that tip, so entries
+    from the other host are preserved rather than reverted.
+
+    ``edit(path)`` changes the ledger inside a throwaway worktree; ``verify(worktree)``
+    returns a reason to abort (nothing is pushed) or ``None``.
     """
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     branch = f"chore/ledger-{platform}-{stamp}"
     worktree = root / "tmp" / f"ledger-{stamp}"
     worktree.parent.mkdir(exist_ok=True)
-    git(root, "worktree", "add", "-q", "-b", branch, str(worktree), rev)
+    base = remote_main_tip(root, remote, rev)
+    git(root, "worktree", "add", "-q", "-b", branch, str(worktree), base)
     try:
+        if base != rev:
+            print(f"branching from {remote}/main {base[:12]} (tested {rev[:12]})")
         edit(worktree / DEFAULT_LEDGER)
         # Re-resolve the remote from the worktree (includeIf can differ per worktree)
         # and require it to still be the same fork before anything is pushed.
