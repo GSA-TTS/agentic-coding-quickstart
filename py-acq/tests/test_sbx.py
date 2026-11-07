@@ -309,3 +309,21 @@ def test_exec_cp_ports_against_sbx_stub(monkeypatch, tmp_path, capsys):
     rc, doc = _invoke(capsys, "--backend", "sbx", "--json", "ports", "box")
     assert rc == 0
     assert doc["data"]["ports"] == [{"host_port": 8080, "guest_port": 80, "origin": "create"}]
+
+
+def test_cp_unc_host_path_on_sbx(monkeypatch, tmp_path, capsys):
+    # ADR-0029: cp's host side is forwarded verbatim on BOTH backends (resolved
+    # natively), so a UNC/network host path is accepted on sbx the same way it is
+    # on msb — there is no host->guest translation on the cp host side.
+    _env(monkeypatch, tmp_path, catalog={"box": "running"})
+
+    rc, doc = _invoke(capsys, "--backend", "sbx", "--json", "cp", "\\\\server\\share\\file.txt", "box:/tmp/dest.txt")
+    assert rc == 0
+    assert doc["data"]["direction"] == "in"
+    assert doc["data"]["host"] == "\\\\server\\share\\file.txt"
+    assert doc["data"]["guest"] == "/tmp/dest.txt"
+
+    rc, doc = _invoke(capsys, "--backend", "sbx", "--json", "cp", "box:/tmp/src.txt", "\\\\server\\share\\file.txt")
+    assert rc == 0
+    assert doc["data"]["direction"] == "out"
+    assert doc["data"]["host"] == "\\\\server\\share\\file.txt"

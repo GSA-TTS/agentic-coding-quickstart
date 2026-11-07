@@ -155,9 +155,13 @@ def run_cp(parsed, emit_json: bool, backend: str) -> int:
 
     Exactly one side is a ``NAME:/guest/path`` reference; the other is a host
     path. Host and guest types stay distinct (ADR-0038m §4): a host mount source
-    is never treated as a guest path implicitly, and a UNC/network host path —
-    which cannot round-trip losslessly across the host/guest boundary — fails
-    closed rather than being mis-forwarded. The backend copy status is preserved.
+    is never treated as a guest path implicitly. The host side is forwarded
+    verbatim to the backend, which resolves it natively on the host, so a
+    UNC/network host path (``\\\\server\\share\\...`` / ``//server/share/...``)
+    is accepted the same way a plain-drive path is — consistent with the UNC
+    workspace mount the msb adapter now supports (ADR-0029). There is no
+    host→guest translation on the ``cp`` host side, so nothing can round-trip
+    lossily. The backend copy status is preserved.
     """
     adapter = common._adapter(backend)
     src = parsed.src
@@ -187,16 +191,11 @@ def run_cp(parsed, emit_json: bool, backend: str) -> int:
             f"list sandboxes with 'acq ls'",
             emit_json,
         )
-    # UNC/network paths require separate qualification (ADR-0038m §4): fail
-    # closed rather than hand a host-side network path to the backend copy.
-    if host_path.startswith("\\\\") or host_path.startswith("//"):
-        return common._operational_failure(
-            "cp",
-            errors.VALIDATION_FAILED,
-            f"host path {host_path!r} is a UNC/network path and requires separate qualification",
-            "copy via a mounted or local path instead",
-            emit_json,
-        )
+    # The host side is forwarded verbatim to the backend, which resolves it
+    # natively on the host (ADR-0029). There is no host->guest translation on
+    # this side, so a UNC/network host path (\\server\share\... /
+    # //server/share/...) is accepted the same way a plain-drive path is —
+    # consistent with the UNC workspace mount the msb adapter now supports.
     rc = adapter.copy(src, dst)
     if rc != 0:
         return common._operational_failure(
