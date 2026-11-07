@@ -14,10 +14,11 @@ assets).
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 
-from . import __version__
+from . import __version__, envelope, errors
 
 
 def _git_revision() -> str | None:
@@ -59,3 +60,25 @@ def version_data() -> dict:
         "backend_version": None,
         "kit_control_plane_ref": None,
     }
+
+
+def run_version(emit_json: bool) -> int:
+    """The ``version`` command handler (human/JSON rendering over :func:`version_data`).
+
+    Lives here, beside :func:`version_data`, so a change to the ``version`` output
+    fields touches only this module and never ``cli.py``. That keeps the
+    ``version`` command off the Tier-3 surface (ADR-0044m): no live oracle asserts
+    its exact output, so a version-output-only change must not expire a recorded
+    transcript. ``cli.py`` delegates to this handler for ``version``/``--version``.
+    """
+    data = version_data()
+    if emit_json:
+        print(json.dumps(envelope.success("version", data)))
+        return errors.EXIT_SUCCESS
+    print("acq v1 (Python skeleton)")
+    print(f"  acq version:       {data['acq_version']}")
+    print(f"  source revision:   {data['source_revision'] or '(not a git clone)'}")
+    print(f"  backend:           {data['backend'] or 'none'}")
+    print(f"  backend version:   {data['backend_version'] or 'none'}")
+    print(f"  kit control plane: {data['kit_control_plane_ref'] or 'none'}")
+    return errors.EXIT_SUCCESS

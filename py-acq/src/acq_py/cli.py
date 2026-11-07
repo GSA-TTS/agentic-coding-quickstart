@@ -26,9 +26,15 @@ import subprocess
 import sys
 import time
 
+# ``doctor`` and ``version_info`` are deliberately NOT imported here: they are
+# off the Tier-3 surface (ADR-0044m), and importing them at startup would make a
+# break in either one kill the lifecycle/secrets verbs the live oracle drives.
+# They are imported lazily inside ``run_doctor`` and the ``version`` dispatch, so
+# a break there affects only ``acq doctor``/``acq version`` — never the oracle's
+# contract commands. ``test_off_surface_modules_are_not_loaded_by_cli`` asserts
+# this closure.
 from . import (
     backends,
-    doctor,
     envelope,
     errors,
     kits,
@@ -38,7 +44,6 @@ from . import (
     sbx,
     security,
     state,
-    version_info,
 )
 
 # Both adapters raise an error carrying the same (code, message, remediation)
@@ -383,20 +388,6 @@ def _operational_failure(
     return exit_code
 
 
-def run_version(emit_json: bool) -> int:
-    data = version_info.version_data()
-    if emit_json:
-        print(json.dumps(envelope.success("version", data)))
-        return errors.EXIT_SUCCESS
-    print("acq v1 (Python skeleton)")
-    print(f"  acq version:       {data['acq_version']}")
-    print(f"  source revision:   {data['source_revision'] or '(not a git clone)'}")
-    print(f"  backend:           {data['backend'] or 'none'}")
-    print(f"  backend version:   {data['backend_version'] or 'none'}")
-    print(f"  kit control plane: {data['kit_control_plane_ref'] or 'none'}")
-    return errors.EXIT_SUCCESS
-
-
 def _resolve_active_backend(explicit: str | None) -> str | None:
     """Resolve the active backend for read-only reporting.
 
@@ -525,6 +516,8 @@ def run_doctor(emit_json: bool, name: str | None) -> int:
             "backend adapters ship in a later slice; sandbox inspection is unavailable in this build",
             emit_json,
         )
+
+    from . import doctor  # lazy: doctor is off-surface (see module docstring)
 
     data = doctor.doctor_data()
     if emit_json:
@@ -2577,7 +2570,12 @@ def main(argv: list[str] | None = None) -> int:
         return _usage_failure(None, str(exc), emit_json)
 
     if parsed.version or parsed.command == "version":
-        return run_version(emit_json)
+        # The `version` command lives in version_info.py (data + output), imported
+        # lazily so a break there affects only `acq version`, never the oracle's
+        # contract commands (ADR-0044m).
+        from . import version_info
+
+        return version_info.run_version(emit_json)
 
     if parsed.command == "backend":
         if backend_override is not None and backend_override not in backends.BACKENDS:

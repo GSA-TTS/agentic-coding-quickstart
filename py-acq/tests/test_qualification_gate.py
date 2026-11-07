@@ -346,6 +346,37 @@ def test_every_harness_module_is_classified_as_surface_or_read_only():
     assert not read_only & set(TIER3_SURFACE)
 
 
+def test_off_surface_modules_are_not_loaded_by_cli():
+    # A module that is off the surface must be genuinely unreachable from the
+    # oracle's commands (ADR-0044m): importing acq_py.cli — the dispatch the live
+    # oracle drives — must not load any off-surface module, or a break there would
+    # kill create/ls/exec/rm/secret/provider-credential while touches_surface() says
+    # False. Run in a fresh interpreter (sys.modules is polluted by sibling tests in
+    # this process); the module names are derived from the exclusion list so the two
+    # stay in lockstep.
+    import subprocess
+
+    from qualification.matrix import TIER3_SURFACE_EXCLUSIONS
+
+    prefix = "py-acq/src/acq_py/"
+    off_surface_modules = tuple(
+        "acq_py." + path[len(prefix):-len(".py")]
+        for path in TIER3_SURFACE_EXCLUSIONS
+        if path.startswith(prefix) and path.endswith(".py")
+    )
+    assert off_surface_modules, "expected at least one off-surface acq_py module"
+    code = (
+        "import sys; import acq_py.cli; "
+        "targets = set(%r); "
+        "print(','.join(sorted(m for m in sys.modules if m in targets)))"
+        % (off_surface_modules,)
+    )
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    loaded = [m for m in proc.stdout.strip().split(",") if m]
+    assert not loaded, f"off-surface modules loaded by importing acq_py.cli: {loaded}"
+
+
 def test_rendered_summary_cannot_be_broken_by_a_waiver_reason():
     s = gate.CellStatus("msb", "macos-arm64", "waived", "a | b\nc")
     row = gate.render([s]).splitlines()[2]

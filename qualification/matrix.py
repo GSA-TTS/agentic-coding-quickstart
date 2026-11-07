@@ -86,6 +86,18 @@ MAX_AGE_DAYS = 90
 # them must not expire the evidence they evaluate. Narrow or widen this list when
 # the oracle's reach changes. The default image is a mutable tag, so an upstream
 # image change is bounded only by the age limit.
+#
+# The CLI is on the surface as a whole *directory* prefix, not a whitelist: a
+# trailing-slash entry matches every path under it, so a new module, subpackage,
+# or data file under ``py-acq/src/acq_py/`` defaults to ON-surface (the gate's
+# "fails closed" posture — anything it cannot establish as excluded stays
+# surface). The exclusions below carve out the modules no committed oracle
+# asserts AND that are genuinely unreachable from the oracle's commands, so a
+# break there affects only the non-contract commands they serve. The ``version``
+# command is off-surface: its data assembly and human/JSON output live together
+# in ``version_info.py`` (``run_version`` was split out of ``cli.py``), and
+# ``cli.py`` imports it lazily, so a version-output-only change touches only
+# ``version_info.py`` and never the surface.
 TIER3_SURFACE = (
     "py-acq/src/acq_py/",
     "scripts/qualify-backend-cell",
@@ -98,14 +110,48 @@ TIER3_SURFACE = (
     "qualification/repro.py",
 )
 
+# Modules under ``py-acq/src/acq_py/`` that are OFF the surface. To be here a
+# module must satisfy BOTH:
+#   (a) no committed oracle asserts its behaviour — of ADR-0044m's six oracles,
+#       the two committed ones are the cell oracle (boot contract + secret/
+#       provider-credential non-exposure) and the ro-mount oracle; #4 (offline
+#       completeness) is deferred and #5 (security-exception recreation) is a
+#       manual sequence, neither of which drives ``acq version``/``acq doctor``;
+#   (b) it is genuinely unreachable from the oracle's commands — ``cli.py`` must
+#       NOT import it at startup, or a break there would kill create/ls/exec/rm/
+#       secret/provider-credential while ``touches_surface`` says False.
+# ``test_off_surface_modules_are_not_loaded_by_cli`` enforces (b) by asserting
+# importing ``acq_py.cli`` loads none of these.
+TIER3_SURFACE_EXCLUSIONS = (
+    "py-acq/src/acq_py/version_info.py",  # `acq version` data + output (lazy import)
+    "py-acq/src/acq_py/doctor.py",        # `acq doctor` (lazy import)
+    "py-acq/src/acq_py/runtime.py",       # managed-runtime resolution (only via doctor)
+    "py-acq/src/acq_py/_stub_msb.py",     # deterministic test backend (subprocess-only)
+    "py-acq/src/acq_py/_stub_sbx.py",     # deterministic test backend (subprocess-only)
+)
+
 
 def touches_surface(changed_paths) -> bool:
-    """Whether any changed path (repo-relative, ``/``-separated) is on the Tier-3 surface."""
-    return any(
-        path == entry or (entry.endswith("/") and path.startswith(entry))
-        for path in changed_paths
-        for entry in TIER3_SURFACE
-    )
+    """Whether any changed path (repo-relative, ``/``-separated) is on the Tier-3 surface.
+
+    A path is on the surface when it matches an entry (a trailing-slash entry
+    matches everything under that directory) and is not carved out by an
+    exclusion. Directory entries make the surface fail CLOSED: a new file under
+    an entry defaults to on-surface.
+    """
+    for path in changed_paths:
+        if not any(
+            path == entry or (entry.endswith("/") and path.startswith(entry))
+            for entry in TIER3_SURFACE
+        ):
+            continue
+        if any(
+            path == excl or (excl.endswith("/") and path.startswith(excl))
+            for excl in TIER3_SURFACE_EXCLUSIONS
+        ):
+            continue
+        return True
+    return False
 
 
 _FINAL_VERSION = re.compile(r"(\d+)\.(\d+)\.(\d+)")
