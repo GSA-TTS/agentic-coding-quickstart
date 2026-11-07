@@ -59,8 +59,10 @@ one of three states:
 
 * `qualified` — a claimed cell holding a green *current* transcript (recorded
   within 90 days, at the backend's current `major.minor`, with no Tier-3 surface
-  change since, where the surface is the CLI source, the two oracles, and this
-  harness's run path; the commit SHA and artifact hash are provenance only);
+  change since, where the surface is the CLI source tree, the two oracles, and
+  this harness's run path, minus the `version`/`doctor` command modules — the
+  exact list is `TIER3_SURFACE` in `qualification/matrix.py`; the commit SHA and
+  artifact hash are provenance only);
 * `unqualified` — a cell that is not claimed (reported honestly, never a pass);
 * `blocked` — a claimed cell without a green current transcript (holds the gate).
 

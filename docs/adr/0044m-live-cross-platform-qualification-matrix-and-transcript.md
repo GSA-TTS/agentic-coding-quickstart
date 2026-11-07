@@ -65,29 +65,46 @@ stale and the cell is blocked until regenerated:
 - its backend `major.minor` version equals the version under acceptance (a
   patch release does not expire it; a minor or major upgrade does);
 - no change to the Tier-3 surface landed after it was recorded. The surface is
-  the *contract-bearing* CLI modules (a whitelist of the `acq_py/*.py` modules
-  the live cell oracle exercises — the `__main__` entrypoint, `cli.py`, and
-  the adapter/state/migration/envelope/security/credential/kit modules it
-  drives — *not* the whole `py-acq/src/acq_py/` package), the cell and
-  ro-mount oracles (`scripts/qualify-backend-cell`,
-  `scripts/qualify-msb-ro-mount`), and the run path of the harness
-  (`qualification/__init__.py`, `__main__.py`, `cli.py`, `model.py`,
-  `runner.py`, `repro.py`); the matrix, ledger and gate only read transcripts,
-  so editing them expires nothing. A commit that touches none of these (a
-  release-please version bump, changelog, docs, tests, CI) does not expire
-  anything.
+  the CLI source tree `py-acq/src/acq_py/` as a whole, the cell and ro-mount
+  oracles (`scripts/qualify-backend-cell`, `scripts/qualify-msb-ro-mount`), and
+  the run path of the harness (`qualification/__init__.py`, `__main__.py`,
+  `cli.py`, `model.py`, `runner.py`, `repro.py`); the matrix, ledger and gate
+  only read transcripts, so editing them expires nothing. A commit that
+  touches none of these (a release-please version bump, changelog, docs, tests,
+  CI) does not expire anything.
 
-  The `version` command is deliberately *off* the surface: its data assembly
-  and human/JSON output live together in `py-acq/src/acq_py/version_info.py`
-  (the `run_version` handler was split out of `cli.py` for exactly this
-  reason), and no oracle asserts the `version` command's exact output fields.
-  A diff confined to the `version` output therefore does not make a recorded
-  transcript stale. The other off-surface `acq_py` modules are the package
-  version constant (`__init__.py`, so a version bump stays release-only),
-  `doctor.py`/`runtime.py` (`acq doctor`, which no oracle asserts), and the
-  deterministic test-only `_stub_*.py` backends. The whitelist is enforced by
-  `test_every_acq_py_module_is_classified_as_surface_or_off_surface`, so a new
-  module must be classified surface or off-surface, never left implicit.
+  The CLI is on the surface as a whole, not as a per-file whitelist, so a new
+  module, subpackage, or data file under `py-acq/src/acq_py/` is on the surface
+  by default (the gate fails closed). The code is normative: `TIER3_SURFACE` in
+  `qualification/matrix.py` lists the entries and `TIER3_SURFACE_EXCLUSIONS`
+  lists the carve-outs, so this prose is not the authority.
+
+  The `version` command is deliberately *off* the surface. Its data assembly and
+  human/JSON output live together in `py-acq/src/acq_py/version_info.py` (the
+  `run_version` handler was split out of `cli.py`), so a diff confined to the
+  `version` output touches only `version_info.py` and never expires a
+  transcript. `cli.py` imports `version_info` (and `doctor`) lazily, so a break
+  in either affects only `acq version`/`acq doctor`, never the oracle's contract
+  commands; `test_off_surface_modules_are_not_loaded_by_cli` asserts that
+  closure. The other excluded modules are `doctor.py`, `runtime.py` (reached
+  only through `doctor.py`), and the deterministic test-only `_stub_*.py`
+  backends. The package `__init__.py` stays *on* the surface: it is the
+  always-loaded package marker, and the release-please version bump edits
+  `package.json` etc., not this file.
+
+  "No oracle asserts it" refers to the two *committed* oracles only: of
+  ADR-0044m's six, the cell oracle (boot contract + secret/provider-credential
+  non-exposure, `scripts/qualify-backend-cell`) and the ro-mount oracle
+  (`scripts/qualify-msb-ro-mount`) are committed; oracle #4 (offline
+  completeness) is deferred and #5 (security-exception recreation) is a manual
+  sequence, and neither drives `acq version` or `acq doctor`.
+
+  `cli.py` remains wholly on the surface: it still owns the lifecycle/secret/
+  migration dispatch and the `version`/`--version` subparser registration, so
+  any `cli.py` edit (help strings, whitespace, dispatch) still expires every
+  cell's transcript — only output-confined changes, which now live in
+  `version_info.py`, are exempt. This is a deliberate coarse residue, not a
+  per-line exclusion.
 
 The commit SHA and artifact SHA-256 are recorded as provenance, not as part of
 the currency test: every release commit changes both without changing

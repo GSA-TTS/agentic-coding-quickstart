@@ -26,9 +26,15 @@ import subprocess
 import sys
 import time
 
+# ``doctor`` and ``version_info`` are deliberately NOT imported here: they are
+# off the Tier-3 surface (ADR-0044m), and importing them at startup would make a
+# break in either one kill the lifecycle/secrets verbs the live oracle drives.
+# They are imported lazily inside ``run_doctor`` and the ``version`` dispatch, so
+# a break there affects only ``acq doctor``/``acq version`` — never the oracle's
+# contract commands. ``test_off_surface_modules_are_not_loaded_by_cli`` asserts
+# this closure.
 from . import (
     backends,
-    doctor,
     envelope,
     errors,
     kits,
@@ -38,7 +44,6 @@ from . import (
     sbx,
     security,
     state,
-    version_info,
 )
 
 # Both adapters raise an error carrying the same (code, message, remediation)
@@ -511,6 +516,8 @@ def run_doctor(emit_json: bool, name: str | None) -> int:
             "backend adapters ship in a later slice; sandbox inspection is unavailable in this build",
             emit_json,
         )
+
+    from . import doctor  # lazy: doctor is off-surface (see module docstring)
 
     data = doctor.doctor_data()
     if emit_json:
@@ -2563,8 +2570,11 @@ def main(argv: list[str] | None = None) -> int:
         return _usage_failure(None, str(exc), emit_json)
 
     if parsed.version or parsed.command == "version":
-        # The `version` command lives in version_info.py (data + output), so a
-        # version-output-only change never touches this dispatch (ADR-0044m).
+        # The `version` command lives in version_info.py (data + output), imported
+        # lazily so a break there affects only `acq version`, never the oracle's
+        # contract commands (ADR-0044m).
+        from . import version_info
+
         return version_info.run_version(emit_json)
 
     if parsed.command == "backend":

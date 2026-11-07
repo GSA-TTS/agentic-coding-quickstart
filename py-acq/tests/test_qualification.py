@@ -333,24 +333,32 @@ def test_touches_surface_distinguishes_release_commits():
 
 
 def test_touches_surface_version_output_is_not_surface():
-    # ADR-0044m: no oracle asserts the `version` command's exact output fields, and
-    # its data + human/JSON output live together in version_info.py (run_version was
-    # split out of cli.py). A version-output-only change must not expire a transcript.
+    # ADR-0044m: the `version` command is off the surface — its data + human/JSON
+    # output live together in version_info.py (run_version split out of cli.py and
+    # imported lazily). A version-output-only change must not expire a transcript.
     assert not touches_surface(["py-acq/src/acq_py/version_info.py"])
-    assert not touches_surface(["py-acq/src/acq_py/version_info.py", "py-acq/src/acq_py/__init__.py"])
     # doctor/runtime and the deterministic test backends are likewise off-surface.
     assert not touches_surface(["py-acq/src/acq_py/doctor.py", "py-acq/src/acq_py/runtime.py"])
     assert not touches_surface(["py-acq/src/acq_py/_stub_msb.py", "py-acq/src/acq_py/_stub_sbx.py"])
 
 
 def test_touches_surface_contract_modules_are_surface():
-    # A diff to a genuinely contract-bearing module must still trigger the surface.
+    # A diff to a contract-bearing module must still trigger the surface. __init__.py
+    # is on-surface: it is the always-loaded package marker, and release-please bumps
+    # package.json (not this file), so it is not a release-only path.
     for module in (
-        "__main__.py", "backends.py", "cli.py", "config.py", "envelope.py",
-        "errors.py", "kits.py", "lock.py", "migration.py", "msb.py",
-        "provider_creds.py", "sbx.py", "security.py", "state.py",
+        "__init__.py", "__main__.py", "backends.py", "cli.py", "config.py",
+        "envelope.py", "errors.py", "kits.py", "lock.py", "migration.py",
+        "msb.py", "provider_creds.py", "sbx.py", "security.py", "state.py",
     ):
         assert touches_surface([f"py-acq/src/acq_py/{module}"]), module
+
+
+def test_touches_surface_new_files_default_on_surface():
+    # The surface fails CLOSED: a new module, subpackage, or data file under
+    # py-acq/src/acq_py/ defaults to on-surface (no whitelist to forget to extend).
+    assert touches_surface(["py-acq/src/acq_py/adapters/openshell.py"])
+    assert touches_surface(["py-acq/src/acq_py/kits.json"])
 
 
 def test_failed_transcript_is_blocked_in_matrix():
