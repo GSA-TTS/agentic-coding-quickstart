@@ -26,12 +26,15 @@ review_cycle: "quarterly"
 ## Qualify this host in one command
 
 On any macOS, Linux (with `/dev/kvm`) or Windows x64 host that has `msb` and/or
-`sbx` installed and logged in, with Python >= 3.12 and `gh` logged in to your fork,
-from a clean checkout whose `HEAD` is on your fork's `main`
-(`git fetch <fork> && git switch --detach <fork>/main`):
+`sbx` installed and logged in, with Python >= 3.12 (`python3` on macOS and Linux, where plain `python` is often
+absent; `py -3.12` on Windows) and `gh` logged in to your fork,
+from the root of a clean checkout whose `HEAD` is on your fork's `main`
+(`git fetch <fork> && git switch --detach <fork>/main`; an older checkout that predates
+this tool has no `qualification/` directory, and `python3 -m qualification.host` fails
+with "No module named 'qualification'"):
 
 ```bash
-python -m qualification.host        # Windows: py -3.12 -m qualification.host
+python3 -m qualification.host       # Windows: py -3.12 -m qualification.host
 ```
 
 It detects the host (OS build, architecture, hypervisor), runs the cell oracle
@@ -325,7 +328,7 @@ A live run is evidence only once it is in the ledger, `docs/qualification-ledger
 which goes on the release). After a green run on a host:
 
 ```bash
-python -m qualification.gate record path/to/transcript.json
+python3 -m qualification.gate record path/to/transcript.json   # Windows: py -3.12 -m ...
 ```
 
 It derives the cell from the transcript's OS and architecture (pass `--platform`
@@ -340,7 +343,7 @@ because the ledger is self-reported evidence.
 Per-attempt timestamps are in the transcript; for one written by an older harness,
 pass `--recorded-at <ISO 8601 UTC>`.
 
-The gate, `python -m qualification.gate check`, runs in CI (`Tier-3 release gate`)
+The gate, `python3 -m qualification.gate check`, runs in CI (`Tier-3 release gate`)
 on every PR, every push to `main`, and weekly. It needs no live run: for each of
 the eight claimed cells it takes the latest ledger entry and passes it only if the
 verdict is `PASS`, it is under 90 days old, its backend `major.minor` equals
