@@ -220,7 +220,7 @@ REVISION=$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)
 DIRTY=""
 if [ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ]; then DIRTY=" (dirty tree)"; fi
 RUN_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-RUN_ID="$(date -u +%d%H%M%S)-$$-$RANDOM"
+RUN_ID="${HAL_RUN_ID:-$(date -u +%d%H%M%S)-$$-$RANDOM}"   # HAL_RUN_ID: offline test seam
 TO=()
 if command -v timeout >/dev/null 2>&1; then TO=(timeout --foreground)
 elif command -v gtimeout >/dev/null 2>&1; then TO=(gtimeout --foreground); fi
@@ -277,8 +277,14 @@ prov_file() { # BACKEND NAME
   ( ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO" . "$ACQ_LIB" >/dev/null 2>&1; _acq_provenance_file "$1" "$2" ) 2>/dev/null
 }
 
-track_sandbox() { CREATED="${CREATED}$1:$2
-"; }
+track_sandbox() {
+  case "
+$CREATED" in *"
+$1:$2
+"*) return 0 ;; esac
+  CREATED="${CREATED}$1:$2
+"
+}
 
 remove_sandbox() { # BACKEND NAME
   "${TO[@]}" 120 "$ACQ" --backend "$1" rm "$2" </dev/null >/dev/null 2>&1 || true
@@ -368,8 +374,26 @@ write_fixture() {
 }
 
 # --- shared helpers -----------------------------------------------------------
-create_sandbox() { # BACKEND NAME WS [extra create args...]
-  local b="$1" n="$2" ws="$3"; shift 3
+# name_in_use BACKEND NAME : 0 = listed, 1 = not listed, 2 = could not tell.
+name_in_use() {
+  case "$1" in
+    msb) probe "$STEP_TIMEOUT" msb ls ;;
+    sbx) probe "$STEP_TIMEOUT" sbx ls -q ;;
+  esac
+  [ "$PROBE_RC" -eq 0 ] || return 2
+  printf '%s\n' "$PROBE_OUT" | grep -Fqw -- "$2"
+}
+
+# create_sandbox BACKEND NAME WS [extra create args...] : refuses (LAST_RC=125, nothing
+# tracked or removed later) when the name is already in use or the listing fails, so the
+# cleanup can only ever remove sandboxes this run created.
+create_sandbox() {
+  local b="$1" n="$2" ws="$3" nrc; shift 3
+  name_in_use "$b" "$n"; nrc=$?
+  if [ "$nrc" -ne 1 ]; then
+    say "[refusing to create '$n': name already in use or the $b listing failed (rc $nrc)]"
+    LAST_RC=125; : >"$CAP"; return 0
+  fi
   track_sandbox "$b" "$n"
   if [ "$b" = msb ]; then
     run_cmd "$CREATE_TIMEOUT" "$ACQ" --backend msb create shell "$ws" --name "$n" --no-provider-kits "$@"
@@ -519,7 +543,8 @@ INSTALL_RERAN_ON_HEAL=0
 # command exited 0; a timeout (124) is named as such.
 need_rc0() {
   [ "$LAST_RC" -eq 0 ] && return 0
-  if [ "$LAST_RC" -eq 124 ]; then record "$1" BLOCKED "$2 timed out; the step was not exercised to a conclusion"
+  if [ "$LAST_RC" -eq 125 ]; then record "$1" BLOCKED "$2 was refused (sandbox name in use, or the backend listing failed)"
+  elif [ "$LAST_RC" -eq 124 ]; then record "$1" BLOCKED "$2 timed out; the step was not exercised to a conclusion"
   else record "$1" BLOCKED "$2 exited $LAST_RC; the step was not exercised to a conclusion (see transcript)"; fi
   return 1
 }
