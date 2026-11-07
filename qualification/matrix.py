@@ -80,15 +80,22 @@ MAX_AGE_DAYS = 90
 
 # The Tier-3 surface: what a live run actually exercises. A change to any of these
 # after a transcript was recorded makes it stale; a release-only commit (version
-# bump, changelog, docs, tests, CI) does not. Narrow or widen this list when the
-# oracle's reach changes.
-# The default image is a mutable tag, so an upstream image change is bounded only
-# by the age limit.
+# bump, changelog, docs, tests, CI) does not. The harness entries are the run
+# path only (the ``run`` command, its model, runner and reproduction rule): the
+# matrix, ledger and gate read transcripts and do not affect a run, so editing
+# them must not expire the evidence they evaluate. Narrow or widen this list when
+# the oracle's reach changes. The default image is a mutable tag, so an upstream
+# image change is bounded only by the age limit.
 TIER3_SURFACE = (
     "py-acq/src/acq_py/",
     "scripts/qualify-backend-cell",
     "scripts/qualify-msb-ro-mount",
-    "qualification/",
+    "qualification/__init__.py",
+    "qualification/__main__.py",
+    "qualification/cli.py",
+    "qualification/model.py",
+    "qualification/runner.py",
+    "qualification/repro.py",
 )
 
 
@@ -114,15 +121,15 @@ def _minor(version: str) -> tuple[str, str] | None:
     return (str(int(match[1])), str(int(match[2]))) if match else None
 
 
-def is_current(
+def staleness(
     transcript: Transcript,
     *,
     now: datetime,
     backend_version: str | None = None,
     surface_changed: bool = False,
     max_age_days: int = MAX_AGE_DAYS,
-) -> bool:
-    """Whether a transcript still counts as current evidence (ADR-0044m staleness).
+) -> str | None:
+    """Why a transcript no longer counts as current, or ``None`` when it does.
 
     It is current while all hold: it was recorded within ``max_age_days`` (and not
     in the future); its backend ``major.minor`` matches ``backend_version``, the
@@ -139,16 +146,28 @@ def is_current(
     try:
         recorded = datetime.fromisoformat(transcript.recorded_at)
     except ValueError:
-        return False
-    if recorded.tzinfo is None or recorded > now:
-        return False
+        return "recorded_at is missing or unparseable"
+    if recorded.tzinfo is None:
+        return "recorded_at has no timezone"
+    if recorded > now:
+        return "recorded_at is in the future"
     if now - recorded > timedelta(days=max_age_days):
-        return False
+        return f"older than {max_age_days} days"
     if backend_version is not None:
         recorded_minor = _minor(transcript.environment.backend_version)
         if recorded_minor is None or recorded_minor != _minor(backend_version):
-            return False
-    return not surface_changed
+            return (
+                f"recorded at backend {transcript.environment.backend_version}, "
+                f"accepted version is {backend_version}"
+            )
+    if surface_changed:
+        return "the Tier-3 surface changed after it was recorded"
+    return None
+
+
+def is_current(transcript: Transcript, **kwargs) -> bool:
+    """Whether a transcript still counts as current evidence (see :func:`staleness`)."""
+    return staleness(transcript, **kwargs) is None
 
 
 def cell_state(
