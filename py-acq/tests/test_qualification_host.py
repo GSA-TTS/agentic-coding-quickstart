@@ -664,3 +664,56 @@ def test_dry_run_previews_the_plan_even_when_a_real_run_would_refuse(tmp_path, m
     # the same HEAD is a hard error without --dry-run, and runs nothing
     assert host.main(["--no-publish"]) == 2
     assert "not on a remote main branch" in capsys.readouterr().err
+
+
+# ---- concurrent recording: two hosts must not conflict or revert each other ----
+
+def test_publish_branches_from_the_remote_tip_and_preserves_the_other_hosts_entries(
+    tmp_path, monkeypatch, capsys
+):
+    work, fork, head = setup_cli(tmp_path, monkeypatch, ledger_doc())
+    # Another host records windows-x64 and its PR merges into main while this host runs.
+    other = ledger_doc([{**entry_for_head(head, "msb"), "platform": "windows-x64",
+                         "transcript_sha256": "w" * 64}],
+                       waivers=[{"backend": "msb", "platform": "linux-x86_64", "reason": "r",
+                                 "expires": "2027-02-05"}])
+    (work / "docs" / "qualification-ledger.json").write_text(json.dumps(other))
+    run(work, "add", "-A"); run(work, "commit", "-qm", "other host's ledger PR")
+    run(work, "push", "-q", "origin", "main")
+    run(work, "push", "-q", "fork", "main")
+    moved = run(work, "rev-parse", "HEAD").strip()
+    run(work, "update-ref", "refs/remotes/fork/main", moved)  # as a successful fetch would
+    # This host tested the OLDER revision; it must still branch from the new tip.
+    run(work, "checkout", "-q", head)
+
+    monkeypatch.setattr(host, "backend_version", lambda b: "0.7.7" if b == "msb" else "0.51.0")
+    monkeypatch.setattr(host, "run_backend", fake_runner(tmp_path, head, {}))
+    assert host.main(["--remote", "fork"]) == 0
+    out = capsys.readouterr().out
+    assert f"branching from fork/main {moved[:12]}" in out
+
+    branch = [b for b in run(fork, "branch", "--list").split() if b.startswith("chore/ledger-")]
+    assert len(branch) == 1
+    ledger = json.loads(run(fork, "show", f"{branch[0]}:docs/qualification-ledger.json"))
+    cells = {(e["backend"], e["platform"]) for e in ledger["entries"]}
+    assert ("msb", "windows-x64") in cells          # the other host's entry survived
+    assert ("msb", "macos-arm64") in cells          # and this host's was added
+    assert ("sbx", "macos-arm64") in cells
+    # The branch is a descendant of the moved tip, so the PR merges cleanly.
+    run(fork, "merge-base", "--is-ancestor", moved, branch[0])
+
+
+def test_publish_still_uses_the_tested_rev_for_the_entries(tmp_path, monkeypatch):
+    work, fork, head = setup_cli(tmp_path, monkeypatch, ledger_doc())
+    (work / "unrelated.txt").write_text("x")
+    run(work, "add", "-A"); run(work, "commit", "-qm", "unrelated, non-surface")
+    run(work, "push", "-q", "origin", "main"); run(work, "push", "-q", "fork", "main")
+    run(work, "update-ref", "refs/remotes/fork/main", run(work, "rev-parse", "HEAD").strip())
+    run(work, "checkout", "-q", head)
+    monkeypatch.setattr(host, "backend_version", lambda b: "0.7.7" if b == "msb" else "0.51.0")
+    monkeypatch.setattr(host, "run_backend", fake_runner(tmp_path, head, {}))
+    assert host.main(["--remote", "fork"]) == 0
+    branch = [b for b in run(fork, "branch", "--list").split() if b.startswith("chore/ledger-")][0]
+    ledger = json.loads(run(fork, "show", f"{branch}:docs/qualification-ledger.json"))
+    for e in ledger["entries"]:
+        assert e["rev"] == head, "the entry must record the revision that was tested"

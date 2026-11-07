@@ -40,8 +40,10 @@ python3 -m qualification.host       # Windows: py -3.12 -m qualification.host
 It detects the host (OS build, architecture, hypervisor), runs the cell oracle
 through the harness for each backend claimed on this platform, records the green
 runs in the ledger (retiring the cell's waiver if it has one), then commits the
-ledger change in a throwaway worktree, pushes a new `chore/ledger-<platform>-<time>`
-branch to your **fork** remote, and opens a PR **into the fork's `main`** (with `gh`,
+ledger change in a throwaway worktree branched from your fork's **current** `main`
+(not the revision tested, so a run that finishes while another host's ledger PR lands
+still merges cleanly and keeps that host's entries), pushes a new
+`chore/ledger-<platform>-<time>` branch to your **fork** remote, and opens a PR **into the fork's `main`** (with `gh`,
 or it prints the URL). Merge that PR as usual. It never pushes to the upstream
 repository (every fetch and push URL of the remote is checked), never touches your
 checkout, and records only green runs unless you pass `--record-failures`.
