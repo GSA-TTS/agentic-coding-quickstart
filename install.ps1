@@ -20,6 +20,7 @@ param(
     [string]$Version = "0.1.0", # x-release-please-version
     [string]$InstallDir = "",
     [string]$Source = "",
+    [string]$Channel = "python",
     [switch]$DryRun,
     [switch]$Yes,
     [switch]$Help
@@ -43,13 +44,15 @@ installer against a pinned release.
 Usage:
   irm <release-url>/install.ps1 | iex
   .\install.ps1 [-InstallDir <path>] [-Source <url|dir>] [-Version <ver>]
-                [-DryRun] [-Yes] [-Help]
+                [-Channel <name>] [-DryRun] [-Yes] [-Help]
 
 Options:
   -InstallDir <path>   User-writable install location. Default: %LOCALAPPDATA%\Programs\acq
   -Source <url|dir>    Release source. A URL fetches SHA256SUMS + the zip; a local
                        directory (the offline asset set) is read in place.
   -Version <ver>       Release version to install. Default: $Version
+  -Channel <name>      Update channel to install (default: python; the only
+                       channel supported on this fork).
   -DryRun              Print actions without making changes.
   -Yes                 Assume yes for the PATH prompt (non-interactive/CI).
   -Help                Show this help.
@@ -127,6 +130,7 @@ function Install-AcqZip {
 
     Write-Step "Installing acq $Version"
     Write-Host "  package:     $PackageName"
+    Write-Host "  channel:     $Channel"
     Write-Host "  source:      $($resolved.Url)"
     Write-Host "  install dir: $InstallDir"
 
@@ -233,6 +237,13 @@ function Add-UserPath {
 if ($Help) {
     Show-Usage
     exit 0
+}
+
+# The -Channel flag is the update-channel seam (ADR-0046m). On this fork the only
+# channel is `python` (the default); any other value fails closed.
+if ($Channel -ne "python") {
+    [Console]::Error.WriteLine("unknown channel '$Channel' (only 'python' is supported on this fork)")
+    exit 2
 }
 
 # -Help and -DryRun are read-only/planning paths and must not require a user

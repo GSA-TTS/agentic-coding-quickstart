@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "id": "installer/channel-python-dry-run",
+  "oracle": "ADR-0046m installer --channel: --channel python parses, surfaces the channel, and dry-runs unchanged",
+  "tier": 1,
+  "backend": null,
+  "platform": "linux",
+  "invoke": {
+    "argv": ["sh", "install.sh", "--channel", "python", "--dry-run"],
+    "env": {},
+    "unset": [],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "contains",
+      "value": "channel:",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": []
+  }
+}

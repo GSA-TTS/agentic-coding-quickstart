@@ -49,10 +49,13 @@ def source_revision() -> str | None:
 def version_data() -> dict:
     """Assemble the ``version`` command's required result data (ADR-0038m).
 
+    ``impl`` is the implementation marker ("python") so a bug report is
+    unambiguous about which implementation produced the output (ADR-0046m).
     ``backend``, ``backend_version``, and ``kit_control_plane_ref`` are nullable
     until the backend adapters and kit control plane land.
     """
     return {
+        "impl": "python",
         "acq_version": acq_version(),
         "source_revision": source_revision(),
         "backend": None,

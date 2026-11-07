@@ -390,6 +390,7 @@ def run_version(emit_json: bool) -> int:
         return errors.EXIT_SUCCESS
     print("acq v1 (Python skeleton)")
     print(f"  acq version:       {data['acq_version']}")
+    print(f"  impl:              {data['impl']}")
     print(f"  source revision:   {data['source_revision'] or '(not a git clone)'}")
     print(f"  backend:           {data['backend'] or 'none'}")
     print(f"  backend version:   {data['backend_version'] or 'none'}")

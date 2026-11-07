@@ -54,6 +54,19 @@ def test_version_json_subprocess():
     assert doc["data"]["acq_version"] == acq_py.__version__
 
 
+def test_version_reports_python_impl():
+    # ADR-0046m: version output marks the implementation so a bug report is
+    # unambiguous about which implementation produced it.
+    proc = run_cli("version", "--json")
+    assert proc.returncode == 0, proc.stderr
+    doc = json.loads(proc.stdout)
+    assert doc["data"]["impl"] == "python"
+
+    human = run_cli("version")
+    assert human.returncode == 0, human.stderr
+    assert "impl:" in human.stdout
+
+
 def test_usage_error_exit_code_2_human():
     proc = run_cli("--bad-flag")
     assert proc.returncode == 2

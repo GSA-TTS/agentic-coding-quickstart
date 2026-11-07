@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "id": "coexistence/impl-bash",
+  "oracle": "ADR-0046m coexistence: an unset ACQ_IMPL runs the Bash body (default unchanged)",
+  "tier": 1,
+  "backend": null,
+  "platform": "linux",
+  "invoke": {
+    "argv": ["bash", "acq", "version"],
+    "env": {},
+    "unset": ["ACQ_IMPL", "ACQ_RUNTIME"],
+    "stdin": "",
+    "timeout_ms": 10000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "contains",
+      "value": "script:",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": []
+  }
+}

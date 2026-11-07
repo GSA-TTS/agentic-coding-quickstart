@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "id": "coexistence/impl-python-json",
+  "oracle": "ADR-0046m coexistence: ACQ_IMPL=python forwards --json and version reports the impl field",
+  "tier": 1,
+  "backend": null,
+  "platform": "linux",
+  "invoke": {
+    "argv": ["bash", "acq", "version", "--json"],
+    "env": {
+      "ACQ_IMPL": "python",
+      "ACQ_VERSION": "0.1.0",
+      "ACQ_SOURCE_REVISION": "0000000000000000000000000000000000000000"
+    },
+    "unset": ["ACQ_RUNTIME"],
+    "stdin": "",
+    "timeout_ms": 10000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "version",
+        "data": {
+          "impl": "python",
+          "acq_version": "0.1.0"
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+  }
+}

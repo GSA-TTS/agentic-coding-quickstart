@@ -103,7 +103,7 @@ def _run_installer(tmp_path: Path, *args: str, stdin: bytes = b"") -> subprocess
     home.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env["HOME"] = str(home)
-    for name in ("XDG_DATA_HOME", "ACQ_INSTALL_DIR", "ACQ_INSTALL_BIN_DIR", "ACQ_INSTALL_SOURCE"):
+    for name in ("XDG_DATA_HOME", "ACQ_INSTALL_DIR", "ACQ_INSTALL_BIN_DIR", "ACQ_INSTALL_SOURCE", "ACQ_INSTALL_CHANNEL"):
         env.pop(name, None)
     return subprocess.run(
         ["sh", str(INSTALL_SH), *args],
@@ -173,6 +173,32 @@ def test_unknown_option_is_a_usage_error(tmp_path):
     proc = _run_installer(tmp_path, "--bogus")
     assert proc.returncode == 2
     assert "unknown option" in proc.stderr.decode()
+
+
+def test_channel_python_dry_run_surfaces_channel(tmp_path):
+    # ADR-0046m: --channel python is the only (and default) channel; it parses,
+    # surfaces the channel in the plan, and installs exactly what the no-flag
+    # default installs today.
+    proc = _run_installer(tmp_path, "--channel", "python", "--dry-run")
+    assert proc.returncode == 0
+    assert "channel:" in proc.stdout.decode()
+
+
+def test_channel_unknown_is_a_usage_error(tmp_path):
+    proc = _run_installer(tmp_path, "--channel", "bogus")
+    assert proc.returncode == 2
+    assert "unknown channel" in proc.stderr.decode()
+
+
+def test_channel_python_offline_install_succeeds(tmp_path):
+    release = _make_release(tmp_path)
+    proc = _run_installer(tmp_path, "--source", str(release), "--channel", "python", "--yes")
+    assert proc.returncode == 0
+    assert _VERIFIED.search(proc.stdout.decode())
+    assert (_bin_dir(tmp_path) / "acq").is_symlink()
+    # The coexistence seam also links the Python implementation's distinct
+    # identity (ADR-0046m).
+    assert (_bin_dir(tmp_path) / "acq-python").is_symlink()
 
 
 def test_dry_run_performs_no_writes(tmp_path):

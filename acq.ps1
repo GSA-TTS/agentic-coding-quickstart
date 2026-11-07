@@ -5,6 +5,41 @@
 
 $ErrorActionPreference = "Stop"
 
+# ACQ_IMPL runtime switch — the coexistence seam (ADR-0046m). On Windows the Bash
+# `acq` dispatches via Git Bash; here the Python implementation runs natively:
+# the managed runtime `py-acq\runtime\python.exe -m acq_py`, else `python` on
+# PATH. Unset / `bash` keeps the existing Git Bash path below; any other value
+# fails closed (exit 2). argv and the exit status are forwarded verbatim.
+$acqImpl = $env:ACQ_IMPL
+if ($acqImpl -and $acqImpl -ne "bash") {
+    if ($acqImpl -ne "python") {
+        [Console]::Error.WriteLine("acq: unsupported ACQ_IMPL '$acqImpl' (expected 'bash' or 'python')")
+        exit 2
+    }
+    $acqImplRepoRoot = Split-Path -Parent $PSCommandPath
+    $runtimePy = Join-Path $acqImplRepoRoot "py-acq\runtime\python.exe"
+    if ($env:ACQ_RUNTIME -and (Test-Path -LiteralPath $env:ACQ_RUNTIME -PathType Leaf)) {
+        $acqPythonExe = $env:ACQ_RUNTIME
+    }
+    elseif (Test-Path -LiteralPath $runtimePy -PathType Leaf) {
+        $acqPythonExe = $runtimePy
+    }
+    else {
+        $pyCmd = Get-Command python -ErrorAction SilentlyContinue
+        if ($null -eq $pyCmd) {
+            [Console]::Error.WriteLine("acq: ACQ_IMPL=python but no Python interpreter was found")
+            exit 1
+        }
+        $acqPythonExe = $pyCmd.Source
+    }
+    $srcDir = Join-Path $acqImplRepoRoot "py-acq\src"
+    if (Test-Path -LiteralPath $srcDir -PathType Container) {
+        $env:PYTHONPATH = $srcDir + $(if ($env:PYTHONPATH) { ";$env:PYTHONPATH" } else { "" })
+    }
+    & $acqPythonExe -m acq_py @args
+    exit $LASTEXITCODE
+}
+
 function Test-IsWslShim {
     param([Parameter(Mandatory = $true)][string]$Path)
 

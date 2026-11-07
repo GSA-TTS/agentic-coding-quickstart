@@ -706,6 +706,67 @@ acq_propagate_usai_rotation() {
 # ---------------------------------------------------------------------------
 if [ -n "${ACQ_SOURCE_ONLY:-}" ]; then return 0 2>/dev/null || exit 0; fi
 
+# ---------------------------------------------------------------------------
+# ACQ_IMPL runtime switch — the coexistence seam (ADR-0046m). `acq` is the
+# neutral entry point over two implementations:
+#   * unset / `bash`   the existing Bash body below (default unchanged)
+#   * `python`         the Python acq v1 replacement (py-acq/src/acq_py)
+#   * anything else    fail closed (exit 2) with a clear message
+#
+# Resolution order for the Python implementation (env-only in this slice,
+# mirroring active_backend's flag -> env -> config -> auto-detect precedence):
+#   1. $ACQ_SCRIPT_DIR/acq-python   the installer-linked launcher — the Python
+#                                   impl's distinct identity, never the `acq` name
+#   2. python -m acq_py             the managed runtime ($ACQ_SCRIPT_DIR/py-acq/
+#                                   runtime/bin/python3, or python.exe on Windows),
+#                                   else python3/python on PATH, with PYTHONPATH
+#                                   pointed at $ACQ_SCRIPT_DIR/py-acq/src
+# argv and the exit status are forwarded verbatim in every case.
+# ---------------------------------------------------------------------------
+_acq_exec_python() {
+  # 1. The distinct launcher (checked into the repo root and linked by the
+  #    installer as `acq-python`); it resolves its own interpreter and source.
+  if [ -x "${ACQ_SCRIPT_DIR}/acq-python" ]; then
+    exec "${ACQ_SCRIPT_DIR}/acq-python" "$@"
+  fi
+
+  # 2. Fallback: run the managed runtime (or a PATH interpreter) directly.
+  local _py=""
+  if [ -n "${ACQ_RUNTIME:-}" ] && [ -x "${ACQ_RUNTIME}" ]; then
+    _py="${ACQ_RUNTIME}"
+  elif [ -x "${ACQ_SCRIPT_DIR}/py-acq/runtime/bin/python3" ]; then
+    _py="${ACQ_SCRIPT_DIR}/py-acq/runtime/bin/python3"
+  elif [ -x "${ACQ_SCRIPT_DIR}/py-acq/runtime/python.exe" ]; then
+    _py="${ACQ_SCRIPT_DIR}/py-acq/runtime/python.exe"
+  elif command -v python3 >/dev/null 2>&1; then
+    _py="$(command -v python3)"
+  elif command -v python >/dev/null 2>&1; then
+    _py="$(command -v python)"
+  fi
+  if [ -z "$_py" ]; then
+    echo "acq: ACQ_IMPL=python but no Python implementation was found" >&2
+    echo "     (run the installer to link acq-python, or put python3 on PATH)" >&2
+    exit 1
+  fi
+  if [ -d "${ACQ_SCRIPT_DIR}/py-acq/src" ]; then
+    PYTHONPATH="${ACQ_SCRIPT_DIR}/py-acq/src${PYTHONPATH:+:$PYTHONPATH}" exec "$_py" -m acq_py "$@"
+  fi
+  exec "$_py" -m acq_py "$@"
+}
+
+_acq_impl="${ACQ_IMPL:-bash}"
+case "$_acq_impl" in
+  bash) : ;;
+  python) _acq_exec_python "$@" ;;
+  *)
+    echo "acq: unsupported ACQ_IMPL '${_acq_impl}' (expected 'bash' or 'python')" >&2
+    echo "     leave ACQ_IMPL unset (or set it to 'bash') for the Bash implementation," >&2
+    echo "     or set ACQ_IMPL=python for the Python v1 implementation." >&2
+    exit 2
+    ;;
+esac
+unset _acq_impl
+
 # Dispatch stays in the original foreground shell: $$, stdin, terminal signals,
 # and exec retain their normal meaning. A private guardian covers replaced EXIT
 # traps and exec; ordinary exits also reap it synchronously. No root is exported.

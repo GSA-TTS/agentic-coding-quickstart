@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "id": "installer/channel-unknown",
+  "oracle": "ADR-0046m installer --channel: an unknown channel fails closed with exit 2",
+  "tier": 1,
+  "backend": null,
+  "platform": "linux",
+  "invoke": {
+    "argv": ["sh", "install.sh", "--channel", "bogus"],
+    "env": {},
+    "unset": [],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 2,
+    "stderr": {
+      "mode": "contains",
+      "value": "unknown channel",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": []
+  }
+}

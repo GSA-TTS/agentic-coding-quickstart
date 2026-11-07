@@ -386,6 +386,26 @@
       "vectors": ["installer/consent-declined"]
     },
     {
+      "contract": "ADR-0046m coexistence: an unset ACQ_IMPL runs the Bash body (default unchanged)",
+      "vectors": ["coexistence/impl-bash"]
+    },
+    {
+      "contract": "ADR-0046m coexistence: ACQ_IMPL=python dispatches to the Python implementation and version reports the impl field",
+      "vectors": ["coexistence/impl-python", "coexistence/impl-python-json"]
+    },
+    {
+      "contract": "ADR-0046m coexistence: an unknown ACQ_IMPL value fails closed with exit 2",
+      "vectors": ["coexistence/impl-unknown"]
+    },
+    {
+      "contract": "ADR-0046m installer --channel: --channel python parses and dry-runs unchanged (the only channel, also the default)",
+      "vectors": ["installer/channel-python-dry-run"]
+    },
+    {
+      "contract": "ADR-0046m installer --channel: an unknown channel fails closed with exit 2",
+      "vectors": ["installer/channel-unknown"]
+    },
+    {
       "contract": "ADR-0044m verbatim RESULT transcript signature (PASS/FAIL/BLOCKED, backend=, image=, host=, rev=, dir=)",
       "vectors": ["qualification/result-line-pass", "qualification/result-line-blocked"]
     },

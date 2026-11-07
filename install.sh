@@ -45,6 +45,7 @@ SOURCE="${ACQ_INSTALL_SOURCE:-}"
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 INSTALL_DIR="${ACQ_INSTALL_DIR:-$DATA_HOME/acq}"
 BIN_DIR="${ACQ_INSTALL_BIN_DIR:-$HOME/.local/bin}"
+CHANNEL="${ACQ_INSTALL_CHANNEL:-python}"
 
 DRY_RUN=0
 ASSUME_YES=0
@@ -96,13 +97,16 @@ Options:
                         asset set) is read in place.
   --ref <ver>           Release version to install (default: the version baked
                         into this installer).
+  --channel <name>      Update channel to install (default: python; the only
+                        channel supported on this fork).
   --dry-run             Print what would happen; make no changes, no network.
   --yes, -y             Assume "yes" to the PATH prompt (non-interactive/CI).
   --help                Show this help.
   --version, -V         Show the installer version.
 
 Environment overrides:
-  ACQ_INSTALL_VERSION, ACQ_INSTALL_SOURCE, ACQ_INSTALL_DIR, ACQ_INSTALL_BIN_DIR
+  ACQ_INSTALL_VERSION, ACQ_INSTALL_SOURCE, ACQ_INSTALL_DIR, ACQ_INSTALL_BIN_DIR,
+  ACQ_INSTALL_CHANNEL
 
 This installer uses no sudo, installs only under your home directory, and never
 changes your PATH without asking.
@@ -123,6 +127,8 @@ while [ $# -gt 0 ]; do
     --source=*) SOURCE="${1#--source=}"; shift ;;
     --ref) [ $# -ge 2 ] || usage_err "--ref needs a value"; VERSION="$2"; shift 2 ;;
     --ref=*) VERSION="${1#--ref=}"; shift ;;
+    --channel) [ $# -ge 2 ] || usage_err "--channel needs a value"; CHANNEL="$2"; shift 2 ;;
+    --channel=*) CHANNEL="${1#--channel=}"; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --yes|-y) ASSUME_YES=1; shift ;;
     --help|-h) usage; exit 0 ;;
@@ -130,6 +136,13 @@ while [ $# -gt 0 ]; do
     *) usage_err "unknown option: $1 (try --help)" ;;
   esac
 done
+
+# The `--channel` flag is the update-channel seam (ADR-0046m). On this fork the
+# only channel is `python` (the default), so any other value fails closed.
+case "$CHANNEL" in
+  python) ;;
+  *) usage_err "unknown channel '$CHANNEL' (only 'python' is supported on this fork)" ;;
+esac
 
 # ---------------------------------------------------------------------------
 # Platform -> release archive name (the enumerated offline asset set, ADR-0042m).
@@ -247,6 +260,7 @@ case "$SOURCE" in
 esac
 
 info "  platform:    $KEY"
+info "  channel:     $CHANNEL"
 info "  archive:     $ARCHIVE"
 info "  source:      $SOURCE"
 info "  install dir: $INSTALL_DIR"
@@ -275,6 +289,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
   printf '  [dry-run] extract %s into %s\n' "$ARCHIVE" "$INSTALL_DIR"
   printf '  [dry-run] verify the enumerated set (launcher, runtime, source, wheelhouse) is present\n'
   printf '  [dry-run] link %s/acq -> %s/acq\n' "$BIN_DIR" "$INSTALL_DIR"
+  printf '  [dry-run] link %s/acq-python -> %s/acq\n' "$BIN_DIR" "$INSTALL_DIR"
   if path_has_bindir; then
     ok "  $BIN_DIR is already on your PATH."
   else
@@ -385,7 +400,9 @@ step "Linking the acq launcher"
 
 run mkdir -p "$BIN_DIR"
 run ln -sf "$INSTALL_DIR/acq" "$BIN_DIR/acq"
+run ln -sf "$INSTALL_DIR/acq" "$BIN_DIR/acq-python"
 ok "  linked $BIN_DIR/acq -> $INSTALL_DIR/acq"
+ok "  linked $BIN_DIR/acq-python -> $INSTALL_DIR/acq"
 
 # ---------------------------------------------------------------------------
 # PATH handling — never modified without consent.
