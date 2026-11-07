@@ -1,0 +1,227 @@
+#!/usr/bin/env bats
+#
+# 162-verify-host-authority-live-runtime.bats — RUNTIME regression tests for the verdict
+# logic of scripts/verify-host-authority-live, against STUBBED acq/sbx/msb binaries
+# (HAL_ACQ_BIN and HAL_RUN_ID are the script's offline test seams). They prove that a
+# step never PASSes on partial output or a failed or timed-out command, that probe
+# failures are BLOCKED rather than FAIL, that the stale-refresh step makes only its own
+# sandbox stale, and that cleanup removes only sandboxes this run created. They say
+# nothing about real sbx or msb behavior; live evidence is recorded in
+# docs/VERIFY_PROVIDER_ADOPTION.md.
+#
+# shellcheck shell=bats
+
+setup() {
+  acq_setup_stubs
+  HS="$STUBDIR/hs"; mkdir -p "$HS/bin" "$HS/prov"
+  export HS REPO_ROOT ACQ_PROVENANCE_DIR="$HS/prov" HAL_RUN_ID=t1 HAL_ACQ_BIN="$HS/bin/acq"
+  export CUR=1111111111111111111111111111111111111111
+  : > "$HS/calls"; : > "$HS/list.sbx"; : > "$HS/list.msb"
+  _write_stubs
+  PATH="$HS/bin:$PATH"
+}
+teardown() { acq_teardown_stubs; }
+
+load 'helper'
+
+_write_stubs() {
+  cat >"$HS/bin/lib.sh" <<'LIB'
+_hc() { ( ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$REPO_ROOT/acq" >/dev/null 2>&1; acq_host_config_dir "$1" "$2" ); }
+_pf() { ( ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$REPO_ROOT/acq" >/dev/null 2>&1; _acq_provenance_file "$1" "$2" ); }
+LIB
+  cat >"$HS/bin/acq" <<'STUB'
+#!/usr/bin/env bash
+. "$HS/bin/lib.sh"
+echo "acq $*" >>"$HS/calls"
+[ "$1" = "--backend" ] || exit 64
+b=$2; shift 2; verb=$1; shift
+name=""; prev=""
+for a in "$@"; do [ "$prev" = "--name" ] && name=$a; prev=$a; done
+[ -n "$name" ] || name=${1:-}
+case "$verb" in
+  create)
+    hc=$(_hc "$b" "$name"); mkdir -p "$hc"; echo "$hc" >"$HS/hcdir.$name"
+    pf=$(_pf "$b" "$name"); mkdir -p "$(dirname "$pf")"; printf 'applied_ref=%s\n' "$CUR" >"$pf"
+    if [ "$b" = sbx ]; then
+      printf 'zscaler-ca-certificate x#ref=%s\nusai-provider y#ref=%s\nagentic-coding-playbook z#ref=%s\n' "$CUR" "$CUR" "$CUR" >"$hc/builtin-kits"
+    else
+      printf '1' >"$hc/install-123"
+    fi
+    echo "$name" >>"$HS/list.$b"
+    exit "${STUB_CREATE_RC:-0}" ;;
+  rm) grep -vxF -- "$name" "$HS/list.$b" >"$HS/l.tmp"; mv "$HS/l.tmp" "$HS/list.$b"; exit 0 ;;
+  restart)
+    if [ "${STUB_RESTART_INSTALL:-0}" = 1 ]; then echo $(( $(cat "$HS/install.count" 2>/dev/null || echo 1) + 1 )) >"$HS/install.count"; fi
+    [ -n "${STUB_RESTART_SLEEP:-}" ] && sleep "$STUB_RESTART_SLEEP"
+    exit "${STUB_RESTART_RC:-0}" ;;
+  run)
+    for x in "Zscaler CA kit" "provider kit" "playbook kit"; do
+      [ "${STUB_RUN_MODE:-full}" = partial ] && [ "$x" = "playbook kit" ] && continue
+      echo "acq: '$name' is missing the $x; injecting with 'sbx kit add'..."
+    done
+    exit "${STUB_RUN_RC:-0}" ;;
+  kit)
+    sub=$1; shift; name=$1; pf=$(_pf "$b" "$name")
+    case "$sub" in
+      check)
+        if [ "${STUB_CHECK_FORCE:-}" = current ] || grep -q "^applied_ref=$CUR$" "$pf"; then echo "status:        current (on the pinned bundle)"
+        else echo "status:        stale (does not match the pinned bundle)"; fi
+        exit 0 ;;
+      update)
+        mode=${STUB_UPDATE_MODE:-full}
+        if [ "$mode" = notice ]; then echo "acq: sbx >= 0.38 cannot extend a live sandbox"; exit 0; fi
+        echo "acq: Zscaler CA kit injected into '$name'."
+        echo "acq: provider kit injected into '$name'."
+        if [ "$mode" != missing ] && [ "$mode" != failrc ]; then
+          echo "acq: playbook kit injected into '$name'."; echo "acq: git-ssh-sign kit refreshed in '$name'."
+        fi
+        [ "$mode" = warn ] && echo "acq: warning: 'sbx kit add' (agent kit) failed for '$name'."
+        if [ "$mode" = failrc ]; then exit 1; fi
+        printf 'applied_ref=%s\n' "$CUR" >"$pf"
+        exit 0 ;;
+    esac ;;
+esac
+exit 0
+STUB
+  cat >"$HS/bin/sbx" <<'STUB'
+#!/usr/bin/env bash
+echo "sbx $*" >>"$HS/calls"
+case "$1" in
+  version) echo "sbx version: v0.48.0 abc123" ;;
+  ls) cat "$HS/list.sbx" ;;
+  rm) shift; for a in "$@"; do case "$a" in -*) ;; *) grep -vxF -- "$a" "$HS/list.sbx" >"$HS/l.tmp"; mv "$HS/l.tmp" "$HS/list.sbx" ;; esac; done ;;
+esac
+exit 0
+STUB
+  cat >"$HS/bin/msb" <<'STUB'
+#!/usr/bin/env bash
+echo "msb $*" >>"$HS/calls"
+all="$*"
+case "$1" in
+  --version) [ -n "${STUB_MSB_VER_SLEEP:-}" ] && sleep "$STUB_MSB_VER_SLEEP"; echo "msb 0.7.7" ;;
+  doctor) exit "${STUB_MSB_DOCTOR_RC:-0}" ;;
+  ls) cat "$HS/list.msb" ;;
+  remove|rm) exit 0 ;;
+  inspect)
+    hc=$(cat "$HS/hcdir.$2" 2>/dev/null)
+    printf '{"active_config":{"mounts":[{"guest":"/var/lib/acq/host","type":"Bind","host":"%s","options":{"readonly":true}}]},"config":{}}\n' "$hc" ;;
+  exec)
+    case "$all" in
+      *".hal-install-proof"*"if [ -e"*|*"if [ -e"*".hal-install-proof"*) [ -n "${STUB_PROOF_FAIL:-}" ] && exit 1; cat "$HS/install.count" 2>/dev/null || echo 1 ;;
+      *"if [ -e"*) echo 1 ;;
+      *"cat /home/agent/.hal-ro-proof"*) echo "/var/lib/acq/host/kit-files/home-agent-hal-ro-proof-sh.1" ;;
+      *NO-GUEST-COPY*) echo NO-GUEST-COPY ;;
+      *PLAIN-COPY-OK*) echo PLAIN-COPY-OK ;;
+    esac ;;
+esac
+exit 0
+STUB
+  chmod +x "$HS/bin/acq" "$HS/bin/sbx" "$HS/bin/msb"
+}
+
+# _hal ARGS... : run the script with short timeouts into $HS/out; results in $HS/out/results.tsv
+_hal() {
+  run bash "$REPO_ROOT/scripts/verify-host-authority-live" --out "$HS/out" --step-timeout 5 --create-timeout 5 "$@"
+}
+_res() { awk -F'\t' -v id="$1" '$1 == id { print $6 }' "$HS/out/results.tsv"; }
+_sbx_pf() { ( ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$REPO_ROOT/acq" >/dev/null 2>&1; _acq_provenance_file sbx "$1" ); }
+
+@test "runtime: sbx stale refresh PASSes only with exit 0 and all four kits reported, and touches only its own provenance" {
+  mkdir -p "$HS/prov/sbx"; printf 'applied_ref=%s\n' "$CUR" > "$(_sbx_pf other-sandbox)"
+  cp "$(_sbx_pf other-sandbox)" "$HS/other.before"
+  _hal --backend sbx --only sbx-baseline,sbx-stale-refresh
+  assert_success
+  [ "$(_res sbx-stale-refresh)" = PASS ]
+  cmp "$HS/other.before" "$(_sbx_pf other-sandbox)"
+  assert_output --partial 'made ONLY the provenance record of hal-t1-s stale'
+}
+
+@test "runtime: stale refresh with one kit missing from the output is FAIL even though the command exited 0" {
+  STUB_UPDATE_MODE=missing _hal --backend sbx --only sbx-baseline,sbx-stale-refresh
+  assert_failure 1
+  [ "$(_res sbx-stale-refresh)" = FAIL ]
+}
+
+@test "runtime: stale refresh that prints kits but exits non-zero is BLOCKED, never PASS" {
+  STUB_UPDATE_MODE=failrc _hal --backend sbx --only sbx-baseline,sbx-stale-refresh
+  [ "$(_res sbx-stale-refresh)" = BLOCKED ]
+}
+
+@test "runtime: stale refresh with a warning in the output is FAIL" {
+  STUB_UPDATE_MODE=warn _hal --backend sbx --only sbx-baseline,sbx-stale-refresh
+  [ "$(_res sbx-stale-refresh)" = FAIL ]
+}
+
+@test "runtime: stale refresh on an sbx that only prints the recreate notice is BLOCKED (not a refresh result)" {
+  STUB_UPDATE_MODE=notice _hal --backend sbx --only sbx-baseline,sbx-stale-refresh
+  [ "$(_res sbx-stale-refresh)" = BLOCKED ]
+}
+
+@test "runtime: stale refresh is BLOCKED when kit check still says current after the edit (refresh would be a no-op)" {
+  STUB_CHECK_FORCE=current _hal --backend sbx --only sbx-baseline,sbx-stale-refresh
+  [ "$(_res sbx-stale-refresh)" = BLOCKED ]
+}
+
+@test "runtime: record-change PASSes only when all three kits attempt kit add" {
+  _hal --backend sbx --only sbx-baseline,sbx-record-change
+  [ "$(_res sbx-record-change)" = PASS ]
+  STUB_RUN_MODE=partial _hal --backend sbx --only sbx-baseline,sbx-record-change
+  [ "$(_res sbx-record-change)" = FAIL ]
+}
+
+@test "runtime: record-change with a failing re-attach is BLOCKED" {
+  STUB_RUN_RC=3 _hal --backend sbx --only sbx-baseline,sbx-record-change
+  [ "$(_res sbx-record-change)" = BLOCKED ]
+}
+
+@test "runtime: a sandbox name already in use is refused, and cleanup never removes it" {
+  echo hal-t1-s > "$HS/list.sbx"
+  _hal --backend sbx --only sbx-baseline
+  [ "$(_res sbx-baseline)" = BLOCKED ]
+  run grep -E '^(acq --backend sbx (create|rm)|sbx rm)' "$HS/calls"
+  assert_failure
+  grep -qx hal-t1-s "$HS/list.sbx"
+}
+
+@test "runtime: cleanup removes exactly the sandbox this run created" {
+  echo keep-me > "$HS/list.sbx"
+  _hal --backend sbx --only sbx-baseline
+  [ "$(_res sbx-baseline)" = PASS ]
+  grep -q 'acq --backend sbx rm hal-t1-s' "$HS/calls"
+  grep -qx keep-me "$HS/list.sbx"
+  refute_output --partial 'keep-me'
+  [ -z "$(find "$HS/out" -maxdepth 1 -name "ws.*" 2>/dev/null)" ]
+}
+
+@test "runtime: install-gate does not PASS when the proof counter advances but the restart times out" {
+  STUB_RESTART_INSTALL=1 STUB_RESTART_SLEEP=3 _hal --backend msb --create-timeout 1 --only msb-ro-kit-create,msb-install-gate
+  [ "$(_res msb-ro-kit-create)" = PASS ]
+  [ "$(_res msb-install-gate)" = BLOCKED ]
+  assert_output --partial 'timed out'
+}
+
+@test "runtime: install-gate PASSes when the restart exits 0 and the counter advances" {
+  STUB_RESTART_INSTALL=1 _hal --backend msb --only msb-ro-kit-create,msb-install-gate
+  [ "$(_res msb-install-gate)" = PASS ]
+}
+
+@test "runtime: install-gate is FAIL (not PASS) when the restart exits 0 but the counter does not advance" {
+  _hal --backend msb --only msb-ro-kit-create,msb-install-gate
+  [ "$(_res msb-install-gate)" = FAIL ]
+}
+
+@test "runtime: a failing proof-file probe is BLOCKED, not compared" {
+  STUB_PROOF_FAIL=1 _hal --backend msb --only msb-ro-kit-create,msb-install-gate
+  [ "$(_res msb-install-gate)" = BLOCKED ]
+}
+
+@test "runtime: a hanging 'msb --version' preflight is bounded and leaves msb steps BLOCKED" {
+  STUB_MSB_VER_SLEEP=10 _hal --backend msb --step-timeout 1 --only msb-ro-kit-create
+  [ "$(_res msb-ro-kit-create)" = BLOCKED ]
+  assert_output --partial 'probe timed out'
+}
+
+@test "runtime: an empty selection exits 2" {
+  _hal --backend msb --only sbx-baseline
+  assert_failure 2
+}
