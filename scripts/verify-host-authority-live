@@ -668,7 +668,7 @@ step_sbx_baseline() {
   n=$(sandbox_name s); SBX_A="$n"
   ws=$(mk_workspace s) || { record "$id" BLOCKED "cannot create a workspace under $WS_ROOT"; return 0; }
   create_sandbox sbx "$n" "$ws"
-  if [ "$LAST_RC" -ne 0 ]; then record "$id" BLOCKED "acq create on sbx exited $LAST_RC (login, Docker, or provider setup? see transcript)"; return 0; fi
+  need_rc0 "$id" "acq create on sbx (login, Docker, or provider setup?)" || return 0
   rec=$(sbx_record_path "$n")
   if [ -s "$rec" ]; then
     SBX_A_OK=1
@@ -683,44 +683,69 @@ step_sbx_forged_heal() {
   local id=sbx-forged-heal before after
   [ "$SBX_A_OK" -eq 1 ] || { record "$id" BLOCKED "needs the sandbox from sbx-baseline"; return 0; }
   run_cmd "$STEP_TIMEOUT" sbx exec "$SBX_A" -- sudo sh -c 'rm -f /usr/local/share/ca-certificates/zscaler-ca.crt /home/agent/usai-config/opencode.jsonc; rm -f /home/agent/.agentic-coding-playbook/AGENTS.md; echo REMOVED'
+  need_rc0 "$id" "removing the guest files as root" || return 0
   last_has REMOVED || { record "$id" BLOCKED "could not remove the guest files as root (sudo unavailable?)"; return 0; }
   before=$(cksum <"$(sbx_record_path "$SBX_A")")
   run_cmd "$CREATE_TIMEOUT" "$ACQ" --backend sbx run "$SBX_A" -- --version
   after=$(cksum <"$(sbx_record_path "$SBX_A")")
-  if [ "$LAST_RC" -ne 0 ]; then record "$id" BLOCKED "re-attach did not complete (rc $LAST_RC), so the heal was not exercised"; return 0; fi
+  need_rc0 "$id" "re-attach" || return 0
   if last_has "injecting with 'sbx kit add'" || last_has "injected into"; then
     record "$id" FAIL "re-attach re-applied a kit although the host record was current"; return 0
   fi
   run_cmd "$STEP_TIMEOUT" sbx exec "$SBX_A" -- sh -c 'test ! -e /home/agent/usai-config/opencode.jsonc && echo STILL-ABSENT'
+  need_rc0 "$id" "post-heal absence probe" || return 0
   if [ "$before" = "$after" ] && last_has STILL-ABSENT; then record "$id" PASS "re-attach did not re-apply removed guest files while the host builtin-kits record was current"
   else record "$id" FAIL "host record changed or the removed guest file reappeared after re-attach"; fi
 }
 
 step_sbx_record_change() {
-  local id=sbx-record-change rec
+  local id=sbx-record-change rec missing="" k
   [ "$SBX_A_OK" -eq 1 ] || { record "$id" BLOCKED "needs the sandbox from sbx-baseline"; return 0; }
   rec=$(sbx_record_path "$SBX_A")
-  cp "$rec" "$OUT/builtin-kits.saved"
-  sed 's/#ref=[0-9a-f]\{40\}/#ref=0000000000000000000000000000000000000000/' "$OUT/builtin-kits.saved" >"$rec.new" && mv -f "$rec.new" "$rec"
+  [ -s "$rec" ] || { record "$id" BLOCKED "host builtin-kits record is missing before the change"; return 0; }
+  cp "$rec" "$OUT/builtin-kits.saved" || { record "$id" BLOCKED "cannot save the original record"; return 0; }
+  sed 's/#ref=[0-9a-f]\{40\}/#ref=0000000000000000000000000000000000000000/' "$OUT/builtin-kits.saved" >"$rec.new" && mv -f "$rec.new" "$rec" \
+    || { record "$id" BLOCKED "cannot alter the host record"; return 0; }
+  cmp -s "$rec" "$OUT/builtin-kits.saved" && { record "$id" BLOCKED "the record had no 40-hex refs to alter (format changed?)"; return 0; }
   say "  altered the host builtin-kits record (refs replaced with zeros); original saved in $OUT"
   run_cmd "$CREATE_TIMEOUT" "$ACQ" --backend sbx run "$SBX_A" -- --version
-  if last_has "sbx kit add" || last_has "sbx >= 0.38" || last_has "injecting with"; then
-    record "$id" PASS "altering the host record triggered the kit add path (output above shows add or the 0.38+ recreate notice)"
+  need_rc0 "$id" "acq run (re-attach)" || return 0
+  for k in "Zscaler CA kit" "provider kit" "playbook kit"; do
+    last_has "is missing the $k; injecting with 'sbx kit add'" || missing="${missing}${k}, "
+  done
+  if [ -z "$missing" ]; then
+    record "$id" PASS "altering the host record made the heal attempt kit add for all three record-tracked kits (Zscaler CA, provider, playbook)"
   else
-    record "$id" FAIL "altering the host builtin-kits record did not trigger kit add"
+    record "$id" FAIL "no kit add attempt for: ${missing%, }"
   fi
 }
 
 step_sbx_stale_refresh() {
-  local id=sbx-stale-refresh
+  local id=sbx-stale-refresh pf missing="" k
   [ "$SBX_A_OK" -eq 1 ] || { record "$id" BLOCKED "needs the sandbox from sbx-baseline"; return 0; }
+  pf=$(prov_file sbx "$SBX_A")
+  [ -n "$pf" ] && [ -s "$pf" ] || { record "$id" BLOCKED "no provenance record for $SBX_A, so staleness cannot be forced"; return 0; }
+  cp "$pf" "$OUT/provenance.saved" || { record "$id" BLOCKED "cannot save the provenance record"; return 0; }
+  awk '/^applied_ref=/ { print "applied_ref=0000000000000000000000000000000000000000"; next } { print }' "$OUT/provenance.saved" >"$pf.new" \
+    && mv -f "$pf.new" "$pf" || { record "$id" BLOCKED "cannot make the provenance record stale"; return 0; }
+  say "  made ONLY the provenance record of $SBX_A stale ($pf); no other sandbox is touched"
+  run_cmd "$STEP_TIMEOUT" "$ACQ" --backend sbx kit check "$SBX_A"
+  need_rc0 "$id" "acq kit check" || return 0
+  last_has "stale" || { record "$id" BLOCKED "acq kit check did not report stale after the edit; refresh would be a no-op"; return 0; }
   run_cmd "$CREATE_TIMEOUT" "$ACQ" --backend sbx kit update "$SBX_A" --yes
-  if last_has "refreshed" || last_has "sbx >= 0.38"; then
-    say "  refreshed lines: $(last_count refreshed); 0.38+ notice lines: $(last_count 'sbx >= 0.38')"
-    record "$id" PASS "forced refresh re-attempted all built-in kits (output above: refreshed or one consolidated recreate notice)"
-  else
-    record "$id" FAIL "kit update did not report re-applying the built-in kits"
+  if last_has "sbx >= 0.38"; then
+    record "$id" BLOCKED "sbx $SBX_VER cannot extend a live sandbox with startup-bearing kits: refresh prints the recreate notice instead of re-applying (documented limit, not a refresh result)"; return 0
   fi
+  need_rc0 "$id" "acq kit update" || return 0
+  for k in "Zscaler CA kit injected" "provider kit injected" "playbook kit injected" "git-ssh-sign kit refreshed"; do
+    last_has "$k" || missing="${missing}${k}, "
+  done
+  if last_has "warning:"; then record "$id" FAIL "kit update reported a warning although it exited 0 (see transcript)"; return 0; fi
+  if [ -n "$missing" ]; then record "$id" FAIL "kit update exited 0 but did not report: ${missing%, }"; return 0; fi
+  run_cmd "$STEP_TIMEOUT" "$ACQ" --backend sbx kit check "$SBX_A"
+  need_rc0 "$id" "acq kit check after refresh" || return 0
+  if last_has "current"; then record "$id" PASS "forced stale refresh exited 0, reported all four named kits applied, and provenance is current again"
+  else record "$id" FAIL "kit update reported success but provenance is not current afterwards"; fi
 }
 
 step_sbx_legacy_reseed() {
@@ -729,15 +754,18 @@ step_sbx_legacy_reseed() {
   rec=$(sbx_record_path "$SBX_A")
   rm -f "$rec"
   run_cmd "$CREATE_TIMEOUT" "$ACQ" --backend sbx run "$SBX_A" -- --version
+  need_rc0 "$id" "acq run (re-attach of the legacy sandbox)" || return 0
   if ver_ge "${SBX_VER#v}" 0.38.0; then
     if [ "$(last_count 'sbx >= 0.38')" -ne 1 ]; then record "$id" FAIL "expected exactly one consolidated recreate notice on sbx $SBX_VER, saw $(last_count 'sbx >= 0.38')"; return 0; fi
   fi
   run_cmd "$CREATE_TIMEOUT" "$ACQ" --backend sbx rm "$SBX_A"
+  need_rc0 "$id" "acq rm" || return 0
   SBX_A_OK=0
   ws=$(mk_workspace s2) || { record "$id" BLOCKED "cannot create a workspace"; return 0; }
   create_sandbox sbx "$SBX_A" "$ws"
-  if [ "$LAST_RC" -eq 0 ] && [ -s "$rec" ]; then record "$id" PASS "legacy notice shown once; acq rm plus a fresh create re-seeded the builtin-kits record"
-  else record "$id" FAIL "fresh create after rm did not re-seed the host builtin-kits record (rc $LAST_RC)"; fi
+  need_rc0 "$id" "acq create after rm" || return 0
+  if [ -s "$rec" ]; then record "$id" PASS "legacy notice shown once; acq rm plus a fresh create re-seeded the builtin-kits record"
+  else record "$id" FAIL "fresh create after rm did not re-seed the host builtin-kits record"; fi
 }
 
 # --- driver -------------------------------------------------------------------
