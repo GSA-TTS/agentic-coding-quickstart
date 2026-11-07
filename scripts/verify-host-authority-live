@@ -35,7 +35,8 @@ set -uo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 REPO=$(cd "$HERE/.." && pwd -P)
-ACQ="$REPO/acq"
+ACQ_LIB="$REPO/acq"
+ACQ="${HAL_ACQ_BIN:-$ACQ_LIB}"   # HAL_ACQ_BIN: offline test seam only
 
 BACKENDS=both
 ONLY=""
@@ -219,7 +220,7 @@ REVISION=$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)
 DIRTY=""
 if [ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ]; then DIRTY=" (dirty tree)"; fi
 RUN_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-NAMETAG=$(date -u +%d%H%M%S)
+RUN_ID="$(date -u +%d%H%M%S)-$$-$RANDOM"
 TO=()
 if command -v timeout >/dev/null 2>&1; then TO=(timeout --foreground)
 elif command -v gtimeout >/dev/null 2>&1; then TO=(gtimeout --foreground); fi
@@ -244,9 +245,13 @@ printf 'id\tbackend\tbackend_version\trevision\tdate\tresult\tdetail\ttranscript
 export ACQ_NO_PROMPT=1 ACQ_UPDATE_CHECK=0 GIT_TERMINAL_PROMPT=0
 CREATED=""
 LAST_RC=0
-WS_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/acq/verify/hal-$STAMP"
+# Scratch workspaces: a fresh mktemp -d directory inside the output directory, verified
+# before use. Cleanup removes only this directory, and only if it is inside $OUT.
+WS_ROOT=$(mktemp -d "$OUT/ws.XXXXXX") || { echo "verify-host-authority-live: cannot create a scratch directory under $OUT" >&2; exit 2; }
+WS_ROOT=$(cd "$WS_ROOT" && pwd -P)
+case "$WS_ROOT" in "$OUT"/ws.?*) ;; *) echo "verify-host-authority-live: unexpected scratch directory $WS_ROOT" >&2; exit 2 ;; esac
 
-sandbox_name() { printf 'hal-%s-%s' "$NAMETAG" "$1"; }
+sandbox_name() { printf 'hal-%s-%s' "$RUN_ID" "$1"; }
 
 # run_cmd SECS CMD... : run with a per-command timeout, stdin closed, output shown
 # live and appended to the transcript; the exit status lands in LAST_RC.
@@ -265,11 +270,11 @@ last_count() { last_out | grep -Fc -- "$1"; }
 
 hc_dir() { # BACKEND NAME
   # shellcheck disable=SC1090
-  ( ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO" . "$ACQ" >/dev/null 2>&1; acq_host_config_dir "$1" "$2" ) 2>/dev/null
+  ( ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO" . "$ACQ_LIB" >/dev/null 2>&1; acq_host_config_dir "$1" "$2" ) 2>/dev/null
 }
 prov_file() { # BACKEND NAME
   # shellcheck disable=SC1090
-  ( ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO" . "$ACQ" >/dev/null 2>&1; _acq_provenance_file "$1" "$2" ) 2>/dev/null
+  ( ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO" . "$ACQ_LIB" >/dev/null 2>&1; _acq_provenance_file "$1" "$2" ) 2>/dev/null
 }
 
 track_sandbox() { CREATED="${CREATED}$1:$2
@@ -303,7 +308,7 @@ cleanup() {
 $CREATED
 CLEAN
   case "$WS_ROOT" in
-    */acq/verify/hal-*) rm -rf -- "$WS_ROOT" ;;
+    "$OUT"/ws.?*) [ -d "$WS_ROOT" ] && rm -rf -- "$WS_ROOT" ;;
   esac
 }
 trap 'cleanup' EXIT
@@ -537,7 +542,7 @@ step_msb_ro_oci() {
   block_if_not_ready "$id" "$MSB_READY" "msb unavailable" || return 0
   ref=$(
     # shellcheck disable=SC1090
-    ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO" . "$ACQ" >/dev/null 2>&1
+    ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO" . "$ACQ_LIB" >/dev/null 2>&1
     _acq_optin_kit_ref oci-engine 2>/dev/null
   )
   [ -n "$ref" ] || { record "$id" BLOCKED "could not resolve the oci-engine kit ref"; return 0; }
