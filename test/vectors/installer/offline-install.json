@@ -16,7 +16,7 @@
     "exit": 0,
     "stdout": {
       "mode": "contains",
-      "value": "verified acq-linux-x86_64.tar.gz",
+      "value": "verified acq-",
       "normalize": []
     }
   },

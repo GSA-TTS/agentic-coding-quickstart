@@ -49,6 +49,15 @@ _COMPONENTS = {
 }
 
 
+_ARCHIVES = (
+    "acq-macos-arm64.tar.gz",
+    "acq-macos-x86_64.tar.gz",
+    "acq-linux-x86_64.tar.gz",
+    "acq-linux-aarch64.tar.gz",
+)
+_VERIFIED = re.compile(r"verified acq-(macos|linux)-(arm64|x86_64|aarch64)\.tar\.gz")
+
+
 def _make_release(
     root: Path, *, bad: bool = False, drop_entry: bool = False, omit: str | None = None
 ) -> Path:
@@ -68,17 +77,20 @@ def _make_release(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(body)
 
-    archive = release / "acq-linux-x86_64.tar.gz"
-    with tarfile.open(archive, "w:gz") as tf:
-        for path in sorted(p for p in stage.rglob("*") if p.is_file()):
-            tf.add(path, arcname=path.relative_to(stage).as_posix())
-
-    sha = hashlib.sha256(archive.read_bytes()).hexdigest()
+    # install.sh selects the archive from the host's uname, so the fixture ships one
+    # per supported platform and the tests pass on any of them.
+    sums = []
+    for name in _ARCHIVES:
+        archive = release / name
+        with tarfile.open(archive, "w:gz") as tf:
+            for path in sorted(p for p in stage.rglob("*") if p.is_file()):
+                tf.add(path, arcname=path.relative_to(stage).as_posix())
+        sha = hashlib.sha256(archive.read_bytes()).hexdigest()
+        sums.append(f"{'0' * 64 if bad else sha}  {name}\n")
     if drop_entry:
         (release / "SHA256SUMS").write_text(f"{sha}  some-other-asset.tar.gz\n")
     else:
-        recorded = "0" * 64 if bad else sha
-        (release / "SHA256SUMS").write_text(f"{recorded}  acq-linux-x86_64.tar.gz\n")
+        (release / "SHA256SUMS").write_text("".join(sums))
     # The provenance manifest travels alongside SHA256SUMS (a separate asset).
     (release / "provenance.json").write_text(
         '{"schema": 1, "note": "test fixture provenance (no secrets)"}\n'
@@ -176,7 +188,7 @@ def test_offline_install_succeeds(tmp_path):
     release = _make_release(tmp_path)
     proc = _run_installer(tmp_path, "--source", str(release), "--yes")
     assert proc.returncode == 0
-    assert "verified acq-linux-x86_64.tar.gz" in proc.stdout.decode()
+    assert _VERIFIED.search(proc.stdout.decode())
     # The bundled runtime and the launcher are laid down.
     assert (_install_dir(tmp_path) / "py-acq" / "runtime" / "bin" / "python3").exists()
     assert (_bin_dir(tmp_path) / "acq").is_symlink()
