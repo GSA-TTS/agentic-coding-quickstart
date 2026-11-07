@@ -11,7 +11,7 @@ setup() { acq_setup_stubs; }
 teardown() { acq_teardown_stubs; }
 
 @test "no heredoc inside a command or process substitution has an unsafe body" {
-  run python3 "$BATS_TEST_DIRNAME/heredoc-scan.py" "$REPO_ROOT/acq" "$REPO_ROOT"/acq.backends/*.sh "$REPO_ROOT"/scripts/*
+  run python3 "$REPO_ROOT/scripts/scan-heredoc-subst.py" "$REPO_ROOT/acq" "$REPO_ROOT"/acq.backends/*.sh "$REPO_ROOT"/scripts/*
   assert_success
 }
 
@@ -19,10 +19,10 @@ teardown() { acq_teardown_stubs; }
   local unsafe="$STUBDIR/unsafe.sh" safe="$STUBDIR/safe.sh"
   printf '%s\n' 'while read -r v; do :; done < <(python3 - <<'"'"'PY'"'"'' "# it's unsafe" 'PY' ')' > "$unsafe"
   printf '%s\n' 'while read -r v; do :; done < <(python3 - <<'"'"'PY'"'"'' 'print(1)' 'PY' ')' > "$safe"
-  run python3 "$BATS_TEST_DIRNAME/heredoc-scan.py" "$unsafe"
+  run python3 "$REPO_ROOT/scripts/scan-heredoc-subst.py" "$unsafe"
   assert_failure
   assert_output --partial 'odd single quotes'
-  run python3 "$BATS_TEST_DIRNAME/heredoc-scan.py" "$safe"
+  run python3 "$REPO_ROOT/scripts/scan-heredoc-subst.py" "$safe"
   assert_success
 }
 
