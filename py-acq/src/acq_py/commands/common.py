@@ -17,22 +17,41 @@ import sys
 from .. import backends, envelope, errors, kits, msb, sbx, security, state
 
 
+# Both adapters raise an error carrying the same (code, message, remediation)
+# contract; catch this tuple uniformly at the seam.
 _ADAPTER_ERRORS = (msb.MsbError, sbx.SbxError)
 
+# Agent tokens accepted by acq dispatch (mirrors acq.backends/agents.sh). Read by the
+# ``run`` create-vs-reattach decision in ``commands.lifecycle``.
 KNOWN_AGENTS = frozenset(
     "claude codex copilot cursor docker-agent droid gemini kiro opencode shell".split()
 )
 
+# Guest-side workspace a session starts in when no host record supplies one
+# (mirrors the legacy ``_acq_msb_workspace_for`` default, ADR-0011).
 DEFAULT_GUEST_WORKSPACE = "/home/agent"
 
+# The default base image (ADR-0030): a generic, agent-less devenv-enabled base for
+# EVERY agent. Agent harness installation is deferred to kits (starting with
+# opencode), so the base image no longer differs per agent; an explicit
+# ``--image``/``ACQ_IMAGE``/``ACQ_MSB_IMAGE`` override is the only way to change it
+# (ADR-0022 precedence). The devenv base is agent-less: the agent binary is
+# installed by the pinned opencode kit at create time (see ``commands.lifecycle._apply_agent_kit``).
+#
+# TODO(quarterly): the digest below is a real, reproducible pin — re-reviewed on
+# the quarterly cadence (ADR-0030). It is sourced from the devenv image VERSION /
+# Dockerfile pins in ``integrations/isolation/images/devenv/`` (devenv-shell:2.1.0)
+# and the upstream ``acq.backends/agents.sh`` default.
 OPENCODE_DEVENV_IMAGE = (
     "ghcr.io/gsa-tts/agentic-coding-patterns/devenv-shell@"
     "sha256:0b5f4cc95c8fa7dd7f3ffd02b56e63d0caf9b151421ff6ea3cb34b2139e3966c"
 )
 
+
 def _adapter(backend: str):
     """Resolve the adapter module for a backend name (``"sbx"`` else ``msb``)."""
     return sbx if backend == "sbx" else msb
+
 
 def _supports(backend: str, capability: str) -> bool:
     """Consult the adapter's declared capability record (ADR-0040m).
@@ -48,6 +67,7 @@ def _supports(backend: str, capability: str) -> bool:
         return True
     return record_fn().get("capabilities", {}).get(capability) != "unsupported"
 
+
 def _default_image_for_agent(agent: str) -> str:
     """The default base image: the pinned devenv shell image for every agent.
 
@@ -55,6 +75,7 @@ def _default_image_for_agent(agent: str) -> str:
     per-agent mapping it replaced, but it no longer selects a different image.
     """
     return OPENCODE_DEVENV_IMAGE
+
 
 def _usage_failure(command: str | None, message: str, emit_json: bool) -> int:
     if emit_json:
@@ -69,6 +90,7 @@ def _usage_failure(command: str | None, message: str, emit_json: bool) -> int:
         print(f"acq: {message}", file=sys.stderr)
         print("run 'acq --help' for usage", file=sys.stderr)
     return errors.EXIT_USAGE
+
 
 def _operational_failure(
     command: str,
@@ -94,6 +116,7 @@ def _operational_failure(
         if remediation:
             print(remediation, file=sys.stderr)
     return exit_code
+
 
 def _resolve_active_backend(explicit: str | None) -> str | None:
     """Resolve the active backend for read-only reporting.
@@ -126,6 +149,7 @@ def _resolve_active_backend(explicit: str | None) -> str | None:
     if len(installed) > 1:
         return "msb"
     return None
+
 
 def _resolve_backend_for_mutation(
     explicit: str | None,
@@ -170,11 +194,13 @@ def _resolve_backend_for_mutation(
             )
     return name, None
 
+
 def _resolve_backend_for_lifecycle(
     explicit: str | None, emit_json: bool, command: str
 ) -> tuple[str | None, int | None]:
     """Backend resolution for the lifecycle verbs (kept as a named alias)."""
     return _resolve_backend_for_mutation(explicit, emit_json, command, domain="lifecycle")
+
 
 def _read_secret_value() -> str:
     """Read the secret value from stdin, preserving trailing-newline fidelity.
@@ -194,6 +220,7 @@ def _read_secret_value() -> str:
         if data.endswith("\r"):  # optional preceding CR (CRLF terminator)
             data = data[:-1]
     return data
+
 
 def _validate_workspace(command: str, path: str | None, emit_json: bool) -> tuple[str | None, int | None]:
     """Resolve the workspace to an absolute directory, or emit a validation failure."""
@@ -216,6 +243,7 @@ def _validate_workspace(command: str, path: str | None, emit_json: bool) -> tupl
         )
     return resolved, None
 
+
 def _mount_workspace(backend: str, workspace: str) -> str:
     """The host path to mount and record for ``workspace``.
 
@@ -231,6 +259,7 @@ def _mount_workspace(backend: str, workspace: str) -> str:
     """
     return os.path.realpath(workspace) if backend == "msb" else workspace
 
+
 def _launch_token(backend: str, name: str, agent: str) -> str:
     """Resolve the launch command: a recorded kit entrypoint wins over the agent name.
 
@@ -243,6 +272,7 @@ def _launch_token(backend: str, name: str, agent: str) -> str:
         return applied["entrypoint"]
     return agent
 
+
 def _trusted_gate(record: dict | None, backend: str, command: str, name: str, emit_json: bool) -> int | None:
     """Refuse a trusted operation on a sandbox missing its read-only mount.
 
@@ -254,6 +284,7 @@ def _trusted_gate(record: dict | None, backend: str, command: str, name: str, em
     except security.SecurityException as exc:
         return _operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
     return None
+
 
 def _sandbox_ref(token: str) -> tuple[str, str] | None:
     """Return ``(name, guest_path)`` when ``token`` is a ``NAME:/guest/path`` ref.
@@ -274,6 +305,7 @@ def _sandbox_ref(token: str) -> tuple[str, str] | None:
         return None
     return (name, rest)
 
+
 def _workspace_from_record(backend: str, name: str) -> str:
     """Resolve the guest workspace for a session (``-w``), host-authoritative.
 
@@ -287,6 +319,7 @@ def _workspace_from_record(backend: str, name: str) -> str:
     if record and record.get("workspace"):
         return record["workspace"]
     return DEFAULT_GUEST_WORKSPACE
+
 
 def _slugify(token: str) -> str:
     """Normalize a token into a sandbox-name slug (mirrors acq.backends slugify).
@@ -305,14 +338,17 @@ def _slugify(token: str) -> str:
             prev_dash = True
     return "".join(out).strip("-")
 
+
 def _derive_name(agent: str, workspace: str) -> str:
     base = os.path.basename(workspace.rstrip("/\\")) or "workspace"
     return f"{_slugify(agent)}-{_slugify(base)}"
+
 
 def _secret_scope_args(parser: argparse.ArgumentParser, *, remainder_help: str) -> None:
     """Add the shared ``-g/--global`` flag + REMAINDER scope/service tokens."""
     parser.add_argument("-g", "--global", dest="global_scope", action="store_true", help="global scope")
     parser.add_argument("args", nargs=argparse.REMAINDER, help=remainder_help)
+
 
 def _parse_secret_scope_service(global_scope: bool, tokens: list[str]) -> tuple[str | None, str | None]:
     """Parse ``[-g | --global | SANDBOX] SERVICE`` -> ``(scope, service)``.
@@ -331,6 +367,7 @@ def _parse_secret_scope_service(global_scope: bool, tokens: list[str]) -> tuple[
     if scope.startswith("-"):
         return None, None
     return scope, service
+
 
 def _parse_secret_ls_scope(global_scope: bool, tokens: list[str]) -> tuple[str | None, bool]:
     """Parse the optional ``secret ls`` scope filter -> ``(scope, ok)``.

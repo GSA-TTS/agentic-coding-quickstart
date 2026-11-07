@@ -1,4 +1,4 @@
-"""``kit`` list/validate/apply/check/update and ``kit source`` add/ls/rm:
+"""``kit`` list/validate/apply/check/update and ``kit-source`` add/ls/rm:
 kit-bundle provenance and application (ADR-0016, ADR-0030).
 """
 
@@ -25,6 +25,7 @@ def _print_kit_list_human(data: dict) -> None:
         for name in data["extra"]:
             print(f"  - {name}")
 
+
 def run_kit_list(emit_json: bool) -> int:
     data = kits.kit_list_data()
     if emit_json:
@@ -32,6 +33,7 @@ def run_kit_list(emit_json: bool) -> int:
     else:
         _print_kit_list_human(data)
     return errors.EXIT_SUCCESS
+
 
 def run_kit_validate(parsed, emit_json: bool) -> int:
     """``acq kit validate PATH`` — validity + coded findings (ADR-0038m §2).
@@ -64,6 +66,7 @@ def run_kit_validate(parsed, emit_json: bool) -> int:
                 if finding.get("remediation"):
                     print(f"           {finding['remediation']}")
     return errors.EXIT_SUCCESS
+
 
 def run_kit_apply(parsed, emit_json: bool, backend_override: str | None) -> int:
     """``acq kit apply NAME KITREF`` — apply a built-in agent kit to a sandbox.
@@ -143,6 +146,7 @@ def run_kit_apply(parsed, emit_json: bool, backend_override: str | None) -> int:
         print(f"applied kit '{kit_name}' to sandbox '{name}' (entrypoint {entrypoint}).")
     return errors.EXIT_SUCCESS
 
+
 def _print_kit_check_human(data: dict) -> None:
     print(f"sandbox:       {data['sandbox']} (backend: {data['backend']})")
     print(f"local pinned:  {data['local']}")
@@ -157,6 +161,7 @@ def _print_kit_check_human(data: dict) -> None:
         print("status:        unknown (no provenance record; may predate tracking)")
         print()
         print(f"refresh in place with: acq kit update {data['sandbox']}")
+
 
 def run_kit_check(parsed, emit_json: bool, backend_override: str | None) -> int:
     """``acq kit check SANDBOX`` — read-only currency report (ADR-0016).
@@ -183,6 +188,7 @@ def run_kit_check(parsed, emit_json: bool, backend_override: str | None) -> int:
     else:
         _print_kit_check_human(data)
     return errors.EXIT_SUCCESS
+
 
 def run_kit_update(parsed, emit_json: bool, backend_override: str | None) -> int:
     """``acq kit update SANDBOX [--yes]`` — consented bundle refresh.
@@ -253,6 +259,7 @@ def run_kit_update(parsed, emit_json: bool, backend_override: str | None) -> int
         print(f"consent recorded for '{name}' to {kits.CONTROL_PLANE_REF}; reapply deferred.")
     return errors.EXIT_SUCCESS
 
+
 def _print_kit_source_ls_human(data: dict) -> None:
     print(f"{'SOURCE':52} {'REF':40} KITS-DIR")
     for src in data["sources"]:
@@ -269,6 +276,7 @@ def _print_kit_source_ls_human(data: dict) -> None:
     if not found:
         print("  (none discovered — sources are unreachable, or publish no provider kits)")
 
+
 def run_kit_source_ls(emit_json: bool) -> int:
     data = kits.kit_source_ls_data()
     if emit_json:
@@ -276,6 +284,7 @@ def run_kit_source_ls(emit_json: bool) -> int:
     else:
         _print_kit_source_ls_human(data)
     return errors.EXIT_SUCCESS
+
 
 def run_kit_source_add(parsed, emit_json: bool) -> int:
     repo = kits.normalize_repo(parsed.repo)
@@ -322,6 +331,7 @@ def run_kit_source_add(parsed, emit_json: bool) -> int:
     else:
         print(f"{action} kit source '{repo}' (@{ref}).")
     return errors.EXIT_SUCCESS
+
 
 def run_kit_source_rm(parsed, emit_json: bool, backend_override: str | None) -> int:
     # Validate --backend up front (the same unknown-backend refusal every mutating

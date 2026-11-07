@@ -14,11 +14,22 @@ from .. import envelope, errors, kits, msb, sbx, security, state
 from . import common
 
 
+# Substrate-contract seam (internal test seam, never a secret, never written to
+# output). ``ACQ_SUBSTRATE_STATE`` is a JSON object mapping an image to its
+# substrate state: ``"ok"`` or a list of gap tokens. A ``"*"`` key applies to any
+# overridden image not otherwise named. Absent means unknown -> a kit cannot be
+# applied to an unverified image (fail closed). The default devenv base is ``"ok"``
+# by construction and never consults the seam.
 SUBSTRATE_STATE_ENV = "ACQ_SUBSTRATE_STATE"
 
+# Substrate-contract gap tokens (ADR-0030 "bring-your-own image contract"). A kit
+# installs into single-user Nix + devenv + direnv at the pinned /nix store, run by
+# the agent user. Addressable gaps are provisioned in-guest; unaddressable gaps
+# fail closed.
 _ADDRESSABLE_SUBSTRATE_GAPS = frozenset({"nix", "devenv", "direnv", "agent-user"})
 
 _UNADDRESSABLE_SUBSTRATE_GAPS = frozenset({"non-linux", "read-only-filesystem"})
+
 
 def _resolve_image(flag_image: str | None, agent: str) -> str:
     """Resolve the base image (ADR-0022 precedence).
@@ -35,6 +46,7 @@ def _resolve_image(flag_image: str | None, agent: str) -> str:
     if msb_image:
         return msb_image
     return common._default_image_for_agent(agent)
+
 
 def _resolve_image_for_kit(
     image_flag: str | None, agent: str, kit_name: str | None, command: str, emit_json: bool
@@ -54,6 +66,7 @@ def _resolve_image_for_kit(
     if exit_code is not None:
         return None, [], exit_code
     return image, provision, None
+
 
 def _substrate_gaps(image: str) -> list[str] | None:
     """The substrate gap list for an image (empty == satisfied), or ``None`` (unknown).
@@ -84,6 +97,7 @@ def _substrate_gaps(image: str) -> list[str] | None:
         return [g for g in entry if isinstance(g, str)]
     return None
 
+
 def _substrate_provision_steps(gaps: list[str]) -> list[list[str]]:
     """In-guest bootstrap steps for addressable substrate gaps (ordered).
 
@@ -99,6 +113,7 @@ def _substrate_provision_steps(gaps: list[str]) -> list[list[str]]:
         "agent-user": ["useradd", "-m", "agent"],
     }
     return [list(steps[gap]) for gap in gaps if gap in steps]
+
 
 def _substrate_plan(
     image: str, kit_name: str | None, command: str, emit_json: bool
@@ -132,6 +147,7 @@ def _substrate_plan(
     addressable = [g for g in gaps if g in _ADDRESSABLE_SUBSTRATE_GAPS]
     return _substrate_provision_steps(addressable), None
 
+
 def _validate_kit_flag(kit_flag: str | None, command: str, emit_json: bool) -> tuple[str | None, int | None]:
     """Validate an explicit ``--kit``; returns ``(kit_name, exit_code)``.
 
@@ -148,6 +164,7 @@ def _validate_kit_flag(kit_flag: str | None, command: str, emit_json: bool) -> t
             emit_json,
         )
     return kit_flag, None
+
 
 def _apply_agent_kit(
     backend: str, name: str, kit_name: str, provision_steps: list[list[str]], command: str, emit_json: bool
@@ -181,6 +198,7 @@ def _apply_agent_kit(
     kits.kit_applied_write(backend, name, kit_name, kits.agent_kit_entrypoint(kit_name))
     return None
 
+
 def _discard_half_created(backend: str, name: str) -> None:
     """Remove a just-created sandbox (and its record) after a failed kit apply.
 
@@ -192,6 +210,7 @@ def _discard_half_created(backend: str, name: str) -> None:
     except common._ADAPTER_ERRORS:
         pass
     state.record_remove(backend, name)
+
 
 def _reattach_workspace(
     backend: str, name: str, typed: str, emit_json: bool
@@ -220,6 +239,7 @@ def _reattach_workspace(
         return None, gate
     return (record or {}).get("workspace") or typed, None
 
+
 def _wait_exec_ready(backend: str, name: str) -> bool:
     adapter = common._adapter(backend)
     deadline = time.monotonic() + adapter.READY_TIMEOUT_S
@@ -229,6 +249,7 @@ def _wait_exec_ready(backend: str, name: str) -> bool:
         if time.monotonic() >= deadline:
             return False
         time.sleep(0.1)
+
 
 def _create_sandbox(
     backend: str, agent: str, workspace: str, name: str, image: str, *, ro_host_config: bool | None = None
@@ -261,6 +282,7 @@ def _create_sandbox(
         "image": image,
     }
 
+
 def _print_create_human(data: dict) -> None:
     line = (
         f"sandbox '{data['name']}' created (backend {data['backend']}, "
@@ -269,6 +291,7 @@ def _print_create_human(data: dict) -> None:
     if data.get("kit"):
         line += f"; applied kit '{data['kit']}' (entrypoint {data['entrypoint']})"
     print(line)
+
 
 def run_create(parsed, emit_json: bool, backend: str) -> int:
     if parsed.recreate is not None:
@@ -332,6 +355,7 @@ def run_create(parsed, emit_json: bool, backend: str) -> int:
     else:
         _print_create_human(data)
     return errors.EXIT_SUCCESS
+
 
 def run_recreate(parsed, emit_json: bool, backend: str) -> int:
     """``acq create --recreate NAME [--yes]`` — security-exception recreation.
@@ -449,6 +473,7 @@ def run_recreate(parsed, emit_json: bool, backend: str) -> int:
     else:
         print(f"recreated sandbox '{name}' (host records and secrets preserved).")
     return errors.EXIT_SUCCESS
+
 
 def run_run(parsed, emit_json: bool, backend: str) -> int:
     """Create (if missing) then launch, or re-attach an existing sandbox by name.
@@ -572,6 +597,7 @@ def run_run(parsed, emit_json: bool, backend: str) -> int:
         )
     return adapter.launch(target, workspace, common._launch_token(backend, target, agent), json_mode=emit_json)
 
+
 def _ls_data(backend: str) -> dict:
     adapter = common._adapter(backend)
     names = adapter.list_names() or []
@@ -599,6 +625,7 @@ def _ls_data(backend: str) -> dict:
     sandboxes.sort(key=lambda entry: entry["name"])
     return {"sandboxes": sandboxes}
 
+
 def _print_ls_human(data: dict) -> None:
     sandboxes = data["sandboxes"]
     if not sandboxes:
@@ -608,6 +635,7 @@ def _print_ls_human(data: dict) -> None:
         extra = f"  ({entry['agent']})" if entry.get("agent") else ""
         print(f"  {entry['name']}  {entry['backend']}  {entry['state']}{extra}")
 
+
 def run_ls(emit_json: bool, backend: str) -> int:
     data = _ls_data(backend)
     if emit_json:
@@ -615,6 +643,7 @@ def run_ls(emit_json: bool, backend: str) -> int:
     else:
         _print_ls_human(data)
     return errors.EXIT_SUCCESS
+
 
 def run_stop(parsed, emit_json: bool, backend: str) -> int:
     adapter = common._adapter(backend)
@@ -637,6 +666,7 @@ def run_stop(parsed, emit_json: bool, backend: str) -> int:
     else:
         print(f"stopped sandbox '{name}'")
     return errors.EXIT_SUCCESS
+
 
 def run_rm(parsed, emit_json: bool, backend: str) -> int:
     adapter = common._adapter(backend)

@@ -45,6 +45,7 @@ def run_secret_set(parsed, emit_json: bool, backend: str) -> int:
         print(f"stored secret '{service}' (scope {scope})")
     return errors.EXIT_SUCCESS
 
+
 def run_secret_rm_raw(placeholder: str, emit_json: bool) -> int:
     """sbx-only raw-placeholder removal (ADR-0038m §48).
 
@@ -62,6 +63,7 @@ def run_secret_rm_raw(placeholder: str, emit_json: bool) -> int:
     else:
         print(f"removed raw placeholder '{placeholder}'.")
     return errors.EXIT_SUCCESS
+
 
 def run_secret_rm(parsed, emit_json: bool, backend: str) -> int:
     """``acq secret rm (-g | SANDBOX) SERVICE`` — remove a secret.
@@ -106,6 +108,7 @@ def run_secret_rm(parsed, emit_json: bool, backend: str) -> int:
         print(f"removed secret '{service}' (scope {scope})")
     return errors.EXIT_SUCCESS
 
+
 def _print_secret_ls_human(data: dict) -> None:
     secrets = data["secrets"]
     if not secrets:
@@ -113,6 +116,7 @@ def _print_secret_ls_human(data: dict) -> None:
         return
     for entry in secrets:
         print(f"  {entry['scope']}  {entry['service']}  {entry['value_state']}")
+
 
 def run_secret_ls(parsed, emit_json: bool, backend: str) -> int:
     """``acq secret ls [(-g | SANDBOX)]`` — scope/service/value_state, never a value.
@@ -144,6 +148,7 @@ def run_secret_ls(parsed, emit_json: bool, backend: str) -> int:
     else:
         _print_secret_ls_human(data)
     return errors.EXIT_SUCCESS
+
 
 def run_secret_has(parsed, backend_override: str | None) -> int:
     """``acq secret has (-g | SANDBOX) SERVICE`` — silent predicate (ADR-0038m).

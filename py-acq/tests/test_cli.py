@@ -82,6 +82,9 @@ def test_success_paths_exit_zero(cmd):
 
 # ---- command-module split (the dispatch layer is a thin seam) -----------------
 
+import pathlib
+
+
 def test_cli_reexports_everything_the_command_modules_own_that_callers_address():
     # The handlers moved to acq_py.commands.*; cli re-exports the names the Tier-2
     # tests patch and call, so the split is invisible to existing callers. Any
@@ -103,41 +106,94 @@ def test_cli_reexports_everything_the_command_modules_own_that_callers_address()
     assert cli._resolve_image is lifecycle._resolve_image
     assert cli.SUBSTRATE_STATE_ENV is lifecycle.SUBSTRATE_STATE_ENV
 
+    # `is` alone is not enough for short string constants: CPython interns
+    # identifier-like literals, so a hand-copied duplicate would satisfy it. Assert
+    # the alias is the *only* definition by reading the source of each module.
+    import re
+
+    for name, owner in (("SUBSTRATE_STATE_ENV", "lifecycle"), ("DEFAULT_GUEST_WORKSPACE", "common")):
+        source = (pathlib.Path(cli.__file__)).read_text(encoding="utf-8")
+        assigns = re.findall(rf"^{name} = (.+)$", source, re.M)
+        assert assigns == [f"{owner}.{name}"], f"cli must alias {name}, not redefine it: {assigns}"
+
 
 def test_every_known_command_has_a_dispatch_arm_into_a_command_module():
-    # main() must route every advertised verb into acq_py.commands.*. Driving each
-    # verb with no arguments cannot prove this (most exit 2 at argparse before
-    # dispatch), so this reads the dispatch itself: every KNOWN_COMMAND must appear
-    # in a `parsed.command == "X"` comparison, and every such arm must call a
-    # qualified `<module>.<handler>`. A verb dropped from the dispatch during a
-    # refactor would otherwise fall through to the backend passthrough silently.
+    # main() must route every advertised verb into a real handler. Driving each verb
+    # with no arguments cannot prove this (most exit 2 at argparse before dispatch),
+    # so this reads the dispatch itself, per arm: for every KNOWN_COMMAND there must
+    # be an `if parsed.command == "X"` (or an `in (...)` group) whose body calls a
+    # `<command module>.<handler>` that exists. Subcommand comparisons
+    # (parsed.secret_command and friends) are deliberately ignored: `ls`, `rm`,
+    # `check` and `list` appear in both spaces, so counting them would let a missing
+    # top-level arm be satisfied by a same-named subcommand.
     import ast
     import inspect
 
     from acq_py import cli
     from acq_py.commands import common, creds, kit, lifecycle, secret, session
 
-    tree = ast.parse(inspect.getsource(cli.main))
-    routed, calls = set(), set()
-    for node in ast.walk(tree):
-        if (isinstance(node, ast.Compare) and isinstance(node.left, ast.Attribute)
-                and node.left.attr in ("command", "secret_command", "backend_command",
-                                       "provider_credential_command", "kit_command")):
-            routed |= {c.value for c in node.comparators if isinstance(c, ast.Constant)}
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
-                and isinstance(node.func.value, ast.Name):
-            calls.add(f"{node.func.value.id}.{node.func.attr}")
-
-    unrouted = cli.KNOWN_COMMANDS - routed
-    assert not unrouted, f"not reachable from main(): {sorted(unrouted)}"
-
     modules = {"common": common, "creds": creds, "kit": kit, "lifecycle": lifecycle,
                "secret": secret, "session": session}
-    handlers = {c for c in calls if c.split(".")[0] in modules}
-    assert handlers, "main() no longer dispatches into any command module"
-    for call in sorted(handlers):
-        mod, attr = call.split(".", 1)
-        assert hasattr(modules[mod], attr), f"main() calls {call}, which does not exist"
+
+    def verbs_of(test):
+        """Top-level command literals an `if` test compares against."""
+        found = set()
+        for node in ast.walk(test):
+            left = getattr(node, "left", None)
+            if isinstance(node, ast.Compare) and isinstance(left, ast.Attribute) and left.attr == "command":
+                for cmp in node.comparators:
+                    if isinstance(cmp, ast.Constant) and isinstance(cmp.value, str):
+                        found.add(cmp.value)
+                    elif isinstance(cmp, (ast.Tuple, ast.List, ast.Set)):
+                        found |= {e.value for e in cmp.elts
+                                  if isinstance(e, ast.Constant) and isinstance(e.value, str)}
+        return found
+
+    def handlers_in(body):
+        calls = set()
+        for stmt in body:
+            for node in ast.walk(stmt):
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and isinstance(node.func.value, ast.Name)
+                        and node.func.value.id in modules):
+                    calls.add((node.func.value.id, node.func.attr))
+        return calls
+
+    # Record the most specific arm per verb: an outer `in (...)` group resolves the
+    # backend and then delegates to one `== "verb"` arm each, so the handler call
+    # must be found on that inner arm, not merely somewhere in the enclosing group.
+    routed, specific = {}, {}
+    for node in ast.walk(ast.parse(inspect.getsource(cli.main))):
+        if not isinstance(node, ast.If):
+            continue
+        verbs = verbs_of(node.test)
+        for verb in verbs:
+            routed.setdefault(verb, set())
+            if len(verbs) == 1:  # a single-verb arm is the specific one
+                specific.setdefault(verb, set()).update(handlers_in(node.body))
+            else:
+                routed[verb].update(handlers_in(node.body))
+    for verb, calls in specific.items():
+        routed[verb] = calls
+
+    # A verb named only in an `in (...)` group, with no arm of its own, is NOT
+    # routed: the group resolves the backend and then falls through, so the verb
+    # would reach the end of main() instead of a handler.
+    grouped = {v for v, calls in routed.items() if v not in specific}
+    delegating = {v for v in grouped if v not in ("version", "doctor", "backend", "help")}
+    assert not delegating, f"named in a group but given no dispatch arm: {sorted(delegating)}"
+
+    unrouted = cli.KNOWN_COMMANDS - set(routed) - {"help"}  # `help` is argparse's own
+    assert not unrouted, f"not reachable from main(): {sorted(unrouted)}"
+
+    for verb, calls in sorted(routed.items()):
+        # `version` and `doctor` are handled in cli itself (lazily imported, so they
+        # stay off the Tier-3 surface); every other verb delegates to a module.
+        if verb in ("version", "doctor", "backend", "help"):
+            continue
+        assert calls, f"the dispatch arm for {verb!r} calls no command-module handler"
+        for mod, attr in sorted(calls):
+            assert hasattr(modules[mod], attr), f"{verb!r} dispatches to {mod}.{attr}, which does not exist"
 
 
 def test_an_unknown_verb_reaches_the_passthrough_not_argparse(monkeypatch):

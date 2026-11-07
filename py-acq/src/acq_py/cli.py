@@ -4,7 +4,8 @@ The highest seam is the subprocess boundary (ADR-0038m section 1): exit codes
 0/1/2 and the structured-output envelope (``--json``) are the contract. This
 module owns that surface — ``build_parser`` and ``main`` — plus the two verbs
 whose handlers are small enough to live beside it (``backend list``/``check``
-and ``doctor``). Every other handler lives in :mod:`acq_py.commands`:
+and ``doctor``). Every other handler lives in :mod:`acq_py.commands`
+(see ADR-0046m for why the boundary falls here):
 
     commands/common.py     the adapter seam, failure envelopes, backend and
                            workspace resolution, secret-scope parsing
@@ -12,10 +13,11 @@ and ``doctor``). Every other handler lives in :mod:`acq_py.commands`:
     commands/session.py    exec, attach, shell, cp, ports, verbatim passthrough
     commands/secret.py     secret set/rm/ls/has
     commands/creds.py      provider-credential, github-scope, usai-rotate-api-key
-    commands/kit.py        kit list/validate/apply/check/update, kit source
+    commands/kit.py        kit list/validate/apply/check/update, kit-source
 
-The names those modules own are re-exported below, so ``cli.<name>`` keeps
-resolving for callers and for the Tier-2 tests that patch them.
+The names those modules own that callers address are re-exported below, so
+``cli.<name>`` keeps resolving. They are aliases: substituting one in a test means
+patching it on its owning module, not rebinding it here.
 
 Output contract:
     * human output -> stdout, diagnostics -> stderr (no ``--json``)
@@ -42,12 +44,6 @@ import sys
 from . import backends, envelope, errors, migration, msb
 from .commands import common, creds, kit, lifecycle, secret, session
 
-# Both adapters raise an error carrying the same (code, message, remediation)
-# contract; catch this tuple uniformly at the seam.
-
-
-# Agent tokens accepted by acq dispatch (mirrors acq.backends/agents.sh). Kept in
-# the CLI because it owns the create-vs-reattach decision for ``run``.
 
 # Every subcommand acq owns. An argv token that is not one of these (and is not a
 # flag) is treated as an unknown verb and forwarded verbatim to the active
@@ -57,26 +53,14 @@ KNOWN_COMMANDS = frozenset(
     "secret kit kit-source provider-credential github-scope usai-rotate-api-key".split()
 )
 
-# Guest-side workspace a session starts in when no host record supplies one
-# (mirrors the legacy ``_acq_msb_workspace_for`` default, ADR-0011).
-
-# The default base image (ADR-0030): a generic, agent-less devenv-enabled base for
-# EVERY agent. Agent harness installation is deferred to kits (starting with
-# opencode), so the base image no longer differs per agent; an explicit
-# ``--image``/``ACQ_IMAGE``/``ACQ_MSB_IMAGE`` override is the only way to change it
-# (ADR-0022 precedence). The devenv base is agent-less: the agent binary is
-# installed by the pinned opencode kit at create time (see ``lifecycle._apply_agent_kit``).
-#
-# TODO(quarterly): the digest below is a real, reproducible pin — re-reviewed on
-# the quarterly cadence (ADR-0030). It is sourced from the devenv image VERSION /
-# Dockerfile pins in ``integrations/isolation/images/devenv/`` (devenv-shell:2.1.0)
-# and the upstream ``acq.backends/agents.sh`` default.
-
 
 # The command handlers live in ``acq_py.commands`` (see that package); this module
 # owns the argparse surface and the dispatch below. These re-exports keep the
-# historical ``cli.<name>`` addresses working for the Tier-2 tests, which patch and
-# call them directly, so the split stays invisible to every existing caller. The
+# historical ``cli.<name>`` addresses working for callers and for the Tier-2 tests
+# that call them, so the split stays invisible to every existing caller. They are
+# aliases, not indirections: every handler reads the name from its owning module, so
+# a test that needs to substitute one must patch it THERE (or on the shared adapter
+# module, as ``cli.msb`` does) — rebinding ``cli.<name>`` would have no effect. The
 # adapter modules above are imported here for the same reason (``cli.msb`` is the
 # module object the tests patch), and because importing them eagerly is part of the
 # Tier-3 surface closure: only ``doctor`` and ``version_info`` stay lazy.
@@ -397,56 +381,6 @@ def run_doctor(emit_json: bool, name: str | None) -> int:
         return errors.EXIT_SUCCESS
     _print_doctor_human(data)
     return errors.EXIT_SUCCESS
-
-
-# ---------------------------------------------------------------------------
-# MSB lifecycle verbs (create / run / stop / rm / ls).
-# ---------------------------------------------------------------------------
-
-
-# Substrate-contract gap tokens (ADR-0030 "bring-your-own image contract"). A kit
-# installs into single-user Nix + devenv + direnv at the pinned /nix store, run by
-# the agent user. Addressable gaps are provisioned in-guest; unaddressable gaps
-# fail closed.
-
-# Substrate-contract seam (internal test seam, never a secret, never written to
-# output). ``ACQ_SUBSTRATE_STATE`` is a JSON object mapping an image to its
-# substrate state: ``"ok"`` or a list of gap tokens. A ``"*"`` key applies to any
-# overridden image not otherwise named. Absent means unknown -> a kit cannot be
-# applied to an unverified image (fail closed). The default devenv base is ``"ok"``
-# by construction and never consults the seam.
-
-
-# ---------------------------------------------------------------------------
-# exec / attach / shell / cp / ports (ADR-0040m capabilities; ADR-0038m §1
-# child/backend status preservation).
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# secret set / rm / ls / has (ADR-0040m `secret-write/rm`, `secret-list`;
-# ADR-0038m §secret ls/has required data). The paramount rule is that no secret
-# VALUE ever appears in argv, logs, fixtures, or output: scope/service are
-# non-secret identifiers on argv, while the value flows on stdin only.
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# provider-credential set / ls / rm (ADR-0038m §provider-credential), and the
-# github-scope / usai-rotate-api-key verbs (ADR-0012, ADR-0013). The paramount
-# rule is unchanged from `secret`: a credential VALUE never appears in argv,
-# logs, or output — it flows on stdin only and is forwarded to the backend on the
-# child's stdin. The binding / scope is host-authoritative state (ADR-0041m).
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# kit list / validate / apply / check / update, and kit-source add / ls / rm
-# (ADR-0038m §kit; ADR-0016 provenance; trusted-source policy; ADR-0030
-# agent-kit install). ``kit apply`` is the ADR-0030 devenv-base + agent-install
-# path: it applies a built-in agent kit in-guest via the backend ``kit-apply``
-# capability, idempotently.
-# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------

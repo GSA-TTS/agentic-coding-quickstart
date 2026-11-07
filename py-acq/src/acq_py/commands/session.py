@@ -55,6 +55,7 @@ def run_exec(parsed, emit_json: bool, backend: str) -> int:
         print(json.dumps(envelope.success("exec", {"name": name, "exit_code": rc})))
     return rc
 
+
 def run_attach(parsed, emit_json: bool, backend: str) -> int:
     """``acq attach NAME`` — attach to an existing sandbox, launching its agent.
 
@@ -111,6 +112,7 @@ def run_attach(parsed, emit_json: bool, backend: str) -> int:
         print(json.dumps(envelope.success("attach", {"name": name, "backend": backend, "agent": agent, "exit_code": rc})))
     return rc
 
+
 def run_shell(parsed, emit_json: bool, backend: str) -> int:
     """``acq shell NAME`` — open an interactive login shell in a sandbox.
 
@@ -146,6 +148,7 @@ def run_shell(parsed, emit_json: bool, backend: str) -> int:
     if emit_json:
         print(json.dumps(envelope.success("shell", {"name": name, "backend": backend, "exit_code": rc})))
     return rc
+
 
 def run_cp(parsed, emit_json: bool, backend: str) -> int:
     """``acq cp SRC DST`` — copy between a native host path and a POSIX guest path.
@@ -213,6 +216,7 @@ def run_cp(parsed, emit_json: bool, backend: str) -> int:
             print(f"copied {name}:{guest_path} -> {host_path}")
     return errors.EXIT_SUCCESS
 
+
 def run_ports(parsed, emit_json: bool, backend: str) -> int:
     """``acq ports NAME`` — report declared host/guest mappings, never health.
 
@@ -246,6 +250,7 @@ def run_ports(parsed, emit_json: bool, backend: str) -> int:
             for entry in mappings:
                 print(f"guest {entry['guest_port']} -> host {entry['host_port']} ({entry['origin']})")
     return errors.EXIT_SUCCESS
+
 
 def _passthrough(argv: list[str], explicit: str | None, emit_json: bool) -> int:
     """Forward an unknown subcommand verbatim to the active backend (ADR-0038m §1).

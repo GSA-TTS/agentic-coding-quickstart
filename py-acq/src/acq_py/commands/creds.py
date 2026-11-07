@@ -72,6 +72,7 @@ def run_provider_credential_set(parsed, emit_json: bool, backend: str) -> int:
         print(f"bound provider '{provider}' to ${key_env} for host(s) {', '.join(hosts)}.")
     return errors.EXIT_SUCCESS
 
+
 def _print_provider_credential_ls_human(data: dict) -> None:
     bindings = data["bindings"]
     if not bindings:
@@ -80,6 +81,7 @@ def _print_provider_credential_ls_human(data: dict) -> None:
     for entry in bindings:
         hosts = ",".join(entry["hosts"]) if entry["hosts"] else "(none)"
         print(f"  {entry['provider']}  {entry['key_env']}  {hosts}  {entry['source_layer']}")
+
 
 def run_provider_credential_ls(emit_json: bool) -> int:
     """``acq provider-credential ls`` — provider/key_env/hosts/source_layer, never a value.
@@ -104,6 +106,7 @@ def run_provider_credential_ls(emit_json: bool) -> int:
     else:
         _print_provider_credential_ls_human(data)
     return errors.EXIT_SUCCESS
+
 
 def run_provider_credential_rm(parsed, emit_json: bool) -> int:
     """``acq provider-credential rm PROVIDER`` — drop the host-side binding.
@@ -149,6 +152,7 @@ def run_provider_credential_rm(parsed, emit_json: bool) -> int:
         print(f"removed the '{provider}' binding.")
     return errors.EXIT_SUCCESS
 
+
 def _github_scope_workspace(parsed, backend: str, emit_json: bool) -> tuple[str | None, int | None]:
     """Resolve the workspace for ``github-scope`` (PATH, else the recorded one)."""
     sandbox = parsed.sandbox
@@ -184,6 +188,7 @@ def _github_scope_workspace(parsed, backend: str, emit_json: bool) -> tuple[str 
         )
     return workspace, None
 
+
 def run_github_scope(parsed, emit_json: bool, backend: str) -> int:
     """``acq github-scope SANDBOX [PATH]`` — per-sandbox GitHub token scope.
 
@@ -216,6 +221,7 @@ def run_github_scope(parsed, emit_json: bool, backend: str) -> int:
     else:
         print(f"scoped a GitHub token to sandbox '{sandbox}' (workspace {workspace}).")
     return errors.EXIT_SUCCESS
+
 
 def run_usai_rotate_api_key(emit_json: bool, backend: str) -> int:
     """``acq usai-rotate-api-key`` — rotate the stored USAi key (ADR-0012).
