@@ -91,3 +91,131 @@ _install_dir() {
   run grep -E 'printenv|API_KEY=|TOKEN=|PASSWORD=|SECRET=' "$REPO_ROOT/install.sh"
   assert_failure
 }
+
+# The default install dir ($XDG_DATA_HOME/acq) is also where the legacy Bash acq
+# keeps its file-fallback secret store and provider-input-validator runtime, and
+# --install-dir can name any directory. The installer must never delete content
+# it did not create.
+
+# Copy the offline fixture and add an extra top-level entry to every archive,
+# regenerating SHA256SUMS, to model a future release that ships a new name.
+_fixture_with_extra_entry() {
+  local name="$1" out="$STUBDIR/assets-extra" a work
+  mkdir -p "$out"
+  cp "$REPO_ROOT/test/fixtures/installer/provenance.json" "$out/"
+  for a in "$REPO_ROOT"/test/fixtures/installer/*.tar.gz; do
+    work="$STUBDIR/repack"; rm -rf "$work"; mkdir -p "$work"
+    tar -xzf "$a" -C "$work"
+    mkdir -p "$work/$name"; printf 'shipped\n' > "$work/$name/README"
+    (cd "$work" && tar -czf "$out/${a##*/}" .)
+  done
+  (cd "$out" && for a in *.tar.gz; do
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$a"; else shasum -a 256 "$a"; fi
+  done) > "$out/SHA256SUMS"
+  printf '%s' "$out"
+}
+
+@test "installer: preserves unrelated content already in the install dir" {
+  local dir; dir="$(_install_dir)"
+  mkdir -p "$dir/secrets" "$dir/provider-input-validator"
+  printf 'keep\n' > "$dir/secrets/acq.usai"
+  printf 'keep\n' > "$dir/provider-input-validator/marker"
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_success
+  [ "$(cat "$dir/secrets/acq.usai")" = keep ]
+  [ "$(cat "$dir/provider-input-validator/marker")" = keep ]
+  [ -e "$dir/py-acq/runtime/bin/python3" ]
+  [ -f "$dir/provenance.json" ]
+  # The marker lists exactly the names the installer owns.
+  run tail -n +2 "$dir/.acq-v1-install"
+  assert_output --partial 'py-acq'
+  refute_output --partial 'secrets'
+  refute_output --partial 'provider-input-validator'
+}
+
+@test "installer: refuses to overwrite an entry it did not create (legacy clone)" {
+  local dir; dir="$(_install_dir)"
+  mkdir -p "$dir/.git"
+  printf '#!/bin/sh\necho legacy\n' > "$dir/acq"
+  printf 'local change\n' > "$dir/mine.txt"
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_failure
+  assert_output --partial "already contains 'acq'"
+  assert_output --partial 'nothing was changed'
+  [ "$(cat "$dir/mine.txt")" = 'local change' ]
+  grep -q legacy "$dir/acq"
+  [ ! -e "$dir/py-acq" ]
+  [ ! -e "$dir/.acq-v1-install" ]
+}
+
+@test "installer: refuses a symlinked install dir, with or without a trailing slash" {
+  local dir; dir="$(_install_dir)"
+  mkdir -p "$STUBDIR/elsewhere" "$(dirname "$dir")"
+  printf 'keep\n' > "$STUBDIR/elsewhere/data"
+  ln -s "$STUBDIR/elsewhere" "$dir"
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_failure
+  assert_output --partial 'is a symlink'
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --install-dir "$dir/" --yes
+  assert_failure
+  assert_output --partial 'is a symlink'
+  [ "$(cat "$STUBDIR/elsewhere/data")" = keep ]
+  [ ! -e "$STUBDIR/elsewhere/acq" ]
+}
+
+@test "installer: re-running over its own install replaces its files in place" {
+  local dir; dir="$(_install_dir)"
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_success
+  printf 'stale\n' > "$dir/py-acq/stale-from-old-release"
+  mkdir -p "$dir/secrets"; printf 'keep\n' > "$dir/secrets/acq.usai"
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_success
+  [ -e "$dir/py-acq/runtime/bin/python3" ]
+  [ ! -e "$dir/py-acq/stale-from-old-release" ]
+  [ "$(cat "$dir/secrets/acq.usai")" = keep ]
+  [ -z "$(find "$dir" -maxdepth 1 -name '.acq-previous.*')" ]
+}
+
+@test "installer: a marked dir still refuses a new release name it does not own" {
+  local dir assets; dir="$(_install_dir)"
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_success
+  mkdir -p "$dir/secrets"; printf 'REAL-USER-SECRET\n' > "$dir/secrets/acq.usai"
+  assets="$(_fixture_with_extra_entry secrets)"
+  run sh "$REPO_ROOT/install.sh" --source "$assets" --yes
+  assert_failure
+  assert_output --partial "already contains 'secrets'"
+  [ "$(cat "$dir/secrets/acq.usai")" = REAL-USER-SECRET ]
+}
+
+@test "installer: a failed first install can be finished by re-running" {
+  local dir shim; dir="$(_install_dir)"
+  shim="$STUBDIR/mv-shim"; mkdir -p "$shim"
+  # Fail the move of wheelhouse/ once, as a full disk would.
+  cat > "$shim/mv" <<SHIM
+#!/bin/sh
+for last; do :; done
+case "\$last" in
+  */wheelhouse) if [ ! -e "$STUBDIR/mv-failed" ]; then : > "$STUBDIR/mv-failed"; exit 1; fi ;;
+esac
+exec /bin/mv "\$@"
+SHIM
+  chmod +x "$shim/mv"
+  PATH="$shim:$PATH" run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_failure
+  assert_output --partial 're-run the installer'
+  [ -f "$dir/.acq-v1-install" ]
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_success
+  [ -d "$dir/wheelhouse" ]
+  [ -z "$(find "$dir" -maxdepth 1 -name '.acq-previous.*')" ]
+}
+
+@test "installer: a first install never sweeps move-aside-looking dirs it did not create" {
+  local dir; dir="$(_install_dir)"
+  mkdir -p "$dir/.acq-previous.mine"; printf 'keep\n' > "$dir/.acq-previous.mine/f"
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_success
+  [ "$(cat "$dir/.acq-previous.mine/f")" = keep ]
+}
