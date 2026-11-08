@@ -22,6 +22,43 @@ _existing = os.environ.get("PYTHONPATH")
 os.environ["PYTHONPATH"] = str(PY_ACQ_SRC) + (_sep + _existing if _existing else "")
 sys.path.insert(0, str(PY_ACQ_SRC))
 
+# Some acq_py modules read ACQ_* tunables (lock and readiness timeouts) at import
+# time, which happens during collection, before any function fixture runs. Clear
+# inherited ACQ_* here so a developer's shell cannot change those either.
+for _var in [v for v in os.environ if v.startswith("ACQ_")]:
+    del os.environ[_var]
+
+
+REAL_HOME = os.path.expanduser("~")
+_USER_DIR_VARS = ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME")
+# Backend-stub homes are consulted before HOME; a developer's export must not leak in.
+_BACKEND_HOME_VARS = ("MSB_HOME", "SBX_HOME")
+
+
+@pytest.fixture(autouse=True)
+def isolate_user_dirs(tmp_path_factory, monkeypatch):
+    """Keep every test away from the developer's real home and acq state.
+
+    Mutating verbs run the state/config migration, which resolves
+    ``$XDG_CONFIG_HOME`` / ``$HOME/.config`` and ``$XDG_STATE_HOME``; a test that
+    only redirected ``ACQ_STATE_DIR`` would otherwise rewrite a real
+    ``~/.config/acq/config.yaml``. ``ACQ_*`` variables inherited from the
+    developer's shell (``ACQ_BACKEND``, ``ACQ_IMPL``, adapter overrides) are
+    cleared so they cannot change a test's outcome. Subprocess-driven tests
+    inherit the redirected environment.
+    """
+    root = tmp_path_factory.mktemp("user-dirs")
+    home = root / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    for var in _USER_DIR_VARS:
+        path = root / var.lower()
+        path.mkdir()
+        monkeypatch.setenv(var, str(path))
+    for var in [v for v in os.environ if v.startswith("ACQ_")] + list(_BACKEND_HOME_VARS):
+        monkeypatch.delenv(var, raising=False)
+    return root
+
 
 @pytest.fixture(scope="session")
 def vectors_dir() -> Path:
