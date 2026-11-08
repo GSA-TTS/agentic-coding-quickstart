@@ -18,7 +18,7 @@ found, resolution fails with :class:`UserDirError` rather than guessing.
 from __future__ import annotations
 
 import os
-from pathlib import Path
+from pathlib import Path, PurePath
 
 
 class UserDirError(Exception):
@@ -30,9 +30,20 @@ class UserDirError(Exception):
         self.remediation = remediation
 
 
+# The path flavor used for the absoluteness test; a seam so tests can exercise
+# the Windows rules on any host.
+_PATH: type[PurePath] = Path
+
+
 def is_absolute(value: str | None) -> bool:
-    """True for a non-empty absolute path string."""
-    return value is not None and value != "" and os.path.isabs(value)
+    """True for a non-empty absolute path string.
+
+    Uses ``PurePath.is_absolute`` rather than ``os.path.isabs``: on Windows it
+    requires both a drive and a root on every supported Python, whereas
+    ``os.path.isabs`` before Python 3.13 also accepts rooted-but-driveless forms
+    such as ``\\foo`` or ``/c/Users/x``, which resolve against the current drive.
+    """
+    return value is not None and value != "" and _PATH(value).is_absolute()
 
 
 def _account_home() -> Path | None:

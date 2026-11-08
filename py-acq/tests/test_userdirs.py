@@ -17,11 +17,11 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
 
-from acq_py import cli, config, state, userdirs
+from acq_py import cli, config, doctor, state, userdirs
 
 BAD_VALUES = ("", "relative", "./relative", "rel/nested")
 
@@ -219,6 +219,7 @@ def test_cli_refuses_relative_acq_state_dir_subprocess(workspace, acq_cmd):
     assert proc.returncode == 1, proc.stderr
     doc = json.loads(proc.stdout.strip().splitlines()[-1])
     assert doc["error"]["code"] == "validation_failed"
+    assert doc["command"] == "secret set"
     assert list(workspace.iterdir()) == []
 
 
@@ -274,3 +275,141 @@ def test_cli_relative_xdg_state_home_writes_nothing_in_workspace(
     )
     assert list(workspace.iterdir()) == []
     assert (home / ".local" / "state" / "acq").is_dir()
+
+
+# --- absoluteness rules (Windows flavor exercised on any host) ---------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("\\foo", False),  # rooted, no drive: resolves against the current drive
+        ("/c/x", False),  # Git Bash style, no drive
+        ("C:foo", False),  # drive-relative
+        ("C:\\x", True),
+        ("C:/x", True),
+        ("\\\\server\\share\\x", True),  # UNC
+        ("", False),
+        ("rel", False),
+    ],
+)
+def test_is_absolute_windows_rules(monkeypatch, value, expected):
+    monkeypatch.setattr(userdirs, "_PATH", PureWindowsPath)
+    assert userdirs.is_absolute(value) is expected
+
+
+def test_windows_driveless_xdg_value_is_ignored(monkeypatch, tmp_path):
+    monkeypatch.setattr(userdirs, "_PATH", PureWindowsPath)
+    monkeypatch.setattr(userdirs, "_account_home", lambda: None)
+    monkeypatch.setenv("HOME", "C:\\Users\\x")
+    monkeypatch.setenv("XDG_STATE_HOME", "/c/Users/x/state")
+    assert userdirs.xdg_base("XDG_STATE_HOME", ".local", "state") == Path(
+        "C:\\Users\\x", ".local", "state"
+    )
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("/abs", True), ("rel", False), ("", False), (None, False)],
+)
+def test_is_absolute_posix_rules(monkeypatch, value, expected):
+    monkeypatch.setattr(userdirs, "_PATH", PurePosixPath)
+    assert userdirs.is_absolute(value) is expected
+
+
+# --- doctor reports instead of crashing --------------------------------------------
+
+
+def test_doctor_state_check_fails_on_relative_acq_state_dir(
+    monkeypatch, workspace, home
+):
+    monkeypatch.setenv("ACQ_STATE_DIR", "relative-state")
+    check = doctor.state_check()
+    assert check["id"] == "state"
+    assert check["status"] == "fail"
+    assert "ACQ_STATE_DIR" in check["message"]
+    assert check["remediation"]
+    assert list(workspace.iterdir()) == []
+
+
+def test_doctor_state_check_fails_without_absolute_home(monkeypatch, workspace):
+    monkeypatch.setattr(userdirs, "_account_home", lambda: None)
+    monkeypatch.setenv("HOME", "relative")
+    monkeypatch.delenv("ACQ_STATE_DIR", raising=False)
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+    check = doctor.state_check()
+    assert check["status"] == "fail"
+    assert "home directory" in check["message"]
+    assert check["remediation"]
+
+
+def test_doctor_json_reports_relative_acq_state_dir(workspace, acq_cmd):
+    env = dict(os.environ, ACQ_STATE_DIR="relative-state")
+    proc = subprocess.run(
+        [*acq_cmd, "doctor", "--json"],
+        cwd=workspace,
+        env=env,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+    )
+    assert "Traceback" not in proc.stderr
+    assert proc.returncode == 0, proc.stderr
+    doc = json.loads(proc.stdout)
+    checks = {c["id"]: c for c in doc["data"]["checks"]}
+    assert checks["state"]["status"] == "fail"
+    assert "ACQ_STATE_DIR" in checks["state"]["message"]
+    assert list(workspace.iterdir()) == []
+
+
+def test_doctor_human_reports_relative_acq_state_dir(workspace, acq_cmd):
+    env = dict(os.environ, ACQ_STATE_DIR="relative-state")
+    proc = subprocess.run(
+        [*acq_cmd, "doctor"],
+        cwd=workspace,
+        env=env,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+    )
+    assert "Traceback" not in proc.stderr
+    assert "ACQ_STATE_DIR" in proc.stdout + proc.stderr
+
+
+# --- pre-step envelopes name the full verb -----------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("argv", "label"),
+    [
+        (["secret", "set", "x"], "secret set"),
+        (["kit-source", "ls"], "kit-source ls"),
+        (["provider-credential", "rm", "usai"], "provider-credential rm"),
+        (["ls"], "ls"),
+    ],
+)
+def test_user_dirs_refusal_names_full_verb(
+    monkeypatch, workspace, home, capsys, argv, label
+):
+    monkeypatch.setenv("ACQ_STATE_DIR", "relative-state")
+    rc = cli.main([*argv, "--json"])
+    doc = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert rc == 1
+    assert doc["command"] == label
+
+
+def test_migration_refusal_names_full_verb(
+    monkeypatch, workspace, home, capsys, tmp_path
+):
+    root = tmp_path / "state"
+    monkeypatch.setenv("ACQ_STATE_DIR", str(root))
+    record = state.record_path("msb", "future")
+    record.parent.mkdir(parents=True)
+    record.write_text(
+        json.dumps({"schema": 99, "name": "future", "backend": "msb"}), encoding="utf-8"
+    )
+    rc = cli.main(["provider-credential", "rm", "usai", "--json"])
+    doc = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert rc == 1
+    assert doc["error"]["code"] == "state_schema_unsupported"
+    assert doc["command"] == "provider-credential rm"

@@ -419,6 +419,13 @@ def _migration_pre_step(emit_json: bool, command: str) -> int | None:
     return None
 
 
+def _command_label(parsed) -> str:
+    """The full verb a handler reports in its envelope (``secret set``, not
+    ``secret``), so a pre-step refusal names the same command."""
+    sub = getattr(parsed, parsed.command.replace("-", "_") + "_command", None)
+    return f"{parsed.command} {sub}" if sub else parsed.command
+
+
 def _user_dirs_pre_step(emit_json: bool, command: str) -> int | None:
     """Refuse up front when the state root or config path cannot be resolved to a
     trustworthy absolute path (a relative ``ACQ_STATE_DIR``, or no absolute home
@@ -499,12 +506,12 @@ def main(argv: list[str] | None = None) -> int:
         return run_doctor(emit_json, parsed.name)
 
     if parsed.command not in ("help", None):
-        dirs_check = _user_dirs_pre_step(emit_json, parsed.command)
+        dirs_check = _user_dirs_pre_step(emit_json, _command_label(parsed))
         if dirs_check is not None:
             return dirs_check
 
     if _is_mutating(parsed):
-        pre_step = _migration_pre_step(emit_json, parsed.command)
+        pre_step = _migration_pre_step(emit_json, _command_label(parsed))
         if pre_step is not None:
             return pre_step
 
