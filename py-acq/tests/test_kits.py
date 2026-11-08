@@ -13,15 +13,18 @@ and exit class are pinned, so removing or weakening the guard fails the test.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
 import pytest
 
 from acq_py import cli, kits, msb, state
+from acq_py.commands import common as commands_common
 
 FULL_REF = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"  # 40-char SHA-1 (synthetic)
 TEAM_REPO = "github.com/acme/team-kits"
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _env(monkeypatch, tmp_path, *, catalog=None, discovery=None):
@@ -690,3 +693,44 @@ def test_launch_uses_recorded_entrypoint(monkeypatch, tmp_path, capsys):
     capsys.readouterr()
     assert rc == 0
     assert captured["agent"] == "custom-opencode-bin"  # entrypoint, not "opencode"
+
+
+# ---------------------------------------------------------------------------
+# Cross-implementation pin parity (Bash <-> Python).
+# ---------------------------------------------------------------------------
+# The trust anchors are duplicated across two implementations: the Bash adapter
+# stack pins ``PATTERNS_KIT_REF`` in ``acq.backends/common.sh`` and the default
+# devenv base in ``acq.backends/agents.sh``; the Python package carries the same
+# two values independently (``kits.CONTROL_PLANE_REF`` and
+# ``commands.common.OPENCODE_DEVENV_IMAGE``). Neither side derives one from the
+# other, so a bump applied to one side only is silent drift: an agent could be
+# launched on one base image while the bundle is fetched at another ref. These
+# guards read the Bash source and compare the values. They fail closed — an
+# assignment that cannot be located is a broken guard, never "nothing to check".
+
+def _bash_pin(relative_path, variable):
+    """Read ``variable="..."`` out of a Bash source file under the repo root."""
+    path = REPO_ROOT / relative_path
+    assert path.is_file(), f"{relative_path} is missing; the pin-parity guard cannot run"
+    assignments = re.findall(
+        rf"""^(?:export\s+)?{re.escape(variable)}=(['"])([^'"]+)\1\s*$""",
+        path.read_text(encoding="utf-8"),
+        re.MULTILINE,
+    )
+    assert len(assignments) == 1, (
+        f"expected exactly one `{variable}=...` assignment in {relative_path}, "
+        f"found {len(assignments)}; the pin-parity guard fails closed rather than "
+        "skipping a pin it cannot read"
+    )
+    return assignments[0][1]
+
+
+def test_patterns_kit_ref_matches_python_control_plane_ref():
+    assert _bash_pin("acq.backends/common.sh", "PATTERNS_KIT_REF") == kits.CONTROL_PLANE_REF
+
+
+def test_default_devenv_image_matches_python_default_image():
+    assert (
+        _bash_pin("acq.backends/agents.sh", "ACQ_DEFAULT_OPENCODE_DEVENV_IMAGE")
+        == commands_common.OPENCODE_DEVENV_IMAGE
+    )
