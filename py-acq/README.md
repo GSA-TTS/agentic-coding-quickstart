@@ -188,6 +188,22 @@ python -m pytest py-acq/tests -q      # pytest runner + coverage manifest
 scripts/run-vectors --acq "python -m acq_py"   # Bash runner (jq)
 ```
 
+On Windows, a global `commit.gpgsign` (for example 1Password's `op-ssh-sign`)
+makes `git commit` fail inside the tests' temporary repos. Neutralize the
+inherited config for a hermetic run:
+
+```sh
+# GIT_CONFIG_GLOBAL="" does not help: git falls back to ~/.gitconfig.
+GIT_CONFIG_GLOBAL=NUL GIT_CONFIG_NOSYSTEM=1 python -m pytest py-acq/tests -q
+```
+
+That baseline is `1 failed, 485 passed, 49 skipped` as of this writing; the
+single failure is the known
+`test_migration.py::test_recreate_preserves_host_record` case (`/w` becoming
+`C:\w`). Without the override, roughly 30 further failures in
+`test_qualification_host.py` and `test_qualification_gate.py` are that signing
+hook, not the code under test.
+
 See `../test/vectors/README.md` for the vector schema, assertion modes, and
 normalisation transforms. Contract evidence is subprocess-only (ADR-0039m);
 the sentinel set covers every assertion mode (`exact`/`contains`/`json`) and

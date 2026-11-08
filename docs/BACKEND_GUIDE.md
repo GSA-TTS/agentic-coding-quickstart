@@ -1144,9 +1144,9 @@ workspace-less create; `ACQ_CLONE` is never set to any value but `1`.
 > **Note (cross-repo, satisfied):** the authoritative `environment` schema
 > property and its field-level validator live in the patterns repo
 > (`schemas/kit-hybrid-v1.schema.json`, `validate-kits.py`), shipped in patterns
-> **v1.7.0**. `PATTERNS_KIT_REF` is pinned to the patterns **v1.8.0**
-> release commit (`f5fb887`); the pin is only advanced to a tagged release,
-> per the fail-closed cross-repo gating.
+> **v1.7.0**. `PATTERNS_KIT_REF` is pinned to the patterns **v1.19.0**
+> release commit (`941a286f912b99475429c3c00db49a99af5b241e`); the pin is only
+> advanced to a tagged release, per the fail-closed cross-repo gating.
 
 **`volumes` (sized guest storage, [ADR-0023](adr/0023-neutral-volumes-kit-vocabulary.md)).**
 A top-level list of `{path, type?, size}` entries — `path` required, absolute,
