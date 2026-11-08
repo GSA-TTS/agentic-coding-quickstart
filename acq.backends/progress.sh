@@ -62,6 +62,15 @@ _ACQ_SPIN_MSG=""
 _ACQ_SPIN_PRIOR_EXIT_TRAP=""
 _ACQ_SPIN_PRIOR_INT_TRAP=""
 _ACQ_SPIN_PRIOR_TERM_TRAP=""
+# The raw `trap -p SIG` lines captured at the same time. The parsed commands
+# above are only for CHAINING; restore re-evals these lines, because a line is
+# a complete `trap` command and keeps dispositions a bare command cannot express
+# (an ignored signal, `trap '' INT`, has an empty command but must stay
+# ignored).
+# "" means the signal was at its default disposition.
+_ACQ_SPIN_PRIOR_EXIT_LINE=""
+_ACQ_SPIN_PRIOR_INT_LINE=""
+_ACQ_SPIN_PRIOR_TERM_LINE=""
 
 # _acq_sanitize_msg TEXT — echo TEXT with C0 control bytes and DEL stripped, so
 # an untrusted caller-supplied label (e.g. a --name value that reaches the
@@ -74,7 +83,8 @@ _acq_sanitize_msg() {
   printf '%s' "$*" | LC_ALL=C tr -d '\000-\037\177'
 }
 
-# _acq_capture_prior_trap SIG — echo the COMMAND currently bound to SIG, or "".
+# _acq_trap_line_cmd LINE — echo the handler COMMAND from a `trap -p SIG` LINE,
+# or "" when LINE is empty or the trap is at its default disposition.
 # `trap -p SIG` prints `trap -- 'the command' NAME` (or nothing if unset), where
 # NAME is NOT necessarily the spelling the caller asked for: bash prints `SIGINT`
 # / `SIGTERM` for signals (3.2 and 5.x alike) but `INT` / `TERM` in POSIX mode,
@@ -82,23 +92,42 @@ _acq_sanitize_msg() {
 # Instead let the shell re-tokenize the line bash itself quoted: after dropping
 # the leading `trap`, the words are `--`, the command, and the signal name, so
 # the command is always the second word whatever the name's spelling.
-_acq_capture_prior_trap() {
-  local line
-  line=$(trap -p "$1")
-  [ -n "$line" ] || { printf ''; return 0; }
+# Keep in sync with _acq_prompt_trap_cmd in prompt.sh (same parser; each file
+# can be sourced without the other).
+_acq_trap_line_cmd() {
+  [ -n "$1" ] || return 0
   # Safe to eval: the text is bash's own `trap -p` output, whose command field
   # is single-quoted (embedded quotes escaped), so it expands to literal words.
-  eval "set -- ${line#trap }"
-  # Newer bash in POSIX mode (seen on 5.3) lists an UNSET trap as `trap -- - NAME`; an action of
-  # `-` means "default disposition", i.e. no prior handler.
-  [ "$2" = "-" ] && { printf ''; return 0; }
-  printf '%s' "$2"
+  eval "set -- ${1#trap }"
+  # Newer bash in POSIX mode (seen on 5.3) lists an UNSET trap as
+  # `trap -- - NAME`; an action of `-` means "default disposition", i.e. no
+  # prior handler.
+  [ "$2" = "-" ] || printf '%s' "$2"
+}
+
+# _acq_capture_prior_trap SIG — echo the COMMAND currently bound to SIG, or "".
+_acq_capture_prior_trap() {
+  _acq_trap_line_cmd "$(trap -p "$1")"
+}
+
+# _acq_restore_trap_line LINE SIG — re-install the trap captured as LINE (a
+# full `trap -p SIG` line, itself a valid `trap` command), or reset SIG to its
+# default disposition when LINE is empty.
+_acq_restore_trap_line() {
+  if [ -n "$1" ]; then
+    eval "$1"
+  else
+    trap - "$2"
+  fi
 }
 
 # _acq_run_prior_trap COMMAND — run a previously-captured trap COMMAND once, if
-# non-empty. Errors in the prior handler must not abort our own cleanup.
+# non-empty. Errors in the prior handler must not abort our own cleanup. It runs
+# inside the spinner's cleanup function (so it sees that function's scope); give
+# it the default word splitting it was written against.
 _acq_run_prior_trap() {
   [ -n "$1" ] || return 0
+  local IFS=$' \t\n'
   eval "$1" || true
 }
 
@@ -190,9 +219,12 @@ acq_spin_start() {
 # sandbox) still runs on Ctrl-C or error. acq_spin_stop restores the prior EXIT
 # trap on the normal path so no lingering no-op trap is left behind (NIT 3).
 _acq_spin_install_traps() {
-  _ACQ_SPIN_PRIOR_EXIT_TRAP=$(_acq_capture_prior_trap EXIT)
-  _ACQ_SPIN_PRIOR_INT_TRAP=$(_acq_capture_prior_trap INT)
-  _ACQ_SPIN_PRIOR_TERM_TRAP=$(_acq_capture_prior_trap TERM)
+  _ACQ_SPIN_PRIOR_EXIT_LINE=$(trap -p EXIT)
+  _ACQ_SPIN_PRIOR_INT_LINE=$(trap -p INT)
+  _ACQ_SPIN_PRIOR_TERM_LINE=$(trap -p TERM)
+  _ACQ_SPIN_PRIOR_EXIT_TRAP=$(_acq_trap_line_cmd "$_ACQ_SPIN_PRIOR_EXIT_LINE")
+  _ACQ_SPIN_PRIOR_INT_TRAP=$(_acq_trap_line_cmd "$_ACQ_SPIN_PRIOR_INT_LINE")
+  _ACQ_SPIN_PRIOR_TERM_TRAP=$(_acq_trap_line_cmd "$_ACQ_SPIN_PRIOR_TERM_LINE")
   trap '_acq_spin_cleanup_exit' EXIT
   trap '_acq_spin_cleanup_signal INT'  INT
   trap '_acq_spin_cleanup_signal TERM' TERM
@@ -226,32 +258,18 @@ acq_spin_stop() {
   _ACQ_SPIN_MSG=""
 }
 
-# _acq_spin_restore_traps — put back the trap commands captured at start time.
-# An empty captured command means the caller had none, so we clear our trap.
+# _acq_spin_restore_traps — put back the traps captured at start time, exactly
+# (handler, ignore, or default), by re-evaluating the saved `trap -p` lines.
 _acq_spin_restore_traps() {
-  if [ -n "$_ACQ_SPIN_PRIOR_EXIT_TRAP" ]; then
-    # Intentional expansion now: restore the exact prior trap command captured
-    # at start time, not a re-evaluation at signal time.
-    # shellcheck disable=SC2064
-    trap "$_ACQ_SPIN_PRIOR_EXIT_TRAP" EXIT
-  else
-    trap - EXIT
-  fi
-  if [ -n "$_ACQ_SPIN_PRIOR_INT_TRAP" ]; then
-    # shellcheck disable=SC2064
-    trap "$_ACQ_SPIN_PRIOR_INT_TRAP" INT
-  else
-    trap - INT
-  fi
-  if [ -n "$_ACQ_SPIN_PRIOR_TERM_TRAP" ]; then
-    # shellcheck disable=SC2064
-    trap "$_ACQ_SPIN_PRIOR_TERM_TRAP" TERM
-  else
-    trap - TERM
-  fi
+  _acq_restore_trap_line "$_ACQ_SPIN_PRIOR_EXIT_LINE" EXIT
+  _acq_restore_trap_line "$_ACQ_SPIN_PRIOR_INT_LINE" INT
+  _acq_restore_trap_line "$_ACQ_SPIN_PRIOR_TERM_LINE" TERM
   _ACQ_SPIN_PRIOR_EXIT_TRAP=""
   _ACQ_SPIN_PRIOR_INT_TRAP=""
   _ACQ_SPIN_PRIOR_TERM_TRAP=""
+  _ACQ_SPIN_PRIOR_EXIT_LINE=""
+  _ACQ_SPIN_PRIOR_INT_LINE=""
+  _ACQ_SPIN_PRIOR_TERM_LINE=""
 }
 
 # _acq_spin_cleanup_exit — EXIT trap: stop any spinner without printing a
@@ -273,7 +291,9 @@ _acq_spin_cleanup_exit() {
 
 # _acq_spin_cleanup_signal SIG — INT/TERM trap: clean up, chain any prior handler
 # for SIG (once), then re-raise the signal with the default disposition so the
-# process exits with the right status.
+# process exits with the right status. SIG is reset to default BEFORE the prior
+# handler runs, so a prior handler that re-raises SIG itself ends the process
+# instead of re-entering this trap.
 _acq_spin_cleanup_signal() {
   _acq_spin_cleanup_exit
   local prior=""
@@ -281,7 +301,7 @@ _acq_spin_cleanup_signal() {
     INT)  prior="$_ACQ_SPIN_PRIOR_INT_TRAP";  _ACQ_SPIN_PRIOR_INT_TRAP="" ;;
     TERM) prior="$_ACQ_SPIN_PRIOR_TERM_TRAP"; _ACQ_SPIN_PRIOR_TERM_TRAP="" ;;
   esac
-  _acq_run_prior_trap "$prior"
   trap - "$1"
+  _acq_run_prior_trap "$prior"
   kill -s "$1" "$$" 2>/dev/null || true
 }

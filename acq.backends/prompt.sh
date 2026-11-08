@@ -204,11 +204,29 @@ _acq_prompt_in_list() {
 # depending on the bash version and POSIX mode, so it is re-tokenized by the
 # shell rather than string-stripped: the command is the word after `--`. Safe to
 # eval: SAVED is bash's own `trap -p` output, with the command single-quoted.
+# Keep in sync with _acq_trap_line_cmd in progress.sh (same parser; each file
+# can be sourced without the other).
 _acq_prompt_trap_cmd() {
   [ -n "$1" ] || return 0
   eval "set -- ${1#trap }"
   # Newer bash in POSIX mode lists an unset trap as `trap -- - NAME`.
   [ "$2" = "-" ] || printf '%s' "$2"
+}
+
+# _acq_prompt_on_int — the multiselect's INT trap. Restore the cursor, reset INT
+# to its default FIRST (so a prior handler that re-raises INT ends the process
+# instead of re-entering this trap), run the caller's prior INT handler once (if
+# any; its failure must not stop us), then re-raise INT so the process ends with
+# the conventional signal status. The prior handler runs here, inside the
+# widget's dynamic scope (it can see acq_prompt_multiselect's locals, including
+# _prior_int_cmd, which is how this function finds it), so give it the default
+# word splitting it was written against.
+_acq_prompt_on_int() {
+  printf '\033[?25h' >&2
+  trap - INT
+  local IFS=$' \t\n'
+  [ -z "${_prior_int_cmd:-}" ] || eval "$_prior_int_cmd" || true
+  kill -s INT $$
 }
 
 # _acq_prompt_restore_trap SAVED SIG — re-install the trap captured as SAVED (a
@@ -287,15 +305,13 @@ acq_prompt_multiselect() {
   cols=$(_acq_prompt_term_cols)
 
   # Hide the cursor for the duration and ensure it is restored on any exit path.
-  # On Ctrl-C: restore the cursor, run the caller's prior INT handler body once
-  # (if any; its failure must not stop us), then reset INT to the default and
-  # re-raise it so the process ends with the conventional signal status. The
-  # trap body is single-quoted on purpose: it reads the locals at signal time,
-  # which is safe because the trap is only live while this function runs.
+  # Ctrl-C goes to _acq_prompt_on_int, which reads _prior_int_cmd from this
+  # function's scope at signal time; that is safe because the trap is only live
+  # while this function runs (every return path restores the saved traps).
   local _prior_int _prior_term _prior_int_cmd
   _prior_int=$(trap -p INT); _prior_term=$(trap -p TERM)
   _prior_int_cmd=$(_acq_prompt_trap_cmd "$_prior_int")
-  trap 'printf "\033[?25h" >&2; [ -z "$_prior_int_cmd" ] || eval "$_prior_int_cmd" || true; trap - INT; kill -s INT $$' INT
+  trap '_acq_prompt_on_int' INT
   [ -z "${ACQ_PROMPT_TEST_INPUT:-}" ] && printf '\033[?25l' >&2
 
   local rendered=0

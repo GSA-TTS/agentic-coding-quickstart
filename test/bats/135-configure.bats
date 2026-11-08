@@ -228,7 +228,8 @@ _cfg_src() {
 @test "prompt: multiselect restores prior INT/TERM traps without running them" {
   run bash -c '
     ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
-    cleanup() { echo "CLEANUP_RAN args=$*"; }
+    # The widget runs with stdout/stderr discarded, so record via a file.
+    cleanup() { echo "args=$*" >> "'"$STUBDIR"'/cleanup-ran"; }
     trap cleanup INT; trap "echo multi word" TERM
     ACQ_PROMPT_TEST_INPUT="ENTER" acq_prompt_multiselect 0 "" "a" "d" "b" "d" >/dev/null 2>&1
     trap -p INT; trap -p TERM
@@ -237,7 +238,7 @@ _cfg_src() {
     echo "after-quit:"; trap -p INT
   '
   assert_success
-  refute_output --partial 'CLEANUP_RAN'
+  assert [ ! -e "$STUBDIR/cleanup-ran" ]
   assert_line --index 0 --regexp "^trap -- 'cleanup' (SIG)?INT\$"
   assert_line --index 1 --regexp "^trap -- 'echo multi word' (SIG)?TERM\$"
   assert_line --index 2 'after-quit:'
@@ -273,6 +274,38 @@ after-quit:"
   '
   assert_equal "$status" 130
   assert_output 'HANDLER_RAN args=[ok]'
+}
+
+@test "prompt: Ctrl-C resets INT before the prior handler, so a re-raise cannot recurse" {
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    # The prior handler re-raises INT itself (bounded, so a regression cannot
+    # loop forever). It must run exactly once: the re-raise has to hit the
+    # default disposition, not the widget trap again.
+    count="'"$STUBDIR"'/prior-count"
+    prior() { echo ran >> "$count"; [ "$(wc -l < "$count")" -ge 3 ] || kill -s INT $$; }
+    trap prior INT
+    _acq_prompt_read_key() { kill -s INT $$; _ACQ_PROMPT_KEY=ENTER; }
+    ACQ_PROMPT_TEST_INPUT="x" acq_prompt_multiselect 0 "" "a" "d" 2>/dev/null
+    echo NOT_REACHED
+  '
+  assert_equal "$status" 130
+  refute_output --partial 'NOT_REACHED'
+  assert_equal "$(wc -l < "$STUBDIR/prior-count" | tr -d ' ')" 1
+}
+
+@test "prompt: Ctrl-C runs the prior INT handler with default word splitting" {
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    words() { set -- $1; echo "WORDS=$#"; }
+    trap "words \"a b c\"" INT
+    # IFS changed in the widget scope when Ctrl-C lands (as during its
+    # comma-split of the defaults list) must not leak into the prior handler.
+    _acq_prompt_read_key() { IFS=,; kill -s INT $$; _ACQ_PROMPT_KEY=ENTER; }
+    ACQ_PROMPT_TEST_INPUT="x" acq_prompt_multiselect 0 "" "a" "d" 2>/dev/null
+  '
+  assert_equal "$status" 130
+  assert_output 'WORDS=3'
 }
 
 @test "prompt: locked rows are frozen — cursor skips them, result excludes them" {
