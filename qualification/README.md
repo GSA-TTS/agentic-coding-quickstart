@@ -81,10 +81,12 @@ green runs in the ledger, and opens the ledger PR. See
 
 `python -m qualification.gate record transcript.json` appends a run to
 `docs/qualification-ledger.json` (metadata and the transcript's hash). `python -m
-qualification.gate check` evaluates the release gate from that ledger. An entry
-counts only as a run of the committed cell oracle on its own cell, and on a pull
-request CI runs the gate from the base branch, so a PR cannot loosen the rules it is
-judged by. See
+qualification.gate check` evaluates the release gate from that ledger. `record`
+refuses a transcript that did not run the committed cell oracle on its own host; the
+gate checks each entry against the repository (oracle hash at its revision, host vs
+cell, no duplicate transcripts) but never sees transcripts, so the ledger's admin
+review remains the control against forged evidence. On a pull request CI runs the
+gate from the base branch, so a PR cannot loosen the rules it is judged by. See
 [`docs/howto/qualification.md`](../docs/howto/qualification.md).
 
 ## No secret value

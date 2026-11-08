@@ -140,7 +140,7 @@ def test_unknown_revision_fails_closed():
     statuses = gate.evaluate(parse_ledger(doc([entry("msb", "macos-arm64")])), now=NOW, changed_paths=lambda rev: None,
                              oracle_digest=committed_oracle)
     s = {(x.backend, x.platform): x for x in statuses}[("msb", "macos-arm64")]
-    assert s.status == "blocked" and "git history" in s.reason
+    assert s.status == "blocked" and "not an ancestor of HEAD" in s.reason
 
 
 def test_waiver_covers_a_blocked_cell_until_it_expires():
@@ -176,6 +176,8 @@ def test_unclaimed_cells_are_not_evaluated():
         {"schema_version": 1, "entries": [{k: v for k, v in entry("msb", "macos-arm64").items() if k != "oracle_sha256"}]},
         {"schema_version": 1, "entries": [{**entry("msb", "macos-arm64"), "oracle_sha256": "E" * 64}]},
         {"schema_version": 1, "entries": [{**entry("msb", "macos-arm64"), "oracle": ""}]},
+        {"schema_version": 1, "entries": [entry("msb", "macos-arm64", rev="abcdef1")]},  # abbreviated rev
+        {"schema_version": 1, "entries": [entry("msb", "macos-arm64", rev="A" * 40)]},
     ],
 )
 def test_malformed_ledger_is_rejected(bad):
@@ -543,26 +545,105 @@ def test_an_oracle_hash_that_does_not_match_the_committed_oracle_is_blocked():
     assert missing.status == "blocked" and "not committed at revision" in missing.reason
 
 
-def test_grandfathered_entries_pass_without_a_binding_and_nothing_else_does():
-    from qualification.ledger import LEGACY_UNBOUND_TRANSCRIPTS
+def legacy_entry(index=0):
+    """A committed legacy entry, exactly as listed (no oracle binding)."""
+    from qualification.ledger import LEGACY_FIELDS, LEGACY_UNBOUND_ENTRIES
 
-    legacy = sorted(LEGACY_UNBOUND_TRANSCRIPTS)[0]
-    grandfathered = {**unbound(entry("msb", "macos-arm64")), "transcript_sha256": legacy}
-    assert status_of(doc([grandfathered])).status == "qualified"
+    digest, values = list(LEGACY_UNBOUND_ENTRIES.items())[index]
+    return {**dict(zip(LEGACY_FIELDS, values)), "transcript_sha256": digest}
+
+
+def test_a_listed_legacy_entry_passes_without_a_binding():
+    e = legacy_entry()  # msb macos-arm64, recorded 2026-11-07T07:04:20Z, before NOW
+    assert (e["backend"], e["platform"]) == ("msb", "macos-arm64")
+    assert status_of(doc([e])).status == "qualified"
     # ...but only as an exemption from the binding: the other rules still apply.
-    old = {**unbound(entry("msb", "macos-arm64", days_ago=91)), "transcript_sha256": legacy}
-    assert status_of(doc([old])).status == "blocked"
-    elsewhere = {**grandfathered, "platform": "linux-x86_64"}
-    assert status_of(doc([elsewhere]), cell=("msb", "linux-x86_64")).status == "blocked"
+    assert status_of(doc([e]), paths=["py-acq/src/acq_py/cli.py"]).status == "blocked"
+
+
+@pytest.mark.parametrize(
+    "cell,changes",
+    [
+        # A listed hash copied onto another cell whose host the entry self-reports,
+        # at a fresh revision and date: the attack the exemption must not allow.
+        (("msb", "linux-x86_64"), {"platform": "linux-x86_64", "arch": "x86_64", "hypervisor": "kvm",
+                                   "rev": "a" * 40, "recorded_at": (NOW - timedelta(days=1)).isoformat()}),
+        (("sbx", "macos-arm64"), {"backend": "sbx", "backend_version": "0.51.0"}),  # the other backend, same host
+        (("msb", "macos-arm64"), {"recorded_at": (NOW - timedelta(minutes=5)).isoformat()}),  # a fresh date only
+        (("msb", "macos-arm64"), {"rev": "a" * 40}),  # another revision only
+        (("msb", "macos-arm64"), {"backend_version": "0.7.11"}),  # another version only
+    ],
+)
+def test_a_legacy_hash_on_any_other_identity_earns_no_exemption(cell, changes):
+    s = status_of(doc([{**legacy_entry(), **changes}]), cell=cell)
+    assert s.status == "blocked" and "no oracle binding" in s.reason
+
+
+def test_the_legacy_exemption_ends_at_the_cutoff_whatever_the_entry_says():
+    from qualification.ledger import LEGACY_UNBOUND_UNTIL, binding_problem
+
+    e = parse_ledger(doc([legacy_entry()])).entries[0]
+    assert binding_problem(e, committed_oracle, LEGACY_UNBOUND_UNTIL - timedelta(seconds=1)) is None
+    assert "no oracle binding" in binding_problem(e, committed_oracle, LEGACY_UNBOUND_UNTIL)
+    assert "no oracle binding" in binding_problem(e, committed_oracle)  # no clock, no exemption
+    assert LEGACY_UNBOUND_UNTIL == datetime(2027, 2, 6, tzinfo=timezone.utc)
+
+
+def test_one_transcript_cannot_be_filed_under_two_cells():
+    # msb and sbx on one host share arch, hypervisor and oracle hash; only the
+    # transcript hash tells their runs apart.
+    msb = entry("msb", "macos-arm64")
+    sbx = {**entry("sbx", "macos-arm64"), "transcript_sha256": msb["transcript_sha256"]}
+    with pytest.raises(LedgerError, match="already recorded"):
+        parse_ledger(doc([msb, sbx]))
+    relabelled = {**msb, "platform": "linux-x86_64", "arch": "x86_64", "hypervisor": "kvm"}
+    with pytest.raises(LedgerError, match="already recorded"):
+        parse_ledger(doc([msb, relabelled]))
+    legacy = legacy_entry()
+    with pytest.raises(LedgerError, match="already recorded"):
+        parse_ledger(doc([legacy, {**legacy, "backend": "sbx", "backend_version": "0.51.0"}]))
+
+
+def test_a_duplicated_transcript_makes_the_gate_exit_2(tmp_path):
+    msb = entry("msb", "macos-arm64")
+    path = tmp_path / "ledger.json"
+    path.write_text(json.dumps(doc([msb, {**entry("sbx", "macos-arm64"), "transcript_sha256": msb["transcript_sha256"]}])))
+    assert gate.main(["--ledger", str(path), "check"]) == 2
+
+
+def test_record_refuses_an_abbreviated_revision():
+    t = transcript(rev="c" * 12)
+    with pytest.raises(LedgerError, match="real commit"):
+        entry_from_transcript(t, json.dumps(t).encode(), oracle_digest=committed_oracle)
+
+
+def test_git_changed_paths_refuses_a_revision_off_the_evaluated_history(tmp_path, monkeypatch):
+    _git(tmp_path, "init", "-q", "-b", "main")
+    (tmp_path / "a.txt").write_text("1")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "one")
+    first = _git(tmp_path, "rev-parse", "HEAD")
+    _git(tmp_path, "switch", "-q", "-c", "side")
+    (tmp_path / "b.txt").write_text("2")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "only on a side branch")
+    side = _git(tmp_path, "rev-parse", "HEAD")
+    _git(tmp_path, "switch", "-q", "main")
+    monkeypatch.chdir(tmp_path)
+    assert gate.git_changed_paths(first) == []
+    assert gate.git_changed_paths(side) is None  # exists, but is not an ancestor of HEAD
+    assert gate.git_changed_paths(first[:12]) is None  # never an abbreviation
 
 
 def test_every_committed_entry_is_bound_or_grandfathered_and_on_its_own_host():
-    # The binding must not silently invalidate genuine evidence already in the ledger.
+    # The binding must not silently invalidate genuine evidence already in the ledger:
+    # each unbound committed entry must be field-for-field its legacy listing.
     from qualification.ledger import binding_problem
 
+    before_cutoff = datetime(2026, 11, 9, tzinfo=timezone.utc)
     ledger = load_ledger(REPO_ROOT / gate.DEFAULT_LEDGER)
     for e in ledger.entries:
-        assert binding_problem(e, lambda rev, path, e=e: e.oracle_sha256) is None, e
+        assert binding_problem(e, lambda rev, path, e=e: e.oracle_sha256, before_cutoff) is None, e
 
 
 def test_the_gate_reads_the_oracle_as_committed_at_the_entrys_revision(tmp_path):

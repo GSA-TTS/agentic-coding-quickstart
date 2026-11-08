@@ -348,9 +348,14 @@ that cell's (`kvm` on Linux, `hvf` on macOS, `wsl2` on Windows). `record` also
 refuses a transcript unless every attempt ran exactly
 `scripts/qualify-backend-cell --backend <the transcript's backend>` (directly or
 after the Python interpreter), and it stores the SHA-256 of that oracle as committed
-at the run's revision, so run it in a checkout that has that revision. The gate
-re-checks both, so an entry that did not come from the committed oracle on its own
-cell qualifies nothing. Run the cell at a commit that is on `main`
+at the run's revision, so run it in a checkout that has that revision. These
+command and platform checks happen only in `record`, on your machine. The gate never
+sees the transcript: it checks each entry against the repository (the committed
+oracle's name and its hash at the entry's revision, arch and hypervisor against the
+cell, no transcript hash filed twice, a full revision that is an ancestor of the
+commit being evaluated). A hand-written entry that passes those is caught only by
+the admin review of the ledger PR and an audit of the transcript it inlines against
+`transcript_sha256`. Run the cell at a commit that is on `main`
 (`--rev "$(git rev-parse HEAD)"`, as in the commands above): `record` refuses the
 harness's all-zero default, and a commit that only existed on a squash-merged PR
 branch is not in `main`'s history, so the gate could not resolve it. Every outcome
