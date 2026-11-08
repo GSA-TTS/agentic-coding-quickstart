@@ -5,6 +5,11 @@
 
 $ErrorActionPreference = "Stop"
 
+# Programs started by acq never resolve from the current directory (normally the
+# untrusted workspace): cmd.exe, CreateProcess and Python's shutil.which honour
+# this for every child process.
+$env:NoDefaultCurrentDirectoryInExePath = "1"
+
 # ACQ_IMPL runtime switch — the coexistence seam (ADR-0047m). On Windows the Bash
 # `acq` dispatches via Git Bash; here the Python implementation runs natively:
 # the managed runtime `py-acq\runtime\python.exe -m acq_py`, else `python` on
@@ -25,7 +30,8 @@ if ($acqImpl -and $acqImpl -ne "bash") {
         $acqPythonExe = $runtimePy
     }
     else {
-        $pyCmd = Get-Command python -ErrorAction SilentlyContinue
+        # python.exe only: a .bat/.cmd shim would run through cmd.exe.
+        $pyCmd = Get-Command python.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($null -eq $pyCmd) {
             [Console]::Error.WriteLine("acq: ACQ_IMPL=python but no Python interpreter was found")
             exit 1

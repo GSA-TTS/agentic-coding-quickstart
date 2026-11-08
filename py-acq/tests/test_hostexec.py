@@ -36,7 +36,8 @@ def workspace(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "path_value", ["", ".", os.pathsep, "." + os.pathsep + "bin", "ws"]
+    "path_value",
+    ["", ".", os.pathsep, "." + os.pathsep + "bin", os.path.join("..", "ws")],
 )
 def test_relative_and_empty_path_entries_are_never_searched(
     workspace, monkeypatch, path_value
@@ -87,6 +88,7 @@ def test_windows_only_accepts_exe_from_absolute_entries(
     _exe(bindir / "msb.cmd")
     real = _exe(bindir / "msb.exe")
     monkeypatch.setattr(hostexec, "_is_windows", lambda: True)
+    monkeypatch.setattr(hostexec, "_is_absolute", os.path.isabs)
     monkeypatch.setenv("PATH", os.pathsep.join([".", str(bindir)]))
     assert hostexec.which("msb") == str(real)
     assert hostexec.which("msb.exe") == str(real)
@@ -146,7 +148,76 @@ def test_git_revision_skips_git_outside_a_checkout(tmp_path, monkeypatch):
     assert version_info._git_revision() is None
 
 
+@pytest.mark.parametrize(
+    "path, absolute",
+    [
+        (r"C:\Program Files\Git\cmd", True),
+        ("C:/tools", True),
+        (r"\\server\share\bin", True),
+        (r"\\?\C:\tools", True),
+        (r"C:tools", False),
+        (r"\tools", False),
+        ("/tools", False),
+        ("tools", False),
+        (".", False),
+        ("", False),
+    ],
+)
+def test_windows_absolute_requires_drive_and_root(monkeypatch, path, absolute):
+    monkeypatch.setattr(hostexec, "_is_windows", lambda: True)
+    assert hostexec._is_absolute(path) is absolute
+
+
+def test_windows_path_entries_skip_relative_and_unquote(monkeypatch):
+    monkeypatch.setattr(hostexec, "_is_windows", lambda: True)
+    monkeypatch.setattr(hostexec.os, "pathsep", ";")
+    monkeypatch.setenv(
+        "PATH", r'.;;C:tools;\tools;"C:\Program Files\Git\cmd";C:\Windows\System32'
+    )
+    assert hostexec._path_entries() == [
+        r"C:\Program Files\Git\cmd",
+        r"C:\Windows\System32",
+    ]
+
+
+@pytest.mark.parametrize("value", ["msb", "msb --debug", "./msb", "bin/msb"])
+def test_relative_override_never_runs_a_workspace_file(workspace, monkeypatch, value):
+    (workspace / "bin").mkdir()
+    _exe(workspace / "bin" / "msb")
+    _exe(workspace / "msb --debug")
+    monkeypatch.setenv("PATH", ".")
+    monkeypatch.setenv("ACQ_MSB_BIN", value)
+    with pytest.raises(FileNotFoundError):
+        msb.msb_command()
+
+
+def test_windows_drive_relative_override_is_refused(monkeypatch):
+    monkeypatch.setattr(hostexec, "_is_windows", lambda: True)
+    with pytest.raises(FileNotFoundError):
+        hostexec.override_command(r"C:msb.exe --x")
+
+
+def test_passthrough_launches_the_resolved_backend(workspace, tmp_path, monkeypatch):
+    from acq_py.commands import session
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    real = _exe(bindir / "sbx")
+    monkeypatch.setenv("PATH", os.pathsep.join([".", str(bindir)]))
+    monkeypatch.setenv("ACQ_BACKEND", "sbx")
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(session.subprocess, "run", fake_run)
+    assert session._passthrough(["image", "list"], None, False) == 0
+    assert seen["argv"] == [str(real), "image", "list"]
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows current-directory search")
-def test_windows_planted_exe_is_not_resolved(workspace):
-    assert hostexec.which("git") != str(workspace / "git.exe")
-    assert hostexec.which("msb") != str(workspace / "msb.exe")
+def test_windows_planted_exe_is_not_resolved(workspace, monkeypatch):
+    monkeypatch.setenv("PATH", ".")
+    assert hostexec.which("git") is None
+    assert hostexec.which("msb") is None
