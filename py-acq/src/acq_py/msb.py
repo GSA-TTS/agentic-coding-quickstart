@@ -75,8 +75,8 @@ def _guest_path(host: str) -> str:
 
     A device path (``\\\\.\\PIPE\\x``) names a device, not a filesystem directory,
     and has no POSIX guest form, so it fails closed rather than emitting a bogus
-    mount. The Bash adapter is NOT a reference here: its ``cygpath -u`` still emits
-    the Cygwin ``//server/share/...`` form for UNC (tracked separately).
+    mount. The Bash adapter aligns on the same ``/unc/`` UNC form (``common.sh``
+    ``canonicalize_path`` re-namespaces ``cygpath -u``'s ``//server/share`` output).
     """
     if not WINDOWS:
         return host

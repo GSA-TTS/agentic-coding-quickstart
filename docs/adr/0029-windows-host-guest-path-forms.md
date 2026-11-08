@@ -185,13 +185,15 @@ plain-drive path is. This removes the asymmetry where ``--volume``/``-w``
 accepted a UNC workspace but ``cp`` refused its host side: a UNC workspace can
 now be created, recorded, launched, *and* copied into/out of through ``cp``.
 
-The Bash adapter still emits the Cygwin ``//server/share/...`` form for UNC
-(``common.sh`` ``cygpath -u``), so the two implementations diverge until the
-Bash adapter is updated (tracked separately, see Links).
+The Bash adapter also agrees on the UNC guest form: ``common.sh``
+``canonicalize_path`` re-namespaces ``cygpath -u``'s ``//server/share/...`` UNC
+output to ``/unc/server/share/...`` (single leading slash, ``unc`` namespace),
+matching the Python adapter.
 
 ## Links
 
-- mogul/agentic-coding-quickstart#85 — Bash adapter UNC divergence (tracked).
+- mogul/agentic-coding-quickstart#85 — Bash adapter UNC divergence (resolved by
+  the ``/unc/`` re-namespacing above).
 - mogul/agentic-coding-quickstart#86 — `acq cp` UNC asymmetry (resolved by this amendment).
 - GSA-TTS/agentic-coding-quickstart#463 — the review that surfaced the
   single-form bug and the MSYS rewriting behavior.

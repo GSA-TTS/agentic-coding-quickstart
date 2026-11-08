@@ -23,8 +23,11 @@ load 'helper'
 # The single logged `msb create` line from the stub call log.
 _create_line() { printf '%s\n' "$(cat "$CALLS")" | grep "^$1 create"; }
 
-# Minimal cygpath: -u maps a drive form to POSIX, -m maps an absolute POSIX path
-# to C: drive form. Distinct and invertible, which is all the split needs.
+# Minimal cygpath: -u maps a drive form to POSIX and a backslash UNC
+# (\\server\share) to the Cygwin //server/share form, -m maps an absolute POSIX
+# path to C: drive form. Distinct and invertible, which is all the split needs.
+# Emitting //server/share for \\server\share lets the UNC test exercise the full
+# cygpath -u -> //server/share -> /unc/ chain (ADR-0029 amendment).
 _plant_cygpath_stub() {
   cat >"$STUBDIR/cygpath" <<'CYGSTUB'
 #!/usr/bin/env bash
@@ -35,6 +38,7 @@ case "$mode" in
       case "$p" in
         C:/tmp/*) printf '/tmp/%s\n' "${p#C:/tmp/}" ;;
         [A-Za-z]:/*) d=$(printf '%s' "${p%%:*}" | tr 'A-Z' 'a-z'); printf '/%s%s\n' "$d" "${p#*:}" ;;
+        \\\\*) printf '//%s\n' "$(printf '%s' "${p#??}" | tr '\\' '/')" ;;
         *) printf '%s\n' "$p" ;;
       esac
     done ;;
@@ -82,6 +86,30 @@ _msys_provision() { # NAME WS
   assert_success
   assert_line 'guest=/c/Users/me/proj'
   assert_line 'host=C:/Users/me/proj'
+}
+
+@test "msys: canonicalize_path maps a UNC host path to the /unc/ guest namespace" {
+  _plant_cygpath_stub
+  run bash -c '
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    printf "unc=%s\n" "$(canonicalize_path "$1")"
+  ' _ '\\server\share\proj'
+  assert_success
+  assert_output 'unc=/unc/server/share/proj'
+}
+
+@test "msys: canonicalize_path does not re-namespace a three-slash or drive-form path" {
+  _plant_cygpath_stub
+  run bash -c '
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    printf "triple=%s\n" "$(canonicalize_path "///server/share")"
+    printf "drive=%s\n" "$(canonicalize_path "/c/proj")"
+  '
+  assert_success
+  assert_line 'triple=///server/share'
+  assert_line 'drive=/c/proj'
 }
 
 @test "msys: a mount uses the host form for SOURCE and the guest form for TARGET" {

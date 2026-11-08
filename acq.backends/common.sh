@@ -1179,20 +1179,43 @@ workspace_paths() {
 # On MSYS/Cygwin this is also the GUEST form: a native tool (git.exe) may report
 # a drive-form path (C:/...), but the guest is a Linux microVM where a drive-form
 # path is not absolute. `cygpath -u` maps drive-form to the shell/guest form
-# (/c/...); cygpath only exists on MSYS/Cygwin, so POSIX hosts are unaffected.
-# For the HOST form a native tool needs, use host_path (below). See ADR-0029.
+# (/c/...), and a UNC host path (\\server\share, the realpath form of a mapped
+# network drive) to the Cygwin //server/share form; cygpath only exists on
+# MSYS/Cygwin, so POSIX hosts are unaffected. The //server/share form is then
+# re-namespaced to /unc/server/share (single leading slash) so it matches the
+# Python adapter and cannot collide with a guest system directory (a share named
+# "home" would otherwise become //home/... = the agent HOME). See ADR-0029.
+# For the HOST form a native tool needs, use host_path (below).
 canonicalize_path() {
   local p="${1:-}" _out=""
   [ -n "$p" ] || return 0
-  if command -v realpath >/dev/null 2>&1; then
-    _out=$(realpath "$p" 2>/dev/null) || _out=""
-  elif command -v readlink >/dev/null 2>&1; then
-    _out=$(readlink -f "$p" 2>/dev/null) || _out=""
-  fi
-  [ -n "$_out" ] && p="$_out"
+  # A UNC host path (\\server\share or //server/share) is already absolute in
+  # the Windows sense and names a network path realpath cannot resolve. A POSIX
+  # host's realpath would treat the backslash form as a RELATIVE path and mangle
+  # it (resolving \\server\share under the cwd), so skip the realpath/readlink
+  # step for UNC and let it flow straight to cygpath -u (ADR-0029 amendment).
+  case "$p" in
+    \\\\*|//[^/]*) : ;;
+    *)
+      if command -v realpath >/dev/null 2>&1; then
+        _out=$(realpath "$p" 2>/dev/null) || _out=""
+      elif command -v readlink >/dev/null 2>&1; then
+        _out=$(readlink -f "$p" 2>/dev/null) || _out=""
+      fi
+      [ -n "$_out" ] && p="$_out"
+      ;;
+  esac
   if command -v cygpath >/dev/null 2>&1; then
     _out=$(cygpath -u "$p" 2>/dev/null) || _out=""
     [ -n "$_out" ] && p="$_out"
+    # cygpath -u maps UNC to the Cygwin //server/share form. The guest must see
+    # a single-slash /unc/ namespace instead (ADR-0029 amendment): it matches
+    # the Python adapter's /unc/server/share/... form, and a leading // is never
+    # handed to the Linux guest (whose meaning is implementation-defined).
+    # Drive-form and already-POSIX values are unaffected.
+    case "$p" in
+      //[^/]*) p="/unc/${p#//}" ;;
+    esac
   fi
   printf '%s\n' "$p"
 }
