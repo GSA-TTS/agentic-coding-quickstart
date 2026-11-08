@@ -25,6 +25,10 @@ acq-py = "acq_py.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+# The msb balanced egress baseline (a copy of acq.backends/msb-balanced-hosts.txt).
+acq_py = ["msb-balanced-hosts.txt"]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]

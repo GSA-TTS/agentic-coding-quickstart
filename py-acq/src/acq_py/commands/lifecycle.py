@@ -252,15 +252,33 @@ def _wait_exec_ready(backend: str, name: str) -> bool:
 
 
 def _create_sandbox(
-    backend: str, agent: str, workspace: str, name: str, image: str, *, ro_host_config: bool | None = None
+    backend: str,
+    agent: str,
+    workspace: str,
+    name: str,
+    image: str,
+    kit_name: str | None,
+    *,
+    ro_host_config: bool | None = None,
 ) -> dict:
-    """Create + exec-ready gate + record write; returns the result record data."""
+    """Create + exec-ready gate + record write; returns the result record data.
+
+    On msb the egress policy is derived from the built-in kits plus ``kit_name``
+    (the agent kit about to be applied, if any); see ``msb.egress_flags``.
+    """
     adapter = common._adapter(backend)
     error_cls = sbx.SbxError if backend == "sbx" else msb.MsbError
     if backend == "sbx":
         adapter.create(name, image, workspace, agent=agent)
     else:
-        adapter.create(name, image, workspace, memory=msb.DEFAULT_MEMORY, cpus=msb.DEFAULT_CPUS)
+        adapter.create(
+            name,
+            image,
+            workspace,
+            memory=msb.DEFAULT_MEMORY,
+            cpus=msb.DEFAULT_CPUS,
+            egress_kits=kits.egress_kit_names(kit_name),
+        )
     if not _wait_exec_ready(backend, name):
         # A half-created sandbox must not strand (legacy cleanup).
         try:
@@ -338,7 +356,7 @@ def run_create(parsed, emit_json: bool, backend: str) -> int:
     if exit_code is not None:
         return exit_code
     try:
-        data = _create_sandbox(backend, parsed.agent, workspace, name, image)
+        data = _create_sandbox(backend, parsed.agent, workspace, name, image, kit_name)
     except common._ADAPTER_ERRORS as exc:
         return common._operational_failure("create", exc.code, exc.message, exc.remediation, emit_json)
     entrypoint = None
@@ -446,12 +464,16 @@ def run_recreate(parsed, emit_json: bool, backend: str) -> int:
     if exit_code is not None:
         return exit_code
     try:
+        # Compute the msb egress policy BEFORE removing the old guest: a policy
+        # that cannot be computed must refuse with the existing sandbox intact.
+        if backend == "msb":
+            msb.egress_flags(kits.egress_kit_names(kit_name))
         # Preserve host records + secrets; lose only the guest filesystem. If the
         # guest is already gone (removed out of band) there is nothing to destroy:
         # recreate from host authority either way.
         if adapter.exists(name):
             adapter.remove(name)
-        data = _create_sandbox(backend, agent, workspace, name, image, ro_host_config=ro_host_config)
+        data = _create_sandbox(backend, agent, workspace, name, image, kit_name, ro_host_config=ro_host_config)
     except common._ADAPTER_ERRORS as exc:
         return common._operational_failure("create", exc.code, exc.message, exc.remediation, emit_json)
     # The guest filesystem was destroyed, so a prior applied-kit record no longer
@@ -516,7 +538,7 @@ def run_run(parsed, emit_json: bool, backend: str) -> int:
             if exit_code is not None:
                 return exit_code
             try:
-                _create_sandbox(backend, target, workspace, name, image)
+                _create_sandbox(backend, target, workspace, name, image, kit_name)
             except common._ADAPTER_ERRORS as exc:
                 return common._operational_failure("run", exc.code, exc.message, exc.remediation, emit_json)
             if kit_name is not None:

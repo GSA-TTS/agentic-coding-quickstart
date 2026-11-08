@@ -30,11 +30,13 @@ from __future__ import annotations
 import json
 import ntpath
 import os
+import re
 import shlex
 import subprocess
 import sys
+from pathlib import Path
 
-from . import errors
+from . import errors, kits
 
 STUB_SENTINEL = "__stub__"
 
@@ -224,6 +226,176 @@ def exists(name: str) -> bool:
     return names is not None and name in names
 
 
+# ---------------------------------------------------------------------------
+# Create-time egress policy (ADR-0018, ADR-0019, ADR-0038m §46). msb fixes a
+# sandbox's network rules at create, so the policy is computed here, before
+# `msb create` runs, and any failure to compute it refuses the create. This
+# mirrors the Bash adapter (acq.backends/msb.sh, acq_backend_provision):
+#
+#   strict   -> --net-default-egress deny + `allow@dns` + the kits' own hosts
+#   balanced -> strict + the vendored sbx "balanced" baseline (the default)
+#   open     -> the kits' own hosts, no deny-default; refused unless
+#               ACQ_NETWORK_TIER_CONFIRM_OPEN=1 (testing only, never GFE)
+#
+# Egress only: ingress keeps msb's default so published ports stay reachable
+# (ADR-0019). `--tls-intercept` is always emitted: from msb 0.7.3 a hostname
+# allow rule only matches traffic msb can inspect, so without interception
+# every allowed host would be unreachable.
+#
+# Deliberate tightenings against the Bash adapter, all in the refuse direction:
+# an invalid tier, a malformed or empty baseline file, and a malformed host are
+# refused here, where Bash falls back to `balanced` or skips the entry.
+# ---------------------------------------------------------------------------
+
+NETWORK_TIERS = ("strict", "balanced", "open")
+
+# A packaged copy of acq.backends/msb-balanced-hosts.txt (a test keeps the two
+# identical) so the Python package needs no Bash tree at runtime.
+# ACQ_MSB_BALANCED_HOSTS_FILE points at a site-specific list, as in Bash.
+BALANCED_HOSTS_FILE = Path(__file__).resolve().with_name("msb-balanced-hosts.txt")
+
+# One DNS label: ASCII letters, digits, `_`, and inner `-`. A target is labels
+# joined by `.`, optionally led by msb's `*.` suffix wildcard. Every value is a
+# single argv element appended to `allow@`, so a target can never become a flag
+# or split into extra arguments; this check also keeps out whitespace and
+# anything msb would misparse.
+_LABEL = r"[A-Za-z0-9_](?:[A-Za-z0-9_-]*[A-Za-z0-9_])?"
+_TARGET_RE = re.compile(rf"(?:\*\.)?{_LABEL}(?:\.{_LABEL})*")
+_PORT_RE = re.compile(r"[1-9][0-9]{0,4}")
+
+
+def _policy_error(message: str, remediation: str) -> MsbError:
+    return MsbError(errors.VALIDATION_FAILED, message, remediation)
+
+
+def network_tier() -> str:
+    """Resolve the egress tier (strict|balanced|open; default balanced).
+
+    ``ACQ_NETWORK_TIER`` wins. The deprecated ``ACQ_MSB_BALANCED_EGRESS`` alias
+    is honored only when the tier is unset, and maps to a tier that is never
+    looser than before: on -> balanced, off/empty -> strict. An unknown value
+    is refused rather than replaced, so a typo cannot widen egress.
+    """
+    raw = os.environ.get("ACQ_NETWORK_TIER", "")
+    if not raw and "ACQ_MSB_BALANCED_EGRESS" in os.environ:
+        alias = os.environ["ACQ_MSB_BALANCED_EGRESS"].lower()
+        raw = "strict" if alias in ("", "0", "false", "no", "off") else "balanced"
+        print(
+            f"acq: notice: ACQ_MSB_BALANCED_EGRESS is deprecated; using ACQ_NETWORK_TIER={raw}",
+            file=sys.stderr,
+        )
+    tier = (raw or "balanced").lower()
+    if tier not in NETWORK_TIERS:
+        raise _policy_error(
+            f"invalid ACQ_NETWORK_TIER {raw!r} (expected strict, balanced, or open)",
+            "set ACQ_NETWORK_TIER to strict, balanced, or open",
+        )
+    return tier
+
+
+def _egress_target(host: str, source: str) -> str:
+    """Translate one allowlist host into an msb ``--net-rule`` target.
+
+    ``**.h`` (sbx multi-label glob) becomes msb's suffix form ``*.h``; ``crl*.h``
+    (an intra-label glob msb cannot express) is broadened to ``*.h``; anything
+    else is an exact host. A single-label suffix such as ``*.com`` is refused,
+    as msb itself refuses it.
+    """
+    if host.startswith("**."):
+        target = "*." + host[3:]
+    elif host.startswith("crl*."):
+        target = "*." + host[5:]
+    else:
+        target = host
+    single_label_suffix = target.startswith("*.") and "." not in target[2:]
+    if not _TARGET_RE.fullmatch(target) or single_label_suffix:
+        raise _policy_error(
+            f"cannot compute the egress policy: invalid host {host!r} in {source}",
+            "fix the allowlist entry; acq refuses to create a sandbox it cannot restrict",
+        )
+    return target
+
+
+def _kit_rules(egress_kits: list[str]) -> list[str]:
+    """``--net-rule allow@HOST`` for each kit's allowlist (port stripped, as Bash)."""
+    if kits.KIT_NETWORK_ALLOW_REF != kits.CONTROL_PLANE_REF:
+        raise _policy_error(
+            "cannot compute the egress policy: the kit network allowlist was derived "
+            f"at {kits.KIT_NETWORK_ALLOW_REF}, not the pinned control plane {kits.CONTROL_PLANE_REF}",
+            "re-derive kits.KIT_NETWORK_ALLOW from the pinned kit specs",
+        )
+    flags: list[str] = []
+    for kit in egress_kits:
+        allow = kits.KIT_NETWORK_ALLOW.get(kit)
+        if allow is None:
+            raise _policy_error(
+                f"cannot compute the egress policy: no network allowlist is known for kit {kit!r}",
+                "select a built-in kit (check ACQ_PROVIDER_KITS)",
+            )
+        for entry in allow:
+            target = _egress_target(entry.split(":", 1)[0], f"kit '{kit}'")
+            flags += ["--net-rule", f"allow@{target}"]
+    return flags
+
+
+def _balanced_rules() -> list[str]:
+    """``--net-rule`` tokens for the vendored sbx "balanced" baseline (ADR-0018).
+
+    Each ``host[:port]`` line becomes ``allow@TARGET[:tcp:PORT]``. A missing,
+    unreadable, malformed, or empty list refuses the create.
+    """
+    path = Path(os.environ.get("ACQ_MSB_BALANCED_HOSTS_FILE") or BALANCED_HOSTS_FILE)
+    remediation = "restore the balanced host list, or set ACQ_NETWORK_TIER=strict"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        raise _policy_error(f"cannot read the balanced egress host list {str(path)!r}", remediation)
+    flags: list[str] = []
+    for lineno, raw in enumerate(text.splitlines(), start=1):
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        host, sep, port = line.rpartition(":")
+        if not sep:
+            host, port = line, ""
+        target = _egress_target(host, f"{path.name} line {lineno}")
+        if not port:
+            flags += ["--net-rule", f"allow@{target}"]
+        elif _PORT_RE.fullmatch(port) and int(port) <= 65535:
+            flags += ["--net-rule", f"allow@{target}:tcp:{port}"]
+        else:
+            raise _policy_error(
+                f"cannot compute the egress policy: invalid port {port!r} in {path.name} line {lineno}",
+                remediation,
+            )
+    if not flags:
+        raise _policy_error(f"the balanced egress host list {str(path)!r} has no entries", remediation)
+    return flags
+
+
+def egress_flags(egress_kits: list[str]) -> list[str]:
+    """The ``msb create`` egress flags for a sandbox carrying ``egress_kits``.
+
+    Raises :class:`MsbError` (``validation_failed``) when the policy cannot be
+    computed, so the caller refuses the create instead of booting a sandbox
+    with unrestricted egress.
+    """
+    tier = network_tier()
+    if tier == "open" and os.environ.get("ACQ_NETWORK_TIER_CONFIRM_OPEN") != "1":
+        raise _policy_error(
+            "ACQ_NETWORK_TIER=open disables deny-by-default egress and is refused without confirmation",
+            "set ACQ_NETWORK_TIER_CONFIRM_OPEN=1 (testing only; never GFE), or use strict or balanced",
+        )
+    flags = _kit_rules(egress_kits)
+    if tier == "open":
+        print("acq: WARNING: ACQ_NETWORK_TIER=open; sandbox egress is UNRESTRICTED", file=sys.stderr)
+    else:
+        baseline = _balanced_rules() if tier == "balanced" else []
+        flags += ["--net-default-egress", "deny", "--net-rule", "allow@dns", *baseline]
+    flags.append("--tls-intercept")
+    return flags
+
+
 def create(
     name: str,
     image: str,
@@ -231,6 +403,8 @@ def create(
     memory: str | None = None,
     cpus: str | None = None,
     guest_workspace: str | None = None,
+    *,
+    egress_kits: list[str],
 ) -> None:
     """Create a sandbox. Raises :class:`MsbError` on backend failure.
 
@@ -241,7 +415,12 @@ def create(
     form), and memory/cpus are ``-m``/``-c``. ``workspace`` is a native host path;
     ``guest_workspace`` overrides the derived POSIX guest form (ADR-0029,
     ADR-0038m §4 host/guest path types are distinct).
+
+    ``egress_kits`` names the kits whose allowlists form the egress policy
+    (see :func:`egress_flags`). It is required so no caller can create a sandbox
+    without one; the policy is computed before msb is invoked.
     """
+    egress = egress_flags(egress_kits)
     guest = guest_workspace or _guest_path(workspace)
     argv = [
         "create",
@@ -256,6 +435,7 @@ def create(
         argv += ["-m", memory]
     if cpus:
         argv += ["-c", cpus]
+    argv += egress
     argv.append(image)  # positional image (last)
     proc = _run(argv)
     if proc.returncode != 0:
