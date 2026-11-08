@@ -339,7 +339,7 @@ def entry_for(work, backend, days_ago=1, verdict="PASS"):
             "backend_version": "0.7.7" if backend == "msb" else "0.51.0", "os_build": "1", "arch": "arm64",
             "hypervisor": "hvf", "rev": head, "artifact_sha256": "b" * 64,
             "recorded_at": (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat(),
-            "transcript_sha256": (backend + verdict + str(days_ago)).ljust(64, "0"),
+            "transcript_sha256": hashlib.sha256((backend + verdict + str(days_ago)).encode()).hexdigest(),
             "oracle": ORACLE, "oracle_sha256": ORACLE_SHA}
 
 
@@ -601,7 +601,7 @@ def test_accepted_version_is_not_moved_for_a_backend_skipped_by_only_stale(tmp_p
 def entry_for_head(rev, backend):
     e = {"backend": backend, "platform": "macos-arm64", "verdict": "PASS", "backend_version": "0.7.7", "os_build": "1",
          "arch": "arm64", "hypervisor": "hvf", "rev": rev, "artifact_sha256": "b" * 64,
-         "recorded_at": datetime.now(timezone.utc).isoformat(), "transcript_sha256": (backend + "x").ljust(64, "0"),
+         "recorded_at": datetime.now(timezone.utc).isoformat(), "transcript_sha256": hashlib.sha256((backend + "x").encode()).hexdigest(),
          "oracle": ORACLE, "oracle_sha256": ORACLE_SHA}
     return e
 
@@ -611,7 +611,7 @@ def test_blast_radius_names_the_cells_a_version_move_expires(tmp_path):
     head = run(work, "rev-parse", "HEAD").strip()
     doc = ledger_doc([entry_for_head(head, "msb"), {**entry_for_head(head, "msb"), "platform": "linux-x86_64",
                                                       "arch": "x86_64", "hypervisor": "kvm",
-                                                      "transcript_sha256": "z" * 64}])
+                                                      "transcript_sha256": "f" * 64}])
     (work / "docs" / "qualification-ledger.json").write_text(json.dumps(doc))
     run(work, "add", "-A"); run(work, "commit", "-qm", "l")
     assert host.blast_radius(work, {"msb": "0.8.0"}) == ["msb/linux-x86_64", "msb/macos-arm64"]
@@ -701,7 +701,7 @@ def test_publish_branches_from_the_remote_tip_and_preserves_the_other_hosts_entr
     work, fork, head = setup_cli(tmp_path, monkeypatch, ledger_doc())
     # Another host records windows-x64 and its PR merges into main while this host runs.
     other = ledger_doc([{**entry_for_head(head, "msb"), "platform": "windows-x64",
-                         "transcript_sha256": "w" * 64}],
+                         "transcript_sha256": "e" * 64}],
                        waivers=[{"backend": "msb", "platform": "linux-x86_64", "reason": "r",
                                  "expires": "2027-02-05"}])
     (work / "docs" / "qualification-ledger.json").write_text(json.dumps(other))

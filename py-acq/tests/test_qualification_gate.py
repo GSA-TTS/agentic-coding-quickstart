@@ -8,6 +8,7 @@ verdict, passing on an unknown revision) fails the suite.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import sys
 from datetime import datetime, timedelta, timezone
@@ -61,7 +62,7 @@ def entry(backend, platform, *, verdict="PASS", days_ago=1, version=None, rev="a
         "rev": rev,
         "artifact_sha256": "b" * 64,
         "recorded_at": (NOW - timedelta(days=days_ago)).isoformat(),
-        "transcript_sha256": f"{backend}{platform}{verdict}{days_ago}{rev}".ljust(64, "0")[:64],
+        "transcript_sha256": hashlib.sha256(f"{backend}{platform}{verdict}{days_ago}{rev}".encode()).hexdigest(),
         "oracle": ORACLE,
         "oracle_sha256": ORACLE_SHA,
     }
@@ -178,6 +179,9 @@ def test_unclaimed_cells_are_not_evaluated():
         {"schema_version": 1, "entries": [{**entry("msb", "macos-arm64"), "oracle": ""}]},
         {"schema_version": 1, "entries": [entry("msb", "macos-arm64", rev="abcdef1")]},  # abbreviated rev
         {"schema_version": 1, "entries": [entry("msb", "macos-arm64", rev="A" * 40)]},
+        {"schema_version": 1, "entries": [{**entry("msb", "macos-arm64"), "transcript_sha256": "AB" * 32}]},
+        {"schema_version": 1, "entries": [{**entry("msb", "macos-arm64"), "transcript_sha256": "ab" * 31}]},
+        {"schema_version": 1, "entries": [{**entry("msb", "macos-arm64"), "transcript_sha256": "z" * 64}]},
     ],
 )
 def test_malformed_ledger_is_rejected(bad):
@@ -602,6 +606,18 @@ def test_one_transcript_cannot_be_filed_under_two_cells():
     legacy = legacy_entry()
     with pytest.raises(LedgerError, match="already recorded"):
         parse_ledger(doc([legacy, {**legacy, "backend": "sbx", "backend_version": "0.51.0"}]))
+
+
+def test_a_case_variant_of_a_recorded_hash_is_not_a_second_transcript(tmp_path):
+    # Hex compares case-insensitively in an audit, so "AB..." is the same transcript as
+    # "ab..."; it must not slip past the duplicate check as a different string.
+    msb = {**entry("msb", "linux-x86_64"), "transcript_sha256": "ab" * 32}
+    sbx = {**entry("sbx", "linux-x86_64"), "transcript_sha256": "AB" * 32}
+    with pytest.raises(LedgerError, match="lowercase hex"):
+        parse_ledger(doc([msb, sbx]))
+    path = tmp_path / "ledger.json"
+    path.write_text(json.dumps(doc([msb, sbx], [waiver(b, p) for b, p in CLAIMED])))
+    assert gate.main(["--ledger", str(path), "check"]) == 2
 
 
 def test_a_duplicated_transcript_makes_the_gate_exit_2(tmp_path):

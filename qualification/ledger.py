@@ -233,6 +233,10 @@ def _parse_entry(doc: dict, index: int) -> Entry:
     entry = Entry(**{field: _text(doc, field, where) for field in fields})
     if not _REV.fullmatch(entry.rev):
         raise LedgerError(f"{where}: rev must be a full 40- or 64-hex commit id")
+    # One spelling per hash: the duplicate check in parse_ledger compares strings, so
+    # an uppercase copy of a recorded hash must not count as a different transcript.
+    if not _SHA256.fullmatch(entry.transcript_sha256):
+        raise LedgerError(f"{where}: transcript_sha256 must be 64 lowercase hex digits")
     if present and not _SHA256.fullmatch(entry.oracle_sha256):
         raise LedgerError(f"{where}: oracle_sha256 must be 64 lowercase hex digits")
     if entry.verdict not in VERDICTS:
