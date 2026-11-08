@@ -305,10 +305,23 @@ fi
 
 step "Downloading acq $VERSION"
 
-tmpdir="${TMPDIR:-/tmp}/acq-install.$$"
-rm -rf "$tmpdir"
-mkdir -p "$tmpdir"
-trap 'rm -rf "$tmpdir"' EXIT HUP INT TERM
+# A private, unpredictably named work dir: the archive is verified here and
+# then extracted, so another local user must not be able to pre-create or swap
+# it between those steps. mktemp -d creates it 0700 and fails rather than reuse
+# an existing path (a fixed name like acq-install.$$ plus `mkdir -p` would
+# silently adopt an attacker's directory).
+# The cleanup trap is installed first (rm -rf "" is a no-op), and signals EXIT
+# rather than return: a trap that only cleaned up would let the script carry on
+# after its private dir was deleted, and a later mkdir would re-create that
+# now-known path, which another user could have taken in the meantime.
+tmpdir=""
+trap 'rm -rf "$tmpdir"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/acq-install.XXXXXXXX")" \
+  || die "could not create a private temporary directory"
+chmod 700 "$tmpdir"
 
 if [ "$SOURCE_IS_URL" -eq 1 ]; then
   curl -fsSL "$SOURCE/$SHA256SUMS_NAME" -o "$tmpdir/$SHA256SUMS_NAME" \
@@ -358,7 +371,8 @@ step "Installing into $INSTALL_DIR"
 command -v tar >/dev/null 2>&1 || die "tar is required to extract the release archive"
 
 staging="$tmpdir/stage"
-mkdir -p "$staging"
+# No -p: if the private dir has vanished, fail instead of re-creating it.
+mkdir "$staging" || die "could not create the staging directory"
 
 case "$ARCHIVE" in
   *.tar.gz) tar -xzf "$tmpdir/$ARCHIVE" -C "$staging" || die "could not extract $ARCHIVE" ;;
