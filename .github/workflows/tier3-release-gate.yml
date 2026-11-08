@@ -50,10 +50,26 @@ jobs:
         with:
           python-version: '3.12'
 
+      # The gate's rules (the claimed cells, the Tier-3 surface and its carve-outs,
+      # the ledger entry checks) are code in qualification/. On a pull request they
+      # come from the base branch, never from the PR under test, so a PR cannot loosen
+      # the rules it is judged by. The ledger and the git history are still the PR's.
+      - name: Check out the base branch's gate rules
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: git worktree add --detach "$RUNNER_TEMP/gate-rules" "$BASE_SHA"
+
+      # -P keeps the working directory (the PR's checkout) off sys.path, so the
+      # qualification package is imported only from PYTHONPATH.
       - name: Evaluate the gate
         run: |
+          rules="$GITHUB_WORKSPACE"
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            rules="$RUNNER_TEMP/gate-rules"
+          fi
           rc=0
-          python -m qualification.gate check > gate.md 2>&1 || rc=$?
+          PYTHONPATH="$rules" python -P -m qualification.gate check > gate.md 2>&1 || rc=$?
           cat gate.md
           {
             echo '### Tier-3 release gate'

@@ -73,6 +73,40 @@ def is_claimed(backend: str, platform: str) -> bool:
     return platform in QUALIFIED.get(backend, frozenset())
 
 
+# What a host in each cell reports as its harness ``arch`` and ``hypervisor``
+# (``qualification.host.detect_host`` sets the hypervisor from the OS: hvf on macOS,
+# wsl2 on Windows, kvm on Linux). A ledger entry whose recorded arch or hypervisor is
+# not one of its cell's is evidence from a different host, so it qualifies nothing:
+# one run cannot stand for two cells.
+PLATFORM_HOSTS = {
+    "linux-x86_64": (frozenset({"x86_64"}), frozenset({"kvm"})),
+    "linux-aarch64": (frozenset({"aarch64", "arm64"}), frozenset({"kvm"})),
+    "linux-musl": (frozenset({"x86_64", "aarch64", "arm64"}), frozenset({"kvm"})),
+    "macos-arm64": (frozenset({"arm64"}), frozenset({"hvf"})),
+    "macos-x86_64": (frozenset({"x86_64"}), frozenset({"hvf"})),
+    "windows-x64": (frozenset({"x86_64", "AMD64"}), frozenset({"wsl2"})),
+    "windows-arm64": (frozenset({"arm64", "ARM64", "aarch64"}), frozenset({"wsl2"})),
+}
+
+
+def host_mismatch(platform: str, arch: str, hypervisor: str) -> str | None:
+    """Why a run on ``arch``/``hypervisor`` cannot be evidence for ``platform``, or ``None``."""
+    arches, hypervisors = PLATFORM_HOSTS.get(platform, (frozenset(), frozenset()))
+    if arch not in arches:
+        return f"arch {arch!r} is not a {platform} host"
+    if hypervisor not in hypervisors:
+        return f"hypervisor {hypervisor!r} is not a {platform} host"
+    return None
+
+
+# The committed cell oracle, repo-relative. A ledger entry counts only if the run it
+# records executed exactly ``<python> CELL_ORACLE --backend <backend>`` and the entry
+# carries the SHA-256 of that file as committed at the recorded revision (see
+# ``qualification.ledger``). It is on the Tier-3 surface, so a change to it after a
+# run also expires the run.
+CELL_ORACLE = "scripts/qualify-backend-cell"
+
+
 # A transcript stays current for this long: the quarterly re-verification cadence
 # (AGENTS.md "Periodic Re-Verification").
 MAX_AGE_DAYS = 90
@@ -82,7 +116,10 @@ MAX_AGE_DAYS = 90
 # bump, changelog, docs, tests, CI) does not. The harness entries are the run
 # path only (the ``run`` command, its model, runner and reproduction rule): the
 # matrix, ledger and gate read transcripts and do not affect a run, so editing
-# them must not expire the evidence they evaluate. Narrow or widen this list when
+# them must not expire the evidence they evaluate. Being off the surface does not
+# let a change loosen them for itself: on a pull request CI runs the gate from the
+# base branch (see ``qualification.gate``), so this list and its exclusions are
+# always the ones already on ``main``. Narrow or widen this list when
 # the oracle's reach changes. The default image is a mutable tag, so an upstream
 # image change is bounded only by the age limit.
 #

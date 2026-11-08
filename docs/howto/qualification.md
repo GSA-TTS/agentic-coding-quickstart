@@ -341,8 +341,16 @@ which goes on the release). After a green run on a host:
 python3 -m qualification.gate record path/to/transcript.json   # Windows: py -3.12 -m ...
 ```
 
-It derives the cell from the transcript's OS and architecture (pass `--platform`
-to override) and appends one entry. Run the cell at a commit that is on `main`
+It derives the cell from the transcript's OS and architecture and appends one
+entry. `--platform` can only restate that cell (or `linux-musl` for a Linux run): a
+run is evidence for the host it ran on, and the recorded arch and hypervisor must be
+that cell's (`kvm` on Linux, `hvf` on macOS, `wsl2` on Windows). `record` also
+refuses a transcript unless every attempt ran exactly
+`scripts/qualify-backend-cell --backend <the transcript's backend>` (directly or
+after the Python interpreter), and it stores the SHA-256 of that oracle as committed
+at the run's revision, so run it in a checkout that has that revision. The gate
+re-checks both, so an entry that did not come from the committed oracle on its own
+cell qualifies nothing. Run the cell at a commit that is on `main`
 (`--rev "$(git rev-parse HEAD)"`, as in the commands above): `record` refuses the
 harness's all-zero default, and a commit that only existed on a squash-merged PR
 branch is not in `main`'s history, so the gate could not resolve it. Every outcome
@@ -360,7 +368,10 @@ verdict is `PASS`, it is under 90 days old, its backend `major.minor` equals
 `accepted_backend_versions` in the ledger, and no file on the Tier-3 surface
 (`TIER3_SURFACE` in `qualification/matrix.py` — the CLI source tree, the two oracles, and the harness's run path, minus the `version`/`doctor` command modules) changed between its recorded
 revision and `HEAD`. A release-please commit changes none of those, so releases do
-not expire anything. Anything the gate cannot establish fails closed.
+not expire anything. Anything the gate cannot establish fails closed. On a pull
+request CI runs the gate's code and rules (`qualification/`) from the base branch,
+so a PR is judged by the rules already on `main`: a PR that changes the surface,
+the claimed cells or the gate takes effect only after it merges.
 
 When a backend is upgraded, change `accepted_backend_versions` in the same PR:
 cells recorded at the old `major.minor` become blocked until re-run.

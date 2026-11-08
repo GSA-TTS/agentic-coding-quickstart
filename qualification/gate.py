@@ -14,11 +14,25 @@ ledger.
 Exit codes: 0 gate passes, 1 a cell is blocked, 2 the ledger or input is
 unusable.
 
-The ledger is self-reported and committed: its integrity is a review control
-(CODEOWNERS on the ledger file), not a technical one. ``transcript_sha256`` only
-helps if the transcripts attached to the release are audited against it. A
-recorded ``rev`` must be a commit on the branch the gate runs on, so record a run
-at a commit that is on ``main`` (a squash-merged branch commit is not).
+An entry counts only as evidence from the committed cell oracle for its own cell
+(:func:`qualification.ledger.binding_problem`): its ``oracle_sha256`` must match the
+oracle as committed at its ``rev``, and its arch and hypervisor must be a host of its
+cell.
+
+The ledger is self-reported and committed: beyond those checks its integrity is a
+review control (CODEOWNERS on the ledger file), not a technical one.
+``transcript_sha256`` only helps if the transcripts attached to the release are
+audited against it. A recorded ``rev`` must be a commit on the branch the gate runs
+on, so record a run at a commit that is on ``main`` (a squash-merged branch commit is
+not).
+
+The rules this module applies (the claimed cells, the Tier-3 surface and its
+carve-outs, the entry checks) live in this package, so they must not come from the
+change under test: on a pull request the ``Tier-3 release gate`` workflow runs this
+package from the base branch against the PR's ledger and history (``python -P`` with
+``PYTHONPATH`` at a base-branch worktree). A PR therefore cannot loosen the rules it
+is judged by; loosening them takes a PR of its own, which CODEOWNERS sends to an
+admin.
 """
 
 from __future__ import annotations
@@ -37,7 +51,10 @@ from .ledger import (
     Ledger,
     LedgerError,
     append_entry,
+    OracleDigest,
+    binding_problem,
     entry_from_transcript,
+    git_oracle_digest,
     latest_entry,
     load_ledger,
 )
@@ -89,11 +106,16 @@ def _transcript_of(entry) -> Transcript:
     return Transcript(Verdict.PASS, env, (), "", "", entry.recorded_at)
 
 
-def _why_not_current(ledger: Ledger, entry, now: datetime, changed_paths: ChangedPaths) -> str | None:
+def _why_not_current(
+    ledger: Ledger, entry, now: datetime, changed_paths: ChangedPaths, oracle_digest: OracleDigest
+) -> str | None:
     if entry is None:
         return "no transcript recorded"
     if entry.verdict != "PASS":
         return f"latest transcript is {entry.verdict}"
+    problem = binding_problem(entry, oracle_digest)
+    if problem:
+        return problem
     version = ledger.accepted_backend_versions.get(entry.backend)
     if version is None:
         return f"accepted_backend_versions has no entry for {entry.backend}"
@@ -105,7 +127,13 @@ def _why_not_current(ledger: Ledger, entry, now: datetime, changed_paths: Change
     )
 
 
-def evaluate(ledger: Ledger, *, now: datetime, changed_paths: ChangedPaths = git_changed_paths) -> list[CellStatus]:
+def evaluate(
+    ledger: Ledger,
+    *,
+    now: datetime,
+    changed_paths: ChangedPaths = git_changed_paths,
+    oracle_digest: OracleDigest = git_oracle_digest,
+) -> list[CellStatus]:
     """The status of every claimed cell."""
     results: list[CellStatus] = []
     for backend in (MSB, SBX):
@@ -113,7 +141,7 @@ def evaluate(ledger: Ledger, *, now: datetime, changed_paths: ChangedPaths = git
             if not is_claimed(backend, platform):
                 continue
             entry = latest_entry(ledger, backend, platform)
-            reason = _why_not_current(ledger, entry, now, changed_paths)
+            reason = _why_not_current(ledger, entry, now, changed_paths, oracle_digest)
             if reason is None:
                 results.append(CellStatus(backend, platform, "qualified"))
                 continue

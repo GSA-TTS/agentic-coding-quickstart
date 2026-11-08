@@ -30,6 +30,20 @@ from qualification.ledger import (  # noqa: E402
 )
 
 NOW = datetime(2026, 11, 7, 12, 0, tzinfo=timezone.utc)
+ORACLE = "scripts/qualify-backend-cell"
+ORACLE_SHA = "e" * 64
+
+
+def committed_oracle(rev, path):
+    """The injected stand-in for ``git cat-file`` at ``rev``: the oracle is committed everywhere."""
+    return ORACLE_SHA if path == ORACLE else None
+
+
+# (arch, hypervisor) a host in each cell reports.
+HOSTS = {
+    "linux-x86_64": ("x86_64", "kvm"), "linux-aarch64": ("aarch64", "kvm"), "macos-arm64": ("arm64", "hvf"),
+    "macos-x86_64": ("x86_64", "hvf"), "windows-x64": ("x86_64", "wsl2"),
+}
 CLAIMED = [
     ("msb", p) for p in ("linux-x86_64", "linux-aarch64", "macos-arm64", "windows-x64")
 ] + [("sbx", p) for p in ("linux-x86_64", "macos-arm64", "windows-x64")]
@@ -42,12 +56,14 @@ def entry(backend, platform, *, verdict="PASS", days_ago=1, version=None, rev="a
         "verdict": verdict,
         "backend_version": version or ("0.7.7" if backend == "msb" else "0.51.0"),
         "os_build": "1",
-        "arch": "x",
-        "hypervisor": "hvf",
+        "arch": HOSTS[platform][0],
+        "hypervisor": HOSTS[platform][1],
         "rev": rev,
         "artifact_sha256": "b" * 64,
         "recorded_at": (NOW - timedelta(days=days_ago)).isoformat(),
         "transcript_sha256": f"{backend}{platform}{verdict}{days_ago}{rev}".ljust(64, "0")[:64],
+        "oracle": ORACLE,
+        "oracle_sha256": ORACLE_SHA,
     }
 
 
@@ -64,8 +80,12 @@ def waiver(backend, platform, expires="2027-02-05"):
     return {"backend": backend, "platform": platform, "reason": "r", "expires": expires}
 
 
-def status_of(ledger_doc, paths=(), cell=("msb", "macos-arm64")):
-    statuses = gate.evaluate(parse_ledger(ledger_doc), now=NOW, changed_paths=lambda rev: list(paths))
+def evaluate(ledger_doc, paths=(), digest=committed_oracle):
+    return gate.evaluate(parse_ledger(ledger_doc), now=NOW, changed_paths=lambda rev: list(paths), oracle_digest=digest)
+
+
+def status_of(ledger_doc, paths=(), cell=("msb", "macos-arm64"), digest=committed_oracle):
+    statuses = evaluate(ledger_doc, paths, digest)
     return {(s.backend, s.platform): s for s in statuses}[cell]
 
 
@@ -74,14 +94,14 @@ def full_green():
 
 
 def test_all_current_cells_pass_the_gate():
-    statuses = gate.evaluate(parse_ledger(full_green()), now=NOW, changed_paths=lambda rev: [])
+    statuses = evaluate(full_green())
     assert len(statuses) == 7
     assert {s.status for s in statuses} == {"qualified"}
 
 
 def test_a_release_only_commit_does_not_expire_any_cell():
     release = [".release-please-manifest.json", "CHANGELOG.md", "install.sh", "package.json", "README.md"]
-    statuses = gate.evaluate(parse_ledger(full_green()), now=NOW, changed_paths=lambda rev: release)
+    statuses = evaluate(full_green(), release)
     assert {s.status for s in statuses} == {"qualified"}
 
 
@@ -117,7 +137,8 @@ def test_missing_accepted_version_fails_closed():
 
 
 def test_unknown_revision_fails_closed():
-    statuses = gate.evaluate(parse_ledger(doc([entry("msb", "macos-arm64")])), now=NOW, changed_paths=lambda rev: None)
+    statuses = gate.evaluate(parse_ledger(doc([entry("msb", "macos-arm64")])), now=NOW, changed_paths=lambda rev: None,
+                             oracle_digest=committed_oracle)
     s = {(x.backend, x.platform): x for x in statuses}[("msb", "macos-arm64")]
     assert s.status == "blocked" and "git history" in s.reason
 
@@ -152,6 +173,9 @@ def test_unclaimed_cells_are_not_evaluated():
         {"schema_version": 1, "waivers": [{"backend": "sbx", "platform": "macos-x86_64", "reason": "r", "expires": "2027-01-01"}]},
         {"schema_version": 1, "waivers": [{**waiver("msb", "macos-arm64"), "expires": "soon"}]},
         {"schema_version": 1, "waivers": [{"backend": "msb", "platform": "macos-arm64", "expires": "2027-01-01"}]},
+        {"schema_version": 1, "entries": [{k: v for k, v in entry("msb", "macos-arm64").items() if k != "oracle_sha256"}]},
+        {"schema_version": 1, "entries": [{**entry("msb", "macos-arm64"), "oracle_sha256": "E" * 64}]},
+        {"schema_version": 1, "entries": [{**entry("msb", "macos-arm64"), "oracle": ""}]},
     ],
 )
 def test_malformed_ledger_is_rejected(bad):
@@ -172,14 +196,20 @@ def test_main_exit_codes(tmp_path, capsys):
     assert gate.main(["--ledger", str(path), "check"]) == 2
 
 
-def transcript(outcome="PASS", **env_over):
+def oracle_argv(backend="msb", python="/usr/bin/python3"):
+    """The argv ``qualification.host`` records: the interpreter, then the committed oracle."""
+    return [python, ORACLE, "--backend", backend]
+
+
+def transcript(outcome="PASS", commands=None, **env_over):
     env = {
         "os": "Darwin", "os_build": "26.7.2", "arch": "arm64", "hypervisor": "hvf", "backend": "msb",
         "backend_version": "0.7.7", "image": "i", "glibc_floor": None, "rev": "c" * 40,
         "artifact_sha256": "d" * 64, "transcript_dir": "/x",
     }
     env.update(env_over)
-    attempt = {"verdict": outcome, "environment": env, "commands": [], "output_sha256": "", "detail": "",
+    argv = oracle_argv(env["backend"]) if commands is None else commands
+    attempt = {"verdict": outcome, "environment": env, "commands": argv, "output_sha256": "", "detail": "",
                "recorded_at": "2026-11-07T07:04:20+00:00"}
     return {"schema_version": 1, "outcome": outcome, "attempts": [attempt]}
 
@@ -188,8 +218,9 @@ def test_record_appends_an_entry_and_is_idempotent_guarded(tmp_path):
     path = tmp_path / "ledger.json"
     path.write_text(json.dumps(doc(waivers=[waiver("msb", "macos-arm64")])))
     raw = json.dumps(transcript()).encode()
-    e = entry_from_transcript(json.loads(raw), raw)
+    e = entry_from_transcript(json.loads(raw), raw, oracle_digest=committed_oracle)
     assert (e.backend, e.platform, e.verdict) == ("msb", "macos-arm64", "PASS")
+    assert (e.oracle, e.oracle_sha256) == (ORACLE, ORACLE_SHA)
     append_entry(path, e)
     ledger = load_ledger(path)
     assert latest_entry(ledger, "msb", "macos-arm64").transcript_sha256 == e.transcript_sha256
@@ -205,14 +236,15 @@ def test_record_rejects_unusable_transcripts():
     old = transcript()
     del old["attempts"][0]["recorded_at"]
     with pytest.raises(LedgerError):
-        entry_from_transcript(old, json.dumps(old).encode())
-    ok = entry_from_transcript(old, json.dumps(old).encode(), recorded_at="2026-11-07T07:00:00+00:00")
+        entry_from_transcript(old, json.dumps(old).encode(), oracle_digest=committed_oracle)
+    ok = entry_from_transcript(old, json.dumps(old).encode(), recorded_at="2026-11-07T07:00:00+00:00",
+                               oracle_digest=committed_oracle)
     assert ok.recorded_at == "2026-11-07T07:00:00+00:00"
     with pytest.raises(LedgerError):
         platform_token("Plan9", "mips")
     odd = copy.deepcopy(transcript(arch="mips"))
     with pytest.raises(LedgerError):
-        entry_from_transcript(odd, json.dumps(odd).encode())
+        entry_from_transcript(odd, json.dumps(odd).encode(), oracle_digest=committed_oracle)
 
 
 def test_the_committed_ledger_is_valid():
@@ -314,13 +346,31 @@ def test_record_refuses_the_all_zero_default_rev_and_malformed_transcripts(tmp_p
     assert gate.main(["--ledger", str(ledger), "record", str(path)]) == 2
 
 
-def test_main_record_end_to_end(tmp_path, capsys):
+def oracle_repo(tmp_path, content=b"#!/usr/bin/env python3\nraise SystemExit(0)\n"):
+    """A throwaway repository with the oracle committed; returns ``(path, head, oracle sha256)``."""
+    import hashlib
+    import subprocess
+
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / ORACLE).write_bytes(content)
+    for args in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "oracle"]):
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+                       cwd=repo, check=True, capture_output=True)
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True).stdout.strip()
+    return repo, head, hashlib.sha256(content).hexdigest()
+
+
+def test_main_record_end_to_end(tmp_path, capsys, monkeypatch):
+    repo, head, digest = oracle_repo(tmp_path)
+    monkeypatch.chdir(repo)  # `record` reads the oracle as committed at the run's rev from this checkout
     ledger = tmp_path / "ledger.json"
     ledger.write_text(json.dumps(doc()))
     path = tmp_path / "t.json"
-    path.write_text(json.dumps(transcript()))
+    path.write_text(json.dumps(transcript(rev=head)))
     assert gate.main(["--ledger", str(ledger), "record", str(path)]) == 0
     assert "recorded PASS msb/macos-arm64" in capsys.readouterr().out
+    assert load_ledger(ledger).entries[0].oracle_sha256 == digest
     assert gate.main(["--ledger", str(ledger), "record", str(path)]) == 2  # already recorded
 
 
@@ -381,3 +431,250 @@ def test_rendered_summary_cannot_be_broken_by_a_waiver_reason():
     s = gate.CellStatus("msb", "macos-arm64", "waived", "a | b\nc")
     row = gate.render([s]).splitlines()[2]
     assert row.count("|") == 5 and "\n" not in row
+
+
+# ---- evidence binding: an entry is a run of the committed oracle on its own cell ----
+
+
+def unbound(e):
+    return {k: v for k, v in e.items() if k not in ("oracle", "oracle_sha256")}
+
+
+@pytest.mark.parametrize(
+    "commands",
+    [
+        [],
+        ["true"],  # a no-op exits 0, which the harness classifies PASS
+        ["/usr/bin/python3", "-c", "pass"],
+        ["/usr/bin/python3", "-c", "pass", ORACLE, "--backend", "msb"],
+        oracle_argv("sbx"),  # the sbx oracle run passed off as the msb cell
+        ["/usr/bin/python3", "elsewhere/qualify-backend-cell", "--backend", "msb"],
+        ["/usr/bin/python3", "/tmp/x/" + ORACLE, "--backend", "msb"],  # not this checkout's oracle
+        ["/usr/bin/python3", ORACLE, "--backend", "msb", "--skip-secrets"],
+        ["/bin/sh", ORACLE, "--backend", "msb"],
+    ],
+)
+def test_record_refuses_a_transcript_that_did_not_run_the_committed_oracle(commands):
+    t = transcript(commands=commands)
+    with pytest.raises(LedgerError, match="did not run the committed cell oracle"):
+        entry_from_transcript(t, json.dumps(t).encode(), oracle_digest=committed_oracle)
+
+
+def test_record_refuses_when_any_attempt_did_not_run_the_oracle():
+    t = transcript()
+    t["attempts"].append({**t["attempts"][0], "commands": ["true"]})
+    with pytest.raises(LedgerError, match="did not run the committed cell oracle"):
+        entry_from_transcript(t, json.dumps(t).encode(), oracle_digest=committed_oracle)
+
+
+@pytest.mark.parametrize(
+    "commands",
+    [
+        [ORACLE, "--backend", "msb"],  # run through its shebang
+        ["C:\\Python312\\python.exe", "scripts\\qualify-backend-cell", "--backend", "msb"],  # Windows host
+        ["/opt/homebrew/bin/python3.12", "./" + ORACLE, "--backend", "msb"],
+    ],
+)
+def test_record_accepts_every_form_the_harness_records_the_oracle_in(commands):
+    t = transcript(commands=commands)
+    assert entry_from_transcript(t, json.dumps(t).encode(), oracle_digest=committed_oracle).oracle == ORACLE
+
+
+def test_record_refuses_a_revision_where_the_oracle_is_not_committed():
+    t = transcript()
+    with pytest.raises(LedgerError, match="not committed at revision"):
+        entry_from_transcript(t, json.dumps(t).encode(), oracle_digest=lambda rev, path: None)
+
+
+@pytest.mark.parametrize("platform", ["linux-x86_64", "linux-aarch64", "macos-x86_64", "windows-x64"])
+def test_record_refuses_a_platform_that_is_not_the_transcripts_host(platform):
+    # One macOS arm64 run must not be recordable as another cell's evidence.
+    t = transcript()
+    with pytest.raises(LedgerError, match="not the transcript's host"):
+        entry_from_transcript(t, json.dumps(t).encode(), platform=platform, oracle_digest=committed_oracle)
+
+
+def test_record_accepts_the_matching_platform_and_musl_on_linux():
+    t = transcript()
+    assert entry_from_transcript(
+        t, json.dumps(t).encode(), platform="macos-arm64", oracle_digest=committed_oracle
+    ).platform == "macos-arm64"
+    linux = transcript(os="Linux", arch="x86_64", hypervisor="kvm")
+    assert entry_from_transcript(
+        linux, json.dumps(linux).encode(), platform="linux-musl", oracle_digest=committed_oracle
+    ).platform == "linux-musl"
+
+
+def test_record_refuses_a_hypervisor_that_is_not_the_cells():
+    t = transcript(hypervisor="unknown")
+    with pytest.raises(LedgerError, match="hypervisor"):
+        entry_from_transcript(t, json.dumps(t).encode(), oracle_digest=committed_oracle)
+
+
+@pytest.mark.parametrize(
+    "cell,arch,hypervisor",
+    [
+        (("msb", "linux-x86_64"), "arm64", "hvf"),     # a macOS run filed under Linux
+        (("msb", "linux-x86_64"), "x86_64", "wsl2"),   # a Windows run filed under Linux
+        (("sbx", "windows-x64"), "x86_64", "kvm"),     # a Linux run filed under Windows
+        (("msb", "linux-aarch64"), "x86_64", "kvm"),   # the wrong architecture
+    ],
+)
+def test_an_entry_recorded_on_another_host_qualifies_nothing(cell, arch, hypervisor):
+    e = {**entry(*cell), "arch": arch, "hypervisor": hypervisor}
+    s = status_of(doc([e]), cell=cell)
+    assert s.status == "blocked" and "another host" in s.reason
+
+
+def test_an_entry_without_an_oracle_binding_is_blocked():
+    s = status_of(doc([unbound(entry("msb", "macos-arm64"))]))
+    assert s.status == "blocked" and "no oracle binding" in s.reason
+
+
+def test_an_entry_naming_another_oracle_is_blocked():
+    s = status_of(doc([{**entry("msb", "macos-arm64"), "oracle": "scripts/noop"}]))
+    assert s.status == "blocked" and "not the committed cell oracle" in s.reason
+
+
+def test_an_oracle_hash_that_does_not_match_the_committed_oracle_is_blocked():
+    s = status_of(doc([{**entry("msb", "macos-arm64"), "oracle_sha256": "f" * 64}]))
+    assert s.status == "blocked" and "does not match" in s.reason
+    missing = status_of(doc([entry("msb", "macos-arm64")]), digest=lambda rev, path: None)
+    assert missing.status == "blocked" and "not committed at revision" in missing.reason
+
+
+def test_grandfathered_entries_pass_without_a_binding_and_nothing_else_does():
+    from qualification.ledger import LEGACY_UNBOUND_TRANSCRIPTS
+
+    legacy = sorted(LEGACY_UNBOUND_TRANSCRIPTS)[0]
+    grandfathered = {**unbound(entry("msb", "macos-arm64")), "transcript_sha256": legacy}
+    assert status_of(doc([grandfathered])).status == "qualified"
+    # ...but only as an exemption from the binding: the other rules still apply.
+    old = {**unbound(entry("msb", "macos-arm64", days_ago=91)), "transcript_sha256": legacy}
+    assert status_of(doc([old])).status == "blocked"
+    elsewhere = {**grandfathered, "platform": "linux-x86_64"}
+    assert status_of(doc([elsewhere]), cell=("msb", "linux-x86_64")).status == "blocked"
+
+
+def test_every_committed_entry_is_bound_or_grandfathered_and_on_its_own_host():
+    # The binding must not silently invalidate genuine evidence already in the ledger.
+    from qualification.ledger import binding_problem
+
+    ledger = load_ledger(REPO_ROOT / gate.DEFAULT_LEDGER)
+    for e in ledger.entries:
+        assert binding_problem(e, lambda rev, path, e=e: e.oracle_sha256) is None, e
+
+
+def test_the_gate_reads_the_oracle_as_committed_at_the_entrys_revision(tmp_path):
+    from qualification.ledger import git_oracle_digest
+
+    repo, head, digest = oracle_repo(tmp_path)
+    assert git_oracle_digest(head, ORACLE, cwd=repo) == digest
+    assert git_oracle_digest("f" * 40, ORACLE, cwd=repo) is None    # unknown revision
+    assert git_oracle_digest(head, "missing", cwd=repo) is None      # not committed there
+    assert git_oracle_digest("HEAD", ORACLE, cwd=repo) is None       # only hex revisions
+    assert git_oracle_digest(head, "--output=x", cwd=repo) is None   # never an option
+
+
+# ---- the rules come from the base branch, not the change under test ------------
+
+WORKFLOW = REPO_ROOT / ".github" / "workflows" / "tier3-release-gate.yml"
+
+
+def test_the_pr_gate_runs_the_base_branchs_rules():
+    # The workflow is the trust anchor (CODEOWNERS: admins): on a pull request it must
+    # import qualification/ from a worktree of the base commit, with -P so the PR's
+    # checkout (the working directory) is not on sys.path.
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert "BASE_SHA: ${{ github.event.pull_request.base.sha }}" in text
+    assert 'git worktree add --detach "$RUNNER_TEMP/gate-rules" "$BASE_SHA"' in text
+    assert 'rules="$RUNNER_TEMP/gate-rules"' in text
+    assert 'PYTHONPATH="$rules" python -P -m qualification.gate check' in text
+    assert "python -m qualification.gate" not in text  # no path that imports the PR's copy
+
+
+def test_codeowners_protects_the_gate_rules_and_the_oracles():
+    owners = (REPO_ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8")
+    for path in ("/qualification/", "/scripts/qualify-backend-cell", "/scripts/qualify-msb-ro-mount",
+                 "/docs/qualification-ledger.json", "/.github/workflows/", "/.github/CODEOWNERS"):
+        assert f"\n{path} @GSA-TTS/agentic-coding-admins" in owners, path
+
+
+def _git(cwd, *args):
+    import subprocess
+
+    return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+                          cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+
+def _run_gate(cwd, rules):
+    """The workflow's invocation: ``PYTHONPATH=<rules> python -P -m qualification.gate check``."""
+    import os
+    import subprocess
+
+    env = {**os.environ, "PYTHONPATH": str(rules)}
+    proc = subprocess.run([sys.executable, "-P", "-m", "qualification.gate", "check", "--json"],
+                          cwd=cwd, env=env, capture_output=True, text=True)
+    assert proc.stdout, proc.stderr
+    return proc.returncode, {(c["backend"], c["platform"]): c for c in json.loads(proc.stdout)}
+
+
+def test_a_pr_cannot_carve_its_own_change_out_of_the_surface_or_rewrite_the_gate(tmp_path):
+    # End to end in a throwaway repository: the base commit holds this package and a
+    # ledger with a bound, current entry. The "PR" changes the CLI (a Tier-3 surface
+    # change, which must expire the entry) and, in the same commit, excludes the CLI
+    # from the surface and rewrites the gate to report every cell qualified. Judged by
+    # its own copy of qualification/ it passes; judged by the base's, as CI now does,
+    # the cell is blocked.
+    import hashlib
+    import shutil
+
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    shutil.copytree(REPO_ROOT / "qualification", repo / "qualification",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copy(REPO_ROOT / ORACLE, repo / ORACLE)
+    cli = repo / "py-acq" / "src" / "acq_py" / "cli.py"
+    cli.parent.mkdir(parents=True)
+    cli.write_text("def main():\n    return 0\n")
+    _git(repo, "init", "-q")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    tested = _git(repo, "rev-parse", "HEAD")
+
+    now = datetime.now(timezone.utc)
+    e = {**entry("msb", "macos-arm64", rev=tested), "recorded_at": (now - timedelta(days=1)).isoformat(),
+         "oracle_sha256": hashlib.sha256((repo / ORACLE).read_bytes()).hexdigest()}
+    others = [waiver(b, p, (now + timedelta(days=30)).date().isoformat())
+              for b, p in CLAIMED if (b, p) != ("msb", "macos-arm64")]
+    (repo / "docs").mkdir()
+    (repo / "docs" / "qualification-ledger.json").write_text(json.dumps(doc([e], others)))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "ledger")
+    base = _git(repo, "rev-parse", "HEAD")
+
+    rc, cells = _run_gate(repo, repo)
+    assert rc == 0 and cells[("msb", "macos-arm64")]["status"] == "qualified"  # the honest baseline
+
+    cli.write_text("def main():\n    return 1  # broken\n")
+    matrix = repo / "qualification" / "matrix.py"
+    marker = "TIER3_SURFACE_EXCLUSIONS = ("
+    assert marker in matrix.read_text()
+    matrix.write_text(matrix.read_text().replace(marker, marker + '\n    "py-acq/src/acq_py/cli.py",', 1))
+    gate_py = repo / "qualification" / "gate.py"
+    gate_py.write_text(gate_py.read_text() + (
+        "\n_real_evaluate = evaluate\n"
+        "def evaluate(ledger, **kw):\n"
+        "    return [CellStatus(s.backend, s.platform, 'qualified') for s in _real_evaluate(ledger, **kw)]\n"
+    ))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "the PR under test")
+
+    rc, cells = _run_gate(repo, repo)  # the PR's own rules: the bypass this closes
+    assert rc == 0 and cells[("msb", "macos-arm64")]["status"] == "qualified"
+
+    rules = tmp_path / "gate-rules"
+    _git(repo, "worktree", "add", "--detach", str(rules), base)
+    rc, cells = _run_gate(repo, rules)  # the base branch's rules, as CI runs them
+    cell = cells[("msb", "macos-arm64")]
+    assert rc == 1 and cell["status"] == "blocked" and "Tier-3 surface" in cell["reason"]

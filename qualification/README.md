@@ -81,7 +81,10 @@ green runs in the ledger, and opens the ledger PR. See
 
 `python -m qualification.gate record transcript.json` appends a run to
 `docs/qualification-ledger.json` (metadata and the transcript's hash). `python -m
-qualification.gate check` evaluates the release gate from that ledger. See
+qualification.gate check` evaluates the release gate from that ledger. An entry
+counts only as a run of the committed cell oracle on its own cell, and on a pull
+request CI runs the gate from the base branch, so a PR cannot loosen the rules it is
+judged by. See
 [`docs/howto/qualification.md`](../docs/howto/qualification.md).
 
 ## No secret value

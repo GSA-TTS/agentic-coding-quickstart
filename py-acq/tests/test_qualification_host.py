@@ -6,6 +6,7 @@ git behaviour is exercised against throwaway repositories.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -21,6 +22,11 @@ from qualification import host, publish as pub  # noqa: E402
 from qualification.ledger import entry_from_transcript, latest_entry, load_ledger  # noqa: E402
 
 CELLS = [("msb", "macos-arm64"), ("sbx", "macos-arm64")]
+# A stand-in for the committed cell oracle in the throwaway repositories: entries
+# bind to the oracle as committed at their revision, so every test repo carries one.
+ORACLE = "scripts/qualify-backend-cell"
+ORACLE_BYTES = b"#!/usr/bin/env python3\nraise SystemExit(0)\n"
+ORACLE_SHA = hashlib.sha256(ORACLE_BYTES).hexdigest()
 
 
 def run(cwd, *args):
@@ -36,6 +42,8 @@ def make_remote_repo(tmp_path, *, push=True):
     (work / "docs").mkdir()
     (work / "docs" / "qualification-ledger.json").write_text("{}")
     (work / ".gitignore").write_text("tmp/\n")  # as in the real repo: run evidence lives in tmp/
+    (work / "scripts").mkdir()
+    (work / ORACLE).write_bytes(ORACLE_BYTES)
     run(work, "add", "-A")
     run(work, "commit", "-qm", "one")
     run(work, "branch", "-M", "main")
@@ -167,14 +175,28 @@ def make_ledger(tmp_path):
     return path
 
 
-def make_transcript(tmp_path, backend, outcome="PASS"):
+def oracle_repo(tmp_path):
+    """A throwaway repository with the oracle committed (created once per test); returns it."""
+    repo = tmp_path / "oracle-repo"
+    if not repo.exists():
+        (repo / "scripts").mkdir(parents=True)
+        (repo / ORACLE).write_bytes(ORACLE_BYTES)
+        run(tmp_path, "init", "-q", str(repo))
+        run(repo, "add", "-A")
+        run(repo, "commit", "-qm", "oracle")
+    return repo
+
+
+def make_transcript(tmp_path, backend, outcome="PASS", rev=None):
     out = tmp_path / f"t-{backend}"
     out.mkdir()
+    rev = rev or run(oracle_repo(tmp_path), "rev-parse", "HEAD").strip()
     env = {"os": "Darwin", "os_build": "26.7.2", "arch": "arm64", "hypervisor": "hvf", "backend": backend,
            "backend_version": "0.7.7" if backend == "msb" else "0.51.0", "image": "i", "glibc_floor": None,
-           "rev": "c" * 40, "artifact_sha256": "d" * 64, "transcript_dir": str(out)}
-    attempt = {"verdict": outcome, "environment": env, "commands": [], "output_sha256": "", "detail": "",
-               "recorded_at": datetime.now(timezone.utc).isoformat()}
+           "rev": rev, "artifact_sha256": "d" * 64, "transcript_dir": str(out)}
+    # The argv qualification.host records (harness_command): the interpreter, then the oracle.
+    attempt = {"verdict": outcome, "environment": env, "commands": [sys.executable, ORACLE, "--backend", backend],
+               "output_sha256": "", "detail": "", "recorded_at": datetime.now(timezone.utc).isoformat()}
     path = out / "transcript.json"
     path.write_text(json.dumps({"schema_version": 1, "outcome": outcome, "attempts": [attempt]}))
     return host.Result(backend, outcome, "", f"RESULT {outcome} {backend}=1", path)
@@ -184,7 +206,7 @@ def test_apply_results_records_green_runs_and_retires_only_their_waivers(tmp_pat
     ledger = make_ledger(tmp_path)
     results = [make_transcript(tmp_path, "msb"), make_transcript(tmp_path, "sbx", "FAIL"),
                host.Result("x", "SKIPPED", "missing")]
-    recorded = host.apply_results(ledger, results, macos(), record_failures=False)
+    recorded = host.apply_results(ledger, results, macos(), record_failures=False, repo=oracle_repo(tmp_path))
     assert [r.backend for r in recorded] == ["msb"]
     parsed = load_ledger(ledger)
     assert latest_entry(parsed, "msb", "macos-arm64").verdict == "PASS"
@@ -195,7 +217,8 @@ def test_apply_results_records_green_runs_and_retires_only_their_waivers(tmp_pat
 
 def test_apply_results_can_record_failures_without_retiring_waivers(tmp_path):
     ledger = make_ledger(tmp_path)
-    recorded = host.apply_results(ledger, [make_transcript(tmp_path, "sbx", "FAIL")], macos(), record_failures=True)
+    recorded = host.apply_results(ledger, [make_transcript(tmp_path, "sbx", "FAIL")], macos(), record_failures=True,
+                                  repo=oracle_repo(tmp_path))
     assert len(recorded) == 1
     parsed = load_ledger(ledger)
     assert latest_entry(parsed, "sbx", "macos-arm64").verdict == "FAIL"
@@ -316,7 +339,8 @@ def entry_for(work, backend, days_ago=1, verdict="PASS"):
             "backend_version": "0.7.7" if backend == "msb" else "0.51.0", "os_build": "1", "arch": "arm64",
             "hypervisor": "hvf", "rev": head, "artifact_sha256": "b" * 64,
             "recorded_at": (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat(),
-            "transcript_sha256": (backend + verdict + str(days_ago)).ljust(64, "0")}
+            "transcript_sha256": (backend + verdict + str(days_ago)).ljust(64, "0"),
+            "oracle": ORACLE, "oracle_sha256": ORACLE_SHA}
 
 
 VERSIONS = {"msb": "0.7.11", "sbx": "0.51.2"}
@@ -360,14 +384,16 @@ def test_plan_skips_missing_backends_and_demands_consent_to_move_the_version(tmp
 
 def test_apply_results_moves_the_accepted_version(tmp_path):
     ledger = make_ledger(tmp_path)
-    host.apply_results(ledger, [make_transcript(tmp_path, "msb")], macos(), False, accept={"msb": "0.7.11"})
+    host.apply_results(ledger, [make_transcript(tmp_path, "msb")], macos(), False, accept={"msb": "0.7.11"},
+                       repo=oracle_repo(tmp_path))
     assert load_ledger(ledger).accepted_backend_versions["msb"] == "0.7.11"
 
 
 def test_apply_results_works_with_no_waiver_present(tmp_path):
     ledger = make_ledger(tmp_path)
     doc = json.loads(ledger.read_text()); doc["waivers"] = []; ledger.write_text(json.dumps(doc))
-    assert len(host.apply_results(ledger, [make_transcript(tmp_path, "msb")], macos(), False)) == 1
+    assert len(host.apply_results(ledger, [make_transcript(tmp_path, "msb")], macos(), False,
+                                  repo=oracle_repo(tmp_path))) == 1
 
 
 def test_pr_text_scrubs_local_paths_and_flags_a_version_move():
@@ -426,9 +452,8 @@ def fake_runner(tmp_path, head, outcomes):
     def fake_run(command, out, backend, cwd=None):
         out.mkdir(parents=True)
         status = outcomes.get(backend, "PASS")
-        t = make_transcript(tmp_path, backend, status)
+        t = make_transcript(tmp_path, backend, status, rev=head)
         doc = json.loads(t.transcript.read_text())
-        doc["attempts"][0]["environment"]["rev"] = head
         # a real run records the installed backend version, which is on its command line
         doc["attempts"][0]["environment"]["backend_version"] = command[command.index("--backend-version") + 1]
         (out / "transcript.json").write_text(json.dumps(doc))
@@ -576,7 +601,8 @@ def test_accepted_version_is_not_moved_for_a_backend_skipped_by_only_stale(tmp_p
 def entry_for_head(rev, backend):
     e = {"backend": backend, "platform": "macos-arm64", "verdict": "PASS", "backend_version": "0.7.7", "os_build": "1",
          "arch": "arm64", "hypervisor": "hvf", "rev": rev, "artifact_sha256": "b" * 64,
-         "recorded_at": datetime.now(timezone.utc).isoformat(), "transcript_sha256": (backend + "x").ljust(64, "0")}
+         "recorded_at": datetime.now(timezone.utc).isoformat(), "transcript_sha256": (backend + "x").ljust(64, "0"),
+         "oracle": ORACLE, "oracle_sha256": ORACLE_SHA}
     return e
 
 
@@ -584,6 +610,7 @@ def test_blast_radius_names_the_cells_a_version_move_expires(tmp_path):
     work = make_remote_repo(tmp_path)
     head = run(work, "rev-parse", "HEAD").strip()
     doc = ledger_doc([entry_for_head(head, "msb"), {**entry_for_head(head, "msb"), "platform": "linux-x86_64",
+                                                      "arch": "x86_64", "hypervisor": "kvm",
                                                       "transcript_sha256": "z" * 64}])
     (work / "docs" / "qualification-ledger.json").write_text(json.dumps(doc))
     run(work, "add", "-A"); run(work, "commit", "-qm", "l")
@@ -788,7 +815,8 @@ def test_the_inlined_hash_is_of_the_real_file_so_a_reviewer_can_verify_it(tmp_pa
 
     run = make_transcript(tmp_path, "msb")
     on_disk = hashlib.sha256(run.transcript.read_bytes()).hexdigest()
-    entry = entry_from_transcript(json.loads(run.transcript.read_bytes()), run.transcript.read_bytes())
+    entry = entry_from_transcript(json.loads(run.transcript.read_bytes()), run.transcript.read_bytes(),
+                                  oracle_digest=lambda rev, path: ORACLE_SHA)
     blocks = "\n".join(host.transcript_evidence([run]))
     shown = re.search(r"sha256 <code>([0-9a-f]{64})</code>", blocks).group(1)
     assert shown == on_disk == entry.transcript_sha256
