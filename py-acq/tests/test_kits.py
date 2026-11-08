@@ -699,38 +699,124 @@ def test_launch_uses_recorded_entrypoint(monkeypatch, tmp_path, capsys):
 # Cross-implementation pin parity (Bash <-> Python).
 # ---------------------------------------------------------------------------
 # The trust anchors are duplicated across two implementations: the Bash adapter
-# stack pins ``PATTERNS_KIT_REF`` in ``acq.backends/common.sh`` and the default
-# devenv base in ``acq.backends/agents.sh``; the Python package carries the same
-# two values independently (``kits.CONTROL_PLANE_REF`` and
-# ``commands.common.OPENCODE_DEVENV_IMAGE``). Neither side derives one from the
-# other, so a bump applied to one side only is silent drift: an agent could be
-# launched on one base image while the bundle is fetched at another ref. These
-# guards read the Bash source and compare the values. They fail closed — an
-# assignment that cannot be located is a broken guard, never "nothing to check".
+# stack pins the patterns repo/ref/dir in ``acq.backends/common.sh`` and the
+# default devenv base in ``acq.backends/agents.sh``; the Python package carries
+# the same values independently (``kits.CONTROL_PLANE_REPO``/``_REF``/``_DIR``
+# and ``commands.common.OPENCODE_DEVENV_IMAGE``). Neither side derives one from
+# the other, so a bump applied to one side only is silent drift: an agent could
+# be launched on one base image while the bundle is fetched at another ref, or a
+# wrong dir could resolve to a kit path that does not exist.
+#
+# Enforced for every assignment form Bash accepts — bare, ``export``,
+# ``readonly``, ``declare -x``, ``local`` — wherever the assignment appears:
+#   * exactly one assignment per anchored variable, so a function-local or
+#     conditional reassignment fails loudly instead of the first match winning;
+#   * that single assignment sits at column 0 — an indented-only definition is
+#     not a top-level constant and fails;
+#   * its value is non-empty and equals the Python constant, with the repo and
+#     dir compared in their normalized form (Bash carries ``git+https://…git``,
+#     Python carries ``host/owner/repo``).
+# These checks raise via ``pytest.fail`` rather than ``assert`` so the guard
+# still fails under ``python -O``, which strips bare assertions.
+#
+# Scope: this proves *value* parity, not *role* parity. Bash uses the devenv
+# image only as the opencode fallback; Python uses it as the default base for
+# every agent. Those roles agree today and are deliberately not compared here.
+
+def _pin_assignments(text, variable):
+    """Every quoted assignment of ``variable`` as ``(line, indent, value, standalone)``.
+
+    Scans each line for ``VAR="..."`` in any position, so a reassignment hidden in
+    a function body or a one-line ``if`` is seen, then classifies it: only a line
+    whose entire statement is the assignment counts as ``standalone``.
+    """
+    name = re.escape(variable)
+    prefix = r"(?:export|readonly|local|declare(?:[ \t]+-[A-Za-z]+)*)[ \t]+"
+    assignment = re.compile(rf"""\b{name}[ \t]*=(?P<q>['"])(?P<value>[^'"]*)(?P=q)""")
+    statement_start = re.compile(rf"""[ \t]*(?:{prefix})?""")
+    statement_end = re.compile(r"""[ \t]*(?:#[^\r\n]*)?$""")
+
+    found = []
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        if line.lstrip().startswith("#"):
+            continue
+        for match in assignment.finditer(line):
+            before = line[: match.start()]
+            after = line[match.end() :]
+            standalone = bool(statement_start.fullmatch(before)) and bool(
+                statement_end.fullmatch(after)
+            )
+            indent = re.match(r"[ \t]*", before).group(0)
+            found.append((lineno, indent, match.group("value"), standalone))
+    return found
+
 
 def _bash_pin(relative_path, variable):
-    """Read ``variable="..."`` out of a Bash source file under the repo root."""
+    """Read the single top-level ``variable="..."`` out of a Bash source file."""
     path = REPO_ROOT / relative_path
-    assert path.is_file(), f"{relative_path} is missing; the pin-parity guard cannot run"
-    assignments = re.findall(
-        rf"""^(?:export\s+)?{re.escape(variable)}=(['"])([^'"]+)\1\s*$""",
-        path.read_text(encoding="utf-8"),
-        re.MULTILINE,
-    )
-    assert len(assignments) == 1, (
-        f"expected exactly one `{variable}=...` assignment in {relative_path}, "
-        f"found {len(assignments)}; the pin-parity guard fails closed rather than "
-        "skipping a pin it cannot read"
-    )
-    return assignments[0][1]
+    if not path.is_file():
+        pytest.fail(f"{relative_path} is missing; the pin-parity guard cannot run")
+    found = _pin_assignments(path.read_text(encoding="utf-8"), variable)
+    if len(found) != 1:
+        where = ", ".join(str(lineno) for lineno, *_ in found) or "none"
+        pytest.fail(
+            f"expected exactly one `{variable}=...` assignment in {relative_path}, "
+            f"found {len(found)} (lines: {where}); none means the guard cannot read "
+            "the pin at all, and any second definition (function-local, conditional, "
+            "or an indented reassignment) would make the effective runtime value "
+            "differ from the one checked here"
+        )
+    lineno, indent, value, standalone = found[0]
+    if not value:
+        pytest.fail(
+            f"`{variable}` in {relative_path} (line {lineno}) is assigned an empty "
+            "string; an empty anchor cannot be compared, and a consumer that "
+            "defaults an empty value would silently use a different one"
+        )
+    if not standalone or indent:
+        pytest.fail(
+            f"the only `{variable}=...` assignment in {relative_path} (line {lineno}) "
+            f"is not a top-level statement (indent {indent!r}); the guard accepts only "
+            "a single column-0 definition that is the whole statement, so a "
+            "function-local, conditional, or indented definition fails closed"
+        )
+    return value
+
+
+def test_patterns_kit_repo_matches_python_control_plane_repo():
+    bash_repo = _bash_pin("acq.backends/common.sh", "PATTERNS_KIT_REPO")
+    normalized = kits.normalize_repo(bash_repo)
+    if normalized != kits.CONTROL_PLANE_REPO:
+        pytest.fail(
+            f"acq.backends/common.sh PATTERNS_KIT_REPO={bash_repo!r} normalizes to "
+            f"{normalized!r}, but kits.CONTROL_PLANE_REPO is {kits.CONTROL_PLANE_REPO!r}"
+        )
 
 
 def test_patterns_kit_ref_matches_python_control_plane_ref():
-    assert _bash_pin("acq.backends/common.sh", "PATTERNS_KIT_REF") == kits.CONTROL_PLANE_REF
+    bash_ref = _bash_pin("acq.backends/common.sh", "PATTERNS_KIT_REF")
+    if bash_ref != kits.CONTROL_PLANE_REF:
+        pytest.fail(
+            f"acq.backends/common.sh PATTERNS_KIT_REF={bash_ref!r}, but "
+            f"kits.CONTROL_PLANE_REF is {kits.CONTROL_PLANE_REF!r}"
+        )
+
+
+def test_patterns_kit_dir_matches_python_control_plane_dir():
+    bash_dir = _bash_pin("acq.backends/common.sh", "PATTERNS_KIT_DIR")
+    normalized = kits.normalize_dir(bash_dir)
+    if normalized != kits.CONTROL_PLANE_DIR:
+        pytest.fail(
+            f"acq.backends/common.sh PATTERNS_KIT_DIR={bash_dir!r} normalizes to "
+            f"{normalized!r}, but kits.CONTROL_PLANE_DIR is {kits.CONTROL_PLANE_DIR!r}"
+        )
 
 
 def test_default_devenv_image_matches_python_default_image():
-    assert (
-        _bash_pin("acq.backends/agents.sh", "ACQ_DEFAULT_OPENCODE_DEVENV_IMAGE")
-        == commands_common.OPENCODE_DEVENV_IMAGE
-    )
+    bash_image = _bash_pin("acq.backends/agents.sh", "ACQ_DEFAULT_OPENCODE_DEVENV_IMAGE")
+    if bash_image != commands_common.OPENCODE_DEVENV_IMAGE:
+        pytest.fail(
+            f"acq.backends/agents.sh ACQ_DEFAULT_OPENCODE_DEVENV_IMAGE={bash_image!r}, "
+            f"but commands.common.OPENCODE_DEVENV_IMAGE is "
+            f"{commands_common.OPENCODE_DEVENV_IMAGE!r}"
+        )
