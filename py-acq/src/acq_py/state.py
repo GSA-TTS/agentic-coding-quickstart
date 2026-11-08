@@ -24,6 +24,8 @@ import os
 import re
 from pathlib import Path
 
+from . import userdirs
+
 # State-schema version of the records this slice writes (ADR-0041m). Distinct
 # from the structured-output ``schema_version`` in ``envelope.py``.
 STATE_SCHEMA = 1
@@ -53,15 +55,24 @@ def state_dir() -> Path:
     ``$HOME/.local/state``, under an ``acq`` subdirectory (ADR-0041m:
     orchestrator-owned records; the layout is not constrained by the legacy
     implementation).
+
+    An empty ``ACQ_STATE_DIR`` counts as unset. A relative one is refused with
+    :class:`userdirs.UserDirError`: it is an explicit override, so silently
+    replacing it with the default would hide the misconfiguration, and honoring
+    it would resolve the state root against the current directory (normally the
+    agent-writable workspace). An empty or relative ``XDG_STATE_HOME`` is ignored
+    as the XDG Base Directory specification requires (see :mod:`userdirs`).
     """
-    override = os.environ.get("ACQ_STATE_DIR")
+    override = os.environ.get("ACQ_STATE_DIR", "")
     if override:
+        if not userdirs.is_absolute(override):
+            raise userdirs.UserDirError(
+                f"ACQ_STATE_DIR must be an absolute path, got {override!r}",
+                "set ACQ_STATE_DIR to an absolute path, or unset it to use "
+                "$XDG_STATE_HOME/acq (default ~/.local/state/acq)",
+            )
         return Path(override)
-    base = os.environ.get("XDG_STATE_HOME")
-    if not base:
-        home = os.environ.get("HOME") or str(Path.home())
-        base = os.path.join(home, ".local", "state")
-    return Path(base) / "acq"
+    return userdirs.xdg_base("XDG_STATE_HOME", ".local", "state") / "acq"
 
 
 def _safe(token: str) -> str:

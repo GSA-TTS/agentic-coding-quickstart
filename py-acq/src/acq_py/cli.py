@@ -41,7 +41,7 @@ import sys
 # ``msb`` is imported for its module object alone: the Tier-2 tests patch
 # ``cli.msb.<fn>``, and the adapter is reached through ``commands.common`` at
 # runtime. Keeping it here preserves those addresses across the command split.
-from . import backends, envelope, errors, migration, msb
+from . import backends, config, envelope, errors, migration, msb, state, userdirs
 from .commands import common, creds, kit, lifecycle, secret, session
 
 
@@ -419,6 +419,24 @@ def _migration_pre_step(emit_json: bool, command: str) -> int | None:
     return None
 
 
+def _user_dirs_pre_step(emit_json: bool, command: str) -> int | None:
+    """Refuse up front when the state root or config path cannot be resolved to a
+    trustworthy absolute path (a relative ``ACQ_STATE_DIR``, or no absolute home
+    to fall back to); return the emitted exit code, else ``None`` (proceed).
+
+    Checked once here so every state-touching verb fails closed with the same
+    actionable message instead of a traceback from deep inside a handler.
+    """
+    try:
+        state.state_dir()
+        config.config_path()
+    except userdirs.UserDirError as exc:
+        return common._operational_failure(
+            command, errors.VALIDATION_FAILED, exc.message, exc.remediation, emit_json
+        )
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
 
@@ -479,6 +497,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if parsed.command == "doctor":
         return run_doctor(emit_json, parsed.name)
+
+    if parsed.command not in ("help", None):
+        dirs_check = _user_dirs_pre_step(emit_json, parsed.command)
+        if dirs_check is not None:
+            return dirs_check
 
     if _is_mutating(parsed):
         pre_step = _migration_pre_step(emit_json, parsed.command)
