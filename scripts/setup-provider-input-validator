@@ -116,7 +116,7 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-python_minor=$("$BOOTSTRAP_PYTHON" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+python_minor=$("$BOOTSTRAP_PYTHON" -I -c 'import sys; print("%d.%d" % sys.version_info[:2])')
 case "$HOST_OS:$python_minor" in
   Darwin:3.12|Darwin:3.13|Darwin:3.14|Linux:3.12|MINGW*:3.12|MSYS*:3.12|CYGWIN*:3.12) : ;;
   *) echo "unsupported Python for provider-input validator on this host: Python $python_minor" >&2; exit 2 ;;
@@ -146,7 +146,7 @@ if [ "$ONLINE" -ne 1 ]; then
   }
 fi
 
-"$BOOTSTRAP_PYTHON" -m venv "$stage/runtime"
+"$BOOTSTRAP_PYTHON" -I -m venv "$stage/runtime"
 if [ -x "$stage/runtime/bin/python3" ]; then
   runtime_python="$stage/runtime/bin/python3"
 elif [ -x "$stage/runtime/Scripts/python.exe" ]; then
@@ -163,11 +163,11 @@ if [ "$ONLINE" -eq 1 ]; then
   # carry a hash and pip verifies them before unpacking. No wheelhouse needed.
   # Network access is scoped to this explicit command and does not affect
   # "acq create", which remains fully offline.
-  "$runtime_python" -m pip install --require-hashes --requirement "$REQUIREMENTS"
+  "$runtime_python" -I -m pip install --require-hashes --requirement "$REQUIREMENTS"
 else
-  "$runtime_python" -m pip install --no-index --find-links "$WHEELHOUSE" --require-hashes --requirement "$REQUIREMENTS"
+  "$runtime_python" -I -m pip install --no-index --find-links "$WHEELHOUSE" --require-hashes --requirement "$REQUIREMENTS"
 fi
-"$runtime_python" - <<'PY'
+"$runtime_python" -I - <<'PY'
 import importlib.metadata as metadata
 required = {"PyYAML": "6.0.3", "jsonschema": "4.26.0"}
 actual = {name: metadata.version(name) for name in required}
@@ -180,7 +180,7 @@ link="$TOOLS_DIR/.provider-input-validator.link.$$.${RANDOM:-0}"
 ln -s "${runtime##*/}" "$link"
 
 replace_link() {
-  "$BOOTSTRAP_PYTHON" - "$link" "$TARGET" <<'PY'
+  "$BOOTSTRAP_PYTHON" -I - "$link" "$TARGET" <<'PY'
 import os
 import sys
 

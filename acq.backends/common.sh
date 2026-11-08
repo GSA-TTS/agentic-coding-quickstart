@@ -4296,7 +4296,9 @@ acq_provider_input_prepare() {
   local validator_args=(--schema-dir "$schema_dir" --credential-bindings "$merged_bindings")
   local i
   for i in "${!manifests[@]}"; do validator_args+=(--bundle "${manifests[$i]}"); done
-  "$python" "$validator" "${validator_args[@]}" >&2 || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
+  # -E -s: ignore PYTHON* env (an empty PYTHONPATH entry is the cwd) and user
+  # site-packages, but keep the pinned validator's own directory on sys.path.
+  "$python" -E -s "$validator" "${validator_args[@]}" >&2 || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
   for i in "${!manifests[@]}"; do
     _acq_provider_input_materialize "${manifests[$i]}" "${kitdirs[$i]}" "$generation/models/providers" || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
   done

@@ -201,20 +201,26 @@ def test_bash_helpers_run_python_isolated_from_the_workspace(tmp_path):
     assert proc.returncode == 0, proc.stderr
 
 
-def test_every_bash_python_snippet_is_isolated():
-    # Guard against new `python3 -` / `"$python" -c` call sites without -I.
+def test_every_host_python_invocation_is_isolated():
+    # Guard against new host-side python calls that put the cwd (or an
+    # inherited PYTHONPATH) on sys.path: `python -`, `python -c`, `python -m`
+    # need -I (or -P/-E for the acq launchers), and `python script.py` needs at
+    # least -E. Covers acq, its backends and the scripts acq executes.
     import re as _re
-    pattern = _re.compile(r'(?:python3|"\$\{?_?py(?:thon)?\}?")\s+(-[A-Za-z]+\s+)*(-|-c)\s')
+    interp = r'(?:python3(?:\.\d+)?|"\$\{?[A-Za-z_]*(?:py|PY|python|PYTHON)[A-Za-z_]*\}?")'
+    pattern = _re.compile(interp + r'((?:\s+-[A-Za-z]+)*)\s+(-|-c|-m|"\$[A-Za-z_]+")\s')
     offenders = []
-    for rel in ("acq", "acq.backends/common.sh", "acq.backends/msb.sh", "acq.backends/sbx.sh",
-                "acq.backends/secret-store.sh", "acq.backends/agents.sh"):
+    for rel in ("acq", "acq-python", "acq.backends/common.sh", "acq.backends/msb.sh",
+                "acq.backends/sbx.sh", "acq.backends/secret-store.sh", "acq.backends/agents.sh",
+                "scripts/setup-provider-input-validator"):
         path = REPO_ROOT / rel
         if not path.exists():
             continue
         for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             if line.lstrip().startswith("#"):
                 continue
-            m = pattern.search(line)
-            if m and "-I" not in (m.group(1) or ""):
-                offenders.append(f"{rel}:{n}: {line.strip()}")
-    assert not offenders, "python snippets without -I:\n" + "\n".join(offenders)
+            for m in pattern.finditer(line):
+                flags = m.group(1) or ""
+                if not _re.search(r"-[A-Za-z]*[IEP]", flags):
+                    offenders.append(f"{rel}:{n}: {line.strip()}")
+    assert not offenders, "host python calls without -I/-E/-P:\n" + "\n".join(offenders)
