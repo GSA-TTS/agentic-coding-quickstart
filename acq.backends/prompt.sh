@@ -198,6 +198,30 @@ _acq_prompt_in_list() {
   return 1
 }
 
+# _acq_prompt_trap_cmd SAVED — echo the handler COMMAND from a saved `trap -p
+# SIG` line (or "" when SAVED is empty / the trap was at its default). The line
+# is `trap -- 'the command' NAME`, where NAME may be spelled `SIGINT` or `INT`
+# depending on the bash version and POSIX mode, so it is re-tokenized by the
+# shell rather than string-stripped: the command is the word after `--`. Safe to
+# eval: SAVED is bash's own `trap -p` output, with the command single-quoted.
+_acq_prompt_trap_cmd() {
+  [ -n "$1" ] || return 0
+  eval "set -- ${1#trap }"
+  # Newer bash in POSIX mode lists an unset trap as `trap -- - NAME`.
+  [ "$2" = "-" ] || printf '%s' "$2"
+}
+
+# _acq_prompt_restore_trap SAVED SIG — re-install the trap captured as SAVED (a
+# full `trap -p SIG` line, which is itself a valid `trap` command), or reset SIG
+# to its default disposition when nothing was set.
+_acq_prompt_restore_trap() {
+  if [ -n "$1" ]; then
+    eval "$1"
+  else
+    trap - "$2"
+  fi
+}
+
 # acq_prompt_multiselect LOCKED_N DEFAULTS_CSV LABEL DESC [LABEL DESC ...]
 # See the header for the full contract. The chosen indices (relative to the
 # toggleable block) are placed in the global _ACQ_PROMPT_SELECTION (space-
@@ -263,10 +287,15 @@ acq_prompt_multiselect() {
   cols=$(_acq_prompt_term_cols)
 
   # Hide the cursor for the duration and ensure it is restored on any exit path.
-  local _prior_int _prior_term
+  # On Ctrl-C: restore the cursor, run the caller's prior INT handler body once
+  # (if any; its failure must not stop us), then reset INT to the default and
+  # re-raise it so the process ends with the conventional signal status. The
+  # trap body is single-quoted on purpose: it reads the locals at signal time,
+  # which is safe because the trap is only live while this function runs.
+  local _prior_int _prior_term _prior_int_cmd
   _prior_int=$(trap -p INT); _prior_term=$(trap -p TERM)
-  # shellcheck disable=SC2064
-  trap 'printf "\033[?25h" >&2; eval "${_prior_int#trap -- }" 2>/dev/null || true; trap - INT; kill -s INT $$' INT
+  _prior_int_cmd=$(_acq_prompt_trap_cmd "$_prior_int")
+  trap 'printf "\033[?25h" >&2; [ -z "$_prior_int_cmd" ] || eval "$_prior_int_cmd" || true; trap - INT; kill -s INT $$' INT
   [ -z "${ACQ_PROMPT_TEST_INPUT:-}" ] && printf '\033[?25l' >&2
 
   local rendered=0
@@ -349,8 +378,8 @@ acq_prompt_multiselect() {
         printf '\033[?25h' >&2
         # Restore prior signal traps and abort the SELECTION (empty) — the caller
         # treats an empty line as "keep defaults / no change".
-        eval "${_prior_int#trap -- }" 2>/dev/null || trap - INT
-        eval "${_prior_term#trap -- }" 2>/dev/null || trap - TERM
+        _acq_prompt_restore_trap "$_prior_int" INT
+        _acq_prompt_restore_trap "$_prior_term" TERM
         printf '%sacq: selection cancelled; keeping current configuration.%s\n' "$_P_DIM" "$_P_R" >&2
         _ACQ_PROMPT_SELECTION="CANCELLED"
         printf 'CANCELLED\n'
@@ -361,8 +390,8 @@ acq_prompt_multiselect() {
   done
 
   [ -z "${ACQ_PROMPT_TEST_INPUT:-}" ] && printf '\033[?25h' >&2
-  eval "${_prior_int#trap -- }" 2>/dev/null || trap - INT
-  eval "${_prior_term#trap -- }" 2>/dev/null || trap - TERM
+  _acq_prompt_restore_trap "$_prior_int" INT
+  _acq_prompt_restore_trap "$_prior_term" TERM
 
   # Emit the chosen indices (relative to the toggleable block) in ascending order.
   _ACQ_PROMPT_SELECTION="$(_acq_prompt_rel_indices "$locked_n" "$checked")"

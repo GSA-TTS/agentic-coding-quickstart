@@ -221,6 +221,60 @@ _cfg_src() {
   assert_output 'CANCELLED'
 }
 
+# multiselect saves the caller's INT/TERM traps as full `trap -p` lines and must
+# put them back verbatim. Those lines end in a signal name (`SIGINT`, or `INT` in
+# POSIX mode), so stripping only the `trap -- ` prefix and eval'ing the rest runs
+# the handler body as a command instead of re-installing it.
+@test "prompt: multiselect restores prior INT/TERM traps without running them" {
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    cleanup() { echo "CLEANUP_RAN args=$*"; }
+    trap cleanup INT; trap "echo multi word" TERM
+    ACQ_PROMPT_TEST_INPUT="ENTER" acq_prompt_multiselect 0 "" "a" "d" "b" "d" >/dev/null 2>&1
+    trap -p INT; trap -p TERM
+    trap "echo multi word" INT
+    ACQ_PROMPT_TEST_INPUT="QUIT" acq_prompt_multiselect 0 "" "a" "d" "b" "d" >/dev/null 2>&1
+    echo "after-quit:"; trap -p INT
+  '
+  assert_success
+  refute_output --partial 'CLEANUP_RAN'
+  assert_line --index 0 --regexp "^trap -- 'cleanup' (SIG)?INT\$"
+  assert_line --index 1 --regexp "^trap -- 'echo multi word' (SIG)?TERM\$"
+  assert_line --index 2 'after-quit:'
+  assert_line --index 3 --regexp "^trap -- 'echo multi word' (SIG)?INT\$"
+}
+
+@test "prompt: multiselect with no prior traps leaves INT/TERM at their defaults" {
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    trap - INT TERM
+    # Check each exit path on its own (print directly: a compound $(...) runs in
+    # a subshell where traps are reset, which would hide a leftover handler).
+    ACQ_PROMPT_TEST_INPUT="ENTER" acq_prompt_multiselect 0 "" "a" "d" >/dev/null 2>&1
+    echo "after-enter:"; trap -p INT; trap -p TERM
+    trap - INT TERM
+    ACQ_PROMPT_TEST_INPUT="QUIT" acq_prompt_multiselect 0 "" "a" "d" >/dev/null 2>&1
+    echo "after-quit:"; trap -p INT; trap -p TERM
+  '
+  assert_success
+  assert_output "after-enter:
+after-quit:"
+}
+
+@test "prompt: Ctrl-C in multiselect runs the prior INT handler once, then re-raises" {
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    handler() { echo "HANDLER_RAN args=[$*]"; }
+    trap "handler ok" INT
+    # Simulate the user pressing Ctrl-C while the widget waits for a key.
+    _acq_prompt_read_key() { kill -s INT $$; _ACQ_PROMPT_KEY=ENTER; }
+    ACQ_PROMPT_TEST_INPUT="x" acq_prompt_multiselect 0 "" "a" "d" 2>/dev/null
+    echo NOT_REACHED
+  '
+  assert_equal "$status" 130
+  assert_output 'HANDLER_RAN args=[ok]'
+}
+
 @test "prompt: locked rows are frozen — cursor skips them, result excludes them" {
   run bash -c '
     ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1

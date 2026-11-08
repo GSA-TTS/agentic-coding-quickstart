@@ -75,17 +75,24 @@ _acq_sanitize_msg() {
 }
 
 # _acq_capture_prior_trap SIG — echo the COMMAND currently bound to SIG, or "".
-# `trap -p SIG` prints `trap -- 'the command' SIG` (or nothing if unset). Parse
-# out just 'the command'. Used so the spinner traps can re-invoke it on exit.
+# `trap -p SIG` prints `trap -- 'the command' NAME` (or nothing if unset), where
+# NAME is NOT necessarily the spelling the caller asked for: bash prints `SIGINT`
+# / `SIGTERM` for signals (3.2 and 5.x alike) but `INT` / `TERM` in POSIX mode,
+# and `EXIT` for the pseudo-signal. So do not string-match the trailing name.
+# Instead let the shell re-tokenize the line bash itself quoted: after dropping
+# the leading `trap`, the words are `--`, the command, and the signal name, so
+# the command is always the second word whatever the name's spelling.
 _acq_capture_prior_trap() {
   local line
   line=$(trap -p "$1")
   [ -n "$line" ] || { printf ''; return 0; }
-  # Strip the leading `trap -- ` and the trailing ` SIG`, then unquote.
-  line=${line#trap -- }
-  line=${line% "$1"}
-  # Bash single-quotes the command; eval to reduce it back to the raw string.
-  eval "printf '%s' $line"
+  # Safe to eval: the text is bash's own `trap -p` output, whose command field
+  # is single-quoted (embedded quotes escaped), so it expands to literal words.
+  eval "set -- ${line#trap }"
+  # Newer bash in POSIX mode (seen on 5.3) lists an UNSET trap as `trap -- - NAME`; an action of
+  # `-` means "default disposition", i.e. no prior handler.
+  [ "$2" = "-" ] && { printf ''; return 0; }
+  printf '%s' "$2"
 }
 
 # _acq_run_prior_trap COMMAND — run a previously-captured trap COMMAND once, if
