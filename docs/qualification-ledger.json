@@ -160,6 +160,32 @@
       "artifact_sha256": "1a04f830c378860da02ca2af4def70809867d1989d159fc9ae224c043a7cc4cb",
       "recorded_at": "2026-11-07T20:55:38+00:00",
       "transcript_sha256": "8982d73f45ff18f144bb1ea92d28f87b07b095250e8a3612743f9b0ae5b399a5"
+    },
+    {
+      "backend": "msb",
+      "platform": "windows-x64",
+      "verdict": "PASS",
+      "backend_version": "0.7.11",
+      "os_build": "10.0.26200",
+      "arch": "x86_64",
+      "hypervisor": "wsl2",
+      "rev": "a05f74d4bdaf26c9c90f437d954c7f5eaf11619a",
+      "artifact_sha256": "8f749f74f8ad0a876fd9763c3e66f53951c33c5707af7c181f52fcaadbb2669d",
+      "recorded_at": "2026-11-08T16:44:09+00:00",
+      "transcript_sha256": "92ff5d8887a427f882d00ab548c1a99a27865609f0f01c4ab8cc78d4eac5fc7e"
+    },
+    {
+      "backend": "sbx",
+      "platform": "windows-x64",
+      "verdict": "PASS",
+      "backend_version": "0.51.0",
+      "os_build": "10.0.26200",
+      "arch": "x86_64",
+      "hypervisor": "wsl2",
+      "rev": "a05f74d4bdaf26c9c90f437d954c7f5eaf11619a",
+      "artifact_sha256": "8f749f74f8ad0a876fd9763c3e66f53951c33c5707af7c181f52fcaadbb2669d",
+      "recorded_at": "2026-11-08T16:44:21+00:00",
+      "transcript_sha256": "c3fe63bf7a3c9c986403b39a5c0203832236941869382b6a032bec8c165c8075"
     }
   ],
   "waivers": [
