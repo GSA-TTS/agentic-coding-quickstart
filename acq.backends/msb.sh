@@ -1348,9 +1348,13 @@ EOF
 #   - `crl*.h` (intra-label glob msb can't express) -> broadened to `*.<parent>`;
 #     the CALLER emits the one-time widening warning (keyed off the `crl*.` input)
 #   - anything else -> the host unchanged (exact domain)
-# The result is charset-guarded ([A-Za-z0-9.*_-]) and single-label `*.` suffixes
-# (which msb rejects for blast radius) are dropped, so the value is safe to place
-# in an argv via the caller's eval-by-name append (SI-10).
+# The result is charset-guarded ([A-Za-z0-9.*_-]), `*` is accepted only as the
+# leading `*.` wildcard, and the name must be two or more well-formed labels, so
+# the value is safe to place in an argv via the caller's eval-by-name append
+# (SI-10). The two-label floor drops single-label `*.` suffixes (msb rejects them
+# for blast radius) AND single-label exact targets: msb reads `any`, `public`,
+# `private`, `multicast`, `host`, and `dns` as GROUP keywords, so an entry such as
+# `any:443` would otherwise become `allow@any:tcp:443` and reopen all egress.
 _acq_msb_balanced_target() {
   local _host="$1" _context="${2:-balanced entry}" _target
   case "$_host" in
@@ -1367,17 +1371,25 @@ _acq_msb_balanced_target() {
       ;;
   esac
 
-  # Reject a single-label suffix (`*.com`): msb refuses it (accidental blast
-  # radius), so drop it here rather than let `msb create` hard-fail on the set.
-  case "$_target" in
-    "*."*)
-      case "${_target#*.}" in
-        *.*) : ;;  # two+ labels after `*.` -> OK
-        *)
-          echo "acq(msb): warning: skipping single-label suffix ${_context} (msb rejects it): ${_target}" >&2
-          return 1
-          ;;
-      esac
+  # Split off the one permitted wildcard form, then require a well-formed name:
+  # no other `*`, no empty label, no label starting or ending with `-`.
+  local _name="$_target"
+  case "$_target" in "*."*) _name="${_target#??}" ;; esac
+  case "$_name" in
+    *"*"*|.*|*.|*..*|-*|*-|*.-*|*-.*)
+      echo "acq(msb): warning: skipping non-hostname ${_context}: ${_host}" >&2
+      return 1
+      ;;
+  esac
+
+  # Require two or more labels. A single-label suffix (`*.com`) is refused by
+  # msb; a single-label exact target (`any`, `public`, `host`, ...) is an msb
+  # group keyword that would widen egress. Drop both.
+  case "$_name" in
+    *.*) : ;;
+    *)
+      echo "acq(msb): warning: skipping single-label ${_context} (msb rejects a single-label suffix and reads a single label as a group such as any/public/host): ${_target}" >&2
+      return 1
       ;;
   esac
 

@@ -196,6 +196,27 @@ def test_missing_baseline_is_refused(monkeypatch, tmp_path, capsys, calls):
     _assert_refused_before_create(*_create(capsys, tmp_path), calls)
 
 
+def test_relative_baseline_path_is_refused(monkeypatch, tmp_path, capsys, calls):
+    # A relative path resolves against the cwd, which may be an agent-writable
+    # workspace; refuse it even when such a file exists and is well formed.
+    _env(monkeypatch, tmp_path)
+    (tmp_path / "hosts.txt").write_text("pypi.org:443\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ACQ_MSB_BALANCED_HOSTS_FILE", "hosts.txt")
+    _assert_refused_before_create(*_create(capsys, tmp_path), calls)
+
+
+def test_group_keyword_baseline_cannot_reopen_egress(monkeypatch, tmp_path):
+    for name in _EGRESS_ENV:
+        monkeypatch.delenv(name, raising=False)
+    hosts = tmp_path / "hosts.txt"
+    hosts.write_text("any:443\npublic\n", encoding="utf-8")
+    monkeypatch.setenv("ACQ_MSB_BALANCED_HOSTS_FILE", str(hosts))
+    with pytest.raises(msb.MsbError) as info:
+        msb.egress_flags(["usai-provider"])
+    assert info.value.code == errors.VALIDATION_FAILED
+
+
 def test_empty_baseline_is_refused(monkeypatch, tmp_path, capsys, calls):
     _env(monkeypatch, tmp_path)
     empty = tmp_path / "hosts.txt"
@@ -235,7 +256,12 @@ def test_recreate_refuses_before_removing_the_old_sandbox(monkeypatch, tmp_path,
 # Argv safety: an allowlist value can never become a flag or extra arguments.
 # ---------------------------------------------------------------------------
 
+# msb reads a single-label target as a group keyword; `allow@any` reopens egress.
+_MSB_GROUP_KEYWORDS = ["any", "public", "private", "multicast", "host", "dns"]
+
 _HOSTILE_HOSTS = [
+    *_MSB_GROUP_KEYWORDS,
+    "localhost",
     "-evil.example.com",
     "--net-default-egress",
     "evil.example.com --net-default-egress allow",
@@ -271,6 +297,13 @@ def test_hostile_kit_host_is_refused(monkeypatch, tmp_path, capsys, calls, host,
         "evil.example.com:443 --net-default-egress allow",
         "evil.example.com:44 3",
         "*.com:443",
+        "*:443",
+        "any:443",
+        "public",
+        "private:443",
+        "multicast",
+        "host:53",
+        "dns",
     ],
 )
 def test_hostile_baseline_line_is_refused(monkeypatch, tmp_path, capsys, calls, line):
@@ -352,3 +385,50 @@ def test_rule_translation_matches_the_bash_adapter(monkeypatch, tmp_path):
     # beside the deny-default. Compare everything else in order.
     assert expected[:2] == ["--net-rule", "allow@dns"]
     assert python == expected[2:]
+
+
+def _spec_network_allow(spec: Path) -> tuple[str, ...]:
+    """``caps.network.allow`` from a kit spec, parsed as kit_spec_net_allow does."""
+    out: list[str] = []
+    in_caps = in_net = in_allow = False
+    for line in spec.read_text(encoding="utf-8").splitlines():
+        if line.startswith("caps:"):
+            in_caps, in_net, in_allow = True, False, False
+            continue
+        if re.match(r"[A-Za-z]", line):
+            in_caps = in_net = in_allow = False
+        if in_caps and re.match(r"\s+network:", line):
+            in_net = True
+            continue
+        if in_net and re.match(r"\s+allow:", line):
+            in_allow = True
+            continue
+        if in_allow:
+            if re.match(r"\s+-\s*", line):
+                value = re.sub(r"^\s*-\s*", "", line)
+                value = re.sub(r"\s*#.*", "", value).rstrip().strip('"')
+                if value:
+                    out.append(value)
+            elif not re.match(r"\s*#", line):
+                in_allow = False
+    return tuple(out)
+
+
+def test_kit_network_allow_matches_the_pinned_kit_specs():
+    """KIT_NETWORK_ALLOW is a copy of each built-in kit's pinned spec.
+
+    Runs where a checkout of the pinned Patterns repository is provided via
+    ACQ_TEST_PATTERNS_REPO (as the pre-commit and bash32 CI workflows do);
+    skipped otherwise, since ordinary tests never fetch.
+    """
+    root = os.environ.get("ACQ_TEST_PATTERNS_REPO")
+    if not root:
+        pytest.skip("pinned Patterns checkout is provided by CI via ACQ_TEST_PATTERNS_REPO")
+    repo = Path(root)
+    head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True)
+    if head.returncode == 0:
+        assert head.stdout.strip() == kits.KIT_NETWORK_ALLOW_REF
+    for kit in kits.BUILTIN_KIT_NAMES:
+        spec = repo / kits.CONTROL_PLANE_DIR / kit / "spec.yaml"
+        assert spec.is_file(), f"missing pinned spec for built-in kit {kit!r}: {spec}"
+        assert _spec_network_allow(spec) == kits.KIT_NETWORK_ALLOW[kit], kit

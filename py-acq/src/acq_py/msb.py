@@ -240,11 +240,15 @@ def exists(name: str) -> bool:
 # Egress only: ingress keeps msb's default so published ports stay reachable
 # (ADR-0019). `--tls-intercept` is always emitted: from msb 0.7.3 a hostname
 # allow rule only matches traffic msb can inspect, so without interception
-# every allowed host would be unreachable.
+# every allowed host would be unreachable. The Bash opt-out
+# ACQ_MSB_NO_TLS_INTERCEPT is deliberately ignored here: this path binds no
+# secrets, so interception serves only to make the allow rules match, and
+# turning it off would leave the policy unusable rather than looser.
 #
 # Deliberate tightenings against the Bash adapter, all in the refuse direction:
-# an invalid tier, a malformed or empty baseline file, and a malformed host are
-# refused here, where Bash falls back to `balanced` or skips the entry.
+# an invalid tier, a relative/missing/malformed/empty baseline file, and a
+# malformed host are refused here, where Bash falls back to `balanced` or skips
+# the entry.
 # ---------------------------------------------------------------------------
 
 NETWORK_TIERS = ("strict", "balanced", "open")
@@ -254,13 +258,16 @@ NETWORK_TIERS = ("strict", "balanced", "open")
 # ACQ_MSB_BALANCED_HOSTS_FILE points at a site-specific list, as in Bash.
 BALANCED_HOSTS_FILE = Path(__file__).resolve().with_name("msb-balanced-hosts.txt")
 
-# One DNS label: ASCII letters, digits, `_`, and inner `-`. A target is labels
-# joined by `.`, optionally led by msb's `*.` suffix wildcard. Every value is a
+# One DNS label: ASCII letters, digits, `_`, and inner `-`. A target is TWO OR
+# MORE labels joined by `.`, optionally led by msb's `*.` suffix wildcard. The
+# two-label floor matters: msb reads a single-label target as a group keyword
+# (`any`, `public`, `private`, `multicast`, `host`, `dns`), so `allow@any` would
+# reopen all egress, and `*.com` is a suffix msb itself refuses. Every value is a
 # single argv element appended to `allow@`, so a target can never become a flag
 # or split into extra arguments; this check also keeps out whitespace and
 # anything msb would misparse.
 _LABEL = r"[A-Za-z0-9_](?:[A-Za-z0-9_-]*[A-Za-z0-9_])?"
-_TARGET_RE = re.compile(rf"(?:\*\.)?{_LABEL}(?:\.{_LABEL})*")
+_TARGET_RE = re.compile(rf"(?:\*\.)?{_LABEL}(?:\.{_LABEL})+")
 _PORT_RE = re.compile(r"[1-9][0-9]{0,4}")
 
 
@@ -298,8 +305,9 @@ def _egress_target(host: str, source: str) -> str:
 
     ``**.h`` (sbx multi-label glob) becomes msb's suffix form ``*.h``; ``crl*.h``
     (an intra-label glob msb cannot express) is broadened to ``*.h``; anything
-    else is an exact host. A single-label suffix such as ``*.com`` is refused,
-    as msb itself refuses it.
+    else is an exact host. A single label (``any``, ``public``, ``host``, ...,
+    which msb reads as a group keyword) and a single-label suffix such as
+    ``*.com`` are refused.
     """
     if host.startswith("**."):
         target = "*." + host[3:]
@@ -307,8 +315,7 @@ def _egress_target(host: str, source: str) -> str:
         target = "*." + host[5:]
     else:
         target = host
-    single_label_suffix = target.startswith("*.") and "." not in target[2:]
-    if not _TARGET_RE.fullmatch(target) or single_label_suffix:
+    if not _TARGET_RE.fullmatch(target):
         raise _policy_error(
             f"cannot compute the egress policy: invalid host {host!r} in {source}",
             "fix the allowlist entry; acq refuses to create a sandbox it cannot restrict",
@@ -346,6 +353,13 @@ def _balanced_rules() -> list[str]:
     """
     path = Path(os.environ.get("ACQ_MSB_BALANCED_HOSTS_FILE") or BALANCED_HOSTS_FILE)
     remediation = "restore the balanced host list, or set ACQ_NETWORK_TIER=strict"
+    if not path.is_absolute():
+        # A relative override resolves against the cwd, which may be a mounted
+        # workspace the agent can write.
+        raise _policy_error(
+            f"ACQ_MSB_BALANCED_HOSTS_FILE must be an absolute path, not {str(path)!r}",
+            "set ACQ_MSB_BALANCED_HOSTS_FILE to an absolute path",
+        )
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):

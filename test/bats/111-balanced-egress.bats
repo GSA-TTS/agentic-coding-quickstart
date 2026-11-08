@@ -57,6 +57,22 @@ _load_msb() { . "${REPO_ROOT}/acq.backends/msb.sh" 2>/dev/null; }
   assert_output ''
 }
 
+@test "balanced_target: msb group keywords and malformed names are dropped" {
+  # msb reads a single-label target as a GROUP (any/public/private/multicast/
+  # host/dns), so `allow@any` would reopen all egress. Each must be dropped
+  # with nothing on stdout, as must a bare or inner `*` and empty/edge labels.
+  run bash -c '
+    . "'"${REPO_ROOT}"'/acq.backends/msb.sh" 2>/dev/null
+    for h in any public private multicast host dns "*" "**.com" "a*b.example.com" \
+             -evil.example.com evil-.example.com example.com. .example.com a..b.com; do
+      if _acq_msb_balanced_target "$h" 2>/dev/null; then echo "ACCEPTED: $h"; fi
+    done
+    _acq_msb_balanced_target "api.example.com" 2>/dev/null
+  '
+  assert_success
+  assert_output 'api.example.com'
+}
+
 @test "balanced_port_ok: 443 and 80 are valid" {
   _load_msb
   run _acq_msb_balanced_port_ok 443
@@ -128,4 +144,39 @@ HOSTS
   refute_output --partial 'bad;host'
   assert_output --partial 'allow@dns'
   refute_output --partial 'allow@host:udp:53'
+}
+
+@test "balanced_rules_into + net_rules_into: group-keyword entries never become rules" {
+  _load_msb
+  cat >"$STUBDIR/bal-groups.txt" <<'HOSTS'
+any:443
+public
+host:53
+github.com:443
+HOSTS
+  cat >"$STUBDIR/groups-spec.yaml" <<'SPEC'
+caps:
+  network:
+    allow:
+      - any
+      - private:443
+      - api.gsa.usai.gov
+SPEC
+  run env ACQ_MSB_BALANCED_HOSTS_FILE="$STUBDIR/bal-groups.txt" bash -c '
+    . "'"${REPO_ROOT}"'/acq.backends/kit-translate.sh" 2>/dev/null
+    . "'"${REPO_ROOT}"'/acq.backends/msb.sh" 2>/dev/null
+    arr=()
+    _acq_msb_balanced_rules_into arr 2>/dev/null
+    printf "%s\n" "${arr[@]}"
+    _acq_msb_net_rules_into arr "'"$STUBDIR"'/groups-spec.yaml" 2>/dev/null
+    printf "%s\n" "${arr[@]}"
+  '
+  assert_success
+  assert_output --partial 'allow@dns'
+  assert_output --partial 'allow@github.com:tcp:443'
+  assert_output --partial 'allow@api.gsa.usai.gov'
+  refute_output --partial 'allow@any'
+  refute_output --partial 'allow@public'
+  refute_output --partial 'allow@private'
+  refute_output --partial 'allow@host'
 }
