@@ -30,11 +30,10 @@ from __future__ import annotations
 import json
 import ntpath
 import os
-import shlex
 import subprocess
 import sys
 
-from . import errors
+from . import errors, hostexec
 
 STUB_SENTINEL = "__stub__"
 
@@ -126,8 +125,8 @@ def msb_command() -> list[str]:
     if override == STUB_SENTINEL:
         return [sys.executable, "-P", "-m", "acq_py._stub_msb"]
     if override:
-        return shlex.split(override)
-    return ["msb"]
+        return hostexec.override_command(override)
+    return hostexec.command("msb")
 
 
 # ---------------------------------------------------------------------------
