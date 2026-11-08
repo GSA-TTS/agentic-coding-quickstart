@@ -1,0 +1,79 @@
+#!/bin/sh
+# stage-windows-runtime — add acq's managed Windows runtime and its Python
+# source to a release tree (ADR-0042m: acq owns an app-private runtime).
+#
+# Verifies a python.org embeddable CPython ZIP against a pinned SHA-256, unpacks
+# it into <tree>/py-acq/runtime, copies acq's source to <tree>/py-acq/src, and
+# rewrites the embedded distribution's ._pth file so the interpreter's import
+# path is exactly: its standard-library zip, its own directory, and ..\src.
+#
+# Why the ._pth file matters: when it is present, the embedded interpreter
+# ignores PYTHONPATH and never adds the current directory, so it is the only way
+# for `python.exe -m acq_py` to find acq, and it also keeps files in the user's
+# workspace off sys.path. `import site` is deliberately left out: acq is
+# stdlib-only, so no site-packages directory is needed.
+#
+# Usage:
+#   scripts/stage-windows-runtime <embed.zip> <sha256> <release-tree>
+#
+# Requires: python3 (for hashing and unzipping, so it runs the same on Linux,
+# macOS and CI). Fails closed: a hash mismatch, an existing runtime directory,
+# or an unexpected archive layout leaves the tree without a runtime.
+
+set -eu
+
+die() { printf 'stage-windows-runtime: %s\n' "$*" >&2; exit 1; }
+
+[ "$#" -eq 3 ] || die "usage: stage-windows-runtime <embed.zip> <sha256> <release-tree>"
+zip="$1" want="$2" tree="$3"
+
+command -v python3 >/dev/null 2>&1 || die "python3 is required"
+[ -f "$zip" ] || die "no such archive: $zip"
+[ -d "$tree" ] || die "not a directory: $tree"
+case "$want" in
+  *[!0-9a-f]* | '') die "expected a lowercase hex SHA-256, got '$want'" ;;
+esac
+[ "${#want}" -eq 64 ] || die "expected a 64-character SHA-256, got ${#want} characters"
+
+repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+src="$repo_root/py-acq/src"
+[ -f "$src/acq_py/__init__.py" ] || die "acq source not found at $src"
+
+runtime="$tree/py-acq/runtime"
+[ ! -e "$runtime" ] || die "$runtime already exists; refusing to overwrite it"
+[ ! -e "$tree/py-acq/src" ] || die "$tree/py-acq/src already exists; refusing to overwrite it"
+
+got="$(python3 -I -c 'import hashlib, sys
+h = hashlib.sha256()
+with open(sys.argv[1], "rb") as f:
+    for chunk in iter(lambda: f.read(1 << 20), b""):
+        h.update(chunk)
+print(h.hexdigest())' "$zip")"
+[ "$got" = "$want" ] || die "SHA-256 mismatch for $zip: expected $want, got $got"
+
+mkdir -p "$tree/py-acq"
+staging="$tree/py-acq/.runtime-staging"
+rm -rf "$staging"
+# zipfile.extractall drops absolute paths and '..' components, so a malformed
+# archive cannot write outside the staging directory.
+python3 -I -m zipfile -e "$zip" "$staging"
+
+# The embeddable layout has exactly one pythonXY._pth next to python.exe.
+pth_count=0
+for f in "$staging"/python*._pth; do
+  [ -f "$f" ] && pth_count=$((pth_count + 1)) && pth="$f"
+done
+[ "$pth_count" -eq 1 ] || { rm -rf "$staging"; die "expected one python*._pth in the archive, found $pth_count"; }
+for need in python.exe LICENSE.txt; do
+  [ -f "$staging/$need" ] || { rm -rf "$staging"; die "archive has no $need"; }
+done
+tag="$(basename "$pth" ._pth)"
+[ -f "$staging/$tag.zip" ] || { rm -rf "$staging"; die "archive has no $tag.zip standard library"; }
+
+printf '%s.zip\r\n.\r\n..\\src\r\n' "$tag" > "$pth"
+mv "$staging" "$runtime"
+
+cp -R "$src" "$tree/py-acq/src"
+find "$tree/py-acq/src" -name __pycache__ -type d -prune -exec rm -rf {} +
+
+printf 'staged %s runtime (%s) and acq source into %s/py-acq\n' "$tag" "$got" "$tree"
