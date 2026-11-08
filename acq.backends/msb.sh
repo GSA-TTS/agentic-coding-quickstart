@@ -2115,7 +2115,7 @@ _acq_msb_ro_mount_recorded_readonly() {
       return 1
     fi
     rc=0
-    res=$(printf '%s' "$json" | "$py" -c "$_ACQ_MSB_RO_INSPECT_PY" "$ACQ_HOST_CONFIG_GUEST_DIR" "$hcfg" "$hcfg_canon" "$hcfg_host" 2>/dev/null) || rc=$?
+    res=$(printf '%s' "$json" | "$py" -I -c "$_ACQ_MSB_RO_INSPECT_PY" "$ACQ_HOST_CONFIG_GUEST_DIR" "$hcfg" "$hcfg_canon" "$hcfg_host" 2>/dev/null) || rc=$?
     case "$rc" in
       0) [ "$res" = "ok" ] && return 0
          _ACQ_MSB_RO_MOUNT_REASON="the mount record check returned an unexpected result"; return 1 ;;

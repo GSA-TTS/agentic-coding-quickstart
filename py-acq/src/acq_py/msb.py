@@ -124,7 +124,7 @@ def msb_command() -> list[str]:
     """Resolve the msb CLI argv (an internal test seam; default ``msb``)."""
     override = os.environ.get("ACQ_MSB_BIN")
     if override == STUB_SENTINEL:
-        return [sys.executable, "-m", "acq_py._stub_msb"]
+        return [sys.executable, "-P", "-m", "acq_py._stub_msb"]
     if override:
         return shlex.split(override)
     return ["msb"]

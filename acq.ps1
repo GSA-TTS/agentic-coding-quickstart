@@ -33,10 +33,24 @@ if ($acqImpl -and $acqImpl -ne "bash") {
         $acqPythonExe = $pyCmd.Source
     }
     $srcDir = Join-Path $acqImplRepoRoot "py-acq\src"
+    # acq is stdlib-only, so the user's PYTHONPATH is never inherited: an empty
+    # or relative entry would put the current directory back on sys.path.
     if (Test-Path -LiteralPath $srcDir -PathType Container) {
-        $env:PYTHONPATH = $srcDir + $(if ($env:PYTHONPATH) { ";$env:PYTHONPATH" } else { "" })
+        $env:PYTHONPATH = $srcDir
     }
-    & $acqPythonExe -m acq_py @args
+    else {
+        Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+    }
+    # -P keeps `python -m` from putting the current directory first on sys.path
+    # (a workspace json.py would otherwise run on the host); interpreters older
+    # than the required 3.12 are refused because they may not honour -P. The
+    # probe runs isolated and imports only the builtin sys module.
+    & $acqPythonExe -I -c "import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)" *> $null
+    if ($LASTEXITCODE -ne 0) {
+        [Console]::Error.WriteLine("acq: ACQ_IMPL=python needs Python 3.12 or newer; $acqPythonExe is not")
+        exit 1
+    }
+    & $acqPythonExe -P -m acq_py @args
     exit $LASTEXITCODE
 }
 

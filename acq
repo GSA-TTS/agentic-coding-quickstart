@@ -719,7 +719,7 @@ if [ -n "${ACQ_SOURCE_ONLY:-}" ]; then return 0 2>/dev/null || exit 0; fi
 #                                   impl's distinct identity, never the `acq` name
 #   2. python -m acq_py             the managed runtime ($ACQ_SCRIPT_DIR/py-acq/
 #                                   runtime/bin/python3, or python.exe on Windows),
-#                                   else python3/python on PATH, with PYTHONPATH
+#                                   else python3/python on PATH, with PYTHONPATH (only)
 #                                   pointed at $ACQ_SCRIPT_DIR/py-acq/src
 # argv and the exit status are forwarded verbatim in every case.
 # ---------------------------------------------------------------------------
@@ -748,10 +748,22 @@ _acq_exec_python() {
     echo "     (run the installer to link acq-python, or put python3 on PATH)" >&2
     exit 1
   fi
-  if [ -d "${ACQ_SCRIPT_DIR}/py-acq/src" ]; then
-    PYTHONPATH="${ACQ_SCRIPT_DIR}/py-acq/src${PYTHONPATH:+:$PYTHONPATH}" exec "$_py" -m acq_py "$@"
+  # -P keeps `python -m` from putting the current directory first on sys.path
+  # (a workspace json.py would otherwise run on the host); interpreters older
+  # than the required 3.12 are refused because they may not honour -P. The probe
+  # runs isolated and imports only the builtin sys module.
+  if ! "$_py" -I -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' >/dev/null 2>&1; then
+    echo "acq: ACQ_IMPL=python needs Python 3.12 or newer; $_py is not" >&2
+    echo "     (set ACQ_RUNTIME, run the installer, or put python3 >= 3.12 on PATH)" >&2
+    exit 1
   fi
-  exec "$_py" -m acq_py "$@"
+  # acq is stdlib-only, so the user's PYTHONPATH is never inherited: an empty or
+  # relative entry would put the current directory back on sys.path despite -P.
+  if [ -d "${ACQ_SCRIPT_DIR}/py-acq/src" ]; then
+    PYTHONPATH="${ACQ_SCRIPT_DIR}/py-acq/src" exec "$_py" -P -m acq_py "$@"
+  fi
+  unset PYTHONPATH
+  exec "$_py" -P -m acq_py "$@"
 }
 
 _acq_impl="${ACQ_IMPL:-bash}"

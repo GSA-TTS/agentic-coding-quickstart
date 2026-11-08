@@ -41,6 +41,7 @@ _provider_release() {
   mkdir -p "$root/scripts" "$root/integrations/isolation/schemas"
   cat > "$root/provider-python" <<'PYTHON'
 #!/bin/sh
+[ "${1:-}" = -I ] && shift  # acq runs python -I (no cwd/env on sys.path)
 if [ "$1" = -c ]; then exit 0; fi
 exec /usr/bin/python3 "$@"
 PYTHON

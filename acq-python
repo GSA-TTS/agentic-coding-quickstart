@@ -51,7 +51,23 @@ else
   exit 1
 fi
 
-if [ -d "$SELF_DIR/py-acq/src" ]; then
-  PYTHONPATH="$SELF_DIR/py-acq/src${PYTHONPATH:+:$PYTHONPATH}" exec "$py" -m acq_py "$@"
+# `python -m` puts the current directory first on sys.path, so a workspace file
+# named like a module acq imports (json.py, argparse.py, ...) would run on the
+# host before any sandbox exists. Run with -P (Python 3.11+: no unsafe path
+# entry) and refuse interpreters older than the required 3.12, which may not
+# honour -P. The version probe runs isolated (-I) and imports only the builtin
+# sys module, so the probe itself cannot be hijacked.
+if ! "$py" -I -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' >/dev/null 2>&1; then
+  echo "acq-python: $py is not Python 3.12 or newer, which acq requires" >&2
+  echo "            (set ACQ_RUNTIME, install the managed runtime, or put python3 >= 3.12 on PATH)" >&2
+  exit 1
 fi
-exec "$py" -m acq_py "$@"
+
+# acq is stdlib-only, so the user's PYTHONPATH is never inherited: an empty or
+# relative entry in it (e.g. "PYTHONPATH=:/opt/x") would put the current
+# directory back on sys.path despite -P.
+if [ -d "$SELF_DIR/py-acq/src" ]; then
+  PYTHONPATH="$SELF_DIR/py-acq/src" exec "$py" -P -m acq_py "$@"
+fi
+unset PYTHONPATH
+exec "$py" -P -m acq_py "$@"

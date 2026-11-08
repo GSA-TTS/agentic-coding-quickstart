@@ -62,7 +62,7 @@ def sbx_command() -> list[str]:
     """Resolve the sbx CLI argv (an internal test seam; default ``sbx``)."""
     override = os.environ.get("ACQ_SBX_BIN")
     if override == STUB_SENTINEL:
-        return [sys.executable, "-m", "acq_py._stub_sbx"]
+        return [sys.executable, "-P", "-m", "acq_py._stub_sbx"]
     if override:
         return shlex.split(override)
     return ["sbx"]
