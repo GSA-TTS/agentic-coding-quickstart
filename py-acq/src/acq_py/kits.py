@@ -59,7 +59,7 @@ class KitSpecError(Exception):
 # TODO(quarterly): a real, reproducible pin re-reviewed on the quarterly cadence
 # (ADR-0030), sourced from the pinned patterns release.
 CONTROL_PLANE_REPO = "github.com/GSA-TTS/agentic-coding-patterns"
-CONTROL_PLANE_REF = "7dd2ddc034b6597e97f450fa716e7d47c9a38287"
+CONTROL_PLANE_REF = "941a286f912b99475429c3c00db49a99af5b241e"
 CONTROL_PLANE_DIR = "integrations/isolation/acq-kits"
 
 # The built-in neutral kit bundle, in apply order (ADR-0011, ADR-0016). The

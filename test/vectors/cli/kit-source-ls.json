@@ -23,7 +23,7 @@
           "sources": [
             {
               "repository": "github.com/GSA-TTS/agentic-coding-patterns",
-              "ref": "7dd2ddc034b6597e97f450fa716e7d47c9a38287",
+              "ref": "941a286f912b99475429c3c00db49a99af5b241e",
               "directory": "integrations/isolation/acq-kits",
               "provider_kits": ["usai-provider"],
               "discovery_status": "reachable"

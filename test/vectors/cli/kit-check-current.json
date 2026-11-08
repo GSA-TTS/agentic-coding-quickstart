@@ -13,7 +13,7 @@
       "ACQ_MSB_INSTALLED": "1",
       "ACQ_SBX_INSTALLED": "0",
       "ACQ_MSB_STUB_CATALOG": "{\"mybox\": \"running\"}",
-      "ACQ_KIT_PROVENANCE_SEED": "{\"mybox\": \"7dd2ddc034b6597e97f450fa716e7d47c9a38287\"}"
+      "ACQ_KIT_PROVENANCE_SEED": "{\"mybox\": \"941a286f912b99475429c3c00db49a99af5b241e\"}"
     },
     "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "MSB_HOME", "ACQ_IMAGE", "ACQ_MSB_IMAGE", "ACQ_MSB_STUB_FAIL", "ACQ_MSB_READY_TIMEOUT"],
     "stdin": "",
@@ -29,8 +29,8 @@
         "data": {
           "sandbox": "mybox",
           "backend": "msb",
-          "local": "7dd2ddc034b6597e97f450fa716e7d47c9a38287",
-          "applied": "7dd2ddc034b6597e97f450fa716e7d47c9a38287",
+          "local": "941a286f912b99475429c3c00db49a99af5b241e",
+          "applied": "941a286f912b99475429c3c00db49a99af5b241e",
           "status": "current"
         }
       },
