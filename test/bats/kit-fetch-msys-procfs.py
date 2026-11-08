@@ -11,6 +11,13 @@
 # trap removes the root, so later kit fetches fail; this test requires instead
 # that it holds the root, lets a kit materialize, kills its tick promptly at exit,
 # notices an orphaning, and leaves an unrelated process alone.
+#
+# What this cannot model, and was instead checked on a real Git Bash host:
+# - On MSYS a child's /proc/<pid>/ppid is readable as soon as `&` returns. Here
+#   the populator needs a few milliseconds, so the guardian waits for its own
+#   entry before starting, and a tick that is not mirrored yet just looks unknown.
+# - The real exename contents (/usr/bin/sleep for the tick) and how Cygwin's
+#   procfs behaves around exec are approximated from the Linux comm field.
 
 from concurrent.futures import ThreadPoolExecutor
 import os
@@ -95,29 +102,37 @@ class Populator(threading.Thread):
                 continue
             try:
                 stat = Path("/proc", name, "stat").read_text()
-            except OSError:
-                continue
-            comm = stat[stat.index("(") + 1:stat.rindex(")")]
-            fields = stat[stat.rindex(")") + 2:].split()
-            table[int(name)] = (int(fields[1]), int(fields[3]), comm)
+                comm = stat[stat.index("(") + 1:stat.rindex(")")]
+                fields = stat[stat.rindex(")") + 2:].split()
+                table[int(name)] = (int(fields[1]), int(fields[3]), comm)
+            except (OSError, ValueError, IndexError):
+                continue  # the process exited while it was being read
         return table
+
+    def mirror_tree(self, sid, root, extra, table):
+        live = {pid for pid, (_, sess, _) in table.items() if sess == sid or pid in extra}
+        for pid in live:
+            entry = root / str(pid)
+            entry.mkdir(exist_ok=True)
+            ppid, _, comm = table[pid]
+            self.write(entry / "exename", "/usr/bin/%s\n" % comm)
+            self.write(entry / "ppid", "%d\n" % ppid)
+        for entry in root.iterdir():
+            if entry.name.isdigit() and int(entry.name) not in live:
+                shutil.rmtree(entry, ignore_errors=True)
 
     def run(self):
         while not self.stopping.is_set():
             table = self.scan()
+            # Mirror while holding the lock, so forget() (and the rmtree its
+            # caller does next) waits for any pass still writing into that tree.
+            # One tree's error must never stop the thread the other cases need.
             with self.lock:
-                trees = list(self.trees.items())
-            for sid, (root, extra) in trees:
-                live = {pid for pid, (_, sess, _) in table.items() if sess == sid or pid in extra}
-                for pid in live:
-                    entry = root / str(pid)
-                    entry.mkdir(exist_ok=True)
-                    ppid, _, comm = table[pid]
-                    self.write(entry / "exename", "/usr/bin/%s\n" % comm)
-                    self.write(entry / "ppid", "%d\n" % ppid)
-                for entry in root.iterdir():
-                    if entry.name.isdigit() and int(entry.name) not in live:
-                        shutil.rmtree(entry, ignore_errors=True)
+                for sid, (root, extra) in list(self.trees.items()):
+                    try:
+                        self.mirror_tree(sid, root, extra, table)
+                    except OSError:
+                        pass
             time.sleep(0.005)
 
 

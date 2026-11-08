@@ -12,6 +12,14 @@
 # start time, so rewriting its ppid file never disturbs the identity. Code that
 # still depends on `ps -o` cannot start the guardian or compute an identity, so
 # provision and terminate exit 1 before their bodies run.
+#
+# What this cannot model, and was instead checked on a real Git Bash host:
+# - Cygwin keeps the /proc/<pid> mtime across exec (the stat starttime field
+#   changes there). Linux start times never change, so a mutant that used the
+#   stat field would still pass here.
+# - On MSYS a child's /proc/<pid>/ppid is readable as soon as `&` returns. Here
+#   the populator needs a few milliseconds, so the copy waits for the guardian's
+#   entry right after starting it, which hides any lag in the real procfs.
 
 from concurrent.futures import ThreadPoolExecutor
 import os
@@ -80,10 +88,10 @@ class Populator(threading.Thread):
                 continue
             try:
                 stat = Path("/proc", name, "stat").read_text()
-            except OSError:
-                continue
-            fields = stat[stat.rindex(")") + 2:].split()
-            table[int(name)] = (int(fields[1]), int(fields[3]), int(fields[19]))
+                fields = stat[stat.rindex(")") + 2:].split()
+                table[int(name)] = (int(fields[1]), int(fields[3]), int(fields[19]))
+            except (OSError, ValueError, IndexError):
+                continue  # the process exited while it was being read
         return table
 
     def mirror(self, root, pid, ppid, start):
@@ -109,21 +117,29 @@ class Populator(threading.Thread):
             os.replace(tmp, link)
             self.made[(root, pid)] = start
 
+    def mirror_tree(self, sid, root, table):
+        live = {pid for pid, (_, sess, _) in table.items() if sess == sid}
+        for pid in live:
+            ppid, _, start = table[pid]
+            self.mirror(root, pid, ppid, start)
+        for entry in root.iterdir():
+            if entry.name.isdigit() and int(entry.name) not in live:
+                os.unlink(entry)
+                shutil.rmtree(root / ".data" / entry.name, ignore_errors=True)
+                self.made.pop((root, int(entry.name)), None)
+
     def run(self):
         while not self.stopping.is_set():
             table = self.scan()
+            # Mirror while holding the lock, so forget() waits for any pass still
+            # writing into that tree. One tree's error must never stop the thread
+            # the other scenarios need.
             with self.lock:
-                trees = list(self.trees.items())
-            for sid, root in trees:
-                live = {pid for pid, (_, sess, _) in table.items() if sess == sid}
-                for pid in live:
-                    ppid, _, start = table[pid]
-                    self.mirror(root, pid, ppid, start)
-                for entry in root.iterdir():
-                    if entry.name.isdigit() and int(entry.name) not in live:
-                        os.unlink(entry)
-                        shutil.rmtree(root / ".data" / entry.name, ignore_errors=True)
-                        self.made.pop((root, int(entry.name)), None)
+                for sid, root in list(self.trees.items()):
+                    try:
+                        self.mirror_tree(sid, root, table)
+                    except OSError:
+                        pass
             time.sleep(0.005)
 
 
@@ -169,6 +185,24 @@ case "$out" in *"recovering stale"*) ;; *) fail "no recovery message: $out" ;; e
 acq_provider_input_lock_release "$lock" || fail release
 identity=$(_acq_provider_input_process_identity "$$") || fail "no identity for a live pid"
 case "$identity" in *[!0-9]*) fail "identity not from the MSYS procfs: $identity" ;; esac
+# It is this PID's start time, checked against the real Linux /proc rather than
+# the fake tree; it differs for a process started over a second later; and it
+# does not drift while the owner lives.
+real_start() { awk -v b="$BTIME" -v hz="$HZ" '{ sub(/.*\) /, ""); printf "%d\n", b + int($20 / hz) }' "/proc/$1/stat"; }
+want=$(real_start "$$")
+[ "$identity" -ge $((want - 1)) ] && [ "$identity" -le $((want + 1)) ] || fail "identity $identity is not start time $want"
+sleep 30 & first=$!
+sleep 1.2
+sleep 30 & second=$!
+for p in "$first" "$second"; do
+  n=0; while [ ! -r "$FAKEPROC/$p/ppid" ] && [ "$n" -lt 300 ]; do sleep 0.01; n=$((n + 1)); done
+done
+a=$(_acq_provider_input_process_identity "$first"); b=$(_acq_provider_input_process_identity "$second")
+kill "$first" "$second"; wait "$first" "$second" 2>/dev/null
+[ -n "$a" ] && [ -n "$b" ] && [ "$a" != "$b" ] || fail "processes 1.2s apart share an identity: '$a' '$b'"
+sleep 1.2
+again=$(_acq_provider_input_process_identity "$$")
+[ "$again" = "$identity" ] || fail "live owner identity drifted: $identity -> $again"
 _acq_provider_input_safe_mkdir "$lock" || fail mkdir
 printf '%s %s\n' "$$" "$identity" > "$lock/owner"
 if out=$(ACQ_PROVIDER_INPUT_LOCK_RETRIES=1 acq_provider_input_lock_acquire sbx stalebox 2>&1); then
@@ -178,11 +212,16 @@ case "$out" in *"owned by live pid $$"*) ;; *) fail "unexpected: $out" ;; esac
 echo SCENARIO-OK
 ''',
     # SIGKILL of the transaction subshell cannot free the lock while its guardian
-    # lives; once the guardian notices and exits, the lock is recoverable.
+    # lives; once the guardian notices and exits, the lock is recoverable. The
+    # guardian polls once a second and leaves soon after its parent dies, so a
+    # registered backend child keeps it alive for a fixed window; otherwise a
+    # loaded host could reach the retry only after the guardian had (correctly)
+    # gone.
     "parent-exit": r'''
 (
   _acq_provider_input_guardian_start || exit 1
   acq_provider_input_lock_acquire sbx parentexit "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID" >/dev/null || exit 1
+  sleep 6 & _acq_provider_input_guardian_register_child "$!" || exit 1
   printf '%s\n' "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID" > "$WORK/guardian.pid"
   sleep 10
 ) &
@@ -200,7 +239,7 @@ fi
 case "$out" in *"owned by live pid $guardian"*) ;; *) fail "unexpected: $out" ;; esac
 wait "$parent" 2>/dev/null
 n=0
-while kill -0 "$guardian" 2>/dev/null && [ "$n" -lt 50 ]; do sleep 0.1; n=$((n + 1)); done
+while kill -0 "$guardian" 2>/dev/null && [ "$n" -lt 150 ]; do sleep 0.1; n=$((n + 1)); done
 lock=$(acq_provider_input_lock_acquire sbx parentexit 2>/dev/null) || fail "lock not recoverable"
 acq_provider_input_lock_release "$lock" || fail release
 echo SCENARIO-OK
@@ -222,7 +261,7 @@ def run(name):
                XDG_STATE_HOME=str(work / "state"), ACQ_PROVENANCE_DIR=str(work / "prov"),
                ACQ_STATE_DIR=str(work / "state" / "acq"),
                ACQ_SECRET_STORE_DIR=str(work / "state" / "sec"),
-               FAKEPROC=str(fake), COPY=str(copy), WORK=str(work),
+               FAKEPROC=str(fake), COPY=str(copy), WORK=str(work), BTIME=str(BOOT), HZ=str(HZ),
                PATH="%s:%s" % (fakebin, env.get("PATH", "")))
     process = subprocess.Popen([shell, str(script)], stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, env=env, start_new_session=True)

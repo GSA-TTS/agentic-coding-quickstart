@@ -4680,7 +4680,10 @@ _acq_provider_input_signal_exit() {
 # unlike the starttime field of /proc/<pid>/stat, it is kept across exec, which
 # matters because the guardian is a forked shell that then execs sh. The ppid
 # file identifies that procfs: Linux /proc has none and macOS has no /proc, so
-# both keep using ps -o lstart.
+# both keep using ps -o lstart. Whole-second resolution can only cost liveness:
+# a PID reused within the same second still matches, so the waiter keeps
+# retrying instead of recovering the lock. It can never make a held lock look
+# stale, because a live owner's start time never changes.
 _acq_provider_input_process_identity() {
   local pid="${1:-}"
   case "$pid" in ""|*[!0-9]*) return 1 ;; esac
