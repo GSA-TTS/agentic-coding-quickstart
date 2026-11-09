@@ -662,13 +662,16 @@ _acq_recreate_name_check() {
 # _acq_attach_name_check ARGS... — `attach` is forwarded to the backend CLI, but
 # its first positional names an existing sandbox, so refuse one that could steer
 # a host path (acq_name_form_check) before forwarding, as Python's attach does.
+# After `--` the next argument is that positional whatever it looks like.
 _acq_attach_name_check() {
-  local a
+  local a after_dashdash=0
   for a in "$@"; do
-    [ "$a" = "--" ] && return 0
-    case "$a" in
-      -?*) continue ;;
-    esac
+    if [ "$after_dashdash" -eq 0 ]; then
+      [ "$a" = "--" ] && { after_dashdash=1; continue; }
+      case "$a" in
+        -?*) continue ;;
+      esac
+    fi
     acq_name_form_check attach "$a"
     return
   done

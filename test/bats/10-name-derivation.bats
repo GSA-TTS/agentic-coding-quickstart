@@ -208,6 +208,9 @@ load 'helper'
     run env ACQ_BACKEND=msb "$ACQ" attach --flag "$bad"
     assert_failure
     assert_output --partial 'acq: attach: refusing sandbox name'
+    run env ACQ_BACKEND=msb "$ACQ" attach -- "$bad"
+    assert_failure
+    assert_output --partial 'acq: attach: refusing sandbox name'
     run env ACQ_BACKEND=msb "$ACQ" kit apply "$bad" ./kit
     assert_failure
     assert_output --partial 'acq: kit apply: refusing sandbox name'
