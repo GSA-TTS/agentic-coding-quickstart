@@ -7,6 +7,8 @@
 #                     scripts/stage-windows-runtime, as the release job does.
 #   windows-git-bash  the bats files that exercise Windows behaviour, run under
 #                     Git Bash: 55-version (the Bash acq) and 06-windows-install.
+#                     It checks out with the runner's default core.autocrlf=true,
+#                     like a plain Git for Windows clone.
 #
 # The kit-fetch lifecycle files (103, 106) are not in the Git Bash subset. Both
 # drive the guardian from Python with POSIX-only facilities (pty, process
@@ -117,11 +119,11 @@ jobs:
       run:
         shell: pwsh
     steps:
-      # The release archive is assembled on Linux, so it ships LF line endings.
-      # Check out the same bytes. The runner's Git defaults to core.autocrlf=true,
-      # which would give the Bash sources CRLF endings (.gitattributes pins only
-      # *.cmd, *.ps1 and scripts/stage-windows-runtime to LF), and Git Bash fails
-      # on the CRs.
+      # The release archive is assembled on Linux, so every file in it has LF
+      # endings. Check out the same bytes, so pytest and the smoke tests see
+      # exactly what users install. (.gitattributes pins the shell scripts to LF
+      # in any case; the windows-git-bash job checks a default autocrlf=true
+      # checkout.)
       - name: Check out with LF line endings
         run: git config --global core.autocrlf false
 
@@ -290,16 +292,26 @@ jobs:
       run:
         shell: bash
     steps:
-      # LF checkout, for the reason given in the windows job.
-      - name: Check out with LF line endings
-        run: git config --global core.autocrlf false
-
+      # This job keeps the runner's default core.autocrlf=true, as a plain Git
+      # for Windows clone does, and relies on the .gitattributes LF pins to keep
+      # the shell scripts runnable. The check below fails if one comes out CRLF.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           # bats-core, bats-support and bats-assert are vendored submodules,
           # pinned by SHA (ADR-0025).
           submodules: true
+
+      - name: Check the shell scripts were checked out with LF endings
+        run: |
+          set -euo pipefail
+          echo "core.autocrlf=$(git config --get core.autocrlf || echo unset)"
+          crlf=$(git ls-files --eol | awk '$2 == "w/crlf" && (/attr\/text eol=lf/ || $NF ~ /\.(sh|bash|bats)$/ || $NF == "acq" || $NF == "acq-python") {print $NF}')
+          if [ -n "$crlf" ]; then
+            echo "::error::shell scripts checked out with CRLF endings:"
+            printf '  %s\n' "$crlf"
+            exit 1
+          fi
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
