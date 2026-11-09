@@ -306,12 +306,16 @@
       "vectors": ["cli/kit-source-rm-sbx-autodetect"]
     },
     {
+      "contract": "ADR-0040m sbx kit_source_revoked drops an owner prefix only when no remaining trusted source (control plane, registry, ACQ_EXTRA_KIT_SOURCES) needs it, and re-reads kit.allowedSources to confirm",
+      "vectors": ["cli/kit-source-rm-sbx-shared-owner", "cli/kit-source-rm-sbx-gsa-tts"]
+    },
+    {
       "contract": "ADR-0040m unknown-backend validation for kit-source rm: --backend bogus is rejected with a usage error (matching the other mutating verbs)",
       "vectors": ["cli/kit-source-rm-unknown-backend"]
     },
     {
       "contract": "ADR-0038m §46 kit-source add/rm both refuse the control-plane trust anchor (symmetry)",
-      "vectors": ["cli/kit-source-add-control-plane"]
+      "vectors": ["cli/kit-source-add-control-plane", "cli/kit-source-add-control-plane-case"]
     },
     {
       "contract": "ADR-0038m §2 kit list required data: control-plane ref and effective built-in/provider/extra sets",
