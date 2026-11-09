@@ -289,11 +289,14 @@ fi
 # clear the inherited git environment with _kit_git_isolate*, which live in
 # kit-translate.sh. When common.sh is sourced without ACQ_SCRIPT_DIR, load it
 # from beside this file; if it is still missing, those reads fail closed
-# (_acq_git_host).
-if ! declare -F _kit_git_isolate >/dev/null 2>&1 &&
-  [ -f "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/kit-translate.sh" ]; then
-  # shellcheck source=acq.backends/kit-translate.sh
-  . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/kit-translate.sh"
+# (_acq_git_host). CDPATH is cleared so `cd` cannot land elsewhere or print.
+if ! declare -F _kit_git_isolate >/dev/null 2>&1; then
+  _acq_common_dir=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P) || _acq_common_dir=""
+  if [ -n "$_acq_common_dir" ] && [ -f "$_acq_common_dir/kit-translate.sh" ]; then
+    # shellcheck source=acq.backends/kit-translate.sh
+    . "$_acq_common_dir/kit-translate.sh"
+  fi
+  unset _acq_common_dir
 fi
 
 # Source the acq-owned, backend-neutral secret store (keychain-backed; both the
@@ -6133,11 +6136,14 @@ detect_workspace_repos() {
     done < <(find "$path" -maxdepth 1 -mindepth 1 -type d ! -type l 2>/dev/null)
   fi
 
+  # Remotes are read with the command-scope config dropped too (isolate, as
+  # Python's gitrepos does): GIT_CONFIG_PARAMETERS or GIT_CONFIG_COUNT/KEY/VALUE
+  # could otherwise inject a remote, and the scope decision follows the remote.
   local url nwo seen="" out=""
   for d in ${dirs[@]+"${dirs[@]}"}; do
-    url=$(_acq_git_host keep -C "$d" config --get remote.origin.url 2>/dev/null || true)
+    url=$(_acq_git_host isolate -C "$d" config --get remote.origin.url 2>/dev/null || true)
     if [ -z "$url" ]; then
-      url=$(_acq_git_host keep -C "$d" config --get-regexp '^remote\..*\.url$' 2>/dev/null \
+      url=$(_acq_git_host isolate -C "$d" config --get-regexp '^remote\..*\.url$' 2>/dev/null \
         | head -n1 | cut -d' ' -f2- || true)
     fi
     [ -n "$url" ] || continue
