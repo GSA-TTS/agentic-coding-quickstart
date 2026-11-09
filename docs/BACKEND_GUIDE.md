@@ -1098,7 +1098,10 @@ under `integrations/isolation/acq-kits/`) and translated per backend by
 - **sbx** — the neutral spec is synthesized into an sbx-v2 kit directory
   (`spec.yaml` + `files/`), then applied via `sbx --kit` / `sbx kit add`. The
   synthesizer maps neutral fields onto the strict sbx-v2 grammar
-  (`permissions.network`, `setup`, `ports`, and `agentInstructions`).
+  (`permissions.network`, `setup`, `ports`, and `agentInstructions`). acq
+  fetches every kit itself first, with its ref and payload checks. If the
+  fetch or a check fails, that kit is not applied (create stops), and sbx is
+  never handed the raw ref to fetch on its own.
 - **msb** — the neutral spec is fetched and driven directly: network allows
   become `--net-rule` flags, files are `msb copy`'d in, and `commands` run via
   `msb exec`. A `backend_shortcuts.msb` (e.g. zscaler `trust_host_cas`) uses the

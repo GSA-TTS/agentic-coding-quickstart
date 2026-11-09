@@ -1462,6 +1462,15 @@ proceeds without prompting), then retries once with your system git config
 It can no longer hang on a
 prompt; a genuine failure now prints this remedy.
 
+On sbx, a failed kit fetch stops the operation: acq prints
+`acq(sbx): error: could not fetch kit; not applying: …`, `acq run`/`acq create`
+does not create the sandbox, and `acq kit apply` or the re-attach heal skips
+that kit. Older acq versions passed the raw ref to sbx so that sbx could try its
+own fetch. That skipped acq's checks (no credentials in the URL, a safe `dir=`,
+the fetched commit matching the pin, and the payload checks), and sbx could not
+parse acq's neutral built-in kits anyway. Fix the fetch (above) and run the
+command again; on msb a failed fetch has always stopped the same way.
+
 ### Related
 
 - Issue #207 (non-interactive fetch), #208 (docs + loud fallback).

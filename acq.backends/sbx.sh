@@ -377,11 +377,25 @@ _acq_sbx_warn_readonly_files() {
 # ---------------------------------------------------------------------------
 # Neutral-kit → sbx-v2 translation
 # ---------------------------------------------------------------------------
+# _acq_sbx_kit_ref_display REF: echo REF safe for a terminal or CI log. A URL
+# whose part before the fragment carries userinfo (user:token@host) has
+# everything up to the last '@' replaced with ***. kit-translate.sh refuses
+# such URLs, but the messages that name the refused ref must not repeat the
+# credential. Over-redacts when a path also contains '@', which is harmless.
+_acq_sbx_kit_ref_display() {
+  local ref="${1:-}" pre
+  pre="${ref%%#*}"
+  case "$pre" in
+    *://*@*) printf '%s://***@%s%s\n' "${pre%%://*}" "${pre##*@}" "${ref#"$pre"}" ;;
+    *) printf '%s\n' "$ref" ;;
+  esac
+}
+
 # Given a neutral kit ref (remote git+https or local dir), fetch it and
-# synthesize a local sbx-v2 kit directory. Echoes the local sbx-v2 kit dir.
-# Falls back to passing the ref through unchanged if translation is unavailable
-# (e.g. an extra kit that is already an sbx-v2 kit), so existing extra-kit
-# workflows keep working.
+# synthesize a local sbx-v2 kit directory. Echoes the local sbx-v2 kit dir. A
+# fetched kit that is already sbx-v2 (an extra kit authored for sbx) is used
+# as-is after the same payload check. Any failure returns non-zero with no
+# output, so callers never hand sbx a raw ref (see the fetch branch below).
 _acq_sbx_translate_kit() {
   local kitref="$1" slug fetchdir kitdir out
   # Offline/test escape hatch: pass the ref through unchanged. Used by the
@@ -392,10 +406,11 @@ _acq_sbx_translate_kit() {
     printf '%s\n' "$kitref"
     return 0
   fi
-  # If kit-translate isn't loaded (shouldn't happen), pass through unchanged.
+  # kit-translate.sh is sourced by common.sh, so this only fails in a broken
+  # install. Fail closed rather than let sbx fetch the kit unchecked.
   if ! command -v kit_translate_fetch >/dev/null 2>&1; then
-    printf '%s\n' "$kitref"
-    return 0
+    echo "acq(sbx): error: the kit translator is not loaded; not applying: $(_acq_sbx_kit_ref_display "$kitref")" >&2
+    return 1
   fi
 
   acq_require_base "sbx kit cache" "$ACQ_SBX_KIT_CACHE" || return 1
@@ -404,25 +419,17 @@ _acq_sbx_translate_kit() {
   out="${ACQ_SBX_KIT_CACHE}/v2/${slug}"
 
   kitdir=$(kit_translate_fetch "$kitref" "$fetchdir") || {
-    # #208: make this loud + actionable rather than a terse warning. For a
-    # git+https ref, a failure here (after kit-translate's non-interactive
-    # anonymous+authed retries) is a real fetch problem, not a prompt hang.
-    # Passing the ref through lets sbx try its own fetch (and keeps pre-resolved
-    # extra-kit workflows working), but the user needs to know WHY it failed.
-    case "$kitref" in
-      git+http*)
-        echo "acq(sbx): WARNING: could not fetch kit: $kitref" >&2
-        echo "acq(sbx):   If git prompted for a GitHub username/password, run 'gh auth" >&2
-        echo "acq(sbx):   setup-git' once (gh auth != git auth), or check for a rewrite:" >&2
-        echo "acq(sbx):   git config --global --get-regexp 'url\\..*insteadOf'." >&2
-        echo "acq(sbx):   Passing the ref through to sbx to attempt its own fetch." >&2
-        ;;
-      *)
-        echo "acq(sbx): warning: could not fetch kit; passing ref through: $kitref" >&2
-        ;;
-    esac
-    printf '%s\n' "$kitref"
-    return 0
+    # Fail closed on every fetch failure. Handing the raw ref to sbx would let
+    # sbx fetch and apply the kit itself, skipping acq's ref checks (no
+    # credentials in the URL, a safe dir=, the fetched commit matching the pin)
+    # and its payload checks. A plain network failure is not passed through
+    # either: acq's built-in kits are neutral hybrid/v1 kits that sbx cannot
+    # parse, so its own fetch could not apply them, and the msb adapter already
+    # stops on any fetch failure. kit-translate.sh has printed the reason (and,
+    # for a git failure, the credential-helper remedy). The offline harness
+    # uses ACQ_SBX_KIT_PASSTHROUGH above instead.
+    echo "acq(sbx): error: could not fetch kit; not applying: $(_acq_sbx_kit_ref_display "$kitref")" >&2
+    return 1
   }
 
   # Only translate kits that are neutral hybrid/v1. If the fetched kit is
@@ -1546,7 +1553,7 @@ acq_backend_ensure_kits_applied() {
     if grep -Fxq -- "$k" <<<"$applied"; then
       continue
     fi
-    echo "acq: applying extra kit to '$name': $k" >&2
+    echo "acq: applying extra kit to '$name': $(_acq_sbx_kit_ref_display "$k")" >&2
     _kadd_rc=0
     if local_extra=$(_acq_sbx_translate_kit "$k"); then
       _acq_sbx_kit_add "$name" "$local_extra" || _kadd_rc=$?
