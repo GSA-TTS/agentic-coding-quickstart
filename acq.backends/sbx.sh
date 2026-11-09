@@ -1271,6 +1271,12 @@ acq_backend_ports() {
 # Usage: _acq_sbx_kit_add SANDBOX LOCAL_KIT_DIR
 _acq_sbx_kit_add() {
   local name="$1" local_kit="$2" err rc
+  # An empty kit means translation refused it (the reason is printed above);
+  # never hand sbx an empty path. Callers treat 1 as an ordinary failure.
+  if [ -z "$local_kit" ]; then
+    echo "acq(sbx): error: no usable kit to add to '$name' (it was refused above)." >&2
+    return 1
+  fi
   # CRITICAL: acq runs under `set -e`. A refusal (the common case this whole
   # helper exists to classify) makes `sbx kit add` exit non-zero, which would
   # abort the entire heal at THIS assignment — before rc/classification run —
