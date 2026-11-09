@@ -60,7 +60,7 @@ def _build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--artifact-sha256", default=_DEFAULT_ARTIFACT)
     run_p.add_argument("--transcript-dir", default=None)
     run_p.add_argument("--attempts", type=_positive_int, default=3)
-    run_p.add_argument("--timeout", type=float, default=120.0)
+    run_p.add_argument("--timeout", type=_ascii_float, default=120.0)
     run_p.add_argument("command", nargs=argparse.REMAINDER)
 
     matrix_p = sub.add_parser("matrix", help="print the qualification matrix from the ledger")
@@ -69,9 +69,20 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _ascii_float(text: str) -> float:
+    # float() also accepts other scripts' digits ("\u0661\u0662"); refuse them.
+    if not text.isascii():
+        raise argparse.ArgumentTypeError(f"must be a number written in ASCII digits, got {text!r}")
+    try:
+        return float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"must be a number, got {text!r}") from None
+
+
 def _positive_int(text: str) -> int:
     try:
-        value = int(text)
+        # int() also accepts other scripts' digits; only ASCII ones count.
+        value = int(text) if text.isascii() else 0
     except ValueError:
         value = 0
     if value < 1:

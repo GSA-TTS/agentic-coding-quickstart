@@ -29,7 +29,9 @@ def env_seconds(name: str, default: float) -> float:
     if raw is None or raw.strip() == "":
         return default
     try:
-        value = float(raw)
+        # float() also accepts other scripts' digits ("\u0661\u0662"); only an
+        # ASCII spelling is a valid override.
+        value = float(raw) if raw.isascii() else math.nan
     except ValueError:
         value = math.nan
     if math.isfinite(value) and value >= 0:

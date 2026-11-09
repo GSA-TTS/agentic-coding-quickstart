@@ -8,6 +8,7 @@
   "invoke": {
     "argv": ["{acq}", "backend", "list", "--json"],
     "env": {
+      "ACQ_SBX_BIN": "__stub__",
       "ACQ_SBX_VERSION": "garbage",
       "ACQ_MSB_INSTALLED": "0"
     },
