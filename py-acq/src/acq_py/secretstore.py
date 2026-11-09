@@ -64,7 +64,14 @@ DPAPI_HEADER = "acq-dpapi-v1"
 # enforces. Applied with fullmatch (``$`` would accept a trailing newline).
 NAME_RE = re.compile(r"[A-Za-z0-9_-]+")
 _META_ENV_RE = re.compile(r"[A-Za-z0-9_]+")
-_META_HOST_RE = re.compile(r"[A-Za-z0-9.,*_-]+")
+# One endpoint host: two or more DNS labels, optionally led by one ``*.``
+# wildcard label. The two-label floor refuses a bare TLD (``com``) and, after a
+# wildcard, a TLD-wide one (``*.com``); a label needs a letter or digit, so ``_``,
+# ``*``, ``**``, ``.`` and ``a..b`` are refused too. Same shape as msb's egress
+# target grammar. The suffix check is label-count only: it does not consult the
+# public-suffix list, so ``*.co.uk`` still passes.
+_HOST_LABEL = r"(?=[A-Za-z0-9_-]*[A-Za-z0-9])[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?"
+_HOST_RE = re.compile(rf"(?:\*\.)?{_HOST_LABEL}(?:\.{_HOST_LABEL})+")
 _FILE_UNSAFE_RE = re.compile(r"[^A-Za-z0-9._-]")
 
 # Seams: the platform checks, so the macOS and Windows paths run on any host.
@@ -747,14 +754,27 @@ def exists(service: str, sandbox: str | None = None) -> bool:
 # Endpoint metadata sidecar (non-secret HOST<TAB>ENV).
 # ---------------------------------------------------------------------------
 
+def host_list_ok(host: str) -> bool:
+    """True when ``host`` is one or more comma-separated endpoint hosts.
+
+    Shared by every ``--host`` path (``secret set`` on both backends and the
+    endpoint sidecar), so a malformed or over-broad host is refused before
+    anything is stored.
+    """
+    return 0 < len(host) <= 1024 and all(
+        len(part) <= 253 and _HOST_RE.fullmatch(part) is not None for part in host.split(",")
+    )
+
+
 def _check_binding(service: str, host: str, env: str) -> None:
     # Charset-restricted so neither can smuggle a flag into a later
     # `--secret ENV@HOST` argv.
-    if _META_ENV_RE.fullmatch(env) is None or _META_HOST_RE.fullmatch(host) is None:
+    if _META_ENV_RE.fullmatch(env) is None or not host_list_ok(host):
         raise SecretStoreError(
             errors.VALIDATION_FAILED,
             f"refusing an unsafe host or env name for '{service}'",
-            "hosts are DNS names (comma-separated); env names match [A-Za-z0-9_]+",
+            "hosts are DNS names of two or more labels (comma-separated, an optional "
+            "leading '*.'); env names match [A-Za-z0-9_]+",
         )
 
 
@@ -856,7 +876,9 @@ def list_entries() -> list[dict]:
     """``{scope, service, value_state}`` per stored key, never a value.
 
     ``scope`` is ``global``, the sandbox name, or ``?`` for an ambiguous legacy
-    key; ``value_state`` is ``set`` or ``unreadable``.
+    key, and ``scope_kind`` (``global``, ``sandbox`` or ``unknown``) keeps a
+    sandbox named ``global`` apart from the global scope; ``value_state`` is
+    ``set`` or ``unreadable``.
     """
     out = []
     for key in list_keys():
@@ -866,7 +888,10 @@ def list_entries() -> list[dict]:
         scope, service = decoded
         sandbox = None if scope in ("-g", "?") else scope
         state = "unreadable" if scope != "?" and unreadable(service, sandbox) else "set"
-        out.append({"scope": "global" if scope == "-g" else scope, "service": service, "value_state": state})
+        kind = {"-g": "global", "?": "unknown"}.get(scope, "sandbox")
+        out.append({
+            "scope": "global" if scope == "-g" else scope, "scope_kind": kind, "service": service, "value_state": state,
+        })
     return out
 
 

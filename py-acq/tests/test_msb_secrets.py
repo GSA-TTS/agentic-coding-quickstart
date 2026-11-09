@@ -622,11 +622,13 @@ def test_ls_reports_bindings_and_filters_by_scope_kind(monkeypatch, tmp_path, ca
     rc, doc, out, _err = _invoke(capsys, "--backend", "msb", "secret", "ls", "--json")
     assert rc == 0 and VALUE not in out and SCOPED not in out
     assert doc["data"]["secrets"] == [
-        {"scope": "?", "service": "a.b.c", "value_state": "set", "binding": None},
-        {"scope": "global", "service": "github", "value_state": "set",
+        {"scope": "?", "scope_kind": "unknown", "service": "a.b.c", "value_state": "set", "binding": None},
+        # The sandbox named `global`: scope reads "global", scope_kind says sandbox.
+        {"scope": "global", "scope_kind": "sandbox", "service": "github", "value_state": "set",
          "binding": "GITHUB_TOKEN@github.com,api.github.com,codeload.github.com"},
-        {"scope": "global", "service": "orphan", "value_state": "set", "binding": None},
-        {"scope": "global", "service": "usai", "value_state": "set", "binding": "USAI_API_KEY@api.gsa.usai.gov"},
+        {"scope": "global", "scope_kind": "global", "service": "orphan", "value_state": "set", "binding": None},
+        {"scope": "global", "scope_kind": "global", "service": "usai", "value_state": "set",
+         "binding": "USAI_API_KEY@api.gsa.usai.gov"},
     ]
     assert [e["service"] for e in msb.secret_ls(secretstore.GLOBAL)] == ["orphan", "usai"]
     assert [e["service"] for e in msb.secret_ls(secretstore.sandbox_scope("global"))] == ["github"]
@@ -807,7 +809,13 @@ def test_binding_host_checks(monkeypatch, tmp_path, capsys):
     assert not msb._binding_ok("API_KEY", "api..example.gov")
     assert not msb._binding_ok("API_KEY", "api.example.gov,")
     assert msb._binding_ok("API_KEY", "api.example.gov:8443,alt.example.gov")
-    secretstore.meta_store("svc", None, "api..example.gov", "API_KEY")
+    # acq refuses to write such a sidecar, but Bash's looser check can: plant one
+    # directly, and msb must still ignore it.
+    with pytest.raises(secretstore.SecretStoreError):
+        secretstore.meta_store("svc", None, "api..example.gov", "API_KEY")
+    meta = secretstore._file_for(secretstore._layout().meta_dir, secretstore.key_for("svc"))
+    meta.parent.mkdir(parents=True, exist_ok=True)
+    meta.write_text("api..example.gov\tAPI_KEY\n", encoding="utf-8")
     assert msb.service_binding("svc") is None
     _set(capsys, monkeypatch, "-g", "svc2", "--host", "API.Example.GOV", "--env", "API_KEY2")
     assert msb.service_binding("svc2") == ("API_KEY2", "api.example.gov")
