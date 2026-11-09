@@ -244,14 +244,29 @@ def _run(
     # read ENV from its own environment). They go only into the child's
     # environment mapping, which ``ps`` and /proc/PID/cmdline do not show; argv
     # names the variable, never the value.
+    #
+    # msb reads and writes UTF-8 whatever the host's code page, so its streams
+    # are UTF-8 here too: with the locale encoding, a Windows ANSI code page
+    # would fail on, or garble, a name such as "Łukasz", and a call that
+    # succeeded would be reported as failed. Output bytes that are not UTF-8
+    # become U+FFFD. Input is checked strictly first (see
+    # hostexec.utf8_input_ok), because replacing a character would silently
+    # send a different value.
     env = {**os.environ, **secret_env} if secret_env else None
+    if not hostexec.utf8_input_ok(input_text):
+        raise MsbError(
+            errors.VALIDATION_FAILED,
+            "the input for msb cannot be encoded as UTF-8",
+            "check the value for stray bytes and retry",
+        )
     try:
         if input_text is None:
             return subprocess.run(
                 [*msb_command(), *argv],
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
-                text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
                 env=env,
             )
@@ -259,7 +274,8 @@ def _run(
             [*msb_command(), *argv],
             input=input_text,
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             env=env,
         )
@@ -268,15 +284,6 @@ def _run(
         # uncaught traceback (ADR-0040m stable error vocabulary): fail closed with
         # a code the seam can map, not a raw OSError.
         raise cli_unavailable() from exc
-    except UnicodeDecodeError as exc:
-        # Output is decoded as text, and bytes that do not decode (a corrupt
-        # listing, or UTF-8 read through a Windows ANSI code page) would
-        # otherwise escape as a traceback, even under --json.
-        raise MsbError(
-            errors.FAILURE,
-            "the msb backend CLI printed output that is not text",
-            "check msb logs and retry",
-        ) from exc
 
 
 def cli_unavailable() -> MsbError:
@@ -744,9 +751,10 @@ def agent_shell(name: str) -> str:
     """
     try:
         proc = _run(["exec", "-u", "root", name, "--", "sh", "-c", _AGENT_SHELL_SCRIPT], timeout=10)
-    except (MsbError, subprocess.TimeoutExpired, ValueError):
-        # ValueError covers UnicodeDecodeError: guest output that is not text.
+    except (MsbError, subprocess.TimeoutExpired):
         return DEFAULT_SHELL
+    # Guest output that is not UTF-8 arrives with U+FFFD in it, which the
+    # word-safe check below refuses.
     lines = (proc.stdout or "").splitlines() if proc.returncode == 0 else []
     shell = lines[0].strip() if lines else ""
     return shell if _SAFE_SHELL.fullmatch(shell) else DEFAULT_SHELL

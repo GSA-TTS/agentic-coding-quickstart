@@ -432,6 +432,27 @@ def test_msb_session_writes_the_host_git_config_into_the_guest(fake, monkeypatch
     assert "Ada" not in command[2]  # values travel as variables, never in the script
 
 
+@pytest.mark.skipif(hostexec.which("git") is None, reason="needs git on the host")
+@pytest.mark.parametrize("name", ["Łukasz Nowak", "José García"])
+def test_host_git_config_is_read_as_utf8_on_an_ansi_code_page(fake, monkeypatch, name):
+    # git prints its config as UTF-8. Read through cp1252, "Łukasz" (C5 81)
+    # fails to decode, a traceback in every msb session, and "José" turns
+    # into "JosÃ©".
+    import locale
+
+    from acq_py import kit_sbx
+    from acq_py.commands import session
+
+    home = Path(os.environ["HOME"])
+    (home / ".gitconfig").write_text(f"[user]\n\tname = {name}\n\temail = l@example.gov\n", encoding="utf-8")
+    monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
+    monkeypatch.delenv("EMAIL", raising=False)
+    monkeypatch.setattr(locale, "getencoding", lambda: "cp1252")
+    monkeypatch.setattr(locale, "getpreferredencoding", lambda do_setlocale=True: "cp1252")
+    assert session._host_git_config("user.name") == name
+    assert kit_sbx.git_global_config_env()[0] == f"ACQ_GIT_USER_NAME={name}"
+
+
 def test_guest_git_config_is_best_effort(monkeypatch):
     calls = []
 

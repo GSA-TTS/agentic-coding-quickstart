@@ -219,6 +219,24 @@ def terminal_env() -> list[str]:
     return entries
 
 
+def utf8_input_ok(text: str | None) -> bool:
+    """True when ``text`` (input for a backend CLI) encodes as UTF-8, or is None.
+
+    The backends' streams are opened as UTF-8 with ``errors="replace"``, so
+    output that is not UTF-8 cannot fail a call. The same setting would quietly
+    turn an unencodable input character (a lone surrogate, which is how Python
+    carries undecodable bytes from the environment) into ``?``, sending the
+    backend a different value. The caller refuses such input instead.
+    """
+    if text is None:
+        return True
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def exit_status(returncode: int) -> int:
     """Map a child's return code to a shell-style exit status.
 

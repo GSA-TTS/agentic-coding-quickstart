@@ -43,6 +43,12 @@ def _host_git_config(key: str) -> str | None:
     The inherited repository redirects are cleared first: an inherited
     ``GIT_CONFIG`` makes ``git config --global`` fail outright ("only one config
     file at a time"), which would hide the user's global value.
+
+    git stores its config as UTF-8 and prints the value unchanged, so it is
+    decoded as UTF-8, never with the locale's code page: on a Windows ANSI code
+    page a name such as "Łukasz" would otherwise fail to decode (a traceback in
+    every session) or turn into mojibake. Bytes that are not UTF-8 become
+    U+FFFD rather than an error.
     """
     git = hostexec.which("git")
     if git is None:
@@ -53,7 +59,8 @@ def _host_git_config(key: str) -> str | None:
             env=gitrepos.git_env(keep_command_scope=True),
             stdin=subprocess.DEVNULL,
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
         )
     except (OSError, subprocess.TimeoutExpired):

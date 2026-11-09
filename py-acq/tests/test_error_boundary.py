@@ -281,22 +281,56 @@ def test_passthrough_with_an_unparseable_bin_override_gives_envelope(monkeypatch
     assert "Traceback" not in err
 
 
+def _ansi_code_page(monkeypatch):
+    """Make text-mode subprocess streams default to cp1252, as on a Windows host."""
+    import locale
+
+    monkeypatch.setattr(locale, "getencoding", lambda: "cp1252")
+    monkeypatch.setattr(locale, "getpreferredencoding", lambda do_setlocale=True: "cp1252")
+
+
+def _printing_backend(tmp_path, octal: str):
+    binary = tmp_path / "backend"
+    binary.write_text(f"#!/bin/sh\nprintf '{octal}'\n", encoding="utf-8")
+    binary.chmod(0o755)
+    return binary
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell script as the backend")
+@pytest.mark.parametrize("adapter,env_name", [(msb, "ACQ_MSB_BIN"), (sbx, "ACQ_SBX_BIN")])
+def test_backend_output_is_read_as_utf8_whatever_the_code_page(monkeypatch, tmp_path, adapter, env_name):
+    # "Łukasz" is C5 81 ...: 0x81 has no cp1252 mapping, so reading it with the
+    # locale encoding would fail a call that succeeded. A byte that is not UTF-8
+    # at all becomes U+FFFD instead of an error.
+    _ansi_code_page(monkeypatch)
+    monkeypatch.setenv(env_name, str(_printing_backend(tmp_path, "\\305\\201ukasz\\n\\377\\n")))
+    proc = adapter._run(["ls"])
+    assert proc.returncode == 0
+    assert proc.stdout == "Łukasz\n�\n"
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell script as the backend")
 @pytest.mark.parametrize("backend", ["msb", "sbx"])
-def test_backend_output_that_is_not_text_gives_envelope(monkeypatch, tmp_path, capsys, backend):
-    # A listing that does not decode (corrupt output, or UTF-8 read through a
-    # Windows ANSI code page) is a backend failure, not a traceback.
-    binary = tmp_path / "backend"
-    binary.write_text("#!/bin/sh\nprintf '\\377\\376box\\n'\n", encoding="utf-8")
-    binary.chmod(0o755)
+def test_backend_output_that_is_not_utf8_never_gives_a_traceback(monkeypatch, tmp_path, capsys, backend):
     monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
-    monkeypatch.setenv(f"ACQ_{backend.upper()}_BIN", str(binary))
+    monkeypatch.setenv(f"ACQ_{backend.upper()}_BIN", str(_printing_backend(tmp_path, "\\377\\376box\\n")))
     _skip_floor(monkeypatch)
-    rc, doc, err = _invoke(capsys, "--backend", backend, "--json", "ls")
-    assert rc == errors.EXIT_FAILURE
-    assert doc["command"] == "ls"
-    assert doc["error"]["code"] == errors.FAILURE
+    _rc, doc, err = _invoke(capsys, "--backend", backend, "--json", "ls")
+    assert doc is not None and doc["command"] == "ls"
     assert "Traceback" not in err
+
+
+@pytest.mark.parametrize("adapter,error", [(msb, msb.MsbError), (sbx, sbx.SbxError)])
+def test_input_that_is_not_utf8_is_refused_before_the_backend_runs(monkeypatch, adapter, error):
+    # A lone surrogate is how Python carries undecodable environment bytes.
+    # Replacing it would send the backend a different secret, so it is refused.
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: calls.append(a))
+    with pytest.raises(error) as exc:
+        adapter._run(["secret", "set"], input_text="tok\udcffen")
+    assert exc.value.code == errors.VALIDATION_FAILED
+    assert "tok" not in exc.value.message
+    assert calls == []
 
 
 # ---------------------------------------------------------------------------

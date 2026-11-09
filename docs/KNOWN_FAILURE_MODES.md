@@ -101,7 +101,7 @@ global git config (as Bash's `_acq_msb_apply_host_git_global_config`); see
 `prepare_session` in `py-acq/src/acq_py/commands/session.py`. On sbx the kits
 carry their own environment and the git identity kit sets the config. These
 values are not secrets (a kit's `environment` is non-secret configuration), so
-they go on the `msb exec` command line as `-e NAME=value`, as in Bash. Five parts
+they go on the `msb exec` command line as `-e NAME=value`, as in Bash. Four parts
 of the Bash session differ or are not ported yet (the numbering below keeps its
 earlier order; the kit environment and guest git config items are done):
 
