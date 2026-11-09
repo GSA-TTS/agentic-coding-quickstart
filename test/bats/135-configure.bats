@@ -294,6 +294,50 @@ after-quit:"
   assert_equal "$(wc -l < "$STUBDIR/prior-count" | tr -d ' ')" 1
 }
 
+# A prompt can run in a subshell or `$(...)`, where `$$` is still the PARENT's
+# PID. The re-raise must end the subshell running the widget (status 130), not
+# signal the parent while the widget carries on and returns a selection. Bash
+# itself re-raises SIGINT in a parent whose `$(...)` died of SIGINT, so the
+# parent here traps INT (as acq's own callers do) to stay running.
+@test "prompt: Ctrl-C inside \$(...) ends the subshell with 130, parent keeps running" {
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    set +e  # acq runs under set -e; keep going to report the status
+    trap "echo PARENT_INT" INT
+    # Interrupt the process running the widget (the command substitution).
+    _acq_prompt_read_key() {
+      kill -s INT "$(exec sh -c '"'"'echo "$PPID"'"'"')"; _ACQ_PROMPT_KEY=ENTER
+    }
+    out=$(ACQ_PROMPT_TEST_INPUT="x" acq_prompt_multiselect 0 "" "a" "d" 2>/dev/null
+      echo NOT_REACHED)
+    echo "SUB_RC=$?"
+    printf "OUT=[%s]\n" "$out"
+    echo PARENT_ALIVE
+  '
+  assert_success
+  assert_line 'SUB_RC=130'
+  assert_line 'PARENT_ALIVE'
+  refute_output --partial 'NOT_REACHED'
+}
+
+@test "prompt: Ctrl-C inside ( ... ) ends only the subshell, with status 130" {
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    set +e  # acq runs under set -e; keep going to report the status
+    _acq_prompt_read_key() {
+      kill -s INT "$(exec sh -c '"'"'echo "$PPID"'"'"')"; _ACQ_PROMPT_KEY=ENTER
+    }
+    ( ACQ_PROMPT_TEST_INPUT="x" acq_prompt_multiselect 0 "" "a" "d" >/dev/null 2>&1
+      echo NOT_REACHED )
+    echo "SUB_RC=$?"
+    echo PARENT_ALIVE
+  '
+  assert_success
+  assert_line 'SUB_RC=130'
+  assert_line 'PARENT_ALIVE'
+  refute_output --partial 'NOT_REACHED'
+}
+
 @test "prompt: Ctrl-C runs the prior INT handler with default word splitting" {
   run bash -c '
     ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1

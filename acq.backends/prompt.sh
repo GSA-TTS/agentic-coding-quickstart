@@ -216,8 +216,9 @@ _acq_prompt_trap_cmd() {
 # _acq_prompt_on_int — the multiselect's INT trap. Restore the cursor, reset INT
 # to its default FIRST (so a prior handler that re-raises INT ends the process
 # instead of re-entering this trap), run the caller's prior INT handler once (if
-# any; its failure must not stop us), then re-raise INT so the process ends with
-# the conventional signal status. The prior handler runs here, inside the
+# any; its failure must not stop us), then re-raise INT at the current process
+# so it ends with the conventional signal status (exit 130 if the re-raise does
+# not end it, e.g. INT ignored). The prior handler runs here, inside the
 # widget's dynamic scope (it can see acq_prompt_multiselect's locals, including
 # _prior_int_cmd, which is how this function finds it), so give it the default
 # word splitting it was written against.
@@ -226,7 +227,21 @@ _acq_prompt_on_int() {
   trap - INT
   local IFS=$' \t\n'
   [ -z "${_prior_int_cmd:-}" ] || eval "$_prior_int_cmd" || true
-  kill -s INT $$
+  _acq_prompt_signal_self INT
+  exit 130
+}
+
+# _acq_prompt_signal_self SIG — send SIG to the CURRENT shell process. The
+# widget often runs inside `$(...)`, where `$$` is still the parent's PID, so a
+# `kill -s INT $$` re-raise would end the parent instead. Use BASHPID, or on
+# bash 3.2 (no BASHPID) the PPID of an `exec`ed child, which is the current
+# shell because `exec` skips the extra fork. Call it directly, never inside
+# `$(...)`. Keep in sync with _acq_signal_self in progress.sh (each file can be
+# sourced without the other).
+_acq_prompt_signal_self() {
+  local _acq_self_pid="${BASHPID:-}"
+  [ -n "$_acq_self_pid" ] || _acq_self_pid=$(exec sh -c 'echo "$PPID"')
+  kill -s "$1" "$_acq_self_pid" 2>/dev/null || true
 }
 
 # _acq_prompt_restore_trap SAVED SIG — re-install the trap captured as SAVED (a

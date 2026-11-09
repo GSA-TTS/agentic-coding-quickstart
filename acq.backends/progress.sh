@@ -142,6 +142,20 @@ _acq_run_prior_trap() {
   { _acq_return_status "${2:-0}"; eval "$1"; } || true
 }
 
+# _acq_signal_self SIG — send SIG to the CURRENT shell process. Inside a
+# subshell or `$(...)`, `$$` is still the parent's PID, so a `kill -s SIG $$`
+# re-raise would hit the parent. Use BASHPID, or on bash 3.2 (no BASHPID) the
+# PPID of an `exec`ed child, which is the current shell because `exec` skips
+# the extra fork. Call it directly, never inside `$(...)`, or it would name the
+# command substitution's process instead.
+# Keep in sync with _acq_prompt_signal_self in prompt.sh (each file can be
+# sourced without the other).
+_acq_signal_self() {
+  local _acq_self_pid="${BASHPID:-}"
+  [ -n "$_acq_self_pid" ] || _acq_self_pid=$(exec sh -c 'echo "$PPID"')
+  kill -s "$1" "$_acq_self_pid" 2>/dev/null || true
+}
+
 # _acq_progress_enabled — 0 (true) when animated progress may run, 1 otherwise.
 # Animate only when ALL hold:
 #   - stderr is an interactive TTY            ([ -t 2 ])
@@ -319,13 +333,11 @@ _acq_spin_cleanup_exit() {
 #      EXIT trap, still ours, chains the prior EXIT handler with that status, so
 #      the shell exits 130/143 and the EXIT cleanup runs exactly once.
 #   3. If it returned, or there was none, run the EXIT cleanup with the signal
-#      status, drop the EXIT trap, and re-raise SIG at THIS process so the parent
-#      sees a death by signal. Inside a subshell `$$` is the parent's PID, so use
-#      BASHPID, or on bash 3.2 (no BASHPID) the PPID of an `exec`ed child, which
-#      is the current shell because `exec` skips the extra fork. Should the
+#      status, drop the EXIT trap, and re-raise SIG at THIS process (see
+#      _acq_signal_self) so the parent sees a death by signal. Should the
 #      re-raise not end the process (SIG ignored), exit with the status instead.
 _acq_spin_cleanup_signal() {
-  local _acq_spin_sig="$1" _acq_spin_status=1 _acq_spin_prior="" _acq_spin_self
+  local _acq_spin_sig="$1" _acq_spin_status=1 _acq_spin_prior=""
   case "$_acq_spin_sig" in
     INT)  _acq_spin_status=130
           _acq_spin_prior="$_ACQ_SPIN_PRIOR_INT_TRAP";  _ACQ_SPIN_PRIOR_INT_TRAP="" ;;
@@ -337,8 +349,6 @@ _acq_spin_cleanup_signal() {
   _acq_run_prior_trap "$_acq_spin_prior" "$_acq_spin_status"
   _acq_spin_cleanup_exit "$_acq_spin_status"
   trap - EXIT
-  _acq_spin_self="${BASHPID:-}"
-  [ -n "$_acq_spin_self" ] || _acq_spin_self=$(exec sh -c 'echo "$PPID"')
-  kill -s "$_acq_spin_sig" "$_acq_spin_self" 2>/dev/null || true
+  _acq_signal_self "$_acq_spin_sig"
   exit "$_acq_spin_status"
 }
