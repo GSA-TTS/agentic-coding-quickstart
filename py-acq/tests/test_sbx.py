@@ -24,7 +24,7 @@ import pytest
 from acq_py import cli, errors, kits, sbx, state
 
 
-def _env(monkeypatch, tmp_path, *, catalog=None, secrets=None):
+def _env(monkeypatch, tmp_path, *, catalog=None, secrets=None, custom=None):
     monkeypatch.setenv("ACQ_SBX_BIN", "__stub__")
     monkeypatch.setenv("ACQ_SBX_VERSION", "0.39.0")
     monkeypatch.setenv("ACQ_SBX_INSTALLED", "1")
@@ -36,6 +36,7 @@ def _env(monkeypatch, tmp_path, *, catalog=None, secrets=None):
         "ACQ_MSB_BIN",
         "ACQ_SBX_STUB_CATALOG",
         "ACQ_SBX_STUB_SECRETS",
+        "ACQ_SBX_STUB_CUSTOM_SECRETS",
         "ACQ_SBX_STUB_SECRET_LS_RAW",
         "ACQ_SBX_STUB_RAW_PLACEHOLDERS",
         "ACQ_SBX_STUB_ALLOWED_SOURCES",
@@ -56,6 +57,13 @@ def _env(monkeypatch, tmp_path, *, catalog=None, secrets=None):
         monkeypatch.setenv("ACQ_SBX_STUB_CATALOG", json.dumps(catalog))
     if secrets is not None:
         monkeypatch.setenv("ACQ_SBX_STUB_SECRETS", json.dumps(secrets))
+    if custom is not None:
+        monkeypatch.setenv("ACQ_SBX_STUB_CUSTOM_SECRETS", json.dumps(custom))
+
+
+def _custom(scope, env, placeholder, *targets):
+    """One row of the stub's custom-secrets table (state only, never a value)."""
+    return {"scope": scope, "env": env, "placeholder": placeholder, "targets": list(targets)}
 
 
 def _invoke(capsys, *argv):
@@ -95,10 +103,13 @@ def test_capability_record_declares_sbx_obligations():
 # ---------------------------------------------------------------------------
 
 def test_key_present_reports_presence_without_value(monkeypatch, tmp_path):
-    _env(monkeypatch, tmp_path, secrets={"global": {"usai": "set"}})
-    # Presence is a bool; the value is never read or surfaced.
+    _env(monkeypatch, tmp_path, secrets={"global": {"github": "set"}},
+         custom=[_custom("global", "USAI_API_KEY", "sbx-cs-u1", "api.gsa.usai.gov")])
+    # Presence is a bool; the value is never read or surfaced. A built-in is
+    # matched by name, usai by its custom secret's env var.
+    assert sbx.key_present("global", "github") is True
     assert sbx.key_present("global", "usai") is True
-    assert sbx.key_present("global", "github") is False
+    assert sbx.key_present("global", "openai") is False
 
 
 def test_key_present_backend_cannot_answer_fails_closed(monkeypatch, tmp_path):
@@ -113,7 +124,7 @@ def test_key_present_backend_cannot_answer_fails_closed(monkeypatch, tmp_path):
 def test_secret_has_on_sbx_is_key_present(monkeypatch, tmp_path, capsys):
     # The `secret has` predicate maps to key_present on sbx: exit 0 present / 1
     # absent, stdout silent (never a value).
-    _env(monkeypatch, tmp_path, secrets={"global": {"usai": "set"}})
+    _env(monkeypatch, tmp_path, custom=[_custom("global", "USAI_API_KEY", "sbx-cs-u1", "api.gsa.usai.gov")])
 
     rc = cli.main(["--backend", "sbx", "secret", "has", "-g", "usai"])
     out, err = capsys.readouterr()
@@ -330,7 +341,7 @@ def test_kit_source_revoked_skips_backend_when_prefix_still_needed(monkeypatch, 
 # ---------------------------------------------------------------------------
 
 def test_raw_placeholder_removal_leaves_acq_store_unchanged(monkeypatch, tmp_path, capsys):
-    _env(monkeypatch, tmp_path, secrets={"global": {"usai": "set"}})
+    _env(monkeypatch, tmp_path, secrets={"global": {"github": "set"}})
     monkeypatch.setenv("ACQ_SBX_STUB_RAW_PLACEHOLDERS", json.dumps(["sbx-cs-abc123"]))
 
     rc, doc = _invoke(capsys, "--backend", "sbx", "secret", "rm", "sbx-cs-abc123", "--json")
@@ -338,9 +349,9 @@ def test_raw_placeholder_removal_leaves_acq_store_unchanged(monkeypatch, tmp_pat
     assert doc["data"]["placeholder"] == "sbx-cs-abc123"
     assert doc["data"]["value_state"] == "unset"
 
-    # The managed secret store is unchanged: the acq-managed `usai` secret is still
-    # present (raw removal never rewrites host-held/managed records).
-    assert sbx.key_present("global", "usai") is True
+    # The managed secret store is unchanged: the acq-managed `github` secret is
+    # still present (raw removal never rewrites host-held/managed records).
+    assert sbx.key_present("global", "github") is True
     # No host sandbox-state record was written by the raw removal.
     assert state.list_records("sbx") == []
 
@@ -353,27 +364,41 @@ def test_raw_placeholder_removal_leaves_acq_store_unchanged(monkeypatch, tmp_pat
 # No secret value ever appears in argv or output on the sbx path.
 # ---------------------------------------------------------------------------
 
-def test_secret_value_never_in_argv_or_output_sbx(monkeypatch, tmp_path, capsys):
-    _env(monkeypatch, tmp_path)
-    captured: dict = {}
+def _spy(monkeypatch):
+    """Record every sbx call as ``(argv, input_text)``."""
+    calls: list = []
     real_run = sbx._run
 
     def spy(argv, *, timeout=None, input_text=None):
-        captured["argv"] = list(argv)
-        captured["input_text"] = input_text
+        calls.append((list(argv), input_text))
         return real_run(argv, timeout=timeout, input_text=input_text)
 
     monkeypatch.setattr(sbx, "_run", spy)
+    return calls
+
+
+def _assert_value_only_on_stdin(calls, value, *texts):
+    # Every argv ELEMENT is searched for the substring, so `--flag=VALUE` is caught.
+    assert all(value not in arg for argv, _ in calls for arg in argv)
+    assert all(value not in text for text in texts)
+    assert [stdin for _, stdin in calls if stdin is not None] == [value]
+
+
+def test_secret_value_never_in_argv_or_output_sbx(monkeypatch, tmp_path, capsys):
+    # usai is a custom endpoint on sbx: `secret set-custom --host --env
+    # --value-stdin`, bound to its pinned host, with the value on stdin only.
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_SBX_VERSION", "0.51.0")
+    calls = _spy(monkeypatch)
     monkeypatch.setattr(sys, "stdin", io.StringIO("TOP-SECRET-VALUE\n"))
 
     rc = cli.main(["--backend", "sbx", "secret", "set", "-g", "usai", "--json"])
     out, err = capsys.readouterr()
 
     assert rc == 0
-    assert captured["input_text"] == "TOP-SECRET-VALUE"
-    assert "TOP-SECRET-VALUE" not in captured["argv"]
-    assert "TOP-SECRET-VALUE" not in out
-    assert "TOP-SECRET-VALUE" not in err
+    fed = [argv for argv, stdin in calls if stdin is not None]
+    assert fed == [["secret", "set-custom", "--host", "api.gsa.usai.gov", "--env", "USAI_API_KEY", "--value-stdin"]]
+    _assert_value_only_on_stdin(calls, "TOP-SECRET-VALUE", out, err)
 
 
 def test_provider_credential_set_uses_value_stdin(monkeypatch, tmp_path, capsys):
@@ -411,8 +436,8 @@ def test_provider_credential_set_uses_value_stdin(monkeypatch, tmp_path, capsys)
     assert "models.acme.example" in captured["argv"]
     assert "ACME_API_KEY" in captured["argv"]
     assert "--value-stdin" in captured["argv"]
-    # The value never reaches argv, stdout, or stderr.
-    assert "TOP-SECRET-PROVIDER-KEY" not in captured["argv"]
+    # The value never reaches argv (any element, so `--flag=VALUE` too), stdout, or stderr.
+    assert all("TOP-SECRET-PROVIDER-KEY" not in arg for arg in captured["argv"])
     assert "TOP-SECRET-PROVIDER-KEY" not in out
     assert "TOP-SECRET-PROVIDER-KEY" not in err
 
@@ -424,10 +449,12 @@ def test_provider_credential_set_uses_value_stdin(monkeypatch, tmp_path, capsys)
 def test_secret_ls_supported_on_sbx(monkeypatch, tmp_path, capsys):
     # sbx HAS a `secret ls` (the secret-list capability); it lists scope/service/
     # value_state, never a value.
-    _env(monkeypatch, tmp_path, secrets={"global": {"usai": "set"}})
+    _env(monkeypatch, tmp_path, secrets={"global": {"github": "set"}})
     rc, doc = _invoke(capsys, "--backend", "sbx", "secret", "ls", "--json")
     assert rc == 0
-    assert doc["data"]["secrets"] == [{"scope": "global", "service": "usai", "value_state": "set"}]
+    assert doc["data"]["secrets"] == [
+        {"scope": "global", "scope_kind": "global", "service": "github", "value_state": "set"}
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -484,3 +511,228 @@ def test_cp_unc_host_path_on_sbx(monkeypatch, tmp_path, capsys):
     assert rc == 0
     assert doc["data"]["direction"] == "out"
     assert doc["data"]["host"] == "\\\\server\\share\\file.txt"
+
+
+# ---------------------------------------------------------------------------
+# The sbx credential path: built-ins through `secret set`, every other endpoint
+# through `secret set-custom`, and has/rm over both of sbx's tables.
+# ---------------------------------------------------------------------------
+
+def _store():
+    import os
+
+    return Path(os.environ["ACQ_SECRET_STORE_DIR"])
+
+
+def _custom_table(tmp_path) -> list:
+    path = Path(tmp_path) / "sbx-home" / ".docker-sbx" / "custom-secrets.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_secret_set_custom_routes(monkeypatch, tmp_path, capsys):
+    # An explicit --host takes the custom route even for a built-in name (a
+    # self-hosted GitLab must not be bound to gitlab.com), scoped with --sandbox.
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_SBX_VERSION", "0.51.0")
+    calls = _spy(monkeypatch)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("GL-TOKEN-VALUE\n"))
+    rc, doc = _invoke(capsys, "--backend", "sbx", "secret", "set", "mybox", "gitlab",
+                      "--host", "workshop.cloud.gov", "--env", "GITLAB_TOKEN", "--json")
+    assert rc == 0 and doc["data"]["scope_kind"] == "sandbox"
+    assert [argv for argv, stdin in calls if stdin is not None] == [
+        ["secret", "set-custom", "--sandbox", "mybox", "--host", "workshop.cloud.gov",
+         "--env", "GITLAB_TOKEN", "--value-stdin"]
+    ]
+    _assert_value_only_on_stdin(calls, "GL-TOKEN-VALUE", json.dumps(doc))
+    # A registered provider binds every pinned host; a sandbox named `global`
+    # gets `--sandbox global`.
+    monkeypatch.setenv("ACQ_PROVIDER_CREDENTIAL_BINDINGS", "acme=ACME_API_KEY@api.acme.example,m.acme.example")
+    calls.clear()
+    monkeypatch.setattr(sys, "stdin", io.StringIO("ACME-VALUE\n"))
+    rc, doc = _invoke(capsys, "--backend", "sbx", "secret", "set", "global", "acme", "--json")
+    assert rc == 0 and doc["data"] == {"scope": "global", "scope_kind": "sandbox", "service": "acme", "value_state": "set"}
+    assert [argv for argv, stdin in calls if stdin is not None] == [
+        ["secret", "set-custom", "--sandbox", "global", "--host", "api.acme.example", "--host", "m.acme.example",
+         "--env", "ACME_API_KEY", "--value-stdin"]
+    ]
+
+
+def test_secret_set_refusals_happen_before_anything_is_stored(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path)
+    # Below sbx 0.51.0 there is no `set-custom --value-stdin`: refused, never fed
+    # to the native route (which would bind usai to nothing).
+    calls = _spy(monkeypatch)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("U-VALUE\n"))
+    rc, doc = _invoke(capsys, "--backend", "sbx", "secret", "set", "-g", "usai", "--json")
+    assert rc == 1 and doc["error"]["code"] == "backend_version_unsupported"
+    assert "0.51.0" in doc["error"]["message"]
+    # A name sbx would store but never inject is refused too.
+    monkeypatch.setenv("ACQ_SBX_VERSION", "0.51.0")
+    monkeypatch.setattr(sys, "stdin", io.StringIO("X-VALUE\n"))
+    rc, doc = _invoke(capsys, "--backend", "sbx", "secret", "set", "-g", "nosuchsvc", "--json")
+    assert rc == 1 and doc["error"]["code"] == "validation_failed"
+    assert "no host/env mapping" in doc["error"]["message"]
+    assert not any(argv[:2] in (["secret", "set"], ["secret", "set-custom"]) for argv, _ in calls)
+    assert not _store().exists()
+
+
+def test_secret_set_refuses_an_existing_entry_on_either_table(monkeypatch, tmp_path, capsys):
+    # A stale native `gitlab` entry would keep injecting to gitlab.com after a
+    # custom --host set; an existing custom entry would prompt to overwrite.
+    _env(monkeypatch, tmp_path, secrets={"global": {"gitlab": "set"}},
+         custom=[_custom("global", "USAI_API_KEY", "sbx-cs-u1", "api.gsa.usai.gov")])
+    monkeypatch.setenv("ACQ_SBX_VERSION", "0.51.0")
+    monkeypatch.setattr(sys, "stdin", io.StringIO("V\n"))
+    rc, doc = _invoke(capsys, "--backend", "sbx", "secret", "set", "-g", "gitlab",
+                      "--host", "workshop.cloud.gov", "--env", "GITLAB_TOKEN", "--json")
+    assert rc == 1 and "already exists" in doc["error"]["message"]
+    monkeypatch.setattr(sys, "stdin", io.StringIO("V\n"))
+    rc, doc = _invoke(capsys, "--backend", "sbx", "secret", "set", "-g", "usai", "--json")
+    assert rc == 1 and "acq secret rm sbx-cs-u1" in doc["error"]["remediation"]
+    assert not _store().exists()
+
+
+def test_secret_has_maps_services_and_falls_back_to_global(monkeypatch, tmp_path, capsys):
+    # A native entry named `usai` is never injected (no proxy rule maps it); the
+    # custom USAI_API_KEY secret is. A sandbox scope falls back to global.
+    _env(monkeypatch, tmp_path, secrets={"global": {"usai": "set", "github": "set"}})
+    assert cli.main(["--backend", "sbx", "secret", "has", "-g", "usai"]) == 1
+    assert cli.main(["--backend", "sbx", "secret", "has", "mybox", "github"]) == 0
+    assert cli.main(["--backend", "sbx", "secret", "has", "mybox", "usai"]) == 1
+    _env(monkeypatch, tmp_path, custom=[_custom("mybox", "USAI_API_KEY", "sbx-cs-u1", "api.gsa.usai.gov")])
+    assert cli.main(["--backend", "sbx", "secret", "has", "mybox", "usai"]) == 0
+    assert cli.main(["--backend", "sbx", "secret", "has", "otherbox", "usai"]) == 1
+    assert cli.main(["--backend", "sbx", "secret", "has", "-g", "usai"]) == 1
+    out, err = capsys.readouterr()
+    assert out == "" and err == ""
+
+
+def test_secret_rm_custom_by_placeholder_with_force_and_no_stdin(monkeypatch, tmp_path, capsys):
+    from acq_py import secretstore
+
+    _env(monkeypatch, tmp_path, custom=[
+        _custom("global", "USAI_API_KEY", "sbx-cs-global", "api.gsa.usai.gov"),
+        _custom("mybox", "GITLAB_TOKEN", "sbx-cs-mybox", "workshop.cloud.gov"),
+    ])
+    secretstore.set_secret("usai", None, "U")
+    secretstore.set_secret("gitlab", "mybox", "G", "workshop.cloud.gov", "GITLAB_TOKEN")
+    seen: list = []
+    real = subprocess.run
+
+    def watch(argv, **kw):
+        seen.append((list(argv), kw.get("stdin"), kw.get("input")))
+        return real(argv, **kw)
+
+    monkeypatch.setattr(sbx.subprocess, "run", watch)
+    rc, doc = _invoke(capsys, "--backend", "sbx", "secret", "rm", "-g", "usai", "--json")
+    assert rc == 0 and doc["data"] == {"scope": "global", "scope_kind": "global", "service": "usai", "value_state": "unset"}
+    rc, doc = _invoke(capsys, "--backend", "sbx", "secret", "rm", "mybox", "gitlab", "--json")
+    assert rc == 0
+    removals = [(argv[argv.index("secret"):], stdin) for argv, stdin, _ in seen if "rm" in argv]
+    assert removals == [
+        (["secret", "rm", "--placeholder", "sbx-cs-global", "-f"], subprocess.DEVNULL),
+        (["secret", "rm", "--placeholder", "sbx-cs-mybox", "--sandbox", "mybox", "-f"], subprocess.DEVNULL),
+    ]
+    assert _custom_table(tmp_path) == []
+    assert not secretstore.exists("usai") and not secretstore.exists("gitlab", "mybox")
+
+
+def test_raw_placeholder_rm_forces_and_closes_stdin(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path, custom=[_custom("global", "ACME_API_KEY", "sbx-cs-raw", "api.acme.example")])
+    seen: list = []
+    real = subprocess.run
+
+    def watch(argv, **kw):
+        seen.append((list(argv), kw.get("stdin")))
+        return real(argv, **kw)
+
+    monkeypatch.setattr(sbx.subprocess, "run", watch)
+    rc, doc = _invoke(capsys, "--backend", "sbx", "secret", "rm", "sbx-cs-raw", "--json")
+    assert rc == 0 and doc["data"]["placeholder"] == "sbx-cs-raw"
+    argv, stdin = seen[-1]
+    assert argv[argv.index("secret"):] == ["secret", "rm", "--placeholder", "sbx-cs-raw", "-f"]
+    assert stdin is subprocess.DEVNULL
+    assert _custom_table(tmp_path) == []
+
+
+def test_global_label_ambiguity_fails_closed(monkeypatch, tmp_path, capsys):
+    # sbx labels the global scope and a sandbox named `global` both "global".
+    from acq_py import secretstore
+
+    # With a sandbox named `global` in sbx, `has -g` cannot tell: exit 1 and say so.
+    _env(monkeypatch, tmp_path, catalog={"global": "running"}, secrets={"global": {"github": "set"}})
+    assert cli.main(["--backend", "sbx", "secret", "has", "-g", "github"]) == 1
+    out, err = capsys.readouterr()
+    assert out == "" and "cannot tell" in err
+    # Asking for the sandbox named `global` sees it either way (it is that
+    # sandbox's entry or the global one, injectable into it both ways)...
+    assert cli.main(["--backend", "sbx", "secret", "has", "global", "github"]) == 0
+    # ...but will not pipe a value into a possible overwrite prompt.
+    monkeypatch.setattr(sys, "stdin", io.StringIO("GH\n"))
+    rc, doc = _invoke(capsys, "--backend", "sbx", "secret", "set", "global", "github", "--json")
+    assert rc == 1 and "cannot tell" in doc["error"]["message"]
+    # A custom entry's placeholder might be the other scope's: rm refuses and
+    # keeps the store entry.
+    _env(monkeypatch, tmp_path, custom=[_custom("global", "USAI_API_KEY", "sbx-cs-g", "api.gsa.usai.gov")])
+    secretstore.set_secret("usai", "global", "U")
+    rc, doc = _invoke(capsys, "--backend", "sbx", "secret", "rm", "global", "usai", "--json")
+    assert rc == 1 and "cannot tell" in doc["error"]["message"]
+    assert secretstore.exists("usai", "global")
+    assert _custom_table_seeded_unchanged(tmp_path)
+    # A native entry is removed by a scope-naming argv, so sbx itself resolves it.
+    _env(monkeypatch, tmp_path, secrets={"global": {"github": "set"}})
+    calls = _spy(monkeypatch)
+    rc, _doc = _invoke(capsys, "--backend", "sbx", "secret", "rm", "global", "github", "--json")
+    assert rc == 0
+    assert ["secret", "rm", "--sandbox", "global", "github", "-f"] in [argv for argv, _ in calls]
+
+
+def _custom_table_seeded_unchanged(tmp_path) -> bool:
+    # The stub writes its custom table only on a change.
+    return not (Path(tmp_path) / "sbx-home" / ".docker-sbx" / "custom-secrets.json").exists()
+
+
+def test_secret_ls_reports_scope_kind(monkeypatch, tmp_path, capsys):
+    secrets = {"global": {"github": "set"}, "mybox": {"github": "set"}}
+    _env(monkeypatch, tmp_path, secrets=secrets,
+         custom=[_custom("global", "USAI_API_KEY", "sbx-cs-u1", "api.gsa.usai.gov")])
+    rc, doc = _invoke(capsys, "--backend", "sbx", "secret", "ls", "--json")
+    assert rc == 0
+    assert [(e["scope"], e["scope_kind"], e["service"]) for e in doc["data"]["secrets"]] == [
+        ("global", "global", "github"), ("mybox", "sandbox", "github"), ("global", "global", "USAI_API_KEY"),
+    ]
+    # Once sbx has a sandbox named `global`, its label is no longer readable as global.
+    _env(monkeypatch, tmp_path, catalog={"global": "running"}, secrets=secrets)
+    rc, doc = _invoke(capsys, "--backend", "sbx", "secret", "ls", "-g", "--json")
+    assert rc == 0
+    assert doc["data"]["secrets"] == [{"scope": "global", "scope_kind": "unknown", "service": "github", "value_state": "set"}]
+
+
+def test_provider_credential_set_existing_custom_secret_hint(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path, custom=[_custom("global", "ACME_API_KEY", "sbx-cs-acme", "api.acme.example")])
+    monkeypatch.setenv("ACQ_SBX_VERSION", "0.51.0")
+    monkeypatch.setattr(sys, "stdin", io.StringIO("ACME\n"))
+    rc, doc = _invoke(capsys, "--backend", "sbx", "provider-credential", "set", "acme", "ACME_API_KEY",
+                      "--host", "api.acme.example", "--json")
+    assert rc == 1 and "already exists" in doc["error"]["message"]
+    assert "acq secret rm sbx-cs-acme" in doc["error"]["remediation"]
+
+
+def test_malformed_provider_binding_fails_closed(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_SBX_VERSION", "0.51.0")
+    monkeypatch.setenv("ACQ_PROVIDER_CREDENTIAL_BINDINGS", "not-a-binding")
+    monkeypatch.setattr(sys, "stdin", io.StringIO("V\n"))
+    rc, doc = _invoke(capsys, "--backend", "sbx", "secret", "set", "-g", "usai", "--json")
+    assert rc == 1 and doc["error"]["code"] == "validation_failed"
+    assert not _store().exists()
+
+
+def test_custom_endpoint_host_that_reads_as_a_flag_is_refused(monkeypatch, tmp_path):
+    # Defence in depth below the neutral layer's own checks: a host part that
+    # starts with "-" would be parsed by sbx as a flag.
+    _env(monkeypatch, tmp_path)
+    for host, env in (("-x.example.gov", "KEY"), ("a.gov,", "KEY"), ("a.gov", "1BAD"), ("", "KEY")):
+        with pytest.raises(sbx.SbxError) as info:
+            sbx.secret_feed(sbx.secretstore.GLOBAL, "svc", "V", host, env)
+        assert info.value.code == errors.VALIDATION_FAILED

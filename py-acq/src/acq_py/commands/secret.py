@@ -37,6 +37,20 @@ _IMPORT_USAGE = "usage: acq secret import [SERVICE] [-g | SANDBOX] [--all] [--fo
 _ENV_NAME_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_")
 
 
+def _scope_kind(scope: secretstore.Scope) -> str:
+    """``scope_kind`` in JSON output: ``scope`` alone reads ``global`` both for
+    the global scope and for a sandbox named ``global``."""
+    return "global" if scope.is_global else "sandbox"
+
+
+def _with_scope_kind(entry: dict) -> dict:
+    """A listing entry with ``scope_kind``: the adapter's own when it reports
+    one (it may say ``unknown``), else read from the ``scope`` label."""
+    if entry.get("scope_kind") in ("global", "sandbox", "unknown"):
+        return entry
+    return {**entry, "scope_kind": "global" if entry.get("scope") == "global" else "sandbox"}
+
+
 def _unsupported(command: str, backend: str, emit_json: bool) -> int:
     return common._operational_failure(
         command,
@@ -149,7 +163,7 @@ def run_secret_set(parsed, emit_json: bool, backend: str) -> int:
         )
     finally:
         value = ""
-    data = {"scope": scope.label, "service": service, "value_state": "set"}
+    data = {"scope": scope.label, "scope_kind": _scope_kind(scope), "service": service, "value_state": "set"}
     if emit_json:
         print(json.dumps(envelope.success(command, data)))
     else:
@@ -222,7 +236,7 @@ def run_secret_rm(parsed, emit_json: bool, backend: str) -> int:
         secretstore.meta_delete(service, scope.sandbox)
     except common._ADAPTER_ERRORS as exc:
         return common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
-    data = {"scope": scope.label, "service": service, "value_state": "unset"}
+    data = {"scope": scope.label, "scope_kind": _scope_kind(scope), "service": service, "value_state": "unset"}
     if emit_json:
         print(json.dumps(envelope.success(command, data)))
     else:
@@ -265,7 +279,7 @@ def run_secret_ls(parsed, emit_json: bool, backend: str) -> int:
         secrets = common._adapter(backend).secret_ls(scope)
     except common._ADAPTER_ERRORS as exc:
         return common._operational_failure("secret ls", exc.code, exc.message, exc.remediation, emit_json)
-    data = {"secrets": secrets}
+    data = {"secrets": [_with_scope_kind(entry) for entry in secrets]}
     if emit_json:
         print(json.dumps(envelope.success("secret ls", data)))
     else:
@@ -518,6 +532,7 @@ def run_secret_import(parsed, emit_json: bool) -> int:
         say(f"acq: no known service tokens found in the environment. Looked for: {looked}.")
     data = {
         "scope": scope.label,
+        "scope_kind": _scope_kind(scope),
         "dry_run": opts.dry_run,
         "mode": opts.mode,
         "results": results,

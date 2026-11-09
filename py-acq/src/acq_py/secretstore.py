@@ -856,7 +856,9 @@ def list_entries() -> list[dict]:
     """``{scope, service, value_state}`` per stored key, never a value.
 
     ``scope`` is ``global``, the sandbox name, or ``?`` for an ambiguous legacy
-    key; ``value_state`` is ``set`` or ``unreadable``.
+    key, and ``scope_kind`` (``global``, ``sandbox`` or ``unknown``) keeps a
+    sandbox named ``global`` apart from the global scope; ``value_state`` is
+    ``set`` or ``unreadable``.
     """
     out = []
     for key in list_keys():
@@ -866,7 +868,10 @@ def list_entries() -> list[dict]:
         scope, service = decoded
         sandbox = None if scope in ("-g", "?") else scope
         state = "unreadable" if scope != "?" and unreadable(service, sandbox) else "set"
-        out.append({"scope": "global" if scope == "-g" else scope, "service": service, "value_state": state})
+        kind = {"-g": "global", "?": "unknown"}.get(scope, "sandbox")
+        out.append({
+            "scope": "global" if scope == "-g" else scope, "scope_kind": kind, "service": service, "value_state": state,
+        })
     return out
 
 

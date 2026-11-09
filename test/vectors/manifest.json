@@ -204,6 +204,22 @@
       "vectors": ["cli/secret-set-host-needs-env"]
     },
     {
+      "contract": "sbx credential routing: built-in services go through `sbx secret set`; usai, registered providers and any --host go through `sbx secret set-custom --host --env --value-stdin` (sbx >= 0.51.0), value on stdin only",
+      "vectors": ["cli/secret-set-usai-sbx-custom", "cli/secret-set-json"]
+    },
+    {
+      "contract": "JSON scope_kind (global | sandbox | unknown) tells a sandbox named 'global' apart from the global scope, where scope alone reads 'global' for both",
+      "vectors": ["cli/secret-set-sandbox-named-global", "cli/secret-ls-scope-kind-sbx", "cli/secret-ls-json"]
+    },
+    {
+      "contract": "sbx secret has means 'sbx can inject it': a service maps to its native entry or custom env var, and a sandbox scope falls back to global (ADR-0038m scoped-over-global)",
+      "vectors": ["cli/secret-has-sbx-usai-custom", "cli/secret-has-sbx-global-fallback"]
+    },
+    {
+      "contract": "sbx secret rm of a custom secret looks up its placeholder and removes it with `sbx secret rm --placeholder P -f`, stdin closed; raw-placeholder removal does the same",
+      "vectors": ["cli/secret-rm-sbx-custom", "cli/secret-rm-raw-placeholder-force"]
+    },
+    {
       "contract": "ADR-0038m §2 provider-credential set success: value on stdin only, binding reports provider/key_env/hosts/source_layer, never a value",
       "vectors": ["cli/provider-credential-set-json"]
     },

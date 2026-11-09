@@ -115,7 +115,8 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   Bash `acq` (`acq_py/secretstore.py`: macOS keychain, `secret-tool`, Windows
   DPAPI, or a 0600 file that is never used on Windows), then feed it to the
   backend on its stdin. The value never appears in argv or output; the success
-  envelope reports `scope`/`service`/`value_state` only (ADR-0038m §secret set).
+  envelope reports `scope`/`scope_kind`/`service`/`value_state` only (ADR-0038m
+  §secret set; `scope_kind` is described below).
   A scope-less `secret set` is a usage error (ADR-0038m §48 drops scope-less
   secret set). An empty or whitespace-only value, a value with a newline or tab
   (after one terminal newline, plus a CRLF `\r`, is stripped), or input that is
@@ -124,6 +125,17 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   with `-`; a sandbox named `global` is a sandbox scope. `--host`/`--env` record
   a custom endpoint and must be given together (`--host` alone works for a
   service with a known env var).
+  **On sbx:** only sbx's built-in services (`anthropic`, `github`, `gitlab`,
+  `google-cloud`, `openai`, `aws`, `azure`) go through `sbx secret set
+  [--sandbox S] SERVICE`. Every other endpoint is a custom secret bound to its
+  hosts and env var with `sbx secret set-custom [--sandbox S] --host H… --env E
+  --value-stdin`, which needs sbx 0.51.0 or newer (older fails with
+  `backend_version_unsupported` before anything is stored): `usai` (bound to
+  `api.gsa.usai.gov` as `USAI_API_KEY`), a provider pinned with `acq
+  provider-credential set` (every pinned host), and any explicit `--host`, built-in
+  names included. A service that is neither is refused with `validation_failed`,
+  since sbx would store it and never inject it. An entry sbx already holds for that
+  scope is refused too (sbx would prompt to overwrite and eat the piped value).
   **Typing a secret:** on a terminal the value is read with echo off after a
   prompt on stderr. Under Git Bash/mintty, native Windows Python sees a pipe
   rather than a console, so typed input cannot be hidden: acq prints a warning
@@ -138,14 +150,30 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
 * `acq-py secret rm (-g | SANDBOX) SERVICE [--json]` — remove a secret. An absent
   secret fails closed with the `secret_missing` code; a backend that cannot answer
   fails closed with its accurate code (`backend_not_found`/`failure`) and never
-  deletes (ADR-0040m).
+  deletes (ADR-0040m). On sbx a built-in is removed by name and a custom secret by
+  the placeholder found for its env var (`sbx secret rm --placeholder P -f`); a
+  single bare token is a raw placeholder. Every sbx removal passes `-f` with stdin
+  closed, so sbx's confirm prompt never waits unseen.
 * `acq-py secret ls [(-g | SANDBOX)] [--json]` — list secrets with
-  `scope`/`service`/`value_state` (set/unset) only, never a value
-  (ADR-0038m §2 secret ls required data). An unreadable, wrong-shape document, or
-  wrong-shape *entry* fails closed with `secret_unreadable` — never silently
-  dropped (ADR-0040m, ADR-0038m §48).
+  `scope`/`scope_kind`/`service`/`value_state` (set/unset) only, never a value
+  (ADR-0038m §2 secret ls required data). On sbx a custom secret is listed by its
+  env var. An unreadable, wrong-shape document, or wrong-shape *entry* fails closed
+  with `secret_unreadable` — never silently dropped (ADR-0040m, ADR-0038m §48).
+* **`scope_kind`** (added alongside `scope` in the `secret set`/`rm`/`ls`/`import`
+  JSON; `scope` itself is unchanged): `scope` reads `global` both for the global
+  scope and for a sandbox named `global`, so `scope_kind` says which: `global` or
+  `sandbox`. `secret ls` can also report `unknown` where the backend's own listing
+  cannot tell: sbx's `secret ls --json` labels both scopes `global`, so once sbx
+  has a sandbox named `global` such an entry is `unknown`; a legacy dotted
+  acq-store key (`scope` `?`) is `unknown` too. On sbx, `secret has`/`rm` and
+  `secret set`'s existence check fail closed where they would need to tell those
+  two scopes apart (a native entry is still removed, by an argv that names the
+  scope). Rename such a sandbox to avoid the ambiguity.
 * `acq-py secret has (-g | SANDBOX) SERVICE` — a silent predicate (ADR-0038m):
-  exit `0` when the secret is present, `1` when absent, `2` on a usage error. It
+  exit `0` when the secret is present, `1` when absent, `2` on a usage error. On
+  sbx "present" means sbx can inject it: a built-in by its native entry, any other
+  service by its custom secret's env var (`usai` by `USAI_API_KEY`), and a sandbox
+  scope falls back to the global entry sbx also injects there. It
   prints nothing on stdout, even with `--json`. A backend that cannot answer (an
   unsupported backend, or a query failure) still exits `1` with stdout silent but
   announces a diagnostic on stderr so "cannot check" is not a silent false

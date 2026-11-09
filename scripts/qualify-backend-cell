@@ -27,9 +27,9 @@ are the ADR's):
                             reported gap: BLOCKED). ``secret set/ls/rm`` and
                             ``provider-credential set/ls/rm`` must never print the
                             value. Both backends: AGENTS.md documents a credential
-                            path on msb (``--secret ENV@HOST``; a non-built-in
-                            service is bound with ``--host``/``--env``) as well as
-                            sbx.
+                            path on msb (``--secret ENV@HOST``) as well as sbx; on
+                            both, a non-built-in service is bound with
+                            ``--host``/``--env``.
     * kit apply (3)       — the guest has the file the pinned usai-provider kit
                             places (``KIT_PROBE_FILE``).
     * read-only trusted   — msb only. In this cell's own guest: the trusted-config
@@ -611,10 +611,9 @@ class Cell:
 
     def _secret_set_argv(self) -> list[str]:
         n = self.names
-        if self.backend == "msb":
-            # A non-built-in service on msb is bound only with --host/--env (AGENTS.md).
-            return self._b("secret", "set", "-g", n.service, "--host", CRED_HOST, "--env", n.secret_env, "--json")
-        return self._b("secret", "set", "-g", n.service, "--json")
+        # A non-built-in service is bound only with --host/--env on both backends
+        # (AGENTS.md): msb binds ENV@HOST, sbx uses `secret set-custom`.
+        return self._b("secret", "set", "-g", n.service, "--host", CRED_HOST, "--env", n.secret_env, "--json")
 
     def secret_round_trip(self) -> None:
         """oracle 2: host-side ``secret set/ls/rm`` never print the value (nonce-named service)."""

@@ -104,8 +104,8 @@ class FakeBackend:
         return self.state_dir / "provenance" / self.backend / f"{self.names.sandbox}.abc123.config"
 
     def secret(self, verb):
-        if verb[1] == "set" and self.backend == "msb":
-            # msb binds a non-built-in service only with --host/--env (AGENTS.md).
+        if verb[1] == "set":
+            # Both backends bind a non-built-in service only with --host/--env (AGENTS.md).
             if "--host" not in verb or "--env" not in verb:
                 return self.done(2)
             if (verb[verb.index("--host") + 1], verb[verb.index("--env") + 1]) != (qbc.CRED_HOST, self.names.secret_env):
@@ -227,9 +227,9 @@ def test_a_compliant_backend_passes(tmp_path, backend, capsys):
         assert raw.removed == ["sbx-cs-ours"]  # never the operator's KEY or OPENCODE_GO_API_KEY secret
     else:
         assert raw.msb_removed == [c.names.canary_sandbox]  # in case the canary was killed before cleanup
-        secret_set = next(call for call in fake.calls if call[2:4] == ["secret", "set"])
-        assert secret_set[secret_set.index("--host") + 1] == "qualify.invalid"
-        assert secret_set[secret_set.index("--env") + 1] == c.names.secret_env
+    secret_set = next(call for call in fake.calls if call[2:4] == ["secret", "set"])
+    assert secret_set[secret_set.index("--host") + 1] == "qualify.invalid"
+    assert secret_set[secret_set.index("--env") + 1] == c.names.secret_env
 
 
 def test_the_nonce_names_are_printed_first(tmp_path, capsys):
@@ -273,10 +273,12 @@ def test_each_missing_control_fails_the_cell_and_is_named(tmp_path, backend, kno
     assert c.names.value not in err  # a failure report never carries the value
 
 
-def test_an_msb_secret_set_without_host_and_env_is_what_a_correct_msb_refuses(tmp_path):
+@pytest.mark.parametrize("backend", ["msb", "sbx"])
+def test_a_secret_set_without_host_and_env_is_what_a_correct_backend_refuses(tmp_path, backend):
     # The fake refuses a non-built-in service without --host/--env, as AGENTS.md says
-    # msb does; the oracle must pass them, so a correct msb is not failed.
-    c, fake, _raw = cell(tmp_path, "msb")
+    # both backends do (sbx would store it and never inject it); the oracle must
+    # pass them, so a correct backend is not failed.
+    c, fake, _raw = cell(tmp_path, backend)
     assert fake.secret(["secret", "set", "-g", c.names.service, "--json"]).returncode == 2
     assert c.run() == 0
 
