@@ -83,6 +83,51 @@ pass).
 
 ---
 
+## Qualification oracle: a forced stop can reach processes outside the step
+
+**Status:** known limitation, tracked for a fix (per AGENTS.md "Track Deferred Work").
+
+### Symptoms and cause
+
+`scripts/qualify-backend-cell` runs each step in its own process group. When a
+step outlives its timeout, or the oracle is stopped, the group gets a polite stop
+(SIGTERM; CTRL_BREAK on Windows) and a grace period. Only if the grace period
+expires is the group force-killed (`run_process` / `stop_process` /
+`_signal_group`): `killpg(SIGKILL)` on POSIX, `taskkill /F /T` on Windows.
+
+That forced kill can reach more than the step:
+
+- **A backend daemon the step auto-started.** If a step's backend command
+  starts its daemon (for example an `msb` server) as a child without detaching
+  it into its own session or process group, the daemon is in the step's group
+  and dies with it. Later steps, and other sandboxes on the host that use the
+  same daemon, then lose it.
+- **An unrelated process on Windows.** `taskkill /T` builds the tree from
+  parent process ids with no process creation-time check. If a process in the
+  tree exited and Windows reused its id, `/T` can walk into, and kill, a process
+  that has nothing to do with the run.
+
+Neither happens on the polite path. Both need a step that ignores the stop for
+the whole grace period (`STOP_GRACE`, `CANARY_GRACE`).
+
+### Mitigation today
+
+Start the backend daemon before a qualification run, so no timed step starts it.
+Leave the grace periods at their defaults so the forced kill stays a last
+resort.
+
+### Proposed fix
+
+1. **Windows:** put each step in a Job object created at spawn time and stop it
+   with `TerminateJobObject`. Job membership is fixed at process creation and
+   inherited by descendants, so the kill covers exactly the step's processes and
+   no pid-reuse lookup is involved. This replaces `taskkill /F /T`.
+2. **Both platforms:** before the first timed step, start the backend daemon
+   (or check that it is already running) outside any step's process group, so
+   a forced kill can never take it down.
+
+---
+
 ## Provider-input validator dependencies are missing
 
 ### Symptoms
