@@ -16,66 +16,94 @@ line; that is the harness's job. What it checks, per ADR-0044m (oracle numbers
 are the ADR's):
 
     * boot contract (3)   — create/ls/exec/rm round trip against the default
-                            shell image. The exec probe prints a number the guest
-                            computes, so an echo of the command line is not a pass.
+                            shell image. Every guest probe prints a number the
+                            guest computes, so an echo of the command line is not
+                            a pass.
     * credential binding  — ``provider-credential set`` binds a throwaway value
       and non-exposure (2)  before the sandbox is created; inside the guest the
                             bound variable must hold a non-empty placeholder, and
                             the value must not appear in the guest's environment
-                            or PID 1's. ``secret set/ls/rm`` and
+                            or PID 1's (an unreadable ``/proc/1/environ`` is a
+                            reported gap: BLOCKED). ``secret set/ls/rm`` and
                             ``provider-credential set/ls/rm`` must never print the
                             value. Both backends: AGENTS.md documents a credential
-                            path on msb (``--secret ENV@HOST``) as well as sbx.
+                            path on msb (``--secret ENV@HOST``; a non-built-in
+                            service is bound with ``--host``/``--env``) as well as
+                            sbx.
     * kit apply (3)       — the guest has the file the pinned usai-provider kit
-                            places (``KIT_PROBE_FILE``), so the built-in kits were
-                            applied at create.
-    * read-only trusted   — msb only: acq's sandbox record declares the host-
-      config mount (1)      enforced read-only trusted-config mount (ADR-0035,
-                            ``ro_host_config``), and the committed canary
-                            ``scripts/qualify-msb-ro-mount`` shows this msb
-                            enforces a ``:ro`` volume. A missing ``bash`` makes
-                            the canary, and so the cell, BLOCKED.
+                            places (``KIT_PROBE_FILE``).
+    * read-only trusted   — msb only. In this cell's own guest: the trusted-config
+      config mount (1)      mount point (``HOST_CONFIG_GUEST_DIR``) is listed with
+                            ``ro`` in ``/proc/mounts``, a write to it (as root when
+                            ``sudo -n`` works) fails with EROFS, and the host
+                            directory acq mounts there is byte-identical
+                            afterwards. acq's sandbox record must also declare the
+                            mount (``ro_host_config``), and the committed canary
+                            ``scripts/qualify-msb-ro-mount`` must pass; it shows,
+                            in a sandbox of its own, that this msb keeps a ``:ro``
+                            volume read-only even against remount attempts. Canary
+                            exit 1 is FAIL; any other non-zero exit, a timeout, or
+                            no usable ``bash`` is BLOCKED.
 
 Not covered here, because they need something an unattended run on one host
 cannot provide: swap-on-the-wire substitution (an endpoint that reports the
-credential it received), attach (a terminal), and version fail-closed against a
-real older backend (covered offline by the Tier-1 vectors). See
+credential it received), attach (a terminal), version fail-closed against a real
+older backend (covered offline by the Tier-1 vectors), and remount attempts
+inside this cell's own guest (the canary makes them in its own sandbox). See
 docs/howto/qualification.md.
 
-The control checks (credentials, kits, ro mount, host-side secrets) all run and
-every failure is printed (``FAIL: <step>: <why>`` on stderr), so one run shows
-everything that is missing; a boot-contract failure stops the run.
+The control checks all run and every failure is printed (``FAIL: <step>:
+<why>`` on stderr), so one run shows everything that is missing; a boot-contract
+failure stops the run.
 
 Isolation: the run must leave the operator's own acq configuration, state and
 credentials exactly as found. Every acq subprocess gets a private configuration
 and state tree (``XDG_CONFIG_HOME``, ``XDG_STATE_HOME``, ``XDG_DATA_HOME``,
 ``XDG_CACHE_HOME``, ``ACQ_STATE_DIR``, ``ACQ_SECRET_STORE_DIR``) that is deleted
 afterwards, and every identifier that reaches a backend's own store (sandbox,
-secret service, provider id, credential variable) carries a per-run nonce, so a
-step can never overwrite or remove an existing binding. ``HOME`` is kept: the
-backend CLIs keep their login, daemon and image cache there, and the oracle
-qualifies the operator's real backend. The caller's ``ACQ_*`` variables are not
-passed on (an ``ACQ_MSB_BIN=__stub__`` or ``ACQ_SECURITY_MOUNT_STATE`` would
-otherwise turn a live run into a stubbed one), ``PYTHONPATH`` is fixed to this
-checkout's ``py-acq/src``, the CLI runs under ``python -P``, and ``msb``/``sbx``
-and ``bash`` are resolved from absolute ``PATH`` entries only.
+secret service, provider id, credential variables) carries a per-run nonce, so a
+step can never overwrite or remove an existing binding. The names are printed to
+stderr first, so a run that is killed outright can be cleaned up by hand.
+``HOME`` is kept: the backend CLIs keep their login, daemon and image cache
+there, and the oracle qualifies the operator's real backend. The caller's
+``ACQ_*`` variables are not passed on, except those ending in ``_TIMEOUT``
+(timing knobs such as ``ACQ_MSB_READY_TIMEOUT``): an ``ACQ_MSB_BIN=__stub__`` or
+``ACQ_SECURITY_MOUNT_STATE`` would otherwise turn a live run into a stubbed one.
+``PYTHONPATH`` is fixed to this checkout's ``py-acq/src``, the CLI runs under
+``python -P -s``, and ``msb``/``sbx``/``bash`` are resolved from absolute ``PATH``
+entries only (on Windows, never the WSL launcher ``System32\\bash.exe``; Git Bash
+is looked for in its install locations first). The canary honours only
+``STEP_TIMEOUT``/``EXEC_TIMEOUT`` from the caller; its image is always the
+default (``QUALIFY_IMAGE`` and ``EXPECT_SHA`` are removed, and
+``ACQ_QUALIFY_OUT_DIR`` is an ``ACQ_*`` variable).
+
+Aborts: SIGTERM (and SIGBREAK on Windows) raise ``SystemExit``, so teardown runs.
+The harness sends one when a run outlives its timeout, then waits a grace period
+before killing it, and exports a deadline (``ACQ_QUALIFY_DEADLINE``, epoch
+seconds) that ends before its timeout; the oracle stops starting steps at that
+deadline, tears down and reports BLOCKED. Teardown always tries to remove the
+nonce-named sandbox, secret and provider binding, whether or not this run saw
+them created.
 
 Exit codes (mirroring ``scripts/qualify-msb-ro-mount`` and ADR-0044m): 0 PASS,
-2 BLOCKED (a prerequisite is missing: the backend CLI, or ``bash`` for the msb
-canary), 1 FAIL. The throwaway secret value is ``TIER3_MARKER_<hex>`` and is
-never printed; captured output is only searched for it.
+2 BLOCKED (a prerequisite or a conclusion is missing), 1 FAIL. The throwaway
+secret value is ``TIER3_MARKER_<hex>`` and is never printed; captured output is
+only searched for it.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import secrets
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -84,8 +112,16 @@ from typing import Callable
 # image ``scripts/qualify-msb-ro-mount`` uses).
 IMAGE = "docker.io/docker/sandbox-templates:shell-docker"
 
-# The credential is bound for this host; the oracle never sends a request to it.
-CRED_HOST = "api.example.com"
+# Credentials are bound for this host, which can never resolve (RFC 2606 reserves
+# ``.invalid``), so nothing can ever be sent to a real server under it.
+CRED_HOST = "qualify.invalid"
+
+# Where acq mounts a sandbox's host-config directory read-only in the guest, and
+# where it keeps that directory on the host (under its provenance directory, one
+# ``<sandbox>.<checksum>.config`` directory per sandbox), as the Bash
+# implementation does (``ACQ_HOST_CONFIG_GUEST_DIR`` in acq.backends/common.sh).
+HOST_CONFIG_GUEST_DIR = "/var/lib/acq/host"
+HOST_CONFIG_GLOB = "provenance/{backend}/{sandbox}.*.config"
 
 # A file the pinned usai-provider kit places in the guest (its ``files`` list).
 # Its presence shows the built-in kits were applied at create. Update it with the
@@ -99,6 +135,13 @@ CREATE_TIMEOUT = 600.0
 STEP_TIMEOUT = 120.0
 # The ro-mount canary creates its own sandbox (image pull) and runs several execs.
 CANARY_TIMEOUT = 1200.0
+# Each teardown command; teardown is not bounded by the deadline.
+TEARDOWN_TIMEOUT = 60.0
+# The whole run, when the harness does not export a deadline.
+DEFAULT_BUDGET = 1500.0
+DEADLINE_ENV = "ACQ_QUALIFY_DEADLINE"
+# Caller variables the canary would honour but the oracle must pin.
+CANARY_PINNED = ("QUALIFY_IMAGE", "EXPECT_SHA")
 
 # acq's own configuration and state locations, each redirected into the private tree.
 ISOLATED_DIRS = (
@@ -118,18 +161,48 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def _which_all(name: str, path: str):
+    for entry in path.split(os.pathsep):
+        if entry and os.path.isabs(entry):
+            found = shutil.which(name, path=entry)
+            if found:
+                yield found
+
+
 def which(name: str, path: str | None = None) -> str | None:
     """``name`` resolved from the absolute entries of ``PATH`` only.
 
     An empty, ``.`` or relative entry would resolve against the current directory,
     which may be a workspace a sandboxed agent can write to.
     """
-    for entry in (os.environ.get("PATH", "") if path is None else path).split(os.pathsep):
-        if entry and os.path.isabs(entry):
-            found = shutil.which(name, path=entry)
-            if found:
-                return found
-    return None
+    return next(_which_all(name, os.environ.get("PATH", "") if path is None else path), None)
+
+
+def _is_wsl_launcher(path: str) -> bool:
+    low = path.replace("/", "\\").lower()
+    return "\\windows\\system32\\" in low or "\\windowsapps\\" in low
+
+
+def find_bash(path: str, *, os_name: str = os.name, environ: dict[str, str] | None = None) -> str | None:
+    """A bash that can run the canary, or ``None``.
+
+    On Windows ``System32\\bash.exe`` (and the Store alias) is the WSL launcher,
+    which would run the canary inside a WSL distribution, not against this host's
+    msb. Git Bash is looked for in its install locations first, then any other
+    ``bash`` on the absolute ``PATH`` entries.
+    """
+    if os_name != "nt":
+        return which("bash", path)
+    environ = os.environ if environ is None else environ
+    roots = [environ.get("ProgramFiles"), environ.get("ProgramW6432"), environ.get("ProgramFiles(x86)")]
+    local = environ.get("LOCALAPPDATA")
+    candidates = [Path(r) / "Git" / "bin" / "bash.exe" for r in roots if r]
+    if local:
+        candidates.append(Path(local) / "Programs" / "Git" / "bin" / "bash.exe")
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return next((b for b in _which_all("bash", path) if not _is_wsl_launcher(b)), None)
 
 
 @dataclass(frozen=True)
@@ -142,6 +215,7 @@ class Names:
     service: str
     provider: str
     key_env: str
+    secret_env: str
     seed: int
 
 
@@ -154,6 +228,7 @@ def make_names(backend: str, nonce: str | None = None) -> Names:
         service=f"acqqual{nonce}",
         provider=f"acq-qual-{nonce}",
         key_env=f"ACQ_QUAL_{nonce.upper()}",
+        secret_env=f"ACQ_QUAL_S_{nonce.upper()}",
         seed=int(nonce, 16),
     )
 
@@ -189,6 +264,20 @@ def _out(proc) -> str:
     return "" if proc is None else (proc.stdout or "") + (proc.stderr or "")
 
 
+def snapshot(root: Path | None) -> dict[str, bytes] | None:
+    """Every file under ``root`` with its bytes, or ``None`` if it cannot be read."""
+    if root is None:
+        return None
+    try:
+        return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
+    except OSError:
+        return None
+
+
+class DeadlineReached(Exception):
+    """The run's time budget ran out before a step could start."""
+
+
 def _problem(proc) -> str | None:
     """Why a completed step failed, or ``None`` if it exited 0."""
     if proc is None:
@@ -203,9 +292,11 @@ class Cell:
     """One oracle run for one backend. ``acq`` and ``raw`` are injectable for tests.
 
     ``acq(argv, stdin=None, timeout=...)`` runs the shipped CLI; ``raw(argv, ...)``
-    runs a program directly; ``canary()`` runs the ro-mount canary and returns its
-    exit status (or ``None`` when ``bash`` is missing); ``state_dir`` is acq's
-    private state root, where its sandbox records are read.
+    runs a program directly; ``canary(timeout)`` runs the ro-mount canary and
+    returns its exit status (``None`` when no usable ``bash`` exists or it timed
+    out); ``state_dir`` is acq's private state root, where its sandbox records and
+    host-config directories are read. Steps stop starting at ``deadline`` (epoch
+    seconds).
     """
 
     backend: str
@@ -214,18 +305,21 @@ class Cell:
     state_dir: Path
     acq: Run
     raw: Run
-    canary: Callable[[], "int | None"]
+    canary: Callable[[float], "int | None"]
+    deadline: float = math.inf
     failures: list[str] = field(default_factory=list)
     blocked: list[str] = field(default_factory=list)
-    created: bool = False
     bound: bool = False
-    secret_set: bool = False
 
     # -- reporting -------------------------------------------------------------
 
     def fail(self, step: str, detail: str) -> None:
         self.failures.append(step)
         print(f"FAIL: {step}: {detail}", file=sys.stderr)
+
+    def block(self, step: str, detail: str) -> None:
+        self.blocked.append(step)
+        print(f"BLOCKED: {step}: {detail}", file=sys.stderr)
 
     def check(self, step: str, proc) -> bool:
         """Record a failure if ``proc`` failed or its output carries the secret value."""
@@ -241,26 +335,35 @@ class Cell:
     def _b(self, *argv: str) -> list[str]:
         return ["--backend", self.backend, *argv]
 
+    def budget(self, timeout: float) -> float:
+        """``timeout`` cut to what is left before the deadline; raise if nothing is."""
+        remaining = self.deadline - time.time()
+        if remaining <= 1:
+            raise DeadlineReached
+        return min(timeout, remaining)
+
+    def call(self, argv: list[str], *, stdin: str | None = None, timeout: float = STEP_TIMEOUT):
+        return self.acq(argv, stdin=stdin, timeout=self.budget(timeout))
+
     # -- steps ------------------------------------------------------------------
 
     def bind_credential(self) -> None:
         """oracle 2: bind a throwaway credential before create (value on stdin only)."""
         n = self.names
-        proc = self.acq(self._b("provider-credential", "set", n.provider, n.key_env, "--host", CRED_HOST, "--json"),
-                        stdin=n.value + "\n")
+        proc = self.call(self._b("provider-credential", "set", n.provider, n.key_env, "--host", CRED_HOST, "--json"),
+                         stdin=n.value + "\n")
         self.bound = proc is not None and proc.returncode == 0
         if self.check("provider-credential set", proc):
-            self.check("provider-credential ls", self.acq(self._b("provider-credential", "ls", "--json")))
+            self.check("provider-credential ls", self.call(self._b("provider-credential", "ls", "--json")))
 
     def boot(self) -> bool:
         """oracle 3: create/ls/exec. Returns False (and stops the run) on any failure."""
         n = self.names
-        created = self.acq(self._b("create", "shell", self.workspace, "--name", n.sandbox, "--image", IMAGE, "--json"),
-                           timeout=CREATE_TIMEOUT)
-        self.created = created is not None and created.returncode == 0
+        created = self.call(self._b("create", "shell", self.workspace, "--name", n.sandbox, "--image", IMAGE, "--json"),
+                            timeout=CREATE_TIMEOUT)
         if not self.check("create", created):
             return False
-        listed = self.acq(self._b("ls", "--json"))
+        listed = self.call(self._b("ls", "--json"))
         if not self.check("ls", listed):
             return False
         try:
@@ -276,7 +379,7 @@ class Cell:
         return self.guest_token("exec", "boot", n.seed + 3, script) is not None
 
     def guest(self, script: str):
-        return self.acq(self._b("exec", self.names.sandbox, "--", "sh", "-c", script))
+        return self.call(self._b("exec", self.names.sandbox, "--", "sh", "-c", script))
 
     def guest_token(self, step: str, key: str, expected: int, script: str) -> str | None:
         """Run ``script`` in the guest; return its output if it printed ``key=<expected>``.
@@ -299,17 +402,25 @@ class Cell:
             self.fail("guest credential", "no credential was bound (provider-credential set failed)")
             return
         n = self.names
+        pid1 = f"/tmp/acq-qual-pid1-{n.nonce}"
         script = (
             f"printf 'cred=%s\\n' \"$(({n.seed} + 1))\"; "
             f"printf 'placeholder=%s\\n' \"${{{n.key_env}:-}}\"; "
-            "env; tr '\\000' '\\n' < /proc/1/environ 2>/dev/null; true"
+            "env; "
+            f"if cat /proc/1/environ > {pid1} 2>/dev/null || sudo -n cat /proc/1/environ > {pid1} 2>/dev/null; "
+            f"then tr '\\000' '\\n' < {pid1}; printf 'pid1=readable\\n'; else printf 'pid1=unreadable\\n'; fi; "
+            f"rm -f {pid1}"
         )
         out = self.guest_token("guest credential", "cred", n.seed + 1, script)
         if out is None:
             return
-        placeholder = next((x.split("=", 1)[1] for x in out.splitlines() if x.startswith("placeholder=")), "")
+        lines = out.splitlines()
+        placeholder = next((x.split("=", 1)[1] for x in lines if x.startswith("placeholder=")), "")
         if not placeholder:
             self.fail("guest credential", f"{n.key_env} is not set in the guest; the credential was not bound")
+        if "pid1=readable" not in lines:
+            self.block("guest credential", "/proc/1/environ is unreadable (even with sudo -n), so PID 1's "
+                       "environment was not checked for the value")
 
     def kits(self) -> None:
         """oracle 3: the built-in kits were applied at create."""
@@ -318,45 +429,89 @@ class Cell:
         if self.check("kit apply", proc) and f"kit={self.names.seed + 2}" not in _out(proc).splitlines():
             self.fail("kit apply", f"{KIT_PROBE_FILE} (placed by the usai-provider kit) is missing in the guest")
 
+    def host_config_dir(self) -> Path | None:
+        found = sorted(self.state_dir.glob(HOST_CONFIG_GLOB.format(backend=self.backend, sandbox=self.names.sandbox)))
+        return found[0] if len(found) == 1 and found[0].is_dir() else None
+
     def ro_mount(self) -> None:
-        """oracle 1 (msb): acq recorded the read-only trusted-config mount, and msb enforces ``:ro``."""
-        records = sorted((self.state_dir / self.backend).glob(f"{self.names.sandbox}.*.json"))
+        """oracle 1 (msb): the trusted-config mount is read-only in this guest; acq records it; msb enforces ``:ro``."""
+        n = self.names
+        records = sorted((self.state_dir / self.backend).glob(f"{n.sandbox}.*.json"))
         try:
             record = json.loads(records[0].read_text(encoding="utf-8")) if records else None
         except (OSError, ValueError):
             record = None
         if not (isinstance(record, dict) and record.get("ro_host_config") is True):
-            self.fail("ro mount", "acq's sandbox record does not declare the read-only trusted-config mount")
-        status = self.canary()
-        if status is None or status == 2:
-            self.blocked.append("ro-mount canary")
-            reason = "bash not found" if status is None else "it could not run to a conclusion"
-            print(f"BLOCKED: ro-mount canary: {reason}", file=sys.stderr)
+            self.fail("ro mount record", "acq's sandbox record does not declare the read-only trusted-config mount")
+        self.ro_effect()
+        status = self.canary(self.budget(CANARY_TIMEOUT))
+        if status == 1:
+            self.fail("ro-mount canary", "scripts/qualify-msb-ro-mount reported a write through the :ro volume")
         elif status != 0:
-            self.fail("ro-mount canary", f"scripts/qualify-msb-ro-mount exited {status}")
+            reason = "no usable bash, or it timed out" if status is None else f"it exited {status}"
+            self.block("ro-mount canary", f"no conclusion ({reason})")
+
+    def ro_effect(self) -> None:
+        """In this cell's own guest: ``ro`` in /proc/mounts, a write fails with EROFS, the host is unchanged."""
+        n = self.names
+        host = self.host_config_dir()
+        before = snapshot(host)
+        target = f"{HOST_CONFIG_GUEST_DIR}/.acq-qual-{n.nonce}"
+        err = f"/tmp/acq-qual-err-{n.nonce}"
+        script = (
+            f"printf 'ro=%s\\n' \"$(({n.seed} + 4))\"; "
+            f"awk '$2 == \"{HOST_CONFIG_GUEST_DIR}\" {{ print \"opts=\" $4 }}' /proc/mounts; "
+            "if sudo -n true 2>/dev/null; then w='sudo -n'; printf 'as=root\\n'; else w=; printf 'as=user\\n'; fi; "
+            f"if $w sh -c 'echo x > \"$1\"' sh {target} 2>{err}; then printf 'write=ok\\n'; "
+            f"else printf 'write=denied:%s\\n' \"$(head -c 300 {err} | tr '\\n' ' ')\"; fi; rm -f {err}"
+        )
+        out = self.guest_token("ro mount", "ro", n.seed + 4, script)
+        if out is None:
+            return
+        lines = out.splitlines()
+        opts = [x[len("opts="):].split(",") for x in lines if x.startswith("opts=")]
+        if not opts:
+            self.fail("ro mount", f"nothing is mounted at {HOST_CONFIG_GUEST_DIR} in the guest")
+        elif "ro" not in opts[-1]:
+            self.fail("ro mount", f"{HOST_CONFIG_GUEST_DIR} is mounted read-write in the guest")
+        write = next((x for x in lines if x.startswith("write=")), "write=")
+        if write == "write=ok":
+            self.fail("ro mount", f"the guest wrote to {HOST_CONFIG_GUEST_DIR}")
+        elif "Read-only file system" not in write:
+            self.fail("ro mount", f"the write to {HOST_CONFIG_GUEST_DIR} did not fail with EROFS")
+        if host is None:
+            self.fail("ro mount", "acq keeps no host-config directory for the sandbox "
+                      f"(expected <state>/{HOST_CONFIG_GLOB.format(backend=self.backend, sandbox=n.sandbox)})")
+        elif before is None or snapshot(host) != before:
+            self.fail("ro mount", "the host-config directory changed while the guest tried to write to it")
 
     def remove(self) -> None:
-        proc = self.acq(self._b("rm", self.names.sandbox, "--json"))
-        if self.check("rm", proc):
-            self.created = False
+        self.check("rm", self.call(self._b("rm", self.names.sandbox, "--json")))
+
+    def _secret_set_argv(self) -> list[str]:
+        n = self.names
+        if self.backend == "msb":
+            # A non-built-in service on msb is bound only with --host/--env (AGENTS.md).
+            return self._b("secret", "set", "-g", n.service, "--host", CRED_HOST, "--env", n.secret_env, "--json")
+        return self._b("secret", "set", "-g", n.service, "--json")
 
     def secret_round_trip(self) -> None:
         """oracle 2: host-side ``secret set/ls/rm`` never print the value (nonce-named service)."""
         n = self.names
-        proc = self.acq(self._b("secret", "set", "-g", n.service, "--json"), stdin=n.value + "\n")
-        self.secret_set = proc is not None and proc.returncode == 0
-        if not self.check("secret set", proc):
+        if not self.check("secret set", self.call(self._secret_set_argv(), stdin=n.value + "\n")):
             return
-        self.check("secret ls", self.acq(self._b("secret", "ls", "--json")))
-        if self.check("secret rm", self.acq(self._b("secret", "rm", "-g", n.service, "--json"))):
-            self.secret_set = False
+        self.check("secret ls", self.call(self._b("secret", "ls", "--json")))
+        self.check("secret rm", self.call(self._b("secret", "rm", "-g", n.service, "--json")))
 
     def unbind_credential(self) -> None:
-        if self.bound and self.check("provider-credential rm",
-                                     self.acq(self._b("provider-credential", "rm", self.names.provider, "--json"))):
-            self.bound = False
+        if self.bound:
+            self.check("provider-credential rm",
+                       self.call(self._b("provider-credential", "rm", self.names.provider, "--json")))
 
     def run(self) -> int:
+        n = self.names
+        print(f"qualify-backend-cell: backend={self.backend} sandbox={n.sandbox} secret-service={n.service} "
+              f"provider={n.provider} env={n.key_env},{n.secret_env}", file=sys.stderr)
         try:
             self.bind_credential()
             if not self.boot():
@@ -368,6 +523,8 @@ class Cell:
             self.remove()
             self.secret_round_trip()
             self.unbind_credential()
+        except DeadlineReached:
+            self.block("deadline", "the run's time budget ran out; remaining steps were not run")
         finally:
             self.teardown()
         if self.failures:
@@ -378,23 +535,26 @@ class Cell:
         return 0
 
     def teardown(self) -> None:
-        """Best effort: remove everything this run created, and nothing else."""
+        """Best effort: remove everything this run may have created, and nothing else.
+
+        Every identifier is nonce-scoped, so each removal is attempted whether or
+        not this run saw the thing created: an abort can land between a backend
+        creating it and acq reporting that it did.
+        """
         n = self.names
-        if self.created:
-            self.acq(self._b("rm", n.sandbox, "--json"))
-        if self.secret_set:
-            self.acq(self._b("secret", "rm", "-g", n.service, "--json"))
-        if self.bound:
-            self.acq(self._b("provider-credential", "rm", n.provider, "--json"))
+        for argv in (self._b("rm", n.sandbox, "--json"),
+                     self._b("secret", "rm", "-g", n.service, "--json"),
+                     self._b("provider-credential", "rm", n.provider, "--json")):
+            self.acq(argv, timeout=TEARDOWN_TIMEOUT)
         if self.backend == "sbx":
             # ``provider-credential rm`` drops only acq's binding; sbx keeps the
             # custom secret it created. Remove that one, found by this run's
-            # nonce-named variable, never by a fixed name.
-            remove_sbx_custom_secrets(self.raw, n.key_env)
+            # nonce-named variables, never by a fixed name.
+            remove_sbx_custom_secrets(self.raw, {n.key_env, n.secret_env})
 
 
-def remove_sbx_custom_secrets(raw: Run, key_env: str) -> None:
-    """Remove the sbx custom secrets whose ``env`` is exactly ``key_env``.
+def remove_sbx_custom_secrets(raw: Run, key_envs: set[str]) -> None:
+    """Remove the sbx custom secrets whose ``env`` is one of ``key_envs``.
 
     Field shape (verified live against sbx 0.51.0): a ``custom_secrets`` entry is
     ``{"scope", "targets", "env", "placeholder", "secret": "<masked>"}``; it is
@@ -402,15 +562,30 @@ def remove_sbx_custom_secrets(raw: Run, key_env: str) -> None:
     failures are swallowed (teardown only). ``--force`` skips sbx's interactive
     confirmation.
     """
-    proc = raw(["sbx", "secret", "ls", "--json"])
+    proc = raw(["sbx", "secret", "ls", "--json"], timeout=TEARDOWN_TIMEOUT)
     try:
-        custom = json.loads(proc.stdout).get("custom_secrets") if proc is not None and proc.returncode == 0 else None
-    except (json.JSONDecodeError, AttributeError):
+        doc = json.loads(proc.stdout) if proc is not None and proc.returncode == 0 else None
+    except (json.JSONDecodeError, TypeError):
         return
+    custom = doc.get("custom_secrets") if isinstance(doc, dict) else None
     for entry in custom if isinstance(custom, list) else []:
-        placeholder = entry.get("placeholder") if isinstance(entry, dict) else None
-        if entry.get("env") == key_env and isinstance(placeholder, str) and placeholder:
-            raw(["sbx", "secret", "rm", "--placeholder", placeholder, "--force"])
+        if not isinstance(entry, dict):
+            continue
+        placeholder = entry.get("placeholder")
+        if entry.get("env") in key_envs and isinstance(placeholder, str) and placeholder:
+            raw(["sbx", "secret", "rm", "--placeholder", placeholder, "--force"], timeout=TEARDOWN_TIMEOUT)
+
+
+def _deadline(environ) -> float:
+    try:
+        value = float(environ.get(DEADLINE_ENV, ""))
+    except ValueError:
+        value = math.nan
+    return value if math.isfinite(value) else time.time() + DEFAULT_BUDGET
+
+
+def _terminate(signum, _frame):
+    raise SystemExit(128 + signum)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -431,6 +606,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"BLOCKED: {backend} CLI is not on PATH", file=sys.stderr)
         return 2
     names = make_names(backend)
+    deadline = _deadline(os.environ)
+    # A terminated run must still tear down (SIGBREAK is what reaches a Windows
+    # console process group).
+    signal.signal(signal.SIGTERM, _terminate)
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, _terminate)
     with tempfile.TemporaryDirectory(prefix="acq-qual-") as tmp:
         root = Path(tmp)
         env = isolated_env(root / "acq")
@@ -440,7 +621,7 @@ def main(argv: list[str] | None = None) -> int:
         if version is None or version.returncode != 0:
             print(f"BLOCKED: {backend} CLI did not run", file=sys.stderr)
             return 2
-        python = [sys.executable, "-P", "-m", "acq_py"]
+        python = [sys.executable, "-P", "-s", "-m", "acq_py"]
 
         def acq(args, *, stdin=None, timeout=STEP_TIMEOUT):
             return run_process([*python, *args], env=env, stdin=stdin, timeout=timeout, cwd=str(root))
@@ -451,15 +632,16 @@ def main(argv: list[str] | None = None) -> int:
                 return None
             return run_process([resolved, *args[1:]], env=env, stdin=stdin, timeout=timeout, cwd=str(root))
 
-        def canary():
-            bash = which("bash", env.get("PATH", ""))
+        def canary(timeout):
+            bash = find_bash(env.get("PATH", ""))
             if bash is None:
                 return None
-            proc = run_process([bash, str(_repo_root() / "scripts" / "qualify-msb-ro-mount")], env=env,
-                               timeout=CANARY_TIMEOUT, cwd=str(_repo_root()))
-            return 2 if proc is None else proc.returncode  # a timeout is no conclusion
+            canary_env = {k: v for k, v in env.items() if k not in CANARY_PINNED}
+            proc = run_process([bash, str(_repo_root() / "scripts" / "qualify-msb-ro-mount")], env=canary_env,
+                               timeout=timeout, cwd=str(_repo_root()))
+            return None if proc is None else proc.returncode
 
-        cell = Cell(backend, names, str(workspace), Path(env["ACQ_STATE_DIR"]), acq, raw, canary)
+        cell = Cell(backend, names, str(workspace), Path(env["ACQ_STATE_DIR"]), acq, raw, canary, deadline)
         return cell.run()
 
 

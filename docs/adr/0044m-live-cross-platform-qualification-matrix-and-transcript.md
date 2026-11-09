@@ -95,7 +95,7 @@ stale and the cell is blocked until regenerated:
 
   "No oracle asserts it" refers to the two *committed* oracles only: of
   ADR-0044m's six, the cell oracle (boot contract, credential binding and
-  non-exposure, kit apply, and on msb the read-only mount record,
+  non-exposure, kit apply, and on msb the read-only trusted-config mount,
   `scripts/qualify-backend-cell`) and the ro-mount oracle
   (`scripts/qualify-msb-ro-mount`, which the cell oracle runs on msb) are committed; oracle #4 (offline
   completeness) is deferred and #5 (security-exception recreation) is a manual
@@ -198,8 +198,10 @@ command-line path keeps only its last component, because a local path names the
 operator's account); `record` refuses any other transcript; and the published block
 is the file itself. So anyone holding the PR can recompute each
 `transcript_sha256` and check that the transcript reproduces its entry, without
-the runner's files (`python -m qualification.gate verify-evidence`). That shows the
-entry and the published transcript agree; it does not show that the run happened.
+the runner's files (`python -m qualification.gate verify-evidence --base <rev>`, which
+also requires exactly one shown block for every entry the PR adds and rejects
+duplicated blocks and blocks hidden in HTML comments). That shows the entries and
+the published transcripts agree; it does not show that the run happened.
 
 The sixteen entries recorded before that rule (the legacy entries listed in
 `qualification/ledger.py`) hash transcripts that carried local paths and were
@@ -208,10 +210,16 @@ hashes; only the files on the hosts that ran them can. They need no migration: t
 stay valid ledger entries, later Tier-3 surface changes have already expired them,
 and the legacy exemption ends on 2027-02-06.
 
-The committed cell oracle checks oracles 1–3 except three facets it cannot check
+The committed cell oracle checks oracles 1–3 except the facets it cannot check
 unattended: swap-on-the-wire substitution (it needs an endpoint that reports what it
 received), attach (it needs a terminal) and version fail-closed against a real
-older backend. Those stay with the Tier-1 vectors and Tier-2 tests and are tracked
+older backend. For oracle 1 on msb what it shows is narrower than "the trusted
+config is read-only": in the cell's own guest the trusted-config mount point is
+listed `ro` in `/proc/mounts`, a write to it fails with EROFS and the host directory
+behind it is unchanged; acq's record declares the mount; and the canary shows, in a
+separate sandbox, that this msb keeps a `:ro` volume read-only against remount
+attempts. It does not show that every trusted file acq relies on lives on that mount,
+and it makes no remount attempt in the cell's own guest. Those stay with the Tier-1 vectors and Tier-2 tests and are tracked
 in `docs/KNOWN_FAILURE_MODES.md`. The oracle runs every acq subprocess against a
 private configuration and state tree, and gives every identifier that reaches a
 backend's own store a per-run nonce, so a run leaves the operator's own credentials

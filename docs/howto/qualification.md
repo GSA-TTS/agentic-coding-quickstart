@@ -85,11 +85,18 @@ file, and hash to the `transcript_sha256` its ledger entry records. Anyone can c
 a ledger PR from the PR alone, in a checkout of its branch:
 
 ```bash
-gh pr view <number> --json body -q .body | python3 -m qualification.gate verify-evidence -
+gh pr view <number> --json body -q .body \
+  | python3 -m qualification.gate verify-evidence --base "$(git merge-base origin/main HEAD)" -
 ```
 
 It prints `OK <sha256>` for each block whose hash is recorded and whose entry the
-block reproduces field for field, and exits non-zero otherwise. Once the PR is open,
+block reproduces field for field. With `--base` it also requires exactly one such
+block for every entry the PR adds to the ledger (compared with the ledger as committed
+at that revision) and reports `MISSING` for an entry with none and `EXTRA` for a block
+that stands for any other entry. Without `--base` a body that leaves an entry out still
+passes, so always give it. It always rejects a block shown twice (`DUPLICATE`) and a
+block inside an HTML comment (`HIDDEN`), which GitHub does not render and so no
+reviewer sees. It exits `0` only when there is no problem. Once the PR is open,
 the copies the run leaves under `tmp/qualify-out-<time>/` are therefore disposable.
 (A transcript is ~1 KB of metadata and hashes: verdict, the oracle's argv, versions,
 host identity, commit and artifact SHA, and a *digest* of the observed output. The
@@ -144,7 +151,7 @@ musl libc, macOS x86_64 (Intel Mac, every backend), and sbx on Linux aarch64.
 
 | # | Oracle | What it proves | Host(s) it needs |
 |---|--------|----------------|------------------|
-| 1 | read-only trusted-config mount | acq records the host-enforced `:ro` mount for the sandbox, and this msb enforces `:ro` (the canary, run by the cell oracle) | msb on KVM/HVF |
+| 1 | read-only trusted-config mount | in the cell's own guest the mount is `ro`, a write fails with EROFS and the host directory is unchanged; acq records the mount; the canary (run by the cell oracle) shows this msb keeps `:ro` against remounts | msb on KVM/HVF |
 | 2 | secret binding and non-exposure | a credential bound before create shows up in the guest as a non-empty placeholder, the value is in neither the guest's environment nor PID 1's, and secret / provider-credential set/ls/rm never print it; swap-on-the-wire is not checked (see below) | msb and sbx |
 | 3 | real backend behaviour | create/ls/exec/rm boot contract and built-in kit apply (the committed cell oracle); attach and version fail-closed asserted elsewhere | msb and sbx |
 | 4 | offline completeness | network-blocked install + smoke | **blocked** (release automation) |
@@ -153,14 +160,29 @@ musl libc, macOS x86_64 (Intel Mac, every backend), and sbx on Linux aarch64.
 
 ### Oracle 1 — read-only trusted-config mount
 
-On msb cells the cell oracle checks two things. First, that the sandbox record acq
-wrote at create declares the host-enforced read-only trusted-config mount
-(`ro_host_config`, ADR-0035/ADR-0041m): that is what acq's own fail-closed gate
-keys on. Second, it runs the committed canary, which proves the `:ro` volume is
-actually enforced by this msb on this host (the canary is not what acq's gate
-depends on, but a cell does not qualify without it). The canary needs `bash` on
-`PATH` (Git Bash on Windows); without it the cell is `BLOCKED`. To run the canary
-alone, **outside** any sandbox:
+On msb cells the cell oracle checks, in the cell's **own** guest, the effect of the
+read-only trusted-config mount (ADR-0035/ADR-0041m):
+
+- `/proc/mounts` lists `/var/lib/acq/host` (where acq mounts the sandbox's host-config
+  directory) with the `ro` option;
+- a write there, as root when `sudo -n` works, fails with EROFS (`Read-only file
+  system`), not merely with a permission error;
+- the host directory acq keeps for the sandbox
+  (`<state>/provenance/msb/<sandbox>.<checksum>.config`, the Bash implementation's
+  layout) is byte-identical after the attempt.
+
+It also checks that acq's sandbox record declares the mount (`ro_host_config`, what
+acq's own fail-closed gate keys on), and runs the committed canary. The canary shows,
+in a sandbox of its own, that this msb keeps a `:ro` volume read-only even when the
+guest tries to remount it read-write; the cell oracle does not attempt a remount in its
+own guest. Canary exit `1` fails the cell; any other non-zero exit, a timeout, or no
+usable `bash` makes it `BLOCKED`. On Windows the WSL launcher (`System32\bash.exe`,
+and the Store alias) is never used, since it would run the canary inside a WSL
+distribution; Git Bash is looked for in its install locations, then any other `bash`
+on the absolute `PATH` entries. The canary always uses the default image: the oracle
+removes `QUALIFY_IMAGE` and `EXPECT_SHA`, and `ACQ_QUALIFY_OUT_DIR` is dropped with the
+other `ACQ_*` variables; `STEP_TIMEOUT` and `EXEC_TIMEOUT` are honoured. To run the
+canary alone, **outside** any sandbox:
 
 ```bash
 bash scripts/qualify-msb-ro-mount
@@ -172,13 +194,17 @@ evidence under `tmp/qualify-msb-ro-mount-<stamp>/`.
 ### Oracle 2 — secret binding and non-exposure
 
 Before creating the sandbox the cell oracle binds a throwaway value with
-`acq provider-credential set` (value on stdin only). Inside the guest the bound
-variable must hold a non-empty placeholder, and the value must appear in neither
-`env` nor `/proc/1/environ`. Host-side, `secret set/ls/rm` and
-`provider-credential set/ls/rm` must never print it. Both backends are checked:
-AGENTS.md documents a credential path on msb (`--secret ENV@HOST`) as well as on
-sbx. The Python implementation has no msb credential path yet, so msb cells fail
-here until it does.
+`acq provider-credential set` for the host `qualify.invalid` (reserved, so it can never
+resolve; value on stdin only). Inside the guest the bound variable must hold a
+non-empty placeholder, and the value must appear in neither `env` nor
+`/proc/1/environ`. If `/proc/1/environ` cannot be read, even with `sudo -n`, that is
+reported and the cell is `BLOCKED`, not passed. Host-side, `secret set/ls/rm` and
+`provider-credential set/ls/rm` must never print it; on msb the secret is set the way
+AGENTS.md documents for a service that is not built in
+(`secret set -g <service> --host qualify.invalid --env <nonce variable>`). Both
+backends are checked: AGENTS.md documents a credential path on msb (`--secret
+ENV@HOST`) as well as on sbx. The Python implementation has no msb credential path
+yet, so msb cells fail here until it does.
 
 Swap-on-the-wire (the real value, not the placeholder, reaching the bound host) is
 **not** checked: it needs an endpoint that reports what it received, and the oracle
@@ -192,11 +218,23 @@ subprocess gets a private configuration and state tree (`XDG_CONFIG_HOME`,
 `ACQ_SECRET_STORE_DIR`), deleted afterwards. The sandbox, the secret service, the
 provider id and the credential variable all carry a per-run nonce, so nothing in a
 backend's own store can be overwritten, and the sbx teardown removes only the custom
-secret whose variable is this run's. `HOME` is kept, because the backend CLIs keep
-their login, daemon and image cache there. The caller's `ACQ_*` variables are not
-passed to acq (a stub seam such as `ACQ_MSB_BIN=__stub__` would otherwise turn a live
-run into a stubbed one), and `msb`, `sbx` and `bash` are resolved from absolute
-`PATH` entries only.
+secrets whose variables are this run's. The names are printed to stderr before
+anything else, so a run that is killed outright can be cleaned up by hand. `HOME` is
+kept, because the backend CLIs keep their login, daemon and image cache there. The
+caller's `ACQ_*` variables are not passed to acq (a stub seam such as
+`ACQ_MSB_BIN=__stub__` would otherwise turn a live run into a stubbed one), except
+those ending in `_TIMEOUT`, such as `ACQ_MSB_READY_TIMEOUT`, which only tune timing.
+`PYTHONPATH` is fixed to this checkout's `py-acq/src`, the CLI runs under
+`python -P -s` (no current directory and no user site-packages on `sys.path`), and
+`msb`, `sbx` and `bash` are resolved from absolute `PATH` entries only.
+
+**Aborts.** When a run outlives the harness's `--timeout`, the harness sends SIGTERM
+(CTRL_BREAK on Windows), waits a grace period (a quarter of the timeout, at most 300
+seconds) and only then kills it. The oracle turns the signal into a normal exit and
+tears down. It is also given a deadline (`ACQ_QUALIFY_DEADLINE`) that ends one grace
+period before the timeout; at the deadline it stops starting steps, tears down and
+reports `BLOCKED`. Teardown always tries to remove the nonce-named sandbox, secret
+and provider binding, whether or not the run saw them created.
 
 ```bash
 V="$(sbx version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)"
@@ -456,8 +494,9 @@ it. See [`release-gate-setup.md`](release-gate-setup.md).
   pass, never a silent skip.
 - A missing backend CLI is a BLOCKED precondition: `scripts/qualify-backend-cell`
   exits `2` (the harness reports `OUTCOME BLOCKED`).
-- On msb, a missing `bash` (for the ro-mount canary), or a canary that cannot reach a
-  conclusion, is BLOCKED too, unless another step failed.
+- On msb, no usable `bash` (for the ro-mount canary), or a canary that exits with
+  anything but `0` or `1`, is BLOCKED too, unless another step failed; so is an
+  unreadable `/proc/1/environ`, and a run that reaches its deadline.
 - Any step failure prints `FAIL: <step>` to stderr and exits `1` (the harness
   applies the 3-attempt reproduction rule).
 - Oracle 4 stays **blocked** until release automation assembles and publishes

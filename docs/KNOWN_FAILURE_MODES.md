@@ -63,6 +63,14 @@ and (msb) the read-only trusted-config mount, including the committed
    (`py-acq/tests/test_exec.py`) until a PTY-driving step is added.
 3. **Version fail-closed against a real older backend.** Covered offline by the
    Tier-1 vectors; a live check needs a second, older backend install on the host.
+4. **Remount attempts in the cell's own guest.** The cell oracle checks `ro` in
+   `/proc/mounts`, an EROFS write and an unchanged host directory in its own guest;
+   attempts to remount read-write are made only by the canary, in a sandbox of its
+   own. The oracle also assumes the Bash layout for where acq keeps a sandbox's
+   host-config directory (`<state>/provenance/<backend>/<sandbox>.<checksum>.config`,
+   mounted at `/var/lib/acq/host`). **Unblock trigger:** the Python implementation
+   establishes the mount; then align the oracle's path constants with it and decide
+   whether to add a remount attempt to the cell's own guest.
 
 **Expected today:** the Python implementation fails the cell oracle on every
 cell (msb has no credential path, no built-in kits are applied, and no read-only

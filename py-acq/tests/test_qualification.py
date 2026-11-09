@@ -12,9 +12,12 @@ suite.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import pytest
 
 # The harness is repo-root tooling (not part of the acq_py package); make it
 # importable alongside the py-acq/src path conftest already adds.
@@ -429,3 +432,59 @@ def test_transcript_digests_output_never_persists_raw_output(monkeypatch):
     assert doc["attempts"][0]["output_sha256"] == sha256_hex(SECRET.encode())
     serialized = json.dumps(doc)
     assert SECRET not in serialized  # only the digest, never the raw value
+
+
+# --- timeouts: SIGTERM, a grace period, then SIGKILL; and an exported deadline ---
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+def test_a_timed_out_command_gets_sigterm_and_a_grace_period_to_tear_down(tmp_path, monkeypatch):
+    from qualification import runner
+
+    monkeypatch.setattr(runner, "_grace", lambda timeout: 10.0)
+    done = tmp_path / "tore-down"
+    script = (
+        "import signal, sys, time\n"
+        f"def stop(*_):\n    open({str(done)!r}, 'w').write('yes')\n    sys.exit(143)\n"
+        "signal.signal(signal.SIGTERM, stop)\n"
+        "time.sleep(60)\n"
+    )
+    t = runner._single_run([sys.executable, "-c", script], make_env(), 1, timeout=1.0)
+    assert t.verdict is Verdict.BLOCKED and t.detail == "command timed out"
+    assert done.read_text() == "yes"  # it was asked to stop, not killed outright
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+def test_a_command_that_ignores_sigterm_is_killed_after_the_grace_period(monkeypatch):
+    import time
+
+    from qualification import runner
+
+    monkeypatch.setattr(runner, "_grace", lambda timeout: 0.5)
+    script = "import signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\ntime.sleep(60)\n"
+    started = time.monotonic()
+    t = runner._single_run([sys.executable, "-c", script], make_env(), 1, timeout=1.0)
+    assert t.verdict is Verdict.BLOCKED and time.monotonic() - started < 30
+
+
+def test_the_command_gets_a_deadline_that_ends_before_the_timeout(tmp_path):
+    import time
+
+    from qualification import runner
+
+    out = tmp_path / "deadline"
+    script = f"import os; open({str(out)!r}, 'w').write(os.environ[{runner.DEADLINE_ENV!r}])"
+    before = time.time()
+    runner._single_run([sys.executable, "-c", script], make_env(), 1, timeout=400.0)
+    deadline = int(out.read_text())
+    assert before + 400 - runner._grace(400) - 2 <= deadline <= time.time() + 400 - runner._grace(400)
+    assert runner._grace(400) == 100 and runner._grace(1800) == runner.TERMINATE_GRACE
+
+
+def test_matrix_cell_state_applies_the_version_floors():
+    for version in ("0.7.1", "0.6.0", "0.7.5"):
+        refused = make_transcript(Verdict.PASS, make_env(backend_version=version))
+        assert cell_state("msb", "linux-x86_64", transcript=refused, now=NOW) is MatrixState.BLOCKED
+    green = make_transcript(Verdict.PASS, make_env(backend_version="0.7.7"))
+    assert cell_state("msb", "linux-x86_64", transcript=green, now=NOW) is MatrixState.QUALIFIED
+    assert cell_state("msb", "linux-x86_64", transcript=green, now=NOW, backend_version="0.7.1") is MatrixState.BLOCKED

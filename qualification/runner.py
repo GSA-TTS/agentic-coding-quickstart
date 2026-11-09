@@ -14,7 +14,9 @@ harness never records ``os.environ`` and never injects a secret into the command
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Sequence
@@ -42,6 +44,28 @@ EXIT_FLAKY = 3
 # a fixture can branch deterministically on the attempt. It is a nonce, never a
 # secret.
 ATTEMPT_ENV = "ACQ_QUALIFY_ATTEMPT"
+
+# A command that outlives its timeout is asked to stop (SIGTERM; CTRL_BREAK on
+# Windows) and given this long to tear down (at most a quarter of the timeout)
+# before it is killed. The deadline exported to it under ``DEADLINE_ENV`` (epoch
+# seconds) ends that long before the timeout, so a well-behaved oracle stops on
+# its own and tears down while the harness is still waiting.
+TERMINATE_GRACE = 300.0
+DEADLINE_ENV = "ACQ_QUALIFY_DEADLINE"
+
+
+def _grace(timeout: float) -> float:
+    return min(TERMINATE_GRACE, timeout / 4)
+
+
+def _stop(proc: subprocess.Popen, grace: float) -> None:
+    """Ask ``proc`` to stop, wait ``grace`` seconds for it, then kill it."""
+    try:
+        proc.send_signal(signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGTERM)
+        proc.communicate(timeout=grace)
+    except (subprocess.TimeoutExpired, OSError):
+        proc.kill()
+        proc.communicate()
 
 
 def _now() -> str:
@@ -73,20 +97,28 @@ def _single_run(
         return Transcript(
             Verdict.BLOCKED, environment, (), "", "no command supplied", _now()
         )
+    grace = _grace(timeout)
     child_env = dict(os.environ)
     child_env[ATTEMPT_ENV] = str(attempt)
+    child_env[DEADLINE_ENV] = str(int(time.time() + timeout - grace))
+    # Its own process group on Windows, so CTRL_BREAK reaches only the command.
+    flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
     try:
-        proc = subprocess.run(
-            list(command),
-            env=child_env,
-            capture_output=True,
-            timeout=timeout,
+        proc = subprocess.Popen(
+            list(command), env=child_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=flags
         )
     except FileNotFoundError:
         return Transcript(
             Verdict.BLOCKED, environment, tuple(command), "", "command not found", _now()
         )
+    except OSError:
+        return Transcript(
+            Verdict.BLOCKED, environment, tuple(command), "", "command could not start", _now()
+        )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
+        _stop(proc, grace)
         return Transcript(
             Verdict.BLOCKED, environment, tuple(command), "", "command timed out", _now()
         )
@@ -94,7 +126,7 @@ def _single_run(
     verdict = classify_exit(proc.returncode)
     # Digest only: raw stdout/stderr is discarded so a secret it may have printed
     # is never persisted.
-    output_sha256 = sha256_hex(proc.stdout + proc.stderr)
+    output_sha256 = sha256_hex(stdout + stderr)
     detail = f"exit {proc.returncode}"
     return Transcript(verdict, environment, tuple(command), output_sha256, detail, _now())
 
