@@ -5,7 +5,6 @@ kit-bundle provenance and application (ADR-0016, ADR-0030).
 from __future__ import annotations
 
 import json
-import sys
 
 from .. import backends, envelope, errors, kits, lock, sbx
 from . import common
@@ -248,7 +247,7 @@ def run_kit_update(parsed, emit_json: bool, backend_override: str | None) -> int
             print(f"sandbox '{name}' is already on the pinned bundle; nothing to do.")
         return errors.EXIT_SUCCESS
     if not parsed.yes:
-        if emit_json or not sys.stdin.isatty():
+        if emit_json or not common._stdin_is_terminal():
             return common._operational_failure(
                 "kit update",
                 errors.CONSENT_REQUIRED,

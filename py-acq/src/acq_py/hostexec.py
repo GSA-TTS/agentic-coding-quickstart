@@ -141,7 +141,55 @@ def override_command(value: str) -> list[str]:
 def stdin_is_tty() -> bool:
     """True when acq's stdin is a terminal, so a session can be given a PTY."""
     try:
-        return os.isatty(0)
+        if not os.isatty(0):
+            return False
+    except OSError:
+        return False
+    return not _is_windows() or _windows_console(0)
+
+
+def stream_is_terminal(stream) -> bool:
+    """True when ``stream`` (``sys.stdin``, say) is an interactive terminal.
+
+    ``isatty()`` alone is not enough on Windows: the NUL device is a character
+    device, so ``acq ... < NUL`` reports a TTY and anything that then waits for
+    keys hangs. There a file stream counts only when its handle is a real
+    console. A stream with no OS file behind it (a test double) is taken at its
+    ``isatty()`` word.
+    """
+    isatty = getattr(stream, "isatty", None)
+    try:
+        if isatty is None or not isatty():
+            return False
+    except (OSError, ValueError):  # a closed stream
+        return False
+    if not _is_windows():
+        return True
+    try:
+        fd = stream.fileno()
+    except (AttributeError, OSError, ValueError):
+        return True
+    return _windows_console(fd)
+
+
+def _windows_console(fd: int) -> bool:  # pragma: no cover - Windows only
+    """True when ``fd``'s handle is a console (``GetConsoleMode`` succeeds).
+
+    Any failure, including a handle that is not a console, reads as False.
+    """
+    if sys.platform != "win32":
+        return False
+    import ctypes
+    import msvcrt
+
+    try:
+        handle = msvcrt.get_osfhandle(fd)
+    except OSError:
+        return False
+    mode = ctypes.c_ulong()
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        return bool(kernel32.GetConsoleMode(ctypes.c_void_p(handle), ctypes.byref(mode)))
     except OSError:
         return False
 

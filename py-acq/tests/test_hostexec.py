@@ -226,3 +226,68 @@ def test_windows_planted_exe_is_not_resolved(workspace, monkeypatch):
     monkeypatch.setenv("PATH", ".")
     assert hostexec.which("git") is None
     assert hostexec.which("msb") is None
+
+
+# ---------------------------------------------------------------------------
+# Interactivity: on Windows, ``< NUL`` must not pass for a terminal.
+# ---------------------------------------------------------------------------
+
+class _Stream:
+    def __init__(self, tty, fileno=0):
+        self._tty = tty
+        self._fileno = fileno
+
+    def isatty(self):
+        if isinstance(self._tty, Exception):
+            raise self._tty
+        return self._tty
+
+    def fileno(self):
+        if isinstance(self._fileno, Exception):
+            raise self._fileno
+        return self._fileno
+
+
+def test_stream_is_terminal_needs_a_console_on_windows(monkeypatch):
+    consoles = []
+    monkeypatch.setattr(hostexec, "_windows_console", lambda fd: consoles.append(fd) or False)
+    monkeypatch.setattr(hostexec, "_is_windows", lambda: False)
+    assert hostexec.stream_is_terminal(_Stream(True)) is True
+    assert hostexec.stream_is_terminal(_Stream(False)) is False
+    assert hostexec.stream_is_terminal(_Stream(ValueError("closed"))) is False
+    assert hostexec.stream_is_terminal(object()) is False
+    assert consoles == []  # POSIX never asks for a console
+
+    # Windows: NUL is a character device, so isatty() says True; the console
+    # check decides. A stream with no OS file is taken at its word.
+    monkeypatch.setattr(hostexec, "_is_windows", lambda: True)
+    assert hostexec.stream_is_terminal(_Stream(True, fileno=7)) is False
+    assert consoles == [7]
+    assert hostexec.stream_is_terminal(_Stream(True, fileno=OSError("no fd"))) is True
+    monkeypatch.setattr(hostexec, "_windows_console", lambda fd: True)
+    assert hostexec.stream_is_terminal(_Stream(True)) is True
+
+
+def test_stdin_is_tty_needs_a_console_on_windows(monkeypatch):
+    monkeypatch.setattr(hostexec.os, "isatty", lambda fd: True)
+    monkeypatch.setattr(hostexec, "_is_windows", lambda: True)
+    monkeypatch.setattr(hostexec, "_windows_console", lambda fd: False)
+    assert hostexec.stdin_is_tty() is False
+    monkeypatch.setattr(hostexec, "_windows_console", lambda fd: True)
+    assert hostexec.stdin_is_tty() is True
+    monkeypatch.setattr(hostexec, "_is_windows", lambda: False)
+    assert hostexec.stdin_is_tty() is True
+
+    def broken(fd):
+        raise OSError("bad fd")
+
+    monkeypatch.setattr(hostexec.os, "isatty", broken)
+    assert hostexec.stdin_is_tty() is False
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the Windows console check itself")
+def test_nul_is_not_a_console_on_windows():
+    with open(os.devnull, "rb") as nul:
+        assert os.isatty(nul.fileno())  # the trap this guards against
+        assert hostexec._windows_console(nul.fileno()) is False
+        assert hostexec.stream_is_terminal(nul) is False

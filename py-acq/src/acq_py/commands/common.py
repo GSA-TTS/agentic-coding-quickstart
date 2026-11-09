@@ -19,6 +19,7 @@ from .. import (
     config,
     envelope,
     errors,
+    hostexec,
     kits,
     msb,
     sbx,
@@ -386,8 +387,7 @@ def _read_secret_value(prompt: str = "Enter secret value: ") -> str:
     The value is returned to the caller and must never be printed, logged, or
     placed on argv. An empty result signals "no value was piped".
     """
-    isatty = getattr(sys.stdin, "isatty", None)
-    if isatty is not None and isatty():
+    if _stdin_is_terminal():
         return _read_secret_tty(prompt)
     mintty = _stdin_is_mintty()
     if mintty:
@@ -399,6 +399,12 @@ def _read_secret_value(prompt: str = "Enter secret value: ") -> str:
         if data.endswith("\r"):  # optional preceding CR (CRLF terminator)
             data = data[:-1]
     return data
+
+
+def _stdin_is_terminal() -> bool:
+    """True when stdin is an interactive terminal (a real console on Windows,
+    where ``< NUL`` would otherwise pass for one)."""
+    return hostexec.stream_is_terminal(sys.stdin)
 
 
 def _validate_workspace(command: str, path: str | None, emit_json: bool) -> tuple[str | None, int | None]:

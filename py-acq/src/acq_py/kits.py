@@ -338,6 +338,16 @@ def extra_kits() -> list[str]:
     return [t for t in os.environ.get("ACQ_EXTRA_KITS", "").split() if t]
 
 
+# The authority part up to its last "@", so a raw "@" in a token cannot leak the rest.
+_USERINFO_RE = re.compile(r"(://)[^/?#\s]*@")
+
+
+def redact_userinfo(text: str) -> str:
+    """Replace the userinfo of any URL in ``text`` (``scheme://user:token@host``)
+    with ``***``, so a credential embedded in a kit ref is never displayed."""
+    return _USERINFO_RE.sub(r"\1***@", text)
+
+
 def kit_list_data() -> dict:
     """Assemble the ``kit list`` required result data (ADR-0038m §2).
 
@@ -348,8 +358,8 @@ def kit_list_data() -> dict:
     return {
         "control_plane_ref": control_plane_ref(),
         "built_in": list(BUILTIN_NEUTRAL_NAMES),
-        "provider": provider_kits(),
-        "extra": extra_kits(),
+        "provider": [redact_userinfo(k) for k in provider_kits()],
+        "extra": [redact_userinfo(k) for k in extra_kits()],
     }
 
 

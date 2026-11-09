@@ -682,9 +682,9 @@ class Cell:
             # The canary removes its own sandbox, unless it was killed first.
             self.raw(["msb", "remove", "--force", n.canary_sandbox], timeout=TEARDOWN_TIMEOUT)
         if self.backend == "sbx":
-            # ``provider-credential rm`` drops only acq's binding; sbx keeps the
-            # custom secret it created. Remove that one, found by this run's
-            # nonce-named variables, never by a fixed name.
+            # ``provider-credential rm`` removes the custom secret it created, but
+            # an aborted run or a failed removal can leave one. Sweep for it, found
+            # by this run's nonce-named variables, never by a fixed name.
             remove_sbx_custom_secrets(self.raw, {n.key_env, n.secret_env})
 
 

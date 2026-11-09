@@ -370,6 +370,9 @@ def _secret_rm_placeholder(rest: list[str]) -> int:
         return 1
     if not _confirmed(rest):
         return 1
+    if _should_fail("secret rm"):
+        print(RAW_FAIL_STDERR, file=sys.stderr)
+        return 1
     sandbox = _arg_after(rest, "--sandbox")
     entries = _load_custom()
     keep = [e for e in entries if e["placeholder"] != token or (sandbox is not None and e["scope"] != sandbox)]

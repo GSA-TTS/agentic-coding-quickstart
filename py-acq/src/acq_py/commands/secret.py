@@ -480,8 +480,7 @@ def _confirm(svc: str, envvar: str, scope: secretstore.Scope, exists: bool, prev
     ``ACQ_SECRET_IMPORT_ASSUME_YES`` answers yes (Bash parity)."""
     if os.environ.get("ACQ_SECRET_IMPORT_ASSUME_YES"):
         return None
-    isatty = getattr(sys.stdin, "isatty", None)
-    if isatty is None or not isatty():
+    if not common._stdin_is_terminal():
         say(f"acq: '{svc}' detected in ${envvar} but stdin is not a TTY; skipping (use --all/--force).")
         return "not_a_tty"
     if exists:
