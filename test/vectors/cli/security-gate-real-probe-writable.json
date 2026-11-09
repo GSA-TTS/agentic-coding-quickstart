@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "id": "cli/security-gate-real-probe-writable",
-  "oracle": "ADR-0035 real read-only-mount probe fails closed: when guest root can write to the read-only host-config mount, create refuses with security_exception and removes the sandbox (the follow-up run finds no such sandbox)",
+  "oracle": "(POSIX hosts; Windows never requests the mount) ADR-0035 real read-only-mount probe fails closed: when guest root can write to the read-only host-config mount, create refuses with security_exception and removes the sandbox (the follow-up run finds no such sandbox)",
   "tier": 1,
   "backend": null,
-  "platform": "any",
+  "platform": "linux",
   "invoke": {
     "argv": [
       "{python}",

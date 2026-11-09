@@ -350,7 +350,8 @@ def test_recreate_preserves_host_record(monkeypatch, tmp_path, capsys):
     record = state.record_read("msb", "sec")
     assert record["agent"] == "opencode"
     assert record["workspace"] == workspace
-    assert record.get("ro_host_config") is True
+    # Re-established where this host can have it; never claimed on Windows.
+    assert record.get("ro_host_config") is (True if security.ro_mount_supported() else None)
 
 
 # ---------------------------------------------------------------------------

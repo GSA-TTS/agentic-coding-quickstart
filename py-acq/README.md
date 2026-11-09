@@ -82,6 +82,15 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   mount is missing. Explicit and consent-gated — a non-interactive run without
   `--yes` refuses with `consent_required`; host records and secrets are
   preserved, only the guest filesystem is lost.
+* The read-only trusted-config mount (ADR-0035) is msb-only, and POSIX-only. On
+  Linux and macOS with msb 0.7.7 or later, create mounts the sandbox's
+  host-config directory `:ro` and records `ro_host_config` once `msb inspect`
+  and a guest probe confirm it; with an older msb, recreate refuses until msb
+  is upgraded. On Windows, msb's filesystem backend was not reviewed for
+  read-only enforcement, so acq never asks for the mount there: sandboxes are
+  created without it, and `create --recreate` rebuilds a sandbox the same way
+  a fresh create would (`"ro_host_config": false`) instead of refusing or
+  looping. See KNOWN_FAILURE_MODES §54.
 * `acq-py run AGENT PATH [--name N] [--image REF] [--json]` — create (if missing)
   then launch the agent in the foreground; `acq-py run NAME` re-attaches to an
   existing sandbox by name.

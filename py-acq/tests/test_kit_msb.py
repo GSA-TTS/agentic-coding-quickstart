@@ -33,7 +33,11 @@ needs_bash = pytest.mark.skipif(
 )
 
 
-def _env(monkeypatch, tmp_path, *, version="0.7.7", catalog=None):
+def _env(monkeypatch, tmp_path, *, version="0.7.7", catalog=None, windows=False):
+    # The read-only mount is requested on POSIX hosts only. In-process tests
+    # choose the host class through the module seam, so the POSIX path is also
+    # exercised on a Windows runner (and the Windows path on POSIX).
+    monkeypatch.setattr(security, "WINDOWS", windows)
     monkeypatch.setenv("ACQ_MSB_BIN", "__stub__")
     monkeypatch.setenv("ACQ_MSB_VERSION", version)
     monkeypatch.setenv("ACQ_MSB_INSTALLED", "1")
@@ -216,7 +220,8 @@ def test_create_mounts_the_host_config_read_only_and_records_it_once_confirmed(m
     argv = _create_argv(seen)
     hcfg = os.path.realpath(security.host_config_dir("box"))
     assert ["--volume", f"{hcfg}:{GUEST}:ro"] == argv[argv.index(f"{hcfg}:{GUEST}:ro") - 1:][:2]
-    assert stat.S_IMODE(os.stat(hcfg).st_mode) == 0o711
+    if os.name != "nt":
+        assert stat.S_IMODE(os.stat(hcfg).st_mode) == 0o711
     # Confirmed before the record was written: inspect, then the two guest probes.
     after = seen[seen.index(argv) + 1:]
     assert ["inspect", "box", "--format", "json"] in after
@@ -412,8 +417,11 @@ def test_readonly_file_is_staged_on_the_mount_and_commands_use_it(monkeypatch, t
     assert staged_guest.startswith(f"{GUEST}/kit-files/home-agent-local-bin-start-sh.")
     host = security.host_config_dir("box") / "kit-files" / staged_guest.rsplit("/", 1)[1]
     assert host.read_text(encoding="utf-8") == "echo hi\n"
-    assert stat.S_IMODE(host.stat().st_mode) == 0o555
-    assert stat.S_IMODE(host.parent.stat().st_mode) == 0o711
+    if os.name != "nt":
+        assert stat.S_IMODE(host.stat().st_mode) == 0o555
+        assert stat.S_IMODE(host.parent.stat().st_mode) == 0o711
+    else:
+        assert not os.access(host, os.W_OK)  # the read-only attribute
     # Only the plain file is copied into the guest; the command runs the staged copy.
     assert [dst for _src, dst in guest.copies] == ["box:/home/agent/conf/plain.txt"]
     ((_flags, argv),) = guest.commands()
@@ -637,7 +645,8 @@ def test_create_registers_the_startup_script_and_removes_the_staged_file(monkeyp
     assert argv[argv.index("--script-path") + 1].startswith(f"{kit_msb.STARTUP_SCRIPT_NAME}:")
     # Bash parity: the first kit with startup commands (the CA kit) stakes it.
     assert "update-ca-certificates" in bodies["text"]
-    assert stat.S_IMODE(bodies["path"].parent.stat().st_mode) == 0o700
+    if os.name != "nt":
+        assert stat.S_IMODE(bodies["path"].parent.stat().st_mode) == 0o700
     assert not bodies["path"].exists()
 
 
@@ -709,7 +718,10 @@ def test_restaging_a_readonly_file_replaces_the_0555_copy(monkeypatch, tmp_path)
     assert kit_msb.stage_readonly_file("box", "/home/agent/start.sh", src) == guest  # no EACCES
     dest = security.host_config_dir("box") / "kit-files" / guest.rsplit("/", 1)[1]
     assert dest.read_text(encoding="utf-8") == "two\n"
-    assert stat.S_IMODE(dest.stat().st_mode) == 0o555
+    if os.name != "nt":
+        assert stat.S_IMODE(dest.stat().st_mode) == 0o555
+    else:
+        assert not os.access(dest, os.W_OK)  # the read-only attribute
     assert sorted(p.name for p in dest.parent.iterdir()) == [dest.name]  # no temp file left
 
 
@@ -761,3 +773,66 @@ def test_recorded_extra_kits_replace_the_environment(monkeypatch, tmp_path):
     monkeypatch.setenv("ACQ_EXTRA_KITS", "would-need-a-fetch")
     names = [k.name for k in kit_msb.select("shell", [], image_is_default=True, extras=[ref])]
     assert names == BUILTINS  # the recorded extra replaced the env; deduped against the built-in
+
+
+# ---------------------------------------------------------------------------
+# Windows: no read-only mount, and recreate does not refuse or loop.
+# ---------------------------------------------------------------------------
+
+
+def test_windows_create_asks_for_no_mount_and_records_none(monkeypatch, tmp_path, capsys):
+    ws = _env(monkeypatch, tmp_path, windows=True)
+    seen = _spy(monkeypatch)
+    rc, doc = _invoke(capsys, "--backend", "msb", "create", "shell", str(ws), "--name", "box", "--json")
+    assert rc == 0 and doc["data"]["ro_host_config"] is False
+    assert not any(t.endswith(f"{GUEST}:ro") for t in _create_argv(seen))
+    assert not [a for a in seen if a[0] == "inspect"]
+    assert not state.record_read("msb", "box").get("ro_host_config")
+
+
+def test_windows_gate_refuses_a_recorded_mount_and_names_the_platform(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path, catalog={"sec": "running"}, windows=True)
+    with pytest.raises(security.SecurityException) as info:
+        security.assert_trusted(_SEC, "msb", "sec")
+    assert security.PLATFORM_PROBLEM in info.value.message
+    assert "upgrade msb" not in (info.value.remediation or "")  # an upgrade would not help
+    assert "--recreate sec" in (info.value.remediation or "")
+
+
+def test_windows_recreate_proceeds_without_claiming_the_mount_and_does_not_loop(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path, windows=True)
+    _seed_sec()
+    seen = _spy(monkeypatch)
+    rc, doc = _invoke(capsys, "--backend", "msb", "create", "--recreate", "sec", "--yes", "--json")
+    assert rc == 0 and doc["data"]["recreated"] is True and doc["data"]["ro_host_config"] is False
+    assert not any(t.endswith(f"{GUEST}:ro") for t in _create_argv(seen))
+    assert not state.record_read("msb", "sec").get("ro_host_config")
+    monkeypatch.setattr(msb, "launch", lambda *a, **k: 0)
+    rc, doc = _invoke(capsys, "--backend", "msb", "run", "sec", "--json")
+    assert rc == 0 and doc["data"]["action"] == "reattached"
+    # A second recreate is refused: nothing is missing any more.
+    rc, doc = _invoke(capsys, "--backend", "msb", "create", "--recreate", "sec", "--yes", "--json")
+    assert rc == 1 and doc["error"]["code"] == errors.VALIDATION_FAILED
+
+
+def test_windows_recreate_tells_a_human_the_mount_was_not_established(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path, windows=True)
+    _seed_sec()
+    assert cli.main(["--backend", "msb", "create", "--recreate", "sec", "--yes"]) == 0
+    out = capsys.readouterr().out
+    assert "recreated sandbox 'sec'" in out and "was not established" in out
+
+
+def test_restaging_on_windows_clears_the_read_only_attribute_first(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setattr(kit_msb, "WINDOWS", True)
+    calls = []
+    real_chmod = os.chmod
+    monkeypatch.setattr(os, "chmod", lambda p, m, **kw: calls.append((str(p), m)) or real_chmod(p, m, **kw))
+    src = tmp_path / "s.sh"
+    src.write_text("a\n", encoding="utf-8")
+    guest = kit_msb.stage_readonly_file("box", "/home/agent/s.sh", src)
+    dest = str(security.host_config_dir("box") / "kit-files" / guest.rsplit("/", 1)[1])
+    assert (dest, stat.S_IWRITE) not in calls  # nothing to clear the first time
+    kit_msb.stage_readonly_file("box", "/home/agent/s.sh", src)
+    assert (dest, stat.S_IWRITE) in calls

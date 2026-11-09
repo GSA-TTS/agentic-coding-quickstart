@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "id": "cli/security-recreate-then-run",
-  "oracle": "Recreate establishes the guarantee: create --recreate establishes the read-only mount it promises, so the next run re-attaches through the real probe instead of hitting security_exception again",
+  "oracle": "(POSIX hosts; the seeded record is re-seeded on every call, so Windows is covered by cli/security-recreate-windows and in-process tests) Recreate establishes the guarantee: create --recreate establishes the read-only mount it promises, so the next run re-attaches through the real probe instead of hitting security_exception again",
   "tier": 1,
   "backend": null,
-  "platform": "any",
+  "platform": "linux",
   "invoke": {
     "argv": [
       "{python}",

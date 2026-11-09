@@ -65,10 +65,27 @@ def host_config_dir(name: str) -> Path:
     return lock.bash_provenance_dir() / "msb" / f"{lock.bash_sandbox_key(name)}.config"
 
 
+# Module-local seam for the host OS class, so the Windows behaviour is testable
+# on a POSIX host (as ``msb.WINDOWS``).
+WINDOWS = os.name == "nt"
+
+PLATFORM_PROBLEM = "this platform's msb filesystem backend was not reviewed for read-only enforcement"
+
+
+def ro_mount_platform_problem() -> str | None:
+    """Why this host cannot have the read-only mount at all (Windows), or ``None``.
+
+    Unlike an old msb this is not something the user can fix: acq never asks
+    for the mount here, so no sandbox created on this host records it.
+    """
+    return PLATFORM_PROBLEM if WINDOWS else None
+
+
 def ro_mount_version_problem() -> str | None:
     """Why acq cannot rely on a read-only mount with the installed msb, or ``None``."""
-    if os.name == "nt":
-        return "this platform's msb filesystem backend was not reviewed for read-only enforcement"
+    platform = ro_mount_platform_problem()
+    if platform is not None:
+        return platform
     status = backends.detect(backends.BACKENDS["msb"])
     parsed = status.parsed
     if parsed is None or not parsed.final or not backends.version_ge(parsed, RO_MOUNT_MIN_VERSION):
@@ -158,7 +175,7 @@ def assert_trusted(record: dict | None, backend: str, name: str) -> None:
         f"recreate it with 'acq create --recreate {name} --yes' — host records and "
         f"secrets are preserved, the guest filesystem is lost"
     )
-    if backend == "msb" and os.name != "nt" and ro_mount_version_problem() is not None:
+    if backend == "msb" and not WINDOWS and ro_mount_version_problem() is not None:
         remediation = f"upgrade msb to {RO_MOUNT_MIN_VERSION.string} or newer, then {remediation}"
     raise SecurityException(
         errors.SECURITY_EXCEPTION,

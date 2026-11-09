@@ -31,7 +31,7 @@ from pathlib import Path
 
 import pytest
 
-from acq_py import cli, errors, kit_msb, kits, lock, msb, state
+from acq_py import cli, errors, kit_msb, kits, lock, msb, security, state
 from acq_py.commands import common
 
 _INSTALL = ["sh", "/home/agent/opencode-install.sh"]
@@ -195,8 +195,10 @@ _SEC_RECORD = {
 }
 
 
-def test_recreate_kit_failure_keeps_the_host_record_for_a_retry(monkeypatch, tmp_path, capsys):
+@pytest.mark.parametrize("windows", [False, True], ids=["posix", "windows"])
+def test_recreate_kit_failure_keeps_the_host_record_for_a_retry(monkeypatch, tmp_path, capsys, windows):
     _env(monkeypatch, tmp_path)
+    monkeypatch.setattr(security, "WINDOWS", windows)  # Windows never gets the read-only mount
     _write_catalog(tmp_path, {"sec": "running"})
     path = state.record_path("msb", "sec")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -217,7 +219,7 @@ def test_recreate_kit_failure_keeps_the_host_record_for_a_retry(monkeypatch, tmp
     record = state.record_read("msb", "sec")
     assert record is not None
     assert record["agent"] == "opencode"
-    assert record.get("ro_host_config") is True
+    assert record.get("ro_host_config") is True  # the record the recreate started from
     assert not _kit_record_path("msb", "sec").exists()
 
     monkeypatch.setattr(kit_msb, "apply_kit", real_apply)

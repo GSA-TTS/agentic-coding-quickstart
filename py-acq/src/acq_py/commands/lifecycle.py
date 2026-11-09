@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from dataclasses import dataclass
 
@@ -692,7 +693,7 @@ def _recreate_locked(name: str, emit_json: bool, backend: str) -> int:
             f"remove it with 'acq rm {name}' and create it again",
             emit_json,
         )
-    data, exit_code = _recreate_msb(name, agent, workspace, image, emit_json)
+    data, exit_code = _recreate_msb(name, record, agent, workspace, image, emit_json)
     if data is None:
         return exit_code if exit_code is not None else errors.EXIT_FAILURE
     data = {**data, "recreated": True}
@@ -700,19 +701,27 @@ def _recreate_locked(name: str, emit_json: bool, backend: str) -> int:
         print(json.dumps(envelope.success("create", data)))
     else:
         print(f"recreated sandbox '{name}' (host records and secrets preserved).")
+        if not data.get("ro_host_config"):
+            print(f"note: {security.PLATFORM_PROBLEM}, so the read-only trusted-config mount was not established "
+                  "(see docs/KNOWN_FAILURE_MODES.md, section 54).")
     return errors.EXIT_SUCCESS
 
 
-def _recreate_msb(name: str, agent: str, workspace: str, image: str, emit_json: bool) -> tuple[dict | None, int | None]:
-    """Replace the guest with one that has a confirmed read-only mount, then reapply its kits.
+def _recreate_msb(
+    name: str, record: dict, agent: str, workspace: str, image: str, emit_json: bool
+) -> tuple[dict | None, int | None]:
+    """Replace the guest with what a fresh create on this host builds, then reapply its kits.
 
-    Everything that can refuse (the msb version, the kit set, the substrate,
-    the egress policy) is checked BEFORE the old guest is removed. On a kit
-    failure the new guest goes but the state record stays, so the recreate can
-    be retried.
+    Where the read-only mount is possible it is established and confirmed. An
+    msb too old for it is refused (upgrading fixes it). On a host that can never
+    have it (Windows) the guest is recreated without it and the new record does
+    not claim it, exactly as a fresh create there: refusing would only force
+    ``rm`` and ``create`` for the same result, and recording it would loop.
+    Everything that can refuse is checked BEFORE the old guest is removed. On a
+    kit failure the new guest goes but the state record stays, for a retry.
     """
     problem = security.ro_mount_version_problem()
-    if problem is not None:
+    if problem is not None and security.ro_mount_platform_problem() is None:
         return None, common._operational_failure(
             "create", errors.VALIDATION_FAILED,
             f"cannot recreate sandbox '{name}' with a read-only trusted-config mount: {problem}",
@@ -737,8 +746,22 @@ def _recreate_msb(name: str, agent: str, workspace: str, image: str, emit_json: 
     result, exit_code = _apply_msb_kits(name, plan, steps, "create", emit_json, ro_required=data["ro_host_config"])
     if result is None:
         _discard_recreated_guest("msb", name)
+        _restore_record("msb", name, record)
         return None, exit_code
     return {**data, **_kit_data(plan, result)}, None
+
+
+def _restore_record(backend: str, name: str, record: dict) -> None:
+    """Put back the record a failed recreate started from, so the recreate can be retried.
+
+    The new guest's record may say less (on Windows it never claims the
+    read-only mount), and a retry is only eligible while the record still
+    says what the sandbox is missing.
+    """
+    try:
+        state.atomic_write_text(state.record_path(backend, name), json.dumps(record, indent=2) + "\n")
+    except OSError:
+        print(f"acq: warning: could not restore the host record of '{name}'", file=sys.stderr)
 
 
 def _run_prepare_locked(

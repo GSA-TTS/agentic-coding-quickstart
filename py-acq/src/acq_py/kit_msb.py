@@ -29,6 +29,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import stat
 import sys
 import tempfile
 from collections.abc import Callable, Iterable
@@ -37,6 +38,8 @@ from pathlib import Path
 
 from . import errors, kitspec, lock, msb, security, state
 
+# Module-local seam for the host OS class (as ``msb.WINDOWS``).
+WINDOWS = os.name == "nt"
 STARTUP_SCRIPT_NAME = "acq-startup"
 STARTUP_STAGE_DIR_ENV = "ACQ_MSB_STARTUP_STAGE_DIR"
 KEEP_STARTUP_STAGE_ENV = "ACQ_MSB_KEEP_STARTUP_STAGE"
@@ -515,6 +518,9 @@ def stage_readonly_file(name: str, guest_path: str, src: Path) -> str:
         with os.fdopen(fd, "wb") as out, open(src, "rb") as inp:
             shutil.copyfileobj(inp, out)
         os.chmod(tmp, 0o555)  # nosec B103 # read-only kit code the guest must read and run (Bash stages it 0555)
+        if WINDOWS and dest.exists():
+            # Windows refuses to replace a file with the read-only attribute.
+            os.chmod(dest, stat.S_IWRITE)
         os.replace(tmp, dest)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
