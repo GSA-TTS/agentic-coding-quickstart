@@ -195,6 +195,60 @@ load 'helper'
   done
 }
 
+# attach, the kit verbs and create --recreate name an existing sandbox too, so
+# they refuse the same path-shaped names before reaching the backend (as the
+# Python implementation does).
+@test "name-form verbs: attach, kit apply/check/update and create --recreate refuse path-shaped names" {
+  local bad
+  for bad in '../x' 'a/b' 'a\b' '..' '.' $'x\ny'; do
+    : >"$CALLS"
+    run env ACQ_BACKEND=msb "$ACQ" attach "$bad"
+    assert_failure
+    assert_output --partial 'acq: attach: refusing sandbox name'
+    run env ACQ_BACKEND=msb "$ACQ" attach --flag "$bad"
+    assert_failure
+    assert_output --partial 'acq: attach: refusing sandbox name'
+    run env ACQ_BACKEND=msb "$ACQ" attach -- "$bad"
+    assert_failure
+    assert_output --partial 'acq: attach: refusing sandbox name'
+    run env ACQ_BACKEND=msb "$ACQ" kit apply "$bad" ./kit
+    assert_failure
+    assert_output --partial 'acq: kit apply: refusing sandbox name'
+    run env ACQ_BACKEND=msb "$ACQ" kit check "$bad"
+    assert_failure
+    assert_output --partial 'acq: kit check: refusing sandbox name'
+    run env ACQ_BACKEND=msb "$ACQ" kit update "$bad" --yes
+    assert_failure
+    assert_output --partial 'acq: kit update: refusing sandbox name'
+    run env ACQ_BACKEND=msb "$ACQ" create --recreate "$bad"
+    assert_failure
+    assert_output --partial 'acq: create: refusing sandbox name'
+    run env ACQ_BACKEND=msb "$ACQ" create "--recreate=$bad"
+    assert_failure
+    assert_output --partial 'acq: create: refusing sandbox name'
+    refute_regex "$(cat "$CALLS")" '^msb '
+  done
+  # A trailing --recreate with no value is an empty name.
+  run env ACQ_BACKEND=msb "$ACQ" create --recreate
+  assert_failure
+  assert_output --partial "acq: create: refusing sandbox name ''"
+}
+
+@test "name-form verbs: a path-safe attach name, and --recreate after --, pass the check" {
+  : >"$CALLS"
+  run env ACQ_BACKEND=msb "$ACQ" attach 'odd.name:1'
+  refute_output --partial 'refusing sandbox name'
+  assert_regex "$(cat "$CALLS")" 'msb attach odd\.name:1'
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    _acq_recreate_name_check opencode . -- --recreate ../x && echo ok-after-dashdash
+    _acq_recreate_name_check opencode . --kit k --recreate good-name && echo ok-good
+  '
+  assert_success
+  assert_line ok-after-dashdash
+  assert_line ok-good
+}
+
 @test "name-form verbs: rm ../victim leaves directories outside the state dir untouched" {
   export ACQ_MSB_CLONES_DIR="$STUBDIR/state-clones"
   mkdir -p "$ACQ_MSB_CLONES_DIR" "$STUBDIR/victim"

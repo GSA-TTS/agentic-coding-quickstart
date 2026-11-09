@@ -677,6 +677,41 @@ refused"
   _assert_work_empty
 }
 
+@test "userdirs: acq_tmp_dir honours only an absolute TMPDIR" {
+  run env TMPDIR="$STUBDIR/abs-tmp" bash -c '. "$1/acq.backends/userdirs.sh"; acq_tmp_dir' _ "$REPO_ROOT"
+  assert_success
+  assert_output "$STUBDIR/abs-tmp"
+  run env TMPDIR=rel-tmp bash -c '. "$1/acq.backends/userdirs.sh"; acq_tmp_dir' _ "$REPO_ROOT"
+  assert_output '/tmp'
+  run env -u TMPDIR bash -c '. "$1/acq.backends/userdirs.sh"; acq_tmp_dir' _ "$REPO_ROOT"
+  assert_output '/tmp'
+}
+
+# Every acq scratch site goes through acq_tmp_dir (or, for the kit translator
+# loaded on its own, the same rule), so a relative TMPDIR never puts a file or
+# directory under the current directory.
+@test "common: scratch files ignore a relative TMPDIR" {
+  # No mktemp site builds its template from TMPDIR directly or leaves it to
+  # mktemp's own TMPDIR default.
+  run grep -nE 'mktemp[^|]*TMPDIR|mktemp\)|mktemp( -d)?$' \
+    "$REPO_ROOT/acq" "$REPO_ROOT/acq.backends/common.sh" \
+    "$REPO_ROOT/acq.backends/msb.sh" "$REPO_ROOT/acq.backends/sbx.sh" \
+    "$REPO_ROOT/acq.backends/kit-translate.sh"
+  assert_failure
+
+  # The kit translator applies the same rule when it is loaded on its own.
+  run env TMPDIR=rel-tmp bash -c '. "$1/acq.backends/kit-translate.sh"; _kit_tmp_dir' _ "$REPO_ROOT"
+  assert_output '/tmp'
+  printf 'schemaVersion: "hybrid/v1"\nname: t\n' >"$STUBDIR/spec.yaml"
+  run env TMPDIR=rel-tmp bash -c '
+    . "$1/acq.backends/kit-translate.sh"
+    _kit_sbx_emit_setup "$2/spec.yaml" "$2/out.yaml" && echo emitted
+  ' _ "$REPO_ROOT" "$STUBDIR"
+  assert_success
+  assert_output 'emitted'
+  _assert_work_empty
+}
+
 @test "common: a relative LOCALAPPDATA on Git Bash is ignored for the validator data dir" {
   local fake="$STUBDIR/fake-acq" want="$HOME/.local/share/acq/provider-input-validator"
   printf '#!/bin/sh\necho MINGW64_NT-10.0\n' >"$STUBDIR/uname"

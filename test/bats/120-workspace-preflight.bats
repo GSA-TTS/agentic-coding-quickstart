@@ -92,6 +92,46 @@ _pf_out() { # PATH
   assert_output ''
 }
 
+@test "identity: an inherited GIT_DIR or GIT_CONFIG does not change what is read" {
+  # Another repository WITH an email: a GIT_DIR pointing at it must not hide that
+  # the workspace repo has none.
+  mkdir -p "$WT/other"
+  ( cd "$WT/other" && git init -q && git config user.email other@example.gov )
+  run bash -c '
+    export HOME="'"$WT"'/fakehome" GIT_CONFIG_NOSYSTEM=1
+    export GIT_DIR="'"$WT"'/other/.git" GIT_WORK_TREE="'"$WT"'/other"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    warn_if_no_git_identity "'"$WT"'/repoA" 2>&1
+  '
+  assert_output --partial 'this repo has no git user.email'
+
+  # GIT_CONFIG makes `git config --global` fail outright ("only one config file
+  # at a time"); the global email must still be found. The workspace has no
+  # repos, so no repo read can find it instead: an unisolated global lookup
+  # falls through to the new-workspace note.
+  mkdir -p "$WT/gchome"
+  printf '[core]\n\tbare = false\n' >"$WT/noemail.gitconfig"
+  run bash -c '
+    export HOME="'"$WT"'/gchome" GIT_CONFIG_NOSYSTEM=1
+    git config --global user.email global@example.gov
+    export GIT_CONFIG="'"$WT"'/noemail.gitconfig"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    warn_if_no_git_identity "'"$WT"'/wsC" 2>&1
+  '
+  assert_output ''
+
+  # With no host identity, the repo read itself must ignore a GIT_CONFIG file
+  # that does set an email: it is not the workspace repo's configuration.
+  printf '[user]\n\temail = injected@example.gov\n' >"$WT/email.gitconfig"
+  run bash -c '
+    export HOME="'"$WT"'/fakehome" GIT_CONFIG_NOSYSTEM=1
+    export GIT_CONFIG="'"$WT"'/email.gitconfig"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    warn_if_no_git_identity "'"$WT"'/repoA" 2>&1
+  '
+  assert_output --partial 'this repo has no git user.email'
+}
+
 @test "identity: incomplete explicit host env still warns" {
   run bash -c '
     export HOME="'"$WT"'/fakehome" GIT_CONFIG_NOSYSTEM=1 GIT_AUTHOR_EMAIL=dev@example.gov

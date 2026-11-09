@@ -707,6 +707,13 @@ fails), the command exits non-zero, leaves the source registered, and prints the
 exact `sbx settings set kit.allowedSources …` recovery command. Fix the cause (or
 apply the printed command) and re-run `acq kit-source rm`; it is safe to repeat.
 
+GitHub ignores letter case in owners and repositories, so `kit-source rm` does
+too where trust is concerned. It refuses the shipped default (the pinned
+control-plane repository) in any letter case, and the control plane's owner
+prefix always stays on the backend allowlist. Owner prefixes compare
+case-insensitively, and when one is revoked every letter-case variant that sbx
+lists is dropped with it.
+
 The provider kit `acq` uses by default is likewise data:
 
 ```yaml
