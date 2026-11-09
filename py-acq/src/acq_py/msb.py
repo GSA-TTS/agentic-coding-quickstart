@@ -1460,6 +1460,7 @@ def _ls_entry(sandbox: str | None, service: str) -> dict:
     binding = service_binding(service, sandbox)
     return {
         "scope": "global" if sandbox is None else sandbox,
+        "scope_kind": "global" if sandbox is None else "sandbox",
         "service": service,
         "value_state": "unreadable" if secretstore.unreadable(service, sandbox) else "set",
         "binding": binding.flag if binding is not None else None,
@@ -1469,7 +1470,9 @@ def _ls_entry(sandbox: str | None, service: str) -> dict:
 def secret_ls(scope: Scope | str | None = None) -> list[dict]:
     """``secret-list``: the acq store's entries, never a value.
 
-    Each entry is ``{scope, service, value_state, binding}``; ``binding`` is the
+    Each entry is ``{scope, scope_kind, service, value_state, binding}``;
+    ``scope_kind`` is ``global``, ``sandbox``, or ``unknown`` for a legacy key,
+    so a sandbox named ``global`` reads as a sandbox. ``binding`` is the
     ``ENV@HOST`` msb would use (None when it has none). ``scope`` filters by
     scope kind, so a sandbox named ``global`` is never listed as global. A
     legacy multi-dot key (scope ``?``) is listed only when unfiltered.
@@ -1483,7 +1486,7 @@ def secret_ls(scope: Scope | str | None = None) -> list[dict]:
         raw_scope, service = decoded
         if raw_scope == "?":
             if want is None:
-                out.append({"scope": "?", "service": service, "value_state": "set", "binding": None})
+                out.append({"scope": "?", "scope_kind": "unknown", "service": service, "value_state": "set", "binding": None})
             continue
         sandbox = None if raw_scope == "-g" else raw_scope
         if want is None or want.sandbox == sandbox:

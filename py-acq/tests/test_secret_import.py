@@ -47,7 +47,7 @@ def test_import_all_stores_each_detected_token_never_echoing_it(monkeypatch, cap
     rc, doc, err = _run(capsys, "--all")
     assert rc == 0 and err == ""
     assert doc["data"] == {
-        "scope": "global", "dry_run": False, "mode": "all", "imported": 2, "skipped": 0,
+        "scope": "global", "scope_kind": "global", "dry_run": False, "mode": "all", "imported": 2, "skipped": 0,
         "results": [
             {"service": "github", "source_env": "GH_TOKEN", "existed": False, "outcome": "imported"},
             {"service": "usai", "source_env": "USAI_API_KEY", "existed": False, "outcome": "imported"},
@@ -133,7 +133,8 @@ def test_sandbox_scope_including_one_named_global(monkeypatch, capsys):
     assert rc == 0 and "imported 'github' (sandbox 'global') from $GITHUB_TOKEN." in err
     assert (_store() / "acq.global.github").exists() and not (_store() / "acq.github").exists()
     rc, doc, _ = _run(capsys, "usai", "mybox", "--all")
-    assert rc == 0 and doc["data"]["scope"] == "mybox" and doc["data"]["results"] == []
+    assert rc == 0 and doc["data"]["scope"] == "mybox" and doc["data"]["scope_kind"] == "sandbox"
+    assert doc["data"]["results"] == []
 
 
 def test_registered_provider_is_importable(monkeypatch, capsys):
