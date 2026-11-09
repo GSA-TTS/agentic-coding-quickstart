@@ -1762,7 +1762,7 @@ def rotate_refeed(value: str, *, primary: bool = True) -> dict:
         done = f"; re-fed: {', '.join(refed)}" if refed else ""
         raise MsbError(
             errors.FAILURE,
-            f"msb sandbox(es) that did not receive the new key: {', '.join(failed)}{done}",
+            f"not re-fed: {', '.join(failed)}{done}",
             "re-run 'acq usai-rotate-api-key' with the same key to retry them, or recreate them",
         )
     return {"backend": "msb", "refed": refed, "kept_own": kept}

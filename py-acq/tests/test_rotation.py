@@ -171,7 +171,7 @@ def test_msb_partial_refeed_exits_1_naming_the_sandbox_then_retry_fixes_it(
     rc, doc, out, err = _rotate(capsys, monkeypatch, "msb")
     assert rc == 1
     message = doc["error"]["message"]
-    assert "did not receive the new key: b" in message and "re-fed: a" in message
+    assert "(msb: not re-fed: b (msb modify failed); re-fed: a)" in message
     assert "re-run 'acq usai-rotate-api-key'" in doc["error"]["remediation"]
     assert secretstore.resolve("usai") == NEW  # stored, so a retry re-feeds it
     _assert_never_leaked(tmp_path, [argv for argv, _ in msb_children], out, err)
@@ -250,7 +250,7 @@ def test_sbx_partial_refeed_exits_1_naming_the_sandbox_then_retry_fixes_it(
     rc, doc, out, err = _rotate(capsys, monkeypatch, "sbx")
     assert rc == 1
     message = doc["error"]["message"]
-    assert "sandbox b" in message and "updated: a" in message
+    assert "(sbx: not re-fed: sandbox b; re-fed: a)" in message
     assert "re-run 'acq usai-rotate-api-key'" in doc["error"]["remediation"]
     assert secretstore.resolve("usai") == NEW
     _assert_never_leaked(tmp_path, [argv for argv, _ in sbx_calls], out, err)
@@ -322,6 +322,6 @@ def test_rotation_names_the_other_backend_when_it_fails(monkeypatch, tmp_path, c
     monkeypatch.setenv("ACQ_SBX_STUB_FAIL_CUSTOM_SCOPES", "global")
     rc, doc, out, err = _rotate(capsys, monkeypatch, "msb")
     assert rc == 1
-    assert "sbx:" in doc["error"]["message"] and "the global USAi secret" in doc["error"]["message"]
+    assert "(sbx: not re-fed: the global USAi secret" in doc["error"]["message"]
     assert secretstore.resolve("usai") == NEW
     _assert_never_leaked(tmp_path, [argv for argv, _ in sbx_calls], out, err)

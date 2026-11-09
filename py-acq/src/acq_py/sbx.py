@@ -1135,10 +1135,10 @@ def rotate_refeed(value: str, *, primary: bool = True) -> dict:
         else:
             failed.append(f"sandbox {row.label}")
     if failed:
-        done = f"; updated: {', '.join(refed)}" if refed else ""
+        done = f"; re-fed: {', '.join(refed)}" if refed else ""
         raise SbxError(
             errors.FAILURE,
-            f"sbx did not take the new key for: {', '.join(failed)}{done}",
+            f"not re-fed: {', '.join(failed)}{done}",
             "re-run 'acq usai-rotate-api-key' with the same key to retry",
         )
     return {"backend": "sbx", "refed": refed, "kept_own": kept}

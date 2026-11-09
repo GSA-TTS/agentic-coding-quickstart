@@ -1,0 +1,83 @@
+{
+  "schema": 1,
+  "id": "cli/usai-rotate-sbx-partial",
+  "oracle": "ADR-0012 key-rotate on sbx, partial re-feed: when `secret set-custom` fails for one sandbox-scoped entry the command exits 1 naming that sandbox and the one that was re-fed, and re-running the rotation once the failure clears exits 0; the key never appears in any step's output",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{python}",
+      "-I",
+      "test/vectors/drivers/seeded-run.py",
+      "[[[\"--backend\",\"sbx\",\"usai-rotate-api-key\",\"--json\"],true,null],{\"env\":{\"ACQ_SBX_STUB_FAIL_CUSTOM_SCOPES\":null}},[[\"--backend\",\"sbx\",\"usai-rotate-api-key\",\"--json\"],true,0]]",
+      "{acq}"
+    ],
+    "env": {
+      "ACQ_SBX_BIN": "__stub__",
+      "ACQ_SBX_VERSION": "0.51.0",
+      "ACQ_SBX_INSTALLED": "1",
+      "ACQ_MSB_INSTALLED": "0",
+      "ACQ_SBX_STUB_CUSTOM_SECRETS": "[{\"scope\":\"global\",\"env\":\"USAI_API_KEY\",\"placeholder\":\"sbx-cs-global-1\",\"targets\":[\"api.gsa.usai.gov\"]},{\"scope\":\"rot-a\",\"env\":\"USAI_API_KEY\",\"placeholder\":\"sbx-cs-rot-a-1\",\"targets\":[\"api.gsa.usai.gov\"]},{\"scope\":\"rot-b\",\"env\":\"USAI_API_KEY\",\"placeholder\":\"sbx-cs-rot-b-1\",\"targets\":[\"api.gsa.usai.gov\"]}]",
+      "ACQ_SBX_STUB_FAIL_CUSTOM_SCOPES": "rot-b"
+    },
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "MSB_HOME",
+      "SBX_HOME",
+      "ACQ_IMAGE",
+      "ACQ_MSB_IMAGE",
+      "ACQ_MSB_READY_TIMEOUT",
+      "ACQ_MSB_STUB_CATALOG",
+      "ACQ_MSB_STUB_FAIL",
+      "ACQ_MSB_STUB_FAIL_ADD",
+      "ACQ_MSB_STUB_FAIL_RM",
+      "ACQ_SBX_STUB_CATALOG",
+      "ACQ_SBX_STUB_FAIL",
+      "ACQ_SBX_STUB_SECRETS",
+      "ACQ_SECRET_NO_LIVE_REFEED",
+      "ACQ_PROVIDER_CREDENTIAL_BINDINGS",
+      "ACQ_PROVIDER_CREDENTIAL_SEED",
+      "USAI_API_KEY",
+      "GITHUB_TOKEN",
+      "GH_TOKEN",
+      "GITLAB_TOKEN"
+    ],
+    "stdin": "vector-rotate-sentinel-5e19",
+    "timeout_ms": 15000
+  },
+  "expect": {
+    "exit": 1,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "usai-rotate-api-key",
+        "error": {
+          "code": "failure",
+          "message": "stored the new USAi key in the acq secret store, but not every sandbox received it (sbx: not re-fed: sandbox rot-b; re-fed: rot-a)",
+          "remediation": "re-run 'acq usai-rotate-api-key' with the same key to retry"
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME",
+      "ACQ_SECRET_STORE_DIR"
+    ]
+  }
+}

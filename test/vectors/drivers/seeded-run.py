@@ -33,6 +33,9 @@ through its own CLI:
   directory loses write permission (POSIX refuses to unlink in it). Permissions
   are restored when the driver ends. A superuser can still delete, so a vector
   using this cannot pass when run as root.
+* ``{"env": {"NAME": VALUE, ...}}`` changes the environment of later steps: a
+  string sets NAME, null unsets it. A vector uses it to clear a stub failure
+  knob between a failing call and the retry that must fix it.
 """
 
 from __future__ import annotations
@@ -104,6 +107,13 @@ def _fixture(step: dict, root: Path, env: dict, locked: list) -> str | None:
         return None
     if step.get("lock_bindings"):
         _lock_bindings(locked)
+        return None
+    if isinstance(step.get("env"), dict):
+        for name, value in step["env"].items():
+            if value is None:
+                env.pop(name, None)
+            else:
+                env[name] = str(value)
         return None
     raise ValueError(f"unknown fixture step {step!r}")
 
