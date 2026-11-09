@@ -315,7 +315,7 @@ def _configure_interactively(term: Terminal, before_write: Callable[[], int | No
     _err("")
     _err(f"acq: configuration saved to {config.config_path()}.")
     _err(f"      extra kits:         {selected or '<none>'}")
-    _err(f"      provider kit:       {provider_sel or current_provider}")
+    _err(f"      provider kit:       {_redacted(provider_sel or current_provider)}")
     return errors.EXIT_SUCCESS
 
 
@@ -486,7 +486,8 @@ def multiselect(term: Terminal, locked: int, defaults: Sequence[int], items: Seq
     """Bash ``acq_prompt_multiselect``: a checkbox list whose first ``locked`` rows
     are frozen. ``defaults`` and the result are 1-based indices relative to the
     toggleable rows; the result is ascending, and ``None`` means cancelled."""
-    labels = [(_sanitize(label), _sanitize(desc)) for label, desc in items]
+    # Rows can carry kit refs, so userinfo is redacted as everywhere else.
+    labels = [(_sanitize(kits.redact_userinfo(label)), _sanitize(kits.redact_userinfo(desc))) for label, desc in items]
     total = len(labels)
     locked = min(locked, total)
     first = locked + 1

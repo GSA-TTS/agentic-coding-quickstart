@@ -359,6 +359,25 @@ def test_cancel_at_the_provider_keeps_the_other_answers(monkeypatch, tmp_path, c
     assert "      provider kit:       example/kit\n" in err
 
 
+def test_provider_kit_userinfo_never_reaches_the_terminal(monkeypatch, tmp_path, capsys):
+    _state_env(monkeypatch, tmp_path)
+    ref = "git+https://oauth2:glpat-LEAKME@host/k.git#ref=abc"
+    path = _write_config(f"schema: 1\nprovider_kit: {ref}\n".encode())
+    # Keep the kits and the scope default; cancel the provider list, so the
+    # summary reports the configured (unchanged) provider kit.
+    script = _Script(["ENTER", "QUIT"], ["\n"]).install(monkeypatch)
+    rc, out, err = _run(capsys, "configure")
+    assert rc == 0
+    assert "glpat-LEAKME" not in out + err
+    assert err.endswith("      provider kit:       git+https://***@host/k.git#ref=abc\n")
+    assert f"provider_kit: {ref}\n".encode() in path.read_bytes()  # the stored value is untouched
+    labels = []
+    monkeypatch.setattr(configure, "_row", lambda term, i, item, *rest: labels.append(item) or "")
+    script.keys.append("ENTER")
+    configure.multiselect(configure.Terminal(), 0, [], [(ref, f"{ref} (@x)")])
+    assert labels and all("LEAKME" not in label + desc for label, desc in labels)
+
+
 def test_fresh_config_is_created_with_the_schema_marker(monkeypatch, tmp_path, capsys):
     _state_env(monkeypatch, tmp_path)
     _Script(["SPACE", "ENTER", "ENTER"], [""]).install(monkeypatch)
