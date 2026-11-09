@@ -60,12 +60,39 @@ QUALIFIED = {
 }
 
 # Version floors (ADR-0044m). msb also refuses 0.7.0..0.7.2 (oracles 1-3 require
-# >= 0.7.7); sbx requires >= 0.39.0.
+# >= 0.7.7); sbx requires >= 0.39.0. The cell oracle exercises oracles 1-3, so a
+# Tier-3 run is evidence only at or above ``ORACLE_FLOORS`` as well. The gate blocks
+# a cell whose entry or accepted version fails :func:`version_problem`, the ledger
+# refuses to accept such a version, and ``qualification.host`` refuses to run on one.
 VERSION_FLOORS = {
     MSB: "0.6.9",
     SBX: "0.39.0",
 }
 MSB_REFUSED_RANGE = ("0.7.0", "0.7.2")
+ORACLE_FLOORS = {
+    MSB: "0.7.7",
+}
+
+
+def _version_tuple(version: str) -> tuple[int, int, int] | None:
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version)
+    return (int(match[1]), int(match[2]), int(match[3])) if match else None
+
+
+def version_problem(backend: str, version: str) -> str | None:
+    """Why ``version`` of ``backend`` cannot carry Tier-3 evidence (ADR-0044m floors), or ``None``."""
+    found = _version_tuple(version)
+    if found is None:
+        return f"{backend} {version!r} is not a final X.Y.Z version"
+    floor = VERSION_FLOORS.get(backend)
+    if floor and found < _version_tuple(floor):
+        return f"{backend} {version} is below the supported floor {floor}"
+    if backend == MSB and _version_tuple(MSB_REFUSED_RANGE[0]) <= found <= _version_tuple(MSB_REFUSED_RANGE[1]):
+        return f"msb {version} is in the refused range {MSB_REFUSED_RANGE[0]}-{MSB_REFUSED_RANGE[1]}"
+    oracle = ORACLE_FLOORS.get(backend)
+    if oracle and found < _version_tuple(oracle):
+        return f"{backend} {version} is below {oracle}, which oracles 1-3 need"
+    return None
 
 
 def is_claimed(backend: str, platform: str) -> bool:
@@ -271,13 +298,16 @@ def cell_state(
 
     Unclaimed cells are unqualified (honest reporting — never claimed, never a
     pass). A claimed cell is qualified only when it holds a green *current*
-    transcript; otherwise blocked (no green verdict — holds the gate).
+    transcript recorded at, and accepted at, a backend version that meets the
+    floors (:func:`version_problem`); otherwise blocked (holds the gate).
     """
     if not is_claimed(backend, platform):
         return MatrixState.UNQUALIFIED
     if (
         transcript is not None
         and transcript.verdict is Verdict.PASS
+        and version_problem(backend, transcript.environment.backend_version) is None
+        and (backend_version is None or version_problem(backend, backend_version) is None)
         and is_current(
             transcript, now=now, backend_version=backend_version, surface_changed=surface_changed
         )
