@@ -1,0 +1,514 @@
+"""Tier-2 tests for the ``config.yaml`` layer (ADR-0038m §config, ADR-0041m).
+
+Non-contract evidence (ADR-0039m): these reach into ``acq_py.config`` directly
+and drive the CLI as a subprocess. The Bash and Python implementations share
+``config.yaml``, so the parity tests at the end source the Bash reader/writer from
+``acq.backends/common.sh`` and compare bytes.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import stat
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+
+import pytest
+
+from acq_py import config, doctor
+from acq_py.commands import common
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+COMMON_SH = REPO_ROOT / "acq.backends" / "common.sh"
+
+POSIX_ONLY = pytest.mark.skipif(os.name != "posix", reason="POSIX file modes and symlinks")
+
+
+def _write_config(data: bytes) -> Path:
+    path = config.config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return path
+
+
+def _mode(path: Path) -> int:
+    return stat.S_IMODE(os.stat(path).st_mode)
+
+
+def _run_cli(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, "-m", "acq_py", *args],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Flat-key reader: mirrors _acq_config_read_field.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        (b"backend: sbx\n", "sbx"),
+        (b"backend:sbx\n", "sbx"),
+        (b"backend   :   sbx   \n", "sbx"),
+        (b"backend: sbx # pinned\n", "sbx"),
+        (b'backend: "sbx"\n', "sbx"),
+        (b"backend: 'msb'\n", "msb"),
+        (b'backend: "sbx" # comment\n', "sbx"),
+        (b"backend: # only a comment\n", None),
+        (b"backend:\n", None),
+        (b"backend: sbx\r\n", "sbx"),
+        (b"backend: sbx", "sbx"),
+        (b"backend: sbx\nbackend: msb\n", "msb"),
+        (b"backend: sbx\nbackend:\n", None),
+        (b"  backend: sbx\n", None),
+        (b"backends: sbx\n", None),
+        (b"schema: 1\nextra_kits: paseo\n", None),
+    ],
+)
+def test_read_field_matches_bash_semantics(content, expected):
+    _write_config(content)
+    assert config.read_field("backend") == expected
+
+
+def test_read_field_absent_file_and_unsafe_key():
+    assert config.read_field("backend") is None
+    _write_config(b"backend: sbx\n")
+    assert config.read_field("back.end") is None
+    assert config.read_field("") is None
+
+
+# ---------------------------------------------------------------------------
+# Flat-key writer: mirrors _acq_config_write_field.
+# ---------------------------------------------------------------------------
+
+def test_write_field_preserves_unknown_keys_and_order():
+    path = _write_config(b"schema: 1\n# hand comment\nbackend: msb\nextra_kits: paseo\nbackend: x\nfuture_key: {a: 1}\n")
+    config.write_field("backend", "sbx")
+    assert path.read_bytes() == (
+        b"schema: 1\n# hand comment\nextra_kits: paseo\nfuture_key: {a: 1}\nbackend: sbx\n"
+    )
+
+
+def test_write_field_empty_value_removes_the_key():
+    path = _write_config(b"schema: 1\nbackend: msb\nextra_kits: paseo\n")
+    config.write_field("backend", "")
+    assert path.read_bytes() == b"schema: 1\nextra_kits: paseo\n"
+
+
+def test_write_field_keeps_crlf_lines_and_terminates_last_line():
+    path = _write_config(b"extra_kits: paseo\r\nscope_github_token: yes")
+    config.write_field("backend", "sbx")
+    assert path.read_bytes() == b"extra_kits: paseo\r\nscope_github_token: yes\nbackend: sbx\n"
+
+
+def test_write_field_new_file_carries_the_schema_marker():
+    path = config.config_path()
+    config.write_field("backend", "sbx")
+    assert path.read_bytes() == f"schema: {config.CONFIG_SCHEMA}\nbackend: sbx\n".encode()
+    assert config.config_schema() == config.CONFIG_SCHEMA
+    if os.name == "posix":
+        assert _mode(path) == 0o600
+        assert _mode(path.parent) == 0o700
+
+
+@pytest.mark.parametrize("value", ["a\nb", "a\rb", "a\x00b"])
+def test_write_field_refuses_values_that_would_inject_lines(value):
+    path = _write_config(b"backend: msb\n")
+    with pytest.raises(ValueError):
+        config.write_field("backend", value)
+    assert path.read_bytes() == b"backend: msb\n"
+
+
+def test_write_field_refuses_unsafe_key():
+    with pytest.raises(ValueError):
+        config.write_field("back:end", "sbx")
+    assert not config.config_path().exists()
+
+
+@POSIX_ONLY
+def test_write_field_does_not_clobber_an_unreadable_config():
+    path = _write_config(b"backend: msb\nprovider_credential_bindings: x\n")
+    path.chmod(0o000)
+    try:
+        if os.access(path, os.R_OK):
+            pytest.skip("running with privileges that bypass file modes")
+        with pytest.raises(OSError):
+            config.write_field("backend", "sbx")
+    finally:
+        path.chmod(0o600)
+    assert path.read_bytes() == b"backend: msb\nprovider_credential_bindings: x\n"
+
+
+@POSIX_ONLY
+def test_write_field_writes_through_a_symlink_and_keeps_its_mode(tmp_path):
+    dotfiles = tmp_path / "dotfiles"
+    dotfiles.mkdir()
+    target = dotfiles / "acq.yaml"
+    target.write_bytes(b"extra_kits: paseo\n")
+    target.chmod(0o640)
+    link = config.config_path()
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(target)
+
+    config.write_field("backend", "sbx")
+
+    assert link.is_symlink(), "the dotfiles symlink was replaced by a regular file"
+    assert os.readlink(link) == str(target)
+    assert target.read_bytes() == b"extra_kits: paseo\nbackend: sbx\n"
+    assert _mode(target) == 0o640
+    assert sorted(p.name for p in dotfiles.iterdir()) == ["acq.yaml"], "temp file left behind"
+
+
+@POSIX_ONLY
+def test_write_field_keeps_a_0600_mode():
+    path = _write_config(b"backend: msb\n")
+    path.chmod(0o600)
+    old = os.umask(0o022)
+    try:
+        config.write_field("backend", "sbx")
+    finally:
+        os.umask(old)
+    assert _mode(path) == 0o600
+
+
+# ---------------------------------------------------------------------------
+# Schema marker: absent vs legacy vs current.
+# ---------------------------------------------------------------------------
+
+def test_config_schema_distinguishes_absent_from_legacy():
+    assert config.config_schema() is None
+    _write_config(b"backend: msb\n")
+    assert config.config_schema() == config.LEGACY_SCHEMA
+    _write_config(b"schema: 1\nbackend: msb\n")
+    assert config.config_schema() == config.CONFIG_SCHEMA
+
+
+def test_doctor_config_check_passes_when_config_is_absent():
+    check = config.doctor_check()
+    assert check["id"] == "config-schema"
+    assert check["status"] == "pass", check
+    assert "legacy" not in check["message"]
+
+
+def test_doctor_config_check_warns_on_legacy_and_fails_on_newer():
+    _write_config(b"backend: msb\n")
+    assert config.doctor_check()["status"] == "warn"
+    _write_config(b"schema: 99\n")
+    assert config.doctor_check()["status"] == "fail"
+    _write_config(b"schema: 1\n")
+    assert config.doctor_check()["status"] == "pass"
+
+
+def test_doctor_reports_the_config_check():
+    ids = [check["id"] for check in doctor.doctor_checks()]
+    assert "config-schema" in ids
+
+
+# ---------------------------------------------------------------------------
+# Forward migration: crash-safe, symlink- and mode-preserving.
+# ---------------------------------------------------------------------------
+
+_LEGACY = b"backend: msb\nprovider_credential_bindings: usai=USAI_API_KEY@api.gsa.usai.gov\n"
+_MIGRATED = f"schema: {config.CONFIG_SCHEMA}\n".encode() + _LEGACY
+
+# Runs migrate_config in a child that hard-exits (os._exit, so no except/finally
+# block can tidy up) at the K-th filesystem commit point: a replace, an fsync, or
+# an unlink. MODE "before" exits instead of performing the call; "after" performs
+# it first. A child that never reaches K prints "done" and exits 0.
+_CRASH_CHILD = textwrap.dedent(
+    """
+    import os, sys
+    from acq_py import config
+
+    k, mode = int(sys.argv[1]), sys.argv[2]
+    count = [0]
+    real = os
+
+    class Proxy:
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+    def wrap(fn):
+        def inner(*args, **kwargs):
+            count[0] += 1
+            if count[0] == k and mode == "before":
+                real._exit(70)
+            result = fn(*args, **kwargs)
+            if count[0] == k and mode == "after":
+                real._exit(70)
+            return result
+        return inner
+
+    proxy = Proxy()
+    for name in ("replace", "rename", "fsync", "unlink", "remove"):
+        setattr(proxy, name, wrap(getattr(real, name)))
+    config.os = proxy
+    config.migrate_config()
+    print("done")
+    """
+)
+
+
+def _crash_at(k: int, mode: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, "-c", _CRASH_CHILD, str(k), mode],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+@POSIX_ONLY
+@pytest.mark.parametrize("mode", ["before", "after"])
+def test_migration_crash_at_any_step_leaves_config_intact(mode):
+    path = config.config_path()
+    reached_end = False
+    for k in range(1, 30):
+        if path.parent.exists():
+            shutil.rmtree(path.parent)
+        _write_config(_LEGACY).chmod(0o600)
+
+        proc = _crash_at(k, mode)
+        assert path.exists(), f"config.yaml missing after a crash at commit point {k} ({mode})"
+        assert path.read_bytes() in (_LEGACY, _MIGRATED), f"torn config.yaml at commit point {k} ({mode})"
+
+        # The next run converges: the config is migrated, nothing is lost.
+        assert config.migrate_config() in ("none", "migrated")
+        assert path.read_bytes() == _MIGRATED
+        assert config.config_schema() == config.CONFIG_SCHEMA
+        assert _mode(path) == 0o600
+        if proc.returncode == 0 and "done" in proc.stdout:
+            reached_end = True
+            break
+        assert proc.returncode == 70, proc.stderr
+    assert reached_end, "migrate_config never completed without a crash"
+
+
+def test_migration_interrupted_in_process_leaves_config_intact(monkeypatch):
+    # A KeyboardInterrupt (a BaseException, not an OSError) at the moment the
+    # migrated bytes are committed must not strand the config in a .bak file.
+    path = _write_config(_LEGACY)
+    real_replace = os.replace
+
+    def interrupt(src, dst, *args, **kwargs):
+        if Path(dst).name == "config.yaml":
+            raise KeyboardInterrupt
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(config.os, "replace", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        config.migrate_config()
+    monkeypatch.setattr(config.os, "replace", real_replace)
+
+    assert path.read_bytes() == _LEGACY
+    assert config.migrate_config() == "migrated"
+    assert path.read_bytes() == _MIGRATED
+
+
+@POSIX_ONLY
+def test_migration_keeps_symlink_and_mode(tmp_path):
+    dotfiles = tmp_path / "dotfiles"
+    dotfiles.mkdir()
+    target = dotfiles / "acq.yaml"
+    target.write_bytes(_LEGACY)
+    target.chmod(0o600)
+    link = config.config_path()
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(target)
+
+    assert config.migrate_config() == "migrated"
+
+    assert link.is_symlink(), "migration replaced the dotfiles symlink"
+    assert target.read_bytes() == _MIGRATED
+    assert _mode(target) == 0o600
+    assert not link.with_name("config.yaml.bak.0").exists()
+
+
+def test_migration_verify_failure_restores_the_original(monkeypatch):
+    path = _write_config(_LEGACY)
+    monkeypatch.setattr(config, "config_schema", lambda: config.LEGACY_SCHEMA)
+    with pytest.raises(config.ConfigSchemaError):
+        config.migrate_config()
+    assert path.read_bytes() == _LEGACY
+
+
+# ---------------------------------------------------------------------------
+# Persisted backend precedence: flag -> env -> config -> auto-detect.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def both_installed(monkeypatch):
+    monkeypatch.setenv("ACQ_SBX_INSTALLED", "1")
+    monkeypatch.setenv("ACQ_MSB_INSTALLED", "1")
+    monkeypatch.setenv("ACQ_SBX_VERSION", "0.51.0")
+    monkeypatch.setenv("ACQ_MSB_VERSION", "0.7.7")
+
+
+def test_persisted_backend_beats_auto_detect(both_installed):
+    _write_config(b"backend: sbx\n")
+    assert common._resolve_active_backend(None) == "sbx"
+
+
+def test_env_and_flag_beat_persisted_backend(both_installed, monkeypatch):
+    _write_config(b"backend: sbx\n")
+    monkeypatch.setenv("ACQ_BACKEND", "msb")
+    assert common._resolve_active_backend(None) == "msb"
+    monkeypatch.delenv("ACQ_BACKEND")
+    assert common._resolve_active_backend("msb") == "msb"
+
+
+def test_invalid_env_falls_through_to_persisted_backend(both_installed, monkeypatch):
+    _write_config(b"backend: sbx\n")
+    monkeypatch.setenv("ACQ_BACKEND", "podman")
+    assert common._resolve_active_backend(None) == "sbx"
+
+
+def test_invalid_persisted_backend_is_dropped(both_installed):
+    _write_config(b"backend: podman\n")
+    assert common._resolve_active_backend(None) == "msb"
+
+
+# ---------------------------------------------------------------------------
+# `acq backend set` / `acq backend unset` (subprocess).
+# ---------------------------------------------------------------------------
+
+def test_backend_set_persists_and_preserves_other_keys():
+    path = _write_config(b"extra_kits: paseo\nbackend: msb\n")
+    proc = _run_cli("backend", "set", "sbx", "--json")
+    assert proc.returncode == 0, proc.stderr
+    doc = json.loads(proc.stdout)
+    assert doc["command"] == "backend set"
+    assert doc["data"]["backend"] == "sbx"
+    assert doc["data"]["previous"] == "msb"
+    assert doc["data"]["config_path"] == str(path)
+    assert path.read_bytes() == b"schema: 1\nextra_kits: paseo\nbackend: sbx\n"
+
+
+def test_backend_set_human_output():
+    proc = _run_cli("backend", "set", "msb")
+    assert proc.returncode == 0, proc.stderr
+    assert "default backend set to 'msb'" in proc.stdout
+    assert config.read_field("backend") == "msb"
+
+
+def test_backend_set_refuses_an_unknown_backend():
+    path = _write_config(b"backend: msb\n")
+    proc = _run_cli("backend", "set", "podman", "--json")
+    assert proc.returncode == 2
+    assert json.loads(proc.stdout)["error"]["code"] == "usage"
+    assert path.read_bytes() == b"backend: msb\n"
+
+
+def test_backend_set_refuses_a_newer_config_schema():
+    path = _write_config(b"schema: 99\nbackend: msb\n")
+    proc = _run_cli("backend", "set", "sbx", "--json")
+    assert proc.returncode == 1
+    assert json.loads(proc.stdout)["error"]["code"] == "state_schema_unsupported"
+    assert path.read_bytes() == b"schema: 99\nbackend: msb\n"
+
+
+def test_backend_unset_clears_only_the_backend():
+    path = _write_config(b"backend: sbx\nextra_kits: paseo\n")
+    proc = _run_cli("backend", "unset", "--json")
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(proc.stdout)["data"]
+    assert data["cleared"] is True and data["previous"] == "sbx" and data["backend"] is None
+    assert path.read_bytes() == b"schema: 1\nextra_kits: paseo\n"
+
+
+def test_backend_unset_removes_a_config_left_holding_only_the_marker():
+    path = _write_config(b"backend: sbx\n")
+    proc = _run_cli("backend", "unset")
+    assert proc.returncode == 0, proc.stderr
+    assert "cleared the persisted default backend" in proc.stdout
+    assert not path.exists()
+
+
+def test_backend_unset_when_nothing_is_persisted():
+    proc = _run_cli("backend", "unset", "--json")
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(proc.stdout)["data"]
+    assert data["cleared"] is False and data["previous"] is None
+    assert not config.config_path().exists()
+
+
+def test_backend_list_reports_the_persisted_backend(both_installed):
+    _write_config(b"backend: sbx\n")
+    proc = _run_cli("backend", "list", "--json")
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["data"]["active_backend"] == "sbx"
+
+
+# ---------------------------------------------------------------------------
+# Bash <-> Python parity on the shared config.yaml.
+# ---------------------------------------------------------------------------
+
+BASH = shutil.which("bash")
+needs_bash = pytest.mark.skipif(BASH is None or os.name != "posix", reason="needs bash on a POSIX host")
+
+_PARITY_INPUTS = [
+    b"",
+    b"backend: sbx\n",
+    b"schema: 1\nbackend: 'msb'   # pinned\nextra_kits: paseo openchamber\n",
+    b'backend: "sbx" # c\r\nscope_github_token: yes\r\n',
+    b"backend: sbx\nbackend: msb\n  backend: indented\nbackendx: no",
+    b"# comment only\nfuture: {nested: 1}\nbackend:\n",
+    b"backend: a#b\nextra_kits: x # y # z\n",
+]
+
+
+def _bash(script: str, *args: str) -> subprocess.CompletedProcess:
+    assert BASH is not None
+    return subprocess.run(
+        [BASH, "-c", f'source "$1"; shift; {script}', "bash", str(COMMON_SH), *args],
+        capture_output=True,
+        timeout=60,
+        env={**os.environ, "LC_ALL": "C"},
+    )
+
+
+@needs_bash
+@pytest.mark.parametrize("content", _PARITY_INPUTS)
+@pytest.mark.parametrize("key", ["backend", "extra_kits", "scope_github_token", "future"])
+def test_bash_and_python_read_the_same_value(content, key):
+    _write_config(content)
+    proc = _bash('_acq_config_read_field "$1"', key)
+    assert proc.returncode == 0, proc.stderr
+    bash_value = proc.stdout.decode().rstrip("\n") or None
+    assert config.read_field(key) == bash_value
+
+
+@needs_bash
+@pytest.mark.parametrize("content", [c for c in _PARITY_INPUTS if c])
+@pytest.mark.parametrize(("key", "value"), [("backend", "sbx"), ("backend", ""), ("extra_kits", "paseo")])
+def test_bash_and_python_write_the_same_bytes(content, key, value):
+    path = _write_config(content)
+    proc = _bash('_acq_config_write_field "$1" "$2"', key, value)
+    assert proc.returncode == 0, proc.stderr
+    bash_bytes = path.read_bytes()
+
+    _write_config(content)
+    config.write_field(key, value)
+    assert path.read_bytes() == bash_bytes
+
+
+@needs_bash
+def test_python_backend_set_round_trips_through_bash(both_installed):
+    _write_config(b"extra_kits: paseo\n")
+    assert _run_cli("backend", "set", "sbx").returncode == 0
+    proc = _bash("_acq_config_read_field backend; _acq_config_read_field extra_kits")
+    assert proc.stdout.decode().splitlines() == ["sbx", "paseo"]
+
+    # Bash writes the backend back; Python resolves what Bash persisted.
+    assert _bash("_acq_config_write_field backend msb").returncode == 0
+    assert common._resolve_active_backend(None) == "msb"
+    assert config.config_schema() == config.CONFIG_SCHEMA
+    assert config.read_field("extra_kits") == "paseo"

@@ -24,7 +24,8 @@
           "checks": [
             { "id": "runtime", "status": "pass" },
             { "id": "backend", "status": "warn" },
-            { "id": "state", "status": "pass" }
+            { "id": "state", "status": "pass" },
+            { "id": "config-schema", "status": "pass" }
           ]
         }
       },

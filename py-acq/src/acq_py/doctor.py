@@ -15,14 +15,15 @@ Status vocabulary (stable tokens, one scale for both overall and per-check):
 The overall ``status`` is derived from the checks: ``fail`` (any fail) outranks
 ``warn`` (any warn) outranks ``pass``.
 
-The foundation slice knows only two honest, offline checks: the managed runtime
-(ADR-0042m) and backend-adapter availability (ADR-0040m). Both are deterministic
-and never touch the network, so ``doctor`` is a safe diagnostic in any context.
+The checks are the managed runtime (ADR-0042m), backend-adapter availability
+(ADR-0040m), state-tree migration health and the ``config.yaml`` schema marker
+(ADR-0041m). All are deterministic, read-only and never touch the network, so
+``doctor`` is a safe diagnostic in any context.
 """
 
 from __future__ import annotations
 
-from . import migration, runtime, userdirs
+from . import config, migration, runtime, userdirs
 
 PASS = "pass"
 WARN = "warn"
@@ -63,7 +64,7 @@ def backend_check() -> dict:
 
 def doctor_checks() -> list[dict]:
     """Return the ordered check list for the current build."""
-    return [runtime_check(), backend_check(), state_check()]
+    return [runtime_check(), backend_check(), state_check(), config.doctor_check()]
 
 
 def state_check() -> dict:

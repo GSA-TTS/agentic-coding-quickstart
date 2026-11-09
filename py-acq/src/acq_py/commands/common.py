@@ -14,7 +14,7 @@ import json
 import os
 import sys
 
-from .. import backends, envelope, errors, kits, msb, sbx, security, state
+from .. import backends, config, envelope, errors, kits, msb, sbx, security, state
 
 
 # Both adapters raise an error carrying the same (code, message, remediation)
@@ -122,10 +122,11 @@ def _resolve_active_backend(explicit: str | None) -> str | None:
     """Resolve the active backend for read-only reporting.
 
     Precedence: the ``--backend`` flag, then the ``ACQ_BACKEND`` environment
-    variable, then (in a later slice) config persistence via ``backend set``,
-    then the auto-detect default. An invalid flag value is a usage error
-    (handled by the caller); an invalid environment value is dropped (ADR-0038m
-    "drop invalid persisted backends").
+    variable, then the ``backend:`` key ``backend set`` persists in
+    ``config.yaml``, then the auto-detect default (Bash ``acq_resolve_backend``).
+    An invalid flag value is a usage error (handled by the caller); an invalid
+    environment or persisted value is dropped and the next source is consulted
+    (ADR-0038m "drop invalid persisted backends").
 
     Auto-detect default arms:
 
@@ -143,6 +144,9 @@ def _resolve_active_backend(explicit: str | None) -> str | None:
     env_backend = os.environ.get("ACQ_BACKEND")
     if env_backend in backends.BACKENDS:
         return env_backend
+    persisted = config.read_field("backend")
+    if persisted in backends.BACKENDS:
+        return persisted
     installed = [s.name for s in backends.detect_all() if s.installed]
     if len(installed) == 1:
         return installed[0]

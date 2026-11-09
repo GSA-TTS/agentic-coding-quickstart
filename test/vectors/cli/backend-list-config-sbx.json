@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "id": "cli/backend-list-config-sbx",
+  "oracle": "spec backend seam / ADR-0038m \u00a7config precedence: a persisted `backend set` value outranks auto-detect (both installed, config says sbx -> sbx)",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{acq}",
+      "backend",
+      "list",
+      "--json"
+    ],
+    "env": {
+      "ACQ_SBX_VERSION": "0.51.0",
+      "ACQ_MSB_VERSION": "0.7.7",
+      "ACQ_SBX_INSTALLED": "1",
+      "ACQ_MSB_INSTALLED": "1",
+      "ACQ_CONFIG_SEED": "backend: sbx"
+    },
+    "unset": [
+      "ACQ_BACKEND"
+    ],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "backend list",
+        "data": {
+          "active_backend": "sbx"
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME"
+    ]
+  }
+}
