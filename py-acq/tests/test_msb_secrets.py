@@ -271,39 +271,103 @@ def test_global_rm_unbinds_running_sandboxes(monkeypatch, tmp_path, capsys, chil
     assert not secretstore.exists("usai")
 
 
+def _modify_tails(children):
+    return [argv[argv.index("modify") + 1:] for argv, _env in _verb_calls(children, "modify")]
+
+
 def test_scoped_rm_falls_back_to_the_global_value(monkeypatch, tmp_path, capsys, children):
     _running(tmp_path, monkeypatch, "a")
     _set(capsys, monkeypatch, "-g", "usai")
     _set(capsys, monkeypatch, "a", "usai", value=SCOPED)
     children.clear()
     assert _invoke(capsys, "--backend", "msb", "secret", "rm", "a", "usai")[0] == 0
-    (argv, env), = _verb_calls(children, "modify")
-    assert argv[argv.index("modify") + 1:] == ["a", "--secret", "USAI_API_KEY@api.gsa.usai.gov"]
+    # Never a replace in place: remove, then re-add the global value separately.
+    assert _modify_tails(children) == [["a", "--secret-rm", "USAI_API_KEY"],
+                                       ["a", "--secret", "USAI_API_KEY@api.gsa.usai.gov"]]
+    (_argv, env), = [c for c in _verb_calls(children, "modify") if "--secret" in c[0]]
     assert env["USAI_API_KEY"] == VALUE
     _assert_value_absent(VALUE, children)
     _assert_value_absent(SCOPED, children)
     assert _stub_records(tmp_path)["a"]["USAI_API_KEY"]["env_present"] is True
+    assert msb.held_read("a")["USAI_API_KEY"]["scope"] == "global"
 
 
 def test_scoped_rm_with_a_different_env_drops_then_rebinds(monkeypatch, tmp_path, capsys, children):
     _running(tmp_path, monkeypatch, "a")
     _set(capsys, monkeypatch, "-g", "svc", "--host", "api.example.gov", "--env", "API_KEY")
+    children.clear()
     _set(capsys, monkeypatch, "a", "svc", "--host", "box.example.gov", "--env", "BOX_KEY", value=SCOPED)
+    assert _modify_tails(children) == [["a", "--secret-rm", "API_KEY"], ["a", "--secret", "BOX_KEY@box.example.gov"]]
     children.clear()
     assert _invoke(capsys, "--backend", "msb", "secret", "rm", "a", "svc")[0] == 0
-    (argv, env), = _verb_calls(children, "modify")
-    assert argv[argv.index("modify") + 1:] == ["a", "--secret-rm", "BOX_KEY", "--secret", "API_KEY@api.example.gov"]
-    assert env["API_KEY"] == VALUE and env.get("BOX_KEY") != SCOPED
+    assert _modify_tails(children) == [["a", "--secret-rm", "BOX_KEY"], ["a", "--secret", "API_KEY@api.example.gov"]]
+    assert set(_stub_records(tmp_path)["a"]) == {"API_KEY"}
 
 
-def test_unbind_failure_warns_and_still_removes(monkeypatch, tmp_path, capsys):
+def test_scoped_rm_readd_failure_leaves_no_removed_value(monkeypatch, tmp_path, capsys):
     _running(tmp_path, monkeypatch, "a")
     _set(capsys, monkeypatch, "-g", "usai")
-    monkeypatch.setenv("ACQ_MSB_STUB_FAIL", "modify")
-    rc, doc, _out, err = _invoke(capsys, "--backend", "msb", "secret", "rm", "-g", "usai", "--json")
+    _set(capsys, monkeypatch, "a", "usai", value=SCOPED)
+    monkeypatch.setenv("ACQ_MSB_STUB_FAIL_ADD", "a")
+    rc, _doc, _out, err = _invoke(capsys, "--backend", "msb", "secret", "rm", "a", "usai")
+    assert rc == 0
+    assert "could not bind the global value there" in err
+    assert "USAI_API_KEY" not in _stub_records(tmp_path)["a"]
+    assert msb.held_read("a") == {}
+    assert not secretstore.exists("usai", "a")
+
+
+def test_unbind_failure_keeps_the_secret_and_retry_succeeds(monkeypatch, tmp_path, capsys):
+    _running(tmp_path, monkeypatch, "a", "b")
+    _set(capsys, monkeypatch, "-g", "usai")
+    monkeypatch.setenv("ACQ_MSB_STUB_FAIL_RM", "b")
+    rc, doc, out, err = _invoke(capsys, "--backend", "msb", "secret", "rm", "-g", "usai", "--json")
+    assert rc == 1 and doc["error"]["code"] == "unbind_failed"
+    assert "sandbox(es): b;" in doc["error"]["message"]
+    assert secretstore.resolve("usai") == VALUE  # kept for the retry
+    assert "USAI_API_KEY" not in _stub_records(tmp_path)["a"]
+    assert VALUE not in out + err
+    monkeypatch.delenv("ACQ_MSB_STUB_FAIL_RM")
+    rc, doc, _out, _err = _invoke(capsys, "--backend", "msb", "secret", "rm", "-g", "usai", "--json")
     assert rc == 0 and doc["data"]["value_state"] == "unset"
-    assert "could not unbind 'usai' from running sandbox(es) a" in err
-    assert secretstore.resolve("usai") is None
+    assert _stub_records(tmp_path) == {"a": {}, "b": {}}
+
+
+def test_unbind_targets_only_the_sandboxes_that_hold_it(monkeypatch, tmp_path, capsys, children):
+    _running(tmp_path, monkeypatch, "a")
+    _set(capsys, monkeypatch, "-g", "usai")
+    # b started after the set and never got the binding; idle (stopped) holds it.
+    catalog = tmp_path / "msb-home" / ".microsandbox" / "catalog.json"
+    catalog.write_text(json.dumps({"a": "running", "b": "running", "idle": "stopped"}), encoding="utf-8")
+    msb._held_write("idle", {"USAI_API_KEY": {"service": "usai", "host": "api.gsa.usai.gov", "scope": "global"}})
+    records = _stub_records(tmp_path)
+    records["idle"] = {"USAI_API_KEY": {"host": "api.gsa.usai.gov", "env_present": True}}
+    (tmp_path / "msb-home" / ".microsandbox" / "secrets.json").write_text(json.dumps(records), encoding="utf-8")
+    children.clear()
+    rc, _doc, _out, err = _invoke(capsys, "--backend", "msb", "secret", "rm", "-g", "usai", "--json")
+    assert rc == 0 and err == ""
+    assert sorted(t[0] for t in _modify_tails(children)) == ["a", "idle"]
+
+
+def test_unreadable_binding_record_fails_closed(monkeypatch, tmp_path, capsys):
+    _running(tmp_path, monkeypatch, "a")
+    _set(capsys, monkeypatch, "-g", "usai")
+    msb._held_path("a").write_text("not json", encoding="utf-8")
+    rc, doc, _out, _err = _invoke(capsys, "--backend", "msb", "secret", "rm", "-g", "usai", "--json")
+    assert rc == 1 and doc["error"]["code"] == "state_schema_unsupported"
+    assert secretstore.resolve("usai") == VALUE
+    for bad in ('[]', '{"schema": 1, "sandbox": "a", "bindings": []}', '{"schema": 1, "sandbox": "a", '
+                '"bindings": {"K": 1}}', '{"schema": 2, "sandbox": "a", "bindings": {}}'):
+        msb._held_path("a").write_text(bad, encoding="utf-8")
+        with pytest.raises(msb.MsbError):
+            msb.held_read("a")
+
+
+def test_rm_warns_when_no_binding_resolves(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path)
+    secretstore.store(secretstore.key_for("orphan"), VALUE)
+    rc, _doc, _out, err = _invoke(capsys, "--backend", "msb", "secret", "rm", "-g", "orphan")
+    assert rc == 0 and "'orphan' has no msb binding to resolve" in err
 
 
 def test_unlisted_sandboxes_fail_closed(monkeypatch, tmp_path):
@@ -393,6 +457,125 @@ def test_provider_credential_set_stores_and_refeeds(monkeypatch, tmp_path, capsy
     assert _has("-g", "acme") == 0
 
 
+def test_provider_partial_refeed_then_rm_fully_revokes(monkeypatch, tmp_path, capsys):
+    _running(tmp_path, monkeypatch, "a", "b")
+    monkeypatch.setenv("ACQ_MSB_STUB_FAIL_ADD", "b")
+    rc, doc, _out, _err = _invoke(capsys, "--backend", "msb", "provider-credential", "set", "acme", "ACME_KEY",
+                                  "--host", "models.acme.gov", "--json", stdin=VALUE, monkeypatch=monkeypatch)
+    assert rc == 1 and "b" in doc["error"]["message"]
+    # The pin was recorded first, so rm resolves the same binding re-feed used.
+    assert msb.service_binding("acme") == ("ACME_KEY", "models.acme.gov")
+    assert set(_stub_records(tmp_path)["a"]) == {"ACME_KEY"} and _stub_records(tmp_path).get("b", {}) == {}
+    monkeypatch.delenv("ACQ_MSB_STUB_FAIL_ADD")
+    assert _invoke(capsys, "--backend", "msb", "secret", "rm", "-g", "acme")[0] == 0
+    assert all("ACME_KEY" not in held for held in _stub_records(tmp_path).values())
+    assert msb.held_read("a") == {} and secretstore.resolve("acme") is None
+
+
+def test_provider_pin_refuses_a_diverging_endpoint_record(monkeypatch, tmp_path, capsys, children):
+    _running(tmp_path, monkeypatch, "a")
+    _set(capsys, monkeypatch, "-g", "acme", "--host", "old.acme.gov", "--env", "ACME_OLD", value="S3NTINEL-old")
+    children.clear()
+    rc, doc, _out, _err = _invoke(capsys, "--backend", "msb", "provider-credential", "set", "acme", "ACME_KEY",
+                                  "--host", "models.acme.gov", "--json", stdin=VALUE, monkeypatch=monkeypatch)
+    assert rc == 1 and doc["error"]["code"] == "validation_failed"
+    assert "ACME_OLD@old.acme.gov" in doc["error"]["message"]
+    assert provider_creds.get_binding("acme") is None
+    assert secretstore.resolve("acme") == "S3NTINEL-old" and _verb_calls(children, "modify") == []
+    # A record naming the same destination is consistent and allowed.
+    rc, _doc, _out, err = _invoke(capsys, "--backend", "msb", "provider-credential", "set", "acme", "ACME_OLD",
+                                  "--host", "old.acme.gov", "--json", stdin=VALUE, monkeypatch=monkeypatch)
+    assert rc == 0, err
+    assert msb.held_read("a")["ACME_OLD"]["host"] == "old.acme.gov"
+
+
+def test_provider_set_skips_a_sandbox_with_its_own_value(monkeypatch, tmp_path, capsys, children):
+    _running(tmp_path, monkeypatch, "a", "b")
+    secretstore.store(secretstore.key_for("acme", "a"), SCOPED)
+    rc, _doc, _out, err = _invoke(capsys, "--backend", "msb", "provider-credential", "set", "acme", "ACME_KEY",
+                                  "--host", "models.acme.gov", "--json", stdin=VALUE, monkeypatch=monkeypatch)
+    assert rc == 0, err
+    assert [t[0] for t in _modify_tails(children)] == ["b"]
+
+
+def test_scoped_set_targets_only_that_sandbox(monkeypatch, tmp_path, capsys, children):
+    _running(tmp_path, monkeypatch, "a", "b")
+    _set(capsys, monkeypatch, "b", "github", value=SCOPED)
+    assert _modify_tails(children) == [["b", "--secret", "GITHUB_TOKEN@github.com,api.github.com,codeload.github.com"]]
+    assert msb.held_read("b")["GITHUB_TOKEN"]["scope"] == "sandbox" and msb.held_read("a") == {}
+
+
+def test_create_first_claim_wins_for_a_shared_env(monkeypatch, tmp_path, capsys, children):
+    _env(monkeypatch, tmp_path)
+    # Records written outside this preflight (e.g. by Bash) can share a variable.
+    for service, value in (("svc1", "S3NTINEL-one"), ("svc2", "S3NTINEL-two")):
+        secretstore.set_secret(service, None, value, "api.example.gov", "SHARED_KEY")
+    rc, doc, _out, _err = _invoke(capsys, "--backend", "msb", "create", "shell", str(tmp_path / "ws"),
+                                  "--name", "box", "--json")
+    assert rc == 0 and doc["data"]["secret_bindings"] == ["SHARED_KEY@api.example.gov"]
+    (argv, env), = _verb_calls(children, "create")
+    assert argv.count("--secret") == 1 and env["SHARED_KEY"] == "S3NTINEL-one"
+    assert msb.held_read("box")["SHARED_KEY"]["service"] == "svc1"
+
+
+def test_refeed_keeps_the_first_claim(monkeypatch, tmp_path, capsys, children):
+    _env(monkeypatch, tmp_path)
+    secretstore.set_secret("svc1", None, "S3NTINEL-one", "api.example.gov", "SHARED_KEY")
+    assert _invoke(capsys, "--backend", "msb", "create", "shell", str(tmp_path / "ws"), "--name", "box")[0] == 0
+    secretstore.set_secret("svc2", None, "S3NTINEL-two", "api.example.gov", "SHARED_KEY")
+    children.clear()
+    msb.secret_feed(secretstore.GLOBAL, "svc2", "")
+    assert _verb_calls(children, "modify") == []
+    assert "SHARED_KEY is already bound there for 'svc1'" in capsys.readouterr().err
+
+
+def test_refeed_without_a_readable_value_fails(monkeypatch, tmp_path, capsys):
+    _running(tmp_path, monkeypatch, "a")
+    monkeypatch.setattr(secretstore, "resolve", lambda service, sandbox=None: None)
+    with pytest.raises(msb.MsbError) as info:
+        msb.secret_feed(secretstore.GLOBAL, "usai", "")
+    assert "a (no injectable value)" in info.value.message
+
+
+def test_set_refuses_another_services_env(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path)
+    provider_creds.set_binding("acme", "ACME_KEY", ["models.acme.gov"])
+    _set(capsys, monkeypatch, "-g", "svc1", "--host", "api.example.gov", "--env", "API_KEY")
+    for env, why in (("GITHUB_TOKEN", "reserved for 'github'"), ("USAI_API_KEY", "reserved for 'usai'"),
+                     ("ACME_KEY", "provider 'acme'"), ("API_KEY", "already bound for 'svc1'")):
+        rc, doc, _out, _err = _invoke(capsys, "--backend", "msb", "secret", "set", "-g", "svc2", "--host",
+                                      "api.example.gov", "--env", env, "--json", stdin=VALUE, monkeypatch=monkeypatch)
+        assert rc == 1 and why in doc["error"]["message"], env
+    assert not secretstore.exists("svc2")
+    # A service may keep its own reserved variable on another host.
+    _set(capsys, monkeypatch, "-g", "github", "--host", "ghe.example.gov", "--env", "GITHUB_TOKEN")
+
+
+def test_binding_host_checks(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path)
+    assert not msb._binding_ok("API_KEY", "api..example.gov")
+    assert not msb._binding_ok("API_KEY", "api.example.gov,")
+    assert msb._binding_ok("API_KEY", "api.example.gov:8443,alt.example.gov")
+    secretstore.meta_store("svc", None, "api..example.gov", "API_KEY")
+    assert msb.service_binding("svc") is None
+    _set(capsys, monkeypatch, "-g", "svc2", "--host", "API.Example.GOV", "--env", "API_KEY2")
+    assert msb.service_binding("svc2") == ("API_KEY2", "api.example.gov")
+
+
+def test_create_that_cannot_record_its_bindings_is_undone(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path)
+    _set(capsys, monkeypatch, "-g", "usai")
+
+    def boom(name, held):
+        raise msb.MsbError("failure", f"could not record the secrets bound to sandbox '{name}'")
+
+    monkeypatch.setattr(msb, "_held_write", boom)
+    rc, doc, _out, _err = _invoke(capsys, "--backend", "msb", "create", "shell", str(tmp_path / "ws"),
+                                  "--name", "box", "--json")
+    assert rc == 1 and "could not record" in doc["error"]["message"]
+    assert not msb.exists("box")
+
+
 def test_capability_record_declares_the_secret_verbs():
     caps = msb.capability_record()["capabilities"]
     assert caps["secret-write"] == caps["secret-rm"] == caps["secret-list"] == "required"
@@ -418,6 +601,8 @@ def test_stub_refuses_a_value_on_argv(monkeypatch, tmp_path, capsys):
     assert VALUE not in err and "MISSING is not set" in err
     assert _stub(monkeypatch, tmp_path, "create", "--name", "x", "--secret", "TOK@h.example", "img") == 0
     assert _stub_records(tmp_path) == {"x": {"TOK": {"host": "h.example", "env_present": True}}}
+    assert _stub(monkeypatch, tmp_path, "modify", "x", "--secret", "TOK@h.example") == 0  # rotate
+    assert _stub(monkeypatch, tmp_path, "modify", "x", "--secret", "TOK@other.example") == 1  # no replace
     assert _stub(monkeypatch, tmp_path, "modify", "x", "--secret-rm", "NOPE") == 1
     assert _stub(monkeypatch, tmp_path, "modify", "x", "--secret-rm", "TOK") == 0
     assert _stub(monkeypatch, tmp_path, "modify", "nobox", "--secret-rm", "TOK") == 1

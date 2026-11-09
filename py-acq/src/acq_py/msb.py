@@ -29,6 +29,7 @@ internal test seam, never a secret, never written to acq output.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import ntpath
 import os
@@ -38,7 +39,7 @@ import sys
 from pathlib import Path
 from typing import NamedTuple
 
-from . import errors, hostexec, kits, provider_creds, secretstore, timeouts
+from . import errors, hostexec, kits, provider_creds, secretstore, state, timeouts
 from .secretstore import Scope
 
 STUB_SENTINEL = "__stub__"
@@ -503,10 +504,12 @@ def create(
 
     Every secret the sandbox can be injected with (:func:`secret_bindings`) is
     bound as ``--secret ENV@HOST``; the values travel only in the child's
-    environment mapping.
+    environment mapping. The bindings are recorded host-side so a later
+    ``secret rm`` knows which sandboxes hold them.
     """
     egress = egress_flags(egress_kits)
-    secret_flags, secret_env = secret_bindings(name)
+    planned, secret_env = secret_bindings(name)
+    secret_flags = [token for bound in planned for token in ("--secret", bound.binding.flag)]
     guest = guest_workspace or _guest_path(workspace)
     argv = [
         "create",
@@ -537,7 +540,14 @@ def create(
             f"msb create failed for sandbox '{name}'",
             "check msb logs and retry",
         )
-    return secret_flags[1::2]
+    try:
+        _held_write(name, {b.binding.env: b.entry() for b in planned})
+    except MsbError:
+        # Untracked bindings could never be revoked by `secret rm`: do not keep
+        # a sandbox acq cannot account for.
+        _run(["remove", "--force", name])
+        raise
+    return [bound.binding.flag for bound in planned]
 
 
 def exec_ready(name: str) -> bool:
@@ -646,6 +656,7 @@ def remove(name: str) -> None:
             f"msb remove failed for sandbox '{name}'",
             "check msb logs and retry",
         )
+    _held_forget(name)
 
 
 def _run_stream(argv: list[str], *, json_mode: bool) -> int:
@@ -795,6 +806,10 @@ def ports(name: str) -> list[dict]:
 # environment mapping; argv carries the variable name and host, never the value,
 # and no function here returns, logs or raises with a value (ADR-0038m user
 # story #7 "no secret exposure").
+#
+# Which sandbox holds which binding is recorded host-side (one small record per
+# sandbox, names and hosts only), because revocation must reach exactly the
+# sandboxes that hold a binding: msb offers no binding listing acq can rely on.
 # ---------------------------------------------------------------------------
 
 # GitHub's token is bound to the REST API and both git-transport hosts, so API
@@ -812,6 +827,9 @@ NO_LIVE_REFEED_ENV = "ACQ_SECRET_NO_LIVE_REFEED"
 # `_acq_provider_fact_safe_host` accepts: no scheme, path, wildcard or `..`.
 _BIND_HOST_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.:-]*")
 
+HELD_SCHEMA = 1
+_HELD_UNSAFE_RE = re.compile(r"[^A-Za-z0-9._-]")
+
 
 class SecretBinding(NamedTuple):
     """Where one service's secret is injected: the env var msb reads and the
@@ -823,6 +841,18 @@ class SecretBinding(NamedTuple):
     @property
     def flag(self) -> str:
         return f"{self.env}@{self.host}"
+
+
+class BoundSecret(NamedTuple):
+    """One binding a sandbox holds: the service, its binding, and whether the
+    value came from the sandbox's own store entry (else the global one)."""
+
+    service: str
+    binding: SecretBinding
+    own: bool
+
+    def entry(self) -> dict:
+        return {"service": self.service, "host": self.binding.host, "scope": "sandbox" if self.own else "global"}
 
 
 def _binding_ok(env: str, host: str) -> bool:
@@ -838,10 +868,10 @@ def _binding_ok(env: str, host: str) -> bool:
 def service_binding(service: str, sandbox: str | None = None) -> SecretBinding | None:
     """The binding msb uses for ``service`` in ``sandbox`` (None = global), or None.
 
-    The single table for create, re-feed, unbind, ``secret has`` and ``secret
-    ls``. An endpoint recorded by ``acq secret set SVC --host H --env E`` wins
-    (the sandbox's own record first, then the global one); otherwise ``github``
-    has its fixed hosts and a provider its pinned destination
+    The single table for create, re-feed, ``secret has`` and ``secret ls``. An
+    endpoint recorded by ``acq secret set SVC --host H --env E`` wins (the
+    sandbox's own record first, then the global one); otherwise ``github`` has
+    its fixed hosts and a provider its pinned destination
     (:func:`provider_creds.provider_env_hosts`). Anything else, or an unsafe
     mapping, has no binding: it is never guessed.
     """
@@ -858,6 +888,78 @@ def service_binding(service: str, sandbox: str | None = None) -> SecretBinding |
     return found
 
 
+# --- host-side record of the bindings each sandbox holds -------------------
+
+def _held_path(name: str) -> Path:
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:8]
+    return state.state_dir() / "msb-secret-bindings" / f"{_HELD_UNSAFE_RE.sub('_', name)}.{digest}.json"
+
+
+def held_read(name: str) -> dict[str, dict]:
+    """``{ENV: {service, host, scope}}`` for the bindings ``name`` holds.
+
+    No record means none. A record that exists but cannot be read raises
+    :class:`MsbError`: treating it as empty would let ``secret rm`` skip a
+    sandbox that still holds a credential.
+    """
+    path = _held_path(name)
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        raise _held_unreadable(name) from exc
+    try:
+        doc = json.loads(raw)
+    except ValueError as exc:
+        raise _held_unreadable(name) from exc
+    if not isinstance(doc, dict) or doc.get("schema") != HELD_SCHEMA or doc.get("sandbox") != name:
+        raise _held_unreadable(name)
+    held = doc.get("bindings")
+    if not isinstance(held, dict):
+        raise _held_unreadable(name)
+    if not all(isinstance(v, dict) and isinstance(v.get("service"), str) for v in held.values()):
+        raise _held_unreadable(name)
+    return held
+
+
+def _held_unreadable(name: str) -> MsbError:
+    return MsbError(
+        errors.STATE_SCHEMA_UNSUPPORTED,
+        f"cannot read the record of the secrets bound to sandbox '{name}'",
+        f"remove the sandbox with 'acq rm {name}' (or repair the record under msb-secret-bindings), then retry",
+    )
+
+
+def _held_write(name: str, held: dict[str, dict]) -> None:
+    path = _held_path(name)
+    if not held:
+        _held_forget(name)
+        return
+    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps({"schema": HELD_SCHEMA, "sandbox": name, "bindings": held}, sort_keys=True),
+                       encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as exc:
+        tmp.unlink(missing_ok=True)
+        raise MsbError(
+            errors.FAILURE,
+            f"could not record the secrets bound to sandbox '{name}'",
+            "check that the acq state directory is writable, then retry",
+        ) from exc
+
+
+def _held_forget(name: str) -> None:
+    try:
+        _held_path(name).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+# --- create ------------------------------------------------------------------
+
 def _bind_candidates(name: str) -> list[str]:
     """Services a new sandbox may bind, in Bash's order: github, the services
     with a recorded endpoint (this sandbox's and global), then the providers."""
@@ -868,15 +970,21 @@ def _bind_candidates(name: str) -> list[str]:
     return out
 
 
-def secret_bindings(name: str) -> tuple[list[str], dict[str, str]]:
-    """``(["--secret", "ENV@HOST", ...], {ENV: value})`` for sandbox ``name``.
+def _has_own_value(service: str, sandbox: str) -> bool:
+    """True when ``sandbox`` holds its own value for ``service`` (which a global
+    change must leave alone: the sandbox scope takes precedence)."""
+    return secretstore.name_ok(sandbox) and secretstore.exists(service, sandbox)
+
+
+def secret_bindings(name: str) -> tuple[list[BoundSecret], dict[str, str]]:
+    """The bindings a new sandbox ``name`` gets, and ``{ENV: value}`` for them.
 
     A service is bound when it has a binding and a value resolves for it, the
     sandbox's own value taking precedence over the global one. The first service
     to claim an env var keeps it. The caller passes the mapping only as the msb
     child's environment and clears it afterwards.
     """
-    flags: list[str] = []
+    planned: list[BoundSecret] = []
     env: dict[str, str] = {}
     for service in _bind_candidates(name):
         binding = service_binding(service, name)
@@ -885,26 +993,49 @@ def secret_bindings(name: str) -> tuple[list[str], dict[str, str]]:
         value = secretstore.resolve(service, name)
         if value:
             env[binding.env] = value
-            flags += ["--secret", binding.flag]
+            planned.append(BoundSecret(service, binding, _has_own_value(service, name)))
         value = None
-    return flags, env
+    return planned, env
+
+
+# --- secret set ----------------------------------------------------------------
+
+def _env_claim_problem(service: str, env: str, sandbox: str | None) -> str | None:
+    """Why ``service`` may not bind ``env`` (another service's variable), or None."""
+    owner = provider_creds.key_env_owner(env)
+    if owner is not None and owner != service:
+        return f"{env} is reserved for '{owner}'"
+    for provider in provider_creds.provider_ids():
+        pinned = provider_creds.provider_env_hosts(provider) if provider != service else None
+        if pinned is not None and pinned[0] == env:
+            return f"{env} is the credential variable of provider '{provider}'"
+    for other in secretstore.meta_list(sandbox):
+        bound = service_binding(other, sandbox) if other != service else None
+        if bound is not None and bound.env == env:
+            return f"{env} is already bound for '{other}'"
+    return None
 
 
 def secret_preflight(scope: Scope | str, service: str, host: str = "", env: str = "") -> None:
     """Refuse, before anything is stored, a secret msb could never inject.
 
-    An explicit ``--host``/``--env`` must be bindable; without them the service
-    needs a recorded endpoint, a fixed one (github) or a provider pin. Storing a
-    value msb cannot bind would report a credential the sandbox never receives.
+    An explicit ``--host``/``--env`` must be bindable and must not take another
+    service's variable (reserved names, provider variables, or a variable a
+    recorded endpoint already uses). Without them the service needs a recorded
+    endpoint, a fixed one (github) or a provider pin. Storing a value msb cannot
+    bind would report a credential the sandbox never receives.
     """
     sc = secretstore.as_scope(scope)
     if host or env:
-        if not _binding_ok(env, host):
+        problem = None if _binding_ok(env, host) else (
+            "use an upper-case env var name that is not process-critical (e.g. API_KEY) and plain DNS hosts"
+        )
+        claim = _env_claim_problem(service, env, sc.sandbox) if problem is None else None
+        if problem is not None or claim is not None:
             raise MsbError(
                 errors.VALIDATION_FAILED,
-                f"msb cannot bind '{service}' as {env}@{host}",
-                "use an upper-case env var name that is not process-critical (e.g. API_KEY) "
-                "and plain DNS hosts; nothing was stored",
+                f"msb cannot bind '{service}' as {env}@{host}" + (f": {claim}" if claim else ""),
+                f"{problem or 'choose a different --env'}; nothing was stored",
             )
         return
     if service_binding(service, sc.sandbox) is None:
@@ -935,12 +1066,6 @@ def _running_targets(scope: Scope) -> list[str]:
     return names
 
 
-def _has_own_value(service: str, sandbox: str) -> bool:
-    """True when ``sandbox`` holds its own value for ``service`` (which a global
-    change must leave alone: the sandbox scope takes precedence)."""
-    return secretstore.name_ok(sandbox) and secretstore.exists(service, sandbox)
-
-
 def _modify(name: str, flags: list[str], secret_env: dict[str, str] | None = None) -> bool:
     try:
         proc = _run(["modify", name, *flags], secret_env=secret_env)
@@ -950,11 +1075,46 @@ def _modify(name: str, flags: list[str], secret_env: dict[str, str] | None = Non
     return proc.returncode == 0
 
 
+def _drop(name: str, env: str, held: dict[str, dict]) -> bool:
+    """``msb modify NAME --secret-rm ENV`` and forget it in the record."""
+    if not _modify(name, ["--secret-rm", env]):
+        return False
+    held.pop(env, None)
+    _held_write(name, held)
+    return True
+
+
+def _put(name: str, bound: BoundSecret, value: str, held: dict[str, dict]) -> bool:
+    """Bind ``bound`` in sandbox ``name`` and record it.
+
+    A binding is never replaced in place: if the variable is bound to other
+    hosts, or this service is bound under another variable, those are removed
+    first with their own ``--secret-rm``. Adding the same variable to the same
+    hosts rotates the value.
+    """
+    env = bound.binding.env
+    stale = [e for e, v in held.items() if v["service"] == bound.service and e != env]
+    if env in held and held[env].get("host") != bound.binding.host:
+        stale.append(env)
+    for old in stale:
+        if not _drop(name, old, held):
+            return False
+    if not _modify(name, ["--secret", bound.binding.flag], {env: value}):
+        return False
+    held[env] = bound.entry()
+    _held_write(name, held)
+    return True
+
+
 def _refeed(service: str, scope: Scope) -> None:
     """Push ``service``'s current value to the running sandboxes ``scope``
-    reaches (``msb modify NAME --secret ENV@HOST``), so a new or changed secret
-    applies without a recreate. Raises :class:`MsbError` naming any sandbox that
-    could not be updated."""
+    reaches, so a new or changed secret applies without a recreate.
+
+    A sandbox with its own value is left alone on a global change, and a
+    variable already bound there for another service keeps its first claim
+    (warned). Raises :class:`MsbError` naming every sandbox that could not be
+    updated, including one whose value or binding could not be resolved.
+    """
     if _live_refeed_off():
         return
     failed: list[str] = []
@@ -963,9 +1123,17 @@ def _refeed(service: str, scope: Scope) -> None:
             continue
         binding = service_binding(service, sandbox)
         value = secretstore.resolve(service, sandbox)
-        if binding is not None and value:
-            if not _modify(sandbox, ["--secret", binding.flag], {binding.env: value}):
-                failed.append(sandbox)
+        held = held_read(sandbox)
+        if binding is None or not value:
+            failed.append(f"{sandbox} (no injectable value)")
+        elif binding.env in held and held[binding.env]["service"] != service:
+            print(
+                f"acq: warning: '{service}' was not applied to sandbox '{sandbox}': "
+                f"{binding.env} is already bound there for '{held[binding.env]['service']}'",
+                file=sys.stderr,
+            )
+        elif not _put(sandbox, BoundSecret(service, binding, _has_own_value(service, sandbox)), value, held):
+            failed.append(sandbox)
         value = None
     if failed:
         raise MsbError(
@@ -986,47 +1154,68 @@ def secret_feed(scope: Scope | str, service: str, value: str, host: str = "", en
     _refeed(service, secretstore.as_scope(scope))
 
 
-def _unbind_flags(scope: Scope, service: str, sandbox: str) -> tuple[list[str], dict[str, str] | None] | None:
-    """The ``msb modify`` flags that take ``scope``'s value for ``service`` out
-    of ``sandbox``, or None when it is not bound there.
+# --- secret rm -------------------------------------------------------------------
 
-    Removing a sandbox's own value falls back to the global one when that can be
-    bound (the sandbox keeps a working credential); otherwise the binding goes.
+def _unbind_one(scope: Scope, service: str, sandbox: str) -> bool:
+    """Remove ``scope``'s binding of ``service`` from ``sandbox``, if it holds one.
+
+    Only bindings the record shows the sandbox holding for this scope are
+    touched. Removing a sandbox's own value then re-binds the global value with
+    a separate call when one can be injected; if that re-add fails the sandbox is
+    left without the credential (warned), never with the removed value.
     """
-    current = service_binding(service, sandbox)
-    if current is None:
-        return None
-    if not scope.is_global:
+    held = held_read(sandbox)
+    wanted = "global" if scope.is_global else "sandbox"
+    envs = [e for e, v in held.items() if v["service"] == service and v.get("scope") == wanted]
+    for env in envs:
+        if not _drop(sandbox, env, held):
+            return False
+    if envs and not scope.is_global:
         fallback = service_binding(service, None)
         value = secretstore.resolve(service, None)
-        if fallback is not None and value:
-            drop = ["--secret-rm", current.env] if fallback.env != current.env else []
-            return [*drop, "--secret", fallback.flag], {fallback.env: value}
-    return ["--secret-rm", current.env], None
+        if fallback is not None and value and fallback.env not in held:
+            if not _put(sandbox, BoundSecret(service, fallback, False), value, held):
+                print(
+                    f"acq: warning: removed '{service}' from sandbox '{sandbox}', but could not bind the "
+                    f"global value there; run 'acq secret set -g {service}' or recreate the sandbox",
+                    file=sys.stderr,
+                )
+        value = None
+    return True
 
 
 def secret_unbind(scope: Scope | str, service: str) -> None:
-    """Before the store entry is deleted: unbind it from running sandboxes.
+    """Before the store entry is deleted: unbind it from the sandboxes holding it.
 
-    Best effort, as in Bash: msb may refuse to remove a binding a sandbox never
-    had, so a sandbox that cannot be updated is named in a warning and the
-    removal from the store goes ahead.
+    The host-side record says which sandboxes hold the binding (stopped ones
+    included); nothing else is touched. If any of them cannot be updated this
+    raises ``unbind_failed`` naming them, and the caller keeps the store entry so
+    the removal can be retried.
     """
     sc = secretstore.as_scope(scope)
+    if service_binding(service, sc.sandbox) is None:
+        print(
+            f"acq: warning: '{service}' has no msb binding to resolve (no endpoint mapping or provider pin); "
+            "only sandboxes recorded as holding it are unbound",
+            file=sys.stderr,
+        )
     if _live_refeed_off():
         return
-    failed: list[str] = []
-    for sandbox in _running_targets(sc):
-        if sc.is_global and _has_own_value(service, sandbox):
-            continue
-        plan = _unbind_flags(sc, service, sandbox)
-        if plan is not None and not _modify(sandbox, *plan):
-            failed.append(sandbox)
+    names = list_names()
+    if names is None:
+        raise MsbError(
+            errors.FAILURE,
+            "could not list sandboxes to unbind the secret from",
+            "check that msb works ('msb list'), then retry",
+        )
+    targets = names if sc.is_global else [n for n in names if n == sc.sandbox]
+    failed = [sandbox for sandbox in targets if not _unbind_one(sc, service, sandbox)]
     if failed:
-        print(
-            f"acq: warning: could not unbind '{service}' from running sandbox(es) {', '.join(failed)}; "
-            "it stays injected there until they are recreated or removed",
-            file=sys.stderr,
+        raise MsbError(
+            errors.UNBIND_FAILED,
+            f"could not unbind '{service}' from sandbox(es): {', '.join(failed)}; "
+            "it is still stored in the acq secret store",
+            "retry the removal; if a sandbox stays unreachable, remove it with 'acq rm NAME' and retry",
         )
 
 
@@ -1055,12 +1244,14 @@ def secret_has(scope: Scope | str, service: str) -> bool:
 
 
 def secret_rm(scope: Scope | str, service: str) -> None:
-    """Unbind from running sandboxes, then delete the store value and endpoint."""
+    """Unbind from the sandboxes holding it, then delete the store value and endpoint."""
     sc = secretstore.as_scope(scope)
     secret_unbind(sc, service)
     secretstore.delete(secretstore.key_for(service, sc.sandbox))
     secretstore.meta_delete(service, sc.sandbox)
 
+
+# --- secret ls -------------------------------------------------------------------
 
 def _ls_entry(sandbox: str | None, service: str) -> dict:
     binding = service_binding(service, sandbox)
@@ -1104,11 +1295,14 @@ def secret_ls(scope: Scope | str | None = None) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def provider_credential_set(provider: str, key_env: str, hosts: list[str], value: str) -> None:
-    """Store a provider credential in the acq store and bind it where it runs.
+    """Pin a provider's destination, store its credential, and bind it.
 
-    The value goes to the global store entry for ``provider``; running sandboxes
-    without their own value are re-fed ``--secret KEY_ENV@HOSTS``, and new ones
-    bind it at create from the recorded pin. Raises :class:`MsbError`.
+    The pin is recorded first, so create, re-feed and ``secret rm`` all resolve
+    the same binding (:func:`service_binding`); then the value goes to the
+    global store entry for ``provider`` and running sandboxes without their own
+    value are re-fed. A ``--host``/``--env`` record for the provider that names
+    a different destination is refused rather than silently overridden either
+    way. Raises :class:`MsbError`.
     """
     host = ",".join(hosts)
     if not _binding_ok(key_env, host):
@@ -1117,24 +1311,25 @@ def provider_credential_set(provider: str, key_env: str, hosts: list[str], value
             f"msb cannot bind provider '{provider}' as {key_env}@{host}",
             "use an upper-case env var name and plain DNS hosts",
         )
+    recorded = secretstore.meta_resolve_exact(provider, None)
+    if recorded is not None and (recorded.env, recorded.host) != (key_env, host):
+        raise MsbError(
+            errors.VALIDATION_FAILED,
+            f"'{provider}' already has a recorded endpoint {recorded.env}@{recorded.host}, "
+            f"which differs from {key_env}@{host}",
+            f"remove it with 'acq secret rm -g {provider}', then pin the provider again; nothing was changed",
+        )
+    try:
+        provider_creds.set_binding(provider, key_env, hosts)
+    except state.StateSchemaError as exc:
+        raise MsbError(
+            errors.STATE_SCHEMA_UNSUPPORTED,
+            str(exc),
+            f"remove or repair the unreadable provider-credential binding for '{provider}', then retry",
+        ) from exc
     secretstore.store(secretstore.key_for(provider), value)
     value = ""
-    if _live_refeed_off():
-        return
-    failed: list[str] = []
-    for sandbox in _running_targets(secretstore.GLOBAL):
-        if _has_own_value(provider, sandbox):
-            continue
-        current = secretstore.resolve(provider, None)
-        if current and not _modify(sandbox, ["--secret", f"{key_env}@{host}"], {key_env: current}):
-            failed.append(sandbox)
-        current = None
-    if failed:
-        raise MsbError(
-            errors.FAILURE,
-            f"stored the '{provider}' credential, but could not apply it to running sandbox(es): {', '.join(failed)}",
-            "re-run the command, or recreate those sandboxes",
-        )
+    _refeed(provider, secretstore.GLOBAL)
 
 
 def github_scope(sandbox: str, value: str) -> None:

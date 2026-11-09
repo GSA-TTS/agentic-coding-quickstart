@@ -16,6 +16,13 @@ argv element (a ``--flag=VALUE`` embedding included). The stub records each
 sandbox's bindings in ``secrets.json`` next to the catalog as ``{name: {ENV:
 {host, env_present}}}``: whether the variable was present, never its value.
 
+``modify`` models the conservative reading of msb's "add or rotate": ``--secret
+ENV@HOST`` for a variable already bound to the SAME hosts rotates it, but one
+bound to OTHER hosts is an error (no assumption that it is replaced), and
+``--secret-rm`` of a variable that is not bound is an error.
+``ACQ_MSB_STUB_FAIL_ADD`` / ``ACQ_MSB_STUB_FAIL_RM`` name sandboxes (comma
+separated) whose ``modify --secret`` / ``--secret-rm`` fails.
+
 msb 0.7.11 has NO ``secret``/``kit-apply``/``substrate-provision``/
 ``provider-credential``/``github-scope``/``rotate`` subcommands, so the stub models
 none of them: any such token is an "unrecognized subcommand" (exit 1), matching the
@@ -134,6 +141,8 @@ def _apply_secrets(args: list[str], bindings: dict) -> str | None:
             return f"host environment variable {env} is not set"
         if value and any(value in a for a in args):
             return f"the value of {env} was found on the command line"
+        if env in bindings and bindings[env].get("host") != host:
+            return f"secret {env} is already bound to other hosts; remove it first"
         bindings[env] = {"host": host, "env_present": True}
     for env in _flag_values(args, "--secret-rm"):
         if env not in bindings:
@@ -200,6 +209,10 @@ def main(argv: list[str]) -> int:
         if name is None or name not in catalog:
             print(f"msb: no such sandbox '{name}'", file=sys.stderr)
             return 1
+        for knob, flag in (("ACQ_MSB_STUB_FAIL_ADD", "--secret"), ("ACQ_MSB_STUB_FAIL_RM", "--secret-rm")):
+            if flag in args and name in os.environ.get(knob, "").split(","):
+                print(RAW_FAIL_STDERR, file=sys.stderr)
+                return 1
         records = _load_secrets()
         bindings = records.get(name, {})
         problem = _apply_secrets(args, bindings)

@@ -60,7 +60,11 @@ exit 1, the `unsupported_capability` code, and remediation.
 > adapter, are bound as `--secret ENV@HOST` at create, and reach running
 > sandboxes through `msb modify --secret`/`--secret-rm`. `key-present` stays an
 > sbx-only obligation (msb holds no proxy table); `secret has` on msb is answered
-> from the store and the adapter's binding table.
+> from the store and the adapter's binding table. Because msb offers no binding
+> listing acq relies on, the adapter records host-side which sandbox holds which
+> binding; `secret rm` unbinds exactly those, and if one cannot be updated it
+> keeps the stored value and fails with `unbind_failed` so the removal can be
+> retried.
 
 The record is a declaration; conformance is proven, not trusted: each
 declared capability is asserted by a Tier-1 subprocess vector (working, or
