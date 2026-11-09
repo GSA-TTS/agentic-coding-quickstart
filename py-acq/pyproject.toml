@@ -26,8 +26,17 @@ acq-py = "acq_py.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-# The msb balanced egress baseline (a copy of acq.backends/msb-balanced-hosts.txt).
-acq_py = ["msb-balanced-hosts.txt"]
+# The msb balanced egress baseline (a copy of acq.backends/msb-balanced-hosts.txt),
+# and the built-in kit bundle pinned at the control-plane ref (kitspec.py). The
+# bundle globs name the dot directory explicitly because setuptools' globs skip
+# hidden paths; tests/test_kitspec.py checks that they cover every bundled file.
+acq_py = [
+  "msb-balanced-hosts.txt",
+  "kitbundle/MANIFEST.json",
+  "kitbundle/*/*",
+  "kitbundle/*/**/*",
+  "kitbundle/*/files/home/.config/git/*",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

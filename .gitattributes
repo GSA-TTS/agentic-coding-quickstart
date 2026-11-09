@@ -38,3 +38,8 @@ scripts/verify-msb-pin text eol=lf
 scripts/verify-net-default-egress text eol=lf
 scripts/verify-ports-live text eol=lf
 scripts/verify-sbx-startup-barrier text eol=lf
+
+# The built-in kit bundle is a byte-exact copy of the pinned Patterns kits
+# (py-acq/src/acq_py/kitbundle/MANIFEST.json records each file's git blob id), and
+# some of its files are shell scripts.
+py-acq/src/acq_py/kitbundle/** text eol=lf
