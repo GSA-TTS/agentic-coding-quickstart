@@ -269,6 +269,15 @@ if ! command -v acq_is_known_agent >/dev/null 2>&1; then
   fi
 fi
 
+# Source the host user-directory resolvers (absolute-only XDG/HOME/ACQ_STATE_DIR
+# handling). Needed before secret-store.sh, whose defaults are assigned when it
+# is sourced. The adapters source it defensively too, for tests that load them
+# directly.
+if ! command -v acq_xdg_dir >/dev/null 2>&1; then
+  # shellcheck source=acq.backends/userdirs.sh
+  . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/userdirs.sh"
+fi
+
 # Source the neutral-kit translation layer (spec.yaml parser + shortcut
 # dispatch). ACQ_SCRIPT_DIR is exported by the acq entry point; in the offline
 # test harness it is set before common.sh is sourced.
@@ -902,7 +911,14 @@ acq_validate_agent_builtin_kit_dir() {
 acq_validate_agent_builtin_kit_ref() {
   local agent="$1" kitref="$2" base_dir="${3:-}" kitdir
   if [ -z "$base_dir" ]; then
-    base_dir="${ACQ_STATE_DIR:-${TMPDIR:-/tmp}/acq}/agent-kit-validation/$agent"
+    # A relative ACQ_STATE_DIR is never honored (see userdirs.sh); the entry
+    # point refuses it up front, and this fails closed if reached anyway.
+    if [ -n "${ACQ_STATE_DIR:-}" ]; then
+      acq_path_is_absolute "$ACQ_STATE_DIR" || return 1
+      base_dir="$ACQ_STATE_DIR/agent-kit-validation/$agent"
+    else
+      base_dir="${TMPDIR:-/tmp}/acq/agent-kit-validation/$agent"
+    fi
   fi
   kitdir=$(kit_translate_fetch "$kitref" "$base_dir") || return 1
   acq_validate_agent_builtin_kit_dir "$agent" "$kitdir"
@@ -1065,10 +1081,88 @@ EOF
 
 # Normalize a string into a sandbox-name slug: lowercase, runs of
 # non-alphanumerics collapsed to a single hyphen, leading/trailing hyphens trimmed.
+# Only ASCII a-z0-9 survive, byte-wise under the C locale, so the result is the
+# same single-line slug the Python implementation derives: a newline, an escape
+# sequence or a non-ASCII letter in a directory name becomes a hyphen instead of
+# leaking into the sandbox name (where a newline would split `list -q` lookups).
 slugify() {
   printf '%s' "$1" \
-    | tr '[:upper:]' '[:lower:]' \
-    | sed -e 's/[^a-z0-9]\{1,\}/-/g' -e 's/^-*//' -e 's/-*$//'
+    | LC_ALL=C tr 'A-Z' 'a-z' \
+    | LC_ALL=C tr -cs 'a-z0-9' '-' \
+    | sed -e 's/^-*//' -e 's/-*$//'
+}
+
+# acq_printable STR — STR with every control character (newline, tab, ESC, DEL)
+# replaced by '?', for echoing a user-supplied path or name to the terminal. A
+# directory name can carry ESC/OSC sequences that would otherwise drive the
+# terminal, or a newline that would forge extra output lines.
+acq_printable() {
+  printf '%s' "${1//[[:cntrl:]]/?}"
+}
+
+# _acq_name_is_one_line NAME — 0 when NAME is non-empty and has no newline, i.e.
+# it could appear as one line of a backend's `list -q` output.
+_acq_name_is_one_line() {
+  case "$1" in
+    ''|*$'\n'*) return 1 ;;
+  esac
+  return 0
+}
+
+# _acq_list_has_line NAME LIST — 0 when NAME equals a whole line of LIST. The
+# adapters' existence probes use this instead of `grep -Fx`, which treats each
+# line of a multi-line pattern as a separate pattern: a name with an embedded
+# newline would then match an unrelated sandbox listed on its own line, and an
+# empty name would match a blank line. A trailing CR is ignored so a native
+# Windows CLI's CRLF output still matches.
+_acq_list_has_line() {
+  local want="$1" line
+  _acq_name_is_one_line "$want" || return 1
+  while IFS= read -r line; do
+    [ "${line%$'\r'}" = "$want" ] && return 0
+  done <<EOF
+$2
+EOF
+  return 1
+}
+
+# acq_sandbox_name_check NAME — fail with a message unless NAME is safe to use
+# as the name of a NEW sandbox (an explicit --name). The name is passed to the
+# backend as an argument, matched against `list -q` output line by line, used as
+# msb's NAME:PATH copy target, joined into host paths and printed. Only ASCII
+# letters, digits, '_' and '-' are accepted, the same set the secret store and
+# the msb ports state accept for a sandbox name, so every per-sandbox feature
+# works with any name acq lets you create; a leading '-' would read as an
+# option. The characters are spelled out because a bracket range follows the
+# locale's collation order under bash 3.2.
+acq_sandbox_name_check() {
+  case "$1" in
+    ''|-*|*[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-]*)
+      echo "acq: error: invalid sandbox name '$(acq_printable "$1")'." >&2
+      echo "     Use only letters, digits, '_' and '-', not starting with '-'." >&2
+      echo "     An existing sandbox with another name is still reachable with" >&2
+      echo "     'acq run NAME', 'acq shell NAME' or 'acq rm NAME'." >&2
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+# acq_name_form_check VERB NAME — refuse a NAME given to a verb that acts on an
+# existing sandbox (rm, stop, exec, ...) when it cannot be a sandbox name but
+# could steer a host path built from it: empty, '.', '..', anything containing
+# '/' or '\', or a control character. Unlike acq_sandbox_name_check this accepts
+# every other character, so a sandbox created outside acq stays reachable.
+acq_name_form_check() {
+  case "$2" in
+    ''|.|..|*/*|*\\*|*[[:cntrl:]]*)
+      echo "acq: $1: refusing sandbox name '$(acq_printable "$2")'." >&2
+      echo "     A sandbox name cannot be empty, '.' or '..', or contain '/', '\\'" >&2
+      echo "     or control characters." >&2
+      return 1
+      ;;
+  esac
+  return 0
 }
 
 # True if PREV is a flag that consumes the next argument as its value.
@@ -1085,11 +1179,13 @@ derive_name() {
   local agent="" first_path="" prev=""
   for arg in "$@"; do
     if [ "$prev" = "--name" ]; then
+      acq_sandbox_name_check "$arg" || return 1
       printf '%s\n' "$arg"
       return 0
     fi
     case "$arg" in
       --name=*)
+        acq_sandbox_name_check "${arg#--name=}" || return 1
         printf '%s\n' "${arg#--name=}"
         return 0
         ;;
@@ -1167,6 +1263,72 @@ workspace_paths() {
     fi
     prev="$arg"
   done
+}
+
+# acq_workspace_specs_safe ARGS... — refuse, with a message, any workspace
+# positional in an AGENT-form create/run arg list that the backends cannot
+# represent. Each positional is PATH[:ro], and the ':ro' suffix is the only colon
+# acq understands: a colon anywhere else is read as a separator (workspace_path
+# here, sbx's own PATH:ro parsing, msb's SOURCE:DEST[:OPTIONS] volume spec), so
+# the mount would silently target a different path. A control character splits
+# the line-oriented workspace list the adapters read and reaches the terminal
+# when the path is echoed. The symlink-resolved path is checked too, because it
+# is what msb mounts. With no path argument the current directory is the
+# workspace, so it is checked instead. Silent and 0 when every path is usable.
+acq_workspace_specs_safe() {
+  local agent="" prev="" arg seen=0
+  for arg in "$@"; do
+    if _takes_value "$prev"; then prev="$arg"; continue; fi
+    prev="$arg"
+    case "$arg" in
+      -*) continue ;;
+    esac
+    if [ -z "$agent" ]; then
+      agent="$arg"
+      continue
+    fi
+    seen=1
+    _acq_workspace_safe "${arg%:ro}" || return 1
+  done
+  [ "$seen" -eq 1 ] || _acq_workspace_safe "$PWD" || return 1
+  return 0
+}
+
+# _acq_workspace_safe PATH — check PATH as given and, when it is a directory, its
+# symlink-resolved form.
+_acq_workspace_safe() {
+  local p="$1" real
+  _acq_workspace_path_safe "$p" "$p" || return 1
+  [ -d "$p" ] || return 0
+  real=$(canonicalize_path "$p")
+  [ "$real" = "$p" ] && return 0
+  _acq_workspace_path_safe "$real" "$p (resolves to $real)"
+}
+
+# _acq_workspace_path_safe PATH SHOWN — the per-path check behind
+# acq_workspace_specs_safe. SHOWN describes the path for the message.
+_acq_workspace_path_safe() {
+  case "$1" in
+    *[[:cntrl:]]*)
+      echo "acq: error: workspace path contains a control character (newline, tab or escape): $(acq_printable "$2")" >&2
+      echo "     acq cannot mount it safely. Rename the directory, then re-run." >&2
+      return 1
+      ;;
+    *:*)
+      echo "acq: error: workspace path contains ':': $(acq_printable "$2")" >&2
+      case "$2" in
+        [abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ]:[/\\]*)
+          echo "     In Git Bash, give a Windows drive path in /c/... form instead of C:/..." >&2
+          return 1
+          ;;
+      esac
+      echo "     acq and the sandbox backends use ':' to separate a mount's path from its" >&2
+      echo "     options (PATH:ro), so this path cannot be mounted. Rename the directory," >&2
+      echo "     then re-run." >&2
+      return 1
+      ;;
+  esac
+  return 0
 }
 
 # Canonicalize a filesystem path to its real, symlink-free absolute form, in the
@@ -1262,7 +1424,7 @@ advise_project_env_activation() {
     echo "     use already-approved direnv export when available." >&2
     return 0
   fi
-  echo "acq: project environment detected ($kind) in $ws." >&2
+  echo "acq: project environment detected ($kind) in $(acq_printable "$ws")." >&2
   echo "     acq will not run project activation, 'direnv allow', or 'devenv shell' automatically." >&2
   echo "     If you trust this repo and have approved its .envrc yourself, re-run" >&2
   echo "     this acq command with ACQ_ACTIVATE_PROJECT_ENV=1 to use direnv export." >&2
@@ -1776,8 +1938,12 @@ acq_registry_auth_hint() {
 
 ACQ_RESOLVED_BACKEND=""
 
+# Only an absolute XDG_CONFIG_HOME/HOME is honored (see userdirs.sh); returns 1
+# with no output when no absolute home can be determined.
 _acq_config_file() {
-  printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/acq/config.yaml"
+  local base
+  base=$(acq_xdg_dir XDG_CONFIG_HOME .config) || return 1
+  printf '%s\n' "$base/acq/config.yaml"
 }
 
 _read_config_backend() {
@@ -1799,7 +1965,7 @@ _acq_config_read_field() {
   case "$key" in
     ''|*[!A-Za-z0-9_]*) return 0 ;;   # fail closed on an unexpected key name
   esac
-  cfg=$(_acq_config_file)
+  cfg=$(_acq_config_file) || return 0
   [ -f "$cfg" ] || return 0
   awk -v k="$key" '
     {
@@ -1857,7 +2023,7 @@ _acq_config_write_field() {
   case "$key" in
     ''|*[!A-Za-z0-9_]*) acq_debug "config: refusing to write unsafe key '$key'"; return 1 ;;
   esac
-  cfg=$(_acq_config_file)
+  cfg=$(_acq_config_file) || { acq_debug "config: no absolute config directory"; return 1; }
   dir=$(dirname "$cfg")
   if ! ( umask 077; mkdir -p "$dir" ) 2>/dev/null; then
     acq_debug "config: could not create config dir: $dir"
@@ -1899,8 +2065,11 @@ _acq_config_write_field() {
 _ACQ_LOCAL_BIN_ANNOUNCED=""
 _ensure_local_bin_on_path() {
   local be="$1"
-  local lb="${HOME:-}/.local/bin"
-  [ -n "${HOME:-}" ] || return 1
+  local lb
+  # Only an absolute home: a relative entry on PATH would resolve against the
+  # current directory (see userdirs.sh).
+  lb=$(acq_home_dir) || return 1
+  lb="$lb/.local/bin"
   [ -x "$lb/$be" ] || return 1
 
   # Already on PATH? Then nothing to do (defensive; caller only reaches here
@@ -2012,9 +2181,24 @@ _announce_autodetect_backend() {
   esac
 }
 
-# Source the adapter for a named backend. Fails closed if the file is missing.
+# acq_backend_name_known NAME — 0 when NAME is a backend acq ships an adapter for.
+# The name picks the file under acq.backends/ that acq sources, so it is checked
+# against this fixed set before any path is built from it.
+acq_backend_name_known() {
+  case "$1" in
+    sbx|msb) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Source the adapter for a named backend. Fails closed on a name outside the
+# known set (before any file is touched) or if the file is missing.
 _load_backend_adapter() {
   local name="$1"
+  if ! acq_backend_name_known "$name"; then
+    echo "acq: error: unknown backend '$(acq_printable "$name")' (expected sbx or msb)" >&2
+    exit 1
+  fi
   local adapter="${ACQ_SCRIPT_DIR}/acq.backends/${name}.sh"
   if [ ! -f "$adapter" ]; then
     echo "acq: error: no backend adapter found for '${name}' (expected: ${adapter})" >&2
@@ -2037,18 +2221,19 @@ _load_backend_adapter() {
 # Resolve and load the backend. $1 (optional) = explicit --backend value.
 acq_resolve_backend() {
   local explicit="${1:-}"
-  local name=""
+  local name="" origin=""
   local autodetected=0
 
   if [ -n "$explicit" ]; then
-    name="$explicit"
+    name="$explicit"; origin="--backend"
   elif [ -n "${ACQ_BACKEND:-}" ]; then
-    name="$ACQ_BACKEND"
+    name="$ACQ_BACKEND"; origin="ACQ_BACKEND"
   else
     local cfg_name
     cfg_name=$(_read_config_backend)
     if [ -n "$cfg_name" ]; then
       name="$cfg_name"
+      origin="${XDG_CONFIG_HOME:-$HOME/.config}/acq/config.yaml"
     else
       _auto_detect_backend || {
         echo "acq: error: no backend detected (looked on PATH and in ~/.local/bin)." >&2
@@ -2074,6 +2259,14 @@ acq_resolve_backend() {
   # silent.
   [ "$autodetected" -eq 1 ] && _announce_autodetect_backend
 
+  # An unknown name exits, as a missing adapter file always has: a backend the
+  # user named explicitly but acq cannot load is an error even for the
+  # best-effort callers, unlike "nothing installed" above.
+  if ! acq_backend_name_known "$name"; then
+    echo "acq: error: unknown backend '$(acq_printable "$name")' from ${origin:-auto-detect} (expected sbx or msb)." >&2
+    echo "     Fix or unset it, or pin a valid one with 'acq backend set msb'." >&2
+    exit 1
+  fi
   _load_backend_adapter "$name"
   _build_kit_list
 }
@@ -2115,7 +2308,9 @@ _acq_provenance_dir() {
     printf '%s\n' "$ACQ_PROVENANCE_DIR"
     return 0
   fi
-  printf '%s\n' "${XDG_STATE_HOME:-$HOME/.local/state}/acq/provenance"
+  local base
+  base=$(acq_xdg_dir XDG_STATE_HOME .local/state) || return 1
+  printf '%s\n' "$base/acq/provenance"
 }
 
 # Path to one sandbox's provenance record. Keyed by backend + sandbox name so the
@@ -2132,7 +2327,9 @@ _acq_provenance_file() {
   # cksum of the raw name disambiguates sanitizer collisions (fail-open: if cksum
   # is somehow unavailable the name still resolves, just without the suffix).
   name_sum=$(printf '%s' "$name" | cksum 2>/dev/null | cut -d' ' -f1 2>/dev/null || echo 0)
-  printf '%s/%s/%s.%s.env\n' "$(_acq_provenance_dir)" "$safe_backend" "$safe_name" "$name_sum"
+  local _acq_pd
+  _acq_pd=$(_acq_provenance_dir) || return 1
+  printf '%s/%s/%s.%s.env\n' "$_acq_pd" "$safe_backend" "$safe_name" "$name_sum"
 }
 
 # Write (or overwrite) a sandbox's provenance record. Call ONLY after a
@@ -2350,7 +2547,9 @@ _acq_cli_kits_file() {
   safe_backend=$(printf '%s' "$backend" | tr -c 'A-Za-z0-9._-' '_')
   safe_name=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')
   name_sum=$(printf '%s' "$name" | cksum 2>/dev/null | cut -d' ' -f1 2>/dev/null || echo 0)
-  printf '%s/%s/%s.%s.kits\n' "$(_acq_provenance_dir)" "$safe_backend" "$safe_name" "$name_sum"
+  local _acq_pd
+  _acq_pd=$(_acq_provenance_dir) || return 1
+  printf '%s/%s/%s.%s.kits\n' "$_acq_pd" "$safe_backend" "$safe_name" "$name_sum"
 }
 
 # Persist the current CLI (`--kit`) and extra (ACQ_EXTRA_KITS) kit refs for a
@@ -3013,7 +3212,8 @@ acq_kit_source_provider_kits() {
   [ -n "$repo" ] && [ -n "$ref" ] && [ -n "$dir" ] || return 0
   command -v kit_translate_fetch >/dev/null 2>&1 || return 0
   seed=$(printf '%s@%s' "$repo" "$ref" | cksum 2>/dev/null | cut -d' ' -f1)
-  cache="${XDG_CACHE_HOME:-${HOME:-}/.cache}/acq/kit-sources/${seed:-0}"
+  cache=$(acq_xdg_dir XDG_CACHE_HOME .cache) || return 0
+  cache="$cache/acq/kit-sources/${seed:-0}"
   root=$(kit_translate_fetch "git+https://${repo}.git#ref=${ref}&dir=${dir}" "$cache" 2>/dev/null) || {
     acq_debug "kit-source: could not fetch $repo@$ref for discovery"
     return 0
@@ -3648,20 +3848,25 @@ _acq_provider_facts_python() {
   if [ -n "${LOCALAPPDATA:-}" ] && [ "$(uname -s 2>/dev/null)" != "Linux" ]; then
     data_home="$LOCALAPPDATA/acq"
   else
-    data_home="${XDG_DATA_HOME:-${HOME:-}/.local/share}/acq"
+    data_home=$(acq_xdg_dir XDG_DATA_HOME .local/share)/acq || data_home=""
   fi
   runtime="${ACQ_PROVIDER_INPUT_DATA_DIR:-$data_home/provider-input-validator}.current"
-  if [ -x "$runtime/bin/python3" ]; then
-    printf '%s\n' "$runtime/bin/python3"
-    return 0
-  fi
-  if [ -x "$runtime/Scripts/python.exe" ]; then
-    printf '%s\n' "$runtime/Scripts/python.exe"
-    return 0
-  fi
-  if [ -x "$runtime/python.exe" ]; then
-    printf '%s\n' "$runtime/python.exe"
-    return 0
+  # Only an absolute runtime path: a relative one would run an interpreter from
+  # the current directory (see userdirs.sh).
+  if { [ -n "$data_home" ] || [ -n "${ACQ_PROVIDER_INPUT_DATA_DIR:-}" ]; } \
+      && acq_path_is_absolute "$runtime"; then
+    if [ -x "$runtime/bin/python3" ]; then
+      printf '%s\n' "$runtime/bin/python3"
+      return 0
+    fi
+    if [ -x "$runtime/Scripts/python.exe" ]; then
+      printf '%s\n' "$runtime/Scripts/python.exe"
+      return 0
+    fi
+    if [ -x "$runtime/python.exe" ]; then
+      printf '%s\n' "$runtime/python.exe"
+      return 0
+    fi
   fi
   if command -v python3 >/dev/null 2>&1; then
     printf '%s\n' "python3"
@@ -4239,9 +4444,20 @@ _acq_provider_input_python() {
     if [ -n "${LOCALAPPDATA:-}" ] && [[ "$(uname -s 2>/dev/null)" = MINGW* || "$(uname -s 2>/dev/null)" = MSYS* || "$(uname -s 2>/dev/null)" = CYGWIN* ]]; then
       data_home="$LOCALAPPDATA/acq"
     else
-      data_home="${XDG_DATA_HOME:-${HOME:-}/.local/share}/acq"
+      data_home=$(acq_xdg_dir XDG_DATA_HOME .local/share)/acq || data_home=""
     fi
+    [ -n "$data_home" ] || [ -n "${ACQ_PROVIDER_INPUT_DATA_DIR:-}" ] || {
+      echo "acq: cannot determine an absolute data directory for the provider-input validator" >&2
+      echo "     set HOME or XDG_DATA_HOME (or ACQ_PROVIDER_INPUT_DATA_DIR) to an absolute path" >&2
+      return 2
+    }
     tools_dir="${ACQ_PROVIDER_INPUT_DATA_DIR:-$data_home/provider-input-validator}"
+    # A relative directory would run (and bootstrap) an interpreter under the
+    # current directory, so it is refused (see userdirs.sh).
+    acq_path_is_absolute "$tools_dir" || {
+      echo "acq: ACQ_PROVIDER_INPUT_DATA_DIR must be an absolute path, got $(acq_quote_value "$tools_dir")" >&2
+      return 2
+    }
     runtime="$tools_dir/provider-input-validator.current"
     if [ -x "$runtime/bin/python3" ]; then python="$runtime/bin/python3"
     elif [ -x "$runtime/Scripts/python.exe" ]; then python="$runtime/Scripts/python.exe"
@@ -4267,7 +4483,9 @@ _acq_provider_input_python() {
         echo "     Or set ACQ_PROVIDER_INPUT_PYTHON to a Python interpreter with PyYAML 6.0.3 and jsonschema 4.26.0." >&2
       fi
     fi
-    "$setup" --apply >&2 || return 2
+    # Hand the bootstrap the exact directory checked below, so the two can never
+    # disagree about where the runtime is published.
+    ACQ_PROVIDER_INPUT_DATA_DIR="$tools_dir" "$setup" --apply >&2 || return 2
     runtime="$tools_dir/provider-input-validator.current"
     if [ -x "$runtime/bin/python3" ]; then python="$runtime/bin/python3"
     elif [ -x "$runtime/Scripts/python.exe" ]; then python="$runtime/Scripts/python.exe"
@@ -4384,7 +4602,9 @@ acq_provider_input_root() {
   safe_backend=$(printf '%s' "$backend" | tr -c 'A-Za-z0-9._-' '_')
   safe_name=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')
   name_sum=$(printf '%s' "$name" | cksum 2>/dev/null | cut -d' ' -f1 2>/dev/null || echo 0)
-  printf '%s/provider-input/%s/%s.%s\n' "$(_acq_provenance_dir)" "$safe_backend" "$safe_name" "$name_sum"
+  local _acq_pd
+  _acq_pd=$(_acq_provenance_dir) || return 1
+  printf '%s/provider-input/%s/%s.%s\n' "$_acq_pd" "$safe_backend" "$safe_name" "$name_sum"
 }
 
 acq_provider_input_guest_root() {
@@ -4985,6 +5205,9 @@ _acq_provider_input_control_plane() {
   mkdir -p "$dest" || return 1
   (
     cd "$dest" || exit 1
+    # Keep every git call below on this checkout, whatever GIT_DIR or config
+    # injection the caller's environment carries (see _kit_git_isolate).
+    _kit_git_isolate
     export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/echo GCM_INTERACTIVE=never
     git init -q || exit 1
     git remote add origin "${PATTERNS_KIT_REPO#git+}" || exit 1
@@ -5083,7 +5306,9 @@ acq_host_config_dir() {
   safe_backend=$(printf '%s' "$backend" | tr -c 'A-Za-z0-9._-' '_')
   safe_name=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')
   name_sum=$(printf '%s' "$name" | cksum 2>/dev/null | cut -d' ' -f1 2>/dev/null || echo 0)
-  printf '%s/%s/%s.%s.config\n' "$(_acq_provenance_dir)" "$safe_backend" "$safe_name" "$name_sum"
+  local _acq_pd
+  _acq_pd=$(_acq_provenance_dir) || return 1
+  printf '%s/%s/%s.%s.config\n' "$_acq_pd" "$safe_backend" "$safe_name" "$name_sum"
 }
 
 # Validate a config KEY: fixed-literal callers only, restricted charset, never a
@@ -5860,7 +6085,7 @@ EOF
   if command -v acq_backend_secret_set >/dev/null 2>&1; then
     acq_backend_secret_set "$sandbox" github || {
       echo "acq: github scoping skipped or failed; continuing (you can re-run later" >&2
-      echo "      with: acq github-scope $sandbox $ws)." >&2
+      echo "      with: acq github-scope $sandbox $(acq_printable "$ws"))." >&2
       return 0
     }
   else
@@ -5907,7 +6132,7 @@ advise_github_scope() {
 
   # Non-interactive (CI, piped): advise and continue.
   if [ ! -t 0 ]; then
-    echo "      To scope it later: acq github-scope $sandbox $ws" >&2
+    echo "      To scope it later: acq github-scope $sandbox $(acq_printable "$ws")" >&2
     return 0
   fi
 
@@ -5923,7 +6148,7 @@ advise_github_scope() {
   if acq_prompt_confirm "Scope a GitHub token for this sandbox now?" "$scope_default"; then
     github_scope_sandbox "$sandbox" "$ws"
   else
-    echo "acq: continuing without scoping (run 'acq github-scope $sandbox $ws' anytime)." >&2
+    echo "acq: continuing without scoping (run 'acq github-scope $sandbox $(acq_printable "$ws")' anytime)." >&2
   fi
   return 0
 }
@@ -5938,12 +6163,12 @@ preflight_workspace_path() {
   [ -n "$path" ] || return 0            # no path arg -> caller's $PWD default
   if [ -e "$path" ]; then
     if [ ! -d "$path" ]; then
-      echo "acq: error — workspace must be a directory: $path" >&2
+      echo "acq: error — workspace must be a directory: $(acq_printable "$path")" >&2
       return 1
     fi
     return 0
   fi
-  echo "acq: error — workspace path does not exist: $path" >&2
+  echo "acq: error — workspace path does not exist: $(acq_printable "$path")" >&2
   echo "      If this is a new workspace, create it first, then re-run:" >&2
   printf '        mkdir -p %q && acq run …\n' "$path" >&2
   return 1
@@ -6114,9 +6339,25 @@ acq_print_doctor() {
   echo "  [msb: ${msb_status}]"
   echo ""
 
-  local config_file
-  config_file=$(_acq_config_file)
-  if [ -f "$config_file" ]; then
+  # User directories: report an unusable state/config location as a failed
+  # check with the same text Python's doctor uses, and keep going (a diagnostic
+  # must complete). Nothing is offered for writing below in that case.
+  # The entry point records the problem before the adapter loads; compute it
+  # here only when called without it.
+  local dirs_ok=1
+  [ -n "${ACQ_USERDIRS_MESSAGE+set}" ] || acq_userdirs_problem || true
+  if [ -n "${ACQ_USERDIRS_MESSAGE:-}" ]; then
+    dirs_ok=""
+    echo "  [fail] state: ${ACQ_USERDIRS_MESSAGE}"
+    echo "           ${ACQ_USERDIRS_REMEDIATION}"
+    echo ""
+  fi
+
+  local config_file=""
+  config_file=$(_acq_config_file) || config_file=""
+  if [ -z "$config_file" ]; then
+    echo "  config: (no absolute config directory)"
+  elif [ -f "$config_file" ]; then
     echo "  config: ${config_file}"
     local cfg_backend
     cfg_backend=$(_read_config_backend)
@@ -6139,6 +6380,9 @@ acq_print_doctor() {
   fi
 
   echo ""
+  if [ -z "$dirs_ok" ] || [ -z "$config_file" ]; then
+    return 0
+  fi
   # ACQ_RESOLVED_BACKEND is always set by acq_resolve_backend before doctor runs,
   # so the ':-msb' here is only a defensive fallback — it mirrors auto-detect's
   # default and does NOT let doctor independently pick a backend.
@@ -6166,7 +6410,7 @@ acq_print_doctor() {
 # (config.yaml) to stderr, so `acq configure` opens by showing what is in effect.
 _acq_configure_show_current() {
   local cfg backend extras scope bindings provider_kit sources
-  cfg=$(_acq_config_file)
+  cfg=$(_acq_config_file) || return 1
   backend=$(_acq_config_read_field backend)
   extras=$(_acq_config_read_field extra_kits)
   scope=$(_acq_config_read_field scope_github_token)
@@ -6321,7 +6565,7 @@ acq_configure() {
 # non-interactive (CI / piped) — fail-open, preserving today's behavior.
 maybe_first_run_configure() {
   local cfg dir
-  cfg=$(_acq_config_file)
+  cfg=$(_acq_config_file) || return 0
   [ -f "$cfg" ] && return 0        # already configured (or previously offered)
   _acq_prompt_interactive || return 0   # non-interactive: skip silently
 

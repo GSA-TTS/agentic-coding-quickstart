@@ -35,7 +35,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import errors, hostexec, kits, timeouts
+from . import errors, hostexec, kits, secretstore, timeouts
+from .secretstore import Scope
 
 STUB_SENTINEL = "__stub__"
 
@@ -859,15 +860,30 @@ def _secret_unsupported(verb: str) -> MsbError:
 # ``msb secret …`` takes the scope as either the ``--global`` flag or a leading
 # positional sandbox name; a global scope is encoded as the flag so a sandbox
 # whose name happens to be ``--global`` can never be confused with the flag.
-_GLOBAL_SCOPE = "global"
+# Scopes are typed (:class:`secretstore.Scope`), so a sandbox named ``global``
+# stays a sandbox; a bare string is accepted from older callers.
+_GLOBAL_SCOPE = secretstore.GLOBAL
 
 
-def _secret_scope_argv(scope: str) -> list[str]:
+def _secret_scope_argv(scope: Scope | str) -> list[str]:
     """Encode a scope as the ``msb secret …`` argv token (non-secret)."""
-    return ["--global"] if scope == _GLOBAL_SCOPE else [scope]
+    sc = secretstore.as_scope(scope)
+    return ["--global"] if sc.sandbox is None else [sc.sandbox]
 
 
-def secret_set(scope: str, service: str, value: str, *, timeout: float | None = None) -> None:
+# The neutral ``secret`` seam (commands/secret.py) writes the acq store and then
+# calls ``secret_feed``/``secret_unbind``. The capability record declares
+# secret-write/secret-rm unsupported, so the seam refuses before storing and
+# these are never reached; they fail closed if called anyway.
+def secret_feed(scope: Scope | str, service: str, value: str, host: str = "", env: str = "") -> None:
+    raise _secret_unsupported("set")
+
+
+def secret_unbind(scope: Scope | str, service: str) -> None:
+    raise _secret_unsupported("rm")
+
+
+def secret_set(scope: Scope | str, service: str, value: str, *, timeout: float | None = None) -> None:
     """``secret-write`` fails closed on msb (no ``secret`` subcommand, ADR-0040m).
 
     The value is never read, logged, or placed on argv: the refusal happens before
@@ -877,7 +893,7 @@ def secret_set(scope: str, service: str, value: str, *, timeout: float | None = 
     raise _secret_unsupported("set")
 
 
-def secret_has(scope: str, service: str) -> bool:
+def secret_has(scope: Scope | str, service: str) -> bool:
     """True when a secret for ``(scope, service)`` is present; False when absent.
 
     Tri-state at the caller's level: presence is a bool, but a backend that
@@ -893,7 +909,7 @@ def secret_has(scope: str, service: str) -> bool:
     raise _secret_unsupported("has")
 
 
-def secret_rm(scope: str, service: str) -> None:
+def secret_rm(scope: Scope | str, service: str) -> None:
     """Remove a secret for ``(scope, service)``. Raises :class:`MsbError` on failure.
 
     The seam (:func:`cli.run_secret_rm`) checks presence first and reports
@@ -905,7 +921,7 @@ def secret_rm(scope: str, service: str) -> None:
     raise _secret_unsupported("rm")
 
 
-def secret_ls(scope: str | None = None) -> list[dict]:
+def secret_ls(scope: Scope | str | None = None) -> list[dict]:
     """``secret-list`` fails closed on msb (no ``secret`` subcommand, ADR-0040m).
 
     Raises :class:`MsbError` with ``unsupported_capability``. The listing never

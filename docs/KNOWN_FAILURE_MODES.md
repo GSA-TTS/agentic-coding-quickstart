@@ -3477,6 +3477,50 @@ it is a musl build and is content-pinned rather than signer-authenticated.
 
 ---
 
+## 53. After Upgrading, `acq run AGENT` Creates a Second Sandbox for a Workspace With Non-ASCII Letters
+
+**Status:** Expected after the sandbox-name hardening. Bash `acq` only; the
+Python implementation always derived names this way.
+
+### Symptoms
+
+- In a workspace whose directory name contains lowercase accented letters (for
+  example `~/café`), `acq run opencode` creates a new sandbox instead of
+  re-attaching to the one created before the upgrade.
+- `acq ls` shows both: the old name keeps the letters (`opencode-café`), the
+  new one drops them (`opencode-caf`; a letter in the middle of the name becomes
+  a hyphen).
+- Only sandboxes created while acq ran under a glibc locale such as
+  `en_US.UTF-8` are affected. Under `C`, `C.UTF-8` or `POSIX` the old slug
+  already turned these letters into hyphens.
+
+### Root Cause
+
+The derived name is `<agent>-<slug of the workspace directory name>`. Under a
+glibc locale such as `en_US.UTF-8`, the old slug kept lowercase accented letters
+(uppercase ones, such as `Ü`, were already dropped), and in any locale it kept a
+newline. It now keeps only ASCII `a-z` and `0-9` and turns every other run of
+characters into one hyphen, the same as the Python implementation, so names are
+always a single line of a fixed character set (`slugify` in
+`acq.backends/common.sh`). The old sandbox is not renamed or removed; it keeps
+running under its old name.
+
+### Fix
+
+- To keep using the old sandbox, address it by name: `acq run opencode-café`
+  (or `acq shell`, `acq exec`, `acq stop` with that name).
+- To move to the new name, remove the old sandbox with `acq rm opencode-café`
+  once anything you need from it is saved, then `acq run opencode` again.
+
+Related checks added at the same time: an explicit `--name` must use only ASCII
+letters, digits, `_` and `-` and not start with `-`; a workspace path containing
+`:` (other than the `:ro` suffix) or a control character is refused at create;
+and `rm`, `stop`, `exec` and the other verbs that take an existing sandbox's
+name refuse names that are empty, `.` or `..`, or contain `/`, `\` or control
+characters.
+
+---
+
 ## Contributing
 
 When you discover a new failure mode:

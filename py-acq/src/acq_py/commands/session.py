@@ -364,6 +364,9 @@ def _passthrough(argv: list[str], explicit: str | None, emit_json: bool) -> int:
             f"unknown backend: {explicit!r} (expected sbx or msb)",
             emit_json,
         )
+    invalid = common._invalid_persisted_backend_failure(explicit, verb, emit_json)
+    if invalid is not None:
+        return invalid
     name = common._resolve_active_backend(explicit)
     if name is None:
         return common._operational_failure(

@@ -36,6 +36,10 @@
       "vectors": ["cli/backend-list-none", "cli/backend-list-unknown", "cli/backend-list-default-msb"]
     },
     {
+      "contract": "spec backend seam: active_backend precedence flag -> env -> config (backend set) -> auto-detect; backend set/unset persist and clear only the backend key; an invalid backend is never persisted, and one found in config.yaml fails closed",
+      "vectors": ["cli/lifecycle-create-config-sbx", "cli/lifecycle-config-backend-invalid", "cli/backend-set", "cli/backend-set-unknown", "cli/backend-unset", "cli/backend-unset-none"]
+    },
+    {
       "contract": "ADR-0040m version floor fail-closed (backend_not_found / backend_version_unsupported / backend_version_unknown)",
       "vectors": ["cli/backend-check-ok", "cli/backend-check-unsupported", "cli/backend-check-blocked", "cli/backend-check-unknown", "cli/backend-check-not-found", "cli/backend-check-bin-override-blocked", "cli/backend-check-forced-version-ignored-for-real-bin"]
     },
@@ -186,6 +190,22 @@
     {
       "contract": "ADR-0040m unsupported-capability fail-closed for secret listing on msb (msb has no `secret` subcommand; secret-list is sbx)",
       "vectors": ["cli/secret-msb-unsupported"]
+    },
+    {
+      "contract": "secret import (Bash acq_secret_import parity): known host tokens (USAI_API_KEY, GITHUB_TOKEN/GH_TOKEN, GITLAB_TOKEN, registered provider KEY_ENVs) go to the acq secret store with no backend; --all never overwrites, --dry-run writes nothing, a non-TTY interactive run skips, a multi-line value is refused, and no value is ever echoed",
+      "vectors": ["cli/secret-import-all", "cli/secret-import-dry-run", "cli/secret-import-noninteractive-skip", "cli/secret-import-refuses-multiline", "cli/secret-import-none", "cli/secret-import-unknown-flag"]
+    },
+    {
+      "contract": "Secret service and sandbox names follow the acq store-key rule [A-Za-z0-9_-]+ with no leading '-', and are refused before any store or backend access",
+      "vectors": ["cli/secret-set-service-dash-refused"]
+    },
+    {
+      "contract": "A sandbox literally named 'global' is a sandbox scope, never the global scope (typed scope parse)",
+      "vectors": ["cli/secret-scope-sandbox-named-global", "cli/secret-import-sandbox-named-global"]
+    },
+    {
+      "contract": "secret set --host/--env binds a custom endpoint's host and env var together; either alone is refused before anything is stored",
+      "vectors": ["cli/secret-set-host-needs-env"]
     },
     {
       "contract": "ADR-0038m §2 provider-credential set success: value on stdin only, binding reports provider/key_env/hosts/source_layer, never a value",
@@ -376,6 +396,10 @@
     {
       "contract": "ADR-0041m fail-closed migration: a newer/unparseable/min_reader record is refused with a stable code before any mutation",
       "vectors": ["cli/migration-newer-refused"]
+    },
+    {
+      "contract": "ADR-0041m state root: a relative ACQ_STATE_DIR is refused before any state is read or written (XDG Base Directory: relative values are never resolved against the current directory)",
+      "vectors": ["cli/state-dir-relative-refused"]
     },
     {
       "contract": "ADR-0035/0041m security exception: a sandbox missing its read-only mount fails closed on trusted operations",

@@ -37,6 +37,11 @@ if ! command -v acq_is_known_agent >/dev/null 2>&1; then
   # shellcheck source=acq.backends/agents.sh
   . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/agents.sh"
 fi
+# Absolute-only XDG/HOME resolution, for the same reason.
+if ! command -v acq_xdg_dir >/dev/null 2>&1; then
+  # shellcheck source=acq.backends/userdirs.sh
+  . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/userdirs.sh"
+fi
 
 USAI_PROVIDER_HOST="${USAI_PROVIDER_HOST:-api.gsa.usai.gov}"
 USAI_PROVIDER_BIND_HOSTS="${USAI_PROVIDER_BIND_HOSTS:-$USAI_PROVIDER_HOST}"
@@ -78,8 +83,12 @@ ACQ_SBX_STARTUP_BARRIER_PATH="/tmp/acq/startup-complete"
 USAI_KIT_CONFIG_PATH="/home/agent/usai-config/opencode.jsonc"
 
 # Where synthesized sbx-v2 kits (translated from the neutral hybrid/v1 kits)
-# are materialized for this run.
-ACQ_SBX_KIT_CACHE="${ACQ_SBX_KIT_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/acq/sbx-kits}"
+# are materialized for this run. The resolver runs outside the expansion: a
+# failing command substitution in an assignment would trip errexit while this
+# file is sourced.
+_acq_ud=$(acq_xdg_dir XDG_CACHE_HOME .cache) || _acq_ud=""
+ACQ_SBX_KIT_CACHE="${ACQ_SBX_KIT_CACHE:-${_acq_ud:+$_acq_ud/acq/sbx-kits}}"
+unset _acq_ud
 
 # Module-scope flag: set to 1 once the ssh-agent trust-boundary notice has been
 # printed, so it appears at most once per process. See ADR-0021.
@@ -178,7 +187,7 @@ acq_backend_prepare() {
 acq_backend_exists() {
   local listed
   listed=$(sbx ls -q 2>/dev/null) || return 1
-  grep -Fxq -- "$1" <<<"$listed"
+  _acq_list_has_line "$1" "$listed"
 }
 
 # Return success only when sbx successfully lists sandboxes and NAME is absent.
@@ -187,7 +196,10 @@ acq_backend_exists() {
 _acq_sbx_confirm_absent() {
   local name="$1" listed
   listed=$(sbx ls -q 2>/dev/null) || return 1
-  ! grep -Fxq -- "$name" <<<"$listed"
+  # A name that cannot appear as one listed line cannot be confirmed absent:
+  # treat it as indeterminate, never as permission to clean up.
+  _acq_name_is_one_line "$name" || return 1
+  ! _acq_list_has_line "$name" "$listed"
 }
 
 # ---------------------------------------------------------------------------
@@ -362,6 +374,7 @@ _acq_sbx_translate_kit() {
     return 0
   fi
 
+  acq_require_base "sbx kit cache" "$ACQ_SBX_KIT_CACHE" || return 1
   slug=$(printf '%s' "$kitref" | tr -c 'A-Za-z0-9._-' '_')
   fetchdir="${ACQ_SBX_KIT_CACHE}/fetch/${slug}"
   out="${ACQ_SBX_KIT_CACHE}/v2/${slug}"
@@ -437,6 +450,7 @@ _acq_sbx_git_identity_kit() {
   [ -n "$allrecs" ] || return 0
   slug=$(printf '%s' "$allrecs" | cksum | cut -d' ' -f1)
 
+  acq_require_base "sbx kit cache" "$ACQ_SBX_KIT_CACHE" || return 1
   local dir="${ACQ_SBX_KIT_CACHE}/generated/git-identity-${slug}"
   mkdir -p "$dir"
   {
@@ -473,6 +487,7 @@ _acq_sbx_git_identity_kit() {
 
 _acq_sbx_startup_barrier_kit() {
   local token="$1" dir
+  acq_require_base "sbx kit cache" "$ACQ_SBX_KIT_CACHE" || return 1
   dir="${ACQ_SBX_KIT_CACHE}/generated/startup-barrier-${token}"
   mkdir -p "$dir"
   cat >"$dir/spec.yaml" <<EOF

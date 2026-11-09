@@ -5,8 +5,26 @@ IFS=$'\n\t'
 APPLY=0
 ONLINE=0
 ROOT=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-DATA_HOME="${XDG_DATA_HOME:-${HOME:-}/.local/share}"
-TOOLS_DIR="${ACQ_PROVIDER_INPUT_DATA_DIR:-$DATA_HOME/acq/provider-input-validator}"
+# acq passes ACQ_PROVIDER_INPUT_DATA_DIR when it bootstraps the runtime. Run by
+# hand, the default sits under XDG_DATA_HOME, resolved with acq's own rules: a
+# relative XDG_DATA_HOME or HOME is ignored, never resolved against the current
+# directory (see acq.backends/userdirs.sh).
+TOOLS_DIR="${ACQ_PROVIDER_INPUT_DATA_DIR:-}"
+TOOLS_DIR_ERROR=""
+if [ -f "$ROOT/acq.backends/userdirs.sh" ]; then
+  # shellcheck source=acq.backends/userdirs.sh
+  . "$ROOT/acq.backends/userdirs.sh"
+  if [ -n "$TOOLS_DIR" ]; then
+    acq_path_is_absolute "$TOOLS_DIR" \
+      || TOOLS_DIR_ERROR="ACQ_PROVIDER_INPUT_DATA_DIR must be an absolute path, got $(acq_quote_value "$TOOLS_DIR")"
+  elif DATA_HOME=$(acq_xdg_dir XDG_DATA_HOME .local/share); then
+    TOOLS_DIR="$DATA_HOME/acq/provider-input-validator"
+  else
+    TOOLS_DIR_ERROR="cannot determine an absolute data directory; set HOME or XDG_DATA_HOME (or ACQ_PROVIDER_INPUT_DATA_DIR) to an absolute path"
+  fi
+else
+  TOOLS_DIR_ERROR="missing $ROOT/acq.backends/userdirs.sh; reinstall acq"
+fi
 TARGET="$TOOLS_DIR/provider-input-validator.current"
 REQUIREMENTS="$ROOT/scripts/provider-input-validator-requirements.txt"
 WHEELHOUSE="${ACQ_PROVIDER_INPUT_WHEELHOUSE:-}"
@@ -76,6 +94,10 @@ esac
   echo "missing pinned requirements: $REQUIREMENTS" >&2
   exit 2
 }
+if [ -n "$TOOLS_DIR_ERROR" ]; then
+  echo "provider-input validator: $TOOLS_DIR_ERROR" >&2
+  exit 2
+fi
 if [ "$APPLY" -ne 1 ]; then
   if [ "$ONLINE" -eq 1 ]; then
     echo "[dry-run] would create $TARGET and download pinned requirements from PyPI"

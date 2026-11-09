@@ -209,7 +209,9 @@ _run_vector() {
     < <(jq -r '.isolation.redirect[]?' "$vecfile")
 
   local out="$outdir/out" err="$outdir/err" in="$outdir/in" exp="$outdir/expected"
-  jq -r '.invoke.stdin // ""' "$vecfile" > "$in"
+  # -j, not -r: stdin is fed byte-exact, as the pytest runner does (-r would
+  # append a newline the vector never declared).
+  jq -j '.invoke.stdin // ""' "$vecfile" > "$in"
   local timeout_ms timeout_s
   timeout_ms="$(jq -r '.invoke.timeout_ms // 5000' "$vecfile")"
   timeout_s="$(awk -v ms="$timeout_ms" 'BEGIN { printf "%.3f", ms / 1000 }')"

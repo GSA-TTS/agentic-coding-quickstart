@@ -829,6 +829,9 @@ _assert_layout_refused() { # SANDBOX
 
 @test "clone(msb): a relative ACQ_STATE_DIR is refused before any host-side git runs" {
   # A relative core.hooksPath would resolve inside the guest-writable workspace.
+  # The adapter blanks a relative ACQ_STATE_DIR when it is sourced, so the
+  # refusal comes from the unresolved clones dir; the wrapper's own check is the
+  # fallback if that ever changes. Either way nothing is created and no git runs.
   run bash -c '
     cd "'"$STUBDIR"'"
     export ACQ_STATE_DIR=relstate
@@ -838,7 +841,7 @@ _assert_layout_refused() { # SANDBOX
     _acq_msb_clone_setup shell-cloneproj "$1"
   ' _ "$CLONEPROJ"
   assert_failure
-  assert_output --partial 'ACQ_STATE_DIR must be an absolute path'
+  assert_output --regexp 'ACQ_STATE_DIR must be an absolute path|scratch clones dir: its directory could not be resolved'
   [ ! -e "$STUBDIR/relstate" ]
   run git -C "$CLONEPROJ" remote
   assert_success

@@ -33,7 +33,8 @@ import os
 import subprocess
 import sys
 
-from . import errors, hostexec, kits, timeouts
+from . import errors, hostexec, kits, secretstore, timeouts
+from .secretstore import Scope
 
 STUB_SENTINEL = "__stub__"
 
@@ -406,12 +407,15 @@ def ports(name: str) -> list[dict]:
 # ``sbx secret …`` takes a sandbox scope as the ``--sandbox NAME`` flag; the
 # GLOBAL scope is the DEFAULT (no flag) on ``set``/``rm`` (the real sbx dropped
 # the ``-g``/``--global`` flag on those verbs). ``secret ls`` still takes ``-g``.
-_GLOBAL_SCOPE = "global"
+# Scopes are typed (:class:`secretstore.Scope`), so a sandbox named ``global``
+# gets ``--sandbox global``; a bare string is accepted from older callers.
+_GLOBAL_SCOPE = secretstore.GLOBAL
 
 
-def _secret_scope_argv(scope: str) -> list[str]:
+def _secret_scope_argv(scope: Scope | str) -> list[str]:
     """Encode a scope for ``sbx secret set/rm`` (global is the default, no flag)."""
-    return [] if scope == _GLOBAL_SCOPE else ["--sandbox", scope]
+    sc = secretstore.as_scope(scope)
+    return [] if sc.sandbox is None else ["--sandbox", sc.sandbox]
 
 
 def _secret_list_docs() -> list[dict]:
@@ -490,32 +494,59 @@ def _secret_list_docs() -> list[dict]:
     return out
 
 
-def secret_set(scope: str, service: str, value: str, *, timeout: float | None = None) -> None:
-    """Store a secret for ``(scope, service)``. The value travels on stdin only.
+def secret_preflight(scope: Scope | str, service: str, host: str = "", env: str = "") -> None:
+    """Refuse a ``secret set`` sbx cannot be fed, before anything is stored.
+
+    The real sbx prompts "Overwrite? (y/N)" when the secret already exists (it
+    has no stdin ``--force``), which would consume the piped value as the
+    answer, so an existing secret fails closed here. A custom endpoint
+    (``--host``/``--env``) needs ``sbx secret set-custom``, which this adapter
+    does not drive yet; it is refused rather than fed to the built-in service
+    route, which would bind the value to the wrong endpoint.
+    """
+    sc = secretstore.as_scope(scope)
+    if host or env:
+        raise SbxError(
+            errors.UNSUPPORTED,
+            f"custom endpoints (--host/--env) are not yet supported for '{service}' on the sbx backend",
+            "nothing was stored; set it without --host/--env, or use the msb backend",
+        )
+    if key_present(sc, service):
+        hint = f"acq secret rm -g {service}" if sc.is_global else f"acq secret rm {sc.sandbox} {service}"
+        raise SbxError(
+            errors.FAILURE,
+            f"secret '{service}' already exists in scope {sc.describe()}",
+            f"remove it first ('{hint}'), then re-set",
+        )
+
+
+def secret_feed(
+    scope: Scope | str, service: str, value: str, host: str = "", env: str = "", *, timeout: float | None = None
+) -> None:
+    """Feed a value already in the acq store to sbx's proxy (stdin only).
 
     Reconciles with the real sbx ``secret set SERVICE [--sandbox NAME]``: the
     service is the sole positional, the value is read from stdin, and the global
-    scope is the default (no flag). The real sbx prompts "Overwrite? (y/N)" when
-    the secret already exists (it has no stdin ``--force``), which would consume
-    the piped value as the answer — so presence is pre-checked and an existing
-    secret fails closed (never piped into the prompt).
+    scope is the default (no flag). :func:`secret_preflight` runs first.
     """
-    if key_present(scope, service):
-        raise SbxError(
-            errors.FAILURE,
-            f"secret '{service}' already exists in scope '{scope}'",
-            f"remove it first (e.g. 'acq secret rm -g {service}'), then re-set",
-        )
     proc = _run(["secret", "set", *_secret_scope_argv(scope), service], input_text=value, timeout=timeout)
     if proc.returncode != 0:
         raise SbxError(
             errors.FAILURE,
-            f"could not store secret '{service}' for scope '{scope}'",
+            f"could not feed secret '{service}' to sbx for {secretstore.as_scope(scope).describe()}",
             "check backend logs and retry",
         )
 
 
-def secret_rm(scope: str, service: str) -> None:
+def secret_set(scope: Scope | str, service: str, value: str, *, timeout: float | None = None) -> None:
+    """Store a secret in sbx's own table only: :func:`secret_preflight` then
+    :func:`secret_feed`. ``acq secret set`` writes the acq store first and calls
+    those two itself."""
+    secret_preflight(scope, service)
+    secret_feed(scope, service, value, timeout=timeout)
+
+
+def secret_rm(scope: Scope | str, service: str) -> None:
     """Remove a managed secret for ``(scope, service)``. Raises on backend failure.
 
     Reconciles with the real sbx ``secret rm SERVICE [--sandbox NAME] -f`` (the
@@ -525,12 +556,12 @@ def secret_rm(scope: str, service: str) -> None:
     if proc.returncode != 0:
         raise SbxError(
             errors.FAILURE,
-            f"could not remove secret '{service}' for scope '{scope}'",
+            f"could not remove secret '{service}' for {secretstore.as_scope(scope).describe()}",
             "check backend logs and retry",
         )
 
 
-def secret_ls(scope: str | None = None) -> list[dict]:
+def secret_ls(scope: Scope | str | None = None) -> list[dict]:
     """``secret-list`` on sbx (``sbx secret ls --json``): scope/service/value_state.
 
     ``scope`` is an optional filter (``"global"`` or a sandbox name); ``None``
@@ -545,10 +576,11 @@ def secret_ls(scope: str | None = None) -> list[dict]:
     docs = _secret_list_docs()
     if scope is None:
         return docs
-    return [d for d in docs if d["scope"] == scope]
+    want = secretstore.as_scope(scope).label
+    return [d for d in docs if d["scope"] == want]
 
 
-def key_present(scope: str, service: str) -> bool:
+def key_present(scope: Scope | str, service: str) -> bool:
     """sbx-only ``key_present`` obligation (ADR-0040m): is the sbx key present?
 
     Reports presence, never the value. sbx has no ``secret has`` subcommand, so
@@ -557,10 +589,25 @@ def key_present(scope: str, service: str) -> bool:
     :class:`SbxError` so the seam never conflates "the backend is down" with "the
     secret is absent".
     """
+    want = secretstore.as_scope(scope).label
     for entry in _secret_list_docs():
-        if entry["scope"] == scope and entry["service"] == service:
+        if entry["scope"] == want and entry["service"] == service:
             return True
     return False
+
+
+# The neutral ``secret`` seam (commands/secret.py): presence in sbx's own table,
+# the "can inject" predicate, and removal from sbx after the acq store entry.
+def secret_present(scope: Scope | str, service: str) -> bool:
+    return key_present(scope, service)
+
+
+def secret_has(scope: Scope | str, service: str) -> bool:
+    return key_present(scope, service)
+
+
+def secret_unbind(scope: Scope | str, service: str) -> None:
+    secret_rm(scope, service)
 
 
 def secret_rm_raw(placeholder: str) -> None:
@@ -628,7 +675,7 @@ def github_scope(sandbox: str, value: str) -> None:
     same "Overwrite?" pre-check as :func:`secret_set` applies (the value must never
     be consumed by the prompt).
     """
-    if key_present(sandbox, "github"):
+    if key_present(secretstore.sandbox_scope(sandbox), "github"):
         raise SbxError(
             errors.FAILURE,
             f"GitHub token already exists for sandbox '{sandbox}'",
