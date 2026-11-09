@@ -47,7 +47,7 @@ import sys
 from collections.abc import Callable, Iterator, Sequence
 from typing import NamedTuple
 
-from .. import backends, config, envelope, errors, kits, provider_creds
+from .. import backends, config, envelope, errors, hostexec, kits, provider_creds
 from . import common
 
 COMMAND = "configure"
@@ -230,8 +230,7 @@ def interactive(emit_json: bool) -> bool:
     ``--json``, which always reports instead)."""
     if emit_json or os.environ.get("ACQ_NO_PROMPT") or os.environ.get("ACQ_NO_PROGRESS"):
         return False
-    isatty = getattr(sys.stdin, "isatty", None)
-    return bool(isatty is not None and isatty())
+    return common._stdin_is_terminal()
 
 
 def run_configure(emit_json: bool, backend_override: str | None, before_write: Callable[[], int | None]) -> int:
@@ -346,7 +345,7 @@ class Terminal:
     """Key and line input on stdin, chrome on stderr."""
 
     def __init__(self) -> None:
-        self.color = bool(getattr(sys.stderr, "isatty", lambda: False)())
+        self.color = hostexec.stream_is_terminal(sys.stderr)
 
     def write(self, text: str) -> None:
         sys.stderr.write(text)

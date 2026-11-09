@@ -231,6 +231,31 @@ def test_no_prompt_env_keeps_a_terminal_non_interactive(monkeypatch):
     assert configure.interactive(False) is False
 
 
+def test_windows_nul_stdin_is_not_interactive(monkeypatch, tmp_path, capsys):
+    """On Windows ``< NUL`` reports isatty() True; only a real console counts,
+    so configure reports instead of waiting for keys."""
+    from acq_py import hostexec
+
+    class _Nul:
+        def isatty(self):
+            return True
+
+        def fileno(self):
+            return 0
+
+    _state_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(sys, "stdin", _Nul())
+    monkeypatch.setattr(hostexec, "_is_windows", lambda: True)
+    monkeypatch.setattr(hostexec, "_windows_console", lambda fd: False)
+    assert configure.interactive(False) is False
+    monkeypatch.setattr(configure.Terminal, "read_key", lambda term: pytest.fail("prompted on NUL"))
+    rc, out, err = _run(capsys, "configure")
+    assert rc == 0 and out == ""
+    assert "acq: non-interactive; configuration unchanged." in err
+    monkeypatch.setattr(hostexec, "_windows_console", lambda fd: True)
+    assert configure.interactive(False) is True
+
+
 @needs_bash
 def test_human_report_matches_bash(tmp_path):
     _write_config(SEED + b"scope_github_token: yes\nprovider_kit: example/kit\n")
