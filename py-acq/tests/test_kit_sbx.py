@@ -10,6 +10,7 @@ against the deterministic ``__stub__`` sbx.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import random
@@ -863,6 +864,103 @@ def test_a_damaged_kit_directory_is_rebuilt_not_reused(monkeypatch, tmp_path):
     assert kit_sbx.translated_kit(kit) == path
     assert victim.is_file()
     assert not [e for e in path.parent.iterdir() if e.name.startswith(".")]
+
+
+def test_a_concurrent_creates_fresh_copy_survives_a_stale_damaged_verdict(monkeypatch, tmp_path):
+    # Two creates find the same damaged directory. B replaces it with its own
+    # fresh copy after A has judged it damaged but before A moves it aside. A
+    # must put B's copy back (B may be handing it to sbx), not delete it.
+    monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
+    kit = kit_sbx.bundled_kit("opencode")
+    path = kit_sbx.translated_kit(kit)
+    reference = tmp_path / "reference"
+    shutil.copytree(path, reference, symlinks=True)
+    next(p for p in path.rglob("*") if p.is_file() and p.name != "spec.yaml").unlink()
+    real_valid = kit_sbx._valid_kit_dir
+    b_copy = {}
+
+    def stale_verdict(target, digest=None):
+        verdict = real_valid(target, digest)
+        if target == path and not b_copy:
+            # B, between A's check and A's move: discard the damaged tree and
+            # rename its own complete copy into place.
+            kit_sbx._discard(path)
+            build = tmp_path / "b-build"
+            shutil.copytree(reference, build, symlinks=True)
+            os.rename(build, path)
+            b_copy["ino"] = os.lstat(path).st_ino
+        return verdict
+
+    monkeypatch.setattr(kit_sbx, "_valid_kit_dir", stale_verdict)
+    assert kit_sbx.translated_kit(kit) == path
+    assert b_copy and os.lstat(path).st_ino == b_copy["ino"]
+    assert real_valid(path, path.name.rsplit(".", 1)[1])
+    assert not [e for e in path.parent.iterdir() if e.name.startswith(".")]
+
+
+def test_a_moved_aside_copy_is_dropped_when_the_name_is_retaken(monkeypatch, tmp_path):
+    # The moved tree turns out complete, so it would be renamed back; the name
+    # was taken again meanwhile, so the moved copy is dropped and the new one kept.
+    monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
+    parent = kit_sbx._subdir("generated")
+    dest = parent / "kit"
+    dest.mkdir()
+    (dest / "spec.yaml").write_text("x", encoding="utf-8")
+    real_rename = os.rename
+
+    def rename(src, dst):
+        real_rename(src, dst)
+        if Path(dst).name.startswith(kit_sbx.TRASH_PREFIX):
+            (dest).mkdir()  # another create took the name meanwhile
+            (dest / "spec.yaml").write_text("y", encoding="utf-8")
+
+    monkeypatch.setattr(kit_sbx.os, "rename", rename)
+    kit_sbx._move_damaged_aside(dest, None)
+    assert (dest / "spec.yaml").read_text(encoding="utf-8") == "y"
+    assert not [e for e in parent.iterdir() if e.name.startswith(kit_sbx.TRASH_PREFIX)]
+
+
+def _fill_spec(tmp):
+    (tmp / "spec.yaml").write_text("x", encoding="utf-8")
+
+
+def test_a_failed_rename_with_nothing_at_the_name_raises(monkeypatch, tmp_path):
+    # The rename into place fails although nothing sits at the kit's name (a
+    # permission error, a Windows antivirus handle, a name too long). That must
+    # fail the create, not return a path that does not exist.
+    monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
+    parent = kit_sbx._subdir("generated")
+    real_rename = os.rename
+
+    def rename(src, dst):
+        if Path(dst).name == "kit":
+            raise PermissionError(errno.EACCES, "denied")
+        return real_rename(src, dst)
+
+    monkeypatch.setattr(kit_sbx.os, "rename", rename)
+    with pytest.raises(kit_sbx.KitTranslateError, match="could not place a generated kit"):
+        kit_sbx._publish(parent, "kit", _fill_spec)
+    assert list(parent.iterdir()) == []  # the build directory is cleaned up too
+
+
+def test_a_rename_retried_after_the_name_was_vacated_places_the_kit(monkeypatch, tmp_path):
+    # The first rename fails because a tree sits at the name; by the time it is
+    # looked at, another create has moved it away. The rename is retried.
+    monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
+    parent = kit_sbx._subdir("generated")
+    real_rename = os.rename
+    failed = []
+
+    def rename(src, dst):
+        if Path(dst).name == "kit" and not failed:
+            failed.append(True)
+            raise FileExistsError(errno.EEXIST, "exists")
+        return real_rename(src, dst)
+
+    monkeypatch.setattr(kit_sbx.os, "rename", rename)
+    dest = kit_sbx._publish(parent, "kit", _fill_spec)
+    assert failed and dest == parent / "kit" and kit_sbx._valid_kit_dir(dest)
+    assert [e.name for e in parent.iterdir()] == ["kit"]
 
 
 def test_prune_sweeps_old_build_directories_only(monkeypatch, tmp_path):

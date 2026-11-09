@@ -10,7 +10,7 @@ import re
 import subprocess
 import sys
 
-from .. import backends, envelope, errors, hostexec, msb, sbx, state
+from .. import backends, envelope, errors, gitrepos, hostexec, msb, sbx, state
 from . import common
 
 # Host identity variables replayed into every session, so commits made in the
@@ -27,13 +27,19 @@ def _identity_value_is_safe(value: str) -> bool:
 
 
 def _host_git_config(key: str) -> str | None:
-    """Read ``git config --global --get KEY`` on the host; ``None`` if unavailable."""
+    """Read ``git config --global --get KEY`` on the host; ``None`` if unavailable.
+
+    The inherited repository redirects are cleared first: an inherited
+    ``GIT_CONFIG`` makes ``git config --global`` fail outright ("only one config
+    file at a time"), which would hide the user's global value.
+    """
     git = hostexec.which("git")
     if git is None:
         return None
     try:
         proc = subprocess.run(
             [git, "config", "--global", "--get", key],
+            env=gitrepos.git_env(keep_command_scope=True),
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
