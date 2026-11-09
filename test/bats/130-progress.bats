@@ -172,3 +172,64 @@ _prog() { # SHELL_SNIPPET
   refute_output --partial 'NOT_REACHED'
   assert_equal "$(wc -l < "$STUBDIR/prior-count" | tr -d ' ')" 1
 }
+
+# The provisioning subshells in sbx.sh and msb.sh install an EXIT trap of the
+# form `rc=$?; cleanup; exit "$rc"`. With the spinner composed over it, that
+# handler must still see the status the subshell is exiting with, or a failed
+# provision would be reported as a success.
+@test "progress: composed EXIT cleanup hands the real exit status to the prior handler" {
+  _prog '( trap '"'"'rc=$?; echo "PRIOR_RC=$rc"; exit "$rc"'"'"' EXIT
+      _acq_spin_install_traps
+      exit 3 )
+    echo "SUB_RC=$?"'
+  assert_line 'PRIOR_RC=3'
+  assert_line 'SUB_RC=3'
+}
+
+@test "progress: exit status survives the composed EXIT cleanup under set -e" {
+  _prog 'set -e
+    ( trap '"'"'rc=$?; echo "PRIOR_RC=$rc"; exit "$rc"'"'"' EXIT
+      _acq_spin_install_traps
+      exit 3 ) || echo "SUB_RC=$?"'
+  assert_line 'PRIOR_RC=3'
+  assert_line 'SUB_RC=3'
+}
+
+# Ctrl-C inside such a subshell must run the chained INT handler (once), and its
+# exit must reach the prior EXIT handler with status 130.
+@test "progress: Ctrl-C in a subshell runs the prior INT handler before the EXIT cleanup" {
+  _prog '( trap '"'"'rc=$?; echo "EXIT_RC=$rc"; exit "$rc"'"'"' EXIT
+      trap '"'"'echo INT_HANDLER; exit 130'"'"' INT
+      _acq_spin_install_traps
+      kill -s INT "$(exec sh -c '"'"'echo "$PPID"'"'"')"
+      echo NOT_REACHED )
+    echo "SUB_RC=$?"'
+  assert_line 'EXIT_RC=130'
+  assert_line 'SUB_RC=130'
+  assert_equal "$(grep -c INT_HANDLER <<<"$output")" 1
+  refute_output --partial 'NOT_REACHED'
+}
+
+# With no prior handler the signal is re-raised. In a subshell `$$` is the
+# PARENT's PID, so the re-raise must target the subshell itself.
+@test "progress: the signal re-raise targets the subshell, not the parent" {
+  _prog '( _acq_spin_install_traps
+      _acq_spin_cleanup_signal TERM
+      echo NOT_REACHED )
+    echo "SUB_RC=$?"'
+  # Line match: the shell's "Terminated" job notice echoes the command text.
+  assert_line 'SUB_RC=143'
+  refute_line 'NOT_REACHED'
+}
+
+@test "progress: re-raise with no prior INT handler still runs the prior EXIT handler once" {
+  _prog '( trap '"'"'echo "EXIT_RC=$?"'"'"' EXIT
+      _acq_spin_install_traps
+      _acq_spin_cleanup_signal INT
+      echo NOT_REACHED )
+    echo "SUB_RC=$?"'
+  assert_line 'EXIT_RC=130'
+  assert_line 'SUB_RC=130'
+  assert_equal "$(grep -c EXIT_RC <<<"$output")" 1
+  refute_output --partial 'NOT_REACHED'
+}

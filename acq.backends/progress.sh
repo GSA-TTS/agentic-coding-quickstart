@@ -121,14 +121,25 @@ _acq_restore_trap_line() {
   fi
 }
 
-# _acq_run_prior_trap COMMAND — run a previously-captured trap COMMAND once, if
-# non-empty. Errors in the prior handler must not abort our own cleanup. It runs
+# _acq_return_status N — return N, so the next command sees `$?` = N.
+_acq_return_status() {
+  return "$1"
+}
+
+# _acq_run_prior_trap COMMAND [STATUS] — run a previously-captured trap COMMAND
+# once, if non-empty, with `$?` set to STATUS (default 0). A handler written as
+# `rc=$?; cleanup; exit "$rc"` (the provisioning subshells in sbx.sh and msb.sh)
+# reads `$?` first, so it must see the status the shell is exiting with, not the
+# status of our own cleanup commands; otherwise a failed or interrupted provision
+# exits 0. Errors in the prior handler must not abort our own cleanup, so the
+# whole group runs in an `||` context, where `set -e` does not apply (that also
+# keeps a non-zero STATUS from tripping errexit before the handler runs). It runs
 # inside the spinner's cleanup function (so it sees that function's scope); give
 # it the default word splitting it was written against.
 _acq_run_prior_trap() {
   [ -n "$1" ] || return 0
   local IFS=$' \t\n'
-  eval "$1" || true
+  { _acq_return_status "${2:-0}"; eval "$1"; } || true
 }
 
 # _acq_progress_enabled — 0 (true) when animated progress may run, 1 otherwise.
@@ -272,11 +283,9 @@ _acq_spin_restore_traps() {
   _ACQ_SPIN_PRIOR_TERM_LINE=""
 }
 
-# _acq_spin_cleanup_exit — EXIT trap: stop any spinner without printing a
-# spurious "done" (an exit may be an error path). Clear the line + cursor, then
-# re-invoke the caller's prior EXIT handler (once) so its cleanup (e.g. sbx rm of
-# a throwaway validation sandbox) still runs even though we composed over it.
-_acq_spin_cleanup_exit() {
+# _acq_spin_stop_animation — kill and reap the animator (if any), then clear the
+# line and restore the cursor. Prints no "done" marker.
+_acq_spin_stop_animation() {
   if [ -n "$_ACQ_SPIN_PID" ]; then
     kill "$_ACQ_SPIN_PID" 2>/dev/null || true
     wait "$_ACQ_SPIN_PID" 2>/dev/null || true
@@ -284,24 +293,52 @@ _acq_spin_cleanup_exit() {
     printf '\r\033[K\033[?25h' >&2
   fi
   _ACQ_SPIN_MSG=""
-  local prior="$_ACQ_SPIN_PRIOR_EXIT_TRAP"
-  _ACQ_SPIN_PRIOR_EXIT_TRAP=""
-  _acq_run_prior_trap "$prior"
 }
 
-# _acq_spin_cleanup_signal SIG — INT/TERM trap: clean up, chain any prior handler
-# for SIG (once), then re-raise the signal with the default disposition so the
-# process exits with the right status. SIG is reset to default BEFORE the prior
-# handler runs, so a prior handler that re-raises SIG itself ends the process
-# instead of re-entering this trap.
+# _acq_spin_cleanup_exit [STATUS] — EXIT trap: stop any spinner without printing
+# a spurious "done" (an exit may be an error path). Clear the line + cursor, then
+# re-invoke the caller's prior EXIT handler (once) so its cleanup (e.g. sbx rm of
+# a throwaway validation sandbox) still runs even though we composed over it.
+# The prior handler sees the exit status in `$?`: STATUS when given (the signal
+# path), otherwise the `$?` this trap was entered with. Capture it before any
+# other command runs. Locals carry a prefix so they cannot shadow a variable the
+# prior handler reads.
+_acq_spin_cleanup_exit() {
+  local _acq_spin_rc="${1:-$?}"
+  _acq_spin_stop_animation
+  local _acq_spin_prior="$_ACQ_SPIN_PRIOR_EXIT_TRAP"
+  _ACQ_SPIN_PRIOR_EXIT_TRAP=""
+  _acq_run_prior_trap "$_acq_spin_prior" "$_acq_spin_rc"
+}
+
+# _acq_spin_cleanup_signal SIG — INT/TERM trap. Order matters:
+#   1. Stop the animation, and reset SIG to its default disposition so a prior
+#      handler that re-raises SIG ends the process instead of re-entering here.
+#   2. Run the prior SIG handler (once) with `$?` = 128+signal. If it exits (the
+#      provisioning subshells chain `_acq_provider_input_signal_exit 130`), the
+#      EXIT trap, still ours, chains the prior EXIT handler with that status, so
+#      the shell exits 130/143 and the EXIT cleanup runs exactly once.
+#   3. If it returned, or there was none, run the EXIT cleanup with the signal
+#      status, drop the EXIT trap, and re-raise SIG at THIS process so the parent
+#      sees a death by signal. Inside a subshell `$$` is the parent's PID, so use
+#      BASHPID, or on bash 3.2 (no BASHPID) the PPID of an `exec`ed child, which
+#      is the current shell because `exec` skips the extra fork. Should the
+#      re-raise not end the process (SIG ignored), exit with the status instead.
 _acq_spin_cleanup_signal() {
-  _acq_spin_cleanup_exit
-  local prior=""
-  case "$1" in
-    INT)  prior="$_ACQ_SPIN_PRIOR_INT_TRAP";  _ACQ_SPIN_PRIOR_INT_TRAP="" ;;
-    TERM) prior="$_ACQ_SPIN_PRIOR_TERM_TRAP"; _ACQ_SPIN_PRIOR_TERM_TRAP="" ;;
+  local _acq_spin_sig="$1" _acq_spin_status=1 _acq_spin_prior="" _acq_spin_self
+  case "$_acq_spin_sig" in
+    INT)  _acq_spin_status=130
+          _acq_spin_prior="$_ACQ_SPIN_PRIOR_INT_TRAP";  _ACQ_SPIN_PRIOR_INT_TRAP="" ;;
+    TERM) _acq_spin_status=143
+          _acq_spin_prior="$_ACQ_SPIN_PRIOR_TERM_TRAP"; _ACQ_SPIN_PRIOR_TERM_TRAP="" ;;
   esac
-  trap - "$1"
-  _acq_run_prior_trap "$prior"
-  kill -s "$1" "$$" 2>/dev/null || true
+  _acq_spin_stop_animation
+  trap - "$_acq_spin_sig"
+  _acq_run_prior_trap "$_acq_spin_prior" "$_acq_spin_status"
+  _acq_spin_cleanup_exit "$_acq_spin_status"
+  trap - EXIT
+  _acq_spin_self="${BASHPID:-}"
+  [ -n "$_acq_spin_self" ] || _acq_spin_self=$(exec sh -c 'echo "$PPID"')
+  kill -s "$_acq_spin_sig" "$_acq_spin_self" 2>/dev/null || true
+  exit "$_acq_spin_status"
 }
