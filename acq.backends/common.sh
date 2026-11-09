@@ -1111,18 +1111,38 @@ EOF
 }
 
 # acq_sandbox_name_check NAME — fail with a message unless NAME is safe to use
-# as a sandbox name. An explicit --name is passed to the backend as an argument,
-# matched against `list -q` output line by line, used as msb's NAME:PATH copy
-# target, keyed into host state files (sanitised to this same charset, so two
-# names could otherwise alias one record; ADR-0016) and printed. Only ASCII
-# letters, digits, '.', '_' and '-' are accepted; a leading '-' would read as an
-# option, and '.'/'..' as path components. The characters are spelled out because
-# a bracket range follows the locale's collation order under bash 3.2.
+# as the name of a NEW sandbox (an explicit --name). The name is passed to the
+# backend as an argument, matched against `list -q` output line by line, used as
+# msb's NAME:PATH copy target, joined into host paths and printed. Only ASCII
+# letters, digits, '_' and '-' are accepted, the same set the secret store and
+# the msb ports state accept for a sandbox name, so every per-sandbox feature
+# works with any name acq lets you create; a leading '-' would read as an
+# option. The characters are spelled out because a bracket range follows the
+# locale's collation order under bash 3.2.
 acq_sandbox_name_check() {
   case "$1" in
-    ''|.|..|-*|*[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-]*)
+    ''|-*|*[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-]*)
       echo "acq: error: invalid sandbox name '$(acq_printable "$1")'." >&2
-      echo "     Use only letters, digits, '.', '_' and '-', not starting with '-'." >&2
+      echo "     Use only letters, digits, '_' and '-', not starting with '-'." >&2
+      echo "     An existing sandbox with another name is still reachable with" >&2
+      echo "     'acq run NAME', 'acq shell NAME' or 'acq rm NAME'." >&2
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+# acq_name_form_check VERB NAME — refuse a NAME given to a verb that acts on an
+# existing sandbox (rm, stop, exec, ...) when it cannot be a sandbox name but
+# could steer a host path built from it: empty, '.', '..', anything containing
+# '/' or '\', or a control character. Unlike acq_sandbox_name_check this accepts
+# every other character, so a sandbox created outside acq stays reachable.
+acq_name_form_check() {
+  case "$2" in
+    ''|.|..|*/*|*\\*|*[[:cntrl:]]*)
+      echo "acq: $1: refusing sandbox name '$(acq_printable "$2")'." >&2
+      echo "     A sandbox name cannot be empty, '.' or '..', or contain '/', '\\'" >&2
+      echo "     or control characters." >&2
       return 1
       ;;
   esac
@@ -1237,9 +1257,10 @@ workspace_paths() {
 # the mount would silently target a different path. A control character splits
 # the line-oriented workspace list the adapters read and reaches the terminal
 # when the path is echoed. The symlink-resolved path is checked too, because it
-# is what msb mounts. Silent and 0 when every path is usable.
+# is what msb mounts. With no path argument the current directory is the
+# workspace, so it is checked instead. Silent and 0 when every path is usable.
 acq_workspace_specs_safe() {
-  local agent="" prev="" arg p
+  local agent="" prev="" arg seen=0
   for arg in "$@"; do
     if _takes_value "$prev"; then prev="$arg"; continue; fi
     prev="$arg"
@@ -1250,17 +1271,26 @@ acq_workspace_specs_safe() {
       agent="$arg"
       continue
     fi
-    p="${arg%:ro}"
-    _acq_workspace_path_safe "$p" "$p" || return 1
-    if [ -d "$p" ]; then
-      _acq_workspace_path_safe "$(canonicalize_path "$p")" "$p" || return 1
-    fi
+    seen=1
+    _acq_workspace_safe "${arg%:ro}" || return 1
   done
+  [ "$seen" -eq 1 ] || _acq_workspace_safe "$PWD" || return 1
   return 0
 }
 
+# _acq_workspace_safe PATH — check PATH as given and, when it is a directory, its
+# symlink-resolved form.
+_acq_workspace_safe() {
+  local p="$1" real
+  _acq_workspace_path_safe "$p" "$p" || return 1
+  [ -d "$p" ] || return 0
+  real=$(canonicalize_path "$p")
+  [ "$real" = "$p" ] && return 0
+  _acq_workspace_path_safe "$real" "$p (resolves to $real)"
+}
+
 # _acq_workspace_path_safe PATH SHOWN — the per-path check behind
-# acq_workspace_specs_safe. SHOWN is the path as the user gave it, for the message.
+# acq_workspace_specs_safe. SHOWN describes the path for the message.
 _acq_workspace_path_safe() {
   case "$1" in
     *[[:cntrl:]]*)
@@ -1271,7 +1301,7 @@ _acq_workspace_path_safe() {
     *:*)
       echo "acq: error: workspace path contains ':': $(acq_printable "$2")" >&2
       case "$2" in
-        [A-Za-z]:[/\\]*)
+        [abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ]:[/\\]*)
           echo "     In Git Bash, give a Windows drive path in /c/... form instead of C:/..." >&2
           return 1
           ;;

@@ -247,12 +247,44 @@ _ws_safe() { # ARGS...
   refute_output --partial $'\007'
 }
 
-@test "workspace specs: a symlink whose target contains ':' is refused" {
+@test "workspace specs: a symlink whose target contains ':' is refused, naming the target" {
   mkdir -p "$WT/real:dir"
   ln -s "$WT/real:dir" "$WT/plainlink"
   _ws_safe opencode "$WT/plainlink"
   assert_failure
   assert_output --partial "contains ':'"
+  assert_output --partial "resolves to"
+  assert_output --partial "real:dir"
+}
+
+@test "workspace specs: with no path argument the current directory is checked" {
+  mkdir -p "$WT/cwd:colon" "$WT/"$'cwd\nnl'
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    cd "$1" && acq_workspace_specs_safe opencode 2>&1
+  ' _ "$WT/cwd:colon"
+  assert_failure
+  assert_output --partial "contains ':'"
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    cd "$1" && acq_workspace_specs_safe --name x opencode 2>&1
+  ' _ "$WT/"$'cwd\nnl'
+  assert_failure
+  assert_output --partial 'control character'
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    cd "$1" && acq_workspace_specs_safe opencode 2>&1
+  ' _ "$WT/okdir"
+  assert_success
+}
+
+@test "create(msb): no path argument from a ':' cwd fails before any backend create" {
+  mkdir -p "$WT/cwdproj:z"
+  cd "$WT/cwdproj:z"
+  run env ACQ_BACKEND=msb ACQ_NO_PROMPT=1 "$ACQ" create opencode --no-provider-kits
+  assert_failure
+  assert_output --partial "contains ':'"
+  refute_regex "$(cat "$CALLS")" '^msb create'
 }
 
 @test "preflight: a missing path with escape characters is reported without raw control bytes" {

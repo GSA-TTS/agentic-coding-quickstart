@@ -6249,6 +6249,7 @@ _acq_msb_secret_refeed() {
     # heredoc (else only the first sandbox is processed — a real msb drains
     # stdin). Same trap guarded in acq_backend_secret_rm's sweep.
     while IFS= read -r sb; do
+      sb="${sb%$'\r'}"
       [ -n "$sb" ] || continue
       _acq_msb_cli modify "$sb" --secret "${_env}@${_host}" </dev/null >/dev/null 2>&1 \
         && applied=$((applied + 1))
@@ -6369,6 +6370,7 @@ acq_backend_secret_propagate() {
     eligible=1
   else
     while IFS= read -r sb; do
+      sb="${sb%$'\r'}"
       [ -n "$sb" ] && eligible=$((eligible + 1))
     done <<EOF
 $(_acq_msb_cli list -q 2>/dev/null)
@@ -6420,6 +6422,7 @@ _acq_msb_secret_unbind() {
     # only the FIRST sandbox is processed (a real `msb` drains stdin). This is
     # the same stdin-consumption trap the test stub deliberately reproduces.
     while IFS= read -r sb; do
+      sb="${sb%$'\r'}"
       [ -n "$sb" ] || continue
       _acq_msb_cli modify "$sb" --secret-rm "$env_name" </dev/null >/dev/null 2>&1 \
         && unbound=$((unbound + 1))

@@ -426,3 +426,34 @@ PSSTUB
   assert_output --partial 'plaintext-unreadable=no'
   assert_output --partial 'mixed-unreadable=no'
 }
+
+# A native Windows msb prints CRLF lines; the re-feed sweeps must hand msb the
+# bare sandbox name, not one with a trailing CR.
+@test "secret set -g(msb): CRLF list output re-feeds the bare sandbox names" {
+  load_acq
+  printf 'crA\r\ncrB\r\n' > "$STUBDIR/.msb_sandbox_list"
+  : > "$CALLS"
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/crlf-set-secrets"
+    export ACQ_SECRET_TEST_VALUE="usai-key-value"
+    ACQ_BACKEND=msb "'"$ACQ"'" secret set -g usai >/dev/null 2>&1
+  '
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'msb modify crA --secret USAI_API_KEY@api.gsa.usai.gov'
+  assert_regex "$log" 'msb modify crB --secret USAI_API_KEY@api.gsa.usai.gov'
+}
+
+@test "secret rm -g(msb): CRLF list output unbinds the bare sandbox names" {
+  load_acq
+  printf 'crA\r\ncrB\r\n' > "$STUBDIR/.msb_sandbox_list"
+  : > "$CALLS"
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/crlf-rm-secrets"
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    printf "K\n" | acq_secret_store "$(_acq_secret_key usai)"
+    ACQ_BACKEND=msb "'"$ACQ"'" secret rm -g usai >/dev/null 2>&1
+  '
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'msb modify crA --secret-rm USAI_API_KEY'
+  assert_regex "$log" 'msb modify crB --secret-rm USAI_API_KEY'
+}

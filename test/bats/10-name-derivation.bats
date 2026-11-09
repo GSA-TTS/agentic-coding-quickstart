@@ -81,7 +81,7 @@ load 'helper'
 
 @test "derive_name: an explicit --name outside [A-Za-z0-9._-] is refused" {
   local bad
-  for bad in $'x\nbox' $'x\033]0;t\007' 'a:b' 'a/b' '../up' '..' '.' '-flag' 'has space' ''; do
+  for bad in $'x\nbox' $'x\033]0;t\007' 'a:b' 'a/b' '../up' '..' '.' 'v1.2' '-flag' 'has space' ''; do
     run derive_name --name "$bad" opencode /proj
     assert_failure
     assert_output --partial 'invalid sandbox name'
@@ -92,10 +92,16 @@ load 'helper'
   assert_output --partial 'invalid sandbox name'
 }
 
-@test "derive_name: an explicit --name with dots, underscores and dashes is accepted" {
-  run derive_name --name My_box.v2-x opencode /proj
+@test "derive_name: an explicit --name with underscores and dashes is accepted" {
+  run derive_name --name My_box-v2 opencode /proj
   assert_success
-  assert_output 'My_box.v2-x'
+  assert_output 'My_box-v2'
+}
+
+@test "derive_name: the invalid-name error points at the verbs for existing sandboxes" {
+  run derive_name --name a.b opencode /proj
+  assert_failure
+  assert_output --partial "acq run NAME"
 }
 
 @test "lookup(msb): a name with a newline never matches an unrelated listed sandbox" {
@@ -131,4 +137,54 @@ load 'helper'
   assert_line 'exists=no'
   assert_line 'absent=unconfirmed'
   assert_line 'box=yes'
+}
+
+@test "lookup: a CRLF list line matches the bare name" {
+  run _acq_list_has_line box "$(printf 'other\r\nbox\r\n')"
+  assert_success
+  run _acq_list_has_line box "$(printf 'other\r\nboxer\r\n')"
+  assert_failure
+  printf 'other\r\nbox\r\n' >"$STUBDIR/.msb_sandbox_list"
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_backend_exists box
+  '
+  assert_success
+}
+
+# Verbs that act on an existing sandbox take NAME as given. Names that could
+# steer a host path (traversal, separators, control characters) are refused
+# before the backend or any cleanup runs; any other name is passed through.
+@test "name-form verbs: path-shaped and control-character names are refused" {
+  local verb bad
+  for verb in rm stop start restart exec shell ports; do
+    for bad in '../x' 'a/b' 'a\b' '..' '.' $'x\ny' $'x\033]0;t\007'; do
+      : >"$CALLS"
+      run env ACQ_BACKEND=msb "$ACQ" "$verb" "$bad"
+      assert_failure
+      assert_output --partial 'refusing sandbox name'
+      refute_output --partial $'\033'
+      refute_regex "$(cat "$CALLS")" '^msb (remove|stop|start|exec|inspect)'
+    done
+  done
+}
+
+@test "name-form verbs: rm ../victim leaves directories outside the state dir untouched" {
+  export ACQ_MSB_CLONES_DIR="$STUBDIR/state-clones"
+  mkdir -p "$ACQ_MSB_CLONES_DIR" "$STUBDIR/victim"
+  : >"$STUBDIR/victim/keep"
+  printf '../victim\n' >"$STUBDIR/.msb_sandbox_list"
+  run env ACQ_BACKEND=msb "$ACQ" rm ../victim
+  [ -f "$STUBDIR/victim/keep" ]
+  assert_failure
+  assert_output --partial 'refusing sandbox name'
+  refute_regex "$(cat "$CALLS")" '^msb remove'
+}
+
+@test "name-form verbs: an unusual but path-safe name still reaches the backend" {
+  : >"$CALLS"
+  run env ACQ_BACKEND=msb "$ACQ" stop 'odd.name:1'
+  refute_output --partial 'refusing sandbox name'
+  assert_regex "$(cat "$CALLS")" 'msb stop odd\.name:1'
 }
