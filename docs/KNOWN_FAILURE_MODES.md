@@ -3848,7 +3848,8 @@ key on its next attach. Record the transcript, then close this entry.
 
 ## 58. Bash acq: Stray `Terminated` After a Group SIGTERM
 
-**Status:** Root cause known; fix deferred to the Bash `acq` owner.
+**Status:** Fixed — the kit-fetch guardian's stderr goes to `/dev/null`, and a
+failed parent lookup no longer ends the guardian.
 
 ### Symptoms
 
@@ -3862,12 +3863,12 @@ bash 3.2 shards) and passes on re-run.
 
 ### Root Cause
 
-The line does not come from acq's shell or its foreground child. It comes from
-the kit-fetch guardian that `_acq_kit_fetch_start` in `acq` starts in the
-background:
+This describes `acq` before the fix below. The line did not come from acq's
+shell or its foreground child. It came from the kit-fetch guardian that
+`_acq_kit_fetch_start` in `acq` starts in the background:
 
 1. The guardian runs `sh -c '…'` with HUP, INT and TERM ignored, in acq's
-   process group, and keeps acq's stderr.
+   process group, and kept acq's stderr.
 2. Each one-second tick it looks up its own parent with `proc_info`. On Linux and
    macOS that runs `ps -o ppid= -p PID` inside a command substitution.
 3. procps `ps` (Linux) installs its own SIGTERM and SIGHUP handlers at startup,
@@ -3883,8 +3884,8 @@ background:
 
 So the race is between the group signal and the guardian's short `ps` window.
 The first `ps` runs right as acq starts, which is where the test signals, and
-CPU load makes the window longer. The guardian then exits through
-`parent=$(proc_info "$$") || exit 1` and removes the root. A group SIGHUP
+CPU load makes the window longer. The guardian then exited through
+`parent=$(proc_info "$$") || exit 1` and removed the root. A group SIGHUP
 that hits the same window takes that exit too (`ps` exits 1), but silently.
 Either way this is harmless here, because acq is dying from the same signal.
 SIGINT, from a terminal's Ctrl-C, does not trigger any of this.
@@ -3899,22 +3900,26 @@ that comes from the wrapper, not from the real `ps`.)
 
 ### Fix
 
-Proposed, in `acq` (not changed here): send the guardian's stderr to
-`/dev/null` along with its stdin and stdout
-(`) </dev/null >/dev/null 2>&1 &`). The guardian never needs to print, so this
-removes the stray line whatever its helpers do. Separately, a failed
-`proc_info` could skip the tick instead of exiting, so a helper killed by a
-signal never ends the guardian early. If it does, the tick must still run the
-`kill -0 "$owner"` liveness check. Otherwise a `ps` that keeps failing, together
-with an acq killed by SIGKILL (which runs no EXIT trap), would leave the
-guardian and its root behind forever.
+`_acq_kit_fetch_start` in `acq` now sends the guardian's stderr to `/dev/null`
+along with its stdin and stdout (`) </dev/null >/dev/null 2>&1 &`). The guardian
+never needs to print, so the stray line cannot appear whatever its helpers do.
+
+A failed `proc_info` now skips only that tick's parent comparison instead of
+ending the guardian, so a lookup killed by a signal no longer deletes the root
+while acq still runs. The tick still runs the `kill -0 "$owner"` liveness check,
+so a `ps` that keeps failing, together with an acq killed by SIGKILL (which runs
+no EXIT trap), still ends the guardian and removes its root.
 
 ### Prevention / Status
 
-Once the fix lands in `acq`, add the slow-`ps` wrapper above as a deterministic
-case in `test/bats/kit-fetch-lifecycle.py`. Until then, a failure of only the
-`foreground` SIGTERM sub-case, whose stderr is exactly `Terminated\n`, is this
-known race and not a regression.
+`test/bats/kit-fetch-lifecycle.py` (run by
+`test/bats/103-kit-fetch-lifecycle.bats`) covers both parts without load or
+stress loops. Its slow `ps` wrapper resets SIGTERM, holds the guardian's lookup
+open for three seconds and leaves a marker file, and the case sends the group
+SIGTERM once the marker exists, so the signal lands inside the lookup every time
+and acq's stderr must stay empty. A `ps` wrapper that always fails checks that
+acq's root survives a failed lookup, and that the guardian still removes the
+root after acq is killed by SIGKILL.
 
 ---
 

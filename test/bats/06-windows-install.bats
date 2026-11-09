@@ -119,6 +119,43 @@ teardown() {
   assert_regex "$launcher" 'if \(\$env:LOCALAPPDATA -match '
 }
 
+# As install.sh refuses a relative --install-dir, install.ps1 refuses an
+# -InstallDir that is not fully qualified, before -DryRun or any write.
+@test "windows installer: a relative -InstallDir is refused before anything runs" {
+  installer=$(cat "$REPO_ROOT/install.ps1")
+  assert_regex "$installer" 'if \(\$InstallDir -and -not \(Test-AbsolutePath \$InstallDir\)\)'
+  assert_regex "$installer" '-InstallDir must be an absolute path, got .\$\(Format-Shown \$InstallDir\).'
+  # The check sits before the -DryRun branch, so a dry run refuses it too.
+  check_line=$(grep -n 'Test-AbsolutePath \$InstallDir' "$REPO_ROOT/install.ps1" | head -n 1 | cut -d: -f1)
+  dryrun_line=$(grep -n '^if (\$DryRun) {' "$REPO_ROOT/install.ps1" | head -n 1 | cut -d: -f1)
+  [ -n "$check_line" ] && [ -n "$dryrun_line" ] && [ "$check_line" -lt "$dryrun_line" ]
+}
+
+@test "windows PowerShell: a relative -InstallDir is refused when pwsh is available" {
+  command -v pwsh >/dev/null 2>&1 || skip "pwsh not available"
+  mkdir -p "$STUBDIR/work"
+  cd "$STUBDIR/work" || return 1
+
+  local rel
+  for rel in rel-inst 'C:rel-inst' '\rel-inst'; do
+    run pwsh -NoLogo -NoProfile -File "$REPO_ROOT/install.ps1" -DryRun -InstallDir "$rel"
+    assert_failure 1
+    assert_output --partial "-InstallDir must be an absolute path, got '$rel'"
+    refute_output --partial '[dry-run]'
+  done
+  # The refused value is echoed with control characters replaced.
+  run pwsh -NoLogo -NoProfile -File "$REPO_ROOT/install.ps1" -DryRun -InstallDir $'rel\033]0;t\007x'
+  assert_failure 1
+  assert_output --partial "got 'rel?]0;t?x'"
+  refute_output --partial $'\033'
+  # A fully qualified -InstallDir is accepted.
+  run pwsh -NoLogo -NoProfile -File "$REPO_ROOT/install.ps1" -DryRun -InstallDir 'C:\acq-test'
+  assert_success
+  assert_output --partial 'install dir: C:\acq-test'
+  run ls -A "$STUBDIR/work"
+  assert_output ''
+}
+
 @test "windows PowerShell: a relative LOCALAPPDATA never names the install dir" {
   command -v pwsh >/dev/null 2>&1 || skip "pwsh not available"
   mkdir -p "$STUBDIR/work"
