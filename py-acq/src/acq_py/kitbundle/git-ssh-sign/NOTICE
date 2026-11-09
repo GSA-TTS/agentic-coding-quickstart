@@ -1,0 +1,25 @@
+git-ssh-sign acq mixin kit
+Copyright 2026 GSA-TTS
+
+This kit is vendored (copied) from the Docker sbx-kits-contrib repository:
+
+  https://github.com/docker/sbx-kits-contrib/tree/main/git-ssh-sign
+  Source commit: d259d157af15649d1f90902cae397ebe1f2b1e3d
+
+The original work is:
+
+  Copyright 2026 Docker, Inc.
+  Licensed under the Apache License, Version 2.0.
+  http://www.apache.org/licenses/LICENSE-2.0
+
+Modifications by GSA-TTS (see docs/decisions/vendored-from-sbx-kits-contrib.md):
+  - Ported spec.yaml from schemaVersion "1" to "2" (memory -> agentContext).
+  - Ported spec.yaml from sbx schemaVersion "2" to the neutral acq
+    schemaVersion "hybrid/v1" (Phase 2): commands carry a `phase` field; the
+    key-resolution script moves from an inline initFiles blob to a files/
+    payload (files/home/.config/git/ssh-signing-key-command).
+  - Dropped the unused files/.config/git/hooks/pre-commit (upstream's own
+    documentation disavows it; the install step unsets core.hooksPath).
+  - Added README.md, TROUBLESHOOTING.md, scripts/verify, and this NOTICE.
+
+A copy of the Apache License, Version 2.0 accompanies this NOTICE (LICENSE).

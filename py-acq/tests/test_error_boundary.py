@@ -20,7 +20,7 @@ import time
 
 import pytest
 
-from acq_py import backends, cli, errors, lock, migration, msb, sbx, state
+from acq_py import backends, cli, errors, hostexec, lock, migration, msb, sbx, state
 from acq_py.commands import lifecycle
 
 MISSING_BIN = "/nonexistent/acq-test/backend"
@@ -189,13 +189,13 @@ def test_passthrough_sbx_honours_bin_seam(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("ACQ_SBX_INSTALLED", "1")
     monkeypatch.setenv("ACQ_MSB_INSTALLED", "0")
     seen: list[list[str]] = []
-    real_run = subprocess.run
+    real_run = hostexec.run_foreground
 
     def _spy(argv, *args, **kwargs):
         seen.append(list(argv))
         return real_run(argv, *args, **kwargs)
 
-    monkeypatch.setattr(subprocess, "run", _spy)
+    monkeypatch.setattr(hostexec, "run_foreground", _spy)
     assert cli.main(["--backend", "sbx", "echo", "hi"]) == 0
     # Forwarded to the binary the sbx adapter itself runs, not a bare PATH `sbx`.
     assert seen[-1] == [*sbx.sbx_command(), "echo", "hi"]

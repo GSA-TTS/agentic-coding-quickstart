@@ -1,0 +1,100 @@
+# spec.yaml — zscaler-ca-certificate (a neutral acq mixin kit, hybrid/v1)
+#
+# Installs the public Zscaler Root CA into the sandbox system trust store, so
+# agents, SDKs, and CLIs trust TLS certificates signed by a Zscaler HTTPS-
+# inspecting proxy. Without it, every outbound HTTPS call from the sandbox fails
+# certificate verification when the egress is intercepted by Zscaler.
+#
+# NEUTRAL (backend-agnostic) form. Converted from the former sbx kit in Phase 2;
+# see integrations/isolation/docs/decisions/0001-neutral-hybrid-v1-acq-kits.md.
+#
+# What it does, declaratively (file-drop path — used by sbx, and ppp later):
+#   - files (phase initFiles): stage the PEM-encoded Zscaler Root CA in the agent
+#     home (/home/agent/zscaler-ca.crt), writable by uid 1000.
+#   - commands (phase startup, user 0): move it into the system CA source dir and
+#     run update-ca-certificates to rebuild the system trust bundle, idempotently.
+#
+# THE SHOWCASE — msb backend shortcut:
+#   msb has a native `--trust-host-cas` primitive that propagates the host's
+#   already-trusted CAs (including the org's Zscaler CA) into the guest at boot.
+#   That is strictly better than the file-drop + update-ca-certificates dance, so
+#   the msb adapter takes the shortcut below and IGNORES files/commands for this
+#   kit. See the README parity note.
+#
+# Why initFiles+startup and NOT files/+install (carried from the sbx kit): on the
+# opencode-docker base, commands.install runs BEFORE the base setup that populates
+# /usr/local/share/ca-certificates, and initFiles run as uid 1000 which cannot
+# write that root-owned dir — so stage in the writable home, then move as root at
+# startup. See docs/decisions/.
+#
+# Security: a root CA certificate is PUBLIC, not a secret — it contains only the
+# public key and issuer identity. This is the well-known shared "Zscaler Root CA"
+# (CN=Zscaler Root CA, O=Zscaler Inc.; SHA-256
+# 04:F6:1F:1D:13:AA:E1:D1:65:73:DC:2C:37:F7:96:FD:F4:AC:97:71:3A:69:59:EB:B1:1D:24:73:95:8B:1A:53),
+# safe to commit.
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: zscaler-ca-certificate
+displayName: Zscaler Root CA
+description: >
+  Installs the public Zscaler Root CA into the sandbox system trust store so
+  agents and SDKs trust TLS certificates signed by a Zscaler HTTPS-inspecting
+  proxy. On backends without a native host-CA-trust primitive, drops the
+  embedded certificate and rebuilds the trust bundle with update-ca-certificates
+  at sandbox start. On msb, takes the native --trust-host-cas shortcut.
+
+# No caps.network: the certificate is embedded in the kit (files/), nothing is
+# downloaded, so the kit needs no egress allow-list.
+
+files:
+  # Written at sandbox start, AFTER base-image setup, as the agent user (uid
+  # 1000), which cannot write the root-owned system CA dir — so stage in the
+  # writable agent home and let the root startup step below move it into place.
+  # update-ca-certificates requires PEM files with a .crt extension.
+  #
+  # Deliberately NOT `readonly: true`. That flag is honored only by a consumer
+  # that mounts kit files read-only (acq msb), and msb skips this file-drop path
+  # entirely via the trust_host_cas shortcut below. Every consumer that DOES run
+  # this path (sbx, older acq) ignores the flag, so the root startup command
+  # would still receive the agent-writable /home/agent path and there is no
+  # root-owned copy to substitute (the cert is staged at start, not at create).
+  # Failing closed on that path would drop the cert install altogether; running
+  # it unchanged keeps the pre-existing trust model. See README "Read-only
+  # startup code (not used)".
+  - path: /home/agent/zscaler-ca.crt
+    mode: "0644"
+    phase: initFiles
+    source: files/home/zscaler-ca.crt
+    description: Stage the Zscaler Root CA in the agent home (writable by uid 1000)
+
+commands:
+  # Move the staged cert into the system CA source dir and rebuild the trust
+  # bundle. Runs as root (both operations require it). Idempotent: install
+  # overwrites the same file each start and update-ca-certificates regenerates
+  # the same bundle, so replaying on every start is safe.
+  - phase: startup
+    user: "0"
+    description: Install the Zscaler Root CA into the system trust store
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        install -m 0644 /home/agent/zscaler-ca.crt \
+          /usr/local/share/ca-certificates/zscaler-ca.crt
+        update-ca-certificates
+
+agentContext: |
+  ## Zscaler Root CA
+
+  The public Zscaler Root CA is trusted in this sandbox's system trust store, so
+  outbound HTTPS through a Zscaler-inspecting proxy verifies correctly. This is
+  the intended effect of HTTPS inspection; no action is needed from you.
+
+# Backend shortcut (the showcase): msb propagates host-trusted CAs into the guest
+# natively. When this shortcut is present for the active backend, the adapter
+# emits the native flag and SKIPS the files/commands above for this kit.
+backend_shortcuts:
+  msb:
+    trust_host_cas: true
+  sbx: {}

@@ -215,7 +215,8 @@ def test_an_unknown_verb_reaches_the_passthrough_not_argparse(monkeypatch):
     # The passthrough is the deliberate escape hatch (spec user story #9): an unknown
     # verb must reach it verbatim rather than becoming an argparse usage error. With
     # no backend installed it fails closed with backend_not_found, which is itself
-    # proof the verb got past argparse into the passthrough.
+    # proof the verb got past argparse into the passthrough. (--json goes before
+    # the verb: after it, the backend would receive it verbatim.)
     import contextlib
     import io
     import json
@@ -226,7 +227,7 @@ def test_an_unknown_verb_reaches_the_passthrough_not_argparse(monkeypatch):
     monkeypatch.setenv("ACQ_SBX_INSTALLED", "0")
     out = io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
-        code = cli.main(["definitely-not-a-verb", "--json"])
+        code = cli.main(["--json", "definitely-not-a-verb"])
     assert code == 1  # operational failure, not 2 (usage)
     doc = json.loads(out.getvalue().splitlines()[-1])
     assert doc["command"] == "definitely-not-a-verb"  # the verb was carried through

@@ -1,12 +1,27 @@
 """Deterministic offline fake ``msb`` for contract vectors (internal test seam).
 
 Mirrors the real msb 0.7.11 CLI surface the adapter drives: ``--version``, ``list``/
-``ls`` (with ``-q``/``--running``), ``create --name N [IMAGE]``, ``exec -u USER NAME
+``ls`` (with ``-q``/``--running``), ``create --name N [--secret ENV@HOST]... [IMAGE]``,
+``modify NAME [--secret ENV@HOST]... [--secret-rm ENV]...``, ``exec -u USER NAME
 -- CMD``, ``stop``, ``remove -f``, ``copy``, and ``inspect NAME --format json`` —
 against a JSON catalog at ``$MSB_HOME/.microsandbox/catalog.json`` (or
 ``$HOME/.microsandbox/...``), which the vector runner redirects to a throwaway
 directory. An initial catalog can be seeded in-memory via ``ACQ_MSB_STUB_CATALOG``
 (JSON ``{name: state}``).
+
+``--secret ENV@HOST`` is checked the way it must work against the real msb, which
+reads ENV from its own environment: the variable must be set, an inline
+``ENV=VALUE`` form is refused, and the bound value must not appear inside any
+argv element (a ``--flag=VALUE`` embedding included). The stub records each
+sandbox's bindings in ``secrets.json`` next to the catalog as ``{name: {ENV:
+{host, env_present}}}``: whether the variable was present, never its value.
+
+``modify`` models the conservative reading of msb's "add or rotate": ``--secret
+ENV@HOST`` for a variable already bound to the SAME hosts rotates it, but one
+bound to OTHER hosts is an error (no assumption that it is replaced), and
+``--secret-rm`` of a variable that is not bound is an error.
+``ACQ_MSB_STUB_FAIL_ADD`` / ``ACQ_MSB_STUB_FAIL_RM`` name sandboxes (comma
+separated) whose ``modify --secret`` / ``--secret-rm`` fails.
 
 msb 0.7.11 has NO ``secret``/``kit-apply``/``substrate-provision``/
 ``provider-credential``/``github-scope``/``rotate`` subcommands, so the stub models
@@ -89,6 +104,53 @@ def _save(catalog: dict[str, str]) -> None:
     path.write_text(json.dumps(catalog, sort_keys=True), encoding="utf-8")
 
 
+def _secrets_path() -> Path:
+    return _catalog_path().with_name("secrets.json")
+
+
+def _load_secrets() -> dict[str, dict]:
+    try:
+        doc = json.loads(_secrets_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {k: v for k, v in doc.items() if isinstance(v, dict)} if isinstance(doc, dict) else {}
+
+
+def _save_secrets(records: dict[str, dict]) -> None:
+    path = _secrets_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(records, sort_keys=True), encoding="utf-8")
+
+
+def _flag_values(args: list[str], flag: str) -> list[str]:
+    return [args[i + 1] for i, a in enumerate(args) if a == flag and i + 1 < len(args)]
+
+
+def _apply_secrets(args: list[str], bindings: dict) -> str | None:
+    """Apply ``--secret``/``--secret-rm`` flags to ``bindings``; return an error.
+
+    Records only the host and whether the variable was present. A value is read
+    solely to prove it is absent from argv and is never stored or printed.
+    """
+    for spec in _flag_values(args, "--secret"):
+        env, sep, host = spec.partition("@")
+        if not sep or not env or not host or "=" in env:
+            return "invalid --secret: expected ENV@HOST (inline values are rejected)"
+        value = os.environ.get(env)
+        if value is None:
+            return f"host environment variable {env} is not set"
+        if value and any(value in a for a in args):
+            return f"the value of {env} was found on the command line"
+        if env in bindings and bindings[env].get("host") != host:
+            return f"secret {env} is already bound to other hosts; remove it first"
+        bindings[env] = {"host": host, "env_present": True}
+    for env in _flag_values(args, "--secret-rm"):
+        if env not in bindings:
+            return f"no secret named {env}"
+        del bindings[env]
+    return None
+
+
 def _arg_after(args: list[str], flag: str) -> str | None:
     for i, a in enumerate(args):
         if a == flag and i + 1 < len(args):
@@ -127,8 +189,38 @@ def main(argv: list[str]) -> int:
         if name in catalog:
             print(f"msb: sandbox '{name}' already exists", file=sys.stderr)
             return 1
+        bindings: dict = {}
+        problem = _apply_secrets(args, bindings)
+        if problem is not None:
+            print(f"msb: {problem}", file=sys.stderr)
+            return 1
         catalog[name] = "running"
         _save(catalog)
+        records = _load_secrets()
+        records[name] = bindings
+        _save_secrets(records)
+        return 0
+
+    if cmd == "modify":
+        if _should_fail("modify"):
+            print(RAW_FAIL_STDERR, file=sys.stderr)
+            return 1
+        name = args[1] if len(args) > 1 else None
+        if name is None or name not in catalog:
+            print(f"msb: no such sandbox '{name}'", file=sys.stderr)
+            return 1
+        for knob, flag in (("ACQ_MSB_STUB_FAIL_ADD", "--secret"), ("ACQ_MSB_STUB_FAIL_RM", "--secret-rm")):
+            if flag in args and name in os.environ.get(knob, "").split(","):
+                print(RAW_FAIL_STDERR, file=sys.stderr)
+                return 1
+        records = _load_secrets()
+        bindings = records.get(name, {})
+        problem = _apply_secrets(args, bindings)
+        if problem is not None:
+            print(f"msb: {problem}", file=sys.stderr)
+            return 1
+        records[name] = bindings
+        _save_secrets(records)
         return 0
 
     if cmd == "exec":
@@ -233,6 +325,9 @@ def main(argv: list[str]) -> int:
             return 1
         del catalog[name]
         _save(catalog)
+        records = _load_secrets()
+        if records.pop(name, None) is not None:
+            _save_secrets(records)
         return 0
 
     print(f"msb: unrecognized subcommand '{cmd}'", file=sys.stderr)

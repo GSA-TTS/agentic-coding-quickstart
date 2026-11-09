@@ -86,6 +86,11 @@ jobs:
           [ "$(git -C "$patterns_dir" rev-parse HEAD)" = "$patterns_ref" ]
           test -z "$(git -C "$patterns_dir" status --porcelain)"
           chmod -R a-w "$patterns_dir"
+      # The Python acq ships the built-in kits as package data. Every file's git
+      # blob id in its MANIFEST.json must equal the blob at the same path in the
+      # pinned Patterns tree checked out above (scripts/refresh-kitbundle).
+      - name: Check the packaged kit bundle against the pinned Patterns tree
+        run: python scripts/refresh-kitbundle --check --checkout "$RUNNER_TEMP/agentic-coding-patterns"
       - name: Install markdown linter dependencies
         run: npm ci --prefix .github/linters
       - name: Run pre-commit

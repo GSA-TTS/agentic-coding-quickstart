@@ -112,6 +112,11 @@ PENDING_PATHSPECS='
 #                                     (py-acq/src and qualification are listed)
 #   scripts/qualify-backend-cell scripts/stage-windows-runtime
 #                                     live qualification and release staging tools
+#   scripts/refresh-kitbundle         regenerates and checks the Python acq's kit
+#                                     bundle (package data under py-acq/src); run by
+#                                     hand, by the pre-commit job and by the pytest
+#                                     suite, never by the bash 3.2 job (150-exec-bits
+#                                     sees only its mode, as for every executable)
 NOT_INPUTS='
 AGENTS.fork.md
 GLOSSARY.md
@@ -123,6 +128,7 @@ py-acq/requirements-quality.txt
 py-acq/tests/
 scripts/qualify-backend-cell
 scripts/stage-windows-runtime
+scripts/refresh-kitbundle
 .github/workflows/python-quality.yml
 .github/workflows/python-vectors.yml
 .github/workflows/tier3-release-gate.yml

@@ -73,13 +73,61 @@ and (msb) the read-only trusted-config mount, including the committed
    whether to add a remount attempt to the cell's own guest.
 
 **Expected today:** the Python implementation fails the cell oracle on every
-cell (msb has no credential path, no built-in kits are applied, and no read-only
-trusted-config mount is established), so a Tier-3 run reports `FAIL` with each
+cell (no built-in kits are applied and no read-only trusted-config mount is
+established; the msb credential path exists but has no live run yet), so a Tier-3
+run reports `FAIL` with each
 missing control named, rather than qualifying a sandbox that lacks them. The
 first live run with the extended oracle should also confirm that `sbx` accepts the
 nonce-named global secret service, and that neither backend CLI reads the
 redirected `XDG_*` directories (if one does, its steps fail closed rather than
 pass).
+
+---
+
+## Deferred: Python session parity gaps (attach, shell, exec)
+
+**Status:** deferred (tracked per AGENTS.md "Track Deferred Work").
+
+The Python `attach`, `shell`, `run` and `exec` give the session a PTY when stdin
+is a terminal (`msb exec -t`, `sbx exec -it`), pass `HOME`, `TERM`/`COLORTERM`,
+the host git identity and (msb) `SHELL`, map a signal death to `128+N`, and
+leave Ctrl-C to the child (`py-acq/src/acq_py/hostexec.py` `run_foreground`). Six
+parts of the Bash session differ or are not ported yet:
+
+1. **Kit `environment[]` replay** (Bash `_acq_msb_kit_env_flags_into`). The
+   Python kit engine does not persist a kit's declared environment, so there is
+   nothing to replay. **Unblock trigger:** the Python kit engine applies kits
+   through the neutral engine and records their environment; then add it to the
+   adapters' session flags.
+2. **ssh-agent forwarding** (ADR-0021). Python never creates the `--vsock` route
+   or the in-guest bridge, so it passes `SSH_AUTH_SOCK` only when the sandbox's
+   host record carries an `ssh_auth_sock` guest path, which no Python create
+   writes yet; sandboxes created by Bash keep that path in Bash's host config,
+   which Python does not read. **Unblock trigger:** forwarding is ported, or the
+   Python reader for Bash's state tree lands.
+3. **Guest git config** (Bash `_acq_msb_apply_host_git_global_config`, and sbx's
+   git identity kit). Python passes the identity as `GIT_*`/`EMAIL` session
+   variables only; it does not write `user.name`/`user.email` into the guest's
+   global git config. **Unblock trigger:** same as item 1.
+4. **`ACQ_ACTIVATE_PROJECT_ENV`.** With it set to `1`, Bash passes
+   `ACQ_WORKSPACE` and wraps the session in its guest script
+   (`acq_guest_exec_script`, `acq_guest_shell_script` in `acq.backends/common.sh`),
+   which changes into the workspace and loads its `.envrc` through `direnv` before
+   the command runs. Python ignores the variable and starts the command directly.
+   **Unblock trigger:** the Python substrate reliably provides `direnv` in the
+   guest; then port the two scripts into the adapters' session commands.
+5. **sbx attach uses `sbx exec -it`, not `sbx run --name`.** Bash re-attaches with
+   `sbx run --name NAME`, which relaunches the agent baked into the sandbox and
+   reads its launch mode from the `generic-opencode` host record. Python has no
+   such record, and `sbx run` takes no `-e`, so it could not pass the session
+   environment above. Python therefore runs the recorded agent (or kit entrypoint)
+   with `sbx exec -it NAME -- AGENT` from host state, as it does on msb.
+   **Unblock trigger:** the Python reader for Bash's state tree lands; then decide
+   whether a Bash-created generic-OpenCode sandbox needs `sbx run` to attach.
+6. **Live check.** A TUI attach, an interactive shell and Ctrl-C have been tested
+   only against a fake backend under a PTY (`py-acq/tests/test_session_fidelity.py`).
+   **Unblock trigger:** the next Tier-3 run on an msb host, and on an sbx 0.51+
+   host for `sbx exec -it`.
 
 ---
 
@@ -125,6 +173,50 @@ resort.
 2. **Both platforms:** before the first timed step, start the backend daemon
    (or check that it is already running) outside any step's process group, so
    a forced kill can never take it down.
+
+---
+
+## Python acq on msb: `secret rm` can be blocked by a sandbox it has no record for
+
+**Status:** known limitation, waiting on a live msb check (per AGENTS.md "Track Deferred Work").
+
+### Symptoms and cause
+
+The Python msb adapter records host-side which secret bindings each sandbox it
+creates holds (`<state>/msb-secret-bindings/`), because msb gives acq no binding
+listing to rely on. `secret rm` unbinds exactly what those records show. A
+sandbox msb lists without a record is unknown: one created by the Bash `acq`, by
+`msb` directly, or before the records existed. For each unknown sandbox,
+`secret rm` tries `msb modify NAME --secret-rm ENV`. If that fails, acq cannot
+tell "msb refused because the variable was never bound" from a real failure, so
+it keeps the secret in the acq store and exits 1 with `unbind_failed`, naming
+the sandbox. Until the msb behaviour is known, any unknown sandbox that never
+had the binding can block the removal if msb rejects removing an unbound
+variable (the test stub models it that way). Stopped sandboxes are swept too,
+and `msb modify` on a stopped sandbox is also unverified.
+
+### Mitigation today
+
+Remove the named sandbox (`acq rm NAME`, or `msb remove NAME` for one acq did
+not create), then retry `acq secret rm`. If you know a named sandbox never had
+the secret (or accept that it may keep it), retry with
+`acq secret rm ... --accept-unconfirmed NAME[,NAME]`: only the named unrecorded
+sandboxes are accepted, the JSON data lists them under `unconfirmed`, and a
+stderr note repeats that they may still hold the binding. Sandboxes the Python
+acq creates always have a record and never block it.
+
+On a global removal, an unrecorded sandbox that also has its own stored value is
+not assumed safe: the Bash `acq`'s global set overwrites a sandbox's own binding,
+so acq removes the binding and re-adds the sandbox's own value in a separate
+call, and reports the sandbox as unconfirmed if either call fails.
+
+### Unblock trigger
+
+A live msb run that shows what `msb modify NAME --secret-rm ENV` does for a
+variable that is not bound, on a running and on a stopped sandbox. If msb
+succeeds, or fails in a way acq can tell apart, treat that as "confirmed
+unbound", stop blocking, and retire `--accept-unconfirmed`. Reading Bash's provenance records (planned
+Bash-state import) would also turn Bash-created sandboxes into known ones.
 
 ---
 
