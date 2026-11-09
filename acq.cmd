@@ -30,5 +30,9 @@ if not exist "%ACQ_POWERSHELL%" (
   exit /b 1
 )
 
+rem acq.ps1 recognises exactly this argument shape (-NoLogo -NoProfile -File
+rem then its own path) and reads the arguments from its own command line,
+rem because PowerShell's binder removes the first `--` from $args. Keep the two
+rem in step.
 "%ACQ_POWERSHELL%" -NoLogo -NoProfile -File "%ACQ_PS1%" %*
 exit /b %ERRORLEVEL%

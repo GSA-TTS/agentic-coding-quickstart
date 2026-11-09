@@ -10,14 +10,111 @@ $ErrorActionPreference = "Stop"
 # this for every child process.
 $env:NoDefaultCurrentDirectoryInExePath = "1"
 
+# acq.cmd starts this script as
+#   powershell.exe -NoLogo -NoProfile -File "<this script>" <arguments>
+# and by the time PowerShell fills $args it has already changed the arguments:
+# its parameter binder takes the first bare `--` as its own end-of-parameters
+# marker and removes it, although acq needs it to tell its own flags from a
+# guest command's. Get-AcqLauncherArgs recovers the arguments from the
+# process's argv instead, which .NET splits from the raw command line with the
+# Windows (MSVCRT) rules, so `--`, empty arguments and embedded quotes arrive as
+# acq.cmd received them. It returns $null for any other kind of launch, such as
+# `.\acq.ps1` typed at a PowerShell prompt: there PowerShell parsed the line
+# itself and $args is all there is.
+function Get-AcqLauncherArgs {
+    param([Parameter(Mandatory = $true)][string]$Self)
+
+    $argv = [Environment]::GetCommandLineArgs()
+    if ($argv.Count -lt 5) { return $null }
+    if ($argv[1] -cne '-NoLogo' -or $argv[2] -cne '-NoProfile' -or $argv[3] -cne '-File') {
+        return $null
+    }
+    # The script named on the command line must be this one: another script
+    # started with -File may have called acq.ps1, and its arguments are not ours.
+    try {
+        $named = [System.IO.Path]::GetFullPath($argv[4])
+        $mine = [System.IO.Path]::GetFullPath($Self)
+    }
+    catch {
+        return $null
+    }
+    if (-not [string]::Equals($named, $mine, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $null
+    }
+    $rest = @()
+    for ($i = 5; $i -lt $argv.Count; $i++) {
+        $rest += [string]$argv[$i]
+    }
+    # The unary comma keeps an empty array from being unrolled into $null.
+    return , $rest
+}
+
+# Quote one argument for a Windows command line so that the MSVCRT parser
+# (Python's, and most native programs') gives it back unchanged: an empty
+# argument becomes "", and a backslash run is doubled only where it precedes a
+# double quote.
+function ConvertTo-AcqCommandLineArgument {
+    param([AllowEmptyString()][string]$Value)
+
+    if ($Value.Length -gt 0 -and $Value -notmatch '[\s"]') {
+        return $Value
+    }
+    $slash = [char]92
+    $builder = New-Object System.Text.StringBuilder
+    [void]$builder.Append('"')
+    $backslashes = 0
+    foreach ($ch in $Value.ToCharArray()) {
+        if ($ch -eq $slash) {
+            $backslashes++
+            continue
+        }
+        if ($ch -eq [char]34) {
+            [void]$builder.Append($slash, 2 * $backslashes + 1)
+        }
+        elseif ($backslashes -gt 0) {
+            [void]$builder.Append($slash, $backslashes)
+        }
+        [void]$builder.Append($ch)
+        $backslashes = 0
+    }
+    [void]$builder.Append($slash, 2 * $backslashes)
+    [void]$builder.Append('"')
+    return $builder.ToString()
+}
+
+# Run a native program with an exact command line and return its exit status.
+# PowerShell's own call operator would re-quote the arguments (Windows
+# PowerShell 5.1 drops empty ones and leaves embedded quotes unescaped). The
+# child shares this console and inherits the standard handles, and starts in
+# the current PowerShell location, as the call operator would start it.
+function Invoke-AcqProcess {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [AllowEmptyString()][string]$ArgumentLine
+    )
+
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $FilePath
+    $startInfo.Arguments = $ArgumentLine
+    $startInfo.UseShellExecute = $false
+    $startInfo.WorkingDirectory = (Get-Location -PSProvider FileSystem).ProviderPath
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    $process.WaitForExit()
+    return $process.ExitCode
+}
+
+$launcherArgs = Get-AcqLauncherArgs -Self $PSCommandPath
+
 # ACQ_IMPL runtime switch — the coexistence seam (ADR-0047m). On Windows the Bash
 # `acq` dispatches via Git Bash; here the Python implementation runs natively:
 # the managed runtime `py-acq\runtime\python.exe -m acq_py`, else `python` on
 # PATH. Unset / `bash` keeps the existing Git Bash path below; any other value
-# fails closed (exit 2). argv and the exit status are forwarded verbatim.
+# fails closed (exit 2). argv and the exit status are forwarded verbatim. The
+# value is compared case-sensitively (-cne), as the Bash `acq` compares it, so
+# `PYTHON` or `Bash` fails closed here too instead of selecting a branch.
 $acqImpl = $env:ACQ_IMPL
-if ($acqImpl -and $acqImpl -ne "bash") {
-    if ($acqImpl -ne "python") {
+if ($acqImpl -and $acqImpl -cne "bash") {
+    if ($acqImpl -cne "python") {
         [Console]::Error.WriteLine("acq: unsupported ACQ_IMPL '$acqImpl' (expected 'bash' or 'python')")
         exit 2
     }
@@ -97,6 +194,19 @@ if ($acqImpl -and $acqImpl -ne "bash") {
         [Console]::Error.WriteLine("acq: ACQ_IMPL=python needs Python 3.12 or newer; $acqPythonExe is not")
         exit 1
     }
+    if ($null -ne $launcherArgs) {
+        # Started by acq.cmd: hand Python the arguments exactly as acq.cmd got
+        # them. A separate powershell.exe owns no PowerShell pipeline, so the
+        # child writing straight to the inherited handles loses nothing.
+        $argumentLine = '-P -m acq_py'
+        foreach ($argument in $launcherArgs) {
+            $argumentLine += ' ' + (ConvertTo-AcqCommandLineArgument -Value $argument)
+        }
+        exit (Invoke-AcqProcess -FilePath $acqPythonExe -ArgumentLine $argumentLine)
+    }
+    # Called from a PowerShell prompt or script: PowerShell has parsed the line
+    # (quote a literal '--' there), and the call operator keeps the output in the
+    # caller's pipeline, so `acq version --json | ConvertFrom-Json` works.
     & $acqPythonExe -P -m acq_py @args
     exit $LASTEXITCODE
 }
@@ -176,8 +286,11 @@ function Convert-ToGitBashPath {
 }
 
 function Convert-ArgumentForGitBash {
-    param([Parameter(Mandatory = $true)][string]$Argument)
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Argument)
 
+    if ($Argument.Length -eq 0) {
+        return $Argument
+    }
     if ($Argument -match '^[A-Za-z]:[\\/]' -or (Test-IsUncPath -Path $Argument)) {
         return Convert-ToGitBashPath -Path $Argument
     }
@@ -211,7 +324,15 @@ if ($env:LOCALAPPDATA -match '^([A-Za-z]:[\\/]|[\\/]{2}[^\\/])') {
 if ($validatorData -and (Test-Path -LiteralPath $validatorData -PathType Container)) {
     $env:ACQ_PROVIDER_INPUT_DATA_DIR = (Convert-ToGitBashPath -Path $validatorData)
 }
-$convertedArgs = @($args | ForEach-Object { Convert-ArgumentForGitBash -Argument $_ })
+# Started by acq.cmd, the recovered arguments keep the `--` that $args lost.
+# They still reach bash.exe through the call operator, so under Windows
+# PowerShell 5.1 an empty argument or an embedded quote is not preserved on this
+# branch.
+$sourceArgs = $args
+if ($null -ne $launcherArgs) {
+    $sourceArgs = $launcherArgs
+}
+$convertedArgs = @($sourceArgs | ForEach-Object { Convert-ArgumentForGitBash -Argument $_ })
 
 & $bash --noprofile --norc $bashAcq @convertedArgs
 exit $LASTEXITCODE

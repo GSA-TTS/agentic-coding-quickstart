@@ -84,6 +84,69 @@ pass).
 
 ---
 
+## Deferred: Windows launcher argv and Bash UNC mount need live Windows checks
+
+**Status:** deferred (tracked per AGENTS.md "Track Deferred Work").
+
+Three Windows fixes were made and unit-tested without a Windows host:
+
+- **acq.cmd forwards argv exactly.** `acq.cmd` starts `acq.ps1` with
+  `powershell.exe -NoLogo -NoProfile -File`. PowerShell's parameter binder took
+  the first bare `--` out of `$args`, and Windows PowerShell 5.1 then dropped
+  empty arguments and left embedded double quotes unescaped when it called
+  Python. `acq.ps1` now recognises that exact launch shape, reads the arguments
+  from its own process argv (`[Environment]::GetCommandLineArgs()`), and starts
+  Python with an MSVCRT-quoted command line through
+  `System.Diagnostics.Process`. The child inherits the console and standard
+  handles and starts in the current PowerShell location. The Bash branch reads
+  the same recovered argv, so it keeps `--` too.
+- **`ACQ_IMPL` is compared case-sensitively** in `acq.ps1` (`-cne`), as the Bash
+  `acq` compares it: `PYTHON` or `Bash` exits 2.
+- **Bash msb UNC workspace.** `host_path` maps the `/unc/server/share/...` guest
+  form back to the UNC host path `//server/share/...` instead of passing it to
+  `cygpath -m`, which put it under the MSYS root. The msb `--volume` source and
+  the recorded host workspace are the UNC path again (ADR-0029 amendment).
+
+`py-acq/tests/test_windows_launchers.py` runs the launchers on the Windows CI
+job (argv round trip through `acq.cmd`, the exit status, the working directory,
+case-sensitive `ACQ_IMPL`, and `--` on the Bash branch). `test/bats/117-msys-path-forms.bats`
+covers the UNC mount with a simulated `cygpath`.
+
+**Live checks still needed (Windows x64):**
+
+1. **Interactive sessions through `acq.cmd`.** With `ACQ_IMPL=python`, run
+   `acq.cmd run shell <dir>` and `acq.cmd exec <name> -- sh -c 'echo "a b"'` from
+   cmd.exe. The attach must get a working TTY, Ctrl-C must reach the guest
+   process, and the exit status of `exec` must come back. CI has no console, so it
+   cannot show that Python started through `Process.Start` handles the TTY as it
+   did under the call operator.
+2. **Bash msb with a UNC workspace.** Under Git Bash with msb,
+   `ACQ_IMPL=bash ACQ_DEBUG=1 acq run shell '\\server\share\proj'` (or a
+   mapped drive whose realpath is UNC) must log
+   `msb volume: //server/share/proj (host) -> /unc/server/share/proj (guest)`, and
+   msb must mount it. The Python adapter's UNC mount was verified live; nothing
+   yet shows msb accepting the forward-slash `//server/share` source the Bash
+   adapter passes.
+
+**Known limitations (not fixed):**
+
+- **`acq.ps1` run from PowerShell.** In PowerShell, `acq` resolves to `acq.ps1`
+  before `acq.cmd`, and PowerShell parses the line itself, so the first bare `--`
+  never reaches acq. Quote it (`acq exec box '--' echo --json`), or run
+  `acq.cmd`. Windows PowerShell 5.1 also drops an empty argument passed to Python
+  there. Recovering the original text from `$MyInvocation` would need the
+  PowerShell parser and `Invoke-Expression`, which is too fragile to adopt
+  without a Windows host to test it. **Unblock trigger:** a Windows host or CI
+  job that can drive an interactive PowerShell session.
+- **Bash branch quoting.** On the Bash branch (`ACQ_IMPL` unset or `bash`),
+  `acq.ps1` still calls `bash.exe` through the call operator, so under Windows
+  PowerShell 5.1 empty arguments and embedded quotes are not preserved. MSYS
+  globs unquoted arguments, so switching this branch to an exact command line
+  needs its own analysis. **Unblock trigger:** decide whether the Bash branch
+  stays supported on Windows once ADR-0048m's default flips.
+
+---
+
 ## Deferred: Python session parity gaps (attach, shell, exec)
 
 **Status:** deferred (tracked per AGENTS.md "Track Deferred Work").
