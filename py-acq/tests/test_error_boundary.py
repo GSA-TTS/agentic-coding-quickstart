@@ -185,6 +185,72 @@ def test_ls_with_missing_cli_human_output(monkeypatch, tmp_path, capsys):
     assert "could not be run" in captured.err
 
 
+def _sbx_env(monkeypatch, tmp_path, *, catalog):
+    monkeypatch.setenv("ACQ_SBX_BIN", "__stub__")
+    monkeypatch.setenv("ACQ_SBX_VERSION", "0.39.0")
+    monkeypatch.setenv("ACQ_SBX_INSTALLED", "1")
+    monkeypatch.setenv("ACQ_MSB_INSTALLED", "0")
+    monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("SBX_HOME", str(tmp_path / "sbx-home"))
+    monkeypatch.setenv("ACQ_SBX_STUB_CATALOG", json.dumps(catalog))
+
+
+@pytest.mark.parametrize("backend,knob,listing", [("msb", "list", "msb list"), ("sbx", "ls", "sbx ls")])
+def test_ls_failed_listing_is_a_failure_not_empty(monkeypatch, tmp_path, capsys, backend, knob, listing):
+    # A listing that exits non-zero proves nothing about the sandboxes, so ls
+    # must fail rather than report "no sandboxes" (ADR-0038m).
+    if backend == "msb":
+        _env(monkeypatch, tmp_path, catalog={"alpha": "running"})
+    else:
+        _sbx_env(monkeypatch, tmp_path, catalog={"alpha": "running"})
+    monkeypatch.setenv(f"ACQ_{backend.upper()}_STUB_FAIL", knob)
+    rc, doc, err = _invoke(capsys, "--backend", backend, "--json", "ls")
+    assert rc == errors.EXIT_FAILURE
+    assert doc["command"] == "ls"
+    assert doc["error"] == {
+        "code": errors.FAILURE,
+        "message": "could not list sandboxes",
+        "remediation": f"check that {backend} works ('{listing}'), then retry",
+    }
+    assert "raw backend failure" not in err
+
+    rc = cli.main(["--backend", backend, "ls"])
+    captured = capsys.readouterr()
+    assert rc == errors.EXIT_FAILURE
+    assert captured.out == ""
+    assert "no sandboxes" not in captured.err
+    assert "could not list sandboxes" in captured.err
+
+
+@pytest.mark.parametrize("backend", ["msb", "sbx"])
+def test_ls_failed_running_query_is_a_failure(monkeypatch, tmp_path, capsys, backend):
+    # Names listed but running state unknown: reporting every sandbox as
+    # stopped would be as false as reporting none, so ls fails.
+    if backend == "msb":
+        _env(monkeypatch, tmp_path, catalog={"alpha": "running"})
+    else:
+        _sbx_env(monkeypatch, tmp_path, catalog={"alpha": "running"})
+    adapter = msb if backend == "msb" else sbx
+    monkeypatch.setattr(adapter, "running_names", lambda **_kw: None)
+    rc, doc, _err = _invoke(capsys, "--backend", backend, "--json", "ls")
+    assert rc == errors.EXIT_FAILURE
+    assert doc["error"]["code"] == errors.FAILURE
+
+
+@pytest.mark.parametrize("backend", ["msb", "sbx"])
+def test_ls_successful_empty_listing_is_still_no_sandboxes(monkeypatch, tmp_path, capsys, backend):
+    if backend == "msb":
+        _env(monkeypatch, tmp_path, catalog={})
+    else:
+        _sbx_env(monkeypatch, tmp_path, catalog={})
+    rc, doc, _err = _invoke(capsys, "--backend", backend, "--json", "ls")
+    assert rc == errors.EXIT_SUCCESS
+    assert doc["data"] == {"sandboxes": []}
+    rc = cli.main(["--backend", backend, "ls"])
+    assert rc == errors.EXIT_SUCCESS
+    assert capsys.readouterr().out.strip() == "no sandboxes"
+
+
 def test_passthrough_sbx_honours_bin_seam(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("ACQ_SBX_BIN", "__stub__")
     monkeypatch.setenv("ACQ_SBX_VERSION", "0.51.0")

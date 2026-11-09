@@ -2,7 +2,8 @@
 
 ``version`` reports: ``impl`` (the implementation marker, always "python" here),
 ``acq_version`` (SemVer), ``source_revision`` (the baked release commit SHA),
-nullable ``backend``/``backend_version``, and ``kit_control_plane_ref``.
+the active ``backend`` and its detected ``backend_version`` (both nullable), and
+``kit_control_plane_ref`` (the pinned control-plane commit).
 
 The two baked values may be overridden via the ``ACQ_VERSION`` and
 ``ACQ_SOURCE_REVISION`` environment variables for reproducible builds/tests.
@@ -17,9 +18,11 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
-from . import __version__, envelope, errors, hostexec
+from . import __version__, backends, envelope, errors, hostexec, kits
+from .commands import common
 
 # The checkout acq runs from: src/acq_py -> src -> py-acq -> repository root.
 _CHECKOUT_ROOT = Path(__file__).resolve().parents[3]
@@ -56,25 +59,41 @@ def source_revision() -> str | None:
     return _git_revision()
 
 
-def version_data() -> dict:
+def _backend_identity(backend_override: str | None) -> tuple[str | None, str | None]:
+    """The active backend and its detected version, resolved best effort.
+
+    Uses the same precedence as every other verb (``--backend``, ``ACQ_BACKEND``,
+    the persisted ``backend:``, then auto-detect), like the Bash acq's
+    ``print_version``. The version is the backend's parsed version, ``"unknown"``
+    when it is installed but its version cannot be parsed, and ``None`` when no
+    backend resolves or the resolved one is not installed. Reporting never
+    applies the version floor: ``version`` describes the host, it does not gate.
+    """
+    name = common._resolve_active_backend(backend_override)
+    if name is None:
+        return None, None
+    return name, backends.detect(backends.BACKENDS[name]).version
+
+
+def version_data(backend_override: str | None = None) -> dict:
     """Assemble the ``version`` command's required result data (ADR-0038m).
 
     ``impl`` is the implementation marker ("python") so a bug report is
     unambiguous about which implementation produced the output (ADR-0047m).
-    ``backend``, ``backend_version``, and ``kit_control_plane_ref`` are nullable
-    until the backend adapters and kit control plane land.
+    ``kit_control_plane_ref`` is the control-plane commit this build pins.
     """
+    backend, backend_version = _backend_identity(backend_override)
     return {
         "impl": "python",
         "acq_version": acq_version(),
         "source_revision": source_revision(),
-        "backend": None,
-        "backend_version": None,
-        "kit_control_plane_ref": None,
+        "backend": backend,
+        "backend_version": backend_version,
+        "kit_control_plane_ref": kits.CONTROL_PLANE_REF,
     }
 
 
-def run_version(emit_json: bool) -> int:
+def run_version(emit_json: bool, backend_override: str | None = None) -> int:
     """The ``version`` command handler (human/JSON rendering over :func:`version_data`).
 
     Lives here, beside :func:`version_data`, so a change to the ``version`` output
@@ -82,8 +101,23 @@ def run_version(emit_json: bool) -> int:
     ``version`` command off the Tier-3 surface (ADR-0044m): no live oracle asserts
     its exact output, so a version-output-only change must not expire a recorded
     transcript. ``cli.py`` delegates to this handler for ``version``/``--version``.
+
+    An unknown ``--backend`` value is a usage error, as for every other verb. An
+    unknown backend persisted in config.yaml is a warning (stderr, and
+    ``data.warnings`` under ``--json``) and reports no backend: like ``backend
+    list``, ``version`` is a read-only report and never auto-detects past a
+    broken pin.
     """
-    data = version_data()
+    if backend_override is not None and backend_override not in backends.BACKENDS:
+        return common._usage_failure(
+            "version", f"unknown backend: {backend_override!r} (expected sbx or msb)", emit_json
+        )
+    data = version_data(backend_override)
+    invalid = common._invalid_persisted_backend(backend_override)
+    if invalid is not None:
+        warning = common._invalid_persisted_backend_message(invalid)
+        data["warnings"] = [warning]
+        print(f"acq: warning: {warning}", file=sys.stderr)
     if emit_json:
         print(json.dumps(envelope.success("version", data)))
         return errors.EXIT_SUCCESS

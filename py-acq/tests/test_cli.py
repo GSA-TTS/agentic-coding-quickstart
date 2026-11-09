@@ -88,6 +88,99 @@ def test_version_flag_alias():
     assert "acq version" in proc.stdout
 
 
+# ---- version reports the real backend identity --------------------------------
+
+
+def _stub_backends(monkeypatch, *, msb=None, sbx=None):
+    """Install the offline stub for each backend given a version string; the
+    others read as not installed."""
+    for name, version in (("MSB", msb), ("SBX", sbx)):
+        if version is None:
+            monkeypatch.setenv(f"ACQ_{name}_INSTALLED", "0")
+            continue
+        monkeypatch.setenv(f"ACQ_{name}_BIN", "__stub__")
+        monkeypatch.setenv(f"ACQ_{name}_VERSION", version)
+        monkeypatch.setenv(f"ACQ_{name}_INSTALLED", "1")
+
+
+def _version_json(capsys, *argv):
+    from acq_py import cli
+
+    rc = cli.main([*argv, "version", "--json"])
+    captured = capsys.readouterr()
+    return rc, json.loads(captured.out), captured.err
+
+
+def test_version_reports_auto_detected_backend_and_control_plane_ref(monkeypatch, capsys):
+    from acq_py import kits
+
+    _stub_backends(monkeypatch, msb="msb 0.7.11")
+    rc, doc, err = _version_json(capsys)
+    assert rc == 0 and err == ""
+    data = doc["data"]
+    assert data["backend"] == "msb"
+    assert data["backend_version"] == "0.7.11"
+    assert data["kit_control_plane_ref"] == kits.CONTROL_PLANE_REF
+    assert "warnings" not in data
+
+
+def test_version_honours_the_backend_flag_and_env(monkeypatch, capsys):
+    _stub_backends(monkeypatch, msb="msb 0.7.11", sbx="v0.51.0")
+    rc, doc, _err = _version_json(capsys, "--backend", "sbx")
+    assert rc == 0
+    assert (doc["data"]["backend"], doc["data"]["backend_version"]) == ("sbx", "0.51.0")
+    monkeypatch.setenv("ACQ_BACKEND", "sbx")
+    rc, doc, _err = _version_json(capsys)
+    assert (doc["data"]["backend"], doc["data"]["backend_version"]) == ("sbx", "0.51.0")
+
+
+def test_version_reports_unknown_for_an_unparseable_backend_version(monkeypatch, capsys):
+    # Reporting never applies the version floor: an installed backend whose
+    # version cannot be parsed is reported, not refused.
+    _stub_backends(monkeypatch, msb="not a version")
+    rc, doc, _err = _version_json(capsys)
+    assert rc == 0
+    assert (doc["data"]["backend"], doc["data"]["backend_version"]) == ("msb", "unknown")
+
+
+def test_version_with_no_backend_reports_nulls_but_the_control_plane_ref(monkeypatch, capsys):
+    from acq_py import cli, kits
+
+    _stub_backends(monkeypatch)
+    rc, doc, _err = _version_json(capsys)
+    assert rc == 0
+    assert doc["data"]["backend"] is None and doc["data"]["backend_version"] is None
+    assert doc["data"]["kit_control_plane_ref"] == kits.CONTROL_PLANE_REF
+
+    assert cli.main(["version"]) == 0
+    out = capsys.readouterr().out
+    assert re.search(r"^  backend:\s+none$", out, re.MULTILINE)
+    assert f"kit control plane: {kits.CONTROL_PLANE_REF}" in out
+
+
+def test_version_rejects_an_unknown_backend_flag(monkeypatch, capsys):
+    _stub_backends(monkeypatch, msb="msb 0.7.11")
+    rc, doc, _err = _version_json(capsys, "--backend", "bogus")
+    assert rc == errors.EXIT_USAGE
+    assert doc["error"]["code"] == errors.USAGE
+
+
+def test_version_warns_on_an_unknown_persisted_backend(monkeypatch, capsys):
+    # Like `backend list`, version is a read-only report: a broken pin is a
+    # warning and resolves to no backend rather than auto-detecting past it.
+    from acq_py import config
+
+    _stub_backends(monkeypatch, msb="msb 0.7.11")
+    path = config.config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("backend: bogus\n", encoding="utf-8")
+    rc, doc, err = _version_json(capsys)
+    assert rc == 0
+    assert doc["data"]["backend"] is None and doc["data"]["backend_version"] is None
+    assert len(doc["data"]["warnings"]) == 1 and "bogus" in doc["data"]["warnings"][0]
+    assert "acq: warning:" in err and "bogus" in err
+
+
 @pytest.mark.parametrize("cmd", [["version"], ["help"], ["--help"]])
 def test_success_paths_exit_zero(cmd):
     assert run_cli(*cmd).returncode == 0
