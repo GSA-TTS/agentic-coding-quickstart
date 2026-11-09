@@ -668,26 +668,18 @@ def provider_credential_set(provider: str, key_env: str, hosts: list[str], value
 
 
 def github_scope(sandbox: str, value: str) -> None:
-    """Store a sandbox-scoped GitHub token (ADR-0013); value travels on stdin only.
+    """Store a GitHub token for ``sandbox`` only (ADR-0013); stdin only, never argv.
 
-    Reconciles with the real sbx ``secret set github --sandbox NAME`` (github is a
-    built-in sbx service); the token is bound to ``sandbox`` (never global). The
-    same "Overwrite?" pre-check as :func:`secret_set` applies (the value must never
-    be consumed by the prompt).
+    The same path as ``acq secret set SANDBOX github``: :func:`secret_preflight`
+    (an existing entry is refused before anything is stored), then the acq
+    secret store (the source of truth), then :func:`secret_feed` to sbx's proxy
+    for that sandbox (never global). Raises :class:`SbxError` or
+    :class:`secretstore.SecretStoreError`.
     """
-    if key_present(secretstore.sandbox_scope(sandbox), "github"):
-        raise SbxError(
-            errors.FAILURE,
-            f"GitHub token already exists for sandbox '{sandbox}'",
-            f"remove it first (acq secret rm {sandbox} github), then re-scope",
-        )
-    proc = _run(["secret", "set", "--sandbox", sandbox, "github"], input_text=value)
-    if proc.returncode != 0:
-        raise SbxError(
-            errors.FAILURE,
-            f"could not store the scoped GitHub token for sandbox '{sandbox}'",
-            "check backend logs and retry",
-        )
+    scope = secretstore.sandbox_scope(sandbox)
+    secret_preflight(scope, "github")
+    secretstore.set_secret("github", sandbox, value)
+    secret_feed(scope, "github", value)
 
 
 def rotate_key(value: str) -> None:

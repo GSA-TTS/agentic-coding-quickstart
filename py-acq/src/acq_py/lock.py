@@ -209,6 +209,38 @@ def sandbox_lock(backend: str, name: str) -> Iterator[None]:
         raise SandboxLockTimeout(str(exc), bash.remediation(name)) from None
 
 
+class ProviderCredentialLockTimeout(LockTimeout):
+    """Another acq command is changing the same provider-credential binding."""
+
+
+def provider_credential_lock_path(provider: str) -> Path:
+    """The lock file for one provider's credential binding, keyed like its record."""
+    return state.state_dir() / "locks" / "provider-credentials" / f"{state.record_key(provider)}.lock"
+
+
+@contextmanager
+def provider_credential_lock(provider: str) -> Iterator[None]:
+    """Serialize ``provider-credential set``/``rm`` for one provider.
+
+    ``set`` snapshots the binding record, writes it, stores the value and may
+    put the snapshot back; ``rm`` removes the credential and then the record. A
+    second command for the same provider waiting here can therefore never see,
+    or roll back to, a half-finished change. Storing and re-feeding a value can
+    take as long as a sandbox lifecycle step, so the wait is the lifecycle
+    lock's (``$ACQ_SANDBOX_LOCK_TIMEOUT``). Raises
+    :class:`ProviderCredentialLockTimeout`.
+    """
+    timeout_s = timeouts.env_seconds(SANDBOX_TIMEOUT_ENV, DEFAULT_SANDBOX_TIMEOUT_S)
+    with exclusive_lock(
+        provider_credential_lock_path(provider),
+        timeout_s,
+        what=f"the provider-credential lock for '{provider}' (another acq command is changing it)",
+        timeout_cls=ProviderCredentialLockTimeout,
+        retry_s=_SANDBOX_RETRY_S,
+    ):
+        yield
+
+
 def _posix_cksum(data: bytes) -> int:
     """POSIX ``cksum`` CRC of ``data``; Bash keys its per-sandbox paths with it."""
     crc = 0
