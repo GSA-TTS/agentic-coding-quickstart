@@ -396,3 +396,19 @@ STUB
 
 # CI relevance coverage of these scripts is enforced (fail, never skip) by
 # 158-bash32-relevance-paths.bats; the OCI launcher and scanner tests live in 159.
+
+@test "bash32: a relative XDG_CACHE_HOME or HOME never roots the default prefix" {
+  local work="$STUBDIR/work" fake
+  fake="$(make_fake_bash 3.2.57)"
+  mkdir -p "$work/rel-cache/acq/bash-3.2.57/bin" "$work/relhome/.cache/acq/bash-3.2.57/bin" \
+    "$HOME/.cache/acq/bash-3.2.57/bin"
+  cp "$fake" "$work/rel-cache/acq/bash-3.2.57/bin/bash"
+  cp "$fake" "$work/relhome/.cache/acq/bash-3.2.57/bin/bash"
+  cp "$fake" "$HOME/.cache/acq/bash-3.2.57/bin/bash"
+  cd "$work" || return 1
+  run env -u ACQ_BASH32_PREFIX XDG_CACHE_HOME=rel-cache "$RUNNER" --which
+  assert_success
+  assert_output "$HOME/.cache/acq/bash-3.2.57/bin/bash (3.2.57)"
+  run env -u ACQ_BASH32_PREFIX -u XDG_CACHE_HOME HOME=relhome "$RUNNER" --which
+  refute_output --partial 'relhome'
+}

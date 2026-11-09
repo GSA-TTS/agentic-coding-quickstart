@@ -108,3 +108,24 @@ teardown() {
   '
   assert_success
 }
+
+@test "windows installers: LOCALAPPDATA is used only when fully qualified" {
+  installer=$(cat "$REPO_ROOT/install.ps1")
+  launcher=$(cat "$REPO_ROOT/acq.ps1")
+
+  assert_regex "$installer" 'function Test-AbsolutePath'
+  assert_regex "$installer" 'if \(-not \(Test-AbsolutePath \$base\)\)'
+  refute_regex "$installer" 'Join-Path \$env:LOCALAPPDATA'
+  assert_regex "$launcher" 'if \(\$env:LOCALAPPDATA -match '
+}
+
+@test "windows PowerShell: a relative LOCALAPPDATA never names the install dir" {
+  command -v pwsh >/dev/null 2>&1 || skip "pwsh not available"
+  mkdir -p "$STUBDIR/work"
+  cd "$STUBDIR/work" || return 1
+
+  run env LOCALAPPDATA=rel-local pwsh -NoLogo -NoProfile -File "$REPO_ROOT/install.ps1" -DryRun
+  assert_success
+  assert_output --partial '[dry-run]'
+  refute_output --partial 'rel-local'
+}

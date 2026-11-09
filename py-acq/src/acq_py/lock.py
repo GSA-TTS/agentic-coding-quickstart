@@ -270,14 +270,10 @@ def _bash_safe(token: str) -> str:
 def bash_provenance_dir() -> Path:
     """Bash's provenance root (``_acq_provenance_dir`` in ``acq.backends/common.sh``).
 
-    ``ACQ_PROVENANCE_DIR``, else ``${XDG_STATE_HOME:-$HOME/.local/state}/acq/provenance``.
+    Delegates to :func:`state.provenance_dir`, which refuses a relative
+    ``ACQ_PROVENANCE_DIR`` and ignores relative user directories.
     """
-    root = os.environ.get("ACQ_PROVENANCE_DIR") or ""
-    if root:
-        return Path(root)
-    xdg = os.environ.get("XDG_STATE_HOME") or ""
-    home = os.environ.get("HOME") or str(Path.home())
-    return (Path(xdg) if xdg else Path(home) / ".local" / "state") / "acq" / "provenance"
+    return state.provenance_dir()
 
 
 def bash_sandbox_key(name: str) -> str:

@@ -42,6 +42,31 @@ load 'helper'
   assert_output "opencode-${cwd_base}"
 }
 
+# The workspace basename is taken from the path made absolute and lexically
+# normalised, as the Python implementation does, so both derive the same name.
+@test "derive_name: the root derives agent-workspace, as the Python acq does" {
+  run derive_name opencode /
+  assert_output 'opencode-workspace'
+  run derive_name opencode //
+  assert_output 'opencode-workspace'
+  run bash -c 'cd / && . "$1" >/dev/null 2>&1 && derive_name opencode' _ "${REPO_ROOT}/acq.backends/common.sh"
+  assert_output 'opencode-workspace'
+}
+
+@test "derive_name: trailing '.' and '..' steps fold to the directory they name" {
+  run derive_name opencode /srv/My-App/.
+  assert_output 'opencode-my-app'
+  run derive_name opencode /srv/My-App/sub/..
+  assert_output 'opencode-my-app'
+  run derive_name opencode /srv/..
+  assert_output 'opencode-workspace'
+  mkdir -p "$BATS_TEST_TMPDIR/Parent Dir/child"
+  run bash -c 'cd "$2" && . "$1" >/dev/null 2>&1 && derive_name opencode .. && derive_name opencode x/../..' \
+    _ "${REPO_ROOT}/acq.backends/common.sh" "$BATS_TEST_TMPDIR/Parent Dir/child"
+  assert_line --index 0 'opencode-parent-dir'
+  assert_line --index 1 'opencode-parent-dir'
+}
+
 # Names flow into backend argv, `msb list -q` line lookups, state-file keys and
 # terminal output. A derived name must be a single-line slug whatever the
 # directory is called, and an explicit --name that cannot be used safely is

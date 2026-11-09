@@ -911,14 +911,13 @@ acq_validate_agent_builtin_kit_dir() {
 acq_validate_agent_builtin_kit_ref() {
   local agent="$1" kitref="$2" base_dir="${3:-}" kitdir
   if [ -z "$base_dir" ]; then
-    # A relative ACQ_STATE_DIR is never honored (see userdirs.sh); the entry
-    # point refuses it up front, and this fails closed if reached anyway.
-    if [ -n "${ACQ_STATE_DIR:-}" ]; then
-      acq_path_is_absolute "$ACQ_STATE_DIR" || return 1
-      base_dir="$ACQ_STATE_DIR/agent-kit-validation/$agent"
-    else
-      base_dir="${TMPDIR:-/tmp}/acq/agent-kit-validation/$agent"
-    fi
+    # Scratch under the per-user state root, never TMPDIR: a shared /tmp/acq is
+    # a fixed name another local user could create first and fill, and a
+    # relative TMPDIR would resolve against the current directory. acq_state_dir
+    # refuses a relative ACQ_STATE_DIR and ignores relative XDG values (see
+    # userdirs.sh), so this fails closed when no absolute root exists.
+    base_dir=$(acq_state_dir) || return 1
+    base_dir="$base_dir/agent-kit-validation/$agent"
   fi
   kitdir=$(kit_translate_fetch "$kitref" "$base_dir") || return 1
   acq_validate_agent_builtin_kit_dir "$agent" "$kitdir"
@@ -1216,10 +1215,39 @@ derive_name() {
     return 1
   fi
 
-  local base="."
-  [ -n "$first_path" ] && base=$(basename "$first_path")
-  [ "$base" = "." ] && base=$(basename "$PWD")
-  printf '%s\n' "$(slugify "$agent")-$(slugify "$base")"
+  _acq_path_basename "${first_path:-.}"
+  [ -n "$_ACQ_BASENAME" ] || _ACQ_BASENAME=workspace
+  printf '%s\n' "$(slugify "$agent")-$(slugify "$_ACQ_BASENAME")"
+}
+
+# _acq_path_basename PATH — set _ACQ_BASENAME to the last component of PATH
+# made absolute and lexically normalised, as the Python implementation's
+# os.path.abspath does: trailing '/', '.' and '..' steps are folded, a relative
+# path that folds to '.' names the logical $PWD, any other relative path is
+# joined onto the physical working directory, and the root yields "" (which
+# derive_name turns into "workspace"). It sets a variable rather than printing,
+# so a component ending in a newline is kept intact.
+_acq_path_basename() {
+  local p="$1" c up=0 abs=0
+  _ACQ_BASENAME=""
+  case "$p" in /*) abs=1 ;; esac
+  while :; do
+    while [ -n "$p" ]; do
+      c="${p##*/}"
+      case "$p" in */*) p="${p%/*}" ;; *) p="" ;; esac
+      case "$c" in
+        ''|.) ;;
+        ..) up=$((up + 1)) ;;
+        *)
+          if [ "$up" -eq 0 ]; then _ACQ_BASENAME="$c"; return 0; fi
+          up=$((up - 1))
+          ;;
+      esac
+    done
+    [ "$abs" -eq 0 ] || return 0
+    abs=1
+    if [ "$up" -eq 0 ]; then p="$PWD"; else p=$(pwd -P); fi
+  done
 }
 
 # Find the workspace path in an AGENT-form create/run arg list: the SECOND
@@ -1274,9 +1302,11 @@ workspace_paths() {
 # the line-oriented workspace list the adapters read and reaches the terminal
 # when the path is echoed. The symlink-resolved path is checked too, because it
 # is what msb mounts. With no path argument the current directory is the
-# workspace, so it is checked instead. Silent and 0 when every path is usable.
+# workspace, so it is checked instead, and so is a path that folds to '.' (the
+# logical $PWD, which a symlink named with ':' can carry even when the resolved
+# path has none). Silent and 0 when every path is usable.
 acq_workspace_specs_safe() {
-  local agent="" prev="" arg seen=0
+  local agent="" prev="" arg ws seen=0
   for arg in "$@"; do
     if _takes_value "$prev"; then prev="$arg"; continue; fi
     prev="$arg"
@@ -1288,10 +1318,30 @@ acq_workspace_specs_safe() {
       continue
     fi
     seen=1
-    _acq_workspace_safe "${arg%:ro}" || return 1
+    ws="${arg%:ro}"
+    _acq_path_folds_to_dot "$ws" && ws="$PWD"
+    _acq_workspace_safe "$ws" || return 1
   done
   [ "$seen" -eq 1 ] || _acq_workspace_safe "$PWD" || return 1
   return 0
+}
+
+# _acq_path_folds_to_dot PATH — 0 when PATH is relative and its '.' and '..'
+# steps fold it to '.' ('.', './', 'src/..'), the paths the Python
+# implementation resolves against the logical $PWD.
+_acq_path_folds_to_dot() {
+  local p="$1" c up=0
+  case "$p" in ''|/*) return 1 ;; esac
+  while [ -n "$p" ]; do
+    c="${p##*/}"
+    case "$p" in */*) p="${p%/*}" ;; *) p="" ;; esac
+    case "$c" in
+      ''|.) ;;
+      ..) up=$((up + 1)) ;;
+      *) [ "$up" -gt 0 ] || return 1; up=$((up - 1)) ;;
+    esac
+  done
+  [ "$up" -eq 0 ]
 }
 
 # _acq_workspace_safe PATH — check PATH as given and, when it is a directory, its
@@ -1578,6 +1628,13 @@ acq_host_socket_forwards() {
     local _port="${_spec##*:}" _path="${_spec%:*}"
     if [ "$_path" = "$_spec" ]; then
       printf 'acq: malformed host-socket forward %s (expected PATH:PORT); skipping\n' "$_entry" >&2
+      continue
+    fi
+    # Absoluteness is checked on the path as given, before canonicalizing: a
+    # relative path (or a relative symlink) would resolve against the current
+    # directory, normally the agent-writable workspace (see userdirs.sh).
+    if ! acq_path_is_absolute "$_path"; then
+      printf 'acq: host-socket path %s is not absolute; skipping\n' "$_path" >&2
       continue
     fi
     if command -v canonicalize_path >/dev/null 2>&1; then
@@ -2218,6 +2275,15 @@ _load_backend_adapter() {
   ACQ_RESOLVED_BACKEND="$name"
 }
 
+# acq_resolve_backend_best_effort [EXPLICIT] — resolve the backend for a verb that
+# works without one (version, doctor, configure, help). Its diagnostics are
+# silenced, so "nothing installed" lets the verb report "unknown", but the
+# unknown-backend refusal still reaches stderr through fd 3 before it exits:
+# a broken pin must not end the verb with a bare exit 1.
+acq_resolve_backend_best_effort() {
+  _ACQ_RESOLVE_ERR_FD=3 acq_resolve_backend "${1:-}" 3>&2 2>/dev/null || true
+}
+
 # Resolve and load the backend. $1 (optional) = explicit --backend value.
 acq_resolve_backend() {
   local explicit="${1:-}"
@@ -2233,7 +2299,7 @@ acq_resolve_backend() {
     cfg_name=$(_read_config_backend)
     if [ -n "$cfg_name" ]; then
       name="$cfg_name"
-      origin="${XDG_CONFIG_HOME:-$HOME/.config}/acq/config.yaml"
+      origin=$(_acq_config_file) || origin="config.yaml"
     else
       _auto_detect_backend || {
         echo "acq: error: no backend detected (looked on PATH and in ~/.local/bin)." >&2
@@ -2263,8 +2329,10 @@ acq_resolve_backend() {
   # user named explicitly but acq cannot load is an error even for the
   # best-effort callers, unlike "nothing installed" above.
   if ! acq_backend_name_known "$name"; then
-    echo "acq: error: unknown backend '$(acq_printable "$name")' from ${origin:-auto-detect} (expected sbx or msb)." >&2
-    echo "     Fix or unset it, or pin a valid one with 'acq backend set msb'." >&2
+    {
+      echo "acq: error: unknown backend '$(acq_printable "$name")' from ${origin:-auto-detect} (expected sbx or msb)."
+      echo "     Fix or unset it, or pin a valid one with 'acq backend set msb'."
+    } >&"${_ACQ_RESOLVE_ERR_FD:-2}"
     exit 1
   fi
   _load_backend_adapter "$name"
@@ -2303,8 +2371,11 @@ acq_resolve_backend() {
 
 # Provenance state directory (host-side). Overridable via ACQ_PROVENANCE_DIR for
 # tests and for users who relocate XDG state. Mirrors _acq_config_file's style.
+# A relative override is never honoured (see userdirs.sh): the entry point
+# refuses it up front, and this fails closed if reached anyway.
 _acq_provenance_dir() {
   if [ -n "${ACQ_PROVENANCE_DIR:-}" ]; then
+    acq_path_is_absolute "$ACQ_PROVENANCE_DIR" || return 1
     printf '%s\n' "$ACQ_PROVENANCE_DIR"
     return 0
   fi
@@ -3841,11 +3912,14 @@ acq_provider_recorded_facts() {
 # Windows (`Scripts/python.exe`) and custom interpreters work; only then PATH.
 _acq_provider_facts_python() {
   local python="${ACQ_PROVIDER_INPUT_PYTHON:-}" runtime data_home
-  if [ -n "$python" ] && [ -x "$python" ]; then
+  # Only an absolute interpreter path: a relative one would run a program from
+  # the current directory (see userdirs.sh).
+  if acq_path_is_absolute "$python" && [ -x "$python" ]; then
     printf '%s\n' "$python"
     return 0
   fi
-  if [ -n "${LOCALAPPDATA:-}" ] && [ "$(uname -s 2>/dev/null)" != "Linux" ]; then
+  # LOCALAPPDATA, like the XDG variables, counts only when absolute.
+  if acq_path_is_absolute "${LOCALAPPDATA:-}" && [ "$(uname -s 2>/dev/null)" != "Linux" ]; then
     data_home="$LOCALAPPDATA/acq"
   else
     data_home=$(acq_xdg_dir XDG_DATA_HOME .local/share)/acq || data_home=""
@@ -4436,12 +4510,16 @@ ACQ_PROVIDER_INPUT_GUEST_DIR="${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provi
 _acq_provider_input_python() {
   local python="${ACQ_PROVIDER_INPUT_PYTHON:-}" version_check runtime data_home tools_dir setup
   if [ -n "$python" ]; then
+    acq_path_is_absolute "$python" || {
+      echo "acq: ACQ_PROVIDER_INPUT_PYTHON must be an absolute path, got $(acq_quote_value "$python")" >&2
+      return 2
+    }
     [ -x "$python" ] || {
       echo "acq: configured provider-input Python is not executable: $python" >&2
       return 2
     }
   else
-    if [ -n "${LOCALAPPDATA:-}" ] && [[ "$(uname -s 2>/dev/null)" = MINGW* || "$(uname -s 2>/dev/null)" = MSYS* || "$(uname -s 2>/dev/null)" = CYGWIN* ]]; then
+    if acq_path_is_absolute "${LOCALAPPDATA:-}" && [[ "$(uname -s 2>/dev/null)" = MINGW* || "$(uname -s 2>/dev/null)" = MSYS* || "$(uname -s 2>/dev/null)" = CYGWIN* ]]; then
       data_home="$LOCALAPPDATA/acq"
     else
       data_home=$(acq_xdg_dir XDG_DATA_HOME .local/share)/acq || data_home=""

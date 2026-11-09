@@ -3174,6 +3174,13 @@ _acq_msb_upstream_ca_flags_into() {
     IFS="$_oldifs"
     for _p in "$@"; do
       [ -n "$_p" ] || continue
+      # A relative entry (including the "C" of a split C:/x.pem) would name a
+      # file under the current directory, normally the agent-writable
+      # workspace, so it is never trusted (see userdirs.sh).
+      if ! acq_path_is_absolute "$_p"; then
+        echo "acq(msb): warning: ACQ_MSB_UPSTREAM_CA_CERT path is not absolute, skipping: ${_p}" >&2
+        continue
+      fi
       if [ -r "$_p" ] && [ -s "$_p" ]; then
         # --tls-upstream-ca-cert names a HOST PEM native msb reads: host form.
         local _phost="$_p"

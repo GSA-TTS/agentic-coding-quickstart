@@ -550,6 +550,39 @@ def run_doctor(emit_json: bool, name: str | None) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Sandbox-name pre-step (parity with Bash acq_sandbox_name_check and
+# acq_name_form_check).
+# ---------------------------------------------------------------------------
+
+# Verbs whose positional ``name`` names an existing sandbox.
+_NAME_FORM_VERBS = ("stop", "rm", "exec", "attach", "shell", "ports")
+_NAME_FORM_KIT_VERBS = ("apply", "check", "update")
+
+
+def _sandbox_name_pre_step(parsed, emit_json: bool) -> int | None:
+    """Refuse an unusable sandbox name before any backend or state access.
+
+    An explicit ``--name`` for a new sandbox (``create``, and ``run`` in its
+    AGENT form, where Bash's ``derive_name`` reads it) must match the new-name
+    charset. A name given to a verb that acts on an existing sandbox only has to
+    be path-safe. Returns the emitted exit code, else ``None`` (proceed).
+    """
+    cmd = parsed.command
+    if cmd in ("create", "run") and parsed.name is not None:
+        if cmd == "create" or parsed.target in KNOWN_AGENTS:
+            refused = common._new_sandbox_name_failure(cmd, parsed.name, emit_json)
+            if refused is not None:
+                return refused
+    if cmd == "create" and parsed.recreate is not None:
+        return common._name_form_failure(cmd, parsed.recreate, emit_json)
+    if cmd in _NAME_FORM_VERBS:
+        return common._name_form_failure(cmd, parsed.name, emit_json)
+    if cmd == "kit" and parsed.kit_command in _NAME_FORM_KIT_VERBS:
+        return common._name_form_failure(_command_label(parsed), parsed.name, emit_json)
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Synchronized forward-migration pre-step (ADR-0041m).
 # ---------------------------------------------------------------------------
 
@@ -597,7 +630,8 @@ def _command_label(parsed) -> str:
 def _user_dirs_pre_step(emit_json: bool, command: str) -> int | None:
     """Refuse up front when the state root or config path cannot be resolved to a
     trustworthy absolute path (a relative ``ACQ_STATE_DIR``, or no absolute home
-    to fall back to); return the emitted exit code, else ``None`` (proceed).
+    to fall back to) or a path override is relative; return the emitted exit
+    code, else ``None`` (proceed).
 
     Checked once here so every state-touching verb fails closed with the same
     actionable message instead of a traceback from deep inside a handler.
@@ -605,6 +639,7 @@ def _user_dirs_pre_step(emit_json: bool, command: str) -> int | None:
     try:
         state.state_dir()
         config.config_path()
+        userdirs.check_path_overrides()
     except userdirs.UserDirError as exc:
         return common._operational_failure(
             command, errors.VALIDATION_FAILED, exc.message, exc.remediation, emit_json
@@ -729,6 +764,9 @@ def _dispatch(parser: _Parser, parsed, emit_json: bool, backend_override: str | 
         dirs_check = _user_dirs_pre_step(emit_json and label != "secret has", label)
         if dirs_check is not None:
             return dirs_check
+        name_check = _sandbox_name_pre_step(parsed, emit_json)
+        if name_check is not None:
+            return name_check
 
     if _is_mutating(parsed):
         pre_step = _migration_pre_step(emit_json, _command_label(parsed))
