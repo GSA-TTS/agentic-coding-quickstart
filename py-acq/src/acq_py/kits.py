@@ -418,15 +418,8 @@ def _read_record(path: Path, *, strict: bool, label: str) -> dict | None:
 
 
 def _atomic_write(path: Path, doc: dict) -> None:
-    """Write a record atomically (temp + fsync + rename), never half-written."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    data = json.dumps(doc, indent=2, sort_keys=False)
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(data + "\n")
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp, path)
+    """Write a record atomically (unique temp + fsync + rename), never half-written."""
+    state.atomic_write_text(path, json.dumps(doc, indent=2, sort_keys=False) + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -777,12 +770,26 @@ def kit_applied_write(backend: str, sandbox: str, kit: str, entrypoint: str) -> 
     return doc
 
 
+def kit_applied_present(backend: str, sandbox: str) -> bool:
+    """True when a host applied-kit record exists for the sandbox, readable or not.
+
+    ``rm`` uses it to decide whether a sandbox the backend no longer knows still
+    has host records to clear. The ``ACQ_KIT_APPLIED_SEED`` seam counts as a
+    record, as it does for :func:`kit_applied_read`.
+    """
+    if os.environ.get(KIT_APPLIED_SEED_ENV) is not None:
+        return kit_applied_read(backend, sandbox) is not None
+    return _kit_applied_path(backend, sandbox).exists()
+
+
 def kit_applied_remove(backend: str, sandbox: str) -> None:
     """Drop a sandbox's applied-kit record (best-effort; absent is a no-op).
 
-    Used when the guest filesystem is destroyed out of band — the security-exception
-    recreation (ADR-0035) — because the host record that said "agent installed" is
-    no longer true, so the next ``kit apply`` re-runs the idempotent install.
+    Used whenever the guest it describes is gone or brand new: ``rm``, a fresh
+    create (a stale record left by an out-of-band removal must not suppress the
+    install), and the security-exception recreation (ADR-0035). In each case the
+    host record that said "agent installed" is no longer true, so the next apply
+    re-runs the idempotent install.
     """
     try:
         _kit_applied_path(backend, sandbox).unlink()

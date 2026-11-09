@@ -59,6 +59,25 @@ def ready_timeout_s() -> float:
     return timeouts.env_seconds(READY_TIMEOUT_ENV, DEFAULT_READY_TIMEOUT_S)
 
 
+# Budget (seconds) for one in-guest kit-install or substrate step. A cold Nix
+# install of an agent can take many minutes, so the default is generous; the
+# point is that a step that hangs (a prompt nobody can answer) ends with a stable
+# ``timeout`` error instead of blocking acq forever.
+DEFAULT_KIT_TIMEOUT_S = 1800.0
+KIT_TIMEOUT_ENV = "ACQ_MSB_KIT_TIMEOUT"
+
+# Non-interactive git guards for in-guest kit and substrate steps, the same
+# values Bash's adapter appends (``_acq_msb_env_tokens_with_guards_into``): git
+# must fail rather than prompt for credentials no one can type (the prompt would
+# be hidden, since the step's output is captured).
+GIT_GUARD_ENV = ("GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=/bin/false", "SSH_ASKPASS=/bin/false")
+
+
+def kit_timeout_s() -> float:
+    """The per-step kit/substrate budget in seconds, read when needed."""
+    return timeouts.env_seconds(KIT_TIMEOUT_ENV, DEFAULT_KIT_TIMEOUT_S)
+
+
 # Module-local seam for the host OS class. ``_guest_path`` reads this instead of
 # ``os.name`` so the Windows-only translation is testable on a POSIX host without
 # mutating the process-wide ``os`` module (``msb.os`` is ``os``).
@@ -196,7 +215,18 @@ def _run(
     timeout: float | None = None,
     input_text: str | None = None,
 ) -> subprocess.CompletedProcess:
+    # Output is captured, so the child must never read the user's terminal: a
+    # command that prompts would hang with the prompt hidden, or swallow typed
+    # input. Without ``input_text`` its stdin is the null device.
     try:
+        if input_text is None:
+            return subprocess.run(
+                [*msb_command(), *argv],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
         return subprocess.run(
             [*msb_command(), *argv],
             input=input_text,
@@ -497,6 +527,30 @@ def exec_ready(name: str) -> bool:
     return proc.returncode == 0
 
 
+def _guest_step(name: str, user: str, step: list[str]) -> bool:
+    """Run one in-guest kit/substrate step non-interactively; True on success.
+
+    Mirrors Bash's kit exec path: stdin is the null device (see :func:`_run`),
+    the git prompt guards are set, and the step is bounded by
+    :func:`kit_timeout_s`. A step that overruns raises :class:`MsbError`
+    (``timeout``).
+    """
+    argv = ["exec", "-u", user]
+    for token in GIT_GUARD_ENV:
+        argv += ["-e", token]
+    argv += [name, "--", *step]
+    budget = kit_timeout_s()
+    try:
+        proc = _run(argv, timeout=budget)
+    except subprocess.TimeoutExpired as exc:
+        raise MsbError(
+            errors.TIMEOUT,
+            f"an in-guest setup step for sandbox '{name}' did not finish within {budget:g}s",
+            f"check network access from the sandbox, or raise {KIT_TIMEOUT_ENV}, then retry",
+        ) from exc
+    return proc.returncode == 0
+
+
 def kit_apply(name: str, kit: str, install_cmd: list[str]) -> None:
     """Apply a kit in-guest (ADR-0040m ``kit-apply``): run the kit's pinned
     install command inside the sandbox as the unprivileged ``agent`` user.
@@ -505,7 +559,9 @@ def kit_apply(name: str, kit: str, install_cmd: list[str]) -> None:
     is data sourced from the pinned control plane and is forwarded verbatim to the
     backend, which runs it in-guest. The argv is the ``nix profile install
     …#<agent>`` install — it carries no credential — so nothing sensitive crosses
-    the boundary. Raises :class:`MsbError` on backend failure.
+    the boundary. The step never reads the user's terminal, runs with the git
+    prompt guards, and is time-bounded (:func:`_guest_step`). Raises
+    :class:`MsbError` on backend failure or timeout.
 
     Idempotency is a host-authoritative concern (the seam short-circuits a re-apply
     of an already-applied kit via :func:`acq_py.kits.kit_applied_read`); the
@@ -514,8 +570,7 @@ def kit_apply(name: str, kit: str, install_cmd: list[str]) -> None:
     """
     # Reconciles with the real msb 0.7.11 CLI: there is NO `kit-apply` subcommand.
     # The pinned install command runs in-guest via `msb exec -u agent NAME -- …`.
-    proc = _run(["exec", "-u", "agent", name, "--", *install_cmd])
-    if proc.returncode != 0:
+    if not _guest_step(name, "agent", install_cmd):
         raise MsbError(
             errors.FAILURE,
             f"could not apply kit '{kit}' to sandbox '{name}'",
@@ -523,20 +578,22 @@ def kit_apply(name: str, kit: str, install_cmd: list[str]) -> None:
         )
 
 
-def provision_substrate(name: str, steps: list[list[str]]) -> None:
+def provision_substrate(name: str, steps: list[tuple[str, list[str]]]) -> None:
     """Provision addressable substrate gaps in-guest (ADR-0030 "bring-your-own
-    image contract"): bootstrap single-user Nix + devenv + direnv and create the
-    agent user before the agent install.
+    image contract"): create the agent user and bootstrap single-user Nix +
+    devenv + direnv before the agent install.
 
-    The steps are data sourced from the pinned control plane (never a secret,
-    never a credential) and run in-guest via the backend seam; acq never executes
-    them on the host. Raises :class:`MsbError` on backend failure.
+    Each step is ``(user, argv)``: the seam decides which guest user runs it
+    (root creates the agent user, as Bash's ``_acq_msb_ensure_agent_user`` does
+    with ``-u 0``; the agent user runs its own single-user installs). The steps
+    are data sourced from the pinned control plane (never a secret, never a
+    credential) and run in-guest via the backend seam; acq never executes them on
+    the host. Raises :class:`MsbError` on backend failure or timeout.
     """
     # Reconciles with the real msb 0.7.11 CLI: there is NO `substrate-provision`
-    # subcommand. Each bootstrap step runs in-guest via `msb exec -u agent NAME -- …`.
-    for step in steps:
-        proc = _run(["exec", "-u", "agent", name, "--", *step])
-        if proc.returncode != 0:
+    # subcommand. Each bootstrap step runs in-guest via `msb exec -u USER NAME -- …`.
+    for user, step in steps:
+        if not _guest_step(name, user, step):
             raise MsbError(
                 errors.FAILURE,
                 f"could not provision the substrate for sandbox '{name}'",

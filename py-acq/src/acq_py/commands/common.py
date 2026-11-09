@@ -231,7 +231,7 @@ def _validate_workspace(command: str, path: str | None, emit_json: bool) -> tupl
             f"usage: acq {command} AGENT PATH",
             emit_json,
         )
-    resolved = os.path.abspath(path)
+    resolved = _logical_abspath(path)
     if not os.path.isdir(resolved):
         return None, _operational_failure(
             command,
@@ -241,6 +241,32 @@ def _validate_workspace(command: str, path: str | None, emit_json: bool) -> tupl
             emit_json,
         )
     return resolved, None
+
+
+def _logical_abspath(path: str) -> str:
+    """Absolute form of a typed workspace path, keeping the shell's logical cwd.
+
+    ``os.path.abspath`` joins onto ``os.getcwd()``, which has symlinks resolved.
+    For ``.`` (the working directory itself) the shell's logical ``$PWD`` is used
+    instead, when it names the same directory, so a symlinked project directory
+    gets the sandbox name Bash's ``derive_name`` gives it (``basename "$PWD"``)
+    and the same name as when its path is typed out. Any other path is made
+    absolute as before: a ``..`` step resolved against the logical path could
+    name a different directory than the one the OS opens.
+    """
+    if os.path.normpath(path) == os.curdir:
+        pwd = os.environ.get("PWD") or ""
+        if pwd and os.path.isabs(pwd):
+            # Check the same normalised value that is returned: a raw ``$PWD``
+            # with ``..`` through a symlink can resolve to the cwd while its
+            # lexical form names a different directory.
+            logical = os.path.normpath(pwd)
+            try:
+                if os.path.samefile(logical, os.curdir):
+                    return logical
+            except OSError:
+                pass
+    return os.path.abspath(path)
 
 
 # Module-local seam for path canonicalization. ``_mount_workspace`` reads this
@@ -355,6 +381,12 @@ def _slugify(token: str) -> str:
 
 
 def _derive_name(agent: str, workspace: str) -> str:
+    """``<agent>-<basename>`` slug for a workspace (mirrors Bash ``derive_name``).
+
+    ``workspace`` is the path as the user typed it, made absolute by
+    :func:`_validate_workspace` (logical for ``.``), never the canonicalized
+    mount path.
+    """
     base = os.path.basename(workspace.rstrip("/\\")) or "workspace"
     return f"{_slugify(agent)}-{_slugify(base)}"
 
