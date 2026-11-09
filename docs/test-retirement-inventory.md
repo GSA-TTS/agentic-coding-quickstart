@@ -126,8 +126,8 @@ numeric-prefix order.
 | File | Tests | Bucket | Disposition |
 |---|---|---|---|
 | `40-secret-set.bats` | 33 | preserve | §secret set/has + §48. Covered by `cli/secret-set-*`, `cli/secret-has-*`, `cli/secret-rm-*`, `cli/secret-sbx-unsupported`. **Mixed → retire:** `mask` (interactive masked input) is rendering, dropped by §50 "exact … prompt layout … not contracts"; **DROP** "scope-less secret set" (§6) is covered by `cli/secret-set-usage`. |
-| `45-secret-store-unit.bats` | 20 | re-express | In-process secret-store unit. `secret rm`/`ls` observables map to `cli/secret-rm-*`/`cli/secret-ls-*`; Windows DPAPI envelope (ADR-0028) is platform-specific → Windows Tier-3 qualification. |
-| `71b-msb-secret-store-backends.bats` | 11 | re-express | keychain-linux/macos/file backends are platform-specific secret storage (ADR-0028). multi-workspace mount + symlink canonicalization are §4 host/guest-path fidelity → **gap**. |
+| `45-secret-store-unit.bats` | 20 | re-express | In-process secret-store unit. `secret rm`/`ls` observables map to `cli/secret-rm-*`/`cli/secret-ls-*`. The store itself (keys, scopes, 0600 file backend, DPAPI envelope and legacy migration through a fake PowerShell and the `dpapi_*` seam) is re-expressed for the Python store in `py-acq/tests/test_secretstore.py`, with a Bash↔Python byte round trip in `py-acq/tests/test_secretstore_bash.py`; real DPAPI remains a Windows Tier-3 qualification item (ADR-0028). |
+| `71b-msb-secret-store-backends.bats` | 11 | re-express | keychain-linux/macos/file backends are platform-specific secret storage (ADR-0028); their logic (index, self-heal from sidecars, `security -i`, legacy file fallback) is re-expressed against fake `secret-tool`/`security` in `py-acq/tests/test_secretstore.py` and round-tripped with Bash in `py-acq/tests/test_secretstore_bash.py`; the real keychains remain host qualification items. multi-workspace mount + symlink canonicalization are §4 host/guest-path fidelity → **gap**. |
 | `125-github-scope.bats` | 14 | preserve | ADR-0013 per-sandbox GitHub scoping. Covered by `cli/github-scope-json`, `cli/github-scope-no-value`, `cli/github-scope-sbx`. |
 | `146-provider-verification.bats` | 28 | preserve | §provider-credential + host-verifier reachability. Covered by `cli/provider-credential-*`. **Mixed → re-express:** reachability/model-identity checks are Tier-2/Tier-3 evidence, not Tier-1 vectors. |
 | `148-provider-credential-bindings.bats` | 56 | preserve | §provider-credential set/ls/rm + facts.json validation (ADR-0040m). Covered by `cli/provider-credential-*`. |
@@ -152,8 +152,8 @@ numeric-prefix order.
 
 | File | Tests | Bucket | Disposition |
 |---|---|---|---|
-| `70-msb-backend.bats` | 20 | preserve | §active_backend + §version floor. Covered by `cli/backend-list-*`, `cli/backend-check-*`. **Mixed → re-express:** `backend set/unset` (persist default) and `prepare`/`doctor --fix` host-readiness have no vector — **gap**. |
-| `71-msb-provision-secrets.bats` | 14 | preserve | §secret binding + provision. Covered by `cli/lifecycle-create`, `cli/secret-ls-*`. |
+| `70-msb-backend.bats` | 20 | preserve | §active_backend + §version floor. Covered by `cli/backend-list-*`, `cli/backend-check-*`. **Mixed → re-express:** `backend set/unset` (persist default) is covered by `cli/backend-set*`, `cli/backend-unset*` and `cli/lifecycle-create-config-sbx`; `prepare`/`doctor --fix` host-readiness has no vector — **gap**. |
+| `71-msb-provision-secrets.bats` | 14 | preserve | §secret binding + provision. Covered by `cli/create-msb-binds-usai`, `cli/secret-set-msb`, `cli/secret-ls-msb`, `cli/secret-rm-msb`, `cli/secret-has-msb-scoped-over-global`, `cli/lifecycle-create`. |
 | `71c-msb-canonical-host-config.bats` | 2 | re-express | §4 host-path canonicalization before mount — host/guest-path fidelity → **gap**. |
 | `72-msb-agent-user.bats` | 37 | preserve | §attach/exec/shell as agent user. Covered by `cli/attach-*`, `cli/exec-*`, `cli/shell-*`. **Mixed → re-express:** TERM forwarding, passwd-shell, workspace `-w` are Tier-2/Tier-3. |
 | `73-msb-kits-startup.bats` | 14 | re-express | msb create-time startup staging (ADR-0017) is backend-internal; observable "startup command runs" is Tier-3. |
@@ -204,7 +204,9 @@ retire-on-touch can proceed block by block:
 
 * **`60-help.bats`** — retire the "bare `secret` appends backend help" block
   (DROP: backend help for bare `secret`, ADR-0038m §6); preserve the help-flag
-  and `secret import`/`secret set-custom` blocks.
+  and `secret import`/`secret set-custom` blocks. `secret import` behavior is
+  covered by `cli/secret-import-*` and by the Bash/Python store parity test in
+  `py-acq/tests/test_secretstore_bash.py`.
 * **`40-secret-set.bats`** — retire the `mask` interactive-mask block (§50
   rendering); the scope-less-`secret set` block is already a DROP covered by
   `cli/secret-set-usage`.
@@ -223,9 +225,9 @@ retire-on-touch can proceed block by block:
 * **`146-provider-verification.bats`** — re-express the reachability /
   model-identity blocks as Tier-2/Tier-3 evidence; preserve the
   provider-credential binding blocks already covered by vectors.
-* **`70-msb-backend.bats`** — re-express `backend set/unset` and `prepare`
-  host-readiness as new vectors (gap); preserve version-floor and auto-detect
-  blocks already covered.
+* **`70-msb-backend.bats`** — `backend set/unset` is re-expressed as vectors;
+  re-express `prepare` host-readiness as a new vector (gap); preserve
+  version-floor and auto-detect blocks already covered.
 * **`65-doctor-image-contract.bats`** — retire the `doctor script:` blocks
   (source `common.sh` and assert `acq_image_contract_doctor_script` internals —
   implementation detail); preserve the subprocess `acq doctor` blocks already
@@ -260,7 +262,7 @@ dropped. All are Tier-1 candidates unless marked Tier-3.
 | G14 | Windows installer (PowerShell) | `06-windows-install.bats` | ADR-0042m + ADR-0044m |
 | G15 | Noninteractive `configure` output (effective key/value, no secrets) | `135-configure.bats` | §2 required data |
 | G16 | SSH-agent forwarding (`--vsock` / `ACQ_FORWARD_HOST_SOCKETS`) | `115-ssh-agent-forward.bats` | §6 preserve-with-warning |
-| G17 | `backend set/unset` persist + host-readiness `prepare` | `70-msb-backend.bats` | §3 + ADR-0040m |
+| G17 | Host-readiness `prepare` (`backend set/unset` persistence is now covered by `cli/backend-set*`, `cli/backend-unset*`) | `70-msb-backend.bats` | §3 + ADR-0040m |
 | G18 | Kit-ref / `ACQ_EXTRA_KITS` persistence round-trip | `95-kit-ref-persistence.bats` | §3 + ADR-0041m |
 | G19 | Installer elevation/secret-safety guard | `05-install.bats` | ADR-0042m |
 

@@ -64,6 +64,11 @@ runner and `scripts/run-vectors`) carry the *how*.
 not implemented in this slice; a vector that declares either is refused (fail
 closed) rather than silently ignored.
 
+Until `invoke.fixtures` exists, a vector that needs acq state seeded by earlier
+acq calls runs `drivers/seeded-run.py` (`["{python}", "-I",
+"test/vectors/drivers/seeded-run.py", STEPS, "{acq}"]`); the script documents
+the step format, and the coverage manifest records which vectors use it.
+
 Placeholders in `invoke.argv`: `{acq}` splices the CLI-under-test command list;
 `{python}` splices the interpreter used by deterministic sentinel subjects.
 

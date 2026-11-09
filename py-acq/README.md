@@ -110,17 +110,46 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   mappings with origin (create-time), never listener health (ADR-0038m §2). A
   failed or unreadable `msb inspect` fails closed rather than reporting an empty
   list (ADR-0038m §48).
-* `acq-py secret set (-g | SANDBOX) SERVICE [--json]` — store a secret. The value
-  is read from **stdin only** (never argv) and forwarded to the backend on its
-  stdin; the success envelope reports `scope`/`service`/`value_state` and never
-  the value (ADR-0038m §secret set). A scope-less `secret set` is a usage error
-  (ADR-0038m §48 drops scope-less secret set); an empty or whitespace-only stdin
-  value is a `validation_failed` failure (exit 1). Exactly one terminal newline is
-  stripped (plus a CRLF `\r`); any further trailing newlines are value content.
-* `acq-py secret rm (-g | SANDBOX) SERVICE [--json]` — remove a secret. An absent
-  secret fails closed with the `secret_missing` code; a backend that cannot answer
-  fails closed with its accurate code (`backend_not_found`/`failure`) and never
-  deletes (ADR-0040m).
+* `acq-py secret set (-g | SANDBOX) SERVICE [--host HOST --env ENV] [--json]` —
+  store a secret in the acq secret store, which is shared byte for byte with the
+  Bash `acq` (`acq_py/secretstore.py`: macOS keychain, `secret-tool`, Windows
+  DPAPI, or a 0600 file that is never used on Windows), then feed it to the
+  backend on its stdin. The value never appears in argv or output; the success
+  envelope reports `scope`/`service`/`value_state` only (ADR-0038m §secret set).
+  A scope-less `secret set` is a usage error (ADR-0038m §48 drops scope-less
+  secret set). An empty or whitespace-only value, a value with a newline or tab
+  (after one terminal newline, plus a CRLF `\r`, is stripped), or input that is
+  not valid UTF-8 is a `validation_failed` failure (exit 1) and nothing is
+  stored. Service and sandbox names must match `[A-Za-z0-9_-]+` and not start
+  with `-`; a sandbox named `global` is a sandbox scope. `--host`/`--env` record
+  a custom endpoint and must be given together (`--host` alone works for a
+  service with a known env var).
+  **Typing a secret:** on a terminal the value is read with echo off after a
+  prompt on stderr. Under Git Bash/mintty, native Windows Python sees a pipe
+  rather than a console, so typed input cannot be hidden: acq prints a warning
+  first. There, pipe the value instead (`printf '%s' "$TOKEN" | acq-py secret
+  set -g usai`) or run from a native console (Windows Terminal, PowerShell, cmd).
+* `acq-py secret import [SERVICE] [-g | SANDBOX] [--all] [--force] [--dry-run]
+  [--json]` — copy known tokens from the host environment (`USAI_API_KEY`,
+  `GITHUB_TOKEN`/`GH_TOKEN`, `GITLAB_TOKEN`, registered provider KEY_ENVs) into the
+  acq secret store, as Bash `acq secret import` does. Needs no backend.
+  Interactive by default (asks per service on a terminal, skips otherwise);
+  `--all` never overwrites, `--force` does, `--dry-run` writes nothing.
+* `acq-py secret rm (-g | SANDBOX) SERVICE [--accept-unconfirmed NAME[,NAME]]
+  [--json]` — remove a secret. An absent secret fails closed with the
+  `secret_missing` code; a backend that cannot answer fails closed with its
+  accurate code (`backend_not_found`/`failure`) and never deletes (ADR-0040m).
+  On msb the secret is first unbound from every sandbox acq recorded as holding
+  it, and swept best-effort from sandboxes acq has no record for (created by the
+  Bash `acq` or by `msb` directly). If a binding cannot be removed, or an
+  unrecorded sandbox cannot be confirmed unbound, the secret is kept and the
+  command fails with `unbind_failed`, naming the sandboxes.
+  `--accept-unconfirmed NAME[,NAME]` (msb only) accepts the named unrecorded
+  sandboxes staying unconfirmed: the removal then succeeds, the JSON data lists
+  them under `unconfirmed`, and a note on stderr says they may still hold the
+  binding. It never covers a recorded binding that failed. It is a stopgap
+  until a live msb check settles what removing an unbound variable does (see
+  `docs/KNOWN_FAILURE_MODES.md`), and can be retired then.
 * `acq-py secret ls [(-g | SANDBOX)] [--json]` — list secrets with
   `scope`/`service`/`value_state` (set/unset) only, never a value
   (ADR-0038m §2 secret ls required data). An unreadable, wrong-shape document, or
@@ -139,7 +168,7 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   backend adapter is present) fails closed with exit `1` and the
   `unsupported_capability` code (ADR-0040m). The lifecycle verbs add
   `sandbox_not_found`, `sandbox_exists`, `validation_failed`, and `timeout`; the
-  secret verbs add `secret_missing` and `secret_unreadable`; the state-migration
+  secret verbs add `secret_missing`, `secret_unreadable` and `unbind_failed`; the state-migration
   slice adds `state_schema_unsupported` (a newer/unparseable/`min_reader`
   record), `migration_locked` (the migration lock was held by a concurrent
   invocation), `migration_failed` (an atomic record migration could not verify),

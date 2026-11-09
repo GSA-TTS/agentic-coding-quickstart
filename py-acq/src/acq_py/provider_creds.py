@@ -387,6 +387,60 @@ def list_bindings() -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Injection lookups for the backend adapters (Bash acq_provider_credential_lookup
+# and acq_provider_binding_host_env). The msb adapter binds a provider's stored
+# credential as ``--secret KEY_ENV@HOSTS`` from these.
+# ---------------------------------------------------------------------------
+
+def provider_env_hosts(provider: str) -> tuple[str, str] | None:
+    """``(key_env, "host[,host...]")`` a provider's credential is bound to, or None.
+
+    The per-invocation env layer wins over the durable record, and the shipped
+    usai trust anchor applies only when neither names the provider. A malformed
+    or unreadable pin yields None rather than the anchor: a broken user pin must
+    never be replaced by a default destination. A pin with no hosts also yields
+    None (only a kit's facts could supply one, and acq never lets a kit choose
+    where a credential goes).
+    """
+    if not provider_id_ok(provider):
+        return None
+    try:
+        found = next((b for b in reversed(_env_bindings()) if b["provider"] == provider), None)
+        if found is None:
+            found = get_binding(provider)
+    except (ValueError, OSError, state.StateSchemaError):
+        return None
+    if found is None:
+        if provider == USAI_PROVIDER_ID:
+            return USAI_PROVIDER_KEY_ENV, USAI_PROVIDER_HOST
+        return None
+    key_env, hosts = found.get("key_env"), found.get("hosts")
+    if not isinstance(key_env, str) or not isinstance(hosts, list) or not hosts:
+        return None
+    if not all(isinstance(h, str) for h in hosts) or validate_binding(provider, key_env, hosts) is not None:
+        return None
+    return key_env, ",".join(hosts)
+
+
+def provider_ids() -> list[str]:
+    """Every provider acq may bind: the usai trust anchor, then each registered id.
+
+    A malformed registry narrows the list to the anchor (whose own lookup then
+    fails closed in :func:`provider_env_hosts`); it never widens it.
+    """
+    out = [USAI_PROVIDER_ID]
+    try:
+        bindings = list_bindings()
+    except (ValueError, OSError):
+        return out
+    for b in bindings:
+        provider = b.get("provider")
+        if isinstance(provider, str) and provider_id_ok(provider) and provider not in out:
+            out.append(provider)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # GitHub per-sandbox scope (ADR-0013).
 # ---------------------------------------------------------------------------
 

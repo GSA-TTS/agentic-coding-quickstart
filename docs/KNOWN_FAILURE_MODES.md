@@ -73,8 +73,9 @@ and (msb) the read-only trusted-config mount, including the committed
    whether to add a remount attempt to the cell's own guest.
 
 **Expected today:** the Python implementation fails the cell oracle on every
-cell (msb has no credential path, no built-in kits are applied, and no read-only
-trusted-config mount is established), so a Tier-3 run reports `FAIL` with each
+cell (no built-in kits are applied and no read-only trusted-config mount is
+established; the msb credential path exists but has no live run yet), so a Tier-3
+run reports `FAIL` with each
 missing control named, rather than qualifying a sandbox that lacks them. The
 first live run with the extended oracle should also confirm that `sbx` accepts the
 nonce-named global secret service, and that neither backend CLI reads the
@@ -125,6 +126,50 @@ resort.
 2. **Both platforms:** before the first timed step, start the backend daemon
    (or check that it is already running) outside any step's process group, so
    a forced kill can never take it down.
+
+---
+
+## Python acq on msb: `secret rm` can be blocked by a sandbox it has no record for
+
+**Status:** known limitation, waiting on a live msb check (per AGENTS.md "Track Deferred Work").
+
+### Symptoms and cause
+
+The Python msb adapter records host-side which secret bindings each sandbox it
+creates holds (`<state>/msb-secret-bindings/`), because msb gives acq no binding
+listing to rely on. `secret rm` unbinds exactly what those records show. A
+sandbox msb lists without a record is unknown: one created by the Bash `acq`, by
+`msb` directly, or before the records existed. For each unknown sandbox,
+`secret rm` tries `msb modify NAME --secret-rm ENV`. If that fails, acq cannot
+tell "msb refused because the variable was never bound" from a real failure, so
+it keeps the secret in the acq store and exits 1 with `unbind_failed`, naming
+the sandbox. Until the msb behaviour is known, any unknown sandbox that never
+had the binding can block the removal if msb rejects removing an unbound
+variable (the test stub models it that way). Stopped sandboxes are swept too,
+and `msb modify` on a stopped sandbox is also unverified.
+
+### Mitigation today
+
+Remove the named sandbox (`acq rm NAME`, or `msb remove NAME` for one acq did
+not create), then retry `acq secret rm`. If you know a named sandbox never had
+the secret (or accept that it may keep it), retry with
+`acq secret rm ... --accept-unconfirmed NAME[,NAME]`: only the named unrecorded
+sandboxes are accepted, the JSON data lists them under `unconfirmed`, and a
+stderr note repeats that they may still hold the binding. Sandboxes the Python
+acq creates always have a record and never block it.
+
+On a global removal, an unrecorded sandbox that also has its own stored value is
+not assumed safe: the Bash `acq`'s global set overwrites a sandbox's own binding,
+so acq removes the binding and re-adds the sandbox's own value in a separate
+call, and reports the sandbox as unconfirmed if either call fails.
+
+### Unblock trigger
+
+A live msb run that shows what `msb modify NAME --secret-rm ENV` does for a
+variable that is not bound, on a running and on a stopped sandbox. If msb
+succeeds, or fails in a way acq can tell apart, treat that as "confirmed
+unbound", stop blocking, and retire `--accept-unconfirmed`. Reading Bash's provenance records (planned
+Bash-state import) would also turn Bash-created sandboxes into known ones.
 
 ---
 

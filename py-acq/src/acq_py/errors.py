@@ -51,6 +51,9 @@ STATE_SCHEMA_UNSUPPORTED = "state_schema_unsupported"
 # an error).
 SECRET_MISSING = "secret_missing"  # nosec B105 # an error code
 SECRET_UNREADABLE = "secret_unreadable"  # nosec B105 # an error code
+# ``unbind_failed``: ``secret rm`` could not take a binding out of a sandbox that
+# holds it, so the store entry is kept for a retry (never a false "removed").
+UNBIND_FAILED = "unbind_failed"
 
 # Kit slice (ADR-0038m §kit, ADR-0016 provenance, trusted-source policy).
 # ``kit_ref_not_pinned``: ``kit-source add`` refuses a non-full (mutable) ref —

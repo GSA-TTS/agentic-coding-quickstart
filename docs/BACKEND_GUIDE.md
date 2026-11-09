@@ -755,6 +755,15 @@ or `acq.<sandbox>.<service>` (sandbox-scoped); a sandbox-scoped key takes preced
 over the global one for the same service (supporting USAi per-sandbox
 billing-code keys).
 
+A secret typed at a prompt is read without echo. One exception on Windows: in
+Git Bash's terminal (mintty), the Python `acq` sees its input as a pipe rather
+than a console and cannot hide what you type, so it prints a warning first. Pipe
+the value there instead (`printf '%s' "$TOKEN" | acq secret set -g usai`), or run
+`acq` from a native console such as Windows Terminal, PowerShell or cmd. The
+Python `acq` always runs its Windows DPAPI helper as
+`%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`, never found on
+`PATH`, so a `powershell.exe` planted in a workspace is never used.
+
 At `acq run`/`create`, the **msb** backend reads the value from the store,
 exports it into a transient host env var, and binds it with
 `msb --secret ENV@HOST`. msb puts a **placeholder** (`$MSB_<env>`) in the guest;
