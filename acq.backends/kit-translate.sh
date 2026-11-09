@@ -56,15 +56,28 @@
 # (git 2.53), plus GIT_NAMESPACE; a test checks it against the installed git.
 # GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM are kept: they select the user's own
 # config files, which the authenticated retry reads for credential helpers.
+# The msb clone mode (msb.sh) uses it for its host-side git calls too.
 _kit_git_isolate() {
   local _v
-  unset GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG GIT_CONFIG_PARAMETERS \
-    GIT_CONFIG_COUNT GIT_OBJECT_DIRECTORY GIT_DIR GIT_WORK_TREE \
-    GIT_IMPLICIT_WORK_TREE GIT_GRAFT_FILE GIT_INDEX_FILE GIT_NO_REPLACE_OBJECTS \
-    GIT_REPLACE_REF_BASE GIT_PREFIX GIT_SHALLOW_FILE GIT_COMMON_DIR GIT_NAMESPACE
+  _kit_git_isolate_repo
+  unset GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
   for _v in $(compgen -v GIT_CONFIG_KEY_) $(compgen -v GIT_CONFIG_VALUE_); do
     unset "$_v"
   done
+}
+
+# _kit_git_isolate_repo — the part of _kit_git_isolate that keeps the command
+# scope: unset the variables that point git at another repository, work tree,
+# index, object store or ref namespace, or send `git config` to another file,
+# but keep GIT_CONFIG_PARAMETERS and GIT_CONFIG_COUNT/KEY_n/VALUE_n. Only for a
+# caller that reads the user's command-scope config on purpose and runs
+# nothing that config could name (a `git config` read); everything else calls
+# _kit_git_isolate.
+_kit_git_isolate_repo() {
+  unset GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG GIT_OBJECT_DIRECTORY \
+    GIT_DIR GIT_WORK_TREE GIT_IMPLICIT_WORK_TREE GIT_GRAFT_FILE GIT_INDEX_FILE \
+    GIT_NO_REPLACE_OBJECTS GIT_REPLACE_REF_BASE GIT_PREFIX GIT_SHALLOW_FILE \
+    GIT_COMMON_DIR GIT_NAMESPACE
 }
 
 # Only full immutable commit IDs participate. Symbolic/abbreviated refs keep

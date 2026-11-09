@@ -5,7 +5,6 @@ kit-bundle provenance and application (ADR-0016, ADR-0030).
 from __future__ import annotations
 
 import json
-import sys
 
 from .. import (
     backends,
@@ -301,7 +300,7 @@ def run_kit_update(parsed, emit_json: bool, backend_override: str | None) -> int
 
 def _kit_update_consent(name: str, backend: str, emit_json: bool) -> int | None:
     """Ask for consent; ``None`` when given, else the emitted exit code (refused or cancelled)."""
-    if emit_json or not sys.stdin.isatty():
+    if emit_json or not common._stdin_is_terminal():
         return common._operational_failure(
             "kit update",
             errors.CONSENT_REQUIRED,

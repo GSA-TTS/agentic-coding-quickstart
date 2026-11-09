@@ -219,7 +219,9 @@ def test_file_backend_fails_closed_on_a_dpapi_envelope():
     assert not secretstore.has("usai")
     assert secretstore.unreadable("usai")
     assert secretstore.exists("usai")
-    assert secretstore.list_entries() == [{"scope": "global", "service": "usai", "value_state": "unreadable"}]
+    assert secretstore.list_entries() == [
+        {"scope": "global", "scope_kind": "global", "service": "usai", "value_state": "unreadable"}
+    ]
 
 
 # ---------------------------------------------------------------------------

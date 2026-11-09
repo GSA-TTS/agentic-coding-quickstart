@@ -5,7 +5,8 @@
   "notes": [
     "attach child/backend exit-status preservation is Tier-2 only: the vector harness cannot yet seed host-authoritative state records (a readable record is required before attach will launch an agent). attach's status propagation shares the launch -> exec_command -> _run_stream path that cli/shell-exit-code covers at Tier-1, so it is covered transitively; attach-specific fail-closed behavior (missing sandbox, missing/unreadable record) is Tier-1 covered directly by cli/attach-missing and cli/attach-json. Do not re-add an attach-exit-code vector until the harness can seed state.",
     "msb credential path (contract change): cli/secret-msb-unsupported, cli/secret-has-present, cli/secret-has-absent and cli/provider-credential-set-json were edited because msb now serves the secret verbs and provider-credential set from the acq secret store instead of failing with unsupported_capability (secret-msb-unsupported keeps its id but now asserts an empty listing). The msb create/run vectors gained an ACQ_SECRET_STORE_DIR redirect because create now reads the store to bind secrets.",
-    "ADR-0043m deviation: a vector is one CLI invocation with no fixtures, and neither runner implements invoke.fixtures yet. Vectors whose oracle needs a seeded acq secret store (cli/secret-ls-msb, cli/secret-has-msb-scoped-over-global, cli/secret-rm-msb, cli/create-msb-binds-usai, cli/secret-has-present) therefore invoke test/vectors/drivers/seeded-run.py, which runs earlier acq calls to seed state, reports one observed acq invocation, and fails the vector if any other step exits unexpectedly or the stdin sentinel appears in any step's output. Replace the driver with invoke.fixtures once both runners implement it.",
+    "ADR-0043m deviation: a vector is one CLI invocation with no fixtures, and neither runner implements invoke.fixtures yet. Vectors whose oracle needs a seeded acq secret store (cli/secret-ls-msb, cli/secret-has-msb-scoped-over-global, cli/secret-rm-msb, cli/create-msb-binds-usai, cli/secret-has-present, cli/secret-ls-msb-sandbox-named-global), or a fixture acq cannot create through its CLI (temporary git workspaces for cli/github-scope-json, cli/github-scope-sbx, cli/github-scope-no-value and cli/github-scope-multi-owner; a hand-written or undeletable binding record for cli/provider-credential-set-schema-error-no-orphan and cli/provider-credential-rm-unlink-fails), therefore invoke test/vectors/drivers/seeded-run.py, which runs earlier acq calls to seed state, reports one observed acq invocation, and fails the vector if any other step exits unexpectedly or the stdin sentinel appears in any step's output. Replace the driver with invoke.fixtures once both runners implement it.",
+    "github-scope and provider-credential rm (contract change): github-scope no longer reports or records scoped: true. It reports scope (sandbox, or none when the workspace has no GitHub repositories), owner, repos and stored, and refuses multi-owner workspaces; msb now serves it through the acq secret store instead of failing with unsupported_capability. cli/github-scope-json, cli/github-scope-sbx and cli/github-scope-no-value were edited to run against a temporary one-owner git workspace instead of the repository root, whose remotes vary by checkout. provider-credential rm now also unbinds and deletes the provider's stored credential and reports credential_removed, so cli/provider-credential-rm-json gained that field and the rm vectors gained an ACQ_SECRET_STORE_DIR redirect.",
     "msb kit application (contract change): cli/kit-update-yes now expects the in-place reapply (status current, action refreshed) instead of consent recorded with the reapply deferred, and cli/run-inference-ignores-team-kits passes a bundled kit ref in ACQ_EXTRA_KITS, because unbundled extra kits are now refused rather than ignored (cli/run-extra-kit-unfetchable-refused covers that refusal). ACQ_SECURITY_MOUNT_STATE is honoured only with the stub backend; without it the gate runs the real msb inspect plus guest probe against the stub, which records each create's mounts.",
     "Legacy-suite retirement classification: docs/test-retirement-inventory.md buckets every test/bats file as preserve/re-express/retire and records gaps G1-G19. This manifest maps only the preserve-tier contract rows to vectors; the inventory is the authoritative cross-reference from legacy tests to vectors and DROP rows."
   ],
@@ -41,6 +42,10 @@
     {
       "contract": "spec backend seam: active_backend precedence flag -> env -> config (backend set) -> auto-detect; backend set/unset persist and clear only the backend key; an invalid backend is never persisted, and one found in config.yaml fails closed",
       "vectors": ["cli/lifecycle-create-config-sbx", "cli/lifecycle-config-backend-invalid", "cli/backend-set", "cli/backend-set-unknown", "cli/backend-unset", "cli/backend-unset-none"]
+    },
+    {
+      "contract": "ADR-0031 configure: non-interactive --json reports each setting with its value, source layer (flag, env, config, default) and honoured_by_python (the no-write and no-secret guarantees are enforced by py-acq/tests/test_configure.py)",
+      "vectors": ["cli/configure-json-layers"]
     },
     {
       "contract": "ADR-0040m version floor fail-closed (backend_not_found / backend_version_unsupported / backend_version_unknown)",
@@ -219,6 +224,22 @@
       "vectors": ["cli/secret-set-host-needs-env"]
     },
     {
+      "contract": "sbx credential routing: built-in services go through `sbx secret set`; usai, registered providers and any --host go through `sbx secret set-custom --host --env --value-stdin` (sbx >= 0.51.0), value on stdin only",
+      "vectors": ["cli/secret-set-usai-sbx-custom", "cli/secret-set-json"]
+    },
+    {
+      "contract": "JSON scope_kind (global | sandbox | unknown) tells a sandbox named 'global' apart from the global scope, where scope alone reads 'global' for both",
+      "vectors": ["cli/secret-set-sandbox-named-global", "cli/secret-ls-scope-kind-sbx", "cli/secret-ls-json", "cli/secret-ls-msb-sandbox-named-global"]
+    },
+    {
+      "contract": "sbx secret has means 'sbx can inject it': a service maps to its native entry or custom env var, and a sandbox scope falls back to global (ADR-0038m scoped-over-global)",
+      "vectors": ["cli/secret-has-sbx-usai-custom", "cli/secret-has-sbx-global-fallback"]
+    },
+    {
+      "contract": "sbx secret rm of a custom secret looks up its placeholder and removes it with `sbx secret rm --placeholder P -f`, stdin closed; raw-placeholder removal does the same",
+      "vectors": ["cli/secret-rm-sbx-custom", "cli/secret-rm-raw-placeholder-force"]
+    },
+    {
       "contract": "ADR-0038m §2 provider-credential set success: value on stdin only, binding reports provider/key_env/hosts/source_layer, never a value",
       "vectors": ["cli/provider-credential-set-json"]
     },
@@ -229,6 +250,14 @@
     {
       "contract": "ADR-0038m §provider-credential rm exit semantics: exit 0 removed true, absent binding fails closed with secret_missing",
       "vectors": ["cli/provider-credential-rm-json", "cli/provider-credential-rm-missing"]
+    },
+    {
+      "contract": "ADR-0038m fail-closed provider-credential rm: a binding record that cannot be deleted is a failure (exit 1), never removed true",
+      "vectors": ["cli/provider-credential-rm-unlink-fails"]
+    },
+    {
+      "contract": "ADR-0038m / ADR-0041m provider-credential set ordering: the binding is checked and written before the value reaches the backend, so an unreadable record leaves no orphaned credential",
+      "vectors": ["cli/provider-credential-set-schema-error-no-orphan"]
     },
     {
       "contract": "ADR-0038m §1 provider-credential set validation: empty value, missing --host, and malformed provider id fail closed (validation_failed)",
@@ -247,8 +276,12 @@
       "vectors": ["cli/provider-credential-sbx-set-version-floor"]
     },
     {
-      "contract": "ADR-0013 per-sandbox GitHub token scoping: github-scope records a sandbox-scoped (never global) scope with the token never exposed",
+      "contract": "ADR-0013 per-sandbox GitHub token flow: github-scope detects the workspace's GitHub repositories, stores the token for that sandbox only (never global, never exposed), and reports the owner and repositories it was requested for without claiming it was narrowed",
       "vectors": ["cli/github-scope-json"]
+    },
+    {
+      "contract": "ADR-0013 multi-owner refusal: a workspace with GitHub repositories from more than one owner is refused before the token is read",
+      "vectors": ["cli/github-scope-multi-owner"]
     },
     {
       "contract": "ADR-0038m §1 github-scope validation: an empty stdin token fails closed (validation_failed)",

@@ -1,0 +1,111 @@
+{
+  "schema": 1,
+  "id": "cli/configure-json-layers",
+  "oracle": "ADR-0031 / ADR-0038m \u00a72: non-interactive `configure --json` reports every setting as key, value, source layer (flag, env, config, default) and whether the Python acq honours it. This vector pins the reported values only; that nothing is written and that no secret value is printed are enforced by py-acq/tests/test_configure.py (test_no_secret_value_reaches_the_output, test_non_interactive_leaves_a_legacy_config_unchanged)",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{acq}",
+      "--backend",
+      "sbx",
+      "configure",
+      "--json"
+    ],
+    "env": {
+      "ACQ_EXTRA_KITS": "git+https://example.invalid/kit",
+      "ACQ_KIT_SOURCE_SEED": "[{\"repository\": \"github.com/team/kits\", \"ref\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"directory\": \"kits\"}]",
+      "ACQ_PROVIDER_CREDENTIAL_SEED": "[{\"provider\": \"opencode-go\", \"key_env\": \"OPENCODE_GO_API_KEY\", \"hosts\": [\"opencode.ai\"]}]",
+      "OPENCODE_GO_API_KEY": "VECTOR-SECRET-MUST-NOT-APPEAR",
+      "USAI_API_KEY": "VECTOR-SECRET-MUST-NOT-APPEAR"
+    },
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "ACQ_CONFIG_SEED",
+      "ACQ_PROVIDER_KITS",
+      "ACQ_PROVIDER_CREDENTIAL_BINDINGS",
+      "ACQ_NO_PROMPT",
+      "ACQ_NO_PROGRESS",
+      "ACQ_KIT_SOURCE_DISCOVERY"
+    ],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "configure",
+        "data": {
+          "interactive": false,
+          "changed": false,
+          "settings": [
+            {
+              "key": "backend",
+              "value": "sbx",
+              "source": "flag",
+              "honoured_by_python": true
+            },
+            {
+              "key": "extra_kits",
+              "value": "git+https://example.invalid/kit",
+              "source": "env",
+              "honoured_by_python": false
+            },
+            {
+              "key": "scope_github_token",
+              "value": "no",
+              "source": "default",
+              "honoured_by_python": false
+            },
+            {
+              "key": "provider_credential_bindings",
+              "value": "opencode-go=OPENCODE_GO_API_KEY@opencode.ai",
+              "source": "config",
+              "honoured_by_python": true,
+              "entries": [
+                {
+                  "value": "opencode-go=OPENCODE_GO_API_KEY@opencode.ai",
+                  "source": "config"
+                }
+              ]
+            },
+            {
+              "key": "provider_kit",
+              "value": "agentic-coding-patterns/usai-provider",
+              "source": "default",
+              "honoured_by_python": false
+            },
+            {
+              "key": "kit_sources",
+              "value": "github.com/team/kits@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|kits",
+              "source": "config",
+              "honoured_by_python": true
+            }
+          ]
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME"
+    ]
+  }
+}

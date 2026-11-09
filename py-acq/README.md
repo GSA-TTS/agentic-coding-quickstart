@@ -136,7 +136,8 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   Bash `acq` (`acq_py/secretstore.py`: macOS keychain, `secret-tool`, Windows
   DPAPI, or a 0600 file that is never used on Windows), then feed it to the
   backend on its stdin. The value never appears in argv or output; the success
-  envelope reports `scope`/`service`/`value_state` only (ADR-0038m §secret set).
+  envelope reports `scope`/`scope_kind`/`service`/`value_state` only (ADR-0038m
+  §secret set; `scope_kind` is described below).
   A scope-less `secret set` is a usage error (ADR-0038m §48 drops scope-less
   secret set). An empty or whitespace-only value, a value with a newline or tab
   (after one terminal newline, plus a CRLF `\r`, is stripped), or input that is
@@ -145,6 +146,17 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   with `-`; a sandbox named `global` is a sandbox scope. `--host`/`--env` record
   a custom endpoint and must be given together (`--host` alone works for a
   service with a known env var).
+  **On sbx:** only sbx's built-in services (`anthropic`, `github`, `gitlab`,
+  `google-cloud`, `openai`, `aws`, `azure`) go through `sbx secret set
+  [--sandbox S] SERVICE`. Every other endpoint is a custom secret bound to its
+  hosts and env var with `sbx secret set-custom [--sandbox S] --host H… --env E
+  --value-stdin`, which needs sbx 0.51.0 or newer (older fails with
+  `backend_version_unsupported` before anything is stored): `usai` (bound to
+  `api.gsa.usai.gov` as `USAI_API_KEY`), a provider pinned with `acq
+  provider-credential set` (every pinned host), and any explicit `--host`, built-in
+  names included. A service that is neither is refused with `validation_failed`,
+  since sbx would store it and never inject it. An entry sbx already holds for that
+  scope is refused too (sbx would prompt to overwrite and eat the piped value).
   **Typing a secret:** on a terminal the value is read with echo off after a
   prompt on stderr. Under Git Bash/mintty, native Windows Python sees a pipe
   rather than a console, so typed input cannot be hidden: acq prints a warning
@@ -171,13 +183,30 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   binding. It never covers a recorded binding that failed. It is a stopgap
   until a live msb check settles what removing an unbound variable does (see
   `docs/KNOWN_FAILURE_MODES.md`), and can be retired then.
+  On sbx a built-in is removed by name and a custom secret by the placeholder
+  found for its env var (`sbx secret rm --placeholder P -f`); a single bare token
+  is a raw placeholder. Every sbx removal passes `-f` with stdin closed, so sbx's
+  confirm prompt never waits unseen.
 * `acq-py secret ls [(-g | SANDBOX)] [--json]` — list secrets with
-  `scope`/`service`/`value_state` (set/unset) only, never a value
-  (ADR-0038m §2 secret ls required data). An unreadable, wrong-shape document, or
-  wrong-shape *entry* fails closed with `secret_unreadable` — never silently
-  dropped (ADR-0040m, ADR-0038m §48).
+  `scope`/`scope_kind`/`service`/`value_state` (set/unset) only, never a value
+  (ADR-0038m §2 secret ls required data). On sbx a custom secret is listed by its
+  env var. An unreadable, wrong-shape document, or wrong-shape *entry* fails closed
+  with `secret_unreadable` — never silently dropped (ADR-0040m, ADR-0038m §48).
+* **`scope_kind`** (added alongside `scope` in the `secret set`/`rm`/`ls`/`import`
+  JSON; `scope` itself is unchanged): `scope` reads `global` both for the global
+  scope and for a sandbox named `global`, so `scope_kind` says which: `global` or
+  `sandbox`. `secret ls` can also report `unknown` where the backend's own listing
+  cannot tell: sbx's `secret ls --json` labels both scopes `global`, so once sbx
+  has a sandbox named `global` such an entry is `unknown`; a legacy dotted
+  acq-store key (`scope` `?`) is `unknown` too. On sbx, `secret has`/`rm` and
+  `secret set`'s existence check fail closed where they would need to tell those
+  two scopes apart (a native entry is still removed, by an argv that names the
+  scope). Rename such a sandbox to avoid the ambiguity.
 * `acq-py secret has (-g | SANDBOX) SERVICE` — a silent predicate (ADR-0038m):
-  exit `0` when the secret is present, `1` when absent, `2` on a usage error. It
+  exit `0` when the secret is present, `1` when absent, `2` on a usage error. On
+  sbx "present" means sbx can inject it: a built-in by its native entry, any other
+  service by its custom secret's env var (`usai` by `USAI_API_KEY`), and a sandbox
+  scope falls back to the global entry sbx also injects there. It
   prints nothing on stdout, even with `--json`. A backend that cannot answer (an
   unsupported backend, or a query failure) still exits `1` with stdout silent but
   announces a diagnostic on stderr so "cannot check" is not a silent false
@@ -198,6 +227,47 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   and `security_exception` (a sandbox missing its read-only mount).
   `exec`, `attach`, `shell`, `cp`, and passthrough preserve the child/backend
   exit status rather than acq's own `0`/`1`.
+
+## configure (ADR-0031)
+
+`acq-py configure` ports the Bash `acq configure`. It first prints the current
+settings (to stderr, in the Bash layout). At a terminal it then asks the Bash
+questions with the Bash defaults (opt-in kits, the GitHub-token scoping default,
+the provider kit) and writes the same three `config.yaml` keys through
+`acq_py/config.py`: `extra_kits`, `scope_github_token` and `provider_kit`. Other
+keys, including unknown ones, are kept. Without a terminal (or with
+`ACQ_NO_PROMPT`, `ACQ_NO_PROGRESS` or `--json`) nothing is written; `--json`
+lists each setting as `key`, `value`, `source` and `honoured_by_python`.
+
+**The three keys take effect only under the Bash acq for now.** The Python acq
+does not read `extra_kits`, `provider_kit` or `scope_github_token` yet, so both
+the report and `--json` (`"honoured_by_python": false`) say so.
+
+Deliberate differences from Bash:
+
+* **Schema marker.** A `config.yaml` that Python creates starts with `schema: 1`
+  (ADR-0041m); Bash's writer never adds it. An existing file is changed only in
+  the keys written, and only after the forward migration, which runs just before
+  the first write (so cancelling leaves a legacy file untouched) and refuses a
+  newer schema up front.
+* **Offline provider list.** The provider-kit picker offers the shipped default
+  and the provider kits Python already knows about (the control plane's, and any
+  a registered source is known to publish). It never fetches a kit source, so it
+  can list fewer kits than Bash, which fetches every trusted source.
+* **Layer reporting.** The report shows the value Python would use, with its
+  layer: `--backend` (flag), `ACQ_BACKEND`, `ACQ_EXTRA_KITS`, `ACQ_PROVIDER_KITS`
+  and `ACQ_PROVIDER_CREDENTIAL_BINDINGS` (env), the config, or the default. Bash
+  shows only `config.yaml`. Kit sources and provider-credential bindings come
+  from Python's own registries, and each binding carries its own layer. The
+  human report marks a flag or env value with `[from X]`; otherwise it matches
+  Bash line for line, plus a note about the keys above. Userinfo in a kit ref
+  (`https://user:token@host`) is shown as `***@host`.
+* **Stricter failures.** A `config.yaml` write that fails exits 1 (Bash ignores
+  it), a malformed `ACQ_PROVIDER_CREDENTIAL_BINDINGS` is `validation_failed`, and
+  an unknown `--backend` is a usage error. Ctrl-C exits 130; SIGTERM and SIGHUP
+  restore the terminal and exit 128 plus the signal number.
+* **Not ported.** The first-run offer and the create-time kit picker (accepted
+  gaps in ADR-0048m).
 
 ## State migration (ADR-0041m)
 

@@ -98,6 +98,16 @@ if ! command -v acq_host_config_read >/dev/null 2>&1; then
   # shellcheck source=acq.backends/common.sh
   . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 fi
+# The --clone host-side git calls clear the inherited git environment with
+# _kit_git_isolate (kit-translate.sh). common.sh sources that file only when
+# ACQ_SCRIPT_DIR is set, so load it from beside this adapter when it is
+# missing. If it still is not defined, those calls refuse to run
+# (_acq_msb_git_ws_prep).
+if ! declare -F _kit_git_isolate >/dev/null 2>&1 &&
+  [ -f "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/kit-translate.sh" ]; then
+  # shellcheck source=acq.backends/kit-translate.sh
+  . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/kit-translate.sh"
+fi
 
 # Keep the adapter-local validator used by attach while delegating the canonical
 # token policy to the shared agent catalog.
@@ -3258,19 +3268,67 @@ _acq_msb_upstream_ca_flags_into() {
 # Windows git (Git Bash) does not resolve to a POSIX null device. The path
 # must be absolute: a relative hooksPath resolves against the workspace
 # itself, which the guest can write.
+# Each call runs in a subshell that first clears the inherited git environment
+# (_kit_git_isolate): an inherited GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE or
+# similar would point the call at another repository (the clone would copy
+# it, `remote add` would write to it), and the user's command-scope config
+# (GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT/KEY_n/VALUE_n) is dropped with it,
+# so only the wrapper's own settings are on the command scope. That scope
+# is read after every config file, so a user value there would otherwise
+# override the repository config acq reads to decide what to blank, and
+# GIT_CONFIG_PARAMETERS is read after GIT_CONFIG_COUNT, so it would override
+# the filter blanking too. GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM stay (the
+# user's own files). The one reader of the command scope uses
+# _acq_msb_git_ws_cmdscope instead.
 _acq_msb_git_ws() {
-  local dir="$1"
-  shift
+  _acq_msb_git_ws_run isolate "$@"
+}
+
+# _acq_msb_git_ws_cmdscope DIR ARGS... — _acq_msb_git_ws for a `git config`
+# read that wants the user's command-scope config (the identity read): the
+# variables that locate a repository are still cleared, but
+# GIT_CONFIG_PARAMETERS and GIT_CONFIG_COUNT/KEY_n/VALUE_n are kept. The filter
+# blanking entries are left off, since they would renumber the user's entries
+# and a config read starts no filter. Use it for nothing that can run a program.
+_acq_msb_git_ws_cmdscope() {
+  _acq_msb_git_ws_run keep "$@"
+}
+
+# _acq_msb_git_ws_run MODE DIR ARGS... — the body of both wrappers. MODE is
+# isolate (clear the whole inherited git environment) or keep (keep the
+# command scope).
+_acq_msb_git_ws_run() {
+  local mode="$1" dir="$2" wsenv=()
+  shift 2
   _acq_msb_git_ws_prep "$dir" || return 1
-  GIT_NO_LAZY_FETCH=1 GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
-    env ${_ACQ_MSB_WS_ENV[@]+"${_ACQ_MSB_WS_ENV[@]}"} git --no-pager \
-      -c core.fsmonitor=false \
-      -c "core.hooksPath=${_ACQ_MSB_WS_HOOKS}" \
-      -c core.untrackedCache=false \
-      -c protocol.allow=never \
-      -c submodule.recurse=false \
-      ${_ACQ_MSB_WS_CFG[@]+"${_ACQ_MSB_WS_CFG[@]}"} \
-      -C "$dir" "$@"
+  [ "$mode" = keep ] || wsenv=(${_ACQ_MSB_WS_ENV[@]+"${_ACQ_MSB_WS_ENV[@]}"})
+  (
+    if [ "$mode" = keep ]; then _kit_git_isolate_repo; else _kit_git_isolate; fi
+    GIT_NO_LAZY_FETCH=1 GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
+      env ${wsenv[@]+"${wsenv[@]}"} git --no-pager \
+        -c core.fsmonitor=false \
+        -c "core.hooksPath=${_ACQ_MSB_WS_HOOKS}" \
+        -c core.untrackedCache=false \
+        -c protocol.allow=never \
+        -c submodule.recurse=false \
+        ${_ACQ_MSB_WS_CFG[@]+"${_ACQ_MSB_WS_CFG[@]}"} \
+        -C "$dir" "$@"
+  )
+}
+
+# _acq_msb_git_scratch SCRATCH ARGS... — run git against the scratch clone acq
+# has just created (and not yet exposed to the guest) with the inherited git
+# environment cleared, as _acq_msb_git_ws does: an inherited GIT_DIR would
+# send its config writes to another repository, and GIT_CONFIG to another
+# file. Refuses (return 1) when _kit_git_isolate is not loaded.
+_acq_msb_git_scratch() {
+  local scratch="$1"
+  shift
+  declare -F _kit_git_isolate >/dev/null 2>&1 || return 1
+  (
+    _kit_git_isolate
+    git --no-pager -C "$scratch" "$@"
+  )
 }
 
 # _acq_msb_git_ws_prep DIR — compute the wrapper's per-call settings for DIR:
@@ -3280,6 +3338,12 @@ _acq_msb_git_ws() {
 # Hooks stay off only while the hooks path does not exist, so an existing file,
 # directory or symlink there fails closed rather than becoming a hooks dir.
 _acq_msb_git_ws_prep() {
+  if ! declare -F _kit_git_isolate >/dev/null 2>&1 ||
+    ! declare -F _kit_git_isolate_repo >/dev/null 2>&1; then
+    echo "acq(msb): error: --clone: kit-translate.sh is not loaded, so acq cannot clear the" >&2
+    echo "acq(msb):   inherited git environment (GIT_DIR and the like); refusing to run git." >&2
+    return 1
+  fi
   _ACQ_MSB_WS_HOOKS="${ACQ_STATE_DIR}/.git-hooks-disabled"
   case "$_ACQ_MSB_WS_HOOKS" in
     /* | [A-Za-z]:[/\\]*) ;;
@@ -3301,26 +3365,28 @@ _acq_msb_git_ws_prep() {
 # clone never start a clean/smudge/process program it names. Sets the arrays
 # _ACQ_MSB_WS_ENV (environment assignments) and _ACQ_MSB_WS_CFG (`-c` options).
 # The settings travel as GIT_CONFIG_COUNT/GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n>
-# (git 2.31+), appended after any the user already exports: a `-c name=value`
-# splits at the first '=', so it cannot name a driver whose name itself
-# contains one. On an older git the `-c` form is the only one, and a driver
-# name containing '=' is refused (return 1) because it cannot be blanked.
+# (git 2.31+), numbered from 0 because the wrapper drops any the user exports:
+# a `-c name=value` splits at the first '=', so it cannot name a driver whose
+# name itself contains one. The config is read with the same environment the
+# wrapper gives git (_kit_git_isolate), so the list matches what git sees.
+# On an older git the `-c` form is the only one, and a driver name
+# containing '=' is refused (return 1) because it cannot be blanked.
 # A config read that fails (any status but 0, or 1 for "no filter keys") is
 # refused too: without the list, a driver could be left live.
 _acq_msb_git_ws_filter_cfg() {
   local dir="$1" key val n envok="" keys rc=0
   _ACQ_MSB_WS_ENV=()
   _ACQ_MSB_WS_CFG=()
-  keys=$(git --no-pager -C "$dir" config --name-only --get-regexp '^filter\.' 2>/dev/null) || rc=$?
+  keys=$(
+    _kit_git_isolate
+    git --no-pager -C "$dir" config --name-only --get-regexp '^filter\.' 2>/dev/null
+  ) || rc=$?
   if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
     echo "acq(msb): error: --clone: could not read the git config for $dir (git exit $rc);" >&2
     echo "acq(msb):   refusing to run git there without knowing its filter drivers." >&2
     return 1
   fi
-  case "${GIT_CONFIG_COUNT:-}" in
-    '' | *[!0-9]*) n=0 ;;
-    *) n=$((10#$GIT_CONFIG_COUNT)) ;;
-  esac
+  n=0
   while IFS= read -r key; do
     case "$key" in
       filter.*.clean | filter.*.smudge | filter.*.process) val="" ;;
@@ -3679,7 +3745,7 @@ _acq_msb_clone_copy_config() {
     _acq_msb_clone_read_identity "$src" "$key" || rc=$?
     case "$rc" in
       0)
-        git -C "$scratch" config --replace-all "$key" "$_ACQ_MSB_IDENT_VAL" >/dev/null 2>&1 ||
+        _acq_msb_git_scratch "$scratch" config --replace-all "$key" "$_ACQ_MSB_IDENT_VAL" >/dev/null 2>&1 ||
           _acq_msb_clone_config_fail set "$key"
         ;;
       1) _acq_msb_clone_unset_key "$scratch" "$key" ;;
@@ -3700,9 +3766,9 @@ _acq_msb_clone_copy_config() {
     first=1
     while IFS= read -r -d '' val; do
       if [ -n "$first" ]; then
-        git -C "$scratch" config --replace-all "$key" "$val" >/dev/null 2>&1
+        _acq_msb_git_scratch "$scratch" config --replace-all "$key" "$val" >/dev/null 2>&1
       else
-        git -C "$scratch" config --add "$key" "$val" >/dev/null 2>&1
+        _acq_msb_git_scratch "$scratch" config --add "$key" "$val" >/dev/null 2>&1
       fi || { _acq_msb_clone_config_fail set "$key" || return 1; continue 2; }
       first=""
     done < <(_acq_msb_git_ws "$src" config --no-includes -z --get-all "$key" 2>/dev/null)
@@ -3715,7 +3781,7 @@ _acq_msb_clone_copy_config() {
 # _acq_msb_clone_config_fail, whose status this returns.
 _acq_msb_clone_unset_key() {
   local rc=0
-  git -C "$1" config --unset-all "$2" >/dev/null 2>&1 || rc=$?
+  _acq_msb_git_scratch "$1" config --unset-all "$2" >/dev/null 2>&1 || rc=$?
   # 5: nothing to unset.
   [ "$rc" -eq 0 ] || [ "$rc" -eq 5 ] || _acq_msb_clone_config_fail set "$2"
 }
@@ -3805,17 +3871,21 @@ _acq_msb_clone_read_scope() {
 # for the command scope. `config --show-scope -z` prints scope/value pairs,
 # NUL-delimited; includes stay off, so only values from the environment and
 # the wrapper's own settings (which never set user.*) are command-scoped here.
+# It is the one call that keeps the user's exported command-scope config
+# (_acq_msb_git_ws_cmdscope); every other host-side git call drops it.
 _acq_msb_clone_read_command_scope() {
   local src="$1" key="$2" rc=0 scope val found=""
   _acq_msb_git_version_ge 2 26 || return 1
-  _acq_msb_git_ws "$src" config --no-includes --show-scope --get-all "$key" >/dev/null 2>&1 || rc=$?
+  _acq_msb_git_ws_cmdscope "$src" config --no-includes --show-scope --get-all "$key" \
+    >/dev/null 2>&1 || rc=$?
   [ "$rc" -eq 1 ] && return 1
   [ "$rc" -eq 0 ] || return 2
   while IFS= read -r -d '' scope && IFS= read -r -d '' val; do
     [ "$scope" = command ] || continue
     _ACQ_MSB_IDENT_VAL="$val"
     found=1
-  done < <(_acq_msb_git_ws "$src" config --no-includes --show-scope -z --get-all "$key" 2>/dev/null)
+  done < <(_acq_msb_git_ws_cmdscope "$src" config --no-includes --show-scope -z \
+    --get-all "$key" 2>/dev/null)
   [ -n "$found" ] || return 1
   return 0
 }

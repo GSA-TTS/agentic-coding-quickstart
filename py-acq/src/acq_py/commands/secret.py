@@ -37,6 +37,20 @@ _IMPORT_USAGE = "usage: acq secret import [SERVICE] [-g | SANDBOX] [--all] [--fo
 _ENV_NAME_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_")
 
 
+def _scope_kind(scope: secretstore.Scope) -> str:
+    """``scope_kind`` in JSON output: ``scope`` alone reads ``global`` both for
+    the global scope and for a sandbox named ``global``."""
+    return "global" if scope.is_global else "sandbox"
+
+
+def _with_scope_kind(entry: dict) -> dict:
+    """A listing entry with ``scope_kind``: the adapter's own when it reports
+    one (it may say ``unknown``), else read from the ``scope`` label."""
+    if entry.get("scope_kind") in ("global", "sandbox", "unknown"):
+        return entry
+    return {**entry, "scope_kind": "global" if entry.get("scope") == "global" else "sandbox"}
+
+
 def _unsupported(command: str, backend: str, emit_json: bool) -> int:
     return common._operational_failure(
         command,
@@ -76,8 +90,11 @@ def _resolve_binding(service: str, hosts: list[str], env: str | None) -> tuple[s
     if not hosts:
         return "", "", f"--env {env} needs --host HOST as well"
     host = ",".join(hosts).lower()  # DNS names are case-insensitive; record one form
-    if any(not part for part in host.split(",")) or secretstore._META_HOST_RE.fullmatch(host) is None:
-        return "", "", f"invalid --host {host!r}: hosts are DNS names, comma-separated"
+    if not secretstore.host_list_ok(host):
+        return "", "", (
+            f"invalid --host {host!r}: hosts are DNS names of two or more labels, comma-separated "
+            "(one leading '*.' wildcard label is allowed; '*', '*.com' and empty labels are not)"
+        )
     env = env or _known_env_for(service)
     if env is None:
         return "", "", f"--host {host} needs --env ENV as well ('{service}' has no env mapping)"
@@ -94,7 +111,9 @@ def run_secret_set(parsed, emit_json: bool, backend: str) -> int:
     preflight, so a refusal never leaves a half-written entry. The value goes
     to the acq store, the endpoint mapping to its sidecar, and then to the
     backend's feed on the child's stdin. The success envelope carries only
-    scope/service/value_state.
+    scope/scope_kind/service/value_state: ``scope_kind`` (``global`` or
+    ``sandbox``) keeps a sandbox named ``global`` apart from the global scope,
+    which ``scope`` alone reports the same way.
     """
     command = "secret set"
     tokens, hosts, env_flag, flag_error = common._split_host_env(list(parsed.args))
@@ -149,7 +168,7 @@ def run_secret_set(parsed, emit_json: bool, backend: str) -> int:
         )
     finally:
         value = ""
-    data = {"scope": scope.label, "service": service, "value_state": "set"}
+    data = {"scope": scope.label, "scope_kind": _scope_kind(scope), "service": service, "value_state": "set"}
     if emit_json:
         print(json.dumps(envelope.success(command, data)))
     else:
@@ -262,7 +281,7 @@ def run_secret_rm(parsed, emit_json: bool, backend: str) -> int:
         secretstore.meta_delete(service, scope.sandbox)
     except common._ADAPTER_ERRORS as exc:
         return common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
-    data: dict = {"scope": scope.label, "service": service, "value_state": "unset"}
+    data: dict = {"scope": scope.label, "scope_kind": _scope_kind(scope), "service": service, "value_state": "unset"}
     if accept is not None:
         data["unconfirmed"] = accepted
     if emit_json:
@@ -282,7 +301,7 @@ def _print_secret_ls_human(data: dict) -> None:
 
 
 def run_secret_ls(parsed, emit_json: bool, backend: str) -> int:
-    """``acq secret ls [(-g | SANDBOX)]`` — scope/service/value_state, never a value.
+    """``acq secret ls [(-g | SANDBOX)]`` — scope/scope_kind/service/value_state, never a value.
 
     An unreadable or unparseable listing fails closed with ``secret_unreadable``
     (ADR-0040m) rather than being reported as empty. A backend whose capability
@@ -307,7 +326,7 @@ def run_secret_ls(parsed, emit_json: bool, backend: str) -> int:
         secrets = common._adapter(backend).secret_ls(scope)
     except common._ADAPTER_ERRORS as exc:
         return common._operational_failure("secret ls", exc.code, exc.message, exc.remediation, emit_json)
-    data = {"secrets": secrets}
+    data = {"secrets": [_with_scope_kind(entry) for entry in secrets]}
     if emit_json:
         print(json.dumps(envelope.success("secret ls", data)))
     else:
@@ -461,8 +480,7 @@ def _confirm(svc: str, envvar: str, scope: secretstore.Scope, exists: bool, prev
     ``ACQ_SECRET_IMPORT_ASSUME_YES`` answers yes (Bash parity)."""
     if os.environ.get("ACQ_SECRET_IMPORT_ASSUME_YES"):
         return None
-    isatty = getattr(sys.stdin, "isatty", None)
-    if isatty is None or not isatty():
+    if not common._stdin_is_terminal():
         say(f"acq: '{svc}' detected in ${envvar} but stdin is not a TTY; skipping (use --all/--force).")
         return "not_a_tty"
     if exists:
@@ -560,6 +578,7 @@ def run_secret_import(parsed, emit_json: bool) -> int:
         say(f"acq: no known service tokens found in the environment. Looked for: {looked}.")
     data = {
         "scope": scope.label,
+        "scope_kind": _scope_kind(scope),
         "dry_run": opts.dry_run,
         "mode": opts.mode,
         "results": results,

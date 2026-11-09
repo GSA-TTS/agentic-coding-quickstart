@@ -18,8 +18,7 @@ adapter) and reach a sandbox as ``--secret ENV@HOST`` bindings: on ``create``,
 and on running sandboxes through ``msb modify --secret`` / ``--secret-rm``. msb
 reads each bound value from its own environment, so a secret VALUE reaches the
 msb child only through that environment mapping, never argv or output.
-``github_scope`` and ``rotate_key`` still fail closed with
-``unsupported_capability``.
+``rotate_key`` still fails closed with ``unsupported_capability``.
 
 The ``msb`` executable is overridable via ``ACQ_MSB_BIN`` for reproducible,
 offline contract vectors. ``__stub__`` routes to the bundled deterministic fake
@@ -1593,6 +1592,7 @@ def _ls_entry(sandbox: str | None, service: str) -> dict:
     binding = service_binding(service, sandbox)
     return {
         "scope": "global" if sandbox is None else sandbox,
+        "scope_kind": "global" if sandbox is None else "sandbox",
         "service": service,
         "value_state": "unreadable" if secretstore.unreadable(service, sandbox) else "set",
         "binding": binding.flag if binding is not None else None,
@@ -1602,7 +1602,9 @@ def _ls_entry(sandbox: str | None, service: str) -> dict:
 def secret_ls(scope: Scope | str | None = None) -> list[dict]:
     """``secret-list``: the acq store's entries, never a value.
 
-    Each entry is ``{scope, service, value_state, binding}``; ``binding`` is the
+    Each entry is ``{scope, scope_kind, service, value_state, binding}``;
+    ``scope_kind`` is ``global``, ``sandbox``, or ``unknown`` for a legacy key,
+    so a sandbox named ``global`` reads as a sandbox. ``binding`` is the
     ``ENV@HOST`` msb would use (None when it has none). ``scope`` filters by
     scope kind, so a sandbox named ``global`` is never listed as global. A
     legacy multi-dot key (scope ``?``) is listed only when unfiltered.
@@ -1616,7 +1618,7 @@ def secret_ls(scope: Scope | str | None = None) -> list[dict]:
         raw_scope, service = decoded
         if raw_scope == "?":
             if want is None:
-                out.append({"scope": "?", "service": service, "value_state": "set", "binding": None})
+                out.append({"scope": "?", "scope_kind": "unknown", "service": service, "value_state": "set", "binding": None})
             continue
         sandbox = None if raw_scope == "-g" else raw_scope
         if want is None or want.sandbox == sandbox:
@@ -1669,16 +1671,13 @@ def provider_credential_set(provider: str, key_env: str, hosts: list[str], value
 
 
 def github_scope(sandbox: str, value: str) -> None:
-    """GitHub per-sandbox scoping fails closed on msb (no ``github-scope`` subcommand).
+    """Store a GitHub token for ``sandbox`` only and bind it (ADR-0013).
 
-    The token is never read or placed on argv; the refusal happens before the value
-    crosses the boundary. Raises :class:`MsbError` with ``unsupported_capability``.
+    The same path as ``acq secret set SANDBOX github``: the value goes to the
+    acq secret store under the sandbox scope and a running sandbox is re-fed;
+    a new one binds it at create. Raises :class:`MsbError`.
     """
-    raise MsbError(
-        errors.UNSUPPORTED,
-        f"GitHub token scoping is not supported on the msb backend for sandbox '{sandbox}'",
-        f"to bind a token to this sandbox only, use 'acq secret set {sandbox} github' (value on stdin)",
-    )
+    secret_set(secretstore.sandbox_scope(sandbox), "github", value)
 
 
 def rotate_key(value: str) -> None:

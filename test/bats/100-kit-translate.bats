@@ -565,6 +565,22 @@ GITSTUB
   assert_output ''
 }
 
+@test "kit git isolation: the repo-only variant clears the rest but keeps the command scope" {
+  local vars
+  vars=$("$ACQ_TEST_REAL_GIT" rev-parse --local-env-vars)
+  [ -n "$vars" ]
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    for v in $1 GIT_NAMESPACE GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
+      export "$v=set-by-test"
+    done
+    _kit_git_isolate_repo
+    env | grep "=set-by-test\$" | sed "s/=.*//" | sort
+  ' _ "$vars"
+  assert_success
+  assert_output "$(printf '%s\n' GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_PARAMETERS GIT_CONFIG_VALUE_0)"
+}
+
 @test "kit fetch: an inherited GIT_CONFIG is never written to" {
   local fake="$STUBDIR/fake-global-config"
   : >"$fake"

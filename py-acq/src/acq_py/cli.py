@@ -14,6 +14,7 @@ and ``doctor``). Every other handler lives in :mod:`acq_py.commands`
     commands/secret.py     secret set/rm/ls/has/import
     commands/creds.py      provider-credential, github-scope, usai-rotate-api-key
     commands/kit.py        kit list/validate/apply/check/update, kit-source
+    commands/configure.py  configure (show the settings, or change them at a TTY)
 
 The names those modules own that callers address are re-exported below, so
 ``cli.<name>`` keeps resolving. They are aliases: substituting one in a test means
@@ -46,13 +47,13 @@ from typing import NoReturn
 # ``cli.msb.<fn>``, and the adapter is reached through ``commands.common`` at
 # runtime. Keeping it here preserves those addresses across the command split.
 from . import backends, config, envelope, errors, migration, msb, state, userdirs  # noqa: F401
-from .commands import common, creds, kit, lifecycle, secret, session
+from .commands import common, configure, creds, kit, lifecycle, secret, session
 
 # Every subcommand acq owns. An argv token that is not one of these (and is not a
 # flag) is treated as an unknown verb and forwarded verbatim to the active
 # backend (announced passthrough, spec user story #9 / ADR-0038m §1).
 KNOWN_COMMANDS = frozenset(
-    "version doctor help backend create run ls stop rm exec attach shell cp ports "
+    "version doctor help backend configure create run ls stop rm exec attach shell cp ports "
     "secret kit kit-source provider-credential github-scope usai-rotate-api-key".split()
 )
 
@@ -225,6 +226,11 @@ def build_parser() -> _Parser:
     set_parser.add_argument("name", help="backend name (sbx | msb)")
     backend_sub.add_parser("unset", help="clear the persisted default (fall back to auto-detect)")
 
+    sub.add_parser(
+        "configure",
+        help="show the configuration; at a terminal, choose extra kits, token scoping and the provider kit",
+    )
+
     create_parser = sub.add_parser("create", help="create a sandbox (detached)")
     create_parser.add_argument("agent", nargs="?", help="agent to provision (e.g. opencode, shell)")
     create_parser.add_argument("path", nargs="?", help="workspace directory to mount")
@@ -357,6 +363,10 @@ def build_parser() -> _Parser:
     pc_sub.add_parser("ls", help="list pinned provider bindings (provider/key_env/hosts/source_layer, never values)")
     pc_rm = pc_sub.add_parser("rm", help="remove a configured provider binding")
     pc_rm.add_argument("provider", help="provider id")
+    pc_rm.add_argument(
+        "--accept-unconfirmed", dest="accept_unconfirmed", action="append", metavar="NAME[,NAME]",
+        help="accept these sandboxes (with no acq binding record) staying unconfirmed (msb)",
+    )
 
     # github-scope: per-sandbox GitHub token scoping (ADR-0013). The token is on
     # stdin only and backend-bound; the scope is recorded host-side.
@@ -730,6 +740,18 @@ def _dispatch(parser: _Parser, parsed, emit_json: bool, backend_override: str | 
             return run_backend_set(emit_json, parsed.name)
         return run_backend_unset(emit_json)
 
+    if parsed.command == "configure":
+        if backend_override is not None and backend_override not in backends.BACKENDS:
+            return common._usage_failure(
+                "configure", f"unknown backend: {backend_override!r} (expected sbx or msb)", emit_json
+            )
+        # Only the interactive form writes config.yaml, and it takes the
+        # migration pre-step just before its first write, so a cancelled run
+        # leaves a legacy config untouched.
+        return configure.run_configure(
+            emit_json, backend_override, lambda: _migration_pre_step(emit_json, "configure")
+        )
+
     if parsed.command in ("create", "run", "ls", "stop", "rm", "exec", "attach", "shell", "cp", "ports"):
         _backend, exit_code = common._resolve_backend_for_lifecycle(backend_override, emit_json, parsed.command)
         if exit_code is not None:
@@ -813,12 +835,12 @@ def _dispatch(parser: _Parser, parsed, emit_json: bool, backend_override: str | 
         subcmd = parsed.provider_credential_command
         if subcmd is None:
             return common._usage_failure("provider-credential", "provider-credential requires a subcommand: set | ls | rm", emit_json)
-        # ls/rm read and mutate host-side binding records only; only `set` moves a
-        # value across the backend boundary and therefore needs a backend.
+        # ls reads host-side binding records only. rm resolves a backend itself,
+        # and only when a stored credential has to be unbound; set always needs one.
         if subcmd == "ls":
             return creds.run_provider_credential_ls(emit_json)
         if subcmd == "rm":
-            return creds.run_provider_credential_rm(parsed, emit_json)
+            return creds.run_provider_credential_rm(parsed, emit_json, backend_override)
         _backend, exit_code = common._resolve_backend_for_mutation(
             backend_override, emit_json, "provider-credential set", domain="provider credentials",
             capability="provider-credential-set",
