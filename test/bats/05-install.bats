@@ -219,3 +219,67 @@ SHIM
   assert_success
   [ "$(cat "$dir/.acq-previous.mine/f")" = keep ]
 }
+
+# The verified archive is staged in a private work dir: another local user must
+# not be able to pre-create or swap it between verify and extract (a predictable
+# name plus `mkdir -p` would adopt their directory).
+@test "installer: verifies the archive inside a private, unpredictable work dir" {
+  local shim="$STUBDIR/sum-shim" log="$STUBDIR/sum.log" real
+  mkdir -p "$shim"
+  for tool in sha256sum shasum; do
+    real="$(command -v "$tool" 2>/dev/null)" || continue
+    cat > "$shim/$tool" <<SHIM
+#!/bin/sh
+for f; do :; done
+d=\$(dirname "\$f")
+printf '%s %s\n' "\$(ls -ld "\$d" | cut -c1-10)" "\${d##*/}" >> "$log"
+exec "$real" "\$@"
+SHIM
+    chmod +x "$shim/$tool"
+  done
+  PATH="$shim:$PATH" run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_success
+  run cat "$log"
+  assert_output --regexp '^drwx------ acq-install\.'
+  # The suffix is random (mktemp), not the installer's PID.
+  refute_output --regexp 'acq-install\.[0-9]+$'
+}
+
+@test "installer: an interrupt cannot let a re-created work dir be installed" {
+  # Models a local attacker: after an interrupt deletes the private work dir,
+  # they re-create its (now known) path with a poisoned archive. The installer
+  # must exit on the signal instead of carrying on and extracting it.
+  # The attacker plants every file the installer reads after verification (the
+  # archive and the public provenance manifest), so only the signal exit stops it.
+  local shim="$STUBDIR/race-shim" evil="$STUBDIR/evil" real_mkdir real_tar a w
+  real_mkdir="$(command -v mkdir)"; real_tar="$(command -v tar)"
+  mkdir -p "$shim" "$evil" "$STUBDIR/tmp"
+  for a in "$REPO_ROOT"/test/fixtures/installer/*.tar.gz; do
+    w="$STUBDIR/repack"; rm -rf "$w"; mkdir -p "$w"
+    tar -xzf "$a" -C "$w"; : > "$w/PWNED"
+    (cd "$w" && tar -czf "$evil/${a##*/}" .)
+  done
+  cat > "$shim/mkdir" <<SHIM
+#!/bin/sh
+for last; do :; done
+case "\$last" in
+  */acq-install.*/stage)
+    t=\${last%/stage}
+    ( while [ -d "\$t" ]; do sleep 0.02; done
+      "$real_mkdir" -p "\$t/stage"
+      cp "$evil"/*.tar.gz "$REPO_ROOT/test/fixtures/installer/provenance.json" "\$t/" ) &
+    kill -INT \$PPID ;;
+esac
+exec "$real_mkdir" "\$@"
+SHIM
+  cat > "$shim/tar" <<SHIM
+#!/bin/sh
+sleep 0.5
+exec "$real_tar" "\$@"
+SHIM
+  chmod +x "$shim/mkdir" "$shim/tar"
+  TMPDIR="$STUBDIR/tmp" PATH="$shim:$PATH" run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_failure
+  [ ! -e "$(_install_dir)/PWNED" ]
+  [ ! -e "$(_install_dir)/acq" ]
+}
