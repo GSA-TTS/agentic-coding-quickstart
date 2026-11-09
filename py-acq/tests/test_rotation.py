@@ -429,6 +429,7 @@ def test_a_refusal_from_the_other_backend_only_fails_its_propagation(
     assert "nothing was changed" not in remediation
     assert "the sbx sandboxes were not re-fed" in remediation and "ADR-0008" in remediation
     assert "sbx-cs-g1" in remediation and "re-run 'acq usai-rotate-api-key' with the same key" in remediation
+    assert remediation.count("re-run") == 1, remediation  # said once, not doubled
     _assert_never_leaked(tmp_path, [argv for argv, _ in msb_children + sbx_calls], out, err)
 
 
@@ -454,6 +455,7 @@ def test_every_other_backend_sbx_refusal_lets_msb_rotate(
     assert _set_customs(sbx_calls) == {}
     [reason] = doc["error"]["backends"][1]["not_refed"]
     assert reason.startswith(_CANNOT) and expect in reason, reason
+    assert doc["error"]["remediation"].count("re-run 'acq usai-rotate-api-key' with the same key") == 1
     _assert_never_leaked(tmp_path, [argv for argv, _ in msb_children + sbx_calls], out, err)
 
 

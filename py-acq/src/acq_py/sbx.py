@@ -1131,6 +1131,7 @@ def _rotate_envs(hosts: list[str], env: str) -> _Envs:
 
 _NOTHING_CHANGED = "nothing was changed"
 _SBX_NOT_REFED = "the sbx sandboxes were not re-fed"
+_RERUN = "re-run 'acq usai-rotate-api-key' with the same key"
 
 
 def _rotate_plan(
@@ -1163,8 +1164,8 @@ def _rotate_plan(
             f"sbx lists {len(rows[0])} global custom secrets for ${env}, so acq cannot tell which "
             "one your sandboxes use",
             f"{outcome}; keep the one your sandboxes were injected with and remove the others with 'acq secret rm "
-            f"PLACEHOLDER' (placeholders: {', '.join(e.placeholder for e in rows[0])}), then re-run; a sandbox "
-            "left with a removed placeholder is recovered by the ADR-0008 rebind or a recreate",
+            f"PLACEHOLDER' (placeholders: {', '.join(e.placeholder for e in rows[0])}), then {_RERUN}; a "
+            "sandbox left with a removed placeholder is recovered by the ADR-0008 rebind or a recreate",
         )
     return rows
 
@@ -1210,10 +1211,12 @@ def rotate_preflight(*, primary: bool = True) -> dict | None:
     except SbxError as exc:
         if primary:
             raise
-        return _not_refed(
-            f"acq cannot re-feed sbx: {exc.message}",
-            f"{exc.remediation}; then re-run 'acq usai-rotate-api-key' with the same key to re-feed the sbx sandboxes",
-        )
+        # Say to re-run the rotation once, whether or not the refusal already does.
+        remediation = exc.remediation or ""
+        if _RERUN not in remediation:
+            remediation = f"{remediation}; then {_RERUN} to re-feed the sbx sandboxes" if remediation else (
+                f"{_RERUN} to re-feed the sbx sandboxes")
+        return _not_refed(f"acq cannot re-feed sbx: {exc.message}", remediation)
     return None
 
 
