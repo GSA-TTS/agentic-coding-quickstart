@@ -421,3 +421,15 @@ def migrate_tree() -> None:
             str(exc),
             "repair or remove config.yaml so its schema marker is readable",
         ) from exc
+    except OSError as exc:
+        # An unwritable or full state root (creating the lock file, writing the
+        # generation marker, the config.yaml step) must fail closed through the
+        # error contract, not crash every mutating verb with a traceback.
+        # Per-record failures are already MigrationErrors naming their step.
+        where = exc.filename or str(state_root())
+        raise MigrationError(
+            errors.MIGRATION_FAILED,
+            f"could not migrate the acq state tree at {str(where)!r}: {exc.strerror or exc}",
+            "check that the acq state and config directories are writable and have free space, then retry",
+            path=str(where),
+        ) from exc
