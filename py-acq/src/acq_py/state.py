@@ -22,6 +22,7 @@ import hashlib
 import json
 import os
 import re
+import tempfile
 from pathlib import Path
 
 from . import userdirs
@@ -83,9 +84,43 @@ def _checksum(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()[:8]
 
 
+def safe_token(token: str) -> str:
+    """``token`` reduced to the safe filename charset (for per-sandbox paths)."""
+    return _safe(token)
+
+
+def record_key(name: str) -> str:
+    """The per-sandbox filename stem: sanitized name plus a checksum of the raw name."""
+    return f"{_safe(name)}.{_checksum(name)}"
+
+
 def record_path(backend: str, name: str) -> Path:
     """Path to one sandbox's state record, keyed by backend + sandbox name."""
-    return backend_dir(backend) / f"{_safe(name)}.{_checksum(name)}.json"
+    return backend_dir(backend) / f"{record_key(name)}.json"
+
+
+def atomic_write_text(path: Path, data: str) -> None:
+    """Write ``data`` to ``path`` atomically: unique temp file, fsync, rename.
+
+    The temp file gets a unique name in the target directory, so two writers of
+    the same record (or of two records in one directory) never share a temp file,
+    and a failed write removes its own temp file. A crash cannot leave a
+    half-written record (ADR-0041m atomic, non-destructive).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def backend_dir(backend: str) -> Path:
@@ -131,15 +166,7 @@ def record_write(
     if ro_host_config:
         doc["ro_host_config"] = True
 
-    path = record_path(backend, name)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    data = json.dumps(doc, indent=2, sort_keys=False)
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(data + "\n")
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp, path)
+    atomic_write_text(record_path(backend, name), json.dumps(doc, indent=2, sort_keys=False) + "\n")
     return doc
 
 

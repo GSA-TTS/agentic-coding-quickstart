@@ -1,6 +1,10 @@
 """``create``, ``run``, ``create --recreate``, ``ls``, ``stop``, ``rm``: the sandbox
 lifecycle, with the image, kit and substrate resolution those verbs share
 (ADR-0040m, ADR-0030).
+
+Create, recreate, rm (and the create-or-reattach step of ``run``) each hold the
+per-sandbox lifecycle lock (``lock.sandbox_lock``) for their whole transaction,
+so two acq commands never interleave on one sandbox's guest and host records.
 """
 
 from __future__ import annotations
@@ -10,7 +14,7 @@ import os
 import sys
 import time
 
-from .. import envelope, errors, kits, msb, sbx, security, state
+from .. import envelope, errors, kits, lock, msb, sbx, security, state
 from . import common
 
 
@@ -211,16 +215,51 @@ def _apply_agent_kit(
 
 
 def _discard_half_created(backend: str, name: str) -> None:
-    """Remove a just-created sandbox (and its record) after a failed kit apply.
+    """Remove a just-created sandbox (and its host records) after a failed kit apply.
 
     Mirrors the exec-ready timeout cleanup in ``_create_sandbox``: a sandbox
     created but left without its agent binary must not strand.
     """
-    try:
-        common._adapter(backend).remove(name)
-    except common._ADAPTER_ERRORS:
-        pass
+    _remove_quietly(common._adapter(backend), name)
+    _clear_host_records(backend, name)
+
+
+def _discard_recreated_guest(backend: str, name: str) -> None:
+    """Remove a recreated guest whose kit apply failed, keeping its state record.
+
+    Recreation promises that host records survive: the state record (agent,
+    workspace, image, ``ro_host_config``) is the authority a retried
+    ``create --recreate`` rebuilds from, so only the guest and the applied-kit
+    record (which no longer describes any guest) go.
+    """
+    _remove_quietly(common._adapter(backend), name)
+    kits.kit_applied_remove(backend, name)
+
+
+def _clear_host_records(backend: str, name: str) -> None:
+    """Drop every per-sandbox host record: the state record and the applied-kit record.
+
+    A leftover applied-kit record would make the next create of the same name
+    skip the agent install, so the two always go together.
+    """
     state.record_remove(backend, name)
+    kits.kit_applied_remove(backend, name)
+
+
+def _has_host_records(backend: str, name: str) -> bool:
+    """True when any per-sandbox host record exists, readable or not."""
+    return state.record_path(backend, name).exists() or kits.kit_applied_present(backend, name)
+
+
+def _lock_failure(command: str, name: str, exc: lock.SandboxLockTimeout, emit_json: bool) -> int:
+    """Report that another acq command holds the sandbox's lifecycle lock."""
+    return common._operational_failure(
+        command,
+        errors.TIMEOUT,
+        str(exc),
+        f"wait for the other acq command on sandbox '{name}' to finish, then retry",
+        emit_json,
+    )
 
 
 def _reattach_workspace(
@@ -298,6 +337,10 @@ def _create_sandbox(
             f"sandbox '{name}' did not become exec-ready",
             f"check {backend} logs, then remove the half-created sandbox and retry",
         )
+    # The guest is brand new, so no kit is installed in it. An applied-kit record
+    # left by a sandbox of the same name that was removed outside acq would
+    # otherwise make the kit apply a no-op on a guest without the agent.
+    kits.kit_applied_remove(backend, name)
     try:
         state.record_write(backend, name, agent=agent, workspace=workspace, image=image, ro_host_config=ro_host_config)
     except OSError as exc:
@@ -358,6 +401,15 @@ def run_create(parsed, emit_json: bool, backend: str) -> int:
         kit_name = kits.agent_kit_for(parsed.agent)  # implicit inference (built-in only)
     name = parsed.name or common._derive_name(parsed.agent, workspace)
     workspace = common._mount_workspace(backend, workspace)
+    try:
+        with lock.sandbox_lock(backend, name):
+            return _create_locked(parsed, emit_json, backend, name, workspace, kit_name)
+    except lock.SandboxLockTimeout as exc:
+        return _lock_failure("create", name, exc, emit_json)
+
+
+def _create_locked(parsed, emit_json: bool, backend: str, name: str, workspace: str, kit_name: str | None) -> int:
+    """The body of ``create`` once the sandbox's lifecycle lock is held."""
     adapter = common._adapter(backend)
     if adapter.exists(name):
         return common._operational_failure(
@@ -414,7 +466,6 @@ def run_recreate(parsed, emit_json: bool, backend: str) -> int:
     sandbox that is NOT in the security exception — it is never a general "reset".
     """
     name = parsed.recreate
-    adapter = common._adapter(backend)
     try:
         record = state.record_read(backend, name)
     except state.StateSchemaError as exc:
@@ -430,7 +481,7 @@ def run_recreate(parsed, emit_json: bool, backend: str) -> int:
             "create",
             errors.SANDBOX_NOT_FOUND,
             f"sandbox '{name}' has no host state record to recreate",
-            f"create it with 'acq create', or list sandboxes with 'acq ls'",
+            "create it with 'acq create', or list sandboxes with 'acq ls'",
             emit_json,
         )
     try:
@@ -465,7 +516,38 @@ def run_recreate(parsed, emit_json: bool, backend: str) -> int:
             else:
                 print("cancelled.")
             return errors.EXIT_SUCCESS
+    try:
+        with lock.sandbox_lock(backend, name):
+            return _recreate_locked(name, emit_json, backend)
+    except lock.SandboxLockTimeout as exc:
+        return _lock_failure("create", name, exc, emit_json)
 
+
+def _recreate_locked(name: str, emit_json: bool, backend: str) -> int:
+    """The body of ``create --recreate`` once the lifecycle lock is held.
+
+    The record is read again under the lock: another command may have removed
+    the sandbox while the consent prompt was open.
+    """
+    adapter = common._adapter(backend)
+    try:
+        record = state.record_read(backend, name)
+    except state.StateSchemaError as exc:
+        return common._operational_failure(
+            "create",
+            errors.STATE_SCHEMA_UNSUPPORTED,
+            str(exc),
+            f"remove the unreadable record for '{name}', or recreate it out of band",
+            emit_json,
+        )
+    if record is None:
+        return common._operational_failure(
+            "create",
+            errors.SANDBOX_NOT_FOUND,
+            f"sandbox '{name}' has no host state record to recreate",
+            "create it with 'acq create', or list sandboxes with 'acq ls'",
+            emit_json,
+        )
     agent = record.get("agent") or "shell"
     workspace = record.get("workspace") or common.DEFAULT_GUEST_WORKSPACE
     if record.get("workspace"):
@@ -505,14 +587,15 @@ def run_recreate(parsed, emit_json: bool, backend: str) -> int:
     except common._ADAPTER_ERRORS as exc:
         return common._operational_failure("create", exc.code, exc.message, exc.remediation, emit_json)
     # The guest filesystem was destroyed, so a prior applied-kit record no longer
-    # describes the fresh guest: clear it and re-apply the agent kit (if any) so
-    # the recreated sandbox has its agent binary (ADR-0030 create-time install).
+    # describes the fresh guest (``_create_sandbox`` cleared it): re-apply the
+    # agent kit (if any) so the recreated sandbox has its agent binary (ADR-0030
+    # create-time install). On failure the state record stays, so the recreate
+    # can be retried.
     entrypoint = None
     if kit_name is not None:
-        kits.kit_applied_remove(backend, name)
         gate = _apply_agent_kit(backend, name, kit_name, provision_steps, "create", emit_json)
         if gate is not None:
-            _discard_half_created(backend, name)
+            _discard_recreated_guest(backend, name)
             return gate
         entrypoint = kits.agent_kit_entrypoint(kit_name)
     data["kit"] = kit_name
@@ -523,6 +606,71 @@ def run_recreate(parsed, emit_json: bool, backend: str) -> int:
     else:
         print(f"recreated sandbox '{name}' (host records and secrets preserved).")
     return errors.EXIT_SUCCESS
+
+
+def _run_prepare_locked(
+    parsed, emit_json: bool, backend: str, target: str, name: str, workspace: str, kit_name: str | None
+) -> tuple[dict | None, int | None]:
+    """Create-or-reattach for ``run AGENT PATH`` with the lifecycle lock held.
+
+    Returns ``(data, None)`` with the result data (whose ``workspace`` and
+    ``entrypoint`` drive the launch), or ``(None, exit_code)`` once a failure has
+    been reported. The launch itself happens after the lock is released: an
+    interactive session must not block other commands on the sandbox.
+    """
+    adapter = common._adapter(backend)
+    action = "reattached" if adapter.exists(name) else "created"
+    if action == "reattached":
+        recorded, exit_code = _reattach_workspace(backend, name, workspace, emit_json)
+        if exit_code is not None:
+            return None, exit_code
+        workspace = recorded or workspace
+    image: str | None = None
+    entrypoint: str | None = None
+    if not adapter.exists(name):
+        if kit_name is None:
+            kit_name = kits.agent_kit_for(target)  # implicit inference (built-in only)
+        if kit_name is not None and not common._supports(backend, "kit-apply"):
+            return None, common._operational_failure(
+                "run",
+                errors.UNSUPPORTED,
+                f"agent '{target}' requires the '{kit_name}' kit, which the {backend} backend cannot apply",
+                "use a backend that supports kit-apply (msb in this slice), or choose an agent without a kit",
+                emit_json,
+            )
+        image, provision_steps, exit_code = _resolve_image_for_kit(parsed.image, target, kit_name, "run", emit_json)
+        if exit_code is not None:
+            return None, exit_code
+        try:
+            _create_sandbox(backend, target, workspace, name, image, kit_name)
+        except common._ADAPTER_ERRORS as exc:
+            return None, common._operational_failure("run", exc.code, exc.message, exc.remediation, emit_json)
+        if kit_name is not None:
+            gate = _apply_agent_kit(backend, name, kit_name, provision_steps, "run", emit_json)
+            if gate is not None:
+                _discard_half_created(backend, name)
+                return None, gate
+            entrypoint = kits.agent_kit_entrypoint(kit_name)
+    else:
+        # Re-attach: the kit (if any) was applied at create time; read the
+        # recorded kit/entrypoint (lenient) so the launch surfaces provenance.
+        applied = kits.kit_applied_read(backend, name)
+        if applied:
+            kit_name = applied.get("kit")
+            entrypoint = applied.get("entrypoint")
+    data: dict = {
+        "name": name,
+        "backend": backend,
+        "agent": target,
+        "workspace": workspace,
+        "state": "running",
+        "action": action,
+    }
+    if action == "created":
+        data["image"] = image
+    data["kit"] = kit_name
+    data["entrypoint"] = entrypoint
+    return data, None
 
 
 def run_run(parsed, emit_json: bool, backend: str) -> int:
@@ -544,62 +692,19 @@ def run_run(parsed, emit_json: bool, backend: str) -> int:
             return exit_code
         name = parsed.name or common._derive_name(target, workspace)
         workspace = common._mount_workspace(backend, workspace)
-        action = "reattached" if adapter.exists(name) else "created"
-        if action == "reattached":
-            workspace, exit_code = _reattach_workspace(backend, name, workspace, emit_json)
-            if exit_code is not None:
-                return exit_code
-        image: str | None = None
-        entrypoint: str | None = None
-        if not adapter.exists(name):
-            if kit_name is None:
-                kit_name = kits.agent_kit_for(target)  # implicit inference (built-in only)
-            if kit_name is not None and not common._supports(backend, "kit-apply"):
-                return common._operational_failure(
-                    "run",
-                    errors.UNSUPPORTED,
-                    f"agent '{target}' requires the '{kit_name}' kit, which the {backend} backend cannot apply",
-                    "use a backend that supports kit-apply (msb in this slice), or choose an agent without a kit",
-                    emit_json,
-                )
-            image, provision_steps, exit_code = _resolve_image_for_kit(parsed.image, target, kit_name, "run", emit_json)
-            if exit_code is not None:
-                return exit_code
-            try:
-                _create_sandbox(backend, target, workspace, name, image, kit_name)
-            except common._ADAPTER_ERRORS as exc:
-                return common._operational_failure("run", exc.code, exc.message, exc.remediation, emit_json)
-            if kit_name is not None:
-                gate = _apply_agent_kit(backend, name, kit_name, provision_steps, "run", emit_json)
-                if gate is not None:
-                    _discard_half_created(backend, name)
-                    return gate
-                entrypoint = kits.agent_kit_entrypoint(kit_name)
-        else:
-            # Re-attach: the kit (if any) was applied at create time; read the
-            # recorded kit/entrypoint (lenient) so the launch surfaces provenance.
-            applied = kits.kit_applied_read(backend, name)
-            if applied:
-                kit_name = applied.get("kit")
-                entrypoint = applied.get("entrypoint")
-        data = {
-            "name": name,
-            "backend": backend,
-            "agent": target,
-            "workspace": workspace,
-            "state": "running",
-            "action": action,
-        }
-        if action == "created":
-            data["image"] = image
-        data["kit"] = kit_name
-        data["entrypoint"] = entrypoint
+        try:
+            with lock.sandbox_lock(backend, name):
+                data, exit_code = _run_prepare_locked(parsed, emit_json, backend, target, name, workspace, kit_name)
+        except lock.SandboxLockTimeout as exc:
+            return _lock_failure("run", name, exc, emit_json)
+        if data is None:
+            return exit_code if exit_code is not None else errors.EXIT_FAILURE
         if emit_json:
             print(json.dumps(envelope.success("run", data)))
         # Launch in the foreground; the child's status is `run`'s exit status. In
         # --json mode the child's stdout is routed to stderr so stdout stays one
         # JSON document. A recorded kit entrypoint wins over the agent token.
-        return _launch_after_envelope(backend, name, workspace, entrypoint or target, emit_json)
+        return _launch_after_envelope(backend, name, data["workspace"], data["entrypoint"] or target, emit_json)
 
     # Not a known agent: re-attach to an existing sandbox by name, else fail
     # closed as ambiguous (a token that is neither agent nor sandbox is a usage
@@ -739,24 +844,62 @@ def run_stop(parsed, emit_json: bool, backend: str) -> int:
 
 
 def run_rm(parsed, emit_json: bool, backend: str) -> int:
-    adapter = common._adapter(backend)
+    """``acq rm NAME``: remove a sandbox and every host record acq keeps for it.
+
+    Holds the sandbox's lifecycle lock so a concurrent create cannot write
+    records for a guest this removal is tearing down.
+    """
     name = parsed.name
-    if not adapter.exists(name):
-        return common._operational_failure(
-            "rm",
-            errors.SANDBOX_NOT_FOUND,
-            f"sandbox '{name}' not found",
-            f"list sandboxes with 'acq ls'",
-            emit_json,
-        )
     try:
-        adapter.remove(name)
-    except common._ADAPTER_ERRORS as exc:
-        return common._operational_failure("rm", exc.code, exc.message, exc.remediation, emit_json)
-    state.record_remove(backend, name)
-    data = {"name": name, "backend": backend, "removed": True}
+        with lock.sandbox_lock(backend, name):
+            return _rm_locked(name, emit_json, backend)
+    except lock.SandboxLockTimeout as exc:
+        return _lock_failure("rm", name, exc, emit_json)
+
+
+def _still_exists(adapter, name: str) -> bool:
+    """Whether the backend still lists the sandbox; an unanswerable probe counts as yes."""
+    try:
+        return bool(adapter.exists(name))
+    except common._ADAPTER_ERRORS:
+        return True
+
+
+def _rm_locked(name: str, emit_json: bool, backend: str) -> int:
+    """The body of ``rm`` once the lifecycle lock is held.
+
+    Like Bash's ``_acq_backend_terminate_unlocked``, cleanup of host records
+    still happens when the sandbox is already gone: a sandbox removed outside acq
+    leaves records only acq can clear (``backend_absent: true``), and a remove
+    that fails because the guest vanished meanwhile still clears them. Only when
+    there is neither a guest nor any host record is the name unknown.
+    """
+    adapter = common._adapter(backend)
+    backend_absent = False
+    if not adapter.exists(name):
+        if not _has_host_records(backend, name):
+            return common._operational_failure(
+                "rm",
+                errors.SANDBOX_NOT_FOUND,
+                f"sandbox '{name}' not found",
+                "list sandboxes with 'acq ls'",
+                emit_json,
+            )
+        backend_absent = True
+    else:
+        try:
+            adapter.remove(name)
+        except common._ADAPTER_ERRORS as exc:
+            if _still_exists(adapter, name):
+                return common._operational_failure("rm", exc.code, exc.message, exc.remediation, emit_json)
+    _clear_host_records(backend, name)
+    data: dict = {"name": name, "backend": backend, "removed": True}
+    if backend_absent:
+        data["backend_absent"] = True
     if emit_json:
         print(json.dumps(envelope.success("rm", data)))
+    elif backend_absent:
+        print(f"removed the host records for sandbox '{name}' (the sandbox itself was already gone)")
     else:
         print(f"removed sandbox '{name}'")
     return errors.EXIT_SUCCESS
