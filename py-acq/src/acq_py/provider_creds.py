@@ -82,16 +82,20 @@ BINDINGS_ENV = "ACQ_PROVIDER_CREDENTIAL_BINDINGS"
 # bindings without a prior ``set`` (mirrors ``ACQ_KIT_SOURCE_SEED``).
 SEED_ENV = "ACQ_PROVIDER_CREDENTIAL_SEED"
 
+# These grammars are applied with re.fullmatch, never re.match: in Python, `$`
+# also matches just before a trailing newline, so "BASH_ENV\n" would pass an
+# anchored match() while not equalling the forbidden name it represents.
+
 # providerId grammar: lower-case alphanumeric + hyphens, bounded, never
 # starting/ending with '-'.
-_PROVIDER_ID_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$")
+_PROVIDER_ID_RE = re.compile(r"[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?")
 
 # KEY_ENV grammar: an upper-case environment-variable name.
-_KEY_ENV_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+_KEY_ENV_RE = re.compile(r"[A-Z][A-Z0-9_]*")
 
 # HOST grammar: one DNS name, lower-case, no scheme/port/path/wildcard.
 _HOST_RE = re.compile(
-    r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$"
+    r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*"
 )
 
 _SAFE_RE = re.compile(r"[^A-Za-z0-9._-]")
@@ -110,11 +114,11 @@ def _checksum(token: str) -> str:
 # ---------------------------------------------------------------------------
 
 def provider_id_ok(provider: str) -> bool:
-    return bool(_PROVIDER_ID_RE.match(provider))
+    return bool(_PROVIDER_ID_RE.fullmatch(provider))
 
 
 def key_env_ok(key_env: str) -> bool:
-    return key_env not in FORBIDDEN_KEY_ENVS and bool(_KEY_ENV_RE.match(key_env))
+    return key_env not in FORBIDDEN_KEY_ENVS and bool(_KEY_ENV_RE.fullmatch(key_env))
 
 
 def key_env_owner(key_env: str) -> str | None:
@@ -122,7 +126,7 @@ def key_env_owner(key_env: str) -> str | None:
 
 
 def host_ok(host: str) -> bool:
-    return len(host) <= 253 and bool(_HOST_RE.match(host))
+    return len(host) <= 253 and bool(_HOST_RE.fullmatch(host))
 
 
 def validate_binding(provider: str, key_env: str, hosts: list[str]) -> str | None:
