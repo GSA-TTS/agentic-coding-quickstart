@@ -35,7 +35,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import errors, hostexec, kits
+from . import errors, hostexec, kits, timeouts
 
 STUB_SENTINEL = "__stub__"
 
@@ -46,7 +46,18 @@ DEFAULT_CPUS = "2"
 
 # Exec-ready gate budget (seconds): `msb create` returns 0 even on async boot
 # failure, so readiness is proven by a successful `msb exec` (ADR-0011).
-READY_TIMEOUT_S = float(os.environ.get("ACQ_MSB_READY_TIMEOUT", "30"))
+DEFAULT_READY_TIMEOUT_S = 30.0
+READY_TIMEOUT_ENV = "ACQ_MSB_READY_TIMEOUT"
+
+
+def ready_timeout_s() -> float:
+    """The exec-ready budget in seconds, read when needed (never at import).
+
+    A malformed or non-finite override falls back to the default with a stderr
+    warning instead of crashing every command or making the wait unbounded.
+    """
+    return timeouts.env_seconds(READY_TIMEOUT_ENV, DEFAULT_READY_TIMEOUT_S)
+
 
 # Module-local seam for the host OS class. ``_guest_path`` reads this instead of
 # ``os.name`` so the Windows-only translation is testable on a POSIX host without
@@ -193,15 +204,25 @@ def _run(
             text=True,
             timeout=timeout,
         )
-    except FileNotFoundError as exc:
-        # A missing msb binary must never surface as an uncaught traceback
-        # (ADR-0040m stable error vocabulary): fail closed with a code the seam
-        # can map, not a raw OSError.
-        raise MsbError(
-            errors.BACKEND_NOT_FOUND,
-            "the msb backend CLI could not be run",
-            "install msb and retry",
-        ) from exc
+    except OSError as exc:
+        # A missing (or non-executable) msb binary must never surface as an
+        # uncaught traceback (ADR-0040m stable error vocabulary): fail closed with
+        # a code the seam can map, not a raw OSError.
+        raise cli_unavailable() from exc
+
+
+def cli_unavailable() -> MsbError:
+    """The stable error for an msb CLI that cannot be started at all.
+
+    Covers a binary missing from PATH, removed after detection, or not
+    executable (``FileNotFoundError``/``PermissionError`` and other ``OSError``
+    from process creation). The message never echoes the resolved path.
+    """
+    return MsbError(
+        errors.BACKEND_NOT_FOUND,
+        "the msb backend CLI could not be run",
+        "install msb and retry",
+    )
 
 
 def list_names() -> list[str] | None:
@@ -550,7 +571,8 @@ def _run_stream(argv: list[str], *, json_mode: bool) -> int:
     stdout stays a single JSON document (ADR-0038m §2); otherwise stdio is
     inherited so the child renders directly (and a TTY would attach normally).
     Passing the fd directly keeps this working when ``sys.stderr`` has been
-    replaced by a harness object without a usable fileno().
+    replaced by a harness object without a usable fileno(). A CLI that cannot be
+    started raises :class:`MsbError` (``backend_not_found``), as :func:`_run` does.
     """
     if json_mode:
         try:
@@ -559,7 +581,10 @@ def _run_stream(argv: list[str], *, json_mode: bool) -> int:
             stdout = 2
     else:
         stdout = None
-    return subprocess.run([*msb_command(), *argv], stdout=stdout).returncode
+    try:
+        return subprocess.run([*msb_command(), *argv], stdout=stdout).returncode
+    except OSError as exc:
+        raise cli_unavailable() from exc
 
 
 def launch(name: str, workspace: str | None, agent: str | None, *, json_mode: bool = False) -> int:

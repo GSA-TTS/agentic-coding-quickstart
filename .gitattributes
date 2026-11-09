@@ -14,6 +14,7 @@
 acq text eol=lf
 acq-python text eol=lf
 # Extensionless shell scripts under scripts/ (the others there are Python).
+scripts/bats-shard text eol=lf
 scripts/diagnose-host-egress-diff text eol=lf
 scripts/diagnose-tls-intercept text eol=lf
 scripts/fix-exec-bits text eol=lf
@@ -27,6 +28,7 @@ scripts/run-shellcheck text eol=lf
 scripts/run-vectors text eol=lf
 scripts/setup-provider-input-validator text eol=lf
 scripts/stage-windows-runtime text eol=lf
+scripts/test-acq-bash32 text eol=lf
 scripts/test-acq-bats text eol=lf
 scripts/verify-backends text eol=lf
 scripts/verify-git-https-secret-msb text eol=lf

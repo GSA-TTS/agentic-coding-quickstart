@@ -83,6 +83,40 @@ def until(process, marker):
     return output.decode()
 
 
+def process_state(pid):
+    result = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True)
+    return result.stdout.strip()
+
+
+def wait_until_blocked(process):
+    # `ARMED` is printed before the script reaches its blocking `read`. A trapped
+    # signal that lands in that gap is not delivered by EINTR: the shell only
+    # runs the trap after `read` returns, so the case would hang until stdin
+    # closes. Wait until the process sleeps, on three consecutive polls (a
+    # runnable or preempted process reports R, never S), before signalling.
+    deadline = time.monotonic() + 15
+    asleep = 0
+    while asleep < 3 and process.poll() is None and time.monotonic() < deadline:
+        asleep = asleep + 1 if process_state(process.pid).startswith("S") else 0
+        time.sleep(0.02)
+    assert asleep >= 3, ("never blocked", process_state(process.pid))
+
+
+def diagnostics(process):
+    table = subprocess.run(["ps", "-axo", "pid,ppid,pgid,stat,command"], capture_output=True,
+                           text=True).stdout.splitlines()
+    tree = [line for line in table
+            if line.split()[:1] == ["PID"] or str(process.pid) in line.split()[:3]]
+    errors = b""
+    while process.stderr is not None and not process.stderr.closed \
+            and select.select([process.stderr], [], [], 0)[0]:
+        block = os.read(process.stderr.fileno(), 4096)
+        if not block:
+            break
+        errors += block
+    return "process tree:\n" + "\n".join(tree) + "\nstderr tail: " + repr(errors[-500:])
+
+
 def signal_case(mode, sig, group=False):
     process = subprocess.Popen([shell, str(script), mode], stdin=subprocess.PIPE,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -93,6 +127,8 @@ def signal_case(mode, sig, group=False):
         assert int(output.splitlines()[0].split()[1]) == process.pid, output
         if mode == "exec":
             assert int(output.splitlines()[1].split()[1]) == process.pid, output
+        if not group:
+            wait_until_blocked(process)
         if group:
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
@@ -115,6 +151,8 @@ def signal_case(mode, sig, group=False):
         assert not errors, errors
         assert_clean(output)
         print("PASS", mode, signal.Signals(sig).name, "group" if group else "pid")
+    except (AssertionError, subprocess.TimeoutExpired) as error:
+        raise AssertionError(f"{error!r}\n{diagnostics(process)}") from None
     finally:
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)

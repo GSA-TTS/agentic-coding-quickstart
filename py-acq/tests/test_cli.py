@@ -131,7 +131,8 @@ def test_cli_reexports_everything_the_command_modules_own_that_callers_address()
 
 
 def test_every_known_command_has_a_dispatch_arm_into_a_command_module():
-    # main() must route every advertised verb into a real handler. Driving each verb
+    # main() (through _dispatch, which holds the arms while main owns the error
+    # boundary) must route every advertised verb into a real handler. Driving each verb
     # with no arguments cannot prove this (most exit 2 at argparse before dispatch),
     # so this reads the dispatch itself, per arm: for every KNOWN_COMMAND there must
     # be an `if parsed.command == "X"` (or an `in (...)` group) whose body calls a
@@ -176,7 +177,8 @@ def test_every_known_command_has_a_dispatch_arm_into_a_command_module():
     # backend and then delegates to one `== "verb"` arm each, so the handler call
     # must be found on that inner arm, not merely somewhere in the enclosing group.
     routed, specific = {}, {}
-    for node in ast.walk(ast.parse(inspect.getsource(cli.main))):
+    dispatch_src = inspect.getsource(cli.main) + "\n" + inspect.getsource(cli._dispatch)
+    for node in ast.walk(ast.parse(dispatch_src)):
         if not isinstance(node, ast.If):
             continue
         verbs = verbs_of(node.test)

@@ -33,13 +33,23 @@ import os
 import subprocess
 import sys
 
-from . import errors, hostexec
+from . import errors, hostexec, timeouts
 
 STUB_SENTINEL = "__stub__"
 
 # Exec-ready gate budget (seconds). sbx's ``create`` returns 0 even on async boot
 # failure, so readiness is proven by a successful ``sbx exec`` (mirrors msb).
-READY_TIMEOUT_S = float(os.environ.get("ACQ_SBX_READY_TIMEOUT", "30"))
+DEFAULT_READY_TIMEOUT_S = 30.0
+READY_TIMEOUT_ENV = "ACQ_SBX_READY_TIMEOUT"
+
+
+def ready_timeout_s() -> float:
+    """The exec-ready budget in seconds, read when needed (never at import).
+
+    A malformed or non-finite override falls back to the default with a stderr
+    warning instead of crashing every command or making the wait unbounded.
+    """
+    return timeouts.env_seconds(READY_TIMEOUT_ENV, DEFAULT_READY_TIMEOUT_S)
 
 
 class SbxError(Exception):
@@ -81,12 +91,19 @@ def _run(
             text=True,
             timeout=timeout,
         )
-    except FileNotFoundError as exc:
-        raise SbxError(
-            errors.BACKEND_NOT_FOUND,
-            "the sbx backend CLI could not be run",
-            "install sbx and retry",
-        ) from exc
+    except OSError as exc:
+        # Mirrors msb._run: a missing or non-executable sbx binary fails closed
+        # with a stable code, never a raw OSError traceback.
+        raise cli_unavailable() from exc
+
+
+def cli_unavailable() -> SbxError:
+    """The stable error for an sbx CLI that cannot be started at all (see msb)."""
+    return SbxError(
+        errors.BACKEND_NOT_FOUND,
+        "the sbx backend CLI could not be run",
+        "install sbx and retry",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +261,8 @@ def _run_stream(argv: list[str], *, json_mode: bool) -> int:
     """Run a backend command with the child's exit status as the return value.
 
     Mirrors :func:`acq_py.msb._run_stream`: in ``json_mode`` the child's stdout is
-    routed to stderr so the CLI's stdout stays a single JSON document.
+    routed to stderr so the CLI's stdout stays a single JSON document, and a CLI
+    that cannot be started raises :class:`SbxError` (``backend_not_found``).
     """
     if json_mode:
         try:
@@ -253,7 +271,10 @@ def _run_stream(argv: list[str], *, json_mode: bool) -> int:
             stdout = 2
     else:
         stdout = None
-    return subprocess.run([*sbx_command(), *argv], stdout=stdout).returncode
+    try:
+        return subprocess.run([*sbx_command(), *argv], stdout=stdout).returncode
+    except OSError as exc:
+        raise cli_unavailable() from exc
 
 
 def launch(name: str, workspace: str | None, agent: str | None, *, json_mode: bool = False) -> int:

@@ -36,7 +36,7 @@ start. Two facts about that path are **not established**:
    `setup.files`) are guest-writable after delivery. They are: the guest owns its
    filesystem, so these are the same guest-resident copies ADR-0035 rejects.
 
-Scope today is small. An audit of the pinned Patterns release (v1.17.0) found no
+Scope today is small. An audit of Patterns v1.17.0 found no
 `acq-kits/*/spec.yaml` that declares `readonly: true`, so Mechanism 2 had no
 consumer on either backend. The v1.18.0 pin changes that: the opt-in `oci-engine`
 kit now declares `readonly: true` on its root startup grant script and storage
@@ -45,8 +45,8 @@ ignores the field, so the kit's startup command takes its legacy branch and runs
 the root-owned copies published at create. The SBX gap is therefore no longer
 latent for that one opt-in kit. Re-check this against the pin in force when the ADR
 is accepted.
-This ADR decides the direction so that the first kit to opt in does not silently
-get weaker guarantees on SBX than on msb.
+This ADR proposes the enforcement direction for opted-in kits; the implemented
+SBX warning makes the weaker guarantee visible without claiming parity.
 
 `sbx kit add` of startup-bearing kits is refused on sbx 0.38
 (`docs/KNOWN_FAILURE_MODES.md` section 36), so on that version mid-life repair is
@@ -141,26 +141,30 @@ to sbx without those startup commands.
 
 ### Option D: Accept and document
 
-Record that SBX trusted-restart parity does not exist, rely on native replay,
-and require that no kit mark startup code `readonly: true` on SBX until a
-mechanism is validated (the translator would warn, not silently degrade).
+Record that SBX trusted-restart parity does not exist and rely on native replay.
+When a kit marks startup code `readonly: true`, warn that SBX delivers a
+guest-resident copy without the corresponding integrity guarantee. Do not
+represent the field as enforced until a mechanism is validated.
 
-- Pros: zero risk of an unverified mechanism; honest; no code.
+- Pros: does not introduce an unverified enforcement mechanism; makes the
+  existing limitation visible.
 - Cons: SBX users get weaker restart integrity than msb for any kit that opts in.
-- Verdict: **correct interim state**, because no shipped kit opts in.
+- Verdict: **implemented interim state** for the opt-in `oci-engine` kit as well
+  as future consumers; the warning does not provide trusted-restart parity.
 
 ## Decision Outcome (proposed)
 
-**Adopt Option D now and Option B as the implementation path, gated on live
-validation and on the first shipped kit that sets `readonly: true`.** Do not
+**Retain the implemented Option D warning and propose Option B as the
+enforcement path, gated on live validation.** The first shipped consumer,
+`oci-engine`, already sets `readonly: true`. Do not
 implement Option C. Do not implement runtime code for Option B until the live
 validation below passes, because its integrity claim rests on sbx behavior
 (mount enforcement under a sudo guest, restart persistence) that has not been
 observed.
 
 Until then the SBX translator MUST NOT silently treat `readonly: true` as
-satisfied. When the first kit opts in, the SBX path must either implement
-Option B or emit a visible warning that the file is a guest copy on SBX.
+satisfied. The SBX path emits a visible warning that the file is a guest copy;
+replacing that warning-only behavior with Option B requires the validation below.
 
 **Implementation status (interim, Option D):** the visible warning is
 implemented. `_acq_sbx_translate_kit` in `acq.backends/sbx.sh` writes one
@@ -212,8 +216,8 @@ fixture kit and an SBX tamper step, mirroring the msb live fixture.
 
 ### Positive
 
-- The latent SBX gap is named, bounded, and tied to a concrete trigger instead of
-  being discovered when a kit opts in.
+- The SBX gap affecting the opted-in kit is named and made visible by the
+  warning, while stronger enforcement remains gated on concrete validation.
 - Reuses an existing, shipped sbx mechanism if validation passes.
 - Validation step 5 resolves whether native replay is trustworthy independent of
   this ADR's outcome.

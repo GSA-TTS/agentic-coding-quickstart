@@ -194,7 +194,18 @@ def _apply_agent_kit(
         common._adapter(backend).kit_apply(name, kit_name, kits.agent_kit_install(kit_name))
     except common._ADAPTER_ERRORS as exc:
         return common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
-    kits.kit_applied_write(backend, name, kit_name, kits.agent_kit_entrypoint(kit_name))
+    try:
+        kits.kit_applied_write(backend, name, kit_name, kits.agent_kit_entrypoint(kit_name))
+    except OSError as exc:
+        # The kit is installed but acq could not record it. Report it through the
+        # error contract; the caller discards the half-created sandbox.
+        return common._operational_failure(
+            command,
+            errors.FAILURE,
+            f"could not record the applied kit for sandbox '{name}': {exc.strerror or exc}",
+            "check that the acq state directory is writable and has free space, then retry",
+            emit_json,
+        )
     return None
 
 
@@ -241,7 +252,7 @@ def _reattach_workspace(
 
 def _wait_exec_ready(backend: str, name: str) -> bool:
     adapter = common._adapter(backend)
-    deadline = time.monotonic() + adapter.READY_TIMEOUT_S
+    deadline = time.monotonic() + adapter.ready_timeout_s()
     while True:
         if adapter.exec_ready(name):
             return True
@@ -280,16 +291,25 @@ def _create_sandbox(
         )
     if not _wait_exec_ready(backend, name):
         # A half-created sandbox must not strand (legacy cleanup).
-        try:
-            adapter.remove(name)
-        except common._ADAPTER_ERRORS:
-            pass
+        _remove_quietly(adapter, name)
         raise error_cls(
             errors.TIMEOUT,
             f"sandbox '{name}' did not become exec-ready",
             f"check {backend} logs, then remove the half-created sandbox and retry",
         )
-    state.record_write(backend, name, agent=agent, workspace=workspace, image=image, ro_host_config=ro_host_config)
+    try:
+        state.record_write(backend, name, agent=agent, workspace=workspace, image=image, ro_host_config=ro_host_config)
+    except OSError as exc:
+        # Without its host record the guest is unusable (run/attach refuse a
+        # sandbox with no readable record), so it must not strand either. The
+        # failure is raised as the adapter's error so every caller reports it
+        # through the same envelope path as a backend failure.
+        _remove_quietly(adapter, name)
+        raise error_cls(
+            errors.FAILURE,
+            f"could not write the host state record for sandbox '{name}': {exc.strerror or exc}",
+            "check that the acq state directory is writable and has free space, then retry",
+        ) from exc
     return {
         "name": name,
         "backend": backend,
@@ -298,6 +318,14 @@ def _create_sandbox(
         "state": "running",
         "image": image,
     }
+
+
+def _remove_quietly(adapter, name: str) -> None:
+    """Best-effort removal of a sandbox acq just created and cannot keep."""
+    try:
+        adapter.remove(name)
+    except common._ADAPTER_ERRORS:
+        pass
 
 
 def _print_create_human(data: dict) -> None:
@@ -575,7 +603,7 @@ def run_run(parsed, emit_json: bool, backend: str) -> int:
         # Launch in the foreground; the child's status is `run`'s exit status. In
         # --json mode the child's stdout is routed to stderr so stdout stays one
         # JSON document. A recorded kit entrypoint wins over the agent token.
-        return adapter.launch(name, workspace, entrypoint or target, json_mode=emit_json)
+        return _launch_after_envelope(backend, name, workspace, entrypoint or target, emit_json)
 
     # Not a known agent: re-attach to an existing sandbox by name, else fail
     # closed as ambiguous (a token that is neither agent nor sandbox is a usage
@@ -621,7 +649,22 @@ def run_run(parsed, emit_json: bool, backend: str) -> int:
                 )
             )
         )
-    return adapter.launch(target, workspace, common._launch_token(backend, target, agent), json_mode=emit_json)
+    return _launch_after_envelope(backend, target, workspace, common._launch_token(backend, target, agent), emit_json)
+
+
+def _launch_after_envelope(backend: str, name: str, workspace: str | None, token: str | None, emit_json: bool) -> int:
+    """Launch for ``run`` once its success envelope may already be on stdout.
+
+    Under ``--json`` stdout must carry exactly one document, and ``run`` has
+    already printed it before the foreground launch. A launch that cannot start
+    (e.g. the backend CLI vanished) is therefore reported on stderr only, with
+    exit 1, instead of reaching the command boundary, which would print a second
+    document.
+    """
+    try:
+        return common._adapter(backend).launch(name, workspace, token, json_mode=emit_json)
+    except common._ADAPTER_ERRORS as exc:
+        return common._operational_failure("run", exc.code, exc.message, exc.remediation, False)
 
 
 def _ls_data(backend: str) -> dict:
@@ -663,7 +706,12 @@ def _print_ls_human(data: dict) -> None:
 
 
 def run_ls(emit_json: bool, backend: str) -> int:
-    data = _ls_data(backend)
+    try:
+        data = _ls_data(backend)
+    except common._ADAPTER_ERRORS as exc:
+        # e.g. the backend CLI was removed after detection, or detection was
+        # forced: report backend_not_found through the envelope, not a traceback.
+        return common._operational_failure("ls", exc.code, exc.message, exc.remediation, emit_json)
     if emit_json:
         print(json.dumps(envelope.success("ls", data)))
     else:

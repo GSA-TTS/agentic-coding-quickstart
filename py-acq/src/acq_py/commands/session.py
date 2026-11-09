@@ -5,10 +5,11 @@ backend passthrough: the verbs that act on an existing sandbox (ADR-0038m §4).
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 
-from .. import backends, envelope, errors, hostexec, msb, state
+from .. import backends, envelope, errors, msb, sbx, state
 from . import common
 
 
@@ -259,10 +260,21 @@ def _passthrough(argv: list[str], explicit: str | None, emit_json: bool) -> int:
     The handoff is announced on stderr so the user knows any output/errors below
     the notice belong to the backend, not acq. The backend binary's exit status is
     preserved. Passthrough is a verbatim escape hatch: a successful handoff never
-    emits an acq JSON envelope (the backend owns stdout, so ``--json`` is inert);
-    only the no-backend failure follows acq's normal error contract.
+    emits an acq JSON envelope (the backend owns stdout, so ``--json`` is inert).
+    Failures before the handoff follow acq's normal error contract: an unknown
+    ``--backend`` is a usage error (exit 2), and no backend, or a backend CLI that
+    cannot be started, is ``backend_not_found`` (exit 1).
+
+    Like Bash's ``_acq_backend_passthrough``, it does not run the version floor:
+    the verb is the backend's own, so the backend judges it.
     """
     verb = argv[0]
+    if explicit is not None and explicit not in backends.BACKENDS:
+        return common._usage_failure(
+            verb,
+            f"unknown backend: {explicit!r} (expected sbx or msb)",
+            emit_json,
+        )
     name = common._resolve_active_backend(explicit)
     if name is None:
         return common._operational_failure(
@@ -272,12 +284,24 @@ def _passthrough(argv: list[str], explicit: str | None, emit_json: bool) -> int:
             f"install msb {backends.MSB_MIN_VERSION[0]}.{backends.MSB_MIN_VERSION[1]}.{backends.MSB_MIN_VERSION[2]} or newer and retry",
             emit_json,
         )
-    # The msb adapter honors ACQ_MSB_BIN (its test seam); sbx forwards to the raw
-    # CLI. Either way the unknown verb + args are forwarded unchanged.
-    if name == "msb":
-        binary = msb.msb_command()
-    else:
-        binary = hostexec.command(backends.BACKENDS[name].cli)
+    # Each adapter's command resolver honours its ACQ_<BACKEND>_BIN test seam, so
+    # the binary forwarded to is the one every other verb runs. The binary is
+    # resolved before the notice so a missing CLI yields only acq's error.
+    try:
+        binary = msb.msb_command() if name == "msb" else sbx.sbx_command()
+    except OSError:
+        return _backend_unavailable(verb, name, emit_json)
+    if not (os.path.isfile(binary[0]) and os.access(binary[0], os.X_OK)):
+        return _backend_unavailable(verb, name, emit_json)
     print(f"acq: '{verb}' is not an acq subcommand - forwarding to '{name}'.", file=sys.stderr)
     print(f"     (output and any errors below are from '{name}', not acq)", file=sys.stderr)
-    return subprocess.run([*binary, *argv]).returncode
+    try:
+        return subprocess.run([*binary, *argv]).returncode
+    except OSError:
+        return _backend_unavailable(verb, name, emit_json)
+
+
+def _backend_unavailable(verb: str, backend: str, emit_json: bool) -> int:
+    """Report a backend CLI that cannot be started, using the adapter's own error."""
+    err = common._adapter(backend).cli_unavailable()
+    return common._operational_failure(verb, err.code, err.message, err.remediation, emit_json)
