@@ -278,6 +278,22 @@ _ws_safe() { # ARGS...
   assert_success
 }
 
+@test "workspace specs: '.' is checked as the logical cwd, so a ':' symlink on the way is refused" {
+  mkdir -p "$WT/real/proj"
+  ln -s "$WT/real" "$WT/c:link"
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    cd -L "$1" || exit 9
+    for p in . ./ sub/..; do acq_workspace_specs_safe opencode "$p" 2>&1 && echo "accepted $p"; done
+    acq_workspace_specs_safe opencode "$2" 2>&1 && echo "accepted physical"
+  ' _ "$WT/c:link/proj" "$WT/real/proj"
+  assert_output --partial "contains ':'"
+  refute_output --partial 'accepted .'
+  refute_output --partial 'accepted ./'
+  refute_output --partial 'accepted sub/..'
+  assert_output --partial 'accepted physical'
+}
+
 @test "create(msb): no path argument from a ':' cwd fails before any backend create" {
   mkdir -p "$WT/cwdproj:z"
   cd "$WT/cwdproj:z"

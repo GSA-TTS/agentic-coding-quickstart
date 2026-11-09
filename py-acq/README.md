@@ -85,6 +85,17 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
 * `acq-py run AGENT PATH [--name N] [--image REF] [--json]` — create (if missing)
   then launch the agent in the foreground; `acq-py run NAME` re-attaches to an
   existing sandbox by name.
+* Sandbox names and workspace paths follow the Bash `acq` rules
+  (`commands/common.py`). Without `--name`, the name is `AGENT-<slug>`, where the
+  slug is the lowercased ASCII letters and digits of the workspace's last path
+  component (the root gives `workspace`). An explicit `--name` must match
+  `[A-Za-z0-9_-]+` and not start with `-`. Verbs that act on an existing sandbox
+  (`stop`, `rm`, `exec`, `attach`, `shell`, `ports`, `kit apply|check|update`,
+  `create --recreate`) refuse an empty name, `.`, `..`, and names containing `/`,
+  `\` or control characters. A workspace path, and the path its symlinks resolve
+  to, must not contain control characters or `:`. The backends split mount specs
+  on `:`, and acq-py takes no `:ro` suffix. On Windows the colon of a drive letter
+  (`C:\...`) is allowed, because msb's `--volume` source accepts it.
 * `acq-py ls [--json]` — list sandboxes with `name`/`backend`/`state`
   (ADR-0038m §2).
 * `acq-py stop NAME [--json]` and `acq-py rm NAME [--json]` — stop (state

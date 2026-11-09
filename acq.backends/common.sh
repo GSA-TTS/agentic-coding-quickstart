@@ -1216,10 +1216,39 @@ derive_name() {
     return 1
   fi
 
-  local base="."
-  [ -n "$first_path" ] && base=$(basename "$first_path")
-  [ "$base" = "." ] && base=$(basename "$PWD")
-  printf '%s\n' "$(slugify "$agent")-$(slugify "$base")"
+  _acq_path_basename "${first_path:-.}"
+  [ -n "$_ACQ_BASENAME" ] || _ACQ_BASENAME=workspace
+  printf '%s\n' "$(slugify "$agent")-$(slugify "$_ACQ_BASENAME")"
+}
+
+# _acq_path_basename PATH — set _ACQ_BASENAME to the last component of PATH
+# made absolute and lexically normalised, as the Python implementation's
+# os.path.abspath does: trailing '/', '.' and '..' steps are folded, a relative
+# path that folds to '.' names the logical $PWD, any other relative path is
+# joined onto the physical working directory, and the root yields "" (which
+# derive_name turns into "workspace"). It sets a variable rather than printing,
+# so a component ending in a newline is kept intact.
+_acq_path_basename() {
+  local p="$1" c up=0 abs=0
+  _ACQ_BASENAME=""
+  case "$p" in /*) abs=1 ;; esac
+  while :; do
+    while [ -n "$p" ]; do
+      c="${p##*/}"
+      case "$p" in */*) p="${p%/*}" ;; *) p="" ;; esac
+      case "$c" in
+        ''|.) ;;
+        ..) up=$((up + 1)) ;;
+        *)
+          if [ "$up" -eq 0 ]; then _ACQ_BASENAME="$c"; return 0; fi
+          up=$((up - 1))
+          ;;
+      esac
+    done
+    [ "$abs" -eq 0 ] || return 0
+    abs=1
+    if [ "$up" -eq 0 ]; then p="$PWD"; else p=$(pwd -P); fi
+  done
 }
 
 # Find the workspace path in an AGENT-form create/run arg list: the SECOND
@@ -1274,9 +1303,11 @@ workspace_paths() {
 # the line-oriented workspace list the adapters read and reaches the terminal
 # when the path is echoed. The symlink-resolved path is checked too, because it
 # is what msb mounts. With no path argument the current directory is the
-# workspace, so it is checked instead. Silent and 0 when every path is usable.
+# workspace, so it is checked instead, and so is a path that folds to '.' (the
+# logical $PWD, which a symlink named with ':' can carry even when the resolved
+# path has none). Silent and 0 when every path is usable.
 acq_workspace_specs_safe() {
-  local agent="" prev="" arg seen=0
+  local agent="" prev="" arg ws seen=0
   for arg in "$@"; do
     if _takes_value "$prev"; then prev="$arg"; continue; fi
     prev="$arg"
@@ -1288,10 +1319,30 @@ acq_workspace_specs_safe() {
       continue
     fi
     seen=1
-    _acq_workspace_safe "${arg%:ro}" || return 1
+    ws="${arg%:ro}"
+    _acq_path_folds_to_dot "$ws" && ws="$PWD"
+    _acq_workspace_safe "$ws" || return 1
   done
   [ "$seen" -eq 1 ] || _acq_workspace_safe "$PWD" || return 1
   return 0
+}
+
+# _acq_path_folds_to_dot PATH — 0 when PATH is relative and its '.' and '..'
+# steps fold it to '.' ('.', './', 'src/..'), the paths the Python
+# implementation resolves against the logical $PWD.
+_acq_path_folds_to_dot() {
+  local p="$1" c up=0
+  case "$p" in ''|/*) return 1 ;; esac
+  while [ -n "$p" ]; do
+    c="${p##*/}"
+    case "$p" in */*) p="${p%/*}" ;; *) p="" ;; esac
+    case "$c" in
+      ''|.) ;;
+      ..) up=$((up + 1)) ;;
+      *) [ "$up" -gt 0 ] || return 1; up=$((up - 1)) ;;
+    esac
+  done
+  [ "$up" -eq 0 ]
 }
 
 # _acq_workspace_safe PATH — check PATH as given and, when it is a directory, its
@@ -2218,6 +2269,15 @@ _load_backend_adapter() {
   ACQ_RESOLVED_BACKEND="$name"
 }
 
+# acq_resolve_backend_best_effort [EXPLICIT] — resolve the backend for a verb that
+# works without one (version, doctor, configure, help). Its diagnostics are
+# silenced, so "nothing installed" lets the verb report "unknown", but the
+# unknown-backend refusal still reaches stderr through fd 3 before it exits:
+# a broken pin must not end the verb with a bare exit 1.
+acq_resolve_backend_best_effort() {
+  _ACQ_RESOLVE_ERR_FD=3 acq_resolve_backend "${1:-}" 3>&2 2>/dev/null || true
+}
+
 # Resolve and load the backend. $1 (optional) = explicit --backend value.
 acq_resolve_backend() {
   local explicit="${1:-}"
@@ -2263,8 +2323,10 @@ acq_resolve_backend() {
   # user named explicitly but acq cannot load is an error even for the
   # best-effort callers, unlike "nothing installed" above.
   if ! acq_backend_name_known "$name"; then
-    echo "acq: error: unknown backend '$(acq_printable "$name")' from ${origin:-auto-detect} (expected sbx or msb)." >&2
-    echo "     Fix or unset it, or pin a valid one with 'acq backend set msb'." >&2
+    {
+      echo "acq: error: unknown backend '$(acq_printable "$name")' from ${origin:-auto-detect} (expected sbx or msb)."
+      echo "     Fix or unset it, or pin a valid one with 'acq backend set msb'."
+    } >&"${_ACQ_RESOLVE_ERR_FD:-2}"
     exit 1
   fi
   _load_backend_adapter "$name"
