@@ -9,6 +9,7 @@ setup() {
   mkdir -p "$RUNNER_ROOT/scripts" "$RUNNER_ROOT/test/vendor/bats-core/bin" "$RUNNER_ROOT/test/bats"
   cp "$REPO_ROOT/scripts/test-acq-bats" "$RUNNER_ROOT/scripts/test-acq-bats"
   cp "$REPO_ROOT/scripts/run-shellcheck" "$RUNNER_ROOT/scripts/run-shellcheck"
+  cp "$REPO_ROOT/scripts/bats-shard" "$RUNNER_ROOT/scripts/bats-shard"
   cat > "$RUNNER_ROOT/test/vendor/bats-core/bin/bats" <<'STUB'
 #!/bin/sh
 printf 'bats-arg:%s\n' "$@"
@@ -78,6 +79,58 @@ STUB
   assert_line "bats-arg:$RUNNER_ROOT/test/bats/a.bats"
   assert_line "bats-arg:$RUNNER_ROOT/test/bats/b.bats"
   assert_line 'bats-arg:--timing'
+}
+
+@test "runner: ACQ_BATS_SHARD runs only the selected files (serial path)" {
+  printf '@test "x" {\n true\n}\n' > "$RUNNER_ROOT/test/bats/a.bats"
+  printf '@test "y" {\n true\n}\n@test "z" {\n true\n}\n' > "$RUNNER_ROOT/test/bats/b.bats"
+  run env ACQ_BATS_JOBS=1 ACQ_BATS_SHARD=1/2 bash "$RUNNER_ROOT/scripts/test-acq-bats"
+  assert_success
+  assert_line "bats-arg:$RUNNER_ROOT/test/bats/b.bats"
+  refute_line "bats-arg:$RUNNER_ROOT/test/bats/a.bats"
+  refute_line "bats-arg:$RUNNER_ROOT/test/bats"
+  run env ACQ_BATS_JOBS=1 ACQ_BATS_SHARD=2/2 bash "$RUNNER_ROOT/scripts/test-acq-bats"
+  assert_success
+  assert_line "bats-arg:$RUNNER_ROOT/test/bats/a.bats"
+  refute_line "bats-arg:$RUNNER_ROOT/test/bats/b.bats"
+}
+
+@test "runner: ACQ_BATS_SHARD xargs fallback runs only the selected files" {
+  printf '@test "x" {\n true\n}\n' > "$RUNNER_ROOT/test/bats/a.bats"
+  printf '@test "y" {\n true\n}\n@test "z" {\n true\n}\n' > "$RUNNER_ROOT/test/bats/b.bats"
+  run env ACQ_BATS_JOBS=2 ACQ_BATS_SHARD=1/2 bash -c '
+    command() {
+      case "$*" in
+        "-v parallel"|"-v rush") return 1 ;;
+        *) builtin command "$@" ;;
+      esac
+    }
+    export -f command
+    exec bash "$1/scripts/test-acq-bats"
+  ' _ "$RUNNER_ROOT"
+  assert_success
+  assert_line "bats-arg:$RUNNER_ROOT/test/bats/b.bats"
+  refute_line "bats-arg:$RUNNER_ROOT/test/bats/a.bats"
+}
+
+@test "runner: invalid ACQ_BATS_SHARD fails closed before running any test" {
+  local spec
+  for spec in 0/2 3/2 x 1/2/3 9/9; do
+    run env ACQ_BATS_JOBS=1 ACQ_BATS_SHARD="$spec" bash "$RUNNER_ROOT/scripts/test-acq-bats"
+    assert_failure 2
+    refute_output --partial 'bats-arg:'
+  done
+}
+
+@test "runner: explicit file arguments ignore ACQ_BATS_SHARD" {
+  run env ACQ_BATS_SHARD=1/2 bash "$RUNNER_ROOT/scripts/test-acq-bats" 'only.bats'
+  assert_success
+  assert_line 'bats-arg:only.bats'
+}
+
+@test "runner: an ACQ_BATS_SHARD exported by the CI leg does not leak into runner tests" {
+  # acq_setup_stubs (this test's setup) must have cleared it.
+  [ -z "${ACQ_BATS_SHARD:-}" ]
 }
 
 @test "shellcheck runner: validates workers and preserves a failing batch" {
