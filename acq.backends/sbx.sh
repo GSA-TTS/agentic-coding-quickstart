@@ -87,7 +87,7 @@ USAI_KIT_CONFIG_PATH="/home/agent/usai-config/opencode.jsonc"
 # failing command substitution in an assignment would trip errexit while this
 # file is sourced.
 _acq_ud=$(acq_xdg_dir XDG_CACHE_HOME .cache) || _acq_ud=""
-ACQ_SBX_KIT_CACHE="${ACQ_SBX_KIT_CACHE:-$_acq_ud/acq/sbx-kits}"
+ACQ_SBX_KIT_CACHE="${ACQ_SBX_KIT_CACHE:-${_acq_ud:+$_acq_ud/acq/sbx-kits}}"
 unset _acq_ud
 
 # Module-scope flag: set to 1 once the ssh-agent trust-boundary notice has been

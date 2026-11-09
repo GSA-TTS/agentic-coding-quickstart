@@ -24,14 +24,19 @@ teardown() { acq_teardown_stubs; }
 
 load 'helper'
 
-# A stub `id` naming an account the password database does not know, so the
-# account-home fallback finds nothing and only HOME could supply a home.
+# Stub `id` and `getent` so the account-home fallback finds nothing (an
+# account the password database does not know) and only HOME could supply a
+# home.
 _plant_unknown_account() {
   cat >"$STUBDIR/id" <<'IDSTUB'
 #!/bin/sh
-echo acq-no-such-account-46
+case "$1" in -u) echo 4199999 ;; *) echo acq-no-such-account-46 ;; esac
 IDSTUB
-  chmod +x "$STUBDIR/id"
+  cat >"$STUBDIR/getent" <<'GESTUB'
+#!/bin/sh
+exit 2
+GESTUB
+  chmod +x "$STUBDIR/id" "$STUBDIR/getent"
 }
 
 _assert_work_empty() {
@@ -60,16 +65,52 @@ _assert_work_empty() {
 
 @test "userdirs: a relative HOME falls back to the account home, never the cwd" {
   local want
-  want=$(bash -c 'eval "printf %s ~$(id -un)"')
+  if command -v getent >/dev/null 2>&1; then
+    want=$(getent passwd "$(id -u)" | cut -d: -f6)
+  else
+    want=$(bash -c 'eval "printf %s ~$(id -un)"')
+  fi
   run env HOME=relhome bash -c '. "$1/acq.backends/userdirs.sh"; acq_home_dir' _ "$REPO_ROOT"
   assert_success
   assert_output "$want"
   case "$output" in /*) ;; *) fail "home is not absolute: $output" ;; esac
 }
 
+@test "userdirs: the account home is looked up by uid, so a numeric account name works" {
+  cat >"$STUBDIR/id" <<'IDSTUB'
+#!/bin/sh
+case "$1" in -u) echo 4242 ;; *) echo 1234 ;; esac
+IDSTUB
+  cat >"$STUBDIR/getent" <<'GESTUB'
+#!/bin/sh
+echo "getent $*" >> "$CALLS"
+[ "$1 $2" = "passwd 4242" ] && echo '1234:x:4242:4242::/abs/acct-home:/bin/sh'
+GESTUB
+  chmod +x "$STUBDIR/id" "$STUBDIR/getent"
+  run env HOME=relhome bash -c '. "$1/acq.backends/userdirs.sh"; acq_home_dir' _ "$REPO_ROOT"
+  assert_success
+  assert_output '/abs/acct-home'
+  run cat "$CALLS"
+  assert_line 'getent passwd 4242'
+}
+
+@test "userdirs: without getent, an all-digit account name never reaches the tilde lookup" {
+  local bin="$STUBDIR/nogetent" bash_bin
+  bash_bin=$(command -v bash)
+  mkdir -p "$bin"
+  printf '#!/bin/sh\necho 1234\n' >"$bin/id"
+  chmod +x "$bin/id"
+  run env HOME=relhome PATH="$bin" "$bash_bin" -c '
+    . "$1/acq.backends/userdirs.sh"
+    acq_home_dir || echo "no home"
+  ' _ "$REPO_ROOT"
+  assert_success
+  assert_output 'no home'
+}
+
 @test "userdirs: no absolute home fails closed with the Python message" {
   _plant_unknown_account
-  run env HOME=relhome XDG_STATE_HOME=rel bash -c '
+  run env -u ACQ_STATE_DIR HOME=relhome XDG_STATE_HOME=rel bash -c '
     . "$1/acq.backends/userdirs.sh"
     acq_home_dir && echo "home resolved"
     acq_xdg_dir XDG_STATE_HOME .local/state && echo "xdg resolved"
@@ -78,8 +119,58 @@ _assert_work_empty() {
   assert_failure
   refute_line 'home resolved'
   refute_line 'xdg resolved'
-  assert_line "acq: cannot determine an absolute home directory (HOME is 'relhome')"
-  assert_line 'set HOME to an absolute path, or set the XDG base directory variables (XDG_STATE_HOME, XDG_CONFIG_HOME, XDG_DATA_HOME, XDG_CACHE_HOME) to absolute paths'
+  assert_output "acq: cannot determine an absolute home directory (HOME is 'relhome')
+set HOME to an absolute path, or set the XDG base directory variables (XDG_STATE_HOME, XDG_CONFIG_HOME) to absolute paths"
+}
+
+@test "userdirs: Bash-only scope - no home with a relative XDG_DATA_HOME names the data and cache dirs" {
+  _plant_unknown_account
+  run env -u ACQ_STATE_DIR HOME=relhome XDG_STATE_HOME=/s XDG_CONFIG_HOME=/c XDG_DATA_HOME=rel XDG_CACHE_HOME=/k bash -c '
+    . "$1/acq.backends/userdirs.sh"
+    acq_userdirs_check
+  ' _ "$REPO_ROOT"
+  assert_failure
+  assert_output "acq: cannot determine an absolute home directory (HOME is 'relhome')
+set HOME to an absolute path, or set the XDG base directory variables (XDG_STATE_HOME, XDG_CONFIG_HOME, XDG_DATA_HOME, XDG_CACHE_HOME) to absolute paths"
+}
+
+@test "userdirs: a diagnostic quotes the value like Python repr (no raw newlines)" {
+  run env ACQ_STATE_DIR="$(printf 'rel\nINJECTED\tx')" bash -c '. "$1/acq.backends/userdirs.sh"; acq_userdirs_check' _ "$REPO_ROOT"
+  assert_failure
+  assert_line --index 0 "acq: ACQ_STATE_DIR must be an absolute path, got 'rel\\nINJECTED\\tx'"
+  refute_line 'INJECTED'
+  run bash -c '. "$1/acq.backends/userdirs.sh"; acq_quote_value "it'"'"'s"; acq_quote_value "$(printf "a\001b\\\\c")"' _ "$REPO_ROOT"
+  assert_line --index 0 "\"it's\""
+  assert_line --index 1 "'a\\x01b\\\\c'"
+}
+
+@test "userdirs: Git Bash / Cygwin drive-rooted paths are absolute only there" {
+  run bash -c '
+    . "$1/acq.backends/userdirs.sh"
+    OSTYPE=msys
+    acq_path_is_absolute "C:/x" && echo "msys C:/x abs"
+    acq_path_is_absolute "C:\\x" && echo "msys C:\\x abs"
+    acq_path_is_absolute "x/C:" || echo "msys x/C: rel"
+    XDG_STATE_HOME="D:\\state" acq_xdg_dir XDG_STATE_HOME .local/state
+    OSTYPE=linux-gnu
+    acq_path_is_absolute "C:/x" || echo "posix C:/x rel"
+  ' _ "$REPO_ROOT"
+  assert_success
+  assert_line 'msys C:/x abs'
+  assert_line 'msys C:\x abs'
+  assert_line 'msys x/C: rel'
+  assert_line 'D:\state'
+  assert_line 'posix C:/x rel'
+}
+
+@test "userdirs: on Git Bash, USERPROFILE supplies the home in POSIX form" {
+  run env HOME=relhome USERPROFILE='C:\Users\Agent Name' bash -c '
+    . "$1/acq.backends/userdirs.sh"
+    OSTYPE=msys
+    acq_home_dir
+  ' _ "$REPO_ROOT"
+  assert_success
+  assert_output '/c/Users/Agent Name'
 }
 
 @test "userdirs: absolute XDG_* values need no home at all" {
@@ -219,4 +310,135 @@ set ACQ_STATE_DIR to an absolute path, or unset it to use \$XDG_STATE_HOME/acq (
   refute_output --partial 'fetch base='
   assert_output 'done'
   _assert_work_empty
+}
+
+@test "common: kit-source discovery never caches under a relative XDG_CACHE_HOME" {
+  run env XDG_CACHE_HOME=rel-cache bash -c '
+    . "$1/acq.backends/common.sh"
+    kit_translate_fetch() { printf "fetch base=%s\n" "$2" >> "$CALLS"; return 1; }
+    acq_kit_source_provider_kits github.com/example/kits v1 kits
+  ' _ "$REPO_ROOT"
+  assert_success
+  run cat "$CALLS"
+  assert_output --partial "fetch base=$HOME/.cache/acq/kit-sources/"
+  refute_output --partial 'rel-cache'
+}
+
+# A runtime planted under the relative XDG_DATA_HOME, which must never be used.
+_plant_relative_runtime() {
+  local d
+  for d in "$WORK/rel-data/acq/provider-input-validator.current/bin" \
+           "$WORK/rel-data/acq/provider-input-validator/provider-input-validator.current/bin"; do
+    mkdir -p "$d"
+    printf '#!/bin/sh\nexit 0\n' >"$d/python3"
+    chmod +x "$d/python3"
+  done
+}
+
+@test "common: the provider-facts interpreter comes from the absolute data dir, never a relative XDG_DATA_HOME" {
+  _plant_relative_runtime
+  local want="$HOME/.local/share/acq/provider-input-validator.current/bin"
+  mkdir -p "$want"
+  printf '#!/bin/sh\nexit 0\n' >"$want/python3"
+  chmod +x "$want/python3"
+  run env -u ACQ_PROVIDER_INPUT_PYTHON -u ACQ_PROVIDER_INPUT_DATA_DIR -u LOCALAPPDATA XDG_DATA_HOME=rel-data bash -c '
+    . "$1/acq.backends/common.sh"
+    _acq_provider_facts_python
+  ' _ "$REPO_ROOT"
+  assert_success
+  assert_output "$want/python3"
+}
+
+@test "common: the validator runtime is looked up and bootstrapped under the absolute data dir" {
+  _plant_relative_runtime
+  local fake="$STUBDIR/fake-acq" want="$HOME/.local/share/acq/provider-input-validator"
+  mkdir -p "$fake/scripts"
+  cat >"$fake/scripts/setup-provider-input-validator" <<'SETUP'
+#!/bin/sh
+echo "setup data_dir=${ACQ_PROVIDER_INPUT_DATA_DIR:-}" >> "$CALLS"
+mkdir -p "$ACQ_PROVIDER_INPUT_DATA_DIR/provider-input-validator.current/bin"
+printf '#!/bin/sh\nexit 0\n' >"$ACQ_PROVIDER_INPUT_DATA_DIR/provider-input-validator.current/bin/python3"
+chmod +x "$ACQ_PROVIDER_INPUT_DATA_DIR/provider-input-validator.current/bin/python3"
+SETUP
+  chmod +x "$fake/scripts/setup-provider-input-validator"
+  run env -u ACQ_PROVIDER_INPUT_PYTHON -u ACQ_PROVIDER_INPUT_DATA_DIR -u LOCALAPPDATA XDG_DATA_HOME=rel-data bash -c '
+    . "$1/acq.backends/common.sh"
+    ACQ_SCRIPT_DIR="$2"
+    _acq_provider_input_python
+  ' _ "$REPO_ROOT" "$fake"
+  assert_success
+  assert_output "$want/provider-input-validator.current/bin/python3"
+  run cat "$CALLS"
+  assert_line "setup data_dir=$want"
+}
+
+@test "common: a relative ACQ_PROVIDER_INPUT_DATA_DIR is refused" {
+  run env -u ACQ_PROVIDER_INPUT_PYTHON -u LOCALAPPDATA ACQ_PROVIDER_INPUT_DATA_DIR=rel-tools bash -c '
+    . "$1/acq.backends/common.sh"
+    _acq_provider_input_python
+  ' _ "$REPO_ROOT"
+  assert_failure 2
+  assert_output "acq: ACQ_PROVIDER_INPUT_DATA_DIR must be an absolute path, got 'rel-tools'"
+  _assert_work_empty
+}
+
+@test "setup script: the default data dir ignores a relative XDG_DATA_HOME" {
+  run env -u ACQ_PROVIDER_INPUT_DATA_DIR XDG_DATA_HOME=rel-data ACQ_PROVIDER_INPUT_HOST_OS=Linux ACQ_PROVIDER_INPUT_HOST_ARCH=x86_64 \
+    "$REPO_ROOT/scripts/setup-provider-input-validator"
+  assert_success
+  assert_line --partial "would create $HOME/.local/share/acq/provider-input-validator/provider-input-validator.current"
+  refute_output --partial 'rel-data'
+  run env ACQ_PROVIDER_INPUT_DATA_DIR=rel-tools ACQ_PROVIDER_INPUT_HOST_OS=Linux ACQ_PROVIDER_INPUT_HOST_ARCH=x86_64 \
+    "$REPO_ROOT/scripts/setup-provider-input-validator" --apply
+  assert_failure 2
+  assert_output "provider-input validator: ACQ_PROVIDER_INPUT_DATA_DIR must be an absolute path, got 'rel-tools'"
+  _assert_work_empty
+}
+
+@test "no home: source-time defaults stay empty instead of root-anchored" {
+  _plant_unknown_account
+  run env -u ACQ_STATE_DIR -u ACQ_SECRET_STORE_DIR -u ACQ_SECRET_FILE_DIR HOME=relhome \
+      XDG_STATE_HOME=rel XDG_DATA_HOME=rel XDG_CACHE_HOME=rel bash -c '
+    . "$1/acq.backends/secret-store.sh"
+    . "$1/acq.backends/msb.sh"
+    . "$1/acq.backends/sbx.sh"
+    printf "[%s]\n" "$ACQ_SECRET_FILE_DIR" "$ACQ_SECRET_META_DIR" "$ACQ_SECRET_INDEX_FILE" \
+      "$ACQ_STATE_DIR" "$ACQ_MSB_SSH_DIR" "$ACQ_MSB_SSH_KEY" "$ACQ_MSB_PORTS_DIR" "$ACQ_MSB_CLONES_DIR" \
+      "$ACQ_MSB_SSH_AGENT_LINK_DIR" "$ACQ_MSB_KIT_CACHE" "$ACQ_MSB_UPSTREAM_CA_FILE" "$ACQ_SBX_KIT_CACHE"
+    _acq_secret_file_for acq.usai || echo "no secret path"
+  ' _ "$REPO_ROOT"
+  assert_success
+  refute_output --partial '[/'
+  assert_line 'no secret path'
+}
+
+@test "cli: doctor is not refused; it reports the bad state dir as a failed check and completes" {
+  run env ACQ_STATE_DIR=rel-state ACQ_BACKEND=msb "$ACQ" doctor </dev/null
+  assert_success
+  assert_line 'acq: backend health check'
+  assert_line "  [fail] state: ACQ_STATE_DIR must be an absolute path, got 'rel-state'"
+  assert_line '           set ACQ_STATE_DIR to an absolute path, or unset it to use $XDG_STATE_HOME/acq (default ~/.local/state/acq)'
+  refute_output --partial 'as the default backend'
+  run env ACQ_STATE_DIR=rel-state ACQ_BACKEND=msb "$ACQ" doctor somebox
+  assert_failure 1
+  assert_line --index 0 "acq: ACQ_STATE_DIR must be an absolute path, got 'rel-state'"
+  _assert_work_empty
+}
+
+@test "cli: every dispatch arm is either checked or deliberately exempt from the user-dirs check" {
+  local verbs verb kind
+  verbs=$(awk '/^case "\$subcommand" in/{inb=1;next} inb&&/^esac/{inb=0} inb&&/^  [^ #][^)]*\)/{sub(/^  /,""); sub(/\).*/,""); print}' "$ACQ" \
+    | tr '|' '\n' | sort -u)
+  [ -n "$verbs" ] || fail "no dispatch arms found in $ACQ"
+  # shellcheck disable=SC1090  # the acq entry point, sourced for its verb table
+  ACQ_SOURCE_ONLY=1 . "$ACQ"
+  for verb in $verbs; do
+    case "$verb" in
+      # Exempt on purpose: no acq state, or (doctor) reports instead of refusing;
+      # backend and configure are checked by their own arms of the entry check.
+      '""'|'*'|-*|help|version|doctor|backend|configure) continue ;;
+    esac
+    kind=$(_acq_verb_backend_help_kind "$verb")
+    [ -n "$kind" ] || fail "dispatch arm '$verb' is not classified by _acq_verb_backend_help_kind, so the user-dirs entry check skips it"
+  done
 }

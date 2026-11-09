@@ -298,7 +298,7 @@ ACQ_MSB_SKIP_PREREQ_CHECK="${ACQ_MSB_SKIP_PREREQ_CHECK:-}"
 # (The resolvers run outside the expansions below: a failing command
 # substitution in an assignment would trip errexit while this file is sourced.)
 _acq_ud=$(acq_xdg_dir XDG_CACHE_HOME .cache) || _acq_ud=""
-ACQ_MSB_KIT_CACHE="${ACQ_MSB_KIT_CACHE:-$_acq_ud/acq/kits}"
+ACQ_MSB_KIT_CACHE="${ACQ_MSB_KIT_CACHE:-${_acq_ud:+$_acq_ud/acq/kits}}"
 unset _acq_ud
 
 # Max seconds to wait for `msb exec` to work after create (the guest boots in
@@ -514,7 +514,7 @@ esac
 
 # Where the auto-detected host CA bundle is written for the upstream verifier.
 _acq_ud=$(acq_state_dir) || _acq_ud=""
-ACQ_MSB_UPSTREAM_CA_FILE="${ACQ_MSB_UPSTREAM_CA_FILE:-$_acq_ud/msb/host-upstream-cas.pem}"
+ACQ_MSB_UPSTREAM_CA_FILE="${ACQ_MSB_UPSTREAM_CA_FILE:-${_acq_ud:+$_acq_ud/msb/host-upstream-cas.pem}}"
 unset _acq_ud
 
 # REPRODUCTION / TESTING toggle. A host whose corporate proxy does NOT intercept
@@ -623,13 +623,14 @@ ACQ_MSB_BALANCED_HOSTS_FILE="${ACQ_MSB_BALANCED_HOSTS_FILE:-${ACQ_SCRIPT_DIR:-.}
 # ~/.local/state/acq); override the whole root with ACQ_STATE_DIR (tests do).
 # Only absolute values are honored (see userdirs.sh). A relative ACQ_STATE_DIR is
 # refused by the entry point before any adapter loads; here it resolves to empty
-# rather than to a directory under the current one.
+# rather than to a directory under the current one, and so do the defaults
+# derived from it (empty, never root-anchored).
 ACQ_STATE_DIR="$(acq_state_dir)" || ACQ_STATE_DIR=""
-ACQ_MSB_SSH_DIR="${ACQ_MSB_SSH_DIR:-${ACQ_STATE_DIR}/ssh}"
-ACQ_MSB_SSH_KEY="${ACQ_MSB_SSH_KEY:-${ACQ_MSB_SSH_DIR}/msb_id_ed25519}"
-ACQ_MSB_SSH_KNOWN_HOSTS="${ACQ_MSB_SSH_KNOWN_HOSTS:-${ACQ_MSB_SSH_DIR}/known_hosts}"
-ACQ_MSB_PORTS_DIR="${ACQ_MSB_PORTS_DIR:-${ACQ_STATE_DIR}/ports}"
-ACQ_MSB_CLONES_DIR="${ACQ_MSB_CLONES_DIR:-${ACQ_STATE_DIR}/clones}"
+ACQ_MSB_SSH_DIR="${ACQ_MSB_SSH_DIR:-${ACQ_STATE_DIR:+$ACQ_STATE_DIR/ssh}}"
+ACQ_MSB_SSH_KEY="${ACQ_MSB_SSH_KEY:-${ACQ_MSB_SSH_DIR:+$ACQ_MSB_SSH_DIR/msb_id_ed25519}}"
+ACQ_MSB_SSH_KNOWN_HOSTS="${ACQ_MSB_SSH_KNOWN_HOSTS:-${ACQ_MSB_SSH_DIR:+$ACQ_MSB_SSH_DIR/known_hosts}}"
+ACQ_MSB_PORTS_DIR="${ACQ_MSB_PORTS_DIR:-${ACQ_STATE_DIR:+$ACQ_STATE_DIR/ports}}"
+ACQ_MSB_CLONES_DIR="${ACQ_MSB_CLONES_DIR:-${ACQ_STATE_DIR:+$ACQ_STATE_DIR/clones}}"
 # Create-time startup-script staging state (ADR-0017). The staged host file list
 # is reset per provision; declare it at module scope so cleanup references are
 # always defined even if provision is not the entry point.
@@ -703,7 +704,7 @@ esac
 # SSH_AUTH_SOCK on every bridge (re)start; msb dials that path per guest
 # connection and follows the link, so the persisted route never goes stale when
 # the host agent moves (macOS launchd mints a new socket path per login).
-ACQ_MSB_SSH_AGENT_LINK_DIR="${ACQ_STATE_DIR}/msb/ssh-agent"
+ACQ_MSB_SSH_AGENT_LINK_DIR="${ACQ_STATE_DIR:+$ACQ_STATE_DIR/msb/ssh-agent}"
 # msb connect()s to the link path itself, so it must fit a sockaddr_un: 104
 # bytes on macOS including the NUL terminator (108 on Linux). Budget for the
 # smaller platform.

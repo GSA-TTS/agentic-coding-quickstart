@@ -2157,7 +2157,9 @@ _acq_provenance_file() {
   # cksum of the raw name disambiguates sanitizer collisions (fail-open: if cksum
   # is somehow unavailable the name still resolves, just without the suffix).
   name_sum=$(printf '%s' "$name" | cksum 2>/dev/null | cut -d' ' -f1 2>/dev/null || echo 0)
-  printf '%s/%s/%s.%s.env\n' "$(_acq_provenance_dir)" "$safe_backend" "$safe_name" "$name_sum"
+  local _acq_pd
+  _acq_pd=$(_acq_provenance_dir) || return 1
+  printf '%s/%s/%s.%s.env\n' "$_acq_pd" "$safe_backend" "$safe_name" "$name_sum"
 }
 
 # Write (or overwrite) a sandbox's provenance record. Call ONLY after a
@@ -2375,7 +2377,9 @@ _acq_cli_kits_file() {
   safe_backend=$(printf '%s' "$backend" | tr -c 'A-Za-z0-9._-' '_')
   safe_name=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')
   name_sum=$(printf '%s' "$name" | cksum 2>/dev/null | cut -d' ' -f1 2>/dev/null || echo 0)
-  printf '%s/%s/%s.%s.kits\n' "$(_acq_provenance_dir)" "$safe_backend" "$safe_name" "$name_sum"
+  local _acq_pd
+  _acq_pd=$(_acq_provenance_dir) || return 1
+  printf '%s/%s/%s.%s.kits\n' "$_acq_pd" "$safe_backend" "$safe_name" "$name_sum"
 }
 
 # Persist the current CLI (`--kit`) and extra (ACQ_EXTRA_KITS) kit refs for a
@@ -3677,17 +3681,22 @@ _acq_provider_facts_python() {
     data_home=$(acq_xdg_dir XDG_DATA_HOME .local/share)/acq || data_home=""
   fi
   runtime="${ACQ_PROVIDER_INPUT_DATA_DIR:-$data_home/provider-input-validator}.current"
-  if [ -x "$runtime/bin/python3" ]; then
-    printf '%s\n' "$runtime/bin/python3"
-    return 0
-  fi
-  if [ -x "$runtime/Scripts/python.exe" ]; then
-    printf '%s\n' "$runtime/Scripts/python.exe"
-    return 0
-  fi
-  if [ -x "$runtime/python.exe" ]; then
-    printf '%s\n' "$runtime/python.exe"
-    return 0
+  # Only an absolute runtime path: a relative one would run an interpreter from
+  # the current directory (see userdirs.sh).
+  if { [ -n "$data_home" ] || [ -n "${ACQ_PROVIDER_INPUT_DATA_DIR:-}" ]; } \
+      && acq_path_is_absolute "$runtime"; then
+    if [ -x "$runtime/bin/python3" ]; then
+      printf '%s\n' "$runtime/bin/python3"
+      return 0
+    fi
+    if [ -x "$runtime/Scripts/python.exe" ]; then
+      printf '%s\n' "$runtime/Scripts/python.exe"
+      return 0
+    fi
+    if [ -x "$runtime/python.exe" ]; then
+      printf '%s\n' "$runtime/python.exe"
+      return 0
+    fi
   fi
   if command -v python3 >/dev/null 2>&1; then
     printf '%s\n' "python3"
@@ -4267,7 +4276,18 @@ _acq_provider_input_python() {
     else
       data_home=$(acq_xdg_dir XDG_DATA_HOME .local/share)/acq || data_home=""
     fi
+    [ -n "$data_home" ] || [ -n "${ACQ_PROVIDER_INPUT_DATA_DIR:-}" ] || {
+      echo "acq: cannot determine an absolute data directory for the provider-input validator" >&2
+      echo "     set HOME or XDG_DATA_HOME (or ACQ_PROVIDER_INPUT_DATA_DIR) to an absolute path" >&2
+      return 2
+    }
     tools_dir="${ACQ_PROVIDER_INPUT_DATA_DIR:-$data_home/provider-input-validator}"
+    # A relative directory would run (and bootstrap) an interpreter under the
+    # current directory, so it is refused (see userdirs.sh).
+    acq_path_is_absolute "$tools_dir" || {
+      echo "acq: ACQ_PROVIDER_INPUT_DATA_DIR must be an absolute path, got $(acq_quote_value "$tools_dir")" >&2
+      return 2
+    }
     runtime="$tools_dir/provider-input-validator.current"
     if [ -x "$runtime/bin/python3" ]; then python="$runtime/bin/python3"
     elif [ -x "$runtime/Scripts/python.exe" ]; then python="$runtime/Scripts/python.exe"
@@ -4293,7 +4313,9 @@ _acq_provider_input_python() {
         echo "     Or set ACQ_PROVIDER_INPUT_PYTHON to a Python interpreter with PyYAML 6.0.3 and jsonschema 4.26.0." >&2
       fi
     fi
-    "$setup" --apply >&2 || return 2
+    # Hand the bootstrap the exact directory checked below, so the two can never
+    # disagree about where the runtime is published.
+    ACQ_PROVIDER_INPUT_DATA_DIR="$tools_dir" "$setup" --apply >&2 || return 2
     runtime="$tools_dir/provider-input-validator.current"
     if [ -x "$runtime/bin/python3" ]; then python="$runtime/bin/python3"
     elif [ -x "$runtime/Scripts/python.exe" ]; then python="$runtime/Scripts/python.exe"
@@ -4410,7 +4432,9 @@ acq_provider_input_root() {
   safe_backend=$(printf '%s' "$backend" | tr -c 'A-Za-z0-9._-' '_')
   safe_name=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')
   name_sum=$(printf '%s' "$name" | cksum 2>/dev/null | cut -d' ' -f1 2>/dev/null || echo 0)
-  printf '%s/provider-input/%s/%s.%s\n' "$(_acq_provenance_dir)" "$safe_backend" "$safe_name" "$name_sum"
+  local _acq_pd
+  _acq_pd=$(_acq_provenance_dir) || return 1
+  printf '%s/provider-input/%s/%s.%s\n' "$_acq_pd" "$safe_backend" "$safe_name" "$name_sum"
 }
 
 acq_provider_input_guest_root() {
@@ -4905,7 +4929,9 @@ acq_host_config_dir() {
   safe_backend=$(printf '%s' "$backend" | tr -c 'A-Za-z0-9._-' '_')
   safe_name=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')
   name_sum=$(printf '%s' "$name" | cksum 2>/dev/null | cut -d' ' -f1 2>/dev/null || echo 0)
-  printf '%s/%s/%s.%s.config\n' "$(_acq_provenance_dir)" "$safe_backend" "$safe_name" "$name_sum"
+  local _acq_pd
+  _acq_pd=$(_acq_provenance_dir) || return 1
+  printf '%s/%s/%s.%s.config\n' "$_acq_pd" "$safe_backend" "$safe_name" "$name_sum"
 }
 
 # Validate a config KEY: fixed-literal callers only, restricted charset, never a
@@ -5936,9 +5962,25 @@ acq_print_doctor() {
   echo "  [msb: ${msb_status}]"
   echo ""
 
-  local config_file
-  config_file=$(_acq_config_file) || return 1
-  if [ -f "$config_file" ]; then
+  # User directories: report an unusable state/config location as a failed
+  # check with the same text Python's doctor uses, and keep going (a diagnostic
+  # must complete). Nothing is offered for writing below in that case.
+  # The entry point records the problem before the adapter loads; compute it
+  # here only when called without it.
+  local dirs_ok=1
+  [ -n "${ACQ_USERDIRS_MESSAGE+set}" ] || acq_userdirs_problem || true
+  if [ -n "${ACQ_USERDIRS_MESSAGE:-}" ]; then
+    dirs_ok=""
+    echo "  [fail] state: ${ACQ_USERDIRS_MESSAGE}"
+    echo "           ${ACQ_USERDIRS_REMEDIATION}"
+    echo ""
+  fi
+
+  local config_file=""
+  config_file=$(_acq_config_file) || config_file=""
+  if [ -z "$config_file" ]; then
+    echo "  config: (no absolute config directory)"
+  elif [ -f "$config_file" ]; then
     echo "  config: ${config_file}"
     local cfg_backend
     cfg_backend=$(_read_config_backend)
@@ -5961,6 +6003,9 @@ acq_print_doctor() {
   fi
 
   echo ""
+  if [ -z "$dirs_ok" ] || [ -z "$config_file" ]; then
+    return 0
+  fi
   # ACQ_RESOLVED_BACKEND is always set by acq_resolve_backend before doctor runs,
   # so the ':-msb' here is only a defensive fallback — it mirrors auto-detect's
   # default and does NOT let doctor independently pick a backend.
