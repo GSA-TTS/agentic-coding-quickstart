@@ -4,9 +4,8 @@
 # RELEASES ARE UPSTREAM'S JOB. This fork cuts none: the acq v1 rewrite merges into
 # GSA-TTS/agentic-coding-quickstart, and upstream's release-please numbers it there,
 # so upstream users keep an unbroken SemVer line. A fork release would be a second,
-# conflicting version line for the same tool -- and the fork has no tags and branched
-# just after upstream 4.1.1, so release-please here walks all history and proposes a
-# *downgrade*.
+# conflicting version line for the same tool -- and the fork carries no release tags,
+# so release-please here walks all history and proposes a *downgrade*.
 #
 # Every job below is therefore gated on `vars.ENABLE_RELEASES == 'true'`, a
 # repository variable that is unset on the fork. The workflow stays in place,
@@ -147,12 +146,12 @@ jobs:
             pip_platform: manylinux_2_17_aarch64
             lock: scripts/provider-input-validator-requirements-linux.txt
             python_versions: "312"
-          - runner: macos-14
+          - runner: macos-15
             platform: macos-arm64
             pip_platform: macosx_11_0_arm64
             lock: scripts/provider-input-validator-requirements-macos.txt
             python_versions: "312 313 314"
-          - runner: macos-13
+          - runner: macos-15-intel
             platform: macos-x86_64
             pip_platform: macosx_10_13_x86_64
             lock: scripts/provider-input-validator-requirements-macos.txt
@@ -193,7 +192,7 @@ jobs:
           printf 'python312.zip\n.\nLib/site-packages\nimport site\n' > runtime/python312._pth
           test -f runtime/LICENSE.txt
           mv runtime validator-runtime
-          (cd validator-runtime && zip -qr ../provider-input-validator-runtime-windows-x86_64.zip .)
+          python3 -c "import shutil; shutil.make_archive('provider-input-validator-runtime-windows-x86_64', 'zip', 'validator-runtime')"
       - name: Smoke-test acq's managed Windows runtime
         if: ${{ matrix.platform == 'windows-x86_64' }}
         run: |
