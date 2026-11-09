@@ -52,6 +52,10 @@ _GIT_REPO_ENV = frozenset(
     }
 )
 _GIT_CONFIG_PAIR = re.compile(r"GIT_CONFIG_(KEY|VALUE)_[0-9]+")
+# The command-scope config variables in that list. A ``git config --global``
+# read keeps them, as the Bash keep mode does: they cannot redirect a read that
+# is already limited to the global file.
+_GIT_COMMAND_SCOPE_ENV = frozenset({"GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT"})
 
 # Child directories never worth scanning (the Bash skip list), and the scan cap.
 _SKIP_DIRS = frozenset({"node_modules", ".venv", "venv", "vendor", "target", "dist", "build"})
@@ -75,8 +79,17 @@ _REPO_RE = re.compile(r"[A-Za-z0-9._-]{1,100}", re.ASCII)
 PAT_PERMISSIONS = (("contents", "write"), ("pull_requests", "write"), ("issues", "write"), ("actions", "read"))
 
 
-def git_env() -> dict[str, str]:
-    """The environment for git reads: the caller's, minus repository redirects."""
+def git_env(*, keep_command_scope: bool = False) -> dict[str, str]:
+    """The environment for git reads: the caller's, minus repository redirects.
+
+    ``keep_command_scope`` keeps the command-scope config variables (the Bash
+    ``_kit_git_isolate_repo`` keep mode), for a ``git config`` read of the
+    user's own configuration. HOME, XDG_CONFIG_HOME, GIT_CONFIG_GLOBAL and
+    GIT_CONFIG_NOSYSTEM are kept either way, so the global file is still found.
+    """
+    if keep_command_scope:
+        drop = _GIT_REPO_ENV - _GIT_COMMAND_SCOPE_ENV
+        return {k: v for k, v in os.environ.items() if k not in drop}
     return {
         k: v for k, v in os.environ.items() if k not in _GIT_REPO_ENV and not _GIT_CONFIG_PAIR.fullmatch(k)
     }

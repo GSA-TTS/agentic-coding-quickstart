@@ -294,6 +294,45 @@ def test_email_falls_back_to_the_global_git_config(fake, monkeypatch):
     assert "EMAIL=grace@example.gov" in session.host_git_identity_env()
 
 
+@pytest.mark.skipif(hostexec.which("git") is None, reason="needs git on the host")
+def test_global_git_config_read_ignores_inherited_repo_redirects(fake, monkeypatch, tmp_path):
+    # An inherited GIT_CONFIG makes `git config --global` fail ("only one config
+    # file at a time"); the read clears it and the other repository redirects,
+    # but keeps the variables that locate the user's own global file.
+    home = Path(os.environ["HOME"])
+    (home / ".gitconfig").write_text("[user]\n\temail = grace@example.gov\n", encoding="utf-8")
+    other = tmp_path / "other.gitconfig"
+    other.write_text("[user]\n\temail = mallory@example.gov\n", encoding="utf-8")
+    monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
+    monkeypatch.delenv("EMAIL", raising=False)
+    monkeypatch.setenv("GIT_CONFIG", str(other))
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "missing" / ".git"))
+    from acq_py.commands import session
+
+    assert session._host_git_config("user.email") == "grace@example.gov"
+    assert "EMAIL=grace@example.gov" in session.host_git_identity_env()
+    # GIT_CONFIG_GLOBAL still names the global file.
+    named = tmp_path / "named.gitconfig"
+    named.write_text("[user]\n\temail = named@example.gov\n", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(named))
+    assert session._host_git_config("user.email") == "named@example.gov"
+
+
+def test_keep_command_scope_env_drops_only_repo_redirects(monkeypatch):
+    from acq_py import gitrepos
+
+    for name, value in (("GIT_CONFIG", "/x"), ("GIT_DIR", "/y"), ("GIT_CONFIG_COUNT", "1"),
+                        ("GIT_CONFIG_KEY_0", "a.b"), ("GIT_CONFIG_VALUE_0", "c"),
+                        ("GIT_CONFIG_PARAMETERS", "'a.b'='c'"), ("GIT_CONFIG_GLOBAL", "/g"),
+                        ("GIT_CONFIG_NOSYSTEM", "1"), ("XDG_CONFIG_HOME", "/xdg")):
+        monkeypatch.setenv(name, value)
+    env = gitrepos.git_env(keep_command_scope=True)
+    assert "GIT_CONFIG" not in env and "GIT_DIR" not in env
+    for kept in ("GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_PARAMETERS",
+                 "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "XDG_CONFIG_HOME", "HOME"):
+        assert kept in env
+
+
 @posix_only
 @pytest.mark.parametrize("backend", ["msb", "sbx"])
 def test_ssh_auth_sock_is_passed_only_with_recorded_forwarding(fake, monkeypatch, backend):
