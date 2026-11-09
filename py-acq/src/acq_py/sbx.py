@@ -266,7 +266,7 @@ def _run_stream(argv: list[str], *, json_mode: bool) -> int:
     """
     if json_mode:
         try:
-            stdout: object = sys.stderr.fileno()
+            stdout: int | None = sys.stderr.fileno()
         except (AttributeError, OSError, ValueError):
             stdout = 2
     else:
@@ -327,12 +327,12 @@ def ports(name: str) -> list[dict]:
         )
     try:
         doc = json.loads(proc.stdout)
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, ValueError) as exc:
         raise SbxError(
             errors.FAILURE,
             f"could not parse declared ports for sandbox '{name}'",
             "the backend returned an unreadable ports result; check sbx logs and retry",
-        )
+        ) from exc
     if not isinstance(doc, dict):
         raise SbxError(
             errors.FAILURE,
@@ -403,12 +403,12 @@ def _secret_list_docs() -> list[dict]:
         )
     try:
         doc = json.loads(proc.stdout)
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, ValueError) as exc:
         raise SbxError(
             errors.SECRET_UNREADABLE,
             "could not parse the secret store listing",
             "the backend returned an unreadable secret list; check backend logs and retry",
-        )
+        ) from exc
     if not isinstance(doc, dict):
         raise SbxError(
             errors.SECRET_UNREADABLE,

@@ -13,7 +13,6 @@ import time
 from .. import envelope, errors, kits, msb, sbx, security, state
 from . import common
 
-
 # Substrate-contract seam (internal test seam, never a secret, never written to
 # output). ``ACQ_SUBSTRATE_STATE`` is a JSON object mapping an image to its
 # substrate state: ``"ok"`` or a list of gap tokens. A ``"*"`` key applies to any
@@ -351,6 +350,7 @@ def run_create(parsed, emit_json: bool, backend: str) -> int:
     workspace, exit_code = common._validate_workspace("create", parsed.path, emit_json)
     if exit_code is not None:
         return exit_code
+    assert workspace is not None  # nosec B101 # resolver contract; narrows the type for mypy
     kit_name, exit_code = _validate_kit_flag(parsed.kit, "create", emit_json)
     if exit_code is not None:
         return exit_code
@@ -383,6 +383,7 @@ def run_create(parsed, emit_json: bool, backend: str) -> int:
     image, provision_steps, exit_code = _resolve_image_for_kit(parsed.image, parsed.agent, kit_name, "create", emit_json)
     if exit_code is not None:
         return exit_code
+    assert image is not None  # nosec B101 # resolver contract; narrows the type for mypy
     try:
         data = _create_sandbox(backend, parsed.agent, workspace, name, image, kit_name)
     except common._ADAPTER_ERRORS as exc:
@@ -430,7 +431,7 @@ def run_recreate(parsed, emit_json: bool, backend: str) -> int:
             "create",
             errors.SANDBOX_NOT_FOUND,
             f"sandbox '{name}' has no host state record to recreate",
-            f"create it with 'acq create', or list sandboxes with 'acq ls'",
+            "create it with 'acq create', or list sandboxes with 'acq ls'",
             emit_json,
         )
     try:
@@ -539,6 +540,7 @@ def run_run(parsed, emit_json: bool, backend: str) -> int:
         workspace, exit_code = common._validate_workspace("run", parsed.path, emit_json)
         if exit_code is not None:
             return exit_code
+        assert workspace is not None  # nosec B101 # resolver contract; narrows the type for mypy
         kit_name, exit_code = _validate_kit_flag(parsed.kit, "run", emit_json)
         if exit_code is not None:
             return exit_code
@@ -549,6 +551,7 @@ def run_run(parsed, emit_json: bool, backend: str) -> int:
             workspace, exit_code = _reattach_workspace(backend, name, workspace, emit_json)
             if exit_code is not None:
                 return exit_code
+            assert workspace is not None  # nosec B101 # resolver contract; narrows the type for mypy
         image: str | None = None
         entrypoint: str | None = None
         if not adapter.exists(name):
@@ -565,6 +568,7 @@ def run_run(parsed, emit_json: bool, backend: str) -> int:
             image, provision_steps, exit_code = _resolve_image_for_kit(parsed.image, target, kit_name, "run", emit_json)
             if exit_code is not None:
                 return exit_code
+            assert image is not None  # nosec B101 # resolver contract; narrows the type for mypy
             try:
                 _create_sandbox(backend, target, workspace, name, image, kit_name)
             except common._ADAPTER_ERRORS as exc:
@@ -648,7 +652,7 @@ def run_run(parsed, emit_json: bool, backend: str) -> int:
     return _launch_after_envelope(backend, target, workspace, common._launch_token(backend, target, agent), emit_json)
 
 
-def _launch_after_envelope(backend: str, name: str, workspace: str | None, token: str, emit_json: bool) -> int:
+def _launch_after_envelope(backend: str, name: str, workspace: str | None, token: str | None, emit_json: bool) -> int:
     """Launch for ``run`` once its success envelope may already be on stdout.
 
     Under ``--json`` stdout must carry exactly one document, and ``run`` has
@@ -723,7 +727,7 @@ def run_stop(parsed, emit_json: bool, backend: str) -> int:
             "stop",
             errors.SANDBOX_NOT_FOUND,
             f"sandbox '{name}' not found",
-            f"list sandboxes with 'acq ls', or create one with 'acq create'",
+            "list sandboxes with 'acq ls', or create one with 'acq create'",
             emit_json,
         )
     try:
@@ -746,7 +750,7 @@ def run_rm(parsed, emit_json: bool, backend: str) -> int:
             "rm",
             errors.SANDBOX_NOT_FOUND,
             f"sandbox '{name}' not found",
-            f"list sandboxes with 'acq ls'",
+            "list sandboxes with 'acq ls'",
             emit_json,
         )
     try:

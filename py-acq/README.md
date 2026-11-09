@@ -203,14 +203,46 @@ inherited config for a hermetic run:
 GIT_CONFIG_GLOBAL=NUL GIT_CONFIG_NOSYSTEM=1 python -m pytest py-acq/tests -q
 ```
 
-That baseline is `1 failed, 485 passed, 49 skipped` as of this writing; the
-single failure is the known
-`test_migration.py::test_recreate_preserves_host_record` case (`/w` becoming
-`C:\w`). Without the override, roughly 30 further failures in
-`test_qualification_host.py` and `test_qualification_gate.py` are that signing
-hook, not the code under test.
+With the override, the suite is expected to pass on Windows; the Windows CI job
+(`.github/workflows/windows.yml`) runs it on every relevant pull request. The
+`install.sh` tests that need a supported platform are skipped there, because
+`install.sh` refuses Windows hosts and `install.ps1` is the Windows installer.
+Without the override, roughly 30 failures in `test_qualification_host.py` and
+`test_qualification_gate.py` come from that signing hook, not the code under
+test.
 
 See `../test/vectors/README.md` for the vector schema, assertion modes, and
 normalisation transforms. Contract evidence is subprocess-only (ADR-0039m);
 the sentinel set covers every assertion mode (`exact`/`contains`/`json`) and
 every normalisation transform (`abspath`/`tmpdir`/`crlf`/`timing`/`order`/`json`).
+
+### Quality gates
+
+`.github/workflows/python-quality.yml` runs ruff, mypy and bandit on `src/`
+and fails when pytest's in-process branch coverage drops below the
+`fail_under` floor in `pyproject.toml`. The tools are CI-only, pinned with
+hashes in `requirements-quality.txt` (policy: ADR-0049m). To run the gates
+locally, use a throwaway virtual environment and run the commands from
+`py-acq/`:
+
+```sh
+python -m pip install --require-hashes --no-deps --only-binary :all: -r requirements-quality.txt
+python -m ruff check src
+python -m mypy
+python -m bandit -c pyproject.toml -r src
+python -m pytest -q --cov --cov-report=term
+```
+
+The gates started at zero findings, so there is no baseline. A finding that
+is a false positive gets a targeted suppression with its reason on the same
+line, such as `# nosec B105 # an error code`. Do not widen the skip lists in
+`pyproject.toml` to clear one.
+
+### Windows
+
+`.github/workflows/windows.yml` runs on a Windows runner when a pull request
+touches Windows-relevant paths. It runs pytest, smoke tests of `acq.cmd` and
+`acq.ps1` for both `ACQ_IMPL` paths, `install.ps1 -DryRun` under PowerShell 7
+and Windows PowerShell 5.1, the release job's managed-runtime staging and
+smoke check, and a Git Bash run of `55-version.bats` and
+`06-windows-install.bats`.

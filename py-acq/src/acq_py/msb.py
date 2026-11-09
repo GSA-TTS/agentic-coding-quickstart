@@ -382,8 +382,8 @@ def _balanced_rules() -> list[str]:
         )
     try:
         text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        raise _policy_error(f"cannot read the balanced egress host list {str(path)!r}", remediation)
+    except (OSError, UnicodeDecodeError) as exc:
+        raise _policy_error(f"cannot read the balanced egress host list {str(path)!r}", remediation) from exc
     flags: list[str] = []
     for lineno, raw in enumerate(text.splitlines(), start=1):
         line = raw.split("#", 1)[0].strip()
@@ -576,7 +576,7 @@ def _run_stream(argv: list[str], *, json_mode: bool) -> int:
     """
     if json_mode:
         try:
-            stdout: object = sys.stderr.fileno()
+            stdout: int | None = sys.stderr.fileno()
         except (AttributeError, OSError, ValueError):
             stdout = 2
     else:
@@ -651,12 +651,12 @@ def ports(name: str) -> list[dict]:
         )
     try:
         doc = json.loads(proc.stdout)
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, ValueError) as exc:
         raise MsbError(
             errors.FAILURE,
             f"could not parse declared ports for sandbox '{name}'",
             "the backend returned an unreadable inspect result; check msb logs and retry",
-        )
+        ) from exc
 
     def _bad_shape() -> MsbError:
         return MsbError(

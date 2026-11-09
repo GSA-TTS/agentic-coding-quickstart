@@ -391,21 +391,29 @@ def test_steps_never_get_more_time_than_the_deadline_leaves(tmp_path):
 
 
 def test_find_bash_skips_the_wsl_launcher_and_prefers_git_bash(tmp_path):
+    # The PATH search uses shutil.which, which on a real Windows host only finds
+    # names with a PATHEXT suffix (and may report it as .EXE), so the fakes found
+    # through PATH get .exe there and paths compare case-insensitively.
+    suffix = ".exe" if sys.platform == "win32" else ""
+
     def exe(path):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("#!/bin/sh\n")
         path.chmod(0o755)
         return path
 
-    wsl = exe(tmp_path / "Windows" / "System32" / "bash")
-    apps = exe(tmp_path / "Users" / "j" / "AppData" / "Local" / "Microsoft" / "WindowsApps" / "bash")
+    def same(found, expected):
+        return found is not None and os.path.normcase(found) == os.path.normcase(str(expected))
+
+    wsl = exe(tmp_path / "Windows" / "System32" / f"bash{suffix}")
+    apps = exe(tmp_path / "Users" / "j" / "AppData" / "Local" / "Microsoft" / "WindowsApps" / f"bash{suffix}")
     path = os.pathsep.join([str(wsl.parent), str(apps.parent)])
     assert qbc.find_bash(path, os_name="nt", environ={}) is None
     git = exe(tmp_path / "Program Files" / "Git" / "bin" / "bash.exe")
     assert qbc.find_bash(path, os_name="nt", environ={"ProgramFiles": str(tmp_path / "Program Files")}) == str(git)
-    other = exe(tmp_path / "msys64" / "usr" / "bin" / "bash")
-    assert qbc.find_bash(os.pathsep.join([path, str(other.parent)]), os_name="nt", environ={}) == str(other)
-    assert qbc.find_bash(str(wsl.parent), os_name="posix") == str(wsl)  # elsewhere bash is just bash
+    other = exe(tmp_path / "msys64" / "usr" / "bin" / f"bash{suffix}")
+    assert same(qbc.find_bash(os.pathsep.join([path, str(other.parent)]), os_name="nt", environ={}), other)
+    assert same(qbc.find_bash(str(wsl.parent), os_name="posix"), wsl)  # elsewhere bash is just bash
 
 
 # ---- the script end to end, against the bundled stubs --------------------------
