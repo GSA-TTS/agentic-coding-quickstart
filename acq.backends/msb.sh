@@ -73,6 +73,11 @@ if ! command -v acq_is_known_agent >/dev/null 2>&1; then
   # shellcheck source=acq.backends/agents.sh
   . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/agents.sh"
 fi
+# Absolute-only XDG/HOME/ACQ_STATE_DIR resolution, for the same reason.
+if ! command -v acq_xdg_dir >/dev/null 2>&1; then
+  # shellcheck source=acq.backends/userdirs.sh
+  . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/userdirs.sh"
+fi
 
 _acq_msb_select_kits() {
   local agent="${1:-}"
@@ -290,7 +295,11 @@ ACQ_MSB_SKIP_PREREQ_CHECK="${ACQ_MSB_SKIP_PREREQ_CHECK:-}"
 
 # Where fetched neutral kits are materialized for this run (msb has no native
 # kit mechanism, so acq drives the parsed operations itself).
-ACQ_MSB_KIT_CACHE="${ACQ_MSB_KIT_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/acq/kits}"
+# (The resolvers run outside the expansions below: a failing command
+# substitution in an assignment would trip errexit while this file is sourced.)
+_acq_ud=$(acq_xdg_dir XDG_CACHE_HOME .cache) || _acq_ud=""
+ACQ_MSB_KIT_CACHE="${ACQ_MSB_KIT_CACHE:-$_acq_ud/acq/kits}"
+unset _acq_ud
 
 # Max seconds to wait for `msb exec` to work after create (the guest boots in
 # the background; kit application must not race it). Mirrors sbx's
@@ -504,7 +513,9 @@ case "$(printf '%s' "$ACQ_MSB_UPSTREAM_CA_AUTODETECT" | tr '[:upper:]' '[:lower:
 esac
 
 # Where the auto-detected host CA bundle is written for the upstream verifier.
-ACQ_MSB_UPSTREAM_CA_FILE="${ACQ_MSB_UPSTREAM_CA_FILE:-${ACQ_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/acq}/msb/host-upstream-cas.pem}"
+_acq_ud=$(acq_state_dir) || _acq_ud=""
+ACQ_MSB_UPSTREAM_CA_FILE="${ACQ_MSB_UPSTREAM_CA_FILE:-$_acq_ud/msb/host-upstream-cas.pem}"
+unset _acq_ud
 
 # REPRODUCTION / TESTING toggle. A host whose corporate proxy does NOT intercept
 # api.gsa.usai.gov / github.com (e.g. those domains are on a proxy bypass list)
@@ -610,7 +621,10 @@ ACQ_MSB_BALANCED_HOSTS_FILE="${ACQ_MSB_BALANCED_HOSTS_FILE:-${ACQ_SCRIPT_DIR:-.}
 # and records the `msb ssh serve` + `ssh -L` PIDs per sandbox so `acq rm`/stop can
 # tear them down. State lives under $XDG_STATE_HOME/acq (falling back to
 # ~/.local/state/acq); override the whole root with ACQ_STATE_DIR (tests do).
-ACQ_STATE_DIR="${ACQ_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/acq}"
+# Only absolute values are honored (see userdirs.sh). A relative ACQ_STATE_DIR is
+# refused by the entry point before any adapter loads; here it resolves to empty
+# rather than to a directory under the current one.
+ACQ_STATE_DIR="$(acq_state_dir)" || ACQ_STATE_DIR=""
 ACQ_MSB_SSH_DIR="${ACQ_MSB_SSH_DIR:-${ACQ_STATE_DIR}/ssh}"
 ACQ_MSB_SSH_KEY="${ACQ_MSB_SSH_KEY:-${ACQ_MSB_SSH_DIR}/msb_id_ed25519}"
 ACQ_MSB_SSH_KNOWN_HOSTS="${ACQ_MSB_SSH_KNOWN_HOSTS:-${ACQ_MSB_SSH_DIR}/known_hosts}"

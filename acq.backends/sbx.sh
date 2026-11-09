@@ -37,6 +37,11 @@ if ! command -v acq_is_known_agent >/dev/null 2>&1; then
   # shellcheck source=acq.backends/agents.sh
   . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/agents.sh"
 fi
+# Absolute-only XDG/HOME resolution, for the same reason.
+if ! command -v acq_xdg_dir >/dev/null 2>&1; then
+  # shellcheck source=acq.backends/userdirs.sh
+  . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/userdirs.sh"
+fi
 
 USAI_PROVIDER_HOST="${USAI_PROVIDER_HOST:-api.gsa.usai.gov}"
 USAI_PROVIDER_BIND_HOSTS="${USAI_PROVIDER_BIND_HOSTS:-$USAI_PROVIDER_HOST}"
@@ -78,8 +83,12 @@ ACQ_SBX_STARTUP_BARRIER_PATH="/tmp/acq/startup-complete"
 USAI_KIT_CONFIG_PATH="/home/agent/usai-config/opencode.jsonc"
 
 # Where synthesized sbx-v2 kits (translated from the neutral hybrid/v1 kits)
-# are materialized for this run.
-ACQ_SBX_KIT_CACHE="${ACQ_SBX_KIT_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/acq/sbx-kits}"
+# are materialized for this run. The resolver runs outside the expansion: a
+# failing command substitution in an assignment would trip errexit while this
+# file is sourced.
+_acq_ud=$(acq_xdg_dir XDG_CACHE_HOME .cache) || _acq_ud=""
+ACQ_SBX_KIT_CACHE="${ACQ_SBX_KIT_CACHE:-$_acq_ud/acq/sbx-kits}"
+unset _acq_ud
 
 # Module-scope flag: set to 1 once the ssh-agent trust-boundary notice has been
 # printed, so it appears at most once per process. See ADR-0021.

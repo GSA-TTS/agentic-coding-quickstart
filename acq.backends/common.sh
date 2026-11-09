@@ -269,6 +269,15 @@ if ! command -v acq_is_known_agent >/dev/null 2>&1; then
   fi
 fi
 
+# Source the host user-directory resolvers (absolute-only XDG/HOME/ACQ_STATE_DIR
+# handling). Needed before secret-store.sh, whose defaults are assigned when it
+# is sourced. The adapters source it defensively too, for tests that load them
+# directly.
+if ! command -v acq_xdg_dir >/dev/null 2>&1; then
+  # shellcheck source=acq.backends/userdirs.sh
+  . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/userdirs.sh"
+fi
+
 # Source the neutral-kit translation layer (spec.yaml parser + shortcut
 # dispatch). ACQ_SCRIPT_DIR is exported by the acq entry point; in the offline
 # test harness it is set before common.sh is sourced.
@@ -902,7 +911,14 @@ acq_validate_agent_builtin_kit_dir() {
 acq_validate_agent_builtin_kit_ref() {
   local agent="$1" kitref="$2" base_dir="${3:-}" kitdir
   if [ -z "$base_dir" ]; then
-    base_dir="${ACQ_STATE_DIR:-${TMPDIR:-/tmp}/acq}/agent-kit-validation/$agent"
+    # A relative ACQ_STATE_DIR is never honored (see userdirs.sh); the entry
+    # point refuses it up front, and this fails closed if reached anyway.
+    if [ -n "${ACQ_STATE_DIR:-}" ]; then
+      acq_path_is_absolute "$ACQ_STATE_DIR" || return 1
+      base_dir="$ACQ_STATE_DIR/agent-kit-validation/$agent"
+    else
+      base_dir="${TMPDIR:-/tmp}/acq/agent-kit-validation/$agent"
+    fi
   fi
   kitdir=$(kit_translate_fetch "$kitref" "$base_dir") || return 1
   acq_validate_agent_builtin_kit_dir "$agent" "$kitdir"
@@ -1776,8 +1792,12 @@ acq_registry_auth_hint() {
 
 ACQ_RESOLVED_BACKEND=""
 
+# Only an absolute XDG_CONFIG_HOME/HOME is honored (see userdirs.sh); returns 1
+# with no output when no absolute home can be determined.
 _acq_config_file() {
-  printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/acq/config.yaml"
+  local base
+  base=$(acq_xdg_dir XDG_CONFIG_HOME .config) || return 1
+  printf '%s\n' "$base/acq/config.yaml"
 }
 
 _read_config_backend() {
@@ -1799,7 +1819,7 @@ _acq_config_read_field() {
   case "$key" in
     ''|*[!A-Za-z0-9_]*) return 0 ;;   # fail closed on an unexpected key name
   esac
-  cfg=$(_acq_config_file)
+  cfg=$(_acq_config_file) || return 0
   [ -f "$cfg" ] || return 0
   awk -v k="$key" '
     {
@@ -1857,7 +1877,7 @@ _acq_config_write_field() {
   case "$key" in
     ''|*[!A-Za-z0-9_]*) acq_debug "config: refusing to write unsafe key '$key'"; return 1 ;;
   esac
-  cfg=$(_acq_config_file)
+  cfg=$(_acq_config_file) || { acq_debug "config: no absolute config directory"; return 1; }
   dir=$(dirname "$cfg")
   if ! ( umask 077; mkdir -p "$dir" ) 2>/dev/null; then
     acq_debug "config: could not create config dir: $dir"
@@ -1899,8 +1919,11 @@ _acq_config_write_field() {
 _ACQ_LOCAL_BIN_ANNOUNCED=""
 _ensure_local_bin_on_path() {
   local be="$1"
-  local lb="${HOME:-}/.local/bin"
-  [ -n "${HOME:-}" ] || return 1
+  local lb
+  # Only an absolute home: a relative entry on PATH would resolve against the
+  # current directory (see userdirs.sh).
+  lb=$(acq_home_dir) || return 1
+  lb="$lb/.local/bin"
   [ -x "$lb/$be" ] || return 1
 
   # Already on PATH? Then nothing to do (defensive; caller only reaches here
@@ -2115,7 +2138,9 @@ _acq_provenance_dir() {
     printf '%s\n' "$ACQ_PROVENANCE_DIR"
     return 0
   fi
-  printf '%s\n' "${XDG_STATE_HOME:-$HOME/.local/state}/acq/provenance"
+  local base
+  base=$(acq_xdg_dir XDG_STATE_HOME .local/state) || return 1
+  printf '%s\n' "$base/acq/provenance"
 }
 
 # Path to one sandbox's provenance record. Keyed by backend + sandbox name so the
@@ -3013,7 +3038,8 @@ acq_kit_source_provider_kits() {
   [ -n "$repo" ] && [ -n "$ref" ] && [ -n "$dir" ] || return 0
   command -v kit_translate_fetch >/dev/null 2>&1 || return 0
   seed=$(printf '%s@%s' "$repo" "$ref" | cksum 2>/dev/null | cut -d' ' -f1)
-  cache="${XDG_CACHE_HOME:-${HOME:-}/.cache}/acq/kit-sources/${seed:-0}"
+  cache=$(acq_xdg_dir XDG_CACHE_HOME .cache) || return 0
+  cache="$cache/acq/kit-sources/${seed:-0}"
   root=$(kit_translate_fetch "git+https://${repo}.git#ref=${ref}&dir=${dir}" "$cache" 2>/dev/null) || {
     acq_debug "kit-source: could not fetch $repo@$ref for discovery"
     return 0
@@ -3648,7 +3674,7 @@ _acq_provider_facts_python() {
   if [ -n "${LOCALAPPDATA:-}" ] && [ "$(uname -s 2>/dev/null)" != "Linux" ]; then
     data_home="$LOCALAPPDATA/acq"
   else
-    data_home="${XDG_DATA_HOME:-${HOME:-}/.local/share}/acq"
+    data_home=$(acq_xdg_dir XDG_DATA_HOME .local/share)/acq || data_home=""
   fi
   runtime="${ACQ_PROVIDER_INPUT_DATA_DIR:-$data_home/provider-input-validator}.current"
   if [ -x "$runtime/bin/python3" ]; then
@@ -4239,7 +4265,7 @@ _acq_provider_input_python() {
     if [ -n "${LOCALAPPDATA:-}" ] && [[ "$(uname -s 2>/dev/null)" = MINGW* || "$(uname -s 2>/dev/null)" = MSYS* || "$(uname -s 2>/dev/null)" = CYGWIN* ]]; then
       data_home="$LOCALAPPDATA/acq"
     else
-      data_home="${XDG_DATA_HOME:-${HOME:-}/.local/share}/acq"
+      data_home=$(acq_xdg_dir XDG_DATA_HOME .local/share)/acq || data_home=""
     fi
     tools_dir="${ACQ_PROVIDER_INPUT_DATA_DIR:-$data_home/provider-input-validator}"
     runtime="$tools_dir/provider-input-validator.current"
@@ -5911,7 +5937,7 @@ acq_print_doctor() {
   echo ""
 
   local config_file
-  config_file=$(_acq_config_file)
+  config_file=$(_acq_config_file) || return 1
   if [ -f "$config_file" ]; then
     echo "  config: ${config_file}"
     local cfg_backend
@@ -5962,7 +5988,7 @@ acq_print_doctor() {
 # (config.yaml) to stderr, so `acq configure` opens by showing what is in effect.
 _acq_configure_show_current() {
   local cfg backend extras scope bindings provider_kit sources
-  cfg=$(_acq_config_file)
+  cfg=$(_acq_config_file) || return 1
   backend=$(_acq_config_read_field backend)
   extras=$(_acq_config_read_field extra_kits)
   scope=$(_acq_config_read_field scope_github_token)
@@ -6117,7 +6143,7 @@ acq_configure() {
 # non-interactive (CI / piped) — fail-open, preserving today's behavior.
 maybe_first_run_configure() {
   local cfg dir
-  cfg=$(_acq_config_file)
+  cfg=$(_acq_config_file) || return 0
   [ -f "$cfg" ] && return 0        # already configured (or previously offered)
   _acq_prompt_interactive || return 0   # non-interactive: skip silently
 

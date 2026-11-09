@@ -55,8 +55,21 @@ ACQ_KEYCHAIN_LABEL="acq-secret-store"
 # envelope format ever changes.
 ACQ_SECRET_DPAPI_HEADER="acq-dpapi-v1"
 
-# File-fallback location (used only when no OS keychain tool is present).
-ACQ_SECRET_FILE_DIR="${ACQ_SECRET_FILE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/acq/secrets}"
+# Absolute-only XDG/HOME resolution. common.sh normally sources this first, but
+# unit tests source this file on its own.
+if ! command -v acq_xdg_dir >/dev/null 2>&1; then
+  # shellcheck source=acq.backends/userdirs.sh
+  . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/userdirs.sh"
+fi
+
+# File-fallback location (used only when no OS keychain tool is present). A
+# relative XDG_DATA_HOME or HOME is ignored (see userdirs.sh), so secret files
+# can never land under the current directory.
+# The resolver runs outside the expansion: a failing command substitution in an
+# assignment would trip errexit while this file is being sourced.
+_acq_ud=$(acq_xdg_dir XDG_DATA_HOME .local/share) || _acq_ud=""
+ACQ_SECRET_FILE_DIR="${ACQ_SECRET_FILE_DIR:-$_acq_ud/acq/secrets}"
+unset _acq_ud
 
 # Offline-test escape hatch: when ACQ_SECRET_STORE_DIR is set, force the file
 # backend rooted there (no real keychain touched). Used by the offline test suite.
