@@ -361,6 +361,20 @@ def test_kit_update_interactive_decline_records_nothing(monkeypatch, tmp_path, c
     assert kits.consent_read("msb", "mybox") is None
 
 
+def test_kit_update_on_windows_nul_stdin_refuses_without_prompting(monkeypatch, tmp_path, capsys, windows_nul_stdin):
+    """Human mode with ``< NUL`` on Windows: isatty() says True, but there is no
+    console, so the consent prompt must refuse rather than wait for input."""
+    _env(monkeypatch, tmp_path, catalog={"mybox": "running"})
+    windows_nul_stdin("y\n")
+    monkeypatch.setattr("builtins.input", lambda prompt="": pytest.fail("prompted without a console"))
+
+    rc = cli.main(["--backend", "msb", "kit", "update", "mybox"])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "refusing to refresh 'mybox' non-interactively without --yes" in err
+    assert kits.provenance_read("msb", "mybox") is None
+
+
 class _FakeStdin:
     def __init__(self, *, isatty):
         self._isatty = isatty

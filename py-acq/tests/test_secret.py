@@ -601,6 +601,18 @@ def test_non_utf8_secret_is_refused_without_a_traceback_or_its_bytes(tmp_path, l
     assert not _store_dir().exists()
 
 
+def test_secret_reader_on_windows_nul_stdin_reads_the_pipe(monkeypatch, windows_nul_stdin):
+    """``< NUL`` (or a redirected file) on Windows passes isatty() but has no
+    console: the value is read from stdin, never through a no-echo prompt."""
+    import getpass
+
+    from acq_py.commands import common
+
+    windows_nul_stdin("PIPED-VALUE\n")
+    monkeypatch.setattr(getpass, "getpass", lambda prompt, stream=None: pytest.fail("prompted without a console"))
+    assert common._read_secret_value() == "PIPED-VALUE"
+
+
 def test_undecodable_values_never_reach_the_store(monkeypatch):
     import getpass
 

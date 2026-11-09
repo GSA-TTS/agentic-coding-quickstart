@@ -98,6 +98,17 @@ def test_interactive_without_a_tty_skips(monkeypatch, capsys):
     assert doc["data"]["imported"] == 1 and secretstore.resolve("usai") == "v1"
 
 
+def test_interactive_on_windows_nul_stdin_skips(monkeypatch, capsys, windows_nul_stdin):
+    """``< NUL`` on Windows passes isatty() but has no console: the per-service
+    prompt must not run, even though stdin would answer yes."""
+    monkeypatch.setenv("USAI_API_KEY", "nul-value-WXYZ")
+    windows_nul_stdin("y\n")
+    rc, doc, err = _run(capsys)
+    assert rc == 0 and doc["data"]["results"][0]["reason"] == "not_a_tty"
+    assert "[y/N]" not in err
+    assert not _store().exists()
+
+
 def test_interactive_prompt_on_a_tty(monkeypatch, capsys):
     class _Tty(io.StringIO):
         def isatty(self):

@@ -120,7 +120,11 @@ def test_relative_layout_override_is_refused(monkeypatch, var):
     monkeypatch.setenv(var, "relative/dir")
     with pytest.raises(SecretStoreError) as info:
         secretstore.backend_name()
-    assert var in info.value.message
+    # The wording of Bash's shared override check (_acq_userdirs_override_problem).
+    fallback = "the default" if var == "ACQ_SECRET_META_DIR" else "the default secret store"
+    assert info.value.code == "validation_failed"
+    assert info.value.message == f"{var} must be an absolute path, got 'relative/dir'"
+    assert info.value.remediation == f"set {var} to an absolute path, or unset it to use {fallback}"
 
 
 @posix_fakes

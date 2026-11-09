@@ -176,6 +176,9 @@ def _windows_console(fd: int) -> bool:  # pragma: no cover - Windows only
     """True when ``fd``'s handle is a console (``GetConsoleMode`` succeeds).
 
     Any failure, including a handle that is not a console, reads as False.
+    ``ctypes.windll`` loads kernel32 once and keeps it, so a call costs no DLL
+    load. The handle goes in as ``c_void_p``: a 64-bit handle value does not
+    fit the C ``int`` ctypes would otherwise convert a Python int to.
     """
     if sys.platform != "win32":
         return False
@@ -188,9 +191,8 @@ def _windows_console(fd: int) -> bool:  # pragma: no cover - Windows only
         return False
     mode = ctypes.c_ulong()
     try:
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        return bool(kernel32.GetConsoleMode(ctypes.c_void_p(handle), ctypes.byref(mode)))
-    except OSError:
+        return bool(ctypes.windll.kernel32.GetConsoleMode(ctypes.c_void_p(handle), ctypes.byref(mode)))
+    except OSError:  # kernel32 could not be loaded
         return False
 
 

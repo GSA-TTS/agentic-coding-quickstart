@@ -3832,6 +3832,78 @@ key on its next attach. Record the transcript, then close this entry.
 
 ---
 
+## 58. Bash acq: Stray `Terminated` After a Group SIGTERM
+
+**Status:** Root cause known; fix deferred to the Bash `acq` owner.
+
+### Symptoms
+
+A SIGTERM sent to acq's whole process group, rather than to acq alone,
+sometimes leaves a bare `Terminated` line on acq's stderr.
+acq still exits with the signal and its kit-fetch root is still removed. The
+`foreground` SIGTERM sub-case of `test/bats/103-kit-fetch-lifecycle.bats`
+(driven by `test/bats/kit-fetch-lifecycle.py`) asserts an empty stderr, so it
+fails now and then. It is seen more on loaded CI runners (pre-commit and the
+bash 3.2 shards) and passes on re-run.
+
+### Root Cause
+
+The line does not come from acq's shell or its foreground child. It comes from
+the kit-fetch guardian that `_acq_kit_fetch_start` in `acq` starts in the
+background:
+
+1. The guardian runs `sh -c '…'` with HUP, INT and TERM ignored, in acq's
+   process group, and keeps acq's stderr.
+2. Each one-second tick it looks up its own parent with `proc_info`. On Linux and
+   macOS that runs `ps -o ppid= -p PID` inside a command substitution.
+3. procps `ps` (Linux) installs its own SIGTERM and SIGHUP handlers at startup,
+   even when it inherits them as ignored (`strace -e trace=rt_sigaction ps …`
+   shows it with procps-ng 4.0.4). It leaves SIGINT alone. A group SIGTERM that
+   arrives while that `ps` runs makes its handler re-raise the signal, so `ps`
+   dies from SIGTERM. A group SIGHUP does not: `ps` 4.0.4 handles it with
+   `exit_group(1)`, so it exits with status 1 and nothing is printed. Whether
+   the macOS `ps` behaves the same has not been checked.
+4. The command-substitution subshell (dash on Ubuntu) waited for `ps` in the
+   foreground and reports its death by signal on stderr: `Terminated`. After a
+   SIGHUP there is no death by signal to report, so the line never appears.
+
+So the race is between the group signal and the guardian's short `ps` window.
+The first `ps` runs right as acq starts, which is where the test signals, and
+CPU load makes the window longer. The guardian then exits through
+`parent=$(proc_info "$$") || exit 1` and removes the root. A group SIGHUP
+that hits the same window takes that exit too (`ps` exits 1), but silently.
+Either way this is harmless here, because acq is dying from the same signal.
+SIGINT, from a terminal's Ctrl-C, does not trigger any of this.
+
+A forced reproduction, run without load: put a `ps` wrapper first on `PATH`
+that resets SIGTERM to its default, sleeps three seconds, then execs the real
+`ps`. Start `acq` (the harness's generated script, `foreground` mode) in its
+own session and `killpg` it with SIGTERM after one second. You get
+`Terminated` on stderr every time. With the real `ps` and no load, stderr is
+empty. (A wrapper that also resets SIGHUP prints `Hangup` for a group SIGHUP;
+that comes from the wrapper, not from the real `ps`.)
+
+### Fix
+
+Proposed, in `acq` (not changed here): send the guardian's stderr to
+`/dev/null` along with its stdin and stdout
+(`) </dev/null >/dev/null 2>&1 &`). The guardian never needs to print, so this
+removes the stray line whatever its helpers do. Separately, a failed
+`proc_info` could skip the tick instead of exiting, so a helper killed by a
+signal never ends the guardian early. If it does, the tick must still run the
+`kill -0 "$owner"` liveness check. Otherwise a `ps` that keeps failing, together
+with an acq killed by SIGKILL (which runs no EXIT trap), would leave the
+guardian and its root behind forever.
+
+### Prevention / Status
+
+Once the fix lands in `acq`, add the slow-`ps` wrapper above as a deterministic
+case in `test/bats/kit-fetch-lifecycle.py`. Until then, a failure of only the
+`foreground` SIGTERM sub-case, whose stderr is exactly `Terminated\n`, is this
+known race and not a regression.
+
+---
+
 ## Contributing
 
 When you discover a new failure mode:

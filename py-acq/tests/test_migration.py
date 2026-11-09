@@ -323,6 +323,21 @@ def test_recreate_requires_consent(monkeypatch, tmp_path, capsys):
     assert doc["error"]["code"] == errors.CONSENT_REQUIRED
 
 
+def test_recreate_on_windows_nul_stdin_refuses_without_prompting(monkeypatch, tmp_path, capsys, windows_nul_stdin):
+    """Human mode with ``< NUL`` on Windows: isatty() says True, but there is no
+    console, so ``create --recreate`` must refuse rather than prompt."""
+    _env(monkeypatch, tmp_path, catalog={"sec": "running"})
+    _write_record("msb", "sec", _SEC_RECORD)
+    monkeypatch.setenv("ACQ_SECURITY_MOUNT_STATE", json.dumps({"sec": "missing"}))
+    windows_nul_stdin("y\n")
+    monkeypatch.setattr("builtins.input", lambda prompt="": pytest.fail("prompted without a console"))
+
+    rc = cli.main(["--backend", "msb", "create", "--recreate", "sec"])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "refusing to recreate 'sec' non-interactively without --yes" in err
+
+
 def test_recreate_refused_when_not_security_exception(monkeypatch, tmp_path, capsys):
     _env(monkeypatch, tmp_path, catalog={"plain": "running"})
     _write_record("msb", "plain", {"schema": 1, "name": "plain", "backend": "msb", "agent": "opencode", "workspace": "/w"})
