@@ -568,6 +568,7 @@ fi
 # update the index never fails the store — it only degrades later enumeration.
 _acq_secret_index_add() {
   local key="$1" dir line
+  [ -n "$ACQ_SECRET_INDEX_FILE" ] || return 0   # no data dir: best-effort skip
   dir=$(dirname "$ACQ_SECRET_INDEX_FILE")
   ( umask 077; mkdir -p "$dir" ) || return 0
   # Already present? Nothing to do (keeps the file deduplicated).
@@ -598,6 +599,7 @@ _acq_secret_index_remove() {
 
 _acq_secret_meta_file_for() {
   local key="$1"
+  [ -n "$ACQ_SECRET_META_DIR" ] || return 1   # no absolute data dir (userdirs.sh)
   printf '%s/%s\n' "$ACQ_SECRET_META_DIR" "$(printf '%s' "$key" | tr -c 'A-Za-z0-9._-' '_')"
 }
 

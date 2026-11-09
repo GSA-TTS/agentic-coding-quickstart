@@ -737,7 +737,7 @@ _ACQ_MSB_HOST_PROBE_NOTICE_SHOWN=0
 # value — exactly the bug this avoids). The counter is therefore persisted in a small
 # file under the ports state dir so consecutive publishes in one process read
 # distinct, increasing values. Seeded from a per-process random base.
-_ACQ_MSB_PORT_SEQ_FILE="${ACQ_MSB_PORTS_DIR}/.port-seq"
+_ACQ_MSB_PORT_SEQ_FILE="${ACQ_MSB_PORTS_DIR:+$ACQ_MSB_PORTS_DIR/.port-seq}"
 
 # Per-process random base offset for ephemeral serve-port selection, evaluated
 # ONCE when this file is sourced (not per call). Spreads different processes
@@ -1308,6 +1308,7 @@ _acq_msb_fetch_kit() {
     esac
   fi
   # Derive a stable cache subdir from the ref (sha + dir tail).
+  acq_require_base "msb kit cache" "$ACQ_MSB_KIT_CACHE" || return 1
   slug=$(printf '%s' "$kitref" | tr -c 'A-Za-z0-9._-' '_' )
   dest="${ACQ_MSB_KIT_CACHE}/${slug}"
   if [ -d "$dest/.git" ]; then
@@ -3079,7 +3080,8 @@ _acq_msb_stage_startup_script() {
 
   # Private staging dir (0700) under the acq state tree — not a world-readable
   # /tmp. Mirrors how ssh keys/state are kept under ACQ_STATE_DIR.
-  local _dir="${ACQ_MSB_STARTUP_STAGE_DIR:-${ACQ_STATE_DIR}/msb-startup}"
+  local _dir="${ACQ_MSB_STARTUP_STAGE_DIR:-${ACQ_STATE_DIR:+$ACQ_STATE_DIR/msb-startup}}"
+  acq_require_base "startup staging dir" "$_dir" || return 0   # best-effort, like the mktemp failure below
   mkdir -p "$_dir" 2>/dev/null || true
   chmod 700 "$_dir" 2>/dev/null || true
 
@@ -3188,6 +3190,8 @@ _acq_msb_upstream_ca_flags_into() {
   command -v security >/dev/null 2>&1 || return 0
 
   local _out="$ACQ_MSB_UPSTREAM_CA_FILE" _dir
+  # No resolvable state dir: skip (dirname of "" is ".", the current dir).
+  acq_require_base "upstream-CA bundle" "$_out" 2>/dev/null || return 0
   _dir=$(dirname -- "$_out")
   if ! mkdir -p "$_dir" 2>/dev/null; then
     echo "acq(msb): warning: cannot create upstream-CA dir ${_dir}; skipping auto-detect" >&2
@@ -3300,6 +3304,7 @@ _acq_msb_clone_setup() {
     echo "acq(msb): error: --clone: workspace must be the repository root: $top_canon" >&2
     return 1
   fi
+  acq_require_base "scratch clones dir" "$ACQ_MSB_CLONES_DIR" || return 1
   local dir="${ACQ_MSB_CLONES_DIR}/${name}" scratch
   scratch="${dir}/$(basename "$ws_canon")"
   if [ -e "$dir" ]; then
@@ -3470,6 +3475,7 @@ _acq_msb_clone_warn_unfetched() {
   # NOTE: `local a="$1" b="…${a}"` is a trap — the whole statement's words
   # expand BEFORE `local` assigns, so ${a} is unbound under set -u. Split them.
   local name="$1" origin="" scratch="" d t
+  [ -n "$ACQ_MSB_CLONES_DIR" ] || return 0   # no clones dir: nothing to inspect
   local dir="${ACQ_MSB_CLONES_DIR}/${name}"
   [ -d "$dir" ] || return 0
   origin=$(cat "${dir}/.origin" 2>/dev/null) || origin=""
@@ -3508,6 +3514,7 @@ EOF
 # fetch-back remote from the origin checkout. Best-effort, always returns 0
 # (a sandbox created without --clone has no dir: quiet no-op).
 _acq_msb_clone_cleanup() {
+  acq_require_base "scratch clones dir" "$ACQ_MSB_CLONES_DIR" || return 1   # never rm -rf "/$name"
   local name="$1" origin=""
   local dir="${ACQ_MSB_CLONES_DIR}/${name}"
   [ -d "$dir" ] || return 0
@@ -4723,6 +4730,7 @@ _acq_msb_ssh_agent_link_path() {
   case "$name" in
     ""|*[!A-Za-z0-9_-]*|-*) return 1 ;;
   esac
+  [ -n "$ACQ_MSB_SSH_AGENT_LINK_DIR" ] || return 1   # no state dir: no managed link
   _p="${ACQ_MSB_SSH_AGENT_LINK_DIR}/${name}.sock"
   if [ "$(printf '%s' "$_p" | wc -c | tr -d ' ')" -gt "$ACQ_MSB_SUN_PATH_MAX" ]; then
     _sum=$(printf '%s' "$name" | cksum | cut -d' ' -f1)
@@ -5665,6 +5673,8 @@ _acq_msb_valid_publish() {
 # _acq_msb_ssh_key_ensure — create the acq-managed ed25519 key on first use.
 # 0700 dir, 0600 key, under acq state (NOT the user's ~/.ssh). Idempotent.
 _acq_msb_ssh_key_ensure() {
+  acq_require_base "acq-managed ssh key dir" "$ACQ_MSB_SSH_DIR" || return 1
+  acq_require_base "acq-managed ssh key" "$ACQ_MSB_SSH_KEY" || return 1
   if [ -f "$ACQ_MSB_SSH_KEY" ]; then
     return 0
   fi
@@ -5735,11 +5745,15 @@ _acq_msb_pick_ephemeral_port() {
   # missing/garbage file resets to 0; failures fall back to 0 (fail-open to a
   # valid port — a same-value collision only re-fails a real serve bind, never
   # corrupts state).
-  seq=$(cat "$_ACQ_MSB_PORT_SEQ_FILE" 2>/dev/null)
+  # With no ports dir the counter is simply not persisted (never written to "/").
+  seq=""
+  [ -n "$_ACQ_MSB_PORT_SEQ_FILE" ] && seq=$(cat "$_ACQ_MSB_PORT_SEQ_FILE" 2>/dev/null)
   case "$seq" in ""|*[!0-9]*) seq=0 ;; esac
   seq=$(( seq + 1 ))
-  mkdir -p "$ACQ_MSB_PORTS_DIR" 2>/dev/null || true
-  printf '%s\n' "$seq" >"$_ACQ_MSB_PORT_SEQ_FILE" 2>/dev/null || true
+  if [ -n "$ACQ_MSB_PORTS_DIR" ] && [ -n "$_ACQ_MSB_PORT_SEQ_FILE" ]; then
+    mkdir -p "$ACQ_MSB_PORTS_DIR" 2>/dev/null || true
+    printf '%s\n' "$seq" >"$_ACQ_MSB_PORT_SEQ_FILE" 2>/dev/null || true
+  fi
 
   # Deterministic test seam: pin the serve port for exact-shape assertions.
   case "${ACQ_MSB_FORCE_SERVE_PORT:-}" in
@@ -5871,6 +5885,7 @@ _acq_msb_ports_pidfile() {
       return 1
       ;;
   esac
+  acq_require_base "ports state dir" "$ACQ_MSB_PORTS_DIR" || return 1
   printf '%s/%s.pids' "$ACQ_MSB_PORTS_DIR" "$name"
 }
 

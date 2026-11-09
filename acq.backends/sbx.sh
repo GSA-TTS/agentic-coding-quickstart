@@ -371,6 +371,7 @@ _acq_sbx_translate_kit() {
     return 0
   fi
 
+  acq_require_base "sbx kit cache" "$ACQ_SBX_KIT_CACHE" || return 1
   slug=$(printf '%s' "$kitref" | tr -c 'A-Za-z0-9._-' '_')
   fetchdir="${ACQ_SBX_KIT_CACHE}/fetch/${slug}"
   out="${ACQ_SBX_KIT_CACHE}/v2/${slug}"
@@ -446,6 +447,7 @@ _acq_sbx_git_identity_kit() {
   [ -n "$allrecs" ] || return 0
   slug=$(printf '%s' "$allrecs" | cksum | cut -d' ' -f1)
 
+  acq_require_base "sbx kit cache" "$ACQ_SBX_KIT_CACHE" || return 1
   local dir="${ACQ_SBX_KIT_CACHE}/generated/git-identity-${slug}"
   mkdir -p "$dir"
   {
@@ -482,6 +484,7 @@ _acq_sbx_git_identity_kit() {
 
 _acq_sbx_startup_barrier_kit() {
   local token="$1" dir
+  acq_require_base "sbx kit cache" "$ACQ_SBX_KIT_CACHE" || return 1
   dir="${ACQ_SBX_KIT_CACHE}/generated/startup-barrier-${token}"
   mkdir -p "$dir"
   cat >"$dir/spec.yaml" <<EOF

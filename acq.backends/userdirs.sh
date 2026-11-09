@@ -247,6 +247,18 @@ acq_userdirs_problem() {
   return 1
 }
 
+# acq_require_base LABEL VALUE — guard for a consumer of a resolved directory:
+# return 0 when VALUE is non-empty; otherwise say which directory is missing and
+# return 1. Defaults derived from an unresolvable user directory are left empty
+# (never root-anchored), so every consumer that would build a path, create a
+# directory or delete under one calls this first and fails closed.
+acq_require_base() {
+  [ -n "${2:-}" ] && return 0
+  printf 'acq: refusing to use the %s: its directory could not be resolved to an absolute path\n' "${1:-acq directory}" >&2
+  printf '%s\n' '     set HOME, or the XDG base directory variables, to absolute paths (see: acq doctor)' >&2
+  return 1
+}
+
 # acq_userdirs_check — refuse when acq's user directories cannot be resolved:
 # print "acq: MESSAGE" and the remediation on stderr (as Python does) and return
 # 1; return 0 when every directory resolves.

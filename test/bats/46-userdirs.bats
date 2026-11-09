@@ -98,7 +98,9 @@ GESTUB
   local bin="$STUBDIR/nogetent" bash_bin
   bash_bin=$(command -v bash)
   mkdir -p "$bin"
-  printf '#!/bin/sh\necho 1234\n' >"$bin/id"
+  # uid/name 0: "~0" is the one all-digit tilde form bash expands (to $PWD),
+  # so it must never reach the lookup.
+  printf '#!/bin/sh\necho 0\n' >"$bin/id"
   chmod +x "$bin/id"
   run env HOME=relhome PATH="$bin" "$bash_bin" -c '
     . "$1/acq.backends/userdirs.sh"
@@ -395,21 +397,99 @@ SETUP
   _assert_work_empty
 }
 
+# Environment for the "no home" tests: no absolute home and relative XDG
+# values, so every acq default derived from them is left empty.
+_no_home_env() {
+  printf '%s\n' -u ACQ_STATE_DIR -u ACQ_SECRET_STORE_DIR -u ACQ_SECRET_FILE_DIR \
+    -u ACQ_MSB_KIT_LOCAL_DIR -u ACQ_MSB_STARTUP_STAGE_DIR -u ACQ_SBX_KIT_CACHE -u ACQ_SBX_KIT_PASSTHROUGH \
+    HOME=relhome XDG_STATE_HOME=rel XDG_DATA_HOME=rel XDG_CACHE_HOME=rel
+}
+
 @test "no home: source-time defaults stay empty instead of root-anchored" {
   _plant_unknown_account
-  run env -u ACQ_STATE_DIR -u ACQ_SECRET_STORE_DIR -u ACQ_SECRET_FILE_DIR HOME=relhome \
-      XDG_STATE_HOME=rel XDG_DATA_HOME=rel XDG_CACHE_HOME=rel bash -c '
+  local -a e=()
+  while IFS= read -r l; do e+=("$l"); done < <(_no_home_env)
+  run env "${e[@]}" bash -c '
     . "$1/acq.backends/secret-store.sh"
     . "$1/acq.backends/msb.sh"
     . "$1/acq.backends/sbx.sh"
     printf "[%s]\n" "$ACQ_SECRET_FILE_DIR" "$ACQ_SECRET_META_DIR" "$ACQ_SECRET_INDEX_FILE" \
       "$ACQ_STATE_DIR" "$ACQ_MSB_SSH_DIR" "$ACQ_MSB_SSH_KEY" "$ACQ_MSB_PORTS_DIR" "$ACQ_MSB_CLONES_DIR" \
-      "$ACQ_MSB_SSH_AGENT_LINK_DIR" "$ACQ_MSB_KIT_CACHE" "$ACQ_MSB_UPSTREAM_CA_FILE" "$ACQ_SBX_KIT_CACHE"
+      "$ACQ_MSB_SSH_AGENT_LINK_DIR" "$ACQ_MSB_KIT_CACHE" "$ACQ_MSB_UPSTREAM_CA_FILE" "$ACQ_SBX_KIT_CACHE" \
+      "$_ACQ_MSB_PORT_SEQ_FILE"
     _acq_secret_file_for acq.usai || echo "no secret path"
+    _acq_secret_meta_file_for acq.usai || echo "no meta path"
   ' _ "$REPO_ROOT"
   assert_success
   refute_output --partial '[/'
   assert_line 'no secret path'
+  assert_line 'no meta path'
+}
+
+@test "no home: consumers of an empty base refuse or no-op, never touching / or the cwd" {
+  _plant_unknown_account
+  local -a e=()
+  while IFS= read -r l; do e+=("$l"); done < <(_no_home_env)
+  run env "${e[@]}" ERRF="$STUBDIR/consumer.err" bash -c '
+    . "$1/acq.backends/common.sh"
+    . "$1/acq.backends/msb.sh"
+    . "$1/acq.backends/sbx.sh"
+    r() { local rc=0; "$@" >/dev/null 2>"$ERRF" || rc=$?; printf "%s rc=%s %s\n" "$1" "$rc" "$(head -1 "$ERRF")"; }
+    r _acq_msb_clone_cleanup box
+    r _acq_msb_clone_warn_unfetched box
+    r _acq_msb_ports_pidfile box
+    r _acq_msb_ssh_agent_link_path box
+    r _acq_msb_ssh_key_ensure
+    r _acq_msb_fetch_kit "git+https://example.invalid/kits.git#ref=abc&dir=k"
+    r _acq_msb_stage_startup_script "$ERRF.none.yaml" flags
+    port=$(_acq_msb_pick_ephemeral_port) && echo "port=$port"
+    r _acq_sbx_translate_kit "git+https://example.invalid/kits.git#ref=abc&dir=k"
+    r _acq_sbx_startup_barrier_kit tok
+    GIT_AUTHOR_NAME=n GIT_AUTHOR_EMAIL=e@x r _acq_sbx_git_identity_kit
+    r _acq_secret_index_add acq.usai
+  ' _ "$REPO_ROOT"
+  assert_success
+  assert_line '_acq_msb_clone_cleanup rc=1 acq: refusing to use the scratch clones dir: its directory could not be resolved to an absolute path'
+  assert_line '_acq_msb_clone_warn_unfetched rc=0 '
+  assert_line '_acq_msb_ports_pidfile rc=1 acq: refusing to use the ports state dir: its directory could not be resolved to an absolute path'
+  assert_line '_acq_msb_ssh_agent_link_path rc=1 '
+  assert_line '_acq_msb_ssh_key_ensure rc=1 acq: refusing to use the acq-managed ssh key dir: its directory could not be resolved to an absolute path'
+  assert_line '_acq_msb_fetch_kit rc=1 acq: refusing to use the msb kit cache: its directory could not be resolved to an absolute path'
+  assert_line '_acq_msb_stage_startup_script rc=0 acq: refusing to use the startup staging dir: its directory could not be resolved to an absolute path'
+  assert_line --regexp '^port=[0-9]+$'
+  assert_line '_acq_sbx_translate_kit rc=1 acq: refusing to use the sbx kit cache: its directory could not be resolved to an absolute path'
+  assert_line '_acq_sbx_startup_barrier_kit rc=1 acq: refusing to use the sbx kit cache: its directory could not be resolved to an absolute path'
+  assert_line '_acq_sbx_git_identity_kit rc=1 acq: refusing to use the sbx kit cache: its directory could not be resolved to an absolute path'
+  assert_line '_acq_secret_index_add rc=0 '
+  _assert_work_empty
+}
+
+@test "no home: macOS upstream-CA auto-detect skips instead of writing under the cwd" {
+  _plant_unknown_account
+  cat >"$STUBDIR/uname" <<'STUB'
+#!/bin/sh
+echo Darwin
+STUB
+  cat >"$STUBDIR/security" <<'STUB'
+#!/bin/sh
+echo "security $*" >> "$CALLS"
+printf -- '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n'
+STUB
+  chmod +x "$STUBDIR/uname" "$STUBDIR/security"
+  local -a e=()
+  while IFS= read -r l; do e+=("$l"); done < <(_no_home_env)
+  run env -u ACQ_MSB_NO_UPSTREAM_CA -u ACQ_MSB_UPSTREAM_CA_CERT "${e[@]}" ACQ_MSB_UPSTREAM_CA_AUTODETECT=1 bash -c '
+    . "$1/acq.backends/msb.sh"
+    flags=()
+    _acq_msb_upstream_ca_flags_into flags
+    printf "flags=[%s]\n" "${flags[*]-}"
+  ' _ "$REPO_ROOT"
+  assert_success
+  assert_output 'flags=[]'
+  # It stops before staging a temp bundle (dirname "" would be the cwd).
+  run cat "$CALLS"
+  refute_output --partial 'security find-certificate'
+  _assert_work_empty
 }
 
 @test "cli: doctor is not refused; it reports the bad state dir as a failed check and completes" {
@@ -422,6 +502,7 @@ SETUP
   run env ACQ_STATE_DIR=rel-state ACQ_BACKEND=msb "$ACQ" doctor somebox
   assert_failure 1
   assert_line --index 0 "acq: ACQ_STATE_DIR must be an absolute path, got 'rel-state'"
+  refute_line --partial 'no such sandbox'
   _assert_work_empty
 }
 
