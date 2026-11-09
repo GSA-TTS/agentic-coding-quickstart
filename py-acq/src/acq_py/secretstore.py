@@ -33,7 +33,9 @@ it only relocates the DPAPI files); ``ACQ_SECRET_FILE_DIR``,
 ``ACQ_SECRET_META_DIR``, ``ACQ_SECRET_INDEX_FILE`` and ``ACQ_SECRET_FORCE_FILE``
 override the layout; ``ACQ_SECRET_SECURITY_BIN`` and
 ``ACQ_SECRET_POWERSHELL_BIN`` replace the keychain tools only when
-``ACQ_SECRET_STORE_DIR`` is also set, so production never honors them. Unlike
+``ACQ_SECRET_STORE_DIR`` is also set, so production never honors them; Windows
+PowerShell is otherwise run by its full path under ``%SystemRoot%``, never found
+on PATH, and the override must be absolute too. Unlike
 Bash, a relative path in any of these is refused rather than resolved against
 the current directory, which is normally the untrusted workspace.
 """
@@ -74,7 +76,11 @@ IS_MACOS = sys.platform == "darwin"
 TOOL_TIMEOUT = 300.0
 
 _SECURITY_DEFAULT = "/usr/bin/security"
-_POWERSHELL_DEFAULT = "powershell.exe"
+# Windows PowerShell is launched by its full path under %SystemRoot%, never by a
+# PATH search: acq usually runs inside the workspace it sandboxes, and a planted
+# powershell.exe there must not be the one that decrypts the user's secrets
+# (acq.cmd follows the same rule).
+_POWERSHELL_RELATIVE = ("System32", "WindowsPowerShell", "v1.0", "powershell.exe")
 
 # The PowerShell one-liners, byte-identical to Bash's so both sides call DPAPI
 # the same way: plaintext and ciphertext move over stdin/stdout, never argv.
@@ -187,6 +193,9 @@ def value_problem(value: str) -> str | None:
     """
     if not value:
         return "the secret value is empty"
+    if any("\ud800" <= ch <= "\udfff" for ch in value):
+        # Undecodable input carried through surrogateescape: not a real value.
+        return "the secret value is not valid UTF-8"
     if "\n" in value or "\t" in value:
         return "the secret value contains a newline or tab, which the acq secret store cannot store intact"
     if value.removesuffix("\r") == DPAPI_HEADER:
@@ -267,15 +276,23 @@ def _security_bin(layout: _Layout) -> str:
     return _tool_override(layout, "ACQ_SECRET_SECURITY_BIN") or _SECURITY_DEFAULT
 
 
-def _resolve_program(name: str) -> str | None:
-    """An absolute executable path for ``name``; the cwd is never searched."""
-    if os.path.isabs(name):
-        return name if os.path.isfile(name) and os.access(name, os.X_OK) else None
-    return hostexec.which(name)
+def _executable(path: str) -> str | None:
+    """``path`` when it is an absolute, existing executable file, else None."""
+    if userdirs.is_absolute(path) and os.path.isfile(path) and os.access(path, os.X_OK):
+        return path
+    return None
 
 
 def _powershell(layout: _Layout) -> str | None:
-    return _resolve_program(_tool_override(layout, "ACQ_SECRET_POWERSHELL_BIN") or _POWERSHELL_DEFAULT)
+    """The absolute path of Windows PowerShell, or None. The test-only override
+    must itself be absolute; nothing is looked up on PATH."""
+    override = _tool_override(layout, "ACQ_SECRET_POWERSHELL_BIN")
+    if override:
+        return _executable(override)
+    system_root = os.environ.get("SystemRoot", "")
+    if not userdirs.is_absolute(system_root):
+        return None
+    return _executable(os.path.join(system_root, *_POWERSHELL_RELATIVE))
 
 
 def backend_name() -> str:
@@ -288,9 +305,10 @@ def backend_name() -> str:
         if _powershell(layout) is None:
             raise SecretStoreError(
                 errors.FAILURE,
-                "Windows DPAPI is unavailable (powershell.exe was not found), and acq never "
-                "stores secrets in plaintext on Windows",
-                "make the in-box Windows PowerShell (powershell.exe) available on PATH and retry",
+                "Windows DPAPI is unavailable (Windows PowerShell was not found under "
+                "%SystemRoot%), and acq never stores secrets in plaintext on Windows",
+                "set SystemRoot to the absolute Windows directory (e.g. C:\\Windows) so "
+                "%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe is found, then retry",
             )
         return "keychain-windows"
     if layout.force_file:

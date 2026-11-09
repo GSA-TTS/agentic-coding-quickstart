@@ -467,3 +467,34 @@ def test_private_dirs_created_0700_including_parents(monkeypatch, tmp_path):
     secretstore.store("acq.usai", "V")
     for path in (tmp_path / "a", tmp_path / "a" / "b", tmp_path / "a" / "b" / "store"):
         assert _mode(path) == 0o700
+
+
+@posix_fakes
+def test_windows_powershell_runs_from_systemroot_only(monkeypatch, tmp_path):
+    apply_env(monkeypatch, fake_env(tmp_path))
+    monkeypatch.setattr(secretstore, "IS_WINDOWS", True)
+    monkeypatch.delenv("ACQ_SECRET_POWERSHELL_BIN", raising=False)
+    # A powershell.exe on PATH (or in the current directory) is never used.
+    marker = tmp_path / "planted-ran"
+    planted_on_path = f"open({str(marker)!r}, 'w').close()\nimport sys\nsys.exit(1)\n"
+    plant(tmp_path / "pathbin", "powershell.exe", planted_on_path)
+    plant(tmp_path, "powershell.exe", planted_on_path)
+    monkeypatch.setenv("PATH", str(tmp_path / "pathbin"))
+    monkeypatch.delenv("SystemRoot", raising=False)
+    with pytest.raises(SecretStoreError):
+        secretstore.backend_name()
+    planted = tmp_path / "Windows" / "System32" / "WindowsPowerShell" / "v1.0"
+    plant(planted, "powershell.exe", POWERSHELL)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SystemRoot", "Windows")  # relative: refused, cwd never consulted
+    with pytest.raises(SecretStoreError):
+        secretstore.backend_name()
+    monkeypatch.setenv("ACQ_SECRET_POWERSHELL_BIN", "powershell.exe")  # override must be absolute
+    with pytest.raises(SecretStoreError):
+        secretstore.backend_name()
+    monkeypatch.delenv("ACQ_SECRET_POWERSHELL_BIN")
+    monkeypatch.setenv("SystemRoot", str(tmp_path / "Windows"))
+    assert secretstore._powershell(secretstore._layout()) == str(planted / "powershell.exe")
+    secretstore.set_secret("usai", None, "SYSROOT-VALUE")
+    assert secretstore.resolve("usai") == "SYSROOT-VALUE"
+    assert not marker.exists()

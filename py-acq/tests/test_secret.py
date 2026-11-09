@@ -557,3 +557,121 @@ def test_secret_typed_at_a_terminal_is_not_echoed(tmp_path):
     assert os.waitstatus_to_exitcode(status) == 0, output
     assert b"PTY-TYPED-SECRET" not in output
     assert (store / "acq.usai").read_bytes() == b"PTY-TYPED-SECRET"
+
+
+# ---------------------------------------------------------------------------
+# Review follow-ups: undecodable input, rm ordering, Git Bash/mintty.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX locales")
+@pytest.mark.parametrize("locale", ["C.UTF-8", "C"])
+def test_non_utf8_secret_is_refused_without_a_traceback_or_its_bytes(tmp_path, locale):
+    import os
+    import subprocess
+
+    env = dict(os.environ, ACQ_SBX_BIN="__stub__", ACQ_SBX_VERSION="0.39.0", ACQ_SBX_INSTALLED="1",
+               ACQ_MSB_INSTALLED="0", ACQ_STATE_DIR=str(tmp_path / "state"), SBX_HOME=str(tmp_path / "sbx"),
+               LC_ALL=locale, LANG=locale)
+    env.pop("PYTHONUTF8", None)
+    env.pop("PYTHONIOENCODING", None)
+    proc = subprocess.run(
+        [sys.executable, "-m", "acq_py", "--backend", "sbx", "secret", "set", "-g", "usai", "--json"],
+        input=b"SECRET\xffTAIL\n", capture_output=True, env=env, timeout=120, check=False,
+    )
+    assert proc.returncode == 1, proc.stderr
+    doc = json.loads(proc.stdout)
+    assert doc["error"] == {**doc["error"], "code": "validation_failed", "message": "the secret value is not valid UTF-8"}
+    both = proc.stdout + proc.stderr
+    assert b"Traceback" not in both
+    for leak in (b"\xff", b"\\xff", b"0xff", "ÿ".encode(), b"position", b"SECRET", b"TAIL"):
+        assert leak not in both, leak
+    assert not _store_dir().exists()
+
+
+def test_undecodable_values_never_reach_the_store(monkeypatch):
+    import getpass
+
+    from acq_py import secretstore
+    from acq_py.commands import common
+
+    assert secretstore.value_problem("ab\udcffcd") == "the secret value is not valid UTF-8"
+
+    class _Tty(io.StringIO):
+        def isatty(self):
+            return True
+
+    monkeypatch.setattr(sys, "stdin", _Tty(""))
+    monkeypatch.setattr(getpass, "getpass", lambda prompt, stream=None: "ab\udcffcd")
+    with pytest.raises(common.SecretInputError) as info:
+        common._read_secret_value()
+    assert info.value.message == "the secret value is not valid UTF-8"
+
+    def undecodable(prompt, stream=None):
+        raise UnicodeDecodeError("utf-8", b"SECRET\xff", 6, 7, "invalid start byte")
+
+    monkeypatch.setattr(getpass, "getpass", undecodable)
+    with pytest.raises(common.SecretInputError) as info:
+        common._read_secret_value()
+    assert "SECRET" not in info.value.message and "\\xff" not in info.value.message
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX environment bytes")
+def test_import_refuses_a_non_utf8_environment_value(tmp_path):
+    import os
+    import subprocess
+
+    env = {k: v for k, v in os.environ.items() if k not in ("GITHUB_TOKEN", "GH_TOKEN", "GITLAB_TOKEN")}
+    env["USAI_API_KEY"] = "SECRET\udcffTAIL"  # encodes back to the raw 0xff byte
+    proc = subprocess.run(
+        [sys.executable, "-m", "acq_py", "secret", "import", "--all", "--json"],
+        stdin=subprocess.DEVNULL, capture_output=True, env=env, timeout=120, check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    doc = json.loads(proc.stdout)
+    assert doc["data"]["results"] == [
+        {"service": "usai", "source_env": "USAI_API_KEY", "outcome": "refused", "reason": "unstorable"}
+    ]
+    assert b"SECRET" not in proc.stdout + proc.stderr and b"Traceback" not in proc.stderr
+    assert not _store_dir().exists()
+
+
+def test_secret_rm_keeps_the_store_when_the_backend_unbind_fails(monkeypatch, tmp_path, capsys):
+    # The backend is unbound first; if that fails, the store value and its
+    # endpoint sidecar must survive so the user can retry the removal.
+    from acq_py import sbx, secretstore
+
+    _env_sbx(monkeypatch, tmp_path, secrets={"box": {"gitlab": "set"}})
+    secretstore.set_secret("gitlab", "box", "GL-VALUE", "workshop.cloud.gov", "GITLAB_TOKEN")
+
+    def refuse(*_a):
+        raise sbx.SbxError("failure", "could not remove secret 'gitlab' for sandbox 'box'", "check backend logs and retry")
+
+    monkeypatch.setattr(sbx, "secret_unbind", refuse)
+    rc, doc = _invoke(capsys, "--backend", "sbx", "secret", "rm", "box", "gitlab", "--json")
+    assert rc == 1 and doc["error"]["code"] == "failure"
+    assert secretstore.resolve("gitlab", "box") == "GL-VALUE"
+    assert secretstore.meta_resolve_exact("gitlab", "box") == ("workshop.cloud.gov", "GITLAB_TOKEN")
+
+
+def test_mintty_pipe_names():
+    from acq_py.commands import common
+
+    assert common._is_mintty_pipe_name("\\msys-1888ae32e00d56aa-pty0-from-master")
+    assert common._is_mintty_pipe_name("\\cygwin-e022582115c10879-pty3-from-master")
+    assert not common._is_mintty_pipe_name("\\msys-1888ae32e00d56aa-pty0-to-master")
+    assert not common._is_mintty_pipe_name("\\Win32Pipes.0000123c.00000002")
+    assert not common._is_mintty_pipe_name("\\msys-1888ae32e00d56aa-pipe-0x1")
+    if sys.platform != "win32":
+        assert common._stdin_is_mintty() is False
+
+
+def test_mintty_stdin_warns_that_input_is_visible_and_reads_one_line(monkeypatch, capsys):
+    from acq_py.commands import common
+
+    monkeypatch.setattr(common, "_stdin_is_mintty", lambda: True)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("TYPED-VALUE\nlater input\n"))
+    assert common._read_secret_value("Enter USAi API key: ") == "TYPED-VALUE"
+    err = capsys.readouterr().err
+    assert "Git Bash/mintty" in err and "will be visible" in err
+    assert err.endswith("Enter USAi API key: ")
+    assert "TYPED-VALUE" not in err

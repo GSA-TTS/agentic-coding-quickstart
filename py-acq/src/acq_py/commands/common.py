@@ -225,11 +225,83 @@ def _read_secret_tty(prompt: str) -> str:
     with warnings.catch_warnings():
         warnings.simplefilter("error", getpass.GetPassWarning)
         try:
-            return getpass.getpass(prompt, stream=sys.stderr)
+            value = getpass.getpass(prompt, stream=sys.stderr)
         except getpass.GetPassWarning:
             raise SecretInputError("cannot turn off terminal echo to read the secret") from None
+        except UnicodeError:
+            raise SecretInputError(_NOT_UTF8) from None
         except EOFError:
             return ""
+    if _has_surrogates(value):  # a terminal decoded with surrogateescape
+        raise SecretInputError(_NOT_UTF8)
+    return value
+
+
+# Fixed text: a decode error's own message quotes the offending byte and its
+# offset, which are part of the secret, so it is never passed on.
+_NOT_UTF8 = "the secret value is not valid UTF-8"
+
+
+def _has_surrogates(text: str) -> bool:
+    return any("\ud800" <= ch <= "\udfff" for ch in text)
+
+
+def _is_mintty_pipe_name(name: str) -> bool:
+    """True for the named pipe an MSYS2/Cygwin pty (mintty, Git Bash) hands a
+    native Windows program as its stdin, e.g. ``\\msys-1888ae32e00d56aa-pty0-from-master``."""
+    return ("msys-" in name or "cygwin-" in name) and "-pty" in name and "-from-master" in name
+
+
+def _stdin_is_mintty() -> bool:
+    """True when stdin is a Git Bash/mintty terminal seen through its pty pipe.
+
+    Native Windows Python sees that terminal as a pipe, not a console, so it
+    cannot turn echo off; the pipe's name is the reliable marker. Any failure
+    to inspect the handle answers False.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        import msvcrt
+
+        handle = msvcrt.get_osfhandle(sys.stdin.fileno())
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        if kernel32.GetFileType(handle) != 3:  # FILE_TYPE_PIPE
+            return False
+        size = 4 + 2 * 1024
+        buf = ctypes.create_string_buffer(size)
+        if not kernel32.GetFileInformationByHandleEx(handle, 2, buf, size):  # FileNameInfo
+            return False
+        length = int.from_bytes(buf.raw[:4], "little")
+        name = buf.raw[4 : 4 + length].decode("utf-16-le", "replace")
+    except Exception:  # noqa: BLE001 - a detection miss must never break the read
+        return False
+    return _is_mintty_pipe_name(name)
+
+
+_MINTTY_HINT = (
+    "acq: warning: this terminal (Git Bash/mintty) cannot hide what you type, so the secret "
+    "will be visible. Press Ctrl-C and pipe it instead (printf '%s' \"$TOKEN\" | acq ...), "
+    "or run acq from a native console (Windows Terminal, PowerShell, cmd)."
+)
+
+
+def _read_piped_secret(one_line: bool = False) -> str:
+    """Read stdin (all of it, or one typed line) as strict UTF-8, from the byte
+    stream when there is one."""
+    buffer = getattr(sys.stdin, "buffer", None)
+    if buffer is None:  # an in-memory text stream (tests): already decoded
+        data = sys.stdin.readline() if one_line else sys.stdin.read()
+    else:
+        try:
+            raw = buffer.readline() if one_line else buffer.read()
+            data = raw.decode("utf-8")
+        except UnicodeError:
+            raise SecretInputError(_NOT_UTF8) from None
+    if _has_surrogates(data):
+        raise SecretInputError(_NOT_UTF8)
+    return data
 
 
 def _read_secret_value(prompt: str = "Enter secret value: ") -> str:
@@ -243,13 +315,22 @@ def _read_secret_value(prompt: str = "Enter secret value: ") -> str:
     in newlines is not silently truncated. A lone trailing ``\\r`` with no
     preceding ``\\n`` is likewise preserved.
 
+    Bytes that are not valid UTF-8 fail closed with a fixed
+    ``validation_failed`` message that quotes nothing from the input. Under
+    Git Bash/mintty, where typed input cannot be hidden, a warning and the
+    prompt go to stderr first.
+
     The value is returned to the caller and must never be printed, logged, or
     placed on argv. An empty result signals "no value was piped".
     """
     isatty = getattr(sys.stdin, "isatty", None)
     if isatty is not None and isatty():
         return _read_secret_tty(prompt)
-    data = sys.stdin.read()
+    mintty = _stdin_is_mintty()
+    if mintty:
+        print(_MINTTY_HINT, file=sys.stderr)
+        print(prompt, end="", file=sys.stderr, flush=True)
+    data = _read_piped_secret(one_line=mintty)
     if data.endswith("\n"):
         data = data[:-1]  # strip exactly one terminal newline
         if data.endswith("\r"):  # optional preceding CR (CRLF terminator)
