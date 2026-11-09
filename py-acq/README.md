@@ -208,3 +208,24 @@ See `../test/vectors/README.md` for the vector schema, assertion modes, and
 normalisation transforms. Contract evidence is subprocess-only (ADR-0039m);
 the sentinel set covers every assertion mode (`exact`/`contains`/`json`) and
 every normalisation transform (`abspath`/`tmpdir`/`crlf`/`timing`/`order`/`json`).
+
+### Quality gates
+
+`.github/workflows/python-quality.yml` runs ruff, mypy and bandit on `src/`
+and fails when pytest's in-process branch coverage drops below the
+`fail_under` floor in `pyproject.toml`. The tools are CI-only, pinned with
+hashes in `requirements-quality.txt`. To run the gates locally, use a
+throwaway virtual environment and run the commands from `py-acq/`:
+
+```sh
+python -m pip install --require-hashes --no-deps -r requirements-quality.txt
+python -m ruff check src
+python -m mypy
+python -m bandit -c pyproject.toml -r src
+python -m pytest -q --cov --cov-report=term
+```
+
+The gates started at zero findings, so there is no baseline. A finding that
+is a false positive gets a targeted suppression with its reason on the same
+line, such as `# nosec B105 # an error code`. Do not widen the skip lists in
+`pyproject.toml` to clear one.
