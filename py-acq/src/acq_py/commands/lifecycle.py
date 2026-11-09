@@ -1,8 +1,8 @@
-"""``create``, ``run``, ``create --recreate``, ``ls``, ``stop``, ``rm``: the sandbox
-lifecycle, with the image, kit and substrate resolution those verbs share
-(ADR-0040m, ADR-0030).
+"""``create``, ``run``, ``create --recreate``, ``ls``, ``stop``, ``start``, ``restart``,
+``rm``: the sandbox lifecycle, with the image, kit and substrate resolution those
+verbs share (ADR-0040m, ADR-0030).
 
-Create, recreate, rm (and the create-or-reattach step of ``run``) each hold the
+Create, recreate, rm, start, restart (and the create-or-reattach step of ``run``) each hold the
 per-sandbox lifecycle lock (``lock.sandbox_lock``) for their whole transaction,
 so two acq commands never interleave on one sandbox's guest and host records.
 """
@@ -1050,4 +1050,168 @@ def _rm_locked(name: str, emit_json: bool, backend: str) -> int:
         print(f"removed the host records for sandbox '{name}' (the sandbox itself was already gone)")
     else:
         print(f"removed sandbox '{name}'")
+    return errors.EXIT_SUCCESS
+
+
+# ---------------------------------------------------------------------------
+# start / restart (msb only; ADR-0017, ADR-0040m). Bash: the acq start/restart
+# arms, acq_backend_start and acq_cli_kits_load.
+# ---------------------------------------------------------------------------
+
+def run_start(parsed, emit_json: bool, backend: str) -> int:
+    """``acq start NAME``: resume a stopped msb sandbox, rebind its secrets, heal its kits."""
+    return _start_verb("start", parsed.name, emit_json, backend)
+
+
+def run_restart(parsed, emit_json: bool, backend: str) -> int:
+    """``acq restart NAME``: stop (a failure only warns, as in Bash), then the same as ``start``."""
+    return _start_verb("restart", parsed.name, emit_json, backend)
+
+
+def _start_verb(command: str, name: str, emit_json: bool, backend: str) -> int:
+    """Refuse on a backend without the verb, else run it under the sandbox's lifecycle lock.
+
+    sbx has no detached resume: a stopped sandbox resumes on attach, so the
+    remediation is ``acq run NAME`` (Bash prints the same).
+    """
+    if not common._supports(backend, command):
+        hint = f" (optionally 'acq stop {name}' first)" if command == "restart" else ""
+        return common._operational_failure(
+            command, errors.UNSUPPORTED,
+            f"the '{backend}' backend has no separate '{command}' verb",
+            f"a stopped sandbox resumes automatically on attach: run 'acq run {name}'{hint}", emit_json,
+        )
+    try:
+        with lock.sandbox_lock(backend, name):
+            return _start_locked(command, name, emit_json)
+    except lock.SandboxLockTimeout as exc:
+        return _lock_failure(command, name, exc, emit_json)
+
+
+def _start_record(command: str, name: str, emit_json: bool) -> tuple[dict | None, int | None]:
+    """The sandbox's host record (``None`` when absent) once msb lists it, or the emitted refusal.
+
+    Both checks come before anything changes: a missing sandbox is
+    ``sandbox_not_found``, and a record that cannot be read fails closed.
+    """
+    try:
+        if not msb.exists(name):
+            return None, common._operational_failure(
+                command, errors.SANDBOX_NOT_FOUND, f"sandbox '{name}' not found",
+                "list sandboxes with 'acq ls', or create one with 'acq create'", emit_json,
+            )
+        return state.record_read("msb", name), None
+    except state.StateSchemaError as exc:
+        return None, common._operational_failure(
+            command, errors.STATE_SCHEMA_UNSUPPORTED, str(exc),
+            f"recreate the sandbox with 'acq create --recreate {name}', or remove it with 'acq rm {name}'",
+            emit_json,
+        )
+    except common._ADAPTER_ERRORS as exc:
+        return None, common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
+
+
+def _resume(command: str, name: str) -> bool:
+    """Stop first for ``restart``, then ``msb start`` unless it already runs; True if it was running.
+
+    A failed stop is a warning and the start is still attempted (Bash parity).
+    Raises the adapter error when the listing or the start fails.
+    """
+    if command == "restart":
+        try:
+            msb.stop(name)
+        except msb.MsbError:
+            print(f"acq: warning: restart: stop of '{name}' failed; attempting start anyway", file=sys.stderr)
+    running = msb.running_names()
+    if running is None:
+        raise msb.MsbError(errors.FAILURE, "could not list running sandboxes", "check that msb works ('msb list'), then retry")
+    if name in running:
+        return True
+    msb.start(name)
+    return False
+
+
+def _start_locked(command: str, name: str, emit_json: bool) -> int:
+    """Resume, wait for exec-readiness, rebind secrets, check the read-only mount, heal the kits.
+
+    Once the sandbox runs, every failure says so: it is not stopped again, and
+    a heal that did not complete is never reported as success (ADR-0038m).
+    """
+    record, exit_code = _start_record(command, name, emit_json)
+    if exit_code is not None:
+        return exit_code
+    try:
+        was_running = _resume(command, name)
+    except common._ADAPTER_ERRORS as exc:
+        return common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
+    if not _wait_exec_ready("msb", name):
+        return common._operational_failure(
+            command, errors.TIMEOUT,
+            f"sandbox '{name}' was started but did not become exec-ready, so its secrets and kits were not re-applied",
+            f"check msb logs, then retry 'acq {command} {name}'", emit_json,
+        )
+    try:
+        unbound = msb.reconcile_bindings(name)
+    except common._ADAPTER_ERRORS as exc:
+        return common._operational_failure(
+            command, exc.code, f"sandbox '{name}' is running, but: {exc.message}", exc.remediation, emit_json,
+        )
+    applied, exit_code = _heal_after_start(command, name, record, emit_json)
+    if applied is None:
+        return exit_code if exit_code is not None else errors.EXIT_FAILURE
+    if unbound:
+        return common._operational_failure(
+            command, errors.FAILURE,
+            f"sandbox '{name}' is running and its kits were re-applied, but {', '.join(unbound)} could not be bound in it",
+            f"retry 'acq {command} {name}', or recreate the sandbox to bind the stored values", emit_json,
+        )
+    return _print_started(command, name, applied, was_running, emit_json)
+
+
+def _heal_after_start(command: str, name: str, record: dict | None, emit_json: bool) -> tuple[list[str] | None, int | None]:
+    """Check the recorded read-only mount, then re-apply the kit set; the applied kits or the emitted failure.
+
+    The kit set is the one create chose: the recorded agent and image, plus the
+    ``--kit`` and extra refs kept in the sandbox's ``.kits`` record. Re-applying
+    re-runs every kit's startup phase, which ``msb start`` does not replay
+    (ADR-0017). Provenance is recorded only when every kit applied, as Bash does.
+    """
+    try:
+        security.assert_trusted(record, "msb", name)
+    except security.SecurityException as exc:
+        return None, common._operational_failure(
+            command, exc.code, f"{exc.message}; the sandbox is running, but its kits were not re-applied",
+            exc.remediation, emit_json,
+        )
+    agent = (record or {}).get("agent") or "shell"
+    image = (record or {}).get("image") or common.OPENCODE_DEVENV_IMAGE
+    cli_kits, extras = kit_msb.cli_kits_read(name)
+    plan, exit_code = _plan_msb_kits(agent, cli_kits, image, command, emit_json, extras)
+    if plan is None:
+        return None, exit_code
+    result = kit_msb.ensure_kits_applied(name, plan.kits, ro_required=security.requires_ro_mount(record))
+    if result.incomplete:
+        return None, common._operational_failure(
+            command, errors.FAILURE,
+            f"sandbox '{name}' is running, but these kits were not re-applied: {', '.join(result.incomplete)}",
+            f"check the warnings above, then retry 'acq {command} {name}'", emit_json,
+        )
+    try:
+        kits.provenance_write("msb", name)
+    except OSError:
+        print(f"acq: warning: could not record the kit provenance of '{name}'", file=sys.stderr)
+    return result.applied, None
+
+
+def _print_started(command: str, name: str, applied: list[str], was_running: bool, emit_json: bool) -> int:
+    data = {
+        "name": name, "backend": "msb", "state": "running", "was_running": was_running,
+        "secret_bindings": msb.held_flags(name), "kits": applied,
+    }
+    if emit_json:
+        print(json.dumps(envelope.success(command, data)))
+    elif was_running and command == "start":
+        print(f"sandbox '{name}' was already running; re-applied its kits")
+    else:
+        print(f"{command}ed sandbox '{name}' and re-applied its kits")
     return errors.EXIT_SUCCESS

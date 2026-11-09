@@ -99,16 +99,28 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   slug is the lowercased ASCII letters and digits of the workspace's last path
   component (the root gives `workspace`). An explicit `--name` must match
   `[A-Za-z0-9_-]+` and not start with `-`. Verbs that act on an existing sandbox
-  (`stop`, `rm`, `exec`, `attach`, `shell`, `ports`, `kit apply|check|update`,
-  `create --recreate`) refuse an empty name, `.`, `..`, and names containing `/`,
-  `\` or control characters. A workspace path, and the path its symlinks resolve
-  to, must not contain control characters or `:`. The backends split mount specs
-  on `:`, and acq-py takes no `:ro` suffix. On Windows the colon of a drive letter
-  (`C:\...`) is allowed, because msb's `--volume` source accepts it.
+  (`stop`, `start`, `restart`, `rm`, `exec`, `attach`, `shell`, `ports`,
+  `kit apply|check|update`, `create --recreate`) refuse an empty name, `.`,
+  `..`, and names containing `/`, `\` or control characters. A workspace path,
+  and the path its symlinks resolve to, must not contain control characters or
+  `:`. The backends split mount specs on `:`, and acq-py takes no `:ro` suffix.
+  On Windows the colon of a drive letter (`C:\...`) is allowed, because msb's
+  `--volume` source accepts it.
 * `acq-py ls [--json]` — list sandboxes with `name`/`backend`/`state`
   (ADR-0038m §2).
 * `acq-py stop NAME [--json]` and `acq-py rm NAME [--json]` — stop (state
   preserved) or remove a sandbox and its record.
+* `acq-py start NAME [--json]` and `acq-py restart NAME [--json]` (msb only) —
+  resume a stopped sandbox (`restart` stops it first; a failed stop only warns),
+  under the sandbox's lifecycle lock. `msb start` gets the sandbox's bound
+  secrets from the acq store in its environment only (msb keeps no value across a
+  stop); a recorded binding with no readable value is refused before anything
+  starts. Once the guest is exec-ready, a secret stored while it was stopped is
+  bound with `msb modify`, the read-only trusted-config mount is checked when the
+  record requires it, and the kit set (the recorded agent, image and `.kits`
+  refs) is re-applied so kit startup runs again (ADR-0017). Any failure after
+  the start says the sandbox is running and exits 1. On sbx both fail with
+  `unsupported_capability` and point to `acq run NAME`.
 * `acq-py [--json] exec NAME -- CMD...` — run a command non-interactively inside
   a sandbox as the unprivileged `agent` user; the child's exit status is acq's
   exit status (ADR-0038m §1). In `--json` mode the child's stdout is routed to

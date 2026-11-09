@@ -3,7 +3,7 @@
 Mirrors the real msb 0.7.11 CLI surface the adapter drives: ``--version``, ``list``/
 ``ls`` (with ``-q``/``--running``), ``create --name N [--secret ENV@HOST]... [IMAGE]``,
 ``modify NAME [--secret ENV@HOST]... [--secret-rm ENV]...``, ``exec -u USER NAME
--- CMD``, ``stop``, ``remove -f``, ``copy``, and ``inspect NAME --format json`` —
+-- CMD``, ``stop``, ``start``, ``remove -f``, ``copy``, and ``inspect NAME --format json`` —
 against a JSON catalog at ``$MSB_HOME/.microsandbox/catalog.json`` (or
 ``$HOME/.microsandbox/...``), which the vector runner redirects to a throwaway
 directory. An initial catalog can be seeded in-memory via ``ACQ_MSB_STUB_CATALOG``
@@ -15,6 +15,8 @@ reads ENV from its own environment: the variable must be set, an inline
 argv element (a ``--flag=VALUE`` embedding included). The stub records each
 sandbox's bindings in ``secrets.json`` next to the catalog as ``{name: {ENV:
 {host, env_present}}}``: whether the variable was present, never its value.
+``start NAME`` checks the same way that every variable the sandbox has bound is
+set in its environment (msb keeps no value across a stop) and absent from argv.
 
 ``create`` also records each ``--volume HOST:GUEST[:ro]`` in ``mounts.json``,
 and ``inspect`` reports them as ``active_config.mounts`` (``{guest, host, type:
@@ -211,6 +213,28 @@ def _arg_after(args: list[str], flag: str) -> str | None:
     return None
 
 
+def _start(args: list[str], catalog: dict[str, str]) -> int:
+    """``start NAME``: every bound variable must be in the environment, never in argv."""
+    if _should_fail("start"):
+        print(RAW_FAIL_STDERR, file=sys.stderr)
+        return 1
+    name = args[1] if len(args) > 1 else None
+    if name is None or name not in catalog:
+        print(f"msb: no such sandbox '{name}'", file=sys.stderr)
+        return 1
+    for env in _load_secrets().get(name, {}):
+        value = os.environ.get(env)
+        if value is None:
+            print(f"msb: host environment variable {env} is not set", file=sys.stderr)
+            return 1
+        if value and any(value in a for a in args):
+            print(f"msb: the value of {env} was found on the command line", file=sys.stderr)
+            return 1
+    catalog[name] = "running"
+    _save(catalog)
+    return 0
+
+
 def main(argv: list[str]) -> int:
     args = argv[1:]
     if not args:
@@ -370,6 +394,9 @@ def main(argv: list[str]) -> int:
         catalog[name] = "stopped"
         _save(catalog)
         return 0
+
+    if cmd == "start":
+        return _start(args, catalog)
 
     if cmd == "remove":
         if _should_fail("remove"):
