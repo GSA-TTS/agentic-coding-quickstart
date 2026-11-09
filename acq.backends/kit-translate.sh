@@ -232,6 +232,63 @@ EOM
 }
 
 # ---------------------------------------------------------------------------
+# kit_source_within KITDIR SOURCE
+#
+# Succeeds only when KITDIR/SOURCE, with every symlink resolved, is a regular
+# file inside KITDIR (itself resolved). A kit's files[] payload must come from
+# the kit, never from elsewhere on the host. Fails closed when the path cannot
+# be resolved (no realpath/readlink -f available, dangling link, missing file).
+kit_source_within() {
+  local kitdir="${1:-}" src="${2:-}" root target
+  case "$src" in "" | /*) return 1 ;; esac
+  case "/$src/" in */../*) return 1 ;; esac
+  root=$(cd -P -- "$kitdir" 2>/dev/null && pwd -P) || return 1
+  [ -n "$root" ] || return 1
+  target=$(_kit_resolve_path "$kitdir/$src") || return 1
+  case "$target" in
+    "$root"/*) [ -f "$target" ] ;;
+    *) return 1 ;;
+  esac
+}
+
+# _kit_resolve_path PATH: print PATH with all symlinks resolved, or fail.
+_kit_resolve_path() {
+  local out=""
+  if command -v realpath >/dev/null 2>&1; then
+    out=$(realpath -- "$1" 2>/dev/null) || return 1
+  elif command -v readlink >/dev/null 2>&1; then
+    out=$(readlink -f -- "$1" 2>/dev/null) || return 1
+  fi
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
+}
+
+# kit_tree_symlinks_within KITDIR TREE: succeed when every symlink under TREE
+# resolves to a path inside KITDIR. Used before a kit's files/ tree is copied
+# verbatim, so a link cannot carry host content into a generated kit.
+kit_tree_symlinks_within() {
+  local kitdir="${1:-}" tree="${2:-}" root link target bad=0 links
+  [ -d "$tree" ] || return 0
+  root=$(cd -P -- "$kitdir" 2>/dev/null && pwd -P) || return 1
+  links=$(find "$tree" -type l 2>/dev/null)
+  while IFS= read -r link; do
+    [ -n "$link" ] || continue
+    if ! target=$(_kit_resolve_path "$link"); then
+      echo "kit-translate: unresolvable symlink in kit payload: ${link#"$kitdir"/}" >&2
+      bad=1
+      continue
+    fi
+    case "$target" in
+      "$root" | "$root"/*) ;;
+      *) echo "kit-translate: kit payload symlink points outside the kit: ${link#"$kitdir"/}" >&2; bad=1 ;;
+    esac
+  done <<LINKS
+$links
+LINKS
+  [ "$bad" -eq 0 ]
+}
+
+# ---------------------------------------------------------------------------
 # kit_spec_field SPEC KEY
 # ---------------------------------------------------------------------------
 # Echo a top-level scalar string value (name, kind, displayName, schemaVersion).
@@ -631,7 +688,10 @@ kit_spec_files() {
           print "kit-translate: skipping file with invalid mode: " cur_mode > "/dev/stderr"
         } else if (cur_path !~ /^[A-Za-z0-9._\/-]+$/) {
           print "kit-translate: skipping file with unsafe path: " cur_path > "/dev/stderr"
-        } else if (cur_source != "" && cur_source !~ /^[A-Za-z0-9._\/-]+$/) {
+        } else if (cur_source != "" && (cur_source !~ /^[A-Za-z0-9._\/-]+$/ || cur_source ~ /^\// || cur_source ~ /(^|\/)\.\.(\/|$)/)) {
+          # A source is relative to the kit directory and stays inside it: no
+          # leading slash and no ".." segment (kit_source_within also resolves
+          # symlinks at the point of use).
           print "kit-translate: skipping file with unsafe source: " cur_source > "/dev/stderr"
         } else {
           printf "%s\t%s\t%s\t%s\t%s\n", cur_path, cur_mode, cur_phase, cur_source, ro
@@ -1001,7 +1061,10 @@ kit_translate_to_sbx() {
 
   # Copy the entire files/ payload tree verbatim (static file drop). sbx v2
   # auto-maps files/home/... -> /home/... etc.
+  # cp -a keeps symlinks, so refuse a payload whose links resolve outside the
+  # kit before copying it into the generated kit.
   if [ -d "${kitdir}/files" ]; then
+    kit_tree_symlinks_within "$kitdir" "${kitdir}/files" || return 1
     mkdir -p "${out}/files"
     cp -a "${kitdir}/files/." "${out}/files/"
   fi
@@ -1358,8 +1421,12 @@ kit_validate() {
       /*) ;;
       *) echo "kit: validate: file path must be absolute: '$p'" >&2; errs=$((errs + 1)) ;;
     esac
-    if [ -n "$src" ] && [ ! -f "${kitdir}/${src}" ]; then
-      echo "kit: validate: file source not found: ${src}" >&2
+    if [ -n "$src" ] && ! kit_source_within "$kitdir" "$src"; then
+      if [ ! -e "${kitdir}/${src}" ] && [ ! -L "${kitdir}/${src}" ]; then
+        echo "kit: validate: file source not found: ${src}" >&2
+      else
+        echo "kit: validate: file source must be a regular file inside the kit directory: ${src}" >&2
+      fi
       errs=$((errs + 1))
     fi
   done <<EOF

@@ -2375,18 +2375,34 @@ acq_cli_kits_write() {
       local _extra=()
       split_noglob _extra "$ACQ_EXTRA_KITS"
       for ref in ${_extra[@]+"${_extra[@]}"}; do
-        [ -n "$ref" ] && printf 'extra=%s\n' "$ref"
+        [ -n "$ref" ] && printf 'extra=%s\n' "$(_acq_kit_ref_absolute "$ref")"
       done
     fi
     # CLI (`--kit`) refs, one per array element (already un-split).
     for ref in ${ACQ_CLI_KITS[@]+"${ACQ_CLI_KITS[@]}"}; do
-      [ -n "$ref" ] && printf 'kit=%s\n' "$ref"
+      [ -n "$ref" ] && printf 'kit=%s\n' "$(_acq_kit_ref_absolute "$ref")"
     done
   } > "$tmp" 2>/dev/null || { acq_debug "cli-kits: write failed: $tmp"; rm -f "$tmp" 2>/dev/null; return 1; }
   chmod 600 "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$file" 2>/dev/null || { acq_debug "cli-kits: mv failed: $file"; rm -f "$tmp" 2>/dev/null; return 1; }
   acq_debug "cli-kits: recorded $backend/$name (kit=$(printf '%s ' ${ACQ_CLI_KITS[@]+"${ACQ_CLI_KITS[@]}"}))"
   return 0
+}
+
+# _acq_kit_ref_absolute REF: echo REF with a relative local kit path made
+# absolute (physical), so a recorded ref names the same kit wherever a later
+# start/restart runs. Remote refs, absolute paths and paths that are not an
+# existing directory are echoed unchanged.
+_acq_kit_ref_absolute() {
+  local ref="${1:-}" abs
+  case "$ref" in
+    "" | git+http* | /*) printf '%s\n' "$ref"; return 0 ;;
+  esac
+  if [ -d "$ref" ] && abs=$(cd -P -- "$ref" 2>/dev/null && pwd -P) && [ -n "$abs" ]; then
+    printf '%s\n' "$abs"
+  else
+    printf '%s\n' "$ref"
+  fi
 }
 
 # Reload a sandbox's persisted CLI (`--kit`) and extra kit refs into ACQ_CLI_KITS
@@ -2406,9 +2422,25 @@ acq_cli_kits_load() {
   ACQ_CLI_KITS=()
   local _extras="" line val
   while IFS= read -r line; do
+    val=""
     case "$line" in
-      kit=*)   ACQ_CLI_KITS+=("${line#kit=}") ;;
-      extra=*) val="${line#extra=}"; [ -n "$val" ] && _extras="${_extras:+$_extras }$val" ;;
+      kit=* | extra=*)
+        val="${line#*=}"
+        # A relative local ref would be re-resolved against whatever directory
+        # this command runs from; records now store absolute paths, so skip a
+        # relative one left by an older acq instead of guessing.
+        case "$val" in
+          "" | git+http* | /*) ;;
+          *)
+            echo "acq: warning: ignoring recorded relative kit path '$val' for $name; pass --kit with an absolute path to re-apply it" >&2
+            continue
+            ;;
+        esac
+        ;;
+    esac
+    case "$line" in
+      kit=*)   ACQ_CLI_KITS+=("$val") ;;
+      extra=*) [ -n "$val" ] && _extras="${_extras:+$_extras }$val" ;;
     esac
   done < "$file"
   # Only overwrite ACQ_EXTRA_KITS from the record if the record carried extras;

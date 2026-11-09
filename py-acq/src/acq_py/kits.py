@@ -693,6 +693,10 @@ def _finding(code: str, message: str, remediation: str | None = None) -> dict:
     return body
 
 
+# Upper bound on a spec.yaml read by validate_kit.
+_MAX_SPEC_BYTES = 1024 * 1024
+
+
 def validate_kit(path: str) -> dict:
     """Validate a neutral ``hybrid/v1`` kit (a directory or a ``spec.yaml`` path).
 
@@ -714,6 +718,10 @@ def validate_kit(path: str) -> dict:
     spec: Path | None = None
     if p.is_dir():
         candidate = p / "spec.yaml"
+        # A kit's own spec.yaml must be a regular file in the kit directory, not
+        # a symlink that could point at some other file on the host.
+        if candidate.is_symlink():
+            raise KitSpecError(f"spec.yaml in {path!r} is a symlink; a kit's spec.yaml must be a regular file")
         if candidate.is_file():
             spec = candidate
         else:
@@ -722,11 +730,22 @@ def validate_kit(path: str) -> dict:
             )
     else:
         spec = p
+    # Only regular files are read (a FIFO or device would block or stream), and
+    # only up to a size no real spec approaches.
+    if not spec.is_file():
+        raise KitSpecError(f"{str(spec)!r} is not a regular file")
 
     try:
-        text = spec.read_text(encoding="utf-8")
+        with open(spec, "rb") as fh:
+            raw = fh.read(_MAX_SPEC_BYTES + 1)
     except OSError as exc:
         raise KitSpecError(f"could not read {str(spec)!r}") from exc
+    if len(raw) > _MAX_SPEC_BYTES:
+        raise KitSpecError(f"{str(spec)!r} is larger than {_MAX_SPEC_BYTES} bytes")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise KitSpecError(f"{str(spec)!r} is not valid UTF-8") from exc
 
     findings: list[dict] = []
     if not re.search(r"schemaVersion:\s*['\"]?hybrid/v1['\"]?", text):

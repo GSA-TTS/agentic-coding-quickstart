@@ -13,6 +13,7 @@ and exit class are pinned, so removing or weakening the guard fails the test.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -360,7 +361,7 @@ def test_kit_validate_unreadable_spec_exit_1(monkeypatch, tmp_path, capsys):
     def _boom(*args, **kwargs):
         raise OSError("permission denied")
 
-    monkeypatch.setattr(Path, "read_text", _boom)
+    monkeypatch.setattr(kits, "open", _boom, raising=False)
     rc, doc = _invoke(capsys, "kit", "validate", str(kit_dir), "--json")
     assert rc == 1
     assert doc["error"]["code"] == "validation_failed"
@@ -376,9 +377,40 @@ def test_validate_kit_raises_kit_spec_error_for_unreadable(monkeypatch, tmp_path
     def _boom(*args, **kwargs):
         raise OSError("permission denied")
 
-    monkeypatch.setattr(Path, "read_text", _boom)
+    monkeypatch.setattr(kits, "open", _boom, raising=False)
     with pytest.raises(kits.KitSpecError):
         kits.validate_kit(str(kit_dir))
+
+
+def test_validate_kit_refuses_a_symlinked_spec_in_a_kit_dir(tmp_path):
+    other = tmp_path / "elsewhere.yaml"
+    other.write_text('schemaVersion: "hybrid/v1"\nname: other\n', encoding="utf-8")
+    kit_dir = tmp_path / "linked-kit"
+    kit_dir.mkdir()
+    (kit_dir / "spec.yaml").symlink_to(other)
+    with pytest.raises(kits.KitSpecError, match="symlink"):
+        kits.validate_kit(str(kit_dir))
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs mkfifo")
+def test_validate_kit_refuses_a_non_regular_spec(tmp_path):
+    fifo = tmp_path / "spec.yaml"
+    os.mkfifo(fifo)
+    with pytest.raises(kits.KitSpecError, match="not a regular file"):
+        kits.validate_kit(str(fifo))
+
+
+def test_validate_kit_refuses_an_oversized_spec(tmp_path):
+    kit_dir = _write_kit(tmp_path, "big", ['schemaVersion: "hybrid/v1"', "name: big"])
+    with open(kit_dir / "spec.yaml", "a", encoding="utf-8") as fh:
+        fh.write("#" * (kits._MAX_SPEC_BYTES + 1))
+    with pytest.raises(kits.KitSpecError, match="larger than"):
+        kits.validate_kit(str(kit_dir))
+
+
+def test_validate_kit_accepts_a_direct_spec_path(tmp_path):
+    kit_dir = _write_kit(tmp_path, "direct", ['schemaVersion: "hybrid/v1"', "name: direct-kit"])
+    assert kits.validate_kit(str(kit_dir / "spec.yaml"))["valid"] is True
 
 
 # ---------------------------------------------------------------------------
