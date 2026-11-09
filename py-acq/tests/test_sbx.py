@@ -736,3 +736,79 @@ def test_custom_endpoint_host_that_reads_as_a_flag_is_refused(monkeypatch, tmp_p
         with pytest.raises(sbx.SbxError) as info:
             sbx.secret_feed(sbx.secretstore.GLOBAL, "svc", "V", host, env)
         assert info.value.code == errors.VALIDATION_FAILED
+
+
+def test_custom_rows_must_match_the_recorded_hosts(monkeypatch, tmp_path, capsys):
+    # Two custom secrets share an env var but target different hosts. Matching
+    # on the env var alone would remove the other host's placeholder, and has
+    # would answer yes for the wrong host.
+    from acq_py import secretstore
+
+    rows = [
+        _custom("global", "GITLAB_TOKEN", "sbx-cs-other", "gitlab.other.example"),
+        _custom("global", "GITLAB_TOKEN", "sbx-cs-ours", "workshop.cloud.gov"),
+    ]
+    _env(monkeypatch, tmp_path, custom=rows)
+    secretstore.set_secret("gitlab", None, "G", "workshop.cloud.gov", "GITLAB_TOKEN")
+    calls = _spy(monkeypatch)
+    rc, _doc = _invoke(capsys, "--backend", "sbx", "secret", "rm", "-g", "gitlab", "--json")
+    assert rc == 0
+    removals = [argv for argv, _ in calls if argv[:2] == ["secret", "rm"]]
+    assert removals == [["secret", "rm", "--placeholder", "sbx-cs-ours", "-f"]]
+    assert [row["placeholder"] for row in _custom_table(tmp_path)] == ["sbx-cs-other"]
+    # usai's pin (api.gsa.usai.gov) is not met by a USAI_API_KEY row that
+    # targets somewhere else either. (Drop the stub's table so the seed applies.)
+    (Path(tmp_path) / "sbx-home" / ".docker-sbx" / "custom-secrets.json").unlink()
+    _env(monkeypatch, tmp_path, custom=[_custom("global", "USAI_API_KEY", "sbx-cs-elsewhere", "llm.elsewhere.example")])
+    assert cli.main(["--backend", "sbx", "secret", "has", "-g", "usai"]) == 1
+    _env(monkeypatch, tmp_path, custom=[_custom("global", "USAI_API_KEY", "sbx-cs-u", "API.GSA.USAI.GOV")])
+    assert cli.main(["--backend", "sbx", "secret", "has", "-g", "usai"]) == 0
+
+
+def test_native_rm_failing_on_an_ambiguous_row_says_so_and_runs_once(monkeypatch, tmp_path, capsys):
+    # Both a global and a sandbox-`global` github row are labelled "global": the
+    # removal is the same argv, so it runs once, and when sbx refuses it the
+    # error is the ambiguity, not a generic retry.
+    from acq_py import secretstore
+
+    # A definite row that fails keeps the generic retry advice.
+    _env(monkeypatch, tmp_path, secrets={"mybox": {"github": "set"}})
+    monkeypatch.setenv("ACQ_SBX_STUB_FAIL", "secret rm")
+    rc, doc = _invoke(capsys, "--backend", "sbx", "secret", "rm", "mybox", "github", "--json")
+    assert rc == 1 and doc["error"]["remediation"] == "check backend logs and retry"
+
+    _env(monkeypatch, tmp_path, secrets={"global": {"github": "set"}})
+    secretstore.set_secret("github", "global", "GH")
+    monkeypatch.setattr(sbx, "_read_listing", lambda: [
+        sbx._Entry("service", "global", "github", ""), sbx._Entry("service", "global", "github", ""),
+    ])
+    monkeypatch.setenv("ACQ_SBX_STUB_FAIL", "secret rm")
+    calls = _spy(monkeypatch)
+    rc, doc = _invoke(capsys, "--backend", "sbx", "secret", "rm", "global", "github", "--json")
+    assert rc == 1 and "cannot tell" in doc["error"]["message"]
+    assert doc["error"]["remediation"].startswith("the acq secret store entry was kept")
+    assert [argv for argv, _ in calls if argv[:2] == ["secret", "rm"]] == [
+        ["secret", "rm", "--sandbox", "global", "github", "-f"]
+    ]
+    assert secretstore.exists("github", "global")
+
+
+def test_unreadable_sandbox_list_makes_the_global_label_ambiguous(monkeypatch, tmp_path, capsys):
+    # If `sbx ls -q` fails, acq cannot rule out a sandbox named `global`.
+    _env(monkeypatch, tmp_path, secrets={"global": {"github": "set"}})
+    monkeypatch.setenv("ACQ_SBX_STUB_FAIL", "ls")
+    assert cli.main(["--backend", "sbx", "secret", "has", "-g", "github"]) == 1
+    assert "cannot tell" in capsys.readouterr().err
+    rc, doc = _invoke(capsys, "--backend", "sbx", "secret", "ls", "--json")
+    assert rc == 0
+    assert doc["data"]["secrets"] == [{"scope": "global", "scope_kind": "unknown", "service": "github", "value_state": "set"}]
+
+
+def test_secret_ls_for_sandbox_global_without_such_a_sandbox_is_empty(monkeypatch, tmp_path, capsys):
+    # With no sandbox named `global` in sbx, a "global" row is the global scope,
+    # so listing the sandbox named `global` shows nothing (and -g shows it).
+    _env(monkeypatch, tmp_path, secrets={"global": {"github": "set"}})
+    rc, doc = _invoke(capsys, "--backend", "sbx", "secret", "ls", "global", "--json")
+    assert rc == 0 and doc["data"]["secrets"] == []
+    rc, doc = _invoke(capsys, "--backend", "sbx", "secret", "ls", "-g", "--json")
+    assert rc == 0 and [e["scope_kind"] for e in doc["data"]["secrets"]] == ["global"]

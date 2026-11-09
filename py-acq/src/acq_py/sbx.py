@@ -462,6 +462,21 @@ class _Entry(NamedTuple):
     label: str  # the listing's scope string
     key: str  # the service name, or a custom secret's env var
     placeholder: str  # custom secrets only ("" when absent)
+    targets: frozenset[str] = frozenset()  # custom secrets' hosts, lower-cased (empty when unlisted)
+
+
+# Custom env var -> the host sets a row's ``targets`` may carry, or ``None`` to
+# match the env var alone (nothing recorded which hosts it was bound to).
+_Envs = dict[str, set[frozenset[str]] | None]
+
+
+def _host_set(hosts: object) -> frozenset[str]:
+    """A host list (list, or a comma/space-separated string) as a lower-cased set."""
+    if isinstance(hosts, str):
+        hosts = hosts.replace(",", " ").split()
+    if not isinstance(hosts, list):
+        return frozenset()
+    return frozenset(h.strip().lower() for h in hosts if isinstance(h, str) and h.strip())
 
 
 def _listing_unreadable(detail: str) -> SbxError:
@@ -483,7 +498,8 @@ def _entry_from(table: str, entry: object) -> _Entry:
     if not isinstance(scope, str) or not isinstance(key, str) or not scope or not key:
         raise _listing_unreadable("an unexpected secret-list entry")
     placeholder = entry.get("placeholder") if table == "custom" else ""
-    return _Entry(table, scope, key, placeholder if isinstance(placeholder, str) else "")
+    targets = _host_set(entry.get("targets")) if table == "custom" else frozenset()
+    return _Entry(table, scope, key, placeholder if isinstance(placeholder, str) else "", targets)
 
 
 def _read_listing() -> list[_Entry]:
@@ -574,12 +590,12 @@ class _Scopes:
         return "sandbox"
 
 
-def _ambiguous(service: str) -> SbxError:
+def _ambiguous(service: str, outcome: str = "nothing was changed") -> SbxError:
     return SbxError(
         errors.FAILURE,
         f"sbx's secret listing cannot tell a global '{service}' entry from one "
         "scoped to the sandbox named 'global'",
-        "nothing was changed; check 'sbx secret ls' and remove the entry with sbx "
+        f"{outcome}; check 'sbx secret ls' and remove the entry with sbx "
         "directly ('sbx secret rm SERVICE [--sandbox global] -f', or "
         "'acq secret rm <placeholder>' for a custom secret)",
     )
@@ -654,38 +670,60 @@ def _route(service: str, host: str, env: str) -> tuple[str, str] | None:
     return binding
 
 
-def _wanted(scope: Scope, service: str, *, removal: bool) -> tuple[str | None, set[str]]:
+def _want_env(envs: _Envs, env: str, hosts: str | None) -> None:
+    """Add a custom env var, pinned to ``hosts`` (comma-separated) when known."""
+    if hosts is None or not _host_set(hosts):
+        envs[env] = None
+    elif env not in envs or envs[env] is not None:
+        allowed = envs.setdefault(env, set())
+        if allowed is not None:
+            allowed.add(_host_set(hosts))
+
+
+def _wanted(scope: Scope, service: str, *, removal: bool) -> tuple[str | None, _Envs]:
     """What carries ``service`` in sbx's table: ``(native name or None, custom env vars)``.
 
     The endpoint sidecar recorded for exactly this scope wins (it is what was
-    actually bound); a provider adds its registry env var. A native entry
+    actually bound); a provider adds its registry env var. Each custom env var
+    is pinned to the hosts recorded with it, so another host's secret under the
+    same env var is neither reported as injectable nor removed. A native entry
     counts as injectable only for a built-in; removal also clears a stray
     native entry of the same name (sbx would never inject it). A service acq
     does not model matches a raw sbx entry by that name, native or custom.
     """
-    envs: set[str] = set()
+    envs: _Envs = {}
     meta = secretstore.meta_resolve_exact(service, scope.sandbox)
     if meta is not None and meta.env:
-        envs.add(meta.env)
+        _want_env(envs, meta.env, meta.host)
     if service in BUILTIN_SERVICES:
         return service, envs
     binding = _provider_binding(service)
     if binding is not None:
-        envs.add(binding[1])
+        _want_env(envs, binding[1], binding[0])
     elif not envs:
-        return service, {service}
+        return service, {service: None}
     return (service if removal else None), envs
 
 
+def _custom_hit(entry: _Entry, envs: _Envs) -> bool:
+    """A custom row carries a wanted env var, and every one of its ``targets``
+    is among the hosts recorded for it (a subset, so a row per host and one row
+    for all of them both match). A row that lists no targets matches by env alone."""
+    if entry.key not in envs:
+        return False
+    allowed = envs[entry.key]
+    return allowed is None or not entry.targets or any(entry.targets <= hosts for hosts in allowed)
+
+
 def _match(
-    listing: list[_Entry], scopes: _Scopes, want: Scope, native: str | None, envs: set[str]
+    listing: list[_Entry], scopes: _Scopes, want: Scope, native: str | None, envs: _Envs
 ) -> tuple[list[_Entry], list[_Entry]]:
     """``(found, ambiguous)``: the entries for ``want`` that carry
     ``native``/``envs``, and those whose ``global`` label might be ``want``'s."""
     found: list[_Entry] = []
     ambiguous: list[_Entry] = []
     for entry in listing:
-        hit = entry.key == native if entry.table == "service" else entry.key in envs
+        hit = entry.key == native if entry.table == "service" else _custom_hit(entry, envs)
         if not hit:
             continue
         matched = scopes.match(entry.label, want)
@@ -696,8 +734,8 @@ def _match(
     return found, ambiguous
 
 
-def _find(scope: Scope, service: str, *, removal: bool) -> list[_Entry]:
-    """Entries for ``service`` in exactly ``scope``.
+def _find(scope: Scope, service: str, *, removal: bool) -> tuple[list[_Entry], list[_Entry]]:
+    """``(found, ambiguous)`` entries for ``service`` in exactly ``scope``.
 
     An ambiguous native entry is kept for removal: ``sbx secret rm SERVICE
     [--sandbox S]`` names the scope itself, so sbx removes that scope's entry or
@@ -708,7 +746,7 @@ def _find(scope: Scope, service: str, *, removal: bool) -> list[_Entry]:
     found, ambiguous = _match(_read_listing(), _Scopes(), scope, *_wanted(scope, service, removal=removal))
     if ambiguous and (not removal or any(entry.table == "custom" for entry in ambiguous)):
         raise _ambiguous(service)
-    return found + ambiguous
+    return found, ambiguous
 
 
 def _require_set_custom() -> None:
@@ -740,7 +778,8 @@ def secret_preflight(scope: Scope | str, service: str, host: str = "", env: str 
     if route is not None:
         _require_set_custom()
     native = service if route is None or service in BUILTIN_SERVICES else None
-    envs = set() if route is None else {route[1]}
+    # Any host: a same-env custom secret in this scope may make sbx refuse or prompt.
+    envs: _Envs = {} if route is None else {route[1]: None}
     found, ambiguous = _match(_read_listing(), _Scopes(), sc, native, envs)
     if ambiguous:
         raise _ambiguous(service)
@@ -800,26 +839,34 @@ def secret_rm(scope: Scope | str, service: str) -> None:
     --placeholder P [--sandbox S] -f``. ``-f`` suppresses sbx's confirm prompt
     and stdin is ``/dev/null``, so no prompt can wait unseen. Nothing to remove
     is a no-op; a custom entry behind an ambiguous ``global`` label fails closed
-    (see :func:`_find`).
+    (see :func:`_find`). Identical removals run once; one that fails on rows
+    only an ambiguous ``global`` label matched says so, since a retry cannot help.
     """
     sc = secretstore.as_scope(scope)
-    for entry in _find(sc, service, removal=True):
+    found, ambiguous = _find(sc, service, removal=True)
+    plans: dict[tuple[str, ...], bool] = {}  # argv -> only ambiguous rows need it
+    for entry, unsure in [(e, False) for e in found] + [(e, True) for e in ambiguous]:
         if entry.table == "service":
-            argv = ["secret", "rm", *_secret_scope_argv(sc), entry.key, "-f"]
+            argv = ("secret", "rm", *_secret_scope_argv(sc), entry.key, "-f")
         elif entry.placeholder:
-            argv = ["secret", "rm", "--placeholder", entry.placeholder, *_secret_scope_argv(sc), "-f"]
+            argv = ("secret", "rm", "--placeholder", entry.placeholder, *_secret_scope_argv(sc), "-f")
         else:
             raise SbxError(
                 errors.FAILURE,
                 f"sbx listed no placeholder for the custom secret '{entry.key}' ({sc.describe()})",
                 "check 'sbx secret ls' and remove it with sbx directly",
             )
-        if _run(argv).returncode != 0:
-            raise SbxError(
-                errors.FAILURE,
-                f"could not remove secret '{service}' for {sc.describe()}",
-                "check backend logs and retry",
-            )
+        plans[argv] = plans.get(argv, True) and unsure
+    for argv, unsure in plans.items():
+        if _run(list(argv)).returncode == 0:
+            continue
+        if unsure:
+            raise _ambiguous(service, "the acq secret store entry was kept")
+        raise SbxError(
+            errors.FAILURE,
+            f"could not remove secret '{service}' for {sc.describe()}",
+            "check backend logs and retry",
+        )
 
 
 def secret_ls(scope: Scope | str | None = None) -> list[dict]:
@@ -856,14 +903,14 @@ def key_present(scope: Scope | str, service: str) -> bool:
     *cannot answer* (or an ambiguous ``global`` label) raises :class:`SbxError`,
     so "the backend is down" is never conflated with "the secret is absent".
     """
-    return bool(_find(secretstore.as_scope(scope), service, removal=False))
+    return any(_find(secretstore.as_scope(scope), service, removal=False))
 
 
 # The neutral ``secret`` seam (commands/secret.py): presence in sbx's own table,
 # the "can inject" predicate, and removal from sbx after the acq store entry.
 def secret_present(scope: Scope | str, service: str) -> bool:
     """Anything ``secret rm`` would remove for exactly this scope."""
-    return bool(_find(secretstore.as_scope(scope), service, removal=True))
+    return any(_find(secretstore.as_scope(scope), service, removal=True))
 
 
 def secret_has(scope: Scope | str, service: str) -> bool:
@@ -926,7 +973,7 @@ def provider_credential_set(provider: str, key_env: str, hosts: list[str], value
     custom secret already bound to ``key_env`` fails closed before the value is
     piped, so the value is never consumed by an overwrite prompt.
     """
-    found, ambiguous = _match(_read_listing(), _Scopes(), _GLOBAL_SCOPE, None, {key_env})
+    found, ambiguous = _match(_read_listing(), _Scopes(), _GLOBAL_SCOPE, None, {key_env: None})
     if ambiguous:
         raise _ambiguous(key_env)
     if found:

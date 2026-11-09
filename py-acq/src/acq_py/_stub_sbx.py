@@ -392,6 +392,9 @@ def _secret_rm(rest: list[str], secrets: dict[str, dict[str, str]]) -> int:
         return 1
     if not _confirmed(rest):
         return 1
+    if _should_fail("secret rm"):
+        print(RAW_FAIL_STDERR, file=sys.stderr)
+        return 1
     scope = _secret_scope(rest)
     if service not in secrets.get(scope, {}):
         print("sbx: no such secret", file=sys.stderr)
@@ -517,6 +520,9 @@ def main(argv: list[str]) -> int:
     catalog = _load()
 
     if cmd in ("ls", "list"):
+        if _should_fail("ls"):
+            print(RAW_FAIL_STDERR, file=sys.stderr)
+            return 1
         # Real `sbx ls` has only --format/--json/-q (NO --running); --json emits a
         # list of {name, status} objects, and -q/table emit names one per line.
         if "--json" in args or "--format" in args:
