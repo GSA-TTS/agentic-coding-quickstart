@@ -637,6 +637,41 @@ _acq_backend_passthrough() {
   command "${ACQ_RESOLVED_BACKEND}" "$@"
 }
 
+# _acq_recreate_name_check ARGS... — `create --recreate NAME` names an existing
+# sandbox, so refuse a NAME that could steer a host path (acq_name_form_check),
+# as the Python implementation does. Only arguments before `--` count; a
+# trailing --recreate with no value is checked as an empty name.
+_acq_recreate_name_check() {
+  local prev="" a
+  for a in "$@"; do
+    [ "$a" = "--" ] && break
+    if [ "$prev" = "--recreate" ]; then
+      acq_name_form_check create "$a" || return 1
+    else
+      case "$a" in
+        --recreate=*) acq_name_form_check create "${a#--recreate=}" || return 1 ;;
+      esac
+    fi
+    prev="$a"
+  done
+  [ "$prev" != "--recreate" ] || acq_name_form_check create ""
+}
+
+# _acq_attach_name_check ARGS... — `attach` is forwarded to the backend CLI, but
+# its first positional names an existing sandbox, so refuse one that could steer
+# a host path (acq_name_form_check) before forwarding, as Python's attach does.
+_acq_attach_name_check() {
+  local a
+  for a in "$@"; do
+    [ "$a" = "--" ] && return 0
+    case "$a" in
+      -?*) continue ;;
+    esac
+    acq_name_form_check attach "$a"
+    return
+  done
+}
+
 _acq_secret_service_arg() {
   local a1="${1:-}" a2="${2:-}"
   case "$a1" in
@@ -1142,6 +1177,7 @@ case "$subcommand" in
           echo "acq: kit apply: usage: acq kit apply NAME KITREF" >&2
           exit 1
         fi
+        acq_name_form_check "kit apply" "$local_name" || exit 1
         # kit apply needs the backend resolved.
         acq_resolve_backend "${explicit_backend}"
         acq_backend_apply_kit "$local_name" "$local_kitref"
@@ -1156,6 +1192,7 @@ case "$subcommand" in
           echo "acq: kit check: usage: acq kit check SANDBOX" >&2
           exit 1
         fi
+        acq_name_form_check "kit check" "$local_name" || exit 1
         acq_resolve_backend "${explicit_backend}"
         if ! acq_backend_exists "$local_name"; then
           echo "acq: kit check: no such sandbox '$local_name'." >&2
@@ -1201,6 +1238,7 @@ case "$subcommand" in
           echo "acq: kit update: usage: acq kit update SANDBOX [--yes]" >&2
           exit 1
         fi
+        acq_name_form_check "kit update" "$local_name" || exit 1
         acq_resolve_backend "${explicit_backend}"
         if ! acq_backend_exists "$local_name"; then
           echo "acq: kit update: no such sandbox '$local_name'." >&2
@@ -1432,6 +1470,7 @@ case "$subcommand" in
 
   create)
     shift
+    _acq_recreate_name_check "$@" || exit 1
     acq_backend_prepare
     # First-run onboarding (ADR-0031): offer `acq configure` once before we
     # provision, so a brand-new user picks kits up front. No-op after first run
@@ -2151,6 +2190,9 @@ case "$subcommand" in
     # drop it before forwarding the remaining args — otherwise the verb would be
     # doubled (e.g. `acq policy init` → `sbx policy policy init`).
     shift
+    if [ "$subcommand" = attach ]; then
+      _acq_attach_name_check "$@" || exit 1
+    fi
     _acq_backend_passthrough "$subcommand" "$@"
     ;;
 esac
