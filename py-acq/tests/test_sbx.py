@@ -812,3 +812,23 @@ def test_secret_ls_for_sandbox_global_without_such_a_sandbox_is_empty(monkeypatc
     assert rc == 0 and doc["data"]["secrets"] == []
     rc, doc = _invoke(capsys, "--backend", "sbx", "secret", "ls", "-g", "--json")
     assert rc == 0 and [e["scope_kind"] for e in doc["data"]["secrets"]] == ["global"]
+
+
+def test_custom_row_without_targets_fails_closed_for_a_pinned_env(monkeypatch, tmp_path, capsys):
+    # A row with no targets for an env var pinned to hosts could be another
+    # host's secret: has and rm fail closed (secret_unreadable) instead of
+    # matching on the env var alone.
+    from acq_py import secretstore
+
+    _env(monkeypatch, tmp_path, custom=[_custom("global", "USAI_API_KEY", "sbx-cs-bare")])
+    secretstore.set_secret("usai", None, "U")
+    assert cli.main(["--backend", "sbx", "secret", "has", "-g", "usai"]) == 1
+    assert "no target hosts" in capsys.readouterr().err
+    calls = _spy(monkeypatch)
+    rc, doc = _invoke(capsys, "--backend", "sbx", "secret", "rm", "-g", "usai", "--json")
+    assert rc == 1 and doc["error"]["code"] == "secret_unreadable"
+    assert not any(argv[:2] == ["secret", "rm"] for argv, _ in calls)
+    assert secretstore.exists("usai")
+    # A service with no recorded hosts still matches by env var alone.
+    _env(monkeypatch, tmp_path, custom=[_custom("global", "RAW_ENV", "sbx-cs-raw")])
+    assert cli.main(["--backend", "sbx", "secret", "has", "-g", "RAW_ENV"]) == 0

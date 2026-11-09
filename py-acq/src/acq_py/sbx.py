@@ -708,11 +708,24 @@ def _wanted(scope: Scope, service: str, *, removal: bool) -> tuple[str | None, _
 def _custom_hit(entry: _Entry, envs: _Envs) -> bool:
     """A custom row carries a wanted env var, and every one of its ``targets``
     is among the hosts recorded for it (a subset, so a row per host and one row
-    for all of them both match). A row that lists no targets matches by env alone."""
+    for all of them both match). Where no hosts were recorded, the env var alone
+    matches. A row with no ``targets`` for an env var pinned to hosts fails
+    closed: acq cannot tell which host it serves, so it must never be reported
+    as injectable or have its placeholder removed as if it were this one."""
     if entry.key not in envs:
         return False
     allowed = envs[entry.key]
-    return allowed is None or not entry.targets or any(entry.targets <= hosts for hosts in allowed)
+    if allowed is None:
+        return True
+    if not entry.targets:
+        raise SbxError(
+            errors.SECRET_UNREADABLE,
+            f"sbx lists a custom secret for ${entry.key} with no target hosts, so acq cannot tell "
+            "whether it is the one bound to the recorded hosts",
+            "nothing was changed; check 'sbx secret ls' and, if it is yours, remove it with "
+            "'acq secret rm PLACEHOLDER' (the placeholder sbx lists for it)",
+        )
+    return any(entry.targets <= hosts for hosts in allowed)
 
 
 def _match(
@@ -996,12 +1009,13 @@ def provider_credential_set(provider: str, key_env: str, hosts: list[str], value
         )
 
 
-def custom_secret_listed(scope: Scope | str, env: str) -> bool:
-    """Does sbx still list a custom secret for ``env`` in exactly ``scope``, for
-    any host? An ambiguous ``global`` label counts as listed. Raises
-    :class:`SbxError` when the listing cannot be read."""
+def custom_secret_placeholders(scope: Scope | str, env: str) -> list[str]:
+    """Placeholders of the custom secrets sbx still lists for ``env`` in exactly
+    ``scope``, for any host (an ambiguous ``global`` label included; ``""`` for
+    a row without one). Empty when there are none. Raises :class:`SbxError`
+    when the listing cannot be read."""
     found, ambiguous = _match(_read_listing(), _Scopes(), secretstore.as_scope(scope), None, {env: None})
-    return bool(found or ambiguous)
+    return [entry.placeholder for entry in found + ambiguous]
 
 
 def github_scope(sandbox: str, value: str) -> None:

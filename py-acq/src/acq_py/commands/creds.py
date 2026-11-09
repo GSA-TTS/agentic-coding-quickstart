@@ -284,28 +284,48 @@ def _remove_credential(
     return outcome
 
 
-def _sbx_custom_secret_remains(binding: dict, outcome: _RmOutcome) -> bool:
-    """After an sbx removal that removed nothing: could a global custom secret
-    for the binding's KEY_ENV still be injected?
+def _sbx_custom_secret_remains(binding: dict) -> list[str] | None:
+    """After any sbx removal, successful or not: the placeholders of the global
+    custom secrets sbx still lists for the binding's KEY_ENV, or ``None`` when
+    there are none.
 
-    The removal path finds the ``set-custom`` entry by KEY_ENV and pinned hosts.
-    A failed removal, a same-KEY_ENV entry for other hosts, or a listing that
-    cannot be read all leave one possibly in place; finding none means there is
-    nothing to warn about.
+    The removal path takes only the ``set-custom`` entry whose targets match the
+    binding's hosts, and deletes the stored value either way. A same-KEY_ENV
+    entry it skipped (re-pinned out of band, or targets sbx lists in a form acq
+    cannot match) would keep ``$KEY_ENV`` injected after a reported success, so
+    the listing is re-read every time. A listing that cannot be read, or a
+    binding without a KEY_ENV, counts as remaining (``[""]``): never a silent
+    success.
     """
     key_env = binding.get("key_env")
-    if outcome.exit_code is not None or not isinstance(key_env, str):
-        return True
+    if not isinstance(key_env, str):
+        return [""]
     try:
-        return bool(common._adapter("sbx").custom_secret_listed(secretstore.GLOBAL, key_env))
+        left = common._adapter("sbx").custom_secret_placeholders(secretstore.GLOBAL, key_env)
     except common._ADAPTER_ERRORS:
-        return True
+        return [""]
+    return left or None
+
+
+def _sbx_rm_incomplete(provider: str, binding: dict, outcome: _RmOutcome, left: list[str], emit_json: bool) -> int:
+    """Fail an sbx removal that left a custom secret for KEY_ENV in place."""
+    key_env = binding.get("key_env") or "its KEY_ENV"
+    done = f"removed the stored '{provider}' credential, but " if outcome.removed else ""
+    named = [p for p in left if p]
+    target = " or ".join(f"'acq secret rm {p}'" for p in named) or "'acq secret rm PLACEHOLDER' (from 'sbx secret ls')"
+    return common._operational_failure(
+        "provider-credential rm",
+        errors.UNBIND_FAILED,
+        f"{done}sbx still lists a global custom secret for ${key_env}, so it may still be injected "
+        f"(credential_removed: false); the '{provider}' binding was kept",
+        f"remove it with {target}, then re-run 'acq provider-credential rm {provider}'",
+        emit_json,
+    )
 
 
 def _warn_sbx_custom_secret(provider: str, binding: dict) -> None:
-    """The sbx removal did not take the ``set-custom`` entry ``provider-credential
-    set`` created (it failed, or sbx lists one for other hosts than the pin), so
-    say it may still be injected rather than imply it is gone."""
+    """An sbx removal that failed left the ``set-custom`` entry listed: say it may
+    still be injected rather than imply it is gone."""
     key_env = binding.get("key_env") or "its KEY_ENV"
     print(
         f"acq: warning: an sbx custom secret for ${key_env} ('{provider}') may still be injected; "
@@ -373,8 +393,12 @@ def _rm_locked(provider: str, backend_override: str | None, accept: list[str] | 
             emit_json,
         )
     outcome = _remove_credential(provider, backend_override, accept, emit_json)
-    if outcome.backend == "sbx" and not outcome.removed and _sbx_custom_secret_remains(binding, outcome):
-        _warn_sbx_custom_secret(provider, binding)
+    if outcome.backend == "sbx":
+        left = _sbx_custom_secret_remains(binding)
+        if left is not None and outcome.exit_code is not None:
+            _warn_sbx_custom_secret(provider, binding)
+        elif left is not None:
+            return _sbx_rm_incomplete(provider, binding, outcome, left, emit_json)
     if outcome.exit_code is not None:
         return outcome.exit_code
     try:

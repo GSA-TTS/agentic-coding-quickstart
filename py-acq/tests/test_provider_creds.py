@@ -342,23 +342,46 @@ def test_provider_credential_rm_on_sbx_warns_only_when_a_custom_secret_remains(m
     assert "may still be injected" in err and "$ACME_KEY" in err and "acq secret rm PLACEHOLDER" in err
     assert len(_sbx_custom_table(tmp_path)) == 1
     # A same-KEY_ENV entry for another host is not this binding's, so it is not
-    # removed, but the warning says one is still there.
+    # removed; rm fails (never a silent success) and keeps the binding.
     monkeypatch.delenv("ACQ_SBX_STUB_FAIL")
     (tmp_path / "sbx-home" / ".docker-sbx" / "custom-secrets.json").unlink()
     monkeypatch.setenv("ACQ_SBX_STUB_CUSTOM_SECRETS", json.dumps(
         [{"scope": "global", "env": "ACME_KEY", "placeholder": "sbx-cs-elsewhere", "targets": ["models.other.gov"]}]
     ))
     rc, doc, _out, err = _invoke_full(capsys, "--backend", "sbx", "provider-credential", "rm", "acme", "--json")
-    assert rc == 0 and doc["data"]["credential_removed"] is False
-    assert "may still be injected" in err
+    assert rc == 1 and doc["error"]["code"] == "unbind_failed"
+    assert "may still be injected" in doc["error"]["message"] and "acq secret rm sbx-cs-elsewhere" in doc["error"]["remediation"]
+    assert provider_creds.get_binding("acme") is not None
     from acq_py import sbx, secretstore
 
-    assert sbx.custom_secret_listed(secretstore.GLOBAL, "ACME_KEY")  # still there (the seed, untouched)
+    assert sbx.custom_secret_placeholders(secretstore.GLOBAL, "ACME_KEY") == ["sbx-cs-elsewhere"]  # untouched
     assert not (tmp_path / "sbx-home" / ".docker-sbx" / "custom-secrets.json").exists()
     # Nothing listed for the KEY_ENV at all: nothing to warn about.
     provider_creds.set_binding("other", "OTHER_KEY", ["models.other.gov"])
     rc, doc, _out, err = _invoke_full(capsys, "--backend", "sbx", "provider-credential", "rm", "other", "--json")
     assert rc == 0 and doc["data"]["credential_removed"] is False and "warning" not in err
+
+
+def test_provider_credential_rm_on_sbx_never_reports_removed_while_a_row_remains(monkeypatch, tmp_path, capsys):
+    # A stored value exists, and the only ACME_KEY row targets a host the
+    # binding no longer pins (re-pinned out of band). The row is skipped and the
+    # stored value deleted, but $ACME_KEY is still injected: rm must not report
+    # credential_removed: true or exit 0.
+    from acq_py import secretstore
+
+    _sbx_env(monkeypatch, tmp_path, version="0.51.0")
+    provider_creds.set_binding("acme", "ACME_KEY", ["models.acme.gov"])
+    secretstore.store(secretstore.key_for("acme"), "STORED-VALUE")
+    monkeypatch.setenv("ACQ_SBX_STUB_CUSTOM_SECRETS", json.dumps(
+        [{"scope": "global", "env": "ACME_KEY", "placeholder": "sbx-cs-old", "targets": ["models.old.gov"]}]
+    ))
+    rc, doc, out, err = _invoke_full(capsys, "--backend", "sbx", "provider-credential", "rm", "acme", "--json")
+    assert rc == 1 and doc["error"]["code"] == "unbind_failed"
+    assert doc["error"]["message"].startswith("removed the stored 'acme' credential, but sbx still lists")
+    assert "credential_removed: false" in doc["error"]["message"]
+    assert "'acq secret rm sbx-cs-old'" in doc["error"]["remediation"]
+    assert "STORED-VALUE" not in out + err
+    assert provider_creds.get_binding("acme") is not None  # kept, so the removal can be retried
 
 
 def test_provider_credential_set_and_rm_wait_for_the_provider_lock(monkeypatch, tmp_path, capsys):
