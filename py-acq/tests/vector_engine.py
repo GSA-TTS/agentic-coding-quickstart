@@ -250,12 +250,18 @@ def run_vector(
     # (scripts/run-vectors), so a relative path in ``invoke.argv`` resolves the
     # same under both runners (ADR-0043m: the two runners must agree). The corpus
     # root is ``<repo>/test/vectors``, so its grandparent is the repo root.
+    #
+    # stdin is always a pipe carrying exactly ``invoke.stdin``, empty included,
+    # as the Bash runner always feeds a file. Passing None for an empty value
+    # would hand the child pytest's own fd 0: harmless under the default capture
+    # (/dev/null), but under ``pytest -s`` the CLI would read the developer's
+    # terminal, and a consent prompt would see their answer.
     try:
         proc = subprocess.run(
             argv,
             cwd=str(corpus_root.parent.parent),
             env=env,
-            input=stdin.encode("utf-8") if stdin else None,
+            input=stdin.encode("utf-8"),
             capture_output=True,
             timeout=timeout,
         )
