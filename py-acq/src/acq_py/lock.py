@@ -19,14 +19,15 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from . import state, timeouts
+from . import hostexec, state, timeouts
 
-if os.name == "nt":  # pragma: no cover - exercised only on Windows hosts
+if sys.platform == "win32":  # pragma: no cover - exercised only on Windows hosts
     import msvcrt
 else:
     import fcntl
@@ -120,7 +121,7 @@ def exclusive_lock(
 def _try_os_lock(fh) -> bool:
     """Take the OS advisory lock without blocking; False when it is held elsewhere."""
     try:
-        if os.name == "nt":  # pragma: no cover - Windows only
+        if sys.platform == "win32":  # pragma: no cover - Windows only
             # msvcrt.locking locks one byte; ensure the file has one.
             fh.seek(0, os.SEEK_END)
             if fh.tell() == 0:
@@ -138,7 +139,7 @@ def _try_os_lock(fh) -> bool:
 
 def _unlock(fh) -> None:
     try:
-        if os.name == "nt":  # pragma: no cover - Windows only
+        if sys.platform == "win32":  # pragma: no cover - Windows only
             fh.seek(0)
             msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
         else:
@@ -270,9 +271,12 @@ def _process_identity(pid: int) -> str | None:
             return str(int(proc.stat().st_mtime))
     except OSError:
         return None
+    ps = hostexec.which("ps")  # resolved from absolute PATH entries only
+    if ps is None:
+        return None
     try:
         out = subprocess.run(
-            ["ps", "-o", "lstart=", "-p", str(pid)],
+            [ps, "-o", "lstart=", "-p", str(pid)],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
@@ -349,7 +353,7 @@ class _BashLock:
     def acquire(self) -> bool:
         """Take the lock, or return False while a Bash or Python holder has it."""
         self.blocked = False
-        if os.name == "nt":  # pragma: no cover - Windows only
+        if sys.platform == "win32":  # pragma: no cover - Windows only
             self.blocked = self._recent_on_windows()
             return not self.blocked
         identity = _process_identity(os.getpid())
@@ -394,7 +398,7 @@ class _BashLock:
         base = f"wait for the other acq command on sandbox '{name}' to finish, then retry"
         if not self.blocked:
             return base
-        if os.name == "nt":  # pragma: no cover - Windows only
+        if sys.platform == "win32":  # pragma: no cover - Windows only
             return (
                 f"{base}; a lock left by Bash acq ({self.path}) counts as held for "
                 f"{int(_BASH_WINDOWS_FRESH_S // 60)} minutes after it was taken, so if no "

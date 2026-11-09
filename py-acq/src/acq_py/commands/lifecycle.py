@@ -17,7 +17,6 @@ import time
 from .. import envelope, errors, kits, lock, msb, sbx, security, state
 from . import common
 
-
 # Substrate-contract seam (internal test seam, never a secret, never written to
 # output). ``ACQ_SUBSTRATE_STATE`` is a JSON object mapping an image to its
 # substrate state: ``"ok"`` or a list of gap tokens. A ``"*"`` key applies to any
@@ -405,6 +404,7 @@ def run_create(parsed, emit_json: bool, backend: str) -> int:
     workspace, exit_code = common._validate_workspace("create", parsed.path, emit_json)
     if exit_code is not None:
         return exit_code
+    assert workspace is not None  # nosec B101 # resolver contract; narrows the type for mypy
     kit_name, exit_code = _validate_kit_flag(parsed.kit, "create", emit_json)
     if exit_code is not None:
         return exit_code
@@ -446,6 +446,7 @@ def _create_locked(parsed, emit_json: bool, backend: str, name: str, workspace: 
     image, provision_steps, exit_code = _resolve_image_for_kit(parsed.image, parsed.agent, kit_name, "create", emit_json)
     if exit_code is not None:
         return exit_code
+    assert image is not None  # nosec B101 # resolver contract; narrows the type for mypy
     try:
         data = _create_sandbox(backend, parsed.agent, workspace, name, image, kit_name)
     except common._ADAPTER_ERRORS as exc:
@@ -667,6 +668,7 @@ def _run_prepare_locked(
         image, provision_steps, exit_code = _resolve_image_for_kit(parsed.image, target, kit_name, "run", emit_json)
         if exit_code is not None:
             return None, exit_code
+        assert image is not None  # nosec B101 # resolver contract; narrows the type for mypy
         try:
             _create_sandbox(backend, target, workspace, name, image, kit_name)
         except common._ADAPTER_ERRORS as exc:
@@ -713,6 +715,7 @@ def run_run(parsed, emit_json: bool, backend: str) -> int:
         workspace, exit_code = common._validate_workspace("run", parsed.path, emit_json)
         if exit_code is not None:
             return exit_code
+        assert workspace is not None  # nosec B101 # resolver contract; narrows the type for mypy
         kit_name, exit_code = _validate_kit_flag(parsed.kit, "run", emit_json)
         if exit_code is not None:
             return exit_code
@@ -779,7 +782,7 @@ def run_run(parsed, emit_json: bool, backend: str) -> int:
     return _launch_after_envelope(backend, target, workspace, common._launch_token(backend, target, agent), emit_json)
 
 
-def _launch_after_envelope(backend: str, name: str, workspace: str | None, token: str, emit_json: bool) -> int:
+def _launch_after_envelope(backend: str, name: str, workspace: str | None, token: str | None, emit_json: bool) -> int:
     """Launch for ``run`` once its success envelope may already be on stdout.
 
     Under ``--json`` stdout must carry exactly one document, and ``run`` has
@@ -854,7 +857,7 @@ def run_stop(parsed, emit_json: bool, backend: str) -> int:
             "stop",
             errors.SANDBOX_NOT_FOUND,
             f"sandbox '{name}' not found",
-            f"list sandboxes with 'acq ls', or create one with 'acq create'",
+            "list sandboxes with 'acq ls', or create one with 'acq create'",
             emit_json,
         )
     try:

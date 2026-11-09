@@ -82,8 +82,9 @@ def run_kit_apply(parsed, emit_json: bool, backend_override: str | None) -> int:
     backend, exit_code = common._resolve_backend_for_mutation(
         backend_override, emit_json, "kit apply", domain="kit"
     )
-    if exit_code is not None or backend is None:
-        return exit_code if exit_code is not None else errors.EXIT_FAILURE
+    if exit_code is not None:
+        return exit_code
+    assert backend is not None  # nosec B101 # resolver contract; narrows the type for mypy
     if not common._supports(backend, "kit-apply"):
         return common._operational_failure(
             "kit apply",
@@ -117,7 +118,7 @@ def _kit_apply_locked(name: str, kitref: str, emit_json: bool, backend: str) -> 
             "kit apply",
             errors.SANDBOX_NOT_FOUND,
             f"sandbox '{name}' not found",
-            f"list sandboxes with 'acq ls', or create one with 'acq create'",
+            "list sandboxes with 'acq ls', or create one with 'acq create'",
             emit_json,
         )
     if not kits.is_agent_kit(kitref):
@@ -191,13 +192,14 @@ def run_kit_check(parsed, emit_json: bool, backend_override: str | None) -> int:
     )
     if exit_code is not None:
         return exit_code
+    assert backend is not None  # nosec B101 # resolver contract; narrows the type for mypy
     name = parsed.name
     if not common._adapter(backend).exists(name):
         return common._operational_failure(
             "kit check",
             errors.SANDBOX_NOT_FOUND,
             f"sandbox '{name}' not found",
-            f"list sandboxes with 'acq ls', or create one with 'acq create'",
+            "list sandboxes with 'acq ls', or create one with 'acq create'",
             emit_json,
         )
     data = kits.kit_check_data(backend, name)
@@ -227,13 +229,14 @@ def run_kit_update(parsed, emit_json: bool, backend_override: str | None) -> int
     )
     if exit_code is not None:
         return exit_code
+    assert backend is not None  # nosec B101 # resolver contract; narrows the type for mypy
     name = parsed.name
     if not common._adapter(backend).exists(name):
         return common._operational_failure(
             "kit update",
             errors.SANDBOX_NOT_FOUND,
             f"sandbox '{name}' not found",
-            f"list sandboxes with 'acq ls', or create one with 'acq create'",
+            "list sandboxes with 'acq ls', or create one with 'acq create'",
             emit_json,
         )
     status = kits.provenance_status(backend, name)

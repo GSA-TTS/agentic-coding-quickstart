@@ -83,3 +83,27 @@ updates:
       - "pre-commit"
     commit-message:
       prefix: "chore(deps)"
+
+  # py-acq's pinned dev and CI tools: requirements-dev.txt (pytest) and the
+  # hash-locked requirements-quality.txt (ruff, mypy, bandit, pytest-cov and their
+  # dependencies). acq has no runtime dependencies (ADR-0042m); see ADR-0049m.
+  # Keep the pytest pin in requirements-dev.txt, requirements-quality.txt and
+  # pyproject.toml equal when merging an update.
+  - package-ecosystem: "pip"
+    directory: "/py-acq"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "python"
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      py-acq-tools:
+        patterns:
+          - "*"

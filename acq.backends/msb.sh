@@ -3229,78 +3229,203 @@ _acq_msb_upstream_ca_flags_into() {
 # read-write into sandboxes in normal mode, so its repository config, attributes
 # and hooks are treated as untrusted here: no hooks, no fsmonitor, no filter
 # drivers, no transports (so no lazy fetch from a promisor remote), no
-# submodule recursion. Callers that need the local file transport (the scratch
-# clone) re-allow only that one after the wrapper's defaults.
+# submodule recursion, no pager. Callers that need the local file transport
+# (the scratch clone) re-allow only that one after the wrapper's defaults.
+# Hooks are disabled by pointing core.hooksPath at a directory under acq's own
+# state dir that nothing ever creates, rather than /dev/null, which a native
+# Windows git (Git Bash) does not resolve to a POSIX null device. The path
+# must be absolute: a relative hooksPath resolves against the workspace
+# itself, which the guest can write.
 _acq_msb_git_ws() {
-  local dir="$1" key
+  local dir="$1"
   shift
-  local -a cfg=(
-    -c core.fsmonitor=false
-    -c core.hooksPath=/dev/null
-    -c core.untrackedCache=false
-    -c protocol.allow=never
-    -c submodule.recurse=false
-  )
-  # Blank every filter driver the repository's config defines (reading config
-  # runs nothing), so status and clone never start a clean/smudge/process
-  # program it names.
+  _acq_msb_git_ws_prep "$dir" || return 1
+  GIT_NO_LAZY_FETCH=1 GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
+    env ${_ACQ_MSB_WS_ENV[@]+"${_ACQ_MSB_WS_ENV[@]}"} git --no-pager \
+      -c core.fsmonitor=false \
+      -c "core.hooksPath=${_ACQ_MSB_WS_HOOKS}" \
+      -c core.untrackedCache=false \
+      -c protocol.allow=never \
+      -c submodule.recurse=false \
+      ${_ACQ_MSB_WS_CFG[@]+"${_ACQ_MSB_WS_CFG[@]}"} \
+      -C "$dir" "$@"
+}
+
+# _acq_msb_git_ws_prep DIR — compute the wrapper's per-call settings for DIR:
+# _ACQ_MSB_WS_HOOKS (the never-created hooks path) and the filter settings
+# (_acq_msb_git_ws_filter_cfg). Returns 1, saying why, when either cannot be
+# made safe; clone setup calls it once up front, where that message is shown.
+# Hooks stay off only while the hooks path does not exist, so an existing file,
+# directory or symlink there fails closed rather than becoming a hooks dir.
+_acq_msb_git_ws_prep() {
+  _ACQ_MSB_WS_HOOKS="${ACQ_STATE_DIR}/.git-hooks-disabled"
+  case "$_ACQ_MSB_WS_HOOKS" in
+    /* | [A-Za-z]:[/\\]*) ;;
+    *)
+      echo "acq(msb): error: --clone: ACQ_STATE_DIR must be an absolute path: ${ACQ_STATE_DIR}" >&2
+      return 1
+      ;;
+  esac
+  if [ -e "$_ACQ_MSB_WS_HOOKS" ] || [ -L "$_ACQ_MSB_WS_HOOKS" ]; then
+    echo "acq(msb): error: --clone: $_ACQ_MSB_WS_HOOKS exists. acq disables git hooks by" >&2
+    echo "acq(msb):   pointing core.hooksPath at that path and needs it absent. Remove it, then re-run." >&2
+    return 1
+  fi
+  _acq_msb_git_ws_filter_cfg "$1"
+}
+
+# _acq_msb_git_ws_filter_cfg DIR — build the settings that blank every filter
+# driver DIR's config defines (reading config runs nothing), so status and
+# clone never start a clean/smudge/process program it names. Sets the arrays
+# _ACQ_MSB_WS_ENV (environment assignments) and _ACQ_MSB_WS_CFG (`-c` options).
+# The settings travel as GIT_CONFIG_COUNT/GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n>
+# (git 2.31+), appended after any the user already exports: a `-c name=value`
+# splits at the first '=', so it cannot name a driver whose name itself
+# contains one. On an older git the `-c` form is the only one, and a driver
+# name containing '=' is refused (return 1) because it cannot be blanked.
+# A config read that fails (any status but 0, or 1 for "no filter keys") is
+# refused too: without the list, a driver could be left live.
+_acq_msb_git_ws_filter_cfg() {
+  local dir="$1" key val n envok="" keys rc=0
+  _ACQ_MSB_WS_ENV=()
+  _ACQ_MSB_WS_CFG=()
+  keys=$(git --no-pager -C "$dir" config --name-only --get-regexp '^filter\.' 2>/dev/null) || rc=$?
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
+    echo "acq(msb): error: --clone: could not read the git config for $dir (git exit $rc);" >&2
+    echo "acq(msb):   refusing to run git there without knowing its filter drivers." >&2
+    return 1
+  fi
+  case "${GIT_CONFIG_COUNT:-}" in
+    '' | *[!0-9]*) n=0 ;;
+    *) n=$((10#$GIT_CONFIG_COUNT)) ;;
+  esac
   while IFS= read -r key; do
     case "$key" in
-      filter.*.clean | filter.*.smudge | filter.*.process) cfg+=(-c "${key}=") ;;
-      filter.*.required) cfg+=(-c "${key}=false") ;;
+      filter.*.clean | filter.*.smudge | filter.*.process) val="" ;;
+      filter.*.required) val=false ;;
+      *) continue ;;
     esac
-  done < <(git -C "$dir" config --name-only --get-regexp '^filter\.' 2>/dev/null)
-  GIT_NO_LAZY_FETCH=1 GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 git "${cfg[@]}" -C "$dir" "$@"
+    [ -n "$envok" ] || { _acq_msb_git_version_ge 2 31 && envok=1 || envok=0; }
+    if [ "$envok" = 1 ]; then
+      _ACQ_MSB_WS_ENV+=("GIT_CONFIG_KEY_${n}=${key}" "GIT_CONFIG_VALUE_${n}=${val}")
+      n=$((n + 1))
+      continue
+    fi
+    case "$key" in
+      *=*)
+        echo "acq(msb): error: --clone: the repository config defines a filter driver whose" >&2
+        echo "acq(msb):   name contains '=' ($key). This git cannot disable it; git 2.31 or" >&2
+        echo "acq(msb):   later can. Upgrade git, or remove or rename that filter, then re-run." >&2
+        return 1
+        ;;
+    esac
+    _ACQ_MSB_WS_CFG+=(-c "${key}=${val}")
+  done <<EOF
+$keys
+EOF
+  [ "${#_ACQ_MSB_WS_ENV[@]}" -eq 0 ] || _ACQ_MSB_WS_ENV+=("GIT_CONFIG_COUNT=${n}")
+  return 0
+}
+
+# _acq_msb_git_version_ge MAJOR MINOR — succeed when the host git is at least
+# MAJOR.MINOR (2.31 reads GIT_CONFIG_COUNT; 2.26 has `config --show-scope`).
+_acq_msb_git_version_ge() {
+  local v maj min
+  v=$(git --version 2>/dev/null) || return 1
+  v=${v#git version }
+  maj=${v%%.*}
+  min=${v#*.}
+  min=${min%%.*}
+  case "$maj" in '' | *[!0-9]*) return 1 ;; esac
+  case "$min" in '' | *[!0-9]*) return 1 ;; esac
+  [ "$maj" -gt "$1" ] || { [ "$maj" -eq "$1" ] && [ "$min" -ge "$2" ]; }
 }
 
 # _acq_msb_clone_setup NAME WSPATH — create the scratch clone + fetch-back
 # remote for NAME's primary workspace WSPATH. On success sets
 # _ACQ_MSB_CLONE_DIR to the canonicalized scratch path (the mount source).
 # Fails (return 1) without touching the backend when WSPATH is not a git
-# repository root or a previous scratch is still present.
+# repository root or a previous scratch is still present. The steps run in
+# order and each refusal stops the create: name, wrapper settings, repository
+# root, stale scratch, preflight, scratch clone, then the config and remote
+# wiring.
 _acq_msb_clone_setup() {
-  local name="$1" ws="$2" top=""
-  # NAME lands verbatim in host paths (mkdir/git clone, and rm -rf at cleanup)
-  # under the clones root, and in the sandbox-<name> remote — and an EXPLICIT
-  # --name bypasses slugify, reaching here before msb's own name validation
-  # ever runs. Fail closed on anything that is not a single safe path
-  # component, so a traversal-shaped name can never build a path outside the
-  # clones root.
-  case "$name" in
+  local name="$1" ws="$2" ws_canon dir scratch
+  _acq_msb_clone_check_name "$name" || return 1
+  # Checked up front so its refusal is shown: the wrapper calls below hide
+  # git's stderr, and each one would refuse the same way.
+  _acq_msb_git_ws_prep "$ws" || return 1
+  ws_canon=$(_acq_msb_clone_repo_root "$ws") || return 1
+  dir="${ACQ_MSB_CLONES_DIR}/${name}"
+  scratch="${dir}/$(basename "$ws_canon")"
+  _acq_msb_clone_check_stale "$name" "$dir" || return 1
+  _acq_msb_clone_preflight "$ws_canon" || return 1
+  _acq_msb_clone_make_scratch "$ws_canon" "$dir" "$scratch" || return 1
+  _acq_msb_clone_wire "$name" "$ws_canon" "$dir" "$scratch" || return 1
+  _ACQ_MSB_CLONE_DIR=$(canonicalize_path "$scratch")
+  return 0
+}
+
+# _acq_msb_clone_check_name NAME — refuse a NAME that is not a single safe path
+# component. NAME lands verbatim in host paths (mkdir/git clone, and rm -rf at
+# cleanup) under the clones root, and in the sandbox-<name> remote — and an
+# EXPLICIT --name bypasses slugify, reaching here before msb's own name
+# validation ever runs. Failing closed means a traversal-shaped name can never
+# build a path outside the clones root.
+_acq_msb_clone_check_name() {
+  case "$1" in
     ''|.|..|*[!A-Za-z0-9._-]*)
-      echo "acq(msb): error: --clone: invalid sandbox name '$name' for the scratch clone" >&2
+      echo "acq(msb): error: --clone: invalid sandbox name '$1' for the scratch clone" >&2
       echo "acq(msb):   (allowed: letters, digits, '.', '_', '-')." >&2
       return 1
       ;;
   esac
+  return 0
+}
+
+# _acq_msb_clone_repo_root WSPATH — print WSPATH canonicalized, or refuse
+# (return 1) when it is not a git repository or not the repository's root.
+_acq_msb_clone_repo_root() {
+  local ws="$1" top="" ws_canon top_canon
   if ! top=$(_acq_msb_git_ws "$ws" rev-parse --show-toplevel 2>/dev/null); then
     echo "acq(msb): error: --clone: workspace is not a git repository: $ws" >&2
     echo "acq(msb):   --clone runs the agent on a clone of the primary workspace's repo." >&2
     return 1
   fi
-  local ws_canon top_canon
   ws_canon=$(canonicalize_path "$ws")
   top_canon=$(canonicalize_path "$top")
   if [ "$ws_canon" != "$top_canon" ]; then
     echo "acq(msb): error: --clone: workspace must be the repository root: $top_canon" >&2
     return 1
   fi
-  local dir="${ACQ_MSB_CLONES_DIR}/${name}" scratch
-  scratch="${dir}/$(basename "$ws_canon")"
-  if [ -e "$dir" ]; then
-    echo "acq(msb): error: --clone: a scratch clone for '$name' already exists: $dir" >&2
-    if acq_backend_exists "$name"; then
-      # The scratch is the LIVE mount source of an existing sandbox — advising
-      # manual deletion here would destroy its workspace and skip the rm-time
-      # unfetched-commit warning.
-      echo "acq(msb):   sandbox '$name' still exists and mounts it. Remove the sandbox with" >&2
-      echo "acq(msb):   'acq rm $name' (it warns about unfetched work and cleans up), then re-run." >&2
-    else
-      echo "acq(msb):   it may hold unfetched work from an earlier sandbox. Recover it" >&2
-      echo "acq(msb):   ('git fetch sandbox-${name}') and remove the directory, then re-run." >&2
-    fi
-    return 1
+  printf '%s\n' "$ws_canon"
+}
+
+# _acq_msb_clone_check_stale NAME DIR — refuse when NAME's scratch dir DIR is
+# still present, with advice that matches whether the sandbox still exists.
+_acq_msb_clone_check_stale() {
+  local name="$1" dir="$2"
+  [ -e "$dir" ] || return 0
+  echo "acq(msb): error: --clone: a scratch clone for '$name' already exists: $dir" >&2
+  if acq_backend_exists "$name"; then
+    # The scratch is the LIVE mount source of an existing sandbox — advising
+    # manual deletion here would destroy its workspace and skip the rm-time
+    # unfetched-commit warning.
+    echo "acq(msb):   sandbox '$name' still exists and mounts it. Remove the sandbox with" >&2
+    echo "acq(msb):   'acq rm $name' (it warns about unfetched work and cleans up), then re-run." >&2
+  else
+    echo "acq(msb):   it may hold unfetched work from an earlier sandbox. Recover it" >&2
+    echo "acq(msb):   ('git fetch sandbox-${name}') and remove the directory, then re-run." >&2
   fi
+  return 1
+}
+
+# _acq_msb_clone_preflight WS — the checks on the canonical workspace WS that
+# run before anything is created: refuse an unusual layout, borrowed objects or
+# a partial clone; note Git LFS and uncommitted changes.
+_acq_msb_clone_preflight() {
+  local ws_canon="$1"
+  _acq_msb_clone_check_layout "$ws_canon" || return 1
   # An alternates file makes the object store borrow from other repositories
   # on the host; a scratch clone must carry only this repository's objects.
   if [ -s "${ws_canon}/.git/objects/info/alternates" ]; then
@@ -3309,16 +3434,32 @@ _acq_msb_clone_setup() {
     echo "acq(msb):   file, or use a regular clone, then re-run." >&2
     return 1
   fi
+  _acq_msb_clone_check_partial "$ws_canon" || return 1
+  _ACQ_MSB_CLONE_LFS=""
+  _acq_msb_clone_note_lfs "$ws_canon"
   if [ -n "$(_acq_msb_git_ws "$ws_canon" status --porcelain --ignore-submodules=all 2>/dev/null)" ]; then
     echo "acq(msb): note: the workspace has uncommitted changes; a git clone carries" >&2
     echo "acq(msb):   committed state only. Commit first ('git add' untracked files)," >&2
     echo "acq(msb):   or copy files in with 'acq cp'." >&2
+    if [ -n "$_ACQ_MSB_CLONE_LFS" ]; then
+      echo "acq(msb):   With filters disabled, LFS-tracked files may appear modified here" >&2
+      echo "acq(msb):   even when they are not." >&2
+    fi
   fi
+  return 0
+}
+
+# _acq_msb_clone_make_scratch WS DIR SCRATCH — create the private scratch dir
+# DIR, record WS as its origin, and clone WS into SCRATCH. On failure removes
+# DIR and returns 1.
+_acq_msb_clone_make_scratch() {
+  local ws_canon="$1" dir="$2" scratch="$3"
   # Private (0700): the scratch .git/config carries the source origin URL,
   # which may embed a credential, at a path the user never sees. Check the
-  # status explicitly: this function runs as an `if !` condition, which
-  # suppresses errexit for its whole body, so a bare `&&` chain would let a
-  # failed chmod fall through and clone that config in at the ambient umask.
+  # status explicitly: this runs inside an `if !` condition (the create calls
+  # _acq_msb_clone_setup that way), which suppresses errexit for the whole
+  # call chain, so a bare `&&` chain would let a failed chmod fall through and
+  # clone that config in at the ambient umask.
   if ! (umask 077 && mkdir -p "$dir") || ! chmod 700 "$dir"; then
     echo "acq(msb): error: --clone: could not create a private scratch dir: $dir" >&2
     echo "acq(msb):   Refusing to clone a config that may embed a credential into a" >&2
@@ -3336,6 +3477,14 @@ _acq_msb_clone_setup() {
     rm -rf "$dir"
     return 1
   fi
+  return 0
+}
+
+# _acq_msb_clone_wire NAME WS DIR SCRATCH — carry the identity and origin
+# config into SCRATCH (on failure removes DIR and returns 1), then register
+# the sandbox-NAME fetch-back remote in WS and tell the user how to recover.
+_acq_msb_clone_wire() {
+  local name="$1" ws_canon="$2" dir="$3" scratch="$4"
   if ! _acq_msb_clone_copy_config "$ws_canon" "$scratch"; then
     rm -rf "$dir"
     return 1
@@ -3355,18 +3504,117 @@ _acq_msb_clone_setup() {
   # reads the guest-writable scratch").
   echo "acq(msb): agent runs on a disposable clone; the real checkout is untouched." >&2
   echo "acq(msb):   Recover agent branches with: git fetch sandbox-${name}" >&2
-  _ACQ_MSB_CLONE_DIR=$(canonicalize_path "$scratch")
+  return 0
+}
+
+# _acq_msb_clone_check_layout WS — refuse (return 1) unless the canonical
+# workspace WS is an ordinary repository whose .git is its own directory. In a
+# linked worktree or a submodule checkout (.git is a gitfile, or the git dir
+# names a commondir), with a symlink anywhere inside .git, or with git's
+# directories resolving elsewhere, git can read objects, refs or config from
+# outside WS/.git, where the alternates check and the scratch clone are not
+# looking. A pass means that, at the time of the check, git's directories are
+# WS/.git and every directory below it except .git/hooks was listed with no
+# symlink found. .git/hooks is exempt (pruned before it is read): the wrapper
+# never runs hooks. The scan fails closed when find reports any error, such as
+# a directory it cannot list (an execute-only .git would otherwise hide a
+# link that git can still open by name). It only asks whether any link exists,
+# so odd file names cannot confuse it, and it runs from inside .git so the
+# workspace path is never parsed as a find pattern.
+_acq_msb_clone_check_layout() {
+  local ws="$1" want why="" gd="" common="" links=""
+  want="${ws}/.git"
+  if [ -L "$want" ]; then
+    why=".git is a symlink"
+  elif [ ! -d "$want" ]; then
+    why=".git is a file pointing at another git directory"
+  elif [ -e "${want}/commondir" ] || [ -L "${want}/commondir" ]; then
+    why=".git/commondir exists"
+  elif ! links=$(cd "$want" && find . -path ./hooks -prune -o -type l -print 2>/dev/null); then
+    why="could not scan .git (an unreadable directory inside it)"
+  elif [ -n "$links" ]; then
+    why=".git contains a symlink (outside .git/hooks)"
+  else
+    want=$(canonicalize_path "$want")
+    gd=$(_acq_msb_git_ws "$ws" rev-parse --absolute-git-dir 2>/dev/null) || gd=""
+    common=$(_acq_msb_git_ws "$ws" rev-parse --git-common-dir 2>/dev/null) || common=""
+    # --git-common-dir may print a path relative to WS (git -C WS).
+    case "$common" in '' | /* | [A-Za-z]:*) ;; *) common="${ws}/${common}" ;; esac
+    [ -z "$gd" ] || gd=$(canonicalize_path "$gd")
+    [ -z "$common" ] || common=$(canonicalize_path "$common")
+    if [ "$gd" != "$want" ] || [ "$common" != "$want" ]; then
+      why="git resolves its directory to ${gd:-?} (common: ${common:-?})"
+    fi
+  fi
+  [ -n "$why" ] || return 0
+  echo "acq(msb): error: --clone: $ws is not an ordinary repository checkout: $why." >&2
+  echo "acq(msb):   Clone mode needs .git to be the repository's own directory; 'git worktree'" >&2
+  echo "acq(msb):   checkouts and submodule checkouts are not supported. Run it from the main" >&2
+  echo "acq(msb):   checkout or a regular clone, then re-run." >&2
+  return 1
+}
+
+# _acq_msb_clone_check_partial WS — refuse (return 1) a partial clone, up
+# front: objects left on the server are missing locally and the wrapper never
+# fetches them, so the clone would otherwise fail part-way through. A bare
+# `promisor` key is boolean true; anything git would not read as false is
+# treated as true (fail closed).
+_acq_msb_clone_check_partial() {
+  local ws="$1" entry val partial=""
+  if _acq_msb_git_ws "$ws" config --get-all extensions.partialClone >/dev/null 2>&1; then
+    partial=1
+  else
+    while IFS= read -r -d '' entry; do
+      case "$entry" in
+        *$'\n'*) val=${entry#*$'\n'} ;;
+        *) val=true ;;
+      esac
+      case "$val" in
+        '' | [Ff][Aa][Ll][Ss][Ee] | [Nn][Oo] | [Oo][Ff][Ff] | 0) ;;
+        *) partial=1; break ;;
+      esac
+    done < <(_acq_msb_git_ws "$ws" config -z --get-regexp '^remote\..*\.promisor$' 2>/dev/null)
+  fi
+  [ -n "$partial" ] || return 0
+  echo "acq(msb): error: --clone: $ws is a partial clone (it has a promisor remote)." >&2
+  echo "acq(msb):   Objects left on the server are missing locally and clone mode never" >&2
+  echo "acq(msb):   fetches them. Use a full clone of the repository, then re-run." >&2
+  return 1
+}
+
+# _acq_msb_clone_note_lfs WS — print a notice when WS uses Git LFS, and set
+# _ACQ_MSB_CLONE_LFS=1. The wrapper disables filter drivers, so LFS-tracked
+# files land in the scratch as pointer files (the agent can fetch their content
+# in the guest), and the host-side status can show them as modified. Advisory.
+_acq_msb_clone_note_lfs() {
+  local ws="$1" f found=""
+  for f in "${ws}/.gitattributes" "${ws}/.git/info/attributes"; do
+    if [ -f "$f" ] && [ ! -L "$f" ] && grep -q 'filter=lfs' "$f" 2>/dev/null; then
+      found=1
+    fi
+  done
+  [ -d "${ws}/.git/lfs" ] && found=1
+  if [ -z "$found" ] &&
+    _acq_msb_git_ws "$ws" config --local --no-includes --get-regexp '^lfs\.' >/dev/null 2>&1; then
+    found=1
+  fi
+  [ -n "$found" ] || return 0
+  _ACQ_MSB_CLONE_LFS=1
+  echo "acq(msb): note: this repository uses Git LFS. Clone mode disables filter drivers," >&2
+  echo "acq(msb):   so LFS-tracked files are checked out in the scratch as pointer files." >&2
+  echo "acq(msb):   If git-lfs is available in the sandbox, fetch their content there with:" >&2
+  echo "acq(msb):   git lfs pull" >&2
   return 0
 }
 
 # _acq_msb_clone_copy_config SRC SCRATCH — write the few repo-local config
 # values a clone drops but the guest needs, from SRC into the scratch (see
 # ADR-0027 for what a clone carries and why):
-#   - user.name/user.email: SRC's EFFECTIVE identity. A per-forge identity
-#     often lives only in .git/config or behind a gitdir-scoped includeIf; the
-#     guest's synced global tier cannot express a per-repo value, so without
-#     this the first in-guest commit fails with "Author identity unknown".
-#     `git -C SRC config --get` resolves it exactly as the user's own commits do.
+#   - user.name/user.email: SRC's identity. A per-forge identity often lives
+#     only in .git/config or behind a gitdir-scoped includeIf in the global
+#     config; the guest's synced global tier cannot express a per-repo value,
+#     so without this the first in-guest commit fails with "Author identity
+#     unknown". See _acq_msb_clone_read_identity for which scopes are read.
 #   - remote.origin.url/remote.origin.pushurl: `git clone <host path>` points
 #     the scratch's origin at the host checkout path, and the scratch is
 #     mounted AT that path in the guest — so origin resolves to the scratch
@@ -3403,14 +3651,23 @@ _acq_msb_clone_setup() {
 # warns: a missing identity already fails loudly at the first in-guest commit.
 _acq_msb_clone_copy_config() {
   local src="$1" scratch="$2" key rc val first
-  for key in user.name user.email remote.origin.url remote.origin.pushurl; do
+  for key in user.name user.email; do
+    rc=0
+    _acq_msb_clone_read_identity "$src" "$key" || rc=$?
+    case "$rc" in
+      0)
+        git -C "$scratch" config --replace-all "$key" "$_ACQ_MSB_IDENT_VAL" >/dev/null 2>&1 ||
+          _acq_msb_clone_config_fail set "$key"
+        ;;
+      1) _acq_msb_clone_unset_key "$scratch" "$key" ;;
+      *) _acq_msb_clone_config_fail read "$key" ;;
+    esac
+  done
+  for key in remote.origin.url remote.origin.pushurl; do
     rc=0
     _acq_msb_git_ws "$src" config --no-includes --get-all "$key" >/dev/null 2>&1 || rc=$?
     if [ "$rc" -eq 1 ]; then
-      rc=0
-      git -C "$scratch" config --unset-all "$key" >/dev/null 2>&1 || rc=$?
-      # 5: nothing to unset.
-      [ "$rc" -eq 0 ] || [ "$rc" -eq 5 ] || _acq_msb_clone_config_fail set "$key" || return 1
+      _acq_msb_clone_unset_key "$scratch" "$key" || return 1
       continue
     fi
     if [ "$rc" -ne 0 ]; then
@@ -3427,6 +3684,116 @@ _acq_msb_clone_copy_config() {
       first=""
     done < <(_acq_msb_git_ws "$src" config --no-includes -z --get-all "$key" 2>/dev/null)
   done
+  return 0
+}
+
+# _acq_msb_clone_unset_key SCRATCH KEY — remove KEY from the scratch config
+# (the source has no value for it). Failure goes through the policy in
+# _acq_msb_clone_config_fail, whose status this returns.
+_acq_msb_clone_unset_key() {
+  local rc=0
+  git -C "$1" config --unset-all "$2" >/dev/null 2>&1 || rc=$?
+  # 5: nothing to unset.
+  [ "$rc" -eq 0 ] || [ "$rc" -eq 5 ] || _acq_msb_clone_config_fail set "$2"
+}
+
+# _acq_msb_clone_read_identity SRC KEY — resolve the identity KEY (user.name or
+# user.email) for the checkout SRC into _ACQ_MSB_IDENT_VAL. Returns 0 when set,
+# 1 when no scope sets it, 2 when a scope's config cannot be read.
+# The scopes are read in git's own order, system -> global -> local ->
+# worktree -> command, and the last value wins, as it does for the user's own
+# commits. The system and global files are the user's (the guest never writes
+# them), so they are read with --includes: a per-forge identity commonly sits
+# behind a gitdir-scoped includeIf there. The repository's own config files
+# are reachable from the guest in normal mode, so they are read with
+# --no-includes and cannot point the host at another file.
+#   - system: skipped when GIT_CONFIG_NOSYSTEM is true by git's boolean rules
+#     (_acq_msb_git_bool_true), as git does (`config --system` reads it
+#     regardless).
+#   - worktree (.git/config.worktree): read only when extensions.worktreeConfig
+#     is true; otherwise `--worktree` would just re-read the local file.
+#   - command (values the user exports via GIT_CONFIG_COUNT or
+#     GIT_CONFIG_PARAMETERS): picked out of `config --show-scope`, which needs
+#     git 2.26. Known gap: on an older git the command scope is not read.
+_acq_msb_clone_read_identity() {
+  local src="$1" key="$2" scope rc found=""
+  _ACQ_MSB_IDENT_VAL=""
+  for scope in system global local worktree command; do
+    rc=0
+    case "$scope" in
+      system)
+        _acq_msb_git_bool_true "${GIT_CONFIG_NOSYSTEM:-}" && continue
+        _acq_msb_clone_read_scope "$src" "$key" --system --includes || rc=$?
+        ;;
+      global) _acq_msb_clone_read_scope "$src" "$key" --global --includes || rc=$? ;;
+      local) _acq_msb_clone_read_scope "$src" "$key" --local --no-includes || rc=$? ;;
+      worktree)
+        [ "$(_acq_msb_git_ws "$src" config --local --no-includes --bool \
+          --get extensions.worktreeConfig 2>/dev/null)" = true ] || continue
+        _acq_msb_clone_read_scope "$src" "$key" --worktree --no-includes || rc=$?
+        ;;
+      command) _acq_msb_clone_read_command_scope "$src" "$key" || rc=$? ;;
+    esac
+    case "$rc" in
+      0) found=1 ;;
+      1) ;;
+      *) return 2 ;;
+    esac
+  done
+  [ -n "$found" ] || return 1
+  return 0
+}
+
+# _acq_msb_git_bool_true VALUE — succeed when git's boolean parsing reads VALUE
+# as true: true/yes/on in any case, or an integer (optional sign and k/m/g
+# suffix) that is not zero, so `00` is false. Empty and false/no/off are false.
+# git refuses anything else outright; that is treated as true here.
+_acq_msb_git_bool_true() {
+  local d="$1"
+  case "$d" in
+    '' | [Ff][Aa][Ll][Ss][Ee] | [Nn][Oo] | [Oo][Ff][Ff]) return 1 ;;
+    [Tt][Rr][Uu][Ee] | [Yy][Ee][Ss] | [Oo][Nn]) return 0 ;;
+  esac
+  d=${d#[+-]}
+  d=${d%[kKmMgG]}
+  case "$d" in
+    '' | *[!0-9]*) return 0 ;;
+    *[!0]*) return 0 ;;
+  esac
+  return 1
+}
+
+# _acq_msb_clone_read_scope SRC KEY FLAGS... — read KEY from SRC's config with
+# the scope FLAGS; on success put its last value in _ACQ_MSB_IDENT_VAL. Returns
+# 0 when set, 1 when absent, 2 when the config cannot be read.
+_acq_msb_clone_read_scope() {
+  local src="$1" key="$2" rc=0 val
+  shift 2
+  _acq_msb_git_ws "$src" config "$@" --get-all "$key" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] && return 1
+  [ "$rc" -eq 0 ] || return 2
+  while IFS= read -r -d '' val; do
+    _ACQ_MSB_IDENT_VAL="$val"
+  done < <(_acq_msb_git_ws "$src" config "$@" -z --get-all "$key" 2>/dev/null)
+  return 0
+}
+
+# _acq_msb_clone_read_command_scope SRC KEY — like _acq_msb_clone_read_scope,
+# for the command scope. `config --show-scope -z` prints scope/value pairs,
+# NUL-delimited; includes stay off, so only values from the environment and
+# the wrapper's own settings (which never set user.*) are command-scoped here.
+_acq_msb_clone_read_command_scope() {
+  local src="$1" key="$2" rc=0 scope val found=""
+  _acq_msb_git_version_ge 2 26 || return 1
+  _acq_msb_git_ws "$src" config --no-includes --show-scope --get-all "$key" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] && return 1
+  [ "$rc" -eq 0 ] || return 2
+  while IFS= read -r -d '' scope && IFS= read -r -d '' val; do
+    [ "$scope" = command ] || continue
+    _ACQ_MSB_IDENT_VAL="$val"
+    found=1
+  done < <(_acq_msb_git_ws "$src" config --no-includes --show-scope -z --get-all "$key" 2>/dev/null)
+  [ -n "$found" ] || return 1
   return 0
 }
 
@@ -3450,7 +3817,9 @@ _acq_msb_clone_config_fail() {
 # _acq_msb_clone_warn_unfetched NAME — warn (sbx-parity, never blocks) when
 # NAME's scratch clone holds commits absent from the origin checkout's object
 # store. Branch tips are checked with cat-file -e; a fetch transfers exactly
-# those objects, so tip-present == nothing to lose.
+# those objects, so tip-present == nothing to lose. When the wrapper refuses to
+# run git against the origin checkout, its reason is shown and the check is
+# reported as skipped, rather than every tip looking unfetched.
 _acq_msb_clone_warn_unfetched() {
   # NOTE: `local a="$1" b="…${a}"` is a trap — the whole statement's words
   # expand BEFORE `local` assigns, so ${a} is unbound under set -u. Split them.
@@ -3459,6 +3828,11 @@ _acq_msb_clone_warn_unfetched() {
   [ -d "$dir" ] || return 0
   origin=$(cat "${dir}/.origin" 2>/dev/null) || origin=""
   [ -n "$origin" ] && [ -d "$origin" ] || return 0
+  if ! _acq_msb_git_ws_prep "$origin"; then
+    echo "acq(msb): warning: could not check sandbox '$name''s scratch clone for unfetched" >&2
+    echo "acq(msb):   commits (see above); any it holds are discarded with it." >&2
+    return 0
+  fi
   for d in "$dir"/*/; do [ -d "${d}.git" ] && scratch="${d%/}"; done
   [ -n "$scratch" ] || return 0
   # Branch tips are read straight from the ref files (loose + packed). The
@@ -3491,14 +3865,21 @@ EOF
 
 # _acq_msb_clone_cleanup NAME — delete NAME's scratch clone and drop the
 # fetch-back remote from the origin checkout. Best-effort, always returns 0
-# (a sandbox created without --clone has no dir: quiet no-op).
+# (a sandbox created without --clone has no dir: quiet no-op). When the wrapper
+# refuses to run git against the origin checkout, its reason is shown along
+# with the command that removes the remote by hand.
 _acq_msb_clone_cleanup() {
   local name="$1" origin=""
   local dir="${ACQ_MSB_CLONES_DIR}/${name}"
   [ -d "$dir" ] || return 0
   origin=$(cat "${dir}/.origin" 2>/dev/null) || origin=""
   if [ -n "$origin" ] && [ -d "$origin" ]; then
-    _acq_msb_git_ws "$origin" remote remove "sandbox-${name}" >/dev/null 2>&1 || true
+    if _acq_msb_git_ws_prep "$origin"; then
+      _acq_msb_git_ws "$origin" remote remove "sandbox-${name}" >/dev/null 2>&1 || true
+    else
+      echo "acq(msb): warning: left the 'sandbox-${name}' remote in $origin (see above)." >&2
+      echo "acq(msb):   Remove it with: git -C $origin remote remove sandbox-${name}" >&2
+    fi
   fi
   rm -rf "$dir"
   return 0
@@ -4383,7 +4764,7 @@ acq_backend_provision() {
     _acq_provider_input_guardian_start || exit 1
     lock=$(acq_provider_input_lock_acquire msb "$1" "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID") || { _acq_provider_input_guardian_stop; exit 1; }
     trap 'rc=$?; _acq_msb_cleanup_uncreated_attempt; acq_provider_input_lock_release "${lock:-}" || true; _acq_provider_input_guardian_stop; exit "$rc"' EXIT
-    trap '_acq_provider_input_signal_exit 128' HUP
+    trap '_acq_provider_input_signal_exit 129' HUP
     trap '_acq_provider_input_signal_exit 130' INT
     trap '_acq_provider_input_signal_exit 143' TERM
     _acq_backend_provision_unlocked "$@"; rc=$?; exit "$rc" )
@@ -5536,7 +5917,7 @@ acq_backend_terminate() {
     _acq_provider_input_guardian_start || exit 1
     lock=$(acq_provider_input_lock_acquire msb "$1" "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID") || { _acq_provider_input_guardian_stop; exit 1; }
     trap 'rc=$?; acq_provider_input_lock_release "${lock:-}" || true; _acq_provider_input_guardian_stop; exit "$rc"' EXIT
-    trap '_acq_provider_input_signal_exit 128' HUP
+    trap '_acq_provider_input_signal_exit 129' HUP
     trap '_acq_provider_input_signal_exit 130' INT
     trap '_acq_provider_input_signal_exit 143' TERM
     _acq_backend_terminate_unlocked "$@"; rc=$?; exit "$rc" )

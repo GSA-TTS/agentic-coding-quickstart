@@ -37,7 +37,7 @@ import hashlib
 import json
 import os
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from . import state
@@ -514,7 +514,7 @@ def all_sources() -> list[dict]:
     (durable trust is repository-granular and the anchor is not re-pinnable
     through the registry).
     """
-    sources = [
+    sources: list[dict] = [
         {
             "repository": CONTROL_PLANE_REPO,
             "ref": CONTROL_PLANE_REF,
@@ -666,7 +666,7 @@ def provenance_write(backend: str, sandbox: str) -> dict:
         "backend": backend,
         "sandbox": sandbox,
         "applied_ref": CONTROL_PLANE_REF,
-        "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "recorded_at": datetime.now(UTC).isoformat(timespec="seconds"),
     }
     _atomic_write(_provenance_path(backend, sandbox), doc)
     return doc
@@ -698,7 +698,7 @@ def consent_write(backend: str, sandbox: str) -> dict:
         "backend": backend,
         "sandbox": sandbox,
         "consented_ref": CONTROL_PLANE_REF,
-        "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "recorded_at": datetime.now(UTC).isoformat(timespec="seconds"),
     }
     _atomic_write(_consent_path(backend, sandbox), doc)
     return doc
@@ -764,7 +764,7 @@ def kit_applied_write(backend: str, sandbox: str, kit: str, entrypoint: str) -> 
         "sandbox": sandbox,
         "kit": kit,
         "entrypoint": entrypoint,
-        "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "recorded_at": datetime.now(UTC).isoformat(timespec="seconds"),
     }
     _atomic_write(_kit_applied_path(backend, sandbox), doc)
     return doc

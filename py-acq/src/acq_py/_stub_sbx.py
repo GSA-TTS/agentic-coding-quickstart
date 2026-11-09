@@ -40,7 +40,7 @@ INSPECT_RAW_ENV = "ACQ_SBX_STUB_PORTS_RAW"
 # a raw (wrong-shape) document. The stub records ONLY scope/service/state — it never
 # stores or echoes a secret value (it discards stdin after reading it).
 SECRETS_ENV = "ACQ_SBX_STUB_SECRETS"
-SECRET_LS_RAW_ENV = "ACQ_SBX_STUB_SECRET_LS_RAW"
+SECRET_LS_RAW_ENV = "ACQ_SBX_STUB_SECRET_LS_RAW"  # nosec B105 # an env var name
 
 # Raw placeholders in sbx's custom-secrets table (state only, never a value).
 RAW_PLACEHOLDERS_ENV = "ACQ_SBX_STUB_RAW_PLACEHOLDERS"
@@ -325,21 +325,21 @@ def _secret_main(args: list[str]) -> int:
             print(raw)
             return 0
         # Scope filter: -g/--global -> "global", --sandbox NAME -> NAME, else all.
-        scope: str | None = None
+        scope_filter: str | None = None
         if "-g" in rest or "--global" in rest:
-            scope = "global"
+            scope_filter = "global"
         else:
             sbx = _arg_after(rest, "--sandbox")
             if sbx is not None:
-                scope = sbx
+                scope_filter = sbx
         entries: list[dict] = []
         for sc, services in secrets.items():
-            if scope is not None and sc != scope:
+            if scope_filter is not None and sc != scope_filter:
                 continue
-            for svc, state in services.items():
+            for svc, _state in services.items():
                 # Mirrors the real `sbx secret ls --json` entry: {scope, type,
                 # name, secret:"(stored)"} — the value is never emitted.
-                entries.append({"scope": sc, "type": "service", "name": svc, "secret": "(stored)"})
+                entries.append({"scope": sc, "type": "service", "name": svc, "secret": "(stored)"})  # nosec B105 # placeholder
         entries.sort(key=lambda e: (e["scope"], e["name"]))
         # The real `sbx secret ls --json` is an OBJECT envelope, not a bare list.
         print(json.dumps(
@@ -423,8 +423,8 @@ def main(argv: list[str]) -> int:
             entries.sort(key=lambda e: e["name"])
             print(json.dumps(entries))
             return 0
-        for name, state in catalog.items():
-            print(name)
+        for sandbox_name in catalog:
+            print(sandbox_name)
         return 0
 
     if cmd == "create":
