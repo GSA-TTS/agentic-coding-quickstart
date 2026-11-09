@@ -241,9 +241,11 @@ lists each setting as `key`, `value`, `source` and `honoured_by_python`.
 
 **`scope_github_token` takes effect only under the Bash acq for now**, and both
 the report and `--json` (`"honoured_by_python": false`) say so. The Python acq
-reads `extra_kits` and `provider_kit` when it creates an msb sandbox; it applies
-only its pinned built-in kits, so a kit that would have to be fetched (any
-catalog extra kit today) is refused at create rather than ignored.
+reads `extra_kits` and `provider_kit` when it creates an msb sandbox, but applies
+only kits from its pinned built-in bundle: a kit that would have to be fetched
+(any catalog extra kit today) is refused at create and needs the Bash acq
+(`ACQ_IMPL=bash`). `--json` marks those two settings `"python_applies":
+"bundled-only"`.
 
 Deliberate differences from Bash:
 

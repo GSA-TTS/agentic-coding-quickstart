@@ -986,9 +986,13 @@ _RO_WRITE_PROBE = (
 
 
 def ro_mount_guest_probe(name: str, guest_dir: str) -> int:
-    """DIAGNOSTIC: 0 present and not writable by guest root, 1 not confirmed, 2 writable."""
+    """DIAGNOSTIC: 0 present and not writable by guest root, 1 not confirmed, 2 writable.
+
+    Both checks run as guest root: at create the probe runs before the kits
+    set up the agent user, which a custom image may not have yet.
+    """
     try:
-        present = _run(["exec", name, "-u", "agent", "--", "sh", "-c", 'test -d "$1" && test -x "$1"', "sh", guest_dir],
+        present = _run(["exec", name, "-u", "0", "--", "sh", "-c", 'test -d "$1" && test -x "$1"', "sh", guest_dir],
                        timeout=30)
         if present.returncode != 0:
             return 1

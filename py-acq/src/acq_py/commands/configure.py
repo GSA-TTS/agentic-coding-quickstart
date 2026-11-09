@@ -13,10 +13,12 @@ defaults, and writes the same three ``config.yaml`` keys Bash writes:
 * ``provider_kit`` — the first checked provider-kit candidate.
 
 The Python acq reads ``extra_kits`` and ``provider_kit`` when it creates an msb
-sandbox; it applies only its pinned built-in kits, so a catalog kit chosen here
-is refused at create rather than ignored. ``scope_github_token`` takes effect
-only under the Bash acq for now, and the report says so (``honoured_by_python:
-false`` in ``--json``). Every write goes through :func:`acq_py.config.write_field`, so other
+sandbox, but it applies only kits from its pinned built-in bundle: a kit that
+would have to be fetched (every catalog extra kit today) is refused at create,
+and needs the Bash acq (``ACQ_IMPL=bash``). ``--json`` says so with
+``"python_applies": "bundled-only"`` on those two settings, next to
+``honoured_by_python: true``. ``scope_github_token`` takes effect only under the
+Bash acq for now (``honoured_by_python: false``). Every write goes through :func:`acq_py.config.write_field`, so other
 keys (including ones acq does not know) are kept, a symlinked config is written
 through, and each write is atomic. A newer ``config.yaml`` schema is refused
 before the first prompt; the forward-migration pre-step (the one every mutating
@@ -79,7 +81,12 @@ FLAG, ENV, CONFIG, DEFAULT, MIXED = "flag", "env", "config", "default", "mixed"
 
 # The keys configure writes that only the Bash acq reads so far.
 BASH_ONLY_KEYS = frozenset({"scope_github_token"})
-BASH_ONLY_NOTE = "      note: scope GitHub token takes effect only under the Bash acq for now."
+# The keys the Python acq reads but serves only from its pinned built-in bundle.
+BUNDLED_ONLY_KEYS = frozenset({"extra_kits", "provider_kit"})
+BASH_ONLY_NOTE = (
+    "      note: the Python acq applies extra and provider kits only from its built-in bundle "
+    "(others need ACQ_IMPL=bash); scope GitHub token takes effect only under the Bash acq for now."
+)
 
 # Raw terminal control bytes (C0, DEL, C1) are dropped from displayed labels.
 _CONTROL_RE = re.compile("[\x00-\x1f\x7f-\x9f]")
@@ -99,6 +106,8 @@ class Setting(NamedTuple):
             "source": self.source,
             "honoured_by_python": self.key not in BASH_ONLY_KEYS,
         }
+        if self.key in BUNDLED_ONLY_KEYS:
+            doc["python_applies"] = "bundled-only"
         if self.entries:
             doc["entries"] = [{"value": value, "source": source} for value, source in self.entries]
         return doc

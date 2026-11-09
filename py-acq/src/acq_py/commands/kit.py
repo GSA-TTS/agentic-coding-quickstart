@@ -330,9 +330,10 @@ def _kit_update_locked(name: str, emit_json: bool, backend: str) -> int:
         )
     agent = (record or {}).get("agent") or "shell"
     try:
-        selection = kitspec.select_kits(agent, configured_extras=True)
-        selection.require()
-        kit_set = kit_msb.resolve(selection)
+        cli_kits, extras = kit_msb.cli_kits_read(name)
+        image = (record or {}).get("image") or common.OPENCODE_DEVENV_IMAGE
+        kit_set = kit_msb.select(agent, cli_kits, image_is_default=image == common.OPENCODE_DEVENV_IMAGE,
+                                 extras=extras)
     except kitspec.KitSelectionError as exc:
         return common._operational_failure("kit update", errors.VALIDATION_FAILED, str(exc),
                                            "fix the kit selection and retry", emit_json)

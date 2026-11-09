@@ -693,3 +693,71 @@ def test_ro_guest_path_matches_bash(tmp_path):
     path = "/home/agent/.local/bin/My-Start_v2.sh"
     bash = _bash(tmp_path, '_acq_msb_stage_readonly_file box "$1" "$2"', path, str(REPO_ROOT / "LICENSE"))
     assert bash.strip() == kit_msb.ro_guest_path(path)
+
+
+# ---------------------------------------------------------------------------
+# Review fixes.
+# ---------------------------------------------------------------------------
+
+
+def test_restaging_a_readonly_file_replaces_the_0555_copy(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path)
+    src = tmp_path / "start.sh"
+    src.write_text("one\n", encoding="utf-8")
+    guest = kit_msb.stage_readonly_file("box", "/home/agent/start.sh", src)
+    src.write_text("two\n", encoding="utf-8")
+    assert kit_msb.stage_readonly_file("box", "/home/agent/start.sh", src) == guest  # no EACCES
+    dest = security.host_config_dir("box") / "kit-files" / guest.rsplit("/", 1)[1]
+    assert dest.read_text(encoding="utf-8") == "two\n"
+    assert stat.S_IMODE(dest.stat().st_mode) == 0o555
+    assert sorted(p.name for p in dest.parent.iterdir()) == [dest.name]  # no temp file left
+
+
+def test_reapplying_a_readonly_kit_succeeds(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path)
+    _Guest(monkeypatch)
+    kit = _kit(tmp_path, "ro", _RO_KIT, {"files/start.sh": "echo hi\n", "files/plain.txt": "x\n"})
+    for _ in range(2):  # create, then kit update / kit apply / recreate
+        assert kit_msb.apply_kit("box", kit, [], kit_msb.RoGate("box", True, check=lambda n: ("ok", "")), force=True)
+
+
+def test_create_on_an_image_without_the_agent_user_confirms_the_mount(monkeypatch, tmp_path, capsys):
+    # The probe runs before the kits set up the agent user, so it must not need one.
+    ws = _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_MSB_STUB_NO_AGENT_USER", "box")
+    rc = cli.main(["--backend", "msb", "create", "shell", str(ws), "--name", "box", "--json"])
+    doc = json.loads(capsys.readouterr().out)
+    assert rc == 0, doc
+    assert doc["data"]["ro_host_config"] is True
+    assert state.record_read("msb", "box")["ro_host_config"] is True
+
+
+def test_kit_kits_are_recorded_and_reapplied_by_kit_update_and_recreate(monkeypatch, tmp_path, capsys):
+    ws = _env(monkeypatch, tmp_path)
+    ref = kitspec.builtin_kit_ref("opencode")
+    rc, doc = _invoke(capsys, "--backend", "msb", "create", "shell", str(ws), "--name", "box", "--kit", "opencode", "--json")
+    assert rc == 0 and doc["data"]["kits"][-1] == "opencode"
+    assert kit_msb.cli_kits_read("box") == ([ref], [])
+    kits.provenance_remove("msb", "box")  # make the bundle "unknown" so update reapplies
+    rc, doc = _invoke(capsys, "--backend", "msb", "kit", "update", "box", "--yes", "--json")
+    assert rc == 0 and doc["data"]["kits"] == [*BUILTINS, "opencode"]
+    # Recreate rebuilds from the same record (here after the guest was lost out of band).
+    catalog = tmp_path / "msb-home" / ".microsandbox" / "catalog.json"
+    catalog.write_text("{}", encoding="utf-8")
+    assert security.mount_state("msb", "box") == "unknown"
+    rc, doc = _invoke(capsys, "--backend", "msb", "create", "--recreate", "box", "--yes", "--json")
+    assert rc == 0 and doc["data"]["kits"][-1] == "opencode"
+    assert _invoke(capsys, "--backend", "msb", "rm", "box", "--json")[0] == 0
+    assert kit_msb.cli_kits_read("box") == ([], [])
+
+
+def test_recorded_extra_kits_replace_the_environment(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path)
+    ref = kitspec.builtin_kit_ref("git-ssh-sign")
+    kit_msb.cli_kits_write("box", [kit_msb.Kit("git-ssh-sign", "extra", kitspec.load_bundled_kit("git-ssh-sign"), ref)])
+    path = kit_msb._cli_kits_path("box")
+    path.write_text(path.read_text(encoding="utf-8") + "kit=relative/kit\n", encoding="utf-8")
+    assert kit_msb.cli_kits_read("box") == ([], [ref])  # the relative ref is skipped
+    monkeypatch.setenv("ACQ_EXTRA_KITS", "would-need-a-fetch")
+    names = [k.name for k in kit_msb.select("shell", [], image_is_default=True, extras=[ref])]
+    assert names == BUILTINS  # the recorded extra replaced the env; deduped against the built-in

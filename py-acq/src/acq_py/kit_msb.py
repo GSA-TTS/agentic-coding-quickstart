@@ -62,6 +62,7 @@ class Kit:
     name: str
     role: str
     spec: kitspec.KitSpec
+    ref: str = ""
 
     @property
     def shortcut(self) -> bool:
@@ -117,8 +118,71 @@ def resolve(selection: kitspec.KitSelection) -> list[Kit]:
         if sel.ref in seen:
             continue
         seen.add(sel.ref)
-        out.append(Kit(sel.bundled, sel.role, _load(sel.bundled)))
+        out.append(Kit(sel.bundled, sel.role, _load(sel.bundled), sel.ref))
     return out
+
+
+def select(agent: str, cli_kits: list[str], *, image_is_default: bool, extras: list[str] | None = None) -> list[Kit]:
+    """Select, verify and parse a sandbox's kit set (Bash ``_build_kit_list``).
+
+    Config ``extra_kits`` take part. ``extras``, when recorded for the sandbox,
+    replace ``ACQ_EXTRA_KITS`` (as Bash ``acq_cli_kits_load`` does). On the
+    default image the agent's bundled kit is required, since that image has no
+    agent binary. Raises :class:`kitspec.KitSelectionError` or :class:`msb.MsbError`.
+    """
+    required = agent if agent in kitspec.AGENT_BUNDLE_KITS and image_is_default else None
+    env = {**os.environ, "ACQ_EXTRA_KITS": " ".join(extras)} if extras else os.environ
+    selection = kitspec.select_kits(agent, cli_kits=cli_kits, env=env, configured_extras=True,
+                                    required_agent_kit=required)
+    selection.require()
+    return resolve(selection)
+
+
+# ---------------------------------------------------------------------------
+# The sandbox's --kit and extra refs (Bash acq_cli_kits_write / acq_cli_kits_load).
+# ---------------------------------------------------------------------------
+
+
+def _cli_kits_path(name: str) -> Path:
+    return lock.bash_provenance_dir() / "msb" / f"{lock.bash_sandbox_key(name)}.kits"
+
+
+def cli_kits_write(name: str, kit_set: Iterable[Kit]) -> None:
+    """Record the sandbox's extra and ``--kit`` refs so later reapplies include them. Raises ``OSError``."""
+    kit_set = list(kit_set)
+    lines = ["schema=1", *(f"extra={k.ref}" for k in kit_set if k.role == "extra"),
+             *(f"kit={k.ref}" for k in kit_set if k.role == "cli")]
+    path = _cli_kits_path(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    state.atomic_write_text(path, "\n".join(lines) + "\n")
+    path.chmod(0o600)
+
+
+def cli_kits_read(name: str) -> tuple[list[str], list[str]]:
+    """The recorded ``(--kit refs, extra refs)``; empty when there is no record.
+
+    A relative local ref (left by an older Bash acq) would resolve against the
+    current directory, so it is skipped with a warning, as Bash does.
+    """
+    try:
+        text = _cli_kits_path(name).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return [], []
+    cli: list[str] = []
+    extras: list[str] = []
+    for line in text.splitlines():
+        key, _, value = line.partition("=")
+        if key not in ("kit", "extra") or not value:
+            continue
+        if not (value.startswith(("git+http", "/")) or re.match(r"[A-Za-z]:[/\\]", value)):
+            _warn(f"ignoring recorded relative kit path '{value}' for {name}")
+            continue
+        (cli if key == "kit" else extras).append(value)
+    return cli, extras
+
+
+def cli_kits_remove(name: str) -> None:
+    _cli_kits_path(name).unlink(missing_ok=True)
 
 
 def bundled_kit(name: str, role: str = "cli") -> Kit:
@@ -444,8 +508,17 @@ def stage_readonly_file(name: str, guest_path: str, src: Path) -> str:
     files.chmod(0o711)
     guest = ro_guest_path(guest_path)
     dest = files / guest.rsplit("/", 1)[1]
-    shutil.copyfile(src, dest)
-    dest.chmod(0o555)
+    # A staged copy is 0555, so it is replaced rather than written over (Bash
+    # ``cp -f``): a temporary file in the same directory, renamed into place.
+    fd, tmp = tempfile.mkstemp(prefix=f".{dest.name}.", dir=files)
+    try:
+        with os.fdopen(fd, "wb") as out, open(src, "rb") as inp:
+            shutil.copyfileobj(inp, out)
+        os.chmod(tmp, 0o555)  # nosec B103 # read-only kit code the guest must read and run (Bash stages it 0555)
+        os.replace(tmp, dest)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
     return guest
 
 

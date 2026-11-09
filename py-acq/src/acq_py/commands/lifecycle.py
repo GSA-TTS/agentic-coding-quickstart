@@ -173,20 +173,16 @@ class _KitPlan:
 
 
 def _plan_msb_kits(
-    agent: str, cli_kits: list[str], image: str, command: str, emit_json: bool
+    agent: str, cli_kits: list[str], image: str, command: str, emit_json: bool, extras: list[str] | None = None
 ) -> tuple[_KitPlan | None, int | None]:
-    """Select, verify and parse the kit set for an msb create (Bash ``_build_kit_list``).
+    """Select, verify and parse the kit set for an msb create (:func:`kit_msb.select`).
 
-    Config ``extra_kits`` take part, as in Bash. On the default image the
-    agent's bundled kit is required, since that image has no agent binary. Only
-    a kit chosen as the agent kit or passed with ``--kit`` can provide the
+    Only a kit chosen as the agent kit or passed with ``--kit`` can provide the
     agent: an extra kit is never inferred as one (ADR-0030).
     """
-    required = agent if agent in kitspec.AGENT_BUNDLE_KITS and image == common.OPENCODE_DEVENV_IMAGE else None
     try:
-        selection = kitspec.select_kits(agent, cli_kits=cli_kits, configured_extras=True, required_agent_kit=required)
-        selection.require()
-        resolved = kit_msb.resolve(selection)
+        resolved = kit_msb.select(agent, cli_kits, image_is_default=image == common.OPENCODE_DEVENV_IMAGE,
+                                  extras=extras)
     except kitspec.KitSelectionError as exc:
         return None, common._operational_failure(
             command, errors.VALIDATION_FAILED, str(exc),
@@ -223,6 +219,7 @@ def _apply_msb_kits(
             "check network access from the sandbox and the warnings above, then retry", emit_json,
         )
     try:
+        kit_msb.cli_kits_write(name, plan.kits)
         if plan.agent_kit is not None:
             kits.kit_applied_write("msb", name, plan.agent_kit, plan.entrypoint or plan.agent_kit)
         if not result.incomplete:
@@ -323,6 +320,7 @@ def _clear_host_records(backend: str, name: str) -> None:
     if backend == "msb":
         msb.held_forget(name)
         kit_msb.remove_host_config(name)
+        kit_msb.cli_kits_remove(name)
 
 
 def _has_host_records(backend: str, name: str) -> bool:
@@ -720,7 +718,8 @@ def _recreate_msb(name: str, agent: str, workspace: str, image: str, emit_json: 
             f"cannot recreate sandbox '{name}' with a read-only trusted-config mount: {problem}",
             f"upgrade msb to {security.RO_MOUNT_MIN_VERSION.string} or newer, then retry", emit_json,
         )
-    plan, exit_code = _plan_msb_kits(agent, [], image, "create", emit_json)
+    cli_kits, extras = kit_msb.cli_kits_read(name)
+    plan, exit_code = _plan_msb_kits(agent, cli_kits, image, "create", emit_json, extras)
     if plan is None:
         return None, exit_code
     steps, exit_code = _substrate_plan(image, plan.agent_kit, "create", emit_json)

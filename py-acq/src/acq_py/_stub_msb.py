@@ -22,7 +22,8 @@ and ``inspect`` reports them as ``active_config.mounts`` (``{guest, host, type:
 mount. ``ACQ_MSB_STUB_MOUNT_RW`` names sandboxes (comma separated) whose mounts
 inspect reports as writable, and ``ACQ_MSB_STUB_RO_WRITABLE`` names sandboxes
 whose guest write probe (an ``exec`` whose command mentions ``.acq-ro-probe``)
-reports the read-only mount writable (exit 2).
+reports the read-only mount writable (exit 2). ``ACQ_MSB_STUB_NO_AGENT_USER``
+names sandboxes whose image has no ``agent`` user: ``exec -u agent`` fails there.
 
 ``modify`` models the conservative reading of msb's "add or rotate": ``--secret
 ENV@HOST`` for a variable already bound to the SAME hosts rotates it, but one
@@ -131,6 +132,7 @@ def _save_secrets(records: dict[str, dict]) -> None:
 
 
 MOUNT_RW_ENV = "ACQ_MSB_STUB_MOUNT_RW"
+NO_AGENT_USER_ENV = "ACQ_MSB_STUB_NO_AGENT_USER"
 RO_WRITABLE_ENV = "ACQ_MSB_STUB_RO_WRITABLE"
 
 
@@ -308,6 +310,9 @@ def main(argv: list[str]) -> int:
             return 1
         if any(".acq-ro-probe" in token for token in command) and _named(RO_WRITABLE_ENV, name):
             return 2
+        if _arg_after(head, "-u") == "agent" and _named(NO_AGENT_USER_ENV, name):
+            print("msb: unable to find user agent", file=sys.stderr)
+            return 1
         marker = EXEC_MARKER
         if command:
             marker += " " + " ".join(command)
