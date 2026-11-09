@@ -488,3 +488,36 @@ def test_matrix_cell_state_applies_the_version_floors():
     green = make_transcript(Verdict.PASS, make_env(backend_version="0.7.7"))
     assert cell_state("msb", "linux-x86_64", transcript=green, now=NOW) is MatrixState.QUALIFIED
     assert cell_state("msb", "linux-x86_64", transcript=green, now=NOW, backend_version="0.7.1") is MatrixState.BLOCKED
+
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+def test_ctrl_c_on_the_harness_stops_the_command_before_giving_up(tmp_path, monkeypatch):
+    # On Windows the command runs in its own process group and never sees Ctrl+C, so
+    # the harness must pass the stop on. Simulated here with SIGALRM raising
+    # KeyboardInterrupt while the harness waits.
+    import signal
+
+    from qualification import runner
+
+    monkeypatch.setattr(runner, "_grace", lambda timeout: 10.0)
+    done = tmp_path / "tore-down"
+    script = (
+        "import signal, sys, time\n"
+        f"def stop(*_):\n    open({str(done)!r}, 'w').write('yes')\n    sys.exit(143)\n"
+        "signal.signal(signal.SIGTERM, stop)\n"
+        "time.sleep(60)\n"
+    )
+
+    def interrupt(*_):
+        raise KeyboardInterrupt
+
+    old = signal.signal(signal.SIGALRM, interrupt)
+    signal.setitimer(signal.ITIMER_REAL, 1.0)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            runner._single_run([sys.executable, "-c", script], make_env(), 1, timeout=60.0)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+    assert done.read_text() == "yes"

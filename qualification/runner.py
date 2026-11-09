@@ -122,6 +122,11 @@ def _single_run(
         return Transcript(
             Verdict.BLOCKED, environment, tuple(command), "", "command timed out", _now()
         )
+    except KeyboardInterrupt:
+        # In its own process group (Windows) the command never sees the operator's
+        # Ctrl+C, so pass the stop on and let it tear down before giving up.
+        _stop(proc, grace)
+        raise
 
     verdict = classify_exit(proc.returncode)
     # Digest only: raw stdout/stderr is discarded so a secret it may have printed

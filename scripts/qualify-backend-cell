@@ -42,8 +42,9 @@ are the ADR's):
                             ``scripts/qualify-msb-ro-mount`` must pass; it shows,
                             in a sandbox of its own, that this msb keeps a ``:ro``
                             volume read-only even against remount attempts. Canary
-                            exit 1 is FAIL; any other non-zero exit, a timeout, or
-                            no usable ``bash`` is BLOCKED.
+                            exit 1 with its ``RESULT FAIL`` line is FAIL; exit 0
+                            needs its ``RESULT PASS`` line; anything else, a
+                            timeout, or no usable ``bash`` is BLOCKED.
 
 Not covered here, because they need something an unattended run on one host
 cannot provide: swap-on-the-wire substitution (an endpoint that reports the
@@ -75,15 +76,21 @@ entries only (on Windows, never the WSL launcher ``System32\\bash.exe``; Git Bas
 is looked for in its install locations first). The canary honours only
 ``STEP_TIMEOUT``/``EXEC_TIMEOUT`` from the caller; its image is always the
 default (``QUALIFY_IMAGE`` and ``EXPECT_SHA`` are removed, and
-``ACQ_QUALIFY_OUT_DIR`` is an ``ACQ_*`` variable).
+``ACQ_QUALIFY_OUT_DIR`` is an ``ACQ_*`` variable), and its sandbox gets this run's
+nonce name (``QUALIFY_SANDBOX_NAME``), which teardown also removes.
 
 Aborts: SIGTERM (and SIGBREAK on Windows) raise ``SystemExit``, so teardown runs.
+Every subprocess runs in its own process group; when it times out, or the oracle
+is interrupted while waiting for it, the group gets SIGTERM (CTRL_BREAK on
+Windows) and a grace period before it is killed, so acq's and the canary's own
+cleanup still runs and no backend command is left running behind them.
 The harness sends one when a run outlives its timeout, then waits a grace period
 before killing it, and exports a deadline (``ACQ_QUALIFY_DEADLINE``, epoch
 seconds) that ends before its timeout; the oracle stops starting steps at that
-deadline, tears down and reports BLOCKED. Teardown always tries to remove the
-nonce-named sandbox, secret and provider binding, whether or not this run saw
-them created.
+deadline, tears down and reports BLOCKED (a step cut short by the deadline is
+BLOCKED, not FAIL). Teardown always tries to remove the nonce-named sandbox,
+canary sandbox, secret and provider binding, whether or not this run saw them
+created.
 
 Exit codes (mirroring ``scripts/qualify-msb-ro-mount`` and ADR-0044m): 0 PASS,
 2 BLOCKED (a prerequisite or a conclusion is missing), 1 FAIL. The throwaway
@@ -141,7 +148,11 @@ TEARDOWN_TIMEOUT = 60.0
 DEFAULT_BUDGET = 1500.0
 DEADLINE_ENV = "ACQ_QUALIFY_DEADLINE"
 # Caller variables the canary would honour but the oracle must pin.
-CANARY_PINNED = ("QUALIFY_IMAGE", "EXPECT_SHA")
+CANARY_PINNED = ("QUALIFY_IMAGE", "EXPECT_SHA", "QUALIFY_SANDBOX_NAME")
+# How long a stopped subprocess gets to clean up after SIGTERM before it is killed.
+# The canary removes its own sandbox (a 60 s msb call) when stopped.
+STOP_GRACE = 30.0
+CANARY_GRACE = 90.0
 
 # acq's own configuration and state locations, each redirected into the private tree.
 ISOLATED_DIRS = (
@@ -216,6 +227,7 @@ class Names:
     provider: str
     key_env: str
     secret_env: str
+    canary_sandbox: str
     seed: int
 
 
@@ -229,6 +241,7 @@ def make_names(backend: str, nonce: str | None = None) -> Names:
         provider=f"acq-qual-{nonce}",
         key_env=f"ACQ_QUAL_{nonce.upper()}",
         secret_env=f"ACQ_QUAL_S_{nonce.upper()}",
+        canary_sandbox=f"acq-qual-ro-{nonce}",
         seed=int(nonce, 16),
     )
 
@@ -250,14 +263,66 @@ def isolated_env(root: Path, base: dict[str, str] | None = None) -> dict[str, st
 Run = Callable[..., "subprocess.CompletedProcess[str] | None"]
 
 
-def run_process(argv: list[str], *, env: dict[str, str], stdin: str | None = None,
-                timeout: float = STEP_TIMEOUT, cwd: str | None = None):
-    """Run ``argv`` capturing its output; ``None`` on a timeout or a missing executable."""
+def _signal_group(proc: subprocess.Popen, kill: bool) -> None:
+    """Signal ``proc``'s whole process group: stop politely, or kill."""
+    if os.name == "nt":
+        if not kill:
+            proc.send_signal(signal.CTRL_BREAK_EVENT)
+            return
+        taskkill = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "taskkill.exe")
+        subprocess.run([taskkill, "/F", "/T", "/PID", str(proc.pid)], capture_output=True, check=False)
+        proc.kill()
+        return
     try:
-        return subprocess.run(list(argv), env=env, input=stdin, capture_output=True, text=True,
-                              errors="replace", timeout=timeout, cwd=cwd)
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+        os.killpg(proc.pid, signal.SIGKILL if kill else signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def stop_process(proc: subprocess.Popen, grace: float) -> None:
+    """SIGTERM (CTRL_BREAK on Windows) to the group, ``grace`` seconds, then kill the group."""
+    try:
+        _signal_group(proc, kill=False)
+        proc.communicate(timeout=grace)
+    except (subprocess.TimeoutExpired, OSError):
+        _signal_group(proc, kill=True)
+        proc.communicate()
+
+
+def run_process(argv: list[str], *, env: dict[str, str], stdin: str | None = None,
+                timeout: float = STEP_TIMEOUT, cwd: str | None = None, grace: float = STOP_GRACE):
+    """Run ``argv`` capturing its output; ``None`` on a timeout or if it cannot start.
+
+    It runs in its own process group. On a timeout, or when the oracle itself is
+    interrupted (SIGTERM, Ctrl+C) while waiting, the group is stopped with
+    :func:`stop_process`, so a backend command it started (an ``msb create``, the
+    canary's sandbox) is not left running and its own cleanup gets to run; a plain
+    ``subprocess.run`` timeout would SIGKILL only the direct child.
+    """
+    group = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
+             else {"start_new_session": True})
+    try:
+        proc = subprocess.Popen(list(argv), env=env, cwd=cwd, text=True, errors="replace",
+                                stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, **group)
+    except OSError:
         return None
+    try:
+        out, err = proc.communicate(stdin, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        stop_process(proc, grace)
+        return None
+    except BaseException:
+        stop_process(proc, grace)
+        raise
+    return subprocess.CompletedProcess(list(argv), proc.returncode, out, err)
+
+
+def canary_env(env: dict[str, str], names: Names) -> dict[str, str]:
+    """The canary's environment: the oracle's, with its image pinned and this run's sandbox name."""
+    pinned = {k: v for k, v in env.items() if k not in CANARY_PINNED}
+    pinned["QUALIFY_SANDBOX_NAME"] = names.canary_sandbox
+    return pinned
 
 
 def _out(proc) -> str:
@@ -293,8 +358,8 @@ class Cell:
 
     ``acq(argv, stdin=None, timeout=...)`` runs the shipped CLI; ``raw(argv, ...)``
     runs a program directly; ``canary(timeout)`` runs the ro-mount canary and
-    returns its exit status (``None`` when no usable ``bash`` exists or it timed
-    out); ``state_dir`` is acq's private state root, where its sandbox records and
+    returns ``(exit status, stdout)`` (status ``None`` when no usable ``bash``
+    exists or it timed out); ``state_dir`` is acq's private state root, where its sandbox records and
     host-config directories are read. Steps stop starting at ``deadline`` (epoch
     seconds).
     """
@@ -305,7 +370,7 @@ class Cell:
     state_dir: Path
     acq: Run
     raw: Run
-    canary: Callable[[float], "int | None"]
+    canary: Callable[[float], "tuple[int | None, str]"]
     deadline: float = math.inf
     failures: list[str] = field(default_factory=list)
     blocked: list[str] = field(default_factory=list)
@@ -343,7 +408,14 @@ class Cell:
         return min(timeout, remaining)
 
     def call(self, argv: list[str], *, stdin: str | None = None, timeout: float = STEP_TIMEOUT):
-        return self.acq(argv, stdin=stdin, timeout=self.budget(timeout))
+        proc = self.acq(argv, stdin=stdin, timeout=self.budget(timeout))
+        self._deadline_check(proc)
+        return proc
+
+    def _deadline_check(self, result) -> None:
+        """A step that got no result because the deadline cut it short is BLOCKED, not FAIL."""
+        if result is None and time.time() >= self.deadline - 1:
+            raise DeadlineReached
 
     # -- steps ------------------------------------------------------------------
 
@@ -444,11 +516,14 @@ class Cell:
         if not (isinstance(record, dict) and record.get("ro_host_config") is True):
             self.fail("ro mount record", "acq's sandbox record does not declare the read-only trusted-config mount")
         self.ro_effect()
-        status = self.canary(self.budget(CANARY_TIMEOUT))
-        if status == 1:
+        status, out = self.canary(self.budget(CANARY_TIMEOUT))
+        self._deadline_check(status)
+        # The verdict needs the canary's own RESULT line, not just an exit status.
+        verdict = next((x.split()[1] for x in out.splitlines() if x.startswith("RESULT ") and len(x.split()) > 1), "")
+        if status == 1 and verdict == "FAIL":
             self.fail("ro-mount canary", "scripts/qualify-msb-ro-mount reported a write through the :ro volume")
-        elif status != 0:
-            reason = "no usable bash, or it timed out" if status is None else f"it exited {status}"
+        elif not (status == 0 and verdict == "PASS"):
+            reason = "no usable bash, or it timed out" if status is None else f"exit {status}, RESULT {verdict or 'missing'}"
             self.block("ro-mount canary", f"no conclusion ({reason})")
 
     def ro_effect(self) -> None:
@@ -546,6 +621,9 @@ class Cell:
                      self._b("secret", "rm", "-g", n.service, "--json"),
                      self._b("provider-credential", "rm", n.provider, "--json")):
             self.acq(argv, timeout=TEARDOWN_TIMEOUT)
+        if self.backend == "msb":
+            # The canary removes its own sandbox, unless it was killed first.
+            self.raw(["msb", "remove", "--force", n.canary_sandbox], timeout=TEARDOWN_TIMEOUT)
         if self.backend == "sbx":
             # ``provider-credential rm`` drops only acq's binding; sbx keeps the
             # custom secret it created. Remove that one, found by this run's
@@ -612,7 +690,9 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, _terminate)
     if hasattr(signal, "SIGBREAK"):
         signal.signal(signal.SIGBREAK, _terminate)
-    with tempfile.TemporaryDirectory(prefix="acq-qual-") as tmp:
+    # A Windows file still held open by a just-stopped process must not turn the
+    # verdict into a traceback.
+    with tempfile.TemporaryDirectory(prefix="acq-qual-", ignore_cleanup_errors=True) as tmp:
         root = Path(tmp)
         env = isolated_env(root / "acq")
         workspace = root / "workspace"
@@ -635,11 +715,11 @@ def main(argv: list[str] | None = None) -> int:
         def canary(timeout):
             bash = find_bash(env.get("PATH", ""))
             if bash is None:
-                return None
-            canary_env = {k: v for k, v in env.items() if k not in CANARY_PINNED}
-            proc = run_process([bash, str(_repo_root() / "scripts" / "qualify-msb-ro-mount")], env=canary_env,
-                               timeout=timeout, cwd=str(_repo_root()))
-            return None if proc is None else proc.returncode
+                return None, ""
+            proc = run_process([bash, str(_repo_root() / "scripts" / "qualify-msb-ro-mount")],
+                               env=canary_env(env, names), timeout=timeout, cwd=str(_repo_root()),
+                               grace=CANARY_GRACE)
+            return (None, "") if proc is None else (proc.returncode, proc.stdout or "")
 
         cell = Cell(backend, names, str(workspace), Path(env["ACQ_STATE_DIR"]), acq, raw, canary, deadline)
         return cell.run()

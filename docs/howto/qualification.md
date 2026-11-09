@@ -85,6 +85,7 @@ file, and hash to the `transcript_sha256` its ledger entry records. Anyone can c
 a ledger PR from the PR alone, in a checkout of its branch:
 
 ```bash
+git fetch origin     # the merge-base below must be computed against the current main
 gh pr view <number> --json body -q .body \
   | python3 -m qualification.gate verify-evidence --base "$(git merge-base origin/main HEAD)" -
 ```
@@ -175,8 +176,11 @@ It also checks that acq's sandbox record declares the mount (`ro_host_config`, w
 acq's own fail-closed gate keys on), and runs the committed canary. The canary shows,
 in a sandbox of its own, that this msb keeps a `:ro` volume read-only even when the
 guest tries to remount it read-write; the cell oracle does not attempt a remount in its
-own guest. Canary exit `1` fails the cell; any other non-zero exit, a timeout, or no
-usable `bash` makes it `BLOCKED`. On Windows the WSL launcher (`System32\bash.exe`,
+own guest. Canary exit `1` together with its `RESULT FAIL` line fails the cell; exit
+`0` counts only with its `RESULT PASS` line; anything else, a timeout, or no usable
+`bash` makes it `BLOCKED`. The canary's sandbox is given this run's nonce name
+(`acq-qual-ro-<nonce>`, via `QUALIFY_SANDBOX_NAME`), and teardown removes it too, in
+case the canary was stopped before its own cleanup ran. On Windows the WSL launcher (`System32\bash.exe`,
 and the Store alias) is never used, since it would run the canary inside a WSL
 distribution; Git Bash is looked for in its install locations, then any other `bash`
 on the absolute `PATH` entries. The canary always uses the default image: the oracle
@@ -230,11 +234,15 @@ those ending in `_TIMEOUT`, such as `ACQ_MSB_READY_TIMEOUT`, which only tune tim
 
 **Aborts.** When a run outlives the harness's `--timeout`, the harness sends SIGTERM
 (CTRL_BREAK on Windows), waits a grace period (a quarter of the timeout, at most 300
-seconds) and only then kills it. The oracle turns the signal into a normal exit and
-tears down. It is also given a deadline (`ACQ_QUALIFY_DEADLINE`) that ends one grace
+seconds) and only then kills it; Ctrl+C on the harness is passed on the same way. The
+oracle turns the signal into a normal exit and tears down. The oracle runs each acq
+call and the canary in a process group of its own and stops a group the same way
+(SIGTERM, a grace period, then kill), so an interrupted `msb create` or canary run
+cleans up instead of leaving a sandbox behind. It is also given a deadline (`ACQ_QUALIFY_DEADLINE`) that ends one grace
 period before the timeout; at the deadline it stops starting steps, tears down and
-reports `BLOCKED`. Teardown always tries to remove the nonce-named sandbox, secret
-and provider binding, whether or not the run saw them created.
+reports `BLOCKED`; a step the deadline cut short is `BLOCKED` too, not `FAIL`.
+Teardown always tries to remove the nonce-named sandbox, canary sandbox, secret and
+provider binding, whether or not the run saw them created.
 
 ```bash
 V="$(sbx version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)"

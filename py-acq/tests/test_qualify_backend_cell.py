@@ -169,6 +169,7 @@ class FakeRaw:
 
     def __init__(self, names):
         self.removed: list[str] = []
+        self.msb_removed: list[str] = []
         self.table = [
             {"scope": "global", "env": "KEY", "placeholder": "sbx-cs-operator", "secret": "<masked>"},
             {"scope": "global", "env": "OPENCODE_GO_API_KEY", "placeholder": "sbx-cs-op2", "secret": "<masked>"},
@@ -182,15 +183,24 @@ class FakeRaw:
         if argv[:4] == ["sbx", "secret", "rm", "--placeholder"]:
             self.removed.append(argv[4])
             return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if argv[:3] == ["msb", "remove", "--force"]:
+            self.msb_removed.append(argv[3])
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
         raise AssertionError(f"unexpected raw call {argv}")
 
 
+CANARY_LINES = {0: "RESULT: PASS\nRESULT PASS msb=0.7.7 image=i host=h rev=r dir=d\n",
+                1: "RESULT: FAIL\nRESULT FAIL msb=0.7.7 image=i host=h rev=r dir=d\n"}
+
+
 def cell(tmp_path, backend="msb", canary=0, deadline=None, **knobs):
+    """``canary`` is an exit status (0 and 1 come with the canary's RESULT line) or ``(status, stdout)``."""
     names = qbc.make_names(backend, NONCE)
     state = tmp_path / "state"
     fake = FakeBackend(backend, names, state, **knobs)
     raw = FakeRaw(names)
-    c = qbc.Cell(backend, names, str(tmp_path / "ws"), state, fake, raw, lambda timeout: canary,
+    result = canary if isinstance(canary, tuple) else (canary, CANARY_LINES.get(canary, ""))
+    c = qbc.Cell(backend, names, str(tmp_path / "ws"), state, fake, raw, lambda timeout: result,
                  *([deadline] if deadline is not None else []))
     return c, fake, raw
 
@@ -216,6 +226,7 @@ def test_a_compliant_backend_passes(tmp_path, backend, capsys):
     if backend == "sbx":
         assert raw.removed == ["sbx-cs-ours"]  # never the operator's KEY or OPENCODE_GO_API_KEY secret
     else:
+        assert raw.msb_removed == [c.names.canary_sandbox]  # in case the canary was killed before cleanup
         secret_set = next(call for call in fake.calls if call[2:4] == ["secret", "set"])
         assert secret_set[secret_set.index("--host") + 1] == "qualify.invalid"
         assert secret_set[secret_set.index("--env") + 1] == c.names.secret_env
@@ -286,8 +297,11 @@ def test_a_backend_that_only_echoes_the_command_cannot_pass(tmp_path):
     assert not any(call[2] == "exec" and "kit=" in call[-1] for call in fake.calls)  # the run stopped
 
 
-@pytest.mark.parametrize("status", [None, 2, 3, 127, -9, 130])
-def test_only_canary_exit_1_is_a_failure_anything_else_blocks(tmp_path, status):
+@pytest.mark.parametrize("status", [None, 2, 3, 127, -9, 130, (1, ""), (1, "RESULT PASS msb=x\n"),
+                                    (0, ""), (0, "RESULT FAIL msb=x\n"), (None, "RESULT FAIL msb=x\n")])
+def test_only_canary_exit_1_with_its_result_fail_line_is_a_failure(tmp_path, status):
+    # A FAIL needs the canary's own verdict line, so a bash that died with status 1
+    # (a crash, a missing tool) is not reported as msb failing to enforce :ro.
     c, _fake, _raw = cell(tmp_path, "msb", status)
     assert c.run() == 2
     assert c.failures == [] and c.blocked == ["ro-mount canary"]
@@ -450,3 +464,115 @@ def test_sigterm_mid_create_still_tears_the_sandbox_down(tmp_path):
     catalog = home / ".microsandbox" / "catalog.json"
     assert sandbox not in (catalog.read_text() if catalog.exists() else "")
     assert list(tmp.iterdir()) == []  # the private state tree is gone too
+
+
+
+def test_canary_env_pins_the_image_and_names_the_sandbox_after_the_run(tmp_path):
+    names = qbc.make_names("msb", NONCE)
+    env = qbc.canary_env({"PATH": "/usr/bin", "QUALIFY_IMAGE": "evil:latest", "EXPECT_SHA": "x",
+                          "QUALIFY_SANDBOX_NAME": "acq-qual-ro-someone-elses", "STEP_TIMEOUT": "900"}, names)
+    assert env == {"PATH": "/usr/bin", "STEP_TIMEOUT": "900", "QUALIFY_SANDBOX_NAME": f"acq-qual-ro-{NONCE}"}
+
+
+def test_a_step_cut_short_by_the_deadline_is_blocked_not_failed(tmp_path):
+    import time
+
+    c, fake, _raw = cell(tmp_path, "msb", deadline=time.time() + 600)
+    real = fake.__call__
+
+    def slow_create(argv, *, stdin=None, timeout=None):
+        if argv[2] == "create":
+            c.deadline = time.time() - 1  # the step used up the budget and came back with nothing
+            return None
+        return real(argv, stdin=stdin, timeout=timeout)
+
+    c.acq = slow_create
+    assert c.run() == 2
+    assert c.failures == [] and c.blocked == ["deadline"]
+
+
+def test_a_canary_cut_short_by_the_deadline_is_blocked_not_failed(tmp_path):
+    import time
+
+    c, _fake, _raw = cell(tmp_path, "msb", deadline=time.time() + 600)
+
+    def canary(timeout):
+        c.deadline = time.time() - 1
+        return None, ""
+
+    c.canary = canary
+    assert c.run() == 2
+    assert c.failures == [] and c.blocked == ["deadline"]
+
+
+# ---- run_process: a stopped subprocess's whole group gets SIGTERM, then a grace ----
+
+
+def _trapping_script(tmp_path):
+    """A shell that starts a grandchild and records whether its TERM trap ran."""
+    script = tmp_path / "child.sh"
+    script.write_text(
+        "#!/bin/sh\n"
+        f"trap 'echo cleaned > {tmp_path}/trap; exit 143' TERM\n"
+        f"sleep 60 & echo $! > {tmp_path}/grandchild\n"
+        "wait\n"
+    )
+    return script
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    # a zombie still answers kill(0); it is not running
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().split()[2] != "Z"
+    except OSError:
+        return True
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
+def test_run_process_stops_the_whole_group_on_timeout_and_lets_its_cleanup_run(tmp_path):
+    import time
+
+    script = _trapping_script(tmp_path)
+    assert qbc.run_process(["/bin/sh", str(script)], env=dict(os.environ), timeout=1.0, grace=10.0) is None
+    assert (tmp_path / "trap").read_text().strip() == "cleaned"  # not SIGKILLed: its trap ran
+    pid = int((tmp_path / "grandchild").read_text())
+    for _ in range(50):
+        if not _alive(pid):
+            break
+        time.sleep(0.1)
+    assert not _alive(pid)  # the grandchild (think: msb create) was stopped too
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+def test_run_process_stops_the_group_when_the_oracle_is_interrupted(tmp_path):
+    # SIGTERM to the oracle (or Ctrl+C) arrives while it waits on a child: the child
+    # group still gets SIGTERM and its grace before the oracle tears down.
+    import signal
+
+    script = _trapping_script(tmp_path)
+
+    def interrupt(*_):
+        raise SystemExit(143)
+
+    old = signal.signal(signal.SIGALRM, interrupt)
+    signal.setitimer(signal.ITIMER_REAL, 0.5)
+    try:
+        with pytest.raises(SystemExit):
+            qbc.run_process(["/bin/sh", str(script)], env=dict(os.environ), timeout=60.0, grace=10.0)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+    assert (tmp_path / "trap").read_text().strip() == "cleaned"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+def test_run_process_kills_a_group_that_ignores_sigterm_after_the_grace(tmp_path):
+    import time
+
+    started = time.monotonic()
+    proc = qbc.run_process(["/bin/sh", "-c", "trap '' TERM; sleep 60"], env=dict(os.environ), timeout=0.5, grace=0.5)
+    assert proc is None and time.monotonic() - started < 30
