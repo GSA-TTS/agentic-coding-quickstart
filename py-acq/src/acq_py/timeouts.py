@@ -22,7 +22,8 @@ def env_seconds(name: str, default: float) -> float:
     """Return ``$name`` as seconds, or ``default`` when it is unset or invalid.
 
     Valid means a finite float that is ``>= 0``. An invalid value is reported on
-    stderr (naming the variable, not echoing anything else) and ignored.
+    stderr, naming the variable and quoting the rejected value (a timeout, never
+    a secret), and ignored.
     """
     raw = os.environ.get(name)
     if raw is None or raw.strip() == "":

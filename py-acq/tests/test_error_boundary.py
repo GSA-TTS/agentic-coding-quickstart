@@ -38,10 +38,13 @@ def _env(monkeypatch, tmp_path, *, catalog=None):
 
 
 def _invoke(capsys, *argv):
+    """Run ``cli.main``; under ``--json`` stdout must hold at most ONE document."""
     rc = cli.main(list(argv))
     captured = capsys.readouterr()
     out = captured.out.strip()
-    doc = json.loads(out.splitlines()[-1]) if out else None
+    lines = out.splitlines()
+    assert len(lines) <= 1, f"expected one JSON document on stdout, got {len(lines)}: {out!r}"
+    doc = json.loads(lines[0]) if lines else None
     return rc, doc, captured.err
 
 
@@ -277,3 +280,45 @@ def test_boundary_keeps_secret_has_silent(monkeypatch, tmp_path, capsys):
     assert rc == errors.EXIT_FAILURE
     assert captured.out == ""
     assert "could not be run" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# stdout carries exactly one document even when run's launch fails late.
+# ---------------------------------------------------------------------------
+
+def _launch_cannot_start(*_args, **_kwargs):
+    raise msb.cli_unavailable()
+
+
+def test_run_create_then_launch_failure_keeps_one_document(monkeypatch, tmp_path, capsys):
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setattr(msb, "launch", _launch_cannot_start)
+    rc, doc, err = _invoke(capsys, "--backend", "msb", "--json", "run", "shell", str(ws), "--name", "box")
+    assert rc == errors.EXIT_FAILURE
+    # The one document is run's success envelope; the launch failure is stderr.
+    assert doc["command"] == "run" and doc["data"]["action"] == "created"
+    assert "could not be run" in err
+
+
+def test_run_reattach_by_name_launch_failure_keeps_one_document(monkeypatch, tmp_path, capsys):
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    _env(monkeypatch, tmp_path)
+    assert _invoke(capsys, "--backend", "msb", "--json", "create", "shell", str(ws), "--name", "box")[0] == 0
+    monkeypatch.setattr(msb, "launch", _launch_cannot_start)
+    rc, doc, err = _invoke(capsys, "--backend", "msb", "--json", "run", "box")
+    assert rc == errors.EXIT_FAILURE
+    assert doc["command"] == "run" and doc["data"]["action"] == "reattached"
+    assert "could not be run" in err
+
+
+def test_secret_has_user_dirs_refusal_stays_off_stdout(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_STATE_DIR", "relative/state")
+    rc = cli.main(["--backend", "msb", "--json", "secret", "has", "-g", "usai"])
+    captured = capsys.readouterr()
+    assert rc == errors.EXIT_FAILURE
+    assert captured.out == ""
+    assert captured.err.strip() != ""

@@ -549,7 +549,9 @@ def _dispatch(parser: _Parser, parsed, emit_json: bool, backend_override: str | 
         return run_doctor(emit_json, parsed.name)
 
     if parsed.command not in ("help", None):
-        dirs_check = _user_dirs_pre_step(emit_json, _command_label(parsed))
+        label = _command_label(parsed)
+        # `secret has` is a silent predicate: its refusal goes to stderr only.
+        dirs_check = _user_dirs_pre_step(emit_json and label != "secret has", label)
         if dirs_check is not None:
             return dirs_check
 
