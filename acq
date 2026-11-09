@@ -776,10 +776,24 @@ unset _acq_impl
 # waiting out the rest of the tick (up to one second). `tick` still holds the
 # child's PID for a moment after `wait` has reaped it, and USR1 can be handled in
 # exactly that window, so the exit trap never signals the saved PID on trust: it
-# first asks ps whether that PID is a `sleep` whose parent is this guardian, and
-# signals nothing otherwise. A stale PID that has been reused by another process
-# has a different parent and is left alone. A second USR1 is ignored once cleanup
-# has started so it cannot cut the exit trap short.
+# first asks proc_info whether that PID is a `sleep` whose parent is this
+# guardian, and signals nothing otherwise. A stale PID that has been reused by
+# another process has a different parent and is left alone. A second USR1 is
+# ignored once cleanup has started so it cannot cut the exit trap short.
+# Parent and command lookups go through proc_info. Git Bash (MSYS2/Cygwin) ships a
+# ps without -o, so there they come from the per-process `ppid` and `exename`
+# files that its /proc provides; without this the guardian's first lookup failed,
+# it exited at once and its EXIT trap deleted the root out from under every later
+# kit fetch. Linux /proc has no `ppid` file and macOS has no /proc, so both keep
+# using ps -o. Any lookup that fails yields no answer, so nothing is signalled.
+# The two files are separate reads, so `exename` is read first and `ppid` last:
+# if the PID is reused between them, the parent reported is the new process's,
+# and it can only be this guardian if the guardian forked that process itself.
+# An owner killed outside Cygwin (taskkill /F) stays the recorded parent there,
+# so each tick also requires the owner to still answer kill -0. If Cygwin reuses
+# the dead owner's PID before the next tick (its PIDs only wrap after a long
+# run), the guardian and its private root would stay until that process exits.
+# That is a leak only: the guardian never signals anything based on the owner.
 _acq_kit_fetch_cleanup() {
   if [ -n "${_ACQ_KIT_FETCH_GUARDIAN:-}" ]; then
     kill -USR1 "$_ACQ_KIT_FETCH_GUARDIAN" 2>/dev/null || true
@@ -801,11 +815,26 @@ _acq_kit_fetch_start() {
     trap '' HUP INT TERM
     exec sh -c '
       owner=$1 root=$2 tick=""
+      proc_info() {
+        if [ -r "/proc/$1/ppid" ]; then
+          pp="" exe=""
+          if [ "$#" -gt 1 ]; then
+            { read -r exe || [ -n "$exe" ]; } 2>/dev/null < "/proc/$1/exename" || return 1
+          fi
+          { read -r pp || [ -n "$pp" ]; } 2>/dev/null < "/proc/$1/ppid" || return 1
+          [ "$#" -gt 1 ] || { printf "%s\n" "$pp"; return 0; }
+          printf "%s %s\n" "$pp" "${exe##*/}"
+        elif [ "$#" -gt 1 ]; then
+          ps -o ppid= -o comm= -p "$1"
+        else
+          ps -o ppid= -p "$1"
+        fi
+      }
       stop_tick() {
         trap "" USR1
         set -f
         [ -n "$tick" ] || return 0
-        info=$(ps -o ppid= -o comm= -p "$tick" 2>/dev/null) || info=""
+        info=$(proc_info "$tick" comm 2>/dev/null) || info=""
         set -- $info
         if [ "$#" -eq 2 ] && [ "$1" = "$$" ]; then
           case "$2" in sleep|*/sleep) kill -s KILL "$tick" 2>/dev/null || : ;; esac
@@ -816,8 +845,9 @@ _acq_kit_fetch_start() {
       trap "exit 0" USR1
       : > "$root/ready" || exit 1
       while [ -d "$root" ]; do
-        parent=$(ps -o ppid= -p "$$") || exit 1
+        parent=$(proc_info "$$") || exit 1
         [ "$(printf "%s" "$parent" | tr -d "[:space:]")" = "$owner" ] || exit 0
+        kill -0 "$owner" 2>/dev/null || exit 0
         sleep 1 & tick=$!
         wait "$tick" || :
         tick=""

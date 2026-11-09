@@ -4568,7 +4568,13 @@ _acq_provider_input_guardian_start() {
     done
   ' sh "$_ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN" &
   _ACQ_PROVIDER_INPUT_GUARDIAN_PID=$!
-  _ACQ_PROVIDER_INPUT_TRANSACTION_PID=$(ps -o ppid= -p "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID" 2>/dev/null | tr -d '[:space:]')
+  # Git Bash (MSYS2/Cygwin) ps has no -o, but its /proc has a per-process ppid
+  # file. Linux /proc has no such file and macOS has no /proc, so both use ps -o.
+  if [ -r "/proc/$_ACQ_PROVIDER_INPUT_GUARDIAN_PID/ppid" ]; then
+    _ACQ_PROVIDER_INPUT_TRANSACTION_PID=$(tr -d '[:space:]' 2>/dev/null < "/proc/$_ACQ_PROVIDER_INPUT_GUARDIAN_PID/ppid")
+  else
+    _ACQ_PROVIDER_INPUT_TRANSACTION_PID=$(ps -o ppid= -p "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID" 2>/dev/null | tr -d '[:space:]')
+  fi
   case "$_ACQ_PROVIDER_INPUT_TRANSACTION_PID" in ""|*[!0-9]*) _acq_provider_input_guardian_stop; return 1 ;; esac
   export _ACQ_PROVIDER_INPUT_GUARDIAN_PID
   export _ACQ_PROVIDER_INPUT_TRANSACTION_PID
@@ -4668,10 +4674,24 @@ _acq_provider_input_signal_exit() {
   exit 1
 }
 
+# Start time of a live PID, so a lock owner whose PID was reused reads as stale.
+# Git Bash (MSYS2/Cygwin) ps has no -o; there the /proc/<pid> directory's mtime
+# is the process start time in whole seconds (as ps -o lstart is elsewhere) and,
+# unlike the starttime field of /proc/<pid>/stat, it is kept across exec, which
+# matters because the guardian is a forked shell that then execs sh. The ppid
+# file identifies that procfs: Linux /proc has none and macOS has no /proc, so
+# both keep using ps -o lstart. Whole-second resolution can only cost liveness:
+# a PID reused within the same second still matches, so the waiter keeps
+# retrying instead of recovering the lock. It can never make a held lock look
+# stale, because a live owner's start time never changes.
 _acq_provider_input_process_identity() {
   local pid="${1:-}"
   case "$pid" in ""|*[!0-9]*) return 1 ;; esac
-  ps -o lstart= -p "$pid" 2>/dev/null | tr -d '[:space:]' | grep .
+  if [ -r "/proc/$pid/ppid" ]; then
+    stat -c %Y "/proc/$pid" 2>/dev/null | tr -d '[:space:]' | grep .
+  else
+    ps -o lstart= -p "$pid" 2>/dev/null | tr -d '[:space:]' | grep .
+  fi
 }
 
 acq_provider_input_lock_release() {
