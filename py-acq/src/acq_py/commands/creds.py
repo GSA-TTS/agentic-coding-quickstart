@@ -563,18 +563,21 @@ def run_github_scope(parsed, emit_json: bool, backend: str) -> int:
 
 
 _ROTATE = "usai-rotate-api-key"
-_ROTATE_RETRY = "re-run 'acq usai-rotate-api-key' with the same key to retry"
+_ROTATE_RETRY = "re-run 'acq usai-rotate-api-key' with the same key to retry the sandboxes that were not re-fed"
 
 
-def _rotation_backends(backend: str) -> list[str]:
-    """The active backend, then the other one when it is installed.
+def _rotation_backends(backend: str) -> tuple[list[str], list[dict]]:
+    """``(names, below_floor)``: the active backend, then the other one when it
+    is installed and meets acq's version floor.
 
     The acq store is shared, so a sandbox on the other backend uses the same
-    key and is re-fed too (Bash ``acq_propagate_usai_rotation``). An installed
-    backend below acq's version floor is skipped with a warning: acq drives no
-    sandbox there.
+    key and is re-fed too (Bash ``acq_propagate_usai_rotation``). acq drives no
+    sandbox on an installed backend below its floor, so that backend gets a
+    result of its own: not re-fed when it holds (or may hold) the key, else
+    skipped.
     """
     names = [backend]
+    below: list[dict] = []
     for other in backends.BACKEND_ORDER:
         spec = backends.BACKENDS[other]
         if other == backend or not backends.detect(spec).installed:
@@ -582,54 +585,91 @@ def _rotation_backends(backend: str) -> list[str]:
         problem = backends.check_version(spec)
         if problem is None:
             names.append(other)
+            continue
+        result: dict = {"backend": other, "refed": [], "kept_own": [], "not_refed": []}
+        holds = common._adapter(other).rotate_holds_key()
+        if holds is False:
+            result["skipped"] = problem.message
         else:
-            print(f"acq: warning: {other} sandboxes were not re-fed: {problem.message}", file=sys.stderr)
-    return names
+            result["not_refed"] = [f"any sandbox holding the key ({problem.message})"]
+            result["remediation"] = problem.remediation
+        below.append(result)
+    return names, below
 
 
-def _rotate_result(results: list[dict], emit_json: bool) -> int:
-    data = {
-        "provider": provider_creds.USAI_PROVIDER_ID,
-        "key_env": provider_creds.USAI_PROVIDER_KEY_ENV,
-        "rotated": True,
-        "backends": results,
-    }
-    if emit_json:
-        print(json.dumps(envelope.success(_ROTATE, data)))
-        return errors.EXIT_SUCCESS
-    print("rotated the USAi API key (stored in the acq secret store).")
+def _rotate_lines(results: list[dict]) -> list[str]:
+    lines = []
     for result in results:
-        print(f"  {result['backend']}: re-fed: {', '.join(result['refed']) or 'none'}")
+        name = result["backend"]
+        lines.append(f"  {name}: re-fed: {', '.join(result['refed']) or 'none'}")
         if result["kept_own"]:
-            print(f"  {result['backend']}: kept their own usai key: {', '.join(result['kept_own'])}")
-    return errors.EXIT_SUCCESS
+            lines.append(f"  {name}: kept their own usai key: {', '.join(result['kept_own'])}")
+        if result.get("not_refed"):
+            lines.append(f"  {name}: NOT re-fed: {', '.join(result['not_refed'])}")
+        if result.get("skipped"):
+            lines.append(f"  {name}: skipped (holds no usai key): {result['skipped']}")
+        if name == "msb":
+            lines.append("  msb: stopped sandboxes are not re-fed; 'acq start' gives them the stored key")
+    return lines
 
 
-def _rotate_locked(backend: str, value: str, emit_json: bool) -> int:
-    """Rotation under the usai provider lock: preflight, store, re-feed."""
-    try:
-        common._adapter(backend).rotate_preflight()
-        secretstore.store(secretstore.key_for(provider_creds.USAI_PROVIDER_ID), value)
-    except common._ADAPTER_ERRORS as exc:
-        return common._operational_failure(_ROTATE, exc.code, exc.message, exc.remediation, emit_json)
+def _rotate_report(results: list[dict], emit_json: bool) -> int:
+    """Success when every backend re-fed everything, else exit 1 naming what
+    was not re-fed. Either way ``backends`` reports each backend's outcome."""
+    missed = [r for r in results if r.get("not_refed")]
+    public = [{k: v for k, v in r.items() if k != "remediation"} for r in results]
+    if not missed:
+        data = {
+            "provider": provider_creds.USAI_PROVIDER_ID,
+            "key_env": provider_creds.USAI_PROVIDER_KEY_ENV,
+            "rotated": True,
+            "backends": public,
+        }
+        if emit_json:
+            print(json.dumps(envelope.success(_ROTATE, data)))
+        else:
+            print("rotated the USAi API key (stored in the acq secret store).")
+            print("\n".join(_rotate_lines(results)))
+        return errors.EXIT_SUCCESS
+    detail = "; ".join(
+        f"{r['backend']}: not re-fed: {', '.join(r['not_refed'])}" + (f"; re-fed: {', '.join(r['refed'])}" if r["refed"] else "")
+        for r in missed
+    )
+    message = f"stored the new USAi key in the acq secret store, but not every sandbox received it ({detail})"
+    remediation = next((r["remediation"] for r in missed if r.get("remediation")), None) or _ROTATE_RETRY
+    if emit_json:
+        doc = envelope.error(_ROTATE, errors.FAILURE, message, remediation=remediation)
+        doc["error"]["backends"] = public
+        print(json.dumps(doc))
+    else:
+        print(f"acq: {message}", file=sys.stderr)
+        print("\n".join(_rotate_lines(results)), file=sys.stderr)
+        print(remediation, file=sys.stderr)
+    return errors.EXIT_FAILURE
+
+
+def _rotate_refeed_all(names: list[str], backend: str, value: str) -> list[dict]:
     results: list[dict] = []
-    failures: list = []
-    for name in _rotation_backends(backend):
+    for name in names:
         try:
             results.append(common._adapter(name).rotate_refeed(value, primary=name == backend))
         except common._ADAPTER_ERRORS as exc:
-            failures.append((name, exc))
-    if failures:
-        detail = "; ".join(f"{name}: {exc.message}" for name, exc in failures)
-        first = failures[0][1]
-        return common._operational_failure(
-            _ROTATE,
-            first.code,
-            f"stored the new USAi key in the acq secret store, but not every sandbox received it ({detail})",
-            first.remediation or _ROTATE_RETRY,
-            emit_json,
-        )
-    return _rotate_result(results, emit_json)
+            results.append({"backend": name, "refed": [], "kept_own": [], "not_refed": [f"every sandbox ({exc.message})"],
+                            "remediation": exc.remediation})
+    return results
+
+
+def _rotate_locked(backend: str, value: str, emit_json: bool) -> int:
+    """Rotation under the usai provider lock: preflight every backend that
+    will be re-fed, store, then re-feed."""
+    try:
+        names, below = _rotation_backends(backend)
+        for name in names:
+            common._adapter(name).rotate_preflight(primary=name == backend)
+        secretstore.store(secretstore.key_for(provider_creds.USAI_PROVIDER_ID), value)
+    except common._ADAPTER_ERRORS as exc:
+        return common._operational_failure(_ROTATE, exc.code, exc.message, exc.remediation, emit_json)
+    return _rotate_report(_rotate_refeed_all(names, backend, value) + below, emit_json)
 
 
 def run_usai_rotate_api_key(emit_json: bool, backend: str) -> int:
@@ -638,14 +678,15 @@ def run_usai_rotate_api_key(emit_json: bool, backend: str) -> int:
     Reads the new key on stdin only (silently, after a prompt, on a terminal).
     Rotation is a store write plus a re-feed; acq does not call the provider
     (as in Bash, the key is checked against the real sandbox on the next
-    attach). Under the usai provider lock, the active backend's preflight first
-    refuses, with nothing changed, a rotation it could not deliver. The key then
-    goes to the acq secret store, the source of truth on both backends, and
-    every sandbox that uses it is re-fed: on the active backend and, when it is
-    installed, the other one. If any sandbox did not receive the key the
-    command exits 1 naming it (and the ones that did); the store keeps the new
-    key, so re-running with the same key retries. The key never appears in
-    argv, output or errors.
+    attach). Under the usai provider lock, each backend to be re-fed (the
+    active one and, when it is installed, the other) first refuses, with
+    nothing changed, a rotation it could not deliver. The key then goes to the
+    acq secret store, the source of truth on both backends, and every sandbox
+    that uses it is re-fed. If any sandbox did not receive the key (or an
+    installed backend below acq's floor may hold it) the command exits 1
+    naming it, and ``backends`` reports each backend's outcome; the store keeps
+    the new key, so re-running with the same key retries. The key never
+    appears in argv, output or errors.
     """
     value = common._read_secret_value("Enter the new USAi API key: ")
     problem = None if value.strip() else "no new USAi key provided on stdin"

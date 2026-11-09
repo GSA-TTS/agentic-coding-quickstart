@@ -59,6 +59,12 @@ CUSTOM_SECRETS_ENV = "ACQ_SBX_STUB_CUSTOM_SECRETS"  # nosec B105 # an env var na
 # set-custom`` fails, so a vector can exercise a partial rotation.
 FAIL_CUSTOM_SCOPES_ENV = "ACQ_SBX_STUB_FAIL_CUSTOM_SCOPES"
 
+# How ``set-custom --placeholder P`` treats an existing entry, to model an sbx
+# that does not keep the placeholder: unset updates it in place (what rotation
+# relies on), ``mint`` replaces its placeholder with a new one, and
+# ``duplicate`` adds a second entry with a new placeholder.
+PLACEHOLDER_MODE_ENV = "ACQ_SBX_STUB_PLACEHOLDER_MODE"
+
 # ``exec``/``cp`` markers to simulate a real agent writing to stdout/stderr.
 EXEC_MARKER = "[stub sbx exec]"
 COPY_MARKER = "[stub sbx copy]"
@@ -362,9 +368,14 @@ def _secret_set_custom(rest: list[str]) -> int:
     entries = _load_custom()
     placeholder = _arg_after(rest, "--placeholder")
     same = [e for e in entries if e["scope"] == scope and e["env"] == env]
+    mode = os.environ.get(PLACEHOLDER_MODE_ENV, "")
     if placeholder is not None and same and all(e["placeholder"] == placeholder for e in same):
-        for entry in same:
+        minted = f"{placeholder}-minted"
+        if mode == "duplicate":
+            entries.append({"scope": scope, "env": env, "placeholder": minted, "targets": hosts})
+        for entry in [] if mode == "duplicate" else same:
             entry["targets"] = hosts  # updated in place: the placeholder is kept
+            entry["placeholder"] = minted if mode == "mint" else placeholder
         _save_custom(entries)
         return 0
     if same:

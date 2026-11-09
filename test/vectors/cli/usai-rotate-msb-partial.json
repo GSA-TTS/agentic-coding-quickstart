@@ -57,7 +57,19 @@
         "error": {
           "code": "failure",
           "message": "stored the new USAi key in the acq secret store, but not every sandbox received it (msb: not re-fed: rot-b (msb modify failed); re-fed: rot-a)",
-          "remediation": "re-run 'acq usai-rotate-api-key' with the same key to retry them, or recreate them"
+          "remediation": "re-run 'acq usai-rotate-api-key' with the same key to retry the sandboxes that were not re-fed",
+          "backends": [
+            {
+              "backend": "msb",
+              "refed": [
+                "rot-a"
+              ],
+              "kept_own": [],
+              "not_refed": [
+                "rot-b (msb modify failed)"
+              ]
+            }
+          ]
         }
       },
       "normalize": []

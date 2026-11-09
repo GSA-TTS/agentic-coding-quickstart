@@ -1693,8 +1693,9 @@ def github_scope(sandbox: str, value: str) -> None:
 # reads the key back from the store exactly as ``secret set -g`` re-feeds it.
 
 
-def rotate_preflight() -> None:
+def rotate_preflight(*, primary: bool = True) -> None:
     """Refuse a rotation msb could never deliver, before anything is stored."""
+    del primary  # the same on msb whether it is the active backend or not
     if service_binding(provider_creds.USAI_PROVIDER_ID) is None:
         raise MsbError(
             errors.VALIDATION_FAILED,
@@ -1703,16 +1704,39 @@ def rotate_preflight() -> None:
         )
 
 
+def rotate_holds_key() -> bool | None:
+    """Whether any sandbox acq recorded holds the USAi key, read from acq's own
+    binding records without running msb (which may be below acq's floor).
+    None when a record cannot be read."""
+    directory = state.state_dir() / "msb-secret-bindings"
+    try:
+        records = sorted(directory.glob("*.json"))
+        docs = [json.loads(path.read_text(encoding="utf-8")) for path in records]
+    except (OSError, ValueError):
+        return None
+    for doc in docs:
+        bindings = doc.get("bindings") if isinstance(doc, dict) else None
+        if not isinstance(bindings, dict):
+            return None
+        if any(isinstance(e, dict) and e.get("service") == provider_creds.USAI_PROVIDER_ID for e in bindings.values()):
+            return True
+    return False
+
+
 def _rotate_one(service: str, sandbox: str) -> str | None:
     """Re-feed the stored global key to one running sandbox.
 
-    Returns None when it was re-fed, ``"skipped"`` when the variable is bound
-    there for another service (warned, as :func:`_refeed` does), or the reason
-    it was not re-fed.
+    Returns None when it was re-fed, ``"kept"`` when the sandbox has its own
+    value, ``"skipped"`` when the variable is bound there for another service
+    (warned, as :func:`_refeed` does), or the reason it was not re-fed. Any
+    failure is confined to this sandbox.
     """
-    binding = service_binding(service, sandbox)
-    value = secretstore.resolve(service, sandbox)
+    value = None
     try:
+        if _has_own_value(service, sandbox):
+            return "kept"
+        binding = service_binding(service, sandbox)
+        value = secretstore.resolve(service, sandbox)
         if binding is None or not value:
             return "no injectable value"
         rec = held_read(sandbox)
@@ -1726,7 +1750,7 @@ def _rotate_one(service: str, sandbox: str) -> str | None:
             return "skipped"
         if not _put(rec, BoundSecret(service, binding, False), value):
             return "msb modify failed"
-    except MsbError as exc:
+    except (MsbError, secretstore.SecretStoreError) as exc:
         return exc.message
     finally:
         value = None
@@ -1737,32 +1761,24 @@ def rotate_refeed(value: str, *, primary: bool = True) -> dict:
     """Push the stored global USAi key to every running sandbox.
 
     ``value`` is not used: each sandbox gets the key read back from the acq
-    store, and a sandbox with its own ``usai`` value keeps it (reported in
-    ``kept_own``). ``primary`` makes no difference on msb, whose re-feed never
-    creates anything beyond the bindings ``secret set -g usai`` would. Stopped
-    sandboxes are not re-fed. Raises :class:`MsbError` naming every running
-    sandbox that did not receive the key; the ones that did are named too, and
-    re-running the rotation retries the rest.
+    store, and a sandbox with its own ``usai`` value keeps it (``kept_own``).
+    ``primary`` makes no difference on msb, whose re-feed never creates
+    anything beyond the bindings ``secret set -g usai`` would. Stopped
+    sandboxes are not re-fed (``acq start`` passes them the stored key).
+    Returns ``{backend, refed, kept_own, not_refed}``; a sandbox that did not
+    receive the key is listed in ``not_refed`` with the reason, and the rest
+    are still re-fed. Raises :class:`MsbError` only when the running sandboxes
+    cannot be listed.
     """
     del value, primary
     service = provider_creds.USAI_PROVIDER_ID
-    refed: list[str] = []
-    kept: list[str] = []
-    failed: list[str] = []
+    out: dict = {"backend": "msb", "refed": [], "kept_own": [], "not_refed": []}
     for sandbox in [] if _live_refeed_off() else _running_targets(secretstore.GLOBAL):
-        if _has_own_value(service, sandbox):
-            kept.append(sandbox)
-            continue
         problem = _rotate_one(service, sandbox)
         if problem is None:
-            refed.append(sandbox)
+            out["refed"].append(sandbox)
+        elif problem == "kept":
+            out["kept_own"].append(sandbox)
         elif problem != "skipped":
-            failed.append(f"{sandbox} ({problem})")
-    if failed:
-        done = f"; re-fed: {', '.join(refed)}" if refed else ""
-        raise MsbError(
-            errors.FAILURE,
-            f"not re-fed: {', '.join(failed)}{done}",
-            "re-run 'acq usai-rotate-api-key' with the same key to retry them, or recreate them",
-        )
-    return {"backend": "msb", "refed": refed, "kept_own": kept}
+            out["not_refed"].append(f"{sandbox} ({problem})")
+    return out
