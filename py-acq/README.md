@@ -56,7 +56,11 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
 
 ## The CLI (foundation surface)
 
-* `acq-py version` — human version/identity output (ADR-0042m).
+* `acq-py version` — human version/identity output (ADR-0042m): the acq
+  version and source revision, the active backend (resolved as for every other
+  verb, `--backend` included) with its detected version, and the pinned
+  control-plane ref. Read-only: it never applies the version floor, and an
+  unknown backend pinned in config.yaml is a warning.
 * `acq-py doctor` — human diagnostic output (ADR-0038m §doctor): an overall
   `status` plus a check list, each with a stable `id`, `status`, `message`, and
   optional `remediation`. In this slice the checks are `runtime` (managed-runtime

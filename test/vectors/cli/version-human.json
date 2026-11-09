@@ -9,9 +9,11 @@
     "argv": ["{acq}", "version"],
     "env": {
       "ACQ_VERSION": "0.1.0",
-      "ACQ_SOURCE_REVISION": "0000000000000000000000000000000000000000"
+      "ACQ_SOURCE_REVISION": "0000000000000000000000000000000000000000",
+      "ACQ_SBX_INSTALLED": "0",
+      "ACQ_MSB_INSTALLED": "0"
     },
-    "unset": [],
+    "unset": ["ACQ_BACKEND", "ACQ_SBX_BIN", "ACQ_MSB_BIN", "ACQ_SBX_VERSION", "ACQ_MSB_VERSION"],
     "stdin": "",
     "timeout_ms": 5000
   },
