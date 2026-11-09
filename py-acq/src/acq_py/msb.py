@@ -1259,6 +1259,102 @@ def secret_bindings(name: str) -> tuple[list[BoundSecret], dict[str, str]]:
     return planned, env
 
 
+# --- start (resume a stopped sandbox) ---------------------------------------------
+#
+# `msb start` re-reads the `--secret ENV@HOST` bindings the sandbox holds and
+# needs every ENV in its own environment: msb keeps no value across a stop. The
+# values come from the acq store, as at create, and travel only in the child's
+# environment mapping. `secret set` re-feeds running sandboxes only, so once the
+# sandbox runs again :func:`reconcile_bindings` binds what changed meanwhile.
+
+
+def _start_secret_missing(name: str, env: str, service: str) -> MsbError:
+    unreadable = secretstore.unreadable(service, name)
+    return MsbError(
+        errors.SECRET_UNREADABLE if unreadable else errors.SECRET_MISSING,
+        f"sandbox '{name}' binds {env} for '{service}', but no value for '{service}' can be read "
+        "from the acq secret store, so msb cannot start it",
+        f"store it again with 'acq secret set -g {service}' (or 'acq secret set {name} {service}'), then retry",
+    )
+
+
+def _start_env(name: str) -> dict[str, str]:
+    """``{ENV: value}`` for every binding ``msb start`` looks up in its environment.
+
+    A recorded binding gets the value that takes precedence for its service now
+    (the sandbox's own, else the global one). For a sandbox acq has no complete
+    record of, every binding a new sandbox would get is passed as well, as Bash
+    does, since msb may hold any of them. A recorded binding with no readable
+    value raises: msb would refuse to start, and dropping the binding instead
+    could revoke a credential that is only unreadable for now.
+    """
+    rec = held_read(name)
+    out: dict[str, str] = {}
+    if not rec.complete:
+        _planned, out = secret_bindings(name)
+    for env, entry in rec.bindings.items():
+        value = secretstore.resolve(entry["service"], name)
+        if not value:
+            out.clear()
+            raise _start_secret_missing(name, env, entry["service"])
+        out[env] = value
+        value = None
+    return out
+
+
+def start(name: str) -> None:
+    """``msb start NAME`` with the sandbox's bound secrets in the child's environment only.
+
+    Raises :class:`MsbError` when a bound secret has no value or msb fails. The
+    caller then waits for exec-readiness and calls :func:`reconcile_bindings`.
+    """
+    secret_env = _start_env(name)
+    try:
+        proc = _run(["start", name], secret_env=secret_env)
+    finally:
+        secret_env.clear()
+    if proc.returncode != 0:
+        raise MsbError(
+            errors.FAILURE,
+            f"msb start failed for sandbox '{name}'",
+            "check msb logs and retry",
+        )
+
+
+def reconcile_bindings(name: str) -> list[str]:
+    """Bind, in the running sandbox ``name``, what the store gained while it was stopped.
+
+    Each binding a new sandbox would get (:func:`secret_bindings`) that the
+    record does not show is added with ``msb modify`` (:func:`_put`, which first
+    removes a binding it replaces). One whose only change is its scope is just
+    recorded: ``msb start`` already received the value that takes precedence.
+    Nothing is unbound here; that is ``secret rm``'s job. Returns the services
+    that could not be bound.
+    """
+    rec = held_read(name)
+    planned, values = secret_bindings(name)
+    failed: list[str] = []
+    try:
+        for bound in planned:
+            entry = rec.bindings.get(bound.binding.env)
+            if entry == bound.entry():
+                continue
+            if entry is not None and entry["service"] == bound.service and entry["host"] == bound.binding.host:
+                rec.bindings[bound.binding.env] = bound.entry()
+                rec.note(bound.service)
+                rec.save()
+            elif not _put(rec, bound, values[bound.binding.env]):
+                failed.append(bound.service)
+    finally:
+        values.clear()
+    return failed
+
+
+def held_flags(name: str) -> list[str]:
+    """The ``ENV@HOST`` bindings the record shows for ``name`` (no values)."""
+    return sorted(f"{env}@{entry['host']}" for env, entry in held_read(name).bindings.items())
+
+
 # --- secret set ----------------------------------------------------------------
 
 def _env_claim_problem(service: str, env: str, sandbox: str | None) -> str | None:

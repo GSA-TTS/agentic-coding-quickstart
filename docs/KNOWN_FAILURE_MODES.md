@@ -103,8 +103,12 @@ parts of the Bash session differ or are not ported yet:
    or the in-guest bridge, so it passes `SSH_AUTH_SOCK` only when the sandbox's
    host record carries an `ssh_auth_sock` guest path, which no Python create
    writes yet; sandboxes created by Bash keep that path in Bash's host config,
-   which Python does not read. **Unblock trigger:** forwarding is ported, or the
-   Python reader for Bash's state tree lands.
+   which Python does not read. Bash's resume (`acq_backend_start`) also restarts
+   the in-guest bridge, which dies on stop; the Python `acq start`/`acq restart`
+   have no bridge to restart today, so porting forwarding must add that restart
+   to them too (`_start_locked` in `py-acq/src/acq_py/commands/lifecycle.py`).
+   **Unblock trigger:** forwarding is ported, or the Python reader for Bash's
+   state tree lands.
 3. **Guest git config** (Bash `_acq_msb_apply_host_git_global_config`, and sbx's
    git identity kit). Python passes the identity as `GIT_*`/`EMAIL` session
    variables only; it does not write `user.name`/`user.email` into the guest's
