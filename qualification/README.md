@@ -16,7 +16,7 @@ python -m qualification --help
 python -m qualification matrix --json
 python -m qualification run --backend msb --backend-version 0.7.7 \
     --os Linux --os-build 6.1.0 --arch x86_64 --hypervisor native \
-    --image img -- python -c "exit 0"
+    --image img -- python -c "raise SystemExit(0)"
 ```
 
 ## The verbatim `RESULT` signature
@@ -54,8 +54,8 @@ records `BLOCKED`.
 
 ## The matrix
 
-`python -m qualification matrix` reports every platform/backend cell in exactly
-one of three states:
+`python -m qualification matrix` reports every platform/backend cell, reading the
+committed ledger (`--ledger` to point elsewhere), in exactly one of these states:
 
 * `qualified` — a claimed cell holding a green *current* transcript (recorded
   within 90 days, at the backend's current `major.minor`, with no Tier-3 surface
@@ -63,8 +63,12 @@ one of three states:
   this harness's run path, minus the `version`/`doctor` command modules — the
   exact list is `TIER3_SURFACE` in `qualification/matrix.py`; the commit SHA and
   artifact hash are provenance only);
+* `waived` — a claimed cell without one, covered by an unexpired ledger waiver;
 * `unqualified` — a cell that is not claimed (reported honestly, never a pass);
 * `blocked` — a claimed cell without a green current transcript (holds the gate).
+
+These are the release gate's verdicts (`python -m qualification.gate check`), with
+the reason for each one that is not `qualified`.
 
 The claimed cells are (ADR-0044m): msb on Linux x86_64, Linux aarch64, macOS
 arm64, and Windows x64; sbx on Linux x86_64, macOS arm64, and Windows x64.
@@ -86,14 +90,21 @@ refuses a transcript that did not run the committed cell oracle on its own host;
 gate checks each entry against the repository (oracle hash at its revision, host vs
 cell, no duplicate transcripts) but never sees transcripts, so the ledger's admin
 review remains the control against forged evidence. On a pull request CI runs the
-gate from the base branch, so a PR cannot loosen the rules it is judged by. See
+gate from the base branch, so a PR cannot loosen the rules it is judged by. `python -m
+qualification.gate verify-evidence <pr-body>` checks the transcripts a ledger PR
+inlines: each is the file byte for byte, so its SHA-256 is a recorded
+`transcript_sha256`, and it must reproduce its entry. See
 [`docs/howto/qualification.md`](../docs/howto/qualification.md).
 
 ## No secret value
 
 A transcript records hashes, versions, and the command line, plus a SHA-256
 digest of observed output — never the raw output, never an environment dump,
-never a credential. The harness never injects a secret into argv and never
+never a credential, and never a host-local path (the transcript directory is
+written as `<transcript-dir>` and an absolute command-line path keeps only its last
+component, as `<local>/python3`). It is written in one canonical byte form (sorted
+keys, two-space indent, ASCII, LF, one trailing newline), so the published copy is
+the hashed file. The harness never injects a secret into argv and never
 records `os.environ`; a secret an oracle happens to print is reduced to its
 digest before it can reach the transcript.
 
@@ -106,5 +117,6 @@ python -m pytest py-acq/tests -q                                  # pytest runne
 scripts/run-vectors --acq "python -m acq_py"                     # independent Bash runner
 ```
 
-Unit guards live in `py-acq/tests/test_qualification.py`; subprocess-boundary
-evidence lives in `test/vectors/qualification/`.
+Unit guards live in `py-acq/tests/test_qualification*.py`, the cell oracle's in
+`py-acq/tests/test_qualify_backend_cell.py`; subprocess-boundary evidence lives in
+`test/vectors/qualification/`.

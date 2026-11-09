@@ -3,7 +3,7 @@ title: "Cross-Platform Qualification How-To (Tier-3)"
 description: "How to run the six ADR-0044m Tier-3 qualification oracles and record honest PASS/FAIL/BLOCKED transcripts on macOS and Linux hosts"
 status: canonical
 tier: 3
-last_updated: "2026-11-07"
+last_updated: "2026-11-08"
 audience: "developers"
 keywords: ["qualification", "tier-3", "transcript", "msb", "sbx", "oracle", "adr-0044m", "matrix"]
 related_files: ["docs/howto/release-gate-setup.md", "docs/adr/0044m-live-cross-platform-qualification-matrix-and-transcript.md", "qualification/README.md", "docs/qualification-ledger.json", ".github/workflows/tier3-release-gate.yml", "scripts/qualify-backend-cell", "scripts/qualify-msb-ro-mount", "docs/KNOWN_FAILURE_MODES.md", "docs/adr/0035-host-authoritative-sandbox-config.md", "docs/adr/0041m-configuration-and-state-migration-behavior.md"]
@@ -18,8 +18,8 @@ review_cycle: "quarterly"
 > [`qualification/`](../../qualification/README.md) harness. It tells a human —
 > or an agent on a macOS/Linux host — exactly how to run the six host-enforced
 > oracles, compute the transcript identity fields honestly, and record the
-> verbatim `RESULT` line. The on-host Windows x64 cells are already **green**;
-> the remaining cells need macOS/Linux hosts.
+> verbatim `RESULT` line. The ledger, not this page, says which cells are
+> current: `python3 -m qualification matrix` prints each cell's state.
 
 ---
 
@@ -70,30 +70,42 @@ organisation are refused).
 | `--remote NAME` | fork remote to publish to (default: the only non-upstream remote) |
 | `--record-failures` | also record `FAIL`/`FLAKY` outcomes (published like any other) |
 | `--accept-backend-version` | move the ledger's accepted backend version to the installed one |
-| `--timeout SECONDS` | per attempt (a `FAIL` is retried up to 3 times; default 900) |
+| `--timeout SECONDS` | per attempt (a `FAIL` is retried up to 3 times; default 1800) |
 
 Exit status: `0` every selected backend passed or was already current, `1` a
 `FAIL`/`FLAKY`, `2` anything else (a skipped or blocked backend, or a precondition
 failed and nothing ran). Alpine/musl hosts and an x86_64 Python under Rosetta are
-refused, since they would mislabel the cell.
+refused, since they would mislabel the cell, and so is a backend below the ADR-0044m
+floors (msb below 0.7.7 or in 0.7.0–0.7.2, sbx below 0.39.0), since a run on it is not
+evidence.
 
-The ledger PR carries each `transcript.json` inline, in a collapsed block with its
-SHA-256, so the hash the ledger records can be checked against the evidence it
-stands for. The copies the run leaves under `tmp/qualify-out-<time>/` are therefore
-disposable — delete them whenever you like. (A transcript is ~1 KB of metadata and
-hashes: verdict, the oracle's argv, versions, host identity, commit and artifact
-SHA, and a *digest* of the observed output. The harness never records raw output or
-the environment, so a transcript cannot carry a secret. The one field with no
-evidentiary value, the absolute `transcript_dir` path, is scrubbed from the PR.) The sections below are what that command runs,
-for reference and for debugging a single step.
+The ledger PR carries each `transcript.json` inline, byte for byte, in a collapsed
+block with its SHA-256: the lines inside the block, each ending in a newline, are the
+file, and hash to the `transcript_sha256` its ledger entry records. Anyone can check
+a ledger PR from the PR alone, in a checkout of its branch:
+
+```bash
+gh pr view <number> --json body -q .body | python3 -m qualification.gate verify-evidence -
+```
+
+It prints `OK <sha256>` for each block whose hash is recorded and whose entry the
+block reproduces field for field, and exits non-zero otherwise. Once the PR is open,
+the copies the run leaves under `tmp/qualify-out-<time>/` are therefore disposable.
+(A transcript is ~1 KB of metadata and hashes: verdict, the oracle's argv, versions,
+host identity, commit and artifact SHA, and a *digest* of the observed output. The
+harness never records raw output, the environment or a host-local path: the
+transcript directory is written as `<transcript-dir>` and an absolute command-line
+path keeps only its last component, as in `<local>/python3`, because a local path
+names the operator's account. The `RESULT` line's `dir=` value is replaced in the
+PR body.) The sections below are what that command runs, for reference and for
+debugging a single step.
 
 ## What this is
 
-The acq v1 rewrite is functionally complete and the on-host Tier-3 milestone is
-reached: both **Windows x64** cells qualified **PASS** against real msb 0.7.11
-and sbx 0.51.0. The remaining ADR-0044m qualified cells require macOS/Linux
-hosts that this Windows-only box cannot provide, so this runbook documents how
-to qualify them.
+The runbook for producing Tier-3 evidence for each claimed cell of the ADR-0044m
+matrix. The ledger (`docs/qualification-ledger.json`) is the record of which cells
+hold a current green transcript; `python3 -m qualification matrix` (or
+`python3 -m qualification.gate check`) prints it.
 
 Each cell is in exactly one of three states: **qualified** (green *current*
 transcript), **unqualified** (not claimed), or **blocked** (attempted, no
@@ -108,16 +120,20 @@ The qualified matrix (ADR-0044m `QUALIFIED`):
 
 | Backend | Claimed cells | Version floor | Windows x64 |
 |---------|---------------|---------------|-------------|
-| **msb** | linux-x86_64, linux-aarch64, macos-arm64, windows-x64 | ≥ 0.6.9 (refusing 0.7.0–0.7.2; oracles 1–3 need ≥ 0.7.7) | ✅ PASS |
-| **sbx** | linux-x86_64, macos-arm64, windows-x64 | ≥ 0.39.0 (provider-credential set needs ≥ 0.51.0) | ✅ PASS |
+| **msb** | linux-x86_64, linux-aarch64, macos-arm64, windows-x64 | ≥ 0.6.9 (refusing 0.7.0–0.7.2; oracles 1–3 need ≥ 0.7.7) | claimed |
+| **sbx** | linux-x86_64, macos-arm64, windows-x64 | ≥ 0.39.0 (provider-credential set needs ≥ 0.51.0) | claimed |
 
-**Already green:** `windows-x64` (both backends), produced by the same oracle
-that is committed here (`scripts/qualify-backend-cell`).
+The floors are enforced, not advisory (`version_problem` in `qualification/matrix.py`):
+the gate blocks a cell whose latest entry, or whose accepted backend version, is below
+them or in msb's refused range; the ledger refuses to accept such a version; and
+`qualification.host` will not run on one. Since the cell oracle exercises oracles 1–3,
+an msb run is evidence only at 0.7.7 or later.
 
-**Remaining (need macOS/Linux hosts):**
-
-- msb: `linux-x86_64`, `linux-aarch64`, `macos-arm64`
-- sbx: `linux-x86_64`, `macos-arm64`
+Which cells are current is the ledger's to say, not this page's:
+`python3 -m qualification matrix`. The macOS arm64 and Windows x64 runs recorded so
+far were made with the earlier cell oracle, which did not check credentials, kits or
+the read-only mount; any change to the oracle expires them (it is on the Tier-3
+surface), so every cell needs a run with the current oracle.
 
 **Unqualified (not claimed, reported honestly, never a pass):** Windows ARM64,
 musl libc, macOS x86_64 (Intel Mac, every backend), and sbx on Linux aarch64.
@@ -128,20 +144,23 @@ musl libc, macOS x86_64 (Intel Mac, every backend), and sbx on Linux aarch64.
 
 | # | Oracle | What it proves | Host(s) it needs |
 |---|--------|----------------|------------------|
-| 1 | ro-mount canary | msb enforces a `:ro` trusted-config mount | msb on KVM/HVF |
-| 2 | secret non-exposure | secret set/ls/rm + provider-credential set/ls/rm round-trip; the value never appears in argv or output | sbx |
-| 3 | real backend behaviour | create/ls/exec/rm boot contract + secret/provider-credential non-exposure (the committed cell oracle); kit apply, attach, version fail-closed asserted elsewhere | msb and sbx |
+| 1 | read-only trusted-config mount | acq records the host-enforced `:ro` mount for the sandbox, and this msb enforces `:ro` (the canary, run by the cell oracle) | msb on KVM/HVF |
+| 2 | secret binding and non-exposure | a credential bound before create shows up in the guest as a non-empty placeholder, the value is in neither the guest's environment nor PID 1's, and secret / provider-credential set/ls/rm never print it; swap-on-the-wire is not checked (see below) | msb and sbx |
+| 3 | real backend behaviour | create/ls/exec/rm boot contract and built-in kit apply (the committed cell oracle); attach and version fail-closed asserted elsewhere | msb and sbx |
 | 4 | offline completeness | network-blocked install + smoke | **blocked** (release automation) |
 | 5 | security-exception recreation | strip the read-only-mount record, fail closed, recreate preserving secrets/identity | msb (ADR-0035) |
 | 6 | native-Windows ordinary-user operation | ordinary-user (non-admin) Windows x64 | **done** |
 
-### Oracle 1 — ro-mount canary
+### Oracle 1 — read-only trusted-config mount
 
-Optional, **non-gating**, corroborating evidence (ADR-0035). It is *not* what
-`acq`'s read-only-mount gate depends on — the gate is the per-sandbox record
-plus a version floor — but it proves the `:ro` volume is actually enforced by
-this msb on this host. Requires msb on PATH and a KVM/HVF-capable host with
-network access for the image pull. Run it **outside** any sandbox:
+On msb cells the cell oracle checks two things. First, that the sandbox record acq
+wrote at create declares the host-enforced read-only trusted-config mount
+(`ro_host_config`, ADR-0035/ADR-0041m): that is what acq's own fail-closed gate
+keys on. Second, it runs the committed canary, which proves the `:ro` volume is
+actually enforced by this msb on this host (the canary is not what acq's gate
+depends on, but a cell does not qualify without it). The canary needs `bash` on
+`PATH` (Git Bash on Windows); without it the cell is `BLOCKED`. To run the canary
+alone, **outside** any sandbox:
 
 ```bash
 bash scripts/qualify-msb-ro-mount
@@ -150,13 +169,34 @@ bash scripts/qualify-msb-ro-mount
 It prints its own `RESULT <PASS|FAIL|BLOCKED> msb=<ver> …` line and writes its
 evidence under `tmp/qualify-msb-ro-mount-<stamp>/`.
 
-### Oracle 2 — secret non-exposure
+### Oracle 2 — secret binding and non-exposure
 
-Exercises the secret and (sbx-only) provider-credential round-trips and asserts
-the throwaway value never appears in any captured stdout or stderr. On sbx the
-secret verbs work (`sbx secret set/ls/rm` and `secret set-custom --value-stdin`);
-on msb they fail closed (`unsupported_capability` — there is no secret store, so
-there is nothing to leak).
+Before creating the sandbox the cell oracle binds a throwaway value with
+`acq provider-credential set` (value on stdin only). Inside the guest the bound
+variable must hold a non-empty placeholder, and the value must appear in neither
+`env` nor `/proc/1/environ`. Host-side, `secret set/ls/rm` and
+`provider-credential set/ls/rm` must never print it. Both backends are checked:
+AGENTS.md documents a credential path on msb (`--secret ENV@HOST`) as well as on
+sbx. The Python implementation has no msb credential path yet, so msb cells fail
+here until it does.
+
+Swap-on-the-wire (the real value, not the placeholder, reaching the bound host) is
+**not** checked: it needs an endpoint that reports what it received, and the oracle
+sends nothing to hosts outside the approved list. This is tracked in
+`docs/KNOWN_FAILURE_MODES.md` ("Tier-3 oracle facets the cell oracle cannot check
+unattended").
+
+The run never touches the operator's own credentials or acq state. Every acq
+subprocess gets a private configuration and state tree (`XDG_CONFIG_HOME`,
+`XDG_STATE_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`, `ACQ_STATE_DIR`,
+`ACQ_SECRET_STORE_DIR`), deleted afterwards. The sandbox, the secret service, the
+provider id and the credential variable all carry a per-run nonce, so nothing in a
+backend's own store can be overwritten, and the sbx teardown removes only the custom
+secret whose variable is this run's. `HOME` is kept, because the backend CLIs keep
+their login, daemon and image cache there. The caller's `ACQ_*` variables are not
+passed to acq (a stub seam such as `ACQ_MSB_BIN=__stub__` would otherwise turn a live
+run into a stubbed one), and `msb`, `sbx` and `bash` are resolved from absolute
+`PATH` entries only.
 
 ```bash
 V="$(sbx version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)"
@@ -168,22 +208,27 @@ python -m qualification run \
   --rev "$(git rev-parse HEAD)" \
   --artifact-sha256 "$ARTIFACT_SHA256" \
   --transcript-dir "$TRANSCRIPT_DIR" \
-  --timeout 900 \
+  --timeout 1800 \
   -- scripts/qualify-backend-cell --backend sbx
 ```
 
 ### Oracle 3 — real backend behaviour
 
 The committed `scripts/qualify-backend-cell` oracle exercises the
-create/ls/exec/rm boot contract and (on sbx) the secret/provider-credential
-non-exposure round-trips. ADR-0044m's oracle 3 also names **kit apply**,
-**attach**, and **version fail-closed**, which the cell oracle does **not**
-exercise — those facets are asserted elsewhere:
+create/ls/exec/rm boot contract (the exec probe prints a number the guest computes,
+so a backend that echoes the command instead of running it cannot pass) and
+**kit apply**: the guest must have the file the pinned usai-provider kit places
+(`/home/agent/usai-config/model-catalog-snapshot.json`), which shows the built-in
+kits were applied at create. ADR-0044m's oracle 3 also names **attach** and
+**version fail-closed**, which the cell oracle does **not** exercise:
 
 - **version fail-closed** — Tier-1 subprocess vectors (`test/vectors`,
   `py-acq/tests/test_backends.py`).
 - **attach** — Tier-2 implementation tests (`py-acq/tests/test_exec.py`).
-- **kit apply** — the ADR-0030 devenv-base slice.
+
+The control checks (oracles 1–3) all run and each failure is printed as
+`FAIL: <step>: <why>`, so one run lists everything that is missing; a boot-contract
+failure stops the run.
 
 Run the cell oracle once per backend:
 
@@ -201,7 +246,7 @@ for B in msb sbx; do
     --rev "$(git rev-parse HEAD)" \
     --artifact-sha256 "$ARTIFACT_SHA256" \
     --transcript-dir "$TRANSCRIPT_DIR" \
-    --timeout 900 \
+    --timeout 1800 \
     -- scripts/qualify-backend-cell --backend "$B"
 done
 ```
@@ -310,8 +355,8 @@ anything.
 
 ## Worked example — the Windows x64 PASS
 
-The two green Windows x64 cells (run on this host with `--timeout 900`) produced
-these reference `RESULT` lines; every host regenerates its own with its own
+The two green Windows x64 cells (run with the earlier cell oracle and
+`--timeout 900`) produced these reference `RESULT` lines; every host regenerates its own with its own
 `--rev`, `--artifact-sha256`, `--os-build`, `--arch`, and `--hypervisor`:
 
 ```text
@@ -348,14 +393,18 @@ that cell's (`kvm` on Linux, `hvf` on macOS, `wsl2` on Windows). `record` also
 refuses a transcript unless every attempt ran exactly
 `scripts/qualify-backend-cell --backend <the transcript's backend>` (directly or
 after the Python interpreter), and it stores the SHA-256 of that oracle as committed
-at the run's revision, so run it in a checkout that has that revision. These
+at the run's revision, so run it in a checkout that has that revision. It also
+refuses a transcript that could not be published verbatim: one not in the harness's
+canonical byte form (sorted keys, two-space indent, ASCII, LF, one trailing newline;
+re-serializing or a CRLF conversion breaks it) or one that records a host-local path.
+Those come only from an older harness; re-run the cell. These
 command and platform checks happen only in `record`, on your machine. The gate never
 sees the transcript: it checks each entry against the repository (the committed
 oracle's name and its hash at the entry's revision, arch and hypervisor against the
 cell, no transcript hash filed twice, a full revision that is an ancestor of the
 commit being evaluated). A hand-written entry that passes those is caught only by
 the admin review of the ledger PR and an audit of the transcript it inlines against
-`transcript_sha256`. Run the cell at a commit that is on `main`
+`transcript_sha256` (`python3 -m qualification.gate verify-evidence`, above). Run the cell at a commit that is on `main`
 (`--rev "$(git rev-parse HEAD)"`, as in the commands above): `record` refuses the
 harness's all-zero default, and a commit that only existed on a squash-merged PR
 branch is not in `main`'s history, so the gate could not resolve it. Every outcome
@@ -368,9 +417,9 @@ pass `--recorded-at <ISO 8601 UTC>`.
 
 The gate, `python3 -m qualification.gate check`, runs in CI (`Tier-3 release gate`)
 on every PR, every push to `main`, and weekly. It needs no live run: for each of
-the eight claimed cells it takes the latest ledger entry and passes it only if the
-verdict is `PASS`, it is under 90 days old, its backend `major.minor` equals
-`accepted_backend_versions` in the ledger, and no file on the Tier-3 surface
+the seven claimed cells it takes the latest ledger entry and passes it only if the
+verdict is `PASS`, it is under 90 days old, its backend version meets the floors and
+its `major.minor` equals `accepted_backend_versions` in the ledger, and no file on the Tier-3 surface
 (`TIER3_SURFACE` in `qualification/matrix.py` — the CLI source tree, the two oracles, and the harness's run path, minus the `version`/`doctor` command modules) changed between its recorded
 revision and `HEAD`. A release-please commit changes none of those, so releases do
 not expire anything. Anything the gate cannot establish fails closed. On a pull
@@ -407,6 +456,8 @@ it. See [`release-gate-setup.md`](release-gate-setup.md).
   pass, never a silent skip.
 - A missing backend CLI is a BLOCKED precondition: `scripts/qualify-backend-cell`
   exits `2` (the harness reports `OUTCOME BLOCKED`).
+- On msb, a missing `bash` (for the ro-mount canary), or a canary that cannot reach a
+  conclusion, is BLOCKED too, unless another step failed.
 - Any step failure prints `FAIL: <step>` to stderr and exits `1` (the harness
   applies the 3-attempt reproduction rule).
 - Oracle 4 stays **blocked** until release automation assembles and publishes

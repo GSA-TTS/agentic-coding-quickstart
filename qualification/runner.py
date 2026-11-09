@@ -19,7 +19,16 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Sequence
 
-from .model import Environment, Outcome, Transcript, Verdict, classify_exit, sha256_hex
+from .model import (
+    TRANSCRIPT_DIR_TOKEN,
+    Environment,
+    Outcome,
+    Transcript,
+    Verdict,
+    classify_exit,
+    publishable_argv,
+    sha256_hex,
+)
 from .repro import reproduce
 
 # Harness exit codes (PASS/FAIL/BLOCKED mirror qualify-msb-ro-mount; FLAKY is the
@@ -139,7 +148,11 @@ def transcript_document(result: CellResult) -> dict:
     """Build the whitelisted transcript document (never a secret, never raw output).
 
     The environment identity and command line are recorded; observed output is a
-    digest only; the process environment is never recorded.
+    digest only; the process environment is never recorded. No host-local path is
+    recorded either: the transcript directory becomes ``TRANSCRIPT_DIR_TOKEN`` and
+    an absolute command-line path keeps only its final component
+    (:func:`qualification.model.publishable_argv`), so the document can be published
+    verbatim. Write it with :func:`qualification.model.canonical_transcript_bytes`.
     """
     attempts = []
     for t in result.attempts:
@@ -158,9 +171,11 @@ def transcript_document(result: CellResult) -> dict:
                     "glibc_floor": env.glibc_floor,
                     "rev": env.rev,
                     "artifact_sha256": env.artifact_sha256,
-                    "transcript_dir": env.transcript_dir,
+                    "transcript_dir": (
+                        env.transcript_dir if env.transcript_dir == "none" else TRANSCRIPT_DIR_TOKEN
+                    ),
                 },
-                "commands": list(t.commands),
+                "commands": publishable_argv(t.commands),
                 "output_sha256": t.output_sha256,
                 "detail": t.detail,
                 "recorded_at": t.recorded_at,

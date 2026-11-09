@@ -94,9 +94,10 @@ stale and the cell is blocked until regenerated:
   `package.json` etc., not this file.
 
   "No oracle asserts it" refers to the two *committed* oracles only: of
-  ADR-0044m's six, the cell oracle (boot contract + secret/provider-credential
-  non-exposure, `scripts/qualify-backend-cell`) and the ro-mount oracle
-  (`scripts/qualify-msb-ro-mount`) are committed; oracle #4 (offline
+  ADR-0044m's six, the cell oracle (boot contract, credential binding and
+  non-exposure, kit apply, and on msb the read-only mount record,
+  `scripts/qualify-backend-cell`) and the ro-mount oracle
+  (`scripts/qualify-msb-ro-mount`, which the cell oracle runs on msb) are committed; oracle #4 (offline
   completeness) is deferred and #5 (security-exception recreation) is a manual
   sequence, and neither drives `acq version` or `acq doctor`.
 
@@ -138,7 +139,9 @@ results.)
 
 A release cannot be declared ready without a green current transcript (or an
 unexpired waiver) on every qualified cell, and a Tier-3 surface change cannot merge without fresh live
-evidence. A release that changes none of the Tier-3 surface needs no new live
+evidence. Both hold only where the `Tier-3 release gate` check is required on `main`
+and code-owner review is enforced (`docs/howto/release-gate-setup.md`); without those
+repository settings the gate reports but does not block. A release that changes none of the Tier-3 surface needs no new live
 run, which lets the release gate be evaluated automatically from existing
 transcripts. A claimed cell may carry a dated, reasoned waiver in the ledger,
 which lowers the bar: the gate reports it as waived and blocks again once it
@@ -173,7 +176,10 @@ what that review has to catch, but none of them proves a run happened:
   carry the SHA-256 of that file as committed at the entry's revision (re-read
   from git); its arch and hypervisor must be a host of its cell; no transcript
   hash may be filed twice; its revision must be a full commit id and an ancestor
-  of the commit being evaluated. An entry recorded before the binding existed
+  of the commit being evaluated; its backend version, and the accepted version,
+  must meet the floors above (for the cell oracle, which exercises oracles 1–3:
+  msb ≥ 0.7.7 and outside 0.7.0–0.7.2, sbx ≥ 0.39.0; `version_problem` in
+  `qualification/matrix.py`). An entry recorded before the binding existed
   counts only if it is field-for-field one of the legacy entries listed in
   `qualification/ledger.py`, and that exemption ends on 2027-02-06
   (`binding_problem`).
@@ -184,8 +190,29 @@ what that review has to catch, but none of them proves a run happened:
   admin.
 
 A fabricated transcript, or a hand-written entry that satisfies the gate's checks,
-is caught only by that admin review together with an audit of the evidence:
-`transcript_sha256` is auditable because the ledger PR inlines the transcript it
-hashes (a PR body is not a committed file), so a recorded hash can always be
-checked against the evidence it stands for. A run must be recorded at a commit
-that is on `main`.
+is caught only by that admin review together with an audit of the evidence. The
+ledger PR inlines each transcript it records byte for byte (a PR body is not a
+committed file). The harness writes a transcript in one canonical byte form with no
+host-local path in it (the transcript directory is a token and an absolute
+command-line path keeps only its last component, because a local path names the
+operator's account); `record` refuses any other transcript; and the published block
+is the file itself. So anyone holding the PR can recompute each
+`transcript_sha256` and check that the transcript reproduces its entry, without
+the runner's files (`python -m qualification.gate verify-evidence`). That shows the
+entry and the published transcript agree; it does not show that the run happened.
+
+The sixteen entries recorded before that rule (the legacy entries listed in
+`qualification/ledger.py`) hash transcripts that carried local paths and were
+published re-serialized and scrubbed, so their PR bodies cannot reproduce their
+hashes; only the files on the hosts that ran them can. They need no migration: they
+stay valid ledger entries, later Tier-3 surface changes have already expired them,
+and the legacy exemption ends on 2027-02-06.
+
+The committed cell oracle checks oracles 1–3 except three facets it cannot check
+unattended: swap-on-the-wire substitution (it needs an endpoint that reports what it
+received), attach (it needs a terminal) and version fail-closed against a real
+older backend. Those stay with the Tier-1 vectors and Tier-2 tests and are tracked
+in `docs/KNOWN_FAILURE_MODES.md`. The oracle runs every acq subprocess against a
+private configuration and state tree, and gives every identifier that reaches a
+backend's own store a per-run nonce, so a run leaves the operator's own credentials
+and acq state as it found them. A run must be recorded at a commit that is on `main`.

@@ -20,6 +20,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from qualification import host, publish as pub  # noqa: E402
 from qualification.ledger import entry_from_transcript, latest_entry, load_ledger  # noqa: E402
+from qualification.model import TRANSCRIPT_DIR_TOKEN, canonical_transcript_bytes, publishable_argv  # noqa: E402
 
 CELLS = [("msb", "macos-arm64"), ("sbx", "macos-arm64")]
 # A stand-in for the committed cell oracle in the throwaway repositories: entries
@@ -193,12 +194,14 @@ def make_transcript(tmp_path, backend, outcome="PASS", rev=None):
     rev = rev or run(oracle_repo(tmp_path), "rev-parse", "HEAD").strip()
     env = {"os": "Darwin", "os_build": "26.7.2", "arch": "arm64", "hypervisor": "hvf", "backend": backend,
            "backend_version": "0.7.7" if backend == "msb" else "0.51.0", "image": "i", "glibc_floor": None,
-           "rev": rev, "artifact_sha256": "d" * 64, "transcript_dir": str(out)}
-    # The argv qualification.host records (harness_command): the interpreter, then the oracle.
-    attempt = {"verdict": outcome, "environment": env, "commands": [sys.executable, ORACLE, "--backend", backend],
+           "rev": rev, "artifact_sha256": "d" * 64, "transcript_dir": TRANSCRIPT_DIR_TOKEN}
+    # The argv qualification.host runs (harness_command), as the harness records it:
+    # the interpreter (its directory tokenized), then the oracle.
+    attempt = {"verdict": outcome, "environment": env,
+               "commands": publishable_argv([sys.executable, ORACLE, "--backend", backend]),
                "output_sha256": "", "detail": "", "recorded_at": datetime.now(timezone.utc).isoformat()}
     path = out / "transcript.json"
-    path.write_text(json.dumps({"schema_version": 1, "outcome": outcome, "attempts": [attempt]}))
+    path.write_bytes(canonical_transcript_bytes({"schema_version": 1, "outcome": outcome, "attempts": [attempt]}))
     return host.Result(backend, outcome, "", f"RESULT {outcome} {backend}=1", path)
 
 
@@ -456,7 +459,7 @@ def fake_runner(tmp_path, head, outcomes):
         doc = json.loads(t.transcript.read_text())
         # a real run records the installed backend version, which is on its command line
         doc["attempts"][0]["environment"]["backend_version"] = command[command.index("--backend-version") + 1]
-        (out / "transcript.json").write_text(json.dumps(doc))
+        (out / "transcript.json").write_bytes(canonical_transcript_bytes(doc))
         return host.Result(backend, status, "", f"RESULT {status} {backend}=1 dir={out}", out / "transcript.json")
     return fake_run
 
@@ -764,19 +767,27 @@ def test_pr_body_inlines_each_transcript_with_its_hash(tmp_path):
     assert '"outcome": "PASS"' in body and '"output_sha256"' in body
 
 
-def test_pr_body_scrubs_the_local_path_from_the_transcript_and_the_result_line(tmp_path):
+def test_pr_body_never_inlines_a_transcript_that_carries_a_local_path(tmp_path):
+    # A transcript is shown byte for byte or not at all: rewriting the shown copy is
+    # what made the published hash unverifiable, and an absolute path names the
+    # operator's account.
     run = make_transcript(tmp_path, "msb")
     doc = json.loads(run.transcript.read_text())
     doc["attempts"][0]["environment"]["transcript_dir"] = "/Users/someone/private/path"
-    run.transcript.write_text(json.dumps(doc))
-    run.result_line = "RESULT PASS msb=0.7.7 image=i host=h rev=r dir=/Users/someone/private/path"
+    doc["attempts"][0]["commands"][0] = "C:\\Users\\Jane Doe\\AppData\\python.exe"
+    run.transcript.write_bytes(canonical_transcript_bytes(doc))
+    run.result_line = "RESULT PASS msb=0.7.7 image=i host=h rev=r dir=C:\\Users\\Jane Doe\\repo\\tmp\\x"
 
     _title, body = host.pr_text(macos(), [run], "a" * 40)
-    assert "/Users/someone" not in body
-    assert body.count(host.SCRUBBED_DIR) >= 2  # the RESULT line and the transcript field
-    # scrubbing must not disturb the file on disk: the ledger's hash is of the real bytes
-    assert json.loads(run.transcript.read_text())["attempts"][0]["environment"]["transcript_dir"] \
-        == "/Users/someone/private/path"
+    assert "someone" not in body and "Jane" not in body and "Doe" not in body
+    assert "transcript not inlined" in body and "<details>" not in body
+    assert "dir=<transcript-dir>" in body  # the RESULT line, scrubbed to its end
+
+
+@pytest.mark.parametrize("path", ["/Users/someone/x", "C:\\Users\\Jane Doe\\x y\\t", "/home/a b/c"])
+def test_scrub_removes_the_whole_dir_value_even_with_spaces(path):
+    line = host._scrub(f"RESULT PASS msb=0.7.7 image=i host=Linux x86_64 rev=r dir={path}")
+    assert line == "RESULT PASS msb=0.7.7 image=i host=Linux x86_64 rev=r dir=<transcript-dir>"
 
 
 def test_pr_body_survives_an_unreadable_transcript(tmp_path):
@@ -805,18 +816,57 @@ def test_transcript_evidence_carries_no_environment_dump_or_raw_output(tmp_path)
     assert '"stdout"' not in blocks and '"stderr"' not in blocks  # never raw output
 
 
-def test_the_inlined_hash_is_of_the_real_file_so_a_reviewer_can_verify_it(tmp_path):
-    # The hash in the PR body must be of the transcript's bytes ON DISK — the same
-    # value the ledger entry records — not of the scrubbed copy shown beside it.
-    # Otherwise `sha256sum transcript.json` would not match and the audit path the
-    # inlining exists to provide would be broken.
-    import hashlib
+def test_the_inlined_block_hashes_to_the_recorded_transcript_sha256(tmp_path):
+    # The audit path the inlining exists for: take the published block, hash it, and
+    # get the ledger's transcript_sha256, with no access to the runner's files.
     import re
 
     run = make_transcript(tmp_path, "msb")
-    on_disk = hashlib.sha256(run.transcript.read_bytes()).hexdigest()
-    entry = entry_from_transcript(json.loads(run.transcript.read_bytes()), run.transcript.read_bytes(),
-                                  oracle_digest=lambda rev, path: ORACLE_SHA)
+    raw = run.transcript.read_bytes()
+    entry = entry_from_transcript(json.loads(raw), raw, oracle_digest=lambda rev, path: ORACLE_SHA)
     blocks = "\n".join(host.transcript_evidence([run]))
     shown = re.search(r"sha256 <code>([0-9a-f]{64})</code>", blocks).group(1)
-    assert shown == on_disk == entry.transcript_sha256
+    body = re.search(r"```json\n(.*?)\n```", blocks, re.S).group(1)
+    published = "".join(f"{line}\n" for line in body.split("\n")).encode()
+    assert hashlib.sha256(published).hexdigest() == shown == entry.transcript_sha256
+
+
+def test_a_real_harness_run_publishes_evidence_anyone_can_verify(tmp_path, monkeypatch):
+    # End to end: the harness writes the transcript, record hashes it, the PR body shows
+    # it, and the shown block alone reproduces the ledger's transcript_sha256. No local
+    # path (here, a home directory with a space in it, and the interpreter's directory)
+    # reaches the transcript or the PR body.
+    from qualification import cli
+    from qualification.ledger import append_entry, evidence_blocks, git_oracle_digest, verify_evidence
+
+    repo = oracle_repo(tmp_path)
+    head = run(repo, "rev-parse", "HEAD").strip()
+    monkeypatch.chdir(repo)
+    out = tmp_path / "Jane Doe" / "qualify-out" / "transcript-msb"
+    assert cli.main([
+        "run", "--backend", "msb", "--backend-version", "0.7.7", "--platform", "macos-arm64", "--os", "Darwin",
+        "--os-build", "26.7.2", "--arch", "arm64", "--hypervisor", "hvf", "--rev", head,
+        "--artifact-sha256", "d" * 64, "--transcript-dir", str(out), "--attempts", "1",
+        "--", sys.executable, ORACLE, "--backend", "msb",
+    ]) == 0
+    transcript = out / "transcript.json"
+    raw = transcript.read_bytes()
+    local = [str(tmp_path), "Jane", str(Path(sys.executable).parent)]
+    assert not [x for x in local if x.encode() in raw]
+
+    ledger = make_ledger(tmp_path)
+    entry = entry_from_transcript(json.loads(raw), raw, oracle_digest=lambda r, p: git_oracle_digest(r, p, cwd=repo))
+    append_entry(ledger, entry)
+    result = host.Result("msb", "PASS", "", f"RESULT PASS msb=0.7.7 image=i host=Darwin arm64 rev={head} dir={out}",
+                         transcript)
+    _title, body = host.pr_text(macos(), [result], head)
+    assert not [x for x in local if x in body] and "Doe" not in body
+    assert verify_evidence(load_ledger(ledger), evidence_blocks(body)) == [(entry.transcript_sha256, None)]
+
+
+def test_plan_refuses_a_refused_backend_version_before_running(tmp_path):
+    root = tmp_path
+    (root / "docs").mkdir()
+    (root / "docs" / "qualification-ledger.json").write_text(json.dumps(ledger_doc()))
+    with pytest.raises(pub.HostError, match="refused range"):
+        host.plan(root, macos(), ["msb"], {"msb": "0.7.1"}, False, True)

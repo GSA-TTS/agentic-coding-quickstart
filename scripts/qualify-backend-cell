@@ -2,40 +2,68 @@
 """Per-cell Tier-3 qualification oracle for the acq v1 Python replacement.
 
 Drives the SHIPPED CLI (``python -m acq_py``) as subprocesses against a real
-msb or sbx backend and returns 0 (PASS), 2 (BLOCKED), or 1 (FAIL). It is the
-same oracle that produced the Windows x64 PASS: a human, or an agent on a
-macOS/Linux host, runs it under the qualification harness, which emits the
-verbatim ``RESULT`` transcript line (ADR-0044m):
+msb or sbx backend and returns 0 (PASS), 2 (BLOCKED), or 1 (FAIL). A human, or
+``python -m qualification.host``, runs it under the qualification harness, which
+emits the verbatim ``RESULT`` transcript line (ADR-0044m):
 
-    python -m qualification run --backend msb \
-        --backend-version "$(msb --version)" --os Linux --os-build … --arch … \
-        --hypervisor kvm --rev "$(git rev-parse HEAD)" --image IMG \
+    python -m qualification run --backend msb \\
+        --backend-version "$(msb --version)" --os Linux --os-build … --arch … \\
+        --hypervisor kvm --rev "$(git rev-parse HEAD)" --image IMG \\
         -- scripts/qualify-backend-cell --backend msb
 
 The oracle itself only reports an exit status and never emits the ``RESULT``
-line; that is the harness's job. What it does verify, per ADR-0044m:
+line; that is the harness's job. What it checks, per ADR-0044m (oracle numbers
+are the ADR's):
 
-    * boot contract      — create/ls/exec/rm round-trip against the default
-                           shell image (oracle 3: real backend behaviour).
-    * secret non-exposure — secret set/ls/rm and (sbx only) provider-credential
-                           set/ls/rm round-trips, asserting the throwaway value
-                           never appears in any captured stdout or stderr
-                           (oracle 2).
-    * cleanup discipline — the sbx provider-credential ``rm`` removes only the
-                           host-side binding, NOT the underlying sbx custom
-                           secret; the teardown therefore also removes that raw
-                           custom secret via ``sbx secret rm --placeholder …``
-                           so repeated runs stay idempotent.
+    * boot contract (3)   — create/ls/exec/rm round trip against the default
+                            shell image. The exec probe prints a number the guest
+                            computes, so an echo of the command line is not a pass.
+    * credential binding  — ``provider-credential set`` binds a throwaway value
+      and non-exposure (2)  before the sandbox is created; inside the guest the
+                            bound variable must hold a non-empty placeholder, and
+                            the value must not appear in the guest's environment
+                            or PID 1's. ``secret set/ls/rm`` and
+                            ``provider-credential set/ls/rm`` must never print the
+                            value. Both backends: AGENTS.md documents a credential
+                            path on msb (``--secret ENV@HOST``) as well as sbx.
+    * kit apply (3)       — the guest has the file the pinned usai-provider kit
+                            places (``KIT_PROBE_FILE``), so the built-in kits were
+                            applied at create.
+    * read-only trusted   — msb only: acq's sandbox record declares the host-
+      config mount (1)      enforced read-only trusted-config mount (ADR-0035,
+                            ``ro_host_config``), and the committed canary
+                            ``scripts/qualify-msb-ro-mount`` shows this msb
+                            enforces a ``:ro`` volume. A missing ``bash`` makes
+                            the canary, and so the cell, BLOCKED.
+
+Not covered here, because they need something an unattended run on one host
+cannot provide: swap-on-the-wire substitution (an endpoint that reports the
+credential it received), attach (a terminal), and version fail-closed against a
+real older backend (covered offline by the Tier-1 vectors). See
+docs/howto/qualification.md.
+
+The control checks (credentials, kits, ro mount, host-side secrets) all run and
+every failure is printed (``FAIL: <step>: <why>`` on stderr), so one run shows
+everything that is missing; a boot-contract failure stops the run.
+
+Isolation: the run must leave the operator's own acq configuration, state and
+credentials exactly as found. Every acq subprocess gets a private configuration
+and state tree (``XDG_CONFIG_HOME``, ``XDG_STATE_HOME``, ``XDG_DATA_HOME``,
+``XDG_CACHE_HOME``, ``ACQ_STATE_DIR``, ``ACQ_SECRET_STORE_DIR``) that is deleted
+afterwards, and every identifier that reaches a backend's own store (sandbox,
+secret service, provider id, credential variable) carries a per-run nonce, so a
+step can never overwrite or remove an existing binding. ``HOME`` is kept: the
+backend CLIs keep their login, daemon and image cache there, and the oracle
+qualifies the operator's real backend. The caller's ``ACQ_*`` variables are not
+passed on (an ``ACQ_MSB_BIN=__stub__`` or ``ACQ_SECURITY_MOUNT_STATE`` would
+otherwise turn a live run into a stubbed one), ``PYTHONPATH`` is fixed to this
+checkout's ``py-acq/src``, the CLI runs under ``python -P``, and ``msb``/``sbx``
+and ``bash`` are resolved from absolute ``PATH`` entries only.
 
 Exit codes (mirroring ``scripts/qualify-msb-ro-mount`` and ADR-0044m): 0 PASS,
-2 BLOCKED (the backend CLI is not runnable — a missing prerequisite), 1 FAIL
-(any step failed, printed as ``FAIL: <step>`` on stderr). A secret VALUE is a
-throwaway ``TIER3_MARKER_<hex>`` and must never appear in captured output.
-
-Portability: the workspace is a fresh ``tempfile`` directory (never a hardcoded
-host path); the CLI is run with ``PYTHONPATH`` pointing at ``py-acq/src``
-relative to this script's own location; no shell-specific or Windows-specific
-path assumptions are made. Never prints a real secret.
+2 BLOCKED (a prerequisite is missing: the backend CLI, or ``bash`` for the msb
+canary), 1 FAIL. The throwaway secret value is ``TIER3_MARKER_<hex>`` and is
+never printed; captured output is only searched for it.
 """
 
 from __future__ import annotations
@@ -48,25 +76,41 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 # The default shell image every boot-contract cell creates against (the same
 # image ``scripts/qualify-msb-ro-mount`` uses).
 IMAGE = "docker.io/docker/sandbox-templates:shell-docker"
 
-# Non-secret identifiers for the secret/provider-credential round-trips. The
-# VALUE is always a throwaway ``TIER3_MARKER_<hex>`` generated per run.
-SERVICE = "SVC"
-PROVIDER = "opencode-go"
-KEY_ENV = "KEY"
+# The credential is bound for this host; the oracle never sends a request to it.
 CRED_HOST = "api.example.com"
+
+# A file the pinned usai-provider kit places in the guest (its ``files`` list).
+# Its presence shows the built-in kits were applied at create. Update it with the
+# kit pin if the kit moves it.
+KIT_PROBE_FILE = "/home/agent/usai-config/model-catalog-snapshot.json"
 
 # The first ``create`` pulls the image and boots a microVM; other steps are
 # quick. These are the oracle's own per-step budgets (the harness's outer
-# ``--timeout`` still bounds the whole run, so a fresh host should pass a
-# larger ``--timeout`` to ``qualification run``).
+# ``--timeout`` still bounds the whole run).
 CREATE_TIMEOUT = 600.0
 STEP_TIMEOUT = 120.0
+# The ro-mount canary creates its own sandbox (image pull) and runs several execs.
+CANARY_TIMEOUT = 1200.0
+
+# acq's own configuration and state locations, each redirected into the private tree.
+ISOLATED_DIRS = (
+    "XDG_CONFIG_HOME",
+    "XDG_STATE_HOME",
+    "XDG_DATA_HOME",
+    "XDG_CACHE_HOME",
+    "ACQ_STATE_DIR",
+    "ACQ_SECRET_STORE_DIR",
+)
+# Caller ``ACQ_*`` variables that only tune timing and may pass through.
+_PASSTHROUGH_SUFFIX = "_TIMEOUT"
 
 
 def _repo_root() -> Path:
@@ -74,278 +118,349 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def _cli_env() -> dict[str, str]:
-    """Run ``python -m acq_py`` with ``py-acq/src`` on ``PYTHONPATH``."""
-    env = dict(os.environ)
-    src = str(_repo_root() / "py-acq" / "src")
-    previous = env.get("PYTHONPATH")
-    env["PYTHONPATH"] = src if not previous else src + os.pathsep + previous
-    return env
+def which(name: str, path: str | None = None) -> str | None:
+    """``name`` resolved from the absolute entries of ``PATH`` only.
 
-
-def _run_acq(argv: list[str], *, stdin: str | None = None, timeout: float = STEP_TIMEOUT):
-    """Run the shipped CLI as a subprocess; return a CompletedProcess or None
-    (internal timeout). Captures stdout and stderr so a secret can be checked."""
-    try:
-        return subprocess.run(
-            [sys.executable, "-m", "acq_py", *argv],
-            env=_cli_env(),
-            input=stdin,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired:
-        return None
-
-
-def _run_raw(argv: list[str], *, stdin: str | None = None, timeout: float = STEP_TIMEOUT):
-    """Run a raw backend CLI (not through acq) for the teardown path."""
-    try:
-        return subprocess.run(
-            list(argv),
-            input=stdin,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired:
-        return None
-
-
-def _fail(step: str, detail: str = "") -> int:
-    message = f"FAIL: {step}"
-    if detail:
-        message += f": {detail}"
-    print(message, file=sys.stderr)
-    return 1
-
-
-def _blocked(reason: str) -> int:
-    print(f"BLOCKED: {reason}", file=sys.stderr)
-    return 2
-
-
-def _output_contains(proc, token: str) -> bool:
-    """True when ``token`` appears in a completed process's captured output."""
-    if proc is None:
-        return False
-    return token in (proc.stdout or "") or token in (proc.stderr or "")
-
-
-def _assert_value_not_exposed(step: str, value: str, proc) -> int | None:
-    """Return a FAIL exit code when the secret VALUE leaked; else None."""
-    if _output_contains(proc, value):
-        return _fail(step, "the secret value appeared in captured output")
+    An empty, ``.`` or relative entry would resolve against the current directory,
+    which may be a workspace a sandboxed agent can write to.
+    """
+    for entry in (os.environ.get("PATH", "") if path is None else path).split(os.pathsep):
+        if entry and os.path.isabs(entry):
+            found = shutil.which(name, path=entry)
+            if found:
+                return found
     return None
 
 
-def _remove_sbx_custom_secret(key_env: str) -> None:
-    """Best-effort removal of the sbx custom secret acq created for ``key_env``.
+@dataclass(frozen=True)
+class Names:
+    """Per-run identifiers: everything that reaches a backend's own store is nonce-scoped."""
 
-    ``provider-credential rm`` drops only the host-side binding (documented
-    legacy split); the underlying sbx custom secret must be removed separately
-    for repeated runs to stay idempotent. The placeholder is read from the raw
-    ``sbx secret ls --json`` ``custom_secrets`` table (its value is masked), then
-    removed with ``sbx secret rm --placeholder <placeholder> --force``.
+    nonce: str
+    value: str
+    sandbox: str
+    service: str
+    provider: str
+    key_env: str
+    seed: int
 
-    Field assumption (verified live against sbx 0.51.0): a ``custom_secrets``
-    entry is keyed by ``env`` and removed by ``placeholder`` — it has no ``name``
-    field. The real shape is::
 
-        {"scope": "global",
-         "targets": ["api.example.com"],
-         "env": "<KEY_ENV>",
-         "placeholder": "sbx-cs-…",
-         "secret": "<masked>"}
+def make_names(backend: str, nonce: str | None = None) -> Names:
+    nonce = nonce or secrets.token_hex(4)
+    return Names(
+        nonce=nonce,
+        value=f"TIER3_MARKER_{nonce}",
+        sandbox=f"acq-qual-{backend}-{nonce}",
+        service=f"acqqual{nonce}",
+        provider=f"acq-qual-{nonce}",
+        key_env=f"ACQ_QUAL_{nonce.upper()}",
+        seed=int(nonce, 16),
+    )
 
-    so ``env`` is the lookup key for the entry this run created and
-    ``placeholder`` is the token ``sbx secret rm --placeholder`` accepts. Never
-    reads a secret value (the ``secret`` field is masked); failures are
-    deliberately swallowed (teardown only).
-    """
-    proc = _run_raw(["sbx", "secret", "ls", "--json"], timeout=STEP_TIMEOUT)
-    if proc is None or proc.returncode != 0:
-        return
+
+def isolated_env(root: Path, base: dict[str, str] | None = None) -> dict[str, str]:
+    """The environment every acq (and backend) subprocess runs with; see the module docstring."""
+    env = {
+        k: v for k, v in (os.environ if base is None else base).items()
+        if not k.startswith("ACQ_") or k.endswith(_PASSTHROUGH_SUFFIX)
+    }
+    for var in ISOLATED_DIRS:
+        path = root / var.lower()
+        path.mkdir(parents=True, exist_ok=True)
+        env[var] = str(path)
+    env["PYTHONPATH"] = str(_repo_root() / "py-acq" / "src")
+    return env
+
+
+Run = Callable[..., "subprocess.CompletedProcess[str] | None"]
+
+
+def run_process(argv: list[str], *, env: dict[str, str], stdin: str | None = None,
+                timeout: float = STEP_TIMEOUT, cwd: str | None = None):
+    """Run ``argv`` capturing its output; ``None`` on a timeout or a missing executable."""
     try:
-        doc = json.loads(proc.stdout)
-    except json.JSONDecodeError:
+        return subprocess.run(list(argv), env=env, input=stdin, capture_output=True, text=True,
+                              errors="replace", timeout=timeout, cwd=cwd)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+
+
+def _out(proc) -> str:
+    return "" if proc is None else (proc.stdout or "") + (proc.stderr or "")
+
+
+def _problem(proc) -> str | None:
+    """Why a completed step failed, or ``None`` if it exited 0."""
+    if proc is None:
+        return "timed out or could not start"
+    if proc.returncode != 0:
+        return f"exit {proc.returncode}"
+    return None
+
+
+@dataclass
+class Cell:
+    """One oracle run for one backend. ``acq`` and ``raw`` are injectable for tests.
+
+    ``acq(argv, stdin=None, timeout=...)`` runs the shipped CLI; ``raw(argv, ...)``
+    runs a program directly; ``canary()`` runs the ro-mount canary and returns its
+    exit status (or ``None`` when ``bash`` is missing); ``state_dir`` is acq's
+    private state root, where its sandbox records are read.
+    """
+
+    backend: str
+    names: Names
+    workspace: str
+    state_dir: Path
+    acq: Run
+    raw: Run
+    canary: Callable[[], "int | None"]
+    failures: list[str] = field(default_factory=list)
+    blocked: list[str] = field(default_factory=list)
+    created: bool = False
+    bound: bool = False
+    secret_set: bool = False
+
+    # -- reporting -------------------------------------------------------------
+
+    def fail(self, step: str, detail: str) -> None:
+        self.failures.append(step)
+        print(f"FAIL: {step}: {detail}", file=sys.stderr)
+
+    def check(self, step: str, proc) -> bool:
+        """Record a failure if ``proc`` failed or its output carries the secret value."""
+        if self.names.value in _out(proc):
+            self.fail(step, "the secret value appeared in captured output")
+            return False
+        problem = _problem(proc)
+        if problem:
+            self.fail(step, problem)
+            return False
+        return True
+
+    def _b(self, *argv: str) -> list[str]:
+        return ["--backend", self.backend, *argv]
+
+    # -- steps ------------------------------------------------------------------
+
+    def bind_credential(self) -> None:
+        """oracle 2: bind a throwaway credential before create (value on stdin only)."""
+        n = self.names
+        proc = self.acq(self._b("provider-credential", "set", n.provider, n.key_env, "--host", CRED_HOST, "--json"),
+                        stdin=n.value + "\n")
+        self.bound = proc is not None and proc.returncode == 0
+        if self.check("provider-credential set", proc):
+            self.check("provider-credential ls", self.acq(self._b("provider-credential", "ls", "--json")))
+
+    def boot(self) -> bool:
+        """oracle 3: create/ls/exec. Returns False (and stops the run) on any failure."""
+        n = self.names
+        created = self.acq(self._b("create", "shell", self.workspace, "--name", n.sandbox, "--image", IMAGE, "--json"),
+                           timeout=CREATE_TIMEOUT)
+        self.created = created is not None and created.returncode == 0
+        if not self.check("create", created):
+            return False
+        listed = self.acq(self._b("ls", "--json"))
+        if not self.check("ls", listed):
+            return False
+        try:
+            sandboxes = json.loads(listed.stdout).get("data", {}).get("sandboxes", [])
+            names = [e.get("name") for e in sandboxes if isinstance(e, dict)]
+        except (json.JSONDecodeError, AttributeError):
+            self.fail("ls", "unparseable listing")
+            return False
+        if n.sandbox not in names:
+            self.fail("ls", f"sandbox '{n.sandbox}' not present after create")
+            return False
+        script = f"printf 'boot=%s\\n' \"$(({n.seed} + 3))\""
+        return self.guest_token("exec", "boot", n.seed + 3, script) is not None
+
+    def guest(self, script: str):
+        return self.acq(self._b("exec", self.names.sandbox, "--", "sh", "-c", script))
+
+    def guest_token(self, step: str, key: str, expected: int, script: str) -> str | None:
+        """Run ``script`` in the guest; return its output if it printed ``key=<expected>``.
+
+        The number is computed in the guest, so a backend that echoes the command
+        line instead of running it does not produce it.
+        """
+        proc = self.guest(script)
+        if not self.check(step, proc):
+            return None
+        out = _out(proc)
+        if f"{key}={expected}" not in out.splitlines():
+            self.fail(step, "the guest did not run the probe (its computed result is missing)")
+            return None
+        return out
+
+    def guest_credential(self) -> None:
+        """oracle 2: in the guest, a placeholder is bound and the value is nowhere in the environment."""
+        if not self.bound:
+            self.fail("guest credential", "no credential was bound (provider-credential set failed)")
+            return
+        n = self.names
+        script = (
+            f"printf 'cred=%s\\n' \"$(({n.seed} + 1))\"; "
+            f"printf 'placeholder=%s\\n' \"${{{n.key_env}:-}}\"; "
+            "env; tr '\\000' '\\n' < /proc/1/environ 2>/dev/null; true"
+        )
+        out = self.guest_token("guest credential", "cred", n.seed + 1, script)
+        if out is None:
+            return
+        placeholder = next((x.split("=", 1)[1] for x in out.splitlines() if x.startswith("placeholder=")), "")
+        if not placeholder:
+            self.fail("guest credential", f"{n.key_env} is not set in the guest; the credential was not bound")
+
+    def kits(self) -> None:
+        """oracle 3: the built-in kits were applied at create."""
+        script = f"test -s {KIT_PROBE_FILE} && printf 'kit=%s\\n' \"$(({self.names.seed} + 2))\"; true"
+        proc = self.guest(script)
+        if self.check("kit apply", proc) and f"kit={self.names.seed + 2}" not in _out(proc).splitlines():
+            self.fail("kit apply", f"{KIT_PROBE_FILE} (placed by the usai-provider kit) is missing in the guest")
+
+    def ro_mount(self) -> None:
+        """oracle 1 (msb): acq recorded the read-only trusted-config mount, and msb enforces ``:ro``."""
+        records = sorted((self.state_dir / self.backend).glob(f"{self.names.sandbox}.*.json"))
+        try:
+            record = json.loads(records[0].read_text(encoding="utf-8")) if records else None
+        except (OSError, ValueError):
+            record = None
+        if not (isinstance(record, dict) and record.get("ro_host_config") is True):
+            self.fail("ro mount", "acq's sandbox record does not declare the read-only trusted-config mount")
+        status = self.canary()
+        if status is None or status == 2:
+            self.blocked.append("ro-mount canary")
+            reason = "bash not found" if status is None else "it could not run to a conclusion"
+            print(f"BLOCKED: ro-mount canary: {reason}", file=sys.stderr)
+        elif status != 0:
+            self.fail("ro-mount canary", f"scripts/qualify-msb-ro-mount exited {status}")
+
+    def remove(self) -> None:
+        proc = self.acq(self._b("rm", self.names.sandbox, "--json"))
+        if self.check("rm", proc):
+            self.created = False
+
+    def secret_round_trip(self) -> None:
+        """oracle 2: host-side ``secret set/ls/rm`` never print the value (nonce-named service)."""
+        n = self.names
+        proc = self.acq(self._b("secret", "set", "-g", n.service, "--json"), stdin=n.value + "\n")
+        self.secret_set = proc is not None and proc.returncode == 0
+        if not self.check("secret set", proc):
+            return
+        self.check("secret ls", self.acq(self._b("secret", "ls", "--json")))
+        if self.check("secret rm", self.acq(self._b("secret", "rm", "-g", n.service, "--json"))):
+            self.secret_set = False
+
+    def unbind_credential(self) -> None:
+        if self.bound and self.check("provider-credential rm",
+                                     self.acq(self._b("provider-credential", "rm", self.names.provider, "--json"))):
+            self.bound = False
+
+    def run(self) -> int:
+        try:
+            self.bind_credential()
+            if not self.boot():
+                return 1
+            self.guest_credential()
+            self.kits()
+            if self.backend == "msb":
+                self.ro_mount()
+            self.remove()
+            self.secret_round_trip()
+            self.unbind_credential()
+        finally:
+            self.teardown()
+        if self.failures:
+            return 1
+        if self.blocked:
+            return 2
+        print(f"qualify-backend-cell: PASS backend={self.backend}")
+        return 0
+
+    def teardown(self) -> None:
+        """Best effort: remove everything this run created, and nothing else."""
+        n = self.names
+        if self.created:
+            self.acq(self._b("rm", n.sandbox, "--json"))
+        if self.secret_set:
+            self.acq(self._b("secret", "rm", "-g", n.service, "--json"))
+        if self.bound:
+            self.acq(self._b("provider-credential", "rm", n.provider, "--json"))
+        if self.backend == "sbx":
+            # ``provider-credential rm`` drops only acq's binding; sbx keeps the
+            # custom secret it created. Remove that one, found by this run's
+            # nonce-named variable, never by a fixed name.
+            remove_sbx_custom_secrets(self.raw, n.key_env)
+
+
+def remove_sbx_custom_secrets(raw: Run, key_env: str) -> None:
+    """Remove the sbx custom secrets whose ``env`` is exactly ``key_env``.
+
+    Field shape (verified live against sbx 0.51.0): a ``custom_secrets`` entry is
+    ``{"scope", "targets", "env", "placeholder", "secret": "<masked>"}``; it is
+    removed by ``placeholder``. Never reads a value (``secret`` is masked);
+    failures are swallowed (teardown only). ``--force`` skips sbx's interactive
+    confirmation.
+    """
+    proc = raw(["sbx", "secret", "ls", "--json"])
+    try:
+        custom = json.loads(proc.stdout).get("custom_secrets") if proc is not None and proc.returncode == 0 else None
+    except (json.JSONDecodeError, AttributeError):
         return
-    custom = doc.get("custom_secrets") if isinstance(doc, dict) else None
-    if not isinstance(custom, list):
-        return
-    for entry in custom:
-        if not isinstance(entry, dict) or entry.get("env") != key_env:
-            continue
-        placeholder = entry.get("placeholder")
-        if isinstance(placeholder, str) and placeholder:
-            # ``--force`` suppresses sbx's interactive confirm prompt, which is
-            # required in a non-interactive subprocess.
-            _run_raw(["sbx", "secret", "rm", "--placeholder", placeholder, "--force"])
+    for entry in custom if isinstance(custom, list) else []:
+        placeholder = entry.get("placeholder") if isinstance(entry, dict) else None
+        if entry.get("env") == key_env and isinstance(placeholder, str) and placeholder:
+            raw(["sbx", "secret", "rm", "--placeholder", placeholder, "--force"])
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="qualify-backend-cell",
-        description="Per-cell Tier-3 qualification oracle (ADR-0044m): boot "
-        "contract + secret/provider-credential non-exposure.",
+        description="Per-cell Tier-3 qualification oracle (ADR-0044m): boot contract, credential binding "
+        "and non-exposure, kit apply, and (msb) the read-only trusted-config mount.",
     )
     parser.add_argument("--backend", required=True, choices=["msb", "sbx"], help="backend to qualify")
-    args = parser.parse_args(argv)
-    backend: str = args.backend
+    backend: str = parser.parse_args(argv).backend
 
-    # --- BLOCKED precondition: the backend CLI must be runnable (exit 2). ---
-    bin_name = "msb" if backend == "msb" else "sbx"
-    version_argv = ["--version"] if backend == "msb" else ["version"]
-    if shutil.which(bin_name) is None:
-        return _blocked(f"{bin_name} CLI is not on PATH")
-    probe = _run_raw([bin_name, *version_argv], timeout=15.0)
-    if probe is None or probe.returncode != 0:
-        return _blocked(f"{bin_name} CLI did not run ({' '.join(version_argv)})")
+    # --- BLOCKED preconditions (exit 2). ---
+    if sys.version_info < (3, 11):  # ``python -P``
+        print("BLOCKED: Python >= 3.11 is required", file=sys.stderr)
+        return 2
+    exe = which(backend)
+    if exe is None:
+        print(f"BLOCKED: {backend} CLI is not on PATH", file=sys.stderr)
+        return 2
+    names = make_names(backend)
+    with tempfile.TemporaryDirectory(prefix="acq-qual-") as tmp:
+        root = Path(tmp)
+        env = isolated_env(root / "acq")
+        workspace = root / "workspace"
+        workspace.mkdir()
+        version = run_process([exe, "--version" if backend == "msb" else "version"], env=env, timeout=15.0)
+        if version is None or version.returncode != 0:
+            print(f"BLOCKED: {backend} CLI did not run", file=sys.stderr)
+            return 2
+        python = [sys.executable, "-P", "-m", "acq_py"]
 
-    # Per-run throwaway identifiers. The secret VALUE is a throwaway marker and
-    # must never appear in captured output.
-    nonce = secrets.token_hex(4)
-    value = f"TIER3_MARKER_{nonce}"
-    sandbox_name = f"acq-qual-{backend}-{nonce}"
-    workspace: str | None = None
-    created_secret = False
-    did_provider_credential = False
+        def acq(args, *, stdin=None, timeout=STEP_TIMEOUT):
+            return run_process([*python, *args], env=env, stdin=stdin, timeout=timeout, cwd=str(root))
 
-    try:
-        # --- oracle 3: boot contract (create/ls/exec/rm) ---------------------
-        workspace = tempfile.mkdtemp(prefix="acq-qual-ws-")
+        def raw(args, *, stdin=None, timeout=STEP_TIMEOUT):
+            resolved = which(args[0], env.get("PATH", ""))
+            if resolved is None:
+                return None
+            return run_process([resolved, *args[1:]], env=env, stdin=stdin, timeout=timeout, cwd=str(root))
 
-        created = _run_acq(
-            ["--backend", backend, "create", "shell", workspace,
-             "--name", sandbox_name, "--image", IMAGE, "--json"],
-            timeout=CREATE_TIMEOUT,
-        )
-        if created is None:
-            return _fail("create", "timed out")
-        if created.returncode != 0:
-            return _fail("create", f"exit {created.returncode}")
+        def canary():
+            bash = which("bash", env.get("PATH", ""))
+            if bash is None:
+                return None
+            proc = run_process([bash, str(_repo_root() / "scripts" / "qualify-msb-ro-mount")], env=env,
+                               timeout=CANARY_TIMEOUT, cwd=str(_repo_root()))
+            return 2 if proc is None else proc.returncode  # a timeout is no conclusion
 
-        listed = _run_acq(["--backend", backend, "ls", "--json"])
-        if listed is None:
-            return _fail("ls", "timed out")
-        if listed.returncode != 0:
-            return _fail("ls", f"exit {listed.returncode}")
-        try:
-            listing = json.loads(listed.stdout)
-            names = [
-                entry.get("name")
-                for entry in listing.get("data", {}).get("sandboxes", [])
-                if isinstance(entry, dict)
-            ]
-        except json.JSONDecodeError:
-            return _fail("ls", "unparseable listing")
-        if sandbox_name not in names:
-            return _fail("ls", f"sandbox '{sandbox_name}' not present after create")
-
-        executed = _run_acq(
-            ["--backend", backend, "exec", sandbox_name, "--", "echo", f"hello-from-{backend}"]
-        )
-        if executed is None:
-            return _fail("exec", "timed out")
-        if executed.returncode != 0:
-            return _fail("exec", f"exit {executed.returncode}")
-        if f"hello-from-{backend}" not in (executed.stdout or ""):
-            return _fail("exec", f"missing 'hello-from-{backend}' marker in output")
-
-        removed = _run_acq(["--backend", backend, "rm", sandbox_name, "--json"])
-        if removed is None:
-            return _fail("rm", "timed out")
-        if removed.returncode != 0:
-            return _fail("rm", f"exit {removed.returncode}")
-
-        # --- oracle 2: secret non-exposure (sbx only; msb has no store) -----
-        if backend == "sbx":
-            set_proc = _run_acq(
-                ["--backend", "sbx", "secret", "set", "-g", SERVICE, "--json"],
-                stdin=value + "\n",
-            )
-            if set_proc is None:
-                return _fail("secret set", "timed out")
-            if set_proc.returncode != 0:
-                return _fail("secret set", f"exit {set_proc.returncode}")
-            created_secret = True
-            leak = _assert_value_not_exposed("secret set", value, set_proc)
-            if leak is not None:
-                return leak
-
-            ls_proc = _run_acq(["--backend", "sbx", "secret", "ls", "--json"])
-            if ls_proc is None:
-                return _fail("secret ls", "timed out")
-            if ls_proc.returncode != 0:
-                return _fail("secret ls", f"exit {ls_proc.returncode}")
-            leak = _assert_value_not_exposed("secret ls", value, ls_proc)
-            if leak is not None:
-                return leak
-
-            rm_proc = _run_acq(
-                ["--backend", "sbx", "secret", "rm", "-g", SERVICE, "--json"]
-            )
-            if rm_proc is None:
-                return _fail("secret rm", "timed out")
-            if rm_proc.returncode != 0:
-                return _fail("secret rm", f"exit {rm_proc.returncode}")
-            created_secret = False
-            leak = _assert_value_not_exposed("secret rm", value, rm_proc)
-            if leak is not None:
-                return leak
-
-            # sbx-only provider-credential round-trip.
-            pc_set = _run_acq(
-                ["--backend", "sbx", "provider-credential", "set", PROVIDER, KEY_ENV,
-                 "--host", CRED_HOST, "--json"],
-                stdin=value + "\n",
-            )
-            if pc_set is None:
-                return _fail("provider-credential set", "timed out")
-            if pc_set.returncode != 0:
-                return _fail("provider-credential set", f"exit {pc_set.returncode}")
-            did_provider_credential = True
-            leak = _assert_value_not_exposed("provider-credential set", value, pc_set)
-            if leak is not None:
-                return leak
-
-            pc_ls = _run_acq(["--backend", "sbx", "provider-credential", "ls", "--json"])
-            if pc_ls is None:
-                return _fail("provider-credential ls", "timed out")
-            if pc_ls.returncode != 0:
-                return _fail("provider-credential ls", f"exit {pc_ls.returncode}")
-            leak = _assert_value_not_exposed("provider-credential ls", value, pc_ls)
-            if leak is not None:
-                return leak
-
-            pc_rm = _run_acq(
-                ["--backend", "sbx", "provider-credential", "rm", PROVIDER, "--json"]
-            )
-            if pc_rm is None:
-                return _fail("provider-credential rm", "timed out")
-            if pc_rm.returncode != 0:
-                return _fail("provider-credential rm", f"exit {pc_rm.returncode}")
-            leak = _assert_value_not_exposed("provider-credential rm", value, pc_rm)
-            if leak is not None:
-                return leak
-
-        print(f"qualify-backend-cell: PASS backend={backend}")
-        return 0
-    finally:
-        # Cleanup discipline: leave the host exactly as found, even on failure.
-        # Remove the sandbox (best-effort) and the throwaway workspace.
-        if sandbox_name:
-            _run_acq(["--backend", backend, "rm", sandbox_name, "--json"], timeout=STEP_TIMEOUT)
-        if workspace:
-            shutil.rmtree(workspace, ignore_errors=True)
-        # Remove the regular secret if a step failed before its rm.
-        if created_secret:
-            _run_acq(["--backend", "sbx", "secret", "rm", "-g", SERVICE, "--json"], timeout=STEP_TIMEOUT)
-        # ``provider-credential rm`` removed the host binding; drop the raw sbx
-        # custom secret it left behind so a re-run stays idempotent.
-        if did_provider_credential:
-            _remove_sbx_custom_secret(KEY_ENV)
+        cell = Cell(backend, names, str(workspace), Path(env["ACQ_STATE_DIR"]), acq, raw, canary)
+        return cell.run()
 
 
 if __name__ == "__main__":

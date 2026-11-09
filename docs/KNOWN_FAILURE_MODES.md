@@ -43,6 +43,38 @@ a checked-in fixture, and the live transcript stays open.
 
 ---
 
+## Deferred: Tier-3 oracle facets the cell oracle cannot check unattended
+
+**Status:** deferred (tracked per AGENTS.md "Track Deferred Work").
+
+`scripts/qualify-backend-cell` checks the boot contract, credential binding and
+in-guest non-exposure, built-in kit application, host-side secret non-exposure,
+and (msb) the read-only trusted-config mount, including the committed
+`scripts/qualify-msb-ro-mount` canary. Three ADR-0044m facets are not in it:
+
+1. **Swap-on-the-wire substitution.** Showing that the real credential (not the
+   placeholder) reaches the bound host needs an endpoint that reports what it
+   received, and the oracle must not send even a throwaway value to a host that is
+   not on the approved endpoint list, or open a listener on the host. **Unblock
+   trigger:** the maintainer names an approved echo endpoint (or an in-repo test
+   service the backends can reach); then add a step that binds the throwaway
+   value to it and compares what it saw.
+2. **Attach.** Needs a terminal; covered by the Tier-2 tests
+   (`py-acq/tests/test_exec.py`) until a PTY-driving step is added.
+3. **Version fail-closed against a real older backend.** Covered offline by the
+   Tier-1 vectors; a live check needs a second, older backend install on the host.
+
+**Expected today:** the Python implementation fails the cell oracle on every
+cell (msb has no credential path, no built-in kits are applied, and no read-only
+trusted-config mount is established), so a Tier-3 run reports `FAIL` with each
+missing control named, rather than qualifying a sandbox that lacks them. The
+first live run with the extended oracle should also confirm that `sbx` accepts the
+nonce-named global secret service, and that neither backend CLI reads the
+redirected `XDG_*` directories (if one does, its steps fail closed rather than
+pass).
+
+---
+
 ## Provider-input validator dependencies are missing
 
 ### Symptoms

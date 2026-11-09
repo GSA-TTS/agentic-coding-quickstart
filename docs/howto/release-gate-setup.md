@@ -126,6 +126,16 @@ Settings > Branches (or Rules) > the `main` protection rule:
 > Requiring the check before step 2 makes the release PR unmergeable: the check
 > would never report on it.
 
+> **On a personal fork** (`mogul/agentic-coding-quickstart`): every `CODEOWNERS` line
+> names a `GSA-TTS` team, which cannot own files in a repository outside that
+> organisation, so GitHub reports each line as an unknown owner and code-owner review
+> cannot be required there. Until the fork's maintainer decides how to replace it
+> (for example a fork-only `CODEOWNERS` naming the fork owner, or a ruleset that
+> requires one approving review on `main`), the gate on the fork is advisory: it
+> reports a stale cell but does not stop the merge. Requiring the `Tier-3 release
+> gate` status check in the fork's `main` ruleset is the part that needs no policy
+> choice. Both are repository settings, not code.
+
 Verify: open a throwaway PR and confirm `Tier-3 release gate` is listed as required.
 
 ## 4. Keep the cells current
