@@ -4951,6 +4951,9 @@ _acq_provider_input_control_plane() {
   mkdir -p "$dest" || return 1
   (
     cd "$dest" || exit 1
+    # Keep every git call below on this checkout, whatever GIT_DIR or config
+    # injection the caller's environment carries (see _kit_git_isolate).
+    _kit_git_isolate
     export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/echo GCM_INTERACTIVE=never
     git init -q || exit 1
     git remote add origin "${PATTERNS_KIT_REPO#git+}" || exit 1

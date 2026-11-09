@@ -3367,19 +3367,22 @@ Python implementation always derived names this way.
 
 ### Symptoms
 
-- In a workspace whose directory name contains non-ASCII letters (for example
-  `~/café`), `acq run opencode` creates a new sandbox instead of re-attaching to
-  the one created before the upgrade.
+- In a workspace whose directory name contains lowercase accented letters (for
+  example `~/café`), `acq run opencode` creates a new sandbox instead of
+  re-attaching to the one created before the upgrade.
 - `acq ls` shows both: the old name keeps the letters (`opencode-café`), the
-  new one has a hyphen in their place (`opencode-caf`).
-- The same happens for a directory name that contains a newline or another
-  control character.
+  new one drops them (`opencode-caf`; a letter in the middle of the name becomes
+  a hyphen).
+- Only sandboxes created while acq ran under a glibc locale such as
+  `en_US.UTF-8` are affected. Under `C`, `C.UTF-8` or `POSIX` the old slug
+  already turned these letters into hyphens.
 
 ### Root Cause
 
-The derived name is `<agent>-<slug of the workspace directory name>`. The slug
-used to keep non-ASCII letters (and newlines) when the shell ran in a UTF-8
-locale. It now keeps only ASCII `a-z` and `0-9` and turns every other run of
+The derived name is `<agent>-<slug of the workspace directory name>`. Under a
+glibc locale such as `en_US.UTF-8`, the old slug kept lowercase accented letters
+(uppercase ones, such as `Ü`, were already dropped), and in any locale it kept a
+newline. It now keeps only ASCII `a-z` and `0-9` and turns every other run of
 characters into one hyphen, the same as the Python implementation, so names are
 always a single line of a fixed character set (`slugify` in
 `acq.backends/common.sh`). The old sandbox is not renamed or removed; it keeps

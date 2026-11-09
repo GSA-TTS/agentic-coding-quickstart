@@ -157,3 +157,26 @@ teardown() { acq_teardown_stubs; }
   assert_equal "$(cat "$other/.git/config")" "$before"
   assert [ ! -e "$other/.git/index" ]
 }
+
+# Configuration injected through the environment must not reach the cache's git
+# commands. core.worktree is checked although git 2.53 already ignores it here
+# (the cache's .git is found from the current directory); core.hooksPath shows
+# the injection is really cut off, since a post-checkout hook would otherwise run.
+@test "reuse: config injected through GIT_CONFIG_PARAMETERS or GIT_CONFIG_COUNT does not reach the cache" {
+  local elsewhere="$STUBDIR/elsewhere" hooks="$STUBDIR/hooks" path
+  mkdir -p "$elsewhere" "$hooks"
+  printf '#!/bin/sh\n: >"%s"\n' "$STUBDIR/hook-ran" >"$hooks/post-checkout"
+  chmod +x "$hooks/post-checkout"
+  path=$(GIT_CONFIG_PARAMETERS="'core.worktree'='$elsewhere' 'core.hookspath'='$hooks'" \
+    kit_translate_fetch "$REF" "$STUBDIR/params")
+  assert_equal "$(cat "$path/spec.yaml")" first
+  assert_equal "$(ls -A "$elsewhere")" ""
+  assert [ ! -e "$STUBDIR/hook-ran" ]
+  rm -rf "${_ACQ_KIT_FETCH_ROOT:?}"/*
+  path=$(GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.worktree GIT_CONFIG_VALUE_0="$elsewhere" \
+    GIT_CONFIG_KEY_1=core.hooksPath GIT_CONFIG_VALUE_1="$hooks" \
+    kit_translate_fetch "$REF" "$STUBDIR/count")
+  assert_equal "$(cat "$path/spec.yaml")" first
+  assert_equal "$(ls -A "$elsewhere")" ""
+  assert [ ! -e "$STUBDIR/hook-ran" ]
+}

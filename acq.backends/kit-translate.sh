@@ -45,14 +45,26 @@
 # These read the spec file each call (kits are tiny; simplicity over caching).
 
 # _kit_git_isolate — unset the environment variables that point git at a
-# repository, index, object store or ref namespace other than the one found from
-# the current directory or -C. Call it inside a subshell before running git on
-# the kit cache: an inherited GIT_DIR (set by a hook, an editor or a parent git
-# command) would otherwise make `git init`, `remote`, `config` and `fetch`
-# rewrite that repository instead of the cache.
+# repository, work tree, index, object store or ref namespace other than the one
+# found from the current directory or -C, or that inject configuration. Call it
+# inside a subshell before running git on the kit cache: an inherited GIT_DIR
+# (set by a hook, an editor or a parent git command) would otherwise make
+# `git init`, `remote`, `config` and `fetch` rewrite that repository, GIT_CONFIG
+# would redirect `git config` writes to another file, and GIT_CONFIG_PARAMETERS
+# or GIT_CONFIG_COUNT/KEY_n/VALUE_n could set core.worktree and move the
+# checkout. The fixed list is a superset of `git rev-parse --local-env-vars`
+# (git 2.53), plus GIT_NAMESPACE; a test checks it against the installed git.
+# GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM are kept: they select the user's own
+# config files, which the authenticated retry reads for credential helpers.
 _kit_git_isolate() {
-  unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
-    GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_PREFIX
+  local _v
+  unset GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG GIT_CONFIG_PARAMETERS \
+    GIT_CONFIG_COUNT GIT_OBJECT_DIRECTORY GIT_DIR GIT_WORK_TREE \
+    GIT_IMPLICIT_WORK_TREE GIT_GRAFT_FILE GIT_INDEX_FILE GIT_NO_REPLACE_OBJECTS \
+    GIT_REPLACE_REF_BASE GIT_PREFIX GIT_SHALLOW_FILE GIT_COMMON_DIR GIT_NAMESPACE
+  for _v in $(compgen -v GIT_CONFIG_KEY_) $(compgen -v GIT_CONFIG_VALUE_); do
+    unset "$_v"
+  done
 }
 
 # Only full immutable commit IDs participate. Symbolic/abbreviated refs keep

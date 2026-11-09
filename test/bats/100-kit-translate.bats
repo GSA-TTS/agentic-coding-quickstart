@@ -548,3 +548,42 @@ GITSTUB
   assert_equal "$(cat "$other/.git/config")" "$before"
   [ -d "$STUBDIR/gitdirdest/.git" ]
 }
+
+@test "kit git isolation: every git local-env var and config-injection var is cleared" {
+  local vars
+  vars=$("$ACQ_TEST_REAL_GIT" rev-parse --local-env-vars)
+  [ -n "$vars" ]
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    for v in $1 GIT_NAMESPACE GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_KEY_12 GIT_CONFIG_VALUE_12; do
+      export "$v=set-by-test"
+    done
+    _kit_git_isolate
+    env | grep "=set-by-test\$" || true
+  ' _ "$vars"
+  assert_success
+  assert_output ''
+}
+
+@test "kit fetch: an inherited GIT_CONFIG is never written to" {
+  local fake="$STUBDIR/fake-global-config"
+  : >"$fake"
+  run env GIT_CONFIG="$fake" bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    kit_translate_fetch "git+https://example.test/x/y.git#ref=deadbeef&dir=kit" "'"$STUBDIR"'/gitconfigdest" 2>&1
+  '
+  assert_equal "$(cat "$fake")" ""
+  grep -q 'sparseCheckout = true' "$STUBDIR/gitconfigdest/.git/config"
+}
+
+@test "provider-input control plane: an inherited GIT_DIR leaves that repository's config untouched" {
+  local other="$STUBDIR/other-cp-repo" before
+  "$ACQ_TEST_REAL_GIT" init -q "$other"
+  before=$(cat "$other/.git/config")
+  run env GIT_DIR="$other/.git" GIT_WORK_TREE="$other" bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    _acq_provider_input_control_plane "'"$STUBDIR"'/control-plane" 2>&1
+  '
+  assert_equal "$(cat "$other/.git/config")" "$before"
+  grep -q '\[remote "origin"\]' "$STUBDIR/control-plane/.git/config"
+}
