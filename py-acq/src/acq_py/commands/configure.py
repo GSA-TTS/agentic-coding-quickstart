@@ -2,9 +2,9 @@
 
 A port of the Bash ``acq_configure`` / ``_acq_configure_show_current`` and the
 prompt widgets in ``acq.backends/prompt.sh``. The verb always opens by printing
-the settings in effect. On an interactive terminal it then asks the Bash
-questions in the Bash order, with the Bash defaults, and writes the same three
-``config.yaml`` keys Bash writes:
+the current settings, each with the layer it comes from. On an interactive
+terminal it then asks the Bash questions in the Bash order, with the Bash
+defaults, and writes the same three ``config.yaml`` keys Bash writes:
 
 * ``extra_kits`` — the chosen opt-in kit NAMES (space-separated; none removes
   the key), from a checkbox list that shows the built-in kits as frozen rows;
@@ -12,21 +12,27 @@ questions in the Bash order, with the Bash defaults, and writes the same three
   per-sandbox GitHub-token prompt;
 * ``provider_kit`` — the first checked provider-kit candidate.
 
-Every write goes through :func:`acq_py.config.write_field`, so other keys
-(including ones acq does not know) are kept, a symlinked config is written
-through, and each write is atomic. The dispatcher runs the forward-migration
-pre-step before an interactive run, which refuses a newer ``config.yaml``
-schema exactly as the other mutating verbs do.
+The Python acq does not read those three keys yet: they take effect only under
+the Bash acq for now, and the report says so (``honoured_by_python: false`` in
+``--json``). Every write goes through :func:`acq_py.config.write_field`, so other
+keys (including ones acq does not know) are kept, a symlinked config is written
+through, and each write is atomic. A newer ``config.yaml`` schema is refused
+before the first prompt; the forward-migration pre-step (the one every mutating
+verb takes) runs only just before the first write, so cancelling leaves a legacy
+file untouched.
 
 Without a terminal (stdin is not a TTY, ``ACQ_NO_PROMPT`` or ``ACQ_NO_PROGRESS``
 is set, or ``--json`` was given) nothing is written. ``--json`` reports each
-setting as ``{key, value, source}``, where ``source`` is the layer the value
-came from: ``flag``, ``env``, ``config`` or ``default``. Values are settings,
-never credentials: the provider-credential entry lists bindings (an env var name
-and its hosts), and no secret store or keychain is consulted.
+setting as ``{key, value, source, honoured_by_python}``, where ``source`` is the
+layer the value came from: ``flag``, ``env``, ``config`` or ``default``. The
+provider-credential setting also lists each binding with its own layer (its
+``source`` is ``mixed`` when both layers contribute). Values are settings, never
+credentials: bindings are an env var name and its hosts, userinfo in a kit ref is
+redacted, and no secret store or keychain is consulted.
 
 The first-run offer and the create-time kit picker that Bash also builds on these
-widgets are not ported (accepted gaps, ADR-0048m).
+widgets are not ported (accepted gaps, ADR-0048m; the deliberate differences are
+listed in py-acq/README.md under "configure").
 """
 
 from __future__ import annotations
@@ -36,8 +42,9 @@ import json
 import os
 import re
 import shutil
+import signal
 import sys
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from typing import NamedTuple
 
 from .. import backends, config, envelope, errors, kits, provider_creds
@@ -66,7 +73,13 @@ PROVIDER_KIT_DEFAULT = "agentic-coding-patterns/" + kits.PROVIDER_KIT_NAMES[0]
 SCOPE_PROMPT = "Scope a per-sandbox GitHub token by default (on create)?"
 _HEADER = "? Select kits (dimmed rows are always applied · ↑/↓ move · SPACE toggle · ENTER confirm · q cancel)"
 
-FLAG, ENV, CONFIG, DEFAULT = "flag", "env", "config", "default"
+FLAG, ENV, CONFIG, DEFAULT, MIXED = "flag", "env", "config", "default", "mixed"
+
+# The keys configure writes that only the Bash acq reads so far.
+BASH_ONLY_KEYS = frozenset({"extra_kits", "scope_github_token", "provider_kit"})
+BASH_ONLY_NOTE = (
+    "      note: extra kits, scope GitHub token and provider kit take effect only under the Bash acq for now."
+)
 
 # Raw terminal control bytes (C0, DEL, C1) are dropped from displayed labels.
 _CONTROL_RE = re.compile("[\x00-\x1f\x7f-\x9f]")
@@ -77,6 +90,30 @@ class Setting(NamedTuple):
     value: str | None
     source: str
     origin: str | None = None  # the flag or env var behind a flag/env value
+    entries: tuple[tuple[str, str], ...] = ()  # (value, source) per binding
+
+    def as_json(self) -> dict:
+        doc: dict = {
+            "key": self.key,
+            "value": _redacted(self.value),
+            "source": self.source,
+            "honoured_by_python": self.key not in BASH_ONLY_KEYS,
+        }
+        if self.entries:
+            doc["entries"] = [{"value": value, "source": source} for value, source in self.entries]
+        return doc
+
+
+def _redacted(value: str | None) -> str | None:
+    return None if value is None else kits.redact_userinfo(value)
+
+
+class Signalled(BaseException):
+    """SIGTERM or SIGHUP arrived while the terminal was in key mode."""
+
+    def __init__(self, signum: int):
+        super().__init__(signum)
+        self.signum = signum
 
 
 # ---------------------------------------------------------------------------
@@ -116,15 +153,15 @@ def _bindings_setting() -> Setting:
     bindings = provider_creds.list_bindings()
     if not bindings:
         return Setting("provider_credential_bindings", None, DEFAULT)
-    pairs = []
+    entries = []
     for entry in bindings:
         pair = f"{entry['provider']}={entry['key_env']}"
         if entry["hosts"]:
             pair += "@" + ",".join(entry["hosts"])
-        pairs.append(pair)
-    if any(entry["source_layer"] == provider_creds.ENV_LAYER for entry in bindings):
-        return Setting("provider_credential_bindings", " ".join(pairs), ENV, provider_creds.BINDINGS_ENV)
-    return Setting("provider_credential_bindings", " ".join(pairs), CONFIG)
+        entries.append((pair, ENV if entry["source_layer"] == provider_creds.ENV_LAYER else CONFIG))
+    layers = {source for _, source in entries}
+    source = layers.pop() if len(layers) == 1 else MIXED
+    return Setting("provider_credential_bindings", " ".join(p for p, _ in entries), source, entries=tuple(entries))
 
 
 def _kit_sources_setting() -> Setting:
@@ -160,7 +197,11 @@ def _show_current(settings: list[Setting]) -> None:
 
     def shown(key: str, placeholder: str, hint: str = "") -> str:
         setting = by_key[key]
-        text = (setting.value or placeholder) + hint
+        if setting.entries:  # each binding names its own layer when one is env
+            value = " ".join(f"{v} [{src}]" if src == ENV else v for v, src in setting.entries)
+        else:
+            value = _redacted(setting.value) or ""
+        text = (value or placeholder) + hint
         if setting.origin is not None:
             text += f"   [from {setting.origin}]"
         return text
@@ -172,6 +213,7 @@ def _show_current(settings: list[Setting]) -> None:
     _err(f"      provider creds:     {shown('provider_credential_bindings', '<none>', '   (acq provider-credential ls)')}")
     _err(f"      provider kit:       {shown('provider_kit', '<none>', '   (acq kit-source ls)')}")
     _err(f"      kit sources:        {shown('kit_sources', '<shipped default>')}")
+    _err(BASH_ONLY_NOTE)
     _err("")
 
 
@@ -192,7 +234,10 @@ def interactive(emit_json: bool) -> bool:
     return bool(isatty is not None and isatty())
 
 
-def run_configure(emit_json: bool, backend_override: str | None) -> int:
+def run_configure(emit_json: bool, backend_override: str | None, before_write: Callable[[], int | None]) -> int:
+    """Report the settings; at a terminal, ask and write. ``before_write`` is the
+    migration pre-step: called once just before the first write, it returns an
+    exit code (already reported) to stop, or ``None`` to go on."""
     try:
         settings = current_settings(backend_override)
     except ValueError as exc:
@@ -205,7 +250,7 @@ def run_configure(emit_json: bool, backend_override: str | None) -> int:
             "config_path": str(config.config_path()),
             "interactive": False,
             "changed": False,
-            "settings": [{"key": s.key, "value": s.value, "source": s.source} for s in settings],
+            "settings": [s.as_json() for s in settings],
         }
         print(json.dumps(envelope.success(COMMAND, data)))
         return errors.EXIT_SUCCESS
@@ -214,12 +259,23 @@ def run_configure(emit_json: bool, backend_override: str | None) -> int:
         _err("acq: non-interactive; configuration unchanged.")
         _err("      Run 'acq configure' from a terminal to change kits/token scoping.")
         return errors.EXIT_SUCCESS
+    try:
+        config.config_schema()
+    except config.ConfigSchemaError as exc:
+        # Refused before any prompt; the same code and advice as the pre-step.
+        return common._operational_failure(
+            COMMAND, errors.STATE_SCHEMA_UNSUPPORTED, str(exc),
+            "repair or remove config.yaml so its schema marker is readable", False,
+        )
     term = Terminal()
     try:
-        return _configure_interactively(term)
+        return _configure_interactively(term, before_write)
     except KeyboardInterrupt:
         term.write("\033[?25h\n")
         return 130
+    except Signalled as exc:
+        term.write("\033[?25h\n")
+        return 128 + exc.signum
     except OSError as exc:
         where = f" ({exc.filename})" if exc.filename else ""
         return common._operational_failure(
@@ -229,7 +285,7 @@ def run_configure(emit_json: bool, backend_override: str | None) -> int:
         )
 
 
-def _configure_interactively(term: Terminal) -> int:
+def _configure_interactively(term: Terminal, before_write: Callable[[], int | None]) -> int:
     current_extras = (config.read_field("extra_kits") or "").split()
     rows = [(name, BUILTIN_KIT_DESCS[name]) for name in kits.BUILTIN_KIT_NAMES]
     rows += list(OPTIN_KITS)
@@ -237,6 +293,9 @@ def _configure_interactively(term: Terminal) -> int:
     chosen = multiselect(term, len(kits.BUILTIN_KIT_NAMES), defaults, rows)
     if chosen is None:
         return errors.EXIT_SUCCESS
+    refused = before_write()
+    if refused is not None:
+        return refused
     selected = " ".join(OPTIN_KITS[i - 1][0] for i in chosen)
     config.write_field("extra_kits", selected)
 
@@ -388,6 +447,30 @@ def _read_key_windows() -> str:  # pragma: no cover - Windows console only
     return "QUIT"
 
 
+def _raise_signalled(signum: int, _frame: object) -> None:
+    raise Signalled(signum)
+
+
+@contextlib.contextmanager
+def _signals_raise() -> Iterator[None]:
+    """Turn SIGTERM and SIGHUP into :class:`Signalled` for the duration, so the
+    ``finally`` blocks restore the terminal mode and the cursor."""
+    saved: list[tuple[int, signal.Handlers | int | Callable | None]] = []
+    for name in ("SIGTERM", "SIGHUP"):
+        signum = getattr(signal, name, None)
+        if signum is None:  # no SIGHUP on Windows
+            continue
+        try:
+            saved.append((signum, signal.signal(signum, _raise_signalled)))
+        except (ValueError, OSError):  # not the main thread
+            continue
+    try:
+        yield
+    finally:
+        for signum, handler in saved:
+            signal.signal(signum, signal.SIG_DFL if handler is None else handler)
+
+
 def _sanitize(text: str) -> str:
     return _CONTROL_RE.sub("", text)
 
@@ -411,7 +494,7 @@ def multiselect(term: Terminal, locked: int, defaults: Sequence[int], items: Seq
     cursor = first
     cols = term.columns()
     bold, reset = term.sgr("1"), term.sgr("0")
-    with term.keys():
+    with _signals_raise(), term.keys():
         term.write("\033[?25l")
         try:
             term.write(f"{bold}{_fit(_HEADER, cols)}{reset}\n")

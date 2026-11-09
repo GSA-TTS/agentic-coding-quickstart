@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "id": "cli/configure-json-layers",
-  "oracle": "ADR-0031 / ADR-0038m \u00a72: non-interactive `configure --json` changes nothing and reports every setting as key, value and source layer (flag, env, config, default); provider credentials appear only as bindings, never as a secret value",
+  "oracle": "ADR-0031 / ADR-0038m \u00a72: non-interactive `configure --json` reports every setting as key, value, source layer (flag, env, config, default) and whether the Python acq honours it. This vector pins the reported values only; that nothing is written and that no secret value is printed are enforced by py-acq/tests/test_configure.py (test_no_secret_value_reaches_the_output, test_non_interactive_leaves_a_legacy_config_unchanged)",
   "tier": 1,
   "backend": null,
   "platform": "any",
@@ -47,32 +47,44 @@
             {
               "key": "backend",
               "value": "sbx",
-              "source": "flag"
+              "source": "flag",
+              "honoured_by_python": true
             },
             {
               "key": "extra_kits",
               "value": "git+https://example.invalid/kit",
-              "source": "env"
+              "source": "env",
+              "honoured_by_python": false
             },
             {
               "key": "scope_github_token",
               "value": "no",
-              "source": "default"
+              "source": "default",
+              "honoured_by_python": false
             },
             {
               "key": "provider_credential_bindings",
               "value": "opencode-go=OPENCODE_GO_API_KEY@opencode.ai",
-              "source": "config"
+              "source": "config",
+              "honoured_by_python": true,
+              "entries": [
+                {
+                  "value": "opencode-go=OPENCODE_GO_API_KEY@opencode.ai",
+                  "source": "config"
+                }
+              ]
             },
             {
               "key": "provider_kit",
               "value": "agentic-coding-patterns/usai-provider",
-              "source": "default"
+              "source": "default",
+              "honoured_by_python": false
             },
             {
               "key": "kit_sources",
               "value": "github.com/team/kits@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|kits",
-              "source": "config"
+              "source": "config",
+              "honoured_by_python": true
             }
           ]
         }

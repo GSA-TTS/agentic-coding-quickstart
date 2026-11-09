@@ -40,7 +40,7 @@
       "vectors": ["cli/lifecycle-create-config-sbx", "cli/lifecycle-config-backend-invalid", "cli/backend-set", "cli/backend-set-unknown", "cli/backend-unset", "cli/backend-unset-none"]
     },
     {
-      "contract": "ADR-0031 configure: non-interactive --json reports each setting with its value and source layer (flag, env, config, default), writes nothing, and never prints a secret value",
+      "contract": "ADR-0031 configure: non-interactive --json reports each setting with its value, source layer (flag, env, config, default) and honoured_by_python (the no-write and no-secret guarantees are enforced by py-acq/tests/test_configure.py)",
       "vectors": ["cli/configure-json-layers"]
     },
     {

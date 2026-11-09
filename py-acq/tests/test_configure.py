@@ -83,12 +83,13 @@ def test_json_reports_each_setting_with_its_source_layer(monkeypatch, tmp_path, 
     assert doc["data"]["config_path"] == str(path)
     assert doc["data"]["interactive"] is False and doc["data"]["changed"] is False
     assert doc["data"]["settings"] == [
-        {"key": "backend", "value": "sbx", "source": "flag"},
-        {"key": "extra_kits", "value": "git+https://example.invalid/kit", "source": "env"},
-        {"key": "scope_github_token", "value": "yes", "source": "config"},
-        {"key": "provider_credential_bindings", "value": None, "source": "default"},
-        {"key": "provider_kit", "value": "example/kit", "source": "config"},
-        {"key": "kit_sources", "value": f"github.com/team/kits@{'a' * 40}|kits", "source": "config"},
+        {"key": "backend", "value": "sbx", "source": "flag", "honoured_by_python": True},
+        {"key": "extra_kits", "value": "git+https://example.invalid/kit", "source": "env", "honoured_by_python": False},
+        {"key": "scope_github_token", "value": "yes", "source": "config", "honoured_by_python": False},
+        {"key": "provider_credential_bindings", "value": None, "source": "default", "honoured_by_python": True},
+        {"key": "provider_kit", "value": "example/kit", "source": "config", "honoured_by_python": False},
+        {"key": "kit_sources", "value": f"github.com/team/kits@{'a' * 40}|kits", "source": "config",
+         "honoured_by_python": True},
     ]
     assert path.read_bytes() == b"schema: 1\nscope_github_token: yes\nprovider_kit: example/kit\n"
 
@@ -102,13 +103,16 @@ def test_json_backend_and_provider_layers(monkeypatch, tmp_path, capsys):
     rc, out, _ = _run(capsys, "configure", "--json")
     assert rc == 0
     settings = {s["key"]: s for s in json.loads(out)["data"]["settings"]}
-    assert settings["backend"] == {"key": "backend", "value": "sbx", "source": "config"}
-    assert settings["provider_kit"] == {"key": "provider_kit", "value": "", "source": "env"}
+    assert settings["backend"] == {"key": "backend", "value": "sbx", "source": "config", "honoured_by_python": True}
+    assert settings["provider_kit"] == {"key": "provider_kit", "value": "", "source": "env", "honoured_by_python": False}
     assert settings["provider_credential_bindings"] == {
-        "key": "provider_credential_bindings", "value": "opencode-go=OPENCODE_GO_API_KEY@opencode.ai", "source": "env"}
+        "key": "provider_credential_bindings", "value": "opencode-go=OPENCODE_GO_API_KEY@opencode.ai",
+        "source": "env", "honoured_by_python": True,
+        "entries": [{"value": "opencode-go=OPENCODE_GO_API_KEY@opencode.ai", "source": "env"}]}
     monkeypatch.setenv("ACQ_BACKEND", "msb")
     rc, out, _ = _run(capsys, "configure", "--json")
-    assert json.loads(out)["data"]["settings"][0] == {"key": "backend", "value": "msb", "source": "env"}
+    assert json.loads(out)["data"]["settings"][0] == {
+        "key": "backend", "value": "msb", "source": "env", "honoured_by_python": True}
 
 
 def test_json_config_layer_bindings(monkeypatch, tmp_path, capsys):
@@ -123,7 +127,59 @@ def test_json_config_layer_bindings(monkeypatch, tmp_path, capsys):
         "key": "provider_credential_bindings",
         "value": "acme=ACME_KEY@a.example.gov,b.example.gov bare=BARE_KEY",
         "source": "config",
+        "honoured_by_python": True,
+        "entries": [{"value": "acme=ACME_KEY@a.example.gov,b.example.gov", "source": "config"},
+                    {"value": "bare=BARE_KEY", "source": "config"}],
     }
+
+
+def test_bindings_from_both_layers_are_labelled_per_entry(monkeypatch, tmp_path, capsys):
+    _state_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_PROVIDER_CREDENTIAL_SEED", json.dumps(
+        [{"provider": "acme", "key_env": "ACME_KEY", "hosts": ["a.example.gov"]}]))
+    monkeypatch.setenv("ACQ_PROVIDER_CREDENTIAL_BINDINGS", "opencode-go=OPENCODE_GO_API_KEY@opencode.ai")
+    rc, out, _ = _run(capsys, "configure", "--json")
+    assert rc == 0
+    setting = json.loads(out)["data"]["settings"][3]
+    assert setting["source"] == "mixed"
+    # The order is provider-credential ls's (by layer, then provider).
+    assert setting["entries"] == [{"value": "opencode-go=OPENCODE_GO_API_KEY@opencode.ai", "source": "env"},
+                                  {"value": "acme=ACME_KEY@a.example.gov", "source": "config"}]
+    rc, _, err = _run(capsys, "configure")
+    assert ("      provider creds:     opencode-go=OPENCODE_GO_API_KEY@opencode.ai [env] acme=ACME_KEY@a.example.gov"
+            "   (acq provider-credential ls)\n") in err
+
+
+def test_kit_ref_userinfo_is_redacted(monkeypatch, tmp_path, capsys):
+    _state_env(monkeypatch, tmp_path)
+    token = "ghp_CONFIGURE-USERINFO-TOKEN"
+    monkeypatch.setenv("ACQ_EXTRA_KITS", f"git+https://user:{token}@github.com/o/r.git#ref=x other")
+    monkeypatch.setenv("ACQ_PROVIDER_KITS", f"https://{token}@example.gov/kit")
+    rc, out, _ = _run(capsys, "configure", "--json")
+    assert rc == 0 and token not in out
+    settings = {s["key"]: s["value"] for s in json.loads(out)["data"]["settings"]}
+    assert settings["extra_kits"] == "git+https://***@github.com/o/r.git#ref=x other"
+    assert settings["provider_kit"] == "https://***@example.gov/kit"
+    rc, _, err = _run(capsys, "configure")
+    assert rc == 0 and token not in err and "git+https://***@github.com/o/r.git#ref=x other" in err
+    rc, out, _ = _run(capsys, "kit", "list", "--json")
+    assert rc == 0 and token not in out
+    data = json.loads(out)["data"]
+    assert data["extra"] == ["git+https://***@github.com/o/r.git#ref=x", "other"]
+    assert data["provider"] == ["https://***@example.gov/kit"]
+    assert configure.kits.redact_userinfo("git+ssh://git@github.com/o/r") == "git+ssh://***@github.com/o/r"
+    assert configure.kits.redact_userinfo("no url here") == "no url here"
+    assert configure.kits.redact_userinfo("https://u:p@ss@h.gov/x@y") == "https://***@h.gov/x@y"
+
+
+@pytest.mark.parametrize("argv", [["configure"], ["configure", "--json"]], ids=["human", "json"])
+def test_non_interactive_leaves_a_legacy_config_unchanged(monkeypatch, tmp_path, capsys, argv):
+    _state_env(monkeypatch, tmp_path)
+    legacy = b"backend: msb\nextra_kits: paseo\n"
+    path = _write_config(legacy)
+    rc, _, _ = _run(capsys, *argv)
+    assert rc == 0
+    assert path.read_bytes() == legacy
 
 
 def test_no_secret_value_reaches_the_output(tmp_path):
@@ -152,7 +208,8 @@ def test_human_report_names_flag_and_env_layers(monkeypatch, tmp_path, capsys):
     assert rc == 0 and out == ""
     assert "      default backend:    msb   [from --backend]\n" in err
     assert "      extra kits:         custom-ref   [from ACQ_EXTRA_KITS]\n" in err
-    assert err.endswith("acq: non-interactive; configuration unchanged.\n"
+    assert err.endswith(configure.BASH_ONLY_NOTE + "\n\n"
+                        "acq: non-interactive; configuration unchanged.\n"
                         "      Run 'acq configure' from a terminal to change kits/token scoping.\n")
     # An unknown --backend is refused, never reported as a flag-layer value.
     rc, out, _ = _run(capsys, "--backend", "bogus", "configure", "--json")
@@ -184,7 +241,10 @@ def test_human_report_matches_bash(tmp_path):
     python = subprocess.run([sys.executable, "-m", "acq_py", "configure"], env=py_env, capture_output=True,
                             stdin=subprocess.DEVNULL, timeout=120, check=False)
     assert bash.returncode == 0 and python.returncode == 0, (bash.stderr, python.stderr)
-    assert python.stderr == bash.stderr
+    # The one added line: the note that some keys take effect only under Bash.
+    note = configure.BASH_ONLY_NOTE.encode() + b"\n"
+    assert note in python.stderr
+    assert python.stderr.replace(note, b"", 1) == bash.stderr
     assert python.stdout == bash.stdout == b""
 
 
@@ -262,6 +322,33 @@ def test_cancel_writes_nothing(monkeypatch, tmp_path, capsys):
     assert path.read_bytes() == SEED
 
 
+def test_cancel_leaves_a_legacy_config_untouched(monkeypatch, tmp_path, capsys):
+    # The migration pre-step runs only before the first write, so a cancelled
+    # run does not even add the schema marker.
+    _state_env(monkeypatch, tmp_path)
+    legacy = b"backend: msb\nextra_kits: paseo\n"
+    path = _write_config(legacy)
+    _Script(["SPACE", "QUIT"]).install(monkeypatch)
+    assert _run(capsys, "configure")[0] == 0
+    assert path.read_bytes() == legacy
+
+
+def test_a_refusing_pre_step_stops_before_the_first_write(monkeypatch, tmp_path, capsys):
+    _state_env(monkeypatch, tmp_path)
+    path = _write_config(SEED)
+    _Script(["SPACE", "ENTER"]).install(monkeypatch)
+    calls = []
+
+    def refuse(emit_json, command):
+        calls.append(command)
+        return 1
+
+    monkeypatch.setattr(cli, "_migration_pre_step", refuse)
+    assert _run(capsys, "configure")[0] == 1
+    assert calls == ["configure"]
+    assert path.read_bytes() == SEED
+
+
 def test_cancel_at_the_provider_keeps_the_other_answers(monkeypatch, tmp_path, capsys):
     _state_env(monkeypatch, tmp_path)
     path = _write_config(b"schema: 1\nprovider_kit: example/kit\n")
@@ -296,13 +383,28 @@ def test_ctrl_c_exits_130_and_writes_nothing(monkeypatch, tmp_path, capsys):
     assert path.read_bytes() == SEED
 
 
-def test_newer_config_schema_is_refused(monkeypatch, tmp_path, capsys):
+def test_sigterm_in_key_mode_exits_143_and_writes_nothing(monkeypatch, tmp_path, capsys):
+    _state_env(monkeypatch, tmp_path)
+    path = _write_config(SEED)
+    _Script([]).install(monkeypatch)
+
+    def terminated(term):
+        raise configure.Signalled(15)
+
+    monkeypatch.setattr(configure.Terminal, "read_key", terminated)
+    rc, _, err = _run(capsys, "configure")
+    assert rc == 143
+    assert err.endswith("\033[?25h\033[?25h\n")
+    assert path.read_bytes() == SEED
+
+
+def test_newer_config_schema_is_refused_before_any_prompt(monkeypatch, tmp_path, capsys):
     _state_env(monkeypatch, tmp_path)
     path = _write_config(b"schema: 99\nbackend: msb\n")
-    _Script(["ENTER", "ENTER"], [""]).install(monkeypatch)
+    _Script([]).install(monkeypatch)  # no keys: a prompt would fail the test
     rc, _, err = _run(capsys, "configure")
     assert rc == 1
-    assert "schema 99" in err
+    assert "schema 99" in err and "Select kits" not in err
     assert path.read_bytes() == b"schema: 99\nbackend: msb\n"
 
 
@@ -419,32 +521,68 @@ class _Pty:
         env = dict(os.environ, ACQ_STATE_DIR=str(tmp_path / "state"), COLUMNS=columns)
         self.pid, self.fd = pty.fork()
         if self.pid == 0:  # child: the pty is its controlling terminal and stdin
-            os.execvpe(sys.executable, [sys.executable, "-m", "acq_py", "configure"], env)
+            try:
+                os.execvpe(sys.executable, [sys.executable, "-m", "acq_py", "configure"], env)
+            finally:
+                os._exit(127)
         self.output = b""
 
-    def wait_for(self, marker: bytes, count: int = 1, timeout: float = 60) -> None:
+    def _drain(self, wait: float) -> bool:
+        """Read what is ready within ``wait`` seconds; False at end of output."""
         import select
+
+        if not select.select([self.fd], [], [], wait)[0]:
+            return True
+        try:
+            chunk = os.read(self.fd, 4096)
+        except OSError:
+            return False
+        self.output += chunk
+        return bool(chunk)
+
+    def wait_for(self, marker: bytes, count: int = 1, timeout: float = 60) -> None:
         import time
 
         deadline = time.monotonic() + timeout
         while self.output.count(marker) < count and time.monotonic() < deadline:
-            if select.select([self.fd], [], [], 0.2)[0]:
-                try:
-                    chunk = os.read(self.fd, 4096)
-                except OSError:
-                    break
-                if not chunk:
-                    break
-                self.output += chunk
+            if not self._drain(0.2):
+                break
         assert self.output.count(marker) >= count, self.output
 
     def send(self, data: bytes) -> None:
         os.write(self.fd, data)
 
-    def exit_code(self) -> int:
-        _, status = os.waitpid(self.pid, 0)
+    def signal(self, signum: int) -> None:
+        os.kill(self.pid, signum)
+
+    def exit_code(self, timeout: float = 30) -> int:
+        """The child's exit code; the child is killed if it outlives ``timeout``."""
+        import signal
+        import time
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            pid, status = os.waitpid(self.pid, os.WNOHANG)
+            if pid:
+                self.pid = 0
+                return os.waitstatus_to_exitcode(status)
+            self._drain(0.1)
+        os.kill(self.pid, signal.SIGKILL)
+        os.waitpid(self.pid, 0)
         self.pid = 0
-        return os.waitstatus_to_exitcode(status)
+        raise AssertionError(f"acq configure did not exit within {timeout}s: {self.output!r}")
+
+    def assert_terminal_restored(self) -> None:
+        """Echo and line mode are back on, and the hidden cursor was shown again."""
+        import termios
+
+        try:
+            lflag = termios.tcgetattr(self.fd)[3]
+        except termios.error:  # a platform whose pty master does not report the mode
+            lflag = None
+        if lflag is not None:
+            assert lflag & termios.ECHO and lflag & termios.ICANON, "terminal left in key mode"
+        assert self.output.rfind(b"\x1b[?25h") > self.output.rfind(b"\x1b[?25l") >= 0, self.output
 
     def close(self) -> None:
         import signal
@@ -472,6 +610,7 @@ def test_interactive_flow_on_a_pseudo_terminal(tmp_path):
         term.send(b"j k \r")  # check the control-plane kit, uncheck the shipped default
         term.wait_for(b"configuration saved")
         assert term.exit_code() == 0, term.output
+        term.assert_terminal_restored()
     finally:
         term.close()
     assert b"\x1b[?25l" in term.output and b"\x1b[?25h" in term.output
@@ -490,10 +629,52 @@ def test_pseudo_terminal_q_cancels_and_rows_fit_the_width(tmp_path):
         term.send(b" q")
         term.wait_for(b"selection cancelled")
         assert term.exit_code() == 0, term.output
+        term.assert_terminal_restored()
     finally:
         term.close()
     rows = [line for line in term.output.decode("utf-8", "replace").split("\r\n") if "[x]" in line or "[ ]" in line]
     assert rows and all(len(re.sub("\x1b\\[[0-9;?]*[A-Za-z]", "", row)) <= 40 for row in rows), rows
+    assert path.read_bytes() == SEED
+
+
+@POSIX_ONLY
+@pytest.mark.parametrize("key,code", [(b"\x1b", 0), (b"\x03", 130)], ids=["lone-escape", "ctrl-c"])
+def test_pseudo_terminal_escape_and_ctrl_c_restore_the_terminal(tmp_path, key, code):
+    import time
+
+    path = _write_config(SEED)
+    term = _Pty(tmp_path)
+    try:
+        term.wait_for(b"oci-engine")
+        sent = time.monotonic()
+        term.send(b" " + key)  # toggle a row first: nothing may be written
+        assert term.exit_code(timeout=15) == code, term.output
+        assert time.monotonic() - sent < 15
+        term.assert_terminal_restored()
+    finally:
+        term.close()
+    if code == 0:
+        assert b"selection cancelled" in term.output
+    assert path.read_bytes() == SEED
+
+
+@POSIX_ONLY
+@pytest.mark.parametrize("signame", ["SIGTERM", "SIGHUP"])
+def test_pseudo_terminal_sigterm_and_sighup_restore_the_terminal(tmp_path, signame):
+    import signal
+
+    signum = getattr(signal, signame)
+    path = _write_config(SEED)
+    term = _Pty(tmp_path)
+    try:
+        term.wait_for(b"oci-engine")
+        term.send(b" ")
+        term.wait_for(b"[x] openchamber")
+        term.signal(signum)
+        assert term.exit_code() == 128 + signum, term.output
+        term.assert_terminal_restored()
+    finally:
+        term.close()
     assert path.read_bytes() == SEED
 
 

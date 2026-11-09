@@ -669,13 +669,12 @@ def _dispatch(parser: _Parser, parsed, emit_json: bool, backend_override: str | 
             return common._usage_failure(
                 "configure", f"unknown backend: {backend_override!r} (expected sbx or msb)", emit_json
             )
-        # Only the interactive form writes config.yaml, so only it takes the
-        # migration pre-step (which refuses a newer config schema).
-        if configure.interactive(emit_json):
-            pre_step = _migration_pre_step(emit_json, "configure")
-            if pre_step is not None:
-                return pre_step
-        return configure.run_configure(emit_json, backend_override)
+        # Only the interactive form writes config.yaml, and it takes the
+        # migration pre-step just before its first write, so a cancelled run
+        # leaves a legacy config untouched.
+        return configure.run_configure(
+            emit_json, backend_override, lambda: _migration_pre_step(emit_json, "configure")
+        )
 
     if parsed.command in ("create", "run", "ls", "stop", "rm", "exec", "attach", "shell", "cp", "ports"):
         _backend, exit_code = common._resolve_backend_for_lifecycle(backend_override, emit_json, parsed.command)
