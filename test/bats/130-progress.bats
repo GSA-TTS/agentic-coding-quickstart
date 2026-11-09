@@ -233,3 +233,33 @@ _prog() { # SHELL_SNIPPET
   assert_equal "$(grep -c EXIT_RC <<<"$output")" 1
   refute_output --partial 'NOT_REACHED'
 }
+
+@test "progress: the prior INT/TERM handler runs with \$? set to 130/143" {
+  _prog 'h() { echo "STATUS_$1=$?"; }
+    trap "h INT" INT; trap "h TERM" TERM
+    _acq_spin_install_traps
+    ( _acq_spin_cleanup_signal TERM )
+    _acq_spin_cleanup_signal INT'
+  assert_line 'STATUS_TERM=143'
+  assert_line 'STATUS_INT=130'
+}
+
+# With no prior handler the subshell must die BY the signal, not merely exit
+# 128+N. Bash makes that observable: it prints a "Terminated" notice for a
+# foreground child killed by TERM, `wait` reports 128+N for a background one,
+# and a `$(...)` killed by SIGINT makes the parent take SIGINT too (here, run
+# its INT trap).
+@test "progress: the re-raise is a real death by signal" {
+  _prog '( _acq_spin_install_traps; _acq_spin_cleanup_signal TERM )
+    echo "FG_RC=$?"
+    ( _acq_spin_install_traps; _acq_spin_cleanup_signal TERM ) &
+    wait "$!"; echo "WAIT_RC=$?"
+    trap "echo PARENT_INT" INT
+    out=$(trap - INT; _acq_spin_install_traps; _acq_spin_cleanup_signal INT)
+    echo "COMSUB_RC=$?"'
+  assert_output --partial 'Terminated'
+  assert_line 'FG_RC=143'
+  assert_line 'WAIT_RC=143'
+  assert_line 'PARENT_INT'
+  assert_line 'COMSUB_RC=130'
+}

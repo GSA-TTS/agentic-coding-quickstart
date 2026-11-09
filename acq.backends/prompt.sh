@@ -239,7 +239,12 @@ _acq_prompt_on_int() {
 # `$(...)`. Keep in sync with _acq_signal_self in progress.sh (each file can be
 # sourced without the other).
 _acq_prompt_signal_self() {
-  local _acq_self_pid="${BASHPID:-}"
+  local _acq_self_pid=""
+  # BASHPID only from bash 4 on: bash 3.2 has no such special variable, so
+  # there it is an ordinary one that the environment can set to another PID.
+  if [ "${BASH_VERSINFO[0]:-0}" -ge 4 ]; then
+    _acq_self_pid="${BASHPID:-}"
+  fi
   [ -n "$_acq_self_pid" ] || _acq_self_pid=$(exec sh -c 'echo "$PPID"')
   kill -s "$1" "$_acq_self_pid" 2>/dev/null || true
 }

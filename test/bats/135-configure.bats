@@ -324,6 +324,8 @@ after-quit:"
   run bash -c '
     ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
     set +e  # acq runs under set -e; keep going to report the status
+    # A re-raise aimed at $$ would land here and run this trap.
+    trap "echo PARENT_INT" INT
     _acq_prompt_read_key() {
       kill -s INT "$(exec sh -c '"'"'echo "$PPID"'"'"')"; _ACQ_PROMPT_KEY=ENTER
     }
@@ -335,7 +337,50 @@ after-quit:"
   assert_success
   assert_line 'SUB_RC=130'
   assert_line 'PARENT_ALIVE'
+  refute_line 'PARENT_INT'
   refute_output --partial 'NOT_REACHED'
+}
+
+# progress.sh and prompt.sh each carry a copy of the current-PID signal helper
+# (each file can be sourced without the other); the bodies must not drift.
+@test "prompt: the signal-self helper matches its progress.sh twin" {
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    a=$(declare -f _acq_signal_self | sed 1d)
+    b=$(declare -f _acq_prompt_signal_self | sed 1d)
+    [ -n "$a" ] && [ "$a" = "$b" ] && echo SAME
+  '
+  assert_output 'SAME'
+}
+
+# On bash 3.2 BASHPID is an ordinary variable, so the environment can point it
+# at another process. The helpers must ignore it there and signal only the
+# current shell. (On bash 4+ the variable cannot be overridden, so this holds.)
+@test "prompt: signal-self helpers ignore a decoy BASHPID from the environment" {
+  local helper
+  for helper in _acq_signal_self _acq_prompt_signal_self; do
+    run bash -c '
+      ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+      set +e
+      got="'"$STUBDIR"'/decoy-got"; rm -f "$got"
+      sh -c "trap \"echo TERM > $got; exit 0\" TERM; while :; do sleep 0.1; done" &
+      decoy=$!
+      BASHPID=$decoy
+      ( '"$helper"' TERM; echo NOT_REACHED )
+      echo "SUB_RC=$?"
+      sleep 0.5
+      kill -0 "$decoy" 2>/dev/null && echo DECOY_ALIVE
+      [ -e "$got" ] && echo DECOY_SIGNALLED
+      kill -KILL "$decoy" 2>/dev/null
+      wait "$decoy" 2>/dev/null
+      echo DONE
+    '
+    assert_line 'SUB_RC=143'
+    assert_line 'DECOY_ALIVE'
+    refute_line 'DECOY_SIGNALLED'
+    refute_line 'NOT_REACHED'
+    assert_line 'DONE'
+  done
 }
 
 @test "prompt: Ctrl-C runs the prior INT handler with default word splitting" {
