@@ -33,7 +33,7 @@ def run_exec(parsed, emit_json: bool, backend: str) -> int:
             "exec",
             errors.SANDBOX_NOT_FOUND,
             f"sandbox '{name}' not found",
-            f"list sandboxes with 'acq ls', or create one with 'acq create'",
+            "list sandboxes with 'acq ls', or create one with 'acq create'",
             emit_json,
         )
     try:
@@ -73,7 +73,7 @@ def run_attach(parsed, emit_json: bool, backend: str) -> int:
             "attach",
             errors.SANDBOX_NOT_FOUND,
             f"sandbox '{name}' not found",
-            f"list sandboxes with 'acq ls', or create one with 'acq create'",
+            "list sandboxes with 'acq ls', or create one with 'acq create'",
             emit_json,
         )
     try:
@@ -127,7 +127,7 @@ def run_shell(parsed, emit_json: bool, backend: str) -> int:
             "shell",
             errors.SANDBOX_NOT_FOUND,
             f"sandbox '{name}' not found",
-            f"list sandboxes with 'acq ls', or create one with 'acq create'",
+            "list sandboxes with 'acq ls', or create one with 'acq create'",
             emit_json,
         )
     try:
@@ -180,7 +180,9 @@ def run_cp(parsed, emit_json: bool, backend: str) -> int:
             "exactly one of SRC/DST must be a sandbox reference (NAME:/guest/path)",
             emit_json,
         )
-    name, guest_path = src_ref if src_ref else dst_ref
+    ref = src_ref or dst_ref
+    assert ref is not None  # nosec B101 # checked above; narrows the type for mypy
+    name, guest_path = ref
     host_path = dst if src_ref else src
     direction = "out" if src_ref else "in"
     if not adapter.exists(name):
@@ -188,7 +190,7 @@ def run_cp(parsed, emit_json: bool, backend: str) -> int:
             "cp",
             errors.SANDBOX_NOT_FOUND,
             f"sandbox '{name}' not found",
-            f"list sandboxes with 'acq ls'",
+            "list sandboxes with 'acq ls'",
             emit_json,
         )
     # The host side is forwarded verbatim to the backend, which resolves it
@@ -232,7 +234,7 @@ def run_ports(parsed, emit_json: bool, backend: str) -> int:
             "ports",
             errors.SANDBOX_NOT_FOUND,
             f"sandbox '{name}' not found",
-            f"list sandboxes with 'acq ls', or create one with 'acq create'",
+            "list sandboxes with 'acq ls', or create one with 'acq create'",
             emit_json,
         )
     try:

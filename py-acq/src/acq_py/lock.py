@@ -15,11 +15,12 @@ This is an internal primitive, not part of the public ``acq`` command surface.
 from __future__ import annotations
 
 import os
+import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
 
-if os.name == "nt":  # pragma: no cover - exercised only on Windows hosts
+if sys.platform == "win32":  # pragma: no cover - exercised only on Windows hosts
     import msvcrt
 else:
     import fcntl
@@ -56,7 +57,7 @@ def exclusive_lock(path: Path, timeout_s: float = DEFAULT_TIMEOUT_S):
     try:
         while True:
             try:
-                if os.name == "nt":  # pragma: no cover - Windows only
+                if sys.platform == "win32":  # pragma: no cover - Windows only
                     # msvcrt.locking locks one byte; ensure the file has one.
                     fh.seek(0, os.SEEK_END)
                     if fh.tell() == 0:
@@ -68,19 +69,19 @@ def exclusive_lock(path: Path, timeout_s: float = DEFAULT_TIMEOUT_S):
                     fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 acquired = True
                 break
-            except OSError:
+            except OSError as exc:
                 # The lock is held elsewhere (EWOULDBLOCK / EACCES / EDEADLK).
                 if time.monotonic() >= deadline:
                     raise MigrationLockTimeout(
                         f"could not acquire the migration lock at {path} "
                         f"within {timeout_s:.1f}s"
-                    )
+                    ) from exc
                 time.sleep(_RETRY_INTERVAL_S)
         yield
     finally:
         if acquired:
             try:
-                if os.name == "nt":  # pragma: no cover - Windows only
+                if sys.platform == "win32":  # pragma: no cover - Windows only
                     fh.seek(0)
                     msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
                 else:
