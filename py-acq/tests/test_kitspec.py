@@ -622,7 +622,18 @@ def test_unreadable_spec_is_a_read_failure(tmp_path):
         kitspec.load_spec(tmp_path / "missing.yaml")
 
 
+def _require_symlinks(tmp_path: Path) -> None:
+    """Skip where this user cannot create symlinks (Windows without the privilege)."""
+    probe = tmp_path / ".symlink-probe"
+    try:
+        probe.symlink_to(tmp_path)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable on this host")
+    probe.unlink()
+
+
 def test_refuses_spec_symlink_outside_kit(tmp_path):
+    _require_symlinks(tmp_path)
     outside = tmp_path / "outside.yaml"
     outside.write_text("name: x\n")
     kit = tmp_path / "kit"
@@ -804,6 +815,7 @@ def test_tree_symlink_parity(tmp_path):
 def test_tree_junctions_count_as_links(tmp_path, monkeypatch):
     # Windows junctions are not symlinks to os.path.islink and os.walk enters
     # them. Simulate one with a plain directory reported as a junction.
+    _require_symlinks(tmp_path)
     kit = tmp_path / "kit"
     junction = kit / "files" / "junction"
     junction.mkdir(parents=True)

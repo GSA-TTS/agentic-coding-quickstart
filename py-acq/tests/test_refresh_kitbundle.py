@@ -37,15 +37,22 @@ def _load_script():
 rk = _load_script()
 
 
-def _git(repo: Path, *args: str) -> str:
+def _git(repo: Path, *args: str, input_text: str | None = None) -> str:
     return subprocess.run(
         ["git", "-C", str(repo), "-c", "commit.gpgsign=false", "-c", "user.name=t", "-c", "user.email=t@example.gov",
          *args],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, check=True, input=input_text,
     ).stdout.strip()
 
 
-def _patterns(tmp_path: Path, extra=None) -> tuple[Path, str]:
+def _patterns(tmp_path: Path, extra=None, index=None) -> tuple[Path, str]:
+    """A stand-in Patterns repository with one commit; returns it and the commit.
+
+    ``extra`` edits the working tree before ``git add``; ``index`` edits the
+    index after it. File modes and symlinks are set in the index, never on
+    disk, so the tests behave the same where git ignores the executable bit
+    (core.filemode=false on Windows) or cannot create symlinks.
+    """
     repo = tmp_path / "patterns"
     base = repo / rk.DIRECTORY
     for kit in rk.KITS:
@@ -60,7 +67,6 @@ def _patterns(tmp_path: Path, extra=None) -> tuple[Path, str]:
     (base / "usai-provider" / "provider-input.json").write_text("{}\n")
     (base / "git-ssh-sign" / "LICENSE").write_text("Apache\n")
     (base / "git-ssh-sign" / "files" / "home" / "tool").write_text("#!/bin/sh\n")
-    (base / "git-ssh-sign" / "files" / "home" / "tool").chmod(0o755)
     (base / "other-kit").mkdir()
     (base / "other-kit" / "spec.yaml").write_text("name: other\n")
     if extra:
@@ -68,6 +74,9 @@ def _patterns(tmp_path: Path, extra=None) -> tuple[Path, str]:
     repo.mkdir(exist_ok=True)
     _git(repo, "init", "-q")
     _git(repo, "add", "-A")
+    _git(repo, "update-index", "--chmod=+x", f"{rk.DIRECTORY}/git-ssh-sign/files/home/tool")
+    if index:
+        index(repo)
     _git(repo, "commit", "-q", "-m", "kits")
     return repo, _git(repo, "rev-parse", "HEAD")
 
@@ -123,10 +132,13 @@ def test_check_reports_every_difference(tmp_path, capsys):
 
 
 def test_refuses_non_regular_upstream_files_and_bad_arguments(tmp_path, capsys):
-    def add_symlink(base: Path) -> None:
-        os.symlink("payload", base / "opencode" / "files" / "home" / "link")
+    def add_symlink(repo: Path) -> None:
+        # A symlink entry (mode 120000) written straight into the index.
+        target = _git(repo, "hash-object", "-w", "--stdin", input_text="payload")
+        _git(repo, "update-index", "--add", "--cacheinfo",
+             f"120000,{target},{rk.DIRECTORY}/opencode/files/home/link")
 
-    repo, ref = _patterns(tmp_path, add_symlink)
+    repo, ref = _patterns(tmp_path, index=add_symlink)
     out = tmp_path / "bundle"
     assert rk.main(["--checkout", str(repo), "--ref", ref, "--bundle", str(out)]) == 2
     assert "not a regular file upstream" in capsys.readouterr().err

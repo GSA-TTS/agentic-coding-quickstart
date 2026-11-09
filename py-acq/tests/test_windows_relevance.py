@@ -46,7 +46,7 @@ REQUIRED = {
     "py-acq/src", "py-acq/tests", "py-acq/pyproject.toml", "py-acq/requirements-quality.txt",
     "scripts/stage-windows-runtime", "scripts/gen-install-assets",
     "scripts/qualify-backend-cell", "scripts/setup-provider-input-validator",
-    "scripts/test-acq-lib.sh",
+    "scripts/test-acq-lib.sh", "scripts/refresh-kitbundle",
     "qualification", "docs/qualification-ledger.json",
     "test/bats/06-windows-install.bats", "test/bats/55-version.bats", "test/bats/helper.bash",
     "test/vendor", ".gitmodules", "test/vectors", "test/fixtures",
