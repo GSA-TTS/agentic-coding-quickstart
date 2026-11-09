@@ -326,6 +326,15 @@ def test_unsafe_fields_are_dropped(tree):
     assert legacy_bash.host_config_read("msb", "box", "../escape") is None
 
 
+def test_applied_at_accepts_ascii_digits_only(tree):
+    # Bash writes applied_at with `date -u`, so only ASCII digits are its form;
+    # Python's \d would also accept another script's digits (Arabic-Indic here).
+    _bash_file("box", ".env", "applied_at=2026-11-09T01:02:03Z\n")
+    assert legacy_bash.read_sandbox("msb", "box").applied_at == "2026-11-09T01:02:03Z"
+    _bash_file("box", ".env", "applied_at=٢٠٢٦-11-09T01:02:03Z\n")
+    assert legacy_bash.read_sandbox("msb", "box").applied_at is None
+
+
 def test_agent_falls_back_to_the_host_config_key(tree):
     config_dir = legacy_bash.host_config_dir("msb", "box")
     config_dir.mkdir(parents=True)

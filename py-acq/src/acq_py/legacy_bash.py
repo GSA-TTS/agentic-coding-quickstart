@@ -44,8 +44,9 @@ _CONFIG_KEY_RE = re.compile(r"[A-Za-z0-9._-]+")
 _GUEST_SOCK_RE = re.compile(r"/[A-Za-z0-9._/-]*")
 _REF_RE = re.compile(r"[A-Za-z0-9_.-]*")
 _APPLIED_REF_RE = re.compile(r"[A-Za-z0-9_.-]+")
-_APPLIED_AT_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
-_KEY_STEM_RE = re.compile(r"(?P<safe>[A-Za-z0-9._-]+)\.(?P<sum>\d+)")
+# Digits are ASCII only: ``\d`` also matches other scripts' digits.
+_APPLIED_AT_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
+_KEY_STEM_RE = re.compile(r"(?P<safe>[A-Za-z0-9._-]+)\.(?P<sum>[0-9]+)")
 
 _SAFE_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-")
 
