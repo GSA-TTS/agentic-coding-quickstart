@@ -73,8 +73,9 @@ and (msb) the read-only trusted-config mount, including the committed
    whether to add a remount attempt to the cell's own guest.
 
 **Expected today:** the Python implementation fails the cell oracle on every
-cell (msb has no credential path, no built-in kits are applied, and no read-only
-trusted-config mount is established), so a Tier-3 run reports `FAIL` with each
+cell (no built-in kits are applied and no read-only trusted-config mount is
+established; the msb credential path exists but has no live run yet), so a Tier-3
+run reports `FAIL` with each
 missing control named, rather than qualifying a sandbox that lacks them. The
 first live run with the extended oracle should also confirm that `sbx` accepts the
 nonce-named global secret service, and that neither backend CLI reads the

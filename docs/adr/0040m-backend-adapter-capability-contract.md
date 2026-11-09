@@ -53,6 +53,14 @@ exit 1, the `unsupported_capability` code, and remediation.
 > is unsupported on both. `kit-apply` is msb-only in this slice and runs in-guest
 > via `msb exec` (no `kit-apply` subcommand); `kit-source-revoke` is sbx-only via
 > `sbx settings get/set kit.allowedSources` (no `kit-source-revoke` subcommand).
+>
+> **Reconciliation note (2026-11-09):** msb now declares `secret-write`,
+> `secret-rm` and `secret-list` as `required`. It still has no `secret`
+> subcommand: the values live in the acq secret store shared with the Bash
+> adapter, are bound as `--secret ENV@HOST` at create, and reach running
+> sandboxes through `msb modify --secret`/`--secret-rm`. `key-present` stays an
+> sbx-only obligation (msb holds no proxy table); `secret has` on msb is answered
+> from the store and the adapter's binding table.
 
 The record is a declaration; conformance is proven, not trusted: each
 declared capability is asserted by a Tier-1 subprocess vector (working, or

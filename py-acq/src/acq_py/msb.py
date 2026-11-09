@@ -12,12 +12,14 @@ authority stay host-side in the seam (``cli.py`` + ``state.py``), per ADR-0040m
 Reconciliation with the real msb 0.7.11 CLI: the image is *positional* on
 ``create``, the workspace is a ``--volume HOST:POSIX-GUEST`` mapping, memory/cpus
 are ``-m``/``-c``, and there is NO ``secret``/``kit-apply``/``substrate-provision``/
-``provider-credential``/``github-scope``/``rotate`` subcommand. The secret verbs
-(``secret_set``/``secret_has``/``secret_rm``/``secret_ls``) and the credential
-verbs (``provider_credential_set``/``github_scope``/``rotate_key``) therefore fail
-closed with ``unsupported_capability`` (msb's secrets are per-sandbox ``--secret
-ENV@HOST`` bindings, a provider-credential concern that lands with a later slice).
-A secret VALUE never crosses this boundary.
+``provider-credential``/``github-scope``/``rotate`` subcommand. Secrets therefore
+live in the acq secret store (:mod:`acq_py.secretstore`, shared with the Bash
+adapter) and reach a sandbox as ``--secret ENV@HOST`` bindings: on ``create``,
+and on running sandboxes through ``msb modify --secret`` / ``--secret-rm``. msb
+reads each bound value from its own environment, so a secret VALUE reaches the
+msb child only through that environment mapping, never argv or output.
+``github_scope`` and ``rotate_key`` still fail closed with
+``unsupported_capability``.
 
 The ``msb`` executable is overridable via ``ACQ_MSB_BIN`` for reproducible,
 offline contract vectors. ``__stub__`` routes to the bundled deterministic fake
@@ -34,8 +36,9 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
-from . import errors, hostexec, kits, secretstore, timeouts
+from . import errors, hostexec, kits, provider_creds, secretstore, timeouts
 from .secretstore import Scope
 
 STUB_SENTINEL = "__stub__"
@@ -174,11 +177,13 @@ def msb_command() -> list[str]:
 #
 # Reconcile with the real msb 0.7.11 CLI: msb has NO standalone ``secret``
 # subcommand and no ``provider-credential``/``github-scope``/``rotate``
-# subcommands, so those obligations fail closed (``unsupported``). Secrets on msb
-# are per-sandbox ``--secret ENV@HOST`` bindings on create/start plus
-# ``--secret-rm`` on ``modify`` — a provider-credential concern that lands with a
-# later slice, not a standalone key/value store. ``kit-apply`` is implemented
-# in-guest via ``msb exec`` (no ``kit-apply`` subcommand), so it stays required.
+# subcommands. The secret capabilities are served from the acq secret store and
+# delivered as ``--secret ENV@HOST`` bindings (create) and ``msb modify
+# --secret``/``--secret-rm`` (running sandboxes), as the Bash adapter does.
+# ``key-present`` stays unsupported: it is the sbx obligation to check a
+# backend-held proxy table, and msb holds none (``secret has`` on msb is answered
+# from the store and the binding table, :func:`secret_has`). ``kit-apply`` is
+# implemented in-guest via ``msb exec`` (no ``kit-apply`` subcommand).
 def capability_record(version: str | None = None) -> dict:
     return {
         "backend": "msb",
@@ -196,11 +201,11 @@ def capability_record(version: str | None = None) -> dict:
             "copy": "required",
             "ports": "required",
             "kit-apply": "required",
-            "secret-write": "unsupported",  # no `secret` subcommand on msb
-            "secret-rm": "unsupported",
-            "secret-list": "unsupported",
+            "secret-write": "required",  # acq store + --secret ENV@HOST bindings
+            "secret-rm": "required",  # acq store + msb modify --secret-rm
+            "secret-list": "required",  # listed from the acq store
             "key-rotate": "unsupported",  # no `rotate` subcommand on msb
-            "key-present": "unsupported",
+            "key-present": "unsupported",  # sbx-only proxy-table obligation
             "kit-source-revoke": "unsupported",
             "start": "required",  # msb-only
             "restart": "required",  # msb-only
@@ -215,10 +220,17 @@ def _run(
     *,
     timeout: float | None = None,
     input_text: str | None = None,
+    secret_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
     # Output is captured, so the child must never read the user's terminal: a
     # command that prompts would hang with the prompt hidden, or swallow typed
     # input. Without ``input_text`` its stdin is the null device.
+    #
+    # ``secret_env`` holds bound secret values (``--secret ENV@HOST`` makes msb
+    # read ENV from its own environment). They go only into the child's
+    # environment mapping, which ``ps`` and /proc/PID/cmdline do not show; argv
+    # names the variable, never the value.
+    env = {**os.environ, **secret_env} if secret_env else None
     try:
         if input_text is None:
             return subprocess.run(
@@ -227,6 +239,7 @@ def _run(
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                env=env,
             )
         return subprocess.run(
             [*msb_command(), *argv],
@@ -234,6 +247,7 @@ def _run(
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=env,
         )
     except OSError as exc:
         # A missing (or non-executable) msb binary must never surface as an
@@ -291,10 +305,10 @@ def exists(name: str) -> bool:
 # Egress only: ingress keeps msb's default so published ports stay reachable
 # (ADR-0019). `--tls-intercept` is always emitted: from msb 0.7.3 a hostname
 # allow rule only matches traffic msb can inspect, so without interception
-# every allowed host would be unreachable. The Bash opt-out
-# ACQ_MSB_NO_TLS_INTERCEPT is deliberately ignored here: this path binds no
-# secrets, so interception serves only to make the allow rules match, and
-# turning it off would leave the policy unusable rather than looser.
+# every allowed host would be unreachable. Interception is also what lets msb
+# swap a bound ``--secret`` placeholder for the real value on the wire. The Bash
+# opt-out ACQ_MSB_NO_TLS_INTERCEPT is deliberately ignored here: turning it off
+# would leave the policy unusable and the credentials unsubstituted, not looser.
 #
 # Deliberate tightenings against the Bash adapter, all in the refuse direction:
 # an invalid tier, a relative/missing/malformed/empty baseline file, and a
@@ -470,8 +484,10 @@ def create(
     guest_workspace: str | None = None,
     *,
     egress_kits: list[str],
-) -> None:
-    """Create a sandbox. Raises :class:`MsbError` on backend failure.
+) -> list[str]:
+    """Create a sandbox; returns its ``ENV@HOST`` secret bindings (non-secret).
+
+    Raises :class:`MsbError` on backend failure.
 
     Reconciles with the real msb 0.7.11 ``create``: the image is *positional*
     (``msb create --name X IMAGE``), the workspace is a ``--volume
@@ -484,8 +500,13 @@ def create(
     ``egress_kits`` names the kits whose allowlists form the egress policy
     (see :func:`egress_flags`). It is required so no caller can create a sandbox
     without one; the policy is computed before msb is invoked.
+
+    Every secret the sandbox can be injected with (:func:`secret_bindings`) is
+    bound as ``--secret ENV@HOST``; the values travel only in the child's
+    environment mapping.
     """
     egress = egress_flags(egress_kits)
+    secret_flags, secret_env = secret_bindings(name)
     guest = guest_workspace or _guest_path(workspace)
     argv = [
         "create",
@@ -501,8 +522,12 @@ def create(
     if cpus:
         argv += ["-c", cpus]
     argv += egress
+    argv += secret_flags
     argv.append(image)  # positional image (last)
-    proc = _run(argv)
+    try:
+        proc = _run(argv, secret_env=secret_env)
+    finally:
+        secret_env.clear()
     if proc.returncode != 0:
         # `failure` is the ADR-0038m usage/failure minimum's generic
         # operational-failure code (no ADR-0040m code describes a backend command
@@ -512,6 +537,7 @@ def create(
             f"msb create failed for sandbox '{name}'",
             "check msb logs and retry",
         )
+    return secret_flags[1::2]
 
 
 def exec_ready(name: str) -> bool:
@@ -761,125 +787,354 @@ def ports(name: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Secret verbs (ADR-0040m `secret-write/rm`, `secret-list`). The value is the one
-# thing that must NEVER cross the CLI/adapter boundary except on the child's
-# stdin: scope and service are non-secret identifiers carried on argv, while the
-# value itself is passed via stdin (never argv) and never echoed, logged, or
-# returned by any of these functions (ADR-0038m §user story #7 "no secret
-# exposure").
+# Credential bindings (Bash `_acq_msb_service_binding`, `_acq_msb_bind_one`,
+# `_acq_msb_bind_secrets_into`). msb keeps no secret store: each secret lives in
+# the acq secret store and is bound per sandbox as ``--secret ENV@HOST``. msb
+# reads ENV from its own environment and swaps the guest's placeholder for the
+# value on the wire to HOST. So a value only ever travels in the msb child's
+# environment mapping; argv carries the variable name and host, never the value,
+# and no function here returns, logs or raises with a value (ADR-0038m user
+# story #7 "no secret exposure").
 # ---------------------------------------------------------------------------
 
-def _secret_unsupported(verb: str) -> MsbError:
-    """The fail-closed refusal for every secret verb on msb (ADR-0040m).
+# GitHub's token is bound to the REST API and both git-transport hosts, so API
+# calls and HTTPS clone/push are all substituted. A fixed table: unlike Bash
+# (ACQ_MSB_GITHUB_HOST), no environment variable can redirect the token.
+GITHUB_TOKEN_ENV = "GITHUB_TOKEN"  # nosec B105 # an env var name, not a value
+GITHUB_HOSTS = "github.com,api.github.com,codeload.github.com"
 
-    msb 0.7.11 has no standalone ``secret`` subcommand and no secret store: secrets
-    are per-sandbox ``--secret ENV@HOST`` bindings on create/start plus
-    ``--secret-rm`` on ``modify``, whose destination host comes from the
-    provider-credential binding (a later slice). Until that slice lands, a secret
-    request fails closed with ``unsupported_capability`` rather than inventing a
-    backend store msb does not have.
+# Set (non-empty) to make set/rm store-only, with no `msb modify` against
+# running sandboxes (Bash parity; a verifier seeding a throwaway global key must
+# not rebind, or unbind, the user's own live sandbox).
+NO_LIVE_REFEED_ENV = "ACQ_SECRET_NO_LIVE_REFEED"
+
+# One destination host (an optional :port allowed), as Bash's
+# `_acq_provider_fact_safe_host` accepts: no scheme, path, wildcard or `..`.
+_BIND_HOST_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.:-]*")
+
+
+class SecretBinding(NamedTuple):
+    """Where one service's secret is injected: the env var msb reads and the
+    comma-separated hosts it is substituted for. Never carries a value."""
+
+    env: str
+    host: str
+
+    @property
+    def flag(self) -> str:
+        return f"{self.env}@{self.host}"
+
+
+def _binding_ok(env: str, host: str) -> bool:
+    """True when ``ENV@HOST`` is safe to bind: an upper-case env name that is not
+    process-critical (PATH, LD_PRELOAD, ... would hand the value to the msb child
+    as that variable) and one or more plain hosts."""
+    if not provider_creds.key_env_ok(env):
+        return False
+    parts = host.split(",")
+    return all(_BIND_HOST_RE.fullmatch(part) and ".." not in part for part in parts)
+
+
+def service_binding(service: str, sandbox: str | None = None) -> SecretBinding | None:
+    """The binding msb uses for ``service`` in ``sandbox`` (None = global), or None.
+
+    The single table for create, re-feed, unbind, ``secret has`` and ``secret
+    ls``. An endpoint recorded by ``acq secret set SVC --host H --env E`` wins
+    (the sandbox's own record first, then the global one); otherwise ``github``
+    has its fixed hosts and a provider its pinned destination
+    (:func:`provider_creds.provider_env_hosts`). Anything else, or an unsafe
+    mapping, has no binding: it is never guessed.
     """
-    return MsbError(
-        errors.UNSUPPORTED,
-        f"secret {verb} is not supported on the msb backend",
-        "msb has no standalone secret store; per-sandbox --secret ENV@HOST bindings land with the provider-credential slice",
-    )
+    meta = secretstore.meta_resolve(service, sandbox)
+    if meta is not None and meta.host and meta.env:
+        found: SecretBinding | None = SecretBinding(meta.env, meta.host)
+    elif service == "github":
+        found = SecretBinding(GITHUB_TOKEN_ENV, GITHUB_HOSTS)
+    else:
+        pinned = provider_creds.provider_env_hosts(service)
+        found = SecretBinding(*pinned) if pinned else None
+    if found is None or not _binding_ok(found.env, found.host):
+        return None
+    return found
 
 
-# ``msb secret …`` takes the scope as either the ``--global`` flag or a leading
-# positional sandbox name; a global scope is encoded as the flag so a sandbox
-# whose name happens to be ``--global`` can never be confused with the flag.
-# Scopes are typed (:class:`secretstore.Scope`), so a sandbox named ``global``
-# stays a sandbox; a bare string is accepted from older callers.
-_GLOBAL_SCOPE = secretstore.GLOBAL
+def _bind_candidates(name: str) -> list[str]:
+    """Services a new sandbox may bind, in Bash's order: github, the services
+    with a recorded endpoint (this sandbox's and global), then the providers."""
+    out = ["github"]
+    for service in secretstore.meta_list(name) + provider_creds.provider_ids():
+        if service not in out:
+            out.append(service)
+    return out
 
 
-def _secret_scope_argv(scope: Scope | str) -> list[str]:
-    """Encode a scope as the ``msb secret …`` argv token (non-secret)."""
+def secret_bindings(name: str) -> tuple[list[str], dict[str, str]]:
+    """``(["--secret", "ENV@HOST", ...], {ENV: value})`` for sandbox ``name``.
+
+    A service is bound when it has a binding and a value resolves for it, the
+    sandbox's own value taking precedence over the global one. The first service
+    to claim an env var keeps it. The caller passes the mapping only as the msb
+    child's environment and clears it afterwards.
+    """
+    flags: list[str] = []
+    env: dict[str, str] = {}
+    for service in _bind_candidates(name):
+        binding = service_binding(service, name)
+        if binding is None or binding.env in env:
+            continue
+        value = secretstore.resolve(service, name)
+        if value:
+            env[binding.env] = value
+            flags += ["--secret", binding.flag]
+        value = None
+    return flags, env
+
+
+def secret_preflight(scope: Scope | str, service: str, host: str = "", env: str = "") -> None:
+    """Refuse, before anything is stored, a secret msb could never inject.
+
+    An explicit ``--host``/``--env`` must be bindable; without them the service
+    needs a recorded endpoint, a fixed one (github) or a provider pin. Storing a
+    value msb cannot bind would report a credential the sandbox never receives.
+    """
     sc = secretstore.as_scope(scope)
-    return ["--global"] if sc.sandbox is None else [sc.sandbox]
+    if host or env:
+        if not _binding_ok(env, host):
+            raise MsbError(
+                errors.VALIDATION_FAILED,
+                f"msb cannot bind '{service}' as {env}@{host}",
+                "use an upper-case env var name that is not process-critical (e.g. API_KEY) "
+                "and plain DNS hosts; nothing was stored",
+            )
+        return
+    if service_binding(service, sc.sandbox) is None:
+        raise MsbError(
+            errors.VALIDATION_FAILED,
+            f"'{service}' has no endpoint mapping, so msb cannot inject it",
+            f"pass the destination and env var, e.g. acq secret set -g {service} "
+            "--host api.example.com --env API_KEY; nothing was stored",
+        )
 
 
-# The neutral ``secret`` seam (commands/secret.py) writes the acq store and then
-# calls ``secret_feed``/``secret_unbind``. The capability record declares
-# secret-write/secret-rm unsupported, so the seam refuses before storing and
-# these are never reached; they fail closed if called anyway.
+def _live_refeed_off() -> bool:
+    return bool(os.environ.get(NO_LIVE_REFEED_ENV))
+
+
+def _running_targets(scope: Scope) -> list[str]:
+    """The running sandboxes a change in ``scope`` reaches: the named sandbox
+    (if it is running) or every running sandbox for the global scope."""
+    names = running_names()
+    if names is None:
+        raise MsbError(
+            errors.FAILURE,
+            "could not list running sandboxes to update their credentials",
+            "check that msb works ('msb list'), then retry",
+        )
+    if scope.sandbox is not None:
+        return [scope.sandbox] if scope.sandbox in names else []
+    return names
+
+
+def _has_own_value(service: str, sandbox: str) -> bool:
+    """True when ``sandbox`` holds its own value for ``service`` (which a global
+    change must leave alone: the sandbox scope takes precedence)."""
+    return secretstore.name_ok(sandbox) and secretstore.exists(service, sandbox)
+
+
+def _modify(name: str, flags: list[str], secret_env: dict[str, str] | None = None) -> bool:
+    try:
+        proc = _run(["modify", name, *flags], secret_env=secret_env)
+    finally:
+        if secret_env:
+            secret_env.clear()
+    return proc.returncode == 0
+
+
+def _refeed(service: str, scope: Scope) -> None:
+    """Push ``service``'s current value to the running sandboxes ``scope``
+    reaches (``msb modify NAME --secret ENV@HOST``), so a new or changed secret
+    applies without a recreate. Raises :class:`MsbError` naming any sandbox that
+    could not be updated."""
+    if _live_refeed_off():
+        return
+    failed: list[str] = []
+    for sandbox in _running_targets(scope):
+        if scope.is_global and _has_own_value(service, sandbox):
+            continue
+        binding = service_binding(service, sandbox)
+        value = secretstore.resolve(service, sandbox)
+        if binding is not None and value:
+            if not _modify(sandbox, ["--secret", binding.flag], {binding.env: value}):
+                failed.append(sandbox)
+        value = None
+    if failed:
+        raise MsbError(
+            errors.FAILURE,
+            f"could not apply '{service}' to running sandbox(es): {', '.join(failed)}",
+            "re-run the command, or recreate those sandboxes to bind the stored value",
+        )
+
+
 def secret_feed(scope: Scope | str, service: str, value: str, host: str = "", env: str = "") -> None:
-    raise _secret_unsupported("set")
+    """After the acq store write: re-feed running sandboxes from the store.
+
+    ``value`` is not used: each sandbox gets the value that takes precedence for
+    it, read back from the store (a sandbox with its own value keeps it when a
+    global value changes).
+    """
+    del value
+    _refeed(service, secretstore.as_scope(scope))
+
+
+def _unbind_flags(scope: Scope, service: str, sandbox: str) -> tuple[list[str], dict[str, str] | None] | None:
+    """The ``msb modify`` flags that take ``scope``'s value for ``service`` out
+    of ``sandbox``, or None when it is not bound there.
+
+    Removing a sandbox's own value falls back to the global one when that can be
+    bound (the sandbox keeps a working credential); otherwise the binding goes.
+    """
+    current = service_binding(service, sandbox)
+    if current is None:
+        return None
+    if not scope.is_global:
+        fallback = service_binding(service, None)
+        value = secretstore.resolve(service, None)
+        if fallback is not None and value:
+            drop = ["--secret-rm", current.env] if fallback.env != current.env else []
+            return [*drop, "--secret", fallback.flag], {fallback.env: value}
+    return ["--secret-rm", current.env], None
 
 
 def secret_unbind(scope: Scope | str, service: str) -> None:
-    raise _secret_unsupported("rm")
+    """Before the store entry is deleted: unbind it from running sandboxes.
+
+    Best effort, as in Bash: msb may refuse to remove a binding a sandbox never
+    had, so a sandbox that cannot be updated is named in a warning and the
+    removal from the store goes ahead.
+    """
+    sc = secretstore.as_scope(scope)
+    if _live_refeed_off():
+        return
+    failed: list[str] = []
+    for sandbox in _running_targets(sc):
+        if sc.is_global and _has_own_value(service, sandbox):
+            continue
+        plan = _unbind_flags(sc, service, sandbox)
+        if plan is not None and not _modify(sandbox, *plan):
+            failed.append(sandbox)
+    if failed:
+        print(
+            f"acq: warning: could not unbind '{service}' from running sandbox(es) {', '.join(failed)}; "
+            "it stays injected there until they are recreated or removed",
+            file=sys.stderr,
+        )
 
 
 def secret_set(scope: Scope | str, service: str, value: str, *, timeout: float | None = None) -> None:
-    """``secret-write`` fails closed on msb (no ``secret`` subcommand, ADR-0040m).
+    """Store and bind a secret: preflight, acq store write, then re-feed.
 
-    The value is never read, logged, or placed on argv: the refusal happens before
-    the value crosses the boundary. Raises :class:`MsbError` with
-    ``unsupported_capability``.
+    ``acq secret set`` drives the same three steps through the neutral seam.
     """
-    raise _secret_unsupported("set")
+    del timeout
+    sc = secretstore.as_scope(scope)
+    secret_preflight(sc, service)
+    secretstore.set_secret(service, sc.sandbox, value)
+    secret_feed(sc, service, "")
 
 
 def secret_has(scope: Scope | str, service: str) -> bool:
-    """True when a secret for ``(scope, service)`` is present; False when absent.
+    """``secret has``: can msb inject ``service`` into ``scope``?
 
-    Tri-state at the caller's level: presence is a bool, but a backend that
-    *cannot answer* raises :class:`MsbError` (``backend_not_found`` from a missing
-    binary, ``failure`` from an unexpected exit status) so the seam never
-    conflates "the backend is down" with "the secret is absent" (ADR-0040m: fail
-    closed, but with the accurate code).
-
-    There is no dedicated `secret has` capability on msb: msb has no standalone
-    secret store, so presence cannot be answered and fails closed with
-    ``unsupported_capability`` (never a silent "absent").
+    True when the service has a binding and a value resolves for it, the
+    sandbox's own value first, then the global one (a sandbox can be injected
+    with a global secret). A value stored where it cannot be read, or one with no
+    binding, is not injectable.
     """
-    raise _secret_unsupported("has")
+    sc = secretstore.as_scope(scope)
+    return service_binding(service, sc.sandbox) is not None and secretstore.has(service, sc.sandbox)
 
 
 def secret_rm(scope: Scope | str, service: str) -> None:
-    """Remove a secret for ``(scope, service)``. Raises :class:`MsbError` on failure.
+    """Unbind from running sandboxes, then delete the store value and endpoint."""
+    sc = secretstore.as_scope(scope)
+    secret_unbind(sc, service)
+    secretstore.delete(secretstore.key_for(service, sc.sandbox))
+    secretstore.meta_delete(service, sc.sandbox)
 
-    The seam (:func:`cli.run_secret_rm`) checks presence first and reports
-    ``secret_missing`` for an absent secret; a nonzero exit here is a generic
-    backend failure, not a missing-secret signal (mirrors the sandbox
-    exists-then-remove pattern). On msb the whole store is unsupported, so this
-    fails closed with ``unsupported_capability`` before any removal.
-    """
-    raise _secret_unsupported("rm")
+
+def _ls_entry(sandbox: str | None, service: str) -> dict:
+    binding = service_binding(service, sandbox)
+    return {
+        "scope": "global" if sandbox is None else sandbox,
+        "service": service,
+        "value_state": "unreadable" if secretstore.unreadable(service, sandbox) else "set",
+        "binding": binding.flag if binding is not None else None,
+    }
 
 
 def secret_ls(scope: Scope | str | None = None) -> list[dict]:
-    """``secret-list`` fails closed on msb (no ``secret`` subcommand, ADR-0040m).
+    """``secret-list``: the acq store's entries, never a value.
 
-    Raises :class:`MsbError` with ``unsupported_capability``. The listing never
-    returns a value, and on msb it never returns a listing at all.
+    Each entry is ``{scope, service, value_state, binding}``; ``binding`` is the
+    ``ENV@HOST`` msb would use (None when it has none). ``scope`` filters by
+    scope kind, so a sandbox named ``global`` is never listed as global. A
+    legacy multi-dot key (scope ``?``) is listed only when unfiltered.
     """
-    raise _secret_unsupported("ls")
+    want = None if scope is None else secretstore.as_scope(scope)
+    out: list[dict] = []
+    for key in secretstore.list_keys():
+        decoded = secretstore.decode_key(key)
+        if decoded is None or not decoded[1]:
+            continue
+        raw_scope, service = decoded
+        if raw_scope == "?":
+            if want is None:
+                out.append({"scope": "?", "service": service, "value_state": "set", "binding": None})
+            continue
+        sandbox = None if raw_scope == "-g" else raw_scope
+        if want is None or want.sandbox == sandbox:
+            out.append(_ls_entry(sandbox, service))
+    return out
 
 
 # ---------------------------------------------------------------------------
 # Provider-credential / github-scope / rotation verbs (ADR-0040m secret-write,
-# key-rotate; ADR-0012, ADR-0013). A credential VALUE crosses the adapter
-# boundary only as the child's stdin (never argv, never output). The destination
-# pin (key_env + hosts) and the per-sandbox scope are host-side authority
-# (``provider_creds``); these verbs only move the value.
+# key-rotate; ADR-0012, ADR-0013). The destination pin (key_env + hosts) and the
+# per-sandbox scope are host-side authority (``provider_creds``).
 # ---------------------------------------------------------------------------
 
 def provider_credential_set(provider: str, key_env: str, hosts: list[str], value: str) -> None:
-    """Provider-credential binding fails closed on msb (no equivalent subcommand).
+    """Store a provider credential in the acq store and bind it where it runs.
 
-    The value is never read or placed on argv. msb binds provider credentials as
-    per-sandbox ``--secret ENV@HOST`` references (a later slice); there is no
-    ``provider-credential`` subcommand, so this raises :class:`MsbError` with
-    ``unsupported_capability``.
+    The value goes to the global store entry for ``provider``; running sandboxes
+    without their own value are re-fed ``--secret KEY_ENV@HOSTS``, and new ones
+    bind it at create from the recorded pin. Raises :class:`MsbError`.
     """
-    raise MsbError(
-        errors.UNSUPPORTED,
-        f"provider-credential storage is not supported on the msb backend for provider '{provider}'",
-        "msb binds provider credentials via --secret ENV@HOST at create/start (provider-credential slice)",
-    )
+    host = ",".join(hosts)
+    if not _binding_ok(key_env, host):
+        raise MsbError(
+            errors.VALIDATION_FAILED,
+            f"msb cannot bind provider '{provider}' as {key_env}@{host}",
+            "use an upper-case env var name and plain DNS hosts",
+        )
+    secretstore.store(secretstore.key_for(provider), value)
+    value = ""
+    if _live_refeed_off():
+        return
+    failed: list[str] = []
+    for sandbox in _running_targets(secretstore.GLOBAL):
+        if _has_own_value(provider, sandbox):
+            continue
+        current = secretstore.resolve(provider, None)
+        if current and not _modify(sandbox, ["--secret", f"{key_env}@{host}"], {key_env: current}):
+            failed.append(sandbox)
+        current = None
+    if failed:
+        raise MsbError(
+            errors.FAILURE,
+            f"stored the '{provider}' credential, but could not apply it to running sandbox(es): {', '.join(failed)}",
+            "re-run the command, or recreate those sandboxes",
+        )
 
 
 def github_scope(sandbox: str, value: str) -> None:
@@ -891,7 +1146,7 @@ def github_scope(sandbox: str, value: str) -> None:
     raise MsbError(
         errors.UNSUPPORTED,
         f"GitHub token scoping is not supported on the msb backend for sandbox '{sandbox}'",
-        "msb binds GitHub credentials via --secret GITHUB_TOKEN@github.com,... at create/start (provider-credential slice)",
+        f"to bind a token to this sandbox only, use 'acq secret set {sandbox} github' (value on stdin)",
     )
 
 
@@ -904,5 +1159,5 @@ def rotate_key(value: str) -> None:
     raise MsbError(
         errors.UNSUPPORTED,
         "USAi key rotation is not supported on the msb backend",
-        "rotation is a provider-credential operation with no msb subcommand equivalent",
+        "store the new key with 'acq secret set -g usai' (value on stdin); running sandboxes are re-fed",
     )

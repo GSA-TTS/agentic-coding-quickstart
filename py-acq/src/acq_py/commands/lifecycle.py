@@ -324,21 +324,24 @@ def _create_sandbox(
     """Create + exec-ready gate + record write; returns the result record data.
 
     On msb the egress policy is derived from the built-in kits plus ``kit_name``
-    (the agent kit about to be applied, if any); see ``msb.egress_flags``.
+    (the agent kit about to be applied, if any); see ``msb.egress_flags``. The
+    ``ENV@HOST`` secret bindings msb created the sandbox with are reported as
+    ``secret_bindings`` (names and hosts only, never a value).
     """
     adapter = common._adapter(backend)
     error_cls = sbx.SbxError if backend == "sbx" else msb.MsbError
+    secret_bindings: list[str] | None = None
     if backend == "sbx":
         adapter.create(name, image, workspace, agent=agent)
     else:
-        adapter.create(
+        secret_bindings = adapter.create(
             name,
             image,
             workspace,
             memory=msb.DEFAULT_MEMORY,
             cpus=msb.DEFAULT_CPUS,
             egress_kits=kits.egress_kit_names(kit_name),
-        )
+        ) or []
     if not _wait_exec_ready(backend, name):
         # A half-created sandbox must not strand (legacy cleanup).
         _remove_quietly(adapter, name)
@@ -364,7 +367,7 @@ def _create_sandbox(
             f"could not write the host state record for sandbox '{name}': {exc.strerror or exc}",
             "check that the acq state directory is writable and has free space, then retry",
         ) from exc
-    return {
+    data: dict = {
         "name": name,
         "backend": backend,
         "agent": agent,
@@ -372,6 +375,9 @@ def _create_sandbox(
         "state": "running",
         "image": image,
     }
+    if secret_bindings is not None:
+        data["secret_bindings"] = secret_bindings
+    return data
 
 
 def _remove_quietly(adapter, name: str) -> None:
