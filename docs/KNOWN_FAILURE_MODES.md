@@ -3717,14 +3717,17 @@ lifetime and remove them in `acq rm`.
   provider facts no longer match the provider's pin (a re-pin to another host,
   or an edited record).
 - Without a terminal on stdin, any selected provider with no stored key fails
-  closed; nothing is prompted.
+  closed; nothing is prompted. On sbx, a key that is in the acq store but not in
+  sbx's own proxy table fails the same way, asking for it to be re-stored.
 
 ### Root Cause
 
-The Python msb and sbx paths bind only values from the acq secret store, so
-accepting an exported value would create a sandbox with a dead credential. The
-recorded-host fallback was not ported: refusing is the safe direction, since
-acq never lets a kit choose where a credential goes.
+Each backend takes its credentials at create: msb binds `--secret ENV@HOST`
+from the acq secret store, and sbx injects from the proxy table it snapshots
+then. Neither Python path reads a value exported in the host environment, so
+accepting one would create a sandbox with a dead credential. The recorded-host
+fallback was not ported: refusing is the safe direction, since acq never lets a
+kit choose where a credential goes.
 
 ### Fix
 

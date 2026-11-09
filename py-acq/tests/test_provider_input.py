@@ -16,6 +16,7 @@ import os
 import stat
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -468,10 +469,35 @@ def test_publish_and_discard_never_chmod_through_a_link(tmp_path, monkeypatch):
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs FIFOs")
 def test_a_fifo_in_place_of_an_artifact_is_refused_without_blocking(tmp_path):
     kit = _kit(tmp_path)
-    (kit / "provider-input" / "facts.json").unlink()
-    os.mkfifo(kit / "provider-input" / "facts.json")
-    with pytest.raises(provider_input.ProviderInputError, match="regular file"):
-        provider_input.kit_facts(kit)
+    fifo = kit / "provider-input" / "facts.json"
+    fifo.unlink()
+    os.mkfifo(fifo)
+    outcome: list = []
+    worker = threading.Thread(target=lambda: outcome.append(_raised(provider_input.kit_facts, kit)), daemon=True)
+    worker.start()
+    worker.join(timeout=10)
+    if worker.is_alive():  # a blocking open: release it by opening the write end, then fail
+        os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+        worker.join(timeout=5)
+        pytest.fail("reading a FIFO artifact blocked")
+    assert isinstance(outcome[0], provider_input.ProviderInputError) and "regular file" in str(outcome[0])
+
+
+def _raised(func, *args):
+    try:
+        func(*args)
+    except Exception as exc:  # noqa: BLE001 - the caller inspects what was raised
+        return exc
+    return None
+
+
+def test_sbx_message_names_sbx_and_asks_to_re_store_a_stored_key():
+    facts = provider_input.Facts("usai", "USAI_API_KEY", "api.gsa.usai.gov", "https://api.gsa.usai.gov/api/v1/models",
+                                 "openai-compatible")
+    with pytest.raises(provider_input.ProviderInputError) as exc:
+        provider_input.gate([facts], has_key=lambda p: False, ask_store=None, backend="sbx", stored=lambda p: True)
+    assert "sbx snapshots its proxy table" in exc.value.message and "msb" not in exc.value.message
+    assert "is stored" in exc.value.message and exc.value.remediation.startswith("re-store it")
 
 
 # ---------------------------------------------------------------------------
@@ -518,3 +544,32 @@ def test_sbx_attach_probes_the_recorded_provider(monkeypatch, tmp_path, capsys, 
     monkeypatch.setenv("ACQ_SBX_STUB_PROBE", answer)
     rc, doc, _out, _err = _invoke(capsys, "--backend", "sbx", "run", "sb", "--json")
     assert rc == errors.EXIT_FAILURE and doc["error"]["code"] == code, doc
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory permissions")
+def test_discard_removes_a_generation_bash_made_read_only(tmp_path):
+    generation = tmp_path / "generations" / "generation.x"
+    usai = generation / "models" / "providers" / "usai"
+    usai.mkdir(parents=True)
+    (usai / "facts.json").write_text("{}", encoding="utf-8")
+    for dirpath, dirnames, filenames in os.walk(generation, topdown=False):  # chmod -R a-w, as Bash publishes
+        for entry in [*filenames, *dirnames]:
+            path = Path(dirpath) / entry
+            os.chmod(path, stat.S_IMODE(path.stat().st_mode) & ~0o222)
+    os.chmod(generation, stat.S_IMODE(generation.stat().st_mode) & ~0o222)
+    try:
+        provider_input.discard(generation)
+        assert not generation.exists()
+    finally:
+        if generation.exists():
+            for dirpath, dirnames, _f in os.walk(generation):
+                os.chmod(dirpath, 0o700)
+
+
+def test_sbx_create_with_the_key_only_in_the_acq_store_asks_to_re_store(monkeypatch, tmp_path, capsys):
+    ws = _sbx_env(monkeypatch, tmp_path)
+    secretstore.set_secret("usai", None, VALUE)
+    rc, doc, out, err = _sbx_create(capsys, ws)
+    assert rc == errors.EXIT_FAILURE and doc["error"]["code"] == errors.SECRET_MISSING, doc
+    assert "sbx backend cannot inject" in doc["error"]["message"] and "msb" not in doc["error"]["message"]
+    assert VALUE not in out + err

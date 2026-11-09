@@ -714,6 +714,7 @@ def _provider_gate(backend: str, name: str, kit_names: Iterable[str]) -> list[tu
     provider_input.gate(
         facts, has_key=lambda provider: adapter.secret_has(scope, provider),
         ask_store=_ask_store(adapter) if common._stdin_is_terminal() else None,
+        backend=backend, stored=lambda provider: secretstore.has(provider, name),
     )
     return selected
 

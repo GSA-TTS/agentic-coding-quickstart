@@ -303,14 +303,29 @@ def check_pin(f: Facts) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _missing(f: Facts, *, exported: bool) -> ProviderInputError:
+# Why a key must exist before the create, per backend.
+_AT_CREATE = {
+    "msb": "msb binds credentials only at create",
+    "sbx": "sbx snapshots its proxy table at create",
+}
+
+
+def _missing(f: Facts, backend: str, *, exported: bool, stored: bool) -> ProviderInputError:
+    why = _AT_CREATE.get(backend, f"the {backend} backend binds credentials only at create")
+    if stored:
+        return ProviderInputError(
+            errors.SECRET_MISSING,
+            f"the '{f.provider}' key is stored, but the {backend} backend cannot inject it for '{f.host}' yet; "
+            f"the sandbox would be created without it, because {why}",
+            f"re-store it so the binding is created: acq secret set -g {f.provider}",
+        )
     detail = (
         f"${f.key_env} is exported on the host, but acq binds only stored credentials"
         if exported else f"no key is stored for provider '{f.provider}' (${f.key_env})"
     )
     return ProviderInputError(
         errors.SECRET_MISSING,
-        f"{detail}; the sandbox would be created without it, because msb binds credentials only at create",
+        f"{detail}; the sandbox would be created without it, because {why}",
         f"store it with 'acq secret set -g {f.provider}', then retry",
     )
 
@@ -320,13 +335,17 @@ def gate(
     *,
     has_key: Callable[[str], bool],
     ask_store: Callable[[Facts], bool] | None,
+    backend: str = "msb",
+    stored: Callable[[str], bool] = lambda _provider: False,
 ) -> None:
     """Check every provider's pin and key before a create; raises :class:`ProviderInputError`.
 
     ``has_key(provider)`` says whether the backend can inject a stored key.
     ``ask_store(facts)`` asks on a terminal and stores a key, returning False
     when the user declines; it is None when there is no terminal, and the gate
-    then fails closed instead of prompting.
+    then fails closed instead of prompting. ``stored(provider)`` says whether
+    the acq store holds a key the backend cannot inject (the message then asks
+    for it to be re-stored).
     """
     for f in facts:
         if f.provider in HOST_SERVICES:
@@ -335,7 +354,7 @@ def gate(
         if has_key(f.provider):
             continue
         if ask_store is None:
-            raise _missing(f, exported=bool(os.environ.get(f.key_env)))
+            raise _missing(f, backend, exported=bool(os.environ.get(f.key_env)), stored=stored(f.provider))
         if not ask_store(f):
             raise ProviderInputError(
                 errors.SECRET_MISSING,
@@ -575,6 +594,16 @@ def discard(generation: Path) -> None:
     if generation.is_symlink():
         generation.unlink(missing_ok=True)
         return
+    # A generation published by Bash (``chmod -R a-w``) has 0555 directories, and
+    # an entry cannot be unlinked from a directory that lacks write. os.walk lists
+    # a link to a directory among the directories; the helper skips it.
+    try:
+        _chmod_nofollow(generation, 0o700)
+        for dirpath, dirnames, _files in os.walk(generation, followlinks=False):
+            for entry in dirnames:
+                _chmod_nofollow(Path(dirpath) / entry, 0o700)
+    except OSError:
+        pass
     shutil.rmtree(generation, onexc=_writable)
 
 
