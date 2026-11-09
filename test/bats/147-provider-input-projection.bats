@@ -891,9 +891,9 @@ EOF
   [ ! -e "${root}.lock" ]
 }
 
-@test "handled signal helper reaps real children and yields 128/130/143" {
+@test "handled signal helper reaps real children and yields 129/130/143" {
   local rc_expected script
-  for rc_expected in 128 130 143; do
+  for rc_expected in 129 130 143; do
     script="$STUBDIR/signal-exit-${rc_expected}.sh"
     cat > "$script" << EOF
 #!/usr/bin/env bash
@@ -1825,4 +1825,84 @@ EOF
   assert_success
   grep -Fqx "fetch -q --depth 1 origin $PATTERNS_KIT_REF" "$log"
   grep -Fqx "checkout -q --detach FETCH_HEAD" "$log"
+}
+
+# _spinner_provision BACKEND NAME ACTION — run acq_backend_provision under
+# `set -euo pipefail` (as acq does) with the spinner animating (progress gate
+# forced on) and the unlocked provision stubbed to run ACTION while the spinner
+# is active. Records cleanup and INT-handler calls in $STUBDIR/<name>.log.
+_spinner_provision() {
+  local backend="$1" name="$2" action="$3" script log
+  script="$STUBDIR/spinner-$name.sh"
+  log="$STUBDIR/$name.log"
+  : > "$log"
+  cat > "$script" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+ACQ_SCRIPT_DIR="$REPO_ROOT"; ACQ_SOURCE_ONLY=1
+. "$REPO_ROOT/acq"
+. "$REPO_ROOT/acq.backends/$backend.sh"
+_acq_progress_enabled() { return 0; }
+_acq_${backend}_cleanup_uncreated_attempt() { printf 'cleanup\n' >> "$log"; }
+eval "_test_orig_signal_exit() \$(declare -f _acq_provider_input_signal_exit | sed 1d)"
+_acq_provider_input_signal_exit() { printf 'handler %s\n' "\$*" >> "$log"; _test_orig_signal_exit "\$@"; }
+_acq_backend_provision_unlocked() {
+  acq_spin_start "Creating the sandbox"
+  $action
+  printf 'not-reached\n' >> "$log"
+}
+rc=0
+acq_backend_provision "$name" shell /tmp 2>/dev/null || rc=\$?
+printf 'rc=%s\n' "\$rc"
+EOF
+  chmod +x "$script"
+  BASH_ENV='' run "$script"
+}
+
+@test "provision with the spinner active keeps a failing exit status" {
+  local backend root
+  for backend in sbx msb; do
+    root=$(acq_provider_input_root "$backend" "spinexit-$backend")
+    _spinner_provision "$backend" "spinexit-$backend" 'exit 3'
+    assert_success
+    assert_output 'rc=3'
+    assert_equal "$(cat "$STUBDIR/spinexit-$backend.log")" cleanup
+    [ ! -e "${root}.lock" ]
+  done
+}
+
+@test "Ctrl-C during provision with the spinner active exits 130 via the chained handler" {
+  local backend root
+  for backend in sbx msb; do
+    root=$(acq_provider_input_root "$backend" "spinint-$backend")
+    _spinner_provision "$backend" "spinint-$backend" \
+      'kill -s INT "$_ACQ_PROVIDER_INPUT_TRANSACTION_PID"; sleep 5'
+    assert_success
+    assert_output 'rc=130'
+    assert_equal "$(cat "$STUBDIR/spinint-$backend.log")" "$(printf 'handler 130\ncleanup')"
+    [ ! -e "${root}.lock" ]
+  done
+}
+
+@test "HUP during provision exits 129 via the chained handler" {
+  local backend root
+  for backend in sbx msb; do
+    root=$(acq_provider_input_root "$backend" "spinhup-$backend")
+    _spinner_provision "$backend" "spinhup-$backend" \
+      'kill -s HUP "$_ACQ_PROVIDER_INPUT_TRANSACTION_PID"; sleep 5'
+    assert_success
+    assert_output 'rc=129'
+    assert_equal "$(cat "$STUBDIR/spinhup-$backend.log")" "$(printf 'handler 129\ncleanup')"
+    [ ! -e "${root}.lock" ]
+  done
+}
+
+# HUP is signal 1, so the conventional status is 129. Pin every provider-input
+# transaction HUP trap (provision and terminate, both backends).
+@test "provider-input transaction HUP traps exit 129" {
+  local f
+  for f in sbx msb; do
+    assert_equal "$(grep -c "trap '_acq_provider_input_signal_exit 129' HUP" "$REPO_ROOT/acq.backends/$f.sh")" 2
+    refute grep -q "_acq_provider_input_signal_exit 128" "$REPO_ROOT/acq.backends/$f.sh"
+  done
 }
