@@ -360,10 +360,21 @@ def test_windows_installer_has_no_secret_literals():
     assert _secret_literal_lines(source) == []
 
 
-def test_gen_install_assets_writes_complete_sha256sums(tmp_path):
-    # gen-install-assets needs python3 (to read the manifest) and sha256sum.
-    if not (shutil.which("python3") and shutil.which("sha256sum")):
-        pytest.skip("python3/sha256sum unavailable")
+_GEN_ASSETS = (
+    "install.sh",
+    "install.ps1",
+    "provenance.json",
+    "acq-linux-x86_64.tar.gz",
+    "acq-linux-aarch64.tar.gz",
+    "acq-macos-arm64.tar.gz",
+    "acq-macos-x86_64.tar.gz",
+    "acq-windows-x64.zip",
+)
+# The only line form SHA256SUMS may contain: "HASH  name", two spaces, no "*".
+_SUMS_LINE = re.compile(r"[0-9a-f]{64}  [^ *][^\r]*")
+
+
+def _run_gen_install_assets(tmp_path, env=None):
     dist = tmp_path / "dist"
     dist.mkdir()
     shutil.copy(INSTALL_SH, dist / "install.sh")
@@ -371,30 +382,57 @@ def test_gen_install_assets_writes_complete_sha256sums(tmp_path):
     shutil.copy(REPO_ROOT / "installer" / "provenance.json", dist / "provenance.json")
     # The enumerated archive names from installer/assets.json; gen-install-assets
     # only hashes them, so the bodies need not be a real runtime.
-    for name, body in (
-        ("acq-linux-x86_64.tar.gz", b"linux-x86_64\n"),
-        ("acq-linux-aarch64.tar.gz", b"linux-aarch64\n"),
-        ("acq-macos-arm64.tar.gz", b"macos-arm64\n"),
-        ("acq-macos-x86_64.tar.gz", b"macos-x86_64\n"),
-        ("acq-windows-x64.zip", b"windows\n"),
-    ):
-        (dist / name).write_bytes(body)
+    for name in _GEN_ASSETS[3:]:
+        (dist / name).write_bytes(name.encode() + b"\n")
     proc = subprocess.run(
         ["sh", str(REPO_ROOT / "scripts" / "gen-install-assets"), str(dist)],
         cwd=str(REPO_ROOT),
+        env=env,
         capture_output=True,
         timeout=30,
     )
     assert proc.returncode == 0, proc.stderr.decode()
-    sums = (dist / "SHA256SUMS").read_text(encoding="utf-8")
-    for name in (
-        "install.sh",
-        "install.ps1",
-        "provenance.json",
-        "acq-linux-x86_64.tar.gz",
-        "acq-linux-aarch64.tar.gz",
-        "acq-macos-arm64.tar.gz",
-        "acq-macos-x86_64.tar.gz",
-        "acq-windows-x64.zip",
-    ):
-        assert f"  {name}" in sums
+    return dist, (dist / "SHA256SUMS").read_bytes().decode("utf-8")
+
+
+def _assert_text_form_sums(dist, sums):
+    lines = sums.split("\n")
+    assert lines[-1] == "", "SHA256SUMS must end with a newline"
+    lines = lines[:-1]
+    for line in lines:
+        assert _SUMS_LINE.fullmatch(line), f"not 'HASH  name': {line!r}"
+    recorded = {line[66:]: line[:64] for line in lines}
+    assert sorted(recorded) == sorted(_GEN_ASSETS)
+    for name, digest in recorded.items():
+        assert hashlib.sha256((dist / name).read_bytes()).hexdigest() == digest
+
+
+def test_gen_install_assets_writes_complete_sha256sums(tmp_path):
+    # gen-install-assets needs python3 (to read the manifest) and sha256sum.
+    if not (shutil.which("python3") and shutil.which("sha256sum")):
+        pytest.skip("python3/sha256sum unavailable")
+    dist, sums = _run_gen_install_assets(tmp_path)
+    _assert_text_form_sums(dist, sums)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the fake sha256sum is a POSIX script")
+def test_gen_install_assets_normalizes_binary_mode_sha256sum(tmp_path):
+    # Git for Windows' sha256sum writes the binary-mode form "HASH *name". A fake
+    # that does the same must not get a "*" into SHA256SUMS.
+    if not shutil.which("python3"):
+        pytest.skip("python3 unavailable")
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    fake = fake_bin / "sha256sum"
+    fake.write_text(
+        f"#!{sys.executable}\n"
+        "import hashlib, sys\n"
+        "for name in sys.argv[1:]:\n"
+        "    with open(name, 'rb') as fh:\n"
+        "        print(hashlib.sha256(fh.read()).hexdigest() + ' *' + name)\n"
+    )
+    fake.chmod(0o755)
+    env = {**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"}
+    dist, sums = _run_gen_install_assets(tmp_path, env=env)
+    assert "*" not in sums
+    _assert_text_form_sums(dist, sums)

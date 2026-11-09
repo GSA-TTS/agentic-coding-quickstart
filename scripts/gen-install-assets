@@ -50,8 +50,18 @@ for name in install.sh install.ps1 $assets; do
 done
 
 # Word-splitting is intentional: $assets is a newline-separated list of safe
-# (artifact) names read from the manifest, never user input.
+# (artifact) names read from the manifest, never user input. The assignment
+# fails the script (set -e) if sha256sum fails.
 # shellcheck disable=SC2086
-( cd "$dist" && sha256sum install.sh install.ps1 $assets ) > "$dist/SHA256SUMS"
+sums="$(cd "$dist" && sha256sum install.sh install.ps1 $assets)"
+
+# Write the text form, "HASH  name" (two spaces), on every platform. GNU
+# sha256sum marks binary-mode reads with "HASH *name", and Git for Windows'
+# sha256sum reads in binary mode by default. The installers accept both forms,
+# but release assets should be byte-identical wherever they are generated.
+printf '%s\n' "$sums" | tr -d '\r' | sed 's/^\([0-9a-f]\{64\}\) [ *]/\1  /' > "$dist/SHA256SUMS"
+if grep -v '^[0-9a-f]\{64\}  [^ *]' "$dist/SHA256SUMS" >/dev/null; then
+  die "unexpected line format in $dist/SHA256SUMS"
+fi
 
 printf 'wrote %s/SHA256SUMS\n' "$dist"
