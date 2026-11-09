@@ -634,14 +634,16 @@ def _require_symlinks(tmp_path: Path) -> None:
 
 def test_refuses_spec_symlink_outside_kit(tmp_path):
     _require_symlinks(tmp_path)
+    # Specs are read byte for byte, as Bash's awk reads them: write bytes, so
+    # Windows text mode does not turn the newline into CRLF.
     outside = tmp_path / "outside.yaml"
-    outside.write_text("name: x\n")
+    outside.write_bytes(b"name: x\n")
     kit = tmp_path / "kit"
     kit.mkdir()
     (kit / "spec.yaml").symlink_to(outside)
     with pytest.raises(kitspec.KitSpecError, match="outside the kit"):
         kitspec.load_kit(kit)
-    (kit / "real.yaml").write_text("name: inside\n")
+    (kit / "real.yaml").write_bytes(b"name: inside\n")
     (kit / "spec.yaml").unlink()
     (kit / "spec.yaml").symlink_to("real.yaml")
     assert kitspec.load_kit(kit).field("name") == "inside"
@@ -810,6 +812,38 @@ def test_tree_symlink_parity(tmp_path):
     sibling = tmp_path / "sibling"
     assert kitspec.tree_symlinks_within(sibling, sibling / "files") == [
         "kit-translate: kit payload symlink points outside the kit: files/evil"]
+
+
+def test_tree_warnings_name_entries_kit_relative_with_slashes(monkeypatch):
+    sep = "\\"
+    monkeypatch.setattr(os, "sep", sep)
+    kit = sep.join(("C:", "Users", "u", "kit"))
+    assert kitspec._kit_relative(kit, sep.join((kit, "files", "junction", "out"))) == "files/junction/out"
+    assert kitspec._kit_relative(kit, kit + "/files/x") == "files/x"
+    assert kitspec._kit_relative(kit, sep.join(("D:", "other", "x"))) == "D:/other/x"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real junctions exist only on Windows")
+def test_real_windows_junctions(tmp_path):
+    kit = tmp_path / "kit"
+    (kit / "files" / "sub").mkdir(parents=True)
+    (kit / "files" / "sub" / "f").write_bytes(b"f\n")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret").write_bytes(b"s\n")
+
+    def junction(link: Path, target: Path) -> None:
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)], check=True, capture_output=True)
+        assert os.path.isjunction(link)
+
+    junction(kit / "files" / "in", kit / "files" / "sub")
+    junction(kit / "files" / "sub" / "loop", kit / "files")
+    assert kitspec.tree_symlinks_within(kit, kit / "files") == []
+    assert kitspec.resolve_source(kit, "files/in/f") == (kit / "files" / "sub" / "f").resolve()
+    junction(kit / "files" / "out", outside)
+    assert kitspec.tree_symlinks_within(kit, kit / "files") == [
+        "kit-translate: kit payload symlink points outside the kit: files/out"]
+    assert kitspec.resolve_source(kit, "files/out/secret") is None
 
 
 def test_tree_junctions_count_as_links(tmp_path, monkeypatch):

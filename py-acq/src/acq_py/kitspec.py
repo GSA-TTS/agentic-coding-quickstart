@@ -1017,6 +1017,19 @@ def resolve_source(kit_dir: str | os.PathLike[str], source: str) -> Path | None:
     return Path(target)
 
 
+def _kit_relative(kit: str, entry: str) -> str:
+    """``${link#"$kitdir"/}`` with ``/`` separators: the kit-relative name used in warnings.
+
+    On Windows the walk yields ``\\``-separated paths; the warning names the
+    entry the way Bash does, relative to the kit and with forward slashes.
+    """
+    for sep in dict.fromkeys((os.sep, "/")):
+        if entry.startswith(kit + sep):
+            entry = entry[len(kit) + 1:]
+            break
+    return entry.replace(os.sep, "/")
+
+
 def tree_symlinks_within(kit_dir: str | os.PathLike[str], tree: str | os.PathLike[str]) -> list[str]:
     """``kit_tree_symlinks_within``: the problems found, empty when the tree is safe.
 
@@ -1038,7 +1051,7 @@ def tree_symlinks_within(kit_dir: str | os.PathLike[str], tree: str | os.PathLik
             # os.walk does not follow symlinks, but it does enter junctions.
             dirs[:] = [d for d in dirs if not os.path.isjunction(os.path.join(base, d))]
     for entry in entries:
-        rel = entry.removeprefix(kit + "/")
+        rel = _kit_relative(kit, entry)
         if "\n" in entry:
             problems.append("kit-translate: kit payload has a file name containing a newline; refusing it")
         elif _is_link(entry):
