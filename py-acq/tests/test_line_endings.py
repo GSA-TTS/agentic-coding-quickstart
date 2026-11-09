@@ -24,9 +24,9 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _git(*args: str, stdin: bytes | None = None) -> bytes:
+def _git(*args: str, stdin: bytes | None = None, cwd: Path = REPO_ROOT) -> bytes:
     return subprocess.run(
-        ["git", "-C", str(REPO_ROOT), *args],
+        ["git", "-C", str(cwd), *args],
         input=stdin,
         capture_output=True,
         check=True,
@@ -44,28 +44,49 @@ def _is_shell_shebang(first_line: bytes) -> bool:
     return Path(interpreter).name in SHELL_INTERPRETERS
 
 
-def _tracked_shell_scripts() -> list[str]:
+def _ls_files(root: Path) -> list[tuple[str, str]]:
+    """``(mode, path)`` for every index entry of the repository at ``root``."""
+    entries = []
+    for entry in _git("ls-files", "-s", "-z", cwd=root).split(b"\0"):
+        if entry:
+            meta, _, name = entry.partition(b"\t")
+            entries.append((meta.split()[0].decode(), name.decode("utf-8")))
+    return entries
+
+
+def _shell_scripts(root: Path) -> list[str]:
     scripts = []
-    # Regular files only: mode 160000 entries are the vendored bats submodules,
-    # which carry their own attributes.
-    for entry in _git("ls-files", "-s", "-z").split(b"\0"):
-        if not entry:
+    # Regular files only: mode 160000 entries are submodules (checked
+    # separately below) and 120000 entries are symlinks.
+    for mode, path in _ls_files(root):
+        if mode in ("160000", "120000"):
             continue
-        meta, _, name = entry.partition(b"\t")
-        if meta.split()[0] == b"160000":
-            continue
-        path = name.decode("utf-8")
         if path.endswith(SHELL_SUFFIXES):
             scripts.append(path)
             continue
         try:
-            with open(REPO_ROOT / path, "rb") as fh:
+            with open(root / path, "rb") as fh:
                 first = fh.readline(256)
         except OSError:
             continue
         if _is_shell_shebang(first):
             scripts.append(path)
     return sorted(scripts)
+
+
+def _tracked_shell_scripts() -> list[str]:
+    return _shell_scripts(REPO_ROOT)
+
+
+def _crlf_in_index(root: Path, scripts: set[str]) -> list[str]:
+    crlf = []
+    for line in _git("ls-files", "--eol", "-z", cwd=root).split(b"\0"):
+        if not line:
+            continue
+        info, _, path = line.decode("utf-8").partition("\t")
+        if path in scripts and not info.startswith("i/lf"):
+            crlf.append(f"{path} ({info.split()[0]})")
+    return crlf
 
 
 def test_shebang_detection():
@@ -89,12 +110,25 @@ def test_tracked_shell_scripts_are_pinned_lf():
 
 def test_tracked_shell_scripts_are_lf_in_the_index():
     # The pin keeps the checkout LF only if the stored content is LF too.
-    scripts = set(_tracked_shell_scripts())
-    crlf = []
-    for line in _git("ls-files", "--eol", "-z").split(b"\0"):
-        if not line:
-            continue
-        info, _, path = line.decode("utf-8").partition("\t")
-        if path in scripts and not info.startswith("i/lf"):
-            crlf.append(f"{path} ({info.split()[0]})")
+    crlf = _crlf_in_index(REPO_ROOT, set(_tracked_shell_scripts()))
     assert not crlf, f"shell scripts not stored with LF endings: {crlf}"
+
+
+def test_submodule_shell_scripts_are_lf_in_the_index():
+    # This repository's .gitattributes does not reach into submodules, and the
+    # vendored bats ones do not pin their own scripts (bats-core pins only *.sh
+    # and libexec/; bats-support and bats-assert pin nothing). The Windows CI job
+    # therefore checks them out with core.autocrlf=false, which yields the stored
+    # bytes, so the stored bytes must be LF. Skipped for an uninitialized
+    # submodule.
+    submodules = [path for mode, path in _ls_files(REPO_ROOT) if mode == "160000"]
+    checked = 0
+    for sub in submodules:
+        root = REPO_ROOT / sub
+        if not (root / ".git").exists():
+            continue
+        checked += 1
+        crlf = _crlf_in_index(root, set(_shell_scripts(root)))
+        assert not crlf, f"{sub}: shell scripts not stored with LF endings: {crlf}"
+    if not checked:
+        pytest.skip("no submodule is checked out")

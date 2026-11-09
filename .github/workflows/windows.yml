@@ -315,24 +315,36 @@ jobs:
       run:
         shell: bash
     steps:
-      # This job keeps the runner's default core.autocrlf=true, as a plain Git
-      # for Windows clone does, and relies on the .gitattributes LF pins to keep
-      # the shell scripts runnable. The check below fails if one comes out CRLF.
+      # This job keeps the runner's default core.autocrlf=true for the
+      # repository, as a plain Git for Windows clone does, and relies on the
+      # .gitattributes LF pins to keep its shell scripts runnable.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # bats-core, bats-support and bats-assert are vendored submodules,
-          # pinned by SHA (ADR-0025).
-          submodules: true
 
+      # bats-core, bats-support and bats-assert are vendored submodules, pinned
+      # by SHA (ADR-0025). This repository's .gitattributes does not reach into
+      # them: bats-support and bats-assert have none, and bats-core pins only
+      # *.sh and libexec/, so with autocrlf=true its bin/bats and lib/*.bash come
+      # out CRLF. Check them out as committed (LF) instead; -c is passed on to
+      # the git processes the submodule update starts.
+      - name: Check out the bats submodules with LF line endings
+        run: git -c core.autocrlf=false submodule update --init --recursive
+
+      # Fails if a pinned shell script in the repository, or any file at all in
+      # the submodules, was checked out with CRLF endings.
       - name: Check the shell scripts were checked out with LF endings
         run: |
           set -euo pipefail
           echo "core.autocrlf=$(git config --get core.autocrlf || echo unset)"
           crlf=$(git ls-files --eol | awk '$2 == "w/crlf" && (/attr\/text eol=lf/ || $NF ~ /\.(sh|bash|bats)$/ || $NF == "acq" || $NF == "acq-python") {print $NF}')
-          if [ -n "$crlf" ]; then
-            echo "::error::shell scripts checked out with CRLF endings:"
-            printf '  %s\n' "$crlf"
+          # Each line: "<submodule>: i/<index> w/<worktree> attr/... <path>".
+          sub_eol=$(git submodule foreach --quiet --recursive 'git ls-files --eol | sed "s|^|$displaypath: |"')
+          [ -n "$sub_eol" ] || { echo "::error::no submodule files listed; is the bats checkout missing?"; exit 1; }
+          sub_crlf=$(printf '%s\n' "$sub_eol" | awk '$3 == "w/crlf" {print $1 " " $NF}')
+          if [ -n "$crlf" ] || [ -n "$sub_crlf" ]; then
+            echo "::error::files checked out with CRLF endings:"
+            printf '%s\n' "$crlf" "$sub_crlf"
             exit 1
           fi
 
