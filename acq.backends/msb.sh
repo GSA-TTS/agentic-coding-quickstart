@@ -3224,6 +3224,35 @@ _acq_msb_upstream_ca_flags_into() {
 # documented in the ADR): gitignored/untracked files and uncommitted changes to
 # tracked files do NOT enter the clone — commit first, or `acq cp` them in.
 
+# _acq_msb_git_ws DIR ARGS... — run host-side git against the user's workspace
+# repository with its config-driven programs disabled. The workspace is mounted
+# read-write into sandboxes in normal mode, so its repository config, attributes
+# and hooks are treated as untrusted here: no hooks, no fsmonitor, no filter
+# drivers, no transports (so no lazy fetch from a promisor remote), no
+# submodule recursion. Callers that need the local file transport (the scratch
+# clone) re-allow only that one after the wrapper's defaults.
+_acq_msb_git_ws() {
+  local dir="$1" key
+  shift
+  local -a cfg=(
+    -c core.fsmonitor=false
+    -c core.hooksPath=/dev/null
+    -c core.untrackedCache=false
+    -c protocol.allow=never
+    -c submodule.recurse=false
+  )
+  # Blank every filter driver the repository's config defines (reading config
+  # runs nothing), so status and clone never start a clean/smudge/process
+  # program it names.
+  while IFS= read -r key; do
+    case "$key" in
+      filter.*.clean | filter.*.smudge | filter.*.process) cfg+=(-c "${key}=") ;;
+      filter.*.required) cfg+=(-c "${key}=false") ;;
+    esac
+  done < <(git -C "$dir" config --name-only --get-regexp '^filter\.' 2>/dev/null)
+  GIT_NO_LAZY_FETCH=1 GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 git "${cfg[@]}" -C "$dir" "$@"
+}
+
 # _acq_msb_clone_setup NAME WSPATH — create the scratch clone + fetch-back
 # remote for NAME's primary workspace WSPATH. On success sets
 # _ACQ_MSB_CLONE_DIR to the canonicalized scratch path (the mount source).
@@ -3244,7 +3273,7 @@ _acq_msb_clone_setup() {
       return 1
       ;;
   esac
-  if ! top=$(git -C "$ws" rev-parse --show-toplevel 2>/dev/null); then
+  if ! top=$(_acq_msb_git_ws "$ws" rev-parse --show-toplevel 2>/dev/null); then
     echo "acq(msb): error: --clone: workspace is not a git repository: $ws" >&2
     echo "acq(msb):   --clone runs the agent on a clone of the primary workspace's repo." >&2
     return 1
@@ -3272,7 +3301,15 @@ _acq_msb_clone_setup() {
     fi
     return 1
   fi
-  if [ -n "$(git -C "$ws_canon" status --porcelain 2>/dev/null)" ]; then
+  # An alternates file makes the object store borrow from other repositories
+  # on the host; a scratch clone must carry only this repository's objects.
+  if [ -s "${ws_canon}/.git/objects/info/alternates" ]; then
+    echo "acq(msb): error: --clone: $ws_canon borrows objects from other repositories" >&2
+    echo "acq(msb):   (.git/objects/info/alternates). Run 'git repack -a -d' and remove that" >&2
+    echo "acq(msb):   file, or use a regular clone, then re-run." >&2
+    return 1
+  fi
+  if [ -n "$(_acq_msb_git_ws "$ws_canon" status --porcelain --ignore-submodules=all 2>/dev/null)" ]; then
     echo "acq(msb): note: the workspace has uncommitted changes; a git clone carries" >&2
     echo "acq(msb):   committed state only. Commit first ('git add' untracked files)," >&2
     echo "acq(msb):   or copy files in with 'acq cp'." >&2
@@ -3290,7 +3327,11 @@ _acq_msb_clone_setup() {
     return 1
   fi
   printf '%s\n' "$ws_canon" > "${dir}/.origin"
-  if ! git clone --quiet --no-hardlinks -- "$ws_canon" "$scratch"; then
+  # --no-local goes through upload-pack, so only objects reachable from the
+  # repository's refs are copied. The wrapper disables the workspace's
+  # config-driven programs; only the local file transport is re-allowed.
+  if ! _acq_msb_git_ws "$ws_canon" -c protocol.file.allow=always \
+      clone --quiet --no-local --no-hardlinks -- "$ws_canon" "$scratch"; then
     echo "acq(msb): error: --clone: git clone of $ws_canon failed" >&2
     rm -rf "$dir"
     return 1
@@ -3301,8 +3342,8 @@ _acq_msb_clone_setup() {
   fi
   # Fetch-back remote in the host checkout (replace a stale same-name remote —
   # its scratch dir was just verified absent, so it cannot hold unfetched work).
-  git -C "$ws_canon" remote remove "sandbox-${name}" >/dev/null 2>&1 || true
-  if ! git -C "$ws_canon" remote add "sandbox-${name}" "$scratch" >/dev/null 2>&1; then
+  _acq_msb_git_ws "$ws_canon" remote remove "sandbox-${name}" >/dev/null 2>&1 || true
+  if ! _acq_msb_git_ws "$ws_canon" remote add "sandbox-${name}" "$scratch" >/dev/null 2>&1; then
     echo "acq(msb): warning: could not register the 'sandbox-${name}' remote in $ws_canon;" >&2
     echo "acq(msb):   fetch agent work directly: git fetch $scratch" >&2
   fi
@@ -3364,7 +3405,7 @@ _acq_msb_clone_copy_config() {
   local src="$1" scratch="$2" key rc val first
   for key in user.name user.email remote.origin.url remote.origin.pushurl; do
     rc=0
-    git -C "$src" config --get-all "$key" >/dev/null 2>&1 || rc=$?
+    _acq_msb_git_ws "$src" config --no-includes --get-all "$key" >/dev/null 2>&1 || rc=$?
     if [ "$rc" -eq 1 ]; then
       rc=0
       git -C "$scratch" config --unset-all "$key" >/dev/null 2>&1 || rc=$?
@@ -3384,7 +3425,7 @@ _acq_msb_clone_copy_config() {
         git -C "$scratch" config --add "$key" "$val" >/dev/null 2>&1
       fi || { _acq_msb_clone_config_fail set "$key" || return 1; continue 2; }
       first=""
-    done < <(git -C "$src" config -z --get-all "$key" 2>/dev/null)
+    done < <(_acq_msb_git_ws "$src" config --no-includes -z --get-all "$key" 2>/dev/null)
   done
   return 0
 }
@@ -3437,7 +3478,7 @@ $(awk '$1 ~ /^[0-9a-f]+$/ && $2 ~ /^refs\/heads\//{print $1}' "${scratch}/.git/p
     # Skip non-SHA lines (e.g. a symbolic "ref: ..." loose ref) rather than
     # letting cat-file fail on them and warn spuriously.
     case "$t" in *[!0-9a-f]*) continue ;; esac
-    if ! git -C "$origin" cat-file -e "$t" 2>/dev/null; then
+    if ! _acq_msb_git_ws "$origin" cat-file -e "$t" 2>/dev/null; then
       echo "acq(msb): warning: discarding unfetched commits in sandbox '$name''s scratch clone" >&2
       echo "acq(msb):   (they were recoverable with: git fetch sandbox-${name})." >&2
       return 0
@@ -3457,7 +3498,7 @@ _acq_msb_clone_cleanup() {
   [ -d "$dir" ] || return 0
   origin=$(cat "${dir}/.origin" 2>/dev/null) || origin=""
   if [ -n "$origin" ] && [ -d "$origin" ]; then
-    git -C "$origin" remote remove "sandbox-${name}" >/dev/null 2>&1 || true
+    _acq_msb_git_ws "$origin" remote remove "sandbox-${name}" >/dev/null 2>&1 || true
   fi
   rm -rf "$dir"
   return 0
