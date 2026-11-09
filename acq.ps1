@@ -21,6 +21,16 @@ if ($acqImpl -and $acqImpl -ne "bash") {
         [Console]::Error.WriteLine("acq: unsupported ACQ_IMPL '$acqImpl' (expected 'bash' or 'python')")
         exit 2
     }
+    # True when $Exe runs isolated and is Python 3.12+. Windows PowerShell 5.1
+    # turns a native program's stderr into a terminating error under
+    # $ErrorActionPreference = "Stop" (the Store alias stub writes to stderr),
+    # so the probe runs with a local "Continue" preference.
+    function Test-AcqPython {
+        param([Parameter(Mandatory = $true)][string]$Exe)
+        $ErrorActionPreference = "Continue"
+        & $Exe -I -c "import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)" 2>$null | Out-Null
+        return ($LASTEXITCODE -eq 0)
+    }
     $acqImplRepoRoot = Split-Path -Parent $PSCommandPath
     $runtimePy = Join-Path $acqImplRepoRoot "py-acq\runtime\python.exe"
     # An ACQ_RUNTIME override must be a drive-rooted or UNC path: a relative
@@ -36,21 +46,24 @@ if ($acqImpl -and $acqImpl -ne "bash") {
         $acqPythonExe = $runtimePy
     }
     else {
-        # Search PATH ourselves, like acq_py.hostexec: python.exe from drive-rooted
-        # or UNC entries only. A .bat/.cmd shim would run through cmd.exe, a
-        # relative entry (even ".") resolves against the current directory, which
-        # is normally the workspace, and the Microsoft Store App Execution Alias
-        # under WindowsApps only opens the Store.
+        # Search PATH ourselves, like acq_py.hostexec: consider python.exe only in
+        # drive-rooted or UNC entries, because a relative entry (even ".")
+        # resolves against the current directory, which is normally the
+        # workspace. Take the first candidate that passes the isolated 3.12+
+        # probe: that skips the Microsoft Store App Execution Alias stub (it
+        # exits 9009) and older interpreters, but keeps a real Store-installed
+        # Python, which is reached through the same kind of alias. The path is
+        # built as a string because Join-Path throws on a missing drive letter.
         $pyCmd = $null
         foreach ($entry in ($env:Path -split ';')) {
             $dir = $entry.Trim().Trim('"')
             if (-not ($dir -match '^[A-Za-z]:[\\/]' -or $dir.StartsWith('\\'))) { continue }
-            if ($dir -like '*\Microsoft\WindowsApps*') { continue }
-            $candidate = Join-Path $dir 'python.exe'
-            if (Test-Path -LiteralPath $candidate -PathType Leaf) { $pyCmd = $candidate; break }
+            $candidate = $dir.TrimEnd('\', '/') + '\python.exe'
+            if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
+            if (Test-AcqPython -Exe $candidate) { $pyCmd = $candidate; break }
         }
         if ($null -eq $pyCmd) {
-            [Console]::Error.WriteLine("acq: ACQ_IMPL=python but no Python interpreter was found. Install acq from a release (it bundles its own runtime), or install Python 3.12 or newer from python.org.")
+            [Console]::Error.WriteLine("acq: ACQ_IMPL=python but no Python 3.12+ was found on PATH. Install acq from a release (it bundles its own runtime), install Python 3.12+ from python.org with 'Add python.exe to PATH' checked, or set ACQ_RUNTIME to the full path of python.exe.")
             exit 1
         }
         $acqPythonExe = $pyCmd
@@ -68,8 +81,7 @@ if ($acqImpl -and $acqImpl -ne "bash") {
     # (a workspace json.py would otherwise run on the host); interpreters older
     # than the required 3.12 are refused because they may not honour -P. The
     # probe runs isolated and imports only the builtin sys module.
-    & $acqPythonExe -I -c "import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)" *> $null
-    if ($LASTEXITCODE -ne 0) {
+    if (-not (Test-AcqPython -Exe $acqPythonExe)) {
         [Console]::Error.WriteLine("acq: ACQ_IMPL=python needs Python 3.12 or newer; $acqPythonExe is not")
         exit 1
     }
