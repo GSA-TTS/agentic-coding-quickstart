@@ -76,6 +76,10 @@ _KIT_HELP = (
     "kit ref to apply (repeatable); a built-in agent kit name such as opencode "
     "selects that kit, and refs outside the built-in bundle are refused"
 )
+_NO_PROVIDER_KITS_HELP = (
+    "create without provider kits; authoritative over ACQ_PROVIDER_KITS and config.yaml provider_kit, "
+    "so no provider config or credential is required"
+)
 KNOWN_AGENTS = common.KNOWN_AGENTS
 DEFAULT_GUEST_WORKSPACE = common.DEFAULT_GUEST_WORKSPACE
 OPENCODE_DEVENV_IMAGE = common.OPENCODE_DEVENV_IMAGE
@@ -237,6 +241,7 @@ def build_parser() -> _Parser:
     create_parser.add_argument("--name", help="explicit sandbox name (default: derived from agent+path)")
     create_parser.add_argument("--image", help="base image override (default: the devenv shell image)")
     create_parser.add_argument("--kit", action="append", help=_KIT_HELP)
+    create_parser.add_argument("--no-provider-kits", action="store_true", help=_NO_PROVIDER_KITS_HELP)
     create_parser.add_argument(
         "--recreate",
         metavar="NAME",
@@ -251,6 +256,7 @@ def build_parser() -> _Parser:
     run_parser.add_argument("--name", help="explicit sandbox name (AGENT form)")
     run_parser.add_argument("--image", help="base image override (AGENT form)")
     run_parser.add_argument("--kit", action="append", help=_KIT_HELP)
+    run_parser.add_argument("--no-provider-kits", action="store_true", help=_NO_PROVIDER_KITS_HELP)
 
     sub.add_parser("ls", help="list sandboxes")
 

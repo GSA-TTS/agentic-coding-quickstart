@@ -9,12 +9,13 @@ so two acq commands never interleave on one sandbox's guest and host records.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shlex
 import sys
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 
 from .. import (
@@ -32,7 +33,7 @@ from .. import (
     security,
     state,
 )
-from . import common, session
+from . import common, creds, session
 
 # Substrate-contract seam (internal test seam, never a secret, never written to
 # output). ``ACQ_SUBSTRATE_STATE`` is a JSON object mapping an image to its
@@ -273,6 +274,8 @@ def _new_msb_sandbox(
     steps, exit_code = _substrate_plan(image, plan.agent_kit, command, emit_json)
     if exit_code is not None:
         return None, exit_code
+    # Before the create: msb binds a sandbox's secrets only when it is created.
+    creds.advise_github_scope("msb", name, workspace, emit_json)
     try:
         data = _create_sandbox("msb", agent, workspace, name, image, plan.agent_kit, plan=plan)
     except common._ADAPTER_ERRORS as exc:
@@ -318,6 +321,7 @@ def _new_sbx_sandbox(
     plan, exit_code = _plan_sbx_kits(agent, cli_kits, image, command, emit_json)
     if plan is None:
         return None, exit_code
+    creds.advise_github_scope("sbx", name, workspace, emit_json)
     facts, exit_code = _sbx_provider_gate(command, name, plan, emit_json)
     if facts is None:
         return None, exit_code
@@ -809,7 +813,39 @@ def _print_create_human(data: dict) -> None:
     print(line)
 
 
+PROVIDER_KITS_ENV = "ACQ_PROVIDER_KITS"
+
+
+@contextlib.contextmanager
+def _provider_kits_flag(no_provider_kits: bool) -> Iterator[None]:
+    """``--no-provider-kits`` for the duration of one create or run.
+
+    Bash spells the flag as an explicitly empty ``ACQ_PROVIDER_KITS``, and every
+    provider-selection reader here already treats that as authoritative (no
+    provider kit, no provider credential), ahead of config.yaml ``provider_kit``.
+    So the flag sets the same empty value, which also wins over an exported
+    non-empty one, and puts back what was there before.
+    """
+    if not no_provider_kits:
+        yield
+        return
+    saved = os.environ.get(PROVIDER_KITS_ENV)
+    os.environ[PROVIDER_KITS_ENV] = ""
+    try:
+        yield
+    finally:
+        if saved is None:
+            os.environ.pop(PROVIDER_KITS_ENV, None)
+        else:
+            os.environ[PROVIDER_KITS_ENV] = saved
+
+
 def run_create(parsed, emit_json: bool, backend: str) -> int:
+    with _provider_kits_flag(getattr(parsed, "no_provider_kits", False)):
+        return _run_create(parsed, emit_json, backend)
+
+
+def _run_create(parsed, emit_json: bool, backend: str) -> int:
     if parsed.recreate is not None:
         return run_recreate(parsed, emit_json, backend)
     if not parsed.agent or parsed.agent not in common.KNOWN_AGENTS:
@@ -1021,6 +1057,7 @@ def _recreate_msb(
     steps, exit_code = _substrate_plan(image, plan.agent_kit, "create", emit_json)
     if exit_code is not None:
         return None, exit_code
+    creds.advise_github_scope("msb", name, workspace, emit_json)  # the new guest binds at create
     try:
         msb.egress_flags(kit_msb.egress_names(plan.kits))
         # A pin mismatch or a missing provider key refuses here, old guest intact.
@@ -1081,6 +1118,9 @@ def _run_prepare_locked(
     recorded, exit_code = _reattach_workspace(backend, name, workspace, emit_json)
     if exit_code is not None:
         return None, exit_code
+    # A running sandbox can still take a token (msb re-feeds it, sbx's proxy is
+    # updated), so the nudge runs on a re-attach too, for the path typed now.
+    creds.advise_github_scope(backend, name, workspace, emit_json)
     # Re-attach: the kits were applied at create time; read the recorded
     # kit/entrypoint (lenient) so the launch surfaces provenance.
     applied = kits.kit_applied_read(backend, name) or {}
@@ -1097,6 +1137,11 @@ def _run_prepare_locked(
 
 
 def run_run(parsed, emit_json: bool, backend: str) -> int:
+    with _provider_kits_flag(getattr(parsed, "no_provider_kits", False)):
+        return _run_run(parsed, emit_json, backend)
+
+
+def _run_run(parsed, emit_json: bool, backend: str) -> int:
     """Create (if missing) then launch, or re-attach an existing sandbox by name.
 
     In ``--json`` mode the create/attach result is emitted as one JSON envelope on

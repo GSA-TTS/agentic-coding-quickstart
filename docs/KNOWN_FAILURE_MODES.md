@@ -3800,10 +3800,20 @@ non-default provider (`acq provider-credential set ID KEY_ENV --host HOST`).
 ### Prevention / Status
 
 Documented in `docs/BACKEND_GUIDE.md` (host pinning) and `py-acq/README.md`.
-The Python gate also lacks Bash's `--no-provider-kits` flag (an explicitly
-empty `ACQ_PROVIDER_KITS` is the equivalent) and does not record the provider
-selection per sandbox, so a later `start` of a sandbox with an incomplete
-binding record uses the current selection.
+The Python acq takes Bash's `--no-provider-kits` flag on `create` and `run`,
+ahead of `ACQ_PROVIDER_KITS` and config.yaml `provider_kit`, as Bash does.
+
+**Deferred: the provider selection is not recorded per sandbox.** Bash writes
+`provider_selection` (and the explicit `provider_kits`) into the sandbox's
+provenance record at create and loads it again on re-attach, `start` and
+`kit update`. The Python acq records only the provider facts. So a sandbox
+created with `--no-provider-kits`, or with an explicit `ACQ_PROVIDER_KITS`, gets
+the selection current at the time of a later `acq kit update` (which reapplies
+the provider kit config.yaml or the environment names then), and a `start` of a
+sandbox with an incomplete binding record binds the current selection's
+providers. Until it is fixed, pass the same `ACQ_PROVIDER_KITS` (an empty value
+for none) to `kit update` and `start`. The fix is to write and read Bash's two
+provenance fields in `acq_py.kits`; it waits on nothing else.
 
 ---
 
