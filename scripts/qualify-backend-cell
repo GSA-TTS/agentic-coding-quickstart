@@ -713,8 +713,10 @@ def remove_sbx_custom_secrets(raw: Run, key_envs: set[str]) -> None:
 
 
 def _deadline(environ) -> float:
+    raw = environ.get(DEADLINE_ENV, "")
     try:
-        value = float(environ.get(DEADLINE_ENV, ""))
+        # float() also accepts other scripts' digits; only an ASCII deadline is valid.
+        value = float(raw) if raw.isascii() else math.nan
     except ValueError:
         value = math.nan
     return value if math.isfinite(value) else time.time() + DEFAULT_BUDGET

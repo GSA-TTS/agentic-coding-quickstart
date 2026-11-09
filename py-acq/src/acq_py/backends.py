@@ -288,15 +288,17 @@ def check_version(spec: BackendSpec) -> VersionProblem | None:
     """
     status = detect(spec)
     if not status.installed:
+        bin_var = f"ACQ_{spec.name.upper()}_BIN"
         override = _env(spec.name, "BIN")
-        message = (
-            f"the {spec.name} backend CLI named by ACQ_{spec.name.upper()}_BIN could not be run"
-            if override and override != STUB_SENTINEL
-            else f"backend '{spec.name}' CLI not found on PATH"
-        )
+        if override and override != STUB_SENTINEL and _env(spec.name, "INSTALLED") != "0":
+            return VersionProblem(
+                errors.BACKEND_NOT_FOUND,
+                f"the {spec.name} backend CLI named by {bin_var} could not be run",
+                f"fix {bin_var} (or unset it) and retry",
+            )
         return VersionProblem(
             errors.BACKEND_NOT_FOUND,
-            message,
+            f"backend '{spec.name}' CLI not found on PATH",
             f"install {spec.name} {spec.min_version.string} or newer and retry",
         )
     if status.parsed is None:

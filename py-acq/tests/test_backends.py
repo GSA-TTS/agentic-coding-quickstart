@@ -222,6 +222,17 @@ def test_forced_installed_does_not_rescue_a_missing_override(monkeypatch):
     problem = backends.check_version(backends.BACKENDS["msb"])
     assert problem is not None and problem.code == errors.BACKEND_NOT_FOUND
     assert "ACQ_MSB_BIN" in problem.message
+    assert problem.remediation == "fix ACQ_MSB_BIN (or unset it) and retry"
+
+
+def test_forced_absent_does_not_blame_the_override(tmp_path, monkeypatch):
+    # INSTALLED=0 made the backend absent, not the override: say so plainly.
+    _fake_backend(tmp_path, monkeypatch, "msb", "msb 0.7.11")
+    monkeypatch.setenv("ACQ_MSB_INSTALLED", "0")
+    problem = backends.check_version(backends.BACKENDS["msb"])
+    assert problem is not None and problem.code == errors.BACKEND_NOT_FOUND
+    assert "ACQ_MSB_BIN" not in problem.message
+    assert "ACQ_MSB_BIN" not in (problem.remediation or "")
 
 
 def test_blocked_bin_override_refuses_create_before_any_backend_mutation(tmp_path, monkeypatch, capsys):

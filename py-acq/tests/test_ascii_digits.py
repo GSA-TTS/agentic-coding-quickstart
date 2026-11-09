@@ -10,7 +10,10 @@ rejecting everything.
 
 from __future__ import annotations
 
+import importlib.util
 import sys
+import time
+from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
 import pytest
@@ -19,6 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 from acq_py import backends, timeouts  # noqa: E402
+from qualification import cli as qcli  # noqa: E402
 from qualification import host, ledger, matrix  # noqa: E402
 
 # Each spells a version that would otherwise pass every floor: wholly in another
@@ -89,3 +93,48 @@ def test_timeout_override_rejects_non_ascii_digits(monkeypatch, capsys, raw):
     monkeypatch.setenv("ACQ_TEST_TIMEOUT", raw)
     assert timeouts.env_seconds("ACQ_TEST_TIMEOUT", 7.0) == 7.0
     assert "ignoring ACQ_TEST_TIMEOUT" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Qualification tooling: the cell oracle's deadline and the harness CLI flags.
+# ---------------------------------------------------------------------------
+
+NON_ASCII_NUMBERS = ["\u0663\u0660", "\u0661.\u0665", "\uff13\uff10", "3\u0660", "\u0966\u0967"]
+
+
+def _load_cell_oracle():
+    loader = SourceFileLoader("qualify_backend_cell", str(REPO_ROOT / "scripts" / "qualify-backend-cell"))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[loader.name] = module  # dataclasses resolve annotations through sys.modules
+    loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("raw", NON_ASCII_NUMBERS)
+def test_cell_oracle_deadline_rejects_non_ascii_digits(raw):
+    cell = _load_cell_oracle()
+    assert cell._deadline({cell.DEADLINE_ENV: "1700000000"}) == 1700000000.0  # ASCII control
+    before = time.time()
+    # An unparseable deadline falls back to the oracle's own budget from now.
+    assert cell._deadline({cell.DEADLINE_ENV: raw}) >= before + cell.DEFAULT_BUDGET
+
+
+@pytest.mark.parametrize("raw", NON_ASCII_NUMBERS)
+def test_qualification_cli_flags_reject_non_ascii_digits(raw):
+    parser = qcli._build_parser()
+    args = parser.parse_args(["run", "--backend", "msb", "--attempts", "3", "--timeout", "30"])
+    assert (args.attempts, args.timeout) == (3, 30.0)  # ASCII control
+    with pytest.raises(SystemExit):
+        parser.parse_args(["run", "--backend", "msb", "--attempts", raw])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["run", "--backend", "msb", "--timeout", raw])
+
+
+@pytest.mark.parametrize("raw", NON_ASCII_NUMBERS)
+def test_qualification_host_timeout_rejects_non_ascii_digits(raw):
+    parser = host._build_parser()
+    assert parser.parse_args(["--timeout", "900"]).timeout == 900  # ASCII control
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--timeout", raw])

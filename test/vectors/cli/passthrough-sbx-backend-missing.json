@@ -15,11 +15,11 @@
     ],
     "env": {
       "ACQ_SBX_BIN": "/nonexistent/acq-vector/sbx",
-      "ACQ_SBX_VERSION": "0.51.0",
-      "ACQ_SBX_INSTALLED": "1",
       "ACQ_MSB_INSTALLED": "0"
     },
     "unset": [
+      "ACQ_SBX_VERSION",
+      "ACQ_SBX_INSTALLED",
       "ACQ_BACKEND",
       "ACQ_STATE_DIR",
       "ACQ_SBX_READY_TIMEOUT",

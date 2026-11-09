@@ -390,6 +390,16 @@ def _exit_code(results: list[Result]) -> int:
     return 0 if all(r.status in _OK for r in results) else 2
 
 
+def _ascii_int(text: str) -> int:
+    # int() also accepts other scripts' digits ("\u0661\u0662"); refuse them.
+    if not text.isascii():
+        raise argparse.ArgumentTypeError(f"must be a whole number written in ASCII digits, got {text!r}")
+    try:
+        return int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"must be a whole number, got {text!r}") from None
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="qualification.host", description=__doc__.split("\n")[0])
     p.add_argument("--backend", choices=[MSB, SBX], action="append", help="limit to a backend (repeatable)")
@@ -400,7 +410,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--record-failures", action="store_true", help="also record FAIL/FLAKY outcomes")
     p.add_argument("--accept-backend-version", action="store_true",
                    help="move the ledger's accepted backend version to the installed one (expires other cells)")
-    p.add_argument("--timeout", type=int, default=1800,
+    p.add_argument("--timeout", type=_ascii_int, default=1800,
                    help="seconds per attempt (a FAIL is retried up to 3 times; default 1800)")
     return p
 

@@ -37,7 +37,7 @@
     },
     {
       "contract": "ADR-0040m version floor fail-closed (backend_not_found / backend_version_unsupported / backend_version_unknown)",
-      "vectors": ["cli/backend-check-ok", "cli/backend-check-unsupported", "cli/backend-check-blocked", "cli/backend-check-unknown", "cli/backend-check-not-found", "cli/backend-check-bin-override-blocked"]
+      "vectors": ["cli/backend-check-ok", "cli/backend-check-unsupported", "cli/backend-check-blocked", "cli/backend-check-unknown", "cli/backend-check-not-found", "cli/backend-check-bin-override-blocked", "cli/backend-check-forced-version-ignored-for-real-bin"]
     },
     {
       "contract": "ADR-0038m §2 doctor required result data fields (overall status + per-check id/status)",
