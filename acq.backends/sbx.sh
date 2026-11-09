@@ -228,29 +228,48 @@ _acq_sbx_kit_sources_manual_hint() {
     cmd="$_acc]"
   fi
   echo "      If kit resolution fails, review the current value and run:" >&2
-  echo "        sbx settings set kit.allowedSources '${cmd}'" >&2
+  echo "        sbx settings set kit.allowedSources $(_acq_sbx_sh_quote "$cmd")" >&2
+}
+
+# _acq_sbx_sh_quote VALUE — VALUE as one single-quoted shell word (each ' is
+# written as '\''), so a printed recovery command pastes back intact whatever
+# the JSON holds.
+_acq_sbx_sh_quote() {
+  printf "'%s'" "$(printf '%s' "${1:-}" | sed "s/'/'\\\\''/g")"
+}
+
+# _acq_sbx_prefix_remains PREFIX REPO — true when a source that stays trusted
+# once REPO is removed still needs PREFIX: the pinned control plane (always
+# trusted; kit-source rm refuses it), another registry entry, or an
+# ACQ_EXTRA_KIT_SOURCES grant. GitHub ignores letter case, so prefixes compare
+# ASCII-lower-cased.
+_acq_sbx_prefix_remains() {
+  local key cp_key remaining
+  key=$(_acq_ascii_lower "$1")
+  cp_key=$(_acq_ascii_lower "$(_acq_kit_source_owner_prefix "$ACQ_KIT_SOURCE_DEFAULT_REPO")")
+  [ "$key" != "$cp_key" ] || return 0
+  remaining=$(acq_kit_source_prefixes "$2") || remaining=""
+  printf '%s\n' "$remaining" | LC_ALL=C tr '[:upper:]' '[:lower:]' | grep -Fxq -- "$key"
 }
 
 # acq_backend_kit_source_revoked REPO — a trusted kit source was removed. sbx's
 # kit.allowedSources is owner-granular (host/owner/) and _acq_sbx_ensure_kit_sources_allowed
 # only ever UNIONS, so a revoked source stayed fetchable until the setting was
 # edited by hand. Recompute against what REMAINS trusted once REPO is gone: the
-# owner prefix is dropped only when no remaining registry entry (and no explicit legacy
-# ACQ_EXTRA_KIT_SOURCES grant) still needs it. Returns 0 only when the backend
-# allowlist is verified to no longer grant a prefix nothing needs; any inability
-# to read, write, or verify returns 1 with a recovery command, never a quiet 0.
+# owner prefix is dropped only when nothing remaining still needs it
+# (_acq_sbx_prefix_remains). Entries compare ASCII-lower-cased and every
+# letter-case variant of the prefix is dropped with it, since sbx would honour
+# any of them. Returns 0 only when the backend allowlist is verified to no
+# longer grant a prefix nothing needs; any inability to read, write, or verify
+# returns 1 with a recovery command, never a quiet 0.
 acq_backend_kit_source_revoked() {
-  local repo="${1:-}" prefix remaining current desired verify
+  local repo="${1:-}" prefix key current desired verify
+  # shellcheck disable=SC2016  # $k is a jq variable, not a shell one
+  local grants='any(.[]; type == "string" and ascii_downcase == $k)'
   [ -n "$repo" ] || return 0
   prefix=$(_acq_kit_source_owner_prefix "$repo")
-  remaining=$(acq_kit_source_prefixes "$repo") || remaining=""
-  case "
-$remaining
-" in
-    *"
-$prefix
-"*) return 0 ;;
-  esac
+  _acq_sbx_prefix_remains "$prefix" "$repo" && return 0
+  key=$(_acq_ascii_lower "$prefix")
   if ! command -v sbx >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
     _acq_sbx_kit_source_revoke_failed "$prefix" "sbx and jq are both needed to update kit.allowedSources"
     return 1
@@ -260,10 +279,11 @@ $prefix
     _acq_sbx_kit_source_revoke_failed "$prefix" "could not read kit.allowedSources as a JSON array"
     return 1
   fi
-  if ! printf '%s' "$current" | jq -e --arg p "$prefix" 'index($p) != null' >/dev/null 2>&1; then
+  if ! printf '%s' "$current" | jq -e --arg k "$key" "$grants" >/dev/null 2>&1; then
     return 0
   fi
-  desired=$(printf '%s' "$current" | jq -c --arg p "$prefix" 'map(select(. != $p))' 2>/dev/null)
+  desired=$(printf '%s' "$current" | jq -c --arg k "$key" \
+    'map(select((type == "string" and ascii_downcase == $k) | not))' 2>/dev/null)
   if [ -z "$desired" ]; then
     _acq_sbx_kit_source_revoke_failed "$prefix" "could not compute the updated allowlist"
     return 1
@@ -273,7 +293,11 @@ $prefix
     return 1
   fi
   verify=$(sbx settings get kit.allowedSources 2>/dev/null) || verify=""
-  if ! printf '%s' "$verify" | jq -e --arg p "$prefix" 'type == "array" and (index($p) == null)' >/dev/null 2>&1; then
+  if ! printf '%s' "$verify" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    _acq_sbx_kit_source_revoke_failed "$prefix" "could not read kit.allowedSources back after the update" "$desired"
+    return 1
+  fi
+  if printf '%s' "$verify" | jq -e --arg k "$key" "$grants" >/dev/null 2>&1; then
     _acq_sbx_kit_source_revoke_failed "$prefix" "kit.allowedSources still lists it after the update" "$desired"
     return 1
   fi
@@ -289,7 +313,7 @@ _acq_sbx_kit_source_revoke_failed() {
   echo "     Revocation is NOT complete: the source stays registered because the sbx" >&2
   echo "     backend could still fetch kits from that owner." >&2
   if [ -n "$desired" ]; then
-    echo "     Run:   sbx settings set kit.allowedSources '$desired'" >&2
+    echo "     Run:   sbx settings set kit.allowedSources $(_acq_sbx_sh_quote "$desired")" >&2
   else
     echo "     Review: sbx settings get kit.allowedSources   (remove '$prefix', then 'sbx settings set kit.allowedSources <json-array>')" >&2
   fi

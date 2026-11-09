@@ -324,6 +324,8 @@ against. ACQ_KIT_SOURCES overrides the list for one invocation, and
 ACQ_EXTRA_KIT_SOURCES still ADDS allowlist prefixes (backward compatibility).
 
 Trust is per repository: trusting host/owner/one does not trust host/owner/two.
+The shipped default is the pinned control plane: `rm` refuses it (in any letter
+case), and its owner prefix stays on the backend allowlist.
 `rm` also revokes the backend's owner-wide allowlist entry (sbx) unless another
 trusted source still needs it, and FAILS (leaving the source registered, with a
 recovery command) if the backend allowlist cannot be updated.

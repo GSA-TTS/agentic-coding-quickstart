@@ -3268,8 +3268,21 @@ acq_kit_source_set() {
   return 0
 }
 
-# acq_kit_source_rm REPO — drop one source (the shipped default included; with no
-# sources left acq fetches nothing instead of silently reinstating it).
+# _acq_ascii_lower TEXT — TEXT with ASCII letters lower-cased. GitHub ignores the
+# letter case of hosts, owners and repositories, so trust decisions compare this.
+_acq_ascii_lower() {
+  printf '%s' "${1:-}" | LC_ALL=C tr '[:upper:]' '[:lower:]'
+}
+
+# _acq_kit_source_is_control_plane REPO — true when REPO is the pinned
+# control-plane repository (the shipped default) in any letter case.
+_acq_kit_source_is_control_plane() {
+  [ "$(_acq_ascii_lower "${1:-}")" = "$(_acq_ascii_lower "$ACQ_KIT_SOURCE_DEFAULT_REPO")" ]
+}
+
+# acq_kit_source_rm REPO — drop one registered source. The pinned control plane
+# (the shipped default, in any letter case) is refused, as Python refuses it:
+# it is the trust anchor and stays resolvable whatever the registry says.
 acq_kit_source_rm() {
   local repo_arg="${1:-}" repo summary
   if [ -z "$repo_arg" ]; then
@@ -3281,6 +3294,11 @@ acq_kit_source_rm() {
     echo "acq: kit-source rm: invalid repository '$repo_arg'" >&2
     return 1
   }
+  if _acq_kit_source_is_control_plane "$repo"; then
+    echo "acq: kit-source rm: the built-in control-plane source cannot be removed." >&2
+    echo "     Team/personal sources can be removed; the control plane is the pinned trust anchor." >&2
+    return 1
+  fi
   if ! _acq_kit_source_entry_for_repo "$repo" >/dev/null; then
     echo "acq: kit source '${repo}' is not registered." >&2
     return 1
