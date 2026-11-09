@@ -194,8 +194,9 @@ acq_state_dir() {
 
 # _acq_userdirs_override_problem — check the host path overrides acq honours
 # from the environment: each must be absolute when set, since a relative value
-# would resolve against the current directory. Then check the
-# ACQ_MSB_UPSTREAM_CA_CERT list. Paths inside the guest
+# would resolve against the current directory (ACQ_PROVIDER_INPUT_PYTHON names
+# an interpreter acq runs on the host). Then check the ACQ_MSB_UPSTREAM_CA_CERT
+# and ACQ_FORWARD_HOST_SOCKETS lists. Paths inside the guest
 # (ACQ_HOST_CONFIG_GUEST_DIR, ACQ_PROVIDER_INPUT_GUEST_DIR,
 # ACQ_MSB_SSH_AGENT_GUEST_SOCK) are not host paths and are not checked. On a
 # relative value, set ACQ_USERDIRS_MESSAGE and ACQ_USERDIRS_REMEDIATION and
@@ -203,7 +204,8 @@ acq_state_dir() {
 _acq_userdirs_override_problem() {
   local var value rest
   for var in ACQ_SECRET_STORE_DIR ACQ_SECRET_FILE_DIR \
-      ACQ_PROVENANCE_DIR ACQ_PROVIDER_INPUT_DATA_DIR ACQ_SECRET_META_DIR ACQ_SECRET_INDEX_FILE \
+      ACQ_PROVENANCE_DIR ACQ_PROVIDER_INPUT_DATA_DIR ACQ_PROVIDER_INPUT_PYTHON \
+      ACQ_SECRET_META_DIR ACQ_SECRET_INDEX_FILE \
       ACQ_SBX_KIT_CACHE ACQ_MSB_KIT_CACHE ACQ_MSB_KIT_LOCAL_DIR ACQ_MSB_SSH_DIR ACQ_MSB_SSH_KEY \
       ACQ_MSB_SSH_KNOWN_HOSTS ACQ_MSB_PORTS_DIR ACQ_MSB_CLONES_DIR ACQ_MSB_STARTUP_STAGE_DIR \
       ACQ_MSB_UPSTREAM_CA_FILE ACQ_MSB_BALANCED_HOSTS_FILE; do
@@ -219,26 +221,54 @@ _acq_userdirs_override_problem() {
     ACQ_USERDIRS_REMEDIATION="set $var to an absolute path, or unset it to use $rest"
     return 0
   done
-  _acq_userdirs_ca_list_problem
+  _acq_userdirs_ca_list_problem && return 0
+  _acq_userdirs_socket_list_problem
 }
 
 # _acq_userdirs_ca_list_problem — every entry of ACQ_MSB_UPSTREAM_CA_CERT must be
-# absolute. The list is split on ':' and whitespace, as its consumer splits it;
-# on Git Bash / Cygwin a lone drive letter (the "C" of "C:/x.pem") is skipped,
-# since the consumer drops it too.
+# an absolute POSIX path. The list is split on ':' and whitespace, as its
+# consumer splits it, so a drive-letter path (C:/x.pem or C:\x.pem) would
+# split into a relative "C" and a remainder; it is refused with the /c/... form
+# to use instead.
 _acq_userdirs_ca_list_problem() {
-  local value rest="${ACQ_MSB_UPSTREAM_CA_CERT:-}"
+  local value rest="${ACQ_MSB_UPSTREAM_CA_CERT:-}" var=ACQ_MSB_UPSTREAM_CA_CERT
   while [ -n "$rest" ]; do
     value="${rest%%[:[:space:]]*}"
     if [ "$value" = "$rest" ]; then rest=""; else rest="${rest#*[:[:space:]]}"; fi
+    case "$value:$rest" in
+      [A-Za-z]:[\\/]*)
+        value="$value:${rest%%[:[:space:]]*}"
+        ACQ_USERDIRS_MESSAGE="$var entries must be absolute POSIX paths (the list is split on ':'), got $(acq_quote_value "$value")"
+        ACQ_USERDIRS_REMEDIATION="use the POSIX form of a Windows path in $var, e.g. $(acq_quote_value "$(_acq_posix_profile_path "$value")")"
+        return 0
+        ;;
+    esac
     if [ -z "$value" ] || acq_path_is_absolute "$value"; then
       continue
     fi
-    case "${OSTYPE:-}:$value" in
-      msys*:[A-Za-z]|cygwin*:[A-Za-z]) continue ;;
-    esac
-    ACQ_USERDIRS_MESSAGE="ACQ_MSB_UPSTREAM_CA_CERT entries must be absolute paths, got $(acq_quote_value "$value")"
-    ACQ_USERDIRS_REMEDIATION='list absolute PEM paths in ACQ_MSB_UPSTREAM_CA_CERT, or unset it'
+    ACQ_USERDIRS_MESSAGE="$var entries must be absolute paths, got $(acq_quote_value "$value")"
+    ACQ_USERDIRS_REMEDIATION="list absolute PEM paths in $var, or unset it"
+    return 0
+  done
+  return 1
+}
+
+# _acq_userdirs_socket_list_problem — the PATH of every ACQ_FORWARD_HOST_SOCKETS
+# entry (PATH:PORT[/stream|/dgram], comma-separated) must be absolute, checked
+# on the raw value as given, before any symlink resolution.
+_acq_userdirs_socket_list_problem() {
+  local entry path rest="${ACQ_FORWARD_HOST_SOCKETS:-}"
+  while [ -n "$rest" ]; do
+    entry="${rest%%,*}"
+    if [ "$entry" = "$rest" ]; then rest=""; else rest="${rest#*,}"; fi
+    entry="${entry%/stream}"
+    entry="${entry%/dgram}"
+    path="${entry%:*}"
+    if [ -z "$entry" ] || [ "$path" = "$entry" ] || acq_path_is_absolute "$path"; then
+      continue
+    fi
+    ACQ_USERDIRS_MESSAGE="ACQ_FORWARD_HOST_SOCKETS paths must be absolute, got $(acq_quote_value "$path")"
+    ACQ_USERDIRS_REMEDIATION='give each ACQ_FORWARD_HOST_SOCKETS entry as /absolute/path.sock:PORT, or unset it'
     return 0
   done
   return 1

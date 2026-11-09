@@ -1579,6 +1579,13 @@ acq_host_socket_forwards() {
       printf 'acq: malformed host-socket forward %s (expected PATH:PORT); skipping\n' "$_entry" >&2
       continue
     fi
+    # Absoluteness is checked on the path as given, before canonicalizing: a
+    # relative path (or a relative symlink) would resolve against the current
+    # directory, normally the agent-writable workspace (see userdirs.sh).
+    if ! acq_path_is_absolute "$_path"; then
+      printf 'acq: host-socket path %s is not absolute; skipping\n' "$_path" >&2
+      continue
+    fi
     if command -v canonicalize_path >/dev/null 2>&1; then
       _path=$(canonicalize_path "$_path")
     fi
@@ -2232,7 +2239,7 @@ acq_resolve_backend() {
     cfg_name=$(_read_config_backend)
     if [ -n "$cfg_name" ]; then
       name="$cfg_name"
-      origin="${XDG_CONFIG_HOME:-$HOME/.config}/acq/config.yaml"
+      origin=$(_acq_config_file) || origin="config.yaml"
     else
       _auto_detect_backend || {
         echo "acq: error: no backend detected (looked on PATH and in ~/.local/bin)." >&2
@@ -3843,7 +3850,9 @@ acq_provider_recorded_facts() {
 # Windows (`Scripts/python.exe`) and custom interpreters work; only then PATH.
 _acq_provider_facts_python() {
   local python="${ACQ_PROVIDER_INPUT_PYTHON:-}" runtime data_home
-  if [ -n "$python" ] && [ -x "$python" ]; then
+  # Only an absolute interpreter path: a relative one would run a program from
+  # the current directory (see userdirs.sh).
+  if acq_path_is_absolute "$python" && [ -x "$python" ]; then
     printf '%s\n' "$python"
     return 0
   fi
@@ -4439,6 +4448,10 @@ ACQ_PROVIDER_INPUT_GUEST_DIR="${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provi
 _acq_provider_input_python() {
   local python="${ACQ_PROVIDER_INPUT_PYTHON:-}" version_check runtime data_home tools_dir setup
   if [ -n "$python" ]; then
+    acq_path_is_absolute "$python" || {
+      echo "acq: ACQ_PROVIDER_INPUT_PYTHON must be an absolute path, got $(acq_quote_value "$python")" >&2
+      return 2
+    }
     [ -x "$python" ] || {
       echo "acq: configured provider-input Python is not executable: $python" >&2
       return 2

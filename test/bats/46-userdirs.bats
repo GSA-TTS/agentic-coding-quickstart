@@ -526,7 +526,7 @@ STUB
 
 # The host path overrides acq honours from the environment (see
 # _acq_userdirs_override_problem in acq.backends/userdirs.sh).
-_PATH_OVERRIDES="ACQ_PROVENANCE_DIR ACQ_PROVIDER_INPUT_DATA_DIR ACQ_SECRET_META_DIR ACQ_SECRET_INDEX_FILE ACQ_SBX_KIT_CACHE ACQ_MSB_KIT_CACHE ACQ_MSB_KIT_LOCAL_DIR ACQ_MSB_SSH_DIR ACQ_MSB_SSH_KEY ACQ_MSB_SSH_KNOWN_HOSTS ACQ_MSB_PORTS_DIR ACQ_MSB_CLONES_DIR ACQ_MSB_STARTUP_STAGE_DIR ACQ_MSB_UPSTREAM_CA_FILE ACQ_MSB_BALANCED_HOSTS_FILE"
+_PATH_OVERRIDES="ACQ_PROVENANCE_DIR ACQ_PROVIDER_INPUT_DATA_DIR ACQ_PROVIDER_INPUT_PYTHON ACQ_SECRET_META_DIR ACQ_SECRET_INDEX_FILE ACQ_SBX_KIT_CACHE ACQ_MSB_KIT_CACHE ACQ_MSB_KIT_LOCAL_DIR ACQ_MSB_SSH_DIR ACQ_MSB_SSH_KEY ACQ_MSB_SSH_KNOWN_HOSTS ACQ_MSB_PORTS_DIR ACQ_MSB_CLONES_DIR ACQ_MSB_STARTUP_STAGE_DIR ACQ_MSB_UPSTREAM_CA_FILE ACQ_MSB_BALANCED_HOSTS_FILE"
 
 @test "cli: every relative host path override is refused up front with the Python message" {
   local var
@@ -561,14 +561,85 @@ list absolute PEM paths in ACQ_MSB_UPSTREAM_CA_CERT, or unset it"
   ' _ "$REPO_ROOT"
   assert_failure
   assert_line --index 0 "acq: ACQ_MSB_UPSTREAM_CA_CERT entries must be absolute paths, got './c.pem'"
-  run env ACQ_MSB_UPSTREAM_CA_CERT='C:/certs/ca.pem' bash -c '
-    . "$1/acq.backends/userdirs.sh"
-    OSTYPE=msys
-    acq_userdirs_check && echo ok
+  _assert_work_empty
+}
+
+@test "userdirs: a drive-letter ACQ_MSB_UPSTREAM_CA_CERT entry is refused with the /c/... form" {
+  local os value
+  for os in msys linux-gnu; do
+    for value in 'C:/certs/ca.pem' 'C:\certs\ca.pem' '/abs/a.pem:D:/x/b.pem'; do
+      run env ACQ_MSB_UPSTREAM_CA_CERT="$value" OS_UNDER_TEST="$os" bash -c '
+        . "$1/acq.backends/userdirs.sh"
+        OSTYPE=$OS_UNDER_TEST
+        cygpath() { return 1; }
+        acq_userdirs_check
+      ' _ "$REPO_ROOT"
+      assert_failure
+      case "$value" in
+        /abs/*)
+          assert_output "acq: ACQ_MSB_UPSTREAM_CA_CERT entries must be absolute POSIX paths (the list is split on ':'), got 'D:/x/b.pem'
+use the POSIX form of a Windows path in ACQ_MSB_UPSTREAM_CA_CERT, e.g. '/d/x/b.pem'" ;;
+        *)
+          assert_line --index 0 --partial "entries must be absolute POSIX paths (the list is split on ':'), got 'C:"
+          assert_line --index 1 "use the POSIX form of a Windows path in ACQ_MSB_UPSTREAM_CA_CERT, e.g. '/c/certs/ca.pem'" ;;
+      esac
+    done
+  done
+}
+
+@test "msb adapter: a relative ACQ_MSB_UPSTREAM_CA_CERT entry is never trusted" {
+  printf -- '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n' >"$WORK/C"
+  cp "$WORK/C" "$WORK/rel.pem"
+  run env -u ACQ_MSB_NO_UPSTREAM_CA ACQ_MSB_UPSTREAM_CA_AUTODETECT=0 ACQ_MSB_UPSTREAM_CA_CERT='C:/certs/ca.pem rel.pem' bash -c '
+    . "$1/acq.backends/msb.sh"
+    flags=()
+    _acq_msb_upstream_ca_flags_into flags
+    printf "flags=[%s]\n" "${flags[*]-}"
   ' _ "$REPO_ROOT"
   assert_success
-  assert_output 'ok'
-  _assert_work_empty
+  assert_line 'flags=[]'
+  assert_line --partial 'path is not absolute, skipping: C'
+  assert_line --partial 'path is not absolute, skipping: rel.pem'
+}
+
+@test "cli: a relative ACQ_FORWARD_HOST_SOCKETS path is refused, and never forwarded" {
+  run env ACQ_FORWARD_HOST_SOCKETS="/abs/a.sock:6000/stream,rel.sock:6001" ACQ_BACKEND=msb "$ACQ" ls
+  assert_failure 1
+  assert_output "acq: ACQ_FORWARD_HOST_SOCKETS paths must be absolute, got 'rel.sock'
+give each ACQ_FORWARD_HOST_SOCKETS entry as /absolute/path.sock:PORT, or unset it"
+  # The consumer checks the raw path before resolving it: a real socket under
+  # the cwd, named relatively, is skipped.
+  python3 -c 'import socket; socket.socket(socket.AF_UNIX).bind("rel.sock")' 2>/dev/null \
+    && [ -S rel.sock ] || skip "python3 AF_UNIX socket unavailable"
+  run env -u SSH_AUTH_SOCK ACQ_FORWARD_HOST_SOCKETS="rel.sock:6000" bash -c '
+    . "$1/acq.backends/common.sh"
+    acq_host_socket_forwards
+  ' _ "$REPO_ROOT"
+  assert_success
+  assert_output 'acq: host-socket path rel.sock is not absolute; skipping'
+}
+
+@test "common: a relative ACQ_PROVIDER_INPUT_PYTHON is never run" {
+  printf '#!/bin/sh\necho RAN >> "$CALLS"\n' >"$WORK/py"
+  chmod +x "$WORK/py"
+  run env ACQ_PROVIDER_INPUT_PYTHON=py bash -c '
+    . "$1/acq.backends/common.sh"
+    _acq_provider_facts_python || true
+    _acq_provider_input_python
+  ' _ "$REPO_ROOT"
+  refute_line 'py'
+  assert_line "acq: ACQ_PROVIDER_INPUT_PYTHON must be an absolute path, got 'py'"
+  run cat "$CALLS"
+  refute_output --partial 'RAN'
+}
+
+@test "cli: an unknown config backend names the absolute config path, not a relative XDG_CONFIG_HOME" {
+  mkdir -p "$HOME/.config/acq"
+  printf 'backend: bogus\n' >"$HOME/.config/acq/config.yaml"
+  run env -u ACQ_BACKEND XDG_CONFIG_HOME=rel-config "$ACQ" ls
+  assert_failure
+  assert_output --partial "from $HOME/.config/acq/config.yaml"
+  refute_output --partial 'rel-config'
 }
 
 @test "cli: doctor reports a relative path override as a failed state check" {
