@@ -37,6 +37,10 @@ through its own CLI:
   directory loses write permission (POSIX refuses to unlink in it). Permissions
   are restored when the driver ends. A superuser can still delete, so a vector
   using this cannot pass when run as root.
+* ``{"env": {"NAME": VALUE, ...}}`` changes the environment of later steps: a
+  string sets NAME, null unsets it. Only backend stub knobs (``ACQ_MSB_STUB_*``
+  and ``ACQ_SBX_STUB_*``) may be changed. A vector uses it to clear a stub
+  failure knob between a failing call and the retry that must fix it.
 """
 
 from __future__ import annotations
@@ -51,6 +55,9 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+
+_STUB_KNOB_RE = re.compile(r"ACQ_(?:MSB|SBX)_STUB_[A-Z0-9_]+")
 
 
 def _state_root() -> Path:
@@ -129,6 +136,16 @@ def _fixture(step: dict, root: Path, env: dict, locked: list) -> str | None:
         return None
     if step.get("lock_bindings"):
         _lock_bindings(locked)
+        return None
+    if isinstance(step.get("env"), dict):
+        for name in step["env"]:
+            if not _STUB_KNOB_RE.fullmatch(name):
+                raise ValueError(f"env step may only change ACQ_MSB_STUB_* / ACQ_SBX_STUB_* knobs, not {name!r}")
+        for name, value in step["env"].items():
+            if value is None:
+                env.pop(name, None)
+            else:
+                env[name] = str(value)
         return None
     raise ValueError(f"unknown fixture step {step!r}")
 

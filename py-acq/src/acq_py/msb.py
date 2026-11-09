@@ -18,7 +18,8 @@ adapter) and reach a sandbox as ``--secret ENV@HOST`` bindings: on ``create``,
 and on running sandboxes through ``msb modify --secret`` / ``--secret-rm``. msb
 reads each bound value from its own environment, so a secret VALUE reaches the
 msb child only through that environment mapping, never argv or output.
-``rotate_key`` still fails closed with ``unsupported_capability``.
+``usai-rotate-api-key`` stores the new key and re-feeds running sandboxes the
+same way.
 
 The ``msb`` executable is overridable via ``ACQ_MSB_BIN`` for reproducible,
 offline contract vectors. ``__stub__`` routes to the bundled deterministic fake
@@ -216,7 +217,7 @@ def capability_record(version: str | None = None) -> dict:
             "secret-write": "required",  # acq store + --secret ENV@HOST bindings
             "secret-rm": "required",  # acq store + msb modify --secret-rm
             "secret-list": "required",  # listed from the acq store
-            "key-rotate": "unsupported",  # no `rotate` subcommand on msb
+            "key-rotate": "required",  # acq store + msb modify --secret re-feed
             "key-present": "unsupported",  # sbx-only proxy-table obligation
             "kit-source-revoke": "unsupported",
             "start": "required",  # msb-only
@@ -1813,14 +1814,100 @@ def github_scope(sandbox: str, value: str) -> None:
     secret_set(secretstore.sandbox_scope(sandbox), "github", value)
 
 
-def rotate_key(value: str) -> None:
-    """USAi key rotation fails closed on msb (no ``rotate`` subcommand, ADR-0012).
+# --- usai-rotate-api-key (ADR-0012) ------------------------------------------
+#
+# Rotation is a store write plus a re-feed (plan default: no provider probe; the
+# attach-time key check is the verdict). ``commands/creds.py`` runs the
+# preflight, writes the new key to the acq store, then calls the re-feed, which
+# reads the key back from the store exactly as ``secret set -g`` re-feeds it.
 
-    The new key is never read or placed on argv. Raises :class:`MsbError` with
-    ``unsupported_capability``.
+
+def rotate_preflight(*, primary: bool = True) -> None:
+    """Refuse a rotation msb could never deliver, before anything is stored."""
+    del primary  # the same on msb whether it is the active backend or not
+    if service_binding(provider_creds.USAI_PROVIDER_ID) is None:
+        raise MsbError(
+            errors.VALIDATION_FAILED,
+            "the USAi key has no usable msb binding (its recorded endpoint or provider pin is invalid)",
+            "check it with 'acq secret ls -g' and 'acq provider-credential ls'; nothing was changed",
+        )
+
+
+def rotate_holds_key() -> bool | None:
+    """Whether any sandbox acq recorded holds the USAi key, read from acq's own
+    binding records without running msb (which may be below acq's floor).
+    None when a record cannot be read."""
+    directory = state.state_dir() / "msb-secret-bindings"
+    try:
+        records = sorted(directory.glob("*.json"))
+        docs = [json.loads(path.read_text(encoding="utf-8")) for path in records]
+    except (OSError, ValueError):
+        return None
+    for doc in docs:
+        bindings = doc.get("bindings") if isinstance(doc, dict) else None
+        if not isinstance(bindings, dict):
+            return None
+        if any(isinstance(e, dict) and e.get("service") == provider_creds.USAI_PROVIDER_ID for e in bindings.values()):
+            return True
+    return False
+
+
+def _rotate_one(service: str, sandbox: str) -> str | None:
+    """Re-feed the stored global key to one running sandbox.
+
+    Returns None when it was re-fed, ``"kept"`` when the sandbox has its own
+    value, ``"skipped"`` when the variable is bound there for another service
+    (warned, as :func:`_refeed` does), or the reason it was not re-fed. Any
+    failure is confined to this sandbox.
     """
-    raise MsbError(
-        errors.UNSUPPORTED,
-        "USAi key rotation is not supported on the msb backend",
-        "store the new key with 'acq secret set -g usai' (value on stdin); running sandboxes are re-fed",
-    )
+    value = None
+    try:
+        if _has_own_value(service, sandbox):
+            return "kept"
+        binding = service_binding(service, sandbox)
+        value = secretstore.resolve(service, sandbox)
+        if binding is None or not value:
+            return "no injectable value"
+        rec = held_read(sandbox)
+        holder = rec.bindings.get(binding.env)
+        if holder is not None and holder["service"] != service:
+            print(
+                f"acq: warning: the new '{service}' key was not applied to sandbox '{sandbox}': "
+                f"{binding.env} is bound there for '{holder['service']}'",
+                file=sys.stderr,
+            )
+            return "skipped"
+        if not _put(rec, BoundSecret(service, binding, False), value):
+            return "msb modify failed"
+    except (MsbError, secretstore.SecretStoreError) as exc:
+        return exc.message
+    finally:
+        value = None
+    return None
+
+
+def rotate_refeed(value: str, *, primary: bool = True) -> dict:
+    """Push the stored global USAi key to every running sandbox.
+
+    ``value`` is not used: each sandbox gets the key read back from the acq
+    store, and a sandbox with its own ``usai`` value keeps it (``kept_own``).
+    ``primary`` makes no difference on msb, whose re-feed never creates
+    anything beyond the bindings ``secret set -g usai`` would. Stopped
+    sandboxes are not re-fed (``acq start`` passes them the stored key).
+    Returns ``{backend, refed, kept_own, not_refed}``; a sandbox that did not
+    receive the key is listed in ``not_refed`` with the reason, and the rest
+    are still re-fed. Raises :class:`MsbError` only when the running sandboxes
+    cannot be listed.
+    """
+    del value, primary
+    service = provider_creds.USAI_PROVIDER_ID
+    out: dict = {"backend": "msb", "refed": [], "kept_own": [], "not_refed": []}
+    for sandbox in [] if _live_refeed_off() else _running_targets(secretstore.GLOBAL):
+        problem = _rotate_one(service, sandbox)
+        if problem is None:
+            out["refed"].append(sandbox)
+        elif problem == "kept":
+            out["kept_own"].append(sandbox)
+        elif problem != "skipped":
+            out["not_refed"].append(f"{sandbox} ({problem})")
+    return out

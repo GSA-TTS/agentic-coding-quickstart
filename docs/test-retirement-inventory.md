@@ -131,7 +131,7 @@ numeric-prefix order.
 | `125-github-scope.bats` | 14 | preserve | ADR-0013 per-sandbox GitHub scoping. Covered by `cli/github-scope-json`, `cli/github-scope-no-value`, `cli/github-scope-sbx`. |
 | `146-provider-verification.bats` | 28 | preserve | §provider-credential + host-verifier reachability. Covered by `cli/provider-credential-*`. **Mixed → re-express:** reachability/model-identity checks are Tier-2/Tier-3 evidence, not Tier-1 vectors. |
 | `148-provider-credential-bindings.bats` | 56 | preserve | §provider-credential set/ls/rm + facts.json validation (ADR-0040m). Covered by `cli/provider-credential-*`. |
-| `77-usai-rotate.bats` | 7 | preserve | ADR-0012/0040m key rotation. Covered by `cli/usai-rotate-*`. |
+| `77-usai-rotate.bats` | 7 | preserve | ADR-0012/0040m key rotation. Covered by `cli/usai-rotate-ok` (msb store + `msb modify` re-feed), `cli/usai-rotate-sbx` (`set-custom --placeholder` keeps the placeholder), `cli/usai-rotate-msb-partial` and `cli/usai-rotate-sbx-partial` (a partial re-feed exits 1 naming the sandbox, and a retry fixes it), with cross-backend propagation in `py-acq/tests/test_rotation.py`. The throwaway-sandbox validation and the `scripts/rotate-apikey` shim rows are Bash-only and **retire**: rotation validates at the next attach, as Bash now does on msb. |
 
 ### Kits: list, validate, source, provenance, apply
 

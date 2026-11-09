@@ -66,6 +66,26 @@ exit 1, the `unsupported_capability` code, and remediation.
 > unbinds exactly those, sweeps unknown sandboxes best-effort, and if a binding
 > cannot be removed or an unknown sandbox cannot be confirmed unbound it keeps
 > the stored value and fails with `unbind_failed` so the removal can be retried.
+>
+> **Reconciliation note (2026-11-09, rotation):** `key-rotate` is now `required`
+> on both backends, although neither has a `rotate` subcommand. As in the Bash
+> adapters (ADR-0012), rotation stores the new key in the acq secret store and
+> re-feeds the sandboxes that use it: msb through `msb modify --secret`, sbx by
+> re-setting each custom secret with `secret set-custom --placeholder P
+> --value-stdin` (sbx >= 0.51.0), which keeps the placeholder running sandboxes
+> were injected with (ADR-0008). Rotation does not call the provider, so it never
+> returns `provider_unreachable`/`provider_auth_failed`; the key is checked at
+> the next attach. Every backend to be re-fed is checked before the key is
+> stored, so a refusal changes nothing. A sandbox that misses the new key, or
+> an installed backend below acq's floor that may hold it, fails the command
+> (exit 1, naming it in `error.backends`), and re-running the rotation retries
+> it. On sbx, rotation also overwrites every sandbox-scoped custom secret for
+> the key that acq did not store (such as an ADR-0008 rebind, or one added by
+> hand with `sbx secret set-custom --sandbox`): acq treats such an entry as a
+> copy of the global key. Only a sandbox with its own `usai` value in the acq
+> store (`acq secret set NAME usai`) keeps it. After each `set-custom` acq
+> re-reads the listing and requires the entry to keep its placeholder; that
+> sbx does so is not yet verified live (KNOWN_FAILURE_MODES 57).
 
 The record is a declaration; conformance is proven, not trusted: each
 declared capability is asserted by a Tier-1 subprocess vector (working, or
