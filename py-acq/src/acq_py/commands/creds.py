@@ -591,12 +591,14 @@ def _rotation_backends(backend: str) -> tuple[list[str], list[dict]]:
             names.append(other)
             continue
         result: dict = {"backend": other, "refed": [], "kept_own": [], "not_refed": []}
-        holds = common._adapter(other).rotate_holds_key()
+        adapter = common._adapter(other)
+        holds = adapter.rotate_holds_key()
         if holds is False:
             result["skipped"] = problem.message
         else:
             result["not_refed"] = [f"any sandbox holding the key ({problem.message})"]
-            result["remediation"] = problem.remediation
+            hint = adapter.rotate_stale_hint()
+            result["remediation"] = "; ".join(part for part in (problem.remediation, hint) if part) or None
         below.append(result)
     return names, below
 

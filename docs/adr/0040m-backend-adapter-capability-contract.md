@@ -94,8 +94,15 @@ exit 1, the `unsupported_capability` code, and remediation.
 > other refusal, and an unreadable list on the active backend, refuses the
 > rotation and names the backend. Each sbx call a rotation makes while it holds
 > the usai provider lock is bounded by `ACQ_ROTATE_TIMEOUT` (default 120 s, the
-> Bash adapter's `ROTATE_VALIDATE_TIMEOUT`); a call that times out counts as a
-> failure. Unlike Bash, which propagates only from msb to sbx and needs an
+> Bash adapter's `ROTATE_VALIDATE_TIMEOUT`; it must be more than 0, and 0 or
+> any other invalid value falls back to the default with a warning); a call
+> that times out counts as a failure. An installed msb that fails acq's
+> version check is never run, since any msb command opens its catalog and may
+> migrate it one way (ADR-0032): whether it holds the key is read from acq's
+> binding records alone, and every record counts, including one left by a
+> sandbox removed outside acq. That fails safe (exit 1), and the remediation
+> names the sandboxes the records cover and says that, once msb passes the
+> version check, `acq --backend msb rm NAME` clears a stale record. Unlike Bash, which propagates only from msb to sbx and needs an
 > existing sbx entry, the Python acq also re-feeds msb after a rotation on sbx
 > (it always stores the key first) and, as the active backend, creates a
 > missing global sbx entry. A global sbx entry that took the new key is

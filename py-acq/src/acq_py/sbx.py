@@ -1207,6 +1207,12 @@ def rotate_holds_key() -> bool | None:
         return None
 
 
+def rotate_stale_hint() -> str | None:
+    """None: :func:`rotate_holds_key` reads sbx's own listing, not an acq
+    record that a sandbox removed outside acq could leave behind."""
+    return None
+
+
 def _set_custom(sandbox: str | None, hosts: list[str], env: str, placeholder: str, value: str, budget: float) -> bool:
     """``sbx secret set-custom`` for one entry, keeping its placeholder; stdin only.
     Raises ``subprocess.TimeoutExpired`` past ``budget`` seconds."""

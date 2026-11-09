@@ -55,5 +55,19 @@ DEFAULT_ROTATE_TIMEOUT_S = 120.0
 
 
 def rotate_timeout_s() -> float:
-    """The per-call budget, in seconds, for a rotation's backend calls."""
-    return env_seconds(ROTATE_TIMEOUT_ENV, DEFAULT_ROTATE_TIMEOUT_S)
+    """The per-call budget, in seconds, for a rotation's backend calls.
+
+    Unlike the other budgets, zero is invalid here: a subprocess timeout of 0
+    fails every call at once (it does not mean "no limit", as it does for
+    GNU ``timeout``). Zero, like any other invalid value, falls back to the
+    default with a warning on stderr.
+    """
+    value = env_seconds(ROTATE_TIMEOUT_ENV, DEFAULT_ROTATE_TIMEOUT_S)
+    if value > 0:
+        return value
+    print(
+        f"acq: ignoring {ROTATE_TIMEOUT_ENV}={os.environ.get(ROTATE_TIMEOUT_ENV)!r}: expected a number of "
+        f"seconds > 0; using {DEFAULT_ROTATE_TIMEOUT_S:g}",
+        file=sys.stderr,
+    )
+    return DEFAULT_ROTATE_TIMEOUT_S

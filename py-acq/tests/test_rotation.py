@@ -684,38 +684,58 @@ def test_sbx_secret_for_the_same_env_on_other_hosts_does_not_fail_the_check(monk
 
 
 # ---------------------------------------------------------------------------
-# A below-floor msb: records left by sandboxes deleted outside acq.
+# An msb that fails acq's version check: records left by sandboxes removed
+# outside acq still count (acq must not run msb to check, ADR-0032), and the
+# remediation says how to clear them.
 # ---------------------------------------------------------------------------
 
-def test_below_floor_msb_ignores_a_record_whose_sandbox_is_gone(monkeypatch, tmp_path, capsys, sbx_calls):
-    _sbx_rows(monkeypatch, tmp_path, _row("global", "sbx-cs-g1"), msb_on=True)
-    monkeypatch.setenv("ACQ_MSB_VERSION", "0.6.0")
-    _msb_catalog(tmp_path, {"other": "running"})
-    _usai_record("gone-box")
-    rc, doc, out, err = _rotate(capsys, monkeypatch, "sbx")
-    assert rc == 0, (out, err)
-    msb_result = doc["data"]["backends"][1]
-    assert msb_result["backend"] == "msb" and msb_result["not_refed"] == [] and "0.6.0" in msb_result["skipped"]
-
-
-@pytest.mark.parametrize("listing", ["fail", "table"])
-def test_below_floor_msb_counts_every_record_when_its_list_is_untrusted(
-    monkeypatch, tmp_path, capsys, sbx_calls, listing
+@pytest.mark.parametrize("version", ["0.6.0", "0.7.1"])
+def test_unchecked_msb_counts_a_stale_record_without_running_msb(
+    monkeypatch, tmp_path, capsys, msb_children, sbx_calls, version
 ):
     _sbx_rows(monkeypatch, tmp_path, _row("global", "sbx-cs-g1"), msb_on=True)
-    monkeypatch.setenv("ACQ_MSB_VERSION", "0.6.0")
+    monkeypatch.setenv("ACQ_MSB_VERSION", version)
+    _msb_catalog(tmp_path, {})  # the sandbox was removed outside acq
     _usai_record("gone-box")
-    real = msb._run
-
-    def run(argv, **kwargs):
-        if argv[:1] == ["list"]:
-            assert kwargs.get("timeout") == 120.0
-            if listing == "fail":
-                return subprocess.CompletedProcess(argv, 1, "", "")
-            return subprocess.CompletedProcess(argv, 0, "NAME    STATUS\nother   running\n", "")
-        return real(argv, **kwargs)
-
-    monkeypatch.setattr(msb, "_run", run)
-    rc, doc, _out, _err = _rotate(capsys, monkeypatch, "sbx")
+    rc, doc, out, err = _rotate(capsys, monkeypatch, "sbx")
     assert rc == 1
-    assert doc["error"]["backends"][1]["backend"] == "msb" and doc["error"]["backends"][1]["not_refed"]
+    msb_result = doc["error"]["backends"][1]
+    assert msb_result["backend"] == "msb" and msb_result["not_refed"]
+    remediation = doc["error"]["remediation"]
+    assert "acq's records say gone-box hold the USAi key" in remediation
+    assert "'acq --backend msb rm NAME' clears it" in remediation
+    # Only the version probe ran: no msb command that opens its catalog.
+    assert [argv for argv, _ in msb_children if "--version" not in argv] == []
+    _assert_never_leaked(tmp_path, [argv for argv, _ in msb_children + sbx_calls], out, err)
+
+
+def test_unchecked_msb_without_a_usai_record_is_skipped_without_a_hint(monkeypatch, tmp_path, capsys, sbx_calls):
+    _sbx_rows(monkeypatch, tmp_path, _row("global", "sbx-cs-g1"), msb_on=True)
+    monkeypatch.setenv("ACQ_MSB_VERSION", "0.6.0")
+    msb.HeldRecord("plain", complete=True).save()
+    rc, doc, out, err = _rotate(capsys, monkeypatch, "sbx")
+    assert rc == 0, (out, err)
+    assert "0.6.0" in doc["data"]["backends"][1]["skipped"]
+    assert msb.rotate_stale_hint() is None
+
+
+# ---------------------------------------------------------------------------
+# ACQ_ROTATE_TIMEOUT must be a positive number of seconds.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("raw", ["0", "0.0", "-1", "nan", "soon"])
+def test_rotation_timeout_rejects_zero_and_invalid_values(monkeypatch, capsys, raw):
+    from acq_py import timeouts
+
+    monkeypatch.setenv("ACQ_ROTATE_TIMEOUT", raw)
+    assert timeouts.rotate_timeout_s() == 120.0
+    assert "ACQ_ROTATE_TIMEOUT" in capsys.readouterr().err
+
+
+def test_zero_rotation_timeout_does_not_fail_every_sbx_call(monkeypatch, tmp_path, capsys, sbx_calls):
+    _sbx_rows(monkeypatch, tmp_path, _row("global", "sbx-cs-g1"), _row("a", "sbx-cs-a1"))
+    monkeypatch.setenv("ACQ_ROTATE_TIMEOUT", "0")
+    rc, doc, out, err = _rotate(capsys, monkeypatch, "sbx")
+    assert rc == 0, (out, err)
+    assert doc["data"]["backends"] == [_res("sbx", ["a"], glob="updated")]
+    assert "ignoring ACQ_ROTATE_TIMEOUT='0'" in err

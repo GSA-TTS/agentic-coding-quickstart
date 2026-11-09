@@ -1837,48 +1837,52 @@ def rotate_preflight(*, primary: bool = True) -> dict | None:
     return None
 
 
-def _rotate_listed_names() -> set[str] | None:
-    """The sandboxes ``msb list -q`` names, or None when that cannot be trusted.
-
-    Used only for an msb below acq's floor, to tell a binding record left by a
-    sandbox deleted outside acq from one whose sandbox still exists. The list
-    is read-only and bounded; it counts only when it succeeds and every line is
-    a plain sandbox name, so an output in another format (a table, say) is not
-    mistaken for a list that leaves out a sandbox holding the key.
-    """
-    try:
-        proc = _run(["list", "-q"], timeout=timeouts.rotate_timeout_s())
-    except (MsbError, subprocess.TimeoutExpired):
-        return None
-    if proc.returncode != 0:
-        return None
-    names = {line.strip() for line in proc.stdout.splitlines() if line.strip()}
-    return names if all(secretstore.name_ok(name) for name in names) else None
-
-
-def rotate_holds_key() -> bool | None:
-    """Whether a sandbox acq recorded holds the USAi key, read from acq's own
-    binding records (msb may be below acq's floor, so acq does not drive it).
-    A record whose sandbox ``msb list`` no longer names (deleted outside acq)
-    is ignored; when the list cannot be read, every record counts. None when
-    a record cannot be read."""
+def _rotate_key_holders() -> list[str] | None:
+    """The sandboxes whose binding record says they hold the USAi key, read
+    from acq's own records; None when a record cannot be read. A name that is
+    not a string is reported as ``?``."""
     directory = state.state_dir() / "msb-secret-bindings"
     try:
         records = sorted(directory.glob("*.json"))
         docs = [json.loads(path.read_text(encoding="utf-8")) for path in records]
     except (OSError, ValueError):
         return None
-    holders: list[object] = []
+    holders: list[str] = []
     for doc in docs:
         bindings = doc.get("bindings") if isinstance(doc, dict) else None
         if not isinstance(bindings, dict):
             return None
         if any(isinstance(e, dict) and e.get("service") == provider_creds.USAI_PROVIDER_ID for e in bindings.values()):
-            holders.append(doc.get("sandbox"))
+            name = doc.get("sandbox")
+            holders.append(name if isinstance(name, str) else "?")
+    return holders
+
+
+def rotate_holds_key() -> bool | None:
+    """Whether any sandbox acq recorded holds the USAi key, read from acq's own
+    binding records without running msb. None when a record cannot be read.
+
+    Used only for an msb that fails acq's version check, and any msb command
+    opens (and may one-way migrate) msb's catalog (ADR-0032), so acq cannot ask
+    msb which sandboxes still exist. Every record therefore counts, including
+    one left by a sandbox removed outside acq: that fails safe (the rotation
+    exits 1 rather than claim nothing holds the key), and
+    :func:`rotate_stale_hint` tells the user how to clear such a record."""
+    holders = _rotate_key_holders()
+    return None if holders is None else bool(holders)
+
+
+def rotate_stale_hint() -> str | None:
+    """How to clear a binding record left by a sandbox removed outside acq,
+    naming the sandboxes whose records hold the USAi key (None when there are
+    none, or they cannot be read)."""
+    holders = _rotate_key_holders()
     if not holders:
-        return False
-    listed = _rotate_listed_names()
-    return listed is None or any(not isinstance(name, str) or name in listed for name in holders)
+        return None
+    return (
+        f"acq's records say {', '.join(holders)} hold the USAi key; if one of them was removed outside acq, its "
+        "record is stale: once msb passes acq's version check, 'acq --backend msb rm NAME' clears it"
+    )
 
 
 def _rotate_one(service: str, sandbox: str) -> str | None:
