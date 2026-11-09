@@ -84,10 +84,10 @@ def test_json_reports_each_setting_with_its_source_layer(monkeypatch, tmp_path, 
     assert doc["data"]["interactive"] is False and doc["data"]["changed"] is False
     assert doc["data"]["settings"] == [
         {"key": "backend", "value": "sbx", "source": "flag", "honoured_by_python": True},
-        {"key": "extra_kits", "value": "git+https://example.invalid/kit", "source": "env", "honoured_by_python": False},
+        {"key": "extra_kits", "value": "git+https://example.invalid/kit", "source": "env", "honoured_by_python": True},
         {"key": "scope_github_token", "value": "yes", "source": "config", "honoured_by_python": False},
         {"key": "provider_credential_bindings", "value": None, "source": "default", "honoured_by_python": True},
-        {"key": "provider_kit", "value": "example/kit", "source": "config", "honoured_by_python": False},
+        {"key": "provider_kit", "value": "example/kit", "source": "config", "honoured_by_python": True},
         {"key": "kit_sources", "value": f"github.com/team/kits@{'a' * 40}|kits", "source": "config",
          "honoured_by_python": True},
     ]
@@ -104,7 +104,7 @@ def test_json_backend_and_provider_layers(monkeypatch, tmp_path, capsys):
     assert rc == 0
     settings = {s["key"]: s for s in json.loads(out)["data"]["settings"]}
     assert settings["backend"] == {"key": "backend", "value": "sbx", "source": "config", "honoured_by_python": True}
-    assert settings["provider_kit"] == {"key": "provider_kit", "value": "", "source": "env", "honoured_by_python": False}
+    assert settings["provider_kit"] == {"key": "provider_kit", "value": "", "source": "env", "honoured_by_python": True}
     assert settings["provider_credential_bindings"] == {
         "key": "provider_credential_bindings", "value": "opencode-go=OPENCODE_GO_API_KEY@opencode.ai",
         "source": "env", "honoured_by_python": True,

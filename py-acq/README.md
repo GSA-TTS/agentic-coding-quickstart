@@ -239,9 +239,11 @@ keys, including unknown ones, are kept. Without a terminal (or with
 `ACQ_NO_PROMPT`, `ACQ_NO_PROGRESS` or `--json`) nothing is written; `--json`
 lists each setting as `key`, `value`, `source` and `honoured_by_python`.
 
-**The three keys take effect only under the Bash acq for now.** The Python acq
-does not read `extra_kits`, `provider_kit` or `scope_github_token` yet, so both
-the report and `--json` (`"honoured_by_python": false`) say so.
+**`scope_github_token` takes effect only under the Bash acq for now**, and both
+the report and `--json` (`"honoured_by_python": false`) say so. The Python acq
+reads `extra_kits` and `provider_kit` when it creates an msb sandbox; it applies
+only its pinned built-in kits, so a kit that would have to be fetched (any
+catalog extra kit today) is refused at create rather than ignored.
 
 Deliberate differences from Bash:
 

@@ -12,9 +12,11 @@ defaults, and writes the same three ``config.yaml`` keys Bash writes:
   per-sandbox GitHub-token prompt;
 * ``provider_kit`` — the first checked provider-kit candidate.
 
-The Python acq does not read those three keys yet: they take effect only under
-the Bash acq for now, and the report says so (``honoured_by_python: false`` in
-``--json``). Every write goes through :func:`acq_py.config.write_field`, so other
+The Python acq reads ``extra_kits`` and ``provider_kit`` when it creates an msb
+sandbox; it applies only its pinned built-in kits, so a catalog kit chosen here
+is refused at create rather than ignored. ``scope_github_token`` takes effect
+only under the Bash acq for now, and the report says so (``honoured_by_python:
+false`` in ``--json``). Every write goes through :func:`acq_py.config.write_field`, so other
 keys (including ones acq does not know) are kept, a symlinked config is written
 through, and each write is atomic. A newer ``config.yaml`` schema is refused
 before the first prompt; the forward-migration pre-step (the one every mutating
@@ -76,10 +78,8 @@ _HEADER = "? Select kits (dimmed rows are always applied · ↑/↓ move · SPAC
 FLAG, ENV, CONFIG, DEFAULT, MIXED = "flag", "env", "config", "default", "mixed"
 
 # The keys configure writes that only the Bash acq reads so far.
-BASH_ONLY_KEYS = frozenset({"extra_kits", "scope_github_token", "provider_kit"})
-BASH_ONLY_NOTE = (
-    "      note: extra kits, scope GitHub token and provider kit take effect only under the Bash acq for now."
-)
+BASH_ONLY_KEYS = frozenset({"scope_github_token"})
+BASH_ONLY_NOTE = "      note: scope GitHub token takes effect only under the Bash acq for now."
 
 # Raw terminal control bytes (C0, DEL, C1) are dropped from displayed labels.
 _CONTROL_RE = re.compile("[\x00-\x1f\x7f-\x9f]")
