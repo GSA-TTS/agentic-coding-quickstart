@@ -156,7 +156,7 @@ def test_create_without_a_terminal_only_advises(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(sys, "stdin", stdin)
     rc, _, _, err = _main(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "adv")
     assert rc == 0, err
-    assert "acq: note — this sandbox has no repo-scoped GitHub token.\n" in err
+    assert "acq: note: this sandbox has no repo-scoped GitHub token.\n" in err
     assert "No GitHub token is set for this sandbox." in err
     assert f"To scope it later: acq github-scope adv {ws}\n" in err
     assert stdin.tell() == 0  # no token is read while prompts are off
@@ -346,6 +346,39 @@ def test_sbx_create_scopes_before_the_create(monkeypatch, tmp_path, capsys):
     assert all(TOKEN not in " ".join(argv) for argv, _ in calls)
 
 
+def test_every_advisory_line_is_ascii(monkeypatch, tmp_path, capsys):
+    # On Windows a child's stderr is often in the console code page (cp1252),
+    # where a non-ASCII character does not decode as UTF-8 for whoever reads it.
+    _msb_env(monkeypatch, tmp_path)
+    one = _github_ws(monkeypatch, tmp_path)
+    two = tmp_path / "two"
+    git_repo(monkeypatch, two / "a", "https://github.com/alpha/a.git")
+    git_repo(monkeypatch, two / "b", "https://github.com/beta/b.git")
+    monkeypatch.setattr(creds.common, "_adapter", lambda backend: msb)
+    cases = [
+        (one, False, None, None),         # no terminal: the hint only
+        (one, True, "\n", None),          # declined
+        (one, True, "y\n", ""),           # an empty token: skipped
+        (one, True, "y\n", "tok\tbad"),   # an unstorable token: skipped
+        (one, True, "y\n", TOKEN),        # stored
+        (two, True, "y\n", None),         # several owners: refused
+    ]
+    for ws, tty, answer, token in cases:
+        secretstore.delete(secretstore.key_for("github", "adv"))
+        monkeypatch.setattr(common, "_stdin_is_terminal", lambda tty=tty: tty)
+        if tty:
+            _terminal(monkeypatch, answer=answer, token=token)
+        creds.advise_github_scope("msb", "adv", str(ws), emit_json=False)
+        err = capsys.readouterr().err
+        assert err and err.isascii(), (answer, token, err)
+    secretstore.set_secret("github", None, TOKEN)  # the GLOBAL-token wording
+    secretstore.delete(secretstore.key_for("github", "adv"))
+    monkeypatch.setattr(common, "_stdin_is_terminal", lambda: False)
+    creds.advise_github_scope("msb", "adv", str(one), emit_json=True)
+    err = capsys.readouterr().err
+    assert "A GLOBAL GitHub token is set" in err and err.isascii()
+
+
 def test_scope_default_reads_only_yes_spellings(monkeypatch, tmp_path):
     for value, expected in (("yes", True), ("y", True), ("Y", True), ("YES", False), ("no", False), ("", False)):
         _write_config(f"scope_github_token: {value}\n")
@@ -454,12 +487,19 @@ def test_kit_update_keeps_no_provider_kits_on_sbx(monkeypatch, tmp_path, capsys)
     assert doc["data"]["kits"] == [*BUILTINS_NO_PROVIDER, "opencode"]
 
 
-def test_recreate_keeps_no_provider_kits(monkeypatch, tmp_path, capsys):
+@pytest.mark.parametrize("windows", [False, True], ids=["posix", "windows"])
+def test_recreate_keeps_no_provider_kits(monkeypatch, tmp_path, capsys, windows):
+    monkeypatch.setattr(security, "WINDOWS", windows)  # Windows never gets the read-only mount
     _create_without_providers(monkeypatch, tmp_path, capsys)
-    monkeypatch.setattr(security, "WINDOWS", False)
+    # A sandbox in the security exception: its record claims the read-only mount,
+    # which a Windows create never does, so the claim is written here.
+    path = state.record_path("msb", "np")
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["ro_host_config"] = True
+    path.write_text(json.dumps(record), encoding="utf-8")
     monkeypatch.setenv("ACQ_SECURITY_MOUNT_STATE", json.dumps({"np": "missing"}))
     rc, doc, _, err = _main(capsys, "--backend", "msb", "create", "--recreate", "np", "--yes", "--json")
-    assert rc == 0, err
+    assert rc == 0, (doc, err)
     assert doc["data"]["secret_bindings"] == [] and doc["data"]["kits"] == BUILTINS_NO_PROVIDER
     from acq_py import kits
 

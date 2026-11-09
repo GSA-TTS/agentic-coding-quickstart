@@ -615,10 +615,12 @@ def advise_github_scope(backend: str, sandbox: str, workspace: str, emit_json: b
     repos = gitrepos.detect_workspace_repos(workspace)
     if not repos:
         return
-    lines = ["acq: note — this sandbox has no repo-scoped GitHub token."]
+    # ASCII only: on Windows stderr is often in the console code page, where
+    # Bash's em dash would not decode as UTF-8.
+    lines = ["acq: note: this sandbox has no repo-scoped GitHub token."]
     if _stored_github_token(None):
         lines += ["      A GLOBAL GitHub token is set; it grants this sandbox access to ALL",
-                  "      your repositories — broader than the repos mounted here."]
+                  "      your repositories, broader than the repos mounted here."]
     else:
         lines.append("      No GitHub token is set for this sandbox.")
     lines.append("      For least privilege, scope a token to just the mounted repo(s).")
