@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import ntpath
 import os
+import re
+import string
 import sys
 
 from .. import (
@@ -418,15 +421,124 @@ def _validate_workspace(command: str, path: str | None, emit_json: bool) -> tupl
             emit_json,
         )
     resolved = _logical_abspath(path)
+    shown = path if resolved == path else f"{path} (resolves to {resolved})"
+    unsafe = _workspace_unsafe(command, resolved, shown, emit_json)
+    if unsafe is not None:
+        return None, unsafe
     if not os.path.isdir(resolved):
         return None, _operational_failure(
             command,
             errors.VALIDATION_FAILED,
-            f"workspace path does not exist or is not a directory: {path}",
+            f"workspace path does not exist or is not a directory: {_printable(path)}",
             "create the workspace first, then re-run",
             emit_json,
         )
+    real = REALPATH(resolved)
+    if real != resolved:
+        unsafe = _workspace_unsafe(command, real, f"{path} (resolves to {real})", emit_json)
+        if unsafe is not None:
+            return None, unsafe
     return resolved, None
+
+
+# Module-local seam for the host OS class, read by the workspace colon check so
+# the Windows drive-letter rule is testable on a POSIX host (as ``msb.WINDOWS``).
+WINDOWS = os.name == "nt"
+
+# A Windows drive designator, plain (``C:``) or extended-length (``\\?\C:``), as
+# ``ntpath.splitdrive`` returns it.
+_DRIVE_DESIGNATOR = re.compile(r"(?:[\\/]{2}\?[\\/])?[A-Za-z]:")
+
+
+def _is_control(ch: str) -> bool:
+    """True for a character Bash's ``[[:cntrl:]]`` matches in a UTF-8 locale:
+    C0 controls, DEL, C1 controls and the Unicode line/paragraph separators."""
+    return ch < " " or "\x7f" <= ch <= "\x9f" or ch in "\u2028\u2029"
+
+
+def _printable(text: str) -> str:
+    """``text`` with every control character replaced by ``?`` (Bash
+    ``acq_printable``), for echoing a user-supplied path or name."""
+    return "".join("?" if _is_control(ch) else ch for ch in text)
+
+
+def _colon_scope(path: str) -> str:
+    """The part of ``path`` in which a ``:`` would be read as a separator.
+
+    msb's ``--volume HOST:GUEST[:OPTIONS]`` and sbx's ``PATH:ro`` both split on
+    ``:``. On POSIX that is the whole path. On Windows the native host path
+    starts with a drive designator (``C:``, or ``\\\\?\\C:`` from ``realpath``)
+    whose colon the backends read as part of the path, exactly as the msb
+    adapter's volume spec relies on (``msb._guest_path``); only the rest is
+    checked. A UNC path has no drive colon, so all of it is checked.
+    """
+    if WINDOWS:
+        drive, rest = ntpath.splitdrive(path)
+        if _DRIVE_DESIGNATOR.fullmatch(drive):
+            return rest
+    return path
+
+
+def _workspace_unsafe(command: str, path: str, shown: str, emit_json: bool) -> int | None:
+    """Refuse a workspace path the backends cannot mount (Bash
+    ``_acq_workspace_path_safe``): a control character splits line-oriented
+    records and reaches the terminal, and a ``:`` outside a Windows drive
+    designator is a mount-spec separator, so the mount would target another path.
+    ``shown`` describes the path in the message. Returns the emitted exit code."""
+    if any(_is_control(ch) for ch in path):
+        message = f"workspace path contains a control character (newline, tab or escape): {_printable(shown)}"
+        remediation = "acq cannot mount it safely. Rename the directory, then re-run."
+    elif ":" in _colon_scope(path):
+        message = f"workspace path contains ':': {_printable(shown)}"
+        remediation = (
+            "acq and the sandbox backends use ':' to separate a mount's path from its options "
+            "(PATH:ro), so this path cannot be mounted. Rename the directory, then re-run."
+        )
+        if path.endswith(":ro"):
+            remediation = "This acq takes no ':ro' suffix: give the directory alone. " + remediation
+    else:
+        return None
+    return _operational_failure(command, errors.VALIDATION_FAILED, message, remediation, emit_json)
+
+
+_SANDBOX_NAME_CHARS = frozenset(string.ascii_letters + string.digits + "_-")
+
+
+def _new_sandbox_name_failure(command: str, name: str, emit_json: bool) -> int | None:
+    """Refuse an explicit ``--name`` for a new sandbox outside ``[A-Za-z0-9_-]``
+    or starting with ``-`` (Bash ``acq_sandbox_name_check``); ``.`` and ``..``
+    fall outside the set. Returns the emitted exit code, or ``None``."""
+    if name and not name.startswith("-") and all(ch in _SANDBOX_NAME_CHARS for ch in name):
+        return None
+    return _operational_failure(
+        command,
+        errors.VALIDATION_FAILED,
+        f"invalid sandbox name '{_printable(name)}'.",
+        "Use only letters, digits, '_' and '-', not starting with '-'. An existing sandbox "
+        "with another name is still reachable with 'acq run NAME', 'acq shell NAME' or 'acq rm NAME'.",
+        emit_json,
+    )
+
+
+def _name_form_failure(command: str, name: str, emit_json: bool) -> int | None:
+    """Refuse a NAME given to a verb that acts on an existing sandbox when it
+    could steer a host path built from it (Bash ``acq_name_form_check``): empty,
+    ``.``, ``..``, containing ``/`` or ``\\``, or a control character. Any other
+    name passes, so a sandbox created outside acq stays reachable."""
+    if (
+        name not in ("", ".", "..")
+        and "/" not in name
+        and "\\" not in name
+        and not any(_is_control(ch) for ch in name)
+    ):
+        return None
+    return _operational_failure(
+        command,
+        errors.VALIDATION_FAILED,
+        f"{command}: refusing sandbox name '{_printable(name)}'.",
+        "A sandbox name cannot be empty, '.' or '..', or contain '/', '\\' or control characters.",
+        emit_json,
+    )
 
 
 def _logical_abspath(path: str) -> str:
@@ -552,11 +664,16 @@ def _slugify(token: str) -> str:
     """Normalize a token into a sandbox-name slug (mirrors acq.backends slugify).
 
     Only ASCII ``a-z0-9`` survive; runs of anything else collapse to one hyphen,
-    matching the legacy ``tr + sed`` transform.
+    matching the legacy ``tr + sed`` transform. Only ASCII ``A-Z`` is lowered,
+    as Bash's byte-wise ``LC_ALL=C tr`` does: ``str.lower`` would turn some
+    non-ASCII letters into ASCII ones (U+0130 -> ``i`` plus a combining dot,
+    U+212A KELVIN SIGN -> ``k``).
     """
     out: list[str] = []
     prev_dash = False
-    for ch in token.lower():
+    for ch in token:
+        if "A" <= ch <= "Z":
+            ch = ch.lower()
         if ("a" <= ch <= "z") or ("0" <= ch <= "9"):
             out.append(ch)
             prev_dash = False
@@ -571,9 +688,11 @@ def _derive_name(agent: str, workspace: str) -> str:
 
     ``workspace`` is the path as the user typed it, made absolute by
     :func:`_validate_workspace` (logical for ``.``), never the canonicalized
-    mount path.
+    mount path. Only the host's own separators are stripped, so on POSIX a
+    trailing ``\\`` stays part of the name as it does in Bash. The root has no
+    basename and derives ``workspace``.
     """
-    base = os.path.basename(workspace.rstrip("/\\")) or "workspace"
+    base = os.path.basename(workspace.rstrip(os.sep + (os.altsep or ""))) or "workspace"
     return f"{_slugify(agent)}-{_slugify(base)}"
 
 

@@ -491,6 +491,10 @@
     {
       "contract": "ADR-0044m matrix reports unqualified cells honestly (Windows ARM64, musl, unclaimed sbx cells)",
       "vectors": ["qualification/matrix-unqualified"]
+    },
+    {
+      "contract": "Bash parity for sandbox names and workspace paths: an explicit --name must match [A-Za-z0-9_-] without a leading '-'; a name given to a verb that acts on an existing sandbox must not be empty, '.' or '..', or contain '/', '\\' or control characters; a workspace path containing ':' (outside a Windows drive designator) or a control character is refused before it is checked for existence",
+      "vectors": ["cli/name-create-invalid", "cli/name-form-stop-refused", "cli/workspace-colon-refused"]
     }
   ]
 }

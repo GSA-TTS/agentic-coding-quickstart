@@ -975,7 +975,7 @@ if [ -n "$_acq_wants_help" ]; then
   if ! _acq_print_topic_help "$_acq_help_topic"; then
     print_help
   fi
-  acq_resolve_backend "${explicit_backend}" 2>/dev/null || true
+  acq_resolve_backend_best_effort "${explicit_backend}"
   if [ -z "$_acq_help_topic" ]; then
     _acq_backend_help ""
   elif [ "$(_acq_verb_backend_help_kind "$_acq_help_topic")" = "shared" ]; then
@@ -1240,21 +1240,21 @@ case "$subcommand" in
     # writes config.yaml. Resolve the backend best-effort so a first-run decline
     # can persist the detected default, but never fail on no backend.
     shift
-    acq_resolve_backend "${explicit_backend}" 2>/dev/null || true
+    acq_resolve_backend_best_effort "${explicit_backend}"
     acq_configure
     exit 0
     ;;
 
   version|--version|-v)
     # Resolve backend best-effort so version can report it; don't fail.
-    acq_resolve_backend "${explicit_backend}" 2>/dev/null || true
+    acq_resolve_backend_best_effort "${explicit_backend}"
     print_version
     exit 0
     ;;
 
   doctor)
     shift
-    acq_resolve_backend "${explicit_backend}" 2>/dev/null || true
+    acq_resolve_backend_best_effort "${explicit_backend}"
     if [ -n "${1:-}" ]; then
       if [ -n "${2:-}" ]; then
         echo "acq: doctor: expected at most one sandbox name" >&2

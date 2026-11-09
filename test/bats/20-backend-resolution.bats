@@ -239,3 +239,33 @@ EVIL
   assert_output --partial 'unknown backend'
   [ ! -e "$XDG_CONFIG_HOME/acq/config.yaml" ]
 }
+
+# The best-effort verbs resolve the backend with its diagnostics silenced, so
+# that "nothing installed" can be reported as unknown. An unknown backend pinned
+# in config.yaml still ends them, and must say why instead of a bare exit 1.
+@test "best-effort verbs: an unknown backend in config.yaml is reported, not swallowed" {
+  local verb
+  unset ACQ_BACKEND
+  export XDG_CONFIG_HOME="$STUBDIR/config"
+  mkdir -p "$XDG_CONFIG_HOME/acq"
+  printf 'backend: bogus\n' > "$XDG_CONFIG_HOME/acq/config.yaml"
+  for verb in --help doctor configure version; do
+    run "$ACQ" "$verb" </dev/null
+    assert_failure
+    assert_output --partial "unknown backend 'bogus'"
+    assert_output --partial 'config.yaml'
+  done
+}
+
+@test "best-effort verbs: no backend installed stays silent and succeeds" {
+  unset ACQ_BACKEND
+  export XDG_CONFIG_HOME="$STUBDIR/empty-config"
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "$1" >/dev/null 2>&1
+    _auto_detect_backend() { return 1; }
+    acq_resolve_backend_best_effort ""
+    echo "resolved=[${ACQ_RESOLVED_BACKEND:-}]"
+  ' _ "$ACQ"
+  assert_success
+  assert_output 'resolved=[]'
+}
