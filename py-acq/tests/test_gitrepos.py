@@ -29,6 +29,9 @@ pytestmark = needs_git
         ("ssh://git@github.com/alpha/app.git", "alpha/app"),
         ("git://github.com/alpha/app.git", "alpha/app"),
         ("https://GitHub.com/Alpha/App.git", "Alpha/App"),
+        ("https://github.com/jdoe_acme/app.git", "jdoe_acme/app"),
+        ("git@github.com:jdoe_acme/app.git", "jdoe_acme/app"),
+        ("https://github.com/_lead/app.git", None),
         ("https://github.com/alpha/app/tree/main", "alpha/app"),
         ("  https://github.com/alpha/app.git\n", "alpha/app"),
         ("https://gitlab.com/alpha/app.git", None),
@@ -59,6 +62,15 @@ def test_one_owner(monkeypatch, tmp_path):
     repos = gitrepos.detect_workspace_repos(str(ws))
     assert repos == ["alpha/app", "Alpha/lib"]
     assert gitrepos.owners(repos) == ["alpha"]
+
+
+def test_enterprise_managed_user_owner(monkeypatch, tmp_path):
+    # EMU handles carry "_shortcode"; they must be detected, not skipped.
+    ws = tmp_path / "ws"
+    git_repo(monkeypatch, ws / "app", "https://github.com/jdoe_acme/app.git")
+    repos = gitrepos.detect_workspace_repos(str(ws))
+    assert repos == ["jdoe_acme/app"]
+    assert gitrepos.owners(repos) == ["jdoe_acme"]
 
 
 def test_several_owners(monkeypatch, tmp_path):

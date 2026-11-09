@@ -67,7 +67,9 @@ _REMOTE_PREFIX = re.compile(
 )
 # GitHub account and repository names. Anything else is not a GitHub name and is
 # skipped, so a crafted remote cannot put control characters in acq's output.
-_OWNER_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})", re.ASCII)
+# Owners allow "_" and a longer name for Enterprise Managed User handles
+# (``user_shortcode``), which ordinary account names never contain.
+_OWNER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,99}", re.ASCII)
 _REPO_RE = re.compile(r"[A-Za-z0-9._-]{1,100}", re.ASCII)
 
 PAT_PERMISSIONS = (("contents", "write"), ("pull_requests", "write"), ("issues", "write"), ("actions", "read"))
