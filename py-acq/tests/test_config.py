@@ -671,9 +671,30 @@ def test_a_directory_in_place_of_the_backup_is_refused_by_name(content):
     assert path.read_bytes() == content
 
 
+def _symlinks_supported(tmp_path: Path) -> bool:
+    """True when this host lets the test user create symlinks (Windows needs a
+    privilege or developer mode)."""
+    probe = tmp_path / "symlink-probe"
+    try:
+        probe.symlink_to(tmp_path / "symlink-probe-target")
+    except (OSError, NotImplementedError):
+        return False
+    probe.unlink()
+    return True
+
+
 def _age(path: Path) -> None:
+    """Backdate ``path`` past the stale-temp cutoff without following a symlink.
+
+    A symlink's own mtime can only be set where ``os.utime`` supports
+    ``follow_symlinks=False`` (not on Windows); there it is left as is, which
+    only makes the "symlinks survive" check easier to pass, never harder.
+    """
     old = time.time() - 3600
-    os.utime(path, (old, old), follow_symlinks=False)
+    if not path.is_symlink():
+        os.utime(path, (old, old))
+    elif os.utime in os.supports_follow_symlinks:
+        os.utime(path, (old, old), follow_symlinks=False)
 
 
 def test_stale_temp_files_are_removed_and_fresh_ones_kept():
@@ -704,8 +725,38 @@ def test_replace_bytes_temp_names_match_the_cleanup_pattern(monkeypatch):
     assert seen and all(config._temp_name_pattern("config.yaml", bash=False).fullmatch(n) for n in seen), seen
 
 
-@POSIX_ONLY
+def _plant_near_misses(directory: Path, base: str, tmp_path: Path, symlinks: bool) -> list[Path]:
+    """Create user files that look like temp files but must survive the cleanup."""
+    planted = [directory / f"{base}.tmp.old", directory / f"{base}.tmp.abcd12345", directory / f"{base}.tmp.QRST9876"]
+    for user_file in planted:
+        user_file.write_bytes(b"mine")
+    a_dir = directory / f"{base}.tmp.efgh5678"
+    a_dir.mkdir()
+    planted.append(a_dir)
+    if symlinks:
+        symlink = directory / f"{base}.tmp.abcd1234"
+        symlink.symlink_to(tmp_path / "elsewhere")
+        planted.append(symlink)
+    return planted
+
+
 def test_cleanup_leaves_user_files_symlinks_and_directories_alone(tmp_path):
+    path = _write_config(_MIGRATED)
+    survivors = _plant_near_misses(path.parent, "config.yaml", tmp_path, _symlinks_supported(tmp_path))
+    ours = path.with_name("config.yaml.tmp.zz_99999")
+    ours.write_bytes(b"partial")
+    for leftover in [*survivors, ours]:
+        _age(leftover)
+
+    assert config.migrate_config() == "none"
+    missing = [p.name for p in survivors if not os.path.lexists(p)]
+    assert not missing, f"cleanup removed {missing}"
+    assert not ours.exists()
+
+
+def test_cleanup_next_to_a_symlink_target_touches_only_acq_temp_files(tmp_path):
+    if not _symlinks_supported(tmp_path):
+        pytest.skip("this host does not allow creating symlinks")
     dotfiles = tmp_path / "dotfiles"
     dotfiles.mkdir()
     target = dotfiles / "acq.yaml"
@@ -714,19 +765,7 @@ def test_cleanup_leaves_user_files_symlinks_and_directories_alone(tmp_path):
     link.parent.mkdir(parents=True, exist_ok=True)
     link.symlink_to(target)
 
-    survivors = []
-    for directory, base in ((link.parent, "config.yaml"), (dotfiles, "acq.yaml")):
-        user_file = directory / f"{base}.tmp.old"
-        user_file.write_bytes(b"mine")
-        long_name = directory / f"{base}.tmp.abcd12345"
-        long_name.write_bytes(b"mine")
-        upper = directory / f"{base}.tmp.ABCD1234"
-        upper.write_bytes(b"mine")
-        symlink = directory / f"{base}.tmp.abcd1234"
-        symlink.symlink_to(tmp_path / "elsewhere")
-        a_dir = directory / f"{base}.tmp.efgh5678"
-        a_dir.mkdir()
-        survivors += [user_file, long_name, upper, symlink, a_dir]
+    survivors = _plant_near_misses(dotfiles, "acq.yaml", tmp_path, symlinks=True)
     # Next to the target only acq's own temp files are removed: no Bash pid
     # files and no backup temp files, which are only ever written in the config
     # directory.
