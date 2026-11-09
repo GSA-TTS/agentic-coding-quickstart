@@ -109,10 +109,11 @@ parts of the Bash session differ or are not ported yet:
    to them too (`_start_locked` in `py-acq/src/acq_py/commands/lifecycle.py`).
    **Unblock trigger:** forwarding is ported, or the Python reader for Bash's
    state tree lands.
-3. **Guest git config** (Bash `_acq_msb_apply_host_git_global_config`, and sbx's
-   git identity kit). Python passes the identity as `GIT_*`/`EMAIL` session
-   variables only; it does not write `user.name`/`user.email` into the guest's
-   global git config. **Unblock trigger:** same as item 1.
+3. **Guest git config on msb** (Bash `_acq_msb_apply_host_git_global_config`).
+   On msb, Python passes the identity as `GIT_*`/`EMAIL` session variables only;
+   it does not write `user.name`/`user.email` into the guest's global git config.
+   On sbx the git identity kit (`py-acq/src/acq_py/kit_sbx.py`) does, as in Bash.
+   **Unblock trigger:** same as item 1.
 4. **`ACQ_ACTIVATE_PROJECT_ENV`.** With it set to `1`, Bash passes
    `ACQ_WORKSPACE` and wraps the session in its guest script
    (`acq_guest_exec_script`, `acq_guest_shell_script` in `acq.backends/common.sh`),
