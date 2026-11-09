@@ -58,6 +58,8 @@ DEFAULT_BARRIER_TIMEOUT_S = 60.0
 BARRIER_POLL_S = 2.0
 FORCE_REAPPLY_ENV = "ACQ_FORCE_KIT_REAPPLY"
 STALE_AGE_S = 7 * 24 * 3600  # generated kit directories unused for this long are pruned
+TMP_AGE_S = 3600  # a build directory this old belongs to a create that is gone
+TRASH_PREFIX = ".trash-"
 PROVIDER_RECORD_NAME = "usai-provider"  # Bash USAI_PROVIDER_KIT_NAME, the record key
 OPENCODE_CONFIG_LINK_FIX = (
     'f="$HOME/.config/opencode/opencode.jsonc"; if [ -L "$f" ] && [ ! -e "$f" ]; then rm -f "$f"; fi'
@@ -346,8 +348,30 @@ def _remove_tree(path: Path) -> None:
         shutil.rmtree(path)
 
 
-def _valid_kit_dir(path: Path) -> bool:
-    return path.is_dir() and not path.is_symlink() and (path / "spec.yaml").is_file()
+def _valid_kit_dir(path: Path, digest: str | None = None) -> bool:
+    """A complete kit directory; with ``digest``, one whose content still matches its name.
+
+    The digest check catches a directory a crashed or interrupted removal left
+    half-deleted, which still has its ``spec.yaml``.
+    """
+    if not (path.is_dir() and not path.is_symlink() and (path / "spec.yaml").is_file()):
+        return False
+    try:
+        return digest is None or _tree_digest(path)[:16] == digest
+    except OSError:  # removed under us
+        return False
+
+
+def _discard(path: Path) -> None:
+    """Rename ``path`` aside atomically, then delete it, so no name ever points at a partial tree.
+
+    An interrupted delete leaves only a ``.trash-*`` entry, which no kit name
+    matches and :func:`prune_stale` sweeps. Raises ``OSError`` when it cannot
+    be renamed.
+    """
+    trash = path.parent / f"{TRASH_PREFIX}{secrets.token_hex(8)}"
+    os.rename(path, trash)
+    _remove_tree(trash)
 
 
 def _tree_digest(root: Path) -> str:
@@ -372,9 +396,10 @@ def _publish(parent: Path, stem: str, fill: Callable[[Path], None], *, by_conten
     """Build a kit directory in a private temporary one, then move it to ``parent/name`` if absent.
 
     ``name`` is ``stem``, or ``stem.<digest>`` with ``by_content``, so the
-    same name always means the same content. An existing valid directory is
-    reused and never removed: another create may be handing it to sbx right
-    now. Raises :class:`KitTranslateError`.
+    same name always means the same content. An existing directory whose
+    content matches is reused and never removed: another create may be handing
+    it to sbx right now. One that does not match is damaged, so it is renamed
+    aside and replaced. Raises :class:`KitTranslateError`.
     """
     try:
         tmp = Path(tempfile.mkdtemp(prefix=f".{stem[:40]}.", dir=parent))
@@ -382,14 +407,18 @@ def _publish(parent: Path, stem: str, fill: Callable[[Path], None], *, by_conten
         raise KitTranslateError(f"could not create a kit directory in {str(parent)!r}: {exc.strerror or exc}") from exc
     try:
         fill(tmp)
-        dest = parent / (f"{stem}.{_tree_digest(tmp)[:16]}" if by_content else stem)
-        if not _valid_kit_dir(dest):
-            if dest.is_symlink() or dest.is_file():
-                dest.unlink()  # never a kit acq made: nothing can be using it
+        digest = _tree_digest(tmp)[:16] if by_content else None
+        dest = parent / (f"{stem}.{digest}" if digest else stem)
+        if not _valid_kit_dir(dest, digest):
+            if dest.exists() or dest.is_symlink():
+                try:
+                    _discard(dest)
+                except OSError:
+                    pass  # a concurrent create replaced it first
             try:
                 os.rename(tmp, dest)
             except OSError:
-                if not _valid_kit_dir(dest):  # not a concurrent create's copy
+                if not _valid_kit_dir(dest, digest):  # not a concurrent create's copy
                     raise
     except OSError as exc:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -508,7 +537,8 @@ def git_identity_kit() -> Path | None:
     if built is None:
         return None
     slug, text = built
-    return _publish(_subdir("generated"), f"git-identity-{slug}", lambda tmp: _write_private(tmp / "spec.yaml", text))
+    return _publish(_subdir("generated"), f"git-identity-{slug}", lambda tmp: _write_private(tmp / "spec.yaml", text),
+                    by_content=True)
 
 
 def startup_barrier_spec(token: str) -> str:
@@ -565,9 +595,11 @@ def prune_stale(keep: Iterable[Path], *, now: float | None = None) -> None:
 
     Directories this create uses are kept, and a reused one has its time
     refreshed, so only kits from an older bundle, an old identity or a crashed
-    create are pruned.
+    create are pruned. Each is renamed aside before it is deleted
+    (:func:`_discard`); ``.trash-*`` left by an interrupted prune, and build
+    directories older than :data:`TMP_AGE_S`, are swept too.
     """
-    cutoff = (time.time() if now is None else now) - STALE_AGE_S
+    now = time.time() if now is None else now
     kept = {Path(p) for p in keep}
     for sub in ("v2", "generated"):
         try:
@@ -575,9 +607,13 @@ def prune_stale(keep: Iterable[Path], *, now: float | None = None) -> None:
         except (KitTranslateError, OSError):
             continue
         for entry in entries:
+            if entry in kept:
+                continue
             try:
-                if entry not in kept and os.lstat(entry).st_mtime < cutoff:
+                if entry.name.startswith(TRASH_PREFIX):
                     _remove_tree(entry)
+                elif os.lstat(entry).st_mtime < now - (TMP_AGE_S if entry.name.startswith(".") else STALE_AGE_S):
+                    _discard(entry)
             except OSError:
                 pass
 

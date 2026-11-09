@@ -16,6 +16,7 @@ import random
 import shutil
 import stat
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -823,3 +824,69 @@ def test_force_refresh_uses_roles():
     selection = kitspec.KitSelection(tuple(kitspec.SelectedKit(*r) for r in refs), 3, 4, None)
     out = kit_sbx._force_refresh_kits(kits_, selection)
     assert [(k.name, label) for k, label in out] == [("git-ssh-sign", "git-ssh-sign kit"), ("opencode", "agent kit")]
+
+
+def test_interrupted_prune_never_leaves_a_reusable_partial_kit(monkeypatch, tmp_path):
+    monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
+    kit = kit_sbx.bundled_kit("opencode")
+    path = kit_sbx.translated_kit(kit)
+    old = 1_000_000_000
+    os.utime(path, (old, old))
+    real_remove = kit_sbx._remove_tree
+
+    def interrupted(target):
+        # Delete one payload file, then stop: an rmtree cut short.
+        next(p for p in target.rglob("*") if p.is_file() and p.name != "spec.yaml").unlink()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(kit_sbx, "_remove_tree", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        kit_sbx.prune_stale([])
+    monkeypatch.setattr(kit_sbx, "_remove_tree", real_remove)
+    v2 = path.parent
+    # The partial tree is only under a trash name, never under the kit's name.
+    assert not path.exists()
+    assert [e.name.startswith(kit_sbx.TRASH_PREFIX) for e in v2.iterdir()] == [True]
+    assert kit_sbx.translated_kit(kit) == path and kit_sbx._valid_kit_dir(path, path.name.rsplit(".", 1)[1])
+    kit_sbx.prune_stale([path])
+    assert [e.name for e in v2.iterdir()] == [path.name]
+
+
+def test_a_damaged_kit_directory_is_rebuilt_not_reused(monkeypatch, tmp_path):
+    monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
+    kit = kit_sbx.bundled_kit("opencode")
+    path = kit_sbx.translated_kit(kit)
+    victim = next(p for p in path.rglob("*") if p.is_file() and p.name != "spec.yaml")
+    victim.unlink()  # half-deleted, spec.yaml still there
+    assert kit_sbx.translated_kit(kit) == path
+    assert victim.is_file()
+    assert not [e for e in path.parent.iterdir() if e.name.startswith(".")]
+
+
+def test_prune_sweeps_old_build_directories_only(monkeypatch, tmp_path):
+    monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
+    v2 = kit_sbx._subdir("v2")
+    old_tmp, new_tmp = v2 / ".opencode.abc", v2 / ".opencode.def"
+    old_tmp.mkdir()
+    new_tmp.mkdir()
+    two_hours_ago = time.time() - 7200  # past TMP_AGE_S, well inside STALE_AGE_S
+    os.utime(old_tmp, (two_hours_ago, two_hours_ago))
+    kit_sbx.prune_stale([])
+    assert not old_tmp.exists() and new_tmp.exists()
+
+
+def test_git_identity_kit_is_content_addressed(monkeypatch, tmp_path):
+    monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(kit_sbx, "_session", lambda: type("S", (), {
+        "host_git_identity_env": staticmethod(lambda: ["GIT_AUTHOR_NAME=Jane"]),
+        "_host_git_config": staticmethod(lambda key: None),
+    }))
+    path = kit_sbx.git_identity_kit()
+    slug, text = kit_sbx.git_identity_spec(["GIT_AUTHOR_NAME=Jane"], [])
+    stem, digest = path.name.rsplit(".", 1)
+    assert stem == f"git-identity-{slug}" and kit_sbx._valid_kit_dir(path, digest)
+    # An old-format directory under the bare name is never picked up.
+    (path.parent / stem).mkdir()
+    (path.parent / stem / "spec.yaml").write_text("stale", encoding="utf-8")
+    assert kit_sbx.git_identity_kit() == path
+    assert (path / "spec.yaml").read_text(encoding="utf-8") == text

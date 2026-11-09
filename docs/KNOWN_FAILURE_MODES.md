@@ -3689,6 +3689,16 @@ matching msb work, then re-verify live on a host with sbx 0.51 or later: the
 guest has the kit files, the Zscaler CA and OpenCode configured for USAi, the
 startup barrier is reached, and `acq kit update` reports the recreate notice.
 
+The same live run must confirm that sbx keeps what it read at create. The
+Python acq deletes the per-create startup-barrier kit as soon as `sbx create`
+returns and prunes translated kits under `<state>/sbx-kits/` that have not been
+used for a week, while Bash keeps its kit directories forever. So: create a
+sandbox, delete `<state>/sbx-kits/` entirely, `sbx stop` it, start it again
+(`acq run NAME` or `sbx exec`), and confirm the kits' startup commands still
+run (`/tmp/opencode` exists again, and `/tmp/acq/startup-complete` holds the
+create's token). If they do not, keep the kit directories for the sandbox's
+lifetime and remove them in `acq rm`.
+
 ---
 
 ## Contributing
