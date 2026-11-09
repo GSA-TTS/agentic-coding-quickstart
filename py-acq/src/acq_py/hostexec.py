@@ -190,7 +190,10 @@ def _windows_console(fd: int) -> bool:  # pragma: no cover - Windows only
     except OSError:
         return False
     mode = ctypes.c_ulong()
-    return bool(ctypes.windll.kernel32.GetConsoleMode(ctypes.c_void_p(handle), ctypes.byref(mode)))
+    try:
+        return bool(ctypes.windll.kernel32.GetConsoleMode(ctypes.c_void_p(handle), ctypes.byref(mode)))
+    except OSError:  # kernel32 could not be loaded
+        return False
 
 
 def terminal_env() -> list[str]:
