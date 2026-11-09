@@ -146,3 +146,14 @@ teardown() { acq_teardown_stubs; }
   local entries=("$STUBDIR/tmp"/acq-kit-fetch.*)
   assert [ ! -e "${entries[0]}" ]
 }
+
+@test "reuse: an inherited GIT_DIR leaves that repository untouched and still materializes" {
+  local other="$STUBDIR/other-repo" before path
+  "$ACQ_TEST_REAL_GIT" init -q "$other"
+  before=$(cat "$other/.git/config")
+  path=$(GIT_DIR="$other/.git" GIT_WORK_TREE="$other" GIT_INDEX_FILE="$other/.git/index" \
+    GIT_OBJECT_DIRECTORY="$other/.git/objects" kit_translate_fetch "$REF" "$STUBDIR/isolated")
+  assert_equal "$(cat "$path/spec.yaml")" first
+  assert_equal "$(cat "$other/.git/config")" "$before"
+  assert [ ! -e "$other/.git/index" ]
+}

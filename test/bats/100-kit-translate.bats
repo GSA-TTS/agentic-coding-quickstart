@@ -495,3 +495,56 @@ GITSTUB
   assert_output --partial 'git init failed'
   refute_regex "$(cat "$gitlog")" '(^|[[:space:]])(remote|config|fetch|checkout)([[:space:]]|$)'
 }
+
+@test "kit fetch: a failed git remote stops before config/fetch" {
+  local gitlog="$STUBDIR/git-remote-fail.log"; : >"$gitlog"
+  cat >"$STUBDIR/git" <<GITSTUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$gitlog"
+case "\$*" in
+  remote*) exit 1 ;;
+  *) exit 0 ;;
+esac
+GITSTUB
+  chmod +x "$STUBDIR/git"
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    kit_translate_fetch "git+https://github.com/x/y.git#ref=deadbeef&dir=kit" "'"$STUBDIR"'/remotedest" 2>&1
+  '
+  assert_failure
+  refute_regex "$(cat "$gitlog")" '(^|[[:space:]])(config|fetch|checkout)([[:space:]]|$)'
+}
+
+@test "kit fetch: a failed git config stops before fetch" {
+  local gitlog="$STUBDIR/git-config-fail.log"; : >"$gitlog"
+  cat >"$STUBDIR/git" <<GITSTUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$gitlog"
+case "\$*" in
+  config*) exit 1 ;;
+  *) exit 0 ;;
+esac
+GITSTUB
+  chmod +x "$STUBDIR/git"
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    kit_translate_fetch "git+https://github.com/x/y.git#ref=deadbeef&dir=kit" "'"$STUBDIR"'/configdest" 2>&1
+  '
+  assert_failure
+  refute_regex "$(cat "$gitlog")" '(^|[[:space:]])(fetch|checkout)([[:space:]]|$)'
+}
+
+# An inherited GIT_DIR (or similar) must never redirect the kit cache's git
+# commands into another repository.
+@test "kit fetch: an inherited GIT_DIR leaves that repository's config untouched" {
+  local other="$STUBDIR/other-repo"
+  "$ACQ_TEST_REAL_GIT" init -q "$other"
+  local before; before=$(cat "$other/.git/config")
+  run env GIT_DIR="$other/.git" GIT_WORK_TREE="$other" GIT_INDEX_FILE="$other/.git/index" \
+    bash -c '
+      . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+      kit_translate_fetch "git+https://example.test/x/y.git#ref=deadbeef&dir=kit" "'"$STUBDIR"'/gitdirdest" 2>&1
+    '
+  assert_equal "$(cat "$other/.git/config")" "$before"
+  [ -d "$STUBDIR/gitdirdest/.git" ]
+}
