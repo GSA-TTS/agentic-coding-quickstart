@@ -64,7 +64,10 @@ if [ ! -d "$tree/py-acq" ]; then
   created_pyacq=1
 fi
 staging="$tree/py-acq/.staging.$$"
-mkdir "$staging" || die "could not create $staging"
+if ! mkdir "$staging"; then
+  if [ "$created_pyacq" = 1 ]; then rmdir "$tree/py-acq" 2>/dev/null || :; fi
+  die "could not create $staging"
+fi
 # Remove what this run created on any exit. After a successful run the staging
 # dir is empty and py-acq holds the runtime and source, so rmdir leaves it.
 trap 'rm -rf "$staging"; if [ "$created_pyacq" = 1 ]; then rmdir "$tree/py-acq" 2>/dev/null || :; fi' EXIT
