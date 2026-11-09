@@ -213,6 +213,56 @@ def test_msb_rotation_human_output_never_shows_the_key(monkeypatch, tmp_path, ca
     _assert_never_leaked(tmp_path, [argv for argv, _ in msb_children], out, err)
 
 
+def _msb_timing_out(monkeypatch, match) -> list[tuple[list[str], float | None]]:
+    """Record ``(argv, timeout)`` of every ``msb._run``; time out the calls ``match(argv)`` selects."""
+    seen: list[tuple[list[str], float | None]] = []
+    real = msb._run
+
+    def run(argv, *, timeout=None, input_text=None, secret_env=None):
+        seen.append((list(argv), timeout))
+        if match(argv):
+            if secret_env:
+                secret_env.clear()
+            raise subprocess.TimeoutExpired([*argv], timeout or 0)
+        return real(argv, timeout=timeout, input_text=input_text, secret_env=secret_env)
+
+    monkeypatch.setattr(msb, "_run", run)
+    return seen
+
+
+def test_every_msb_call_in_a_rotation_is_bounded(monkeypatch, tmp_path, capsys, msb_children):
+    _msb_running(monkeypatch, tmp_path, "a", "b")
+    monkeypatch.setenv("ACQ_ROTATE_TIMEOUT", "7")
+    seen = _msb_timing_out(monkeypatch, lambda argv: False)
+    rc, _doc, out, err = _rotate(capsys, monkeypatch, "msb")
+    assert rc == 0, (out, err)
+    refeed = [(argv, t) for argv, t in seen if argv[:1] in (["list"], ["modify"])]
+    assert {argv[0] for argv, _t in refeed} == {"list", "modify"}
+    assert {t for _argv, t in refeed} == {7.0}
+
+
+def test_msb_modify_timeout_fails_only_that_sandbox(monkeypatch, tmp_path, capsys, msb_children):
+    _msb_running(monkeypatch, tmp_path, "a", "b")
+    monkeypatch.setenv("ACQ_ROTATE_TIMEOUT", "7")
+    _msb_timing_out(monkeypatch, lambda argv: argv[:2] == ["modify", "a"])
+    rc, doc, out, err = _rotate(capsys, monkeypatch, "msb")
+    assert rc == 1
+    assert doc["error"]["backends"] == [_res("msb", ["b"], missed=["a ('msb modify' timed out after 7s)"])]
+    assert secretstore.resolve("usai") == NEW
+    _assert_never_leaked(tmp_path, [argv for argv, _ in msb_children], out, err)
+
+
+def test_msb_list_timeout_reports_msb_not_re_fed(monkeypatch, tmp_path, capsys, msb_children):
+    _msb_running(monkeypatch, tmp_path, "a")
+    _msb_timing_out(monkeypatch, lambda argv: argv[:1] == ["list"])
+    rc, doc, out, err = _rotate(capsys, monkeypatch, "msb")
+    assert rc == 1
+    assert doc["error"]["backends"] == [_res("msb", [], missed=["every sandbox ('msb list' timed out after 120s)"])]
+    assert "ACQ_ROTATE_TIMEOUT" in doc["error"]["remediation"]
+    assert _modified(msb_children) == {}
+    _assert_never_leaked(tmp_path, [argv for argv, _ in msb_children], out, err)
+
+
 # ---------------------------------------------------------------------------
 # sbx
 # ---------------------------------------------------------------------------
@@ -355,16 +405,98 @@ def test_rotation_names_the_other_backend_when_it_fails(monkeypatch, tmp_path, c
 # Every backend is checked before anything is stored.
 # ---------------------------------------------------------------------------
 
-def test_a_refusal_from_the_other_backend_changes_nothing(monkeypatch, tmp_path, capsys, msb_children, sbx_calls):
+_CANNOT = "any sandbox holding the key (acq cannot re-feed sbx: "
+
+
+def test_a_refusal_from_the_other_backend_only_fails_its_propagation(
+        monkeypatch, tmp_path, capsys, msb_children, sbx_calls):
+    # sbx is not the backend being rotated: its refusal (duplicate global
+    # entries) reports sbx as not re-fed, msb still rotates, and sbx is left
+    # untouched. The remediation does not claim nothing was changed.
     _msb_running(monkeypatch, tmp_path, "a", sbx_on=True)
     dupes = [_row("global", "sbx-cs-g1"), _row("global", "sbx-cs-g2")]
     monkeypatch.setenv("ACQ_SBX_STUB_CUSTOM_SECRETS", json.dumps(dupes))
     rc, doc, out, err = _rotate(capsys, monkeypatch, "msb")
     assert rc == 1
-    assert "nothing was changed" in doc["error"]["remediation"] and "ADR-0008" in doc["error"]["remediation"]
+    assert secretstore.resolve("usai") == NEW
+    assert _modified(msb_children)["a"]["USAI_API_KEY"] == NEW
+    assert _set_customs(sbx_calls) == {}
+    msb_result, sbx_result = doc["error"]["backends"]
+    assert msb_result == _res("msb", ["a"])
+    [reason] = sbx_result["not_refed"]
+    assert reason.startswith(_CANNOT + "sbx lists 2 global custom secrets")
+    remediation = doc["error"]["remediation"]
+    assert "nothing was changed" not in remediation
+    assert "the sbx sandboxes were not re-fed" in remediation and "ADR-0008" in remediation
+    assert "sbx-cs-g1" in remediation and "re-run 'acq usai-rotate-api-key' with the same key" in remediation
+    _assert_never_leaked(tmp_path, [argv for argv, _ in msb_children + sbx_calls], out, err)
+
+
+@pytest.mark.parametrize("rows, version, expect", [
+    # An ambiguous global label: sbx also has a sandbox named "global".
+    ([_row("global", "sbx-cs-g1")], "0.51.0", "sbx's secret listing cannot tell a global 'usai' entry"),
+    # A row without a usable placeholder.
+    ([_row("global", "-sbx-cs-g1")], "0.51.0", "could not parse the secret store listing"),
+    # An sbx too old to take the key on stdin, holding it.
+    ([_row("global", "sbx-cs-g1")], "0.45.0", "secret-set-custom"),
+])
+def test_every_other_backend_sbx_refusal_lets_msb_rotate(
+        monkeypatch, tmp_path, capsys, msb_children, sbx_calls, rows, version, expect):
+    _msb_running(monkeypatch, tmp_path, "a", sbx_on=True)
+    monkeypatch.setenv("ACQ_SBX_STUB_CUSTOM_SECRETS", json.dumps(rows))
+    monkeypatch.setenv("ACQ_SBX_VERSION", version)
+    if "cannot tell" in expect:
+        monkeypatch.setenv("ACQ_SBX_STUB_CATALOG", json.dumps({"global": "running"}))
+    rc, doc, out, err = _rotate(capsys, monkeypatch, "msb")
+    assert rc == 1, (out, err)
+    assert secretstore.resolve("usai") == NEW
+    assert _modified(msb_children)["a"]["USAI_API_KEY"] == NEW
+    assert _set_customs(sbx_calls) == {}
+    [reason] = doc["error"]["backends"][1]["not_refed"]
+    assert reason.startswith(_CANNOT) and expect in reason, reason
+    _assert_never_leaked(tmp_path, [argv for argv, _ in msb_children + sbx_calls], out, err)
+
+
+def test_sbx_label_lookup_timeout_reports_sbx_not_re_fed_on_msb(monkeypatch, tmp_path, capsys, msb_children, sbx_calls):
+    _msb_running(monkeypatch, tmp_path, "a", sbx_on=True)
+    monkeypatch.setenv("ACQ_SBX_STUB_CUSTOM_SECRETS", json.dumps([_row("global", "sbx-cs-g1")]))
+    _timing_out(monkeypatch, lambda argv: argv[:2] == ["ls", "-q"])
+    rc, doc, out, err = _rotate(capsys, monkeypatch, "msb")
+    assert rc == 1
+    assert doc["error"]["backends"][1] == _res("sbx", [], missed=[_CANNOT + "'sbx ls' timed out after 120s)"])
+    assert _modified(msb_children)["a"]["USAI_API_KEY"] == NEW
+    assert "ACQ_ROTATE_TIMEOUT" in doc["error"]["remediation"]
+    _assert_never_leaked(tmp_path, [argv for argv, _ in msb_children + sbx_calls], out, err)
+
+
+def test_the_rotated_backends_refusal_still_comes_before_the_store_write(
+        monkeypatch, tmp_path, capsys, msb_children, sbx_calls):
+    # msb is being rotated and refuses: nothing is stored, even though sbx
+    # (the other backend) would only have been reported as not re-fed.
+    _msb_running(monkeypatch, tmp_path, "a", sbx_on=True)
+    dupes = [_row("global", "sbx-cs-g1"), _row("global", "sbx-cs-g2")]
+    monkeypatch.setenv("ACQ_SBX_STUB_CUSTOM_SECRETS", json.dumps(dupes))
+
+    def refuse(*, primary=True):
+        raise msb.MsbError(errors.VALIDATION_FAILED, "the USAi key has no usable msb binding", "fix it")
+
+    monkeypatch.setattr(msb, "rotate_preflight", refuse)
+    rc, doc, out, err = _rotate(capsys, monkeypatch, "msb")
+    assert rc == 1 and doc["error"]["message"] == "msb: the USAi key has no usable msb binding"
     assert secretstore.resolve("usai") == OLD
     assert _modified(msb_children) == {} and _set_customs(sbx_calls) == {}
-    _assert_never_leaked(tmp_path, [argv for argv, _ in msb_children + sbx_calls], out, err)
+
+
+def test_a_refusal_after_the_store_write_does_not_say_nothing_changed(monkeypatch, tmp_path, capsys, sbx_calls):
+    # sbx is rotated, but the listing it re-reads after the store write is one
+    # it refuses (here, the preflight is skipped to reach that state).
+    _sbx_rows(monkeypatch, tmp_path, _row("global", "sbx-cs-g1"), _row("global", "sbx-cs-g2"))
+    monkeypatch.setattr(sbx, "rotate_preflight", lambda *, primary=True: None)
+    rc, doc, _out, _err = _rotate(capsys, monkeypatch, "sbx")
+    assert rc == 1
+    assert secretstore.resolve("usai") == NEW
+    assert "nothing was changed" not in doc["error"]["remediation"]
+    assert "the sbx sandboxes were not re-fed" in doc["error"]["remediation"]
 
 
 # ---------------------------------------------------------------------------
@@ -549,7 +681,7 @@ def test_other_backend_preflight_refusal_names_it(monkeypatch, tmp_path, capsys)
     dupes = [_row("global", "sbx-cs-g1"), _row("global", "sbx-cs-g2")]
     monkeypatch.setenv("ACQ_SBX_STUB_CUSTOM_SECRETS", json.dumps(dupes))
     rc, doc, _out, _err = _rotate(capsys, monkeypatch, "msb")
-    assert rc == 1 and doc["error"]["message"].startswith("sbx: sbx lists 2 global custom secrets")
+    assert rc == 1 and "(sbx: not re-fed: " + _CANNOT + "sbx lists 2 global custom secrets" in doc["error"]["message"]
 
 
 # ---------------------------------------------------------------------------
