@@ -101,28 +101,61 @@ class _Parser(argparse.ArgumentParser):
         raise UsageError(message)
 
 
-def _flag_value(argv: list[str], flag: str) -> str | None:
-    try:
-        i = argv.index(flag)
-    except ValueError:
+class _Globals:
+    """acq's global flags (``--json``, ``--backend NAME``) as found on argv."""
+
+    def __init__(self) -> None:
+        self.emit_json = False
+        self.backend: str | None = None
+        self._backend_seen = False
+
+    def take(self, args: list[str], i: int) -> int | None:
+        """Consume a global flag at ``args[i]``; return the next index, else None."""
+        if args[i] == "--json":
+            self.emit_json = True
+            return i + 1
+        if args[i] == "--backend":
+            # The first --backend wins; one with no value is dropped.
+            if not self._backend_seen:
+                self._backend_seen = True
+                self.backend = args[i + 1] if i + 1 < len(args) else None
+            return i + 2
         return None
-    if i + 1 < len(argv):
-        return argv[i + 1]
-    return None
 
 
-def _strip_flag(argv: list[str], flag: str) -> list[str]:
-    out: list[str] = []
-    skip_next = False
-    for token in argv:
-        if skip_next:
-            skip_next = False
+def _scan_globals(args: list[str]) -> tuple[_Globals, list[str]]:
+    """Separate acq's global flags from the rest of argv (ADR-0038m §4).
+
+    Where a global flag is recognised depends on the verb:
+
+    * before the verb, always;
+    * for a verb acq does not own (passthrough), nowhere after it: the backend
+      gets everything after the verb verbatim;
+    * for ``exec``, between the verb and the sandbox name, but not after the
+      name, so ``acq exec box grep --json f`` runs ``grep --json f``;
+    * for every other verb, anywhere before the first bare ``--``.
+    """
+    flags = _Globals()
+    i = 0
+    while i < len(args) and (nxt := flags.take(args, i)) is not None:
+        i = nxt
+    if i == len(args):
+        return flags, []
+    verb = args[i]
+    if not verb.startswith("-") and verb not in KNOWN_COMMANDS:
+        return flags, args[i:]
+    rest = [verb]
+    i += 1
+    while i < len(args) and args[i] != "--":
+        nxt = flags.take(args, i)
+        if nxt is not None:
+            i = nxt
             continue
-        if token == flag:
-            skip_next = True
-            continue
-        out.append(token)
-    return out
+        if verb == "exec":
+            break  # the sandbox name: everything from here on is the command
+        rest.append(args[i])
+        i += 1
+    return flags, rest + args[i:]
 
 
 def build_parser() -> _Parser:
@@ -450,22 +483,9 @@ def _user_dirs_pre_step(emit_json: bool, command: str) -> int | None:
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
 
-    # Split at the first bare ``--`` so the exec/attach passthrough argv stays
-    # opaque: acq's global flags (--json, --backend) are recognized only before
-    # it (ADR-0038m §4 "exec argv after `--` is opaque").
-    head = args
-    tail: list[str] = []
-    for i, token in enumerate(args):
-        if token == "--":  # nosec B105 # argv separator
-            head = args[:i]
-            tail = args[i + 1 :]
-            break
-
-    emit_json = "--json" in head
-    backend_override = _flag_value(head, "--backend")
-    head = [a for a in head if a != "--json"]
-    head = _strip_flag(head, "--backend")
-    args = head if not tail else [*head, "--", *tail]
+    flags, args = _scan_globals(args)
+    emit_json = flags.emit_json
+    backend_override = flags.backend
 
     # Announced verbatim backend passthrough (spec user story #9): an unknown
     # subcommand is forwarded to the active backend binary with a stderr notice,

@@ -6,11 +6,99 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 
-from .. import backends, envelope, errors, msb, sbx, state
+from .. import backends, envelope, errors, hostexec, msb, sbx, state
 from . import common
+
+# Host identity variables replayed into every session, so commits made in the
+# guest carry the user's identity (Bash: ``acq_host_git_identity_env``).
+_GIT_IDENTITY_VARS = ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL")
+# A recorded guest ssh-agent socket must be an absolute path in a word-safe
+# charset, the same guard Bash applies to ACQ_MSB_SSH_AGENT_GUEST_SOCK.
+_SAFE_GUEST_SOCK = re.compile(r"/[A-Za-z0-9._/-]*")
+
+
+def _identity_value_is_safe(value: str) -> bool:
+    # One ``NAME=value`` per entry: a line break or tab would split or corrupt it.
+    return not any(ch in value for ch in "\n\r\t")
+
+
+def _host_git_config(key: str) -> str | None:
+    """Read ``git config --global --get KEY`` on the host; ``None`` if unavailable."""
+    git = hostexec.which("git")
+    if git is None:
+        return None
+    try:
+        proc = subprocess.run(
+            [git, "config", "--global", "--get", key],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.rstrip("\r\n") or None
+
+
+def host_git_identity_env() -> list[str]:
+    """The host's git identity as ``NAME=value`` entries for a guest session.
+
+    Explicit ``GIT_AUTHOR_*``/``GIT_COMMITTER_*`` values are forwarded as set.
+    ``EMAIL`` comes from the environment, else from the global ``user.email``.
+    Values that are empty or contain a line break or tab are skipped.
+    """
+    entries = []
+    for var in _GIT_IDENTITY_VARS:
+        value = os.environ.get(var)
+        if value and _identity_value_is_safe(value):
+            entries.append(f"{var}={value}")
+    email = os.environ.get("EMAIL")
+    if not (email and _identity_value_is_safe(email)):
+        email = _host_git_config("user.email")
+    if email and _identity_value_is_safe(email):
+        entries.append(f"EMAIL={email}")
+    return entries
+
+
+def _forwarded_ssh_auth_sock(record: dict | None) -> str | None:
+    """The guest ssh-agent socket recorded for this sandbox, or ``None``.
+
+    The record carries ``ssh_auth_sock`` only when the sandbox was created with
+    host ssh-agent forwarding (see ADR-0021). The host's own ``SSH_AUTH_SOCK`` is
+    never forwarded: it names a host path that means nothing in the guest.
+    """
+    sock = (record or {}).get("ssh_auth_sock")
+    if isinstance(sock, str) and _SAFE_GUEST_SOCK.fullmatch(sock):
+        return sock
+    return None
+
+
+def session_env(record: dict | None) -> list[str]:
+    """Backend-neutral ``NAME=value`` entries for a session in this sandbox.
+
+    The adapters add their own (HOME, SHELL, and TERM/COLORTERM when the session
+    has a terminal).
+    """
+    entries = host_git_identity_env()
+    sock = _forwarded_ssh_auth_sock(record)
+    if sock is not None:
+        entries.append(f"SSH_AUTH_SOCK={sock}")
+    return entries
+
+
+def session_env_for(backend: str, name: str) -> list[str]:
+    """:func:`session_env` for a sandbox whose record the caller has not read."""
+    try:
+        record = state.record_read(backend, name)
+    except state.StateSchemaError:
+        record = None
+    return session_env(record)
 
 
 def run_exec(parsed, emit_json: bool, backend: str) -> int:
@@ -51,7 +139,7 @@ def run_exec(parsed, emit_json: bool, backend: str) -> int:
     if gate is not None:
         return gate
     workspace = (record or {}).get("workspace") or common.DEFAULT_GUEST_WORKSPACE
-    rc = adapter.exec_command(name, command, workspace=workspace, json_mode=emit_json)
+    rc = adapter.exec_command(name, command, workspace=workspace, json_mode=emit_json, env=session_env(record))
     if emit_json:
         print(json.dumps(envelope.success("exec", {"name": name, "exit_code": rc})))
     return rc
@@ -64,8 +152,8 @@ def run_attach(parsed, emit_json: bool, backend: str) -> int:
     (ADR-0038m §1, spec user story #10): fail closed on a missing sandbox or a
     missing/unreadable host record, then launch the recorded agent and propagate
     its status. The agent comes from host-authoritative state only — there is no
-    agent-to-shell fallback (ADR-0038m §48). True PTY allocation and ssh-agent
-    forwarding are Tier-3/live concerns and are not synthesized here.
+    agent-to-shell fallback (ADR-0038m §48). The adapter gives the session a PTY
+    when stdin is a terminal, and replays the session environment.
     """
     adapter = common._adapter(backend)
     name = parsed.name
@@ -108,7 +196,8 @@ def run_attach(parsed, emit_json: bool, backend: str) -> int:
             emit_json,
         )
     workspace = record.get("workspace") or common.DEFAULT_GUEST_WORKSPACE
-    rc = adapter.launch(name, workspace, common._launch_token(backend, name, agent), json_mode=emit_json)
+    token = common._launch_token(backend, name, agent)
+    rc = adapter.launch(name, workspace, token, json_mode=emit_json, env=session_env(record))
     if emit_json:
         print(json.dumps(envelope.success("attach", {"name": name, "backend": backend, "agent": agent, "exit_code": rc})))
     return rc
@@ -117,9 +206,9 @@ def run_attach(parsed, emit_json: bool, backend: str) -> int:
 def run_shell(parsed, emit_json: bool, backend: str) -> int:
     """``acq shell NAME`` — open an interactive login shell in a sandbox.
 
-    Runs ``/bin/sh -l`` as the unprivileged ``agent`` user (never root), with the
-    child's status preserved. Like ``attach``, the non-interactive path is
-    deterministic and PTY allocation is deferred to the live tier.
+    Runs a login shell as the unprivileged ``agent`` user (never root), with the
+    child's status preserved. Like ``attach``, it gets a PTY when stdin is a
+    terminal and the session environment.
     """
     adapter = common._adapter(backend)
     name = parsed.name
@@ -145,7 +234,7 @@ def run_shell(parsed, emit_json: bool, backend: str) -> int:
     if gate is not None:
         return gate
     workspace = (record or {}).get("workspace") or common.DEFAULT_GUEST_WORKSPACE
-    rc = adapter.launch(name, workspace, "shell", json_mode=emit_json)
+    rc = adapter.launch(name, workspace, "shell", json_mode=emit_json, env=session_env(record))
     if emit_json:
         print(json.dumps(envelope.success("shell", {"name": name, "backend": backend, "exit_code": rc})))
     return rc
@@ -296,7 +385,7 @@ def _passthrough(argv: list[str], explicit: str | None, emit_json: bool) -> int:
     print(f"acq: '{verb}' is not an acq subcommand - forwarding to '{name}'.", file=sys.stderr)
     print(f"     (output and any errors below are from '{name}', not acq)", file=sys.stderr)
     try:
-        return subprocess.run([*binary, *argv]).returncode
+        return hostexec.run_foreground([*binary, *argv])
     except OSError:
         return _backend_unavailable(verb, name, emit_json)
 

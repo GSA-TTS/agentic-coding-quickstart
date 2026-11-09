@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-11-05"
+last_updated: "2026-11-09"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -80,6 +80,38 @@ first live run with the extended oracle should also confirm that `sbx` accepts t
 nonce-named global secret service, and that neither backend CLI reads the
 redirected `XDG_*` directories (if one does, its steps fail closed rather than
 pass).
+
+---
+
+## Deferred: Python session parity gaps (attach, shell, exec)
+
+**Status:** deferred (tracked per AGENTS.md "Track Deferred Work").
+
+The Python `attach`, `shell`, `run` and `exec` give the session a PTY when stdin
+is a terminal (`msb exec -t`, `sbx exec -it`), pass `HOME`, `SHELL`,
+`TERM`/`COLORTERM` and the host git identity, map a signal death to `128+N`, and
+leave Ctrl-C to the child (`py-acq/src/acq_py/hostexec.py` `run_foreground`). Four
+parts of the Bash session are not ported yet:
+
+1. **Kit `environment[]` replay** (Bash `_acq_msb_kit_env_flags_into`). The
+   Python kit engine does not persist a kit's declared environment, so there is
+   nothing to replay. **Unblock trigger:** the Python kit engine applies kits
+   through the neutral engine and records their environment; then add it to the
+   adapters' session flags.
+2. **ssh-agent forwarding** (ADR-0021). Python never creates the `--vsock` route
+   or the in-guest bridge, so it passes `SSH_AUTH_SOCK` only when the sandbox's
+   host record carries an `ssh_auth_sock` guest path, which no Python create
+   writes yet; sandboxes created by Bash keep that path in Bash's host config,
+   which Python does not read. **Unblock trigger:** forwarding is ported, or the
+   Python reader for Bash's state tree lands.
+3. **Guest git config** (Bash `_acq_msb_apply_host_git_global_config`, and sbx's
+   git identity kit). Python passes the identity as `GIT_*`/`EMAIL` session
+   variables only; it does not write `user.name`/`user.email` into the guest's
+   global git config. **Unblock trigger:** same as item 1.
+4. **Live check.** A TUI attach, an interactive shell and Ctrl-C have been tested
+   only against a fake backend under a PTY (`py-acq/tests/test_session_fidelity.py`).
+   **Unblock trigger:** the next Tier-3 run on an msb host, and on an sbx 0.51+
+   host for `sbx exec -it`.
 
 ---
 

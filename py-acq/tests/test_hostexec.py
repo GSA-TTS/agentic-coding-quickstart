@@ -214,9 +214,9 @@ def test_passthrough_launches_the_resolved_backend(workspace, tmp_path, monkeypa
 
     def fake_run(argv, **kwargs):
         seen["argv"] = argv
-        return subprocess.CompletedProcess(argv, 0)
+        return 0
 
-    monkeypatch.setattr(session.subprocess, "run", fake_run)
+    monkeypatch.setattr(session.hostexec, "run_foreground", fake_run)
     assert session._passthrough(["image", "list"], None, False) == 0
     assert seen["argv"] == [str(real), "image", "list"]
 

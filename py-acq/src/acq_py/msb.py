@@ -622,14 +622,16 @@ def remove(name: str) -> None:
 
 
 def _run_stream(argv: list[str], *, json_mode: bool) -> int:
-    """Run a backend command with the child's exit status as the return value.
+    """Run a backend command in the foreground; return its shell-style exit status.
 
     In ``json_mode`` the child's stdout is routed to stderr (fd 2) so the CLI's
     stdout stays a single JSON document (ADR-0038m §2); otherwise stdio is
-    inherited so the child renders directly (and a TTY would attach normally).
-    Passing the fd directly keeps this working when ``sys.stderr`` has been
-    replaced by a harness object without a usable fileno(). A CLI that cannot be
-    started raises :class:`MsbError` (``backend_not_found``), as :func:`_run` does.
+    inherited so the child renders directly. Passing the fd directly keeps this
+    working when ``sys.stderr`` has been replaced by a harness object without a
+    usable fileno(). A child killed by a signal reports ``128 + N``, and Ctrl-C
+    is left to the child (see :func:`acq_py.hostexec.run_foreground`). A CLI
+    that cannot be started raises :class:`MsbError` (``backend_not_found``), as
+    :func:`_run` does.
     """
     if json_mode:
         try:
@@ -639,41 +641,106 @@ def _run_stream(argv: list[str], *, json_mode: bool) -> int:
     else:
         stdout = None
     try:
-        return subprocess.run([*msb_command(), *argv], stdout=stdout).returncode
+        return hostexec.run_foreground([*msb_command(), *argv], stdout=stdout)
     except OSError as exc:
         raise cli_unavailable() from exc
 
 
-def launch(name: str, workspace: str | None, agent: str | None, *, json_mode: bool = False) -> int:
-    """Launch the recorded agent (or a login shell) in the foreground.
+# The agent user's home in the guest. With ``-u agent`` msb does not set HOME,
+# so ``~``-relative logic would resolve against root's home.
+AGENT_HOME = "/home/agent"
+# Fallback when the agent's passwd shell cannot be read or is not a plain path.
+DEFAULT_SHELL = "/bin/sh"
+_SAFE_SHELL = re.compile(r"/[A-Za-z0-9._/-]*")
+_AGENT_ENTRY_SCRIPT = 'getent passwd agent 2>/dev/null || grep "^agent:" /etc/passwd 2>/dev/null'
 
-    Runs as the unprivileged ``agent`` user in the recorded workspace (ADR-0011),
-    with the child's exit status as this function's return value (child-status
-    propagation, ADR-0038m §1). Interactive PTY allocation and ssh-agent
-    forwarding are the attach slice's concern; the deterministic non-interactive
-    path runs ``msb exec`` without a PTY and never blocks on stdin.
+
+def agent_shell(name: str) -> str:
+    """The agent user's passwd shell in ``name``, or :data:`DEFAULT_SHELL`.
+
+    msb's interactive default is the base image's own entrypoint, and it exports
+    neither the passwd shell nor ``SHELL``, so the session is told explicitly
+    (Bash: ``_acq_msb_agent_passwd_shell``). The value comes from the guest, so
+    only a word-safe absolute path is accepted.
     """
-    if agent and agent != "shell":
-        command = [agent]
-    else:
-        command = ["/bin/sh", "-l"]
-    return exec_command(name, command, workspace=workspace, json_mode=json_mode)
+    try:
+        proc = _run(["exec", "-u", "root", name, "--", "sh", "-c", _AGENT_ENTRY_SCRIPT], timeout=10)
+    except (MsbError, subprocess.TimeoutExpired):
+        return DEFAULT_SHELL
+    lines = (proc.stdout or "").splitlines() if proc.returncode == 0 else []
+    fields = lines[0].split(":") if lines else []
+    if len(fields) >= 7 and fields[0] == "agent" and _SAFE_SHELL.fullmatch(fields[6].strip()):
+        return fields[6].strip()
+    return DEFAULT_SHELL
 
 
-def exec_command(name: str, command: list[str], *, workspace: str | None = None, json_mode: bool = False) -> int:
-    """Run an explicit command non-interactively (``acq exec``); returns its status.
-
-    Mirrors :func:`launch` but forwards an arbitrary ``command`` verbatim after the
-    ``--`` separator (ADR-0038m §4 "exec argv after ``--`` is opaque").
-    """
-    argv = ["exec", "-u", "agent"]
+def _session(
+    name: str,
+    command: list[str],
+    *,
+    workspace: str | None,
+    env: list[str],
+    tty: bool,
+    json_mode: bool,
+) -> int:
+    """Run ``command`` as ``agent`` in the workspace with ``env``; ``-t`` if ``tty``."""
+    argv = ["exec", "-t"] if tty else ["exec"]
+    argv += ["-u", "agent"]
     if workspace:
         # `-w` is the POSIX *guest* start directory (ADR-0029): the adapter owns
         # the host->guest translation, so the native host path the seam passed is
         # converted to its guest form here (never a drive path).
         argv += ["-w", _guest_path(workspace)]
+    for entry in env:
+        argv += ["-e", entry]
     argv += [name, "--", *command]
     return _run_stream(argv, json_mode=json_mode)
+
+
+def launch(
+    name: str,
+    workspace: str | None,
+    agent: str | None,
+    *,
+    json_mode: bool = False,
+    env: list[str] | None = None,
+    tty: bool | None = None,
+) -> int:
+    """Launch the recorded agent (or a login shell) in the foreground.
+
+    Runs as the unprivileged ``agent`` user in the recorded workspace (ADR-0011),
+    with the child's exit status as this function's return value (child-status
+    propagation, ADR-0038m §1). When stdin is a terminal (or ``tty`` says so) the
+    session gets a PTY (``msb exec -t``) and the host's TERM/COLORTERM; without
+    one it runs without a PTY, as a pipe or CI job needs. ``env`` is the
+    seam's session environment (git identity, a forwarded ssh-agent socket).
+    """
+    interactive = hostexec.stdin_is_tty() if tty is None else tty
+    shell = agent_shell(name)
+    command = [agent] if agent and agent != "shell" else [shell, "-l"]
+    session = [f"HOME={AGENT_HOME}", f"SHELL={shell}"]
+    if interactive:
+        session += hostexec.terminal_env()
+    return _session(
+        name, command, workspace=workspace, env=[*session, *(env or [])], tty=interactive, json_mode=json_mode
+    )
+
+
+def exec_command(
+    name: str,
+    command: list[str],
+    *,
+    workspace: str | None = None,
+    json_mode: bool = False,
+    env: list[str] | None = None,
+) -> int:
+    """Run an explicit command non-interactively (``acq exec``); returns its status.
+
+    Like :func:`launch` but without a PTY, forwarding ``command`` verbatim after
+    the ``--`` separator (ADR-0038m §4 "exec argv after ``--`` is opaque").
+    """
+    session = [f"HOME={AGENT_HOME}", *(env or [])]
+    return _session(name, command, workspace=workspace, env=session, tty=False, json_mode=json_mode)
 
 
 def copy(src: str, dst: str) -> int:

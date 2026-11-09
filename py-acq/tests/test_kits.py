@@ -810,7 +810,7 @@ def test_launch_uses_recorded_entrypoint(monkeypatch, tmp_path, capsys):
     captured: dict = {}
     real_launch = msb.launch
 
-    def spy(name, workspace, agent, *, json_mode=False):
+    def spy(name, workspace, agent, *, json_mode=False, **_session):
         captured["agent"] = agent
         return 0
 
