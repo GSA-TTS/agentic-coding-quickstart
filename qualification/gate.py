@@ -5,8 +5,10 @@ whether every claimed cell holds a current green transcript, so a release can be
 evaluated on a hosted runner with no live run. ``record`` turns a run's
 ``transcript.json`` into a ledger entry. ``verify-evidence`` checks the transcripts
 a ledger PR body inlines against the ledger (each block's SHA-256 must be a
-recorded ``transcript_sha256`` whose entry the block reproduces), so a reviewer
-can audit a ledger PR without the runner's files.
+recorded ``transcript_sha256`` whose entry the block reproduces; with ``--base``,
+every entry added since that revision needs exactly one such block, and none may
+be hidden in an HTML comment), so a reviewer can audit a ledger PR without the
+runner's files.
 
 A claimed cell is ``qualified`` (current green transcript), ``waived`` (an
 unexpired maintainer waiver in the ledger), or ``blocked``. The gate passes iff
@@ -50,6 +52,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable, Iterable
 
 from .ledger import (
@@ -59,12 +62,13 @@ from .ledger import (
     append_entry,
     OracleDigest,
     binding_problem,
+    audit_evidence,
     entry_from_transcript,
     evidence_blocks,
+    parse_ledger,
     git_oracle_digest,
     latest_entry,
     load_ledger,
-    verify_evidence,
 )
 from .matrix import MSB, PLATFORMS, SBX, is_claimed, staleness, touches_surface, version_problem
 from .model import Environment, Transcript, Verdict
@@ -225,21 +229,47 @@ def _cmd_record(args: argparse.Namespace) -> int:
     return 0
 
 
+def base_entries(ledger_path: str, rev: str, cwd=None) -> set[str]:
+    """The ``transcript_sha256`` of every entry in the ledger as committed at ``rev``."""
+    if not rev or rev.startswith("-"):
+        raise LedgerError(f"--base {rev!r} is not a revision")
+    top = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, cwd=cwd)
+    if top.returncode != 0:
+        raise LedgerError("--base needs a git checkout")
+    try:
+        rel = Path(ledger_path).resolve().relative_to(Path(top.stdout.strip()).resolve()).as_posix()
+    except ValueError:
+        raise LedgerError(f"{ledger_path} is not inside the checkout, so it has no committed version") from None
+    shown = subprocess.run(["git", "show", f"{rev}:{rel}"], capture_output=True, cwd=cwd)
+    if shown.returncode != 0:
+        raise LedgerError(f"cannot read {rel} at {rev}")
+    return {e.transcript_sha256 for e in parse_ledger(json.loads(shown.stdout.decode("utf-8"))).entries}
+
+
 def _cmd_verify_evidence(args: argparse.Namespace) -> int:
     ledger = load_ledger(args.ledger)
+    required = None
+    if args.base is not None:
+        old = base_entries(args.ledger, args.base)
+        required = [e for e in ledger.entries if e.transcript_sha256 not in old]
     if args.body == "-":
-        text = sys.stdin.read()
+        data = sys.stdin.buffer.read()
     else:
-        with open(args.body, encoding="utf-8") as handle:
-            text = handle.read()
-    blocks = evidence_blocks(text)
-    if not blocks:
+        with open(args.body, "rb") as handle:
+            data = handle.read()
+    blocks = evidence_blocks(data.decode("utf-8"))
+    if not blocks and not required:
+        if required is not None:
+            sys.stdout.write("no entries added since the base, and no transcript blocks\n")
+            return 0
         sys.stderr.write("qualification.gate: no ```json transcript blocks found\n")
         return 2
-    results = verify_evidence(ledger, blocks)
+    results, problems = audit_evidence(ledger, blocks, required)
     for digest, problem in results:
         sys.stdout.write(f"{'MISMATCH' if problem else 'OK'} {digest}" + (f": {problem}" if problem else "") + "\n")
-    return 1 if any(problem for _digest, problem in results) else 0
+    for problem in problems:
+        sys.stdout.write(problem + "\n")
+    return 1 if problems or any(problem for _digest, problem in results) else 0
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -256,6 +286,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "verify-evidence", help="check the transcripts a ledger PR body inlines against the ledger"
     )
     verify.add_argument("body", help="a file holding the PR body, or - for stdin")
+    verify.add_argument(
+        "--base", default=None,
+        help="the PR's base revision: every entry added since it must have exactly one verifying block",
+    )
     return parser
 
 

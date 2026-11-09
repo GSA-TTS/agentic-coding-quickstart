@@ -91,9 +91,10 @@ gate checks each entry against the repository (oracle hash at its revision, host
 cell, no duplicate transcripts) but never sees transcripts, so the ledger's admin
 review remains the control against forged evidence. On a pull request CI runs the
 gate from the base branch, so a PR cannot loosen the rules it is judged by. `python -m
-qualification.gate verify-evidence <pr-body>` checks the transcripts a ledger PR
-inlines: each is the file byte for byte, so its SHA-256 is a recorded
-`transcript_sha256`, and it must reproduce its entry. See
+qualification.gate verify-evidence --base <rev> <pr-body>` checks the transcripts a
+ledger PR inlines: each is the file byte for byte, so its SHA-256 is a recorded
+`transcript_sha256`, and it must reproduce its entry; every entry added since `<rev>`
+needs exactly one such block, and none may be duplicated or hidden in an HTML comment. See
 [`docs/howto/qualification.md`](../docs/howto/qualification.md).
 
 ## No secret value

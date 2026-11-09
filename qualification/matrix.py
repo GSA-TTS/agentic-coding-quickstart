@@ -298,13 +298,16 @@ def cell_state(
 
     Unclaimed cells are unqualified (honest reporting — never claimed, never a
     pass). A claimed cell is qualified only when it holds a green *current*
-    transcript; otherwise blocked (no green verdict — holds the gate).
+    transcript recorded at, and accepted at, a backend version that meets the
+    floors (:func:`version_problem`); otherwise blocked (holds the gate).
     """
     if not is_claimed(backend, platform):
         return MatrixState.UNQUALIFIED
     if (
         transcript is not None
         and transcript.verdict is Verdict.PASS
+        and version_problem(backend, transcript.environment.backend_version) is None
+        and (backend_version is None or version_problem(backend, backend_version) is None)
         and is_current(
             transcript, now=now, backend_version=backend_version, surface_changed=surface_changed
         )

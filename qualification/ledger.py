@@ -516,24 +516,42 @@ def set_accepted_version(path: str | Path, backend: str, version: str) -> None:
     _rewrite(Path(path), lambda doc: doc.setdefault("accepted_backend_versions", {}).__setitem__(backend, version))
 
 
-def evidence_blocks(text: str) -> list[bytes]:
+@dataclass(frozen=True)
+class EvidenceBlock:
+    """One ```` ```json ```` block of a PR body: its exact bytes, and whether a reviewer sees it."""
+
+    raw: bytes
+    hidden: bool  # inside an HTML comment, so GitHub does not render it
+
+
+_HTML_COMMENT = re.compile(r"<!--.*?(?:-->|\Z)", re.S)
+
+
+def evidence_blocks(text: str) -> list[EvidenceBlock]:
     """The transcripts a ledger PR body inlines, as the exact bytes they stand for.
 
     Each is a fenced block opened by a line that is exactly ```` ```json ```` and
     closed by a line that is exactly ```` ``` ````; its bytes are the lines between
     the fences, each followed by a newline. CRLF in the text is read as LF (a copied
-    PR body may carry either; a canonical transcript has no CR).
+    PR body may carry either; a canonical transcript has no CR). A block inside an
+    HTML comment (an unterminated one runs to the end) is returned as ``hidden``.
     """
-    blocks, current = [], None
-    for line in text.replace("\r\n", "\n").split("\n"):
+    text = text.replace("\r\n", "\n")
+    comments = [m.span() for m in _HTML_COMMENT.finditer(text)]
+    blocks: list[EvidenceBlock] = []
+    current: list[str] | None = None
+    opened = offset = 0
+    for line in text.split("\n"):
         if current is None:
             if line == "```json":
-                current = []
+                current, opened = [], offset
         elif line == "```":
-            blocks.append("".join(f"{x}\n" for x in current).encode("utf-8"))
+            hidden = any(start <= opened < end for start, end in comments)
+            blocks.append(EvidenceBlock("".join(f"{x}\n" for x in current).encode("utf-8"), hidden))
             current = None
         else:
             current.append(line)
+        offset += len(line) + 1
     return blocks
 
 
@@ -563,3 +581,34 @@ def verify_evidence(ledger: Ledger, blocks: list[bytes]) -> list[tuple[str, str 
         differ = [f for f in Entry.__dataclass_fields__ if getattr(rebuilt, f) != getattr(entry, f)]
         results.append((digest, f"{entry.backend}/{entry.platform}: entry differs in {', '.join(differ)}" if differ else None))
     return results
+
+
+def audit_evidence(
+    ledger: Ledger, blocks: list[EvidenceBlock], required: list[Entry] | None = None
+) -> tuple[list[tuple[str, str | None]], list[str]]:
+    """Check a PR body's blocks: per-block results, then problems with the set as a whole.
+
+    Every shown block must verify (:func:`verify_evidence`); no block may be hidden
+    in an HTML comment or appear twice. With ``required`` (the entries the PR adds),
+    each of those must have exactly one verifying block, and no block may stand for
+    any other entry.
+    """
+    results = verify_evidence(ledger, [b.raw for b in blocks if not b.hidden])
+    problems: list[str] = []
+    seen: dict[str, int] = {}
+    for b in blocks:
+        digest = hashlib.sha256(b.raw).hexdigest()
+        seen[digest] = seen.get(digest, 0) + 1
+        if b.hidden:
+            problems.append(f"HIDDEN {digest}: a transcript block inside an HTML comment is not shown to reviewers")
+    problems += [f"DUPLICATE {d}: the same transcript appears {n} times" for d, n in seen.items() if n > 1]
+    if required is not None:
+        verified = {d for d, problem in results if problem is None}
+        wanted = {e.transcript_sha256 for e in required}
+        problems += [
+            f"MISSING {e.transcript_sha256}: the {e.backend}/{e.platform} entry added since the base has no "
+            "verifying transcript block"
+            for e in required if e.transcript_sha256 not in verified
+        ]
+        problems += [f"EXTRA {d}: not an entry added since the base" for d in sorted(verified - wanted)]
+    return results, problems

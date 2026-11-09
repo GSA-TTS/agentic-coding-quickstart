@@ -861,7 +861,9 @@ def test_a_real_harness_run_publishes_evidence_anyone_can_verify(tmp_path, monke
                          transcript)
     _title, body = host.pr_text(macos(), [result], head)
     assert not [x for x in local if x in body] and "Doe" not in body
-    assert verify_evidence(load_ledger(ledger), evidence_blocks(body)) == [(entry.transcript_sha256, None)]
+    blocks = evidence_blocks(body)
+    assert [b.hidden for b in blocks] == [False]
+    assert verify_evidence(load_ledger(ledger), [b.raw for b in blocks]) == [(entry.transcript_sha256, None)]
 
 
 def test_plan_refuses_a_refused_backend_version_before_running(tmp_path):
@@ -870,3 +872,10 @@ def test_plan_refuses_a_refused_backend_version_before_running(tmp_path):
     (root / "docs" / "qualification-ledger.json").write_text(json.dumps(ledger_doc()))
     with pytest.raises(pub.HostError, match="refused range"):
         host.plan(root, macos(), ["msb"], {"msb": "0.7.1"}, False, True)
+
+
+def test_an_unreadable_transcript_never_puts_its_path_in_the_pr_body(tmp_path):
+    secret_dir = tmp_path / "Users" / "Jane Doe" / "q"
+    r = host.Result("msb", "PASS", "", "RESULT PASS", secret_dir / "transcript.json")  # does not exist
+    body = "\n".join(host.transcript_evidence([r]))
+    assert "transcript unreadable" in body and "Jane" not in body and str(tmp_path) not in body

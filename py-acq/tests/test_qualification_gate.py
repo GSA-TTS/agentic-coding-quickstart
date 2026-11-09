@@ -847,8 +847,8 @@ def test_verify_evidence_reproduces_the_recorded_hash_from_the_published_block(t
 
     path, raw = _recorded(tmp_path, transcript())
     body = _body(raw)
-    assert evidence_blocks(body) == [raw]
-    assert evidence_blocks(body.replace("\n", "\r\n")) == [raw]  # a body copied with CRLF
+    assert [(b.raw, b.hidden) for b in evidence_blocks(body)] == [(raw, False)]
+    assert [b.raw for b in evidence_blocks(body.replace("\n", "\r\n"))] == [raw]  # a body copied with CRLF
     assert verify_evidence(load_ledger(path), [raw]) == [(hashlib.sha256(raw).hexdigest(), None)]
     (tmp_path / "body.md").write_text(body)
     assert gate.main(["--ledger", str(path), "verify-evidence", str(tmp_path / "body.md")]) == 0
@@ -919,3 +919,101 @@ def test_run_rejects_a_non_positive_attempt_count_with_a_usage_error(attempts):
     with pytest.raises(SystemExit) as exc:
         cli.main(["run", "--backend", "msb", "--attempts", attempts, "--", "true"])
     assert exc.value.code == 2
+
+
+
+# ---- verify-evidence --base: every added entry needs exactly one shown block ----
+
+
+def _git(repo, *args):
+    import subprocess
+
+    return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args], cwd=repo,
+                          check=True, capture_output=True, text=True).stdout.strip()
+
+
+def _pr(tmp_path, monkeypatch, *transcripts):
+    """A repo whose base commit has one recorded entry; the working ledger adds ``transcripts``."""
+    repo = tmp_path / "repo"
+    (repo / "docs").mkdir(parents=True)
+    ledger = repo / "docs" / "qualification-ledger.json"
+    ledger.write_text(json.dumps(doc()))
+    old = transcript()
+    old["attempts"][0]["recorded_at"] = "2026-11-01T00:00:00+00:00"
+    append_entry(ledger, entry_from_transcript(old, canon(old), oracle_digest=committed_oracle))
+    _git(tmp_path, "init", "-q", str(repo))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    base = _git(repo, "rev-parse", "HEAD")
+    raws = []
+    for t in transcripts:
+        raw = canon(t)
+        append_entry(ledger, entry_from_transcript(t, raw, oracle_digest=committed_oracle))
+        raws.append(raw)
+    monkeypatch.chdir(repo)
+    return base, canon(old), raws
+
+
+def _verify(tmp_path, body, base, capsys):
+    (tmp_path / "body.md").write_text(body)
+    rc = gate.main(["--ledger", "docs/qualification-ledger.json", "verify-evidence", f"--base={base}",
+                    str(tmp_path / "body.md")])
+    return rc, capsys.readouterr().out
+
+
+def _two():
+    a = transcript()
+    b = transcript(backend="sbx", backend_version="0.51.0")
+    b["attempts"][0]["commands"] = oracle_argv("sbx")
+    return a, b
+
+
+def test_verify_evidence_with_a_base_passes_when_every_added_entry_is_shown_once(tmp_path, monkeypatch, capsys):
+    base, _old, (a, b) = _pr(tmp_path, monkeypatch, *_two())
+    rc, out = _verify(tmp_path, _body(a) + _body(b), base, capsys)
+    assert rc == 0 and out.count("OK ") == 2
+
+
+def test_verify_evidence_reports_an_added_entry_with_no_block(tmp_path, monkeypatch, capsys):
+    # Without a base, a body that shows only one of two new entries verified "OK".
+    base, _old, (a, b) = _pr(tmp_path, monkeypatch, *_two())
+    rc, out = _verify(tmp_path, _body(a), base, capsys)
+    assert rc == 1 and f"MISSING {hashlib.sha256(b).hexdigest()}" in out and "sbx/macos-arm64" in out
+    rc, out = _verify(tmp_path, "no evidence at all", base, capsys)
+    assert rc == 1 and out.count("MISSING") == 2
+
+
+def test_verify_evidence_rejects_duplicate_and_hidden_blocks(tmp_path, monkeypatch, capsys):
+    base, _old, (a, b) = _pr(tmp_path, monkeypatch, *_two())
+    rc, out = _verify(tmp_path, _body(a) + _body(b) + _body(a), base, capsys)
+    assert rc == 1 and f"DUPLICATE {hashlib.sha256(a).hexdigest()}" in out
+    hidden = _body(a) + "<!--\n" + _body(b) + "-->\n"  # renders as nothing, so no reviewer sees it
+    rc, out = _verify(tmp_path, hidden, base, capsys)
+    assert rc == 1 and f"HIDDEN {hashlib.sha256(b).hexdigest()}" in out and "MISSING" in out
+    unterminated = _body(a) + "<!-- " + _body(b)
+    rc, out = _verify(tmp_path, unterminated, base, capsys)
+    assert rc == 1 and "HIDDEN" in out
+    rc, out = _verify(tmp_path, _body(a) + _body(b) + "<!--\n" + _body(a) + "-->\n", base, capsys)
+    assert rc == 1 and "HIDDEN" in out and "DUPLICATE" in out
+
+
+def test_verify_evidence_rejects_a_block_for_an_entry_the_pr_did_not_add(tmp_path, monkeypatch, capsys):
+    base, old, (a,) = _pr(tmp_path, monkeypatch, transcript())
+    rc, out = _verify(tmp_path, _body(a) + _body(old), base, capsys)
+    assert rc == 1 and f"EXTRA {hashlib.sha256(old).hexdigest()}" in out
+
+
+def test_verify_evidence_base_must_be_readable(tmp_path, monkeypatch, capsys):
+    _base, _old, (a,) = _pr(tmp_path, monkeypatch, transcript())
+    for bad in ("0" * 40, "--output=x"):
+        rc, _out = _verify(tmp_path, _body(a), bad, capsys)
+        assert rc == 2
+
+
+def test_verify_evidence_reads_stdin_as_utf8_bytes(tmp_path, monkeypatch, capsys):
+    import io
+
+    path, raw = _recorded(tmp_path, transcript())
+    body = ("café — " + _body(raw)).encode("utf-8")
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(body), encoding="latin-1"))
+    assert gate.main(["--ledger", str(path), "verify-evidence", "-"]) == 0
