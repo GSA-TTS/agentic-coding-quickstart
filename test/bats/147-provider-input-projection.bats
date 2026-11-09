@@ -1035,6 +1035,42 @@ EOF
   [ -d "$real_path" ]
 }
 
+# _walk_race_shim — put a `python3` first on PATH that runs acq's path walks
+# through walk-race-python.py, which lets a rival create the component named by
+# ACQ_TEST_WALK_RACE between the walk's lookup and its mkdir. One deterministic
+# pass stands in for two acq processes creating the same missing directory.
+_walk_race_shim() {
+  local real
+  real=$(command -v python3)
+  mkdir -p "$STUBDIR/walk-race"
+  printf '#!/bin/sh\nexec "%s" -I "%s" "$@"\n' "$real" "$BATS_TEST_DIRNAME/walk-race-python.py" \
+    > "$STUBDIR/walk-race/python3"
+  chmod +x "$STUBDIR/walk-race/python3"
+  export PATH="$STUBDIR/walk-race:$PATH"
+  export ACQ_TEST_WALK_RACE_MARK="$STUBDIR/walk-race/raced"
+}
+
+@test "safe_mkdir tolerates a rival creating a missing component mid-walk" {
+  local real_path="$STUBDIR/race/shared/leaf"
+  _walk_race_shim
+  ACQ_TEST_WALK_RACE=shared run _acq_provider_input_safe_mkdir "$real_path"
+  assert_success
+  assert_equal "$(cat "$ACQ_TEST_WALK_RACE_MARK")" shared
+  [ -d "$real_path" ]
+  [ ! -L "$STUBDIR/race/shared" ]
+}
+
+@test "safe_mkdir still rejects a symlink a rival plants mid-walk" {
+  local real_path="$STUBDIR/race-link/shared/leaf"
+  mkdir -p "$STUBDIR/race-link-target"
+  _walk_race_shim
+  ACQ_TEST_WALK_RACE=shared ACQ_TEST_WALK_RACE_LINK="$STUBDIR/race-link-target" \
+    run _acq_provider_input_safe_mkdir "$real_path"
+  assert_failure
+  assert_equal "$(cat "$ACQ_TEST_WALK_RACE_MARK")" shared
+  [ ! -e "$STUBDIR/race-link-target/leaf" ]
+}
+
 @test "safe_dir accepts an existing real path with no symlinks" {
   local real_path="$STUBDIR/safe_dir_real/p/q"
   mkdir -p "$real_path"
