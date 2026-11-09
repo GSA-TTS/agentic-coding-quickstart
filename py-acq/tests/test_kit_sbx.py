@@ -300,7 +300,7 @@ _IDENTITY_CASES = {
     "none": ({}, None),
     "env-only": ({"GIT_AUTHOR_NAME": "Jane O'Neil", "GIT_COMMITTER_EMAIL": "j@x.gov", "EMAIL": "-e@x.gov"}, None),
     "global-config": ({}, "[user]\n\tname = Ann: B #1\n\temail = ann@x.gov\n"),
-    "tab-skipped": ({"GIT_AUTHOR_NAME": "a\tb", "GIT_AUTHOR_EMAIL": "ok@x.gov"}, "[user]\n\tname = N\n"),
+    "tab-skipped": ({"GIT_AUTHOR_NAME": "a\tb", "GIT_AUTHOR_EMAIL": "ok@x.gov"}, "[user]\n\tname = Nora\n"),
 }
 
 
@@ -348,9 +348,8 @@ def test_kit_dirs_are_private_and_refuse_symlinks(monkeypatch, tmp_path):
         for d in (path.parent.parent, path.parent, path):
             assert stat.S_IMODE(d.stat().st_mode) == 0o700
         assert stat.S_IMODE((path / "spec.yaml").stat().st_mode) == 0o600
-    # Translating again replaces the earlier copy.
-    (path / "stale").write_text("x", encoding="utf-8")
-    assert not (kit_sbx.translated_kit(kit) / "stale").exists()
+    # The same content is published once and reused.
+    assert kit_sbx.translated_kit(kit) == path
     if POSIX:
         shutil.rmtree(tmp_path / "state" / kit_sbx.KIT_DIR_NAME)
         elsewhere = tmp_path / "elsewhere"
@@ -414,6 +413,10 @@ def _kit_flags(argv: list[str]) -> list[Path]:
 def _kit_names(argv: list[str]) -> list[str]:
     names = []
     for path in _kit_flags(argv):
+        if path.name.startswith("startup-barrier-"):
+            assert not path.exists()  # removed once sbx create has read it
+            names.append("acq-startup-barrier")
+            continue
         line = next(x for x in (path / "spec.yaml").read_text(encoding="utf-8").splitlines() if x.startswith("name: "))
         names.append(line[len("name: "):])
     return names
@@ -615,3 +618,208 @@ def test_kit_add_classification(monkeypatch):
         monkeypatch.setattr(sbx, "_run", fake(P(rc, err)))
         assert sbx.kit_add("box", "/k") == want
     assert sbx.kit_add("box", "") == sbx.KIT_ADD_FAILED
+
+
+# ---------------------------------------------------------------------------
+# Unconfirmed sandboxes are never left attachable.
+# ---------------------------------------------------------------------------
+
+
+def test_barrier_timeout_with_a_failed_rm_refuses_reattach(monkeypatch, tmp_path, capsys):
+    ws = _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_SBX_STUB_BARRIER", "stall")
+    monkeypatch.setenv(kit_sbx.BARRIER_TIMEOUT_ENV, "0")
+    monkeypatch.setenv("ACQ_SBX_STUB_FAIL", "rm")
+    rc, doc = _invoke(capsys, "--backend", "sbx", "create", "shell", str(ws), "--name", "stuck", "--json")
+    assert rc == 1
+    assert "could not be removed" in doc["error"]["message"]
+    assert doc["error"]["remediation"].startswith("run 'acq rm stuck'")
+    assert sbx.exists("stuck")
+    assert state.record_read("sbx", "stuck")["kits_unconfirmed"] is True
+    for argv in (("run", "stuck"), ("run", "shell", str(ws), "--name", "stuck"), ("exec", "stuck", "--", "true")):
+        rc, doc = _invoke(capsys, "--backend", "sbx", "--json", *argv)
+        assert rc == 1 and "never confirmed" in doc["error"]["message"], argv
+    monkeypatch.delenv("ACQ_SBX_STUB_FAIL")
+    rc, _ = _invoke(capsys, "--backend", "sbx", "rm", "stuck", "--json")
+    assert rc == 0 and state.record_read("sbx", "stuck") is None
+
+
+@pytest.mark.parametrize("rm_fails", [False, True])
+def test_interrupted_barrier_wait_leaves_nothing_attachable(monkeypatch, tmp_path, capsys, rm_fails):
+    ws = _env(monkeypatch, tmp_path)
+
+    def interrupted(_name, _token):
+        if rm_fails:
+            monkeypatch.setenv("ACQ_SBX_STUB_FAIL", "rm")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(kit_sbx, "wait_startup_barrier", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        cli.main(["--backend", "sbx", "create", "shell", str(ws), "--name", "intr", "--json"])
+    capsys.readouterr()
+    monkeypatch.delenv("ACQ_SBX_STUB_FAIL", raising=False)
+    record = state.record_read("sbx", "intr")
+    if rm_fails:
+        assert sbx.exists("intr") and record["kits_unconfirmed"] is True
+        rc, doc = _invoke(capsys, "--backend", "sbx", "run", "intr", "--json")
+        assert rc == 1 and "never confirmed" in doc["error"]["message"]
+    else:
+        assert not sbx.exists("intr") and record is None
+
+
+def test_exec_ready_timeout_with_a_failed_rm_keeps_the_mark(monkeypatch, tmp_path, capsys):
+    ws = _env(monkeypatch, tmp_path)
+    monkeypatch.setattr(sbx, "exec_ready", lambda _name: False)
+    monkeypatch.setenv("ACQ_SBX_READY_TIMEOUT", "0")
+    monkeypatch.setenv("ACQ_SBX_STUB_FAIL", "rm")
+    rc, doc = _invoke(capsys, "--backend", "sbx", "create", "shell", str(ws), "--name", "nr", "--json")
+    assert rc == 1 and "could not be removed" in doc["error"]["message"]
+    assert state.record_read("sbx", "nr")["kits_unconfirmed"] is True
+
+
+def test_a_confirmed_create_clears_the_mark(monkeypatch, tmp_path, capsys):
+    ws = _env(monkeypatch, tmp_path)
+    rc, _ = _invoke(capsys, "--backend", "sbx", "create", "shell", str(ws), "--name", "ok", "--json")
+    assert rc == 0
+    assert "kits_unconfirmed" not in state.record_read("sbx", "ok")
+
+
+# ---------------------------------------------------------------------------
+# Shared kit directories: concurrency, the barrier kit, pruning.
+# ---------------------------------------------------------------------------
+
+
+def test_concurrent_translations_never_remove_a_live_directory(monkeypatch, tmp_path):
+    import threading
+
+    monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
+    kit_set = [kit_sbx.bundled_kit(name) for name in kitspec.bundle_kit_names()]
+    problems: list[str] = []
+    seen: set[Path] = set()
+
+    def worker():
+        for _ in range(8):
+            for kit in kit_set:
+                try:
+                    path = kit_sbx.translated_kit(kit)
+                except Exception as exc:  # noqa: BLE001 - every failure is a finding
+                    problems.append(repr(exc))
+                    continue
+                seen.add(path)
+                if not (path / "spec.yaml").is_file():
+                    problems.append(f"{path} vanished")
+
+    threads = [threading.Thread(target=worker) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert problems == []
+    assert len(seen) == len(kit_set)  # one directory per kit, named by content
+    assert all((p / "spec.yaml").is_file() for p in seen)
+    leftovers = [e.name for e in (tmp_path / "state" / kit_sbx.KIT_DIR_NAME / "v2").iterdir() if e.name.startswith(".")]
+    assert leftovers == []
+
+
+def test_content_names_follow_the_content(monkeypatch, tmp_path):
+    monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
+    kit = kit_sbx.bundled_kit("opencode")
+    first = kit_sbx.translated_kit(kit)
+    assert kit_sbx.translated_kit(kit) == first
+    other = kit_sbx.Kit(kit.name, kit.role, kitspec.parse_spec(b'schemaVersion: "hybrid/v1"\nname: opencode\n',
+                                                                kit_dir=tmp_path), kit.ref)
+    assert kit_sbx.translated_kit(other) != first and first.is_dir()
+
+
+def test_barrier_kit_is_removed_after_create_and_stale_kits_pruned(monkeypatch, tmp_path, capsys):
+    ws = _env(monkeypatch, tmp_path)
+    root = tmp_path / "state" / kit_sbx.KIT_DIR_NAME
+    rc, _ = _invoke(capsys, "--backend", "sbx", "create", "shell", str(ws), "--name", "b1", "--json")
+    assert rc == 0
+    assert not [e for e in (root / "generated").iterdir() if e.name.startswith("startup-barrier-")]
+    stale = root / "v2" / "old-kit.0123456789abcdef"
+    stale.mkdir()
+    old = 1_000_000_000
+    os.utime(stale, (old, old))
+    live = sorted((root / "v2").iterdir())
+    for path in live:
+        if path != stale:
+            os.utime(path, (old, old))  # old but in use: refreshed and kept
+    rc, _ = _invoke(capsys, "--backend", "sbx", "create", "shell", str(ws), "--name", "b2", "--json")
+    assert rc == 0
+    assert not stale.exists()
+    assert all(p.exists() for p in live if p != stale)
+
+
+# ---------------------------------------------------------------------------
+# Small units.
+# ---------------------------------------------------------------------------
+
+
+def test_private_dir_refuses_another_owner(monkeypatch, tmp_path):
+    monkeypatch.setattr(os, "getuid", lambda: os.lstat(tmp_path).st_uid + 1, raising=False)
+    with pytest.raises(kit_sbx.KitTranslateError, match="owned by another user"):
+        kit_sbx._private_dir(tmp_path / "kits")
+
+
+@pytest.mark.parametrize("value", ["a\rb", "a\nb", "a\tb", "a\x85b", "a b", "a b", "a\x0bb"])
+def test_identity_filter_drops_line_breaks(monkeypatch, value):
+    assert not kit_sbx._safe_identity(value)
+    monkeypatch.setattr(kit_sbx, "_session", lambda: type("S", (), {
+        "host_git_identity_env": staticmethod(lambda: [f"GIT_AUTHOR_NAME={value}", "EMAIL=e@x.gov"]),
+        "_host_git_config": staticmethod(lambda key: value),
+    }))
+    built = kit_sbx.git_identity_spec(
+        [r for r in kit_sbx._session().host_git_identity_env() if kit_sbx._safe_identity(r.partition("=")[2])],
+        kit_sbx.git_global_config_env())
+    assert built is not None and value not in built[1] and "    EMAIL: 'e@x.gov'\n" in built[1]
+    assert "GIT_AUTHOR_NAME" not in built[1] and "ACQ_GIT_USER" not in built[1]
+
+
+@pytest.mark.parametrize("value", ["true", "False", "yes", "off", "~", "null", "123", "0x1F", "1e3", "-2.5",
+                                   ".inf", "2026-11-09", "12:30"])
+def test_identity_values_yaml_would_coerce_are_quoted(value):
+    _slug, text = kit_sbx.git_identity_spec([f"GIT_AUTHOR_NAME={value}"], [])
+    assert f"    GIT_AUTHOR_NAME: '{value}'\n" in text
+
+
+def test_identity_plain_values_stay_bare():
+    _slug, text = kit_sbx.git_identity_spec(["GIT_AUTHOR_NAME=Jane Doe", "GIT_COMMITTER_NAME=Nora"], [])
+    assert "    GIT_AUTHOR_NAME: Jane Doe\n" in text and "    GIT_COMMITTER_NAME: Nora\n" in text
+
+
+def test_clear_instance_state(monkeypatch, tmp_path):
+    monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
+    for key in ("builtin-kits", "extra-kits", "generic-opencode", "install-1", "keep-me"):
+        kit_sbx.hc_write("box", key, "x")
+    kit_sbx.clear_instance_state("box")
+    assert sorted(p.name for p in kit_sbx.host_config_dir("box").iterdir()) == ["keep-me"]
+    kit_sbx.clear_instance_state("absent")  # nothing to clear
+
+
+def test_exec_capture_honours_the_exit_code(monkeypatch):
+    class P:
+        def __init__(self, rc, out):
+            self.returncode, self.stdout, self.stderr = rc, out, ""
+
+    monkeypatch.setattr(sbx, "_run", lambda argv, **kw: P(1, "ready\n"))
+    assert sbx.exec_capture("box", "x") is None
+    monkeypatch.setattr(sbx, "_run", lambda argv, **kw: P(0, "ready\r\n"))
+    assert sbx.exec_capture("box", "x") == "ready\n"
+
+    def slow(argv, **kw):
+        raise subprocess.TimeoutExpired(argv, 1)
+
+    monkeypatch.setattr(sbx, "_run", slow)
+    assert sbx.exec_capture("box", "x") is None
+
+
+def test_force_refresh_uses_roles():
+    kits_ = [kit_sbx.bundled_kit(n, r) for n, r in (("zscaler-ca-certificate", "support"),
+                                                     ("agentic-coding-playbook", "support"),
+                                                     ("git-ssh-sign", "support"), ("opencode", "agent"))]
+    refs = [(k.ref, k.role, k.name) for k in kits_]
+    # No provider kit: Bash's positional count would skip the agent kit.
+    selection = kitspec.KitSelection(tuple(kitspec.SelectedKit(*r) for r in refs), 3, 4, None)
+    out = kit_sbx._force_refresh_kits(kits_, selection)
+    assert [(k.name, label) for k, label in out] == [("git-ssh-sign", "git-ssh-sign kit"), ("opencode", "agent kit")]

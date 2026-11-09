@@ -344,7 +344,11 @@ On msb, acq applies each kit itself (`src/acq_py/kit_msb.py`). On sbx,
 `src/acq_py/kit_sbx.py` translates each kit into an sbx-v2 kit directory under
 `<state>/sbx-kits/` exactly as Bash `kit_translate_to_sbx` does, adds the host
 git identity kit and a startup-barrier kit, and passes them all to
-`sbx create --kit`; create then waits for the barrier. `acq kit apply` and
+`sbx create --kit`; create then waits for the barrier. Until it is seen the
+state record says `kits_unconfirmed`, and every verb that attaches refuses the
+sandbox, so a create that times out or is interrupted and cannot remove the
+sandbox never leaves it attachable. Translated kits are named by content and
+shared between creates; unused ones are pruned after a week. `acq kit apply` and
 `acq kit update` on sbx use `sbx kit add`, which sbx 0.38 and later refuse for
 kits with startup commands, so those report that the sandbox must be recreated.
 `py-acq/tests/test_kit_sbx.py` compares the translator's output with Bash's,

@@ -25,10 +25,15 @@ Generated kit directories live under the acq state directory, in private
 a directory, or (on POSIX) owned by someone else is refused rather than
 followed. A kit's ``files/`` tree is checked with
 :func:`kitspec.tree_symlinks_within` before it is copied, as in Bash.
+Translated kits are named by their content and only ever moved into place when
+absent, so concurrent creates share them without removing one another's; the
+per-create barrier kit is removed once ``sbx create`` has read it, and unused
+directories are pruned after :data:`STALE_AGE_S`.
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import secrets
@@ -52,6 +57,7 @@ BARRIER_TIMEOUT_ENV = "ACQ_SBX_STARTUP_BARRIER_TIMEOUT"
 DEFAULT_BARRIER_TIMEOUT_S = 60.0
 BARRIER_POLL_S = 2.0
 FORCE_REAPPLY_ENV = "ACQ_FORCE_KIT_REAPPLY"
+STALE_AGE_S = 7 * 24 * 3600  # generated kit directories unused for this long are pruned
 PROVIDER_RECORD_NAME = "usai-provider"  # Bash USAI_PROVIDER_KIT_NAME, the record key
 OPENCODE_CONFIG_LINK_FIX = (
     'f="$HOME/.config/opencode/opencode.jsonc"; if [ -L "$f" ] && [ ! -e "$f" ]; then rm -f "$f"; fi'
@@ -65,6 +71,13 @@ _KEY = re.compile(r"[A-Za-z0-9._-]+")
 _SLUG_BYTES = frozenset(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-")
 _BARRIER_TOKEN = re.compile(r"[A-Za-z0-9-]+")
 _YAML_SPECIAL = frozenset(":{}[]#&*!|>'\"%@`")
+# Plain scalars YAML 1.1 or 1.2 would read as something other than a string.
+_YAML_COERCIBLE = re.compile(
+    r"~|null|Null|NULL|y|Y|yes|Yes|YES|n|N|no|No|NO|true|True|TRUE|false|False|FALSE|on|On|ON|off|Off|OFF"
+    r"|=|<<|[-+]?(0b[01_]+|0o?[0-7_]+|0x[0-9a-fA-F_]+|[0-9][0-9_]*(:[0-5]?[0-9])*)"
+    r"|[-+]?(\.[0-9_]+|[0-9][0-9_]*(\.[0-9_]*)?)([eE][-+]?[0-9]+)?|[-+]?\.(inf|Inf|INF)|\.(nan|NaN|NAN)"
+    r"|[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}([Tt ].*)?"
+)
 
 
 class KitTranslateError(Exception):
@@ -333,45 +346,80 @@ def _remove_tree(path: Path) -> None:
         shutil.rmtree(path)
 
 
-def _publish(parent: Path, name: str, fill: Callable[[Path], None]) -> Path:
-    """Build a directory in a private temporary one, then move it to ``parent/name``.
+def _valid_kit_dir(path: Path) -> bool:
+    return path.is_dir() and not path.is_symlink() and (path / "spec.yaml").is_file()
 
-    ``fill(tmp)`` writes the content. A previous directory of that name is
-    replaced, so a stale translation never survives a bundle change. Raises
-    :class:`KitTranslateError`.
+
+def _tree_digest(root: Path) -> str:
+    """A digest of every name, type, mode and byte under ``root`` (symlinks by target)."""
+    digest = hashlib.sha256()
+    for base, dirs, files in sorted(os.walk(root)):
+        dirs.sort()
+        for name in sorted([*dirs, *files]):
+            path = Path(base) / name
+            st = os.lstat(path)
+            digest.update(f"{path.relative_to(root).as_posix()}\0{stat.S_IFMT(st.st_mode)}\0"
+                          f"{stat.S_IMODE(st.st_mode) & 0o777}\0".encode())
+            if stat.S_ISLNK(st.st_mode):
+                digest.update(os.readlink(path).encode())
+            elif stat.S_ISREG(st.st_mode):
+                digest.update(path.read_bytes())
+            digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _publish(parent: Path, stem: str, fill: Callable[[Path], None], *, by_content: bool = False) -> Path:
+    """Build a kit directory in a private temporary one, then move it to ``parent/name`` if absent.
+
+    ``name`` is ``stem``, or ``stem.<digest>`` with ``by_content``, so the
+    same name always means the same content. An existing valid directory is
+    reused and never removed: another create may be handing it to sbx right
+    now. Raises :class:`KitTranslateError`.
     """
-    dest = parent / name
     try:
-        tmp = Path(tempfile.mkdtemp(prefix=f".{name[:40]}.", dir=parent))
+        tmp = Path(tempfile.mkdtemp(prefix=f".{stem[:40]}.", dir=parent))
     except OSError as exc:
         raise KitTranslateError(f"could not create a kit directory in {str(parent)!r}: {exc.strerror or exc}") from exc
     try:
         fill(tmp)
-        for _attempt in range(2):
+        dest = parent / (f"{stem}.{_tree_digest(tmp)[:16]}" if by_content else stem)
+        if not _valid_kit_dir(dest):
+            if dest.is_symlink() or dest.is_file():
+                dest.unlink()  # never a kit acq made: nothing can be using it
             try:
-                _remove_tree(dest)
                 os.rename(tmp, dest)
-                return dest
             except OSError:
-                continue
-        raise KitTranslateError(f"could not place the generated kit at {str(dest)!r}")
+                if not _valid_kit_dir(dest):  # not a concurrent create's copy
+                    raise
+    except OSError as exc:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise KitTranslateError(f"could not place a generated kit in {str(parent)!r}: {exc.strerror or exc}") from exc
     except BaseException:
         shutil.rmtree(tmp, ignore_errors=True)
         raise
+    shutil.rmtree(tmp, ignore_errors=True)  # gone already when it was renamed into place
+    _touch(dest)
+    return dest
+
+
+def _touch(path: Path) -> None:
+    try:
+        os.utime(path)
+    except OSError:
+        pass
 
 
 def _slug(kit: Kit) -> str:
-    """The kit's directory name: its sanitized name and the ``cksum`` of its ref.
+    """The kit's sanitized name; :func:`_publish` appends its content digest.
 
     Bash names the directory after the whole sanitized ref; this short form
     keeps the deepest payload path well inside the Windows path limit.
     """
-    name = "".join(chr(b) if b in _SLUG_BYTES else "_" for b in kit.name.encode("utf-8"))
-    return f"{name}.{lock.posix_cksum(kit.ref.encode('utf-8'))}"
+    return "".join(chr(b) if b in _SLUG_BYTES else "_" for b in kit.name.encode("utf-8"))
 
 
 def translated_kit(kit: Kit) -> Path:
-    """``_acq_sbx_translate_kit`` for a bundled kit: its sbx-v2 directory (``v2/<name>.<cksum>``).
+    """``_acq_sbx_translate_kit`` for a bundled kit: its sbx-v2 directory (``v2/<name>.<digest>``).
 
     Raises :class:`KitTranslateError`; the caller must not create the sandbox.
     """
@@ -382,7 +430,7 @@ def translated_kit(kit: Kit) -> Path:
     def fill(tmp: Path) -> None:
         warnings.extend(translate(kit.spec, tmp))
 
-    path = _publish(_subdir("v2"), _slug(kit), fill)
+    path = _publish(_subdir("v2"), _slug(kit), fill, by_content=True)
     for line in warnings:
         _warn(line)
     return path
@@ -394,7 +442,18 @@ def translated_kit(kit: Kit) -> Path:
 
 
 def _safe_identity(value: str) -> bool:
-    return "\n" not in value and "\t" not in value
+    """One line and no tab: CR, NEL, LS, PS and the other line breaks would split the YAML value."""
+    return "\t" not in value and value.splitlines() == [value]
+
+
+def _identity_value(value: str) -> str:
+    """:func:`yaml_quote`, and single quotes too for a value YAML would read as a bool, null or number.
+
+    Bash emits such a value bare (``user.name = true`` becomes a boolean), so
+    here the Python kit deliberately differs from Bash's.
+    """
+    quoted = yaml_quote(value)
+    return f"'{value}'" if quoted == value and _YAML_COERCIBLE.fullmatch(value) else quoted
 
 
 def _session():
@@ -436,7 +495,7 @@ def git_identity_spec(env_records: list[str], config_records: list[str]) -> tupl
              "environment:", "  variables:"]
     for rec in records:
         key, _, value = rec.partition("=")
-        lines.append(f"    {key}: {yaml_quote(value)}")
+        lines.append(f"    {key}: {_identity_value(value)}")
     if config_records:
         lines += [*_GIT_IDENTITY_INSTALL, f"      description: {yaml_quote(_GIT_IDENTITY_DESCRIPTION)}"]
     return slug, "".join(f"{line}\n" for line in lines)
@@ -444,7 +503,8 @@ def git_identity_spec(env_records: list[str], config_records: list[str]) -> tupl
 
 def git_identity_kit() -> Path | None:
     """The host git identity kit's directory (``generated/git-identity-<cksum>``), or ``None``."""
-    built = git_identity_spec(_session().host_git_identity_env(), git_global_config_env())
+    env = [r for r in _session().host_git_identity_env() if _safe_identity(r.partition("=")[2])]
+    built = git_identity_spec(env, git_global_config_env())
     if built is None:
         return None
     slug, text = built
@@ -485,10 +545,41 @@ def startup_barrier_kit(token: str) -> Path:
 
 @dataclass(frozen=True)
 class CreateKits:
-    """The ``sbx create`` kit flags, and the token the startup barrier kit writes."""
+    """The ``sbx create`` kit flags, the token the startup barrier kit writes, and that kit's directory."""
 
     flags: list[str]
     barrier_token: str
+    barrier_dir: Path
+
+
+def discard_barrier(prepared: CreateKits) -> None:
+    """Remove this create's barrier kit once ``sbx create`` has read it (best-effort)."""
+    try:
+        _remove_tree(prepared.barrier_dir)
+    except OSError:
+        pass
+
+
+def prune_stale(keep: Iterable[Path], *, now: float | None = None) -> None:
+    """Remove generated kit directories unused for :data:`STALE_AGE_S` (best-effort).
+
+    Directories this create uses are kept, and a reused one has its time
+    refreshed, so only kits from an older bundle, an old identity or a crashed
+    create are pruned.
+    """
+    cutoff = (time.time() if now is None else now) - STALE_AGE_S
+    kept = {Path(p) for p in keep}
+    for sub in ("v2", "generated"):
+        try:
+            entries = list(_subdir(sub).iterdir())
+        except (KitTranslateError, OSError):
+            continue
+        for entry in entries:
+            try:
+                if entry not in kept and os.lstat(entry).st_mtime < cutoff:
+                    _remove_tree(entry)
+            except OSError:
+                pass
 
 
 def prepare(kits: Iterable[Kit]) -> CreateKits:
@@ -504,10 +595,12 @@ def prepare(kits: Iterable[Kit]) -> CreateKits:
         if identity is not None:
             flags += ["--kit", str(identity)]
         token = new_barrier_token()
-        flags += ["--kit", str(startup_barrier_kit(token))]
+        barrier = startup_barrier_kit(token)
+        flags += ["--kit", str(barrier)]
     except OSError as exc:
         raise KitTranslateError(f"could not prepare the sandbox's kits: {exc.strerror or exc}") from exc
-    return CreateKits(flags, token)
+    prune_stale(Path(flags[i + 1]) for i in range(0, len(flags), 2))
+    return CreateKits(flags, token, barrier)
 
 
 # ---------------------------------------------------------------------------
@@ -760,21 +853,26 @@ def _builtin_steps(kits: list[Kit], selection: kitspec.KitSelection) -> list[tup
 
 
 def _force_refresh_kits(kits: list[Kit], selection: kitspec.KitSelection) -> list[tuple[Kit, str]]:
-    """On a forced reapply: git-ssh-sign, then the remaining built-in support and agent kits."""
-    handled = len(("zscaler-ca-certificate", PROVIDER_RECORD_NAME, "agentic-coding-playbook", "git-ssh-sign"))
+    """On a forced reapply: git-ssh-sign, then every other built-in support, provider and agent kit.
+
+    The CA, playbook and first provider kit were handled by the steps before.
+    Bash picks the rest by position, assuming exactly one provider kit; here the
+    selection's roles decide, so no provider kit, or several, still refresh
+    every kit exactly once.
+    """
     by_ref = {k.ref: k for k in kits}
+    handled = {_builtin_ref("zscaler-ca-certificate"), _builtin_ref("agentic-coding-playbook"),
+               _builtin_ref("git-ssh-sign"), _provider_ref(selection)}
     out = []
     signing = by_ref.get(_builtin_ref("git-ssh-sign"))
     if signing is not None:
         out.append((signing, "git-ssh-sign kit"))
-    for idx, sel in enumerate(selection.kits, start=1):
-        if idx <= handled:
-            continue
-        if idx > selection.builtin_count:
-            break
+    for sel in selection.kits[:selection.builtin_count]:
         kit = by_ref.get(sel.ref)
-        if kit is not None:
-            out.append((kit, "support kit" if idx <= selection.builtin_support_count else "agent kit"))
+        if kit is None or sel.ref in handled:
+            continue
+        handled.add(sel.ref)
+        out.append((kit, "agent kit" if sel.role == "agent" else "support kit"))
     return out
 
 

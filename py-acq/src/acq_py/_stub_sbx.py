@@ -260,18 +260,21 @@ def _kit_dirs(args: list[str]) -> list[str]:
     return [args[i + 1] for i, a in enumerate(args[:-1]) if a == "--kit"]
 
 
+def _barrier_tokens(kit_dirs: list[str]) -> list[str]:
+    """The tokens the kits' startup commands write to the barrier file (read at create, as sbx does)."""
+    tokens = []
+    for kit_dir in kit_dirs:
+        for line in (_kit_spec(kit_dir) or "").splitlines():
+            if BARRIER_FILE in line and line.count("'") >= 4:
+                tokens.append(line.split("'")[-2])
+    return tokens
+
+
 def _barrier_ready(name: str, script: str) -> bool:
-    """A barrier probe is satisfied when one of the sandbox's kits writes the token it tests for."""
+    """A barrier probe is satisfied when one of the sandbox's kits wrote the token it tests for."""
     if BARRIER_FILE not in script or os.environ.get(BARRIER_ENV) == "stall":
         return False
-    for kit_dir in _load_kits().get(name, []):
-        spec = _kit_spec(kit_dir) or ""
-        for line in spec.splitlines():
-            if BARRIER_FILE in line and "'" in line:
-                token = line.split("'")[-2] if line.count("'") >= 4 else ""
-                if token and f"= '{token}'" in script:
-                    return True
-    return False
+    return any(f"= '{token}'" in script for token in _load_kits().get(f"{name}#barrier", []))
 
 
 def _kit_add(args: list[str], catalog: dict[str, str]) -> int:
@@ -640,6 +643,7 @@ def main(argv: list[str]) -> int:
         _save(catalog)
         kits = _load_kits()
         kits[name] = kit_dirs
+        kits[f"{name}#barrier"] = _barrier_tokens(kit_dirs)
         _save_kits(kits)
         return 0
 
