@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "id": "cli/usai-rotate-sbx",
-  "oracle": "ADR-0012 / ADR-0008 key-rotate on sbx: rotation stores the new key and re-sets every custom secret that carries it with `secret set-custom --placeholder P --value-stdin`, keeping each placeholder (the global entry and the sandbox-scoped one, reported as refed); the value goes only on stdin (the stub refuses an argv --value) and the driver fails the vector if it appears in any output",
+  "oracle": "ADR-0012 / ADR-0008 key-rotate on sbx: rotation stores the new key and re-sets every custom secret that carries it with `secret set-custom --placeholder P --value-stdin`, keeping each placeholder (the sandbox-scoped one reported as refed, the global entry as global: updated); the value goes only on stdin (the stub refuses an argv --value) and the driver fails the vector if it appears in any output",
   "tier": 1,
   "backend": null,
   "platform": "any",
@@ -61,6 +61,7 @@
           "backends": [
             {
               "backend": "sbx",
+              "global": "updated",
               "refed": [
                 "rot-a"
               ],

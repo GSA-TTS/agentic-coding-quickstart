@@ -1822,8 +1822,11 @@ def github_scope(sandbox: str, value: str) -> None:
 # reads the key back from the store exactly as ``secret set -g`` re-feeds it.
 
 
-def rotate_preflight(*, primary: bool = True) -> None:
-    """Refuse a rotation msb could never deliver, before anything is stored."""
+def rotate_preflight(*, primary: bool = True) -> dict | None:
+    """Refuse a rotation msb could never deliver, before anything is stored.
+
+    Returns None: unlike sbx, msb has no listing of its own to read here, so
+    it never reports itself as not re-fed at this stage."""
     del primary  # the same on msb whether it is the active backend or not
     if service_binding(provider_creds.USAI_PROVIDER_ID) is None:
         raise MsbError(
@@ -1831,25 +1834,51 @@ def rotate_preflight(*, primary: bool = True) -> None:
             "the USAi key has no usable msb binding (its recorded endpoint or provider pin is invalid)",
             "check it with 'acq secret ls -g' and 'acq provider-credential ls'; nothing was changed",
         )
+    return None
+
+
+def _rotate_listed_names() -> set[str] | None:
+    """The sandboxes ``msb list -q`` names, or None when that cannot be trusted.
+
+    Used only for an msb below acq's floor, to tell a binding record left by a
+    sandbox deleted outside acq from one whose sandbox still exists. The list
+    is read-only and bounded; it counts only when it succeeds and every line is
+    a plain sandbox name, so an output in another format (a table, say) is not
+    mistaken for a list that leaves out a sandbox holding the key.
+    """
+    try:
+        proc = _run(["list", "-q"], timeout=timeouts.rotate_timeout_s())
+    except (MsbError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    names = {line.strip() for line in proc.stdout.splitlines() if line.strip()}
+    return names if all(secretstore.name_ok(name) for name in names) else None
 
 
 def rotate_holds_key() -> bool | None:
-    """Whether any sandbox acq recorded holds the USAi key, read from acq's own
-    binding records without running msb (which may be below acq's floor).
-    None when a record cannot be read."""
+    """Whether a sandbox acq recorded holds the USAi key, read from acq's own
+    binding records (msb may be below acq's floor, so acq does not drive it).
+    A record whose sandbox ``msb list`` no longer names (deleted outside acq)
+    is ignored; when the list cannot be read, every record counts. None when
+    a record cannot be read."""
     directory = state.state_dir() / "msb-secret-bindings"
     try:
         records = sorted(directory.glob("*.json"))
         docs = [json.loads(path.read_text(encoding="utf-8")) for path in records]
     except (OSError, ValueError):
         return None
+    holders: list[object] = []
     for doc in docs:
         bindings = doc.get("bindings") if isinstance(doc, dict) else None
         if not isinstance(bindings, dict):
             return None
         if any(isinstance(e, dict) and e.get("service") == provider_creds.USAI_PROVIDER_ID for e in bindings.values()):
-            return True
-    return False
+            holders.append(doc.get("sandbox"))
+    if not holders:
+        return False
+    listed = _rotate_listed_names()
+    return listed is None or any(not isinstance(name, str) or name in listed for name in holders)
 
 
 def _rotate_one(service: str, sandbox: str) -> str | None:

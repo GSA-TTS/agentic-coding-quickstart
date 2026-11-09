@@ -181,9 +181,11 @@ def capability_record(version: str | None = None) -> dict:
 # Lifecycle verbs.
 # ---------------------------------------------------------------------------
 
-def list_names() -> list[str] | None:
-    """Return sandbox names (one per line), or ``None`` if ``sbx ls -q`` failed."""
-    proc = _run(["ls", "-q"])
+def list_names(*, timeout: float | None = None) -> list[str] | None:
+    """Return sandbox names (one per line), or ``None`` if ``sbx ls -q`` failed.
+
+    With a ``timeout``, a call that outlasts it raises ``subprocess.TimeoutExpired``."""
+    proc = _run(["ls", "-q"], timeout=timeout)
     if proc.returncode != 0:
         return None
     return [line for line in proc.stdout.splitlines() if line]
@@ -547,7 +549,7 @@ def _entry_from(table: str, entry: object) -> _Entry:
     return _Entry(table, scope, key, placeholder if isinstance(placeholder, str) else "", targets)
 
 
-def _read_listing() -> list[_Entry]:
+def _read_listing(*, timeout: float | None = None) -> list[_Entry]:
     """Run ``sbx secret ls --json`` and parse both of its tables.
 
     The real ``sbx secret ls --json`` returns an OBJECT, not a list:
@@ -561,8 +563,9 @@ def _read_listing() -> list[_Entry]:
     In both, the value is never present. An inspect that *fails* or returns
     unparseable/wrong-shape output raises :class:`SbxError` with
     ``secret_unreadable`` (ADR-0038m §48 drops "inspection-failure-as-empty").
+    With a ``timeout``, a call that outlasts it raises ``subprocess.TimeoutExpired``.
     """
-    proc = _run(["secret", "ls", "--json"])
+    proc = _run(["secret", "ls", "--json"], timeout=timeout)
     if proc.returncode != 0:
         raise SbxError(
             errors.SECRET_UNREADABLE,
@@ -605,12 +608,13 @@ class _Scopes:
     a ``"global"`` label as ambiguous.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, timeout: float | None = None) -> None:
         self._global_sandbox: bool | None = None
+        self._timeout = timeout
 
     def _global_sandbox_exists(self) -> bool:
         if self._global_sandbox is None:
-            names = list_names()
+            names = list_names(timeout=self._timeout)
             self._global_sandbox = names is None or _GLOBAL_LABEL in names
         return self._global_sandbox
 
@@ -1101,19 +1105,45 @@ def _rotate_route() -> tuple[list[str], str]:
     return hosts.split(","), env
 
 
-def _rotate_plan(hosts: list[str], env: str) -> tuple[list[_Entry], list[_Entry]]:
-    """``(global rows, sandbox rows)``: the custom secrets that carry the USAi
-    key for ``env`` and ``hosts``. Refuses, before anything changes, a listing
-    acq cannot act on safely: an ambiguous ``global`` label, a row without a
-    usable placeholder, or more than one global row (acq cannot tell which one
-    the sandboxes were injected with)."""
-    envs: _Envs = {env: {_host_set(hosts)}}
-    scopes = _Scopes()
+def _rotate_timed_out(what: str, budget: float) -> SbxError:
+    """A rotation's sbx call that outlasted its budget. Names the call, never a value."""
+    return SbxError(
+        errors.TIMEOUT,
+        f"'{what}' timed out after {budget:g}s",
+        f"check that sbx responds (it may be waiting on 'sbx login'); set {timeouts.ROTATE_TIMEOUT_ENV} "
+        "to a larger number of seconds if it is only slow",
+    )
+
+
+def _rotate_listing(budget: float) -> list[_Entry]:
+    """``sbx secret ls --json`` for a rotation, bounded by ``budget`` seconds."""
+    try:
+        return _read_listing(timeout=budget)
+    except subprocess.TimeoutExpired:
+        raise _rotate_timed_out("sbx secret ls", budget) from None
+
+
+def _rotate_envs(hosts: list[str], env: str) -> _Envs:
+    """The custom secrets that carry the USAi key: ``env`` bound to ``hosts``."""
+    return {env: {_host_set(hosts)}}
+
+
+def _rotate_plan(hosts: list[str], env: str, listing: list[_Entry], budget: float) -> tuple[list[_Entry], list[_Entry]]:
+    """``(global rows, sandbox rows)``: the custom secrets in ``listing`` that
+    carry the USAi key for ``env`` and ``hosts``. Refuses, before anything
+    changes, a listing acq cannot act on safely: an ambiguous ``global`` label,
+    a row without a usable placeholder, or more than one global row (acq cannot
+    tell which one the sandboxes were injected with)."""
+    envs = _rotate_envs(hosts, env)
+    scopes = _Scopes(timeout=budget)
     rows: tuple[list[_Entry], list[_Entry]] = ([], [])
-    for entry in _read_listing():
+    for entry in listing:
         if entry.table != "custom" or not _custom_hit(entry, envs):
             continue
-        is_global = scopes.match(entry.label, _GLOBAL_SCOPE)
+        try:
+            is_global = scopes.match(entry.label, _GLOBAL_SCOPE)
+        except subprocess.TimeoutExpired:
+            raise _rotate_timed_out("sbx ls", budget) from None
         if is_global is None:
             raise _ambiguous(provider_creds.USAI_PROVIDER_ID)
         if not entry.placeholder or entry.placeholder.startswith("-"):
@@ -1131,53 +1161,96 @@ def _rotate_plan(hosts: list[str], env: str) -> tuple[list[_Entry], list[_Entry]
     return rows
 
 
-def rotate_preflight(*, primary: bool = True) -> None:
+_UNLISTED_REMEDIATION = (
+    "once 'sbx secret ls --json' works again, re-run 'acq usai-rotate-api-key' with the same key "
+    "to re-feed the sbx sandboxes"
+)
+
+
+def rotate_preflight(*, primary: bool = True) -> dict | None:
     """Refuse a rotation sbx could not take, before anything is stored: a
     listing :func:`_rotate_plan` refuses, or sbx below 0.51.0 (no
-    ``--value-stdin``) when it is the active backend or holds the key."""
-    globals_, sandbox_rows = _rotate_plan(*_rotate_route())
+    ``--value-stdin``) when it is the active backend or holds the key.
+
+    When sbx is not the active backend and its secret list cannot be read
+    (``sbx secret ls`` fails, times out, or returns something unreadable), the
+    rotation still goes ahead on the active backend, as Bash rotates msb and
+    fails only the sbx propagation: the result returned here reports sbx as not
+    re-fed, and the command exits 1. Otherwise None. As the active backend, an
+    unreadable list refuses the rotation.
+    """
+    budget = timeouts.rotate_timeout_s()
+    hosts, env = _rotate_route()
+    try:
+        listing = _rotate_listing(budget)
+    except SbxError as exc:
+        if primary:
+            raise
+        return {"backend": "sbx", "refed": [], "kept_own": [],
+                "not_refed": [f"any sandbox holding the key (acq could not read sbx's secret list: {exc.message})"],
+                "remediation": _UNLISTED_REMEDIATION}
+    globals_, sandbox_rows = _rotate_plan(hosts, env, listing, budget)
     if primary or globals_ or sandbox_rows:
         _require_set_custom()
+    return None
 
 
 def rotate_holds_key() -> bool | None:
     """Whether sbx lists a custom secret for the USAi key's env var (None when
-    the listing cannot be read). Used for an sbx below acq's floor, which acq
-    otherwise does not drive."""
+    the listing cannot be read in time). Used for an sbx below acq's floor,
+    which acq otherwise does not drive."""
     env = _rotate_route()[1]
     try:
-        return any(e.table == "custom" and _custom_hit(e, {env: None}) for e in _read_listing())
+        return any(e.table == "custom" and _custom_hit(e, {env: None})
+                   for e in _rotate_listing(timeouts.rotate_timeout_s()))
     except SbxError:
         return None
 
 
-def _set_custom(sandbox: str | None, hosts: list[str], env: str, placeholder: str, value: str) -> bool:
-    """``sbx secret set-custom`` for one entry, keeping its placeholder; stdin only."""
+def _set_custom(sandbox: str | None, hosts: list[str], env: str, placeholder: str, value: str, budget: float) -> bool:
+    """``sbx secret set-custom`` for one entry, keeping its placeholder; stdin only.
+    Raises ``subprocess.TimeoutExpired`` past ``budget`` seconds."""
     argv = ["secret", "set-custom"] + ([] if sandbox is None else ["--sandbox", sandbox])
     for host in hosts:
         argv += ["--host", host]
     argv += ["--env", env] + (["--placeholder", placeholder] if placeholder else []) + ["--value-stdin"]
-    return _run(argv, input_text=value).returncode == 0
+    return _run(argv, input_text=value, timeout=budget).returncode == 0
 
 
-def _kept_placeholder(sandbox: str | None, env: str, placeholder: str) -> bool:
-    """After a ``set-custom``: sbx lists exactly one custom secret for ``env``
-    in that scope, carrying ``placeholder`` (any one, for a new global entry).
-    A new or duplicated placeholder would leave running sandboxes resolving a
-    placeholder sbx no longer maps to the new key (ADR-0008)."""
+def _kept_placeholder(sandbox: str | None, envs: _Envs, placeholder: str, budget: float) -> bool:
+    """After a ``set-custom``: sbx lists exactly one custom secret carrying the
+    USAi key (the same env var and hosts :func:`_rotate_plan` matched) in that
+    scope, and it has ``placeholder`` (any one, for a new global entry). A new
+    or duplicated placeholder would leave running sandboxes resolving a
+    placeholder sbx no longer maps to the new key (ADR-0008). A secret for the
+    same env var on other hosts is a different secret and is not counted."""
     scope = _GLOBAL_SCOPE if sandbox is None else secretstore.sandbox_scope(sandbox)
-    scopes = _Scopes()
-    rows = [e for e in _read_listing() if e.table == "custom" and e.key == env and scopes.match(e.label, scope)]
+    scopes = _Scopes(timeout=budget)
+    listing = _rotate_listing(budget)
+    try:
+        rows = [e for e in listing if e.table == "custom" and _custom_hit(e, envs) and scopes.match(e.label, scope)]
+    except subprocess.TimeoutExpired:
+        raise _rotate_timed_out("sbx ls", budget) from None
     return len(rows) == 1 and (not placeholder or rows[0].placeholder == placeholder)
 
 
-def _rotate_entry(sandbox: str | None, hosts: list[str], env: str, placeholder: str, value: str) -> str | None:
+class _Rotation(NamedTuple):
+    """What every entry's re-set shares (never the value, so a repr cannot show it)."""
+
+    envs: _Envs  # the custom secrets that carry the USAi key
+    env: str
+    budget: float  # seconds allowed for each sbx call
+
+
+def _rotate_entry(rot: _Rotation, sandbox: str | None, hosts: list[str], placeholder: str, value: str) -> str | None:
     """Re-set one entry and confirm its placeholder; None, or why it failed."""
     try:
-        if not _set_custom(sandbox, hosts, env, placeholder, value):
+        if not _set_custom(sandbox, hosts, rot.env, placeholder, value, rot.budget):
             return "sbx secret set-custom failed"
-        if not _kept_placeholder(sandbox, env, placeholder):
+        if not _kept_placeholder(sandbox, rot.envs, placeholder, rot.budget):
             return "sbx did not keep a single entry with its placeholder"
+    except subprocess.TimeoutExpired:
+        return _rotate_timed_out("sbx secret set-custom", rot.budget).message
     except SbxError as exc:
         return exc.message
     return None
@@ -1196,18 +1269,25 @@ def rotate_refeed(value: str, *, primary: bool = True) -> dict:
     its own ``usai`` value in the acq store (``kept_own``): an entry acq did not
     store is a copy of the global key, such as the ADR-0008 rebind. Each entry
     is re-read afterwards to confirm sbx kept one entry with its placeholder.
-    Returns ``{backend, refed, kept_own, not_refed}``; one entry's failure is
-    listed in ``not_refed`` and the others are still re-set.
+    Every sbx call is bounded (:func:`timeouts.rotate_timeout_s`); one that
+    times out counts as that entry's failure.
+    Returns ``{backend, refed, kept_own, not_refed}``, plus ``global``
+    (``updated`` or ``created``) when the global entry took the new key; one
+    entry's failure is listed in ``not_refed`` and the others are still re-set.
     """
+    budget = timeouts.rotate_timeout_s()
     hosts, env = _rotate_route()
-    globals_, sandbox_rows = _rotate_plan(hosts, env)
+    globals_, sandbox_rows = _rotate_plan(hosts, env, _rotate_listing(budget), budget)
+    rot = _Rotation(_rotate_envs(hosts, env), env, budget)
     out: dict = {"backend": "sbx", "refed": [], "kept_own": [], "not_refed": []}
     if globals_ or sandbox_rows or primary:
         _require_set_custom()
     if globals_ or primary:
         row = globals_[0] if globals_ else None
-        problem = _rotate_entry(None, sorted(row.targets) if row else hosts, env, row.placeholder if row else "", value)
-        if problem is not None:
+        problem = _rotate_entry(rot, None, sorted(row.targets) if row else hosts, row.placeholder if row else "", value)
+        if problem is None:
+            out["global"] = "updated" if row else "created"
+        else:
             out["not_refed"].append(f"{_GLOBAL_ENTRY} ({problem})")
     service = provider_creds.USAI_PROVIDER_ID
     for row in sandbox_rows:
@@ -1219,7 +1299,7 @@ def rotate_refeed(value: str, *, primary: bool = True) -> dict:
         if own:
             out["kept_own"].append(row.label)
             continue
-        problem = _rotate_entry(row.label, sorted(row.targets), env, row.placeholder, value)
+        problem = _rotate_entry(rot, row.label, sorted(row.targets), row.placeholder, value)
         if problem is None:
             out["refed"].append(row.label)
         else:
