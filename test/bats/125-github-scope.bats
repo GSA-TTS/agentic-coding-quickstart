@@ -72,6 +72,20 @@ _common() { # FUNC ARGS...
   GIT_CEILING_DIRECTORIES="$STUBDIR" _common detect_workspace_repos "$GWT/empty"; assert_output ''
 }
 
+# An inherited GIT_DIR/GIT_WORK_TREE (from a hook, an editor or a parent git
+# command) must not make detection read another repository's remotes.
+@test "gh-detect: an inherited GIT_DIR does not redirect workspace repo detection" {
+  export GIT_DIR="$GWT/wsGL/.git" GIT_WORK_TREE="$GWT/wsGL"
+  _common detect_workspace_repos "$GWT/repoGH"
+  assert_success
+  assert_output 'GSA-TTS/quickstart'
+  _common detect_workspace_repos "$GWT/wsMulti"
+  assert_success
+  assert_line 'orgOne/repo1'
+  assert_line 'orgTwo/repo2'
+  refute_output --partial 'gitlab'
+}
+
 @test "gh-scope: refuses workspaces spanning multiple GitHub owners" {
   run env ACQ_SECRET_TEST_VALUE=ghp_fake bash -c '
     export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"

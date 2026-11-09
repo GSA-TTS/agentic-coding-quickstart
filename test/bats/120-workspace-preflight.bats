@@ -92,6 +92,32 @@ _pf_out() { # PATH
   assert_output ''
 }
 
+@test "identity: an inherited GIT_DIR or GIT_CONFIG does not change what is read" {
+  # Another repository WITH an email: a GIT_DIR pointing at it must not hide that
+  # the workspace repo has none.
+  mkdir -p "$WT/other"
+  ( cd "$WT/other" && git init -q && git config user.email other@example.gov )
+  run bash -c '
+    export HOME="'"$WT"'/fakehome" GIT_CONFIG_NOSYSTEM=1
+    export GIT_DIR="'"$WT"'/other/.git" GIT_WORK_TREE="'"$WT"'/other"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    warn_if_no_git_identity "'"$WT"'/repoA" 2>&1
+  '
+  assert_output --partial 'this repo has no git user.email'
+
+  # GIT_CONFIG makes `git config --global` fail outright; the global email must
+  # still be found.
+  mkdir -p "$WT/gchome"
+  run bash -c '
+    export HOME="'"$WT"'/gchome" GIT_CONFIG_NOSYSTEM=1
+    git config --global user.email global@example.gov
+    export GIT_CONFIG="'"$WT"'/other/.git/config"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    warn_if_no_git_identity "'"$WT"'/repoA" 2>&1
+  '
+  assert_output ''
+}
+
 @test "identity: incomplete explicit host env still warns" {
   run bash -c '
     export HOME="'"$WT"'/fakehome" GIT_CONFIG_NOSYSTEM=1 GIT_AUTHOR_EMAIL=dev@example.gov

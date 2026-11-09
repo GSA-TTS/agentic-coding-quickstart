@@ -42,22 +42,35 @@ fi
 # Print version/identity
 # ---------------------------------------------------------------------------
 
+# _acq_version_git_line — the banner's git line for acq's own clone. Each git
+# call goes through _acq_git_host (common.sh), which clears an inherited
+# GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE and the like, so the banner reports on
+# ACQ_SCRIPT_DIR and not on whatever repository the caller's environment names;
+# the user's command-scope config is dropped too, since none of these reads
+# needs it and `git diff` may run programs that config names.
+_acq_version_git_line() {
+  local d="${ACQ_SCRIPT_DIR}" branch sha dirty=""
+  if ! command -v git >/dev/null 2>&1; then
+    echo "  git:         (not a git clone — cannot report branch/commit)"
+  elif ! _acq_git_host_ready; then
+    echo "  git:         (cannot report: kit-translate.sh is not loaded)"
+  elif _acq_git_host isolate -C "$d" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    branch=$(_acq_git_host isolate -C "$d" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?")
+    sha=$(_acq_git_host isolate -C "$d" rev-parse --short HEAD 2>/dev/null || echo "?")
+    _acq_git_host isolate -C "$d" diff --quiet 2>/dev/null &&
+      _acq_git_host isolate -C "$d" diff --cached --quiet 2>/dev/null || dirty=" (dirty)"
+    echo "  git:         ${branch}@${sha}${dirty}"
+  else
+    echo "  git:         (not a git clone — cannot report branch/commit)"
+  fi
+}
+
 print_version() {
   local resolved_backend="${ACQ_RESOLVED_BACKEND:-unknown}"
   echo "acq"
   echo "  script:      ${ACQ_RESOLVED_PATH}"
   echo "  clone dir:   ${ACQ_SCRIPT_DIR}"
-  if command -v git >/dev/null 2>&1 \
-      && git -C "${ACQ_SCRIPT_DIR}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    local branch sha dirty=""
-    branch=$(git -C "${ACQ_SCRIPT_DIR}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?")
-    sha=$(git -C "${ACQ_SCRIPT_DIR}" rev-parse --short HEAD 2>/dev/null || echo "?")
-    git -C "${ACQ_SCRIPT_DIR}" diff --quiet 2>/dev/null && \
-      git -C "${ACQ_SCRIPT_DIR}" diff --cached --quiet 2>/dev/null || dirty=" (dirty)"
-    echo "  git:         ${branch}@${sha}${dirty}"
-  else
-    echo "  git:         (not a git clone — cannot report branch/commit)"
-  fi
+  _acq_version_git_line
   echo "  backend:     ${resolved_backend}"
   if command -v acq_backend_version >/dev/null 2>&1; then
     echo "  backend ver: $(acq_backend_version 2>/dev/null || echo '?')"
