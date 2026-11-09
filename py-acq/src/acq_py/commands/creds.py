@@ -4,12 +4,22 @@ per-sandbox credential binding (ADR-0013). No credential value is ever echoed.
 
 from __future__ import annotations
 
-import hmac
+import dataclasses
+import hashlib
 import json
 import os
 import sys
 
-from .. import envelope, errors, gitrepos, hostexec, provider_creds, secretstore, state
+from .. import (
+    envelope,
+    errors,
+    gitrepos,
+    hostexec,
+    lock,
+    provider_creds,
+    secretstore,
+    state,
+)
 from . import common
 
 
@@ -46,14 +56,31 @@ def run_provider_credential_set(parsed, emit_json: bool, backend: str) -> int:
             "pipe the credential value on stdin, e.g. printf '%s' VALUE | acq provider-credential set PROVIDER KEY_ENV --host H",
             emit_json,
         )
-    # The binding is written before the value moves (plan default: binding
-    # first), so an unreadable or newer-schema record, or a state directory
-    # acq cannot write, fails closed with nothing stored in the backend. If the
-    # backend then refuses before storing the value, the record is put back
-    # exactly as it was; once the value is stored it keeps the new pin, which
-    # is what re-feeding and removing it resolve against.
+    try:
+        with lock.provider_credential_lock(provider):
+            return _set_locked(adapter, provider, key_env, hosts, value, emit_json)
+    except lock.ProviderCredentialLockTimeout as exc:
+        return common._operational_failure(
+            command, errors.TIMEOUT, str(exc), "retry once the other command finishes; nothing was changed", emit_json
+        )
+    finally:
+        value = ""
+
+
+def _set_locked(adapter, provider: str, key_env: str, hosts: list[str], value: str, emit_json: bool) -> int:
+    """``provider-credential set`` under the provider's lock.
+
+    The binding is written before the value moves (plan default: binding
+    first), so an unreadable or newer-schema record, or a state directory acq
+    cannot write, fails closed with nothing stored in the backend. If the
+    backend then refuses and the stored value did not change, the record is put
+    back exactly as it was; once a new value is stored it keeps the new pin,
+    which is what re-feeding and removing it resolve against.
+    """
+    command = "provider-credential set"
     try:
         snapshot = provider_creds.binding_snapshot(provider)
+        before = _stored_digest(provider)
         provider_creds.set_binding(provider, key_env, hosts)
     except state.StateSchemaError as exc:
         # A newer/unknown-schema or unparseable binding record fails closed with
@@ -77,12 +104,10 @@ def run_provider_credential_set(parsed, emit_json: bool, backend: str) -> int:
     try:
         adapter.provider_credential_set(provider, key_env, hosts, value)
     except common._ADAPTER_ERRORS as exc:
-        stored = _value_stored(provider, value)
-        value = ""
-        if stored:
+        after = _stored_digest(provider)
+        if before is _UNREADABLE or after is _UNREADABLE or before != after:
             return common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
         return _set_failed(command, provider, snapshot, exc, emit_json)
-    value = ""
     data = {
         "provider": provider,
         "key_env": key_env,
@@ -96,17 +121,23 @@ def run_provider_credential_set(parsed, emit_json: bool, backend: str) -> int:
     return errors.EXIT_SUCCESS
 
 
-def _value_stored(provider: str, value: str) -> bool:
-    """Whether the acq store now holds ``value`` as ``provider``'s global credential.
+# A stored value acq could not read: whether it changed is unknown.
+_UNREADABLE = b"unreadable"
 
-    A store that cannot be read counts as stored, so the new pin is kept rather
-    than pointing a possibly-stored value back at the old destination.
+
+def _stored_digest(provider: str) -> bytes | None:
+    """SHA-256 of ``provider``'s global value in the acq store (None when absent).
+
+    Only a digest is kept, so the before/after comparison holds no second copy
+    of the credential. A store that cannot be read gives :data:`_UNREADABLE`,
+    which the caller treats as changed: the new pin is then kept rather than
+    pointing a possibly-stored value back at the old destination.
     """
     try:
         current = secretstore.get(secretstore.key_for(provider))
     except (*common._ADAPTER_ERRORS, OSError):
-        return True
-    return current is not None and hmac.compare_digest(current.encode("utf-8"), value.encode("utf-8"))
+        return _UNREADABLE
+    return None if current is None else hashlib.sha256(current.encode("utf-8")).digest()
 
 
 def _set_failed(command: str, provider: str, snapshot: bytes | None, exc, emit_json: bool) -> int:
@@ -175,74 +206,147 @@ def _rm_credential_backend(backend_override: str | None, in_store: bool, emit_js
     )
 
 
-def _remove_credential(provider: str, backend_override: str | None, emit_json: bool) -> tuple[bool, int | None]:
+@dataclasses.dataclass
+class _RmOutcome:
+    """What removing a provider's credential did (``exit_code`` set on failure)."""
+
+    removed: bool = False
+    backend: str | None = None
+    accepted: list[str] = dataclasses.field(default_factory=list)
+    exit_code: int | None = None
+
+
+def _rm_failed(provider: str, exc, outcome: _RmOutcome, emit_json: bool) -> _RmOutcome:
+    kept = f"; the '{provider}' binding was kept, so the removal can be retried"
+    remediation = exc.remediation
+    if exc.code == errors.UNBIND_FAILED:
+        remediation = (
+            f"retry 'acq provider-credential rm {provider}'; remove a sandbox that stays unreachable or "
+            "unconfirmed ('acq rm NAME'), or accept an unconfirmed one with "
+            f"'acq provider-credential rm {provider} --accept-unconfirmed NAME'"
+        )
+    outcome.exit_code = common._operational_failure(
+        "provider-credential rm", exc.code, exc.message + kept, remediation, emit_json
+    )
+    return outcome
+
+
+def _remove_credential(
+    provider: str, backend_override: str | None, accept: list[str] | None, emit_json: bool
+) -> _RmOutcome:
     """Unbind and delete ``provider``'s global credential, as ``secret rm -g`` does.
 
     Runs while the binding still exists, because the backend resolves where the
-    credential is bound from it. Returns ``(removed, exit code or None)``.
+    credential is bound from it. ``accept`` is ``--accept-unconfirmed`` (msb
+    only; refused before anything changes on a backend without it).
     """
     command = "provider-credential rm"
-    kept = f"; the '{provider}' binding was kept, so the removal can be retried"
+    outcome = _RmOutcome()
     try:
         in_store = secretstore.exists(provider, None)
     except common._ADAPTER_ERRORS as exc:
-        return False, common._operational_failure(command, exc.code, exc.message + kept, exc.remediation, emit_json)
-    backend, exit_code = _rm_credential_backend(backend_override, in_store, emit_json)
-    if exit_code is not None or backend is None:
-        return False, exit_code
-    if not common._supports(backend, "secret-rm"):
-        if not in_store:
-            return False, None
-        return False, common._operational_failure(
-            command,
-            errors.UNSUPPORTED,
-            f"the {backend} backend cannot unbind the stored '{provider}' credential" + kept,
-            "nothing was changed",
-            emit_json,
-        )
+        return _rm_failed(provider, exc, outcome, emit_json)
+    outcome.backend, outcome.exit_code = _rm_credential_backend(backend_override, in_store, emit_json)
+    if outcome.exit_code is not None or outcome.backend is None:
+        return outcome
+    backend = outcome.backend
     adapter = common._adapter(backend)
+    if accept is not None and not getattr(adapter, "ACCEPT_UNCONFIRMED", False):
+        outcome.exit_code = common._operational_failure(
+            command, errors.UNSUPPORTED, f"--accept-unconfirmed is not supported on the {backend} backend",
+            "remove the flag; nothing was changed", emit_json,
+        )
+        return outcome
+    if not common._supports(backend, "secret-rm"):
+        if in_store:
+            outcome.exit_code = common._operational_failure(
+                command,
+                errors.UNSUPPORTED,
+                f"the {backend} backend cannot unbind the stored '{provider}' credential; nothing was changed",
+                "re-run with a backend that can remove secrets (--backend NAME)",
+                emit_json,
+            )
+        return outcome
     present_fn = getattr(adapter, "secret_present", None)
     try:
         in_backend = present_fn(secretstore.GLOBAL, provider) if present_fn is not None else None
         if not in_store and not in_backend:
-            return False, None
-        if in_backend is not False:
+            return outcome
+        if in_backend is not False and accept is not None:
+            outcome.accepted = adapter.secret_unbind(secretstore.GLOBAL, provider, accept_unconfirmed=accept) or []
+        elif in_backend is not False:
             adapter.secret_unbind(secretstore.GLOBAL, provider)
         secretstore.delete(secretstore.key_for(provider))
         secretstore.meta_delete(provider, None)
     except common._ADAPTER_ERRORS as exc:
-        return False, common._operational_failure(command, exc.code, exc.message + kept, exc.remediation, emit_json)
-    return True, None
+        return _rm_failed(provider, exc, outcome, emit_json)
+    outcome.removed = True
+    return outcome
+
+
+def _warn_sbx_custom_secret(provider: str, binding: dict) -> None:
+    """The sbx adapter cannot yet map a provider to the ``set-custom`` entry that
+    ``provider-credential set`` created, so an sbx removal that found nothing
+    (or failed) may leave that entry injected. Say so rather than imply it is gone."""
+    key_env = binding.get("key_env") or "its KEY_ENV"
+    print(
+        f"acq: warning: the sbx custom secret holding '{provider}' (${key_env}) may still be injected; "
+        "acq cannot find or remove it on sbx yet. List it with 'sbx secret ls' and remove it with "
+        "'acq secret rm PLACEHOLDER' (the placeholder sbx lists for it).",
+        file=sys.stderr,
+    )
+
+
+def _accept_names(parsed) -> tuple[list[str] | None, str | None]:
+    """``--accept-unconfirmed NAME[,NAME]`` (repeatable) as names, or a problem."""
+    raw = getattr(parsed, "accept_unconfirmed", None)
+    if not raw:
+        return None, None
+    names = [n for value in raw for n in value.split(",")]
+    bad = next((n for n in names if not common._secret_name_ok(n)), None)
+    if bad is not None:
+        return None, f"invalid sandbox name {bad!r} for --accept-unconfirmed"
+    return names, None
 
 
 def run_provider_credential_rm(parsed, emit_json: bool, backend_override: str | None = None) -> int:
-    """``acq provider-credential rm PROVIDER`` — drop the binding and its credential.
+    """``acq provider-credential rm PROVIDER [--accept-unconfirmed NAME[,NAME]]``.
 
     Removing an absent binding fails closed with ``secret_missing`` (reused: the
     credential binding is missing, ADR-0040m). The provider's stored global
     credential is unbound from the sandboxes that hold it and deleted first,
-    exactly as ``acq secret rm -g PROVIDER`` does, so removing the destination
-    pin never leaves the credential injected. Then the binding record is
-    deleted; a record that cannot be deleted is a failure, never ``removed``.
+    exactly as ``acq secret rm -g PROVIDER`` does (``--accept-unconfirmed`` is
+    passed through, msb only), so removing the destination pin never leaves the
+    credential injected. Then the binding record is deleted; a record that
+    cannot be deleted is a failure, never ``removed``. Runs under the
+    provider's lock, like ``set``.
     """
     command = "provider-credential rm"
     provider = parsed.provider
-    if not provider_creds.provider_id_ok(provider):
+    accept, problem = _accept_names(parsed)
+    if problem is None and not provider_creds.provider_id_ok(provider):
+        problem = f"invalid provider id {provider!r}"
+    if problem is not None:
+        return common._operational_failure(command, errors.VALIDATION_FAILED, problem, None, emit_json)
+    try:
+        with lock.provider_credential_lock(provider):
+            return _rm_locked(provider, backend_override, accept, emit_json)
+    except lock.ProviderCredentialLockTimeout as exc:
         return common._operational_failure(
-            command,
-            errors.VALIDATION_FAILED,
-            f"invalid provider id {provider!r}",
-            None,
-            emit_json,
+            command, errors.TIMEOUT, str(exc), "retry once the other command finishes; nothing was changed", emit_json
         )
+
+
+def _rm_locked(provider: str, backend_override: str | None, accept: list[str] | None, emit_json: bool) -> int:
+    command = "provider-credential rm"
     unreadable = f"remove or repair the unreadable provider-credential binding for '{provider}', then retry"
     try:
-        present = provider_creds.get_binding(provider) is not None
+        binding = provider_creds.get_binding(provider)
     except state.StateSchemaError as exc:
         # A newer/unknown-schema or unparseable binding record fails closed with
         # the ADR-0041m stable code rather than a raw traceback.
         return common._operational_failure(command, errors.STATE_SCHEMA_UNSUPPORTED, str(exc), unreadable, emit_json)
-    if not present:
+    if binding is None:
         return common._operational_failure(
             command,
             errors.SECRET_MISSING,
@@ -250,15 +354,17 @@ def run_provider_credential_rm(parsed, emit_json: bool, backend_override: str | 
             f"list bindings with 'acq provider-credential ls', or add one with 'acq provider-credential set {provider} KEY_ENV --host H'",
             emit_json,
         )
-    credential_removed, exit_code = _remove_credential(provider, backend_override, emit_json)
-    if exit_code is not None:
-        return exit_code
+    outcome = _remove_credential(provider, backend_override, accept, emit_json)
+    if outcome.backend == "sbx" and not outcome.removed:
+        _warn_sbx_custom_secret(provider, binding)
+    if outcome.exit_code is not None:
+        return outcome.exit_code
     try:
         provider_creds.remove_binding(provider)
     except state.StateSchemaError as exc:
         return common._operational_failure(command, errors.STATE_SCHEMA_UNSUPPORTED, str(exc), unreadable, emit_json)
     except OSError as exc:
-        done = f"removed the stored '{provider}' credential, but " if credential_removed else ""
+        done = f"removed the stored '{provider}' credential, but " if outcome.removed else ""
         return common._operational_failure(
             command,
             errors.FAILURE,
@@ -266,11 +372,13 @@ def run_provider_credential_rm(parsed, emit_json: bool, backend_override: str | 
             f"check that the acq state directory is writable, then re-run 'acq provider-credential rm {provider}'",
             emit_json,
         )
-    data = {"provider": provider, "removed": True, "credential_removed": credential_removed}
+    data: dict = {"provider": provider, "removed": True, "credential_removed": outcome.removed}
+    if accept is not None:
+        data["unconfirmed"] = outcome.accepted
     if emit_json:
         print(json.dumps(envelope.success(command, data)))
     else:
-        suffix = " and its stored credential" if credential_removed else ""
+        suffix = " and its stored credential" if outcome.removed else ""
         print(f"removed the '{provider}' binding{suffix}.")
     return errors.EXIT_SUCCESS
 

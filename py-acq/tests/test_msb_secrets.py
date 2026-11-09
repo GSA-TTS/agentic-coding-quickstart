@@ -689,6 +689,40 @@ def test_provider_rm_unbinds_and_deletes_the_credential(monkeypatch, tmp_path, c
     _assert_value_absent(VALUE, children, out, err)
 
 
+def test_provider_rm_accept_unconfirmed(monkeypatch, tmp_path, capsys):
+    # A sandbox acq has no record for cannot be confirmed unbound; rm names the
+    # provider-credential command to accept it, and the flag passes through.
+    _env(monkeypatch, tmp_path, catalog={"other": "stopped"})
+    provider_creds.set_binding("acme", "ACME_KEY", ["models.acme.gov"])
+    secretstore.store(secretstore.key_for("acme"), VALUE)
+    rc, doc, _out, _err = _invoke(capsys, "--backend", "msb", "provider-credential", "rm", "acme", "--json")
+    assert rc == 1 and doc["error"]["code"] == "unbind_failed"
+    assert "acq provider-credential rm acme --accept-unconfirmed NAME" in doc["error"]["remediation"]
+    assert provider_creds.get_binding("acme") is not None and secretstore.resolve("acme") == VALUE
+    rc, doc, _out, _err = _invoke(capsys, "--backend", "msb", "provider-credential", "rm", "acme",
+                                  "--accept-unconfirmed", "bad.name", "--json")
+    assert rc == 1 and doc["error"]["code"] == "validation_failed"
+    rc, doc, _out, err = _invoke(capsys, "--backend", "msb", "provider-credential", "rm", "acme",
+                                 "--accept-unconfirmed", "other", "--json")
+    assert rc == 0, err
+    assert doc["data"] == {"provider": "acme", "removed": True, "credential_removed": True, "unconfirmed": ["other"]}
+    assert secretstore.resolve("acme") is None and provider_creds.get_binding("acme") is None
+
+
+def test_provider_reset_same_value_refused_restores_the_binding(monkeypatch, tmp_path, capsys, children):
+    # The stored value is unchanged when msb refuses a re-set of the SAME value
+    # under a new destination, so the previous binding must come back.
+    _running(tmp_path, monkeypatch, "a")
+    _set(capsys, monkeypatch, "-g", "acme", "--host", "old.acme.gov", "--env", "ACME_OLD")
+    provider_creds.set_binding("acme", "ACME_OLD", ["old.acme.gov"])
+    before = provider_creds._binding_path("acme").read_bytes()
+    rc, doc, _out, _err = _invoke(capsys, "--backend", "msb", "provider-credential", "set", "acme", "ACME_KEY",
+                                  "--host", "models.acme.gov", "--json", stdin=VALUE, monkeypatch=monkeypatch)
+    assert rc == 1 and doc["error"]["code"] == "validation_failed"
+    assert provider_creds._binding_path("acme").read_bytes() == before
+    assert secretstore.resolve("acme") == VALUE
+
+
 def test_provider_pin_refuses_a_diverging_endpoint_record(monkeypatch, tmp_path, capsys, children):
     _running(tmp_path, monkeypatch, "a")
     _set(capsys, monkeypatch, "-g", "acme", "--host", "old.acme.gov", "--env", "ACME_OLD", value="S3NTINEL-old")

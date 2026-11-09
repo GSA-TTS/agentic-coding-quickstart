@@ -51,6 +51,12 @@ def _invoke(capsys, *argv):
     return rc, doc
 
 
+def _invoke_full(capsys, *argv):
+    rc = cli.main(list(argv))
+    out, err = capsys.readouterr()
+    return rc, (json.loads(out) if out.strip() else None), out, err
+
+
 # ---------------------------------------------------------------------------
 # provider-credential set / ls / rm
 # ---------------------------------------------------------------------------
@@ -284,6 +290,45 @@ def test_provider_credential_rm_needs_a_backend_for_a_stored_value(monkeypatch, 
     assert rc == 1 and doc["error"]["code"] == "backend_not_found"
     assert provider_creds.get_binding("acme") is not None
     assert secretstore.get(secretstore.key_for("acme")) == "STORED-VALUE"
+
+
+def test_provider_credential_rm_on_sbx_warns_the_custom_secret_may_remain(monkeypatch, tmp_path, capsys):
+    # Until sbx can map a provider to its set-custom entry, rm must not imply
+    # the sbx secret is gone.
+    _sbx_env(monkeypatch, tmp_path, version="0.51.0")
+    monkeypatch.setattr(sys, "stdin", io.StringIO("v-1\n"))
+    assert _invoke(capsys, "--backend", "sbx", "provider-credential", "set", "acme", "ACME_KEY",
+                   "--host", "models.acme.gov", "--json")[0] == 0
+    rc, doc, _out, _err = _invoke_full(capsys, "--backend", "sbx", "provider-credential", "rm", "acme",
+                                       "--accept-unconfirmed", "x", "--json")
+    assert rc == 1 and doc["error"]["code"] == "unsupported_capability"
+    assert provider_creds.get_binding("acme") is not None
+    rc, doc, _out, err = _invoke_full(capsys, "--backend", "sbx", "provider-credential", "rm", "acme", "--json")
+    assert rc == 0 and doc["data"]["credential_removed"] is False
+    assert "may still be injected" in err and "$ACME_KEY" in err and "acq secret rm PLACEHOLDER" in err
+
+
+def test_provider_credential_set_and_rm_wait_for_the_provider_lock(monkeypatch, tmp_path, capsys):
+    from acq_py import lock, secretstore
+
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_SANDBOX_LOCK_TIMEOUT", "0.3")
+    provider_creds.set_binding("other", "OTHER_KEY", ["models.other.gov"])
+    with lock.provider_credential_lock("acme"):
+        monkeypatch.setattr(sys, "stdin", io.StringIO("LOCKED-OUT-VALUE\n"))
+        rc, doc = _invoke(capsys, "--backend", "msb", "provider-credential", "set", "acme", "ACME_KEY",
+                          "--host", "models.acme.gov", "--json")
+        assert rc == 1 and doc["error"]["code"] == "timeout"
+        assert provider_creds.get_binding("acme") is None and secretstore.resolve("acme") is None
+        provider_creds.set_binding("acme", "ACME_KEY", ["models.acme.gov"])
+        rc, doc = _invoke(capsys, "provider-credential", "rm", "acme", "--json")
+        assert rc == 1 and doc["error"]["code"] == "timeout"
+        assert provider_creds.get_binding("acme") is not None
+        # Another provider is not held up.
+        rc, doc = _invoke(capsys, "provider-credential", "rm", "other", "--json")
+        assert rc == 0
+    rc, doc = _invoke(capsys, "provider-credential", "rm", "acme", "--json")
+    assert rc == 0
 
 
 def test_provider_credential_min_reader_fails_closed(monkeypatch, tmp_path, capsys):

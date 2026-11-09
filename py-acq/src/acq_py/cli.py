@@ -350,6 +350,10 @@ def build_parser() -> _Parser:
     pc_sub.add_parser("ls", help="list pinned provider bindings (provider/key_env/hosts/source_layer, never values)")
     pc_rm = pc_sub.add_parser("rm", help="remove a configured provider binding")
     pc_rm.add_argument("provider", help="provider id")
+    pc_rm.add_argument(
+        "--accept-unconfirmed", dest="accept_unconfirmed", action="append", metavar="NAME[,NAME]",
+        help="accept these sandboxes (with no acq binding record) staying unconfirmed (msb)",
+    )
 
     # github-scope: per-sandbox GitHub token scoping (ADR-0013). The token is on
     # stdin only and backend-bound; the scope is recorded host-side.
