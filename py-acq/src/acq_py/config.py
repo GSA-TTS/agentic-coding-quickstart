@@ -24,6 +24,8 @@ import os
 import re
 from pathlib import Path
 
+from . import userdirs
+
 CONFIG_SCHEMA = 1
 
 # A flat ``schema:`` key: column 0, a single integer token, optional trailing
@@ -42,12 +44,13 @@ class ConfigSchemaError(Exception):
 
 
 def config_path() -> Path:
-    """Resolve the acq config file (ADR-0038m §config path)."""
-    base = os.environ.get("XDG_CONFIG_HOME")
-    if not base:
-        home = os.environ.get("HOME") or str(Path.home())
-        base = os.path.join(home, ".config")
-    return Path(base) / "acq" / "config.yaml"
+    """Resolve the acq config file (ADR-0038m §config path).
+
+    An empty or relative ``XDG_CONFIG_HOME`` is ignored as the XDG Base Directory
+    specification requires, falling back to ``$HOME/.config`` (see
+    :mod:`userdirs`).
+    """
+    return userdirs.xdg_base("XDG_CONFIG_HOME", ".config") / "acq" / "config.yaml"
 
 
 def _read_raw() -> str | None:

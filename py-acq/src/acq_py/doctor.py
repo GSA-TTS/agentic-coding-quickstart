@@ -22,7 +22,7 @@ and never touch the network, so ``doctor`` is a safe diagnostic in any context.
 
 from __future__ import annotations
 
-from . import migration, runtime
+from . import migration, runtime, userdirs
 
 PASS = "pass"
 WARN = "warn"
@@ -72,12 +72,18 @@ def state_check() -> dict:
     ``doctor`` is a diagnostic and does NOT migrate: it reports the current tree
     state so a newer/unparseable record is surfaced (``fail``) and a legacy v0
     record is flagged (``warn``) as "will migrate forward on the next mutating
-    verb", rather than being silently skipped.
+    verb", rather than being silently skipped. An unresolvable state root (a
+    relative ``ACQ_STATE_DIR``, or no absolute home to fall back to) is reported
+    as a failed check rather than raised, so the diagnostic still completes.
     """
-    generation = migration.read_generation()
+    try:
+        generation = migration.read_generation()
+        records = list(migration.iter_records())
+    except userdirs.UserDirError as exc:
+        return {"id": "state", "status": FAIL, "message": exc.message, "remediation": exc.remediation}
     newer: list[str] = []
     legacy: list[str] = []
-    for path in migration.iter_records():
+    for path in records:
         try:
             doc = migration._load_record(path)
         except migration.MigrationError:
