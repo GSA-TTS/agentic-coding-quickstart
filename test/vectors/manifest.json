@@ -36,6 +36,10 @@
       "vectors": ["cli/backend-list-none", "cli/backend-list-unknown", "cli/backend-list-default-msb"]
     },
     {
+      "contract": "spec backend seam: active_backend precedence flag -> env -> config (backend set) -> auto-detect; backend set/unset persist and clear only the backend key; an invalid backend is never persisted, and one found in config.yaml fails closed",
+      "vectors": ["cli/lifecycle-create-config-sbx", "cli/lifecycle-config-backend-invalid", "cli/backend-set", "cli/backend-set-unknown", "cli/backend-unset", "cli/backend-unset-none"]
+    },
+    {
       "contract": "ADR-0040m version floor fail-closed (backend_not_found / backend_version_unsupported / backend_version_unknown)",
       "vectors": ["cli/backend-check-ok", "cli/backend-check-unsupported", "cli/backend-check-blocked", "cli/backend-check-unknown", "cli/backend-check-not-found", "cli/backend-check-bin-override-blocked", "cli/backend-check-forced-version-ignored-for-real-bin"]
     },

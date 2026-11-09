@@ -3,7 +3,7 @@
 The highest seam is the subprocess boundary (ADR-0038m section 1): exit codes
 0/1/2 and the structured-output envelope (``--json``) are the contract. This
 module owns that surface — ``build_parser`` and ``main`` — plus the two verbs
-whose handlers are small enough to live beside it (``backend list``/``check``
+whose handlers are small enough to live beside it (``backend`` list/check/set/unset
 and ``doctor``). Every other handler lives in :mod:`acq_py.commands`
 (see ADR-0046m for why the boundary falls here):
 
@@ -144,12 +144,15 @@ def build_parser() -> _Parser:
     sub.add_parser("help", help="show help")
 
     backend_parser = sub.add_parser(
-        "backend", help="detect and inspect the sandbox backends (sbx, msb)"
+        "backend", help="detect, inspect and select the sandbox backends (sbx, msb)"
     )
     backend_sub = backend_parser.add_subparsers(dest="backend_command", metavar="SUBCOMMAND")
     backend_sub.add_parser("list", help="list detected backends")
     check_parser = backend_sub.add_parser("check", help="fail closed on an unsupported backend version")
     check_parser.add_argument("name", help="backend name (sbx | msb)")
+    set_parser = backend_sub.add_parser("set", help="persist the default backend in config.yaml")
+    set_parser.add_argument("name", help="backend name (sbx | msb)")
+    backend_sub.add_parser("unset", help="clear the persisted default (fall back to auto-detect)")
 
     create_parser = sub.add_parser("create", help="create a sandbox (detached)")
     create_parser.add_argument("agent", nargs="?", help="agent to provision (e.g. opencode, shell)")
@@ -310,8 +313,15 @@ def _backend_list_data(active_backend: str | None) -> dict:
     }
 
 
-def run_backend_list(emit_json: bool, active_backend: str | None) -> int:
+def run_backend_list(emit_json: bool, active_backend: str | None, warnings: list[str] | None = None) -> int:
+    """List the backends. A read-only report: a problem such as an unknown
+    persisted backend is a warning (stderr, and ``data.warnings`` under
+    ``--json``), never a failure."""
     data = _backend_list_data(active_backend)
+    if warnings:
+        data["warnings"] = warnings
+        for warning in warnings:
+            print(f"acq: warning: {warning}", file=sys.stderr)
     if emit_json:
         print(json.dumps(envelope.success("backend list", data)))
         return errors.EXIT_SUCCESS
@@ -367,6 +377,59 @@ def run_backend_check(emit_json: bool, name: str) -> int:
     return errors.EXIT_FAILURE
 
 
+def run_backend_set(emit_json: bool, name: str) -> int:
+    """Persist ``name`` as the default backend (Bash ``acq backend set``).
+
+    Only the ``backend:`` key changes; every other config key is kept. The name
+    was validated by the dispatch, so an invalid backend is never persisted.
+    """
+    previous = config.read_field("backend")
+    try:
+        path = config.write_field("backend", name)
+    except OSError as exc:
+        return _config_write_failure("backend set", exc, emit_json)
+    data = {"backend": name, "previous": previous, "config_path": str(path)}
+    if emit_json:
+        print(json.dumps(envelope.success("backend set", data)))
+    else:
+        print(f"default backend set to '{name}' in {path}")
+    return errors.EXIT_SUCCESS
+
+
+def run_backend_unset(emit_json: bool) -> int:
+    """Clear the persisted default backend so acq auto-detects (Bash ``acq backend
+    unset``). Idempotent; other config keys are kept, and a config left holding
+    nothing else is removed, as Bash does.
+    """
+    path = config.config_path()
+    previous = config.read_field("backend")
+    if previous is not None:
+        try:
+            config.write_field("backend", "")
+            config.remove_if_only_marker()
+        except OSError as exc:
+            return _config_write_failure("backend unset", exc, emit_json)
+    data = {"backend": None, "previous": previous, "cleared": previous is not None, "config_path": str(path)}
+    if emit_json:
+        print(json.dumps(envelope.success("backend unset", data)))
+    elif previous is not None:
+        print(f"cleared the persisted default backend ({path}); acq will auto-detect.")
+    else:
+        print("no persisted default backend was set; acq already auto-detects.")
+    return errors.EXIT_SUCCESS
+
+
+def _config_write_failure(command: str, exc: OSError, emit_json: bool) -> int:
+    where = f" ({exc.filename})" if exc.filename else ""
+    return common._operational_failure(
+        command,
+        errors.FAILURE,
+        f"could not write {config.config_path()}: {exc.strerror or exc}{where}",
+        "check the permissions of the acq config directory and file, then retry",
+        emit_json,
+    )
+
+
 def _print_doctor_human(data: dict) -> None:
     print("acq: doctor")
     for check in data["checks"]:
@@ -419,6 +482,8 @@ def _is_mutating(parsed) -> bool:
         return parsed.provider_credential_command in ("set", "rm")
     if cmd in ("github-scope", "usai-rotate-api-key"):
         return True
+    if cmd == "backend":
+        return parsed.backend_command in ("set", "unset")
     if cmd == "kit":
         return parsed.kit_command in ("apply", "update")
     if cmd == "kit-source":
@@ -551,14 +616,27 @@ def _dispatch(parser: _Parser, parsed, emit_json: bool, backend_override: str | 
                 emit_json,
             )
         if parsed.backend_command == "list":
-            return run_backend_list(emit_json, common._resolve_active_backend(backend_override))
+            invalid = common._invalid_persisted_backend(backend_override)
+            warnings = [common._invalid_persisted_backend_message(invalid)] if invalid is not None else None
+            return run_backend_list(emit_json, common._resolve_active_backend(backend_override), warnings)
         if parsed.backend_command == "check":
             return run_backend_check(emit_json, parsed.name)
-        return common._usage_failure(
-            "backend",
-            "backend requires a subcommand: list | check",
-            emit_json,
-        )
+        if parsed.backend_command == "set" and parsed.name not in backends.BACKENDS:
+            # Refused before anything is written: an invalid backend is never
+            # persisted (ADR-0038m).
+            return common._usage_failure(
+                "backend set",
+                f"unknown backend: {parsed.name!r} (expected sbx or msb)",
+                emit_json,
+            )
+        if parsed.backend_command not in ("set", "unset"):
+            return common._usage_failure(
+                "backend",
+                "backend requires a subcommand: list | check | set | unset",
+                emit_json,
+            )
+        # set/unset write config.yaml, so they take the user-dirs and migration
+        # pre-steps below like every other mutating verb.
 
     if parsed.command == "doctor":
         return run_doctor(emit_json, parsed.name)
@@ -574,6 +652,11 @@ def _dispatch(parser: _Parser, parsed, emit_json: bool, backend_override: str | 
         pre_step = _migration_pre_step(emit_json, _command_label(parsed))
         if pre_step is not None:
             return pre_step
+
+    if parsed.command == "backend":
+        if parsed.backend_command == "set":
+            return run_backend_set(emit_json, parsed.name)
+        return run_backend_unset(emit_json)
 
     if parsed.command in ("create", "run", "ls", "stop", "rm", "exec", "attach", "shell", "cp", "ports"):
         _backend, exit_code = common._resolve_backend_for_lifecycle(backend_override, emit_json, parsed.command)

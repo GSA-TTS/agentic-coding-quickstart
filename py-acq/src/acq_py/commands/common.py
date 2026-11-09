@@ -14,7 +14,18 @@ import json
 import os
 import sys
 
-from .. import backends, envelope, errors, kits, msb, sbx, secretstore, security, state
+from .. import (
+    backends,
+    config,
+    envelope,
+    errors,
+    kits,
+    msb,
+    sbx,
+    secretstore,
+    security,
+    state,
+)
 
 # Both adapters and the acq secret store raise an error carrying the same
 # (code, message, remediation) contract; catch this tuple uniformly at the seam.
@@ -121,10 +132,19 @@ def _resolve_active_backend(explicit: str | None) -> str | None:
     """Resolve the active backend for read-only reporting.
 
     Precedence: the ``--backend`` flag, then the ``ACQ_BACKEND`` environment
-    variable, then (in a later slice) config persistence via ``backend set``,
-    then the auto-detect default. An invalid flag value is a usage error
-    (handled by the caller); an invalid environment value is dropped (ADR-0038m
-    "drop invalid persisted backends").
+    variable, then the ``backend:`` key ``backend set`` persists in
+    ``config.yaml``, then the auto-detect default (Bash ``acq_resolve_backend``).
+    An invalid flag value is a usage error (handled by the caller); an invalid
+    environment value is dropped and the next source is consulted.
+
+    An invalid persisted value is NOT skipped: it resolves to ``None`` so nothing
+    auto-detects past a broken pin. Mutating callers refuse first through
+    :func:`_invalid_persisted_backend_failure`, as Bash does when its adapter
+    lookup fails; read-only reporting (``backend list``, ``doctor``) warns and
+    goes on. This replaces the earlier lenient reading of ADR-0038m's "drop
+    invalid persisted backends", which silently ignored the value: ADR-0038m drops
+    Bash's *acceptance* of an invalid backend (``backend set`` now refuses one),
+    and a value that still reaches config.yaml by hand is surfaced, not hidden.
 
     Auto-detect default arms:
 
@@ -142,12 +162,54 @@ def _resolve_active_backend(explicit: str | None) -> str | None:
     env_backend = os.environ.get("ACQ_BACKEND")
     if env_backend in backends.BACKENDS:
         return env_backend
+    persisted = config.read_field("backend")
+    if persisted is not None:
+        return persisted if persisted in backends.BACKENDS else None
     installed = [s.name for s in backends.detect_all() if s.installed]
     if len(installed) == 1:
         return installed[0]
     if len(installed) > 1:
         return "msb"
     return None
+
+
+def _invalid_persisted_backend(explicit: str | None) -> str | None:
+    """The persisted ``backend:`` value when it is not a known backend and would
+    be consulted (no ``--backend`` flag and no valid ``ACQ_BACKEND``), else ``None``.
+    """
+    if explicit is not None or os.environ.get("ACQ_BACKEND") in backends.BACKENDS:
+        return None
+    persisted = config.read_field("backend")
+    if persisted is None or persisted in backends.BACKENDS:
+        return None
+    return persisted
+
+
+def _invalid_persisted_backend_message(value: str) -> str:
+    return f"config.yaml ({config.config_path()}) sets an unknown backend: {value!r} (expected sbx or msb)"
+
+
+_INVALID_PERSISTED_REMEDIATION = (
+    "run 'acq backend set msb' or 'acq backend set sbx' (or 'acq backend unset' to auto-detect)"
+)
+
+
+def _invalid_persisted_backend_failure(explicit: str | None, command: str, emit_json: bool) -> int | None:
+    """Refuse a verb that needs a backend when config.yaml persists an unknown one.
+
+    Returns the emitted exit code, or ``None`` when the persisted value is fine
+    or not consulted.
+    """
+    value = _invalid_persisted_backend(explicit)
+    if value is None:
+        return None
+    return _operational_failure(
+        command,
+        errors.BACKEND_NOT_FOUND,
+        _invalid_persisted_backend_message(value),
+        _INVALID_PERSISTED_REMEDIATION,
+        emit_json,
+    )
 
 
 def _resolve_backend_for_mutation(
@@ -173,6 +235,9 @@ def _resolve_backend_for_mutation(
             f"unknown backend: {explicit!r} (expected sbx or msb)",
             emit_json,
         )
+    invalid = _invalid_persisted_backend_failure(explicit, command, emit_json)
+    if invalid is not None:
+        return None, invalid
     name = _resolve_active_backend(explicit)
     if name is None:
         return None, _operational_failure(

@@ -404,6 +404,9 @@ def run_kit_source_rm(parsed, emit_json: bool, backend_override: str | None) -> 
     # When both backends are installed with no flag/env, auto-detect resolves msb,
     # so sbx's owner prefix is not revoked here — correct under the resolved-active-
     # backend scope, and it becomes revocable once kit-apply (ADR-0030) lands.
+    invalid = common._invalid_persisted_backend_failure(backend_override, "kit-source rm", emit_json)
+    if invalid is not None:
+        return invalid
     resolved = common._resolve_active_backend(backend_override)
     if resolved == "sbx":
         try:
