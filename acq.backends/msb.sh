@@ -1870,12 +1870,12 @@ EOF
     src=""
     if [ -n "$source" ]; then
       # The payload must be a regular file inside the kit (symlinks resolved);
-      # a source that resolves elsewhere on the host is skipped.
-      if ! kit_source_within "$kitdir" "$source"; then
+      # a source that resolves elsewhere on the host is skipped. The resolved
+      # path is what gets copied, so the checked file is the copied file.
+      if ! src=$(kit_source_resolve "$kitdir" "$source"); then
         echo "acq(msb): warning: skipping kit file '$path': its source is not a regular file inside the kit directory" >&2
         continue
       fi
-      src="${kitdir}/${source}"
     fi
     if [ "$_readonly" = "true" ] && [ -n "$src" ] && [ -f "$src" ] && [ "$_hcfg_done" -eq 0 ]; then
       _hcfg_done=1

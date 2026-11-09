@@ -695,6 +695,37 @@ def _finding(code: str, message: str, remediation: str | None = None) -> dict:
 
 # Upper bound on a spec.yaml read by validate_kit.
 _MAX_SPEC_BYTES = 1024 * 1024
+_SOURCE_LINE = re.compile(r"^\s*(?:-\s*)?source:\s*(.*?)\s*(?:#.*)?$", re.MULTILINE)
+_SAFE_SOURCE = re.compile(r"[A-Za-z0-9._/-]+")
+
+
+def _inside(target: Path, root: Path) -> bool:
+    return target == root or root in target.parents
+
+
+def _spec_file_sources(text: str) -> list[str]:
+    """``source:`` values from the spec's top-level ``files:`` block."""
+    sources: list[str] = []
+    in_files = False
+    for line in text.splitlines():
+        if line[:1].isalpha():
+            in_files = line.startswith("files:")
+            continue
+        if in_files:
+            m = _SOURCE_LINE.match(line)
+            if m:
+                sources.append(m.group(1).strip("'\" "))
+    return sources
+
+
+def _source_inside_kit(kit_root: Path, source: str) -> bool:
+    """Mirror the Bash kit_source_within rule for one files[] source."""
+    if not _SAFE_SOURCE.fullmatch(source) or source.startswith("/"):
+        return False
+    if ".." in source.split("/"):
+        return False
+    target = (kit_root / source).resolve()
+    return _inside(target, kit_root) and target != kit_root and target.is_file()
 
 
 def validate_kit(path: str) -> dict:
@@ -716,20 +747,21 @@ def validate_kit(path: str) -> dict:
     if not p.exists():
         raise KitSpecError(f"kit path does not exist: {path}")
     spec: Path | None = None
+    kit_root: Path | None = None
     if p.is_dir():
+        kit_root = p.resolve()
         candidate = p / "spec.yaml"
-        # A kit's own spec.yaml must be a regular file in the kit directory, not
-        # a symlink that could point at some other file on the host.
-        if candidate.is_symlink():
-            raise KitSpecError(f"spec.yaml in {path!r} is a symlink; a kit's spec.yaml must be a regular file")
-        if candidate.is_file():
-            spec = candidate
-        else:
+        if not candidate.is_file():
             raise KitSpecError(
                 f"no spec.yaml found in {path!r} (a kit is a directory containing spec.yaml)"
             )
+        # A kit's own spec.yaml may be a symlink only within the kit directory.
+        if not _inside(candidate.resolve(), kit_root):
+            raise KitSpecError(f"spec.yaml in {path!r} resolves outside the kit directory")
+        spec = candidate
     else:
         spec = p
+        kit_root = p.parent.resolve()
     # Only regular files are read (a FIFO or device would block or stream), and
     # only up to a size no real spec approaches.
     if not spec.is_file():
@@ -764,5 +796,14 @@ def validate_kit(path: str) -> dict:
         if not re.fullmatch(r"[A-Za-z0-9._-]+", name):
             findings.append(
                 _finding("kit_name_unsafe", f"unsafe kit name {name!r}")
+            )
+    for source in _spec_file_sources(text):
+        if not _source_inside_kit(kit_root, source):
+            findings.append(
+                _finding(
+                    "kit_file_source_unsafe",
+                    f"file source must be a regular file inside the kit directory: {source!r}",
+                    "keep files[] sources relative to the kit and inside it (no '..', no absolute paths, no links out)",
+                )
             )
     return {"valid": not findings, "findings": findings}

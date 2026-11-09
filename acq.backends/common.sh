@@ -1008,6 +1008,7 @@ _acq_require_provider_selection() {
 _build_kit_list() {
   local agent="${1:-}" kit support_refs
   KITS=()
+  _acq_kit_refs_make_absolute
   # This runs for EVERY verb (acq_resolve_backend), so a provider-selection
   # failure is LATCHED here and only enforced by create/run through
   # _acq_require_provider_selection. The kit list still builds (without the
@@ -1501,6 +1502,7 @@ extract_kit_flags() {
   if [ "$expect_kit" -eq 1 ]; then
     echo "acq: --kit given with no value; ignoring" >&2
   fi
+  _acq_kit_refs_make_absolute
 }
 
 # Extract the explicit empty provider selection without relying on shell export
@@ -2389,6 +2391,25 @@ acq_cli_kits_write() {
   return 0
 }
 
+# _acq_kit_refs_make_absolute: rewrite ACQ_CLI_KITS and ACQ_EXTRA_KITS in place
+# so every relative local kit ref is absolute. Called where the refs enter (the
+# --kit parser and the kit-list build), so the cli-kits record, the sbx
+# extra-kits heal record and the applied list all name the same kits.
+_acq_kit_refs_make_absolute() {
+  local i ref out=""
+  local _x=()
+  for i in ${ACQ_CLI_KITS[@]+"${!ACQ_CLI_KITS[@]}"}; do
+    ACQ_CLI_KITS[i]=$(_acq_kit_ref_absolute "${ACQ_CLI_KITS[i]}")
+  done
+  if [ -n "${ACQ_EXTRA_KITS:-}" ]; then
+    split_noglob _x "$ACQ_EXTRA_KITS"
+    for ref in ${_x[@]+"${_x[@]}"}; do
+      [ -n "$ref" ] && out="${out:+$out }$(_acq_kit_ref_absolute "$ref")"
+    done
+    ACQ_EXTRA_KITS="$out"
+  fi
+}
+
 # _acq_kit_ref_absolute REF: echo REF with a relative local kit path made
 # absolute (physical), so a recorded ref names the same kit wherever a later
 # start/restart runs. Remote refs, absolute paths and paths that are not an
@@ -2396,9 +2417,9 @@ acq_cli_kits_write() {
 _acq_kit_ref_absolute() {
   local ref="${1:-}" abs
   case "$ref" in
-    "" | git+http* | /*) printf '%s\n' "$ref"; return 0 ;;
+    "" | git+http* | /* | [A-Za-z]:/* | [A-Za-z]:\\*) printf '%s\n' "$ref"; return 0 ;;
   esac
-  if [ -d "$ref" ] && abs=$(cd -P -- "$ref" 2>/dev/null && pwd -P) && [ -n "$abs" ]; then
+  if [ -d "$ref" ] && abs=$(CDPATH='' cd -P -- "$ref" 2>/dev/null && pwd -P) && [ -n "$abs" ]; then
     printf '%s\n' "$abs"
   else
     printf '%s\n' "$ref"
@@ -2430,9 +2451,10 @@ acq_cli_kits_load() {
         # this command runs from; records now store absolute paths, so skip a
         # relative one left by an older acq instead of guessing.
         case "$val" in
-          "" | git+http* | /*) ;;
+          "" | git+http* | /* | [A-Za-z]:/* | [A-Za-z]:\\*) ;;
           *)
-            echo "acq: warning: ignoring recorded relative kit path '$val' for $name; pass --kit with an absolute path to re-apply it" >&2
+            echo "acq: warning: ignoring recorded relative kit path '$val' for $name (recorded by an older acq);" >&2
+            echo "acq:   recreate the sandbox with an absolute --kit path or ACQ_EXTRA_KITS entry to keep applying it." >&2
             continue
             ;;
         esac

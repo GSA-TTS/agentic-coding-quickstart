@@ -397,15 +397,20 @@ _acq_sbx_translate_kit() {
       acq_debug "translate(sbx): $kitref -> $out"
       rm -rf "$out"
       kit_translate_to_sbx "$kitdir" "$out" >/dev/null || {
-        echo "acq(sbx): warning: kit translation failed; passing ref through: $kitref" >&2
-        printf '%s\n' "$kitref"
-        return 0
+        # Fail closed: handing the raw ref to sbx would skip acq's payload checks.
+        echo "acq(sbx): error: kit translation failed; not applying: $kitref" >&2
+        return 1
       }
       _acq_sbx_warn_readonly_files "$kitdir"
       printf '%s\n' "$out"
       ;;
     *)
-      # Not a neutral kit — use the fetched dir (or the original ref) as-is.
+      # Not a neutral kit — use the fetched dir (or the original ref) as-is,
+      # after the same payload check the neutral path applies.
+      if [ -d "$kitdir" ] && ! kit_tree_symlinks_within "$kitdir" "$kitdir"; then
+        echo "acq(sbx): error: kit payload links outside the kit; not applying: $kitref" >&2
+        return 1
+      fi
       printf '%s\n' "$kitdir"
       ;;
   esac
@@ -416,7 +421,7 @@ _acq_sbx_translate_kit() {
 _acq_sbx_kit_flags() {
   local k local_kit
   for k in "${KITS[@]}"; do
-    local_kit=$(_acq_sbx_translate_kit "$k")
+    local_kit=$(_acq_sbx_translate_kit "$k") || return 1
     printf '%s\n%s\n' "--kit" "$local_kit"
   done
 }
@@ -742,8 +747,14 @@ _acq_backend_provision_unlocked() {
   # read-only marker cannot become the primary workspace.
   local _sbx_args_final=("${_sbx_args[@]}" "$_provider_mount_val")
 
-  local kf=()
-  while IFS= read -r line; do kf+=("$line"); done < <(_acq_sbx_kit_flags)
+  local kf=() _kflags
+  if ! _kflags=$(_acq_sbx_kit_flags); then
+    echo "acq(sbx): error: a kit could not be prepared; not creating the sandbox." >&2
+    return 1
+  fi
+  while IFS= read -r line; do [ -n "$line" ] && kf+=("$line"); done <<EOF
+$_kflags
+EOF
   local _git_identity_kit=""
   _git_identity_kit=$(_acq_sbx_git_identity_kit)
   [ -n "$_git_identity_kit" ] && kf+=(--kit "$_git_identity_kit")
@@ -1320,7 +1331,7 @@ _acq_sbx_print_recreate_notice() {
 
 acq_backend_apply_kit() {
   local name="$1" kitref="$2" local_kit rc
-  local_kit=$(_acq_sbx_translate_kit "$kitref")
+  local_kit=$(_acq_sbx_translate_kit "$kitref") || return 1
   # `set -e`-safe: _acq_sbx_kit_add returns 3 (refusal) or 1 (other failure) as
   # its NORMAL signalling. A bare call on its own line would abort under `set -e`
   # before we read $?. Capture the status inline.
@@ -1491,8 +1502,12 @@ acq_backend_ensure_kits_applied() {
       continue
     fi
     echo "acq: applying extra kit to '$name': $k" >&2
-    local_extra=$(_acq_sbx_translate_kit "$k")
-    _kadd_rc=0; _acq_sbx_kit_add "$name" "$local_extra" || _kadd_rc=$?
+    _kadd_rc=0
+    if local_extra=$(_acq_sbx_translate_kit "$k"); then
+      _acq_sbx_kit_add "$name" "$local_extra" || _kadd_rc=$?
+    else
+      _kadd_rc=1
+    fi
     case $_kadd_rc in
       0)
         healed=1

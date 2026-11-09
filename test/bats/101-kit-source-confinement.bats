@@ -153,3 +153,88 @@ SPEC
   assert_equal "${ACQ_CLI_KITS[0]}" "/kits/abs"
   assert_equal "$ACQ_EXTRA_KITS" ""
 }
+
+@test "sbx materialization refuses a payload name containing a newline" {
+  local kit="$STUBDIR/nlkit" out="$STUBDIR/sbx-nl"
+  _mk_kit "$kit"
+  ln -s ../../outside.txt "$kit/files/name
+x"
+  run bash -c '. "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"; kit_translate_to_sbx "'"$kit"'" "'"$out"'" 2>&1; echo "RC=$?"'
+  assert_output --partial 'file name containing a newline'
+  assert_output --partial 'RC=1'
+  [ -z "$(find "$out" -name 'name*' 2>/dev/null)" ]
+}
+
+@test "kit validate reports absolute and parent-directory sources instead of passing" {
+  local kit="$STUBDIR/absk"
+  _mk_kit "$kit"
+  cat >> "$kit/spec.yaml" <<'SPEC'
+  - path: /home/agent/a
+    source: /etc/hostname
+  - path: /home/agent/b
+    source: ../outside.txt
+SPEC
+  run bash -c '. "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"; kit_validate "'"$kit"'" 2>&1; echo "RC=$?"'
+  assert_output --partial "file source must be a path inside the kit directory: '/etc/hostname'"
+  assert_output --partial "file source must be a path inside the kit directory: '../outside.txt'"
+  assert_output --partial 'RC=1'
+}
+
+@test "kit_source_within and recorded refs ignore CDPATH" {
+  mkdir -p "$STUBDIR/a/mykit/files" "$STUBDIR/b/mykit/files"
+  printf x > "$STUBDIR/a/mykit/files/ok"
+  run bash -c '
+    export CDPATH="'"$STUBDIR"'/b"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    cd "'"$STUBDIR"'/a"
+    if kit_source_within mykit files/ok; then echo WITHIN; else echo REFUSED; fi
+  '
+  assert_output 'WITHIN'
+  load_acq
+  local abs
+  abs=$(cd -P "$STUBDIR/a/mykit" && pwd -P)
+  run bash -c 'export CDPATH="'"$STUBDIR"'/b"; cd "'"$STUBDIR"'/a"; . "'"$REPO_ROOT"'/acq.backends/common.sh" 2>/dev/null; _acq_kit_ref_absolute mykit'
+  assert_output "$abs"
+}
+
+@test "msb apply skips a kit file whose source links outside the kit" {
+  local k="$STUBDIR/msbk"
+  _mk_kit "$k"
+  ln -s ../../outside.txt "$k/files/out"
+  cat >> "$k/spec.yaml" <<'SPEC'
+  - path: /home/agent/out
+    source: files/out
+SPEC
+  : > "$CALLS"
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/msbk-secrets"
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_test_stub_provider_input_boundary
+    _acq_msb_apply_kit_dir msbkbox "'"$k"'" 2>&1
+  '
+  assert_output --partial "skipping kit file '/home/agent/out'"
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'msbkbox:/home/agent/ok'
+  refute_regex "$log" 'outside\.txt'
+  refute_regex "$log" 'msbkbox:/home/agent/out'
+}
+
+@test "cli-kits and the sbx extra-kits record agree on an absolute ref" {
+  load_acq
+  . "$REPO_ROOT/acq.backends/sbx.sh"
+  mkdir -p "$STUBDIR/proj/mykit" "$STUBDIR/proj/extrakit"
+  local abs abs2
+  abs=$(cd -P "$STUBDIR/proj/mykit" && pwd -P)
+  abs2=$(cd -P "$STUBDIR/proj/extrakit" && pwd -P)
+  cd "$STUBDIR/proj"
+  ACQ_EXTRA_KITS="./extrakit"
+  extract_kit_flags create shell --kit ./mykit .
+  assert_equal "${ACQ_CLI_KITS[0]}" "$abs"
+  assert_equal "$ACQ_EXTRA_KITS" "$abs2"
+  _acq_sbx_seed_extra_kit_record healbox
+  run acq_host_config_read sbx healbox extra-kits
+  assert_line "$abs"
+  assert_line "$abs2"
+}
