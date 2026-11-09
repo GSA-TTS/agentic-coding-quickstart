@@ -4431,10 +4431,15 @@ acq_provider_input_discard() {
 # Outside Git Bash, MSYS2 and Cygwin this is exactly `python3`, with no probe.
 # On those Windows shells python3 is often missing, or is the Microsoft Store
 # alias stub that only prints an install hint, so python3, python and py -3 are
-# each run once, and the first working Python 3 is used. No usable interpreter
+# probed in that order, and the first working Python 3 is used. A candidate is
+# used only when `command -v` resolves it to an absolute path, and it is run by
+# that path, so a shell function or alias of the same name is never trusted. The
+# result is cached in the calling shell; _acq_provider_input_guardian_start
+# resolves it in the transaction shell before any command substitution, so the
+# helpers inside one transaction share a single probe. No usable interpreter
 # fails closed.
 _acq_provider_input_path_python() {
-  local cand kind probe
+  local cand kind probe path
   case "${OSTYPE:-}" in
     msys*|cygwin*) ;;
     *)
@@ -4443,17 +4448,21 @@ _acq_provider_input_path_python() {
       return 0
       ;;
   esac
+  if [ -n "${_ACQ_PROVIDER_INPUT_PATH_PY_KIND:-}" ] && [ -n "${_ACQ_PROVIDER_INPUT_PATH_PY[0]:-}" ]; then
+    return 0
+  fi
   # Write the kind without a newline: native Windows Python emits CRLF.
   probe='import os, sys
 if sys.version_info < (3, 6): raise SystemExit(1)
 posix = all(hasattr(os, n) for n in ("O_NOFOLLOW", "O_DIRECTORY")) and os.open in os.supports_dir_fd and os.mkdir in os.supports_dir_fd
 sys.stdout.write("posix" if posix else "nt" if os.name == "nt" else "none")'
   for cand in python3 python py; do
+    path=$(command -v "$cand" 2>/dev/null) || continue
+    case "$path" in /*) ;; *) continue ;; esac
     case "$cand" in
-      py) _ACQ_PROVIDER_INPUT_PATH_PY=(py -3) ;;
-      *) _ACQ_PROVIDER_INPUT_PATH_PY=("$cand") ;;
+      py) _ACQ_PROVIDER_INPUT_PATH_PY=("$path" -3) ;;
+      *) _ACQ_PROVIDER_INPUT_PATH_PY=("$path") ;;
     esac
-    command -v "$cand" >/dev/null 2>&1 || continue
     kind=$("${_ACQ_PROVIDER_INPUT_PATH_PY[@]}" -I -c "$probe" </dev/null 2>/dev/null) || continue
     case "$kind" in
       posix|nt) _ACQ_PROVIDER_INPUT_PATH_PY_KIND=$kind; return 0 ;;
@@ -4468,16 +4477,19 @@ sys.stdout.write("posix" if posix else "nt" if os.name == "nt" else "none")'
 # _acq_provider_input_nt_path PATH — print the Windows path for an MSYS or
 # Cygwin PATH, mapped lexically: the longest mount point in the mount table that
 # prefixes PATH is replaced by its Windows target, and the rest is kept as is. A
-# drive-absolute path (C:\... or C:/...) is printed unchanged. cygpath -w is not
-# used because it resolves symlinks and junctions in the path, which would hide
-# them from the walk; ".." is kept so the walk rejects it. Mount points match
-# case-insensitively, as they do in MSYS and Cygwin (/C/x is C:\x). A leading
-# "//" is a UNC path there and is rejected. Mount points are OS-level aliases,
-# like the macOS /var link, and their Windows targets are walked from the drive
-# root like everything else. ACQ_TEST_MOUNTS_FILE replaces /proc/mounts for
-# offline tests only.
+# drive-absolute path (C:\... or C:/...) is printed unchanged. Mapping the
+# text is the conservative choice: cygpath -w has been seen both to keep and to
+# resolve a junction in the path on Git for Windows, and a resolved link would
+# be hidden from the walk, so the result must not depend on how cygpath
+# resolves. ".." is kept so the walk rejects it. A mount whose options include
+# posix=0 (the drive and /tmp mounts on Git for Windows) matches
+# case-insensitively, as MSYS does (/C/x is C:\x); any other mount matches
+# case-sensitively. A leading "//" is a UNC path there and is rejected. Mount
+# points are OS-level aliases, like the macOS /var link, and their Windows
+# targets are walked from the drive root like everything else.
+# ACQ_TEST_MOUNTS_FILE replaces /proc/mounts, and only under bats.
 _acq_provider_input_nt_path() {
-  local p="$1" mounts="${ACQ_TEST_MOUNTS_FILE:-/proc/mounts}" win mnt _fields
+  local p="$1" mounts=/proc/mounts win mnt _fstype opts _fields
   local best_mnt="" best_win="" found="" rest nocase=0
   case "$p" in
     [A-Za-z]:[\\/]*) printf '%s\n' "$p"; return 0 ;;
@@ -4485,14 +4497,20 @@ _acq_provider_input_nt_path() {
     /*) ;;
     *) return 1 ;;
   esac
+  if [ -n "${BATS_TEST_NAME:-}" ] && [ -n "${ACQ_TEST_MOUNTS_FILE:-}" ]; then
+    mounts=$ACQ_TEST_MOUNTS_FILE
+  fi
   [ -r "$mounts" ] || return 1
   shopt -q nocasematch && nocase=1
-  shopt -s nocasematch
   # /proc/mounts escapes spaces and other bytes as octal (\040); %b decodes them.
-  while read -r win mnt _fields; do
+  while read -r win mnt _fstype opts _fields; do
     printf -v win '%b' "$win"
     printf -v mnt '%b' "$mnt"
     case "$mnt" in /*) ;; *) continue ;; esac
+    case ",$opts," in
+      *,posix=0,*) shopt -s nocasematch ;;
+      *) shopt -u nocasematch ;;
+    esac
     case "$p/" in
       "${mnt%/}/"*)
         if [ -z "$found" ] || [ "${#mnt}" -gt "${#best_mnt}" ]; then
@@ -4501,7 +4519,7 @@ _acq_provider_input_nt_path() {
         ;;
     esac
   done < "$mounts"
-  [ "$nocase" = 1 ] || shopt -u nocasematch
+  if [ "$nocase" = 1 ]; then shopt -s nocasematch; else shopt -u nocasematch; fi
   [ -n "$found" ] && [ -n "$best_win" ] || return 1
   # Strip the matched prefix by length: it may differ from PATH in case.
   best_mnt=${best_mnt%/}
@@ -4518,7 +4536,21 @@ _acq_provider_input_nt_path() {
 # directory, or has FILE_ATTRIBUTE_REPARSE_POINT set. That last check catches
 # junctions and every other reparse point, which S_ISLNK does not report. A
 # component created by mkdir is checked again afterwards, so a link swapped in
-# at that moment is still rejected. The path is mapped by
+# at that moment is still rejected.
+#
+# A race remains. The POSIX walk holds a descriptor for each checked directory,
+# but each lstat here resolves the whole path again, so a component replaced
+# with a link after it was checked could be followed by a later lstat or mkdir.
+# That window is no wider than the one every caller already has, since callers
+# act on the path string after this check returns. Holding each component open
+# with CreateFileW (FILE_FLAG_OPEN_REPARSE_POINT, no FILE_SHARE_DELETE) would
+# close it within the walk, at the cost of a ctypes implementation.
+#
+# A component that Win32 would rewrite is rejected before anything is touched:
+# a trailing dot or space (stripped by Win32), ":" (a drive or stream, which
+# ntpath.join would also merge), <>"|?* and control characters. Otherwise the
+# walk could check a different directory from the one bash then uses. The path
+# is mapped by
 # _acq_provider_input_nt_path and passed with MSYS argument conversion off, so
 # nothing resolves a link before the walk sees it. Anything other than a
 # drive-letter path (UNC, device or relative) is rejected, as are "." and ".."
@@ -4545,6 +4577,8 @@ if os.altsep: rest = rest.replace(os.altsep, os.sep)
 if not rest.startswith(os.sep): fail()
 parts = [p for p in rest.split(os.sep) if p]
 if any(p in ('.', '..') for p in parts): fail()
+for p in parts:
+    if p[-1] in '. ' or any(c in ':<>"|?*' or ord(c) < 32 for c in p): fail()
 current = drive + os.sep
 try:
     check(os.lstat(current))
@@ -4766,6 +4800,10 @@ acq_provider_input_lock_acquire() {
 # guardian PID instead. The guardian exits if its transaction parent disappears,
 # including after SIGKILL, making stale recovery safe.
 _acq_provider_input_guardian_start() {
+  # Resolve the path-helper interpreter here, in the transaction shell, so the
+  # command substitutions that follow inherit the cached result. A failure is
+  # reported again, and fails closed, by the first helper that needs it.
+  _acq_provider_input_path_python 2>/dev/null || true
   _ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN=$(mktemp "${TMPDIR:-/tmp}/acq-provider-children.XXXXXX") || return 1
   export _ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN
   sh -c '

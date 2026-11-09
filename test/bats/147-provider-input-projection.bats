@@ -1459,6 +1459,8 @@ msyspython -I - $real"
     '/c|C:/'
     '/C/Users/u|C:/Users/u'
     '/TMP/x|C:/Users/u/AppData/Local/Temp/x'
+    '/BIN/bash|C:/Program Files/Git/BIN/bash'
+    '/Usr/share|C:/Program Files/Git/Usr/share'
     '/tmp/acq-x|C:/Users/u/AppData/Local/Temp/acq-x'
     '/bin/bash|C:/Program Files/Git/usr/bin/bash'
     '/usr/share|C:/Program Files/Git/usr/share'
@@ -1485,6 +1487,107 @@ msyspython -I - $real"
   assert_failure
   ACQ_TEST_MOUNTS_FILE="$STUBDIR/no-such-mounts" run _acq_provider_input_nt_path '/c/x'
   assert_failure
+}
+
+@test "nt_path takes the longest mount prefix whatever the table order" {
+  # / is listed last, and /usr/bin is nested in /usr with a different target, so
+  # a first-match or shortest-match lookup gives a wrong answer.
+  local table="$STUBDIR/nested-mounts" pair input expected got
+  printf '%s\n' \
+    'E:/usrbin /usr/bin ntfs binary,noacl,auto 1 1' \
+    'F:/usr /usr ntfs binary,noacl,auto 1 1' \
+    'C: /c ntfs binary,noacl,posix=0,user,noumount,auto 1 1' \
+    'G:/root / ntfs binary,noacl,auto 1 1' > "$table"
+  local cases=(
+    '/usr/bin/bash|E:/usrbin/bash'
+    '/usr/bin|E:/usrbin/'
+    '/usr/binx/y|F:/usr/binx/y'
+    '/usr/lib/x|F:/usr/lib/x'
+    '/c/x|C:/x'
+    '/opt/x|G:/root/opt/x'
+  )
+  for pair in "${cases[@]}"; do
+    input="${pair%%|*}"; expected="${pair#*|}"
+    got=$(ACQ_TEST_MOUNTS_FILE="$table" _acq_provider_input_nt_path "$input") || got="<rc=$?>"
+    [ "$got" = "$expected" ] || {
+      printf 'FAIL nt_path %s -> %s, want %s\n' "$input" "$got" "$expected" >&2
+      return 1
+    }
+  done
+}
+
+@test "nt_path ignores ACQ_TEST_MOUNTS_FILE outside bats" {
+  local table="$STUBDIR/zmounts" got
+  printf 'Z:/fake / ntfs binary,noacl,auto 1 1\n' > "$table"
+  got=$(ACQ_TEST_MOUNTS_FILE="$table" _acq_provider_input_nt_path /x/y)
+  assert_equal "$got" 'Z:/fake/x/y'
+  got=$(unset BATS_TEST_NAME; ACQ_TEST_MOUNTS_FILE="$table" _acq_provider_input_nt_path /x/y) || got="<rc=$?>"
+  [ "$got" != 'Z:/fake/x/y' ]
+}
+
+@test "native Windows walk rejects names Win32 would rewrite, before touching them" {
+  local bin base="$STUBDIR/nt_names" name names
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  names=('dot.' 'space ' 'c:' 'a:b' 'lt<' 'gt>' 'q"' 'pipe|' 'ask?' 'star*' "tab$(printf '\t')x")
+  mkdir -p "$base"
+  for name in "${names[@]}"; do
+    OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_mkdir "$base/$name/child"
+    assert_failure
+    [ ! -e "$base/$name" ] || { printf 'FAIL created %s\n' "$name" >&2; return 1; }
+    # An existing directory with the name is still refused by the check.
+    mkdir "$base/$name"
+    OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_dir "$base/$name"
+    assert_failure
+  done
+  # The same walk accepts an ordinary name, so the refusals come from the names.
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_mkdir "$base/plain.name/child"
+  assert_success
+}
+
+@test "native Windows walk checks the drive root itself" {
+  local bin
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_dir "$STUBDIR"
+  assert_success
+  FAKE_REPARSE=/ OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_dir "$STUBDIR"
+  assert_failure
+}
+
+@test "interpreter probe trusts only absolute command paths and runs them by path" {
+  local bin
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  OSTYPE=msys PATH="$bin:$PATH" _acq_provider_input_path_python
+  assert_equal "${_ACQ_PROVIDER_INPUT_PATH_PY[*]}" "$bin/python"
+  assert_equal "$_ACQ_PROVIDER_INPUT_PATH_PY_KIND" nt
+  # A shell function named python is not a candidate, even though it would
+  # answer the probe.
+  unset _ACQ_PROVIDER_INPUT_PATH_PY _ACQ_PROVIDER_INPUT_PATH_PY_KIND
+  rm -f "$bin/python"
+  eval "python() { \"$bin/winpython\" \"\$@\"; }"
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_mkdir "$STUBDIR/fn_python/a"
+  unset -f python
+  assert_failure
+  assert_output --partial 'need Python 3'
+  [ ! -e "$STUBDIR/fn_python" ]
+}
+
+@test "interpreter probe result is cached and warmed by the transaction guardian" {
+  local bin probes
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  OSTYPE=msys PATH="$bin:$PATH" _acq_provider_input_guardian_start
+  _acq_provider_input_guardian_stop
+  assert_equal "$_ACQ_PROVIDER_INPUT_PATH_PY_KIND" nt
+  # Later helpers reuse the cached interpreter: no further probe runs, even
+  # inside command substitutions.
+  OSTYPE=msys PATH="$bin:$PATH" _acq_provider_input_safe_mkdir "$STUBDIR/cached/a"
+  : "$(OSTYPE=msys PATH="$bin:$PATH" _acq_provider_input_safe_dir "$STUBDIR/cached/a"; echo checked)"
+  probes=$(grep -c -- ' -I -c ' "$STUBDIR/py.log")
+  assert_equal "$probes" 2
+  grep -q "^winpython -I - check $STUBDIR/cached/a\$" "$STUBDIR/py.log"
 }
 
 @test "canonical_path passes the path through unchanged for native Windows Python" {
