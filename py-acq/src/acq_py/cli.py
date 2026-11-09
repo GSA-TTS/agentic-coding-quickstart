@@ -3,7 +3,7 @@
 The highest seam is the subprocess boundary (ADR-0038m section 1): exit codes
 0/1/2 and the structured-output envelope (``--json``) are the contract. This
 module owns that surface — ``build_parser`` and ``main`` — plus the two verbs
-whose handlers are small enough to live beside it (``backend list``/``check``
+whose handlers are small enough to live beside it (``backend`` list/check/set/unset
 and ``doctor``). Every other handler lives in :mod:`acq_py.commands`
 (see ADR-0046m for why the boundary falls here):
 
@@ -101,28 +101,92 @@ class _Parser(argparse.ArgumentParser):
         raise UsageError(message)
 
 
-def _flag_value(argv: list[str], flag: str) -> str | None:
-    try:
-        i = argv.index(flag)
-    except ValueError:
+class _Globals:
+    """acq's global flags (``--json``, ``--backend NAME``) as found on argv."""
+
+    def __init__(self) -> None:
+        self.emit_json = False
+        self.backend: str | None = None
+        self._backend_seen = False
+        # Set when argv is malformed in a way main() reports as a usage error.
+        self.backend_missing = False
+        self.misplaced: list[str] = []
+
+    def take(self, args: list[str], i: int) -> int | None:
+        """Consume a global flag at ``args[i]``; return the next index, else None."""
+        if args[i] == "--json":
+            self.emit_json = True
+            return i + 1
+        if args[i] == "--backend":
+            if i + 1 >= len(args) or args[i + 1] == "--":
+                self.backend_missing = True
+                return i + 1
+            # The first --backend wins.
+            if not self._backend_seen:
+                self._backend_seen = True
+                self.backend = args[i + 1]
+            return i + 2
         return None
-    if i + 1 < len(argv):
-        return argv[i + 1]
-    return None
 
 
-def _strip_flag(argv: list[str], flag: str) -> list[str]:
-    out: list[str] = []
-    skip_next = False
-    for token in argv:
-        if skip_next:
-            skip_next = False
+def _misplaced_exec_globals(args: list[str], start: int, flags: _Globals) -> bool:
+    """True when ``args[start:]`` is only acq global flags and then a ``--``.
+
+    ``acq exec box --json -- cmd`` almost certainly meant ``--json`` for acq, not
+    a guest command named ``--json``. The flags are recorded on ``flags`` (so an
+    error can still honour ``--json``) and reported as a usage error.
+    """
+    probe = _Globals()
+    i = start
+    while i < len(args) and args[i] != "--":
+        nxt = probe.take(args, i)
+        if nxt is None:
+            return False
+        i = nxt  # a --backend with no value counts too: it is acq's flag
+    if i == start or i >= len(args):
+        return False
+    flags.misplaced = args[start:i]
+    flags.emit_json = flags.emit_json or probe.emit_json
+    return True
+
+
+def _scan_globals(args: list[str]) -> tuple[_Globals, list[str]]:
+    """Separate acq's global flags from the rest of argv (ADR-0038m §4).
+
+    Where a global flag is recognised depends on the verb:
+
+    * before the verb, always;
+    * for a verb acq does not own (passthrough), nowhere after it: the backend
+      gets everything after the verb verbatim;
+    * for ``exec``, between the verb and the sandbox name, but not after the
+      name, so ``acq exec box grep --json f`` runs ``grep --json f``. Only acq
+      flags between the name and a ``--`` are refused (see
+      :func:`_misplaced_exec_globals`);
+    * for every other verb, anywhere before the first bare ``--``.
+    """
+    flags = _Globals()
+    i = 0
+    while i < len(args) and (nxt := flags.take(args, i)) is not None:
+        i = nxt
+    if i >= len(args):
+        return flags, []
+    verb = args[i]
+    if not verb.startswith("-") and verb not in KNOWN_COMMANDS:
+        return flags, args[i:]
+    rest = [verb]
+    i += 1
+    while i < len(args) and args[i] != "--":
+        nxt = flags.take(args, i)
+        if nxt is not None:
+            i = nxt
             continue
-        if token == flag:
-            skip_next = True
-            continue
-        out.append(token)
-    return out
+        if verb == "exec":
+            # The sandbox name: everything after it is the command.
+            _misplaced_exec_globals(args, i + 1, flags)
+            break
+        rest.append(args[i])
+        i += 1
+    return flags, rest + args[i:]
 
 
 def build_parser() -> _Parser:
@@ -144,12 +208,15 @@ def build_parser() -> _Parser:
     sub.add_parser("help", help="show help")
 
     backend_parser = sub.add_parser(
-        "backend", help="detect and inspect the sandbox backends (sbx, msb)"
+        "backend", help="detect, inspect and select the sandbox backends (sbx, msb)"
     )
     backend_sub = backend_parser.add_subparsers(dest="backend_command", metavar="SUBCOMMAND")
     backend_sub.add_parser("list", help="list detected backends")
     check_parser = backend_sub.add_parser("check", help="fail closed on an unsupported backend version")
     check_parser.add_argument("name", help="backend name (sbx | msb)")
+    set_parser = backend_sub.add_parser("set", help="persist the default backend in config.yaml")
+    set_parser.add_argument("name", help="backend name (sbx | msb)")
+    backend_sub.add_parser("unset", help="clear the persisted default (fall back to auto-detect)")
 
     create_parser = sub.add_parser("create", help="create a sandbox (detached)")
     create_parser.add_argument("agent", nargs="?", help="agent to provision (e.g. opencode, shell)")
@@ -217,6 +284,10 @@ def build_parser() -> _Parser:
     common._secret_scope_args(secret_set, remainder_help="[-g | SANDBOX] SERVICE [--host HOST --env ENV]")
 
     secret_rm = secret_sub.add_parser("rm", help="remove a secret")
+    secret_rm.add_argument(
+        "--accept-unconfirmed", dest="accept_unconfirmed", action="append", metavar="NAME[,NAME]",
+        help="accept these sandboxes (with no acq binding record) staying unconfirmed (msb)",
+    )
     common._secret_scope_args(secret_rm, remainder_help="[-g | SANDBOX] SERVICE")
 
     secret_ls = secret_sub.add_parser("ls", help="list secrets (scope/service/value-state, never values)")
@@ -310,8 +381,15 @@ def _backend_list_data(active_backend: str | None) -> dict:
     }
 
 
-def run_backend_list(emit_json: bool, active_backend: str | None) -> int:
+def run_backend_list(emit_json: bool, active_backend: str | None, warnings: list[str] | None = None) -> int:
+    """List the backends. A read-only report: a problem such as an unknown
+    persisted backend is a warning (stderr, and ``data.warnings`` under
+    ``--json``), never a failure."""
     data = _backend_list_data(active_backend)
+    if warnings:
+        data["warnings"] = warnings
+        for warning in warnings:
+            print(f"acq: warning: {warning}", file=sys.stderr)
     if emit_json:
         print(json.dumps(envelope.success("backend list", data)))
         return errors.EXIT_SUCCESS
@@ -367,6 +445,59 @@ def run_backend_check(emit_json: bool, name: str) -> int:
     return errors.EXIT_FAILURE
 
 
+def run_backend_set(emit_json: bool, name: str) -> int:
+    """Persist ``name`` as the default backend (Bash ``acq backend set``).
+
+    Only the ``backend:`` key changes; every other config key is kept. The name
+    was validated by the dispatch, so an invalid backend is never persisted.
+    """
+    previous = config.read_field("backend")
+    try:
+        path = config.write_field("backend", name)
+    except OSError as exc:
+        return _config_write_failure("backend set", exc, emit_json)
+    data = {"backend": name, "previous": previous, "config_path": str(path)}
+    if emit_json:
+        print(json.dumps(envelope.success("backend set", data)))
+    else:
+        print(f"default backend set to '{name}' in {path}")
+    return errors.EXIT_SUCCESS
+
+
+def run_backend_unset(emit_json: bool) -> int:
+    """Clear the persisted default backend so acq auto-detects (Bash ``acq backend
+    unset``). Idempotent; other config keys are kept, and a config left holding
+    nothing else is removed, as Bash does.
+    """
+    path = config.config_path()
+    previous = config.read_field("backend")
+    if previous is not None:
+        try:
+            config.write_field("backend", "")
+            config.remove_if_only_marker()
+        except OSError as exc:
+            return _config_write_failure("backend unset", exc, emit_json)
+    data = {"backend": None, "previous": previous, "cleared": previous is not None, "config_path": str(path)}
+    if emit_json:
+        print(json.dumps(envelope.success("backend unset", data)))
+    elif previous is not None:
+        print(f"cleared the persisted default backend ({path}); acq will auto-detect.")
+    else:
+        print("no persisted default backend was set; acq already auto-detects.")
+    return errors.EXIT_SUCCESS
+
+
+def _config_write_failure(command: str, exc: OSError, emit_json: bool) -> int:
+    where = f" ({exc.filename})" if exc.filename else ""
+    return common._operational_failure(
+        command,
+        errors.FAILURE,
+        f"could not write {config.config_path()}: {exc.strerror or exc}{where}",
+        "check the permissions of the acq config directory and file, then retry",
+        emit_json,
+    )
+
+
 def _print_doctor_human(data: dict) -> None:
     print("acq: doctor")
     for check in data["checks"]:
@@ -419,6 +550,8 @@ def _is_mutating(parsed) -> bool:
         return parsed.provider_credential_command in ("set", "rm")
     if cmd in ("github-scope", "usai-rotate-api-key"):
         return True
+    if cmd == "backend":
+        return parsed.backend_command in ("set", "unset")
     if cmd == "kit":
         return parsed.kit_command in ("apply", "update")
     if cmd == "kit-source":
@@ -465,22 +598,19 @@ def _user_dirs_pre_step(emit_json: bool, command: str) -> int | None:
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
 
-    # Split at the first bare ``--`` so the exec/attach passthrough argv stays
-    # opaque: acq's global flags (--json, --backend) are recognized only before
-    # it (ADR-0038m §4 "exec argv after `--` is opaque").
-    head = args
-    tail: list[str] = []
-    for i, token in enumerate(args):
-        if token == "--":  # nosec B105 # argv separator
-            head = args[:i]
-            tail = args[i + 1 :]
-            break
-
-    emit_json = "--json" in head
-    backend_override = _flag_value(head, "--backend")
-    head = [a for a in head if a != "--json"]
-    head = _strip_flag(head, "--backend")
-    args = head if not tail else [*head, "--", *tail]
+    flags, args = _scan_globals(args)
+    emit_json = flags.emit_json
+    backend_override = flags.backend
+    if flags.backend_missing:
+        return common._usage_failure(None, "--backend requires a value (sbx or msb)", emit_json)
+    if flags.misplaced:
+        given = " ".join(flags.misplaced)
+        return common._usage_failure(
+            "exec",
+            f"'{given}' after the sandbox name would be sent to the guest as the command; "
+            f"put acq's flags before the verb (acq {given} exec NAME -- CMD...)",
+            emit_json,
+        )
 
     # Announced verbatim backend passthrough (spec user story #9): an unknown
     # subcommand is forwarded to the active backend binary with a stderr notice,
@@ -551,14 +681,27 @@ def _dispatch(parser: _Parser, parsed, emit_json: bool, backend_override: str | 
                 emit_json,
             )
         if parsed.backend_command == "list":
-            return run_backend_list(emit_json, common._resolve_active_backend(backend_override))
+            invalid = common._invalid_persisted_backend(backend_override)
+            warnings = [common._invalid_persisted_backend_message(invalid)] if invalid is not None else None
+            return run_backend_list(emit_json, common._resolve_active_backend(backend_override), warnings)
         if parsed.backend_command == "check":
             return run_backend_check(emit_json, parsed.name)
-        return common._usage_failure(
-            "backend",
-            "backend requires a subcommand: list | check",
-            emit_json,
-        )
+        if parsed.backend_command == "set" and parsed.name not in backends.BACKENDS:
+            # Refused before anything is written: an invalid backend is never
+            # persisted (ADR-0038m).
+            return common._usage_failure(
+                "backend set",
+                f"unknown backend: {parsed.name!r} (expected sbx or msb)",
+                emit_json,
+            )
+        if parsed.backend_command not in ("set", "unset"):
+            return common._usage_failure(
+                "backend",
+                "backend requires a subcommand: list | check | set | unset",
+                emit_json,
+            )
+        # set/unset write config.yaml, so they take the user-dirs and migration
+        # pre-steps below like every other mutating verb.
 
     if parsed.command == "doctor":
         return run_doctor(emit_json, parsed.name)
@@ -574,6 +717,11 @@ def _dispatch(parser: _Parser, parsed, emit_json: bool, backend_override: str | 
         pre_step = _migration_pre_step(emit_json, _command_label(parsed))
         if pre_step is not None:
             return pre_step
+
+    if parsed.command == "backend":
+        if parsed.backend_command == "set":
+            return run_backend_set(emit_json, parsed.name)
+        return run_backend_unset(emit_json)
 
     if parsed.command in ("create", "run", "ls", "stop", "rm", "exec", "attach", "shell", "cp", "ports"):
         _backend, exit_code = common._resolve_backend_for_lifecycle(backend_override, emit_json, parsed.command)

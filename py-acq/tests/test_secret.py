@@ -8,9 +8,9 @@ VALUE ever appears in argv or output — it flows only as the backend child's st
 
 Reconciliation with the real CLIs (msb 0.7.11 / sbx 0.50.1):
 
-* msb has NO standalone ``secret`` subcommand, so every secret verb fails closed
-  with ``unsupported_capability`` (secrets on msb are per-sandbox ``--secret
-  ENV@HOST`` bindings, a provider-credential concern).
+* msb has NO standalone ``secret`` subcommand: the secret verbs are served from
+  the acq secret store and delivered as per-sandbox ``--secret ENV@HOST``
+  bindings (``test_msb_secrets.py`` covers the binding path in depth).
 * sbx HAS ``secret set/ls/rm``, so the secret verbs (and ``secret ls``) work on
   sbx, with the value on the child's stdin only.
 """
@@ -73,47 +73,44 @@ def _invoke(capsys, *argv):
 
 
 # ---------------------------------------------------------------------------
-# msb: every secret verb fails closed with unsupported_capability (no `secret`
-# subcommand on the real msb).
+# msb: the secret verbs work from the acq store (value never in output).
 # ---------------------------------------------------------------------------
 
-def test_msb_secret_set_unsupported_value_never_in_argv_or_output(monkeypatch, tmp_path, capsys):
+def test_msb_secret_set_value_never_in_output(monkeypatch, tmp_path, capsys):
     _env_msb(monkeypatch, tmp_path)
     monkeypatch.setattr(sys, "stdin", io.StringIO("TOP-SECRET-VALUE\n"))
 
     rc, doc = _invoke(capsys, "--backend", "msb", "secret", "set", "-g", "usai", "--json")
     out, err = capsys.readouterr()
 
-    assert rc == 1
-    assert doc["error"]["code"] == "unsupported_capability"
+    assert rc == 0
+    assert doc["data"] == {"scope": "global", "scope_kind": "global", "service": "usai", "value_state": "set"}
     assert "TOP-SECRET-VALUE" not in out
     assert "TOP-SECRET-VALUE" not in err
 
 
-def test_msb_secret_has_unsupported_silent_stdout(monkeypatch, tmp_path, capsys):
+def test_msb_secret_has_is_silent(monkeypatch, tmp_path, capsys):
     _env_msb(monkeypatch, tmp_path)
 
     rc = cli.main(["--backend", "msb", "secret", "has", "-g", "usai"])
     out, err = capsys.readouterr()
-    assert rc == 1
-    assert out == ""
-    assert "not supported" in err
+    assert (rc, out, err) == (1, "", "")
 
 
-def test_msb_secret_rm_unsupported(monkeypatch, tmp_path, capsys):
+def test_msb_secret_rm_absent_is_secret_missing(monkeypatch, tmp_path, capsys):
     _env_msb(monkeypatch, tmp_path)
 
     rc, doc = _invoke(capsys, "--backend", "msb", "secret", "rm", "-g", "usai", "--json")
     assert rc == 1
-    assert doc["error"]["code"] == "unsupported_capability"
+    assert doc["error"]["code"] == "secret_missing"
 
 
-def test_msb_secret_ls_unsupported(monkeypatch, tmp_path, capsys):
+def test_msb_secret_ls_empty_store(monkeypatch, tmp_path, capsys):
     _env_msb(monkeypatch, tmp_path)
 
     rc, doc = _invoke(capsys, "--backend", "msb", "secret", "ls", "--json")
-    assert rc == 1
-    assert doc["error"]["code"] == "unsupported_capability"
+    assert rc == 0
+    assert doc["data"] == {"secrets": []}
 
 
 # ---------------------------------------------------------------------------
@@ -340,12 +337,12 @@ def test_secret_set_writes_the_acq_store_only_when_the_backend_accepts(monkeypat
     rc, doc = _invoke(capsys, "--backend", "sbx", "secret", "set", "box", "github", "--json")
     assert rc == 1 and "already exists" in doc["error"]["message"]
     assert not (_store_dir() / "acq.box.github").exists()
-    # msb declares secret-write unsupported (until its binding path lands):
-    # refused without storing anything.
+    # msb refuses a service it could never inject (no endpoint mapping) before
+    # the store is touched.
     _env_msb(monkeypatch, tmp_path)
     monkeypatch.setattr(sys, "stdin", io.StringIO("MSB-VALUE\n"))
-    rc, doc = _invoke(capsys, "--backend", "msb", "secret", "set", "mybox", "usai", "--json")
-    assert rc == 1 and doc["error"]["code"] == "unsupported_capability"
+    rc, doc = _invoke(capsys, "--backend", "msb", "secret", "set", "mybox", "orphan", "--json")
+    assert rc == 1 and doc["error"]["code"] == "validation_failed"
     assert sorted(p.name for p in _store_dir().iterdir()) == ["acq.usai"]
 
 

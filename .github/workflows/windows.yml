@@ -104,6 +104,7 @@ jobs:
             'scripts/qualify-backend-cell' \
             'scripts/setup-provider-input-validator' \
             'scripts/test-acq-lib.sh' \
+            'scripts/refresh-kitbundle' \
             'qualification' \
             'docs/qualification-ledger.json' \
             'test/bats/06-windows-install.bats' \

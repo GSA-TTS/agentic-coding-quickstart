@@ -12,6 +12,9 @@ from absolute ``PATH`` entries only, and launched by that path. On Windows only
 ``.exe`` files are accepted: a bare name passed to ``CreateProcess`` only ever
 matched ``.exe``, and batch files are run through ``cmd.exe`` with its own
 argument-quoting rules.
+
+It also owns :func:`run_foreground`, the one way acq hands the terminal to a
+backend session (``exec``, ``attach``, ``shell`` and passthrough).
 """
 
 from __future__ import annotations
@@ -20,7 +23,16 @@ import errno
 import ntpath
 import os
 import shlex
+import signal
+import subprocess
 import sys
+import threading
+from collections.abc import Callable
+from types import FrameType
+from typing import Any
+
+# What signal.getsignal returns and signal.signal accepts (Handlers is an int).
+_Handler = Callable[[int, FrameType | None], Any] | int
 
 
 def _is_windows() -> bool:
@@ -124,3 +136,118 @@ def override_command(value: str) -> list[str]:
             parts[0],
         )
     return parts
+
+
+def stdin_is_tty() -> bool:
+    """True when acq's stdin is a terminal, so a session can be given a PTY."""
+    try:
+        return os.isatty(0)
+    except OSError:
+        return False
+
+
+def terminal_env() -> list[str]:
+    """The host terminal's identity (TERM, COLORTERM) as ``NAME=value`` entries.
+
+    For a session that has a PTY: msb does not pass the caller's terminal type
+    into the guest, so a TUI agent would see ``TERM=linux`` and drop to sixteen
+    colours. Only variables the host has set are returned; nothing is invented.
+    """
+    entries = []
+    for var in ("TERM", "COLORTERM"):
+        value = os.environ.get(var)
+        if value and not any(ch in value for ch in "\n\r\t"):
+            entries.append(f"{var}={value}")
+    return entries
+
+
+def exit_status(returncode: int) -> int:
+    """Map a child's return code to a shell-style exit status.
+
+    ``subprocess`` reports a child killed by signal N as ``-N``; a shell reports
+    ``128 + N`` (143 for SIGTERM, 130 for SIGINT). Passing ``-N`` on to
+    ``SystemExit`` would truncate it to ``256 - N`` instead.
+    """
+    return 128 - returncode if returncode < 0 else returncode
+
+
+# Set by _ignore_interrupt when acq itself received SIGINT during the current
+# foreground run (from the terminal's Ctrl-C, or a kill aimed at acq).
+_interrupted = False
+
+
+def _ignore_interrupt(_signum: int, _frame: FrameType | None) -> None:
+    """SIGINT handler used while a foreground child runs: note it, do nothing."""
+    global _interrupted
+    _interrupted = True
+
+
+def run_foreground(argv: list[str], *, stdout: int | None = None) -> int:
+    """Run ``argv`` in the foreground and return its shell-style exit status.
+
+    The child inherits acq's terminal and process group, so the terminal's
+    Ctrl-C reaches it directly and it decides what an interrupt means (an agent
+    TUI cancels its current step; a shell redraws its prompt). acq only waits.
+    ``subprocess.run`` would instead turn the interrupt into
+    ``KeyboardInterrupt``, SIGKILL the child and print a traceback.
+
+    While the child runs, SIGINT in acq goes to a handler that does nothing. It
+    is a real handler rather than ``SIG_IGN`` on purpose: an ignored signal stays
+    ignored across ``exec`` and would make the child deaf to Ctrl-C, while a
+    caught one is reset to the default in the child. ``OSError`` from starting
+    the program propagates to the caller.
+
+    When the child dies of SIGINT *and* acq received SIGINT as well (a Ctrl-C
+    for the whole foreground job), acq dies of SIGINT too, as a shell does (see
+    :func:`_die_of_interrupt`). In that case it prints nothing more: under
+    ``--json`` there is no envelope. A SIGINT aimed only at the child gives an
+    ordinary status 130, and the caller reports it as usual.
+    """
+    global _interrupted
+    _interrupted = False
+    previous = _hold_interrupt()
+    try:
+        child = subprocess.Popen(argv, stdout=stdout)
+        returncode = child.wait()
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGINT, previous)
+    if returncode == -signal.SIGINT and _interrupted and previous is not None and not _is_windows():
+        _die_of_interrupt()
+    return exit_status(returncode)
+
+
+def _die_of_interrupt() -> None:
+    """End acq by SIGINT, as a shell does when its foreground job was interrupted.
+
+    A calling shell loop (``for f in ...; do acq exec ...; done``) stops on
+    Ctrl-C only if its child died *of* SIGINT; an ordinary exit with status 130
+    tells it the child handled the interrupt, and the loop carries on. If the
+    signal does not end the process, the caller falls back to status 130.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except (OSError, ValueError):
+            pass
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    os.kill(os.getpid(), signal.SIGINT)
+
+
+def _hold_interrupt() -> _Handler | None:
+    """Install :func:`_ignore_interrupt` for SIGINT; return the handler it replaced.
+
+    Returns ``None`` (and changes nothing) off the main thread, where Python
+    does not allow signal handlers to be set, and when SIGINT is already ignored
+    (acq started in the background, or under ``nohup``): the child then inherits
+    the same disposition, as it would from a shell.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        return None
+    previous = signal.getsignal(signal.SIGINT)
+    if previous == signal.SIG_IGN:
+        return None
+    signal.signal(signal.SIGINT, _ignore_interrupt)
+    # getsignal returns None for a handler not installed from Python; put the
+    # default back in that case rather than leaving ours behind.
+    return signal.SIG_DFL if previous is None else previous

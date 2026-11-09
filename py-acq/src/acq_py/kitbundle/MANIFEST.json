@@ -1,0 +1,108 @@
+{
+  "schema": 1,
+  "repository": "github.com/GSA-TTS/agentic-coding-patterns",
+  "ref": "941a286f912b99475429c3c00db49a99af5b241e",
+  "directory": "integrations/isolation/acq-kits",
+  "kits": {
+    "zscaler-ca-certificate": {
+      "files": {
+        "files/home/zscaler-ca.crt": {
+          "git_blob": "45e3a29f930dddff12e99b90611a452943475cab",
+          "size": 1732,
+          "upstream_mode": "100644"
+        },
+        "spec.yaml": {
+          "git_blob": "68f1f922d96abf1ff7e77f5ecd0f4c882fc8c5c9",
+          "size": 5007,
+          "upstream_mode": "100644"
+        }
+      }
+    },
+    "usai-provider": {
+      "files": {
+        "files/home/usai-config/model-catalog-snapshot.json": {
+          "git_blob": "2ba8d8090cb86a0af6a626f6735636d463bf4e30",
+          "size": 8454,
+          "upstream_mode": "100644"
+        },
+        "provider-input.json": {
+          "git_blob": "66d140ba9d7fbeda0725583b83d07113e05f2266",
+          "size": 332,
+          "upstream_mode": "100644"
+        },
+        "provider-input/facts.json": {
+          "git_blob": "5fbbc2fae4063707174c925bfbf8ffac2c850112",
+          "size": 272,
+          "upstream_mode": "100644"
+        },
+        "spec.yaml": {
+          "git_blob": "742ae6052975be3816e5f2dc8f04e99cf77b1e4e",
+          "size": 5340,
+          "upstream_mode": "100644"
+        }
+      }
+    },
+    "agentic-coding-playbook": {
+      "files": {
+        "files/home/playbook-clone.sh": {
+          "git_blob": "fb9afd54c6d92c55f11dc1b0f1716926281b0399",
+          "size": 15067,
+          "upstream_mode": "100644"
+        },
+        "spec.yaml": {
+          "git_blob": "f914c3d4bae87eeb4fe53bbb0381a9cd6523773c",
+          "size": 5856,
+          "upstream_mode": "100644"
+        }
+      }
+    },
+    "git-ssh-sign": {
+      "files": {
+        "LICENSE": {
+          "git_blob": "833b9a3d408851ce75a8a0a301a3f59b8481ebe5",
+          "size": 10758,
+          "upstream_mode": "100644"
+        },
+        "NOTICE": {
+          "git_blob": "4f93f9bd80692e509d08cf1de3765b49dc091d0a",
+          "size": 1139,
+          "upstream_mode": "100644"
+        },
+        "files/home/.config/git/ssh-signing-key-command": {
+          "git_blob": "a38c9933f32560bd7f59f99fbf7f881c51c388b2",
+          "size": 1196,
+          "upstream_mode": "100755"
+        },
+        "spec.yaml": {
+          "git_blob": "d11e3e97a36f3e552a9ef7e466427bf0bdeac387",
+          "size": 3369,
+          "upstream_mode": "100644"
+        }
+      }
+    },
+    "opencode": {
+      "files": {
+        "files/home/opencode-config/base-config.jsonc": {
+          "git_blob": "a040bfcf4f4022926f7332881a2be08e7d63e87c",
+          "size": 3185,
+          "upstream_mode": "100644"
+        },
+        "files/home/opencode-config/render-provider-config.mjs": {
+          "git_blob": "81bbcbeed49976004613f99a63e63d7b1eea2460",
+          "size": 43386,
+          "upstream_mode": "100644"
+        },
+        "files/home/opencode-install.sh": {
+          "git_blob": "6ba74443480496ac2f500a8e5664cedfb3e1a573",
+          "size": 14019,
+          "upstream_mode": "100644"
+        },
+        "spec.yaml": {
+          "git_blob": "3ef248773117f5aec06742442e1bce136e723365",
+          "size": 8840,
+          "upstream_mode": "100644"
+        }
+      }
+    }
+  }
+}

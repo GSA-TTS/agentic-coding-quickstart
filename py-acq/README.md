@@ -89,16 +89,37 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   (ADR-0038m §2).
 * `acq-py stop NAME [--json]` and `acq-py rm NAME [--json]` — stop (state
   preserved) or remove a sandbox and its record.
-* `acq-py exec NAME -- CMD... [--json]` — run a command non-interactively inside
+* `acq-py [--json] exec NAME -- CMD...` — run a command non-interactively inside
   a sandbox as the unprivileged `agent` user; the child's exit status is acq's
   exit status (ADR-0038m §1). In `--json` mode the child's stdout is routed to
   stderr and one success envelope carrying `exit_code` is emitted on stdout.
+  acq's own flags go before `NAME`: everything after it, including `--json` or
+  `--backend`, is the guest command.
 * `acq-py attach NAME [--json]` — attach to an existing sandbox, launching the
   recorded agent. The agent is read from host-authoritative state only; there is
   no agent-to-shell fallback (ADR-0038m §48). The non-interactive contract is
   deterministic: fail closed on a missing sandbox or a missing/unreadable host
-  record, propagate status; true PTY allocation is deferred to the live tier.
-* `acq-py shell NAME [--json]` — open a login shell (`/bin/sh -l`) in a sandbox.
+  record, propagate status.
+* `acq-py shell NAME [--json]` — open a shell in a sandbox: on msb the agent
+  user's passwd shell as a login shell, on sbx `bash`.
+* Sessions: when stdin is a terminal, `attach`, `shell` and `run` give the
+  session a PTY (`msb exec -t`, `sbx exec -it`) and pass the host's `TERM` and
+  `COLORTERM`; without one there is no PTY. Every session (`exec` too) gets
+  `HOME=/home/agent` and the host git identity (`GIT_AUTHOR_*`,
+  `GIT_COMMITTER_*`, and `EMAIL` or the global `user.email`). On msb, `attach`,
+  `shell` and `run` also get `SHELL`, with or without a PTY; sbx templates set
+  their own. `SSH_AUTH_SOCK` is passed only when the sandbox records a forwarded
+  ssh-agent socket, never the host's own. A child killed by signal N gives exit
+  status `128+N`. Ctrl-C goes to the child rather than killing it; when the
+  child dies of a Ctrl-C that acq received too, acq dies of SIGINT as well, so a
+  calling shell loop stops, and under `--json` no envelope is printed. A SIGINT
+  sent only to the child gives an ordinary `130` with the envelope.
+* Flag position: acq's own flags (`--json`, `--backend NAME`) may go anywhere
+  before `--` for most verbs, so `acq ls --json` and `acq attach box --json`
+  work. Only two places are strict: after the `exec` sandbox name, where tokens
+  are the guest command (and `acq exec NAME --json -- CMD`, with nothing but
+  acq flags before `--`, is refused as a usage error), and after a passthrough
+  verb, where everything is forwarded to the backend.
 * `acq-py cp SRC DST [--json]` — copy between a native host path and a POSIX
   guest path. Exactly one side is a `NAME:/guest/path` reference; host and guest
   types stay distinct (ADR-0038m §4). The host side is forwarded verbatim to the
@@ -147,13 +168,25 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   acq secret store, as Bash `acq secret import` does. Needs no backend.
   Interactive by default (asks per service on a terminal, skips otherwise);
   `--all` never overwrites, `--force` does, `--dry-run` writes nothing.
-* `acq-py secret rm (-g | SANDBOX) SERVICE [--json]` — remove a secret. An absent
-  secret fails closed with the `secret_missing` code; a backend that cannot answer
-  fails closed with its accurate code (`backend_not_found`/`failure`) and never
-  deletes (ADR-0040m). On sbx a built-in is removed by name and a custom secret by
-  the placeholder found for its env var (`sbx secret rm --placeholder P -f`); a
-  single bare token is a raw placeholder. Every sbx removal passes `-f` with stdin
-  closed, so sbx's confirm prompt never waits unseen.
+* `acq-py secret rm (-g | SANDBOX) SERVICE [--accept-unconfirmed NAME[,NAME]]
+  [--json]` — remove a secret. An absent secret fails closed with the
+  `secret_missing` code; a backend that cannot answer fails closed with its
+  accurate code (`backend_not_found`/`failure`) and never deletes (ADR-0040m).
+  On msb the secret is first unbound from every sandbox acq recorded as holding
+  it, and swept best-effort from sandboxes acq has no record for (created by the
+  Bash `acq` or by `msb` directly). If a binding cannot be removed, or an
+  unrecorded sandbox cannot be confirmed unbound, the secret is kept and the
+  command fails with `unbind_failed`, naming the sandboxes.
+  `--accept-unconfirmed NAME[,NAME]` (msb only) accepts the named unrecorded
+  sandboxes staying unconfirmed: the removal then succeeds, the JSON data lists
+  them under `unconfirmed`, and a note on stderr says they may still hold the
+  binding. It never covers a recorded binding that failed. It is a stopgap
+  until a live msb check settles what removing an unbound variable does (see
+  `docs/KNOWN_FAILURE_MODES.md`), and can be retired then.
+  On sbx a built-in is removed by name and a custom secret by the placeholder
+  found for its env var (`sbx secret rm --placeholder P -f`); a single bare token
+  is a raw placeholder. Every sbx removal passes `-f` with stdin closed, so sbx's
+  confirm prompt never waits unseen.
 * `acq-py secret ls [(-g | SANDBOX)] [--json]` — list secrets with
   `scope`/`scope_kind`/`service`/`value_state` (set/unset) only, never a value
   (ADR-0038m §2 secret ls required data). On sbx a custom secret is listed by its
@@ -180,12 +213,14 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   "absent".
 * Any other subcommand is forwarded verbatim to the active backend binary with an
   announced stderr notice, preserving its exit status (spec user story #9).
+  Everything after the verb is forwarded, so acq's `--json`/`--backend` must
+  come before it.
 * Exit codes (ADR-0038m §1): `0` success, `2` usage, `1` operational. A
   well-formed command acq cannot carry out (for example `doctor NAME` while no
   backend adapter is present) fails closed with exit `1` and the
   `unsupported_capability` code (ADR-0040m). The lifecycle verbs add
   `sandbox_not_found`, `sandbox_exists`, `validation_failed`, and `timeout`; the
-  secret verbs add `secret_missing` and `secret_unreadable`; the state-migration
+  secret verbs add `secret_missing`, `secret_unreadable` and `unbind_failed`; the state-migration
   slice adds `state_schema_unsupported` (a newer/unparseable/`min_reader`
   record), `migration_locked` (the migration lock was held by a concurrent
   invocation), `migration_failed` (an atomic record migration could not verify),
@@ -229,6 +264,31 @@ existing quarterly review cadence (the same cadence that governs re-verifying
 backend patterns and Tier-3 transcripts), with an immediate out-of-band patch
 for any critical/high CVE affecting the bundled CPython or wheelhouse. The
 developer is the decider here; this proposal is flagged rather than adopted.
+
+## Built-in kit bundle
+
+The built-in kits (the four support kits and the `opencode` agent kit) ship as
+package data in `src/acq_py/kitbundle/`, a byte-exact copy of the Patterns
+control plane at `CONTROL_PLANE_REF` (`src/acq_py/kits.py`, equal to
+`PATTERNS_KIT_REF` in `acq.backends/common.sh`). `kitbundle/MANIFEST.json`
+records the ref and each file's git blob id and size; `upstream_mode` is
+informational. `src/acq_py/kitspec.py` parses and selects kits from it, so acq
+never fetches a built-in kit during ordinary operation (ADR-0042m).
+
+To bump the pin, change both refs, then regenerate the bundle and commit it
+with the bump:
+
+```sh
+scripts/refresh-kitbundle                    # reads the pinned tree through `gh api`
+scripts/refresh-kitbundle --checkout DIR     # or from a Patterns clone that has the pin
+python -m pytest py-acq/tests/test_kitspec.py -q
+```
+
+The tests check the bundled files against the manifest and the refs against
+each other. The networked pre-commit job (`.github/workflows/pre-commit.yml`)
+also runs `scripts/refresh-kitbundle --check` against its checkout of Patterns
+at the pin, which fails when any manifest blob id differs from
+`git ls-tree -r <ref>`.
 
 ## Testing
 

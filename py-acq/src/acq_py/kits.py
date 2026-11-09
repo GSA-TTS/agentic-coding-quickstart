@@ -119,7 +119,9 @@ AGENT_KIT_NAMES = tuple(AGENT_KITS)
 # built-in kit's ``caps.network.allow`` list, copied verbatim from its pinned
 # ``spec.yaml`` at ``KIT_NETWORK_ALLOW_REF``. acq never fetches a kit source
 # during ordinary operation (ADR-0042m offline), so the create-time egress
-# allowlist is data held here rather than read from a fetched kit. The msb
+# allowlist is data held here rather than read from a fetched kit. The packaged
+# kit bundle (``kitspec.bundle_network_allow``) carries the same specs, and
+# tests/test_kitspec.py fails when this table and the bundle disagree. The msb
 # adapter translates these entries exactly as the Bash adapter's
 # ``_acq_msb_net_rules_into`` does.
 #

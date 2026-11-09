@@ -15,14 +15,15 @@ Status vocabulary (stable tokens, one scale for both overall and per-check):
 The overall ``status`` is derived from the checks: ``fail`` (any fail) outranks
 ``warn`` (any warn) outranks ``pass``.
 
-The foundation slice knows only two honest, offline checks: the managed runtime
-(ADR-0042m) and backend-adapter availability (ADR-0040m). Both are deterministic
+The checks are the managed runtime (ADR-0042m), backend-adapter availability
+(ADR-0040m), state-tree migration health, and the ``config.yaml`` schema marker
+and persisted backend (ADR-0041m, ADR-0038m). All are deterministic, read-only
 and never touch the network, so ``doctor`` is a safe diagnostic in any context.
 """
 
 from __future__ import annotations
 
-from . import migration, runtime, userdirs
+from . import backends, config, migration, runtime, userdirs
 
 PASS = "pass"  # nosec B105 # a check status
 WARN = "warn"
@@ -63,7 +64,26 @@ def backend_check() -> dict:
 
 def doctor_checks() -> list[dict]:
     """Return the ordered check list for the current build."""
-    return [runtime_check(), backend_check(), state_check()]
+    return [runtime_check(), backend_check(), state_check(), config.doctor_check(), persisted_backend_check()]
+
+
+def persisted_backend_check() -> dict:
+    """Report the ``backend:`` value ``backend set`` persists in config.yaml.
+
+    An unknown value fails the check: every verb that needs a backend refuses
+    while it is there (it is never skipped in favour of auto-detect).
+    """
+    value = config.read_field("backend")  # an unresolvable config path reads as None
+    if value is None:
+        return {"id": "config-backend", "status": PASS, "message": "no persisted backend; acq auto-detects"}
+    if value not in backends.BACKENDS:
+        return {
+            "id": "config-backend",
+            "status": FAIL,
+            "message": f"config.yaml sets an unknown backend: {value!r} (expected sbx or msb)",
+            "remediation": "run 'acq backend set msb' or 'acq backend set sbx' (or 'acq backend unset' to auto-detect)",
+        }
+    return {"id": "config-backend", "status": PASS, "message": f"persisted backend: {value}"}
 
 
 def state_check() -> dict:
