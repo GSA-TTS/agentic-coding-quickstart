@@ -599,7 +599,7 @@ def _rotate_result(results: list[dict], emit_json: bool) -> int:
         return errors.EXIT_SUCCESS
     print("rotated the USAi API key (stored in the acq secret store).")
     for result in results:
-        print(f"  {result['backend']}: re-fed {', '.join(result['refed']) or 'no sandbox-specific entries'}")
+        print(f"  {result['backend']}: re-fed: {', '.join(result['refed']) or 'none'}")
         if result["kept_own"]:
             print(f"  {result['backend']}: kept their own usai key: {', '.join(result['kept_own'])}")
     return errors.EXIT_SUCCESS

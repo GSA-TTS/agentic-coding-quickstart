@@ -189,7 +189,7 @@ def test_msb_rotation_human_output_never_shows_the_key(monkeypatch, tmp_path, ca
     _msb_running(monkeypatch, tmp_path, "a")
     rc, _doc, out, err = _rotate(capsys, monkeypatch, "msb", json_out=False)
     assert rc == 0, err
-    assert "rotated the USAi API key" in out and "msb: re-fed a" in out
+    assert "rotated the USAi API key" in out and "msb: re-fed: a" in out
     _assert_never_leaked(tmp_path, [argv for argv, _ in msb_children], out, err)
 
 
