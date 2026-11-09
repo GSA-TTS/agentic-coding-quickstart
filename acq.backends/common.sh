@@ -5890,12 +5890,20 @@ warn_if_no_ssh_signing_key() {
   echo "      Then commit as usual. (You can still work; only committing needs it.)" >&2
 }
 
-# _acq_host_git_config_value KEY — the user's global git value for KEY. Read
-# through _acq_git_host so an inherited GIT_CONFIG (which makes `git config
-# --global` fail with "only one config file at a time") cannot hide it.
+# _acq_host_git_config_value KEY — the user's global git value for KEY. An
+# inherited GIT_CONFIG makes `git config --global` fail ("only one config file
+# at a time"), so it is unset in a subshell first. Nothing else the caller's
+# environment can carry redirects a --global read: GIT_DIR and the like name a
+# repository, which this read never opens, and command-scope config is not
+# consulted when a file scope is given. GIT_CONFIG_GLOBAL is kept, since it
+# names the user's own global file. Self-contained on purpose: callers (and the
+# Python golden tests) lift this function on its own.
 _acq_host_git_config_value() {
   command -v git >/dev/null 2>&1 || return 0
-  HOME="${HOME:-}" _acq_git_host keep config --global --get "$1" 2>/dev/null || true
+  (
+    unset GIT_CONFIG
+    HOME="${HOME:-}" git config --global --get "$1"
+  ) 2>/dev/null || true
 }
 
 _acq_git_identity_value_is_safe() {
