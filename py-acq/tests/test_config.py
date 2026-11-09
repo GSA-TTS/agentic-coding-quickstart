@@ -15,11 +15,12 @@ import stat
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
 
-from acq_py import config, doctor
+from acq_py import config, doctor, migration
 from acq_py.commands import common
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -71,6 +72,7 @@ def _run_cli(*args: str) -> subprocess.CompletedProcess:
         (b"  backend: sbx\n", None),
         (b"backends: sbx\n", None),
         (b"schema: 1\nextra_kits: paseo\n", None),
+        (b'backend: "a"#b\n', '"a"#b'),
     ],
 )
 def test_read_field_matches_bash_semantics(content, expected):
@@ -270,7 +272,9 @@ def _crash_at(k: int, mode: str) -> subprocess.CompletedProcess:
 @pytest.mark.parametrize("mode", ["before", "after"])
 def test_migration_crash_at_any_step_leaves_config_intact(mode):
     path = config.config_path()
+    backup = path.with_name("config.yaml.bak.0")
     reached_end = False
+    crashed_before_backup_unlink = False
     for k in range(1, 30):
         if path.parent.exists():
             shutil.rmtree(path.parent)
@@ -279,17 +283,23 @@ def test_migration_crash_at_any_step_leaves_config_intact(mode):
         proc = _crash_at(k, mode)
         assert path.exists(), f"config.yaml missing after a crash at commit point {k} ({mode})"
         assert path.read_bytes() in (_LEGACY, _MIGRATED), f"torn config.yaml at commit point {k} ({mode})"
+        if proc.returncode == 70 and path.read_bytes() == _MIGRATED and backup.exists():
+            crashed_before_backup_unlink = True
 
-        # The next run converges: the config is migrated, nothing is lost.
+        # The next run converges: the config is migrated, nothing is lost, and a
+        # backup the crash left behind is cleaned up.
         assert config.migrate_config() in ("none", "migrated")
         assert path.read_bytes() == _MIGRATED
         assert config.config_schema() == config.CONFIG_SCHEMA
         assert _mode(path) == 0o600
+        assert not backup.exists(), f"leftover backup after a crash at commit point {k} ({mode})"
         if proc.returncode == 0 and "done" in proc.stdout:
             reached_end = True
             break
         assert proc.returncode == 70, proc.stderr
     assert reached_end, "migrate_config never completed without a crash"
+    if mode == "before":
+        assert crashed_before_backup_unlink, "the backup-unlink step was never interrupted"
 
 
 def test_migration_interrupted_in_process_leaves_config_intact(monkeypatch):
@@ -374,9 +384,50 @@ def test_invalid_env_falls_through_to_persisted_backend(both_installed, monkeypa
     assert common._resolve_active_backend(None) == "sbx"
 
 
-def test_invalid_persisted_backend_is_dropped(both_installed):
+def test_invalid_persisted_backend_is_not_skipped_for_auto_detect(both_installed):
     _write_config(b"backend: podman\n")
-    assert common._resolve_active_backend(None) == "msb"
+    assert common._resolve_active_backend(None) is None
+    assert common._invalid_persisted_backend(None) == "podman"
+    # A flag or a valid ACQ_BACKEND means the persisted value is not consulted.
+    assert common._invalid_persisted_backend("msb") is None
+
+
+def test_invalid_persisted_backend_fails_mutating_verbs_closed(both_installed):
+    _write_config(b"backend: podman\n")
+    proc = _run_cli("rm", "nope", "--json")
+    assert proc.returncode == 1, proc.stderr
+    error = json.loads(proc.stdout)["error"]
+    assert error["code"] == "backend_not_found"
+    assert "config.yaml" in error["message"] and "'podman'" in error["message"]
+    assert "acq backend set" in error["remediation"]
+
+
+def test_invalid_persisted_backend_fails_passthrough_closed(both_installed):
+    _write_config(b"backend: podman\n")
+    proc = _run_cli("frobnicate", "--json")
+    assert proc.returncode == 1
+    assert json.loads(proc.stdout)["error"]["code"] == "backend_not_found"
+
+
+def test_invalid_persisted_backend_is_a_warning_for_backend_list(both_installed):
+    _write_config(b"backend: podman\n")
+    proc = _run_cli("backend", "list", "--json")
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(proc.stdout)["data"]
+    assert data["active_backend"] is None
+    assert "'podman'" in data["warnings"][0]
+    assert "acq: warning:" in proc.stderr
+
+
+def test_invalid_persisted_backend_fails_the_doctor_check():
+    _write_config(b"backend: podman\n")
+    check = doctor.persisted_backend_check()
+    assert check["id"] == "config-backend" and check["status"] == "fail"
+    assert "acq backend set" in check["remediation"]
+    _write_config(b"backend: sbx\n")
+    assert doctor.persisted_backend_check()["status"] == "pass"
+    proc = _run_cli("doctor", "--json")
+    assert proc.returncode == 0
 
 
 # ---------------------------------------------------------------------------
@@ -465,6 +516,7 @@ _PARITY_INPUTS = [
     b"backend: sbx\nbackend: msb\n  backend: indented\nbackendx: no",
     b"# comment only\nfuture: {nested: 1}\nbackend:\n",
     b"backend: a#b\nextra_kits: x # y # z\n",
+    b'backend: "a"#b\nextra_kits: \'x\'#y # z\n',
 ]
 
 
@@ -515,3 +567,142 @@ def test_python_backend_set_round_trips_through_bash(both_installed):
     assert common._resolve_active_backend(None) == "msb"
     assert config.config_schema() == config.CONFIG_SCHEMA
     assert config.read_field("extra_kits") == "paseo"
+
+
+# ---------------------------------------------------------------------------
+# Read-only configs, the seed seam, leftovers, and doctor's unreadable cases.
+# ---------------------------------------------------------------------------
+
+_STUB_MSB = {"ACQ_MSB_BIN": "__stub__", "ACQ_MSB_VERSION": "0.7.7", "ACQ_SBX_INSTALLED": "0"}
+
+
+def _read_only_dotfile(tmp_path: Path) -> Path:
+    """A legacy config.yaml symlinked to a read-only file in a read-only directory."""
+    store = tmp_path / "store"
+    store.mkdir()
+    target = store / "acq.yaml"
+    target.write_bytes(_LEGACY)
+    target.chmod(0o444)
+    store.chmod(0o555)
+    link = config.config_path()
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(target)
+    if os.access(store, os.W_OK):
+        store.chmod(0o755)
+        pytest.skip("running with privileges that bypass file modes")
+    return target
+
+
+@POSIX_ONLY
+def test_migration_skips_a_read_only_symlink_target(tmp_path, capsys):
+    target = _read_only_dotfile(tmp_path)
+    try:
+        assert config.migrate_config() == "skipped"
+        assert target.read_bytes() == _LEGACY
+        assert config.config_path().is_symlink()
+        assert not config.config_path().with_name("config.yaml.bak.0").exists()
+        note = capsys.readouterr().err
+        assert str(target) in note and "schema: 1" in note
+        # Still readable, and doctor keeps warning.
+        assert config.read_field("backend") == "msb"
+        assert config.doctor_check()["status"] == "warn"
+    finally:
+        target.parent.chmod(0o755)
+
+
+@POSIX_ONLY
+def test_mutating_verb_runs_past_a_read_only_legacy_config(tmp_path, monkeypatch):
+    target = _read_only_dotfile(tmp_path)
+    try:
+        for name, value in _STUB_MSB.items():
+            monkeypatch.setenv(name, value)
+        proc = _run_cli("--backend", "msb", "rm", "nope", "--json")
+        assert proc.returncode == 1
+        assert json.loads(proc.stdout)["error"]["code"] == "sandbox_not_found", proc.stdout
+        assert "read-only" in proc.stderr and str(target) in proc.stderr
+    finally:
+        target.parent.chmod(0o755)
+
+
+def test_config_seed_is_never_materialized_on_a_read_only_path(monkeypatch):
+    monkeypatch.setenv("ACQ_CONFIG_SEED", "backend: sbx")
+    for name, value in _STUB_MSB.items():
+        monkeypatch.setenv(name, value)
+    assert _run_cli("backend", "list", "--json").returncode == 0
+    assert _run_cli("doctor", "--json").returncode == 0
+    assert config.read_field("backend") is None
+    assert not config.config_path().exists()
+
+
+def test_config_seed_is_materialized_by_the_migration_pre_step_in_stub_mode(monkeypatch):
+    monkeypatch.setenv("ACQ_CONFIG_SEED", "backend: sbx")
+    migration.migrate_tree()
+    assert not config.config_path().exists(), "seed honoured without a stub backend"
+
+    monkeypatch.setenv("ACQ_MSB_BIN", "__stub__")
+    migration.migrate_tree()
+    path = config.config_path()
+    assert config.read_field("backend") == "sbx"
+    assert config.config_schema() == config.CONFIG_SCHEMA  # migrated in the same pre-step
+    if os.name == "posix":
+        assert _mode(path.parent) == 0o700
+        assert _mode(path) == 0o600
+
+
+def test_leftover_backup_is_removed_once_the_config_is_marked():
+    path = _write_config(_MIGRATED)
+    backup = path.with_name("config.yaml.bak.0")
+    backup.write_bytes(_LEGACY)
+    assert config.migrate_config() == "none"
+    assert not backup.exists()
+    assert path.read_bytes() == _MIGRATED
+
+
+@pytest.mark.parametrize("content", [_MIGRATED, _LEGACY])
+def test_a_directory_in_place_of_the_backup_is_refused_by_name(content):
+    path = _write_config(content)
+    backup = path.with_name("config.yaml.bak.0")
+    backup.mkdir()
+    with pytest.raises(migration.MigrationError) as info:
+        migration.migrate_tree()
+    assert info.value.code == "migration_failed"
+    assert "config.yaml.bak.0" in info.value.message
+    assert "config.yaml.bak.0" in (info.value.remediation or "")
+    assert path.read_bytes() == content
+
+
+def test_stale_temp_files_are_removed_and_fresh_ones_kept():
+    path = _write_config(_MIGRATED)
+    stale = [path.with_name("config.yaml.tmp.abc123"), path.with_name("config.yaml.bak.0.tmp.def456"),
+             path.with_name("config.yaml.tmp.4242")]
+    fresh = path.with_name("config.yaml.tmp.xyz789")
+    old = time.time() - 3600
+    for leftover in [*stale, fresh]:
+        leftover.write_bytes(b"partial")
+    for leftover in stale:
+        os.utime(leftover, (old, old))
+    config.migrate_config()
+    assert not any(p.exists() for p in stale)
+    assert fresh.exists()
+
+
+@POSIX_ONLY
+def test_doctor_fails_on_an_unreadable_config():
+    path = _write_config(b"schema: 1\n")
+    path.chmod(0o000)
+    try:
+        if os.access(path, os.R_OK):
+            pytest.skip("running with privileges that bypass file modes")
+        check = config.doctor_check()
+        assert check["status"] == "fail" and "cannot read" in check["message"]
+    finally:
+        path.chmod(0o600)
+
+
+@POSIX_ONLY
+def test_doctor_fails_on_a_dangling_symlink(tmp_path):
+    link = config.config_path()
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(tmp_path / "gone.yaml")
+    check = config.doctor_check()
+    assert check["status"] == "fail" and "dangling symlink" in check["message"]

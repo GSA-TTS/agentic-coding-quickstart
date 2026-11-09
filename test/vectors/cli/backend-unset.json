@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "id": "cli/backend-unset",
-  "oracle": "spec backend seam: `backend unset` clears only the persisted default backend so acq falls back to auto-detect",
+  "oracle": "spec backend seam: `backend unset` clears only the persisted default backend so acq falls back to auto-detect (config seeded through the migration pre-step; the seed is honoured only in stub mode)",
   "tier": 1,
   "backend": null,
   "platform": "any",
@@ -13,6 +13,7 @@
       "--json"
     ],
     "env": {
+      "ACQ_MSB_BIN": "__stub__",
       "ACQ_CONFIG_SEED": "backend: sbx"
     },
     "unset": [

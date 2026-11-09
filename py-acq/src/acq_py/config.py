@@ -30,21 +30,28 @@ state). Both carry their own ``schema`` marker; the two never share a number spa
 with the structured-output ``schema_version`` in ``envelope.py``.
 
 ``ACQ_CONFIG_SEED`` is an internal test seam (never a secret, never written to
-output): when set and no ``config.yaml`` exists yet, its text is written there
-before the first read, so a single-invocation contract vector can start from a
-given config (mirrors ``ACQ_STATE_SEED``). Keep a vector's seed on one line: the
-Bash vector runner reads environment values line by line.
+output): when set and no ``config.yaml`` exists yet, the migration pre-step of a
+mutating verb writes its text there, so a single-invocation contract vector can
+start from a given config (mirrors ``ACQ_STATE_SEED``). Read-only paths never
+materialize it, and it is honoured only while a backend runs the bundled
+``__stub__`` (the same gate as the backend detection overrides), so a stray export
+cannot write a real user's config. Keep a vector's seed on one line: the Bash
+vector runner reads environment values line by line.
 """
 
 from __future__ import annotations
 
+import errno
+import glob
 import os
 import re
 import stat
+import sys
 import tempfile
+import time
 from pathlib import Path
 
-from . import userdirs
+from . import backends, userdirs
 
 CONFIG_SCHEMA = 1
 
@@ -70,6 +77,14 @@ _DOUBLE_QUOTED_RE = re.compile(rb'"[^"]*"')
 # A new file, and the backup migration keeps while it runs, are owner-only.
 _NEW_FILE_MODE = 0o600
 
+# Write failures that mean "this file cannot be changed" (a read-only target, as
+# home-manager or nix provide) rather than a broken setup.
+_READ_ONLY_ERRNOS = frozenset({errno.EACCES, errno.EROFS, errno.EPERM})
+
+# Temp files from an interrupted write (``config.yaml.tmp.*``, and Bash's
+# ``config.yaml.tmp.<pid>``) older than this are removed by the migration pre-step.
+_STALE_TEMP_SECONDS = 300
+
 
 class ConfigSchemaError(Exception):
     """``config.yaml`` carries a schema this reader cannot read (ADR-0041m).
@@ -77,6 +92,17 @@ class ConfigSchemaError(Exception):
     Raised for a newer-than-this-reader marker. A schema-less (legacy v0) config
     is the one tolerated case and is migrated forward rather than misread.
     """
+
+
+class ConfigMigrationError(ConfigSchemaError):
+    """A migration step could not be carried out (the schema itself is fine).
+
+    Carries actionable ``remediation`` prose naming the file that is in the way.
+    """
+
+    def __init__(self, message: str, remediation: str):
+        super().__init__(message)
+        self.remediation = remediation
 
 
 def config_path() -> Path:
@@ -93,22 +119,26 @@ def config_path() -> Path:
 # Reading.
 # ---------------------------------------------------------------------------
 
-def _seed_config(path: Path) -> None:
-    """Materialize ``ACQ_CONFIG_SEED`` when no config exists yet (test seam)."""
+def seed_config() -> None:
+    """Materialize ``ACQ_CONFIG_SEED`` when no config exists yet (test seam).
+
+    Called only from the migration pre-step, and only while a backend adapter
+    runs the bundled stub.
+    """
     seed = os.environ.get(SEED_ENV)
-    if seed is None or os.path.lexists(path):
+    stubbed = any(os.environ.get(f"ACQ_{name.upper()}_BIN") == backends.STUB_SENTINEL for name in backends.BACKENDS)
+    if seed is None or not stubbed:
         return
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _replace_bytes(path, seed.encode("utf-8", "surrogateescape"), _NEW_FILE_MODE)
-    except OSError:
-        pass
+    path = config_path()
+    if os.path.lexists(path):
+        return
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _replace_bytes(path, seed.encode("utf-8", "surrogateescape"), _NEW_FILE_MODE)
 
 
 def _read_bytes() -> bytes | None:
     """The config's bytes, or ``None`` when it is absent or unreadable."""
     path = config_path()
-    _seed_config(path)
     try:
         return path.read_bytes()
     except OSError:
@@ -282,7 +312,6 @@ def write_field(key: str, value: str) -> Path:
         raise ValueError(f"config value for {key!r} contains a line break or NUL")
     path = config_path()
     _ensure_config_dir(path)
-    _seed_config(path)
     try:
         raw: bytes | None = path.read_bytes()
     except FileNotFoundError:
@@ -329,20 +358,32 @@ def remove_if_only_marker() -> bool:
 def migrate_config() -> str:
     """Forward-migrate ``config.yaml`` to add the flat ``schema:`` marker.
 
-    Returns ``"none"`` (absent or already current) or ``"migrated"``. The original
-    is never moved out of the way: its bytes are first copied to
-    ``config.yaml.bak.0``, then the migrated content atomically replaces the file
-    (through a symlink, keeping its mode), and the backup is deleted only once the
-    new file reads back with the right marker. A crash at any step therefore
-    leaves either the legacy file, which the next run migrates again, or the
-    migrated one. If the read-back fails, the original bytes are written back.
+    Returns ``"none"`` (absent or already current), ``"migrated"``, or
+    ``"skipped"`` when a legacy config cannot be written (a read-only symlink
+    target, as home-manager or nix provide). The original is never moved out of
+    the way: its bytes are first copied to ``config.yaml.bak.0``, then the
+    migrated content atomically replaces the file (through a symlink, keeping its
+    mode), and the backup is deleted only once the new file reads back with the
+    right marker. A crash at any step therefore leaves either the legacy file,
+    which the next run migrates again, or the migrated one; a backup or temp file
+    left by such a crash is removed by a later run. If the read-back fails, the
+    original bytes are written back.
 
-    Raises :class:`ConfigSchemaError` for a newer marker or a failed step.
+    A legacy config that cannot be written is still readable, so the verb goes
+    on: a note on stderr names the read-only file, and ``doctor`` keeps warning
+    until the marker is added there by hand.
+
+    Raises :class:`ConfigSchemaError` for a newer marker, and
+    :class:`ConfigMigrationError` for a step that failed.
     """
+    path = config_path()
+    backup = path.with_name(path.name + ".bak.0")
+    _remove_stale_temps(path)
     raw = _read_bytes()
     if raw is None:
         return "none"
     if config_schema() == CONFIG_SCHEMA:
+        _remove_leftover_backup(backup)
         return "none"
 
     # Legacy v0: prepend the marker as the first line (schema is the first field).
@@ -350,37 +391,101 @@ def migrate_config() -> str:
     if raw and not raw.endswith(b"\n"):
         migrated += b"\n"
 
-    path = config_path()
-    backup = path.with_name(path.name + ".bak.0")
-    step = "backup"
     try:
         _replace_bytes(backup, raw, _NEW_FILE_MODE)
-        step = "write"
-        _write_config_bytes(path, migrated)
-        step = "verify"
-        verified = _verified()
-        if not verified:
-            step = "restore"
-            _write_config_bytes(path, raw)
     except OSError as exc:
-        # Every write is atomic, so before the restore step config.yaml still
-        # holds the original. If the restore itself failed, the backup is the
-        # only copy and is kept.
-        kept = f"the original is kept at {backup}" if step == "restore" else "config.yaml was not changed"
-        if step != "restore":
-            _unlink_quietly(backup)
-        raise ConfigSchemaError(
-            f"config.yaml migration failed at step {step!r}: {path} ({exc}); {kept}"
+        if exc.errno in _READ_ONLY_ERRNOS and not os.access(path.parent, os.W_OK):
+            # The whole config directory is read-only: nothing can be written.
+            _note_read_only(path.parent)
+            return "skipped"
+        raise ConfigMigrationError(
+            f"could not write the config backup {backup}: {exc.strerror or exc}; config.yaml was not changed",
+            f"remove or repair {backup} (it must be a writable regular file or absent), then retry",
         ) from exc
-    _unlink_quietly(backup)
-    if not verified:
+    try:
+        _write_config_bytes(path, migrated)
+    except OSError as exc:
+        _unlink_quietly(backup)
+        if exc.errno in _READ_ONLY_ERRNOS:
+            _note_read_only(_write_target(path))
+            return "skipped"
+        raise ConfigMigrationError(
+            f"config.yaml migration failed while writing {path}: {exc.strerror or exc}; config.yaml was not changed",
+            "check that config.yaml and its directory are writable, then retry",
+        ) from exc
+    if not _verified():
+        try:
+            _write_config_bytes(path, raw)
+        except OSError as exc:
+            # The backup is now the only copy of the original, so it is kept.
+            raise ConfigMigrationError(
+                f"config.yaml did not verify after migration and could not be restored: {path} "
+                f"({exc.strerror or exc}); the original is kept at {backup}",
+                f"copy {backup} back to {path}, then retry",
+            ) from exc
+        _unlink_quietly(backup)
         raise ConfigSchemaError(f"config.yaml did not verify after migration; the original was restored: {path}")
+    _unlink_quietly(backup)
     return "migrated"
+
+
+def _note_read_only(target: Path) -> None:
+    print(
+        f"acq: note: {target} is read-only, so config.yaml was left without its schema marker; "
+        f"add 'schema: {CONFIG_SCHEMA}' as the first line of that file to record it",
+        file=sys.stderr,
+    )
+
+
+def _remove_leftover_backup(backup: Path) -> None:
+    """Remove a ``config.yaml.bak.0`` an interrupted migration left behind.
+
+    Only called once ``config.yaml`` carries the current marker, so the backup is
+    no longer needed. A directory (or anything else that cannot be removed) in its
+    place is refused, because the next legacy migration could not write its backup
+    there either.
+    """
+    if not os.path.lexists(backup):
+        return
+    if backup.is_dir() and not backup.is_symlink():
+        raise ConfigMigrationError(
+            f"{backup} is a directory, where acq keeps a temporary config backup",
+            f"remove the directory {backup}, then retry",
+        )
+    try:
+        os.unlink(backup)
+    except OSError as exc:
+        raise ConfigMigrationError(
+            f"could not remove the leftover config backup {backup}: {exc.strerror or exc}",
+            f"remove {backup}, then retry",
+        ) from exc
+
+
+def _remove_stale_temps(path: Path) -> None:
+    """Remove temp files an interrupted write left beside the config or its target."""
+    try:
+        target = _write_target(path)
+    except OSError:
+        target = path
+    cutoff = time.time() - _STALE_TEMP_SECONDS
+    for directory, name in {(path.parent, path.name), (target.parent, target.name)}:
+        for pattern in (f"{glob.escape(name)}.tmp.*", f"{glob.escape(name)}.bak.0.tmp.*"):
+            try:
+                candidates = list(directory.glob(pattern))
+            except OSError:
+                continue
+            for candidate in candidates:
+                try:
+                    info = os.lstat(candidate)
+                except OSError:
+                    continue
+                if stat.S_ISREG(info.st_mode) and info.st_mtime < cutoff:
+                    _unlink_quietly(candidate)
 
 
 def _unlink_quietly(path: Path) -> None:
     try:
-        path.unlink()
+        os.unlink(path)
     except OSError:
         pass
 
@@ -397,9 +502,38 @@ def _verified() -> bool:
         return False
 
 
+def _unreadable_problem(path: Path) -> dict | None:
+    """A failed doctor check when ``config.yaml`` exists but cannot be read.
+
+    ``_read_bytes`` treats an unreadable file as absent so the verbs keep their
+    defaults; doctor must not report that as "no config.yaml".
+    """
+    if path.is_symlink() and not path.exists():
+        return {
+            "id": "config-schema",
+            "status": "fail",
+            "message": f"config.yaml is a dangling symlink ({path} -> {os.readlink(path)})",
+            "remediation": "point the symlink at an existing file, or remove it to use the defaults",
+        }
+    if not os.path.lexists(path):
+        return None
+    try:
+        with open(path, "rb"):
+            pass
+    except OSError as exc:
+        return {
+            "id": "config-schema",
+            "status": "fail",
+            "message": f"cannot read {path}: {exc.strerror or exc}",
+            "remediation": "make config.yaml a regular file readable by your user, or remove it to use the defaults",
+        }
+    return None
+
+
 def doctor_check() -> dict:
     """Report config-schema health for ``acq doctor`` (read-only)."""
     try:
+        problem = _unreadable_problem(config_path())
         current = config_schema()
     except userdirs.UserDirError as exc:
         return {"id": "config-schema", "status": "fail", "message": exc.message, "remediation": exc.remediation}
@@ -410,6 +544,8 @@ def doctor_check() -> dict:
             "message": str(exc),
             "remediation": "remove or repair config.yaml so its schema marker is readable",
         }
+    if problem is not None:
+        return problem
     if current is None:
         return {"id": "config-schema", "status": "pass", "message": "no config.yaml; defaults apply"}
     if current == LEGACY_SCHEMA:
@@ -417,6 +553,7 @@ def doctor_check() -> dict:
             "id": "config-schema",
             "status": "warn",
             "message": "config.yaml is a legacy schema-less (v0) config",
-            "remediation": "run any mutating acq command; config.yaml is migrated forward in place",
+            "remediation": "run any mutating acq command to migrate it in place; if the file is read-only, "
+            f"add 'schema: {CONFIG_SCHEMA}' as its first line",
         }
     return {"id": "config-schema", "status": "pass", "message": f"config.yaml schema {current}"}

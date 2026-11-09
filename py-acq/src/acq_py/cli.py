@@ -313,8 +313,15 @@ def _backend_list_data(active_backend: str | None) -> dict:
     }
 
 
-def run_backend_list(emit_json: bool, active_backend: str | None) -> int:
+def run_backend_list(emit_json: bool, active_backend: str | None, warnings: list[str] | None = None) -> int:
+    """List the backends. A read-only report: a problem such as an unknown
+    persisted backend is a warning (stderr, and ``data.warnings`` under
+    ``--json``), never a failure."""
     data = _backend_list_data(active_backend)
+    if warnings:
+        data["warnings"] = warnings
+        for warning in warnings:
+            print(f"acq: warning: {warning}", file=sys.stderr)
     if emit_json:
         print(json.dumps(envelope.success("backend list", data)))
         return errors.EXIT_SUCCESS
@@ -609,7 +616,9 @@ def _dispatch(parser: _Parser, parsed, emit_json: bool, backend_override: str | 
                 emit_json,
             )
         if parsed.backend_command == "list":
-            return run_backend_list(emit_json, common._resolve_active_backend(backend_override))
+            invalid = common._invalid_persisted_backend(backend_override)
+            warnings = [common._invalid_persisted_backend_message(invalid)] if invalid is not None else None
+            return run_backend_list(emit_json, common._resolve_active_backend(backend_override), warnings)
         if parsed.backend_command == "check":
             return run_backend_check(emit_json, parsed.name)
         if parsed.backend_command == "set" and parsed.name not in backends.BACKENDS:

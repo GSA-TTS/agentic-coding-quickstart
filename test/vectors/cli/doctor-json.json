@@ -25,7 +25,8 @@
             { "id": "runtime", "status": "pass" },
             { "id": "backend", "status": "warn" },
             { "id": "state", "status": "pass" },
-            { "id": "config-schema", "status": "pass" }
+            { "id": "config-schema", "status": "pass" },
+            { "id": "config-backend", "status": "pass" }
           ]
         }
       },
