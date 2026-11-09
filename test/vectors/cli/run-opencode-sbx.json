@@ -1,0 +1,96 @@
+{
+  "schema": 1,
+  "id": "cli/run-opencode-sbx",
+  "oracle": "Built-in kits on sbx: the documented bootstrap acq run opencode . translates every built-in kit (CA trust, USAi provider, playbook, git signing) and the bundled opencode agent kit to sbx-v2 kits, creates the sandbox with them, waits for kit startup, then launches the kit's entrypoint",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{acq}",
+      "--backend",
+      "sbx",
+      "run",
+      "opencode",
+      ".",
+      "--name",
+      "oc-sbx",
+      "--json"
+    ],
+    "env": {
+      "ACQ_SBX_BIN": "__stub__",
+      "ACQ_SBX_VERSION": "0.51.0",
+      "ACQ_SBX_INSTALLED": "1",
+      "ACQ_MSB_INSTALLED": "0"
+    },
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "MSB_HOME",
+      "SBX_HOME",
+      "ACQ_IMAGE",
+      "ACQ_MSB_IMAGE",
+      "ACQ_SBX_READY_TIMEOUT",
+      "ACQ_SBX_STUB_CATALOG",
+      "ACQ_SBX_STUB_FAIL",
+      "ACQ_SBX_STUB_SECRETS",
+      "ACQ_SBX_STUB_SECRET_LS_RAW",
+      "ACQ_SBX_STUB_RAW_PLACEHOLDERS",
+      "ACQ_SBX_STUB_ALLOWED_SOURCES",
+      "ACQ_SBX_STUB_EXEC_EXIT",
+      "ACQ_SBX_STUB_BARRIER",
+      "ACQ_SBX_STUB_KIT_ADD",
+      "ACQ_SBX_STARTUP_BARRIER_TIMEOUT",
+      "ACQ_KIT_APPLIED_SEED",
+      "ACQ_EXTRA_KITS",
+      "ACQ_PROVIDER_KITS",
+      "ACQ_MIGRATION_LOCK_TIMEOUT"
+    ],
+    "stdin": "",
+    "timeout_ms": 10000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "run",
+        "data": {
+          "name": "oc-sbx",
+          "backend": "sbx",
+          "agent": "opencode",
+          "action": "created",
+          "image": "ghcr.io/gsa-tts/agentic-coding-patterns/devenv-shell@sha256:0b5f4cc95c8fa7dd7f3ffd02b56e63d0caf9b151421ff6ea3cb34b2139e3966c",
+          "kit": "opencode",
+          "entrypoint": "opencode",
+          "kits": [
+            "zscaler-ca-certificate",
+            "usai-provider",
+            "agentic-coding-playbook",
+            "git-ssh-sign",
+            "opencode"
+          ]
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "contains",
+      "value": "[stub sbx exec] opencode",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME",
+      "ACQ_SECRET_STORE_DIR"
+    ]
+  }
+}

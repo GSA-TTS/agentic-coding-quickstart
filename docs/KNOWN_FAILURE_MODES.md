@@ -111,10 +111,11 @@ parts of the Bash session differ or are not ported yet:
    forwarding must add the bridge to create, attach, `acq start` and
    `acq restart` (`_start_locked` in `py-acq/src/acq_py/commands/lifecycle.py`).
    **Unblock trigger:** forwarding is ported.
-3. **Guest git config** (Bash `_acq_msb_apply_host_git_global_config`, and sbx's
-   git identity kit). Python passes the identity as `GIT_*`/`EMAIL` session
-   variables only; it does not write `user.name`/`user.email` into the guest's
-   global git config. **Unblock trigger:** same as item 1.
+3. **Guest git config on msb** (Bash `_acq_msb_apply_host_git_global_config`).
+   On msb, Python passes the identity as `GIT_*`/`EMAIL` session variables only;
+   it does not write `user.name`/`user.email` into the guest's global git config.
+   On sbx the git identity kit (`py-acq/src/acq_py/kit_sbx.py`) does, as in Bash.
+   **Unblock trigger:** same as item 1.
 4. **`ACQ_ACTIVATE_PROJECT_ENV`.** With it set to `1`, Bash passes
    `ACQ_WORKSPACE` and wraps the session in its guest script
    (`acq_guest_exec_script`, `acq_guest_shell_script` in `acq.backends/common.sh`),
@@ -3688,6 +3689,58 @@ guest with a warning (none of the built-in kits declares one today).
 Re-review when msb's Windows filesystem backend is assessed for read-only
 enforcement; enabling it is the `security.WINDOWS` platform check in
 `py-acq/src/acq_py/security.py` and its Bash counterpart.
+
+---
+
+## 55. Python acq on sbx: Kit Gaps Still Open
+
+**Status:** Tracked follow-ups (sbx, Python `acq`).
+
+### Symptoms
+
+The Python acq now creates sbx sandboxes with the built-in kits and the bundled
+agent kit (`acq run opencode .` works), but compared with the Bash acq:
+
+- OpenCode is not pointed at USAi yet. The bundled `opencode` kit's startup
+  renderer reads the provider-input generation at `ACQ_PROVIDER_INPUT_ROOT`; the
+  Python acq does not prepare or mount it, so the renderer reports `not-ready`
+  and leaves `opencode.jsonc` alone (the same gap as on msb).
+- `acq run NAME` re-attaches without the sbx heal. Bash re-runs
+  `acq_backend_ensure_kits_applied` on every re-attach; the Python acq runs the
+  ported heal only for `acq kit update`.
+- Kit-delivered `~/.rc.d/*.sh` snippets are not sourced at login: the post-create
+  bridge Bash writes (`_acq_sbx_ensure_rc_bridge`) is not ported.
+- A kit ref that would have to be fetched (an opt-in catalog kit, a remote or
+  local extra, an unbundled `--kit` ref or provider kit) is refused before create
+  with `unsupported_capability`, as on msb.
+
+### Root Cause
+
+These pieces belong to other parts of the port (provider inputs, re-attach
+healing, the login-profile bridge, a SHA-verified kit fetch). The Python acq
+passes sbx only local, translated kit directories, so it does not need the
+`kit.allowedSources` update Bash makes before create.
+
+### Fix
+
+Use the Bash acq (`ACQ_IMPL=bash`) where any of these matters.
+
+### Prevention / Status
+
+Port provider-input projection, the re-attach heal and the rc bridge with the
+matching msb work, then re-verify live on a host with sbx 0.51 or later: the
+guest has the kit files, the Zscaler CA and OpenCode configured for USAi, the
+startup barrier is reached, and `acq kit update` reports the recreate notice.
+
+The same live run must confirm that sbx keeps what it read at create. The
+Python acq deletes the per-create startup-barrier kit as soon as `sbx create`
+returns and prunes translated kits under `<state>/sbx-kits/` that have not been
+used for a week, while Bash keeps its kit directories forever. So: create a
+sandbox, delete `<state>/sbx-kits/` entirely, `sbx stop` it, start it again
+(`acq run NAME` or `sbx exec`), and confirm the kits' startup commands still
+run (`/tmp/opencode` exists again, and `/tmp/acq/startup-complete` holds the
+create's token). If they do not, keep the kit directories for the sandbox's
+lifetime and remove them in `acq rm`.
 
 ---
 
