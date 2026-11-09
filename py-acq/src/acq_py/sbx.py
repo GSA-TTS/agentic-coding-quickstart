@@ -33,7 +33,8 @@ import os
 import subprocess
 import sys
 
-from . import errors, hostexec, timeouts
+from . import errors, hostexec, kits, secretstore, timeouts
+from .secretstore import Scope
 
 STUB_SENTINEL = "__stub__"
 
@@ -266,7 +267,7 @@ def _run_stream(argv: list[str], *, json_mode: bool) -> int:
     """
     if json_mode:
         try:
-            stdout: object = sys.stderr.fileno()
+            stdout: int | None = sys.stderr.fileno()
         except (AttributeError, OSError, ValueError):
             stdout = 2
     else:
@@ -327,12 +328,12 @@ def ports(name: str) -> list[dict]:
         )
     try:
         doc = json.loads(proc.stdout)
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, ValueError) as exc:
         raise SbxError(
             errors.FAILURE,
             f"could not parse declared ports for sandbox '{name}'",
             "the backend returned an unreadable ports result; check sbx logs and retry",
-        )
+        ) from exc
     if not isinstance(doc, dict):
         raise SbxError(
             errors.FAILURE,
@@ -369,12 +370,15 @@ def ports(name: str) -> list[dict]:
 # ``sbx secret …`` takes a sandbox scope as the ``--sandbox NAME`` flag; the
 # GLOBAL scope is the DEFAULT (no flag) on ``set``/``rm`` (the real sbx dropped
 # the ``-g``/``--global`` flag on those verbs). ``secret ls`` still takes ``-g``.
-_GLOBAL_SCOPE = "global"
+# Scopes are typed (:class:`secretstore.Scope`), so a sandbox named ``global``
+# gets ``--sandbox global``; a bare string is accepted from older callers.
+_GLOBAL_SCOPE = secretstore.GLOBAL
 
 
-def _secret_scope_argv(scope: str) -> list[str]:
+def _secret_scope_argv(scope: Scope | str) -> list[str]:
     """Encode a scope for ``sbx secret set/rm`` (global is the default, no flag)."""
-    return [] if scope == _GLOBAL_SCOPE else ["--sandbox", scope]
+    sc = secretstore.as_scope(scope)
+    return [] if sc.sandbox is None else ["--sandbox", sc.sandbox]
 
 
 def _secret_list_docs() -> list[dict]:
@@ -403,12 +407,12 @@ def _secret_list_docs() -> list[dict]:
         )
     try:
         doc = json.loads(proc.stdout)
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, ValueError) as exc:
         raise SbxError(
             errors.SECRET_UNREADABLE,
             "could not parse the secret store listing",
             "the backend returned an unreadable secret list; check backend logs and retry",
-        )
+        ) from exc
     if not isinstance(doc, dict):
         raise SbxError(
             errors.SECRET_UNREADABLE,
@@ -453,32 +457,59 @@ def _secret_list_docs() -> list[dict]:
     return out
 
 
-def secret_set(scope: str, service: str, value: str, *, timeout: float | None = None) -> None:
-    """Store a secret for ``(scope, service)``. The value travels on stdin only.
+def secret_preflight(scope: Scope | str, service: str, host: str = "", env: str = "") -> None:
+    """Refuse a ``secret set`` sbx cannot be fed, before anything is stored.
+
+    The real sbx prompts "Overwrite? (y/N)" when the secret already exists (it
+    has no stdin ``--force``), which would consume the piped value as the
+    answer, so an existing secret fails closed here. A custom endpoint
+    (``--host``/``--env``) needs ``sbx secret set-custom``, which this adapter
+    does not drive yet; it is refused rather than fed to the built-in service
+    route, which would bind the value to the wrong endpoint.
+    """
+    sc = secretstore.as_scope(scope)
+    if host or env:
+        raise SbxError(
+            errors.UNSUPPORTED,
+            f"custom endpoints (--host/--env) are not yet supported for '{service}' on the sbx backend",
+            "nothing was stored; set it without --host/--env, or use the msb backend",
+        )
+    if key_present(sc, service):
+        hint = f"acq secret rm -g {service}" if sc.is_global else f"acq secret rm {sc.sandbox} {service}"
+        raise SbxError(
+            errors.FAILURE,
+            f"secret '{service}' already exists in scope {sc.describe()}",
+            f"remove it first ('{hint}'), then re-set",
+        )
+
+
+def secret_feed(
+    scope: Scope | str, service: str, value: str, host: str = "", env: str = "", *, timeout: float | None = None
+) -> None:
+    """Feed a value already in the acq store to sbx's proxy (stdin only).
 
     Reconciles with the real sbx ``secret set SERVICE [--sandbox NAME]``: the
     service is the sole positional, the value is read from stdin, and the global
-    scope is the default (no flag). The real sbx prompts "Overwrite? (y/N)" when
-    the secret already exists (it has no stdin ``--force``), which would consume
-    the piped value as the answer — so presence is pre-checked and an existing
-    secret fails closed (never piped into the prompt).
+    scope is the default (no flag). :func:`secret_preflight` runs first.
     """
-    if key_present(scope, service):
-        raise SbxError(
-            errors.FAILURE,
-            f"secret '{service}' already exists in scope '{scope}'",
-            f"remove it first (e.g. 'acq secret rm -g {service}'), then re-set",
-        )
     proc = _run(["secret", "set", *_secret_scope_argv(scope), service], input_text=value, timeout=timeout)
     if proc.returncode != 0:
         raise SbxError(
             errors.FAILURE,
-            f"could not store secret '{service}' for scope '{scope}'",
+            f"could not feed secret '{service}' to sbx for {secretstore.as_scope(scope).describe()}",
             "check backend logs and retry",
         )
 
 
-def secret_rm(scope: str, service: str) -> None:
+def secret_set(scope: Scope | str, service: str, value: str, *, timeout: float | None = None) -> None:
+    """Store a secret in sbx's own table only: :func:`secret_preflight` then
+    :func:`secret_feed`. ``acq secret set`` writes the acq store first and calls
+    those two itself."""
+    secret_preflight(scope, service)
+    secret_feed(scope, service, value, timeout=timeout)
+
+
+def secret_rm(scope: Scope | str, service: str) -> None:
     """Remove a managed secret for ``(scope, service)``. Raises on backend failure.
 
     Reconciles with the real sbx ``secret rm SERVICE [--sandbox NAME] -f`` (the
@@ -488,12 +519,12 @@ def secret_rm(scope: str, service: str) -> None:
     if proc.returncode != 0:
         raise SbxError(
             errors.FAILURE,
-            f"could not remove secret '{service}' for scope '{scope}'",
+            f"could not remove secret '{service}' for {secretstore.as_scope(scope).describe()}",
             "check backend logs and retry",
         )
 
 
-def secret_ls(scope: str | None = None) -> list[dict]:
+def secret_ls(scope: Scope | str | None = None) -> list[dict]:
     """``secret-list`` on sbx (``sbx secret ls --json``): scope/service/value_state.
 
     ``scope`` is an optional filter (``"global"`` or a sandbox name); ``None``
@@ -508,10 +539,11 @@ def secret_ls(scope: str | None = None) -> list[dict]:
     docs = _secret_list_docs()
     if scope is None:
         return docs
-    return [d for d in docs if d["scope"] == scope]
+    want = secretstore.as_scope(scope).label
+    return [d for d in docs if d["scope"] == want]
 
 
-def key_present(scope: str, service: str) -> bool:
+def key_present(scope: Scope | str, service: str) -> bool:
     """sbx-only ``key_present`` obligation (ADR-0040m): is the sbx key present?
 
     Reports presence, never the value. sbx has no ``secret has`` subcommand, so
@@ -520,10 +552,25 @@ def key_present(scope: str, service: str) -> bool:
     :class:`SbxError` so the seam never conflates "the backend is down" with "the
     secret is absent".
     """
+    want = secretstore.as_scope(scope).label
     for entry in _secret_list_docs():
-        if entry["scope"] == scope and entry["service"] == service:
+        if entry["scope"] == want and entry["service"] == service:
             return True
     return False
+
+
+# The neutral ``secret`` seam (commands/secret.py): presence in sbx's own table,
+# the "can inject" predicate, and removal from sbx after the acq store entry.
+def secret_present(scope: Scope | str, service: str) -> bool:
+    return key_present(scope, service)
+
+
+def secret_has(scope: Scope | str, service: str) -> bool:
+    return key_present(scope, service)
+
+
+def secret_unbind(scope: Scope | str, service: str) -> None:
+    secret_rm(scope, service)
 
 
 def secret_rm_raw(placeholder: str) -> None:
@@ -591,7 +638,7 @@ def github_scope(sandbox: str, value: str) -> None:
     same "Overwrite?" pre-check as :func:`secret_set` applies (the value must never
     be consumed by the prompt).
     """
-    if key_present(sandbox, "github"):
+    if key_present(secretstore.sandbox_scope(sandbox), "github"):
         raise SbxError(
             errors.FAILURE,
             f"GitHub token already exists for sandbox '{sandbox}'",
@@ -623,54 +670,78 @@ def rotate_key(value: str) -> None:
 # Kit-source revocation (sbx-only, ADR-0040m ``kit_source_revoked``).
 # ---------------------------------------------------------------------------
 
-def _owner_prefix(repo: str) -> str:
-    """sbx's ``kit.allowedSources`` is owner-granular: ``host/owner/``."""
-    parts = [p for p in repo.split("/") if p]
-    if len(parts) >= 2:
-        return "/".join(parts[:2]) + "/"
-    return repo + "/"
-
-
-def kit_source_revoked(repo: str) -> str:
-    """Revoke a trusted kit source from sbx's ``kit.allowedSources``.
-
-    sbx has no ``kit-source-revoke`` subcommand: the allowlist lives under
-    ``sbx settings`` as a JSON array at ``kit.allowedSources``, so revocation is a
-    read-modify-write of that setting (owner-granular, ``host/owner/``). acq only
-    ever *unions* onto the allowlist, so a source removed from the acq registry
-    stays fetchable until the owner prefix is dropped here. Returns the revoked
-    owner prefix (the "revoked ref") on success; raises :class:`SbxError` on any
-    inability to revoke — never a quiet 0.
-    """
-    prefix = _owner_prefix(repo)
+def _read_allowed_sources() -> list | None:
+    """``sbx settings get kit.allowedSources`` as a list, or ``None`` if unreadable."""
     proc = _run(["settings", "get", "kit.allowedSources"])
     if proc.returncode != 0:
-        raise SbxError(
-            errors.FAILURE,
-            f"could not read sbx kit.allowedSources to revoke '{repo}'",
-            "check sbx logs and retry",
-        )
+        return None
     try:
         sources = json.loads(proc.stdout)
     except (json.JSONDecodeError, ValueError):
-        raise SbxError(
-            errors.FAILURE,
-            f"could not parse sbx kit.allowedSources to revoke '{repo}'",
-            "check sbx logs and retry",
+        return None
+    return sources if isinstance(sources, list) else None
+
+
+def _grants(sources: list, prefix: str) -> bool:
+    """True when ``sources`` lists ``prefix`` in any letter case (GitHub ignores case)."""
+    key = prefix.casefold()
+    return any(isinstance(s, str) and s.casefold() == key for s in sources)
+
+
+def _revoke_failed(repo: str, prefix: str, reason: str, desired: str | None = None) -> SbxError:
+    """The loud half of the fail-closed contract: what is still permitted, and how to fix it.
+
+    Mirrors Bash ``_acq_sbx_kit_source_revoke_failed``. The source stays
+    registered, because the sbx backend could still fetch kits from that owner.
+    """
+    if desired is not None:
+        fix = f"run: sbx settings set kit.allowedSources '{desired}'"
+    else:
+        fix = (
+            "review 'sbx settings get kit.allowedSources', remove "
+            f"'{prefix}', then run 'sbx settings set kit.allowedSources <json-array>'"
         )
-    if not isinstance(sources, list):
-        raise SbxError(
-            errors.FAILURE,
-            f"could not parse sbx kit.allowedSources to revoke '{repo}'",
-            "check sbx logs and retry",
-        )
-    if prefix in sources:
-        desired = json.dumps([s for s in sources if s != prefix])
-        proc = _run(["settings", "set", "kit.allowedSources", desired])
-        if proc.returncode != 0:
-            raise SbxError(
-                errors.FAILURE,
-                f"could not write sbx kit.allowedSources to revoke '{repo}'",
-                "check sbx logs and retry",
-            )
+    return SbxError(
+        errors.FAILURE,
+        f"{reason}, so sbx kit.allowedSources still permits '{prefix}'; "
+        f"kit source '{repo}' was not removed",
+        f"{fix}; then re-run: acq kit-source rm {repo}",
+    )
+
+
+def kit_source_revoked(repo: str) -> str | None:
+    """Revoke a removed kit source from sbx's ``kit.allowedSources``.
+
+    sbx has no ``kit-source-revoke`` subcommand: the allowlist lives under
+    ``sbx settings`` as a JSON array at ``kit.allowedSources``, and it is
+    owner-granular (``host/owner/``). acq only ever *unions* onto it, so a removed
+    source stays fetchable until its owner prefix is dropped here.
+
+    Mirrors Bash ``acq_backend_kit_source_revoked``: the prefix is dropped only
+    when nothing that remains trusted after removing ``repo`` needs it (the
+    control plane, another registered source, or an ``ACQ_EXTRA_KIT_SOURCES``
+    grant), and the setting is re-read afterwards to confirm. Prefixes compare
+    casefolded, and every case variant of the prefix is dropped with it.
+
+    Returns ``None`` when a remaining source still needs the prefix (nothing is
+    revoked and sbx is not called). Otherwise returns the prefix, which sbx no
+    longer grants. Raises :class:`SbxError` on any failure to read, write or
+    verify the setting; it never returns quietly in that case.
+    """
+    prefix = kits.owner_prefix(repo)
+    remaining = {p.casefold() for p in kits.kit_source_prefixes(exclude=repo)}
+    if prefix.casefold() in remaining:
+        return None
+    sources = _read_allowed_sources()
+    if sources is None:
+        raise _revoke_failed(repo, prefix, "could not read kit.allowedSources as a JSON array")
+    if not _grants(sources, prefix):
+        return prefix
+    desired = json.dumps([s for s in sources if not _grants([s], prefix)])
+    proc = _run(["settings", "set", "kit.allowedSources", desired])
+    if proc.returncode != 0:
+        raise _revoke_failed(repo, prefix, "could not write kit.allowedSources", desired)
+    verify = _read_allowed_sources()
+    if verify is None or _grants(verify, prefix):
+        raise _revoke_failed(repo, prefix, "kit.allowedSources still lists it after the update", desired)
     return prefix

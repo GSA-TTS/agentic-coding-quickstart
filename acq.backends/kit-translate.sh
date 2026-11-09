@@ -44,19 +44,42 @@
 #
 # These read the spec file each call (kits are tiny; simplicity over caching).
 
+# _kit_git_isolate — unset the environment variables that point git at a
+# repository, work tree, index, object store or ref namespace other than the one
+# found from the current directory or -C, or that inject configuration. Call it
+# inside a subshell before running git on the kit cache: an inherited GIT_DIR
+# (set by a hook, an editor or a parent git command) would otherwise make
+# `git init`, `remote`, `config` and `fetch` rewrite that repository, GIT_CONFIG
+# would redirect `git config` writes to another file, and GIT_CONFIG_PARAMETERS
+# or GIT_CONFIG_COUNT/KEY_n/VALUE_n could set core.worktree and move the
+# checkout. The fixed list is a superset of `git rev-parse --local-env-vars`
+# (git 2.53), plus GIT_NAMESPACE; a test checks it against the installed git.
+# GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM are kept: they select the user's own
+# config files, which the authenticated retry reads for credential helpers.
+_kit_git_isolate() {
+  local _v
+  unset GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG GIT_CONFIG_PARAMETERS \
+    GIT_CONFIG_COUNT GIT_OBJECT_DIRECTORY GIT_DIR GIT_WORK_TREE \
+    GIT_IMPLICIT_WORK_TREE GIT_GRAFT_FILE GIT_INDEX_FILE GIT_NO_REPLACE_OBJECTS \
+    GIT_REPLACE_REF_BASE GIT_PREFIX GIT_SHALLOW_FILE GIT_COMMON_DIR GIT_NAMESPACE
+  for _v in $(compgen -v GIT_CONFIG_KEY_) $(compgen -v GIT_CONFIG_VALUE_); do
+    unset "$_v"
+  done
+}
+
 # Only full immutable commit IDs participate. Symbolic/abbreviated refs keep
 # their original per-call fetch semantics. The owning acq shell creates and
 # cleans this private root; command substitutions share files, not shell state.
 _kit_fetch_reuse() {
   local kitref="$1" destdir="$2" url="$3" ref="$4" dir="$5"
   local key source actual
-  key=$(printf '%s\0%s' "$url" "$ref" | git hash-object --stdin) || return 1
+  key=$(_kit_git_isolate; printf '%s\0%s' "$url" "$ref" | git hash-object --stdin) || return 1
   source="$_ACQ_KIT_FETCH_ROOT/$key"
   if [ ! -f "$source/.git/acq-verified" ]; then
     # Fetch into a private source, never a consumer's mutable destination.
     # The empty root disables recursion without affecting the owning shell.
     _ACQ_KIT_FETCH_ROOT='' kit_translate_fetch "$kitref" "$source" >/dev/null || return 1
-    actual=$(git -C "$source" rev-parse HEAD 2>/dev/null) || return 1
+    actual=$(_kit_git_isolate; git -C "$source" rev-parse HEAD 2>/dev/null) || return 1
     if [ "$actual" != "$ref" ]; then
       echo 'kit-translate: failed to fetch remote kit' >&2
       echo 'kit-translate:   fetched revision does not match pinned commit' >&2
@@ -72,6 +95,7 @@ _kit_fetch_reuse() {
 _kit_fetch_materialize() (
   set -o pipefail
   local source="$1" ref="$2" dir="$3" destdir="$4" stage tree
+  _kit_git_isolate
   # Filesystem spelling permits ./ and repeated slashes; Git tree lookup does
   # not. Traversal has already been rejected by the shared source validator.
   dir=$(printf '%s' "$dir" | sed -e 's|//*|/|g' -e ':again' \
@@ -178,11 +202,18 @@ kit_translate_fetch() {
         local _cfg="$1"
         (
           cd "$destdir" || exit 1
+          _kit_git_isolate
           export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/echo GCM_INTERACTIVE=never
           rm -rf .git 2>/dev/null
-          git init -q
-          git remote add origin "$url" 2>/dev/null || git remote set-url origin "$url"
-          git config core.sparseCheckout true
+          # Stop if init fails: the cache directory may sit inside another
+          # repository, and every git call below would then reconfigure and
+          # fetch into that enclosing repository instead.
+          if ! git init -q; then
+            echo "kit-translate: git init failed in the kit cache directory: $destdir" >&2
+            exit 1
+          fi
+          { git remote add origin "$url" 2>/dev/null || git remote set-url origin "$url"; } || exit 1
+          git config core.sparseCheckout true || exit 1
           # `git init` does not always create .git/info/ (platform-dependent),
           # so create it before writing the sparse-checkout file — otherwise the
           # redirect fails with ".git/info/sparse-checkout: No such file or

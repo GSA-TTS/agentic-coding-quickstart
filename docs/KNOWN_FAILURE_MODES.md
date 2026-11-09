@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-10-28"
+last_updated: "2026-11-09"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -42,6 +42,134 @@ wheelhouse. Until then the fail-closed presence checks are proven offline agains
 a checked-in fixture, and the live transcript stays open.
 
 ---
+
+## Deferred: Tier-3 oracle facets the cell oracle cannot check unattended
+
+**Status:** deferred (tracked per AGENTS.md "Track Deferred Work").
+
+`scripts/qualify-backend-cell` checks the boot contract, credential binding and
+in-guest non-exposure, built-in kit application, host-side secret non-exposure,
+and (msb) the read-only trusted-config mount, including the committed
+`scripts/qualify-msb-ro-mount` canary. Three ADR-0044m facets are not in it:
+
+1. **Swap-on-the-wire substitution.** Showing that the real credential (not the
+   placeholder) reaches the bound host needs an endpoint that reports what it
+   received, and the oracle must not send even a throwaway value to a host that is
+   not on the approved endpoint list, or open a listener on the host. **Unblock
+   trigger:** the maintainer names an approved echo endpoint (or an in-repo test
+   service the backends can reach); then add a step that binds the throwaway
+   value to it and compares what it saw.
+2. **Attach.** Needs a terminal; covered by the Tier-2 tests
+   (`py-acq/tests/test_exec.py`) until a PTY-driving step is added.
+3. **Version fail-closed against a real older backend.** Covered offline by the
+   Tier-1 vectors; a live check needs a second, older backend install on the host.
+4. **Remount attempts in the cell's own guest.** The cell oracle checks `ro` in
+   `/proc/mounts`, an EROFS write and an unchanged host directory in its own guest;
+   attempts to remount read-write are made only by the canary, in a sandbox of its
+   own. The oracle also assumes the Bash layout for where acq keeps a sandbox's
+   host-config directory (`<state>/provenance/<backend>/<sandbox>.<checksum>.config`,
+   mounted at `/var/lib/acq/host`). **Unblock trigger:** the Python implementation
+   establishes the mount; then align the oracle's path constants with it and decide
+   whether to add a remount attempt to the cell's own guest.
+
+**Expected today:** the Python implementation fails the cell oracle on every
+cell (msb has no credential path, no built-in kits are applied, and no read-only
+trusted-config mount is established), so a Tier-3 run reports `FAIL` with each
+missing control named, rather than qualifying a sandbox that lacks them. The
+first live run with the extended oracle should also confirm that `sbx` accepts the
+nonce-named global secret service, and that neither backend CLI reads the
+redirected `XDG_*` directories (if one does, its steps fail closed rather than
+pass).
+
+---
+
+## Qualification oracle: a forced stop can reach processes outside the step
+
+**Status:** known limitation, tracked for a fix (per AGENTS.md "Track Deferred Work").
+
+### Symptoms and cause
+
+`scripts/qualify-backend-cell` runs each step in its own process group. When a
+step outlives its timeout, or the oracle is stopped, the group gets a polite stop
+(SIGTERM; CTRL_BREAK on Windows) and a grace period. Only if the grace period
+expires is the group force-killed (`run_process` / `stop_process` /
+`_signal_group`): `killpg(SIGKILL)` on POSIX, `taskkill /F /T` on Windows.
+
+That forced kill can reach more than the step:
+
+- **A backend daemon the step auto-started.** If a step's backend command
+  starts its daemon (for example an `msb` server) as a child without detaching
+  it into its own session or process group, the daemon is in the step's group
+  and dies with it. Later steps, and other sandboxes on the host that use the
+  same daemon, then lose it.
+- **An unrelated process on Windows.** `taskkill /T` builds the tree from
+  parent process ids with no process creation-time check. If a process in the
+  tree exited and Windows reused its id, `/T` can walk into, and kill, a process
+  that has nothing to do with the run.
+
+Neither happens on the polite path. Both need a step that ignores the stop for
+the whole grace period (`STOP_GRACE`, `CANARY_GRACE`).
+
+### Mitigation today
+
+Start the backend daemon before a qualification run, so no timed step starts it.
+Leave the grace periods at their defaults so the forced kill stays a last
+resort.
+
+### Proposed fix
+
+1. **Windows:** put each step in a Job object created at spawn time and stop it
+   with `TerminateJobObject`. Job membership is fixed at process creation and
+   inherited by descendants, so the kill covers exactly the step's processes and
+   no pid-reuse lookup is involved. This replaces `taskkill /F /T`.
+2. **Both platforms:** before the first timed step, start the backend daemon
+   (or check that it is already running) outside any step's process group, so
+   a forced kill can never take it down.
+
+---
+
+## Read-only host-config probe misclassifies a denied write
+
+### Symptoms and cause
+
+Readonly kit staging reports that the host-config mount looks writable even
+though host `msb inspect` records a read-only bind and direct writes fail with
+`Read-only file system`. A POSIX shell can exit with status 2 when redirection
+on the special builtin `:` fails. The original probe used that same status to
+signal a successful write, confusing denial with writability.
+
+`acq.backends/msb.sh::_acq_msb_host_config_mount_probe` now isolates the write
+attempt in a subshell. Only an actual successful write selects status 2;
+denial returns 0, while missing/inaccessible mounts and transport errors remain
+refusals. Host mount-record, version and platform checks still apply. The
+real-shell regression is in `test/bats/84-msb-ro-mount-qualification.bats`.
+
+Measured with MSB 0.7.11 on macOS ARM64: the root guest write to a readonly
+canary was denied, a writable control succeeded, and the host sentinel remained
+unchanged. With the fixed probe, the existing OCI kit installed Podman and
+passed its rootless startup self-test. This does not qualify all inner-container
+isolation controls or prove general read-only enforcement across platforms.
+
+## Rootless nested Podman lacks cgroup delegation
+
+The OCI kit may install successfully and pass its storage self-test while an
+inner container with explicit memory/CPU/PID limits still cannot start. In the
+measured MSB 0.7.11 guest, Podman 5.7.0 reported cgroup v2, cgroupfs and an empty
+delegated controller list. The bounded network-off test was refused:
+
+```text
+unable to apply cgroup configuration: rootless needs no limits + no cgrouppath
+when no permission is granted for cgroups
+```
+
+Do not remove mandatory limits to label this a successful isolated runner.
+The outer sandbox owner must provide a reviewed cgroup-delegation path, or use
+another qualified backend, before rootless inner containers can satisfy that
+resource contract. Reopen qualification when delegation is available; verify
+effective memory, CPU and PID enforcement alongside network/source/credential
+separation and cleanup. Kit installation and rootless storage readiness alone
+are insufficient evidence. No host engine socket or privileged-host workaround
+is required or authorized by this guidance.
 
 ## Provider-input validator dependencies are missing
 
@@ -2551,33 +2679,33 @@ dependabot bump) needed an admin-bypass merge to get past it.
 ### Fix
 
 Removed the workflow-level `paths:` filter so the workflow always triggers,
-and split the single job into three:
-
+and split the single job into a chain (the job set has since grown; see section 52 and
+ADR-0039 for the current shape):
 1. `changes` — a cheap job that computes relevance via `git diff --name-only`
    against the PR base (same technique `markdown-quality.yml`'s link-check job
    already uses; no new marketplace action). Fails closed: any error in
    computing the diff is a job **failure**, never a silent "not relevant."
-2. `test-acq-bash32` — the real, expensive job (builds bash 3.2.57 from
-   source, runs the offline suite) — now conditional on `needs.changes`
-   reporting relevant, unchanged otherwise.
+2. The real, expensive work — originally one job, `test-acq-bash32`, that built bash
+   3.2.57 from source and ran the offline suite. It is conditional on `needs.changes`
+   reporting relevant, and is now `prepare-bash32` (builds the interpreter once)
+   plus a matrix of `test-acq-bash32` shard legs.
 3. `gate` — an always-running job (`if: always()`) that is what branch
    protection actually requires, posted under the **same** required-check name
    the old single job used (`acq offline suite under bash 3.2`) — so this fix
    needed **no** out-of-band branch-protection/ruleset update. It fails unless
-   `needs.changes.result == 'success'` **and**
-   `needs.test-acq-bash32.result` is `success` or `skipped` — checking both
-   upstream jobs, not just the expensive one, so a failure in the cheap
-   relevance-detection step can't be laundered into a passing gate via the
-   downstream job's consequent skip.
+   `needs.changes.result == 'success'` **and** the downstream jobs have the outcome
+   the relevance output predicts, so a failure in the cheap relevance-detection
+   step can't be laundered into a passing gate via a downstream skip.
 
 Verified locally (not just read from docs) before merging: reproduced both
 branches of the `changes` job's `git diff` logic against real commits (one
 touching only a workflow file → empty diff → `relevant=false`; one touching
 `acq.backends/msb.sh` → non-empty diff → `relevant=true`), and exercised the
-gate's shell logic directly against all five `(changes result, test result)`
-combinations, confirming it passes only on `(success, success)` and
+gate's shell logic directly against every `(changes result, test result)`
+combination, confirming it passes only on `(success, success)` and
 `(success, skipped)` and fails on every other combination including the
-failure-laundering case `(failure, skipped)`.
+failure-laundering case `(failure, skipped)` (the gate has since been extended to the
+three-job form; the same exhaustive check was repeated for it, see section 52).
 
 ### Prevention
 
@@ -2587,51 +2715,12 @@ gate-job pattern. A conditional trigger and "required" are structurally
 incompatible in GitHub Actions; check new required workflows for this before
 adding them to branch protection.
 
----
-
-## 43. A Second Parallel Sandbox From the Same Kit Is Unreachable on Its Published Port (msb)
-
-### Symptoms
-
-- Two sandboxes created from the same kit both start cleanly, with no error.
-- `acq ports` reports the **same** host port for both, e.g.
-  `sandbox 6767 -> host 127.0.0.1:6767` in each.
-- `http://127.0.0.1:6767` serves the **first** sandbox's service. The second
-  sandbox's UI/API is simply unreachable, and nothing said so.
-- Also: a developer already running their own service on that port owns it, and
-  the sandbox's mapping silently loses.
-
-### Root Cause
-
-acq's neutral `publishedPorts` parser defaulted an omitted `host:` to the
-**guest** port, so every sandbox built from one kit requested the same host port.
-msb accepts the duplicate mapping without complaint — first writer wins, the rest
-are inert.
-
-### Fix
-
-Fixed in acq: an entry that omits `host:` now gets a **free** loopback host port
-chosen per sandbox, and an explicitly requested host port that is already in use
-**fails the create** instead of producing a dead mapping. Upgrade acq and
-recreate the sandboxes (`acq rm NAME` then `acq run …`) — the mapping is baked
-into the create arguments, so an existing sandbox keeps its old one.
-
-To pin a predictable host port per sandbox instead of taking the free one:
-
-```bash
-acq run opencode --publish 6868:6767 ~/projects/app-one
-acq run opencode --publish 6869:6767 ~/projects/app-two
-```
-
-`--publish` is msb-only and create-time only. See
-[ADR-0034](adr/0034-host-port-selection-and-publish-override.md).
-
-### Prevention
-
-Never hardcode a published host port in a script — read it back from
-`acq ports NAME`, or request it explicitly with `--publish` and let a contended
-port fail loudly. Note that `acq ports` prints the mapping msb was **asked**
-for, which is not proof that the sandbox owns that host port.
+The `changes` job's path list is the other half of this contract: a file the
+real suite reads but the list omits skips the 3.2 run while the gate stays
+green. Add every new input (script, requirements file, key, submodule pin) to
+the `git diff` pathspecs. `test/bats/158-bash32-relevance-paths.bats` fails when
+a known entry is missing and when a new tracked file is neither listed nor
+declared a non-input.
 
 ---
 
@@ -3246,6 +3335,157 @@ passwordless-sudo agent can rewrite them before a root startup command runs them
 Use the msb backend (`ACQ_BACKEND=msb`) when the tamper-resistance of those files
 matters, or do not enable the kit on sbx. The sbx read-only mount (ADR-0037, Option B)
 is gated on live sbx validation.
+
+---
+
+## 51. A Second Parallel Sandbox From the Same Kit Is Unreachable on Its Published Port (msb)
+
+### Symptoms
+
+- Two sandboxes created from the same kit both start cleanly, with no error.
+- `acq ports` reports the **same** host port for both, e.g.
+  `sandbox 6767 -> host 127.0.0.1:6767` in each.
+- `http://127.0.0.1:6767` serves the **first** sandbox's service. The second
+  sandbox's UI/API is simply unreachable, and nothing said so.
+- Also: a developer already running their own service on that port owns it, and
+  the sandbox's mapping silently loses.
+
+### Root Cause
+
+acq's neutral `publishedPorts` parser defaulted an omitted `host:` to the
+**guest** port, so every sandbox built from one kit requested the same host port.
+msb accepts the duplicate mapping without complaint — first writer wins, the rest
+are inert.
+
+### Fix
+
+Fixed in acq: an entry that omits `host:` now gets a **free** loopback host port
+chosen per sandbox, and an explicitly requested host port that is already in use
+**fails the create** instead of producing a dead mapping. Upgrade acq and
+recreate the sandboxes (`acq rm NAME` then `acq run …`) — the mapping is baked
+into the create arguments, so an existing sandbox keeps its old one.
+
+To pin a predictable host port per sandbox instead of taking the free one:
+
+```bash
+acq run opencode --publish 6868:6767 ~/projects/app-one
+acq run opencode --publish 6869:6767 ~/projects/app-two
+```
+
+`--publish` is msb-only and create-time only. See
+[ADR-0034](adr/0034-host-port-selection-and-publish-override.md).
+
+### Prevention
+
+Never hardcode a published host port in a script — read it back from
+`acq ports NAME`, or request it explicitly with `--publish` and let a contended
+port fail loudly. Note that `acq ports` prints the mapping msb was **asked**
+for, which is not proof that the sandbox owns that host port.
+
+---
+
+## 52. A Bash 3.2 Shard Leg or the Interpreter Hand-Off Fails (`acq offline suite under bash 3.2`)
+
+**Status:** Fail closed by design. Applies to the CI workflow
+`.github/workflows/bash32-compat.yml` (design: ADR-0039).
+
+### Symptoms
+
+- The required check `acq offline suite under bash 3.2` is red, and the run has a
+  `Prepare bash 3.2.57 interpreter` job and matrix legs named
+  `acq offline suite under bash 3.2 (build N/M)`.
+- One of:
+  - a single leg fails with test failures: the failing `not ok` line is in that
+    leg's log, and its job summary has a `bats timing (shard: NofM)` table;
+  - every leg fails at *Download the prepared interpreter* or *Install and confirm
+    bash 3.2.57*: `Artifact not found`, `sha256sum: ... did NOT match`, or
+    `interpreter reports X, need 3.2.57`;
+  - the gate reports `relevant diff but prepare=failure, offline suite=skipped`: the
+    prepare job failed, so the legs never started.
+
+### Root Cause
+
+The suite is split into shards (`scripts/bats-shard`, `ACQ_BATS_SHARD=I/N`), and the
+interpreter is built once by `prepare-bash32` and handed to the legs as a run
+artifact whose sha256 is a job output. Every link fails closed: a missing or
+altered tarball, or an interpreter that does not report exactly `3.2.57`, stops the
+leg rather than running on some other bash. The matrix job's result is `success`
+only if every leg succeeded, and the gate also requires the prepare job to have
+succeeded whenever the diff is relevant. The artifact is kept two days, so a leg
+re-run after that fails with `Artifact not found`.
+
+### Fix
+
+1. **Test failures in one leg:** reproduce with the same shard locally,
+   `ACQ_BATS_SHARD=<I>/<N> scripts/test-acq-bats`, or run the failing file under a
+   local 3.2.57 with `scripts/test-acq-bash32 test/bats/<file>.bats`
+   (see `docs/howto/bash32-testing.md`).
+2. **Artifact missing (expired or deleted):** use "Re-run all jobs", which rebuilds the
+   interpreter; "Re-run failed jobs" cannot recreate it.
+3. **sha256 mismatch or wrong version:** treat as an integrity problem, not a flake.
+   Do not bypass the check; re-run all jobs, and if it recurs, investigate the prepare
+   job's build log and the cache entry `bash32-Linux-3.2.57`.
+4. **Prepare job failed during the source build:** the log names the GNU mirror
+   fetch, the OpenPGP signature check, or the compile. A transient mirror failure is
+   retried across five mirrors; a signature or fingerprint failure must be
+   escalated, never worked around.
+5. **One shard consistently much slower than the others:** the shards are balanced by
+   `@test` count, not measured time. Compare the legs' timing artifacts
+   (`bats-timing-<I>of<N>-<attempt>`) and adjust the weighting in `scripts/bats-shard`
+   or add a leg (change `matrix.shard` only; the shard count is derived from it).
+
+### Prevention / Status
+
+The gate's logic was checked against every combination of the three job results and
+the relevance output, and passes only for an all-success relevant run or an
+all-skipped irrelevant one. Adding a test file needs no CI change: shards are
+re-derived from `test/bats` on every run. The OCI-fetched interpreter used by
+`scripts/test-acq-bash32 --install-oci` is deliberately not used in CI (ADR-0039):
+it is a musl build and is content-pinned rather than signer-authenticated.
+
+---
+
+## 53. After Upgrading, `acq run AGENT` Creates a Second Sandbox for a Workspace With Non-ASCII Letters
+
+**Status:** Expected after the sandbox-name hardening. Bash `acq` only; the
+Python implementation always derived names this way.
+
+### Symptoms
+
+- In a workspace whose directory name contains lowercase accented letters (for
+  example `~/café`), `acq run opencode` creates a new sandbox instead of
+  re-attaching to the one created before the upgrade.
+- `acq ls` shows both: the old name keeps the letters (`opencode-café`), the
+  new one drops them (`opencode-caf`; a letter in the middle of the name becomes
+  a hyphen).
+- Only sandboxes created while acq ran under a glibc locale such as
+  `en_US.UTF-8` are affected. Under `C`, `C.UTF-8` or `POSIX` the old slug
+  already turned these letters into hyphens.
+
+### Root Cause
+
+The derived name is `<agent>-<slug of the workspace directory name>`. Under a
+glibc locale such as `en_US.UTF-8`, the old slug kept lowercase accented letters
+(uppercase ones, such as `Ü`, were already dropped), and in any locale it kept a
+newline. It now keeps only ASCII `a-z` and `0-9` and turns every other run of
+characters into one hyphen, the same as the Python implementation, so names are
+always a single line of a fixed character set (`slugify` in
+`acq.backends/common.sh`). The old sandbox is not renamed or removed; it keeps
+running under its old name.
+
+### Fix
+
+- To keep using the old sandbox, address it by name: `acq run opencode-café`
+  (or `acq shell`, `acq exec`, `acq stop` with that name).
+- To move to the new name, remove the old sandbox with `acq rm opencode-café`
+  once anything you need from it is saved, then `acq run opencode` again.
+
+Related checks added at the same time: an explicit `--name` must use only ASCII
+letters, digits, `_` and `-` and not start with `-`; a workspace path containing
+`:` (other than the `:ro` suffix) or a control character is refused at create;
+and `rm`, `stop`, `exec` and the other verbs that take an existing sandbox's
+name refuse names that are empty, `.` or `..`, or contain `/`, `\` or control
+characters.
 
 ---
 

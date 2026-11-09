@@ -14,12 +14,22 @@ import json
 import os
 import sys
 
-from .. import backends, config, envelope, errors, kits, msb, sbx, security, state
+from .. import (
+    backends,
+    config,
+    envelope,
+    errors,
+    kits,
+    msb,
+    sbx,
+    secretstore,
+    security,
+    state,
+)
 
-
-# Both adapters raise an error carrying the same (code, message, remediation)
-# contract; catch this tuple uniformly at the seam.
-_ADAPTER_ERRORS = (msb.MsbError, sbx.SbxError)
+# Both adapters and the acq secret store raise an error carrying the same
+# (code, message, remediation) contract; catch this tuple uniformly at the seam.
+_ADAPTER_ERRORS = (msb.MsbError, sbx.SbxError, secretstore.SecretStoreError)
 
 # Agent tokens accepted by acq dispatch (mirrors acq.backends/agents.sh). Read by the
 # ``run`` create-vs-reattach decision in ``commands.lifecycle``.
@@ -206,19 +216,134 @@ def _resolve_backend_for_lifecycle(
     return _resolve_backend_for_mutation(explicit, emit_json, command, domain="lifecycle")
 
 
-def _read_secret_value() -> str:
-    """Read the secret value from stdin, preserving trailing-newline fidelity.
+class SecretInputError(secretstore.SecretStoreError):
+    """A secret could not be read safely from the terminal. Carries no value;
+    being a store error, it leaves through the command boundary as a stable
+    ``validation_failed`` envelope from every verb that reads a secret."""
 
-    Exactly the single terminal newline that a terminal/``echo`` appends is
-    stripped (plus an immediately preceding ``\\r`` for a CRLF terminator). Any
-    further trailing newlines are value content and are preserved: a value that
-    legitimately ends in newlines is not silently truncated. A lone trailing
-    ``\\r`` with no preceding ``\\n`` is likewise preserved.
+    def __init__(self, message: str):
+        super().__init__(errors.VALIDATION_FAILED, message, "pipe the secret on stdin instead")
+
+
+def _read_secret_tty(prompt: str) -> str:
+    """Read one line from the terminal with echo off; the prompt goes to stderr.
+
+    ``getpass`` falls back to an echoing read (with a warning) when it cannot
+    turn echo off; that warning is raised as an error here, before anything is
+    read, so a typed secret is never shown.
+    """
+    import getpass
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", getpass.GetPassWarning)
+        try:
+            value = getpass.getpass(prompt, stream=sys.stderr)
+        except getpass.GetPassWarning:
+            raise SecretInputError("cannot turn off terminal echo to read the secret") from None
+        except UnicodeError:
+            raise SecretInputError(_NOT_UTF8) from None
+        except EOFError:
+            return ""
+    if _has_surrogates(value):  # a terminal decoded with surrogateescape
+        raise SecretInputError(_NOT_UTF8)
+    return value
+
+
+# Fixed text: a decode error's own message quotes the offending byte and its
+# offset, which are part of the secret, so it is never passed on.
+_NOT_UTF8 = "the secret value is not valid UTF-8"
+
+
+def _has_surrogates(text: str) -> bool:
+    return any("\ud800" <= ch <= "\udfff" for ch in text)
+
+
+def _is_mintty_pipe_name(name: str) -> bool:
+    """True for the named pipe an MSYS2/Cygwin pty (mintty, Git Bash) hands a
+    native Windows program as its stdin, e.g. ``\\msys-1888ae32e00d56aa-pty0-from-master``."""
+    return ("msys-" in name or "cygwin-" in name) and "-pty" in name and "-from-master" in name
+
+
+def _stdin_is_mintty() -> bool:
+    """True when stdin is a Git Bash/mintty terminal seen through its pty pipe.
+
+    Native Windows Python sees that terminal as a pipe, not a console, so it
+    cannot turn echo off; the pipe's name is the reliable marker. Any failure
+    to inspect the handle answers False.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        import msvcrt
+
+        handle = msvcrt.get_osfhandle(sys.stdin.fileno())
+        kernel32 = ctypes.windll.kernel32
+        if kernel32.GetFileType(handle) != 3:  # FILE_TYPE_PIPE
+            return False
+        size = 4 + 2 * 1024
+        buf = ctypes.create_string_buffer(size)
+        if not kernel32.GetFileInformationByHandleEx(handle, 2, buf, size):  # FileNameInfo
+            return False
+        length = int.from_bytes(buf.raw[:4], "little")
+        name = buf.raw[4 : 4 + length].decode("utf-16-le", "replace")
+    except Exception:  # noqa: BLE001 - a detection miss must never break the read
+        return False
+    return _is_mintty_pipe_name(name)
+
+
+_MINTTY_HINT = (
+    "acq: warning: this terminal (Git Bash/mintty) cannot hide what you type, so the secret "
+    "will be visible. Press Ctrl-C and pipe it instead (printf '%s' \"$TOKEN\" | acq ...), "
+    "or run acq from a native console (Windows Terminal, PowerShell, cmd)."
+)
+
+
+def _read_piped_secret(one_line: bool = False) -> str:
+    """Read stdin (all of it, or one typed line) as strict UTF-8, from the byte
+    stream when there is one."""
+    buffer = getattr(sys.stdin, "buffer", None)
+    if buffer is None:  # an in-memory text stream (tests): already decoded
+        data = sys.stdin.readline() if one_line else sys.stdin.read()
+    else:
+        try:
+            raw = buffer.readline() if one_line else buffer.read()
+            data = raw.decode("utf-8")
+        except UnicodeError:
+            raise SecretInputError(_NOT_UTF8) from None
+    if _has_surrogates(data):
+        raise SecretInputError(_NOT_UTF8)
+    return data
+
+
+def _read_secret_value(prompt: str = "Enter secret value: ") -> str:
+    """Read the secret value: silently from a terminal, else from stdin.
+
+    On a terminal the user is prompted (on stderr) and the line is read with
+    echo off. Piped stdin keeps trailing-newline fidelity: exactly the single
+    terminal newline that a terminal/``echo`` appends is stripped (plus an
+    immediately preceding ``\\r`` for a CRLF terminator). Any further trailing
+    newlines are value content and are preserved: a value that legitimately ends
+    in newlines is not silently truncated. A lone trailing ``\\r`` with no
+    preceding ``\\n`` is likewise preserved.
+
+    Bytes that are not valid UTF-8 fail closed with a fixed
+    ``validation_failed`` message that quotes nothing from the input. Under
+    Git Bash/mintty, where typed input cannot be hidden, a warning and the
+    prompt go to stderr first.
 
     The value is returned to the caller and must never be printed, logged, or
     placed on argv. An empty result signals "no value was piped".
     """
-    data = sys.stdin.read()
+    isatty = getattr(sys.stdin, "isatty", None)
+    if isatty is not None and isatty():
+        return _read_secret_tty(prompt)
+    mintty = _stdin_is_mintty()
+    if mintty:
+        print(_MINTTY_HINT, file=sys.stderr)
+        print(prompt, end="", file=sys.stderr, flush=True)
+    data = _read_piped_secret(one_line=mintty)
     if data.endswith("\n"):
         data = data[:-1]  # strip exactly one terminal newline
         if data.endswith("\r"):  # optional preceding CR (CRLF terminator)
@@ -236,7 +361,7 @@ def _validate_workspace(command: str, path: str | None, emit_json: bool) -> tupl
             f"usage: acq {command} AGENT PATH",
             emit_json,
         )
-    resolved = os.path.abspath(path)
+    resolved = _logical_abspath(path)
     if not os.path.isdir(resolved):
         return None, _operational_failure(
             command,
@@ -246,6 +371,32 @@ def _validate_workspace(command: str, path: str | None, emit_json: bool) -> tupl
             emit_json,
         )
     return resolved, None
+
+
+def _logical_abspath(path: str) -> str:
+    """Absolute form of a typed workspace path, keeping the shell's logical cwd.
+
+    ``os.path.abspath`` joins onto ``os.getcwd()``, which has symlinks resolved.
+    For ``.`` (the working directory itself) the shell's logical ``$PWD`` is used
+    instead, when it names the same directory, so a symlinked project directory
+    gets the sandbox name Bash's ``derive_name`` gives it (``basename "$PWD"``)
+    and the same name as when its path is typed out. Any other path is made
+    absolute as before: a ``..`` step resolved against the logical path could
+    name a different directory than the one the OS opens.
+    """
+    if os.path.normpath(path) == os.curdir:
+        pwd = os.environ.get("PWD") or ""
+        if pwd and os.path.isabs(pwd):
+            # Check the same normalised value that is returned: a raw ``$PWD``
+            # with ``..`` through a symlink can resolve to the cwd while its
+            # lexical form names a different directory.
+            logical = os.path.normpath(pwd)
+            try:
+                if os.path.samefile(logical, os.curdir):
+                    return logical
+            except OSError:
+                pass
+    return os.path.abspath(path)
 
 
 # Module-local seam for path canonicalization. ``_mount_workspace`` reads this
@@ -280,7 +431,7 @@ def _mount_workspace(backend: str, workspace: str) -> str:
     return REALPATH(workspace) if backend == "msb" else workspace
 
 
-def _launch_token(backend: str, name: str, agent: str) -> str:
+def _launch_token(backend: str, name: str, agent: str | None) -> str | None:
     """Resolve the launch command: a recorded kit entrypoint wins over the agent name.
 
     A future kit may declare an entrypoint that differs from the agent token it
@@ -360,6 +511,12 @@ def _slugify(token: str) -> str:
 
 
 def _derive_name(agent: str, workspace: str) -> str:
+    """``<agent>-<basename>`` slug for a workspace (mirrors Bash ``derive_name``).
+
+    ``workspace`` is the path as the user typed it, made absolute by
+    :func:`_validate_workspace` (logical for ``.``), never the canonicalized
+    mount path.
+    """
     base = os.path.basename(workspace.rstrip("/\\")) or "workspace"
     return f"{_slugify(agent)}-{_slugify(base)}"
 
@@ -370,33 +527,82 @@ def _secret_scope_args(parser: argparse.ArgumentParser, *, remainder_help: str) 
     parser.add_argument("args", nargs=argparse.REMAINDER, help=remainder_help)
 
 
-def _parse_secret_scope_service(global_scope: bool, tokens: list[str]) -> tuple[str | None, str | None]:
+def _secret_name_ok(name: str) -> bool:
+    """A service or sandbox name for the secret verbs: the store-key alphabet
+    ``[A-Za-z0-9_-]+``, and no leading ``-`` so it can never be read as a flag
+    when it reaches a backend CLI's argv."""
+    return secretstore.name_ok(name) and not name.startswith("-")
+
+
+def _secret_names_problem(scope: secretstore.Scope | None, service: str | None) -> str | None:
+    """Why the scope/service names are refused, or None. Checked before any
+    store or backend access."""
+    for kind, name in (("sandbox", None if scope is None else scope.sandbox), ("service", service)):
+        if name is not None and not _secret_name_ok(name):
+            return f"invalid {kind} name {name!r}: names must match [A-Za-z0-9_-]+ and not start with '-'"
+    return None
+
+
+def _parse_secret_scope_service(
+    global_scope: bool, tokens: list[str]
+) -> tuple[secretstore.Scope | None, str | None]:
     """Parse ``[-g | --global | SANDBOX] SERVICE`` -> ``(scope, service)``.
 
-    ``scope`` is ``"global"`` for the flag form or the sandbox name for the
-    positional form. Returns ``(None, None)`` for any other shape so the caller
-    emits a usage error. Scope and service are non-secret identifiers only.
+    ``scope`` is a typed :class:`secretstore.Scope`: the flag form is the global
+    scope, the positional form a sandbox scope, so a sandbox literally named
+    ``global`` stays a sandbox. Returns ``(None, None)`` for any other shape so
+    the caller emits a usage error. Name validity is checked separately
+    (:func:`_secret_names_problem`).
     """
     if global_scope:
         if len(tokens) != 1:
             return None, None
-        return "global", tokens[0]
+        return secretstore.GLOBAL, tokens[0]
     if len(tokens) != 2:
         return None, None
     scope, service = tokens
     if scope.startswith("-"):
         return None, None
-    return scope, service
+    return secretstore.sandbox_scope(scope), service
 
 
-def _parse_secret_ls_scope(global_scope: bool, tokens: list[str]) -> tuple[str | None, bool]:
+def _split_host_env(tokens: list[str]) -> tuple[list[str], list[str], str | None, str | None]:
+    """Pull ``--host H`` / ``--host=H`` (repeatable) and ``--env E`` / ``--env=E``
+    out of ``secret set``'s trailing tokens.
+
+    Returns ``(positionals, hosts, env, error)``; ``error`` names a flag given
+    without its value. Repeated hosts accumulate (the comma-joined multi-host
+    form the sidecar stores) rather than silently dropping endpoints.
+    """
+    positionals: list[str] = []
+    hosts: list[str] = []
+    env: str | None = None
+    it = iter(tokens)
+    for token in it:
+        flag, eq, inline = token.partition("=")
+        if flag not in ("--host", "--env"):
+            positionals.append(token)
+            continue
+        value: str | None = inline
+        if not eq:
+            value = next(it, None)
+        if not value:
+            return positionals, hosts, env, f"{flag} needs a value"
+        if flag == "--host":
+            hosts.append(value)
+        else:
+            env = value
+    return positionals, hosts, env, None
+
+
+def _parse_secret_ls_scope(global_scope: bool, tokens: list[str]) -> tuple[secretstore.Scope | None, bool]:
     """Parse the optional ``secret ls`` scope filter -> ``(scope, ok)``.
 
     ``ok`` is False for a malformed filter (extra tokens, or an unknown flag),
     in which case the caller emits a usage error.
     """
     if global_scope:
-        return ("global", True) if not tokens else (None, False)
+        return (secretstore.GLOBAL, True) if not tokens else (None, False)
     if not tokens:
         return None, True
     if len(tokens) > 1:
@@ -404,4 +610,4 @@ def _parse_secret_ls_scope(global_scope: bool, tokens: list[str]) -> tuple[str |
     token = tokens[0]
     if token.startswith("-"):
         return None, False
-    return token, True
+    return secretstore.sandbox_scope(token), True

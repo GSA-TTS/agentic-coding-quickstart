@@ -20,6 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 from qualification import gate  # noqa: E402
+from qualification.model import TRANSCRIPT_DIR_TOKEN, canonical_transcript_bytes as canon, publishable_argv  # noqa: E402
 from qualification.ledger import (  # noqa: E402
     LedgerError,
     append_entry,
@@ -202,8 +203,9 @@ def test_main_exit_codes(tmp_path, capsys):
     assert gate.main(["--ledger", str(path), "check"]) == 2
 
 
-def oracle_argv(backend="msb", python="/usr/bin/python3"):
-    """The argv ``qualification.host`` records: the interpreter, then the committed oracle."""
+def oracle_argv(backend="msb", python="<local>/python3"):
+    """The argv the harness records for ``qualification.host``: the interpreter (its
+    directory tokenized), then the committed oracle."""
     return [python, ORACLE, "--backend", backend]
 
 
@@ -211,7 +213,7 @@ def transcript(outcome="PASS", commands=None, **env_over):
     env = {
         "os": "Darwin", "os_build": "26.7.2", "arch": "arm64", "hypervisor": "hvf", "backend": "msb",
         "backend_version": "0.7.7", "image": "i", "glibc_floor": None, "rev": "c" * 40,
-        "artifact_sha256": "d" * 64, "transcript_dir": "/x",
+        "artifact_sha256": "d" * 64, "transcript_dir": TRANSCRIPT_DIR_TOKEN,
     }
     env.update(env_over)
     argv = oracle_argv(env["backend"]) if commands is None else commands
@@ -223,7 +225,7 @@ def transcript(outcome="PASS", commands=None, **env_over):
 def test_record_appends_an_entry_and_is_idempotent_guarded(tmp_path):
     path = tmp_path / "ledger.json"
     path.write_text(json.dumps(doc(waivers=[waiver("msb", "macos-arm64")])))
-    raw = json.dumps(transcript()).encode()
+    raw = canon(transcript())
     e = entry_from_transcript(json.loads(raw), raw, oracle_digest=committed_oracle)
     assert (e.backend, e.platform, e.verdict) == ("msb", "macos-arm64", "PASS")
     assert (e.oracle, e.oracle_sha256) == (ORACLE, ORACLE_SHA)
@@ -242,15 +244,15 @@ def test_record_rejects_unusable_transcripts():
     old = transcript()
     del old["attempts"][0]["recorded_at"]
     with pytest.raises(LedgerError):
-        entry_from_transcript(old, json.dumps(old).encode(), oracle_digest=committed_oracle)
-    ok = entry_from_transcript(old, json.dumps(old).encode(), recorded_at="2026-11-07T07:00:00+00:00",
+        entry_from_transcript(old, canon(old), oracle_digest=committed_oracle)
+    ok = entry_from_transcript(old, canon(old), recorded_at="2026-11-07T07:00:00+00:00",
                                oracle_digest=committed_oracle)
     assert ok.recorded_at == "2026-11-07T07:00:00+00:00"
     with pytest.raises(LedgerError):
         platform_token("Plan9", "mips")
     odd = copy.deepcopy(transcript(arch="mips"))
     with pytest.raises(LedgerError):
-        entry_from_transcript(odd, json.dumps(odd).encode(), oracle_digest=committed_oracle)
+        entry_from_transcript(odd, canon(odd), oracle_digest=committed_oracle)
 
 
 def test_the_committed_ledger_is_valid():
@@ -341,10 +343,10 @@ def test_bad_ledger_bytes_exit_2_not_a_traceback(tmp_path):
 def test_record_refuses_the_all_zero_default_rev_and_malformed_transcripts(tmp_path):
     zero = transcript(rev="0" * 40)
     with pytest.raises(LedgerError, match="real commit"):
-        entry_from_transcript(zero, json.dumps(zero).encode())
+        entry_from_transcript(zero, canon(zero))
     for bad in ({"attempts": ["x"]}, {"attempts": [{}]}, {"attempts": [{"environment": {"backend": "msb"}}]}):
         with pytest.raises(LedgerError):
-            entry_from_transcript(bad, json.dumps(bad).encode(), recorded_at="2026-11-07T07:00:00+00:00")
+            entry_from_transcript(bad, canon(bad), recorded_at="2026-11-07T07:00:00+00:00")
     path = tmp_path / "t.json"
     path.write_text(json.dumps({"attempts": ["x"]}))
     ledger = tmp_path / "ledger.json"
@@ -373,7 +375,7 @@ def test_main_record_end_to_end(tmp_path, capsys, monkeypatch):
     ledger = tmp_path / "ledger.json"
     ledger.write_text(json.dumps(doc()))
     path = tmp_path / "t.json"
-    path.write_text(json.dumps(transcript(rev=head)))
+    path.write_bytes(canon(transcript(rev=head)))
     assert gate.main(["--ledger", str(ledger), "record", str(path)]) == 0
     assert "recorded PASS msb/macos-arm64" in capsys.readouterr().out
     assert load_ledger(ledger).entries[0].oracle_sha256 == digest
@@ -461,16 +463,16 @@ def unbound(e):
     ],
 )
 def test_record_refuses_a_transcript_that_did_not_run_the_committed_oracle(commands):
-    t = transcript(commands=commands)
+    t = transcript(commands=publishable_argv(commands))  # as the harness records them
     with pytest.raises(LedgerError, match="did not run the committed cell oracle"):
-        entry_from_transcript(t, json.dumps(t).encode(), oracle_digest=committed_oracle)
+        entry_from_transcript(t, canon(t), oracle_digest=committed_oracle)
 
 
 def test_record_refuses_when_any_attempt_did_not_run_the_oracle():
     t = transcript()
     t["attempts"].append({**t["attempts"][0], "commands": ["true"]})
     with pytest.raises(LedgerError, match="did not run the committed cell oracle"):
-        entry_from_transcript(t, json.dumps(t).encode(), oracle_digest=committed_oracle)
+        entry_from_transcript(t, canon(t), oracle_digest=committed_oracle)
 
 
 @pytest.mark.parametrize(
@@ -482,14 +484,14 @@ def test_record_refuses_when_any_attempt_did_not_run_the_oracle():
     ],
 )
 def test_record_accepts_every_form_the_harness_records_the_oracle_in(commands):
-    t = transcript(commands=commands)
-    assert entry_from_transcript(t, json.dumps(t).encode(), oracle_digest=committed_oracle).oracle == ORACLE
+    t = transcript(commands=publishable_argv(commands))  # as the harness records them
+    assert entry_from_transcript(t, canon(t), oracle_digest=committed_oracle).oracle == ORACLE
 
 
 def test_record_refuses_a_revision_where_the_oracle_is_not_committed():
     t = transcript()
     with pytest.raises(LedgerError, match="not committed at revision"):
-        entry_from_transcript(t, json.dumps(t).encode(), oracle_digest=lambda rev, path: None)
+        entry_from_transcript(t, canon(t), oracle_digest=lambda rev, path: None)
 
 
 @pytest.mark.parametrize("platform", ["linux-x86_64", "linux-aarch64", "macos-x86_64", "windows-x64"])
@@ -497,24 +499,24 @@ def test_record_refuses_a_platform_that_is_not_the_transcripts_host(platform):
     # One macOS arm64 run must not be recordable as another cell's evidence.
     t = transcript()
     with pytest.raises(LedgerError, match="not the transcript's host"):
-        entry_from_transcript(t, json.dumps(t).encode(), platform=platform, oracle_digest=committed_oracle)
+        entry_from_transcript(t, canon(t), platform=platform, oracle_digest=committed_oracle)
 
 
 def test_record_accepts_the_matching_platform_and_musl_on_linux():
     t = transcript()
     assert entry_from_transcript(
-        t, json.dumps(t).encode(), platform="macos-arm64", oracle_digest=committed_oracle
+        t, canon(t), platform="macos-arm64", oracle_digest=committed_oracle
     ).platform == "macos-arm64"
     linux = transcript(os="Linux", arch="x86_64", hypervisor="kvm")
     assert entry_from_transcript(
-        linux, json.dumps(linux).encode(), platform="linux-musl", oracle_digest=committed_oracle
+        linux, canon(linux), platform="linux-musl", oracle_digest=committed_oracle
     ).platform == "linux-musl"
 
 
 def test_record_refuses_a_hypervisor_that_is_not_the_cells():
     t = transcript(hypervisor="unknown")
     with pytest.raises(LedgerError, match="hypervisor"):
-        entry_from_transcript(t, json.dumps(t).encode(), oracle_digest=committed_oracle)
+        entry_from_transcript(t, canon(t), oracle_digest=committed_oracle)
 
 
 @pytest.mark.parametrize(
@@ -630,7 +632,7 @@ def test_a_duplicated_transcript_makes_the_gate_exit_2(tmp_path):
 def test_record_refuses_an_abbreviated_revision():
     t = transcript(rev="c" * 12)
     with pytest.raises(LedgerError, match="real commit"):
-        entry_from_transcript(t, json.dumps(t).encode(), oracle_digest=committed_oracle)
+        entry_from_transcript(t, canon(t), oracle_digest=committed_oracle)
 
 
 def test_git_changed_paths_refuses_a_revision_off_the_evaluated_history(tmp_path, monkeypatch):
@@ -775,3 +777,243 @@ def test_a_pr_cannot_carve_its_own_change_out_of_the_surface_or_rewrite_the_gate
     rc, cells = _run_gate(repo, rules)  # the base branch's rules, as CI runs them
     cell = cells[("msb", "macos-arm64")]
     assert rc == 1 and cell["status"] == "blocked" and "Tier-3 surface" in cell["reason"]
+
+
+# ---- ADR-0044m version floors -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "backend,version,why",
+    [
+        ("msb", "0.6.8", "below the supported floor 0.6.9"),
+        ("msb", "0.7.1", "refused range"),
+        ("msb", "0.7.2", "refused range"),
+        ("msb", "0.7.5", "oracles 1-3"),
+        ("sbx", "0.38.9", "below the supported floor 0.39.0"),
+    ],
+)
+def test_a_run_on_a_refused_or_below_floor_backend_is_not_evidence(backend, version, why):
+    platform = "macos-arm64"
+    # Even when the accepted version is moved to the same minor, the run does not count.
+    ledger = doc([entry(backend, platform, version=version)], versions={"msb": "0.7.7", "sbx": "0.51.0", backend: version})
+    status = status_of(ledger, cell=(backend, platform))
+    assert status.status == "blocked" and why in status.reason
+
+
+@pytest.mark.parametrize("backend,version", [("msb", "0.7.7"), ("msb", "0.7.11"), ("msb", "0.8.0"), ("sbx", "0.39.0"), ("sbx", "0.51.0")])
+def test_supported_versions_still_qualify(backend, version):
+    ledger = doc([entry(backend, "macos-arm64", version=version)], versions={"msb": "0.7.7", "sbx": "0.51.0", backend: version})
+    assert status_of(ledger, cell=(backend, "macos-arm64")).status == "qualified"
+
+
+def test_the_ledger_refuses_to_accept_a_refused_backend_version(tmp_path):
+    from qualification.ledger import set_accepted_version
+
+    path = tmp_path / "ledger.json"
+    path.write_text(json.dumps(doc()))
+    for backend, version in (("msb", "0.7.1"), ("msb", "0.6.0"), ("sbx", "0.38.0")):
+        with pytest.raises(LedgerError, match="cannot accept"):
+            set_accepted_version(path, backend, version)
+    set_accepted_version(path, "msb", "0.7.11")
+    assert load_ledger(path).accepted_backend_versions["msb"] == "0.7.11"
+
+
+def test_no_committed_entry_is_blocked_by_the_version_floors():
+    # The floors are new; they must not retroactively disqualify a recorded run.
+    from qualification.matrix import version_problem
+
+    ledger = load_ledger(REPO_ROOT / gate.DEFAULT_LEDGER)
+    assert [e for e in ledger.entries if version_problem(e.backend, e.backend_version)] == []
+    assert [b for b, v in ledger.accepted_backend_versions.items() if version_problem(b, v)] == []
+
+
+# ---- the published evidence can be re-verified from the PR body ----------------
+
+
+def _recorded(tmp_path, t):
+    path = tmp_path / "ledger.json"
+    path.write_text(json.dumps(doc()))
+    raw = canon(t)
+    append_entry(path, entry_from_transcript(t, raw, oracle_digest=committed_oracle))
+    return path, raw
+
+
+def _body(raw):
+    return "intro\n\n<details>\n\n```json\n" + raw.decode().removesuffix("\n") + "\n```\n\n</details>\n"
+
+
+def test_verify_evidence_reproduces_the_recorded_hash_from_the_published_block(tmp_path, capsys):
+    from qualification.ledger import evidence_blocks, verify_evidence
+
+    path, raw = _recorded(tmp_path, transcript())
+    body = _body(raw)
+    assert [(b.raw, b.hidden) for b in evidence_blocks(body)] == [(raw, False)]
+    assert [b.raw for b in evidence_blocks(body.replace("\n", "\r\n"))] == [raw]  # a body copied with CRLF
+    assert verify_evidence(load_ledger(path), [raw]) == [(hashlib.sha256(raw).hexdigest(), None)]
+    (tmp_path / "body.md").write_text(body)
+    assert gate.main(["--ledger", str(path), "verify-evidence", str(tmp_path / "body.md")]) == 0
+    assert capsys.readouterr().out.startswith("OK ")
+
+
+def test_verify_evidence_catches_a_tampered_or_unrecorded_block(tmp_path, capsys):
+    path, raw = _recorded(tmp_path, transcript())
+    tampered = raw.replace(b'"0.7.7"', b'"0.7.11"')
+    (tmp_path / "body.md").write_text(_body(tampered))
+    assert gate.main(["--ledger", str(path), "verify-evidence", str(tmp_path / "body.md")]) == 1
+    assert "no ledger entry records this transcript_sha256" in capsys.readouterr().out
+    (tmp_path / "empty.md").write_text("no blocks here")
+    assert gate.main(["--ledger", str(path), "verify-evidence", str(tmp_path / "empty.md")]) == 2
+
+
+def test_verify_evidence_catches_an_entry_that_does_not_match_its_transcript(tmp_path):
+    from qualification.ledger import verify_evidence
+
+    path, raw = _recorded(tmp_path, transcript())
+    ledger_doc = json.loads(path.read_text())
+    ledger_doc["entries"][0]["os_build"] = "99.0"  # the entry no longer says what the run recorded
+    path.write_text(json.dumps(ledger_doc))
+    [(_digest, problem)] = verify_evidence(load_ledger(path), [raw])
+    assert problem and "os_build" in problem
+
+
+def test_record_refuses_a_transcript_that_could_not_be_published_verbatim():
+    # Re-serialized (no trailing newline), CRLF, or carrying a local path: a published
+    # copy could not reproduce the hash, or would publish the operator's account name.
+    t = transcript()
+    for raw in (json.dumps(t).encode(), canon(t).replace(b"\n", b"\r\n"), canon(t).removesuffix(b"\n")):
+        with pytest.raises(LedgerError, match="canonical form"):
+            entry_from_transcript(json.loads(raw), raw, oracle_digest=committed_oracle)
+    for env_over, commands in (({"transcript_dir": "/home/jane/q/t"}, None),
+                               ({}, ["C:\\Users\\Jane Doe\\python.exe", ORACLE, "--backend", "msb"])):
+        bad = transcript(commands=commands, **env_over)
+        with pytest.raises(LedgerError, match="local"):
+            entry_from_transcript(bad, canon(bad), oracle_digest=committed_oracle)
+
+
+# ---- harness CLI ----------------------------------------------------------------
+
+
+def test_matrix_reports_the_gates_verdict_from_the_ledger(tmp_path, capsys, monkeypatch):
+    # `qualification matrix` used to ignore the ledger and print every claimed cell blocked.
+    from qualification import cli
+
+    path = tmp_path / "ledger.json"
+    path.write_text(json.dumps(doc([entry("msb", "macos-arm64")], [waiver("sbx", "windows-x64")])))
+    real = gate.evaluate
+    monkeypatch.setattr(gate, "evaluate", lambda ledger, now: real(
+        ledger, now=NOW, changed_paths=lambda rev: [], oracle_digest=committed_oracle))
+    assert cli.main(["matrix", "--ledger", str(path), "--json"]) == 0
+    cells = {(c["backend"], c["platform"]): c for c in json.loads(capsys.readouterr().out)["data"]["cells"]}
+    assert cells[("msb", "macos-arm64")]["state"] == "qualified"
+    assert cells[("sbx", "windows-x64")]["state"] == "waived"
+    assert cells[("msb", "linux-x86_64")]["state"] == "blocked"
+    assert cells[("msb", "windows-arm64")] == {"backend": "msb", "platform": "windows-arm64", "claimed": False,
+                                               "state": "unqualified", "reason": ""}
+    assert cli.main(["matrix", "--ledger", str(tmp_path / "missing.json")]) == 2
+
+
+@pytest.mark.parametrize("attempts", ["0", "-1", "x"])
+def test_run_rejects_a_non_positive_attempt_count_with_a_usage_error(attempts):
+    from qualification import cli
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["run", "--backend", "msb", "--attempts", attempts, "--", "true"])
+    assert exc.value.code == 2
+
+
+
+# ---- verify-evidence --base: every added entry needs exactly one shown block ----
+
+
+def _git(repo, *args):
+    import subprocess
+
+    return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args], cwd=repo,
+                          check=True, capture_output=True, text=True).stdout.strip()
+
+
+def _pr(tmp_path, monkeypatch, *transcripts):
+    """A repo whose base commit has one recorded entry; the working ledger adds ``transcripts``."""
+    repo = tmp_path / "repo"
+    (repo / "docs").mkdir(parents=True)
+    ledger = repo / "docs" / "qualification-ledger.json"
+    ledger.write_text(json.dumps(doc()))
+    old = transcript()
+    old["attempts"][0]["recorded_at"] = "2026-11-01T00:00:00+00:00"
+    append_entry(ledger, entry_from_transcript(old, canon(old), oracle_digest=committed_oracle))
+    _git(tmp_path, "init", "-q", str(repo))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    base = _git(repo, "rev-parse", "HEAD")
+    raws = []
+    for t in transcripts:
+        raw = canon(t)
+        append_entry(ledger, entry_from_transcript(t, raw, oracle_digest=committed_oracle))
+        raws.append(raw)
+    monkeypatch.chdir(repo)
+    return base, canon(old), raws
+
+
+def _verify(tmp_path, body, base, capsys):
+    (tmp_path / "body.md").write_text(body)
+    rc = gate.main(["--ledger", "docs/qualification-ledger.json", "verify-evidence", f"--base={base}",
+                    str(tmp_path / "body.md")])
+    return rc, capsys.readouterr().out
+
+
+def _two():
+    a = transcript()
+    b = transcript(backend="sbx", backend_version="0.51.0")
+    b["attempts"][0]["commands"] = oracle_argv("sbx")
+    return a, b
+
+
+def test_verify_evidence_with_a_base_passes_when_every_added_entry_is_shown_once(tmp_path, monkeypatch, capsys):
+    base, _old, (a, b) = _pr(tmp_path, monkeypatch, *_two())
+    rc, out = _verify(tmp_path, _body(a) + _body(b), base, capsys)
+    assert rc == 0 and out.count("OK ") == 2
+
+
+def test_verify_evidence_reports_an_added_entry_with_no_block(tmp_path, monkeypatch, capsys):
+    # Without a base, a body that shows only one of two new entries verified "OK".
+    base, _old, (a, b) = _pr(tmp_path, monkeypatch, *_two())
+    rc, out = _verify(tmp_path, _body(a), base, capsys)
+    assert rc == 1 and f"MISSING {hashlib.sha256(b).hexdigest()}" in out and "sbx/macos-arm64" in out
+    rc, out = _verify(tmp_path, "no evidence at all", base, capsys)
+    assert rc == 1 and out.count("MISSING") == 2
+
+
+def test_verify_evidence_rejects_duplicate_and_hidden_blocks(tmp_path, monkeypatch, capsys):
+    base, _old, (a, b) = _pr(tmp_path, monkeypatch, *_two())
+    rc, out = _verify(tmp_path, _body(a) + _body(b) + _body(a), base, capsys)
+    assert rc == 1 and f"DUPLICATE {hashlib.sha256(a).hexdigest()}" in out
+    hidden = _body(a) + "<!--\n" + _body(b) + "-->\n"  # renders as nothing, so no reviewer sees it
+    rc, out = _verify(tmp_path, hidden, base, capsys)
+    assert rc == 1 and f"HIDDEN {hashlib.sha256(b).hexdigest()}" in out and "MISSING" in out
+    unterminated = _body(a) + "<!-- " + _body(b)
+    rc, out = _verify(tmp_path, unterminated, base, capsys)
+    assert rc == 1 and "HIDDEN" in out
+    rc, out = _verify(tmp_path, _body(a) + _body(b) + "<!--\n" + _body(a) + "-->\n", base, capsys)
+    assert rc == 1 and "HIDDEN" in out and "DUPLICATE" in out
+
+
+def test_verify_evidence_rejects_a_block_for_an_entry_the_pr_did_not_add(tmp_path, monkeypatch, capsys):
+    base, old, (a,) = _pr(tmp_path, monkeypatch, transcript())
+    rc, out = _verify(tmp_path, _body(a) + _body(old), base, capsys)
+    assert rc == 1 and f"EXTRA {hashlib.sha256(old).hexdigest()}" in out
+
+
+def test_verify_evidence_base_must_be_readable(tmp_path, monkeypatch, capsys):
+    _base, _old, (a,) = _pr(tmp_path, monkeypatch, transcript())
+    for bad in ("0" * 40, "--output=x"):
+        rc, _out = _verify(tmp_path, _body(a), bad, capsys)
+        assert rc == 2
+
+
+def test_verify_evidence_reads_stdin_as_utf8_bytes(tmp_path, monkeypatch, capsys):
+    import io
+
+    path, raw = _recorded(tmp_path, transcript())
+    body = ("café — " + _body(raw)).encode("utf-8")
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(body), encoding="latin-1"))
+    assert gate.main(["--ledger", str(path), "verify-evidence", "-"]) == 0

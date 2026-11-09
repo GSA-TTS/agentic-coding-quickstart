@@ -346,6 +346,9 @@ def test_migration_verify_failure_restores_the_original(monkeypatch):
 
 @pytest.fixture
 def both_installed(monkeypatch):
+    # The installed/version overrides are honoured only for the bundled stub.
+    monkeypatch.setenv("ACQ_SBX_BIN", "__stub__")
+    monkeypatch.setenv("ACQ_MSB_BIN", "__stub__")
     monkeypatch.setenv("ACQ_SBX_INSTALLED", "1")
     monkeypatch.setenv("ACQ_MSB_INSTALLED", "1")
     monkeypatch.setenv("ACQ_SBX_VERSION", "0.51.0")

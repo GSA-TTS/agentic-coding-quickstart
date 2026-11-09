@@ -894,12 +894,3 @@ seed_host_config() {
   return 0
 }
 export -f seed_host_config 2>/dev/null || true
-
-# Seed the host-side agent-user gate for a pre-provisioned sandbox test fixture.
-seed_host_config_gates() {
-  local backend="${1:-msb}" name="${2:-}"
-  [ -n "$name" ] || return 0
-  command -v acq_host_config_write >/dev/null 2>&1 || return 0
-  [ "${STUB_AGENT_USER_READY:-0}" = "1" ] && acq_host_config_write "$backend" "$name" agent-user-ready 1
-}
-export -f seed_host_config_gates 2>/dev/null || true

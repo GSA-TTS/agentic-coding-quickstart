@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from . import config, migration, runtime, userdirs
 
-PASS = "pass"
+PASS = "pass"  # nosec B105 # a check status
 WARN = "warn"
 FAIL = "fail"
 

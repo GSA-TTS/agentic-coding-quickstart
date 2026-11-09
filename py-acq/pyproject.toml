@@ -32,3 +32,45 @@ acq_py = ["msb-balanced-hosts.txt"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+
+# Python quality gates (.github/workflows/python-quality.yml): ruff, mypy and
+# bandit on src/, plus a branch-coverage floor on the pytest run. The tool
+# versions are pinned in requirements-quality.txt. tests/ is not linted yet.
+[tool.ruff]
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# Explicit rule set, so a ruff upgrade that changes its defaults cannot change
+# the gate on its own: pyflakes, the pycodestyle error subset that ruff enables
+# by default, import order, pyupgrade and bugbear. Security lint is bandit's job.
+select = ["E4", "E7", "E9", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src"]
+mypy_path = "src"
+explicit_package_bases = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+[tool.bandit]
+exclude_dirs = ["tests"]
+# B404 (imports subprocess) and B603 (subprocess without a shell) flag what acq is
+# for: it runs the backend CLIs. Every call passes an argv list resolved through
+# hostexec. The checks that matter here stay on: B602/B604/B605 (a shell) and
+# B607 (an executable found by a partial path).
+skips = ["B404", "B603"]
+
+[tool.coverage.run]
+branch = true
+source = ["acq_py"]
+# The backend stubs and the __main__ shim only ever run in a child process
+# (ACQ_*_BIN=__stub__ / python -m acq_py), which in-process coverage cannot see.
+omit = ["*/acq_py/_stub_*.py", "*/acq_py/__main__.py"]
+
+[tool.coverage.report]
+skip_covered = true
+# In-process branch coverage was 77% when this gate was added. The floor sits a
+# little below it to absorb noise; raise it as coverage improves.
+fail_under = 75

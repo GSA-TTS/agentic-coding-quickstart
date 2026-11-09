@@ -47,10 +47,9 @@ upgrade from one version to the next as always, and somewhere in that sequence t
 default implementation becomes the Python one.
 
 A fork release would be a second, conflicting version line for the same tool. It also
-cannot produce a sane number: the fork has no tags and branched just after upstream
-4.1.1, while upstream has since shipped 4.2.0 and 4.2.1, so release-please on the fork
-walks all of history and proposes a *downgrade* (it proposed `4.0.1` against a manifest
-of `4.1.1`; that PR was closed).
+cannot produce a sane number: the fork carries no release tags, so release-please on
+the fork walks all of history and proposes a *downgrade* (for example, it once proposed
+`4.0.1` against a manifest of `4.1.1`; that PR was closed).
 
 So every job in `release.yml` is gated on the repository variable
 `ENABLE_RELEASES == 'true'`, which is **unset on the fork**. The workflow and the gate
@@ -125,6 +124,16 @@ Settings > Branches (or Rules) > the `main` protection rule:
 
 > Requiring the check before step 2 makes the release PR unmergeable: the check
 > would never report on it.
+
+> **On a personal fork** (`mogul/agentic-coding-quickstart`): every `CODEOWNERS` line
+> names a `GSA-TTS` team, which cannot own files in a repository outside that
+> organisation, so GitHub reports each line as an unknown owner and code-owner review
+> cannot be required there. Until the fork's maintainer decides how to replace it
+> (for example a fork-only `CODEOWNERS` naming the fork owner, or a ruleset that
+> requires one approving review on `main`), the gate on the fork is advisory: it
+> reports a stale cell but does not stop the merge. Requiring the `Tier-3 release
+> gate` status check in the fork's `main` ruleset is the part that needs no policy
+> choice. Both are repository settings, not code.
 
 Verify: open a throwaway PR and confirm `Tier-3 release gate` is listed as required.
 

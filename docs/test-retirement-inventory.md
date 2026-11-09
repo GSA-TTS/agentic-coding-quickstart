@@ -126,8 +126,8 @@ numeric-prefix order.
 | File | Tests | Bucket | Disposition |
 |---|---|---|---|
 | `40-secret-set.bats` | 33 | preserve | §secret set/has + §48. Covered by `cli/secret-set-*`, `cli/secret-has-*`, `cli/secret-rm-*`, `cli/secret-sbx-unsupported`. **Mixed → retire:** `mask` (interactive masked input) is rendering, dropped by §50 "exact … prompt layout … not contracts"; **DROP** "scope-less secret set" (§6) is covered by `cli/secret-set-usage`. |
-| `45-secret-store-unit.bats` | 20 | re-express | In-process secret-store unit. `secret rm`/`ls` observables map to `cli/secret-rm-*`/`cli/secret-ls-*`; Windows DPAPI envelope (ADR-0028) is platform-specific → Windows Tier-3 qualification. |
-| `71b-msb-secret-store-backends.bats` | 11 | re-express | keychain-linux/macos/file backends are platform-specific secret storage (ADR-0028). multi-workspace mount + symlink canonicalization are §4 host/guest-path fidelity → **gap**. |
+| `45-secret-store-unit.bats` | 20 | re-express | In-process secret-store unit. `secret rm`/`ls` observables map to `cli/secret-rm-*`/`cli/secret-ls-*`. The store itself (keys, scopes, 0600 file backend, DPAPI envelope and legacy migration through a fake PowerShell and the `dpapi_*` seam) is re-expressed for the Python store in `py-acq/tests/test_secretstore.py`, with a Bash↔Python byte round trip in `py-acq/tests/test_secretstore_bash.py`; real DPAPI remains a Windows Tier-3 qualification item (ADR-0028). |
+| `71b-msb-secret-store-backends.bats` | 11 | re-express | keychain-linux/macos/file backends are platform-specific secret storage (ADR-0028); their logic (index, self-heal from sidecars, `security -i`, legacy file fallback) is re-expressed against fake `secret-tool`/`security` in `py-acq/tests/test_secretstore.py` and round-tripped with Bash in `py-acq/tests/test_secretstore_bash.py`; the real keychains remain host qualification items. multi-workspace mount + symlink canonicalization are §4 host/guest-path fidelity → **gap**. |
 | `125-github-scope.bats` | 14 | preserve | ADR-0013 per-sandbox GitHub scoping. Covered by `cli/github-scope-json`, `cli/github-scope-no-value`, `cli/github-scope-sbx`. |
 | `146-provider-verification.bats` | 28 | preserve | §provider-credential + host-verifier reachability. Covered by `cli/provider-credential-*`. **Mixed → re-express:** reachability/model-identity checks are Tier-2/Tier-3 evidence, not Tier-1 vectors. |
 | `148-provider-credential-bindings.bats` | 56 | preserve | §provider-credential set/ls/rm + facts.json validation (ADR-0040m). Covered by `cli/provider-credential-*`. |
@@ -204,7 +204,9 @@ retire-on-touch can proceed block by block:
 
 * **`60-help.bats`** — retire the "bare `secret` appends backend help" block
   (DROP: backend help for bare `secret`, ADR-0038m §6); preserve the help-flag
-  and `secret import`/`secret set-custom` blocks.
+  and `secret import`/`secret set-custom` blocks. `secret import` behavior is
+  covered by `cli/secret-import-*` and by the Bash/Python store parity test in
+  `py-acq/tests/test_secretstore_bash.py`.
 * **`40-secret-set.bats`** — retire the `mask` interactive-mask block (§50
   rendering); the scope-less-`secret set` block is already a DROP covered by
   `cli/secret-set-usage`.

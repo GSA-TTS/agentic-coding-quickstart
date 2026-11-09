@@ -35,7 +35,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import errors, hostexec, kits, timeouts
+from . import errors, hostexec, kits, secretstore, timeouts
+from .secretstore import Scope
 
 STUB_SENTINEL = "__stub__"
 
@@ -57,6 +58,25 @@ def ready_timeout_s() -> float:
     warning instead of crashing every command or making the wait unbounded.
     """
     return timeouts.env_seconds(READY_TIMEOUT_ENV, DEFAULT_READY_TIMEOUT_S)
+
+
+# Budget (seconds) for one in-guest kit-install or substrate step. A cold Nix
+# install of an agent can take many minutes, so the default is generous; the
+# point is that a step that hangs (a prompt nobody can answer) ends with a stable
+# ``timeout`` error instead of blocking acq forever.
+DEFAULT_KIT_TIMEOUT_S = 1800.0
+KIT_TIMEOUT_ENV = "ACQ_MSB_KIT_TIMEOUT"
+
+# Non-interactive git guards for in-guest kit and substrate steps, the same
+# values Bash's adapter appends (``_acq_msb_env_tokens_with_guards_into``): git
+# must fail rather than prompt for credentials no one can type (the prompt would
+# be hidden, since the step's output is captured).
+GIT_GUARD_ENV = ("GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=/bin/false", "SSH_ASKPASS=/bin/false")
+
+
+def kit_timeout_s() -> float:
+    """The per-step kit/substrate budget in seconds, read when needed."""
+    return timeouts.env_seconds(KIT_TIMEOUT_ENV, DEFAULT_KIT_TIMEOUT_S)
 
 
 # Module-local seam for the host OS class. ``_guest_path`` reads this instead of
@@ -196,7 +216,18 @@ def _run(
     timeout: float | None = None,
     input_text: str | None = None,
 ) -> subprocess.CompletedProcess:
+    # Output is captured, so the child must never read the user's terminal: a
+    # command that prompts would hang with the prompt hidden, or swallow typed
+    # input. Without ``input_text`` its stdin is the null device.
     try:
+        if input_text is None:
+            return subprocess.run(
+                [*msb_command(), *argv],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
         return subprocess.run(
             [*msb_command(), *argv],
             input=input_text,
@@ -382,8 +413,8 @@ def _balanced_rules() -> list[str]:
         )
     try:
         text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        raise _policy_error(f"cannot read the balanced egress host list {str(path)!r}", remediation)
+    except (OSError, UnicodeDecodeError) as exc:
+        raise _policy_error(f"cannot read the balanced egress host list {str(path)!r}", remediation) from exc
     flags: list[str] = []
     for lineno, raw in enumerate(text.splitlines(), start=1):
         line = raw.split("#", 1)[0].strip()
@@ -497,6 +528,30 @@ def exec_ready(name: str) -> bool:
     return proc.returncode == 0
 
 
+def _guest_step(name: str, user: str, step: list[str]) -> bool:
+    """Run one in-guest kit/substrate step non-interactively; True on success.
+
+    Mirrors Bash's kit exec path: stdin is the null device (see :func:`_run`),
+    the git prompt guards are set, and the step is bounded by
+    :func:`kit_timeout_s`. A step that overruns raises :class:`MsbError`
+    (``timeout``).
+    """
+    argv = ["exec", "-u", user]
+    for token in GIT_GUARD_ENV:
+        argv += ["-e", token]
+    argv += [name, "--", *step]
+    budget = kit_timeout_s()
+    try:
+        proc = _run(argv, timeout=budget)
+    except subprocess.TimeoutExpired as exc:
+        raise MsbError(
+            errors.TIMEOUT,
+            f"an in-guest setup step for sandbox '{name}' did not finish within {budget:g}s",
+            f"check network access from the sandbox, or raise {KIT_TIMEOUT_ENV}, then retry",
+        ) from exc
+    return proc.returncode == 0
+
+
 def kit_apply(name: str, kit: str, install_cmd: list[str]) -> None:
     """Apply a kit in-guest (ADR-0040m ``kit-apply``): run the kit's pinned
     install command inside the sandbox as the unprivileged ``agent`` user.
@@ -505,7 +560,9 @@ def kit_apply(name: str, kit: str, install_cmd: list[str]) -> None:
     is data sourced from the pinned control plane and is forwarded verbatim to the
     backend, which runs it in-guest. The argv is the ``nix profile install
     …#<agent>`` install — it carries no credential — so nothing sensitive crosses
-    the boundary. Raises :class:`MsbError` on backend failure.
+    the boundary. The step never reads the user's terminal, runs with the git
+    prompt guards, and is time-bounded (:func:`_guest_step`). Raises
+    :class:`MsbError` on backend failure or timeout.
 
     Idempotency is a host-authoritative concern (the seam short-circuits a re-apply
     of an already-applied kit via :func:`acq_py.kits.kit_applied_read`); the
@@ -514,8 +571,7 @@ def kit_apply(name: str, kit: str, install_cmd: list[str]) -> None:
     """
     # Reconciles with the real msb 0.7.11 CLI: there is NO `kit-apply` subcommand.
     # The pinned install command runs in-guest via `msb exec -u agent NAME -- …`.
-    proc = _run(["exec", "-u", "agent", name, "--", *install_cmd])
-    if proc.returncode != 0:
+    if not _guest_step(name, "agent", install_cmd):
         raise MsbError(
             errors.FAILURE,
             f"could not apply kit '{kit}' to sandbox '{name}'",
@@ -523,20 +579,22 @@ def kit_apply(name: str, kit: str, install_cmd: list[str]) -> None:
         )
 
 
-def provision_substrate(name: str, steps: list[list[str]]) -> None:
+def provision_substrate(name: str, steps: list[tuple[str, list[str]]]) -> None:
     """Provision addressable substrate gaps in-guest (ADR-0030 "bring-your-own
-    image contract"): bootstrap single-user Nix + devenv + direnv and create the
-    agent user before the agent install.
+    image contract"): create the agent user and bootstrap single-user Nix +
+    devenv + direnv before the agent install.
 
-    The steps are data sourced from the pinned control plane (never a secret,
-    never a credential) and run in-guest via the backend seam; acq never executes
-    them on the host. Raises :class:`MsbError` on backend failure.
+    Each step is ``(user, argv)``: the seam decides which guest user runs it
+    (root creates the agent user, as Bash's ``_acq_msb_ensure_agent_user`` does
+    with ``-u 0``; the agent user runs its own single-user installs). The steps
+    are data sourced from the pinned control plane (never a secret, never a
+    credential) and run in-guest via the backend seam; acq never executes them on
+    the host. Raises :class:`MsbError` on backend failure or timeout.
     """
     # Reconciles with the real msb 0.7.11 CLI: there is NO `substrate-provision`
-    # subcommand. Each bootstrap step runs in-guest via `msb exec -u agent NAME -- …`.
-    for step in steps:
-        proc = _run(["exec", "-u", "agent", name, "--", *step])
-        if proc.returncode != 0:
+    # subcommand. Each bootstrap step runs in-guest via `msb exec -u USER NAME -- …`.
+    for user, step in steps:
+        if not _guest_step(name, user, step):
             raise MsbError(
                 errors.FAILURE,
                 f"could not provision the substrate for sandbox '{name}'",
@@ -576,7 +634,7 @@ def _run_stream(argv: list[str], *, json_mode: bool) -> int:
     """
     if json_mode:
         try:
-            stdout: object = sys.stderr.fileno()
+            stdout: int | None = sys.stderr.fileno()
         except (AttributeError, OSError, ValueError):
             stdout = 2
     else:
@@ -651,12 +709,12 @@ def ports(name: str) -> list[dict]:
         )
     try:
         doc = json.loads(proc.stdout)
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, ValueError) as exc:
         raise MsbError(
             errors.FAILURE,
             f"could not parse declared ports for sandbox '{name}'",
             "the backend returned an unreadable inspect result; check msb logs and retry",
-        )
+        ) from exc
 
     def _bad_shape() -> MsbError:
         return MsbError(
@@ -731,15 +789,30 @@ def _secret_unsupported(verb: str) -> MsbError:
 # ``msb secret …`` takes the scope as either the ``--global`` flag or a leading
 # positional sandbox name; a global scope is encoded as the flag so a sandbox
 # whose name happens to be ``--global`` can never be confused with the flag.
-_GLOBAL_SCOPE = "global"
+# Scopes are typed (:class:`secretstore.Scope`), so a sandbox named ``global``
+# stays a sandbox; a bare string is accepted from older callers.
+_GLOBAL_SCOPE = secretstore.GLOBAL
 
 
-def _secret_scope_argv(scope: str) -> list[str]:
+def _secret_scope_argv(scope: Scope | str) -> list[str]:
     """Encode a scope as the ``msb secret …`` argv token (non-secret)."""
-    return ["--global"] if scope == _GLOBAL_SCOPE else [scope]
+    sc = secretstore.as_scope(scope)
+    return ["--global"] if sc.sandbox is None else [sc.sandbox]
 
 
-def secret_set(scope: str, service: str, value: str, *, timeout: float | None = None) -> None:
+# The neutral ``secret`` seam (commands/secret.py) writes the acq store and then
+# calls ``secret_feed``/``secret_unbind``. The capability record declares
+# secret-write/secret-rm unsupported, so the seam refuses before storing and
+# these are never reached; they fail closed if called anyway.
+def secret_feed(scope: Scope | str, service: str, value: str, host: str = "", env: str = "") -> None:
+    raise _secret_unsupported("set")
+
+
+def secret_unbind(scope: Scope | str, service: str) -> None:
+    raise _secret_unsupported("rm")
+
+
+def secret_set(scope: Scope | str, service: str, value: str, *, timeout: float | None = None) -> None:
     """``secret-write`` fails closed on msb (no ``secret`` subcommand, ADR-0040m).
 
     The value is never read, logged, or placed on argv: the refusal happens before
@@ -749,7 +822,7 @@ def secret_set(scope: str, service: str, value: str, *, timeout: float | None = 
     raise _secret_unsupported("set")
 
 
-def secret_has(scope: str, service: str) -> bool:
+def secret_has(scope: Scope | str, service: str) -> bool:
     """True when a secret for ``(scope, service)`` is present; False when absent.
 
     Tri-state at the caller's level: presence is a bool, but a backend that
@@ -765,7 +838,7 @@ def secret_has(scope: str, service: str) -> bool:
     raise _secret_unsupported("has")
 
 
-def secret_rm(scope: str, service: str) -> None:
+def secret_rm(scope: Scope | str, service: str) -> None:
     """Remove a secret for ``(scope, service)``. Raises :class:`MsbError` on failure.
 
     The seam (:func:`cli.run_secret_rm`) checks presence first and reports
@@ -777,7 +850,7 @@ def secret_rm(scope: str, service: str) -> None:
     raise _secret_unsupported("rm")
 
 
-def secret_ls(scope: str | None = None) -> list[dict]:
+def secret_ls(scope: Scope | str | None = None) -> list[dict]:
     """``secret-list`` fails closed on msb (no ``secret`` subcommand, ADR-0040m).
 
     Raises :class:`MsbError` with ``unsupported_capability``. The listing never

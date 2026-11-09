@@ -3,7 +3,12 @@
 ``python -m qualification.gate check`` decides, from the committed ledger alone,
 whether every claimed cell holds a current green transcript, so a release can be
 evaluated on a hosted runner with no live run. ``record`` turns a run's
-``transcript.json`` into a ledger entry.
+``transcript.json`` into a ledger entry. ``verify-evidence`` checks the transcripts
+a ledger PR body inlines against the ledger (each block's SHA-256 must be a
+recorded ``transcript_sha256`` whose entry the block reproduces; with ``--base``,
+every entry added since that revision needs exactly one such block, and none may
+be hidden in an HTML comment), so a reviewer can audit a ledger PR without the
+runner's files.
 
 A claimed cell is ``qualified`` (current green transcript), ``waived`` (an
 unexpired maintainer waiver in the ledger), or ``blocked``. The gate passes iff
@@ -22,8 +27,10 @@ tell whether a run really executed the oracle (``record`` checks that, locally).
 
 The ledger is self-reported and committed: beyond those checks its integrity is a
 review control (CODEOWNERS on the ledger file), not a technical one.
-``transcript_sha256`` only helps if the transcripts attached to the release are
-audited against it. A recorded ``rev`` must be an ancestor of the commit the gate
+``transcript_sha256`` helps that review because the ledger PR inlines each
+transcript byte for byte; ``verify-evidence`` recomputes it from the PR body. An
+entry, or the accepted version, below the ADR-0044m version floors blocks its cell
+(:func:`qualification.matrix.version_problem`). A recorded ``rev`` must be an ancestor of the commit the gate
 evaluates (otherwise the cell is blocked), so record a run at a commit that is on
 ``main`` (a squash-merged branch commit is not).
 
@@ -45,6 +52,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable, Iterable
 
 from .ledger import (
@@ -54,12 +62,15 @@ from .ledger import (
     append_entry,
     OracleDigest,
     binding_problem,
+    audit_evidence,
     entry_from_transcript,
+    evidence_blocks,
+    parse_ledger,
     git_oracle_digest,
     latest_entry,
     load_ledger,
 )
-from .matrix import MSB, PLATFORMS, SBX, is_claimed, staleness, touches_surface
+from .matrix import MSB, PLATFORMS, SBX, is_claimed, staleness, touches_surface, version_problem
 from .model import Environment, Transcript, Verdict
 
 _REV = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
@@ -127,6 +138,12 @@ def _why_not_current(
     version = ledger.accepted_backend_versions.get(entry.backend)
     if version is None:
         return f"accepted_backend_versions has no entry for {entry.backend}"
+    # The ADR-0044m floors and the msb refused range: a run on such a version is not
+    # evidence, and accepting such a version cannot make one current.
+    for which, candidate in (("recorded", entry.backend_version), ("accepted", version)):
+        floor = version_problem(entry.backend, candidate)
+        if floor:
+            return f"{which} backend version: {floor}"
     paths = changed_paths(entry.rev)
     if paths is None:
         return f"revision {entry.rev[:12]} is not an ancestor of HEAD (record at a commit on main; fetch full history)"
@@ -212,6 +229,49 @@ def _cmd_record(args: argparse.Namespace) -> int:
     return 0
 
 
+def base_entries(ledger_path: str, rev: str, cwd=None) -> set[str]:
+    """The ``transcript_sha256`` of every entry in the ledger as committed at ``rev``."""
+    if not rev or rev.startswith("-"):
+        raise LedgerError(f"--base {rev!r} is not a revision")
+    top = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, cwd=cwd)
+    if top.returncode != 0:
+        raise LedgerError("--base needs a git checkout")
+    try:
+        rel = Path(ledger_path).resolve().relative_to(Path(top.stdout.strip()).resolve()).as_posix()
+    except ValueError:
+        raise LedgerError(f"{ledger_path} is not inside the checkout, so it has no committed version") from None
+    shown = subprocess.run(["git", "show", f"{rev}:{rel}"], capture_output=True, cwd=cwd)
+    if shown.returncode != 0:
+        raise LedgerError(f"cannot read {rel} at {rev}")
+    return {e.transcript_sha256 for e in parse_ledger(json.loads(shown.stdout.decode("utf-8"))).entries}
+
+
+def _cmd_verify_evidence(args: argparse.Namespace) -> int:
+    ledger = load_ledger(args.ledger)
+    required = None
+    if args.base is not None:
+        old = base_entries(args.ledger, args.base)
+        required = [e for e in ledger.entries if e.transcript_sha256 not in old]
+    if args.body == "-":
+        data = sys.stdin.buffer.read()
+    else:
+        with open(args.body, "rb") as handle:
+            data = handle.read()
+    blocks = evidence_blocks(data.decode("utf-8"))
+    if not blocks and not required:
+        if required is not None:
+            sys.stdout.write("no entries added since the base, and no transcript blocks\n")
+            return 0
+        sys.stderr.write("qualification.gate: no ```json transcript blocks found\n")
+        return 2
+    results, problems = audit_evidence(ledger, blocks, required)
+    for digest, problem in results:
+        sys.stdout.write(f"{'MISMATCH' if problem else 'OK'} {digest}" + (f": {problem}" if problem else "") + "\n")
+    for problem in problems:
+        sys.stdout.write(problem + "\n")
+    return 1 if problems or any(problem for _digest, problem in results) else 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="qualification.gate", description=__doc__.split("\n")[0])
     parser.add_argument("--ledger", default=DEFAULT_LEDGER)
@@ -222,13 +282,22 @@ def _build_parser() -> argparse.ArgumentParser:
     record.add_argument("transcript")
     record.add_argument("--platform", default=None, help="matrix platform token (default: derived from os/arch)")
     record.add_argument("--recorded-at", default=None, help="ISO 8601 UTC time (default: from the transcript)")
+    verify = sub.add_parser(
+        "verify-evidence", help="check the transcripts a ledger PR body inlines against the ledger"
+    )
+    verify.add_argument("body", help="a file holding the PR body, or - for stdin")
+    verify.add_argument(
+        "--base", default=None,
+        help="the PR's base revision: every entry added since it must have exactly one verifying block",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
-        return _cmd_check(args) if args.subcommand == "check" else _cmd_record(args)
+        commands = {"check": _cmd_check, "record": _cmd_record, "verify-evidence": _cmd_verify_evidence}
+        return commands[args.subcommand](args)
     except (LedgerError, OSError, ValueError, TypeError, KeyError) as exc:
         sys.stderr.write(f"qualification.gate: {exc}\n")
         return 2

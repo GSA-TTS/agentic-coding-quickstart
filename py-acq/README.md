@@ -110,13 +110,31 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   mappings with origin (create-time), never listener health (ADR-0038m §2). A
   failed or unreadable `msb inspect` fails closed rather than reporting an empty
   list (ADR-0038m §48).
-* `acq-py secret set (-g | SANDBOX) SERVICE [--json]` — store a secret. The value
-  is read from **stdin only** (never argv) and forwarded to the backend on its
-  stdin; the success envelope reports `scope`/`service`/`value_state` and never
-  the value (ADR-0038m §secret set). A scope-less `secret set` is a usage error
-  (ADR-0038m §48 drops scope-less secret set); an empty or whitespace-only stdin
-  value is a `validation_failed` failure (exit 1). Exactly one terminal newline is
-  stripped (plus a CRLF `\r`); any further trailing newlines are value content.
+* `acq-py secret set (-g | SANDBOX) SERVICE [--host HOST --env ENV] [--json]` —
+  store a secret in the acq secret store, which is shared byte for byte with the
+  Bash `acq` (`acq_py/secretstore.py`: macOS keychain, `secret-tool`, Windows
+  DPAPI, or a 0600 file that is never used on Windows), then feed it to the
+  backend on its stdin. The value never appears in argv or output; the success
+  envelope reports `scope`/`service`/`value_state` only (ADR-0038m §secret set).
+  A scope-less `secret set` is a usage error (ADR-0038m §48 drops scope-less
+  secret set). An empty or whitespace-only value, a value with a newline or tab
+  (after one terminal newline, plus a CRLF `\r`, is stripped), or input that is
+  not valid UTF-8 is a `validation_failed` failure (exit 1) and nothing is
+  stored. Service and sandbox names must match `[A-Za-z0-9_-]+` and not start
+  with `-`; a sandbox named `global` is a sandbox scope. `--host`/`--env` record
+  a custom endpoint and must be given together (`--host` alone works for a
+  service with a known env var).
+  **Typing a secret:** on a terminal the value is read with echo off after a
+  prompt on stderr. Under Git Bash/mintty, native Windows Python sees a pipe
+  rather than a console, so typed input cannot be hidden: acq prints a warning
+  first. There, pipe the value instead (`printf '%s' "$TOKEN" | acq-py secret
+  set -g usai`) or run from a native console (Windows Terminal, PowerShell, cmd).
+* `acq-py secret import [SERVICE] [-g | SANDBOX] [--all] [--force] [--dry-run]
+  [--json]` — copy known tokens from the host environment (`USAI_API_KEY`,
+  `GITHUB_TOKEN`/`GH_TOKEN`, `GITLAB_TOKEN`, registered provider KEY_ENVs) into the
+  acq secret store, as Bash `acq secret import` does. Needs no backend.
+  Interactive by default (asks per service on a terminal, skips otherwise);
+  `--all` never overwrites, `--force` does, `--dry-run` writes nothing.
 * `acq-py secret rm (-g | SANDBOX) SERVICE [--json]` — remove a secret. An absent
   secret fails closed with the `secret_missing` code; a backend that cannot answer
   fails closed with its accurate code (`backend_not_found`/`failure`) and never
@@ -159,9 +177,15 @@ unparseable record (or a reader below a record's `min_reader`) is refused with a
 stable code. Each record migrates atomically and non-destructively until
 verified. Read-only diagnostics (`ls`, `doctor`) report rather than migrate.
 
-Detection and the reported version are overridable for reproducible, offline
-tests: `ACQ_SBX_INSTALLED`/`ACQ_MSB_INSTALLED` (`"0"`/`"1"`) and
-`ACQ_SBX_VERSION`/`ACQ_MSB_VERSION` (a forced version string).
+The version floor is checked against the program the adapter actually runs, so
+an `ACQ_MSB_BIN`/`ACQ_SBX_BIN` override is probed with `--version`/`version` and
+refused before any mutation when it is below the floor. Detection and the
+reported version are overridable for reproducible, offline tests:
+`ACQ_SBX_INSTALLED`/`ACQ_MSB_INSTALLED` (`"0"`/`"1"`) and
+`ACQ_SBX_VERSION`/`ACQ_MSB_VERSION` (a forced version string). `"0"` (force
+absent) is honoured everywhere; `"1"` and a forced version are honoured only
+while that backend's `ACQ_*_BIN` is `__stub__`, so they can never skip the floor
+for a real binary.
 
 ## Managed runtime (ADR-0042m)
 
@@ -197,14 +221,46 @@ inherited config for a hermetic run:
 GIT_CONFIG_GLOBAL=NUL GIT_CONFIG_NOSYSTEM=1 python -m pytest py-acq/tests -q
 ```
 
-That baseline is `1 failed, 485 passed, 49 skipped` as of this writing; the
-single failure is the known
-`test_migration.py::test_recreate_preserves_host_record` case (`/w` becoming
-`C:\w`). Without the override, roughly 30 further failures in
-`test_qualification_host.py` and `test_qualification_gate.py` are that signing
-hook, not the code under test.
+With the override, the suite is expected to pass on Windows; the Windows CI job
+(`.github/workflows/windows.yml`) runs it on every relevant pull request. The
+`install.sh` tests that need a supported platform are skipped there, because
+`install.sh` refuses Windows hosts and `install.ps1` is the Windows installer.
+Without the override, roughly 30 failures in `test_qualification_host.py` and
+`test_qualification_gate.py` come from that signing hook, not the code under
+test.
 
 See `../test/vectors/README.md` for the vector schema, assertion modes, and
 normalisation transforms. Contract evidence is subprocess-only (ADR-0039m);
 the sentinel set covers every assertion mode (`exact`/`contains`/`json`) and
 every normalisation transform (`abspath`/`tmpdir`/`crlf`/`timing`/`order`/`json`).
+
+### Quality gates
+
+`.github/workflows/python-quality.yml` runs ruff, mypy and bandit on `src/`
+and fails when pytest's in-process branch coverage drops below the
+`fail_under` floor in `pyproject.toml`. The tools are CI-only, pinned with
+hashes in `requirements-quality.txt` (policy: ADR-0049m). To run the gates
+locally, use a throwaway virtual environment and run the commands from
+`py-acq/`:
+
+```sh
+python -m pip install --require-hashes --no-deps --only-binary :all: -r requirements-quality.txt
+python -m ruff check src
+python -m mypy
+python -m bandit -c pyproject.toml -r src
+python -m pytest -q --cov --cov-report=term
+```
+
+The gates started at zero findings, so there is no baseline. A finding that
+is a false positive gets a targeted suppression with its reason on the same
+line, such as `# nosec B105 # an error code`. Do not widen the skip lists in
+`pyproject.toml` to clear one.
+
+### Windows
+
+`.github/workflows/windows.yml` runs on a Windows runner when a pull request
+touches Windows-relevant paths. It runs pytest, smoke tests of `acq.cmd` and
+`acq.ps1` for both `ACQ_IMPL` paths, `install.ps1 -DryRun` under PowerShell 7
+and Windows PowerShell 5.1, the release job's managed-runtime staging and
+smoke check, and a Git Bash run of `55-version.bats` and
+`06-windows-install.bats`.
