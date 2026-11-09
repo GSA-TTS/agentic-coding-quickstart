@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "id": "cli/workspace-colon-refused",
-  "oracle": "Bash parity (_acq_workspace_path_safe): a workspace path with ':' is refused (validation_failed) before the existence check, since the backends split mount specs on ':'",
+  "oracle": "Bash parity (_acq_workspace_path_safe): a workspace path with ':' is refused (validation_failed) before the existence check, since the backends split mount specs on ':'. Linux-only: on Windows '/no/such:dir' is drive-relative, so the message also names its absolute D:\\ form; the Windows drive-letter rule is covered by py-acq/tests/test_naming.py",
   "tier": 1,
   "backend": null,
-  "platform": "any",
+  "platform": "linux",
   "invoke": {
     "argv": ["{acq}", "--backend", "msb", "create", "opencode", "/no/such:dir", "--name", "box", "--json"],
     "env": {

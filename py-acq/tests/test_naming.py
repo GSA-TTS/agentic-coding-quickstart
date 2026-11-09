@@ -250,6 +250,15 @@ def test_create_refuses_a_workspace_path_with_a_colon_or_control(monkeypatch, tm
     assert "\n" not in doc["error"]["message"]
 
 
+@pytest.mark.skipif(POSIX, reason="native Windows drive paths")
+def test_windows_create_allows_the_drive_colon_and_refuses_any_other(monkeypatch, tmp_path, capsys):
+    _msb_env(monkeypatch, tmp_path)
+    rc, doc = _invoke_json(capsys, "--backend", "msb", "create", "opencode", str(tmp_path / "no" / "such:dir"))
+    _assert_refused(rc, doc, "contains ':'")
+    rc, doc = _invoke_json(capsys, "--backend", "msb", "create", "opencode", str(tmp_path / "missing"))
+    _assert_refused(rc, doc, "does not exist")
+
+
 def test_a_ro_suffix_gets_a_hint(monkeypatch, tmp_path, capsys):
     _msb_env(monkeypatch, tmp_path)
     rc, doc = _invoke_json(capsys, "--backend", "msb", "create", "opencode", "proj:ro")
