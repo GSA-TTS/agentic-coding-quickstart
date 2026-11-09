@@ -17,9 +17,11 @@ import json
 import sys
 from pathlib import Path
 
+import subprocess
+
 import pytest
 
-from acq_py import cli, errors, sbx, state
+from acq_py import cli, errors, kits, sbx, state
 
 
 def _env(monkeypatch, tmp_path, *, catalog=None, secrets=None):
@@ -46,6 +48,8 @@ def _env(monkeypatch, tmp_path, *, catalog=None, secrets=None):
         "ACQ_SBX_STUB_EXIT_CODE",
         "ACQ_IMAGE",
         "ACQ_MSB_IMAGE",
+        "ACQ_KIT_SOURCE_SEED",
+        "ACQ_EXTRA_KIT_SOURCES",
     ):
         monkeypatch.delenv(name, raising=False)
     if catalog is not None:
@@ -166,6 +170,159 @@ def test_kit_source_rm_auto_detected_sbx_revokes_and_removes(monkeypatch, tmp_pa
     # Mutation proof: the revoked owner prefix is gone from sbx's allowlist.
     allowed_path = Path(tmp_path) / "sbx-home" / ".docker-sbx" / "allowed-sources.json"
     assert json.loads(allowed_path.read_text(encoding="utf-8")) == ["docker.io/"]
+
+
+FULL_REF = "a" * 40
+
+
+def _allowed_path(tmp_path) -> Path:
+    return Path(tmp_path) / "sbx-home" / ".docker-sbx" / "allowed-sources.json"
+
+
+def _seed_allowed(tmp_path, sources) -> None:
+    path = _allowed_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(sources), encoding="utf-8")
+
+
+def _allowed(tmp_path) -> list:
+    return json.loads(_allowed_path(tmp_path).read_text(encoding="utf-8"))
+
+
+def _add_source(capsys, repo):
+    rc, _ = _invoke(capsys, "--backend", "sbx", "kit-source", "add", repo, "--ref", FULL_REF, "--json")
+    assert rc == 0
+
+
+def test_kit_source_rm_keeps_owner_prefix_a_sibling_source_needs(monkeypatch, tmp_path, capsys):
+    # sbx's allowlist is owner-granular: removing acme/kits-a must not revoke
+    # github.com/acme/ while acme/kits-b is still trusted. Once the last acme
+    # source goes, the prefix is revoked.
+    _env(monkeypatch, tmp_path)
+    _seed_allowed(tmp_path, ["docker.io/", "github.com/acme/"])
+    _add_source(capsys, "github.com/acme/kits-a")
+    _add_source(capsys, "github.com/acme/kits-b")
+
+    rc, doc = _invoke(capsys, "--backend", "sbx", "kit-source", "rm", "github.com/acme/kits-a", "--json")
+    assert rc == 0
+    assert doc["data"]["removed"] is True
+    assert _allowed(tmp_path) == ["docker.io/", "github.com/acme/"]
+    assert kits.source_record("github.com/acme/kits-a") is None
+
+    rc, doc = _invoke(capsys, "--backend", "sbx", "kit-source", "rm", "github.com/acme/kits-b", "--json")
+    assert rc == 0
+    assert _allowed(tmp_path) == ["docker.io/"]
+
+
+@pytest.mark.parametrize("repo", ["github.com/GSA-TTS/team-kits", "github.com/gsa-tts/team-kits"])
+def test_kit_source_rm_keeps_control_plane_owner_prefix(monkeypatch, tmp_path, capsys, repo):
+    # The pinned control-plane kits are fetched from github.com/GSA-TTS/, so a
+    # team source under that owner (in any letter case) never revokes it.
+    _env(monkeypatch, tmp_path)
+    _seed_allowed(tmp_path, ["docker.io/", "github.com/GSA-TTS/"])
+    _add_source(capsys, repo)
+
+    rc, doc = _invoke(capsys, "--backend", "sbx", "kit-source", "rm", repo, "--json")
+    assert rc == 0
+    assert doc["data"]["removed"] is True
+    assert _allowed(tmp_path) == ["docker.io/", "github.com/GSA-TTS/"]
+
+
+def test_kit_source_rm_keeps_owner_prefix_granted_by_extra_sources(monkeypatch, tmp_path, capsys):
+    # A legacy ACQ_EXTRA_KIT_SOURCES grant still needs the prefix.
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_EXTRA_KIT_SOURCES", "github.com/other/ github.com/acme/")
+    _seed_allowed(tmp_path, ["docker.io/", "github.com/acme/"])
+    _add_source(capsys, "github.com/acme/team-kits")
+
+    rc, _ = _invoke(capsys, "--backend", "sbx", "kit-source", "rm", "github.com/acme/team-kits", "--json")
+    assert rc == 0
+    assert _allowed(tmp_path) == ["docker.io/", "github.com/acme/"]
+
+
+def test_kit_source_rm_revokes_every_case_variant_of_the_owner(monkeypatch, tmp_path, capsys):
+    # GitHub owners are case-insensitive, so a case variant of the prefix grants
+    # the same owner and is revoked with it.
+    _env(monkeypatch, tmp_path)
+    _seed_allowed(tmp_path, ["docker.io/", "github.com/Acme/", "github.com/acme/"])
+    _add_source(capsys, "github.com/acme/team-kits")
+
+    rc, _ = _invoke(capsys, "--backend", "sbx", "kit-source", "rm", "github.com/acme/team-kits", "--json")
+    assert rc == 0
+    assert _allowed(tmp_path) == ["docker.io/"]
+
+
+def test_kit_source_rm_keeps_prefix_a_case_variant_record_still_needs(monkeypatch, tmp_path, capsys):
+    # The registry is keyed by exact spelling, so github.com/Acme/kits and
+    # github.com/acme/kits are separate records. Removing one leaves the other
+    # registered, and its owner prefix (the same owner on GitHub) stays allowed.
+    _env(monkeypatch, tmp_path)
+    _seed_allowed(tmp_path, ["docker.io/", "github.com/acme/"])
+    _add_source(capsys, "github.com/Acme/kits")
+    _add_source(capsys, "github.com/acme/kits")
+
+    rc, _ = _invoke(capsys, "--backend", "sbx", "kit-source", "rm", "github.com/acme/kits", "--json")
+    assert rc == 0
+    assert _allowed(tmp_path) == ["docker.io/", "github.com/acme/"]
+    assert kits.source_record("github.com/Acme/kits") is not None
+
+
+def _fake_settings(monkeypatch, *, after_set):
+    """Replace sbx._run: ``settings get`` reports the prefix until a set, then ``after_set``."""
+    calls = []
+    state_box = {"current": json.dumps(["docker.io/", "github.com/acme/"])}
+
+    def fake_run(argv, **_kw):
+        calls.append(list(argv))
+        if argv[:2] == ["settings", "get"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=state_box["current"], stderr="")
+        if argv[:2] == ["settings", "set"]:
+            state_box["current"] = after_set
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        raise AssertionError(f"unexpected sbx call: {argv}")
+
+    monkeypatch.setattr(sbx, "_run", fake_run)
+    return calls
+
+
+def test_kit_source_revoked_re_reads_and_fails_closed_when_prefix_remains(monkeypatch, tmp_path):
+    # sbx accepted the write but still lists the prefix: revocation is not
+    # verified, so it fails closed with a recovery command.
+    _env(monkeypatch, tmp_path)
+    calls = _fake_settings(monkeypatch, after_set=json.dumps(["docker.io/", "github.com/acme/"]))
+    with pytest.raises(sbx.SbxError) as excinfo:
+        sbx.kit_source_revoked("github.com/acme/team-kits")
+    assert excinfo.value.code == errors.FAILURE
+    assert "github.com/acme/" in excinfo.value.message
+    assert """sbx settings set kit.allowedSources '["docker.io/"]'""" in excinfo.value.remediation
+    assert [c[:2] for c in calls] == [["settings", "get"], ["settings", "set"], ["settings", "get"]]
+
+
+def test_kit_source_revoked_fails_closed_when_re_read_is_unparseable(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path)
+    _fake_settings(monkeypatch, after_set="not json")
+    with pytest.raises(sbx.SbxError) as excinfo:
+        sbx.kit_source_revoked("github.com/acme/team-kits")
+    assert excinfo.value.code == errors.FAILURE
+
+
+def test_kit_source_rm_keeps_registry_entry_when_revocation_unverified(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path)
+    _add_source(capsys, "github.com/acme/team-kits")
+    _fake_settings(monkeypatch, after_set=json.dumps(["github.com/acme/"]))
+
+    rc, doc = _invoke(capsys, "--backend", "sbx", "kit-source", "rm", "github.com/acme/team-kits", "--json")
+    assert rc == 1
+    assert doc["error"]["code"] == "failure"
+    assert kits.source_record("github.com/acme/team-kits") is not None
+
+
+def test_kit_source_revoked_skips_backend_when_prefix_still_needed(monkeypatch, tmp_path):
+    # Nothing to revoke means no sbx call at all (mirrors the Bash early return).
+    _env(monkeypatch, tmp_path)
+    calls = _fake_settings(monkeypatch, after_set="[]")
+    assert sbx.kit_source_revoked("github.com/GSA-TTS/team-kits") is None
+    assert calls == []
 
 
 # ---------------------------------------------------------------------------

@@ -63,15 +63,18 @@ from .ledger import (
     git_oracle_digest,
     load_ledger,
     platform_token,
+    publication_problem,
     set_accepted_version,
 )
-from .matrix import CELL_ORACLE, MSB, SBX, is_claimed, same_minor
+from .matrix import CELL_ORACLE, MSB, SBX, is_claimed, same_minor, version_problem
+from .model import TRANSCRIPT_DIR_TOKEN
 from .publish import HostError
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 # The image the cell oracle creates sandboxes from (scripts/qualify-backend-cell).
 IMAGE = "docker.io/docker/sandbox-templates:shell-docker"
-_VERSION = re.compile(r"\d+\.\d+\.\d+")
+# ASCII digits only: ``\d`` also matches other scripts' digits, which int() accepts.
+_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 _VERSION_ARGV = {MSB: ["--version"], SBX: ["version"]}
 _STATUS = {0: "PASS", 1: "FAIL", 2: "BLOCKED", 3: "FLAKY"}
 _OK = ("PASS", "CURRENT")
@@ -165,6 +168,8 @@ def backend_version(backend: str, *, which=shutil.which, run=subprocess.run) -> 
     match = _VERSION.search(text)
     if proc.returncode != 0 or not match or text[match.end():match.end() + 1] in ("-", "+"):
         return None  # a pre-release is not a version the ledger can accept
+    if any(ch.isdecimal() and not ch.isascii() for ch in text):
+        return None  # another script's digit next to the match would be silently dropped
     return match.group(0)
 
 
@@ -239,12 +244,16 @@ def blast_radius(root: Path, accept: dict[str, str], host: Host | None = None) -
     )
 
 
-SCRUBBED_DIR = "<transcript-dir>"
+SCRUBBED_DIR = TRANSCRIPT_DIR_TOKEN
 
 
 def _scrub(line: str) -> str:
-    """Replace the ``dir=`` token's absolute local path (it embeds a username)."""
-    return re.sub(r"dir=\S+", f"dir={SCRUBBED_DIR}", line)
+    """Replace the ``RESULT`` line's ``dir=`` value, an absolute local path that names the account.
+
+    ``dir=`` is the last token of the line (:func:`qualification.model.format_result_line`),
+    so everything after it goes, including the rest of a path with spaces in it.
+    """
+    return re.sub(r"\bdir=.*$", f"dir={SCRUBBED_DIR}", line)
 
 
 def transcript_evidence(recorded: list[Result]) -> list[str]:
@@ -252,33 +261,38 @@ def transcript_evidence(recorded: list[Result]) -> list[str]:
 
     A transcript is ~1 KB of metadata and hashes — verdict, the oracle's argv,
     backend version, OS build, arch, hypervisor, commit and artifact SHA, and a
-    SHA-256 *digest* of the observed output. The harness never records raw output
-    or the environment, so no secret can reach one. Inlining them here is what
-    makes the ledger's ``transcript_sha256`` auditable, and means the copies on the
-    host that ran them are disposable. ADR-0044m's "not committed" still holds: a
-    PR body is not a tracked file.
+    SHA-256 *digest* of the observed output. The harness never records raw output,
+    the environment or a host-local path, so it can be published as it is.
 
-    The only field with no evidentiary value is ``transcript_dir``, an absolute
-    local path containing a username; it is scrubbed, like the ``RESULT`` line's.
+    Each block is the file's exact bytes: the lines between the fences, each
+    followed by a newline, hash to the ``transcript_sha256`` the ledger records,
+    which is the digest shown beside it. That is what lets anyone audit the entry
+    from the PR alone (``python -m qualification.gate verify-evidence``), and why the
+    copies left on the host that ran them are disposable once the PR is open. A
+    transcript that cannot be shown verbatim (:func:`publication_problem`) is not
+    shown at all; ``record`` refuses such a transcript in the first place.
     """
     blocks: list[str] = []
     for r in recorded:
         if r.transcript is None:
             continue
         try:
-            doc = json.loads(r.transcript.read_text(encoding="utf-8"))
+            raw = r.transcript.read_bytes()
+            doc = json.loads(raw)
         except (OSError, ValueError) as exc:
-            blocks += [f"<!-- {r.backend}: transcript unreadable ({exc}) -->", ""]
+            # Never the exception text itself: an OSError's carries the absolute path.
+            reason = (exc.strerror if isinstance(exc, OSError) else None) or type(exc).__name__
+            blocks += [f"<!-- {r.backend}: transcript unreadable ({reason}) -->", ""]
             continue
-        for attempt in doc.get("attempts", []):
-            env = attempt.get("environment")
-            if isinstance(env, dict) and "transcript_dir" in env:
-                env["transcript_dir"] = SCRUBBED_DIR
-        digest = hashlib.sha256(r.transcript.read_bytes()).hexdigest()
+        problem = publication_problem(doc, raw)
+        if problem:
+            blocks += [f"<!-- {r.backend}: transcript not inlined: {problem} -->", ""]
+            continue
+        digest = hashlib.sha256(raw).hexdigest()
         blocks += [
             f"<details><summary><code>transcript.json</code> — {r.backend} "
             f"(sha256 <code>{digest}</code>)</summary>",
-            "", "```json", json.dumps(doc, indent=2, sort_keys=True), "```", "",
+            "", "```json", raw.decode("ascii").removesuffix("\n"), "```", "",
             "</details>", "",
         ]
     return blocks
@@ -302,9 +316,11 @@ def pr_text(
                   "major.minor until it is re-run."]
         lines += [f"Cells that stop being qualified because of this: {', '.join(expired) if expired else 'none'}.", ""]
     lines += [
-        "A green run retires that cell's waiver, if it has one. The transcripts are below, so the "
-        "`transcript_sha256` each ledger entry records can be checked against the evidence it stands for; "
-        "they are not committed (ADR-0044m).",
+        "A green run retires that cell's waiver, if it has one. The transcripts are below, byte for byte: "
+        "the lines inside each block, each ending in a newline, hash to the `transcript_sha256` its ledger "
+        "entry records. Check every block against this PR's ledger, and that every entry it adds has exactly "
+        "one, in a checkout of the PR branch, after `git fetch origin`: `gh pr view <number> --json body -q "
+        ".body | python3 -m qualification.gate verify-evidence --base \"$(git merge-base origin/main HEAD)\" -`. They are not committed (ADR-0044m).",
         "",
         *transcript_evidence(recorded),
         "Generated by `python -m qualification.host`. AI-assisted tooling.",
@@ -345,6 +361,9 @@ def plan(root: Path, host: Host, backends: list[str], versions: dict, only_stale
             skipped.append(Result(b, "SKIPPED", f"{b} CLI not found, not runnable, or not a final release"))
             notes.append(f"{b}: not found on PATH (or not a final release); skipped")
             continue
+        floor = version_problem(b, versions[b])
+        if floor:
+            raise HostError(f"installed {floor} (ADR-0044m); a run on it is not Tier-3 evidence. Install a supported {b}.")
         accepted = ledger.accepted_backend_versions.get(b)
         if accepted is None or not same_minor(versions[b], accepted):
             if not accept_flag:
@@ -371,6 +390,16 @@ def _exit_code(results: list[Result]) -> int:
     return 0 if all(r.status in _OK for r in results) else 2
 
 
+def _ascii_int(text: str) -> int:
+    # int() also accepts other scripts' digits ("\u0661\u0662"); refuse them.
+    if not text.isascii():
+        raise argparse.ArgumentTypeError(f"must be a whole number written in ASCII digits, got {text!r}")
+    try:
+        return int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"must be a whole number, got {text!r}") from None
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="qualification.host", description=__doc__.split("\n")[0])
     p.add_argument("--backend", choices=[MSB, SBX], action="append", help="limit to a backend (repeatable)")
@@ -381,8 +410,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--record-failures", action="store_true", help="also record FAIL/FLAKY outcomes")
     p.add_argument("--accept-backend-version", action="store_true",
                    help="move the ledger's accepted backend version to the installed one (expires other cells)")
-    p.add_argument("--timeout", type=int, default=900,
-                   help="seconds per attempt (a FAIL is retried up to 3 times; default 900)")
+    p.add_argument("--timeout", type=_ascii_int, default=1800,
+                   help="seconds per attempt (a FAIL is retried up to 3 times; default 1800)")
     return p
 
 

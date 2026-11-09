@@ -43,6 +43,91 @@ a checked-in fixture, and the live transcript stays open.
 
 ---
 
+## Deferred: Tier-3 oracle facets the cell oracle cannot check unattended
+
+**Status:** deferred (tracked per AGENTS.md "Track Deferred Work").
+
+`scripts/qualify-backend-cell` checks the boot contract, credential binding and
+in-guest non-exposure, built-in kit application, host-side secret non-exposure,
+and (msb) the read-only trusted-config mount, including the committed
+`scripts/qualify-msb-ro-mount` canary. Three ADR-0044m facets are not in it:
+
+1. **Swap-on-the-wire substitution.** Showing that the real credential (not the
+   placeholder) reaches the bound host needs an endpoint that reports what it
+   received, and the oracle must not send even a throwaway value to a host that is
+   not on the approved endpoint list, or open a listener on the host. **Unblock
+   trigger:** the maintainer names an approved echo endpoint (or an in-repo test
+   service the backends can reach); then add a step that binds the throwaway
+   value to it and compares what it saw.
+2. **Attach.** Needs a terminal; covered by the Tier-2 tests
+   (`py-acq/tests/test_exec.py`) until a PTY-driving step is added.
+3. **Version fail-closed against a real older backend.** Covered offline by the
+   Tier-1 vectors; a live check needs a second, older backend install on the host.
+4. **Remount attempts in the cell's own guest.** The cell oracle checks `ro` in
+   `/proc/mounts`, an EROFS write and an unchanged host directory in its own guest;
+   attempts to remount read-write are made only by the canary, in a sandbox of its
+   own. The oracle also assumes the Bash layout for where acq keeps a sandbox's
+   host-config directory (`<state>/provenance/<backend>/<sandbox>.<checksum>.config`,
+   mounted at `/var/lib/acq/host`). **Unblock trigger:** the Python implementation
+   establishes the mount; then align the oracle's path constants with it and decide
+   whether to add a remount attempt to the cell's own guest.
+
+**Expected today:** the Python implementation fails the cell oracle on every
+cell (msb has no credential path, no built-in kits are applied, and no read-only
+trusted-config mount is established), so a Tier-3 run reports `FAIL` with each
+missing control named, rather than qualifying a sandbox that lacks them. The
+first live run with the extended oracle should also confirm that `sbx` accepts the
+nonce-named global secret service, and that neither backend CLI reads the
+redirected `XDG_*` directories (if one does, its steps fail closed rather than
+pass).
+
+---
+
+## Qualification oracle: a forced stop can reach processes outside the step
+
+**Status:** known limitation, tracked for a fix (per AGENTS.md "Track Deferred Work").
+
+### Symptoms and cause
+
+`scripts/qualify-backend-cell` runs each step in its own process group. When a
+step outlives its timeout, or the oracle is stopped, the group gets a polite stop
+(SIGTERM; CTRL_BREAK on Windows) and a grace period. Only if the grace period
+expires is the group force-killed (`run_process` / `stop_process` /
+`_signal_group`): `killpg(SIGKILL)` on POSIX, `taskkill /F /T` on Windows.
+
+That forced kill can reach more than the step:
+
+- **A backend daemon the step auto-started.** If a step's backend command
+  starts its daemon (for example an `msb` server) as a child without detaching
+  it into its own session or process group, the daemon is in the step's group
+  and dies with it. Later steps, and other sandboxes on the host that use the
+  same daemon, then lose it.
+- **An unrelated process on Windows.** `taskkill /T` builds the tree from
+  parent process ids with no process creation-time check. If a process in the
+  tree exited and Windows reused its id, `/T` can walk into, and kill, a process
+  that has nothing to do with the run.
+
+Neither happens on the polite path. Both need a step that ignores the stop for
+the whole grace period (`STOP_GRACE`, `CANARY_GRACE`).
+
+### Mitigation today
+
+Start the backend daemon before a qualification run, so no timed step starts it.
+Leave the grace periods at their defaults so the forced kill stays a last
+resort.
+
+### Proposed fix
+
+1. **Windows:** put each step in a Job object created at spawn time and stop it
+   with `TerminateJobObject`. Job membership is fixed at process creation and
+   inherited by descendants, so the kill covers exactly the step's processes and
+   no pid-reuse lookup is involved. This replaces `taskkill /F /T`.
+2. **Both platforms:** before the first timed step, start the backend daemon
+   (or check that it is already running) outside any step's process group, so
+   a forced kill can never take it down.
+
+---
+
 ## Read-only host-config probe misclassifies a denied write
 
 ### Symptoms and cause

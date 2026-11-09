@@ -8,6 +8,7 @@
   "invoke": {
     "argv": ["{acq}", "backend", "check", "sbx", "--json"],
     "env": {
+      "ACQ_SBX_BIN": "__stub__",
       "ACQ_SBX_VERSION": "0.35.0"
     },
     "unset": ["ACQ_SBX_INSTALLED", "ACQ_MSB_INSTALLED", "ACQ_MSB_VERSION", "ACQ_BACKEND"],
