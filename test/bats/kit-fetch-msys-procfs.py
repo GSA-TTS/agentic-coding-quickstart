@@ -10,7 +10,8 @@
 # guardian that still depends on `ps -o` exits on its first lookup and its EXIT
 # trap removes the root, so later kit fetches fail; this test requires instead
 # that it holds the root, lets a kit materialize, kills its tick promptly at exit,
-# notices an orphaning, and leaves an unrelated process alone.
+# notices an orphaning (also when the procfs still names the dead owner as its
+# parent, as Cygwin does after taskkill /F), and leaves an unrelated process alone.
 #
 # What this cannot model, and was instead checked on a real Git Bash host:
 # - On MSYS a child's /proc/<pid>/ppid is readable as soon as `&` returns. Here
@@ -81,9 +82,9 @@ class Populator(threading.Thread):
         self.trees = {}  # session id -> (fake proc dir, extra pids to mirror)
         self.stopping = threading.Event()
 
-    def watch(self, sid, root, extra=()):
+    def watch(self, sid, root, extra=(), frozen=False):
         with self.lock:
-            self.trees[sid] = (root, set(extra))
+            self.trees[sid] = (root, set(extra), frozen)
 
     def forget(self, sid):
         with self.lock:
@@ -109,14 +110,17 @@ class Populator(threading.Thread):
                 continue  # the process exited while it was being read
         return table
 
-    def mirror_tree(self, sid, root, extra, table):
+    def mirror_tree(self, sid, root, extra, frozen, table):
         live = {pid for pid, (_, sess, _) in table.items() if sess == sid or pid in extra}
         for pid in live:
             entry = root / str(pid)
             entry.mkdir(exist_ok=True)
             ppid, _, comm = table[pid]
             self.write(entry / "exename", "/usr/bin/%s\n" % comm)
-            self.write(entry / "ppid", "%d\n" % ppid)
+            # A frozen tree keeps each first-seen parent, as Cygwin does for a
+            # child whose parent was killed outside Cygwin (taskkill /F).
+            if not (frozen and (entry / "ppid").exists()):
+                self.write(entry / "ppid", "%d\n" % ppid)
         for entry in root.iterdir():
             if entry.name.isdigit() and int(entry.name) not in live:
                 shutil.rmtree(entry, ignore_errors=True)
@@ -128,9 +132,9 @@ class Populator(threading.Thread):
             # caller does next) waits for any pass still writing into that tree.
             # One tree's error must never stop the thread the other cases need.
             with self.lock:
-                for sid, (root, extra) in list(self.trees.items()):
+                for sid, (root, extra, frozen) in list(self.trees.items()):
                     try:
-                        self.mirror_tree(sid, root, extra, table)
+                        self.mirror_tree(sid, root, extra, frozen, table)
                     except OSError:
                         pass
             time.sleep(0.005)
@@ -165,7 +169,7 @@ def until(process, marker):
 
 
 class Case:
-    def __init__(self, victim=None):
+    def __init__(self, victim=None, frozen=False):
         self.tmp = Path(tempfile.mkdtemp(prefix="case.", dir=scratch))
         self.fake = self.tmp / "proc"
         self.fake.mkdir()
@@ -179,7 +183,7 @@ class Case:
         self.process = subprocess.Popen([shell, str(script)], stdin=subprocess.PIPE,
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                         env=env, start_new_session=True)
-        populator.watch(self.process.pid, self.fake, [victim] if victim else [])
+        populator.watch(self.process.pid, self.fake, [victim] if victim else [], frozen)
         self.guardian = None
         try:
             ready = until(self.process, b"READY").splitlines()[0].split()
@@ -262,15 +266,22 @@ def holds_root_and_exits_promptly():
         case.close()
 
 
-def orphaned():
-    case = Case()
+def orphaned(frozen=False):
+    """SIGKILL the owner; the guardian must notice and remove the root.
+
+    With `frozen`, the guardian's ppid file keeps naming the dead owner, which is
+    what Cygwin shows after the owner is killed with taskkill /F, so only the
+    owner liveness check can notice.
+    """
+    case = Case(frozen=frozen)
     try:
         time.sleep(1.5)
         assert alive(case.guardian) and case.root.is_dir(), "guardian did not hold the root"
         started = time.monotonic()
         case.process.kill()
         case.process.wait(timeout=SETTLE_BOUND)
-        return "sigkill-removed-after %.3fs" % case.gone(started, SETTLE_BOUND)
+        took = case.gone(started, SETTLE_BOUND)
+        return "%s-removed-after %.3fs" % ("stale-ppid-owner-kill" if frozen else "sigkill", took)
     finally:
         case.close()
 
@@ -292,8 +303,12 @@ def bystander_spared():
         bystander.wait()
 
 
-jobs = [holds_root_and_exits_promptly, orphaned, bystander_spared]
-with ThreadPoolExecutor(max_workers=3) as pool:
+def orphaned_stale_ppid():
+    return orphaned(frozen=True)
+
+
+jobs = [holds_root_and_exits_promptly, orphaned, orphaned_stale_ppid, bystander_spared]
+with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
     futures = [pool.submit(job) for job in jobs]
 failures = 0
 for job, future in zip(jobs, futures):

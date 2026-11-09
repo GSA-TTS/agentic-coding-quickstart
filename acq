@@ -789,6 +789,8 @@ unset _acq_impl
 # The two files are separate reads, so `exename` is read first and `ppid` last:
 # if the PID is reused between them, the parent reported is the new process's,
 # and it can only be this guardian if the guardian forked that process itself.
+# An owner killed outside Cygwin (taskkill /F) stays the recorded parent there,
+# so each tick also requires the owner to still answer kill -0.
 _acq_kit_fetch_cleanup() {
   if [ -n "${_ACQ_KIT_FETCH_GUARDIAN:-}" ]; then
     kill -USR1 "$_ACQ_KIT_FETCH_GUARDIAN" 2>/dev/null || true
@@ -842,6 +844,7 @@ _acq_kit_fetch_start() {
       while [ -d "$root" ]; do
         parent=$(proc_info "$$") || exit 1
         [ "$(printf "%s" "$parent" | tr -d "[:space:]")" = "$owner" ] || exit 0
+        kill -0 "$owner" 2>/dev/null || exit 0
         sleep 1 & tick=$!
         wait "$tick" || :
         tick=""
