@@ -180,9 +180,15 @@ kit_translate_fetch() {
           cd "$destdir" || exit 1
           export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/echo GCM_INTERACTIVE=never
           rm -rf .git 2>/dev/null
-          git init -q
-          git remote add origin "$url" 2>/dev/null || git remote set-url origin "$url"
-          git config core.sparseCheckout true
+          # Stop if init fails: the cache directory may sit inside another
+          # repository, and every git call below would then reconfigure and
+          # fetch into that enclosing repository instead.
+          if ! git init -q; then
+            echo "kit-translate: git init failed in the kit cache directory: $destdir" >&2
+            exit 1
+          fi
+          { git remote add origin "$url" 2>/dev/null || git remote set-url origin "$url"; } || exit 1
+          git config core.sparseCheckout true || exit 1
           # `git init` does not always create .git/info/ (platform-dependent),
           # so create it before writing the sparse-checkout file — otherwise the
           # redirect fails with ".git/info/sparse-checkout: No such file or

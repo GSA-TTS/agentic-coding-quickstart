@@ -178,7 +178,7 @@ acq_backend_prepare() {
 acq_backend_exists() {
   local listed
   listed=$(sbx ls -q 2>/dev/null) || return 1
-  grep -Fxq -- "$1" <<<"$listed"
+  _acq_list_has_line "$1" "$listed"
 }
 
 # Return success only when sbx successfully lists sandboxes and NAME is absent.
@@ -187,7 +187,10 @@ acq_backend_exists() {
 _acq_sbx_confirm_absent() {
   local name="$1" listed
   listed=$(sbx ls -q 2>/dev/null) || return 1
-  ! grep -Fxq -- "$name" <<<"$listed"
+  # A name that cannot appear as one listed line cannot be confirmed absent:
+  # treat it as indeterminate, never as permission to clean up.
+  _acq_name_is_one_line "$name" || return 1
+  ! _acq_list_has_line "$name" "$listed"
 }
 
 # ---------------------------------------------------------------------------

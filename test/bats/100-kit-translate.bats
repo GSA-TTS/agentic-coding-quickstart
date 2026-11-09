@@ -471,3 +471,27 @@ SPEC
   run bash -c 'printf "0755\n755\nabc\n07555\n" | awk "\$0 ~ /^[0-7][0-7][0-7][0-7]?\$/ {print}"'
   assert_output $'0755\n755'
 }
+
+# The kit cache directory sits under the user's state/cache tree, which may be
+# inside some other git repository. If `git init` fails there, the following
+# remote/config/fetch calls would act on that enclosing repository, so the fetch
+# must stop at the failed init with a clear message.
+@test "kit fetch: a failed git init stops before any remote/config/fetch call" {
+  local gitlog="$STUBDIR/git-init-fail.log"; : >"$gitlog"
+  cat >"$STUBDIR/git" <<GITSTUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$gitlog"
+case "\$*" in
+  *init*) echo 'fatal: cannot init' >&2; exit 1 ;;
+  *) exit 0 ;;
+esac
+GITSTUB
+  chmod +x "$STUBDIR/git"
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    kit_translate_fetch "git+https://github.com/x/y.git#ref=deadbeef&dir=kit" "'"$STUBDIR"'/initdest" 2>&1
+  '
+  assert_failure
+  assert_output --partial 'git init failed'
+  refute_regex "$(cat "$gitlog")" '(^|[[:space:]])(remote|config|fetch|checkout)([[:space:]]|$)'
+}

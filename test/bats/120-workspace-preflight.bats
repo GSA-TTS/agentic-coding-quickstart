@@ -199,3 +199,100 @@ sandbox 4096 -> host 127.0.0.1:4096 (create-time -p)'
 @test "harness: XDG_CONFIG_HOME is isolated so a faked HOME never reaches the developer's git config" {
   [[ "${XDG_CONFIG_HOME:-}" == "$STUBDIR"/* ]]
 }
+
+# Workspace positionals are PATH[:ro]. A ':' anywhere but the ':ro' suffix is
+# read as a separator (by workspace_path and by msb's SOURCE:DEST[:OPTIONS]
+# volume spec), and a control character splits the line-oriented workspace list
+# and reaches the terminal when the path is echoed. Both are refused up front.
+_ws_safe() { # ARGS...
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    acq_workspace_specs_safe "$@" 2>&1
+  ' _ "$@"
+}
+
+@test "workspace specs: a ':' in a workspace path is refused with a clear message" {
+  mkdir -p "$WT/a:b"
+  _ws_safe opencode "$WT/a:b"
+  assert_failure
+  assert_output --partial "contains ':'"
+  _ws_safe opencode "$WT/okdir" "$WT/a:b:ro"
+  assert_failure
+  assert_output --partial "contains ':'"
+  _ws_safe opencode 'C:/Users/me/proj'
+  assert_failure
+  assert_output --partial '/c/... form'
+}
+
+@test "workspace specs: plain paths, ':ro' suffixes and flags are accepted" {
+  _ws_safe opencode "$WT/okdir" "$WT/wsC:ro"
+  assert_success
+  assert_output ''
+  _ws_safe --name x opencode --kit k "$WT/okdir"
+  assert_success
+  _ws_safe opencode
+  assert_success
+}
+
+@test "workspace specs: newline and escape characters in a path are refused, never echoed raw" {
+  local nl="$WT/"$'new\nline' esc="$WT/"$'esc\033]0;pwn\007dir'
+  mkdir -p "$nl" "$esc"
+  _ws_safe opencode "$nl"
+  assert_failure
+  assert_output --partial 'control character'
+  _ws_safe opencode "$esc"
+  assert_failure
+  assert_output --partial 'control character'
+  refute_output --partial $'\033'
+  refute_output --partial $'\007'
+}
+
+@test "workspace specs: a symlink whose target contains ':' is refused" {
+  mkdir -p "$WT/real:dir"
+  ln -s "$WT/real:dir" "$WT/plainlink"
+  _ws_safe opencode "$WT/plainlink"
+  assert_failure
+  assert_output --partial "contains ':'"
+}
+
+@test "preflight: a missing path with escape characters is reported without raw control bytes" {
+  _pf_out "$WT/"$'gone\033]0;pwn\007'
+  assert_output --partial 'does not exist'
+  refute_output --partial $'\033'
+  refute_output --partial $'\007'
+}
+
+@test "create(msb): a workspace path with ':' fails before any backend create" {
+  mkdir -p "$WT/proj:x"
+  run env ACQ_BACKEND=msb ACQ_NO_PROMPT=1 "$ACQ" create opencode --no-provider-kits "$WT/proj:x"
+  assert_failure
+  assert_output --partial "contains ':'"
+  refute_regex "$(cat "$CALLS")" '^msb create'
+}
+
+@test "run(msb): a fresh create with a ':' workspace path fails before any backend create" {
+  mkdir -p "$WT/proj:y"
+  run env ACQ_BACKEND=msb ACQ_NO_PROMPT=1 "$ACQ" run opencode --no-provider-kits "$WT/proj:y"
+  assert_failure
+  assert_output --partial "contains ':'"
+  refute_regex "$(cat "$CALLS")" '^msb create'
+}
+
+@test "create(msb): an explicit --name with a newline fails before any backend call" {
+  mkdir -p "$WT/proj"
+  run env ACQ_BACKEND=msb ACQ_NO_PROMPT=1 "$ACQ" create opencode --no-provider-kits --name $'x\nbox' "$WT/proj"
+  assert_failure
+  assert_output --partial 'invalid sandbox name'
+  refute_regex "$(cat "$CALLS")" '^msb create'
+}
+
+@test "advisory: the project-env notice never echoes raw control bytes from the path" {
+  local d="$WT/"$'env\033]0;pwn\007proj'
+  mkdir -p "$d"; : >"$d/.envrc"
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    advise_project_env_activation "$1" 2>&1
+  ' _ "$d"
+  assert_output --partial 'project environment detected (direnv)'
+  refute_output --partial $'\033'
+}
