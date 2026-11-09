@@ -85,7 +85,7 @@ exit 1, the `unsupported_capability` code, and remediation.
 > copy of the global key. Only a sandbox with its own `usai` value in the acq
 > store (`acq secret set NAME usai`) keeps it. After each `set-custom` acq
 > re-reads the listing and requires the entry to keep its placeholder; that
-> sbx does so is not yet verified live (KNOWN_FAILURE_MODES 55).
+> sbx does so is not yet verified live (KNOWN_FAILURE_MODES 57).
 
 The record is a declaration; conformance is proven, not trusted: each
 declared capability is asserted by a Tier-1 subprocess vector (working, or

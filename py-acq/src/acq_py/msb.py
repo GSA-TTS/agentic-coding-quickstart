@@ -42,7 +42,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-from . import errors, hostexec, kits, provider_creds, secretstore, state, timeouts
+from . import (
+    errors,
+    hostexec,
+    kits,
+    provider_creds,
+    provider_input,
+    secretstore,
+    state,
+    timeouts,
+)
 from .secretstore import Scope
 
 STUB_SENTINEL = "__stub__"
@@ -615,6 +624,20 @@ def kit_exec(name: str, flags: list[str], argv: list[str]) -> bool:
             f"check network access from the sandbox, or raise {KIT_TIMEOUT_ENV}, then retry",
         ) from exc
     return proc.returncode == 0
+
+
+def guest_output(name: str, argv: list[str]) -> str:
+    """Run a read-only probe in the guest as the agent user; its stdout, or "" on failure.
+
+    Used for the attach-time provider key check (:func:`provider_input.check_keys`):
+    the probe's own output carries its verdict, so an exec failure or overrun
+    reads as "no status", which that check treats as a refusal.
+    """
+    try:
+        proc = _run(["exec", "-u", "agent", name, "--", *argv], timeout=60)
+    except subprocess.TimeoutExpired:
+        return ""
+    return proc.stdout or ""
 
 
 def provision_substrate(name: str, steps: list[tuple[str, list[str]]]) -> None:
@@ -1223,9 +1246,19 @@ def held_forget(name: str) -> None:
 
 def _bind_candidates(name: str) -> list[str]:
     """Services a new sandbox may bind, in Bash's order: github, the services
-    with a recorded endpoint (this sandbox's and global), then the providers."""
+    with a recorded endpoint (this sandbox's and global), then the providers.
+
+    The providers honour provider selection (Bash ``acq_provider_delivery_ids``):
+    the registered ones, the usai anchor only while its kit is selected, and
+    those the sandbox's recorded provider facts name. An explicitly empty
+    ``ACQ_PROVIDER_KITS`` binds no provider unless its facts were recorded.
+    """
+    try:
+        providers = provider_input.delivery_ids("msb", name)
+    except provider_input.ProviderInputError as exc:
+        raise MsbError(exc.code, exc.message, exc.remediation) from exc
     out = ["github"]
-    for service in secretstore.meta_list(name) + provider_creds.provider_ids():
+    for service in secretstore.meta_list(name) + providers:
         if service not in out:
             out.append(service)
     return out

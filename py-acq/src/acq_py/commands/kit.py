@@ -11,6 +11,7 @@ from .. import (
     envelope,
     errors,
     kit_msb,
+    kit_sbx,
     kits,
     kitspec,
     lock,
@@ -84,7 +85,9 @@ def run_kit_apply(parsed, emit_json: bool, backend_override: str | None) -> int:
 
     The ``kit-apply`` capability maps through the adapter seam (ADR-0040m): a
     backend that declares it ``unsupported`` fails closed with
-    ``unsupported_capability`` (sbx in this slice). Only built-in agent kits are
+    ``unsupported_capability``. On sbx the kit is added with ``sbx kit add``,
+    which sbx 0.38 and later refuse for a kit with startup commands
+    (``unsupported_capability``: recreate the sandbox). Only built-in agent kits are
     applicable by name here; team/personal kit application is deferred. The
     install runs in-guest and is idempotent: a re-apply of the same kit is a no-op
     (no duplicate install), tracked by the host-authoritative applied-kit record
@@ -101,7 +104,7 @@ def run_kit_apply(parsed, emit_json: bool, backend_override: str | None) -> int:
             "kit apply",
             errors.UNSUPPORTED,
             f"kit apply is not supported on the {backend} backend",
-            "kit-apply is msb-only in this slice (ADR-0040m); use msb to apply an agent kit",
+            "use a backend that supports kit-apply (ADR-0040m)",
             emit_json,
         )
     name = parsed.name
@@ -171,6 +174,12 @@ def _kit_apply_install(name: str, kit_name: str, backend: str, emit_json: bool) 
     record, exit_code = _trusted_record(backend, name, "kit apply", emit_json)
     if exit_code is not None:
         return exit_code
+    if backend == "sbx":
+        try:
+            kit_sbx.apply_single(name, kit_sbx.bundled_kit(kit_name, "agent"))
+        except common._ADAPTER_ERRORS as exc:
+            return common._operational_failure("kit apply", exc.code, exc.message, exc.remediation, emit_json)
+        return None
     try:
         kit = kit_msb.bundled_kit(kit_name, "agent")
         applied = kit_msb.apply_single(name, kit, ro_required=security.requires_ro_mount(record))
@@ -281,7 +290,7 @@ def run_kit_update(parsed, emit_json: bool, backend_override: str | None) -> int
     if not common._supports(backend, "kit-apply"):
         return common._operational_failure(
             "kit update", errors.UNSUPPORTED, f"kit reapply is not supported on the {backend} backend",
-            "kit-apply is msb-only in this slice (ADR-0040m)", emit_json,
+            "use a backend that supports kit-apply (ADR-0040m)", emit_json,
         )
     if not parsed.yes:
         declined = _kit_update_consent(name, backend, emit_json)
@@ -323,6 +332,8 @@ def _kit_update_locked(name: str, emit_json: bool, backend: str) -> int:
     record, exit_code = _trusted_record(backend, name, "kit update", emit_json)
     if exit_code is not None:
         return exit_code
+    if backend == "sbx":
+        return _kit_update_sbx(name, record, emit_json)
     if name not in (msb.running_names() or []):
         return common._operational_failure(
             "kit update", errors.FAILURE, f"sandbox '{name}' is not running, so its kits cannot be reapplied",
@@ -341,21 +352,53 @@ def _kit_update_locked(name: str, emit_json: bool, backend: str) -> int:
         return common._operational_failure("kit update", exc.code, exc.message, exc.remediation, emit_json)
     result = kit_msb.ensure_kits_applied(name, kit_set, ro_required=security.requires_ro_mount(record), force=True)
     if result.incomplete:
-        return common._operational_failure(
-            "kit update", errors.FAILURE,
-            f"the kit refresh of '{name}' did not complete ({', '.join(result.incomplete)}); "
-            "its provenance was left unchanged",
-            f"re-run 'acq kit update {name} --yes' to retry, or recreate the sandbox for a clean rebuild",
-            emit_json,
-        )
+        return _kit_update_incomplete(name, result.incomplete, emit_json)
+    return _kit_update_done(name, backend, result.applied, emit_json)
+
+
+def _kit_update_incomplete(name: str, failed: list[str], emit_json: bool) -> int:
+    return common._operational_failure(
+        "kit update", errors.FAILURE,
+        f"the kit refresh of '{name}' did not complete ({', '.join(failed)}); its provenance was left unchanged",
+        f"re-run 'acq kit update {name} --yes' to retry, or recreate the sandbox for a clean rebuild",
+        emit_json,
+    )
+
+
+def _kit_update_done(name: str, backend: str, applied: list[str], emit_json: bool) -> int:
+    """Record provenance after a complete refresh and report it."""
     kits.provenance_write(backend, name)
-    data = {**kits.kit_check_data(backend, name), "action": "refreshed", "kits": result.applied}
+    data = {**kits.kit_check_data(backend, name), "action": "refreshed", "kits": applied}
     if emit_json:
         print(json.dumps(envelope.success("kit update", data)))
     else:
         print(f"refreshed the kit bundle in '{name}' to {kits.CONTROL_PLANE_REF} (in place; state preserved).")
         print("Restart the agent (or re-run 'acq run') to pick up refreshed config.")
     return errors.EXIT_SUCCESS
+
+
+def _kit_update_sbx(name: str, record: dict | None, emit_json: bool) -> int:
+    """The sbx refresh: the heal with every built-in kit forced (Bash ``acq_bundle_reapply``).
+
+    ``sbx kit add`` starts a stopped sandbox itself, so no running check is
+    needed. sbx 0.38 and later refuse kits with startup commands mid-life, and
+    the refresh then reports that the sandbox must be recreated.
+    """
+    agent = (record or {}).get("agent") or "shell"
+    image = (record or {}).get("image") or common.OPENCODE_DEVENV_IMAGE
+    try:
+        cli_kits, extras = kit_msb.cli_kits_read(name, backend="sbx")
+        kit_set, selection = kit_sbx.select(agent, cli_kits, image_is_default=image == common.OPENCODE_DEVENV_IMAGE,
+                                            extras=extras)
+    except kitspec.KitSelectionError as exc:
+        return common._operational_failure("kit update", errors.VALIDATION_FAILED, str(exc),
+                                           "fix the kit selection and retry", emit_json)
+    except common._ADAPTER_ERRORS as exc:
+        return common._operational_failure("kit update", exc.code, exc.message, exc.remediation, emit_json)
+    result = kit_sbx.ensure_kits_applied(name, kit_set, selection, force=True)
+    if not result.ok:
+        return _kit_update_incomplete(name, result.failed or ["exec readiness"], emit_json)
+    return _kit_update_done(name, "sbx", result.added, emit_json)
 
 
 def _print_kit_source_ls_human(data: dict) -> None:

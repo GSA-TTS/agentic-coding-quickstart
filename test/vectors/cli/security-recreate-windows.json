@@ -1,20 +1,17 @@
 {
   "schema": 1,
   "id": "cli/security-recreate-windows",
-  "oracle": "KNOWN_FAILURE_MODES 54: on Windows, where acq never requests the read-only mount, create --recreate rebuilds the guest the way a fresh create there would and does not claim ro_host_config, instead of refusing or looping",
+  "oracle": "KNOWN_FAILURE_MODES 54: on Windows, where acq never requests the read-only mount, create --recreate rebuilds the guest the way a fresh create there would and does not claim ro_host_config, instead of refusing or looping (a usai key is stored first: the default provider kit is selected, and acq refuses an msb create whose provider has no stored key)",
   "tier": 1,
   "backend": null,
   "platform": "windows",
   "invoke": {
     "argv": [
-      "{acq}",
-      "--backend",
-      "msb",
-      "create",
-      "--recreate",
-      "sec",
-      "--yes",
-      "--json"
+      "{python}",
+      "-I",
+      "test/vectors/drivers/seeded-run.py",
+      "[[[\"--backend\",\"msb\",\"secret\",\"set\",\"-g\",\"usai\"],true,0],[[\"--backend\",\"msb\",\"create\",\"--recreate\",\"sec\",\"--yes\",\"--json\"],false,null]]",
+      "{acq}"
     ],
     "env": {
       "ACQ_MSB_BIN": "__stub__",
@@ -42,10 +39,14 @@
       "ACQ_KIT_APPLIED_SEED",
       "ACQ_EXTRA_KITS",
       "ACQ_PROVIDER_KITS",
-      "ACQ_MIGRATION_LOCK_TIMEOUT"
+      "ACQ_MIGRATION_LOCK_TIMEOUT",
+      "USAI_API_KEY",
+      "ACQ_PROVIDER_CREDENTIAL_BINDINGS",
+      "ACQ_PROVIDER_CREDENTIAL_SEED",
+      "ACQ_MSB_STUB_PROBE"
     ],
-    "stdin": "",
-    "timeout_ms": 10000
+    "stdin": "vector-usai-sentinel-5e1d",
+    "timeout_ms": 15000
   },
   "expect": {
     "exit": 0,

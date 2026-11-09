@@ -187,6 +187,7 @@ def test_create_binds_and_value_never_in_argv(monkeypatch, tmp_path, capsys, chi
 
 def test_create_prefers_the_sandbox_value_over_global(monkeypatch, tmp_path, capsys, children):
     _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_PROVIDER_KITS", "")  # no provider kit selected: no usai gate or binding
     _set(capsys, monkeypatch, "-g", "github")
     _set(capsys, monkeypatch, "box", "github", value=SCOPED)
     children.clear()
@@ -201,6 +202,7 @@ def test_create_prefers_the_sandbox_value_over_global(monkeypatch, tmp_path, cap
 
 def test_create_without_secrets_adds_no_flags(monkeypatch, tmp_path, capsys, children):
     _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_PROVIDER_KITS", "")  # no provider kit selected: no usai gate or binding
     rc, doc, _out, _err = _invoke(capsys, "--backend", "msb", "create", "shell", str(tmp_path / "ws"),
                                   "--name", "box", "--json")
     assert rc == 0 and doc["data"]["secret_bindings"] == []
@@ -365,6 +367,7 @@ def test_unbind_targets_only_the_sandboxes_that_hold_it(monkeypatch, tmp_path, c
 
 def test_create_writes_a_record_even_with_no_bindings(monkeypatch, tmp_path, capsys):
     _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_PROVIDER_KITS", "")  # no provider kit selected: no usai gate or binding
     assert _invoke(capsys, "--backend", "msb", "create", "shell", str(tmp_path / "ws"), "--name", "box")[0] == 0
     rec = msb.held_read("box")
     assert rec.complete and rec.bindings == {} and rec.knows("usai")
@@ -508,6 +511,7 @@ def test_scoped_rm_on_an_unrecorded_sandbox(monkeypatch, tmp_path, capsys, child
 
 def test_rm_clears_the_record_of_a_sandbox_already_gone(monkeypatch, tmp_path, capsys):
     _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_PROVIDER_KITS", "")  # no provider kit selected: no usai gate or binding
     assert _invoke(capsys, "--backend", "msb", "create", "shell", str(tmp_path / "ws"), "--name", "box")[0] == 0
     _catalog(tmp_path)  # removed outside acq
     rc, doc, _out, _err = _invoke(capsys, "--backend", "msb", "rm", "box", "--json")
@@ -652,6 +656,7 @@ def test_provider_credential_set_stores_and_refeeds(monkeypatch, tmp_path, capsy
 
 def test_provider_partial_refeed_then_rm_fully_revokes(monkeypatch, tmp_path, capsys):
     _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_PROVIDER_KITS", "")  # no provider kit selected: no usai gate or binding
     for name in ("a", "b"):  # created by acq, so their records are complete
         assert _invoke(capsys, "--backend", "msb", "create", "shell", str(tmp_path / "ws"), "--name", name)[0] == 0
     monkeypatch.setenv("ACQ_MSB_STUB_FAIL_ADD", "b")
@@ -760,6 +765,7 @@ def test_scoped_set_targets_only_that_sandbox(monkeypatch, tmp_path, capsys, chi
 
 def test_create_first_claim_wins_for_a_shared_env(monkeypatch, tmp_path, capsys, children):
     _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_PROVIDER_KITS", "")  # no provider kit selected: no usai gate or binding
     # Records written outside this preflight (e.g. by Bash) can share a variable.
     for service, value in (("svc1", "S3NTINEL-one"), ("svc2", "S3NTINEL-two")):
         secretstore.set_secret(service, None, value, "api.example.gov", "SHARED_KEY")
@@ -773,6 +779,7 @@ def test_create_first_claim_wins_for_a_shared_env(monkeypatch, tmp_path, capsys,
 
 def test_refeed_keeps_the_first_claim(monkeypatch, tmp_path, capsys, children):
     _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_PROVIDER_KITS", "")  # no provider kit selected: no usai gate or binding
     secretstore.set_secret("svc1", None, "S3NTINEL-one", "api.example.gov", "SHARED_KEY")
     assert _invoke(capsys, "--backend", "msb", "create", "shell", str(tmp_path / "ws"), "--name", "box")[0] == 0
     secretstore.set_secret("svc2", None, "S3NTINEL-two", "api.example.gov", "SHARED_KEY")

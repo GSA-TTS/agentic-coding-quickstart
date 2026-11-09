@@ -273,7 +273,7 @@ lists each setting as `key`, `value`, `source` and `honoured_by_python`.
 
 **`scope_github_token` takes effect only under the Bash acq for now**, and both
 the report and `--json` (`"honoured_by_python": false`) say so. The Python acq
-reads `extra_kits` and `provider_kit` when it creates an msb sandbox, but applies
+reads `extra_kits` and `provider_kit` when it creates a sandbox, but applies
 only kits from its pinned built-in bundle: a kit that would have to be fetched
 (any catalog extra kit today) is refused at create and needs the Bash acq
 (`ACQ_IMPL=bash`). `--json` marks those two settings `"python_applies":
@@ -351,6 +351,34 @@ control plane at `CONTROL_PLANE_REF` (`src/acq_py/kits.py`, equal to
 records the ref and each file's git blob id and size; `upstream_mode` is
 informational. `src/acq_py/kitspec.py` parses and selects kits from it, so acq
 never fetches a built-in kit during ordinary operation (ADR-0042m).
+
+On msb, acq applies each kit itself (`src/acq_py/kit_msb.py`). On sbx,
+`src/acq_py/kit_sbx.py` translates each kit into an sbx-v2 kit directory under
+`<state>/sbx-kits/` exactly as Bash `kit_translate_to_sbx` does, adds the host
+git identity kit and a startup-barrier kit, and passes them all to
+`sbx create --kit`; create then waits for the barrier. Until it is seen the
+state record says `kits_unconfirmed`, and every verb that attaches refuses the
+sandbox, so a create that times out or is interrupted and cannot remove the
+sandbox never leaves it attachable. Translated kits are named by content and
+shared between creates; unused ones are pruned after a week. `acq kit apply` and
+`acq kit update` on sbx use `sbx kit add`, which sbx 0.38 and later refuse for
+kits with startup commands, so those report that the sandbox must be recreated.
+`py-acq/tests/test_kit_sbx.py` compares the translator's output with Bash's,
+file by file.
+
+Provider-role kits (`usai-provider`) are handled by `src/acq_py/provider_input.py`.
+Before any create (and before `create --recreate` removes the old guest) acq
+checks each selected provider's facts against its pin and checks that a key is
+stored: on a terminal it asks and stores one, otherwise it fails closed with
+`secret_missing`. This is stricter than Bash: a key exported in the host
+environment is not accepted (store it with `acq secret set -g usai`), and a
+provider with no pin is refused even if a host was recorded earlier (see
+`docs/KNOWN_FAILURE_MODES.md`, section 56). On msb the provider-input generation
+is mounted read-only at `ACQ_PROVIDER_INPUT_ROOT` for OpenCode's renderer. Before
+`run` attaches, each recorded provider's key is probed from inside the guest
+(`provider_auth_failed`, `provider_unreachable`). Tests that create msb
+sandboxes use the `provider_key` pytest marker, which stores a throwaway usai
+key; the stubs answer the probe from `ACQ_MSB_STUB_PROBE` / `ACQ_SBX_STUB_PROBE`.
 
 To bump the pin, change both refs, then regenerate the bundle and commit it
 with the bump:

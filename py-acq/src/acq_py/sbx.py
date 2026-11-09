@@ -162,7 +162,7 @@ def capability_record(version: str | None = None) -> dict:
             "remove": "required",
             "copy": "required",
             "ports": "required",
-            "kit-apply": "unsupported",  # deferred to the kit-apply slice
+            "kit-apply": "required",  # `create --kit` and `kit add` (acq_py.kit_sbx)
             "secret-write": "required",
             "secret-rm": "required",
             "secret-list": "required",  # sbx has `secret ls`
@@ -225,6 +225,7 @@ def create(
     memory: str | None = None,
     cpus: str | None = None,
     agent: str | None = None,
+    kit_flags: list[str] | None = None,
 ) -> None:
     """Create a sandbox. Raises :class:`SbxError` on backend failure.
 
@@ -232,7 +233,8 @@ def create(
     the agent and workspace path are *positional*, the name is ``--name``, and the
     container image is ``-t/--template``. ``memory``/``cpus`` are accepted for
     signature parity with :mod:`acq_py.msb` but not forwarded (sbx derives guest
-    sizing from its templates).
+    sizing from its templates). ``kit_flags`` are the ``--kit DIR`` pairs
+    :func:`acq_py.kit_sbx.prepare` built; sbx applies those kits itself.
     """
     argv = ["create"]
     if agent:
@@ -240,6 +242,7 @@ def create(
     argv.append(workspace)
     argv += ["--name", name]
     argv += ["-t", image]
+    argv += kit_flags or []
     proc = _run(argv)
     if proc.returncode != 0:
         raise SbxError(
@@ -256,6 +259,46 @@ def exec_ready(name: str) -> bool:
     except subprocess.TimeoutExpired:
         return False
     return proc.returncode == 0
+
+
+# ``kit_add`` outcomes (Bash ``_acq_sbx_kit_add``).
+KIT_ADD_OK = 0
+KIT_ADD_FAILED = 1
+KIT_ADD_RECREATE = 3
+
+# sbx 0.38 refuses ``kit add`` of a kit that declares setup.startup; these are
+# the phrasings Bash matches (``_acq_sbx_kit_add``). Its stderr is classified
+# only, never shown: raw backend text is not part of acq's output.
+_RECREATE_PHRASES = ("setup.startup", "declares startup", "can only be used when creating a new sandbox",
+                     "create a new sandbox", "recreate the sandbox")
+
+
+def _refused_for_recreate(err: str) -> bool:
+    if any(p in err for p in _RECREATE_PHRASES):
+        return True
+    start = err.find("startup")
+    return start >= 0 and "recreate" in err[start:]
+
+
+def kit_add(name: str, kit_dir: str) -> int:
+    """``sbx kit add NAME DIR``: :data:`KIT_ADD_OK`, :data:`KIT_ADD_RECREATE` or :data:`KIT_ADD_FAILED`."""
+    if not kit_dir:
+        return KIT_ADD_FAILED
+    proc = _run(["kit", "add", name, kit_dir])
+    if proc.returncode == 0:
+        return KIT_ADD_OK
+    return KIT_ADD_RECREATE if _refused_for_recreate(proc.stderr or "") else KIT_ADD_FAILED
+
+
+def exec_capture(name: str, script: str, timeout: float = 30) -> str | None:
+    """``sbx exec NAME -- sh -c SCRIPT`` with stdin closed: its stdout (CRs dropped), or ``None``."""
+    try:
+        proc = _run(["exec", name, "--", "sh", "-c", script], timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None
+    if proc.returncode != 0:
+        return None
+    return (proc.stdout or "").replace("\r", "")
 
 
 def stop(name: str) -> None:

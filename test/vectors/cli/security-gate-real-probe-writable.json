@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "id": "cli/security-gate-real-probe-writable",
-  "oracle": "(POSIX hosts; Windows never requests the mount) ADR-0035 real read-only-mount probe fails closed: when guest root can write to the read-only host-config mount, create refuses with security_exception and removes the sandbox (the follow-up run finds no such sandbox)",
+  "oracle": "(POSIX hosts; Windows never requests the mount) ADR-0035 real read-only-mount probe fails closed: when guest root can write to the read-only host-config mount, create refuses with security_exception and removes the sandbox (the follow-up run finds no such sandbox) (a usai key is stored first: the default provider kit is selected, and acq refuses an msb create whose provider has no stored key)",
   "tier": 1,
   "backend": null,
   "platform": "linux",
@@ -10,7 +10,7 @@
       "{python}",
       "-I",
       "test/vectors/drivers/seeded-run.py",
-      "[[[\"--backend\",\"msb\",\"create\",\"opencode\",\".\",\"--name\",\"gate\",\"--json\"],false,null],[[\"--backend\",\"msb\",\"run\",\"gate\",\"--json\"],false,2]]",
+      "[[[\"--backend\",\"msb\",\"secret\",\"set\",\"-g\",\"usai\"],true,0],[[\"--backend\",\"msb\",\"create\",\"opencode\",\".\",\"--name\",\"gate\",\"--json\"],false,null],[[\"--backend\",\"msb\",\"run\",\"gate\",\"--json\"],false,2]]",
       "{acq}"
     ],
     "env": {
@@ -38,10 +38,14 @@
       "ACQ_KIT_APPLIED_SEED",
       "ACQ_EXTRA_KITS",
       "ACQ_PROVIDER_KITS",
-      "ACQ_MIGRATION_LOCK_TIMEOUT"
+      "ACQ_MIGRATION_LOCK_TIMEOUT",
+      "USAI_API_KEY",
+      "ACQ_PROVIDER_CREDENTIAL_BINDINGS",
+      "ACQ_PROVIDER_CREDENTIAL_SEED",
+      "ACQ_MSB_STUB_PROBE"
     ],
-    "stdin": "",
-    "timeout_ms": 10000
+    "stdin": "vector-usai-sentinel-624a",
+    "timeout_ms": 15000
   },
   "expect": {
     "exit": 1,
