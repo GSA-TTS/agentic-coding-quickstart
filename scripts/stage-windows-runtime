@@ -17,9 +17,9 @@
 #   scripts/stage-windows-runtime <embed.zip> <sha256> <release-tree>
 #
 # Requires: python3 (for hashing and unzipping, so it runs the same on Linux,
-# macOS, Windows CI and dash/bash 3.2). Fails closed: a hash mismatch, an
-# unexpected archive layout, or an existing runtime or source directory leaves
-# the tree unchanged.
+# macOS, Git Bash on Windows CI, dash and bash 3.2). Fails closed: a hash
+# mismatch, an unexpected archive layout, or an existing runtime or source
+# directory leaves the tree unchanged.
 
 set -eu
 
@@ -58,14 +58,19 @@ bad = [n for n in zipfile.ZipFile(sys.argv[1]).namelist() if "\\" in n]
 sys.exit("archive entry names contain backslashes: %s" % bad[:3] if bad else 0)' "$zip" \
   || die "unexpected entry names in $zip"
 
-mkdir -p "$tree/py-acq"
+created_pyacq=0
+if [ ! -d "$tree/py-acq" ]; then
+  mkdir "$tree/py-acq"
+  created_pyacq=1
+fi
 staging="$tree/py-acq/.staging.$$"
-# Remove the staging dir on any exit; after a successful run it is empty.
-trap 'rm -rf "$staging"' EXIT
+mkdir "$staging" || die "could not create $staging"
+# Remove what this run created on any exit. After a successful run the staging
+# dir is empty and py-acq holds the runtime and source, so rmdir leaves it.
+trap 'rm -rf "$staging"; if [ "$created_pyacq" = 1 ]; then rmdir "$tree/py-acq" 2>/dev/null || :; fi' EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
-mkdir "$staging"
 
 # zipfile.extractall drops absolute paths and '..' components, so a malformed
 # archive cannot write outside the staging directory.

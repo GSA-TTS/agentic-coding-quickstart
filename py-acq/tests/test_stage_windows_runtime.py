@@ -23,7 +23,7 @@ SCRIPT = REPO_ROOT / "scripts" / "stage-windows-runtime"
 
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32" or shutil.which("sh") is None,
-    reason="exercises the POSIX release-build script (run by CI on Linux)",
+    reason="drives the POSIX build script through sh; on Windows CI it runs under Git Bash in the release smoke step",
 )
 
 
@@ -106,8 +106,8 @@ def test_refuses_unexpected_layout(tmp_path: Path, kwargs: dict) -> None:
     result = _run(str(embed), sha, str(tree))
     assert result.returncode != 0
     assert not (tree / "py-acq" / "runtime").exists()
-    assert not (tree / "py-acq" / "src").exists()
-    assert not list((tree / "py-acq").glob(".staging*"))
+    # Nothing is left behind, not even an empty py-acq directory.
+    assert not (tree / "py-acq").exists()
 
 
 def test_refuses_to_overwrite_an_existing_runtime(tmp_path: Path) -> None:

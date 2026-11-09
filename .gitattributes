@@ -1,2 +1,5 @@
 *.cmd text eol=lf
 *.ps1 text eol=lf
+# Shell scripts run by release CI on windows-2022 (core.autocrlf=true there) must
+# keep LF endings, or bash fails on the CRs.
+scripts/stage-windows-runtime text eol=lf
