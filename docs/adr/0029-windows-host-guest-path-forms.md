@@ -188,7 +188,14 @@ now be created, recorded, launched, *and* copied into/out of through ``cp``.
 The Bash adapter also agrees on the UNC guest form: ``common.sh``
 ``canonicalize_path`` re-namespaces ``cygpath -u``'s ``//server/share/...`` UNC
 output to ``/unc/server/share/...`` (single leading slash, ``unc`` namespace),
-matching the Python adapter.
+matching the Python adapter. ``host_path`` is its inverse: a ``/unc/...`` value
+maps back to the UNC ``//server/share/...`` host form instead of going through
+``cygpath -m``, which would place it under the MSYS root
+(``C:/Program Files/Git/unc/...``), so the msb ``--volume`` source and the
+recorded host workspace stay the real UNC path. The UNC bypass of the
+``realpath`` step applies to the ``//server`` form only where ``cygpath``
+exists; on a POSIX host a leading ``//`` is an ordinary absolute path and is
+still resolved, so the POSIX behaviour is unchanged.
 
 ## Links
 

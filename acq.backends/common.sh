@@ -1413,24 +1413,29 @@ _acq_workspace_path_safe() {
 # "home" would otherwise become //home/... = the agent HOME). See ADR-0029.
 # For the HOST form a native tool needs, use host_path (below).
 canonicalize_path() {
-  local p="${1:-}" _out=""
+  local p="${1:-}" _out="" _resolve=1
   [ -n "$p" ] || return 0
   # A UNC host path (\\server\share or //server/share) is already absolute in
   # the Windows sense and names a network path realpath cannot resolve. A POSIX
   # host's realpath would treat the backslash form as a RELATIVE path and mangle
   # it (resolving \\server\share under the cwd), so skip the realpath/readlink
   # step for UNC and let it flow straight to cygpath -u (ADR-0029 amendment).
+  # The //server form is UNC only where cygpath exists (MSYS/Cygwin). On a
+  # POSIX host a leading // is an ordinary absolute path (macOS keeps it in
+  # `cd //var/...; pwd`), so it still goes through realpath there: skipping it
+  # would hand msb the symlinked $TMPDIR form it cannot mount.
   case "$p" in
-    \\\\*|//[^/]*) : ;;
-    *)
-      if command -v realpath >/dev/null 2>&1; then
-        _out=$(realpath "$p" 2>/dev/null) || _out=""
-      elif command -v readlink >/dev/null 2>&1; then
-        _out=$(readlink -f "$p" 2>/dev/null) || _out=""
-      fi
-      [ -n "$_out" ] && p="$_out"
-      ;;
+    \\\\*) _resolve=0 ;;
+    //[^/]*) command -v cygpath >/dev/null 2>&1 && _resolve=0 ;;
   esac
+  if [ "$_resolve" -eq 1 ]; then
+    if command -v realpath >/dev/null 2>&1; then
+      _out=$(realpath "$p" 2>/dev/null) || _out=""
+    elif command -v readlink >/dev/null 2>&1; then
+      _out=$(readlink -f "$p" 2>/dev/null) || _out=""
+    fi
+    [ -n "$_out" ] && p="$_out"
+  fi
   if command -v cygpath >/dev/null 2>&1; then
     _out=$(cygpath -u "$p" 2>/dev/null) || _out=""
     [ -n "$_out" ] && p="$_out"
@@ -1453,10 +1458,22 @@ canonicalize_path() {
 # native host tool must resolve on the host filesystem (a mount SOURCE, a file
 # to copy, a host socket, a host PEM). On POSIX the two are identical. See
 # ADR-0029.
+#
+# host_path is the inverse of canonicalize_path's /unc/ re-namespacing: a guest
+# /unc/server/share/... value names the UNC path //server/share/... on the
+# host. /unc is not an MSYS mount, so cygpath -m would place it under the MSYS
+# root (C:/Program Files/Git/unc/...), a directory that does not exist; the
+# mount source for a mapped-drive workspace must stay the UNC path.
 host_path() {
   local p="${1:-}" _out=""
   [ -n "$p" ] || return 0
   if command -v cygpath >/dev/null 2>&1; then
+    case "$p" in
+      /unc/?*)
+        printf '//%s\n' "${p#/unc/}"
+        return 0
+        ;;
+    esac
     _out=$(cygpath -m "$p" 2>/dev/null) || _out=""
     [ -n "$_out" ] && p="$_out"
   fi
