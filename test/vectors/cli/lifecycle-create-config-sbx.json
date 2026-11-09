@@ -7,13 +7,11 @@
   "platform": "any",
   "invoke": {
     "argv": [
-      "{acq}",
-      "create",
-      "shell",
-      ".",
-      "--name",
-      "cfg-sbx-test",
-      "--json"
+      "{python}",
+      "-I",
+      "test/vectors/drivers/seeded-run.py",
+      "[{\"git_repos\":{}},[[\"create\",\"shell\",\"{workspace}\",\"--name\",\"cfg-sbx-test\",\"--json\"],false,null]]",
+      "{acq}"
     ],
     "env": {
       "ACQ_SBX_BIN": "__stub__",

@@ -10,12 +10,14 @@ layer and the Tier-2 tests keep addressing them as ``cli.<name>``.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import ntpath
 import os
 import re
 import string
 import sys
+from collections.abc import Callable
 
 from .. import (
     backends,
@@ -130,6 +132,24 @@ def _operational_failure(
         if remediation:
             print(remediation, file=sys.stderr)
     return exit_code
+
+
+def with_recorded_selection(command: str, backend: str, name: str, emit_json: bool, body: Callable[[], int]) -> int:
+    """Run ``body`` under the provider selection ``name`` was created with
+    (:func:`kits.recorded_provider_selection`), as start, recreate and ``kit
+    update`` must. An unreadable recorded value fails closed before anything
+    runs, as Bash ``acq_provider_selection_load`` does."""
+    scope = contextlib.ExitStack()
+    try:
+        scope.enter_context(kits.recorded_provider_selection(backend, name))
+    except kits.ProviderSelectionError as exc:
+        return _operational_failure(
+            command, errors.VALIDATION_FAILED, str(exc),
+            f"recreate the sandbox ('acq rm {name}', then 'acq create') so a valid selection is recorded",
+            emit_json,
+        )
+    with scope:
+        return body()
 
 
 def _resolve_active_backend(explicit: str | None) -> str | None:

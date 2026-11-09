@@ -821,6 +821,19 @@ Feeding the **sbx** proxy depends on the sbx secret type (per the sbx CLI):
   set-custom …` command for you to run. (On msb no sbx step is needed — msb reads
   the acq store directly.)
 
+**Per-sandbox GitHub token at create.** Before `acq create` or `acq run`
+provisions a sandbox, and when `acq run` re-attaches, acq looks for GitHub
+repositories in the workspace. If it finds some and the sandbox has no GitHub
+token of its own, it says so and, at a terminal, offers to scope one now (the
+`acq github-scope` steps, [ADR-0013](adr/0013-per-sandbox-github-token-downscoping.md)).
+The token is stored before the create, so msb binds it and sbx's proxy has it.
+The default answer is `scope_github_token:` in config.yaml, which
+`acq configure` sets; unset means no. Declining never stops the create. Both
+implementations do this, and without a terminal on stdin both print only the
+`acq github-scope` command to run later. The Python acq does the same under
+`--json`, and when `ACQ_NO_PROMPT` or `ACQ_NO_PROGRESS` is set at a terminal,
+where the Bash acq takes the configured answer and, on yes, reads a token.
+
 This is the bash subset of the design's §7.5 unified secret model; the full
 Go/keychain MITM component (age fallback, `CredentialRewriteRule`,
 swap-on-access placeholders) remains a larger future effort tracked separately.
@@ -1227,6 +1240,26 @@ last) is:
 The merged table is written into the prepare staging directory and passed to the
 validator; it is removed with that stage. Malformed ids, reserved ENV names, or
 malformed hosts fail closed before validation runs.
+
+**Which provider kits a create selects.** In order: `--no-provider-kits` on
+`acq create`/`acq run` selects none; otherwise a set `ACQ_PROVIDER_KITS` is the
+list (an empty value selects none); otherwise `provider_kit:` in config.yaml
+(`acq configure`); otherwise the shipped `usai-provider`. Opt-in extra kits work
+the same way: a non-empty `ACQ_EXTRA_KITS` replaces config.yaml `extra_kits:`,
+and `--kit` refs are added after either (at a terminal, the Bash acq's
+create-time picker can still change the extras for one sandbox). The Python acq
+follows the same order, has no picker, and applies only kits from its pinned built-in bundle, so it refuses a kit that
+would have to be fetched (every catalog extra kit today) and points to
+`ACQ_IMPL=bash`.
+
+The create records which provider selection applied (`provider_selection` and
+`provider_kits` in the sandbox's provenance record). `acq start`,
+`acq create --recreate` and `acq kit update` use that record, not the
+selection current at the time, so a sandbox created with `--no-provider-kits`
+never gains a provider kit or key later; the Bash acq also reloads it when
+`acq run` re-attaches. With no recorded selection (a sandbox from before it was
+recorded), the Bash acq uses the default selection and the Python acq the
+current one.
 
 **Host pinning.** A kit can declare any `providerId` and allow-list any host, so
 the registry also pins the destination host(s) per providerId

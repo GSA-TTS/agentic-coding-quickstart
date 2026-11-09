@@ -61,7 +61,7 @@
               "key": "scope_github_token",
               "value": "no",
               "source": "default",
-              "honoured_by_python": false
+              "honoured_by_python": true
             },
             {
               "key": "provider_credential_bindings",

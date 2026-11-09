@@ -196,7 +196,9 @@ def test_a_failed_builtin_kit_warns_and_withholds_provenance(monkeypatch, tmp_pa
     assert rc == 0
     doc = json.loads(out)
     assert doc["data"]["kits_incomplete"] == ["git-ssh-sign"]
-    assert kits.provenance_read("msb", "box") is None  # never a false "current"
+    # Never a false "current": the record carries the provider selection only.
+    assert kits.provenance_status("msb", "box") == "unknown"
+    assert "applied_ref" not in kits.provenance_read("msb", "box")
 
 
 def test_a_failed_agent_kit_fails_the_create_and_removes_the_guest(monkeypatch, tmp_path, capsys):
