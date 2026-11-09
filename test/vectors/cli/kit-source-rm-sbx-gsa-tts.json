@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "id": "cli/kit-source-rm-sbx-gsa-tts",
+  "oracle": "ADR-0040m sbx kit_source_revoked: removing a team source under the control plane's owner keeps github.com/GSA-TTS/ in sbx's kit.allowedSources, because the pinned control-plane kits are fetched from it (the stub refuses every settings write, so any revocation attempt fails the command)",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{acq}", "--backend", "sbx", "kit-source", "rm", "github.com/GSA-TTS/team-kits", "--json"],
+    "env": {
+      "ACQ_SBX_BIN": "__stub__",
+      "ACQ_SBX_VERSION": "0.39.0",
+      "ACQ_SBX_INSTALLED": "1",
+      "ACQ_MSB_INSTALLED": "0",
+      "ACQ_KIT_SOURCE_SEED": "[{\"repository\":\"github.com/GSA-TTS/team-kits\",\"ref\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"directory\":\"kits\"}]",
+      "ACQ_SBX_STUB_ALLOWED_SOURCES": "[\"docker.io/\",\"github.com/GSA-TTS/\"]",
+      "ACQ_SBX_STUB_FAIL": "settings set"
+    },
+    "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "MSB_HOME", "SBX_HOME", "ACQ_IMAGE", "ACQ_MSB_IMAGE", "ACQ_SBX_STUB_CATALOG", "ACQ_SBX_STUB_SECRETS", "ACQ_SBX_STUB_SECRET_LS_RAW", "ACQ_SBX_STUB_RAW_PLACEHOLDERS", "ACQ_SBX_STUB_ROTATE", "ACQ_MSB_STUB_CATALOG", "ACQ_MSB_STUB_FAIL", "ACQ_MSB_STUB_SECRETS", "ACQ_MSB_STUB_SECRET_LS_RAW", "ACQ_MSB_STUB_ROTATE", "ACQ_KIT_SOURCE_DISCOVERY", "ACQ_EXTRA_KIT_SOURCES"],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "kit-source rm",
+        "data": {"repository": "github.com/GSA-TTS/team-kits", "removed": true}
+      },
+      "normalize": []
+    },
+    "stderr": {"mode": "exact", "value": "", "normalize": []}
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+  }
+}

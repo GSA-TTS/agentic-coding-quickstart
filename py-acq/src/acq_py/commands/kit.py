@@ -294,7 +294,7 @@ def run_kit_source_add(parsed, emit_json: bool) -> int:
             f"invalid repository: {parsed.repo!r} (want host/owner/repo)",
             emit_json,
         )
-    if repo == kits.CONTROL_PLANE_REPO:
+    if kits.is_control_plane(repo):
         return common._operational_failure(
             "kit-source add",
             errors.VALIDATION_FAILED,
@@ -353,7 +353,7 @@ def run_kit_source_rm(parsed, emit_json: bool, backend_override: str | None) -> 
             f"invalid repository: {parsed.repo!r} (want host/owner/repo)",
             emit_json,
         )
-    if repo == kits.CONTROL_PLANE_REPO:
+    if kits.is_control_plane(repo):
         return common._operational_failure(
             "kit-source rm",
             errors.VALIDATION_FAILED,
@@ -371,7 +371,9 @@ def run_kit_source_rm(parsed, emit_json: bool, backend_override: str | None) -> 
         )
     # sbx-only: revoke the source from sbx's kit.allowedSources BEFORE the host
     # record is dropped, so a failed revocation never strands a trusted source the
-    # backend still fetches from (ADR-0040m ``kit_source_revoked``). Revocation
+    # backend still fetches from (ADR-0040m ``kit_source_revoked``). The owner
+    # prefix is kept while the control plane, another registered source or an
+    # ACQ_EXTRA_KIT_SOURCES grant still needs it (sbx.kit_source_revoked). Revocation
     # fires on the RESOLVED active backend (--backend flag → ACQ_BACKEND env →
     # auto-detect): whenever sbx is the backend in effect — selected explicitly OR
     # auto-detected as the sole installed backend — the owner prefix is dropped
