@@ -15,7 +15,7 @@ import sys
 import time
 
 from .. import envelope, errors, kits, lock, msb, sbx, security, state
-from . import common
+from . import common, session
 
 # Substrate-contract seam (internal test seam, never a secret, never written to
 # output). ``ACQ_SUBSTRATE_STATE`` is a JSON object mapping an image to its
@@ -802,7 +802,8 @@ def _launch_after_envelope(backend: str, name: str, workspace: str | None, token
     document.
     """
     try:
-        return common._adapter(backend).launch(name, workspace, token, json_mode=emit_json)
+        env = session.session_env_for(backend, name)
+        return common._adapter(backend).launch(name, workspace, token, json_mode=emit_json, env=env)
     except common._ADAPTER_ERRORS as exc:
         return common._operational_failure("run", exc.code, exc.message, exc.remediation, False)
 

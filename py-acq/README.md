@@ -89,16 +89,37 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   (ADR-0038m §2).
 * `acq-py stop NAME [--json]` and `acq-py rm NAME [--json]` — stop (state
   preserved) or remove a sandbox and its record.
-* `acq-py exec NAME -- CMD... [--json]` — run a command non-interactively inside
+* `acq-py [--json] exec NAME -- CMD...` — run a command non-interactively inside
   a sandbox as the unprivileged `agent` user; the child's exit status is acq's
   exit status (ADR-0038m §1). In `--json` mode the child's stdout is routed to
   stderr and one success envelope carrying `exit_code` is emitted on stdout.
+  acq's own flags go before `NAME`: everything after it, including `--json` or
+  `--backend`, is the guest command.
 * `acq-py attach NAME [--json]` — attach to an existing sandbox, launching the
   recorded agent. The agent is read from host-authoritative state only; there is
   no agent-to-shell fallback (ADR-0038m §48). The non-interactive contract is
   deterministic: fail closed on a missing sandbox or a missing/unreadable host
-  record, propagate status; true PTY allocation is deferred to the live tier.
-* `acq-py shell NAME [--json]` — open a login shell (`/bin/sh -l`) in a sandbox.
+  record, propagate status.
+* `acq-py shell NAME [--json]` — open a shell in a sandbox: on msb the agent
+  user's passwd shell as a login shell, on sbx `bash`.
+* Sessions: when stdin is a terminal, `attach`, `shell` and `run` give the
+  session a PTY (`msb exec -t`, `sbx exec -it`) and pass the host's `TERM` and
+  `COLORTERM`; without one there is no PTY. Every session (`exec` too) gets
+  `HOME=/home/agent` and the host git identity (`GIT_AUTHOR_*`,
+  `GIT_COMMITTER_*`, and `EMAIL` or the global `user.email`). On msb, `attach`,
+  `shell` and `run` also get `SHELL`, with or without a PTY; sbx templates set
+  their own. `SSH_AUTH_SOCK` is passed only when the sandbox records a forwarded
+  ssh-agent socket, never the host's own. A child killed by signal N gives exit
+  status `128+N`. Ctrl-C goes to the child rather than killing it; when the
+  child dies of a Ctrl-C that acq received too, acq dies of SIGINT as well, so a
+  calling shell loop stops, and under `--json` no envelope is printed. A SIGINT
+  sent only to the child gives an ordinary `130` with the envelope.
+* Flag position: acq's own flags (`--json`, `--backend NAME`) may go anywhere
+  before `--` for most verbs, so `acq ls --json` and `acq attach box --json`
+  work. Only two places are strict: after the `exec` sandbox name, where tokens
+  are the guest command (and `acq exec NAME --json -- CMD`, with nothing but
+  acq flags before `--`, is refused as a usage error), and after a passthrough
+  verb, where everything is forwarded to the backend.
 * `acq-py cp SRC DST [--json]` — copy between a native host path and a POSIX
   guest path. Exactly one side is a `NAME:/guest/path` reference; host and guest
   types stay distinct (ADR-0038m §4). The host side is forwarded verbatim to the
@@ -163,6 +184,8 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   "absent".
 * Any other subcommand is forwarded verbatim to the active backend binary with an
   announced stderr notice, preserving its exit status (spec user story #9).
+  Everything after the verb is forwarded, so acq's `--json`/`--backend` must
+  come before it.
 * Exit codes (ADR-0038m §1): `0` success, `2` usage, `1` operational. A
   well-formed command acq cannot carry out (for example `doctor NAME` while no
   backend adapter is present) fails closed with exit `1` and the

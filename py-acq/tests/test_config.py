@@ -404,7 +404,8 @@ def test_invalid_persisted_backend_fails_mutating_verbs_closed(both_installed):
 
 def test_invalid_persisted_backend_fails_passthrough_closed(both_installed):
     _write_config(b"backend: podman\n")
-    proc = _run_cli("frobnicate", "--json")
+    # --json goes before the verb: after a passthrough verb it is the backend's.
+    proc = _run_cli("--json", "frobnicate")
     assert proc.returncode == 1
     assert json.loads(proc.stdout)["error"]["code"] == "backend_not_found"
 

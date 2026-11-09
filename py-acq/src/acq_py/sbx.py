@@ -259,11 +259,12 @@ def remove(name: str) -> None:
 
 
 def _run_stream(argv: list[str], *, json_mode: bool) -> int:
-    """Run a backend command with the child's exit status as the return value.
+    """Run a backend command in the foreground; return its shell-style exit status.
 
     Mirrors :func:`acq_py.msb._run_stream`: in ``json_mode`` the child's stdout is
-    routed to stderr so the CLI's stdout stays a single JSON document, and a CLI
-    that cannot be started raises :class:`SbxError` (``backend_not_found``).
+    routed to stderr so the CLI's stdout stays a single JSON document, a child
+    killed by a signal reports ``128 + N``, Ctrl-C is left to the child, and a
+    CLI that cannot be started raises :class:`SbxError` (``backend_not_found``).
     """
     if json_mode:
         try:
@@ -273,26 +274,62 @@ def _run_stream(argv: list[str], *, json_mode: bool) -> int:
     else:
         stdout = None
     try:
-        return subprocess.run([*sbx_command(), *argv], stdout=stdout).returncode
+        return hostexec.run_foreground([*sbx_command(), *argv], stdout=stdout)
     except OSError as exc:
         raise cli_unavailable() from exc
 
 
-def launch(name: str, workspace: str | None, agent: str | None, *, json_mode: bool = False) -> int:
+# The agent user's home, passed explicitly so a session sees it on every
+# template. SHELL is not set: the template's own value applies.
+AGENT_HOME = "/home/agent"
+# What ``acq shell`` runs, as Bash's ``acq_backend_shell`` does
+# (``sbx exec -it NAME bash``): the sbx agent templates ship bash.
+SHELL_COMMAND = ("bash",)
+
+
+def _session(name: str, command: list[str], *, env: list[str], tty: bool, json_mode: bool) -> int:
+    """Run ``command`` in ``name`` with ``env``; ``-it`` (stdin and a PTY) if ``tty``."""
+    argv = ["exec", "-it"] if tty else ["exec"]
+    for entry in env:
+        argv += ["-e", entry]
+    argv += [name, "--", *command]
+    return _run_stream(argv, json_mode=json_mode)
+
+
+def launch(
+    name: str,
+    workspace: str | None,
+    agent: str | None,
+    *,
+    json_mode: bool = False,
+    env: list[str] | None = None,
+    tty: bool | None = None,
+) -> int:
     """Launch the recorded agent (or a login shell) in the foreground.
 
     sbx's agent templates bake the unprivileged ``agent`` user, so there is no
-    ``-u`` flag to pass (unlike msb). The child's exit status is this function's
-    return value (ADR-0038m §1).
+    ``-u`` flag to pass (unlike msb). When stdin is a terminal (or ``tty`` says
+    so) the session gets stdin and a PTY (``sbx exec -it``) and the host's
+    TERM/COLORTERM. The child's exit status is this function's return value
+    (ADR-0038m §1). ``workspace`` is accepted for parity (see
+    :func:`exec_command`).
     """
-    if agent and agent != "shell":
-        command = [agent]
-    else:
-        command = ["/bin/sh", "-l"]
-    return exec_command(name, command, workspace=workspace, json_mode=json_mode)
+    interactive = hostexec.stdin_is_tty() if tty is None else tty
+    command = [agent] if agent and agent != "shell" else list(SHELL_COMMAND)
+    session = [f"HOME={AGENT_HOME}"]
+    if interactive:
+        session += hostexec.terminal_env()
+    return _session(name, command, env=[*session, *(env or [])], tty=interactive, json_mode=json_mode)
 
 
-def exec_command(name: str, command: list[str], *, workspace: str | None = None, json_mode: bool = False) -> int:
+def exec_command(
+    name: str,
+    command: list[str],
+    *,
+    workspace: str | None = None,
+    json_mode: bool = False,
+    env: list[str] | None = None,
+) -> int:
     """Run an explicit command non-interactively (``acq exec``); returns its status.
 
     ``workspace`` is accepted for parity but not forwarded: sbx mounts the recorded
@@ -300,8 +337,8 @@ def exec_command(name: str, command: list[str], *, workspace: str | None = None,
     per-exec ``-w`` flag. The command after ``--`` is forwarded verbatim
     (ADR-0038m §4).
     """
-    argv = ["exec", name, "--", *command]
-    return _run_stream(argv, json_mode=json_mode)
+    session = [f"HOME={AGENT_HOME}", *(env or [])]
+    return _session(name, command, env=session, tty=False, json_mode=json_mode)
 
 
 def copy(src: str, dst: str) -> int:

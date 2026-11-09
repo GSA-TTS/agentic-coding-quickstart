@@ -278,6 +278,10 @@
       "vectors": ["cli/passthrough", "cli/passthrough-exit-code", "cli/passthrough-sbx-bin-seam"]
     },
     {
+      "contract": "ADR-0038m §4 global flag position: acq reads --json/--backend before the verb; exec stops at the sandbox name and passthrough at the verb, so later flags reach the guest command or backend verbatim",
+      "vectors": ["cli/exec-flags-after-name-verbatim", "cli/passthrough-trailing-flags"]
+    },
+    {
       "contract": "ADR-0038m §1/§2 passthrough failures before the handoff keep the error contract: unknown --backend is usage (exit 2); a backend CLI that cannot be run is backend_not_found (exit 1)",
       "vectors": ["cli/passthrough-unknown-backend", "cli/passthrough-backend-missing", "cli/passthrough-sbx-backend-missing"]
     },
