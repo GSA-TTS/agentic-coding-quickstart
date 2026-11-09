@@ -6,7 +6,9 @@ Two subcommands:
 machine-readable ``OUTCOME`` disposition line. Offline-testable by pointing
 ``--`` + a command at a fake backend (e.g. ``python -c "exit 1"``).
 
-``matrix`` — print the qualified/unqualified/blocked matrix honestly.
+``matrix`` — print every cell's state from the committed ledger: ``qualified``,
+``waived`` or ``blocked`` for a claimed cell (the release gate's verdict), or
+``unqualified`` for a cell that is not claimed.
 
 The harness is Tier-3 tooling, not CLI code; the live run is its downstream
 consumer. Exit codes: 0 PASS, 1 FAIL, 2 BLOCKED, 3 FLAKY (escalation).
@@ -20,8 +22,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .matrix import is_claimed, report_matrix
-from .model import Environment, format_result_line
+from .matrix import MSB, PLATFORMS, SBX, is_claimed
+from .model import Environment, canonical_transcript_bytes, format_result_line
 from .runner import (
     CellResult,
     exit_code_for,
@@ -57,13 +59,35 @@ def _build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--rev", default=_DEFAULT_REV)
     run_p.add_argument("--artifact-sha256", default=_DEFAULT_ARTIFACT)
     run_p.add_argument("--transcript-dir", default=None)
-    run_p.add_argument("--attempts", type=int, default=3)
-    run_p.add_argument("--timeout", type=float, default=120.0)
+    run_p.add_argument("--attempts", type=_positive_int, default=3)
+    run_p.add_argument("--timeout", type=_ascii_float, default=120.0)
     run_p.add_argument("command", nargs=argparse.REMAINDER)
 
-    matrix_p = sub.add_parser("matrix", help="print the qualification matrix")
+    matrix_p = sub.add_parser("matrix", help="print the qualification matrix from the ledger")
     matrix_p.add_argument("--json", action="store_true")
+    matrix_p.add_argument("--ledger", default="docs/qualification-ledger.json")
     return parser
+
+
+def _ascii_float(text: str) -> float:
+    # float() also accepts other scripts' digits ("\u0661\u0662"); refuse them.
+    if not text.isascii():
+        raise argparse.ArgumentTypeError(f"must be a number written in ASCII digits, got {text!r}")
+    try:
+        return float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"must be a number, got {text!r}") from None
+
+
+def _positive_int(text: str) -> int:
+    try:
+        # int() also accepts other scripts' digits; only ASCII ones count.
+        value = int(text) if text.isascii() else 0
+    except ValueError:
+        value = 0
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be a whole number >= 1, got {text!r}")
+    return value
 
 
 def _environment(args: argparse.Namespace) -> Environment:
@@ -108,27 +132,38 @@ def _cmd_run(args: argparse.Namespace) -> int:
     if args.transcript_dir:
         transcript_dir = Path(environment.transcript_dir)
         transcript_dir.mkdir(parents=True, exist_ok=True)
-        path = transcript_dir / "transcript.json"
-        path.write_text(
-            json.dumps(transcript_document(result), sort_keys=True, indent=2) + "\n",
-            encoding="utf-8",
+        # Bytes, in the one canonical form: these exact bytes are hashed into the
+        # ledger and shown in the ledger PR, so a reviewer can reproduce the hash.
+        (transcript_dir / "transcript.json").write_bytes(
+            canonical_transcript_bytes(transcript_document(result))
         )
 
     return exit_code_for(result.outcome)
 
 
 def _cmd_matrix(args: argparse.Namespace) -> int:
-    reports = report_matrix({}, now=datetime.now(timezone.utc))
+    # The gate reads the ledger and git; imported here so ``run`` never needs either.
+    from .gate import evaluate
+    from .ledger import LedgerError, load_ledger
+
+    try:
+        ledger = load_ledger(args.ledger)
+    except LedgerError as exc:
+        sys.stderr.write(f"qualification matrix: {exc}\n")
+        return 2
+    claimed = {(s.backend, s.platform): s for s in evaluate(ledger, now=datetime.now(timezone.utc))}
+    cells = []
+    for backend in (MSB, SBX):
+        for platform in PLATFORMS:
+            status = claimed.get((backend, platform))
+            cells.append({
+                "backend": backend,
+                "platform": platform,
+                "claimed": status is not None,
+                "state": status.status if status else "unqualified",
+                "reason": status.reason if status else "",
+            })
     if args.json:
-        cells = [
-            {
-                "backend": r.backend,
-                "platform": r.platform,
-                "claimed": r.claimed,
-                "state": r.state.value,
-            }
-            for r in reports
-        ]
         sys.stdout.write(
             json.dumps(
                 {"schema_version": 1, "command": "matrix", "data": {"cells": cells}},
@@ -137,9 +172,9 @@ def _cmd_matrix(args: argparse.Namespace) -> int:
             + "\n"
         )
     else:
-        for r in reports:
-            marker = "unqualified" if not r.claimed else r.state.value
-            sys.stdout.write(f"{r.backend} {r.platform} {marker}\n")
+        for c in cells:
+            detail = f" ({c['reason']})" if c["reason"] else ""
+            sys.stdout.write(f"{c['backend']} {c['platform']} {c['state']}{detail}\n")
     return 0
 
 
