@@ -16,7 +16,12 @@ setup() {
   CLONEPROJ="$STUBDIR/cloneproj"
   _mk_repo "$CLONEPROJ"
 }
-teardown() { acq_teardown_stubs; }
+teardown() {
+  # Undo any mode a test stripped from the repo's .git, so the stub dir can be
+  # removed.
+  chmod u+rwx "$CLONEPROJ/.git" "$CLONEPROJ/.git/hooks" 2>/dev/null || true
+  acq_teardown_stubs
+}
 
 load 'helper'
 
@@ -884,13 +889,50 @@ _assert_layout_refused() { # SANDBOX
   assert_failure
   [ "$(git config --file "$cfg" user.email)" = wt@example.gov ]
   _msb_clone -- rm shell-cloneproj
-  # GIT_CONFIG_NOSYSTEM=0 reads the system file; an exported command-scope
-  # value comes last and wins.
+  # GIT_CONFIG_NOSYSTEM=00 is false to git (the integer zero), so the system
+  # file is read; an exported command-scope value comes last and wins.
   _msb_clone HOME="$STUBDIR/nohome" XDG_CONFIG_HOME="$STUBDIR/noconfig" \
-    GIT_CONFIG_SYSTEM="$sys" GIT_CONFIG_NOSYSTEM=0 \
+    GIT_CONFIG_SYSTEM="$sys" GIT_CONFIG_NOSYSTEM=00 \
     GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.email GIT_CONFIG_VALUE_0=env@example.gov -- \
     create shell --clone "$CLONEPROJ"
   assert_success
   [ "$(git config --file "$cfg" user.name)" = "System User" ]
   [ "$(git config --file "$cfg" user.email)" = env@example.gov ]
+}
+
+@test "clone(msb): an execute-only .git cannot hide a symlink from the scan" {
+  [ "$(id -u)" -ne 0 ] || skip "root ignores directory permissions"
+  # git still opens files by name in an execute-only directory, so a symlink
+  # the scan cannot list must refuse the create rather than pass unseen.
+  local other="$STUBDIR/otherrepo"
+  _mk_repo "$other"
+  mv "$CLONEPROJ/.git/refs/heads" "$STUBDIR/saved"
+  ln -s "$other/.git/refs/heads" "$CLONEPROJ/.git/refs/heads"
+  chmod 0111 "$CLONEPROJ/.git"
+  _msb_clone -- create shell --clone "$CLONEPROJ"
+  chmod 0755 "$CLONEPROJ/.git"
+  _assert_layout_refused shell-cloneproj
+  assert_output --partial 'could not scan .git'
+  rm "$CLONEPROJ/.git/refs/heads"; mv "$STUBDIR/saved" "$CLONEPROJ/.git/refs/heads"
+  # An unreadable .git/hooks is pruned before it is read, so it stays exempt.
+  chmod 0 "$CLONEPROJ/.git/hooks"
+  _msb_clone -- create shell --clone "$CLONEPROJ"
+  assert_success
+  [ -d "$STUBDIR/state/clones/shell-cloneproj/cloneproj/.git" ]
+}
+
+@test "clone(msb): rm reports a wrapper refusal instead of a spurious unfetched warning" {
+  _msb_clone -- create shell --clone "$CLONEPROJ"
+  assert_success
+  # Nothing unfetched, but the wrapper now refuses to run git in the origin:
+  # rm must say why, not claim every branch tip is unfetched or silently
+  # leave the remote behind.
+  mkdir -p "$STUBDIR/state/.git-hooks-disabled"
+  _msb_clone -- rm shell-cloneproj
+  assert_success
+  assert_output --partial '.git-hooks-disabled exists'
+  refute_output --partial 'discarding unfetched commits'
+  assert_output --partial 'could not check'
+  assert_output --partial 'remote remove sandbox-shell-cloneproj'
+  [ ! -e "$STUBDIR/state/clones/shell-cloneproj" ]
 }

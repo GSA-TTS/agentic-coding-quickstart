@@ -132,8 +132,9 @@ on purpose, written repo-locally into the scratch:
   user's, and the guest never writes them); the repository's config files are
   read without includes, because in a non-clone run the guest can write them
   and an include there could point the host at any file. The system scope is
-  skipped when `GIT_CONFIG_NOSYSTEM` holds any non-empty value other than
-  `0`/`false`/`no`/`off`, as git does. Known gap: the command scope is picked
+  skipped when `GIT_CONFIG_NOSYSTEM` is true by git's own boolean rules
+  (`true`/`yes`/`on`, or a non-zero integer, so `00` is false), as git does.
+  Known gap: the command scope is picked
   out of `git config --show-scope`, which needs git 2.26, so on an older git it
   is not read. A failure to read or write the identity only warns: a missing
   identity already fails loudly at the first commit.
@@ -196,14 +197,20 @@ repository, with a message naming `git worktree` and submodule checkouts:
   must both equal `<canonical workspace>/.git` (this also catches a
   `GIT_DIR`/`GIT_COMMON_DIR` in the caller's environment).
 
-Together these checks guarantee that, at the time they run, git's directory
-and common directory are `<workspace>/.git` and every object, ref and config
-file git reads from it lives physically under that directory, so the
-alternates check (also refused: an `objects/info/alternates` file) and the
-clone look at what git actually uses. They say nothing about later changes;
-see the residual risks below. The hooks path must not exist either: if it
-does, as a file, directory or symlink, the create fails closed rather than
-running whatever it holds as hooks. A
+Together these checks guarantee exactly this, at the time they run: git's
+directory and common directory are `<workspace>/.git`, and every directory
+below it except `.git/hooks` could be listed and holds no symlink. The scan
+fails closed on any error, so a directory it cannot list (an execute-only
+`.git`, say, where git can still open files by name) refuses the create
+instead of hiding a link. So no path git resolves below `.git`, hooks aside,
+is redirected out of it, and the alternates check (also refused: an
+`objects/info/alternates` file) and the clone look at what git actually
+uses. A file there may still be a hard link, which shares content with
+another directory entry but cannot redirect a path. The checks say nothing
+about later changes; see the residual risks below. The hooks path must not
+exist either: if it does, as a file, directory or symlink, git commands fail
+closed rather than running whatever it holds as hooks; the check runs before
+every wrapped git call, at create and at rm. A
 **partial clone** (`extensions.partialClone`, or any `remote.*.promisor` that
 is true) is refused up front too: objects left on the server are missing
 locally and the wrapper never fetches them, so the clone would otherwise fail
@@ -231,12 +238,13 @@ Residual risks, accepted:
   accepted because it needs a second, already-running sandbox on the same
   checkout racing a create the operator starts.
 - **Hooks path.** Hooks stay disabled only while the hooks path under acq's
-  state dir does not exist. The create checks this and fails closed, but the
-  check and each later git call are not atomic: a host process that creates
-  the path in between would have its contents run as hooks. The path is a
-  direct child of the state dir, which is never mounted into a guest (a
-  scratch clone is mounted from a subdirectory below it), so only a host
-  process already running as the user could do this.
+  state dir does not exist. Every wrapped git call checks this first and fails
+  closed, but the check and the git command it guards are not atomic: whoever
+  creates the path in between would have its contents run as hooks on the
+  host. acq never mounts the state dir itself (a scratch clone is mounted from
+  a subdirectory below it), so this needs a host process already running as
+  the user, or a guest whose workspace contains the state dir, for example a
+  `$HOME` workspace, since the default state dir is under `~/.local/state`.
 
 ### Trade-off stated openly
 

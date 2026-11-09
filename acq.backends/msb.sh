@@ -3513,13 +3513,16 @@ _acq_msb_clone_wire() {
 # names a commondir), with a symlink anywhere inside .git, or with git's
 # directories resolving elsewhere, git can read objects, refs or config from
 # outside WS/.git, where the alternates check and the scratch clone are not
-# looking. A pass means that, at the time of the check, everything git reads
-# lives physically under WS/.git. .git/hooks is exempt from the symlink scan:
-# the wrapper never runs hooks. The scan only asks whether any link exists, so
-# odd file names cannot confuse it; it runs from inside .git so the workspace
-# path is never parsed as a find pattern.
+# looking. A pass means that, at the time of the check, git's directories are
+# WS/.git and every directory below it except .git/hooks was listed with no
+# symlink found. .git/hooks is exempt (pruned before it is read): the wrapper
+# never runs hooks. The scan fails closed when find reports any error, such as
+# a directory it cannot list (an execute-only .git would otherwise hide a
+# link that git can still open by name). It only asks whether any link exists,
+# so odd file names cannot confuse it, and it runs from inside .git so the
+# workspace path is never parsed as a find pattern.
 _acq_msb_clone_check_layout() {
-  local ws="$1" want why="" gd="" common=""
+  local ws="$1" want why="" gd="" common="" links=""
   want="${ws}/.git"
   if [ -L "$want" ]; then
     why=".git is a symlink"
@@ -3527,7 +3530,9 @@ _acq_msb_clone_check_layout() {
     why=".git is a file pointing at another git directory"
   elif [ -e "${want}/commondir" ] || [ -L "${want}/commondir" ]; then
     why=".git/commondir exists"
-  elif [ -n "$(cd "$want" && find . -path ./hooks -prune -o -type l -print 2>/dev/null | head -n 1)" ]; then
+  elif ! links=$(cd "$want" && find . -path ./hooks -prune -o -type l -print 2>/dev/null); then
+    why="could not scan .git (an unreadable directory inside it)"
+  elif [ -n "$links" ]; then
     why=".git contains a symlink (outside .git/hooks)"
   else
     want=$(canonicalize_path "$want")
@@ -3702,8 +3707,9 @@ _acq_msb_clone_unset_key() {
 # behind a gitdir-scoped includeIf there. The repository's own config files
 # are reachable from the guest in normal mode, so they are read with
 # --no-includes and cannot point the host at another file.
-#   - system: skipped when GIT_CONFIG_NOSYSTEM holds any non-empty value other
-#     than 0/false/no/off, as git does (`config --system` reads it regardless).
+#   - system: skipped when GIT_CONFIG_NOSYSTEM is true by git's boolean rules
+#     (_acq_msb_git_bool_true), as git does (`config --system` reads it
+#     regardless).
 #   - worktree (.git/config.worktree): read only when extensions.worktreeConfig
 #     is true; otherwise `--worktree` would just re-read the local file.
 #   - command (values the user exports via GIT_CONFIG_COUNT or
@@ -3716,10 +3722,7 @@ _acq_msb_clone_read_identity() {
     rc=0
     case "$scope" in
       system)
-        case "${GIT_CONFIG_NOSYSTEM:-}" in
-          '' | 0 | [Ff][Aa][Ll][Ss][Ee] | [Nn][Oo] | [Oo][Ff][Ff]) ;;
-          *) continue ;;
-        esac
+        _acq_msb_git_bool_true "${GIT_CONFIG_NOSYSTEM:-}" && continue
         _acq_msb_clone_read_scope "$src" "$key" --system --includes || rc=$?
         ;;
       global) _acq_msb_clone_read_scope "$src" "$key" --global --includes || rc=$? ;;
@@ -3739,6 +3742,25 @@ _acq_msb_clone_read_identity() {
   done
   [ -n "$found" ] || return 1
   return 0
+}
+
+# _acq_msb_git_bool_true VALUE — succeed when git's boolean parsing reads VALUE
+# as true: true/yes/on in any case, or an integer (optional sign and k/m/g
+# suffix) that is not zero, so `00` is false. Empty and false/no/off are false.
+# git refuses anything else outright; that is treated as true here.
+_acq_msb_git_bool_true() {
+  local d="$1"
+  case "$d" in
+    '' | [Ff][Aa][Ll][Ss][Ee] | [Nn][Oo] | [Oo][Ff][Ff]) return 1 ;;
+    [Tt][Rr][Uu][Ee] | [Yy][Ee][Ss] | [Oo][Nn]) return 0 ;;
+  esac
+  d=${d#[+-]}
+  d=${d%[kKmMgG]}
+  case "$d" in
+    '' | *[!0-9]*) return 0 ;;
+    *[!0]*) return 0 ;;
+  esac
+  return 1
 }
 
 # _acq_msb_clone_read_scope SRC KEY FLAGS... — read KEY from SRC's config with
@@ -3795,7 +3817,9 @@ _acq_msb_clone_config_fail() {
 # _acq_msb_clone_warn_unfetched NAME — warn (sbx-parity, never blocks) when
 # NAME's scratch clone holds commits absent from the origin checkout's object
 # store. Branch tips are checked with cat-file -e; a fetch transfers exactly
-# those objects, so tip-present == nothing to lose.
+# those objects, so tip-present == nothing to lose. When the wrapper refuses to
+# run git against the origin checkout, its reason is shown and the check is
+# reported as skipped, rather than every tip looking unfetched.
 _acq_msb_clone_warn_unfetched() {
   # NOTE: `local a="$1" b="…${a}"` is a trap — the whole statement's words
   # expand BEFORE `local` assigns, so ${a} is unbound under set -u. Split them.
@@ -3804,6 +3828,11 @@ _acq_msb_clone_warn_unfetched() {
   [ -d "$dir" ] || return 0
   origin=$(cat "${dir}/.origin" 2>/dev/null) || origin=""
   [ -n "$origin" ] && [ -d "$origin" ] || return 0
+  if ! _acq_msb_git_ws_prep "$origin"; then
+    echo "acq(msb): warning: could not check sandbox '$name''s scratch clone for unfetched" >&2
+    echo "acq(msb):   commits (see above); any it holds are discarded with it." >&2
+    return 0
+  fi
   for d in "$dir"/*/; do [ -d "${d}.git" ] && scratch="${d%/}"; done
   [ -n "$scratch" ] || return 0
   # Branch tips are read straight from the ref files (loose + packed). The
@@ -3836,14 +3865,21 @@ EOF
 
 # _acq_msb_clone_cleanup NAME — delete NAME's scratch clone and drop the
 # fetch-back remote from the origin checkout. Best-effort, always returns 0
-# (a sandbox created without --clone has no dir: quiet no-op).
+# (a sandbox created without --clone has no dir: quiet no-op). When the wrapper
+# refuses to run git against the origin checkout, its reason is shown along
+# with the command that removes the remote by hand.
 _acq_msb_clone_cleanup() {
   local name="$1" origin=""
   local dir="${ACQ_MSB_CLONES_DIR}/${name}"
   [ -d "$dir" ] || return 0
   origin=$(cat "${dir}/.origin" 2>/dev/null) || origin=""
   if [ -n "$origin" ] && [ -d "$origin" ]; then
-    _acq_msb_git_ws "$origin" remote remove "sandbox-${name}" >/dev/null 2>&1 || true
+    if _acq_msb_git_ws_prep "$origin"; then
+      _acq_msb_git_ws "$origin" remote remove "sandbox-${name}" >/dev/null 2>&1 || true
+    else
+      echo "acq(msb): warning: left the 'sandbox-${name}' remote in $origin (see above)." >&2
+      echo "acq(msb):   Remove it with: git -C $origin remote remove sandbox-${name}" >&2
+    fi
   fi
   rm -rf "$dir"
   return 0
