@@ -257,11 +257,14 @@ def _mount_workspace(backend: str, workspace: str) -> str:
     msb cannot mount a symlinked host path (notably the macOS ``$TMPDIR``,
     ``/var/folders`` -> ``/private/var/folders``), so it gets the real path; the
     guest ``-w`` start directory is derived from the same value. The same
-    ``realpath`` is what lets msb mount a Windows ``subst`` or mapped drive: msb's
-    mount backend rejects a ``subst``/mapped drive letter (``X:\\...`` fails with
-    os error 22) but accepts the resolved plain-drive or UNC path ``realpath``
-    yields, and ``_guest_path`` translates either form. On Windows ``realpath``
-    also expands 8.3 short names and normalises case (``C:\\PROGRA~1\\x`` ->
+    ``realpath`` is what keeps a Windows ``subst`` or mapped-drive workspace
+    working after the session that created it: drive letters are per logon
+    session, so without ``realpath`` the record would hold ``Z:\\proj`` and the
+    sandbox could not restart from a session without ``Z:`` (msb fails the mount
+    with os error 2), while the resolved plain-drive or UNC path mounts from any
+    session. Live runs on msb 0.7.7 mounted drive letters within one session and
+    accepted a UNC ``--volume`` source; ``_guest_path`` translates either form.
+    On Windows ``realpath`` also expands 8.3 short names and normalises case (``C:\\PROGRA~1\\x`` ->
     ``C:\\Program Files\\x``), so the *recorded* workspace string can differ from
     what the user typed; that is benign — the sandbox name derives from the typed
     path (``_derive_name`` runs before this), and exec/attach/shell/reattach all
