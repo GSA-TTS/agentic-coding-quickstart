@@ -15,7 +15,19 @@ import sys
 import time
 from dataclasses import dataclass
 
-from .. import envelope, errors, kit_msb, kits, kitspec, lock, msb, sbx, security, state
+from .. import (
+    envelope,
+    errors,
+    kit_msb,
+    kit_sbx,
+    kits,
+    kitspec,
+    lock,
+    msb,
+    sbx,
+    security,
+    state,
+)
 from . import common, session
 
 # Substrate-contract seam (internal test seam, never a secret, never written to
@@ -160,10 +172,14 @@ def _cli_kit_refs(values: list[str] | None) -> list[str]:
 
 @dataclass(frozen=True)
 class _KitPlan:
-    """The kits an msb create applies, and which of them provides the agent (if any)."""
+    """The kits a create applies, and which of them provides the agent (if any).
+
+    ``selection`` is the kit selection they came from (the sbx heal records use it).
+    """
 
     kits: list[kit_msb.Kit]
     agent_kit: str | None
+    selection: kitspec.KitSelection | None = None
 
     @property
     def entrypoint(self) -> str | None:
@@ -264,26 +280,93 @@ def _new_msb_sandbox(
     return {**data, **_kit_data(plan, result)}, None
 
 
+def _plan_sbx_kits(
+    agent: str, cli_kits: list[str], image: str, command: str, emit_json: bool
+) -> tuple[_KitPlan | None, int | None]:
+    """Select, verify and parse the kit set for an sbx create (:func:`kit_sbx.select`)."""
+    try:
+        resolved, selection = kit_sbx.select(agent, cli_kits, image_is_default=image == common.OPENCODE_DEVENV_IMAGE)
+    except kitspec.KitSelectionError as exc:
+        return None, common._operational_failure(
+            command, errors.VALIDATION_FAILED, str(exc),
+            "fix the kit selection (config extra_kits or provider_kit, ACQ_EXTRA_KITS, ACQ_PROVIDER_KITS, --kit)",
+            emit_json,
+        )
+    except sbx.SbxError as exc:
+        return None, common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
+    agent_kit = next(
+        (k.name for k in resolved if k.role in ("agent", "cli") and k.name in kitspec.AGENT_BUNDLE_KITS), None
+    )
+    return _KitPlan(resolved, agent_kit, selection), None
+
+
 def _new_sbx_sandbox(
     command: str, emit_json: bool, *, agent: str, workspace: str, name: str, image_flag: str | None,
     cli_kits: list[str],
 ) -> tuple[dict | None, int | None]:
-    """Create an sbx sandbox; it cannot apply kits in this slice, so an agent that needs one is refused."""
-    kit_name = kits.agent_kit_for(agent)
-    if cli_kits or (kit_name is not None and not common._supports("sbx", "kit-apply")):
-        wanted = f"the '{kit_name}' kit" if kit_name and not cli_kits else "the requested kits"
-        return None, common._operational_failure(
-            command,
-            errors.UNSUPPORTED,
-            f"agent '{agent}' requires {wanted}, which the sbx backend cannot apply",
-            "use a backend that supports kit-apply (msb in this slice), or choose an agent without a kit",
-            emit_json,
-        )
+    """Translate the kits, create the sandbox with them, then wait for kit startup (Bash sbx provision).
+
+    sbx applies the kits itself (``sbx create --kit DIR``). On the default image
+    OpenCode comes from the pinned kit, so sbx is given the ``shell`` agent and
+    does not add its own OpenCode kit as well.
+    """
+    image = _resolve_image(image_flag, agent)
+    plan, exit_code = _plan_sbx_kits(agent, cli_kits, image, command, emit_json)
+    if plan is None:
+        return None, exit_code
     try:
-        data = _create_sandbox("sbx", agent, workspace, name, _resolve_image(image_flag, agent), None)
+        prepared = kit_sbx.prepare(plan.kits)
+    except kit_sbx.KitTranslateError as exc:
+        return None, common._operational_failure(
+            command, errors.VALIDATION_FAILED, f"a kit could not be prepared, so the sandbox was not created: {exc}",
+            "check that the acq state directory is acq's own and writable, or reinstall acq", emit_json,
+        )
+    generic = agent == "opencode" and image == common.OPENCODE_DEVENV_IMAGE
+    try:
+        data = _create_sandbox("sbx", agent, workspace, name, image, plan.agent_kit,
+                               sbx_create=("shell" if generic else agent, prepared.flags))
     except common._ADAPTER_ERRORS as exc:
         return None, common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
-    return {**data, "kit": None, "entrypoint": None}, None
+    exit_code = _finish_sbx_create(name, agent, plan, prepared.barrier_token, command, emit_json, generic=generic)
+    if exit_code is not None:
+        _discard_half_created("sbx", name)
+        return None, exit_code
+    return {**data, **_kit_data(plan, kit_msb.ApplyResult(applied=[k.name for k in plan.kits]))}, None
+
+
+def _finish_sbx_create(
+    name: str, agent: str, plan: _KitPlan, token: str, command: str, emit_json: bool, *, generic: bool
+) -> int | None:
+    """Seed the host kit records, wait for the startup barrier, then record what was applied.
+
+    The records describe what the host passed to the create it saw succeed, so
+    they are written before the barrier, which only the guest writes. A sandbox
+    whose kit startup never finished is not kept.
+    """
+    kit_sbx.clear_instance_state(name)
+    if plan.selection is not None:
+        kit_sbx.seed_records(name, plan.selection)
+    if not kit_sbx.wait_startup_barrier(name, token):
+        return common._operational_failure(
+            command, errors.TIMEOUT,
+            f"the kit startup commands in sandbox '{name}' did not finish within {kit_sbx.barrier_timeout_s():g}s, "
+            "so the sandbox was removed rather than kept with unconfirmed kit-managed config",
+            f"check network access from the sandbox, or raise {kit_sbx.BARRIER_TIMEOUT_ENV}, then retry", emit_json,
+        )
+    try:
+        if agent == "opencode":
+            kit_sbx.hc_write(name, "generic-opencode", "generic-opencode" if generic else "legacy-opencode")
+        kit_msb.cli_kits_write(name, plan.kits, backend="sbx")
+        if plan.agent_kit is not None:
+            kits.kit_applied_write("sbx", name, plan.agent_kit, plan.entrypoint or plan.agent_kit)
+        kits.provenance_write("sbx", name)
+    except OSError as exc:
+        return common._operational_failure(
+            command, errors.FAILURE,
+            f"could not record the applied kits for sandbox '{name}': {exc.strerror or exc}",
+            "check that the acq state directory is writable and has free space, then retry", emit_json,
+        )
+    return None
 
 
 def _discard_half_created(backend: str, name: str) -> None:
@@ -322,6 +405,9 @@ def _clear_host_records(backend: str, name: str) -> None:
         msb.held_forget(name)
         kit_msb.remove_host_config(name)
         kit_msb.cli_kits_remove(name)
+    else:
+        kit_sbx.remove_host_config(name)
+        kit_msb.cli_kits_remove(name, backend="sbx")
 
 
 def _has_host_records(backend: str, name: str) -> bool:
@@ -389,20 +475,21 @@ def _create_sandbox(
     kit_name: str | None,
     *,
     plan: _KitPlan | None = None,
+    sbx_create: tuple[str, list[str]] | None = None,
 ) -> dict:
     """Create + exec-ready gate + record write; returns the result record data.
 
     On msb, ``plan``'s kits set the egress policy and create flags. When msb can
     enforce it the host-config directory is mounted read-only, and the record
-    says ``ro_host_config`` only after :func:`_confirm_ro_mount`. Secret
-    bindings are reported by name and host only, never a value.
+    says ``ro_host_config`` only after :func:`_confirm_ro_mount`. Secret bindings
+    are reported by name and host only. ``sbx_create`` is sbx's agent and ``--kit`` flags.
     """
     adapter = common._adapter(backend)
     error_cls = sbx.SbxError if backend == "sbx" else msb.MsbError
-    secret_bindings: list[str] | None = None
-    ro_mount = False
+    secret_bindings, ro_mount = None, False
     if backend == "sbx":
-        adapter.create(name, image, workspace, agent=agent)
+        sbx_agent, kit_flags = sbx_create or (agent, [])
+        adapter.create(name, image, workspace, agent=sbx_agent, kit_flags=kit_flags)
     else:
         ro_mount = security.ro_mount_supported()
         secret_bindings = _msb_create(name, image, workspace, plan.kits if plan else [], ro_mount=ro_mount)

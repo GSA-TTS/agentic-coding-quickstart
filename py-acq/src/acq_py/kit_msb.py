@@ -146,29 +146,29 @@ def select(agent: str, cli_kits: list[str], *, image_is_default: bool, extras: l
 # ---------------------------------------------------------------------------
 
 
-def _cli_kits_path(name: str) -> Path:
-    return lock.bash_provenance_dir() / "msb" / f"{lock.bash_sandbox_key(name)}.kits"
+def _cli_kits_path(name: str, backend: str = "msb") -> Path:
+    return lock.bash_provenance_dir() / backend / f"{lock.bash_sandbox_key(name)}.kits"
 
 
-def cli_kits_write(name: str, kit_set: Iterable[Kit]) -> None:
+def cli_kits_write(name: str, kit_set: Iterable[Kit], backend: str = "msb") -> None:
     """Record the sandbox's extra and ``--kit`` refs so later reapplies include them. Raises ``OSError``."""
     kit_set = list(kit_set)
     lines = ["schema=1", *(f"extra={k.ref}" for k in kit_set if k.role == "extra"),
              *(f"kit={k.ref}" for k in kit_set if k.role == "cli")]
-    path = _cli_kits_path(name)
+    path = _cli_kits_path(name, backend)
     path.parent.mkdir(parents=True, exist_ok=True)
     state.atomic_write_text(path, "\n".join(lines) + "\n")
     path.chmod(0o600)
 
 
-def cli_kits_read(name: str) -> tuple[list[str], list[str]]:
+def cli_kits_read(name: str, backend: str = "msb") -> tuple[list[str], list[str]]:
     """The recorded ``(--kit refs, extra refs)``; empty when there is no record.
 
     A relative local ref (left by an older Bash acq) would resolve against the
     current directory, so it is skipped with a warning, as Bash does.
     """
     try:
-        text = _cli_kits_path(name).read_text(encoding="utf-8")
+        text = _cli_kits_path(name, backend).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return [], []
     cli: list[str] = []
@@ -184,8 +184,8 @@ def cli_kits_read(name: str) -> tuple[list[str], list[str]]:
     return cli, extras
 
 
-def cli_kits_remove(name: str) -> None:
-    _cli_kits_path(name).unlink(missing_ok=True)
+def cli_kits_remove(name: str, backend: str = "msb") -> None:
+    _cli_kits_path(name, backend).unlink(missing_ok=True)
 
 
 def bundled_kit(name: str, role: str = "cli") -> Kit:

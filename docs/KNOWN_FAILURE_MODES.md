@@ -3644,6 +3644,48 @@ enforcement; enabling it is the `security.WINDOWS` platform check in
 
 ---
 
+## 55. Python acq on sbx: Kit Gaps Still Open
+
+**Status:** Tracked follow-ups (sbx, Python `acq`).
+
+### Symptoms
+
+The Python acq now creates sbx sandboxes with the built-in kits and the bundled
+agent kit (`acq run opencode .` works), but compared with the Bash acq:
+
+- OpenCode is not pointed at USAi yet. The bundled `opencode` kit's startup
+  renderer reads the provider-input generation at `ACQ_PROVIDER_INPUT_ROOT`; the
+  Python acq does not prepare or mount it, so the renderer reports `not-ready`
+  and leaves `opencode.jsonc` alone (the same gap as on msb).
+- `acq run NAME` re-attaches without the sbx heal. Bash re-runs
+  `acq_backend_ensure_kits_applied` on every re-attach; the Python acq runs the
+  ported heal only for `acq kit update`.
+- Kit-delivered `~/.rc.d/*.sh` snippets are not sourced at login: the post-create
+  bridge Bash writes (`_acq_sbx_ensure_rc_bridge`) is not ported.
+- A kit ref that would have to be fetched (an opt-in catalog kit, a remote or
+  local extra, an unbundled `--kit` ref or provider kit) is refused before create
+  with `unsupported_capability`, as on msb.
+
+### Root Cause
+
+These pieces belong to other parts of the port (provider inputs, re-attach
+healing, the login-profile bridge, a SHA-verified kit fetch). The Python acq
+passes sbx only local, translated kit directories, so it does not need the
+`kit.allowedSources` update Bash makes before create.
+
+### Fix
+
+Use the Bash acq (`ACQ_IMPL=bash`) where any of these matters.
+
+### Prevention / Status
+
+Port provider-input projection, the re-attach heal and the rc bridge with the
+matching msb work, then re-verify live on a host with sbx 0.51 or later: the
+guest has the kit files, the Zscaler CA and OpenCode configured for USAi, the
+startup barrier is reached, and `acq kit update` reports the recreate notice.
+
+---
+
 ## Contributing
 
 When you discover a new failure mode:
