@@ -87,7 +87,7 @@ jobs:
             'py-acq/src' \
             'py-acq/tests' \
             'py-acq/pyproject.toml' \
-            'py-acq/requirements-dev.txt' \
+            'py-acq/requirements-quality.txt' \
             'scripts/stage-windows-runtime' \
             'scripts/test-acq-lib.sh' \
             'test/bats/06-windows-install.bats' \
@@ -153,12 +153,15 @@ jobs:
           command -v python3
           python3 -c 'import sys; assert sys.version_info[:2] == (3, 12), sys.version'
 
-      # acq-py has no runtime dependencies (ADR-0042m); pytest is the pinned dev
-      # dependency, as in python-vectors.yml.
-      - name: Install acq-py and test dependencies
+      # Only the hash-locked test tools (ADR-0049m): pytest, with colorama for
+      # win32, from wheels only. acq-py itself is not installed: pytest imports it
+      # from py-acq/src through the pyproject `pythonpath`, the tests' child
+      # processes get the same PYTHONPATH from conftest.py, and acq.ps1 sets
+      # PYTHONPATH to py-acq\src. That also avoids building a wheel with the
+      # unpinned setuptools build dependency.
+      - name: Install pinned test tools
         run: |
-          python -m pip install ./py-acq
-          python -m pip install -r py-acq/requirements-dev.txt
+          python -m pip install --require-hashes --no-deps --only-binary :all: -r py-acq/requirements-quality.txt
 
       - name: pytest (py-acq, Python 3.12)
         run: python -m pytest py-acq/tests -q

@@ -3,7 +3,7 @@
 # runtime dependencies (ADR-0042m); nothing here ships with it. Policy: ADR-0049m.
 #
 # Exact pins with hashes, transitive dependencies included, so CI installs with
-#   python -m pip install --require-hashes --no-deps -r requirements-quality.txt
+#   python -m pip install --require-hashes --no-deps --only-binary :all: -r requirements-quality.txt
 # pytest matches the pin in requirements-dev.txt and pyproject.toml.
 #
 # Regenerate after editing the top-level pins (bandit, mypy, pytest, pytest-cov,

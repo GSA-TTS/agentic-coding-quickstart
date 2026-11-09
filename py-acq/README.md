@@ -220,7 +220,7 @@ locally, use a throwaway virtual environment and run the commands from
 `py-acq/`:
 
 ```sh
-python -m pip install --require-hashes --no-deps -r requirements-quality.txt
+python -m pip install --require-hashes --no-deps --only-binary :all: -r requirements-quality.txt
 python -m ruff check src
 python -m mypy
 python -m bandit -c pyproject.toml -r src

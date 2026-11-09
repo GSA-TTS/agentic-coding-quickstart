@@ -51,9 +51,11 @@ jobs:
           python-version: '3.12'
 
       # --no-deps with --require-hashes: the file lists every transitive
-      # dependency, so pip resolves nothing on its own.
+      # dependency, so pip resolves nothing on its own. --only-binary: wheels
+      # only, so no sdist build step runs code at install time.
       - name: Install pinned quality tools
-        run: python -m pip install --require-hashes --no-deps -r requirements-quality.txt
+        run: |
+          python -m pip install --require-hashes --no-deps --only-binary :all: -r requirements-quality.txt
 
       - name: ruff
         run: python -m ruff check --no-cache --output-format=github src

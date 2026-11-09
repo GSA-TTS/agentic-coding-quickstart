@@ -50,9 +50,10 @@ environment.
 
 **Pinning.** `py-acq/requirements-quality.txt` pins every package exactly,
 transitive dependencies included, with SHA-256 hashes for each distribution.
-CI installs it with `pip install --require-hashes --no-deps`, so pip resolves
-nothing by itself and a substituted artifact fails the install. pytest's pin
-matches `requirements-dev.txt` and `pyproject.toml`.
+CI installs it with `pip install --require-hashes --no-deps --only-binary :all:`,
+so pip resolves nothing by itself, a substituted artifact fails the install, and
+no source distribution is built. The Windows job installs the same file to get
+pytest. pytest's pin matches `requirements-dev.txt` and `pyproject.toml`.
 
 **Cooldown.** A version must have been on PyPI for at least seven days before
 it is adopted. This matches the cooldown `dependabot.yml` already applies to
