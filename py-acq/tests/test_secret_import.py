@@ -83,7 +83,7 @@ def test_dry_run_writes_nothing(monkeypatch, capsys):
     out, err = capsys.readouterr()
     assert rc == 0
     assert out == "secret import done: 1 imported, 0 skipped\n"
-    assert "would import 'usai' from $USAI_API_KEY (…9876) into global." in err
+    assert "would import 'usai' from $USAI_API_KEY (...9876) into global." in err
     assert "dry-value" not in out + err  # only the masked last-4 preview
     assert not _store().exists()
 
@@ -107,7 +107,7 @@ def test_interactive_prompt_on_a_tty(monkeypatch, capsys):
     monkeypatch.setattr(sys, "stdin", _Tty("n\n"))
     rc = cli.main(["secret", "import"])
     err = capsys.readouterr().err
-    assert rc == 0 and "import usai from $USAI_API_KEY (…ABCD) into global? [y/N]" in err
+    assert rc == 0 and "import usai from $USAI_API_KEY (...ABCD) into global? [y/N]" in err
     assert not _store().exists()
     monkeypatch.setattr(sys, "stdin", _Tty("y\n"))
     assert cli.main(["secret", "import"]) == 0

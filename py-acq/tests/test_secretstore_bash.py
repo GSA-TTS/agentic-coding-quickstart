@@ -26,13 +26,40 @@ from pathlib import Path
 import pytest
 
 from acq_py import secretstore
-from secret_fakes import POWERSHELL, SECRET_TOOL, SECURITY, apply_env, fake_env, logged_argv, plant, prepend_path
+from secret_fakes import (
+    POWERSHELL,
+    SECRET_TOOL,
+    SECURITY,
+    apply_env,
+    fake_env,
+    logged_argv,
+    plant,
+    prepend_path,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 STORE_SH = REPO_ROOT / "acq.backends" / "secret-store.sh"
-BASH = shutil.which("bash")
+WINDOWS = sys.platform == "win32"
 
-pytestmark = pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="needs a POSIX bash")
+
+def _find_bash() -> str | None:
+    """POSIX bash, or on Windows Git Bash next to git.exe (the bash the Bash acq
+    supports there); never the System32 WSL launcher, which is a different OS."""
+    if not WINDOWS:
+        return shutil.which("bash")
+    git = shutil.which("git")
+    if git is None:
+        return None
+    root = Path(git).resolve().parent.parent  # <Git>\cmd\git.exe -> <Git>
+    candidate = root / "bin" / "bash.exe"
+    return str(candidate) if candidate.is_file() else None
+
+
+BASH = _find_bash()
+
+pytestmark = pytest.mark.skipif(BASH is None, reason="needs bash (Git Bash on Windows)")
+# The keychain fakes are POSIX scripts with a shebang; Windows cannot exec them.
+posix_fakes = pytest.mark.skipif(WINDOWS, reason="the fake keychain tools are POSIX scripts")
 
 # Bash pins its backend the way its own bats suite does: ACQ_SECRET_STORE_DIR
 # forces `file` at source time, so a keychain test unsets the force flag and
@@ -48,12 +75,12 @@ _PIN = {
 def _bash(backend: str, script: str, **env: str) -> str:
     """Run ``script`` with secret-store.sh sourced; return stdout. Values reach
     Bash only through the environment, never its argv."""
-    full = f'. "{STORE_SH}"\n{_PIN[backend]}\n{script}'
+    full = f'. "{STORE_SH.as_posix()}"\n{_PIN[backend]}\n{script}'
     proc = subprocess.run(
         [BASH, "-c", full],
         env={**os.environ, **env},
         capture_output=True,
-        text=True,
+        encoding="utf-8",  # Bash emits UTF-8; Windows' default would be the ANSI code page
         timeout=60,
         check=False,
     )
@@ -67,7 +94,7 @@ def _store_dir() -> Path:
 
 def _snapshot(root: Path) -> dict[str, bytes]:
     return {
-        str(p.relative_to(root)): p.read_bytes()
+        p.relative_to(root).as_posix(): p.read_bytes()
         for p in sorted(root.rglob("*"))
         if p.is_file() and not p.name.endswith(".log")
     }
@@ -153,6 +180,7 @@ def test_roundtrip_file_backend(monkeypatch):
     assert f"{_store_dir().name}/meta/acq.gitlab" in bash_written
 
 
+@posix_fakes
 def test_roundtrip_keychain_linux(monkeypatch, tmp_path):
     env = fake_env(_store_dir().parent)
     apply_env(monkeypatch, env)
@@ -167,6 +195,7 @@ def test_roundtrip_keychain_linux(monkeypatch, tmp_path):
     assert all(v not in argv for v in VALUES.values())
 
 
+@posix_fakes
 def test_roundtrip_keychain_macos(monkeypatch, tmp_path):
     env = fake_env(_store_dir().parent)
     apply_env(monkeypatch, env)
@@ -179,6 +208,7 @@ def test_roundtrip_keychain_macos(monkeypatch, tmp_path):
     assert all(v not in argv for v in VALUES.values())
 
 
+@posix_fakes
 def test_roundtrip_keychain_windows_envelope(monkeypatch, tmp_path):
     env = fake_env(_store_dir().parent)
     apply_env(monkeypatch, env)
@@ -193,6 +223,7 @@ def test_roundtrip_keychain_windows_envelope(monkeypatch, tmp_path):
     assert all(v not in argv for v in VALUES.values())
 
 
+@posix_fakes
 def test_windows_legacy_migration_crosses_implementations(monkeypatch, tmp_path):
     """A plaintext value the Bash file backend left behind is read by Python's
     DPAPI backend and re-encrypted; Bash's DPAPI backend then reads the envelope."""
@@ -275,6 +306,11 @@ def _run_import(cmd: list[str], args: str, env: dict[str, str]) -> subprocess.Co
         ("--bogus", {"USAI_API_KEY": "usai-1"}, {}, {}),
     ],
 )
+@pytest.mark.skipif(
+    WINDOWS,
+    reason="on Windows the Python acq stores DPAPI envelopes even under ACQ_SECRET_STORE_DIR "
+    "while Bash writes plaintext there, so the stores cannot be byte-compared",
+)
 def test_secret_import_matches_bash(tmp_path, args, tokens, seed, expected):
     fake_bin = tmp_path / "fake-bin"
     fake_bin.mkdir()
@@ -298,3 +334,20 @@ def test_secret_import_matches_bash(tmp_path, args, tokens, seed, expected):
     if procs["bash"].returncode != 0:
         # Both refuse the flag as a usage error, never for a missing backend.
         assert "unknown flag" in procs["bash"].stderr and procs["python"].returncode == 2, diag
+
+
+@pytest.mark.skipif(not WINDOWS, reason="real Windows DPAPI")
+def test_real_dpapi_roundtrip_with_git_bash(monkeypatch):
+    """On a Windows host, the Python store and the Bash store under Git Bash
+    read each other's real DPAPI envelopes (CurrentUser scope). Only the
+    throwaway ACQ_SECRET_STORE_DIR is written."""
+    monkeypatch.setattr(secretstore, "IS_WINDOWS", True)
+    assert secretstore.backend_name() == "keychain-windows"
+    _bash("keychain-windows", 'printf "%s\\n" "$V" | acq_secret_store "$(_acq_secret_key usai)"', V="bash-dpapi-value")
+    raw = (_store_dir() / "acq.usai").read_bytes()
+    assert raw.startswith(b"acq-dpapi-v1") and b"bash-dpapi-value" not in raw
+    assert secretstore.resolve("usai") == "bash-dpapi-value"
+    secretstore.set_secret("github", "global", "python-dpapi-value")
+    raw = (_store_dir() / "acq.global.github").read_bytes()
+    assert raw.startswith(b"acq-dpapi-v1\n") and b"python-dpapi-value" not in raw
+    assert _bash("keychain-windows", "acq_secret_resolve github global") == "python-dpapi-value"

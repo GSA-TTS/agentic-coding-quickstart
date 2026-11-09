@@ -20,7 +20,16 @@ import pytest
 
 from acq_py import secretstore
 from acq_py.secretstore import GLOBAL, Scope, SecretStoreError
-from secret_fakes import POWERSHELL, SECRET_TOOL, SECURITY, apply_env, fake_env, logged_argv, plant, prepend_path
+from secret_fakes import (
+    POWERSHELL,
+    SECRET_TOOL,
+    SECURITY,
+    apply_env,
+    fake_env,
+    logged_argv,
+    plant,
+    prepend_path,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 POSIX = os.name == "posix"
@@ -332,7 +341,7 @@ def dpapi_seam(monkeypatch):
 def test_windows_envelope_roundtrip(dpapi_seam):
     secretstore.set_secret("usai", None, "WIN-VALUE")
     raw = (_store_dir() / "acq.usai").read_bytes()
-    assert raw == b"acq-dpapi-v1\n" + "EULAV-NIW".encode().hex().encode()
+    assert raw == b"acq-dpapi-v1\n" + b"EULAV-NIW".hex().encode()
     assert b"WIN-VALUE" not in raw
     assert secretstore.resolve("usai") == "WIN-VALUE"
     assert secretstore.list_keys() == ["acq.usai"]
@@ -378,7 +387,7 @@ def test_windows_migration_never_clobbers_a_concurrent_write(dpapi_seam, monkeyp
     real_encrypt = secretstore.dpapi_encrypt
 
     def racing_encrypt(plaintext):
-        path.write_bytes(b"acq-dpapi-v1\n" + "WEN".encode().hex().encode())  # a concurrent set
+        path.write_bytes(b"acq-dpapi-v1\n" + b"WEN".hex().encode())  # a concurrent set
         return real_encrypt(plaintext)
 
     monkeypatch.setattr(secretstore, "dpapi_encrypt", racing_encrypt)

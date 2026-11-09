@@ -409,8 +409,9 @@ def _parse_import(parsed) -> tuple[_ImportArgs, str | None]:
 
 def _last4(value: str) -> str:
     """The masked preview Bash shows in prompts: the last four characters, or
-    all stars for a short value."""
-    return "…" + ("*" * len(value) if len(value) <= 4 else value[-4:])
+    all stars for a short value. ASCII ``...`` stands in for Bash's ellipsis, so
+    the line survives a Windows console or pipe's legacy code page."""
+    return "..." + ("*" * len(value) if len(value) <= 4 else value[-4:])
 
 
 def _confirm(svc: str, envvar: str, scope: secretstore.Scope, exists: bool, preview: str, say) -> str | None:
@@ -442,7 +443,7 @@ def _import_one(svc: str, envvar: str, opts: _ImportArgs, scope: secretstore.Sco
     value = os.environ.get(envvar, "")
     problem = secretstore.value_problem(value)
     if problem is not None:
-        say(f"acq: refusing '{svc}' — ${envvar}: {problem}. Set a single-line value and retry.")
+        say(f"acq: refusing '{svc}': ${envvar}: {problem}. Set a single-line value and retry.")
         return {**entry, "outcome": "refused", "reason": "unstorable"}
     exists = secretstore.exists(svc, scope.sandbox)
     entry["existed"] = exists
@@ -492,7 +493,7 @@ def run_secret_import(parsed, emit_json: bool) -> int:
         if not emit_json:
             print(line, file=sys.stderr)
 
-    say(f"acq: scanning host environment for known service tokens (scope: {scope.describe()})…")
+    say(f"acq: scanning host environment for known service tokens (scope: {scope.describe()})...")
     if opts.dry_run:
         say("acq: --dry-run: no values will be written.")
     services = [opts.service] if opts.service else _importable_services()

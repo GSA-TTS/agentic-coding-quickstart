@@ -566,15 +566,15 @@ def test_secret_typed_at_a_terminal_is_not_echoed(tmp_path):
 # Review follow-ups: undecodable input, rm ordering, Git Bash/mintty.
 # ---------------------------------------------------------------------------
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX locales")
-@pytest.mark.parametrize("locale", ["C.UTF-8", "C"])
+@pytest.mark.parametrize("locale", ["C.UTF-8", "C", None])
 def test_non_utf8_secret_is_refused_without_a_traceback_or_its_bytes(tmp_path, locale):
     import os
     import subprocess
 
     env = dict(os.environ, ACQ_SBX_BIN="__stub__", ACQ_SBX_VERSION="0.39.0", ACQ_SBX_INSTALLED="1",
-               ACQ_MSB_INSTALLED="0", ACQ_STATE_DIR=str(tmp_path / "state"), SBX_HOME=str(tmp_path / "sbx"),
-               LC_ALL=locale, LANG=locale)
+               ACQ_MSB_INSTALLED="0", ACQ_STATE_DIR=str(tmp_path / "state"), SBX_HOME=str(tmp_path / "sbx"))
+    if locale is not None:  # POSIX locales; None is the host default (and Windows)
+        env.update(LC_ALL=locale, LANG=locale)
     env.pop("PYTHONUTF8", None)
     env.pop("PYTHONIOENCODING", None)
     proc = subprocess.run(
