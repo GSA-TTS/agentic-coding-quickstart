@@ -111,7 +111,9 @@ def run_secret_set(parsed, emit_json: bool, backend: str) -> int:
     preflight, so a refusal never leaves a half-written entry. The value goes
     to the acq store, the endpoint mapping to its sidecar, and then to the
     backend's feed on the child's stdin. The success envelope carries only
-    scope/service/value_state.
+    scope/scope_kind/service/value_state: ``scope_kind`` (``global`` or
+    ``sandbox``) keeps a sandbox named ``global`` apart from the global scope,
+    which ``scope`` alone reports the same way.
     """
     command = "secret set"
     tokens, hosts, env_flag, flag_error = common._split_host_env(list(parsed.args))
@@ -299,7 +301,7 @@ def _print_secret_ls_human(data: dict) -> None:
 
 
 def run_secret_ls(parsed, emit_json: bool, backend: str) -> int:
-    """``acq secret ls [(-g | SANDBOX)]`` — scope/service/value_state, never a value.
+    """``acq secret ls [(-g | SANDBOX)]`` — scope/scope_kind/service/value_state, never a value.
 
     An unreadable or unparseable listing fails closed with ``secret_unreadable``
     (ADR-0040m) rather than being reported as empty. A backend whose capability
