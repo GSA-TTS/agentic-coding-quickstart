@@ -328,6 +328,41 @@ def test_teardown_removes_what_the_run_may_have_created_even_when_create_fails(t
     assert raw.removed == ["sbx-cs-ours"]
 
 
+@pytest.mark.parametrize("backend", ["msb", "sbx"])
+def test_a_stop_signal_during_teardown_does_not_cut_the_removals_short(tmp_path, backend):
+    # The harness's timeout SIGTERM, a second Ctrl+C or a SIGBREAK lands while the
+    # first removal runs: every removal still runs, and the handlers come back after.
+    import signal
+
+    c, fake, raw = cell(tmp_path, backend)
+    stops = [getattr(signal, n) for n in ("SIGINT", "SIGTERM", "SIGBREAK") if hasattr(signal, n)]
+    saved = {sig: signal.getsignal(sig) for sig in stops}
+
+    def signalled(argv, **kwargs):
+        if argv[2:3] == ["rm"]:
+            for sig in stops:
+                signal.raise_signal(sig)
+        return fake(argv, **kwargs)
+
+    c.acq = signalled
+    try:
+        signal.signal(signal.SIGTERM, qbc._terminate)
+        if hasattr(signal, "SIGBREAK"):
+            signal.signal(signal.SIGBREAK, qbc._terminate)
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        c.teardown()
+        assert signal.getsignal(signal.SIGTERM) is qbc._terminate
+        assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+    finally:
+        for sig, handler in saved.items():
+            signal.signal(sig, handler)
+    assert fake.calls == teardown_calls(c, fake)
+    if backend == "sbx":
+        assert raw.removed == ["sbx-cs-ours"]
+    else:
+        assert raw.msb_removed == [c.names.canary_sandbox]
+
+
 def test_a_spent_deadline_stops_the_run_blocks_it_and_still_tears_down(tmp_path, capsys):
     import time
 
@@ -576,3 +611,54 @@ def test_run_process_kills_a_group_that_ignores_sigterm_after_the_grace(tmp_path
     started = time.monotonic()
     proc = qbc.run_process(["/bin/sh", "-c", "trap '' TERM; sleep 60"], env=dict(os.environ), timeout=0.5, grace=0.5)
     assert proc is None and time.monotonic() - started < 30
+
+
+def test_run_process_honours_its_timeout_while_waiting_in_slices(monkeypatch):
+    # Each wait returns within WAIT_SLICE (so a SIGBREAK handler runs promptly on
+    # Windows), yet the step as a whole still gets exactly its timeout.
+    import time
+
+    waits = []
+
+    class Spy(subprocess.Popen):
+        def communicate(self, input=None, timeout=None):
+            waits.append(timeout)
+            return super().communicate(input, timeout=timeout)
+
+    monkeypatch.setattr(qbc.subprocess, "Popen", Spy)
+    started = time.monotonic()
+    proc = qbc.run_process([sys.executable, "-c", "import time; time.sleep(30)"], env=dict(os.environ),
+                           timeout=2.5, grace=1.0)
+    elapsed = time.monotonic() - started
+    assert proc is None
+    assert 2.5 <= elapsed < 2.5 + 1.0 + 3.0  # the timeout, then at most the grace and a reap
+    assert len(waits) >= 3 and all(w is not None and w <= qbc.WAIT_SLICE for w in waits)
+
+
+def test_run_process_captures_all_output_of_a_child_slower_than_one_slice():
+    script = (
+        "import sys, time\n"
+        "data = sys.stdin.read()\n"
+        "for i in range(4):\n"
+        "    print(f'line {i} ' + 'x' * 50000, flush=True)\n"
+        "    print(f'err {i}', file=sys.stderr, flush=True)\n"
+        "    time.sleep(0.6)\n"
+        "print('got ' + data.strip(), flush=True)\n"
+    )
+    proc = qbc.run_process([sys.executable, "-c", script], env=dict(os.environ), stdin="value\n", timeout=30.0)
+    assert proc is not None and proc.returncode == 0
+    assert proc.stdout.splitlines() == [f"line {i} " + "x" * 50000 for i in range(4)] + ["got value"]
+    assert proc.stderr.splitlines() == [f"err {i}" for i in range(4)]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX sessions")
+def test_run_process_does_not_wait_on_a_process_that_left_the_group():
+    # ``setsid`` puts the sleeper outside the killed group, still holding the pipes.
+    import shutil
+    import time
+
+    if shutil.which("setsid") is None:
+        pytest.skip("setsid is not available")
+    started = time.monotonic()
+    proc = qbc.run_process(["sh", "-c", "setsid sleep 8 & sleep 30"], env=dict(os.environ), timeout=1, grace=1)
+    assert proc is None and time.monotonic() - started < 6

@@ -52,20 +52,42 @@ ATTEMPT_ENV = "ACQ_QUALIFY_ATTEMPT"
 # its own and tears down while the harness is still waiting.
 TERMINATE_GRACE = 300.0
 DEADLINE_ENV = "ACQ_QUALIFY_DEADLINE"
+# After the command is killed, how long to wait for its pipes to close: a process
+# it started and that outlived it can hold them open indefinitely.
+REAP_TIMEOUT = 5.0
 
 
 def _grace(timeout: float) -> float:
     return min(TERMINATE_GRACE, timeout / 4)
 
 
-def _stop(proc: subprocess.Popen, grace: float) -> None:
-    """Ask ``proc`` to stop, wait ``grace`` seconds for it, then kill it."""
+def _stop(proc: subprocess.Popen, grace: float, *, ask: bool = True) -> None:
+    """Ask ``proc`` to stop (unless ``ask`` is false), wait ``grace`` seconds, then kill it."""
     try:
-        proc.send_signal(signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGTERM)
+        if ask:
+            proc.send_signal(signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGTERM)
         proc.communicate(timeout=grace)
     except (subprocess.TimeoutExpired, OSError):
         proc.kill()
-        proc.communicate()
+        _reap(proc, min(REAP_TIMEOUT, grace))
+
+
+def _reap(proc: subprocess.Popen, timeout: float) -> None:
+    """Wait at most ``timeout`` seconds for a killed ``proc``, then close its pipes."""
+    try:
+        proc.communicate(timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        pass
+    for pipe in (proc.stdout, proc.stderr):
+        if pipe is not None:
+            try:
+                pipe.close()
+            except OSError:
+                pass
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def _now() -> str:
@@ -123,9 +145,11 @@ def _single_run(
             Verdict.BLOCKED, environment, tuple(command), "", "command timed out", _now()
         )
     except KeyboardInterrupt:
-        # In its own process group (Windows) the command never sees the operator's
-        # Ctrl+C, so pass the stop on and let it tear down before giving up.
-        _stop(proc, grace)
+        # On Windows the command runs in its own process group and never sees the
+        # operator's Ctrl+C, so pass the stop on. On POSIX it shares the terminal's
+        # process group and already has the SIGINT; a second signal would interrupt
+        # its orderly stop. Either way, let it tear down before giving up.
+        _stop(proc, grace, ask=os.name == "nt")
         raise
 
     verdict = classify_exit(proc.returncode)

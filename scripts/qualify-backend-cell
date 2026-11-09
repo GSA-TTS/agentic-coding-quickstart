@@ -153,6 +153,12 @@ CANARY_PINNED = ("QUALIFY_IMAGE", "EXPECT_SHA", "QUALIFY_SANDBOX_NAME")
 # The canary removes its own sandbox (a 60 s msb call) when stopped.
 STOP_GRACE = 30.0
 CANARY_GRACE = 90.0
+# After a group is killed, how long to wait for its pipes to close. A process that
+# left the group (``setsid``, a daemon) can hold them open indefinitely.
+REAP_TIMEOUT = 5.0
+# A wait on a subprocess returns at least this often, so the oracle's own signal
+# handlers run promptly (a Windows wait is not interrupted by SIGBREAK).
+WAIT_SLICE = 1.0
 
 # acq's own configuration and state locations, each redirected into the private tree.
 ISOLATED_DIRS = (
@@ -279,6 +285,27 @@ def _signal_group(proc: subprocess.Popen, kill: bool) -> None:
         pass
 
 
+def _reap(proc: subprocess.Popen, timeout: float) -> None:
+    """Wait at most ``timeout`` seconds for a killed ``proc``, then close its pipes.
+
+    Bounded because a process outside the killed group may still hold the pipes.
+    """
+    try:
+        proc.communicate(timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        pass
+    for pipe in (proc.stdin, proc.stdout, proc.stderr):
+        if pipe is not None:
+            try:
+                pipe.close()
+            except OSError:
+                pass
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def stop_process(proc: subprocess.Popen, grace: float) -> None:
     """SIGTERM (CTRL_BREAK on Windows) to the group, ``grace`` seconds, then kill the group."""
     try:
@@ -286,14 +313,33 @@ def stop_process(proc: subprocess.Popen, grace: float) -> None:
         proc.communicate(timeout=grace)
     except (subprocess.TimeoutExpired, OSError):
         _signal_group(proc, kill=True)
-        proc.communicate()
+        _reap(proc, min(REAP_TIMEOUT, grace))
+
+
+def _communicate(proc: subprocess.Popen, stdin: str | None, timeout: float):
+    """``proc.communicate(stdin, timeout=timeout)``, waiting in ``WAIT_SLICE`` slices.
+
+    Retrying after ``TimeoutExpired`` loses no output (documented ``subprocess``
+    behaviour). ``stdin`` goes only to the first call: the input is a short
+    credential value, which fits the pipe buffer and is written whole at once.
+    """
+    end = time.monotonic() + timeout
+    while True:
+        remaining = end - time.monotonic()
+        try:
+            return proc.communicate(stdin, timeout=max(0.0, min(remaining, WAIT_SLICE)))
+        except subprocess.TimeoutExpired:
+            if remaining <= WAIT_SLICE:
+                raise
+            stdin = None
 
 
 def run_process(argv: list[str], *, env: dict[str, str], stdin: str | None = None,
                 timeout: float = STEP_TIMEOUT, cwd: str | None = None, grace: float = STOP_GRACE):
     """Run ``argv`` capturing its output; ``None`` on a timeout or if it cannot start.
 
-    It runs in its own process group. On a timeout, or when the oracle itself is
+    It runs in its own process group, and the wait on it is sliced so a stop
+    signal to the oracle is handled within ``WAIT_SLICE`` seconds. On a timeout, or when the oracle itself is
     interrupted (SIGTERM, Ctrl+C) while waiting, the group is stopped with
     :func:`stop_process`, so a backend command it started (an ``msb create``, the
     canary's sandbox) is not left running and its own cleanup gets to run; a plain
@@ -308,7 +354,7 @@ def run_process(argv: list[str], *, env: dict[str, str], stdin: str | None = Non
     except OSError:
         return None
     try:
-        out, err = proc.communicate(stdin, timeout=timeout)
+        out, err = _communicate(proc, stdin, timeout)
     except subprocess.TimeoutExpired:
         stop_process(proc, grace)
         return None
@@ -615,7 +661,19 @@ class Cell:
         Every identifier is nonce-scoped, so each removal is attempted whether or
         not this run saw the thing created: an abort can land between a backend
         creating it and acq reporting that it did.
+
+        A stop signal (the harness's timeout SIGTERM, a second Ctrl+C, SIGBREAK)
+        is swallowed meanwhile, so it cannot cut the removals short. Teardown is
+        bounded by its per-step timeouts, and the harness still kills the oracle
+        once its grace period runs out.
         """
+        previous = _ignore_stop_signals()
+        try:
+            self._remove_everything()
+        finally:
+            _restore_signals(previous)
+
+    def _remove_everything(self) -> None:
         n = self.names
         for argv in (self._b("rm", n.sandbox, "--json"),
                      self._b("secret", "rm", "-g", n.service, "--json"),
@@ -664,6 +722,38 @@ def _deadline(environ) -> float:
 
 def _terminate(signum, _frame):
     raise SystemExit(128 + signum)
+
+
+def _swallow(_signum, _frame) -> None:
+    """A no-op handler.
+
+    Used rather than ``SIG_IGN``: an ignored signal stays ignored across
+    ``exec`` on POSIX, so teardown's own subprocesses would then ignore the
+    SIGTERM :func:`stop_process` sends them. A caught one is reset in the child.
+    """
+
+
+def _stop_signals() -> list[int]:
+    return [getattr(signal, name) for name in ("SIGINT", "SIGTERM", "SIGBREAK") if hasattr(signal, name)]
+
+
+def _ignore_stop_signals() -> dict[int, object]:
+    """Swallow SIGINT, SIGTERM and (Windows) SIGBREAK; return the handlers to restore."""
+    previous = {}
+    for sig in _stop_signals():
+        try:
+            previous[sig] = signal.signal(sig, _swallow)
+        except (ValueError, OSError):  # not the main thread
+            pass
+    return previous
+
+
+def _restore_signals(previous: dict[int, object]) -> None:
+    for sig, handler in previous.items():
+        try:
+            signal.signal(sig, handler if handler is not None else signal.SIG_DFL)
+        except (ValueError, OSError, TypeError):
+            pass
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -492,24 +492,31 @@ def test_matrix_cell_state_applies_the_version_floors():
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
-def test_ctrl_c_on_the_harness_stops_the_command_before_giving_up(tmp_path, monkeypatch):
-    # On Windows the command runs in its own process group and never sees Ctrl+C, so
-    # the harness must pass the stop on. Simulated here with SIGALRM raising
-    # KeyboardInterrupt while the harness waits.
+def test_ctrl_c_on_the_harness_lets_the_command_tear_down_without_a_second_signal(tmp_path, monkeypatch):
+    # On POSIX the terminal's Ctrl+C reaches the harness and the command alike (one
+    # process group). The harness must not add a SIGTERM of its own, which would
+    # interrupt the command's orderly stop; it waits for the command to tear down.
+    # Simulated with SIGALRM: SIGINT to the command, KeyboardInterrupt in the harness.
     import signal
 
     from qualification import runner
 
     monkeypatch.setattr(runner, "_grace", lambda timeout: 10.0)
-    done = tmp_path / "tore-down"
+    log, ready = tmp_path / "signals", tmp_path / "pid"
     script = (
-        "import signal, sys, time\n"
-        f"def stop(*_):\n    open({str(done)!r}, 'w').write('yes')\n    sys.exit(143)\n"
-        "signal.signal(signal.SIGTERM, stop)\n"
-        "time.sleep(60)\n"
+        "import os, signal, sys, time\n"
+        f"def note(sig, _):\n    open({str(log)!r}, 'a').write(signal.Signals(sig).name + '\\n')\n"
+        "signal.signal(signal.SIGTERM, note)\n"
+        "signal.signal(signal.SIGINT, note)\n"
+        f"open({str(ready)!r}, 'w').write(str(os.getpid()))\n"
+        "end = time.monotonic() + 60\n"
+        f"while time.monotonic() < end and not os.path.exists({str(log)!r}):\n    time.sleep(0.05)\n"
+        "time.sleep(1.0)  # tearing down; a SIGTERM now would be logged\n"
+        "sys.exit(130)\n"
     )
 
     def interrupt(*_):
+        os.kill(int(ready.read_text()), signal.SIGINT)
         raise KeyboardInterrupt
 
     old = signal.signal(signal.SIGALRM, interrupt)
@@ -520,4 +527,41 @@ def test_ctrl_c_on_the_harness_stops_the_command_before_giving_up(tmp_path, monk
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, old)
-    assert done.read_text() == "yes"
+    assert log.read_text().splitlines() == ["SIGINT"]  # never a forwarded SIGTERM
+
+
+@pytest.mark.parametrize("platform", ["nt", "posix"])
+def test_ctrl_c_is_forwarded_to_the_command_only_on_windows(monkeypatch, platform):
+    from qualification import runner
+
+    seen = []
+
+    class Proc:
+        pid = 4242
+        returncode = None
+
+        def communicate(self, timeout=None):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(runner.subprocess, "Popen", lambda *a, **k: Proc())
+    monkeypatch.setattr(runner.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
+    monkeypatch.setattr(runner, "_stop", lambda proc, grace, ask=True: seen.append(ask))
+    monkeypatch.setattr(runner.os, "name", platform)
+    with pytest.raises(KeyboardInterrupt):
+        runner._single_run(["oracle"], make_env(), 1, timeout=60.0)
+    assert seen == [platform == "nt"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
+def test_a_killed_command_whose_pipes_outlive_it_does_not_hang_the_harness(monkeypatch):
+    import shutil
+    import time
+
+    from qualification import runner
+
+    if shutil.which("setsid") is None:
+        pytest.skip("setsid is not available")
+    monkeypatch.setattr(runner, "_grace", lambda timeout: 1.0)
+    started = time.monotonic()
+    t = runner._single_run(["sh", "-c", "setsid sleep 8 & exec sleep 30"], make_env(), 1, timeout=1.0)
+    assert t.verdict is Verdict.BLOCKED and time.monotonic() - started < 6
