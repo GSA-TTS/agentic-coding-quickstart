@@ -2926,11 +2926,18 @@ _acq_kit_source_revoke_in_backend() {
 # Best-effort and OFFLINE-SAFE: a failed fetch yields nothing (callers say so)
 # rather than failing the whole listing or a create.
 acq_kit_source_provider_kits() {
-  local repo="${1:-}" ref="${2:-}" dir="${3:-}" cache seed root kit manifest
+  local repo="${1:-}" ref="${2:-}" dir="${3:-}" cache seed root kit manifest namespace
   [ -n "$repo" ] && [ -n "$ref" ] && [ -n "$dir" ] || return 0
   command -v kit_translate_fetch >/dev/null 2>&1 || return 0
   seed=$(printf '%s@%s' "$repo" "$ref" | cksum 2>/dev/null | cut -d' ' -f1)
-  cache="${XDG_CACHE_HOME:-${HOME:-}/.cache}/acq/kit-sources/${seed:-0}"
+  # Historical seed directories may contain Git metadata. Preserve them rather
+  # than adopting or deleting repositories while upgrading discovery payloads.
+  namespace="${XDG_CACHE_HOME:-${HOME:-}/.cache}/acq/kit-sources/payload-v2"
+  if [ -L "$namespace" ]; then
+    acq_debug 'kit-source: refusing a symlink kit cache namespace'
+    return 0
+  fi
+  cache="${namespace}/${seed:-0}"
   root=$(kit_translate_fetch "git+https://${repo}.git#ref=${ref}&dir=${dir}" "$cache" 2>/dev/null) || {
     acq_debug "kit-source: could not fetch $repo@$ref for discovery"
     return 0
