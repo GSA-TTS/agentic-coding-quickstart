@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 import time
 
 from .. import envelope, errors, kits, lock, msb, sbx, security, state
@@ -530,7 +529,7 @@ def run_recreate(parsed, emit_json: bool, backend: str) -> int:
     if exit_code is not None:
         return exit_code
     if not parsed.yes:
-        if emit_json or not sys.stdin.isatty():
+        if emit_json or not common._stdin_is_terminal():
             return common._operational_failure(
                 "create",
                 errors.CONSENT_REQUIRED,

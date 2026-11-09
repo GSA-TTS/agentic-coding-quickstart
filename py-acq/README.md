@@ -199,6 +199,47 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   `exec`, `attach`, `shell`, `cp`, and passthrough preserve the child/backend
   exit status rather than acq's own `0`/`1`.
 
+## configure (ADR-0031)
+
+`acq-py configure` ports the Bash `acq configure`. It first prints the current
+settings (to stderr, in the Bash layout). At a terminal it then asks the Bash
+questions with the Bash defaults (opt-in kits, the GitHub-token scoping default,
+the provider kit) and writes the same three `config.yaml` keys through
+`acq_py/config.py`: `extra_kits`, `scope_github_token` and `provider_kit`. Other
+keys, including unknown ones, are kept. Without a terminal (or with
+`ACQ_NO_PROMPT`, `ACQ_NO_PROGRESS` or `--json`) nothing is written; `--json`
+lists each setting as `key`, `value`, `source` and `honoured_by_python`.
+
+**The three keys take effect only under the Bash acq for now.** The Python acq
+does not read `extra_kits`, `provider_kit` or `scope_github_token` yet, so both
+the report and `--json` (`"honoured_by_python": false`) say so.
+
+Deliberate differences from Bash:
+
+* **Schema marker.** A `config.yaml` that Python creates starts with `schema: 1`
+  (ADR-0041m); Bash's writer never adds it. An existing file is changed only in
+  the keys written, and only after the forward migration, which runs just before
+  the first write (so cancelling leaves a legacy file untouched) and refuses a
+  newer schema up front.
+* **Offline provider list.** The provider-kit picker offers the shipped default
+  and the provider kits Python already knows about (the control plane's, and any
+  a registered source is known to publish). It never fetches a kit source, so it
+  can list fewer kits than Bash, which fetches every trusted source.
+* **Layer reporting.** The report shows the value Python would use, with its
+  layer: `--backend` (flag), `ACQ_BACKEND`, `ACQ_EXTRA_KITS`, `ACQ_PROVIDER_KITS`
+  and `ACQ_PROVIDER_CREDENTIAL_BINDINGS` (env), the config, or the default. Bash
+  shows only `config.yaml`. Kit sources and provider-credential bindings come
+  from Python's own registries, and each binding carries its own layer. The
+  human report marks a flag or env value with `[from X]`; otherwise it matches
+  Bash line for line, plus a note about the keys above. Userinfo in a kit ref
+  (`https://user:token@host`) is shown as `***@host`.
+* **Stricter failures.** A `config.yaml` write that fails exits 1 (Bash ignores
+  it), a malformed `ACQ_PROVIDER_CREDENTIAL_BINDINGS` is `validation_failed`, and
+  an unknown `--backend` is a usage error. Ctrl-C exits 130; SIGTERM and SIGHUP
+  restore the terminal and exit 128 plus the signal number.
+* **Not ported.** The first-run offer and the create-time kit picker (accepted
+  gaps in ADR-0048m).
+
 ## State migration (ADR-0041m)
 
 acq owns migration of acq-hosted state records; backend-native state is never
