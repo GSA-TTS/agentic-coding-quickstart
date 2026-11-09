@@ -86,6 +86,20 @@ exit 1, the `unsupported_capability` code, and remediation.
 > store (`acq secret set NAME usai`) keeps it. After each `set-custom` acq
 > re-reads the listing and requires the entry to keep its placeholder; that
 > sbx does so is not yet verified live (KNOWN_FAILURE_MODES 57).
+>
+> One case does not refuse: when sbx is installed but not the active backend
+> and its secret list cannot be read (`sbx secret ls` fails, times out, or
+> returns something unreadable), the rotation still goes ahead on msb and reports sbx as not
+> re-fed (exit 1), as Bash rotates msb and fails only the sbx propagation; any
+> other refusal, and an unreadable list on the active backend, refuses the
+> rotation and names the backend. Each sbx call a rotation makes while it holds
+> the usai provider lock is bounded by `ACQ_ROTATE_TIMEOUT` (default 120 s, the
+> Bash adapter's `ROTATE_VALIDATE_TIMEOUT`); a call that times out counts as a
+> failure. Unlike Bash, which propagates only from msb to sbx and needs an
+> existing sbx entry, the Python acq also re-feeds msb after a rotation on sbx
+> (it always stores the key first) and, as the active backend, creates a
+> missing global sbx entry. A global sbx entry that took the new key is
+> reported as `global: updated` (or `created`) in that backend's result.
 
 The record is a declaration; conformance is proven, not trusted: each
 declared capability is asserted by a Tier-1 subprocess vector (working, or

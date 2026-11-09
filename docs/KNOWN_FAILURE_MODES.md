@@ -3816,8 +3816,9 @@ has not been run against a real sbx.
 ### Fix
 
 The Python acq does not trust it. After each `set-custom` it re-reads `sbx secret
-ls --json` and requires exactly one entry for that scope and env carrying the
-same placeholder. If sbx minted a new placeholder or a duplicate, the entry is
+ls --json` and requires exactly one entry for that scope, env and hosts carrying
+the same placeholder (a secret for the same env on other hosts is a different
+one). If sbx minted a new placeholder or a duplicate, the entry is
 reported as not re-fed and the command exits 1. To recover a sandbox left with a
 placeholder sbx no longer maps, use the ADR-0008 rebind or recreate it, then
 re-run the rotation.
