@@ -114,6 +114,55 @@ AGENT_KITS: dict[str, tuple[list[str], str]] = {
 AGENT_KIT_NAMES = tuple(AGENT_KITS)
 
 
+# ---------------------------------------------------------------------------
+# Kit network egress (ADR-0018, ADR-0030 "Egress and kit conflicts"). Each
+# built-in kit's ``caps.network.allow`` list, copied verbatim from its pinned
+# ``spec.yaml`` at ``KIT_NETWORK_ALLOW_REF``. acq never fetches a kit source
+# during ordinary operation (ADR-0042m offline), so the create-time egress
+# allowlist is data held here rather than read from a fetched kit. The msb
+# adapter translates these entries exactly as the Bash adapter's
+# ``_acq_msb_net_rules_into`` does.
+#
+# The ref is recorded separately from ``CONTROL_PLANE_REF`` on purpose: bumping
+# the control-plane pin without re-deriving this table makes the two differ, and
+# the msb adapter then refuses to create a sandbox instead of applying a stale
+# allowlist (fail closed).
+#
+# ``opencode`` here is the Python agent kit (the pinned ``nix profile install``
+# argv in ``AGENT_KITS``), which declares no egress of its own.
+# ---------------------------------------------------------------------------
+KIT_NETWORK_ALLOW_REF = "941a286f912b99475429c3c00db49a99af5b241e"
+KIT_NETWORK_ALLOW: dict[str, tuple[str, ...]] = {
+    "zscaler-ca-certificate": (),
+    "usai-provider": ("api.gsa.usai.gov",),
+    "agentic-coding-playbook": (
+        "api.github.com:443",
+        "codeload.github.com:443",
+        "github.com:443",
+    ),
+    "git-ssh-sign": (),
+    "opencode": (),
+}
+
+
+def egress_kit_names(agent_kit: str | None) -> list[str]:
+    """The kits whose network allowances make up a new sandbox's egress policy.
+
+    Mirrors the Bash kit list (``_acq_selected_support_kit_refs`` then the
+    agent kit), in the same order: CA trust, the provider kit(s), the playbook,
+    git signing, then the agent kit when one is selected. The built-in kits are
+    part of the policy even though this create path does not apply them yet:
+    egress is fixed when the sandbox is created, and both implementations should
+    produce the same policy for the same selection. Extra (team/personal) kits
+    are left out because this path does not apply them and cannot resolve them
+    without a network fetch. Leaving them out allows less, never more.
+    """
+    names = ["zscaler-ca-certificate", *provider_kits(), "agentic-coding-playbook", "git-ssh-sign"]
+    if agent_kit is not None:
+        names.append(agent_kit)
+    return names
+
+
 def agent_kit_for(agent: str) -> str | None:
     """Return the built-in agent-kit name for an agent, or ``None`` (no kit).
 
