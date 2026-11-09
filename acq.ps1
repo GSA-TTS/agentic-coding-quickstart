@@ -5,6 +5,11 @@
 
 $ErrorActionPreference = "Stop"
 
+# Programs started by acq never resolve from the current directory (normally the
+# untrusted workspace): cmd.exe, CreateProcess and Python's shutil.which honour
+# this for every child process.
+$env:NoDefaultCurrentDirectoryInExePath = "1"
+
 # ACQ_IMPL runtime switch — the coexistence seam (ADR-0047m). On Windows the Bash
 # `acq` dispatches via Git Bash; here the Python implementation runs natively:
 # the managed runtime `py-acq\runtime\python.exe -m acq_py`, else `python` on
@@ -16,8 +21,33 @@ if ($acqImpl -and $acqImpl -ne "bash") {
         [Console]::Error.WriteLine("acq: unsupported ACQ_IMPL '$acqImpl' (expected 'bash' or 'python')")
         exit 2
     }
+    # True when $Exe runs isolated and is Python 3.12+. Windows PowerShell 5.1
+    # turns a native program's stderr into a terminating error under
+    # $ErrorActionPreference = "Stop" (the Store alias stub writes to stderr),
+    # so the probe runs with a local "Continue" preference.
+    function Test-AcqPython {
+        param([Parameter(Mandatory = $true)][string]$Exe)
+        $ErrorActionPreference = "Continue"
+        # Clear any exit code left by the caller's previous command (acq.ps1 may
+        # run inside the user's own session), so a candidate that cannot start
+        # is never accepted on a stale 0.
+        $global:LASTEXITCODE = $null
+        try {
+            & $Exe -I -c "import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)" 2>$null | Out-Null
+        }
+        catch {
+            return $false
+        }
+        return ($LASTEXITCODE -eq 0)
+    }
     $acqImplRepoRoot = Split-Path -Parent $PSCommandPath
     $runtimePy = Join-Path $acqImplRepoRoot "py-acq\runtime\python.exe"
+    # An ACQ_RUNTIME override must be a drive-rooted or UNC path: a relative
+    # value would be resolved against the current directory (the workspace).
+    if ($env:ACQ_RUNTIME -and -not ($env:ACQ_RUNTIME -match '^[A-Za-z]:[\\/]' -or $env:ACQ_RUNTIME.StartsWith('\\'))) {
+        [Console]::Error.WriteLine("acq: ACQ_RUNTIME must be an absolute path to python.exe, got '$($env:ACQ_RUNTIME)'")
+        exit 1
+    }
     if ($env:ACQ_RUNTIME -and (Test-Path -LiteralPath $env:ACQ_RUNTIME -PathType Leaf)) {
         $acqPythonExe = $env:ACQ_RUNTIME
     }
@@ -25,18 +55,49 @@ if ($acqImpl -and $acqImpl -ne "bash") {
         $acqPythonExe = $runtimePy
     }
     else {
-        $pyCmd = Get-Command python -ErrorAction SilentlyContinue
+        # Search PATH ourselves, like acq_py.hostexec: consider python.exe only in
+        # drive-rooted or UNC entries, because a relative entry (even ".")
+        # resolves against the current directory, which is normally the
+        # workspace. Take the first candidate that passes the isolated 3.12+
+        # probe: that skips the Microsoft Store App Execution Alias stub (it
+        # exits 9009) and older interpreters, but keeps a real Store-installed
+        # Python, which is reached through the same kind of alias. The path is
+        # built as a string because Join-Path throws on a missing drive letter.
+        $pyCmd = $null
+        foreach ($entry in ($env:Path -split ';')) {
+            $dir = $entry.Trim().Trim('"')
+            if (-not ($dir -match '^[A-Za-z]:[\\/]' -or $dir.StartsWith('\\'))) { continue }
+            $candidate = $dir.TrimEnd('\', '/') + '\python.exe'
+            # Re-check after trimming: an entry of just "\\" would become the
+            # drive-relative "\python.exe".
+            if (-not ($candidate -match '^[A-Za-z]:[\\/]' -or $candidate.StartsWith('\\'))) { continue }
+            if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
+            if (Test-AcqPython -Exe $candidate) { $pyCmd = $candidate; break }
+        }
         if ($null -eq $pyCmd) {
-            [Console]::Error.WriteLine("acq: ACQ_IMPL=python but no Python interpreter was found")
+            [Console]::Error.WriteLine("acq: ACQ_IMPL=python but no Python 3.12+ was found on PATH. Install acq from a release (it bundles its own runtime), install Python 3.12+ from python.org with 'Add python.exe to PATH' checked, or set ACQ_RUNTIME to the full path of python.exe.")
             exit 1
         }
-        $acqPythonExe = $pyCmd.Source
+        $acqPythonExe = $pyCmd
     }
     $srcDir = Join-Path $acqImplRepoRoot "py-acq\src"
+    # acq is stdlib-only, so the user's PYTHONPATH is never inherited: an empty
+    # or relative entry would put the current directory back on sys.path.
     if (Test-Path -LiteralPath $srcDir -PathType Container) {
-        $env:PYTHONPATH = $srcDir + $(if ($env:PYTHONPATH) { ";$env:PYTHONPATH" } else { "" })
+        $env:PYTHONPATH = $srcDir
     }
-    & $acqPythonExe -m acq_py @args
+    else {
+        Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+    }
+    # -P keeps `python -m` from putting the current directory first on sys.path
+    # (a workspace json.py would otherwise run on the host); interpreters older
+    # than the required 3.12 are refused because they may not honour -P. The
+    # probe runs isolated and imports only the builtin sys module.
+    if (-not (Test-AcqPython -Exe $acqPythonExe)) {
+        [Console]::Error.WriteLine("acq: ACQ_IMPL=python needs Python 3.12 or newer; $acqPythonExe is not")
+        exit 1
+    }
+    & $acqPythonExe -P -m acq_py @args
     exit $LASTEXITCODE
 }
 

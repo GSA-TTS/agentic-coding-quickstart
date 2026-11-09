@@ -32,11 +32,10 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import subprocess
 from dataclasses import dataclass
 
-from . import errors
+from . import errors, hostexec
 
 # Version floors (ADR-0044m). Represented as (major, minor, patch) triples.
 SBX_MIN_VERSION = (0, 39, 0)
@@ -189,13 +188,13 @@ def _is_installed(spec: BackendSpec) -> bool:
         return override == "1"
     if _env(spec.name, "VERSION") is not None:
         return True
-    return shutil.which(spec.cli) is not None
+    return hostexec.which(spec.cli) is not None
 
 
 def _run_version_command(spec: BackendSpec) -> str | None:
     try:
         proc = subprocess.run(
-            [spec.cli, *spec.version_argv],
+            [*hostexec.command(spec.cli), *spec.version_argv],
             capture_output=True,
             text=True,
             timeout=5,

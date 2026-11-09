@@ -3329,7 +3329,7 @@ acq_provider_credential_merge_json() {
   [ -n "$base" ] && [ -n "$out" ] && [ -n "$python" ] || return 1
   overrides=$(acq_provider_credential_overrides) || return 1
   # shellcheck disable=SC2086  # validated entries; word splitting is the framing
-  "$python" - "$base" "$out" $overrides <<'PY'
+  "$python" -I - "$base" "$out" $overrides <<'PY'
 import json, os, sys
 
 base_path, out_path = sys.argv[1], sys.argv[2]
@@ -3642,7 +3642,7 @@ acq_provider_facts_json_fields() {
       4) models_url="$value" ;;
       5) api_protocol="$value" ;;
     esac
-  done < <("$python" - "$file" <<'PY'
+  done < <("$python" -I - "$file" <<'PY'
 import json, sys
 from urllib.parse import urlsplit
 
@@ -4236,7 +4236,7 @@ if actual != required:
     print("acq: provider-input validation requires PyYAML 6.0.3 and jsonschema 4.26.0; found " + ", ".join("%s=%s" % (package, actual[package] or "missing") for package in required), file=sys.stderr)
     print("     Run: scripts/setup-provider-input-validator --apply", file=sys.stderr)
     raise SystemExit(2)'
-  "$python" -c "$version_check" || return 2
+  "$python" -I -c "$version_check" || return 2
   printf '%s\n' "$python"
 }
 
@@ -4296,7 +4296,9 @@ acq_provider_input_prepare() {
   local validator_args=(--schema-dir "$schema_dir" --credential-bindings "$merged_bindings")
   local i
   for i in "${!manifests[@]}"; do validator_args+=(--bundle "${manifests[$i]}"); done
-  "$python" "$validator" "${validator_args[@]}" >&2 || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
+  # -E -s: ignore PYTHON* env (an empty PYTHONPATH entry is the cwd) and user
+  # site-packages, but keep the pinned validator's own directory on sys.path.
+  "$python" -E -s "$validator" "${validator_args[@]}" >&2 || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
   for i in "${!manifests[@]}"; do
     _acq_provider_input_materialize "${manifests[$i]}" "${kitdirs[$i]}" "$generation/models/providers" || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
   done
@@ -4380,7 +4382,7 @@ acq_provider_input_discard() {
 # builds never set this variable; it is documented alongside ACQ_TEST_HOST_OS as
 # a test-seam-only override.
 _acq_provider_input_canonical_path() {
-  python3 - "$1" <<'PY'
+  python3 -I - "$1" <<'PY'
 import os, re, sys
 path = sys.argv[1]
 # Collapse harmless absolute spelling variants before alias matching.
@@ -4416,7 +4418,7 @@ PY
 _acq_provider_input_safe_mkdir() {
   local _canon
   _canon=$(_acq_provider_input_canonical_path "$1") || return 1
-  python3 - "$_canon" <<'PY'
+  python3 -I - "$_canon" <<'PY'
 import os, stat, sys
 path = sys.argv[1]
 if not os.path.isabs(path): raise SystemExit('provider-input path must be absolute')
@@ -4438,7 +4440,7 @@ PY
 _acq_provider_input_safe_dir() {
   local _canon
   _canon=$(_acq_provider_input_canonical_path "$1") || return 1
-  python3 - "$_canon" <<'PY'
+  python3 -I - "$_canon" <<'PY'
 import os, stat, sys
 path = sys.argv[1]
 if not os.path.isabs(path): raise SystemExit(1)
@@ -4477,7 +4479,7 @@ _acq_provider_input_remove_tree() {
 }
 
 _acq_provider_input_atomic_replace() {
-  python3 - "$1" "$2" <<'PY'
+  python3 -I - "$1" "$2" <<'PY'
 import os, sys
 os.replace(sys.argv[1], sys.argv[2])
 PY
@@ -4741,7 +4743,7 @@ _acq_provider_input_control_plane() {
 # reads. Validation and later materialization therefore cannot observe a changed
 # candidate manifest, symlink, or path outside the fetched kit.
 _acq_provider_input_snapshot() {
-  python3 - "$1" "$2" <<'PY'
+  python3 -I - "$1" "$2" <<'PY'
 import json, os, stat, sys
 kit, target = sys.argv[1:]
 def open_relative(root, value):
@@ -4787,7 +4789,7 @@ PY
 
 # Copy only validator-approved regular files into the backend-owned readonly tree.
 _acq_provider_input_materialize() {
-  python3 - "$1" "$2" "$3" <<'PY'
+  python3 -I - "$1" "$2" "$3" <<'PY'
 import json, os, shutil, sys
 manifest, kit, target_root = sys.argv[1:]
 bundle = json.load(open(manifest, encoding="utf-8"))
