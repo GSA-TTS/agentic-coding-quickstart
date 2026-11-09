@@ -12,20 +12,31 @@ Version floors follow the ADR-0044m qualified matrix:
     * msb  >= 0.6.9, refusing 0.7.0-0.7.2 (one-way state migration; ADR-0032),
       and only final releases (no prerelease/build suffix).
 
+The floor is checked against the same program the adapter later runs: the
+installed check and the ``--version``/``version`` probe both use the adapter's
+own argv (``msb.msb_command()`` / ``sbx.sbx_command()``), so an ``ACQ_MSB_BIN`` /
+``ACQ_SBX_BIN`` override is version-checked exactly like the PATH binary. Were
+the probe to run the PATH binary instead, an override naming an older build
+would pass the floor and then touch sandbox state unchecked.
+
 Detection and the reported version are overridable via environment variables for
 reproducible, offline contract vectors (the same convention ``version_info.py``
 uses for ``ACQ_VERSION``/``ACQ_SOURCE_REVISION``):
 
-    * ``ACQ_SBX_INSTALLED`` / ``ACQ_MSB_INSTALLED`` - ``"1"`` or ``"0"`` forces
-      the installed state, skipping the PATH lookup.
+    * ``ACQ_SBX_INSTALLED`` / ``ACQ_MSB_INSTALLED`` - ``"0"`` forces the backend
+      absent; ``"1"`` forces it installed.
     * ``ACQ_SBX_VERSION`` / ``ACQ_MSB_VERSION`` - forces the version string the
       backend CLI would report (implies ``installed`` unless the explicit
       ``INSTALLED`` override says otherwise).
 
 These overrides are an internal test seam, not part of the public ``acq``
 command/contract surface: they exist only so contract vectors can run
-deterministically and offline. They are never secrets and are never written to
-output.
+deterministically and offline. An override that could only make a backend look
+*absent* (``INSTALLED=0``) is honoured everywhere, because it can only refuse.
+An override that could make a backend look installed or supported (``INSTALLED=1``
+and ``VERSION``) is honoured only while that backend's ``ACQ_*_BIN`` is the
+bundled ``__stub__``; otherwise a stray export would skip the floor for a real
+binary. They are never secrets and are never written to output.
 """
 
 from __future__ import annotations
@@ -35,7 +46,11 @@ import re
 import subprocess
 from dataclasses import dataclass
 
-from . import errors, hostexec
+from . import errors
+
+# Mirrors ``msb.STUB_SENTINEL`` / ``sbx.STUB_SENTINEL`` (not imported, to keep
+# this module free of adapter imports at load time).
+STUB_SENTINEL = "__stub__"
 
 # Version floors (ADR-0044m). Represented as (major, minor, patch) triples.
 SBX_MIN_VERSION = (0, 39, 0)
@@ -46,8 +61,10 @@ MSB_BLOCKED_MAX = (0, 7, 2)
 # A version token: optional leading `v`, X.Y (patch optional), and an optional
 # `-prerelease` / `+build` suffix. The suffix is captured so `final` can be
 # decided (msb refuses non-final releases); the numeric core is what the floor
-# and blocked-range comparisons use.
-_VERSION_RE = re.compile(r"v?(\d+)\.(\d+)(?:\.(\d+))?([-+][^\s]*)?")
+# and blocked-range comparisons use. Digits are ASCII only: ``\d`` would also
+# match other scripts' decimal digits (Arabic-Indic, Devanagari, ...), which
+# ``int()`` then converts, so a version no backend ever prints would parse.
+_VERSION_RE = re.compile(r"v?([0-9]+)\.([0-9]+)(?:\.([0-9]+))?([-+][^\s]*)?")
 
 
 @dataclass(frozen=True)
@@ -69,13 +86,20 @@ class Version:
         return f"{self.major}.{self.minor}.{self.patch}"
 
 
+def _has_non_ascii_digit(text: str) -> bool:
+    # The ASCII-only pattern alone would still read "0.7.\u0667" as 0.7 (the
+    # patch digit is simply not matched), so output carrying any other script's
+    # digit is refused outright: no backend prints one.
+    return any(ch.isdecimal() and not ch.isascii() for ch in text)
+
+
 def parse_version(raw: str) -> Version | None:
     """Parse a version string into a :class:`Version`, or None if unparseable.
 
     Only final releases carry ``final=True``. The ``v`` prefix and any
     prerelease/build suffix are dropped from the reported numeric core.
     """
-    if not raw:
+    if not raw or _has_non_ascii_digit(raw):
         return None
     match = _VERSION_RE.search(raw)
     if match is None:
@@ -182,25 +206,52 @@ def _env(name: str, key: str) -> str | None:
     return os.environ.get(f"ACQ_{name.upper()}_{key}")
 
 
+def _uses_stub(spec: BackendSpec) -> bool:
+    """True when the adapter runs the bundled offline fake (``ACQ_*_BIN=__stub__``)."""
+    return _env(spec.name, "BIN") == STUB_SENTINEL
+
+
+def _adapter_command(spec: BackendSpec) -> list[str]:
+    """The argv the adapter itself runs for this backend.
+
+    Imported lazily: the adapter modules sit above this read-side module, and
+    importing them at module load would make ``backends`` depend on everything
+    they import. Raises ``FileNotFoundError`` (no such program) or
+    ``ValueError`` (an override that is not a valid command line).
+    """
+    if spec.name == "msb":
+        from . import msb
+
+        return msb.msb_command()
+    from . import sbx
+
+    return sbx.sbx_command()
+
+
 def _is_installed(spec: BackendSpec) -> bool:
     override = _env(spec.name, "INSTALLED")
-    if override is not None:
-        return override == "1"
-    if _env(spec.name, "VERSION") is not None:
-        return True
-    return hostexec.which(spec.cli) is not None
+    if override == "0":
+        return False
+    if _uses_stub(spec):
+        return override is None or override == "1"
+    try:
+        argv = _adapter_command(spec)
+    except (OSError, ValueError):
+        return False
+    return os.path.isfile(argv[0]) and os.access(argv[0], os.X_OK)
 
 
 def _run_version_command(spec: BackendSpec) -> str | None:
     try:
         proc = subprocess.run(
-            [*hostexec.command(spec.cli), *spec.version_argv],
+            [*_adapter_command(spec), *spec.version_argv],
             capture_output=True,
             text=True,
             timeout=5,
             check=False,
+            stdin=subprocess.DEVNULL,
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, ValueError, subprocess.SubprocessError):
         return None
     if proc.returncode != 0:
         return None
@@ -209,7 +260,7 @@ def _run_version_command(spec: BackendSpec) -> str | None:
 
 def _detected_version(spec: BackendSpec) -> Version | None:
     forced = _env(spec.name, "VERSION")
-    if forced is not None:
+    if forced is not None and _uses_stub(spec):
         return parse_version(forced)
     return parse_version(_run_version_command(spec) or "")
 
@@ -237,9 +288,15 @@ def check_version(spec: BackendSpec) -> VersionProblem | None:
     """
     status = detect(spec)
     if not status.installed:
+        override = _env(spec.name, "BIN")
+        message = (
+            f"the {spec.name} backend CLI named by ACQ_{spec.name.upper()}_BIN could not be run"
+            if override and override != STUB_SENTINEL
+            else f"backend '{spec.name}' CLI not found on PATH"
+        )
         return VersionProblem(
             errors.BACKEND_NOT_FOUND,
-            f"backend '{spec.name}' CLI not found on PATH",
+            message,
             f"install {spec.name} {spec.min_version.string} or newer and retry",
         )
     if status.parsed is None:

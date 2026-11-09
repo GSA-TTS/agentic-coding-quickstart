@@ -20,7 +20,7 @@ import time
 
 import pytest
 
-from acq_py import cli, errors, lock, migration, msb, sbx, state
+from acq_py import backends, cli, errors, lock, migration, msb, sbx, state
 from acq_py.commands import lifecycle
 
 MISSING_BIN = "/nonexistent/acq-test/backend"
@@ -35,6 +35,16 @@ def _env(monkeypatch, tmp_path, *, catalog=None):
     monkeypatch.setenv("MSB_HOME", str(tmp_path / "msb-home"))
     if catalog is not None:
         monkeypatch.setenv("ACQ_MSB_STUB_CATALOG", json.dumps(catalog))
+
+
+def _skip_floor(monkeypatch):
+    """Let a verb past the version floor so the adapter's own mapping is exercised.
+
+    The floor probes the same program the adapter runs, so a missing ``ACQ_*_BIN``
+    is normally refused there first; these tests cover the later failure (the CLI
+    vanishing or becoming unrunnable after the check).
+    """
+    monkeypatch.setattr(backends, "check_version", lambda spec: None)
 
 
 def _invoke(capsys, *argv):
@@ -143,6 +153,7 @@ def test_exec_streaming_with_missing_cli_gives_envelope(monkeypatch, tmp_path, c
     _env(monkeypatch, tmp_path)
     monkeypatch.setattr(msb, "exists", lambda name: True)
     monkeypatch.setenv("ACQ_MSB_BIN", MISSING_BIN)
+    _skip_floor(monkeypatch)
     rc, doc, err = _invoke(capsys, "--backend", "msb", "--json", "exec", "box", "--", "true")
     assert rc == errors.EXIT_FAILURE
     assert doc["command"] == "exec"
@@ -154,6 +165,7 @@ def test_exec_streaming_with_missing_cli_gives_envelope(monkeypatch, tmp_path, c
 def test_session_verbs_with_missing_cli_give_envelope(monkeypatch, tmp_path, capsys, verb):
     _env(monkeypatch, tmp_path)
     monkeypatch.setenv("ACQ_MSB_BIN", MISSING_BIN)
+    _skip_floor(monkeypatch)
     rc, doc, _err = _invoke(capsys, "--backend", "msb", "--json", *verb)
     assert rc == errors.EXIT_FAILURE
     assert doc["command"] == verb[0]
@@ -163,6 +175,7 @@ def test_session_verbs_with_missing_cli_give_envelope(monkeypatch, tmp_path, cap
 def test_ls_with_missing_cli_human_output(monkeypatch, tmp_path, capsys):
     _env(monkeypatch, tmp_path)
     monkeypatch.setenv("ACQ_MSB_BIN", MISSING_BIN)
+    _skip_floor(monkeypatch)
     rc = cli.main(["--backend", "msb", "ls"])
     captured = capsys.readouterr()
     assert rc == errors.EXIT_FAILURE

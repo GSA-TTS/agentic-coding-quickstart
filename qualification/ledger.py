@@ -56,7 +56,8 @@ from .model import TRANSCRIPT_DIR_TOKEN, canonical_transcript_bytes, publishable
 SCHEMA_VERSION = 1
 DEFAULT_LEDGER = "docs/qualification-ledger.json"
 VERDICTS = ("PASS", "FAIL", "BLOCKED", "FLAKY")
-_FINAL_VERSION = re.compile(r"\d+\.\d+\.\d+")
+# ASCII digits only: ``\d`` also matches other scripts' digits, which int() accepts.
+_FINAL_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 # A full commit id (SHA-1 or SHA-256 object format): an abbreviation can become
 # ambiguous, so a recorded revision is never one.

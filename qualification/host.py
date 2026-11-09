@@ -73,7 +73,8 @@ from .publish import HostError
 REPO_ROOT = Path(__file__).resolve().parent.parent
 # The image the cell oracle creates sandboxes from (scripts/qualify-backend-cell).
 IMAGE = "docker.io/docker/sandbox-templates:shell-docker"
-_VERSION = re.compile(r"\d+\.\d+\.\d+")
+# ASCII digits only: ``\d`` also matches other scripts' digits, which int() accepts.
+_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 _VERSION_ARGV = {MSB: ["--version"], SBX: ["version"]}
 _STATUS = {0: "PASS", 1: "FAIL", 2: "BLOCKED", 3: "FLAKY"}
 _OK = ("PASS", "CURRENT")
@@ -167,6 +168,8 @@ def backend_version(backend: str, *, which=shutil.which, run=subprocess.run) -> 
     match = _VERSION.search(text)
     if proc.returncode != 0 or not match or text[match.end():match.end() + 1] in ("-", "+"):
         return None  # a pre-release is not a version the ledger can accept
+    if any(ch.isdecimal() and not ch.isascii() for ch in text):
+        return None  # another script's digit next to the match would be silently dropped
     return match.group(0)
 
 
