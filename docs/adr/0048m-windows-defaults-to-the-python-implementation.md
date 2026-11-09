@@ -102,9 +102,10 @@ The default flips only when every gate below holds. Until then this ADR stays
    flag was passed.
 4. **Command parity:** every command the Bash `acq` accepts on Windows is
    implemented, or is listed in this ADR as an accepted gap with its replacement.
-   Today the Python CLI lacks `start` and `restart`. (`secret set-custom` is not
-   a gap: Bash refuses it with guidance, and Python rejects it as an unknown
-   subcommand.)
+   `start` and `restart` are implemented on msb; on sbx both refuse with
+   `unsupported_capability` and point to `acq run`, as Bash does. (`secret
+   set-custom` is not a gap: Bash refuses it with guidance, and Python rejects it
+   as an unknown subcommand.)
    `acq configure` is implemented, with two accepted gaps:
    - **The first-run offer.** Bash offers to run `acq configure` the first time
      `acq create`/`run` finds no `config.yaml`. Python does not prompt; the

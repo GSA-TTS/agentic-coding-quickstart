@@ -54,7 +54,8 @@
               "key": "extra_kits",
               "value": "git+https://example.invalid/kit",
               "source": "env",
-              "honoured_by_python": false
+              "honoured_by_python": true,
+              "python_applies": "bundled-only"
             },
             {
               "key": "scope_github_token",
@@ -78,7 +79,8 @@
               "key": "provider_kit",
               "value": "agentic-coding-patterns/usai-provider",
               "source": "default",
-              "honoured_by_python": false
+              "honoured_by_python": true,
+              "python_applies": "bundled-only"
             },
             {
               "key": "kit_sources",

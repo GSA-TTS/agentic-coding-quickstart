@@ -104,6 +104,8 @@ class FakeBackend:
         return self.state_dir / "provenance" / self.backend / f"{self.names.sandbox}.abc123.config"
 
     def secret(self, verb):
+        if verb[1:4] == ["set", "-g", "usai"] and "--host" not in verb:
+            return self.done(0)  # the throwaway key the msb create gate needs (a built-in provider)
         if verb[1] == "set":
             # Both backends bind a non-built-in service only with --host/--env (AGENTS.md).
             if "--host" not in verb or "--env" not in verb:
@@ -227,7 +229,7 @@ def test_a_compliant_backend_passes(tmp_path, backend, capsys):
         assert raw.removed == ["sbx-cs-ours"]  # never the operator's KEY or OPENCODE_GO_API_KEY secret
     else:
         assert raw.msb_removed == [c.names.canary_sandbox]  # in case the canary was killed before cleanup
-    secret_set = next(call for call in fake.calls if call[2:4] == ["secret", "set"])
+    secret_set = next(call for call in fake.calls if call[2:4] == ["secret", "set"] and "--host" in call)
     assert secret_set[secret_set.index("--host") + 1] == "qualify.invalid"
     assert secret_set[secret_set.index("--env") + 1] == c.names.secret_env
 
@@ -425,6 +427,28 @@ def _snapshot(root: Path) -> dict[str, bytes]:
     return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the stub shim is a POSIX shell script")
+@pytest.mark.skipif(sys.version_info < (3, 11), reason="the oracle runs the CLI under python -P")
+def test_sbx_without_a_usai_key_in_its_table_is_blocked_before_create(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    shim = bin_dir / "sbx"
+    shim.write_text(
+        f"#!/bin/sh\nACQ_SBX_STUB_VERSION=0.51.0 PYTHONPATH={REPO_ROOT / 'py-acq' / 'src'} "
+        f"exec {sys.executable} -P -m acq_py._stub_sbx \"$@\"\n"
+    )
+    shim.chmod(0o755)
+    env = {"PATH": os.pathsep.join([str(bin_dir), "/usr/bin", "/bin"]), "HOME": str(home), "TMPDIR": str(tmp_path)}
+    proc = subprocess.run([sys.executable, str(ORACLE_PATH), "--backend", "sbx"], env=env,
+                          capture_output=True, text=True, timeout=120, cwd=tmp_path)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "BLOCKED: usai key: sbx holds no global USAI_API_KEY secret" in proc.stderr
+    assert not (home / ".docker-sbx" / "catalog.json").exists() or "acq-qual" not in (
+        home / ".docker-sbx" / "catalog.json").read_text(encoding="utf-8")
+
+
 @pytest.mark.skipif(os.name == "nt", reason="the stub shims are POSIX shell scripts")
 @pytest.mark.skipif(sys.version_info < (3, 11), reason="the oracle runs the CLI under python -P")
 @pytest.mark.parametrize("backend,version", [("msb", "0.7.11"), ("sbx", "0.51.0")])
@@ -451,6 +475,12 @@ def test_the_script_leaves_the_callers_acq_state_alone_and_a_stub_cannot_pass(tm
     )
     shim.chmod(0o755)
     env = {"PATH": os.pathsep.join([str(bin_dir), "/usr/bin", "/bin"]), **{v: str(p) for v, p in dirs.items()}}
+    if backend == "sbx":  # the operator's sbx already holds a usai key (the create gate checks sbx's table)
+        table = dirs["HOME"] / ".docker-sbx" / "custom-secrets.json"
+        table.parent.mkdir()
+        table.write_text(json.dumps(
+            [{"scope": "global", "env": "USAI_API_KEY", "placeholder": "sbx-cs-usai", "targets": ["api.gsa.usai.gov"]}]
+        ), encoding="utf-8")
     proc = subprocess.run([sys.executable, str(ORACLE_PATH), "--backend", backend], env=env,
                           capture_output=True, text=True, timeout=300, cwd=tmp_path)
 

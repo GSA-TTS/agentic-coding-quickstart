@@ -1,49 +1,74 @@
 {
   "schema": 1,
   "id": "cli/usai-rotate-ok",
-  "oracle": "ADR-0012 / ADR-0040m key-rotate: rotation validates the new key then replaces the old, never emitting the new key (the synthetic placeholder never appears in stdout or stderr)",
+  "oracle": "ADR-0012 key-rotate on msb: rotation stores the new key in the acq secret store and re-feeds every running sandbox with `msb modify --secret USAI_API_KEY@api.gsa.usai.gov` (reported per backend as refed); the value reaches msb only through its environment (the stub refuses a value inside any argv element) and the driver fails the vector if it appears in any step's output",
   "tier": 1,
   "backend": null,
   "platform": "any",
   "invoke": {
     "argv": [
-      "{acq}",
-      "--backend",
-      "msb",
-      "usai-rotate-api-key",
-      "--json"
+      "{python}",
+      "-I",
+      "test/vectors/drivers/seeded-run.py",
+      "[[[\"--backend\",\"msb\",\"secret\",\"set\",\"-g\",\"usai\"],true,0],[[\"--backend\",\"msb\",\"create\",\"shell\",\".\",\"--name\",\"rot-a\",\"--json\"],false,0],[[\"--backend\",\"msb\",\"create\",\"shell\",\".\",\"--name\",\"rot-b\",\"--json\"],false,0],[[\"--backend\",\"msb\",\"usai-rotate-api-key\",\"--json\"],true,null]]",
+      "{acq}"
     ],
     "env": {
       "ACQ_MSB_BIN": "__stub__",
       "ACQ_MSB_VERSION": "0.7.7",
       "ACQ_MSB_INSTALLED": "1",
-      "ACQ_SBX_INSTALLED": "0",
-      "ACQ_MSB_STUB_ROTATE": "ok"
+      "ACQ_SBX_INSTALLED": "0"
     },
     "unset": [
       "ACQ_BACKEND",
       "ACQ_STATE_DIR",
       "MSB_HOME",
+      "SBX_HOME",
       "ACQ_IMAGE",
       "ACQ_MSB_IMAGE",
       "ACQ_MSB_READY_TIMEOUT",
       "ACQ_MSB_STUB_CATALOG",
       "ACQ_MSB_STUB_FAIL",
-      "ACQ_MSB_STUB_SECRETS",
-      "ACQ_MSB_STUB_SECRET_LS_RAW"
+      "ACQ_MSB_STUB_FAIL_ADD",
+      "ACQ_MSB_STUB_FAIL_RM",
+      "ACQ_SBX_STUB_CATALOG",
+      "ACQ_SBX_STUB_FAIL",
+      "ACQ_SBX_STUB_SECRETS",
+      "ACQ_SBX_STUB_CUSTOM_SECRETS",
+      "ACQ_SBX_STUB_FAIL_CUSTOM_SCOPES",
+      "ACQ_SECRET_NO_LIVE_REFEED",
+      "ACQ_PROVIDER_CREDENTIAL_BINDINGS",
+      "ACQ_PROVIDER_CREDENTIAL_SEED",
+      "USAI_API_KEY",
+      "GITHUB_TOKEN",
+      "GH_TOKEN",
+      "GITLAB_TOKEN"
     ],
-    "stdin": "placeholder-new-key-2468\n",
-    "timeout_ms": 5000
+    "stdin": "vector-rotate-sentinel-5e19",
+    "timeout_ms": 15000
   },
   "expect": {
-    "exit": 1,
+    "exit": 0,
     "stdout": {
       "mode": "json",
       "value": {
         "schema_version": 1,
         "command": "usai-rotate-api-key",
-        "error": {
-          "code": "unsupported_capability"
+        "data": {
+          "provider": "usai",
+          "key_env": "USAI_API_KEY",
+          "rotated": true,
+          "backends": [
+            {
+              "backend": "msb",
+              "refed": [
+                "rot-a",
+                "rot-b"
+              ],
+              "kept_own": [],
+              "not_refed": []
+            }
+          ]
         }
       },
       "normalize": []
@@ -62,7 +87,8 @@
       "XDG_CONFIG_HOME",
       "XDG_DATA_HOME",
       "XDG_STATE_HOME",
-      "XDG_CACHE_HOME"
+      "XDG_CACHE_HOME",
+      "ACQ_SECRET_STORE_DIR"
     ]
   }
 }

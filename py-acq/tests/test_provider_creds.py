@@ -741,35 +741,8 @@ def test_github_scope_human_guidance_has_the_pat_url(monkeypatch, tmp_path, caps
 
 
 # ---------------------------------------------------------------------------
-# usai-rotate-api-key
+# usai-rotate-api-key (rotation itself is covered in test_rotation.py)
 # ---------------------------------------------------------------------------
-
-def test_rotate_key_never_in_argv_or_output(monkeypatch, tmp_path, capsys):
-    # Neither backend has a `rotate` subcommand, so `usai-rotate-api-key` fails
-    # closed with unsupported_capability and the new key is never read into argv
-    # or output.
-    _env(monkeypatch, tmp_path)
-    monkeypatch.setattr(sys, "stdin", io.StringIO("NEW-ROTATED-KEY\n"))
-
-    rc = cli.main(["--backend", "msb", "usai-rotate-api-key", "--json"])
-    out, err = capsys.readouterr()
-
-    assert rc == 1
-    assert "unsupported_capability" in out
-    assert "NEW-ROTATED-KEY" not in out
-    assert "NEW-ROTATED-KEY" not in err
-
-
-def test_rotate_fails_closed_unsupported(monkeypatch, tmp_path, capsys):
-    # No `rotate` subcommand on either backend: rotation fails closed (never a
-    # provider_unreachable/auth_failed, and the old key is never touched).
-    _env(monkeypatch, tmp_path)
-    monkeypatch.setattr(sys, "stdin", io.StringIO("new-key\n"))
-
-    rc, doc = _invoke(capsys, "--backend", "msb", "usai-rotate-api-key", "--json")
-    assert rc == 1
-    assert doc["error"]["code"] == "unsupported_capability"
-
 
 def test_rotate_no_value_validation_failed(monkeypatch, tmp_path, capsys):
     _env(monkeypatch, tmp_path)
@@ -778,19 +751,3 @@ def test_rotate_no_value_validation_failed(monkeypatch, tmp_path, capsys):
     rc, doc = _invoke(capsys, "--backend", "msb", "usai-rotate-api-key", "--json")
     assert rc == 1
     assert doc["error"]["code"] == "validation_failed"
-
-
-def test_rotate_sbx_unsupported(monkeypatch, tmp_path, capsys):
-    # sbx also has no `rotate` subcommand: fail closed with unsupported_capability.
-    _env(monkeypatch, tmp_path)
-    monkeypatch.setenv("ACQ_SBX_BIN", "__stub__")
-    monkeypatch.setenv("ACQ_SBX_VERSION", "0.39.0")
-    monkeypatch.setenv("ACQ_SBX_INSTALLED", "1")
-    monkeypatch.setenv("ACQ_MSB_INSTALLED", "0")
-    monkeypatch.setenv("SBX_HOME", str(tmp_path / "sbx-home"))
-    monkeypatch.setattr(sys, "stdin", io.StringIO("new-key\n"))
-
-    rc, doc = _invoke(capsys, "--backend", "sbx", "usai-rotate-api-key", "--json")
-    assert rc == 1
-    assert doc["error"]["code"] == "unsupported_capability"
-    assert "new-key" not in json.dumps(doc)

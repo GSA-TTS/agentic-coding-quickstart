@@ -29,7 +29,7 @@ import json
 import os
 import sys
 
-from .. import envelope, errors, provider_creds, secretstore
+from .. import envelope, errors, lock, provider_creds, secretstore
 from . import common
 
 _SET_USAGE = "usage: acq secret set [-g | SANDBOX] SERVICE [--host HOST --env ENV] (value on stdin)"
@@ -147,7 +147,28 @@ def run_secret_set(parsed, emit_json: bool, backend: str) -> int:
         )
     if not common._supports(backend, "secret-write"):
         return _unsupported(command, backend, emit_json)
+    return _usai_guarded(command, scope, service, emit_json,
+                         lambda: _set_apply(backend, scope, service, value, host, env, emit_json))
 
+
+def _usai_guarded(command: str, scope: secretstore.Scope, service: str, emit_json: bool, body) -> int:
+    """Run ``body`` under the usai provider lock when it changes the global usai
+    key, so it cannot interleave with ``usai-rotate-api-key``; else as is."""
+    if not (scope.is_global and service == provider_creds.USAI_PROVIDER_ID):
+        return body()
+    try:
+        with lock.provider_credential_lock(service):
+            return body()
+    except lock.ProviderCredentialLockTimeout as exc:
+        return common._operational_failure(
+            command, errors.TIMEOUT, str(exc), "retry once the other command finishes; nothing was changed", emit_json
+        )
+
+
+def _set_apply(backend: str, scope: secretstore.Scope, service: str, value: str, host: str, env: str,
+               emit_json: bool) -> int:
+    """Preflight, store and feed one validated ``secret set``."""
+    command = "secret set"
     adapter = common._adapter(backend)
     preflight = getattr(adapter, "secret_preflight", None)
     try:
@@ -255,6 +276,13 @@ def run_secret_rm(parsed, emit_json: bool, backend: str) -> int:
             command, errors.UNSUPPORTED, f"--accept-unconfirmed is not supported on the {backend} backend",
             "remove the flag; nothing was changed", emit_json,
         )
+    return _usai_guarded(command, scope, service, emit_json,
+                         lambda: _rm_apply(adapter, scope, service, accept, emit_json))
+
+
+def _rm_apply(adapter, scope: secretstore.Scope, service: str, accept: list[str] | None, emit_json: bool) -> int:
+    """Check presence, unbind and delete one validated ``secret rm``."""
+    command = "secret rm"
     present_fn = getattr(adapter, "secret_present", None)
     try:
         in_backend = present_fn(scope, service) if present_fn is not None else None

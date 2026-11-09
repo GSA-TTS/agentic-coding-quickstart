@@ -28,11 +28,19 @@ through its own CLI:
 * ``{"binding_record": PROVIDER, "text": TEXT}`` writes TEXT as PROVIDER's
   provider-credential binding record, at the path acq's state layout gives it
   (``<state root>/provider-credentials/<provider>.<first 8 hex of sha256>.json``).
+* ``{"bash_state": PATH, "text": TEXT}`` writes TEXT as a file the Bash acq
+  keeps, at PATH relative to its provenance root (``$ACQ_PROVENANCE_DIR``, else
+  ``<XDG state home>/acq/provenance``), for example
+  ``msb/<name>.<cksum of name>.env``. PATH must be relative and free of ``..``.
 * ``{"lock_bindings": true}`` makes every binding record undeletable: each
   record is made read-only (Windows refuses to delete a read-only file) and the
   directory loses write permission (POSIX refuses to unlink in it). Permissions
   are restored when the driver ends. A superuser can still delete, so a vector
   using this cannot pass when run as root.
+* ``{"env": {"NAME": VALUE, ...}}`` changes the environment of later steps: a
+  string sets NAME, null unsets it. Only backend stub knobs (``ACQ_MSB_STUB_*``
+  and ``ACQ_SBX_STUB_*``) may be changed. A vector uses it to clear a stub
+  failure knob between a failing call and the retry that must fix it.
 """
 
 from __future__ import annotations
@@ -47,6 +55,9 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+
+_STUB_KNOB_RE = re.compile(r"ACQ_(?:MSB|SBX)_STUB_[A-Z0-9_]+")
 
 
 def _state_root() -> Path:
@@ -66,6 +77,24 @@ def _binding_path(provider: str) -> Path:
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", provider)
     digest = hashlib.sha256(provider.encode("utf-8")).hexdigest()[:8]
     return _binding_dir() / f"{safe}.{digest}.json"
+
+
+def _bash_provenance_root() -> Path:
+    override = os.environ.get("ACQ_PROVENANCE_DIR")
+    if override:
+        return Path(override)
+    xdg = os.environ.get("XDG_STATE_HOME")
+    base = Path(xdg) if xdg and os.path.isabs(xdg) else Path.home() / ".local" / "state"
+    return base / "acq" / "provenance"
+
+
+def _bash_state(rel: str, text: str) -> None:
+    parts = rel.split("/")
+    if not rel or rel.startswith("/") or ".." in parts or "\\" in rel or ":" in rel:
+        raise ValueError(f"bash_state path must be relative: {rel!r}")
+    path = _bash_provenance_root().joinpath(*parts)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
 
 
 def _git_repos(repos: dict, root: Path, env: dict) -> Path:
@@ -102,8 +131,21 @@ def _fixture(step: dict, root: Path, env: dict, locked: list) -> str | None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(step["text"], encoding="utf-8")
         return None
+    if "bash_state" in step:
+        _bash_state(step["bash_state"], step["text"])
+        return None
     if step.get("lock_bindings"):
         _lock_bindings(locked)
+        return None
+    if isinstance(step.get("env"), dict):
+        for name in step["env"]:
+            if not _STUB_KNOB_RE.fullmatch(name):
+                raise ValueError(f"env step may only change ACQ_MSB_STUB_* / ACQ_SBX_STUB_* knobs, not {name!r}")
+        for name, value in step["env"].items():
+            if value is None:
+                env.pop(name, None)
+            else:
+                env[name] = str(value)
         return None
     raise ValueError(f"unknown fixture step {step!r}")
 

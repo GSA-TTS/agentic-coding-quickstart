@@ -9,7 +9,7 @@ and ``doctor``). Every other handler lives in :mod:`acq_py.commands`
 
     commands/common.py     the adapter seam, failure envelopes, backend and
                            workspace resolution, secret-scope parsing
-    commands/lifecycle.py  create, run, create --recreate, ls, stop, rm
+    commands/lifecycle.py  create, run, create --recreate, ls, stop, start, restart, rm
     commands/session.py    exec, attach, shell, cp, ports, verbatim passthrough
     commands/secret.py     secret set/rm/ls/has/import
     commands/creds.py      provider-credential, github-scope, usai-rotate-api-key
@@ -53,7 +53,7 @@ from .commands import common, configure, creds, kit, lifecycle, secret, session
 # flag) is treated as an unknown verb and forwarded verbatim to the active
 # backend (announced passthrough, spec user story #9 / ADR-0038m §1).
 KNOWN_COMMANDS = frozenset(
-    "version doctor help backend configure create run ls stop rm exec attach shell cp ports "
+    "version doctor help backend configure create run ls stop start restart rm exec attach shell cp ports "
     "secret kit kit-source provider-credential github-scope usai-rotate-api-key".split()
 )
 
@@ -69,6 +69,13 @@ KNOWN_COMMANDS = frozenset(
 # module object the tests patch), and because importing them eagerly is part of the
 # Tier-3 surface closure: only ``doctor`` and ``version_info`` stay lazy.
 _ADAPTER_ERRORS = common._ADAPTER_ERRORS
+
+# Bash semantics: --kit is repeatable and each value is a kit ref applied after
+# the built-ins. A built-in agent kit name stands for that bundled kit.
+_KIT_HELP = (
+    "kit ref to apply (repeatable); a built-in agent kit name such as opencode "
+    "selects that kit, and refs outside the built-in bundle are refused"
+)
 KNOWN_AGENTS = common.KNOWN_AGENTS
 DEFAULT_GUEST_WORKSPACE = common.DEFAULT_GUEST_WORKSPACE
 OPENCODE_DEVENV_IMAGE = common.OPENCODE_DEVENV_IMAGE
@@ -229,7 +236,7 @@ def build_parser() -> _Parser:
     create_parser.add_argument("path", nargs="?", help="workspace directory to mount")
     create_parser.add_argument("--name", help="explicit sandbox name (default: derived from agent+path)")
     create_parser.add_argument("--image", help="base image override (default: the devenv shell image)")
-    create_parser.add_argument("--kit", help="built-in agent kit to apply (overrides inference; e.g. opencode)")
+    create_parser.add_argument("--kit", action="append", help=_KIT_HELP)
     create_parser.add_argument(
         "--recreate",
         metavar="NAME",
@@ -243,12 +250,20 @@ def build_parser() -> _Parser:
     run_parser.add_argument("path", nargs="?", help="workspace directory to mount (AGENT form)")
     run_parser.add_argument("--name", help="explicit sandbox name (AGENT form)")
     run_parser.add_argument("--image", help="base image override (AGENT form)")
-    run_parser.add_argument("--kit", help="built-in agent kit to apply (overrides inference; e.g. opencode)")
+    run_parser.add_argument("--kit", action="append", help=_KIT_HELP)
 
     sub.add_parser("ls", help="list sandboxes")
 
     stop_parser = sub.add_parser("stop", help="stop a sandbox without removing it")
     stop_parser.add_argument("name", help="sandbox name")
+
+    start_parser = sub.add_parser(
+        "start", help="start a stopped sandbox, rebind its secrets and re-apply its kits (msb only)"
+    )
+    start_parser.add_argument("name", help="sandbox name")
+
+    restart_parser = sub.add_parser("restart", help="stop then start a sandbox, as 'start' does (msb only)")
+    restart_parser.add_argument("name", help="sandbox name")
 
     rm_parser = sub.add_parser("rm", help="remove a sandbox")
     rm_parser.add_argument("name", help="sandbox name")
@@ -370,7 +385,7 @@ def build_parser() -> _Parser:
     github_scope_parser.add_argument("path", nargs="?", help="workspace path (default: recorded sandbox workspace)")
 
     # usai-rotate-api-key: rotate the stored USAi key (ADR-0012). New key on stdin
-    # only; the old key is replaced only after the new one is confirmed.
+    # only; it is stored, then every sandbox that uses it is re-fed.
     sub.add_parser("usai-rotate-api-key", help="rotate the USAi API key (new key on stdin)")
 
     return parser
@@ -548,7 +563,7 @@ def run_doctor(emit_json: bool, name: str | None) -> int:
 # ---------------------------------------------------------------------------
 
 # Verbs whose positional ``name`` names an existing sandbox.
-_NAME_FORM_VERBS = ("stop", "rm", "exec", "attach", "shell", "ports")
+_NAME_FORM_VERBS = ("stop", "start", "restart", "rm", "exec", "attach", "shell", "ports")
 _NAME_FORM_KIT_VERBS = ("apply", "check", "update")
 
 
@@ -585,7 +600,7 @@ def _is_mutating(parsed) -> bool:
     trigger migration (ADR-0041m: read-only diagnostics may report ``unknown``).
     """
     cmd = parsed.command
-    if cmd in ("create", "run", "stop", "rm", "exec", "attach", "shell", "cp", "ports"):
+    if cmd in ("create", "run", "stop", "start", "restart", "rm", "exec", "attach", "shell", "cp", "ports"):
         return True
     if cmd == "secret":
         return parsed.secret_command in ("set", "rm", "import")
@@ -783,7 +798,9 @@ def _dispatch(parser: _Parser, parsed, emit_json: bool, backend_override: str | 
             emit_json, backend_override, lambda: _migration_pre_step(emit_json, "configure")
         )
 
-    if parsed.command in ("create", "run", "ls", "stop", "rm", "exec", "attach", "shell", "cp", "ports"):
+    if parsed.command in (
+        "create", "run", "ls", "stop", "start", "restart", "rm", "exec", "attach", "shell", "cp", "ports",
+    ):
         _backend, exit_code = common._resolve_backend_for_lifecycle(backend_override, emit_json, parsed.command)
         if exit_code is not None:
             return exit_code
@@ -796,6 +813,10 @@ def _dispatch(parser: _Parser, parsed, emit_json: bool, backend_override: str | 
             return lifecycle.run_ls(emit_json, _backend)
         if parsed.command == "stop":
             return lifecycle.run_stop(parsed, emit_json, _backend)
+        if parsed.command == "start":
+            return lifecycle.run_start(parsed, emit_json, _backend)
+        if parsed.command == "restart":
+            return lifecycle.run_restart(parsed, emit_json, _backend)
         if parsed.command == "rm":
             return lifecycle.run_rm(parsed, emit_json, _backend)
         if parsed.command == "exec":

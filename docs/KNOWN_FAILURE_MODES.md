@@ -101,14 +101,21 @@ parts of the Bash session differ or are not ported yet:
    adapters' session flags.
 2. **ssh-agent forwarding** (ADR-0021). Python never creates the `--vsock` route
    or the in-guest bridge, so it passes `SSH_AUTH_SOCK` only when the sandbox's
-   host record carries an `ssh_auth_sock` guest path, which no Python create
-   writes yet; sandboxes created by Bash keep that path in Bash's host config,
-   which Python does not read. **Unblock trigger:** forwarding is ported, or the
-   Python reader for Bash's state tree lands.
-3. **Guest git config** (Bash `_acq_msb_apply_host_git_global_config`, and sbx's
-   git identity kit). Python passes the identity as `GIT_*`/`EMAIL` session
-   variables only; it does not write `user.name`/`user.email` into the guest's
-   global git config. **Unblock trigger:** same as item 1.
+   host record carries an `ssh_auth_sock` guest path. No Python create writes
+   one yet; for a sandbox created by Bash, the state migration copies the path
+   from Bash's host config (`ssh-auth-sock`) into the record (ADR-0041m
+   generation 2). Python still does not start the in-guest bridge that path
+   points at: Bash restarts it on attach and on resume (`acq_backend_start`)
+   because it dies when the sandbox stops, so after a stop the forwarded socket
+   in a Bash-created sandbox is dead until Bash re-attaches it. Porting
+   forwarding must add the bridge to create, attach, `acq start` and
+   `acq restart` (`_start_locked` in `py-acq/src/acq_py/commands/lifecycle.py`).
+   **Unblock trigger:** forwarding is ported.
+3. **Guest git config on msb** (Bash `_acq_msb_apply_host_git_global_config`).
+   On msb, Python passes the identity as `GIT_*`/`EMAIL` session variables only;
+   it does not write `user.name`/`user.email` into the guest's global git config.
+   On sbx the git identity kit (`py-acq/src/acq_py/kit_sbx.py`) does, as in Bash.
+   **Unblock trigger:** same as item 1.
 4. **`ACQ_ACTIVATE_PROJECT_ENV`.** With it set to `1`, Bash passes
    `ACQ_WORKSPACE` and wraps the session in its guest script
    (`acq_guest_exec_script`, `acq_guest_shell_script` in `acq.backends/common.sh`),
@@ -122,12 +129,52 @@ parts of the Bash session differ or are not ported yet:
    such record, and `sbx run` takes no `-e`, so it could not pass the session
    environment above. Python therefore runs the recorded agent (or kit entrypoint)
    with `sbx exec -it NAME -- AGENT` from host state, as it does on msb.
-   **Unblock trigger:** the Python reader for Bash's state tree lands; then decide
-   whether a Bash-created generic-OpenCode sandbox needs `sbx run` to attach.
+   The reader for Bash's state tree has landed
+   (`legacy_bash.host_config_read("sbx", NAME, "generic-opencode")` in
+   `py-acq/src/acq_py/legacy_bash.py`), so the record is available.
+   **Unblock trigger:** the sbx kit and attach work; decide then whether a
+   Bash-created generic-OpenCode sandbox needs `sbx run` to attach.
 6. **Live check.** A TUI attach, an interactive shell and Ctrl-C have been tested
    only against a fake backend under a PTY (`py-acq/tests/test_session_fidelity.py`).
    **Unblock trigger:** the next Tier-3 run on an msb host, and on an sbx 0.51+
    host for `sbx exec -it`.
+
+---
+
+## Deferred: limits of the Python acq's import of Bash state
+
+**Status:** deferred (tracked per AGENTS.md "Track Deferred Work").
+
+The Python acq imports the Bash acq's state once per state tree, in the
+generation-2 step of the migration that runs before the first mutating verb
+(ADR-0041m; `py-acq/src/acq_py/legacy_bash.py`, `migration.py`). Four limits
+remain:
+
+1. **Once per tree.** State the Bash acq writes after that step (a sandbox it
+   creates while both implementations are in use, a `kit-source add` or a
+   `provider-credential set`) is not imported. (A `kit_sources` or
+   `provider_credential_bindings` list that Bash itself would refuse is the
+   exception: it stays pending, with a warning on each mutating verb, until it
+   is fixed.) Kit sources without a full commit SHA are never imported; add them
+   again with `acq kit-source add REPO --ref <full-sha>`. Running the import every time
+   would bring back records removed with the Python acq, including kit sources
+   whose trust the user withdrew. **Mitigation:** create such sandboxes with
+   the Python acq, or re-register the source or binding with it.
+   **Unblock trigger:** the Bash implementation is retired, or a ledger of
+   imported records is needed.
+2. **Read-only verbs do not import.** `acq ls` and `acq doctor` never migrate,
+   so until the first mutating verb (`run`, `create`, `exec`, ...) a Bash
+   sandbox is listed without its agent and workspace, or not at all.
+   **Unblock trigger:** a report that this confuses users; then have `doctor`
+   warn when Bash state is waiting to be imported.
+3. **Workspaces in MSYS form on Windows.** A workspace Git Bash recorded as
+   `/c/Users/...` is not an absolute native path, so it is dropped and
+   re-attach uses the path typed on the command line. **Unblock trigger:** a
+   Windows host shows Bash recording that form; then translate it.
+4. **Names acq did not generate.** A sandbox name that the Bash key sanitizer
+   changed (any character outside `A-Za-z0-9._-`) cannot be recovered from the
+   file name, so that sandbox is skipped. acq's own names are never affected.
+   **Unblock trigger:** none expected.
 
 ---
 
@@ -215,8 +262,9 @@ call, and reports the sandbox as unconfirmed if either call fails.
 A live msb run that shows what `msb modify NAME --secret-rm ENV` does for a
 variable that is not bound, on a running and on a stopped sandbox. If msb
 succeeds, or fails in a way acq can tell apart, treat that as "confirmed
-unbound", stop blocking, and retire `--accept-unconfirmed`. Reading Bash's provenance records (planned
-Bash-state import) would also turn Bash-created sandboxes into known ones.
+unbound", stop blocking, and retire `--accept-unconfirmed`. The Bash-state import (ADR-0041m generation 2)
+does not help here: Bash records which sandboxes exist, not which secrets each
+one was bound with, so an imported sandbox still has no binding record.
 
 ---
 
@@ -3600,6 +3648,187 @@ A sandbox created under an old name keeps running under it. Reach it with
 `acq run NAME` (or `acq shell`, `acq exec`, `acq stop`), or remove it with
 `acq rm NAME` and run `acq run AGENT PATH` again to create it under the new
 name.
+
+---
+
+## 54. Python acq: No Read-Only Trusted-Config Mount on Windows
+
+**Status:** Accepted limitation (msb, Windows hosts, Python `acq`).
+
+### Symptoms
+
+On Windows, `acq create`/`acq run` report `"ro_host_config": false`, and the msb
+create command carries no `--volume …:/var/lib/acq/host:ro`. A sandbox whose host
+record says `ro_host_config: true` (one seeded by a test, or recorded by an
+earlier build) fails trusted operations with `security_exception`, and the reason
+reads "this platform's msb filesystem backend was not reviewed for read-only
+enforcement". `acq create --recreate NAME --yes` then succeeds and prints a note
+that the mount was not established.
+
+### Root Cause
+
+ADR-0035's guarantee rests on msb enforcing `:ro` on the host. Only msb's POSIX
+filesystem backend was reviewed for that, which is why the Bash adapter never
+relies on the mount on Windows either (`_acq_msb_ro_mount_platform_ok`). The Python
+acq therefore never asks for the mount on Windows, and its probe reports the
+guarantee as `unknown` there.
+
+### Fix
+
+Nothing to fix on the host. Recreate rebuilds the sandbox exactly as a fresh create
+on this host would: without the mount, and with a record that does not claim it,
+so the next `acq run` takes the legacy path instead of failing again. Refusing
+instead would only force `acq rm` and `acq create` for the same result, and
+recording the mount would make recreate loop. An msb older than 0.7.7 on Linux or
+macOS is different: there recreate refuses with "upgrade msb", because upgrading
+does establish the guarantee. Readonly kit files on Windows are copied into the
+guest with a warning (none of the built-in kits declares one today).
+
+The provider-input generation (what OpenCode's renderer reads at
+`ACQ_PROVIDER_INPUT_ROOT`) is not mounted on Windows either, since it would be a
+writable host path without that review, and no warning is printed for it. The
+provider facts are still recorded, the credential gate still runs and keys are
+still probed before attach, but OpenCode keeps its existing provider config.
+The Bash acq does mount it there.
+
+### Prevention / Status
+
+Re-review when msb's Windows filesystem backend is assessed for read-only
+enforcement; enabling it is the `security.WINDOWS` platform check in
+`py-acq/src/acq_py/security.py` and its Bash counterpart.
+
+---
+
+## 55. Python acq on sbx: Kit Gaps Still Open
+
+**Status:** Tracked follow-ups (sbx, Python `acq`).
+
+### Symptoms
+
+The Python acq now creates sbx sandboxes with the built-in kits and the bundled
+agent kit (`acq run opencode .` works), but compared with the Bash acq:
+
+- OpenCode is not pointed at USAi yet. The bundled `opencode` kit's startup
+  renderer reads the provider-input generation at `ACQ_PROVIDER_INPUT_ROOT`; on
+  sbx the Python acq does not prepare or mount it, so the renderer reports
+  `not-ready` and leaves `opencode.jsonc` alone. (On msb it is mounted read-only
+  where msb can enforce that; not on Windows, see section 54.) The provider
+  credential gate and the attach-time key probe do run on sbx.
+- `acq run NAME` re-attaches without the sbx heal. Bash re-runs
+  `acq_backend_ensure_kits_applied` on every re-attach; the Python acq runs the
+  ported heal only for `acq kit update`.
+- Kit-delivered `~/.rc.d/*.sh` snippets are not sourced at login: the post-create
+  bridge Bash writes (`_acq_sbx_ensure_rc_bridge`) is not ported.
+- A kit ref that would have to be fetched (an opt-in catalog kit, a remote or
+  local extra, an unbundled `--kit` ref or provider kit) is refused before create
+  with `unsupported_capability`, as on msb.
+
+### Root Cause
+
+These pieces belong to other parts of the port (provider inputs, re-attach
+healing, the login-profile bridge, a SHA-verified kit fetch). The Python acq
+passes sbx only local, translated kit directories, so it does not need the
+`kit.allowedSources` update Bash makes before create.
+
+### Fix
+
+Use the Bash acq (`ACQ_IMPL=bash`) where any of these matters.
+
+### Prevention / Status
+
+Port provider-input projection, the re-attach heal and the rc bridge with the
+matching msb work, then re-verify live on a host with sbx 0.51 or later: the
+guest has the kit files, the Zscaler CA and OpenCode configured for USAi, the
+startup barrier is reached, and `acq kit update` reports the recreate notice.
+
+The same live run must confirm that sbx keeps what it read at create. The
+Python acq deletes the per-create startup-barrier kit as soon as `sbx create`
+returns and prunes translated kits under `<state>/sbx-kits/` that have not been
+used for a week, while Bash keeps its kit directories forever. So: create a
+sandbox, delete `<state>/sbx-kits/` entirely, `sbx stop` it, start it again
+(`acq run NAME` or `sbx exec`), and confirm the kits' startup commands still
+run (`/tmp/opencode` exists again, and `/tmp/acq/startup-complete` holds the
+create's token). If they do not, keep the kit directories for the sandbox's
+lifetime and remove them in `acq rm`.
+
+## 56. Python acq: Stricter Provider-Credential Gate Than Bash
+
+**Status:** Intended difference (Python `acq`); revisit if a CI flow depends on it.
+
+### Symptoms
+
+- `acq create`/`acq run` fails with `secret_missing` ("`$USAI_API_KEY` is exported
+  on the host, but acq binds only stored credentials") where the Bash acq on msb
+  would bind the exported value.
+- A provider with no pin fails with `validation_failed` ("is not pinned to a
+  host") even though the Bash acq would accept the host recorded for that
+  sandbox at an earlier create.
+- `acq run NAME` fails with `validation_failed` when the sandbox's recorded
+  provider facts no longer match the provider's pin (a re-pin to another host,
+  or an edited record).
+- Without a terminal on stdin, any selected provider with no stored key fails
+  closed; nothing is prompted. On sbx, a key that is in the acq store but not in
+  sbx's own proxy table fails the same way, asking for it to be re-stored.
+
+### Root Cause
+
+Each backend takes its credentials at create: msb binds `--secret ENV@HOST`
+from the acq secret store, and sbx injects from the proxy table it snapshots
+then. Neither Python path reads a value exported in the host environment, so
+accepting one would create a sandbox with a dead credential. The recorded-host
+fallback was not ported: refusing is the safe direction, since acq never lets a
+kit choose where a credential goes.
+
+### Fix
+
+Store the key (`printf '%s' "$KEY" | acq secret set -g usai`) and pin any
+non-default provider (`acq provider-credential set ID KEY_ENV --host HOST`).
+
+### Prevention / Status
+
+Documented in `docs/BACKEND_GUIDE.md` (host pinning) and `py-acq/README.md`.
+The Python gate also lacks Bash's `--no-provider-kits` flag (an explicitly
+empty `ACQ_PROVIDER_KITS` is the equivalent) and does not record the provider
+selection per sandbox, so a later `start` of a sandbox with an incomplete
+binding record uses the current selection.
+
+---
+
+## 57. Python acq: sbx Key Rotation Not Yet Verified Against a Real sbx
+
+**Status:** Deferred live check (sbx, Python `acq`).
+
+### Symptoms
+
+None observed yet. The risk: after `acq usai-rotate-api-key` on sbx, a running
+sandbox keeps getting `401` from USAi because sbx gave its custom secret a new
+placeholder, or added a second entry, instead of updating the existing one.
+
+### Root Cause
+
+sbx has no `rotate` subcommand. The Python acq re-sets each custom secret that
+carries the USAi key with `sbx secret set-custom --host H --env E --placeholder P
+--value-stdin`, so the key goes on stdin. The Bash adapter uses `--placeholder P`
+too, but lets sbx prompt for the value. That `--placeholder` with `--value-stdin`
+updates the entry in place and keeps `P` is modelled by the bundled sbx stub and
+has not been run against a real sbx.
+
+### Fix
+
+The Python acq does not trust it. After each `set-custom` it re-reads `sbx secret
+ls --json` and requires exactly one entry for that scope and env carrying the
+same placeholder. If sbx minted a new placeholder or a duplicate, the entry is
+reported as not re-fed and the command exits 1. To recover a sandbox left with a
+placeholder sbx no longer maps, use the ADR-0008 rebind or recreate it, then
+re-run the rotation.
+
+### Prevention / Status
+
+**Unblock trigger:** the next sbx live qualification run (sbx >= 0.51.0) with a
+host USAi key. Run `acq usai-rotate-api-key` with `ACQ_IMPL=python` against a
+sandbox created with the old key, confirm `sbx secret ls --json` still shows one
+entry with the same placeholder, and that the sandbox reaches USAi with the new
+key on its next attach. Record the transcript, then close this entry.
 
 ---
 

@@ -3,7 +3,7 @@
 The read side (detection + version floor) lives in ``backends.py``; this module
 owns the mutating/lifecycle verbs the seam drives — ``create``, ``list``,
 ``exec`` (readiness probe + agent launch), ``stop``, ``remove``, ``copy``, and
-``ports`` — plus the in-guest ``kit_apply``/``provision_substrate`` (both driven
+``ports`` — plus the in-guest ``kit_exec``/``provision_substrate`` (both driven
 via ``msb exec``) — by invoking the ``msb`` CLI as a subprocess. The adapter reports
 outcomes and never decides trust: sandbox identity, agent, and workspace
 authority stay host-side in the seam (``cli.py`` + ``state.py``), per ADR-0040m
@@ -18,7 +18,8 @@ adapter) and reach a sandbox as ``--secret ENV@HOST`` bindings: on ``create``,
 and on running sandboxes through ``msb modify --secret`` / ``--secret-rm``. msb
 reads each bound value from its own environment, so a secret VALUE reaches the
 msb child only through that environment mapping, never argv or output.
-``rotate_key`` still fails closed with ``unsupported_capability``.
+``usai-rotate-api-key`` stores the new key and re-feeds running sandboxes the
+same way.
 
 The ``msb`` executable is overridable via ``ACQ_MSB_BIN`` for reproducible,
 offline contract vectors. ``__stub__`` routes to the bundled deterministic fake
@@ -32,14 +33,25 @@ import hashlib
 import json
 import ntpath
 import os
+import posixpath
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-from . import errors, hostexec, kits, provider_creds, secretstore, state, timeouts
+from . import (
+    errors,
+    hostexec,
+    kits,
+    provider_creds,
+    provider_input,
+    secretstore,
+    state,
+    timeouts,
+)
 from .secretstore import Scope
 
 STUB_SENTINEL = "__stub__"
@@ -205,7 +217,7 @@ def capability_record(version: str | None = None) -> dict:
             "secret-write": "required",  # acq store + --secret ENV@HOST bindings
             "secret-rm": "required",  # acq store + msb modify --secret-rm
             "secret-list": "required",  # listed from the acq store
-            "key-rotate": "unsupported",  # no `rotate` subcommand on msb
+            "key-rotate": "required",  # acq store + msb modify --secret re-feed
             "key-present": "unsupported",  # sbx-only proxy-table obligation
             "kit-source-revoke": "unsupported",
             "start": "required",  # msb-only
@@ -485,6 +497,7 @@ def create(
     guest_workspace: str | None = None,
     *,
     egress_kits: list[str],
+    kit_flags: list[str] | None = None,
 ) -> list[str]:
     """Create a sandbox; returns its ``ENV@HOST`` secret bindings (non-secret).
 
@@ -500,7 +513,9 @@ def create(
 
     ``egress_kits`` names the kits whose allowlists form the egress policy
     (see :func:`egress_flags`). It is required so no caller can create a sandbox
-    without one; the policy is computed before msb is invoked.
+    without one; the policy is computed before msb is invoked. ``kit_flags`` are
+    the kits' other create-time flags (the read-only host-config mount, the
+    startup script, CA trust), built by :mod:`acq_py.kit_msb`.
 
     Every secret the sandbox can be injected with (:func:`secret_bindings`) is
     bound as ``--secret ENV@HOST``; the values travel only in the child's
@@ -525,6 +540,7 @@ def create(
     if cpus:
         argv += ["-c", cpus]
     argv += egress
+    argv += kit_flags or []
     argv += secret_flags
     argv.append(image)  # positional image (last)
     try:
@@ -588,31 +604,40 @@ def _guest_step(name: str, user: str, step: list[str]) -> bool:
     return proc.returncode == 0
 
 
-def kit_apply(name: str, kit: str, install_cmd: list[str]) -> None:
-    """Apply a kit in-guest (ADR-0040m ``kit-apply``): run the kit's pinned
-    install command inside the sandbox as the unprivileged ``agent`` user.
+def kit_exec(name: str, flags: list[str], argv: list[str]) -> bool:
+    """Run one in-guest kit step (``msb exec FLAGS NAME -- ARGV``); True on success.
 
-    acq never executes kit code on the host (ADR-0038m §46): the install command
-    is data sourced from the pinned control plane and is forwarded verbatim to the
-    backend, which runs it in-guest. The argv is the ``nix profile install
-    …#<agent>`` install — it carries no credential — so nothing sensitive crosses
-    the boundary. The step never reads the user's terminal, runs with the git
-    prompt guards, and is time-bounded (:func:`_guest_step`). Raises
-    :class:`MsbError` on backend failure or timeout.
-
-    Idempotency is a host-authoritative concern (the seam short-circuits a re-apply
-    of an already-applied kit via :func:`acq_py.kits.kit_applied_read`); the
-    backend re-runs a genuinely idempotent install when asked, and the host record
-    is the durable "already applied" signal.
+    The kit engine (:mod:`acq_py.kit_msb`) builds ``flags``: the guest user, the
+    kit environment and the git prompt guards. As for every kit step, stdin is
+    the null device, output is captured, and the step is bounded by
+    :func:`kit_timeout_s`; an overrun raises :class:`MsbError` (``timeout``).
+    acq never runs kit code on the host (ADR-0038m §46): the argv is pinned kit
+    data that msb runs in the guest.
     """
-    # Reconciles with the real msb 0.7.11 CLI: there is NO `kit-apply` subcommand.
-    # The pinned install command runs in-guest via `msb exec -u agent NAME -- …`.
-    if not _guest_step(name, "agent", install_cmd):
+    budget = kit_timeout_s()
+    try:
+        proc = _run(["exec", *flags, name, "--", *argv], timeout=budget)
+    except subprocess.TimeoutExpired as exc:
         raise MsbError(
-            errors.FAILURE,
-            f"could not apply kit '{kit}' to sandbox '{name}'",
-            "check msb logs and retry",
-        )
+            errors.TIMEOUT,
+            f"an in-guest kit step for sandbox '{name}' did not finish within {budget:g}s",
+            f"check network access from the sandbox, or raise {KIT_TIMEOUT_ENV}, then retry",
+        ) from exc
+    return proc.returncode == 0
+
+
+def guest_output(name: str, argv: list[str]) -> str:
+    """Run a read-only probe in the guest as the agent user; its stdout, or "" on failure.
+
+    Used for the attach-time provider key check (:func:`provider_input.check_keys`):
+    the probe's own output carries its verdict, so an exec failure or overrun
+    reads as "no status", which that check treats as a refusal.
+    """
+    try:
+        proc = _run(["exec", "-u", "agent", name, "--", *argv], timeout=60)
+    except subprocess.TimeoutExpired:
+        return ""
+    return proc.stdout or ""
 
 
 def provision_substrate(name: str, steps: list[tuple[str, list[str]]]) -> None:
@@ -869,6 +894,141 @@ def ports(name: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Read-only host-config mount checks (ADR-0035; Bash
+# `_acq_msb_ro_mount_recorded_readonly` and `_acq_msb_host_config_mount_probe`).
+# Enforcement of `:ro` is msb's, on the host. What acq checks is that msb
+# RECORDED this sandbox's mount as read-only, read from the host with `msb
+# inspect` (a guest cannot forge it), plus a guest probe that can only make acq
+# stricter: a guest root controls the probe's tools, so its "denied" answer
+# proves nothing on its own, while a "writable" answer is taken at face value.
+# ---------------------------------------------------------------------------
+
+RO_INSPECT_RETRIES_ENV = "ACQ_MSB_RO_INSPECT_RETRIES"
+RO_INSPECT_SLEEP_ENV = "ACQ_MSB_RO_INSPECT_RETRY_SLEEP"
+
+
+class _NotReady(Exception):
+    """``msb inspect`` reports no active config yet (retried)."""
+
+
+def _norm_guest(path: object) -> str | None:
+    if not isinstance(path, str) or not path.startswith("/"):
+        return None
+    return posixpath.normpath("/" + path.lstrip("/"))
+
+
+def _inspect_mounts(raw: str) -> list[tuple[str, dict]]:
+    """``(guest, mount)`` pairs from ``msb inspect`` JSON; raises ``ValueError`` with a reason."""
+    try:
+        doc = json.loads(raw)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise ValueError("msb inspect output is not valid JSON") from exc
+    if not isinstance(doc, dict):
+        raise ValueError("msb inspect output has an unexpected shape (not an object)")
+    active = doc.get("active_config")
+    if active is None:
+        raise _NotReady("msb reports no active config for the sandbox yet (active_config is null)")
+    if not isinstance(active, dict) or not isinstance(active.get("mounts"), list):
+        raise ValueError("msb inspect active_config has no mounts list")
+    out: list[tuple[str, dict]] = []
+    for mount in active["mounts"]:
+        if not isinstance(mount, dict):
+            raise ValueError("msb inspect lists a mount with an unexpected shape")
+        if mount.get("guest") is None:
+            continue
+        guest = _norm_guest(mount.get("guest"))
+        if guest is None:
+            raise ValueError("msb inspect lists a mount with an unexpected guest path")
+        out.append((guest, mount))
+    return out
+
+
+def _check_ro_mount(entries: list[tuple[str, dict]], guest_dir: str, host_dirs: list[str]) -> None:
+    """Raise ``ValueError`` unless ``guest_dir`` is exactly one read-only Bind of ``host_dirs``."""
+    target = _norm_guest(guest_dir) or guest_dir
+    same = [m for g, m in entries if g == target]
+    if len(same) != 1:
+        raise ValueError(f"msb lists {'no' if not same else 'more than one'} mount at {guest_dir}")
+    mount = same[0]
+    opts = mount.get("options")
+    if mount.get("type") != "Bind":
+        raise ValueError(f"the mount at {guest_dir} is not a Bind mount")
+    if not isinstance(opts, dict) or opts.get("readonly") is not True:
+        raise ValueError(f"msb does not record the mount at {guest_dir} as read-only")
+    host = mount.get("host")
+    if not isinstance(host, str) or not host:
+        raise ValueError(f"the mount at {guest_dir} has no host path")
+    if os.path.realpath(host) not in {os.path.realpath(h) for h in host_dirs}:
+        raise ValueError(f"the mount at {guest_dir} is not backed by this sandbox's acq host config directory")
+    for guest, other in entries:
+        if other is mount:
+            continue
+        if guest == "/" or target.startswith(guest + "/") or guest.startswith(target + "/"):
+            other_opts = other.get("options")
+            if not isinstance(other_opts, dict) or other_opts.get("readonly") is not True:
+                raise ValueError(f"another mount ({guest}) that is not read-only overlaps {guest_dir}")
+
+
+def ro_mount_recorded(name: str, guest_dir: str, host_dirs: list[str]) -> tuple[str, str]:
+    """Whether msb recorded ``guest_dir`` as this sandbox's read-only Bind of ``host_dirs``.
+
+    Returns ``("ok", "")``, ``("missing", reason)`` when msb's record does not
+    show that mount, or ``("unknown", reason)`` when it could not be read. A
+    null ``active_config`` right after boot is retried
+    (:data:`RO_INSPECT_RETRIES_ENV`, default 3, one second apart); anything else
+    fails closed at once. The inspect JSON is never printed.
+    """
+    raw = os.environ.get(RO_INSPECT_RETRIES_ENV, "")
+    tries = max(1, int(raw)) if raw.isascii() and raw.isdigit() else 3
+    reason = "msb reports no active config for the sandbox yet"
+    for attempt in range(tries):
+        if attempt:
+            time.sleep(timeouts.env_seconds(RO_INSPECT_SLEEP_ENV, 1.0))
+        try:
+            proc = _run(["inspect", name, "--format", "json"], timeout=30)
+        except subprocess.TimeoutExpired:
+            return "unknown", "'msb inspect' did not answer, so the recorded mount could not be read"
+        if proc.returncode != 0:
+            return "unknown", "'msb inspect' failed, so the recorded mount could not be read"
+        try:
+            _check_ro_mount(_inspect_mounts(proc.stdout or ""), guest_dir, host_dirs)
+        except _NotReady as exc:
+            reason = str(exc)
+            continue
+        except ValueError as exc:
+            return "missing", str(exc)
+        return "ok", ""
+    return "unknown", reason
+
+
+# Exit 2 only when guest root's write succeeded. A failed redirection on the
+# special builtin ':' ends some shells with status 2, so it runs in a subshell.
+_RO_WRITE_PROBE = (
+    '_dir=$1; _tmp="$_dir/.acq-ro-probe.$$"; '
+    'if ( : > "$_tmp" ) 2>/dev/null; then rm -f "$_tmp" 2>/dev/null; exit 2; fi; exit 0'
+)
+
+
+def ro_mount_guest_probe(name: str, guest_dir: str) -> int:
+    """DIAGNOSTIC: 0 present and not writable by guest root, 1 not confirmed, 2 writable.
+
+    Both checks run as guest root: at create the probe runs before the kits
+    set up the agent user, which a custom image may not have yet.
+    """
+    try:
+        present = _run(["exec", name, "-u", "0", "--", "sh", "-c", 'test -d "$1" && test -x "$1"', "sh", guest_dir],
+                       timeout=30)
+        if present.returncode != 0:
+            return 1
+        write = _run(["exec", name, "-u", "0", "--", "sh", "-c", _RO_WRITE_PROBE, "sh", guest_dir], timeout=30)
+    except subprocess.TimeoutExpired:
+        return 1
+    if write.returncode == 2:
+        return 2
+    return 0 if write.returncode == 0 else 1
+
+
+# ---------------------------------------------------------------------------
 # Credential bindings (Bash `_acq_msb_service_binding`, `_acq_msb_bind_one`,
 # `_acq_msb_bind_secrets_into`). msb keeps no secret store: each secret lives in
 # the acq secret store and is bound per sandbox as ``--secret ENV@HOST``. msb
@@ -1086,9 +1246,19 @@ def held_forget(name: str) -> None:
 
 def _bind_candidates(name: str) -> list[str]:
     """Services a new sandbox may bind, in Bash's order: github, the services
-    with a recorded endpoint (this sandbox's and global), then the providers."""
+    with a recorded endpoint (this sandbox's and global), then the providers.
+
+    The providers honour provider selection (Bash ``acq_provider_delivery_ids``):
+    the registered ones, the usai anchor only while its kit is selected, and
+    those the sandbox's recorded provider facts name. An explicitly empty
+    ``ACQ_PROVIDER_KITS`` binds no provider unless its facts were recorded.
+    """
+    try:
+        providers = provider_input.delivery_ids("msb", name)
+    except provider_input.ProviderInputError as exc:
+        raise MsbError(exc.code, exc.message, exc.remediation) from exc
     out = ["github"]
-    for service in secretstore.meta_list(name) + provider_creds.provider_ids():
+    for service in secretstore.meta_list(name) + providers:
         if service not in out:
             out.append(service)
     return out
@@ -1120,6 +1290,102 @@ def secret_bindings(name: str) -> tuple[list[BoundSecret], dict[str, str]]:
             planned.append(BoundSecret(service, binding, _has_own_value(service, name)))
         value = None
     return planned, env
+
+
+# --- start (resume a stopped sandbox) ---------------------------------------------
+#
+# `msb start` re-reads the `--secret ENV@HOST` bindings the sandbox holds and
+# needs every ENV in its own environment: msb keeps no value across a stop. The
+# values come from the acq store, as at create, and travel only in the child's
+# environment mapping. `secret set` re-feeds running sandboxes only, so once the
+# sandbox runs again :func:`reconcile_bindings` binds what changed meanwhile.
+
+
+def _start_secret_missing(name: str, env: str, service: str) -> MsbError:
+    unreadable = secretstore.unreadable(service, name)
+    return MsbError(
+        errors.SECRET_UNREADABLE if unreadable else errors.SECRET_MISSING,
+        f"sandbox '{name}' binds {env} for '{service}', but no value for '{service}' can be read "
+        "from the acq secret store, so msb cannot start it",
+        f"store it again with 'acq secret set -g {service}' (or 'acq secret set {name} {service}'), then retry",
+    )
+
+
+def _start_env(name: str) -> dict[str, str]:
+    """``{ENV: value}`` for every binding ``msb start`` looks up in its environment.
+
+    A recorded binding gets the value that takes precedence for its service now
+    (the sandbox's own, else the global one). For a sandbox acq has no complete
+    record of, every binding a new sandbox would get is passed as well, as Bash
+    does, since msb may hold any of them. A recorded binding with no readable
+    value raises: msb would refuse to start, and dropping the binding instead
+    could revoke a credential that is only unreadable for now.
+    """
+    rec = held_read(name)
+    out: dict[str, str] = {}
+    if not rec.complete:
+        _planned, out = secret_bindings(name)
+    for env, entry in rec.bindings.items():
+        value = secretstore.resolve(entry["service"], name)
+        if not value:
+            out.clear()
+            raise _start_secret_missing(name, env, entry["service"])
+        out[env] = value
+        value = None
+    return out
+
+
+def start(name: str) -> None:
+    """``msb start NAME`` with the sandbox's bound secrets in the child's environment only.
+
+    Raises :class:`MsbError` when a bound secret has no value or msb fails. The
+    caller then waits for exec-readiness and calls :func:`reconcile_bindings`.
+    """
+    secret_env = _start_env(name)
+    try:
+        proc = _run(["start", name], secret_env=secret_env)
+    finally:
+        secret_env.clear()
+    if proc.returncode != 0:
+        raise MsbError(
+            errors.FAILURE,
+            f"msb start failed for sandbox '{name}'",
+            "check msb logs and retry",
+        )
+
+
+def reconcile_bindings(name: str) -> list[str]:
+    """Bind, in the running sandbox ``name``, what the store gained while it was stopped.
+
+    Each binding a new sandbox would get (:func:`secret_bindings`) that the
+    record does not show is added with ``msb modify`` (:func:`_put`, which first
+    removes a binding it replaces). One whose only change is its scope is just
+    recorded: ``msb start`` already received the value that takes precedence.
+    Nothing is unbound here; that is ``secret rm``'s job. Returns the services
+    that could not be bound.
+    """
+    rec = held_read(name)
+    planned, values = secret_bindings(name)
+    failed: list[str] = []
+    try:
+        for bound in planned:
+            entry = rec.bindings.get(bound.binding.env)
+            if entry == bound.entry():
+                continue
+            if entry is not None and entry["service"] == bound.service and entry["host"] == bound.binding.host:
+                rec.bindings[bound.binding.env] = bound.entry()
+                rec.note(bound.service)
+                rec.save()
+            elif not _put(rec, bound, values[bound.binding.env]):
+                failed.append(bound.service)
+    finally:
+        values.clear()
+    return failed
+
+
+def held_flags(name: str) -> list[str]:
+    """The ``ENV@HOST`` bindings the record shows for ``name`` (no values)."""
+    return sorted(f"{env}@{entry['host']}" for env, entry in held_read(name).bindings.items())
 
 
 # --- secret set ----------------------------------------------------------------
@@ -1548,14 +1814,100 @@ def github_scope(sandbox: str, value: str) -> None:
     secret_set(secretstore.sandbox_scope(sandbox), "github", value)
 
 
-def rotate_key(value: str) -> None:
-    """USAi key rotation fails closed on msb (no ``rotate`` subcommand, ADR-0012).
+# --- usai-rotate-api-key (ADR-0012) ------------------------------------------
+#
+# Rotation is a store write plus a re-feed (plan default: no provider probe; the
+# attach-time key check is the verdict). ``commands/creds.py`` runs the
+# preflight, writes the new key to the acq store, then calls the re-feed, which
+# reads the key back from the store exactly as ``secret set -g`` re-feeds it.
 
-    The new key is never read or placed on argv. Raises :class:`MsbError` with
-    ``unsupported_capability``.
+
+def rotate_preflight(*, primary: bool = True) -> None:
+    """Refuse a rotation msb could never deliver, before anything is stored."""
+    del primary  # the same on msb whether it is the active backend or not
+    if service_binding(provider_creds.USAI_PROVIDER_ID) is None:
+        raise MsbError(
+            errors.VALIDATION_FAILED,
+            "the USAi key has no usable msb binding (its recorded endpoint or provider pin is invalid)",
+            "check it with 'acq secret ls -g' and 'acq provider-credential ls'; nothing was changed",
+        )
+
+
+def rotate_holds_key() -> bool | None:
+    """Whether any sandbox acq recorded holds the USAi key, read from acq's own
+    binding records without running msb (which may be below acq's floor).
+    None when a record cannot be read."""
+    directory = state.state_dir() / "msb-secret-bindings"
+    try:
+        records = sorted(directory.glob("*.json"))
+        docs = [json.loads(path.read_text(encoding="utf-8")) for path in records]
+    except (OSError, ValueError):
+        return None
+    for doc in docs:
+        bindings = doc.get("bindings") if isinstance(doc, dict) else None
+        if not isinstance(bindings, dict):
+            return None
+        if any(isinstance(e, dict) and e.get("service") == provider_creds.USAI_PROVIDER_ID for e in bindings.values()):
+            return True
+    return False
+
+
+def _rotate_one(service: str, sandbox: str) -> str | None:
+    """Re-feed the stored global key to one running sandbox.
+
+    Returns None when it was re-fed, ``"kept"`` when the sandbox has its own
+    value, ``"skipped"`` when the variable is bound there for another service
+    (warned, as :func:`_refeed` does), or the reason it was not re-fed. Any
+    failure is confined to this sandbox.
     """
-    raise MsbError(
-        errors.UNSUPPORTED,
-        "USAi key rotation is not supported on the msb backend",
-        "store the new key with 'acq secret set -g usai' (value on stdin); running sandboxes are re-fed",
-    )
+    value = None
+    try:
+        if _has_own_value(service, sandbox):
+            return "kept"
+        binding = service_binding(service, sandbox)
+        value = secretstore.resolve(service, sandbox)
+        if binding is None or not value:
+            return "no injectable value"
+        rec = held_read(sandbox)
+        holder = rec.bindings.get(binding.env)
+        if holder is not None and holder["service"] != service:
+            print(
+                f"acq: warning: the new '{service}' key was not applied to sandbox '{sandbox}': "
+                f"{binding.env} is bound there for '{holder['service']}'",
+                file=sys.stderr,
+            )
+            return "skipped"
+        if not _put(rec, BoundSecret(service, binding, False), value):
+            return "msb modify failed"
+    except (MsbError, secretstore.SecretStoreError) as exc:
+        return exc.message
+    finally:
+        value = None
+    return None
+
+
+def rotate_refeed(value: str, *, primary: bool = True) -> dict:
+    """Push the stored global USAi key to every running sandbox.
+
+    ``value`` is not used: each sandbox gets the key read back from the acq
+    store, and a sandbox with its own ``usai`` value keeps it (``kept_own``).
+    ``primary`` makes no difference on msb, whose re-feed never creates
+    anything beyond the bindings ``secret set -g usai`` would. Stopped
+    sandboxes are not re-fed (``acq start`` passes them the stored key).
+    Returns ``{backend, refed, kept_own, not_refed}``; a sandbox that did not
+    receive the key is listed in ``not_refed`` with the reason, and the rest
+    are still re-fed. Raises :class:`MsbError` only when the running sandboxes
+    cannot be listed.
+    """
+    del value, primary
+    service = provider_creds.USAI_PROVIDER_ID
+    out: dict = {"backend": "msb", "refed": [], "kept_own": [], "not_refed": []}
+    for sandbox in [] if _live_refeed_off() else _running_targets(secretstore.GLOBAL):
+        problem = _rotate_one(service, sandbox)
+        if problem is None:
+            out["refed"].append(sandbox)
+        elif problem == "kept":
+            out["kept_own"].append(sandbox)
+        elif problem != "skipped":
+            out["not_refed"].append(f"{sandbox} ({problem})")
+    return out

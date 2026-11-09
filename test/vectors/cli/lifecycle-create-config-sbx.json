@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "id": "cli/lifecycle-create-config-sbx",
-  "oracle": "spec backend seam / ADR-0038m \u00a7config precedence: with both backends installed and no flag or env, the backend persisted by `backend set` (config.yaml backend: sbx) outranks the msb auto-detect default",
+  "oracle": "spec backend seam / ADR-0038m §config precedence: with both backends installed and no flag or env, the backend persisted by `backend set` (config.yaml backend: sbx) outranks the msb auto-detect default (sbx's own table holds a usai key: the default provider kit is selected, and acq refuses a create whose provider key sbx cannot inject)",
   "tier": 1,
   "backend": null,
   "platform": "any",
@@ -20,7 +20,8 @@
       "ACQ_SBX_VERSION": "0.51.0",
       "ACQ_MSB_BIN": "__stub__",
       "ACQ_MSB_VERSION": "0.7.7",
-      "ACQ_CONFIG_SEED": "backend: sbx"
+      "ACQ_CONFIG_SEED": "backend: sbx",
+      "ACQ_SBX_STUB_CUSTOM_SECRETS": "[{\"scope\": \"global\", \"env\": \"USAI_API_KEY\", \"placeholder\": \"sbx-cs-usai\", \"targets\": [\"api.gsa.usai.gov\"]}]"
     },
     "unset": [
       "ACQ_BACKEND",
@@ -36,7 +37,11 @@
       "ACQ_MSB_STUB_FAIL",
       "ACQ_SBX_INSTALLED",
       "ACQ_MSB_INSTALLED",
-      "ACQ_MIGRATION_LOCK_TIMEOUT"
+      "ACQ_MIGRATION_LOCK_TIMEOUT",
+      "ACQ_SBX_STUB_PROBE",
+      "ACQ_PROVIDER_KITS",
+      "ACQ_PROVIDER_CREDENTIAL_BINDINGS",
+      "ACQ_PROVIDER_CREDENTIAL_SEED"
     ],
     "stdin": "",
     "timeout_ms": 5000

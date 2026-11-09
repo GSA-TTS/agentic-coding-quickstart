@@ -1,12 +1,18 @@
 {
   "schema": 1,
   "id": "cli/lifecycle-create-backend-failure",
-  "oracle": "ADR-0040m raw backend text is never a portable field: a backend-native failure surfaces stable prose, not raw stderr",
+  "oracle": "ADR-0040m raw backend text is never a portable field: a backend-native failure surfaces stable prose, not raw stderr (a usai key is stored first: the default provider kit is selected, and acq refuses an msb create whose provider has no stored key)",
   "tier": 1,
   "backend": null,
   "platform": "any",
   "invoke": {
-    "argv": ["{acq}", "--backend", "msb", "create", "opencode", ".", "--name", "fail-test", "--json"],
+    "argv": [
+      "{python}",
+      "-I",
+      "test/vectors/drivers/seeded-run.py",
+      "[[[\"--backend\",\"msb\",\"secret\",\"set\",\"-g\",\"usai\"],true,0],[[\"--backend\",\"msb\",\"create\",\"opencode\",\".\",\"--name\",\"fail-test\",\"--json\"],false,null]]",
+      "{acq}"
+    ],
     "env": {
       "ACQ_MSB_BIN": "__stub__",
       "ACQ_MSB_VERSION": "0.7.7",
@@ -14,9 +20,21 @@
       "ACQ_SBX_INSTALLED": "0",
       "ACQ_MSB_STUB_FAIL": "create"
     },
-    "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "MSB_HOME", "ACQ_IMAGE", "ACQ_MSB_IMAGE", "ACQ_MSB_STUB_CATALOG", "ACQ_MSB_READY_TIMEOUT"],
-    "stdin": "",
-    "timeout_ms": 5000
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "MSB_HOME",
+      "ACQ_IMAGE",
+      "ACQ_MSB_IMAGE",
+      "ACQ_MSB_STUB_CATALOG",
+      "ACQ_MSB_READY_TIMEOUT",
+      "USAI_API_KEY",
+      "ACQ_PROVIDER_CREDENTIAL_BINDINGS",
+      "ACQ_PROVIDER_CREDENTIAL_SEED",
+      "ACQ_MSB_STUB_PROBE"
+    ],
+    "stdin": "vector-usai-sentinel-08dd",
+    "timeout_ms": 15000
   },
   "expect": {
     "exit": 1,
@@ -33,11 +51,22 @@
       },
       "normalize": []
     },
-    "stderr": {"mode": "exact", "value": "", "normalize": []}
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
   },
   "isolation": {
     "offline": true,
     "ssh_stubs": false,
-    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "ACQ_SECRET_STORE_DIR"]
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME",
+      "ACQ_SECRET_STORE_DIR"
+    ]
   }
 }

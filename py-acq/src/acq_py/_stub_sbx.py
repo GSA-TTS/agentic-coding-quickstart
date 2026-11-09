@@ -12,13 +12,21 @@ Mirrors the real sbx 0.51.0 CLI surface:
 * ``sbx secret set SERVICE [--sandbox NAME]`` (value on stdin, global default),
   ``sbx secret rm SERVICE [--sandbox NAME] -f``, ``sbx secret ls [-g|--sandbox]
   --json``, ``sbx secret rm --placeholder TOKEN [--sandbox NAME] -f``, and ``sbx
-  secret set-custom --host H --env E --value-stdin [--sandbox NAME]`` (value on
-  stdin; a custom secret lands in its own table with a placeholder). Without
+  secret set-custom --host H --env E [--placeholder P] --value-stdin [--sandbox
+  NAME]`` (value on stdin; a custom secret lands in its own table with a
+  placeholder, and ``--placeholder`` naming the existing entry's placeholder
+  updates that entry in place, as rotation relies on). Without
   ``-f``, ``secret rm`` asks ``Remove secret? (y/N)`` and reads the answer from
   stdin; end-of-input is "no" and exits 1. There is NO ``secret has``.
 * ``sbx settings get/set kit.allowedSources`` — the owner-granular kit allowlist
   the adapter's ``kit_source_revoked`` drives (there is no ``kit-source-revoke``
   subcommand).
+* ``sbx create … --kit DIR`` records each kit directory (it must hold a
+  ``spec.yaml``), and ``sbx kit add NAME DIR`` adds one, refusing a kit that
+  declares ``setup.startup`` as sbx 0.38 and later do. A ``sh -c`` exec that
+  tests the startup-barrier file prints ``ready`` when the sandbox was created
+  with the barrier kit holding that token, as the real guest would once its
+  startup commands ran.
 
 The catalog and secret store are backend-native state, not acq authority: acq never
 reads them as configuration (ADR-0040m §trust ownership). They are never secrets and
@@ -53,6 +61,16 @@ RAW_PLACEHOLDERS_ENV = "ACQ_SBX_STUB_RAW_PLACEHOLDERS"
 # placeholder, targets}`` (state only, never a value).
 CUSTOM_SECRETS_ENV = "ACQ_SBX_STUB_CUSTOM_SECRETS"  # nosec B105 # an env var name
 
+# Scopes (comma separated; ``global`` for the global scope) whose ``secret
+# set-custom`` fails, so a vector can exercise a partial rotation.
+FAIL_CUSTOM_SCOPES_ENV = "ACQ_SBX_STUB_FAIL_CUSTOM_SCOPES"
+
+# How ``set-custom --placeholder P`` treats an existing entry, to model an sbx
+# that does not keep the placeholder: unset updates it in place (what rotation
+# relies on), ``mint`` replaces its placeholder with a new one, and
+# ``duplicate`` adds a second entry with a new placeholder.
+PLACEHOLDER_MODE_ENV = "ACQ_SBX_STUB_PLACEHOLDER_MODE"
+
 # ``exec``/``cp`` markers to simulate a real agent writing to stdout/stderr.
 EXEC_MARKER = "[stub sbx exec]"
 COPY_MARKER = "[stub sbx copy]"
@@ -71,6 +89,17 @@ ECHO_EXIT_ENV = "ACQ_SBX_STUB_EXIT_CODE"
 # seed is the initial value only: once a ``settings set`` has written the file,
 # reads return what was written, so the adapter's re-read can verify its write.
 ALLOWED_SOURCES_ENV = "ACQ_SBX_STUB_ALLOWED_SOURCES"
+
+# Kit knobs. ``ACQ_SBX_STUB_BARRIER=stall`` never reports the startup barrier
+# (kit startup that does not finish); ``ACQ_SBX_STUB_KIT_ADD=allow`` accepts a
+# startup-bearing kit in ``kit add`` (an sbx older than 0.38).
+BARRIER_ENV = "ACQ_SBX_STUB_BARRIER"
+KIT_ADD_ENV = "ACQ_SBX_STUB_KIT_ADD"
+BARRIER_FILE = "/tmp/acq/startup-complete"  # nosec B108 # the guest path the barrier kit writes
+STARTUP_REFUSAL = (
+    'ERROR: kit "{name}" declares setup.startup, which the kit-add recreate flow does not yet apply; '
+    "recreate the sandbox from scratch via `sbx rm` + `sbx create --kit`"
+)
 
 
 def _exit_code(env_name: str) -> int:
@@ -214,6 +243,74 @@ def _save_allowed_sources(sources: list[str]) -> None:
     path.write_text(json.dumps(sources, sort_keys=True), encoding="utf-8")
 
 
+def _kits_path() -> Path:
+    return _home() / ".docker-sbx" / "kits.json"
+
+
+def _load_kits() -> dict[str, list[str]]:
+    try:
+        doc = json.loads(_kits_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {k: v for k, v in doc.items() if isinstance(v, list)} if isinstance(doc, dict) else {}
+
+
+def _save_kits(kits: dict[str, list[str]]) -> None:
+    path = _kits_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(kits, sort_keys=True), encoding="utf-8")
+
+
+def _kit_spec(kit_dir: str) -> str | None:
+    try:
+        return (Path(kit_dir) / "spec.yaml").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _kit_dirs(args: list[str]) -> list[str]:
+    return [args[i + 1] for i, a in enumerate(args[:-1]) if a == "--kit"]
+
+
+def _barrier_tokens(kit_dirs: list[str]) -> list[str]:
+    """The tokens the kits' startup commands write to the barrier file (read at create, as sbx does)."""
+    tokens = []
+    for kit_dir in kit_dirs:
+        for line in (_kit_spec(kit_dir) or "").splitlines():
+            if BARRIER_FILE in line and line.count("'") >= 4:
+                tokens.append(line.split("'")[-2])
+    return tokens
+
+
+def _barrier_ready(name: str, script: str) -> bool:
+    """A barrier probe is satisfied when one of the sandbox's kits wrote the token it tests for."""
+    if BARRIER_FILE not in script or os.environ.get(BARRIER_ENV) == "stall":
+        return False
+    return any(f"= '{token}'" in script for token in _load_kits().get(f"{name}#barrier", []))
+
+
+def _kit_add(args: list[str], catalog: dict[str, str]) -> int:
+    """``sbx kit add NAME DIR``."""
+    if _should_fail("kit add"):
+        print(RAW_FAIL_STDERR, file=sys.stderr)
+        return 1
+    name, kit_dir = (args + ["", ""])[:2]
+    if name not in catalog:
+        print(f"sbx: no such sandbox '{name}'", file=sys.stderr)
+        return 1
+    spec = _kit_spec(kit_dir)
+    if spec is None:
+        print(f"sbx: cannot read kit '{kit_dir}'", file=sys.stderr)
+        return 1
+    if "\n  startup:" in spec and os.environ.get(KIT_ADD_ENV) != "allow":
+        print(STARTUP_REFUSAL.format(name=Path(kit_dir).name), file=sys.stderr)
+        return 1
+    kits = _load_kits()
+    kits.setdefault(name, []).append(kit_dir)
+    _save_kits(kits)
+    return 0
+
+
 def _arg_after(args: list[str], flag: str) -> str | None:
     for i, a in enumerate(args):
         if a == flag and i + 1 < len(args):
@@ -350,12 +447,28 @@ def _secret_set_custom(rest: list[str]) -> int:
         print(RAW_FAIL_STDERR, file=sys.stderr)
         return 1
     scope = _secret_scope(rest)
+    if scope in os.environ.get(FAIL_CUSTOM_SCOPES_ENV, "").split(","):
+        print(RAW_FAIL_STDERR, file=sys.stderr)
+        return 1
     entries = _load_custom()
-    if any(e["scope"] == scope and e["env"] == env for e in entries):
+    placeholder = _arg_after(rest, "--placeholder")
+    same = [e for e in entries if e["scope"] == scope and e["env"] == env]
+    mode = os.environ.get(PLACEHOLDER_MODE_ENV, "")
+    if placeholder is not None and same and all(e["placeholder"] == placeholder for e in same):
+        minted = f"{placeholder}-minted"
+        if mode == "duplicate":
+            entries.append({"scope": scope, "env": env, "placeholder": minted, "targets": hosts})
+        for entry in [] if mode == "duplicate" else same:
+            entry["targets"] = hosts  # updated in place: the placeholder is kept
+            entry["placeholder"] = minted if mode == "mint" else placeholder
+        _save_custom(entries)
+        return 0
+    if same:
         print(f"sbx: custom secret for {env} already exists", file=sys.stderr)
         return 1
-    digest = hashlib.sha256(f"{scope}\0{env}".encode()).hexdigest()[:16]
-    entries.append({"scope": scope, "env": env, "placeholder": f"sbx-cs-{digest}", "targets": hosts})
+    if placeholder is None:
+        placeholder = "sbx-cs-" + hashlib.sha256(f"{scope}\0{env}".encode()).hexdigest()[:16]
+    entries.append({"scope": scope, "env": env, "placeholder": placeholder, "targets": hosts})
     _save_custom(entries)
     return 0
 
@@ -550,9 +663,23 @@ def main(argv: list[str]) -> int:
         if name in catalog:
             print(f"sbx: sandbox '{name}' already exists", file=sys.stderr)
             return 1
+        kit_dirs = _kit_dirs(args)
+        if any(_kit_spec(d) is None for d in kit_dirs):
+            print("sbx: a --kit directory has no readable spec.yaml", file=sys.stderr)
+            return 1
         catalog[name] = "running"
         _save(catalog)
+        kits = _load_kits()
+        kits[name] = kit_dirs
+        kits[f"{name}#barrier"] = _barrier_tokens(kit_dirs)
+        _save_kits(kits)
         return 0
+
+    if cmd == "kit":
+        if args[1:2] == ["add"]:
+            return _kit_add(args[2:], catalog)
+        print("sbx: unrecognized kit subcommand", file=sys.stderr)
+        return 1
 
     if cmd == "exec":
         # `sbx exec [-u USER] [-w DIR] [-e K=V] NAME [-- CMD...]` — exit 0 when
@@ -579,10 +706,16 @@ def main(argv: list[str]) -> int:
         if name is None or name not in catalog:
             print(f"sbx: no such sandbox '{name}'", file=sys.stderr)
             return 1
+        if any("%{http_code}" in token for token in command):
+            # acq's provider key probe: answered from ACQ_SBX_STUB_PROBE, never a network call.
+            print(os.environ.get("ACQ_SBX_STUB_PROBE", "200|0"))
+            return 0
         marker = EXEC_MARKER
         if command:
             marker += " " + " ".join(command)
         print(marker)
+        if command[:2] == ["sh", "-c"] and len(command) > 2 and _barrier_ready(name, command[2]):
+            print("ready")
         return _exit_code(EXEC_EXIT_ENV)
 
     if cmd in ("cp", "copy"):

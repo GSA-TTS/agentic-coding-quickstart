@@ -20,6 +20,8 @@ import pytest
 
 from acq_py import cli, config, errors, lock, migration, security, state
 
+pytestmark = pytest.mark.provider_key  # creates msb sandboxes: needs a stored provider key
+
 
 def _env(monkeypatch, tmp_path, *, catalog=None):
     monkeypatch.setenv("ACQ_MSB_BIN", "__stub__")
@@ -88,7 +90,7 @@ def test_forward_migration_in_place(monkeypatch, tmp_path):
     # The .bak.<old_schema> sidecar is deleted once the new record verified.
     assert not path.with_name(path.name + ".bak.0").exists()
     # The generation marker is written LAST, declaring the tree complete.
-    assert migration.read_generation() == migration.TARGET_SCHEMA
+    assert migration.read_generation() == migration.TARGET_GENERATION
 
 
 def test_forward_migration_is_idempotent(monkeypatch, tmp_path):
@@ -119,7 +121,7 @@ def test_crash_converges_idempotent(monkeypatch, tmp_path):
 
     assert state.record_read("msb", "a") is not None  # idempotent no-op
     assert state.record_read("msb", "b") is not None  # now migrated
-    assert migration.read_generation() == migration.TARGET_SCHEMA
+    assert migration.read_generation() == migration.TARGET_GENERATION
 
 
 # ---------------------------------------------------------------------------
@@ -350,7 +352,8 @@ def test_recreate_preserves_host_record(monkeypatch, tmp_path, capsys):
     record = state.record_read("msb", "sec")
     assert record["agent"] == "opencode"
     assert record["workspace"] == workspace
-    assert record.get("ro_host_config") is True
+    # Re-established where this host can have it; never claimed on Windows.
+    assert record.get("ro_host_config") is (True if security.ro_mount_supported() else None)
 
 
 # ---------------------------------------------------------------------------
@@ -413,7 +416,11 @@ def test_attach_fails_closed_when_probe_unset(monkeypatch, tmp_path, capsys):
     assert doc["error"]["code"] == errors.SECURITY_EXCEPTION
 
 
-def test_mount_state_unset_is_unknown():
+def test_mount_state_unset_is_unknown(monkeypatch, tmp_path):
+    # Without the seam the real probe runs; against the stub, a sandbox msb does
+    # not know cannot be inspected, so the guarantee is unconfirmed.
+    monkeypatch.setenv("ACQ_MSB_BIN", "__stub__")
+    monkeypatch.setenv("MSB_HOME", str(tmp_path / "msb-home"))
     assert security.mount_state("msb", "anything") == "unknown"
 
 
@@ -501,7 +508,7 @@ def test_config_migrated_independently_of_generation_marker(monkeypatch, tmp_pat
     _env(monkeypatch, tmp_path)
     _write_record("msb", "legacy", {"name": "legacy", "backend": "msb"})
     migration.migrate_tree()
-    assert migration.read_generation() == migration.TARGET_SCHEMA
+    assert migration.read_generation() == migration.TARGET_GENERATION
 
     # A legacy config.yaml appears after the state tree is already current.
     path = config.config_path()

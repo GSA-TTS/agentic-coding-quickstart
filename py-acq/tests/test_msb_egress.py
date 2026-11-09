@@ -19,7 +19,9 @@ from pathlib import Path
 
 import pytest
 
-from acq_py import cli, errors, kits, msb, state
+from acq_py import cli, errors, kit_msb, kits, kitspec, msb, state
+
+pytestmark = pytest.mark.provider_key  # creates msb sandboxes: needs a stored provider key
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CANONICAL_HOSTS = REPO_ROOT / "acq.backends" / "msb-balanced-hosts.txt"
@@ -84,9 +86,9 @@ def _net_rules(argv):
     return [argv[i + 1] for i, token in enumerate(argv) if token == "--net-rule"]
 
 
-def _assert_refused_before_create(rc, doc, seen):
+def _assert_refused_before_create(rc, doc, seen, code=errors.VALIDATION_FAILED):
     assert rc == errors.EXIT_FAILURE
-    assert doc["error"]["code"] == errors.VALIDATION_FAILED
+    assert doc["error"]["code"] == code
     assert not [argv for argv in seen if argv and argv[0] == "create"]
 
 
@@ -129,6 +131,7 @@ def test_strict_tier_drops_the_baseline_but_keeps_deny_default(monkeypatch, tmp_
         "allow@api.github.com",
         "allow@codeload.github.com",
         "allow@github.com",
+        "allow@registry.npmjs.org",  # the bundled opencode kit's pinned binary
         "allow@dns",
     ]
 
@@ -163,14 +166,16 @@ def test_run_and_shell_agent_also_get_the_policy(monkeypatch, tmp_path, capsys, 
 def test_provider_kit_override_changes_the_kit_hosts(monkeypatch, tmp_path, capsys, calls):
     _env(monkeypatch, tmp_path)
     monkeypatch.setenv("ACQ_PROVIDER_KITS", "")
-    assert kits.egress_kit_names(None) == ["zscaler-ca-certificate", "agentic-coding-playbook", "git-ssh-sign"]
+    assert kit_msb.egress_names(kit_msb.resolve(kitspec.select_kits(None))) == [
+        "zscaler-ca-certificate", "agentic-coding-playbook", "git-ssh-sign",
+    ]
     assert _create(capsys, tmp_path)[0] == 0
     assert "allow@api.gsa.usai.gov" not in _net_rules(_create_argv(calls))
 
 
 def test_egress_kit_order_mirrors_the_bash_kit_list(monkeypatch):
     monkeypatch.delenv("ACQ_PROVIDER_KITS", raising=False)
-    assert kits.egress_kit_names("opencode") == [
+    assert kit_msb.egress_names(kit_msb.resolve(kitspec.select_kits("opencode", env={}))) == [
         "zscaler-ca-certificate",
         "usai-provider",
         "agentic-coding-playbook",
@@ -228,7 +233,8 @@ def test_empty_baseline_is_refused(monkeypatch, tmp_path, capsys, calls):
 def test_unknown_provider_kit_is_refused(monkeypatch, tmp_path, capsys, calls):
     _env(monkeypatch, tmp_path)
     monkeypatch.setenv("ACQ_PROVIDER_KITS", "someone-elses-provider")
-    _assert_refused_before_create(*_create(capsys, tmp_path), calls)
+    # Outside the bundle, the provider kit would have to be fetched: refused.
+    _assert_refused_before_create(*_create(capsys, tmp_path), calls, errors.UNSUPPORTED)
 
 
 def test_stale_kit_allowlist_is_refused(monkeypatch, tmp_path, capsys, calls):
@@ -323,7 +329,10 @@ def test_every_emitted_rule_is_one_well_formed_token(monkeypatch, tmp_path, caps
     assert rules and all(token.fullmatch(rule) for rule in rules), rules
     # Each `--net-rule` consumes exactly the next token; nothing else leaks in.
     flags = [t for t in argv[1:-1] if t.startswith("-")]
-    assert set(flags) <= {"--name", "--volume", "-w", "-m", "-c", "--net-rule", "--net-default-egress", "--tls-intercept"}
+    assert set(flags) <= {
+        "--name", "--volume", "-w", "-m", "-c", "--net-rule", "--net-default-egress", "--tls-intercept",
+        "--script-path", "--trust-host-cas", "--env", "--secret",
+    }
 
 
 # ---------------------------------------------------------------------------

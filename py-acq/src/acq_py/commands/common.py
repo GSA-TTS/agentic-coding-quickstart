@@ -618,8 +618,16 @@ def _trusted_gate(record: dict | None, backend: str, command: str, name: str, em
     """Refuse a trusted operation on a sandbox missing its read-only mount.
 
     Returns an emitted exit code when the record requires the mount and the probe
-    reports it missing (ADR-0035/0041m), else ``None`` to proceed.
+    reports it missing (ADR-0035/0041m), or when the record says the sandbox's
+    kits were never confirmed (a create stopped before its startup barrier and
+    the sandbox could not be removed), else ``None`` to proceed.
     """
+    if record and record.get("kits_unconfirmed"):
+        return _operational_failure(
+            command, errors.FAILURE,
+            f"sandbox '{name}' was created, but acq never confirmed that its kits finished starting",
+            f"remove it with 'acq rm {name}', then create it again", emit_json,
+        )
     try:
         security.assert_trusted(record, backend, name)
     except security.SecurityException as exc:

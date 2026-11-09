@@ -1,0 +1,500 @@
+"""Tier-2 tests for reading and importing the Bash acq's state (ADR-0041m).
+
+The Bash-written fixtures come from sourcing the real writers in
+``acq.backends/common.sh`` into the test's isolated state tree, so the reader is
+checked against what Bash actually writes, not a copy of its format. Those
+tests need bash on a POSIX host; the hand-written fixtures below them run on
+every platform.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from acq_py import (
+    config,
+    kits,
+    kitspec,
+    legacy_bash,
+    lock,
+    migration,
+    provider_creds,
+    state,
+)
+from acq_py.commands import session
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+COMMON_SH = REPO_ROOT / "acq.backends" / "common.sh"
+BASH = shutil.which("bash")
+needs_bash = pytest.mark.skipif(BASH is None or os.name != "posix", reason="needs bash on a POSIX host")
+
+SHA = "0123456789abcdef0123456789abcdef01234567"
+OTHER_SHA = "fedcba9876543210fedcba9876543210fedcba98"
+SOCK = "/home/agent/.acq/ssh-agent.sock"
+
+
+@pytest.fixture
+def tree(tmp_path, monkeypatch):
+    """An isolated state tree: Python state, Bash provenance and config all under tmp_path."""
+    monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("ACQ_PROVENANCE_DIR", str(tmp_path / "provenance"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    for var in ("ACQ_STATE_SEED", "ACQ_CONFIG_SEED", "ACQ_KIT_SOURCE_SEED", "ACQ_PROVIDER_CREDENTIAL_SEED",
+                "ACQ_KIT_PROVENANCE_SEED", "ACQ_KIT_SOURCES", "ACQ_PROVIDER_CREDENTIAL_BINDINGS"):
+        monkeypatch.delenv(var, raising=False)
+    return tmp_path
+
+
+def _bash(script: str, *args: str) -> None:
+    assert BASH is not None
+    proc = subprocess.run(
+        [BASH, "-c", f'source "$1"; shift; {script}', "bash", str(COMMON_SH), *args],
+        capture_output=True, timeout=60, env={**os.environ, "LC_ALL": "C"}, check=False,
+    )
+    assert proc.returncode == 0, proc.stderr.decode()
+
+
+def _bash_sandbox(tree: Path, name: str = "opencode-proj", agent: str = "opencode") -> Path:
+    """Write one msb sandbox's state with the Bash writers; returns its workspace."""
+    workspace = tree / "ws" / name
+    workspace.mkdir(parents=True)
+    kit = tree / "kit"
+    kit.mkdir(exist_ok=True)
+    _bash(
+        'acq_provenance_write msb "$1" "$2" && acq_workspace_record_write msb "$1" "$3" '
+        '&& acq_host_config_write msb "$1" ro-host-config 1 '
+        '&& acq_host_config_write msb "$1" ssh-auth-sock "$4" '
+        '&& ACQ_CLI_KITS=("$5") && acq_cli_kits_write msb "$1"',
+        name, agent, str(workspace), SOCK, str(kit),
+    )
+    return workspace
+
+
+def _bash_config(key: str, value: str) -> None:
+    _bash('_acq_config_write_field "$1" "$2"', key, value)
+
+
+def _snapshot(*roots: Path) -> dict[str, bytes]:
+    out: dict[str, bytes] = {}
+    for root in roots:
+        for path in sorted(root.rglob("*")):
+            if path.is_file():
+                out[str(path)] = path.read_bytes()
+    return out
+
+
+def _python_records(tree: Path) -> dict[str, bytes]:
+    return _snapshot(tree / "state")
+
+
+# ---------------------------------------------------------------------------
+# Readers against Bash-written state.
+# ---------------------------------------------------------------------------
+
+@needs_bash
+def test_reader_parses_what_the_bash_writers_write(tree):
+    workspace = _bash_sandbox(tree)
+    assert legacy_bash.provenance_file("msb", "opencode-proj").is_file()
+    assert legacy_bash.sandbox_names("msb") == ["opencode-proj"]
+    sandbox = legacy_bash.read_sandbox("msb", "opencode-proj")
+    assert sandbox.agent == "opencode"
+    assert sandbox.workspace == str(workspace)
+    assert sandbox.ro_host_config is True
+    assert sandbox.ssh_auth_sock == SOCK
+    assert sandbox.applied_ref == kits.CONTROL_PLANE_REF
+    assert sandbox.applied_at is not None
+    assert legacy_bash.read_cli_kits("msb", "opencode-proj") == ([str(tree / "kit")], [])
+
+
+@needs_bash
+def test_cksum_key_matches_the_bash_writer(tree):
+    for name in ("opencode-proj", "a", "x" * 70, "ünïcode"):
+        _bash('acq_provenance_write msb "$1" shell', name)
+        assert legacy_bash.provenance_file("msb", name).is_file(), name
+
+
+@needs_bash
+@pytest.mark.parametrize("entry", [
+    f"github.com/acme/kits@{SHA}|kits",
+    "github.com/acme/kits",
+    "https://github.com/acme/kits.git@abc|.",
+    "github.com/GSA-TTS/agentic-coding-patterns",
+    "github.com/acme/kits@bad^ref",
+    "github.com/acme/kits|../x",
+    "github.com/acme/kits|/abs",
+    "https://user@github.com/acme/kits",
+    "notarepo",
+])
+def test_kit_source_entry_parses_like_bash(entry):
+    assert BASH is not None
+    proc = subprocess.run(
+        [BASH, "-c", 'source "$1"; _acq_kit_source_parse_entry "$2"', "bash", str(COMMON_SH), entry],
+        capture_output=True, timeout=60, check=False,
+    )
+    if proc.returncode != 0:
+        with pytest.raises(legacy_bash.LegacyParseError):
+            legacy_bash.parse_kit_source_entry(entry)
+        return
+    assert "|".join(legacy_bash.parse_kit_source_entry(entry)) == proc.stdout.decode().strip()
+
+
+@needs_bash
+@pytest.mark.parametrize("pairs", [
+    "opencode-go=OPENCODE_GO_API_KEY@models.example.gov",
+    "a=A_KEY b=B_KEY@h1.example,h2.example",
+    "a=A_KEY@h1.example,",
+    "a=A_KEY@,h1.example",
+    "a=A_KEY@h1.example,,h2.example",
+    "x=USAI_API_KEY",
+    "Bad=KEY",
+    "a=PATH",
+    "a=lower",
+    "novalue",
+    "a=A@HOST.EXAMPLE",
+])
+def test_provider_credential_pairs_parse_like_bash(pairs):
+    assert BASH is not None
+    proc = subprocess.run(
+        [BASH, "-c", 'source "$1"; _acq_provider_credential_parse_pairs src "$2"', "bash", str(COMMON_SH), pairs],
+        capture_output=True, timeout=60, check=False,
+    )
+    if proc.returncode != 0:
+        with pytest.raises(legacy_bash.LegacyParseError):
+            legacy_bash.parse_provider_credential_pairs(pairs)
+        return
+    want = proc.stdout.decode().split()
+    got = [f"{p}={k}" + (f"@{','.join(h)}" if h else "") for p, k, h in
+           legacy_bash.parse_provider_credential_pairs(pairs)]
+    assert got == want
+
+
+# ---------------------------------------------------------------------------
+# The generation-2 import against Bash-written state.
+# ---------------------------------------------------------------------------
+
+def _bash_world(tree: Path) -> Path:
+    workspace = _bash_sandbox(tree)
+    _bash_config("kit_sources", f"github.com/acme/kits@{SHA}|kits")
+    _bash_config("provider_credential_bindings", "opencode-go=OPENCODE_GO_API_KEY@models.example.gov")
+    return workspace
+
+
+@needs_bash
+def test_generation_1_tree_imports_bash_state(tree):
+    workspace = _bash_world(tree)
+    migration.write_generation(migration.RECORDS_GENERATION)
+
+    migration.migrate_tree()
+
+    record = state.record_read("msb", "opencode-proj")
+    assert record is not None
+    assert record["agent"] == "opencode"
+    assert record["workspace"] == str(workspace)
+    assert record["ro_host_config"] is True
+    assert record["ssh_auth_sock"] == SOCK
+    assert kits.provenance_status("msb", "opencode-proj") == "current"
+    assert kits.source_record("github.com/acme/kits") == {
+        "schema": kits.KIT_SCHEMA, "repository": "github.com/acme/kits", "ref": SHA, "directory": "kits",
+    }
+    binding = provider_creds.get_binding("opencode-go")
+    assert binding is not None
+    assert (binding["key_env"], binding["hosts"]) == ("OPENCODE_GO_API_KEY", ["models.example.gov"])
+    assert migration.read_generation() == migration.TARGET_GENERATION
+
+
+@needs_bash
+def test_import_is_idempotent_and_leaves_bash_files_unchanged(tree):
+    _bash_world(tree)
+    bash_before = _snapshot(tree / "provenance", tree / "config")
+
+    migration.migrate_tree()
+    first = _python_records(tree)
+    migration.write_generation(migration.RECORDS_GENERATION)  # force the import to run again
+    migration.migrate_tree()
+
+    assert _python_records(tree) == first
+    # Only the schema marker this acq adds may differ in config.yaml.
+    bash_after = _snapshot(tree / "provenance", tree / "config")
+    cfg = str(config.config_path())
+    assert bash_after[cfg].replace(b"schema: 1\n", b"") == bash_before[cfg]
+    assert {k: v for k, v in bash_after.items() if k != cfg} == {k: v for k, v in bash_before.items() if k != cfg}
+
+
+@needs_bash
+def test_import_never_clobbers_existing_python_records(tree):
+    _bash_world(tree)
+    state.record_write("msb", "opencode-proj", agent="claude", workspace="/elsewhere")
+    kits.set_source("github.com/acme/kits", OTHER_SHA, "other")
+    provider_creds.set_binding("opencode-go", "OTHER_KEY", ["other.example.gov"])
+    before = _python_records(tree)
+
+    migration.migrate_tree()
+
+    after = _python_records(tree)
+    assert {k: v for k, v in after.items() if k in before} == before
+    assert state.record_read("msb", "opencode-proj")["agent"] == "claude"
+    # The Bash bundle ref describes the Bash sandbox, not this acq's: not carried over.
+    assert kits.provenance_read("msb", "opencode-proj") is None
+
+
+@needs_bash
+def test_records_removed_after_the_import_stay_removed(tree):
+    _bash_world(tree)
+    migration.migrate_tree()
+    state.record_remove("msb", "opencode-proj")
+    kits.remove_source("github.com/acme/kits")
+    provider_creds.remove_binding("opencode-go")
+
+    migration.migrate_tree()
+
+    assert state.record_read("msb", "opencode-proj") is None
+    assert kits.source_record("github.com/acme/kits") is None
+    assert provider_creds.get_binding("opencode-go") is None
+
+
+@needs_bash
+def test_imported_ssh_agent_socket_reaches_the_session(tree, monkeypatch):
+    _bash_sandbox(tree)
+    monkeypatch.setattr(session, "host_git_identity_env", list)
+    assert session.session_env_for("msb", "opencode-proj") == []
+
+    migration.migrate_tree()
+
+    assert session.session_env_for("msb", "opencode-proj") == [f"SSH_AUTH_SOCK={SOCK}"]
+
+
+@needs_bash
+def test_provider_kit_resolves_against_imported_bash_kit_sources(tree):
+    _bash_config("kit_sources", f"github.com/acme/kits@{SHA}|kits")
+    _bash_config("provider_kit", "kits/acme-provider")
+    with pytest.raises(kitspec.KitSelectionError):
+        kitspec.provider_kit_ref({})
+
+    migration.migrate_tree()
+
+    assert kitspec.provider_kit_ref({}) == f"git+https://github.com/acme/kits.git#ref={SHA}&dir=kits/acme-provider"
+    assert legacy_bash.provider_kit() == "kits/acme-provider"
+
+
+# ---------------------------------------------------------------------------
+# Hand-written fixtures (every platform).
+# ---------------------------------------------------------------------------
+
+def _bash_file(name: str, suffix: str, text: str, backend: str = "msb") -> Path:
+    path = legacy_bash._backend_dir(backend) / f"{lock.bash_sandbox_key(name)}{suffix}"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _config(text: str) -> None:
+    path = config.config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def test_posix_cksum_known_values():
+    assert legacy_bash.posix_cksum(b"") == 4294967295
+    assert legacy_bash.posix_cksum(b"opencode-proj") == 2856696754
+    assert legacy_bash.sandbox_key("a/b") == f"a_b.{legacy_bash.posix_cksum(b'a/b')}"
+
+
+def test_env_parse_first_key_wins_and_workspace_needs_host_source(tree):
+    _bash_file("box", ".env", "agent=shell\nagent=opencode\nworkspace=/w\nnoequals\n")
+    assert legacy_bash.provenance_field("msb", "box", "agent") == "shell"
+    assert legacy_bash.workspace_record_read("msb", "box") is None
+    _bash_file("box", ".env", "workspace_source=host\nworkspace=/w\n")
+    assert legacy_bash.workspace_record_read("msb", "box") == "/w"
+
+
+def test_unsafe_fields_are_dropped(tree):
+    _bash_file("box", ".env", "agent=Bad;x\nworkspace_source=host\nworkspace=relative/dir\n"
+               "applied_ref=a b\napplied_at=yesterday\n")
+    config_dir = legacy_bash.host_config_dir("msb", "box")
+    config_dir.mkdir()
+    (config_dir / "ssh-auth-sock").write_text("/home/agent/x;rm -rf ~", encoding="utf-8")
+    (config_dir / "ro-host-config").write_text("yes", encoding="utf-8")
+    sandbox = legacy_bash.read_sandbox("msb", "box")
+    assert (sandbox.agent, sandbox.workspace, sandbox.ssh_auth_sock) == (None, None, None)
+    assert (sandbox.applied_ref, sandbox.applied_at, sandbox.ro_host_config) == (None, None, False)
+    assert legacy_bash.host_config_read("msb", "box", "../escape") is None
+
+
+def test_agent_falls_back_to_the_host_config_key(tree):
+    config_dir = legacy_bash.host_config_dir("msb", "box")
+    config_dir.mkdir(parents=True)
+    (config_dir / "agent").write_text("claude\n", encoding="utf-8")
+    assert legacy_bash.read_sandbox("msb", "box").agent == "claude"
+
+
+def test_names_that_sanitizing_changed_are_skipped(tree):
+    _bash_file("a/b", ".env", "agent=shell\n")  # stored as a_b.<cksum of 'a/b'>
+    _bash_file("good", ".kits", "schema=1\n")
+    (legacy_bash._backend_dir("msb") / "stray.txt").write_text("x", encoding="utf-8")
+    (legacy_bash._backend_dir("msb") / "box.123.env").write_text("agent=shell\n", encoding="utf-8")
+    assert legacy_bash.sandbox_names("msb") == ["good"]
+    assert legacy_bash.sandbox_names("sbx") == []
+
+
+def test_cli_kits_relative_refs_are_skipped(tree):
+    _bash_file("box", ".kits", "schema=1\nkit=rel/kit\nextra=git+https://h/o/r.git\nkit=/abs\nkit=\n")
+    warnings: list[str] = []
+    assert legacy_bash.read_cli_kits("msb", "box", warnings.append) == (["/abs"], ["git+https://h/o/r.git"])
+    assert warnings and "rel/kit" in warnings[0]
+    assert legacy_bash.read_cli_kits("msb", "absent") is None
+
+
+def test_config_key_readers(tree):
+    _config("kit_sources: none\nextra_kits: paseo openchamber\n")
+    assert legacy_bash.kit_sources() == []
+    assert legacy_bash.extra_kits() == ["paseo", "openchamber"]
+    assert legacy_bash.provider_kit() is None
+    assert legacy_bash.provider_credential_bindings() == []
+
+
+def test_import_sbx_sandbox_from_hand_written_record(tree, capsys):
+    _bash_file("shell-ws", ".env", "schema=1\nbackend=sbx\nagent=shell\napplied_ref=abc\n", backend="sbx")
+    legacy_bash.host_config_dir("sbx", "half-made").mkdir(parents=True)
+
+    migration.migrate_tree()
+
+    record = state.record_read("sbx", "shell-ws")
+    assert record is not None
+    assert (record["agent"], record["workspace"], record["imported_from"]) == ("shell", None, "bash")
+    assert "ro_host_config" not in record and "ssh_auth_sock" not in record
+    assert kits.provenance_status("sbx", "shell-ws") == "stale"
+    assert state.record_read("sbx", "half-made") is None  # a create that never finished
+    assert "imported 1 sandbox record(s)" in capsys.readouterr().err
+
+
+def test_bad_config_lists_wait_at_generation_1_until_fixed(tree, capsys):
+    _bash_file("box", ".env", "agent=shell\n")
+    _config(f"kit_sources: github.com/acme/kits@{SHA} notarepo\n"
+            "provider_credential_bindings: good=GOOD_KEY bad\n")
+
+    for _ in range(2):  # every mutating run warns again; nothing is dropped for good
+        migration.migrate_tree()
+        assert kits.list_source_records() == []
+        assert provider_creds.get_binding("good") is None
+        assert migration.read_generation() == migration.RECORDS_GENERATION
+        err = capsys.readouterr().err
+        assert "kit_sources was not imported" in err
+        assert "provider_credential_bindings was not imported" in err
+    # The sandbox part completed on the first run and is not run again.
+    assert migration.read_import_done() == {"sandboxes"}
+    state.record_remove("msb", "box")
+
+    _config(f"kit_sources: github.com/acme/kits@{SHA}\nprovider_credential_bindings: good=GOOD_KEY\n")
+    migration.migrate_tree()
+
+    assert [r["repository"] for r in kits.list_source_records()] == ["github.com/acme/kits"]
+    assert provider_creds.get_binding("good")["key_env"] == "GOOD_KEY"
+    assert state.record_read("msb", "box") is None  # removed after its import: stays removed
+    assert migration.read_generation() == migration.TARGET_GENERATION
+    assert migration.read_import_done() == set()
+    assert "was not imported" not in capsys.readouterr().err
+
+
+def test_mutable_empty_refs_and_the_control_plane_are_not_imported(tree, capsys):
+    _config("kit_sources: github.com/acme/kits@main github.com/GSA-TTS/agentic-coding-patterns "
+            f"github.com/acme/unpinned github.com/acme/pinned@{SHA}\n")
+    migration.migrate_tree()
+    assert [r["repository"] for r in kits.list_source_records()] == ["github.com/acme/pinned"]
+    err = capsys.readouterr().err
+    assert "'github.com/acme/kits' was not imported: ref 'main'" in err
+    assert "'github.com/acme/unpinned' was not imported: ref ''" in err
+    assert migration.read_generation() == migration.TARGET_GENERATION
+
+
+def test_ro_host_config_with_trailing_newline_is_required(tree):
+    _bash_file("box", ".env", "agent=shell\n")
+    config_dir = legacy_bash.host_config_dir("msb", "box")
+    config_dir.mkdir()
+    (config_dir / "ro-host-config").write_bytes(b"1\n\n")
+    assert legacy_bash.read_sandbox("msb", "box").ro_host_config is True
+    (config_dir / "ro-host-config").write_bytes(b"1\r\n")
+    assert legacy_bash.read_sandbox("msb", "box").ro_host_config is False  # as Bash compares it
+
+
+def test_duplicate_provider_ids_keep_the_last_entry(tree):
+    _config("provider_credential_bindings: a=FIRST_KEY@one.example b=B_KEY a=LAST_KEY@two.example\n")
+    assert legacy_bash.provider_credential_bindings() == [
+        ("a", "LAST_KEY", ["two.example"]), ("b", "B_KEY", []),
+    ]
+    migration.migrate_tree()
+    binding = provider_creds.get_binding("a")
+    assert (binding["key_env"], binding["hosts"]) == ("LAST_KEY", ["two.example"])
+
+
+def test_parse_env_splits_lines_like_awk():
+    assert legacy_bash.parse_env("agent=sh\x1cworkspace=/x\nworkspace_source=host\r\n") == {
+        "agent": "sh\x1cworkspace=/x", "workspace_source": "host\r",
+    }
+
+
+def test_provenance_is_retried_after_a_crash_between_record_and_provenance(tree, monkeypatch):
+    _bash_file("box", ".env", f"agent=shell\napplied_ref={kits.CONTROL_PLANE_REF}\n")
+
+    def crash(*args, **kwargs):
+        raise OSError("simulated crash")
+
+    with monkeypatch.context() as m:
+        m.setattr(kits, "provenance_import", crash)
+        with pytest.raises(migration.MigrationError):
+            migration.migrate_tree()
+    assert state.record_read("msb", "box")["imported_from"] == "bash"
+    assert kits.provenance_read("msb", "box") is None
+    assert migration.read_generation() == migration.RECORDS_GENERATION
+
+    migration.migrate_tree()
+
+    assert kits.provenance_status("msb", "box") == "current"
+    assert migration.read_generation() == migration.TARGET_GENERATION
+
+
+def test_fresh_tree_without_bash_state_is_quiet(tree, capsys):
+    migration.migrate_tree()
+    assert migration.read_generation() == migration.TARGET_GENERATION
+    assert capsys.readouterr().err == ""
+    assert not (tree / "state" / "msb").exists()
+
+
+def test_atomic_create_never_replaces(tree):
+    path = tree / "state" / "x.json"
+    assert state.atomic_create_text(path, "one\n") is True
+    assert state.atomic_create_text(path, "two\n") is False
+    assert path.read_text(encoding="utf-8") == "one\n"
+    assert [p.name for p in path.parent.iterdir()] == ["x.json"]  # no temp file left
+
+
+def test_atomic_create_without_hard_links(tree, monkeypatch):
+    def no_link(src, dst):
+        raise OSError("hard links not supported")
+
+    monkeypatch.setattr(state.os, "link", no_link)
+    path = tree / "state" / "y.json"
+    assert state.atomic_create_text(path, "one\n") is True
+    assert state.atomic_create_text(path, "two\n") is False
+    assert path.read_text(encoding="utf-8") == "one\n"
+
+
+def test_import_binding_validates(tree):
+    with pytest.raises(ValueError):
+        provider_creds.import_binding("Bad", "KEY", [])
+    assert provider_creds.import_binding("ok", "OK_KEY", ["h.example"]) is True
+    assert provider_creds.import_binding("ok", "OTHER_KEY", []) is False
+    assert json.loads(provider_creds._binding_path("ok").read_text(encoding="utf-8"))["key_env"] == "OK_KEY"
+
+
+def test_relative_provenance_dir_fails_the_migration_closed(tree, monkeypatch):
+    monkeypatch.setenv("ACQ_PROVENANCE_DIR", "relative/dir")
+    with pytest.raises(migration.MigrationError) as info:
+        migration.migrate_tree()
+    assert info.value.code == "migration_failed"
+    assert migration.read_generation() == migration.RECORDS_GENERATION

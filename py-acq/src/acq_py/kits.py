@@ -14,14 +14,13 @@ This is the kit-source registry + kit-inspection layer only. It owns:
   deterministic ``discovery_status`` without network (ADR-0038m §48 explicit
   best-effort discovery status);
 * minimal structural **kit validation** (ADR-0038m §kit validate);
-* the **built-in agent-kit registry** (ADR-0030) — the pinned-by-content install
-  argv and declared entrypoint for each built-in agent kit, plus the
-  host-authoritative per-sandbox applied-kit record that makes ``kit apply``
-  idempotent and re-runnable.
+* the **built-in agent-kit registry** (ADR-0030) — the declared entrypoint of
+  each built-in agent kit, plus the host-authoritative per-sandbox applied-kit
+  record that makes ``kit apply`` idempotent and re-runnable.
 
-This module still never executes kit code (on the host or in the guest): the
-install argv is data forwarded through the backend seam, which runs it in-guest
-via the ``kit-apply`` capability (ADR-0040m).
+This module never executes kit code (on the host or in the guest): the msb
+adapter's kit engine (``kit_msb``) applies the bundled kits in-guest via the
+``kit-apply`` capability (ADR-0040m).
 
 Trusted-source policy (ADR-0030 §"Agent kit inference", ADR-0038m §46 "durable
 trust is repository-granular"): only the built-in bundle participates in implicit
@@ -79,37 +78,16 @@ BUILTIN_NEUTRAL_NAMES = tuple(n for n in BUILTIN_KIT_NAMES if n not in PROVIDER_
 # ---------------------------------------------------------------------------
 # Built-in agent kits (ADR-0030). An agent kit installs or exposes an agent
 # harness, declares its entrypoint, and renders that harness's configuration
-# from provider facts. The install step is pinned by content: a
-# ``nix profile install github:NixOS/nixpkgs/<rev>#<agent>`` at the substrate's
-# declared rev (content-hashed, cached, and identical across arches) — never a
-# mutable ``npm install -g …@latest`` fallback (ADR-0030 "Agent install
-# contract"). Only ``opencode`` is a built-in agent kit today; the other known
-# agents select no agent kit but still land on the devenv base (spec
-# implementation decision #4).
+# from provider facts. The kit itself is the bundled Patterns kit of the same
+# name (``kitspec.AGENT_BUNDLE_KITS``), applied in-guest like every other kit:
+# the opencode kit installs a pinned, SHA-256-verified binary, as Bash does.
+# Only ``opencode`` is a built-in agent kit today; the other known agents
+# select no agent kit but still land on the devenv base (spec implementation
+# decision #4).
 # ---------------------------------------------------------------------------
 
-# The nixpkgs rev an agent kit installs its binary at (ADR-0030 "substrate
-# contract"): the install is content-hashed, cached, and identical across arches
-# because it pins a full rev, never a mutable branch/tag. TODO(quarterly): this is
-# a real, reproducible pin — re-reviewed on the quarterly cadence (ADR-0030). It
-# is sourced from the substrate's declared NIXPKGS_REV (nixos-26.05) in
-# ``integrations/isolation/images/devenv/`` and upstream ``acq.backends/agents.sh``;
-# the offline path treats it as opaque data (the install argv is never executed
-# here).
-OPENCODE_NIXPKGS_REV = "0d9e9b832d03ac387417e16ce1febf73b2e631e1"
-
-# Built-in agent kits: kit name -> (pinned install argv, entrypoint).
-AGENT_KITS: dict[str, tuple[list[str], str]] = {
-    "opencode": (
-        [
-            "nix",
-            "profile",
-            "install",
-            f"github:NixOS/nixpkgs/{OPENCODE_NIXPKGS_REV}#opencode",
-        ],
-        "opencode",
-    ),
-}
+# Built-in agent kits: kit name -> the entrypoint its spec declares.
+AGENT_KITS: dict[str, str] = {"opencode": "opencode"}
 
 AGENT_KIT_NAMES = tuple(AGENT_KITS)
 
@@ -130,8 +108,8 @@ AGENT_KIT_NAMES = tuple(AGENT_KITS)
 # the msb adapter then refuses to create a sandbox instead of applying a stale
 # allowlist (fail closed).
 #
-# ``opencode`` here is the Python agent kit (the pinned ``nix profile install``
-# argv in ``AGENT_KITS``), which declares no egress of its own.
+# ``opencode`` is the bundled Patterns agent kit, which fetches its pinned,
+# SHA-256-verified binary from npm's registry (what Bash applies too).
 # ---------------------------------------------------------------------------
 KIT_NETWORK_ALLOW_REF = "941a286f912b99475429c3c00db49a99af5b241e"
 KIT_NETWORK_ALLOW: dict[str, tuple[str, ...]] = {
@@ -143,26 +121,8 @@ KIT_NETWORK_ALLOW: dict[str, tuple[str, ...]] = {
         "github.com:443",
     ),
     "git-ssh-sign": (),
-    "opencode": (),
+    "opencode": ("registry.npmjs.org",),
 }
-
-
-def egress_kit_names(agent_kit: str | None) -> list[str]:
-    """The kits whose network allowances make up a new sandbox's egress policy.
-
-    Mirrors the Bash kit list (``_acq_selected_support_kit_refs`` then the
-    agent kit), in the same order: CA trust, the provider kit(s), the playbook,
-    git signing, then the agent kit when one is selected. The built-in kits are
-    part of the policy even though this create path does not apply them yet:
-    egress is fixed when the sandbox is created, and both implementations should
-    produce the same policy for the same selection. Extra (team/personal) kits
-    are left out because this path does not apply them and cannot resolve them
-    without a network fetch. Leaving them out allows less, never more.
-    """
-    names = ["zscaler-ca-certificate", *provider_kits(), "agentic-coding-playbook", "git-ssh-sign"]
-    if agent_kit is not None:
-        names.append(agent_kit)
-    return names
 
 
 def agent_kit_for(agent: str) -> str | None:
@@ -186,14 +146,9 @@ def is_agent_kit(name: str) -> bool:
     return name in AGENT_KITS
 
 
-def agent_kit_install(name: str) -> list[str]:
-    """The pinned-by-content install argv for a built-in agent kit (ADR-0030)."""
-    return list(AGENT_KITS[name][0])
-
-
 def agent_kit_entrypoint(name: str) -> str:
     """The entrypoint a built-in agent kit declares (the installed binary)."""
-    return AGENT_KITS[name][1]
+    return AGENT_KITS[name]
 
 
 # State-schema version of the records this module writes (ADR-0041m). Distinct
@@ -504,6 +459,17 @@ def set_source(repo: str, ref: str, directory: str) -> str:
     return "updated" if existed else "added"
 
 
+def import_source(repo: str, ref: str, directory: str) -> bool:
+    """Register a source carried over from the Bash acq's ``kit_sources``; True when written.
+
+    Used only by the forward migration. A source already in the registry (in
+    any state) is left as it is, so a later ``kit-source add``/``rm`` made with
+    this acq is never undone by the import.
+    """
+    doc = {"schema": KIT_SCHEMA, "repository": repo, "ref": ref, "directory": directory}
+    return state.atomic_create_text(_source_path(repo), json.dumps(doc, indent=2, sort_keys=False) + "\n")
+
+
 def remove_source(repo: str) -> bool:
     """Remove one registered source; returns ``True`` when it was present."""
     if source_record(repo) is None:
@@ -668,10 +634,9 @@ def provenance_status(backend: str, sandbox: str) -> str:
 def provenance_write(backend: str, sandbox: str) -> dict:
     """Record a successful bundle reapply (ADR-0016: only after success).
 
-    This writes ``applied_ref``, the only currency signal ``kit check`` reads. It
-    is reserved for the kit-apply slice (deferred): ``kit update`` must NOT call
-    it — ``kit update`` records *consent* via :func:`consent_write` and never
-    claims currency (ADR-0038m §3 drops false partial success).
+    This writes ``applied_ref``, the only currency signal ``kit check`` reads.
+    Callers write it only after every built-in kit applied in full (create, run
+    and ``kit update``), never on a partial apply (ADR-0038m §3).
     """
     doc = {
         "schema": KIT_SCHEMA,
@@ -682,6 +647,32 @@ def provenance_write(backend: str, sandbox: str) -> dict:
     }
     _atomic_write(_provenance_path(backend, sandbox), doc)
     return doc
+
+
+def provenance_import(backend: str, sandbox: str, applied_ref: str, recorded_at: str | None) -> bool:
+    """Carry over the bundle ref the Bash acq recorded for a sandbox; True when written.
+
+    Used only by the forward migration, so ``kit check`` reports a Bash-created
+    sandbox as current or stale instead of unknown. An existing record is never
+    replaced.
+    """
+    doc = {"schema": KIT_SCHEMA, "backend": backend, "sandbox": sandbox, "applied_ref": applied_ref}
+    if recorded_at:
+        doc["recorded_at"] = recorded_at
+    data = json.dumps(doc, indent=2, sort_keys=False) + "\n"
+    return state.atomic_create_text(_provenance_path(backend, sandbox), data)
+
+
+def provenance_remove(backend: str, sandbox: str) -> None:
+    """Drop a sandbox's provenance record (best-effort; absent is a no-op).
+
+    Used whenever the guest it describes is gone or brand new, so a record left
+    by an earlier sandbox of the same name never reports a new guest current.
+    """
+    try:
+        _provenance_path(backend, sandbox).unlink()
+    except OSError:
+        pass
 
 
 def _consent_dir() -> Path:

@@ -20,12 +20,27 @@ from pathlib import Path
 
 import pytest
 
-from acq_py import cli, kits, msb, state
+from acq_py import cli, kit_msb, kits, kitspec, msb, state
 from acq_py.commands import common as commands_common
+
+pytestmark = pytest.mark.provider_key  # creates msb sandboxes: needs a stored provider key
 
 FULL_REF = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"  # 40-char SHA-1 (synthetic)
 TEAM_REPO = "github.com/acme/team-kits"
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _spy_run(monkeypatch) -> list[list[str]]:
+    """Record the argv of every msb command the adapter runs (the stub still runs)."""
+    seen: list[list[str]] = []
+    real = msb._run
+
+    def spy(argv, **kwargs):
+        seen.append(list(argv))
+        return real(argv, **kwargs)
+
+    monkeypatch.setattr(msb, "_run", spy)
+    return seen
 
 
 def _env(monkeypatch, tmp_path, *, catalog=None, discovery=None):
@@ -289,38 +304,48 @@ def test_kit_update_consent_gate(monkeypatch, tmp_path, capsys):
     assert kits.provenance_read("msb", "mybox") is None
     assert kits.consent_read("msb", "mybox") is None
 
-    # --yes consents and records CONSENT (not applied provenance).
+    # --yes consents and reapplies the bundle in place; provenance follows success.
     rc, doc = _invoke(capsys, "--backend", "msb", "kit", "update", "mybox", "--yes", "--json")
     assert rc == 0
-    assert doc["data"]["action"] == "consent_recorded"
-    assert doc["data"]["status"] == "deferred"
-    assert doc["data"]["consented_ref"] == kits.CONTROL_PLANE_REF
-    # applied_ref is NOT written: kit update never fabricates currency.
-    assert kits.provenance_read("msb", "mybox") is None
-    assert kits.consent_read("msb", "mybox")["consented_ref"] == kits.CONTROL_PLANE_REF
+    assert doc["data"]["action"] == "refreshed"
+    assert doc["data"]["status"] == "current"
+    assert doc["data"]["kits"] == ["zscaler-ca-certificate", "usai-provider", "agentic-coding-playbook", "git-ssh-sign"]
+    assert kits.provenance_read("msb", "mybox")["applied_ref"] == kits.CONTROL_PLANE_REF
 
 
-def test_kit_update_does_not_flip_check_to_current(monkeypatch, tmp_path, capsys):
-    """Mutation-proof guard: kit update must NOT make kit check report current.
+def test_kit_update_failed_reapply_does_not_flip_check_to_current(monkeypatch, tmp_path, capsys):
+    """Mutation-proof guard: only a complete reapply makes kit check report current.
 
-    A stale sandbox stays stale after a consented ``kit update`` (the reapply is
-    deferred), so removing the consent/applied separation flips ``kit check`` to
-    ``current`` and fails this test.
+    A stale sandbox whose reapply fails stays stale (exit 1, provenance
+    untouched); the same update succeeding then flips it to current.
     """
     _env(monkeypatch, tmp_path, catalog={"mybox": "running"})
     _write_provenance(tmp_path, "msb", "mybox", "0" * 40)  # stale
-
-    rc, doc = _invoke(capsys, "--backend", "msb", "kit", "check", "mybox", "--json")
-    assert rc == 0
-    assert doc["data"]["status"] == "stale"
+    monkeypatch.setenv("ACQ_MSB_STUB_FAIL", "exec")
 
     rc, doc = _invoke(capsys, "--backend", "msb", "kit", "update", "mybox", "--yes", "--json")
-    assert rc == 0
-    assert doc["data"]["status"] == "deferred"
-
+    assert rc == 1
+    assert doc["error"]["code"] == "failure"
     rc, doc = _invoke(capsys, "--backend", "msb", "kit", "check", "mybox", "--json")
+    assert doc["data"]["status"] == "stale"  # NOT current: the reapply failed
+
+    monkeypatch.delenv("ACQ_MSB_STUB_FAIL")
+    rc, doc = _invoke(capsys, "--backend", "msb", "kit", "update", "mybox", "--yes", "--json")
     assert rc == 0
-    assert doc["data"]["status"] == "stale"  # NOT current — reapply is deferred
+    rc, doc = _invoke(capsys, "--backend", "msb", "kit", "check", "mybox", "--json")
+    assert doc["data"]["status"] == "current"
+
+
+def test_kit_update_forces_install_commands(monkeypatch, tmp_path, capsys):
+    """``kit update`` reruns install-phase commands their run-once marker would skip."""
+    _env(monkeypatch, tmp_path, catalog={"mybox": "running"})
+    seen = _spy_run(monkeypatch)
+    for _ in range(2):
+        _write_provenance(tmp_path, "msb", "mybox", "0" * 40)
+        rc, _doc = _invoke(capsys, "--backend", "msb", "kit", "update", "mybox", "--yes", "--json")
+        assert rc == 0
+    installs = [a for a in seen if a[0] == "exec" and any("git config --system gpg.format ssh" in t for t in a)]
+    assert len(installs) == 2  # git-ssh-sign's install ran on both refreshes
 
 
 def test_kit_update_interactive_decline_records_nothing(monkeypatch, tmp_path, capsys):
@@ -555,30 +580,29 @@ def test_agent_kit_for_builtin_bundle_only(monkeypatch):
     assert kits.is_agent_kit("claude") is False
 
 
-def test_agent_kit_install_pinned_by_content():
-    # Mutation-proof guard: the install step is a content-pinned nix profile
-    # install at a full immutable rev — never the mutable npm fallback the ADR
-    # rejects (ADR-0030 "Agent install contract").
-    argv = kits.agent_kit_install("opencode")
-    assert argv[:3] == ["nix", "profile", "install"]
-    assert argv[-1].endswith("#opencode")
-    assert "npm" not in argv
-    rev = argv[-1].split("/")[-1].split("#")[0]
-    assert kits.is_full_ref(rev)
-    assert kits.agent_kit_entrypoint("opencode") == "opencode"
-
+def test_agent_kit_is_the_pinned_bundled_kit():
+    # Bash parity: the opencode agent kit is the bundled Patterns kit, whose
+    # install fetches a pinned binary and verifies its SHA-256 (never an
+    # unpinned npm install).
+    spec = kitspec.load_bundled_kit("opencode")
+    install = spec.commands_for("install")
+    assert len(install) == 1 and install[0].user == "0"
+    script = install[0].argv[-1]
+    assert "OPENCODE_SHA256_LINUX_X64=" in script and "npm install" not in script
+    assert kits.agent_kit_entrypoint("opencode") == spec.agent_field("entrypoint") == "opencode"
 
 def test_kit_apply_capability_maps_through_seam():
     # Mutation-proof guard: the kit-apply capability maps through the adapter
-    # seam (ADR-0040m) — msb declares it supported (via its capability record,
-    # not the record_fn-is-None fallback), sbx declares it unsupported (fail-closed).
+    # seam (ADR-0040m) — both adapters declare it in their capability records
+    # (not the record_fn-is-None fallback): msb applies kits itself, sbx through
+    # `sbx create --kit` and `sbx kit add`.
     rec = msb.capability_record("0.7.7")
     assert rec["backend"] == "msb"
     assert rec["capabilities"]["kit-apply"] == "required"
     assert rec["capabilities"]["secret-list"] == "required"  # served from the acq store
     assert rec["capabilities"]["key-present"] == "unsupported"  # sbx-only
     assert cli._supports("msb", "kit-apply") is True
-    assert cli._supports("sbx", "kit-apply") is False
+    assert cli._supports("sbx", "kit-apply") is True
 
 
 def test_kit_apply_applies_and_records(monkeypatch, tmp_path, capsys):
@@ -601,7 +625,7 @@ def test_kit_apply_reapply_is_noop(monkeypatch, tmp_path, capsys):
     # install is NOT re-invoked (no duplicate install). The host record gates it.
     _env(monkeypatch, tmp_path, catalog={"mybox": "running"})
     calls: list[tuple] = []
-    monkeypatch.setattr(msb, "kit_apply", lambda *a, **k: calls.append(a) or None)
+    monkeypatch.setattr(kit_msb, "apply_single", lambda *a, **k: calls.append(a) or True)
 
     rc, doc = _invoke(capsys, "--backend", "msb", "kit", "apply", "mybox", "opencode", "--json")
     assert rc == 0
@@ -668,14 +692,34 @@ def test_run_claude_ignores_team_kits(monkeypatch, tmp_path, capsys):
     ws = tmp_path / "workspace"
     ws.mkdir()
     _env(monkeypatch, tmp_path)
-    monkeypatch.setenv("ACQ_EXTRA_KITS", "opencode claude shell")
+    # An extra kit that does provide an agent (the bundled opencode kit) is
+    # applied as an extra, never inferred as claude's agent kit.
+    monkeypatch.setenv("ACQ_EXTRA_KITS", kitspec.builtin_kit_ref("opencode"))
 
     rc, doc = _invoke(capsys, "--backend", "msb", "run", "claude", str(ws), "--name", "cl-box", "--json")
     assert rc == 0
     data = doc["data"]
     assert data["kit"] is None  # claude is not a built-in agent kit
+    assert data["kits"][-1] == "opencode"  # ...but the extra kit was applied
     assert data["image"] == cli.OPENCODE_DEVENV_IMAGE
     assert kits.kit_applied_read("msb", "cl-box") is None
+
+
+def test_run_unfetchable_extra_kits_are_refused_not_ignored(monkeypatch, tmp_path, capsys):
+    # Extra kits the Python acq would have to fetch are refused before create,
+    # never silently dropped.
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_EXTRA_KITS", "opencode claude shell")
+    seen = _spy_run(monkeypatch)
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "run", "claude", str(ws), "--name", "cl-box", "--json")
+    assert rc == 1
+    assert doc["error"]["code"] == "unsupported_capability"
+    assert "'opencode'" in doc["error"]["message"]
+    assert not [a for a in seen if a[0] == "create"]
+    assert state.record_read("msb", "cl-box") is None
 
 
 def test_run_kit_explicit_override_wins(monkeypatch, tmp_path, capsys):
@@ -787,16 +831,35 @@ def test_run_kit_substrate_ok_no_provision(monkeypatch, tmp_path, capsys):
     assert calls == []  # no substrate gaps -> no provision step
 
 
-def test_run_unknown_kit_is_usage_error(monkeypatch, tmp_path, capsys):
-    # Mutation-proof guard: --kit with a non-built-in name is a usage error (exit
-    # 2), never a silent fallback to inference.
+def test_run_unbundled_kit_ref_is_refused(monkeypatch, tmp_path, capsys):
+    # Mutation-proof guard: --kit takes kit refs (Bash semantics); one outside the
+    # built-in bundle would need a fetch, so it is refused before create, never
+    # silently dropped or replaced by inference.
     ws = tmp_path / "workspace"
     ws.mkdir()
     _env(monkeypatch, tmp_path)
 
     rc, doc = _invoke(capsys, "--backend", "msb", "run", "opencode", str(ws), "--name", "oc-box", "--kit", "team-kit", "--json")
-    assert rc == 2
-    assert doc["error"]["code"] == "usage"
+    assert rc == 1
+    assert doc["error"]["code"] == "unsupported_capability"
+    assert state.record_read("msb", "oc-box") is None
+
+
+def test_kit_flag_is_repeatable_and_accepts_bundled_refs(monkeypatch, tmp_path, capsys):
+    # --kit repeats; a bundled ref is applied after the built-ins (here twice the
+    # same kit: applied once), and --kit opencode still selects the agent kit.
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    _env(monkeypatch, tmp_path)
+    ref = kitspec.builtin_kit_ref("git-ssh-sign")
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "run", "shell", str(ws), "--name", "sh-box",
+                      "--kit", "opencode", "--kit", ref, "--json")
+    assert rc == 0
+    assert doc["data"]["kit"] == "opencode"
+    assert doc["data"]["kits"] == [
+        "zscaler-ca-certificate", "usai-provider", "agentic-coding-playbook", "git-ssh-sign", "opencode",
+    ]
 
 
 def test_launch_uses_recorded_entrypoint(monkeypatch, tmp_path, capsys):

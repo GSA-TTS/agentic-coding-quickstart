@@ -82,6 +82,15 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   mount is missing. Explicit and consent-gated — a non-interactive run without
   `--yes` refuses with `consent_required`; host records and secrets are
   preserved, only the guest filesystem is lost.
+* The read-only trusted-config mount (ADR-0035) is msb-only, and POSIX-only. On
+  Linux and macOS with msb 0.7.7 or later, create mounts the sandbox's
+  host-config directory `:ro` and records `ro_host_config` once `msb inspect`
+  and a guest probe confirm it; with an older msb, recreate refuses until msb
+  is upgraded. On Windows, msb's filesystem backend was not reviewed for
+  read-only enforcement, so acq never asks for the mount there: sandboxes are
+  created without it, and `create --recreate` rebuilds a sandbox the same way
+  a fresh create would (`"ro_host_config": false`) instead of refusing or
+  looping. See KNOWN_FAILURE_MODES §54.
 * `acq-py run AGENT PATH [--name N] [--image REF] [--json]` — create (if missing)
   then launch the agent in the foreground; `acq-py run NAME` re-attaches to an
   existing sandbox by name.
@@ -90,16 +99,28 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   slug is the lowercased ASCII letters and digits of the workspace's last path
   component (the root gives `workspace`). An explicit `--name` must match
   `[A-Za-z0-9_-]+` and not start with `-`. Verbs that act on an existing sandbox
-  (`stop`, `rm`, `exec`, `attach`, `shell`, `ports`, `kit apply|check|update`,
-  `create --recreate`) refuse an empty name, `.`, `..`, and names containing `/`,
-  `\` or control characters. A workspace path, and the path its symlinks resolve
-  to, must not contain control characters or `:`. The backends split mount specs
-  on `:`, and acq-py takes no `:ro` suffix. On Windows the colon of a drive letter
-  (`C:\...`) is allowed, because msb's `--volume` source accepts it.
+  (`stop`, `start`, `restart`, `rm`, `exec`, `attach`, `shell`, `ports`,
+  `kit apply|check|update`, `create --recreate`) refuse an empty name, `.`,
+  `..`, and names containing `/`, `\` or control characters. A workspace path,
+  and the path its symlinks resolve to, must not contain control characters or
+  `:`. The backends split mount specs on `:`, and acq-py takes no `:ro` suffix.
+  On Windows the colon of a drive letter (`C:\...`) is allowed, because msb's
+  `--volume` source accepts it.
 * `acq-py ls [--json]` — list sandboxes with `name`/`backend`/`state`
   (ADR-0038m §2).
 * `acq-py stop NAME [--json]` and `acq-py rm NAME [--json]` — stop (state
   preserved) or remove a sandbox and its record.
+* `acq-py start NAME [--json]` and `acq-py restart NAME [--json]` (msb only) —
+  resume a stopped sandbox (`restart` stops it first; a failed stop only warns),
+  under the sandbox's lifecycle lock. `msb start` gets the sandbox's bound
+  secrets from the acq store in its environment only (msb keeps no value across a
+  stop); a recorded binding with no readable value is refused before anything
+  starts. Once the guest is exec-ready, a secret stored while it was stopped is
+  bound with `msb modify`, the read-only trusted-config mount is checked when the
+  record requires it, and the kit set (the recorded agent, image and `.kits`
+  refs) is re-applied so kit startup runs again (ADR-0017). Any failure after
+  the start says the sandbox is running and exits 1. On sbx both fail with
+  `unsupported_capability` and point to `acq run NAME`.
 * `acq-py [--json] exec NAME -- CMD...` — run a command non-interactively inside
   a sandbox as the unprivileged `agent` user; the child's exit status is acq's
   exit status (ADR-0038m §1). In `--json` mode the child's stdout is routed to
@@ -250,9 +271,13 @@ keys, including unknown ones, are kept. Without a terminal (or with
 `ACQ_NO_PROMPT`, `ACQ_NO_PROGRESS` or `--json`) nothing is written; `--json`
 lists each setting as `key`, `value`, `source` and `honoured_by_python`.
 
-**The three keys take effect only under the Bash acq for now.** The Python acq
-does not read `extra_kits`, `provider_kit` or `scope_github_token` yet, so both
-the report and `--json` (`"honoured_by_python": false`) say so.
+**`scope_github_token` takes effect only under the Bash acq for now**, and both
+the report and `--json` (`"honoured_by_python": false`) say so. The Python acq
+reads `extra_kits` and `provider_kit` when it creates a sandbox, but applies
+only kits from its pinned built-in bundle: a kit that would have to be fetched
+(any catalog extra kit today) is refused at create and needs the Bash acq
+(`ACQ_IMPL=bash`). `--json` marks those two settings `"python_applies":
+"bundled-only"`.
 
 Deliberate differences from Bash:
 
@@ -326,6 +351,34 @@ control plane at `CONTROL_PLANE_REF` (`src/acq_py/kits.py`, equal to
 records the ref and each file's git blob id and size; `upstream_mode` is
 informational. `src/acq_py/kitspec.py` parses and selects kits from it, so acq
 never fetches a built-in kit during ordinary operation (ADR-0042m).
+
+On msb, acq applies each kit itself (`src/acq_py/kit_msb.py`). On sbx,
+`src/acq_py/kit_sbx.py` translates each kit into an sbx-v2 kit directory under
+`<state>/sbx-kits/` exactly as Bash `kit_translate_to_sbx` does, adds the host
+git identity kit and a startup-barrier kit, and passes them all to
+`sbx create --kit`; create then waits for the barrier. Until it is seen the
+state record says `kits_unconfirmed`, and every verb that attaches refuses the
+sandbox, so a create that times out or is interrupted and cannot remove the
+sandbox never leaves it attachable. Translated kits are named by content and
+shared between creates; unused ones are pruned after a week. `acq kit apply` and
+`acq kit update` on sbx use `sbx kit add`, which sbx 0.38 and later refuse for
+kits with startup commands, so those report that the sandbox must be recreated.
+`py-acq/tests/test_kit_sbx.py` compares the translator's output with Bash's,
+file by file.
+
+Provider-role kits (`usai-provider`) are handled by `src/acq_py/provider_input.py`.
+Before any create (and before `create --recreate` removes the old guest) acq
+checks each selected provider's facts against its pin and checks that a key is
+stored: on a terminal it asks and stores one, otherwise it fails closed with
+`secret_missing`. This is stricter than Bash: a key exported in the host
+environment is not accepted (store it with `acq secret set -g usai`), and a
+provider with no pin is refused even if a host was recorded earlier (see
+`docs/KNOWN_FAILURE_MODES.md`, section 56). On msb the provider-input generation
+is mounted read-only at `ACQ_PROVIDER_INPUT_ROOT` for OpenCode's renderer. Before
+`run` attaches, each recorded provider's key is probed from inside the guest
+(`provider_auth_failed`, `provider_unreachable`). Tests that create msb
+sandboxes use the `provider_key` pytest marker, which stores a throwaway usai
+key; the stubs answer the probe from `ACQ_MSB_STUB_PROBE` / `ACQ_SBX_STUB_PROBE`.
 
 To bump the pin, change both refs, then regenerate the bundle and commit it
 with the bump:

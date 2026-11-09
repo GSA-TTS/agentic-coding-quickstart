@@ -32,6 +32,15 @@ are the ADR's):
                             ``--host``/``--env``.
     * kit apply (3)       — the guest has the file the pinned usai-provider kit
                             places (``KIT_PROBE_FILE``).
+
+Prerequisite (sbx): the usai-provider kit is selected, and acq refuses a create
+whose provider key the backend cannot inject. On msb the oracle stores a
+throwaway usai key in its private acq store; on sbx the key must be in sbx's
+own proxy table, which the oracle never writes globally (that would overwrite
+the operator's key). So sbx's global table must already hold a ``USAI_API_KEY``
+custom secret for ``api.gsa.usai.gov`` (``acq secret set -g usai`` with the sbx
+backend). The oracle checks ``sbx secret ls --json`` first and reports BLOCKED
+(exit 2) when it is missing or unreadable.
     * read-only trusted   — msb only. In this cell's own guest: the trusted-config
       config mount (1)      mount point (``HOST_CONFIG_GUEST_DIR``) is listed with
                             ``ro`` in ``/proc/mounts``, a write to it (as root when
@@ -473,6 +482,14 @@ class Cell:
         self.bound = proc is not None and proc.returncode == 0
         if self.check("provider-credential set", proc):
             self.check("provider-credential ls", self.call(self._b("provider-credential", "ls", "--json")))
+        if self.backend == "msb":
+            # The default usai provider kit is selected, and acq refuses an msb
+            # create whose provider has no stored key (msb binds keys only at
+            # create). The throwaway value lives in this run's isolated store.
+            # On sbx acq checks sbx's own table instead, which this script never
+            # writes globally: main() preflights it (see the module docstring).
+            self.check("secret set usai", self.call(self._b("secret", "set", "-g", "usai", "--json"),
+                                                    stdin=n.value + "\n"))
 
     def boot(self) -> bool:
         """oracle 3: create/ls/exec. Returns False (and stops the run) on any failure."""
@@ -688,6 +705,29 @@ class Cell:
             remove_sbx_custom_secrets(self.raw, {n.key_env, n.secret_env})
 
 
+USAI_KEY_ENV = "USAI_API_KEY"
+USAI_HOST = "api.gsa.usai.gov"
+
+
+def sbx_usai_key_present(raw: Run) -> bool | None:
+    """True when sbx's global table holds a USAI_API_KEY custom secret for the
+    USAi host, False when it does not, None when the listing cannot be read.
+    Reads names and targets only; ``secret`` is masked by sbx."""
+    proc = raw(["sbx", "secret", "ls", "--json"], timeout=STEP_TIMEOUT)
+    try:
+        doc = json.loads(proc.stdout) if proc is not None and proc.returncode == 0 else None
+    except (json.JSONDecodeError, TypeError):
+        return None
+    custom = doc.get("custom_secrets") if isinstance(doc, dict) else None
+    if not isinstance(custom, list):
+        return None
+    return any(
+        isinstance(e, dict) and e.get("scope") == "global" and e.get("env") == USAI_KEY_ENV
+        and USAI_HOST in (e.get("targets") or [])
+        for e in custom
+    )
+
+
 def remove_sbx_custom_secrets(raw: Run, key_envs: set[str]) -> None:
     """Remove the sbx custom secrets whose ``env`` is one of ``key_envs``.
 
@@ -812,6 +852,14 @@ def main(argv: list[str] | None = None) -> int:
                                grace=CANARY_GRACE)
             return (None, "") if proc is None else (proc.returncode, proc.stdout or "")
 
+        if backend == "sbx":
+            present = sbx_usai_key_present(raw)
+            if not present:
+                why = "cannot read 'sbx secret ls --json'" if present is None else (
+                    f"sbx holds no global {USAI_KEY_ENV} secret for {USAI_HOST}")
+                print(f"BLOCKED: usai key: {why}; acq refuses the create without it "
+                      "(store one with 'acq --backend sbx secret set -g usai')", file=sys.stderr)
+                return 2
         cell = Cell(backend, names, str(workspace), Path(env["ACQ_STATE_DIR"]), acq, raw, canary, deadline)
         return cell.run()
 

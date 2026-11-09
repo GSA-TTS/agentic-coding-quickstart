@@ -1238,12 +1238,26 @@ existing record **fails closed**; moving a credential to a new host is an
 explicit re-pin. The gate prompt and `acq provider-credential ls` both show the
 destination host.
 
+> **Python acq is stricter here.** The Python implementation
+> (`py-acq/src/acq_py/provider_input.py`) has no recorded-host fallback: a
+> provider with no pin (other than the shipped `usai` trust anchor) is refused
+> even if a host was recorded for the sandbox, so pin it with
+> `acq provider-credential set`. It also refuses a pin whose `KEY_ENV` differs
+> from the kit's `facts.keyEnv`, and re-checks the recorded facts against the pin
+> before every attach. It validates the bundled provider input in code instead of
+> running the pinned Patterns validator; only the pinned, manifest-verified
+> built-in bundle can be selected there today.
+
 Injection is then data-driven per backend — no provider-specific `acq` code:
 
 | Backend | How `keyEnv@host` is bound at create |
 |---------|--------------------------------------|
 | sbx | a custom proxy secret (`sbx secret set-custom --host … --env …`) derived from the provider's facts; create snapshots the table, so a host-exported value cannot be bound and acq fails closed instead |
-| msb | `--secret ENV@HOST` from the same facts, value resolved out of the acq store (or from a host-exported value, for CI) |
+| msb | `--secret ENV@HOST` from the same facts, value resolved out of the acq store (or, in the Bash acq only, from a host-exported value, for CI) |
+
+The Python acq binds only stored values on both backends, so its gate refuses a
+host-exported key (`secret_missing`, naming `acq secret set -g <providerId>`);
+in CI, store the key first (`printf '%s' "$KEY" | acq secret set -g usai`).
 
 `acq secret set -g <providerId>` stores the value under that provider; the
 injected `providerId`/`keyEnv`/`host`/`modelsUrl` are recorded in the sandbox's

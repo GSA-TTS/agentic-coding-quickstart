@@ -19,8 +19,9 @@ raw-placeholder removal, and the ``kit.allowedSources`` revocation via
 ``rm``), so the secret verbs work here (value on stdin): sbx's built-in services
 through ``secret set``, every other endpoint (usai, providers, ``--host``) through
 ``secret set-custom --value-stdin`` (sbx >= 0.51.0). ``create`` maps to the positional
-``sbx create AGENT [PATH] --name N -t IMAGE`` form and rotation (no ``rotate``
-subcommand) fails closed with ``unsupported_capability``.
+``sbx create AGENT [PATH] --name N -t IMAGE`` form. sbx has no ``rotate``
+subcommand: ``usai-rotate-api-key`` re-sets the key with ``secret set-custom
+--placeholder P --value-stdin``, keeping each entry's placeholder.
 
 The ``sbx`` executable is overridable via ``ACQ_SBX_BIN`` for reproducible, offline
 contract vectors. ``__stub__`` routes to the bundled deterministic fake
@@ -136,7 +137,8 @@ def cli_unavailable() -> SbxError:
 #
 # Reconcile with the real sbx CLI: sbx HAS a ``secret`` subcommand with
 # ``set``/``ls``/``rm`` (so ``secret-list`` is required, not msb-only), but it has
-# NO ``rotate`` subcommand (``key-rotate`` is unsupported) and no ``kit-source-revoke``
+# NO ``rotate`` subcommand (``key-rotate`` is served by ``secret set-custom
+# --placeholder``, version-gated like any custom endpoint) and no ``kit-source-revoke``
 # subcommand — the kit ``allowedSources`` allowlist is managed via
 # ``sbx settings get/set kit.allowedSources``, which ``kit_source_revoked`` drives.
 # ``secret-write`` for a built-in service works from the global floor, but a
@@ -160,11 +162,11 @@ def capability_record(version: str | None = None) -> dict:
             "remove": "required",
             "copy": "required",
             "ports": "required",
-            "kit-apply": "unsupported",  # deferred to the kit-apply slice
+            "kit-apply": "required",  # `create --kit` and `kit add` (acq_py.kit_sbx)
             "secret-write": "required",
             "secret-rm": "required",
             "secret-list": "required",  # sbx has `secret ls`
-            "key-rotate": "unsupported",  # no `rotate` subcommand on sbx
+            "key-rotate": "required",  # secret set-custom --placeholder (sbx >= 0.51.0)
             "key-present": "required",  # sbx-only (via `secret ls --json`)
             "kit-source-revoke": "required",  # sbx-only (via `sbx settings`)
             "start": "unsupported",  # msb-only
@@ -223,6 +225,7 @@ def create(
     memory: str | None = None,
     cpus: str | None = None,
     agent: str | None = None,
+    kit_flags: list[str] | None = None,
 ) -> None:
     """Create a sandbox. Raises :class:`SbxError` on backend failure.
 
@@ -230,7 +233,8 @@ def create(
     the agent and workspace path are *positional*, the name is ``--name``, and the
     container image is ``-t/--template``. ``memory``/``cpus`` are accepted for
     signature parity with :mod:`acq_py.msb` but not forwarded (sbx derives guest
-    sizing from its templates).
+    sizing from its templates). ``kit_flags`` are the ``--kit DIR`` pairs
+    :func:`acq_py.kit_sbx.prepare` built; sbx applies those kits itself.
     """
     argv = ["create"]
     if agent:
@@ -238,6 +242,7 @@ def create(
     argv.append(workspace)
     argv += ["--name", name]
     argv += ["-t", image]
+    argv += kit_flags or []
     proc = _run(argv)
     if proc.returncode != 0:
         raise SbxError(
@@ -254,6 +259,46 @@ def exec_ready(name: str) -> bool:
     except subprocess.TimeoutExpired:
         return False
     return proc.returncode == 0
+
+
+# ``kit_add`` outcomes (Bash ``_acq_sbx_kit_add``).
+KIT_ADD_OK = 0
+KIT_ADD_FAILED = 1
+KIT_ADD_RECREATE = 3
+
+# sbx 0.38 refuses ``kit add`` of a kit that declares setup.startup; these are
+# the phrasings Bash matches (``_acq_sbx_kit_add``). Its stderr is classified
+# only, never shown: raw backend text is not part of acq's output.
+_RECREATE_PHRASES = ("setup.startup", "declares startup", "can only be used when creating a new sandbox",
+                     "create a new sandbox", "recreate the sandbox")
+
+
+def _refused_for_recreate(err: str) -> bool:
+    if any(p in err for p in _RECREATE_PHRASES):
+        return True
+    start = err.find("startup")
+    return start >= 0 and "recreate" in err[start:]
+
+
+def kit_add(name: str, kit_dir: str) -> int:
+    """``sbx kit add NAME DIR``: :data:`KIT_ADD_OK`, :data:`KIT_ADD_RECREATE` or :data:`KIT_ADD_FAILED`."""
+    if not kit_dir:
+        return KIT_ADD_FAILED
+    proc = _run(["kit", "add", name, kit_dir])
+    if proc.returncode == 0:
+        return KIT_ADD_OK
+    return KIT_ADD_RECREATE if _refused_for_recreate(proc.stderr or "") else KIT_ADD_FAILED
+
+
+def exec_capture(name: str, script: str, timeout: float = 30) -> str | None:
+    """``sbx exec NAME -- sh -c SCRIPT`` with stdin closed: its stdout (CRs dropped), or ``None``."""
+    try:
+        proc = _run(["exec", name, "--", "sh", "-c", script], timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None
+    if proc.returncode != 0:
+        return None
+    return (proc.stdout or "").replace("\r", "")
 
 
 def stop(name: str) -> None:
@@ -1033,17 +1078,153 @@ def github_scope(sandbox: str, value: str) -> None:
     secret_feed(scope, "github", value)
 
 
-def rotate_key(value: str) -> None:
-    """USAi key rotation fails closed on sbx (no ``rotate`` subcommand, ADR-0012).
+# --- usai-rotate-api-key (ADR-0012, ADR-0008) ---------------------------------
+#
+# Rotation is a store write plus a re-feed (plan default: no provider probe; the
+# attach-time key check is the verdict). ``commands/creds.py`` runs the
+# preflight, writes the new key to the acq store, then calls the re-feed. sbx
+# keeps the value in its own proxy table, so the re-feed sets it there again,
+# keeping each entry's placeholder: a running sandbox was injected with that
+# placeholder at create, and a new placeholder would leave it unresolvable
+# (ADR-0008). The value is the child's stdin only.
 
-    The new key is never read or placed on argv. Raises :class:`SbxError` with
-    ``unsupported_capability``.
+
+def _rotate_route() -> tuple[list[str], str]:
+    """``(hosts, env)`` the global USAi key is bound to: the endpoint recorded
+    with ``acq secret set -g usai --host H --env E`` when there is one, else the
+    provider binding (the shipped trust anchor by default)."""
+    service = provider_creds.USAI_PROVIDER_ID
+    meta = secretstore.meta_resolve_exact(service, None)
+    if meta is not None and meta.host and meta.env:
+        return meta.host.split(","), meta.env
+    hosts, env = _provider_binding(service) or (provider_creds.USAI_PROVIDER_HOST, provider_creds.USAI_PROVIDER_KEY_ENV)
+    return hosts.split(","), env
+
+
+def _rotate_plan(hosts: list[str], env: str) -> tuple[list[_Entry], list[_Entry]]:
+    """``(global rows, sandbox rows)``: the custom secrets that carry the USAi
+    key for ``env`` and ``hosts``. Refuses, before anything changes, a listing
+    acq cannot act on safely: an ambiguous ``global`` label, a row without a
+    usable placeholder, or more than one global row (acq cannot tell which one
+    the sandboxes were injected with)."""
+    envs: _Envs = {env: {_host_set(hosts)}}
+    scopes = _Scopes()
+    rows: tuple[list[_Entry], list[_Entry]] = ([], [])
+    for entry in _read_listing():
+        if entry.table != "custom" or not _custom_hit(entry, envs):
+            continue
+        is_global = scopes.match(entry.label, _GLOBAL_SCOPE)
+        if is_global is None:
+            raise _ambiguous(provider_creds.USAI_PROVIDER_ID)
+        if not entry.placeholder or entry.placeholder.startswith("-"):
+            raise _listing_unreadable(f"a custom secret for ${env} without a usable placeholder")
+        rows[0 if is_global else 1].append(entry)
+    if len(rows[0]) > 1:
+        raise SbxError(
+            errors.FAILURE,
+            f"sbx lists {len(rows[0])} global custom secrets for ${env}, so acq cannot tell which "
+            "one your sandboxes use",
+            "keep the one your sandboxes were injected with and remove the others with 'acq secret rm "
+            f"PLACEHOLDER' (placeholders: {', '.join(e.placeholder for e in rows[0])}); a sandbox left with a "
+            "removed placeholder is recovered by the ADR-0008 rebind or a recreate. Then re-run; nothing was changed",
+        )
+    return rows
+
+
+def rotate_preflight(*, primary: bool = True) -> None:
+    """Refuse a rotation sbx could not take, before anything is stored: a
+    listing :func:`_rotate_plan` refuses, or sbx below 0.51.0 (no
+    ``--value-stdin``) when it is the active backend or holds the key."""
+    globals_, sandbox_rows = _rotate_plan(*_rotate_route())
+    if primary or globals_ or sandbox_rows:
+        _require_set_custom()
+
+
+def rotate_holds_key() -> bool | None:
+    """Whether sbx lists a custom secret for the USAi key's env var (None when
+    the listing cannot be read). Used for an sbx below acq's floor, which acq
+    otherwise does not drive."""
+    env = _rotate_route()[1]
+    try:
+        return any(e.table == "custom" and _custom_hit(e, {env: None}) for e in _read_listing())
+    except SbxError:
+        return None
+
+
+def _set_custom(sandbox: str | None, hosts: list[str], env: str, placeholder: str, value: str) -> bool:
+    """``sbx secret set-custom`` for one entry, keeping its placeholder; stdin only."""
+    argv = ["secret", "set-custom"] + ([] if sandbox is None else ["--sandbox", sandbox])
+    for host in hosts:
+        argv += ["--host", host]
+    argv += ["--env", env] + (["--placeholder", placeholder] if placeholder else []) + ["--value-stdin"]
+    return _run(argv, input_text=value).returncode == 0
+
+
+def _kept_placeholder(sandbox: str | None, env: str, placeholder: str) -> bool:
+    """After a ``set-custom``: sbx lists exactly one custom secret for ``env``
+    in that scope, carrying ``placeholder`` (any one, for a new global entry).
+    A new or duplicated placeholder would leave running sandboxes resolving a
+    placeholder sbx no longer maps to the new key (ADR-0008)."""
+    scope = _GLOBAL_SCOPE if sandbox is None else secretstore.sandbox_scope(sandbox)
+    scopes = _Scopes()
+    rows = [e for e in _read_listing() if e.table == "custom" and e.key == env and scopes.match(e.label, scope)]
+    return len(rows) == 1 and (not placeholder or rows[0].placeholder == placeholder)
+
+
+def _rotate_entry(sandbox: str | None, hosts: list[str], env: str, placeholder: str, value: str) -> str | None:
+    """Re-set one entry and confirm its placeholder; None, or why it failed."""
+    try:
+        if not _set_custom(sandbox, hosts, env, placeholder, value):
+            return "sbx secret set-custom failed"
+        if not _kept_placeholder(sandbox, env, placeholder):
+            return "sbx did not keep a single entry with its placeholder"
+    except SbxError as exc:
+        return exc.message
+    return None
+
+
+_GLOBAL_ENTRY = "the global USAi secret (used by every sbx sandbox without its own entry)"
+
+
+def rotate_refeed(value: str, *, primary: bool = True) -> dict:
+    """Set the new USAi key in every sbx entry that carries it.
+
+    The global entry is updated in place (it serves every sandbox without an
+    entry of its own); when there is none, the primary backend creates it, as
+    ``secret set -g usai`` would, and propagation from the other backend leaves
+    sbx alone. A sandbox-scoped entry is updated too, unless that sandbox has
+    its own ``usai`` value in the acq store (``kept_own``): an entry acq did not
+    store is a copy of the global key, such as the ADR-0008 rebind. Each entry
+    is re-read afterwards to confirm sbx kept one entry with its placeholder.
+    Returns ``{backend, refed, kept_own, not_refed}``; one entry's failure is
+    listed in ``not_refed`` and the others are still re-set.
     """
-    raise SbxError(
-        errors.UNSUPPORTED,
-        "USAi key rotation is not supported on the sbx backend",
-        "rotation is a provider-credential operation with no sbx subcommand equivalent",
-    )
+    hosts, env = _rotate_route()
+    globals_, sandbox_rows = _rotate_plan(hosts, env)
+    out: dict = {"backend": "sbx", "refed": [], "kept_own": [], "not_refed": []}
+    if globals_ or sandbox_rows or primary:
+        _require_set_custom()
+    if globals_ or primary:
+        row = globals_[0] if globals_ else None
+        problem = _rotate_entry(None, sorted(row.targets) if row else hosts, env, row.placeholder if row else "", value)
+        if problem is not None:
+            out["not_refed"].append(f"{_GLOBAL_ENTRY} ({problem})")
+    service = provider_creds.USAI_PROVIDER_ID
+    for row in sandbox_rows:
+        try:
+            own = secretstore.name_ok(row.label) and secretstore.exists(service, row.label)
+        except secretstore.SecretStoreError as exc:
+            out["not_refed"].append(f"sandbox {row.label} ({exc.message})")
+            continue
+        if own:
+            out["kept_own"].append(row.label)
+            continue
+        problem = _rotate_entry(row.label, sorted(row.targets), env, row.placeholder, value)
+        if problem is None:
+            out["refed"].append(row.label)
+        else:
+            out["not_refed"].append(f"sandbox {row.label} ({problem})")
+    return out
 
 
 # ---------------------------------------------------------------------------

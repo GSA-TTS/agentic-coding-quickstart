@@ -131,7 +131,7 @@ numeric-prefix order.
 | `125-github-scope.bats` | 14 | preserve | ADR-0013 per-sandbox GitHub scoping. Covered by `cli/github-scope-json`, `cli/github-scope-no-value`, `cli/github-scope-sbx`. |
 | `146-provider-verification.bats` | 28 | preserve | §provider-credential + host-verifier reachability. Covered by `cli/provider-credential-*`. **Mixed → re-express:** reachability/model-identity checks are Tier-2/Tier-3 evidence, not Tier-1 vectors. |
 | `148-provider-credential-bindings.bats` | 56 | preserve | §provider-credential set/ls/rm + facts.json validation (ADR-0040m). Covered by `cli/provider-credential-*`. |
-| `77-usai-rotate.bats` | 7 | preserve | ADR-0012/0040m key rotation. Covered by `cli/usai-rotate-*`. |
+| `77-usai-rotate.bats` | 7 | preserve | ADR-0012/0040m key rotation. Covered by `cli/usai-rotate-ok` (msb store + `msb modify` re-feed), `cli/usai-rotate-sbx` (`set-custom --placeholder` keeps the placeholder), `cli/usai-rotate-msb-partial` and `cli/usai-rotate-sbx-partial` (a partial re-feed exits 1 naming the sandbox, and a retry fixes it), with cross-backend propagation in `py-acq/tests/test_rotation.py`. The throwaway-sandbox validation and the `scripts/rotate-apikey` shim rows are Bash-only and **retire**: rotation validates at the next attach, as Bash now does on msb. |
 
 ### Kits: list, validate, source, provenance, apply
 
@@ -157,7 +157,7 @@ numeric-prefix order.
 | `71c-msb-canonical-host-config.bats` | 2 | re-express | §4 host-path canonicalization before mount — host/guest-path fidelity → **gap**. |
 | `72-msb-agent-user.bats` | 37 | preserve | §attach/exec/shell as agent user. Covered by `cli/attach-*`, `cli/exec-*`, `cli/shell-*`. **Mixed → re-express:** TERM forwarding, passwd-shell, workspace `-w` are Tier-2/Tier-3. |
 | `73-msb-kits-startup.bats` | 14 | re-express | msb create-time startup staging (ADR-0017) is backend-internal; observable "startup command runs" is Tier-3. |
-| `74-msb-restart-durability.bats` | 21 | re-express | §start/restart/stop ordering + secret re-export (no-leak, §5). `cli/lifecycle-stop` covers stop; start/restart durability has no vector — **gap**. |
+| `74-msb-restart-durability.bats` | 21 | re-express | §start/restart/stop ordering + secret re-export (no-leak, §5). `cli/lifecycle-stop` covers stop; `cli/start-msb`, `cli/restart-msb`, `cli/start-sbx-unsupported` and `cli/start-missing` cover start/restart and the secret re-export (G8). |
 | `75-msb-kit-security.bats` | 8 | preserve | §kit validate reports hostile mode/phase/name (not silently drops). Covered by `cli/kit-validate-findings`. |
 | `76-msb-dns.bats` | 13 | re-express | §DNS/resource defaults (ACQ_MSB_* overrides) — no vector — **gap** (Tier-2 provision detail + `lifecycle-create` observables). |
 | `78-msb-kit-env.bats` | 9 | re-express | kit environment persistence/replay (ADR-0033). Language-specific. |
@@ -253,7 +253,7 @@ dropped. All are Tier-1 candidates unless marked Tier-3.
 | G5 | Clone option (`--clone` / `ACQ_CLONE`, scratch clone, origin carry) | `116-clone-option.bats` | §3 + ADR-0027 |
 | G6 | Volumes vocabulary + terminate cleanup | `110-volumes.bats` | §4 + ADR-0023 |
 | G7 | Balanced-egress rule translation (deny-by-default) | `111-balanced-egress.bats` | §5 + ADR-0018/0019 |
-| G8 | start/restart durability + secret re-export (no-leak) | `74-msb-restart-durability.bats` | §start/restart + §5 |
+| G8 | start/restart durability + secret re-export (no-leak). Covered for the Python CLI by `cli/start-msb` and `cli/restart-msb` | `74-msb-restart-durability.bats` | §start/restart + §5 |
 | G9 | Host/guest path fidelity (canonicalization, symlink, Windows forms) | `71c`, `117-msys-path-forms.bats` | §4 + ADR-0029 |
 | G10 | Guest-tamper resistance / forged markers (host-authoritative) — Tier-3 | `81-msb-forged-guest-markers.bats` | §5 |
 | G11 | Read-only host-config + mount qualification — Tier-3 | `83`, `84-msb-ro-mount-qualification.bats` | §5 + ADR-0035/0044m |
