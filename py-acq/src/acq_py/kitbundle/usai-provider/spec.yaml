@@ -1,0 +1,109 @@
+# spec.yaml — usai-provider (a neutral acq mixin kit, hybrid/v1)
+#
+# Configures an agent to use the GSA USAi OpenAI-compatible endpoint as its
+# model provider. Today it targets OpenCode; the kit is named "usai-provider"
+# (not "usai-opencode-provider") to leave room for additional agents later.
+# See README.md "Scope and roadmap".
+#
+# This is the NEUTRAL (backend-agnostic) form: acq's kit-translate layer maps
+# the declarative caps/files/commands below onto whichever backend is active
+# (sbx today; msb from Phase 2). The four sbx-v2 kits were converted to this
+# hybrid/v1 vocabulary in Phase 2 — see
+# integrations/isolation/docs/decisions/0001-neutral-hybrid-v1-acq-kits.md.
+#
+# What it does: allow-list the provider endpoint and publish provider metadata
+# for acq. The OpenCode kit is the sole writer of OpenCode's global config.
+#
+# Secret: the USAi API key is NOT in this kit. The OpenCode renderer reads the
+# injected USAI_API_KEY env var; acq supplies it at runtime via the active
+# backend's credential path (e.g. `acq secret set`). The real key never enters
+# the kit spec.
+#
+# Neutral model catalog: this kit ships a vendored snapshot of the USAi model
+# list in the harness-neutral acq-neutral-model-catalog/v1 shape, plus the
+# host-side authoring tool (scripts/normalize-catalog.mjs) that regenerates it
+# from integrations/providers/usai/catalog.json. Both are model METADATA only.
+#
+# It does NOT self-register provider facts. An earlier revision of this kit
+# wrote a facts file (host, baseUrl, modelsUrl, keyEnv) from inside the sandbox
+# at startup as root, on the theory that a root-owned guest path would be a
+# trustworthy source for a future provider-discovery consumer. That reasoning
+# was wrong: `acq` grants the agent user passwordless sudo
+# (quickstart acq.backends/msb.sh, `agent ALL=(ALL) NOPASSWD:ALL`, and the same
+# guarantee in the sbx base-image contract), so a root-owned guest file is
+# forgeable by the very principal it was meant to be protected from. Shipping
+# it would have invited a consumer to trust a credential POINTER that the agent
+# can rewrite.
+#
+# Trustworthy provider facts therefore need a host-materialized, read-only
+# source. That mechanism does not exist yet (it depends on acq's host-config
+# `:ro` mount, still unmerged upstream), so this kit deliberately ships no
+# facts file rather than shipping one at the wrong trust level. See
+# integrations/isolation/docs/decisions/0004-neutral-model-provider-discovery.md
+# (this ADR is pending merge in a separate PR; the path will resolve once it
+# lands) for the full design, and the follow-up issue for the facts work.
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: usai-provider
+displayName: USAi Provider (OpenCode)
+description: >
+  Publishes USAi provider input and allow-lists its endpoint. The OpenCode kit
+  renders the backend-selected provider generation into global configuration.
+
+caps:
+  network:
+    allow:
+      # Exact host (default port 443). USAi is a custom endpoint, not a
+      # built-in backend service, so the kit must allow-list it explicitly.
+      - api.gsa.usai.gov
+
+files:
+  # Vendored fallback snapshot of a handful of real USAi models in the neutral
+  # acq-neutral-model-catalog/v1 shape (see scripts/normalize-catalog.mjs,
+  # which regenerates it from integrations/providers/usai/catalog.json).
+  #
+  # NOT AUTHORITATIVE, and deliberately not described as a trust anchor. This
+  # path is under /home/agent, which the agent OWNS -- forging it needs no
+  # privilege escalation at all. It is a convenience payload so a reader has a
+  # well-shaped example of the neutral catalog locally; it carries ONLY model
+  # metadata (id, context window, max output tokens, cost) and no routing or
+  # credential fields, so rewriting it cannot redirect a credential or point a
+  # consumer at a different host.
+  #
+  # A consumer that needs TRUSTWORTHY provider facts -- host, baseUrl,
+  # modelsUrl, keyEnv -- must read them from a host-materialized, read-only
+  # source, never from this file and never from any guest-writable path. That
+  # mechanism does not exist yet; see the follow-up issue referenced in the
+  # header comment. Mode "0644" matches the opencode.jsonc entry above (a
+  # static, non-executable payload).
+  - path: /home/agent/usai-config/model-catalog-snapshot.json
+    mode: "0644"
+    source: files/home/usai-config/model-catalog-snapshot.json
+
+agentContext: |
+  ## USAi Provider
+
+  Your provider input is selected by `acq`; the OpenCode kit renders the
+  selected generation at startup. Credentials are injected by `acq` and are
+  not stored in this sandbox.
+
+# No backend shortcuts: every backend uses the same allow-list + file-drop +
+# projection mechanism for this kit.
+backend_shortcuts:
+  sbx: {}
+  msb: {}
+
+# Bundle provenance (quickstart#235). Declares that this kit is part of the
+# `acq-builtin` bundle so a consumer (acq) can detect an installed sandbox
+# bundle older than the locally approved PATTERNS_KIT_REF and offer a safe
+# refresh. The applied commit SHA + timestamp + backend are recorded by the
+# consumer inside the sandbox at apply time, NOT here.
+provenance:
+  repo: GSA-TTS/agentic-coding-patterns
+  bundle: acq-builtin
+  bundle_version: "1"
+  kit_names:
+    - usai-provider
+    - agentic-coding-playbook
+    - zscaler-ca-certificate
+    - git-ssh-sign
