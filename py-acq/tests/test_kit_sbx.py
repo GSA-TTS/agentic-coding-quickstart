@@ -865,6 +865,61 @@ def test_a_damaged_kit_directory_is_rebuilt_not_reused(monkeypatch, tmp_path):
     assert not [e for e in path.parent.iterdir() if e.name.startswith(".")]
 
 
+def test_a_concurrent_creates_fresh_copy_survives_a_stale_damaged_verdict(monkeypatch, tmp_path):
+    # Two creates find the same damaged directory. B replaces it with its own
+    # fresh copy after A has judged it damaged but before A moves it aside. A
+    # must put B's copy back (B may be handing it to sbx), not delete it.
+    monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
+    kit = kit_sbx.bundled_kit("opencode")
+    path = kit_sbx.translated_kit(kit)
+    reference = tmp_path / "reference"
+    shutil.copytree(path, reference, symlinks=True)
+    next(p for p in path.rglob("*") if p.is_file() and p.name != "spec.yaml").unlink()
+    real_valid = kit_sbx._valid_kit_dir
+    b_copy = {}
+
+    def stale_verdict(target, digest=None):
+        verdict = real_valid(target, digest)
+        if target == path and not b_copy:
+            # B, between A's check and A's move: discard the damaged tree and
+            # rename its own complete copy into place.
+            kit_sbx._discard(path)
+            build = tmp_path / "b-build"
+            shutil.copytree(reference, build, symlinks=True)
+            os.rename(build, path)
+            b_copy["ino"] = os.lstat(path).st_ino
+        return verdict
+
+    monkeypatch.setattr(kit_sbx, "_valid_kit_dir", stale_verdict)
+    assert kit_sbx.translated_kit(kit) == path
+    assert b_copy and os.lstat(path).st_ino == b_copy["ino"]
+    assert real_valid(path, path.name.rsplit(".", 1)[1])
+    assert not [e for e in path.parent.iterdir() if e.name.startswith(".")]
+
+
+def test_a_moved_aside_copy_is_dropped_when_the_name_is_retaken(monkeypatch, tmp_path):
+    # The moved tree turns out complete, so it would be renamed back; the name
+    # was taken again meanwhile, so the moved copy is dropped and the new one kept.
+    monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
+    parent = kit_sbx._subdir("generated")
+    dest = parent / "kit"
+    dest.mkdir()
+    (dest / "spec.yaml").write_text("x", encoding="utf-8")
+    judged = os.lstat(dest)
+    real_rename = os.rename
+
+    def rename(src, dst):
+        real_rename(src, dst)
+        if Path(dst).name.startswith(kit_sbx.TRASH_PREFIX):
+            (dest).mkdir()  # another create took the name meanwhile
+            (dest / "spec.yaml").write_text("y", encoding="utf-8")
+
+    monkeypatch.setattr(kit_sbx.os, "rename", rename)
+    kit_sbx._move_damaged_aside(dest, judged, None)
+    assert (dest / "spec.yaml").read_text(encoding="utf-8") == "y"
+    assert not [e for e in parent.iterdir() if e.name.startswith(kit_sbx.TRASH_PREFIX)]
+
+
 def test_prune_sweeps_old_build_directories_only(monkeypatch, tmp_path):
     monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
     v2 = kit_sbx._subdir("v2")
