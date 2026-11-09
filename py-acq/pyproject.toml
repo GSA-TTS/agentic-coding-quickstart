@@ -1,5 +1,7 @@
 [build-system]
-requires = ["setuptools>=68"]
+# 77 is the first setuptools with PEP 639 metadata: an SPDX `license` expression
+# and `license-files` under [project].
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,7 +10,13 @@ version = "0.1.0"
 description = "Python skeleton for the acq v1 replacement (foundation slice)"
 readme = "README.md"
 requires-python = ">=3.12"
-license = "CC0-1.0"
+# acq is CC0-1.0. The bundled git-ssh-sign kit (src/acq_py/kitbundle) is
+# Apache-2.0; its LICENSE and NOTICE ship with the package.
+license = "CC0-1.0 AND Apache-2.0"
+license-files = [
+  "src/acq_py/kitbundle/git-ssh-sign/LICENSE",
+  "src/acq_py/kitbundle/git-ssh-sign/NOTICE",
+]
 # No runtime dependencies: acq v1's managed runtime stays app-private and
 # offline (ADR-0042m). The CLI uses the Python standard library only, so
 # ordinary operation never installs or downloads anything.
