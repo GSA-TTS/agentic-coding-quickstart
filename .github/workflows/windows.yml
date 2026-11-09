@@ -328,23 +328,28 @@ jobs:
       # *.sh and libexec/, so with autocrlf=true its bin/bats and lib/*.bash come
       # out CRLF. Check them out as committed (LF) instead.
       #
-      # `git -c core.autocrlf=false submodule update` is not enough: Git for
-      # Windows 2.56 did not pass the -c setting to the submodule checkouts. The
-      # setting goes in through the environment, which those child processes
-      # inherit, and each submodule then records core.autocrlf=false locally and
-      # re-checks out its files from the index (`git rm --cached` first, so git
-      # cannot keep a CRLF file it thinks is unchanged). The second half makes
-      # the result LF whatever the git version does with the first.
+      # Two settings are needed. core.autocrlf=false alone still leaves
+      # bats-core's `* text=auto` files to core.eol, whose default (native) is
+      # CRLF on Windows, so core.eol=lf as well. And `git -c ... submodule
+      # update` is not enough: Git for Windows 2.56 did not pass the -c setting
+      # to the submodule checkouts. The settings go in through the environment,
+      # which those child processes inherit, and each submodule then records
+      # them locally and re-checks out its files from the index (`git rm
+      # --cached` first, so git cannot keep a CRLF file it thinks is unchanged).
+      # The second half makes the result LF whatever the git version does with
+      # the first.
       - name: Check out the bats submodules with LF line endings
         env:
-          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_COUNT: '2'
           GIT_CONFIG_KEY_0: core.autocrlf
           GIT_CONFIG_VALUE_0: 'false'
+          GIT_CONFIG_KEY_1: core.eol
+          GIT_CONFIG_VALUE_1: lf
         run: |
           set -euo pipefail
           git submodule update --init --recursive
           git submodule foreach --quiet --recursive \
-            'git config core.autocrlf false && git rm -rq --cached . && git reset -q --hard'
+            'git config core.autocrlf false && git config core.eol lf && git rm -rq --cached . && git reset -q --hard'
 
       # Fails if a pinned shell script in the repository, or any file at all in
       # the submodules, was checked out with CRLF endings.
