@@ -292,9 +292,12 @@ def list_names() -> list[str] | None:
     return [line for line in proc.stdout.splitlines() if line]
 
 
-def running_names() -> list[str] | None:
-    """Return running sandbox names, or ``None`` if ``msb list`` failed."""
-    proc = _run(["list", "--running", "-q"])
+def running_names(*, timeout: float | None = None) -> list[str] | None:
+    """Return running sandbox names, or ``None`` if ``msb list`` failed.
+
+    Raises ``subprocess.TimeoutExpired`` past ``timeout`` seconds.
+    """
+    proc = _run(["list", "--running", "-q"], timeout=timeout)
     if proc.returncode != 0:
         return None
     return [line for line in proc.stdout.splitlines() if line]
@@ -1440,10 +1443,11 @@ def _live_refeed_off() -> bool:
     return bool(os.environ.get(NO_LIVE_REFEED_ENV))
 
 
-def _running_targets(scope: Scope) -> list[str]:
+def _running_targets(scope: Scope, timeout: float | None = None) -> list[str]:
     """The running sandboxes a change in ``scope`` reaches: the named sandbox
-    (if it is running) or every running sandbox for the global scope."""
-    names = running_names()
+    (if it is running) or every running sandbox for the global scope. Raises
+    ``subprocess.TimeoutExpired`` past ``timeout`` seconds."""
+    names = running_names(timeout=timeout)
     if names is None:
         raise MsbError(
             errors.FAILURE,
@@ -1455,18 +1459,19 @@ def _running_targets(scope: Scope) -> list[str]:
     return names
 
 
-def _modify(name: str, flags: list[str], secret_env: dict[str, str] | None = None) -> bool:
+def _modify(name: str, flags: list[str], secret_env: dict[str, str] | None = None, timeout: float | None = None) -> bool:
+    """``msb modify NAME FLAGS``; raises ``subprocess.TimeoutExpired`` past ``timeout`` seconds."""
     try:
-        proc = _run(["modify", name, *flags], secret_env=secret_env)
+        proc = _run(["modify", name, *flags], secret_env=secret_env, timeout=timeout)
     finally:
         if secret_env:
             secret_env.clear()
     return proc.returncode == 0
 
 
-def _drop(rec: HeldRecord, env: str) -> bool:
+def _drop(rec: HeldRecord, env: str, timeout: float | None = None) -> bool:
     """``msb modify NAME --secret-rm ENV`` and forget it in the record."""
-    if not _modify(rec.name, ["--secret-rm", env]):
+    if not _modify(rec.name, ["--secret-rm", env], timeout=timeout):
         return False
     entry = rec.bindings.pop(env, None)
     if entry is not None:
@@ -1475,22 +1480,23 @@ def _drop(rec: HeldRecord, env: str) -> bool:
     return True
 
 
-def _put(rec: HeldRecord, bound: BoundSecret, value: str) -> bool:
+def _put(rec: HeldRecord, bound: BoundSecret, value: str, timeout: float | None = None) -> bool:
     """Bind ``bound`` in sandbox ``rec.name`` and record it.
 
     A binding is never replaced in place: if the variable is bound to other
     hosts, or this service is bound under another variable, those are removed
     first with their own ``--secret-rm``. Adding the same variable to the same
-    hosts rotates the value.
+    hosts rotates the value. Each msb call is bounded by ``timeout`` seconds
+    (``subprocess.TimeoutExpired``).
     """
     env = bound.binding.env
     stale = [e for e, v in rec.bindings.items() if v["service"] == bound.service and e != env]
     if env in rec.bindings and rec.bindings[env].get("host") != bound.binding.host:
         stale.append(env)
     for old in stale:
-        if not _drop(rec, old):
+        if not _drop(rec, old, timeout):
             return False
-    if not _modify(rec.name, ["--secret", bound.binding.flag], {env: value}):
+    if not _modify(rec.name, ["--secret", bound.binding.flag], {env: value}, timeout):
         return False
     rec.bindings[env] = bound.entry()
     rec.note(bound.service)
@@ -1884,13 +1890,19 @@ def rotate_stale_hint() -> str | None:
     )
 
 
-def _rotate_one(service: str, sandbox: str) -> str | None:
+def _rotate_timed_out(what: str, budget: float) -> str:
+    """Why a rotation's msb call failed when it outlasted its budget (never a value)."""
+    return f"'{what}' timed out after {budget:g}s"
+
+
+def _rotate_one(service: str, sandbox: str, budget: float) -> str | None:
     """Re-feed the stored global key to one running sandbox.
 
     Returns None when it was re-fed, ``"kept"`` when the sandbox has its own
     value, ``"skipped"`` when the variable is bound there for another service
-    (warned, as :func:`_refeed` does), or the reason it was not re-fed. Any
-    failure is confined to this sandbox.
+    (warned, as :func:`_refeed` does), or the reason it was not re-fed. Each
+    msb call is bounded by ``budget`` seconds, and one that times out counts as
+    a failure. Any failure is confined to this sandbox.
     """
     value = None
     try:
@@ -1909,8 +1921,10 @@ def _rotate_one(service: str, sandbox: str) -> str | None:
                 file=sys.stderr,
             )
             return "skipped"
-        if not _put(rec, BoundSecret(service, binding, False), value):
+        if not _put(rec, BoundSecret(service, binding, False), value, budget):
             return "msb modify failed"
+    except subprocess.TimeoutExpired:
+        return _rotate_timed_out("msb modify", budget)
     except (MsbError, secretstore.SecretStoreError) as exc:
         return exc.message
     finally:
@@ -1926,16 +1940,28 @@ def rotate_refeed(value: str, *, primary: bool = True) -> dict:
     ``primary`` makes no difference on msb, whose re-feed never creates
     anything beyond the bindings ``secret set -g usai`` would. Stopped
     sandboxes are not re-fed (``acq start`` passes them the stored key).
+    Every msb call is bounded (:func:`timeouts.rotate_timeout_s`), as on sbx,
+    since it runs under the usai provider lock.
     Returns ``{backend, refed, kept_own, not_refed}``; a sandbox that did not
     receive the key is listed in ``not_refed`` with the reason, and the rest
     are still re-fed. Raises :class:`MsbError` only when the running sandboxes
-    cannot be listed.
+    cannot be listed (or the listing times out).
     """
     del value, primary
     service = provider_creds.USAI_PROVIDER_ID
+    budget = timeouts.rotate_timeout_s()
     out: dict = {"backend": "msb", "refed": [], "kept_own": [], "not_refed": []}
-    for sandbox in [] if _live_refeed_off() else _running_targets(secretstore.GLOBAL):
-        problem = _rotate_one(service, sandbox)
+    try:
+        targets = [] if _live_refeed_off() else _running_targets(secretstore.GLOBAL, budget)
+    except subprocess.TimeoutExpired:
+        raise MsbError(
+            errors.TIMEOUT,
+            _rotate_timed_out("msb list", budget),
+            f"check that msb responds ('msb list'); set {timeouts.ROTATE_TIMEOUT_ENV} to a larger number of "
+            "seconds if it is only slow, then re-run 'acq usai-rotate-api-key' with the same key",
+        ) from None
+    for sandbox in targets:
+        problem = _rotate_one(service, sandbox, budget)
         if problem is None:
             out["refed"].append(sandbox)
         elif problem == "kept":

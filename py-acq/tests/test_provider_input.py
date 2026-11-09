@@ -546,6 +546,61 @@ def test_sbx_attach_probes_the_recorded_provider(monkeypatch, tmp_path, capsys, 
     assert rc == errors.EXIT_FAILURE and doc["error"]["code"] == code, doc
 
 
+def test_sbx_on_a_terminal_the_gate_asks_stores_feeds_and_creates(monkeypatch, tmp_path, capsys):
+    # The terminal prompt-and-store path on sbx, end to end: the gate asks, the
+    # key is read with echo off (stubbed), stored in the acq store and fed to
+    # sbx's proxy table, so the re-check passes and the create goes ahead. The
+    # value reaches sbx only on stdin, never argv or output.
+    ws = _sbx_env(monkeypatch, tmp_path)
+    sbx_mod = sys.modules["acq_py.sbx"]
+    monkeypatch.setattr(common, "_stdin_is_terminal", lambda: True)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("y\n"))
+    prompts = []
+    monkeypatch.setattr(common, "_read_secret_tty", lambda prompt: prompts.append(prompt) or VALUE)
+    argvs: list[list[str]] = []
+    real = subprocess.run
+
+    def spy(argv, *args, **kwargs):
+        argvs.append([str(a) for a in argv])
+        return real(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", spy)
+    rc, doc, out, err = _sbx_create(capsys, ws)
+    assert rc == 0, (doc, err)
+    assert prompts == ["Enter the usai key: "]
+    assert "Store a credential for provider 'usai'" in err and "api.gsa.usai.gov" in err
+    assert secretstore.resolve("usai") == VALUE
+    assert sbx_mod.secret_has(secretstore.GLOBAL, "usai")
+    assert any("set-custom" in argv for argv in argvs)
+    assert sbx_mod.exists("sb")
+    for argv in argvs:
+        assert all(VALUE not in token for token in argv), argv
+    assert VALUE not in out + err
+
+
+def test_sbx_provider_id_colliding_with_a_builtin_service_is_refused(monkeypatch, tmp_path):
+    # A provider named like an sbx built-in service (here "openai") would be
+    # fed through `sbx secret set openai` and bound to sbx's own vendor
+    # endpoint, not the pinned host. No bundled kit declares such a provider,
+    # so the selection is faked; the gate refuses before any key check.
+    from acq_py.commands import lifecycle
+
+    _sbx_env(monkeypatch, tmp_path)
+    facts = provider_input.Facts("openai", "OPENAI_API_KEY", "models.example.gov",
+                                 "https://models.example.gov/v1/models", "openai-compatible")
+    monkeypatch.setattr(provider_input, "selected_facts", lambda kit_names: [("fake-kit", {}, facts)])
+    monkeypatch.setattr(provider_input, "gate", lambda *a, **k: pytest.fail("the gate ran past the collision"))
+    with pytest.raises(provider_input.ProviderInputError) as exc:
+        lifecycle._provider_gate("sbx", "sb", ["fake-kit"])
+    assert exc.value.code == errors.VALIDATION_FAILED
+    assert "collides with an sbx built-in service" in exc.value.message and "models.example.gov" in exc.value.message
+    # msb has no built-in services: the same selection reaches the gate there.
+    reached = []
+    monkeypatch.setattr(provider_input, "gate", lambda *a, **k: reached.append(True))
+    lifecycle._provider_gate("msb", "sb", ["fake-kit"])
+    assert reached == [True]
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX directory permissions")
 def test_discard_removes_a_generation_bash_made_read_only(tmp_path):
     generation = tmp_path / "generations" / "generation.x"

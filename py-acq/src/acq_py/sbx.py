@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 from typing import NamedTuple
@@ -1128,12 +1129,20 @@ def _rotate_envs(hosts: list[str], env: str) -> _Envs:
     return {env: {_host_set(hosts)}}
 
 
-def _rotate_plan(hosts: list[str], env: str, listing: list[_Entry], budget: float) -> tuple[list[_Entry], list[_Entry]]:
+_NOTHING_CHANGED = "nothing was changed"
+_SBX_NOT_REFED = "the sbx sandboxes were not re-fed"
+_RERUN = "re-run 'acq usai-rotate-api-key' with the same key"
+
+
+def _rotate_plan(
+    hosts: list[str], env: str, listing: list[_Entry], budget: float, *, outcome: str = _NOTHING_CHANGED
+) -> tuple[list[_Entry], list[_Entry]]:
     """``(global rows, sandbox rows)``: the custom secrets in ``listing`` that
-    carry the USAi key for ``env`` and ``hosts``. Refuses, before anything
-    changes, a listing acq cannot act on safely: an ambiguous ``global`` label,
-    a row without a usable placeholder, or more than one global row (acq cannot
-    tell which one the sandboxes were injected with)."""
+    carry the USAi key for ``env`` and ``hosts``. Refuses a listing acq cannot
+    act on safely: an ambiguous ``global`` label, a row without a usable
+    placeholder, or more than one global row (acq cannot tell which one the
+    sandboxes were injected with). ``outcome`` is what the refusal says
+    happened: nothing, before the store write, or only sbx missed the key."""
     envs = _rotate_envs(hosts, env)
     scopes = _Scopes(timeout=budget)
     rows: tuple[list[_Entry], list[_Entry]] = ([], [])
@@ -1145,7 +1154,7 @@ def _rotate_plan(hosts: list[str], env: str, listing: list[_Entry], budget: floa
         except subprocess.TimeoutExpired:
             raise _rotate_timed_out("sbx ls", budget) from None
         if is_global is None:
-            raise _ambiguous(provider_creds.USAI_PROVIDER_ID)
+            raise _ambiguous(provider_creds.USAI_PROVIDER_ID, outcome)
         if not entry.placeholder or entry.placeholder.startswith("-"):
             raise _listing_unreadable(f"a custom secret for ${env} without a usable placeholder")
         rows[0 if is_global else 1].append(entry)
@@ -1154,9 +1163,9 @@ def _rotate_plan(hosts: list[str], env: str, listing: list[_Entry], budget: floa
             errors.FAILURE,
             f"sbx lists {len(rows[0])} global custom secrets for ${env}, so acq cannot tell which "
             "one your sandboxes use",
-            "keep the one your sandboxes were injected with and remove the others with 'acq secret rm "
-            f"PLACEHOLDER' (placeholders: {', '.join(e.placeholder for e in rows[0])}); a sandbox left with a "
-            "removed placeholder is recovered by the ADR-0008 rebind or a recreate. Then re-run; nothing was changed",
+            f"{outcome}; keep the one your sandboxes were injected with and remove the others with 'acq secret rm "
+            f"PLACEHOLDER' (placeholders: {', '.join(e.placeholder for e in rows[0])}), then {_RERUN}; a "
+            "sandbox left with a removed placeholder is recovered by the ADR-0008 rebind or a recreate",
         )
     return rows
 
@@ -1167,17 +1176,23 @@ _UNLISTED_REMEDIATION = (
 )
 
 
+def _not_refed(reason: str, remediation: str) -> dict:
+    return {"backend": "sbx", "refed": [], "kept_own": [], "not_refed": [f"any sandbox holding the key ({reason})"],
+            "remediation": remediation}
+
+
 def rotate_preflight(*, primary: bool = True) -> dict | None:
     """Refuse a rotation sbx could not take, before anything is stored: a
     listing :func:`_rotate_plan` refuses, or sbx below 0.51.0 (no
     ``--value-stdin``) when it is the active backend or holds the key.
 
-    When sbx is not the active backend and its secret list cannot be read
-    (``sbx secret ls`` fails, times out, or returns something unreadable), the
-    rotation still goes ahead on the active backend, as Bash rotates msb and
-    fails only the sbx propagation: the result returned here reports sbx as not
-    re-fed, and the command exits 1. Otherwise None. As the active backend, an
-    unreadable list refuses the rotation.
+    That refusal applies only when sbx is the backend being rotated. When it is
+    not, every sbx problem found here (a secret list that cannot be read or
+    times out, an ``sbx ls`` timeout while resolving the ``global`` label, a
+    listing :func:`_rotate_plan` refuses, or an sbx too old to take the key)
+    lets the rotation go ahead on the active backend, as Bash rotates msb and
+    fails only the sbx propagation: the result returned here reports sbx as
+    not re-fed, and the command exits 1. Otherwise None.
     """
     budget = timeouts.rotate_timeout_s()
     hosts, env = _rotate_route()
@@ -1186,12 +1201,22 @@ def rotate_preflight(*, primary: bool = True) -> dict | None:
     except SbxError as exc:
         if primary:
             raise
-        return {"backend": "sbx", "refed": [], "kept_own": [],
-                "not_refed": [f"any sandbox holding the key (acq could not read sbx's secret list: {exc.message})"],
-                "remediation": _UNLISTED_REMEDIATION}
-    globals_, sandbox_rows = _rotate_plan(hosts, env, listing, budget)
-    if primary or globals_ or sandbox_rows:
-        _require_set_custom()
+        return _not_refed(f"acq could not read sbx's secret list: {exc.message}", _UNLISTED_REMEDIATION)
+    try:
+        globals_, sandbox_rows = _rotate_plan(
+            hosts, env, listing, budget, outcome=_NOTHING_CHANGED if primary else _SBX_NOT_REFED
+        )
+        if primary or globals_ or sandbox_rows:
+            _require_set_custom()
+    except SbxError as exc:
+        if primary:
+            raise
+        # Say to re-run the rotation once, whether or not the refusal already does.
+        remediation = exc.remediation or ""
+        if _RERUN not in remediation:
+            remediation = f"{remediation}; then {_RERUN} to re-feed the sbx sandboxes" if remediation else (
+                f"{_RERUN} to re-feed the sbx sandboxes")
+        return _not_refed(f"acq cannot re-feed sbx: {exc.message}", remediation)
     return None
 
 
@@ -1283,7 +1308,9 @@ def rotate_refeed(value: str, *, primary: bool = True) -> dict:
     """
     budget = timeouts.rotate_timeout_s()
     hosts, env = _rotate_route()
-    globals_, sandbox_rows = _rotate_plan(hosts, env, _rotate_listing(budget), budget)
+    # The new key is already in the acq store here, so a refusal now cannot
+    # say that nothing was changed.
+    globals_, sandbox_rows = _rotate_plan(hosts, env, _rotate_listing(budget), budget, outcome=_SBX_NOT_REFED)
     rot = _Rotation(_rotate_envs(hosts, env), env, budget)
     out: dict = {"backend": "sbx", "refed": [], "kept_own": [], "not_refed": []}
     if globals_ or sandbox_rows or primary:
@@ -1342,7 +1369,9 @@ def _revoke_failed(repo: str, prefix: str, reason: str, desired: str | None = No
     registered, because the sbx backend could still fetch kits from that owner.
     """
     if desired is not None:
-        fix = f"run: sbx settings set kit.allowedSources '{desired}'"
+        # Shell-quoted, so the printed command round-trips even when an
+        # allowlist entry contains a single quote.
+        fix = f"run: sbx settings set kit.allowedSources {shlex.quote(desired)}"
     else:
         fix = (
             "review 'sbx settings get kit.allowedSources', remove "
@@ -1389,6 +1418,8 @@ def kit_source_revoked(repo: str) -> str | None:
     if proc.returncode != 0:
         raise _revoke_failed(repo, prefix, "could not write kit.allowedSources", desired)
     verify = _read_allowed_sources()
-    if verify is None or _grants(verify, prefix):
+    if verify is None:
+        raise _revoke_failed(repo, prefix, "could not read kit.allowedSources back after the update", desired)
+    if _grants(verify, prefix):
         raise _revoke_failed(repo, prefix, "kit.allowedSources still lists it after the update", desired)
     return prefix

@@ -392,14 +392,47 @@ def _tree_digest(root: Path) -> str:
     return digest.hexdigest()
 
 
+def _move_damaged_aside(dest: Path, digest: str | None) -> None:
+    """Delete the damaged tree at ``dest``, but never a concurrent create's fresh copy.
+
+    The verdict that ``dest`` is damaged can be stale by the time it is acted
+    on: another create may have replaced the damaged tree with its own valid
+    copy in between. So the tree is renamed aside first and checked again
+    there: a tree that is still incomplete is deleted, and a valid one is
+    renamed back. The check is on content alone, not on the tree's inode, so
+    a valid copy is never deleted, and a damaged tree is still repaired on a
+    file system where a rename changes the inode (FAT, exFAT).
+
+    Raises ``OSError`` from the rename aside (a concurrent create moved it
+    first) or from deleting the moved tree; a tree left half deleted sits at a
+    ``.trash-*`` name no kit uses, and :func:`prune_stale` sweeps it.
+    """
+    trash = dest.parent / f"{TRASH_PREFIX}{secrets.token_hex(8)}"
+    os.rename(dest, trash)
+    if not _valid_kit_dir(trash, digest):
+        _remove_tree(trash)
+        return
+    try:
+        os.rename(trash, dest)
+    except OSError:
+        # The name was taken again meanwhile. The moved copy is at a name no
+        # kit uses, so nothing can be reading it there; the caller checks
+        # whatever now sits at ``dest``.
+        _remove_tree(trash)
+
+
 def _publish(parent: Path, stem: str, fill: Callable[[Path], None], *, by_content: bool = False) -> Path:
     """Build a kit directory in a private temporary one, then move it to ``parent/name`` if absent.
 
     ``name`` is ``stem``, or ``stem.<digest>`` with ``by_content``, so the
-    same name always means the same content. An existing directory whose
-    content matches is reused and never removed: another create may be handing
-    it to sbx right now. One that does not match is damaged, so it is renamed
-    aside and replaced. Raises :class:`KitTranslateError`.
+    same name always means the same content. An existing complete directory
+    (with ``by_content``, one whose content still matches its name) is reused
+    rather than replaced: another create may be handing it to sbx right now.
+    Only :func:`prune_stale` removes it, once it has gone unused for
+    :data:`STALE_AGE_S`. An incomplete one is damaged, so it is renamed aside
+    and replaced; a concurrent create's fresh copy that took its place in the
+    meantime is put back, not deleted (:func:`_move_damaged_aside`). Raises
+    :class:`KitTranslateError`.
     """
     try:
         tmp = Path(tempfile.mkdtemp(prefix=f".{stem[:40]}.", dir=parent))
@@ -415,11 +448,16 @@ def _publish(parent: Path, stem: str, fill: Callable[[Path], None], *, by_conten
         try:
             os.rename(tmp, dest)
         except OSError:
-            if not _valid_kit_dir(dest, digest):  # damaged, e.g. half deleted: replace it
-                try:
-                    _discard(dest)
-                except OSError:
-                    pass  # a concurrent create replaced it first
+            if not _valid_kit_dir(dest, digest):
+                if os.path.lexists(dest):  # damaged, e.g. half deleted: move it aside
+                    try:
+                        _move_damaged_aside(dest, digest)
+                    except OSError:
+                        pass  # a concurrent create moved it first, or a delete stopped part way
+                # Retry in every case: also when nothing sat at ``dest`` (it was
+                # moved away meanwhile, or the first rename failed for another
+                # reason, such as a permission error), so such a failure is
+                # raised instead of returning a path that does not exist.
                 try:
                     os.rename(tmp, dest)
                 except OSError:

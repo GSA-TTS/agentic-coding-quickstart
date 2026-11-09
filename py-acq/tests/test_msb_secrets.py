@@ -567,7 +567,7 @@ def test_rm_warns_when_no_binding_resolves(monkeypatch, tmp_path, capsys):
 
 def test_unlisted_sandboxes_fail_closed(monkeypatch, tmp_path):
     _env(monkeypatch, tmp_path)
-    monkeypatch.setattr(msb, "running_names", lambda: None)
+    monkeypatch.setattr(msb, "running_names", lambda **_kw: None)
     with pytest.raises(msb.MsbError) as info:
         msb.secret_feed(secretstore.GLOBAL, "usai", "")
     assert info.value.code == "failure"

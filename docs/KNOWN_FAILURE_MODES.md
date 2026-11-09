@@ -3285,7 +3285,11 @@ idempotent). `acq kit-source ls` shows the source until the removal completes.
 ### Prevention
 
 Regression tests in `test/bats/149-kit-source.bats` cover shared-prefix removal
-and the read/write/`jq` failure paths.
+and the read/write/`jq` failure paths. For the Python acq, the vectors
+`cli/kit-source-rm-sbx-write-fails` and `cli/kit-source-rm-sbx-readback-fails`
+cover a refused write and a setting that cannot be read back after the write
+(reported as such, not as "still lists it"). The printed recovery command is
+shell-quoted, so it can be pasted as-is even when an entry holds a `'`.
 
 ---
 
@@ -3750,6 +3754,15 @@ sandbox, delete `<state>/sbx-kits/` entirely, `sbx stop` it, start it again
 run (`/tmp/opencode` exists again, and `/tmp/acq/startup-complete` holds the
 create's token). If they do not, keep the kit directories for the sandbox's
 lifetime and remove them in `acq rm`.
+
+One narrow window is left when a translated kit directory is replaced because
+it is damaged: create A moves create B's fresh copy aside on a stale verdict,
+create C takes the kit's name before A can rename B's copy back, and A then
+deletes B's tree (`_move_damaged_aside` in `py-acq/src/acq_py/kit_sbx.py`).
+The name ends up holding a valid copy (C's, with the same content), but B's
+create can fail if sbx reads the kit while the name is briefly empty or being
+swapped. It needs a damaged directory plus three concurrent creates of the
+same kit; re-running B's create recovers it.
 
 ## 56. Python acq: Stricter Provider-Credential Gate Than Bash
 

@@ -87,16 +87,22 @@ exit 1, the `unsupported_capability` code, and remediation.
 > re-reads the listing and requires the entry to keep its placeholder; that
 > sbx does so is not yet verified live (KNOWN_FAILURE_MODES 57).
 >
-> One case does not refuse: when sbx is installed but not the active backend
-> and its secret list cannot be read (`sbx secret ls` fails, times out, or
-> returns something unreadable), the rotation still goes ahead on msb and reports sbx as not
-> re-fed (exit 1), as Bash rotates msb and fails only the sbx propagation; any
-> other refusal, and an unreadable list on the active backend, refuses the
-> rotation and names the backend. Each sbx call a rotation makes while it holds
-> the usai provider lock is bounded by `ACQ_ROTATE_TIMEOUT` (default 120 s, the
-> Bash adapter's `ROTATE_VALIDATE_TIMEOUT`; it must be more than 0, and 0 or
-> any other invalid value falls back to the default with a warning); a call
-> that times out counts as a failure. An installed msb that fails acq's
+> These sbx refusals apply only when sbx is the active backend. When sbx is
+> installed but not the active backend, no sbx problem blocks the rotation:
+> a secret list that cannot be read (`sbx secret ls` fails, times out, or
+> returns something unreadable), an `sbx ls` timeout while resolving the
+> `global` label, any listing acq refuses (duplicate global entries, an
+> ambiguous label, a row with no usable placeholder), or an sbx below 0.51.0
+> that holds the key. The rotation goes ahead on msb and reports sbx as not
+> re-fed (exit 1), as Bash rotates msb and fails only the sbx propagation. The
+> active backend's own refusals still come first, before the store write, and
+> name the backend. Each sbx and msb call a rotation makes while it holds the
+> usai provider lock (sbx `secret ls`, `ls` and `set-custom`; msb `list` and
+> `modify`) is bounded by `ACQ_ROTATE_TIMEOUT` (default 120 s, the Bash
+> adapter's `ROTATE_VALIDATE_TIMEOUT`; it must be more than 0, and 0 or any
+> other invalid value falls back to the default with a warning); a call that
+> times out counts as a failure: of that sandbox for `set-custom` or `modify`,
+> of the whole backend's re-feed for a listing. An installed msb that fails acq's
 > version check is never run, since any msb command opens its catalog and may
 > migrate it one way (ADR-0032): whether it holds the key is read from acq's
 > binding records alone, and every record counts, including one left by a
