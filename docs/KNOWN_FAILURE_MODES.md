@@ -101,14 +101,16 @@ parts of the Bash session differ or are not ported yet:
    adapters' session flags.
 2. **ssh-agent forwarding** (ADR-0021). Python never creates the `--vsock` route
    or the in-guest bridge, so it passes `SSH_AUTH_SOCK` only when the sandbox's
-   host record carries an `ssh_auth_sock` guest path, which no Python create
-   writes yet; sandboxes created by Bash keep that path in Bash's host config,
-   which Python does not read. Bash's resume (`acq_backend_start`) also restarts
-   the in-guest bridge, which dies on stop; the Python `acq start`/`acq restart`
-   have no bridge to restart today, so porting forwarding must add that restart
-   to them too (`_start_locked` in `py-acq/src/acq_py/commands/lifecycle.py`).
-   **Unblock trigger:** forwarding is ported, or the Python reader for Bash's
-   state tree lands.
+   host record carries an `ssh_auth_sock` guest path. No Python create writes
+   one yet; for a sandbox created by Bash, the state migration copies the path
+   from Bash's host config (`ssh-auth-sock`) into the record (ADR-0041m
+   generation 2). Python still does not start the in-guest bridge that path
+   points at: Bash restarts it on attach and on resume (`acq_backend_start`)
+   because it dies when the sandbox stops, so after a stop the forwarded socket
+   in a Bash-created sandbox is dead until Bash re-attaches it. Porting
+   forwarding must add the bridge to create, attach, `acq start` and
+   `acq restart` (`_start_locked` in `py-acq/src/acq_py/commands/lifecycle.py`).
+   **Unblock trigger:** forwarding is ported.
 3. **Guest git config on msb** (Bash `_acq_msb_apply_host_git_global_config`).
    On msb, Python passes the identity as `GIT_*`/`EMAIL` session variables only;
    it does not write `user.name`/`user.email` into the guest's global git config.
@@ -127,12 +129,52 @@ parts of the Bash session differ or are not ported yet:
    such record, and `sbx run` takes no `-e`, so it could not pass the session
    environment above. Python therefore runs the recorded agent (or kit entrypoint)
    with `sbx exec -it NAME -- AGENT` from host state, as it does on msb.
-   **Unblock trigger:** the Python reader for Bash's state tree lands; then decide
-   whether a Bash-created generic-OpenCode sandbox needs `sbx run` to attach.
+   The reader for Bash's state tree has landed
+   (`legacy_bash.host_config_read("sbx", NAME, "generic-opencode")` in
+   `py-acq/src/acq_py/legacy_bash.py`), so the record is available.
+   **Unblock trigger:** the sbx kit and attach work; decide then whether a
+   Bash-created generic-OpenCode sandbox needs `sbx run` to attach.
 6. **Live check.** A TUI attach, an interactive shell and Ctrl-C have been tested
    only against a fake backend under a PTY (`py-acq/tests/test_session_fidelity.py`).
    **Unblock trigger:** the next Tier-3 run on an msb host, and on an sbx 0.51+
    host for `sbx exec -it`.
+
+---
+
+## Deferred: limits of the Python acq's import of Bash state
+
+**Status:** deferred (tracked per AGENTS.md "Track Deferred Work").
+
+The Python acq imports the Bash acq's state once per state tree, in the
+generation-2 step of the migration that runs before the first mutating verb
+(ADR-0041m; `py-acq/src/acq_py/legacy_bash.py`, `migration.py`). Four limits
+remain:
+
+1. **Once per tree.** State the Bash acq writes after that step (a sandbox it
+   creates while both implementations are in use, a `kit-source add` or a
+   `provider-credential set`) is not imported. (A `kit_sources` or
+   `provider_credential_bindings` list that Bash itself would refuse is the
+   exception: it stays pending, with a warning on each mutating verb, until it
+   is fixed.) Kit sources without a full commit SHA are never imported; add them
+   again with `acq kit-source add REPO --ref <full-sha>`. Running the import every time
+   would bring back records removed with the Python acq, including kit sources
+   whose trust the user withdrew. **Mitigation:** create such sandboxes with
+   the Python acq, or re-register the source or binding with it.
+   **Unblock trigger:** the Bash implementation is retired, or a ledger of
+   imported records is needed.
+2. **Read-only verbs do not import.** `acq ls` and `acq doctor` never migrate,
+   so until the first mutating verb (`run`, `create`, `exec`, ...) a Bash
+   sandbox is listed without its agent and workspace, or not at all.
+   **Unblock trigger:** a report that this confuses users; then have `doctor`
+   warn when Bash state is waiting to be imported.
+3. **Workspaces in MSYS form on Windows.** A workspace Git Bash recorded as
+   `/c/Users/...` is not an absolute native path, so it is dropped and
+   re-attach uses the path typed on the command line. **Unblock trigger:** a
+   Windows host shows Bash recording that form; then translate it.
+4. **Names acq did not generate.** A sandbox name that the Bash key sanitizer
+   changed (any character outside `A-Za-z0-9._-`) cannot be recovered from the
+   file name, so that sandbox is skipped. acq's own names are never affected.
+   **Unblock trigger:** none expected.
 
 ---
 
@@ -220,8 +262,9 @@ call, and reports the sandbox as unconfirmed if either call fails.
 A live msb run that shows what `msb modify NAME --secret-rm ENV` does for a
 variable that is not bound, on a running and on a stopped sandbox. If msb
 succeeds, or fails in a way acq can tell apart, treat that as "confirmed
-unbound", stop blocking, and retire `--accept-unconfirmed`. Reading Bash's provenance records (planned
-Bash-state import) would also turn Bash-created sandboxes into known ones.
+unbound", stop blocking, and retire `--accept-unconfirmed`. The Bash-state import (ADR-0041m generation 2)
+does not help here: Bash records which sandboxes exist, not which secrets each
+one was bound with, so an imported sandbox still has no binding record.
 
 ---
 

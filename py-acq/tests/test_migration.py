@@ -88,7 +88,7 @@ def test_forward_migration_in_place(monkeypatch, tmp_path):
     # The .bak.<old_schema> sidecar is deleted once the new record verified.
     assert not path.with_name(path.name + ".bak.0").exists()
     # The generation marker is written LAST, declaring the tree complete.
-    assert migration.read_generation() == migration.TARGET_SCHEMA
+    assert migration.read_generation() == migration.TARGET_GENERATION
 
 
 def test_forward_migration_is_idempotent(monkeypatch, tmp_path):
@@ -119,7 +119,7 @@ def test_crash_converges_idempotent(monkeypatch, tmp_path):
 
     assert state.record_read("msb", "a") is not None  # idempotent no-op
     assert state.record_read("msb", "b") is not None  # now migrated
-    assert migration.read_generation() == migration.TARGET_SCHEMA
+    assert migration.read_generation() == migration.TARGET_GENERATION
 
 
 # ---------------------------------------------------------------------------
@@ -506,7 +506,7 @@ def test_config_migrated_independently_of_generation_marker(monkeypatch, tmp_pat
     _env(monkeypatch, tmp_path)
     _write_record("msb", "legacy", {"name": "legacy", "backend": "msb"})
     migration.migrate_tree()
-    assert migration.read_generation() == migration.TARGET_SCHEMA
+    assert migration.read_generation() == migration.TARGET_GENERATION
 
     # A legacy config.yaml appears after the state tree is already current.
     path = config.config_path()

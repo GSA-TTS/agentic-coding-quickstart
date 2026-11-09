@@ -430,7 +430,7 @@ def test_run_typed_path_reattach_fails_closed_on_newer_schema(monkeypatch, tmp_p
     _env(monkeypatch, tmp_path, catalog={"future": "running"})
     # Mark the tree migrated so the migration pre-step does not trip on the record
     # first; this test must reach the typed-path reattach's own schema check.
-    migration.write_generation(migration.TARGET_SCHEMA)
+    migration.write_generation(migration.TARGET_GENERATION)
     _seed_record({**_SEC_RECORD, "name": "future", "schema": 99, "ro_host_config": False})
     _forbid_launch(monkeypatch)
 

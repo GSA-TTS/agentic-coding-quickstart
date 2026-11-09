@@ -1,0 +1,352 @@
+"""Read the Bash acq's host state, for the forward migration (ADR-0041m).
+
+The Bash acq keeps per-sandbox state as small files under its provenance root
+(:func:`state.provenance_dir`), keyed by backend and by the sandbox name's
+sanitized form plus its POSIX ``cksum`` (``_acq_provenance_file`` in
+``acq.backends/common.sh``):
+
+* ``<backend>/<key>.env`` — ``key=value`` lines: ``agent``, ``workspace`` (with
+  ``workspace_source=host``), ``applied_ref``, ``applied_at`` and others;
+* ``<backend>/<key>.config/`` — one file per key (``acq_host_config_write``):
+  ``agent``, ``workspace``, ``ro-host-config``, ``ssh-auth-sock`` and others;
+* ``<backend>/<key>.kits`` — the ``--kit`` and extra kit refs
+  (``acq_cli_kits_write``).
+
+Its user configuration lives in flat ``config.yaml`` keys: ``kit_sources``,
+``provider_credential_bindings``, ``provider_kit`` and ``extra_kits``.
+
+Everything here only reads. Nothing is trusted beyond what the Bash readers
+themselves accept: each field is checked against the grammar Bash validates it
+with, and a value that fails is treated as absent. These files are written by
+acq on the host, never by a guest.
+"""
+
+from __future__ import annotations
+
+import re
+import sys
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+
+from . import config, kits, lock, provider_creds, userdirs
+
+# The suffixes of the per-sandbox files, as Bash names them.
+ENV_SUFFIX = ".env"
+CONFIG_SUFFIX = ".config"
+KITS_SUFFIX = ".kits"
+
+# Bash's own guards: ``acq_provenance_write`` keeps an agent only in [a-z-];
+# ``_acq_host_config_key_ok`` limits key names; the msb adapter accepts a guest
+# ssh-agent socket only as an absolute path in a word-safe charset.
+_AGENT_RE = re.compile(r"[a-z-]+")
+_CONFIG_KEY_RE = re.compile(r"[A-Za-z0-9._-]+")
+_GUEST_SOCK_RE = re.compile(r"/[A-Za-z0-9._/-]*")
+_REF_RE = re.compile(r"[A-Za-z0-9_.-]*")
+_APPLIED_REF_RE = re.compile(r"[A-Za-z0-9_.-]+")
+_APPLIED_AT_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+_KEY_STEM_RE = re.compile(r"(?P<safe>[A-Za-z0-9._-]+)\.(?P<sum>\d+)")
+
+_SAFE_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-")
+
+# The ``kit_sources`` spelling for "no trusted sources" (``acq_kit_sources_entries``).
+_NO_SOURCES = ("none", "NONE", "None")
+
+
+class LegacyParseError(ValueError):
+    """A Bash config value the Bash acq itself would refuse to use."""
+
+
+@dataclass(frozen=True)
+class BashSandbox:
+    """What the Bash acq recorded for one sandbox (fields absent when not recorded)."""
+
+    backend: str
+    name: str
+    agent: str | None = None
+    workspace: str | None = None
+    ro_host_config: bool = False
+    ssh_auth_sock: str | None = None
+    applied_ref: str | None = None
+    applied_at: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Paths (``_acq_provenance_file``, ``acq_host_config_dir``, ``_acq_cli_kits_file``).
+# ---------------------------------------------------------------------------
+
+def posix_cksum(data: bytes) -> int:
+    """The POSIX ``cksum`` CRC of ``data``, as Bash's name keys use it."""
+    return lock.posix_cksum(data)
+
+
+def sandbox_key(name: str) -> str:
+    """The per-sandbox filename stem: ``tr -c 'A-Za-z0-9._-' '_'`` of the name, a dot, its cksum."""
+    return lock.bash_sandbox_key(name)
+
+
+def _bash_safe(token: str) -> str:
+    """``tr -c 'A-Za-z0-9._-' '_'``: every other UTF-8 byte becomes ``_``."""
+    return "".join(chr(b) if chr(b) in _SAFE_CHARS else "_" for b in token.encode("utf-8"))
+
+
+def _backend_dir(backend: str) -> Path:
+    return lock.bash_provenance_dir() / _bash_safe(backend)
+
+
+def provenance_file(backend: str, name: str) -> Path:
+    return _backend_dir(backend) / f"{sandbox_key(name)}{ENV_SUFFIX}"
+
+
+def host_config_dir(backend: str, name: str) -> Path:
+    return _backend_dir(backend) / f"{sandbox_key(name)}{CONFIG_SUFFIX}"
+
+
+def cli_kits_file(backend: str, name: str) -> Path:
+    return _backend_dir(backend) / f"{sandbox_key(name)}{KITS_SUFFIX}"
+
+
+# ---------------------------------------------------------------------------
+# Per-sandbox readers.
+# ---------------------------------------------------------------------------
+
+def parse_env(text: str) -> dict[str, str]:
+    """Parse a ``.env`` record; the first line for a key wins (``acq_provenance_field``).
+
+    Lines are split on ``\\n`` only, as awk splits records: a ``\\r`` or another
+    character ``str.splitlines`` would treat as a line break stays in the value.
+    """
+    out: dict[str, str] = {}
+    for line in text.split("\n"):
+        key, sep, value = line.partition("=")
+        if sep and key not in out:
+            out[key] = value
+    return out
+
+
+def read_env(backend: str, name: str) -> dict[str, str]:
+    """A sandbox's ``.env`` record as a dict (empty when absent or unreadable)."""
+    try:
+        return parse_env(provenance_file(backend, name).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return {}
+
+
+def provenance_field(backend: str, name: str, field: str) -> str | None:
+    """One ``.env`` field (``acq_provenance_field``); ``None`` when absent or empty."""
+    return read_env(backend, name).get(field) or None
+
+
+def workspace_record_read(backend: str, name: str) -> str | None:
+    """The recorded host workspace, only when ``workspace_source=host`` (``acq_workspace_record_read``)."""
+    env = read_env(backend, name)
+    if env.get("workspace_source") != "host":
+        return None
+    return env.get("workspace") or None
+
+
+def host_config_read(backend: str, name: str, key: str) -> str | None:
+    """One host-config key's raw value (``acq_host_config_read``); ``None`` when absent."""
+    if key in (".", "..") or not _CONFIG_KEY_RE.fullmatch(key):
+        return None
+    path = host_config_dir(backend, name) / key
+    try:
+        if not path.is_file():
+            return None
+        return path.read_bytes().decode("utf-8", "surrogateescape")
+    except OSError:
+        return None
+
+
+def _is_absolute_ref(value: str) -> bool:
+    return value.startswith(("git+http", "/")) or bool(re.match(r"[A-Za-z]:[/\\]", value))
+
+
+def read_cli_kits(
+    backend: str, name: str, warn: Callable[[str], None] | None = None
+) -> tuple[list[str], list[str]] | None:
+    """The recorded ``(--kit refs, extra refs)`` (``acq_cli_kits_load``); ``None`` with no record.
+
+    A relative local ref left by an older Bash acq would resolve against the
+    current directory, so it is skipped (with ``warn``), as Bash does.
+    """
+    try:
+        text = cli_kits_file(backend, name).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    cli: list[str] = []
+    extras: list[str] = []
+    for line in text.splitlines():
+        key, _, value = line.partition("=")
+        if key not in ("kit", "extra") or not value:
+            continue
+        if not _is_absolute_ref(value):
+            if warn is not None:
+                warn(f"ignoring recorded relative kit path '{value}' for {name}")
+            continue
+        (cli if key == "kit" else extras).append(value)
+    return cli, extras
+
+
+def _sandbox_name(stem: str) -> str | None:
+    """The sandbox name a ``<safe>.<cksum>`` stem stands for, or ``None``.
+
+    The raw name is recoverable only when sanitizing left it unchanged, which
+    the cksum confirms. acq's own names (``[a-z0-9-]``) always qualify; a
+    hand-made name with other characters cannot be recovered and is skipped.
+    """
+    match = _KEY_STEM_RE.fullmatch(stem)
+    if match is None:
+        return None
+    safe = match.group("safe")
+    if str(posix_cksum(safe.encode("utf-8"))) != match.group("sum"):
+        return None
+    return safe
+
+
+def sandbox_names(backend: str) -> list[str]:
+    """Every sandbox name with a Bash ``.env``, ``.config`` or ``.kits`` record, sorted."""
+    directory = _backend_dir(backend)
+    try:
+        entries = list(directory.iterdir())
+    except OSError:
+        return []
+    names: set[str] = set()
+    for entry in entries:
+        for suffix in (ENV_SUFFIX, CONFIG_SUFFIX, KITS_SUFFIX):
+            if entry.name.endswith(suffix):
+                name = _sandbox_name(entry.name[: -len(suffix)])
+                if name is not None:
+                    names.add(name)
+    return sorted(names)
+
+
+def _command_substitution(value: str | None) -> str | None:
+    """``value`` as Bash's ``$(...)`` would yield it: trailing newlines removed."""
+    return value.rstrip("\n") if value is not None else None
+
+
+def _clean(value: str | None) -> str | None:
+    return value.strip() if value and value.strip() else None
+
+
+def _workspace(backend: str, name: str) -> str | None:
+    """The host workspace, kept only if it is one line and an absolute path on this host."""
+    value = workspace_record_read(backend, name)
+    if value is None or any(ch in value for ch in "\n\r\t\0") or not userdirs.is_absolute(value):
+        return None
+    return value
+
+
+def read_sandbox(backend: str, name: str) -> BashSandbox:
+    """Everything the Bash acq recorded for one sandbox, each field checked as Bash checks it."""
+    env = read_env(backend, name)
+    agent = env.get("agent") or _clean(host_config_read(backend, name, "agent"))
+    sock = _clean(host_config_read(backend, name, "ssh-auth-sock"))
+    applied_ref = env.get("applied_ref")
+    applied_at = env.get("applied_at")
+    return BashSandbox(
+        backend=backend,
+        name=name,
+        agent=agent if agent and _AGENT_RE.fullmatch(agent) else None,
+        workspace=_workspace(backend, name),
+        ro_host_config=_command_substitution(host_config_read(backend, name, "ro-host-config")) == "1",
+        ssh_auth_sock=sock if sock and _GUEST_SOCK_RE.fullmatch(sock) else None,
+        applied_ref=applied_ref if applied_ref and _APPLIED_REF_RE.fullmatch(applied_ref) else None,
+        applied_at=applied_at if applied_at and _APPLIED_AT_RE.fullmatch(applied_at) else None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# config.yaml keys.
+# ---------------------------------------------------------------------------
+
+def parse_kit_source_entry(entry: str) -> tuple[str, str, str]:
+    """``_acq_kit_source_parse_entry``: ``repo[@REF][|DIR]`` to ``(repo, ref, dir)``.
+
+    An entry for the shipped control plane without a ref follows the shipped
+    pin, as in Bash. Raises :class:`LegacyParseError` where Bash refuses.
+    """
+    rest, _, directory = entry.partition("|")
+    rest, _, ref = rest.partition("@")
+    repo = kits.normalize_repo(rest) if rest == rest.strip() else None
+    if not entry or repo is None or len(repo) > 200:
+        raise LegacyParseError(f"invalid kit source '{entry}'")
+    if not _REF_RE.fullmatch(ref):
+        raise LegacyParseError(f"invalid ref '{ref}' for '{repo}'")
+    if not ref and repo == kits.CONTROL_PLANE_REPO:
+        ref = kits.CONTROL_PLANE_REF
+    normalized = kits.normalize_dir(directory or None)
+    if normalized is None:
+        raise LegacyParseError(f"unsafe kit dir '{directory}' for '{repo}'")
+    return repo, ref, normalized
+
+
+def kit_sources() -> list[tuple[str, str, str]]:
+    """The ``kit_sources`` entries (``acq_kit_sources_entries`` without the env override).
+
+    An absent key reads as no entries, as does the explicit ``none``. One bad
+    entry makes Bash refuse the whole list, so this raises
+    :class:`LegacyParseError` rather than returning part of it.
+    """
+    raw = config.read_field("kit_sources")
+    if raw is None or raw in _NO_SOURCES:
+        return []
+    return [parse_kit_source_entry(token) for token in raw.split()]
+
+
+def _parse_hosts(provider: str, hosts: str) -> list[str]:
+    """Split ``h1,h2``: like Bash's comma word-split, a trailing comma is ignored."""
+    parts = hosts.split(",")
+    if parts and parts[-1] == "":
+        parts.pop()
+    if any(part == "" for part in parts):
+        raise LegacyParseError(f"invalid host '' for provider '{provider}'")
+    return parts
+
+
+def parse_provider_credential_pairs(pairs: str) -> list[tuple[str, str, list[str]]]:
+    """``_acq_provider_credential_parse_pairs``: ``id=KEY_ENV[@h1[,h2]]`` tokens.
+
+    Raises :class:`LegacyParseError` for the first malformed token, as Bash
+    fails the whole list.
+    """
+    out: list[tuple[str, str, list[str]]] = []
+    for token in pairs.split():
+        if "=" not in token:
+            raise LegacyParseError(f"expected '<providerId>=<KEY_ENV>', got '{token}'")
+        provider, _, rest = token.partition("=")
+        key_env, at, hosts = rest.partition("@")
+        if "=" in key_env:
+            raise LegacyParseError(f"'{token}' has a malformed credential name")
+        host_list = _parse_hosts(provider, hosts) if at else []
+        problem = provider_creds.validate_binding(provider, key_env, host_list)
+        if problem is not None:
+            raise LegacyParseError(problem)
+        out.append((provider, key_env, host_list))
+    return out
+
+
+def provider_credential_bindings() -> list[tuple[str, str, list[str]]]:
+    """The ``provider_credential_bindings`` config key, parsed (empty when absent).
+
+    A provider listed more than once keeps its LAST entry, as Bash's
+    ``acq_provider_credential_lookup`` does.
+    """
+    pairs = parse_provider_credential_pairs(config.read_field("provider_credential_bindings") or "")
+    last = {provider: (provider, key_env, hosts) for provider, key_env, hosts in pairs}
+    return list(last.values())
+
+
+def provider_kit() -> str | None:
+    """The ``provider_kit`` config key. The Python acq reads it in place (``kitspec``)."""
+    return config.read_field("provider_kit")
+
+
+def extra_kits() -> list[str]:
+    """The ``extra_kits`` config key, split. The Python acq reads it in place (``kitspec``)."""
+    return (config.read_field("extra_kits") or "").split()
+
+
+def warn(message: str) -> None:
+    print(f"acq: warning: {message}", file=sys.stderr)

@@ -138,6 +138,38 @@ def atomic_write_text(path: Path, data: str) -> None:
         raise
 
 
+def atomic_create_text(path: Path, data: str) -> bool:
+    """Create ``path`` holding ``data`` only if it does not exist yet; True when created.
+
+    The data goes to a unique temp file (fsynced) that is then hard-linked into
+    place, so the record appears whole or not at all, and a record another
+    command wrote first (even moments earlier) is never replaced. A filesystem
+    without hard links falls back to an existence check and a rename, which
+    still never replaces a record that was already there when it looked.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            return False
+        except OSError:
+            if os.path.lexists(path):
+                return False
+            os.replace(tmp, path)
+        return True
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
 def backend_dir(backend: str) -> Path:
     """The state subdirectory holding one backend's sandbox records.
 
@@ -188,6 +220,19 @@ def record_write(
 
     atomic_write_text(record_path(backend, name), json.dumps(doc, indent=2, sort_keys=False) + "\n")
     return doc
+
+
+def record_import(backend: str, name: str, fields: dict) -> bool:
+    """Create a sandbox's record from another implementation's state; True when written.
+
+    Used by the forward migration to adopt a sandbox the Bash acq created. It
+    never replaces a record that already exists (readable or not): the Python
+    record is the authority once present. ``fields`` are added after the
+    ``schema``/``name``/``backend`` header and must not repeat those keys.
+    """
+    doc: dict = {"schema": STATE_SCHEMA, "name": name, "backend": backend}
+    doc.update({k: v for k, v in fields.items() if k not in doc})
+    return atomic_create_text(record_path(backend, name), json.dumps(doc, indent=2, sort_keys=False) + "\n")
 
 
 def _record_from_path(path: Path, *, strict: bool, label: str) -> dict | None:

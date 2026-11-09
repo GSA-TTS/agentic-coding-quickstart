@@ -459,6 +459,17 @@ def set_source(repo: str, ref: str, directory: str) -> str:
     return "updated" if existed else "added"
 
 
+def import_source(repo: str, ref: str, directory: str) -> bool:
+    """Register a source carried over from the Bash acq's ``kit_sources``; True when written.
+
+    Used only by the forward migration. A source already in the registry (in
+    any state) is left as it is, so a later ``kit-source add``/``rm`` made with
+    this acq is never undone by the import.
+    """
+    doc = {"schema": KIT_SCHEMA, "repository": repo, "ref": ref, "directory": directory}
+    return state.atomic_create_text(_source_path(repo), json.dumps(doc, indent=2, sort_keys=False) + "\n")
+
+
 def remove_source(repo: str) -> bool:
     """Remove one registered source; returns ``True`` when it was present."""
     if source_record(repo) is None:
@@ -636,6 +647,20 @@ def provenance_write(backend: str, sandbox: str) -> dict:
     }
     _atomic_write(_provenance_path(backend, sandbox), doc)
     return doc
+
+
+def provenance_import(backend: str, sandbox: str, applied_ref: str, recorded_at: str | None) -> bool:
+    """Carry over the bundle ref the Bash acq recorded for a sandbox; True when written.
+
+    Used only by the forward migration, so ``kit check`` reports a Bash-created
+    sandbox as current or stale instead of unknown. An existing record is never
+    replaced.
+    """
+    doc = {"schema": KIT_SCHEMA, "backend": backend, "sandbox": sandbox, "applied_ref": applied_ref}
+    if recorded_at:
+        doc["recorded_at"] = recorded_at
+    data = json.dumps(doc, indent=2, sort_keys=False) + "\n"
+    return state.atomic_create_text(_provenance_path(backend, sandbox), data)
 
 
 def provenance_remove(backend: str, sandbox: str) -> None:

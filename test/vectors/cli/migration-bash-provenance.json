@@ -1,0 +1,76 @@
+{
+  "schema": 1,
+  "id": "cli/migration-bash-provenance",
+  "oracle": "ADR-0041m forward migration of existing installs: a sandbox the Bash acq created (its provenance/<backend>/<name>.<cksum>.env record, written here byte-for-byte as Bash writes it) is imported by the first mutating verb's generation-2 migration step, so ls lists it with its recorded agent instead of dropping it",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{python}",
+      "-I",
+      "test/vectors/drivers/seeded-run.py",
+      "[{\"bash_state\":\"msb/opencode-proj.2856696754.env\",\"text\":\"schema=1\\nbundle=acq-builtin\\nrepo=GSA-TTS/agentic-coding-patterns\\napplied_ref=941a286f912b99475429c3c00db49a99af5b241e\\nbackend=msb\\nprovider_selection=default\\nagent=opencode\\napplied_at=2026-11-09T16:04:12Z\\nworkspace_source=host\\nworkspace=/w/proj\\n\"},[[\"--backend\",\"msb\",\"backend\",\"set\",\"msb\"],false,0],[[\"--backend\",\"msb\",\"ls\",\"--json\"],false,null],[[\"--backend\",\"msb\",\"kit\",\"check\",\"opencode-proj\",\"--json\"],false,0]]",
+      "{acq}"
+    ],
+    "env": {
+      "ACQ_MSB_BIN": "__stub__",
+      "ACQ_MSB_VERSION": "0.7.7",
+      "ACQ_MSB_INSTALLED": "1",
+      "ACQ_SBX_INSTALLED": "0",
+      "ACQ_MSB_STUB_CATALOG": "{\"opencode-proj\":\"running\"}"
+    },
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "ACQ_PROVENANCE_DIR",
+      "MSB_HOME",
+      "ACQ_IMAGE",
+      "ACQ_MSB_IMAGE",
+      "ACQ_MSB_READY_TIMEOUT",
+      "ACQ_MSB_STUB_FAIL",
+      "ACQ_STATE_SEED",
+      "ACQ_KIT_PROVENANCE_SEED",
+      "ACQ_SANDBOX_LOCK_TIMEOUT"
+    ],
+    "stdin": "",
+    "timeout_ms": 20000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "ls",
+        "data": {
+          "sandboxes": [
+            {
+              "name": "opencode-proj",
+              "backend": "msb",
+              "state": "running",
+              "agent": "opencode"
+            }
+          ]
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME"
+    ]
+  }
+}
