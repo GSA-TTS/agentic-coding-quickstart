@@ -452,7 +452,10 @@ def _secret_set_custom(rest: list[str]) -> int:
         return 1
     entries = _load_custom()
     placeholder = _arg_after(rest, "--placeholder")
-    same = [e for e in entries if e["scope"] == scope and e["env"] == env]
+    # A custom secret is keyed by scope, env var and hosts: one for the same env
+    # var on other hosts only is a different secret and is left alone.
+    same = [e for e in entries if e["scope"] == scope and e["env"] == env
+            and (not e.get("targets") or set(e["targets"]) & set(hosts))]
     mode = os.environ.get(PLACEHOLDER_MODE_ENV, "")
     if placeholder is not None and same and all(e["placeholder"] == placeholder for e in same):
         minted = f"{placeholder}-minted"
