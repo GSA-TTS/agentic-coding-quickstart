@@ -202,6 +202,31 @@ backend patterns and Tier-3 transcripts), with an immediate out-of-band patch
 for any critical/high CVE affecting the bundled CPython or wheelhouse. The
 developer is the decider here; this proposal is flagged rather than adopted.
 
+## Built-in kit bundle
+
+The built-in kits (the four support kits and the `opencode` agent kit) ship as
+package data in `src/acq_py/kitbundle/`, a byte-exact copy of the Patterns
+control plane at `CONTROL_PLANE_REF` (`src/acq_py/kits.py`, equal to
+`PATTERNS_KIT_REF` in `acq.backends/common.sh`). `kitbundle/MANIFEST.json`
+records the ref and each file's git blob id and size; `upstream_mode` is
+informational. `src/acq_py/kitspec.py` parses and selects kits from it, so acq
+never fetches a built-in kit during ordinary operation (ADR-0042m).
+
+To bump the pin, change both refs, then regenerate the bundle and commit it
+with the bump:
+
+```sh
+scripts/refresh-kitbundle                    # reads the pinned tree through `gh api`
+scripts/refresh-kitbundle --checkout DIR     # or from a Patterns clone that has the pin
+python -m pytest py-acq/tests/test_kitspec.py -q
+```
+
+The tests check the bundled files against the manifest and the refs against
+each other. The networked pre-commit job (`.github/workflows/pre-commit.yml`)
+also runs `scripts/refresh-kitbundle --check` against its checkout of Patterns
+at the pin, which fails when any manifest blob id differs from
+`git ls-tree -r <ref>`.
+
 ## Testing
 
 Two runners consume the same `test/vectors/` corpus and must agree on the

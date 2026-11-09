@@ -807,6 +807,9 @@ def test_pin_parity_with_bash():
 
 def test_bundle_matches_its_manifest():
     assert kitspec.verify_bundle() == []
+    for entry in kitspec.bundle_manifest()["kits"].values():
+        for meta in entry["files"].values():
+            assert set(meta) == {"git_blob", "size", "upstream_mode"}
     for name in kitspec.bundle_kit_names():
         spec = kitspec.load_bundled_kit(name)
         assert spec.field("schemaVersion") == "hybrid/v1"

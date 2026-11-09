@@ -26,9 +26,14 @@ Parser
 
 Built-in bundle
     The built-in kits ship as package data under ``kitbundle/``, copied from the
-    control-plane repository at :data:`kits.CONTROL_PLANE_REF`. ``MANIFEST.json``
-    records that ref and the git blob id of every file, so the copy can be
-    checked offline (:func:`verify_bundle`). acq never fetches a built-in kit
+    control-plane repository at :data:`kits.CONTROL_PLANE_REF` by
+    ``scripts/refresh-kitbundle``. ``MANIFEST.json`` records that ref and the
+    git blob id and size of every file, so the copy can be checked offline
+    (:func:`verify_bundle`); CI also checks the blob ids against the pinned
+    Patterns tree. Each entry's ``upstream_mode`` is informational: acq does not
+    verify the bundled files against it (package data carries no file modes, and
+    ``files[].mode`` sets the in-guest mode), though ``refresh-kitbundle
+    --check`` compares it with the pinned tree. acq never fetches a built-in kit
     during ordinary operation (ADR-0042m).
 
 Selection
