@@ -223,23 +223,35 @@ def test_bash_refuses_what_python_refuses():
 # ---------------------------------------------------------------------------
 
 _TOKEN_VARS = ("USAI_API_KEY", "GITHUB_TOKEN", "GH_TOKEN", "GITLAB_TOKEN", "OPENCODE_API_KEY")
+# Store-layout and backend knobs a developer's or runner's shell could carry in.
+_PINNED_AWAY = (
+    "ACQ_SECRET_IMPORT_ASSUME_YES", "ACQ_PROVIDER_CREDENTIAL_BINDINGS", "ACQ_SECRET_FORCE_FILE",
+    "ACQ_SECRET_FILE_DIR", "ACQ_SECRET_META_DIR", "ACQ_SECRET_INDEX_FILE", "ACQ_BACKEND",
+)
+
+# Bash `acq` resolves a backend before it dispatches any verb, `secret import`
+# included, even though import never calls it. A host without msb or sbx (a CI
+# runner) would make Bash exit 1 before importing anything, so the Bash side
+# gets a fake msb that answers only `--version`, on every host alike.
+_FAKE_MSB = '#!/bin/sh\n[ "${1:-}" = "--version" ] && { echo "msb 0.7.11"; exit 0; }\nexit 1\n'
 
 
-def _import_env(store: Path, tokens: dict[str, str]) -> dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if k not in _TOKEN_VARS}
-    env.pop("ACQ_SECRET_IMPORT_ASSUME_YES", None)
-    env.pop("ACQ_PROVIDER_CREDENTIAL_BINDINGS", None)
+def _import_env(store: Path, tokens: dict[str, str], fake_bin: Path) -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if k not in _TOKEN_VARS + _PINNED_AWAY}
     env.update(tokens)
+    # Both sides use the forced file backend under their own directory, so a
+    # host secret-tool or keychain can never be chosen.
     env["ACQ_SECRET_STORE_DIR"] = str(store)
+    env["ACQ_BACKEND"] = "msb"
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env.get('PATH', '')}"
     return env
 
 
-def _run_import(cmd: list[str], env: dict[str, str]) -> int:
-    proc = subprocess.run(
-        [*cmd, "secret", "import", *env.pop("_ARGS").split()],
+def _run_import(cmd: list[str], args: str, env: dict[str, str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [*cmd, "secret", "import", *args.split()],
         env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120, check=False,
     )
-    return proc.returncode
 
 
 @pytest.mark.parametrize(
@@ -264,18 +276,25 @@ def _run_import(cmd: list[str], env: dict[str, str]) -> int:
     ],
 )
 def test_secret_import_matches_bash(tmp_path, args, tokens, seed, expected):
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    (fake_bin / "msb").write_text(_FAKE_MSB, encoding="utf-8")
+    (fake_bin / "msb").chmod(0o755)
     stores = {}
-    codes = {}
+    procs = {}
     for impl, cmd in (("bash", [BASH, str(REPO_ROOT / "acq")]), ("python", [sys.executable, "-m", "acq_py"])):
         store = tmp_path / impl
         for key, value in seed.items():
             store.mkdir(exist_ok=True)
             (store / key).write_bytes(value)
-        env = _import_env(store, tokens)
-        env["_ARGS"] = args
-        codes[impl] = _run_import(cmd, env)
+        procs[impl] = _run_import(cmd, args, _import_env(store, tokens, fake_bin))
         stores[impl] = _snapshot(store) if store.exists() else {}
-    assert stores["python"] == stores["bash"], json.dumps({k: {n: v.decode() for n, v in s.items()} for k, s in stores.items()})
-    assert stores["python"] == expected
+    diag = json.dumps({k: {n: v.decode() for n, v in s.items()} for k, s in stores.items()})
+    diag += "".join(f"\n--- {impl} rc={p.returncode} stderr:\n{p.stderr}" for impl, p in procs.items())
+    assert stores["python"] == stores["bash"], diag
+    assert stores["python"] == expected, diag
     # Bash exits 1 on a usage error; Python's contract uses 2 (ADR-0038m).
-    assert (codes["python"] == 0) == (codes["bash"] == 0)
+    assert (procs["python"].returncode == 0) == (procs["bash"].returncode == 0), diag
+    if procs["bash"].returncode != 0:
+        # Both refuse the flag as a usage error, never for a missing backend.
+        assert "unknown flag" in procs["bash"].stderr and procs["python"].returncode == 2, diag

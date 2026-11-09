@@ -14,8 +14,7 @@ import json
 import os
 import sys
 
-from .. import backends, envelope, errors, kits, msb, sbx, security, state
-from .. import secretstore
+from .. import backends, envelope, errors, kits, msb, sbx, secretstore, security, state
 
 # Both adapters and the acq secret store raise an error carrying the same
 # (code, message, remediation) contract; catch this tuple uniformly at the seam.
@@ -265,7 +264,7 @@ def _stdin_is_mintty() -> bool:
         import msvcrt
 
         handle = msvcrt.get_osfhandle(sys.stdin.fileno())
-        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        kernel32 = ctypes.windll.kernel32
         if kernel32.GetFileType(handle) != 3:  # FILE_TYPE_PIPE
             return False
         size = 4 + 2 * 1024

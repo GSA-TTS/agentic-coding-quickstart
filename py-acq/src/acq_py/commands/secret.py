@@ -379,28 +379,28 @@ def _parse_import(parsed) -> tuple[_ImportArgs, str | None]:
         if parsed.service not in importable:
             return opts, f"secret import: unknown service '{parsed.service}' for --service"
         opts.service = parsed.service
-    for token in parsed.tokens:
-        if token in ("--all", "--force", "-f", "--dry-run", "-g", "--global"):
-            opts.mode = {"--all": "all", "--force": "force", "-f": "force"}.get(token, opts.mode)
-            opts.dry_run = opts.dry_run or token == "--dry-run"
-            opts.global_flag = opts.global_flag or token in ("-g", "--global")
-        elif token.startswith("--service="):
-            name = token[len("--service="):]
+    for arg in parsed.args:
+        if arg in ("--all", "--force", "-f", "--dry-run", "-g", "--global"):
+            opts.mode = {"--all": "all", "--force": "force", "-f": "force"}.get(arg, opts.mode)
+            opts.dry_run = opts.dry_run or arg == "--dry-run"
+            opts.global_flag = opts.global_flag or arg in ("-g", "--global")
+        elif arg.startswith("--service="):
+            name = arg[len("--service="):]
             if name not in importable:
                 return opts, f"secret import: unknown service '{name}' for --service"
             err = _import_take_service(opts, name)
             if err:
                 return opts, err
-        elif token.startswith("-"):
-            return opts, f"secret import: unknown flag '{token}'"
-        elif token in importable:
-            err = _import_take_service(opts, token)
+        elif arg.startswith("-"):
+            return opts, f"secret import: unknown flag '{arg}'"
+        elif arg in importable:
+            err = _import_take_service(opts, arg)
             if err:
                 return opts, err
         elif opts.sandbox is None:
-            opts.sandbox = token
+            opts.sandbox = arg
         else:
-            return opts, f"secret import: unexpected extra tokenument '{token}'"
+            return opts, f"secret import: unexpected extra argument '{arg}'"
     if opts.global_flag and opts.sandbox is not None:
         # Bash lets whichever comes last win; refuse the ambiguity instead.
         return opts, "secret import: give either -g or a SANDBOX, not both"
