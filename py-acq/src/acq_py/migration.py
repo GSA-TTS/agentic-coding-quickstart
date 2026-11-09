@@ -401,7 +401,8 @@ def migrate_tree() -> None:
     """
     try:
         with lock.exclusive_lock(lock_path()):
-            _seed_records()  # materialize the test seam inside the critical section
+            _seed_records()  # materialize the test seams inside the critical section
+            config.seed_config()
             config.migrate_config()  # independent of the generation marker
             if read_generation() >= TARGET_SCHEMA:
                 return
@@ -415,6 +416,8 @@ def migrate_tree() -> None:
             str(exc),
             "another migration is in progress; retry shortly",
         ) from exc
+    except config.ConfigMigrationError as exc:
+        raise MigrationError(errors.MIGRATION_FAILED, str(exc), exc.remediation) from exc
     except config.ConfigSchemaError as exc:
         raise MigrationError(
             errors.STATE_SCHEMA_UNSUPPORTED,

@@ -152,7 +152,7 @@ numeric-prefix order.
 
 | File | Tests | Bucket | Disposition |
 |---|---|---|---|
-| `70-msb-backend.bats` | 20 | preserve | §active_backend + §version floor. Covered by `cli/backend-list-*`, `cli/backend-check-*`. **Mixed → re-express:** `backend set/unset` (persist default) and `prepare`/`doctor --fix` host-readiness have no vector — **gap**. |
+| `70-msb-backend.bats` | 20 | preserve | §active_backend + §version floor. Covered by `cli/backend-list-*`, `cli/backend-check-*`. **Mixed → re-express:** `backend set/unset` (persist default) is covered by `cli/backend-set*`, `cli/backend-unset*` and `cli/lifecycle-create-config-sbx`; `prepare`/`doctor --fix` host-readiness has no vector — **gap**. |
 | `71-msb-provision-secrets.bats` | 14 | preserve | §secret binding + provision. Covered by `cli/lifecycle-create`, `cli/secret-ls-*`. |
 | `71c-msb-canonical-host-config.bats` | 2 | re-express | §4 host-path canonicalization before mount — host/guest-path fidelity → **gap**. |
 | `72-msb-agent-user.bats` | 37 | preserve | §attach/exec/shell as agent user. Covered by `cli/attach-*`, `cli/exec-*`, `cli/shell-*`. **Mixed → re-express:** TERM forwarding, passwd-shell, workspace `-w` are Tier-2/Tier-3. |
@@ -225,9 +225,9 @@ retire-on-touch can proceed block by block:
 * **`146-provider-verification.bats`** — re-express the reachability /
   model-identity blocks as Tier-2/Tier-3 evidence; preserve the
   provider-credential binding blocks already covered by vectors.
-* **`70-msb-backend.bats`** — re-express `backend set/unset` and `prepare`
-  host-readiness as new vectors (gap); preserve version-floor and auto-detect
-  blocks already covered.
+* **`70-msb-backend.bats`** — `backend set/unset` is re-expressed as vectors;
+  re-express `prepare` host-readiness as a new vector (gap); preserve
+  version-floor and auto-detect blocks already covered.
 * **`65-doctor-image-contract.bats`** — retire the `doctor script:` blocks
   (source `common.sh` and assert `acq_image_contract_doctor_script` internals —
   implementation detail); preserve the subprocess `acq doctor` blocks already
@@ -262,7 +262,7 @@ dropped. All are Tier-1 candidates unless marked Tier-3.
 | G14 | Windows installer (PowerShell) | `06-windows-install.bats` | ADR-0042m + ADR-0044m |
 | G15 | Noninteractive `configure` output (effective key/value, no secrets) | `135-configure.bats` | §2 required data |
 | G16 | SSH-agent forwarding (`--vsock` / `ACQ_FORWARD_HOST_SOCKETS`) | `115-ssh-agent-forward.bats` | §6 preserve-with-warning |
-| G17 | `backend set/unset` persist + host-readiness `prepare` | `70-msb-backend.bats` | §3 + ADR-0040m |
+| G17 | Host-readiness `prepare` (`backend set/unset` persistence is now covered by `cli/backend-set*`, `cli/backend-unset*`) | `70-msb-backend.bats` | §3 + ADR-0040m |
 | G18 | Kit-ref / `ACQ_EXTRA_KITS` persistence round-trip | `95-kit-ref-persistence.bats` | §3 + ADR-0041m |
 | G19 | Installer elevation/secret-safety guard | `05-install.bats` | ADR-0042m |
 
