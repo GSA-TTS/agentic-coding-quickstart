@@ -157,6 +157,7 @@ def record_write(
     image: str | None = None,
     created_at: str | None = None,
     ro_host_config: bool | None = None,
+    kits_unconfirmed: bool | None = None,
 ) -> dict:
     """Write (atomically) a sandbox's host-authoritative state record.
 
@@ -166,6 +167,8 @@ def record_write(
     ``ro_host_config`` records that the create passed the ADR-0035 read-only
     trusted-config mount (host key ``ro-host-config``); it is preserved across the
     security-exception recreation so the sandbox keeps requiring the guarantee.
+    ``kits_unconfirmed`` marks a guest whose kit startup acq has not yet seen
+    finish; every verb that attaches to a sandbox refuses one so marked.
     """
     doc: dict = {
         "schema": STATE_SCHEMA,
@@ -180,6 +183,8 @@ def record_write(
         doc["created_at"] = created_at
     if ro_host_config:
         doc["ro_host_config"] = True
+    if kits_unconfirmed:
+        doc["kits_unconfirmed"] = True
 
     atomic_write_text(record_path(backend, name), json.dumps(doc, indent=2, sort_keys=False) + "\n")
     return doc

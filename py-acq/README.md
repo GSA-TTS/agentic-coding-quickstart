@@ -273,7 +273,7 @@ lists each setting as `key`, `value`, `source` and `honoured_by_python`.
 
 **`scope_github_token` takes effect only under the Bash acq for now**, and both
 the report and `--json` (`"honoured_by_python": false`) say so. The Python acq
-reads `extra_kits` and `provider_kit` when it creates an msb sandbox, but applies
+reads `extra_kits` and `provider_kit` when it creates a sandbox, but applies
 only kits from its pinned built-in bundle: a kit that would have to be fetched
 (any catalog extra kit today) is refused at create and needs the Bash acq
 (`ACQ_IMPL=bash`). `--json` marks those two settings `"python_applies":
@@ -351,6 +351,20 @@ control plane at `CONTROL_PLANE_REF` (`src/acq_py/kits.py`, equal to
 records the ref and each file's git blob id and size; `upstream_mode` is
 informational. `src/acq_py/kitspec.py` parses and selects kits from it, so acq
 never fetches a built-in kit during ordinary operation (ADR-0042m).
+
+On msb, acq applies each kit itself (`src/acq_py/kit_msb.py`). On sbx,
+`src/acq_py/kit_sbx.py` translates each kit into an sbx-v2 kit directory under
+`<state>/sbx-kits/` exactly as Bash `kit_translate_to_sbx` does, adds the host
+git identity kit and a startup-barrier kit, and passes them all to
+`sbx create --kit`; create then waits for the barrier. Until it is seen the
+state record says `kits_unconfirmed`, and every verb that attaches refuses the
+sandbox, so a create that times out or is interrupted and cannot remove the
+sandbox never leaves it attachable. Translated kits are named by content and
+shared between creates; unused ones are pruned after a week. `acq kit apply` and
+`acq kit update` on sbx use `sbx kit add`, which sbx 0.38 and later refuse for
+kits with startup commands, so those report that the sandbox must be recreated.
+`py-acq/tests/test_kit_sbx.py` compares the translator's output with Bash's,
+file by file.
 
 To bump the pin, change both refs, then regenerate the bundle and commit it
 with the bump:

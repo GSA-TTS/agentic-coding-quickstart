@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "id": "cli/lifecycle-sbx-create",
-  "oracle": "ADR-0040m sbx provision capability: create a sandbox end to end against the sbx stub and record host-authoritative state (shell selects no agent kit, so no kit-apply is needed; opencode requires kit-apply, which is msb-only in this slice)",
+  "oracle": "ADR-0040m sbx provision capability: create a sandbox end to end against the sbx stub and record host-authoritative state (shell selects no agent kit, so only the built-in support kits are passed to sbx create)",
   "tier": 1,
   "backend": null,
   "platform": "any",
@@ -24,7 +24,7 @@
       "value": {
         "schema_version": 1,
         "command": "create",
-        "data": {"name": "sbx-life-test", "backend": "sbx", "agent": "shell", "state": "running", "kit": null}
+        "data": {"name": "sbx-life-test", "backend": "sbx", "agent": "shell", "state": "running", "kit": null, "kits": ["zscaler-ca-certificate", "usai-provider", "agentic-coding-playbook", "git-ssh-sign"]}
       },
       "normalize": []
     },
