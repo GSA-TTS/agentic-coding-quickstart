@@ -232,6 +232,99 @@ EOM
 }
 
 # ---------------------------------------------------------------------------
+# kit_source_resolve KITDIR SOURCE / kit_source_within KITDIR SOURCE
+#
+# A kit's files[] payload must come from the kit itself. kit_source_resolve
+# prints the fully resolved path of KITDIR/SOURCE and succeeds only when that is
+# a regular file inside the resolved KITDIR; callers copy from the printed path,
+# so what is checked is what is copied. kit_source_within is the status-only
+# form. Both fail closed when a path cannot be resolved.
+kit_source_resolve() {
+  local kitdir="${1:-}" src="${2:-}" root target
+  case "$src" in "" | /*) return 1 ;; esac
+  case "/$src/" in */../*) return 1 ;; esac
+  root=$(_kit_resolve_path "$kitdir") || return 1
+  target=$(_kit_resolve_path "$kitdir/$src") || return 1
+  case "$target" in
+    "$root"/*) [ -f "$target" ] || return 1 ;;
+    *) return 1 ;;
+  esac
+  printf '%s\n' "$target"
+}
+
+kit_source_within() {
+  kit_source_resolve "$@" >/dev/null
+}
+
+# _kit_resolve_path PATH: print PATH with every symlink resolved, or fail.
+# The kit root and its sources go through this same function so both sides of a
+# containment check use one resolver. It prefers realpath, then readlink -f, and
+# otherwise follows links with plain readlink and resolves directories with
+# cd -P (older macOS has neither realpath nor readlink -f). CDPATH is ignored.
+_kit_resolve_path() {
+  local p="${1:-}" out="" link dir base n=0
+  [ -n "$p" ] || return 1
+  if command -v realpath >/dev/null 2>&1 && out=$(realpath -- "$p" 2>/dev/null) && [ -n "$out" ]; then
+    printf '%s\n' "$out"
+    return 0
+  fi
+  if out=$(readlink -f -- "$p" 2>/dev/null) && [ -n "$out" ]; then
+    printf '%s\n' "$out"
+    return 0
+  fi
+  while [ -L "$p" ]; do
+    n=$((n + 1))
+    [ "$n" -le 40 ] || return 1
+    link=$(readlink -- "$p") || return 1
+    case "$link" in
+      /*) p="$link" ;;
+      *) p="$(dirname -- "$p")/$link" ;;
+    esac
+  done
+  [ -e "$p" ] || return 1
+  if [ -d "$p" ]; then
+    (CDPATH='' cd -P -- "$p" 2>/dev/null && pwd -P)
+    return
+  fi
+  dir=$(CDPATH='' cd -P -- "$(dirname -- "$p")" 2>/dev/null && pwd -P) || return 1
+  base=$(basename -- "$p")
+  printf '%s/%s\n' "$dir" "$base"
+}
+
+# kit_tree_symlinks_within KITDIR TREE: succeed when TREE has no entry whose
+# name contains a newline and every symlink under it resolves inside KITDIR.
+# Used before a kit's files/ tree is copied verbatim (cp -a keeps links), so a
+# link cannot carry host content into a generated kit. Names are read
+# NUL-delimited; a newline-bearing name is refused outright.
+kit_tree_symlinks_within() {
+  local kitdir="${1:-}" tree="${2:-}" root link target bad=0 nl
+  [ -d "$tree" ] || return 0
+  root=$(_kit_resolve_path "$kitdir") || return 1
+  nl='
+'
+  while IFS= read -r -d '' link; do
+    case "$link" in
+      *"$nl"*)
+        echo "kit-translate: kit payload has a file name containing a newline; refusing it" >&2
+        bad=1
+        continue
+        ;;
+    esac
+    [ -L "$link" ] || continue
+    if ! target=$(_kit_resolve_path "$link"); then
+      echo "kit-translate: unresolvable symlink in kit payload: ${link#"$kitdir"/}" >&2
+      bad=1
+      continue
+    fi
+    case "$target" in
+      "$root" | "$root"/*) ;;
+      *) echo "kit-translate: kit payload symlink points outside the kit: ${link#"$kitdir"/}" >&2; bad=1 ;;
+    esac
+  done < <(find "$tree" -print0 2>/dev/null)
+  [ "$bad" -eq 0 ]
+}
+
+# ---------------------------------------------------------------------------
 # kit_spec_field SPEC KEY
 # ---------------------------------------------------------------------------
 # Echo a top-level scalar string value (name, kind, displayName, schemaVersion).
@@ -631,7 +724,10 @@ kit_spec_files() {
           print "kit-translate: skipping file with invalid mode: " cur_mode > "/dev/stderr"
         } else if (cur_path !~ /^[A-Za-z0-9._\/-]+$/) {
           print "kit-translate: skipping file with unsafe path: " cur_path > "/dev/stderr"
-        } else if (cur_source != "" && cur_source !~ /^[A-Za-z0-9._\/-]+$/) {
+        } else if (cur_source != "" && (cur_source !~ /^[A-Za-z0-9._\/-]+$/ || cur_source ~ /^\// || cur_source ~ /(^|\/)\.\.(\/|$)/)) {
+          # A source is relative to the kit directory and stays inside it: no
+          # leading slash and no ".." segment (kit_source_within also resolves
+          # symlinks at the point of use).
           print "kit-translate: skipping file with unsafe source: " cur_source > "/dev/stderr"
         } else {
           printf "%s\t%s\t%s\t%s\t%s\n", cur_path, cur_mode, cur_phase, cur_source, ro
@@ -1001,7 +1097,10 @@ kit_translate_to_sbx() {
 
   # Copy the entire files/ payload tree verbatim (static file drop). sbx v2
   # auto-maps files/home/... -> /home/... etc.
+  # cp -a keeps symlinks, so refuse a payload whose links resolve outside the
+  # kit before copying it into the generated kit.
   if [ -d "${kitdir}/files" ]; then
+    kit_tree_symlinks_within "$kitdir" "${kitdir}/files" || return 1
     mkdir -p "${out}/files"
     cp -a "${kitdir}/files/." "${out}/files/"
   fi
@@ -1358,13 +1457,35 @@ kit_validate() {
       /*) ;;
       *) echo "kit: validate: file path must be absolute: '$p'" >&2; errs=$((errs + 1)) ;;
     esac
-    if [ -n "$src" ] && [ ! -f "${kitdir}/${src}" ]; then
-      echo "kit: validate: file source not found: ${src}" >&2
+    if [ -n "$src" ] && ! kit_source_within "$kitdir" "$src"; then
+      if [ ! -e "${kitdir}/${src}" ] && [ ! -L "${kitdir}/${src}" ]; then
+        echo "kit: validate: file source not found: ${src}" >&2
+      else
+        echo "kit: validate: file source must be a regular file inside the kit directory: ${src}" >&2
+      fi
       errs=$((errs + 1))
     fi
   done <<EOF
 $(kit_spec_files "$spec")
 EOF
+
+  # Raw-spec scan for sources kit_spec_files drops (absolute, "..", or outside
+  # its path charset), so `acq kit validate` reports them instead of passing.
+  local bad_src
+  bad_src=$(awk '
+    /^[A-Za-z]/ { in_f = ($0 ~ /^files:/) }
+    in_f && /^[[:space:]]+-?[[:space:]]*source:/ {
+      v=$0; sub(/^[^:]*:[[:space:]]*/,"",v); sub(/[[:space:]]*#.*/,"",v)
+      gsub(/^["'\'' ]+|["'\'' ]+$/,"",v)
+      if (v !~ /^[A-Za-z0-9._\/-]+$/ || v ~ /^\// || v ~ /(^|\/)\.\.(\/|$)/) print v
+    }' "$spec")
+  if [ -n "$bad_src" ]; then
+    while IFS= read -r m; do
+      [ -n "$m" ] && { echo "kit: validate: file source must be a path inside the kit directory: '$m'" >&2; errs=$((errs + 1)); }
+    done <<EOF
+$bad_src
+EOF
+  fi
 
   # Raw-spec scan: any `mode:` value that is not a 0-prefixed 4-digit octal
   # string is rejected — it reaches the root `chmod $mode` in the msb adapter

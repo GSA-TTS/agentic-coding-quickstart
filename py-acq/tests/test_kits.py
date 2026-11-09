@@ -13,6 +13,7 @@ and exit class are pinned, so removing or weakening the guard fails the test.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -360,7 +361,7 @@ def test_kit_validate_unreadable_spec_exit_1(monkeypatch, tmp_path, capsys):
     def _boom(*args, **kwargs):
         raise OSError("permission denied")
 
-    monkeypatch.setattr(Path, "read_text", _boom)
+    monkeypatch.setattr(kits, "open", _boom, raising=False)
     rc, doc = _invoke(capsys, "kit", "validate", str(kit_dir), "--json")
     assert rc == 1
     assert doc["error"]["code"] == "validation_failed"
@@ -376,9 +377,75 @@ def test_validate_kit_raises_kit_spec_error_for_unreadable(monkeypatch, tmp_path
     def _boom(*args, **kwargs):
         raise OSError("permission denied")
 
-    monkeypatch.setattr(Path, "read_text", _boom)
+    monkeypatch.setattr(kits, "open", _boom, raising=False)
     with pytest.raises(kits.KitSpecError):
         kits.validate_kit(str(kit_dir))
+
+
+def test_validate_kit_refuses_a_spec_linking_outside_the_kit(tmp_path):
+    other = tmp_path / "elsewhere.yaml"
+    other.write_text('schemaVersion: "hybrid/v1"\nname: other\n', encoding="utf-8")
+    kit_dir = tmp_path / "linked-kit"
+    kit_dir.mkdir()
+    (kit_dir / "spec.yaml").symlink_to(other)
+    with pytest.raises(kits.KitSpecError, match="outside the kit"):
+        kits.validate_kit(str(kit_dir))
+
+
+def test_validate_kit_accepts_a_spec_symlink_inside_the_kit(tmp_path):
+    kit_dir = tmp_path / "aliased-kit"
+    kit_dir.mkdir()
+    (kit_dir / "spec.v1.yaml").write_text('schemaVersion: "hybrid/v1"\nname: aliased\n', encoding="utf-8")
+    (kit_dir / "spec.yaml").symlink_to("spec.v1.yaml")
+    assert kits.validate_kit(str(kit_dir))["valid"] is True
+
+
+def _kit_with_sources(tmp_path, *sources):
+    kit_dir = tmp_path / "src-kit"
+    (kit_dir / "files").mkdir(parents=True)
+    (kit_dir / "files" / "ok").write_text("inside", encoding="utf-8")
+    (tmp_path / "outside.txt").write_text("outside", encoding="utf-8")
+    lines = ['schemaVersion: "hybrid/v1"', "name: src-kit", "files:"]
+    for i, src in enumerate(sources):
+        lines += [f"  - path: /home/agent/f{i}", f"    source: {src}"]
+    (kit_dir / "spec.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return kit_dir
+
+
+def test_validate_kit_accepts_in_kit_sources_and_links(tmp_path):
+    kit_dir = _kit_with_sources(tmp_path, "files/ok", "files/alias")
+    (kit_dir / "files" / "alias").symlink_to("ok")
+    assert kits.validate_kit(str(kit_dir)) == {"valid": True, "findings": []}
+
+
+@pytest.mark.parametrize("source", ["/etc/hostname", "../outside.txt", "files/../../outside.txt", "files/out", "files/missing"])
+def test_validate_kit_reports_sources_outside_the_kit(tmp_path, source):
+    kit_dir = _kit_with_sources(tmp_path, source)
+    (kit_dir / "files" / "out").symlink_to("../../outside.txt")
+    result = kits.validate_kit(str(kit_dir))
+    assert result["valid"] is False
+    assert [f["code"] for f in result["findings"]] == ["kit_file_source_unsafe"]
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs mkfifo")
+def test_validate_kit_refuses_a_non_regular_spec(tmp_path):
+    fifo = tmp_path / "spec.yaml"
+    os.mkfifo(fifo)
+    with pytest.raises(kits.KitSpecError, match="not a regular file"):
+        kits.validate_kit(str(fifo))
+
+
+def test_validate_kit_refuses_an_oversized_spec(tmp_path):
+    kit_dir = _write_kit(tmp_path, "big", ['schemaVersion: "hybrid/v1"', "name: big"])
+    with open(kit_dir / "spec.yaml", "a", encoding="utf-8") as fh:
+        fh.write("#" * (kits._MAX_SPEC_BYTES + 1))
+    with pytest.raises(kits.KitSpecError, match="larger than"):
+        kits.validate_kit(str(kit_dir))
+
+
+def test_validate_kit_accepts_a_direct_spec_path(tmp_path):
+    kit_dir = _write_kit(tmp_path, "direct", ['schemaVersion: "hybrid/v1"', "name: direct-kit"])
+    assert kits.validate_kit(str(kit_dir / "spec.yaml"))["valid"] is True
 
 
 # ---------------------------------------------------------------------------
