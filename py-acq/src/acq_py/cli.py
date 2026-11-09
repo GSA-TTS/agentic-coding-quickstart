@@ -108,6 +108,9 @@ class _Globals:
         self.emit_json = False
         self.backend: str | None = None
         self._backend_seen = False
+        # Set when argv is malformed in a way main() reports as a usage error.
+        self.backend_missing = False
+        self.misplaced: list[str] = []
 
     def take(self, args: list[str], i: int) -> int | None:
         """Consume a global flag at ``args[i]``; return the next index, else None."""
@@ -115,12 +118,36 @@ class _Globals:
             self.emit_json = True
             return i + 1
         if args[i] == "--backend":
-            # The first --backend wins; one with no value is dropped.
+            if i + 1 >= len(args) or args[i + 1] == "--":
+                self.backend_missing = True
+                return i + 1
+            # The first --backend wins.
             if not self._backend_seen:
                 self._backend_seen = True
-                self.backend = args[i + 1] if i + 1 < len(args) else None
+                self.backend = args[i + 1]
             return i + 2
         return None
+
+
+def _misplaced_exec_globals(args: list[str], start: int, flags: _Globals) -> bool:
+    """True when ``args[start:]`` is only acq global flags and then a ``--``.
+
+    ``acq exec box --json -- cmd`` almost certainly meant ``--json`` for acq, not
+    a guest command named ``--json``. The flags are recorded on ``flags`` (so an
+    error can still honour ``--json``) and reported as a usage error.
+    """
+    probe = _Globals()
+    i = start
+    while i < len(args) and args[i] != "--":
+        nxt = probe.take(args, i)
+        if nxt is None or probe.backend_missing:
+            return False
+        i = nxt
+    if i == start or i >= len(args):
+        return False
+    flags.misplaced = args[start:i]
+    flags.emit_json = flags.emit_json or probe.emit_json
+    return True
 
 
 def _scan_globals(args: list[str]) -> tuple[_Globals, list[str]]:
@@ -132,14 +159,16 @@ def _scan_globals(args: list[str]) -> tuple[_Globals, list[str]]:
     * for a verb acq does not own (passthrough), nowhere after it: the backend
       gets everything after the verb verbatim;
     * for ``exec``, between the verb and the sandbox name, but not after the
-      name, so ``acq exec box grep --json f`` runs ``grep --json f``;
+      name, so ``acq exec box grep --json f`` runs ``grep --json f``. Only acq
+      flags between the name and a ``--`` are refused (see
+      :func:`_misplaced_exec_globals`);
     * for every other verb, anywhere before the first bare ``--``.
     """
     flags = _Globals()
     i = 0
     while i < len(args) and (nxt := flags.take(args, i)) is not None:
         i = nxt
-    if i == len(args):
+    if i >= len(args):
         return flags, []
     verb = args[i]
     if not verb.startswith("-") and verb not in KNOWN_COMMANDS:
@@ -152,7 +181,9 @@ def _scan_globals(args: list[str]) -> tuple[_Globals, list[str]]:
             i = nxt
             continue
         if verb == "exec":
-            break  # the sandbox name: everything from here on is the command
+            # The sandbox name: everything after it is the command.
+            _misplaced_exec_globals(args, i + 1, flags)
+            break
         rest.append(args[i])
         i += 1
     return flags, rest + args[i:]
@@ -486,6 +517,16 @@ def main(argv: list[str] | None = None) -> int:
     flags, args = _scan_globals(args)
     emit_json = flags.emit_json
     backend_override = flags.backend
+    if flags.backend_missing:
+        return common._usage_failure(None, "--backend requires a value (sbx or msb)", emit_json)
+    if flags.misplaced:
+        given = " ".join(flags.misplaced)
+        return common._usage_failure(
+            "exec",
+            f"'{given}' after the sandbox name would be sent to the guest as the command; "
+            f"put acq's flags before the verb (acq {given} exec NAME -- CMD...)",
+            emit_json,
+        )
 
     # Announced verbatim backend passthrough (spec user story #9): an unknown
     # subcommand is forwarded to the active backend binary with a stderr notice,

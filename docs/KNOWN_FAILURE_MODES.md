@@ -88,8 +88,8 @@ pass).
 **Status:** deferred (tracked per AGENTS.md "Track Deferred Work").
 
 The Python `attach`, `shell`, `run` and `exec` give the session a PTY when stdin
-is a terminal (`msb exec -t`, `sbx exec -it`), pass `HOME`, `SHELL`,
-`TERM`/`COLORTERM` and the host git identity, map a signal death to `128+N`, and
+is a terminal (`msb exec -t`, `sbx exec -it`), pass `HOME`, `TERM`/`COLORTERM`,
+the host git identity and (msb) `SHELL`, map a signal death to `128+N`, and
 leave Ctrl-C to the child (`py-acq/src/acq_py/hostexec.py` `run_foreground`). Four
 parts of the Bash session are not ported yet:
 

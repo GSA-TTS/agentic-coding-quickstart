@@ -652,7 +652,12 @@ AGENT_HOME = "/home/agent"
 # Fallback when the agent's passwd shell cannot be read or is not a plain path.
 DEFAULT_SHELL = "/bin/sh"
 _SAFE_SHELL = re.compile(r"/[A-Za-z0-9._/-]*")
-_AGENT_ENTRY_SCRIPT = 'getent passwd agent 2>/dev/null || grep "^agent:" /etc/passwd 2>/dev/null'
+# Trimmed in the guest, as Bash does, so only the shell field crosses: the rest
+# of the entry (the comment field in particular) may hold any bytes at all.
+_AGENT_SHELL_SCRIPT = (
+    '{ getent passwd agent 2>/dev/null || grep "^agent:" /etc/passwd 2>/dev/null; }'
+    " | head -n1 | cut -d: -f7"
+)
 
 
 def agent_shell(name: str) -> str:
@@ -664,14 +669,13 @@ def agent_shell(name: str) -> str:
     only a word-safe absolute path is accepted.
     """
     try:
-        proc = _run(["exec", "-u", "root", name, "--", "sh", "-c", _AGENT_ENTRY_SCRIPT], timeout=10)
-    except (MsbError, subprocess.TimeoutExpired):
+        proc = _run(["exec", "-u", "root", name, "--", "sh", "-c", _AGENT_SHELL_SCRIPT], timeout=10)
+    except (MsbError, subprocess.TimeoutExpired, ValueError):
+        # ValueError covers UnicodeDecodeError: guest output that is not text.
         return DEFAULT_SHELL
     lines = (proc.stdout or "").splitlines() if proc.returncode == 0 else []
-    fields = lines[0].split(":") if lines else []
-    if len(fields) >= 7 and fields[0] == "agent" and _SAFE_SHELL.fullmatch(fields[6].strip()):
-        return fields[6].strip()
-    return DEFAULT_SHELL
+    shell = lines[0].strip() if lines else ""
+    return shell if _SAFE_SHELL.fullmatch(shell) else DEFAULT_SHELL
 
 
 def _session(

@@ -189,14 +189,37 @@ def run_foreground(argv: list[str], *, stdout: int | None = None) -> int:
     ignored across ``exec`` and would make the child deaf to Ctrl-C, while a
     caught one is reset to the default in the child. ``OSError`` from starting
     the program propagates to the caller.
+
+    When the child dies of SIGINT, acq dies of SIGINT too (see
+    :func:`_die_of_interrupt`) rather than returning 130.
     """
     previous = _hold_interrupt()
     try:
         child = subprocess.Popen(argv, stdout=stdout)
-        return exit_status(child.wait())
+        returncode = child.wait()
     finally:
         if previous is not None:
             signal.signal(signal.SIGINT, previous)
+    if returncode == -signal.SIGINT and previous is not None and not _is_windows():
+        _die_of_interrupt()
+    return exit_status(returncode)
+
+
+def _die_of_interrupt() -> None:
+    """End acq by SIGINT, as a shell does when its foreground job was interrupted.
+
+    A calling shell loop (``for f in ...; do acq exec ...; done``) stops on
+    Ctrl-C only if its child died *of* SIGINT; an ordinary exit with status 130
+    tells it the child handled the interrupt, and the loop carries on. If the
+    signal does not end the process, the caller falls back to status 130.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except (OSError, ValueError):
+            pass
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    os.kill(os.getpid(), signal.SIGINT)
 
 
 def _hold_interrupt() -> _Handler | None:

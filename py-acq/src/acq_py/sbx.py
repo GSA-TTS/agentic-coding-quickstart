@@ -278,11 +278,12 @@ def _run_stream(argv: list[str], *, json_mode: bool) -> int:
         raise cli_unavailable() from exc
 
 
-# The agent user's home and the login shell acq starts in an sbx session. The
-# sbx agent templates bake both; they are passed explicitly so a session sees
-# the same values on every template.
+# The agent user's home, passed explicitly so a session sees it on every
+# template. SHELL is not set: the template's own value applies.
 AGENT_HOME = "/home/agent"
-DEFAULT_SHELL = "/bin/sh"
+# What ``acq shell`` runs, as Bash's ``acq_backend_shell`` does
+# (``sbx exec -it NAME bash``): the sbx agent templates ship bash.
+SHELL_COMMAND = ("bash",)
 
 
 def _session(name: str, command: list[str], *, env: list[str], tty: bool, json_mode: bool) -> int:
@@ -313,8 +314,8 @@ def launch(
     :func:`exec_command`).
     """
     interactive = hostexec.stdin_is_tty() if tty is None else tty
-    command = [agent] if agent and agent != "shell" else [DEFAULT_SHELL, "-l"]
-    session = [f"HOME={AGENT_HOME}", f"SHELL={DEFAULT_SHELL}"]
+    command = [agent] if agent and agent != "shell" else list(SHELL_COMMAND)
+    session = [f"HOME={AGENT_HOME}"]
     if interactive:
         session += hostexec.terminal_env()
     return _session(name, command, env=[*session, *(env or [])], tty=interactive, json_mode=json_mode)

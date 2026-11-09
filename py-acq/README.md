@@ -100,17 +100,19 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   no agent-to-shell fallback (ADR-0038m §48). The non-interactive contract is
   deterministic: fail closed on a missing sandbox or a missing/unreadable host
   record, propagate status.
-* `acq-py shell NAME [--json]` — open a login shell in a sandbox (on msb, the
-  agent user's passwd shell; otherwise `/bin/sh -l`).
+* `acq-py shell NAME [--json]` — open a shell in a sandbox: on msb the agent
+  user's passwd shell as a login shell, on sbx `bash`.
 * Sessions: when stdin is a terminal, `attach`, `shell` and `run` give the
   session a PTY (`msb exec -t`, `sbx exec -it`) and pass the host's `TERM` and
   `COLORTERM`; without one there is no PTY. Every session (`exec` too) gets
   `HOME=/home/agent` and the host git identity (`GIT_AUTHOR_*`,
-  `GIT_COMMITTER_*`, and `EMAIL` or the global `user.email`); interactive ones
-  also get `SHELL`. `SSH_AUTH_SOCK` is passed only when the sandbox records a
-  forwarded ssh-agent socket, never the host's own. A child killed by signal N
-  gives exit status `128+N`, and Ctrl-C goes to the child rather than killing
-  it.
+  `GIT_COMMITTER_*`, and `EMAIL` or the global `user.email`); interactive msb
+  sessions also get `SHELL` (sbx templates set their own). `SSH_AUTH_SOCK` is
+  passed only when the sandbox records a forwarded ssh-agent socket, never the
+  host's own. A child killed by signal N gives exit status `128+N`; Ctrl-C goes
+  to the child rather than killing it, and if the child dies of it acq dies of
+  SIGINT too, so a calling shell loop stops. acq's flags go before the verb:
+  `acq exec NAME --json -- CMD` is refused as a usage error.
 * `acq-py cp SRC DST [--json]` — copy between a native host path and a POSIX
   guest path. Exactly one side is a `NAME:/guest/path` reference; host and guest
   types stay distinct (ADR-0038m §4). The host side is forwarded verbatim to the
