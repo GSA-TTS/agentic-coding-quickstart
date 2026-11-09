@@ -39,9 +39,12 @@ Bash acq's state (:mod:`acq_py.legacy_bash`) so sandboxes, trusted kit sources
 and provider-credential bindings it created keep working. The import only ever
 creates Python records that do not exist yet and never deletes or rewrites a
 Bash file, so it is safe to repeat; a tree already marked generation 1 is
-scanned again. It runs once per tree: a record removed afterwards with this acq
-(``rm``, ``kit-source rm``, ``provider-credential rm``) is not brought back from
-the Bash files left behind.
+scanned again. Each part of it (sandboxes, kit sources, bindings) runs once per
+tree and is recorded in the marker when complete: a record removed afterwards
+with this acq (``rm``, ``kit-source rm``, ``provider-credential rm``) is not
+brought back from the Bash files left behind. A ``config.yaml`` list Bash itself
+would refuse leaves its part pending, with a warning on each mutating verb, and
+the tree stays at generation 1 until the list is fixed and imported.
 
 ``ACQ_STATE_SEED`` is an internal test seam (never a secret, never written to
 output): a JSON object mapping ``"<backend>/<name>"`` to a record (a dict is
@@ -146,12 +149,29 @@ def read_generation() -> int:
     return gen if isinstance(gen, int) and not isinstance(gen, bool) else 0
 
 
-def write_generation(generation: int) -> None:
-    """Write the marker atomically (temp + fsync + rename); called LAST."""
+def read_import_done() -> set[str]:
+    """The parts of the generation-2 Bash import already complete (see :func:`import_bash_state`)."""
+    try:
+        doc = json.loads(generation_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    done = doc.get("bash_import_done") if isinstance(doc, dict) else None
+    return {p for p in done if isinstance(p, str)} if isinstance(done, list) else set()
+
+
+def write_generation(generation: int, *, import_done: set[str] | None = None) -> None:
+    """Write the marker atomically (temp + fsync + rename); called LAST.
+
+    ``import_done`` records which parts of a not yet finished generation-2 import
+    are complete, so they are not run again.
+    """
     path = generation_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
-    data = json.dumps({"schema": state.STATE_SCHEMA, "generation": generation}, indent=2)
+    doc: dict = {"schema": state.STATE_SCHEMA, "generation": generation}
+    if import_done:
+        doc["bash_import_done"] = sorted(import_done)
+    data = json.dumps(doc, indent=2)
     with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(data + "\n")
         fh.flush()
@@ -414,40 +434,42 @@ def _migrate_record(path: Path, doc: dict) -> bool:
 # Generation 2: import the Bash acq's state.
 # ---------------------------------------------------------------------------
 
-def _import_kit_sources() -> int:
-    """Import ``config.yaml`` ``kit_sources``; returns how many records were created.
+def _import_kit_sources() -> tuple[int, bool]:
+    """Import ``config.yaml`` ``kit_sources``; returns ``(records created, complete)``.
 
-    The control plane is never registered (it is the shipped pin). A ref that is
-    not a full commit SHA is skipped with a warning, since this acq only trusts
-    immutable refs; an unpinned entry is imported unpinned, as Bash lists it.
+    The control plane is never registered (it is the shipped pin). An entry
+    whose ref is not a full commit SHA, including an unpinned one, is skipped
+    with a warning: this acq only trusts immutable refs, and a registered source
+    without a ref would trust the whole repository. A list that cannot be parsed
+    is not complete: it is retried, with a warning, until it is fixed.
     """
     try:
         entries = legacy_bash.kit_sources()
     except legacy_bash.LegacyParseError as exc:
-        legacy_bash.warn(f"config.yaml kit_sources was not imported: {exc}")
-        return 0
+        legacy_bash.warn(f"config.yaml kit_sources was not imported: {exc}; fix it to import it")
+        return 0, False
     created = 0
     for repo, ref, directory in entries:
         if kits.is_control_plane(repo):
             continue
-        if ref and not kits.is_full_ref(ref):
+        if not kits.is_full_ref(ref):
             legacy_bash.warn(
                 f"kit source '{repo}' was not imported: ref '{ref}' is not a full commit SHA; "
                 f"run 'acq kit-source add {repo} --ref <full-sha>' to trust it"
             )
             continue
         created += kits.import_source(repo, ref, directory)
-    return created
+    return created, True
 
 
-def _import_provider_bindings() -> int:
-    """Import ``config.yaml`` ``provider_credential_bindings``; returns records created."""
+def _import_provider_bindings() -> tuple[int, bool]:
+    """Import ``config.yaml`` ``provider_credential_bindings``; returns ``(created, complete)``."""
     try:
         bindings = legacy_bash.provider_credential_bindings()
     except legacy_bash.LegacyParseError as exc:
-        legacy_bash.warn(f"config.yaml provider_credential_bindings was not imported: {exc}")
-        return 0
-    return sum(provider_creds.import_binding(p, k, h) for p, k, h in bindings)
+        legacy_bash.warn(f"config.yaml provider_credential_bindings was not imported: {exc}; fix it to import it")
+        return 0, False
+    return sum(provider_creds.import_binding(p, k, h) for p, k, h in bindings), True
 
 
 def _import_sandbox(sandbox: legacy_bash.BashSandbox) -> bool:
@@ -455,8 +477,9 @@ def _import_sandbox(sandbox: legacy_bash.BashSandbox) -> bool:
 
     A sandbox the Bash acq knows nothing useful about (no agent, no workspace:
     a create that never finished) is skipped. The recorded bundle ref is carried
-    over only with a record this import created, so it never describes a
-    different sandbox that this acq already has under the same name.
+    over only to a record this import created (``imported_from: bash``), so it
+    never describes a different sandbox that this acq already has under the same
+    name; it is retried for such a record, in case a crash came between the two.
     """
     if sandbox.agent is None and sandbox.workspace is None:
         return False
@@ -466,28 +489,55 @@ def _import_sandbox(sandbox: legacy_bash.BashSandbox) -> bool:
     if sandbox.ssh_auth_sock:
         fields["ssh_auth_sock"] = sandbox.ssh_auth_sock
     fields["imported_from"] = "bash"
-    if not state.record_import(sandbox.backend, sandbox.name, fields):
-        return False
-    if sandbox.applied_ref:
+    created = state.record_import(sandbox.backend, sandbox.name, fields)
+    if sandbox.applied_ref and (created or _imported_record(sandbox.backend, sandbox.name)):
         kits.provenance_import(sandbox.backend, sandbox.name, sandbox.applied_ref, sandbox.applied_at)
-    return True
+    return created
 
 
-def import_bash_state() -> dict[str, int]:
-    """Import the Bash acq's state into this acq's records; returns counts created.
+def _imported_record(backend: str, name: str) -> bool:
+    """True when the sandbox's existing record is one this import created."""
+    try:
+        record = state.record_read(backend, name)
+    except state.StateSchemaError:
+        return False
+    return record is not None and record.get("imported_from") == "bash"
+
+
+def _import_sandboxes() -> tuple[int, bool]:
+    created = 0
+    for backend in backends.BACKENDS:
+        for name in legacy_bash.sandbox_names(backend):
+            created += _import_sandbox(legacy_bash.read_sandbox(backend, name))
+    return created, True
+
+
+# The parts of the import, each completed (and recorded in the marker) on its own.
+_IMPORT_PARTS = {
+    "sandboxes": _import_sandboxes,
+    "kit_sources": _import_kit_sources,
+    "provider_credentials": _import_provider_bindings,
+}
+
+
+def import_bash_state() -> bool:
+    """Import the Bash acq's state into this acq's records; True when every part is complete.
 
     Idempotent: only records that do not exist yet are created, and no Bash file
     is changed. A Bash value its own readers would refuse is skipped with a
-    warning rather than failing the migration.
+    warning. Each part is recorded in the marker once complete and never runs
+    again, so a record removed afterwards is not brought back; a config list
+    that cannot be parsed leaves its part pending, to be imported once fixed.
     """
-    counts = {
-        "sandboxes": 0,
-        "kit_sources": _import_kit_sources(),
-        "provider_credentials": _import_provider_bindings(),
-    }
-    for backend in backends.BACKENDS:
-        for name in legacy_bash.sandbox_names(backend):
-            counts["sandboxes"] += _import_sandbox(legacy_bash.read_sandbox(backend, name))
+    done = read_import_done()
+    counts = {part: 0 for part in _IMPORT_PARTS}
+    for part, run in _IMPORT_PARTS.items():
+        if part in done:
+            continue
+        counts[part], complete = run()
+        if complete:
+            done.add(part)
+            write_generation(RECORDS_GENERATION, import_done=done)
     if any(counts.values()):
         print(
             f"acq: imported {counts['sandboxes']} sandbox record(s), {counts['kit_sources']} kit "
@@ -495,7 +545,7 @@ def import_bash_state() -> dict[str, int]:
             "from the Bash acq's state",
             file=sys.stderr,
         )
-    return counts
+    return done >= set(_IMPORT_PARTS)
 
 
 # ---------------------------------------------------------------------------
@@ -509,8 +559,7 @@ def _migrate_generations(generation: int) -> None:
             doc = _load_record(path)
             _migrate_record(path, doc)
         write_generation(RECORDS_GENERATION)  # LAST: a generation completes only now
-    if generation < TARGET_GENERATION:
-        import_bash_state()
+    if generation < TARGET_GENERATION and import_bash_state():
         write_generation(TARGET_GENERATION)
 
 

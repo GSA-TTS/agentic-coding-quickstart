@@ -74,9 +74,12 @@ records (agent, workspace, the read-only mount requirement, the forwarded
 ssh-agent socket) with their bundle ref, and the `config.yaml` keys
 `kit_sources` and `provider_credential_bindings` become kit-source and binding
 records. `provider_kit`, `extra_kits` and the `.kits` records are read in place.
-The import only creates records that do not exist yet and never deletes or
-rewrites a Bash file. It runs once per tree, so a record removed afterwards is
-not recreated from the Bash files left behind.
+Only kit sources pinned to a full commit SHA are imported. The import only
+creates records that do not exist yet and never deletes or rewrites a Bash
+file. Each part runs once per tree, so a record removed afterwards is not
+recreated from the Bash files left behind; a `config.yaml` list Bash itself
+would refuse keeps its part pending (with a warning) and the tree at
+generation 1 until the list is fixed.
 
 Migratable records are the §3 semantic state plus `clones/`, `ports/`, `ssh/`;
 disposable caches are those acq can regenerate from host-held authority and

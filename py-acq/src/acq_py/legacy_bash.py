@@ -111,9 +111,13 @@ def cli_kits_file(backend: str, name: str) -> Path:
 # ---------------------------------------------------------------------------
 
 def parse_env(text: str) -> dict[str, str]:
-    """Parse a ``.env`` record; the first line for a key wins (``acq_provenance_field``)."""
+    """Parse a ``.env`` record; the first line for a key wins (``acq_provenance_field``).
+
+    Lines are split on ``\\n`` only, as awk splits records: a ``\\r`` or another
+    character ``str.splitlines`` would treat as a line break stays in the value.
+    """
     out: dict[str, str] = {}
-    for line in text.splitlines():
+    for line in text.split("\n"):
         key, sep, value = line.partition("=")
         if sep and key not in out:
             out[key] = value
@@ -217,6 +221,11 @@ def sandbox_names(backend: str) -> list[str]:
     return sorted(names)
 
 
+def _command_substitution(value: str | None) -> str | None:
+    """``value`` as Bash's ``$(...)`` would yield it: trailing newlines removed."""
+    return value.rstrip("\n") if value is not None else None
+
+
 def _clean(value: str | None) -> str | None:
     return value.strip() if value and value.strip() else None
 
@@ -241,7 +250,7 @@ def read_sandbox(backend: str, name: str) -> BashSandbox:
         name=name,
         agent=agent if agent and _AGENT_RE.fullmatch(agent) else None,
         workspace=_workspace(backend, name),
-        ro_host_config=host_config_read(backend, name, "ro-host-config") == "1",
+        ro_host_config=_command_substitution(host_config_read(backend, name, "ro-host-config")) == "1",
         ssh_auth_sock=sock if sock and _GUEST_SOCK_RE.fullmatch(sock) else None,
         applied_ref=applied_ref if applied_ref and _APPLIED_REF_RE.fullmatch(applied_ref) else None,
         applied_at=applied_at if applied_at and _APPLIED_AT_RE.fullmatch(applied_at) else None,
@@ -319,8 +328,14 @@ def parse_provider_credential_pairs(pairs: str) -> list[tuple[str, str, list[str
 
 
 def provider_credential_bindings() -> list[tuple[str, str, list[str]]]:
-    """The ``provider_credential_bindings`` config key, parsed (empty when absent)."""
-    return parse_provider_credential_pairs(config.read_field("provider_credential_bindings") or "")
+    """The ``provider_credential_bindings`` config key, parsed (empty when absent).
+
+    A provider listed more than once keeps its LAST entry, as Bash's
+    ``acq_provider_credential_lookup`` does.
+    """
+    pairs = parse_provider_credential_pairs(config.read_field("provider_credential_bindings") or "")
+    last = {provider: (provider, key_env, hosts) for provider, key_env, hosts in pairs}
+    return list(last.values())
 
 
 def provider_kit() -> str | None:

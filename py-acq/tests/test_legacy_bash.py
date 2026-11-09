@@ -373,24 +373,89 @@ def test_import_sbx_sandbox_from_hand_written_record(tree, capsys):
     assert "imported 1 sandbox record(s)" in capsys.readouterr().err
 
 
-def test_bad_config_lists_are_not_imported(tree, capsys):
+def test_bad_config_lists_wait_at_generation_1_until_fixed(tree, capsys):
+    _bash_file("box", ".env", "agent=shell\n")
     _config(f"kit_sources: github.com/acme/kits@{SHA} notarepo\n"
             "provider_credential_bindings: good=GOOD_KEY bad\n")
+
+    for _ in range(2):  # every mutating run warns again; nothing is dropped for good
+        migration.migrate_tree()
+        assert kits.list_source_records() == []
+        assert provider_creds.get_binding("good") is None
+        assert migration.read_generation() == migration.RECORDS_GENERATION
+        err = capsys.readouterr().err
+        assert "kit_sources was not imported" in err
+        assert "provider_credential_bindings was not imported" in err
+    # The sandbox part completed on the first run and is not run again.
+    assert migration.read_import_done() == {"sandboxes"}
+    state.record_remove("msb", "box")
+
+    _config(f"kit_sources: github.com/acme/kits@{SHA}\nprovider_credential_bindings: good=GOOD_KEY\n")
     migration.migrate_tree()
-    assert kits.list_source_records() == []
-    assert provider_creds.get_binding("good") is None
-    err = capsys.readouterr().err
-    assert "kit_sources was not imported" in err
-    assert "provider_credential_bindings was not imported" in err
+
+    assert [r["repository"] for r in kits.list_source_records()] == ["github.com/acme/kits"]
+    assert provider_creds.get_binding("good")["key_env"] == "GOOD_KEY"
+    assert state.record_read("msb", "box") is None  # removed after its import: stays removed
+    assert migration.read_generation() == migration.TARGET_GENERATION
+    assert migration.read_import_done() == set()
+    assert "was not imported" not in capsys.readouterr().err
 
 
-def test_mutable_refs_and_the_control_plane_are_not_imported(tree, capsys):
+def test_mutable_empty_refs_and_the_control_plane_are_not_imported(tree, capsys):
     _config("kit_sources: github.com/acme/kits@main github.com/GSA-TTS/agentic-coding-patterns "
-            "github.com/acme/unpinned\n")
+            f"github.com/acme/unpinned github.com/acme/pinned@{SHA}\n")
     migration.migrate_tree()
-    assert [r["repository"] for r in kits.list_source_records()] == ["github.com/acme/unpinned"]
-    assert kits.source_record("github.com/acme/unpinned")["ref"] == ""
-    assert "not a full commit SHA" in capsys.readouterr().err
+    assert [r["repository"] for r in kits.list_source_records()] == ["github.com/acme/pinned"]
+    err = capsys.readouterr().err
+    assert "'github.com/acme/kits' was not imported: ref 'main'" in err
+    assert "'github.com/acme/unpinned' was not imported: ref ''" in err
+    assert migration.read_generation() == migration.TARGET_GENERATION
+
+
+def test_ro_host_config_with_trailing_newline_is_required(tree):
+    _bash_file("box", ".env", "agent=shell\n")
+    config_dir = legacy_bash.host_config_dir("msb", "box")
+    config_dir.mkdir()
+    (config_dir / "ro-host-config").write_bytes(b"1\n\n")
+    assert legacy_bash.read_sandbox("msb", "box").ro_host_config is True
+    (config_dir / "ro-host-config").write_bytes(b"1\r\n")
+    assert legacy_bash.read_sandbox("msb", "box").ro_host_config is False  # as Bash compares it
+
+
+def test_duplicate_provider_ids_keep_the_last_entry(tree):
+    _config("provider_credential_bindings: a=FIRST_KEY@one.example b=B_KEY a=LAST_KEY@two.example\n")
+    assert legacy_bash.provider_credential_bindings() == [
+        ("a", "LAST_KEY", ["two.example"]), ("b", "B_KEY", []),
+    ]
+    migration.migrate_tree()
+    binding = provider_creds.get_binding("a")
+    assert (binding["key_env"], binding["hosts"]) == ("LAST_KEY", ["two.example"])
+
+
+def test_parse_env_splits_lines_like_awk():
+    assert legacy_bash.parse_env("agent=sh\x1cworkspace=/x\nworkspace_source=host\r\n") == {
+        "agent": "sh\x1cworkspace=/x", "workspace_source": "host\r",
+    }
+
+
+def test_provenance_is_retried_after_a_crash_between_record_and_provenance(tree, monkeypatch):
+    _bash_file("box", ".env", f"agent=shell\napplied_ref={kits.CONTROL_PLANE_REF}\n")
+
+    def crash(*args, **kwargs):
+        raise OSError("simulated crash")
+
+    with monkeypatch.context() as m:
+        m.setattr(kits, "provenance_import", crash)
+        with pytest.raises(migration.MigrationError):
+            migration.migrate_tree()
+    assert state.record_read("msb", "box")["imported_from"] == "bash"
+    assert kits.provenance_read("msb", "box") is None
+    assert migration.read_generation() == migration.RECORDS_GENERATION
+
+    migration.migrate_tree()
+
+    assert kits.provenance_status("msb", "box") == "current"
+    assert migration.read_generation() == migration.TARGET_GENERATION
 
 
 def test_fresh_tree_without_bash_state_is_quiet(tree, capsys):

@@ -151,7 +151,11 @@ remain:
 
 1. **Once per tree.** State the Bash acq writes after that step (a sandbox it
    creates while both implementations are in use, a `kit-source add` or a
-   `provider-credential set`) is not imported. Running the import every time
+   `provider-credential set`) is not imported. (A `kit_sources` or
+   `provider_credential_bindings` list that Bash itself would refuse is the
+   exception: it stays pending, with a warning on each mutating verb, until it
+   is fixed.) Kit sources without a full commit SHA are never imported; add them
+   again with `acq kit-source add REPO --ref <full-sha>`. Running the import every time
    would bring back records removed with the Python acq, including kit sources
    whose trust the user withdrew. **Mitigation:** create such sandboxes with
    the Python acq, or re-register the source or binding with it.
