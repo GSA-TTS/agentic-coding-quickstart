@@ -5034,7 +5034,13 @@ try:
         try:
             child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
         except FileNotFoundError:
-            os.mkdir(part, 0o755, dir_fd=fd)
+            # Another acq may create the same component between the lookup and
+            # this mkdir. Its directory is as good as ours; the O_NOFOLLOW open
+            # and the S_ISDIR check below still reject anything else it left.
+            try:
+                os.mkdir(part, 0o755, dir_fd=fd)
+            except FileExistsError:
+                pass
             child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
         if not stat.S_ISDIR(os.fstat(child).st_mode): raise SystemExit('unsafe provider-input path')
         os.close(fd); fd = child
