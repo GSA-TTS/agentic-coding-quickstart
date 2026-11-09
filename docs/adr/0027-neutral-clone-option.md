@@ -185,6 +185,30 @@ entries (git 2.31+) because a `-c name=value` option splits at the first `=`
 and cannot name a driver whose name contains one; on an older git such a
 driver is refused rather than left live.
 
+Every such call, the config read that lists the filter drivers, and the
+config writes into the newly created scratch also run with the caller's
+inherited git environment cleared: the list the kit cache clears (every
+variable `git rev-parse --local-env-vars` prints, plus `GIT_NAMESPACE` and
+`GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>`). An inherited
+`GIT_DIR` or `GIT_WORK_TREE` (set by a hook, an editor or a parent git
+command) would otherwise point the clone at another repository, so the
+sandbox would get the wrong source, and `remote add`/`remote remove` would
+change that repository's remotes. If the code that clears it is not loaded,
+these calls refuse to run git. `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM` and
+`GIT_CONFIG_NOSYSTEM` are kept: they choose the user's own config files.
+
+The user's exported command-scope config (`GIT_CONFIG_PARAMETERS`, and
+`GIT_CONFIG_COUNT` entries) is therefore dropped from these calls, where acq
+used to append its filter entries after the user's (changed 2026-11-09).
+Git reads the command scope after every config file, and
+`GIT_CONFIG_PARAMETERS` after `GIT_CONFIG_COUNT`, so a filter driver the user
+exported there overrode acq's blanking and ran during the host-side status.
+The identity read is the one exception: its command scope (above) still sees
+the user's exported values, with only the repository-locating variables
+cleared, because a `git config` read starts no program. A `safe.directory`
+exported through `GIT_CONFIG_COUNT` or `GIT_CONFIG_PARAMETERS` therefore no
+longer applies in clone mode; set it in the global or system config instead.
+
 Before cloning, the create refuses a workspace that is not an ordinary
 repository, with a message naming `git worktree` and submodule checkouts:
 
@@ -194,8 +218,9 @@ repository, with a message naming `git worktree` and submodule checkouts:
   (for example `objects/pack`, `refs/heads` or `packed-refs` pointing into
   another repository). `.git/hooks` is exempt, since hooks never run.
 - `git rev-parse --absolute-git-dir` and `--git-common-dir`, canonicalised,
-  must both equal `<canonical workspace>/.git` (this also catches a
-  `GIT_DIR`/`GIT_COMMON_DIR` in the caller's environment).
+  must both equal `<canonical workspace>/.git` (a `GIT_DIR` or
+  `GIT_COMMON_DIR` in the caller's environment is cleared before this runs;
+  see above).
 
 Together these checks guarantee exactly this, at the time they run: git's
 directory and common directory are `<workspace>/.git`, and every directory
