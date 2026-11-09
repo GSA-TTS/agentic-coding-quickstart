@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -123,10 +124,14 @@ def test_start_passes_bound_secrets_only_in_the_start_childs_env(monkeypatch, tm
     (argv, env), = _calls(children, "start")
     assert argv[-2:] == ["start", "box"]
     assert env is not None and env["USAI_API_KEY"] == VALUE
-    # No other child (readiness probes, kit steps) receives the value.
+    # No other child (readiness probes, kit steps) receives the value. A child
+    # given no env mapping inherits acq's own environment, which must not have
+    # picked the value up either.
     for other_argv, other_env in children:
         if "start" not in other_argv:
-            assert other_env is None or VALUE not in other_env.values()
+            inherited = other_env if other_env is not None else dict(os.environ)
+            assert VALUE not in inherited.values()
+    assert VALUE not in os.environ.values()
     _assert_value_absent(VALUE, children, out, err)
     assert VALUE not in json.dumps(_stub_records(tmp_path))
 
@@ -244,27 +249,44 @@ def _require_ro(name: str) -> None:
                        ro_host_config=True)
 
 
-def test_start_runs_the_ro_probe_before_the_heal(monkeypatch, tmp_path, capsys):
+def _spy_reconcile(monkeypatch, events: list) -> None:
+    real = msb.reconcile_bindings
+
+    def spy(name):
+        events.append("reconcile")
+        return real(name)
+
+    monkeypatch.setattr(msb, "reconcile_bindings", spy)
+
+
+def test_start_runs_the_ro_probe_before_binding_secrets_and_the_heal(monkeypatch, tmp_path, capsys):
     _stopped_box(monkeypatch, tmp_path, capsys, secret=False)
     _require_ro("box")
     events: list = []
     calls = _spy_heal(monkeypatch, events)
+    _spy_reconcile(monkeypatch, events)
     monkeypatch.setattr(security, "probe_mount", lambda name: (events.append("probe"), ("ok", ""))[1])
     rc, doc, _out, err = _acq(capsys, "start", "box", "--json")
     assert rc == 0, (doc, err)
-    assert events[:2] == ["probe", "heal"]
+    assert events[:3] == ["probe", "reconcile", "heal"]
     assert calls[0][1] is True  # the heal keeps the read-only requirement
 
 
-def test_start_refuses_the_heal_when_the_ro_mount_is_missing(monkeypatch, tmp_path, capsys):
+def test_start_missing_ro_mount_binds_no_new_secret_and_skips_the_heal(monkeypatch, tmp_path, capsys, children):
     _stopped_box(monkeypatch, tmp_path, capsys, secret=False)
     _require_ro("box")
-    calls = _spy_heal(monkeypatch, [])
+    _set(capsys, monkeypatch, "-g", "usai")  # stored while stopped: would be bound after the start
+    events: list = []
+    calls = _spy_heal(monkeypatch, events)
+    _spy_reconcile(monkeypatch, events)
     monkeypatch.setattr(security, "probe_mount", lambda name: ("missing", "the host-config mount looks WRITABLE"))
+    children.clear()
     rc, doc, _out, _err = _acq(capsys, "start", "box", "--json")
     assert rc == 1 and doc["error"]["code"] == errors.SECURITY_EXCEPTION
     assert "is running" in doc["error"]["message"]
-    assert calls == []
+    assert calls == [] and events == []
+    assert _calls(children, "modify") == []
+    assert "USAI_API_KEY" not in msb.held_read("box").bindings
 
 
 def test_start_without_the_ro_requirement_does_not_probe(monkeypatch, tmp_path, capsys):
@@ -317,6 +339,22 @@ def test_restart_still_starts_when_the_stop_fails(monkeypatch, tmp_path, capsys,
     assert "stop of 'box' failed; attempting start anyway" in err
     assert "start" in _verbs(children)
     assert "restarted sandbox 'box'" in out
+
+
+def test_restart_that_cannot_stop_a_running_sandbox_fails(monkeypatch, tmp_path, capsys, children):
+    _env(monkeypatch, tmp_path)
+    _create(capsys, tmp_path)
+    calls = _spy_heal(monkeypatch, [])
+    monkeypatch.setenv("ACQ_MSB_STUB_FAIL", "stop")
+    children.clear()
+    rc, doc, out, err = _acq(capsys, "restart", "box", "--json")
+    assert rc == 1 and doc["command"] == "restart" and doc["error"]["code"] == errors.FAILURE
+    assert "could not restart sandbox 'box'" in doc["error"]["message"]
+    assert "still running" in doc["error"]["message"] and "re-applied" in doc["error"]["message"]
+    assert "restarted" not in out
+    assert "start" not in _verbs(children)  # it never stopped, so there was nothing to start
+    assert len(calls) == 1  # the kits were still healed
+    assert "stop of 'box' failed" in err
 
 
 def test_start_on_a_running_sandbox_skips_msb_start_but_heals(monkeypatch, tmp_path, capsys, children):

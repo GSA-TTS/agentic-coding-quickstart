@@ -1114,8 +1114,10 @@ def _start_record(command: str, name: str, emit_json: bool) -> tuple[dict | None
 def _resume(command: str, name: str) -> bool:
     """Stop first for ``restart``, then ``msb start`` unless it already runs; True if it was running.
 
-    A failed stop is a warning and the start is still attempted (Bash parity).
-    Raises the adapter error when the listing or the start fails.
+    A failed stop is a warning and the start is still attempted (Bash parity);
+    if the sandbox is still running, the heal runs and ``restart`` then fails
+    (:func:`_finish_start`). Raises the adapter error when the listing or the
+    start fails.
     """
     if command == "restart":
         try:
@@ -1132,10 +1134,12 @@ def _resume(command: str, name: str) -> bool:
 
 
 def _start_locked(command: str, name: str, emit_json: bool) -> int:
-    """Resume, wait for exec-readiness, rebind secrets, check the read-only mount, heal the kits.
+    """Resume, wait for exec-readiness, check the read-only mount, rebind secrets, heal the kits.
 
-    Once the sandbox runs, every failure says so: it is not stopped again, and
-    a heal that did not complete is never reported as success (ADR-0038m).
+    The mount is checked before any secret is bound, so a sandbox missing its
+    read-only trusted config never receives a newly added credential. Once the
+    sandbox runs, every failure says so: it is not stopped again, and a heal
+    that did not complete is never reported as success (ADR-0038m).
     """
     record, exit_code = _start_record(command, name, emit_json)
     if exit_code is not None:
@@ -1150,6 +1154,9 @@ def _start_locked(command: str, name: str, emit_json: bool) -> int:
             f"sandbox '{name}' was started but did not become exec-ready, so its secrets and kits were not re-applied",
             f"check msb logs, then retry 'acq {command} {name}'", emit_json,
         )
+    gate = _start_trusted_gate(command, name, record, emit_json)
+    if gate is not None:
+        return gate
     try:
         unbound = msb.reconcile_bindings(name)
     except common._ADAPTER_ERRORS as exc:
@@ -1159,30 +1166,51 @@ def _start_locked(command: str, name: str, emit_json: bool) -> int:
     applied, exit_code = _heal_after_start(command, name, record, emit_json)
     if applied is None:
         return exit_code if exit_code is not None else errors.EXIT_FAILURE
+    return _finish_start(command, name, applied, unbound, was_running, emit_json)
+
+
+def _start_trusted_gate(command: str, name: str, record: dict | None, emit_json: bool) -> int | None:
+    """Refuse to rebind or heal a running sandbox whose recorded read-only mount is not confirmed (ADR-0035)."""
+    try:
+        security.assert_trusted(record, "msb", name)
+    except security.SecurityException as exc:
+        return common._operational_failure(
+            command, exc.code, f"{exc.message}; the sandbox is running, but its secrets and kits were not re-applied",
+            exc.remediation, emit_json,
+        )
+    return None
+
+
+def _finish_start(
+    command: str, name: str, applied: list[str], unbound: list[str], was_running: bool, emit_json: bool
+) -> int:
+    """Report the outcome after the heal: a secret left unbound, or a restart whose stop did not
+    take effect (the sandbox was never stopped, so it was not restarted), is a failure."""
     if unbound:
         return common._operational_failure(
             command, errors.FAILURE,
             f"sandbox '{name}' is running and its kits were re-applied, but {', '.join(unbound)} could not be bound in it",
             f"retry 'acq {command} {name}', or recreate the sandbox to bind the stored values", emit_json,
         )
+    if command == "restart" and was_running:
+        return common._operational_failure(
+            command, errors.FAILURE,
+            f"could not restart sandbox '{name}': it could not be stopped and is still running "
+            "(its secrets and kits were re-applied)",
+            f"check msb logs, then retry 'acq restart {name}', or run 'acq stop {name}' and 'acq start {name}'",
+            emit_json,
+        )
     return _print_started(command, name, applied, was_running, emit_json)
 
 
 def _heal_after_start(command: str, name: str, record: dict | None, emit_json: bool) -> tuple[list[str] | None, int | None]:
-    """Check the recorded read-only mount, then re-apply the kit set; the applied kits or the emitted failure.
+    """Re-apply the kit set (the mount was checked already); the applied kits or the emitted failure.
 
     The kit set is the one create chose: the recorded agent and image, plus the
     ``--kit`` and extra refs kept in the sandbox's ``.kits`` record. Re-applying
     re-runs every kit's startup phase, which ``msb start`` does not replay
     (ADR-0017). Provenance is recorded only when every kit applied, as Bash does.
     """
-    try:
-        security.assert_trusted(record, "msb", name)
-    except security.SecurityException as exc:
-        return None, common._operational_failure(
-            command, exc.code, f"{exc.message}; the sandbox is running, but its kits were not re-applied",
-            exc.remediation, emit_json,
-        )
     agent = (record or {}).get("agent") or "shell"
     image = (record or {}).get("image") or common.OPENCODE_DEVENV_IMAGE
     cli_kits, extras = kit_msb.cli_kits_read(name)
@@ -1210,7 +1238,7 @@ def _print_started(command: str, name: str, applied: list[str], was_running: boo
     }
     if emit_json:
         print(json.dumps(envelope.success(command, data)))
-    elif was_running and command == "start":
+    elif was_running:
         print(f"sandbox '{name}' was already running; re-applied its kits")
     else:
         print(f"{command}ed sandbox '{name}' and re-applied its kits")
