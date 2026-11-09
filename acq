@@ -863,7 +863,7 @@ _acq_kit_fetch_cleanup() {
 }
 
 _acq_kit_fetch_start() {
-  _ACQ_KIT_FETCH_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/acq-kit-fetch.XXXXXX") || exit 1
+  _ACQ_KIT_FETCH_ROOT=$(mktemp -d "$(acq_tmp_dir)/acq-kit-fetch.XXXXXX") || exit 1
   export -n _ACQ_KIT_FETCH_ROOT
   _ACQ_KIT_FETCH_GUARDIAN=""
   trap '_acq_kit_fetch_cleanup' EXIT

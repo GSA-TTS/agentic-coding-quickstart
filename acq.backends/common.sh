@@ -4636,7 +4636,7 @@ acq_provider_input_prepare() {
   root=$(acq_provider_input_root "$backend" "$name") || return 1
   _acq_provider_input_safe_mkdir "$root/generations" || return 1
   chmod 755 "$root" "$root/generations" || return 1
-  stage=$(mktemp -d "${TMPDIR:-/tmp}/acq-provider-input.XXXXXXXX") || return 1
+  stage=$(mktemp -d "$(acq_tmp_dir)/acq-provider-input.XXXXXXXX") || return 1
   chmod 700 "$stage" || { rm -rf "$stage"; return 1; }
   for kitref in ${KITS[@]+"${KITS[@]}"}; do
     token=$(printf '%s' "$kitref" | cksum | cut -d' ' -f1) || { rm -rf "$stage"; return 1; }
@@ -5046,7 +5046,7 @@ PY
 }
 
 _acq_provider_input_cleanup_stage() {
-  case "${1:-}" in "${TMPDIR:-/tmp}"/acq-provider-input.*) rm -rf -- "$1" ;; *) return 1 ;; esac
+  case "${1:-}" in "$(acq_tmp_dir)"/acq-provider-input.*) rm -rf -- "$1" ;; *) return 1 ;; esac
 }
 
 _acq_provider_input_cleanup_generation() {
@@ -5144,7 +5144,7 @@ _acq_provider_input_guardian_start() {
   # command substitutions that follow inherit the cached result. A failure is
   # reported again, and fails closed, by the first helper that needs it.
   _acq_provider_input_path_python 2>/dev/null || true
-  _ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN=$(mktemp "${TMPDIR:-/tmp}/acq-provider-children.XXXXXX") || return 1
+  _ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN=$(mktemp "$(acq_tmp_dir)/acq-provider-children.XXXXXX") || return 1
   export _ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN
   sh -c '
     parent=$PPID

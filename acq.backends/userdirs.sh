@@ -56,6 +56,20 @@ acq_path_is_absolute() {
   return 1
 }
 
+# acq_tmp_dir — the directory acq makes its short-lived scratch files and
+# directories in: TMPDIR when it is absolute, else /tmp. A relative TMPDIR is
+# ignored, as relative XDG_* values are: it would resolve against the current
+# directory (normally the workspace the guest can write), and a path recorded
+# from it would name a different place after a cd or in a command run with
+# another working directory.
+acq_tmp_dir() {
+  if acq_path_is_absolute "${TMPDIR:-}"; then
+    printf '%s\n' "$TMPDIR"
+  else
+    printf '/tmp\n'
+  fi
+}
+
 # acq_quote_value VALUE — print VALUE quoted the way Python's repr() quotes a
 # string, so a diagnostic can never carry raw newlines or control characters:
 # single quotes (double quotes when VALUE holds a single quote and no double
