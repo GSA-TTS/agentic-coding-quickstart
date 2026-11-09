@@ -179,13 +179,22 @@ jobs:
       # from py-acq/src through the pyproject `pythonpath`, the tests' child
       # processes get the same PYTHONPATH from conftest.py, and acq.ps1 sets
       # PYTHONPATH to py-acq\src. That also avoids building a wheel with the
-      # unpinned setuptools build dependency.
+      # unpinned setuptools build dependency. The tools go into a throwaway venv:
+      # the runner's Python already has some of them (colorama, packaging), and
+      # pip treats an installed package as satisfied without checking its hash,
+      # so installing into that interpreter would skip --require-hashes for them.
       - name: Install pinned test tools
         run: |
-          python -m pip install --require-hashes --no-deps --only-binary :all: -r py-acq/requirements-quality.txt
+          $venv = Join-Path $env:RUNNER_TEMP 'acq-test-tools'
+          python -m venv --clear $venv
+          if ($LASTEXITCODE -ne 0) { throw "python -m venv exited $LASTEXITCODE" }
+          & (Join-Path $venv 'Scripts\python.exe') -m pip install --require-hashes --no-deps --only-binary :all: -r py-acq/requirements-quality.txt
+          if ($LASTEXITCODE -ne 0) { throw "pip install exited $LASTEXITCODE" }
 
       - name: pytest (py-acq, Python 3.12)
-        run: python -m pytest py-acq/tests -q
+        run: |
+          & (Join-Path $env:RUNNER_TEMP 'acq-test-tools\Scripts\python.exe') -m pytest py-acq/tests -q
+          if ($LASTEXITCODE -ne 0) { throw "pytest exited $LASTEXITCODE" }
 
       # acq.cmd runs acq.ps1 under Windows PowerShell 5.1, as users run it; acq.ps1
       # invoked directly runs under PowerShell 7. No backend is installed on the
