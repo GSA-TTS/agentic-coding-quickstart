@@ -608,6 +608,20 @@ def test_refuses_non_regular_files(tmp_path):
         kitspec.load_kit(tmp_path)
 
 
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="needs POSIX permissions and a non-root user")
+def test_unreadable_spec_is_a_read_failure(tmp_path):
+    spec = tmp_path / "spec.yaml"
+    spec.write_text("name: x\n")
+    spec.chmod(0)
+    try:
+        with pytest.raises(kitspec.KitSpecError, match="could not read"):
+            kitspec.load_spec(spec)
+    finally:
+        spec.chmod(0o600)
+    with pytest.raises(kitspec.KitSpecError, match="regular file"):
+        kitspec.load_spec(tmp_path / "missing.yaml")
+
+
 def test_refuses_spec_symlink_outside_kit(tmp_path):
     outside = tmp_path / "outside.yaml"
     outside.write_text("name: x\n")
@@ -692,6 +706,11 @@ def _confinement_kit(tmp_path: Path) -> Path:
     (files / "linkdir").symlink_to("dir")
     (files / "updir").symlink_to("..")
     (files / "rootlink").symlink_to(tmp_path)
+    # A sibling whose path starts with the kit's path: only the separator in
+    # the containment check keeps it out.
+    (tmp_path / "kit-evil").mkdir()
+    (tmp_path / "kit-evil" / "x").write_text("evil\n")
+    (files / "evil").symlink_to(Path("..") / ".." / "kit-evil" / "x")
     (kit / "spec.yaml").write_text("name: k\n")
     return kit
 
@@ -699,6 +718,7 @@ def _confinement_kit(tmp_path: Path) -> Path:
 _SOURCES = [
     "files/a", "files/dir", "files/link_in", "files/link_out", "files/dangling", "files/loop1",
     "files/linkdir", "files/updir/files/a", "files/rootlink/outside.txt", "files/..hidden", "/abs",
+    "files/evil", "files/rootlink/kit-evil/x",
     "../kit/files/a", "files/../files/a", "", "files/nonexistent", "files//a", "./files/a", "files/a/",
     "spec.yaml", ".", "files", "files/a/x", "files/nonexistent/", "files/dir/../a",
 ]
@@ -730,11 +750,12 @@ def test_source_confinement_parity(tmp_path, via_link):
     for source in _HOST_DEPENDENT_SOURCES:
         assert kitspec.resolve_source(kit_arg, source) is None
     assert kitspec.resolve_source(kit_arg, "files/link_out") is None
+    assert kitspec.resolve_source(kit_arg, "files/evil") is None
 
 
 def _tree_cases(tmp_path: Path) -> dict[str, tuple[Path, Path]]:
     cases = {}
-    for name in ("clean", "outside", "dangling-in", "dangling-out", "loop", "newline", "toplink"):
+    for name in ("clean", "outside", "dangling-in", "dangling-out", "loop", "newline", "toplink", "sibling"):
         kit = tmp_path / name
         tree = kit / "files"
         (tree / "sub").mkdir(parents=True)
@@ -750,6 +771,8 @@ def _tree_cases(tmp_path: Path) -> dict[str, tuple[Path, Path]]:
     (tmp_path / "loop" / "files" / "l1").symlink_to("l2")
     (tmp_path / "loop" / "files" / "l2").symlink_to("l1")
     (tmp_path / "newline" / "files" / "bad\nname").write_text("x\n")
+    (tmp_path / "sibling-evil").mkdir()
+    (tmp_path / "sibling" / "files" / "evil").symlink_to(tmp_path / "sibling-evil")
     top = tmp_path / "toplink"
     shutil.rmtree(top / "files")
     (top / "elsewhere").mkdir()
@@ -773,6 +796,27 @@ def test_tree_symlink_parity(tmp_path):
         assert sorted(lines) == sorted(problems), name
         assert rc == ("rc=0" if not problems else "rc=1"), name
     assert kitspec.tree_symlinks_within(tmp_path, tmp_path / "absent") == []
+    sibling = tmp_path / "sibling"
+    assert kitspec.tree_symlinks_within(sibling, sibling / "files") == [
+        "kit-translate: kit payload symlink points outside the kit: files/evil"]
+
+
+def test_tree_junctions_count_as_links(tmp_path, monkeypatch):
+    # Windows junctions are not symlinks to os.path.islink and os.walk enters
+    # them. Simulate one with a plain directory reported as a junction.
+    kit = tmp_path / "kit"
+    junction = kit / "files" / "junction"
+    junction.mkdir(parents=True)
+    (junction / "out").symlink_to(tmp_path)
+    real_isjunction = os.path.isjunction
+    monkeypatch.setattr(os.path, "isjunction", lambda p: os.fspath(p) == str(junction) or real_isjunction(p))
+    # Treated as a link that resolves inside the kit, and never walked into.
+    assert kitspec.tree_symlinks_within(kit, kit / "files") == []
+    monkeypatch.setattr(os.path, "isjunction", lambda p: os.fspath(p) == str(kit / "files"))
+    assert kitspec.tree_symlinks_within(kit, kit / "files") == []
+    monkeypatch.setattr(os.path, "isjunction", real_isjunction)
+    assert kitspec.tree_symlinks_within(kit, kit / "files") == [
+        "kit-translate: kit payload symlink points outside the kit: files/junction/out"]
 
 
 # ---------------------------------------------------------------------------

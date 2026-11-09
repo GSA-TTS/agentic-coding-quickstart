@@ -50,6 +50,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dc_field
@@ -904,15 +905,33 @@ def parse_spec(raw: bytes, kit_dir: Path | None = None, label: str = "spec.yaml"
     )
 
 
+_OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+
+
 def _read_regular(path: Path) -> bytes:
-    """Read a regular file of at most :data:`MAX_SPEC_BYTES` (a FIFO or device would block)."""
-    if not path.is_file():
-        raise KitSpecError(f"{str(path)!r} is not a regular file")
+    """Read a regular file of at most :data:`MAX_SPEC_BYTES`.
+
+    The file is opened without blocking (a FIFO with no writer would otherwise
+    hang the open) and checked with ``fstat`` on the open descriptor, so what is
+    read is the regular file that was checked, even if the path is swapped.
+    """
     try:
-        with open(path, "rb") as fh:
-            raw = fh.read(MAX_SPEC_BYTES + 1)
+        fd = os.open(path, _OPEN_FLAGS)
     except OSError as exc:
+        if not path.is_file():
+            raise KitSpecError(f"{str(path)!r} is not a regular file") from exc
         raise KitSpecError(f"could not read {str(path)!r}") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise KitSpecError(f"{str(path)!r} is not a regular file")
+    except BaseException:
+        os.close(fd)
+        raise
+    with os.fdopen(fd, "rb") as fh:
+        try:
+            raw = fh.read(MAX_SPEC_BYTES + 1)
+        except OSError as exc:
+            raise KitSpecError(f"could not read {str(path)!r}") from exc
     if len(raw) > MAX_SPEC_BYTES:
         raise KitSpecError(f"{str(path)!r} is larger than {MAX_SPEC_BYTES} bytes")
     return raw
@@ -968,9 +987,14 @@ def _resolve_path(p: str, depth: int = 0) -> str | None:
     except OSError:
         return None
     candidate = os.path.join(parent, tail)
-    if os.path.islink(candidate):
+    if _is_link(candidate):
         return _resolve_path(os.path.join(parent, os.readlink(candidate)), depth + 1)
     return candidate
+
+
+def _is_link(path: str) -> bool:
+    """A symlink, or a Windows junction (realpath follows both; neither may be walked into)."""
+    return os.path.islink(path) or os.path.isjunction(path)
 
 
 def resolve_source(kit_dir: str | os.PathLike[str], source: str) -> Path | None:
@@ -997,7 +1021,8 @@ def tree_symlinks_within(kit_dir: str | os.PathLike[str], tree: str | os.PathLik
     """``kit_tree_symlinks_within``: the problems found, empty when the tree is safe.
 
     No name may contain a newline, and every symlink under ``tree`` must resolve
-    inside the kit directory. A missing tree is safe.
+    inside the kit directory. A Windows junction counts as a symlink, and the
+    walk never enters one. A missing tree is safe.
     """
     kit, top = os.fspath(kit_dir), os.fspath(tree)
     if not os.path.isdir(top):
@@ -1007,14 +1032,16 @@ def tree_symlinks_within(kit_dir: str | os.PathLike[str], tree: str | os.PathLik
         return ["kit-translate: cannot resolve the kit directory"]
     problems: list[str] = []
     entries = [top]
-    if not os.path.islink(top):  # find -P lists a symlinked top without entering it
+    if not _is_link(top):  # find -P lists a symlinked top without entering it
         for base, dirs, names in os.walk(top):
             entries.extend(os.path.join(base, n) for n in (*dirs, *names))
+            # os.walk does not follow symlinks, but it does enter junctions.
+            dirs[:] = [d for d in dirs if not os.path.isjunction(os.path.join(base, d))]
     for entry in entries:
         rel = entry.removeprefix(kit + "/")
         if "\n" in entry:
             problems.append("kit-translate: kit payload has a file name containing a newline; refusing it")
-        elif os.path.islink(entry):
+        elif _is_link(entry):
             target = _resolve_path(entry)
             if target is None:
                 problems.append(f"kit-translate: unresolvable symlink in kit payload: {rel}")
