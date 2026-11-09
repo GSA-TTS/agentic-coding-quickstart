@@ -23,6 +23,8 @@ import pytest
 from acq_py import cli, kit_msb, kits, kitspec, msb, state
 from acq_py.commands import common as commands_common
 
+pytestmark = pytest.mark.provider_key  # creates msb sandboxes: needs a stored provider key
+
 FULL_REF = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"  # 40-char SHA-1 (synthetic)
 TEAM_REPO = "github.com/acme/team-kits"
 REPO_ROOT = Path(__file__).resolve().parents[2]

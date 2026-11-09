@@ -49,6 +49,7 @@ acq_py = [
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+markers = ["provider_key: store a throwaway usai key so msb creates pass the provider credential gate"]
 
 # Python quality gates (.github/workflows/python-quality.yml): ruff, mypy and
 # bandit on src/, plus a branch-coverage floor on the pytest run. The tool

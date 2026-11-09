@@ -22,6 +22,8 @@ from pathlib import Path
 import pytest
 
 from acq_py import cli, errors, kit_sbx, kits, kitspec, sbx, state
+
+pytestmark = pytest.mark.provider_key  # creates sandboxes: needs a stored provider key
 from test_kitspec import EDGE_SPECS, _random_spec, _section_spec
 
 REPO_ROOT = Path(__file__).resolve().parents[2]

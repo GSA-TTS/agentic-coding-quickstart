@@ -33,6 +33,14 @@ from the root of a clean checkout whose `HEAD` is on your fork's `main`
 this tool has no `qualification/` directory, and `python3 -m qualification.host` fails
 with "No module named 'qualification'"):
 
+> **sbx needs a usai key in sbx's own table.** The usai-provider kit is selected,
+> and acq refuses a create whose provider key the backend cannot inject. On msb
+> the oracle stores a throwaway key in its private acq store, but on sbx the key
+> must be in sbx's global proxy table, which the oracle never writes (that would
+> overwrite your key). Store one first with
+> `acq --backend sbx secret set -g usai`. Without it the sbx cell reports
+> **BLOCKED** (exit 2, "usai key") before anything is created.
+
 ```bash
 python3 -m qualification.host       # Windows: py -3.12 -m qualification.host
 ```
@@ -267,7 +275,7 @@ create/ls/exec/rm boot contract (the exec probe prints a number the guest comput
 so a backend that echoes the command instead of running it cannot pass) and
 **kit apply**: the guest must have the file the pinned usai-provider kit places
 (`/home/agent/usai-config/model-catalog-snapshot.json`), which shows the built-in
-kits were applied at create. ADR-0044m's oracle 3 also names **attach** and
+kits were applied at create (on sbx this needs the usai key described above). ADR-0044m's oracle 3 also names **attach** and
 **version fail-closed**, which the cell oracle does **not** exercise:
 
 - **version fail-closed** — Tier-1 subprocess vectors (`test/vectors`,

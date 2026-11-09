@@ -409,17 +409,22 @@ def _publish(parent: Path, stem: str, fill: Callable[[Path], None], *, by_conten
         fill(tmp)
         digest = _tree_digest(tmp)[:16] if by_content else None
         dest = parent / (f"{stem}.{digest}" if digest else stem)
-        if not _valid_kit_dir(dest, digest):
-            if dest.exists() or dest.is_symlink():
+        # Rename first: it is atomic and fails when ``dest`` already holds a
+        # tree, so a concurrent create's fresh copy is never judged by a
+        # validity check made before it appeared and then discarded.
+        try:
+            os.rename(tmp, dest)
+        except OSError:
+            if not _valid_kit_dir(dest, digest):  # damaged, e.g. half deleted: replace it
                 try:
                     _discard(dest)
                 except OSError:
                     pass  # a concurrent create replaced it first
-            try:
-                os.rename(tmp, dest)
-            except OSError:
-                if not _valid_kit_dir(dest, digest):  # not a concurrent create's copy
-                    raise
+                try:
+                    os.rename(tmp, dest)
+                except OSError:
+                    if not _valid_kit_dir(dest, digest):  # not a concurrent create's copy
+                        raise
     except OSError as exc:
         shutil.rmtree(tmp, ignore_errors=True)
         raise KitTranslateError(f"could not place a generated kit in {str(parent)!r}: {exc.strerror or exc}") from exc

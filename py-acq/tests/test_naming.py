@@ -27,6 +27,8 @@ import pytest
 from acq_py import cli, errors
 from acq_py.commands import common
 
+pytestmark = pytest.mark.provider_key  # creates msb sandboxes: needs a stored provider key
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMMON_SH = REPO_ROOT / "acq.backends" / "common.sh"
 BASH = shutil.which("bash")

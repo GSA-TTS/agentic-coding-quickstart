@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "id": "cli/run-opencode-sbx",
-  "oracle": "Built-in kits on sbx: the documented bootstrap acq run opencode . translates every built-in kit (CA trust, USAi provider, playbook, git signing) and the bundled opencode agent kit to sbx-v2 kits, creates the sandbox with them, waits for kit startup, then launches the kit's entrypoint",
+  "oracle": "Built-in kits on sbx: the documented bootstrap acq run opencode . translates every built-in kit (CA trust, USAi provider, playbook, git signing) and the bundled opencode agent kit to sbx-v2 kits, creates the sandbox with them, waits for kit startup, then launches the kit's entrypoint (sbx's own table holds a usai key: the default provider kit is selected, and acq refuses a create whose provider key sbx cannot inject)",
   "tier": 1,
   "backend": null,
   "platform": "any",
@@ -21,7 +21,8 @@
       "ACQ_SBX_BIN": "__stub__",
       "ACQ_SBX_VERSION": "0.51.0",
       "ACQ_SBX_INSTALLED": "1",
-      "ACQ_MSB_INSTALLED": "0"
+      "ACQ_MSB_INSTALLED": "0",
+      "ACQ_SBX_STUB_CUSTOM_SECRETS": "[{\"scope\": \"global\", \"env\": \"USAI_API_KEY\", \"placeholder\": \"sbx-cs-usai\", \"targets\": [\"api.gsa.usai.gov\"]}]"
     },
     "unset": [
       "ACQ_BACKEND",
@@ -44,7 +45,10 @@
       "ACQ_KIT_APPLIED_SEED",
       "ACQ_EXTRA_KITS",
       "ACQ_PROVIDER_KITS",
-      "ACQ_MIGRATION_LOCK_TIMEOUT"
+      "ACQ_MIGRATION_LOCK_TIMEOUT",
+      "ACQ_SBX_STUB_PROBE",
+      "ACQ_PROVIDER_CREDENTIAL_BINDINGS",
+      "ACQ_PROVIDER_CREDENTIAL_SEED"
     ],
     "stdin": "",
     "timeout_ms": 10000

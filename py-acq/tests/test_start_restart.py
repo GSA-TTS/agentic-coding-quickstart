@@ -22,6 +22,8 @@ import pytest
 
 from acq_py import cli, errors, kit_msb, lock, msb, secretstore, security, state
 
+pytestmark = pytest.mark.provider_key  # creates msb sandboxes: needs a stored provider key
+
 VALUE = "S3NTINEL-start-value-4b17"
 OWN = "S3NTINEL-own-value-c2a0"
 
@@ -106,7 +108,12 @@ def _stopped_box(monkeypatch, tmp_path, capsys, *, secret=True):
     _env(monkeypatch, tmp_path)
     if secret:
         _set(capsys, monkeypatch, "-g", "usai")
+    else:
+        # Created with no provider kit, so neither the key gate nor a usai binding applies.
+        secretstore.delete(secretstore.key_for("usai"))
+        monkeypatch.setenv("ACQ_PROVIDER_KITS", "")
     _create(capsys, tmp_path)
+    monkeypatch.delenv("ACQ_PROVIDER_KITS", raising=False)
     assert _acq(capsys, "stop", "box")[0] == 0
 
 

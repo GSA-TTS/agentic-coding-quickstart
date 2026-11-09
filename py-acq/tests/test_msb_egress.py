@@ -21,6 +21,8 @@ import pytest
 
 from acq_py import cli, errors, kit_msb, kits, kitspec, msb, state
 
+pytestmark = pytest.mark.provider_key  # creates msb sandboxes: needs a stored provider key
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CANONICAL_HOSTS = REPO_ROOT / "acq.backends" / "msb-balanced-hosts.txt"
 
@@ -329,7 +331,7 @@ def test_every_emitted_rule_is_one_well_formed_token(monkeypatch, tmp_path, caps
     flags = [t for t in argv[1:-1] if t.startswith("-")]
     assert set(flags) <= {
         "--name", "--volume", "-w", "-m", "-c", "--net-rule", "--net-default-egress", "--tls-intercept",
-        "--script-path", "--trust-host-cas",
+        "--script-path", "--trust-host-cas", "--env", "--secret",
     }
 
 
