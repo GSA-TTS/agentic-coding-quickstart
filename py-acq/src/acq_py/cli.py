@@ -14,6 +14,7 @@ and ``doctor``). Every other handler lives in :mod:`acq_py.commands`
     commands/secret.py     secret set/rm/ls/has/import
     commands/creds.py      provider-credential, github-scope, usai-rotate-api-key
     commands/kit.py        kit list/validate/apply/check/update, kit-source
+    commands/configure.py  configure (show the settings, or change them at a TTY)
 
 The names those modules own that callers address are re-exported below, so
 ``cli.<name>`` keeps resolving. They are aliases: substituting one in a test means
@@ -46,13 +47,13 @@ from typing import NoReturn
 # ``cli.msb.<fn>``, and the adapter is reached through ``commands.common`` at
 # runtime. Keeping it here preserves those addresses across the command split.
 from . import backends, config, envelope, errors, migration, msb, state, userdirs  # noqa: F401
-from .commands import common, creds, kit, lifecycle, secret, session
+from .commands import common, configure, creds, kit, lifecycle, secret, session
 
 # Every subcommand acq owns. An argv token that is not one of these (and is not a
 # flag) is treated as an unknown verb and forwarded verbatim to the active
 # backend (announced passthrough, spec user story #9 / ADR-0038m §1).
 KNOWN_COMMANDS = frozenset(
-    "version doctor help backend create run ls stop rm exec attach shell cp ports "
+    "version doctor help backend configure create run ls stop rm exec attach shell cp ports "
     "secret kit kit-source provider-credential github-scope usai-rotate-api-key".split()
 )
 
@@ -217,6 +218,11 @@ def build_parser() -> _Parser:
     set_parser = backend_sub.add_parser("set", help="persist the default backend in config.yaml")
     set_parser.add_argument("name", help="backend name (sbx | msb)")
     backend_sub.add_parser("unset", help="clear the persisted default (fall back to auto-detect)")
+
+    sub.add_parser(
+        "configure",
+        help="show the configuration; at a terminal, choose extra kits, token scoping and the provider kit",
+    )
 
     create_parser = sub.add_parser("create", help="create a sandbox (detached)")
     create_parser.add_argument("agent", nargs="?", help="agent to provision (e.g. opencode, shell)")
@@ -722,6 +728,18 @@ def _dispatch(parser: _Parser, parsed, emit_json: bool, backend_override: str | 
         if parsed.backend_command == "set":
             return run_backend_set(emit_json, parsed.name)
         return run_backend_unset(emit_json)
+
+    if parsed.command == "configure":
+        if backend_override is not None and backend_override not in backends.BACKENDS:
+            return common._usage_failure(
+                "configure", f"unknown backend: {backend_override!r} (expected sbx or msb)", emit_json
+            )
+        # Only the interactive form writes config.yaml, and it takes the
+        # migration pre-step just before its first write, so a cancelled run
+        # leaves a legacy config untouched.
+        return configure.run_configure(
+            emit_json, backend_override, lambda: _migration_pre_step(emit_json, "configure")
+        )
 
     if parsed.command in ("create", "run", "ls", "stop", "rm", "exec", "attach", "shell", "cp", "ports"):
         _backend, exit_code = common._resolve_backend_for_lifecycle(backend_override, emit_json, parsed.command)

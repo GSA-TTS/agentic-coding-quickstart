@@ -102,9 +102,21 @@ The default flips only when every gate below holds. Until then this ADR stays
    flag was passed.
 4. **Command parity:** every command the Bash `acq` accepts on Windows is
    implemented, or is listed in this ADR as an accepted gap with its replacement.
-   Today the Python CLI lacks `configure`, `start`, `restart`, `backend set`,
-   `backend unset` and `secret import`. (`secret set-custom` is not a gap: Bash
-   refuses it with guidance, and Python rejects it as an unknown subcommand.)
+   Today the Python CLI lacks `start` and `restart`. (`secret set-custom` is not
+   a gap: Bash refuses it with guidance, and Python rejects it as an unknown
+   subcommand.)
+   `acq configure` is implemented, with two accepted gaps:
+   - **The first-run offer.** Bash offers to run `acq configure` the first time
+     `acq create`/`run` finds no `config.yaml`. Python does not prompt; the
+     replacement is running `acq configure` once by hand.
+   - **The create-time kit picker.** Bash lets a single `acq create`/`run` change
+     the opt-in kits for that sandbox. Python has no picker. It does not apply
+     extra kits at all yet (see "Python reads the configure keys" under Links), so
+     until it does the replacement is the Bash acq (`ACQ_IMPL=bash`), whose picker
+     and `ACQ_EXTRA_KITS` still work.
+
+   The deliberate behaviour differences of the Python `configure` are listed in
+   `py-acq/README.md` under "configure".
 5. **Proof:**
    - a Windows CI job runs the pytest and vector suites, and smoke-tests both
      launchers on pull requests;
@@ -164,6 +176,7 @@ When the gates are met, the launcher change is covered by:
 - Credential gaps: mogul/agentic-coding-quickstart#107
 - Kit, bootstrap and trusted-config gaps: mogul/agentic-coding-quickstart#108
 - State, migration and lifecycle gaps: mogul/agentic-coding-quickstart#109
+- Python reads the configure keys (`extra_kits`, `provider_kit`, `scope_github_token`): mogul/agentic-coding-quickstart#168
 - Release assets: mogul/agentic-coding-quickstart#111
 - Windows CI: mogul/agentic-coding-quickstart#122
 - Bash `create`/`rm` under Git Bash: mogul/agentic-coding-quickstart#128
