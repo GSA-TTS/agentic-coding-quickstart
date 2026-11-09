@@ -189,13 +189,59 @@ function Install-AcqZip {
             throw "release archive is missing the bundled runtime ($RuntimeRelative)."
         }
 
-        # Publish: replace an existing install in place (the update path).
-        $parent = Split-Path -Parent $InstallDir
-        New-Item -ItemType Directory -Force -Path $parent | Out-Null
-        if (Test-Path -LiteralPath $InstallDir) {
-            Remove-Item -LiteralPath $InstallDir -Recurse -Force
+        # Publish without destroying anything this installer did not create:
+        # -InstallDir can name any directory. Record the exact top-level names
+        # the installer owns in a marker file, overwrite only those names, and
+        # refuse any other collision. The marker is written before anything
+        # moves, so a failed run leaves a directory the next run can finish.
+        # Get-Item (not Test-Path) is used for existence so dangling links and
+        # junctions are seen too.
+        $ownedMarker = ".acq-v1-install"
+        if ($InstallDir.Length -gt 3) { $InstallDir = $InstallDir.TrimEnd('\', '/') }  # keep a drive root like C:\
+        $existing = Get-Item -LiteralPath $InstallDir -Force -ErrorAction SilentlyContinue
+        if ($existing) {
+            if ($existing.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw "$InstallDir is a symlink or junction; refusing to install through it. Pass -InstallDir with a real directory."
+            }
+            if (-not $existing.PSIsContainer) {
+                throw "$InstallDir exists and is not a directory; move it aside or pass -InstallDir."
+            }
         }
-        Move-Item -LiteralPath $sourceDir -Destination $InstallDir
+        New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+        $markerPath = Join-Path $InstallDir $ownedMarker
+        $owned = @()
+        $wasMarked = Test-Path -LiteralPath $markerPath -PathType Leaf
+        if ($wasMarked) {
+            $owned = @(Get-Content -LiteralPath $markerPath | Select-Object -Skip 1)
+        }
+        $entries = @(Get-ChildItem -LiteralPath $sourceDir -Force)
+        foreach ($entry in $entries) {
+            $present = Get-Item -LiteralPath (Join-Path $InstallDir $entry.Name) -Force -ErrorAction SilentlyContinue
+            if ($present -and ($owned -notcontains $entry.Name)) {
+                throw "$InstallDir already contains '$($entry.Name)', which this installer did not create (not listed in $ownedMarker). Move it aside or pass -InstallDir; nothing was changed."
+            }
+        }
+        # Every release name is now absent or already ours; keep previously owned
+        # names too (leftovers from an older release are still ours to replace).
+        $names = @($owned) + @($entries | ForEach-Object { $_.Name }) | Select-Object -Unique
+        Set-Content -LiteralPath $markerPath -Value (@($Version) + $names) -Encoding ascii
+        # Only trust leftover move-aside dirs in a directory marked before this run.
+        if ($wasMarked) {
+            Get-ChildItem -LiteralPath $InstallDir -Force -Directory -Filter ".acq-previous.*" |
+                Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } |
+                ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force }
+        }
+        $previous = Join-Path $InstallDir ".acq-previous.$PID"
+        New-Item -ItemType Directory -Path $previous | Out-Null
+        foreach ($entry in $entries) {
+            $target = Join-Path $InstallDir $entry.Name
+            if (Get-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue) {
+                Move-Item -LiteralPath $target -Destination (Join-Path $previous $entry.Name)
+            }
+            Move-Item -LiteralPath $entry.FullName -Destination $target
+        }
+        # Only owned entries were moved into $previous, so removing it is safe.
+        Remove-Item -LiteralPath $previous -Recurse -Force
     }
     finally {
         if (Test-Path -LiteralPath $tmpRoot) {

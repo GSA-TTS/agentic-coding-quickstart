@@ -199,17 +199,20 @@ def agent_kit_entrypoint(name: str) -> str:
 # ``schema_version`` in ``envelope.py``: each record TYPE carries its own marker.
 KIT_SCHEMA = 1
 
+# The grammars below are applied with re.fullmatch: an anchored re.match() would
+# also accept a trailing newline, because `$` matches just before one.
+
 # A full immutable git ref is a 40-char SHA-1 or 64-char SHA-256, case-insensitive.
-_FULL_SHA1_RE = re.compile(r"^[0-9a-fA-F]{40}$")
-_FULL_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+_FULL_SHA1_RE = re.compile(r"[0-9a-fA-F]{40}")
+_FULL_SHA256_RE = re.compile(r"[0-9a-fA-F]{64}")
 
 # A normalized repository is host/owner/repo: lower-case host, two more path
 # segments, no scheme, no trailing slash (ADR-0016 `_acq_kit_source_repo_ok`).
-_REPO_RE = re.compile(r"^[a-z0-9][a-z0-9.-]*/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_REPO_RE = re.compile(r"[a-z0-9][a-z0-9.-]*/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 
 # A kit directory is a relative path of the neutral acq-kits tree (no leading
 # slash, no ``..`` traversal, ASCII path chars only).
-_DIR_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
+_DIR_RE = re.compile(r"[A-Za-z0-9._/-]+")
 
 # Offline discovery seam (internal test seam, never a secret, never written to
 # output). Maps a repository to a deterministic list of provider kits; a repo key
@@ -242,7 +245,7 @@ def is_full_ref(ref: str) -> bool:
     A branch, tag, abbreviated SHA, or anything else is a mutable ref and is
     refused (ADR-0038m §46 "kits use immutable full refs").
     """
-    return bool(_FULL_SHA1_RE.match(ref) or _FULL_SHA256_RE.match(ref))
+    return bool(_FULL_SHA1_RE.fullmatch(ref) or _FULL_SHA256_RE.fullmatch(ref))
 
 
 def normalize_repo(arg: str) -> str | None:
@@ -264,7 +267,7 @@ def normalize_repo(arg: str) -> str | None:
     if repo.endswith(".git"):
         repo = repo[: -len(".git")]
     repo = repo.rstrip("/")
-    if not _REPO_RE.match(repo):
+    if not _REPO_RE.fullmatch(repo):
         return None
     return repo
 
@@ -272,7 +275,7 @@ def normalize_repo(arg: str) -> str | None:
 def normalize_dir(value: str | None) -> str | None:
     """Validate (or default) a kit directory; ``None`` for an unsafe path."""
     d = (value or CONTROL_PLANE_DIR)
-    if not d or d.startswith("/") or ".." in d or not _DIR_RE.match(d):
+    if not d or d.startswith("/") or ".." in d or not _DIR_RE.fullmatch(d):
         return None
     return d
 

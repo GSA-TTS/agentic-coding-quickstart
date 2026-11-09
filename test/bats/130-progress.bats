@@ -104,3 +104,71 @@ _prog() { # SHELL_SNIPPET
   refute_output --partial "$(printf '\033')"
   assert_output --partial 'gotcha'
 }
+
+# Trap capture must not depend on how `trap -p` spells the signal: bash prints
+# `SIGINT`/`SIGTERM` normally (3.2 and 5.x) but `INT`/`TERM` in POSIX mode. The
+# captured command is re-installed and re-invoked verbatim, so a leftover signal
+# name would corrupt it (e.g. `handler 130` becoming `handler 130SIGINT`).
+@test "progress: prior INT/TERM trap commands are captured without the signal name" {
+  _prog 'trap "handler 130" INT; trap "handler 143" TERM
+    printf "INT=[%s]\n" "$(_acq_capture_prior_trap INT)"
+    printf "TERM=[%s]\n" "$(_acq_capture_prior_trap TERM)"
+    set -o posix
+    printf "PINT=[%s]\n" "$(_acq_capture_prior_trap INT)"
+    trap - TERM
+    printf "PUNSET=[%s]\n" "$(_acq_capture_prior_trap TERM)"'
+  assert_line 'INT=[handler 130]'
+  assert_line 'TERM=[handler 143]'
+  assert_line 'PINT=[handler 130]'
+  assert_line 'PUNSET=[]'
+}
+
+@test "progress: capture round-trips a trap command with quotes and newlines" {
+  # Build the awkward command outside the snippet to avoid nested shell quoting.
+  export TRAP_CMD_FILE="$STUBDIR/trap-cmd"
+  printf '%s\n%s' "echo \"it's\" '\$x' \"\$HOME\"" 'echo two' > "$TRAP_CMD_FILE"
+  _prog 'cmd=$(cat "$TRAP_CMD_FILE"); trap "$cmd" INT
+    got=$(_acq_capture_prior_trap INT)
+    if [ "$got" = "$cmd" ]; then echo ROUNDTRIP_OK; else printf "GOT=[%s]\n" "$got"; fi'
+  assert_output 'ROUNDTRIP_OK'
+}
+
+@test "progress: spin install/restore puts back the exact prior INT and TERM traps" {
+  _prog 'trap "handler 130" INT; trap "handler 143" TERM
+    _acq_spin_install_traps
+    _acq_spin_restore_traps
+    trap -p INT; trap -p TERM'
+  assert_line --regexp "^trap -- 'handler 130' (SIG)?INT\$"
+  assert_line --regexp "^trap -- 'handler 143' (SIG)?TERM\$"
+}
+
+@test "progress: Ctrl-C chains the prior INT handler with its exact arguments" {
+  _prog 'handler() { printf "HANDLER_ARGS=[%s]\n" "$*"; }
+    trap "handler 130" INT
+    _acq_spin_install_traps
+    _acq_spin_cleanup_signal INT
+    printf "NOT_REACHED\n"'
+  assert_equal "$status" 130
+  assert_line 'HANDLER_ARGS=[130]'
+  refute_output --partial 'NOT_REACHED'
+}
+
+@test "progress: spin install/restore keeps an ignored INT ignored" {
+  _prog 'trap "" INT
+    _acq_spin_install_traps
+    _acq_spin_restore_traps
+    trap -p INT'
+  assert_output --regexp "^trap -- '' (SIG)?INT\$"
+}
+
+@test "progress: Ctrl-C resets INT before the prior handler, so a re-raise cannot recurse" {
+  export PRIOR_COUNT="$STUBDIR/prior-count"
+  _prog 'prior() { echo ran >> "$PRIOR_COUNT"; [ "$(wc -l < "$PRIOR_COUNT")" -ge 3 ] || kill -s INT $$; }
+    trap prior INT
+    _acq_spin_install_traps
+    _acq_spin_cleanup_signal INT
+    printf "NOT_REACHED\n"'
+  assert_equal "$status" 130
+  refute_output --partial 'NOT_REACHED'
+  assert_equal "$(wc -l < "$STUBDIR/prior-count" | tr -d ' ')" 1
+}

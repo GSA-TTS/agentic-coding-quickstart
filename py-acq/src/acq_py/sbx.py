@@ -30,11 +30,10 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import subprocess
 import sys
 
-from . import errors
+from . import errors, hostexec
 
 STUB_SENTINEL = "__stub__"
 
@@ -62,10 +61,10 @@ def sbx_command() -> list[str]:
     """Resolve the sbx CLI argv (an internal test seam; default ``sbx``)."""
     override = os.environ.get("ACQ_SBX_BIN")
     if override == STUB_SENTINEL:
-        return [sys.executable, "-m", "acq_py._stub_sbx"]
+        return [sys.executable, "-P", "-m", "acq_py._stub_sbx"]
     if override:
-        return shlex.split(override)
-    return ["sbx"]
+        return hostexec.override_command(override)
+    return hostexec.command("sbx")
 
 
 def _run(

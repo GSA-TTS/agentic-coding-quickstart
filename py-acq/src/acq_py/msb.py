@@ -31,12 +31,11 @@ import json
 import ntpath
 import os
 import re
-import shlex
 import subprocess
 import sys
 from pathlib import Path
 
-from . import errors, kits
+from . import errors, hostexec, kits
 
 STUB_SENTINEL = "__stub__"
 
@@ -126,10 +125,10 @@ def msb_command() -> list[str]:
     """Resolve the msb CLI argv (an internal test seam; default ``msb``)."""
     override = os.environ.get("ACQ_MSB_BIN")
     if override == STUB_SENTINEL:
-        return [sys.executable, "-m", "acq_py._stub_msb"]
+        return [sys.executable, "-P", "-m", "acq_py._stub_msb"]
     if override:
-        return shlex.split(override)
-    return ["msb"]
+        return hostexec.override_command(override)
+    return hostexec.command("msb")
 
 
 # ---------------------------------------------------------------------------

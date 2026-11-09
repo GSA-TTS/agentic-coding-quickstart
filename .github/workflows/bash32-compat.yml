@@ -136,6 +136,11 @@ jobs:
             'scripts/test-acq-lib.sh' \
             'scripts/test-acq-bats' \
             'test/bats' \
+            'scripts/run-vectors' \
+            'scripts/gen-install-assets' \
+            'test/vectors' \
+            'acq-python' \
+            'install.sh' \
             '.github/workflows/bash32-compat.yml')"
           if [ -n "$changed" ]; then
             echo "relevant=true" >>"$GITHUB_OUTPUT"
@@ -273,6 +278,22 @@ jobs:
         run: |
           set -euo pipefail
           PATH="/opt/bash32/bin:$PATH" /opt/bash32/bin/bash scripts/test-acq-bats
+
+      # The vector runner is itself a bash script that macOS developers run with
+      # the system bash 3.2, so exercise it under 3.2 against the Python CLI.
+      - name: Run vector corpus under bash 3.2
+        run: |
+          set -euo pipefail
+          PYTHONPATH="$PWD/py-acq/src" PATH="/opt/bash32/bin:$PATH" \
+            /opt/bash32/bin/bash scripts/run-vectors --acq "python -m acq_py"
+
+      # macOS /bin/sh is bash 3.2 in POSIX mode: the POSIX entry points must parse there.
+      - name: Parse POSIX entry points under bash 3.2 --posix
+        run: |
+          set -euo pipefail
+          for f in acq-python install.sh scripts/gen-install-assets; do
+            /opt/bash32/bin/bash --posix -n "$f"
+          done
 
   # Always-posting gate: this is what branch protection actually requires,
   # under the ORIGINAL required-check name ("acq offline suite under bash

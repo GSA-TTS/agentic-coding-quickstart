@@ -55,8 +55,17 @@ from . import publish as pub
 from dataclasses import replace
 
 from .gate import evaluate, git_changed_paths
-from .ledger import DEFAULT_LEDGER, LedgerError, append_entry, entry_from_transcript, load_ledger, platform_token, set_accepted_version
-from .matrix import MSB, SBX, is_claimed, same_minor
+from .ledger import (
+    DEFAULT_LEDGER,
+    LedgerError,
+    append_entry,
+    entry_from_transcript,
+    git_oracle_digest,
+    load_ledger,
+    platform_token,
+    set_accepted_version,
+)
+from .matrix import CELL_ORACLE, MSB, SBX, is_claimed, same_minor
 from .publish import HostError
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -166,7 +175,7 @@ def harness_command(host: Host, backend: str, version: str, rev: str, sha: str, 
         "--os", host.system, "--os-build", host.os_build, "--arch", host.arch,
         "--hypervisor", host.hypervisor, "--image", IMAGE, "--rev", rev,
         "--artifact-sha256", sha, "--transcript-dir", str(out), "--timeout", str(timeout),
-        "--", sys.executable, str(Path("scripts") / "qualify-backend-cell"), "--backend", backend,
+        "--", sys.executable, str(Path(CELL_ORACLE)), "--backend", backend,
     ]
 
 
@@ -182,10 +191,24 @@ def _recordable(r: Result, record_failures: bool) -> bool:
     return r.transcript is not None and (r.status == "PASS" or (record_failures and r.status in ("FAIL", "FLAKY")))
 
 
+def _git_at(root: Path) -> dict:
+    """The gate's git lookups, run in ``root`` (this module may run from any directory)."""
+    return {
+        "changed_paths": lambda rev: git_changed_paths(rev, cwd=root),
+        "oracle_digest": lambda rev, path: git_oracle_digest(rev, path, cwd=root),
+    }
+
+
 def apply_results(
-    ledger: Path, results: list[Result], host: Host, record_failures: bool, accept: dict[str, str] | None = None
+    ledger: Path, results: list[Result], host: Host, record_failures: bool, accept: dict[str, str] | None = None,
+    repo: Path | None = None,
 ) -> list[Result]:
-    """Edit ``ledger``: move accepted versions, then record each qualifying run."""
+    """Edit ``ledger``: move accepted versions, then record each qualifying run.
+
+    ``repo`` is the checkout whose history holds the runs' revision (default
+    ``REPO_ROOT``); each entry records the oracle as committed there.
+    """
+    digest = _git_at(repo or REPO_ROOT)["oracle_digest"]
     for backend, version in (accept or {}).items():
         set_accepted_version(ledger, backend, version)
     recorded = []
@@ -193,7 +216,7 @@ def apply_results(
         if not _recordable(r, record_failures):
             continue
         raw = r.transcript.read_bytes()
-        entry = entry_from_transcript(json.loads(raw), raw, platform=host.platform)
+        entry = entry_from_transcript(json.loads(raw), raw, platform=host.platform, oracle_digest=digest)
         append_entry(ledger, entry, retire_waiver=entry.verdict == "PASS")
         recorded.append(r)
     return recorded
@@ -207,9 +230,8 @@ def blast_radius(root: Path, accept: dict[str, str], host: Host | None = None) -
     ledger = load_ledger(root / DEFAULT_LEDGER)
     moved = replace(ledger, accepted_backend_versions={**ledger.accepted_backend_versions, **accept})
     now = datetime.now(timezone.utc)
-    paths = lambda r: git_changed_paths(r, cwd=root)  # noqa: E731
-    before = {(s.backend, s.platform): s.status for s in evaluate(ledger, now=now, changed_paths=paths)}
-    after = {(s.backend, s.platform): s.status for s in evaluate(moved, now=now, changed_paths=paths)}
+    before = {(s.backend, s.platform): s.status for s in evaluate(ledger, now=now, **_git_at(root))}
+    after = {(s.backend, s.platform): s.status for s in evaluate(moved, now=now, **_git_at(root))}
     own = {(b, host.platform) for b in accept} if host else set()
     return sorted(
         f"{b}/{p}" for (b, p), status in before.items()
@@ -314,7 +336,7 @@ def plan(root: Path, host: Host, backends: list[str], versions: dict, only_stale
     ledger = load_ledger(root / DEFAULT_LEDGER)
     status = {
         (s.backend, s.platform): s
-        for s in evaluate(ledger, now=datetime.now(timezone.utc), changed_paths=lambda r: git_changed_paths(r, cwd=root))
+        for s in evaluate(ledger, now=datetime.now(timezone.utc), **_git_at(root))
     }
     to_run, skipped, moves, notes = [], [], {}, []
     for b in backends:
@@ -428,7 +450,7 @@ def _run(args: argparse.Namespace) -> int:
                 edit=lambda path: apply_results(path, results, host, args.record_failures, accept),
                 verify=lambda wt: _cells_qualified(wt, host, green),
             )
-        except HostError as exc:
+        except (HostError, LedgerError) as exc:  # a refused entry keeps the runs too
             kept = [str(r.transcript) for r in recorded]
             raise HostError(
                 f"{exc}\n  the runs are kept in {root / 'tmp'}; once the problem is fixed, re-run this command, or record "

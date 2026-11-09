@@ -8,7 +8,7 @@ import json
 import subprocess
 import sys
 
-from .. import backends, envelope, errors, msb, state
+from .. import backends, envelope, errors, hostexec, msb, state
 from . import common
 
 
@@ -275,7 +275,7 @@ def _passthrough(argv: list[str], explicit: str | None, emit_json: bool) -> int:
     if name == "msb":
         binary = msb.msb_command()
     else:
-        binary = [backends.BACKENDS[name].cli]
+        binary = hostexec.command(backends.BACKENDS[name].cli)
     print(f"acq: '{verb}' is not an acq subcommand - forwarding to '{name}'.", file=sys.stderr)
     print(f"     (output and any errors below are from '{name}', not acq)", file=sys.stderr)
     return subprocess.run([*binary, *argv]).returncode

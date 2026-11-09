@@ -12,6 +12,7 @@ _provider_release() {
   mkdir -p "$root/scripts" "$root/integrations/isolation/schemas"
   cat > "$root/provider-python" <<'PYTHON'
 #!/bin/sh
+[ "${1:-}" = -I ] && shift  # acq runs python -I (no cwd/env on sys.path)
 if [ "$1" = -c ]; then exit 0; fi
 exec /usr/bin/python3 "$@"
 PYTHON
@@ -76,6 +77,7 @@ EOF
   mkdir -p "$runtime"
   cat > "$runtime/python3" <<'EOF'
 #!/bin/sh
+[ "${1:-}" = -I ] && shift  # acq runs python -I (no cwd/env on sys.path)
 if [ "$1" = -c ]; then exit 0; fi
 exit 1
 EOF
@@ -103,6 +105,7 @@ EOF
   cat > "$fakebin/python-custom" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$VALIDATOR_SETUP_LOG"
+[ "${1:-}" = -I ] && shift  # acq runs python -I (no cwd/env on sys.path)
 if [ "$1" = -c ]; then printf '3.14\n'; exit 0; fi
 if [ "$1" = -m ] && [ "$2" = venv ]; then
   mkdir -p "$3/bin"; cp "$0" "$3/bin/python3"; exit 0
@@ -134,6 +137,7 @@ EOF
   cat > "$fakebin/python3.14" <<'EOF'
 #!/bin/sh
 printf 'selected-3.14 %s\n' "$*" >> "$VALIDATOR_SETUP_LOG"
+[ "${1:-}" = -I ] && shift  # acq runs python -I (no cwd/env on sys.path)
 if [ "$1" = -c ]; then printf '3.14\n'; exit 0; fi
 if [ "$1" = -m ] && [ "$2" = venv ]; then
   mkdir -p "$3/bin"; cp "$0" "$3/bin/python3"; exit 0
@@ -175,6 +179,7 @@ EOF
   cat > "$fakebin/python3.12" <<'EOF'
 #!/bin/sh
 printf 'selected-3.12 %s\n' "$*" >> "$VALIDATOR_SETUP_LOG"
+[ "${1:-}" = -I ] && shift  # acq runs python -I (no cwd/env on sys.path)
 if [ "$1" = -c ]; then printf '3.12\n'; exit 0; fi
 if [ "$1" = -m ] && [ "$2" = venv ]; then
   mkdir -p "$3/bin"; cp "$0" "$3/bin/python3"; exit 0
@@ -214,6 +219,7 @@ EOF
   cat > "$fakebin/python3" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$VALIDATOR_SETUP_LOG"
+ [ "${1:-}" = -I ] && shift  # acq runs python -I (no cwd/env on sys.path)
  if [ "$1" = -c ]; then
    printf '3.12\n'
    exit 0
@@ -316,6 +322,7 @@ EOF
   _provider_release "$release"; _provider_kit "$release" alpha
   cat > "$python" <<EOF
 #!/bin/sh
+[ "\${1:-}" = -I ] && shift  # acq runs python -I (no cwd/env on sys.path)
 if [ "\$1" = -c ]; then exit 2; fi
 printf 'validator unexpectedly invoked\n' >> "$STUBDIR/validator-invoked"
 exit 0

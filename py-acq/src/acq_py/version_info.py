@@ -17,14 +17,24 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from pathlib import Path
 
-from . import __version__, envelope, errors
+from . import __version__, envelope, errors, hostexec
+
+
+# The checkout acq runs from: src/acq_py -> src -> py-acq -> repository root.
+_CHECKOUT_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _git_revision() -> str | None:
+    # Report acq's own revision, as the Bash acq does with `git -C`. Running git
+    # in the current directory would report the workspace's revision instead, and
+    # would read the workspace's .git/config, which the sandboxed agent can write.
+    if not (_CHECKOUT_ROOT / ".git").exists():
+        return None
     try:
         out = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+            [*hostexec.command("git"), "-C", str(_CHECKOUT_ROOT), "rev-parse", "HEAD"],
             capture_output=True,
             text=True,
             timeout=5,

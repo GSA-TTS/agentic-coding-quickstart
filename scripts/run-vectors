@@ -11,9 +11,10 @@
 #   scripts/run-vectors [--acq "python3 -m acq_py"] [--python python3] \
 #                       [--vectors test/vectors] [--section NAME]
 #
-# Dependencies: bash, jq (pinned in CI), GNU coreutils (timeout, sort, head,
-# tail, od, tr), python3 (for {python} and the default {acq}). Fails closed if
-# jq or python3 is absent.
+# Dependencies: bash (3.2+), jq (pinned in CI), GNU `timeout` (macOS: Homebrew
+# coreutils, on PATH as `timeout`), sort/head/tail/od/tr (BSD or GNU), and
+# python3 (for {python} and the default {acq}). Fails closed if jq or python3
+# is absent.
 #
 # Per-vector exit codes: 0 ok, 1 skip (platform scope), 2 refused (fail closed),
 # 3 fail (assertion/validation). The `negative/` section expects refusal (2).
@@ -56,15 +57,25 @@ for tool in jq timeout; do
 done
 
 # --- normalisation transforms (must mirror py-acq/tests/vector_engine.py) ----
+# In-place sed without `-i`: GNU `sed -i` and BSD/macOS `sed -i ''` disagree on
+# the flag's argument, so write to a temp file and move it over the original.
+# Scripts passed here must also avoid GNU-only escapes such as \r.
+_sed_inplace() {
+  local file="$1"
+  shift
+  sed "$@" "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+}
+
 _apply_transform() {
   # $1 = transform name, $2 = file to transform in place
-  local name="$1" file="$2" tmpdir _had_nl
+  local name="$1" file="$2" tmpdir _had_nl _size
   tmpdir="${TMPDIR:-/tmp}"
+  tmpdir="${tmpdir%/}"  # macOS $TMPDIR ends in '/'; the Python runner strips it
   case "$name" in
-    abspath) sed -E -i 's#/[^[:space:]]+#<abspath>#g' "$file" ;;
-    tmpdir)  sed -i -e "s#$tmpdir#<tmpdir>#g" -e 's#/tmp#<tmpdir>#g' "$file" ;;
-    crlf)    sed -i 's/\r$//' "$file" ;;
-    timing)  sed -E -i 's#[0-9]+(\.[0-9]+)?(ms|us|µs|s)#<timing>#g' "$file" ;;
+    abspath) _sed_inplace "$file" -E 's#/[^[:space:]]+#<abspath>#g' ;;
+    tmpdir)  _sed_inplace "$file" -e "s#$tmpdir#<tmpdir>#g" -e 's#/tmp#<tmpdir>#g' ;;
+    crlf)    _sed_inplace "$file" $'s/\r$//' ;;  # literal CR: BSD sed has no \r escape
+    timing)  _sed_inplace "$file" -E 's#[0-9]+(\.[0-9]+)?(ms|us|µs|s)#<timing>#g' ;;
     order)
       # Preserve the trailing-newline flag the Python runner tracks, and sort by
       # byte (== codepoint for UTF-8) so both runners order non-ASCII alike.
@@ -74,7 +85,10 @@ _apply_transform() {
       fi
       LC_ALL=C sort -o "$file" "$file"
       if [ "$_had_nl" -eq 0 ] && [ -s "$file" ]; then
-        head -c -1 "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+        # Drop the newline sort appended. `head -c -1` is GNU-only; a positive
+        # byte count works with BSD/macOS head too.
+        _size="$(wc -c < "$file" | tr -d ' ')"
+        head -c "$((_size - 1))" "$file" > "$file.tmp" && mv "$file.tmp" "$file"
       fi
       ;;
     json)
@@ -179,7 +193,7 @@ _run_vector() {
   # Build argv, splicing {acq} and {python}.
   while IFS= read -r token; do
     case "$token" in
-      "{acq}") read -r -a words <<<"$ACQ_CMD"; cmd+=("${words[@]}") ;;
+      "{acq}") read -r -a words <<<"$ACQ_CMD"; cmd+=(${words[@]+"${words[@]}"}) ;;
       "{python}") cmd+=("$PYTHON_CMD") ;;
       *) cmd+=("$token") ;;
     esac
@@ -201,8 +215,11 @@ _run_vector() {
   timeout_s="$(awk -v ms="$timeout_ms" 'BEGIN { printf "%.3f", ms / 1000 }')"
 
   # Run the command with the constructed environment in a subshell.
+  # `${arr[@]+"${arr[@]}"}` expands to nothing for an empty array: bash < 4.4
+  # (macOS ships 3.2) treats a bare "${arr[@]}" on an empty array as unbound
+  # under `set -u` and aborts the subshell before the CLI runs.
   (
-    for u in "${unset_list[@]}"; do unset "$u"; done
+    for u in ${unset_list[@]+"${unset_list[@]}"}; do unset "$u"; done
     [ "${#env_list[@]}" -gt 0 ] && export "${env_list[@]}"
     for r in "${redirect_list[@]}"; do export "$r"="$outdir/redirect/$r"; done
     exec timeout "$timeout_s" "${cmd[@]}"

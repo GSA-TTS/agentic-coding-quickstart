@@ -160,8 +160,32 @@ release gate from it, and the `Tier-3 release gate` workflow runs that on every
 PR, every push to `main`, and weekly. The ledger may carry dated, reasoned
 waivers for a claimed cell that has no current transcript; a waiver lowers the
 bar, is reported as such, and blocks again once it expires. The ledger is
-self-reported and committed, so its integrity is a review control (CODEOWNERS
-requires an admin's review of `docs/qualification-ledger.json`), not a technical
-one; `transcript_sha256` is auditable because the ledger PR inlines the
-transcript it hashes (a PR body is not a committed file), so a recorded hash can
-always be checked against the evidence it stands for. A run must be recorded at a commit that is on `main`.
+self-reported and committed, so its integrity is chiefly a review control
+(CODEOWNERS requires an admin's review of `docs/qualification-ledger.json`, of
+`qualification/`, and of the two committed oracles). Technical checks narrow
+what that review has to catch, but none of them proves a run happened:
+
+- `record` sees the transcript and refuses one whose attempts did not run exactly
+  the committed cell oracle for the transcript's backend, or a `--platform` that
+  is not the transcript's own host. It runs on the recorder's machine, so it stops
+  mistakes and tooling misuse, not someone who edits the ledger by hand.
+- The gate sees only ledger entries. Each must name the committed cell oracle and
+  carry the SHA-256 of that file as committed at the entry's revision (re-read
+  from git); its arch and hypervisor must be a host of its cell; no transcript
+  hash may be filed twice; its revision must be a full commit id and an ancestor
+  of the commit being evaluated. An entry recorded before the binding existed
+  counts only if it is field-for-field one of the legacy entries listed in
+  `qualification/ledger.py`, and that exemption ends on 2027-02-06
+  (`binding_problem`).
+- On a pull request the `Tier-3 release gate` workflow runs `qualification/` from
+  the base branch, not the PR under test, so a PR cannot change the claimed cells,
+  the surface or its carve-outs, or the gate itself and be judged by its own
+  version; loosening any of them takes a separate PR, which CODEOWNERS sends to an
+  admin.
+
+A fabricated transcript, or a hand-written entry that satisfies the gate's checks,
+is caught only by that admin review together with an audit of the evidence:
+`transcript_sha256` is auditable because the ledger PR inlines the transcript it
+hashes (a PR body is not a committed file), so a recorded hash can always be
+checked against the evidence it stands for. A run must be recorded at a commit
+that is on `main`.

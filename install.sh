@@ -305,10 +305,23 @@ fi
 
 step "Downloading acq $VERSION"
 
-tmpdir="${TMPDIR:-/tmp}/acq-install.$$"
-rm -rf "$tmpdir"
-mkdir -p "$tmpdir"
-trap 'rm -rf "$tmpdir"' EXIT HUP INT TERM
+# A private, unpredictably named work dir: the archive is verified here and
+# then extracted, so another local user must not be able to pre-create or swap
+# it between those steps. mktemp -d creates it 0700 and fails rather than reuse
+# an existing path (a fixed name like acq-install.$$ plus `mkdir -p` would
+# silently adopt an attacker's directory).
+# The cleanup trap is installed first (rm -rf "" is a no-op), and signals EXIT
+# rather than return: a trap that only cleaned up would let the script carry on
+# after its private dir was deleted, and a later mkdir would re-create that
+# now-known path, which another user could have taken in the meantime.
+tmpdir=""
+trap 'rm -rf "$tmpdir"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/acq-install.XXXXXXXX")" \
+  || die "could not create a private temporary directory"
+chmod 700 "$tmpdir"
 
 if [ "$SOURCE_IS_URL" -eq 1 ]; then
   curl -fsSL "$SOURCE/$SHA256SUMS_NAME" -o "$tmpdir/$SHA256SUMS_NAME" \
@@ -358,7 +371,8 @@ step "Installing into $INSTALL_DIR"
 command -v tar >/dev/null 2>&1 || die "tar is required to extract the release archive"
 
 staging="$tmpdir/stage"
-mkdir -p "$staging"
+# No -p: if the private dir has vanished, fail instead of re-creating it.
+mkdir "$staging" || die "could not create the staging directory"
 
 case "$ARCHIVE" in
   *.tar.gz) tar -xzf "$tmpdir/$ARCHIVE" -C "$staging" || die "could not extract $ARCHIVE" ;;
@@ -386,12 +400,80 @@ fi
 [ -e "$staging/py-acq/src/acq_py/__init__.py" ] || die "release archive is missing the acq source tree (py-acq/src/acq_py/)"
 [ -d "$staging/wheelhouse" ] || die "release archive is missing the dependency wheelhouse (wheelhouse/)"
 
-# Publish: replace an existing install in place (the update path).
-mkdir -p "$(dirname "$INSTALL_DIR")"
-if [ -e "$INSTALL_DIR" ]; then
-  rm -rf "$INSTALL_DIR"
+# Publish without destroying anything this installer did not create. The default
+# install dir ($XDG_DATA_HOME/acq) is also where the legacy Bash acq keeps its
+# file-fallback secret store and provider-input-validator runtime, and
+# --install-dir / ACQ_INSTALL_DIR can name any directory. So the installer records
+# the exact top-level names it owns in a marker file, overwrites only those names,
+# and refuses any other collision. The marker is written before anything moves, so
+# a failed run leaves a directory the next run can finish.
+OWNED_MARKER=".acq-v1-install"
+cp "$tmpdir/$PROVENANCE_NAME" "$staging/$PROVENANCE_NAME"
+
+# Strip trailing slashes so `[ -L ]` tests the link itself, not its target.
+while :; do
+  case "$INSTALL_DIR" in
+    */) [ "$INSTALL_DIR" = / ] && break; INSTALL_DIR="${INSTALL_DIR%/}" ;;
+    *) break ;;
+  esac
+done
+if [ -L "$INSTALL_DIR" ]; then
+  die "$INSTALL_DIR is a symlink; refusing to install through it (pass --install-dir with a real directory)"
 fi
-mv "$staging" "$INSTALL_DIR"
+if [ -e "$INSTALL_DIR" ] && [ ! -d "$INSTALL_DIR" ]; then
+  die "$INSTALL_DIR exists and is not a directory; move it aside or pass --install-dir"
+fi
+mkdir -p "$INSTALL_DIR"
+marker="$INSTALL_DIR/$OWNED_MARKER"
+was_marked=0
+[ -f "$marker" ] && was_marked=1
+
+# Owned names are the marker's lines after the version header.
+_acq_owned() {
+  [ -f "$marker" ] && tail -n +2 "$marker" | grep -Fxq -- "$1"
+}
+
+for entry in "$staging"/* "$staging"/.[!.]* "$staging"/..?*; do
+  { [ -e "$entry" ] || [ -L "$entry" ]; } || continue
+  name="${entry##*/}"
+  if { [ -e "$INSTALL_DIR/$name" ] || [ -L "$INSTALL_DIR/$name" ]; } && ! _acq_owned "$name"; then
+    die "$INSTALL_DIR already contains '$name', which this installer did not create (not listed in $OWNED_MARKER). Move it aside or pass --install-dir; nothing was changed."
+  fi
+done
+
+# Every release name is now absent or already ours, so recording them as owned is
+# truthful. Keep previously owned names too: leftovers from an older release are
+# still ours to replace later.
+{
+  printf '%s\n' "$VERSION"
+  { [ -f "$marker" ] && tail -n +2 "$marker"; } || :
+  for entry in "$staging"/* "$staging"/.[!.]* "$staging"/..?*; do
+    { [ -e "$entry" ] || [ -L "$entry" ]; } || continue
+    printf '%s\n' "${entry##*/}"
+  done
+} | awk 'NR == 1 || !seen[$0]++' > "$marker.tmp.$$"
+mv "$marker.tmp.$$" "$marker" || die "could not write $marker"
+
+# Move-aside dirs from an earlier failed run hold only replaced acq files, but
+# only trust that in a directory that was already marked before this run.
+if [ "$was_marked" -eq 1 ]; then
+  for stale in "$INSTALL_DIR"/.acq-previous.*; do
+    [ -d "$stale" ] && [ ! -L "$stale" ] && rm -rf "$stale"
+  done
+fi
+
+previous="$INSTALL_DIR/.acq-previous.$$"
+mkdir "$previous" || die "could not create $previous"
+for entry in "$staging"/* "$staging"/.[!.]* "$staging"/..?*; do
+  { [ -e "$entry" ] || [ -L "$entry" ]; } || continue
+  name="${entry##*/}"
+  if [ -e "$INSTALL_DIR/$name" ] || [ -L "$INSTALL_DIR/$name" ]; then
+    mv "$INSTALL_DIR/$name" "$previous/$name" || die "could not move aside $INSTALL_DIR/$name; re-run the installer to finish"
+  fi
+  mv "$entry" "$INSTALL_DIR/$name" || die "could not install $name; re-run the installer to finish"
+done
+# Only owned entries were moved into $previous, so removing it is safe.
+rm -rf "$previous"
 
 # ---------------------------------------------------------------------------
 # Link the launcher onto PATH.

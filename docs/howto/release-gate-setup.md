@@ -118,9 +118,10 @@ Verify: the next release PR shows the token owner as author, and the
 Settings > Branches (or Rules) > the `main` protection rule:
 
 - **Require status checks to pass**, and add **`Tier-3 release gate`**.
-- **Require review from Code Owners** — this is what enforces the `CODEOWNERS` rule
+- **Require review from Code Owners** — this is what enforces the `CODEOWNERS` rules
   on `docs/qualification-ledger.json` (the ledger is self-reported evidence, so its
-  integrity is a review control).
+  integrity is a review control), on `qualification/` (the gate and its rules), and
+  on the two committed oracles.
 
 > Requiring the check before step 2 makes the release PR unmergeable: the check
 > would never report on it.
