@@ -115,6 +115,13 @@ def _run(
         # Mirrors msb._run: a missing or non-executable sbx binary fails closed
         # with a stable code, never a raw OSError traceback.
         raise cli_unavailable() from exc
+    except UnicodeDecodeError as exc:
+        # Mirrors msb._run: output that does not decode is a backend failure.
+        raise SbxError(
+            errors.FAILURE,
+            "the sbx backend CLI printed output that is not text",
+            "check sbx logs and retry",
+        ) from exc
 
 
 def cli_unavailable() -> SbxError:

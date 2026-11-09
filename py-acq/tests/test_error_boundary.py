@@ -269,6 +269,36 @@ def test_passthrough_sbx_honours_bin_seam(monkeypatch, tmp_path, capsys):
     assert seen[-1] == [*sbx.sbx_command(), "echo", "hi"]
 
 
+@pytest.mark.parametrize("backend", ["msb", "sbx"])
+def test_passthrough_with_an_unparseable_bin_override_gives_envelope(monkeypatch, capsys, backend):
+    # Passthrough skips the version floor, so the override is first parsed here:
+    # an unbalanced quote must not escape as shlex's ValueError.
+    monkeypatch.setenv(f"ACQ_{backend.upper()}_BIN", '"/opt/backend --flag')
+    rc, doc, err = _invoke(capsys, "--backend", backend, "--json", "notaverb")
+    assert rc == errors.EXIT_FAILURE
+    assert doc["command"] == "notaverb"
+    assert doc["error"]["code"] == errors.BACKEND_NOT_FOUND
+    assert "Traceback" not in err
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell script as the backend")
+@pytest.mark.parametrize("backend", ["msb", "sbx"])
+def test_backend_output_that_is_not_text_gives_envelope(monkeypatch, tmp_path, capsys, backend):
+    # A listing that does not decode (corrupt output, or UTF-8 read through a
+    # Windows ANSI code page) is a backend failure, not a traceback.
+    binary = tmp_path / "backend"
+    binary.write_text("#!/bin/sh\nprintf '\\377\\376box\\n'\n", encoding="utf-8")
+    binary.chmod(0o755)
+    monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv(f"ACQ_{backend.upper()}_BIN", str(binary))
+    _skip_floor(monkeypatch)
+    rc, doc, err = _invoke(capsys, "--backend", backend, "--json", "ls")
+    assert rc == errors.EXIT_FAILURE
+    assert doc["command"] == "ls"
+    assert doc["error"]["code"] == errors.FAILURE
+    assert "Traceback" not in err
+
+
 # ---------------------------------------------------------------------------
 # Host write failures keep the contract and do not strand a guest.
 # ---------------------------------------------------------------------------

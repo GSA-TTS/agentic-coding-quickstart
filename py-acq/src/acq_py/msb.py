@@ -268,6 +268,15 @@ def _run(
         # uncaught traceback (ADR-0040m stable error vocabulary): fail closed with
         # a code the seam can map, not a raw OSError.
         raise cli_unavailable() from exc
+    except UnicodeDecodeError as exc:
+        # Output is decoded as text, and bytes that do not decode (a corrupt
+        # listing, or UTF-8 read through a Windows ANSI code page) would
+        # otherwise escape as a traceback, even under --json.
+        raise MsbError(
+            errors.FAILURE,
+            "the msb backend CLI printed output that is not text",
+            "check msb logs and retry",
+        ) from exc
 
 
 def cli_unavailable() -> MsbError:
