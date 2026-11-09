@@ -1177,16 +1177,20 @@ class SelectedKit:
 class KitSelection:
     """The ordered kit list.
 
-    ``provider_error`` is set when the provider kit could not be resolved; the
-    list is then built without it, so management verbs still work, and
-    :meth:`require_provider` must stop a create or run (Bash
-    ``ACQ_PROVIDER_SELECTION_ERROR`` / ``_acq_require_provider_selection``).
+    ``provider_error`` is set when the provider kit could not be resolved, and
+    ``extras_error`` when the configured ``extra_kits`` name an unknown kit. The
+    list is then built without that kit or those extras, so the verbs that
+    repair the configuration still work, and :meth:`require` must stop a create
+    or run (Bash ``ACQ_PROVIDER_SELECTION_ERROR`` /
+    ``_acq_require_provider_selection``, and the ``exit 1`` after
+    ``_acq_apply_configured_extra_kits``).
     """
 
     kits: tuple[SelectedKit, ...]
     builtin_support_count: int
     builtin_count: int
     provider_error: str | None
+    extras_error: str | None = None
 
     @property
     def refs(self) -> list[str]:
@@ -1195,6 +1199,15 @@ class KitSelection:
     def require_provider(self) -> None:
         if self.provider_error is not None:
             raise KitSelectionError(f"the configured provider kit could not be resolved: {self.provider_error}")
+
+    def require_extras(self) -> None:
+        if self.extras_error is not None:
+            raise KitSelectionError(self.extras_error)
+
+    def require(self) -> None:
+        """Raise unless every selected kit resolved (what create and run check)."""
+        self.require_extras()
+        self.require_provider()
 
 
 _PROVIDER_KIT_DEFAULT = "agentic-coding-patterns/usai-provider"
@@ -1351,7 +1364,8 @@ def configured_extra_kits(env: Mapping[str, str]) -> list[str]:
     """``_acq_apply_configured_extra_kits`` then the split: ``ACQ_EXTRA_KITS`` wins over config.
 
     The configured value lists catalog kit names only; raw refs belong in
-    ``ACQ_EXTRA_KITS`` or ``--kit``.
+    ``ACQ_EXTRA_KITS`` or ``--kit``. Raises :class:`KitSelectionError` for an
+    unknown name.
     """
     if env.get("ACQ_EXTRA_KITS"):
         return _ifs_split(env["ACQ_EXTRA_KITS"])
@@ -1389,13 +1403,20 @@ def select_kits(
     env: Mapping[str, str] | None = None,
     no_provider_kits: bool = False,
     required_agent_kit: str | None = None,
+    configured_extras: bool = False,
     ready: Callable[[str], bool] = agent_kit_ready,
 ) -> KitSelection:
-    """Build the ordered kit list for a create or run (Bash ``_build_kit_list``).
+    """Build the ordered kit list (Bash ``_build_kit_list``).
 
     ``cli_kits`` are ``--kit`` refs. ``required_agent_kit`` names the agent whose
     kit must apply (the generic default image has no agent binary); it is an
     error when that kit is not ready. Relative local refs become absolute.
+
+    Extras come from ``ACQ_EXTRA_KITS`` only, as in ``_build_kit_list``. Create
+    and run pass ``configured_extras=True`` to fold in config ``extra_kits``
+    first, as Bash does with ``_acq_apply_configured_extra_kits``; an unknown
+    configured name is latched in ``extras_error`` rather than raised, so a
+    caller must call :meth:`KitSelection.require` before building a sandbox.
     """
     env = os.environ if env is None else env
     known = _known_agents()
@@ -1411,9 +1432,15 @@ def select_kits(
             and agent in AGENT_BUNDLE_KITS and ready(agent)):
         selected.append(_kit(builtin_kit_ref(AGENT_BUNDLE_KITS[agent][0]), "agent"))
     builtin_count = len(selected)
-    selected += [_kit(kit_ref_absolute(r), "extra") for r in configured_extra_kits(env)]
+    extras, extras_error = _ifs_split(env.get("ACQ_EXTRA_KITS", "")), None
+    if configured_extras:
+        try:
+            extras = configured_extra_kits(env)
+        except KitSelectionError as exc:
+            extras_error = str(exc)
+    selected += [_kit(kit_ref_absolute(r), "extra") for r in extras]
     selected += [_kit(kit_ref_absolute(r), "cli") for r in cli_kits]
-    return KitSelection(tuple(selected), support_count, builtin_count, provider_error)
+    return KitSelection(tuple(selected), support_count, builtin_count, provider_error, extras_error)
 
 
 def _known_agents() -> frozenset[str]:

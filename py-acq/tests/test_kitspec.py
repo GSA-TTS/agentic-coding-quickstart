@@ -993,14 +993,34 @@ def test_selection_extra_and_cli_kits(tmp_path, monkeypatch):
 
 def test_selection_configured_extra_kits():
     _write_config("extra_kits: openchamber paseo # picked\n")
-    assert kitspec.select_kits(None, env={}).refs[4:] == [REF("openchamber"), REF("paseo")]
+    # Only create and run fold config extras in; _build_kit_list alone does not.
+    assert kitspec.select_kits(None, env={}).refs == SUPPORT
+    sel = kitspec.select_kits(None, env={}, configured_extras=True)
+    assert sel.refs[4:] == [REF("openchamber"), REF("paseo")]
+    assert [k.bundled for k in sel.kits[4:]] == [None, None]
+    sel.require()
     # A non-empty ACQ_EXTRA_KITS wins, even when it is only whitespace.
-    assert kitspec.select_kits(None, env={"ACQ_EXTRA_KITS": "/e"}).refs[4:] == ["/e"]
-    assert kitspec.select_kits(None, env={"ACQ_EXTRA_KITS": "  "}).refs[4:] == []
-    assert kitspec.select_kits(None, env={"ACQ_EXTRA_KITS": ""}).refs[4:] == [REF("openchamber"), REF("paseo")]
+    for value, expected in (("/e", ["/e"]), ("  ", []), ("", [REF("openchamber"), REF("paseo")])):
+        sel = kitspec.select_kits(None, env={"ACQ_EXTRA_KITS": value}, configured_extras=True)
+        assert sel.refs[4:] == expected, value
+
+
+def test_selection_unknown_configured_extra_is_latched():
     _write_config("extra_kits: openchamber git+https://evil/x.git\n")
-    with pytest.raises(kitspec.KitSelectionError, match="unknown kit 'git\\+https://evil/x.git'"):
-        kitspec.select_kits(None, env={})
+    # Verbs other than create and run never read config extras, so they cannot be locked out.
+    plain = kitspec.select_kits(None, env={})
+    assert plain.extras_error is None
+    plain.require()
+    sel = kitspec.select_kits(None, env={}, configured_extras=True)
+    assert sel.refs == SUPPORT
+    assert sel.extras_error is not None and "unknown kit 'git+https://evil/x.git'" in sel.extras_error
+    sel.require_provider()
+    with pytest.raises(kitspec.KitSelectionError, match="unknown kit"):
+        sel.require()
+    with pytest.raises(kitspec.KitSelectionError, match="unknown kit"):
+        sel.require_extras()
+    # ACQ_EXTRA_KITS from the environment means config is not consulted at all.
+    assert kitspec.select_kits(None, env={"ACQ_EXTRA_KITS": "/e"}, configured_extras=True).extras_error is None
 
 
 def test_selection_required_agent_kit():
@@ -1048,7 +1068,9 @@ ACQ_CLI_KITS=("$@")
 if [ -n "${NO_PROVIDER:-}" ]; then ACQ_PROVIDER_KITS=""; ACQ_PROVIDER_KITS_FROM_CLI=1; fi
 if [ -n "${REQUIRED:-}" ]; then ACQ_REQUIRED_AGENT_KIT="$REQUIRED"; fi
 _acq_kit_refs_make_absolute
-_acq_apply_configured_extra_kits 2>/dev/null || { echo ERROR; exit 0; }
+if [ -n "${APPLY:-}" ]; then
+  _acq_apply_configured_extra_kits 2>/dev/null || { echo ERROR; exit 0; }
+fi
 _build_kit_list "$agent" 2>/dev/null || { echo ERROR; exit 0; }
 printf 'K %s\n' "${KITS[@]}"
 printf 'S %s\nB %s\n' "$ACQ_BUILTIN_SUPPORT_KIT_COUNT" "$ACQ_BUILTIN_KIT_COUNT"
@@ -1065,9 +1087,12 @@ _SELECTION_CASES = [
     ("provider-env", "shell", [], {"ACQ_PROVIDER_KITS": "/p1 git+https://x/y.git#ref=a&dir=b"}, None),
     ("no-provider", "shell", [], {"NO_PROVIDER": "1", "ACQ_PROVIDER_KITS": "/p"}, None),
     ("extra-env", "shell", ["c1"], {"ACQ_EXTRA_KITS": "localkit missing git+https://e/x.git#ref=1&dir=d"}, None),
-    ("extra-config", "shell", [], {}, "extra_kits: openchamber paseo # c\n"),
-    ("extra-env-wins", "shell", [], {"ACQ_EXTRA_KITS": "/e"}, "extra_kits: paseo\n"),
-    ("extra-config-unknown", "shell", [], {}, "extra_kits: openchamber nope\n"),
+    ("extra-config", "shell", [], {"APPLY": "1"}, "extra_kits: openchamber paseo # c\n"),
+    ("extra-env-wins", "shell", [], {"APPLY": "1", "ACQ_EXTRA_KITS": "/e"}, "extra_kits: paseo\n"),
+    ("extra-config-unknown", "shell", [], {"APPLY": "1"}, "extra_kits: openchamber nope\n"),
+    # _build_kit_list without _acq_apply_configured_extra_kits ignores config extras.
+    ("extra-config-no-apply", "opencode", [], {}, "extra_kits: openchamber paseo\n"),
+    ("extra-config-unknown-no-apply", "shell", [], {}, "extra_kits: openchamber nope\n"),
     ("provider-short", "shell", [], {}, "provider_kit: usai-provider@agentic-coding-patterns\n"),
     ("provider-full", "shell", [], {}, "provider_kit: github.com/GSA-TTS/agentic-coding-patterns/openchamber\n"),
     ("provider-local", "shell", [], {}, "provider_kit: ./local\n"),
@@ -1103,10 +1128,13 @@ def test_selection_parity_with_bash(tmp_path, monkeypatch, case, agent, cli, ext
     try:
         sel = kitspec.select_kits(
             agent, cli_kits=cli, env=py_env, no_provider_kits=bool(extra_env.get("NO_PROVIDER")),
-            required_agent_kit=extra_env.get("REQUIRED"),
+            required_agent_kit=extra_env.get("REQUIRED"), configured_extras=bool(extra_env.get("APPLY")),
             ready=(lambda a: False) if extra_env.get("BROKEN_AGENT") else kitspec.agent_kit_ready,
         )
     except kitspec.KitSelectionError:
+        assert out == "ERROR\n", case
+        return
+    if sel.extras_error is not None:
         assert out == "ERROR\n", case
         return
     lines = [f"K {str(agent_kit) if r == REF('opencode') else r}" for r in sel.refs]
