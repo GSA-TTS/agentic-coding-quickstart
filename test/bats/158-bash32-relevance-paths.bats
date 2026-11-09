@@ -34,6 +34,14 @@ WORKFLOW_REL='.github/workflows/bash32-compat.yml'
 #   .github/keys/...asc   the key that authenticates the bash 3.2.57 source
 #   release.yml           read by 06-windows-install.bats
 #   bash32-compat.yml     the job itself
+#   scripts/run-vectors test/vectors py-acq/src qualification
+#                         the job runs the vector corpus under bash 3.2
+#                         against the Python CLI (python -m acq_py); the
+#                         qualification vectors load the qualification package
+#   acq-python scripts/gen-install-assets
+#                         POSIX entry points the job parses with --posix -n
+#   test/fixtures         offline installer and kit fixtures read by
+#                         05-install.bats and by the vectors
 REQUIRED_PATHSPECS='
 acq
 acq.backends
@@ -71,6 +79,13 @@ test/vendor
 .github/keys/chet-ramey-bash-release-signing-key.asc
 .github/workflows/release.yml
 .github/workflows/bash32-compat.yml
+scripts/run-vectors
+scripts/gen-install-assets
+test/vectors
+acq-python
+py-acq/src
+qualification
+test/fixtures
 '
 
 # TEMPORARY ALLOWLIST — delete this variable (and the `pending` handling in the
@@ -91,7 +106,24 @@ PENDING_PATHSPECS='
 #   .github (other than the listed)   templates, linters, other workflows
 #   repo metadata / lint config       not read by any @test
 #   other scripts/verify-* and probes live or manual tools, never run by the suite
+#   py-acq/ (except src) installer/
+#                                     Python packaging, pytest suite and installer
+#                                     metadata; the job runs none of them
+#                                     (py-acq/src and qualification are listed)
+#   scripts/qualify-backend-cell scripts/stage-windows-runtime
+#                                     live qualification and release staging tools
 NOT_INPUTS='
+AGENTS.fork.md
+GLOSSARY.md
+installer/
+py-acq/README.md
+py-acq/pyproject.toml
+py-acq/requirements-dev.txt
+py-acq/tests/
+scripts/qualify-backend-cell
+scripts/stage-windows-runtime
+.github/workflows/python-vectors.yml
+.github/workflows/tier3-release-gate.yml
 docs/
 checklists/
 governance/

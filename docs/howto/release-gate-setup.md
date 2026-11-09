@@ -47,10 +47,9 @@ upgrade from one version to the next as always, and somewhere in that sequence t
 default implementation becomes the Python one.
 
 A fork release would be a second, conflicting version line for the same tool. It also
-cannot produce a sane number: the fork has no tags and branched just after upstream
-4.1.1, while upstream has since shipped 4.2.0 and 4.2.1, so release-please on the fork
-walks all of history and proposes a *downgrade* (it proposed `4.0.1` against a manifest
-of `4.1.1`; that PR was closed).
+cannot produce a sane number: the fork carries no release tags, so release-please on
+the fork walks all of history and proposes a *downgrade* (for example, it once proposed
+`4.0.1` against a manifest of `4.1.1`; that PR was closed).
 
 So every job in `release.yml` is gated on the repository variable
 `ENABLE_RELEASES == 'true'`, which is **unset on the fork**. The workflow and the gate
