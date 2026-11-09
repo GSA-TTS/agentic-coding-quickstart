@@ -98,8 +98,13 @@ def run_case(backend, sig):
     env = os.environ.copy()
     for key in ("ACQ_NO_PROGRESS", "ACQ_DEBUG", "SSH_AUTH_SOCK"):
         env.pop(key, None)
+    # Each case owns its state: the cases run concurrently, and the kit caches
+    # would otherwise default to the developer's real XDG cache.
+    provenance = work / "provenance"
     env.update(PATH=f"{work / 'bin'}{os.pathsep}{env['PATH']}", CALLS=str(calls),
-               TMPDIR=str(tmp), ACQ_BACKEND=backend, ACQ_NO_PROMPT="1")
+               TMPDIR=str(tmp), ACQ_BACKEND=backend, ACQ_NO_PROMPT="1",
+               ACQ_PROVENANCE_DIR=str(provenance), ACQ_SBX_KIT_CACHE=str(work / "kits"),
+               ACQ_MSB_KIT_CACHE=str(work / "msb-kits"))
     master, slave = pty.openpty()
     process = subprocess.Popen([shell, str(repo / "acq"), "create", "shell", "--name", name,
                                 str(work / "proj")],
@@ -130,9 +135,9 @@ def run_case(backend, sig):
         expected = (128 + sig,) if sig == signal.SIGINT else (128 + sig, -sig)
         assert rc in expected, (case, "exit status", rc, bytes(output[-600:]))
         until(lambda: not alive(child) and not list(
-            stubdir.glob(f"provenance/provider-input/{backend}/{name}.*.lock")),
+            provenance.glob(f"provider-input/{backend}/{name}.*.lock")),
             master, output, "cleanup after exit", 30)
-        generations = list(stubdir.glob(f"provenance/provider-input/{backend}/{name}.*/generations/*"))
+        generations = list(provenance.glob(f"provider-input/{backend}/{name}.*/generations/*"))
         assert not generations, (case, "generation not discarded", generations)
         log = calls.read_text().splitlines()
         assert "create-blocked" in log, (case, log)
@@ -144,13 +149,15 @@ def run_case(backend, sig):
     except AssertionError as error:
         raise AssertionError(f"{case}: {error!r}") from None
     finally:
-        if process.poll() is None:
+        # The whole session group, always: after a failed assertion the
+        # provisioning subshell, its guardian, the spinner animator or the
+        # blocked create may outlive acq itself.
+        try:
             os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        if process.poll() is None:
             process.wait(timeout=15)
-        if pid_file.is_file():
-            child = int(pid_file.read_text() or 0)
-            if child and alive(child):
-                os.kill(child, signal.SIGKILL)
         os.close(master)
 
 
