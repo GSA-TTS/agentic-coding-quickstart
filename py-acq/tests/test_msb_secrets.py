@@ -751,7 +751,13 @@ def test_binding_host_checks(monkeypatch, tmp_path, capsys):
     assert not msb._binding_ok("API_KEY", "api..example.gov")
     assert not msb._binding_ok("API_KEY", "api.example.gov,")
     assert msb._binding_ok("API_KEY", "api.example.gov:8443,alt.example.gov")
-    secretstore.meta_store("svc", None, "api..example.gov", "API_KEY")
+    # acq refuses to write such a sidecar, but Bash's looser check can: plant one
+    # directly, and msb must still ignore it.
+    with pytest.raises(secretstore.SecretStoreError):
+        secretstore.meta_store("svc", None, "api..example.gov", "API_KEY")
+    meta = secretstore._file_for(secretstore._layout().meta_dir, secretstore.key_for("svc"))
+    meta.parent.mkdir(parents=True, exist_ok=True)
+    meta.write_text("api..example.gov\tAPI_KEY\n", encoding="utf-8")
     assert msb.service_binding("svc") is None
     _set(capsys, monkeypatch, "-g", "svc2", "--host", "API.Example.GOV", "--env", "API_KEY2")
     assert msb.service_binding("svc2") == ("API_KEY2", "api.example.gov")

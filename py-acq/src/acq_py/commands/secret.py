@@ -90,8 +90,11 @@ def _resolve_binding(service: str, hosts: list[str], env: str | None) -> tuple[s
     if not hosts:
         return "", "", f"--env {env} needs --host HOST as well"
     host = ",".join(hosts).lower()  # DNS names are case-insensitive; record one form
-    if any(not part for part in host.split(",")) or secretstore._META_HOST_RE.fullmatch(host) is None:
-        return "", "", f"invalid --host {host!r}: hosts are DNS names, comma-separated"
+    if not secretstore.host_list_ok(host):
+        return "", "", (
+            f"invalid --host {host!r}: hosts are DNS names of two or more labels, comma-separated "
+            "(one leading '*.' wildcard label is allowed; '*', '*.com' and empty labels are not)"
+        )
     env = env or _known_env_for(service)
     if env is None:
         return "", "", f"--host {host} needs --env ENV as well ('{service}' has no env mapping)"

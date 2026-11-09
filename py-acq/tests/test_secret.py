@@ -688,3 +688,32 @@ def test_mintty_stdin_warns_that_input_is_visible_and_reads_one_line(monkeypatch
     assert "Git Bash/mintty" in err and "will be visible" in err
     assert err.endswith("Enter USAi API key: ")
     assert "TYPED-VALUE" not in err
+
+
+@pytest.mark.parametrize("backend", ["sbx", "msb"])
+@pytest.mark.parametrize("host", ["*", "**", "*.com", "_", ".", "a..b", "com", "*.*.example.gov", "api.example.gov."])
+def test_secret_set_refuses_over_broad_or_malformed_hosts(monkeypatch, tmp_path, capsys, backend, host):
+    # A wildcard over everything, a bare TLD (or a wildcard over one) and empty
+    # labels are refused by the shared --host check on both backends, before the
+    # value is stored or any backend is called.
+    if backend == "sbx":
+        _env_sbx(monkeypatch, tmp_path, version="0.51.0")
+    else:
+        _env_msb(monkeypatch, tmp_path)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("HOST-CHECK-VALUE\n"))
+    rc, doc = _invoke(capsys, "--backend", backend, "secret", "set", "-g", "svc", "--host", host, "--env", "SVC_KEY", "--json")
+    assert rc == 1 and doc["error"]["code"] == "validation_failed", host
+    assert "invalid --host" in doc["error"]["message"]
+    assert not _store_dir().exists()
+
+
+def test_host_list_check_and_sidecar_share_one_grammar():
+    from acq_py import secretstore
+
+    for good in ("api.gsa.usai.gov", "*.example.gov", "a_b.example.gov", "x.example.gov,*.y.example.gov"):
+        assert secretstore.host_list_ok(good), good
+    for bad in ("*", "**", "*.com", "_", ".", "a..b", "com", "a.b,", "-a.example.gov", "a.example.gov:443", "*a.b.c"):
+        assert not secretstore.host_list_ok(bad), bad
+        with pytest.raises(secretstore.SecretStoreError) as info:
+            secretstore.meta_store("svc", None, bad, "SVC_KEY")
+        assert info.value.code == "validation_failed"
