@@ -15,7 +15,20 @@ import sys
 import time
 from dataclasses import dataclass
 
-from .. import envelope, errors, kit_msb, kits, kitspec, lock, msb, provider_input, sbx, secretstore, security, state
+from .. import (
+    envelope,
+    errors,
+    kit_msb,
+    kits,
+    kitspec,
+    lock,
+    msb,
+    provider_input,
+    sbx,
+    secretstore,
+    security,
+    state,
+)
 from . import common, session
 
 # Substrate-contract seam (internal test seam, never a secret, never written to
@@ -933,6 +946,11 @@ def run_run(parsed, emit_json: bool, backend: str) -> int:
             f"'{target}' is not a known agent or an existing sandbox",
             emit_json,
         )
+    return _run_by_name(backend, target, emit_json)
+
+
+def _run_by_name(backend: str, target: str, emit_json: bool) -> int:
+    """``run NAME``: re-attach an existing sandbox from its host record."""
     # Re-attach by sandbox name (host-authoritative record supplies agent/workspace).
     # A sandbox whose host record is absent or unreadable must fail closed, never
     # launch a bare `/bin/sh -l` without a workspace.

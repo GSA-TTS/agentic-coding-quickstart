@@ -41,7 +41,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-from . import errors, hostexec, kits, provider_creds, provider_input, secretstore, state, timeouts
+from . import (
+    errors,
+    hostexec,
+    kits,
+    provider_creds,
+    provider_input,
+    secretstore,
+    state,
+    timeouts,
+)
 from .secretstore import Scope
 
 STUB_SENTINEL = "__stub__"

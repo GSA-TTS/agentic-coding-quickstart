@@ -1,12 +1,18 @@
 {
   "schema": 1,
   "id": "cli/security-recreate-yes",
-  "oracle": "ADR-0041m security-exception recreation: explicit consent (--yes) recreates the guest, preserving the host record",
+  "oracle": "ADR-0041m security-exception recreation: explicit consent (--yes) recreates the guest, preserving the host record (a usai key is stored first: the default provider kit is selected, and acq refuses an msb create whose provider has no stored key)",
   "tier": 1,
   "backend": null,
   "platform": "any",
   "invoke": {
-    "argv": ["{acq}", "--backend", "msb", "create", "--recreate", "sec", "--yes", "--json"],
+    "argv": [
+      "{python}",
+      "-I",
+      "test/vectors/drivers/seeded-run.py",
+      "[[[\"--backend\",\"msb\",\"secret\",\"set\",\"-g\",\"usai\"],true,0],[[\"--backend\",\"msb\",\"create\",\"--recreate\",\"sec\",\"--yes\",\"--json\"],false,null]]",
+      "{acq}"
+    ],
     "env": {
       "ACQ_MSB_BIN": "__stub__",
       "ACQ_MSB_VERSION": "0.7.7",
@@ -15,9 +21,27 @@
       "ACQ_STATE_SEED": "{\"msb/sec\":{\"schema\":1,\"name\":\"sec\",\"backend\":\"msb\",\"agent\":\"opencode\",\"workspace\":\"/w\",\"ro_host_config\":true}}",
       "ACQ_SECURITY_MOUNT_STATE": "{\"sec\":\"missing\"}"
     },
-    "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "MSB_HOME", "ACQ_IMAGE", "ACQ_MSB_IMAGE", "ACQ_MSB_STUB_CATALOG", "ACQ_MSB_READY_TIMEOUT", "ACQ_MSB_STUB_FAIL", "ACQ_MSB_STUB_EXEC_EXIT", "ACQ_MSB_STUB_COPY_EXIT", "ACQ_MSB_STUB_EXIT_CODE", "ACQ_MSB_STUB_PORTS", "ACQ_MIGRATION_LOCK_TIMEOUT"],
-    "stdin": "",
-    "timeout_ms": 5000
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "MSB_HOME",
+      "ACQ_IMAGE",
+      "ACQ_MSB_IMAGE",
+      "ACQ_MSB_STUB_CATALOG",
+      "ACQ_MSB_READY_TIMEOUT",
+      "ACQ_MSB_STUB_FAIL",
+      "ACQ_MSB_STUB_EXEC_EXIT",
+      "ACQ_MSB_STUB_COPY_EXIT",
+      "ACQ_MSB_STUB_EXIT_CODE",
+      "ACQ_MSB_STUB_PORTS",
+      "ACQ_MIGRATION_LOCK_TIMEOUT",
+      "USAI_API_KEY",
+      "ACQ_PROVIDER_CREDENTIAL_BINDINGS",
+      "ACQ_PROVIDER_CREDENTIAL_SEED",
+      "ACQ_MSB_STUB_PROBE"
+    ],
+    "stdin": "vector-usai-sentinel-2a4e",
+    "timeout_ms": 15000
   },
   "expect": {
     "exit": 0,
@@ -26,15 +50,31 @@
       "value": {
         "schema_version": 1,
         "command": "create",
-        "data": {"name": "sec", "backend": "msb", "state": "running", "recreated": true}
+        "data": {
+          "name": "sec",
+          "backend": "msb",
+          "state": "running",
+          "recreated": true
+        }
       },
       "normalize": []
     },
-    "stderr": {"mode": "exact", "value": "", "normalize": []}
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
   },
   "isolation": {
     "offline": true,
     "ssh_stubs": false,
-    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "ACQ_SECRET_STORE_DIR"]
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME",
+      "ACQ_SECRET_STORE_DIR"
+    ]
   }
 }

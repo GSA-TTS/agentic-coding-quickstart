@@ -26,6 +26,9 @@ inspect reports as writable, and ``ACQ_MSB_STUB_RO_WRITABLE`` names sandboxes
 whose guest write probe (an ``exec`` whose command mentions ``.acq-ro-probe``)
 reports the read-only mount writable (exit 2). ``ACQ_MSB_STUB_NO_AGENT_USER``
 names sandboxes whose image has no ``agent`` user: ``exec -u agent`` fails there.
+``ACQ_MSB_STUB_PROBE`` answers acq's in-guest provider key probe (an ``exec``
+whose command carries curl's ``%{http_code}``): ``<code>|<curl exit>``, default
+``200|0``.
 
 ``modify`` models the conservative reading of msb's "add or rotate": ``--secret
 ENV@HOST`` for a variable already bound to the SAME hosts rotates it, but one
@@ -209,6 +212,15 @@ def _apply_secrets(args: list[str], bindings: dict) -> str | None:
     return None
 
 
+def _answer_probe() -> int:
+    """acq's in-guest provider key probe: curl's status code, then ``|<curl exit>``.
+
+    Answered from ``ACQ_MSB_STUB_PROBE`` (default ``200|0``); never a network call.
+    """
+    print(os.environ.get(PROBE_ENV, "200|0"))
+    return 0
+
+
 def _arg_after(args: list[str], flag: str) -> str | None:
     for i, a in enumerate(args):
         if a == flag and i + 1 < len(args):
@@ -341,10 +353,7 @@ def main(argv: list[str]) -> int:
             print("msb: unable to find user agent", file=sys.stderr)
             return 1
         if any("%{http_code}" in token for token in command):
-            # acq's provider key probe (curl's status line then "|<curl exit>"):
-            # answered from ``ACQ_MSB_STUB_PROBE`` (default "200|0"), never a network call.
-            print(os.environ.get(PROBE_ENV, "200|0"))
-            return 0
+            return _answer_probe()
         marker = EXEC_MARKER
         if command:
             marker += " " + " ".join(command)

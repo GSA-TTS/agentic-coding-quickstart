@@ -497,7 +497,6 @@ def materialize(manifest: dict, kit_root: Path, target_root: Path) -> None:
     target.mkdir(mode=0o755)
     _copy_out(read_member(kit_root, manifest["factsPath"]), target / "facts.json", 0o444)
     _copy_out(read_member(kit_root, manifest["snapshotPath"]), target / "snapshot.json", 0o444)
-    os.chmod(target, 0o555)
 
 
 def prepare(backend: str, name: str, selected: list[tuple[str, dict, Facts]], bundle_dir: Path | None = None) -> Path:
@@ -511,7 +510,7 @@ def prepare(backend: str, name: str, selected: list[tuple[str, dict, Facts]], bu
     _safe_dir(root / "generations")
     generation = Path(tempfile.mkdtemp(prefix="generation.", dir=root / "generations"))
     try:
-        os.chmod(generation, 0o755)
+        os.chmod(generation, 0o755)  # nosec B103 # a directory the guest reads, through a read-only mount
         providers = generation / "models" / "providers"
         providers.mkdir(parents=True, mode=0o755)
         for kit, manifest, _facts in selected:
@@ -526,16 +525,15 @@ def prepare(backend: str, name: str, selected: list[tuple[str, dict, Facts]], bu
 
 
 def _make_read_only(generation: Path) -> None:
-    for dirpath, dirnames, filenames in os.walk(generation, topdown=False, followlinks=False):
+    """Every file read-only. Directories stay owner-writable so the owner can
+    remove an old generation; the guest is held off by the read-only mount."""
+    for dirpath, _dirnames, filenames in os.walk(generation, followlinks=False):
         for entry in filenames:
             os.chmod(Path(dirpath) / entry, 0o444)
-        for entry in dirnames:
-            os.chmod(Path(dirpath) / entry, 0o555)
-    os.chmod(generation, 0o555)
 
 
 def publish(backend: str, name: str, generation: Path) -> None:
-    """Make ``generation`` read-only and point ``current`` at it (atomic rename).
+    """Make ``generation``'s files read-only and point ``current`` at it (atomic rename).
 
     Earlier generations are kept: a sandbox created by an older acq may still
     mount ``current``. Raises ``OSError``.
@@ -663,11 +661,13 @@ def check_keys(name: str, facts: Iterable[Facts], run_probe: Callable[[list[str]
     """Probe each provider's key from inside sandbox ``name``; raises on the first failure.
 
     429 and 5xx are transient: a warning, not a refusal. A host service is
-    never probed.
+    never probed, and facts that no longer match the provider's pin (a
+    tampered record, or a pin changed since create) are refused unprobed.
     """
     for f in facts:
         if f.provider in HOST_SERVICES:
             continue
+        check_pin(f)
         status = classify(run_probe(probe_argv(f)))
         problem = _status_error(name, f, status)
         if problem is not None:
