@@ -73,6 +73,23 @@ def isolate_user_dirs(tmp_path_factory, monkeypatch):
     return root
 
 
+# A throwaway usai key (never a real credential). msb binds provider keys only
+# at create, so acq refuses to create a sandbox whose selected provider has no
+# stored key (the pre-create credential gate). A test module that creates msb
+# sandboxes marks itself ``provider_key`` to get one in the throwaway store.
+TEST_USAI_KEY = "test-usai-key-not-a-secret"
+
+
+@pytest.fixture(autouse=True)
+def provider_key(request, isolate_user_dirs):
+    if request.node.get_closest_marker("provider_key") is None:
+        return None
+    from acq_py import secretstore
+
+    secretstore.set_secret("usai", None, TEST_USAI_KEY)
+    return TEST_USAI_KEY
+
+
 @pytest.fixture(scope="session")
 def vectors_dir() -> Path:
     return VECTORS_DIR

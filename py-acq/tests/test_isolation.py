@@ -51,7 +51,8 @@ def test_state_touching_command_writes_only_under_the_test_tree(tmp_path, acq_cm
     ws = tmp_path / "workspace"
     ws.mkdir()
     env = dict(os.environ, ACQ_MSB_BIN="__stub__", ACQ_MSB_VERSION="0.7.7",
-               ACQ_MSB_INSTALLED="1", ACQ_SBX_INSTALLED="0", MSB_HOME=str(tmp_path / "msb-home"))
+               ACQ_MSB_INSTALLED="1", ACQ_SBX_INSTALLED="0", MSB_HOME=str(tmp_path / "msb-home"),
+               ACQ_PROVIDER_KITS="")  # no provider kit, so no stored key is needed
     proc = subprocess.run(acq_cmd + ["--backend", "msb", "create", "shell", str(ws), "--name", "iso", "--json"],
                           env=env, capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stdout + proc.stderr

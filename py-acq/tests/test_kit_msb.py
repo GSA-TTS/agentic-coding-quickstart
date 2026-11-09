@@ -21,6 +21,8 @@ import pytest
 
 from acq_py import cli, errors, kit_msb, kits, kitspec, msb, security, state
 
+pytestmark = pytest.mark.provider_key  # creates msb sandboxes: needs a stored provider key
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BASH = shutil.which("bash")
 BUILTINS = ["zscaler-ca-certificate", "usai-provider", "agentic-coding-playbook", "git-ssh-sign"]

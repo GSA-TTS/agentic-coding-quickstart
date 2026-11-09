@@ -528,6 +528,14 @@
     {
       "contract": "Bash parity for sandbox names and workspace paths: an explicit --name must match [A-Za-z0-9_-] without a leading '-'; a name given to a verb that acts on an existing sandbox must not be empty, '.' or '..', or contain '/', '\\' or control characters; a workspace path containing ':' (outside a Windows drive designator) or a control character is refused before it is checked for existence",
       "vectors": ["cli/name-create-invalid", "cli/name-form-stop-refused", "cli/workspace-colon-refused"]
+    },
+    {
+      "contract": "Provider-credential pins are enforced: a selected provider kit whose facts name a host (or key variable) other than the provider's pin is refused before create (Bash _acq_provider_credentials_gate_trust)",
+      "vectors": ["cli/create-provider-pin-mismatch-refused"]
+    },
+    {
+      "contract": "Pre-create provider credential gate (Bash acq_provider_credentials_gate): a selected provider with no stored key fails closed without a terminal (on a terminal acq asks and stores it)",
+      "vectors": ["cli/run-missing-key-noninteractive"]
     }
   ]
 }

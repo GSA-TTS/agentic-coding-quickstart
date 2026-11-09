@@ -104,6 +104,8 @@ class FakeBackend:
         return self.state_dir / "provenance" / self.backend / f"{self.names.sandbox}.abc123.config"
 
     def secret(self, verb):
+        if verb[1:4] == ["set", "-g", "usai"] and "--host" not in verb:
+            return self.done(0)  # the throwaway key the msb create gate needs (a built-in provider)
         if verb[1] == "set":
             # Both backends bind a non-built-in service only with --host/--env (AGENTS.md).
             if "--host" not in verb or "--env" not in verb:
@@ -227,7 +229,7 @@ def test_a_compliant_backend_passes(tmp_path, backend, capsys):
         assert raw.removed == ["sbx-cs-ours"]  # never the operator's KEY or OPENCODE_GO_API_KEY secret
     else:
         assert raw.msb_removed == [c.names.canary_sandbox]  # in case the canary was killed before cleanup
-    secret_set = next(call for call in fake.calls if call[2:4] == ["secret", "set"])
+    secret_set = next(call for call in fake.calls if call[2:4] == ["secret", "set"] and "--host" in call)
     assert secret_set[secret_set.index("--host") + 1] == "qualify.invalid"
     assert secret_set[secret_set.index("--env") + 1] == c.names.secret_env
 

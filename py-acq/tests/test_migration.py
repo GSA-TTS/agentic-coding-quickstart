@@ -20,6 +20,8 @@ import pytest
 
 from acq_py import cli, config, errors, lock, migration, security, state
 
+pytestmark = pytest.mark.provider_key  # creates msb sandboxes: needs a stored provider key
+
 
 def _env(monkeypatch, tmp_path, *, catalog=None):
     monkeypatch.setenv("ACQ_MSB_BIN", "__stub__")

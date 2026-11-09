@@ -23,6 +23,8 @@ import pytest
 from acq_py import backends, cli, errors, hostexec, lock, migration, msb, sbx, state
 from acq_py.commands import lifecycle
 
+pytestmark = pytest.mark.provider_key  # creates msb sandboxes: needs a stored provider key
+
 MISSING_BIN = "/nonexistent/acq-test/backend"
 
 

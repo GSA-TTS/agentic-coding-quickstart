@@ -473,6 +473,12 @@ class Cell:
         self.bound = proc is not None and proc.returncode == 0
         if self.check("provider-credential set", proc):
             self.check("provider-credential ls", self.call(self._b("provider-credential", "ls", "--json")))
+        if self.backend == "msb":
+            # The default usai provider kit is selected, and acq refuses an msb
+            # create whose provider has no stored key (msb binds keys only at
+            # create). The throwaway value lives in this run's isolated store.
+            self.check("secret set usai", self.call(self._b("secret", "set", "-g", "usai", "--json"),
+                                                    stdin=n.value + "\n"))
 
     def boot(self) -> bool:
         """oracle 3: create/ls/exec. Returns False (and stops the run) on any failure."""

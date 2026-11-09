@@ -34,6 +34,8 @@ import pytest
 from acq_py import cli, errors, kit_msb, kits, lock, msb, security, state
 from acq_py.commands import common
 
+pytestmark = pytest.mark.provider_key  # creates msb sandboxes: needs a stored provider key
+
 _INSTALL = ["sh", "/home/agent/opencode-install.sh"]
 # A token only the bundled opencode kit's install command carries.
 _INSTALL_MARK = "OPENCODE_SHA256_LINUX_X64="

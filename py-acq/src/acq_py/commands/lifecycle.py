@@ -15,7 +15,7 @@ import sys
 import time
 from dataclasses import dataclass
 
-from .. import envelope, errors, kit_msb, kits, kitspec, lock, msb, sbx, security, state
+from .. import envelope, errors, kit_msb, kits, kitspec, lock, msb, provider_input, sbx, secretstore, security, state
 from . import common, session
 
 # Substrate-contract seam (internal test seam, never a secret, never written to
@@ -322,6 +322,7 @@ def _clear_host_records(backend: str, name: str) -> None:
         msb.held_forget(name)
         kit_msb.remove_host_config(name)
         kit_msb.cli_kits_remove(name)
+        provider_input.remove(backend, name)
 
 
 def _has_host_records(backend: str, name: str) -> bool:
@@ -464,22 +465,108 @@ def _write_record(backend: str, name: str, *, agent: str, workspace: str, image:
 
 
 def _msb_create(name: str, image: str, workspace: str, kit_set: list[kit_msb.Kit], *, ro_mount: bool) -> list[str]:
-    """``msb create`` with the kit set's flags; the staged startup script is removed after."""
+    """``msb create`` with the kit set's flags; the staged startup script is removed after.
+
+    The provider credential gate runs first (msb binds credentials only at
+    create), then the provider-input generation is staged and mounted
+    read-only; it is published only once the create succeeded.
+    """
+    generation = _provider_prepare(name, kit_set, ro_mount=ro_mount)
     try:
         flags, staged = kit_msb.create_flags(name, kit_set, ro_mount=ro_mount)
     except OSError as exc:
+        _provider_abandon(name, generation)
         raise msb.MsbError(
             errors.FAILURE,
             f"could not prepare the host-config directory for sandbox '{name}': {exc.strerror or exc}",
             "check that the acq state directory is writable and has free space, then retry",
         ) from exc
+    if generation is not None:
+        flags += provider_input.msb_flags(generation)
     try:
-        return msb.create(
+        bindings = msb.create(
             name, image, workspace, memory=msb.DEFAULT_MEMORY, cpus=msb.DEFAULT_CPUS,
             egress_kits=kit_msb.egress_names(kit_set), kit_flags=flags,
         ) or []
+    except BaseException:
+        _provider_abandon(name, generation)
+        raise
     finally:
         kit_msb.discard_staged(staged)
+    _provider_publish(name, generation)
+    return bindings
+
+
+def _ask_store(adapter) -> object:
+    """The gate's terminal prompt: ask, then read the key with echo off and store it globally."""
+    def ask(facts: provider_input.Facts) -> bool:
+        print(f"\nStore a credential for provider '{facts.provider}'?\n  env var:  ${facts.key_env}\n"
+              f"  sends to: {facts.host}\nStore it now? [y/N] ", end="", file=sys.stderr, flush=True)
+        if sys.stdin.readline().strip().lower() not in ("y", "yes"):
+            print(f"Skipping. Aborting; re-run when the '{facts.provider}' key is set.", file=sys.stderr)
+            return False
+        value = common._read_secret_tty(f"Enter the {facts.provider} key: ")
+        try:
+            if not value.strip() or secretstore.value_problem(value) is not None:
+                return False
+            adapter.secret_set(secretstore.GLOBAL, facts.provider, value)
+        finally:
+            value = ""
+        return True
+
+    return ask
+
+
+def _provider_prepare(name: str, kit_set: list[kit_msb.Kit], *, ro_mount: bool):
+    """Gate the selected providers' pins and keys, then stage and record their input.
+
+    Returns the unpublished generation to mount, or None when msb cannot mount
+    it read-only (Windows): the facts are still recorded, but OpenCode's
+    renderer then leaves its config untouched. Raises :class:`msb.MsbError`.
+    """
+    scope = secretstore.sandbox_scope(name)
+    try:
+        selected = provider_input.selected_facts(k.name for k in kit_set)
+        facts = [f for _kit, _manifest, f in selected]
+        provider_input.gate(
+            facts, has_key=lambda provider: msb.secret_has(scope, provider),
+            ask_store=_ask_store(msb) if common._stdin_is_terminal() else None,  # type: ignore[arg-type]
+        )
+        provider_input.record_write("msb", name, facts)
+        if not ro_mount:
+            if facts:
+                print("acq: warning: provider input is not mounted without the read-only host-config mount; "
+                      "OpenCode keeps its existing provider config", file=sys.stderr)
+            return None
+        return provider_input.prepare("msb", name, selected)
+    except provider_input.ProviderInputError as exc:
+        raise msb.MsbError(exc.code, exc.message, exc.remediation) from exc
+    except OSError as exc:
+        raise msb.MsbError(
+            errors.FAILURE, f"could not record the provider facts of sandbox '{name}': {exc.strerror or exc}",
+            "check that the acq state directory is writable and has free space, then retry",
+        ) from exc
+
+
+def _provider_abandon(name: str, generation) -> None:
+    """Undo :func:`_provider_prepare` after a failed create (best-effort)."""
+    if generation is not None:
+        provider_input.discard(generation)
+    try:
+        provider_input.record_write("msb", name, [])
+    except OSError:
+        pass
+
+
+def _provider_publish(name: str, generation) -> None:
+    if generation is None:
+        return
+    try:
+        provider_input.publish("msb", name, generation)
+    except OSError:
+        # The guest mounts the exact generation, so it is unaffected; only an
+        # older acq reading `current` misses it.
+        print(f"acq: warning: could not publish the provider input of sandbox '{name}'", file=sys.stderr)
 
 
 def _confirm_ro_mount(adapter, name: str) -> None:
@@ -827,6 +914,9 @@ def run_run(parsed, emit_json: bool, backend: str) -> int:
             return _lock_failure("run", name, exc, emit_json)
         if data is None:
             return exit_code if exit_code is not None else errors.EXIT_FAILURE
+        exit_code = _attach_key_check(backend, name, emit_json)
+        if exit_code is not None:
+            return exit_code
         if emit_json:
             print(json.dumps(envelope.success("run", data)))
         # Launch in the foreground; the child's status is `run`'s exit status. In
@@ -867,6 +957,9 @@ def run_run(parsed, emit_json: bool, backend: str) -> int:
     gate = common._trusted_gate(record, backend, "run", target, emit_json)
     if gate is not None:
         return gate
+    exit_code = _attach_key_check(backend, target, emit_json)
+    if exit_code is not None:
+        return exit_code
     agent = record.get("agent")
     workspace = record.get("workspace")
     if emit_json:
@@ -879,6 +972,30 @@ def run_run(parsed, emit_json: bool, backend: str) -> int:
             )
         )
     return _launch_after_envelope(backend, target, workspace, common._launch_token(backend, target, agent), emit_json)
+
+
+def _attach_key_check(backend: str, name: str, emit_json: bool) -> int | None:
+    """Validate the sandbox's provider keys before an attach (Bash ``ensure_valid_provider_keys``).
+
+    Each provider its recorded facts name is probed from inside the guest
+    against its own models URL. A rejected key fails with
+    ``provider_auth_failed``, an unreachable endpoint (or no verdict at all)
+    with ``provider_unreachable``: attaching with an unverified credential is
+    how a dead key reaches the agent. A backend with no in-guest probe, or a
+    sandbox with no recorded facts, has nothing to check.
+    """
+    probe = getattr(common._adapter(backend), "guest_output", None)
+    if probe is None:
+        return None
+    try:
+        facts = provider_input.recorded(backend, name)
+        provider_input.check_keys(name, facts, lambda argv: probe(name, argv),
+                                  lambda message: print(f"acq: warning: {message}", file=sys.stderr))
+    except provider_input.ProviderInputError as exc:
+        return common._operational_failure("run", exc.code, exc.message, exc.remediation, emit_json)
+    except common._ADAPTER_ERRORS as exc:
+        return common._operational_failure("run", exc.code, exc.message, exc.remediation, emit_json)
+    return None
 
 
 def _launch_after_envelope(backend: str, name: str, workspace: str | None, token: str | None, emit_json: bool) -> int:
