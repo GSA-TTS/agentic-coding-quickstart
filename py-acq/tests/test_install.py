@@ -8,8 +8,11 @@ fail-closed checksum / dry-run / consent behavior and the user-scope
 They are Tier-2 implementation detail (ADR-0039m): contract evidence is the
 language-neutral ``installer/*`` vectors under ``test/vectors/installer``, run by
 both the pytest and Bash runners — never these tests. They are skipped on hosts
-without a POSIX shell/toolchain (e.g. Windows), where the Windows installer
-(``install.ps1``) is covered by the bats suite instead.
+without a POSIX shell/toolchain. On Windows, where Git Bash supplies one,
+install.sh refuses the host as an unsupported platform, so the tests that need a
+supported platform are skipped there too: the Windows installer
+(``install.ps1``) has its own -DryRun smoke step in .github/workflows/windows.yml
+and source checks in the bats suite.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 from pathlib import Path
 
@@ -37,6 +41,13 @@ def _have_tools() -> bool:
 
 
 pytestmark = pytest.mark.skipif(not _have_tools(), reason="POSIX shell/toolchain unavailable")
+
+# install.sh supports macOS and Linux only and refuses a Git Bash (MINGW) host,
+# so a test that needs it to reach the install path cannot run on Windows.
+supported_platform_only = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="install.sh refuses Windows hosts; install.ps1 is the Windows installer",
+)
 
 
 # The archive's enumerated components (ADR-0042m), keyed by the name the installer
@@ -176,6 +187,7 @@ def test_unknown_option_is_a_usage_error(tmp_path):
     assert "unknown option" in proc.stderr.decode()
 
 
+@supported_platform_only
 def test_channel_python_dry_run_surfaces_channel(tmp_path):
     # ADR-0047m: --channel python is the only (and default) channel; it parses,
     # surfaces the channel in the plan, and installs exactly what the no-flag
@@ -191,6 +203,7 @@ def test_channel_unknown_is_a_usage_error(tmp_path):
     assert "unknown channel" in proc.stderr.decode()
 
 
+@supported_platform_only
 def test_channel_python_offline_install_succeeds(tmp_path):
     release = _make_release(tmp_path)
     proc = _run_installer(tmp_path, "--source", str(release), "--channel", "python", "--yes")
@@ -202,6 +215,7 @@ def test_channel_python_offline_install_succeeds(tmp_path):
     assert (_bin_dir(tmp_path) / "acq-python").is_symlink()
 
 
+@supported_platform_only
 def test_dry_run_performs_no_writes(tmp_path):
     proc = _run_installer(tmp_path, "--dry-run")
     assert proc.returncode == 0
@@ -211,6 +225,7 @@ def test_dry_run_performs_no_writes(tmp_path):
     assert not _bin_dir(tmp_path).exists()
 
 
+@supported_platform_only
 def test_offline_install_succeeds(tmp_path):
     release = _make_release(tmp_path)
     proc = _run_installer(tmp_path, "--source", str(release), "--yes")
@@ -228,6 +243,7 @@ def test_offline_install_succeeds(tmp_path):
     assert (_bin_dir(tmp_path) / "acq").resolve() != (_bin_dir(tmp_path) / "acq-python").resolve()
 
 
+@supported_platform_only
 def test_checksum_mismatch_fails_closed(tmp_path):
     release = _make_release(tmp_path, bad=True)
     proc = _run_installer(tmp_path, "--source", str(release), "--yes")
@@ -236,6 +252,7 @@ def test_checksum_mismatch_fails_closed(tmp_path):
     assert not _install_dir(tmp_path).exists()
 
 
+@supported_platform_only
 def test_missing_checksum_entry_fails_closed(tmp_path):
     release = _make_release(tmp_path, drop_entry=True)
     proc = _run_installer(tmp_path, "--source", str(release), "--yes")
@@ -244,6 +261,7 @@ def test_missing_checksum_entry_fails_closed(tmp_path):
     assert not _install_dir(tmp_path).exists()
 
 
+@supported_platform_only
 @pytest.mark.parametrize(
     "omit,needle",
     [
@@ -264,6 +282,7 @@ def test_missing_component_fails_closed(tmp_path, omit, needle):
     assert not _install_dir(tmp_path).exists()
 
 
+@supported_platform_only
 def test_missing_provenance_fails_closed(tmp_path):
     release = _make_release(tmp_path)
     (release / "provenance.json").unlink()
@@ -273,6 +292,7 @@ def test_missing_provenance_fails_closed(tmp_path):
     assert not _install_dir(tmp_path).exists()
 
 
+@supported_platform_only
 def test_consent_is_not_inferred_when_noninteractive(tmp_path):
     release = _make_release(tmp_path)
     # No --yes and a non-interactive stdin: consent must decline (fail closed).
