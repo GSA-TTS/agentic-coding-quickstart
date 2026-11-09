@@ -29,10 +29,16 @@ command -v python3 >/dev/null 2>&1 || die "python3 is required"
 # provenance manifest plus every platform archive. The manifest is the durable
 # home of the asset set; this script derives its file list from it so the two
 # cannot drift.
+#
+# The list is written as bytes with LF separators. Windows Python's text-mode
+# stdout would end every line with CRLF, and $(...) strips only the trailing
+# newline, so under Git Bash every name but the last kept a stray CR and failed
+# the completeness check below.
 assets="$(python3 -c '
-import json
+import json, sys
 a = json.load(open("installer/assets.json", encoding="utf-8"))
-print("\n".join([a["provenance"]] + sorted(p["archive"] for p in a["platforms"].values())))
+names = [a["provenance"]] + sorted(p["archive"] for p in a["platforms"].values())
+sys.stdout.buffer.write(("\n".join(names) + "\n").encode("ascii"))
 ')"
 
 [ -n "$assets" ] || die "no assets enumerated in installer/assets.json"
