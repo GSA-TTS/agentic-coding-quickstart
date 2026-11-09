@@ -737,7 +737,7 @@ def _dispatch(parser: _Parser, parsed, emit_json: bool, backend_override: str | 
         # contract commands (ADR-0044m).
         from . import version_info
 
-        return version_info.run_version(emit_json)
+        return version_info.run_version(emit_json, backend_override)
 
     if parsed.command == "backend":
         if backend_override is not None and backend_override not in backends.BACKENDS:

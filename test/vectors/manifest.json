@@ -10,6 +10,7 @@
     "msb kit application (contract change): cli/kit-update-yes now expects the in-place reapply (status current, action refreshed) instead of consent recorded with the reapply deferred, and cli/run-inference-ignores-team-kits passes a bundled kit ref in ACQ_EXTRA_KITS, because unbundled extra kits are now refused rather than ignored (cli/run-extra-kit-unfetchable-refused covers that refusal). ACQ_SECURITY_MOUNT_STATE is honoured only with the stub backend; without it the gate runs the real msb inspect plus guest probe against the stub, which records each create's mounts. cli/configure-json-layers now reports extra_kits and provider_kit as honoured by Python, which reads them at create, with python_applies: bundled-only because it applies only kits from its built-in bundle. cli/security-gate-real-probe and cli/security-gate-real-probe-writable are scoped to linux (the schema has no posix value) because Windows never requests the read-only mount (KNOWN_FAILURE_MODES 54); cli/security-recreate-then-run is scoped to linux too, because ACQ_STATE_SEED re-seeds the ro_host_config record on every call, which no Windows recreate can clear; cli/security-recreate-windows covers Windows (recreate rebuilds without claiming the mount) and cli/security-recreate-yes runs everywhere.",
     "usai key rotation (contract change): cli/usai-rotate-ok and cli/usai-rotate-sbx expected unsupported_capability; they now run rotation through test/vectors/drivers/seeded-run.py (so the driver fails them if the key appears in any output) and assert the per-backend re-feed. cli/usai-rotate-unreachable and cli/usai-rotate-auth-failed were renamed cli/usai-rotate-sbx-partial and cli/usai-rotate-msb-partial: rotation never calls the provider (the provider_unreachable / provider_auth_failed codes belong to the attach-time key check), so they now cover a partial re-feed that exits 1 naming the sandbox and the retry that fixes it, using the driver's env step to clear the stub failure knob between the two calls.",
     "config.yaml settings read by Python (contract change): cli/configure-json-layers now reports scope_github_token as honoured by Python (honoured_by_python: true), because create and run use it as the default answer to the per-sandbox GitHub-token prompt; that prompt is interactive, so its evidence is Tier-2 (py-acq/tests/test_create_config_settings.py). create and run gained --no-provider-kits (cli/create-no-provider-kits). Because create and run now note a workspace's GitHub repositories on stderr, every create or run vector that asserts an exact stderr and used the runner's working directory (the acq checkout, itself a GitHub repository) as its workspace now gets an empty workspace from test/vectors/drivers/seeded-run.py ({\"git_repos\": {}}): cli/create-msb-binds-usai, cli/create-no-provider-kits, cli/create-provider-pin-mismatch-refused, cli/lifecycle-create, cli/lifecycle-create-backend-failure, cli/lifecycle-create-config-sbx, cli/lifecycle-sbx-create, cli/run-missing-key-noninteractive, cli/security-gate-real-probe and cli/security-gate-real-probe-writable; their oracles are unchanged.",
+    "version identity (contract change): cli/version-json expected kit_control_plane_ref null; it now expects the pinned control-plane commit, and it and cli/version-human mark both backends uninstalled, because version now reports the resolved active backend and its detected version, which would otherwise depend on what the host has installed. cli/version-json-backend covers a resolved backend.",
     "Legacy-suite retirement classification: docs/test-retirement-inventory.md buckets every test/bats file as preserve/re-express/retire and records gaps G1-G19. This manifest maps only the preserve-tier contract rows to vectors; the inventory is the authoritative cross-reference from legacy tests to vectors and DROP rows."
   ],
   "rows": [
@@ -31,7 +32,7 @@
     },
     {
       "contract": "ADR-0038m §2 version required result data fields",
-      "vectors": ["cli/version-json"]
+      "vectors": ["cli/version-json", "cli/version-json-backend"]
     },
     {
       "contract": "ADR-0038m §2 backend list required data: active backend and installed/name/version records",
@@ -80,6 +81,10 @@
     {
       "contract": "ADR-0038m §2 ls required data: sandboxes with name/backend/state",
       "vectors": ["cli/lifecycle-ls"]
+    },
+    {
+      "contract": "ADR-0038m §48 drop inspection-failure-as-empty: ls fails closed (failure) when the backend listing exits non-zero, never 'no sandboxes' (msb and sbx)",
+      "vectors": ["cli/ls-list-failure-msb", "cli/ls-list-failure-sbx"]
     },
     {
       "contract": "ADR-0041m forward migration of existing installs: the generation-2 step imports a sandbox the Bash acq created (provenance/<backend>/<name>.<cksum>.env) so it is listed and re-attachable instead of orphaned",

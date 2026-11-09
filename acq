@@ -859,6 +859,15 @@ unset _acq_impl
 # the dead owner's PID before the next tick (its PIDs only wrap after a long
 # run), the guardian and its private root would stay until that process exits.
 # That is a leak only: the guardian never signals anything based on the owner.
+# A parent lookup that fails skips only the parent comparison for that tick; the
+# kill -0 check on the owner still runs, so a lookup that keeps failing cannot
+# keep the guardian alive after an owner killed by SIGKILL (which runs no EXIT
+# trap). Without this, one failed lookup ended the guardian and deleted the root
+# while acq was still using it. procps ps installs its own SIGTERM handler even
+# when SIGTERM is inherited as ignored, so a SIGTERM sent to acq's whole process
+# group can kill the lookup; the subshell running it then reports `Terminated`.
+# The guardian never needs to print, so its stderr goes to /dev/null and that
+# report never reaches acq's stderr.
 _acq_kit_fetch_cleanup() {
   if [ -n "${_ACQ_KIT_FETCH_GUARDIAN:-}" ]; then
     kill -USR1 "$_ACQ_KIT_FETCH_GUARDIAN" 2>/dev/null || true
@@ -910,15 +919,16 @@ _acq_kit_fetch_start() {
       trap "exit 0" USR1
       : > "$root/ready" || exit 1
       while [ -d "$root" ]; do
-        parent=$(proc_info "$$") || exit 1
-        [ "$(printf "%s" "$parent" | tr -d "[:space:]")" = "$owner" ] || exit 0
+        if parent=$(proc_info "$$"); then
+          [ "$(printf "%s" "$parent" | tr -d "[:space:]")" = "$owner" ] || exit 0
+        fi
         kill -0 "$owner" 2>/dev/null || exit 0
         sleep 1 & tick=$!
         wait "$tick" || :
         tick=""
       done
     ' sh "$$" "$_ACQ_KIT_FETCH_ROOT"
-  ) </dev/null >/dev/null &
+  ) </dev/null >/dev/null 2>&1 &
   _ACQ_KIT_FETCH_GUARDIAN=$!
   while [ ! -f "$_ACQ_KIT_FETCH_ROOT/ready" ]; do
     kill -0 "$_ACQ_KIT_FETCH_GUARDIAN" 2>/dev/null || exit 1

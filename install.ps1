@@ -47,7 +47,8 @@ Usage:
                 [-Channel <name>] [-DryRun] [-Yes] [-Help]
 
 Options:
-  -InstallDir <path>   User-writable install location. Default: %LOCALAPPDATA%\Programs\acq
+  -InstallDir <path>   User-writable install location, as an absolute path.
+                       Default: %LOCALAPPDATA%\Programs\acq
   -Source <url|dir>    Release source. A URL fetches SHA256SUMS + the zip; a local
                        directory (the offline asset set) is read in place.
   -Version <ver>       Release version to install. Default: $Version
@@ -101,6 +102,14 @@ function Test-AbsolutePath {
     # current directory or drive.
     if (-not $Path) { return $false }
     return (($Path -match '^[A-Za-z]:[\\/]') -or ($Path -match '^[\\/]{2}[^\\/]'))
+}
+
+function Format-Shown {
+    param([string]$Value)
+    # The value with every character outside printable ASCII replaced by '?', so
+    # a value echoed back in a message cannot carry control characters to the
+    # terminal (install.sh's `shown` helper).
+    return ($Value -replace '[^\x20-\x7E]', '?')
 }
 
 function Get-DefaultInstallDir {
@@ -308,6 +317,15 @@ if ($Help) {
 if ($Channel -ne "python") {
     [Console]::Error.WriteLine("unknown channel '$Channel' (only 'python' is supported on this fork)")
     exit 2
+}
+
+# An -InstallDir that is not fully qualified would resolve against the current
+# directory (or, for C:x and \x, the current drive), and the PATH entry added
+# for it would be relative too. Refuse it before anything else, -DryRun
+# included, as install.sh refuses a relative --install-dir.
+if ($InstallDir -and -not (Test-AbsolutePath $InstallDir)) {
+    [Console]::Error.WriteLine("error: -InstallDir must be an absolute path, got '$(Format-Shown $InstallDir)'; pass a fully qualified -InstallDir (for example C:\acq) or omit it to use the default")
+    exit 1
 }
 
 # -Help and -DryRun are read-only/planning paths and must not require a user

@@ -263,6 +263,9 @@ def main(argv: list[str]) -> int:
     catalog = _load()
 
     if cmd in ("list", "ls"):
+        if _should_fail("list"):
+            print(RAW_FAIL_STDERR, file=sys.stderr)
+            return 1
         running_only = "--running" in args
         for sandbox_name, state in catalog.items():
             if running_only and state != "running":

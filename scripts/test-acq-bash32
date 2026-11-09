@@ -49,6 +49,14 @@ case "${XDG_CACHE_HOME:-}" in
   *) case "${HOME:-}" in /*) _cache="$HOME/.cache" ;; *) _cache="/nonexistent/.cache" ;; esac ;;
 esac
 PREFIX="${ACQ_BASH32_PREFIX:-${_cache}/acq/bash-${REQUIRED_VERSION}}"
+# Scratch directories go under TMPDIR only when it is absolute, else /tmp, as
+# acq_tmp_dir in acq.backends/userdirs.sh does: a relative TMPDIR would put them
+# under the current directory, and the PATH shim made there would stop
+# resolving after a cd.
+case "${TMPDIR:-}" in
+  /*) _tmp="$TMPDIR" ;;
+  *) _tmp="/tmp" ;;
+esac
 
 # Remove temp state on every exit path; signals exit with the conventional status
 # (a bare cleanup-only handler would resume the interrupted command).
@@ -156,7 +164,7 @@ do_install() {
     echo "test-acq-bash32: already installed: ${PREFIX}/bin/bash"
     return 0
   fi
-  WORK="$(mktemp -d "${TMPDIR:-/tmp}/acq-bash32.XXXXXX")" || die "cannot create a temp dir"
+  WORK="$(mktemp -d "${_tmp}/acq-bash32.XXXXXX")" || die "cannot create a temp dir"
   set_cleanup_traps
   tarball="bash-${REQUIRED_VERSION}.tar.gz"
   for f in "$tarball" "${tarball}.sig"; do
@@ -222,7 +230,7 @@ fi
 
 # Private PATH dir exposing the verified interpreter as `bash`, so bats and nested
 # `#!/usr/bin/env bash` scripts resolve to it without reordering system dirs.
-SHIM="$(mktemp -d "${TMPDIR:-/tmp}/acq-bash32-path.XXXXXX")" || die "cannot create a temp dir"
+SHIM="$(mktemp -d "${_tmp}/acq-bash32-path.XXXXXX")" || die "cannot create a temp dir"
 set_cleanup_traps
 ln -s "$INTERP" "${SHIM}/bash" || die "cannot link the interpreter"
 export PATH="${SHIM}:${PATH}"

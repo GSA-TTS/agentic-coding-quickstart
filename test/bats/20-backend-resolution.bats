@@ -292,6 +292,35 @@ EVIL
   assert_output --partial "unknown backend 'bogus'"
 }
 
+# With --backend or ACQ_BACKEND set, resolution never reads config.yaml, but the
+# broken pin still breaks every invocation without the override, so doctor
+# reports it as Python's does (its check always reads config.yaml). It still
+# exits 0 and does not offer to overwrite the pin.
+@test "doctor: an unknown backend in config.yaml is reported under a valid override" {
+  unset ACQ_BACKEND
+  export XDG_CONFIG_HOME="$STUBDIR/config"
+  mkdir -p "$XDG_CONFIG_HOME/acq"
+  printf 'backend: bogus\n' > "$XDG_CONFIG_HOME/acq/config.yaml"
+
+  run "$ACQ" --backend msb doctor </dev/null
+  assert_success
+  assert_output --partial "[fail] config-backend: config.yaml sets an unknown backend: 'bogus'"
+  assert_output --partial "acq backend set msb"
+  refute_output --partial 'as the default backend to'
+  grep -Fxq 'backend: bogus' "$XDG_CONFIG_HOME/acq/config.yaml"
+
+  run env ACQ_BACKEND=sbx "$ACQ" doctor </dev/null
+  assert_success
+  assert_output --partial "[fail] config-backend: config.yaml sets an unknown backend: 'bogus'"
+  refute_output --partial 'as the default backend to'
+
+  # A valid pin under an override is not a failure.
+  printf 'backend: sbx\n' > "$XDG_CONFIG_HOME/acq/config.yaml"
+  run "$ACQ" --backend msb doctor </dev/null
+  assert_success
+  refute_output --partial '[fail] config-backend'
+}
+
 @test "best-effort verbs: no backend installed stays silent and succeeds" {
   unset ACQ_BACKEND
   export XDG_CONFIG_HOME="$STUBDIR/empty-config"

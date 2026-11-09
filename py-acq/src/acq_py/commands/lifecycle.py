@@ -1266,10 +1266,23 @@ def _launch_after_envelope(backend: str, name: str, workspace: str | None, token
         return common._operational_failure("run", exc.code, exc.message, exc.remediation, False)
 
 
-def _ls_data(backend: str) -> dict:
+# The backend's own listing command, named in the remediation when it fails.
+_LIST_COMMAND = {"msb": "msb list", "sbx": "sbx ls"}
+
+
+def _ls_data(backend: str) -> dict | None:
+    """The ``ls`` result data, or ``None`` when the backend could not list.
+
+    A failed listing is never read as "no sandboxes" (ADR-0038m drops
+    inspection-failure-as-empty): either listing failing makes ``ls`` fail, so a
+    failed running-state query cannot report every sandbox as stopped either.
+    """
     adapter = common._adapter(backend)
-    names = adapter.list_names() or []
-    running = set(adapter.running_names() or [])
+    names = adapter.list_names()
+    running_names = adapter.running_names() if names is not None else None
+    if names is None or running_names is None:
+        return None
+    running = set(running_names)
     records = {record["name"]: record for record in state.list_records(backend)}
     sandboxes: list[dict] = []
     for name in names:
@@ -1311,6 +1324,14 @@ def run_ls(emit_json: bool, backend: str) -> int:
         # e.g. the backend CLI was removed after detection, or detection was
         # forced: report backend_not_found through the envelope, not a traceback.
         return common._operational_failure("ls", exc.code, exc.message, exc.remediation, emit_json)
+    if data is None:
+        return common._operational_failure(
+            "ls",
+            errors.FAILURE,
+            "could not list sandboxes",
+            f"check that {backend} works ('{_LIST_COMMAND[backend]}'), then retry",
+            emit_json,
+        )
     if emit_json:
         print(json.dumps(envelope.success("ls", data)))
     else:
