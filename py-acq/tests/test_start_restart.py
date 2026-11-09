@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from acq_py import cli, errors, kit_msb, lock, msb, secretstore, security, state
+from acq_py import cli, errors, kit_msb, kits, lock, msb, secretstore, security, state
 
 pytestmark = pytest.mark.provider_key  # creates msb sandboxes: needs a stored provider key
 
@@ -114,6 +114,14 @@ def _stopped_box(monkeypatch, tmp_path, capsys, *, secret=True):
         monkeypatch.setenv("ACQ_PROVIDER_KITS", "")
     _create(capsys, tmp_path)
     monkeypatch.delenv("ACQ_PROVIDER_KITS", raising=False)
+    if not secret:
+        # A sandbox keeps the selection it was created with; drop that record, as
+        # for a sandbox from before it was recorded, so start uses the current,
+        # default selection and a usai key stored meanwhile gets bound.
+        path = kits._provenance_path("msb", "box")
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        del doc["provider_selection"]
+        path.write_text(json.dumps(doc), encoding="utf-8")
     assert _acq(capsys, "stop", "box")[0] == 0
 
 

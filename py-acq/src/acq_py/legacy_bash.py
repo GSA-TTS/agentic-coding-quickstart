@@ -69,6 +69,10 @@ class BashSandbox:
     ssh_auth_sock: str | None = None
     applied_ref: str | None = None
     applied_at: str | None = None
+    # As Bash ``acq_provenance_write`` recorded them; None when the record
+    # predates them or holds a value Bash never writes.
+    provider_selection: str | None = None
+    provider_kits: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +249,12 @@ def read_sandbox(backend: str, name: str) -> BashSandbox:
     sock = _clean(host_config_read(backend, name, "ssh-auth-sock"))
     applied_ref = env.get("applied_ref")
     applied_at = env.get("applied_at")
+    selection = env.get("provider_selection")
+    if selection not in (kits.SELECTION_DEFAULT, kits.SELECTION_EXPLICIT):
+        selection = None
+    provider_kits = env.get("provider_kits") if selection == kits.SELECTION_EXPLICIT else None
+    if provider_kits is not None and "\0" in provider_kits:
+        selection = provider_kits = None  # cannot be an environment value: import nothing
     return BashSandbox(
         backend=backend,
         name=name,
@@ -254,6 +264,8 @@ def read_sandbox(backend: str, name: str) -> BashSandbox:
         ssh_auth_sock=sock if sock and _GUEST_SOCK_RE.fullmatch(sock) else None,
         applied_ref=applied_ref if applied_ref and _APPLIED_REF_RE.fullmatch(applied_ref) else None,
         applied_at=applied_at if applied_at and _APPLIED_AT_RE.fullmatch(applied_at) else None,
+        provider_selection=selection,
+        provider_kits=provider_kits or None,
     )
 
 

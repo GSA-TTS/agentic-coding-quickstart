@@ -177,13 +177,19 @@ def test_no_prompt_env_only_advises_even_at_a_terminal(monkeypatch, tmp_path, ca
 
 
 @pytest.mark.provider_key
-def test_json_create_skips_the_nudge(monkeypatch, tmp_path, capsys):
+def test_json_create_notes_but_never_prompts(monkeypatch, tmp_path, capsys):
+    # Even at a terminal and with the default answer yes: --json never prompts.
     _msb_env(monkeypatch, tmp_path)
     ws = _github_ws(monkeypatch, tmp_path)
+    _write_config("scope_github_token: yes\n")
     shown = _terminal(monkeypatch, answer="y\n")
-    rc, doc, _, err = _main(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "adv", "--json")
+    rc, doc, out, err = _main(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "adv", "--json")
     assert rc == 0 and doc["data"]["name"] == "adv"
-    assert "GitHub" not in err and shown == []
+    assert len(out.strip().splitlines()) == 1  # stdout stays one document
+    assert "this sandbox has no repo-scoped GitHub token." in err
+    assert f"To scope it later: acq github-scope adv {ws}\n" in err
+    assert creds.SCOPE_NOW_PROMPT not in err and shown == []
+    assert not secretstore.exists("github", "adv")
 
 
 @pytest.mark.provider_key
@@ -346,3 +352,179 @@ def test_scope_default_reads_only_yes_spellings(monkeypatch, tmp_path):
         assert creds.scope_github_token_default() is expected, value
     config.config_path().unlink()
     assert creds.scope_github_token_default() is False
+
+
+# ---------------------------------------------------------------------------
+# The provider selection is recorded at create and kept by later verbs
+# (Bash acq_provenance_write / acq_provider_selection_load).
+# ---------------------------------------------------------------------------
+
+BUILTINS_NO_PROVIDER = ["zscaler-ca-certificate", "agentic-coding-playbook", "git-ssh-sign"]
+
+
+def _create_without_providers(monkeypatch, tmp_path, capsys, name="np", backend="msb", agent="shell"):
+    """A usai key is stored (the default provider kit would bind it), then the
+    sandbox is created with --no-provider-kits. Later calls run without the flag."""
+    (_sbx_env if backend == "sbx" else _msb_env)(monkeypatch, tmp_path)
+    monkeypatch.delenv("ACQ_PROVIDER_KITS", raising=False)
+    secretstore.set_secret("usai", None, "throwaway-usai-key")
+    ws = _plain_ws(tmp_path)
+    rc, doc, _, err = _main(capsys, "--backend", backend, "create", agent, str(ws), "--name", name,
+                            "--no-provider-kits", "--json")
+    assert rc == 0, err
+    assert "usai-provider" not in doc["data"]["kits"]
+    return ws
+
+
+def _make_stale(backend, name):
+    """Keep the record (and its selection), but on another bundle ref, so kit update reapplies."""
+    from acq_py import kits
+
+    path = kits._provenance_path(backend, name)
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc["applied_ref"] = "0" * 40
+    path.write_text(json.dumps(doc), encoding="utf-8")
+
+
+def test_create_records_the_selection(monkeypatch, tmp_path, capsys):
+    from acq_py import kits
+
+    _create_without_providers(monkeypatch, tmp_path, capsys)
+    assert kits.provider_selection_read("msb", "np") == ("explicit", "")
+    rec = kits.provenance_read("msb", "np")
+    assert rec["provider_selection"] == "explicit" and "provider_kits" not in rec  # Bash omits an empty list
+    assert kits.provenance_status("msb", "np") == "current"
+
+
+def test_default_create_records_the_default_selection(monkeypatch, tmp_path, capsys):
+    from acq_py import kits
+
+    _msb_env(monkeypatch, tmp_path)
+    monkeypatch.delenv("ACQ_PROVIDER_KITS", raising=False)
+    secretstore.set_secret("usai", None, "throwaway-usai-key")
+    rc, _, _, err = _main(capsys, "--backend", "msb", "create", "shell", str(_plain_ws(tmp_path)), "--name", "df",
+                          "--json")
+    assert rc == 0, err
+    assert kits.provider_selection_read("msb", "df") == ("default", "")
+
+
+def test_start_keeps_no_provider_kits(monkeypatch, tmp_path, capsys):
+    _create_without_providers(monkeypatch, tmp_path, capsys)
+    assert _main(capsys, "--backend", "msb", "stop", "np", "--json")[0] == 0
+    rc, doc, _, err = _main(capsys, "--backend", "msb", "start", "np", "--json")
+    assert rc == 0, err
+    assert doc["data"]["secret_bindings"] == [] and msb.held_read("np").bindings == {}
+    assert doc["data"]["kits"] == BUILTINS_NO_PROVIDER
+    assert "ACQ_PROVIDER_KITS" not in os.environ
+
+
+def test_start_keeps_an_explicit_selection_over_a_later_export(monkeypatch, tmp_path, capsys):
+    # The recorded selection wins over what the environment says at start, in
+    # either direction: here an export that would select no provider kit.
+    _msb_env(monkeypatch, tmp_path)
+    monkeypatch.delenv("ACQ_PROVIDER_KITS", raising=False)
+    secretstore.set_secret("usai", None, "throwaway-usai-key")
+    assert _main(capsys, "--backend", "msb", "create", "shell", str(_plain_ws(tmp_path)), "--name", "df",
+                 "--json")[0] == 0
+    assert _main(capsys, "--backend", "msb", "stop", "df", "--json")[0] == 0
+    monkeypatch.setenv("ACQ_PROVIDER_KITS", "")
+    rc, doc, _, err = _main(capsys, "--backend", "msb", "start", "df", "--json")
+    assert rc == 0, err
+    assert doc["data"]["kits"] == ["zscaler-ca-certificate", "usai-provider", *BUILTINS_NO_PROVIDER[1:]]
+    assert os.environ["ACQ_PROVIDER_KITS"] == ""  # the export is put back
+
+
+def test_kit_update_keeps_no_provider_kits_on_msb(monkeypatch, tmp_path, capsys):
+    _create_without_providers(monkeypatch, tmp_path, capsys)
+    _make_stale("msb", "np")
+    rc, doc, _, err = _main(capsys, "--backend", "msb", "kit", "update", "np", "--yes", "--json")
+    assert rc == 0, err
+    assert doc["data"]["action"] == "refreshed" and doc["data"]["kits"] == BUILTINS_NO_PROVIDER
+    from acq_py import kits
+
+    assert kits.provider_selection_read("msb", "np") == ("explicit", "")  # kept by the rewrite
+
+
+def test_kit_update_keeps_no_provider_kits_on_sbx(monkeypatch, tmp_path, capsys):
+    _create_without_providers(monkeypatch, tmp_path, capsys, backend="sbx", agent="opencode")
+    monkeypatch.setenv("ACQ_SBX_STUB_KIT_ADD", "allow")
+    _make_stale("sbx", "np")
+    rc, doc, _, err = _main(capsys, "--backend", "sbx", "kit", "update", "np", "--yes", "--json")
+    assert rc == 0, err
+    assert doc["data"]["kits"] == [*BUILTINS_NO_PROVIDER, "opencode"]
+
+
+def test_recreate_keeps_no_provider_kits(monkeypatch, tmp_path, capsys):
+    _create_without_providers(monkeypatch, tmp_path, capsys)
+    monkeypatch.setattr(security, "WINDOWS", False)
+    monkeypatch.setenv("ACQ_SECURITY_MOUNT_STATE", json.dumps({"np": "missing"}))
+    rc, doc, _, err = _main(capsys, "--backend", "msb", "create", "--recreate", "np", "--yes", "--json")
+    assert rc == 0, err
+    assert doc["data"]["secret_bindings"] == [] and doc["data"]["kits"] == BUILTINS_NO_PROVIDER
+    from acq_py import kits
+
+    assert kits.provider_selection_read("msb", "np") == ("explicit", "")
+
+
+def test_a_create_whose_kits_did_not_all_apply_still_records_the_selection(monkeypatch, tmp_path, capsys):
+    from acq_py import errors, kit_msb, kits
+
+    real_apply = kit_msb.apply_kit
+
+    def failing(name, kit, *args, **kwargs):
+        if kit.name == "git-ssh-sign":
+            raise msb.MsbError(errors.FAILURE, "could not apply", "retry")
+        return real_apply(name, kit, *args, **kwargs)
+
+    monkeypatch.setattr(kit_msb, "apply_kit", failing)
+    _create_without_providers(monkeypatch, tmp_path, capsys)
+    assert kits.provider_selection_read("msb", "np") == ("explicit", "")
+    assert kits.provenance_status("msb", "np") == "unknown"  # no bundle ref without a full apply
+    assert kits.kit_check_data("msb", "np")["applied"] is None
+
+
+def test_a_sandbox_without_a_recorded_selection_uses_the_current_one(monkeypatch, tmp_path, capsys):
+    # A record written before the selection was (or none at all) changes nothing.
+    from acq_py import kits
+
+    _create_without_providers(monkeypatch, tmp_path, capsys)
+    path = kits._provenance_path("msb", "np")
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    del doc["provider_selection"]
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    assert kits.provider_selection_read("msb", "np") is None
+    assert _main(capsys, "--backend", "msb", "stop", "np", "--json")[0] == 0
+    rc, doc, _, _ = _main(capsys, "--backend", "msb", "start", "np", "--json")
+    assert rc == 0 and "usai-provider" in doc["data"]["kits"]  # today's default selection
+    assert kits.provider_selection_read("msb", "np") == ("default", "")  # recorded from now on
+
+
+def test_an_unreadable_recorded_selection_fails_closed(monkeypatch, tmp_path, capsys):
+    from acq_py import kits
+
+    _create_without_providers(monkeypatch, tmp_path, capsys)
+    for bad in ({"provider_selection": "all"}, {"provider_selection": "explicit", "provider_kits": 7}):
+        path = kits._provenance_path("msb", "np")
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        doc.pop("provider_kits", None)
+        doc.update(bad, applied_ref="0" * 40)  # stale, so kit update would reapply
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        rc, out, _, _ = _main(capsys, "--backend", "msb", "start", "np", "--json")
+        assert rc == 1 and out["error"]["code"] == "validation_failed", bad
+        rc, out, _, _ = _main(capsys, "--backend", "msb", "kit", "update", "np", "--yes", "--json")
+        assert rc == 1 and out["error"]["code"] == "validation_failed", bad
+    assert msb.held_read("np").bindings == {}
+
+
+def test_recorded_explicit_kit_list_is_reapplied(monkeypatch, tmp_path):
+    from acq_py import kits, kitspec
+
+    _msb_env(monkeypatch, tmp_path)
+    ref = kitspec.builtin_kit_ref("usai-provider")
+    monkeypatch.setenv("ACQ_PROVIDER_KITS", ref)
+    kits.provenance_write("msb", "ex")
+    monkeypatch.setenv("ACQ_PROVIDER_KITS", "")
+    assert kits.provider_selection_read("msb", "ex") == ("explicit", ref)
+    with kits.recorded_provider_selection("msb", "ex"):
+        assert os.environ["ACQ_PROVIDER_KITS"] == ref
+    assert os.environ["ACQ_PROVIDER_KITS"] == ""

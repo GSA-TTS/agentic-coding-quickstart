@@ -15,7 +15,7 @@ import os
 import shlex
 import sys
 import time
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 from .. import (
@@ -244,8 +244,9 @@ def _apply_msb_kits(
         kit_msb.cli_kits_write(name, plan.kits)
         if plan.agent_kit is not None:
             kits.kit_applied_write("msb", name, plan.agent_kit, plan.entrypoint or plan.agent_kit)
-        if not result.incomplete:
-            kits.provenance_write("msb", name)
+        # The provider selection is recorded even when a kit did not apply, so
+        # a later start or kit update never widens it; the bundle ref is not.
+        kits.provenance_write("msb", name, applied=not result.incomplete)
     except OSError as exc:
         return None, common._operational_failure(
             command, errors.FAILURE,
@@ -813,35 +814,22 @@ def _print_create_human(data: dict) -> None:
     print(line)
 
 
-PROVIDER_KITS_ENV = "ACQ_PROVIDER_KITS"
-
-
-@contextlib.contextmanager
-def _provider_kits_flag(no_provider_kits: bool) -> Iterator[None]:
+def _provider_kits_flag(parsed) -> contextlib.AbstractContextManager[None]:
     """``--no-provider-kits`` for the duration of one create or run.
 
-    Bash spells the flag as an explicitly empty ``ACQ_PROVIDER_KITS``, and every
-    provider-selection reader here already treats that as authoritative (no
-    provider kit, no provider credential), ahead of config.yaml ``provider_kit``.
-    So the flag sets the same empty value, which also wins over an exported
-    non-empty one, and puts back what was there before.
+    Bash spells the flag as an explicitly empty ``ACQ_PROVIDER_KITS``, which
+    every provider-selection reader treats as authoritative (no provider kit,
+    no provider credential), ahead of config.yaml ``provider_kit``. So the flag
+    sets the same empty value, which also wins over an exported non-empty one;
+    the create records it, so later verbs keep it.
     """
-    if not no_provider_kits:
-        yield
-        return
-    saved = os.environ.get(PROVIDER_KITS_ENV)
-    os.environ[PROVIDER_KITS_ENV] = ""
-    try:
-        yield
-    finally:
-        if saved is None:
-            os.environ.pop(PROVIDER_KITS_ENV, None)
-        else:
-            os.environ[PROVIDER_KITS_ENV] = saved
+    if getattr(parsed, "no_provider_kits", False):
+        return kits.provider_kits_env("")
+    return contextlib.nullcontext()
 
 
 def run_create(parsed, emit_json: bool, backend: str) -> int:
-    with _provider_kits_flag(getattr(parsed, "no_provider_kits", False)):
+    with _provider_kits_flag(parsed):
         return _run_create(parsed, emit_json, backend)
 
 
@@ -966,7 +954,11 @@ def run_recreate(parsed, emit_json: bool, backend: str) -> int:
             return errors.EXIT_SUCCESS
     try:
         with lock.sandbox_lock(backend, name):
-            return _recreate_locked(name, emit_json, backend)
+            if getattr(parsed, "no_provider_kits", False):  # the flag (already applied) wins
+                return _recreate_locked(name, emit_json, backend)
+            return common.with_recorded_selection(
+                "create", backend, name, emit_json, lambda: _recreate_locked(name, emit_json, backend)
+            )
     except lock.SandboxLockTimeout as exc:
         return _lock_failure("create", name, exc, emit_json)
 
@@ -1137,7 +1129,7 @@ def _run_prepare_locked(
 
 
 def run_run(parsed, emit_json: bool, backend: str) -> int:
-    with _provider_kits_flag(getattr(parsed, "no_provider_kits", False)):
+    with _provider_kits_flag(parsed):
         return _run_run(parsed, emit_json, backend)
 
 
@@ -1460,7 +1452,9 @@ def _start_verb(command: str, name: str, emit_json: bool, backend: str) -> int:
         )
     try:
         with lock.sandbox_lock(backend, name):
-            return _start_locked(command, name, emit_json)
+            return common.with_recorded_selection(
+                command, backend, name, emit_json, lambda: _start_locked(command, name, emit_json)
+            )
     except lock.SandboxLockTimeout as exc:
         return _lock_failure(command, name, exc, emit_json)
 

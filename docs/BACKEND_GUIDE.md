@@ -829,9 +829,10 @@ token of its own, it says so and, at a terminal, offers to scope one now (the
 The token is stored before the create, so msb binds it and sbx's proxy has it.
 The default answer is `scope_github_token:` in config.yaml, which
 `acq configure` sets; unset means no. Declining never stops the create. Both
-implementations do this. The Python acq never reads a token while prompts are
-off (no terminal, `ACQ_NO_PROMPT` or `ACQ_NO_PROGRESS`): it prints the
-`acq github-scope` command to run later. With `--json` it skips the check.
+implementations do this, and without a terminal on stdin both print only the
+`acq github-scope` command to run later. The Python acq does the same under
+`--json`, and when `ACQ_NO_PROMPT` or `ACQ_NO_PROGRESS` is set at a terminal,
+where the Bash acq takes the configured answer and, on yes, reads a token.
 
 This is the bash subset of the design's §7.5 unified secret model; the full
 Go/keychain MITM component (age fallback, `CredentialRewriteRule`,
@@ -1250,6 +1251,15 @@ create-time picker can still change the extras for one sandbox). The Python acq
 follows the same order, has no picker, and applies only kits from its pinned built-in bundle, so it refuses a kit that
 would have to be fetched (every catalog extra kit today) and points to
 `ACQ_IMPL=bash`.
+
+The create records which provider selection applied (`provider_selection` and
+`provider_kits` in the sandbox's provenance record). `acq start`,
+`acq create --recreate` and `acq kit update` use that record, not the
+selection current at the time, so a sandbox created with `--no-provider-kits`
+never gains a provider kit or key later; the Bash acq also reloads it when
+`acq run` re-attaches. With no recorded selection (a sandbox from before it was
+recorded), the Bash acq uses the default selection and the Python acq the
+current one.
 
 **Host pinning.** A kit can declare any `providerId` and allow-list any host, so
 the registry also pins the destination host(s) per providerId

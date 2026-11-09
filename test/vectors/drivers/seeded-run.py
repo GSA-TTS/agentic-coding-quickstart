@@ -24,7 +24,9 @@ through its own CLI:
   temporary directory holding one git repository per NAME, each with
   ``remote.origin.url`` set (no network). Later steps get the workspace path in
   place of a literal ``{workspace}`` argument, and run with git discovery capped
-  at the temporary directory.
+  at the temporary directory. ``{"git_repos": {}}`` gives an empty workspace
+  outside any repository, for a vector whose stderr must not depend on the
+  checkout it runs from (create and run note a workspace's GitHub repositories).
 * ``{"binding_record": PROVIDER, "text": TEXT}`` writes TEXT as PROVIDER's
   provider-credential binding record, at the path acq's state layout gives it
   (``<state root>/provider-credentials/<provider>.<first 8 hex of sha256>.json``).
@@ -103,6 +105,7 @@ def _git_repos(repos: dict, root: Path, env: dict) -> Path:
         raise RuntimeError("git is not installed")
     clean = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     workspace = root / "ws"
+    workspace.mkdir()  # exists even with no repositories: a workspace with none
     for name, url in repos.items():
         repo = workspace / name
         repo.mkdir(parents=True)

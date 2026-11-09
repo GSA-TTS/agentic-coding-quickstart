@@ -298,7 +298,9 @@ def run_kit_update(parsed, emit_json: bool, backend_override: str | None) -> int
             return declined
     try:
         with lock.sandbox_lock(backend, name):
-            return _kit_update_locked(name, emit_json, backend)
+            return common.with_recorded_selection(
+                "kit update", backend, name, emit_json, lambda: _kit_update_locked(name, emit_json, backend)
+            )
     except lock.SandboxLockTimeout as exc:
         return common._operational_failure(
             "kit update", errors.TIMEOUT, str(exc),

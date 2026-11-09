@@ -606,11 +606,11 @@ def advise_github_scope(backend: str, sandbox: str, workspace: str, emit_json: b
     Warn-not-block: declining, an empty token or a failed store never stops
     the create.
 
-    Without a terminal (or with ``ACQ_NO_PROMPT`` or ``ACQ_NO_PROGRESS``) it
-    only prints the command to scope later: a token is never read while prompts
-    are off. ``--json`` skips the nudge entirely, since it never prompts.
+    Without a terminal, with ``ACQ_NO_PROMPT`` or ``ACQ_NO_PROGRESS``, or with
+    ``--json`` (whose stdout stays one document) it only prints the command to
+    scope later: a token is never read while prompts are off.
     """
-    if emit_json or _stored_github_token(sandbox):
+    if _stored_github_token(sandbox):
         return
     repos = gitrepos.detect_workspace_repos(workspace)
     if not repos:
