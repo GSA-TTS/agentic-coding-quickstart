@@ -35,9 +35,10 @@ override the layout; ``ACQ_SECRET_SECURITY_BIN`` and
 ``ACQ_SECRET_POWERSHELL_BIN`` replace the keychain tools only when
 ``ACQ_SECRET_STORE_DIR`` is also set, so production never honors them; Windows
 PowerShell is otherwise run by its full path under ``%SystemRoot%``, never found
-on PATH, and the override must be absolute too. Unlike
-Bash, a relative path in any of these is refused rather than resolved against
-the current directory, which is normally the untrusted workspace.
+on PATH, and the override must be absolute too. A relative path in any of
+these is refused rather than resolved against the current directory, which is
+normally the untrusted workspace; the layout overrides are refused with the
+same message as Bash.
 """
 
 from __future__ import annotations
@@ -239,16 +240,16 @@ class _Layout:
 
 
 def _abs_env(name: str) -> Path | None:
-    value = os.environ.get(name, "")
-    if not value:
-        return None
-    if not userdirs.is_absolute(value):
-        raise SecretStoreError(
-            errors.VALIDATION_FAILED,
-            f"{name} must be an absolute path",
-            f"set {name} to an absolute path, or unset it",
-        )
-    return Path(value)
+    """The path a layout override names, or ``None`` when unset or empty.
+
+    A relative value is refused with the wording Bash's shared override check
+    (``_acq_userdirs_override_problem``) prints, through
+    :func:`userdirs.path_override`.
+    """
+    try:
+        return userdirs.path_override(name, dict(userdirs.PATH_OVERRIDES).get(name, "the default"))
+    except userdirs.UserDirError as exc:
+        raise SecretStoreError(errors.VALIDATION_FAILED, exc.message, exc.remediation) from None
 
 
 def _default_file_dir() -> Path:

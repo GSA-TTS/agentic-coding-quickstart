@@ -51,6 +51,7 @@ from . import (
     secretstore,
     state,
     timeouts,
+    userdirs,
 )
 from .secretstore import Scope
 
@@ -429,15 +430,13 @@ def _balanced_rules() -> list[str]:
     Each ``host[:port]`` line becomes ``allow@TARGET[:tcp:PORT]``. A missing,
     unreadable, malformed, or empty list refuses the create.
     """
-    path = Path(os.environ.get("ACQ_MSB_BALANCED_HOSTS_FILE") or BALANCED_HOSTS_FILE)
     remediation = "restore the balanced host list, or set ACQ_NETWORK_TIER=strict"
-    if not path.is_absolute():
+    try:
         # A relative override resolves against the cwd, which may be a mounted
-        # workspace the agent can write.
-        raise _policy_error(
-            f"ACQ_MSB_BALANCED_HOSTS_FILE must be an absolute path, not {str(path)!r}",
-            "set ACQ_MSB_BALANCED_HOSTS_FILE to an absolute path",
-        )
+        # workspace the agent can write. Refused with Bash's shared wording.
+        path = userdirs.path_override("ACQ_MSB_BALANCED_HOSTS_FILE") or BALANCED_HOSTS_FILE
+    except userdirs.UserDirError as exc:
+        raise _policy_error(exc.message, exc.remediation) from None
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:

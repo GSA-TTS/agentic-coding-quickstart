@@ -211,6 +211,19 @@ def test_relative_baseline_path_is_refused(monkeypatch, tmp_path, capsys, calls)
     _assert_refused_before_create(*_create(capsys, tmp_path), calls)
 
 
+def test_relative_baseline_path_uses_the_shared_refusal_text(monkeypatch):
+    # The adapter's own check words the refusal as Bash's shared override check
+    # does (acq.backends/userdirs.sh _acq_userdirs_override_problem).
+    monkeypatch.setenv("ACQ_MSB_BALANCED_HOSTS_FILE", "hosts.txt")
+    with pytest.raises(msb.MsbError) as info:
+        msb._balanced_rules()
+    assert info.value.code == errors.VALIDATION_FAILED
+    assert info.value.message == "ACQ_MSB_BALANCED_HOSTS_FILE must be an absolute path, got 'hosts.txt'"
+    assert info.value.remediation == (
+        "set ACQ_MSB_BALANCED_HOSTS_FILE to an absolute path, or unset it to use the default"
+    )
+
+
 def test_group_keyword_baseline_cannot_reopen_egress(monkeypatch, tmp_path):
     for name in _EGRESS_ENV:
         monkeypatch.delenv(name, raising=False)
