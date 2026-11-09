@@ -394,3 +394,81 @@ def test_classify_matches_bash():
     assert provider_input.classify("|6") == "unresolved"
     assert provider_input.classify("") == ""
     assert provider_input.classify("xx|") == ""
+
+
+# ---------------------------------------------------------------------------
+# Recreate gates before it removes the old guest.
+# ---------------------------------------------------------------------------
+
+
+def _recreatable(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path)
+    catalog = tmp_path / "msb-home" / ".microsandbox" / "catalog.json"
+    catalog.parent.mkdir(parents=True, exist_ok=True)
+    catalog.write_text(json.dumps({"sec": "running"}), encoding="utf-8")
+    record = {"schema": 1, "name": "sec", "backend": "msb", "agent": "opencode", "workspace": str(tmp_path / "ws"),
+              "ro_host_config": True}
+    path = sys.modules["acq_py.state"].record_path("msb", "sec")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record), encoding="utf-8")
+    monkeypatch.setenv("ACQ_SECURITY_MOUNT_STATE", json.dumps({"sec": "missing"}))
+
+
+@pytest.mark.provider_key
+def test_recreate_with_a_pin_mismatch_keeps_the_old_guest(monkeypatch, tmp_path, capsys, children):
+    _recreatable(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_PROVIDER_CREDENTIAL_BINDINGS", "usai=USAI_API_KEY@models.example.gov")
+    rc, doc, _out, _err = _invoke(capsys, "--backend", "msb", "create", "--recreate", "sec", "--yes", "--json")
+    assert rc == errors.EXIT_FAILURE and doc["error"]["code"] == errors.VALIDATION_FAILED, doc
+    assert _verb_calls(children, "remove") == [] and _verb_calls(children, "create") == []
+    assert msb.exists("sec")
+
+
+def test_recreate_without_a_key_keeps_the_old_guest(monkeypatch, tmp_path, capsys, children):
+    _recreatable(monkeypatch, tmp_path)
+    rc, doc, _out, _err = _invoke(capsys, "--backend", "msb", "create", "--recreate", "sec", "--yes", "--json")
+    assert rc == errors.EXIT_FAILURE and doc["error"]["code"] == errors.SECRET_MISSING, doc
+    assert _verb_calls(children, "remove") == [] and _verb_calls(children, "create") == []
+    assert msb.exists("sec")
+
+
+# ---------------------------------------------------------------------------
+# Review follow-ups: curl's exit status and selection-off registry providers.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("raw", ["200|28", "200|7", "401|6"])
+def test_a_status_with_a_failed_curl_is_never_accepted(raw):
+    assert provider_input.classify(raw) in ("unreachable", "unresolved")
+
+
+def test_a_registered_provider_is_not_delivered_with_selection_off(monkeypatch, tmp_path):
+    monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("ACQ_PROVIDER_CREDENTIAL_BINDINGS", "acme=ACME_KEY@models.acme.example")
+    monkeypatch.delenv("ACQ_PROVIDER_KITS", raising=False)
+    assert provider_input.delivery_ids("msb", "box") == ["acme", "usai"]
+    monkeypatch.setenv("ACQ_PROVIDER_KITS", "")
+    assert provider_input.delivery_ids("msb", "box") == []
+
+
+def test_publish_and_discard_never_chmod_through_a_link(tmp_path, monkeypatch):
+    monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
+    outside = tmp_path / "outside.txt"
+    outside.write_text("x", encoding="utf-8")
+    os.chmod(outside, 0o600)
+    generation = provider_input.prepare("msb", "box", [])
+    _symlink(outside, generation / "models" / "link")
+    provider_input.publish("msb", "box", generation)
+    provider_input.discard(generation)
+    assert not generation.exists() and outside.read_text(encoding="utf-8") == "x"
+    if os.name != "nt":
+        assert stat.S_IMODE(outside.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs FIFOs")
+def test_a_fifo_in_place_of_an_artifact_is_refused_without_blocking(tmp_path):
+    kit = _kit(tmp_path)
+    (kit / "provider-input" / "facts.json").unlink()
+    os.mkfifo(kit / "provider-input" / "facts.json")
+    with pytest.raises(provider_input.ProviderInputError, match="regular file"):
+        provider_input.kit_facts(kit)

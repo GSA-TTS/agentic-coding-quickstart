@@ -65,6 +65,7 @@ _URL_RE = re.compile(r"https://[A-Za-z0-9._~:/?%=+,@-]+")
 _FACT_FIELDS = ("providerId", "keyEnv", "host", "modelsUrl", "apiProtocol")
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 _REPARSE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 
@@ -136,8 +137,12 @@ def _read_fd(root: Path, parts: list[str]) -> tuple[bytes, int]:
     """Descriptor-relative walk with ``O_NOFOLLOW`` at every step (POSIX)."""
     fd = os.open(root, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW)
     try:
-        for part in parts:
-            nxt = os.open(part, os.O_RDONLY | _O_NOFOLLOW, dir_fd=fd)
+        for index, part in enumerate(parts):
+            # Directories must be directories; the file is opened non-blocking so
+            # a FIFO planted in its place cannot hang the read before fstat refuses it.
+            last = index == len(parts) - 1
+            flags = os.O_RDONLY | _O_NOFOLLOW | (_O_NONBLOCK if last else _O_DIRECTORY)
+            nxt = os.open(part, flags, dir_fd=fd)
             os.close(fd)
             fd = nxt
         info = os.fstat(fd)
@@ -524,12 +529,22 @@ def prepare(backend: str, name: str, selected: list[tuple[str, dict, Facts]], bu
     return generation
 
 
+def _chmod_nofollow(path: str | Path, mode: int) -> None:
+    """chmod ``path`` unless it is a link (a link is skipped, never followed)."""
+    if os.path.islink(path):
+        return
+    if os.chmod in os.supports_follow_symlinks:
+        os.chmod(path, mode, follow_symlinks=False)
+    else:
+        os.chmod(path, mode)
+
+
 def _make_read_only(generation: Path) -> None:
     """Every file read-only. Directories stay owner-writable so the owner can
     remove an old generation; the guest is held off by the read-only mount."""
     for dirpath, _dirnames, filenames in os.walk(generation, followlinks=False):
         for entry in filenames:
-            os.chmod(Path(dirpath) / entry, 0o444)
+            _chmod_nofollow(Path(dirpath) / entry, 0o444)
 
 
 def publish(backend: str, name: str, generation: Path) -> None:
@@ -552,7 +567,7 @@ def discard(generation: Path) -> None:
     """Remove an unpublished generation (best-effort, never following a link)."""
     def _writable(func, path, _exc):  # a read-only entry is made writable, then retried
         try:
-            os.chmod(path, 0o700)
+            _chmod_nofollow(path, 0o700)
             func(path)
         except OSError:
             pass
@@ -560,13 +575,6 @@ def discard(generation: Path) -> None:
     if generation.is_symlink():
         generation.unlink(missing_ok=True)
         return
-    try:
-        os.chmod(generation, 0o700)
-        for dirpath, dirnames, _files in os.walk(generation, followlinks=False):
-            for entry in dirnames:
-                os.chmod(Path(dirpath) / entry, 0o700)
-    except OSError:
-        pass
     shutil.rmtree(generation, onexc=_writable)
 
 

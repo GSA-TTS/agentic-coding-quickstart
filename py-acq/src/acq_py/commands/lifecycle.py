@@ -13,6 +13,7 @@ import json
 import os
 import sys
 import time
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 from .. import (
@@ -633,7 +634,16 @@ def _msb_create(name: str, image: str, workspace: str, kit_set: list[kit_msb.Kit
     return bindings
 
 
-def _ask_store(adapter) -> object:
+def _store_provider_key(adapter, provider: str, value: str) -> None:
+    """Store a provider key as ``acq secret set -g PROVIDER`` does: preflight, acq store, backend feed."""
+    preflight = getattr(adapter, "secret_preflight", None)
+    if preflight is not None:
+        preflight(secretstore.GLOBAL, provider, "", "")
+    secretstore.set_secret(provider, None, value)
+    adapter.secret_feed(secretstore.GLOBAL, provider, value, "", "")
+
+
+def _ask_store(adapter) -> Callable[[provider_input.Facts], bool]:
     """The gate's terminal prompt: ask, then read the key with echo off and store it globally."""
     def ask(facts: provider_input.Facts) -> bool:
         print(f"\nStore a credential for provider '{facts.provider}'?\n  env var:  ${facts.key_env}\n"
@@ -645,12 +655,40 @@ def _ask_store(adapter) -> object:
         try:
             if not value.strip() or secretstore.value_problem(value) is not None:
                 return False
-            adapter.secret_set(secretstore.GLOBAL, facts.provider, value)
+            _store_provider_key(adapter, facts.provider, value)
         finally:
             value = ""
         return True
 
     return ask
+
+
+def _provider_gate(backend: str, name: str, kit_names: Iterable[str]) -> list[tuple[str, dict, provider_input.Facts]]:
+    """The pre-create credential gate (Bash ``acq_provider_credentials_gate``) for the selected kits.
+
+    Checks every selected provider's pin, then that the backend can inject its
+    key, prompting on a terminal and failing closed otherwise. Runs before
+    anything is created or removed. Returns the selected provider inputs.
+    Raises :class:`provider_input.ProviderInputError` or an adapter error.
+    """
+    adapter = common._adapter(backend)
+    scope = secretstore.sandbox_scope(name)
+    selected = provider_input.selected_facts(kit_names)
+    facts = [f for _kit, _manifest, f in selected]
+    if backend == "sbx":
+        for f in facts:
+            if f.provider in sbx.BUILTIN_SERVICES:
+                raise provider_input.ProviderInputError(
+                    errors.VALIDATION_FAILED,
+                    f"provider id '{f.provider}' collides with an sbx built-in service, which would bind "
+                    f"to sbx's own vendor endpoint instead of '{f.host}'",
+                    "rename the provider in its kit (provider-input.json)",
+                )
+    provider_input.gate(
+        facts, has_key=lambda provider: adapter.secret_has(scope, provider),
+        ask_store=_ask_store(adapter) if common._stdin_is_terminal() else None,
+    )
+    return selected
 
 
 def _provider_prepare(name: str, kit_set: list[kit_msb.Kit], *, ro_mount: bool):
@@ -660,14 +698,9 @@ def _provider_prepare(name: str, kit_set: list[kit_msb.Kit], *, ro_mount: bool):
     it read-only (Windows): the facts are still recorded, but OpenCode's
     renderer then leaves its config untouched. Raises :class:`msb.MsbError`.
     """
-    scope = secretstore.sandbox_scope(name)
     try:
-        selected = provider_input.selected_facts(k.name for k in kit_set)
+        selected = _provider_gate("msb", name, (k.name for k in kit_set))
         facts = [f for _kit, _manifest, f in selected]
-        provider_input.gate(
-            facts, has_key=lambda provider: msb.secret_has(scope, provider),
-            ask_store=_ask_store(msb) if common._stdin_is_terminal() else None,  # type: ignore[arg-type]
-        )
         provider_input.record_write("msb", name, facts)
         if not ro_mount:
             if facts:
@@ -959,6 +992,13 @@ def _recreate_msb(
         return None, exit_code
     try:
         msb.egress_flags(kit_msb.egress_names(plan.kits))
+        # A pin mismatch or a missing provider key refuses here, old guest intact.
+        _provider_gate("msb", name, (k.name for k in plan.kits))
+    except provider_input.ProviderInputError as exc:
+        return None, common._operational_failure("create", exc.code, exc.message, exc.remediation, emit_json)
+    except common._ADAPTER_ERRORS as exc:
+        return None, common._operational_failure("create", exc.code, exc.message, exc.remediation, emit_json)
+    try:
         # Preserve host records + secrets; lose only the guest filesystem. A guest
         # already removed out of band has nothing to destroy.
         if msb.exists(name):
