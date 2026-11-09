@@ -987,6 +987,35 @@ if [ -n "$_acq_wants_help" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# User directories: refuse up front when acq's state, config, data or cache
+# directory cannot be resolved to an absolute path (a relative ACQ_STATE_DIR, or
+# no absolute home to fall back to), so every acq verb that reads or writes host
+# state fails closed with one actionable message. Relative XDG_* values are
+# simply ignored (see acq.backends/userdirs.sh). Help, version, `backend list`
+# and unknown verbs (passed through to the backend CLI) touch no acq state and
+# are not checked, matching the Python implementation. `doctor` is not refused
+# either: like Python, it reports the problem as a failed `state` check and
+# completes (see acq_print_doctor).
+# ---------------------------------------------------------------------------
+case "$subcommand" in
+  version|--version|-v) : ;;
+  # Recorded now, before the adapter loads (msb.sh replaces a relative
+  # ACQ_STATE_DIR with an empty one), for acq_print_doctor to report.
+  doctor) acq_userdirs_problem || true ;;
+  backend)
+    case "${2:-}" in
+      set|unset) acq_userdirs_check || exit 1 ;;
+    esac
+    ;;
+  configure) acq_userdirs_check || exit 1 ;;
+  *)
+    if [ -n "$(_acq_verb_backend_help_kind "$subcommand")" ]; then
+      acq_userdirs_check || exit 1
+    fi
+    ;;
+esac
+
+# ---------------------------------------------------------------------------
 # Subcommands that don't need a backend resolved first.
 # ---------------------------------------------------------------------------
 
@@ -1024,7 +1053,7 @@ case "$subcommand" in
           echo "acq: backend set: unknown backend '$(acq_printable "$local_backend")' (expected sbx or msb)" >&2
           exit 1
         }
-        local_config_file="${XDG_CONFIG_HOME:-$HOME/.config}/acq/config.yaml"
+        local_config_file=$(_acq_config_file)
         # Write only the `backend:` key, preserving any other config (extra_kits,
         # scope_github_token) written by `acq configure` (ADR-0031).
         _acq_config_write_field backend "$local_backend" \
@@ -1035,7 +1064,7 @@ case "$subcommand" in
         # Clear ONLY the persisted default backend so acq falls back to
         # auto-detection (see the resolution order in `acq help`). Preserves any
         # other config keys (extra_kits, scope_github_token). Idempotent.
-        local_config_file="${XDG_CONFIG_HOME:-$HOME/.config}/acq/config.yaml"
+        local_config_file=$(_acq_config_file)
         if [ -f "$local_config_file" ] && [ -n "$(_acq_config_read_field backend)" ]; then
           _acq_config_write_field backend ""   # empty value removes the key
           # If the config is now empty (backend was the only key), remove the
@@ -1229,6 +1258,12 @@ case "$subcommand" in
     if [ -n "${1:-}" ]; then
       if [ -n "${2:-}" ]; then
         echo "acq: doctor: expected at most one sandbox name" >&2
+        exit 1
+      fi
+      # Inspecting a sandbox reads its host records, so it needs usable dirs
+      # (the problem was recorded by the entry check, before the adapter loaded).
+      if [ -n "${ACQ_USERDIRS_MESSAGE:-}" ]; then
+        printf 'acq: %s\n%s\n' "$ACQ_USERDIRS_MESSAGE" "$ACQ_USERDIRS_REMEDIATION" >&2
         exit 1
       fi
       acq_print_image_contract_doctor "$1"
