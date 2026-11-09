@@ -207,8 +207,10 @@ reported and the cell is `BLOCKED`, not passed. Host-side, `secret set/ls/rm` an
 AGENTS.md documents for a service that is not built in
 (`secret set -g <service> --host qualify.invalid --env <nonce variable>`). Both
 backends are checked: AGENTS.md documents a credential path on msb (`--secret
-ENV@HOST`) as well as on sbx. The Python implementation has no msb credential path
-yet, so msb cells fail here until it does.
+ENV@HOST`) as well as on sbx. The Python implementation keeps msb secrets in the acq
+secret store and binds them as `--secret ENV@HOST` at create (running sandboxes are
+updated with `msb modify --secret`/`--secret-rm`); a live msb run of this step is
+still to be recorded.
 
 Swap-on-the-wire (the real value, not the placeholder, reaching the bound host) is
 **not** checked: it needs an endpoint that reports what it received, and the oracle

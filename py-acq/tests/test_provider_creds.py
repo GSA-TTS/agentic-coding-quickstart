@@ -92,9 +92,11 @@ def test_provider_credential_value_never_in_argv_or_output(monkeypatch, tmp_path
     assert "TOP-SECRET-PROVIDER-KEY" not in err
 
 
-def test_provider_credential_msb_unsupported(monkeypatch, tmp_path, capsys):
-    # msb has no provider-credential subcommand: `provider-credential set` fails
-    # closed with unsupported_capability (value never read, never in output).
+def test_provider_credential_msb_stores_in_the_acq_store(monkeypatch, tmp_path, capsys):
+    # msb has no provider-credential subcommand: the value goes to the acq
+    # secret store (bound as --secret KEY_ENV@HOST at create), never to output.
+    from acq_py import secretstore
+
     _env(monkeypatch, tmp_path)
     monkeypatch.setattr(sys, "stdin", io.StringIO("TOP-SECRET-PROVIDER-KEY\n"))
 
@@ -102,8 +104,9 @@ def test_provider_credential_msb_unsupported(monkeypatch, tmp_path, capsys):
         capsys, "--backend", "msb", "provider-credential", "set", "usai", "USAI_API_KEY", "--host", "api.gsa.usai.gov", "--json"
     )
     out, err = capsys.readouterr()
-    assert rc == 1
-    assert doc["error"]["code"] == "unsupported_capability"
+    assert rc == 0
+    assert doc["data"]["key_env"] == "USAI_API_KEY"
+    assert secretstore.resolve("usai") == "TOP-SECRET-PROVIDER-KEY"
     assert "TOP-SECRET-PROVIDER-KEY" not in out
     assert "TOP-SECRET-PROVIDER-KEY" not in err
 

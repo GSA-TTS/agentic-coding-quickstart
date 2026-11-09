@@ -4,6 +4,8 @@
   "inventory": "docs/test-retirement-inventory.md",
   "notes": [
     "attach child/backend exit-status preservation is Tier-2 only: the vector harness cannot yet seed host-authoritative state records (a readable record is required before attach will launch an agent). attach's status propagation shares the launch -> exec_command -> _run_stream path that cli/shell-exit-code covers at Tier-1, so it is covered transitively; attach-specific fail-closed behavior (missing sandbox, missing/unreadable record) is Tier-1 covered directly by cli/attach-missing and cli/attach-json. Do not re-add an attach-exit-code vector until the harness can seed state.",
+    "msb credential path (contract change): cli/secret-msb-unsupported, cli/secret-has-present, cli/secret-has-absent and cli/provider-credential-set-json were edited because msb now serves the secret verbs and provider-credential set from the acq secret store instead of failing with unsupported_capability (secret-msb-unsupported keeps its id but now asserts an empty listing). The msb create/run vectors gained an ACQ_SECRET_STORE_DIR redirect because create now reads the store to bind secrets.",
+    "ADR-0043m deviation: a vector is one CLI invocation with no fixtures, and neither runner implements invoke.fixtures yet. Vectors whose oracle needs a seeded acq secret store (cli/secret-ls-msb, cli/secret-has-msb-scoped-over-global, cli/secret-rm-msb, cli/create-msb-binds-usai, cli/secret-has-present) therefore invoke test/vectors/drivers/seeded-run.py, which runs earlier acq calls to seed state, reports one observed acq invocation, and fails the vector if any other step exits unexpectedly or the stdin sentinel appears in any step's output. Replace the driver with invoke.fixtures once both runners implement it.",
     "Legacy-suite retirement classification: docs/test-retirement-inventory.md buckets every test/bats file as preserve/re-express/retire and records gaps G1-G19. This manifest maps only the preserve-tier contract rows to vectors; the inventory is the authoritative cross-reference from legacy tests to vectors and DROP rows."
   ],
   "rows": [
@@ -188,8 +190,16 @@
       "vectors": ["cli/secret-rm-missing", "cli/secret-ls-unreadable", "cli/secret-ls-bad-shape", "cli/secret-ls-entry-bad-shape"]
     },
     {
-      "contract": "ADR-0040m unsupported-capability fail-closed for secret listing on msb (msb has no `secret` subcommand; secret-list is sbx)",
-      "vectors": ["cli/secret-msb-unsupported"]
+      "contract": "msb secret-write/rm/list (ADR-0040m reconciliation): msb has no `secret` subcommand, so the verbs are served from the acq secret store and delivered as --secret ENV@HOST bindings; ls reports each entry's ENV@HOST binding, a service msb cannot bind is refused before it is stored, and no value is ever echoed",
+      "vectors": ["cli/secret-msb-unsupported", "cli/secret-set-msb", "cli/secret-ls-msb", "cli/secret-rm-msb"]
+    },
+    {
+      "contract": "ADR-0038m scoped-over-global credentials on msb: secret has means 'can be injected'; a sandbox value answers only for that sandbox, and a sandbox without one falls back to the global value",
+      "vectors": ["cli/secret-has-msb-scoped-over-global"]
+    },
+    {
+      "contract": "msb create binds every injectable secret as --secret ENV@HOST (reported as secret_bindings); the value reaches msb only through its environment, never argv or output",
+      "vectors": ["cli/create-msb-binds-usai"]
     },
     {
       "contract": "secret import (Bash acq_secret_import parity): known host tokens (USAI_API_KEY, GITHUB_TOKEN/GH_TOKEN, GITLAB_TOKEN, registered provider KEY_ENVs) go to the acq secret store with no backend; --all never overwrites, --dry-run writes nothing, a non-TTY interactive run skips, a multi-line value is refused, and no value is ever echoed",

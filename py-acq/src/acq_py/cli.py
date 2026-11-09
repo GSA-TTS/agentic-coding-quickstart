@@ -284,6 +284,10 @@ def build_parser() -> _Parser:
     common._secret_scope_args(secret_set, remainder_help="[-g | SANDBOX] SERVICE [--host HOST --env ENV]")
 
     secret_rm = secret_sub.add_parser("rm", help="remove a secret")
+    secret_rm.add_argument(
+        "--accept-unconfirmed", dest="accept_unconfirmed", action="append", metavar="NAME[,NAME]",
+        help="accept these sandboxes (with no acq binding record) staying unconfirmed (msb)",
+    )
     common._secret_scope_args(secret_rm, remainder_help="[-g | SANDBOX] SERVICE")
 
     secret_ls = secret_sub.add_parser("ls", help="list secrets (scope/service/value-state, never values)")
