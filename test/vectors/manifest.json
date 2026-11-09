@@ -241,7 +241,15 @@
     },
     {
       "contract": "ADR-0038m §1 / spec story #9 passthrough: verbatim forwarding, announced stderr notice, status preserved",
-      "vectors": ["cli/passthrough", "cli/passthrough-exit-code"]
+      "vectors": ["cli/passthrough", "cli/passthrough-exit-code", "cli/passthrough-sbx-bin-seam"]
+    },
+    {
+      "contract": "ADR-0038m §1/§2 passthrough failures before the handoff keep the error contract: unknown --backend is usage (exit 2); a backend CLI that cannot be run is backend_not_found (exit 1)",
+      "vectors": ["cli/passthrough-unknown-backend", "cli/passthrough-backend-missing", "cli/passthrough-sbx-backend-missing"]
+    },
+    {
+      "contract": "ADR-0038m §2 / ADR-0040m command boundary: a backend CLI missing after detection gives backend_not_found with an envelope, never a traceback (ls, session verbs)",
+      "vectors": ["cli/ls-backend-missing", "cli/exec-backend-missing"]
     },
     {
       "contract": "ADR-0042m runtime: offline operation, no opportunistic download",

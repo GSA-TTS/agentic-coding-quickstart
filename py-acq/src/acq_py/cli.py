@@ -23,6 +23,9 @@ Output contract:
     * human output -> stdout, diagnostics -> stderr (no ``--json``)
     * JSON envelope -> stdout, diagnostics -> stderr (``--json``)
     * exit 0 success, 2 usage error, 1 operational failure
+    * ``main`` is the command boundary: an adapter error or host ``OSError`` a
+      handler did not map itself still leaves as a stable code and envelope,
+      never a traceback
 """
 
 from __future__ import annotations
@@ -477,6 +480,46 @@ def main(argv: list[str] | None = None) -> int:
     except UsageError as exc:
         return common._usage_failure(None, str(exc), emit_json)
 
+    try:
+        return _dispatch(parser, parsed, emit_json, backend_override)
+    except common._ADAPTER_ERRORS as exc:
+        # The command boundary (ADR-0038m §2): an adapter error a handler did not
+        # map itself (e.g. the backend CLI vanished after detection, or detection
+        # was forced) still leaves as a stable code + envelope, never a traceback.
+        return _boundary_failure(parsed, exc.code, exc.message, exc.remediation, emit_json)
+    except BrokenPipeError:
+        raise  # stdout is gone; there is nowhere to write an envelope
+    except OSError as exc:
+        # Host I/O failures (an unwritable state directory, a full disk) likewise
+        # keep the contract. The message carries the OS reason and path only.
+        where = f" ({exc.filename})" if exc.filename else ""
+        return _boundary_failure(
+            parsed,
+            errors.FAILURE,
+            f"could not complete '{_boundary_label(parsed)}': {exc.strerror or exc}{where}",
+            "check permissions and free space for the acq state and config directories, then retry",
+            emit_json,
+        )
+
+
+def _boundary_failure(parsed, code: str, message: str, remediation: str | None, emit_json: bool) -> int:
+    """Emit a failure caught at the command boundary for ``parsed``'s verb.
+
+    ``secret has`` is a silent predicate whose stdout stays empty even under
+    ``--json``, so its failure goes to stderr only (exit 1, never "absent").
+    """
+    label = _boundary_label(parsed)
+    if label == "secret has":
+        emit_json = False
+    return common._operational_failure(label, code, message, remediation, emit_json)
+
+
+def _boundary_label(parsed) -> str:
+    return _command_label(parsed) if parsed.command else "acq"
+
+
+def _dispatch(parser: _Parser, parsed, emit_json: bool, backend_override: str | None) -> int:
+    """Route a parsed command line to its handler; ``main`` owns the error boundary."""
     if parsed.version or parsed.command == "version":
         # The `version` command lives in version_info.py (data + output), imported
         # lazily so a break there affects only `acq version`, never the oracle's

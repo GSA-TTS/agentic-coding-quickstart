@@ -1,0 +1,63 @@
+{
+  "schema": 1,
+  "id": "cli/passthrough-sbx-backend-missing",
+  "oracle": "ADR-0038m §1 passthrough on sbx: a forwarded verb whose sbx CLI cannot be run fails with backend_not_found (exit 1), the same as msb",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{acq}",
+      "--backend",
+      "sbx",
+      "--json",
+      "notaverb"
+    ],
+    "env": {
+      "ACQ_SBX_BIN": "/nonexistent/acq-vector/sbx",
+      "ACQ_SBX_VERSION": "0.51.0",
+      "ACQ_SBX_INSTALLED": "1",
+      "ACQ_MSB_INSTALLED": "0"
+    },
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "ACQ_SBX_READY_TIMEOUT",
+      "ACQ_SBX_STUB_EXIT_CODE",
+      "ACQ_SBX_STUB_CATALOG",
+      "ACQ_SBX_STUB_FAIL"
+    ],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 1,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "notaverb",
+        "error": {
+          "code": "backend_not_found"
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME"
+    ]
+  }
+}

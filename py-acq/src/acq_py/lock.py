@@ -5,9 +5,9 @@ advisory lock: ``fcntl.flock`` on POSIX, ``msvcrt.locking`` on Windows. Both are
 *advisory* locks the operating system releases automatically when the holding
 process exits — including on a crash — so a crashed migration can never strand
 state behind a stale lock. A second invocation waits a bounded interval
-(:data:`DEFAULT_TIMEOUT_S`, overridable via ``ACQ_MIGRATION_LOCK_TIMEOUT``) and
-then fails closed with :class:`MigrationLockTimeout` rather than racing the
-in-flight migration.
+(:data:`DEFAULT_TIMEOUT_S`, overridable via ``ACQ_MIGRATION_LOCK_TIMEOUT``, read
+at each acquisition rather than at import) and then fails closed with
+:class:`MigrationLockTimeout` rather than racing the in-flight migration.
 
 This is an internal primitive, not part of the public ``acq`` command surface.
 """
@@ -19,17 +19,28 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+from . import timeouts
+
 if os.name == "nt":  # pragma: no cover - exercised only on Windows hosts
     import msvcrt
 else:
     import fcntl
 
-# Bounded wait before a second invocation fails closed (seconds). Overridable so
-# a contract/unit vector can observe the fail-closed path without a long wait.
-DEFAULT_TIMEOUT_S = float(os.environ.get("ACQ_MIGRATION_LOCK_TIMEOUT", "5.0"))
+# Bounded wait before a second invocation fails closed (seconds). Overridable via
+# TIMEOUT_ENV so a contract/unit vector can observe the fail-closed path without
+# a long wait. The override is read lazily by ``configured_timeout_s()``: a
+# malformed value must not crash an unrelated command at import, and a
+# non-finite one must not make the bounded wait unbounded.
+DEFAULT_TIMEOUT_S = 5.0
+TIMEOUT_ENV = "ACQ_MIGRATION_LOCK_TIMEOUT"
 
 # Poll interval between non-blocking acquisition attempts.
 _RETRY_INTERVAL_S = 0.05
+
+
+def configured_timeout_s() -> float:
+    """The bounded lock wait in seconds: ``$ACQ_MIGRATION_LOCK_TIMEOUT`` or the default."""
+    return timeouts.env_seconds(TIMEOUT_ENV, DEFAULT_TIMEOUT_S)
 
 
 class MigrationLockTimeout(Exception):
@@ -41,14 +52,17 @@ class MigrationLockTimeout(Exception):
 
 
 @contextmanager
-def exclusive_lock(path: Path, timeout_s: float = DEFAULT_TIMEOUT_S):
+def exclusive_lock(path: Path, timeout_s: float | None = None):
     """Hold an exclusive OS advisory lock on ``path`` for the duration of the block.
 
     Creates ``path`` (and its parent) if needed. Waits up to ``timeout_s`` for the
-    lock; raises :class:`MigrationLockTimeout` past the deadline. The lock is
+    lock (default: :func:`configured_timeout_s`, read now rather than at import);
+    raises :class:`MigrationLockTimeout` past the deadline. The lock is
     released in a ``finally`` on normal exit *and* is auto-released by the OS if
     the process dies without cleanup (a crash).
     """
+    if timeout_s is None:
+        timeout_s = configured_timeout_s()
     path.parent.mkdir(parents=True, exist_ok=True)
     fh = open(path, "a+b")
     deadline = time.monotonic() + timeout_s
