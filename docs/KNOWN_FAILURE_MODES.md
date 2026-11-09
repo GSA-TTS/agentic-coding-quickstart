@@ -3644,6 +3644,44 @@ enforcement; enabling it is the `security.WINDOWS` platform check in
 
 ---
 
+## 55. Python acq: sbx Key Rotation Not Yet Verified Against a Real sbx
+
+**Status:** Deferred live check (sbx, Python `acq`).
+
+### Symptoms
+
+None observed yet. The risk: after `acq usai-rotate-api-key` on sbx, a running
+sandbox keeps getting `401` from USAi because sbx gave its custom secret a new
+placeholder, or added a second entry, instead of updating the existing one.
+
+### Root Cause
+
+sbx has no `rotate` subcommand. The Python acq re-sets each custom secret that
+carries the USAi key with `sbx secret set-custom --host H --env E --placeholder P
+--value-stdin`, so the key goes on stdin. The Bash adapter uses `--placeholder P`
+too, but lets sbx prompt for the value. That `--placeholder` with `--value-stdin`
+updates the entry in place and keeps `P` is modelled by the bundled sbx stub and
+has not been run against a real sbx.
+
+### Fix
+
+The Python acq does not trust it. After each `set-custom` it re-reads `sbx secret
+ls --json` and requires exactly one entry for that scope and env carrying the
+same placeholder. If sbx minted a new placeholder or a duplicate, the entry is
+reported as not re-fed and the command exits 1. To recover a sandbox left with a
+placeholder sbx no longer maps, use the ADR-0008 rebind or recreate it, then
+re-run the rotation.
+
+### Prevention / Status
+
+**Unblock trigger:** the next sbx live qualification run (sbx >= 0.51.0) with a
+host USAi key. Run `acq usai-rotate-api-key` with `ACQ_IMPL=python` against a
+sandbox created with the old key, confirm `sbx secret ls --json` still shows one
+entry with the same placeholder, and that the sandbox reaches USAi with the new
+key on its next attach. Record the transcript, then close this entry.
+
+---
+
 ## Contributing
 
 When you discover a new failure mode:

@@ -75,8 +75,17 @@ exit 1, the `unsupported_capability` code, and remediation.
 > --value-stdin` (sbx >= 0.51.0), which keeps the placeholder running sandboxes
 > were injected with (ADR-0008). Rotation does not call the provider, so it never
 > returns `provider_unreachable`/`provider_auth_failed`; the key is checked at
-> the next attach. A sandbox that misses the new key fails the command (exit 1,
-> naming it), and re-running the rotation retries it.
+> the next attach. Every backend to be re-fed is checked before the key is
+> stored, so a refusal changes nothing. A sandbox that misses the new key, or
+> an installed backend below acq's floor that may hold it, fails the command
+> (exit 1, naming it in `error.backends`), and re-running the rotation retries
+> it. On sbx, rotation also overwrites every sandbox-scoped custom secret for
+> the key that acq did not store (such as an ADR-0008 rebind, or one added by
+> hand with `sbx secret set-custom --sandbox`): acq treats such an entry as a
+> copy of the global key. Only a sandbox with its own `usai` value in the acq
+> store (`acq secret set NAME usai`) keeps it. After each `set-custom` acq
+> re-reads the listing and requires the entry to keep its placeholder; that
+> sbx does so is not yet verified live (KNOWN_FAILURE_MODES 55).
 
 The record is a declaration; conformance is proven, not trusted: each
 declared capability is asserted by a Tier-1 subprocess vector (working, or
