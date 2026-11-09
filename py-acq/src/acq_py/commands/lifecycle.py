@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
+from dataclasses import dataclass
 
-from .. import envelope, errors, kits, lock, msb, sbx, security, state
+from .. import envelope, errors, kit_msb, kits, kitspec, lock, msb, sbx, security, state
 from . import common, session
 
 # Substrate-contract seam (internal test seam, never a secret, never written to
@@ -48,26 +50,6 @@ def _resolve_image(flag_image: str | None, agent: str) -> str:
     if msb_image:
         return msb_image
     return common._default_image_for_agent(agent)
-
-
-def _resolve_image_for_kit(
-    image_flag: str | None, agent: str, kit_name: str | None, command: str, emit_json: bool
-) -> tuple[str | None, list[tuple[str, list[str]]], int | None]:
-    """Resolve the base image and, for a kit, plan the substrate contract (ADR-0030).
-
-    A kit installs into the devenv substrate, so acq verifies the selected image
-    against the bring-your-own image contract and provisions addressable gaps
-    in-guest rather than rejecting. Returns ``(image, provision_steps, exit_code)``:
-    ``provision_steps`` are the substrate bootstrap steps to run before the agent
-    install (empty for the default devenv base, which satisfies the contract by
-    construction); ``exit_code`` is non-``None`` when the substrate is unverifiable
-    or a gap is unaddressable (fail closed).
-    """
-    image = _resolve_image(image_flag, agent)
-    provision, exit_code = _substrate_plan(image, kit_name, command, emit_json)
-    if exit_code is not None:
-        return None, [], exit_code
-    return image, provision, None
 
 
 def _substrate_gaps(image: str) -> list[str] | None:
@@ -161,66 +143,147 @@ def _substrate_plan(
     return _substrate_provision_steps(addressable), None
 
 
-def _validate_kit_flag(kit_flag: str | None, command: str, emit_json: bool) -> tuple[str | None, int | None]:
-    """Validate an explicit ``--kit``; returns ``(kit_name, exit_code)``.
+def _cli_kit_refs(values: list[str] | None) -> list[str]:
+    """``--kit`` values as kit refs (Bash: repeatable, each an extra kit ref).
 
-    An explicit ``--kit`` must name a built-in agent kit (ADR-0030 "Agent kit
-    inference"): an unknown name is a usage error (exit 2), and team/personal kit
-    sources are never resolved here.
+    A built-in agent kit name (``opencode``) stands for the pinned ref of that
+    bundled kit, so ``--kit opencode`` still applies the agent kit. Any other
+    value is a ref; one the bundle does not hold is refused before create
+    (:func:`kit_msb.resolve`).
     """
-    if kit_flag is None:
-        return None, None
-    if not kits.is_agent_kit(kit_flag):
-        return None, common._usage_failure(
-            command,
-            f"unknown kit: {kit_flag!r} (built-in agent kits: {', '.join(kits.AGENT_KIT_NAMES)})",
+    out = []
+    for value in values or []:
+        entry = kitspec.AGENT_BUNDLE_KITS.get(value)
+        out.append(kitspec.builtin_kit_ref(entry[0]) if entry else value)
+    return out
+
+
+@dataclass(frozen=True)
+class _KitPlan:
+    """The kits an msb create applies, and which of them provides the agent (if any)."""
+
+    kits: list[kit_msb.Kit]
+    agent_kit: str | None
+
+    @property
+    def entrypoint(self) -> str | None:
+        for kit in self.kits:
+            if kit.name == self.agent_kit:
+                return kit.spec.agent_field("entrypoint")
+        return None
+
+
+def _plan_msb_kits(
+    agent: str, cli_kits: list[str], image: str, command: str, emit_json: bool, extras: list[str] | None = None
+) -> tuple[_KitPlan | None, int | None]:
+    """Select, verify and parse the kit set for an msb create (:func:`kit_msb.select`).
+
+    Only a kit chosen as the agent kit or passed with ``--kit`` can provide the
+    agent: an extra kit is never inferred as one (ADR-0030).
+    """
+    try:
+        resolved = kit_msb.select(agent, cli_kits, image_is_default=image == common.OPENCODE_DEVENV_IMAGE,
+                                  extras=extras)
+    except kitspec.KitSelectionError as exc:
+        return None, common._operational_failure(
+            command, errors.VALIDATION_FAILED, str(exc),
+            "fix the kit selection (config extra_kits or provider_kit, ACQ_EXTRA_KITS, ACQ_PROVIDER_KITS, --kit)",
             emit_json,
         )
-    return kit_flag, None
+    except msb.MsbError as exc:
+        return None, common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
+    agent_kit = next(
+        (k.name for k in resolved if k.role in ("agent", "cli") and k.name in kitspec.AGENT_BUNDLE_KITS), None
+    )
+    return _KitPlan(resolved, agent_kit), None
 
 
-def _apply_agent_kit(
-    backend: str, name: str, kit_name: str, provision_steps: list[tuple[str, list[str]]], command: str, emit_json: bool
-) -> int | None:
-    """Apply a built-in agent kit to a sandbox (create-time install, ADR-0030).
+def _apply_msb_kits(
+    name: str, plan: _KitPlan, provision_steps: list[tuple[str, list[str]]], command: str, emit_json: bool,
+    *, ro_required: bool,
+) -> tuple[kit_msb.ApplyResult | None, int | None]:
+    """Provision substrate gaps, then apply the whole kit set to a new guest (ADR-0030).
 
-    Idempotent and host-authoritative: a sandbox already on ``kit_name`` is a
-    no-op (no duplicate install), tracked by the applied-kit record (ADR-0041m).
-    Addressable substrate gaps are provisioned in-guest (bootstrap single-user Nix
-    + devenv + direnv + the agent user) before the agent install. acq never
-    executes kit code on the host, and the install argv carries no credential
-    (ADR-0038m §46, §7). Returns an emitted exit code on failure, else ``None``.
+    A kit that does not apply in full is a warning, as in Bash, unless it is the
+    agent kit: without it the default image has no agent, so the create fails.
+    Provenance is recorded only when every kit applied (ADR-0038m §3).
     """
-    if not common._supports(backend, "kit-apply"):
-        return common._operational_failure(
-            command,
-            errors.UNSUPPORTED,
-            f"kit apply is not supported on the {backend} backend",
-            "the agent kit requires kit-apply; use a backend that supports it (msb in this slice)",
-            emit_json,
-        )
-    existing = kits.kit_applied_read(backend, name)
-    if existing and existing.get("kit") == kit_name:
-        return None  # already applied: idempotent no-op
     try:
         if provision_steps:
-            common._adapter(backend).provision_substrate(name, provision_steps)
-        common._adapter(backend).kit_apply(name, kit_name, kits.agent_kit_install(kit_name))
-    except common._ADAPTER_ERRORS as exc:
-        return common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
+            msb.provision_substrate(name, provision_steps)
+    except msb.MsbError as exc:
+        return None, common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
+    result = kit_msb.ensure_kits_applied(name, plan.kits, ro_required=ro_required)
+    if plan.agent_kit in result.incomplete:
+        return None, common._operational_failure(
+            command, errors.FAILURE, f"could not apply kit '{plan.agent_kit}' to sandbox '{name}'",
+            "check network access from the sandbox and the warnings above, then retry", emit_json,
+        )
     try:
-        kits.kit_applied_write(backend, name, kit_name, kits.agent_kit_entrypoint(kit_name))
+        kit_msb.cli_kits_write(name, plan.kits)
+        if plan.agent_kit is not None:
+            kits.kit_applied_write("msb", name, plan.agent_kit, plan.entrypoint or plan.agent_kit)
+        if not result.incomplete:
+            kits.provenance_write("msb", name)
     except OSError as exc:
-        # The kit is installed but acq could not record it. Report it through the
-        # error contract; the caller discards the half-created sandbox.
-        return common._operational_failure(
-            command,
-            errors.FAILURE,
+        return None, common._operational_failure(
+            command, errors.FAILURE,
             f"could not record the applied kit for sandbox '{name}': {exc.strerror or exc}",
-            "check that the acq state directory is writable and has free space, then retry",
+            "check that the acq state directory is writable and has free space, then retry", emit_json,
+        )
+    return result, None
+
+
+def _kit_data(plan: _KitPlan, result: kit_msb.ApplyResult) -> dict:
+    data: dict = {"kit": plan.agent_kit, "entrypoint": plan.entrypoint, "kits": result.applied}
+    if result.incomplete:
+        data["kits_incomplete"] = result.incomplete
+    return data
+
+
+def _new_msb_sandbox(
+    command: str, emit_json: bool, *, agent: str, workspace: str, name: str, image_flag: str | None,
+    cli_kits: list[str],
+) -> tuple[dict | None, int | None]:
+    """Plan the kits, create the guest, apply the kits; the result data or an emitted exit code."""
+    image = _resolve_image(image_flag, agent)
+    plan, exit_code = _plan_msb_kits(agent, cli_kits, image, command, emit_json)
+    if plan is None:
+        return None, exit_code
+    steps, exit_code = _substrate_plan(image, plan.agent_kit, command, emit_json)
+    if exit_code is not None:
+        return None, exit_code
+    try:
+        data = _create_sandbox("msb", agent, workspace, name, image, plan.agent_kit, plan=plan)
+    except common._ADAPTER_ERRORS as exc:
+        return None, common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
+    result, exit_code = _apply_msb_kits(name, plan, steps, command, emit_json, ro_required=data["ro_host_config"])
+    if result is None:
+        _discard_half_created("msb", name)
+        return None, exit_code
+    return {**data, **_kit_data(plan, result)}, None
+
+
+def _new_sbx_sandbox(
+    command: str, emit_json: bool, *, agent: str, workspace: str, name: str, image_flag: str | None,
+    cli_kits: list[str],
+) -> tuple[dict | None, int | None]:
+    """Create an sbx sandbox; it cannot apply kits in this slice, so an agent that needs one is refused."""
+    kit_name = kits.agent_kit_for(agent)
+    if cli_kits or (kit_name is not None and not common._supports("sbx", "kit-apply")):
+        wanted = f"the '{kit_name}' kit" if kit_name and not cli_kits else "the requested kits"
+        return None, common._operational_failure(
+            command,
+            errors.UNSUPPORTED,
+            f"agent '{agent}' requires {wanted}, which the sbx backend cannot apply",
+            "use a backend that supports kit-apply (msb in this slice), or choose an agent without a kit",
             emit_json,
         )
-    return None
+    try:
+        data = _create_sandbox("sbx", agent, workspace, name, _resolve_image(image_flag, agent), None)
+    except common._ADAPTER_ERRORS as exc:
+        return None, common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
+    return {**data, "kit": None, "entrypoint": None}, None
 
 
 def _discard_half_created(backend: str, name: str) -> None:
@@ -254,8 +317,11 @@ def _clear_host_records(backend: str, name: str) -> None:
     """
     state.record_remove(backend, name)
     kits.kit_applied_remove(backend, name)
+    kits.provenance_remove(backend, name)
     if backend == "msb":
         msb.held_forget(name)
+        kit_msb.remove_host_config(name)
+        kit_msb.cli_kits_remove(name)
 
 
 def _has_host_records(backend: str, name: str) -> bool:
@@ -322,29 +388,24 @@ def _create_sandbox(
     image: str,
     kit_name: str | None,
     *,
-    ro_host_config: bool | None = None,
+    plan: _KitPlan | None = None,
 ) -> dict:
     """Create + exec-ready gate + record write; returns the result record data.
 
-    On msb the egress policy is derived from the built-in kits plus ``kit_name``
-    (the agent kit about to be applied, if any); see ``msb.egress_flags``. The
-    ``ENV@HOST`` secret bindings msb created the sandbox with are reported as
-    ``secret_bindings`` (names and hosts only, never a value).
+    On msb, ``plan``'s kits set the egress policy and create flags. When msb can
+    enforce it the host-config directory is mounted read-only, and the record
+    says ``ro_host_config`` only after :func:`_confirm_ro_mount`. Secret
+    bindings are reported by name and host only, never a value.
     """
     adapter = common._adapter(backend)
     error_cls = sbx.SbxError if backend == "sbx" else msb.MsbError
     secret_bindings: list[str] | None = None
+    ro_mount = False
     if backend == "sbx":
         adapter.create(name, image, workspace, agent=agent)
     else:
-        secret_bindings = adapter.create(
-            name,
-            image,
-            workspace,
-            memory=msb.DEFAULT_MEMORY,
-            cpus=msb.DEFAULT_CPUS,
-            egress_kits=kits.egress_kit_names(kit_name),
-        ) or []
+        ro_mount = security.ro_mount_supported()
+        secret_bindings = _msb_create(name, image, workspace, plan.kits if plan else [], ro_mount=ro_mount)
     if not _wait_exec_ready(backend, name):
         # A half-created sandbox must not strand (legacy cleanup).
         _remove_quietly(adapter, name)
@@ -353,23 +414,8 @@ def _create_sandbox(
             f"sandbox '{name}' did not become exec-ready",
             f"check {backend} logs, then remove the half-created sandbox and retry",
         )
-    # The guest is brand new, so no kit is installed in it. An applied-kit record
-    # left by a sandbox of the same name that was removed outside acq would
-    # otherwise make the kit apply a no-op on a guest without the agent.
-    kits.kit_applied_remove(backend, name)
-    try:
-        state.record_write(backend, name, agent=agent, workspace=workspace, image=image, ro_host_config=ro_host_config)
-    except OSError as exc:
-        # Without its host record the guest is unusable (run/attach refuse a
-        # sandbox with no readable record), so it must not strand either. The
-        # failure is raised as the adapter's error so every caller reports it
-        # through the same envelope path as a backend failure.
-        _remove_quietly(adapter, name)
-        raise error_cls(
-            errors.FAILURE,
-            f"could not write the host state record for sandbox '{name}': {exc.strerror or exc}",
-            "check that the acq state directory is writable and has free space, then retry",
-        ) from exc
+    _fresh_guest(backend, adapter, name, ro_mount=ro_mount)
+    _write_record(backend, name, agent=agent, workspace=workspace, image=image, ro_host_config=ro_mount)
     data: dict = {
         "name": name,
         "backend": backend,
@@ -380,7 +426,82 @@ def _create_sandbox(
     }
     if secret_bindings is not None:
         data["secret_bindings"] = secret_bindings
+        data["ro_host_config"] = ro_mount
     return data
+
+
+def _fresh_guest(backend: str, adapter, name: str, *, ro_mount: bool) -> None:
+    """Forget what described an earlier guest of this name, then confirm the new one's mount.
+
+    Records left by a sandbox removed outside acq must not describe the new
+    guest (no kit is installed in it yet).
+    """
+    kits.kit_applied_remove(backend, name)
+    kits.provenance_remove(backend, name)
+    if backend == "msb":
+        kit_msb.clear_instance_state(name)
+        if ro_mount:
+            _confirm_ro_mount(adapter, name)
+
+
+def _write_record(backend: str, name: str, *, agent: str, workspace: str, image: str, ro_host_config: bool) -> None:
+    """Write the new guest's host record, or remove the guest and raise the adapter's error.
+
+    Without its host record the guest is unusable (run/attach refuse a sandbox
+    with no readable record), so it must not strand.
+    """
+    try:
+        state.record_write(backend, name, agent=agent, workspace=workspace, image=image,
+                           ro_host_config=True if ro_host_config else None)
+    except OSError as exc:
+        _remove_quietly(common._adapter(backend), name)
+        error_cls = sbx.SbxError if backend == "sbx" else msb.MsbError
+        raise error_cls(
+            errors.FAILURE,
+            f"could not write the host state record for sandbox '{name}': {exc.strerror or exc}",
+            "check that the acq state directory is writable and has free space, then retry",
+        ) from exc
+
+
+def _msb_create(name: str, image: str, workspace: str, kit_set: list[kit_msb.Kit], *, ro_mount: bool) -> list[str]:
+    """``msb create`` with the kit set's flags; the staged startup script is removed after."""
+    try:
+        flags, staged = kit_msb.create_flags(name, kit_set, ro_mount=ro_mount)
+    except OSError as exc:
+        raise msb.MsbError(
+            errors.FAILURE,
+            f"could not prepare the host-config directory for sandbox '{name}': {exc.strerror or exc}",
+            "check that the acq state directory is writable and has free space, then retry",
+        ) from exc
+    try:
+        return msb.create(
+            name, image, workspace, memory=msb.DEFAULT_MEMORY, cpus=msb.DEFAULT_CPUS,
+            egress_kits=kit_msb.egress_names(kit_set), kit_flags=flags,
+        ) or []
+    finally:
+        kit_msb.discard_staged(staged)
+
+
+def _confirm_ro_mount(adapter, name: str) -> None:
+    """Confirm a new guest's read-only host-config mount, or remove the guest (ADR-0035).
+
+    acq asked msb for the mount, so a guest without a confirmed one is not the
+    sandbox it meant to create: it is removed rather than recorded without the
+    guarantee.
+    """
+    status, reason = security.probe_mount(name)
+    if status != "ok":
+        _remove_quietly(adapter, name)
+        raise msb.MsbError(
+            errors.SECURITY_EXCEPTION,
+            f"sandbox '{name}' was created, but its read-only trusted-config mount could not be "
+            f"confirmed ({reason}); the sandbox was removed",
+            "check the msb version and 'msb inspect', then retry",
+        )
+    try:
+        kit_msb.hc_write(name, "ro-host-config", "1")  # the record Bash's gate reads
+    except OSError:
+        pass
 
 
 def _remove_quietly(adapter, name: str) -> None:
@@ -414,21 +535,17 @@ def run_create(parsed, emit_json: bool, backend: str) -> int:
     if exit_code is not None:
         return exit_code
     assert workspace is not None  # nosec B101 # resolver contract; narrows the type for mypy
-    kit_name, exit_code = _validate_kit_flag(parsed.kit, "create", emit_json)
-    if exit_code is not None:
-        return exit_code
-    if kit_name is None:
-        kit_name = kits.agent_kit_for(parsed.agent)  # implicit inference (built-in only)
+    cli_kits = _cli_kit_refs(parsed.kit)
     name = parsed.name or common._derive_name(parsed.agent, workspace)
     workspace = common._mount_workspace(backend, workspace)
     try:
         with lock.sandbox_lock(backend, name):
-            return _create_locked(parsed, emit_json, backend, name, workspace, kit_name)
+            return _create_locked(parsed, emit_json, backend, name, workspace, cli_kits)
     except lock.SandboxLockTimeout as exc:
         return _lock_failure("create", name, exc, emit_json)
 
 
-def _create_locked(parsed, emit_json: bool, backend: str, name: str, workspace: str, kit_name: str | None) -> int:
+def _create_locked(parsed, emit_json: bool, backend: str, name: str, workspace: str, cli_kits: list[str]) -> int:
     """The body of ``create`` once the sandbox's lifecycle lock is held."""
     adapter = common._adapter(backend)
     if adapter.exists(name):
@@ -439,36 +556,13 @@ def _create_locked(parsed, emit_json: bool, backend: str, name: str, workspace: 
             f"re-attach with 'acq run {name}', or remove it with 'acq rm {name}'",
             emit_json,
         )
-    # Fail closed BEFORE create when the agent needs a kit the backend can't apply
-    # (never strand a half-provisioned sandbox missing its agent binary). SBX
-    # declares kit-apply unsupported in this slice: it will instead use a neutral
-    # shell launcher token (ADR-0030 "on both backends" rollout) once kit-apply
-    # lands there — reconcile later.
-    if kit_name is not None and not common._supports(backend, "kit-apply"):
-        return common._operational_failure(
-            "create",
-            errors.UNSUPPORTED,
-            f"agent '{parsed.agent}' requires the '{kit_name}' kit, which the {backend} backend cannot apply",
-            "use a backend that supports kit-apply (msb in this slice), or choose an agent without a kit",
-            emit_json,
-        )
-    image, provision_steps, exit_code = _resolve_image_for_kit(parsed.image, parsed.agent, kit_name, "create", emit_json)
-    if exit_code is not None:
-        return exit_code
-    assert image is not None  # nosec B101 # resolver contract; narrows the type for mypy
-    try:
-        data = _create_sandbox(backend, parsed.agent, workspace, name, image, kit_name)
-    except common._ADAPTER_ERRORS as exc:
-        return common._operational_failure("create", exc.code, exc.message, exc.remediation, emit_json)
-    entrypoint = None
-    if kit_name is not None:
-        gate = _apply_agent_kit(backend, name, kit_name, provision_steps, "create", emit_json)
-        if gate is not None:
-            _discard_half_created(backend, name)
-            return gate
-        entrypoint = kits.agent_kit_entrypoint(kit_name)
-    data["kit"] = kit_name
-    data["entrypoint"] = entrypoint
+    new_sandbox = _new_sbx_sandbox if backend == "sbx" else _new_msb_sandbox
+    data, exit_code = new_sandbox(
+        "create", emit_json, agent=parsed.agent, workspace=workspace, name=name, image_flag=parsed.image,
+        cli_kits=cli_kits,
+    )
+    if data is None:
+        return exit_code if exit_code is not None else errors.EXIT_FAILURE
     if emit_json:
         print(json.dumps(envelope.success("create", data)))
     else:
@@ -554,31 +648,32 @@ def run_recreate(parsed, emit_json: bool, backend: str) -> int:
         return _lock_failure("create", name, exc, emit_json)
 
 
+def _recreate_record(backend: str, name: str, emit_json: bool) -> tuple[dict | None, int | None]:
+    """The record a recreate rebuilds from, or the emitted refusal (unreadable or absent)."""
+    try:
+        record = state.record_read(backend, name)
+    except state.StateSchemaError as exc:
+        return None, common._operational_failure(
+            "create", errors.STATE_SCHEMA_UNSUPPORTED, str(exc),
+            f"remove the unreadable record for '{name}', or recreate it out of band", emit_json,
+        )
+    if record is None:
+        return None, common._operational_failure(
+            "create", errors.SANDBOX_NOT_FOUND, f"sandbox '{name}' has no host state record to recreate",
+            "create it with 'acq create', or list sandboxes with 'acq ls'", emit_json,
+        )
+    return record, None
+
+
 def _recreate_locked(name: str, emit_json: bool, backend: str) -> int:
     """The body of ``create --recreate`` once the lifecycle lock is held.
 
     The record is read again under the lock: another command may have removed
     the sandbox while the consent prompt was open.
     """
-    adapter = common._adapter(backend)
-    try:
-        record = state.record_read(backend, name)
-    except state.StateSchemaError as exc:
-        return common._operational_failure(
-            "create",
-            errors.STATE_SCHEMA_UNSUPPORTED,
-            str(exc),
-            f"remove the unreadable record for '{name}', or recreate it out of band",
-            emit_json,
-        )
+    record, exit_code = _recreate_record(backend, name, emit_json)
     if record is None:
-        return common._operational_failure(
-            "create",
-            errors.SANDBOX_NOT_FOUND,
-            f"sandbox '{name}' has no host state record to recreate",
-            "create it with 'acq create', or list sandboxes with 'acq ls'",
-            emit_json,
-        )
+        return exit_code if exit_code is not None else errors.EXIT_FAILURE
     # Eligibility again, under the lock: a concurrent recreate may have rebuilt
     # the sandbox while this one waited, and its guest must not be destroyed.
     exit_code = _recreate_ineligible(record, backend, name, emit_json)
@@ -590,62 +685,87 @@ def _recreate_locked(name: str, emit_json: bool, backend: str) -> int:
         # Records written before msb workspaces were canonicalized hold the symlink form.
         workspace = common._mount_workspace(backend, workspace)
     image = record.get("image") or common._default_image_for_agent(agent)
-    ro_host_config = bool(record.get("ro_host_config"))
-    # Fail closed BEFORE recreation when the recorded agent needs a kit the
-    # backend can't apply: a legacy sbx opencode sandbox must not be recreated
-    # and then discarded because kit-apply is unsupported there (ADR-0040m).
-    kit_name = kits.agent_kit_for(agent)
-    if kit_name is not None and not common._supports(backend, "kit-apply"):
+    if backend != "msb":
         return common._operational_failure(
             "create",
             errors.UNSUPPORTED,
-            f"agent '{agent}' requires the '{kit_name}' kit, which the {backend} backend cannot apply",
-            "use a backend that supports kit-apply (msb in this slice) to recreate this sandbox",
+            f"cannot recreate sandbox '{name}': the read-only trusted-config mount is an msb-only guarantee",
+            f"remove it with 'acq rm {name}' and create it again",
             emit_json,
         )
-    # Verify the recorded image's substrate contract before recreating: a kit on an
-    # unverifiable or unaddressable image fails closed, an addressable gap is
-    # provisioned in-guest after recreation.
-    provision_steps, exit_code = _substrate_plan(image, kit_name, "create", emit_json)
-    if exit_code is not None:
-        return exit_code
-    try:
-        # Compute the msb egress policy BEFORE removing the old guest: a policy
-        # that cannot be computed must refuse with the existing sandbox intact.
-        if backend == "msb":
-            msb.egress_flags(kits.egress_kit_names(kit_name))
-        # Preserve host records + secrets; lose only the guest filesystem. If the
-        # guest is already gone (removed out of band) there is nothing to destroy:
-        # recreate from host authority either way.
-        if adapter.exists(name):
-            adapter.remove(name)
-        data = _create_sandbox(backend, agent, workspace, name, image, kit_name, ro_host_config=ro_host_config)
-    except common._ADAPTER_ERRORS as exc:
-        return common._operational_failure("create", exc.code, exc.message, exc.remediation, emit_json)
-    # The guest filesystem was destroyed, so a prior applied-kit record no longer
-    # describes the fresh guest (``_create_sandbox`` cleared it): re-apply the
-    # agent kit (if any) so the recreated sandbox has its agent binary (ADR-0030
-    # create-time install). On failure the state record stays, so the recreate
-    # can be retried.
-    entrypoint = None
-    if kit_name is not None:
-        gate = _apply_agent_kit(backend, name, kit_name, provision_steps, "create", emit_json)
-        if gate is not None:
-            _discard_recreated_guest(backend, name)
-            return gate
-        entrypoint = kits.agent_kit_entrypoint(kit_name)
-    data["kit"] = kit_name
-    data["entrypoint"] = entrypoint
+    data, exit_code = _recreate_msb(name, record, agent, workspace, image, emit_json)
+    if data is None:
+        return exit_code if exit_code is not None else errors.EXIT_FAILURE
     data = {**data, "recreated": True}
     if emit_json:
         print(json.dumps(envelope.success("create", data)))
     else:
         print(f"recreated sandbox '{name}' (host records and secrets preserved).")
+        if not data.get("ro_host_config"):
+            print(f"note: {security.PLATFORM_PROBLEM}, so the read-only trusted-config mount was not established "
+                  "(see docs/KNOWN_FAILURE_MODES.md, section 54).")
     return errors.EXIT_SUCCESS
 
 
+def _recreate_msb(
+    name: str, record: dict, agent: str, workspace: str, image: str, emit_json: bool
+) -> tuple[dict | None, int | None]:
+    """Replace the guest with what a fresh create on this host builds, then reapply its kits.
+
+    Where the read-only mount is possible it is established and confirmed. An
+    msb too old for it is refused (upgrading fixes it). On a host that can never
+    have it (Windows) the guest is recreated without it and the new record does
+    not claim it, exactly as a fresh create there: refusing would only force
+    ``rm`` and ``create`` for the same result, and recording it would loop.
+    Everything that can refuse is checked BEFORE the old guest is removed. On a
+    kit failure the new guest goes but the state record stays, for a retry.
+    """
+    problem = security.ro_mount_version_problem()
+    if problem is not None and security.ro_mount_platform_problem() is None:
+        return None, common._operational_failure(
+            "create", errors.VALIDATION_FAILED,
+            f"cannot recreate sandbox '{name}' with a read-only trusted-config mount: {problem}",
+            f"upgrade msb to {security.RO_MOUNT_MIN_VERSION.string} or newer, then retry", emit_json,
+        )
+    cli_kits, extras = kit_msb.cli_kits_read(name)
+    plan, exit_code = _plan_msb_kits(agent, cli_kits, image, "create", emit_json, extras)
+    if plan is None:
+        return None, exit_code
+    steps, exit_code = _substrate_plan(image, plan.agent_kit, "create", emit_json)
+    if exit_code is not None:
+        return None, exit_code
+    try:
+        msb.egress_flags(kit_msb.egress_names(plan.kits))
+        # Preserve host records + secrets; lose only the guest filesystem. A guest
+        # already removed out of band has nothing to destroy.
+        if msb.exists(name):
+            msb.remove(name)
+        data = _create_sandbox("msb", agent, workspace, name, image, plan.agent_kit, plan=plan)
+    except common._ADAPTER_ERRORS as exc:
+        return None, common._operational_failure("create", exc.code, exc.message, exc.remediation, emit_json)
+    result, exit_code = _apply_msb_kits(name, plan, steps, "create", emit_json, ro_required=data["ro_host_config"])
+    if result is None:
+        _discard_recreated_guest("msb", name)
+        _restore_record("msb", name, record)
+        return None, exit_code
+    return {**data, **_kit_data(plan, result)}, None
+
+
+def _restore_record(backend: str, name: str, record: dict) -> None:
+    """Put back the record a failed recreate started from, so the recreate can be retried.
+
+    The new guest's record may say less (on Windows it never claims the
+    read-only mount), and a retry is only eligible while the record still
+    says what the sandbox is missing.
+    """
+    try:
+        state.atomic_write_text(state.record_path(backend, name), json.dumps(record, indent=2) + "\n")
+    except OSError:
+        print(f"acq: warning: could not restore the host record of '{name}'", file=sys.stderr)
+
+
 def _run_prepare_locked(
-    parsed, emit_json: bool, backend: str, target: str, name: str, workspace: str, kit_name: str | None
+    parsed, emit_json: bool, backend: str, target: str, name: str, workspace: str, cli_kits: list[str]
 ) -> tuple[dict | None, int | None]:
     """Create-or-reattach for ``run AGENT PATH`` with the lifecycle lock held.
 
@@ -655,59 +775,31 @@ def _run_prepare_locked(
     interactive session must not block other commands on the sandbox.
     """
     adapter = common._adapter(backend)
-    action = "reattached" if adapter.exists(name) else "created"
-    if action == "reattached":
-        recorded, exit_code = _reattach_workspace(backend, name, workspace, emit_json)
-        if exit_code is not None:
-            return None, exit_code
-        workspace = recorded or workspace
-    image: str | None = None
-    entrypoint: str | None = None
     if not adapter.exists(name):
-        if kit_name is None:
-            kit_name = kits.agent_kit_for(target)  # implicit inference (built-in only)
-        if kit_name is not None and not common._supports(backend, "kit-apply"):
-            return None, common._operational_failure(
-                "run",
-                errors.UNSUPPORTED,
-                f"agent '{target}' requires the '{kit_name}' kit, which the {backend} backend cannot apply",
-                "use a backend that supports kit-apply (msb in this slice), or choose an agent without a kit",
-                emit_json,
-            )
-        image, provision_steps, exit_code = _resolve_image_for_kit(parsed.image, target, kit_name, "run", emit_json)
-        if exit_code is not None:
+        new_sandbox = _new_sbx_sandbox if backend == "sbx" else _new_msb_sandbox
+        data, exit_code = new_sandbox(
+            "run", emit_json, agent=target, workspace=workspace, name=name, image_flag=parsed.image,
+            cli_kits=cli_kits,
+        )
+        if data is None:
             return None, exit_code
-        assert image is not None  # nosec B101 # resolver contract; narrows the type for mypy
-        try:
-            _create_sandbox(backend, target, workspace, name, image, kit_name)
-        except common._ADAPTER_ERRORS as exc:
-            return None, common._operational_failure("run", exc.code, exc.message, exc.remediation, emit_json)
-        if kit_name is not None:
-            gate = _apply_agent_kit(backend, name, kit_name, provision_steps, "run", emit_json)
-            if gate is not None:
-                _discard_half_created(backend, name)
-                return None, gate
-            entrypoint = kits.agent_kit_entrypoint(kit_name)
-    else:
-        # Re-attach: the kit (if any) was applied at create time; read the
-        # recorded kit/entrypoint (lenient) so the launch surfaces provenance.
-        applied = kits.kit_applied_read(backend, name)
-        if applied:
-            kit_name = applied.get("kit")
-            entrypoint = applied.get("entrypoint")
-    data: dict = {
+        return {**data, "action": "created"}, None
+    recorded, exit_code = _reattach_workspace(backend, name, workspace, emit_json)
+    if exit_code is not None:
+        return None, exit_code
+    # Re-attach: the kits were applied at create time; read the recorded
+    # kit/entrypoint (lenient) so the launch surfaces provenance.
+    applied = kits.kit_applied_read(backend, name) or {}
+    return {
         "name": name,
         "backend": backend,
         "agent": target,
-        "workspace": workspace,
+        "workspace": recorded or workspace,
         "state": "running",
-        "action": action,
-    }
-    if action == "created":
-        data["image"] = image
-    data["kit"] = kit_name
-    data["entrypoint"] = entrypoint
-    return data, None
+        "action": "reattached",
+        "kit": applied.get("kit"),
+        "entrypoint": applied.get("entrypoint"),
+    }, None
 
 
 def run_run(parsed, emit_json: bool, backend: str) -> int:
@@ -725,14 +817,12 @@ def run_run(parsed, emit_json: bool, backend: str) -> int:
         if exit_code is not None:
             return exit_code
         assert workspace is not None  # nosec B101 # resolver contract; narrows the type for mypy
-        kit_name, exit_code = _validate_kit_flag(parsed.kit, "run", emit_json)
-        if exit_code is not None:
-            return exit_code
+        cli_kits = _cli_kit_refs(parsed.kit)
         name = parsed.name or common._derive_name(target, workspace)
         workspace = common._mount_workspace(backend, workspace)
         try:
             with lock.sandbox_lock(backend, name):
-                data, exit_code = _run_prepare_locked(parsed, emit_json, backend, target, name, workspace, kit_name)
+                data, exit_code = _run_prepare_locked(parsed, emit_json, backend, target, name, workspace, cli_kits)
         except lock.SandboxLockTimeout as exc:
             return _lock_failure("run", name, exc, emit_json)
         if data is None:

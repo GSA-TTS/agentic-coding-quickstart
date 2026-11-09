@@ -69,6 +69,13 @@ KNOWN_COMMANDS = frozenset(
 # module object the tests patch), and because importing them eagerly is part of the
 # Tier-3 surface closure: only ``doctor`` and ``version_info`` stay lazy.
 _ADAPTER_ERRORS = common._ADAPTER_ERRORS
+
+# Bash semantics: --kit is repeatable and each value is a kit ref applied after
+# the built-ins. A built-in agent kit name stands for that bundled kit.
+_KIT_HELP = (
+    "kit ref to apply (repeatable); a built-in agent kit name such as opencode "
+    "selects that kit, and refs outside the built-in bundle are refused"
+)
 KNOWN_AGENTS = common.KNOWN_AGENTS
 DEFAULT_GUEST_WORKSPACE = common.DEFAULT_GUEST_WORKSPACE
 OPENCODE_DEVENV_IMAGE = common.OPENCODE_DEVENV_IMAGE
@@ -229,7 +236,7 @@ def build_parser() -> _Parser:
     create_parser.add_argument("path", nargs="?", help="workspace directory to mount")
     create_parser.add_argument("--name", help="explicit sandbox name (default: derived from agent+path)")
     create_parser.add_argument("--image", help="base image override (default: the devenv shell image)")
-    create_parser.add_argument("--kit", help="built-in agent kit to apply (overrides inference; e.g. opencode)")
+    create_parser.add_argument("--kit", action="append", help=_KIT_HELP)
     create_parser.add_argument(
         "--recreate",
         metavar="NAME",
@@ -243,7 +250,7 @@ def build_parser() -> _Parser:
     run_parser.add_argument("path", nargs="?", help="workspace directory to mount (AGENT form)")
     run_parser.add_argument("--name", help="explicit sandbox name (AGENT form)")
     run_parser.add_argument("--image", help="base image override (AGENT form)")
-    run_parser.add_argument("--kit", help="built-in agent kit to apply (overrides inference; e.g. opencode)")
+    run_parser.add_argument("--kit", action="append", help=_KIT_HELP)
 
     sub.add_parser("ls", help="list sandboxes")
 
