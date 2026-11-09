@@ -477,6 +477,8 @@ class Cell:
             # The default usai provider kit is selected, and acq refuses an msb
             # create whose provider has no stored key (msb binds keys only at
             # create). The throwaway value lives in this run's isolated store.
+            # On sbx acq checks sbx's own table instead, which this script never
+            # writes globally: the operator's sbx must already hold a usai key.
             self.check("secret set usai", self.call(self._b("secret", "set", "-g", "usai", "--json"),
                                                     stdin=n.value + "\n"))
 

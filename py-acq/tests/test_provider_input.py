@@ -472,3 +472,49 @@ def test_a_fifo_in_place_of_an_artifact_is_refused_without_blocking(tmp_path):
     os.mkfifo(kit / "provider-input" / "facts.json")
     with pytest.raises(provider_input.ProviderInputError, match="regular file"):
         provider_input.kit_facts(kit)
+
+
+# ---------------------------------------------------------------------------
+# The sbx side: the same gate at create, the same probe at attach.
+# ---------------------------------------------------------------------------
+
+
+def _sbx_env(monkeypatch, tmp_path):
+    from test_kit_sbx import _env as kit_sbx_env
+
+    for name in ("ACQ_SBX_STUB_PROBE", "ACQ_PROVIDER_KITS", "ACQ_PROVIDER_CREDENTIAL_BINDINGS", "USAI_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(common, "_stdin_is_terminal", lambda: False)
+    return kit_sbx_env(monkeypatch, tmp_path)
+
+
+def _sbx_create(capsys, ws):
+    return _invoke(capsys, "--backend", "sbx", "create", "shell", str(ws), "--name", "sb", "--json")
+
+
+def test_sbx_create_without_an_injectable_key_fails_closed(monkeypatch, tmp_path, capsys):
+    ws = _sbx_env(monkeypatch, tmp_path)
+    rc, doc, _out, _err = _sbx_create(capsys, ws)
+    assert rc == errors.EXIT_FAILURE and doc["error"]["code"] == errors.SECRET_MISSING, doc
+    assert not sys.modules["acq_py.sbx"].exists("sb")
+
+
+@pytest.mark.provider_key
+def test_sbx_create_refuses_a_pin_mismatch(monkeypatch, tmp_path, capsys):
+    ws = _sbx_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_PROVIDER_CREDENTIAL_BINDINGS", "usai=USAI_API_KEY@models.example.gov")
+    rc, doc, _out, _err = _sbx_create(capsys, ws)
+    assert rc == errors.EXIT_FAILURE and doc["error"]["code"] == errors.VALIDATION_FAILED, doc
+    assert not sys.modules["acq_py.sbx"].exists("sb")
+
+
+@pytest.mark.provider_key
+@pytest.mark.parametrize("answer,code", [("401|0", errors.PROVIDER_AUTH_FAILED), ("000|7", errors.PROVIDER_UNREACHABLE)])
+def test_sbx_attach_probes_the_recorded_provider(monkeypatch, tmp_path, capsys, answer, code):
+    ws = _sbx_env(monkeypatch, tmp_path)
+    rc, doc, _out, err = _sbx_create(capsys, ws)
+    assert rc == 0, (doc, err)
+    assert [f.provider for f in provider_input.recorded("sbx", "sb")] == ["usai"]
+    monkeypatch.setenv("ACQ_SBX_STUB_PROBE", answer)
+    rc, doc, _out, _err = _invoke(capsys, "--backend", "sbx", "run", "sb", "--json")
+    assert rc == errors.EXIT_FAILURE and doc["error"]["code"] == code, doc

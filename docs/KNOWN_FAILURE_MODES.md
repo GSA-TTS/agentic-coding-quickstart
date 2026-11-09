@@ -3659,9 +3659,11 @@ The Python acq now creates sbx sandboxes with the built-in kits and the bundled
 agent kit (`acq run opencode .` works), but compared with the Bash acq:
 
 - OpenCode is not pointed at USAi yet. The bundled `opencode` kit's startup
-  renderer reads the provider-input generation at `ACQ_PROVIDER_INPUT_ROOT`; the
-  Python acq does not prepare or mount it, so the renderer reports `not-ready`
-  and leaves `opencode.jsonc` alone (the same gap as on msb).
+  renderer reads the provider-input generation at `ACQ_PROVIDER_INPUT_ROOT`; on
+  sbx the Python acq does not prepare or mount it, so the renderer reports
+  `not-ready` and leaves `opencode.jsonc` alone. (On msb it is mounted read-only
+  where msb can enforce that; not on Windows, see section 54.) The provider
+  credential gate and the attach-time key probe do run on sbx.
 - `acq run NAME` re-attaches without the sbx heal. Bash re-runs
   `acq_backend_ensure_kits_applied` on every re-attach; the Python acq runs the
   ported heal only for `acq kit update`.
@@ -3698,6 +3700,44 @@ sandbox, delete `<state>/sbx-kits/` entirely, `sbx stop` it, start it again
 run (`/tmp/opencode` exists again, and `/tmp/acq/startup-complete` holds the
 create's token). If they do not, keep the kit directories for the sandbox's
 lifetime and remove them in `acq rm`.
+
+## 56. Python acq: Stricter Provider-Credential Gate Than Bash
+
+**Status:** Intended difference (Python `acq`); revisit if a CI flow depends on it.
+
+### Symptoms
+
+- `acq create`/`acq run` fails with `secret_missing` ("`$USAI_API_KEY` is exported
+  on the host, but acq binds only stored credentials") where the Bash acq on msb
+  would bind the exported value.
+- A provider with no pin fails with `validation_failed` ("is not pinned to a
+  host") even though the Bash acq would accept the host recorded for that
+  sandbox at an earlier create.
+- `acq run NAME` fails with `validation_failed` when the sandbox's recorded
+  provider facts no longer match the provider's pin (a re-pin to another host,
+  or an edited record).
+- Without a terminal on stdin, any selected provider with no stored key fails
+  closed; nothing is prompted.
+
+### Root Cause
+
+The Python msb and sbx paths bind only values from the acq secret store, so
+accepting an exported value would create a sandbox with a dead credential. The
+recorded-host fallback was not ported: refusing is the safe direction, since
+acq never lets a kit choose where a credential goes.
+
+### Fix
+
+Store the key (`printf '%s' "$KEY" | acq secret set -g usai`) and pin any
+non-default provider (`acq provider-credential set ID KEY_ENV --host HOST`).
+
+### Prevention / Status
+
+Documented in `docs/BACKEND_GUIDE.md` (host pinning) and `py-acq/README.md`.
+The Python gate also lacks Bash's `--no-provider-kits` flag (an explicitly
+empty `ACQ_PROVIDER_KITS` is the equivalent) and does not record the provider
+selection per sandbox, so a later `start` of a sandbox with an incomplete
+binding record uses the current selection.
 
 ---
 

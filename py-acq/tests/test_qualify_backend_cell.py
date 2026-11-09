@@ -453,6 +453,12 @@ def test_the_script_leaves_the_callers_acq_state_alone_and_a_stub_cannot_pass(tm
     )
     shim.chmod(0o755)
     env = {"PATH": os.pathsep.join([str(bin_dir), "/usr/bin", "/bin"]), **{v: str(p) for v, p in dirs.items()}}
+    if backend == "sbx":  # the operator's sbx already holds a usai key (the create gate checks sbx's table)
+        table = dirs["HOME"] / ".docker-sbx" / "custom-secrets.json"
+        table.parent.mkdir()
+        table.write_text(json.dumps(
+            [{"scope": "global", "env": "USAI_API_KEY", "placeholder": "sbx-cs-usai", "targets": ["api.gsa.usai.gov"]}]
+        ), encoding="utf-8")
     proc = subprocess.run([sys.executable, str(ORACLE_PATH), "--backend", backend], env=env,
                           capture_output=True, text=True, timeout=300, cwd=tmp_path)
 

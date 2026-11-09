@@ -7,6 +7,7 @@ subprocess ``python -m acq_py`` resolve the package without an installed copy.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -75,8 +76,9 @@ def isolate_user_dirs(tmp_path_factory, monkeypatch):
 
 # A throwaway usai key (never a real credential). msb binds provider keys only
 # at create, so acq refuses to create a sandbox whose selected provider has no
-# stored key (the pre-create credential gate). A test module that creates msb
-# sandboxes marks itself ``provider_key`` to get one in the throwaway store.
+# stored key (the pre-create credential gate). A test module that creates
+# sandboxes marks itself ``provider_key`` to get one in the throwaway acq store
+# and in the sbx stub's table.
 TEST_USAI_KEY = "test-usai-key-not-a-secret"
 
 
@@ -87,6 +89,10 @@ def provider_key(request, isolate_user_dirs):
     from acq_py import secretstore
 
     secretstore.set_secret("usai", None, TEST_USAI_KEY)
+    # sbx injects from its own proxy table, so the stub's table holds the key too.
+    request.getfixturevalue("monkeypatch").setenv("ACQ_SBX_STUB_CUSTOM_SECRETS", json.dumps(
+        [{"scope": "global", "env": "USAI_API_KEY", "placeholder": "sbx-cs-usai", "targets": ["api.gsa.usai.gov"]}]
+    ))
     return TEST_USAI_KEY
 
 

@@ -678,6 +678,10 @@ def main(argv: list[str]) -> int:
         if name is None or name not in catalog:
             print(f"sbx: no such sandbox '{name}'", file=sys.stderr)
             return 1
+        if any("%{http_code}" in token for token in command):
+            # acq's provider key probe: answered from ACQ_SBX_STUB_PROBE, never a network call.
+            print(os.environ.get("ACQ_SBX_STUB_PROBE", "200|0"))
+            return 0
         marker = EXEC_MARKER
         if command:
             marker += " " + " ".join(command)

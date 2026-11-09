@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sys
 import time
 from collections.abc import Callable, Iterable
@@ -317,6 +318,9 @@ def _new_sbx_sandbox(
     plan, exit_code = _plan_sbx_kits(agent, cli_kits, image, command, emit_json)
     if plan is None:
         return None, exit_code
+    facts, exit_code = _sbx_provider_gate(command, name, plan, emit_json)
+    if facts is None:
+        return None, exit_code
     try:
         prepared = kit_sbx.prepare(plan.kits)
     except kit_sbx.KitTranslateError as exc:
@@ -342,7 +346,30 @@ def _new_sbx_sandbox(
             raise
         return None, common._operational_failure(command, exc.code, exc.message + note,
                                                  remediation or exc.remediation, emit_json)
+    _record_sbx_facts(name, facts)
     return {**data, **_kit_data(plan, kit_msb.ApplyResult(applied=[k.name for k in plan.kits]))}, None
+
+
+def _sbx_provider_gate(
+    command: str, name: str, plan: _KitPlan, emit_json: bool
+) -> tuple[list[provider_input.Facts] | None, int | None]:
+    """The sbx side of the credential gate: sbx snapshots its proxy table at create."""
+    try:
+        selected = _provider_gate("sbx", name, (k.name for k in plan.kits))
+    except provider_input.ProviderInputError as exc:
+        return None, common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
+    except common._ADAPTER_ERRORS as exc:
+        return None, common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
+    return [f for _kit, _manifest, f in selected], None
+
+
+def _record_sbx_facts(name: str, facts: list[provider_input.Facts]) -> None:
+    """Record the facts the attach-time key check probes (best-effort, as Bash)."""
+    try:
+        provider_input.record_write("sbx", name, facts)
+    except OSError:
+        print(f"acq: warning: could not record the provider facts of sandbox '{name}'; "
+              "its provider keys will not be checked before attach", file=sys.stderr)
 
 
 def _finish_sbx_create(name: str, agent: str, plan: _KitPlan, token: str, data: dict, *, generic: bool) -> None:
@@ -1155,19 +1182,22 @@ def _run_by_name(backend: str, target: str, emit_json: bool) -> int:
     return _launch_after_envelope(backend, target, workspace, common._launch_token(backend, target, agent), emit_json)
 
 
+def _sbx_guest_output(name: str, argv: list[str]) -> str:
+    """sbx's in-guest probe: ``sbx exec`` runs one shell string, so each argv token is quoted into it."""
+    return sbx.exec_capture(name, shlex.join(argv), timeout=60) or ""
+
+
 def _attach_key_check(backend: str, name: str, emit_json: bool) -> int | None:
     """Validate the sandbox's provider keys before an attach (Bash ``ensure_valid_provider_keys``).
 
     Each provider its recorded facts name is probed from inside the guest
-    against its own models URL. A rejected key fails with
+    against its own models URL (msb and sbx alike). A rejected key fails with
     ``provider_auth_failed``, an unreachable endpoint (or no verdict at all)
     with ``provider_unreachable``: attaching with an unverified credential is
-    how a dead key reaches the agent. A backend with no in-guest probe, or a
-    sandbox with no recorded facts, has nothing to check.
+    how a dead key reaches the agent. A sandbox with no recorded facts (one
+    created before facts were recorded) has nothing to check.
     """
-    probe = getattr(common._adapter(backend), "guest_output", None)
-    if probe is None:
-        return None
+    probe = msb.guest_output if backend == "msb" else _sbx_guest_output
     try:
         facts = provider_input.recorded(backend, name)
         provider_input.check_keys(name, facts, lambda argv: probe(name, argv),
