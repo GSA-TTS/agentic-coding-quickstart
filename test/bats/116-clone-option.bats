@@ -693,14 +693,18 @@ _assert_layout_refused() { # SANDBOX
   assert_output --partial 'commondir'
 }
 
-@test "clone(msb): a git dir that resolves away from <workspace>/.git is refused" {
-  # GIT_COMMON_DIR moves the common dir (objects, refs, config) while .git
-  # itself still looks ordinary; only the rev-parse comparison catches it.
-  local other="$STUBDIR/otherrepo"
+@test "clone(msb): an inherited GIT_COMMON_DIR is cleared, not followed to another repo" {
+  # GIT_COMMON_DIR would move the common dir (objects, refs, config) while
+  # .git itself still looks ordinary. Host-side git clears it, so the clone
+  # and the remote are the workspace's, and the other repo is untouched.
+  local other="$STUBDIR/otherrepo" before
   _mk_repo "$other"
+  before=$(cat "$other/.git/config")
   _msb_clone GIT_COMMON_DIR="$other/.git" -- create shell --clone "$CLONEPROJ"
-  _assert_layout_refused shell-cloneproj
-  assert_output --partial 'resolves its directory'
+  assert_success
+  [ -d "$STUBDIR/state/clones/shell-cloneproj/cloneproj/.git" ]
+  git -C "$CLONEPROJ" remote get-url sandbox-shell-cloneproj
+  assert_equal "$(cat "$other/.git/config")" "$before"
 }
 
 @test "clone(msb): a filter driver whose name contains '=' is blanked too" {
@@ -857,7 +861,7 @@ _assert_layout_refused() { # SANDBOX
   [ ! -e "$STUBDIR/state/clones/shell-cloneproj" ]
 }
 
-@test "clone(msb): a user-exported GIT_CONFIG_COUNT is kept and the blanking keys appended" {
+@test "clone(msb): a user-exported GIT_CONFIG_COUNT is dropped from workspace git; blanking starts at 0" {
   _arm_repo_config "$CLONEPROJ" "$STUBDIR/ran"
   local real; real=$(command -v git)
   printf '#!/usr/bin/env bash\n{ printf "CALL %%s\\n" "$*"; env | grep "^GIT_CONFIG_" | sort; } >> "%s"\nexec %s "$@"\n' \
@@ -867,14 +871,19 @@ _assert_layout_refused() { # SANDBOX
     create shell --clone "$CLONEPROJ"
   assert_success
   [ ! -e "$STUBDIR/ran" ]
-  local log; log=$(cat "$STUBDIR/gitenv")
-  # The user's entry stays at index 0 on every call; acq's start at 1 (the
-  # host's own system/global filters, if any, are blanked alongside).
-  refute_regex "$log" 'GIT_CONFIG_KEY_0=filter\.'
-  refute_regex "$log" 'GIT_CONFIG_VALUE_0=[^1]'
-  assert_regex "$log" 'GIT_CONFIG_KEY_1=filter\.'
-  assert_regex "$log" 'GIT_CONFIG_KEY_[1-9][0-9]*=filter\.rec\.(clean|smudge|process)'
-  assert_regex "$log" 'GIT_CONFIG_COUNT=([2-9]|[1-9][0-9])'
+  # The environment of the wrapped clone call: acq's blanking entries alone,
+  # from index 0 (the host's own system/global filters, if any, alongside).
+  local clone
+  clone=$(awk '/^CALL /{on = / clone /} on' "$STUBDIR/gitenv")
+  assert_regex "$clone" 'CALL .* clone '
+  refute_regex "$clone" 'core\.abbrev'
+  assert_regex "$clone" 'GIT_CONFIG_KEY_0=filter\.'
+  assert_regex "$clone" 'GIT_CONFIG_KEY_[0-9]+=filter\.rec\.(clean|smudge|process)'
+  # Of the clone-mode calls (wrapped, or against the scratch), only the
+  # command-scope identity read keeps the user's entry.
+  [ -z "$(awk '/^CALL /{c = $0} /core\.abbrev/{print c}' "$STUBDIR/gitenv" |
+    grep -e '-c protocol.allow=never' -e '/clones/' | grep -v -- '--show-scope')" ]
+  assert_regex "$(cat "$STUBDIR/gitenv")" "CALL --no-pager -C $STUBDIR/state/clones/[^ ]* config "
 }
 
 @test "clone(msb): identity honours GIT_CONFIG_NOSYSTEM like git and reads worktree and command scopes" {
@@ -938,4 +947,102 @@ _assert_layout_refused() { # SANDBOX
   assert_output --partial 'could not check'
   assert_output --partial 'remote remove sandbox-shell-cloneproj'
   [ ! -e "$STUBDIR/state/clones/shell-cloneproj" ]
+}
+
+# --- Inherited git environment in clone mode ---
+
+# A second repository with a commit the workspace lacks, standing in for the
+# one an inherited GIT_DIR (set by a hook, an editor or a parent git) names.
+_mk_other_repo() { # PATH
+  _mk_repo "$1"
+  echo other > "$1/other-only.txt"
+  git -C "$1" add other-only.txt
+  git -C "$1" -c user.email=t@example.com -c user.name=t -c commit.gpgsign=false commit -q -m other
+}
+
+@test "clone(msb): create with an inherited GIT_DIR clones the workspace and leaves that repo alone" {
+  local other="$STUBDIR/otherrepo" before scratch="$STUBDIR/state/clones/shell-cloneproj/cloneproj"
+  _mk_other_repo "$other"
+  before=$(cat "$other/.git/config")
+  _msb_clone GIT_DIR="$other/.git" -- create shell --clone "$CLONEPROJ"
+  assert_success
+  # The scratch is a clone of the workspace, not of the inherited repository.
+  [ "$(git -C "$scratch" rev-parse HEAD)" = "$(git -C "$CLONEPROJ" rev-parse HEAD)" ]
+  [ ! -e "$scratch/other-only.txt" ]
+  [ "$(git -C "$CLONEPROJ" remote get-url sandbox-shell-cloneproj)" = "$scratch" ]
+  assert_equal "$(cat "$other/.git/config")" "$before"
+  assert_equal "$(git -C "$other" remote)" ""
+}
+
+@test "clone(msb): rm with an inherited GIT_DIR removes the workspace's remote, not that repo's" {
+  local other="$STUBDIR/otherrepo" before
+  _mk_other_repo "$other"
+  # The other repository has a same-named remote of its own (another checkout
+  # with a sandbox of the same name, say); rm must not remove it.
+  git -C "$other" remote add sandbox-shell-cloneproj "$STUBDIR/elsewhere"
+  before=$(cat "$other/.git/config")
+  _msb_clone -- create shell --clone "$CLONEPROJ"
+  assert_success
+  _msb_clone GIT_DIR="$other/.git" -- rm shell-cloneproj
+  assert_success
+  assert_equal "$(cat "$other/.git/config")" "$before"
+  [ ! -e "$STUBDIR/state/clones/shell-cloneproj" ]
+  run git -C "$CLONEPROJ" remote get-url sandbox-shell-cloneproj
+  assert_failure
+}
+
+@test "clone(msb): a hooks path injected through GIT_CONFIG_PARAMETERS runs no hook" {
+  local hooks="$STUBDIR/injected-hooks" h
+  mkdir -p "$hooks"
+  printf '#!/bin/sh\necho "$0" >> "%s"\ncat >/dev/null\n' "$STUBDIR/ran" > "$hooks/rec"
+  chmod +x "$hooks/rec"
+  for h in post-checkout reference-transaction post-index-change; do
+    cp "$hooks/rec" "$hooks/$h"
+  done
+  _msb_clone -- create shell --clone "$CLONEPROJ"
+  assert_success
+  # A fetched commit gives rm remote-tracking refs to delete, which is what
+  # runs the reference-transaction hook.
+  _agent_commit "$STUBDIR/state/clones/shell-cloneproj/cloneproj" agent-work
+  git -C "$CLONEPROJ" fetch -q sandbox-shell-cloneproj
+  _msb_clone -- rm shell-cloneproj
+  _msb_clone "GIT_CONFIG_PARAMETERS='core.hooksPath'='$hooks'" -- create shell --clone "$CLONEPROJ"
+  assert_success
+  [ -d "$STUBDIR/state/clones/shell-cloneproj/cloneproj/.git" ]
+  _agent_commit "$STUBDIR/state/clones/shell-cloneproj/cloneproj" agent-work-2
+  git -C "$CLONEPROJ" fetch -q sandbox-shell-cloneproj
+  _msb_clone "GIT_CONFIG_PARAMETERS='core.hooksPath'='$hooks'" -- rm shell-cloneproj
+  assert_success
+  [ ! -e "$STUBDIR/ran" ]
+}
+
+@test "clone(msb): a filter driver injected through GIT_CONFIG_PARAMETERS is not run" {
+  # The driver is defined only on the command scope. GIT_CONFIG_PARAMETERS is
+  # read after GIT_CONFIG_COUNT, so it would override acq's blanking entries.
+  local rec="$STUBDIR/recorder.sh"
+  printf '#!/bin/sh\necho "$0 $*" >> "%s"\ncat\n' "$STUBDIR/ran" > "$rec"
+  chmod +x "$rec"
+  printf '* filter=rec\n' > "$CLONEPROJ/.git/info/attributes"
+  touch -t 200001010000 "$CLONEPROJ/file.txt"
+  _msb_clone "GIT_CONFIG_PARAMETERS='filter.rec.clean'='$rec' 'filter.rec.smudge'='$rec'" -- \
+    create shell --clone "$CLONEPROJ"
+  assert_success
+  [ -d "$STUBDIR/state/clones/shell-cloneproj/cloneproj/.git" ]
+  [ ! -e "$STUBDIR/ran" ]
+}
+
+@test "clone(msb): host-side git refuses to run when the isolation helper is not loaded" {
+  local other="$STUBDIR/otherrepo" before
+  _mk_repo "$other"
+  before=$(cat "$other/.git/config")
+  run env GIT_DIR="$other/.git" ACQ_STATE_DIR="$STUBDIR/state" bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh" 2>/dev/null
+    unset -f _kit_git_isolate
+    _acq_msb_git_ws "$1" remote add sandbox-x /nowhere
+  ' _ "$CLONEPROJ"
+  assert_failure
+  assert_output --partial 'cannot clear the'
+  assert_equal "$(cat "$other/.git/config")" "$before"
+  run git -C "$CLONEPROJ" remote
+  assert_output ''
 }
