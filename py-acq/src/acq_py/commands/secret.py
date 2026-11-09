@@ -175,6 +175,37 @@ def run_secret_rm_raw(adapter, placeholder: str, emit_json: bool) -> int:
     return errors.EXIT_SUCCESS
 
 
+_RM_USAGE = "usage: acq secret rm [-g | SANDBOX] SERVICE [--accept-unconfirmed NAME[,NAME]]"
+
+
+def _split_accept(parsed) -> tuple[list[str], list[str] | None, str | None]:
+    """``(positionals, accepted sandbox names or None, problem)`` for ``secret rm``.
+
+    ``--accept-unconfirmed NAME[,NAME]`` (or ``=NAME``) may come before or after
+    the scope and service; it is repeatable and comma-separated. Each name must
+    be a valid sandbox name.
+    """
+    positionals: list[str] = []
+    raw = list(getattr(parsed, "accept_unconfirmed", None) or [])
+    it = iter(parsed.args)
+    for token in it:
+        flag, eq, inline = token.partition("=")
+        if flag != "--accept-unconfirmed":
+            positionals.append(token)
+            continue
+        value = inline if eq else next(it, None)
+        if not value:
+            return positionals, None, "--accept-unconfirmed needs a sandbox name"
+        raw.append(value)
+    if not raw:
+        return positionals, None, None
+    names = [n for value in raw for n in value.split(",")]
+    bad = next((n for n in names if not common._secret_name_ok(n)), None)
+    if bad is not None:
+        return positionals, None, f"invalid sandbox name {bad!r} for --accept-unconfirmed"
+    return positionals, names, None
+
+
 def run_secret_rm(parsed, emit_json: bool, backend: str) -> int:
     """``acq secret rm (-g | SANDBOX) SERVICE`` — remove a secret.
 
@@ -186,19 +217,25 @@ def run_secret_rm(parsed, emit_json: bool, backend: str) -> int:
     """
     command = "secret rm"
     adapter = common._adapter(backend)
-    scope, service = common._parse_secret_scope_service(parsed.global_scope, parsed.args)
+    args, accept, accept_problem = _split_accept(parsed)
+    scope, service = common._parse_secret_scope_service(parsed.global_scope, args)
     if scope is None or service is None:
         # A single bare token (no scope, no second positional) is a raw
         # placeholder for a backend that keeps its own proxy table.
-        args = parsed.args
-        if hasattr(adapter, "secret_rm_raw") and not parsed.global_scope and len(args) == 1 and not args[0].startswith("-"):
+        raw_ok = accept is None and accept_problem is None and not parsed.global_scope and len(args) == 1
+        if hasattr(adapter, "secret_rm_raw") and raw_ok and not args[0].startswith("-"):
             return run_secret_rm_raw(adapter, args[0], emit_json)
-        return common._usage_failure(command, "usage: acq secret rm [-g | SANDBOX] SERVICE", emit_json)
-    problem = common._secret_names_problem(scope, service)
+        return common._usage_failure(command, _RM_USAGE, emit_json)
+    problem = accept_problem or common._secret_names_problem(scope, service)
     if problem is not None:
-        return common._operational_failure(command, errors.VALIDATION_FAILED, problem, None, emit_json)
+        return common._operational_failure(command, errors.VALIDATION_FAILED, problem, _RM_USAGE, emit_json)
     if not common._supports(backend, "secret-rm"):
         return _unsupported(command, backend, emit_json)
+    if accept is not None and not getattr(adapter, "ACCEPT_UNCONFIRMED", False):
+        return common._operational_failure(
+            command, errors.UNSUPPORTED, f"--accept-unconfirmed is not supported on the {backend} backend",
+            "remove the flag; nothing was changed", emit_json,
+        )
     present_fn = getattr(adapter, "secret_present", None)
     try:
         in_backend = present_fn(scope, service) if present_fn is not None else None
@@ -215,14 +252,19 @@ def run_secret_rm(parsed, emit_json: bool, backend: str) -> int:
             f"store one with 'acq secret set -g {service}' (or scoped to a sandbox)",
             emit_json,
         )
+    accepted: list[str] = []
     try:
-        if in_backend is not False:
+        if in_backend is not False and accept is not None:
+            accepted = adapter.secret_unbind(scope, service, accept_unconfirmed=accept) or []
+        elif in_backend is not False:
             adapter.secret_unbind(scope, service)
         secretstore.delete(secretstore.key_for(service, scope.sandbox))
         secretstore.meta_delete(service, scope.sandbox)
     except common._ADAPTER_ERRORS as exc:
         return common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
-    data = {"scope": scope.label, "service": service, "value_state": "unset"}
+    data: dict = {"scope": scope.label, "service": service, "value_state": "unset"}
+    if accept is not None:
+        data["unconfirmed"] = accepted
     if emit_json:
         print(json.dumps(envelope.success(command, data)))
     else:

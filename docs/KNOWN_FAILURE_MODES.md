@@ -151,15 +151,24 @@ and `msb modify` on a stopped sandbox is also unverified.
 ### Mitigation today
 
 Remove the named sandbox (`acq rm NAME`, or `msb remove NAME` for one acq did
-not create), then retry `acq secret rm`. Sandboxes the Python acq creates always
-have a record and never block it.
+not create), then retry `acq secret rm`. If you know a named sandbox never had
+the secret (or accept that it may keep it), retry with
+`acq secret rm ... --accept-unconfirmed NAME[,NAME]`: only the named unrecorded
+sandboxes are accepted, the JSON data lists them under `unconfirmed`, and a
+stderr note repeats that they may still hold the binding. Sandboxes the Python
+acq creates always have a record and never block it.
+
+On a global removal, an unrecorded sandbox that also has its own stored value is
+not assumed safe: the Bash `acq`'s global set overwrites a sandbox's own binding,
+so acq removes the binding and re-adds the sandbox's own value in a separate
+call, and reports the sandbox as unconfirmed if either call fails.
 
 ### Unblock trigger
 
 A live msb run that shows what `msb modify NAME --secret-rm ENV` does for a
 variable that is not bound, on a running and on a stopped sandbox. If msb
 succeeds, or fails in a way acq can tell apart, treat that as "confirmed
-unbound" and stop blocking. Reading Bash's provenance records (planned
+unbound", stop blocking, and retire `--accept-unconfirmed`. Reading Bash's provenance records (planned
 Bash-state import) would also turn Bash-created sandboxes into known ones.
 
 ---

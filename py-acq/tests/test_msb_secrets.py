@@ -400,12 +400,99 @@ def test_unrecorded_sandbox_that_cannot_be_confirmed_blocks_rm(monkeypatch, tmp_
     assert secretstore.resolve("usai") is None
 
 
-def test_unrecorded_sandbox_with_its_own_value_is_left_alone(monkeypatch, tmp_path, capsys, children):
+def _bash_overwritten(monkeypatch, tmp_path, **catalog):
+    """A Bash-created sandbox ``legacy`` whose own value was overwritten by a Bash
+    global set: msb holds the global token there, while the acq store still has
+    the sandbox's own value too."""
+    _env(monkeypatch, tmp_path, catalog=catalog or {"legacy": "running"})
+    secretstore.store(secretstore.key_for("usai"), VALUE)
+    secretstore.store(secretstore.key_for("usai", "legacy"), SCOPED)
+    _stub_bind(tmp_path, "legacy", "USAI_API_KEY", "api.gsa.usai.gov")
+
+
+def test_global_rm_reasserts_an_unrecorded_sandboxs_own_value(monkeypatch, tmp_path, capsys, children):
+    _bash_overwritten(monkeypatch, tmp_path)
+    rc, _doc, out, err = _invoke(capsys, "--backend", "msb", "secret", "rm", "-g", "usai", "--json")
+    assert rc == 0, err
+    assert _modify_tails(children) == [["legacy", "--secret-rm", "USAI_API_KEY"],
+                                       ["legacy", "--secret", "USAI_API_KEY@api.gsa.usai.gov"]]
+    (_argv, env), = [c for c in _verb_calls(children, "modify") if "--secret" in c[0]]
+    assert env["USAI_API_KEY"] == SCOPED  # the sandbox's own value, not the removed global one
+    assert msb.held_read("legacy").bindings["USAI_API_KEY"]["scope"] == "sandbox"
+    assert secretstore.resolve("usai", "legacy") == SCOPED and not secretstore.exists("usai")
+    _assert_value_absent(VALUE, children, out, err)
+    _assert_value_absent(SCOPED, children, out, err)
+
+
+def test_global_rm_reassert_failure_is_unconfirmed(monkeypatch, tmp_path, capsys):
+    _bash_overwritten(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_MSB_STUB_FAIL_ADD", "legacy")
+    rc, doc, _out, _err = _invoke(capsys, "--backend", "msb", "secret", "rm", "-g", "usai", "--json")
+    assert rc == 1 and doc["error"]["code"] == "unbind_failed"
+    assert "binding record for: legacy" in doc["error"]["message"]
+    assert secretstore.resolve("usai") == VALUE
+
+
+def test_global_rm_own_value_never_bound_is_unconfirmed(monkeypatch, tmp_path, capsys):
     _env(monkeypatch, tmp_path, catalog={"legacy": "running"})
     secretstore.store(secretstore.key_for("usai"), VALUE)
     secretstore.store(secretstore.key_for("usai", "legacy"), SCOPED)
-    assert _invoke(capsys, "--backend", "msb", "secret", "rm", "-g", "usai")[0] == 0
-    assert _modify_tails(children) == []
+    rc, doc, _out, _err = _invoke(capsys, "--backend", "msb", "secret", "rm", "-g", "usai", "--json")
+    assert rc == 1 and doc["error"]["code"] == "unbind_failed"
+
+
+def _rm_json(capsys, *extra):
+    return _invoke(capsys, "--backend", "msb", "secret", "rm", *extra, "--json")
+
+
+def test_accept_unconfirmed_accepts_only_the_named_sandboxes(monkeypatch, tmp_path, capsys, children):
+    # legacy holds the token (swept and confirmed); other never had it.
+    _env(monkeypatch, tmp_path, catalog={"legacy": "running", "other": "stopped", "third": "running"})
+    secretstore.store(secretstore.key_for("usai"), VALUE)
+    _stub_bind(tmp_path, "legacy", "USAI_API_KEY", "api.gsa.usai.gov")
+    rc, doc, _out, _err = _rm_json(capsys, "-g", "usai", "--accept-unconfirmed", "other")
+    assert rc == 1 and "binding record for: third" in doc["error"]["message"]
+    assert secretstore.resolve("usai") == VALUE
+    rc, doc, _out, err = _rm_json(capsys, "--accept-unconfirmed", "other,third", "-g", "usai")
+    assert rc == 0 and doc["data"]["unconfirmed"] == ["other", "third"]
+    assert "could not be confirmed unbound from sandbox(es) other, third" in err
+    assert secretstore.resolve("usai") is None
+    assert _stub_records(tmp_path)["legacy"] == {}
+
+
+def test_accept_unconfirmed_never_covers_a_recorded_failure(monkeypatch, tmp_path, capsys):
+    _running(tmp_path, monkeypatch, "a")
+    _set(capsys, monkeypatch, "-g", "usai")
+    monkeypatch.setenv("ACQ_MSB_STUB_FAIL_RM", "a")
+    rc, doc, _out, _err = _rm_json(capsys, "-g", "usai", "--accept-unconfirmed=a")
+    assert rc == 1 and doc["error"]["code"] == "unbind_failed"
+    assert secretstore.resolve("usai") == VALUE
+
+
+def test_accept_unconfirmed_validation(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path)
+    secretstore.store(secretstore.key_for("usai"), VALUE)
+    for extra in (["--accept-unconfirmed", "bad.name"], ["--accept-unconfirmed", "-x"], ["--accept-unconfirmed"],
+                  ["--accept-unconfirmed", "a,,b"]):
+        rc, doc, _out, _err = _rm_json(capsys, "-g", "usai", *extra)
+        assert rc == 1 and doc["error"]["code"] == "validation_failed", extra
+    assert secretstore.resolve("usai") == VALUE
+    # With nothing unconfirmed the field is present and empty.
+    rc, doc, _out, _err = _rm_json(capsys, "-g", "usai", "--accept-unconfirmed", "nobody")
+    assert rc == 0 and doc["data"]["unconfirmed"] == []
+
+
+def test_accept_unconfirmed_is_refused_where_unsupported(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("ACQ_SBX_BIN", "__stub__")
+    monkeypatch.setenv("ACQ_SBX_VERSION", "0.51.0")
+    monkeypatch.setenv("ACQ_SBX_INSTALLED", "1")
+    monkeypatch.setenv("ACQ_MSB_INSTALLED", "0")
+    monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("SBX_HOME", str(tmp_path / "sbx-home"))
+    monkeypatch.setenv("ACQ_SBX_STUB_SECRETS", json.dumps({"global": {"usai": "set"}}))
+    rc, doc, _out, _err = _invoke(capsys, "--backend", "sbx", "secret", "rm", "-g", "usai",
+                                  "--accept-unconfirmed", "x", "--json")
+    assert rc == 1 and doc["error"]["code"] == "unsupported_capability"
 
 
 def test_scoped_rm_on_an_unrecorded_sandbox(monkeypatch, tmp_path, capsys, children):

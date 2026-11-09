@@ -1217,20 +1217,32 @@ def secret_feed(scope: Scope | str, service: str, value: str, host: str = "", en
 def _sweep_unknown(rec: HeldRecord, scope: Scope, service: str) -> bool:
     """Best-effort unbind of ``service`` from a sandbox acq has no knowledge of.
 
-    Returns True when the sandbox is confirmed not to hold it any more: it
-    holds its own value (a global removal leaves that alone), the variable is
-    recorded for another service, or ``msb modify --secret-rm`` succeeded. A
-    failed remove cannot be told apart from "it was never bound", so it is not a
-    confirmation.
+    Returns True when the sandbox is confirmed not to hold the removed value:
+    the variable is recorded for another service, or ``msb modify --secret-rm``
+    succeeded. A failed remove cannot be told apart from "it was never bound",
+    so it is not a confirmation.
+
+    On a global removal a sandbox with its own value is not assumed to hold it:
+    a global set by the Bash ``acq`` overwrites a sandbox's own binding, so the
+    sandbox may hold the global token. Its own value is re-asserted instead (a
+    remove, then a separate add of the sandbox's value, then recorded); if either
+    call fails the sandbox stays unconfirmed.
     """
-    if scope.is_global and _has_own_value(service, rec.name):
-        return True
     guess = service_binding(service, rec.name)
     if guess is None:
         return False
-    if guess.env not in rec.bindings:
-        if not _modify(rec.name, ["--secret-rm", guess.env]):
+    if guess.env in rec.bindings:
+        rec.note(service)
+        rec.save()
+        return True
+    if not _modify(rec.name, ["--secret-rm", guess.env]):
+        return False
+    if scope.is_global and _has_own_value(service, rec.name):
+        value = secretstore.resolve(service, rec.name)
+        if not value or not _put(rec, BoundSecret(service, guess, True), value):
             return False
+        value = None
+        return True
     rec.note(service)
     rec.save()
     return True
@@ -1277,7 +1289,12 @@ def _unbind_one(scope: Scope, service: str, sandbox: str) -> str:
     return "ok"
 
 
-def secret_unbind(scope: Scope | str, service: str) -> None:
+# ``secret rm --accept-unconfirmed`` is honoured by this adapter (the neutral
+# seam refuses the flag for a backend without it).
+ACCEPT_UNCONFIRMED = True
+
+
+def secret_unbind(scope: Scope | str, service: str, *, accept_unconfirmed: list[str] | None = None) -> list[str]:
     """Before the store entry is deleted: unbind it from every sandbox that may hold it.
 
     A sandbox with a record is unbound exactly where the record shows the
@@ -1286,6 +1303,11 @@ def secret_unbind(scope: Scope | str, service: str) -> None:
     ``--secret-rm``. If a recorded binding cannot be removed, or an unknown
     sandbox cannot be confirmed unbound, this raises ``unbind_failed`` naming
     them, and the caller keeps the store entry so the removal can be retried.
+
+    ``accept_unconfirmed`` names unknown sandboxes the user accepts leaving
+    unconfirmed (an explicit override until msb's handling of removing an unbound
+    variable is checked live). Only those are accepted, with a stderr note;
+    they are returned. A recorded binding that fails is never accepted.
     """
     sc = secretstore.as_scope(scope)
     if service_binding(service, sc.sandbox) is None:
@@ -1295,7 +1317,7 @@ def secret_unbind(scope: Scope | str, service: str) -> None:
             file=sys.stderr,
         )
     if _live_refeed_off():
-        return
+        return []
     names = list_names()
     if names is None:
         raise MsbError(
@@ -1306,7 +1328,8 @@ def secret_unbind(scope: Scope | str, service: str) -> None:
     targets = names if sc.is_global else [n for n in names if n == sc.sandbox]
     outcome = {sandbox: _unbind_one(sc, service, sandbox) for sandbox in targets}
     failed = [n for n, o in outcome.items() if o == "failed"]
-    unconfirmed = [n for n, o in outcome.items() if o == "unconfirmed"]
+    accepted = [n for n, o in outcome.items() if o == "unconfirmed" and n in (accept_unconfirmed or [])]
+    unconfirmed = [n for n, o in outcome.items() if o == "unconfirmed" and n not in accepted]
     if failed or unconfirmed:
         parts = [f"could not unbind '{service}' from sandbox(es): {', '.join(failed)}"] if failed else []
         if unconfirmed:
@@ -1317,9 +1340,16 @@ def secret_unbind(scope: Scope | str, service: str) -> None:
         raise MsbError(
             errors.UNBIND_FAILED,
             "; ".join(parts) + "; it is still stored in the acq secret store",
-            "retry the removal; a sandbox that stays unreachable or unconfirmed must be removed "
-            "('acq rm NAME' or 'msb remove NAME') before the secret can be",
+            "retry the removal; remove a sandbox that stays unreachable or unconfirmed ('acq rm NAME' or "
+            "'msb remove NAME'), or accept an unconfirmed one with --accept-unconfirmed NAME",
         )
+    if accepted:
+        print(
+            f"acq: note: accepted that '{service}' could not be confirmed unbound from sandbox(es) "
+            f"{', '.join(accepted)}; it may still be injected there until they are removed",
+            file=sys.stderr,
+        )
+    return accepted
 
 
 def secret_set(scope: Scope | str, service: str, value: str, *, timeout: float | None = None) -> None:
