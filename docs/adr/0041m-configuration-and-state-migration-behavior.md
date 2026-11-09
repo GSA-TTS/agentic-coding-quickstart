@@ -65,6 +65,19 @@ requires explicit, consent-gated recreation; host-held records and secrets are
 preserved, the guest filesystem is lost, and no weaker guest-writable fallback
 is permitted.
 
+Generations are tree-level steps, numbered independently of record schemas.
+Generation 1 brings every record to the current schema. Generation 2 imports
+the Bash implementation's own state (implemented in
+`py-acq/src/acq_py/legacy_bash.py` and `migration.py`): the per-sandbox
+`provenance/<backend>/<name>.<cksum>.{env,config}` records become sandbox
+records (agent, workspace, the read-only mount requirement, the forwarded
+ssh-agent socket) with their bundle ref, and the `config.yaml` keys
+`kit_sources` and `provider_credential_bindings` become kit-source and binding
+records. `provider_kit`, `extra_kits` and the `.kits` records are read in place.
+The import only creates records that do not exist yet and never deletes or
+rewrites a Bash file. It runs once per tree, so a record removed afterwards is
+not recreated from the Bash files left behind.
+
 Migratable records are the §3 semantic state plus `clones/`, `ports/`, `ssh/`;
 disposable caches are those acq can regenerate from host-held authority and
 pinned refs with no observable difference. Classification is proven by a
