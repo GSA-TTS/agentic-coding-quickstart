@@ -22,9 +22,9 @@ _existing = os.environ.get("PYTHONPATH")
 os.environ["PYTHONPATH"] = str(PY_ACQ_SRC) + (_sep + _existing if _existing else "")
 sys.path.insert(0, str(PY_ACQ_SRC))
 
-# Some acq_py modules read ACQ_* tunables (lock and readiness timeouts) at import
-# time, which happens during collection, before any function fixture runs. Clear
-# inherited ACQ_* here so a developer's shell cannot change those either.
+# Collection imports acq_py before any function fixture runs. The timeout
+# tunables are now read lazily, but clear inherited ACQ_* here as well so a
+# developer's shell cannot change anything read during import.
 for _var in [v for v in os.environ if v.startswith("ACQ_")]:
     del os.environ[_var]
 
