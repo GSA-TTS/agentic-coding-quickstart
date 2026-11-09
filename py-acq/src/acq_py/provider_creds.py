@@ -45,10 +45,10 @@ CREDS_SCHEMA = 1
 # The ``source_layer`` a provider-credential binding reports. ``CONFIG_LAYER`` is
 # the host-side provider-credentials record written by ``provider-credential set``
 # (the durable, user-owned layer); ``ENV_LAYER`` is the per-invocation
-# ``ACQ_PROVIDER_CREDENTIAL_BINDINGS`` environment layer. TODO(migration): the
-# legacy ``~/.config/acq/config.yaml`` ``provider_credential_bindings:`` key is
-# NOT read yet — reading/migrating that key into these records is a
-# migration-slice follow-up (ADR-0041m).
+# ``ACQ_PROVIDER_CREDENTIAL_BINDINGS`` environment layer. The Bash acq kept
+# bindings in the ``config.yaml`` ``provider_credential_bindings:`` key; the
+# forward migration imports that key into these records once (see
+# :func:`import_binding` and ``migration.py``, ADR-0041m).
 CONFIG_LAYER = "provider-credentials"
 ENV_LAYER = "env"
 
@@ -264,6 +264,27 @@ def set_binding(provider: str, key_env: str, hosts: list[str]) -> str:
         },
     )
     return "updated" if existed else "added"
+
+
+def import_binding(provider: str, key_env: str, hosts: list[str]) -> bool:
+    """Record a binding carried over from the Bash acq's config; True when written.
+
+    Used only by the forward migration. The binding is validated like any other
+    and an existing record is never replaced, so a later ``provider-credential
+    set``/``rm`` made with this acq is never undone by the import. Raises
+    ``ValueError`` for an invalid binding.
+    """
+    problem = validate_binding(provider, key_env, hosts)
+    if problem is not None:
+        raise ValueError(problem)
+    doc = {
+        "schema": CREDS_SCHEMA,
+        "provider": provider,
+        "key_env": key_env,
+        "hosts": list(hosts),
+        "source_layer": CONFIG_LAYER,
+    }
+    return state.atomic_create_text(_binding_path(provider), json.dumps(doc, indent=2, sort_keys=False) + "\n")
 
 
 def get_binding(provider: str) -> dict | None:

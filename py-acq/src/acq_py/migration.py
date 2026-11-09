@@ -33,6 +33,16 @@ migration never rewrites or rejects them, so a future ``KIT_SCHEMA`` bump cannot
 hard-fail sandbox migration and a legacy kit record is never rewritten into
 sandbox space.
 
+The generation marker counts tree-level steps, independently of the record
+schema: generation 1 is the record schema pass above; generation 2 imports the
+Bash acq's state (:mod:`acq_py.legacy_bash`) so sandboxes, trusted kit sources
+and provider-credential bindings it created keep working. The import only ever
+creates Python records that do not exist yet and never deletes or rewrites a
+Bash file, so it is safe to repeat; a tree already marked generation 1 is
+scanned again. It runs once per tree: a record removed afterwards with this acq
+(``rm``, ``kit-source rm``, ``provider-credential rm``) is not brought back from
+the Bash files left behind.
+
 ``ACQ_STATE_SEED`` is an internal test seam (never a secret, never written to
 output): a JSON object mapping ``"<backend>/<name>"`` to a record (a dict is
 serialized as JSON; a string is written verbatim, to simulate an unparseable
@@ -45,9 +55,20 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 from pathlib import Path
 
-from . import backends, config, errors, lock, state
+from . import (
+    backends,
+    config,
+    errors,
+    kits,
+    legacy_bash,
+    lock,
+    provider_creds,
+    state,
+    userdirs,
+)
 
 # The tree generation this reader migrates records TO, and the schema level this
 # reader itself understands. All record types currently write ``schema=1``; if a
@@ -55,6 +76,11 @@ from . import backends, config, errors, lock, state
 # type-aware rather than treating every record as one schema space.
 TARGET_SCHEMA = state.STATE_SCHEMA
 READER_SCHEMA = state.STATE_SCHEMA
+
+# The tree generation a completed migration declares (see the module docstring):
+# 1 = records at TARGET_SCHEMA, 2 = the Bash acq's state imported.
+RECORDS_GENERATION = 1
+TARGET_GENERATION = 2
 
 # Generation-marker and lock filenames under the state root.
 _GENERATION_FILENAME = "generation"
@@ -385,31 +411,127 @@ def _migrate_record(path: Path, doc: dict) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Generation 2: import the Bash acq's state.
+# ---------------------------------------------------------------------------
+
+def _import_kit_sources() -> int:
+    """Import ``config.yaml`` ``kit_sources``; returns how many records were created.
+
+    The control plane is never registered (it is the shipped pin). A ref that is
+    not a full commit SHA is skipped with a warning, since this acq only trusts
+    immutable refs; an unpinned entry is imported unpinned, as Bash lists it.
+    """
+    try:
+        entries = legacy_bash.kit_sources()
+    except legacy_bash.LegacyParseError as exc:
+        legacy_bash.warn(f"config.yaml kit_sources was not imported: {exc}")
+        return 0
+    created = 0
+    for repo, ref, directory in entries:
+        if kits.is_control_plane(repo):
+            continue
+        if ref and not kits.is_full_ref(ref):
+            legacy_bash.warn(
+                f"kit source '{repo}' was not imported: ref '{ref}' is not a full commit SHA; "
+                f"run 'acq kit-source add {repo} --ref <full-sha>' to trust it"
+            )
+            continue
+        created += kits.import_source(repo, ref, directory)
+    return created
+
+
+def _import_provider_bindings() -> int:
+    """Import ``config.yaml`` ``provider_credential_bindings``; returns records created."""
+    try:
+        bindings = legacy_bash.provider_credential_bindings()
+    except legacy_bash.LegacyParseError as exc:
+        legacy_bash.warn(f"config.yaml provider_credential_bindings was not imported: {exc}")
+        return 0
+    return sum(provider_creds.import_binding(p, k, h) for p, k, h in bindings)
+
+
+def _import_sandbox(sandbox: legacy_bash.BashSandbox) -> bool:
+    """Create the Python record for one Bash sandbox; True when it was created.
+
+    A sandbox the Bash acq knows nothing useful about (no agent, no workspace:
+    a create that never finished) is skipped. The recorded bundle ref is carried
+    over only with a record this import created, so it never describes a
+    different sandbox that this acq already has under the same name.
+    """
+    if sandbox.agent is None and sandbox.workspace is None:
+        return False
+    fields: dict = {"agent": sandbox.agent, "workspace": sandbox.workspace}
+    if sandbox.ro_host_config:
+        fields["ro_host_config"] = True
+    if sandbox.ssh_auth_sock:
+        fields["ssh_auth_sock"] = sandbox.ssh_auth_sock
+    fields["imported_from"] = "bash"
+    if not state.record_import(sandbox.backend, sandbox.name, fields):
+        return False
+    if sandbox.applied_ref:
+        kits.provenance_import(sandbox.backend, sandbox.name, sandbox.applied_ref, sandbox.applied_at)
+    return True
+
+
+def import_bash_state() -> dict[str, int]:
+    """Import the Bash acq's state into this acq's records; returns counts created.
+
+    Idempotent: only records that do not exist yet are created, and no Bash file
+    is changed. A Bash value its own readers would refuse is skipped with a
+    warning rather than failing the migration.
+    """
+    counts = {
+        "sandboxes": 0,
+        "kit_sources": _import_kit_sources(),
+        "provider_credentials": _import_provider_bindings(),
+    }
+    for backend in backends.BACKENDS:
+        for name in legacy_bash.sandbox_names(backend):
+            counts["sandboxes"] += _import_sandbox(legacy_bash.read_sandbox(backend, name))
+    if any(counts.values()):
+        print(
+            f"acq: imported {counts['sandboxes']} sandbox record(s), {counts['kit_sources']} kit "
+            f"source(s) and {counts['provider_credentials']} provider-credential binding(s) "
+            "from the Bash acq's state",
+            file=sys.stderr,
+        )
+    return counts
+
+
+# ---------------------------------------------------------------------------
 # The synchronized pre-step.
 # ---------------------------------------------------------------------------
+
+def _migrate_generations(generation: int) -> None:
+    """Apply every tree step above ``generation``, writing the marker after each."""
+    if generation < RECORDS_GENERATION:
+        for path in iter_records():
+            doc = _load_record(path)
+            _migrate_record(path, doc)
+        write_generation(RECORDS_GENERATION)  # LAST: a generation completes only now
+    if generation < TARGET_GENERATION:
+        import_bash_state()
+        write_generation(TARGET_GENERATION)
+
 
 def migrate_tree() -> None:
     """Run the forward migration under the exclusive advisory lock.
 
-    Idempotent and crash-converging: a generation marker at or above the target
-    short-circuits the *record* pass; otherwise every sandbox-state record is
-    (re)classified and forward-migrated — an already-migrated record is a no-op —
-    and the marker is written LAST so a crash mid-migration resumes on the next
-    run. ``config.yaml`` is migrated in the same critical section but INDEPENDENT
-    of the state generation marker, so a subsequently-legacy config is still
-    migrated once the record tree is already current.
+    Idempotent and crash-converging: each tree step at or below the marker is
+    skipped. Below generation 1 every sandbox-state record is (re)classified and
+    forward-migrated (an already-migrated record is a no-op); below generation 2
+    the Bash acq's state is imported. Each step writes the marker LAST, so a crash
+    mid-step resumes on the next run. ``config.yaml`` is migrated in the same
+    critical section but INDEPENDENT of the state generation marker, so a
+    subsequently-legacy config is still migrated once the record tree is already
+    current.
     """
     try:
         with lock.exclusive_lock(lock_path()):
             _seed_records()  # materialize the test seams inside the critical section
             config.seed_config()
             config.migrate_config()  # independent of the generation marker
-            if read_generation() >= TARGET_SCHEMA:
-                return
-            for path in iter_records():
-                doc = _load_record(path)
-                _migrate_record(path, doc)
-            write_generation(TARGET_SCHEMA)  # LAST: a generation completes only now
+            _migrate_generations(read_generation())
     except lock.MigrationLockTimeout as exc:
         raise MigrationError(
             errors.MIGRATION_LOCKED,
@@ -424,6 +546,8 @@ def migrate_tree() -> None:
             str(exc),
             "repair or remove config.yaml so its schema marker is readable",
         ) from exc
+    except userdirs.UserDirError as exc:
+        raise MigrationError(errors.MIGRATION_FAILED, exc.message, exc.remediation) from exc
     except OSError as exc:
         # An unwritable or full state root (creating the lock file, writing the
         # generation marker, the config.yaml step) must fail closed through the
