@@ -36,6 +36,7 @@ import os
 import re
 import subprocess
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
@@ -541,7 +542,7 @@ def create(
             "check msb logs and retry",
         )
     try:
-        _held_write(name, {b.binding.env: b.entry() for b in planned})
+        _held_write(HeldRecord(name, {b.binding.env: b.entry() for b in planned}, complete=True))
     except MsbError:
         # Untracked bindings could never be revoked by `secret rm`: do not keep
         # a sandbox acq cannot account for.
@@ -656,7 +657,7 @@ def remove(name: str) -> None:
             f"msb remove failed for sandbox '{name}'",
             "check msb logs and retry",
         )
-    _held_forget(name)
+    held_forget(name)
 
 
 def _run_stream(argv: list[str], *, json_mode: bool) -> int:
@@ -889,24 +890,59 @@ def service_binding(service: str, sandbox: str | None = None) -> SecretBinding |
 
 
 # --- host-side record of the bindings each sandbox holds -------------------
+#
+# A record is written for every sandbox acq creates, even one with no bindings,
+# so a missing record means "unknown" (a sandbox created by Bash, by msb
+# directly, or before records existed), never "holds nothing". A record acq
+# starts for an unknown sandbox (when it re-feeds one) is ``complete: false``
+# and lists in ``services`` the services whose binding acq itself set or
+# cleared there; for any other service that sandbox is still unknown.
 
-def _held_path(name: str) -> Path:
+
+@dataclass
+class HeldRecord:
+    """What acq knows about the bindings sandbox ``name`` holds (no values)."""
+
+    name: str
+    bindings: dict[str, dict] = field(default_factory=dict)
+    complete: bool = False
+    services: list[str] = field(default_factory=list)
+
+    def knows(self, service: str) -> bool:
+        """True when acq knows whether this sandbox holds ``service``."""
+        return self.complete or service in self.services
+
+    def note(self, service: str) -> None:
+        if service not in self.services:
+            self.services.append(service)
+
+    def save(self) -> None:
+        _held_write(self)
+
+
+def held_path(name: str) -> Path:
     digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:8]
     return state.state_dir() / "msb-secret-bindings" / f"{_HELD_UNSAFE_RE.sub('_', name)}.{digest}.json"
 
 
-def held_read(name: str) -> dict[str, dict]:
-    """``{ENV: {service, host, scope}}`` for the bindings ``name`` holds.
+def _held_entry_ok(env: object, entry: object) -> bool:
+    return (
+        isinstance(env, str) and provider_creds.key_env_ok(env) and isinstance(entry, dict)
+        and all(isinstance(entry.get(k), str) for k in ("service", "host", "scope"))
+    )
 
-    No record means none. A record that exists but cannot be read raises
-    :class:`MsbError`: treating it as empty would let ``secret rm`` skip a
-    sandbox that still holds a credential.
+
+def held_read(name: str) -> HeldRecord:
+    """The record for ``name``; an unknown (not complete, empty) one when absent.
+
+    A record that exists but cannot be read, or carries an invalid env name,
+    raises :class:`MsbError`: treating it as known-empty would let ``secret rm``
+    skip a sandbox that still holds a credential.
     """
-    path = _held_path(name)
     try:
-        raw = path.read_text(encoding="utf-8")
+        raw = held_path(name).read_text(encoding="utf-8")
     except FileNotFoundError:
-        return {}
+        return HeldRecord(name)
     except OSError as exc:
         raise _held_unreadable(name) from exc
     try:
@@ -915,12 +951,12 @@ def held_read(name: str) -> dict[str, dict]:
         raise _held_unreadable(name) from exc
     if not isinstance(doc, dict) or doc.get("schema") != HELD_SCHEMA or doc.get("sandbox") != name:
         raise _held_unreadable(name)
-    held = doc.get("bindings")
-    if not isinstance(held, dict):
+    bindings, complete, services = doc.get("bindings"), doc.get("complete"), doc.get("services")
+    if not isinstance(bindings, dict) or not isinstance(complete, bool) or not isinstance(services, list):
         raise _held_unreadable(name)
-    if not all(isinstance(v, dict) and isinstance(v.get("service"), str) for v in held.values()):
+    if not all(_held_entry_ok(k, v) for k, v in bindings.items()) or not all(isinstance(s, str) for s in services):
         raise _held_unreadable(name)
-    return held
+    return HeldRecord(name, bindings, complete, services)
 
 
 def _held_unreadable(name: str) -> MsbError:
@@ -931,29 +967,47 @@ def _held_unreadable(name: str) -> MsbError:
     )
 
 
-def _held_write(name: str, held: dict[str, dict]) -> None:
-    path = _held_path(name)
-    if not held:
-        _held_forget(name)
-        return
+def _fsync_dir(directory: Path) -> None:
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return  # not supported for directories on this platform (Windows)
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _held_write(rec: HeldRecord) -> None:
+    """Write ``rec`` durably (temp file, fsync, rename, fsync the directory)."""
+    path = held_path(rec.name)
     tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    doc = {"schema": HELD_SCHEMA, "sandbox": rec.name, "complete": rec.complete,
+           "services": rec.services, "bindings": rec.bindings}
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(json.dumps({"schema": HELD_SCHEMA, "sandbox": name, "bindings": held}, sort_keys=True),
-                       encoding="utf-8")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(doc, sort_keys=True))
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(tmp, path)
     except OSError as exc:
         tmp.unlink(missing_ok=True)
         raise MsbError(
             errors.FAILURE,
-            f"could not record the secrets bound to sandbox '{name}'",
+            f"could not record the secrets bound to sandbox '{rec.name}'",
             "check that the acq state directory is writable, then retry",
         ) from exc
+    _fsync_dir(path.parent)
 
 
-def _held_forget(name: str) -> None:
+def held_forget(name: str) -> None:
+    """Drop ``name``'s record (the sandbox is gone)."""
     try:
-        _held_path(name).unlink(missing_ok=True)
+        held_path(name).unlink(missing_ok=True)
     except OSError:
         pass
 
@@ -1075,17 +1129,19 @@ def _modify(name: str, flags: list[str], secret_env: dict[str, str] | None = Non
     return proc.returncode == 0
 
 
-def _drop(name: str, env: str, held: dict[str, dict]) -> bool:
+def _drop(rec: HeldRecord, env: str) -> bool:
     """``msb modify NAME --secret-rm ENV`` and forget it in the record."""
-    if not _modify(name, ["--secret-rm", env]):
+    if not _modify(rec.name, ["--secret-rm", env]):
         return False
-    held.pop(env, None)
-    _held_write(name, held)
+    entry = rec.bindings.pop(env, None)
+    if entry is not None:
+        rec.note(entry["service"])
+    rec.save()
     return True
 
 
-def _put(name: str, bound: BoundSecret, value: str, held: dict[str, dict]) -> bool:
-    """Bind ``bound`` in sandbox ``name`` and record it.
+def _put(rec: HeldRecord, bound: BoundSecret, value: str) -> bool:
+    """Bind ``bound`` in sandbox ``rec.name`` and record it.
 
     A binding is never replaced in place: if the variable is bound to other
     hosts, or this service is bound under another variable, those are removed
@@ -1093,16 +1149,17 @@ def _put(name: str, bound: BoundSecret, value: str, held: dict[str, dict]) -> bo
     hosts rotates the value.
     """
     env = bound.binding.env
-    stale = [e for e, v in held.items() if v["service"] == bound.service and e != env]
-    if env in held and held[env].get("host") != bound.binding.host:
+    stale = [e for e, v in rec.bindings.items() if v["service"] == bound.service and e != env]
+    if env in rec.bindings and rec.bindings[env].get("host") != bound.binding.host:
         stale.append(env)
     for old in stale:
-        if not _drop(name, old, held):
+        if not _drop(rec, old):
             return False
-    if not _modify(name, ["--secret", bound.binding.flag], {env: value}):
+    if not _modify(rec.name, ["--secret", bound.binding.flag], {env: value}):
         return False
-    held[env] = bound.entry()
-    _held_write(name, held)
+    rec.bindings[env] = bound.entry()
+    rec.note(bound.service)
+    rec.save()
     return True
 
 
@@ -1123,16 +1180,17 @@ def _refeed(service: str, scope: Scope) -> None:
             continue
         binding = service_binding(service, sandbox)
         value = secretstore.resolve(service, sandbox)
-        held = held_read(sandbox)
+        rec = held_read(sandbox)
+        holder = rec.bindings.get(binding.env) if binding is not None else None
         if binding is None or not value:
             failed.append(f"{sandbox} (no injectable value)")
-        elif binding.env in held and held[binding.env]["service"] != service:
+        elif holder is not None and holder["service"] != service:
             print(
                 f"acq: warning: '{service}' was not applied to sandbox '{sandbox}': "
-                f"{binding.env} is already bound there for '{held[binding.env]['service']}'",
+                f"{binding.env} is already bound there for '{holder['service']}'",
                 file=sys.stderr,
             )
-        elif not _put(sandbox, BoundSecret(service, binding, _has_own_value(service, sandbox)), value, held):
+        elif not _put(rec, BoundSecret(service, binding, _has_own_value(service, sandbox)), value):
             failed.append(sandbox)
         value = None
     if failed:
@@ -1156,47 +1214,84 @@ def secret_feed(scope: Scope | str, service: str, value: str, host: str = "", en
 
 # --- secret rm -------------------------------------------------------------------
 
-def _unbind_one(scope: Scope, service: str, sandbox: str) -> bool:
-    """Remove ``scope``'s binding of ``service`` from ``sandbox``, if it holds one.
+def _sweep_unknown(rec: HeldRecord, scope: Scope, service: str) -> bool:
+    """Best-effort unbind of ``service`` from a sandbox acq has no knowledge of.
 
-    Only bindings the record shows the sandbox holding for this scope are
-    touched. Removing a sandbox's own value then re-binds the global value with
-    a separate call when one can be injected; if that re-add fails the sandbox is
-    left without the credential (warned), never with the removed value.
+    Returns True when the sandbox is confirmed not to hold it any more: it
+    holds its own value (a global removal leaves that alone), the variable is
+    recorded for another service, or ``msb modify --secret-rm`` succeeded. A
+    failed remove cannot be told apart from "it was never bound", so it is not a
+    confirmation.
     """
-    held = held_read(sandbox)
-    wanted = "global" if scope.is_global else "sandbox"
-    envs = [e for e, v in held.items() if v["service"] == service and v.get("scope") == wanted]
-    for env in envs:
-        if not _drop(sandbox, env, held):
+    if scope.is_global and _has_own_value(service, rec.name):
+        return True
+    guess = service_binding(service, rec.name)
+    if guess is None:
+        return False
+    if guess.env not in rec.bindings:
+        if not _modify(rec.name, ["--secret-rm", guess.env]):
             return False
-    if envs and not scope.is_global:
-        fallback = service_binding(service, None)
-        value = secretstore.resolve(service, None)
-        if fallback is not None and value and fallback.env not in held:
-            if not _put(sandbox, BoundSecret(service, fallback, False), value, held):
-                print(
-                    f"acq: warning: removed '{service}' from sandbox '{sandbox}', but could not bind the "
-                    f"global value there; run 'acq secret set -g {service}' or recreate the sandbox",
-                    file=sys.stderr,
-                )
-        value = None
+    rec.note(service)
+    rec.save()
     return True
 
 
-def secret_unbind(scope: Scope | str, service: str) -> None:
-    """Before the store entry is deleted: unbind it from the sandboxes holding it.
+def _rebind_global(rec: HeldRecord, service: str) -> None:
+    """After a sandbox value is removed, bind the global value in a separate call.
 
-    The host-side record says which sandboxes hold the binding (stopped ones
-    included); nothing else is touched. If any of them cannot be updated this
-    raises ``unbind_failed`` naming them, and the caller keeps the store entry so
-    the removal can be retried.
+    If that fails the sandbox is left without the credential (warned), never
+    with the removed value.
+    """
+    fallback = service_binding(service, None)
+    value = secretstore.resolve(service, None)
+    if fallback is not None and value and fallback.env not in rec.bindings:
+        if not _put(rec, BoundSecret(service, fallback, False), value):
+            print(
+                f"acq: warning: removed '{service}' from sandbox '{rec.name}', but could not bind the "
+                f"global value there; run 'acq secret set -g {service}' or recreate the sandbox",
+                file=sys.stderr,
+            )
+    value = None
+
+
+def _unbind_one(scope: Scope, service: str, sandbox: str) -> str:
+    """Take ``scope``'s binding of ``service`` out of ``sandbox``.
+
+    Returns ``ok``, ``failed`` (a recorded binding could not be removed) or
+    ``unconfirmed`` (acq has no record of what the sandbox holds, and could not
+    confirm it does not hold this binding).
+    """
+    rec = held_read(sandbox)
+    wanted = "global" if scope.is_global else "sandbox"
+    envs = [e for e, v in rec.bindings.items() if v["service"] == service and v["scope"] == wanted]
+    for env in envs:
+        if not _drop(rec, env):
+            return "failed"
+    removed = bool(envs)
+    if not rec.knows(service):
+        if not _sweep_unknown(rec, scope, service):
+            return "unconfirmed"
+        removed = removed or not (scope.is_global and _has_own_value(service, sandbox))
+    if removed and not scope.is_global:
+        _rebind_global(rec, service)
+    return "ok"
+
+
+def secret_unbind(scope: Scope | str, service: str) -> None:
+    """Before the store entry is deleted: unbind it from every sandbox that may hold it.
+
+    A sandbox with a record is unbound exactly where the record shows the
+    binding (stopped ones included). A sandbox msb lists without a record (or
+    whose record does not cover this service) is unknown and gets a best-effort
+    ``--secret-rm``. If a recorded binding cannot be removed, or an unknown
+    sandbox cannot be confirmed unbound, this raises ``unbind_failed`` naming
+    them, and the caller keeps the store entry so the removal can be retried.
     """
     sc = secretstore.as_scope(scope)
     if service_binding(service, sc.sandbox) is None:
         print(
             f"acq: warning: '{service}' has no msb binding to resolve (no endpoint mapping or provider pin); "
-            "only sandboxes recorded as holding it are unbound",
+            "sandboxes acq has no record for cannot be checked for it",
             file=sys.stderr,
         )
     if _live_refeed_off():
@@ -1209,13 +1304,21 @@ def secret_unbind(scope: Scope | str, service: str) -> None:
             "check that msb works ('msb list'), then retry",
         )
     targets = names if sc.is_global else [n for n in names if n == sc.sandbox]
-    failed = [sandbox for sandbox in targets if not _unbind_one(sc, service, sandbox)]
-    if failed:
+    outcome = {sandbox: _unbind_one(sc, service, sandbox) for sandbox in targets}
+    failed = [n for n, o in outcome.items() if o == "failed"]
+    unconfirmed = [n for n, o in outcome.items() if o == "unconfirmed"]
+    if failed or unconfirmed:
+        parts = [f"could not unbind '{service}' from sandbox(es): {', '.join(failed)}"] if failed else []
+        if unconfirmed:
+            parts.append(
+                f"could not confirm '{service}' is unbound from sandbox(es) acq has no binding record for: "
+                f"{', '.join(unconfirmed)}"
+            )
         raise MsbError(
             errors.UNBIND_FAILED,
-            f"could not unbind '{service}' from sandbox(es): {', '.join(failed)}; "
-            "it is still stored in the acq secret store",
-            "retry the removal; if a sandbox stays unreachable, remove it with 'acq rm NAME' and retry",
+            "; ".join(parts) + "; it is still stored in the acq secret store",
+            "retry the removal; a sandbox that stays unreachable or unconfirmed must be removed "
+            "('acq rm NAME' or 'msb remove NAME') before the secret can be",
         )
 
 

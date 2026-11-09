@@ -129,6 +129,41 @@ resort.
 
 ---
 
+## Python acq on msb: `secret rm` can be blocked by a sandbox it has no record for
+
+**Status:** known limitation, waiting on a live msb check (per AGENTS.md "Track Deferred Work").
+
+### Symptoms and cause
+
+The Python msb adapter records host-side which secret bindings each sandbox it
+creates holds (`<state>/msb-secret-bindings/`), because msb gives acq no binding
+listing to rely on. `secret rm` unbinds exactly what those records show. A
+sandbox msb lists without a record is unknown: one created by the Bash `acq`, by
+`msb` directly, or before the records existed. For each unknown sandbox,
+`secret rm` tries `msb modify NAME --secret-rm ENV`. If that fails, acq cannot
+tell "msb refused because the variable was never bound" from a real failure, so
+it keeps the secret in the acq store and exits 1 with `unbind_failed`, naming
+the sandbox. Until the msb behaviour is known, any unknown sandbox that never
+had the binding can block the removal if msb rejects removing an unbound
+variable (the test stub models it that way). Stopped sandboxes are swept too,
+and `msb modify` on a stopped sandbox is also unverified.
+
+### Mitigation today
+
+Remove the named sandbox (`acq rm NAME`, or `msb remove NAME` for one acq did
+not create), then retry `acq secret rm`. Sandboxes the Python acq creates always
+have a record and never block it.
+
+### Unblock trigger
+
+A live msb run that shows what `msb modify NAME --secret-rm ENV` does for a
+variable that is not bound, on a running and on a stopped sandbox. If msb
+succeeds, or fails in a way acq can tell apart, treat that as "confirmed
+unbound" and stop blocking. Reading Bash's provenance records (planned
+Bash-state import) would also turn Bash-created sandboxes into known ones.
+
+---
+
 ## Read-only host-config probe misclassifies a denied write
 
 ### Symptoms and cause

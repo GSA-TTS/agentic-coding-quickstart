@@ -62,9 +62,10 @@ exit 1, the `unsupported_capability` code, and remediation.
 > sbx-only obligation (msb holds no proxy table); `secret has` on msb is answered
 > from the store and the adapter's binding table. Because msb offers no binding
 > listing acq relies on, the adapter records host-side which sandbox holds which
-> binding; `secret rm` unbinds exactly those, and if one cannot be updated it
-> keeps the stored value and fails with `unbind_failed` so the removal can be
-> retried.
+> binding (an empty record too, so a missing one means "unknown"); `secret rm`
+> unbinds exactly those, sweeps unknown sandboxes best-effort, and if a binding
+> cannot be removed or an unknown sandbox cannot be confirmed unbound it keeps
+> the stored value and fails with `unbind_failed` so the removal can be retried.
 
 The record is a declaration; conformance is proven, not trusted: each
 declared capability is asserted by a Tier-1 subprocess vector (working, or

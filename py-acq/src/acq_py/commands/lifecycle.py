@@ -250,15 +250,19 @@ def _clear_host_records(backend: str, name: str) -> None:
     """Drop every per-sandbox host record: the state record and the applied-kit record.
 
     A leftover applied-kit record would make the next create of the same name
-    skip the agent install, so the two always go together.
+    skip the agent install, so the two always go together. On msb the record of
+    the sandbox's secret bindings goes too.
     """
     state.record_remove(backend, name)
     kits.kit_applied_remove(backend, name)
+    if backend == "msb":
+        msb.held_forget(name)
 
 
 def _has_host_records(backend: str, name: str) -> bool:
     """True when any per-sandbox host record exists, readable or not."""
-    return state.record_path(backend, name).exists() or kits.kit_applied_present(backend, name)
+    held = backend == "msb" and msb.held_path(name).exists()
+    return held or state.record_path(backend, name).exists() or kits.kit_applied_present(backend, name)
 
 
 def _lock_failure(command: str, name: str, exc: lock.SandboxLockTimeout, emit_json: bool) -> int:
