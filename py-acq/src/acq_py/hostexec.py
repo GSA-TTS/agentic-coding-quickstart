@@ -171,8 +171,15 @@ def exit_status(returncode: int) -> int:
     return 128 - returncode if returncode < 0 else returncode
 
 
+# Set by _ignore_interrupt when acq itself received SIGINT during the current
+# foreground run (from the terminal's Ctrl-C, or a kill aimed at acq).
+_interrupted = False
+
+
 def _ignore_interrupt(_signum: int, _frame: FrameType | None) -> None:
-    """SIGINT handler used while a foreground child runs: do nothing."""
+    """SIGINT handler used while a foreground child runs: note it, do nothing."""
+    global _interrupted
+    _interrupted = True
 
 
 def run_foreground(argv: list[str], *, stdout: int | None = None) -> int:
@@ -190,9 +197,14 @@ def run_foreground(argv: list[str], *, stdout: int | None = None) -> int:
     caught one is reset to the default in the child. ``OSError`` from starting
     the program propagates to the caller.
 
-    When the child dies of SIGINT, acq dies of SIGINT too (see
-    :func:`_die_of_interrupt`) rather than returning 130.
+    When the child dies of SIGINT *and* acq received SIGINT as well (a Ctrl-C
+    for the whole foreground job), acq dies of SIGINT too, as a shell does (see
+    :func:`_die_of_interrupt`). In that case it prints nothing more: under
+    ``--json`` there is no envelope. A SIGINT aimed only at the child gives an
+    ordinary status 130, and the caller reports it as usual.
     """
+    global _interrupted
+    _interrupted = False
     previous = _hold_interrupt()
     try:
         child = subprocess.Popen(argv, stdout=stdout)
@@ -200,7 +212,7 @@ def run_foreground(argv: list[str], *, stdout: int | None = None) -> int:
     finally:
         if previous is not None:
             signal.signal(signal.SIGINT, previous)
-    if returncode == -signal.SIGINT and previous is not None and not _is_windows():
+    if returncode == -signal.SIGINT and _interrupted and previous is not None and not _is_windows():
         _die_of_interrupt()
     return exit_status(returncode)
 

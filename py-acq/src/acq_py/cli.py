@@ -140,9 +140,9 @@ def _misplaced_exec_globals(args: list[str], start: int, flags: _Globals) -> boo
     i = start
     while i < len(args) and args[i] != "--":
         nxt = probe.take(args, i)
-        if nxt is None or probe.backend_missing:
+        if nxt is None:
             return False
-        i = nxt
+        i = nxt  # a --backend with no value counts too: it is acq's flag
     if i == start or i >= len(args):
         return False
     flags.misplaced = args[start:i]

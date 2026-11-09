@@ -106,13 +106,20 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   session a PTY (`msb exec -t`, `sbx exec -it`) and pass the host's `TERM` and
   `COLORTERM`; without one there is no PTY. Every session (`exec` too) gets
   `HOME=/home/agent` and the host git identity (`GIT_AUTHOR_*`,
-  `GIT_COMMITTER_*`, and `EMAIL` or the global `user.email`); interactive msb
-  sessions also get `SHELL` (sbx templates set their own). `SSH_AUTH_SOCK` is
-  passed only when the sandbox records a forwarded ssh-agent socket, never the
-  host's own. A child killed by signal N gives exit status `128+N`; Ctrl-C goes
-  to the child rather than killing it, and if the child dies of it acq dies of
-  SIGINT too, so a calling shell loop stops. acq's flags go before the verb:
-  `acq exec NAME --json -- CMD` is refused as a usage error.
+  `GIT_COMMITTER_*`, and `EMAIL` or the global `user.email`). On msb, `attach`,
+  `shell` and `run` also get `SHELL`, with or without a PTY; sbx templates set
+  their own. `SSH_AUTH_SOCK` is passed only when the sandbox records a forwarded
+  ssh-agent socket, never the host's own. A child killed by signal N gives exit
+  status `128+N`. Ctrl-C goes to the child rather than killing it; when the
+  child dies of a Ctrl-C that acq received too, acq dies of SIGINT as well, so a
+  calling shell loop stops, and under `--json` no envelope is printed. A SIGINT
+  sent only to the child gives an ordinary `130` with the envelope.
+* Flag position: acq's own flags (`--json`, `--backend NAME`) may go anywhere
+  before `--` for most verbs, so `acq ls --json` and `acq attach box --json`
+  work. Only two places are strict: after the `exec` sandbox name, where tokens
+  are the guest command (and `acq exec NAME --json -- CMD`, with nothing but
+  acq flags before `--`, is refused as a usage error), and after a passthrough
+  verb, where everything is forwarded to the backend.
 * `acq-py cp SRC DST [--json]` — copy between a native host path and a POSIX
   guest path. Exactly one side is a `NAME:/guest/path` reference; host and guest
   types stay distinct (ADR-0038m §4). The host side is forwarded verbatim to the

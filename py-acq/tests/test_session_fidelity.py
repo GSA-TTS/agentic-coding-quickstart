@@ -69,7 +69,7 @@ elif args[:1] == ["exec"]:
         time.sleep(5)
     if mode == "die-on-int":
         signal.signal(signal.SIGINT, signal.SIG_DFL)
-        record(event="ready")
+        record(event="ready", pid=os.getpid())
         time.sleep(20)
         sys.exit(3)
     if mode == "trap":
@@ -499,7 +499,7 @@ def test_backend_flag_without_a_value_is_a_usage_error(capsys, argv):
 
 @pytest.mark.parametrize(
     "flags",
-    [["--json"], ["--backend", "sbx"], ["--json", "--backend", "msb"]],
+    [["--json"], ["--backend", "sbx"], ["--json", "--backend", "msb"], ["--backend"], ["--json", "--backend"]],
 )
 def test_acq_flags_between_exec_name_and_separator_are_refused(monkeypatch, tmp_path, capfd, flags):
     _stub_msb(monkeypatch, tmp_path)
@@ -519,3 +519,31 @@ def test_guest_command_flags_before_separator_still_pass_through(monkeypatch, tm
     assert rc == 0
     assert doc is None
     assert "[stub exec] grep --json -- x" in output
+
+
+@posix_only
+def test_sigint_aimed_only_at_the_child_gives_130_with_the_envelope(fake, monkeypatch):
+    # acq itself was not interrupted, so it must not die of SIGINT: it reports
+    # the child's 130 and, under --json, still prints its one envelope.
+    monkeypatch.setenv("FAKE_MODE", "die-on-int")
+    acq = subprocess.Popen(
+        _acq("--backend", "msb", "--json", "exec", "box", "--", "agent"),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 15
+        ready = []
+        while not ready and time.monotonic() < deadline:
+            ready = [e for e in fake() if e.get("event") == "ready"]
+            time.sleep(0.05)
+        assert ready, "the backend child never started"
+        os.kill(ready[0]["pid"], signal.SIGINT)
+        out, err = acq.communicate(timeout=15)
+    finally:
+        if acq.poll() is None:
+            acq.kill()
+    assert acq.returncode == 130, err
+    assert json.loads(out)["data"]["exit_code"] == 130

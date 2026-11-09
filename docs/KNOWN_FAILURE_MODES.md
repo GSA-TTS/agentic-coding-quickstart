@@ -90,8 +90,8 @@ pass).
 The Python `attach`, `shell`, `run` and `exec` give the session a PTY when stdin
 is a terminal (`msb exec -t`, `sbx exec -it`), pass `HOME`, `TERM`/`COLORTERM`,
 the host git identity and (msb) `SHELL`, map a signal death to `128+N`, and
-leave Ctrl-C to the child (`py-acq/src/acq_py/hostexec.py` `run_foreground`). Four
-parts of the Bash session are not ported yet:
+leave Ctrl-C to the child (`py-acq/src/acq_py/hostexec.py` `run_foreground`). Six
+parts of the Bash session differ or are not ported yet:
 
 1. **Kit `environment[]` replay** (Bash `_acq_msb_kit_env_flags_into`). The
    Python kit engine does not persist a kit's declared environment, so there is
@@ -108,7 +108,22 @@ parts of the Bash session are not ported yet:
    git identity kit). Python passes the identity as `GIT_*`/`EMAIL` session
    variables only; it does not write `user.name`/`user.email` into the guest's
    global git config. **Unblock trigger:** same as item 1.
-4. **Live check.** A TUI attach, an interactive shell and Ctrl-C have been tested
+4. **`ACQ_ACTIVATE_PROJECT_ENV`.** With it set to `1`, Bash passes
+   `ACQ_WORKSPACE` and wraps the session in its guest script
+   (`acq_guest_exec_script`, `acq_guest_shell_script` in `acq.backends/common.sh`),
+   which changes into the workspace and loads its `.envrc` through `direnv` before
+   the command runs. Python ignores the variable and starts the command directly.
+   **Unblock trigger:** the Python substrate reliably provides `direnv` in the
+   guest; then port the two scripts into the adapters' session commands.
+5. **sbx attach uses `sbx exec -it`, not `sbx run --name`.** Bash re-attaches with
+   `sbx run --name NAME`, which relaunches the agent baked into the sandbox and
+   reads its launch mode from the `generic-opencode` host record. Python has no
+   such record, and `sbx run` takes no `-e`, so it could not pass the session
+   environment above. Python therefore runs the recorded agent (or kit entrypoint)
+   with `sbx exec -it NAME -- AGENT` from host state, as it does on msb.
+   **Unblock trigger:** the Python reader for Bash's state tree lands; then decide
+   whether a Bash-created generic-OpenCode sandbox needs `sbx run` to attach.
+6. **Live check.** A TUI attach, an interactive shell and Ctrl-C have been tested
    only against a fake backend under a PTY (`py-acq/tests/test_session_fidelity.py`).
    **Unblock trigger:** the next Tier-3 run on an msb host, and on an sbx 0.51+
    host for `sbx exec -it`.
