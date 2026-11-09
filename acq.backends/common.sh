@@ -285,6 +285,19 @@ if [ -n "${ACQ_SCRIPT_DIR:-}" ] && [ -f "${ACQ_SCRIPT_DIR}/acq.backends/kit-tran
   # shellcheck disable=SC1091
   . "${ACQ_SCRIPT_DIR}/acq.backends/kit-translate.sh"
 fi
+# The host-side git reads below (workspace repo detection, the identity note)
+# clear the inherited git environment with _kit_git_isolate*, which live in
+# kit-translate.sh. When common.sh is sourced without ACQ_SCRIPT_DIR, load it
+# from beside this file; if it is still missing, those reads fail closed
+# (_acq_git_host). CDPATH is cleared so `cd` cannot land elsewhere or print.
+if ! declare -F _kit_git_isolate >/dev/null 2>&1; then
+  _acq_common_dir=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P) || _acq_common_dir=""
+  if [ -n "$_acq_common_dir" ] && [ -f "$_acq_common_dir/kit-translate.sh" ]; then
+    # shellcheck source=acq.backends/kit-translate.sh
+    . "$_acq_common_dir/kit-translate.sh"
+  fi
+  unset _acq_common_dir
+fi
 
 # Source the acq-owned, backend-neutral secret store (keychain-backed; both the
 # sbx and msb adapters read credentials from here at provision time).
@@ -2284,10 +2297,43 @@ acq_resolve_backend_best_effort() {
   _ACQ_RESOLVE_ERR_FD=3 acq_resolve_backend "${1:-}" 3>&2 2>/dev/null || true
 }
 
+# acq_resolve_backend_diagnostic [EXPLICIT] — acq_resolve_backend_best_effort
+# for doctor and configure. An unknown backend pinned in config.yaml does not
+# end the verb: it is recorded in ACQ_INVALID_BACKEND_PIN (no backend is
+# loaded), so doctor reports a failed config-backend check and configure shows
+# it, both completing as Python's do. An unknown --backend or
+# ACQ_BACKEND value still exits.
+acq_resolve_backend_diagnostic() {
+  ACQ_INVALID_BACKEND_PIN=""
+  _ACQ_RESOLVE_PIN_REPORT=1 acq_resolve_backend_best_effort "${1:-}"
+}
+
+# _acq_unknown_backend_message NAME ORIGIN — the refusal for a backend name acq
+# cannot load (stdout; callers redirect).
+_acq_unknown_backend_message() {
+  echo "acq: error: unknown backend '$(acq_printable "$1")' from ${2} (expected sbx or msb)."
+  echo "     Fix or unset it, or pin a valid one with 'acq backend set msb'."
+}
+
+# _acq_unknown_backend NAME ORIGIN FROM_CONFIG — refuse a backend name acq
+# cannot load. Exits 1, as a missing adapter file always has: a backend the user
+# named but acq cannot load is an error even for the best-effort callers,
+# unlike "nothing installed". The one exception is the config.yaml pin
+# (FROM_CONFIG=1) under acq_resolve_backend_diagnostic, which records the name
+# in ACQ_INVALID_BACKEND_PIN and returns 1 for the verb to report.
+_acq_unknown_backend() {
+  if [ "$3" = 1 ] && [ -n "${_ACQ_RESOLVE_PIN_REPORT:-}" ]; then
+    ACQ_INVALID_BACKEND_PIN="$1"
+    return 1
+  fi
+  _acq_unknown_backend_message "$1" "$2" >&"${_ACQ_RESOLVE_ERR_FD:-2}"
+  exit 1
+}
+
 # Resolve and load the backend. $1 (optional) = explicit --backend value.
 acq_resolve_backend() {
   local explicit="${1:-}"
-  local name="" origin=""
+  local name="" origin="" from_config=0
   local autodetected=0
 
   if [ -n "$explicit" ]; then
@@ -2299,6 +2345,7 @@ acq_resolve_backend() {
     cfg_name=$(_read_config_backend)
     if [ -n "$cfg_name" ]; then
       name="$cfg_name"
+      from_config=1
       origin=$(_acq_config_file) || origin="config.yaml"
     else
       _auto_detect_backend || {
@@ -2325,15 +2372,9 @@ acq_resolve_backend() {
   # silent.
   [ "$autodetected" -eq 1 ] && _announce_autodetect_backend
 
-  # An unknown name exits, as a missing adapter file always has: a backend the
-  # user named explicitly but acq cannot load is an error even for the
-  # best-effort callers, unlike "nothing installed" above.
+  # An unknown name is refused (see _acq_unknown_backend).
   if ! acq_backend_name_known "$name"; then
-    {
-      echo "acq: error: unknown backend '$(acq_printable "$name")' from ${origin:-auto-detect} (expected sbx or msb)."
-      echo "     Fix or unset it, or pin a valid one with 'acq backend set msb'."
-    } >&"${_ACQ_RESOLVE_ERR_FD:-2}"
-    exit 1
+    _acq_unknown_backend "$name" "${origin:-auto-detect}" "$from_config" || return 1
   fi
   _load_backend_adapter "$name"
   _build_kit_list
@@ -3230,8 +3271,21 @@ acq_kit_source_set() {
   return 0
 }
 
-# acq_kit_source_rm REPO — drop one source (the shipped default included; with no
-# sources left acq fetches nothing instead of silently reinstating it).
+# _acq_ascii_lower TEXT — TEXT with ASCII letters lower-cased. GitHub ignores the
+# letter case of hosts, owners and repositories, so trust decisions compare this.
+_acq_ascii_lower() {
+  printf '%s' "${1:-}" | LC_ALL=C tr '[:upper:]' '[:lower:]'
+}
+
+# _acq_kit_source_is_control_plane REPO — true when REPO is the pinned
+# control-plane repository (the shipped default) in any letter case.
+_acq_kit_source_is_control_plane() {
+  [ "$(_acq_ascii_lower "${1:-}")" = "$(_acq_ascii_lower "$ACQ_KIT_SOURCE_DEFAULT_REPO")" ]
+}
+
+# acq_kit_source_rm REPO — drop one registered source. The pinned control plane
+# (the shipped default, in any letter case) is refused, as Python refuses it:
+# it is the trust anchor and stays resolvable whatever the registry says.
 acq_kit_source_rm() {
   local repo_arg="${1:-}" repo summary
   if [ -z "$repo_arg" ]; then
@@ -3243,6 +3297,11 @@ acq_kit_source_rm() {
     echo "acq: kit-source rm: invalid repository '$repo_arg'" >&2
     return 1
   }
+  if _acq_kit_source_is_control_plane "$repo"; then
+    echo "acq: kit-source rm: the built-in control-plane source cannot be removed." >&2
+    echo "     Team/personal sources can be removed; the control plane is the pinned trust anchor." >&2
+    return 1
+  fi
   if ! _acq_kit_source_entry_for_repo "$repo" >/dev/null; then
     echo "acq: kit source '${repo}' is not registered." >&2
     return 1
@@ -4598,7 +4657,7 @@ acq_provider_input_prepare() {
   root=$(acq_provider_input_root "$backend" "$name") || return 1
   _acq_provider_input_safe_mkdir "$root/generations" || return 1
   chmod 755 "$root" "$root/generations" || return 1
-  stage=$(mktemp -d "${TMPDIR:-/tmp}/acq-provider-input.XXXXXXXX") || return 1
+  stage=$(mktemp -d "$(acq_tmp_dir)/acq-provider-input.XXXXXXXX") || return 1
   chmod 700 "$stage" || { rm -rf "$stage"; return 1; }
   for kitref in ${KITS[@]+"${KITS[@]}"}; do
     token=$(printf '%s' "$kitref" | cksum | cut -d' ' -f1) || { rm -rf "$stage"; return 1; }
@@ -5008,7 +5067,7 @@ PY
 }
 
 _acq_provider_input_cleanup_stage() {
-  case "${1:-}" in "${TMPDIR:-/tmp}"/acq-provider-input.*) rm -rf -- "$1" ;; *) return 1 ;; esac
+  case "${1:-}" in "$(acq_tmp_dir)"/acq-provider-input.*) rm -rf -- "$1" ;; *) return 1 ;; esac
 }
 
 _acq_provider_input_cleanup_generation() {
@@ -5106,7 +5165,7 @@ _acq_provider_input_guardian_start() {
   # command substitutions that follow inherit the cached result. A failure is
   # reported again, and fails closed, by the first helper that needs it.
   _acq_provider_input_path_python 2>/dev/null || true
-  _ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN=$(mktemp "${TMPDIR:-/tmp}/acq-provider-children.XXXXXX") || return 1
+  _ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN=$(mktemp "$(acq_tmp_dir)/acq-provider-children.XXXXXX") || return 1
   export _ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN
   sh -c '
     parent=$PPID
@@ -5831,9 +5890,20 @@ warn_if_no_ssh_signing_key() {
   echo "      Then commit as usual. (You can still work; only committing needs it.)" >&2
 }
 
+# _acq_host_git_config_value KEY — the user's global git value for KEY. An
+# inherited GIT_CONFIG makes `git config --global` fail ("only one config file
+# at a time"), so it is unset in a subshell first. Nothing else the caller's
+# environment can carry redirects a --global read: GIT_DIR and the like name a
+# repository, which this read never opens, and command-scope config is not
+# consulted when a file scope is given. GIT_CONFIG_GLOBAL is kept, since it
+# names the user's own global file. Self-contained on purpose: callers (and the
+# Python golden tests) lift this function on its own.
 _acq_host_git_config_value() {
   command -v git >/dev/null 2>&1 || return 0
-  HOME="${HOME:-}" git config --global --get "$1" 2>/dev/null || true
+  (
+    unset GIT_CONFIG
+    HOME="${HOME:-}" git config --global --get "$1"
+  ) 2>/dev/null || true
 }
 
 _acq_git_identity_value_is_safe() {
@@ -5882,6 +5952,64 @@ acq_host_git_global_config_env() {
   fi
 }
 
+# _acq_git_host_ready — 0 when _acq_git_host can clear the inherited git
+# environment (kit-translate.sh is loaded), 1 otherwise.
+_acq_git_host_ready() {
+  declare -F _kit_git_isolate >/dev/null 2>&1 &&
+    declare -F _kit_git_isolate_repo >/dev/null 2>&1
+}
+
+# _acq_git_host MODE ARGS... — run a read-only host git command in a subshell
+# that first clears the inherited git environment. A GIT_DIR, GIT_WORK_TREE,
+# GIT_INDEX_FILE or similar exported by a hook, an editor or a parent git
+# command would otherwise point the read at another repository, so acq would
+# report on the wrong one. MODE keep (_kit_git_isolate_repo) keeps the user's
+# command-scope config (GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT/KEY_n/VALUE_n),
+# for `git config` reads that report the user's effective settings; MODE
+# isolate (_kit_git_isolate) drops it too, for everything else. Fails closed
+# (return 1, git not run) when kit-translate.sh is not loaded.
+_acq_git_host() {
+  local mode="$1"
+  shift
+  _acq_git_host_ready || return 1
+  (
+    if [ "$mode" = keep ]; then _kit_git_isolate_repo; else _kit_git_isolate; fi
+    git "$@"
+  )
+}
+
+# _acq_host_git_identity_set — 0 when the host supplies a usable identity that
+# acq forwards (EMAIL, both GIT_AUTHOR_EMAIL and GIT_COMMITTER_EMAIL, or the
+# global user.email), so no workspace identity note is needed.
+_acq_host_git_identity_set() {
+  local host_email
+  if [ -n "${EMAIL:-}" ] && _acq_git_identity_value_is_safe "$EMAIL"; then
+    return 0
+  fi
+  if [ -n "${GIT_AUTHOR_EMAIL:-}" ] && [ -n "${GIT_COMMITTER_EMAIL:-}" ] \
+      && _acq_git_identity_value_is_safe "$GIT_AUTHOR_EMAIL" \
+      && _acq_git_identity_value_is_safe "$GIT_COMMITTER_EMAIL"; then
+    return 0
+  fi
+  host_email=$(_acq_host_git_config_value user.email)
+  [ -n "$host_email" ] && _acq_git_identity_value_is_safe "$host_email"
+}
+
+# _acq_warn_repo_git_identity REPO — case (a) of warn_if_no_git_identity: note
+# when REPO has no effective user.email. Reads the EFFECTIVE identity (not just
+# --local), with the user's command-scope config kept, so an already-resolvable
+# value doesn't false-warn.
+_acq_warn_repo_git_identity() {
+  local email
+  email=$(_acq_git_host keep -C "$1" config user.email 2>/dev/null || true)
+  [ -n "$email" ] && return 0
+  echo "acq: note — this repo has no git user.email set." >&2
+  echo "      The sandbox home is isolated, so commits will be SIGNED but show" >&2
+  echo "      'Unverified' on GitHub until you set an identity. Fix (in this repo):" >&2
+  echo "        git config user.email you@verified-on-github.example" >&2
+  echo "        git config user.name  \"Your Name\"" >&2
+}
+
 # Warn (do not block) if the mounted workspace has no usable git identity.
 # A repo-local identity crosses through the mounted workspace. When present, acq
 # also forwards the host's explicit GIT_* identity env or global git identity as
@@ -5897,34 +6025,13 @@ acq_host_git_global_config_env() {
 warn_if_no_git_identity() {
   local path="${1:-}"
   command -v git >/dev/null 2>&1 || return 0
+  _acq_git_host_ready || return 0   # advisory: skip rather than read blind
   [ -n "$path" ] && [ -d "$path" ] || return 0   # (d) handled by pre-flight
-
-  local host_email
-  if [ -n "${EMAIL:-}" ] && _acq_git_identity_value_is_safe "$EMAIL"; then
-    return 0
-  fi
-  if [ -n "${GIT_AUTHOR_EMAIL:-}" ] && [ -n "${GIT_COMMITTER_EMAIL:-}" ] \
-      && _acq_git_identity_value_is_safe "$GIT_AUTHOR_EMAIL" \
-      && _acq_git_identity_value_is_safe "$GIT_COMMITTER_EMAIL"; then
-    return 0
-  fi
-  host_email=$(_acq_host_git_config_value user.email)
-  if [ -n "$host_email" ] && _acq_git_identity_value_is_safe "$host_email"; then
-    return 0
-  fi
+  _acq_host_git_identity_set && return 0
 
   # (a) P is itself a git work tree.
-  if git -C "$path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    local email
-    # Prefer EFFECTIVE identity (not just --local) so an already-resolvable
-    # value doesn't false-warn.
-    email=$(git -C "$path" config user.email 2>/dev/null || true)
-    [ -n "$email" ] && return 0
-    echo "acq: note — this repo has no git user.email set." >&2
-    echo "      The sandbox home is isolated, so commits will be SIGNED but show" >&2
-    echo "      'Unverified' on GitHub until you set an identity. Fix (in this repo):" >&2
-    echo "        git config user.email you@verified-on-github.example" >&2
-    echo "        git config user.name  \"Your Name\"" >&2
+  if _acq_git_host isolate -C "$path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    _acq_warn_repo_git_identity "$path"
     return 0
   fi
 
@@ -5963,6 +6070,11 @@ warn_if_no_git_identity() {
 
   # (c) A directory with no repos yet — a NEW/intended workspace. Forward-looking
   # onboarding note (emitted only on first create; the caller gates this).
+  _acq_note_new_workspace_identity
+}
+
+# _acq_note_new_workspace_identity — case (c) of warn_if_no_git_identity.
+_acq_note_new_workspace_identity() {
   echo "acq: note — this workspace has no git repos yet." >&2
   echo "      When you clone one in, set its identity so commits are Verified:" >&2
   echo "        git -C <repo> config user.email you@verified-on-github.example" >&2
@@ -6011,9 +6123,14 @@ detect_workspace_repos() {
   local path="${1:-}"
   command -v git >/dev/null 2>&1 || return 0
   [ -n "$path" ] && [ -d "$path" ] || return 0
+  if ! _acq_git_host_ready; then
+    echo "acq: error: kit-translate.sh is not loaded, so acq cannot clear the inherited" >&2
+    echo "acq:   git environment (GIT_DIR and the like) to read the workspace's remotes." >&2
+    return 1
+  fi
 
   local dirs=() d
-  if git -C "$path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  if _acq_git_host isolate -C "$path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     dirs=("$path")
   else
     local scanned=0
@@ -6027,11 +6144,14 @@ detect_workspace_repos() {
     done < <(find "$path" -maxdepth 1 -mindepth 1 -type d ! -type l 2>/dev/null)
   fi
 
+  # Remotes are read with the command-scope config dropped too (isolate, as
+  # Python's gitrepos does): GIT_CONFIG_PARAMETERS or GIT_CONFIG_COUNT/KEY/VALUE
+  # could otherwise inject a remote, and the scope decision follows the remote.
   local url nwo seen="" out=""
   for d in ${dirs[@]+"${dirs[@]}"}; do
-    url=$(git -C "$d" config --get remote.origin.url 2>/dev/null || true)
+    url=$(_acq_git_host isolate -C "$d" config --get remote.origin.url 2>/dev/null || true)
     if [ -z "$url" ]; then
-      url=$(git -C "$d" config --get-regexp '^remote\..*\.url$' 2>/dev/null \
+      url=$(_acq_git_host isolate -C "$d" config --get-regexp '^remote\..*\.url$' 2>/dev/null \
         | head -n1 | cut -d' ' -f2- || true)
     fi
     [ -n "$url" ] || continue
@@ -6090,7 +6210,7 @@ github_scope_sandbox() {
   local sandbox="$1" ws="${2:-}"
   local repos owners="" nwo owner owner_key owner_count=0
 
-  repos=$(detect_workspace_repos "$ws")
+  repos=$(detect_workspace_repos "$ws") || return 1
   if [ -z "$repos" ]; then
     echo "acq: no GitHub repositories detected in the workspace; nothing to scope." >&2
     return 0
@@ -6190,7 +6310,7 @@ advise_github_scope() {
   fi
 
   local repos
-  repos=$(detect_workspace_repos "$ws")
+  repos=$(detect_workspace_repos "$ws") || return 0   # advisory only
   [ -n "$repos" ] || return 0   # no GitHub repos → nothing to scope
 
   local has_global="no"
@@ -6386,6 +6506,15 @@ acq_print_image_contract_doctor() {
   acq_backend_doctor_sandbox "$name"
 }
 
+# _acq_doctor_backend_pin_check — report an unknown backend pinned in
+# config.yaml (recorded by acq_resolve_backend_diagnostic) as a failed
+# config-backend check, with the message and remediation Python's doctor uses.
+_acq_doctor_backend_pin_check() {
+  [ -n "${ACQ_INVALID_BACKEND_PIN:-}" ] || return 0
+  echo "  [fail] config-backend: config.yaml sets an unknown backend: '$(acq_printable "$ACQ_INVALID_BACKEND_PIN")' (expected sbx or msb)"
+  echo "           run 'acq backend set msb' or 'acq backend set sbx' (or 'acq backend unset' to auto-detect)"
+}
+
 acq_print_doctor() {
   local sbx_status msb_status
 
@@ -6447,6 +6576,7 @@ acq_print_doctor() {
   if [ -n "${ACQ_BACKEND:-}" ]; then
     echo "  ACQ_BACKEND env override: ${ACQ_BACKEND}"
   fi
+  _acq_doctor_backend_pin_check
 
   echo ""
 
@@ -6458,7 +6588,8 @@ acq_print_doctor() {
   fi
 
   echo ""
-  if [ -z "$dirs_ok" ] || [ -z "$config_file" ]; then
+  # A broken pin is not overwritten from here: configure offers that fix.
+  if [ -z "$dirs_ok" ] || [ -z "$config_file" ] || [ -n "${ACQ_INVALID_BACKEND_PIN:-}" ]; then
     return 0
   fi
   # ACQ_RESOLVED_BACKEND is always set by acq_resolve_backend before doctor runs,
@@ -6505,6 +6636,16 @@ _acq_configure_show_current() {
   echo "" >&2
 }
 
+# _acq_configure_backend_pin — when config.yaml pins a backend acq cannot load
+# (ACQ_INVALID_BACKEND_PIN, from acq_resolve_backend_diagnostic), say so. The
+# pin is left as it is: configure does not manage the backend, and 'acq backend
+# set' or 'acq backend unset' fixes it.
+_acq_configure_backend_pin() {
+  [ -n "${ACQ_INVALID_BACKEND_PIN:-}" ] || return 0
+  _acq_unknown_backend_message "$ACQ_INVALID_BACKEND_PIN" "$(_acq_config_file || echo config.yaml)" >&2
+  echo "" >&2
+}
+
 # acq_configure — the interactive configuration flow. Presents the opt-in kit
 # catalog as a multiselect (pre-checked from the current config), then a confirm
 # for the GitHub-token-scoping default, and persists both to config.yaml
@@ -6518,6 +6659,7 @@ _acq_configure_show_current() {
 # via ACQ_EXTRA_KITS) are layered separately and are not managed here.
 acq_configure() {
   _acq_configure_show_current
+  _acq_configure_backend_pin
 
   # Non-interactive (CI / piped / ACQ_NO_PROMPT): make NO changes — just show the
   # current config above and return. Writing here would clobber a hand-edited or

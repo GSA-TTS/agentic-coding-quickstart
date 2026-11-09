@@ -4606,7 +4606,7 @@ EOF
   acq_debug "msb create: invoking (this returns fast; guest boots in background)"
   acq_spin_start "Creating sandbox '$name'"
   _ACQ_MSB_CREATE_STARTED=1
-  _create_output_file=$(mktemp "${TMPDIR:-/tmp}/acq-msb-create.XXXXXX") || return 1
+  _create_output_file=$(mktemp "$(acq_tmp_dir)/acq-msb-create.XXXXXX") || return 1
   # Inline the env assignment so the fork exec-optimizes into the actual msb binary
   # (or test-stub script), making $! the backend executable's own PID.  An extra
   # shell wrapper (_acq_msb_cli) would interpose another fork level, leaving the
@@ -4629,7 +4629,7 @@ EOF
     _create_output=""
     acq_debug "msb create --name $name ${create_flags[*]} $_msb_image"
     acq_spin_start "Creating sandbox '$name'"
-    _create_output_file=$(mktemp "${TMPDIR:-/tmp}/acq-msb-create.XXXXXX") || return 1
+    _create_output_file=$(mktemp "$(acq_tmp_dir)/acq-msb-create.XXXXXX") || return 1
     # Same inline-env pattern as above: expose the msb executable PID directly.
     MSYS2_ARG_CONV_EXCL='*' msb create --name "$name" "${create_flags[@]}" "$_msb_image" >"$_create_output_file" 2>&1 &
     _create_pid=$!
@@ -5631,7 +5631,7 @@ _acq_msb_has_ssh_agent_vsock_route() {
   _ACQ_MSB_ROUTE_PROBE_ERR=""
   # stderr goes to a file, not into $json: a warning mentioning vsock would
   # otherwise flatten into a false route match.
-  _errf=$(mktemp "${TMPDIR:-/tmp}/acq-msb-inspect.XXXXXX" 2>/dev/null) || _errf=/dev/null
+  _errf=$(mktemp "$(acq_tmp_dir)/acq-msb-inspect.XXXXXX" 2>/dev/null) || _errf=/dev/null
   for _try in 1 2; do
     _rc=0
     json=$(_acq_msb_cli inspect "$name" --format json 2>"$_errf") || _rc=$?

@@ -1298,6 +1298,21 @@ EOF
   printf '%s' "$script"
 }
 
+# _kit_tmp_dir — where the translator makes its scratch files: acq_tmp_dir
+# (userdirs.sh) when it is loaded, else TMPDIR when it is absolute, else /tmp.
+# A relative TMPDIR would resolve against the current directory, normally the
+# workspace the guest can write.
+_kit_tmp_dir() {
+  if declare -F acq_tmp_dir >/dev/null 2>&1; then
+    acq_tmp_dir
+    return
+  fi
+  case "${TMPDIR:-}" in
+    /*) printf '%s\n' "$TMPDIR" ;;
+    *) printf '/tmp\n' ;;
+  esac
+}
+
 # Emit setup.install/setup.startup blocks into an sbx-v2 spec from the neutral
 # commands. v2 has no initFiles command phase, so neutral initFiles commands are
 # emitted before startup commands under setup.startup.
@@ -1313,7 +1328,7 @@ _kit_sbx_emit_setup() {
   local spec="$1" out="$2"
   local phases="install initFiles startup"
   local phase have_setup=0 have_install=0 have_startup=0 tmp
-  tmp=$(mktemp)
+  tmp=$(mktemp "$(_kit_tmp_dir)/acq-kit-setup.XXXXXX") || return 1
 
   local chmod_script
   chmod_script=$(_kit_sbx_mode_chmod_script "$spec")
