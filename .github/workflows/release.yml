@@ -26,6 +26,14 @@ concurrency:
 
 permissions: {}
 
+env:
+  # acq's own managed Windows runtime (ADR-0042m), staged into the Windows archive
+  # by scripts/stage-windows-runtime. Keep this on a CPython line that still ships
+  # Windows binaries: once a line is security-only, python.org stops publishing
+  # embeddable ZIPs for it. The hash is python.org's published sha256 for the file.
+  ACQ_PYTHON_EMBED_VERSION: 3.14.10
+  ACQ_PYTHON_EMBED_SHA256: 90905e64a840557d8c1bc4f5b74db3d7ee85e3ffb217611cac1c7813acea4159
+
 jobs:
   # release-please is split in two so the Tier-3 gate can sit between the release PR
   # and the tag/Release it would otherwise create in the same step (ADR-0044m).
@@ -186,6 +194,20 @@ jobs:
           test -f runtime/LICENSE.txt
           mv runtime validator-runtime
           (cd validator-runtime && zip -qr ../provider-input-validator-runtime-windows-x86_64.zip .)
+      - name: Smoke-test acq's managed Windows runtime
+        if: ${{ matrix.platform == 'windows-x86_64' }}
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+            "https://www.python.org/ftp/python/${ACQ_PYTHON_EMBED_VERSION}/python-${ACQ_PYTHON_EMBED_VERSION}-embed-amd64.zip" \
+            -o acq-python-embed.zip
+          mkdir acq-runtime-smoke
+          scripts/stage-windows-runtime acq-python-embed.zip "$ACQ_PYTHON_EMBED_SHA256" acq-runtime-smoke
+          rt=acq-runtime-smoke/py-acq/runtime/python.exe
+          # Isolated, safe-path, and importing acq from ..\src only.
+          PYTHONPATH="$PWD" "$rt" -c "import sys; assert sys.flags.isolated == 1 and sys.flags.safe_path, sys.flags; assert len(sys.path) == 3 and sys.path[2].endswith('src'), sys.path"
+          "$rt" -P -m acq_py version --json > acq-version.json
+          python3 -c "import json; d = json.load(open('acq-version.json')); assert d['data']['impl'] == 'python', d"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: provider-input-validator-wheelhouse-${{ matrix.platform }}
@@ -214,12 +236,6 @@ jobs:
         with:
           path: wheelhouse-artifacts
       - name: Build release assets
-        env:
-          # acq's own managed Windows runtime (ADR-0042m). Keep this on a CPython
-          # line that still ships Windows binaries: once a line is security-only,
-          # python.org stops publishing embeddable ZIPs for it.
-          ACQ_PYTHON_EMBED_VERSION: 3.14.10
-          ACQ_PYTHON_EMBED_SHA256: 90905e64a840557d8c1bc4f5b74db3d7ee85e3ffb217611cac1c7813acea4159
         run: |
           set -euo pipefail
           release_sha="$(git rev-parse HEAD)"
@@ -234,7 +250,7 @@ jobs:
           tar -xzf wheelhouse-artifacts/provider-input-validator-wheelhouse-windows-x86_64/provider-input-validator-wheelhouse-windows-x86_64.tar.gz -C dist/acq-windows-x64/scripts/provider-input-validator-wheelhouse/windows-x86_64
           cp wheelhouse-artifacts/provider-input-validator-runtime-windows-x86_64/provider-input-validator-runtime-windows-x86_64.zip dist/acq-windows-x64/scripts/
           (cd dist/acq-windows-x64/scripts && sha256sum provider-input-validator-runtime-windows-x86_64.zip > provider-input-validator-runtime-windows-x86_64.sha256)
-          curl --fail --location --silent --show-error \
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
             "https://www.python.org/ftp/python/${ACQ_PYTHON_EMBED_VERSION}/python-${ACQ_PYTHON_EMBED_VERSION}-embed-amd64.zip" \
             -o acq-python-embed.zip
           scripts/stage-windows-runtime acq-python-embed.zip "$ACQ_PYTHON_EMBED_SHA256" dist/acq-windows-x64

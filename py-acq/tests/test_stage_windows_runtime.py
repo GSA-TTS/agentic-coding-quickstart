@@ -12,6 +12,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import zipfile
 from pathlib import Path
 
@@ -20,7 +21,10 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "stage-windows-runtime"
 
-pytestmark = pytest.mark.skipif(shutil.which("sh") is None, reason="needs a POSIX sh")
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32" or shutil.which("sh") is None,
+    reason="exercises the POSIX release-build script (run by CI on Linux)",
+)
 
 
 def _fake_embed(
@@ -68,7 +72,9 @@ def test_stages_runtime_pth_and_source(tmp_path: Path) -> None:
     src = tree / "py-acq" / "src" / "acq_py"
     assert (src / "__init__.py").is_file() and (src / "__main__.py").is_file()
     assert not list((tree / "py-acq" / "src").rglob("__pycache__"))
-    assert not (tree / "py-acq" / ".runtime-staging").exists()
+    assert not list((tree / "py-acq").glob(".staging*"))
+    # The test-only backend stubs are not shipped.
+    assert not list(src.glob("_stub_*.py"))
 
 
 @pytest.mark.parametrize("sha", ["0" * 64, "A" * 64, "abc", ""])
@@ -100,7 +106,8 @@ def test_refuses_unexpected_layout(tmp_path: Path, kwargs: dict) -> None:
     result = _run(str(embed), sha, str(tree))
     assert result.returncode != 0
     assert not (tree / "py-acq" / "runtime").exists()
-    assert not (tree / "py-acq" / ".runtime-staging").exists()
+    assert not (tree / "py-acq" / "src").exists()
+    assert not list((tree / "py-acq").glob(".staging*"))
 
 
 def test_refuses_to_overwrite_an_existing_runtime(tmp_path: Path) -> None:
@@ -112,6 +119,26 @@ def test_refuses_to_overwrite_an_existing_runtime(tmp_path: Path) -> None:
     result = _run(str(embed), sha, str(tree))
     assert result.returncode != 0
     assert (tree / "py-acq" / "runtime" / "keep").read_text() == "keep"
+
+
+def test_refuses_to_overwrite_an_existing_source_dir(tmp_path: Path) -> None:
+    embed = tmp_path / "embed.zip"
+    sha = _fake_embed(embed)
+    tree = tmp_path / "t"
+    (tree / "py-acq" / "src").mkdir(parents=True)
+    result = _run(str(embed), sha, str(tree))
+    assert result.returncode != 0
+    assert not (tree / "py-acq" / "runtime").exists()
+
+
+def test_refuses_backslash_entry_names(tmp_path: Path) -> None:
+    embed = tmp_path / "embed.zip"
+    sha = _fake_embed(embed, extra={"..\\..\\evil.txt": b"x"})
+    tree = tmp_path / "t"
+    tree.mkdir()
+    result = _run(str(embed), sha, str(tree))
+    assert result.returncode != 0
+    assert not (tree / "py-acq" / "runtime").exists()
 
 
 def test_traversal_entries_stay_inside_the_tree(tmp_path: Path) -> None:
@@ -131,11 +158,15 @@ def test_release_workflow_pins_the_runtime_and_calls_the_script() -> None:
     version = re.search(r"ACQ_PYTHON_EMBED_VERSION:\s*(\d+\.\d+\.\d+)\s*$", text, re.M)
     sha = re.search(r"ACQ_PYTHON_EMBED_SHA256:\s*([0-9a-f]{64})\s*$", text, re.M)
     assert version and sha
-    assert "scripts/stage-windows-runtime acq-python-embed.zip" in text
-    # The script must run before the archive is zipped.
-    assert text.index("scripts/stage-windows-runtime") < text.index(
-        "zip -qr acq-windows-x64.zip"
+    call = (
+        "scripts/stage-windows-runtime acq-python-embed.zip "
+        '"$ACQ_PYTHON_EMBED_SHA256" dist/acq-windows-x64'
     )
+    assert call in text
+    # The release archive is staged before it is zipped, and the shipped runtime
+    # is smoke-tested on the Windows runner.
+    assert text.index(call) < text.index("zip -qr acq-windows-x64.zip")
+    assert "Smoke-test acq's managed Windows runtime" in text
 
 
 def test_assets_manifest_matches_the_staged_layout() -> None:

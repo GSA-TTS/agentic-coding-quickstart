@@ -7,18 +7,19 @@
 # rewrites the embedded distribution's ._pth file so the interpreter's import
 # path is exactly: its standard-library zip, its own directory, and ..\src.
 #
-# Why the ._pth file matters: when it is present, the embedded interpreter
-# ignores PYTHONPATH and never adds the current directory, so it is the only way
-# for `python.exe -m acq_py` to find acq, and it also keeps files in the user's
-# workspace off sys.path. `import site` is deliberately left out: acq is
-# stdlib-only, so no site-packages directory is needed.
+# Why the ._pth file matters: when it is present, the embedded interpreter runs
+# isolated. It ignores PYTHONPATH and never adds the current directory, so the
+# ._pth is the only way for `python.exe -m acq_py` to find acq, and it also keeps
+# files in the user's workspace off sys.path. `import site` is deliberately left
+# out: acq is stdlib-only, so no site-packages directory is needed.
 #
 # Usage:
 #   scripts/stage-windows-runtime <embed.zip> <sha256> <release-tree>
 #
 # Requires: python3 (for hashing and unzipping, so it runs the same on Linux,
-# macOS and CI). Fails closed: a hash mismatch, an existing runtime directory,
-# or an unexpected archive layout leaves the tree without a runtime.
+# macOS, Windows CI and dash/bash 3.2). Fails closed: a hash mismatch, an
+# unexpected archive layout, or an existing runtime or source directory leaves
+# the tree unchanged.
 
 set -eu
 
@@ -39,8 +40,7 @@ repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 src="$repo_root/py-acq/src"
 [ -f "$src/acq_py/__init__.py" ] || die "acq source not found at $src"
 
-runtime="$tree/py-acq/runtime"
-[ ! -e "$runtime" ] || die "$runtime already exists; refusing to overwrite it"
+[ ! -e "$tree/py-acq/runtime" ] || die "$tree/py-acq/runtime already exists; refusing to overwrite it"
 [ ! -e "$tree/py-acq/src" ] || die "$tree/py-acq/src already exists; refusing to overwrite it"
 
 got="$(python3 -I -c 'import hashlib, sys
@@ -51,29 +51,50 @@ with open(sys.argv[1], "rb") as f:
 print(h.hexdigest())' "$zip")"
 [ "$got" = "$want" ] || die "SHA-256 mismatch for $zip: expected $want, got $got"
 
+# Entry names with a backslash are Windows paths that zipfile would extract as
+# literal file names on POSIX; the embeddable ZIP never has them, so refuse.
+python3 -I -c 'import sys, zipfile
+bad = [n for n in zipfile.ZipFile(sys.argv[1]).namelist() if "\\" in n]
+sys.exit("archive entry names contain backslashes: %s" % bad[:3] if bad else 0)' "$zip" \
+  || die "unexpected entry names in $zip"
+
 mkdir -p "$tree/py-acq"
-staging="$tree/py-acq/.runtime-staging"
-rm -rf "$staging"
+staging="$tree/py-acq/.staging.$$"
+# Remove the staging dir on any exit; after a successful run it is empty.
+trap 'rm -rf "$staging"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+mkdir "$staging"
+
 # zipfile.extractall drops absolute paths and '..' components, so a malformed
 # archive cannot write outside the staging directory.
-python3 -I -m zipfile -e "$zip" "$staging"
+python3 -I -m zipfile -e "$zip" "$staging/runtime"
 
 # The embeddable layout has exactly one pythonXY._pth next to python.exe.
-pth_count=0
-for f in "$staging"/python*._pth; do
-  [ -f "$f" ] && pth_count=$((pth_count + 1)) && pth="$f"
+pth="" pth_count=0
+for f in "$staging"/runtime/python*._pth; do
+  if [ -f "$f" ]; then
+    pth="$f"
+    pth_count=$((pth_count + 1))
+  fi
 done
-[ "$pth_count" -eq 1 ] || { rm -rf "$staging"; die "expected one python*._pth in the archive, found $pth_count"; }
+[ "$pth_count" -eq 1 ] || die "expected one python*._pth in the archive, found $pth_count"
 for need in python.exe LICENSE.txt; do
-  [ -f "$staging/$need" ] || { rm -rf "$staging"; die "archive has no $need"; }
+  [ -f "$staging/runtime/$need" ] || die "archive has no $need"
 done
 tag="$(basename "$pth" ._pth)"
-[ -f "$staging/$tag.zip" ] || { rm -rf "$staging"; die "archive has no $tag.zip standard library"; }
-
+[ -f "$staging/runtime/$tag.zip" ] || die "archive has no $tag.zip standard library"
 printf '%s.zip\r\n.\r\n..\\src\r\n' "$tag" > "$pth"
-mv "$staging" "$runtime"
 
-cp -R "$src" "$tree/py-acq/src"
-find "$tree/py-acq/src" -name __pycache__ -type d -prune -exec rm -rf {} +
+# acq's source, without bytecode caches or the test-only backend stubs (they are
+# reached only through the ACQ_*_BIN=__stub__ test hook).
+cp -R "$src" "$staging/src"
+find "$staging/src" -name __pycache__ -type d -prune -exec rm -rf {} +
+find "$staging/src" -name '_stub_*.py' -type f -exec rm -f {} +
+[ -f "$staging/src/acq_py/__main__.py" ] || die "copied source is incomplete"
+
+mv "$staging/runtime" "$tree/py-acq/runtime"
+mv "$staging/src" "$tree/py-acq/src"
 
 printf 'staged %s runtime (%s) and acq source into %s/py-acq\n' "$tag" "$got" "$tree"
