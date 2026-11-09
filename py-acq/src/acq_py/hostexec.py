@@ -115,16 +115,24 @@ def override_command(value: str) -> list[str]:
     program must then be an absolute path or a bare name, which is resolved with
     :func:`command`; a relative path would resolve against the current
     directory, i.e. the workspace, and is refused.
+
+    A value that does not split (an unbalanced quote) raises
+    ``FileNotFoundError`` like every other unusable override, so each caller's
+    ``OSError`` handling reports it as a backend CLI that cannot be run instead
+    of letting ``shlex``'s ``ValueError`` escape as a traceback.
     """
     if _is_absolute(value) and os.path.isfile(value):
         return [value]
-    if _is_windows():
-        parts = [
-            p[1:-1] if len(p) >= 2 and p[0] == p[-1] == '"' else p
-            for p in shlex.split(value, posix=False)
-        ]
-    else:
-        parts = shlex.split(value)
+    try:
+        if _is_windows():
+            parts = [
+                p[1:-1] if len(p) >= 2 and p[0] == p[-1] == '"' else p
+                for p in shlex.split(value, posix=False)
+            ]
+        else:
+            parts = shlex.split(value)
+    except ValueError as exc:
+        raise FileNotFoundError(errno.ENOENT, "program override is not a valid command line", value) from exc
     if not parts:
         raise FileNotFoundError(errno.ENOENT, "empty program override", value)
     if not _has_dir(parts[0]):
@@ -209,6 +217,24 @@ def terminal_env() -> list[str]:
         if value and not any(ch in value for ch in "\n\r\t"):
             entries.append(f"{var}={value}")
     return entries
+
+
+def utf8_input_ok(text: str | None) -> bool:
+    """True when ``text`` (input for a backend CLI) encodes as UTF-8, or is None.
+
+    The backends' streams are opened as UTF-8 with ``errors="replace"``, so
+    output that is not UTF-8 cannot fail a call. The same setting would quietly
+    turn an unencodable input character (a lone surrogate, which is how Python
+    carries undecodable bytes from the environment) into ``?``, sending the
+    backend a different value. The caller refuses such input instead.
+    """
+    if text is None:
+        return True
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def exit_status(returncode: int) -> int:

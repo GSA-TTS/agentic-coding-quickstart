@@ -10,7 +10,18 @@ import re
 import subprocess
 import sys
 
-from .. import backends, envelope, errors, gitrepos, hostexec, msb, sbx, state
+from .. import (
+    backends,
+    envelope,
+    errors,
+    gitrepos,
+    hostexec,
+    kit_msb,
+    kit_sbx,
+    msb,
+    sbx,
+    state,
+)
 from . import common
 
 # Host identity variables replayed into every session, so commits made in the
@@ -32,6 +43,12 @@ def _host_git_config(key: str) -> str | None:
     The inherited repository redirects are cleared first: an inherited
     ``GIT_CONFIG`` makes ``git config --global`` fail outright ("only one config
     file at a time"), which would hide the user's global value.
+
+    git stores its config as UTF-8 and prints the value unchanged, so it is
+    decoded as UTF-8, never with the locale's code page: on a Windows ANSI code
+    page a name such as "Łukasz" would otherwise fail to decode (a traceback in
+    every session) or turn into mojibake. Bytes that are not UTF-8 become
+    U+FFFD rather than an error.
     """
     git = hostexec.which("git")
     if git is None:
@@ -42,7 +59,8 @@ def _host_git_config(key: str) -> str | None:
             env=gitrepos.git_env(keep_command_scope=True),
             stdin=subprocess.DEVNULL,
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -98,13 +116,30 @@ def session_env(record: dict | None) -> list[str]:
     return entries
 
 
+def prepare_session(backend: str, name: str, record: dict | None) -> list[str]:
+    """Ready ``name`` for a session and return the session's ``NAME=value`` entries.
+
+    The entries are :func:`session_env`. On msb, as in Bash, the host's global
+    git identity is first written into the guest's global git config, and the
+    kit environment recorded when the kits were applied is added last, so a
+    kit's ``environment`` reaches every agent session. sbx applies both itself:
+    its kits carry their environment, and the git identity kit sets the config.
+    """
+    entries = session_env(record)
+    if backend == "msb":
+        # The same host values the sbx git identity kit writes into its guest.
+        msb.apply_git_global_config(name, kit_sbx.git_global_config_env())
+        entries += kit_msb.session_env(name)
+    return entries
+
+
 def session_env_for(backend: str, name: str) -> list[str]:
-    """:func:`session_env` for a sandbox whose record the caller has not read."""
+    """:func:`prepare_session` for a sandbox whose record the caller has not read."""
     try:
         record = state.record_read(backend, name)
     except state.StateSchemaError:
         record = None
-    return session_env(record)
+    return prepare_session(backend, name, record)
 
 
 def run_exec(parsed, emit_json: bool, backend: str) -> int:
@@ -145,7 +180,8 @@ def run_exec(parsed, emit_json: bool, backend: str) -> int:
     if gate is not None:
         return gate
     workspace = (record or {}).get("workspace") or common.DEFAULT_GUEST_WORKSPACE
-    rc = adapter.exec_command(name, command, workspace=workspace, json_mode=emit_json, env=session_env(record))
+    env = prepare_session(backend, name, record)
+    rc = adapter.exec_command(name, command, workspace=workspace, json_mode=emit_json, env=env)
     if emit_json:
         print(json.dumps(envelope.success("exec", {"name": name, "exit_code": rc})))
     return rc
@@ -203,7 +239,7 @@ def run_attach(parsed, emit_json: bool, backend: str) -> int:
         )
     workspace = record.get("workspace") or common.DEFAULT_GUEST_WORKSPACE
     token = common._launch_token(backend, name, agent)
-    rc = adapter.launch(name, workspace, token, json_mode=emit_json, env=session_env(record))
+    rc = adapter.launch(name, workspace, token, json_mode=emit_json, env=prepare_session(backend, name, record))
     if emit_json:
         print(json.dumps(envelope.success("attach", {"name": name, "backend": backend, "agent": agent, "exit_code": rc})))
     return rc
@@ -240,7 +276,7 @@ def run_shell(parsed, emit_json: bool, backend: str) -> int:
     if gate is not None:
         return gate
     workspace = (record or {}).get("workspace") or common.DEFAULT_GUEST_WORKSPACE
-    rc = adapter.launch(name, workspace, "shell", json_mode=emit_json, env=session_env(record))
+    rc = adapter.launch(name, workspace, "shell", json_mode=emit_json, env=prepare_session(backend, name, record))
     if emit_json:
         print(json.dumps(envelope.success("shell", {"name": name, "backend": backend, "exit_code": rc})))
     return rc

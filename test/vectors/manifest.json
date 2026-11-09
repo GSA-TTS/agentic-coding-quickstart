@@ -331,8 +331,8 @@
       "vectors": ["cli/exec-flags-after-name-verbatim", "cli/passthrough-trailing-flags"]
     },
     {
-      "contract": "ADR-0038m §1/§2 passthrough failures before the handoff keep the error contract: unknown --backend is usage (exit 2); a backend CLI that cannot be run is backend_not_found (exit 1)",
-      "vectors": ["cli/passthrough-unknown-backend", "cli/passthrough-backend-missing", "cli/passthrough-sbx-backend-missing"]
+      "contract": "ADR-0038m §1/§2 passthrough failures before the handoff keep the error contract: unknown --backend is usage (exit 2); a backend CLI that cannot be run, or an override that does not parse, is backend_not_found (exit 1)",
+      "vectors": ["cli/passthrough-unknown-backend", "cli/passthrough-backend-missing", "cli/passthrough-sbx-backend-missing", "cli/passthrough-bin-override-unparseable"]
     },
     {
       "contract": "ADR-0038m §2 / ADR-0040m command boundary: a backend CLI missing after detection gives backend_not_found with an envelope, never a traceback (ls, session verbs)",

@@ -653,6 +653,16 @@ def _dedupe_env(tokens: Iterable[str]) -> list[str]:
     return [f"{k}={v}" for k, v in values.items()]
 
 
+def session_env(name: str) -> list[str]:
+    """The kit environment every session in ``name`` gets (Bash ``_acq_msb_kit_env_flags_into``).
+
+    The persisted ``kit-env`` lines, one entry per variable: the last value
+    wins and the first occurrence fixes the order, as kits append in the order
+    they were applied. Empty when no kit declared an environment.
+    """
+    return _dedupe_env(_persisted_env(name))
+
+
 def apply_single(name: str, kit: Kit, *, ro_required: bool) -> bool:
     """Apply one kit to a running sandbox (``acq kit apply``); additive, so the env is not reset.
 

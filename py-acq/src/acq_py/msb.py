@@ -244,14 +244,29 @@ def _run(
     # read ENV from its own environment). They go only into the child's
     # environment mapping, which ``ps`` and /proc/PID/cmdline do not show; argv
     # names the variable, never the value.
+    #
+    # msb reads and writes UTF-8 whatever the host's code page, so its streams
+    # are UTF-8 here too: with the locale encoding, a Windows ANSI code page
+    # would fail on, or garble, a name such as "Łukasz", and a call that
+    # succeeded would be reported as failed. Output bytes that are not UTF-8
+    # become U+FFFD. Input is checked strictly first (see
+    # hostexec.utf8_input_ok), because replacing a character would silently
+    # send a different value.
     env = {**os.environ, **secret_env} if secret_env else None
+    if not hostexec.utf8_input_ok(input_text):
+        raise MsbError(
+            errors.VALIDATION_FAILED,
+            "the input for msb cannot be encoded as UTF-8",
+            "check the value for stray bytes and retry",
+        )
     try:
         if input_text is None:
             return subprocess.run(
                 [*msb_command(), *argv],
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
-                text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
                 env=env,
             )
@@ -259,7 +274,8 @@ def _run(
             [*msb_command(), *argv],
             input=input_text,
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             env=env,
         )
@@ -735,12 +751,43 @@ def agent_shell(name: str) -> str:
     """
     try:
         proc = _run(["exec", "-u", "root", name, "--", "sh", "-c", _AGENT_SHELL_SCRIPT], timeout=10)
-    except (MsbError, subprocess.TimeoutExpired, ValueError):
-        # ValueError covers UnicodeDecodeError: guest output that is not text.
+    except (MsbError, subprocess.TimeoutExpired):
         return DEFAULT_SHELL
+    # Guest output that is not UTF-8 arrives with U+FFFD in it, which the
+    # word-safe check below refuses.
     lines = (proc.stdout or "").splitlines() if proc.returncode == 0 else []
     shell = lines[0].strip() if lines else ""
     return shell if _SAFE_SHELL.fullmatch(shell) else DEFAULT_SHELL
+
+
+# Writes the forwarded identity into the agent's global git config, so tools
+# that read git config rather than GIT_* variables see it too. The values arrive
+# as environment variables, never spliced into the script.
+_GIT_GLOBAL_CONFIG_SCRIPT = (
+    '[ -n "${ACQ_GIT_USER_NAME:-}" ] && git config --global user.name "$ACQ_GIT_USER_NAME" 2>/dev/null || true\n'
+    '[ -n "${ACQ_GIT_USER_EMAIL:-}" ] && git config --global user.email "$ACQ_GIT_USER_EMAIL" 2>/dev/null || true\n'
+)
+
+
+def apply_git_global_config(name: str, entries: list[str]) -> None:
+    """Set the agent's global git ``user.name``/``user.email`` from ``entries``.
+
+    ``entries`` are ``ACQ_GIT_USER_NAME=...``/``ACQ_GIT_USER_EMAIL=...``, the
+    host's own global values. Best effort, as Bash's
+    ``_acq_msb_apply_host_git_global_config``: nothing runs without entries, and
+    a failure is ignored, because the session still carries the identity as
+    ``GIT_*`` variables.
+    """
+    if not entries:
+        return
+    argv = ["exec", "-u", "agent", "-e", f"HOME={AGENT_HOME}"]
+    for entry in entries:
+        argv += ["-e", entry]
+    argv += [name, "--", "sh", "-c", _GIT_GLOBAL_CONFIG_SCRIPT]
+    try:
+        _run(argv, timeout=30)
+    except (MsbError, subprocess.TimeoutExpired):
+        pass
 
 
 def _session(
