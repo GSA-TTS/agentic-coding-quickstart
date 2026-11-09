@@ -107,6 +107,9 @@ step() { printf '%s==>%s %s\n' "$B" "$R" "$*"; }
 warn() { printf '%s%s%s\n' "$YEL" "$*" "$R" >&2; }
 ok()   { printf '%s%s%s\n' "$GRN" "$*" "$R"; }
 die()  { printf '%serror:%s %s\n' "$RED" "$R" "$*" >&2; exit 1; }
+# shown VALUE — VALUE with every non-printable byte replaced by '?', so a value
+# echoed back in a message cannot carry control characters to the terminal.
+shown() { printf '%s' "$1" | LC_ALL=C tr -c '[:print:]' '?'; }
 usage_err() { printf '%serror:%s %s\n' "$RED" "$R" "$*" >&2; exit 2; }
 
 # In dry-run, show what would run; otherwise run it. Child stdin is detached so a
@@ -187,7 +190,7 @@ esac
 # The home directory also names the shell rc file the PATH step may edit, so it
 # is required even when --install-dir and --bin-dir are given.
 if [ -z "$USER_HOME" ]; then
-  if [ -n "${HOME+set}" ]; then home_desc="'$HOME'"; else home_desc="unset"; fi
+  if [ -n "${HOME+set}" ]; then home_desc="'$(shown "$HOME")'"; else home_desc="unset"; fi
   die "cannot determine an absolute home directory (HOME is $home_desc); set HOME to an absolute path"
 fi
 
@@ -196,7 +199,7 @@ fi
 # resolves against the link's own directory, not the one the installer ran in,
 # so a relative value would leave the launcher dangling.
 if ! is_abs_path "$INSTALL_DIR"; then
-  die "${INSTALL_DIR_FROM:-the install directory} must be an absolute path, got '$INSTALL_DIR'; pass an absolute --install-dir (or unset ACQ_INSTALL_DIR to use the default)"
+  die "${INSTALL_DIR_FROM:-the install directory} must be an absolute path, got '$(shown "$INSTALL_DIR")'; pass an absolute --install-dir (or unset ACQ_INSTALL_DIR to use the default)"
 fi
 
 # ---------------------------------------------------------------------------

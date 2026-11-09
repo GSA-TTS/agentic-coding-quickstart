@@ -345,6 +345,11 @@ IDSTUB
     --source "$REPO_ROOT/test/fixtures/installer" --yes --bin-dir "$STUBDIR/bin"
   assert_failure 1
   assert_output --partial "ACQ_INSTALL_DIR must be an absolute path, got 'rel-inst'"
+  # The refused value is echoed with control characters replaced.
+  run sh "$REPO_ROOT/install.sh" --dry-run --install-dir $'rel\033]0;t\007x' --bin-dir "$STUBDIR/bin"
+  assert_failure 1
+  assert_output --partial "got 'rel?]0;t?x'"
+  refute_output --partial $'\033'
   # An absolute --install-dir overrides a relative ACQ_INSTALL_DIR.
   run env ACQ_INSTALL_DIR=rel-inst sh "$REPO_ROOT/install.sh" --dry-run \
     --install-dir "$STUBDIR/inst" --bin-dir "$STUBDIR/bin"
