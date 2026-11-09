@@ -759,8 +759,8 @@ def test_run_kit_addressable_substrate_is_provisioned(monkeypatch, tmp_path, cap
     # before the agent install.
     assert len(calls) == 1
     assert calls[0][0] == "oc-box"
-    assert ["install-nix", "--single-user"] in calls[0][1]
-    assert ["useradd", "-m", "agent"] in calls[0][1]
+    assert ("agent", ["install-nix", "--single-user"]) in calls[0][1]
+    assert ("root", ["useradd", "-m", "agent"]) in calls[0][1]
     assert kits.kit_applied_read("msb", "oc-box")["kit"] == "opencode"
 
 

@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import sys
 
-from .. import backends, envelope, errors, kits, sbx
+from .. import backends, envelope, errors, kits, lock, sbx
 from . import common
 
 
@@ -82,8 +82,8 @@ def run_kit_apply(parsed, emit_json: bool, backend_override: str | None) -> int:
     backend, exit_code = common._resolve_backend_for_mutation(
         backend_override, emit_json, "kit apply", domain="kit"
     )
-    if exit_code is not None:
-        return exit_code
+    if exit_code is not None or backend is None:
+        return exit_code if exit_code is not None else errors.EXIT_FAILURE
     if not common._supports(backend, "kit-apply"):
         return common._operational_failure(
             "kit apply",
@@ -93,7 +93,25 @@ def run_kit_apply(parsed, emit_json: bool, backend_override: str | None) -> int:
             emit_json,
         )
     name = parsed.name
-    kitref = parsed.kitref
+    try:
+        with lock.sandbox_lock(backend, name):
+            return _kit_apply_locked(name, parsed.kitref, emit_json, backend)
+    except lock.SandboxLockTimeout as exc:
+        return common._operational_failure(
+            "kit apply",
+            errors.TIMEOUT,
+            str(exc),
+            exc.remediation or f"wait for the other acq command on sandbox '{name}' to finish, then retry",
+            emit_json,
+        )
+
+
+def _kit_apply_locked(name: str, kitref: str, emit_json: bool, backend: str) -> int:
+    """The body of ``kit apply`` once the sandbox's lifecycle lock is held.
+
+    Holding the lock keeps a concurrent ``rm`` from removing the guest between
+    the install and the applied-kit record write.
+    """
     if not common._adapter(backend).exists(name):
         return common._operational_failure(
             "kit apply",

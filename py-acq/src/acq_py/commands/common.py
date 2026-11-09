@@ -258,9 +258,13 @@ def _logical_abspath(path: str) -> str:
     if os.path.normpath(path) == os.curdir:
         pwd = os.environ.get("PWD") or ""
         if pwd and os.path.isabs(pwd):
+            # Check the same normalised value that is returned: a raw ``$PWD``
+            # with ``..`` through a symlink can resolve to the cwd while its
+            # lexical form names a different directory.
+            logical = os.path.normpath(pwd)
             try:
-                if os.path.samefile(pwd, os.curdir):
-                    return os.path.normpath(pwd)
+                if os.path.samefile(logical, os.curdir):
+                    return logical
             except OSError:
                 pass
     return os.path.abspath(path)

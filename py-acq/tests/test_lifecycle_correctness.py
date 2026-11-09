@@ -19,9 +19,11 @@ the deterministic ``__stub__`` msb. The stub is an internal test seam.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -331,24 +333,150 @@ def test_sandbox_lock_times_out_while_another_holder_has_it(monkeypatch, tmp_pat
     assert state.record_read("msb", "box") is None
 
 
-@pytest.mark.skipif(os.name == "nt", reason="Bash locks carry POSIX pids")
+_REPO = Path(__file__).resolve().parents[2]
+_POSIX_ONLY = pytest.mark.skipif(os.name == "nt", reason="Bash locks carry POSIX pids")
+
+
+def _bash_lock(name: str = "box") -> Path:
+    return lock._bash_lock_dir("msb", name)
+
+
+def _bash(script: str, *args: str, timeout: float = 30) -> subprocess.CompletedProcess:
+    """Run ``script`` in Bash with acq.backends/common.sh sourced (its real lock code)."""
+    return subprocess.run(
+        ["bash", "-c", f'source "{_REPO}/acq.backends/common.sh" >/dev/null 2>&1; {script}', "bash", *args],
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout,
+    )
+
+
+@_POSIX_ONLY
 def test_a_live_bash_lock_for_the_same_sandbox_blocks_rm(monkeypatch, tmp_path, capsys):
     _env(monkeypatch, tmp_path)
     _write_catalog(tmp_path, {"box": "running"})
-    monkeypatch.setenv("ACQ_SANDBOX_LOCK_TIMEOUT", "0.2")
-    bash_lock = Path(os.environ["XDG_STATE_HOME"]) / "acq" / "provenance" / "provider-input" / "msb" / "box.3360700413.lock"
+    monkeypatch.setenv("ACQ_SANDBOX_LOCK_TIMEOUT", "0.3")
+    bash_lock = _bash_lock()
     bash_lock.mkdir(parents=True)
-    (bash_lock / "owner").write_text(f"{os.getpid()} 12345\n", encoding="utf-8")
+    identity = lock._process_identity(os.getpid())
+    assert identity
+    (bash_lock / "owner").write_text(f"{os.getpid()} {identity}\n", encoding="utf-8")
 
     rc, doc = _invoke(capsys, "--backend", "msb", "rm", "box", "--json")
     assert rc == 1
     assert doc["error"]["code"] == errors.TIMEOUT
+    assert str(bash_lock) in doc["error"]["remediation"]
     assert "box" in json.loads(_catalog_path(tmp_path).read_text(encoding="utf-8"))
+    assert bash_lock.is_dir()  # a live holder's lock is never touched
 
-    # A lock whose owner is gone is stale and does not block.
-    (bash_lock / "owner").write_text("999999999 12345\n", encoding="utf-8")
-    rc, doc = _invoke(capsys, "--backend", "msb", "rm", "box", "--json")
+
+@_POSIX_ONLY
+@pytest.mark.parametrize(
+    "owner",
+    [
+        "999999999 12345",  # the owner process is gone
+        "{pid} not-my-start-time",  # a reused PID: alive, but a different process
+        "\u00b2 12345",  # a non-ASCII digit PID is not a PID
+        "\u0663\u0664 12345",
+    ],
+)
+def test_a_stale_bash_lock_is_recovered(monkeypatch, tmp_path, capsys, owner):
+    _env(monkeypatch, tmp_path)
+    _write_catalog(tmp_path, {"box": "running"})
+    monkeypatch.setenv("ACQ_SANDBOX_LOCK_TIMEOUT", "0.3")
+    bash_lock = _bash_lock()
+    bash_lock.mkdir(parents=True)
+    (bash_lock / "owner").write_text(owner.format(pid=os.getpid()) + "\n", encoding="utf-8")
+
+    rc, _doc = _invoke(capsys, "--backend", "msb", "rm", "box", "--json")
     assert rc == 0
+    assert not bash_lock.exists()  # recovered, then taken and released by acq
+
+
+@_POSIX_ONLY
+def test_an_ownerless_bash_lock_is_not_touched(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path)
+    _write_catalog(tmp_path, {"box": "running"})
+    monkeypatch.setenv("ACQ_SANDBOX_LOCK_TIMEOUT", "0.3")
+    bash_lock = _bash_lock()
+    bash_lock.mkdir(parents=True)
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "rm", "box", "--json")
+    assert rc == 1
+    assert doc["error"]["code"] == errors.TIMEOUT
+    assert bash_lock.is_dir()
+
+
+@pytest.mark.parametrize("token", ["12", "007"])
+def test_owner_pid_accepts_ascii_digits(token):
+    assert lock._owner_pid(token) == int(token)
+
+
+@pytest.mark.parametrize("token", ["", "-1", "1.5", " 12", "\u00b2", "\u0663\u0664", "12a"])
+def test_owner_pid_rejects_anything_but_ascii_digits(token):
+    assert lock._owner_pid(token) is None
+
+
+@_POSIX_ONLY
+@pytest.mark.skipif(not shutil.which("bash"), reason="needs bash")
+def test_bash_waits_for_a_python_held_sandbox_lock(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path)
+    with lock.sandbox_lock("msb", "café box"):
+        held = _bash_lock("café box")
+        owner = (held / "owner").read_text(encoding="utf-8").split()
+        assert owner[0] == str(os.getpid())
+        expected = subprocess.run(
+            ["sh", "-c", 'ps -o lstart= -p "$1" | tr -d "[:space:]"', "sh", str(os.getpid())],
+            capture_output=True, text=True,
+        ).stdout
+        assert " ".join(owner[1:]) == expected
+        # Bash's own acquire refuses: the Python owner is live.
+        proc = _bash(
+            'ACQ_PROVIDER_INPUT_LOCK_RETRIES=1 acq_provider_input_lock_acquire msb "$1" $$', "café box"
+        )
+        assert proc.returncode == 1
+        assert "owned by live pid" in proc.stderr
+    assert not held.exists()
+
+
+@_POSIX_ONLY
+@pytest.mark.skipif(not shutil.which("bash"), reason="needs bash")
+def test_python_waits_for_a_bash_held_sandbox_lock_and_recovers_it_when_stale(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_SANDBOX_LOCK_TIMEOUT", "0.3")
+    holder = subprocess.Popen(["sleep", "60"])
+    try:
+        proc = _bash('acq_provider_input_lock_acquire msb "$1" "$2"', "box", str(holder.pid))
+        assert proc.returncode == 0, proc.stderr
+        assert Path(proc.stdout.strip()) == _bash_lock()
+        with pytest.raises(lock.SandboxLockTimeout) as info:
+            with lock.sandbox_lock("msb", "box"):
+                pass
+        assert str(_bash_lock()) in (info.value.remediation or "")
+    finally:
+        holder.kill()
+        holder.wait()
+    with lock.sandbox_lock("msb", "box"):  # the Bash owner is gone: stale, recovered
+        assert _bash_lock().is_dir()
+    assert not _bash_lock().exists()
+
+
+@pytest.mark.skipif(not (shutil.which("tr") and shutil.which("cksum")), reason="needs tr and cksum")
+def test_bash_lock_key_matches_tr_and_cksum_for_a_non_ascii_name():
+    name = "café box/ü"
+    safe = subprocess.run(
+        ["tr", "-c", "A-Za-z0-9._-", "_"], input=name.encode("utf-8"), capture_output=True
+    ).stdout.decode("ascii")
+    total = subprocess.run(["cksum"], input=name.encode("utf-8"), capture_output=True).stdout.split()[0]
+    assert lock._bash_safe(name) == safe == "caf___box___"
+    assert lock._posix_cksum(name.encode("utf-8")) == int(total)
+
+
+@_POSIX_ONLY
+@pytest.mark.skipif(not shutil.which("bash"), reason="needs bash")
+def test_bash_lock_dir_matches_bash_provider_input_root(monkeypatch, tmp_path):
+    for name in ("box", "café box/ü"):
+        proc = _bash('acq_provider_input_root msb "$1"', name)
+        assert proc.returncode == 0, proc.stderr
+        assert str(lock._bash_lock_dir("msb", name)) == proc.stdout.strip() + ".lock"
 
 
 def test_posix_cksum_matches_the_bash_lock_key():
@@ -427,15 +555,223 @@ def test_kit_apply_timeout_is_a_stable_error(monkeypatch):
     assert calls[0][1]["timeout"] == 7.0
 
 
-def test_substrate_steps_run_as_root_detached_with_git_guards(monkeypatch):
+def test_substrate_steps_run_as_their_own_user_detached_with_git_guards(monkeypatch):
     monkeypatch.setenv("ACQ_MSB_BIN", "__stub__")
     calls = _capture_subprocess(monkeypatch)
-    msb.provision_substrate("box", [["useradd", "-m", "agent"], ["install-nix", "--single-user"]])
+    msb.provision_substrate("box", [("root", ["useradd", "-m", "agent"]), ("agent", ["install-nix", "--single-user"])])
     assert len(calls) == 2
+    users = []
     for argv, kwargs in calls:
         head = argv[: argv.index("--")]
-        assert _contains(head, ["-u", "root"])
-        assert not _contains(head, ["-u", "agent"])
+        users.append(head[head.index("-u") + 1])
         assert _contains(head, _GUARDS)
         assert kwargs.get("stdin") is subprocess.DEVNULL
         assert kwargs.get("timeout") is not None
+    assert users == ["root", "agent"]
+
+
+@pytest.mark.parametrize("gaps", [["nix", "agent-user"], ["agent-user", "direnv", "nix", "devenv"]])
+def test_substrate_plan_creates_the_agent_user_first_as_root(gaps):
+    from acq_py.commands import lifecycle
+
+    steps = lifecycle._substrate_provision_steps(gaps)
+    assert steps[0] == ("root", ["useradd", "-m", "agent"])
+    assert all(user == "agent" for user, _argv in steps[1:])
+    assert [argv[0] for _user, argv in steps[1:]][:1] == ["install-nix"]
+
+
+# ---------------------------------------------------------------------------
+# rm needs positive proof that a guest is gone before it clears host records.
+# ---------------------------------------------------------------------------
+
+def _created_box(monkeypatch, tmp_path, capsys):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _env(monkeypatch, tmp_path)
+    rc, _ = _invoke(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "box", "--json")
+    assert rc == 0
+    assert _kit_record_path("msb", "box").exists()
+
+
+def _records_intact():
+    assert state.record_path("msb", "box").exists()
+    assert _kit_record_path("msb", "box").exists()
+
+
+def test_rm_keeps_records_when_remove_fails_and_listing_fails(monkeypatch, tmp_path, capsys):
+    _created_box(monkeypatch, tmp_path, capsys)
+    monkeypatch.setenv("ACQ_MSB_STUB_FAIL", "remove")
+    monkeypatch.setattr(msb, "list_names", lambda: None)
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "rm", "box", "--json")
+    assert rc == 1
+    assert doc["error"]["code"] == errors.FAILURE
+    assert "could not confirm" in doc["error"]["message"]
+    _records_intact()
+    assert "box" in json.loads(_catalog_path(tmp_path).read_text(encoding="utf-8"))
+
+
+def test_rm_keeps_records_of_an_apparent_orphan_when_listing_fails(monkeypatch, tmp_path, capsys):
+    # The guest still exists, but msb cannot list it (and remove fails too): that
+    # is not evidence that the guest is gone, so nothing is cleared.
+    _created_box(monkeypatch, tmp_path, capsys)
+    monkeypatch.setenv("ACQ_MSB_STUB_FAIL", "remove")
+    monkeypatch.setattr(msb, "list_names", lambda: None)
+    monkeypatch.setattr(msb, "exists", lambda name: False)
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "rm", "box", "--json")
+    assert rc == 1
+    _records_intact()
+
+
+def test_rm_keeps_records_when_listing_raises(monkeypatch, tmp_path, capsys):
+    _created_box(monkeypatch, tmp_path, capsys)
+    monkeypatch.setenv("ACQ_MSB_STUB_FAIL", "remove")
+
+    def cannot_list():
+        raise msb.cli_unavailable()
+
+    monkeypatch.setattr(msb, "list_names", cannot_list)
+    rc, _doc = _invoke(capsys, "--backend", "msb", "rm", "box", "--json")
+    assert rc == 1
+    _records_intact()
+
+
+def test_rm_keeps_records_when_remove_fails_and_the_guest_is_still_listed(monkeypatch, tmp_path, capsys):
+    _created_box(monkeypatch, tmp_path, capsys)
+    monkeypatch.setenv("ACQ_MSB_STUB_FAIL", "remove")
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "rm", "box", "--json")
+    assert rc == 1
+    assert doc["error"]["message"] == "msb remove failed for sandbox 'box'"
+    _records_intact()
+
+
+def test_rm_trusts_a_successful_remove_even_when_listing_fails(monkeypatch, tmp_path, capsys):
+    _created_box(monkeypatch, tmp_path, capsys)
+    monkeypatch.setattr(msb, "list_names", lambda: None)
+    monkeypatch.setattr(msb, "exists", lambda name: False)
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "rm", "box", "--json")
+    assert rc == 0
+    assert doc["data"] == {"name": "box", "backend": "msb", "removed": True}
+    assert not state.record_path("msb", "box").exists()
+    assert not _kit_record_path("msb", "box").exists()
+
+
+# ---------------------------------------------------------------------------
+# run, recreate and kit apply take the sandbox lock; recreate re-checks under it.
+# ---------------------------------------------------------------------------
+
+def test_run_waits_for_the_sandbox_lock(monkeypatch, tmp_path, capsys):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_SANDBOX_LOCK_TIMEOUT", "0.3")
+    with lock.sandbox_lock("msb", "box"):
+        rc, doc = _invoke(capsys, "--backend", "msb", "run", "opencode", str(ws), "--name", "box", "--json")
+    assert rc == 1
+    assert doc["error"]["code"] == errors.TIMEOUT
+    assert state.record_read("msb", "box") is None
+    assert not _catalog_path(tmp_path).exists() or "box" not in json.loads(_catalog_path(tmp_path).read_text(encoding="utf-8"))
+
+
+def _sec_sandbox(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path)
+    _write_catalog(tmp_path, {"sec": "running"})
+    path = state.record_path("msb", "sec")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(_SEC_RECORD), encoding="utf-8")
+    monkeypatch.setenv("ACQ_SECURITY_MOUNT_STATE", json.dumps({"sec": "missing"}))
+
+
+def _spy_removes(monkeypatch) -> list[str]:
+    removed: list[str] = []
+    real = msb.remove
+
+    def spy(name):
+        removed.append(name)
+        return real(name)
+
+    monkeypatch.setattr(msb, "remove", spy)
+    return removed
+
+
+def test_recreate_waits_for_the_sandbox_lock(monkeypatch, tmp_path, capsys):
+    _sec_sandbox(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_SANDBOX_LOCK_TIMEOUT", "0.3")
+    removed = _spy_removes(monkeypatch)
+    with lock.sandbox_lock("msb", "sec"):
+        rc, doc = _invoke(capsys, "--backend", "msb", "create", "--recreate", "sec", "--yes", "--json")
+    assert rc == 1
+    assert doc["error"]["code"] == errors.TIMEOUT
+    assert removed == []
+
+
+def _on_lock_entry(monkeypatch, action):
+    """Run ``action`` the moment a command gets the sandbox lock (a racing command's effect)."""
+    real = lock.sandbox_lock
+
+    @contextlib.contextmanager
+    def racing(backend, name):
+        with real(backend, name):
+            action()
+            yield
+
+    monkeypatch.setattr(lock, "sandbox_lock", racing)
+
+
+def test_recreate_rereads_the_record_under_the_lock(monkeypatch, tmp_path, capsys):
+    _sec_sandbox(monkeypatch, tmp_path)
+    removed = _spy_removes(monkeypatch)
+    _on_lock_entry(monkeypatch, lambda: state.record_remove("msb", "sec"))  # a racing rm
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "create", "--recreate", "sec", "--yes", "--json")
+    assert rc == 1
+    assert doc["error"]["code"] == errors.SANDBOX_NOT_FOUND
+    assert removed == []
+
+
+def test_recreate_rechecks_eligibility_under_the_lock(monkeypatch, tmp_path, capsys):
+    # A concurrent recreate finished first: the sandbox now has its read-only
+    # mount, and this recreate must not destroy the guest that one just rebuilt.
+    _sec_sandbox(monkeypatch, tmp_path)
+    removed = _spy_removes(monkeypatch)
+    _on_lock_entry(monkeypatch, lambda: os.environ.__setitem__("ACQ_SECURITY_MOUNT_STATE", json.dumps({"sec": "ok"})))
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "create", "--recreate", "sec", "--yes", "--json")
+    assert rc == 1
+    assert doc["error"]["code"] == errors.VALIDATION_FAILED
+    assert removed == []
+    assert "sec" in json.loads(_catalog_path(tmp_path).read_text(encoding="utf-8"))
+
+
+def test_kit_apply_waits_for_the_sandbox_lock(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path)
+    _write_catalog(tmp_path, {"box": "running"})
+    monkeypatch.setenv("ACQ_SANDBOX_LOCK_TIMEOUT", "0.3")
+    installs = _spy_installs(monkeypatch)
+    with lock.sandbox_lock("msb", "box"):
+        rc, doc = _invoke(capsys, "--backend", "msb", "kit", "apply", "box", "opencode", "--json")
+    assert rc == 1
+    assert doc["error"]["code"] == errors.TIMEOUT
+    assert installs == []
+    assert not _kit_record_path("msb", "box").exists()
+
+
+# ---------------------------------------------------------------------------
+# `.` with a $PWD that normalises to a different directory.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlinked cwd")
+def test_dot_ignores_a_pwd_whose_normal_form_is_a_different_directory(monkeypatch, tmp_path):
+    target = tmp_path / "a" / "b"
+    target.mkdir(parents=True)
+    (tmp_path / "x").mkdir()
+    (tmp_path / "x" / "link").symlink_to(target, target_is_directory=True)
+    monkeypatch.chdir(tmp_path / "a")
+    # Physically x/link/.. is a (the cwd); lexically it is x, a different directory.
+    monkeypatch.setenv("PWD", str(tmp_path / "x" / "link" / ".."))
+
+    assert common._logical_abspath(".") == str((tmp_path / "a").resolve())
+    assert cli._derive_name("opencode", common._logical_abspath(".")) == "opencode-a"

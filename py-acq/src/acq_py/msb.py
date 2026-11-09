@@ -578,22 +578,22 @@ def kit_apply(name: str, kit: str, install_cmd: list[str]) -> None:
         )
 
 
-def provision_substrate(name: str, steps: list[list[str]]) -> None:
+def provision_substrate(name: str, steps: list[tuple[str, list[str]]]) -> None:
     """Provision addressable substrate gaps in-guest (ADR-0030 "bring-your-own
-    image contract"): bootstrap single-user Nix + devenv + direnv and create the
-    agent user before the agent install.
+    image contract"): create the agent user and bootstrap single-user Nix +
+    devenv + direnv before the agent install.
 
-    The steps are data sourced from the pinned control plane (never a secret,
-    never a credential) and run in-guest via the backend seam; acq never executes
-    them on the host. They run as root: they create the agent user (which cannot
-    run its own ``useradd``) and install system-wide prerequisites, as Bash's
-    ``_acq_msb_ensure_agent_user`` does with ``-u 0``. Raises :class:`MsbError` on
-    backend failure or timeout.
+    Each step is ``(user, argv)``: the seam decides which guest user runs it
+    (root creates the agent user, as Bash's ``_acq_msb_ensure_agent_user`` does
+    with ``-u 0``; the agent user runs its own single-user installs). The steps
+    are data sourced from the pinned control plane (never a secret, never a
+    credential) and run in-guest via the backend seam; acq never executes them on
+    the host. Raises :class:`MsbError` on backend failure or timeout.
     """
     # Reconciles with the real msb 0.7.11 CLI: there is NO `substrate-provision`
-    # subcommand. Each bootstrap step runs in-guest via `msb exec -u root NAME -- …`.
-    for step in steps:
-        if not _guest_step(name, "root", step):
+    # subcommand. Each bootstrap step runs in-guest via `msb exec -u USER NAME -- …`.
+    for user, step in steps:
+        if not _guest_step(name, user, step):
             raise MsbError(
                 errors.FAILURE,
                 f"could not provision the substrate for sandbox '{name}'",

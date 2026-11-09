@@ -54,7 +54,7 @@ def _resolve_image(flag_image: str | None, agent: str) -> str:
 
 def _resolve_image_for_kit(
     image_flag: str | None, agent: str, kit_name: str | None, command: str, emit_json: bool
-) -> tuple[str | None, list[list[str]], int | None]:
+) -> tuple[str | None, list[tuple[str, list[str]]], int | None]:
     """Resolve the base image and, for a kit, plan the substrate contract (ADR-0030).
 
     A kit installs into the devenv substrate, so acq verifies the selected image
@@ -102,26 +102,37 @@ def _substrate_gaps(image: str) -> list[str] | None:
     return None
 
 
-def _substrate_provision_steps(gaps: list[str]) -> list[list[str]]:
-    """In-guest bootstrap steps for addressable substrate gaps (ordered).
+# Addressable substrate gaps in the order they are provisioned, each with the
+# guest user its step runs as. The agent user is created first, as root (it cannot
+# run its own ``useradd``), as Bash's ``_acq_msb_ensure_agent_user`` does; the
+# single-user Nix, devenv and direnv installs then run as that agent user, whose
+# profile the kits install into.
+_SUBSTRATE_STEPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("agent-user", "root", ("useradd", "-m", "agent")),
+    ("nix", "agent", ("install-nix", "--single-user")),
+    ("devenv", "agent", ("nix", "profile", "install", "devenv")),
+    ("direnv", "agent", ("nix", "profile", "install", "direnv")),
+)
+
+
+def _substrate_provision_steps(gaps: list[str]) -> list[tuple[str, list[str]]]:
+    """In-guest bootstrap steps for addressable substrate gaps, as ``(user, argv)``.
+
+    The order is fixed by :data:`_SUBSTRATE_STEPS` (agent user first), whatever
+    order the gaps were reported in.
 
     TODO(quarterly): these argv are PLACEHOLDER bootstrap steps — the quarterly
     cadence re-sources the pinned single-user Nix / devenv install from the control
     plane. They are data, never executed here (forwarded to the backend seam), and
     carry no credential.
     """
-    steps = {
-        "nix": ["install-nix", "--single-user"],
-        "devenv": ["nix", "profile", "install", "devenv"],
-        "direnv": ["nix", "profile", "install", "direnv"],
-        "agent-user": ["useradd", "-m", "agent"],
-    }
-    return [list(steps[gap]) for gap in gaps if gap in steps]
+    wanted = set(gaps)
+    return [(user, list(argv)) for gap, user, argv in _SUBSTRATE_STEPS if gap in wanted]
 
 
 def _substrate_plan(
     image: str, kit_name: str | None, command: str, emit_json: bool
-) -> tuple[list[list[str]], int | None]:
+) -> tuple[list[tuple[str, list[str]]], int | None]:
     """Plan the substrate contract for a kit on an image; returns ``(steps, exit_code)``.
 
     A ``None`` kit needs no substrate. Otherwise the image's gaps are classified:
@@ -171,7 +182,7 @@ def _validate_kit_flag(kit_flag: str | None, command: str, emit_json: bool) -> t
 
 
 def _apply_agent_kit(
-    backend: str, name: str, kit_name: str, provision_steps: list[list[str]], command: str, emit_json: bool
+    backend: str, name: str, kit_name: str, provision_steps: list[tuple[str, list[str]]], command: str, emit_json: bool
 ) -> int | None:
     """Apply a built-in agent kit to a sandbox (create-time install, ADR-0030).
 
@@ -257,7 +268,7 @@ def _lock_failure(command: str, name: str, exc: lock.SandboxLockTimeout, emit_js
         command,
         errors.TIMEOUT,
         str(exc),
-        f"wait for the other acq command on sandbox '{name}' to finish, then retry",
+        exc.remediation or f"wait for the other acq command on sandbox '{name}' to finish, then retry",
         emit_json,
     )
 
@@ -455,6 +466,26 @@ def _create_locked(parsed, emit_json: bool, backend: str, name: str, workspace: 
     return errors.EXIT_SUCCESS
 
 
+def _recreate_ineligible(record: dict, backend: str, name: str, emit_json: bool) -> int | None:
+    """Refuse recreation of a sandbox that is not in the security exception.
+
+    Returns an emitted exit code when the sandbox passes the trusted-config gate
+    (nothing to recover), else ``None`` (recreation is the sanctioned recovery).
+    """
+    try:
+        security.assert_trusted(record, backend, name)
+    except security.SecurityException:
+        return None
+    return common._operational_failure(
+        "create",
+        errors.VALIDATION_FAILED,
+        f"sandbox '{name}' is not missing its read-only mount; recreation is "
+        "only for the security exception",
+        f"re-attach with 'acq run {name}' instead",
+        emit_json,
+    )
+
+
 def run_recreate(parsed, emit_json: bool, backend: str) -> int:
     """``acq create --recreate NAME [--yes]`` — security-exception recreation.
 
@@ -484,19 +515,9 @@ def run_recreate(parsed, emit_json: bool, backend: str) -> int:
             "create it with 'acq create', or list sandboxes with 'acq ls'",
             emit_json,
         )
-    try:
-        security.assert_trusted(record, backend, name)
-    except security.SecurityException:
-        pass  # in the security exception -> recreation is the sanctioned recovery
-    else:
-        return common._operational_failure(
-            "create",
-            errors.VALIDATION_FAILED,
-            f"sandbox '{name}' is not missing its read-only mount; recreation is "
-            "only for the security exception",
-            f"re-attach with 'acq run {name}' instead",
-            emit_json,
-        )
+    exit_code = _recreate_ineligible(record, backend, name, emit_json)
+    if exit_code is not None:
+        return exit_code
     if not parsed.yes:
         if emit_json or not sys.stdin.isatty():
             return common._operational_failure(
@@ -548,6 +569,11 @@ def _recreate_locked(name: str, emit_json: bool, backend: str) -> int:
             "create it with 'acq create', or list sandboxes with 'acq ls'",
             emit_json,
         )
+    # Eligibility again, under the lock: a concurrent recreate may have rebuilt
+    # the sandbox while this one waited, and its guest must not be destroyed.
+    exit_code = _recreate_ineligible(record, backend, name, emit_json)
+    if exit_code is not None:
+        return exit_code
     agent = record.get("agent") or "shell"
     workspace = record.get("workspace") or common.DEFAULT_GUEST_WORKSPACE
     if record.get("workspace"):
@@ -857,26 +883,51 @@ def run_rm(parsed, emit_json: bool, backend: str) -> int:
         return _lock_failure("rm", name, exc, emit_json)
 
 
-def _still_exists(adapter, name: str) -> bool:
-    """Whether the backend still lists the sandbox; an unanswerable probe counts as yes."""
+def _confirmed_absent(adapter, name: str) -> bool | None:
+    """Whether a successful listing shows the sandbox gone.
+
+    ``True`` only on positive proof: the backend listed its sandboxes and the
+    name is not among them. ``False`` when it is listed. ``None`` when the
+    listing failed, which proves nothing either way.
+    """
     try:
-        return bool(adapter.exists(name))
+        names = adapter.list_names()
     except common._ADAPTER_ERRORS:
-        return True
+        return None
+    if names is None:
+        return None
+    return name not in names
 
 
 def _rm_locked(name: str, emit_json: bool, backend: str) -> int:
     """The body of ``rm`` once the lifecycle lock is held.
 
-    Like Bash's ``_acq_backend_terminate_unlocked``, cleanup of host records
-    still happens when the sandbox is already gone: a sandbox removed outside acq
-    leaves records only acq can clear (``backend_absent: true``), and a remove
-    that fails because the guest vanished meanwhile still clears them. Only when
-    there is neither a guest nor any host record is the name unknown.
+    Mirrors Bash's ``_acq_backend_terminate_unlocked``: the backend remove is
+    always attempted first. Host records are cleared only once the guest is known
+    to be gone, either because the remove succeeded or because, after a failed
+    remove, a successful listing no longer shows it. A sandbox removed outside acq
+    is reported with ``backend_absent: true``. When the listing itself fails the
+    outcome is unknown, so ``rm`` fails and leaves every record in place. Only
+    when the guest is confirmed absent and there is no host record either is the
+    name unknown (``sandbox_not_found``).
     """
     adapter = common._adapter(backend)
     backend_absent = False
-    if not adapter.exists(name):
+    try:
+        adapter.remove(name)
+    except common._ADAPTER_ERRORS as exc:
+        absent = _confirmed_absent(adapter, name)
+        if absent is None:
+            return common._operational_failure(
+                "rm",
+                exc.code,
+                f"could not remove sandbox '{name}', and could not confirm it is gone "
+                f"because listing {backend} sandboxes failed; its host records were kept",
+                f"check that the {backend} backend is working, then retry 'acq rm {name}'",
+                emit_json,
+            )
+        if not absent:
+            return common._operational_failure("rm", exc.code, exc.message, exc.remediation, emit_json)
         if not _has_host_records(backend, name):
             return common._operational_failure(
                 "rm",
@@ -886,12 +937,6 @@ def _rm_locked(name: str, emit_json: bool, backend: str) -> int:
                 emit_json,
             )
         backend_absent = True
-    else:
-        try:
-            adapter.remove(name)
-        except common._ADAPTER_ERRORS as exc:
-            if _still_exists(adapter, name):
-                return common._operational_failure("rm", exc.code, exc.message, exc.remediation, emit_json)
     _clear_host_records(backend, name)
     data: dict = {"name": name, "backend": backend, "removed": True}
     if backend_absent:
