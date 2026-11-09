@@ -198,6 +198,9 @@ def test_colon_scope_on_windows_skips_only_the_drive_designator(monkeypatch):
     assert common._colon_scope("C:\\Users\\me") == "\\Users\\me"
     assert common._colon_scope("c:/Users/me") == "/Users/me"
     assert common._colon_scope("\\\\?\\C:\\long\\path") == "\\long\\path"
+    assert common._colon_scope("\\\\.\\C:\\dev\\path") == "\\dev\\path"
+    assert common._colon_scope("//./c:/dev/path") == "/dev/path"
+    assert ":" in common._colon_scope("\\\\.\\C:\\a:b")
     assert ":" in common._colon_scope("C:\\a:b")
     assert common._colon_scope("\\\\srv\\share\\p") == "\\\\srv\\share\\p"
     assert common._colon_scope("\\\\srv\\sh:are\\p").count(":") == 1
@@ -212,6 +215,7 @@ def test_windows_drive_paths_pass_and_other_colons_fail(monkeypatch, capsys):
     monkeypatch.setattr(common, "WINDOWS", True)
     assert common._workspace_unsafe("create", "C:\\Users\\me\\proj", "x", False) is None
     assert common._workspace_unsafe("create", "\\\\?\\C:\\Users\\me", "x", False) is None
+    assert common._workspace_unsafe("create", "\\\\.\\C:\\Users\\me", "x", False) is None
     assert common._workspace_unsafe("create", "C:\\Users\\me\\a:b", "C:\\Users\\me\\a:b", False) == 1
     assert "workspace path contains ':'" in capsys.readouterr().err
 

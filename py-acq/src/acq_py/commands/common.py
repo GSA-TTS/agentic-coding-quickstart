@@ -421,7 +421,7 @@ def _validate_workspace(command: str, path: str | None, emit_json: bool) -> tupl
             emit_json,
         )
     resolved = _logical_abspath(path)
-    shown = path if resolved == path else f"{path} (resolves to {resolved})"
+    shown = path if resolved == path else f"{path} (absolute path {resolved})"
     unsafe = _workspace_unsafe(command, resolved, shown, emit_json)
     if unsafe is not None:
         return None, unsafe
@@ -445,9 +445,9 @@ def _validate_workspace(command: str, path: str | None, emit_json: bool) -> tupl
 # the Windows drive-letter rule is testable on a POSIX host (as ``msb.WINDOWS``).
 WINDOWS = os.name == "nt"
 
-# A Windows drive designator, plain (``C:``) or extended-length (``\\?\C:``), as
-# ``ntpath.splitdrive`` returns it.
-_DRIVE_DESIGNATOR = re.compile(r"(?:[\\/]{2}\?[\\/])?[A-Za-z]:")
+# A Windows drive designator, plain (``C:``), extended-length (``\\?\C:``) or in
+# the device namespace (``\\.\C:``), as ``ntpath.splitdrive`` returns it.
+_DRIVE_DESIGNATOR = re.compile(r"(?:[\\/]{2}[?.][\\/])?[A-Za-z]:")
 
 
 def _is_control(ch: str) -> bool:
@@ -467,10 +467,12 @@ def _colon_scope(path: str) -> str:
 
     msb's ``--volume HOST:GUEST[:OPTIONS]`` and sbx's ``PATH:ro`` both split on
     ``:``. On POSIX that is the whole path. On Windows the native host path
-    starts with a drive designator (``C:``, or ``\\\\?\\C:`` from ``realpath``)
-    whose colon the backends read as part of the path, exactly as the msb
-    adapter's volume spec relies on (``msb._guest_path``); only the rest is
-    checked. A UNC path has no drive colon, so all of it is checked.
+    starts with a drive designator (``C:``, ``\\\\?\\C:`` from ``realpath``, or
+    ``\\\\.\\C:``) whose colon the backends read as part of the path, exactly as
+    the msb adapter's volume spec relies on (``msb._guest_path``); only the rest
+    is checked. A device-namespace path passes here and is then refused by the
+    msb adapter as a device path, with that reason rather than a colon. A UNC
+    path has no drive colon, so all of it is checked.
     """
     if WINDOWS:
         drive, rest = ntpath.splitdrive(path)
@@ -547,8 +549,8 @@ def _logical_abspath(path: str) -> str:
     ``os.path.abspath`` joins onto ``os.getcwd()``, which has symlinks resolved.
     For ``.`` (the working directory itself) the shell's logical ``$PWD`` is used
     instead, when it names the same directory, so a symlinked project directory
-    gets the sandbox name Bash's ``derive_name`` gives it (``basename "$PWD"``)
-    and the same name as when its path is typed out. Any other path is made
+    gets the sandbox name Bash's ``derive_name`` gives it (the last component of
+    the logical ``$PWD``) and the same name as when its path is typed out. Any other path is made
     absolute as before: a ``..`` step resolved against the logical path could
     name a different directory than the one the OS opens.
     """

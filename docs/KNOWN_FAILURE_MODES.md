@@ -3579,6 +3579,28 @@ and `rm`, `stop`, `exec` and the other verbs that take an existing sandbox's
 name refuse names that are empty, `.` or `..`, or contain `/`, `\` or control
 characters.
 
+### Also Affected: Workspace Paths Ending in `.`, `..` or `/`
+
+A later change made Bash `derive_name` fold the workspace path the way the
+Python implementation does, so both derive the same name. Bash used to take the
+last component of the path as typed, so some paths derived a different name:
+
+| Typed path | Old Bash name | New name |
+|---|---|---|
+| `/` | `opencode-` | `opencode-workspace` |
+| `..` | `opencode-` | `opencode-<parent directory>` |
+| `src/.` | `opencode-<current directory>` | `opencode-src` |
+| `src/..` | `opencode-` | `opencode-<current directory>` |
+
+At the same time the Python slug was limited to lowering ASCII letters. As a
+result `İ` (U+0130) and the Kelvin sign (U+212A) now become hyphens, as they always did in
+Bash. On POSIX a trailing `\` is now part of the directory name.
+
+A sandbox created under an old name keeps running under it. Reach it with
+`acq run NAME` (or `acq shell`, `acq exec`, `acq stop`), or remove it with
+`acq rm NAME` and run `acq run AGENT PATH` again to create it under the new
+name.
+
 ---
 
 ## Contributing
