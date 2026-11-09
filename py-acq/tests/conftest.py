@@ -7,6 +7,7 @@ subprocess ``python -m acq_py`` resolve the package without an installed copy.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import sys
@@ -109,3 +110,34 @@ def acq_cmd() -> list[str]:
 @pytest.fixture(scope="session")
 def python_exe() -> str:
     return sys.executable
+
+
+class _WindowsNulStdin(io.StringIO):
+    """stdin as ``acq ... < NUL`` shows it on Windows: NUL is a character device,
+    so ``isatty()`` says True, but no console is behind the handle."""
+
+    def isatty(self):
+        return True
+
+    def fileno(self):
+        return 0
+
+
+@pytest.fixture
+def windows_nul_stdin(monkeypatch):
+    """Install a Windows ``< NUL`` stdin holding ``text``; returns the installer.
+
+    A caller that asks ``sys.stdin.isatty()`` directly sees a terminal; only
+    ``hostexec.stream_is_terminal`` sees that no console is attached. A test
+    using this fails if its caller reverts to ``isatty()``.
+    """
+    from acq_py import hostexec
+
+    def install(text: str = "") -> io.StringIO:
+        stream = _WindowsNulStdin(text)
+        monkeypatch.setattr(sys, "stdin", stream)
+        monkeypatch.setattr(hostexec, "_is_windows", lambda: True)
+        monkeypatch.setattr(hostexec, "_windows_console", lambda fd: False)
+        return stream
+
+    return install
