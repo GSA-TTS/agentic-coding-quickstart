@@ -790,7 +790,10 @@ unset _acq_impl
 # if the PID is reused between them, the parent reported is the new process's,
 # and it can only be this guardian if the guardian forked that process itself.
 # An owner killed outside Cygwin (taskkill /F) stays the recorded parent there,
-# so each tick also requires the owner to still answer kill -0.
+# so each tick also requires the owner to still answer kill -0. If Cygwin reuses
+# the dead owner's PID before the next tick (its PIDs only wrap after a long
+# run), the guardian and its private root would stay until that process exits.
+# That is a leak only: the guardian never signals anything based on the owner.
 _acq_kit_fetch_cleanup() {
   if [ -n "${_ACQ_KIT_FETCH_GUARDIAN:-}" ]; then
     kill -USR1 "$_ACQ_KIT_FETCH_GUARDIAN" 2>/dev/null || true
