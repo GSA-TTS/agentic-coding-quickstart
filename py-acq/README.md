@@ -107,7 +107,8 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   On Windows the colon of a drive letter (`C:\...`) is allowed, because msb's
   `--volume` source accepts it.
 * `acq-py ls [--json]` — list sandboxes with `name`/`backend`/`state`
-  (ADR-0038m §2).
+  (ADR-0038m §2). A backend listing that fails makes `ls` fail (`failure`);
+  only a successful empty listing reports no sandboxes.
 * `acq-py stop NAME [--json]` and `acq-py rm NAME [--json]` — stop (state
   preserved) or remove a sandbox and its record.
 * `acq-py start NAME [--json]` and `acq-py restart NAME [--json]` (msb only) —

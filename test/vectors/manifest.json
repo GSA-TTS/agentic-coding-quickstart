@@ -81,6 +81,10 @@
       "vectors": ["cli/lifecycle-ls"]
     },
     {
+      "contract": "ADR-0038m §48 drop inspection-failure-as-empty: ls fails closed (failure) when the backend listing exits non-zero, never 'no sandboxes' (msb and sbx)",
+      "vectors": ["cli/ls-list-failure-msb", "cli/ls-list-failure-sbx"]
+    },
+    {
       "contract": "ADR-0041m forward migration of existing installs: the generation-2 step imports a sandbox the Bash acq created (provenance/<backend>/<name>.<cksum>.env) so it is listed and re-attachable instead of orphaned",
       "vectors": ["cli/migration-bash-provenance"]
     },
