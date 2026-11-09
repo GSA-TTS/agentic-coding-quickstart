@@ -23,6 +23,12 @@ if ($acqImpl -and $acqImpl -ne "bash") {
     }
     $acqImplRepoRoot = Split-Path -Parent $PSCommandPath
     $runtimePy = Join-Path $acqImplRepoRoot "py-acq\runtime\python.exe"
+    # An ACQ_RUNTIME override must be a drive-rooted or UNC path: a relative
+    # value would be resolved against the current directory (the workspace).
+    if ($env:ACQ_RUNTIME -and -not ($env:ACQ_RUNTIME -match '^[A-Za-z]:[\\/]' -or $env:ACQ_RUNTIME.StartsWith('\\'))) {
+        [Console]::Error.WriteLine("acq: ACQ_RUNTIME must be an absolute path to python.exe, got '$($env:ACQ_RUNTIME)'")
+        exit 1
+    }
     if ($env:ACQ_RUNTIME -and (Test-Path -LiteralPath $env:ACQ_RUNTIME -PathType Leaf)) {
         $acqPythonExe = $env:ACQ_RUNTIME
     }
@@ -30,13 +36,24 @@ if ($acqImpl -and $acqImpl -ne "bash") {
         $acqPythonExe = $runtimePy
     }
     else {
-        # python.exe only: a .bat/.cmd shim would run through cmd.exe.
-        $pyCmd = Get-Command python.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        # Search PATH ourselves, like acq_py.hostexec: python.exe from drive-rooted
+        # or UNC entries only. A .bat/.cmd shim would run through cmd.exe, a
+        # relative entry (even ".") resolves against the current directory, which
+        # is normally the workspace, and the Microsoft Store App Execution Alias
+        # under WindowsApps only opens the Store.
+        $pyCmd = $null
+        foreach ($entry in ($env:Path -split ';')) {
+            $dir = $entry.Trim().Trim('"')
+            if (-not ($dir -match '^[A-Za-z]:[\\/]' -or $dir.StartsWith('\\'))) { continue }
+            if ($dir -like '*\Microsoft\WindowsApps*') { continue }
+            $candidate = Join-Path $dir 'python.exe'
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) { $pyCmd = $candidate; break }
+        }
         if ($null -eq $pyCmd) {
-            [Console]::Error.WriteLine("acq: ACQ_IMPL=python but no Python interpreter was found")
+            [Console]::Error.WriteLine("acq: ACQ_IMPL=python but no Python interpreter was found. Install acq from a release (it bundles its own runtime), or install Python 3.12 or newer from python.org.")
             exit 1
         }
-        $acqPythonExe = $pyCmd.Source
+        $acqPythonExe = $pyCmd
     }
     $srcDir = Join-Path $acqImplRepoRoot "py-acq\src"
     # acq is stdlib-only, so the user's PYTHONPATH is never inherited: an empty
