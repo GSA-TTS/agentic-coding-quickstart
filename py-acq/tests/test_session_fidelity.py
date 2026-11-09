@@ -113,9 +113,16 @@ def fake(tmp_path, monkeypatch):
     return entries
 
 
+def _is_git_config_exec(entry: dict) -> bool:
+    return any("git config --global" in token for token in entry["argv"])
+
+
 def _sessions(entries: list[dict]) -> list[dict]:
-    """The logged session execs (the version/list/passwd probes are not logged)."""
-    return [e for e in entries if "event" not in e]
+    """The logged session execs (the version/list/passwd probes are not logged).
+
+    The msb guest git-config write is an exec too; it is not a session.
+    """
+    return [e for e in entries if "event" not in e and not _is_git_config_exec(e)]
 
 
 def _env_flags(argv: list[str]) -> dict[str, str]:
@@ -348,6 +355,116 @@ def test_ssh_auth_sock_is_passed_only_with_recorded_forwarding(fake, monkeypatch
     assert "SSH_AUTH_SOCK" not in without
     assert forwarded["SSH_AUTH_SOCK"] == "/home/agent/.acq/ssh-agent.sock"
     assert "SSH_AUTH_SOCK" not in unsafe
+
+
+def _persist_kit_env(lines: list[str]) -> None:
+    """Write the msb ``kit-env`` host-config key, as applying the kits does."""
+    from acq_py import security
+
+    directory = security.host_config_dir("box")
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "kit-env").write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
+
+
+def _env_pairs(argv: list[str]) -> list[str]:
+    """The ``-e`` values before the sandbox name, in argv order."""
+    head = argv[: argv.index("--")]
+    return [head[i + 1] for i, token in enumerate(head[:-1]) if token == "-e"]
+
+
+@posix_only
+@pytest.mark.parametrize("verb", [["exec", "box", "--", "true"], ["attach", "box"], ["shell", "box"]])
+def test_msb_session_replays_the_persisted_kit_env(fake, monkeypatch, verb):
+    # Bash _acq_msb_kit_env_flags_into: the last value wins, the first occurrence
+    # fixes the order, a malformed name is dropped, and the kit env follows
+    # acq's own entries.
+    monkeypatch.setenv("EMAIL", "ada@example.gov")
+    _record("msb")
+    _persist_kit_env(["OPENCODE_CONFIG=/a.json", "BAD-NAME=x", "XDG_X=1", "OPENCODE_CONFIG=/b.json"])
+    proc = _run_no_tty(["--backend", "msb", *verb])
+    assert proc.returncode == 0, proc.stderr
+    [session] = _sessions(fake())
+    pairs = _env_pairs(session["argv"])
+    assert pairs[-2:] == ["OPENCODE_CONFIG=/b.json", "XDG_X=1"]
+    assert not any(p.startswith("BAD-NAME") for p in pairs)
+    assert "EMAIL=ada@example.gov" in pairs
+    assert "HOME=/home/agent" in pairs
+
+
+def test_run_session_env_carries_the_msb_kit_env_only(fake, monkeypatch):
+    # `acq run` re-attach builds its session through session_env_for. sbx
+    # applies a kit's environment itself, so nothing is replayed there.
+    from acq_py.commands import session
+
+    _record("msb")
+    _record("sbx")
+    _persist_kit_env(["OPENCODE_CONFIG=/a.json"])
+    assert session.session_env_for("msb", "box")[-1] == "OPENCODE_CONFIG=/a.json"
+    assert "OPENCODE_CONFIG=/a.json" not in session.session_env_for("sbx", "box")
+
+
+@posix_only
+@pytest.mark.skipif(hostexec.which("git") is None, reason="needs git on the host")
+@pytest.mark.parametrize("backend", ["msb", "sbx"])
+@pytest.mark.parametrize("verb", [["exec", "box", "--", "true"], ["shell", "box"]])
+def test_msb_session_writes_the_host_git_config_into_the_guest(fake, monkeypatch, backend, verb):
+    home = Path(os.environ["HOME"])
+    (home / ".gitconfig").write_text("[user]\n\tname = Ada Lovelace\n\temail = ada@example.gov\n", encoding="utf-8")
+    monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
+    _record(backend)
+    assert _run_no_tty(["--backend", backend, *verb]).returncode == 0
+    execs = [e for e in fake() if "event" not in e]
+    if backend == "sbx":
+        # The sbx git identity kit sets the config; no extra exec.
+        assert not any(_is_git_config_exec(e) for e in execs)
+        return
+    config, session_exec = execs
+    assert _is_git_config_exec(config) and not _is_git_config_exec(session_exec)
+    argv = config["argv"]
+    assert argv[:3] == ["exec", "-u", "agent"]
+    assert _env_flags(argv) == {
+        "HOME": "/home/agent",
+        "ACQ_GIT_USER_NAME": "Ada Lovelace",
+        "ACQ_GIT_USER_EMAIL": "ada@example.gov",
+    }
+    command = argv[argv.index("--") + 1 :]
+    assert command[:2] == ["sh", "-c"]
+    assert "Ada" not in command[2]  # values travel as variables, never in the script
+
+
+def test_guest_git_config_is_best_effort(monkeypatch):
+    calls = []
+
+    def failing_run(argv, **_kwargs):
+        calls.append(argv)
+        raise msb.MsbError("failure", "boom")
+
+    monkeypatch.setattr(msb, "_run", failing_run)
+    msb.apply_git_global_config("box", [])
+    assert calls == []  # nothing to write: no guest exec
+    msb.apply_git_global_config("box", ["ACQ_GIT_USER_NAME=Ada"])
+    assert len(calls) == 1  # the failure is swallowed
+
+
+def test_windows_nul_stdin_gets_no_pty(monkeypatch):
+    # `acq attach box < NUL` on Windows: isatty() is true for the NUL device but
+    # there is no console, so neither -t nor -it may be passed (msb or sbx would
+    # wait on a terminal that is not there). With a real console both are.
+    monkeypatch.setattr(hostexec, "_is_windows", lambda: True)
+    monkeypatch.setattr(hostexec.os, "isatty", lambda _fd: True)
+    seen: list[list[str]] = []
+    monkeypatch.setattr(msb, "_run_stream", lambda argv, json_mode: seen.append(argv) or 0)
+    monkeypatch.setattr(sbx, "_run_stream", lambda argv, json_mode: seen.append(argv) or 0)
+    monkeypatch.setattr(msb, "agent_shell", lambda _name: "/bin/sh")
+    for console in (False, True):
+        monkeypatch.setattr(hostexec, "_windows_console", lambda _fd, c=console: c)
+        msb.launch("box", None, "opencode")
+        sbx.launch("box", None, "opencode")
+    no_console_msb, no_console_sbx, console_msb, console_sbx = (argv[:2] for argv in seen)
+    assert no_console_msb == ["exec", "-u"]
+    assert no_console_sbx == ["exec", "-e"]
+    assert console_msb == ["exec", "-t"]
+    assert console_sbx == ["exec", "-it"]
 
 
 @posix_only

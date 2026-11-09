@@ -752,6 +752,36 @@ def agent_shell(name: str) -> str:
     return shell if _SAFE_SHELL.fullmatch(shell) else DEFAULT_SHELL
 
 
+# Writes the forwarded identity into the agent's global git config, so tools
+# that read git config rather than GIT_* variables see it too. The values arrive
+# as environment variables, never spliced into the script.
+_GIT_GLOBAL_CONFIG_SCRIPT = (
+    '[ -n "${ACQ_GIT_USER_NAME:-}" ] && git config --global user.name "$ACQ_GIT_USER_NAME" 2>/dev/null || true\n'
+    '[ -n "${ACQ_GIT_USER_EMAIL:-}" ] && git config --global user.email "$ACQ_GIT_USER_EMAIL" 2>/dev/null || true\n'
+)
+
+
+def apply_git_global_config(name: str, entries: list[str]) -> None:
+    """Set the agent's global git ``user.name``/``user.email`` from ``entries``.
+
+    ``entries`` are ``ACQ_GIT_USER_NAME=...``/``ACQ_GIT_USER_EMAIL=...``, the
+    host's own global values. Best effort, as Bash's
+    ``_acq_msb_apply_host_git_global_config``: nothing runs without entries, and
+    a failure is ignored, because the session still carries the identity as
+    ``GIT_*`` variables.
+    """
+    if not entries:
+        return
+    argv = ["exec", "-u", "agent", "-e", f"HOME={AGENT_HOME}"]
+    for entry in entries:
+        argv += ["-e", entry]
+    argv += [name, "--", "sh", "-c", _GIT_GLOBAL_CONFIG_SCRIPT]
+    try:
+        _run(argv, timeout=30)
+    except (MsbError, subprocess.TimeoutExpired):
+        pass
+
+
 def _session(
     name: str,
     command: list[str],
