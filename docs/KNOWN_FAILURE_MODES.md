@@ -3684,6 +3684,13 @@ macOS is different: there recreate refuses with "upgrade msb", because upgrading
 does establish the guarantee. Readonly kit files on Windows are copied into the
 guest with a warning (none of the built-in kits declares one today).
 
+The provider-input generation (what OpenCode's renderer reads at
+`ACQ_PROVIDER_INPUT_ROOT`) is not mounted on Windows either, since it would be a
+writable host path without that review, and no warning is printed for it. The
+provider facts are still recorded, the credential gate still runs and keys are
+still probed before attach, but OpenCode keeps its existing provider config.
+The Bash acq does mount it there.
+
 ### Prevention / Status
 
 Re-review when msb's Windows filesystem backend is assessed for read-only

@@ -340,7 +340,7 @@ def _run_box(capsys):
     ("403|0", errors.PROVIDER_AUTH_FAILED),
     ("000|7", errors.PROVIDER_UNREACHABLE),
     ("|6", errors.PROVIDER_UNREACHABLE),
-    ("", errors.PROVIDER_UNREACHABLE),
+    ("no status", errors.PROVIDER_UNREACHABLE),  # not "": Windows drops an empty env var, so the stub default applied
 ])
 def test_attach_refuses_a_key_the_provider_does_not_accept(monkeypatch, tmp_path, capsys, children, answer, code):
     _env(monkeypatch, tmp_path)
@@ -573,3 +573,36 @@ def test_sbx_create_with_the_key_only_in_the_acq_store_asks_to_re_store(monkeypa
     assert rc == errors.EXIT_FAILURE and doc["error"]["code"] == errors.SECRET_MISSING, doc
     assert "sbx backend cannot inject" in doc["error"]["message"] and "msb" not in doc["error"]["message"]
     assert VALUE not in out + err
+
+
+@pytest.mark.provider_key
+def test_no_provider_input_warning_where_the_platform_never_mounts_it(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path)
+    security = sys.modules["acq_py.security"]
+    monkeypatch.setattr(security, "ro_mount_supported", lambda: False)
+    monkeypatch.setattr(security, "ro_mount_platform_problem", lambda: security.PLATFORM_PROBLEM)
+    rc, doc, _out, err = _create(capsys, tmp_path)
+    assert rc == 0, (doc, err)
+    assert "provider input is not mounted" not in err
+    assert [f.provider for f in provider_input.recorded("msb", "box")] == ["usai"]
+
+
+@pytest.mark.provider_key
+def test_an_old_msb_warns_that_provider_input_is_not_mounted(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path)
+    security = sys.modules["acq_py.security"]
+    monkeypatch.setattr(security, "ro_mount_supported", lambda: False)
+    monkeypatch.setattr(security, "ro_mount_platform_problem", lambda: None)
+    rc, doc, _out, err = _create(capsys, tmp_path)
+    assert rc == 0, (doc, err)
+    assert "provider input is not mounted" in err
+
+
+@pytest.mark.provider_key
+def test_windows_recreate_passes_the_gate_quietly(monkeypatch, tmp_path, capsys):
+    _recreatable(monkeypatch, tmp_path)
+    monkeypatch.setattr(sys.modules["acq_py.security"], "WINDOWS", True)
+    rc, doc, _out, err = _invoke(capsys, "--backend", "msb", "create", "--recreate", "sec", "--yes", "--json")
+    assert rc == 0, (doc, err)
+    assert doc["data"]["recreated"] is True and doc["data"]["ro_host_config"] is False
+    assert "provider input is not mounted" not in err

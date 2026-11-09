@@ -723,15 +723,18 @@ def _provider_prepare(name: str, kit_set: list[kit_msb.Kit], *, ro_mount: bool):
     """Gate the selected providers' pins and keys, then stage and record their input.
 
     Returns the unpublished generation to mount, or None when msb cannot mount
-    it read-only (Windows): the facts are still recorded, but OpenCode's
-    renderer then leaves its config untouched. Raises :class:`msb.MsbError`.
+    it read-only (an old msb, or Windows): the facts are still recorded, but
+    OpenCode's renderer then leaves its config untouched. Raises :class:`msb.MsbError`.
     """
     try:
         selected = _provider_gate("msb", name, (k.name for k in kit_set))
         facts = [f for _kit, _manifest, f in selected]
         provider_input.record_write("msb", name, facts)
         if not ro_mount:
-            if facts:
+            # Only an old msb is worth a warning (upgrading fixes it). On Windows
+            # the mount is never requested, a documented platform limit
+            # (KNOWN_FAILURE_MODES section 54), so every create would warn.
+            if facts and security.ro_mount_platform_problem() is None:
                 print("acq: warning: provider input is not mounted without the read-only host-config mount; "
                       "OpenCode keeps its existing provider config", file=sys.stderr)
             return None
