@@ -15,11 +15,12 @@ import os
 import sys
 
 from .. import backends, envelope, errors, kits, msb, sbx, security, state
+from .. import secretstore
 
 
-# Both adapters raise an error carrying the same (code, message, remediation)
-# contract; catch this tuple uniformly at the seam.
-_ADAPTER_ERRORS = (msb.MsbError, sbx.SbxError)
+# Both adapters and the acq secret store raise an error carrying the same
+# (code, message, remediation) contract; catch this tuple uniformly at the seam.
+_ADAPTER_ERRORS = (msb.MsbError, sbx.SbxError, secretstore.SecretStoreError)
 
 # Agent tokens accepted by acq dispatch (mirrors acq.backends/agents.sh). Read by the
 # ``run`` create-vs-reattach decision in ``commands.lifecycle``.
@@ -202,18 +203,52 @@ def _resolve_backend_for_lifecycle(
     return _resolve_backend_for_mutation(explicit, emit_json, command, domain="lifecycle")
 
 
-def _read_secret_value() -> str:
-    """Read the secret value from stdin, preserving trailing-newline fidelity.
+class SecretInputError(secretstore.SecretStoreError):
+    """A secret could not be read safely from the terminal. Carries no value;
+    being a store error, it leaves through the command boundary as a stable
+    ``validation_failed`` envelope from every verb that reads a secret."""
 
-    Exactly the single terminal newline that a terminal/``echo`` appends is
-    stripped (plus an immediately preceding ``\\r`` for a CRLF terminator). Any
-    further trailing newlines are value content and are preserved: a value that
-    legitimately ends in newlines is not silently truncated. A lone trailing
-    ``\\r`` with no preceding ``\\n`` is likewise preserved.
+    def __init__(self, message: str):
+        super().__init__(errors.VALIDATION_FAILED, message, "pipe the secret on stdin instead")
+
+
+def _read_secret_tty(prompt: str) -> str:
+    """Read one line from the terminal with echo off; the prompt goes to stderr.
+
+    ``getpass`` falls back to an echoing read (with a warning) when it cannot
+    turn echo off; that warning is raised as an error here, before anything is
+    read, so a typed secret is never shown.
+    """
+    import getpass
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", getpass.GetPassWarning)
+        try:
+            return getpass.getpass(prompt, stream=sys.stderr)
+        except getpass.GetPassWarning:
+            raise SecretInputError("cannot turn off terminal echo to read the secret") from None
+        except EOFError:
+            return ""
+
+
+def _read_secret_value(prompt: str = "Enter secret value: ") -> str:
+    """Read the secret value: silently from a terminal, else from stdin.
+
+    On a terminal the user is prompted (on stderr) and the line is read with
+    echo off. Piped stdin keeps trailing-newline fidelity: exactly the single
+    terminal newline that a terminal/``echo`` appends is stripped (plus an
+    immediately preceding ``\\r`` for a CRLF terminator). Any further trailing
+    newlines are value content and are preserved: a value that legitimately ends
+    in newlines is not silently truncated. A lone trailing ``\\r`` with no
+    preceding ``\\n`` is likewise preserved.
 
     The value is returned to the caller and must never be printed, logged, or
     placed on argv. An empty result signals "no value was piped".
     """
+    isatty = getattr(sys.stdin, "isatty", None)
+    if isatty is not None and isatty():
+        return _read_secret_tty(prompt)
     data = sys.stdin.read()
     if data.endswith("\n"):
         data = data[:-1]  # strip exactly one terminal newline
@@ -366,33 +401,82 @@ def _secret_scope_args(parser: argparse.ArgumentParser, *, remainder_help: str) 
     parser.add_argument("args", nargs=argparse.REMAINDER, help=remainder_help)
 
 
-def _parse_secret_scope_service(global_scope: bool, tokens: list[str]) -> tuple[str | None, str | None]:
+def _secret_name_ok(name: str) -> bool:
+    """A service or sandbox name for the secret verbs: the store-key alphabet
+    ``[A-Za-z0-9_-]+``, and no leading ``-`` so it can never be read as a flag
+    when it reaches a backend CLI's argv."""
+    return secretstore.name_ok(name) and not name.startswith("-")
+
+
+def _secret_names_problem(scope: secretstore.Scope | None, service: str | None) -> str | None:
+    """Why the scope/service names are refused, or None. Checked before any
+    store or backend access."""
+    for kind, name in (("sandbox", None if scope is None else scope.sandbox), ("service", service)):
+        if name is not None and not _secret_name_ok(name):
+            return f"invalid {kind} name {name!r}: names must match [A-Za-z0-9_-]+ and not start with '-'"
+    return None
+
+
+def _parse_secret_scope_service(
+    global_scope: bool, tokens: list[str]
+) -> tuple[secretstore.Scope | None, str | None]:
     """Parse ``[-g | --global | SANDBOX] SERVICE`` -> ``(scope, service)``.
 
-    ``scope`` is ``"global"`` for the flag form or the sandbox name for the
-    positional form. Returns ``(None, None)`` for any other shape so the caller
-    emits a usage error. Scope and service are non-secret identifiers only.
+    ``scope`` is a typed :class:`secretstore.Scope`: the flag form is the global
+    scope, the positional form a sandbox scope, so a sandbox literally named
+    ``global`` stays a sandbox. Returns ``(None, None)`` for any other shape so
+    the caller emits a usage error. Name validity is checked separately
+    (:func:`_secret_names_problem`).
     """
     if global_scope:
         if len(tokens) != 1:
             return None, None
-        return "global", tokens[0]
+        return secretstore.GLOBAL, tokens[0]
     if len(tokens) != 2:
         return None, None
     scope, service = tokens
     if scope.startswith("-"):
         return None, None
-    return scope, service
+    return secretstore.sandbox_scope(scope), service
 
 
-def _parse_secret_ls_scope(global_scope: bool, tokens: list[str]) -> tuple[str | None, bool]:
+def _split_host_env(tokens: list[str]) -> tuple[list[str], list[str], str | None, str | None]:
+    """Pull ``--host H`` / ``--host=H`` (repeatable) and ``--env E`` / ``--env=E``
+    out of ``secret set``'s trailing tokens.
+
+    Returns ``(positionals, hosts, env, error)``; ``error`` names a flag given
+    without its value. Repeated hosts accumulate (the comma-joined multi-host
+    form the sidecar stores) rather than silently dropping endpoints.
+    """
+    positionals: list[str] = []
+    hosts: list[str] = []
+    env: str | None = None
+    it = iter(tokens)
+    for token in it:
+        flag, eq, inline = token.partition("=")
+        if flag not in ("--host", "--env"):
+            positionals.append(token)
+            continue
+        value: str | None = inline
+        if not eq:
+            value = next(it, None)
+        if not value:
+            return positionals, hosts, env, f"{flag} needs a value"
+        if flag == "--host":
+            hosts.append(value)
+        else:
+            env = value
+    return positionals, hosts, env, None
+
+
+def _parse_secret_ls_scope(global_scope: bool, tokens: list[str]) -> tuple[secretstore.Scope | None, bool]:
     """Parse the optional ``secret ls`` scope filter -> ``(scope, ok)``.
 
     ``ok`` is False for a malformed filter (extra tokens, or an unknown flag),
     in which case the caller emits a usage error.
     """
     if global_scope:
-        return ("global", True) if not tokens else (None, False)
+        return (secretstore.GLOBAL, True) if not tokens else (None, False)
     if not tokens:
         return None, True
     if len(tokens) > 1:
@@ -400,4 +484,4 @@ def _parse_secret_ls_scope(global_scope: bool, tokens: list[str]) -> tuple[str |
     token = tokens[0]
     if token.startswith("-"):
         return None, False
-    return token, True
+    return secretstore.sandbox_scope(token), True

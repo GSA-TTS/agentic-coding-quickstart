@@ -39,7 +39,10 @@ def test_home_and_xdg_dirs_are_redirected(tmp_path_factory):
     assert os.environ["HOME"] != REAL_HOME
     for var in ("HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
         assert Path(os.environ[var]).resolve().is_relative_to(base), var
-    assert not [v for v in os.environ if v.startswith("ACQ_")]
+    # The one ACQ_* the fixture sets: the secret store is pinned to a throwaway
+    # file backend so no test can reach the host keychain.
+    assert [v for v in os.environ if v.startswith("ACQ_")] == ["ACQ_SECRET_STORE_DIR"]
+    assert Path(os.environ["ACQ_SECRET_STORE_DIR"]).resolve().is_relative_to(base)
     assert "MSB_HOME" not in os.environ and "SBX_HOME" not in os.environ
 
 
