@@ -1239,6 +1239,262 @@ EOF
   assert_failure
 }
 
+# ---------------------------------------------------------------------------
+# safe_mkdir / safe_dir under Git Bash, MSYS2 and Cygwin
+# ---------------------------------------------------------------------------
+# Git for Windows ships no python3 (or only the Microsoft Store alias stub), and
+# native Windows CPython has no O_NOFOLLOW, O_DIRECTORY or dir_fd. These tests
+# set OSTYPE the way those shells do and put emulated interpreters first on
+# PATH. The emulated native Windows Python runs the real interpreter with those
+# flags removed and os.name set to "nt", and its os.lstat reports
+# FILE_ATTRIBUTE_REPARSE_POINT for each directory listed in FAKE_REPARSE, which
+# stands in for an NTFS junction (S_ISLNK does not report one). The test mount
+# table maps / to itself, so the Windows path the walk receives is the same
+# POSIX path.
+
+_win_bin() {
+  local bin="$STUBDIR/winbin" real
+  real=$(command -v python3)
+  mkdir -p "$bin"
+  printf '%s\n' "$bin"
+  cat > "$bin/winpython" <<SH
+#!/bin/sh
+printf '%s\n' "winpython \$*" >> "$STUBDIR/py.log"
+[ "\$1" = -I ] || exit 97
+shift
+case "\$1" in
+  -c) code=\$2; shift 2 ;;
+  -) code=; shift ;;
+  *) exit 97 ;;
+esac
+exec "$real" -I -c '
+import os, stat, sys
+real_lstat = os.lstat
+marked = set(p for p in os.environ.get("FAKE_REPARSE", "").split(":") if p)
+class St:
+    def __init__(self, st, attrs):
+        self._st = st
+        self.st_file_attributes = attrs
+    def __getattr__(self, name):
+        return getattr(self._st, name)
+def lstat(path, *args, **kwargs):
+    st = real_lstat(path, *args, **kwargs)
+    if not stat.S_ISDIR(st.st_mode): return st
+    attrs = stat.FILE_ATTRIBUTE_DIRECTORY
+    if path in marked: attrs |= stat.FILE_ATTRIBUTE_REPARSE_POINT
+    return St(st, attrs)
+os.lstat = lstat
+del os.O_NOFOLLOW, os.O_DIRECTORY
+os.name = "nt"
+code = sys.argv[1] or sys.stdin.read()
+sys.argv = ["-"] + sys.argv[2:]
+exec(compile(code, "<emulated-nt>", "exec"), {"__name__": "__main__"})
+' "\$code" "\$@"
+SH
+  cat > "$bin/storestub" <<SH
+#!/bin/sh
+printf '%s\n' "storestub \$*" >> "$STUBDIR/py.log"
+echo 'Python was not found; run without arguments to install from the Microsoft Store' >&2
+exit 49
+SH
+  cat > "$bin/msyspython" <<SH
+#!/bin/sh
+printf '%s\n' "msyspython \$*" >> "$STUBDIR/py.log"
+exec "$real" "\$@"
+SH
+  cat > "$bin/pylauncher" <<SH
+#!/bin/sh
+printf '%s\n' "py \$*" >> "$STUBDIR/py.log"
+[ "\$1" = -3 ] || exit 98
+shift
+exec "$bin/winpython" "\$@"
+SH
+  chmod +x "$bin"/*
+  printf '/ / ntfs binary,noacl,auto 1 1\n' > "$STUBDIR/mounts"
+}
+
+# _win_use BIN python3=X python=Y py=Z — link the chosen emulations.
+_win_use() {
+  local bin="$1" pair
+  shift
+  rm -f "$bin/python3" "$bin/python" "$bin/py"
+  for pair in "$@"; do ln -s "$bin/${pair#*=}" "$bin/${pair%%=*}"; done
+  export ACQ_TEST_MOUNTS_FILE="$STUBDIR/mounts"
+}
+
+@test "POSIX hosts run safe_dir through python3 with no interpreter probe" {
+  # Exactly the two `python3 -I -` runs this helper always made (canonical_path,
+  # then the walk), and no `-c` probe.
+  local bin real="$STUBDIR/posix_once/a"
+  bin=$(_win_bin)
+  _win_use "$bin" python3=msyspython
+  mkdir -p "$real"
+  OSTYPE=linux-gnu PATH="$bin:$PATH" _acq_provider_input_safe_dir "$real"
+  assert_equal "$(cat "$STUBDIR/py.log")" "msyspython -I - $real
+msyspython -I - $real"
+}
+
+@test "Git Bash skips the python3 Store stub and walks with native Windows Python" {
+  local bin real="$STUBDIR/nt_real/a/b"
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_mkdir "$real"
+  assert_success
+  [ -d "$real" ]
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_dir "$real"
+  assert_success
+  grep -q '^storestub -I -c ' "$STUBDIR/py.log"
+  grep -q "^winpython -I - mkdir $real\$" "$STUBDIR/py.log"
+  grep -q "^winpython -I - check $real\$" "$STUBDIR/py.log"
+}
+
+@test "native Windows walk rejects a symlinked ancestor without outside mutation" {
+  local bin outside="$STUBDIR/nt_outside" link="$STUBDIR/nt_link"
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  mkdir -p "$outside/existing"
+  ln -s "$outside" "$link"
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_mkdir "$link/new/child"
+  assert_failure
+  assert_output --partial 'unsafe provider-input path'
+  [ ! -e "$outside/new" ]
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_dir "$link/existing"
+  assert_failure
+}
+
+@test "native Windows walk rejects a junction (reparse point that is not S_ISLNK)" {
+  local bin junction="$STUBDIR/nt_junction"
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  mkdir -p "$junction/existing"
+  export FAKE_REPARSE="$junction"
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_mkdir "$junction/new"
+  assert_failure
+  [ ! -e "$junction/new" ]
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_dir "$junction/existing"
+  assert_failure
+  # The same tree without the reparse attribute is accepted, so the rejection
+  # above comes from the attribute check alone.
+  unset FAKE_REPARSE
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_dir "$junction/existing"
+  assert_success
+}
+
+@test "native Windows walk rejects a leaf reparse point, a file component and dot-dot" {
+  local bin base="$STUBDIR/nt_misc"
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  mkdir -p "$base/dir/leaf"
+  : > "$base/file"
+  FAKE_REPARSE="$base/dir/leaf" OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_dir "$base/dir/leaf"
+  assert_failure
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_mkdir "$base/file/child"
+  assert_failure
+  [ -f "$base/file" ]
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_mkdir "$base/dir/../made"
+  assert_failure
+  [ ! -e "$base/made" ]
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_dir "$base/missing"
+  assert_failure
+}
+
+@test "Git Bash falls back to py -3 when python3 and python are unusable" {
+  local bin real="$STUBDIR/nt_py/a"
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=storestub py=pylauncher
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_mkdir "$real"
+  assert_success
+  [ -d "$real" ]
+  grep -q "^py -3 -I - mkdir $real\$" "$STUBDIR/py.log"
+}
+
+@test "Git Bash with no usable Python fails closed before touching the path" {
+  local bin real="$STUBDIR/nt_none/a"
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=storestub py=storestub
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_mkdir "$real"
+  assert_failure
+  assert_output --partial 'need Python 3 (python3, python or py -3)'
+  [ ! -e "$STUBDIR/nt_none" ]
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_dir "$STUBDIR"
+  assert_failure
+}
+
+@test "native Windows walk fails closed when the mount table cannot map the path" {
+  local bin real="$STUBDIR/nt_nocyg/a"
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  ACQ_TEST_MOUNTS_FILE="$STUBDIR/no-such-mounts" OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_mkdir "$real"
+  assert_failure
+  assert_output --partial 'cannot map provider-input path'
+  [ ! -e "$STUBDIR/nt_nocyg" ]
+}
+
+@test "MSYS2 or Cygwin Python with POSIX primitives keeps the descriptor-relative walk" {
+  local bin real="$STUBDIR/msys_real/a" outside="$STUBDIR/msys_outside" link="$STUBDIR/msys_link"
+  bin=$(_win_bin)
+  _win_use "$bin" python3=msyspython
+  export ACQ_TEST_MOUNTS_FILE="$STUBDIR/no-such-mounts"
+  mkdir -p "$outside"
+  ln -s "$outside" "$link"
+  OSTYPE=cygwin PATH="$bin:$PATH" run _acq_provider_input_safe_mkdir "$real"
+  assert_success
+  [ -d "$real" ]
+  OSTYPE=cygwin PATH="$bin:$PATH" run _acq_provider_input_safe_mkdir "$link/new"
+  assert_failure
+  [ ! -e "$outside/new" ]
+  grep -q "^msyspython -I - $real\$" "$STUBDIR/py.log"
+}
+
+@test "nt_path maps MSYS paths lexically through the longest mount point" {
+  # The layout Git for Windows reports in /proc/mounts, octal escapes included.
+  local table="$STUBDIR/gitbash-mounts" pair input expected got
+  printf '%s\n' \
+    'C:/Program\040Files/Git / ntfs binary,noacl,auto 1 1' \
+    'C:/Program\040Files/Git/usr/bin /bin ntfs binary,noacl,auto 1 1' \
+    'C:/Users/u/AppData/Local/Temp /tmp ntfs binary,noacl,posix=0,usertemp 1 1' \
+    'C: /c ntfs binary,noacl,posix=0,user,noumount,auto 1 1' > "$table"
+  local cases=(
+    '/c/Users/u/.local/state/acq|C:/Users/u/.local/state/acq'
+    '/c|C:/'
+    '/C/Users/u|C:/Users/u'
+    '/TMP/x|C:/Users/u/AppData/Local/Temp/x'
+    '/tmp/acq-x|C:/Users/u/AppData/Local/Temp/acq-x'
+    '/bin/bash|C:/Program Files/Git/usr/bin/bash'
+    '/usr/share|C:/Program Files/Git/usr/share'
+    '/cx/y|C:/Program Files/Git/cx/y'
+    '/c/a/../b|C:/a/../b'
+    'C:\Users\u|C:\Users\u'
+    'D:/x|D:/x'
+  )
+  for pair in "${cases[@]}"; do
+    input="${pair%%|*}"; expected="${pair#*|}"
+    got=$(ACQ_TEST_MOUNTS_FILE="$table" _acq_provider_input_nt_path "$input") || got="<rc=$?>"
+    [ "$got" = "$expected" ] || {
+      printf 'FAIL nt_path %s -> %s, want %s\n' "$input" "$got" "$expected" >&2
+      return 1
+    }
+  done
+  ACQ_TEST_MOUNTS_FILE="$table" run _acq_provider_input_nt_path 'relative/x'
+  assert_failure
+  ACQ_TEST_MOUNTS_FILE="$table" run _acq_provider_input_nt_path '//server/share/x'
+  assert_failure
+  # The match leaves the caller's nocasematch setting as it was.
+  ACQ_TEST_MOUNTS_FILE="$table" _acq_provider_input_nt_path '/C/x' >/dev/null
+  run shopt -q nocasematch
+  assert_failure
+  ACQ_TEST_MOUNTS_FILE="$STUBDIR/no-such-mounts" run _acq_provider_input_nt_path '/c/x'
+  assert_failure
+}
+
+@test "canonical_path passes the path through unchanged for native Windows Python" {
+  local bin got
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  got=$(OSTYPE=msys PATH="$bin:$PATH" _acq_provider_input_canonical_path '/c/Users/u/.local/state/acq')
+  assert_equal "$got" '/c/Users/u/.local/state/acq'
+}
+
 @test "publication retains old generation for existing current consumers" {
   local root old new
   root=$(acq_provider_input_root sbx cleanupbox)
