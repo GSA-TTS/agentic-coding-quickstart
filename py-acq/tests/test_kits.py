@@ -575,7 +575,7 @@ def test_kit_apply_capability_maps_through_seam():
     rec = msb.capability_record("0.7.7")
     assert rec["backend"] == "msb"
     assert rec["capabilities"]["kit-apply"] == "required"
-    assert rec["capabilities"]["secret-list"] == "unsupported"  # msb has no `secret` subcommand
+    assert rec["capabilities"]["secret-list"] == "required"  # served from the acq store
     assert rec["capabilities"]["key-present"] == "unsupported"  # sbx-only
     assert cli._supports("msb", "kit-apply") is True
     assert cli._supports("sbx", "kit-apply") is False

@@ -153,7 +153,7 @@ numeric-prefix order.
 | File | Tests | Bucket | Disposition |
 |---|---|---|---|
 | `70-msb-backend.bats` | 20 | preserve | §active_backend + §version floor. Covered by `cli/backend-list-*`, `cli/backend-check-*`. **Mixed → re-express:** `backend set/unset` (persist default) is covered by `cli/backend-set*`, `cli/backend-unset*` and `cli/lifecycle-create-config-sbx`; `prepare`/`doctor --fix` host-readiness has no vector — **gap**. |
-| `71-msb-provision-secrets.bats` | 14 | preserve | §secret binding + provision. Covered by `cli/lifecycle-create`, `cli/secret-ls-*`. |
+| `71-msb-provision-secrets.bats` | 14 | preserve | §secret binding + provision. Covered by `cli/create-msb-binds-usai`, `cli/secret-set-msb`, `cli/secret-ls-msb`, `cli/secret-rm-msb`, `cli/secret-has-msb-scoped-over-global`, `cli/lifecycle-create`. |
 | `71c-msb-canonical-host-config.bats` | 2 | re-express | §4 host-path canonicalization before mount — host/guest-path fidelity → **gap**. |
 | `72-msb-agent-user.bats` | 37 | preserve | §attach/exec/shell as agent user. Covered by `cli/attach-*`, `cli/exec-*`, `cli/shell-*`. **Mixed → re-express:** TERM forwarding, passwd-shell, workspace `-w` are Tier-2/Tier-3. |
 | `73-msb-kits-startup.bats` | 14 | re-express | msb create-time startup staging (ADR-0017) is backend-internal; observable "startup command runs" is Tier-3. |

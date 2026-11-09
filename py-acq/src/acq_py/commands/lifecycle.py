@@ -250,15 +250,19 @@ def _clear_host_records(backend: str, name: str) -> None:
     """Drop every per-sandbox host record: the state record and the applied-kit record.
 
     A leftover applied-kit record would make the next create of the same name
-    skip the agent install, so the two always go together.
+    skip the agent install, so the two always go together. On msb the record of
+    the sandbox's secret bindings goes too.
     """
     state.record_remove(backend, name)
     kits.kit_applied_remove(backend, name)
+    if backend == "msb":
+        msb.held_forget(name)
 
 
 def _has_host_records(backend: str, name: str) -> bool:
     """True when any per-sandbox host record exists, readable or not."""
-    return state.record_path(backend, name).exists() or kits.kit_applied_present(backend, name)
+    held = backend == "msb" and msb.held_path(name).exists()
+    return held or state.record_path(backend, name).exists() or kits.kit_applied_present(backend, name)
 
 
 def _lock_failure(command: str, name: str, exc: lock.SandboxLockTimeout, emit_json: bool) -> int:
@@ -324,21 +328,24 @@ def _create_sandbox(
     """Create + exec-ready gate + record write; returns the result record data.
 
     On msb the egress policy is derived from the built-in kits plus ``kit_name``
-    (the agent kit about to be applied, if any); see ``msb.egress_flags``.
+    (the agent kit about to be applied, if any); see ``msb.egress_flags``. The
+    ``ENV@HOST`` secret bindings msb created the sandbox with are reported as
+    ``secret_bindings`` (names and hosts only, never a value).
     """
     adapter = common._adapter(backend)
     error_cls = sbx.SbxError if backend == "sbx" else msb.MsbError
+    secret_bindings: list[str] | None = None
     if backend == "sbx":
         adapter.create(name, image, workspace, agent=agent)
     else:
-        adapter.create(
+        secret_bindings = adapter.create(
             name,
             image,
             workspace,
             memory=msb.DEFAULT_MEMORY,
             cpus=msb.DEFAULT_CPUS,
             egress_kits=kits.egress_kit_names(kit_name),
-        )
+        ) or []
     if not _wait_exec_ready(backend, name):
         # A half-created sandbox must not strand (legacy cleanup).
         _remove_quietly(adapter, name)
@@ -364,7 +371,7 @@ def _create_sandbox(
             f"could not write the host state record for sandbox '{name}': {exc.strerror or exc}",
             "check that the acq state directory is writable and has free space, then retry",
         ) from exc
-    return {
+    data: dict = {
         "name": name,
         "backend": backend,
         "agent": agent,
@@ -372,6 +379,9 @@ def _create_sandbox(
         "state": "running",
         "image": image,
     }
+    if secret_bindings is not None:
+        data["secret_bindings"] = secret_bindings
+    return data
 
 
 def _remove_quietly(adapter, name: str) -> None:

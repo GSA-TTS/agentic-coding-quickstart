@@ -135,10 +135,21 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   acq secret store, as Bash `acq secret import` does. Needs no backend.
   Interactive by default (asks per service on a terminal, skips otherwise);
   `--all` never overwrites, `--force` does, `--dry-run` writes nothing.
-* `acq-py secret rm (-g | SANDBOX) SERVICE [--json]` — remove a secret. An absent
-  secret fails closed with the `secret_missing` code; a backend that cannot answer
-  fails closed with its accurate code (`backend_not_found`/`failure`) and never
-  deletes (ADR-0040m).
+* `acq-py secret rm (-g | SANDBOX) SERVICE [--accept-unconfirmed NAME[,NAME]]
+  [--json]` — remove a secret. An absent secret fails closed with the
+  `secret_missing` code; a backend that cannot answer fails closed with its
+  accurate code (`backend_not_found`/`failure`) and never deletes (ADR-0040m).
+  On msb the secret is first unbound from every sandbox acq recorded as holding
+  it, and swept best-effort from sandboxes acq has no record for (created by the
+  Bash `acq` or by `msb` directly). If a binding cannot be removed, or an
+  unrecorded sandbox cannot be confirmed unbound, the secret is kept and the
+  command fails with `unbind_failed`, naming the sandboxes.
+  `--accept-unconfirmed NAME[,NAME]` (msb only) accepts the named unrecorded
+  sandboxes staying unconfirmed: the removal then succeeds, the JSON data lists
+  them under `unconfirmed`, and a note on stderr says they may still hold the
+  binding. It never covers a recorded binding that failed. It is a stopgap
+  until a live msb check settles what removing an unbound variable does (see
+  `docs/KNOWN_FAILURE_MODES.md`), and can be retired then.
 * `acq-py secret ls [(-g | SANDBOX)] [--json]` — list secrets with
   `scope`/`service`/`value_state` (set/unset) only, never a value
   (ADR-0038m §2 secret ls required data). An unreadable, wrong-shape document, or
@@ -157,7 +168,7 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   backend adapter is present) fails closed with exit `1` and the
   `unsupported_capability` code (ADR-0040m). The lifecycle verbs add
   `sandbox_not_found`, `sandbox_exists`, `validation_failed`, and `timeout`; the
-  secret verbs add `secret_missing` and `secret_unreadable`; the state-migration
+  secret verbs add `secret_missing`, `secret_unreadable` and `unbind_failed`; the state-migration
   slice adds `state_schema_unsupported` (a newer/unparseable/`min_reader`
   record), `migration_locked` (the migration lock was held by a concurrent
   invocation), `migration_failed` (an atomic record migration could not verify),
