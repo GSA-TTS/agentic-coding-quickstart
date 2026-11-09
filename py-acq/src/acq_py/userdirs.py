@@ -13,6 +13,12 @@ The home directory gets the same treatment: ``HOME`` is used only when it is
 absolute; otherwise the account's home from the password database (POSIX) or
 the platform profile directory (Windows) is used. When no absolute home can be
 found, resolution fails with :class:`UserDirError` rather than guessing.
+
+Explicit path overrides (``ACQ_STATE_DIR`` in :mod:`state`, and the
+:data:`PATH_OVERRIDES` here) are different: a relative value is refused rather
+than ignored, since silently replacing it would hide the misconfiguration. Bash
+acq refuses the same variables with the same message
+(``acq.backends/userdirs.sh``).
 """
 
 from __future__ import annotations
@@ -89,3 +95,48 @@ def xdg_base(var: str, *default: str) -> Path:
     if is_absolute(value):
         return Path(value)
     return home_dir().joinpath(*default)
+
+
+# Host path overrides py-acq honours from the environment, in the order Bash
+# checks them, each with the default it falls back to (named in the
+# remediation). Bash acq honours more (its kit caches, msb ssh/ports state and
+# so on) and refuses those too.
+_STORE_FALLBACK = "the default secret store"
+PATH_OVERRIDES: tuple[tuple[str, str], ...] = (
+    ("ACQ_SECRET_STORE_DIR", _STORE_FALLBACK),
+    ("ACQ_SECRET_FILE_DIR", _STORE_FALLBACK),
+    ("ACQ_PROVENANCE_DIR", "the default"),
+    ("ACQ_SECRET_META_DIR", "the default"),
+    ("ACQ_SECRET_INDEX_FILE", "the default"),
+    ("ACQ_MSB_BALANCED_HOSTS_FILE", "the default"),
+)
+
+# Read only when ACQ_SECRET_STORE_DIR is unset: the store dir relocates them.
+_STORE_RELOCATED = ("ACQ_SECRET_META_DIR", "ACQ_SECRET_INDEX_FILE")
+
+
+def path_override(var: str, default: str = "the default") -> Path | None:
+    """The path an override variable names, or ``None`` when it is unset or empty.
+
+    A relative value is refused with :class:`UserDirError`: it would resolve
+    against the current directory, normally the agent-writable workspace.
+    ``default`` names what unsetting the variable falls back to.
+    """
+    value = os.environ.get(var, "")
+    if not value:
+        return None
+    if not is_absolute(value):
+        raise UserDirError(
+            f"{var} must be an absolute path, got {value!r}",
+            f"set {var} to an absolute path, or unset it to use {default}",
+        )
+    return Path(value)
+
+
+def check_path_overrides() -> None:
+    """Raise :class:`UserDirError` for the first relative :data:`PATH_OVERRIDES` value."""
+    store_set = bool(os.environ.get("ACQ_SECRET_STORE_DIR"))
+    for var, default in PATH_OVERRIDES:
+        if store_set and var in _STORE_RELOCATED:
+            continue
+        path_override(var, default)

@@ -93,12 +93,14 @@ def state_check() -> dict:
     state so a newer/unparseable record is surfaced (``fail``) and a legacy v0
     record is flagged (``warn``) as "will migrate forward on the next mutating
     verb", rather than being silently skipped. An unresolvable state root (a
-    relative ``ACQ_STATE_DIR``, or no absolute home to fall back to) is reported
-    as a failed check rather than raised, so the diagnostic still completes.
+    relative ``ACQ_STATE_DIR``, or no absolute home to fall back to) or a relative
+    path override is reported as a failed check rather than raised, so the
+    diagnostic still completes.
     """
     try:
         generation = migration.read_generation()
         records = list(migration.iter_records())
+        userdirs.check_path_overrides()
     except userdirs.UserDirError as exc:
         return {"id": "state", "status": FAIL, "message": exc.message, "remediation": exc.remediation}
     newer: list[str] = []

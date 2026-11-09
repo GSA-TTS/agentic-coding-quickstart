@@ -586,7 +586,8 @@ def _command_label(parsed) -> str:
 def _user_dirs_pre_step(emit_json: bool, command: str) -> int | None:
     """Refuse up front when the state root or config path cannot be resolved to a
     trustworthy absolute path (a relative ``ACQ_STATE_DIR``, or no absolute home
-    to fall back to); return the emitted exit code, else ``None`` (proceed).
+    to fall back to) or a path override is relative; return the emitted exit
+    code, else ``None`` (proceed).
 
     Checked once here so every state-touching verb fails closed with the same
     actionable message instead of a traceback from deep inside a handler.
@@ -594,6 +595,7 @@ def _user_dirs_pre_step(emit_json: bool, command: str) -> int | None:
     try:
         state.state_dir()
         config.config_path()
+        userdirs.check_path_overrides()
     except userdirs.UserDirError as exc:
         return common._operational_failure(
             command, errors.VALIDATION_FAILED, exc.message, exc.remediation, emit_json

@@ -416,6 +416,10 @@
       "vectors": ["cli/state-dir-relative-refused"]
     },
     {
+      "contract": "Path overrides: a relative per-path override (ACQ_PROVENANCE_DIR and the others each implementation honours) is refused before any state is read or written, with the same message in both implementations",
+      "vectors": ["cli/path-override-relative-refused"]
+    },
+    {
       "contract": "ADR-0035/0041m security exception: a sandbox missing its read-only mount fails closed on trusted operations",
       "vectors": ["cli/security-exception-attach", "cli/security-exception-unprobed"]
     },

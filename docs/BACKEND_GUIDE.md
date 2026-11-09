@@ -214,6 +214,18 @@ Tunables:
 | `ACQ_MSB_SSH_AGENT_GUEST_SOCK` | `/home/agent/.acq/ssh-agent.sock` | In-guest unix socket the `socat` bridge exposes and exports as `SSH_AUTH_SOCK` (git signing) |
 | `ACQ_FORWARD_HOST_SOCKETS` | (unset) | General host-socket forwarding: `PATH:PORT[/stream|/dgram][,...]` emitted as `--vsock` routes. The host ssh-agent forward is the automatic special case built on this vocab (ADR-0021) |
 
+Host path overrides must be absolute. This covers the paths in the table above
+(`ACQ_MSB_KIT_CACHE`, `ACQ_MSB_SSH_DIR`, `ACQ_MSB_SSH_KEY`,
+`ACQ_MSB_SSH_KNOWN_HOSTS`, `ACQ_MSB_PORTS_DIR`, `ACQ_MSB_BALANCED_HOSTS_FILE`),
+each entry of `ACQ_MSB_UPSTREAM_CA_CERT`, and the other overrides
+`_acq_userdirs_override_problem` in `acq.backends/userdirs.sh` lists (for
+example `ACQ_PROVENANCE_DIR` and `ACQ_SBX_KIT_CACHE`). A relative value would
+resolve against the current directory, which is usually the workspace the agent
+can write to. acq refuses it before any verb touches state, with
+`acq: <VAR> must be an absolute path, got '<value>'`, and `acq doctor` reports
+it as a failed `state` check. The in-guest paths (`ACQ_MSB_SSH_AGENT_GUEST_SOCK`
+and similar) are not host paths and are not checked this way.
+
 ### DNS / name resolution
 
 msb forwards guest DNS from its host-side network stack to the **host's**

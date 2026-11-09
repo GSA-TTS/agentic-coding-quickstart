@@ -911,14 +911,13 @@ acq_validate_agent_builtin_kit_dir() {
 acq_validate_agent_builtin_kit_ref() {
   local agent="$1" kitref="$2" base_dir="${3:-}" kitdir
   if [ -z "$base_dir" ]; then
-    # A relative ACQ_STATE_DIR is never honored (see userdirs.sh); the entry
-    # point refuses it up front, and this fails closed if reached anyway.
-    if [ -n "${ACQ_STATE_DIR:-}" ]; then
-      acq_path_is_absolute "$ACQ_STATE_DIR" || return 1
-      base_dir="$ACQ_STATE_DIR/agent-kit-validation/$agent"
-    else
-      base_dir="${TMPDIR:-/tmp}/acq/agent-kit-validation/$agent"
-    fi
+    # Scratch under the per-user state root, never TMPDIR: a shared /tmp/acq is
+    # a fixed name another local user could create first and fill, and a
+    # relative TMPDIR would resolve against the current directory. acq_state_dir
+    # refuses a relative ACQ_STATE_DIR and ignores relative XDG values (see
+    # userdirs.sh), so this fails closed when no absolute root exists.
+    base_dir=$(acq_state_dir) || return 1
+    base_dir="$base_dir/agent-kit-validation/$agent"
   fi
   kitdir=$(kit_translate_fetch "$kitref" "$base_dir") || return 1
   acq_validate_agent_builtin_kit_dir "$agent" "$kitdir"
@@ -2303,8 +2302,11 @@ acq_resolve_backend() {
 
 # Provenance state directory (host-side). Overridable via ACQ_PROVENANCE_DIR for
 # tests and for users who relocate XDG state. Mirrors _acq_config_file's style.
+# A relative override is never honoured (see userdirs.sh): the entry point
+# refuses it up front, and this fails closed if reached anyway.
 _acq_provenance_dir() {
   if [ -n "${ACQ_PROVENANCE_DIR:-}" ]; then
+    acq_path_is_absolute "$ACQ_PROVENANCE_DIR" || return 1
     printf '%s\n' "$ACQ_PROVENANCE_DIR"
     return 0
   fi
@@ -3845,7 +3847,8 @@ _acq_provider_facts_python() {
     printf '%s\n' "$python"
     return 0
   fi
-  if [ -n "${LOCALAPPDATA:-}" ] && [ "$(uname -s 2>/dev/null)" != "Linux" ]; then
+  # LOCALAPPDATA, like the XDG variables, counts only when absolute.
+  if acq_path_is_absolute "${LOCALAPPDATA:-}" && [ "$(uname -s 2>/dev/null)" != "Linux" ]; then
     data_home="$LOCALAPPDATA/acq"
   else
     data_home=$(acq_xdg_dir XDG_DATA_HOME .local/share)/acq || data_home=""
@@ -4441,7 +4444,7 @@ _acq_provider_input_python() {
       return 2
     }
   else
-    if [ -n "${LOCALAPPDATA:-}" ] && [[ "$(uname -s 2>/dev/null)" = MINGW* || "$(uname -s 2>/dev/null)" = MSYS* || "$(uname -s 2>/dev/null)" = CYGWIN* ]]; then
+    if acq_path_is_absolute "${LOCALAPPDATA:-}" && [[ "$(uname -s 2>/dev/null)" = MINGW* || "$(uname -s 2>/dev/null)" = MSYS* || "$(uname -s 2>/dev/null)" = CYGWIN* ]]; then
       data_home="$LOCALAPPDATA/acq"
     else
       data_home=$(acq_xdg_dir XDG_DATA_HOME .local/share)/acq || data_home=""

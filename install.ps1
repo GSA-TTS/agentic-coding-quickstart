@@ -94,11 +94,29 @@ function Invoke-InstallCommand {
     & $Command
 }
 
+function Test-AbsolutePath {
+    param([string]$Path)
+    # Fully qualified only: drive-rooted (C:\ or C:/) or UNC (\\server\share). A
+    # bare name, a drive-relative C:x or a driveless \x resolves against the
+    # current directory or drive.
+    if (-not $Path) { return $false }
+    return (($Path -match '^[A-Za-z]:[\\/]') -or ($Path -match '^[\\/]{2}[^\\/]'))
+}
+
 function Get-DefaultInstallDir {
-    if ($env:LOCALAPPDATA) {
-        return (Join-Path $env:LOCALAPPDATA "Programs\acq")
+    # LOCALAPPDATA counts only when it is fully qualified, the rule acq applies to
+    # XDG_* and HOME (see acq.backends/userdirs.sh): a relative value would
+    # resolve against the current directory. Otherwise the profile's Local
+    # AppData known folder is used; GetFolderPath asks Windows for it rather than
+    # reading the environment.
+    $base = $env:LOCALAPPDATA
+    if (-not (Test-AbsolutePath $base)) {
+        $base = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
     }
-    throw "LOCALAPPDATA is not set. install.ps1 requires a user profile to install under."
+    if (Test-AbsolutePath $base) {
+        return (Join-Path $base "Programs\acq")
+    }
+    throw "LOCALAPPDATA is not set to an absolute path. install.ps1 requires a user profile to install under."
 }
 
 function Resolve-Source {
@@ -294,10 +312,11 @@ if ($Channel -ne "python") {
 
 # -Help and -DryRun are read-only/planning paths and must not require a user
 # profile. Resolve the install dir lazily: -DryRun falls back to a placeholder
-# when LOCALAPPDATA is absent, and only the real install path requires it.
+# when no absolute Local AppData folder exists, and only the real install path
+# requires one.
 if ($DryRun) {
     if (-not $InstallDir) {
-        $InstallDir = if ($env:LOCALAPPDATA) { Get-DefaultInstallDir } else { "<LOCALAPPDATA>\Programs\acq" }
+        try { $InstallDir = Get-DefaultInstallDir } catch { $InstallDir = "<LOCALAPPDATA>\Programs\acq" }
     }
     Write-Host "  [dry-run] check host is Windows"
 }

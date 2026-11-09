@@ -233,17 +233,10 @@ def _bash_safe(token: str) -> str:
 def _bash_lock_dir(backend: str, name: str) -> Path:
     """Bash's per-sandbox provision/terminate lock directory (``*.lock``).
 
-    Mirrors ``acq_provider_input_root`` in ``acq.backends/common.sh``: Bash
-    resolves its provenance root from ``ACQ_PROVENANCE_DIR`` or
-    ``${XDG_STATE_HOME:-$HOME/.local/state}/acq/provenance``.
+    Mirrors ``acq_provider_input_root`` in ``acq.backends/common.sh``, rooted at
+    the same provenance directory (:func:`state.provenance_dir`).
     """
-    root = os.environ.get("ACQ_PROVENANCE_DIR") or ""
-    if root:
-        base = Path(root)
-    else:
-        xdg = os.environ.get("XDG_STATE_HOME") or ""
-        home = os.environ.get("HOME") or str(Path.home())
-        base = (Path(xdg) if xdg else Path(home) / ".local" / "state") / "acq" / "provenance"
+    base = state.provenance_dir()
     key = f"{_bash_safe(name)}.{_posix_cksum(name.encode('utf-8'))}"
     return base / "provider-input" / _bash_safe(backend) / f"{key}.lock"
 
