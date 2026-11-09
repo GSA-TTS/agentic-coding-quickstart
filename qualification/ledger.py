@@ -28,6 +28,13 @@ Neither proves the run happened. Against a fabricated transcript or entry the on
 control is an admin's review of the ledger change (CODEOWNERS) together with an
 audit of the transcript the ledger PR inlines against ``transcript_sha256``.
 
+That audit works from the PR alone. ``record`` accepts only a transcript written in
+the harness's canonical byte form with no host-local path in it
+(:func:`publication_problem`), and ``qualification.host`` publishes exactly those
+bytes, so the hash of the published block is the recorded ``transcript_sha256``.
+:func:`verify_evidence` (``python -m qualification.gate verify-evidence``) checks a
+PR body's blocks against the ledger.
+
 It lives outside the Tier-3 surface so recording a run never expires the runs it
 records.
 """
@@ -43,7 +50,8 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from .matrix import CELL_ORACLE, MSB, PLATFORMS, SBX, host_mismatch, is_claimed
+from .matrix import CELL_ORACLE, MSB, PLATFORMS, SBX, host_mismatch, is_claimed, version_problem
+from .model import TRANSCRIPT_DIR_TOKEN, canonical_transcript_bytes, publishable_argv
 
 SCHEMA_VERSION = 1
 DEFAULT_LEDGER = "docs/qualification-ledger.json"
@@ -372,6 +380,35 @@ def _oracle_run(commands: object, backend: str) -> bool:
     return path == CELL_ORACLE and argv[1:] == ["--backend", backend]
 
 
+def publication_problem(doc: object, raw: bytes) -> str | None:
+    """Why ``raw`` (a ``transcript.json``) cannot be published verbatim as its own evidence.
+
+    The ledger PR shows the transcript so that anyone can recompute
+    ``transcript_sha256`` from it. That holds only if the file is in the harness's
+    canonical byte form (:func:`qualification.model.canonical_transcript_bytes`) and
+    carries nothing that must not be published: the harness records the transcript
+    directory as a token and keeps only the last component of an absolute
+    command-line path, because a local path names the operator's account.
+    """
+    if not isinstance(doc, dict) or raw != canonical_transcript_bytes(doc):
+        return (
+            "transcript.json is not in the harness's canonical form (sorted keys, two-space indent, "
+            "ASCII, LF line endings, one trailing newline), so a published copy could not reproduce "
+            "its hash; re-run the cell with the current harness"
+        )
+    for number, attempt in enumerate(doc.get("attempts") or [], 1):
+        if not isinstance(attempt, dict):
+            continue
+        env = attempt.get("environment")
+        if isinstance(env, dict) and env.get("transcript_dir", "none") not in ("none", TRANSCRIPT_DIR_TOKEN):
+            return f"attempt {number} records a local transcript_dir; re-run the cell with the current harness"
+        commands = attempt.get("commands")
+        if isinstance(commands, list) and all(isinstance(c, str) for c in commands):
+            if publishable_argv(commands) != commands:
+                return f"attempt {number} records a host-local path in its command; re-run the cell with the current harness"
+    return None
+
+
 def entry_from_transcript(
     doc: dict,
     raw: bytes,
@@ -383,13 +420,17 @@ def entry_from_transcript(
     """Build a ledger entry from a harness ``transcript.json`` (``raw`` is its bytes).
 
     Refuses a transcript whose attempts did not run the committed cell oracle for the
-    transcript's own backend, and a ``platform`` that is not the transcript's host.
+    transcript's own backend, a ``platform`` that is not the transcript's host, and
+    one that cannot be published verbatim (:func:`publication_problem`).
     ``oracle_digest`` reads the oracle as committed at the transcript's ``rev``
     (default: git in the current directory).
     """
     attempts = doc.get("attempts") if isinstance(doc, dict) else None
     if not isinstance(attempts, list) or not attempts or not all(isinstance(a, dict) for a in attempts):
         raise LedgerError("transcript has no attempts")
+    unpublishable = publication_problem(doc, raw)
+    if unpublishable:
+        raise LedgerError(unpublishable)
     env, last = attempts[0].get("environment"), attempts[-1]
     if not isinstance(env, dict):
         raise LedgerError("transcript attempt has no environment")
@@ -469,4 +510,105 @@ def set_accepted_version(path: str | Path, backend: str, version: str) -> None:
     """Move the backend version under acceptance (expires cells recorded at the old minor)."""
     if backend not in (MSB, SBX) or not _FINAL_VERSION.fullmatch(version):
         raise LedgerError(f"cannot accept {backend} {version!r}: need msb/sbx and a final X.Y.Z version")
+    problem = version_problem(backend, version)
+    if problem:
+        raise LedgerError(f"cannot accept {problem}")
     _rewrite(Path(path), lambda doc: doc.setdefault("accepted_backend_versions", {}).__setitem__(backend, version))
+
+
+@dataclass(frozen=True)
+class EvidenceBlock:
+    """One ```` ```json ```` block of a PR body: its exact bytes, and whether a reviewer sees it."""
+
+    raw: bytes
+    hidden: bool  # inside an HTML comment, so GitHub does not render it
+
+
+_HTML_COMMENT = re.compile(r"<!--.*?(?:-->|\Z)", re.S)
+
+
+def evidence_blocks(text: str) -> list[EvidenceBlock]:
+    """The transcripts a ledger PR body inlines, as the exact bytes they stand for.
+
+    Each is a fenced block opened by a line that is exactly ```` ```json ```` and
+    closed by a line that is exactly ```` ``` ````; its bytes are the lines between
+    the fences, each followed by a newline. CRLF in the text is read as LF (a copied
+    PR body may carry either; a canonical transcript has no CR). A block inside an
+    HTML comment (an unterminated one runs to the end) is returned as ``hidden``.
+    """
+    text = text.replace("\r\n", "\n")
+    comments = [m.span() for m in _HTML_COMMENT.finditer(text)]
+    blocks: list[EvidenceBlock] = []
+    current: list[str] | None = None
+    opened = offset = 0
+    for line in text.split("\n"):
+        if current is None:
+            if line == "```json":
+                current, opened = [], offset
+        elif line == "```":
+            hidden = any(start <= opened < end for start, end in comments)
+            blocks.append(EvidenceBlock("".join(f"{x}\n" for x in current).encode("utf-8"), hidden))
+            current = None
+        else:
+            current.append(line)
+        offset += len(line) + 1
+    return blocks
+
+
+def verify_evidence(ledger: Ledger, blocks: list[bytes]) -> list[tuple[str, str | None]]:
+    """Check each published transcript against the ledger: ``[(sha256, problem or None)]``.
+
+    A block verifies when the ledger has an entry with its SHA-256 and rebuilding an
+    entry from the block reproduces that entry field for field. The oracle hash is
+    taken from the entry here; the gate checks it against git.
+    """
+    by_hash = {e.transcript_sha256: e for e in ledger.entries}
+    results = []
+    for raw in blocks:
+        digest = hashlib.sha256(raw).hexdigest()
+        entry = by_hash.get(digest)
+        if entry is None:
+            results.append((digest, "no ledger entry records this transcript_sha256"))
+            continue
+        try:
+            doc = json.loads(raw)
+            rebuilt = entry_from_transcript(
+                doc, raw, platform=entry.platform, oracle_digest=lambda rev, path: entry.oracle_sha256 or None
+            )
+        except (LedgerError, ValueError) as exc:
+            results.append((digest, f"{entry.backend}/{entry.platform}: {exc}"))
+            continue
+        differ = [f for f in Entry.__dataclass_fields__ if getattr(rebuilt, f) != getattr(entry, f)]
+        results.append((digest, f"{entry.backend}/{entry.platform}: entry differs in {', '.join(differ)}" if differ else None))
+    return results
+
+
+def audit_evidence(
+    ledger: Ledger, blocks: list[EvidenceBlock], required: list[Entry] | None = None
+) -> tuple[list[tuple[str, str | None]], list[str]]:
+    """Check a PR body's blocks: per-block results, then problems with the set as a whole.
+
+    Every shown block must verify (:func:`verify_evidence`); no block may be hidden
+    in an HTML comment or appear twice. With ``required`` (the entries the PR adds),
+    each of those must have exactly one verifying block, and no block may stand for
+    any other entry.
+    """
+    results = verify_evidence(ledger, [b.raw for b in blocks if not b.hidden])
+    problems: list[str] = []
+    seen: dict[str, int] = {}
+    for b in blocks:
+        digest = hashlib.sha256(b.raw).hexdigest()
+        seen[digest] = seen.get(digest, 0) + 1
+        if b.hidden:
+            problems.append(f"HIDDEN {digest}: a transcript block inside an HTML comment is not shown to reviewers")
+    problems += [f"DUPLICATE {d}: the same transcript appears {n} times" for d, n in seen.items() if n > 1]
+    if required is not None:
+        verified = {d for d, problem in results if problem is None}
+        wanted = {e.transcript_sha256 for e in required}
+        problems += [
+            f"MISSING {e.transcript_sha256}: the {e.backend}/{e.platform} entry added since the base has no "
+            "verifying transcript block"
+            for e in required if e.transcript_sha256 not in verified
+        ]
+        problems += [f"EXTRA {d}: not an entry added since the base" for d in sorted(verified - wanted)]
+    return results, problems

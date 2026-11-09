@@ -238,6 +238,11 @@ SEED_ENV = "ACQ_KIT_SOURCE_SEED"
 # ``current``/``stale`` without a prior ``kit update``.
 PROVENANCE_SEED_ENV = "ACQ_KIT_PROVENANCE_SEED"
 
+# Legacy allowlist grants (Bash ``ACQ_EXTRA_KIT_SOURCES``): a whitespace-separated
+# list of ``host/owner/`` prefixes that a prefix-granular backend (sbx) must keep
+# allowing on top of the prefixes the trusted sources need.
+EXTRA_KIT_SOURCES_ENV = "ACQ_EXTRA_KIT_SOURCES"
+
 
 def is_full_ref(ref: str) -> bool:
     """True when ``ref`` is a full immutable SHA (40 or 64 hex chars).
@@ -270,6 +275,35 @@ def normalize_repo(arg: str) -> str | None:
     if not _REPO_RE.fullmatch(repo):
         return None
     return repo
+
+
+def same_repo(a: str, b: str) -> bool:
+    """True when two normalized repositories name the same repository.
+
+    The host is already lower-case after :func:`normalize_repo`, but GitHub also
+    ignores the letter case of the owner and repository, so every trust decision
+    compares casefolded. Otherwise ``github.com/gsa-tts/agentic-coding-patterns``
+    would slip past a check written against ``github.com/GSA-TTS/...``.
+    """
+    return a.casefold() == b.casefold()
+
+
+def is_control_plane(repo: str) -> bool:
+    """True when ``repo`` is the pinned control-plane repository, in any letter case."""
+    return same_repo(repo, CONTROL_PLANE_REPO)
+
+
+def owner_prefix(repo: str) -> str:
+    """The ``host/owner/`` prefix of ``host/owner/repo``.
+
+    Mirrors Bash ``_acq_kit_source_owner_prefix``. A backend that allowlists by
+    prefix (sbx) can only express owner granularity; acq's own trust decisions
+    stay at exact-repository granularity.
+    """
+    parts = [p for p in repo.split("/") if p]
+    if len(parts) >= 2:
+        return "/".join(parts[:2]) + "/"
+    return repo + "/"
 
 
 def normalize_dir(value: str | None) -> str | None:
@@ -495,7 +529,7 @@ def all_sources() -> list[dict]:
         }
     ]
     for rec in list_source_records():
-        if rec.get("repository") == CONTROL_PLANE_REPO:
+        if is_control_plane(rec.get("repository") or ""):
             continue
         sources.append(
             {
@@ -505,6 +539,40 @@ def all_sources() -> list[dict]:
             }
         )
     return sources
+
+
+def kit_source_prefixes(exclude: str | None = None) -> list[str]:
+    """The owner prefixes a prefix-granular backend (sbx) must keep allowing.
+
+    Mirrors Bash ``acq_kit_source_prefixes``: one ``host/owner/`` prefix per
+    trusted source (the pinned control plane first, then the registry), leaving
+    out the registry entry ``exclude`` so a caller can ask what would remain after
+    removing it, then the legacy ``ACQ_EXTRA_KIT_SOURCES`` grants as given.
+    ``exclude`` matches the registered spelling exactly, as the registry is keyed;
+    a case-variant record is a separate entry that still counts. The control plane
+    is never left out: it is the pinned trust anchor and cannot be removed.
+    Prefixes that differ only in letter case are listed once, under the first
+    spelling seen.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(prefix: str) -> None:
+        key = prefix.casefold()
+        if key not in seen:
+            seen.add(key)
+            out.append(prefix)
+
+    for src in all_sources():
+        repo = src.get("repository") or ""
+        if not repo:
+            continue
+        if repo == exclude and not is_control_plane(repo):
+            continue
+        _add(owner_prefix(repo))
+    for token in os.environ.get(EXTRA_KIT_SOURCES_ENV, "").split():
+        _add(token)
+    return out
 
 
 def discover_provider_kits(repository: str) -> tuple[str, list[str]]:

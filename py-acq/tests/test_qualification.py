@@ -12,9 +12,12 @@ suite.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import pytest
 
 # The harness is repo-root tooling (not part of the acq_py package); make it
 # importable alongside the py-acq/src path conftest already adds.
@@ -429,3 +432,136 @@ def test_transcript_digests_output_never_persists_raw_output(monkeypatch):
     assert doc["attempts"][0]["output_sha256"] == sha256_hex(SECRET.encode())
     serialized = json.dumps(doc)
     assert SECRET not in serialized  # only the digest, never the raw value
+
+
+# --- timeouts: SIGTERM, a grace period, then SIGKILL; and an exported deadline ---
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+def test_a_timed_out_command_gets_sigterm_and_a_grace_period_to_tear_down(tmp_path, monkeypatch):
+    from qualification import runner
+
+    monkeypatch.setattr(runner, "_grace", lambda timeout: 10.0)
+    done = tmp_path / "tore-down"
+    script = (
+        "import signal, sys, time\n"
+        f"def stop(*_):\n    open({str(done)!r}, 'w').write('yes')\n    sys.exit(143)\n"
+        "signal.signal(signal.SIGTERM, stop)\n"
+        "time.sleep(60)\n"
+    )
+    t = runner._single_run([sys.executable, "-c", script], make_env(), 1, timeout=1.0)
+    assert t.verdict is Verdict.BLOCKED and t.detail == "command timed out"
+    assert done.read_text() == "yes"  # it was asked to stop, not killed outright
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+def test_a_command_that_ignores_sigterm_is_killed_after_the_grace_period(monkeypatch):
+    import time
+
+    from qualification import runner
+
+    monkeypatch.setattr(runner, "_grace", lambda timeout: 0.5)
+    script = "import signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\ntime.sleep(60)\n"
+    started = time.monotonic()
+    t = runner._single_run([sys.executable, "-c", script], make_env(), 1, timeout=1.0)
+    assert t.verdict is Verdict.BLOCKED and time.monotonic() - started < 30
+
+
+def test_the_command_gets_a_deadline_that_ends_before_the_timeout(tmp_path):
+    import time
+
+    from qualification import runner
+
+    out = tmp_path / "deadline"
+    script = f"import os; open({str(out)!r}, 'w').write(os.environ[{runner.DEADLINE_ENV!r}])"
+    before = time.time()
+    runner._single_run([sys.executable, "-c", script], make_env(), 1, timeout=400.0)
+    deadline = int(out.read_text())
+    assert before + 400 - runner._grace(400) - 2 <= deadline <= time.time() + 400 - runner._grace(400)
+    assert runner._grace(400) == 100 and runner._grace(1800) == runner.TERMINATE_GRACE
+
+
+def test_matrix_cell_state_applies_the_version_floors():
+    for version in ("0.7.1", "0.6.0", "0.7.5"):
+        refused = make_transcript(Verdict.PASS, make_env(backend_version=version))
+        assert cell_state("msb", "linux-x86_64", transcript=refused, now=NOW) is MatrixState.BLOCKED
+    green = make_transcript(Verdict.PASS, make_env(backend_version="0.7.7"))
+    assert cell_state("msb", "linux-x86_64", transcript=green, now=NOW) is MatrixState.QUALIFIED
+    assert cell_state("msb", "linux-x86_64", transcript=green, now=NOW, backend_version="0.7.1") is MatrixState.BLOCKED
+
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+def test_ctrl_c_on_the_harness_lets_the_command_tear_down_without_a_second_signal(tmp_path, monkeypatch):
+    # On POSIX the terminal's Ctrl+C reaches the harness and the command alike (one
+    # process group). The harness must not add a SIGTERM of its own, which would
+    # interrupt the command's orderly stop; it waits for the command to tear down.
+    # Simulated with SIGALRM: SIGINT to the command, KeyboardInterrupt in the harness.
+    import signal
+
+    from qualification import runner
+
+    monkeypatch.setattr(runner, "_grace", lambda timeout: 10.0)
+    log, ready = tmp_path / "signals", tmp_path / "pid"
+    script = (
+        "import os, signal, sys, time\n"
+        f"def note(sig, _):\n    open({str(log)!r}, 'a').write(signal.Signals(sig).name + '\\n')\n"
+        "signal.signal(signal.SIGTERM, note)\n"
+        "signal.signal(signal.SIGINT, note)\n"
+        f"open({str(ready)!r}, 'w').write(str(os.getpid()))\n"
+        "end = time.monotonic() + 60\n"
+        f"while time.monotonic() < end and not os.path.exists({str(log)!r}):\n    time.sleep(0.05)\n"
+        "time.sleep(1.0)  # tearing down; a SIGTERM now would be logged\n"
+        "sys.exit(130)\n"
+    )
+
+    def interrupt(*_):
+        os.kill(int(ready.read_text()), signal.SIGINT)
+        raise KeyboardInterrupt
+
+    old = signal.signal(signal.SIGALRM, interrupt)
+    signal.setitimer(signal.ITIMER_REAL, 1.0)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            runner._single_run([sys.executable, "-c", script], make_env(), 1, timeout=60.0)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+    assert log.read_text().splitlines() == ["SIGINT"]  # never a forwarded SIGTERM
+
+
+@pytest.mark.parametrize("platform", ["nt", "posix"])
+def test_ctrl_c_is_forwarded_to_the_command_only_on_windows(monkeypatch, platform):
+    from qualification import runner
+
+    seen = []
+
+    class Proc:
+        pid = 4242
+        returncode = None
+
+        def communicate(self, timeout=None):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(runner.subprocess, "Popen", lambda *a, **k: Proc())
+    monkeypatch.setattr(runner.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
+    monkeypatch.setattr(runner, "_stop", lambda proc, grace, ask=True: seen.append(ask))
+    monkeypatch.setattr(runner.os, "name", platform)
+    with pytest.raises(KeyboardInterrupt):
+        runner._single_run(["oracle"], make_env(), 1, timeout=60.0)
+    assert seen == [platform == "nt"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
+def test_a_killed_command_whose_pipes_outlive_it_does_not_hang_the_harness(monkeypatch):
+    import shutil
+    import time
+
+    from qualification import runner
+
+    if shutil.which("setsid") is None:
+        pytest.skip("setsid is not available")
+    monkeypatch.setattr(runner, "_grace", lambda timeout: 1.0)
+    started = time.monotonic()
+    t = runner._single_run(["sh", "-c", "setsid sleep 8 & exec sleep 30"], make_env(), 1, timeout=1.0)
+    assert t.verdict is Verdict.BLOCKED and time.monotonic() - started < 6

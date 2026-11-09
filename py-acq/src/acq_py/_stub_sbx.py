@@ -59,7 +59,9 @@ EXEC_EXIT_ENV = "ACQ_SBX_STUB_EXEC_EXIT"
 COPY_EXIT_ENV = "ACQ_SBX_STUB_COPY_EXIT"
 ECHO_EXIT_ENV = "ACQ_SBX_STUB_EXIT_CODE"
 
-# kit.allowedSources allowlist (owner-granular, e.g. "github.com/acme/").
+# kit.allowedSources allowlist (owner-granular, e.g. "github.com/acme/"). The
+# seed is the initial value only: once a ``settings set`` has written the file,
+# reads return what was written, so the adapter's re-read can verify its write.
 ALLOWED_SOURCES_ENV = "ACQ_SBX_STUB_ALLOWED_SOURCES"
 
 
@@ -181,7 +183,7 @@ def _allowed_sources_path() -> Path:
 
 def _load_allowed_sources() -> list[str]:
     seed = os.environ.get(ALLOWED_SOURCES_ENV)
-    if seed:
+    if seed and not _allowed_sources_path().exists():
         try:
             loaded = json.loads(seed)
         except json.JSONDecodeError:
