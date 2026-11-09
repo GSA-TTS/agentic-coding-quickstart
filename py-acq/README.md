@@ -229,3 +229,12 @@ The gates started at zero findings, so there is no baseline. A finding that
 is a false positive gets a targeted suppression with its reason on the same
 line, such as `# nosec B105 # an error code`. Do not widen the skip lists in
 `pyproject.toml` to clear one.
+
+### Windows
+
+`.github/workflows/windows.yml` runs on a Windows runner when a pull request
+touches Windows-relevant paths. It runs pytest, smoke tests of `acq.cmd` and
+`acq.ps1` for both `ACQ_IMPL` paths, `install.ps1 -DryRun` under PowerShell 7
+and Windows PowerShell 5.1, the release job's managed-runtime staging and
+smoke check, and a Git Bash run of `55-version.bats` and
+`06-windows-install.bats`.
