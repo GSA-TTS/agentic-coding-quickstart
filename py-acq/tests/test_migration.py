@@ -334,7 +334,12 @@ def test_recreate_refused_when_not_security_exception(monkeypatch, tmp_path, cap
 def test_recreate_preserves_host_record(monkeypatch, tmp_path, capsys):
     _env(monkeypatch, tmp_path)
     _write_catalog(tmp_path, {"sec": "running"})  # on-disk catalog: remove+create persist
-    _write_record("msb", "sec", _SEC_RECORD)
+    # Recreate canonicalizes the recorded msb workspace with realpath, which on
+    # Windows turns a POSIX "/w" into "<current drive>:\w". Record a workspace
+    # that is already canonical on this host, so preserved means unchanged.
+    (tmp_path / "w").mkdir()
+    workspace = os.path.realpath(tmp_path / "w")
+    _write_record("msb", "sec", {**_SEC_RECORD, "workspace": workspace})
     monkeypatch.setenv("ACQ_SECURITY_MOUNT_STATE", json.dumps({"sec": "missing"}))
 
     rc, doc = _invoke(capsys, "--backend", "msb", "create", "--recreate", "sec", "--yes", "--json")
@@ -344,7 +349,7 @@ def test_recreate_preserves_host_record(monkeypatch, tmp_path, capsys):
     # Host record + secrets preserved: the record keeps its authority fields.
     record = state.record_read("msb", "sec")
     assert record["agent"] == "opencode"
-    assert record["workspace"] == "/w"
+    assert record["workspace"] == workspace
     assert record.get("ro_host_config") is True
 
 

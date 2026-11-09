@@ -119,11 +119,14 @@ installer/
 py-acq/README.md
 py-acq/pyproject.toml
 py-acq/requirements-dev.txt
+py-acq/requirements-quality.txt
 py-acq/tests/
 scripts/qualify-backend-cell
 scripts/stage-windows-runtime
+.github/workflows/python-quality.yml
 .github/workflows/python-vectors.yml
 .github/workflows/tier3-release-gate.yml
+.github/workflows/windows.yml
 docs/
 checklists/
 governance/

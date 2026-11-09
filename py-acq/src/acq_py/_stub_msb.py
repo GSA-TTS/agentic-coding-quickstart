@@ -110,10 +110,10 @@ def main(argv: list[str]) -> int:
 
     if cmd in ("list", "ls"):
         running_only = "--running" in args
-        for name, state in catalog.items():
+        for sandbox_name, state in catalog.items():
             if running_only and state != "running":
                 continue
-            print(name)
+            print(sandbox_name)
         return 0
 
     if cmd == "create":

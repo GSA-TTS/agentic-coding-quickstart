@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "id": "cli/ls-backend-missing",
-  "oracle": "ADR-0040m backend_not_found at the command boundary: ls with the backend CLI missing after detection (forced installed/version) exits 1 with an envelope, not a traceback",
+  "oracle": "ADR-0040m backend_not_found at the command boundary: ls whose ACQ_MSB_BIN names a missing program exits 1 with an envelope, not a traceback (the version floor probes that same program, so it refuses before the adapter runs)",
   "tier": 1,
   "backend": null,
   "platform": "any",
@@ -15,11 +15,11 @@
     ],
     "env": {
       "ACQ_MSB_BIN": "/nonexistent/acq-vector/msb",
-      "ACQ_MSB_VERSION": "0.7.11",
-      "ACQ_MSB_INSTALLED": "1",
       "ACQ_SBX_INSTALLED": "0"
     },
     "unset": [
+      "ACQ_MSB_VERSION",
+      "ACQ_MSB_INSTALLED",
       "ACQ_BACKEND",
       "ACQ_STATE_DIR",
       "MSB_HOME",

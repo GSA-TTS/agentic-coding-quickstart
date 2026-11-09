@@ -47,6 +47,10 @@
 #   QUALIFY_IMAGE       image to test (default: acq's default msb image)
 #   STEP_TIMEOUT        seconds for create (image pull) (default 600)
 #   EXEC_TIMEOUT        seconds for each exec step (default 90)
+#   QUALIFY_SANDBOX_NAME name for the throwaway sandbox (default acq-qual-ro-<stamp>-<pid>);
+#                       must be acq-qual-ro-<lowercase letters, digits, dashes>. The cell
+#                       oracle passes a per-run name so it can remove the sandbox itself
+#                       if this script is killed before its own cleanup runs.
 #
 # Never prints credentials. Needs msb on PATH, a KVM/HVF-capable host, network access
 # for the image pull. Bash 3.2 compatible. Run it OUTSIDE any sandbox.
@@ -125,9 +129,20 @@ finish() { # VERDICT DETAIL
   exit "$rc"
 }
 
+# The throwaway sandbox's name, checked before anything is created. SANDBOX itself is
+# set only just before `msb create`, so cleanup never removes a sandbox this run did
+# not try to create.
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+case "${QUALIFY_SANDBOX_NAME:-}" in
+  "") SANDBOX_NAME="acq-qual-ro-${STAMP}-$$" ;;
+  acq-qual-ro-|acq-qual-ro-*[!a-z0-9-]*)
+    finish BLOCKED "QUALIFY_SANDBOX_NAME must be acq-qual-ro-<lowercase letters, digits, dashes>" ;;
+  acq-qual-ro-*) SANDBOX_NAME="$QUALIFY_SANDBOX_NAME" ;;
+  *) finish BLOCKED "QUALIFY_SANDBOX_NAME must be acq-qual-ro-<lowercase letters, digits, dashes>" ;;
+esac
+
 # Output directory first, so even an early BLOCKED leaves evidence the operator can
 # paste or share. Repo-local by default so it is readable from the same checkout.
-STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 RUNDIR="${ACQ_QUALIFY_OUT_DIR:-$REPO/tmp/qualify-msb-ro-mount-$STAMP}"
 if mkdir -p "$RUNDIR" 2>/dev/null; then
   RUNDIR=$(cd "$RUNDIR" && pwd -P)
@@ -211,7 +226,7 @@ note "DONE"
 EOS
 
 # --- create the throwaway sandbox ------------------------------------------
-SANDBOX="acq-qual-ro-${STAMP}-$$"
+SANDBOX="$SANDBOX_NAME"
 say "msb $VERSION; testing image $IMAGE"
 say "creating throwaway sandbox $SANDBOX (this pulls the image on first use)..."
 if ! _to "$STEP_TIMEOUT" msb create --name "$SANDBOX" \

@@ -37,6 +37,7 @@ def _managed_runtime_executable() -> str | None:
         return str(Path(override))
     # 2. A runtime bundle laid down beside the source by the installer.
     here = Path(__file__).resolve().parent
+    names: tuple[str, ...]
     if os.name == "nt":
         names = ("python.exe",)
     else:

@@ -63,7 +63,7 @@ FORBIDDEN_KEY_ENVS = frozenset(
 
 # Environment-variable names reserved for the built-in services; a provider may
 # reuse a reserved name only when it IS that provider (e.g. `usai` + USAI_API_KEY).
-_RESERVED_KEY_ENV_OWNERS = {
+_RESERVED_KEY_ENV_OWNERS = {  # nosec B105 # env var names and owning services, no values
     "USAI_API_KEY": "usai",
     "GITHUB_TOKEN": "github",
     "GH_TOKEN": "github",

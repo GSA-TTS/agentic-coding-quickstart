@@ -59,6 +59,9 @@ __pycache__/
 *.pyc
 *.egg-info/
 .pytest_cache/
+# coverage.py data from the py-acq quality gate (pytest --cov)
+.coverage
+.coverage.*
 build/
 dist/
 .venv/

@@ -21,7 +21,6 @@ from pathlib import Path
 
 from . import __version__, envelope, errors, hostexec
 
-
 # The checkout acq runs from: src/acq_py -> src -> py-acq -> repository root.
 _CHECKOUT_ROOT = Path(__file__).resolve().parents[3]
 
