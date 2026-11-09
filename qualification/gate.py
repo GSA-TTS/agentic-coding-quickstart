@@ -14,11 +14,26 @@ ledger.
 Exit codes: 0 gate passes, 1 a cell is blocked, 2 the ledger or input is
 unusable.
 
-The ledger is self-reported and committed: its integrity is a review control
-(CODEOWNERS on the ledger file), not a technical one. ``transcript_sha256`` only
-helps if the transcripts attached to the release are audited against it. A
-recorded ``rev`` must be a commit on the branch the gate runs on, so record a run
-at a commit that is on ``main`` (a squash-merged branch commit is not).
+Each entry must also be consistent with the repository
+(:func:`qualification.ledger.binding_problem`): it names the committed cell oracle,
+its ``oracle_sha256`` matches that file as committed at its ``rev``, and its arch and
+hypervisor are a host of its cell. The gate never sees transcripts, so it cannot
+tell whether a run really executed the oracle (``record`` checks that, locally).
+
+The ledger is self-reported and committed: beyond those checks its integrity is a
+review control (CODEOWNERS on the ledger file), not a technical one.
+``transcript_sha256`` only helps if the transcripts attached to the release are
+audited against it. A recorded ``rev`` must be an ancestor of the commit the gate
+evaluates (otherwise the cell is blocked), so record a run at a commit that is on
+``main`` (a squash-merged branch commit is not).
+
+The rules this module applies (the claimed cells, the Tier-3 surface and its
+carve-outs, the entry checks) live in this package, so they must not come from the
+change under test: on a pull request the ``Tier-3 release gate`` workflow runs this
+package from the base branch against the PR's ledger and history (``python -P`` with
+``PYTHONPATH`` at a base-branch worktree). A PR therefore cannot loosen the rules it
+is judged by; loosening them takes a PR of its own, which CODEOWNERS sends to an
+admin.
 """
 
 from __future__ import annotations
@@ -37,14 +52,17 @@ from .ledger import (
     Ledger,
     LedgerError,
     append_entry,
+    OracleDigest,
+    binding_problem,
     entry_from_transcript,
+    git_oracle_digest,
     latest_entry,
     load_ledger,
 )
 from .matrix import MSB, PLATFORMS, SBX, is_claimed, staleness, touches_surface
 from .model import Environment, Transcript, Verdict
 
-_REV = re.compile(r"[0-9a-f]{7,64}")
+_REV = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 
 ChangedPaths = Callable[[str], "Iterable[str] | None"]
 
@@ -58,8 +76,15 @@ class CellStatus:
 
 
 def git_changed_paths(rev: str, cwd=None) -> list[str] | None:
-    """Paths that differ between ``rev`` and ``HEAD``; ``None`` if git cannot say."""
+    """Paths changed from ``rev`` to ``HEAD``; ``None`` if git cannot say.
+
+    ``rev`` must be a full commit id that is an ancestor of ``HEAD``: a commit off
+    the evaluated history (a dropped branch, another fork's PR) is not evidence for it.
+    """
     if not _REV.fullmatch(rev):
+        return None
+    ancestor = subprocess.run(["git", "merge-base", "--is-ancestor", rev, "HEAD"], capture_output=True, cwd=cwd)
+    if ancestor.returncode != 0:
         return None
     # --no-renames lists both sides of a move (a file moved out of the surface must
     # still count); -z and quotePath=false avoid git's quoting of non-ASCII paths.
@@ -89,23 +114,34 @@ def _transcript_of(entry) -> Transcript:
     return Transcript(Verdict.PASS, env, (), "", "", entry.recorded_at)
 
 
-def _why_not_current(ledger: Ledger, entry, now: datetime, changed_paths: ChangedPaths) -> str | None:
+def _why_not_current(
+    ledger: Ledger, entry, now: datetime, changed_paths: ChangedPaths, oracle_digest: OracleDigest
+) -> str | None:
     if entry is None:
         return "no transcript recorded"
     if entry.verdict != "PASS":
         return f"latest transcript is {entry.verdict}"
+    problem = binding_problem(entry, oracle_digest, now)
+    if problem:
+        return problem
     version = ledger.accepted_backend_versions.get(entry.backend)
     if version is None:
         return f"accepted_backend_versions has no entry for {entry.backend}"
     paths = changed_paths(entry.rev)
     if paths is None:
-        return f"revision {entry.rev[:12]} is not in the git history (fetch full history)"
+        return f"revision {entry.rev[:12]} is not an ancestor of HEAD (record at a commit on main; fetch full history)"
     return staleness(
         _transcript_of(entry), now=now, backend_version=version, surface_changed=touches_surface(paths)
     )
 
 
-def evaluate(ledger: Ledger, *, now: datetime, changed_paths: ChangedPaths = git_changed_paths) -> list[CellStatus]:
+def evaluate(
+    ledger: Ledger,
+    *,
+    now: datetime,
+    changed_paths: ChangedPaths = git_changed_paths,
+    oracle_digest: OracleDigest = git_oracle_digest,
+) -> list[CellStatus]:
     """The status of every claimed cell."""
     results: list[CellStatus] = []
     for backend in (MSB, SBX):
@@ -113,7 +149,7 @@ def evaluate(ledger: Ledger, *, now: datetime, changed_paths: ChangedPaths = git
             if not is_claimed(backend, platform):
                 continue
             entry = latest_entry(ledger, backend, platform)
-            reason = _why_not_current(ledger, entry, now, changed_paths)
+            reason = _why_not_current(ledger, entry, now, changed_paths, oracle_digest)
             if reason is None:
                 results.append(CellStatus(backend, platform, "qualified"))
                 continue
