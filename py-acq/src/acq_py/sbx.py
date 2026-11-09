@@ -33,7 +33,7 @@ import os
 import subprocess
 import sys
 
-from . import errors, hostexec, timeouts
+from . import errors, hostexec, kits, timeouts
 
 STUB_SENTINEL = "__stub__"
 
@@ -623,54 +623,78 @@ def rotate_key(value: str) -> None:
 # Kit-source revocation (sbx-only, ADR-0040m ``kit_source_revoked``).
 # ---------------------------------------------------------------------------
 
-def _owner_prefix(repo: str) -> str:
-    """sbx's ``kit.allowedSources`` is owner-granular: ``host/owner/``."""
-    parts = [p for p in repo.split("/") if p]
-    if len(parts) >= 2:
-        return "/".join(parts[:2]) + "/"
-    return repo + "/"
-
-
-def kit_source_revoked(repo: str) -> str:
-    """Revoke a trusted kit source from sbx's ``kit.allowedSources``.
-
-    sbx has no ``kit-source-revoke`` subcommand: the allowlist lives under
-    ``sbx settings`` as a JSON array at ``kit.allowedSources``, so revocation is a
-    read-modify-write of that setting (owner-granular, ``host/owner/``). acq only
-    ever *unions* onto the allowlist, so a source removed from the acq registry
-    stays fetchable until the owner prefix is dropped here. Returns the revoked
-    owner prefix (the "revoked ref") on success; raises :class:`SbxError` on any
-    inability to revoke — never a quiet 0.
-    """
-    prefix = _owner_prefix(repo)
+def _read_allowed_sources() -> list | None:
+    """``sbx settings get kit.allowedSources`` as a list, or ``None`` if unreadable."""
     proc = _run(["settings", "get", "kit.allowedSources"])
     if proc.returncode != 0:
-        raise SbxError(
-            errors.FAILURE,
-            f"could not read sbx kit.allowedSources to revoke '{repo}'",
-            "check sbx logs and retry",
-        )
+        return None
     try:
         sources = json.loads(proc.stdout)
     except (json.JSONDecodeError, ValueError):
-        raise SbxError(
-            errors.FAILURE,
-            f"could not parse sbx kit.allowedSources to revoke '{repo}'",
-            "check sbx logs and retry",
+        return None
+    return sources if isinstance(sources, list) else None
+
+
+def _grants(sources: list, prefix: str) -> bool:
+    """True when ``sources`` lists ``prefix`` in any letter case (GitHub ignores case)."""
+    key = prefix.casefold()
+    return any(isinstance(s, str) and s.casefold() == key for s in sources)
+
+
+def _revoke_failed(repo: str, prefix: str, reason: str, desired: str | None = None) -> SbxError:
+    """The loud half of the fail-closed contract: what is still permitted, and how to fix it.
+
+    Mirrors Bash ``_acq_sbx_kit_source_revoke_failed``. The source stays
+    registered, because the sbx backend could still fetch kits from that owner.
+    """
+    if desired is not None:
+        fix = f"run: sbx settings set kit.allowedSources '{desired}'"
+    else:
+        fix = (
+            "review 'sbx settings get kit.allowedSources', remove "
+            f"'{prefix}', then run 'sbx settings set kit.allowedSources <json-array>'"
         )
-    if not isinstance(sources, list):
-        raise SbxError(
-            errors.FAILURE,
-            f"could not parse sbx kit.allowedSources to revoke '{repo}'",
-            "check sbx logs and retry",
-        )
-    if prefix in sources:
-        desired = json.dumps([s for s in sources if s != prefix])
-        proc = _run(["settings", "set", "kit.allowedSources", desired])
-        if proc.returncode != 0:
-            raise SbxError(
-                errors.FAILURE,
-                f"could not write sbx kit.allowedSources to revoke '{repo}'",
-                "check sbx logs and retry",
-            )
+    return SbxError(
+        errors.FAILURE,
+        f"{reason}, so sbx kit.allowedSources still permits '{prefix}'; "
+        f"kit source '{repo}' was not removed",
+        f"{fix}; then re-run: acq kit-source rm {repo}",
+    )
+
+
+def kit_source_revoked(repo: str) -> str | None:
+    """Revoke a removed kit source from sbx's ``kit.allowedSources``.
+
+    sbx has no ``kit-source-revoke`` subcommand: the allowlist lives under
+    ``sbx settings`` as a JSON array at ``kit.allowedSources``, and it is
+    owner-granular (``host/owner/``). acq only ever *unions* onto it, so a removed
+    source stays fetchable until its owner prefix is dropped here.
+
+    Mirrors Bash ``acq_backend_kit_source_revoked``: the prefix is dropped only
+    when nothing that remains trusted after removing ``repo`` needs it (the
+    control plane, another registered source, or an ``ACQ_EXTRA_KIT_SOURCES``
+    grant), and the setting is re-read afterwards to confirm. Prefixes compare
+    casefolded, and every case variant of the prefix is dropped with it.
+
+    Returns ``None`` when a remaining source still needs the prefix (nothing is
+    revoked and sbx is not called). Otherwise returns the prefix, which sbx no
+    longer grants. Raises :class:`SbxError` on any failure to read, write or
+    verify the setting; it never returns quietly in that case.
+    """
+    prefix = kits.owner_prefix(repo)
+    remaining = {p.casefold() for p in kits.kit_source_prefixes(exclude=repo)}
+    if prefix.casefold() in remaining:
+        return None
+    sources = _read_allowed_sources()
+    if sources is None:
+        raise _revoke_failed(repo, prefix, "could not read kit.allowedSources as a JSON array")
+    if not _grants(sources, prefix):
+        return prefix
+    desired = json.dumps([s for s in sources if not _grants([s], prefix)])
+    proc = _run(["settings", "set", "kit.allowedSources", desired])
+    if proc.returncode != 0:
+        raise _revoke_failed(repo, prefix, "could not write kit.allowedSources", desired)
+    verify = _read_allowed_sources()
+    if verify is None or _grants(verify, prefix):
+        raise _revoke_failed(repo, prefix, "kit.allowedSources still lists it after the update", desired)
     return prefix

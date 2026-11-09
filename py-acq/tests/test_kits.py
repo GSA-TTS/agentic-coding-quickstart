@@ -42,6 +42,8 @@ def _env(monkeypatch, tmp_path, *, catalog=None, discovery=None):
         "ACQ_IMAGE",
         "ACQ_MSB_IMAGE",
         "ACQ_KIT_SOURCE_DISCOVERY",
+        "ACQ_KIT_SOURCE_SEED",
+        "ACQ_EXTRA_KIT_SOURCES",
         "ACQ_EXTRA_KITS",
         "ACQ_PROVIDER_KITS",
         "ACQ_SUBSTRATE_STATE",
@@ -157,6 +159,63 @@ def test_kit_source_add_control_plane_refused(monkeypatch, tmp_path, capsys):
     assert rc == 1
     assert doc["error"]["code"] == "validation_failed"
     assert kits.source_record(kits.CONTROL_PLANE_REPO) is None
+
+
+@pytest.mark.parametrize(
+    "repo",
+    ["github.com/gsa-tts/agentic-coding-patterns", "github.com/GSA-TTS/Agentic-Coding-Patterns"],
+)
+@pytest.mark.parametrize("verb", ["add", "rm"])
+def test_kit_source_control_plane_refused_in_any_case(monkeypatch, tmp_path, capsys, verb, repo):
+    # GitHub ignores owner/repo case, so a case variant names the control plane
+    # itself: add and rm both refuse it, and add writes no registry record.
+    _env(monkeypatch, tmp_path)
+    argv = ["kit-source", verb, repo, "--json"]
+    if verb == "add":
+        argv[3:3] = ["--ref", FULL_REF]
+    rc, doc = _invoke(capsys, *argv)
+    assert rc == 1
+    assert doc["error"]["code"] == "validation_failed"
+    assert kits.source_record(repo) is None
+
+
+def test_is_control_plane_casefolds_owner_and_repo():
+    assert kits.is_control_plane(kits.CONTROL_PLANE_REPO)
+    assert kits.is_control_plane("github.com/gsa-tts/AGENTIC-CODING-PATTERNS")
+    assert not kits.is_control_plane("github.com/gsa-tts/agentic-coding-patterns-fork")
+    assert not kits.is_control_plane("gitlab.com/GSA-TTS/agentic-coding-patterns")
+
+
+def test_kit_source_prefixes_cover_control_plane_registry_and_extra(monkeypatch, tmp_path):
+    # Mirrors Bash acq_kit_source_prefixes: one owner prefix per trusted source,
+    # with EXCLUDE_REPO left out, plus the legacy ACQ_EXTRA_KIT_SOURCES grants.
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv(
+        "ACQ_KIT_SOURCE_SEED",
+        json.dumps(
+            [
+                {"repository": "github.com/acme/kits-a", "ref": FULL_REF},
+                {"repository": "github.com/acme/kits-b", "ref": FULL_REF},
+                {"repository": "github.com/solo/kits", "ref": FULL_REF},
+            ]
+        ),
+    )
+    monkeypatch.setenv("ACQ_EXTRA_KIT_SOURCES", "  github.com/legacy/ \tgitlab.com/x/ ")
+    assert kits.kit_source_prefixes() == [
+        "github.com/GSA-TTS/",
+        "github.com/acme/",
+        "github.com/solo/",
+        "github.com/legacy/",
+        "gitlab.com/x/",
+    ]
+    remaining = kits.kit_source_prefixes(exclude="github.com/solo/kits")
+    assert "github.com/solo/" not in remaining
+    assert "github.com/acme/" in remaining
+    # The exclusion names a registry entry by its registered spelling, so a case
+    # variant that is not registered leaves the real entry (and its prefix) counted.
+    assert "github.com/solo/" in kits.kit_source_prefixes(exclude="github.com/SOLO/Kits")
+    # The control plane is never excluded.
+    assert "github.com/GSA-TTS/" in kits.kit_source_prefixes(exclude=kits.CONTROL_PLANE_REPO)
 
 
 def test_kit_source_discovery_seam_reachable(monkeypatch, tmp_path, capsys):
