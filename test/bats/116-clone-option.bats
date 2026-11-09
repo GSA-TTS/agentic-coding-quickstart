@@ -218,21 +218,31 @@ _refute_backend_create() {
 }
 
 # Point the workspace repo's own config at a recorder script (fsmonitor, a
-# filter driver applied to every file, and an index hook), and leave a tracked
-# file stat-dirty so a status would have to hash it. Host-side git in clone mode
-# must start none of these.
-_arm_repo_config() { # REPO RECORDER_OUT
-  local repo="$1" out="$2" rec="$STUBDIR/recorder.sh"
+# filter driver applied to every file, an index hook, and a ref hook that
+# `remote remove` runs when it deletes remote-tracking refs), and leave a
+# tracked file stat-dirty (an mtime that cannot match the index) so a status
+# would have to hash it. Host-side git in clone mode must start none of these.
+# FILTER names the driver (default `rec`).
+_arm_repo_config() { # REPO RECORDER_OUT [FILTER]
+  local repo="$1" out="$2" filter="${3:-rec}" rec="$STUBDIR/recorder.sh"
   printf '#!/bin/sh\necho "$0 $*" >> "%s"\ncat\n' "$out" > "$rec"
   chmod +x "$rec"
   mkdir -p "$repo/.git/hooks"
   cp "$rec" "$repo/.git/hooks/post-index-change"
+  cp "$rec" "$repo/.git/hooks/reference-transaction"
   git -C "$repo" config core.fsmonitor "$rec"
-  git -C "$repo" config filter.rec.clean "$rec"
-  git -C "$repo" config filter.rec.smudge "$rec"
-  git -C "$repo" config filter.rec.process "$rec"
-  printf '* filter=rec\n' > "$repo/.git/info/attributes"
-  sleep 1; touch "$repo/file.txt"
+  git -C "$repo" config "filter.${filter}.clean" "$rec"
+  git -C "$repo" config "filter.${filter}.smudge" "$rec"
+  git -C "$repo" config "filter.${filter}.process" "$rec"
+  printf '* filter=%s\n' "$filter" > "$repo/.git/info/attributes"
+  touch -t 200001010000 "$repo/file.txt"
+}
+
+# Commit a new file in the scratch clone, as the agent would.
+_agent_commit() { # SCRATCH NAME
+  echo "$2" > "$1/$2.txt"
+  git -C "$1" add "$2.txt"
+  git -C "$1" -c user.email=a@example.com -c user.name=a -c commit.gpgsign=false commit -q -m "$2"
 }
 
 @test "clone(msb): create starts no program named by the workspace repo's config" {
@@ -246,9 +256,14 @@ _arm_repo_config() { # REPO RECORDER_OUT
 @test "clone(msb): rm starts no program named by the workspace repo's config" {
   _msb_clone -- create shell --clone "$CLONEPROJ"
   local scratch="$STUBDIR/state/clones/shell-cloneproj/cloneproj"
-  echo agent-work > "$scratch/agent.txt"
-  git -C "$scratch" add agent.txt
-  git -C "$scratch" -c user.email=a@example.com -c user.name=a -c commit.gpgsign=false commit -q -m agent-work
+  # A fetched commit gives the host remote-tracking refs, so the rm-time
+  # `remote remove` deletes refs and would run the reference-transaction hook
+  # if it were not wrapped. A second, unfetched commit keeps the rm-time
+  # cat-file check exercised.
+  _agent_commit "$scratch" agent-work
+  git -C "$CLONEPROJ" fetch -q sandbox-shell-cloneproj
+  [ -n "$(git -C "$CLONEPROJ" for-each-ref refs/remotes/sandbox-shell-cloneproj)" ]
+  _agent_commit "$scratch" agent-work-2
   _arm_repo_config "$CLONEPROJ" "$STUBDIR/ran"
   _msb_clone -- rm shell-cloneproj
   assert_success
@@ -585,4 +600,179 @@ _stub_git() { # PATTERN RC
   assert_regex "$line" "--env ACQ_WORKSPACE=${logical} "
   refute_regex "$line" 'decoy'
   refute_regex "$line" 'ACQ_CLONE'
+}
+
+# --- Host-side git hardening in clone mode ---
+
+# Put a `git` on PATH that appends each call's argv to LOG and passes it
+# through to the real git.
+_record_git() { # LOG
+  local real; real=$(command -v git)
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s"\nexec %s "$@"\n' "$1" "$real" > "$STUBDIR/git"
+  chmod +x "$STUBDIR/git"
+}
+# The wrapped calls in LOG: every one carries protocol.allow=never.
+_wrapped_calls() { grep -- '-c protocol.allow=never' "$1"; }
+
+# A create that must fail on the repository's layout, leaving nothing behind.
+_assert_layout_refused() { # SANDBOX
+  assert_failure
+  assert_output --partial 'not an ordinary repository checkout'
+  assert_output --partial 'git worktree'
+  assert_output --partial 'submodule'
+  _refute_backend_create
+  [ ! -e "$STUBDIR/state/clones/$1" ]
+}
+
+@test "clone(msb): host-side git runs with --no-pager at create and rm" {
+  _record_git "$STUBDIR/gitlog"
+  _msb_clone -- create shell --clone "$CLONEPROJ"
+  assert_success
+  _msb_clone -- rm shell-cloneproj
+  assert_success
+  local wrapped; wrapped=$(_wrapped_calls "$STUBDIR/gitlog")
+  assert_regex "$wrapped" ' remote remove sandbox-shell-cloneproj'
+  [ -z "$(printf '%s\n' "$wrapped" | grep -v -- '^--no-pager ')" ]
+}
+
+@test "clone(msb): hooks are disabled via a never-created path in acq's state dir, not /dev/null" {
+  _record_git "$STUBDIR/gitlog"
+  _msb_clone -- create shell --clone "$CLONEPROJ"
+  assert_success
+  local wrapped hooks
+  wrapped=$(_wrapped_calls "$STUBDIR/gitlog")
+  [ -n "$wrapped" ]
+  refute_regex "$wrapped" 'core\.hooksPath=/dev/null'
+  # Every wrapped call names the same hooks path, under the state dir...
+  hooks=$(printf '%s\n' "$wrapped" | sed 's/.*-c core\.hooksPath=\([^ ]*\) .*/\1/' | sort -u)
+  [ "$(printf '%s\n' "$hooks" | wc -l | tr -d ' ')" = 1 ]
+  case "$hooks" in "$STUBDIR/state/"?*) ;; *) false ;; esac
+  # ...and nothing creates it.
+  [ ! -e "$hooks" ]
+}
+
+@test "clone(msb): a linked worktree or a gitfile checkout is refused" {
+  git -C "$CLONEPROJ" worktree add -q "$STUBDIR/wtproj"
+  _msb_clone -- create shell --clone "$STUBDIR/wtproj"
+  _assert_layout_refused shell-wtproj
+  assert_output --partial '.git is a file pointing at another git directory'
+  # A submodule checkout has the same shape: .git is a file naming a git dir
+  # kept elsewhere.
+  git init -q --separate-git-dir "$STUBDIR/sep.git" "$STUBDIR/subproj"
+  git -C "$STUBDIR/subproj" -c user.email=t@example.com -c user.name=t -c commit.gpgsign=false \
+    commit -q --allow-empty -m init
+  [ -f "$STUBDIR/subproj/.git" ]
+  _msb_clone -- create shell --clone "$STUBDIR/subproj"
+  _assert_layout_refused shell-subproj
+  assert_output --partial '.git is a file pointing at another git directory'
+}
+
+@test "clone(msb): a symlinked .git, a symlinked object store, or a commondir is refused" {
+  mv "$CLONEPROJ/.git" "$STUBDIR/real.git"
+  ln -s "$STUBDIR/real.git" "$CLONEPROJ/.git"
+  _msb_clone -- create shell --clone "$CLONEPROJ"
+  _assert_layout_refused shell-cloneproj
+  assert_output --partial '.git is a symlink'
+  rm "$CLONEPROJ/.git"; mv "$STUBDIR/real.git" "$CLONEPROJ/.git"
+
+  mv "$CLONEPROJ/.git/objects" "$STUBDIR/objects"
+  ln -s "$STUBDIR/objects" "$CLONEPROJ/.git/objects"
+  _msb_clone -- create shell --clone "$CLONEPROJ"
+  _assert_layout_refused shell-cloneproj
+  assert_output --partial '.git/objects is a symlink'
+  rm "$CLONEPROJ/.git/objects"; mv "$STUBDIR/objects" "$CLONEPROJ/.git/objects"
+
+  printf '.\n' > "$CLONEPROJ/.git/commondir"
+  _msb_clone -- create shell --clone "$CLONEPROJ"
+  _assert_layout_refused shell-cloneproj
+  assert_output --partial 'commondir'
+}
+
+@test "clone(msb): a git dir that resolves away from <workspace>/.git is refused" {
+  # GIT_COMMON_DIR moves the common dir (objects, refs, config) while .git
+  # itself still looks ordinary; only the rev-parse comparison catches it.
+  local other="$STUBDIR/otherrepo"
+  _mk_repo "$other"
+  _msb_clone GIT_COMMON_DIR="$other/.git" -- create shell --clone "$CLONEPROJ"
+  _assert_layout_refused shell-cloneproj
+  assert_output --partial 'resolves its directory'
+}
+
+@test "clone(msb): a filter driver whose name contains '=' is blanked too" {
+  # `-c filter.a=b.clean=` would set filter.a to "b.clean=", leaving the real
+  # driver live; the settings must travel through GIT_CONFIG_COUNT instead.
+  _arm_repo_config "$CLONEPROJ" "$STUBDIR/ran" 'a=b'
+  # The attribute really selects the driver named `a=b` (fsmonitor off: the
+  # recorder is armed there too).
+  [ "$(git -c core.fsmonitor=false -C "$CLONEPROJ" check-attr filter file.txt)" = 'file.txt: filter: a=b' ]
+  _msb_clone -- create shell --clone "$CLONEPROJ"
+  assert_success
+  [ -d "$STUBDIR/state/clones/shell-cloneproj/cloneproj/.git" ]
+  [ ! -e "$STUBDIR/ran" ]
+}
+
+@test "clone(msb): on git older than 2.31 a filter name containing '=' is refused" {
+  _arm_repo_config "$CLONEPROJ" "$STUBDIR/ran" 'a=b'
+  local real; real=$(command -v git)
+  printf '#!/usr/bin/env bash\n[ "$1" = --version ] && { echo "git version 2.30.2"; exit 0; }\nexec %s "$@"\n' \
+    "$real" > "$STUBDIR/git"
+  chmod +x "$STUBDIR/git"
+  _msb_clone -- create shell --clone "$CLONEPROJ"
+  assert_failure
+  assert_output --partial "contains '='"
+  assert_output --partial '2.31'
+  _refute_backend_create
+  [ ! -e "$STUBDIR/state/clones/shell-cloneproj" ]
+  [ ! -e "$STUBDIR/ran" ]
+}
+
+@test "clone(msb): identity comes from global includeIf, then repo-local, never a repo-local include" {
+  local home="$STUBDIR/idhome" repo
+  repo=$(canonicalize_path "$CLONEPROJ")
+  mkdir -p "$home"
+  printf '[user]\n\tname = Forge User\n\temail = forge@example.gov\n' > "$STUBDIR/forge.inc"
+  printf '[includeIf "gitdir:%s/"]\n\tpath = %s\n' "$repo" "$STUBDIR/forge.inc" > "$home/.gitconfig"
+  # Repo-local wins over global for email; the repo's own include is not
+  # followed, so its name never replaces the global one.
+  printf '[user]\n\tname = Local Include\n' > "$STUBDIR/local.inc"
+  git -C "$CLONEPROJ" config include.path "$STUBDIR/local.inc"
+  git -C "$CLONEPROJ" config user.email "repo@example.gov"
+  _msb_clone HOME="$home" XDG_CONFIG_HOME="$STUBDIR/noconfig" GIT_CONFIG_NOSYSTEM=1 -- \
+    create shell --clone "$CLONEPROJ"
+  assert_success
+  local cfg="$STUBDIR/state/clones/shell-cloneproj/cloneproj/.git/config"
+  [ "$(git config --file "$cfg" user.name)" = "Forge User" ]
+  [ "$(git config --file "$cfg" user.email)" = "repo@example.gov" ]
+}
+
+@test "clone(msb): a partial clone is refused before anything is created" {
+  git -C "$CLONEPROJ" remote add origin https://example.invalid/cloneproj.git
+  git -C "$CLONEPROJ" config remote.origin.promisor true
+  _msb_clone -- create shell --clone "$CLONEPROJ"
+  assert_failure
+  assert_output --partial 'partial clone'
+  _refute_backend_create
+  [ ! -e "$STUBDIR/state/clones/shell-cloneproj" ]
+  run git -C "$CLONEPROJ" remote get-url sandbox-shell-cloneproj
+  assert_failure
+
+  git -C "$CLONEPROJ" config --unset remote.origin.promisor
+  git -C "$CLONEPROJ" config extensions.partialClone origin
+  _msb_clone -- create shell --clone "$CLONEPROJ"
+  assert_failure
+  assert_output --partial 'partial clone'
+  [ ! -e "$STUBDIR/state/clones/shell-cloneproj" ]
+}
+
+@test "clone(msb): a Git LFS workspace gets a notice to run 'git lfs pull' in the guest" {
+  _msb_clone -- create shell --name nolfs --clone "$CLONEPROJ"
+  assert_success
+  refute_output --partial 'git lfs pull'
+  printf '*.bin filter=lfs diff=lfs merge=lfs -text\n' > "$CLONEPROJ/.gitattributes"
+  git -C "$CLONEPROJ" add .gitattributes
+  git -C "$CLONEPROJ" -c user.email=t@example.com -c user.name=t -c commit.gpgsign=false commit -q -m lfs
+  _msb_clone -- create shell --name withlfs --clone "$CLONEPROJ"
+  assert_success
+  assert_output --partial 'Git LFS'
+  assert_output --partial 'git lfs pull'
 }

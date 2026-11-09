@@ -119,12 +119,18 @@ A git clone carries **committed state only**:
 Unlike the two divergences above, two pieces of `.git/config` state are carried
 on purpose, written repo-locally into the scratch:
 
-- The source checkout's **effective git identity** (`user.name`/`user.email`),
-  resolved on the host as the user's own commits resolve it. A clone drops
-  `.git/config`, and per-forge identities commonly live only there or in a
-  gitdir-scoped include. Without the copy, the first in-sandbox commit fails
-  with "Author identity unknown"; the guest's global tier cannot express a
-  per-repo value. A failure to read or write it only warns: a missing identity
+- The source checkout's **git identity** (`user.name`/`user.email`). A clone
+  drops `.git/config`, and per-forge identities commonly live only there or in
+  a gitdir-scoped `includeIf` in the global config. Without the copy, the first
+  in-sandbox commit fails with "Author identity unknown"; the guest's global
+  tier cannot express a per-repo value. The scopes are read in git's order,
+  system, then global, then the repository's own `.git/config`, and the last
+  value wins, as for the user's own commits. The system and global files are
+  read with includes (they are the user's, and the guest never writes them);
+  the repository's config is read without includes, because in a non-clone run
+  the guest can write it and an include there could point the host at any
+  file. The system scope is skipped under `GIT_CONFIG_NOSYSTEM`, as git does.
+  A failure to read or write the identity only warns: a missing identity
   already fails loudly at the first commit.
 - The source checkout's **origin URL** (`remote.origin.url`, plus
   `remote.origin.pushurl` when set). `git clone <host path>` points the
@@ -156,6 +162,50 @@ on purpose, written repo-locally into the scratch:
 sbx carries both incidentally by copying `.git` wholesale. Propagating only
 these values is the minimized form of that, without the credential helpers,
 hooks, and URL rewrites that ride along with a wholesale copy.
+
+### Host-side git and the layouts it refuses (amended 2026-11-09)
+
+In a non-clone run the workspace is mounted read-write, so its repository
+config, attributes and hooks are not trusted input when acq runs git on the
+host against it (status, clone, `remote add`/`remove`, config reads, the
+rm-time `cat-file`). Every such call goes through one wrapper that runs git
+with `--no-pager` and disables fsmonitor, hooks, the untracked cache, every
+transport (so no lazy fetch from a promisor remote) and submodule recursion,
+and blanks every filter driver the config defines. Hooks are disabled by
+pointing `core.hooksPath` at a directory under acq's state dir that nothing
+creates, rather than `/dev/null`, which a native Windows git (Git Bash) does
+not treat as a null device. The filter settings travel as `GIT_CONFIG_COUNT`
+entries (git 2.31+) because a `-c name=value` option splits at the first `=`
+and cannot name a driver whose name contains one; on an older git such a
+driver is refused rather than left live.
+
+Before cloning, the create refuses a workspace that is not an ordinary
+repository, with a message naming `git worktree` and submodule checkouts:
+
+- `.git` must be a real directory: not a symlink, and not a gitfile (the shape
+  of a linked worktree or a submodule checkout).
+- It must have no `commondir` file, and `.git/objects` must not be a symlink.
+- `git rev-parse --absolute-git-dir` and `--git-common-dir`, canonicalised,
+  must both equal `<canonical workspace>/.git` (this also catches a
+  `GIT_DIR`/`GIT_COMMON_DIR` in the caller's environment).
+
+In each refused layout git reads objects and config from somewhere other than
+`<workspace>/.git`, where the alternates check (also refused: an
+`objects/info/alternates` file) and the clone would not be looking. A
+**partial clone** (`extensions.partialClone`, or any `remote.*.promisor` that
+is true) is refused up front too: objects left on the server are missing
+locally and the wrapper never fetches them, so the clone would otherwise fail
+part-way through.
+
+**Git LFS** is not refused, but filter drivers are disabled, so LFS-tracked
+files land in the scratch as pointer files. When the workspace uses LFS
+(`filter=lfs` in its `.gitattributes` or `.git/info/attributes`, a `.git/lfs`
+directory, or `lfs.*` keys in its own config), create prints a notice
+suggesting `git lfs pull` inside the sandbox.
+
+The clone uses `--no-local`, so only objects reachable from refs are copied;
+on a large repository that costs a full `pack-objects` pass at create, where a
+local clone would copy the object files directly.
 
 ### Trade-off stated openly
 

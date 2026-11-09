@@ -3229,28 +3229,99 @@ _acq_msb_upstream_ca_flags_into() {
 # read-write into sandboxes in normal mode, so its repository config, attributes
 # and hooks are treated as untrusted here: no hooks, no fsmonitor, no filter
 # drivers, no transports (so no lazy fetch from a promisor remote), no
-# submodule recursion. Callers that need the local file transport (the scratch
-# clone) re-allow only that one after the wrapper's defaults.
+# submodule recursion, no pager. Callers that need the local file transport
+# (the scratch clone) re-allow only that one after the wrapper's defaults.
+# Hooks are disabled by pointing core.hooksPath at a directory under acq's own
+# state dir that nothing ever creates, rather than /dev/null, which a native
+# Windows git (Git Bash) does not resolve to a POSIX null device. The path
+# must be absolute: a relative hooksPath resolves against the workspace
+# itself, which the guest can write.
 _acq_msb_git_ws() {
-  local dir="$1" key
+  local dir="$1"
   shift
-  local -a cfg=(
-    -c core.fsmonitor=false
-    -c core.hooksPath=/dev/null
-    -c core.untrackedCache=false
-    -c protocol.allow=never
-    -c submodule.recurse=false
-  )
-  # Blank every filter driver the repository's config defines (reading config
-  # runs nothing), so status and clone never start a clean/smudge/process
-  # program it names.
+  _acq_msb_git_ws_prep "$dir" || return 1
+  GIT_NO_LAZY_FETCH=1 GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
+    env ${_ACQ_MSB_WS_ENV[@]+"${_ACQ_MSB_WS_ENV[@]}"} git --no-pager \
+      -c core.fsmonitor=false \
+      -c "core.hooksPath=${_ACQ_MSB_WS_HOOKS}" \
+      -c core.untrackedCache=false \
+      -c protocol.allow=never \
+      -c submodule.recurse=false \
+      ${_ACQ_MSB_WS_CFG[@]+"${_ACQ_MSB_WS_CFG[@]}"} \
+      -C "$dir" "$@"
+}
+
+# _acq_msb_git_ws_prep DIR — compute the wrapper's per-call settings for DIR:
+# _ACQ_MSB_WS_HOOKS (the never-created hooks path) and the filter settings
+# (_acq_msb_git_ws_filter_cfg). Returns 1, saying why, when either cannot be
+# made safe; clone setup calls it once up front, where that message is shown.
+_acq_msb_git_ws_prep() {
+  _ACQ_MSB_WS_HOOKS="${ACQ_STATE_DIR}/.git-hooks-disabled"
+  case "$_ACQ_MSB_WS_HOOKS" in
+    /* | [A-Za-z]:[/\\]*) ;;
+    *)
+      echo "acq(msb): error: --clone: ACQ_STATE_DIR must be an absolute path: ${ACQ_STATE_DIR}" >&2
+      return 1
+      ;;
+  esac
+  _acq_msb_git_ws_filter_cfg "$1"
+}
+
+# _acq_msb_git_ws_filter_cfg DIR — build the settings that blank every filter
+# driver DIR's config defines (reading config runs nothing), so status and
+# clone never start a clean/smudge/process program it names. Sets the arrays
+# _ACQ_MSB_WS_ENV (environment assignments) and _ACQ_MSB_WS_CFG (`-c` options).
+# The settings travel as GIT_CONFIG_COUNT/GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n>
+# (git 2.31+), appended after any the user already exports: a `-c name=value`
+# splits at the first '=', so it cannot name a driver whose name itself
+# contains one. On an older git the `-c` form is the only one, and a driver
+# name containing '=' is refused (return 1) because it cannot be blanked.
+_acq_msb_git_ws_filter_cfg() {
+  local dir="$1" key val n envok=""
+  _ACQ_MSB_WS_ENV=()
+  _ACQ_MSB_WS_CFG=()
+  case "${GIT_CONFIG_COUNT:-}" in
+    '' | *[!0-9]*) n=0 ;;
+    *) n=$((10#$GIT_CONFIG_COUNT)) ;;
+  esac
   while IFS= read -r key; do
     case "$key" in
-      filter.*.clean | filter.*.smudge | filter.*.process) cfg+=(-c "${key}=") ;;
-      filter.*.required) cfg+=(-c "${key}=false") ;;
+      filter.*.clean | filter.*.smudge | filter.*.process) val="" ;;
+      filter.*.required) val=false ;;
+      *) continue ;;
     esac
-  done < <(git -C "$dir" config --name-only --get-regexp '^filter\.' 2>/dev/null)
-  GIT_NO_LAZY_FETCH=1 GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 git "${cfg[@]}" -C "$dir" "$@"
+    [ -n "$envok" ] || { _acq_msb_git_has_config_env && envok=1 || envok=0; }
+    if [ "$envok" = 1 ]; then
+      _ACQ_MSB_WS_ENV+=("GIT_CONFIG_KEY_${n}=${key}" "GIT_CONFIG_VALUE_${n}=${val}")
+      n=$((n + 1))
+      continue
+    fi
+    case "$key" in
+      *=*)
+        echo "acq(msb): error: --clone: the repository config defines a filter driver whose" >&2
+        echo "acq(msb):   name contains '=' ($key). This git cannot disable it; git 2.31 or" >&2
+        echo "acq(msb):   later can. Upgrade git, or remove or rename that filter, then re-run." >&2
+        return 1
+        ;;
+    esac
+    _ACQ_MSB_WS_CFG+=(-c "${key}=${val}")
+  done < <(git --no-pager -C "$dir" config --name-only --get-regexp '^filter\.' 2>/dev/null)
+  [ "${#_ACQ_MSB_WS_ENV[@]}" -eq 0 ] || _ACQ_MSB_WS_ENV+=("GIT_CONFIG_COUNT=${n}")
+  return 0
+}
+
+# _acq_msb_git_has_config_env — succeed when the host git reads
+# GIT_CONFIG_COUNT (added in git 2.31).
+_acq_msb_git_has_config_env() {
+  local v maj min
+  v=$(git --version 2>/dev/null) || return 1
+  v=${v#git version }
+  maj=${v%%.*}
+  min=${v#*.}
+  min=${min%%.*}
+  case "$maj" in '' | *[!0-9]*) return 1 ;; esac
+  case "$min" in '' | *[!0-9]*) return 1 ;; esac
+  [ "$maj" -gt 2 ] || { [ "$maj" -eq 2 ] && [ "$min" -ge 31 ]; }
 }
 
 # _acq_msb_clone_setup NAME WSPATH — create the scratch clone + fetch-back
@@ -3273,6 +3344,9 @@ _acq_msb_clone_setup() {
       return 1
       ;;
   esac
+  # Checked up front so its refusal is shown: the wrapper calls below hide
+  # git's stderr, and each one would refuse the same way.
+  _acq_msb_git_ws_prep "$ws" || return 1
   if ! top=$(_acq_msb_git_ws "$ws" rev-parse --show-toplevel 2>/dev/null); then
     echo "acq(msb): error: --clone: workspace is not a git repository: $ws" >&2
     echo "acq(msb):   --clone runs the agent on a clone of the primary workspace's repo." >&2
@@ -3301,6 +3375,7 @@ _acq_msb_clone_setup() {
     fi
     return 1
   fi
+  _acq_msb_clone_check_layout "$ws_canon" || return 1
   # An alternates file makes the object store borrow from other repositories
   # on the host; a scratch clone must carry only this repository's objects.
   if [ -s "${ws_canon}/.git/objects/info/alternates" ]; then
@@ -3309,6 +3384,8 @@ _acq_msb_clone_setup() {
     echo "acq(msb):   file, or use a regular clone, then re-run." >&2
     return 1
   fi
+  _acq_msb_clone_check_partial "$ws_canon" || return 1
+  _acq_msb_clone_note_lfs "$ws_canon"
   if [ -n "$(_acq_msb_git_ws "$ws_canon" status --porcelain --ignore-submodules=all 2>/dev/null)" ]; then
     echo "acq(msb): note: the workspace has uncommitted changes; a git clone carries" >&2
     echo "acq(msb):   committed state only. Commit first ('git add' untracked files)," >&2
@@ -3359,14 +3436,101 @@ _acq_msb_clone_setup() {
   return 0
 }
 
+# _acq_msb_clone_check_layout WS — refuse (return 1) unless the canonical
+# workspace WS is an ordinary repository whose .git is its own directory. In a
+# linked worktree or a submodule checkout (.git is a gitfile, or the git dir
+# names a commondir), or with a symlinked .git or object store, git reads its
+# objects and config from somewhere other than WS/.git, so the alternates check
+# and the scratch clone would not be looking at what git actually uses.
+_acq_msb_clone_check_layout() {
+  local ws="$1" want why="" gd="" common=""
+  want="${ws}/.git"
+  if [ -L "$want" ]; then
+    why=".git is a symlink"
+  elif [ ! -d "$want" ]; then
+    why=".git is a file pointing at another git directory"
+  elif [ -e "${want}/commondir" ] || [ -L "${want}/commondir" ]; then
+    why=".git/commondir exists"
+  elif [ -L "${want}/objects" ]; then
+    why=".git/objects is a symlink"
+  else
+    want=$(canonicalize_path "$want")
+    gd=$(_acq_msb_git_ws "$ws" rev-parse --absolute-git-dir 2>/dev/null) || gd=""
+    common=$(_acq_msb_git_ws "$ws" rev-parse --git-common-dir 2>/dev/null) || common=""
+    # --git-common-dir may print a path relative to WS (git -C WS).
+    case "$common" in '' | /* | [A-Za-z]:*) ;; *) common="${ws}/${common}" ;; esac
+    [ -z "$gd" ] || gd=$(canonicalize_path "$gd")
+    [ -z "$common" ] || common=$(canonicalize_path "$common")
+    if [ "$gd" != "$want" ] || [ "$common" != "$want" ]; then
+      why="git resolves its directory to ${gd:-?} (common: ${common:-?})"
+    fi
+  fi
+  [ -n "$why" ] || return 0
+  echo "acq(msb): error: --clone: $ws is not an ordinary repository checkout: $why." >&2
+  echo "acq(msb):   Clone mode needs .git to be the repository's own directory; 'git worktree'" >&2
+  echo "acq(msb):   checkouts and submodule checkouts are not supported. Run it from the main" >&2
+  echo "acq(msb):   checkout or a regular clone, then re-run." >&2
+  return 1
+}
+
+# _acq_msb_clone_check_partial WS — refuse (return 1) a partial clone, up
+# front: objects left on the server are missing locally and the wrapper never
+# fetches them, so the clone would otherwise fail part-way through. A bare
+# `promisor` key is boolean true; anything git would not read as false is
+# treated as true (fail closed).
+_acq_msb_clone_check_partial() {
+  local ws="$1" entry val partial=""
+  if _acq_msb_git_ws "$ws" config --get-all extensions.partialClone >/dev/null 2>&1; then
+    partial=1
+  else
+    while IFS= read -r -d '' entry; do
+      case "$entry" in
+        *$'\n'*) val=${entry#*$'\n'} ;;
+        *) val=true ;;
+      esac
+      case "$val" in
+        '' | [Ff][Aa][Ll][Ss][Ee] | [Nn][Oo] | [Oo][Ff][Ff] | 0) ;;
+        *) partial=1; break ;;
+      esac
+    done < <(_acq_msb_git_ws "$ws" config -z --get-regexp '^remote\..*\.promisor$' 2>/dev/null)
+  fi
+  [ -n "$partial" ] || return 0
+  echo "acq(msb): error: --clone: $ws is a partial clone (it has a promisor remote)." >&2
+  echo "acq(msb):   Objects left on the server are missing locally and clone mode never" >&2
+  echo "acq(msb):   fetches them. Use a full clone of the repository, then re-run." >&2
+  return 1
+}
+
+# _acq_msb_clone_note_lfs WS — print a notice when WS uses Git LFS. The wrapper
+# disables filter drivers, so LFS-tracked files land in the scratch as pointer
+# files; the agent can fetch their content in the guest. Advisory only.
+_acq_msb_clone_note_lfs() {
+  local ws="$1" f found=""
+  for f in "${ws}/.gitattributes" "${ws}/.git/info/attributes"; do
+    if [ -f "$f" ] && [ ! -L "$f" ] && grep -q 'filter=lfs' "$f" 2>/dev/null; then
+      found=1
+    fi
+  done
+  [ -d "${ws}/.git/lfs" ] && found=1
+  if [ -z "$found" ] &&
+    _acq_msb_git_ws "$ws" config --local --no-includes --get-regexp '^lfs\.' >/dev/null 2>&1; then
+    found=1
+  fi
+  [ -n "$found" ] || return 0
+  echo "acq(msb): note: this repository uses Git LFS. Clone mode disables filter drivers," >&2
+  echo "acq(msb):   so LFS-tracked files are checked out in the scratch as pointer files." >&2
+  echo "acq(msb):   Fetch their content inside the sandbox with: git lfs pull" >&2
+  return 0
+}
+
 # _acq_msb_clone_copy_config SRC SCRATCH — write the few repo-local config
 # values a clone drops but the guest needs, from SRC into the scratch (see
 # ADR-0027 for what a clone carries and why):
-#   - user.name/user.email: SRC's EFFECTIVE identity. A per-forge identity
-#     often lives only in .git/config or behind a gitdir-scoped includeIf; the
-#     guest's synced global tier cannot express a per-repo value, so without
-#     this the first in-guest commit fails with "Author identity unknown".
-#     `git -C SRC config --get` resolves it exactly as the user's own commits do.
+#   - user.name/user.email: SRC's identity. A per-forge identity often lives
+#     only in .git/config or behind a gitdir-scoped includeIf in the global
+#     config; the guest's synced global tier cannot express a per-repo value,
+#     so without this the first in-guest commit fails with "Author identity
+#     unknown". See _acq_msb_clone_read_identity for which scopes are read.
 #   - remote.origin.url/remote.origin.pushurl: `git clone <host path>` points
 #     the scratch's origin at the host checkout path, and the scratch is
 #     mounted AT that path in the guest — so origin resolves to the scratch
@@ -3403,14 +3567,23 @@ _acq_msb_clone_setup() {
 # warns: a missing identity already fails loudly at the first in-guest commit.
 _acq_msb_clone_copy_config() {
   local src="$1" scratch="$2" key rc val first
-  for key in user.name user.email remote.origin.url remote.origin.pushurl; do
+  for key in user.name user.email; do
+    rc=0
+    _acq_msb_clone_read_identity "$src" "$key" || rc=$?
+    case "$rc" in
+      0)
+        git -C "$scratch" config --replace-all "$key" "$_ACQ_MSB_IDENT_VAL" >/dev/null 2>&1 ||
+          _acq_msb_clone_config_fail set "$key"
+        ;;
+      1) _acq_msb_clone_unset_key "$scratch" "$key" ;;
+      *) _acq_msb_clone_config_fail read "$key" ;;
+    esac
+  done
+  for key in remote.origin.url remote.origin.pushurl; do
     rc=0
     _acq_msb_git_ws "$src" config --no-includes --get-all "$key" >/dev/null 2>&1 || rc=$?
     if [ "$rc" -eq 1 ]; then
-      rc=0
-      git -C "$scratch" config --unset-all "$key" >/dev/null 2>&1 || rc=$?
-      # 5: nothing to unset.
-      [ "$rc" -eq 0 ] || [ "$rc" -eq 5 ] || _acq_msb_clone_config_fail set "$key" || return 1
+      _acq_msb_clone_unset_key "$scratch" "$key" || return 1
       continue
     fi
     if [ "$rc" -ne 0 ]; then
@@ -3427,6 +3600,55 @@ _acq_msb_clone_copy_config() {
       first=""
     done < <(_acq_msb_git_ws "$src" config --no-includes -z --get-all "$key" 2>/dev/null)
   done
+  return 0
+}
+
+# _acq_msb_clone_unset_key SCRATCH KEY — remove KEY from the scratch config
+# (the source has no value for it). Failure goes through the policy in
+# _acq_msb_clone_config_fail, whose status this returns.
+_acq_msb_clone_unset_key() {
+  local rc=0
+  git -C "$1" config --unset-all "$2" >/dev/null 2>&1 || rc=$?
+  # 5: nothing to unset.
+  [ "$rc" -eq 0 ] || [ "$rc" -eq 5 ] || _acq_msb_clone_config_fail set "$2"
+}
+
+# _acq_msb_clone_read_identity SRC KEY — resolve the identity KEY (user.name or
+# user.email) for the checkout SRC into _ACQ_MSB_IDENT_VAL. Returns 0 when set,
+# 1 when no scope sets it, 2 when a scope's config cannot be read.
+# The scopes are read in git's own order, system -> global -> local, and the
+# last value wins, as it does for the user's own commits. The system and
+# global files are the user's (the guest never writes them), so they are read
+# with --includes: a per-forge identity commonly sits behind a gitdir-scoped
+# includeIf there. The repository's own .git/config is reachable from the guest
+# in normal mode, so it is read with --no-includes and cannot point the host at
+# another file. The system scope is skipped when GIT_CONFIG_NOSYSTEM is set,
+# as git itself does (`config --system` would read it regardless).
+_acq_msb_clone_read_identity() {
+  local src="$1" key="$2" scope rc val found=""
+  local -a flags
+  _ACQ_MSB_IDENT_VAL=""
+  for scope in system global local; do
+    case "$scope" in
+      system)
+        case "${GIT_CONFIG_NOSYSTEM:-}" in
+          [Tt][Rr][Uu][Ee] | [Yy][Ee][Ss] | [Oo][Nn] | 1) continue ;;
+        esac
+        flags=(--system --includes)
+        ;;
+      global) flags=(--global --includes) ;;
+      local) flags=(--local --no-includes) ;;
+    esac
+    rc=0
+    _acq_msb_git_ws "$src" config "${flags[@]}" --get-all "$key" >/dev/null 2>&1 || rc=$?
+    [ "$rc" -eq 1 ] && continue
+    [ "$rc" -eq 0 ] || return 2
+    while IFS= read -r -d '' val; do
+      _ACQ_MSB_IDENT_VAL="$val"
+      found=1
+    done < <(_acq_msb_git_ws "$src" config "${flags[@]}" -z --get-all "$key" 2>/dev/null)
+  done
+  [ -n "$found" ] || return 1
   return 0
 }
 
