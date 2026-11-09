@@ -1,0 +1,99 @@
+{
+  "schema": 1,
+  "id": "cli/configure-json-layers",
+  "oracle": "ADR-0031 / ADR-0038m \u00a72: non-interactive `configure --json` changes nothing and reports every setting as key, value and source layer (flag, env, config, default); provider credentials appear only as bindings, never as a secret value",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{acq}",
+      "--backend",
+      "sbx",
+      "configure",
+      "--json"
+    ],
+    "env": {
+      "ACQ_EXTRA_KITS": "git+https://example.invalid/kit",
+      "ACQ_KIT_SOURCE_SEED": "[{\"repository\": \"github.com/team/kits\", \"ref\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"directory\": \"kits\"}]",
+      "ACQ_PROVIDER_CREDENTIAL_SEED": "[{\"provider\": \"opencode-go\", \"key_env\": \"OPENCODE_GO_API_KEY\", \"hosts\": [\"opencode.ai\"]}]",
+      "OPENCODE_GO_API_KEY": "VECTOR-SECRET-MUST-NOT-APPEAR",
+      "USAI_API_KEY": "VECTOR-SECRET-MUST-NOT-APPEAR"
+    },
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "ACQ_CONFIG_SEED",
+      "ACQ_PROVIDER_KITS",
+      "ACQ_PROVIDER_CREDENTIAL_BINDINGS",
+      "ACQ_NO_PROMPT",
+      "ACQ_NO_PROGRESS",
+      "ACQ_KIT_SOURCE_DISCOVERY"
+    ],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "configure",
+        "data": {
+          "interactive": false,
+          "changed": false,
+          "settings": [
+            {
+              "key": "backend",
+              "value": "sbx",
+              "source": "flag"
+            },
+            {
+              "key": "extra_kits",
+              "value": "git+https://example.invalid/kit",
+              "source": "env"
+            },
+            {
+              "key": "scope_github_token",
+              "value": "no",
+              "source": "default"
+            },
+            {
+              "key": "provider_credential_bindings",
+              "value": "opencode-go=OPENCODE_GO_API_KEY@opencode.ai",
+              "source": "config"
+            },
+            {
+              "key": "provider_kit",
+              "value": "agentic-coding-patterns/usai-provider",
+              "source": "default"
+            },
+            {
+              "key": "kit_sources",
+              "value": "github.com/team/kits@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|kits",
+              "source": "config"
+            }
+          ]
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME"
+    ]
+  }
+}
