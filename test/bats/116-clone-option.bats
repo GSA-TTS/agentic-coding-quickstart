@@ -217,6 +217,56 @@ _refute_backend_create() {
   [ ! -d "$STUBDIR/state/clones/shell-cloneproj" ]
 }
 
+# Point the workspace repo's own config at a recorder script (fsmonitor, a
+# filter driver applied to every file, and an index hook), and leave a tracked
+# file stat-dirty so a status would have to hash it. Host-side git in clone mode
+# must start none of these.
+_arm_repo_config() { # REPO RECORDER_OUT
+  local repo="$1" out="$2" rec="$STUBDIR/recorder.sh"
+  printf '#!/bin/sh\necho "$0 $*" >> "%s"\ncat\n' "$out" > "$rec"
+  chmod +x "$rec"
+  mkdir -p "$repo/.git/hooks"
+  cp "$rec" "$repo/.git/hooks/post-index-change"
+  git -C "$repo" config core.fsmonitor "$rec"
+  git -C "$repo" config filter.rec.clean "$rec"
+  git -C "$repo" config filter.rec.smudge "$rec"
+  git -C "$repo" config filter.rec.process "$rec"
+  printf '* filter=rec\n' > "$repo/.git/info/attributes"
+  sleep 1; touch "$repo/file.txt"
+}
+
+@test "clone(msb): create starts no program named by the workspace repo's config" {
+  _arm_repo_config "$CLONEPROJ" "$STUBDIR/ran"
+  _msb_clone -- create shell --clone "$CLONEPROJ"
+  assert_success
+  [ -d "$STUBDIR/state/clones/shell-cloneproj/cloneproj/.git" ]
+  [ ! -e "$STUBDIR/ran" ]
+}
+
+@test "clone(msb): rm starts no program named by the workspace repo's config" {
+  _msb_clone -- create shell --clone "$CLONEPROJ"
+  local scratch="$STUBDIR/state/clones/shell-cloneproj/cloneproj"
+  echo agent-work > "$scratch/agent.txt"
+  git -C "$scratch" add agent.txt
+  git -C "$scratch" -c user.email=a@example.com -c user.name=a -c commit.gpgsign=false commit -q -m agent-work
+  _arm_repo_config "$CLONEPROJ" "$STUBDIR/ran"
+  _msb_clone -- rm shell-cloneproj
+  assert_success
+  assert_output --partial 'unfetched commits'
+  [ ! -e "$STUBDIR/ran" ]
+}
+
+@test "clone(msb): a workspace that borrows objects via alternates is refused" {
+  local other="$STUBDIR/otherrepo"
+  _mk_repo "$other"
+  printf '%s\n' "$other/.git/objects" > "$CLONEPROJ/.git/objects/info/alternates"
+  _msb_clone -- create shell --clone "$CLONEPROJ"
+  assert_failure
+  assert_output --partial 'borrows objects from other repositories'
+  _refute_backend_create
+  [ ! -e "$STUBDIR/state/clones/shell-cloneproj" ]
+}
+
 @test "clone(msb): a read-only primary is rejected before any state is created" {
   _msb_clone -- create shell --clone "$CLONEPROJ:ro"
   assert_failure
