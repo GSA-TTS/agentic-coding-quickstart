@@ -28,7 +28,16 @@ if ($acqImpl -and $acqImpl -ne "bash") {
     function Test-AcqPython {
         param([Parameter(Mandatory = $true)][string]$Exe)
         $ErrorActionPreference = "Continue"
-        & $Exe -I -c "import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)" 2>$null | Out-Null
+        # Clear any exit code left by the caller's previous command (acq.ps1 may
+        # run inside the user's own session), so a candidate that cannot start
+        # is never accepted on a stale 0.
+        $global:LASTEXITCODE = $null
+        try {
+            & $Exe -I -c "import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)" 2>$null | Out-Null
+        }
+        catch {
+            return $false
+        }
         return ($LASTEXITCODE -eq 0)
     }
     $acqImplRepoRoot = Split-Path -Parent $PSCommandPath
@@ -59,6 +68,9 @@ if ($acqImpl -and $acqImpl -ne "bash") {
             $dir = $entry.Trim().Trim('"')
             if (-not ($dir -match '^[A-Za-z]:[\\/]' -or $dir.StartsWith('\\'))) { continue }
             $candidate = $dir.TrimEnd('\', '/') + '\python.exe'
+            # Re-check after trimming: an entry of just "\\" would become the
+            # drive-relative "\python.exe".
+            if (-not ($candidate -match '^[A-Za-z]:\\' -or $candidate.StartsWith('\\'))) { continue }
             if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
             if (Test-AcqPython -Exe $candidate) { $pyCmd = $candidate; break }
         }
