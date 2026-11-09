@@ -360,6 +360,39 @@ IDSTUB
   assert_output ''
 }
 
+# A relative bin dir would put the launcher links under the directory the
+# installer ran in, so it is refused before anything is written.
+@test "installer: a relative --bin-dir or ACQ_INSTALL_BIN_DIR is refused" {
+  local work="$STUBDIR/work"
+  mkdir -p "$work"
+  cd "$work" || return 1
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes \
+    --install-dir "$STUBDIR/inst" --bin-dir rel-bin
+  assert_failure 1
+  assert_output --partial "--bin-dir must be an absolute path, got 'rel-bin'"
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes \
+    --install-dir "$STUBDIR/inst" --bin-dir=rel-bin
+  assert_failure 1
+  assert_output --partial "--bin-dir must be an absolute path"
+  run env ACQ_INSTALL_BIN_DIR=rel-bin sh "$REPO_ROOT/install.sh" \
+    --source "$REPO_ROOT/test/fixtures/installer" --yes --install-dir "$STUBDIR/inst"
+  assert_failure 1
+  assert_output --partial "ACQ_INSTALL_BIN_DIR must be an absolute path, got 'rel-bin'"
+  # The refused value is echoed with control characters replaced.
+  run sh "$REPO_ROOT/install.sh" --dry-run --install-dir "$STUBDIR/inst" --bin-dir $'rel\033]0;t\007x'
+  assert_failure 1
+  assert_output --partial "got 'rel?]0;t?x'"
+  refute_output --partial $'\033'
+  [ ! -e "$STUBDIR/inst" ]
+  # An absolute --bin-dir overrides a relative ACQ_INSTALL_BIN_DIR.
+  run env ACQ_INSTALL_BIN_DIR=rel-bin sh "$REPO_ROOT/install.sh" --dry-run \
+    --install-dir "$STUBDIR/inst" --bin-dir "$STUBDIR/bin"
+  assert_success
+  assert_line "  launcher:    $STUBDIR/bin/acq"
+  run ls -A "$work"
+  assert_output ''
+}
+
 @test "installer: a relative TMPDIR is ignored for the private work dir" {
   local work="$STUBDIR/work"
   mkdir -p "$work"

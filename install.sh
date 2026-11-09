@@ -85,6 +85,7 @@ SOURCE="${ACQ_INSTALL_SOURCE:-}"
 INSTALL_DIR="${ACQ_INSTALL_DIR:-${DATA_HOME:+$DATA_HOME/acq}}"
 INSTALL_DIR_FROM="${ACQ_INSTALL_DIR:+ACQ_INSTALL_DIR}"
 BIN_DIR="${ACQ_INSTALL_BIN_DIR:-${USER_HOME:+$USER_HOME/.local/bin}}"
+BIN_DIR_FROM="${ACQ_INSTALL_BIN_DIR:+ACQ_INSTALL_BIN_DIR}"
 CHANNEL="${ACQ_INSTALL_CHANNEL:-python}"
 
 DRY_RUN=0
@@ -164,8 +165,8 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --install-dir) [ $# -ge 2 ] || usage_err "--install-dir needs a value"; INSTALL_DIR="$2"; INSTALL_DIR_FROM="--install-dir"; shift 2 ;;
     --install-dir=*) INSTALL_DIR="${1#--install-dir=}"; INSTALL_DIR_FROM="--install-dir"; shift ;;
-    --bin-dir) [ $# -ge 2 ] || usage_err "--bin-dir needs a value"; BIN_DIR="$2"; shift 2 ;;
-    --bin-dir=*) BIN_DIR="${1#--bin-dir=}"; shift ;;
+    --bin-dir) [ $# -ge 2 ] || usage_err "--bin-dir needs a value"; BIN_DIR="$2"; BIN_DIR_FROM="--bin-dir"; shift 2 ;;
+    --bin-dir=*) BIN_DIR="${1#--bin-dir=}"; BIN_DIR_FROM="--bin-dir"; shift ;;
     --source) [ $# -ge 2 ] || usage_err "--source needs a value"; SOURCE="$2"; shift 2 ;;
     --source=*) SOURCE="${1#--source=}"; shift ;;
     --ref) [ $# -ge 2 ] || usage_err "--ref needs a value"; VERSION="$2"; shift 2 ;;
@@ -200,6 +201,11 @@ fi
 # so a relative value would leave the launcher dangling.
 if ! is_abs_path "$INSTALL_DIR"; then
   die "${INSTALL_DIR_FROM:-the install directory} must be an absolute path, got '$(shown "$INSTALL_DIR")'; pass an absolute --install-dir (or unset ACQ_INSTALL_DIR to use the default)"
+fi
+# The bin directory too: a relative one would put the launcher links under
+# whatever directory the installer happened to run in, off the user's PATH.
+if ! is_abs_path "$BIN_DIR"; then
+  die "${BIN_DIR_FROM:-the bin directory} must be an absolute path, got '$(shown "$BIN_DIR")'; pass an absolute --bin-dir (or unset ACQ_INSTALL_BIN_DIR to use the default)"
 fi
 
 # ---------------------------------------------------------------------------

@@ -6506,12 +6506,31 @@ acq_print_image_contract_doctor() {
   acq_backend_doctor_sandbox "$name"
 }
 
-# _acq_doctor_backend_pin_check — report an unknown backend pinned in
-# config.yaml (recorded by acq_resolve_backend_diagnostic) as a failed
-# config-backend check, with the message and remediation Python's doctor uses.
+# _acq_doctor_broken_pin — print the unknown backend config.yaml pins, or
+# nothing. Resolution records a broken pin (ACQ_INVALID_BACKEND_PIN, from
+# acq_resolve_backend_diagnostic) only when it used the pin; with --backend or
+# ACQ_BACKEND set it never reads config.yaml, so the file is read here. As in
+# Python's doctor, the pin is reported either way: every later invocation
+# without the override still refuses it.
+_acq_doctor_broken_pin() {
+  local pin
+  if [ -n "${ACQ_INVALID_BACKEND_PIN:-}" ]; then
+    printf '%s\n' "$ACQ_INVALID_BACKEND_PIN"
+    return 0
+  fi
+  pin=$(_read_config_backend)
+  if [ -n "$pin" ] && ! acq_backend_name_known "$pin"; then
+    printf '%s\n' "$pin"
+  fi
+  return 0
+}
+
+# _acq_doctor_backend_pin_check PIN — report PIN, an unknown backend pinned in
+# config.yaml (from _acq_doctor_broken_pin), as a failed config-backend check,
+# with the message and remediation Python's doctor uses. No PIN, no output.
 _acq_doctor_backend_pin_check() {
-  [ -n "${ACQ_INVALID_BACKEND_PIN:-}" ] || return 0
-  echo "  [fail] config-backend: config.yaml sets an unknown backend: '$(acq_printable "$ACQ_INVALID_BACKEND_PIN")' (expected sbx or msb)"
+  [ -n "${1:-}" ] || return 0
+  echo "  [fail] config-backend: config.yaml sets an unknown backend: '$(acq_printable "$1")' (expected sbx or msb)"
   echo "           run 'acq backend set msb' or 'acq backend set sbx' (or 'acq backend unset' to auto-detect)"
 }
 
@@ -6576,7 +6595,9 @@ acq_print_doctor() {
   if [ -n "${ACQ_BACKEND:-}" ]; then
     echo "  ACQ_BACKEND env override: ${ACQ_BACKEND}"
   fi
-  _acq_doctor_backend_pin_check
+  local broken_pin
+  broken_pin=$(_acq_doctor_broken_pin)
+  _acq_doctor_backend_pin_check "$broken_pin"
 
   echo ""
 
@@ -6589,7 +6610,7 @@ acq_print_doctor() {
 
   echo ""
   # A broken pin is not overwritten from here: configure offers that fix.
-  if [ -z "$dirs_ok" ] || [ -z "$config_file" ] || [ -n "${ACQ_INVALID_BACKEND_PIN:-}" ]; then
+  if [ -z "$dirs_ok" ] || [ -z "$config_file" ] || [ -n "$broken_pin" ]; then
     return 0
   fi
   # ACQ_RESOLVED_BACKEND is always set by acq_resolve_backend before doctor runs,
