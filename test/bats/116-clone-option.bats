@@ -679,7 +679,7 @@ _assert_layout_refused() { # SANDBOX
   ln -s "$STUBDIR/objects" "$CLONEPROJ/.git/objects"
   _msb_clone -- create shell --clone "$CLONEPROJ"
   _assert_layout_refused shell-cloneproj
-  assert_output --partial '.git/objects is a symlink'
+  assert_output --partial '.git contains a symlink'
   rm "$CLONEPROJ/.git/objects"; mv "$STUBDIR/objects" "$CLONEPROJ/.git/objects"
 
   printf '.\n' > "$CLONEPROJ/.git/commondir"
@@ -765,14 +765,132 @@ _assert_layout_refused() { # SANDBOX
 }
 
 @test "clone(msb): a Git LFS workspace gets a notice to run 'git lfs pull' in the guest" {
+  # Dirty in both runs, so the uncommitted-changes note is printed each time;
+  # only the LFS run adds the may-appear-modified caveat to it.
+  echo new > "$CLONEPROJ/untracked.txt"
   _msb_clone -- create shell --name nolfs --clone "$CLONEPROJ"
   assert_success
+  assert_output --partial 'uncommitted changes'
   refute_output --partial 'git lfs pull'
+  refute_output --partial 'may appear modified'
   printf '*.bin filter=lfs diff=lfs merge=lfs -text\n' > "$CLONEPROJ/.gitattributes"
   git -C "$CLONEPROJ" add .gitattributes
   git -C "$CLONEPROJ" -c user.email=t@example.com -c user.name=t -c commit.gpgsign=false commit -q -m lfs
   _msb_clone -- create shell --name withlfs --clone "$CLONEPROJ"
   assert_success
   assert_output --partial 'Git LFS'
+  assert_output --partial 'If git-lfs is available in the sandbox'
   assert_output --partial 'git lfs pull'
+  assert_output --partial 'LFS-tracked files may appear modified'
+}
+
+@test "clone(msb): a symlink anywhere inside .git (except hooks) is refused" {
+  # Each of these lets git read objects or refs from another repository while
+  # .git itself, .git/objects and rev-parse all look ordinary.
+  local other="$STUBDIR/otherrepo" p
+  _mk_repo "$other"
+  git -C "$other" pack-refs --all
+  for p in objects/pack refs/heads packed-refs; do
+    if [ -e "$CLONEPROJ/.git/$p" ]; then mv "$CLONEPROJ/.git/$p" "$STUBDIR/saved"; fi
+    ln -s "$other/.git/$p" "$CLONEPROJ/.git/$p"
+    _msb_clone -- create shell --clone "$CLONEPROJ"
+    _assert_layout_refused shell-cloneproj
+    assert_output --partial '.git contains a symlink'
+    rm "$CLONEPROJ/.git/$p"
+    if [ -e "$STUBDIR/saved" ]; then mv "$STUBDIR/saved" "$CLONEPROJ/.git/$p"; fi
+  done
+  # A symlink under .git/hooks is exempt: the wrapper never runs hooks.
+  ln -s /nonexistent-hook "$CLONEPROJ/.git/hooks/pre-commit"
+  _msb_clone -- create shell --clone "$CLONEPROJ"
+  assert_success
+  [ -d "$STUBDIR/state/clones/shell-cloneproj/cloneproj/.git" ]
+}
+
+@test "clone(msb): an existing hooks path (dir or dangling symlink) fails closed" {
+  local hooks="$STUBDIR/state/.git-hooks-disabled"
+  mkdir -p "$hooks"
+  _msb_clone -- create shell --clone "$CLONEPROJ"
+  assert_failure
+  assert_output --partial '.git-hooks-disabled exists'
+  _refute_backend_create
+  [ ! -e "$STUBDIR/state/clones/shell-cloneproj" ]
+  rmdir "$hooks"
+  ln -s "$STUBDIR/nowhere" "$hooks"
+  _msb_clone -- create shell --clone "$CLONEPROJ"
+  assert_failure
+  assert_output --partial '.git-hooks-disabled exists'
+  [ ! -e "$STUBDIR/state/clones/shell-cloneproj" ]
+}
+
+@test "clone(msb): a relative ACQ_STATE_DIR is refused before any host-side git runs" {
+  # A relative core.hooksPath would resolve inside the guest-writable workspace.
+  run bash -c '
+    cd "'"$STUBDIR"'"
+    export ACQ_STATE_DIR=relstate
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_test_stub_provider_input_boundary
+    _acq_msb_clone_setup shell-cloneproj "$1"
+  ' _ "$CLONEPROJ"
+  assert_failure
+  assert_output --partial 'ACQ_STATE_DIR must be an absolute path'
+  [ ! -e "$STUBDIR/relstate" ]
+  run git -C "$CLONEPROJ" remote
+  assert_success
+  assert_output ''
+}
+
+@test "clone(msb): an unreadable workspace config is refused, not treated as filter-free" {
+  _stub_git '*"--get-regexp ^filter"*' 128
+  _msb_clone -- create shell --clone "$CLONEPROJ"
+  assert_failure
+  assert_output --partial 'could not read the git config'
+  _refute_backend_create
+  [ ! -e "$STUBDIR/state/clones/shell-cloneproj" ]
+}
+
+@test "clone(msb): a user-exported GIT_CONFIG_COUNT is kept and the blanking keys appended" {
+  _arm_repo_config "$CLONEPROJ" "$STUBDIR/ran"
+  local real; real=$(command -v git)
+  printf '#!/usr/bin/env bash\n{ printf "CALL %%s\\n" "$*"; env | grep "^GIT_CONFIG_" | sort; } >> "%s"\nexec %s "$@"\n' \
+    "$STUBDIR/gitenv" "$real" > "$STUBDIR/git"
+  chmod +x "$STUBDIR/git"
+  _msb_clone GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.abbrev GIT_CONFIG_VALUE_0=12 -- \
+    create shell --clone "$CLONEPROJ"
+  assert_success
+  [ ! -e "$STUBDIR/ran" ]
+  local log; log=$(cat "$STUBDIR/gitenv")
+  # The user's entry stays at index 0 on every call; acq's start at 1 (the
+  # host's own system/global filters, if any, are blanked alongside).
+  refute_regex "$log" 'GIT_CONFIG_KEY_0=filter\.'
+  refute_regex "$log" 'GIT_CONFIG_VALUE_0=[^1]'
+  assert_regex "$log" 'GIT_CONFIG_KEY_1=filter\.'
+  assert_regex "$log" 'GIT_CONFIG_KEY_[1-9][0-9]*=filter\.rec\.(clean|smudge|process)'
+  assert_regex "$log" 'GIT_CONFIG_COUNT=([2-9]|[1-9][0-9])'
+}
+
+@test "clone(msb): identity honours GIT_CONFIG_NOSYSTEM like git and reads worktree and command scopes" {
+  local sys="$STUBDIR/sys.gitconfig" cfg="$STUBDIR/state/clones/shell-cloneproj/cloneproj/.git/config"
+  printf '[user]\n\tname = System User\n\temail = system@example.gov\n' > "$sys"
+  git -C "$CLONEPROJ" config user.email repo@example.gov
+  git -C "$CLONEPROJ" config extensions.worktreeConfig true
+  git -C "$CLONEPROJ" config --worktree user.email wt@example.gov
+  # GIT_CONFIG_NOSYSTEM=2 is true to git (a non-zero integer): no system file.
+  # The worktree scope overrides the local one.
+  _msb_clone HOME="$STUBDIR/nohome" XDG_CONFIG_HOME="$STUBDIR/noconfig" \
+    GIT_CONFIG_SYSTEM="$sys" GIT_CONFIG_NOSYSTEM=2 -- create shell --clone "$CLONEPROJ"
+  assert_success
+  run git config --file "$cfg" user.name
+  assert_failure
+  [ "$(git config --file "$cfg" user.email)" = wt@example.gov ]
+  _msb_clone -- rm shell-cloneproj
+  # GIT_CONFIG_NOSYSTEM=0 reads the system file; an exported command-scope
+  # value comes last and wins.
+  _msb_clone HOME="$STUBDIR/nohome" XDG_CONFIG_HOME="$STUBDIR/noconfig" \
+    GIT_CONFIG_SYSTEM="$sys" GIT_CONFIG_NOSYSTEM=0 \
+    GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.email GIT_CONFIG_VALUE_0=env@example.gov -- \
+    create shell --clone "$CLONEPROJ"
+  assert_success
+  [ "$(git config --file "$cfg" user.name)" = "System User" ]
+  [ "$(git config --file "$cfg" user.email)" = env@example.gov ]
 }

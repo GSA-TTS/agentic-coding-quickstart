@@ -3255,6 +3255,8 @@ _acq_msb_git_ws() {
 # _ACQ_MSB_WS_HOOKS (the never-created hooks path) and the filter settings
 # (_acq_msb_git_ws_filter_cfg). Returns 1, saying why, when either cannot be
 # made safe; clone setup calls it once up front, where that message is shown.
+# Hooks stay off only while the hooks path does not exist, so an existing file,
+# directory or symlink there fails closed rather than becoming a hooks dir.
 _acq_msb_git_ws_prep() {
   _ACQ_MSB_WS_HOOKS="${ACQ_STATE_DIR}/.git-hooks-disabled"
   case "$_ACQ_MSB_WS_HOOKS" in
@@ -3264,6 +3266,11 @@ _acq_msb_git_ws_prep() {
       return 1
       ;;
   esac
+  if [ -e "$_ACQ_MSB_WS_HOOKS" ] || [ -L "$_ACQ_MSB_WS_HOOKS" ]; then
+    echo "acq(msb): error: --clone: $_ACQ_MSB_WS_HOOKS exists. acq disables git hooks by" >&2
+    echo "acq(msb):   pointing core.hooksPath at that path and needs it absent. Remove it, then re-run." >&2
+    return 1
+  fi
   _acq_msb_git_ws_filter_cfg "$1"
 }
 
@@ -3276,10 +3283,18 @@ _acq_msb_git_ws_prep() {
 # splits at the first '=', so it cannot name a driver whose name itself
 # contains one. On an older git the `-c` form is the only one, and a driver
 # name containing '=' is refused (return 1) because it cannot be blanked.
+# A config read that fails (any status but 0, or 1 for "no filter keys") is
+# refused too: without the list, a driver could be left live.
 _acq_msb_git_ws_filter_cfg() {
-  local dir="$1" key val n envok=""
+  local dir="$1" key val n envok="" keys rc=0
   _ACQ_MSB_WS_ENV=()
   _ACQ_MSB_WS_CFG=()
+  keys=$(git --no-pager -C "$dir" config --name-only --get-regexp '^filter\.' 2>/dev/null) || rc=$?
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
+    echo "acq(msb): error: --clone: could not read the git config for $dir (git exit $rc);" >&2
+    echo "acq(msb):   refusing to run git there without knowing its filter drivers." >&2
+    return 1
+  fi
   case "${GIT_CONFIG_COUNT:-}" in
     '' | *[!0-9]*) n=0 ;;
     *) n=$((10#$GIT_CONFIG_COUNT)) ;;
@@ -3290,7 +3305,7 @@ _acq_msb_git_ws_filter_cfg() {
       filter.*.required) val=false ;;
       *) continue ;;
     esac
-    [ -n "$envok" ] || { _acq_msb_git_has_config_env && envok=1 || envok=0; }
+    [ -n "$envok" ] || { _acq_msb_git_version_ge 2 31 && envok=1 || envok=0; }
     if [ "$envok" = 1 ]; then
       _ACQ_MSB_WS_ENV+=("GIT_CONFIG_KEY_${n}=${key}" "GIT_CONFIG_VALUE_${n}=${val}")
       n=$((n + 1))
@@ -3305,14 +3320,16 @@ _acq_msb_git_ws_filter_cfg() {
         ;;
     esac
     _ACQ_MSB_WS_CFG+=(-c "${key}=${val}")
-  done < <(git --no-pager -C "$dir" config --name-only --get-regexp '^filter\.' 2>/dev/null)
+  done <<EOF
+$keys
+EOF
   [ "${#_ACQ_MSB_WS_ENV[@]}" -eq 0 ] || _ACQ_MSB_WS_ENV+=("GIT_CONFIG_COUNT=${n}")
   return 0
 }
 
-# _acq_msb_git_has_config_env — succeed when the host git reads
-# GIT_CONFIG_COUNT (added in git 2.31).
-_acq_msb_git_has_config_env() {
+# _acq_msb_git_version_ge MAJOR MINOR — succeed when the host git is at least
+# MAJOR.MINOR (2.31 reads GIT_CONFIG_COUNT; 2.26 has `config --show-scope`).
+_acq_msb_git_version_ge() {
   local v maj min
   v=$(git --version 2>/dev/null) || return 1
   v=${v#git version }
@@ -3321,7 +3338,7 @@ _acq_msb_git_has_config_env() {
   min=${min%%.*}
   case "$maj" in '' | *[!0-9]*) return 1 ;; esac
   case "$min" in '' | *[!0-9]*) return 1 ;; esac
-  [ "$maj" -gt 2 ] || { [ "$maj" -eq 2 ] && [ "$min" -ge 31 ]; }
+  [ "$maj" -gt "$1" ] || { [ "$maj" -eq "$1" ] && [ "$min" -ge "$2" ]; }
 }
 
 # _acq_msb_clone_setup NAME WSPATH — create the scratch clone + fetch-back
@@ -3385,11 +3402,16 @@ _acq_msb_clone_setup() {
     return 1
   fi
   _acq_msb_clone_check_partial "$ws_canon" || return 1
+  _ACQ_MSB_CLONE_LFS=""
   _acq_msb_clone_note_lfs "$ws_canon"
   if [ -n "$(_acq_msb_git_ws "$ws_canon" status --porcelain --ignore-submodules=all 2>/dev/null)" ]; then
     echo "acq(msb): note: the workspace has uncommitted changes; a git clone carries" >&2
     echo "acq(msb):   committed state only. Commit first ('git add' untracked files)," >&2
     echo "acq(msb):   or copy files in with 'acq cp'." >&2
+    if [ -n "$_ACQ_MSB_CLONE_LFS" ]; then
+      echo "acq(msb):   With filters disabled, LFS-tracked files may appear modified here" >&2
+      echo "acq(msb):   even when they are not." >&2
+    fi
   fi
   # Private (0700): the scratch .git/config carries the source origin URL,
   # which may embed a credential, at a path the user never sees. Check the
@@ -3439,9 +3461,14 @@ _acq_msb_clone_setup() {
 # _acq_msb_clone_check_layout WS — refuse (return 1) unless the canonical
 # workspace WS is an ordinary repository whose .git is its own directory. In a
 # linked worktree or a submodule checkout (.git is a gitfile, or the git dir
-# names a commondir), or with a symlinked .git or object store, git reads its
-# objects and config from somewhere other than WS/.git, so the alternates check
-# and the scratch clone would not be looking at what git actually uses.
+# names a commondir), with a symlink anywhere inside .git, or with git's
+# directories resolving elsewhere, git can read objects, refs or config from
+# outside WS/.git, where the alternates check and the scratch clone are not
+# looking. A pass means that, at the time of the check, everything git reads
+# lives physically under WS/.git. .git/hooks is exempt from the symlink scan:
+# the wrapper never runs hooks. The scan only asks whether any link exists, so
+# odd file names cannot confuse it; it runs from inside .git so the workspace
+# path is never parsed as a find pattern.
 _acq_msb_clone_check_layout() {
   local ws="$1" want why="" gd="" common=""
   want="${ws}/.git"
@@ -3451,8 +3478,8 @@ _acq_msb_clone_check_layout() {
     why=".git is a file pointing at another git directory"
   elif [ -e "${want}/commondir" ] || [ -L "${want}/commondir" ]; then
     why=".git/commondir exists"
-  elif [ -L "${want}/objects" ]; then
-    why=".git/objects is a symlink"
+  elif [ -n "$(cd "$want" && find . -path ./hooks -prune -o -type l -print 2>/dev/null | head -n 1)" ]; then
+    why=".git contains a symlink (outside .git/hooks)"
   else
     want=$(canonicalize_path "$want")
     gd=$(_acq_msb_git_ws "$ws" rev-parse --absolute-git-dir 2>/dev/null) || gd=""
@@ -3501,9 +3528,10 @@ _acq_msb_clone_check_partial() {
   return 1
 }
 
-# _acq_msb_clone_note_lfs WS — print a notice when WS uses Git LFS. The wrapper
-# disables filter drivers, so LFS-tracked files land in the scratch as pointer
-# files; the agent can fetch their content in the guest. Advisory only.
+# _acq_msb_clone_note_lfs WS — print a notice when WS uses Git LFS, and set
+# _ACQ_MSB_CLONE_LFS=1. The wrapper disables filter drivers, so LFS-tracked
+# files land in the scratch as pointer files (the agent can fetch their content
+# in the guest), and the host-side status can show them as modified. Advisory.
 _acq_msb_clone_note_lfs() {
   local ws="$1" f found=""
   for f in "${ws}/.gitattributes" "${ws}/.git/info/attributes"; do
@@ -3517,9 +3545,11 @@ _acq_msb_clone_note_lfs() {
     found=1
   fi
   [ -n "$found" ] || return 0
+  _ACQ_MSB_CLONE_LFS=1
   echo "acq(msb): note: this repository uses Git LFS. Clone mode disables filter drivers," >&2
   echo "acq(msb):   so LFS-tracked files are checked out in the scratch as pointer files." >&2
-  echo "acq(msb):   Fetch their content inside the sandbox with: git lfs pull" >&2
+  echo "acq(msb):   If git-lfs is available in the sandbox, fetch their content there with:" >&2
+  echo "acq(msb):   git lfs pull" >&2
   return 0
 }
 
@@ -3616,38 +3646,82 @@ _acq_msb_clone_unset_key() {
 # _acq_msb_clone_read_identity SRC KEY — resolve the identity KEY (user.name or
 # user.email) for the checkout SRC into _ACQ_MSB_IDENT_VAL. Returns 0 when set,
 # 1 when no scope sets it, 2 when a scope's config cannot be read.
-# The scopes are read in git's own order, system -> global -> local, and the
-# last value wins, as it does for the user's own commits. The system and
-# global files are the user's (the guest never writes them), so they are read
-# with --includes: a per-forge identity commonly sits behind a gitdir-scoped
-# includeIf there. The repository's own .git/config is reachable from the guest
-# in normal mode, so it is read with --no-includes and cannot point the host at
-# another file. The system scope is skipped when GIT_CONFIG_NOSYSTEM is set,
-# as git itself does (`config --system` would read it regardless).
+# The scopes are read in git's own order, system -> global -> local ->
+# worktree -> command, and the last value wins, as it does for the user's own
+# commits. The system and global files are the user's (the guest never writes
+# them), so they are read with --includes: a per-forge identity commonly sits
+# behind a gitdir-scoped includeIf there. The repository's own config files
+# are reachable from the guest in normal mode, so they are read with
+# --no-includes and cannot point the host at another file.
+#   - system: skipped when GIT_CONFIG_NOSYSTEM holds any non-empty value other
+#     than 0/false/no/off, as git does (`config --system` reads it regardless).
+#   - worktree (.git/config.worktree): read only when extensions.worktreeConfig
+#     is true; otherwise `--worktree` would just re-read the local file.
+#   - command (values the user exports via GIT_CONFIG_COUNT or
+#     GIT_CONFIG_PARAMETERS): picked out of `config --show-scope`, which needs
+#     git 2.26. Known gap: on an older git the command scope is not read.
 _acq_msb_clone_read_identity() {
-  local src="$1" key="$2" scope rc val found=""
-  local -a flags
+  local src="$1" key="$2" scope rc found=""
   _ACQ_MSB_IDENT_VAL=""
-  for scope in system global local; do
+  for scope in system global local worktree command; do
+    rc=0
     case "$scope" in
       system)
         case "${GIT_CONFIG_NOSYSTEM:-}" in
-          [Tt][Rr][Uu][Ee] | [Yy][Ee][Ss] | [Oo][Nn] | 1) continue ;;
+          '' | 0 | [Ff][Aa][Ll][Ss][Ee] | [Nn][Oo] | [Oo][Ff][Ff]) ;;
+          *) continue ;;
         esac
-        flags=(--system --includes)
+        _acq_msb_clone_read_scope "$src" "$key" --system --includes || rc=$?
         ;;
-      global) flags=(--global --includes) ;;
-      local) flags=(--local --no-includes) ;;
+      global) _acq_msb_clone_read_scope "$src" "$key" --global --includes || rc=$? ;;
+      local) _acq_msb_clone_read_scope "$src" "$key" --local --no-includes || rc=$? ;;
+      worktree)
+        [ "$(_acq_msb_git_ws "$src" config --local --no-includes --bool \
+          --get extensions.worktreeConfig 2>/dev/null)" = true ] || continue
+        _acq_msb_clone_read_scope "$src" "$key" --worktree --no-includes || rc=$?
+        ;;
+      command) _acq_msb_clone_read_command_scope "$src" "$key" || rc=$? ;;
     esac
-    rc=0
-    _acq_msb_git_ws "$src" config "${flags[@]}" --get-all "$key" >/dev/null 2>&1 || rc=$?
-    [ "$rc" -eq 1 ] && continue
-    [ "$rc" -eq 0 ] || return 2
-    while IFS= read -r -d '' val; do
-      _ACQ_MSB_IDENT_VAL="$val"
-      found=1
-    done < <(_acq_msb_git_ws "$src" config "${flags[@]}" -z --get-all "$key" 2>/dev/null)
+    case "$rc" in
+      0) found=1 ;;
+      1) ;;
+      *) return 2 ;;
+    esac
   done
+  [ -n "$found" ] || return 1
+  return 0
+}
+
+# _acq_msb_clone_read_scope SRC KEY FLAGS... — read KEY from SRC's config with
+# the scope FLAGS; on success put its last value in _ACQ_MSB_IDENT_VAL. Returns
+# 0 when set, 1 when absent, 2 when the config cannot be read.
+_acq_msb_clone_read_scope() {
+  local src="$1" key="$2" rc=0 val
+  shift 2
+  _acq_msb_git_ws "$src" config "$@" --get-all "$key" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] && return 1
+  [ "$rc" -eq 0 ] || return 2
+  while IFS= read -r -d '' val; do
+    _ACQ_MSB_IDENT_VAL="$val"
+  done < <(_acq_msb_git_ws "$src" config "$@" -z --get-all "$key" 2>/dev/null)
+  return 0
+}
+
+# _acq_msb_clone_read_command_scope SRC KEY — like _acq_msb_clone_read_scope,
+# for the command scope. `config --show-scope -z` prints scope/value pairs,
+# NUL-delimited; includes stay off, so only values from the environment and
+# the wrapper's own settings (which never set user.*) are command-scoped here.
+_acq_msb_clone_read_command_scope() {
+  local src="$1" key="$2" rc=0 scope val found=""
+  _acq_msb_git_version_ge 2 26 || return 1
+  _acq_msb_git_ws "$src" config --no-includes --show-scope --get-all "$key" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] && return 1
+  [ "$rc" -eq 0 ] || return 2
+  while IFS= read -r -d '' scope && IFS= read -r -d '' val; do
+    [ "$scope" = command ] || continue
+    _ACQ_MSB_IDENT_VAL="$val"
+    found=1
+  done < <(_acq_msb_git_ws "$src" config --no-includes --show-scope -z --get-all "$key" 2>/dev/null)
   [ -n "$found" ] || return 1
   return 0
 }
