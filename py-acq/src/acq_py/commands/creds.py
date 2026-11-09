@@ -11,6 +11,7 @@ import os
 import sys
 
 from .. import (
+    backends,
     envelope,
     errors,
     gitrepos,
@@ -561,35 +562,108 @@ def run_github_scope(parsed, emit_json: bool, backend: str) -> int:
     return _github_scope_result(backend, sandbox, repos, owner, emit_json)
 
 
-def run_usai_rotate_api_key(emit_json: bool, backend: str) -> int:
-    """``acq usai-rotate-api-key`` — rotate the stored USAi key (ADR-0012).
+_ROTATE = "usai-rotate-api-key"
+_ROTATE_RETRY = "re-run 'acq usai-rotate-api-key' with the same key to retry"
 
-    Reads the new key on stdin only and forwards it to the backend on the child's
-    stdin. The backend validates the new key before replacing the old one, so a
-    failed rotation (provider_unreachable / provider_auth_failed) leaves the old
-    key in place. The new key never appears in output.
+
+def _rotation_backends(backend: str) -> list[str]:
+    """The active backend, then the other one when it is installed.
+
+    The acq store is shared, so a sandbox on the other backend uses the same
+    key and is re-fed too (Bash ``acq_propagate_usai_rotation``). An installed
+    backend below acq's version floor is skipped with a warning: acq drives no
+    sandbox there.
     """
-    adapter = common._adapter(backend)
-    value = common._read_secret_value()
-    if not value.strip():
-        return common._operational_failure(
-            "usai-rotate-api-key",
-            errors.VALIDATION_FAILED,
-            "no new USAi key provided on stdin",
-            "pipe the new key on stdin, e.g. printf '%s' NEW_KEY | acq usai-rotate-api-key",
-            emit_json,
-        )
-    try:
-        adapter.rotate_key(value)
-    except common._ADAPTER_ERRORS as exc:
-        return common._operational_failure("usai-rotate-api-key", exc.code, exc.message, exc.remediation, emit_json)
+    names = [backend]
+    for other in backends.BACKEND_ORDER:
+        spec = backends.BACKENDS[other]
+        if other == backend or not backends.detect(spec).installed:
+            continue
+        problem = backends.check_version(spec)
+        if problem is None:
+            names.append(other)
+        else:
+            print(f"acq: warning: {other} sandboxes were not re-fed: {problem.message}", file=sys.stderr)
+    return names
+
+
+def _rotate_result(results: list[dict], emit_json: bool) -> int:
     data = {
         "provider": provider_creds.USAI_PROVIDER_ID,
         "key_env": provider_creds.USAI_PROVIDER_KEY_ENV,
         "rotated": True,
+        "backends": results,
     }
     if emit_json:
-        print(json.dumps(envelope.success("usai-rotate-api-key", data)))
-    else:
-        print("rotated the USAi API key.")
+        print(json.dumps(envelope.success(_ROTATE, data)))
+        return errors.EXIT_SUCCESS
+    print("rotated the USAi API key (stored in the acq secret store).")
+    for result in results:
+        print(f"  {result['backend']}: re-fed {', '.join(result['refed']) or 'no sandbox-specific entries'}")
+        if result["kept_own"]:
+            print(f"  {result['backend']}: kept their own usai key: {', '.join(result['kept_own'])}")
     return errors.EXIT_SUCCESS
+
+
+def _rotate_locked(backend: str, value: str, emit_json: bool) -> int:
+    """Rotation under the usai provider lock: preflight, store, re-feed."""
+    try:
+        common._adapter(backend).rotate_preflight()
+        secretstore.store(secretstore.key_for(provider_creds.USAI_PROVIDER_ID), value)
+    except common._ADAPTER_ERRORS as exc:
+        return common._operational_failure(_ROTATE, exc.code, exc.message, exc.remediation, emit_json)
+    results: list[dict] = []
+    failures: list = []
+    for name in _rotation_backends(backend):
+        try:
+            results.append(common._adapter(name).rotate_refeed(value, primary=name == backend))
+        except common._ADAPTER_ERRORS as exc:
+            failures.append((name, exc))
+    if failures:
+        detail = "; ".join(f"{name}: {exc.message}" for name, exc in failures)
+        first = failures[0][1]
+        return common._operational_failure(
+            _ROTATE,
+            first.code,
+            f"stored the new USAi key in the acq secret store, but not every sandbox received it ({detail})",
+            first.remediation or _ROTATE_RETRY,
+            emit_json,
+        )
+    return _rotate_result(results, emit_json)
+
+
+def run_usai_rotate_api_key(emit_json: bool, backend: str) -> int:
+    """``acq usai-rotate-api-key`` — rotate the global USAi key (ADR-0012).
+
+    Reads the new key on stdin only (silently, after a prompt, on a terminal).
+    Rotation is a store write plus a re-feed; acq does not call the provider
+    (as in Bash, the key is checked against the real sandbox on the next
+    attach). Under the usai provider lock, the active backend's preflight first
+    refuses, with nothing changed, a rotation it could not deliver. The key then
+    goes to the acq secret store, the source of truth on both backends, and
+    every sandbox that uses it is re-fed: on the active backend and, when it is
+    installed, the other one. If any sandbox did not receive the key the
+    command exits 1 naming it (and the ones that did); the store keeps the new
+    key, so re-running with the same key retries. The key never appears in
+    argv, output or errors.
+    """
+    value = common._read_secret_value("Enter the new USAi API key: ")
+    problem = None if value.strip() else "no new USAi key provided on stdin"
+    problem = problem or secretstore.value_problem(value)
+    if problem is not None:
+        return common._operational_failure(
+            _ROTATE,
+            errors.VALIDATION_FAILED,
+            problem,
+            "pipe the new key on stdin, e.g. printf '%s' NEW_KEY | acq usai-rotate-api-key",
+            emit_json,
+        )
+    try:
+        with lock.provider_credential_lock(provider_creds.USAI_PROVIDER_ID):
+            return _rotate_locked(backend, value, emit_json)
+    except lock.ProviderCredentialLockTimeout as exc:
+        return common._operational_failure(
+            _ROTATE, errors.TIMEOUT, str(exc), "retry once the other command finishes; nothing was changed", emit_json
+        )
+    finally:
+        value = ""

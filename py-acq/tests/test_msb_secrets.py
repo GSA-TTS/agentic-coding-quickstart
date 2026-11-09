@@ -838,7 +838,8 @@ def test_create_that_cannot_record_its_bindings_is_undone(monkeypatch, tmp_path,
 def test_capability_record_declares_the_secret_verbs():
     caps = msb.capability_record()["capabilities"]
     assert caps["secret-write"] == caps["secret-rm"] == caps["secret-list"] == "required"
-    assert caps["key-rotate"] == "unsupported"
+    # Rotation stores the new key and re-feeds running sandboxes (msb modify --secret).
+    assert caps["key-rotate"] == "required"
 
 
 # ---------------------------------------------------------------------------

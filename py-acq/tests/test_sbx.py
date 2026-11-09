@@ -87,8 +87,9 @@ def test_capability_record_declares_sbx_obligations():
     assert caps["kit-source-revoke"] == "required"
     # sbx HAS a `secret` subcommand (set/ls/rm), so secret-list is required.
     assert caps["secret-list"] == "required"
-    # sbx has NO `rotate` subcommand (key-rotate is unsupported).
-    assert caps["key-rotate"] == "unsupported"
+    # sbx has NO `rotate` subcommand: key-rotate re-sets the key with
+    # `secret set-custom --placeholder P --value-stdin`.
+    assert caps["key-rotate"] == "required"
     # msb-only obligations are unsupported on sbx.
     assert caps["start"] == "unsupported"
     assert caps["restart"] == "unsupported"

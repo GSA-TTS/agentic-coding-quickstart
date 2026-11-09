@@ -12,8 +12,10 @@ Mirrors the real sbx 0.51.0 CLI surface:
 * ``sbx secret set SERVICE [--sandbox NAME]`` (value on stdin, global default),
   ``sbx secret rm SERVICE [--sandbox NAME] -f``, ``sbx secret ls [-g|--sandbox]
   --json``, ``sbx secret rm --placeholder TOKEN [--sandbox NAME] -f``, and ``sbx
-  secret set-custom --host H --env E --value-stdin [--sandbox NAME]`` (value on
-  stdin; a custom secret lands in its own table with a placeholder). Without
+  secret set-custom --host H --env E [--placeholder P] --value-stdin [--sandbox
+  NAME]`` (value on stdin; a custom secret lands in its own table with a
+  placeholder, and ``--placeholder`` naming the existing entry's placeholder
+  updates that entry in place, as rotation relies on). Without
   ``-f``, ``secret rm`` asks ``Remove secret? (y/N)`` and reads the answer from
   stdin; end-of-input is "no" and exits 1. There is NO ``secret has``.
 * ``sbx settings get/set kit.allowedSources`` — the owner-granular kit allowlist
@@ -52,6 +54,10 @@ RAW_PLACEHOLDERS_ENV = "ACQ_SBX_STUB_RAW_PLACEHOLDERS"
 # Seed for sbx's custom-secrets table: a JSON list of ``{scope, env,
 # placeholder, targets}`` (state only, never a value).
 CUSTOM_SECRETS_ENV = "ACQ_SBX_STUB_CUSTOM_SECRETS"  # nosec B105 # an env var name
+
+# Scopes (comma separated; ``global`` for the global scope) whose ``secret
+# set-custom`` fails, so a vector can exercise a partial rotation.
+FAIL_CUSTOM_SCOPES_ENV = "ACQ_SBX_STUB_FAIL_CUSTOM_SCOPES"
 
 # ``exec``/``cp`` markers to simulate a real agent writing to stdout/stderr.
 EXEC_MARKER = "[stub sbx exec]"
@@ -350,12 +356,23 @@ def _secret_set_custom(rest: list[str]) -> int:
         print(RAW_FAIL_STDERR, file=sys.stderr)
         return 1
     scope = _secret_scope(rest)
+    if scope in os.environ.get(FAIL_CUSTOM_SCOPES_ENV, "").split(","):
+        print(RAW_FAIL_STDERR, file=sys.stderr)
+        return 1
     entries = _load_custom()
-    if any(e["scope"] == scope and e["env"] == env for e in entries):
+    placeholder = _arg_after(rest, "--placeholder")
+    same = [e for e in entries if e["scope"] == scope and e["env"] == env]
+    if placeholder is not None and same and all(e["placeholder"] == placeholder for e in same):
+        for entry in same:
+            entry["targets"] = hosts  # updated in place: the placeholder is kept
+        _save_custom(entries)
+        return 0
+    if same:
         print(f"sbx: custom secret for {env} already exists", file=sys.stderr)
         return 1
-    digest = hashlib.sha256(f"{scope}\0{env}".encode()).hexdigest()[:16]
-    entries.append({"scope": scope, "env": env, "placeholder": f"sbx-cs-{digest}", "targets": hosts})
+    if placeholder is None:
+        placeholder = "sbx-cs-" + hashlib.sha256(f"{scope}\0{env}".encode()).hexdigest()[:16]
+    entries.append({"scope": scope, "env": env, "placeholder": placeholder, "targets": hosts})
     _save_custom(entries)
     return 0
 

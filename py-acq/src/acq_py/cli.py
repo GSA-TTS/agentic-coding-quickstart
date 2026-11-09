@@ -377,7 +377,7 @@ def build_parser() -> _Parser:
     github_scope_parser.add_argument("path", nargs="?", help="workspace path (default: recorded sandbox workspace)")
 
     # usai-rotate-api-key: rotate the stored USAi key (ADR-0012). New key on stdin
-    # only; the old key is replaced only after the new one is confirmed.
+    # only; it is stored, then every sandbox that uses it is re-fed.
     sub.add_parser("usai-rotate-api-key", help="rotate the USAi API key (new key on stdin)")
 
     return parser
