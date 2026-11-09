@@ -10,6 +10,7 @@ against the deterministic ``__stub__`` sbx.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import random
@@ -905,7 +906,6 @@ def test_a_moved_aside_copy_is_dropped_when_the_name_is_retaken(monkeypatch, tmp
     dest = parent / "kit"
     dest.mkdir()
     (dest / "spec.yaml").write_text("x", encoding="utf-8")
-    judged = os.lstat(dest)
     real_rename = os.rename
 
     def rename(src, dst):
@@ -915,9 +915,52 @@ def test_a_moved_aside_copy_is_dropped_when_the_name_is_retaken(monkeypatch, tmp
             (dest / "spec.yaml").write_text("y", encoding="utf-8")
 
     monkeypatch.setattr(kit_sbx.os, "rename", rename)
-    kit_sbx._move_damaged_aside(dest, judged, None)
+    kit_sbx._move_damaged_aside(dest, None)
     assert (dest / "spec.yaml").read_text(encoding="utf-8") == "y"
     assert not [e for e in parent.iterdir() if e.name.startswith(kit_sbx.TRASH_PREFIX)]
+
+
+def _fill_spec(tmp):
+    (tmp / "spec.yaml").write_text("x", encoding="utf-8")
+
+
+def test_a_failed_rename_with_nothing_at_the_name_raises(monkeypatch, tmp_path):
+    # The rename into place fails although nothing sits at the kit's name (a
+    # permission error, a Windows antivirus handle, a name too long). That must
+    # fail the create, not return a path that does not exist.
+    monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
+    parent = kit_sbx._subdir("generated")
+    real_rename = os.rename
+
+    def rename(src, dst):
+        if Path(dst).name == "kit":
+            raise PermissionError(errno.EACCES, "denied")
+        return real_rename(src, dst)
+
+    monkeypatch.setattr(kit_sbx.os, "rename", rename)
+    with pytest.raises(kit_sbx.KitTranslateError, match="could not place a generated kit"):
+        kit_sbx._publish(parent, "kit", _fill_spec)
+    assert list(parent.iterdir()) == []  # the build directory is cleaned up too
+
+
+def test_a_rename_retried_after_the_name_was_vacated_places_the_kit(monkeypatch, tmp_path):
+    # The first rename fails because a tree sits at the name; by the time it is
+    # looked at, another create has moved it away. The rename is retried.
+    monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
+    parent = kit_sbx._subdir("generated")
+    real_rename = os.rename
+    failed = []
+
+    def rename(src, dst):
+        if Path(dst).name == "kit" and not failed:
+            failed.append(True)
+            raise FileExistsError(errno.EEXIST, "exists")
+        return real_rename(src, dst)
+
+    monkeypatch.setattr(kit_sbx.os, "rename", rename)
+    dest = kit_sbx._publish(parent, "kit", _fill_spec)
+    assert failed and dest == parent / "kit" and kit_sbx._valid_kit_dir(dest)
+    assert [e.name for e in parent.iterdir()] == ["kit"]
 
 
 def test_prune_sweeps_old_build_directories_only(monkeypatch, tmp_path):

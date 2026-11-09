@@ -392,27 +392,24 @@ def _tree_digest(root: Path) -> str:
     return digest.hexdigest()
 
 
-def _same_tree(a: os.stat_result, b: os.stat_result) -> bool:
-    return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
-
-
-def _move_damaged_aside(dest: Path, judged: os.stat_result, digest: str | None) -> None:
+def _move_damaged_aside(dest: Path, digest: str | None) -> None:
     """Delete the damaged tree at ``dest``, but never a concurrent create's fresh copy.
 
     The verdict that ``dest`` is damaged can be stale by the time it is acted
     on: another create may have replaced the damaged tree with its own valid
     copy in between. So the tree is renamed aside first and checked again
-    there. Only the very tree that was judged (same device and inode), still
-    incomplete, is deleted; anything else is renamed back. Raises ``OSError``
-    only from the rename aside (a concurrent create moved it first).
+    there: a tree that is still incomplete is deleted, and a valid one is
+    renamed back. The check is on content alone, not on the tree's inode, so
+    a valid copy is never deleted, and a damaged tree is still repaired on a
+    file system where a rename changes the inode (FAT, exFAT).
+
+    Raises ``OSError`` from the rename aside (a concurrent create moved it
+    first) or from deleting the moved tree; a tree left half deleted sits at a
+    ``.trash-*`` name no kit uses, and :func:`prune_stale` sweeps it.
     """
     trash = dest.parent / f"{TRASH_PREFIX}{secrets.token_hex(8)}"
     os.rename(dest, trash)
-    try:
-        moved = os.lstat(trash)
-    except OSError:
-        return  # gone already; nothing to keep
-    if _same_tree(moved, judged) and not _valid_kit_dir(trash, digest):
+    if not _valid_kit_dir(trash, digest):
         _remove_tree(trash)
         return
     try:
@@ -451,15 +448,16 @@ def _publish(parent: Path, stem: str, fill: Callable[[Path], None], *, by_conten
         try:
             os.rename(tmp, dest)
         except OSError:
-            try:
-                judged: os.stat_result | None = os.lstat(dest)
-            except OSError:
-                judged = None  # moved away meanwhile: just retry the rename
-            if judged is not None and not _valid_kit_dir(dest, digest):  # damaged, e.g. half deleted
-                try:
-                    _move_damaged_aside(dest, judged, digest)
-                except OSError:
-                    pass  # a concurrent create moved it first
+            if not _valid_kit_dir(dest, digest):
+                if os.path.lexists(dest):  # damaged, e.g. half deleted: move it aside
+                    try:
+                        _move_damaged_aside(dest, digest)
+                    except OSError:
+                        pass  # a concurrent create moved it first, or a delete stopped part way
+                # Retry in every case: also when nothing sat at ``dest`` (it was
+                # moved away meanwhile, or the first rename failed for another
+                # reason, such as a permission error), so such a failure is
+                # raised instead of returning a path that does not exist.
                 try:
                     os.rename(tmp, dest)
                 except OSError:
