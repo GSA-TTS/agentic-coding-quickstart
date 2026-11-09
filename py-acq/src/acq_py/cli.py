@@ -806,12 +806,12 @@ def _dispatch(parser: _Parser, parsed, emit_json: bool, backend_override: str | 
         subcmd = parsed.provider_credential_command
         if subcmd is None:
             return common._usage_failure("provider-credential", "provider-credential requires a subcommand: set | ls | rm", emit_json)
-        # ls/rm read and mutate host-side binding records only; only `set` moves a
-        # value across the backend boundary and therefore needs a backend.
+        # ls reads host-side binding records only. rm resolves a backend itself,
+        # and only when a stored credential has to be unbound; set always needs one.
         if subcmd == "ls":
             return creds.run_provider_credential_ls(emit_json)
         if subcmd == "rm":
-            return creds.run_provider_credential_rm(parsed, emit_json)
+            return creds.run_provider_credential_rm(parsed, emit_json, backend_override)
         _backend, exit_code = common._resolve_backend_for_mutation(
             backend_override, emit_json, "provider-credential set", domain="provider credentials",
             capability="provider-credential-set",
