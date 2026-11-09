@@ -60,7 +60,7 @@
     "stderr": {
       "mode": "contains",
       "value": "this sandbox has no repo-scoped GitHub token.\n      No GitHub token is set for this sandbox.\n      For least privilege, scope a token to just the mounted repo(s).\n      To scope it later: acq github-scope gh-box ",
-      "normalize": []
+      "normalize": ["crlf"]
     }
   },
   "isolation": {
