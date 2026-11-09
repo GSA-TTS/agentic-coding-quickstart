@@ -15,8 +15,10 @@ command names differ where the two backends genuinely differ (``ls``/``rm``/``cp
 ``ports`` vs msb's ``list``/``remove``/``copy``/``inspect``), and sbx adds
 proxy-table mechanics msb has no equivalent of (``key_present``, ``secret_ls``,
 raw-placeholder removal, and the ``kit.allowedSources`` revocation via
-``sbx settings``). sbx HAS a ``secret`` subcommand (``set``/``ls``/``rm``), so the
-secret verbs work here (value on stdin), while ``create`` maps to the positional
+``sbx settings``). sbx HAS a ``secret`` subcommand (``set``/``set-custom``/``ls``/
+``rm``), so the secret verbs work here (value on stdin): sbx's built-in services
+through ``secret set``, every other endpoint (usai, providers, ``--host``) through
+``secret set-custom --value-stdin`` (sbx >= 0.51.0). ``create`` maps to the positional
 ``sbx create AGENT [PATH] --name N -t IMAGE`` form and rotation (no ``rotate``
 subcommand) fails closed with ``unsupported_capability``.
 
@@ -32,8 +34,9 @@ import json
 import os
 import subprocess
 import sys
+from typing import NamedTuple
 
-from . import errors, hostexec, kits, secretstore, timeouts
+from . import backends, errors, hostexec, kits, provider_creds, secretstore, timeouts
 from .secretstore import Scope
 
 STUB_SENTINEL = "__stub__"
@@ -84,7 +87,21 @@ def _run(
     timeout: float | None = None,
     input_text: str | None = None,
 ) -> subprocess.CompletedProcess:
+    """Run sbx with its output captured.
+
+    With no ``input_text`` the child's stdin is ``/dev/null``: its output is
+    captured, so a prompt it printed (``Remove? (y/N)``) would be invisible
+    while it waited on the user's terminal. It sees end-of-input instead.
+    """
     try:
+        if input_text is None:
+            return subprocess.run(
+                [*sbx_command(), *argv],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
         return subprocess.run(
             [*sbx_command(), *argv],
             input=input_text,
@@ -122,9 +139,10 @@ def cli_unavailable() -> SbxError:
 # NO ``rotate`` subcommand (``key-rotate`` is unsupported) and no ``kit-source-revoke``
 # subcommand — the kit ``allowedSources`` allowlist is managed via
 # ``sbx settings get/set kit.allowedSources``, which ``kit_source_revoked`` drives.
-# ``secret-write`` (the ``secret set`` path) works from the global floor, but
-# ``provider-credential set`` is version-gated to sbx >= 0.51.0: its value path is
-# ``secret set-custom --value-stdin``, which only exists from 0.51.0 (see
+# ``secret-write`` for a built-in service works from the global floor, but a
+# custom endpoint (``secret set`` for usai, a provider or ``--host``) and
+# ``provider-credential set`` are version-gated to sbx >= 0.51.0: their value
+# path is ``secret set-custom --value-stdin``, which only exists from 0.51.0 (see
 # ``backends.CAPABILITY_FLOORS``).
 def capability_record(version: str | None = None) -> dict:
     return {
@@ -404,22 +422,88 @@ def ports(name: str) -> list[dict]:
 # boundary except on the child's stdin (ADR-0038m §user story #7).
 # ---------------------------------------------------------------------------
 
+# sbx's built-in proxy services (Bash ``_ACQ_SBX_BUILTIN_SERVICES``). Only these
+# go through ``sbx secret set SERVICE``: sbx accepts any service name there, but
+# only a built-in one is mapped to an endpoint, so any other name would be
+# stored and never injected. Every other service (usai, a registered provider,
+# or an explicit ``--host``) is a custom secret, bound to its hosts and env var
+# with ``sbx secret set-custom``.
+BUILTIN_SERVICES = frozenset(("anthropic", "github", "gitlab", "google-cloud", "openai", "aws", "azure"))
+
 # ``sbx secret …`` takes a sandbox scope as the ``--sandbox NAME`` flag; the
-# GLOBAL scope is the DEFAULT (no flag) on ``set``/``rm`` (the real sbx dropped
-# the ``-g``/``--global`` flag on those verbs). ``secret ls`` still takes ``-g``.
-# Scopes are typed (:class:`secretstore.Scope`), so a sandbox named ``global``
-# gets ``--sandbox global``; a bare string is accepted from older callers.
+# GLOBAL scope is the DEFAULT (no flag) on ``set``/``set-custom``/``rm`` (the
+# real sbx dropped ``-g``/``--global`` on those verbs). Scopes are typed
+# (:class:`secretstore.Scope`), so a sandbox named ``global`` gets
+# ``--sandbox global``; a bare string is accepted from older callers.
 _GLOBAL_SCOPE = secretstore.GLOBAL
+
+# How the sbx listing labels the global scope. ``sbx secret ls --json`` reports
+# ``"global"`` (the sbx 0.51.0 live qualification removed a global secret by
+# matching that label), presumably the same string a sandbox named ``global``
+# gets. Its table output prints ``(global)``, which no acq sandbox name can be,
+# so that label is unambiguous and accepted too.
+_GLOBAL_LABEL = "global"
+_GLOBAL_TABLE_LABEL = "(global)"
+
+_ENV_NAME_FIRST = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_")
+_ENV_NAME_REST = _ENV_NAME_FIRST | frozenset("0123456789")
 
 
 def _secret_scope_argv(scope: Scope | str) -> list[str]:
-    """Encode a scope for ``sbx secret set/rm`` (global is the default, no flag)."""
+    """Encode a scope for ``sbx secret set/set-custom/rm`` (global is the default, no flag)."""
     sc = secretstore.as_scope(scope)
     return [] if sc.sandbox is None else ["--sandbox", sc.sandbox]
 
 
-def _secret_list_docs() -> list[dict]:
-    """Run ``sbx secret ls --json`` and flatten its object envelope.
+class _Entry(NamedTuple):
+    """One row of ``sbx secret ls --json``. Never carries a value."""
+
+    table: str  # "service" (``secrets``) or "custom" (``custom_secrets``)
+    label: str  # the listing's scope string
+    key: str  # the service name, or a custom secret's env var
+    placeholder: str  # custom secrets only ("" when absent)
+    targets: frozenset[str] = frozenset()  # custom secrets' hosts, lower-cased (empty when unlisted)
+
+
+# Custom env var -> the host sets a row's ``targets`` may carry, or ``None`` to
+# match the env var alone (nothing recorded which hosts it was bound to).
+_Envs = dict[str, set[frozenset[str]] | None]
+
+
+def _host_set(hosts: object) -> frozenset[str]:
+    """A host list (list, or a comma/space-separated string) as a lower-cased set."""
+    if isinstance(hosts, str):
+        hosts = hosts.replace(",", " ").split()
+    if not isinstance(hosts, list):
+        return frozenset()
+    return frozenset(h.strip().lower() for h in hosts if isinstance(h, str) and h.strip())
+
+
+def _listing_unreadable(detail: str) -> SbxError:
+    return SbxError(
+        errors.SECRET_UNREADABLE,
+        "could not parse the secret store listing",
+        f"the backend returned {detail}; check backend logs and retry",
+    )
+
+
+def _entry_from(table: str, entry: object) -> _Entry:
+    if not isinstance(entry, dict):
+        raise _listing_unreadable("an unexpected secret-list entry")
+    scope = entry.get("scope")
+    if table == "service":
+        key = entry.get("name") or entry.get("service") or entry.get("env")
+    else:
+        key = entry.get("env") or entry.get("name")
+    if not isinstance(scope, str) or not isinstance(key, str) or not scope or not key:
+        raise _listing_unreadable("an unexpected secret-list entry")
+    placeholder = entry.get("placeholder") if table == "custom" else ""
+    targets = _host_set(entry.get("targets")) if table == "custom" else frozenset()
+    return _Entry(table, scope, key, placeholder if isinstance(placeholder, str) else "", targets)
+
+
+def _read_listing() -> list[_Entry]:
+    """Run ``sbx secret ls --json`` and parse both of its tables.
 
     The real ``sbx secret ls --json`` returns an OBJECT, not a list:
     ``{secrets: [], custom_secrets: [], shadowed_services: [], env_only_count: 0}``.
@@ -427,11 +511,9 @@ def _secret_list_docs() -> list[dict]:
 
     * ``secrets`` entries are ``{scope, type, name, secret: "(stored)"}``;
     * ``custom_secrets`` entries are ``{scope, targets, env, placeholder,
-      secret: "(masked)"}`` — keyed by ``env``, with no ``type``/``name`` field.
+      secret: "(masked)"}``: keyed by ``env``, removed by ``placeholder``.
 
-    In both, the value is never present. This flattens those entries into
-    ``{scope, service, value_state}`` (using ``name`` for ``secrets`` and ``env``
-    for ``custom_secrets``). An inspect that *fails* or returns
+    In both, the value is never present. An inspect that *fails* or returns
     unparseable/wrong-shape output raises :class:`SbxError` with
     ``secret_unreadable`` (ADR-0038m §48 drops "inspection-failure-as-empty").
     """
@@ -451,72 +533,275 @@ def _secret_list_docs() -> list[dict]:
             "the backend returned an unreadable secret list; check backend logs and retry",
         ) from exc
     if not isinstance(doc, dict):
-        raise SbxError(
-            errors.SECRET_UNREADABLE,
-            "could not parse the secret store listing",
-            "the backend returned an unexpected secret-list shape; check backend logs and retry",
-        )
-    out: list[dict] = []
-    for key in ("secrets", "custom_secrets"):
+        raise _listing_unreadable("an unexpected secret-list shape")
+    out: list[_Entry] = []
+    for key, table in (("secrets", "service"), ("custom_secrets", "custom")):
         entries = doc.get(key)
         if entries is None:
             # `custom_secrets` may be absent on older sbx; `secrets` is always
             # present. A missing `secrets` key is a wrong shape, not an empty list.
             if key == "secrets":
-                raise SbxError(
-                    errors.SECRET_UNREADABLE,
-                    "could not parse the secret store listing",
-                    "the backend returned an unexpected secret-list shape; check backend logs and retry",
-                )
+                raise _listing_unreadable("an unexpected secret-list shape")
             continue
         if not isinstance(entries, list):
-            raise SbxError(
-                errors.SECRET_UNREADABLE,
-                "could not parse the secret store listing",
-                "the backend returned an unexpected secret-list shape; check backend logs and retry",
-            )
-        for entry in entries:
-            if not isinstance(entry, dict):
-                raise SbxError(
-                    errors.SECRET_UNREADABLE,
-                    "could not parse the secret store listing",
-                    "the backend returned an unexpected secret-list entry; check backend logs and retry",
-                )
-            scope = entry.get("scope")
-            service = entry.get("name") or entry.get("service") or entry.get("env")
-            if scope is None or service is None:
-                raise SbxError(
-                    errors.SECRET_UNREADABLE,
-                    "could not parse the secret store listing",
-                    "the backend returned an unexpected secret-list entry; check backend logs and retry",
-                )
-            out.append({"scope": scope, "service": service, "value_state": "set"})
+            raise _listing_unreadable("an unexpected secret-list shape")
+        out.extend(_entry_from(table, entry) for entry in entries)
     return out
+
+
+class _Scopes:
+    """Map the listing's scope labels onto typed scopes.
+
+    sbx labels both the global scope and a sandbox named ``global`` as
+    ``"global"``. Such a label is read as the global scope unless sbx has a
+    sandbox named ``global`` (or its sandbox list cannot be read); then it is
+    ambiguous, and a caller that needs to know fails closed rather than act on
+    the wrong scope's entry. Asking for the sandbox named ``global`` always sees
+    a ``"global"`` label as ambiguous.
+    """
+
+    def __init__(self) -> None:
+        self._global_sandbox: bool | None = None
+
+    def _global_sandbox_exists(self) -> bool:
+        if self._global_sandbox is None:
+            names = list_names()
+            self._global_sandbox = names is None or _GLOBAL_LABEL in names
+        return self._global_sandbox
+
+    def match(self, label: str, want: Scope) -> bool | None:
+        """True or False, or None when the label cannot be told apart."""
+        if label == _GLOBAL_TABLE_LABEL:
+            return want.is_global
+        if want.is_global:
+            if label != _GLOBAL_LABEL:
+                return False
+            return None if self._global_sandbox_exists() else True
+        if label != want.sandbox:
+            return False
+        return None if label == _GLOBAL_LABEL else True
+
+    def kind(self, label: str) -> str:
+        """``scope_kind`` for ``secret ls``: ``global``, ``sandbox`` or ``unknown``."""
+        if label == _GLOBAL_TABLE_LABEL:
+            return "global"
+        if label == _GLOBAL_LABEL:
+            return "unknown" if self._global_sandbox_exists() else "global"
+        return "sandbox"
+
+
+def _ambiguous(service: str, outcome: str = "nothing was changed") -> SbxError:
+    return SbxError(
+        errors.FAILURE,
+        f"sbx's secret listing cannot tell a global '{service}' entry from one "
+        "scoped to the sandbox named 'global'",
+        f"{outcome}; check 'sbx secret ls' and remove the entry with sbx "
+        "directly ('sbx secret rm SERVICE [--sandbox global] -f', or "
+        "'acq secret rm <placeholder>' for a custom secret)",
+    )
+
+
+def _env_name_ok(name: object) -> bool:
+    return (
+        isinstance(name, str) and bool(name)
+        and name[0] in _ENV_NAME_FIRST and set(name) <= _ENV_NAME_REST
+    )
+
+
+def _provider_binding(service: str) -> tuple[str, str] | None:
+    """``(hosts, key_env)`` a provider binds to (Bash ``_acq_service_hosts_env``).
+
+    Read from acq's credential-bindings registry (every pinned host,
+    comma-joined), falling back to the shipped usai trust anchor. A malformed
+    registry fails closed rather than binding a credential to a guessed host.
+    """
+    try:
+        bindings = provider_creds.list_bindings()
+    except (ValueError, OSError) as exc:
+        raise SbxError(
+            errors.VALIDATION_FAILED,
+            "the provider-credential bindings cannot be read",
+            f"fix {provider_creds.BINDINGS_ENV} (or unset it) and retry",
+        ) from exc
+    for binding in bindings:
+        if binding.get("provider") != service:
+            continue
+        hosts, key_env = binding.get("hosts"), binding.get("key_env")
+        if (
+            not isinstance(hosts, list) or not hosts or not _env_name_ok(key_env)
+            or not all(isinstance(h, str) and provider_creds.host_ok(h) for h in hosts)
+        ):
+            raise SbxError(
+                errors.VALIDATION_FAILED,
+                f"the provider-credential binding for '{service}' is malformed",
+                f"re-pin it with 'acq provider-credential set {service} KEY_ENV --host HOST'",
+            )
+        return ",".join(hosts), str(key_env)
+    if service == provider_creds.USAI_PROVIDER_ID:
+        return provider_creds.USAI_PROVIDER_HOST, provider_creds.USAI_PROVIDER_KEY_ENV
+    return None
+
+
+def _route(service: str, host: str, env: str) -> tuple[str, str] | None:
+    """``None`` for sbx's native service route, else the custom ``(hosts, env)``.
+
+    An explicit ``--host`` wins over every compiled-in or registered binding,
+    built-ins included (a self-hosted GitLab must not be bound to gitlab.com).
+    """
+    if host or env:
+        # A host part starting with "-" would read as a flag in sbx's argv.
+        if not host or not _env_name_ok(env) or any(not h or h.startswith("-") for h in host.split(",")):
+            raise SbxError(
+                errors.VALIDATION_FAILED,
+                f"invalid custom endpoint for '{service}': it needs --host HOST (DNS names) and --env ENV",
+                "nothing was stored; give both, or neither for a built-in service",
+            )
+        return host, env
+    if service in BUILTIN_SERVICES:
+        return None
+    binding = _provider_binding(service)
+    if binding is None:
+        raise SbxError(
+            errors.VALIDATION_FAILED,
+            f"'{service}' is not a built-in sbx service and has no host/env mapping",
+            "nothing was stored; give --host HOST --env ENV, or pin the provider with "
+            "'acq provider-credential set'",
+        )
+    return binding
+
+
+def _want_env(envs: _Envs, env: str, hosts: str | None) -> None:
+    """Add a custom env var, pinned to ``hosts`` (comma-separated) when known."""
+    if hosts is None or not _host_set(hosts):
+        envs[env] = None
+    elif env not in envs or envs[env] is not None:
+        allowed = envs.setdefault(env, set())
+        if allowed is not None:
+            allowed.add(_host_set(hosts))
+
+
+def _wanted(scope: Scope, service: str, *, removal: bool) -> tuple[str | None, _Envs]:
+    """What carries ``service`` in sbx's table: ``(native name or None, custom env vars)``.
+
+    The endpoint sidecar recorded for exactly this scope wins (it is what was
+    actually bound); a provider adds its registry env var. Each custom env var
+    is pinned to the hosts recorded with it, so another host's secret under the
+    same env var is neither reported as injectable nor removed. A native entry
+    counts as injectable only for a built-in; removal also clears a stray
+    native entry of the same name (sbx would never inject it). A service acq
+    does not model matches a raw sbx entry by that name, native or custom.
+    """
+    envs: _Envs = {}
+    meta = secretstore.meta_resolve_exact(service, scope.sandbox)
+    if meta is not None and meta.env:
+        _want_env(envs, meta.env, meta.host)
+    if service in BUILTIN_SERVICES:
+        return service, envs
+    binding = _provider_binding(service)
+    if binding is not None:
+        _want_env(envs, binding[1], binding[0])
+    elif not envs:
+        return service, {service: None}
+    return (service if removal else None), envs
+
+
+def _custom_hit(entry: _Entry, envs: _Envs) -> bool:
+    """A custom row carries a wanted env var, and every one of its ``targets``
+    is among the hosts recorded for it (a subset, so a row per host and one row
+    for all of them both match). Where no hosts were recorded, the env var alone
+    matches. A row with no ``targets`` for an env var pinned to hosts fails
+    closed: acq cannot tell which host it serves, so it must never be reported
+    as injectable or have its placeholder removed as if it were this one."""
+    if entry.key not in envs:
+        return False
+    allowed = envs[entry.key]
+    if allowed is None:
+        return True
+    if not entry.targets:
+        raise SbxError(
+            errors.SECRET_UNREADABLE,
+            f"sbx lists a custom secret for ${entry.key} with no target hosts, so acq cannot tell "
+            "whether it is the one bound to the recorded hosts",
+            "nothing was changed; check 'sbx secret ls' and, if it is yours, remove it with "
+            "'acq secret rm PLACEHOLDER' (the placeholder sbx lists for it)",
+        )
+    return any(entry.targets <= hosts for hosts in allowed)
+
+
+def _match(
+    listing: list[_Entry], scopes: _Scopes, want: Scope, native: str | None, envs: _Envs
+) -> tuple[list[_Entry], list[_Entry]]:
+    """``(found, ambiguous)``: the entries for ``want`` that carry
+    ``native``/``envs``, and those whose ``global`` label might be ``want``'s."""
+    found: list[_Entry] = []
+    ambiguous: list[_Entry] = []
+    for entry in listing:
+        hit = entry.key == native if entry.table == "service" else _custom_hit(entry, envs)
+        if not hit:
+            continue
+        matched = scopes.match(entry.label, want)
+        if matched is None:
+            ambiguous.append(entry)
+        elif matched:
+            found.append(entry)
+    return found, ambiguous
+
+
+def _find(scope: Scope, service: str, *, removal: bool) -> tuple[list[_Entry], list[_Entry]]:
+    """``(found, ambiguous)`` entries for ``service`` in exactly ``scope``.
+
+    An ambiguous native entry is kept for removal: ``sbx secret rm SERVICE
+    [--sandbox S]`` names the scope itself, so sbx removes that scope's entry or
+    fails, and never another scope's. An ambiguous custom entry is refused: its
+    placeholder might be the other scope's secret. Presence fails closed on
+    any ambiguity.
+    """
+    found, ambiguous = _match(_read_listing(), _Scopes(), scope, *_wanted(scope, service, removal=removal))
+    if ambiguous and (not removal or any(entry.table == "custom" for entry in ambiguous)):
+        raise _ambiguous(service)
+    return found, ambiguous
+
+
+def _require_set_custom() -> None:
+    """``set-custom --value-stdin`` only exists from sbx 0.51.0; refuse older."""
+    problem = backends.check_capability_floor(backends.BACKENDS["sbx"], "secret-set-custom")
+    if problem is not None:
+        raise SbxError(problem.code, problem.message, problem.remediation)
+
+
+def _rm_hint(scope: Scope, service: str, entry: _Entry) -> str:
+    if entry.table == "custom" and entry.placeholder:
+        return f"acq secret rm {entry.placeholder}"
+    return f"acq secret rm -g {service}" if scope.is_global else f"acq secret rm {scope.sandbox} {service}"
 
 
 def secret_preflight(scope: Scope | str, service: str, host: str = "", env: str = "") -> None:
     """Refuse a ``secret set`` sbx cannot be fed, before anything is stored.
 
-    The real sbx prompts "Overwrite? (y/N)" when the secret already exists (it
-    has no stdin ``--force``), which would consume the piped value as the
-    answer, so an existing secret fails closed here. A custom endpoint
-    (``--host``/``--env``) needs ``sbx secret set-custom``, which this adapter
-    does not drive yet; it is refused rather than fed to the built-in service
-    route, which would bind the value to the wrong endpoint.
+    Picks the route (:func:`_route`), so a service sbx would store but never
+    inject is refused, and the custom route is refused below sbx 0.51.0. The
+    real sbx prompts "Overwrite? (y/N)" when the secret already exists (it has
+    no stdin ``--force``), which would consume the piped value as the answer, so
+    an existing entry fails closed here. For a built-in name taking the custom
+    route, a native entry of that name counts too: left in place, sbx would keep
+    injecting the token to its own endpoint.
     """
     sc = secretstore.as_scope(scope)
-    if host or env:
-        raise SbxError(
-            errors.UNSUPPORTED,
-            f"custom endpoints (--host/--env) are not yet supported for '{service}' on the sbx backend",
-            "nothing was stored; set it without --host/--env, or use the msb backend",
-        )
-    if key_present(sc, service):
-        hint = f"acq secret rm -g {service}" if sc.is_global else f"acq secret rm {sc.sandbox} {service}"
+    route = _route(service, host, env)
+    if route is not None:
+        _require_set_custom()
+    native = service if route is None or service in BUILTIN_SERVICES else None
+    # Any host: a same-env custom secret in this scope may make sbx refuse or prompt.
+    envs: _Envs = {} if route is None else {route[1]: None}
+    found, ambiguous = _match(_read_listing(), _Scopes(), sc, native, envs)
+    if ambiguous:
+        raise _ambiguous(service)
+    if found:
+        hints = "', '".join(_rm_hint(sc, service, entry) for entry in found)
         raise SbxError(
             errors.FAILURE,
             f"secret '{service}' already exists in scope {sc.describe()}",
-            f"remove it first ('{hint}'), then re-set",
+            f"remove it first ('{hints}'), then re-set",
         )
 
 
@@ -525,85 +810,138 @@ def secret_feed(
 ) -> None:
     """Feed a value already in the acq store to sbx's proxy (stdin only).
 
-    Reconciles with the real sbx ``secret set SERVICE [--sandbox NAME]``: the
-    service is the sole positional, the value is read from stdin, and the global
-    scope is the default (no flag). :func:`secret_preflight` runs first.
+    A built-in goes through ``sbx secret set [--sandbox S] SERVICE``; a custom
+    endpoint through ``sbx secret set-custom [--sandbox S] --host H… --env E
+    --value-stdin``. Either way the value is the child's stdin, never argv.
+    :func:`secret_preflight` runs first.
     """
-    proc = _run(["secret", "set", *_secret_scope_argv(scope), service], input_text=value, timeout=timeout)
+    sc = secretstore.as_scope(scope)
+    route = _route(service, host, env)
+    if route is None:
+        argv = ["secret", "set", *_secret_scope_argv(sc), service]
+    else:
+        argv = ["secret", "set-custom", *_secret_scope_argv(sc)]
+        for one in route[0].split(","):
+            if one:
+                argv += ["--host", one]
+        argv += ["--env", route[1], "--value-stdin"]
+    proc = _run(argv, input_text=value, timeout=timeout)
     if proc.returncode != 0:
         raise SbxError(
             errors.FAILURE,
-            f"could not feed secret '{service}' to sbx for {secretstore.as_scope(scope).describe()}",
+            f"could not feed secret '{service}' to sbx for {sc.describe()}",
             "check backend logs and retry",
         )
 
 
-def secret_set(scope: Scope | str, service: str, value: str, *, timeout: float | None = None) -> None:
+def secret_set(
+    scope: Scope | str, service: str, value: str, host: str = "", env: str = "", *, timeout: float | None = None
+) -> None:
     """Store a secret in sbx's own table only: :func:`secret_preflight` then
     :func:`secret_feed`. ``acq secret set`` writes the acq store first and calls
     those two itself."""
-    secret_preflight(scope, service)
-    secret_feed(scope, service, value, timeout=timeout)
+    secret_preflight(scope, service, host, env)
+    secret_feed(scope, service, value, host, env, timeout=timeout)
 
 
 def secret_rm(scope: Scope | str, service: str) -> None:
-    """Remove a managed secret for ``(scope, service)``. Raises on backend failure.
+    """Remove ``(scope, service)`` from sbx's table. Raises on backend failure.
 
-    Reconciles with the real sbx ``secret rm SERVICE [--sandbox NAME] -f`` (the
-    ``-f`` suppresses the interactive confirm prompt).
+    A native entry goes through ``sbx secret rm SERVICE [--sandbox S] -f``; a
+    custom one is found by its env var and removed with ``sbx secret rm
+    --placeholder P [--sandbox S] -f``. ``-f`` suppresses sbx's confirm prompt
+    and stdin is ``/dev/null``, so no prompt can wait unseen. Nothing to remove
+    is a no-op; a custom entry behind an ambiguous ``global`` label fails closed
+    (see :func:`_find`). Identical removals run once; one that fails on rows
+    only an ambiguous ``global`` label matched says so, since a retry cannot help.
     """
-    proc = _run(["secret", "rm", *_secret_scope_argv(scope), service, "-f"])
-    if proc.returncode != 0:
+    sc = secretstore.as_scope(scope)
+    found, ambiguous = _find(sc, service, removal=True)
+    plans: dict[tuple[str, ...], bool] = {}  # argv -> only ambiguous rows need it
+    for entry, unsure in [(e, False) for e in found] + [(e, True) for e in ambiguous]:
+        if entry.table == "service":
+            argv = ("secret", "rm", *_secret_scope_argv(sc), entry.key, "-f")
+        elif entry.placeholder:
+            argv = ("secret", "rm", "--placeholder", entry.placeholder, *_secret_scope_argv(sc), "-f")
+        else:
+            raise SbxError(
+                errors.FAILURE,
+                f"sbx listed no placeholder for the custom secret '{entry.key}' ({sc.describe()})",
+                "check 'sbx secret ls' and remove it with sbx directly",
+            )
+        plans[argv] = plans.get(argv, True) and unsure
+    for argv, unsure in plans.items():
+        if _run(list(argv)).returncode == 0:
+            continue
+        if unsure:
+            raise _ambiguous(service, "the acq secret store entry was kept")
         raise SbxError(
             errors.FAILURE,
-            f"could not remove secret '{service}' for {secretstore.as_scope(scope).describe()}",
+            f"could not remove secret '{service}' for {sc.describe()}",
             "check backend logs and retry",
         )
 
 
 def secret_ls(scope: Scope | str | None = None) -> list[dict]:
-    """``secret-list`` on sbx (``sbx secret ls --json``): scope/service/value_state.
+    """``secret-list`` on sbx (``sbx secret ls --json``), never a value.
 
-    ``scope`` is an optional filter (``"global"`` or a sandbox name); ``None``
-    lists every scope. Never returns a value.
+    Each entry is ``{scope, scope_kind, service, value_state}``: a custom
+    secret is listed by its env var, and ``scope_kind`` is ``global``,
+    ``sandbox``, or ``unknown`` for a ``global`` label sbx cannot tell apart
+    (see :class:`_Scopes`). ``scope`` filters (``None`` lists every scope).
 
-    NOTE: the scope filter is applied CLIENT-SIDE — the adapter lists all scopes
-    once and filters, rather than passing ``-g``/``--sandbox`` to ``sbx secret
-    ls``. This keeps ``key_present`` (which also reads the full list) and
-    ``secret_ls`` on the same single listing, and avoids the set/rm-vs-ls scope
-    asymmetry (set/rm use a global default with no flag; ``ls`` has ``-g``).
+    NOTE: the filter is applied CLIENT-SIDE on one full listing, the same one
+    ``secret has``/``rm`` read, rather than passing ``-g``/``--sandbox`` to
+    ``sbx secret ls``.
     """
-    docs = _secret_list_docs()
-    if scope is None:
-        return docs
-    want = secretstore.as_scope(scope).label
-    return [d for d in docs if d["scope"] == want]
+    scopes = _Scopes()
+    want = None if scope is None else secretstore.as_scope(scope)
+    out: list[dict] = []
+    for entry in _read_listing():
+        label = _GLOBAL_LABEL if entry.label == _GLOBAL_TABLE_LABEL else entry.label
+        kind = scopes.kind(entry.label)
+        if want is not None and (label != want.label or kind == ("sandbox" if want.is_global else "global")):
+            continue
+        out.append({"scope": label, "scope_kind": kind, "service": entry.key, "value_state": "set"})
+    return out
 
 
 def key_present(scope: Scope | str, service: str) -> bool:
-    """sbx-only ``key_present`` obligation (ADR-0040m): is the sbx key present?
+    """sbx-only ``key_present`` obligation (ADR-0040m): does sbx hold an
+    injectable ``service`` entry in exactly ``scope``?
 
     Reports presence, never the value. sbx has no ``secret has`` subcommand, so
-    presence is a predicate over the ``secret ls --json`` listing. Tri-state at the
-    caller's level: presence is a bool, but a backend that *cannot answer* raises
-    :class:`SbxError` so the seam never conflates "the backend is down" with "the
-    secret is absent".
+    presence is a predicate over the ``secret ls --json`` listing, matched by
+    name for a built-in and by env var for a custom secret. A backend that
+    *cannot answer* (or an ambiguous ``global`` label) raises :class:`SbxError`,
+    so "the backend is down" is never conflated with "the secret is absent".
     """
-    want = secretstore.as_scope(scope).label
-    for entry in _secret_list_docs():
-        if entry["scope"] == want and entry["service"] == service:
-            return True
-    return False
+    return any(_find(secretstore.as_scope(scope), service, removal=False))
 
 
 # The neutral ``secret`` seam (commands/secret.py): presence in sbx's own table,
 # the "can inject" predicate, and removal from sbx after the acq store entry.
 def secret_present(scope: Scope | str, service: str) -> bool:
-    return key_present(scope, service)
+    """Anything ``secret rm`` would remove for exactly this scope."""
+    return any(_find(secretstore.as_scope(scope), service, removal=True))
 
 
 def secret_has(scope: Scope | str, service: str) -> bool:
-    return key_present(scope, service)
+    """Can sbx inject ``service`` here? A sandbox scope falls back to global.
+
+    An ambiguous ``global`` hit while asking for the sandbox named ``global``
+    is injectable either way (it is that sandbox's entry or the global one).
+    """
+    sc = secretstore.as_scope(scope)
+    listing, scopes = _read_listing(), _Scopes()
+    if not sc.is_global:
+        found, ambiguous = _match(listing, scopes, sc, *_wanted(sc, service, removal=False))
+        if found or ambiguous:
+            return True
+    found, ambiguous = _match(listing, scopes, _GLOBAL_SCOPE, *_wanted(_GLOBAL_SCOPE, service, removal=False))
+    if ambiguous:
+        raise _ambiguous(service)
+    return bool(found)
 
 
 def secret_unbind(scope: Scope | str, service: str) -> None:
@@ -614,18 +952,18 @@ def secret_rm_raw(placeholder: str) -> None:
     """sbx-only raw-placeholder removal (ADR-0038m §48).
 
     Removes a raw placeholder from sbx's custom-secrets table via
-    ``sbx secret rm --placeholder TOKEN``. It is backend-specific and leaves the
-    acq store unchanged: it never rewrites host-held records, and the placeholder
-    is never a secret value.
+    ``sbx secret rm --placeholder TOKEN -f`` (stdin ``/dev/null``, so sbx's
+    confirm prompt can never wait unseen). It is backend-specific and leaves the
+    acq store unchanged: it never rewrites host-held records, and the
+    placeholder is never a secret value.
     """
-    proc = _run(["secret", "rm", "--placeholder", placeholder])
+    proc = _run(["secret", "rm", "--placeholder", placeholder, "-f"])
     if proc.returncode != 0:
         raise SbxError(
             errors.FAILURE,
             f"could not remove raw placeholder '{placeholder}' from the sbx proxy table",
             "check backend logs and retry",
         )
-
 
 # ---------------------------------------------------------------------------
 # Provider-credential / github-scope / rotation verbs. A credential VALUE crosses
@@ -644,15 +982,19 @@ def provider_credential_set(provider: str, key_env: str, hosts: list[str], value
     default — no ``--sandbox`` flag), matching the host-side binding's
     destination-pinned (not sandbox-pinned) authority.
 
-    The same ``key_present`` pre-check as :func:`secret_set`/:func:`github_scope`
-    applies: an already-present credential fails closed before the value is piped,
-    so the value is never consumed by a (future) overwrite prompt.
+    The same existence pre-check as :func:`secret_preflight` applies: a global
+    custom secret already bound to ``key_env`` fails closed before the value is
+    piped, so the value is never consumed by an overwrite prompt.
     """
-    if key_present(_GLOBAL_SCOPE, key_env):
+    found, ambiguous = _match(_read_listing(), _Scopes(), _GLOBAL_SCOPE, None, {key_env: None})
+    if ambiguous:
+        raise _ambiguous(key_env)
+    if found:
+        hint = f"acq secret rm {found[0].placeholder}" if found[0].placeholder else "sbx secret ls, then sbx secret rm --placeholder <placeholder> -f"
         raise SbxError(
             errors.FAILURE,
             f"provider credential '{key_env}' already exists for provider '{provider}'",
-            "remove the existing sbx custom secret first (sbx secret ls, then sbx secret rm --placeholder <placeholder> --force), then re-set",
+            f"remove the existing sbx custom secret first ({hint}), then re-set",
         )
     argv = ["secret", "set-custom"]
     for host in hosts:
@@ -667,27 +1009,28 @@ def provider_credential_set(provider: str, key_env: str, hosts: list[str], value
         )
 
 
-def github_scope(sandbox: str, value: str) -> None:
-    """Store a sandbox-scoped GitHub token (ADR-0013); value travels on stdin only.
+def custom_secret_placeholders(scope: Scope | str, env: str) -> list[str]:
+    """Placeholders of the custom secrets sbx still lists for ``env`` in exactly
+    ``scope``, for any host (an ambiguous ``global`` label included; ``""`` for
+    a row without one). Empty when there are none. Raises :class:`SbxError`
+    when the listing cannot be read."""
+    found, ambiguous = _match(_read_listing(), _Scopes(), secretstore.as_scope(scope), None, {env: None})
+    return [entry.placeholder for entry in found + ambiguous]
 
-    Reconciles with the real sbx ``secret set github --sandbox NAME`` (github is a
-    built-in sbx service); the token is bound to ``sandbox`` (never global). The
-    same "Overwrite?" pre-check as :func:`secret_set` applies (the value must never
-    be consumed by the prompt).
+
+def github_scope(sandbox: str, value: str) -> None:
+    """Store a GitHub token for ``sandbox`` only (ADR-0013); stdin only, never argv.
+
+    The same path as ``acq secret set SANDBOX github``: :func:`secret_preflight`
+    (an existing entry is refused before anything is stored), then the acq
+    secret store (the source of truth), then :func:`secret_feed` to sbx's proxy
+    for that sandbox (never global). Raises :class:`SbxError` or
+    :class:`secretstore.SecretStoreError`.
     """
-    if key_present(secretstore.sandbox_scope(sandbox), "github"):
-        raise SbxError(
-            errors.FAILURE,
-            f"GitHub token already exists for sandbox '{sandbox}'",
-            f"remove it first (acq secret rm {sandbox} github), then re-scope",
-        )
-    proc = _run(["secret", "set", "--sandbox", sandbox, "github"], input_text=value)
-    if proc.returncode != 0:
-        raise SbxError(
-            errors.FAILURE,
-            f"could not store the scoped GitHub token for sandbox '{sandbox}'",
-            "check backend logs and retry",
-        )
+    scope = secretstore.sandbox_scope(sandbox)
+    secret_preflight(scope, "github")
+    secretstore.set_secret("github", sandbox, value)
+    secret_feed(scope, "github", value)
 
 
 def rotate_key(value: str) -> None:

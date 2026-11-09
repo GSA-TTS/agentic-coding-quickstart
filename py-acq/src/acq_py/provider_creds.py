@@ -10,9 +10,11 @@ This module owns the **host-authoritative** records for two credential concerns:
   recorded host-side as a ``schema=N`` record; the credential *value* is a
   backend secret and is never stored or surfaced here (ADR-0038m §user story #7
   "no secret exposure").
-* **GitHub per-sandbox scope** — a per-sandbox (never global) marker recording
-  that a sandbox holds a least-privilege GitHub token scoped to its workspace
-  (ADR-0013). The token is backend-bound and never appears in these records or
+* **GitHub per-sandbox scope** — a per-sandbox (never global) record of the
+  workspace, owner and GitHub repositories a sandbox's own GitHub token was
+  requested for (ADR-0013). acq cannot check a token's permissions offline, so
+  the record says what the token was meant to cover, not that it was narrowed.
+  The token lives in the acq secret store and never appears in these records or
   in any output.
 
 Both record families carry their own ``schema`` marker (distinct from the
@@ -282,17 +284,45 @@ def get_binding(provider: str) -> dict | None:
 def remove_binding(provider: str) -> bool:
     """Remove one binding; returns True when it was present.
 
-    When seeded (test seam) there is no on-disk record to unlink: the removal is
-    reported as successful against the seeded registry.
+    A record that cannot be deleted raises :class:`OSError`: reporting it removed
+    while ``ls`` still lists it would be a false success. A record that is
+    already gone (removed concurrently) counts as removed. When seeded (test
+    seam) there is no on-disk record to unlink: the removal is reported as
+    successful against the seeded registry.
     """
     if get_binding(provider) is None:
         return False
     if _seeded_bindings() is None:
         try:
             _binding_path(provider).unlink()
-        except OSError:
+        except FileNotFoundError:
             pass
     return True
+
+
+def binding_snapshot(provider: str) -> bytes | None:
+    """The binding record's exact bytes (None when absent), for :func:`restore_binding`.
+
+    Raises :class:`OSError` when an existing record cannot be read.
+    """
+    try:
+        return _binding_path(provider).read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def restore_binding(provider: str, snapshot: bytes | None) -> None:
+    """Put a binding record back exactly as :func:`binding_snapshot` found it."""
+    path = _binding_path(provider)
+    if snapshot is None:
+        path.unlink(missing_ok=True)
+        return
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "wb") as fh:
+        fh.write(snapshot)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
 
 
 def _env_bindings() -> list[dict]:
@@ -444,18 +474,22 @@ def provider_ids() -> list[str]:
 # GitHub per-sandbox scope (ADR-0013).
 # ---------------------------------------------------------------------------
 
-def github_scope_write(backend: str, sandbox: str, workspace: str) -> dict:
-    """Record a per-sandbox GitHub token scope (least-privilege, ADR-0013).
+def github_scope_write(backend: str, sandbox: str, workspace: str, owner: str, repos: list[str]) -> dict:
+    """Record a sandbox's own GitHub token request (ADR-0013).
 
-    The record names the sandbox, backend, and workspace the token is scoped to.
-    The token itself is backend-bound and never appears here or in output.
+    Names the sandbox, backend, workspace, and the single owner and repositories
+    the fine-grained token was requested for. It does not claim the token was
+    narrowed (acq cannot verify that offline). The token itself is in the acq
+    secret store and never appears here or in output.
     """
     doc = {
         "schema": CREDS_SCHEMA,
         "backend": backend,
         "sandbox": sandbox,
         "workspace": workspace,
-        "scoped": True,
+        "scope": "sandbox",
+        "owner": owner,
+        "repos": list(repos),
     }
     _atomic_write(_scope_path(backend, sandbox), doc)
     return doc

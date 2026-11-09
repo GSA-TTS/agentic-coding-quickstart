@@ -356,6 +356,10 @@ def build_parser() -> _Parser:
     pc_sub.add_parser("ls", help="list pinned provider bindings (provider/key_env/hosts/source_layer, never values)")
     pc_rm = pc_sub.add_parser("rm", help="remove a configured provider binding")
     pc_rm.add_argument("provider", help="provider id")
+    pc_rm.add_argument(
+        "--accept-unconfirmed", dest="accept_unconfirmed", action="append", metavar="NAME[,NAME]",
+        help="accept these sandboxes (with no acq binding record) staying unconfirmed (msb)",
+    )
 
     # github-scope: per-sandbox GitHub token scoping (ADR-0013). The token is on
     # stdin only and backend-bound; the scope is recorded host-side.
@@ -826,12 +830,12 @@ def _dispatch(parser: _Parser, parsed, emit_json: bool, backend_override: str | 
         subcmd = parsed.provider_credential_command
         if subcmd is None:
             return common._usage_failure("provider-credential", "provider-credential requires a subcommand: set | ls | rm", emit_json)
-        # ls/rm read and mutate host-side binding records only; only `set` moves a
-        # value across the backend boundary and therefore needs a backend.
+        # ls reads host-side binding records only. rm resolves a backend itself,
+        # and only when a stored credential has to be unbound; set always needs one.
         if subcmd == "ls":
             return creds.run_provider_credential_ls(emit_json)
         if subcmd == "rm":
-            return creds.run_provider_credential_rm(parsed, emit_json)
+            return creds.run_provider_credential_rm(parsed, emit_json, backend_override)
         _backend, exit_code = common._resolve_backend_for_mutation(
             backend_override, emit_json, "provider-credential set", domain="provider credentials",
             capability="provider-credential-set",

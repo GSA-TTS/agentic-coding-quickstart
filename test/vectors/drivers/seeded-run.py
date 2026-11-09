@@ -16,25 +16,109 @@ its stdout, stderr and exit status become the vector's result. Every other step,
 before or after it, must exit with its expected status. The driver exits 1 with
 a message (and no stdout) if a step exits otherwise or if the sentinel appears
 in any step's stdout or stderr, so a leak fails the vector.
+
+A step may instead be a JSON object that sets up a fixture acq cannot create
+through its own CLI:
+
+* ``{"git_repos": {"NAME": "REMOTE_URL", ...}}`` creates a workspace in a
+  temporary directory holding one git repository per NAME, each with
+  ``remote.origin.url`` set (no network). Later steps get the workspace path in
+  place of a literal ``{workspace}`` argument, and run with git discovery capped
+  at the temporary directory.
+* ``{"binding_record": PROVIDER, "text": TEXT}`` writes TEXT as PROVIDER's
+  provider-credential binding record, at the path acq's state layout gives it
+  (``<state root>/provider-credentials/<provider>.<first 8 hex of sha256>.json``).
+* ``{"lock_bindings": true}`` makes every binding record undeletable: each
+  record is made read-only (Windows refuses to delete a read-only file) and the
+  directory loses write permission (POSIX refuses to unlink in it). Permissions
+  are restored when the driver ends. A superuser can still delete, so a vector
+  using this cannot pass when run as root.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import re
+import shutil
+import stat
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 
 
-def main(argv: list[str]) -> int:
-    steps = json.loads(argv[1])
-    acq = argv[2:]
-    if not acq or [want for _args, _feed, want in steps].count(None) != 1:
-        print("seeded-run: need STEPS with exactly one observed step, then the acq command", file=sys.stderr)
-        return 2
-    value = sys.stdin.buffer.read()
+def _state_root() -> Path:
+    override = os.environ.get("ACQ_STATE_DIR")
+    if override:
+        return Path(override)
+    xdg = os.environ.get("XDG_STATE_HOME")
+    base = Path(xdg) if xdg and os.path.isabs(xdg) else Path.home() / ".local" / "state"
+    return base / "acq"
+
+
+def _binding_dir() -> Path:
+    return _state_root() / "provider-credentials"
+
+
+def _binding_path(provider: str) -> Path:
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", provider)
+    digest = hashlib.sha256(provider.encode("utf-8")).hexdigest()[:8]
+    return _binding_dir() / f"{safe}.{digest}.json"
+
+
+def _git_repos(repos: dict, root: Path, env: dict) -> Path:
+    git = shutil.which("git")
+    if git is None:
+        raise RuntimeError("git is not installed")
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    workspace = root / "ws"
+    for name, url in repos.items():
+        repo = workspace / name
+        repo.mkdir(parents=True)
+        subprocess.run([git, "init", "-q", str(repo)], env=clean, check=True, capture_output=True)
+        subprocess.run([git, "-C", str(repo), "config", "remote.origin.url", url], env=clean, check=True,
+                       capture_output=True)
+    env["GIT_CEILING_DIRECTORIES"] = str(root)
+    return workspace
+
+
+def _lock_bindings(locked: list[tuple[Path, int]]) -> None:
+    directory = _binding_dir()
+    for record in directory.glob("*.json"):
+        locked.append((record, stat.S_IMODE(record.stat().st_mode)))
+        record.chmod(stat.S_IREAD)
+    locked.append((directory, stat.S_IMODE(directory.stat().st_mode)))
+    directory.chmod(stat.S_IREAD | stat.S_IEXEC)
+
+
+def _fixture(step: dict, root: Path, env: dict, locked: list) -> str | None:
+    """Apply one fixture step; returns the workspace path when it created one."""
+    if "git_repos" in step:
+        return str(_git_repos(step["git_repos"], root, env))
+    if "binding_record" in step:
+        path = _binding_path(step["binding_record"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(step["text"], encoding="utf-8")
+        return None
+    if step.get("lock_bindings"):
+        _lock_bindings(locked)
+        return None
+    raise ValueError(f"unknown fixture step {step!r}")
+
+
+def _run(steps: list, acq: list[str], value: bytes, root: Path, locked: list) -> int:
+    env = dict(os.environ)
+    workspace = None
     observed = None
-    for args, feed, want in steps:
-        proc = subprocess.run([*acq, *args], input=value if feed else b"", capture_output=True)
+    for step in steps:
+        if isinstance(step, dict):
+            workspace = _fixture(step, root, env, locked) or workspace
+            continue
+        args, feed, want = step
+        args = [workspace if a == "{workspace}" and workspace else a for a in args]
+        proc = subprocess.run([*acq, *args], input=value if feed else b"", capture_output=True, env=env)
         if value and (value in proc.stdout or value in proc.stderr):
             print("seeded-run: the secret value appeared in acq output", file=sys.stderr)
             return 1
@@ -47,6 +131,22 @@ def main(argv: list[str]) -> int:
     sys.stdout.buffer.write(observed.stdout)
     sys.stderr.buffer.write(observed.stderr)
     return observed.returncode
+
+
+def main(argv: list[str]) -> int:
+    steps = json.loads(argv[1])
+    acq = argv[2:]
+    if not acq or [s[2] for s in steps if not isinstance(s, dict)].count(None) != 1:
+        print("seeded-run: need STEPS with exactly one observed step, then the acq command", file=sys.stderr)
+        return 2
+    value = sys.stdin.buffer.read()
+    locked: list[tuple[Path, int]] = []
+    with tempfile.TemporaryDirectory(prefix="seeded-run-") as tmp:
+        try:
+            return _run(steps, acq, value, Path(tmp), locked)
+        finally:
+            for path, mode in reversed(locked):
+                path.chmod(mode)
 
 
 if __name__ == "__main__":

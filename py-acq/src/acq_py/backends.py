@@ -172,6 +172,9 @@ CAPABILITY_FLOORS: dict[str, dict[str, Version]] = {
         # provider-credential value can only reach sbx safely (stdin, never
         # argv) from that release.
         "provider-credential-set": Version(0, 51, 0, True),
+        # `secret set` for a custom endpoint (usai, a registered provider, or
+        # an explicit --host) uses the same `set-custom --value-stdin` path.
+        "secret-set-custom": Version(0, 51, 0, True),
     },
     "msb": {},
 }

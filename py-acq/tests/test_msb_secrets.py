@@ -622,11 +622,13 @@ def test_ls_reports_bindings_and_filters_by_scope_kind(monkeypatch, tmp_path, ca
     rc, doc, out, _err = _invoke(capsys, "--backend", "msb", "secret", "ls", "--json")
     assert rc == 0 and VALUE not in out and SCOPED not in out
     assert doc["data"]["secrets"] == [
-        {"scope": "?", "service": "a.b.c", "value_state": "set", "binding": None},
-        {"scope": "global", "service": "github", "value_state": "set",
+        {"scope": "?", "scope_kind": "unknown", "service": "a.b.c", "value_state": "set", "binding": None},
+        # The sandbox named `global`: scope reads "global", scope_kind says sandbox.
+        {"scope": "global", "scope_kind": "sandbox", "service": "github", "value_state": "set",
          "binding": "GITHUB_TOKEN@github.com,api.github.com,codeload.github.com"},
-        {"scope": "global", "service": "orphan", "value_state": "set", "binding": None},
-        {"scope": "global", "service": "usai", "value_state": "set", "binding": "USAI_API_KEY@api.gsa.usai.gov"},
+        {"scope": "global", "scope_kind": "global", "service": "orphan", "value_state": "set", "binding": None},
+        {"scope": "global", "scope_kind": "global", "service": "usai", "value_state": "set",
+         "binding": "USAI_API_KEY@api.gsa.usai.gov"},
     ]
     assert [e["service"] for e in msb.secret_ls(secretstore.GLOBAL)] == ["orphan", "usai"]
     assert [e["service"] for e in msb.secret_ls(secretstore.sandbox_scope("global"))] == ["github"]
@@ -663,6 +665,64 @@ def test_provider_partial_refeed_then_rm_fully_revokes(monkeypatch, tmp_path, ca
     assert _invoke(capsys, "--backend", "msb", "secret", "rm", "-g", "acme")[0] == 0
     assert all("ACME_KEY" not in held for held in _stub_records(tmp_path).values())
     assert msb.held_read("a").bindings == {} and secretstore.resolve("acme") is None
+
+
+def test_provider_rm_unbinds_and_deletes_the_credential(monkeypatch, tmp_path, capsys, children):
+    # Removing the destination pin must not leave the credential injected: rm
+    # unbinds it from the sandboxes holding it and deletes the stored value.
+    _running(tmp_path, monkeypatch, "a", "b")
+    rc, _doc, _out, err = _invoke(capsys, "--backend", "msb", "provider-credential", "set", "acme", "ACME_KEY",
+                                  "--host", "models.acme.gov", "--json", stdin=VALUE, monkeypatch=monkeypatch)
+    assert rc == 0, err
+    assert all("ACME_KEY" in _stub_records(tmp_path)[n] for n in ("a", "b"))
+    monkeypatch.setenv("ACQ_MSB_STUB_FAIL_RM", "b")
+    rc, doc, out, err = _invoke(capsys, "--backend", "msb", "provider-credential", "rm", "acme", "--json")
+    assert rc == 1 and doc["error"]["code"] == "unbind_failed"
+    assert "binding was kept" in doc["error"]["message"]
+    assert provider_creds.get_binding("acme") is not None and secretstore.resolve("acme") == VALUE
+    monkeypatch.delenv("ACQ_MSB_STUB_FAIL_RM")
+    children.clear()
+    rc, doc, out, err = _invoke(capsys, "--backend", "msb", "provider-credential", "rm", "acme", "--json")
+    assert rc == 0, err
+    assert doc["data"] == {"provider": "acme", "removed": True, "credential_removed": True}
+    assert all("ACME_KEY" not in held for held in _stub_records(tmp_path).values())
+    assert secretstore.resolve("acme") is None and provider_creds.get_binding("acme") is None
+    assert msb.held_read("b").bindings == {}
+    _assert_value_absent(VALUE, children, out, err)
+
+
+def test_provider_rm_accept_unconfirmed(monkeypatch, tmp_path, capsys):
+    # A sandbox acq has no record for cannot be confirmed unbound; rm names the
+    # provider-credential command to accept it, and the flag passes through.
+    _env(monkeypatch, tmp_path, catalog={"other": "stopped"})
+    provider_creds.set_binding("acme", "ACME_KEY", ["models.acme.gov"])
+    secretstore.store(secretstore.key_for("acme"), VALUE)
+    rc, doc, _out, _err = _invoke(capsys, "--backend", "msb", "provider-credential", "rm", "acme", "--json")
+    assert rc == 1 and doc["error"]["code"] == "unbind_failed"
+    assert "acq provider-credential rm acme --accept-unconfirmed NAME" in doc["error"]["remediation"]
+    assert provider_creds.get_binding("acme") is not None and secretstore.resolve("acme") == VALUE
+    rc, doc, _out, _err = _invoke(capsys, "--backend", "msb", "provider-credential", "rm", "acme",
+                                  "--accept-unconfirmed", "bad.name", "--json")
+    assert rc == 1 and doc["error"]["code"] == "validation_failed"
+    rc, doc, _out, err = _invoke(capsys, "--backend", "msb", "provider-credential", "rm", "acme",
+                                 "--accept-unconfirmed", "other", "--json")
+    assert rc == 0, err
+    assert doc["data"] == {"provider": "acme", "removed": True, "credential_removed": True, "unconfirmed": ["other"]}
+    assert secretstore.resolve("acme") is None and provider_creds.get_binding("acme") is None
+
+
+def test_provider_reset_same_value_refused_restores_the_binding(monkeypatch, tmp_path, capsys, children):
+    # The stored value is unchanged when msb refuses a re-set of the SAME value
+    # under a new destination, so the previous binding must come back.
+    _running(tmp_path, monkeypatch, "a")
+    _set(capsys, monkeypatch, "-g", "acme", "--host", "old.acme.gov", "--env", "ACME_OLD")
+    provider_creds.set_binding("acme", "ACME_OLD", ["old.acme.gov"])
+    before = provider_creds._binding_path("acme").read_bytes()
+    rc, doc, _out, _err = _invoke(capsys, "--backend", "msb", "provider-credential", "set", "acme", "ACME_KEY",
+                                  "--host", "models.acme.gov", "--json", stdin=VALUE, monkeypatch=monkeypatch)
+    assert rc == 1 and doc["error"]["code"] == "validation_failed"
+    assert provider_creds._binding_path("acme").read_bytes() == before
+    assert secretstore.resolve("acme") == VALUE
 
 
 def test_provider_pin_refuses_a_diverging_endpoint_record(monkeypatch, tmp_path, capsys, children):
@@ -749,7 +809,13 @@ def test_binding_host_checks(monkeypatch, tmp_path, capsys):
     assert not msb._binding_ok("API_KEY", "api..example.gov")
     assert not msb._binding_ok("API_KEY", "api.example.gov,")
     assert msb._binding_ok("API_KEY", "api.example.gov:8443,alt.example.gov")
-    secretstore.meta_store("svc", None, "api..example.gov", "API_KEY")
+    # acq refuses to write such a sidecar, but Bash's looser check can: plant one
+    # directly, and msb must still ignore it.
+    with pytest.raises(secretstore.SecretStoreError):
+        secretstore.meta_store("svc", None, "api..example.gov", "API_KEY")
+    meta = secretstore._file_for(secretstore._layout().meta_dir, secretstore.key_for("svc"))
+    meta.parent.mkdir(parents=True, exist_ok=True)
+    meta.write_text("api..example.gov\tAPI_KEY\n", encoding="utf-8")
     assert msb.service_binding("svc") is None
     _set(capsys, monkeypatch, "-g", "svc2", "--host", "API.Example.GOV", "--env", "API_KEY2")
     assert msb.service_binding("svc2") == ("API_KEY2", "api.example.gov")
