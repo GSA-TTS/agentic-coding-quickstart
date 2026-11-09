@@ -75,8 +75,8 @@ The default flips only when every gate below holds. Until then this ADR stays
    - an archive built by the release workflow's Windows build steps contains the
      managed runtime and acq's source;
    - `install.ps1 -Source <dir>` installs that archive;
-   - the installed launcher reports `"impl": "python"` from
-     `py-acq\runtime\python.exe`.
+   - the installed launcher reports `"impl": "python"` (`acq version`), and
+     `acq doctor` reports the app-private runtime as present.
 
    This is checkable on the fork, which cuts no releases. The runtime's patch
    cadence, which ADR-0042m leaves to a separate decision and `py-acq/README.md`
@@ -90,19 +90,21 @@ The default flips only when every gate below holds. Until then this ADR stays
    - the persisted backend choice being honoured;
    - Bash-created state being read or migrated, so switching the default doesn't
      orphan existing sandboxes.
-3. **Sandbox-control parity:** on each Windows backend, every sandbox control the
-   Bash implementation applies is applied by the Python implementation:
+3. **Sandbox-control parity:** on each Windows backend, the Python implementation
+   applies these controls as the Bash implementation does:
    - credential binding;
    - network policy;
    - the read-only trusted config mount;
    - kits.
 
-   A Tier-3 oracle assertion covers each control.
+   A Tier-3 oracle assertion covers each control by checking its effect (for
+   example, that a disallowed destination is actually blocked), not just that a
+   flag was passed.
 4. **Command parity:** every command the Bash `acq` accepts on Windows is
    implemented, or is listed in this ADR as an accepted gap with its replacement.
    Today the Python CLI lacks `configure`, `start`, `restart`, `backend set`,
-   `backend unset` and `secret import`. (`secret set-custom` is a deliberate
-   refusal in both.)
+   `backend unset` and `secret import`. (`secret set-custom` is not a gap: Bash
+   refuses it with guidance, and Python rejects it as an unknown subcommand.)
 5. **Proof:**
    - a Windows CI job runs the pytest and vector suites, and smoke-tests both
      launchers on pull requests;
@@ -134,7 +136,8 @@ The default flips only when every gate below holds. Until then this ADR stays
   directory (`%LOCALAPPDATA%`). AppLocker's default path rules block executables
   there whatever their signature (ADR-0042m), so managed fleets need a publisher
   rule for the PSF certificate, or an IT-approved base runtime selected through
-  `ACQ_RUNTIME`.
+  `ACQ_RUNTIME`. Where AppLocker script rules are enforced, `acq.ps1` in
+  `%LOCALAPPDATA%` also needs its own allowance.
 - `acq version` already reports `"impl"`, so bug reports show which
   implementation ran.
 
