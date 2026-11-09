@@ -40,11 +40,50 @@ RELEASE_BASE_URL="https://github.com/GSA-TTS/agentic-coding-quickstart/releases/
 SHA256SUMS_NAME="SHA256SUMS"
 PROVENANCE_NAME="provenance.json"
 
+# User directories. Like acq itself (acq.backends/userdirs.sh, not sourced here:
+# this script runs before acq is installed), XDG_DATA_HOME and HOME count only
+# when they hold absolute paths, as the XDG Base Directory specification
+# requires; a relative value would resolve against the current directory. A
+# relative or unset HOME falls back to the account's home from the password
+# database. With no absolute home the defaults stay empty and the run stops
+# after option parsing, so --help and --version still work.
+is_abs_path() {
+  case "${1:-}" in /*) return 0 ;; *) return 1 ;; esac
+}
+
+account_home() {
+  ah=""
+  if command -v getent >/dev/null 2>&1; then
+    ah_uid="$(id -u 2>/dev/null)" || return 1
+    case "$ah_uid" in ''|*[!0-9]*) return 1 ;; esac
+    ah="$(getent passwd "$ah_uid" 2>/dev/null | cut -d: -f6)" || ah=""
+  else
+    # No getent (macOS): ~NAME reads the password database, never HOME. Only a
+    # plain identifier reaches eval.
+    ah_user="$(id -un 2>/dev/null)" || return 1
+    case "$ah_user" in [A-Za-z_]*) ;; *) return 1 ;; esac
+    case "$ah_user" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+    eval "ah=~$ah_user"
+  fi
+  is_abs_path "$ah" || return 1
+  printf '%s\n' "$ah"
+}
+
+if is_abs_path "${HOME:-}"; then
+  USER_HOME="$HOME"
+else
+  USER_HOME="$(account_home)" || USER_HOME=""
+fi
+if is_abs_path "${XDG_DATA_HOME:-}"; then
+  DATA_HOME="$XDG_DATA_HOME"
+else
+  DATA_HOME="${USER_HOME:+$USER_HOME/.local/share}"
+fi
+
 VERSION="${ACQ_INSTALL_VERSION:-$DEFAULT_VERSION}"
 SOURCE="${ACQ_INSTALL_SOURCE:-}"
-DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
-INSTALL_DIR="${ACQ_INSTALL_DIR:-$DATA_HOME/acq}"
-BIN_DIR="${ACQ_INSTALL_BIN_DIR:-$HOME/.local/bin}"
+INSTALL_DIR="${ACQ_INSTALL_DIR:-${DATA_HOME:+$DATA_HOME/acq}}"
+BIN_DIR="${ACQ_INSTALL_BIN_DIR:-${USER_HOME:+$USER_HOME/.local/bin}}"
 CHANNEL="${ACQ_INSTALL_CHANNEL:-python}"
 
 DRY_RUN=0
@@ -144,6 +183,13 @@ case "$CHANNEL" in
   *) usage_err "unknown channel '$CHANNEL' (only 'python' is supported on this fork)" ;;
 esac
 
+# The home directory also names the shell rc file the PATH step may edit, so it
+# is required even when --install-dir and --bin-dir are given.
+if [ -z "$USER_HOME" ]; then
+  if [ -n "${HOME+set}" ]; then home_desc="'$HOME'"; else home_desc="unset"; fi
+  die "cannot determine an absolute home directory (HOME is $home_desc); set HOME to an absolute path"
+fi
+
 # ---------------------------------------------------------------------------
 # Platform -> release archive name (the enumerated offline asset set, ADR-0042m).
 #
@@ -234,9 +280,9 @@ path_has_bindir() {
 
 rc_file_for_shell() {
   case "${SHELL:-}" in
-    */zsh) printf '%s\n' "$HOME/.zshrc" ;;
-    */bash) printf '%s\n' "$HOME/.bash_profile" ;;
-    *) printf '%s\n' "$HOME/.profile" ;;
+    */zsh) printf '%s\n' "$USER_HOME/.zshrc" ;;
+    */bash) printf '%s\n' "$USER_HOME/.bash_profile" ;;
+    *) printf '%s\n' "$USER_HOME/.profile" ;;
   esac
 }
 

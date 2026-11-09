@@ -76,6 +76,21 @@ def state_dir() -> Path:
     return userdirs.xdg_base("XDG_STATE_HOME", ".local", "state") / "acq"
 
 
+def provenance_dir() -> Path:
+    """Bash acq's provenance root (host-side).
+
+    ``ACQ_PROVENANCE_DIR``, else ``$XDG_STATE_HOME/acq/provenance`` (default
+    ``~/.local/state/acq/provenance``); like Bash's ``_acq_provenance_dir`` it
+    does not follow ``ACQ_STATE_DIR``. A relative ``ACQ_PROVENANCE_DIR`` is
+    refused and a relative ``XDG_STATE_HOME`` or ``HOME`` is ignored (see
+    :mod:`userdirs`), so the root never resolves against the current directory.
+    """
+    override = userdirs.path_override("ACQ_PROVENANCE_DIR")
+    if override is not None:
+        return override
+    return userdirs.xdg_base("XDG_STATE_HOME", ".local", "state") / "acq" / "provenance"
+
+
 def _safe(token: str) -> str:
     return _SAFE_RE.sub("_", token)
 

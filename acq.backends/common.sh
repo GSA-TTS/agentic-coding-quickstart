@@ -911,14 +911,13 @@ acq_validate_agent_builtin_kit_dir() {
 acq_validate_agent_builtin_kit_ref() {
   local agent="$1" kitref="$2" base_dir="${3:-}" kitdir
   if [ -z "$base_dir" ]; then
-    # A relative ACQ_STATE_DIR is never honored (see userdirs.sh); the entry
-    # point refuses it up front, and this fails closed if reached anyway.
-    if [ -n "${ACQ_STATE_DIR:-}" ]; then
-      acq_path_is_absolute "$ACQ_STATE_DIR" || return 1
-      base_dir="$ACQ_STATE_DIR/agent-kit-validation/$agent"
-    else
-      base_dir="${TMPDIR:-/tmp}/acq/agent-kit-validation/$agent"
-    fi
+    # Scratch under the per-user state root, never TMPDIR: a shared /tmp/acq is
+    # a fixed name another local user could create first and fill, and a
+    # relative TMPDIR would resolve against the current directory. acq_state_dir
+    # refuses a relative ACQ_STATE_DIR and ignores relative XDG values (see
+    # userdirs.sh), so this fails closed when no absolute root exists.
+    base_dir=$(acq_state_dir) || return 1
+    base_dir="$base_dir/agent-kit-validation/$agent"
   fi
   kitdir=$(kit_translate_fetch "$kitref" "$base_dir") || return 1
   acq_validate_agent_builtin_kit_dir "$agent" "$kitdir"
@@ -1631,6 +1630,13 @@ acq_host_socket_forwards() {
       printf 'acq: malformed host-socket forward %s (expected PATH:PORT); skipping\n' "$_entry" >&2
       continue
     fi
+    # Absoluteness is checked on the path as given, before canonicalizing: a
+    # relative path (or a relative symlink) would resolve against the current
+    # directory, normally the agent-writable workspace (see userdirs.sh).
+    if ! acq_path_is_absolute "$_path"; then
+      printf 'acq: host-socket path %s is not absolute; skipping\n' "$_path" >&2
+      continue
+    fi
     if command -v canonicalize_path >/dev/null 2>&1; then
       _path=$(canonicalize_path "$_path")
     fi
@@ -2293,7 +2299,7 @@ acq_resolve_backend() {
     cfg_name=$(_read_config_backend)
     if [ -n "$cfg_name" ]; then
       name="$cfg_name"
-      origin="${XDG_CONFIG_HOME:-$HOME/.config}/acq/config.yaml"
+      origin=$(_acq_config_file) || origin="config.yaml"
     else
       _auto_detect_backend || {
         echo "acq: error: no backend detected (looked on PATH and in ~/.local/bin)." >&2
@@ -2365,8 +2371,11 @@ acq_resolve_backend() {
 
 # Provenance state directory (host-side). Overridable via ACQ_PROVENANCE_DIR for
 # tests and for users who relocate XDG state. Mirrors _acq_config_file's style.
+# A relative override is never honoured (see userdirs.sh): the entry point
+# refuses it up front, and this fails closed if reached anyway.
 _acq_provenance_dir() {
   if [ -n "${ACQ_PROVENANCE_DIR:-}" ]; then
+    acq_path_is_absolute "$ACQ_PROVENANCE_DIR" || return 1
     printf '%s\n' "$ACQ_PROVENANCE_DIR"
     return 0
   fi
@@ -3903,11 +3912,14 @@ acq_provider_recorded_facts() {
 # Windows (`Scripts/python.exe`) and custom interpreters work; only then PATH.
 _acq_provider_facts_python() {
   local python="${ACQ_PROVIDER_INPUT_PYTHON:-}" runtime data_home
-  if [ -n "$python" ] && [ -x "$python" ]; then
+  # Only an absolute interpreter path: a relative one would run a program from
+  # the current directory (see userdirs.sh).
+  if acq_path_is_absolute "$python" && [ -x "$python" ]; then
     printf '%s\n' "$python"
     return 0
   fi
-  if [ -n "${LOCALAPPDATA:-}" ] && [ "$(uname -s 2>/dev/null)" != "Linux" ]; then
+  # LOCALAPPDATA, like the XDG variables, counts only when absolute.
+  if acq_path_is_absolute "${LOCALAPPDATA:-}" && [ "$(uname -s 2>/dev/null)" != "Linux" ]; then
     data_home="$LOCALAPPDATA/acq"
   else
     data_home=$(acq_xdg_dir XDG_DATA_HOME .local/share)/acq || data_home=""
@@ -4498,12 +4510,16 @@ ACQ_PROVIDER_INPUT_GUEST_DIR="${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provi
 _acq_provider_input_python() {
   local python="${ACQ_PROVIDER_INPUT_PYTHON:-}" version_check runtime data_home tools_dir setup
   if [ -n "$python" ]; then
+    acq_path_is_absolute "$python" || {
+      echo "acq: ACQ_PROVIDER_INPUT_PYTHON must be an absolute path, got $(acq_quote_value "$python")" >&2
+      return 2
+    }
     [ -x "$python" ] || {
       echo "acq: configured provider-input Python is not executable: $python" >&2
       return 2
     }
   else
-    if [ -n "${LOCALAPPDATA:-}" ] && [[ "$(uname -s 2>/dev/null)" = MINGW* || "$(uname -s 2>/dev/null)" = MSYS* || "$(uname -s 2>/dev/null)" = CYGWIN* ]]; then
+    if acq_path_is_absolute "${LOCALAPPDATA:-}" && [[ "$(uname -s 2>/dev/null)" = MINGW* || "$(uname -s 2>/dev/null)" = MSYS* || "$(uname -s 2>/dev/null)" = CYGWIN* ]]; then
       data_home="$LOCALAPPDATA/acq"
     else
       data_home=$(acq_xdg_dir XDG_DATA_HOME .local/share)/acq || data_home=""

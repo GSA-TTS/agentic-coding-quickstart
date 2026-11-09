@@ -413,3 +413,108 @@ def test_migration_refusal_names_full_verb(
     assert rc == 1
     assert doc["error"]["code"] == "state_schema_unsupported"
     assert doc["command"] == "provider-credential rm"
+
+
+# --- per-path overrides (ACQ_PROVENANCE_DIR, ACQ_MSB_BALANCED_HOSTS_FILE) ----------
+
+# Each override py-acq honours, with the default its remediation names (the same
+# text Bash prints, acq.backends/userdirs.sh).
+PATH_OVERRIDES = {
+    "ACQ_SECRET_STORE_DIR": "the default secret store",
+    "ACQ_SECRET_FILE_DIR": "the default secret store",
+    "ACQ_PROVENANCE_DIR": "the default",
+    "ACQ_SECRET_META_DIR": "the default",
+    "ACQ_SECRET_INDEX_FILE": "the default",
+    "ACQ_MSB_BALANCED_HOSTS_FILE": "the default",
+}
+
+
+@pytest.mark.parametrize(("var", "default"), PATH_OVERRIDES.items())
+@pytest.mark.parametrize("value", ["relative", "./relative", "rel/nested"])
+def test_relative_path_override_is_refused(monkeypatch, workspace, home, var, default, value):
+    monkeypatch.delenv("ACQ_SECRET_STORE_DIR", raising=False)
+    monkeypatch.setenv(var, value)
+    with pytest.raises(userdirs.UserDirError) as exc:
+        userdirs.check_path_overrides()
+    assert exc.value.message == f"{var} must be an absolute path, got {value!r}"
+    assert exc.value.remediation == f"set {var} to an absolute path, or unset it to use {default}"
+
+
+@pytest.mark.parametrize("var", ["ACQ_SECRET_META_DIR", "ACQ_SECRET_INDEX_FILE"])
+def test_store_dir_relocates_the_secret_metadata_overrides(monkeypatch, tmp_path, var):
+    # Like Bash, these are not read (so not refused) while ACQ_SECRET_STORE_DIR
+    # relocates them; a relative store dir itself is still refused.
+    monkeypatch.setenv(var, "relative")
+    monkeypatch.setenv("ACQ_SECRET_STORE_DIR", str(tmp_path / "store"))
+    userdirs.check_path_overrides()
+    monkeypatch.setenv("ACQ_SECRET_STORE_DIR", "rel-store")
+    with pytest.raises(userdirs.UserDirError, match="ACQ_SECRET_STORE_DIR"):
+        userdirs.check_path_overrides()
+
+
+def test_path_override_empty_is_unset_and_absolute_is_honored(monkeypatch, tmp_path):
+    monkeypatch.setenv("ACQ_PROVENANCE_DIR", "")
+    assert userdirs.path_override("ACQ_PROVENANCE_DIR") is None
+    monkeypatch.setenv("ACQ_PROVENANCE_DIR", str(tmp_path / "prov"))
+    assert userdirs.path_override("ACQ_PROVENANCE_DIR") == tmp_path / "prov"
+
+
+def test_provenance_dir_ignores_relative_xdg_state_home(monkeypatch, workspace, home):
+    monkeypatch.delenv("ACQ_PROVENANCE_DIR", raising=False)
+    monkeypatch.setenv("XDG_STATE_HOME", "rel-state")
+    assert state.provenance_dir() == home / ".local" / "state" / "acq" / "provenance"
+
+
+def test_bash_lock_dir_never_resolves_against_the_cwd(monkeypatch, workspace, home):
+    from acq_py import lock
+
+    monkeypatch.delenv("ACQ_PROVENANCE_DIR", raising=False)
+    monkeypatch.setenv("XDG_STATE_HOME", "rel-state")
+    path = lock._bash_lock_dir("msb", "box")
+    assert path.is_absolute()
+    assert path.is_relative_to(home / ".local" / "state" / "acq" / "provenance")
+    monkeypatch.setenv("ACQ_PROVENANCE_DIR", "rel-prov")
+    with pytest.raises(userdirs.UserDirError):
+        lock._bash_lock_dir("msb", "box")
+
+
+def test_bash_lock_dir_ignores_relative_home(monkeypatch, workspace, tmp_path):
+    from acq_py import lock
+
+    fallback = tmp_path / "account-home"
+    monkeypatch.setattr(userdirs, "_account_home", lambda: fallback)
+    monkeypatch.setenv("HOME", "relhome")
+    monkeypatch.delenv("ACQ_PROVENANCE_DIR", raising=False)
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+    path = lock._bash_lock_dir("msb", "box")
+    assert path.is_relative_to(fallback / ".local" / "state" / "acq" / "provenance")
+
+
+@pytest.mark.parametrize(("var", "default"), PATH_OVERRIDES.items())
+def test_cli_refuses_relative_path_override_with_bash_text(workspace, acq_cmd, var, default):
+    env = dict(os.environ, ACQ_BACKEND="msb", **{var: "rel-override"})
+    if var != "ACQ_SECRET_STORE_DIR":
+        env.pop("ACQ_SECRET_STORE_DIR", None)  # it relocates the metadata overrides
+    proc = subprocess.run(
+        [*acq_cmd, "ls"],
+        cwd=workspace,
+        env=env,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert proc.stdout == ""
+    assert proc.stderr == (
+        f"acq: {var} must be an absolute path, got 'rel-override'\n"
+        f"set {var} to an absolute path, or unset it to use {default}\n"
+    )
+    assert list(workspace.iterdir()) == []
+
+
+def test_doctor_state_check_fails_on_relative_path_override(monkeypatch, workspace, home):
+    monkeypatch.setenv("ACQ_PROVENANCE_DIR", "rel-prov")
+    check = doctor.state_check()
+    assert check["status"] == "fail"
+    assert check["message"] == "ACQ_PROVENANCE_DIR must be an absolute path, got 'rel-prov'"
+    assert list(workspace.iterdir()) == []

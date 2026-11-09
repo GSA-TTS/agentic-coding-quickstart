@@ -124,6 +124,10 @@ fi
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 ACQ="$REPO_ROOT/acq"
+# acq's user-directory rules (functions only): relative XDG_* / HOME values are
+# ignored, never resolved against the current directory.
+# shellcheck source=acq.backends/userdirs.sh
+. "$REPO_ROOT/acq.backends/userdirs.sh"
 
 VERBOSE="${VERIFY_VERBOSE:-}"
 KEEP="${VERIFY_KEEP:-}"
@@ -366,12 +370,24 @@ run_acq() {
 # shallow guest target (verified on msb 0.6.6). A real directory under $HOME
 # mounts fine. So the verify workspace lives under a stable cache dir, and we
 # resolve it to its canonical (symlink-free) path before mounting.
+# _verify_workspace_base — the default workspace parent, under the user's cache
+# directory as acq resolves it (an absolute XDG_CACHE_HOME, else the absolute
+# home's .cache). Fails when no absolute directory exists.
+_verify_workspace_base() {
+  local base
+  base=$(acq_xdg_dir XDG_CACHE_HOME .cache) || return 1
+  printf '%s/acq/verify\n' "$base"
+}
+
 WORKDIR=""
 if [ "$_VERIFY_BACKENDS_SOURCED" -eq 0 ]; then
   WORKDIR="${1:-}"
 fi
 if [ "$_VERIFY_BACKENDS_SOURCED" -eq 0 ] && [ -z "$WORKDIR" ]; then
-  _verify_base="${XDG_CACHE_HOME:-$HOME/.cache}/acq/verify"
+  _verify_base=$(_verify_workspace_base) || {
+    echo "verify-backends: cannot determine an absolute cache directory; set HOME or XDG_CACHE_HOME to an absolute path, or pass WORKDIR" >&2
+    exit 2
+  }
   mkdir -p "$_verify_base"
   WORKDIR=$(mktemp -d "${_verify_base}/ws.XXXXXX")
   ( cd "$WORKDIR" && git init -q && git config user.email test@example.com \

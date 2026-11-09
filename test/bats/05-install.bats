@@ -283,3 +283,59 @@ SHIM
   [ ! -e "$(_install_dir)/PWNED" ]
   [ ! -e "$(_install_dir)/acq" ]
 }
+
+# --- relative user directories (XDG Base Directory: absolute values only) -------
+
+# Stub `id` and `getent` so the account-home fallback resolves to $1, or finds
+# nothing when $1 is empty.
+_plant_account_home() {
+  cat >"$STUBDIR/id" <<'IDSTUB'
+#!/bin/sh
+case "$1" in -u) echo 4199999 ;; *) echo acq-installer-test ;; esac
+IDSTUB
+  if [ -n "${1:-}" ]; then
+    printf '#!/bin/sh\n[ "$1 $2" = "passwd 4199999" ] && echo "acq-installer-test:x:4199999:4199999::%s:/bin/sh"\n' "$1" >"$STUBDIR/getent"
+  else
+    printf '#!/bin/sh\nexit 2\n' >"$STUBDIR/getent"
+  fi
+  chmod +x "$STUBDIR/id" "$STUBDIR/getent"
+}
+
+@test "installer: a relative XDG_DATA_HOME is ignored for the default install dir" {
+  local work="$STUBDIR/work"
+  mkdir -p "$work"
+  cd "$work" || return 1
+  run env XDG_DATA_HOME=rel-data sh "$REPO_ROOT/install.sh" --dry-run --bin-dir "$STUBDIR/bin"
+  assert_success
+  assert_line "  install dir: $HOME/.local/share/acq"
+  refute_output --partial 'rel-data'
+  run ls -A "$work"
+  assert_output ''
+}
+
+@test "installer: a relative HOME falls back to the account home" {
+  local work="$STUBDIR/work"
+  mkdir -p "$work"
+  cd "$work" || return 1
+  _plant_account_home "$STUBDIR/acct-home"
+  run env -u XDG_DATA_HOME HOME=relhome sh "$REPO_ROOT/install.sh" --dry-run --install-dir "$STUBDIR/inst"
+  assert_success
+  assert_line "  launcher:    $STUBDIR/acct-home/.local/bin/acq"
+  refute_output --partial 'relhome'
+  run ls -A "$work"
+  assert_output ''
+}
+
+@test "installer: with no absolute home it stops after option parsing" {
+  local work="$STUBDIR/work"
+  mkdir -p "$work"
+  cd "$work" || return 1
+  _plant_account_home ""
+  run env HOME=relhome sh "$REPO_ROOT/install.sh" --dry-run --install-dir "$STUBDIR/inst" --bin-dir "$STUBDIR/bin"
+  assert_failure 1
+  assert_output --partial "cannot determine an absolute home directory (HOME is 'relhome')"
+  run env HOME=relhome sh "$REPO_ROOT/install.sh" --help
+  assert_success
+  run ls -A "$work"
+  assert_output ''
+}

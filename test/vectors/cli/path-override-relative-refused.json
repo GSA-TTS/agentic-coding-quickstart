@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "id": "cli/path-override-relative-refused",
+  "oracle": "Path overrides: a relative ACQ_PROVENANCE_DIR is refused up front (exit 1, human diagnostics on stderr) instead of resolving against the current directory; both implementations print the same message",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{acq}", "ls"],
+    "env": {"ACQ_PROVENANCE_DIR": "relative-provenance"},
+    "unset": ["ACQ_IMPL", "ACQ_BACKEND", "ACQ_STATE_DIR", "ACQ_SECRET_STORE_DIR", "ACQ_SECRET_FILE_DIR"],
+    "stdin": "",
+    "timeout_ms": 10000
+  },
+  "expect": {
+    "exit": 1,
+    "stdout": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "acq: ACQ_PROVENANCE_DIR must be an absolute path, got 'relative-provenance'\nset ACQ_PROVENANCE_DIR to an absolute path, or unset it to use the default\n",
+      "normalize": ["crlf"]
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+  }
+}
