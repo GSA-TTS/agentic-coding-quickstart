@@ -19,6 +19,12 @@ Mirrors the real sbx 0.51.0 CLI surface:
 * ``sbx settings get/set kit.allowedSources`` — the owner-granular kit allowlist
   the adapter's ``kit_source_revoked`` drives (there is no ``kit-source-revoke``
   subcommand).
+* ``sbx create … --kit DIR`` records each kit directory (it must hold a
+  ``spec.yaml``), and ``sbx kit add NAME DIR`` adds one, refusing a kit that
+  declares ``setup.startup`` as sbx 0.38 and later do. A ``sh -c`` exec that
+  tests the startup-barrier file prints ``ready`` when the sandbox was created
+  with the barrier kit holding that token, as the real guest would once its
+  startup commands ran.
 
 The catalog and secret store are backend-native state, not acq authority: acq never
 reads them as configuration (ADR-0040m §trust ownership). They are never secrets and
@@ -71,6 +77,17 @@ ECHO_EXIT_ENV = "ACQ_SBX_STUB_EXIT_CODE"
 # seed is the initial value only: once a ``settings set`` has written the file,
 # reads return what was written, so the adapter's re-read can verify its write.
 ALLOWED_SOURCES_ENV = "ACQ_SBX_STUB_ALLOWED_SOURCES"
+
+# Kit knobs. ``ACQ_SBX_STUB_BARRIER=stall`` never reports the startup barrier
+# (kit startup that does not finish); ``ACQ_SBX_STUB_KIT_ADD=allow`` accepts a
+# startup-bearing kit in ``kit add`` (an sbx older than 0.38).
+BARRIER_ENV = "ACQ_SBX_STUB_BARRIER"
+KIT_ADD_ENV = "ACQ_SBX_STUB_KIT_ADD"
+BARRIER_FILE = "/tmp/acq/startup-complete"  # nosec B108 # the guest path the barrier kit writes
+STARTUP_REFUSAL = (
+    'ERROR: kit "{name}" declares setup.startup, which the kit-add recreate flow does not yet apply; '
+    "recreate the sandbox from scratch via `sbx rm` + `sbx create --kit`"
+)
 
 
 def _exit_code(env_name: str) -> int:
@@ -212,6 +229,74 @@ def _save_allowed_sources(sources: list[str]) -> None:
     path = _allowed_sources_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(sources, sort_keys=True), encoding="utf-8")
+
+
+def _kits_path() -> Path:
+    return _home() / ".docker-sbx" / "kits.json"
+
+
+def _load_kits() -> dict[str, list[str]]:
+    try:
+        doc = json.loads(_kits_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {k: v for k, v in doc.items() if isinstance(v, list)} if isinstance(doc, dict) else {}
+
+
+def _save_kits(kits: dict[str, list[str]]) -> None:
+    path = _kits_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(kits, sort_keys=True), encoding="utf-8")
+
+
+def _kit_spec(kit_dir: str) -> str | None:
+    try:
+        return (Path(kit_dir) / "spec.yaml").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _kit_dirs(args: list[str]) -> list[str]:
+    return [args[i + 1] for i, a in enumerate(args[:-1]) if a == "--kit"]
+
+
+def _barrier_tokens(kit_dirs: list[str]) -> list[str]:
+    """The tokens the kits' startup commands write to the barrier file (read at create, as sbx does)."""
+    tokens = []
+    for kit_dir in kit_dirs:
+        for line in (_kit_spec(kit_dir) or "").splitlines():
+            if BARRIER_FILE in line and line.count("'") >= 4:
+                tokens.append(line.split("'")[-2])
+    return tokens
+
+
+def _barrier_ready(name: str, script: str) -> bool:
+    """A barrier probe is satisfied when one of the sandbox's kits wrote the token it tests for."""
+    if BARRIER_FILE not in script or os.environ.get(BARRIER_ENV) == "stall":
+        return False
+    return any(f"= '{token}'" in script for token in _load_kits().get(f"{name}#barrier", []))
+
+
+def _kit_add(args: list[str], catalog: dict[str, str]) -> int:
+    """``sbx kit add NAME DIR``."""
+    if _should_fail("kit add"):
+        print(RAW_FAIL_STDERR, file=sys.stderr)
+        return 1
+    name, kit_dir = (args + ["", ""])[:2]
+    if name not in catalog:
+        print(f"sbx: no such sandbox '{name}'", file=sys.stderr)
+        return 1
+    spec = _kit_spec(kit_dir)
+    if spec is None:
+        print(f"sbx: cannot read kit '{kit_dir}'", file=sys.stderr)
+        return 1
+    if "\n  startup:" in spec and os.environ.get(KIT_ADD_ENV) != "allow":
+        print(STARTUP_REFUSAL.format(name=Path(kit_dir).name), file=sys.stderr)
+        return 1
+    kits = _load_kits()
+    kits.setdefault(name, []).append(kit_dir)
+    _save_kits(kits)
+    return 0
 
 
 def _arg_after(args: list[str], flag: str) -> str | None:
@@ -550,9 +635,23 @@ def main(argv: list[str]) -> int:
         if name in catalog:
             print(f"sbx: sandbox '{name}' already exists", file=sys.stderr)
             return 1
+        kit_dirs = _kit_dirs(args)
+        if any(_kit_spec(d) is None for d in kit_dirs):
+            print("sbx: a --kit directory has no readable spec.yaml", file=sys.stderr)
+            return 1
         catalog[name] = "running"
         _save(catalog)
+        kits = _load_kits()
+        kits[name] = kit_dirs
+        kits[f"{name}#barrier"] = _barrier_tokens(kit_dirs)
+        _save_kits(kits)
         return 0
+
+    if cmd == "kit":
+        if args[1:2] == ["add"]:
+            return _kit_add(args[2:], catalog)
+        print("sbx: unrecognized kit subcommand", file=sys.stderr)
+        return 1
 
     if cmd == "exec":
         # `sbx exec [-u USER] [-w DIR] [-e K=V] NAME [-- CMD...]` — exit 0 when
@@ -583,6 +682,8 @@ def main(argv: list[str]) -> int:
         if command:
             marker += " " + " ".join(command)
         print(marker)
+        if command[:2] == ["sh", "-c"] and len(command) > 2 and _barrier_ready(name, command[2]):
+            print("ready")
         return _exit_code(EXEC_EXIT_ENV)
 
     if cmd in ("cp", "copy"):

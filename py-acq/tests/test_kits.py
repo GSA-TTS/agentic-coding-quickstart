@@ -593,15 +593,16 @@ def test_agent_kit_is_the_pinned_bundled_kit():
 
 def test_kit_apply_capability_maps_through_seam():
     # Mutation-proof guard: the kit-apply capability maps through the adapter
-    # seam (ADR-0040m) — msb declares it supported (via its capability record,
-    # not the record_fn-is-None fallback), sbx declares it unsupported (fail-closed).
+    # seam (ADR-0040m) — both adapters declare it in their capability records
+    # (not the record_fn-is-None fallback): msb applies kits itself, sbx through
+    # `sbx create --kit` and `sbx kit add`.
     rec = msb.capability_record("0.7.7")
     assert rec["backend"] == "msb"
     assert rec["capabilities"]["kit-apply"] == "required"
     assert rec["capabilities"]["secret-list"] == "required"  # served from the acq store
     assert rec["capabilities"]["key-present"] == "unsupported"  # sbx-only
     assert cli._supports("msb", "kit-apply") is True
-    assert cli._supports("sbx", "kit-apply") is False
+    assert cli._supports("sbx", "kit-apply") is True
 
 
 def test_kit_apply_applies_and_records(monkeypatch, tmp_path, capsys):

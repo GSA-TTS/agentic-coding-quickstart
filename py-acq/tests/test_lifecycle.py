@@ -101,9 +101,8 @@ def test_stop_missing_fails_closed(monkeypatch, tmp_path, capsys):
 def test_sbx_lifecycle_end_to_end(monkeypatch, tmp_path, capsys):
     # The sbx adapter routes the common lifecycle verbs through the sbx stub with
     # host-authoritative state records keyed by the sbx backend (ADR-0040m).
-    # ``shell`` selects no agent kit, so this stays on the sandbox-templates path
-    # (ADR-0030): opencode on sbx would require the kit-apply capability, which is
-    # msb-only in this slice (fail-closed; see test_sbx_create_opencode_fails_closed).
+    # ``shell`` selects no agent kit; the built-in support kits are still passed
+    # to sbx at create (see test_sbx_create_opencode_applies_its_kit).
     _env(monkeypatch, tmp_path)
     monkeypatch.setenv("ACQ_SBX_BIN", "__stub__")
     monkeypatch.setenv("ACQ_SBX_VERSION", "0.39.0")
@@ -139,11 +138,10 @@ def test_sbx_lifecycle_end_to_end(monkeypatch, tmp_path, capsys):
     assert state.record_read("sbx", "sbx-box") is None
 
 
-def test_sbx_create_opencode_fails_closed(monkeypatch, tmp_path, capsys):
-    # Mutation-proof guard: opencode requires the built-in agent kit, which needs
-    # the kit-apply capability the sbx adapter declares unsupported (ADR-0040m).
-    # The refusal is fail-closed BEFORE create, so no half-provisioned sandbox is
-    # stranded without its agent binary.
+def test_sbx_create_opencode_applies_its_kit(monkeypatch, tmp_path, capsys):
+    # The documented bootstrap works on sbx: opencode's bundled agent kit is
+    # translated and passed to `sbx create --kit` with the built-in kits, and the
+    # recorded entrypoint is what a later re-attach launches.
     _env(monkeypatch, tmp_path)
     monkeypatch.setenv("ACQ_SBX_BIN", "__stub__")
     monkeypatch.setenv("ACQ_SBX_VERSION", "0.39.0")
@@ -154,10 +152,10 @@ def test_sbx_create_opencode_fails_closed(monkeypatch, tmp_path, capsys):
     ws = tmp_path / "workspace"
     ws.mkdir()
     rc, doc = _invoke(capsys, "--backend", "sbx", "create", "opencode", str(ws), "--name", "sbx-box", "--json")
-    assert rc == 1
-    assert doc["error"]["code"] == "unsupported_capability"
-    # Nothing was created by the refused invocation.
-    assert state.record_read("sbx", "sbx-box") is None
+    assert rc == 0
+    assert doc["data"]["kit"] == "opencode"
+    assert doc["data"]["kits"][-1] == "opencode"
+    assert state.record_read("sbx", "sbx-box")["agent"] == "opencode"
 
 
 def test_slugify_and_derive_name():

@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "id": "cli/kit-apply-unsupported",
-  "oracle": "ADR-0040m unsupported-capability fail-closed: kit apply maps through the adapter seam and a backend that declares kit-apply unsupported (sbx) fails closed with unsupported_capability",
+  "oracle": "ADR-0040m unsupported-capability fail-closed: kit apply on sbx adds the kit with sbx kit add, and a kit with startup commands, which sbx 0.38 and later refuse mid-life, fails closed with unsupported_capability (recreate the sandbox)",
   "tier": 1,
   "backend": null,
   "platform": "any",

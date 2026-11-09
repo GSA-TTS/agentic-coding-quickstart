@@ -19,6 +19,7 @@ from .. import (
     envelope,
     errors,
     kit_msb,
+    kit_sbx,
     kits,
     kitspec,
     lock,
@@ -173,10 +174,14 @@ def _cli_kit_refs(values: list[str] | None) -> list[str]:
 
 @dataclass(frozen=True)
 class _KitPlan:
-    """The kits an msb create applies, and which of them provides the agent (if any)."""
+    """The kits a create applies, and which of them provides the agent (if any).
+
+    ``selection`` is the kit selection they came from (the sbx heal records use it).
+    """
 
     kits: list[kit_msb.Kit]
     agent_kit: str | None
+    selection: kitspec.KitSelection | None = None
 
     @property
     def entrypoint(self) -> str | None:
@@ -277,26 +282,122 @@ def _new_msb_sandbox(
     return {**data, **_kit_data(plan, result)}, None
 
 
+def _plan_sbx_kits(
+    agent: str, cli_kits: list[str], image: str, command: str, emit_json: bool
+) -> tuple[_KitPlan | None, int | None]:
+    """Select, verify and parse the kit set for an sbx create (:func:`kit_sbx.select`)."""
+    try:
+        resolved, selection = kit_sbx.select(agent, cli_kits, image_is_default=image == common.OPENCODE_DEVENV_IMAGE)
+    except kitspec.KitSelectionError as exc:
+        return None, common._operational_failure(
+            command, errors.VALIDATION_FAILED, str(exc),
+            "fix the kit selection (config extra_kits or provider_kit, ACQ_EXTRA_KITS, ACQ_PROVIDER_KITS, --kit)",
+            emit_json,
+        )
+    except sbx.SbxError as exc:
+        return None, common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
+    agent_kit = next(
+        (k.name for k in resolved if k.role in ("agent", "cli") and k.name in kitspec.AGENT_BUNDLE_KITS), None
+    )
+    return _KitPlan(resolved, agent_kit, selection), None
+
+
 def _new_sbx_sandbox(
     command: str, emit_json: bool, *, agent: str, workspace: str, name: str, image_flag: str | None,
     cli_kits: list[str],
 ) -> tuple[dict | None, int | None]:
-    """Create an sbx sandbox; it cannot apply kits in this slice, so an agent that needs one is refused."""
-    kit_name = kits.agent_kit_for(agent)
-    if cli_kits or (kit_name is not None and not common._supports("sbx", "kit-apply")):
-        wanted = f"the '{kit_name}' kit" if kit_name and not cli_kits else "the requested kits"
-        return None, common._operational_failure(
-            command,
-            errors.UNSUPPORTED,
-            f"agent '{agent}' requires {wanted}, which the sbx backend cannot apply",
-            "use a backend that supports kit-apply (msb in this slice), or choose an agent without a kit",
-            emit_json,
-        )
+    """Translate the kits, create the sandbox with them, then wait for kit startup (Bash sbx provision).
+
+    sbx applies the kits itself (``sbx create --kit DIR``). On the default image
+    OpenCode comes from the pinned kit, so sbx is given the ``shell`` agent and
+    does not add its own OpenCode kit as well.
+    """
+    image = _resolve_image(image_flag, agent)
+    plan, exit_code = _plan_sbx_kits(agent, cli_kits, image, command, emit_json)
+    if plan is None:
+        return None, exit_code
     try:
-        data = _create_sandbox("sbx", agent, workspace, name, _resolve_image(image_flag, agent), None)
+        prepared = kit_sbx.prepare(plan.kits)
+    except kit_sbx.KitTranslateError as exc:
+        return None, common._operational_failure(
+            command, errors.VALIDATION_FAILED, f"a kit could not be prepared, so the sandbox was not created: {exc}",
+            "check that the acq state directory is acq's own and writable, or reinstall acq", emit_json,
+        )
+    generic = agent == "opencode" and image == common.OPENCODE_DEVENV_IMAGE
+    try:
+        data = _create_sandbox("sbx", agent, workspace, name, image, plan.agent_kit,
+                               sbx_create=("shell" if generic else agent, prepared.flags))
     except common._ADAPTER_ERRORS as exc:
         return None, common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
-    return {**data, "kit": None, "entrypoint": None}, None
+    finally:
+        kit_sbx.discard_barrier(prepared)  # sbx create has read it
+    try:
+        _finish_sbx_create(name, agent, plan, prepared.barrier_token, data, generic=generic)
+    except BaseException as exc:
+        # Also on Ctrl-C: the record still says the kits are unconfirmed, so
+        # nothing attaches to this sandbox unless its removal is confirmed.
+        note, remediation = _discard_unconfirmed_sbx(name)
+        if not isinstance(exc, sbx.SbxError):
+            raise
+        return None, common._operational_failure(command, exc.code, exc.message + note,
+                                                 remediation or exc.remediation, emit_json)
+    return {**data, **_kit_data(plan, kit_msb.ApplyResult(applied=[k.name for k in plan.kits]))}, None
+
+
+def _finish_sbx_create(name: str, agent: str, plan: _KitPlan, token: str, data: dict, *, generic: bool) -> None:
+    """Seed the host kit records, wait for the startup barrier, record what was applied, then confirm.
+
+    The kit records describe what the host passed to the create it saw
+    succeed, so they are written before the barrier, which only the guest
+    writes. The state record loses its ``kits_unconfirmed`` mark last. Raises
+    :class:`sbx.SbxError`; the caller removes the sandbox.
+    """
+    kit_sbx.clear_instance_state(name)
+    if plan.selection is not None:
+        kit_sbx.seed_records(name, plan.selection)
+    if not kit_sbx.wait_startup_barrier(name, token):
+        raise sbx.SbxError(
+            errors.TIMEOUT,
+            f"the kit startup commands in sandbox '{name}' did not finish within {kit_sbx.barrier_timeout_s():g}s",
+            f"check network access from the sandbox, or raise {kit_sbx.BARRIER_TIMEOUT_ENV}, then retry",
+        )
+    try:
+        if agent == "opencode":
+            kit_sbx.hc_write(name, "generic-opencode", "generic-opencode" if generic else "legacy-opencode")
+        kit_msb.cli_kits_write(name, plan.kits, backend="sbx")
+        if plan.agent_kit is not None:
+            kits.kit_applied_write("sbx", name, plan.agent_kit, plan.entrypoint or plan.agent_kit)
+        kits.provenance_write("sbx", name)
+        state.record_write("sbx", name, agent=agent, workspace=data["workspace"], image=data["image"])
+    except OSError as exc:
+        raise sbx.SbxError(
+            errors.FAILURE, f"could not record the applied kits for sandbox '{name}': {exc.strerror or exc}",
+            "check that the acq state directory is writable and has free space, then retry",
+        ) from exc
+
+
+def _discard_unconfirmed_sbx(name: str) -> tuple[str, str | None]:
+    """Remove an sbx sandbox whose kits were never confirmed; returns ``(note, remediation)``.
+
+    Its records go only once the guest is confirmed gone. Otherwise the state
+    record keeps ``kits_unconfirmed``, which every attaching verb refuses, and
+    the user is told to remove it.
+    """
+    if _remove_confirmed(common._adapter("sbx"), name):
+        _clear_host_records("sbx", name)
+        return "; the sandbox was removed", None
+    print(f"acq: warning: sandbox '{name}' could not be removed; run 'acq rm {name}'", file=sys.stderr)
+    return ("; the sandbox could not be removed, and acq refuses to attach to it until it is",
+            f"run 'acq rm {name}', then retry")
+
+
+def _remove_confirmed(adapter, name: str) -> bool:
+    """Remove a sandbox; True only when the remove succeeded or a listing shows it gone."""
+    try:
+        adapter.remove(name)
+        return True
+    except common._ADAPTER_ERRORS:
+        return _confirmed_absent(adapter, name) is True
 
 
 def _discard_half_created(backend: str, name: str) -> None:
@@ -336,6 +437,9 @@ def _clear_host_records(backend: str, name: str) -> None:
         kit_msb.remove_host_config(name)
         kit_msb.cli_kits_remove(name)
         provider_input.remove(backend, name)
+    else:
+        kit_sbx.remove_host_config(name)
+        kit_msb.cli_kits_remove(name, backend="sbx")
 
 
 def _has_host_records(backend: str, name: str) -> bool:
@@ -403,33 +507,33 @@ def _create_sandbox(
     kit_name: str | None,
     *,
     plan: _KitPlan | None = None,
+    sbx_create: tuple[str, list[str]] | None = None,
 ) -> dict:
     """Create + exec-ready gate + record write; returns the result record data.
 
     On msb, ``plan``'s kits set the egress policy and create flags. When msb can
     enforce it the host-config directory is mounted read-only, and the record
-    says ``ro_host_config`` only after :func:`_confirm_ro_mount`. Secret
-    bindings are reported by name and host only, never a value.
+    says ``ro_host_config`` only after :func:`_confirm_ro_mount`. Secret bindings
+    are reported by name and host only. ``sbx_create`` is sbx's agent and ``--kit`` flags.
     """
     adapter = common._adapter(backend)
     error_cls = sbx.SbxError if backend == "sbx" else msb.MsbError
-    secret_bindings: list[str] | None = None
-    ro_mount = False
+    secret_bindings, ro_mount = None, False
+    unconfirmed = backend == "sbx"  # until the kit startup barrier is seen (_finish_sbx_create)
     if backend == "sbx":
-        adapter.create(name, image, workspace, agent=agent)
+        sbx_agent, kit_flags = sbx_create or (agent, [])
+        adapter.create(name, image, workspace, agent=sbx_agent, kit_flags=kit_flags)
+        # Recorded at once, so no verb attaches to the guest while its kits are unconfirmed.
+        _write_record(backend, name, agent=agent, workspace=workspace, image=image, ro_host_config=False,
+                      kits_unconfirmed=True)
     else:
         ro_mount = security.ro_mount_supported()
         secret_bindings = _msb_create(name, image, workspace, plan.kits if plan else [], ro_mount=ro_mount)
     if not _wait_exec_ready(backend, name):
-        # A half-created sandbox must not strand (legacy cleanup).
-        _remove_quietly(adapter, name)
-        raise error_cls(
-            errors.TIMEOUT,
-            f"sandbox '{name}' did not become exec-ready",
-            f"check {backend} logs, then remove the half-created sandbox and retry",
-        )
+        _not_exec_ready(backend, adapter, name, error_cls)
     _fresh_guest(backend, adapter, name, ro_mount=ro_mount)
-    _write_record(backend, name, agent=agent, workspace=workspace, image=image, ro_host_config=ro_mount)
+    _write_record(backend, name, agent=agent, workspace=workspace, image=image, ro_host_config=ro_mount,
+                  kits_unconfirmed=unconfirmed)
     data: dict = {
         "name": name,
         "backend": backend,
@@ -442,6 +546,21 @@ def _create_sandbox(
         data["secret_bindings"] = secret_bindings
         data["ro_host_config"] = ro_mount
     return data
+
+
+def _not_exec_ready(backend: str, adapter, name: str, error_cls) -> None:
+    """Remove a sandbox that never became exec-ready, then raise; it must not strand.
+
+    Its records go only once the guest is confirmed gone; an sbx record left
+    behind still says ``kits_unconfirmed``, so nothing attaches to it.
+    """
+    if _remove_confirmed(adapter, name):
+        if backend == "sbx":
+            _clear_host_records(backend, name)
+        raise error_cls(errors.TIMEOUT, f"sandbox '{name}' did not become exec-ready; it was removed",
+                        f"check {backend} logs, then retry")
+    raise error_cls(errors.TIMEOUT, f"sandbox '{name}' did not become exec-ready, and it could not be removed",
+                    f"run 'acq rm {name}', then retry")
 
 
 def _fresh_guest(backend: str, adapter, name: str, *, ro_mount: bool) -> None:
@@ -458,7 +577,8 @@ def _fresh_guest(backend: str, adapter, name: str, *, ro_mount: bool) -> None:
             _confirm_ro_mount(adapter, name)
 
 
-def _write_record(backend: str, name: str, *, agent: str, workspace: str, image: str, ro_host_config: bool) -> None:
+def _write_record(backend: str, name: str, *, agent: str, workspace: str, image: str, ro_host_config: bool,
+                  kits_unconfirmed: bool = False) -> None:
     """Write the new guest's host record, or remove the guest and raise the adapter's error.
 
     Without its host record the guest is unusable (run/attach refuse a sandbox
@@ -466,14 +586,17 @@ def _write_record(backend: str, name: str, *, agent: str, workspace: str, image:
     """
     try:
         state.record_write(backend, name, agent=agent, workspace=workspace, image=image,
-                           ro_host_config=True if ro_host_config else None)
+                           ro_host_config=True if ro_host_config else None,
+                           kits_unconfirmed=True if kits_unconfirmed else None)
     except OSError as exc:
-        _remove_quietly(common._adapter(backend), name)
+        removed = _remove_confirmed(common._adapter(backend), name)
         error_cls = sbx.SbxError if backend == "sbx" else msb.MsbError
         raise error_cls(
             errors.FAILURE,
-            f"could not write the host state record for sandbox '{name}': {exc.strerror or exc}",
-            "check that the acq state directory is writable and has free space, then retry",
+            f"could not write the host state record for sandbox '{name}': {exc.strerror or exc}"
+            + ("" if removed else ", and the sandbox could not be removed"),
+            "check that the acq state directory is writable and has free space, then retry"
+            + ("" if removed else f" (first run 'acq rm {name}')"),
         ) from exc
 
 
