@@ -374,6 +374,10 @@
       "vectors": ["cli/migration-newer-refused"]
     },
     {
+      "contract": "ADR-0041m state root: a relative ACQ_STATE_DIR is refused before any state is read or written (XDG Base Directory: relative values are never resolved against the current directory)",
+      "vectors": ["cli/state-dir-relative-refused"]
+    },
+    {
       "contract": "ADR-0035/0041m security exception: a sandbox missing its read-only mount fails closed on trusted operations",
       "vectors": ["cli/security-exception-attach", "cli/security-exception-unprobed"]
     },

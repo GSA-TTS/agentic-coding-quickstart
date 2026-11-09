@@ -73,6 +73,11 @@ if ! command -v acq_is_known_agent >/dev/null 2>&1; then
   # shellcheck source=acq.backends/agents.sh
   . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/agents.sh"
 fi
+# Absolute-only XDG/HOME/ACQ_STATE_DIR resolution, for the same reason.
+if ! command -v acq_xdg_dir >/dev/null 2>&1; then
+  # shellcheck source=acq.backends/userdirs.sh
+  . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/userdirs.sh"
+fi
 
 _acq_msb_select_kits() {
   local agent="${1:-}"
@@ -290,7 +295,11 @@ ACQ_MSB_SKIP_PREREQ_CHECK="${ACQ_MSB_SKIP_PREREQ_CHECK:-}"
 
 # Where fetched neutral kits are materialized for this run (msb has no native
 # kit mechanism, so acq drives the parsed operations itself).
-ACQ_MSB_KIT_CACHE="${ACQ_MSB_KIT_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/acq/kits}"
+# (The resolvers run outside the expansions below: a failing command
+# substitution in an assignment would trip errexit while this file is sourced.)
+_acq_ud=$(acq_xdg_dir XDG_CACHE_HOME .cache) || _acq_ud=""
+ACQ_MSB_KIT_CACHE="${ACQ_MSB_KIT_CACHE:-${_acq_ud:+$_acq_ud/acq/kits}}"
+unset _acq_ud
 
 # Max seconds to wait for `msb exec` to work after create (the guest boots in
 # the background; kit application must not race it). Mirrors sbx's
@@ -504,7 +513,9 @@ case "$(printf '%s' "$ACQ_MSB_UPSTREAM_CA_AUTODETECT" | tr '[:upper:]' '[:lower:
 esac
 
 # Where the auto-detected host CA bundle is written for the upstream verifier.
-ACQ_MSB_UPSTREAM_CA_FILE="${ACQ_MSB_UPSTREAM_CA_FILE:-${ACQ_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/acq}/msb/host-upstream-cas.pem}"
+_acq_ud=$(acq_state_dir) || _acq_ud=""
+ACQ_MSB_UPSTREAM_CA_FILE="${ACQ_MSB_UPSTREAM_CA_FILE:-${_acq_ud:+$_acq_ud/msb/host-upstream-cas.pem}}"
+unset _acq_ud
 
 # REPRODUCTION / TESTING toggle. A host whose corporate proxy does NOT intercept
 # api.gsa.usai.gov / github.com (e.g. those domains are on a proxy bypass list)
@@ -610,12 +621,16 @@ ACQ_MSB_BALANCED_HOSTS_FILE="${ACQ_MSB_BALANCED_HOSTS_FILE:-${ACQ_SCRIPT_DIR:-.}
 # and records the `msb ssh serve` + `ssh -L` PIDs per sandbox so `acq rm`/stop can
 # tear them down. State lives under $XDG_STATE_HOME/acq (falling back to
 # ~/.local/state/acq); override the whole root with ACQ_STATE_DIR (tests do).
-ACQ_STATE_DIR="${ACQ_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/acq}"
-ACQ_MSB_SSH_DIR="${ACQ_MSB_SSH_DIR:-${ACQ_STATE_DIR}/ssh}"
-ACQ_MSB_SSH_KEY="${ACQ_MSB_SSH_KEY:-${ACQ_MSB_SSH_DIR}/msb_id_ed25519}"
-ACQ_MSB_SSH_KNOWN_HOSTS="${ACQ_MSB_SSH_KNOWN_HOSTS:-${ACQ_MSB_SSH_DIR}/known_hosts}"
-ACQ_MSB_PORTS_DIR="${ACQ_MSB_PORTS_DIR:-${ACQ_STATE_DIR}/ports}"
-ACQ_MSB_CLONES_DIR="${ACQ_MSB_CLONES_DIR:-${ACQ_STATE_DIR}/clones}"
+# Only absolute values are honored (see userdirs.sh). A relative ACQ_STATE_DIR is
+# refused by the entry point before any adapter loads; here it resolves to empty
+# rather than to a directory under the current one, and so do the defaults
+# derived from it (empty, never root-anchored).
+ACQ_STATE_DIR="$(acq_state_dir)" || ACQ_STATE_DIR=""
+ACQ_MSB_SSH_DIR="${ACQ_MSB_SSH_DIR:-${ACQ_STATE_DIR:+$ACQ_STATE_DIR/ssh}}"
+ACQ_MSB_SSH_KEY="${ACQ_MSB_SSH_KEY:-${ACQ_MSB_SSH_DIR:+$ACQ_MSB_SSH_DIR/msb_id_ed25519}}"
+ACQ_MSB_SSH_KNOWN_HOSTS="${ACQ_MSB_SSH_KNOWN_HOSTS:-${ACQ_MSB_SSH_DIR:+$ACQ_MSB_SSH_DIR/known_hosts}}"
+ACQ_MSB_PORTS_DIR="${ACQ_MSB_PORTS_DIR:-${ACQ_STATE_DIR:+$ACQ_STATE_DIR/ports}}"
+ACQ_MSB_CLONES_DIR="${ACQ_MSB_CLONES_DIR:-${ACQ_STATE_DIR:+$ACQ_STATE_DIR/clones}}"
 # Create-time startup-script staging state (ADR-0017). The staged host file list
 # is reset per provision; declare it at module scope so cleanup references are
 # always defined even if provision is not the entry point.
@@ -689,7 +704,7 @@ esac
 # SSH_AUTH_SOCK on every bridge (re)start; msb dials that path per guest
 # connection and follows the link, so the persisted route never goes stale when
 # the host agent moves (macOS launchd mints a new socket path per login).
-ACQ_MSB_SSH_AGENT_LINK_DIR="${ACQ_STATE_DIR}/msb/ssh-agent"
+ACQ_MSB_SSH_AGENT_LINK_DIR="${ACQ_STATE_DIR:+$ACQ_STATE_DIR/msb/ssh-agent}"
 # msb connect()s to the link path itself, so it must fit a sockaddr_un: 104
 # bytes on macOS including the NUL terminator (108 on Linux). Budget for the
 # smaller platform.
@@ -722,7 +737,7 @@ _ACQ_MSB_HOST_PROBE_NOTICE_SHOWN=0
 # value — exactly the bug this avoids). The counter is therefore persisted in a small
 # file under the ports state dir so consecutive publishes in one process read
 # distinct, increasing values. Seeded from a per-process random base.
-_ACQ_MSB_PORT_SEQ_FILE="${ACQ_MSB_PORTS_DIR}/.port-seq"
+_ACQ_MSB_PORT_SEQ_FILE="${ACQ_MSB_PORTS_DIR:+$ACQ_MSB_PORTS_DIR/.port-seq}"
 
 # Per-process random base offset for ephemeral serve-port selection, evaluated
 # ONCE when this file is sourced (not per call). Spreads different processes
@@ -1293,6 +1308,7 @@ _acq_msb_fetch_kit() {
     esac
   fi
   # Derive a stable cache subdir from the ref (sha + dir tail).
+  acq_require_base "msb kit cache" "$ACQ_MSB_KIT_CACHE" || return 1
   slug=$(printf '%s' "$kitref" | tr -c 'A-Za-z0-9._-' '_' )
   dest="${ACQ_MSB_KIT_CACHE}/${slug}"
   if [ -d "$dest/.git" ]; then
@@ -3064,7 +3080,8 @@ _acq_msb_stage_startup_script() {
 
   # Private staging dir (0700) under the acq state tree — not a world-readable
   # /tmp. Mirrors how ssh keys/state are kept under ACQ_STATE_DIR.
-  local _dir="${ACQ_MSB_STARTUP_STAGE_DIR:-${ACQ_STATE_DIR}/msb-startup}"
+  local _dir="${ACQ_MSB_STARTUP_STAGE_DIR:-${ACQ_STATE_DIR:+$ACQ_STATE_DIR/msb-startup}}"
+  acq_require_base "startup staging dir" "$_dir" || return 0   # best-effort, like the mktemp failure below
   mkdir -p "$_dir" 2>/dev/null || true
   chmod 700 "$_dir" 2>/dev/null || true
 
@@ -3173,6 +3190,8 @@ _acq_msb_upstream_ca_flags_into() {
   command -v security >/dev/null 2>&1 || return 0
 
   local _out="$ACQ_MSB_UPSTREAM_CA_FILE" _dir
+  # No resolvable state dir: skip (dirname of "" is ".", the current dir).
+  acq_require_base "upstream-CA bundle" "$_out" 2>/dev/null || return 0
   _dir=$(dirname -- "$_out")
   if ! mkdir -p "$_dir" 2>/dev/null; then
     echo "acq(msb): warning: cannot create upstream-CA dir ${_dir}; skipping auto-detect" >&2
@@ -3356,6 +3375,7 @@ _acq_msb_clone_setup() {
   # git's stderr, and each one would refuse the same way.
   _acq_msb_git_ws_prep "$ws" || return 1
   ws_canon=$(_acq_msb_clone_repo_root "$ws") || return 1
+  acq_require_base "scratch clones dir" "$ACQ_MSB_CLONES_DIR" || return 1
   dir="${ACQ_MSB_CLONES_DIR}/${name}"
   scratch="${dir}/$(basename "$ws_canon")"
   _acq_msb_clone_check_stale "$name" "$dir" || return 1
@@ -3824,6 +3844,7 @@ _acq_msb_clone_warn_unfetched() {
   # NOTE: `local a="$1" b="…${a}"` is a trap — the whole statement's words
   # expand BEFORE `local` assigns, so ${a} is unbound under set -u. Split them.
   local name="$1" origin="" scratch="" d t
+  [ -n "$ACQ_MSB_CLONES_DIR" ] || return 0   # no clones dir: nothing to inspect
   local dir="${ACQ_MSB_CLONES_DIR}/${name}"
   [ -d "$dir" ] || return 0
   origin=$(cat "${dir}/.origin" 2>/dev/null) || origin=""
@@ -3864,11 +3885,14 @@ EOF
 }
 
 # _acq_msb_clone_cleanup NAME — delete NAME's scratch clone and drop the
-# fetch-back remote from the origin checkout. Best-effort, always returns 0
-# (a sandbox created without --clone has no dir: quiet no-op). When the wrapper
+# fetch-back remote from the origin checkout. Best-effort: returns 0, except
+# that it refuses (returns 1) when the clones dir is unresolved, so it can never
+# remove a path built from an empty base. A sandbox created without --clone has
+# no dir: quiet no-op. When the wrapper
 # refuses to run git against the origin checkout, its reason is shown along
 # with the command that removes the remote by hand.
 _acq_msb_clone_cleanup() {
+  acq_require_base "scratch clones dir" "$ACQ_MSB_CLONES_DIR" || return 1   # never rm -rf "/$name"
   local name="$1" origin=""
   local dir="${ACQ_MSB_CLONES_DIR}/${name}"
   [ -d "$dir" ] || return 0
@@ -5089,6 +5113,7 @@ _acq_msb_ssh_agent_link_path() {
   case "$name" in
     ""|*[!A-Za-z0-9_-]*|-*) return 1 ;;
   esac
+  [ -n "$ACQ_MSB_SSH_AGENT_LINK_DIR" ] || return 1   # no state dir: no managed link
   _p="${ACQ_MSB_SSH_AGENT_LINK_DIR}/${name}.sock"
   if [ "$(printf '%s' "$_p" | wc -c | tr -d ' ')" -gt "$ACQ_MSB_SUN_PATH_MAX" ]; then
     _sum=$(printf '%s' "$name" | cksum | cut -d' ' -f1)
@@ -6031,6 +6056,8 @@ _acq_msb_valid_publish() {
 # _acq_msb_ssh_key_ensure — create the acq-managed ed25519 key on first use.
 # 0700 dir, 0600 key, under acq state (NOT the user's ~/.ssh). Idempotent.
 _acq_msb_ssh_key_ensure() {
+  acq_require_base "acq-managed ssh key dir" "$ACQ_MSB_SSH_DIR" || return 1
+  acq_require_base "acq-managed ssh key" "$ACQ_MSB_SSH_KEY" || return 1
   if [ -f "$ACQ_MSB_SSH_KEY" ]; then
     return 0
   fi
@@ -6101,11 +6128,15 @@ _acq_msb_pick_ephemeral_port() {
   # missing/garbage file resets to 0; failures fall back to 0 (fail-open to a
   # valid port — a same-value collision only re-fails a real serve bind, never
   # corrupts state).
-  seq=$(cat "$_ACQ_MSB_PORT_SEQ_FILE" 2>/dev/null)
+  # With no ports dir the counter is simply not persisted (never written to "/").
+  seq=""
+  [ -n "$_ACQ_MSB_PORT_SEQ_FILE" ] && seq=$(cat "$_ACQ_MSB_PORT_SEQ_FILE" 2>/dev/null)
   case "$seq" in ""|*[!0-9]*) seq=0 ;; esac
   seq=$(( seq + 1 ))
-  mkdir -p "$ACQ_MSB_PORTS_DIR" 2>/dev/null || true
-  printf '%s\n' "$seq" >"$_ACQ_MSB_PORT_SEQ_FILE" 2>/dev/null || true
+  if [ -n "$ACQ_MSB_PORTS_DIR" ] && [ -n "$_ACQ_MSB_PORT_SEQ_FILE" ]; then
+    mkdir -p "$ACQ_MSB_PORTS_DIR" 2>/dev/null || true
+    printf '%s\n' "$seq" >"$_ACQ_MSB_PORT_SEQ_FILE" 2>/dev/null || true
+  fi
 
   # Deterministic test seam: pin the serve port for exact-shape assertions.
   case "${ACQ_MSB_FORCE_SERVE_PORT:-}" in
@@ -6237,6 +6268,7 @@ _acq_msb_ports_pidfile() {
       return 1
       ;;
   esac
+  acq_require_base "ports state dir" "$ACQ_MSB_PORTS_DIR" || return 1
   printf '%s/%s.pids' "$ACQ_MSB_PORTS_DIR" "$name"
 }
 
