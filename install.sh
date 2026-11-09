@@ -83,6 +83,7 @@ fi
 VERSION="${ACQ_INSTALL_VERSION:-$DEFAULT_VERSION}"
 SOURCE="${ACQ_INSTALL_SOURCE:-}"
 INSTALL_DIR="${ACQ_INSTALL_DIR:-${DATA_HOME:+$DATA_HOME/acq}}"
+INSTALL_DIR_FROM="${ACQ_INSTALL_DIR:+ACQ_INSTALL_DIR}"
 BIN_DIR="${ACQ_INSTALL_BIN_DIR:-${USER_HOME:+$USER_HOME/.local/bin}}"
 CHANNEL="${ACQ_INSTALL_CHANNEL:-python}"
 
@@ -158,8 +159,8 @@ EOF
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --install-dir) [ $# -ge 2 ] || usage_err "--install-dir needs a value"; INSTALL_DIR="$2"; shift 2 ;;
-    --install-dir=*) INSTALL_DIR="${1#--install-dir=}"; shift ;;
+    --install-dir) [ $# -ge 2 ] || usage_err "--install-dir needs a value"; INSTALL_DIR="$2"; INSTALL_DIR_FROM="--install-dir"; shift 2 ;;
+    --install-dir=*) INSTALL_DIR="${1#--install-dir=}"; INSTALL_DIR_FROM="--install-dir"; shift ;;
     --bin-dir) [ $# -ge 2 ] || usage_err "--bin-dir needs a value"; BIN_DIR="$2"; shift 2 ;;
     --bin-dir=*) BIN_DIR="${1#--bin-dir=}"; shift ;;
     --source) [ $# -ge 2 ] || usage_err "--source needs a value"; SOURCE="$2"; shift 2 ;;
@@ -188,6 +189,14 @@ esac
 if [ -z "$USER_HOME" ]; then
   if [ -n "${HOME+set}" ]; then home_desc="'$HOME'"; else home_desc="unset"; fi
   die "cannot determine an absolute home directory (HOME is $home_desc); set HOME to an absolute path"
+fi
+
+# The install directory must be absolute, like acq's other path overrides. The
+# launcher symlink points at "$INSTALL_DIR/acq", and a relative symlink target
+# resolves against the link's own directory, not the one the installer ran in,
+# so a relative value would leave the launcher dangling.
+if ! is_abs_path "$INSTALL_DIR"; then
+  die "${INSTALL_DIR_FROM:-the install directory} must be an absolute path, got '$INSTALL_DIR'; pass an absolute --install-dir (or unset ACQ_INSTALL_DIR to use the default)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -365,7 +374,10 @@ trap 'rm -rf "$tmpdir"' EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
-tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/acq-install.XXXXXXXX")" \
+# A relative TMPDIR is ignored (it would resolve against the current directory).
+tmp_base=/tmp
+if is_abs_path "${TMPDIR:-}"; then tmp_base="$TMPDIR"; fi
+tmpdir="$(mktemp -d "$tmp_base/acq-install.XXXXXXXX")" \
   || die "could not create a private temporary directory"
 chmod 700 "$tmpdir"
 

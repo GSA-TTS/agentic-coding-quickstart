@@ -326,6 +326,47 @@ IDSTUB
   assert_output ''
 }
 
+# The launcher symlink points at "$INSTALL_DIR/acq"; a relative target would
+# resolve against the bin dir, not the directory the installer ran in, so a
+# relative install dir is refused before anything is written.
+@test "installer: a relative --install-dir or ACQ_INSTALL_DIR is refused" {
+  local work="$STUBDIR/work"
+  mkdir -p "$work"
+  cd "$work" || return 1
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes \
+    --install-dir rel-inst --bin-dir "$STUBDIR/bin"
+  assert_failure 1
+  assert_output --partial "--install-dir must be an absolute path, got 'rel-inst'"
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes \
+    --install-dir=rel-inst --bin-dir "$STUBDIR/bin"
+  assert_failure 1
+  assert_output --partial "--install-dir must be an absolute path"
+  run env ACQ_INSTALL_DIR=rel-inst sh "$REPO_ROOT/install.sh" \
+    --source "$REPO_ROOT/test/fixtures/installer" --yes --bin-dir "$STUBDIR/bin"
+  assert_failure 1
+  assert_output --partial "ACQ_INSTALL_DIR must be an absolute path, got 'rel-inst'"
+  # An absolute --install-dir overrides a relative ACQ_INSTALL_DIR.
+  run env ACQ_INSTALL_DIR=rel-inst sh "$REPO_ROOT/install.sh" --dry-run \
+    --install-dir "$STUBDIR/inst" --bin-dir "$STUBDIR/bin"
+  assert_success
+  assert_line "  install dir: $STUBDIR/inst"
+  [ ! -e "$STUBDIR/bin" ]
+  run ls -A "$work"
+  assert_output ''
+}
+
+@test "installer: a relative TMPDIR is ignored for the private work dir" {
+  local work="$STUBDIR/work"
+  mkdir -p "$work"
+  cd "$work" || return 1
+  run env TMPDIR=rel-tmp sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes \
+    --install-dir "$STUBDIR/inst" --bin-dir "$STUBDIR/bin"
+  assert_success
+  [ -e "$STUBDIR/inst/py-acq/runtime/bin/python3" ]
+  run ls -A "$work"
+  assert_output ''
+}
+
 @test "installer: with no absolute home it stops after option parsing" {
   local work="$STUBDIR/work"
   mkdir -p "$work"
