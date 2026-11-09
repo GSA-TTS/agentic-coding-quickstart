@@ -1049,6 +1049,10 @@ case "$subcommand" in
         shift
         local_backend="${1:-}"
         [ -z "$local_backend" ] && { echo "acq: backend set: missing backend name" >&2; exit 1; }
+        acq_backend_name_known "$local_backend" || {
+          echo "acq: backend set: unknown backend '$(acq_printable "$local_backend")' (expected sbx or msb)" >&2
+          exit 1
+        }
         local_config_file=$(_acq_config_file)
         # Write only the `backend:` key, preserving any other config (extra_kits,
         # scope_github_token) written by `acq configure` (ADR-0031).
@@ -1423,6 +1427,10 @@ case "$subcommand" in
     _build_kit_list "$create_agent"
     _acq_require_provider_selection || exit 1
     # Pre-flight: validate the workspace path before provisioning (#issue).
+    # Refuse unmountable paths (':' or control characters) first: workspace_path
+    # cuts a spec at its first ':', so the existence check alone would test the
+    # wrong path.
+    acq_workspace_specs_safe "$@" || exit 1
     ws=$(workspace_path "$@")
     preflight_workspace_path "$ws" || exit 1
     local_name=$(derive_name "$@") || exit 1
@@ -1487,6 +1495,7 @@ case "$subcommand" in
       # doesn't re-mount, and the path may legitimately differ from cwd.
       ws=$(workspace_path "${create_args[@]}")
       if ! acq_backend_exists "$local_name"; then
+        acq_workspace_specs_safe "${create_args[@]}" || exit 1
         preflight_workspace_path "$ws" || exit 1
       fi
 
@@ -1705,6 +1714,7 @@ case "$subcommand" in
     acq_backend_guard_version
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: stop: missing sandbox name" >&2; exit 1; }
+    acq_name_form_check stop "$local_name" || exit 1
     acq_backend_stop "$local_name"
     ;;
 
@@ -1722,6 +1732,7 @@ case "$subcommand" in
     acq_backend_guard_version
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: start: missing sandbox name" >&2; exit 1; }
+    acq_name_form_check start "$local_name" || exit 1
     if ! command -v acq_backend_start >/dev/null 2>&1; then
       # e.g. sbx: no 'start' verb, and no detached-resume model — a stopped
       # sandbox is auto-resumed by the next attach, so 'acq run' is the path.
@@ -1757,6 +1768,7 @@ case "$subcommand" in
     acq_backend_guard_version
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: restart: missing sandbox name" >&2; exit 1; }
+    acq_name_form_check restart "$local_name" || exit 1
     if ! command -v acq_backend_start >/dev/null 2>&1; then
       # e.g. sbx: no 'restart' verb. Attach auto-resumes a stopped sandbox, so
       # bouncing it is just 'acq run' (optionally 'acq stop' first).
@@ -1780,6 +1792,7 @@ case "$subcommand" in
     acq_backend_guard_version
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: rm: missing sandbox name" >&2; exit 1; }
+    acq_name_form_check rm "$local_name" || exit 1
     acq_backend_terminate "$local_name"
     ;;
 
@@ -1788,6 +1801,7 @@ case "$subcommand" in
     acq_backend_guard_version
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: exec: missing sandbox name" >&2; exit 1; }
+    acq_name_form_check exec "$local_name" || exit 1
     shift
     _exec_ws=""
     if command -v acq_backend_workspace_for >/dev/null 2>&1; then
@@ -1803,6 +1817,7 @@ case "$subcommand" in
     acq_backend_guard_version
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: shell: missing sandbox name" >&2; exit 1; }
+    acq_name_form_check shell "$local_name" || exit 1
     _shell_ws=""
     if command -v acq_backend_workspace_for >/dev/null 2>&1; then
       _shell_ws=$(acq_backend_workspace_for "$local_name" 2>/dev/null || true)
@@ -1825,6 +1840,7 @@ case "$subcommand" in
     acq_backend_guard_version
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: ports: missing sandbox name" >&2; exit 1; }
+    acq_name_form_check ports "$local_name" || exit 1
     shift
     acq_backend_ports "$local_name" "$@"
     ;;

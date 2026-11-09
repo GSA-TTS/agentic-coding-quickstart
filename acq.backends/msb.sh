@@ -907,7 +907,7 @@ acq_backend_prepare() {
 acq_backend_exists() {
   local listed
   listed=$(_acq_msb_cli list -q 2>/dev/null) || return 1
-  grep -Fxq -- "$1" <<<"$listed"
+  _acq_list_has_line "$1" "$listed"
 }
 
 # Return success only when msb successfully lists sandboxes and NAME is absent.
@@ -915,7 +915,10 @@ acq_backend_exists() {
 _acq_msb_confirm_absent() {
   local name="$1" listed
   listed=$(_acq_msb_cli list -q 2>/dev/null) || return 1
-  ! grep -Fxq -- "$name" <<<"$listed"
+  # A name that cannot appear as one listed line cannot be confirmed absent:
+  # treat it as indeterminate, never as permission to clean up.
+  _acq_name_is_one_line "$name" || return 1
+  ! _acq_list_has_line "$name" "$listed"
 }
 
 # ---------------------------------------------------------------------------
@@ -934,7 +937,7 @@ _acq_msb_confirm_absent() {
 _acq_msb_is_running() {
   local listed
   listed=$(_acq_msb_cli list --running -q 2>/dev/null) || return 1
-  grep -Fxq -- "$1" <<<"$listed"
+  _acq_list_has_line "$1" "$listed"
 }
 
 # ---------------------------------------------------------------------------
@@ -6659,6 +6662,7 @@ _acq_msb_secret_refeed() {
     # heredoc (else only the first sandbox is processed — a real msb drains
     # stdin). Same trap guarded in acq_backend_secret_rm's sweep.
     while IFS= read -r sb; do
+      sb="${sb%$'\r'}"
       [ -n "$sb" ] || continue
       _acq_msb_cli modify "$sb" --secret "${_env}@${_host}" </dev/null >/dev/null 2>&1 \
         && applied=$((applied + 1))
@@ -6779,6 +6783,7 @@ acq_backend_secret_propagate() {
     eligible=1
   else
     while IFS= read -r sb; do
+      sb="${sb%$'\r'}"
       [ -n "$sb" ] && eligible=$((eligible + 1))
     done <<EOF
 $(_acq_msb_cli list -q 2>/dev/null)
@@ -6830,6 +6835,7 @@ _acq_msb_secret_unbind() {
     # only the FIRST sandbox is processed (a real `msb` drains stdin). This is
     # the same stdin-consumption trap the test stub deliberately reproduces.
     while IFS= read -r sb; do
+      sb="${sb%$'\r'}"
       [ -n "$sb" ] || continue
       _acq_msb_cli modify "$sb" --secret-rm "$env_name" </dev/null >/dev/null 2>&1 \
         && unbound=$((unbound + 1))

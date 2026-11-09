@@ -177,3 +177,65 @@ _resolve() { # ADAPTER EXPLICIT  -> prints "<resolved>|<stderr-note>"
   assert_equal "$resolved_shadow" "no"
   assert_equal "$(command -v msb)" "$STUBDIR/msb"
 }
+
+# The backend name selects a file under acq.backends/ that acq SOURCES, so a
+# name from --backend, ACQ_BACKEND or config.yaml must be one of the shipped
+# adapters before any file is read. A traversal-shaped name would otherwise
+# source an arbitrary .sh file from elsewhere on disk.
+_evil_backend() { # -> prints a name that resolves to $STUBDIR/evil.sh
+  cat >"$STUBDIR/evil.sh" <<EVIL
+: >"$STUBDIR/evil-sourced"
+EVIL
+  printf '%s%s/evil' "$(printf '../%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30)" "${STUBDIR#/}"
+}
+
+@test "backend: an unknown --backend name is refused before any adapter is sourced" {
+  local evil; evil=$(_evil_backend)
+  [ -f "${REPO_ROOT}/acq.backends/${evil}.sh" ]   # the traversal really resolves
+  run "$ACQ" --backend "$evil" ls
+  assert_failure
+  assert_output --partial 'unknown backend'
+  assert_output --partial 'expected sbx or msb'
+  [ ! -e "$STUBDIR/evil-sourced" ]
+}
+
+@test "backend: an unknown ACQ_BACKEND value is refused before any adapter is sourced" {
+  local evil; evil=$(_evil_backend)
+  run env ACQ_BACKEND="$evil" "$ACQ" ls
+  assert_failure
+  assert_output --partial 'unknown backend'
+  assert_output --partial 'ACQ_BACKEND'
+  [ ! -e "$STUBDIR/evil-sourced" ]
+}
+
+@test "backend: an unknown backend in config.yaml is refused before any adapter is sourced" {
+  local evil; evil=$(_evil_backend)
+  unset ACQ_BACKEND
+  export XDG_CONFIG_HOME="$STUBDIR/config"
+  mkdir -p "$XDG_CONFIG_HOME/acq"
+  printf 'backend: %s\n' "$evil" > "$XDG_CONFIG_HOME/acq/config.yaml"
+  run "$ACQ" ls
+  assert_failure
+  assert_output --partial 'unknown backend'
+  assert_output --partial 'config.yaml'
+  [ ! -e "$STUBDIR/evil-sourced" ]
+}
+
+@test "backend: _load_backend_adapter itself refuses a name outside sbx|msb" {
+  local evil; evil=$(_evil_backend)
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    _load_backend_adapter "$1"
+  ' _ "$evil"
+  assert_failure
+  assert_output --partial 'unknown backend'
+  [ ! -e "$STUBDIR/evil-sourced" ]
+}
+
+@test "backend set: an unknown backend name is refused and nothing is persisted" {
+  export XDG_CONFIG_HOME="$STUBDIR/setcfg"
+  run "$ACQ" backend set ../x
+  assert_failure
+  assert_output --partial 'unknown backend'
+  [ ! -e "$XDG_CONFIG_HOME/acq/config.yaml" ]
+}
