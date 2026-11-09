@@ -350,7 +350,8 @@ def test_recreate_preserves_host_record(monkeypatch, tmp_path, capsys):
     record = state.record_read("msb", "sec")
     assert record["agent"] == "opencode"
     assert record["workspace"] == workspace
-    assert record.get("ro_host_config") is True
+    # Re-established where this host can have it; never claimed on Windows.
+    assert record.get("ro_host_config") is (True if security.ro_mount_supported() else None)
 
 
 # ---------------------------------------------------------------------------
@@ -413,7 +414,11 @@ def test_attach_fails_closed_when_probe_unset(monkeypatch, tmp_path, capsys):
     assert doc["error"]["code"] == errors.SECURITY_EXCEPTION
 
 
-def test_mount_state_unset_is_unknown():
+def test_mount_state_unset_is_unknown(monkeypatch, tmp_path):
+    # Without the seam the real probe runs; against the stub, a sandbox msb does
+    # not know cannot be inspected, so the guarantee is unconfirmed.
+    monkeypatch.setenv("ACQ_MSB_BIN", "__stub__")
+    monkeypatch.setenv("MSB_HOME", str(tmp_path / "msb-home"))
     assert security.mount_state("msb", "anything") == "unknown"
 
 

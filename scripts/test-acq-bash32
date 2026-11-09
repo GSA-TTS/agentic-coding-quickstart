@@ -39,7 +39,16 @@ DEFAULT_MIRRORS="https://ftpmirror.gnu.org/gnu/bash https://mirrors.kernel.org/g
 
 _dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${_dir}/.." && pwd)"
-PREFIX="${ACQ_BASH32_PREFIX:-${XDG_CACHE_HOME:-${HOME:-/nonexistent}/.cache}/acq/bash-${REQUIRED_VERSION}}"
+# The default prefix sits under the user's cache directory. As in acq
+# (acq.backends/userdirs.sh, not sourced: this runner is also copied on its own),
+# XDG_CACHE_HOME and HOME count only when absolute; a relative value would
+# resolve against the current directory. With neither, the cache candidate
+# points nowhere, as it did for an unset HOME.
+case "${XDG_CACHE_HOME:-}" in
+  /*) _cache="$XDG_CACHE_HOME" ;;
+  *) case "${HOME:-}" in /*) _cache="$HOME/.cache" ;; *) _cache="/nonexistent/.cache" ;; esac ;;
+esac
+PREFIX="${ACQ_BASH32_PREFIX:-${_cache}/acq/bash-${REQUIRED_VERSION}}"
 
 # Remove temp state on every exit path; signals exit with the conventional status
 # (a bare cleanup-only handler would resume the interrupted command).

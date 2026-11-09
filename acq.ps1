@@ -202,8 +202,13 @@ if (-not (Test-Path -LiteralPath $acqScript -PathType Leaf)) {
 
 $bash = Find-GitBash
 $bashAcq = Convert-ToGitBashPath -Path $acqScript
-$validatorData = Join-Path $env:LOCALAPPDATA "acq\provider-input-validator"
-if (Test-Path -LiteralPath $validatorData -PathType Container) {
+# LOCALAPPDATA counts only when fully qualified (drive-rooted or UNC): a relative
+# value would point acq at a directory under the current one.
+$validatorData = $null
+if ($env:LOCALAPPDATA -match '^([A-Za-z]:[\\/]|[\\/]{2}[^\\/])') {
+    $validatorData = Join-Path $env:LOCALAPPDATA "acq\provider-input-validator"
+}
+if ($validatorData -and (Test-Path -LiteralPath $validatorData -PathType Container)) {
     $env:ACQ_PROVIDER_INPUT_DATA_DIR = (Convert-ToGitBashPath -Path $validatorData)
 }
 $convertedArgs = @($args | ForEach-Object { Convert-ArgumentForGitBash -Argument $_ })

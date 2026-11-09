@@ -257,27 +257,36 @@ def _posix_cksum(data: bytes) -> int:
     return ~crc & 0xFFFFFFFF
 
 
+def posix_cksum(data: bytes) -> int:
+    """POSIX ``cksum`` CRC of ``data`` (public name for the other Bash-layout readers)."""
+    return _posix_cksum(data)
+
+
 def _bash_safe(token: str) -> str:
     """Bash's ``tr -c 'A-Za-z0-9._-' '_'``: every other UTF-8 byte becomes ``_``."""
     return "".join(chr(b) if b in _BASH_SAFE_BYTES else "_" for b in token.encode("utf-8"))
 
 
+def bash_provenance_dir() -> Path:
+    """Bash's provenance root (``_acq_provenance_dir`` in ``acq.backends/common.sh``).
+
+    Delegates to :func:`state.provenance_dir`, which refuses a relative
+    ``ACQ_PROVENANCE_DIR`` and ignores relative user directories.
+    """
+    return state.provenance_dir()
+
+
+def bash_sandbox_key(name: str) -> str:
+    """Bash's per-sandbox path key: the sanitized name, a dot, and the name's ``cksum``."""
+    return f"{_bash_safe(name)}.{_posix_cksum(name.encode('utf-8'))}"
+
+
 def _bash_lock_dir(backend: str, name: str) -> Path:
     """Bash's per-sandbox provision/terminate lock directory (``*.lock``).
 
-    Mirrors ``acq_provider_input_root`` in ``acq.backends/common.sh``: Bash
-    resolves its provenance root from ``ACQ_PROVENANCE_DIR`` or
-    ``${XDG_STATE_HOME:-$HOME/.local/state}/acq/provenance``.
+    Mirrors ``acq_provider_input_root`` in ``acq.backends/common.sh``.
     """
-    root = os.environ.get("ACQ_PROVENANCE_DIR") or ""
-    if root:
-        base = Path(root)
-    else:
-        xdg = os.environ.get("XDG_STATE_HOME") or ""
-        home = os.environ.get("HOME") or str(Path.home())
-        base = (Path(xdg) if xdg else Path(home) / ".local" / "state") / "acq" / "provenance"
-    key = f"{_bash_safe(name)}.{_posix_cksum(name.encode('utf-8'))}"
-    return base / "provider-input" / _bash_safe(backend) / f"{key}.lock"
+    return bash_provenance_dir() / "provider-input" / _bash_safe(backend) / f"{bash_sandbox_key(name)}.lock"
 
 
 def _owner_pid(token: str) -> int | None:

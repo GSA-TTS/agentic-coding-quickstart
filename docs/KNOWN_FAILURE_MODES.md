@@ -3579,6 +3579,69 @@ and `rm`, `stop`, `exec` and the other verbs that take an existing sandbox's
 name refuse names that are empty, `.` or `..`, or contain `/`, `\` or control
 characters.
 
+### Also Affected: Workspace Paths Ending in `.`, `..` or `/`
+
+A later change made Bash `derive_name` fold the workspace path the way the
+Python implementation does, so both derive the same name. Bash used to take the
+last component of the path as typed, so some paths derived a different name:
+
+| Typed path | Old Bash name | New name |
+|---|---|---|
+| `/` | `opencode-` | `opencode-workspace` |
+| `..` | `opencode-` | `opencode-<parent directory>` |
+| `src/.` | `opencode-<current directory>` | `opencode-src` |
+| `src/..` | `opencode-` | `opencode-<current directory>` |
+
+At the same time the Python slug was limited to lowering ASCII letters. As a
+result `İ` (U+0130) and the Kelvin sign (U+212A) now become hyphens, as they always did in
+Bash. On POSIX a trailing `\` is now part of the directory name.
+
+A sandbox created under an old name keeps running under it. Reach it with
+`acq run NAME` (or `acq shell`, `acq exec`, `acq stop`), or remove it with
+`acq rm NAME` and run `acq run AGENT PATH` again to create it under the new
+name.
+
+---
+
+## 54. Python acq: No Read-Only Trusted-Config Mount on Windows
+
+**Status:** Accepted limitation (msb, Windows hosts, Python `acq`).
+
+### Symptoms
+
+On Windows, `acq create`/`acq run` report `"ro_host_config": false`, and the msb
+create command carries no `--volume …:/var/lib/acq/host:ro`. A sandbox whose host
+record says `ro_host_config: true` (one seeded by a test, or recorded by an
+earlier build) fails trusted operations with `security_exception`, and the reason
+reads "this platform's msb filesystem backend was not reviewed for read-only
+enforcement". `acq create --recreate NAME --yes` then succeeds and prints a note
+that the mount was not established.
+
+### Root Cause
+
+ADR-0035's guarantee rests on msb enforcing `:ro` on the host. Only msb's POSIX
+filesystem backend was reviewed for that, which is why the Bash adapter never
+relies on the mount on Windows either (`_acq_msb_ro_mount_platform_ok`). The Python
+acq therefore never asks for the mount on Windows, and its probe reports the
+guarantee as `unknown` there.
+
+### Fix
+
+Nothing to fix on the host. Recreate rebuilds the sandbox exactly as a fresh create
+on this host would: without the mount, and with a record that does not claim it,
+so the next `acq run` takes the legacy path instead of failing again. Refusing
+instead would only force `acq rm` and `acq create` for the same result, and
+recording the mount would make recreate loop. An msb older than 0.7.7 on Linux or
+macOS is different: there recreate refuses with "upgrade msb", because upgrading
+does establish the guarantee. Readonly kit files on Windows are copied into the
+guest with a warning (none of the built-in kits declares one today).
+
+### Prevention / Status
+
+Re-review when msb's Windows filesystem backend is assessed for read-only
+enforcement; enabling it is the `security.WINDOWS` platform check in
+`py-acq/src/acq_py/security.py` and its Bash counterpart.
+
 ---
 
 ## Contributing

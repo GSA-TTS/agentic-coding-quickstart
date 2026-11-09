@@ -16,6 +16,15 @@ argv element (a ``--flag=VALUE`` embedding included). The stub records each
 sandbox's bindings in ``secrets.json`` next to the catalog as ``{name: {ENV:
 {host, env_present}}}``: whether the variable was present, never its value.
 
+``create`` also records each ``--volume HOST:GUEST[:ro]`` in ``mounts.json``,
+and ``inspect`` reports them as ``active_config.mounts`` (``{guest, host, type:
+"Bind", options: {readonly}}``), which is what acq reads to confirm a read-only
+mount. ``ACQ_MSB_STUB_MOUNT_RW`` names sandboxes (comma separated) whose mounts
+inspect reports as writable, and ``ACQ_MSB_STUB_RO_WRITABLE`` names sandboxes
+whose guest write probe (an ``exec`` whose command mentions ``.acq-ro-probe``)
+reports the read-only mount writable (exit 2). ``ACQ_MSB_STUB_NO_AGENT_USER``
+names sandboxes whose image has no ``agent`` user: ``exec -u agent`` fails there.
+
 ``modify`` models the conservative reading of msb's "add or rotate": ``--secret
 ENV@HOST`` for a variable already bound to the SAME hosts rotates it, but one
 bound to OTHER hosts is an error (no assumption that it is replaced), and
@@ -122,6 +131,50 @@ def _save_secrets(records: dict[str, dict]) -> None:
     path.write_text(json.dumps(records, sort_keys=True), encoding="utf-8")
 
 
+MOUNT_RW_ENV = "ACQ_MSB_STUB_MOUNT_RW"
+NO_AGENT_USER_ENV = "ACQ_MSB_STUB_NO_AGENT_USER"
+RO_WRITABLE_ENV = "ACQ_MSB_STUB_RO_WRITABLE"
+
+
+def _named(env_name: str, name: str | None) -> bool:
+    return name is not None and name in os.environ.get(env_name, "").split(",")
+
+
+def _mounts_path() -> Path:
+    return _catalog_path().with_name("mounts.json")
+
+
+def _load_mounts() -> dict[str, list]:
+    try:
+        doc = json.loads(_mounts_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {k: v for k, v in doc.items() if isinstance(v, list)} if isinstance(doc, dict) else {}
+
+
+def _save_mounts(records: dict[str, list]) -> None:
+    path = _mounts_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(records, sort_keys=True), encoding="utf-8")
+
+
+def _volume_mounts(args: list[str]) -> list[dict]:
+    """``--volume HOST:GUEST[:ro]`` flags as msb inspect mount records."""
+    out = []
+    for spec in _flag_values(args, "--volume"):
+        readonly = spec.endswith(":ro")
+        host, _, guest = (spec[:-3] if readonly else spec).rpartition(":")
+        out.append({"guest": guest, "host": host, "type": "Bind", "options": {"readonly": readonly}})
+    return out
+
+
+def _inspect_mounts(name: str) -> list[dict]:
+    mounts = _load_mounts().get(name, [])
+    if _named(MOUNT_RW_ENV, name):
+        mounts = [{**m, "options": {"readonly": False}} for m in mounts]
+    return mounts
+
+
 def _flag_values(args: list[str], flag: str) -> list[str]:
     return [args[i + 1] for i, a in enumerate(args) if a == flag and i + 1 < len(args)]
 
@@ -199,6 +252,9 @@ def main(argv: list[str]) -> int:
         records = _load_secrets()
         records[name] = bindings
         _save_secrets(records)
+        mounts = _load_mounts()
+        mounts[name] = _volume_mounts(args)
+        _save_mounts(mounts)
         return 0
 
     if cmd == "modify":
@@ -252,6 +308,11 @@ def main(argv: list[str]) -> int:
         if name is None or name not in catalog:
             print(f"msb: no such sandbox '{name}'", file=sys.stderr)
             return 1
+        if any(".acq-ro-probe" in token for token in command) and _named(RO_WRITABLE_ENV, name):
+            return 2
+        if _arg_after(head, "-u") == "agent" and _named(NO_AGENT_USER_ENV, name):
+            print("msb: unable to find user agent", file=sys.stderr)
+            return 1
         marker = EXEC_MARKER
         if command:
             marker += " " + " ".join(command)
@@ -289,7 +350,7 @@ def main(argv: list[str]) -> int:
         # msb 0.6.7 `inspect --format json` shape (ADR-0014): published ports live
         # at active_config.network.ports[] as {host_port, guest_port, protocol,
         # host_bind}.
-        print(json.dumps({"active_config": {"network": {"ports": port_list}}}))
+        print(json.dumps({"active_config": {"network": {"ports": port_list}, "mounts": _inspect_mounts(name)}}))
         return 0
 
     if cmd == "echo":
@@ -328,6 +389,9 @@ def main(argv: list[str]) -> int:
         records = _load_secrets()
         if records.pop(name, None) is not None:
             _save_secrets(records)
+        mounts = _load_mounts()
+        if mounts.pop(name, None) is not None:
+            _save_mounts(mounts)
         return 0
 
     print(f"msb: unrecognized subcommand '{cmd}'", file=sys.stderr)

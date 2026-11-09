@@ -523,3 +523,217 @@ STUB
     [ -n "$kind" ] || fail "dispatch arm '$verb' is not classified by _acq_verb_backend_help_kind, so the user-dirs entry check skips it"
   done
 }
+
+# The host path overrides acq honours from the environment (see
+# _acq_userdirs_override_problem in acq.backends/userdirs.sh).
+_PATH_OVERRIDES="ACQ_PROVENANCE_DIR ACQ_PROVIDER_INPUT_DATA_DIR ACQ_PROVIDER_INPUT_PYTHON ACQ_SECRET_META_DIR ACQ_SECRET_INDEX_FILE ACQ_SBX_KIT_CACHE ACQ_MSB_KIT_CACHE ACQ_MSB_KIT_LOCAL_DIR ACQ_MSB_SSH_DIR ACQ_MSB_SSH_KEY ACQ_MSB_SSH_KNOWN_HOSTS ACQ_MSB_PORTS_DIR ACQ_MSB_CLONES_DIR ACQ_MSB_STARTUP_STAGE_DIR ACQ_MSB_UPSTREAM_CA_FILE ACQ_MSB_BALANCED_HOSTS_FILE"
+
+@test "cli: every relative host path override is refused up front with the Python message" {
+  local var
+  # The secret-store metadata overrides are honoured only without
+  # ACQ_SECRET_STORE_DIR (which relocates them), so it is unset here.
+  for var in $_PATH_OVERRIDES; do
+    run env -u ACQ_SECRET_STORE_DIR "$var=rel-override" ACQ_BACKEND=msb "$ACQ" ls
+    assert_failure 1
+    assert_output "acq: $var must be an absolute path, got 'rel-override'
+set $var to an absolute path, or unset it to use the default"
+  done
+  _assert_work_empty
+  # Absolute values pass.
+  local -a e=()
+  for var in $_PATH_OVERRIDES; do e+=("$var=/abs/$var"); done
+  run env "${e[@]}" ACQ_MSB_UPSTREAM_CA_CERT='/a.pem:/b.pem /c.pem' bash -c '
+    . "$1/acq.backends/userdirs.sh"
+    acq_userdirs_check && echo ok
+  ' _ "$REPO_ROOT"
+  assert_success
+  assert_output 'ok'
+}
+
+@test "cli: a relative ACQ_MSB_UPSTREAM_CA_CERT entry is refused" {
+  run env ACQ_MSB_UPSTREAM_CA_CERT='/abs/a.pem:rel/b.pem' ACQ_BACKEND=msb "$ACQ" ls
+  assert_failure 1
+  assert_output "acq: ACQ_MSB_UPSTREAM_CA_CERT entries must be absolute paths, got 'rel/b.pem'
+list absolute PEM paths in ACQ_MSB_UPSTREAM_CA_CERT, or unset it"
+  run env ACQ_MSB_UPSTREAM_CA_CERT="$(printf '/abs/a.pem\n./c.pem')" bash -c '
+    . "$1/acq.backends/userdirs.sh"
+    acq_userdirs_check
+  ' _ "$REPO_ROOT"
+  assert_failure
+  assert_line --index 0 "acq: ACQ_MSB_UPSTREAM_CA_CERT entries must be absolute paths, got './c.pem'"
+  _assert_work_empty
+}
+
+@test "userdirs: a drive-letter ACQ_MSB_UPSTREAM_CA_CERT entry is refused with the /c/... form" {
+  local os value
+  for os in msys linux-gnu; do
+    for value in 'C:/certs/ca.pem' 'C:\certs\ca.pem' '/abs/a.pem:D:/x/b.pem'; do
+      run env ACQ_MSB_UPSTREAM_CA_CERT="$value" OS_UNDER_TEST="$os" bash -c '
+        . "$1/acq.backends/userdirs.sh"
+        OSTYPE=$OS_UNDER_TEST
+        cygpath() { return 1; }
+        acq_userdirs_check
+      ' _ "$REPO_ROOT"
+      assert_failure
+      case "$value" in
+        /abs/*)
+          assert_output "acq: ACQ_MSB_UPSTREAM_CA_CERT entries must be absolute POSIX paths (the list is split on ':'), got 'D:/x/b.pem'
+use the POSIX form of a Windows path in ACQ_MSB_UPSTREAM_CA_CERT, e.g. '/d/x/b.pem'" ;;
+        *)
+          assert_line --index 0 --partial "entries must be absolute POSIX paths (the list is split on ':'), got 'C:"
+          assert_line --index 1 "use the POSIX form of a Windows path in ACQ_MSB_UPSTREAM_CA_CERT, e.g. '/c/certs/ca.pem'" ;;
+      esac
+    done
+  done
+}
+
+@test "msb adapter: a relative ACQ_MSB_UPSTREAM_CA_CERT entry is never trusted" {
+  printf -- '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n' >"$WORK/C"
+  cp "$WORK/C" "$WORK/rel.pem"
+  run env -u ACQ_MSB_NO_UPSTREAM_CA ACQ_MSB_UPSTREAM_CA_AUTODETECT=0 ACQ_MSB_UPSTREAM_CA_CERT='C:/certs/ca.pem rel.pem' bash -c '
+    . "$1/acq.backends/msb.sh"
+    flags=()
+    _acq_msb_upstream_ca_flags_into flags
+    printf "flags=[%s]\n" "${flags[*]-}"
+  ' _ "$REPO_ROOT"
+  assert_success
+  assert_line 'flags=[]'
+  assert_line --partial 'path is not absolute, skipping: C'
+  assert_line --partial 'path is not absolute, skipping: rel.pem'
+}
+
+@test "cli: a relative ACQ_FORWARD_HOST_SOCKETS path is refused, and never forwarded" {
+  run env ACQ_FORWARD_HOST_SOCKETS="/abs/a.sock:6000/stream,rel.sock:6001" ACQ_BACKEND=msb "$ACQ" ls
+  assert_failure 1
+  assert_output "acq: ACQ_FORWARD_HOST_SOCKETS paths must be absolute, got 'rel.sock'
+give each ACQ_FORWARD_HOST_SOCKETS entry as /absolute/path.sock:PORT, or unset it"
+  # The consumer checks the raw path before resolving it: a real socket under
+  # the cwd, named relatively, is skipped.
+  python3 -c 'import socket; socket.socket(socket.AF_UNIX).bind("rel.sock")' 2>/dev/null \
+    && [ -S rel.sock ] || skip "python3 AF_UNIX socket unavailable"
+  run env -u SSH_AUTH_SOCK ACQ_FORWARD_HOST_SOCKETS="rel.sock:6000" bash -c '
+    . "$1/acq.backends/common.sh"
+    acq_host_socket_forwards
+  ' _ "$REPO_ROOT"
+  assert_success
+  assert_output 'acq: host-socket path rel.sock is not absolute; skipping'
+}
+
+@test "common: a relative ACQ_PROVIDER_INPUT_PYTHON is never run" {
+  printf '#!/bin/sh\necho RAN >> "$CALLS"\n' >"$WORK/py"
+  chmod +x "$WORK/py"
+  run env ACQ_PROVIDER_INPUT_PYTHON=py bash -c '
+    . "$1/acq.backends/common.sh"
+    _acq_provider_facts_python || true
+    _acq_provider_input_python
+  ' _ "$REPO_ROOT"
+  refute_line 'py'
+  assert_line "acq: ACQ_PROVIDER_INPUT_PYTHON must be an absolute path, got 'py'"
+  run cat "$CALLS"
+  refute_output --partial 'RAN'
+}
+
+@test "cli: an unknown config backend names the absolute config path, not a relative XDG_CONFIG_HOME" {
+  mkdir -p "$HOME/.config/acq"
+  printf 'backend: bogus\n' >"$HOME/.config/acq/config.yaml"
+  run env -u ACQ_BACKEND XDG_CONFIG_HOME=rel-config "$ACQ" ls
+  assert_failure
+  assert_output --partial "from $HOME/.config/acq/config.yaml"
+  refute_output --partial 'rel-config'
+}
+
+@test "cli: doctor reports a relative path override as a failed state check" {
+  run env ACQ_PROVENANCE_DIR=rel-prov ACQ_BACKEND=msb "$ACQ" doctor </dev/null
+  assert_success
+  assert_line "  [fail] state: ACQ_PROVENANCE_DIR must be an absolute path, got 'rel-prov'"
+  assert_line '           set ACQ_PROVENANCE_DIR to an absolute path, or unset it to use the default'
+  _assert_work_empty
+}
+
+@test "common: the provenance dir never resolves a relative override" {
+  run env ACQ_PROVENANCE_DIR=rel-prov bash -c '
+    . "$1/acq.backends/common.sh"
+    _acq_provenance_dir || echo refused
+  ' _ "$REPO_ROOT"
+  assert_success
+  assert_output 'refused'
+}
+
+@test "common: kit validation scratch lives under the state dir, never TMPDIR" {
+  run env -u ACQ_STATE_DIR XDG_STATE_HOME="$STUBDIR/xs" TMPDIR=rel-tmp bash -c '
+    . "$1/acq.backends/common.sh"
+    kit_translate_fetch() { printf "fetch base=%s\n" "$2" >&2; return 1; }
+    acq_validate_agent_builtin_kit_ref opencode some-ref || echo refused
+  ' _ "$REPO_ROOT"
+  assert_success
+  assert_output "fetch base=$STUBDIR/xs/acq/agent-kit-validation/opencode
+refused"
+  run env -u ACQ_STATE_DIR XDG_STATE_HOME="$STUBDIR/xs" TMPDIR="$STUBDIR/tmp" bash -c '
+    . "$1/acq.backends/common.sh"
+    kit_translate_fetch() { printf "fetch base=%s\n" "$2" >&2; return 1; }
+    acq_validate_agent_builtin_kit_ref opencode some-ref || echo refused
+  ' _ "$REPO_ROOT"
+  assert_line --index 0 "fetch base=$STUBDIR/xs/acq/agent-kit-validation/opencode"
+  _assert_work_empty
+}
+
+@test "common: a relative LOCALAPPDATA on Git Bash is ignored for the validator data dir" {
+  local fake="$STUBDIR/fake-acq" want="$HOME/.local/share/acq/provider-input-validator"
+  printf '#!/bin/sh\necho MINGW64_NT-10.0\n' >"$STUBDIR/uname"
+  chmod +x "$STUBDIR/uname"
+  mkdir -p "$fake/scripts"
+  cat >"$fake/scripts/setup-provider-input-validator" <<'SETUP'
+#!/bin/sh
+echo "setup data_dir=${ACQ_PROVIDER_INPUT_DATA_DIR:-}" >> "$CALLS"
+mkdir -p "$ACQ_PROVIDER_INPUT_DATA_DIR/provider-input-validator.current/bin"
+printf '#!/bin/sh\nexit 0\n' >"$ACQ_PROVIDER_INPUT_DATA_DIR/provider-input-validator.current/bin/python3"
+chmod +x "$ACQ_PROVIDER_INPUT_DATA_DIR/provider-input-validator.current/bin/python3"
+SETUP
+  chmod +x "$fake/scripts/setup-provider-input-validator"
+  run env -u ACQ_PROVIDER_INPUT_PYTHON -u ACQ_PROVIDER_INPUT_DATA_DIR -u XDG_DATA_HOME LOCALAPPDATA=rel-local bash -c '
+    . "$1/acq.backends/common.sh"
+    ACQ_SCRIPT_DIR="$2"
+    _acq_provider_input_python
+  ' _ "$REPO_ROOT" "$fake"
+  assert_success
+  assert_output "$want/provider-input-validator.current/bin/python3"
+  run cat "$CALLS"
+  assert_line "setup data_dir=$want"
+  _assert_work_empty
+}
+
+@test "verify-backends: the default workspace base ignores a relative XDG_CACHE_HOME" {
+  run env XDG_CACHE_HOME=rel-cache bash -c '
+    VERIFY_BACKENDS_SOURCE_ONLY=1 . "$1/scripts/verify-backends"
+    _verify_workspace_base
+    XDG_CACHE_HOME=/abs/cache _verify_workspace_base
+  ' _ "$REPO_ROOT"
+  assert_success
+  assert_line --index 0 "$HOME/.cache/acq/verify"
+  assert_line --index 1 "/abs/cache/acq/verify"
+  _assert_work_empty
+}
+
+# A curl that records the call and fails, so verify-msb-pin never reaches the
+# network even if it gets past its install-target checks.
+_plant_failing_curl() {
+  printf '#!/bin/sh\necho "curl $*" >> "$CALLS"\nexit 22\n' >"$STUBDIR/curl"
+  chmod +x "$STUBDIR/curl"
+}
+
+@test "verify-msb-pin: --install refuses relative install targets before fetching" {
+  _plant_failing_curl
+  run env MSB_HOME=rel-msb bash "$REPO_ROOT/scripts/verify-msb-pin" --install </dev/null
+  assert_failure 2
+  assert_output "verify-msb-pin: MSB_HOME must be an absolute path, got 'rel-msb'"
+  run env -u MSB_HOME ACQ_INSTALL_BIN_DIR=rel-bin bash "$REPO_ROOT/scripts/verify-msb-pin" --install </dev/null
+  assert_failure 2
+  assert_output "verify-msb-pin: ACQ_INSTALL_BIN_DIR must be an absolute path, got 'rel-bin'"
+  _plant_unknown_account
+  run env -u MSB_HOME -u ACQ_INSTALL_BIN_DIR HOME=relhome bash "$REPO_ROOT/scripts/verify-msb-pin" --install </dev/null
+  assert_failure 2
+  assert_output 'verify-msb-pin: cannot determine an absolute home directory; set HOME to an absolute path'
+  run cat "$CALLS"
+  refute_output --partial 'curl'
+  _assert_work_empty
+}
