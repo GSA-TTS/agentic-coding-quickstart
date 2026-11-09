@@ -8,8 +8,11 @@ fail-closed checksum / dry-run / consent behavior and the user-scope
 They are Tier-2 implementation detail (ADR-0039m): contract evidence is the
 language-neutral ``installer/*`` vectors under ``test/vectors/installer``, run by
 both the pytest and Bash runners — never these tests. They are skipped on hosts
-without a POSIX shell/toolchain (e.g. Windows), where the Windows installer
-(``install.ps1``) is covered by the bats suite instead.
+without a POSIX shell/toolchain. On Windows, where Git Bash supplies one,
+install.sh refuses the host as an unsupported platform, so the tests that need a
+supported platform are skipped there too: the Windows installer
+(``install.ps1``) has its own -DryRun smoke step in .github/workflows/windows.yml
+and source checks in the bats suite.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 from pathlib import Path
 
@@ -37,6 +41,13 @@ def _have_tools() -> bool:
 
 
 pytestmark = pytest.mark.skipif(not _have_tools(), reason="POSIX shell/toolchain unavailable")
+
+# install.sh supports macOS and Linux only and refuses a Git Bash (MINGW) host,
+# so a test that needs it to reach the install path cannot run on Windows.
+supported_platform_only = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="install.sh refuses Windows hosts; install.ps1 is the Windows installer",
+)
 
 
 # The archive's enumerated components (ADR-0042m), keyed by the name the installer
@@ -176,6 +187,7 @@ def test_unknown_option_is_a_usage_error(tmp_path):
     assert "unknown option" in proc.stderr.decode()
 
 
+@supported_platform_only
 def test_channel_python_dry_run_surfaces_channel(tmp_path):
     # ADR-0047m: --channel python is the only (and default) channel; it parses,
     # surfaces the channel in the plan, and installs exactly what the no-flag
@@ -191,6 +203,7 @@ def test_channel_unknown_is_a_usage_error(tmp_path):
     assert "unknown channel" in proc.stderr.decode()
 
 
+@supported_platform_only
 def test_channel_python_offline_install_succeeds(tmp_path):
     release = _make_release(tmp_path)
     proc = _run_installer(tmp_path, "--source", str(release), "--channel", "python", "--yes")
@@ -202,6 +215,7 @@ def test_channel_python_offline_install_succeeds(tmp_path):
     assert (_bin_dir(tmp_path) / "acq-python").is_symlink()
 
 
+@supported_platform_only
 def test_dry_run_performs_no_writes(tmp_path):
     proc = _run_installer(tmp_path, "--dry-run")
     assert proc.returncode == 0
@@ -211,6 +225,7 @@ def test_dry_run_performs_no_writes(tmp_path):
     assert not _bin_dir(tmp_path).exists()
 
 
+@supported_platform_only
 def test_offline_install_succeeds(tmp_path):
     release = _make_release(tmp_path)
     proc = _run_installer(tmp_path, "--source", str(release), "--yes")
@@ -228,6 +243,7 @@ def test_offline_install_succeeds(tmp_path):
     assert (_bin_dir(tmp_path) / "acq").resolve() != (_bin_dir(tmp_path) / "acq-python").resolve()
 
 
+@supported_platform_only
 def test_checksum_mismatch_fails_closed(tmp_path):
     release = _make_release(tmp_path, bad=True)
     proc = _run_installer(tmp_path, "--source", str(release), "--yes")
@@ -236,6 +252,7 @@ def test_checksum_mismatch_fails_closed(tmp_path):
     assert not _install_dir(tmp_path).exists()
 
 
+@supported_platform_only
 def test_missing_checksum_entry_fails_closed(tmp_path):
     release = _make_release(tmp_path, drop_entry=True)
     proc = _run_installer(tmp_path, "--source", str(release), "--yes")
@@ -244,6 +261,7 @@ def test_missing_checksum_entry_fails_closed(tmp_path):
     assert not _install_dir(tmp_path).exists()
 
 
+@supported_platform_only
 @pytest.mark.parametrize(
     "omit,needle",
     [
@@ -264,6 +282,7 @@ def test_missing_component_fails_closed(tmp_path, omit, needle):
     assert not _install_dir(tmp_path).exists()
 
 
+@supported_platform_only
 def test_missing_provenance_fails_closed(tmp_path):
     release = _make_release(tmp_path)
     (release / "provenance.json").unlink()
@@ -273,6 +292,7 @@ def test_missing_provenance_fails_closed(tmp_path):
     assert not _install_dir(tmp_path).exists()
 
 
+@supported_platform_only
 def test_consent_is_not_inferred_when_noninteractive(tmp_path):
     release = _make_release(tmp_path)
     # No --yes and a non-interactive stdin: consent must decline (fail closed).
@@ -340,10 +360,21 @@ def test_windows_installer_has_no_secret_literals():
     assert _secret_literal_lines(source) == []
 
 
-def test_gen_install_assets_writes_complete_sha256sums(tmp_path):
-    # gen-install-assets needs python3 (to read the manifest) and sha256sum.
-    if not (shutil.which("python3") and shutil.which("sha256sum")):
-        pytest.skip("python3/sha256sum unavailable")
+_GEN_ASSETS = (
+    "install.sh",
+    "install.ps1",
+    "provenance.json",
+    "acq-linux-x86_64.tar.gz",
+    "acq-linux-aarch64.tar.gz",
+    "acq-macos-arm64.tar.gz",
+    "acq-macos-x86_64.tar.gz",
+    "acq-windows-x64.zip",
+)
+# The only line form SHA256SUMS may contain: "HASH  name", two spaces, no "*".
+_SUMS_LINE = re.compile(r"[0-9a-f]{64}  [^ *][^\r]*")
+
+
+def _run_gen_install_assets(tmp_path, env=None, expect_ok=True):
     dist = tmp_path / "dist"
     dist.mkdir()
     shutil.copy(INSTALL_SH, dist / "install.sh")
@@ -351,30 +382,86 @@ def test_gen_install_assets_writes_complete_sha256sums(tmp_path):
     shutil.copy(REPO_ROOT / "installer" / "provenance.json", dist / "provenance.json")
     # The enumerated archive names from installer/assets.json; gen-install-assets
     # only hashes them, so the bodies need not be a real runtime.
-    for name, body in (
-        ("acq-linux-x86_64.tar.gz", b"linux-x86_64\n"),
-        ("acq-linux-aarch64.tar.gz", b"linux-aarch64\n"),
-        ("acq-macos-arm64.tar.gz", b"macos-arm64\n"),
-        ("acq-macos-x86_64.tar.gz", b"macos-x86_64\n"),
-        ("acq-windows-x64.zip", b"windows\n"),
-    ):
-        (dist / name).write_bytes(body)
+    for name in _GEN_ASSETS[3:]:
+        (dist / name).write_bytes(name.encode() + b"\n")
     proc = subprocess.run(
         ["sh", str(REPO_ROOT / "scripts" / "gen-install-assets"), str(dist)],
         cwd=str(REPO_ROOT),
+        env=env,
         capture_output=True,
         timeout=30,
     )
+    if not expect_ok:
+        return proc
     assert proc.returncode == 0, proc.stderr.decode()
-    sums = (dist / "SHA256SUMS").read_text(encoding="utf-8")
-    for name in (
-        "install.sh",
-        "install.ps1",
-        "provenance.json",
-        "acq-linux-x86_64.tar.gz",
-        "acq-linux-aarch64.tar.gz",
-        "acq-macos-arm64.tar.gz",
-        "acq-macos-x86_64.tar.gz",
-        "acq-windows-x64.zip",
-    ):
-        assert f"  {name}" in sums
+    return dist, (dist / "SHA256SUMS").read_bytes().decode("utf-8")
+
+
+def _fake_sha256sum_env(tmp_path, line_expr, extra=""):
+    """PATH with a fake sha256sum printing ``line_expr`` (Python, using
+    ``digest`` and ``name``) per file, then the literal ``extra`` line if any."""
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    fake = fake_bin / "sha256sum"
+    fake.write_text(
+        f"#!{sys.executable}\n"
+        "import hashlib, sys\n"
+        "for name in sys.argv[1:]:\n"
+        "    with open(name, 'rb') as fh:\n"
+        "        digest = hashlib.sha256(fh.read()).hexdigest()\n"
+        f"    print({line_expr})\n"
+        + (f"print({extra!r})\n" if extra else "")
+    )
+    fake.chmod(0o755)
+    return {**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"}
+
+
+def _assert_text_form_sums(dist, sums):
+    lines = sums.split("\n")
+    assert lines[-1] == "", "SHA256SUMS must end with a newline"
+    lines = lines[:-1]
+    for line in lines:
+        assert _SUMS_LINE.fullmatch(line), f"not 'HASH  name': {line!r}"
+    recorded = {line[66:]: line[:64] for line in lines}
+    assert sorted(recorded) == sorted(_GEN_ASSETS)
+    for name, digest in recorded.items():
+        assert hashlib.sha256((dist / name).read_bytes()).hexdigest() == digest
+
+
+def test_gen_install_assets_writes_complete_sha256sums(tmp_path):
+    # gen-install-assets needs python3 (to read the manifest) and sha256sum.
+    if not (shutil.which("python3") and shutil.which("sha256sum")):
+        pytest.skip("python3/sha256sum unavailable")
+    dist, sums = _run_gen_install_assets(tmp_path)
+    _assert_text_form_sums(dist, sums)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the fake sha256sum is a POSIX script")
+def test_gen_install_assets_normalizes_binary_mode_sha256sum(tmp_path):
+    # Git for Windows' sha256sum writes the binary-mode form "HASH *name". A fake
+    # that does the same must not get a "*" into SHA256SUMS.
+    if not shutil.which("python3"):
+        pytest.skip("python3 unavailable")
+    env = _fake_sha256sum_env(tmp_path, "digest + ' *' + name")
+    dist, sums = _run_gen_install_assets(tmp_path, env=env)
+    assert "*" not in sums
+    _assert_text_form_sums(dist, sums)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the fake sha256sum is a POSIX script")
+@pytest.mark.parametrize(
+    "extra, message",
+    [
+        ("0" * 64 + "  stray.tar.gz", "lines, expected"),
+        ("not a checksum line", "unexpected line format"),
+    ],
+)
+def test_gen_install_assets_fails_closed_on_unexpected_output(tmp_path, extra, message):
+    # One "HASH  name" line per enumerated file, nothing else: an extra or a
+    # malformed line from sha256sum fails the script instead of shipping.
+    if not shutil.which("python3"):
+        pytest.skip("python3 unavailable")
+    env = _fake_sha256sum_env(tmp_path, "digest + '  ' + name", extra=extra)
+    proc = _run_gen_install_assets(tmp_path, env=env, expect_ok=False)
+    assert proc.returncode == 1
+    assert message in proc.stderr.decode()

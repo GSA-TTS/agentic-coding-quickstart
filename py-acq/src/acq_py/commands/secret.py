@@ -170,7 +170,6 @@ def run_secret_has(parsed, backend_override: str | None) -> int:
         # floor): exit 1/2 with stdout still silent, so "cannot check" is never a
         # silent false "absent".
         return exit_code
-    adapter = common._adapter(backend)
     try:
         if backend == "sbx":
             present = sbx.key_present(scope, service)

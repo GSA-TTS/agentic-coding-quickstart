@@ -17,8 +17,11 @@ environment dump, never a credential.
 from __future__ import annotations
 
 import hashlib
+import json
+import re
 from dataclasses import dataclass
 from enum import Enum
+from typing import Iterable
 
 
 class Verdict(str, Enum):
@@ -120,6 +123,51 @@ def format_result_line(verdict: str, environment: Environment) -> str:
         f"image={environment.image} host={environment.host} rev={environment.rev} "
         f"dir={environment.transcript_dir}"
     )
+
+
+# What a written transcript records in place of host-local paths. A transcript is
+# published verbatim in the ledger PR as the evidence its ``transcript_sha256``
+# stands for, so the bytes that are hashed must be the bytes that are shown, and
+# they must carry no local path (which names the operator's account). The
+# transcript directory is recorded as this token (the RESULT line on stdout still
+# carries the real path, for the operator) ...
+TRANSCRIPT_DIR_TOKEN = "<transcript-dir>"
+# ... and an absolute path in the command line keeps only its final component after
+# this prefix (``/home/jane/.venv/bin/python3`` -> ``<local>/python3``). What ran is
+# still recorded: the interpreter's name, the oracle's repository path and its
+# arguments; only the directory it ran from is not.
+LOCAL_PATH_PREFIX = "<local>/"
+_LOCAL_PATH = re.compile(r"[/\\~]|[A-Za-z]:[/\\]")
+
+
+def is_local_path(arg: str) -> bool:
+    """Whether ``arg`` is a host-local path: POSIX or Windows absolute, rooted, UNC, or ``~``-relative."""
+    return bool(_LOCAL_PATH.match(arg))
+
+
+def _publishable_arg(arg: str) -> str:
+    if is_local_path(arg):
+        return LOCAL_PATH_PREFIX + re.split(r"[/\\]", arg.rstrip("/\\"))[-1]
+    flag, sep, value = arg.partition("=")
+    if sep and is_local_path(value):
+        return f"{flag}={_publishable_arg(value)}"
+    return arg
+
+
+def publishable_argv(argv: Iterable[str]) -> list[str]:
+    """``argv`` as a transcript records it: no host-local path (see ``LOCAL_PATH_PREFIX``)."""
+    return [_publishable_arg(a) for a in argv]
+
+
+def canonical_transcript_bytes(doc: dict) -> bytes:
+    """The only byte form a ``transcript.json`` is written in.
+
+    Sorted keys, two-space indent, ASCII only, LF line endings, one trailing newline
+    (written as bytes, so Windows does not turn LF into CRLF). Because the form is
+    fixed, a reviewer holding the published copy reproduces the exact bytes, and so
+    the ``transcript_sha256`` the ledger records.
+    """
+    return (json.dumps(doc, sort_keys=True, indent=2, ensure_ascii=True) + "\n").encode("ascii")
 
 
 def classify_exit(returncode: int) -> Verdict:

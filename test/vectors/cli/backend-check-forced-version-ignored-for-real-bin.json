@@ -1,0 +1,64 @@
+{
+  "schema": 1,
+  "id": "cli/backend-check-forced-version-ignored-for-real-bin",
+  "oracle": "ADR-0040m version floor fail-closed: ACQ_MSB_VERSION/ACQ_MSB_INSTALLED are an offline test seam honoured only for the bundled __stub__; with ACQ_MSB_BIN naming a real program (a fake msb 0.7.1) a forced 0.7.11 is ignored and the program's own blocked version is refused with backend_version_unsupported",
+  "tier": 1,
+  "backend": null,
+  "platform": "linux",
+  "invoke": {
+    "argv": [
+      "{acq}",
+      "backend",
+      "check",
+      "msb",
+      "--json"
+    ],
+    "env": {
+      "ACQ_MSB_BIN": "python3 -c \"import sys; a = sys.argv[1:]; sys.exit(print('msb 0.7.1') if a == ['--version'] else 'fake msb 0.7.1: refused to run ' + ' '.join(a))\"",
+      "ACQ_SBX_INSTALLED": "0",
+      "ACQ_MSB_VERSION": "0.7.11",
+      "ACQ_MSB_INSTALLED": "1"
+    },
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "ACQ_SBX_BIN",
+      "ACQ_SBX_VERSION",
+      "MSB_HOME",
+      "ACQ_IMAGE",
+      "ACQ_MSB_IMAGE"
+    ],
+    "stdin": "",
+    "timeout_ms": 10000
+  },
+  "expect": {
+    "exit": 1,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "backend check",
+        "error": {
+          "code": "backend_version_unsupported"
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME"
+    ]
+  }
+}

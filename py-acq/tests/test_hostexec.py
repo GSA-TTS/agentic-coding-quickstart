@@ -17,6 +17,11 @@ import pytest
 from acq_py import backends, hostexec, msb, sbx, version_info
 
 
+# A program found on PATH: hostexec accepts only ``.exe`` files on Windows, so
+# the fakes found through PATH carry the suffix there (POSIX names stay bare).
+_EXE_SUFFIX = ".exe" if sys.platform == "win32" else ""
+
+
 def _exe(path: Path) -> Path:
     path.write_text("#!/bin/sh\nexit 0\n")
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
@@ -54,7 +59,7 @@ def test_absolute_path_entry_resolves_to_an_absolute_path(
 ):
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    real = _exe(bindir / "msb")
+    real = _exe(bindir / f"msb{_EXE_SUFFIX}")
     monkeypatch.setenv("PATH", os.pathsep.join(["", ".", str(bindir)]))
     assert hostexec.which("msb") == str(real)
     assert msb.msb_command() == [str(real)]
@@ -131,7 +136,7 @@ def test_git_revision_reads_acq_checkout_not_the_workspace(workspace, monkeypatc
 
     bindir = workspace.parent / "bin"
     bindir.mkdir()
-    real = _exe(bindir / "git")
+    real = _exe(bindir / f"git{_EXE_SUFFIX}")
     monkeypatch.setenv("PATH", str(bindir))
     monkeypatch.setattr(version_info, "_CHECKOUT_ROOT", workspace.parent)
     (workspace.parent / ".git").mkdir()
@@ -202,7 +207,7 @@ def test_passthrough_launches_the_resolved_backend(workspace, tmp_path, monkeypa
 
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    real = _exe(bindir / "sbx")
+    real = _exe(bindir / f"sbx{_EXE_SUFFIX}")
     monkeypatch.setenv("PATH", os.pathsep.join([".", str(bindir)]))
     monkeypatch.setenv("ACQ_BACKEND", "sbx")
     seen = {}

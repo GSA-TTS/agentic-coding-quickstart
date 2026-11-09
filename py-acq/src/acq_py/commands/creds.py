@@ -174,7 +174,7 @@ def _github_scope_workspace(parsed, backend: str, emit_json: bool) -> tuple[str 
             "github-scope",
             errors.STATE_SCHEMA_UNSUPPORTED,
             str(exc),
-            f"recreate the sandbox with 'acq create', or pass a workspace path explicitly",
+            "recreate the sandbox with 'acq create', or pass a workspace path explicitly",
             emit_json,
         )
     workspace = (record or {}).get("workspace")
@@ -201,6 +201,7 @@ def run_github_scope(parsed, emit_json: bool, backend: str) -> int:
     workspace, exit_code = _github_scope_workspace(parsed, backend, emit_json)
     if exit_code is not None:
         return exit_code
+    assert workspace is not None  # nosec B101 # resolver contract; narrows the type for mypy
     value = common._read_secret_value()
     if not value.strip():
         return common._operational_failure(

@@ -4471,6 +4471,188 @@ acq_provider_input_discard() {
   _acq_provider_input_cleanup_generation "$root" "$generation"
 }
 
+# Choose the interpreter for the provider-input path helpers below. It sets
+# _ACQ_PROVIDER_INPUT_PATH_PY (an argv prefix) and
+# _ACQ_PROVIDER_INPUT_PATH_PY_KIND:
+#   posix  the interpreter has O_NOFOLLOW, O_DIRECTORY and dir_fd, so the
+#          descriptor-relative traversal runs unchanged;
+#   nt     native Windows CPython, which has none of those, so the helpers use
+#          _acq_provider_input_nt_dir instead.
+# Outside Git Bash, MSYS2 and Cygwin this is exactly `python3`, with no probe.
+# On those Windows shells python3 is often missing, or is the Microsoft Store
+# alias stub that only prints an install hint, so python3, python and py -3 are
+# probed in that order, and the first working Python 3 is used. A candidate is
+# used only when `command -v` resolves it to an absolute path, and it is run by
+# that path, so a shell function or alias of the same name is never trusted. The
+# result is cached in the calling shell; _acq_provider_input_guardian_start
+# resolves it in the transaction shell before any command substitution, so the
+# helpers inside one transaction share a single probe. No usable interpreter
+# fails closed.
+# The cache is only trusted when this process set it. Neither name is a public
+# setting, so values inherited from the environment are dropped at source time;
+# otherwise an exported value could pick the interpreter.
+unset _ACQ_PROVIDER_INPUT_PATH_PY _ACQ_PROVIDER_INPUT_PATH_PY_KIND
+_acq_provider_input_path_python() {
+  local cand kind probe path
+  case "${OSTYPE:-}" in
+    msys*|cygwin*) ;;
+    *)
+      _ACQ_PROVIDER_INPUT_PATH_PY=(python3)
+      _ACQ_PROVIDER_INPUT_PATH_PY_KIND=posix
+      return 0
+      ;;
+  esac
+  if [ -n "${_ACQ_PROVIDER_INPUT_PATH_PY_KIND:-}" ] && [ -n "${_ACQ_PROVIDER_INPUT_PATH_PY[0]:-}" ]; then
+    return 0
+  fi
+  # Write the kind without a newline: native Windows Python emits CRLF.
+  probe='import os, sys
+if sys.version_info < (3, 6): raise SystemExit(1)
+posix = all(hasattr(os, n) for n in ("O_NOFOLLOW", "O_DIRECTORY")) and os.open in os.supports_dir_fd and os.mkdir in os.supports_dir_fd
+sys.stdout.write("posix" if posix else "nt" if os.name == "nt" else "none")'
+  for cand in python3 python py; do
+    path=$(command -v "$cand" 2>/dev/null) || continue
+    case "$path" in /*) ;; *) continue ;; esac
+    case "$cand" in
+      py) _ACQ_PROVIDER_INPUT_PATH_PY=("$path" -3) ;;
+      *) _ACQ_PROVIDER_INPUT_PATH_PY=("$path") ;;
+    esac
+    kind=$("${_ACQ_PROVIDER_INPUT_PATH_PY[@]}" -I -c "$probe" </dev/null 2>/dev/null) || continue
+    case "$kind" in
+      posix|nt) _ACQ_PROVIDER_INPUT_PATH_PY_KIND=$kind; return 0 ;;
+    esac
+  done
+  _ACQ_PROVIDER_INPUT_PATH_PY=()
+  _ACQ_PROVIDER_INPUT_PATH_PY_KIND=
+  echo "acq: provider-input path checks need Python 3 (python3, python or py -3); none is usable" >&2
+  return 1
+}
+
+# _acq_provider_input_nt_path PATH — print the Windows path for an MSYS or
+# Cygwin PATH, mapped lexically: the longest mount point in the mount table that
+# prefixes PATH is replaced by its Windows target, and the rest is kept as is. A
+# drive-absolute path (C:\... or C:/...) is printed unchanged. Mapping the
+# text is the conservative choice: cygpath -w has been seen both to keep and to
+# resolve a junction in the path on Git for Windows, and a resolved link would
+# be hidden from the walk, so the result must not depend on how cygpath
+# resolves. ".." is kept so the walk rejects it. A mount whose options include
+# posix=0 (the drive and /tmp mounts on Git for Windows) matches
+# case-insensitively, as MSYS does (/C/x is C:\x); any other mount matches
+# case-sensitively. A leading "//" is a UNC path there and is rejected. Mount
+# points are OS-level aliases, like the macOS /var link, and their Windows
+# targets are walked from the drive root like everything else.
+# ACQ_TEST_MOUNTS_FILE replaces /proc/mounts, and only under bats.
+_acq_provider_input_nt_path() {
+  local p="$1" mounts=/proc/mounts win mnt _fstype opts _fields
+  local best_mnt="" best_win="" found="" rest nocase=0
+  case "$p" in
+    [A-Za-z]:[\\/]*) printf '%s\n' "$p"; return 0 ;;
+    //*) return 1 ;;
+    /*) ;;
+    *) return 1 ;;
+  esac
+  if [ -n "${BATS_TEST_NAME:-}" ] && [ -n "${ACQ_TEST_MOUNTS_FILE:-}" ]; then
+    mounts=$ACQ_TEST_MOUNTS_FILE
+  fi
+  [ -r "$mounts" ] || return 1
+  shopt -q nocasematch && nocase=1
+  # /proc/mounts escapes spaces and other bytes as octal (\040); %b decodes them.
+  while read -r win mnt _fstype opts _fields; do
+    printf -v win '%b' "$win"
+    printf -v mnt '%b' "$mnt"
+    case "$mnt" in /*) ;; *) continue ;; esac
+    case ",$opts," in
+      *,posix=0,*) shopt -s nocasematch ;;
+      *) shopt -u nocasematch ;;
+    esac
+    case "$p/" in
+      "${mnt%/}/"*)
+        if [ -z "$found" ] || [ "${#mnt}" -gt "${#best_mnt}" ]; then
+          best_mnt=$mnt best_win=$win found=1
+        fi
+        ;;
+    esac
+  done < "$mounts"
+  if [ "$nocase" = 1 ]; then shopt -s nocasematch; else shopt -u nocasematch; fi
+  [ -n "$found" ] && [ -n "$best_win" ] || return 1
+  # Strip the matched prefix by length: it may differ from PATH in case.
+  best_mnt=${best_mnt%/}
+  rest=${p:${#best_mnt}}
+  [ -n "$rest" ] || rest=/
+  printf '%s%s\n' "${best_win%/}" "$rest"
+}
+
+# _acq_provider_input_nt_dir mkdir|check PATH — the native Windows form of
+# _acq_provider_input_safe_mkdir / _acq_provider_input_safe_dir. Windows CPython
+# has no O_NOFOLLOW, O_DIRECTORY or dir_fd, so each component, from the drive
+# root down, is checked with os.lstat, which does not follow symlinks or
+# junctions. The walk fails closed if a component is a symlink, is not a
+# directory, or has FILE_ATTRIBUTE_REPARSE_POINT set. That last check catches
+# junctions and every other reparse point, which S_ISLNK does not report. A
+# component created by mkdir is checked again afterwards, so a link swapped in
+# at that moment is still rejected.
+#
+# A race remains. The POSIX walk holds a descriptor for each checked directory,
+# but each lstat here resolves the whole path again, so a component replaced
+# with a link after it was checked could be followed by a later lstat or mkdir.
+# That window is no wider than the one every caller already has, since callers
+# act on the path string after this check returns. Holding each component open
+# with CreateFileW (FILE_FLAG_OPEN_REPARSE_POINT, no FILE_SHARE_DELETE) would
+# close it within the walk, at the cost of a ctypes implementation.
+#
+# A component that Win32 would rewrite is rejected before anything is touched:
+# a trailing dot or space (stripped by Win32), ":" (a drive or stream, which
+# ntpath.join would also merge), <>"|?* and control characters. Otherwise the
+# walk could check a different directory from the one bash then uses. The path
+# is mapped by
+# _acq_provider_input_nt_path and passed with MSYS argument conversion off, so
+# nothing resolves a link before the walk sees it. Anything other than a
+# drive-letter path (UNC, device or relative) is rejected, as are "." and ".."
+# components.
+_acq_provider_input_nt_dir() {
+  local mode="$1" winpath
+  winpath=$(_acq_provider_input_nt_path "$2") && [ -n "$winpath" ] || {
+    echo "acq: cannot map provider-input path to a Windows path: $2" >&2
+    return 1
+  }
+  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
+    "${_ACQ_PROVIDER_INPUT_PATH_PY[@]}" -I - "$mode" "$winpath" <<'PY'
+import os, stat, sys
+mode, path = sys.argv[1:]
+def fail():
+    raise SystemExit('unsafe provider-input path' if mode == 'mkdir' else 1)
+def check(st):
+    if (stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode)
+            or getattr(st, 'st_file_attributes', 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+        fail()
+drive, rest = os.path.splitdrive(path)
+if os.sep == '\\' and not (len(drive) == 2 and drive[1] == ':'): fail()
+if os.altsep: rest = rest.replace(os.altsep, os.sep)
+if not rest.startswith(os.sep): fail()
+parts = [p for p in rest.split(os.sep) if p]
+if any(p in ('.', '..') for p in parts): fail()
+for p in parts:
+    if p[-1] in '. ' or any(c in ':<>"|?*' or ord(c) < 32 for c in p): fail()
+current = drive + os.sep
+try:
+    check(os.lstat(current))
+    for part in parts:
+        current = os.path.join(current, part)
+        try:
+            st = os.lstat(current)
+        except FileNotFoundError:
+            if mode != 'mkdir': fail()
+            try:
+                os.mkdir(current, 0o755)
+            except FileExistsError:
+                pass
+            st = os.lstat(current)
+        check(st)
+except OSError:
+    fail()
+PY
+}
+
 # Normalize the three macOS kernel-managed path aliases to their canonical
 # /private/{var,tmp,etc} spellings so O_NOFOLLOW traversal never sees a
 # symlink at the first path component.  Also collapses harmless absolute
@@ -4486,7 +4668,14 @@ acq_provider_input_discard() {
 # builds never set this variable; it is documented alongside ACQ_TEST_HOST_OS as
 # a test-seam-only override.
 _acq_provider_input_canonical_path() {
-  python3 -I - "$1" <<'PY'
+  _acq_provider_input_path_python || return 1
+  # The aliases are macOS-only, and the native Windows walk maps the path
+  # itself (_acq_provider_input_nt_path), so there is nothing to rewrite here.
+  if [ "$_ACQ_PROVIDER_INPUT_PATH_PY_KIND" = nt ]; then
+    printf '%s' "$1"
+    return 0
+  fi
+  "${_ACQ_PROVIDER_INPUT_PATH_PY[@]}" -I - "$1" <<'PY'
 import os, re, sys
 path = sys.argv[1]
 # Collapse harmless absolute spelling variants before alias matching.
@@ -4518,11 +4707,17 @@ PY
 # those three OS-level prefixes (plus harmless double-slash/dot variants) so
 # O_NOFOLLOW does not reject them with ELOOP.  All subsequent components —
 # including every user-influenced one — still traverse with O_NOFOLLOW.
-# Linux is unaffected.
+# Linux is unaffected.  Native Windows Python, which lacks these primitives,
+# gets the equivalent check from _acq_provider_input_nt_dir.
 _acq_provider_input_safe_mkdir() {
   local _canon
+  _acq_provider_input_path_python || return 1
+  if [ "$_ACQ_PROVIDER_INPUT_PATH_PY_KIND" = nt ]; then
+    _acq_provider_input_nt_dir mkdir "$1"
+    return
+  fi
   _canon=$(_acq_provider_input_canonical_path "$1") || return 1
-  python3 -I - "$_canon" <<'PY'
+  "${_ACQ_PROVIDER_INPUT_PATH_PY[@]}" -I - "$_canon" <<'PY'
 import os, stat, sys
 path = sys.argv[1]
 if not os.path.isabs(path): raise SystemExit('provider-input path must be absolute')
@@ -4543,8 +4738,13 @@ PY
 
 _acq_provider_input_safe_dir() {
   local _canon
+  _acq_provider_input_path_python || return 1
+  if [ "$_ACQ_PROVIDER_INPUT_PATH_PY_KIND" = nt ]; then
+    _acq_provider_input_nt_dir check "$1"
+    return
+  fi
   _canon=$(_acq_provider_input_canonical_path "$1") || return 1
-  python3 -I - "$_canon" <<'PY'
+  "${_ACQ_PROVIDER_INPUT_PATH_PY[@]}" -I - "$_canon" <<'PY'
 import os, stat, sys
 path = sys.argv[1]
 if not os.path.isabs(path): raise SystemExit(1)
@@ -4654,6 +4854,10 @@ acq_provider_input_lock_acquire() {
 # guardian PID instead. The guardian exits if its transaction parent disappears,
 # including after SIGKILL, making stale recovery safe.
 _acq_provider_input_guardian_start() {
+  # Resolve the path-helper interpreter here, in the transaction shell, so the
+  # command substitutions that follow inherit the cached result. A failure is
+  # reported again, and fails closed, by the first helper that needs it.
+  _acq_provider_input_path_python 2>/dev/null || true
   _ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN=$(mktemp "${TMPDIR:-/tmp}/acq-provider-children.XXXXXX") || return 1
   export _ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN
   sh -c '
