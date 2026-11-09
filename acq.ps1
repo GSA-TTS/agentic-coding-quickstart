@@ -70,7 +70,7 @@ if ($acqImpl -and $acqImpl -ne "bash") {
             $candidate = $dir.TrimEnd('\', '/') + '\python.exe'
             # Re-check after trimming: an entry of just "\\" would become the
             # drive-relative "\python.exe".
-            if (-not ($candidate -match '^[A-Za-z]:\\' -or $candidate.StartsWith('\\'))) { continue }
+            if (-not ($candidate -match '^[A-Za-z]:[\\/]' -or $candidate.StartsWith('\\'))) { continue }
             if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
             if (Test-AcqPython -Exe $candidate) { $pyCmd = $candidate; break }
         }
