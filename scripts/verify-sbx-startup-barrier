@@ -14,6 +14,14 @@ SCRIPT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 ACQ="$SCRIPT_DIR/acq"
 PASS=0
 FAIL=0
+# The work dir goes under TMPDIR only when it is absolute, else /tmp, as
+# acq_tmp_dir in acq.backends/userdirs.sh does: a relative TMPDIR would put it
+# under the current directory. Read it here, because TMPDIR is reused below to
+# hold the work dir.
+case "${TMPDIR:-}" in
+  /*) TMP_BASE="$TMPDIR" ;;
+  *) TMP_BASE="/tmp" ;;
+esac
 TMPDIR=""
 
 ok() { PASS=$((PASS + 1)); printf '  ok  %s\n' "$1"; }
@@ -31,7 +39,7 @@ info "preconditions"
 command -v sbx >/dev/null 2>&1 && ok "sbx on PATH ($(sbx version 2>/dev/null | sed -n '1p'))" || { bad "sbx not on PATH"; exit 1; }
 [ -x "$ACQ" ] && ok "acq is executable" || { bad "acq not executable at $ACQ"; exit 1; }
 
-TMPDIR=$(mktemp -d "${TMPDIR:-/tmp}/acq-sbx-startup.XXXXXX")
+TMPDIR=$(mktemp -d "$TMP_BASE/acq-sbx-startup.XXXXXX")
 WORKSPACE="$TMPDIR/workspace"
 KITDIR="$TMPDIR/slow-config-writer"
 mkdir -p "$WORKSPACE" "$KITDIR"

@@ -357,6 +357,28 @@ STUB
   [ -z "$(ls -A "$tmp")" ]
 }
 
+# As acq_tmp_dir does, the runner puts its PATH shim under TMPDIR only when it is
+# absolute, else /tmp. A shim made under a relative TMPDIR would be a relative
+# PATH entry, so `bash` would stop resolving after a cd.
+@test "bash32: the PATH shim ignores a relative TMPDIR" {
+  local root="$STUBDIR/root" fake work="$STUBDIR/work"
+  mkdir -p "$root/scripts" "$root/test/vendor/bats-core/bin" "$work/rel-tmp"
+  cp "$RUNNER" "$root/scripts/test-acq-bash32"
+  cp "$REPO_ROOT/scripts/test-acq-bats" "$root/scripts/test-acq-bats"
+  cat > "$root/test/vendor/bats-core/bin/bats" <<'STUB'
+#!/bin/sh
+command -v bash > "$SHIM_RECORD"
+STUB
+  chmod +x "$root/test/vendor/bats-core/bin/bats"
+  fake="$(make_fake_bash 3.2.57)"
+  cd "$work" || return 1
+  run env TMPDIR=rel-tmp SHIM_RECORD="$STUBDIR/shim" ACQ_BASH32="$fake" "$root/scripts/test-acq-bash32" x.bats
+  assert_success
+  run cat "$STUBDIR/shim"
+  assert_output --regexp '^/tmp/acq-bash32-path\.[^/]+/bash$'
+  [ -z "$(ls -A "$work/rel-tmp")" ]
+}
+
 @test "bash32: a relative ACQ_BASH32_PREFIX is rejected" {
   run env ACQ_BASH32_PREFIX=relative/dir "$RUNNER" --which
   assert_failure 2

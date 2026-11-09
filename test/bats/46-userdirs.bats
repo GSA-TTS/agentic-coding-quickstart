@@ -756,6 +756,67 @@ _plant_failing_curl() {
   chmod +x "$STUBDIR/curl"
 }
 
+# The dev and verify scripts follow acq_tmp_dir: their scratch dirs go under
+# TMPDIR only when it is absolute, else /tmp. Each case plants a relative
+# TMPDIR that exists in the working directory, so a script that still used it
+# would create its scratch dir there.
+@test "install-provider-input-wheelhouse: the download dir ignores a relative TMPDIR" {
+  _plant_failing_curl
+  mkdir -p "$STUBDIR/abs-tmp"
+  run env TMPDIR="$STUBDIR/abs-tmp" sh "$REPO_ROOT/scripts/install-provider-input-wheelhouse" \
+    --target "$STUBDIR/wh" --version 0.0.0 </dev/null
+  assert_failure
+  run cat "$CALLS"
+  assert_output --regexp "-o $STUBDIR/abs-tmp/acq-validator-wheelhouse\.[^/]+/SHA256SUMS"
+  : >"$CALLS"
+  mkdir rel-tmp
+  run env TMPDIR=rel-tmp sh "$REPO_ROOT/scripts/install-provider-input-wheelhouse" \
+    --target "$STUBDIR/wh" --version 0.0.0 </dev/null
+  assert_failure
+  run cat "$CALLS"
+  assert_output --regexp '-o /tmp/acq-validator-wheelhouse\.[^/]+/SHA256SUMS'
+  rmdir rel-tmp
+  _assert_work_empty
+}
+
+@test "probe-msb-posthoc-ports: the probe dir ignores a relative TMPDIR" {
+  # Only what the probe runs before its msb check is on PATH, so it stops there.
+  local bin="$STUBDIR/minbin" tool shell
+  shell=$(command -v bash)
+  mkdir -p "$bin" "$STUBDIR/abs-tmp"
+  for tool in dirname mktemp rm; do ln -s "$(command -v "$tool")" "$bin/$tool"; done
+  run env PATH="$bin" TMPDIR="$STUBDIR/abs-tmp" "$shell" "$REPO_ROOT/scripts/probe-msb-posthoc-ports" </dev/null
+  assert_failure 1
+  assert_output --regexp "temp dir: $STUBDIR/abs-tmp/acq-msb-ports-probe\."
+  assert_output --partial 'msb not on PATH'
+  mkdir rel-tmp
+  run env PATH="$bin" TMPDIR=rel-tmp "$shell" "$REPO_ROOT/scripts/probe-msb-posthoc-ports" </dev/null
+  assert_failure 1
+  assert_output --regexp 'temp dir: /tmp/acq-msb-ports-probe\.'
+  rmdir rel-tmp
+  _assert_work_empty
+}
+
+@test "verify-sbx-startup-barrier: the work dir follows an absolute TMPDIR and ignores a relative one" {
+  # A copy beside a fake acq that prints its arguments and fails `create`, so the
+  # script stops after printing the kit path inside its work dir.
+  local fake="$STUBDIR/fake-repo"
+  mkdir -p "$fake/scripts" "$STUBDIR/abs-tmp"
+  cp "$REPO_ROOT/scripts/verify-sbx-startup-barrier" "$fake/scripts/"
+  printf '#!/bin/sh\nprintf "acq %%s\\n" "$*"\ncase " $* " in *" create "*) exit 1 ;; esac\nexit 0\n' >"$fake/acq"
+  printf '#!/bin/sh\necho "sbx 0.0.0"\n' >"$STUBDIR/sbx"
+  chmod +x "$fake/acq" "$fake/scripts/verify-sbx-startup-barrier" "$STUBDIR/sbx"
+  run env TMPDIR="$STUBDIR/abs-tmp" bash "$fake/scripts/verify-sbx-startup-barrier" probe-sbx </dev/null
+  assert_failure 1
+  assert_output --regexp "--kit $STUBDIR/abs-tmp/acq-sbx-startup\.[^/ ]+/slow-config-writer"
+  mkdir rel-tmp
+  run env TMPDIR=rel-tmp bash "$fake/scripts/verify-sbx-startup-barrier" probe-sbx </dev/null
+  assert_failure 1
+  assert_output --regexp '--kit /tmp/acq-sbx-startup\.[^/ ]+/slow-config-writer'
+  rmdir rel-tmp
+  _assert_work_empty
+}
+
 @test "verify-msb-pin: --install refuses relative install targets before fetching" {
   _plant_failing_curl
   run env MSB_HOME=rel-msb bash "$REPO_ROOT/scripts/verify-msb-pin" --install </dev/null
