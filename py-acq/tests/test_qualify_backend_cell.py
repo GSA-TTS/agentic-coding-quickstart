@@ -427,6 +427,28 @@ def _snapshot(root: Path) -> dict[str, bytes]:
     return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the stub shim is a POSIX shell script")
+@pytest.mark.skipif(sys.version_info < (3, 11), reason="the oracle runs the CLI under python -P")
+def test_sbx_without_a_usai_key_in_its_table_is_blocked_before_create(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    shim = bin_dir / "sbx"
+    shim.write_text(
+        f"#!/bin/sh\nACQ_SBX_STUB_VERSION=0.51.0 PYTHONPATH={REPO_ROOT / 'py-acq' / 'src'} "
+        f"exec {sys.executable} -P -m acq_py._stub_sbx \"$@\"\n"
+    )
+    shim.chmod(0o755)
+    env = {"PATH": os.pathsep.join([str(bin_dir), "/usr/bin", "/bin"]), "HOME": str(home), "TMPDIR": str(tmp_path)}
+    proc = subprocess.run([sys.executable, str(ORACLE_PATH), "--backend", "sbx"], env=env,
+                          capture_output=True, text=True, timeout=120, cwd=tmp_path)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "BLOCKED: usai key: sbx holds no global USAI_API_KEY secret" in proc.stderr
+    assert not (home / ".docker-sbx" / "catalog.json").exists() or "acq-qual" not in (
+        home / ".docker-sbx" / "catalog.json").read_text(encoding="utf-8")
+
+
 @pytest.mark.skipif(os.name == "nt", reason="the stub shims are POSIX shell scripts")
 @pytest.mark.skipif(sys.version_info < (3, 11), reason="the oracle runs the CLI under python -P")
 @pytest.mark.parametrize("backend,version", [("msb", "0.7.11"), ("sbx", "0.51.0")])
