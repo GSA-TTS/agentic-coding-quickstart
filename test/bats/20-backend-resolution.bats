@@ -242,19 +242,54 @@ EVIL
 
 # The best-effort verbs resolve the backend with its diagnostics silenced, so
 # that "nothing installed" can be reported as unknown. An unknown backend pinned
-# in config.yaml still ends them, and must say why instead of a bare exit 1.
+# in config.yaml still ends help and version, and must say why instead of a bare
+# exit 1.
 @test "best-effort verbs: an unknown backend in config.yaml is reported, not swallowed" {
   local verb
   unset ACQ_BACKEND
   export XDG_CONFIG_HOME="$STUBDIR/config"
   mkdir -p "$XDG_CONFIG_HOME/acq"
   printf 'backend: bogus\n' > "$XDG_CONFIG_HOME/acq/config.yaml"
-  for verb in --help doctor configure version; do
+  for verb in --help version; do
     run "$ACQ" "$verb" </dev/null
     assert_failure
     assert_output --partial "unknown backend 'bogus'"
     assert_output --partial 'config.yaml'
   done
+}
+
+# doctor and configure complete instead, as Python's do: doctor reports a failed
+# config-backend check and configure shows the problem, both exiting 0 with
+# config.yaml left as it was.
+@test "doctor and configure: an unknown backend in config.yaml is reported and they complete" {
+  unset ACQ_BACKEND
+  export XDG_CONFIG_HOME="$STUBDIR/config"
+  mkdir -p "$XDG_CONFIG_HOME/acq"
+  printf 'backend: bogus\n' > "$XDG_CONFIG_HOME/acq/config.yaml"
+
+  run "$ACQ" doctor </dev/null
+  assert_success
+  assert_output --partial "[fail] config-backend: config.yaml sets an unknown backend: 'bogus'"
+  assert_output --partial "acq backend set msb"
+
+  run "$ACQ" configure </dev/null
+  assert_success
+  assert_output --partial "unknown backend 'bogus'"
+  assert_output --partial 'configuration unchanged'
+  grep -Fxq 'backend: bogus' "$XDG_CONFIG_HOME/acq/config.yaml"
+
+  # Inspecting a sandbox needs its backend, so `doctor NAME` still refuses.
+  run "$ACQ" doctor some-sandbox </dev/null
+  assert_failure
+  assert_output --partial "unknown backend 'bogus'"
+
+  # An explicit --backend or ACQ_BACKEND value is still refused up front.
+  run "$ACQ" --backend bogus doctor </dev/null
+  assert_failure
+  assert_output --partial "unknown backend 'bogus'"
+  run env ACQ_BACKEND=bogus "$ACQ" configure </dev/null
+  assert_failure
+  assert_output --partial "unknown backend 'bogus'"
 }
 
 @test "best-effort verbs: no backend installed stays silent and succeeds" {

@@ -2294,10 +2294,43 @@ acq_resolve_backend_best_effort() {
   _ACQ_RESOLVE_ERR_FD=3 acq_resolve_backend "${1:-}" 3>&2 2>/dev/null || true
 }
 
+# acq_resolve_backend_diagnostic [EXPLICIT] — acq_resolve_backend_best_effort
+# for doctor and configure. An unknown backend pinned in config.yaml does not
+# end the verb: it is recorded in ACQ_INVALID_BACKEND_PIN (no backend is
+# loaded), so doctor reports a failed config-backend check and configure shows
+# it, both completing as Python's do. An unknown --backend or
+# ACQ_BACKEND value still exits.
+acq_resolve_backend_diagnostic() {
+  ACQ_INVALID_BACKEND_PIN=""
+  _ACQ_RESOLVE_PIN_REPORT=1 acq_resolve_backend_best_effort "${1:-}"
+}
+
+# _acq_unknown_backend_message NAME ORIGIN — the refusal for a backend name acq
+# cannot load (stdout; callers redirect).
+_acq_unknown_backend_message() {
+  echo "acq: error: unknown backend '$(acq_printable "$1")' from ${2} (expected sbx or msb)."
+  echo "     Fix or unset it, or pin a valid one with 'acq backend set msb'."
+}
+
+# _acq_unknown_backend NAME ORIGIN FROM_CONFIG — refuse a backend name acq
+# cannot load. Exits 1, as a missing adapter file always has: a backend the user
+# named but acq cannot load is an error even for the best-effort callers,
+# unlike "nothing installed". The one exception is the config.yaml pin
+# (FROM_CONFIG=1) under acq_resolve_backend_diagnostic, which records the name
+# in ACQ_INVALID_BACKEND_PIN and returns 1 for the verb to report.
+_acq_unknown_backend() {
+  if [ "$3" = 1 ] && [ -n "${_ACQ_RESOLVE_PIN_REPORT:-}" ]; then
+    ACQ_INVALID_BACKEND_PIN="$1"
+    return 1
+  fi
+  _acq_unknown_backend_message "$1" "$2" >&"${_ACQ_RESOLVE_ERR_FD:-2}"
+  exit 1
+}
+
 # Resolve and load the backend. $1 (optional) = explicit --backend value.
 acq_resolve_backend() {
   local explicit="${1:-}"
-  local name="" origin=""
+  local name="" origin="" from_config=0
   local autodetected=0
 
   if [ -n "$explicit" ]; then
@@ -2309,6 +2342,7 @@ acq_resolve_backend() {
     cfg_name=$(_read_config_backend)
     if [ -n "$cfg_name" ]; then
       name="$cfg_name"
+      from_config=1
       origin=$(_acq_config_file) || origin="config.yaml"
     else
       _auto_detect_backend || {
@@ -2335,15 +2369,9 @@ acq_resolve_backend() {
   # silent.
   [ "$autodetected" -eq 1 ] && _announce_autodetect_backend
 
-  # An unknown name exits, as a missing adapter file always has: a backend the
-  # user named explicitly but acq cannot load is an error even for the
-  # best-effort callers, unlike "nothing installed" above.
+  # An unknown name is refused (see _acq_unknown_backend).
   if ! acq_backend_name_known "$name"; then
-    {
-      echo "acq: error: unknown backend '$(acq_printable "$name")' from ${origin:-auto-detect} (expected sbx or msb)."
-      echo "     Fix or unset it, or pin a valid one with 'acq backend set msb'."
-    } >&"${_ACQ_RESOLVE_ERR_FD:-2}"
-    exit 1
+    _acq_unknown_backend "$name" "${origin:-auto-detect}" "$from_config" || return 1
   fi
   _load_backend_adapter "$name"
   _build_kit_list
@@ -6446,6 +6474,15 @@ acq_print_image_contract_doctor() {
   acq_backend_doctor_sandbox "$name"
 }
 
+# _acq_doctor_backend_pin_check — report an unknown backend pinned in
+# config.yaml (recorded by acq_resolve_backend_diagnostic) as a failed
+# config-backend check, with the message and remediation Python's doctor uses.
+_acq_doctor_backend_pin_check() {
+  [ -n "${ACQ_INVALID_BACKEND_PIN:-}" ] || return 0
+  echo "  [fail] config-backend: config.yaml sets an unknown backend: '$(acq_printable "$ACQ_INVALID_BACKEND_PIN")' (expected sbx or msb)"
+  echo "           run 'acq backend set msb' or 'acq backend set sbx' (or 'acq backend unset' to auto-detect)"
+}
+
 acq_print_doctor() {
   local sbx_status msb_status
 
@@ -6507,6 +6544,7 @@ acq_print_doctor() {
   if [ -n "${ACQ_BACKEND:-}" ]; then
     echo "  ACQ_BACKEND env override: ${ACQ_BACKEND}"
   fi
+  _acq_doctor_backend_pin_check
 
   echo ""
 
@@ -6518,7 +6556,8 @@ acq_print_doctor() {
   fi
 
   echo ""
-  if [ -z "$dirs_ok" ] || [ -z "$config_file" ]; then
+  # A broken pin is not overwritten from here: configure offers that fix.
+  if [ -z "$dirs_ok" ] || [ -z "$config_file" ] || [ -n "${ACQ_INVALID_BACKEND_PIN:-}" ]; then
     return 0
   fi
   # ACQ_RESOLVED_BACKEND is always set by acq_resolve_backend before doctor runs,
@@ -6565,6 +6604,16 @@ _acq_configure_show_current() {
   echo "" >&2
 }
 
+# _acq_configure_backend_pin — when config.yaml pins a backend acq cannot load
+# (ACQ_INVALID_BACKEND_PIN, from acq_resolve_backend_diagnostic), say so. The
+# pin is left as it is: configure does not manage the backend, and 'acq backend
+# set' or 'acq backend unset' fixes it.
+_acq_configure_backend_pin() {
+  [ -n "${ACQ_INVALID_BACKEND_PIN:-}" ] || return 0
+  _acq_unknown_backend_message "$ACQ_INVALID_BACKEND_PIN" "$(_acq_config_file || echo config.yaml)" >&2
+  echo "" >&2
+}
+
 # acq_configure — the interactive configuration flow. Presents the opt-in kit
 # catalog as a multiselect (pre-checked from the current config), then a confirm
 # for the GitHub-token-scoping default, and persists both to config.yaml
@@ -6578,6 +6627,7 @@ _acq_configure_show_current() {
 # via ACQ_EXTRA_KITS) are layered separately and are not managed here.
 acq_configure() {
   _acq_configure_show_current
+  _acq_configure_backend_pin
 
   # Non-interactive (CI / piped / ACQ_NO_PROMPT): make NO changes — just show the
   # current config above and return. Writing here would clobber a hand-edited or

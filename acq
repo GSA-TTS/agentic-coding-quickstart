@@ -1253,7 +1253,7 @@ case "$subcommand" in
     # writes config.yaml. Resolve the backend best-effort so a first-run decline
     # can persist the detected default, but never fail on no backend.
     shift
-    acq_resolve_backend_best_effort "${explicit_backend}"
+    acq_resolve_backend_diagnostic "${explicit_backend}"
     acq_configure
     exit 0
     ;;
@@ -1267,10 +1267,15 @@ case "$subcommand" in
 
   doctor)
     shift
-    acq_resolve_backend_best_effort "${explicit_backend}"
+    acq_resolve_backend_diagnostic "${explicit_backend}"
     if [ -n "${1:-}" ]; then
       if [ -n "${2:-}" ]; then
         echo "acq: doctor: expected at most one sandbox name" >&2
+        exit 1
+      fi
+      # Inspecting a sandbox needs its backend, so a broken pin ends it here.
+      if [ -n "${ACQ_INVALID_BACKEND_PIN:-}" ]; then
+        _acq_unknown_backend_message "$ACQ_INVALID_BACKEND_PIN" "$(_acq_config_file || echo config.yaml)" >&2
         exit 1
       fi
       # Inspecting a sandbox reads its host records, so it needs usable dirs
