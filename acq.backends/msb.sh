@@ -3345,53 +3345,86 @@ _acq_msb_git_version_ge() {
 # remote for NAME's primary workspace WSPATH. On success sets
 # _ACQ_MSB_CLONE_DIR to the canonicalized scratch path (the mount source).
 # Fails (return 1) without touching the backend when WSPATH is not a git
-# repository root or a previous scratch is still present.
+# repository root or a previous scratch is still present. The steps run in
+# order and each refusal stops the create: name, wrapper settings, repository
+# root, stale scratch, preflight, scratch clone, then the config and remote
+# wiring.
 _acq_msb_clone_setup() {
-  local name="$1" ws="$2" top=""
-  # NAME lands verbatim in host paths (mkdir/git clone, and rm -rf at cleanup)
-  # under the clones root, and in the sandbox-<name> remote — and an EXPLICIT
-  # --name bypasses slugify, reaching here before msb's own name validation
-  # ever runs. Fail closed on anything that is not a single safe path
-  # component, so a traversal-shaped name can never build a path outside the
-  # clones root.
-  case "$name" in
+  local name="$1" ws="$2" ws_canon dir scratch
+  _acq_msb_clone_check_name "$name" || return 1
+  # Checked up front so its refusal is shown: the wrapper calls below hide
+  # git's stderr, and each one would refuse the same way.
+  _acq_msb_git_ws_prep "$ws" || return 1
+  ws_canon=$(_acq_msb_clone_repo_root "$ws") || return 1
+  dir="${ACQ_MSB_CLONES_DIR}/${name}"
+  scratch="${dir}/$(basename "$ws_canon")"
+  _acq_msb_clone_check_stale "$name" "$dir" || return 1
+  _acq_msb_clone_preflight "$ws_canon" || return 1
+  _acq_msb_clone_make_scratch "$ws_canon" "$dir" "$scratch" || return 1
+  _acq_msb_clone_wire "$name" "$ws_canon" "$dir" "$scratch" || return 1
+  _ACQ_MSB_CLONE_DIR=$(canonicalize_path "$scratch")
+  return 0
+}
+
+# _acq_msb_clone_check_name NAME — refuse a NAME that is not a single safe path
+# component. NAME lands verbatim in host paths (mkdir/git clone, and rm -rf at
+# cleanup) under the clones root, and in the sandbox-<name> remote — and an
+# EXPLICIT --name bypasses slugify, reaching here before msb's own name
+# validation ever runs. Failing closed means a traversal-shaped name can never
+# build a path outside the clones root.
+_acq_msb_clone_check_name() {
+  case "$1" in
     ''|.|..|*[!A-Za-z0-9._-]*)
-      echo "acq(msb): error: --clone: invalid sandbox name '$name' for the scratch clone" >&2
+      echo "acq(msb): error: --clone: invalid sandbox name '$1' for the scratch clone" >&2
       echo "acq(msb):   (allowed: letters, digits, '.', '_', '-')." >&2
       return 1
       ;;
   esac
-  # Checked up front so its refusal is shown: the wrapper calls below hide
-  # git's stderr, and each one would refuse the same way.
-  _acq_msb_git_ws_prep "$ws" || return 1
+  return 0
+}
+
+# _acq_msb_clone_repo_root WSPATH — print WSPATH canonicalized, or refuse
+# (return 1) when it is not a git repository or not the repository's root.
+_acq_msb_clone_repo_root() {
+  local ws="$1" top="" ws_canon top_canon
   if ! top=$(_acq_msb_git_ws "$ws" rev-parse --show-toplevel 2>/dev/null); then
     echo "acq(msb): error: --clone: workspace is not a git repository: $ws" >&2
     echo "acq(msb):   --clone runs the agent on a clone of the primary workspace's repo." >&2
     return 1
   fi
-  local ws_canon top_canon
   ws_canon=$(canonicalize_path "$ws")
   top_canon=$(canonicalize_path "$top")
   if [ "$ws_canon" != "$top_canon" ]; then
     echo "acq(msb): error: --clone: workspace must be the repository root: $top_canon" >&2
     return 1
   fi
-  local dir="${ACQ_MSB_CLONES_DIR}/${name}" scratch
-  scratch="${dir}/$(basename "$ws_canon")"
-  if [ -e "$dir" ]; then
-    echo "acq(msb): error: --clone: a scratch clone for '$name' already exists: $dir" >&2
-    if acq_backend_exists "$name"; then
-      # The scratch is the LIVE mount source of an existing sandbox — advising
-      # manual deletion here would destroy its workspace and skip the rm-time
-      # unfetched-commit warning.
-      echo "acq(msb):   sandbox '$name' still exists and mounts it. Remove the sandbox with" >&2
-      echo "acq(msb):   'acq rm $name' (it warns about unfetched work and cleans up), then re-run." >&2
-    else
-      echo "acq(msb):   it may hold unfetched work from an earlier sandbox. Recover it" >&2
-      echo "acq(msb):   ('git fetch sandbox-${name}') and remove the directory, then re-run." >&2
-    fi
-    return 1
+  printf '%s\n' "$ws_canon"
+}
+
+# _acq_msb_clone_check_stale NAME DIR — refuse when NAME's scratch dir DIR is
+# still present, with advice that matches whether the sandbox still exists.
+_acq_msb_clone_check_stale() {
+  local name="$1" dir="$2"
+  [ -e "$dir" ] || return 0
+  echo "acq(msb): error: --clone: a scratch clone for '$name' already exists: $dir" >&2
+  if acq_backend_exists "$name"; then
+    # The scratch is the LIVE mount source of an existing sandbox — advising
+    # manual deletion here would destroy its workspace and skip the rm-time
+    # unfetched-commit warning.
+    echo "acq(msb):   sandbox '$name' still exists and mounts it. Remove the sandbox with" >&2
+    echo "acq(msb):   'acq rm $name' (it warns about unfetched work and cleans up), then re-run." >&2
+  else
+    echo "acq(msb):   it may hold unfetched work from an earlier sandbox. Recover it" >&2
+    echo "acq(msb):   ('git fetch sandbox-${name}') and remove the directory, then re-run." >&2
   fi
+  return 1
+}
+
+# _acq_msb_clone_preflight WS — the checks on the canonical workspace WS that
+# run before anything is created: refuse an unusual layout, borrowed objects or
+# a partial clone; note Git LFS and uncommitted changes.
+_acq_msb_clone_preflight() {
+  local ws_canon="$1"
   _acq_msb_clone_check_layout "$ws_canon" || return 1
   # An alternates file makes the object store borrow from other repositories
   # on the host; a scratch clone must carry only this repository's objects.
@@ -3413,11 +3446,20 @@ _acq_msb_clone_setup() {
       echo "acq(msb):   even when they are not." >&2
     fi
   fi
+  return 0
+}
+
+# _acq_msb_clone_make_scratch WS DIR SCRATCH — create the private scratch dir
+# DIR, record WS as its origin, and clone WS into SCRATCH. On failure removes
+# DIR and returns 1.
+_acq_msb_clone_make_scratch() {
+  local ws_canon="$1" dir="$2" scratch="$3"
   # Private (0700): the scratch .git/config carries the source origin URL,
   # which may embed a credential, at a path the user never sees. Check the
-  # status explicitly: this function runs as an `if !` condition, which
-  # suppresses errexit for its whole body, so a bare `&&` chain would let a
-  # failed chmod fall through and clone that config in at the ambient umask.
+  # status explicitly: this runs inside an `if !` condition (the create calls
+  # _acq_msb_clone_setup that way), which suppresses errexit for the whole
+  # call chain, so a bare `&&` chain would let a failed chmod fall through and
+  # clone that config in at the ambient umask.
   if ! (umask 077 && mkdir -p "$dir") || ! chmod 700 "$dir"; then
     echo "acq(msb): error: --clone: could not create a private scratch dir: $dir" >&2
     echo "acq(msb):   Refusing to clone a config that may embed a credential into a" >&2
@@ -3435,6 +3477,14 @@ _acq_msb_clone_setup() {
     rm -rf "$dir"
     return 1
   fi
+  return 0
+}
+
+# _acq_msb_clone_wire NAME WS DIR SCRATCH — carry the identity and origin
+# config into SCRATCH (on failure removes DIR and returns 1), then register
+# the sandbox-NAME fetch-back remote in WS and tell the user how to recover.
+_acq_msb_clone_wire() {
+  local name="$1" ws_canon="$2" dir="$3" scratch="$4"
   if ! _acq_msb_clone_copy_config "$ws_canon" "$scratch"; then
     rm -rf "$dir"
     return 1
@@ -3454,7 +3504,6 @@ _acq_msb_clone_setup() {
   # reads the guest-writable scratch").
   echo "acq(msb): agent runs on a disposable clone; the real checkout is untouched." >&2
   echo "acq(msb):   Recover agent branches with: git fetch sandbox-${name}" >&2
-  _ACQ_MSB_CLONE_DIR=$(canonicalize_path "$scratch")
   return 0
 }
 
