@@ -214,8 +214,9 @@ every normalisation transform (`abspath`/`tmpdir`/`crlf`/`timing`/`order`/`json`
 `.github/workflows/python-quality.yml` runs ruff, mypy and bandit on `src/`
 and fails when pytest's in-process branch coverage drops below the
 `fail_under` floor in `pyproject.toml`. The tools are CI-only, pinned with
-hashes in `requirements-quality.txt`. To run the gates locally, use a
-throwaway virtual environment and run the commands from `py-acq/`:
+hashes in `requirements-quality.txt` (policy: ADR-0049m). To run the gates
+locally, use a throwaway virtual environment and run the commands from
+`py-acq/`:
 
 ```sh
 python -m pip install --require-hashes --no-deps -r requirements-quality.txt

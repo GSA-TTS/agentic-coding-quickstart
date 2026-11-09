@@ -4,7 +4,8 @@
 # Configuration lives in py-acq/pyproject.toml ([tool.ruff], [tool.mypy],
 # [tool.bandit], [tool.coverage.*]). The tools are CI-only and pinned with hashes,
 # transitive dependencies included, in py-acq/requirements-quality.txt; acq
-# itself still installs nothing at runtime (ADR-0042m).
+# itself still installs nothing at runtime (ADR-0042m). ADR-0049m records the
+# tool choice, the pinning and cooldown policy, and how the pins are updated.
 #
 # The gates start at zero findings: the existing findings were fixed when the
 # gates were added, so there is no baseline file and any new finding fails.

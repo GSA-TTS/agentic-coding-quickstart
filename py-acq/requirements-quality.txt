@@ -1,6 +1,6 @@
 # CI-only quality tools for py-acq (.github/workflows/python-quality.yml): ruff,
 # mypy, bandit, and pytest-cov for the coverage report. acq itself has no
-# runtime dependencies (ADR-0042m); nothing here ships with it.
+# runtime dependencies (ADR-0042m); nothing here ships with it. Policy: ADR-0049m.
 #
 # Exact pins with hashes, transitive dependencies included, so CI installs with
 #   python -m pip install --require-hashes --no-deps -r requirements-quality.txt
