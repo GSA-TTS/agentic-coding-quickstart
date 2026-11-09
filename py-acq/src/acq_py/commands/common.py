@@ -17,7 +17,6 @@ import sys
 from .. import backends, envelope, errors, kits, msb, sbx, security, state
 from .. import secretstore
 
-
 # Both adapters and the acq secret store raise an error carrying the same
 # (code, message, remediation) contract; catch this tuple uniformly at the seam.
 _ADAPTER_ERRORS = (msb.MsbError, sbx.SbxError, secretstore.SecretStoreError)
@@ -392,7 +391,7 @@ def _mount_workspace(backend: str, workspace: str) -> str:
     return REALPATH(workspace) if backend == "msb" else workspace
 
 
-def _launch_token(backend: str, name: str, agent: str) -> str:
+def _launch_token(backend: str, name: str, agent: str | None) -> str | None:
     """Resolve the launch command: a recorded kit entrypoint wins over the agent name.
 
     A future kit may declare an entrypoint that differs from the agent token it

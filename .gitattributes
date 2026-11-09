@@ -1,5 +1,40 @@
 *.cmd text eol=lf
 *.ps1 text eol=lf
-# Shell scripts run by release CI on windows-2022 (core.autocrlf=true there) must
-# keep LF endings, or bash fails on the CRs.
+
+# Shell sources keep LF endings in every checkout. Git for Windows defaults to
+# core.autocrlf=true, which would give them CRLF endings, and bash under Git Bash
+# fails on the CRs (`set -euo pipefail\r` is an invalid option). That breaks
+# the default acq path in a plain Windows clone and any Bash step on a Windows CI
+# runner that checks out with autocrlf=true (as the release job does).
+# py-acq/tests/test_line_endings.py fails when a tracked shell script is not
+# covered here.
+*.sh text eol=lf
+*.bash text eol=lf
+*.bats text eol=lf
+acq text eol=lf
+acq-python text eol=lf
+# Extensionless shell scripts under scripts/ (the others there are Python).
+scripts/bats-shard text eol=lf
+scripts/diagnose-host-egress-diff text eol=lf
+scripts/diagnose-tls-intercept text eol=lf
+scripts/fix-exec-bits text eol=lf
+scripts/gen-install-assets text eol=lf
+scripts/install-provider-input-wheelhouse text eol=lf
+scripts/probe-macos-keychain-stdin text eol=lf
+scripts/probe-msb-posthoc-ports text eol=lf
+scripts/qualify-msb-ro-mount text eol=lf
+scripts/rotate-apikey text eol=lf
+scripts/run-shellcheck text eol=lf
+scripts/run-vectors text eol=lf
+scripts/setup-provider-input-validator text eol=lf
 scripts/stage-windows-runtime text eol=lf
+scripts/test-acq-bash32 text eol=lf
+scripts/test-acq-bats text eol=lf
+scripts/verify-backends text eol=lf
+scripts/verify-git-https-secret-msb text eol=lf
+scripts/verify-image-override text eol=lf
+scripts/verify-issue-320 text eol=lf
+scripts/verify-msb-pin text eol=lf
+scripts/verify-net-default-egress text eol=lf
+scripts/verify-ports-live text eol=lf
+scripts/verify-sbx-startup-barrier text eol=lf

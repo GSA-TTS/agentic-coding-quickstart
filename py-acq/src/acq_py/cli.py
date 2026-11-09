@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from typing import NoReturn
 
 # ``doctor`` and ``version_info`` are deliberately NOT imported here: they are
 # off the Tier-3 surface (ADR-0044m), and importing them at startup would make a
@@ -44,9 +45,8 @@ import sys
 # ``msb`` is imported for its module object alone: the Tier-2 tests patch
 # ``cli.msb.<fn>``, and the adapter is reached through ``commands.common`` at
 # runtime. Keeping it here preserves those addresses across the command split.
-from . import backends, config, envelope, errors, migration, msb, state, userdirs
+from . import backends, config, envelope, errors, migration, msb, state, userdirs  # noqa: F401
 from .commands import common, creds, kit, lifecycle, secret, session
-
 
 # Every subcommand acq owns. An argv token that is not one of these (and is not a
 # flag) is treated as an unknown verb and forwarded verbatim to the active
@@ -95,7 +95,7 @@ class UsageError(Exception):
 
 
 class _Parser(argparse.ArgumentParser):
-    def error(self, message: str) -> None:
+    def error(self, message: str) -> NoReturn:
         # argparse's default prints usage + exits; we raise so main() can emit a
         # consistent failure envelope/exit code instead.
         raise UsageError(message)
@@ -471,7 +471,7 @@ def main(argv: list[str] | None = None) -> int:
     head = args
     tail: list[str] = []
     for i, token in enumerate(args):
-        if token == "--":
+        if token == "--":  # nosec B105 # argv separator
             head = args[:i]
             tail = args[i + 1 :]
             break
@@ -579,6 +579,7 @@ def _dispatch(parser: _Parser, parsed, emit_json: bool, backend_override: str | 
         _backend, exit_code = common._resolve_backend_for_lifecycle(backend_override, emit_json, parsed.command)
         if exit_code is not None:
             return exit_code
+        assert _backend is not None  # nosec B101 # resolver contract; narrows the type for mypy
         if parsed.command == "create":
             return lifecycle.run_create(parsed, emit_json, _backend)
         if parsed.command == "run":
@@ -618,6 +619,7 @@ def _dispatch(parser: _Parser, parsed, emit_json: bool, backend_override: str | 
         )
         if exit_code is not None:
             return exit_code
+        assert _backend is not None  # nosec B101 # resolver contract; narrows the type for mypy
         if subcmd == "set":
             return secret.run_secret_set(parsed, emit_json, _backend)
         if subcmd == "rm":
@@ -668,6 +670,7 @@ def _dispatch(parser: _Parser, parsed, emit_json: bool, backend_override: str | 
         )
         if exit_code is not None:
             return exit_code
+        assert _backend is not None  # nosec B101 # resolver contract; narrows the type for mypy
         return creds.run_provider_credential_set(parsed, emit_json, _backend)
 
     if parsed.command == "github-scope":
@@ -676,6 +679,7 @@ def _dispatch(parser: _Parser, parsed, emit_json: bool, backend_override: str | 
         )
         if exit_code is not None:
             return exit_code
+        assert _backend is not None  # nosec B101 # resolver contract; narrows the type for mypy
         return creds.run_github_scope(parsed, emit_json, _backend)
 
     if parsed.command == "usai-rotate-api-key":
@@ -684,6 +688,7 @@ def _dispatch(parser: _Parser, parsed, emit_json: bool, backend_override: str | 
         )
         if exit_code is not None:
             return exit_code
+        assert _backend is not None  # nosec B101 # resolver contract; narrows the type for mypy
         return creds.run_usai_rotate_api_key(emit_json, _backend)
 
     if parsed.command == "help" or parsed.command is None:

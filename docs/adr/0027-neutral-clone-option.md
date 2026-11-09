@@ -119,13 +119,25 @@ A git clone carries **committed state only**:
 Unlike the two divergences above, two pieces of `.git/config` state are carried
 on purpose, written repo-locally into the scratch:
 
-- The source checkout's **effective git identity** (`user.name`/`user.email`),
-  resolved on the host as the user's own commits resolve it. A clone drops
-  `.git/config`, and per-forge identities commonly live only there or in a
-  gitdir-scoped include. Without the copy, the first in-sandbox commit fails
-  with "Author identity unknown"; the guest's global tier cannot express a
-  per-repo value. A failure to read or write it only warns: a missing identity
-  already fails loudly at the first commit.
+- The source checkout's **git identity** (`user.name`/`user.email`). A clone
+  drops `.git/config`, and per-forge identities commonly live only there or in
+  a gitdir-scoped `includeIf` in the global config. Without the copy, the first
+  in-sandbox commit fails with "Author identity unknown"; the guest's global
+  tier cannot express a per-repo value. The scopes are read in git's order,
+  system, global, the repository's own `.git/config`, its worktree config
+  (`.git/config.worktree`, only when `extensions.worktreeConfig` is true), then
+  the command scope (values the user exports through `GIT_CONFIG_COUNT` or
+  `GIT_CONFIG_PARAMETERS`), and the last value wins, as for the user's own
+  commits. The system and global files are read with includes (they are the
+  user's, and the guest never writes them); the repository's config files are
+  read without includes, because in a non-clone run the guest can write them
+  and an include there could point the host at any file. The system scope is
+  skipped when `GIT_CONFIG_NOSYSTEM` is true by git's own boolean rules
+  (`true`/`yes`/`on`, or a non-zero integer, so `00` is false), as git does.
+  Known gap: the command scope is picked
+  out of `git config --show-scope`, which needs git 2.26, so on an older git it
+  is not read. A failure to read or write the identity only warns: a missing
+  identity already fails loudly at the first commit.
 - The source checkout's **origin URL** (`remote.origin.url`, plus
   `remote.origin.pushurl` when set). `git clone <host path>` points the
   scratch's `origin` at the host checkout path, and the scratch is mounted at
@@ -156,6 +168,83 @@ on purpose, written repo-locally into the scratch:
 sbx carries both incidentally by copying `.git` wholesale. Propagating only
 these values is the minimized form of that, without the credential helpers,
 hooks, and URL rewrites that ride along with a wholesale copy.
+
+### Host-side git and the layouts it refuses (amended 2026-11-09)
+
+In a non-clone run the workspace is mounted read-write, so its repository
+config, attributes and hooks are not trusted input when acq runs git on the
+host against it (status, clone, `remote add`/`remove`, config reads, the
+rm-time `cat-file`). Every such call goes through one wrapper that runs git
+with `--no-pager` and disables fsmonitor, hooks, the untracked cache, every
+transport (so no lazy fetch from a promisor remote) and submodule recursion,
+and blanks every filter driver the config defines. Hooks are disabled by
+pointing `core.hooksPath` at a directory under acq's state dir that nothing
+creates, rather than `/dev/null`, which a native Windows git (Git Bash) does
+not treat as a null device. The filter settings travel as `GIT_CONFIG_COUNT`
+entries (git 2.31+) because a `-c name=value` option splits at the first `=`
+and cannot name a driver whose name contains one; on an older git such a
+driver is refused rather than left live.
+
+Before cloning, the create refuses a workspace that is not an ordinary
+repository, with a message naming `git worktree` and submodule checkouts:
+
+- `.git` must be a real directory: not a symlink, and not a gitfile (the shape
+  of a linked worktree or a submodule checkout).
+- It must have no `commondir` file, and nothing inside it may be a symlink
+  (for example `objects/pack`, `refs/heads` or `packed-refs` pointing into
+  another repository). `.git/hooks` is exempt, since hooks never run.
+- `git rev-parse --absolute-git-dir` and `--git-common-dir`, canonicalised,
+  must both equal `<canonical workspace>/.git` (this also catches a
+  `GIT_DIR`/`GIT_COMMON_DIR` in the caller's environment).
+
+Together these checks guarantee exactly this, at the time they run: git's
+directory and common directory are `<workspace>/.git`, and every directory
+below it except `.git/hooks` could be listed and holds no symlink. The scan
+fails closed on any error, so a directory it cannot list (an execute-only
+`.git`, say, where git can still open files by name) refuses the create
+instead of hiding a link. So no path git resolves below `.git`, hooks aside,
+is redirected out of it, and the alternates check (also refused: an
+`objects/info/alternates` file) and the clone look at what git actually
+uses. A file there may still be a hard link, which shares content with
+another directory entry but cannot redirect a path. The checks say nothing
+about later changes; see the residual risks below. The hooks path must not
+exist either: if it does, as a file, directory or symlink, git commands fail
+closed rather than running whatever it holds as hooks; the check runs before
+every wrapped git call, at create and at rm. A
+**partial clone** (`extensions.partialClone`, or any `remote.*.promisor` that
+is true) is refused up front too: objects left on the server are missing
+locally and the wrapper never fetches them, so the clone would otherwise fail
+part-way through.
+
+**Git LFS** is not refused, but filter drivers are disabled, so LFS-tracked
+files land in the scratch as pointer files. When the workspace uses LFS
+(`filter=lfs` in its `.gitattributes` or `.git/info/attributes`, a `.git/lfs`
+directory, or `lfs.*` keys in its own config), create prints a notice
+suggesting `git lfs pull` inside the sandbox if git-lfs is available there,
+and the uncommitted-changes note adds that LFS-tracked files may appear
+modified (the host-side status runs with filters disabled too).
+
+The clone uses `--no-local`, so only objects reachable from refs are copied;
+on a large repository that costs a full `pack-objects` pass at create, where a
+local clone would copy the object files directly.
+
+Residual risks, accepted:
+
+- **Check-then-clone race.** The layout checks and the clone are separate
+  steps. A normal-mode sandbox that mounts the same checkout read-write and
+  runs concurrently can change `.git` in between (add a symlink, an alternates
+  file, a promisor remote), and the clone then reads what it finds. Closing
+  this would need the clone to run against a snapshot acq controls; it is
+  accepted because it needs a second, already-running sandbox on the same
+  checkout racing a create the operator starts.
+- **Hooks path.** Hooks stay disabled only while the hooks path under acq's
+  state dir does not exist. Every wrapped git call checks this first and fails
+  closed, but the check and the git command it guards are not atomic: whoever
+  creates the path in between would have its contents run as hooks on the
+  host. acq never mounts the state dir itself (a scratch clone is mounted from
+  a subdirectory below it), so this needs a host process already running as
+  the user, or a guest whose workspace contains the state dir, for example a
+  `$HOME` workspace, since the default state dir is under `~/.local/state`.
 
 ### Trade-off stated openly
 

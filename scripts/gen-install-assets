@@ -29,10 +29,16 @@ command -v python3 >/dev/null 2>&1 || die "python3 is required"
 # provenance manifest plus every platform archive. The manifest is the durable
 # home of the asset set; this script derives its file list from it so the two
 # cannot drift.
+#
+# The list is written as bytes with LF separators. Windows Python's text-mode
+# stdout would end every line with CRLF, and $(...) strips only the trailing
+# newline, so under Git Bash every name but the last kept a stray CR and failed
+# the completeness check below.
 assets="$(python3 -c '
-import json
+import json, sys
 a = json.load(open("installer/assets.json", encoding="utf-8"))
-print("\n".join([a["provenance"]] + sorted(p["archive"] for p in a["platforms"].values())))
+names = [a["provenance"]] + sorted(p["archive"] for p in a["platforms"].values())
+sys.stdout.buffer.write(("\n".join(names) + "\n").encode("ascii"))
 ')"
 
 [ -n "$assets" ] || die "no assets enumerated in installer/assets.json"
@@ -44,8 +50,30 @@ for name in install.sh install.ps1 $assets; do
 done
 
 # Word-splitting is intentional: $assets is a newline-separated list of safe
-# (artifact) names read from the manifest, never user input.
+# (artifact) names read from the manifest, never user input. The assignment
+# fails the script (set -e) if sha256sum fails.
 # shellcheck disable=SC2086
-( cd "$dist" && sha256sum install.sh install.ps1 $assets ) > "$dist/SHA256SUMS"
+sums="$(cd "$dist" && sha256sum install.sh install.ps1 $assets)"
+
+# Write the text form, "HASH  name" (two spaces), on every platform. GNU
+# sha256sum marks binary-mode reads with "HASH *name", and Git for Windows'
+# sha256sum reads in binary mode by default. The installers accept both forms,
+# but release assets should be byte-identical wherever they are generated.
+printf '%s\n' "$sums" | tr -d '\r' | sed 's/^\([0-9a-f]\{64\}\) [ *]/\1  /' > "$dist/SHA256SUMS"
+
+# Fail closed on the result: exactly one "HASH  name" line per enumerated file.
+# grep -v exits 1 when every line matches, 0 when one does not, and 2 on an
+# error, which must not pass as "all lines match".
+rc=0
+grep -v '^[0-9a-f]\{64\}  [^ *]' "$dist/SHA256SUMS" >/dev/null || rc=$?
+case "$rc" in
+  1) ;;
+  0) die "unexpected line format in $dist/SHA256SUMS" ;;
+  *) die "could not check $dist/SHA256SUMS (grep exit $rc)" ;;
+esac
+# shellcheck disable=SC2086
+set -- install.sh install.ps1 $assets
+lines=$(wc -l < "$dist/SHA256SUMS" | tr -d " ")
+[ "$lines" -eq "$#" ] || die "$dist/SHA256SUMS has $lines lines, expected $#"
 
 printf 'wrote %s/SHA256SUMS\n' "$dist"

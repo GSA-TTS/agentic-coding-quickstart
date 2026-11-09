@@ -379,7 +379,7 @@ def _parse_import(parsed) -> tuple[_ImportArgs, str | None]:
         if parsed.service not in importable:
             return opts, f"secret import: unknown service '{parsed.service}' for --service"
         opts.service = parsed.service
-    for token in parsed.args:
+    for token in parsed.tokens:
         if token in ("--all", "--force", "-f", "--dry-run", "-g", "--global"):
             opts.mode = {"--all": "all", "--force": "force", "-f": "force"}.get(token, opts.mode)
             opts.dry_run = opts.dry_run or token == "--dry-run"
@@ -400,7 +400,7 @@ def _parse_import(parsed) -> tuple[_ImportArgs, str | None]:
         elif opts.sandbox is None:
             opts.sandbox = token
         else:
-            return opts, f"secret import: unexpected extra argument '{token}'"
+            return opts, f"secret import: unexpected extra tokenument '{token}'"
     if opts.global_flag and opts.sandbox is not None:
         # Bash lets whichever comes last win; refuse the ambiguity instead.
         return opts, "secret import: give either -g or a SANDBOX, not both"
