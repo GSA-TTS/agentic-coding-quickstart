@@ -604,9 +604,9 @@ STUB
 @test "kit-source rm keeps the control plane's owner prefix even when the registry omits it" {
   _plant_sbx_allowlist_stub '["docker.io/","github.com/GSA-TTS/"]'
   mkdir -p "$XDG_CONFIG_HOME/acq"
-  printf 'kit_sources: github.com/gsa-tts/team-kits@aaaa\n' > "$XDG_CONFIG_HOME/acq/config.yaml"
+  printf 'kit_sources: github.com/GSA-TTS/team-kits@aaaa\n' > "$XDG_CONFIG_HOME/acq/config.yaml"
 
-  run env ACQ_BACKEND=sbx "$ACQ" kit-source rm github.com/gsa-tts/team-kits
+  run env ACQ_BACKEND=sbx "$ACQ" kit-source rm github.com/GSA-TTS/team-kits
   assert_success
   grep -Fq 'github.com/GSA-TTS/' "$STUBDIR/allowed"
   refute grep -Fq 'settings set' "$CALLS"
