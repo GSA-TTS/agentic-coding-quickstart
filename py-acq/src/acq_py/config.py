@@ -42,7 +42,6 @@ vector runner reads environment values line by line.
 from __future__ import annotations
 
 import errno
-import glob
 import os
 import re
 import stat
@@ -81,9 +80,15 @@ _NEW_FILE_MODE = 0o600
 # home-manager or nix provide) rather than a broken setup.
 _READ_ONLY_ERRNOS = frozenset({errno.EACCES, errno.EROFS, errno.EPERM})
 
-# Temp files from an interrupted write (``config.yaml.tmp.*``, and Bash's
-# ``config.yaml.tmp.<pid>``) older than this are removed by the migration pre-step.
+# Temp files from an interrupted write older than this are removed by the
+# migration pre-step. Only the exact names acq and Bash create are touched, since
+# the directory may be a user's dotfiles: ``<name>.tmp.`` plus mkstemp's random
+# part (eight characters from ``[a-z0-9_]`` in CPython's tempfile; a test pins it)
+# for ``_replace_bytes``, and ``config.yaml.tmp.<pid>`` for Bash's writer, which
+# only ever writes in the config directory.
 _STALE_TEMP_SECONDS = 300
+_TEMP_INFIX = ".tmp."
+_MKSTEMP_PART = "[a-z0-9_]{8}"
 
 
 class ConfigSchemaError(Exception):
@@ -259,7 +264,7 @@ def _replace_bytes(dest: Path, data: bytes, mode: int) -> None:
     and is created owner-only before it is given ``mode``. It is removed if
     anything fails before the rename.
     """
-    fd, tmp_name = tempfile.mkstemp(prefix=dest.name + ".tmp.", dir=dest.parent)
+    fd, tmp_name = tempfile.mkstemp(prefix=dest.name + _TEMP_INFIX, dir=dest.parent)
     tmp = Path(tmp_name)
     try:
         with os.fdopen(fd, "wb") as fh:
@@ -461,26 +466,44 @@ def _remove_leftover_backup(backup: Path) -> None:
         ) from exc
 
 
+def _temp_name_pattern(name: str, bash: bool) -> re.Pattern[str]:
+    """The exact temp-file names written for ``name`` (plus Bash's when ``bash``)."""
+    part = f"(?:{_MKSTEMP_PART}|[0-9]+)" if bash else _MKSTEMP_PART
+    return re.compile(re.escape(name + _TEMP_INFIX) + part)
+
+
 def _remove_stale_temps(path: Path) -> None:
-    """Remove temp files an interrupted write left beside the config or its target."""
-    try:
-        target = _write_target(path)
-    except OSError:
-        target = path
+    """Remove stale temp files an interrupted write left behind.
+
+    Looks only where acq writes: the config directory (the config's own temp
+    files, Bash's ``config.yaml.tmp.<pid>``, and the backup's temp files) and,
+    for a symlinked config, the target's directory (the target's temp files
+    only). A name must match exactly, and only an old regular file is removed:
+    never a symlink, a directory, or any other user file.
+    """
+    patterns = [
+        (path.parent, _temp_name_pattern(path.name, bash=True)),
+        (path.parent, _temp_name_pattern(path.name + ".bak.0", bash=False)),
+    ]
+    target = _write_target(path)
+    if target != path:
+        patterns.append((target.parent, _temp_name_pattern(target.name, bash=False)))
     cutoff = time.time() - _STALE_TEMP_SECONDS
-    for directory, name in {(path.parent, path.name), (target.parent, target.name)}:
-        for pattern in (f"{glob.escape(name)}.tmp.*", f"{glob.escape(name)}.bak.0.tmp.*"):
+    for directory, pattern in patterns:
+        try:
+            names = os.listdir(directory)
+        except OSError:
+            continue
+        for entry in names:
+            if not pattern.fullmatch(entry):
+                continue
+            candidate = directory / entry
             try:
-                candidates = list(directory.glob(pattern))
+                info = os.lstat(candidate)
             except OSError:
                 continue
-            for candidate in candidates:
-                try:
-                    info = os.lstat(candidate)
-                except OSError:
-                    continue
-                if stat.S_ISREG(info.st_mode) and info.st_mtime < cutoff:
-                    _unlink_quietly(candidate)
+            if stat.S_ISREG(info.st_mode) and info.st_mtime < cutoff:
+                _unlink_quietly(candidate)
 
 
 def _unlink_quietly(path: Path) -> None:

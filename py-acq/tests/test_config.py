@@ -671,19 +671,78 @@ def test_a_directory_in_place_of_the_backup_is_refused_by_name(content):
     assert path.read_bytes() == content
 
 
+def _age(path: Path) -> None:
+    old = time.time() - 3600
+    os.utime(path, (old, old), follow_symlinks=False)
+
+
 def test_stale_temp_files_are_removed_and_fresh_ones_kept():
     path = _write_config(_MIGRATED)
-    stale = [path.with_name("config.yaml.tmp.abc123"), path.with_name("config.yaml.bak.0.tmp.def456"),
+    stale = [path.with_name("config.yaml.tmp.abc_1234"), path.with_name("config.yaml.bak.0.tmp.def45678"),
              path.with_name("config.yaml.tmp.4242")]
-    fresh = path.with_name("config.yaml.tmp.xyz789")
-    old = time.time() - 3600
+    fresh = path.with_name("config.yaml.tmp.xyz78901")
     for leftover in [*stale, fresh]:
         leftover.write_bytes(b"partial")
     for leftover in stale:
-        os.utime(leftover, (old, old))
+        _age(leftover)
     config.migrate_config()
     assert not any(p.exists() for p in stale)
     assert fresh.exists()
+
+
+def test_replace_bytes_temp_names_match_the_cleanup_pattern(monkeypatch):
+    # Pins the mkstemp name shape the cleanup relies on (prefix + 8 characters).
+    seen: list[str] = []
+    real_replace = os.replace
+
+    def record(src, dst, *args, **kwargs):
+        seen.append(Path(src).name)
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(config.os, "replace", record)
+    config.write_field("backend", "sbx")
+    assert seen and all(config._temp_name_pattern("config.yaml", bash=False).fullmatch(n) for n in seen), seen
+
+
+@POSIX_ONLY
+def test_cleanup_leaves_user_files_symlinks_and_directories_alone(tmp_path):
+    dotfiles = tmp_path / "dotfiles"
+    dotfiles.mkdir()
+    target = dotfiles / "acq.yaml"
+    target.write_bytes(_MIGRATED)
+    link = config.config_path()
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(target)
+
+    survivors = []
+    for directory, base in ((link.parent, "config.yaml"), (dotfiles, "acq.yaml")):
+        user_file = directory / f"{base}.tmp.old"
+        user_file.write_bytes(b"mine")
+        long_name = directory / f"{base}.tmp.abcd12345"
+        long_name.write_bytes(b"mine")
+        upper = directory / f"{base}.tmp.ABCD1234"
+        upper.write_bytes(b"mine")
+        symlink = directory / f"{base}.tmp.abcd1234"
+        symlink.symlink_to(tmp_path / "elsewhere")
+        a_dir = directory / f"{base}.tmp.efgh5678"
+        a_dir.mkdir()
+        survivors += [user_file, long_name, upper, symlink, a_dir]
+    # Next to the target only acq's own temp files are removed: no Bash pid
+    # files and no backup temp files, which are only ever written in the config
+    # directory.
+    bash_like = dotfiles / "acq.yaml.tmp.4242"
+    backup_like = dotfiles / "acq.yaml.bak.0.tmp.abcd1234"
+    ours = dotfiles / "acq.yaml.tmp.zz_99999"
+    for leftover in (bash_like, backup_like, ours):
+        leftover.write_bytes(b"partial")
+    survivors += [bash_like, backup_like]
+    for leftover in [*survivors, ours]:
+        _age(leftover)
+
+    assert config.migrate_config() == "none"
+    missing = [p.name for p in survivors if not os.path.lexists(p)]
+    assert not missing, f"cleanup removed {missing}"
+    assert not ours.exists()
 
 
 @POSIX_ONLY
