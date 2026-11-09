@@ -1590,6 +1590,36 @@ msyspython -I - $real"
   grep -q "^winpython -I - check $STUBDIR/cached/a\$" "$STUBDIR/py.log"
 }
 
+@test "interpreter cache inherited from the environment is ignored" {
+  # An exported cache must not choose the interpreter: sourcing acq drops it, so
+  # the probe runs, finds no usable Python here, and safe_dir fails closed
+  # without running the planted command.
+  local bin planted="$STUBDIR/planted-python" script="$STUBDIR/inherited-cache.sh"
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=storestub py=storestub
+  mkdir -p "$STUBDIR/inherited/a"
+  cat > "$planted" <<SH
+#!/bin/sh
+printf '%s\n' "planted \$*" >> "$STUBDIR/planted.log"
+exit 0
+SH
+  chmod +x "$planted"
+  cat > "$script" <<SH
+#!/usr/bin/env bash
+ACQ_SCRIPT_DIR="$REPO_ROOT"; ACQ_SOURCE_ONLY=1
+. "$REPO_ROOT/acq"
+set +e
+OSTYPE=msys
+PATH="$bin:\$PATH"
+_acq_provider_input_safe_dir "$STUBDIR/inherited/a"
+SH
+  chmod +x "$script"
+  _ACQ_PROVIDER_INPUT_PATH_PY="$planted" _ACQ_PROVIDER_INPUT_PATH_PY_KIND=nt run "$script"
+  assert_failure
+  assert_output --partial 'need Python 3'
+  [ ! -e "$STUBDIR/planted.log" ]
+}
+
 @test "canonical_path passes the path through unchanged for native Windows Python" {
   local bin got
   bin=$(_win_bin)

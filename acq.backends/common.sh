@@ -4438,6 +4438,10 @@ acq_provider_input_discard() {
 # resolves it in the transaction shell before any command substitution, so the
 # helpers inside one transaction share a single probe. No usable interpreter
 # fails closed.
+# The cache is only trusted when this process set it. Neither name is a public
+# setting, so values inherited from the environment are dropped at source time;
+# otherwise an exported value could pick the interpreter.
+unset _ACQ_PROVIDER_INPUT_PATH_PY _ACQ_PROVIDER_INPUT_PATH_PY_KIND
 _acq_provider_input_path_python() {
   local cand kind probe path
   case "${OSTYPE:-}" in
