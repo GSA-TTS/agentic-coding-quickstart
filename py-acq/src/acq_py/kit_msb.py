@@ -36,7 +36,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import errors, kitspec, lock, msb, security, state
+from . import errors, kitspec, legacy_bash, lock, msb, security, state
 
 # Module-local seam for the host OS class (as ``msb.WINDOWS``).
 WINDOWS = os.name == "nt"
@@ -147,7 +147,7 @@ def select(agent: str, cli_kits: list[str], *, image_is_default: bool, extras: l
 
 
 def _cli_kits_path(name: str, backend: str = "msb") -> Path:
-    return lock.bash_provenance_dir() / backend / f"{lock.bash_sandbox_key(name)}.kits"
+    return legacy_bash.cli_kits_file(backend, name)
 
 
 def cli_kits_write(name: str, kit_set: Iterable[Kit], backend: str = "msb") -> None:
@@ -167,21 +167,7 @@ def cli_kits_read(name: str, backend: str = "msb") -> tuple[list[str], list[str]
     A relative local ref (left by an older Bash acq) would resolve against the
     current directory, so it is skipped with a warning, as Bash does.
     """
-    try:
-        text = _cli_kits_path(name, backend).read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return [], []
-    cli: list[str] = []
-    extras: list[str] = []
-    for line in text.splitlines():
-        key, _, value = line.partition("=")
-        if key not in ("kit", "extra") or not value:
-            continue
-        if not (value.startswith(("git+http", "/")) or re.match(r"[A-Za-z]:[/\\]", value)):
-            _warn(f"ignoring recorded relative kit path '{value}' for {name}")
-            continue
-        (cli if key == "kit" else extras).append(value)
-    return cli, extras
+    return legacy_bash.read_cli_kits(backend, name, _warn) or ([], [])
 
 
 def cli_kits_remove(name: str, backend: str = "msb") -> None:

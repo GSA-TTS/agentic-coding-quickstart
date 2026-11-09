@@ -28,6 +28,10 @@ through its own CLI:
 * ``{"binding_record": PROVIDER, "text": TEXT}`` writes TEXT as PROVIDER's
   provider-credential binding record, at the path acq's state layout gives it
   (``<state root>/provider-credentials/<provider>.<first 8 hex of sha256>.json``).
+* ``{"bash_state": PATH, "text": TEXT}`` writes TEXT as a file the Bash acq
+  keeps, at PATH relative to its provenance root (``$ACQ_PROVENANCE_DIR``, else
+  ``<XDG state home>/acq/provenance``), for example
+  ``msb/<name>.<cksum of name>.env``. PATH must be relative and free of ``..``.
 * ``{"lock_bindings": true}`` makes every binding record undeletable: each
   record is made read-only (Windows refuses to delete a read-only file) and the
   directory loses write permission (POSIX refuses to unlink in it). Permissions
@@ -68,6 +72,24 @@ def _binding_path(provider: str) -> Path:
     return _binding_dir() / f"{safe}.{digest}.json"
 
 
+def _bash_provenance_root() -> Path:
+    override = os.environ.get("ACQ_PROVENANCE_DIR")
+    if override:
+        return Path(override)
+    xdg = os.environ.get("XDG_STATE_HOME")
+    base = Path(xdg) if xdg and os.path.isabs(xdg) else Path.home() / ".local" / "state"
+    return base / "acq" / "provenance"
+
+
+def _bash_state(rel: str, text: str) -> None:
+    parts = rel.split("/")
+    if not rel or rel.startswith("/") or ".." in parts or "\\" in rel or ":" in rel:
+        raise ValueError(f"bash_state path must be relative: {rel!r}")
+    path = _bash_provenance_root().joinpath(*parts)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
 def _git_repos(repos: dict, root: Path, env: dict) -> Path:
     git = shutil.which("git")
     if git is None:
@@ -101,6 +123,9 @@ def _fixture(step: dict, root: Path, env: dict, locked: list) -> str | None:
         path = _binding_path(step["binding_record"])
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(step["text"], encoding="utf-8")
+        return None
+    if "bash_state" in step:
+        _bash_state(step["bash_state"], step["text"])
         return None
     if step.get("lock_bindings"):
         _lock_bindings(locked)
