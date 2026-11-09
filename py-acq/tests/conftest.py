@@ -57,6 +57,19 @@ def isolate_user_dirs(tmp_path_factory, monkeypatch):
         monkeypatch.setenv(var, str(path))
     for var in [v for v in os.environ if v.startswith("ACQ_")] + list(_BACKEND_HOME_VARS):
         monkeypatch.delenv(var, raising=False)
+    # The acq secret store would otherwise pick the host keychain (secret-tool,
+    # macOS security, DPAPI) and could overwrite a developer's real credential.
+    # Force the file backend under the throwaway root; a test that exercises a
+    # keychain backend substitutes fakes explicitly (see test_secretstore.py).
+    store = root / "secret-store"
+    monkeypatch.setenv("ACQ_SECRET_STORE_DIR", str(store))
+    monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", f"unix:path={root / 'no-session-bus'}")
+    # On a Windows host the store would use real DPAPI even for the throwaway
+    # directory; in-process tests stay on the file backend instead, and the
+    # Windows path is exercised through its seams (test_secretstore.py).
+    from acq_py import secretstore
+
+    monkeypatch.setattr(secretstore, "IS_WINDOWS", False)
     return root
 
 

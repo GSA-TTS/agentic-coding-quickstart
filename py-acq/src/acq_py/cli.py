@@ -11,7 +11,7 @@ and ``doctor``). Every other handler lives in :mod:`acq_py.commands`
                            workspace resolution, secret-scope parsing
     commands/lifecycle.py  create, run, create --recreate, ls, stop, rm
     commands/session.py    exec, attach, shell, cp, ports, verbatim passthrough
-    commands/secret.py     secret set/rm/ls/has
+    commands/secret.py     secret set/rm/ls/has/import
     commands/creds.py      provider-credential, github-scope, usai-rotate-api-key
     commands/kit.py        kit list/validate/apply/check/update, kit-source
 
@@ -209,8 +209,12 @@ def build_parser() -> _Parser:
     # flag-vs-two-positional alternation unambiguously, so ``-g``/``--global`` is a
     # flag and the remaining tokens are captured with REMAINDER and disambiguated
     # by ``common._parse_secret_scope_service`` / ``common._parse_secret_ls_scope``.
+    # ``--host``/``--env`` bind a custom endpoint; they are also accepted after
+    # the positionals, where REMAINDER captures them (``common._split_host_env``).
     secret_set = secret_sub.add_parser("set", help="store a secret (value read from stdin)")
-    common._secret_scope_args(secret_set, remainder_help="[-g | SANDBOX] SERVICE")
+    secret_set.add_argument("--host", dest="hosts", action="append", help="custom endpoint host (repeatable)")
+    secret_set.add_argument("--env", dest="env_name", help="env var the custom endpoint binds")
+    common._secret_scope_args(secret_set, remainder_help="[-g | SANDBOX] SERVICE [--host HOST --env ENV]")
 
     secret_rm = secret_sub.add_parser("rm", help="remove a secret")
     common._secret_scope_args(secret_rm, remainder_help="[-g | SANDBOX] SERVICE")
@@ -220,6 +224,17 @@ def build_parser() -> _Parser:
 
     secret_has = secret_sub.add_parser("has", help="silent predicate: exit 0 if the secret is present")
     common._secret_scope_args(secret_has, remainder_help="[-g | SANDBOX] SERVICE")
+
+    # The flags are registered so they parse before the first positional, and
+    # re-read from REMAINDER after it (``commands.secret._parse_import``).
+    secret_import = secret_sub.add_parser(
+        "import", help="store known service tokens from the host environment in the acq secret store"
+    )
+    secret_import.add_argument("--all", action="store_true", help="import without prompting; never overwrite")
+    secret_import.add_argument("-f", "--force", action="store_true", help="import without prompting; overwrite")
+    secret_import.add_argument("--dry-run", action="store_true", help="show what would be imported; write nothing")
+    secret_import.add_argument("--service", help="import only this service")
+    common._secret_scope_args(secret_import, remainder_help="[SERVICE] [-g | SANDBOX]")
 
     kit_parser = sub.add_parser("kit", help="inspect kits and the trusted-source registry")
     kit_sub = kit_parser.add_subparsers(dest="kit_command", metavar="SUBCOMMAND")
@@ -399,7 +414,7 @@ def _is_mutating(parsed) -> bool:
     if cmd in ("create", "run", "stop", "rm", "exec", "attach", "shell", "cp", "ports"):
         return True
     if cmd == "secret":
-        return parsed.secret_command in ("set", "rm")
+        return parsed.secret_command in ("set", "rm", "import")
     if cmd == "provider-credential":
         return parsed.provider_credential_command in ("set", "rm")
     if cmd in ("github-scope", "usai-rotate-api-key"):
@@ -589,12 +604,15 @@ def _dispatch(parser: _Parser, parsed, emit_json: bool, backend_override: str | 
     if parsed.command == "secret":
         subcmd = parsed.secret_command
         if subcmd is None:
-            return common._usage_failure("secret", "secret requires a subcommand: set | rm | ls | has", emit_json)
+            return common._usage_failure("secret", "secret requires a subcommand: set | rm | ls | has | import", emit_json)
         command = f"secret {subcmd}"
         # `secret has` is a silent predicate: it never emits a stdout body, so it
         # resolves the backend itself with emit_json=False (failures -> stderr).
         if subcmd == "has":
             return secret.run_secret_has(parsed, backend_override)
+        # `secret import` writes only the acq store, so it needs no backend.
+        if subcmd == "import":
+            return secret.run_secret_import(parsed, emit_json)
         # argparse already refused an unknown choice, so subcmd is set|rm|ls here.
         _backend, exit_code = common._resolve_backend_for_mutation(
             backend_override, emit_json, command, domain="secret management"

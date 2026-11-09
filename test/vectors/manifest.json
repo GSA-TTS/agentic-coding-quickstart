@@ -188,6 +188,22 @@
       "vectors": ["cli/secret-msb-unsupported"]
     },
     {
+      "contract": "secret import (Bash acq_secret_import parity): known host tokens (USAI_API_KEY, GITHUB_TOKEN/GH_TOKEN, GITLAB_TOKEN, registered provider KEY_ENVs) go to the acq secret store with no backend; --all never overwrites, --dry-run writes nothing, a non-TTY interactive run skips, a multi-line value is refused, and no value is ever echoed",
+      "vectors": ["cli/secret-import-all", "cli/secret-import-dry-run", "cli/secret-import-noninteractive-skip", "cli/secret-import-refuses-multiline", "cli/secret-import-none", "cli/secret-import-unknown-flag"]
+    },
+    {
+      "contract": "Secret service and sandbox names follow the acq store-key rule [A-Za-z0-9_-]+ with no leading '-', and are refused before any store or backend access",
+      "vectors": ["cli/secret-set-service-dash-refused"]
+    },
+    {
+      "contract": "A sandbox literally named 'global' is a sandbox scope, never the global scope (typed scope parse)",
+      "vectors": ["cli/secret-scope-sandbox-named-global", "cli/secret-import-sandbox-named-global"]
+    },
+    {
+      "contract": "secret set --host/--env binds a custom endpoint's host and env var together; either alone is refused before anything is stored",
+      "vectors": ["cli/secret-set-host-needs-env"]
+    },
+    {
       "contract": "ADR-0038m §2 provider-credential set success: value on stdin only, binding reports provider/key_env/hosts/source_layer, never a value",
       "vectors": ["cli/provider-credential-set-json"]
     },
