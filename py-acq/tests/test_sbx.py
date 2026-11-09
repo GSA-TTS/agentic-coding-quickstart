@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import io
 import json
+import shlex
 import sys
 from pathlib import Path
 
@@ -316,6 +317,33 @@ def test_kit_source_revoked_fails_closed_when_re_read_is_unparseable(monkeypatch
     with pytest.raises(sbx.SbxError) as excinfo:
         sbx.kit_source_revoked("github.com/acme/team-kits")
     assert excinfo.value.code == errors.FAILURE
+    # The setting could not be read back: the error says so, rather than
+    # claiming sbx still lists the prefix.
+    assert "could not read kit.allowedSources back after the update" in excinfo.value.message
+    assert "still lists" not in excinfo.value.message
+
+
+def test_kit_source_revoke_recovery_command_round_trips_a_single_quote(monkeypatch, tmp_path):
+    # An allowlist entry holding a single quote must survive the printed
+    # command: shell-splitting it gives back exactly the JSON acq wanted.
+    _env(monkeypatch, tmp_path)
+    sources = ["docker.io/", "github.com/acme/", "example.com/it's/"]
+    calls = []
+
+    def fake_run(argv, **_kw):
+        calls.append(list(argv))
+        if argv[:2] == ["settings", "get"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(sources), stderr="")
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="refused")
+
+    monkeypatch.setattr(sbx, "_run", fake_run)
+    with pytest.raises(sbx.SbxError) as excinfo:
+        sbx.kit_source_revoked("github.com/acme/team-kits")
+    command = excinfo.value.remediation.removeprefix("run: ").split("; then re-run:")[0]
+    words = shlex.split(command)
+    assert words[:4] == ["sbx", "settings", "set", "kit.allowedSources"]
+    assert json.loads(words[4]) == ["docker.io/", "example.com/it's/"]
+    assert words[4] == calls[-1][3]
 
 
 def test_kit_source_rm_keeps_registry_entry_when_revocation_unverified(monkeypatch, tmp_path, capsys):

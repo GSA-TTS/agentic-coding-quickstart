@@ -89,6 +89,10 @@ ECHO_EXIT_ENV = "ACQ_SBX_STUB_EXIT_CODE"
 # seed is the initial value only: once a ``settings set`` has written the file,
 # reads return what was written, so the adapter's re-read can verify its write.
 ALLOWED_SOURCES_ENV = "ACQ_SBX_STUB_ALLOWED_SOURCES"
+# ``fail`` makes ``settings get`` fail once a ``settings set`` has written the
+# allowlist, so a vector can model an sbx that takes the write but cannot be
+# read back.
+ALLOWED_SOURCES_READBACK_ENV = "ACQ_SBX_STUB_ALLOWED_SOURCES_READBACK"
 
 # Kit knobs. ``ACQ_SBX_STUB_BARRIER=stall`` never reports the startup barrier
 # (kit startup that does not finish); ``ACQ_SBX_STUB_KIT_ADD=allow`` accepts a
@@ -587,7 +591,8 @@ def _settings_main(args: list[str]) -> int:
     sub = args[0]
     rest = args[1:]
     if sub == "get":
-        if _should_fail("settings get"):
+        readback_fails = os.environ.get(ALLOWED_SOURCES_READBACK_ENV) == "fail" and _allowed_sources_path().exists()
+        if _should_fail("settings get") or readback_fails:
             print(RAW_FAIL_STDERR, file=sys.stderr)
             return 1
         if rest and rest[0] == "kit.allowedSources":

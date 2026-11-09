@@ -391,6 +391,10 @@
       "vectors": ["cli/kit-source-rm-sbx-shared-owner", "cli/kit-source-rm-sbx-gsa-tts"]
     },
     {
+      "contract": "ADR-0040m sbx kit_source_revoked fails closed on a refused write or an unreadable re-read: the source stays registered, the error names which step failed, and the recovery command is shell-quoted",
+      "vectors": ["cli/kit-source-rm-sbx-write-fails", "cli/kit-source-rm-sbx-readback-fails"]
+    },
+    {
       "contract": "ADR-0040m unknown-backend validation for kit-source rm: --backend bogus is rejected with a usage error (matching the other mutating verbs)",
       "vectors": ["cli/kit-source-rm-unknown-backend"]
     },

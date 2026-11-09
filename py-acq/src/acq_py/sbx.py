@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 from typing import NamedTuple
@@ -1342,7 +1343,9 @@ def _revoke_failed(repo: str, prefix: str, reason: str, desired: str | None = No
     registered, because the sbx backend could still fetch kits from that owner.
     """
     if desired is not None:
-        fix = f"run: sbx settings set kit.allowedSources '{desired}'"
+        # Shell-quoted, so the printed command round-trips even when an
+        # allowlist entry contains a single quote.
+        fix = f"run: sbx settings set kit.allowedSources {shlex.quote(desired)}"
     else:
         fix = (
             "review 'sbx settings get kit.allowedSources', remove "
@@ -1389,6 +1392,8 @@ def kit_source_revoked(repo: str) -> str | None:
     if proc.returncode != 0:
         raise _revoke_failed(repo, prefix, "could not write kit.allowedSources", desired)
     verify = _read_allowed_sources()
-    if verify is None or _grants(verify, prefix):
+    if verify is None:
+        raise _revoke_failed(repo, prefix, "could not read kit.allowedSources back after the update", desired)
+    if _grants(verify, prefix):
         raise _revoke_failed(repo, prefix, "kit.allowedSources still lists it after the update", desired)
     return prefix
