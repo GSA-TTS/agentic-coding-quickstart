@@ -374,7 +374,7 @@ _GEN_ASSETS = (
 _SUMS_LINE = re.compile(r"[0-9a-f]{64}  [^ *][^\r]*")
 
 
-def _run_gen_install_assets(tmp_path, env=None):
+def _run_gen_install_assets(tmp_path, env=None, expect_ok=True):
     dist = tmp_path / "dist"
     dist.mkdir()
     shutil.copy(INSTALL_SH, dist / "install.sh")
@@ -391,8 +391,29 @@ def _run_gen_install_assets(tmp_path, env=None):
         capture_output=True,
         timeout=30,
     )
+    if not expect_ok:
+        return proc
     assert proc.returncode == 0, proc.stderr.decode()
     return dist, (dist / "SHA256SUMS").read_bytes().decode("utf-8")
+
+
+def _fake_sha256sum_env(tmp_path, line_expr, extra=""):
+    """PATH with a fake sha256sum printing ``line_expr`` (Python, using
+    ``digest`` and ``name``) per file, then the literal ``extra`` line if any."""
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    fake = fake_bin / "sha256sum"
+    fake.write_text(
+        f"#!{sys.executable}\n"
+        "import hashlib, sys\n"
+        "for name in sys.argv[1:]:\n"
+        "    with open(name, 'rb') as fh:\n"
+        "        digest = hashlib.sha256(fh.read()).hexdigest()\n"
+        f"    print({line_expr})\n"
+        + (f"print({extra!r})\n" if extra else "")
+    )
+    fake.chmod(0o755)
+    return {**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"}
 
 
 def _assert_text_form_sums(dist, sums):
@@ -421,18 +442,26 @@ def test_gen_install_assets_normalizes_binary_mode_sha256sum(tmp_path):
     # that does the same must not get a "*" into SHA256SUMS.
     if not shutil.which("python3"):
         pytest.skip("python3 unavailable")
-    fake_bin = tmp_path / "fake-bin"
-    fake_bin.mkdir()
-    fake = fake_bin / "sha256sum"
-    fake.write_text(
-        f"#!{sys.executable}\n"
-        "import hashlib, sys\n"
-        "for name in sys.argv[1:]:\n"
-        "    with open(name, 'rb') as fh:\n"
-        "        print(hashlib.sha256(fh.read()).hexdigest() + ' *' + name)\n"
-    )
-    fake.chmod(0o755)
-    env = {**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"}
+    env = _fake_sha256sum_env(tmp_path, "digest + ' *' + name")
     dist, sums = _run_gen_install_assets(tmp_path, env=env)
     assert "*" not in sums
     _assert_text_form_sums(dist, sums)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the fake sha256sum is a POSIX script")
+@pytest.mark.parametrize(
+    "extra, message",
+    [
+        ("0" * 64 + "  stray.tar.gz", "lines, expected"),
+        ("not a checksum line", "unexpected line format"),
+    ],
+)
+def test_gen_install_assets_fails_closed_on_unexpected_output(tmp_path, extra, message):
+    # One "HASH  name" line per enumerated file, nothing else: an extra or a
+    # malformed line from sha256sum fails the script instead of shipping.
+    if not shutil.which("python3"):
+        pytest.skip("python3 unavailable")
+    env = _fake_sha256sum_env(tmp_path, "digest + '  ' + name", extra=extra)
+    proc = _run_gen_install_assets(tmp_path, env=env, expect_ok=False)
+    assert proc.returncode == 1
+    assert message in proc.stderr.decode()

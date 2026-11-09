@@ -60,8 +60,20 @@ sums="$(cd "$dist" && sha256sum install.sh install.ps1 $assets)"
 # sha256sum reads in binary mode by default. The installers accept both forms,
 # but release assets should be byte-identical wherever they are generated.
 printf '%s\n' "$sums" | tr -d '\r' | sed 's/^\([0-9a-f]\{64\}\) [ *]/\1  /' > "$dist/SHA256SUMS"
-if grep -v '^[0-9a-f]\{64\}  [^ *]' "$dist/SHA256SUMS" >/dev/null; then
-  die "unexpected line format in $dist/SHA256SUMS"
-fi
+
+# Fail closed on the result: exactly one "HASH  name" line per enumerated file.
+# grep -v exits 1 when every line matches, 0 when one does not, and 2 on an
+# error, which must not pass as "all lines match".
+rc=0
+grep -v '^[0-9a-f]\{64\}  [^ *]' "$dist/SHA256SUMS" >/dev/null || rc=$?
+case "$rc" in
+  1) ;;
+  0) die "unexpected line format in $dist/SHA256SUMS" ;;
+  *) die "could not check $dist/SHA256SUMS (grep exit $rc)" ;;
+esac
+# shellcheck disable=SC2086
+set -- install.sh install.ps1 $assets
+lines=$(wc -l < "$dist/SHA256SUMS" | tr -d " ")
+[ "$lines" -eq "$#" ] || die "$dist/SHA256SUMS has $lines lines, expected $#"
 
 printf 'wrote %s/SHA256SUMS\n' "$dist"
