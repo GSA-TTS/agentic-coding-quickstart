@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "id": "cli/run-inference-ignores-team-kits",
-  "oracle": "ADR-0030 agent-kit inference scope: a team/personal kit named after a non-built-in agent (claude) is never inferred as the agent kit (built-in bundle only)",
+  "oracle": "ADR-0030 agent-kit inference scope: an extra kit that provides an agent (the bundled opencode kit passed through ACQ_EXTRA_KITS) is applied as an extra but never inferred as the agent kit of a non-built-in agent (claude)",
   "tier": 1,
   "backend": null,
   "platform": "any",
@@ -12,7 +12,7 @@
       "ACQ_MSB_VERSION": "0.7.7",
       "ACQ_MSB_INSTALLED": "1",
       "ACQ_SBX_INSTALLED": "0",
-      "ACQ_EXTRA_KITS": "opencode claude shell"
+      "ACQ_EXTRA_KITS": "git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=941a286f912b99475429c3c00db49a99af5b241e&dir=integrations/isolation/acq-kits/opencode"
     },
     "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "MSB_HOME", "ACQ_IMAGE", "ACQ_MSB_IMAGE", "ACQ_MSB_STUB_CATALOG", "ACQ_MSB_READY_TIMEOUT", "ACQ_MSB_STUB_FAIL", "ACQ_KIT_APPLIED_SEED"],
     "stdin": "",
@@ -32,7 +32,8 @@
           "action": "created",
           "image": "ghcr.io/gsa-tts/agentic-coding-patterns/devenv-shell@sha256:0b5f4cc95c8fa7dd7f3ffd02b56e63d0caf9b151421ff6ea3cb34b2139e3966c",
           "kit": null,
-          "entrypoint": null
+          "entrypoint": null,
+          "kits": ["zscaler-ca-certificate", "usai-provider", "agentic-coding-playbook", "git-ssh-sign", "opencode"]
         }
       },
       "normalize": []

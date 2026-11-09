@@ -1,0 +1,80 @@
+{
+  "schema": 1,
+  "id": "cli/security-gate-real-probe",
+  "oracle": "ADR-0035 real read-only-mount probe: create records ro_host_config only after msb inspect shows the host-config mount as the one read-only Bind and a guest-root write is denied; a later trusted operation (attach) passes the gate through the same real probe, with no test seam set",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{python}",
+      "-I",
+      "test/vectors/drivers/seeded-run.py",
+      "[[[\"--backend\",\"msb\",\"create\",\"opencode\",\".\",\"--name\",\"gate\",\"--json\"],false,null],[[\"--backend\",\"msb\",\"attach\",\"gate\",\"--json\"],false,0]]",
+      "{acq}"
+    ],
+    "env": {
+      "ACQ_MSB_BIN": "__stub__",
+      "ACQ_MSB_VERSION": "0.7.7",
+      "ACQ_MSB_INSTALLED": "1",
+      "ACQ_SBX_INSTALLED": "0"
+    },
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "MSB_HOME",
+      "ACQ_IMAGE",
+      "ACQ_MSB_IMAGE",
+      "ACQ_MSB_STUB_CATALOG",
+      "ACQ_MSB_READY_TIMEOUT",
+      "ACQ_MSB_STUB_FAIL",
+      "ACQ_MSB_STUB_EXEC_EXIT",
+      "ACQ_MSB_STUB_COPY_EXIT",
+      "ACQ_MSB_STUB_EXIT_CODE",
+      "ACQ_MSB_STUB_PORTS",
+      "ACQ_MSB_STUB_MOUNT_RW",
+      "ACQ_MSB_STUB_RO_WRITABLE",
+      "ACQ_SECURITY_MOUNT_STATE",
+      "ACQ_KIT_APPLIED_SEED",
+      "ACQ_EXTRA_KITS",
+      "ACQ_PROVIDER_KITS",
+      "ACQ_MIGRATION_LOCK_TIMEOUT"
+    ],
+    "stdin": "",
+    "timeout_ms": 10000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "create",
+        "data": {
+          "name": "gate",
+          "backend": "msb",
+          "ro_host_config": true,
+          "kit": "opencode"
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME",
+      "ACQ_SECRET_STORE_DIR"
+    ]
+  }
+}

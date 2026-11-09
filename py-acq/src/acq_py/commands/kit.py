@@ -7,7 +7,19 @@ from __future__ import annotations
 import json
 import sys
 
-from .. import backends, envelope, errors, kits, lock, sbx
+from .. import (
+    backends,
+    envelope,
+    errors,
+    kit_msb,
+    kits,
+    kitspec,
+    lock,
+    msb,
+    sbx,
+    security,
+    state,
+)
 from . import common
 
 
@@ -132,38 +144,63 @@ def _kit_apply_locked(name: str, kitref: str, emit_json: bool, backend: str) -> 
     kit_name = kitref
     entrypoint = kits.agent_kit_entrypoint(kit_name)
     existing = kits.kit_applied_read(backend, name)
-    if existing and existing.get("kit") == kit_name:
-        data = {
-            "sandbox": name,
-            "backend": backend,
-            "kit": kit_name,
-            "entrypoint": entrypoint,
-            "applied": False,
-            "action": "noop",
-        }
-        if emit_json:
-            print(json.dumps(envelope.success("kit apply", data)))
-        else:
-            print(f"kit '{kit_name}' already applied to sandbox '{name}'.")
-        return errors.EXIT_SUCCESS
-    try:
-        common._adapter(backend).kit_apply(name, kit_name, kits.agent_kit_install(kit_name))
-    except common._ADAPTER_ERRORS as exc:
-        return common._operational_failure("kit apply", exc.code, exc.message, exc.remediation, emit_json)
-    kits.kit_applied_write(backend, name, kit_name, entrypoint)
+    applied = not (existing and existing.get("kit") == kit_name)
+    if applied:
+        exit_code = _kit_apply_install(name, kit_name, backend, emit_json)
+        if exit_code is not None:
+            return exit_code
+        kits.kit_applied_write(backend, name, kit_name, entrypoint)
     data = {
         "sandbox": name,
         "backend": backend,
         "kit": kit_name,
         "entrypoint": entrypoint,
-        "applied": True,
-        "action": "applied",
+        "applied": applied,
+        "action": "applied" if applied else "noop",
     }
     if emit_json:
         print(json.dumps(envelope.success("kit apply", data)))
-    else:
+    elif applied:
         print(f"applied kit '{kit_name}' to sandbox '{name}' (entrypoint {entrypoint}).")
+    else:
+        print(f"kit '{kit_name}' already applied to sandbox '{name}'.")
     return errors.EXIT_SUCCESS
+
+
+def _kit_apply_install(name: str, kit_name: str, backend: str, emit_json: bool) -> int | None:
+    """Apply the bundled kit in-guest once the read-only-mount gate passes; an exit code on failure."""
+    record, exit_code = _trusted_record(backend, name, "kit apply", emit_json)
+    if exit_code is not None:
+        return exit_code
+    try:
+        kit = kit_msb.bundled_kit(kit_name, "agent")
+        applied = kit_msb.apply_single(name, kit, ro_required=security.requires_ro_mount(record))
+    except kit_msb.KitApplyFailed as exc:
+        return common._operational_failure("kit apply", errors.FAILURE, str(exc), "check msb logs and retry", emit_json)
+    except common._ADAPTER_ERRORS as exc:
+        return common._operational_failure("kit apply", exc.code, exc.message, exc.remediation, emit_json)
+    if not applied:
+        return common._operational_failure(
+            "kit apply", errors.FAILURE, f"could not apply kit '{kit_name}' to sandbox '{name}'",
+            "check network access from the sandbox and the warnings above, then retry", emit_json,
+        )
+    return None
+
+
+def _trusted_record(backend: str, name: str, command: str, emit_json: bool) -> tuple[dict | None, int | None]:
+    """The sandbox's host record, once the read-only-mount gate has passed (ADR-0035).
+
+    Applying kits runs trusted code in the guest, so a sandbox whose recorded
+    read-only mount is missing or unconfirmed is refused, as for ``run``.
+    """
+    try:
+        record = state.record_read(backend, name)
+    except state.StateSchemaError as exc:
+        return None, common._operational_failure(
+            command, errors.STATE_SCHEMA_UNSUPPORTED, str(exc),
+            f"recreate the sandbox with 'acq create', or remove it with 'acq rm {name}'", emit_json,
+        )
+    return record, common._trusted_gate(record, backend, command, name, emit_json)
 
 
 def _print_kit_check_human(data: dict) -> None:
@@ -211,18 +248,13 @@ def run_kit_check(parsed, emit_json: bool, backend_override: str | None) -> int:
 
 
 def run_kit_update(parsed, emit_json: bool, backend_override: str | None) -> int:
-    """``acq kit update SANDBOX [--yes]`` — consented bundle refresh.
+    """``acq kit update SANDBOX [--yes]`` — consented in-place reapply of the kit bundle.
 
-    Refresh is consented (ADR-0038m §46): ``--yes`` consents explicitly, an
-    interactive TTY prompts, and a non-interactive run without ``--yes`` refuses
-    (never invents consent; spec user story #10). ``--json`` is always
-    non-interactive.
-
-    The reapply itself (kit-apply) is deferred, so ``kit update`` records the
-    user's *consent* to the pinned ref and reports ``consent recorded, reapply
-    deferred``. It does NOT write ``applied_ref`` or report ``current``/``refreshed``:
-    ``kit check`` keeps reading ``stale``/``unknown`` until the kit-apply slice
-    actually reapplies (ADR-0038m §3 drops false partial success).
+    Consent (ADR-0038m §46): ``--yes``, or a TTY prompt; non-interactive runs
+    without ``--yes`` refuse. The reapply (Bash ``acq_bundle_reapply``) reruns
+    every selected kit with installs forced, under the lifecycle lock, and
+    records ``applied_ref`` only when every kit applied (ADR-0038m §3). The
+    guest is never recreated.
     """
     backend, exit_code = common._resolve_backend_for_mutation(
         backend_override, emit_json, "kit update", domain="kit inspection"
@@ -247,37 +279,82 @@ def run_kit_update(parsed, emit_json: bool, backend_override: str | None) -> int
         else:
             print(f"sandbox '{name}' is already on the pinned bundle; nothing to do.")
         return errors.EXIT_SUCCESS
+    if not common._supports(backend, "kit-apply"):
+        return common._operational_failure(
+            "kit update", errors.UNSUPPORTED, f"kit reapply is not supported on the {backend} backend",
+            "kit-apply is msb-only in this slice (ADR-0040m)", emit_json,
+        )
     if not parsed.yes:
-        if emit_json or not sys.stdin.isatty():
-            return common._operational_failure(
-                "kit update",
-                errors.CONSENT_REQUIRED,
-                f"refusing to refresh '{name}' non-interactively without --yes",
-                f"re-run with 'acq kit update {name} --yes' to consent",
-                emit_json,
-            )
-        answer = input(f"refresh the kit bundle in '{name}' to {kits.CONTROL_PLANE_REF}? [y/N] ")
-        if answer.strip().lower() not in ("y", "yes"):
-            if emit_json:
-                print(json.dumps(envelope.success("kit update", {"sandbox": name, "backend": backend, "action": "cancelled"})))
-            else:
-                print("cancelled.")
-            return errors.EXIT_SUCCESS
-    # Consent recorded; the idempotent in-place reapply is the deferred kit-apply
-    # slice. This is deliberately NOT applied provenance: applied_ref is unchanged,
-    # so kit check keeps reporting stale/unknown rather than fabricating currency.
-    rec = kits.consent_write(backend, name)
-    data = {
-        "sandbox": name,
-        "backend": backend,
-        "consented_ref": rec["consented_ref"],
-        "status": "deferred",
-        "action": "consent_recorded",
-    }
+        declined = _kit_update_consent(name, backend, emit_json)
+        if declined is not None:
+            return declined
+    try:
+        with lock.sandbox_lock(backend, name):
+            return _kit_update_locked(name, emit_json, backend)
+    except lock.SandboxLockTimeout as exc:
+        return common._operational_failure(
+            "kit update", errors.TIMEOUT, str(exc),
+            exc.remediation or f"wait for the other acq command on sandbox '{name}' to finish, then retry",
+            emit_json,
+        )
+
+
+def _kit_update_consent(name: str, backend: str, emit_json: bool) -> int | None:
+    """Ask for consent; ``None`` when given, else the emitted exit code (refused or cancelled)."""
+    if emit_json or not sys.stdin.isatty():
+        return common._operational_failure(
+            "kit update",
+            errors.CONSENT_REQUIRED,
+            f"refusing to refresh '{name}' non-interactively without --yes",
+            f"re-run with 'acq kit update {name} --yes' to consent",
+            emit_json,
+        )
+    answer = input(f"refresh the kit bundle in '{name}' to {kits.CONTROL_PLANE_REF}? [y/N] ")
+    if answer.strip().lower() in ("y", "yes"):
+        return None
+    if emit_json:
+        print(json.dumps(envelope.success("kit update", {"sandbox": name, "backend": backend, "action": "cancelled"})))
+    else:
+        print("cancelled.")
+    return errors.EXIT_SUCCESS
+
+
+def _kit_update_locked(name: str, emit_json: bool, backend: str) -> int:
+    """Reapply the kit set to a running sandbox, then record provenance on full success."""
+    record, exit_code = _trusted_record(backend, name, "kit update", emit_json)
+    if exit_code is not None:
+        return exit_code
+    if name not in (msb.running_names() or []):
+        return common._operational_failure(
+            "kit update", errors.FAILURE, f"sandbox '{name}' is not running, so its kits cannot be reapplied",
+            f"start it (for example by re-attaching with 'acq run {name}'), then retry", emit_json,
+        )
+    agent = (record or {}).get("agent") or "shell"
+    try:
+        selection = kitspec.select_kits(agent, configured_extras=True)
+        selection.require()
+        kit_set = kit_msb.resolve(selection)
+    except kitspec.KitSelectionError as exc:
+        return common._operational_failure("kit update", errors.VALIDATION_FAILED, str(exc),
+                                           "fix the kit selection and retry", emit_json)
+    except common._ADAPTER_ERRORS as exc:
+        return common._operational_failure("kit update", exc.code, exc.message, exc.remediation, emit_json)
+    result = kit_msb.ensure_kits_applied(name, kit_set, ro_required=security.requires_ro_mount(record), force=True)
+    if result.incomplete:
+        return common._operational_failure(
+            "kit update", errors.FAILURE,
+            f"the kit refresh of '{name}' did not complete ({', '.join(result.incomplete)}); "
+            "its provenance was left unchanged",
+            f"re-run 'acq kit update {name} --yes' to retry, or recreate the sandbox for a clean rebuild",
+            emit_json,
+        )
+    kits.provenance_write(backend, name)
+    data = {**kits.kit_check_data(backend, name), "action": "refreshed", "kits": result.applied}
     if emit_json:
         print(json.dumps(envelope.success("kit update", data)))
     else:
-        print(f"consent recorded for '{name}' to {kits.CONTROL_PLANE_REF}; reapply deferred.")
+        print(f"refreshed the kit bundle in '{name}' to {kits.CONTROL_PLANE_REF} (in place; state preserved).")
+        print("Restart the agent (or re-run 'acq run') to pick up refreshed config.")
     return errors.EXIT_SUCCESS
 
 

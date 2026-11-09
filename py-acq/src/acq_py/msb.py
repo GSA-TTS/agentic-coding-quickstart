@@ -3,7 +3,7 @@
 The read side (detection + version floor) lives in ``backends.py``; this module
 owns the mutating/lifecycle verbs the seam drives — ``create``, ``list``,
 ``exec`` (readiness probe + agent launch), ``stop``, ``remove``, ``copy``, and
-``ports`` — plus the in-guest ``kit_apply``/``provision_substrate`` (both driven
+``ports`` — plus the in-guest ``kit_exec``/``provision_substrate`` (both driven
 via ``msb exec``) — by invoking the ``msb`` CLI as a subprocess. The adapter reports
 outcomes and never decides trust: sandbox identity, agent, and workspace
 authority stay host-side in the seam (``cli.py`` + ``state.py``), per ADR-0040m
@@ -33,9 +33,11 @@ import hashlib
 import json
 import ntpath
 import os
+import posixpath
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
@@ -486,6 +488,7 @@ def create(
     guest_workspace: str | None = None,
     *,
     egress_kits: list[str],
+    kit_flags: list[str] | None = None,
 ) -> list[str]:
     """Create a sandbox; returns its ``ENV@HOST`` secret bindings (non-secret).
 
@@ -501,7 +504,9 @@ def create(
 
     ``egress_kits`` names the kits whose allowlists form the egress policy
     (see :func:`egress_flags`). It is required so no caller can create a sandbox
-    without one; the policy is computed before msb is invoked.
+    without one; the policy is computed before msb is invoked. ``kit_flags`` are
+    the kits' other create-time flags (the read-only host-config mount, the
+    startup script, CA trust), built by :mod:`acq_py.kit_msb`.
 
     Every secret the sandbox can be injected with (:func:`secret_bindings`) is
     bound as ``--secret ENV@HOST``; the values travel only in the child's
@@ -526,6 +531,7 @@ def create(
     if cpus:
         argv += ["-c", cpus]
     argv += egress
+    argv += kit_flags or []
     argv += secret_flags
     argv.append(image)  # positional image (last)
     try:
@@ -589,31 +595,26 @@ def _guest_step(name: str, user: str, step: list[str]) -> bool:
     return proc.returncode == 0
 
 
-def kit_apply(name: str, kit: str, install_cmd: list[str]) -> None:
-    """Apply a kit in-guest (ADR-0040m ``kit-apply``): run the kit's pinned
-    install command inside the sandbox as the unprivileged ``agent`` user.
+def kit_exec(name: str, flags: list[str], argv: list[str]) -> bool:
+    """Run one in-guest kit step (``msb exec FLAGS NAME -- ARGV``); True on success.
 
-    acq never executes kit code on the host (ADR-0038m §46): the install command
-    is data sourced from the pinned control plane and is forwarded verbatim to the
-    backend, which runs it in-guest. The argv is the ``nix profile install
-    …#<agent>`` install — it carries no credential — so nothing sensitive crosses
-    the boundary. The step never reads the user's terminal, runs with the git
-    prompt guards, and is time-bounded (:func:`_guest_step`). Raises
-    :class:`MsbError` on backend failure or timeout.
-
-    Idempotency is a host-authoritative concern (the seam short-circuits a re-apply
-    of an already-applied kit via :func:`acq_py.kits.kit_applied_read`); the
-    backend re-runs a genuinely idempotent install when asked, and the host record
-    is the durable "already applied" signal.
+    The kit engine (:mod:`acq_py.kit_msb`) builds ``flags``: the guest user, the
+    kit environment and the git prompt guards. As for every kit step, stdin is
+    the null device, output is captured, and the step is bounded by
+    :func:`kit_timeout_s`; an overrun raises :class:`MsbError` (``timeout``).
+    acq never runs kit code on the host (ADR-0038m §46): the argv is pinned kit
+    data that msb runs in the guest.
     """
-    # Reconciles with the real msb 0.7.11 CLI: there is NO `kit-apply` subcommand.
-    # The pinned install command runs in-guest via `msb exec -u agent NAME -- …`.
-    if not _guest_step(name, "agent", install_cmd):
+    budget = kit_timeout_s()
+    try:
+        proc = _run(["exec", *flags, name, "--", *argv], timeout=budget)
+    except subprocess.TimeoutExpired as exc:
         raise MsbError(
-            errors.FAILURE,
-            f"could not apply kit '{kit}' to sandbox '{name}'",
-            "check msb logs and retry",
-        )
+            errors.TIMEOUT,
+            f"an in-guest kit step for sandbox '{name}' did not finish within {budget:g}s",
+            f"check network access from the sandbox, or raise {KIT_TIMEOUT_ENV}, then retry",
+        ) from exc
+    return proc.returncode == 0
 
 
 def provision_substrate(name: str, steps: list[tuple[str, list[str]]]) -> None:
@@ -867,6 +868,137 @@ def ports(name: str) -> list[dict]:
                 }
             )
     return out
+
+
+# ---------------------------------------------------------------------------
+# Read-only host-config mount checks (ADR-0035; Bash
+# `_acq_msb_ro_mount_recorded_readonly` and `_acq_msb_host_config_mount_probe`).
+# Enforcement of `:ro` is msb's, on the host. What acq checks is that msb
+# RECORDED this sandbox's mount as read-only, read from the host with `msb
+# inspect` (a guest cannot forge it), plus a guest probe that can only make acq
+# stricter: a guest root controls the probe's tools, so its "denied" answer
+# proves nothing on its own, while a "writable" answer is taken at face value.
+# ---------------------------------------------------------------------------
+
+RO_INSPECT_RETRIES_ENV = "ACQ_MSB_RO_INSPECT_RETRIES"
+RO_INSPECT_SLEEP_ENV = "ACQ_MSB_RO_INSPECT_RETRY_SLEEP"
+
+
+class _NotReady(Exception):
+    """``msb inspect`` reports no active config yet (retried)."""
+
+
+def _norm_guest(path: object) -> str | None:
+    if not isinstance(path, str) or not path.startswith("/"):
+        return None
+    return posixpath.normpath("/" + path.lstrip("/"))
+
+
+def _inspect_mounts(raw: str) -> list[tuple[str, dict]]:
+    """``(guest, mount)`` pairs from ``msb inspect`` JSON; raises ``ValueError`` with a reason."""
+    try:
+        doc = json.loads(raw)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise ValueError("msb inspect output is not valid JSON") from exc
+    if not isinstance(doc, dict):
+        raise ValueError("msb inspect output has an unexpected shape (not an object)")
+    active = doc.get("active_config")
+    if active is None:
+        raise _NotReady("msb reports no active config for the sandbox yet (active_config is null)")
+    if not isinstance(active, dict) or not isinstance(active.get("mounts"), list):
+        raise ValueError("msb inspect active_config has no mounts list")
+    out: list[tuple[str, dict]] = []
+    for mount in active["mounts"]:
+        if not isinstance(mount, dict):
+            raise ValueError("msb inspect lists a mount with an unexpected shape")
+        if mount.get("guest") is None:
+            continue
+        guest = _norm_guest(mount.get("guest"))
+        if guest is None:
+            raise ValueError("msb inspect lists a mount with an unexpected guest path")
+        out.append((guest, mount))
+    return out
+
+
+def _check_ro_mount(entries: list[tuple[str, dict]], guest_dir: str, host_dirs: list[str]) -> None:
+    """Raise ``ValueError`` unless ``guest_dir`` is exactly one read-only Bind of ``host_dirs``."""
+    target = _norm_guest(guest_dir) or guest_dir
+    same = [m for g, m in entries if g == target]
+    if len(same) != 1:
+        raise ValueError(f"msb lists {'no' if not same else 'more than one'} mount at {guest_dir}")
+    mount = same[0]
+    opts = mount.get("options")
+    if mount.get("type") != "Bind":
+        raise ValueError(f"the mount at {guest_dir} is not a Bind mount")
+    if not isinstance(opts, dict) or opts.get("readonly") is not True:
+        raise ValueError(f"msb does not record the mount at {guest_dir} as read-only")
+    host = mount.get("host")
+    if not isinstance(host, str) or not host:
+        raise ValueError(f"the mount at {guest_dir} has no host path")
+    if os.path.realpath(host) not in {os.path.realpath(h) for h in host_dirs}:
+        raise ValueError(f"the mount at {guest_dir} is not backed by this sandbox's acq host config directory")
+    for guest, other in entries:
+        if other is mount:
+            continue
+        if guest == "/" or target.startswith(guest + "/") or guest.startswith(target + "/"):
+            other_opts = other.get("options")
+            if not isinstance(other_opts, dict) or other_opts.get("readonly") is not True:
+                raise ValueError(f"another mount ({guest}) that is not read-only overlaps {guest_dir}")
+
+
+def ro_mount_recorded(name: str, guest_dir: str, host_dirs: list[str]) -> tuple[str, str]:
+    """Whether msb recorded ``guest_dir`` as this sandbox's read-only Bind of ``host_dirs``.
+
+    Returns ``("ok", "")``, ``("missing", reason)`` when msb's record does not
+    show that mount, or ``("unknown", reason)`` when it could not be read. A
+    null ``active_config`` right after boot is retried
+    (:data:`RO_INSPECT_RETRIES_ENV`, default 3, one second apart); anything else
+    fails closed at once. The inspect JSON is never printed.
+    """
+    raw = os.environ.get(RO_INSPECT_RETRIES_ENV, "")
+    tries = max(1, int(raw)) if raw.isascii() and raw.isdigit() else 3
+    reason = "msb reports no active config for the sandbox yet"
+    for attempt in range(tries):
+        if attempt:
+            time.sleep(timeouts.env_seconds(RO_INSPECT_SLEEP_ENV, 1.0))
+        try:
+            proc = _run(["inspect", name, "--format", "json"], timeout=30)
+        except subprocess.TimeoutExpired:
+            return "unknown", "'msb inspect' did not answer, so the recorded mount could not be read"
+        if proc.returncode != 0:
+            return "unknown", "'msb inspect' failed, so the recorded mount could not be read"
+        try:
+            _check_ro_mount(_inspect_mounts(proc.stdout or ""), guest_dir, host_dirs)
+        except _NotReady as exc:
+            reason = str(exc)
+            continue
+        except ValueError as exc:
+            return "missing", str(exc)
+        return "ok", ""
+    return "unknown", reason
+
+
+# Exit 2 only when guest root's write succeeded. A failed redirection on the
+# special builtin ':' ends some shells with status 2, so it runs in a subshell.
+_RO_WRITE_PROBE = (
+    '_dir=$1; _tmp="$_dir/.acq-ro-probe.$$"; '
+    'if ( : > "$_tmp" ) 2>/dev/null; then rm -f "$_tmp" 2>/dev/null; exit 2; fi; exit 0'
+)
+
+
+def ro_mount_guest_probe(name: str, guest_dir: str) -> int:
+    """DIAGNOSTIC: 0 present and not writable by guest root, 1 not confirmed, 2 writable."""
+    try:
+        present = _run(["exec", name, "-u", "agent", "--", "sh", "-c", 'test -d "$1" && test -x "$1"', "sh", guest_dir],
+                       timeout=30)
+        if present.returncode != 0:
+            return 1
+        write = _run(["exec", name, "-u", "0", "--", "sh", "-c", _RO_WRITE_PROBE, "sh", guest_dir], timeout=30)
+    except subprocess.TimeoutExpired:
+        return 1
+    if write.returncode == 2:
+        return 2
+    return 0 if write.returncode == 0 else 1
 
 
 # ---------------------------------------------------------------------------

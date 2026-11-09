@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "id": "cli/kit-update-yes",
-  "oracle": "ADR-0038m §3 / §46 kit update --yes records consent (never applied_ref) and reports consent recorded, reapply deferred",
+  "oracle": "ADR-0038m §3 / §46 kit update --yes reapplies the kit bundle in place and only then records applied_ref, so the sandbox reports current",
   "tier": 1,
   "backend": null,
   "platform": "any",
@@ -16,7 +16,7 @@
     },
     "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "MSB_HOME", "ACQ_IMAGE", "ACQ_MSB_IMAGE", "ACQ_MSB_STUB_FAIL", "ACQ_MSB_READY_TIMEOUT", "ACQ_KIT_PROVENANCE_SEED"],
     "stdin": "",
-    "timeout_ms": 5000
+    "timeout_ms": 10000
   },
   "expect": {
     "exit": 0,
@@ -28,9 +28,11 @@
         "data": {
           "sandbox": "mybox",
           "backend": "msb",
-          "consented_ref": "941a286f912b99475429c3c00db49a99af5b241e",
-          "status": "deferred",
-          "action": "consent_recorded"
+          "local": "941a286f912b99475429c3c00db49a99af5b241e",
+          "applied": "941a286f912b99475429c3c00db49a99af5b241e",
+          "status": "current",
+          "action": "refreshed",
+          "kits": ["zscaler-ca-certificate", "usai-provider", "agentic-coding-playbook", "git-ssh-sign"]
         }
       },
       "normalize": []

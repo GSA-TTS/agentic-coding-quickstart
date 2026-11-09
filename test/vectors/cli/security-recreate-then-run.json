@@ -1,0 +1,82 @@
+{
+  "schema": 1,
+  "id": "cli/security-recreate-then-run",
+  "oracle": "Recreate establishes the guarantee: create --recreate establishes the read-only mount it promises, so the next run re-attaches through the real probe instead of hitting security_exception again",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{python}",
+      "-I",
+      "test/vectors/drivers/seeded-run.py",
+      "[[[\"--backend\",\"msb\",\"create\",\"--recreate\",\"sec\",\"--yes\",\"--json\"],false,0],[[\"--backend\",\"msb\",\"run\",\"sec\",\"--json\"],false,null]]",
+      "{acq}"
+    ],
+    "env": {
+      "ACQ_MSB_BIN": "__stub__",
+      "ACQ_MSB_VERSION": "0.7.7",
+      "ACQ_MSB_INSTALLED": "1",
+      "ACQ_SBX_INSTALLED": "0",
+      "ACQ_STATE_SEED": "{\"msb/sec\":{\"schema\":1,\"name\":\"sec\",\"backend\":\"msb\",\"agent\":\"opencode\",\"workspace\":\"/w\",\"ro_host_config\":true}}"
+    },
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "MSB_HOME",
+      "ACQ_IMAGE",
+      "ACQ_MSB_IMAGE",
+      "ACQ_MSB_STUB_CATALOG",
+      "ACQ_MSB_READY_TIMEOUT",
+      "ACQ_MSB_STUB_FAIL",
+      "ACQ_MSB_STUB_EXEC_EXIT",
+      "ACQ_MSB_STUB_COPY_EXIT",
+      "ACQ_MSB_STUB_EXIT_CODE",
+      "ACQ_MSB_STUB_PORTS",
+      "ACQ_MSB_STUB_MOUNT_RW",
+      "ACQ_MSB_STUB_RO_WRITABLE",
+      "ACQ_SECURITY_MOUNT_STATE",
+      "ACQ_KIT_APPLIED_SEED",
+      "ACQ_EXTRA_KITS",
+      "ACQ_PROVIDER_KITS",
+      "ACQ_MIGRATION_LOCK_TIMEOUT"
+    ],
+    "stdin": "",
+    "timeout_ms": 10000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "run",
+        "data": {
+          "name": "sec",
+          "backend": "msb",
+          "agent": "opencode",
+          "state": "running",
+          "action": "reattached"
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "contains",
+      "value": "[stub exec]",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME",
+      "ACQ_SECRET_STORE_DIR"
+    ]
+  }
+}

@@ -31,10 +31,12 @@ from pathlib import Path
 
 import pytest
 
-from acq_py import cli, errors, kits, lock, msb, state
+from acq_py import cli, errors, kit_msb, kits, lock, msb, state
 from acq_py.commands import common
 
-_INSTALL = kits.agent_kit_install("opencode")
+_INSTALL = ["sh", "/home/agent/opencode-install.sh"]
+# A token only the bundled opencode kit's install command carries.
+_INSTALL_MARK = "OPENCODE_SHA256_LINUX_X64="
 
 
 def _env(monkeypatch, tmp_path):
@@ -69,7 +71,7 @@ def _spy_installs(monkeypatch) -> list[list[str]]:
     real = msb._run
 
     def spy(argv, **kwargs):
-        if argv[-len(_INSTALL):] == _INSTALL:
+        if argv[0] == "exec" and any(_INSTALL_MARK in token for token in argv):
             installs.append(list(argv))
         return real(argv, **kwargs)
 
@@ -201,12 +203,14 @@ def test_recreate_kit_failure_keeps_the_host_record_for_a_retry(monkeypatch, tmp
     path.write_text(json.dumps(_SEC_RECORD), encoding="utf-8")
     monkeypatch.setenv("ACQ_SECURITY_MOUNT_STATE", json.dumps({"sec": "missing"}))
 
-    real_kit_apply = msb.kit_apply
+    real_apply = kit_msb.apply_kit
 
-    def failing_kit_apply(name, kit, install_cmd):
-        raise msb.MsbError(errors.FAILURE, f"could not apply kit '{kit}' to sandbox '{name}'", "retry")
+    def failing_apply(name, kit, *args, **kwargs):
+        if kit.name == "opencode":
+            raise msb.MsbError(errors.FAILURE, f"could not apply kit '{kit.name}' to sandbox '{name}'", "retry")
+        return real_apply(name, kit, *args, **kwargs)
 
-    monkeypatch.setattr(msb, "kit_apply", failing_kit_apply)
+    monkeypatch.setattr(kit_msb, "apply_kit", failing_apply)
     rc, doc = _invoke(capsys, "--backend", "msb", "create", "--recreate", "sec", "--yes", "--json")
     assert rc == 1
     assert doc["error"]["code"] == errors.FAILURE
@@ -216,7 +220,7 @@ def test_recreate_kit_failure_keeps_the_host_record_for_a_retry(monkeypatch, tmp
     assert record.get("ro_host_config") is True
     assert not _kit_record_path("msb", "sec").exists()
 
-    monkeypatch.setattr(msb, "kit_apply", real_kit_apply)
+    monkeypatch.setattr(kit_msb, "apply_kit", real_apply)
     rc, doc = _invoke(capsys, "--backend", "msb", "create", "--recreate", "sec", "--yes", "--json")
     assert rc == 0
     assert doc["data"]["recreated"] is True
@@ -263,7 +267,7 @@ import os, sys, time
 from pathlib import Path
 args = sys.argv[1:]
 gate = Path(os.environ["SLOW_GATE"])
-if "install" in args:
+if any("OPENCODE_SHA256_LINUX_X64=" in a for a in args):
     (gate / "installing").touch()
     deadline = time.monotonic() + 30
     while not (gate / "release").exists() and time.monotonic() < deadline:
@@ -532,10 +536,10 @@ def _contains(seq: list[str], sub: list[str]) -> bool:
     return any(seq[i:i + len(sub)] == sub for i in range(len(seq) - len(sub) + 1))
 
 
-def test_kit_apply_runs_detached_from_the_terminal_with_git_guards(monkeypatch):
+def test_kit_command_runs_detached_from_the_terminal_with_git_guards(monkeypatch):
     monkeypatch.setenv("ACQ_MSB_BIN", "__stub__")
     calls = _capture_subprocess(monkeypatch)
-    msb.kit_apply("box", "opencode", _INSTALL)
+    msb.kit_exec("box", kit_msb.exec_flags("1000", kit_msb.command_env([], [])), _INSTALL)
     (argv, kwargs), = calls
     assert kwargs.get("stdin") is subprocess.DEVNULL
     assert kwargs.get("timeout") is not None and kwargs["timeout"] > 0
@@ -545,12 +549,12 @@ def test_kit_apply_runs_detached_from_the_terminal_with_git_guards(monkeypatch):
     assert argv[argv.index("--") + 1:] == _INSTALL
 
 
-def test_kit_apply_timeout_is_a_stable_error(monkeypatch):
+def test_kit_command_timeout_is_a_stable_error(monkeypatch):
     monkeypatch.setenv("ACQ_MSB_BIN", "__stub__")
     monkeypatch.setenv("ACQ_MSB_KIT_TIMEOUT", "7")
     calls = _capture_subprocess(monkeypatch, raise_timeout=True)
     with pytest.raises(msb.MsbError) as info:
-        msb.kit_apply("box", "opencode", _INSTALL)
+        msb.kit_exec("box", ["-u", "0"], _INSTALL)
     assert info.value.code == errors.TIMEOUT
     assert calls[0][1]["timeout"] == 7.0
 

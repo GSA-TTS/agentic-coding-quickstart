@@ -413,7 +413,11 @@ def test_attach_fails_closed_when_probe_unset(monkeypatch, tmp_path, capsys):
     assert doc["error"]["code"] == errors.SECURITY_EXCEPTION
 
 
-def test_mount_state_unset_is_unknown():
+def test_mount_state_unset_is_unknown(monkeypatch, tmp_path):
+    # Without the seam the real probe runs; against the stub, a sandbox msb does
+    # not know cannot be inspected, so the guarantee is unconfirmed.
+    monkeypatch.setenv("ACQ_MSB_BIN", "__stub__")
+    monkeypatch.setenv("MSB_HOME", str(tmp_path / "msb-home"))
     assert security.mount_state("msb", "anything") == "unknown"
 
 
