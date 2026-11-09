@@ -205,7 +205,9 @@ Git reads the command scope after every config file, and
 exported there overrode acq's blanking and ran during the host-side status.
 The identity read is the one exception: its command scope (above) still sees
 the user's exported values, with only the repository-locating variables
-cleared, because a `git config` read starts no program.
+cleared, because a `git config` read starts no program. A `safe.directory`
+exported through `GIT_CONFIG_COUNT` or `GIT_CONFIG_PARAMETERS` therefore no
+longer applies in clone mode; set it in the global or system config instead.
 
 Before cloning, the create refuses a workspace that is not an ordinary
 repository, with a message naming `git worktree` and submodule checkouts:

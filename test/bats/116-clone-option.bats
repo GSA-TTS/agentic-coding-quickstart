@@ -961,17 +961,48 @@ _mk_other_repo() { # PATH
 }
 
 @test "clone(msb): create with an inherited GIT_DIR clones the workspace and leaves that repo alone" {
-  local other="$STUBDIR/otherrepo" before scratch="$STUBDIR/state/clones/shell-cloneproj/cloneproj"
+  local other="$STUBDIR/otherrepo" scratch="$STUBDIR/state/clones/shell-cloneproj/cloneproj"
   _mk_other_repo "$other"
-  before=$(cat "$other/.git/config")
-  _msb_clone GIT_DIR="$other/.git" -- create shell --clone "$CLONEPROJ"
+  # A workspace identity makes create write user.name into the scratch, a
+  # write an inherited GIT_DIR would send to the other repository instead.
+  git -C "$CLONEPROJ" config user.name "Repo User"
+  cp "$other/.git/config" "$STUBDIR/other-config.before"
+  _msb_clone HOME="$STUBDIR/nohome" XDG_CONFIG_HOME="$STUBDIR/noconfig" GIT_CONFIG_NOSYSTEM=1 \
+    GIT_DIR="$other/.git" -- create shell --clone "$CLONEPROJ"
   assert_success
   # The scratch is a clone of the workspace, not of the inherited repository.
   [ "$(git -C "$scratch" rev-parse HEAD)" = "$(git -C "$CLONEPROJ" rev-parse HEAD)" ]
   [ ! -e "$scratch/other-only.txt" ]
   [ "$(git -C "$CLONEPROJ" remote get-url sandbox-shell-cloneproj)" = "$scratch" ]
-  assert_equal "$(cat "$other/.git/config")" "$before"
+  cmp "$STUBDIR/other-config.before" "$other/.git/config"
+  [ "$(git config --file "$scratch/.git/config" user.name)" = "Repo User" ]
   assert_equal "$(git -C "$other" remote)" ""
+}
+
+@test "clone(msb): an inherited GIT_DIR naming a filter-free repo leaves the workspace's filters blanked" {
+  # acq lists the filter drivers to blank from the workspace's config. Read
+  # through an inherited GIT_DIR, that list would come from the other, clean
+  # repository and the workspace's own driver would run.
+  local other="$STUBDIR/cleanrepo"
+  _mk_repo "$other"
+  _arm_repo_config "$CLONEPROJ" "$STUBDIR/ran"
+  _msb_clone GIT_DIR="$other/.git" -- create shell --clone "$CLONEPROJ"
+  assert_success
+  [ -d "$STUBDIR/state/clones/shell-cloneproj/cloneproj/.git" ]
+  [ ! -e "$STUBDIR/ran" ]
+}
+
+@test "clone(msb): an identity in an inherited GIT_CONFIG file is not carried into the scratch" {
+  # git reports values from a GIT_CONFIG file as command scope, so only
+  # clearing it keeps them out of the identity read; the repo's own value wins.
+  local scratch="$STUBDIR/state/clones/shell-cloneproj/cloneproj"
+  printf '[user]\n\tname = Env File User\n' > "$STUBDIR/env.gitconfig"
+  git -C "$CLONEPROJ" config user.name "Repo User"
+  _msb_clone HOME="$STUBDIR/nohome" XDG_CONFIG_HOME="$STUBDIR/noconfig" GIT_CONFIG_NOSYSTEM=1 \
+    GIT_CONFIG="$STUBDIR/env.gitconfig" -- create shell --clone "$CLONEPROJ"
+  assert_success
+  refute_output --partial 'could not read'
+  [ "$(git config --file "$scratch/.git/config" user.name)" = "Repo User" ]
 }
 
 @test "clone(msb): rm with an inherited GIT_DIR removes the workspace's remote, not that repo's" {
