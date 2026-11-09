@@ -177,9 +177,15 @@ unparseable record (or a reader below a record's `min_reader`) is refused with a
 stable code. Each record migrates atomically and non-destructively until
 verified. Read-only diagnostics (`ls`, `doctor`) report rather than migrate.
 
-Detection and the reported version are overridable for reproducible, offline
-tests: `ACQ_SBX_INSTALLED`/`ACQ_MSB_INSTALLED` (`"0"`/`"1"`) and
-`ACQ_SBX_VERSION`/`ACQ_MSB_VERSION` (a forced version string).
+The version floor is checked against the program the adapter actually runs, so
+an `ACQ_MSB_BIN`/`ACQ_SBX_BIN` override is probed with `--version`/`version` and
+refused before any mutation when it is below the floor. Detection and the
+reported version are overridable for reproducible, offline tests:
+`ACQ_SBX_INSTALLED`/`ACQ_MSB_INSTALLED` (`"0"`/`"1"`) and
+`ACQ_SBX_VERSION`/`ACQ_MSB_VERSION` (a forced version string). `"0"` (force
+absent) is honoured everywhere; `"1"` and a forced version are honoured only
+while that backend's `ACQ_*_BIN` is `__stub__`, so they can never skip the floor
+for a real binary.
 
 ## Managed runtime (ADR-0042m)
 

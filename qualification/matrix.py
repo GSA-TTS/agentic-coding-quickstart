@@ -75,7 +75,8 @@ ORACLE_FLOORS = {
 
 
 def _version_tuple(version: str) -> tuple[int, int, int] | None:
-    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version)
+    # ASCII digits only: ``\d`` also matches other scripts' digits, which int() accepts.
+    match = re.fullmatch(r"([0-9]+)\.([0-9]+)\.([0-9]+)", version)
     return (int(match[1]), int(match[2]), int(match[3])) if match else None
 
 
@@ -217,7 +218,7 @@ def touches_surface(changed_paths) -> bool:
     return False
 
 
-_FINAL_VERSION = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+_FINAL_VERSION = re.compile(r"([0-9]+)\.([0-9]+)\.([0-9]+)")
 
 
 def _minor(version: str) -> tuple[str, str] | None:

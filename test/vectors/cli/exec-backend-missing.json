@@ -18,11 +18,11 @@
     ],
     "env": {
       "ACQ_MSB_BIN": "/nonexistent/acq-vector/msb",
-      "ACQ_MSB_VERSION": "0.7.11",
-      "ACQ_MSB_INSTALLED": "1",
       "ACQ_SBX_INSTALLED": "0"
     },
     "unset": [
+      "ACQ_MSB_VERSION",
+      "ACQ_MSB_INSTALLED",
       "ACQ_BACKEND",
       "ACQ_STATE_DIR",
       "MSB_HOME",

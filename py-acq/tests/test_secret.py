@@ -23,7 +23,7 @@ import sys
 
 import pytest
 
-from acq_py import cli
+from acq_py import backends, cli
 
 
 def _env_msb(monkeypatch, tmp_path):
@@ -227,6 +227,9 @@ def test_sbx_secret_rm_backend_error_not_secret_missing(monkeypatch, tmp_path, c
     # accurate code (backend_not_found here) and never delete, never secret_missing.
     _env_sbx(monkeypatch, tmp_path)
     monkeypatch.setenv("ACQ_SBX_BIN", str(tmp_path / "definitely-missing-sbx"))
+    # The version floor probes the same program and would refuse first; skip it
+    # so the secret verb's own handling of an unanswering backend is exercised.
+    monkeypatch.setattr(backends, "check_version", lambda spec: None)
 
     rc, doc = _invoke(capsys, "--backend", "sbx", "secret", "rm", "-g", "usai", "--json")
     assert rc == 1
