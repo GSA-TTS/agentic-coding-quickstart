@@ -38,6 +38,19 @@ does not install Python globally or use WinGet. The embedded distribution is
 covered by the [Python Software Foundation License Version 2](https://docs.python.org/3/license.html);
 the release includes its notice as `PYTHON-NOTICE.txt`.
 
+The Windows x64 archive also carries acq's own managed runtime for the Python
+implementation (`ACQ_IMPL=python`): CPython's embedded distribution, pinned and
+SHA-256 verified by release CI, unpacked at `py-acq\runtime\` next to the
+readable source in `py-acq\src\` (`scripts/stage-windows-runtime`). Windows does
+not ship Python: run with arguments, as acq runs it, its `python.exe` App
+Execution Alias only prints a hint to install Python from the Microsoft Store
+and exits 9009 (run bare, it opens the Store). So an installed release never
+relies on a system interpreter. The
+runtime's `._pth` file fixes its import path to its standard library, its own
+directory and acq's source; the embedded interpreter then ignores `PYTHONPATH`
+and never adds the current directory. Its license notice ships as
+`py-acq\runtime\LICENSE.txt`.
+
 ---
 
 ## Multiple Workspaces
