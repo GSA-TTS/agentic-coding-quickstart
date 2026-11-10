@@ -5,7 +5,8 @@
 # exactly once (one confirm-absent listing, provider-input generation discarded,
 # lock released, backend child reaped, cursor restored), exit only after that
 # cleanup, and end with the conventional status: 130 for SIGINT, 143 for
-# SIGTERM. The "pid" cases send SIGTERM to acq's PID alone: acq is documented
+# SIGTERM, 129 for SIGHUP (a closed terminal). The "pid" cases send SIGTERM to
+# acq's PID alone: acq is documented
 # not to forward it, so it must wait for the provisioning step to finish and
 # then stop with 143.
 #
@@ -24,6 +25,7 @@ import select
 import signal
 import subprocess
 import sys
+import threading
 import time
 
 repo, stubdir = (Path(p).resolve() for p in sys.argv[1:3])
@@ -38,6 +40,11 @@ shell = sys.argv[3]
 # to the default across exec, so acq starts as it would from a terminal.
 signal.signal(signal.SIGINT, signal.default_int_handler)
 signal.signal(signal.SIGTERM, signal.SIG_DFL)
+signal.signal(signal.SIGHUP, signal.SIG_DFL)
+
+# The cases run in threads; one print call per line under a lock keeps each
+# PASS line whole.
+PRINT_LOCK = threading.Lock()
 
 # Intercept only `create`: record it, publish this process's PID (the one acq
 # registered as its backend child), and block. SIGINT is ignored in an
@@ -172,13 +179,14 @@ def run_case(backend, sig, target):
         assert not alive(child), (case, "acq exited before its backend child", bytes(output[-600:]))
         assert not list(provenance.glob(lock_glob)), (case, "acq exited before releasing the lock")
         drain(master, output)
-        # Ctrl-C and a group SIGTERM: the subshell's handlers exit 130/143 and
-        # acq exits with that status. A SIGTERM to acq alone: provisioning
+        # Ctrl-C and a group SIGTERM or SIGHUP: the subshell's handlers exit
+        # 130/143/129 and acq exits with that status. A SIGTERM to acq alone: provisioning
         # completes, then acq stops with 143 instead of going on.
         assert rc == 128 + sig, (case, "exit status", rc, bytes(output[-600:]))
         if target == "pid":
             assert b"stopped by SIGTERM after the provisioning step finished" in output, (case, bytes(output[-600:]))
-            print("PASS", case, "status", rc)
+            with PRINT_LOCK:
+                print(f"PASS {case} status {rc}", flush=True)
             return
         generations = list(provenance.glob(f"provider-input/{backend}/{name}.*/generations/*"))
         assert not generations, (case, "generation not discarded", generations)
@@ -188,7 +196,8 @@ def run_case(backend, sig, target):
         assert after.count(LISTING[backend]) == 1, (case, "cleanup listings", after)
         tail = bytes(output).rsplit(b"Creating sandbox", 1)[-1]
         assert b"\x1b[?25h" in tail, (case, "cursor not restored", tail)
-        print("PASS", case, "status", rc)
+        with PRINT_LOCK:
+            print(f"PASS {case} status {rc}", flush=True)
     except AssertionError as error:
         raise AssertionError(f"{case}: {error!r}") from None
     finally:
@@ -206,7 +215,8 @@ def run_case(backend, sig, target):
 
 print("shell", subprocess.run([shell, "-c", 'printf %s "$BASH_VERSION"'], capture_output=True,
                                text=True).stdout)
-cases = [(backend, sig, "group") for backend in ("sbx", "msb") for sig in (signal.SIGINT, signal.SIGTERM)]
+cases = [(backend, sig, "group") for backend in ("sbx", "msb")
+         for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)]
 cases += [(backend, signal.SIGTERM, "pid") for backend in ("sbx", "msb")]
 with ThreadPoolExecutor(max_workers=len(cases)) as pool:
     futures = [pool.submit(run_case, *args) for args in cases]

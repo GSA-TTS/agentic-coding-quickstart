@@ -58,6 +58,10 @@ acq_setup_stubs() {
   export HOME="$STUBDIR/home"
   export XDG_CONFIG_HOME="$STUBDIR/xdg"
   unset GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
+  # The fetch stubs read the transport allowlist acq sets on its anonymous
+  # attempt; an inherited value would make them refuse every fetch. Tests that
+  # need one set it themselves.
+  unset GIT_ALLOW_PROTOCOL
   # Git for Windows sets core.autocrlf=true system-wide, which rewrites LF->CRLF
   # in the stub repos and breaks byte-exact fixture assertions on Windows hosts.
   # Isolate the stub git from that host default so line endings are deterministic.

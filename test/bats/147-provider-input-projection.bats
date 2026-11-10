@@ -2290,6 +2290,68 @@ EOF
   done
 }
 
+# A child forked while the transaction subshell's traps are set can run them:
+# a signal that reaches it before Bash resets its inherited handlers is handled
+# with the subshell's trap commands, and Bash 5 then also runs the subshell's
+# EXIT trap there. Call the handlers from a child directly, as that window does,
+# for provision and terminate on both backends. The child must exit with the
+# handler's status without signalling the registered backend child, running the
+# uncreated-attempt cleanup or releasing the lock; the owner's own exit must
+# still do all of that exactly once.
+_owner_guard_script() { # BACKEND NAME VERB LOG
+  local backend="$1" name="$2" verb="$3" log="$4" script="$STUBDIR/owner-$2.sh"
+  cat > "$script" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+ACQ_SCRIPT_DIR="$REPO_ROOT"; ACQ_SOURCE_ONLY=1
+. "$REPO_ROOT/acq"
+. "$REPO_ROOT/acq.backends/$backend.sh"
+_acq_${backend}_cleanup_uncreated_attempt() { printf 'cleanup\n' >> "$log"; }
+lock="\$(acq_provider_input_root $backend $name).lock"
+_owner_body() {
+  sleep 30 & backend_child=\$!
+  _acq_provider_input_guardian_register_child "\$backend_child"
+  exit_line=\$(trap -p EXIT)
+  exit_cmd=\$(_acq_trap_line_cmd "\$exit_line")
+  [ -n "\$exit_cmd" ] || printf 'no-exit-trap\n' >> "$log"
+  ( _acq_provider_input_signal_exit 143; printf 'not-reached\n' >> "$log" ) || printf 'child-term=%s\n' "\$?" >> "$log"
+  ( _acq_provider_input_signal_exit 129; printf 'not-reached\n' >> "$log" ) || printf 'child-hup=%s\n' "\$?" >> "$log"
+  ( _acq_return_status 5; eval "\$exit_cmd" ) || printf 'child-exit=%s\n' "\$?" >> "$log"
+  kill -0 "\$backend_child" 2>/dev/null && printf 'backend-child-alive\n' >> "$log"
+  [ -d "\$lock" ] && printf 'lock-held\n' >> "$log"
+  kill "\$backend_child" 2>/dev/null || true
+  wait "\$backend_child" 2>/dev/null || true
+  exit 3
+}
+_acq_backend_${verb}_unlocked() { _owner_body; }
+rc=0
+acq_backend_$verb "$name" shell /tmp 2>/dev/null || rc=\$?
+printf 'rc=%s\n' "\$rc"
+[ -d "\$lock" ] && printf 'lock-left\n'
+true
+EOF
+  chmod +x "$script"
+  BASH_ENV='' run "$script"
+}
+
+@test "a child that inherits the transaction traps never cleans up for the owner" {
+  local backend verb name log want
+  for backend in sbx msb; do
+    for verb in provision terminate; do
+      name="owner-$verb-$backend"
+      log="$STUBDIR/$name.log"
+      : > "$log"
+      _owner_guard_script "$backend" "$name" "$verb" "$log"
+      assert_success
+      assert_output 'rc=3'
+      want=$(printf 'child-term=143\nchild-hup=129\nchild-exit=5\nbackend-child-alive\nlock-held')
+      # Only provision has an uncreated attempt to clean up; the owner runs it once.
+      [ "$verb" = provision ] && want=$(printf '%s\ncleanup' "$want")
+      assert_equal "$(cat "$log")" "$want"
+    done
+  done
+}
+
 # HUP is signal 1, so the conventional status is 129. Pin every provider-input
 # transaction HUP trap (provision and terminate, both backends).
 @test "provider-input transaction HUP traps exit 129" {

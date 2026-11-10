@@ -58,6 +58,9 @@ _ACQ_SPIN_ACTIVE=""
 _ACQ_SPIN_SELF_PID=""
 # PID of the shell that installed the spinner's traps (see _acq_spin_is_owner).
 _ACQ_SPIN_OWNER=""
+# PID of the shell that installed a provisioning or terminate subshell's traps
+# (see acq_trap_owner_mark); "" outside such a subshell.
+_ACQ_TRAP_OWNER=""
 
 # Prior EXIT/INT/TERM trap COMMANDS captured at acq_spin_start time, so the
 # spinner's own cleanup traps COMPOSE with (rather than clobber) a caller's
@@ -198,15 +201,43 @@ _acq_spin_self_pid() {
 # the brief window described above, and costs a repeated cleanup: the lesser
 # failure of the two.
 _acq_spin_is_owner() {
-  [ -n "$_ACQ_SPIN_OWNER" ] || return 0
-  _acq_spin_self_pid
-  [ -n "$_ACQ_SPIN_SELF_PID" ] || return 0
-  [ "$_ACQ_SPIN_SELF_PID" = "$_ACQ_SPIN_OWNER" ]
+  _acq_pid_is_self "$_ACQ_SPIN_OWNER"
 }
 
-# acq_run_signal_deferred COMMAND [ARG...] — run COMMAND (in acq, a provisioning
-# function whose body is a subshell with its own HUP/INT/TERM cleanup) so that a
-# SIGTERM or SIGHUP for acq's own shell waits for it.
+# _acq_pid_is_self OWNER — true when OWNER is empty, when this shell's PID
+# cannot be learned, or when OWNER is this shell's PID; false otherwise. The
+# shared test behind _acq_spin_is_owner and acq_trap_owner_is_self (an unknown
+# PID counts as the owner, for the reason given above).
+_acq_pid_is_self() {
+  [ -n "$1" ] || return 0
+  _acq_spin_self_pid
+  [ -n "$_ACQ_SPIN_SELF_PID" ] || return 0
+  [ "$_ACQ_SPIN_SELF_PID" = "$1" ]
+}
+
+# acq_trap_owner_mark / acq_trap_owner_is_self — the same installer-PID guard
+# for the provisioning and terminate subshells' own EXIT/HUP/INT/TERM traps
+# (acq.backends/sbx.sh and msb.sh). Mark right before installing them; every
+# handler then starts with acq_trap_owner_is_self, so a child forked while they
+# are set, and signalled before Bash resets its inherited handlers, exits
+# instead of signalling the registered backend children, discarding the
+# uncreated attempt or releasing the lock on the owner's behalf. The mark lives
+# in the subshell that sets it, so a nested subshell marking its own traps does
+# not change the outer one's.
+acq_trap_owner_mark() {
+  _acq_spin_self_pid
+  _ACQ_TRAP_OWNER="$_ACQ_SPIN_SELF_PID"
+}
+
+acq_trap_owner_is_self() {
+  _acq_pid_is_self "${_ACQ_TRAP_OWNER:-}"
+}
+
+# acq_run_signal_deferred COMMAND [ARG...] — run COMMAND (in acq, the provision
+# or terminate function, whose body is a subshell with its own HUP/INT/TERM
+# cleanup) so that a SIGTERM or SIGHUP for acq's own shell waits for it.
+# _ACQ_DEFERRED_STEP names the step in the "stopped by" message (default
+# "provisioning"; `acq rm` sets "removal").
 #
 # A terminal's Ctrl-C reaches the whole process group, and Bash already waits
 # for a foreground child that handles SIGINT before acting on it. SIGTERM and
@@ -242,7 +273,7 @@ acq_run_signal_deferred() {
   _acq_restore_trap_line "$_acq_sd_hup" HUP
   [ -n "$_ACQ_DEFERRED_SIGNAL" ] || return "$_acq_sd_rc"
   if [ "$_acq_sd_rc" -eq 0 ]; then
-    echo "acq: stopped by SIG$_ACQ_DEFERRED_SIGNAL after the provisioning step finished" >&2
+    echo "acq: stopped by SIG$_ACQ_DEFERRED_SIGNAL after the ${_ACQ_DEFERRED_STEP:-provisioning} step finished" >&2
   fi
   case "$_ACQ_DEFERRED_SIGNAL" in
     HUP) exit 129 ;;
@@ -331,8 +362,10 @@ acq_spin_start() {
     # then has no PID to kill) and an owner killed by SIGKILL, which runs no
     # trap at all.
     # NOTE: do NOT redirect this subshell's stderr to /dev/null — the frames ARE
-    # the stderr output. The "Terminated" job notice is suppressed instead by
-    # reaping under `wait … 2>/dev/null` in the stop/cleanup paths.
+    # the stderr output. It ends on TERM with `exit 0` rather than dying by the
+    # signal, so the shell never prints a "Terminated" job notice for it (see
+    # _acq_spin_end_animator).
+    trap 'exit 0' TERM
     while :; do
       for _f in $frames; do
         kill -0 "$owner" 2>/dev/null || exit 0
@@ -375,12 +408,7 @@ acq_spin_stop() {
   final=$(_acq_sanitize_msg "${1:-$_ACQ_SPIN_MSG}")
 
   if [ -n "$_ACQ_SPIN_ACTIVE" ]; then
-    # Kill the animator and reap it silently (suppress the shell's "Terminated"
-    # job notice by waiting with output discarded).
-    if [ -n "$_ACQ_SPIN_PID" ]; then
-      kill "$_ACQ_SPIN_PID" 2>/dev/null || true
-      wait "$_ACQ_SPIN_PID" 2>/dev/null || true
-    fi
+    _acq_spin_end_animator
     _ACQ_SPIN_PID=""
     _ACQ_SPIN_ACTIVE=""
     # Clear the animated line (\r + clear-to-EOL) and restore the cursor.
@@ -410,14 +438,40 @@ _acq_spin_restore_traps() {
   _ACQ_SPIN_OWNER=""
 }
 
-# _acq_spin_stop_animation — kill and reap the animator (if any), then clear the
-# line and restore the cursor. Prints no "done" marker.
+# _acq_spin_end_animator — stop the animator (if any) and return once it has
+# exited, without the `wait` builtin.
+#
+# Bash 5.2 can lose track of a child that exits while a trap runs: in the
+# Ctrl-C cleanup, `wait <animator>` then never returned although the animator
+# had exited and been reaped, and acq hung until it was killed. Measured with
+# test/bats/create-signal.py's sbx Ctrl-C case, six at a time on four CPUs:
+# 5 hangs in 80 runs under Bash 5.2.21, none in 60 under 5.3. Polling with
+# `kill -0` cannot hang that way. The `sleep` between polls makes the shell reap
+# an exited animator, which then no longer answers `kill -0`. The animator ends
+# on TERM with `exit 0`, so no "Terminated" job notice is printed for it (Bash
+# 3.2 would otherwise print one when it reaps a child killed by TERM); the poll
+# runs with stderr on /dev/null for a TERM that lands before the animator has
+# set that trap. After about two seconds the poll gives up rather than send
+# KILL to a PID that may have been reused: an animator still running then stops
+# by itself once this shell is gone (its kill -0 check on the owner).
+_acq_spin_end_animator() {
+  local pid="$_ACQ_SPIN_PID" tries=0
+  [ -n "$pid" ] || return 0
+  kill "$pid" 2>/dev/null || return 0
+  {
+    while kill -0 "$pid" 2>/dev/null && [ "$tries" -lt 100 ]; do
+      sleep 0.02
+      tries=$((tries + 1))
+    done
+  } 2>/dev/null
+  return 0
+}
+
+# _acq_spin_stop_animation — stop the animator (if any), then clear the line
+# and restore the cursor. Prints no "done" marker.
 _acq_spin_stop_animation() {
   if [ -n "$_ACQ_SPIN_ACTIVE" ]; then
-    if [ -n "$_ACQ_SPIN_PID" ]; then
-      kill "$_ACQ_SPIN_PID" 2>/dev/null || true
-      wait "$_ACQ_SPIN_PID" 2>/dev/null || true
-    fi
+    _acq_spin_end_animator
     _ACQ_SPIN_PID=""
     _ACQ_SPIN_ACTIVE=""
     printf '\r\033[K\033[?25h' >&2

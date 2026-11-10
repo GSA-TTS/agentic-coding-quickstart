@@ -692,6 +692,27 @@ _acq_recreate_name_check() {
   [ "$prev" != "--recreate" ] || acq_name_form_check create ""
 }
 
+# _acq_recreate_unsupported ARGS... — the Bash acq has no `create --recreate`
+# (the Python acq's recreation of a sandbox missing its read-only trusted-config
+# mount). Without this refusal the flag reached the backend arguments and NAME
+# was read as the agent, so a new sandbox was created from the current
+# directory instead. Only arguments before `--` count. Prints the refusal and
+# returns 1 when the flag is present.
+_acq_recreate_unsupported() {
+  local a
+  for a in "$@"; do
+    case "$a" in
+      --) return 0 ;;
+      --recreate|--recreate=*)
+        echo "acq: create: --recreate is not supported by the Bash implementation." >&2
+        echo "     Remove the sandbox ('acq rm NAME') and create it again, or use the Python acq (ACQ_IMPL=python)." >&2
+        return 1
+        ;;
+    esac
+  done
+  return 0
+}
+
 # _acq_attach_name_check ARGS... — `attach` is forwarded to the backend CLI, but
 # its first positional names an existing sandbox, so refuse one that could steer
 # a host path (acq_name_form_check) before forwarding, as Python's attach does.
@@ -1540,6 +1561,7 @@ case "$subcommand" in
   create)
     shift
     _acq_recreate_name_check "$@" || exit 1
+    _acq_recreate_unsupported "$@" || exit 2
     acq_backend_prepare
     # First-run onboarding (ADR-0031): offer `acq configure` once before we
     # provision, so a brand-new user picks kits up front. No-op after first run
@@ -1618,12 +1640,16 @@ case "$subcommand" in
       acq_print_selected_agent_kit "$first"
 
       # Pre-flight: validate the workspace path before provisioning (#issue).
-      # Only enforce on a fresh create — a re-attach to an existing sandbox
-      # doesn't re-mount, and the path may legitimately differ from cwd.
+      # The typed path is checked only on a fresh create — a re-attach to an
+      # existing sandbox doesn't re-mount, and the path may legitimately differ
+      # from cwd. A re-attach checks the workspace recorded at create instead,
+      # which is the one still mounted.
       ws=$(workspace_path "${create_args[@]}")
       if ! acq_backend_exists "$local_name"; then
         acq_workspace_specs_safe "${create_args[@]}" || exit 1
         preflight_workspace_path "$ws" || exit 1
+      else
+        acq_recorded_workspace_safe "${ACQ_RESOLVED_BACKEND}" "$local_name" || exit 1
       fi
 
       if acq_backend_exists "$local_name"; then
@@ -1757,6 +1783,9 @@ case "$subcommand" in
       # Capture staleness BEFORE the heal (the heal rewrites provenance to
       # "current"), then heal, then offer a refresh. Never
       # blocks; skipped under --no-update-check / ACQ_UPDATE_CHECK=0.
+      # The workspace recorded at create is still mounted: refuse it before the
+      # heal if it reaches acq's own directories.
+      acq_recorded_workspace_safe "${ACQ_RESOLVED_BACKEND}" "$first" || exit 1
       note_publish_ignored_on_reattach "$first"
       _pre_heal_status=$(acq_provenance_status "${ACQ_RESOLVED_BACKEND}" "$first")
       # Reload persisted CLI (`--kit`) / extra kit refs so the heal re-runs their
@@ -1868,6 +1897,7 @@ case "$subcommand" in
       echo "       acq run $local_name" >&2
       exit 1
     fi
+    acq_recorded_workspace_safe "${ACQ_RESOLVED_BACKEND}" "$local_name" || exit 1
     acq_backend_start "$local_name"
     # Reload the CLI (`--kit`) / extra kit refs persisted at provision so the
     # heal below re-runs THEIR startup too, not just the built-ins. Without this
@@ -1904,6 +1934,7 @@ case "$subcommand" in
       echo "       acq run $local_name        # (optionally 'acq stop $local_name' first)" >&2
       exit 1
     fi
+    acq_recorded_workspace_safe "${ACQ_RESOLVED_BACKEND}" "$local_name" || exit 1
     acq_backend_stop "$local_name" \
       || echo "acq: restart: stop failed; attempting start anyway." >&2
     acq_backend_start "$local_name"
@@ -1920,7 +1951,10 @@ case "$subcommand" in
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: rm: missing sandbox name" >&2; exit 1; }
     acq_name_form_check rm "$local_name" || exit 1
-    acq_backend_terminate "$local_name"
+    # A group SIGTERM/SIGHUP waits for the terminate cleanup (progress.sh), as
+    # for create: the terminate subshell holds the lock and the backend remove.
+    _ACQ_DEFERRED_STEP=removal
+    acq_run_signal_deferred acq_backend_terminate "$local_name"
     ;;
 
   exec)

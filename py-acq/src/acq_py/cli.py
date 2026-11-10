@@ -38,6 +38,7 @@ import os
 import signal
 import sys
 import threading
+import time
 from collections.abc import Iterator
 from typing import NoReturn
 
@@ -715,18 +716,34 @@ class _Terminated(BaseException):
         self.signum = signum
 
 
-# True once _raise_terminated has raised in the current main() call.
-_terminating = False
+# When _raise_terminated first raised in the current main() call
+# (time.monotonic()), or None before that.
+_terminating_since: float | None = None
+
+# How long after the first SIGTERM or SIGHUP a further one is ignored, in
+# seconds. The cleanup that the first signal started runs in that window.
+_SECOND_SIGNAL_GRACE_S = 10.0
 
 
 def _raise_terminated(signum: int, _frame: object) -> None:
-    # Raise once. A second SIGTERM during the cleanup it started would otherwise
-    # cut that cleanup short and leave the lock or the provider inputs behind.
-    global _terminating
-    if _terminating:
+    """Raise :class:`_Terminated` for the first signal; end the process for a late one.
+
+    A second SIGTERM soon after the first (a process group signalled twice, or
+    ``kill`` repeated at once) would otherwise cut the cleanup short and leave
+    the lock or the provider inputs behind, so within the grace period it is
+    ignored. After it, the cleanup may be hung, and ``kill`` (or ``timeout``
+    without ``-k``) must still stop acq: the signal's default disposition is
+    restored and the signal raised again, so acq ends by that signal, as a
+    shell reports with 128 + N.
+    """
+    global _terminating_since
+    if _terminating_since is None:
+        _terminating_since = time.monotonic()
+        raise _Terminated(signum)
+    if time.monotonic() - _terminating_since < _SECOND_SIGNAL_GRACE_S:
         return
-    _terminating = True
-    raise _Terminated(signum)
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
 
 
 @contextlib.contextmanager
@@ -739,8 +756,8 @@ def _terminate_raises() -> Iterator[None]:
     handlers can only be set from the main thread, so elsewhere nothing changes.
     The previous handlers are restored on the way out.
     """
-    global _terminating
-    _terminating = False
+    global _terminating_since
+    _terminating_since = None
     saved: list[tuple[int, object]] = []
     if threading.current_thread() is threading.main_thread():
         for name in ("SIGTERM", "SIGHUP"):

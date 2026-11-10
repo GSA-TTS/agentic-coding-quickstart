@@ -26,6 +26,18 @@ s=socket.socket(socket.AF_UNIX)
 s.bind(sys.argv[1])' "$1" >/dev/null 2>&1 && [ -S "$1" ]
 }
 
+# _skip_unless_link_fits NAME — skip when sandbox NAME's managed route link,
+# "$STUBDIR/state/msb/ssh-agent/NAME.sock", would not fit a unix socket address
+# (ACQ_MSB_SUN_PATH_MAX, 103 bytes: 104 on macOS and 108 on Linux, less the
+# NUL). msb.sh then routes the raw agent path instead, so a test about the
+# managed link would only measure a long temp directory, not acq.
+_skip_unless_link_fits() {
+  local link="$STUBDIR/state/msb/ssh-agent/$1.sock"
+  if [ "${#link}" -gt 103 ]; then
+    skip "temp path too long for a unix socket address: $link is ${#link} bytes (max 103); use a shorter TMPDIR"
+  fi
+}
+
 @test "vsock(10c1): create emits --vsock :3552/stream for a real host ssh-agent on msb >= 0.6.9" {
   _mk_unix_socket "$STUBDIR/agent.sock" || skip "python3 AF_UNIX socket unavailable"
   run bash -c '
@@ -708,6 +720,7 @@ PQ
 }
 
 @test "vsock(10c25): an unset or non-socket SSH_AUTH_SOCK at start leaves the link alone and never fails the verb" {
+  _skip_unless_link_fits holdbox
   mkdir -p "$STUBDIR/state/msb/ssh-agent"
   ln -s "$STUBDIR/gone.sock" "$STUBDIR/state/msb/ssh-agent/holdbox.sock"
   touch "$STUBDIR/not-a-socket25"
@@ -760,6 +773,10 @@ PQ
 }
 
 @test "vsock(10c27): the unreachable warning names the one-time recreate for a legacy route, and the host agent for a managed one" {
+  # Both names must be able to carry a managed link: the (a) remedy promises
+  # one only when the name allows it.
+  _skip_unless_link_fits oldbox
+  _skip_unless_link_fits newbox
   # (a) legacy route (no managed link): recreate once; afterwards start heals it.
   run bash -c '
     export STUB_MSB_VERSION=0.6.9 STUB_AGENT_UNREACHABLE=1

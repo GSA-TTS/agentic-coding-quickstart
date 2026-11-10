@@ -315,3 +315,34 @@ _prog() { # SHELL_SNIPPET
   assert_line 'PARENT_INT'
   assert_line 'COMSUB_RC=130'
 }
+
+# Bash 5.2 can lose a child that exits while a trap runs, so `wait <animator>`
+# in the Ctrl-C cleanup could block forever (seen as create-signal.py's sbx
+# Ctrl-C case timing out under load). Stopping the animator must therefore not
+# use the `wait` builtin, on the normal stop path or in the signal cleanup, and
+# must still return only once the animator is gone, with no "Terminated" job
+# notice for it (Bash 3.2 prints one for a child killed by TERM).
+@test "progress: stopping the animator never uses the wait builtin, and it is gone afterwards" {
+  local pids="$STUBDIR/animators"
+  _prog '_acq_progress_enabled() { return 0; }
+    wait() { echo "WAIT-BUILTIN $*"; builtin wait "$@"; }
+    acq_spin_start "phase one"
+    printf "%s\n" "$_ACQ_SPIN_PID" >> "'"$pids"'"
+    sleep 0.3
+    acq_spin_stop
+    kill -0 "$(tail -n 1 "'"$pids"'")" 2>/dev/null && echo "ANIMATOR-ALIVE-AFTER-STOP"
+    sleep 0.3
+    acq_spin_start "phase two"
+    printf "%s\n" "$_ACQ_SPIN_PID" >> "'"$pids"'"
+    sleep 0.3
+    _acq_spin_cleanup_signal TERM'
+  assert_equal "$status" 143
+  refute_output --partial 'WAIT-BUILTIN'
+  refute_output --partial 'ANIMATOR-ALIVE'
+  refute_output --partial 'Terminated'
+  local pid
+  while IFS= read -r pid; do
+    run kill -0 "$pid"
+    assert_failure
+  done < "$pids"
+}
