@@ -95,6 +95,19 @@ def git_env(*, keep_command_scope: bool = False) -> dict[str, str]:
     }
 
 
+def redirects_left(env: dict[str, str], *, keep_command_scope: bool = False) -> list[str]:
+    """The variables in ``env`` that :func:`git_env` would have removed, sorted.
+
+    Empty for an environment :func:`git_env` built with the same
+    ``keep_command_scope``; a caller that must never run git with a redirect
+    in place checks it before running git, and refuses otherwise.
+    """
+    drop = _GIT_REPO_ENV - _GIT_COMMAND_SCOPE_ENV if keep_command_scope else _GIT_REPO_ENV
+    return sorted(
+        k for k in env if k in drop or (not keep_command_scope and _GIT_CONFIG_PAIR.fullmatch(k))
+    )
+
+
 def _git(git: str, cwd: str, *args: str) -> str | None:
     """``git -C cwd ARGS`` stdout, or None if git failed or could not run."""
     try:

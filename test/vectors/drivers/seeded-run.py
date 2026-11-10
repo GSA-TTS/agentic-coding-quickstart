@@ -27,6 +27,10 @@ through its own CLI:
   at the temporary directory. ``{"git_repos": {}}`` gives an empty workspace
   outside any repository, for a vector whose stderr must not depend on the
   checkout it runs from (create and run note a workspace's GitHub repositories).
+* ``{"git_workspace": true}`` creates a workspace in a temporary directory
+  that is itself a git repository root with one committed file (no remote,
+  no network), for the clone-mode vectors. Later steps get its path for
+  ``{workspace}``, with git discovery capped at the temporary directory.
 * ``{"binding_record": PROVIDER, "text": TEXT}`` writes TEXT as PROVIDER's
   provider-credential binding record, at the path acq's state layout gives it
   (``<state root>/provider-credentials/<provider>.<first 8 hex of sha256>.json``).
@@ -116,6 +120,22 @@ def _git_repos(repos: dict, root: Path, env: dict) -> Path:
     return workspace
 
 
+def _git_workspace(root: Path, env: dict) -> Path:
+    git = shutil.which("git")
+    if git is None:
+        raise RuntimeError("git is not installed")
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    clean["GIT_CONFIG_NOSYSTEM"] = "1"
+    workspace = root / "ws"
+    workspace.mkdir()
+    (workspace / "file.txt").write_text("one\n", encoding="utf-8")
+    ident = ["-c", "user.name=vector", "-c", "user.email=vector@example.invalid", "-c", "commit.gpgsign=false"]
+    for args in (["init", "-q"], ["add", "file.txt"], [*ident, "commit", "-q", "-m", "init"]):
+        subprocess.run([git, "-C", str(workspace), *args], env=clean, check=True, capture_output=True)
+    env["GIT_CEILING_DIRECTORIES"] = str(root)
+    return workspace
+
+
 def _lock_bindings(locked: list[tuple[Path, int]]) -> None:
     directory = _binding_dir()
     for record in directory.glob("*.json"):
@@ -129,6 +149,8 @@ def _fixture(step: dict, root: Path, env: dict, locked: list) -> str | None:
     """Apply one fixture step; returns the workspace path when it created one."""
     if "git_repos" in step:
         return str(_git_repos(step["git_repos"], root, env))
+    if step.get("git_workspace") is True:
+        return str(_git_workspace(root, env))
     if "binding_record" in step:
         path = _binding_path(step["binding_record"])
         path.parent.mkdir(parents=True, exist_ok=True)

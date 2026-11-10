@@ -29,6 +29,7 @@ from .. import (
     kitspec,
     lock,
     msb,
+    msb_clone,
     provider_creds,
     provider_input,
     publish,
@@ -215,11 +216,13 @@ class _CreateOpts:
     ``publish`` are the validated ``--publish HOST:GUEST`` values (msb only,
     ADR-0034). ``extras`` are the extra kit refs the create-time picker chose,
     which replace config ``extra_kits`` for this sandbox; ``None`` keeps the
-    configured selection.
+    configured selection. ``clone`` is clone mode (``--clone`` or
+    ``ACQ_CLONE=1``, ADR-0027).
     """
 
     publish: tuple[str, ...] = ()
     extras: tuple[str, ...] | None = None
+    clone: bool = False
 
     def extra_refs(self) -> list[str] | None:
         return None if self.extras is None else list(self.extras)
@@ -314,7 +317,11 @@ def _new_msb_sandbox(
     command: str, emit_json: bool, *, agent: str, workspace: str, name: str, image_flag: str | None,
     cli_kits: list[str], opts: _CreateOpts = _NO_OPTS,
 ) -> tuple[dict | None, int | None]:
-    """Plan the kits, create the guest, apply the kits; the result data or an emitted exit code."""
+    """Plan the kits, create the guest, apply the kits; the result data or an emitted exit code.
+
+    With ``opts.clone`` the guest mounts a fresh scratch clone of ``workspace``
+    (:mod:`acq_py.msb_clone`); it goes with the guest if the kits fail.
+    """
     image = _resolve_image(image_flag, agent)
     plan, exit_code = _plan_msb_kits(agent, cli_kits, image, command, emit_json, opts.extra_refs())
     if plan is None:
@@ -324,12 +331,12 @@ def _new_msb_sandbox(
     if exit_code is not None:
         return None, exit_code
     try:
-        data = _create_sandbox("msb", agent, workspace, name, image, plan.agent_kit, plan=plan)
+        data = _create_sandbox("msb", agent, workspace, name, image, plan.agent_kit, plan=plan, clone=opts.clone)
     except common._ADAPTER_ERRORS as exc:
         return None, common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
     result, exit_code = _apply_msb_kits(name, plan, steps, command, emit_json, ro_required=data["ro_host_config"])
     if result is None:
-        _discard_half_created("msb", name)
+        _discard_half_created("msb", name, clone=opts.clone)
         return None, exit_code
     return {**data, **_kit_data(plan, result)}, None
 
@@ -363,7 +370,8 @@ def _new_sbx_sandbox(
 
     sbx applies the kits itself (``sbx create --kit DIR``). On the default image
     OpenCode comes from the pinned kit, so sbx is given the ``shell`` agent and
-    does not add its own OpenCode kit as well.
+    does not add its own OpenCode kit as well. ``opts.clone`` is sbx's
+    native ``--clone`` (ADR-0027).
     """
     image = _resolve_image(image_flag, agent)
     plan, exit_code = _plan_sbx_kits(agent, cli_kits, image, command, emit_json, opts.extra_refs())
@@ -388,7 +396,8 @@ def _new_sbx_sandbox(
     generic = agent == "opencode" and image == common.OPENCODE_DEVENV_IMAGE
     try:
         data = _create_sandbox("sbx", agent, workspace, name, image, plan.agent_kit,
-                               sbx_create=("shell" if generic else agent, prepared.flags), sbx_extra=mount)
+                               sbx_create=("shell" if generic else agent, prepared.flags), sbx_extra=mount,
+                               clone=opts.clone)
     except common._ADAPTER_ERRORS as exc:
         _sbx_provider_abandon(name, generation, created=True)
         return None, common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
@@ -497,7 +506,8 @@ def _finish_sbx_create(name: str, agent: str, plan: _KitPlan, token: str, data: 
         if plan.agent_kit is not None:
             kits.kit_applied_write("sbx", name, plan.agent_kit, plan.entrypoint or plan.agent_kit)
         kits.provenance_write("sbx", name)
-        state.record_write("sbx", name, agent=agent, workspace=data["workspace"], image=data["image"])
+        state.record_write("sbx", name, agent=agent, workspace=data["workspace"], image=data["image"],
+                           clone=True if data.get("clone") else None)
     except OSError as exc:
         raise sbx.SbxError(
             errors.FAILURE, f"could not record the applied kits for sandbox '{name}': {exc.strerror or exc}",
@@ -529,14 +539,47 @@ def _remove_confirmed(adapter, name: str) -> bool:
         return _confirmed_absent(adapter, name) is True
 
 
-def _discard_half_created(backend: str, name: str) -> None:
+def _discard_half_created(backend: str, name: str, *, clone: bool = False) -> None:
     """Remove a just-created sandbox (and its host records) after a failed kit apply.
 
     Mirrors the exec-ready timeout cleanup in ``_create_sandbox``: a sandbox
-    created but left without its agent binary must not strand.
+    created but left without its agent binary must not strand. ``clone`` says
+    this create made the scratch clone, which goes too once the guest is gone.
     """
-    _remove_quietly(common._adapter(backend), name)
+    adapter = common._adapter(backend)
+    _remove_quietly(adapter, name)
     _clear_host_records(backend, name)
+    if clone:
+        _drop_fresh_clone(adapter, name)
+
+
+def _drop_fresh_clone(adapter, name: str) -> None:
+    """Remove the scratch clone a failed create made, only once its sandbox is confirmed gone.
+
+    As in Bash: while the backend may still hold the sandbox, the scratch is
+    its mount source and stays for ``acq rm``.
+    """
+    if _confirmed_absent(adapter, name) is True:
+        _clone_cleanup_quietly(name)
+
+
+def _warn_unfetched_quietly(name: str) -> bool:
+    """:func:`msb_clone.warn_unfetched`, which must never stop ``rm``: a failure is reported and rm goes on."""
+    try:
+        return msb_clone.warn_unfetched(name)
+    except OSError as exc:
+        print(f"acq(msb): warning: could not check sandbox '{name}''s scratch clone for unfetched commits "
+              f"({exc.strerror or exc}); any it holds are discarded with it.", file=sys.stderr)
+        return False
+
+
+def _clone_cleanup_quietly(name: str) -> None:
+    """:func:`msb_clone.cleanup` (best-effort): a failure is reported, never raised."""
+    try:
+        msb_clone.cleanup(name)
+    except OSError as exc:
+        print(f"acq(msb): warning: could not remove sandbox '{name}''s scratch clone ({exc.strerror or exc}); "
+              f"remove it by hand once you no longer need its work.", file=sys.stderr)
 
 
 def _discard_recreated_guest(backend: str, name: str) -> bool:
@@ -586,7 +629,7 @@ def _clear_host_records(backend: str, name: str) -> None:
 
 def _has_host_records(backend: str, name: str) -> bool:
     """True when any per-sandbox host record exists, readable or not."""
-    held = backend == "msb" and msb.held_path(name).exists()
+    held = backend == "msb" and (msb.held_path(name).exists() or msb_clone.present(name))
     return held or state.record_path(backend, name).exists() or kits.kit_applied_present(backend, name)
 
 
@@ -659,6 +702,8 @@ def _create_sandbox(
     plan: _KitPlan | None = None,
     sbx_create: tuple[str, list[str]] | None = None,
     sbx_extra: tuple[list[str], list[str]] = ([], []),
+    clone: bool = False,
+    clone_src: str | None = None,
 ) -> dict:
     """Create + exec-ready gate + record write; returns the result record data.
 
@@ -669,6 +714,13 @@ def _create_sandbox(
     flags, ``sbx_extra`` its extra workspace and ``--env`` arguments (the
     read-only provider-input mount).
 
+    ``clone`` is clone mode (ADR-0027): on msb a fresh scratch clone of
+    ``workspace`` is made after the provider pre-gate and mounted at the
+    workspace's guest path, and removed again if the create fails and the
+    sandbox is confirmed gone; on sbx it is the native ``--clone``.
+    ``clone_src`` mounts an existing scratch instead (a recreate), which a
+    failure never removes. The record keeps ``workspace``, the real checkout.
+
     The secret-store lock is held, shared, from before the store is read for
     the new guest's secrets until the guest runs, where a global secret
     change's re-feed reaches it (see :func:`lock.secret_store_lock`). On sbx
@@ -678,30 +730,51 @@ def _create_sandbox(
     does not hold it; under the lock the gate runs again without asking.
     """
     adapter = common._adapter(backend)
+    kit_set = plan.kits if plan else []
+    fresh_clone = backend == "msb" and clone
+    if backend == "msb":
+        _provider_pregate(name, kit_set)
+        if fresh_clone:
+            clone_src = msb_clone.setup(name, workspace, lambda n: _exists_quietly("msb", n))
+    try:
+        return _create_guest(backend, adapter, agent, workspace, name, image, plan,
+                             sbx_create=sbx_create, sbx_extra=sbx_extra, clone=clone, clone_src=clone_src)
+    except BaseException:
+        if fresh_clone:
+            _drop_fresh_clone(adapter, name)
+        raise
+
+
+def _create_guest(
+    backend: str, adapter, agent: str, workspace: str, name: str, image: str, plan: _KitPlan | None, *,
+    sbx_create: tuple[str, list[str]] | None, sbx_extra: tuple[list[str], list[str]], clone: bool,
+    clone_src: str | None,
+) -> dict:
+    """The body of :func:`_create_sandbox` once any scratch clone exists."""
+    kit_set = plan.kits if plan else []
     error_cls = sbx.SbxError if backend == "sbx" else msb.MsbError
     secret_bindings, ro_mount, port_mappings = None, False, None
     unconfirmed = backend == "sbx"  # until the kit startup barrier is seen (_finish_sbx_create)
-    kit_set = plan.kits if plan else []
-    if backend == "msb":
-        _provider_pregate(name, kit_set)
+    cloned = bool(clone_src) if backend == "msb" else clone
     with _store_reading(error_cls, "nothing was created"):  # raised before anything was created
         if backend == "sbx":
             sbx_agent, kit_flags = sbx_create or (agent, [])
             adapter.create(name, image, workspace, agent=sbx_agent, kit_flags=kit_flags,
-                           extra_workspaces=sbx_extra[0], env=sbx_extra[1])
+                           extra_workspaces=sbx_extra[0], env=sbx_extra[1], clone=clone)
             # Recorded at once, so no verb attaches to the guest while its kits are unconfirmed.
             _write_record(backend, name, agent=agent, workspace=workspace, image=image, ro_host_config=False,
-                          kits_unconfirmed=True)
+                          kits_unconfirmed=True, clone=cloned)
         else:
             ro_mount = security.ro_mount_supported()
             secret_bindings, port_mappings = _msb_create(name, image, workspace, kit_set, ro_mount=ro_mount,
                                                          overrides=plan.publish if plan else (),
-                                                         preferred=dict(plan.preferred) if plan else None)
+                                                         preferred=dict(plan.preferred) if plan else None,
+                                                         clone_src=clone_src)
         if not _wait_exec_ready(backend, name):
             _not_exec_ready(backend, adapter, name, error_cls)
     _fresh_guest(backend, adapter, name, ro_mount=ro_mount)
     _write_record(backend, name, agent=agent, workspace=workspace, image=image, ro_host_config=ro_mount,
-                  kits_unconfirmed=unconfirmed)
+                  kits_unconfirmed=unconfirmed, clone=cloned)
     data: dict = {
         "name": name,
         "backend": backend,
@@ -710,6 +783,8 @@ def _create_sandbox(
         "state": "running",
         "image": image,
     }
+    if cloned:
+        data["clone"] = True
     if secret_bindings is not None:
         data["secret_bindings"] = secret_bindings
         data["ro_host_config"] = ro_mount
@@ -748,7 +823,7 @@ def _fresh_guest(backend: str, adapter, name: str, *, ro_mount: bool) -> None:
 
 
 def _write_record(backend: str, name: str, *, agent: str, workspace: str, image: str, ro_host_config: bool,
-                  kits_unconfirmed: bool = False) -> None:
+                  kits_unconfirmed: bool = False, clone: bool = False) -> None:
     """Write the new guest's host record, or remove the guest and raise the adapter's error.
 
     Without its host record the guest is unusable (run/attach refuse a sandbox
@@ -757,7 +832,8 @@ def _write_record(backend: str, name: str, *, agent: str, workspace: str, image:
     try:
         state.record_write(backend, name, agent=agent, workspace=workspace, image=image,
                            ro_host_config=True if ro_host_config else None,
-                           kits_unconfirmed=True if kits_unconfirmed else None)
+                           kits_unconfirmed=True if kits_unconfirmed else None,
+                           clone=True if clone else None)
     except OSError as exc:
         removed = _remove_confirmed(common._adapter(backend), name)
         error_cls = sbx.SbxError if backend == "sbx" else msb.MsbError
@@ -772,8 +848,10 @@ def _write_record(backend: str, name: str, *, agent: str, workspace: str, image:
 
 def _msb_create(name: str, image: str, workspace: str, kit_set: list[kit_msb.Kit], *, ro_mount: bool,
                 overrides: tuple[str, ...] = (), preferred: dict[str, int] | None = None,
-                ) -> tuple[list[str], list[dict]]:
+                clone_src: str | None = None) -> tuple[list[str], list[dict]]:
     """``msb create`` with the kit set's flags; its secret bindings and declared port mappings.
+
+    ``clone_src`` is a scratch clone to mount at ``workspace``'s guest path.
 
     The published ports are mapped first (:func:`publish.create_port_flags`): a
     port that cannot be mapped refuses the create before anything is staged.
@@ -804,7 +882,7 @@ def _msb_create(name: str, image: str, workspace: str, kit_set: list[kit_msb.Kit
     try:
         bindings = msb.create(
             name, image, workspace, memory=msb.DEFAULT_MEMORY, cpus=msb.DEFAULT_CPUS,
-            egress_kits=kit_msb.egress_names(kit_set), kit_flags=flags,
+            egress_kits=kit_msb.egress_names(kit_set), kit_flags=flags, clone_source=clone_src,
         ) or []
     except BaseException:
         _provider_abandon(name, generation)
@@ -1006,6 +1084,36 @@ def _provider_kits_flag(parsed) -> contextlib.AbstractContextManager[None]:
     return contextlib.nullcontext()
 
 
+CLONE_REATTACH_NOTE = (
+    "acq: note: --clone/ACQ_CLONE is ignored when re-attaching an existing sandbox ('{name}'); it applies only "
+    "at create. Remove the sandbox first ('acq rm {name}') to recreate on a disposable clone."
+)
+CLONE_RECREATE_NOTE = (
+    "acq: note: --clone/ACQ_CLONE is ignored by 'create --recreate' ('{name}'); the sandbox is rebuilt on the "
+    "workspace it was created with."
+)
+
+
+def _clone_path_failure(command: str, backend: str, path: str | None, emit_json: bool) -> int | None:
+    """Bash's msb refusals of a clone-mode create that names no usable primary workspace.
+
+    The scratch clone needs a repository to clone, and a read-only primary
+    makes no sense for a disposable copy. Returns the emitted exit code, else None.
+    """
+    if backend != "msb":
+        return None
+    if not path:
+        return common._operational_failure(
+            command, errors.VALIDATION_FAILED, "--clone requires a workspace path (the repo to clone).", None,
+            emit_json)
+    if path.endswith(":ro"):
+        return common._operational_failure(
+            command, errors.VALIDATION_FAILED,
+            f"--clone requires a writable primary workspace; '{common._printable(path)}' is read-only.",
+            "Drop ':ro' \u2014 the agent works on a disposable clone; the real checkout is untouched.", emit_json)
+    return None
+
+
 def _create_opts(parsed, command: str, backend: str, emit_json: bool) -> tuple[_CreateOpts | None, int | None]:
     """The ``create``/``run`` options for a new sandbox, or the emitted refusal.
 
@@ -1022,7 +1130,7 @@ def _create_opts(parsed, command: str, backend: str, emit_json: bool) -> tuple[_
         return None, common._operational_failure(
             command, errors.UNSUPPORTED, publish.SBX_REFUSAL, publish.SBX_REFUSAL_REMEDIATION, emit_json,
         )
-    return _CreateOpts(publish=tuple(pairs)), None
+    return _CreateOpts(publish=tuple(pairs), clone=common.clone_requested(parsed)), None
 
 
 def run_create(parsed, emit_json: bool, backend: str) -> int:
@@ -1047,6 +1155,10 @@ def _run_create(parsed, emit_json: bool, backend: str) -> int:
             f"unknown agent: {parsed.agent!r} (expected one of: {', '.join(sorted(common.KNOWN_AGENTS))})",
             emit_json,
         )
+    if common.clone_requested(parsed):
+        exit_code = _clone_path_failure("create", backend, parsed.path, emit_json)
+        if exit_code is not None:
+            return exit_code
     workspace, exit_code = common._validate_workspace("create", parsed.path, emit_json)
     if exit_code is not None:
         return exit_code
@@ -1214,6 +1326,8 @@ def run_recreate(parsed, emit_json: bool, backend: str) -> int:
     sandbox that is NOT in the security exception — it is never a general "reset".
     """
     name = parsed.recreate
+    if common.clone_requested(parsed):
+        print(CLONE_RECREATE_NOTE.format(name=name), file=sys.stderr)
     try:
         record = state.record_read(backend, name)
     except state.StateSchemaError as exc:
@@ -1317,7 +1431,10 @@ def _recreate_locked(name: str, emit_json: bool, backend: str) -> int:
             f"remove it with 'acq rm {name}' and create it again",
             emit_json,
         )
-    data, exit_code = _recreate_msb(name, record, agent, workspace, image, emit_json)
+    clone_src, exit_code = _recreate_clone_source(name, record, workspace, emit_json)
+    if exit_code is not None:
+        return exit_code
+    data, exit_code = _recreate_msb(name, record, agent, workspace, image, emit_json, clone_src)
     if data is None:
         return exit_code if exit_code is not None else errors.EXIT_FAILURE
     data = {**data, "recreated": True}
@@ -1331,8 +1448,39 @@ def _recreate_locked(name: str, emit_json: bool, backend: str) -> int:
     return errors.EXIT_SUCCESS
 
 
+def _recreate_clone_source(name: str, record: dict, workspace: str, emit_json: bool) -> tuple[str | None, int | None]:
+    """The scratch a clone sandbox is rebuilt on, never the real checkout; ``(scratch, None)`` or a refusal.
+
+    A clone sandbox is one whose record says ``clone``, or, for a record
+    without the key (a sandbox the Bash acq created), one with anything at its
+    scratch-clone path. The scratch must still be a clone whose ``.origin``
+    names the recorded workspace; otherwise the recreate is refused before the
+    old guest is touched. The guest owns the scratch and can break it (rename
+    its ``.git``, say), and rebuilding on the real checkout would hand the
+    agent the repository the user wanted kept out of reach.
+    """
+    if not record.get("workspace"):
+        return None, None
+    marked = record.get("clone") is True or ("clone" not in record and msb_clone.present(name))
+    if not marked:
+        return None, None
+    try:
+        scratch, matches = msb_clone.recorded_scratch(name, workspace)
+    except OSError:
+        scratch, matches = None, False
+    if scratch and matches:
+        return scratch, None
+    return None, common._operational_failure(
+        "create", errors.VALIDATION_FAILED,
+        f"sandbox '{name}' runs on a disposable clone, but its scratch clone of {workspace} is missing or "
+        "damaged, or names another checkout; refusing to rebuild it on the real checkout",
+        f"remove it with 'acq rm {name}' and create it again with --clone", emit_json,
+    )
+
+
 def _recreate_msb(
-    name: str, record: dict, agent: str, workspace: str, image: str, emit_json: bool
+    name: str, record: dict, agent: str, workspace: str, image: str, emit_json: bool,
+    clone_src: str | None = None,
 ) -> tuple[dict | None, int | None]:
     """Replace the guest with what a fresh create on this host builds, then reapply its kits.
 
@@ -1372,7 +1520,7 @@ def _recreate_msb(
         # already removed out of band has nothing to destroy.
         if msb.exists(name):
             msb.remove(name)
-        data = _create_sandbox("msb", agent, workspace, name, image, plan.agent_kit, plan=plan)
+        data = _create_sandbox("msb", agent, workspace, name, image, plan.agent_kit, plan=plan, clone_src=clone_src)
     except common._ADAPTER_ERRORS as exc:
         return None, common._operational_failure("create", exc.code, exc.message, exc.remediation, emit_json)
     if not data["ro_host_config"] and security.ro_mount_platform_problem() is None:
@@ -1449,6 +1597,7 @@ def _run_prepare_locked(
     fails.
     """
     adapter = common._adapter(backend)
+    clone = common.clone_requested(parsed)
     if not adapter.exists(name):
         new_sandbox = _new_sbx_sandbox if backend == "sbx" else _new_msb_sandbox
         data, exit_code = new_sandbox(
@@ -1460,6 +1609,9 @@ def _run_prepare_locked(
                 _forget_scoped_token(backend, name)
             return None, exit_code
         return {**data, "action": "created"}, None
+    if clone:
+        # Create-time only (ADR-0027): a re-attach does not re-mount.
+        print(CLONE_REATTACH_NOTE.format(name=name), file=sys.stderr)
     found, exit_code = _reattach_workspace(backend, name, workspace, emit_json)
     if found is None:
         return None, exit_code
@@ -1505,6 +1657,10 @@ def _run_run(parsed, emit_json: bool, backend: str) -> int:
     if opts is None:
         return exit_code if exit_code is not None else errors.EXIT_FAILURE
     if target in common.KNOWN_AGENTS:
+        if common.clone_requested(parsed):
+            exit_code = _clone_path_failure("run", backend, parsed.path, emit_json)
+            if exit_code is not None:
+                return exit_code
         workspace, exit_code = common._validate_workspace("run", parsed.path, emit_json)
         if exit_code is not None:
             return exit_code
@@ -1972,6 +2128,9 @@ def _rm_locked(name: str, emit_json: bool, backend: str) -> int:
     """
     adapter = common._adapter(backend)
     backend_absent = False
+    # Clone mode (ADR-0027): say what the scratch clone holds before anything is
+    # deleted; it goes only once the sandbox is known to be gone.
+    unfetched = backend == "msb" and _warn_unfetched_quietly(name)
     try:
         adapter.remove(name)
     except common._ADAPTER_ERRORS as exc:
@@ -1997,9 +2156,13 @@ def _rm_locked(name: str, emit_json: bool, backend: str) -> int:
             )
         backend_absent = True
     _clear_host_records(backend, name)
+    if backend == "msb":
+        _clone_cleanup_quietly(name)
     data: dict = {"name": name, "backend": backend, "removed": True}
     if backend_absent:
         data["backend_absent"] = True
+    if unfetched:
+        data["clone_unfetched"] = True
     if emit_json:
         print(json.dumps(envelope.success("rm", data)))
     elif backend_absent:

@@ -445,6 +445,21 @@ def _stdin_is_terminal() -> bool:
     return hostexec.stream_is_terminal(sys.stdin)
 
 
+def clone_env() -> bool:
+    """True when ``ACQ_CLONE`` asks for clone mode the way Bash reads it.
+
+    Bash enables clone mode only for the exact value ``1``
+    (``[ "${ACQ_CLONE:-0}" = "1" ]`` in ``acq`` and both adapters); unset,
+    empty, ``0`` or any other value, ``true`` and `` 1`` included, leaves it off.
+    """
+    return os.environ.get("ACQ_CLONE") == "1"
+
+
+def clone_requested(parsed) -> bool:
+    """Clone mode for a ``create``/``run``: ``--clone``, or ``ACQ_CLONE=1`` (ADR-0027)."""
+    return bool(getattr(parsed, "clone", False)) or clone_env()
+
+
 def _validate_workspace(command: str, path: str | None, emit_json: bool) -> tuple[str | None, int | None]:
     """Resolve the workspace to an absolute directory, or emit a validation failure."""
     if not path:
@@ -488,6 +503,8 @@ _ACQ_PATH_OVERRIDES = (
     ("kit cache", "ACQ_MSB_KIT_CACHE"),
     ("kit startup staging directory", "ACQ_MSB_STARTUP_STAGE_DIR"),
     ("balanced-tier hosts file", "ACQ_MSB_BALANCED_HOSTS_FILE"),
+    # Each scratch clone's .origin names the checkout acq runs git in at rm.
+    ("scratch clones dir", "ACQ_MSB_CLONES_DIR"),
 )
 
 

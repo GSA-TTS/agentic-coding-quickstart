@@ -537,6 +537,7 @@ def create(
     *,
     egress_kits: Sequence[EgressKit],
     kit_flags: list[str] | None = None,
+    clone_source: str | None = None,
 ) -> list[str]:
     """Create a sandbox; returns its ``ENV@HOST`` secret bindings (non-secret).
 
@@ -556,6 +557,12 @@ def create(
     the kits' other create-time flags (the read-only host-config mount, the
     startup script, CA trust), built by :mod:`acq_py.kit_msb`.
 
+    The guest gets ``ACQ_WORKSPACE`` (the guest path of the workspace) on every
+    create, and ``ACQ_CLONE=1`` when ``clone_source`` is set: then the host
+    directory mounted at that guest path is the scratch clone
+    (:mod:`acq_py.msb_clone`, ADR-0027), not ``workspace`` itself. Kits key on
+    the two variables to act on the clone and never on the real checkout.
+
     Every secret the sandbox can be injected with (:func:`secret_bindings`) is
     bound as ``--secret ENV@HOST``; the values travel only in the child's
     environment mapping. The bindings are recorded host-side so a later
@@ -570,10 +577,14 @@ def create(
         "--name",
         name,
         "--volume",
-        f"{workspace}:{guest}",
+        f"{clone_source or workspace}:{guest}",
         "-w",
         guest,
+        "--env",
+        f"ACQ_WORKSPACE={guest}",
     ]
+    if clone_source:
+        argv += ["--env", "ACQ_CLONE=1"]
     if memory:
         argv += ["-m", memory]
     if cpus:
