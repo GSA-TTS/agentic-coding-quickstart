@@ -346,6 +346,81 @@ def test_sbx_create_scopes_before_the_create(monkeypatch, tmp_path, capsys):
     assert all(TOKEN not in " ".join(argv) for argv, _ in calls)
 
 
+@pytest.mark.provider_key
+@pytest.mark.parametrize("verb", ["create", "run"])
+def test_a_token_the_prompt_stored_is_removed_when_the_msb_create_fails(monkeypatch, tmp_path, capsys, verb):
+    # Left behind, the token would be bound to the next sandbox created under
+    # this name, whatever workspace it mounts.
+    _msb_env(monkeypatch, tmp_path)
+    ws = _github_ws(monkeypatch, tmp_path)
+    _write_config("scope_github_token: yes\n")
+    _terminal(monkeypatch, answer="\n", token=TOKEN)
+    monkeypatch.setenv("ACQ_MSB_STUB_FAIL", "create")
+    rc, _, out, err = _main(capsys, "--backend", "msb", verb, "opencode", str(ws), "--name", "adv")
+    assert rc == 1, err
+    assert "stored a GitHub token for sandbox 'adv'" in err
+    assert "removed the GitHub token stored for 'adv'" in err
+    assert secretstore.get(secretstore.key_for("github", "adv")) is None
+    assert provider_creds.github_scope_read("msb", "adv") is None
+    assert TOKEN not in out + err
+
+
+@pytest.mark.provider_key
+def test_a_token_the_prompt_stored_is_removed_from_sbx_too_when_the_create_fails(monkeypatch, tmp_path, capsys):
+    from acq_py import sbx
+
+    _sbx_env(monkeypatch, tmp_path)
+    ws = _github_ws(monkeypatch, tmp_path)
+    _write_config("scope_github_token: yes\n")
+    _terminal(monkeypatch, answer="\n", token=TOKEN)
+    monkeypatch.setenv("ACQ_SBX_STUB_FAIL", "create")
+    rc, _, _, err = _main(capsys, "--backend", "sbx", "create", "opencode", str(ws), "--name", "adv")
+    assert rc == 1, err
+    assert secretstore.get(secretstore.key_for("github", "adv")) is None
+    assert not sbx.secret_has(secretstore.sandbox_scope("adv"), "github")
+
+
+@pytest.mark.provider_key
+def test_a_token_stored_before_the_command_is_kept_when_the_create_fails(monkeypatch, tmp_path, capsys):
+    _msb_env(monkeypatch, tmp_path)
+    ws = _github_ws(monkeypatch, tmp_path)
+    secretstore.set_secret("github", "adv", TOKEN)  # the user's own, from 'acq secret set adv github'
+    monkeypatch.setenv("ACQ_MSB_STUB_FAIL", "create")
+    rc, _, _, err = _main(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "adv")
+    assert rc == 1, err
+    assert secretstore.get(secretstore.key_for("github", "adv")) == TOKEN
+    assert "removed the GitHub token" not in err
+
+
+@pytest.mark.provider_key
+@pytest.mark.parametrize("verb", ["create", "run"])
+def test_the_scope_prompt_does_not_hold_the_sandbox_lock(monkeypatch, tmp_path, capsys, verb):
+    # A prompt waits on the user; holding the lifecycle lock meanwhile would
+    # stall every other acq command on the sandbox (and a backend secret path
+    # that takes the lock would wait on itself).
+    from acq_py import lock
+
+    _msb_env(monkeypatch, tmp_path)
+    ws = _github_ws(monkeypatch, tmp_path)
+    _terminal(monkeypatch, answer="n\n")
+    monkeypatch.setenv("ACQ_SANDBOX_LOCK_TIMEOUT", "0.2")
+    free: list[bool] = []
+
+    def read_line(self):
+        try:
+            with lock.sandbox_lock("msb", "adv"):
+                free.append(True)
+        except lock.SandboxLockTimeout:
+            free.append(False)
+        return "n\n"
+
+    monkeypatch.setattr(configure.Terminal, "read_line", read_line)
+    monkeypatch.setattr(msb, "launch", lambda *a, **k: 0)
+    rc, _, _, err = _main(capsys, "--backend", "msb", verb, "opencode", str(ws), "--name", "adv")
+    assert rc == 0, err
+    assert free == [True]
+
+
 def test_every_advisory_line_is_ascii(monkeypatch, tmp_path, capsys):
     # On Windows a child's stderr is often in the console code page (cp1252),
     # where a non-ASCII character does not decode as UTF-8 for whoever reads it.

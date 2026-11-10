@@ -732,15 +732,12 @@ def select(agent: str, cli_kits: list[str], *, image_is_default: bool,
            extras: list[str] | None = None) -> tuple[list[Kit], kitspec.KitSelection]:
     """Select, verify and parse a sandbox's kit set (Bash ``_build_kit_list``).
 
-    As on msb, config ``extra_kits`` take part, recorded ``extras`` replace
-    ``ACQ_EXTRA_KITS``, and on the default image the agent's bundled kit is
-    required. Raises :class:`kitspec.KitSelectionError` or :class:`sbx.SbxError`.
+    As on msb (:func:`kit_msb.selection_for`): a new sandbox (``extras`` is
+    None) folds in config ``extra_kits``; an existing one is rebuilt from its
+    recorded ``extras`` and never adds a configured default. Raises
+    :class:`kitspec.KitSelectionError` or :class:`sbx.SbxError`.
     """
-    required = agent if agent in kitspec.AGENT_BUNDLE_KITS and image_is_default else None
-    env = {**os.environ, "ACQ_EXTRA_KITS": " ".join(extras)} if extras else os.environ
-    selection = kitspec.select_kits(agent, cli_kits=cli_kits, env=env, configured_extras=True,
-                                    required_agent_kit=required)
-    selection.require()
+    selection = kit_msb.selection_for(agent, cli_kits, image_is_default=image_is_default, extras=extras)
     return resolve(selection), selection
 
 

@@ -439,3 +439,79 @@ def test_run_typed_path_reattach_fails_closed_on_newer_schema(monkeypatch, tmp_p
     rc, doc = _invoke(capsys, "--backend", "msb", "run", "opencode", str(ws), "--name", "future", "--json")
     assert rc == 1
     assert doc["error"]["code"] == "state_schema_unsupported"
+
+
+# ---------------------------------------------------------------------------
+# A workspace must not hold acq's own directories: the guest could rewrite
+# acq's records and its read-only trusted config through the writable mount.
+# ---------------------------------------------------------------------------
+
+def _assert_overlap_refused(rc, doc, relation, what):
+    assert rc == 1, doc
+    assert doc["error"]["code"] == "validation_failed"
+    assert f"{relation} acq's {what}" in doc["error"]["message"]
+    assert "not your home directory itself" in doc["error"]["remediation"]
+
+
+@pytest.mark.parametrize("verb", ["create", "run"])
+def test_a_workspace_containing_the_state_dir_is_refused(monkeypatch, tmp_path, capsys, verb):
+    _env(monkeypatch, tmp_path)  # ACQ_STATE_DIR is tmp_path/state
+    _forbid_launch(monkeypatch)
+    rc, doc = _invoke(capsys, "--backend", "msb", verb, "opencode", str(tmp_path), "--name", "box", "--json")
+    _assert_overlap_refused(rc, doc, "contains", "state directory")
+    assert not cli.msb.exists("box")
+    assert state.record_read("msb", "box") is None
+
+
+def test_a_workspace_inside_the_state_dir_is_refused(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path)
+    ws = tmp_path / "state" / "msb" / "ws"
+    ws.mkdir(parents=True)
+    rc, doc = _invoke(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "box", "--json")
+    _assert_overlap_refused(rc, doc, "is inside", "state directory")
+    assert not cli.msb.exists("box")
+
+
+@pytest.mark.parametrize("var,what", [("XDG_CONFIG_HOME", "config directory"),
+                                      ("ACQ_SECRET_STORE_DIR", "secret store"),
+                                      ("XDG_STATE_HOME", "state directory")])
+def test_a_workspace_holding_the_config_secret_store_or_provenance_dir_is_refused(
+        monkeypatch, tmp_path, capsys, var, what):
+    _env(monkeypatch, tmp_path)
+    ws = tmp_path / "project"
+    (ws / "inner").mkdir(parents=True)
+    monkeypatch.setenv(var, str(ws / "inner"))  # XDG_STATE_HOME moves the provenance tree (host-config dirs)
+    rc, doc = _invoke(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "box", "--json")
+    _assert_overlap_refused(rc, doc, "contains", what)
+    assert not cli.msb.exists("box")
+
+
+def test_a_workspace_reached_through_a_link_is_compared_canonically(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path)
+    link = tmp_path.parent / f"{tmp_path.name}-link"
+    link.symlink_to(tmp_path, target_is_directory=True)
+    try:
+        rc, doc = _invoke(capsys, "--backend", "msb", "create", "opencode", str(link), "--name", "box", "--json")
+    finally:
+        link.unlink()
+    _assert_overlap_refused(rc, doc, "contains", "state directory")
+
+
+def test_run_by_name_refuses_a_recorded_workspace_holding_acq_state(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path, catalog={"old": "running"})
+    _seed_record({"schema": 1, "name": "old", "backend": "msb", "agent": "shell", "workspace": str(tmp_path)})
+    _forbid_launch(monkeypatch)
+    rc, doc = _invoke(capsys, "--backend", "msb", "run", "old", "--json")
+    _assert_overlap_refused(rc, doc, "contains", "state directory")
+
+
+def test_recreate_refuses_a_recorded_workspace_holding_acq_state(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path, catalog={"sec": "running"})
+    _seed_record({**_SEC_RECORD, "workspace": str(tmp_path)})
+    monkeypatch.setenv("ACQ_SECURITY_MOUNT_STATE", json.dumps({"sec": "missing"}))
+    removed = []
+    monkeypatch.setattr(cli.msb, "remove", lambda name: removed.append(name))
+    rc, doc = _invoke(capsys, "--backend", "msb", "create", "--recreate", "sec", "--yes", "--json")
+    _assert_overlap_refused(rc, doc, "contains", "state directory")
+    assert removed == []
+    assert state.record_read("msb", "sec")["ro_host_config"] is True

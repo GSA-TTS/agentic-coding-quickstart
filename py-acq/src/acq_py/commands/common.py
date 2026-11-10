@@ -32,6 +32,7 @@ from .. import (
     secretstore,
     security,
     state,
+    userdirs,
 )
 
 # Both adapters and the acq secret store raise an error carrying the same
@@ -472,7 +473,75 @@ def _validate_workspace(command: str, path: str | None, emit_json: bool) -> tupl
         unsafe = _workspace_unsafe(command, real, f"{path} (resolves to {real})", emit_json)
         if unsafe is not None:
             return None, unsafe
+    overlap = _workspace_overlap_failure(command, resolved, emit_json)
+    if overlap is not None:
+        return None, overlap
     return resolved, None
+
+
+def _acq_host_dirs() -> list[tuple[str, str]]:
+    """acq's own host directories, as ``(what, path)``: what a sandbox must never write.
+
+    The state tree (sandbox records), the provenance tree (each sandbox's
+    host-config directory and provider input, which acq mounts READ-ONLY into
+    the guest as trusted configuration), the config directory and the secret
+    store. A location that cannot be resolved (a relative override) is
+    refused by the command's own setup, so it is left out here.
+    """
+    getters: list[tuple[str, Callable[[], object]]] = [
+        ("state directory", state.state_dir),
+        ("state directory", state.provenance_dir),
+        ("config directory", lambda: config.config_path().parent),
+        ("secret store", lambda: secretstore._layout().file_dir),
+        ("secret store", lambda: secretstore._layout().meta_dir),
+        ("secret store", lambda: secretstore._layout().index_file),
+    ]
+    out: list[tuple[str, str]] = []
+    for what, get in getters:
+        try:
+            out.append((what, str(get())))
+        except (userdirs.UserDirError, secretstore.SecretStoreError, OSError):
+            continue
+    return out
+
+
+def _within(child: str, parent: str) -> bool:
+    """True when ``child`` is ``parent`` or below it (both absolute and canonical)."""
+    try:
+        return os.path.commonpath([child, parent]) == parent
+    except ValueError:  # different drives on Windows
+        return False
+
+
+def _workspace_overlap_failure(command: str, workspace: str, emit_json: bool) -> int | None:
+    """Refuse a workspace that contains, or lies inside, one of acq's own directories.
+
+    The workspace is mounted WRITABLE. Were acq's state under it (``acq run
+    opencode ~``, say), the guest could rewrite the host records acq trusts and
+    the trusted configuration acq mounts read-only, through the writable mount,
+    which defeats the read-only mount entirely (ADR-0035). Both sides are
+    compared canonical (links resolved; case-folded where the platform is
+    case-insensitive). Returns the emitted exit code (``validation_failed``).
+    """
+    ws = os.path.normcase(REALPATH(workspace))
+    for what, path in _acq_host_dirs():
+        own = os.path.normcase(REALPATH(path))
+        if _within(own, ws):
+            relation = "contains"
+        elif _within(ws, own):
+            relation = "is inside"
+        else:
+            continue
+        return _operational_failure(
+            command,
+            errors.VALIDATION_FAILED,
+            f"workspace {_printable(workspace)} {relation} acq's {what} ({_printable(path)}); a sandbox could "
+            "change acq's host records and its read-only trusted configuration through the writable workspace mount",
+            "use a project directory that holds none of acq's state, config or secret-store directories "
+            "(not your home directory itself), then re-run",
+            emit_json,
+        )
+    return None
 
 
 # Module-local seam for the host OS class, read by the workspace colon check so
