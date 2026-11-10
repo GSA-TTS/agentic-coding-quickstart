@@ -1582,3 +1582,90 @@ def test_recreate_of_a_clone_sandbox_keeps_ports_as_preferences_and_its_scratch(
     assert call["preferred"] == {"6767": 6868} and call["overrides"] == ()
     assert call["clone_src"] == os.path.realpath(_scratch(tmp_path))
     assert doc["data"]["clone"] is True
+
+
+# ---------------------------------------------------------------------------
+# Third review: ref tips, bounded read, find_scratch candidate, and Windows
+# remover tests.
+# ---------------------------------------------------------------------------
+
+@posix_only
+@root_ignores_modes
+@pytest.mark.parametrize("target", ["loose", "packed"])
+def test_unreadable_ref_file_counts_as_unreadable_and_warns(env, tmp_path, capsys, target):
+    assert _create(capsys, str(env), "--clone")[0] == 0
+    scratch = _scratch(tmp_path)
+    if target == "loose":
+        ref_file = scratch / ".git" / "refs" / "heads" / "feature"
+        ref_file.write_text("0123456789abcdef0123456789abcdef01234567\n")
+    else:
+        ref_file = scratch / ".git" / "packed-refs"
+        ref_file.write_text("# pack-refs with: peeled fully-peeled sorted\n0123456789abcdef0123456789abcdef01234567 refs/heads/feature\n")
+    os.chmod(ref_file, 0)
+    try:
+        _tips, truncated = msb_clone._ref_tips(scratch)
+        assert truncated is True
+        assert msb_clone.warn_unfetched(NAME) is True
+    finally:
+        os.chmod(ref_file, 0o600)
+
+
+@posix_only
+def test_read_bounded_refuses_symlink_when_platform_lacks_nofollow(tmp_path, monkeypatch):
+    target = tmp_path / "target.txt"
+    target.write_text("secret-content")
+    link = tmp_path / "link.txt"
+    os.symlink(target, link)
+    monkeypatch.setattr(msb_clone, "_READ_FLAGS", os.O_RDONLY)
+    assert msb_clone._read_bounded(str(link), 1024) is None
+
+
+@posix_only
+@root_ignores_modes
+def test_find_scratch_returns_path_when_unreadable_or_linked(env, tmp_path, capsys):
+    assert _create(capsys, str(env), "--clone")[0] == 0
+    sandbox = _clones(tmp_path) / NAME
+    scratch = _scratch(tmp_path)
+    os.chmod(scratch, 0)
+    try:
+        found, unreadable = msb_clone._find_scratch(sandbox)
+        assert found == scratch
+        assert unreadable is True
+        # Verify recorded_scratch never returns the unreadable path as a recreate source
+        rec_scratch, matches = msb_clone.recorded_scratch(NAME, str(env))
+        assert rec_scratch is None
+        assert matches is False
+    finally:
+        os.chmod(scratch, 0o700)
+
+
+def test_remove_guest_tree_windows_retries_unreadable_dir(tmp_path, monkeypatch):
+    import shutil
+
+    tree = tmp_path / "tree"
+    sub = tree / "sub"
+    file = sub / "file.txt"
+    sub.mkdir(parents=True)
+    file.write_text("hello")
+
+    locked = {str(sub)}
+    real_scandir = os.scandir
+    real_chmod = os.chmod
+
+    def mock_scandir(path):
+        if str(path) in locked:
+            raise PermissionError(13, "Access is denied", str(path))
+        return real_scandir(path)
+
+    def mock_chmod(path, mode):
+        locked.discard(str(path))
+        return real_chmod(path, mode)
+
+    monkeypatch.setattr(shutil, "_use_fd_functions", False)
+    monkeypatch.setattr(msb_clone, "WINDOWS", True)
+    monkeypatch.setattr(os, "scandir", mock_scandir)
+    monkeypatch.setattr(os, "chmod", mock_chmod)
+
+    msb_clone.remove_guest_tree(tree)
+    assert not tree.exists()
+

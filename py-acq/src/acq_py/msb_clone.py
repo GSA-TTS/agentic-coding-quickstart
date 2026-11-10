@@ -214,10 +214,10 @@ def _find_scratch(sandbox_dir: Path) -> tuple[Path | None, bool]:
         except FileNotFoundError:
             continue
         except OSError:
-            unreadable = True
+            found, unreadable = candidate, True
             continue
         if _lstat_link(info):
-            unreadable = True
+            found, unreadable = candidate, True
         elif stat.S_ISDIR(info.st_mode):
             found = candidate
     return found, unreadable
@@ -253,7 +253,7 @@ def _fix_dir(directory: str, root: str) -> int | None:
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         pfd = os.open(parent, flags)
-    except OSError:
+    except (OSError, NotImplementedError):
         return None
     try:
         info = os.stat(base, dir_fd=pfd, follow_symlinks=False)
@@ -267,7 +267,7 @@ def _fix_dir(directory: str, root: str) -> int | None:
             os.close(fd)
             return None
         return fd
-    except (OSError, ValueError):
+    except (OSError, ValueError, NotImplementedError):
         return None
     finally:
         os.close(pfd)
@@ -305,7 +305,10 @@ def _remove_tree(path: Path, root: str, fixed: set[str]) -> None:
         if info is None or _lstat_link(info) or target in fixed:
             raise exc
         fixed.add(target)
-        os.chmod(target, stat.S_IWRITE | stat.S_IREAD)
+        os.chmod(target, stat.S_IRWXU if stat.S_ISDIR(info.st_mode) else (stat.S_IWRITE | stat.S_IREAD))
+        if func is getattr(os, "scandir", None) or func not in (os.unlink, os.rmdir, os.remove):
+            _remove_tree(Path(target), root, fixed)
+            return
         func(target)
 
     shutil.rmtree(path, onexc=retry)
@@ -609,6 +612,9 @@ def check_partial(ws: str) -> None:
 
 def _read_bounded(path: str, cap: int) -> tuple[bytes, bool] | None:
     """Up to ``cap`` bytes of a regular, non-link file, and whether more remained."""
+    info = _lstat(path)
+    if info is None or _lstat_link(info) or not stat.S_ISREG(info.st_mode):
+        return None
     try:
         fd = os.open(path, _READ_FLAGS)
     except OSError:
@@ -922,15 +928,21 @@ def _ref_tips(scratch: Path) -> tuple[list[str], bool]:
         for root, dirs, files in os.walk(heads, followlinks=False, onerror=unreadable.append):
             dirs[:] = [d for d in dirs if _real_dir(os.path.join(root, d))]
             for name in files:
-                read = _read_bounded(os.path.join(root, name), _LOOSE_REF_CAP)
+                ref_path = os.path.join(root, name)
+                read = _read_bounded(ref_path, _LOOSE_REF_CAP)
                 if read is not None:
                     tips += read[0].decode("ascii", "replace").split("\n")
-    read = _read_bounded(str(git / "packed-refs"), _PACKED_REFS_CAP)
+                else:
+                    unreadable.append(OSError(f"could not read loose ref: {ref_path}"))
+    packed_path = git / "packed-refs"
+    read = _read_bounded(str(packed_path), _PACKED_REFS_CAP)
     if read is not None:
         for line in read[0].decode("ascii", "replace").split("\n"):
             fields = line.split()
             if len(fields) >= 2 and _HEX_RE.fullmatch(fields[0]) and fields[1].startswith("refs/heads/"):
                 tips.append(fields[0])
+    elif _lstat(packed_path) is not None:
+        unreadable.append(OSError(f"could not read packed-refs: {packed_path}"))
     truncated = bool(read and read[1]) or bool(unreadable)
     return list(dict.fromkeys(t for t in tips if _HEX_RE.fullmatch(t))), truncated
 
