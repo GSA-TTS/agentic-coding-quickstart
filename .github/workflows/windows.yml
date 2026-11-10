@@ -6,9 +6,11 @@
 #                     PowerShell 5.1; and the managed runtime staged with
 #                     scripts/stage-windows-runtime, as the release job does.
 #   windows-git-bash  the bats files that exercise Windows behaviour, run under
-#                     Git Bash: 55-version (the Bash acq), 06-windows-install and
-#                     163-provider-input-windows-native (the Bash provider-input
-#                     transaction with native Windows Python).
+#                     Git Bash: 55-version (the Bash acq), 06-windows-install,
+#                     117-msys-path-forms (the host-form and guest-form paths
+#                     acq hands msb) and 163-provider-input-windows-native (the
+#                     Bash provider-input transaction with native Windows
+#                     Python).
 #                     It checks out with the runner's default core.autocrlf=true,
 #                     like a plain Git for Windows clone.
 #
@@ -111,6 +113,7 @@ jobs:
             'docs/qualification-ledger.json' \
             'test/bats/06-windows-install.bats' \
             'test/bats/55-version.bats' \
+            'test/bats/117-msys-path-forms.bats' \
             'test/bats/163-provider-input-windows-native.bats' \
             'test/bats/helper.bash' \
             'test/vendor' \
@@ -399,7 +402,7 @@ jobs:
           set -euo pipefail
           bash --version | head -1
           test/vendor/bats-core/bin/bats test/bats/55-version.bats test/bats/06-windows-install.bats \
-            test/bats/163-provider-input-windows-native.bats
+            test/bats/117-msys-path-forms.bats test/bats/163-provider-input-windows-native.bats
 
   # The status to require. It always runs, and fails unless `changes` succeeded
   # and each Windows job either passed or was skipped as irrelevant.

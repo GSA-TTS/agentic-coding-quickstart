@@ -99,9 +99,10 @@ function Test-AbsolutePath {
     param([string]$Path)
     # Fully qualified only: drive-rooted (C:\ or C:/) or UNC (\\server\share). A
     # bare name, a drive-relative C:x or a driveless \x resolves against the
-    # current directory or drive.
+    # current directory or drive. A UNC path needs both the server and the
+    # share: \\server alone names no directory that can be written to.
     if (-not $Path) { return $false }
-    return (($Path -match '^[A-Za-z]:[\\/]') -or ($Path -match '^[\\/]{2}[^\\/]'))
+    return (($Path -match '^[A-Za-z]:[\\/]') -or ($Path -match '^[\\/]{2}[^\\/]+[\\/][^\\/]'))
 }
 
 function Format-Shown {
@@ -332,8 +333,13 @@ if ($Channel -ne "python") {
 # An -InstallDir that is not fully qualified would resolve against the current
 # directory (or, for C:x and \x, the current drive), and the PATH entry added
 # for it would be relative too. Refuse it before anything else, -DryRun
-# included, as install.sh refuses a relative --install-dir.
-if ($InstallDir -and -not (Test-AbsolutePath $InstallDir)) {
+# included, as install.sh refuses a relative --install-dir. An empty
+# -InstallDir '' is refused the same way rather than read as "use the default",
+# as install.sh refuses an empty --install-dir. Run as `irm ... | iex`, the text
+# runs in the caller's scope, where $PSBoundParameters can be $null, so it is
+# checked first; a non-empty -InstallDir is still validated there.
+$installDirGiven = ($null -ne $PSBoundParameters -and $PSBoundParameters.ContainsKey('InstallDir')) -or $InstallDir
+if ($installDirGiven -and -not (Test-AbsolutePath $InstallDir)) {
     [Console]::Error.WriteLine("error: -InstallDir must be an absolute path, got '$(Format-Shown $InstallDir)'; pass a fully qualified -InstallDir (for example C:\acq) or omit it to use the default")
     exit 1
 }
