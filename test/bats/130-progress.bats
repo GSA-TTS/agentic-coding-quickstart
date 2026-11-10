@@ -346,3 +346,63 @@ _prog() { # SHELL_SNIPPET
     assert_failure
   done < "$pids"
 }
+
+# An animator that is not scheduled for a while can be in the middle of a draw
+# with the TERM still pending, and write its frame whenever it next runs. If
+# the stop returned before that, the frame would land on whatever acq printed
+# next (an attached session). Model the unscheduled animator by stopping it
+# (SIGSTOP) inside its first draw for three seconds, longer than the stop's
+# two-second wait for an exit: the stop must not return while the animator
+# can still draw, nothing may be drawn after it returns, and the spinner's
+# private directory must be gone afterwards.
+@test "progress: a stop never returns while a suspended animator can still draw" {
+  local mark="$STUBDIR/animator-stopped" spintmp="$STUBDIR/spintmp"
+  mkdir -p "$spintmp"
+  _prog '_acq_progress_enabled() { return 0; }
+    export TMPDIR="'"$spintmp"'"
+    printf() {
+      if [ "$1" = "\r%s %s" ] && mkdir "'"$mark"'" 2>/dev/null; then
+        sh -c "kill -STOP \$PPID"
+      fi
+      builtin printf "$@"
+    }
+    acq_spin_start "phase one"
+    anim=$_ACQ_SPIN_PID
+    i=0
+    while [ ! -d "'"$mark"'" ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i + 1)); done
+    sleep 0.3
+    ( sleep 3; echo "CONTINUED" >&2; kill -CONT "$anim" ) &
+    resume=$!
+    acq_spin_stop
+    echo "STOP-RETURNED" >&2
+    builtin wait "$resume"
+    sleep 0.5
+    kill -0 "$anim" 2>/dev/null && echo "ANIMATOR-ALIVE"
+    ls "'"$spintmp"'"'
+  assert_success
+  [ -d "$mark" ]
+  [[ "$output" == *CONTINUED*STOP-RETURNED* ]]
+  local after="${output##*STOP-RETURNED}"
+  [[ "$after" != *"phase one"* ]]
+  refute_output --partial 'ANIMATOR-ALIVE'
+  refute_output --partial 'acq-spin.'
+}
+
+# Without its private directory the animator could not be stopped with that
+# guarantee, so the spinner announces the phase instead and leaves the caller's
+# traps as they were.
+@test "progress: with no directory for the draw lock the spinner degrades to a status line" {
+  _prog '_acq_progress_enabled() { return 0; }
+    export TMPDIR="'"$STUBDIR"'/no-such-dir"
+    trap "echo PRIOR_EXIT" EXIT
+    acq_spin_start "phase one"
+    echo "PID=[$_ACQ_SPIN_PID] ACTIVE=[$_ACQ_SPIN_ACTIVE]"
+    trap -p EXIT
+    acq_spin_stop'
+  assert_success
+  assert_line 'acq: phase one'
+  assert_line 'PID=[] ACTIVE=[]'
+  assert_line "trap -- 'echo PRIOR_EXIT' EXIT"
+  refute_output --partial $'\r'
+  refute_output --partial 'done'
+}

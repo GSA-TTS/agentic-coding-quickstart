@@ -52,6 +52,9 @@
 # retained so acq_spin_stop can render the final "done" line for the same label.
 _ACQ_SPIN_PID=""
 _ACQ_SPIN_MSG=""
+# Private directory holding the animator's draw lock and stop marker ("" when
+# no animated spinner is running). See _acq_spin_end_animator.
+_ACQ_SPIN_DIR=""
 # Non-empty from the moment an animated spinner starts composing its traps until
 # it is stopped, so cleanup also runs in the gap before _ACQ_SPIN_PID is set.
 _ACQ_SPIN_ACTIVE=""
@@ -338,7 +341,7 @@ acq_spin_start() {
     return 0
   fi
 
-  local frames owner
+  local frames owner dir
   frames=$(_acq_spin_frames)
   # Compose the cleanup traps BEFORE the cursor is hidden or the animator
   # exists. In the other order, a Ctrl-C or SIGTERM that landed while the traps
@@ -349,6 +352,19 @@ acq_spin_start() {
   _ACQ_SPIN_ACTIVE=1
   _acq_spin_install_traps
   owner="$_ACQ_SPIN_OWNER"
+  # A private directory for the draw lock and the stop marker (see
+  # _acq_spin_end_animator), made once the cleanup traps are in place so that
+  # they remove it from the moment it is recorded. Without it the animator could
+  # not be stopped with a guarantee, so animate nothing and announce the phase
+  # instead.
+  dir=$(mktemp -d "${TMPDIR:-/tmp}/acq-spin.XXXXXX" 2>/dev/null) || dir=""
+  if [ -z "$dir" ] || [ ! -d "$dir" ]; then
+    _ACQ_SPIN_ACTIVE=""
+    _acq_spin_restore_traps
+    acq_status "$msg"
+    return 0
+  fi
+  _ACQ_SPIN_DIR="$dir"
   # Hide the cursor for the duration of the animation; the stop path (and the
   # trap) restore it. Then spawn the animator in the background.
   printf '\033[?25l' >&2
@@ -365,11 +381,20 @@ acq_spin_start() {
     # the stderr output. It ends on TERM with `exit 0` rather than dying by the
     # signal, so the shell never prints a "Terminated" job notice for it (see
     # _acq_spin_end_animator).
-    trap 'exit 0' TERM
+    # Each frame is drawn only while holding the draw lock and only when no
+    # stop marker exists, so once the stopping shell holds the lock (or this
+    # animator is gone) no frame can follow, however late this process runs.
+    trap '_acq_spin_animator_quit "$dir"' TERM
     while :; do
       for _f in $frames; do
-        kill -0 "$owner" 2>/dev/null || exit 0
-        printf '\r%s %s' "$_f" "$msg" >&2
+        kill -0 "$owner" 2>/dev/null || _acq_spin_animator_quit "$dir"
+        if mkdir "$dir/draw" 2>/dev/null; then
+          [ ! -e "$dir/stop" ] || _acq_spin_animator_quit "$dir"
+          printf '\r%s %s' "$_f" "$msg" >&2
+          rmdir "$dir/draw" 2>/dev/null || true
+        elif [ -e "$dir/stop" ] || [ ! -d "$dir" ]; then
+          _acq_spin_animator_quit "$dir"
+        fi
         sleep 0.1
       done
     done
@@ -451,20 +476,63 @@ _acq_spin_restore_traps() {
 # on TERM with `exit 0`, so no "Terminated" job notice is printed for it (Bash
 # 3.2 would otherwise print one when it reaps a child killed by TERM); the poll
 # runs with stderr on /dev/null for a TERM that lands before the animator has
-# set that trap. After about two seconds the poll gives up rather than send
-# KILL to a PID that may have been reused: an animator still running then stops
-# by itself once this shell is gone (its kill -0 check on the owner).
+# set that trap.
+#
+# A TERM alone does not stop the drawing in time: an animator that is not
+# scheduled for a while can be past its checks, with the TERM still pending,
+# and write one more frame whenever it next runs, over whatever this shell has
+# printed since (an attached agent session). So the animator draws only while
+# holding a draw lock (a directory made with mkdir, which is atomic) and only
+# when no stop marker exists. This function writes the stop marker, sends TERM,
+# then waits until it holds the draw lock itself or the animator is gone; from
+# either point on no frame can be drawn. The lock is held only for the moment
+# of one draw, so this waits beyond that moment only for an animator that is
+# alive and in the middle of a draw. Once the lock is held, it waits up to about
+# two seconds more for the animator to exit rather than send KILL to a PID that
+# may have been reused; an animator still running then ends at its next check,
+# because the lock is taken and the stop marker is set. The private directory
+# is removed here once the animator is gone, or otherwise by the animator as it
+# quits (_acq_spin_animator_quit).
 _acq_spin_end_animator() {
-  local pid="$_ACQ_SPIN_PID" tries=0
-  [ -n "$pid" ] || return 0
-  kill "$pid" 2>/dev/null || return 0
+  local pid="$_ACQ_SPIN_PID" dir="$_ACQ_SPIN_DIR" tries=0 held=0 gone=0
+  _ACQ_SPIN_DIR=""
+  if [ -z "$dir" ]; then
+    [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
+    return 0
+  fi
   {
-    while kill -0 "$pid" 2>/dev/null && [ "$tries" -lt 100 ]; do
+    : >"$dir/stop" || true
+    [ -z "$pid" ] || kill "$pid" || true
+    while :; do
+      if [ "$held" -eq 0 ] && mkdir "$dir/draw"; then
+        held=1
+      fi
+      # The animator removes the directory as it quits, and draws nothing after.
+      if [ ! -d "$dir" ]; then gone=1; break; fi
+      if [ -n "$pid" ] && ! kill -0 "$pid"; then gone=1; break; fi
+      # Without a PID (a signal landed before it was recorded), the lock is all
+      # this shell can hold; the animator ends at its next check.
+      if [ "$held" -eq 1 ] && { [ -z "$pid" ] || [ "$tries" -ge 100 ]; }; then
+        break
+      fi
       sleep 0.02
       tries=$((tries + 1))
     done
+    if [ "$gone" -eq 1 ]; then
+      rm -f "$dir/stop" || true
+      rmdir "$dir/draw" "$dir" || true
+    fi
   } 2>/dev/null
   return 0
+}
+
+# _acq_spin_animator_quit DIR — the animator's way out: remove its private
+# directory (the stopping shell may hold the draw lock inside it; that no longer
+# matters once the animator is ending) and exit 0.
+_acq_spin_animator_quit() {
+  rm -f "$1/stop" 2>/dev/null || true
+  rmdir "$1/draw" "$1" 2>/dev/null || true
+  exit 0
 }
 
 # _acq_spin_stop_animation — stop the animator (if any), then clear the line
