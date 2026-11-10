@@ -1084,8 +1084,8 @@ def ro_mount_guest_probe(name: str, guest_dir: str) -> int:
 # reads ENV from its own environment and swaps the guest's placeholder for the
 # value on the wire to HOST. So a value only ever travels in the msb child's
 # environment mapping; argv carries the variable name and host, never the value,
-# and no function here returns, logs or raises with a value (ADR-0038m user
-# story #7 "no secret exposure").
+# and no function here returns, logs or raises with a value (ADR-0038m, and
+# ordinary-user story 7 "no secret exposure" in docs/spec/acq-v1.md).
 #
 # Which sandbox holds which binding is recorded host-side (one small record per
 # sandbox, names and hosts only), because revocation must reach exactly the
