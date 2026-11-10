@@ -51,6 +51,9 @@ _plain_kit() {
   _plain_kit "$kit"
   ln "$kit/files/sub/deeper/data.txt" "$STUBDIR/outside-name"
   ln -s "$kit" "$STUBDIR/kitlink"
+  # Git Bash's ln -s copies unless native symlinks are enabled; a copy holds
+  # plain files, so there is nothing to test there.
+  [ -L "$STUBDIR/kitlink" ] || skip "ln -s made a copy, not a symlink, on this host"
   run kit_translate_fetch "$STUBDIR/kitlink" "$STUBDIR/unused"
   assert_failure
   assert_output --partial 'local kit refused: files/sub/deeper/data.txt has more than one hard link'
