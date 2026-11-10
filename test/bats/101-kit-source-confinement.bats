@@ -64,6 +64,7 @@ SPEC
     '  - path: /home/agent/b' '    source: files/b' \
     '  - path: /home/agent/c' '    phase: bogus' '    source: files/c' \
     '  - path: /home/agent/d' "    phase: init$(printf '\t')x" '    source: files/d' \
+    '  - path: /home/agent/e;x' '    phase: later' '    source: files/e' \
     > "$k/spec.yaml"
   run bash -c '
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
@@ -75,6 +76,9 @@ SPEC
   assert_output --partial 'skipping file with unknown phase: init'
   refute_output --partial $'/home/agent/c\t'
   refute_output --partial $'/home/agent/d\t'
+  # The phase is checked before the path, as in the Python acq.
+  assert_output --partial 'skipping file with unknown phase: later'
+  refute_output --partial 'unsafe path: /home/agent/e;x'
 }
 
 @test "kit_source_within accepts in-kit files and in-kit links, refuses the rest" {
