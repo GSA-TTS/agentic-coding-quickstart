@@ -1391,9 +1391,10 @@ _acq_workspace_safe() {
 # _acq_trusted_host_dirs — acq's own host directories, one per line: the state
 # dir, the provenance dir (which holds each sandbox's read-only trusted config),
 # the config dir, the data dir (the provider-input validator lives there), the
-# cache dir and the sbx and msb kit caches (the kit payloads acq applies), and
-# the secret store's file, sidecar and index locations. Unresolvable entries
-# are skipped.
+# cache dir and the sbx and msb kit caches (the kit payloads acq applies), the
+# msb scratch clones dir (another sandbox's clone, and its record of the
+# checkout acq runs git in at rm), and the secret store's file, sidecar and
+# index locations. Unresolvable entries are skipped.
 _acq_trusted_host_dirs() {
   local d
   if d=$(acq_state_dir 2>/dev/null); then printf '%s\n' "$d"; fi
@@ -1402,7 +1403,7 @@ _acq_trusted_host_dirs() {
   if d=$(acq_xdg_dir XDG_DATA_HOME .local/share 2>/dev/null); then printf '%s/acq\n' "$d"; fi
   if d=$(acq_xdg_dir XDG_CACHE_HOME .cache 2>/dev/null); then printf '%s/acq\n' "$d"; fi
   for d in "${ACQ_SECRET_FILE_DIR:-}" "${ACQ_SECRET_META_DIR:-}" "${ACQ_PROVIDER_INPUT_DATA_DIR:-}" \
-      "${ACQ_SBX_KIT_CACHE:-}" "${ACQ_MSB_KIT_CACHE:-}"; do
+      "${ACQ_SBX_KIT_CACHE:-}" "${ACQ_MSB_KIT_CACHE:-}" "${ACQ_MSB_CLONES_DIR:-}"; do
     if [ -n "$d" ]; then printf '%s\n' "$d"; fi
   done
   if [ -n "${ACQ_SECRET_INDEX_FILE:-}" ]; then dirname -- "$ACQ_SECRET_INDEX_FILE"; fi
