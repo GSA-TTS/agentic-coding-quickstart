@@ -773,9 +773,9 @@ def test_create_routes_the_agent_wires_the_bridge_and_sessions_get_the_socket(tm
     assert _vsock(_create_argv(seen)) == [f"{link}:3552/stream"]
     assert os.readlink(link) == os.path.realpath(agent)
     assert "forwarding your host ssh-agent" in err
-    # The JSON contract is unchanged: forwarding adds no envelope field.
+    # Forwarding adds no envelope field (``ports`` comes from port publishing).
     assert set(doc["data"]) == {"name", "backend", "agent", "workspace", "state", "image", "secret_bindings",
-                                "ro_host_config", "kit", "entrypoint", "kits"}
+                                "ro_host_config", "kit", "entrypoint", "kits", "ports"}
     # Agent-user kit commands see the guest socket right after HOME.
     execs = _kit_agent_execs(seen)
     assert execs and all(a[a.index("HOME=/home/agent") + 1:][:2] == ["-e", f"SSH_AUTH_SOCK={GUEST_SOCK}"] for a in execs)
