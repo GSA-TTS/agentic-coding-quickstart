@@ -799,6 +799,33 @@ def test_global_set_skips_a_sandbox_whose_recorded_selection_leaves_the_provider
     assert sorted(t[0] for t in _modify_tails(children)) == ["a", "b", "c"]
 
 
+def test_global_set_refeeds_a_held_binding_even_when_the_selection_leaves_the_provider_out(
+        monkeypatch, tmp_path, capsys, children):
+    _running(tmp_path, monkeypatch, "a")
+    _record_selection("a", "")
+    rec = msb.HeldRecord("a", complete=True)
+    rec.bindings["USAI_API_KEY"] = {"service": "usai", "host": "api.gsa.usai.gov", "scope": "global"}
+    rec.save()
+    out, err = _set(capsys, monkeypatch, "-g", "usai")
+    (argv, env), = _verb_calls(children, "modify")
+    assert argv[-3:] == ["a", "--secret", "USAI_API_KEY@api.gsa.usai.gov"] and env["USAI_API_KEY"] == VALUE
+    _assert_value_absent(VALUE, children, out, err)
+
+
+def test_scoped_provider_set_notes_a_sandbox_whose_selection_leaves_it_out(monkeypatch, tmp_path, capsys, children):
+    _running(tmp_path, monkeypatch, "a")
+    _record_selection("a", "")
+    out, err = _set(capsys, monkeypatch, "a", "usai")
+    assert _verb_calls(children, "modify") == []
+    assert ("acq: note: 'usai' is stored for sandbox 'a', but it will not reach that sandbox until its "
+            "provider selection includes the provider") in err
+    assert secretstore.resolve("usai", "a") == VALUE
+    _assert_value_absent(VALUE, children, out, err)
+    # A global change says nothing: most sandboxes are simply not meant to get it.
+    _out, global_err = _set(capsys, monkeypatch, "-g", "usai")
+    assert "acq: note:" not in global_err
+
+
 def test_refeed_with_an_unreadable_recorded_selection_fails_closed_for_that_sandbox(
         monkeypatch, tmp_path, capsys, children):
     from acq_py import kits

@@ -197,6 +197,25 @@ def test_msb_rotation_skips_a_sandbox_whose_recorded_selection_leaves_usai_out(
     _assert_never_leaked(tmp_path, [argv for argv, _ in msb_children], out, err)
 
 
+def test_msb_rotation_refeeds_a_held_binding_even_when_the_selection_leaves_usai_out(
+    monkeypatch, tmp_path, capsys, msb_children
+):
+    # "a" already holds the usai binding (fed before the selection was honoured,
+    # say): re-feeding it grants nothing new and keeps it off the old key, as
+    # 'acq start' would feed it after a stop.
+    from acq_py import kits
+
+    _msb_running(monkeypatch, tmp_path, "a", "b")
+    with kits.provider_kits_env(""):
+        kits.provenance_write("msb", "a")
+    _usai_record("a")
+    rc, doc, out, err = _rotate(capsys, monkeypatch, "msb")
+    assert rc == 0, (out, err)
+    assert doc["data"]["backends"] == [_res("msb", ["a", "b"])]
+    assert _modified(msb_children)["a"]["USAI_API_KEY"] == NEW
+    _assert_never_leaked(tmp_path, [argv for argv, _ in msb_children], out, err)
+
+
 def test_msb_rotation_names_a_sandbox_whose_recorded_selection_is_unreadable(
     monkeypatch, tmp_path, capsys, msb_children
 ):
