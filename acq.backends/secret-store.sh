@@ -260,7 +260,9 @@ _acq_secret_windows_encrypt() {
   local ps b64; ps=$(_acq_secret_powershell_bin)
   # A failed or empty encoding must not reach PowerShell: it would protect an
   # empty value.
-  b64=$(base64 | tr -d '\r\n') || return 1
+  # base64 is captured on its own so its exit status, not tr's, decides.
+  b64=$(base64) || return 1
+  b64=$(printf '%s' "$b64" | tr -d '\r\n')
   [ -n "$b64" ] || return 1
   printf '%s' "$b64" | "$ps" -NoLogo -NoProfile -Command '$ErrorActionPreference="Stop"; Add-Type -AssemblyName System.Security; $i=[Console]::In.ReadToEnd(); $b=[Convert]::FromBase64String($i.Trim()); [Console]::Out.Write([Convert]::ToBase64String([Security.Cryptography.ProtectedData]::Protect($b,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser)))' 2>/dev/null
 }

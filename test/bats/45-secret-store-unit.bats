@@ -307,6 +307,22 @@ PSSTUB
   refute_regex "$(tr -d '\n' < "$STUBDIR/ps-stdin")" '[^A-Za-z0-9+/=]'
 }
 
+@test "keychain-windows: a failing base64 encoder stores nothing, even with partial output" {
+  _plant_powershell_stub
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/win-b64fail"
+    export ACQ_SECRET_POWERSHELL_BIN="'"$STUBDIR"'/powershell.exe"
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    unset ACQ_SECRET_FORCE_FILE
+    _acq_secret_backend() { printf "keychain-windows\n"; }
+    base64() { printf "QUJD"; return 1; }
+    printf "%s\n" "value" | acq_secret_store "$(_acq_secret_key usai)" && printf "stored=yes\n" || printf "stored=no\n"
+    [ -e "$ACQ_SECRET_FILE_DIR/acq.usai" ] && printf "file=yes\n" || printf "file=no\n"
+  '
+  assert_output --partial 'stored=no'
+  assert_output --partial 'file=no'
+}
+
 @test "keychain-windows: a legacy plaintext value is read and migrated to an envelope" {
   _plant_powershell_stub
   : > "$CALLS"
