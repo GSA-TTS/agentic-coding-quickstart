@@ -334,6 +334,90 @@ _ws_safe() { # ARGS...
   assert_output --partial 'accepted physical'
 }
 
+@test "workspace specs: a workspace containing acq's state, config or secret dirs is refused" {
+  local d
+  # The state dir, config dir and secret store each make their parent unsafe;
+  # the read-only flag does not help (the guest could still read the store).
+  for d in state xdg/acq secrets; do
+    mkdir -p "$STUBDIR/$d"
+  done
+  mkdir -p "$STUBDIR/outer/st" "$STUBDIR/outer/cfg"
+  run bash -c '
+    export ACQ_STATE_DIR="$1/outer/st/acq"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    acq_workspace_specs_safe opencode "$1/outer" 2>&1
+  ' _ "$STUBDIR"
+  assert_failure
+  assert_output --partial "contains acq's own directory"
+  run bash -c '
+    export XDG_CONFIG_HOME="$1/outer/cfg"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    acq_workspace_specs_safe opencode "$1/outer:ro" 2>&1
+  ' _ "$STUBDIR"
+  assert_failure
+  assert_output --partial "contains acq's own directory"
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="$1/outer/secrets"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    acq_workspace_specs_safe opencode "$1/outer/secrets" 2>&1
+  ' _ "$STUBDIR"
+  assert_failure
+  assert_output --partial "contains acq's own directory"
+  # A symlink to such a directory is refused by its resolved form.
+  ln -s "$STUBDIR" "$WT/stublink"
+  _ws_safe opencode "$WT/stublink"
+  assert_failure
+  assert_output --partial "contains acq's own directory"
+  # A project directory beside them is accepted.
+  _ws_safe opencode "$WT/okdir"
+  assert_success
+}
+
+@test "workspace specs: a workspace inside acq's dirs or kit caches is refused" {
+  # Inside the provenance dir, a workspace would reach every other sandbox's
+  # trusted config.
+  mkdir -p "$STUBDIR/provenance/msb/other.123.config" "$STUBDIR/sbxcache/v2" "$STUBDIR/msbcache/k"
+  _ws_safe opencode "$STUBDIR/provenance/msb/other.123.config"
+  assert_failure
+  assert_output --partial "is inside acq's own directory"
+  run bash -c '
+    export ACQ_SBX_KIT_CACHE="$1/sbxcache" ACQ_MSB_KIT_CACHE="$1/msbcache"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    acq_workspace_specs_safe opencode "$1/sbxcache/v2" 2>&1 && echo accepted-sbx
+    acq_workspace_specs_safe opencode "$1/msbcache/k" 2>&1 && echo accepted-msb
+    acq_workspace_specs_safe opencode "$1" 2>&1 && echo accepted-parent
+    true
+  ' _ "$STUBDIR"
+  refute_output --partial accepted
+  assert_output --partial "is inside acq's own directory"
+  assert_output --partial "contains acq's own directory"
+  # The default cache dir ($XDG_CACHE_HOME/acq) is covered too.
+  mkdir -p "$STUBDIR/cachehome/acq/sbx-kits"
+  run bash -c '
+    export XDG_CACHE_HOME="$1/cachehome"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    acq_workspace_specs_safe opencode "$1/cachehome/acq/sbx-kits" 2>&1
+  ' _ "$STUBDIR"
+  assert_failure
+  assert_output --partial "is inside acq's own directory"
+  # A directory that resolves to '/' does not make every workspace "inside" it.
+  run bash -c '
+    export ACQ_PROVIDER_INPUT_DATA_DIR=/
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    acq_workspace_specs_safe opencode "$1" 2>&1
+  ' _ "$WT/okdir"
+  assert_success
+}
+
+@test "create(msb): a workspace containing acq's state dir fails before any backend create" {
+  run env ACQ_BACKEND=msb ACQ_NO_PROMPT=1 "$ACQ" create opencode --no-provider-kits "$STUBDIR"
+  # Exit 1 and the remediation wording match the Python acq's validation_failed.
+  assert_equal "$status" "1"
+  assert_output --partial "contains acq's own directory"
+  assert_output --partial "use a project directory that holds none of acq's state, config or secret-store directories (not your home directory itself), then re-run"
+  refute_regex "$(cat "$CALLS")" '^msb create'
+}
+
 @test "create(msb): no path argument from a ':' cwd fails before any backend create" {
   mkdir -p "$WT/cwdproj:z"
   cd "$WT/cwdproj:z"

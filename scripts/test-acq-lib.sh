@@ -860,8 +860,11 @@ BASH_ENV
   # Export ACQ_SCRIPT_DIR so acq can locate its backends.
   export ACQ_SCRIPT_DIR="$REPO_ROOT"
   # Force the acq secret store to a throwaway file backend (never touch the real
-  # OS keychain in tests).
+  # OS keychain in tests). On Windows ACQ_SECRET_STORE_DIR alone only relocates
+  # the DPAPI files, so the file backend is forced explicitly; tests of the
+  # keychain and DPAPI backends unset it.
   export ACQ_SECRET_STORE_DIR="$STUBDIR/secrets"
+  export ACQ_SECRET_FORCE_FILE=1
   # Force acq's state dir (ssh keys, port PIDs — ADR-0015) under the throwaway
   # STUBDIR so tests never write to the real ~/.local/state/acq.
   export ACQ_STATE_DIR="$STUBDIR/state"

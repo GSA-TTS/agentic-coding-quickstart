@@ -148,8 +148,8 @@ _kit_fetch_materialize() (
 #   - a query string (?private_token=…) becomes ?***;
 #   - URL userinfo (scheme://user:token@host) becomes scheme://***@host,
 #     cutting at the last '@';
-#   - without a scheme, a first path segment shaped user:token@host becomes
-#     ***@host.
+#   - without a scheme, a first path segment carrying any userinfo
+#     (user:token@host, or a bare token@host) becomes ***@host.
 # The fragment (#ref=…&dir=…) is kept so the message still names the kit. This
 # over-redacts when a path or host part legitimately contains '@' or ':',
 # which is harmless.
@@ -166,7 +166,7 @@ kit_ref_display() {
     *)
       first="${base%%/*}"
       case "$first" in
-        *:*@*) base="***@${first##*@}${base#"$first"}" ;;
+        *@*) base="***@${first##*@}${base#"$first"}" ;;
       esac
       ;;
   esac
@@ -802,6 +802,12 @@ kit_spec_files() {
         ro = (cur_readonly == "true") ? "true" : ""
         if (cur_mode != "" && cur_mode !~ /^[0-7][0-7][0-7][0-7]?$/) {
           print "kit-translate: skipping file with invalid mode: " cur_mode > "/dev/stderr"
+        } else if (cur_phase != "" && cur_phase !~ /^(install|initFiles|startup)$/) {
+          # phase is a column of this tab-separated record: an unknown value (a
+          # tab in it would shift every later column) drops the entry, as an
+          # unknown command phase does in kit_spec_commands. Checked after the
+          # mode and before the path, in the same order as the Python acq.
+          print "kit-translate: skipping file with unknown phase: " cur_phase > "/dev/stderr"
         } else if (cur_path !~ /^[A-Za-z0-9._\/-]+$/) {
           print "kit-translate: skipping file with unsafe path: " cur_path > "/dev/stderr"
         } else if (cur_source != "" && (cur_source !~ /^[A-Za-z0-9._\/-]+$/ || cur_source ~ /^\// || cur_source ~ /(^|\/)\.\.(\/|$)/)) {

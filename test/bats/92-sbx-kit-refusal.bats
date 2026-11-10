@@ -265,4 +265,72 @@ _NOGIT_REF='https://kituser:s3cr3t-tok@github.com/o/r.git#ref=0123456789abcdef01
   assert_equal "$(kit_ref_display 'git+https://h.example/r.git#ref=a&dir=b@c')" 'git+https://h.example/r.git#ref=a&dir=b@c'
   assert_equal "$(kit_ref_display '/kits/local@1')" '/kits/local@1'
   assert_equal "$(kit_ref_display './kits/a:b')" './kits/a:b'
+  # A bare token@host (no scheme, no password part) is userinfo too.
+  assert_equal "$(kit_ref_display 'ghp_tok@h.example/o/r.git#ref=a')" '***@h.example/o/r.git#ref=a'
+}
+
+@test "kit-source: an invalid entry is named without its credential" {
+  run _acq_kit_source_parse_entry 'https://kituser:s3cr3t-tok@github.com/acme/kits@abc' kit_sources
+  assert_failure
+  assert_output --partial "invalid kit source 'https://***@"
+  refute_output --partial 's3cr3t-tok'
+  refute_output --partial 'kituser'
+  # An invalid ref and an untrusted or unknown source name are redacted too.
+  run _acq_kit_source_parse_entry 'github.com/acme/kits@kituser:s3cr3t-tok@x' kit_sources
+  assert_failure
+  assert_output --partial "invalid ref '***@x'"
+  refute_output --partial 's3cr3t-tok'
+  run _acq_kit_source_resolve_repo 'https://kituser:s3cr3t-tok@github.com/acme/kits'
+  assert_failure
+  assert_output --partial "kit source 'https://***@github.com/acme/kits' is not trusted"
+  refute_output --partial 's3cr3t-tok'
+  run _acq_kit_source_resolve_repo 'kituser:s3cr3t-tok@kits'
+  assert_failure
+  refute_output --partial 's3cr3t-tok'
+}
+
+@test "sbx: the extra-kit record warning redacts the ref" {
+  local ref='https://kituser:s3cr3t-tok@github.com/o/r.git#ref=abc&dir=x'
+  _acq_sbx_translate_kit() { printf '%s\n' "$STUBDIR/translated"; }
+  _acq_sbx_kit_add() { return 0; }
+  acq_host_config_append() { return 1; }
+  ACQ_EXTRA_KITS="$ref" run acq_backend_ensure_kits_applied recwarnbox
+  assert_output --partial "could not record extra kit 'https://***@github.com/"
+  refute_output --partial 's3cr3t-tok'
+}
+
+@test "sbx: the translate debug line names the ref only through kit_ref_display" {
+  local ref='https://kituser:s3cr3t-tok@github.com/o/r.git#ref=abc&dir=x'
+  kit_translate_fetch() { mkdir -p "$STUBDIR/fetched"; printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\n' > "$STUBDIR/fetched/spec.yaml"; printf '%s\n' "$STUBDIR/fetched"; }
+  kit_translate_to_sbx() { mkdir -p "$2"; }
+  _acq_sbx_warn_readonly_files() { :; }
+  # stdout is the translated dir the caller consumes; only stderr reaches a log.
+  local rc=0
+  ACQ_DEBUG=1 ACQ_SBX_KIT_PASSTHROUGH="" ACQ_SBX_KIT_CACHE="$STUBDIR/cache" \
+    _acq_sbx_translate_kit "$ref" >/dev/null 2>"$STUBDIR/translate.err" || rc=$?
+  assert_equal "$rc" "0"
+  run cat "$STUBDIR/translate.err"
+  assert_output --partial 'translate(sbx): https://***@github.com/'
+  refute_output --partial 's3cr3t-tok'
+}
+
+@test "heal(sbx): recorded built-in kits are not fetched or translated" {
+  printf 'offlinebox\n' > "$STUBDIR/.sandbox_list"
+  acq_host_config_write sbx offlinebox builtin-kits "zscaler-ca-certificate ${ZSCALER_KIT}
+${USAI_PROVIDER_KIT_NAME} ${USAI_KIT}
+agentic-coding-playbook ${PLAYBOOK_KIT}"
+  # An offline fetch: every translation fails and says so.
+  kit_translate_fetch() { echo "FETCH-ATTEMPT $1" >&2; return 1; }
+  ACQ_SBX_KIT_PASSTHROUGH="" ACQ_SBX_KIT_CACHE="$STUBDIR/cache" run acq_backend_ensure_kits_applied offlinebox
+  assert_success
+  refute_output --partial 'FETCH-ATTEMPT'
+  refute_output --partial 'could not fetch kit'
+  # An unrecorded kit is still fetched, and its failed translation is a failed add.
+  acq_host_config_write sbx offlinebox builtin-kits "zscaler-ca-certificate ${ZSCALER_KIT}
+${USAI_PROVIDER_KIT_NAME} ${USAI_KIT}"
+  ACQ_SBX_KIT_PASSTHROUGH="" ACQ_SBX_KIT_CACHE="$STUBDIR/cache" run acq_backend_ensure_kits_applied offlinebox
+  assert_output --partial 'missing the playbook kit'
+  assert_output --partial 'FETCH-ATTEMPT'
+  assert_output --partial "'sbx kit add' (playbook kit) failed"
+  refute_regex "$(printf '%s\n' "$output" | grep FETCH-ATTEMPT)" 'zscaler'
 }
