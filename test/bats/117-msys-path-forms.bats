@@ -332,3 +332,53 @@ MSBENVSTUB
   assert_success
   assert_output 'EXCL=*'
 }
+
+# msb records the workspace in drive form (host_path). The re-attach check must
+# compare it in the shell form, or a sandbox created on a directory holding
+# acq's state would pass as a "relative" path that matches nothing. This cygpath
+# stub maps C:/x to /x, which round-trips on any host's temp directory.
+_plant_strip_drive_cygpath() {
+  cat >"$STUBDIR/cygpath" <<'CYGSTUB'
+#!/usr/bin/env bash
+mode="${1:-}"; shift || true
+for p in "$@"; do
+  case "$mode:$p" in
+    -u:C:/*) printf '%s\n' "${p#C:}" ;;
+    -m:/*) printf 'C:%s\n' "$p" ;;
+    *) printf '%s\n' "$p" ;;
+  esac
+done
+CYGSTUB
+  chmod +x "$STUBDIR/cygpath"
+}
+
+@test "msys: the re-attach check reads a drive-form recorded workspace in the shell form" {
+  _plant_strip_drive_cygpath
+  mkdir -p "$STUBDIR/okproj"
+  run bash -c '
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    acq_workspace_record_write msb box "C:$1" || echo record-failed
+    acq_workspace_record_write msb proj "C:$1/okproj" || echo record-failed
+    printf "recorded=%s\n" "$(acq_workspace_record_read msb box)"
+    acq_recorded_workspace_safe msb box 2>&1 && echo box-passed
+    acq_recorded_workspace_safe msb proj 2>&1 && echo proj-passed
+  ' _ "$STUBDIR"
+  refute_line record-failed
+  assert_line "recorded=C:$STUBDIR"
+  assert_output --partial "contains acq's own directory"
+  assert_output --partial "Sandbox box was created on that workspace"
+  refute_line box-passed
+  assert_line proj-passed
+}
+
+@test "msys: run NAME on msb refuses a drive-form recorded workspace holding acq's state" {
+  _plant_strip_drive_cygpath
+  printf 'box\n' >"$STUBDIR/.msb_sandbox_list"
+  printf 'box\n' >"$STUBDIR/.msb_running_list"
+  acq_workspace_record_write msb box "C:$STUBDIR"
+  run env ACQ_BACKEND=msb ACQ_UPDATE_CHECK=0 "$ACQ" run box
+  assert_equal "$status" "1"
+  assert_output --partial "contains acq's own directory"
+  refute_regex "$(cat "$CALLS")" '^msb (exec|start|modify)'
+}

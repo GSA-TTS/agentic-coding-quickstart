@@ -1467,10 +1467,25 @@ EOF
 # under its workspace) would keep reaching acq's state through its writable
 # mount. Silent and 0 when nothing is recorded (a legacy sandbox) or the
 # recorded workspace is safe.
+#
+# msb records the workspace in the native host form (host_path), which under
+# Git Bash is drive form (C:/...). The comparison below treats anything not
+# starting with '/' as relative to $PWD, so a drive-form record would never
+# match acq's own directories (which the shell names /c/...). Such a record is
+# converted to the shell form with `cygpath -u` first; cygpath exists only on
+# MSYS/Cygwin, where drive-form records are written.
 acq_recorded_workspace_safe() {
-  local ws
+  local ws posix
   ws=$(acq_workspace_record_read "$1" "$2" 2>/dev/null | tr -d '\r') || ws=""
   [ -n "$ws" ] || return 0
+  case "$ws" in
+    [abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ]:[/\\]*|\\\\*)
+      if command -v cygpath >/dev/null 2>&1; then
+        posix=$(cygpath -u "$ws" 2>/dev/null) || posix=""
+        [ -n "$posix" ] && ws="$posix"
+      fi
+      ;;
+  esac
   _acq_workspace_trusted_safe "$ws" && return 0
   echo "     Sandbox $(acq_printable "$2") was created on that workspace: remove it ('acq rm $(acq_printable "$2")') and create it again on a project directory." >&2
   return 1
