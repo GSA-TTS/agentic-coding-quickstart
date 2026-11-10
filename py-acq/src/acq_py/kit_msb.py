@@ -3,10 +3,11 @@
 A port of the Bash msb adapter's kit path (``acq.backends/msb.sh``):
 
 * :func:`resolve` checks the packaged bundle against its manifest
-  (:func:`kitspec.verify_bundle`) and parses every selected kit. The Python
-  acq applies only its pinned built-in bundle; a ref that would have to be
-  fetched (an opt-in catalog kit, a remote or local extra, a ``--kit`` ref, a
-  provider kit outside the bundle) is refused before anything is created.
+  (:func:`kitspec.verify_bundle`) and parses every selected kit. A kit the
+  bundle does not hold (an opt-in catalog kit, a remote extra or ``--kit``
+  ref, a provider kit from a registered source) is fetched at its pinned
+  commit and checked (:mod:`kit_fetch`); a ref that cannot be fetched, or a
+  local kit directory, is refused before anything is created.
 * :func:`create_flags` builds a kit set's create-time flags: the read-only
   host-config mount, the ``--script-path`` startup script
   (``_acq_msb_stage_startup_script``) and host CA trust for a kit whose
@@ -36,7 +37,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import errors, kitspec, legacy_bash, lock, msb, security, state
+from . import errors, kit_fetch, kitspec, legacy_bash, lock, msb, security, state
 
 # Module-local seam for the host OS class (as ``msb.WINDOWS``).
 WINDOWS = os.name == "nt"
@@ -60,12 +61,18 @@ _INSTANCE_PREFIXES = ("install-", "agent-installed-")
 
 @dataclass(frozen=True)
 class Kit:
-    """One selected kit, parsed from the bundle. ``role`` comes from :class:`kitspec.SelectedKit`."""
+    """One selected kit, parsed from the bundle or fetched. ``role`` comes from :class:`kitspec.SelectedKit`.
+
+    ``fetched`` marks a kit fetched at its pinned commit (:mod:`kit_fetch`)
+    rather than read from the bundle: its egress allowlist comes from its own
+    spec, not from the vetted built-in table.
+    """
 
     name: str
     role: str
     spec: kitspec.KitSpec
     ref: str = ""
+    fetched: bool = False
 
     @property
     def shortcut(self) -> bool:
@@ -103,8 +110,19 @@ def _bundle_problem() -> str | None:
     return problems[0] if problems else None
 
 
+def fetch_selected(sel: kitspec.SelectedKit, backend: str) -> Kit:
+    """A kit outside the bundle, fetched at its pinned commit. Raises :class:`kit_fetch.KitFetchError`."""
+    name, spec = kit_fetch.load(sel.ref, backend)
+    return Kit(name, sel.role, spec, sel.ref, fetched=True)
+
+
 def resolve(selection: kitspec.KitSelection) -> list[Kit]:
-    """Verify the bundle and parse every selected kit; raises :class:`msb.MsbError`."""
+    """Verify the bundle, then parse every selected kit, fetching any the bundle does not hold.
+
+    A kit outside the bundle is fetched at its pinned commit and checked
+    (:func:`kit_fetch.load`); one that cannot be fetched stops the caller,
+    before anything is created. Raises :class:`msb.MsbError`.
+    """
     problem = _bundle_problem()
     if problem is not None:
         raise msb.MsbError(
@@ -115,18 +133,18 @@ def resolve(selection: kitspec.KitSelection) -> list[Kit]:
     out: list[Kit] = []
     seen: set[str] = set()
     for sel in selection.kits:
-        if sel.bundled is None:
-            raise msb.MsbError(
-                errors.UNSUPPORTED,
-                f"kit {sel.ref!r} ({sel.role} kit) would have to be fetched; the Python acq "
-                "applies only its pinned built-in kits",
-                "drop it from --kit, ACQ_EXTRA_KITS, ACQ_PROVIDER_KITS or config extra_kits/provider_kit, "
-                "or use the Bash acq (ACQ_IMPL=bash) for kits that must be fetched",
-            )
         if sel.ref in seen:
             continue
         seen.add(sel.ref)
-        out.append(Kit(sel.bundled, sel.role, _load(sel.bundled), sel.ref))
+        if sel.bundled is not None:
+            out.append(Kit(sel.bundled, sel.role, _load(sel.bundled), sel.ref))
+            continue
+        try:
+            kit = fetch_selected(sel, "msb")
+        except kit_fetch.KitFetchError as exc:
+            raise msb.MsbError(exc.code, f"{exc.message} ({sel.role} kit)", exc.remediation) from exc
+        _check_creatable(kit.name, kit.spec)
+        out.append(kit)
     return out
 
 
@@ -207,18 +225,28 @@ def _load(name: str) -> kitspec.KitSpec:
     except kitspec.KitSpecError as exc:
         raise msb.MsbError(errors.VALIDATION_FAILED, f"cannot read built-in kit '{name}': {exc}",
                            "reinstall acq") from exc
+    _check_creatable(name, spec)
+    return spec
+
+
+def _check_creatable(name: str, spec: kitspec.KitSpec) -> None:
     if spec.published_ports or spec.volumes:
         raise msb.MsbError(
             errors.UNSUPPORTED,
             f"kit '{name}' declares published ports or volumes, which the Python acq does not create yet",
             "use the Bash acq (ACQ_IMPL=bash) for this kit",
         )
-    return spec
 
 
-def egress_names(kits: Iterable[Kit]) -> list[str]:
-    """The kit names whose network allowances form the sandbox's egress policy."""
-    return [k.name for k in kits]
+def egress_names(kits: Iterable[Kit]) -> list[msb.EgressKit]:
+    """What forms the sandbox's egress policy: each kit's name, or for a fetched kit its own allowlist.
+
+    A bundled kit is named, and :func:`msb.egress_flags` takes its allowlist
+    from the vetted table pinned with the bundle. A fetched kit's allowlist is
+    read from its own spec at the pinned commit, as Bash reads every kit's
+    (``_acq_msb_net_rules_into``); msb.egress_flags validates each host.
+    """
+    return [(k.name, k.spec.net_allow) if k.fetched else k.name for k in kits]
 
 
 # ---------------------------------------------------------------------------

@@ -3869,41 +3869,72 @@ enforcement; enabling it is the `security.WINDOWS` platform check in
 
 ### Symptoms
 
-The Python acq now creates sbx sandboxes with the built-in kits and the bundled
-agent kit (`acq run opencode .` works), but compared with the Bash acq:
+The Python acq creates sbx sandboxes with the built-in kits and the bundled
+agent kit (`acq run opencode .` works), and `acq run NAME` re-attaches with the
+sbx heal (for its remaining differences from Bash, see "Python acq: `run`
+Re-Attach Heal Differs From Bash in Two Places" near the end of this file). On
+Linux and macOS it also mounts the provider-input generation read-only, so the
+bundled `opencode` kit's startup renderer points OpenCode at USAi, and it fetches
+kits outside the bundle at their pinned commit. Compared with the Bash acq:
 
-- OpenCode is not pointed at USAi yet. The bundled `opencode` kit's startup
-  renderer reads the provider-input generation at `ACQ_PROVIDER_INPUT_ROOT`; on
-  sbx the Python acq does not prepare or mount it, so the renderer reports
-  `not-ready` and leaves `opencode.jsonc` alone. (On msb it is mounted read-only
-  where msb can enforce that; not on Windows, see section 54.) The provider
-  credential gate and the attach-time key probe do run on sbx.
-- `acq run NAME` re-attaches without the sbx heal. Bash re-runs
-  `acq_backend_ensure_kits_applied` on every re-attach; the Python acq runs the
-  ported heal only for `acq kit update`.
+- On Windows the provider-input generation is not staged or mounted, so the
+  renderer reports `not-ready` and leaves `opencode.jsonc` alone there. sbx
+  mounts an extra workspace at its host path in the guest, but how it spells a
+  Windows host path in the guest has not been verified, so
+  `ACQ_PROVIDER_INPUT_ROOT` could not name it. (msb does not mount it on Windows
+  either, see section 54.) The provider facts are still recorded, and the
+  credential gate and the attach-time key probe still run.
 - Kit-delivered `~/.rc.d/*.sh` snippets are not sourced at login: the post-create
   bridge Bash writes (`_acq_sbx_ensure_rc_bridge`) is not ported.
-- A kit ref that would have to be fetched (an opt-in catalog kit, a remote or
-  local extra, an unbundled `--kit` ref or provider kit) is refused before create
-  with `unsupported_capability`, as on msb.
+- A kit outside the bundle is applied only from a `git+https` ref pinned to a
+  full 40-hex commit (`py-acq/src/acq_py/kit_fetch.py`, as on msb). A local kit
+  directory (`unsupported_capability`), a branch or tag ref
+  (`kit_ref_not_pinned`; Bash fetches it unverified) and a kit that is not
+  neutral `hybrid/v1` (Bash passes an sbx-native kit through) are refused before
+  create. A fetch that fails, including for lack of network, refuses the create;
+  a commit fetched once is reused offline by later commands.
 
 ### Root Cause
 
-These pieces belong to other parts of the port (provider inputs, re-attach
-healing, the login-profile bridge, a SHA-verified kit fetch). The Python acq
-passes sbx only local, translated kit directories, so it does not need the
+The Windows guest path and the login-profile bridge belong to other parts of the
+port. Local kit directories are refused because the Python acq reads a kit only
+from its private fetch cache, which only acq writes; a local directory would be
+read where anyone who can write there can change it during the checks (the
+residual race section 61 describes for Bash on Windows). The Python acq passes
+sbx only local, translated kit directories, so it does not need the
 `kit.allowedSources` update Bash makes before create.
 
 ### Fix
 
-Use the Bash acq (`ACQ_IMPL=bash`) where any of these matters.
+Use the Bash acq (`ACQ_IMPL=bash`) for a local kit directory, an unpinned kit
+ref, or a Windows host where OpenCode must be configured for USAi. Pin a remote
+kit ref to its commit (`#ref=<40-hex sha>`) to apply it with the Python acq.
 
 ### Prevention / Status
 
-Port provider-input projection, the re-attach heal and the rc bridge with the
-matching msb work, then re-verify live on a host with sbx 0.51 or later: the
-guest has the kit files, the Zscaler CA and OpenCode configured for USAi, the
-startup barrier is reached, and `acq kit update` reports the recreate notice.
+Tracked follow-ups:
+
+- **Windows provider input on sbx.** Unblock trigger: a live sbx run on Windows
+  that shows where an extra workspace `C:\…\generation.X:ro` appears in the guest
+  (and that sbx accepts that argument). Then stage and mount it there as on
+  POSIX; `provider_input.publish` already writes Bash's Windows pointer file.
+- **Local kit directories.** Copy the kit into the private fetch cache with the
+  same no-link checks (option 1 in section 61), then apply the copy. Unblock
+  trigger: a documented need for local kits with the Python acq.
+- **The rc bridge.** Port `_acq_sbx_ensure_rc_bridge` with the msb login-shell
+  work.
+- **Kit fetch on Windows.** The fetch itself has no POSIX-only step, but its
+  repository-fixture tests (`py-acq/tests/test_kit_fetch.py`) commit symlinks and
+  executable modes, so they skip on Windows, where only the ref-grammar tests
+  run. Unblock trigger: the Windows default flip (ADR-0048m) or the first
+  report of a fetched kit on Windows; then add a fixture without links and run
+  it in the Windows lane.
+
+Re-verify live on a host with sbx 0.51 or later: the guest has the kit files, the
+Zscaler CA and OpenCode configured for USAi, the provider-input mount is
+read-only in the guest (a write to it as guest root fails), the startup barrier
+is reached, a fetched extra kit applies, and `acq kit update` reports the
+recreate notice.
 
 The same live run must confirm that sbx keeps what it read at create. The
 Python acq deletes the per-create startup-barrier kit as soon as `sbx create`
@@ -3950,7 +3981,11 @@ from the acq secret store, and sbx injects from the proxy table it snapshots
 then. Neither Python path reads a value exported in the host environment, so
 accepting one would create a sandbox with a dead credential. The recorded-host
 fallback was not ported: refusing is the safe direction, since acq never lets a
-kit choose where a credential goes.
+kit choose where a credential goes. That holds for a provider kit the Python acq
+fetches from a registered kit source too (`py-acq/src/acq_py/kit_fetch.py`): its
+facts are read from the fetched, pinned commit and checked against the
+provider's pin exactly like the bundled kit's, so a fetched kit naming another
+host or key variable is refused before create.
 
 ### Fix
 
@@ -4290,10 +4325,11 @@ for the attach-time key check and the credential bindings; it reads the pointer
 file as described above. A sandbox created by an older acq, which mounted the
 whole root, would follow `current` inside the guest, but no such sandbox exists
 on Windows because the Bash transaction never completed there before. The
-Python acq's `provider_input.publish` calls `os.symlink`, which fails on Windows
-without Developer Mode or an administrator; it prints `could not publish the
-provider input` as a warning and continues, and the Bash reader then falls back
-to the recorded facts.
+Python acq's `provider_input.publish` writes the same pointer file on Windows
+(`generations/generation.<suffix>` and a newline, renamed over `current` with
+`os.replace`), so both implementations leave the same state. Like Bash, it
+removes a link left at `current` (never its target) and retries, and refuses a
+real directory there.
 
 If `current` is a link the Python acq left (a directory symlink or a junction,
 which `os.replace` cannot overwrite), Bash removes that link, never its target,
@@ -4343,11 +4379,11 @@ fallback, provider facts read from native Python, the transaction from lock to
 unlock with a mount source Windows resolves, and a stubbed `acq create` and
 `acq rm`.
 
-**Tracked:** the Python acq still tries a symlink for `current` on Windows, and
-without Developer Mode it leaves none, so Bash falls back to the recorded facts
-for a sandbox the Python acq created. For both implementations to leave the
-same state, it should write the same pointer file. Unblock trigger: ADR-0048m's
-default flip.
+The Python acq writes the same pointer file on Windows
+(`py-acq/tests/test_sbx_provider_input.py` covers the pointer, the swap over a
+link left at `current`, and the refusal of a real directory). It does not yet
+stage a generation on Windows for either backend (sections 54 and 55), so
+today the pointer is written only once that lands.
 
 ---
 
@@ -4621,3 +4657,31 @@ acq run opencode /path/to/your/project
 ```
 
 The Python acq does not have this check yet.
+
+---
+
+## Bash acq: The Anonymous Kit Fetch Attempt Rewrites Every URL to github.com
+
+**Symptom:** None visible. Every remote kit fetch by the Bash acq takes its
+second, authenticated attempt (with the user's git config); the first attempt,
+meant to be anonymous, always fails.
+
+**Cause:** `kit_translate_fetch` (`acq.backends/kit-translate.sh`) runs the
+first attempt with `-c credential.helper= -c url.https://github.com/.insteadOf=`
+to neutralize a user's `github.com` URL rewrite. An `insteadOf` value is a URL
+prefix, and an empty prefix matches every URL, so git rewrites
+`https://github.com/GSA-TTS/agentic-coding-patterns.git` to
+`https://github.com/https://github.com/GSA-TTS/agentic-coding-patterns.git`
+(checked with git 2.53: `git -c "url.file:///A/.insteadOf=" ls-remote
+file:///B/repo` reports `'/A/file:///B/repo' does not appear to be a git
+repository`). The request goes to github.com without credentials, so nothing
+leaks, but the fallback runs with the user's credential helpers on every fetch.
+The bats tests replace `git fetch` with a stub, so they never saw it.
+
+**Resolution:** Nothing to do as a user. The Python acq does not copy this: its
+first attempt reads no git config files at all (`GIT_CONFIG_NOSYSTEM=1`,
+`GIT_CONFIG_GLOBAL` set to the null device; `py-acq/src/acq_py/kit_fetch.py`).
+
+**Tracked:** change the Bash first attempt to the same config isolation and add
+a bats test that runs a real `git fetch` against a local repository through the
+anonymous attempt. Unblock trigger: the next change to `kit_translate_fetch`.

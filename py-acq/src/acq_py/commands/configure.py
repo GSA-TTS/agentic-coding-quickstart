@@ -15,10 +15,11 @@ defaults, and writes the same three ``config.yaml`` keys Bash writes:
 The Python acq reads all three. ``extra_kits`` and ``provider_kit`` feed the kit
 selection at create and run, with Bash's precedence (a non-empty
 ``ACQ_EXTRA_KITS`` over ``extra_kits``; ``--no-provider-kits``, then a set
-``ACQ_PROVIDER_KITS``, over ``provider_kit``), but it applies only kits from its
-pinned built-in bundle: a kit that would have to be fetched (every catalog extra
-kit today) is refused at create, and needs the Bash acq (``ACQ_IMPL=bash``).
-``--json`` says so with ``"python_applies": "bundled-only"`` on those two
+``ACQ_PROVIDER_KITS``, over ``provider_kit``). It applies a kit from its pinned
+built-in bundle, or fetches it at a pinned commit (every catalog extra kit is
+pinned to the control plane); a local kit directory or a ref not pinned to a
+commit is refused at create, and needs the Bash acq (``ACQ_IMPL=bash``).
+``--json`` says so with ``"python_applies": "pinned-only"`` on those two
 settings. ``scope_github_token`` is the default answer to the per-sandbox
 GitHub-token prompt at create and run. Every write goes through :func:`acq_py.config.write_field`, so other
 keys (including ones acq does not know) are kept, a symlinked config is written
@@ -81,11 +82,12 @@ _HEADER = "? Select kits (dimmed rows are always applied · ↑/↓ move · SPAC
 
 FLAG, ENV, CONFIG, DEFAULT, MIXED = "flag", "env", "config", "default", "mixed"
 
-# The keys the Python acq reads but serves only from its pinned built-in bundle.
-BUNDLED_ONLY_KEYS = frozenset({"extra_kits", "provider_kit"})
-BUNDLED_ONLY_NOTE = (
-    "      note: the Python acq applies extra and provider kits only from its built-in bundle "
-    "(others need ACQ_IMPL=bash)."
+# The keys the Python acq reads but serves only from its pinned built-in bundle
+# or a remote kit pinned to a commit (no local kit directory, no unpinned ref).
+PINNED_ONLY_KEYS = frozenset({"extra_kits", "provider_kit"})
+PINNED_ONLY_NOTE = (
+    "      note: the Python acq applies extra and provider kits from its built-in bundle or pinned to a "
+    "commit (local kit directories and unpinned refs need ACQ_IMPL=bash)."
 )
 
 # Raw terminal control bytes (C0, DEL, C1) are dropped from displayed labels.
@@ -108,8 +110,8 @@ class Setting(NamedTuple):
             # in the contract, and python_applies qualifies a partial reading.
             "honoured_by_python": True,
         }
-        if self.key in BUNDLED_ONLY_KEYS:
-            doc["python_applies"] = "bundled-only"
+        if self.key in PINNED_ONLY_KEYS:
+            doc["python_applies"] = "pinned-only"
         if self.entries:
             doc["entries"] = [{"value": value, "source": source} for value, source in self.entries]
         return doc
@@ -224,7 +226,7 @@ def _show_current(settings: list[Setting]) -> None:
     _err(f"      provider creds:     {shown('provider_credential_bindings', '<none>', '   (acq provider-credential ls)')}")
     _err(f"      provider kit:       {shown('provider_kit', '<none>', '   (acq kit-source ls)')}")
     _err(f"      kit sources:        {shown('kit_sources', '<shipped default>')}")
-    _err(BUNDLED_ONLY_NOTE)
+    _err(PINNED_ONLY_NOTE)
     _err("")
 
 

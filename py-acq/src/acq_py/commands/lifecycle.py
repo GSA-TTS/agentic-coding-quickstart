@@ -17,6 +17,7 @@ import sys
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from pathlib import Path
 
 from .. import (
     envelope,
@@ -35,6 +36,9 @@ from .. import (
     state,
 )
 from . import common, creds, session
+
+# Module-local seam for the host OS class (as ``msb.WINDOWS``).
+WINDOWS = os.name == "nt"
 
 # Substrate-contract seam (internal test seam, never a secret, never written to
 # output). ``ACQ_SUBSTRATE_STATE`` is a JSON object mapping an image to its
@@ -166,8 +170,8 @@ def _cli_kit_refs(values: list[str] | None) -> list[str]:
 
     A built-in agent kit name (``opencode``) stands for the pinned ref of that
     bundled kit, so ``--kit opencode`` still applies the agent kit. Any other
-    value is a ref; one the bundle does not hold is refused before create
-    (:func:`kit_msb.resolve`).
+    value is a ref; one the bundle does not hold is fetched at its pinned
+    commit, or refused before create when it cannot be (:func:`kit_msb.resolve`).
     """
     out = []
     for value in values or []:
@@ -328,12 +332,18 @@ def _new_sbx_sandbox(
     plan, exit_code = _plan_sbx_kits(agent, cli_kits, image, command, emit_json)
     if plan is None:
         return None, exit_code
-    facts, exit_code = _sbx_provider_gate(command, name, plan, emit_json)
-    if facts is None:
+    selected, exit_code = _sbx_provider_gate(command, name, plan, emit_json)
+    if selected is None:
         return None, exit_code
+    facts = [f for _root, _manifest, f in selected]
+    try:
+        generation, mount = _sbx_provider_stage(name, selected)
+    except provider_input.ProviderInputError as exc:
+        return None, common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
     try:
         prepared = kit_sbx.prepare(plan.kits)
     except kit_sbx.KitTranslateError as exc:
+        _sbx_provider_abandon(name, generation, created=False)
         return None, common._operational_failure(
             command, errors.VALIDATION_FAILED, f"a kit could not be prepared, so the sandbox was not created: {exc}",
             "check that the acq state directory is acq's own and writable, or reinstall acq", emit_json,
@@ -341,11 +351,16 @@ def _new_sbx_sandbox(
     generic = agent == "opencode" and image == common.OPENCODE_DEVENV_IMAGE
     try:
         data = _create_sandbox("sbx", agent, workspace, name, image, plan.agent_kit,
-                               sbx_create=("shell" if generic else agent, prepared.flags))
+                               sbx_create=("shell" if generic else agent, prepared.flags), sbx_extra=mount)
     except common._ADAPTER_ERRORS as exc:
+        _sbx_provider_abandon(name, generation, created=True)
         return None, common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
+    except BaseException:
+        _sbx_provider_abandon(name, generation, created=True)
+        raise
     finally:
         kit_sbx.discard_barrier(prepared)  # sbx create has read it
+    _provider_publish("sbx", name, generation)
     try:
         _finish_sbx_create(name, agent, plan, prepared.barrier_token, data, generic=generic)
     except BaseException as exc:
@@ -362,15 +377,54 @@ def _new_sbx_sandbox(
 
 def _sbx_provider_gate(
     command: str, name: str, plan: _KitPlan, emit_json: bool
-) -> tuple[list[provider_input.Facts] | None, int | None]:
-    """The sbx side of the credential gate: sbx snapshots its proxy table at create."""
+) -> tuple[list[tuple[Path, dict, provider_input.Facts]] | None, int | None]:
+    """The sbx side of the credential gate (sbx snapshots its proxy table at create); the selected inputs."""
     try:
-        selected = _provider_gate("sbx", name, (k.name for k in plan.kits))
+        selected = _provider_gate("sbx", name, plan.kits)
     except provider_input.ProviderInputError as exc:
         return None, common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
     except common._ADAPTER_ERRORS as exc:
         return None, common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
-    return [f for _kit, _manifest, f in selected], None
+    return selected, None
+
+
+def _sbx_provider_stage(
+    name: str, selected: list[tuple[Path, dict, provider_input.Facts]]
+) -> tuple[Path | None, tuple[list[str], list[str]]]:
+    """Stage the provider-input generation an sbx create mounts read-only (Bash ``acq_provider_input_prepare``).
+
+    Returns the unpublished generation and the create's extra workspace and env
+    arguments. sbx mounts an extra workspace at its host path, and the ``:ro``
+    suffix makes the mount read-only, so OpenCode's startup renderer reads the
+    generation at ``ACQ_PROVIDER_INPUT_ROOT``, passed with ``sbx create --env``,
+    which needs sbx 0.39.0; the backend version floor refused an older sbx
+    (``backend_version_unsupported``) before this create began, as Bash's
+    ``MIN_SBX_VERSION`` does. On Windows nothing is staged:
+    where sbx mounts a Windows host path in the guest has not been verified, so
+    the variable could not name it (KNOWN_FAILURE_MODES section 55). Raises
+    :class:`provider_input.ProviderInputError`.
+    """
+    if WINDOWS:
+        return None, ([], [])
+    generation = provider_input.prepare("sbx", name, selected)
+    try:
+        workspace_arg, env_arg = provider_input.sbx_mount(generation)
+    except provider_input.ProviderInputError:
+        provider_input.discard(generation)
+        raise
+    return generation, ([workspace_arg], [env_arg])
+
+
+def _sbx_provider_abandon(name: str, generation: Path | None, *, created: bool) -> None:
+    """Discard an unpublished generation once no sandbox can be mounting it (best-effort).
+
+    After ``sbx create`` was attempted, a sandbox may exist that mounts the
+    generation, so it is discarded only when sbx confirms the sandbox is
+    absent, as Bash ``_acq_sbx_cleanup_uncreated_attempt`` does.
+    """
+    if generation is None or (created and _confirmed_absent(common._adapter("sbx"), name) is not True):
+        return
+    provider_input.discard(generation)
 
 
 def _record_sbx_facts(name: str, facts: list[provider_input.Facts]) -> None:
@@ -546,13 +600,16 @@ def _create_sandbox(
     *,
     plan: _KitPlan | None = None,
     sbx_create: tuple[str, list[str]] | None = None,
+    sbx_extra: tuple[list[str], list[str]] = ([], []),
 ) -> dict:
     """Create + exec-ready gate + record write; returns the result record data.
 
     On msb, ``plan``'s kits set the egress policy and create flags. When msb can
     enforce it the host-config directory is mounted read-only, and the record
     says ``ro_host_config`` only after :func:`_confirm_ro_mount`. Secret bindings
-    are reported by name and host only. ``sbx_create`` is sbx's agent and ``--kit`` flags.
+    are reported by name and host only. ``sbx_create`` is sbx's agent and ``--kit``
+    flags, ``sbx_extra`` its extra workspace and ``--env`` arguments (the
+    read-only provider-input mount).
     """
     adapter = common._adapter(backend)
     error_cls = sbx.SbxError if backend == "sbx" else msb.MsbError
@@ -560,7 +617,8 @@ def _create_sandbox(
     unconfirmed = backend == "sbx"  # until the kit startup barrier is seen (_finish_sbx_create)
     if backend == "sbx":
         sbx_agent, kit_flags = sbx_create or (agent, [])
-        adapter.create(name, image, workspace, agent=sbx_agent, kit_flags=kit_flags)
+        adapter.create(name, image, workspace, agent=sbx_agent, kit_flags=kit_flags,
+                       extra_workspaces=sbx_extra[0], env=sbx_extra[1])
         # Recorded at once, so no verb attaches to the guest while its kits are unconfirmed.
         _write_record(backend, name, agent=agent, workspace=workspace, image=image, ro_host_config=False,
                       kits_unconfirmed=True)
@@ -667,7 +725,7 @@ def _msb_create(name: str, image: str, workspace: str, kit_set: list[kit_msb.Kit
         raise
     finally:
         kit_msb.discard_staged(staged)
-    _provider_publish(name, generation)
+    _provider_publish("msb", name, generation)
     return bindings
 
 
@@ -700,17 +758,20 @@ def _ask_store(adapter) -> Callable[[provider_input.Facts], bool]:
     return ask
 
 
-def _provider_gate(backend: str, name: str, kit_names: Iterable[str]) -> list[tuple[str, dict, provider_input.Facts]]:
+def _provider_gate(backend: str, name: str,
+                   kit_set: Iterable[kit_msb.Kit]) -> list[tuple[Path, dict, provider_input.Facts]]:
     """The pre-create credential gate (Bash ``acq_provider_credentials_gate``) for the selected kits.
 
     Checks every selected provider's pin, then that the backend can inject its
     key, prompting on a terminal and failing closed otherwise. Runs before
-    anything is created or removed. Returns the selected provider inputs.
+    anything is created or removed. Returns the selected provider inputs. A
+    fetched provider kit is read from its own checked directory, and its facts
+    face the same pin check as a bundled one's.
     Raises :class:`provider_input.ProviderInputError` or an adapter error.
     """
     adapter = common._adapter(backend)
     scope = secretstore.sandbox_scope(name)
-    selected = provider_input.selected_facts(kit_names)
+    selected = provider_input.selected_facts((k.name, k.spec.kit_dir) for k in kit_set)
     facts = [f for _kit, _manifest, f in selected]
     if backend == "sbx":
         for f in facts:
@@ -737,7 +798,7 @@ def _provider_prepare(name: str, kit_set: list[kit_msb.Kit], *, ro_mount: bool):
     OpenCode's renderer then leaves its config untouched. Raises :class:`msb.MsbError`.
     """
     try:
-        selected = _provider_gate("msb", name, (k.name for k in kit_set))
+        selected = _provider_gate("msb", name, kit_set)
         facts = [f for _kit, _manifest, f in selected]
         provider_input.record_write("msb", name, facts)
         if not ro_mount:
@@ -768,11 +829,12 @@ def _provider_abandon(name: str, generation) -> None:
         pass
 
 
-def _provider_publish(name: str, generation) -> None:
+def _provider_publish(backend: str, name: str, generation) -> None:
+    """Point ``current`` at the generation a created sandbox mounts (a warning on failure)."""
     if generation is None:
         return
     try:
-        provider_input.publish("msb", name, generation)
+        provider_input.publish(backend, name, generation)
     except OSError:
         # The guest mounts the exact generation, so it is unaffected; only an
         # older acq reading `current` misses it.
@@ -1138,7 +1200,7 @@ def _recreate_msb(
     try:
         msb.egress_flags(kit_msb.egress_names(plan.kits))
         # A pin mismatch or a missing provider key refuses here, old guest intact.
-        _provider_gate("msb", name, (k.name for k in plan.kits))
+        _provider_gate("msb", name, plan.kits)
     except provider_input.ProviderInputError as exc:
         return None, common._operational_failure("create", exc.code, exc.message, exc.remediation, emit_json)
     except common._ADAPTER_ERRORS as exc:
