@@ -55,7 +55,9 @@
     "stderr": {
       "mode": "exact",
       "value": "acq: imported 1 sandbox record(s), 0 kit source(s) and 0 provider-credential binding(s) from the Bash acq's state\n",
-      "normalize": []
+      "normalize": [
+        "crlf"
+      ]
     }
   },
   "isolation": {
