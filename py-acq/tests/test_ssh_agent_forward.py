@@ -526,6 +526,54 @@ def test_a_link_whose_target_is_not_the_users_socket_is_removed_and_no_bridge_st
     assert not os.path.lexists(link) and _bridges(seen) == []
 
 
+def test_the_opt_out_says_plainly_when_the_route_names_the_raw_agent_path(tmp_path, monkeypatch, capsys, roomy):
+    _env(monkeypatch, tmp_path, catalog={"rawbox": "running", "linkgone": "running"})
+    _seed_recorded("rawbox")
+    _inspect(monkeypatch, {"active_config": _ROUTE})  # host_socket is the raw agent path
+    ssh_agent.opt_out("rawbox")
+    err = capsys.readouterr().err
+    assert "names the raw agent socket path, not acq's managed link" in err and "'acq rm rawbox'" in err
+    assert "was disconnected" not in err and _recorded("rawbox") is None
+    # A managed route whose link is already gone is disconnected, and says so.
+    _seed_recorded("linkgone")
+    _inspect(monkeypatch, {"active_config": {"vsock": {"routes": [
+        {"host_socket": str(_link(tmp_path, "linkgone")), "port": 3552}]}}})
+    ssh_agent.opt_out("linkgone")
+    err = capsys.readouterr().err
+    assert "the forwarded ssh-agent was disconnected from 'linkgone'" in err and "raw agent socket path" not in err
+
+
+@needs_unix_sockets
+def test_a_link_whose_target_sits_in_a_symlinked_directory_is_removed(tmp_path, monkeypatch, capsys, roomy):
+    _env(monkeypatch, tmp_path, catalog={"dirbox": "running"})
+    (tmp_path / "realdir").mkdir()
+    _sock(tmp_path / "realdir" / "a.sock")
+    (tmp_path / "aliasdir").symlink_to(tmp_path / "realdir")
+    link = _link(tmp_path, "dirbox")
+    link.parent.mkdir(parents=True)
+    link.symlink_to(tmp_path / "aliasdir" / "a.sock")
+    (tmp_path / "plain").write_text("x", encoding="utf-8")
+    monkeypatch.setenv("SSH_AUTH_SOCK", str(tmp_path / "plain"))
+    _seed_recorded("dirbox")
+    seen = _spy(monkeypatch)
+    ssh_agent.start_bridge("dirbox")
+    assert "removed the ssh-agent route link" in capsys.readouterr().err
+    assert not os.path.lexists(link) and _bridges(seen) == []
+
+
+@needs_unix_sockets
+def test_re_pointing_the_link_at_another_users_socket_warns_as_create_does(tmp_path, monkeypatch, capsys, roomy):
+    _env(monkeypatch, tmp_path)
+    link = _link(tmp_path, "ownbox")
+    link.parent.mkdir(parents=True)
+    link.symlink_to(_sock(tmp_path / "own.sock"))
+    monkeypatch.setenv("SSH_AUTH_SOCK", _sock(tmp_path / "theirs.sock"))
+    monkeypatch.setattr(ssh_agent, "_socket_owned_by_me", lambda p: False)
+    assert ssh_agent.link_refresh("ownbox") == ("", False)
+    assert "SSH_AUTH_SOCK names a socket owned by another user; forwarding it anyway" in capsys.readouterr().err
+    assert os.readlink(link) == os.path.realpath(tmp_path / "theirs.sock")
+
+
 @needs_unix_sockets
 def test_a_link_to_another_users_socket_is_removed(tmp_path, monkeypatch, capsys, roomy):
     _env(monkeypatch, tmp_path, catalog={"stalebox": "running"})

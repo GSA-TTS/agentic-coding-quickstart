@@ -423,6 +423,8 @@ def link_refresh(name: str, *, relink: bool = False) -> tuple[str, bool]:
         target = _canonical(target)
         ws = workspace_holding(target, workspaces)
         if ws is None and link_point(link, target):
+            if not _socket_owned_by_me(target):  # the same check create makes
+                _say("acq: warning: SSH_AUTH_SOCK names a socket owned by another user; forwarding it anyway")
             return "", False
         if ws is not None:
             _refuse_inside(target, LABEL_AGENT, ws)
@@ -450,14 +452,21 @@ def _readlink(link: str) -> str:
 
 
 def _link_target_ok(link: str, workspaces: list[str]) -> bool:
-    """The link's current target is itself (lstat) a socket owned by this user, outside the workspace."""
+    """The link's current target is itself (lstat) a socket owned by this user, outside the workspace.
+
+    Its directory must be this user's own real directory too (lstat, not a
+    symlink), so nobody else can swap the socket for another between checks.
+    """
     target = _readlink(link)
     if not target:
         return False
     target = os.path.join(os.path.dirname(link), target)
     try:
         info = os.lstat(target)
+        parent = os.lstat(os.path.dirname(target))
     except OSError:
+        return False
+    if stat.S_ISLNK(parent.st_mode) or not stat.S_ISDIR(parent.st_mode) or not _owned_by_me(parent):
         return False
     return stat.S_ISSOCK(info.st_mode) and _owned_by_me(info) and workspace_holding(target, workspaces) is None
 
@@ -468,19 +477,30 @@ def opt_out(name: str) -> None:
     The managed link goes, so the route reaches nothing; the recorded guest
     socket goes, so no session gets ``SSH_AUTH_SOCK``; no bridge is started.
     Setting ``SSH_AUTH_SOCK`` and re-running ``start`` or ``run`` reconnects.
+
+    A sandbox whose route names the raw agent socket (no managed link: an older
+    sandbox, a link path too long for a socket address, or a link directory that
+    failed its check) cannot be disconnected this way: the route still reaches
+    that socket, and guest code can dial it over vsock itself. That is said
+    plainly, with the remedy (remove and recreate the sandbox).
     """
     _ACTIVE.discard(name)
-    removed = False
     link = link_path(name)
-    if link is not None and os.path.islink(link):
+    had_link = link is not None and os.path.islink(link)
+    if had_link and link is not None:
         _unlink_quietly(link)
-        removed = True
-    if _recorded_text(name):
+    had_key = bool(_recorded_text(name))
+    if had_key:
         kit_msb.hc_clear(name, HOST_CONFIG_KEY)
-        removed = True
-    if removed:
+    if not (had_link or had_key):
+        return
+    if had_link or _route_names_link(_route_doc(name), name):
         _say(f"acq(msb): SSH_AUTH_SOCK is unset, so the forwarded ssh-agent was disconnected from '{name}'; set it "
              f"and re-run 'acq start {name}' or 'acq run {name}' to reconnect.")
+        return
+    _say(f"acq(msb): SSH_AUTH_SOCK is unset, so sessions in '{name}' no longer get SSH_AUTH_SOCK, but this sandbox's "
+         "--vsock route names the raw agent socket path, not acq's managed link, so the guest can still reach that "
+         f"agent while the sandbox exists. Remove it with 'acq rm {name}' and create it again to disconnect it.")
 
 
 def _opted_out() -> bool:
@@ -792,4 +812,3 @@ def ensure_forward(name: str) -> str | None:
     if check_socat(name):
         start_bridge(name, relink=_route_names_link(flat, name))
     return guest_sock()
-

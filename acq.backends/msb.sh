@@ -5342,6 +5342,8 @@ _acq_msb_ssh_agent_link_refresh() {
       _ACQ_MSB_SSH_AGENT_LINK_SKIPPED="SSH_AUTH_SOCK names a socket inside the workspace '$ws'. Re-run 'acq start $name' or 'acq run $name' from a shell whose SSH_AUTH_SOCK is outside it."
     elif _acq_msb_ssh_agent_link_point "$link" "$target"; then
       acq_debug "msb: ssh-agent route link for $name -> $target"
+      # The same owner check create makes: warn, never refuse.
+      [ -O "$target" ] || printf 'acq: warning: SSH_AUTH_SOCK names a socket owned by another user; forwarding it anyway\n' >&2
       return 0
     else
       _ACQ_MSB_SSH_AGENT_LINK_SKIPPED="the link could not be replaced. Fix or remove '$link' (is its directory writable, and is it still a symlink?), then re-run 'acq start $name' or 'acq run $name'."
@@ -5368,6 +5370,11 @@ _acq_msb_ssh_agent_link_target_ok() {
   [ -n "$t" ] || return 1
   case "$t" in /*) ;; *) t="$(dirname "$link")/$t" ;; esac
   [ -S "$t" ] && [ ! -L "$t" ] && [ -O "$t" ] || return 1
+  # Its directory must be this user's own real directory too, so nobody else
+  # can swap the socket for another between checks.
+  local d
+  d=$(dirname "$t")
+  [ -d "$d" ] && [ ! -L "$d" ] && [ -O "$d" ] || return 1
   ! _acq_msb_fwd_workspace_holding "$t" "$2" >/dev/null
 }
 
@@ -5376,21 +5383,38 @@ _acq_msb_ssh_agent_link_target_ok() {
 # reaches nothing; the recorded guest socket goes, so no session gets
 # SSH_AUTH_SOCK; no bridge is started. Setting SSH_AUTH_SOCK and re-running
 # `acq start` or `acq run` reconnects. Never fails the caller.
+# A sandbox whose route names the raw agent socket (no managed link: an older
+# sandbox, a link path too long for a socket address, or a link directory that
+# failed its check) cannot be disconnected this way: the route still reaches
+# that socket, and guest code can dial it over vsock itself. That is said
+# plainly, with the remedy (remove and recreate the sandbox).
 _acq_msb_ssh_agent_opt_out() {
-  local name="$1" link _removed=0
+  local name="$1" link _had_link=0 _had_key=0
   _ACQ_MSB_SSH_AGENT_FORWARDING=0
   if link=$(_acq_msb_ssh_agent_link_path "$name") && [ -L "$link" ]; then
     rm -f "$link" 2>/dev/null
-    _removed=1
+    _had_link=1
   fi
   if [ -n "$(_acq_msb_ssh_auth_sock_for "$name")" ]; then
     acq_host_config_clear msb "$name" ssh-auth-sock
-    _removed=1
+    _had_key=1
   fi
-  if [ "$_removed" = "1" ]; then
+  [ "$_had_link" = "1" ] || [ "$_had_key" = "1" ] || return 0
+  if [ "$_had_link" = "0" ]; then
+    # No link here: ask msb whether the route names the managed link at all.
+    _ACQ_MSB_ROUTE_FLAT=""
+    _acq_msb_has_ssh_agent_vsock_route "$name" >/dev/null 2>&1 || true
+    _acq_msb_route_names_link "$name" && _had_link=1
+  fi
+  if [ "$_had_link" = "1" ]; then
     echo "acq(msb): SSH_AUTH_SOCK is unset, so the forwarded ssh-agent was disconnected from '$name';" \
          "set it and re-run 'acq start $name' or 'acq run $name' to reconnect." >&2
+    return 0
   fi
+  echo "acq(msb): SSH_AUTH_SOCK is unset, so sessions in '$name' no longer get SSH_AUTH_SOCK, but this" \
+       "sandbox's --vsock route names the raw agent socket path, not acq's managed link, so the guest" \
+       "can still reach that agent while the sandbox exists. Remove it with 'acq rm $name' and create" \
+       "it again to disconnect it." >&2
   return 0
 }
 

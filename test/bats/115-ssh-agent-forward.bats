@@ -891,6 +891,79 @@ PQ
   assert_equal "$(readlink "$STUBDIR/state/msb/ssh-agent/wsbox.sock")" "$STUBDIR/out.sock"
 }
 
+@test "vsock(10c25g): the opt-out says plainly when the route names the raw agent path" {
+  printf 'rawbox\n' >"$STUBDIR/.msb_sandbox_list"
+  printf 'rawbox\n' >"$STUBDIR/.msb_running_list"
+  printf '{"active_config":{"vsock":{"routes":[{"host_socket":"/private/var/x/Listeners","port":3552}]}}}\n' \
+    >"$STUBDIR/.msb_inspect_json"
+  run bash -c '
+    unset SSH_AUTH_SOCK
+    export STUB_MSB_VERSION=0.6.9 STUB_RECORDED_SSH_AUTH_SOCK=/home/agent/.acq/ssh-agent.sock
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb rawbox
+    _acq_msb_ssh_agent_opt_out rawbox 2>&1
+    printf "SOCK=[%s]\n" "$(_acq_msb_ssh_auth_sock_for rawbox)"
+  '
+  assert_output --partial "names the raw agent socket path, not acq's managed link"
+  assert_output --partial "'acq rm rawbox'"
+  refute_output --partial 'was disconnected'
+  assert_output --partial 'SOCK=[]'
+  # A managed route whose link is already gone is disconnected, and says so.
+  _skip_unless_link_fits linkgone
+  printf 'linkgone\n' >"$STUBDIR/.msb_sandbox_list"
+  printf '{"active_config":{"vsock":{"routes":[{"host_socket":"%s","port":3552}]}}}\n' \
+    "$STUBDIR/state/msb/ssh-agent/linkgone.sock" >"$STUBDIR/.msb_inspect_json"
+  run bash -c '
+    unset SSH_AUTH_SOCK
+    export STUB_MSB_VERSION=0.6.9 STUB_RECORDED_SSH_AUTH_SOCK=/home/agent/.acq/ssh-agent.sock
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb linkgone
+    _acq_msb_ssh_agent_opt_out linkgone 2>&1
+  '
+  assert_output --partial "the forwarded ssh-agent was disconnected from 'linkgone'"
+  refute_output --partial 'raw agent socket path'
+}
+
+@test "vsock(10c25h): a link whose target sits in a symlinked directory is removed" {
+  _skip_unless_link_fits dirbox
+  mkdir -p "$STUBDIR/realdir" "$STUBDIR/state/msb/ssh-agent"
+  _mk_unix_socket "$STUBDIR/realdir/a.sock" || skip "python3 AF_UNIX socket unavailable"
+  ln -s "$STUBDIR/realdir" "$STUBDIR/aliasdir"
+  ln -s "$STUBDIR/aliasdir/a.sock" "$STUBDIR/state/msb/ssh-agent/dirbox.sock"
+  touch "$STUBDIR/not-a-socket25h"
+  : > "$CALLS"
+  run bash -c '
+    export SSH_AUTH_SOCK="'"$STUBDIR"'/not-a-socket25h" STUB_MSB_VERSION=0.6.9 STUB_RECORDED_SSH_AUTH_SOCK=/home/agent/.acq/ssh-agent.sock
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb dirbox
+    _acq_msb_start_ssh_agent_bridge dirbox 2>&1
+    wait
+  '
+  assert_output --partial 'removed the ssh-agent route link'
+  [ ! -L "$STUBDIR/state/msb/ssh-agent/dirbox.sock" ]
+  refute_regex "$(cat "$CALLS")" 'socat UNIX-LISTEN'
+}
+
+@test "vsock(10c25i): re-pointing the link at another user's socket warns as create does" {
+  _skip_unless_link_fits ownbox
+  local foreign
+  foreign=$(find /run /var/run -maxdepth 2 -type s ! -user "$(id -u)" -print -quit 2>/dev/null || true)
+  [ -n "$foreign" ] || skip "no socket owned by another user on this host"
+  _mk_unix_socket "$STUBDIR/own.sock" || skip "python3 AF_UNIX socket unavailable"
+  mkdir -p "$STUBDIR/state/msb/ssh-agent"
+  ln -s "$STUBDIR/own.sock" "$STUBDIR/state/msb/ssh-agent/ownbox.sock"
+  run bash -c '
+    export SSH_AUTH_SOCK="'"$foreign"'" STUB_MSB_VERSION=0.6.9
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _acq_msb_ssh_agent_link_refresh ownbox 2>&1
+  '
+  assert_output --partial 'SSH_AUTH_SOCK names a socket owned by another user; forwarding it anyway'
+}
+
 @test "vsock(10c25f): the link directory is created 0700" {
   _skip_unless_link_fits modebox
   _mk_unix_socket "$STUBDIR/agent25f.sock" || skip "python3 AF_UNIX socket unavailable"
