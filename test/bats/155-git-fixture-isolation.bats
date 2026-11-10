@@ -1,0 +1,276 @@
+#!/usr/bin/env bats
+#
+# 155-git-fixture-isolation.bats — the suite's own git fixtures must never be
+# redirected at another repository by an inherited Git environment.
+#
+# Exercise acq_clear_git_local_env with a sentinel repository and an uncleared
+# negative control. Also assert that the
+# kit-fetch destination guard refuses a destination inside a real repository.
+#
+# shellcheck shell=bats
+
+setup() { acq_setup_stubs; }
+teardown() { acq_teardown_stubs; }
+
+load 'helper'
+
+# _mk_sentinel_repo — a real repo standing in for "the repository that invoked
+# the hook". Its HEAD, identity, config and tracked file are the things a
+# redirected fixture would damage.
+_mk_sentinel_repo() { # PATH
+  mkdir -p "$1"
+  git -C "$1" init -q
+  printf 'sentinel\n' > "$1/sentinel.txt"
+  git -C "$1" add sentinel.txt
+  git -C "$1" -c user.email=real@example.gov -c user.name=real \
+    -c commit.gpgsign=false commit -q -m parent-sentinel
+}
+
+@test "git-fixture-isolation: setup clears Git's repository-local env vars" {
+  # acq_setup_stubs already ran. Every variable git would have exported to a
+  # hook must be absent, or a fixture `git -C` would resolve to the wrong repo.
+  local v
+  for v in $(git rev-parse --local-env-vars); do
+    refute [ -n "${!v:-}" ]
+  done
+}
+
+@test "git-fixture-isolation: inherited GIT_DIR cannot redirect a fixture repo" {
+  local sentinel="$STUBDIR/sentinel" fixture="$STUBDIR/fixture"
+  _mk_sentinel_repo "$sentinel"
+  local head_before count_before
+  head_before=$(git -C "$sentinel" rev-parse HEAD)
+  count_before=$(git -C "$sentinel" rev-list --count HEAD)
+
+  # Export exactly what Git hands a hook, then re-run the harness clear and
+  # create a fixture the way the suite does.
+  export GIT_DIR="$sentinel/.git"
+  export GIT_WORK_TREE="$sentinel"
+  export GIT_INDEX_FILE="$sentinel/.git/index"
+  acq_clear_git_local_env
+
+  mkdir -p "$fixture"
+  git -C "$fixture" init -q
+  printf 'one\n' > "$fixture/file.txt"
+  git -C "$fixture" add file.txt
+  git -C "$fixture" -c user.email=t@example.com -c user.name=t \
+    -c commit.gpgsign=false commit -q -m init
+
+  # The fixture is its own repository, not the sentinel.
+  assert [ -d "$fixture/.git" ]
+  assert_equal "$(git -C "$fixture" rev-parse --show-toplevel)" \
+    "$(cd "$fixture" && pwd -P)"
+
+  # The sentinel is untouched: same HEAD, same commit count, no fixture
+  # identity on its log, and no core.worktree written into its config.
+  assert_equal "$(git -C "$sentinel" rev-parse HEAD)" "$head_before"
+  assert_equal "$(git -C "$sentinel" rev-list --count HEAD)" "$count_before"
+  run git -C "$sentinel" log --format='%ae' -1
+  assert_output 'real@example.gov'
+  run git -C "$sentinel" config --local --get core.worktree
+  assert_failure
+}
+
+@test "git-fixture-isolation: a hook-inherited GIT_DIR WOULD capture an uncleared fixture" {
+  # Negative control. Without the clear, `git -C` resolves to the inherited
+  # GIT_DIR — so this test fails if the hazard ever stops being real and the
+  # two tests above start passing vacuously.
+  local sentinel="$STUBDIR/sentinel2" fixture="$STUBDIR/fixture2"
+  _mk_sentinel_repo "$sentinel"
+
+  export GIT_DIR="$sentinel/.git"
+  export GIT_WORK_TREE="$sentinel"
+  export GIT_INDEX_FILE="$sentinel/.git/index"
+
+  mkdir -p "$fixture"
+  git -C "$fixture" init -q 2>/dev/null || true
+  # The fixture got no .git of its own, and resolves to the sentinel.
+  refute [ -d "$fixture/.git" ]
+  assert_equal "$(git -C "$fixture" rev-parse --show-toplevel)" \
+    "$(cd "$sentinel" && pwd -P)"
+
+  acq_clear_git_local_env
+}
+
+@test "kit fetch: refuses a destination inside a git repository" {
+  local repo="$STUBDIR/destrepo"
+  _mk_sentinel_repo "$repo"
+  local head_before
+  head_before=$(git -C "$repo" rev-parse HEAD)
+
+  run kit_translate_fetch \
+    'git+https://example.invalid/x.git#ref=deadbeef&dir=kits/a' "$repo"
+  assert_failure
+  assert_output --partial 'refusing to fetch into a git repository'
+
+  # The guard ran before any destructive step: metadata and tracked file intact.
+  assert [ -d "$repo/.git" ]
+  assert_equal "$(git -C "$repo" rev-parse HEAD)" "$head_before"
+  assert [ -f "$repo/sentinel.txt" ]
+}
+
+@test "kit fetch: refuses a subdirectory of a git repository" {
+  local repo="$STUBDIR/destrepo2"
+  _mk_sentinel_repo "$repo"
+  mkdir -p "$repo/nested/deeper"
+
+  run kit_translate_fetch \
+    'git+https://example.invalid/x.git#ref=deadbeef&dir=kits/a' "$repo/nested/deeper"
+  assert_failure
+  assert_output --partial 'refusing to fetch into a git repository'
+  assert [ -d "$repo/.git" ]
+  assert [ -f "$repo/sentinel.txt" ]
+}
+
+@test "kit fetch: refuses an empty destination" {
+  run kit_translate_fetch \
+    'git+https://example.invalid/x.git#ref=deadbeef&dir=kits/a' ''
+  assert_failure
+  assert_output --partial 'refusing to fetch into an empty destination'
+}
+
+@test "kit fetch: preserves a bare repository and its refs and config" {
+  local source="$STUBDIR/source" bare="$STUBDIR/archive.git"
+  _mk_sentinel_repo "$source"
+  git clone -q --bare "$source" "$bare"
+  cp "$bare/config" "$STUBDIR/config.before"
+  local head_before refs_before
+  head_before=$(git -C "$bare" rev-parse HEAD)
+  refs_before=$(git -C "$bare" show-ref)
+
+  run kit_translate_fetch \
+    'git+https://example.invalid/x.git#ref=deadbeef&dir=kits/a' "$bare"
+  assert_failure
+  assert_output --partial 'refusing to fetch into a git repository'
+  assert_equal "$(git -C "$bare" rev-parse --is-bare-repository)" true
+  assert_equal "$(git -C "$bare" rev-parse HEAD)" "$head_before"
+  assert_equal "$(git -C "$bare" show-ref)" "$refs_before"
+  cmp "$bare/config" "$STUBDIR/config.before"
+  assert_equal "$(git -C "$bare" show HEAD:sentinel.txt)" sentinel
+  refute [ -e "$bare/.git" ]
+}
+
+@test "kit fetch: newline destination cannot replace its stripped sibling" {
+  local sibling="$STUBDIR/payload" dest
+  mkdir -p "$sibling"
+  printf 'keep sibling\n' > "$sibling/sentinel"
+  for dest in "$sibling"$'\n' "$STUBDIR/embedded"$'\n'"/child"; do
+    run _kit_fetch_destination "$dest"
+    assert_failure
+    assert_output 'kit-translate: refusing to fetch into a newline-bearing destination'
+    refute [ -e "$dest" ]
+    assert_equal "$(cat "$sibling/sentinel")" 'keep sibling'
+  done
+  refute [ -e "$STUBDIR/embedded"$'\n' ]
+}
+
+@test "kit fetch: physical ancestor newline is rejected before mkdir or sibling inspection" {
+  local sibling="$STUBDIR/physical" physical="$STUBDIR/physical"$'\n'
+  mkdir -p "$sibling" "$physical"
+  printf 'keep sibling\n' > "$sibling/sentinel"
+  printf 'keep target\n' > "$physical/sentinel"
+  ln -s "$physical" "$STUBDIR/alias"
+  run _kit_fetch_destination "$STUBDIR/alias/new/child"
+  assert_failure
+  assert_output 'kit-translate: refusing to fetch into a newline-bearing destination'
+  refute [ -e "$physical/new" ]
+  refute [ -e "$sibling/new" ]
+  assert_equal "$(cat "$sibling/sentinel")" 'keep sibling'
+  assert_equal "$(cat "$physical/sentinel")" 'keep target'
+}
+
+@test "kit fetch: refuses a symlink into bare repository metadata" {
+  local bare="$STUBDIR/empty.git" alias="$STUBDIR/alias"
+  git init -q --bare "$bare"
+  cp "$bare/config" "$STUBDIR/config.before"
+  ln -s "$bare/objects" "$alias"
+
+  run kit_translate_fetch \
+    'git+https://example.invalid/x.git#ref=deadbeef&dir=kits/a' "$alias"
+  assert_failure
+  assert_output --partial 'refusing to fetch into a git repository'
+  cmp "$bare/config" "$STUBDIR/config.before"
+  assert_equal "$(git -C "$bare" rev-parse --is-bare-repository)" true
+  refute [ -e "$bare/objects/.git" ]
+}
+
+@test "kit fetch: refuses / as a destination" {
+  local dest
+  for dest in / // /. /./ /usr/..; do
+    run kit_translate_fetch \
+      'git+https://example.invalid/x.git#ref=deadbeef&dir=kits/a' "$dest"
+    assert_failure
+    assert_output --partial 'refusing to fetch into /'
+  done
+}
+
+@test "kit fetch: refuses symlink payload destinations including dot and slash aliases" {
+  mkdir -p "$STUBDIR/payload"
+  printf 'keep\n' > "$STUBDIR/payload/sentinel"
+  ln -s "$STUBDIR/payload" "$STUBDIR/link"
+  local dest
+  for dest in "$STUBDIR/link" "$STUBDIR/link/" "$STUBDIR/link/." "$STUBDIR/link//./."; do
+    run kit_translate_fetch \
+      'git+https://example.invalid/x.git#ref=deadbeef&dir=kits/a' "$dest"
+    assert_failure
+    assert_output --partial 'refusing to fetch into a symlink destination'
+    assert_equal "$(cat "$STUBDIR/payload/sentinel")" keep
+    assert [ -L "$STUBDIR/link" ]
+  done
+}
+
+@test "kit fetch: refuses linked-worktree gitfiles and broken metadata without mkdir" {
+  local repo="$STUBDIR/parent" linked="$STUBDIR/linked" dest
+  _mk_sentinel_repo "$repo"
+  git -C "$repo" worktree add -q --detach "$linked" HEAD
+  mkdir -p "$STUBDIR/broken"
+  printf 'gitdir: /missing/metadata\n' > "$STUBDIR/broken/.git"
+  mkdir -p "$STUBDIR/symlinked" "$STUBDIR/external-metadata/objects"
+  ln -s "$STUBDIR/external-metadata" "$STUBDIR/symlinked/.git"
+  for dest in "$linked" "$linked/new/child" "$STUBDIR/broken/new/child" \
+      "$STUBDIR/symlinked/.git/objects/new"; do
+    run kit_translate_fetch \
+      'git+https://example.invalid/x.git#ref=deadbeef&dir=kits/a' "$dest"
+    assert_failure
+    assert_output --partial 'refusing to fetch into a git repository'
+  done
+  assert [ ! -e "$linked/new" ]
+  assert [ ! -e "$STUBDIR/broken/new" ]
+  assert [ ! -e "$STUBDIR/external-metadata/objects/new" ]
+  assert_equal "$(cat "$linked/sentinel.txt")" sentinel
+}
+
+@test "kit fetch: still accepts a clean scratch destination" {
+  # The guard must not break the normal path. A non-repo scratch dir gets past
+  # the destination checks and fails later, on the unreachable network host.
+  local scratch="$STUBDIR/scratch"
+  run kit_translate_fetch \
+    'git+https://example.invalid/x.git#ref=deadbeef&dir=kits/a' "$scratch"
+  assert_failure
+  refute_output --partial 'refusing to fetch into'
+  assert [ -d "$scratch" ]
+}
+
+@test "kit fetch: recursive inspection fails closed on partial find output" {
+  mkdir -p "$STUBDIR/dest/nested"
+  printf 'keep\n' > "$STUBDIR/dest/nested/sentinel"
+  find() { printf '%s\0' "$STUBDIR/dest"; return 1; }
+  run kit_translate_fetch \
+    'git+https://example.invalid/x.git#ref=deadbeef&dir=kits/a' "$STUBDIR/dest"
+  assert_failure
+  assert_output --partial 'refusing to fetch into an uninspectable destination'
+  assert_equal "$(cat "$STUBDIR/dest/nested/sentinel")" keep
+}
+
+@test "kit fetch: subtree detection supports newline names and incomplete bare layouts" {
+  local dest="$STUBDIR/tree" child
+  child="$dest/"$'nested\nrepo'
+  mkdir -p "$child/objects" "$child/refs"
+  ln -s /missing "$child/HEAD"
+  run kit_translate_fetch \
+    'git+https://example.invalid/x.git#ref=deadbeef&dir=kits/a' "$dest"
+  assert_failure
+  assert_output --partial 'refusing to fetch into a git repository subtree'
+  assert [ -L "$child/HEAD" ]
+  assert [ -d "$child/objects" ]
+}
