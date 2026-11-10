@@ -148,8 +148,8 @@ _kit_fetch_materialize() (
 #   - a query string (?private_token=…) becomes ?***;
 #   - URL userinfo (scheme://user:token@host) becomes scheme://***@host,
 #     cutting at the last '@';
-#   - without a scheme, a first path segment shaped user:token@host becomes
-#     ***@host.
+#   - without a scheme, a first path segment carrying any userinfo
+#     (user:token@host, or a bare token@host) becomes ***@host.
 # The fragment (#ref=…&dir=…) is kept so the message still names the kit. This
 # over-redacts when a path or host part legitimately contains '@' or ':',
 # which is harmless.
@@ -166,7 +166,7 @@ kit_ref_display() {
     *)
       first="${base%%/*}"
       case "$first" in
-        *:*@*) base="***@${first##*@}${base#"$first"}" ;;
+        *@*) base="***@${first##*@}${base#"$first"}" ;;
       esac
       ;;
   esac

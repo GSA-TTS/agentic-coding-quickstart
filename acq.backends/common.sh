@@ -2984,7 +2984,7 @@ _acq_kit_source_parse_entry() {
     *'@'*) ref="${rest#*@}"; rest="${rest%%@*}" ;;
   esac
   if ! repo=$(_acq_kit_source_normalize_repo "$rest"); then
-    echo "acq: ${source}: invalid kit source '$entry'" >&2
+    echo "acq: ${source}: invalid kit source '$(kit_ref_display "$entry")'" >&2
     echo "     want host/owner/repo[@REF][|DIR] (for example github.com/acme/kits@<sha>)" >&2
     return 1
   fi
