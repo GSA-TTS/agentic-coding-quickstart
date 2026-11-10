@@ -4161,6 +4161,98 @@ it) and add a Windows test that plants the DLL.
 
 ---
 
+## 61. Bash acq on Windows: Provider-Input `current` Is a Pointer File, Not a Symlink
+
+**Status:** Fixed for the Bash `acq` under Git Bash (`ACQ_IMPL=bash`, still the
+Windows default until ADR-0048m's gates are met). One follow-up is deferred: see
+Prevention / Status.
+
+### Symptoms
+
+Before the fix, every Bash `acq create`, `acq run` and `acq rm` under Git Bash
+failed in the provider-input transaction:
+
+- `Python was not found; run without arguments to install from the Microsoft
+  Store …`: the snapshot, materialize and swap helpers ran `python3`, which on
+  Windows is missing or is the App Execution Alias stub.
+- `rm: cannot remove '…/.current.NNNN.NNNN': Is a directory`, then `acq(msb):
+  error: sandbox 'NAME' was created but provider inputs could not be published.`
+
+After the fix, `current` under a sandbox's provider-input root
+(`…/provider-input/<backend>/<name>.<sum>/current`) is a small text file holding
+`generations/generation.XXXXXXXX` on Windows, where Linux and macOS have a
+symlink with that same target.
+
+### Root Cause
+
+The helpers in `acq.backends/common.sh` assumed a POSIX Python. Native Windows
+CPython has no `O_NOFOLLOW`, `O_DIRECTORY`, `dir_fd` or `os.fchmod` (before 3.13).
+Publishing used `ln -s`, and Git Bash's default `ln -s` copies the target
+directory rather than linking it, so the temporary name was a directory that
+`rm -f` cannot remove.
+
+### Fix
+
+- `_acq_provider_input_snapshot`, `_acq_provider_input_materialize` and
+  `_acq_provider_input_atomic_replace` run through the same interpreter probe as
+  the directory helpers (`python3`, `python`, `py -3`, skipping the Store stub),
+  with paths mapped to Windows form by `_acq_provider_input_nt_path`. On native
+  Windows Python the snapshot walks each artifact path with `os.lstat`, refuses
+  symlinks and every reparse point (junctions included), checks that the opened
+  handle is the file it checked, and refuses names Win32 would rewrite
+  (trailing dot or space, `:` streams, device names such as `NUL`).
+- `_acq_provider_input_publish` writes `current` as a pointer file and renames it
+  over the old one with `os.replace`. The POSIX path, a relative symlink, is
+  unchanged.
+
+The options considered for Windows publish:
+
+| Option | Admin or Developer Mode | Atomic switch | Why not chosen |
+|--------|-------------------------|---------------|----------------|
+| Directory junction (`mklink /J`, `New-Item -ItemType Junction`) | No | No | `MoveFileEx` cannot replace an existing directory, so a swap is remove-then-create. A junction needs an absolute target, so it breaks if the state directory moves, and it puts a reparse point in the tree that the walk is built to refuse and that recursive removal must not follow. |
+| `MSYS=winsymlinks:nativestrict` | Yes | Yes for a file symlink | Fails on a default Windows 11 client. |
+| **Pointer file** | No | Yes (`os.replace` of a file) | Chosen. |
+
+The pointer file costs nothing that is in use: no sandbox mounts `current`. Both
+backends mount the exact generation (`acq_provider_input_sbx_mount`,
+`acq_provider_input_msb_mount`), and the msb mount source is the drive-form path
+`host_path` produces. `current` only lets a sandbox created by an older acq,
+which mounted the whole root, find its inputs, and no such sandbox exists on
+Windows because the Bash transaction never completed there before. The Python
+acq's `provider_input.publish` calls `os.symlink`, which fails on Windows without
+Developer Mode or an administrator; it prints `could not publish the provider
+input` as a warning and continues, for the same reason.
+
+If `current` is a link the Python acq left (a directory symlink or a junction,
+which `os.replace` cannot overwrite), Bash removes that link, never its target,
+and retries, so `current` is absent for that moment. A real directory named
+`current`, such as a copy left by an older Bash acq, is refused (`it is a
+directory, not a file or a link`) and kept; remove it, or run `acq rm NAME`, and
+recreate.
+
+The lstat walk has the same residual race as the directory walk
+(`_acq_provider_input_nt_dir`): an ancestor swapped for a link after its check
+is followed by the open. The kits it reads sit in acq's private staging
+directory.
+
+### Prevention / Status
+
+`test/bats/147-provider-input-projection.bats` covers the Windows code paths on
+Linux with an emulated native Python (links, junctions, a leaf swapped after its
+lstat, Win32 names, the pointer swap and a full transaction).
+`test/bats/163-provider-input-windows-native.bats` runs on Git Bash with native
+Windows Python, in the Windows CI Git Bash subset: real junctions, a native
+symlink when one can be made, the pointer file, the transaction from lock to
+unlock with a mount source Windows resolves, and a stubbed `acq create` and
+`acq rm`. Against the previous helpers all eight of its tests fail.
+
+**Deferred:** the Python acq still tries a symlink for `current` on Windows. For
+the two implementations to leave the same state there, it should write the same
+pointer file. Unblock trigger: ADR-0048m's default flip, or anything that starts
+reading `current` on Windows.
+
+---
+
 ## Contributing
 
 When you discover a new failure mode:

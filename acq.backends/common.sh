@@ -4852,6 +4852,31 @@ sys.stdout.write("posix" if posix else "nt" if os.name == "nt" else "none")'
   return 1
 }
 
+# _acq_provider_input_run_py PATH... — run the Python program on stdin with the
+# interpreter chosen by _acq_provider_input_path_python, passing each PATH as an
+# argument. Native Windows Python cannot open an MSYS path, so for it each PATH
+# is first mapped by _acq_provider_input_nt_path and passed with MSYS argument
+# conversion off, as _acq_provider_input_nt_dir does; a PATH that does not map
+# fails closed before the program runs. Every other interpreter gets the PATHs
+# unchanged.
+_acq_provider_input_run_py() {
+  local arg mapped args=()
+  _acq_provider_input_path_python || return 1
+  if [ "$_ACQ_PROVIDER_INPUT_PATH_PY_KIND" != nt ]; then
+    "${_ACQ_PROVIDER_INPUT_PATH_PY[@]}" -I - "$@"
+    return
+  fi
+  for arg in "$@"; do
+    mapped=$(_acq_provider_input_nt_path "$arg") && [ -n "$mapped" ] || {
+      echo "acq: cannot map provider-input path to a Windows path: $arg" >&2
+      return 1
+    }
+    args+=("$mapped")
+  done
+  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
+    "${_ACQ_PROVIDER_INPUT_PATH_PY[@]}" -I - ${args[@]+"${args[@]}"}
+}
+
 # _acq_provider_input_nt_path PATH — print the Windows path for an MSYS or
 # Cygwin PATH, mapped lexically: the longest mount point in the mount table that
 # prefixes PATH is replaced by its Windows target, and the rest is kept as is. A
@@ -5112,13 +5137,52 @@ _acq_provider_input_remove_tree() {
   rm -rf -- "$1"
 }
 
+# _acq_provider_input_atomic_replace SRC DST — rename SRC over DST in one step.
+# On native Windows Python os.replace is MoveFileEx with REPLACE_EXISTING,
+# which replaces a file atomically but cannot replace a directory. So when DST
+# is a link to a directory (a directory symlink or a junction, both of which the
+# Python acq can leave as current), the link itself is removed, never followed,
+# and the rename is retried. current is briefly absent in that one case, which
+# no reader depends on: every sandbox mounts its exact generation. A real
+# directory at DST is refused rather than removed.
 _acq_provider_input_atomic_replace() {
-  python3 -I - "$1" "$2" <<'PY'
+  _acq_provider_input_path_python || return 1
+  if [ "$_ACQ_PROVIDER_INPUT_PATH_PY_KIND" = nt ]; then
+    _acq_provider_input_run_py "$1" "$2" <<'PY'
+import os, stat, sys
+src, dst = sys.argv[1:]
+try:
+    os.replace(src, dst)
+except OSError:
+    st = os.lstat(dst)
+    if not (stat.S_ISLNK(st.st_mode)
+            or getattr(st, 'st_file_attributes', 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+        if stat.S_ISDIR(st.st_mode):
+            raise SystemExit('acq: cannot replace %s: it is a directory, not a file or a link' % dst)
+        raise
+    if stat.S_ISDIR(st.st_mode):
+        os.rmdir(dst)
+    else:
+        os.unlink(dst)
+    os.replace(src, dst)
+PY
+    return
+  fi
+  _acq_provider_input_run_py "$1" "$2" <<'PY'
 import os, sys
 os.replace(sys.argv[1], sys.argv[2])
 PY
 }
 
+# current names the generation the last successful create published. On POSIX
+# it is a relative symlink, generations/<generation>. Native Windows has no
+# unprivileged symlink: Git Bash's ln -s copies the directory instead, a
+# native symlink needs Developer Mode or an administrator, and a junction can
+# neither be renamed over an existing one nor hold a relative target. So there
+# current is a pointer file holding that same relative path, written to a
+# temporary name and renamed over current, which is atomic for a file. No
+# sandbox mounts current: both backends mount the exact generation, so the
+# pointer is a record, and it keeps every link out of the state tree.
 _acq_provider_input_publish() {
   local root="$1" generation="$2" base temp current
   case "$root" in ""|/|/*/) return 1 ;; esac
@@ -5129,7 +5193,12 @@ _acq_provider_input_publish() {
   base=${generation##*/}
   temp="$root/.current.$$.$RANDOM"
   current="$root/current"
-  ln -s "generations/$base" "$temp" || return 1
+  if [ "${_ACQ_PROVIDER_INPUT_PATH_PY_KIND:-}" = nt ]; then
+    # noclobber: never write through a name that already exists.
+    ( set -C; printf 'generations/%s\n' "$base" > "$temp" ) 2>/dev/null || return 1
+  else
+    ln -s "generations/$base" "$temp" || return 1
+  fi
   # rename is atomic within root; do not remove current first.
   _acq_provider_input_atomic_replace "$temp" "$current" || { rm -f "$temp"; return 1; }
   # Retain prior generations. A sandbox created by an older acq may still mount
@@ -5383,13 +5452,33 @@ _acq_provider_input_control_plane() {
 # Snapshot only the declared regular files with descriptor-relative, no-follow
 # reads. Validation and later materialization therefore cannot observe a changed
 # candidate manifest, symlink, or path outside the fetched kit.
+#
+# Native Windows CPython has no O_NOFOLLOW, O_DIRECTORY or dir_fd, so there each
+# artifact is reached by an os.lstat walk from the kit root, which follows no
+# symlink or junction. The walk refuses a symlink or any reparse point
+# (FILE_ATTRIBUTE_REPARSE_POINT, which also covers junctions), a non-directory
+# ancestor and a final component that is not a regular file. The file is then
+# opened and its handle must name the same file (volume and file index) the
+# walk checked, so a link swapped in for the leaf after its lstat is refused.
+# As in _acq_provider_input_nt_dir, an ancestor swapped for a link between its
+# check and the open is not caught; the kit sits in acq's private staging
+# directory. Artifact paths there must also be names Win32 keeps as written: no
+# backslash, ":" (a drive or an alternate data stream), <>"|?*, control
+# character, trailing dot or space, or reserved device name such as NUL.
 _acq_provider_input_snapshot() {
-  python3 -I - "$1" "$2" <<'PY'
-import json, os, stat, sys
+  _acq_provider_input_run_py "$1" "$2" <<'PY'
+import io, json, os, stat, sys
 kit, target = sys.argv[1:]
-def open_relative(root, value):
+posix = all(hasattr(os, n) for n in ('O_NOFOLLOW', 'O_DIRECTORY')) and os.open in os.supports_dir_fd
+RESERVED = {'CON', 'PRN', 'AUX', 'NUL', 'CONIN$', 'CONOUT$'} | {d + str(i) for d in ('COM', 'LPT') for i in range(1, 10)}
+def check_value(value):
     if not isinstance(value, str) or value.startswith('/') or not value or any(part in ('', '.', '..') for part in value.split('/')):
         raise SystemExit('unsafe provider artifact path')
+    if not posix and any(part[-1] in '. ' or part.split('.')[0].rstrip(' ').upper() in RESERVED
+                         or any(c in '\\:<>"|?*' or ord(c) < 32 for c in part) for part in value.split('/')):
+        raise SystemExit('unsafe provider artifact path')
+def open_relative(root, value):
+    check_value(value)
     fd = os.dup(root)
     try:
         for part in value.split('/'):
@@ -5399,10 +5488,32 @@ def open_relative(root, value):
         return fd
     except:
         os.close(fd); raise
-root = os.open(kit, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+def linked(st):
+    return stat.S_ISLNK(st.st_mode) or getattr(st, 'st_file_attributes', 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+def open_walk(value):
+    check_value(value)
+    path = kit
+    st = os.lstat(path)
+    if linked(st) or not stat.S_ISDIR(st.st_mode): raise SystemExit('unsafe provider artifact')
+    parts = value.split('/')
+    for index, part in enumerate(parts):
+        path = os.path.join(path, part)
+        st = os.lstat(path)
+        kind = stat.S_ISREG if index == len(parts) - 1 else stat.S_ISDIR
+        if linked(st) or not kind(st.st_mode): raise SystemExit('unsafe provider artifact')
+    stream = open(path, 'rb')
+    try:
+        opened = os.fstat(stream.fileno())
+        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (st.st_dev, st.st_ino):
+            raise SystemExit('unsafe provider artifact')
+    except BaseException:
+        stream.close(); raise
+    return stream
+root = os.open(kit, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) if posix else None
+def open_member(value):
+    return os.fdopen(open_relative(root, value), 'rb') if posix else open_walk(value)
 try:
-    manifest_fd = open_relative(root, 'provider-input.json')
-    with os.fdopen(manifest_fd, encoding='utf-8') as stream: manifest_bytes = stream.read()
+    with io.TextIOWrapper(open_member('provider-input.json'), encoding='utf-8') as stream: manifest_bytes = stream.read()
     try:
         bundle = json.loads(manifest_bytes)
     except json.JSONDecodeError as exc:
@@ -5411,31 +5522,40 @@ try:
             f'invalid JSON at line {exc.lineno} column {exc.colno}'
         )
     os.mkdir(target, 0o700)
-    with open(os.path.join(target, 'provider-input.json'), 'x', encoding='utf-8') as stream: stream.write(manifest_bytes)
+    with open(os.path.join(target, 'provider-input.json'), 'x', encoding='utf-8', newline='\n') as stream: stream.write(manifest_bytes)
     for path in ('spec.yaml', bundle['factsPath'], bundle['normalizerPath'], bundle['snapshotPath']):
-        source = open_relative(root, path)
+        source = open_member(path)
         destination = os.path.join(target, path)
         os.makedirs(os.path.dirname(destination), mode=0o700, exist_ok=True)
-        with os.fdopen(source, 'rb') as src, open(destination, 'xb') as dst:
+        with source as src, open(destination, 'xb') as dst:
             source_mode = stat.S_IMODE(os.fstat(src.fileno()).st_mode)
             while True:
                 chunk = src.read(1024 * 1024)
                 if not chunk: break
                 dst.write(chunk)
-            os.fchmod(dst.fileno(), source_mode)
+            if posix: os.fchmod(dst.fileno(), source_mode)
+        if not posix: os.chmod(destination, source_mode)
 finally:
-    os.close(root)
+    if root is not None: os.close(root)
 PY
 }
 
 # Copy only validator-approved regular files into the backend-owned readonly tree.
+# On native Windows Python the provider ID and artifact paths must also be names
+# Win32 keeps as written (see _acq_provider_input_snapshot), and an artifact
+# that is a reparse point is refused, as a symlink is everywhere.
 _acq_provider_input_materialize() {
-  python3 -I - "$1" "$2" "$3" <<'PY'
-import json, os, shutil, sys
+  _acq_provider_input_run_py "$1" "$2" "$3" <<'PY'
+import json, os, shutil, stat, sys
 manifest, kit, target_root = sys.argv[1:]
+posix = all(hasattr(os, n) for n in ('O_NOFOLLOW', 'O_DIRECTORY')) and os.open in os.supports_dir_fd
+RESERVED = {'CON', 'PRN', 'AUX', 'NUL', 'CONIN$', 'CONOUT$'} | {d + str(i) for d in ('COM', 'LPT') for i in range(1, 10)}
+def nt_unsafe(name):
+    return (not posix and (name[-1] in '. ' or name.split('.')[0].rstrip(' ').upper() in RESERVED
+                           or any(c in '\\:<>"|?*' or ord(c) < 32 for c in name)))
 bundle = json.load(open(manifest, encoding="utf-8"))
 provider = bundle["providerId"]
-if not isinstance(provider, str) or not provider or provider in ('.', '..') or '/' in provider or '\\' in provider:
+if not isinstance(provider, str) or not provider or provider in ('.', '..') or '/' in provider or '\\' in provider or nt_unsafe(provider):
     raise SystemExit("unsafe provider ID")
 if bundle.get("schemaVersion") != "acq-provider-input-bundle/v2" or bundle.get("providerPath") != "models/providers/" + provider:
     raise SystemExit("unsafe provider bundle layout")
@@ -5444,10 +5564,12 @@ if os.path.lexists(target) or os.path.dirname(target) != target_root or os.path.
     raise SystemExit("duplicate or unsafe provider target")
 os.mkdir(target, 0o755)
 for source, destination, mode in ((bundle["factsPath"], "facts.json", 0o444), (bundle["normalizerPath"], "normalizer", 0o555), (bundle["snapshotPath"], "snapshot.json", 0o444)):
-    if not isinstance(source, str) or source.startswith('/') or any(part in ('', '.', '..') for part in source.split('/')):
+    if not isinstance(source, str) or source.startswith('/') or any(part in ('', '.', '..') or nt_unsafe(part) for part in source.split('/')):
         raise SystemExit("unsafe provider artifact path")
     source = os.path.join(kit, source)
     if os.path.islink(source) or not os.path.isfile(source):
+        raise SystemExit("unsafe provider artifact")
+    if getattr(os.lstat(source), 'st_file_attributes', 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
         raise SystemExit("unsafe provider artifact")
     destination = os.path.join(target, destination)
     shutil.copyfile(source, destination)
