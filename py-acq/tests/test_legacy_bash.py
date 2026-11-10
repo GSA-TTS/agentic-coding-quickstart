@@ -357,6 +357,11 @@ def test_cli_kits_relative_refs_are_skipped(tree):
     assert legacy_bash.read_cli_kits("msb", "box", warnings.append) == (["/abs"], ["git+https://h/o/r.git"])
     assert warnings and "rel/kit" in warnings[0]
     assert legacy_bash.read_cli_kits("msb", "absent") is None
+    # A recorded value that is not a plain path is not quoted back.
+    _bash_file("box", ".kits", f"schema=1\nkit=bob:{KEY}@host/kit\n")
+    warnings.clear()
+    assert legacy_bash.read_cli_kits("msb", "box", warnings.append) == ([], [])
+    assert warnings and "<redacted>" in warnings[0] and "S3NTINEL" not in warnings[0]
 
 
 def test_config_key_readers(tree):
@@ -421,6 +426,158 @@ def test_bad_config_lists_wait_at_generation_1_until_fixed(tree, capsys):
     assert migration.read_generation() == migration.TARGET_GENERATION
     assert migration.read_import_done() == set()
     assert "was not imported" not in capsys.readouterr().err
+
+
+def test_doctor_reports_a_pending_import_after_its_warning_stops_printing(tree, capsys):
+    from acq_py import doctor
+
+    assert doctor.bash_import_check()["status"] == "pass"  # nothing has run yet
+    _bash_file("box", ".env", "agent=shell\n")
+    _config(f"kit_sources: github.com/acme/kits@{SHA} notarepo\nprovider_credential_bindings: good=GOOD_KEY\n")
+    migration.migrate_tree()
+    assert "kit_sources was not imported" in capsys.readouterr().err
+    migration.migrate_tree()
+    assert "was not imported" not in capsys.readouterr().err  # printed once only
+
+    check = doctor.bash_import_check()
+    assert check["status"] == "warn", check
+    assert "kit_sources pending" in check["message"]
+    assert "sandboxes" not in check["message"].split("(", 1)[1].split(")", 1)[0]  # that part is done
+    assert "kit_sources was not imported" in check["message"]
+    assert "mutating acq command" in check["remediation"]
+    assert doctor.overall_status(doctor.doctor_checks()) != "pass"
+
+    _config(f"kit_sources: github.com/acme/kits@{SHA}\nprovider_credential_bindings: good=GOOD_KEY\n")
+    migration.migrate_tree()
+    assert doctor.bash_import_check()["status"] == "pass"
+    assert migration.read_import_warnings() == []
+
+
+@pytest.mark.parametrize("entry", [
+    f"https://bob:S3NTINEL-tok-1@github.com/acme/kits@{SHA}",
+    f"bob:S3NTINEL-tok-1@github.com/acme/kits@{SHA}",
+])
+def test_a_credential_in_a_bash_kit_source_never_reaches_output_marker_or_doctor(tree, capsys, entry):
+    from acq_py import cli, doctor
+
+    _config(f"kit_sources: {entry}\n")
+    migration.migrate_tree()
+    err = capsys.readouterr().err
+    assert "kit_sources was not imported" in err and "entry 1" in err and "<redacted>" in err
+    assert "S3NTINEL-tok-1" not in err
+    assert "S3NTINEL-tok-1" not in migration.generation_path().read_text(encoding="utf-8")
+    assert "S3NTINEL-tok-1" not in json.dumps(doctor.bash_import_check())
+    assert cli.main(["doctor", "--json"]) == 0
+    out, err = capsys.readouterr()
+    assert "kit_sources was not imported" in out
+    assert "S3NTINEL-tok-1" not in out + err
+
+
+KEY = "sk-S3NTINEL-pasted-key-9f2c"
+
+
+@pytest.mark.parametrize(("bindings", "phrase"), [
+    (f"opencode-go={KEY}", "invalid KEY_ENV <redacted> for provider 'opencode-go'"),  # key where the name goes
+    (f"opencode-go=OPENCODE_GO_API_KEY=x{KEY}", "has a malformed credential name <redacted>"),
+    (KEY, "expected '<providerId>=<KEY_ENV>', got <redacted>"),  # the key on its own
+    (f"{KEY}=OPENCODE_GO_API_KEY", "invalid provider id <redacted>"),
+    (f"opencode-go=OPENCODE_GO_API_KEY@{KEY}.example", "invalid host <redacted> for provider 'opencode-go'"),
+    (f"good=GOOD_KEY opencode-go={KEY}", "entry 2: invalid KEY_ENV <redacted>"),
+])
+def test_a_key_pasted_into_a_bash_binding_never_reaches_output_marker_or_doctor(tree, capsys, bindings, phrase):
+    from acq_py import cli, doctor
+
+    _config(f"provider_credential_bindings: {bindings}\n")
+    migration.migrate_tree()
+    err = capsys.readouterr().err
+    assert "provider_credential_bindings was not imported" in err and phrase in err, err
+    assert KEY not in err and "S3NTINEL" not in err
+    assert "S3NTINEL" not in migration.generation_path().read_text(encoding="utf-8")
+    assert "S3NTINEL" not in json.dumps(doctor.bash_import_check())
+    assert cli.main(["doctor", "--json"]) == 0
+    out, err = capsys.readouterr()
+    assert "provider_credential_bindings was not imported" in out
+    assert "S3NTINEL" not in out + err
+
+
+def test_a_well_formed_but_refused_binding_still_names_its_parts(tree, capsys):
+    # A provider claiming another service's env var: both parts have their
+    # shape, so the warning can say which ones conflict.
+    _config("provider_credential_bindings: acme=GITHUB_TOKEN@models.acme.example\n")
+    migration.migrate_tree()
+    err = capsys.readouterr().err
+    assert "'GITHUB_TOKEN'" in err and "'acme'" in err and "<redacted>" not in err
+
+
+@pytest.mark.parametrize("ref", ["ghp_S3NTINELtoken0123456789abcdef", "github_pat_S3NTINEL_x",
+                                 "glpat-S3NTINEL", "sk-S3NTINEL", "xoxb-S3NTINEL", "S3NTINEL" + "x" * 40])
+def test_a_token_shaped_kit_source_ref_never_reaches_output_marker_or_doctor(tree, capsys, ref):
+    from acq_py import cli, doctor
+
+    # The bad binding keeps the import pending, so its warnings are kept and doctor shows them.
+    _config(f"kit_sources: github.com/acme/kits@{ref}\nprovider_credential_bindings: bad\n")
+    migration.migrate_tree()
+    err = capsys.readouterr().err
+    assert "kit source 'github.com/acme/kits' was not imported: ref <redacted>" in err, err
+    assert "S3NTINEL" not in err
+    assert "S3NTINEL" not in migration.generation_path().read_text(encoding="utf-8")
+    check = doctor.bash_import_check()
+    assert "ref <redacted>" in check["message"] and "S3NTINEL" not in json.dumps(check)
+    assert cli.main(["doctor", "--json"]) == 0
+    out, err = capsys.readouterr()
+    assert "S3NTINEL" not in out + err
+
+
+def test_a_branch_or_short_sha_kit_source_ref_is_still_named(tree, capsys):
+    _config("kit_sources: github.com/acme/kits@main github.com/acme/other@0123abc\n")
+    migration.migrate_tree()
+    err = capsys.readouterr().err
+    assert "ref 'main' is not a full commit SHA" in err and "ref '0123abc'" in err
+
+
+def test_a_token_in_a_bash_kit_source_without_url_form_is_not_quoted(tree, capsys):
+    _config(f"kit_sources: github.com/acme/kits@{SHA} {KEY}\n")
+    migration.migrate_tree()
+    err = capsys.readouterr().err
+    assert "entry 2: invalid kit source <redacted>" in err and "S3NTINEL" not in err
+
+
+def test_an_old_marker_holding_a_credential_is_redacted_when_read(tree):
+    from acq_py import doctor
+
+    migration.write_generation(migration.RECORDS_GENERATION, import_done={"sandboxes"}, import_warned="0" * 64)
+    doc = json.loads(migration.generation_path().read_text(encoding="utf-8"))
+    doc["bash_import_warnings"] = [f"config.yaml kit_sources was not imported: invalid kit source "
+                                   f"'https://bob:S3NTINEL-tok-2@github.com/acme/kits@{SHA}'"]
+    migration.generation_path().write_text(json.dumps(doc), encoding="utf-8")
+    check = doctor.bash_import_check()
+    assert "S3NTINEL-tok-2" not in json.dumps(check) and "https://***@github.com" in check["message"]
+
+
+@pytest.mark.parametrize(("text", "shown"), [
+    ("https://u:p@host/r", "https://***@host/r"),
+    ("'u:p@host/r@sha'", "'***@host/r@sha'"),
+    ("github.com/acme/kits@sha", "github.com/acme/kits@sha"),  # a ref, not userinfo
+    ("https://host/r?token=x", "https://host/r?***"),
+    ("is the path right?", "is the path right?"),
+])
+def test_redact_hides_url_credentials_only(text, shown):
+    assert legacy_bash.redact(text) == shown
+
+
+def test_a_marker_from_before_the_warning_text_was_kept_gets_it_without_a_reprint(tree, capsys):
+    from acq_py import doctor
+
+    _config(f"kit_sources: github.com/acme/kits@{SHA} notarepo\n")
+    migration.migrate_tree()
+    capsys.readouterr()
+    # As an older acq left it: the digest of the warnings, not their text.
+    migration.write_generation(migration.RECORDS_GENERATION, import_done=migration.read_import_done(),
+                               import_warned=migration.read_import_warned())
+    assert migration.read_import_warnings() == []
+    migration.migrate_tree()
+    assert "was not imported" not in capsys.readouterr().err
+    assert "kit_sources was not imported" in doctor.bash_import_check()["message"]
 
 
 def test_mutable_empty_refs_and_the_control_plane_are_not_imported(tree, capsys):

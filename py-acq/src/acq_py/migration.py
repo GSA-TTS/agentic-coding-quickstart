@@ -172,13 +172,39 @@ def read_import_warned() -> str | None:
     return warned if isinstance(warned, str) else None
 
 
+def read_import_warnings() -> list[str]:
+    """The warnings the pending import last printed (``acq doctor`` shows them again).
+
+    Redacted again on the way out (:func:`legacy_bash.redact`), so a marker
+    written by an acq that did not redact never shows a credential.
+    """
+    warnings = _read_marker().get("bash_import_warnings")
+    return [legacy_bash.redact(w) for w in warnings if isinstance(w, str)] if isinstance(warnings, list) else []
+
+
+def import_started() -> bool:
+    """True once a generation-2 import has run and left something in the marker (see :func:`import_bash_state`)."""
+    marker = _read_marker()
+    return any(key in marker for key in ("bash_import_done", "bash_import_warned", "bash_import_warnings"))
+
+
+def import_parts() -> tuple[str, ...]:
+    """The parts of the generation-2 import, in the order they run."""
+    return tuple(_IMPORT_PARTS)
+
+
 def write_generation(generation: int, *, import_done: set[str] | None = None,
-                     import_warned: str | None = None) -> None:
+                     import_warned: str | None = None, import_warnings: list[str] | None = None) -> None:
     """Write the marker atomically (temp + fsync + rename); called LAST.
 
     ``import_done`` records which parts of a not yet finished generation-2 import
     are complete, so they are not run again; ``import_warned`` the digest of the
-    warnings that import last printed, so the same ones are not printed again.
+    warnings that import last printed, so the same ones are not printed again,
+    and ``import_warnings`` their text, which ``acq doctor`` reports while the
+    import stays pending (a mutating command prints them only once). The
+    warnings name paths and Bash config values; URL credentials in those values
+    are redacted when a warning is raised (:func:`legacy_bash.warn`) and again
+    here, before the text is written.
     """
     path = generation_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -188,6 +214,8 @@ def write_generation(generation: int, *, import_done: set[str] | None = None,
         doc["bash_import_done"] = sorted(import_done)
     if import_warned:
         doc["bash_import_warned"] = import_warned
+    if import_warnings:
+        doc["bash_import_warnings"] = [legacy_bash.redact(w) for w in import_warnings]
     data = json.dumps(doc, indent=2)
     with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(data + "\n")
@@ -471,7 +499,7 @@ def _import_kit_sources() -> tuple[int, bool]:
             continue
         if not kits.is_full_ref(ref):
             legacy_bash.warn(
-                f"kit source '{repo}' was not imported: ref '{ref}' is not a full commit SHA; "
+                f"kit source '{repo}' was not imported: ref {legacy_bash.shown_ref(ref)} is not a full commit SHA; "
                 f"run 'acq kit-source add {repo} --ref <full-sha>' to trust it"
             )
             continue
@@ -593,7 +621,8 @@ def import_bash_state() -> bool:
                 done.difference_update({mark for mark in done if mark.startswith(f"{part}:")})
                 done.add(part)
             if done != before:
-                write_generation(RECORDS_GENERATION, import_done=done, import_warned=read_import_warned())
+                write_generation(RECORDS_GENERATION, import_done=done, import_warned=read_import_warned(),
+                                 import_warnings=read_import_warnings())
     finished = done >= set(_IMPORT_PARTS)
     _report_import_warnings(warnings, done, pending=not finished)
     if any(counts.values()):
@@ -611,7 +640,10 @@ def _report_import_warnings(warnings: list[str], done: set[str], *, pending: boo
 
     A finished import prints whatever it collected (each such warning comes from
     a part that runs once). A pending one compares a digest of its warnings
-    with the one in the marker, and records the new digest when they differ.
+    with the one in the marker, and records the new digest, and the warnings
+    themselves for ``acq doctor``, when they differ. A marker that has the
+    digest but not the text (written before the text was kept) gets the text
+    without printing anything again.
     """
     if not pending:
         for message in warnings:
@@ -619,10 +651,12 @@ def _report_import_warnings(warnings: list[str], done: set[str], *, pending: boo
         return
     digest = hashlib.sha256("\n".join(warnings).encode("utf-8")).hexdigest() if warnings else None
     if digest == read_import_warned():
+        if warnings and read_import_warnings() != warnings:
+            write_generation(RECORDS_GENERATION, import_done=done, import_warned=digest, import_warnings=warnings)
         return
     for message in warnings:
         legacy_bash.warn(message)
-    write_generation(RECORDS_GENERATION, import_done=done, import_warned=digest)
+    write_generation(RECORDS_GENERATION, import_done=done, import_warned=digest, import_warnings=warnings)
 
 
 # ---------------------------------------------------------------------------

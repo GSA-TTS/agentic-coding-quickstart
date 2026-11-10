@@ -184,6 +184,42 @@ def test_on_a_terminal_the_prompt_does_not_hold_the_secret_store_lock(monkeypatc
     assert secretstore.resolve("usai") == VALUE
 
 
+def test_a_key_entered_at_the_prompt_is_stored_under_the_provider_and_store_locks(monkeypatch, tmp_path, capsys,
+                                                                                 children):
+    # Stored as 'acq secret set -g usai' stores it: a rotation or another
+    # 'provider-credential set' (the provider lock) and a create reading the
+    # store (the store lock) must not interleave with the write.
+    from acq_py import lock
+
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setattr(common, "_stdin_is_terminal", lambda: True)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("y\n"))
+    monkeypatch.setattr(common, "_read_secret_tty", lambda prompt: VALUE)
+    held: list[tuple[bool, bool]] = []
+    real = secretstore.set_secret
+
+    def free(path, cls, *, shared=False) -> bool:
+        try:  # at once: fails while another holder excludes this mode
+            with lock.exclusive_lock(path, 0.0, timeout_cls=cls, shared=shared):
+                return True
+        except cls:
+            return False
+
+    def store(service, scope, value):
+        held.append((
+            not free(lock.provider_credential_lock_path("usai"), lock.ProviderCredentialLockTimeout),
+            # even a shared holder (a create) is kept out while the key is written
+            not free(lock.secret_store_lock_path(), lock.SecretStoreLockTimeout, shared=True),
+        ))
+        return real(service, scope, value)
+
+    monkeypatch.setattr(secretstore, "set_secret", store)
+    rc, doc, _out, err = _create(capsys, tmp_path)
+    assert rc == 0, (doc, err)
+    assert held == [(True, True)]
+    assert secretstore.resolve("usai") == VALUE
+
+
 def test_a_key_removed_after_the_prompt_fails_the_create_closed(monkeypatch, tmp_path, capsys, children):
     # Under the store lock the gate checks again, without asking.
     from acq_py.commands import lifecycle

@@ -21,6 +21,7 @@ import select
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -67,6 +68,18 @@ elif args[:1] == ["exec"]:
     if mode == "sigterm":
         os.kill(os.getpid(), signal.SIGTERM)
         time.sleep(5)
+    if mode == "trap-term":
+        def on_end(signum, _frame):
+            time.sleep(0.5)  # a short cleanup: acq must still be waiting when it finishes
+            record(event="ended", signum=signum)
+            sys.exit(9)
+
+        signal.signal(signal.SIGTERM, on_end)
+        signal.signal(signal.SIGHUP, on_end)
+        record(event="ready", pid=os.getpid())
+        time.sleep(20)
+        record(event="timed-out")
+        sys.exit(3)
     if mode == "die-on-int":
         signal.signal(signal.SIGINT, signal.SIG_DFL)
         record(event="ready", pid=os.getpid())
@@ -619,6 +632,187 @@ def test_ctrl_c_in_a_shell_loop_stops_the_loop(fake, monkeypatch):
     assert b"after" not in out and b"finished" not in out, out
     assert rc == -signal.SIGINT, out
     assert b"Traceback" not in out
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+@posix_only
+@pytest.mark.parametrize("name", ["SIGTERM", "SIGHUP"])
+def test_a_signal_for_acq_alone_ends_the_session_child_before_acq_exits(fake, monkeypatch, name):
+    # kill <acq pid> during a session: acq passes the signal on, waits for the
+    # child, then exits 128+N; the child no longer runs or holds the terminal.
+    sig = getattr(signal, name)
+    monkeypatch.setenv("FAKE_MODE", "trap-term")
+    _record("msb")
+    proc = subprocess.Popen(_acq("--backend", "msb", "--json", "exec", "box", "--", "agent"),
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        deadline = time.monotonic() + 20
+        while not any(e.get("event") == "ready" for e in fake()) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        [ready] = [e for e in fake() if e.get("event") == "ready"]
+        proc.send_signal(sig)
+        out, err = proc.communicate(timeout=30)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+    assert proc.returncode == 128 + sig, err
+    assert [e["signum"] for e in fake() if e.get("event") == "ended"] == [sig]
+    assert not _pid_alive(ready["pid"])
+    assert out == "" and "Traceback" not in err
+
+
+@posix_only
+def test_a_child_that_ignores_the_signal_is_killed_after_the_grace_period(monkeypatch, tmp_path):
+    monkeypatch.setattr(hostexec, "_SESSION_SIGNAL_GRACE_S", 0.5)
+    ready = tmp_path / "ready"
+    child = [sys.executable, "-c",
+             "import os, signal, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+             f"open({str(ready)!r}, 'w').write(str(os.getpid())); time.sleep(30)"]
+
+    class Ended(BaseException):
+        pass
+
+    def acq_handler(signum, _frame):  # stands in for cli's own SIGTERM handler
+        raise Ended(signum)
+
+    def signal_acq():
+        deadline = time.monotonic() + 20
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        time.sleep(0.1)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    previous = signal.signal(signal.SIGTERM, acq_handler)
+    started = time.monotonic()
+    try:
+        threading.Thread(target=signal_acq, daemon=True).start()
+        with pytest.raises(Ended) as caught:
+            hostexec.run_foreground(child)
+        assert signal.getsignal(signal.SIGTERM) is acq_handler  # restored before it ran
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    assert caught.value.args == (signal.SIGTERM,)
+    assert time.monotonic() - started < 15
+    assert not _pid_alive(int(ready.read_text()))
+
+
+def test_run_foreground_returns_128_plus_n_when_the_prior_handler_returns(monkeypatch, tmp_path):
+    # A handler that does not raise leaves acq running: the session still ends
+    # with the shell's status for the signal. Runs on Windows too, with the
+    # signal raised from another thread as a console Ctrl-Break would be.
+    monkeypatch.setattr(hostexec, "_SESSION_SIGNAL_GRACE_S", 0.5)
+    signum = signal.SIGBREAK if sys.platform == "win32" else signal.SIGTERM  # type: ignore[attr-defined,unused-ignore]
+    ready = tmp_path / "ready"
+    child = [sys.executable, "-c",
+             "import signal, sys, time\n"
+             "for name in ('SIGTERM', 'SIGBREAK'):\n"
+             "    if hasattr(signal, name): signal.signal(getattr(signal, name), signal.SIG_IGN)\n"
+             f"open({str(ready)!r}, 'w').close(); time.sleep(30)"]
+    seen: list[int] = []
+
+    def raise_later():
+        deadline = time.monotonic() + 20
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        time.sleep(0.1)
+        if sys.platform == "win32":
+            signal.raise_signal(signum)  # handled by the main thread at its next poll
+        else:
+            os.kill(os.getpid(), signum)  # process-directed, so it interrupts the main thread's wait
+
+    previous = signal.signal(signum, lambda n, _f: seen.append(n))
+    started = time.monotonic()
+    try:
+        threading.Thread(target=raise_later, daemon=True).start()
+        assert hostexec.run_foreground(child) == 128 + signum
+    finally:
+        signal.signal(signum, previous)
+    assert seen == [signum]
+    assert time.monotonic() - started < 15  # the child was killed, not waited out
+
+
+def test_a_signal_while_the_handlers_are_put_back_still_ends_acq(monkeypatch):
+    # The child has exited and run_foreground is restoring its handlers when
+    # SIGTERM lands: acq must still end by it, not raise out of the restore.
+    class Ended(BaseException):
+        pass
+
+    def acq_handler(signum, _frame):  # stands in for cli's own SIGTERM handler
+        raise Ended(signum)
+
+    real = signal.signal
+    fired: list[int] = []
+
+    def restoring(signum, handler):
+        if signum != signal.SIGINT and handler is not hostexec._session_signal and not fired:
+            fired.append(signum)
+            hostexec._session_signal(signal.SIGTERM, None)  # the handler running right here
+        return real(signum, handler)
+
+    previous = real(signal.SIGTERM, acq_handler)
+    try:
+        monkeypatch.setattr(hostexec.signal, "signal", restoring)
+        with pytest.raises(Ended) as caught:
+            hostexec.run_foreground([sys.executable, "-c", "pass"])
+        monkeypatch.undo()
+        assert signal.getsignal(signal.SIGTERM) is acq_handler  # every handler was put back
+    finally:
+        real(signal.SIGTERM, previous)
+    assert fired and caught.value.args == (signal.SIGTERM,)
+
+
+def test_outside_the_wait_a_session_signal_is_recorded_not_raised(monkeypatch):
+    # A signal delivered anywhere outside the try that catches it (a function
+    # entry, a loop back-jump in the restore) must not raise: that would escape
+    # as a traceback. It is recorded, and acted on once the handlers are back.
+    monkeypatch.setattr(hostexec, "_session_signum", None)
+    monkeypatch.setattr(hostexec, "_session_waiting", False)
+    hostexec._session_signal(signal.SIGTERM, None)  # no exception
+    assert hostexec._session_signum == signal.SIGTERM
+    monkeypatch.setattr(hostexec, "_session_signum", None)
+    monkeypatch.setattr(hostexec, "_session_waiting", True)
+    with pytest.raises(hostexec._SessionSignal):
+        hostexec._session_signal(signal.SIGTERM, None)
+
+
+def test_a_signal_recorded_after_the_wait_ends_acq_once_the_handlers_are_back(monkeypatch):
+    # The signal lands just after the child's wait returned (here: inside the
+    # wait call, after the child is reaped and the wait flag is cleared).
+    class Ended(BaseException):
+        pass
+
+    def acq_handler(signum, _frame):
+        raise Ended(signum)
+
+    real_wait = subprocess.Popen.wait
+
+    def wait_then_signal(self, timeout=None):
+        code = real_wait(self, timeout)
+        hostexec._session_waiting = False  # as run_foreground leaves it once the wait returned
+        hostexec._session_signal(signal.SIGTERM, None)
+        return code
+
+    previous = signal.signal(signal.SIGTERM, acq_handler)
+    try:
+        monkeypatch.setattr(subprocess.Popen, "wait", wait_then_signal)
+        with pytest.raises(Ended) as caught:
+            hostexec.run_foreground([sys.executable, "-c", "pass"])
+        monkeypatch.undo()
+        assert signal.getsignal(signal.SIGTERM) is acq_handler
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    assert caught.value.args == (signal.SIGTERM,)
+    assert hostexec._session_waiting is False
 
 
 def test_sigint_handler_is_restored_when_the_program_cannot_start(tmp_path):

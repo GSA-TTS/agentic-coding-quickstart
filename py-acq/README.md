@@ -8,7 +8,8 @@ Tier-3-qualified**. A few documented flags are still missing: `--clone` and
 `ports --publish`. `ACQ_CLONE=1` is refused with a usage error rather than
 mounting the real workspace. Some behaviour also differs; for example,
 a kit outside the pinned built-in bundle is applied only when its ref is pinned
-to a full commit, and a local kit directory is refused. The dated correction in
+to a full commit, and a local kit directory is copied into acq's private cache
+and checked there before it is applied. The dated correction in
 ADR-0047m lists the gaps and the qualification state. The Bash `acq` stays the default implementation
 (`ACQ_IMPL` unset); `ACQ_IMPL=python` selects this one.
 
@@ -172,7 +173,13 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   status `128+N`. Ctrl-C goes to the child rather than killing it; when the
   child dies of a Ctrl-C that acq received too, acq dies of SIGINT as well, so a
   calling shell loop stops, and under `--json` no envelope is printed. A SIGINT
-  sent only to the child gives an ordinary `130` with the envelope.
+  sent only to the child gives an ordinary `130` with the envelope. A SIGTERM
+  or SIGHUP sent to acq during a session is passed on to the child, which has
+  ten seconds to exit before acq kills it; acq then exits `128+N` with no
+  envelope, so the session never outlives acq holding the terminal. On Windows
+  a Ctrl-Break reaches the child from the console itself; acq gives it the same
+  ten seconds and exits `149` (SIGBREAK is 21), again with no envelope. A
+  forced kill of acq on Windows cannot be caught (KNOWN_FAILURE_MODES §85).
 * Flag position: acq's own flags (`--json`, `--backend NAME`) may go anywhere
   before `--` for most verbs, so `acq ls --json` and `acq attach box --json`
   work. Only two places are strict: after the `exec` sandbox name, where tokens
@@ -316,9 +323,10 @@ precedence, so `--json` reports `"honoured_by_python": true` for each:
   state migration.
 * A kit the built-in bundle does not hold (every catalog extra kit, a provider
   kit from a registered source) is fetched at its pinned commit (see "Kits
-  outside the bundle" below). A local kit directory, or a ref not pinned to a
-  full commit, is refused at create and needs the Bash acq (`ACQ_IMPL=bash`).
-  `--json` marks these two settings `"python_applies": "pinned-only"`.
+  outside the bundle" below), and a local kit directory is copied and checked
+  first. A ref not pinned to a full commit is refused at create and needs the
+  Bash acq (`ACQ_IMPL=bash`). `--json` marks these two settings
+  `"python_applies": "pinned-only"`.
 * **`scope_github_token`** is the default answer (`yes`, `y` or `Y` mean yes)
   to the per-sandbox GitHub-token prompt (ADR-0013). Before a new sandbox is
   provisioned, and when `run` re-attaches, acq checks the workspace for GitHub
@@ -436,8 +444,17 @@ source) is fetched by `src/acq_py/kit_fetch.py`, a port of Bash
   `kit_ref_not_pinned` (Bash fetches it unverified). So are URL userinfo
   (`credential-bearing kit URLs are not allowed`), plain `http`, a query
   string or percent escapes, and a `dir=` that is absolute, contains `..` or
-  uses a character outside `[A-Za-z0-9._/-]`. A local kit directory is refused
-  with `unsupported_capability`.
+  uses a character outside `[A-Za-z0-9._/-]`.
+* A local kit directory (Bash reads it in place) is copied into the same
+  private cache first, and every check runs on the copy, so a change to the
+  directory during the checks cannot reach the sandbox. The copy follows no
+  link: a link in the kit is copied as a link and must resolve inside the copy
+  (on Windows a link or junction in a local kit is refused outright), and
+  anything but files, directories and links is refused, as is a tree of more
+  than 10000 entries, 256 MiB or 64 levels of directories. On Windows each
+  copied file's real path (`GetFinalPathNameByHandleW`) must lie under the kit.
+  A directory that does not exist is `validation_failed`. The copy is named by
+  its content.
 * The commit is fetched into a bare repository and must be exactly the pinned
   one; the kit is checked out from that commit's tree with a private index, and
   no symlink in it may resolve outside the kit. Only a neutral `hybrid/v1` kit
@@ -521,13 +538,20 @@ of 0 is also ignored, because it would fail the call at once instead of meaning
 |---------|---------|--------|
 | `ACQ_LIST_TIMEOUT` | `60` (more than 0) | One backend sandbox listing (`msb list`, `sbx ls`), behind `acq ls` and every existence or running check in create, run, start, rm and the secret re-feeds. A listing that does not answer in time fails the command with `timeout`. On Windows the listing runs in a Job object, and a timeout ends it and every process it started, such as an msb server it started itself (as every bounded backend call does there). |
 | `ACQ_ROTATE_TIMEOUT` | `120` (more than 0) | Each backend call `acq usai-rotate-api-key` makes while it holds the usai provider lock. |
-| `ACQ_SBX_KIT_ADD_TIMEOUT` | `600` (more than 0) | One `sbx kit add` (the kit heal before an attach, `kit apply`, `kit update`), which runs with the sandbox's lifecycle lock held. A heal that times out warns and the attach goes on. |
+| `ACQ_SBX_KIT_ADD_TIMEOUT` | `240` (more than 0) | One `sbx kit add` (the kit heal before an attach, `kit apply`, `kit update`), which runs with the sandbox's lifecycle lock held. A heal that times out warns and the attach goes on. The default stays below `ACQ_SANDBOX_LOCK_TIMEOUT`, so a command waiting for the lock outlasts one hung kit add; if you raise this one, raise that one above it. |
 | `ACQ_KIT_FETCH_TIMEOUT` | `120` (more than 0) | Each git step of fetching a pinned remote kit. |
 | `ACQ_MSB_KIT_TIMEOUT` | `1800` | One in-guest kit-install or substrate step on msb. |
 | `ACQ_MSB_READY_TIMEOUT`, `ACQ_SBX_READY_TIMEOUT` | `30` | The wait for a new sandbox to accept `exec`. |
 | `ACQ_SBX_STARTUP_BARRIER_TIMEOUT` | `60` | The wait for an sbx sandbox's kit startup commands to finish. |
 | `ACQ_SANDBOX_LOCK_TIMEOUT` | `300` | The wait for a sandbox's lifecycle lock, a provider-credential lock, or the secret-store lock that global secret changes and creates share. |
 | `ACQ_MIGRATION_LOCK_TIMEOUT` | `5` | The wait for the state-migration lock and the config lock. |
+
+A command that has waited about two seconds for any of these locks prints one
+line on stderr, `acq: waiting for <the lock>, held by another acq command...`,
+and keeps waiting. It never writes that line to stdout, so `--json` output is
+unchanged. While a global secret change waits for the secret-store lock, new
+creates and starts wait behind it, so a steady stream of them cannot keep it
+out until it times out.
 
 ## Testing
 
