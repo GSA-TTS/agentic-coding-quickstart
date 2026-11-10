@@ -4820,7 +4820,7 @@ replace its `wait` with the same bounded poll.
 
 ---
 
-## 84. Windows: A Forced Kill of the Python acq Leaves the Session Child Running
+## 85. Windows: A Forced Kill of the Python acq Leaves the Session Child Running
 
 **Symptom:** On Windows, ending the Python acq from outside during `acq attach`,
 `acq shell`, `acq exec` or `acq run` (Task Manager's End task, `taskkill /F
