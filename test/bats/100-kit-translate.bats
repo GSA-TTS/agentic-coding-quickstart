@@ -255,9 +255,25 @@ GITSTUB
   refute_regex "$fetchline" 'insteadOf'
 }
 
-# The anonymous attempt end to end, with a real git against a local repository:
-# file:// is allowed only through the bats-only ACQ_TEST_KIT_ANON_PROTOCOLS. The
-# user's global config rewrites every file:// URL to a missing path and names a
+# The anonymous attempt's allowlist is https, which an inherited
+# GIT_ALLOW_PROTOCOL can only narrow; no environment variable widens it, under
+# bats or not.
+@test "kit fetch: the anonymous allowlist is https and only ever narrowed" {
+  run env -u GIT_ALLOW_PROTOCOL BATS_TEST_NAME=x ACQ_TEST_KIT_ANON_PROTOCOLS=file bash -c '
+    . "$1/acq.backends/kit-translate.sh"
+    _kit_anon_protocols
+    GIT_ALLOW_PROTOCOL=ssh:https _kit_anon_protocols
+    GIT_ALLOW_PROTOCOL=file _kit_anon_protocols
+    GIT_ALLOW_PROTOCOL= _kit_anon_protocols
+  ' _ "$REPO_ROOT"
+  assert_success
+  assert_output $'https\nhttps\nacq-none\nacq-none'
+}
+
+# The anonymous attempt end to end, with a real git against a local repository.
+# The attempt allows only https, so a git wrapper on PATH records that and swaps
+# that one value for file before running the real git; nothing else about the
+# attempt changes. The user's global config rewrites every file:// URL to a missing path and names a
 # hooks directory whose post-checkout hook leaves a marker; the anonymous
 # attempt must read neither, and the authenticated retry must still run no hook.
 @test "kit fetch: the anonymous attempt really fetches, reading no git config file and running no hook" {
@@ -278,7 +294,19 @@ GITSTUB
   rm -f "$marker"
   git config --global "url.file://$STUBDIR/missing-acq-repo/.insteadOf" "file://"
 
-  run env -u GIT_ALLOW_PROTOCOL ACQ_TEST_KIT_ANON_PROTOCOLS=file bash -c '
+  local realgit wrap="$STUBDIR/anon-git" protolog="$STUBDIR/anon-protocols"
+  realgit=$(command -v git)
+  mkdir -p "$wrap"
+  cat >"$wrap/git" <<GITWRAP
+#!/usr/bin/env bash
+if [ "\${GIT_ALLOW_PROTOCOL-unset}" = https ]; then
+  printf '%s\n' "\$*" >>"$protolog"
+  export GIT_ALLOW_PROTOCOL=file
+fi
+exec "$realgit" "\$@"
+GITWRAP
+  chmod +x "$wrap/git"
+  run env -u GIT_ALLOW_PROTOCOL PATH="$wrap:$PATH" bash -c '
     . "$1/acq.backends/kit-translate.sh"
     mkdir -p "$2"
     _kit_git_fetch_into anon "$2" "file://$3" "$4" kits/demo >/dev/null || exit 1
@@ -288,8 +316,10 @@ GITSTUB
   assert_output "$sha"
   assert [ -f "$STUBDIR/anon/kits/demo/spec.yaml" ]
   assert [ ! -e "$marker" ]
+  # The fetch itself ran under the https-only allowlist.
+  grep -q -- '--depth 1 origin' "$protolog"
 
-  # Without the test override only https is allowed, so the same fetch fails.
+  # Without the wrapper only https is allowed, so the same fetch fails.
   run env -u GIT_ALLOW_PROTOCOL bash -c '
     . "$1/acq.backends/kit-translate.sh"
     mkdir -p "$2"

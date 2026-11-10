@@ -52,6 +52,15 @@
 # retained so acq_spin_stop can render the final "done" line for the same label.
 _ACQ_SPIN_PID=""
 _ACQ_SPIN_MSG=""
+# Private directory holding the animator's draw lock and stop marker ("" when
+# no animated spinner is running). See _acq_spin_end_animator.
+_ACQ_SPIN_DIR=""
+# Non-empty once this shell may have forked the animator for _ACQ_SPIN_DIR, and
+# once this shell holds that directory's draw lock.
+_ACQ_SPIN_FORKED=""
+_ACQ_SPIN_LOCKED=""
+# Non-empty while this shell handles a signal in _acq_spin_cleanup_signal.
+_ACQ_SPIN_IN_SIGNAL=""
 # Non-empty from the moment an animated spinner starts composing its traps until
 # it is stopped, so cleanup also runs in the gap before _ACQ_SPIN_PID is set.
 _ACQ_SPIN_ACTIVE=""
@@ -190,8 +199,9 @@ _acq_spin_self_pid() {
 # its inherited handlers is handled with the parent's trap commands, and Bash 5
 # then also runs the parent's EXIT trap there. Measured: TERMing a subshell
 # straight after `( ... ) &` ran the parent's EXIT trap in 173 of 200 children
-# under Bash 5.3 (none under 3.2). The spinner kills its animator in exactly
-# that way, so without this check the animator could run the caller's EXIT
+# under Bash 5.3 (none under 3.2). A terminal's or `timeout`'s group signal
+# reaches the animator in exactly that way (and the spinner once TERMed it
+# itself), so without this check the animator could run the caller's EXIT
 # cleanup (sandbox removal, lock release) a second time, from the wrong process.
 #
 # An unknown PID also counts as the owner. On Bash 3.2 the PID comes from a
@@ -338,7 +348,7 @@ acq_spin_start() {
     return 0
   fi
 
-  local frames owner
+  local frames owner dir
   frames=$(_acq_spin_frames)
   # Compose the cleanup traps BEFORE the cursor is hidden or the animator
   # exists. In the other order, a Ctrl-C or SIGTERM that landed while the traps
@@ -349,27 +359,53 @@ acq_spin_start() {
   _ACQ_SPIN_ACTIVE=1
   _acq_spin_install_traps
   owner="$_ACQ_SPIN_OWNER"
+  # A private directory for the draw lock and the stop marker (see
+  # _acq_spin_end_animator), made once the cleanup traps are in place so that
+  # they remove it from the moment it is recorded. A signal that lands while
+  # mktemp runs, before the name is recorded, can still leave an empty
+  # acq-spin.* directory behind. Without the directory the animator could not
+  # be stopped with a guarantee, so animate nothing and announce the phase
+  # instead.
+  dir=$(mktemp -d "${TMPDIR:-/tmp}/acq-spin.XXXXXX" 2>/dev/null) || dir=""
+  if [ -z "$dir" ] || [ ! -d "$dir" ]; then
+    _ACQ_SPIN_ACTIVE=""
+    _acq_spin_restore_traps
+    acq_status "$msg"
+    return 0
+  fi
+  _ACQ_SPIN_DIR="$dir"
   # Hide the cursor for the duration of the animation; the stop path (and the
   # trap) restore it. Then spawn the animator in the background.
   printf '\033[?25l' >&2
+  _ACQ_SPIN_FORKED=1
   (
     # The animator loop. Writes "\r<frame> <msg>" to stderr, sleeping between
-    # frames. Runs until killed by acq_spin_stop. `_f` is a plain (not `local`)
-    # variable: this is a subshell body, not a function, so `local` is invalid
-    # here — and the subshell's own scope means it can't leak to the parent.
+    # frames. Runs until acq_spin_stop sets its stop marker (or a TERM or HUP
+    # reaches it). `_f` is a plain (not `local`) variable: this is a subshell
+    # body, not a function, so `local` is invalid here — and the subshell's own
+    # scope means it can't leak to the parent.
     # It also stops by itself once the shell that started it is gone. That
     # covers a signal handled between the fork and the `$!` below (the cleanup
-    # then has no PID to kill) and an owner killed by SIGKILL, which runs no
+    # then has no PID to watch) and an owner killed by SIGKILL, which runs no
     # trap at all.
     # NOTE: do NOT redirect this subshell's stderr to /dev/null — the frames ARE
-    # the stderr output. It ends on TERM with `exit 0` rather than dying by the
-    # signal, so the shell never prints a "Terminated" job notice for it (see
-    # _acq_spin_end_animator).
-    trap 'exit 0' TERM
+    # the stderr output. It ends on TERM or HUP with `exit 0`, removing its
+    # private directory, rather than dying by the signal, so the shell prints
+    # no "Terminated" job notice for it.
+    # Each frame is drawn only while holding the draw lock and only when no
+    # stop marker exists, so once the stopping shell holds the lock (or this
+    # animator is gone) no frame can follow, however late this process runs.
+    trap '_acq_spin_animator_quit "$dir"' TERM HUP
     while :; do
       for _f in $frames; do
-        kill -0 "$owner" 2>/dev/null || exit 0
-        printf '\r%s %s' "$_f" "$msg" >&2
+        kill -0 "$owner" 2>/dev/null || _acq_spin_animator_quit "$dir"
+        if mkdir "$dir/draw" 2>/dev/null; then
+          [ ! -e "$dir/stop" ] || _acq_spin_animator_quit "$dir"
+          printf '\r%s %s' "$_f" "$msg" >&2
+          rmdir "$dir/draw" 2>/dev/null || true
+        elif [ -e "$dir/stop" ] || [ ! -d "$dir" ]; then
+          _acq_spin_animator_quit "$dir"
+        fi
         sleep 0.1
       done
     done
@@ -438,8 +474,8 @@ _acq_spin_restore_traps() {
   _ACQ_SPIN_OWNER=""
 }
 
-# _acq_spin_end_animator — stop the animator (if any) and return once it has
-# exited, without the `wait` builtin.
+# _acq_spin_end_animator — stop the animator (if any) so that it can draw no
+# further frame, without the `wait` builtin.
 #
 # Bash 5.2 can lose track of a child that exits while a trap runs: in the
 # Ctrl-C cleanup, `wait <animator>` then never returned although the animator
@@ -447,24 +483,89 @@ _acq_spin_restore_traps() {
 # test/bats/create-signal.py's sbx Ctrl-C case, six at a time on four CPUs:
 # 5 hangs in 80 runs under Bash 5.2.21, none in 60 under 5.3. Polling with
 # `kill -0` cannot hang that way. The `sleep` between polls makes the shell reap
-# an exited animator, which then no longer answers `kill -0`. The animator ends
-# on TERM with `exit 0`, so no "Terminated" job notice is printed for it (Bash
-# 3.2 would otherwise print one when it reaps a child killed by TERM); the poll
-# runs with stderr on /dev/null for a TERM that lands before the animator has
-# set that trap. After about two seconds the poll gives up rather than send
-# KILL to a PID that may have been reused: an animator still running then stops
-# by itself once this shell is gone (its kill -0 check on the owner).
+# an exited animator, which then no longer answers `kill -0`.
+#
+# A TERM alone would not stop the drawing in time: an animator that is not
+# scheduled for a while can be past its checks, with the TERM still pending,
+# and write one more frame whenever it next runs, over whatever this shell has
+# printed since (an attached agent session). So the animator draws only while
+# holding a draw lock (a directory made with mkdir, which is atomic) and only
+# when no stop marker exists, and it quits by itself at its next check (within
+# one frame) once the marker is set. This function writes the stop marker, then
+# waits until it holds the draw lock itself or the animator is gone; from either
+# point on no frame can be drawn. The lock is held only for the moment of one
+# draw, so this waits beyond that moment only for an animator that is alive and
+# in the middle of a draw. That wait is capped at about 30 seconds, for an
+# animator suspended (SIGSTOP) while holding the lock: after that the stop
+# returns, and such an animator, if it is ever resumed, can still draw that one
+# frame. Once the lock is held, it waits up to about two seconds more for the
+# animator to exit; one still running then ends at its next check.
+#
+# The animator is not sent TERM (unless the stop marker cannot be written,
+# when only a TERM can end it). A TERM that reached it before it set its own
+# trap would kill it by the signal, and Bash 3.2 then prints a "Terminated" job
+# notice; hiding that needed stderr on /dev/null around the whole wait, which
+# also hid the output of a trap that ran during it (the cursor restore, a
+# caller's interrupt message). The private directory is removed here once the
+# animator is gone or was never started, or otherwise by the animator as it
+# quits (_acq_spin_animator_quit).
+#
+# The spinner state is cleared only after the wait, so a signal that arrives
+# during it runs this same wait again from the trap (writing the marker and
+# taking the lock are idempotent) instead of skipping it.
 _acq_spin_end_animator() {
-  local pid="$_ACQ_SPIN_PID" tries=0
-  [ -n "$pid" ] || return 0
-  kill "$pid" 2>/dev/null || return 0
-  {
-    while kill -0 "$pid" 2>/dev/null && [ "$tries" -lt 100 ]; do
-      sleep 0.02
-      tries=$((tries + 1))
-    done
-  } 2>/dev/null
+  local pid="$_ACQ_SPIN_PID" dir="$_ACQ_SPIN_DIR" tries=0 held=0 gone=0 deadline
+  if [ -z "$dir" ]; then
+    [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
+    return 0
+  fi
+  [ -z "$_ACQ_SPIN_LOCKED" ] || held=1
+  deadline=$((SECONDS + 30))
+  if [ -z "$pid" ] && [ -z "$_ACQ_SPIN_FORKED" ]; then
+    # No animator was ever started for this directory.
+    gone=1
+  else
+    # The animator quits by itself once it sees the marker. Only if the marker
+    # cannot be written is it sent TERM instead (the job notice that may then
+    # follow is the lesser harm than an animator polling for the whole session).
+    if ! : 2>/dev/null >"$dir/stop" && [ -n "$pid" ]; then
+      kill "$pid" 2>/dev/null || true
+    fi
+  fi
+  while [ "$gone" -eq 0 ]; do
+    if [ "$held" -eq 0 ] && mkdir "$dir/draw" 2>/dev/null; then
+      _ACQ_SPIN_LOCKED=1
+      held=1
+    fi
+    # The animator removes the directory as it quits, and draws nothing after.
+    if [ ! -d "$dir" ]; then gone=1; break; fi
+    if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then gone=1; break; fi
+    # Without a PID (a signal landed between the fork and recording it), the
+    # lock is all this shell can hold; the animator ends at its next check.
+    if [ "$held" -eq 1 ] && { [ -z "$pid" ] || [ "$tries" -ge 100 ]; }; then
+      break
+    fi
+    [ "$SECONDS" -lt "$deadline" ] || break
+    sleep 0.02
+    tries=$((tries + 1))
+  done
+  if [ "$gone" -eq 1 ]; then
+    rm -f "$dir/stop" 2>/dev/null || true
+    rmdir "$dir/draw" "$dir" 2>/dev/null || true
+  fi
+  _ACQ_SPIN_DIR=""
+  _ACQ_SPIN_FORKED=""
+  _ACQ_SPIN_LOCKED=""
   return 0
+}
+
+# _acq_spin_animator_quit DIR — the animator's way out: remove its private
+# directory (the stopping shell may hold the draw lock inside it; that no longer
+# matters once the animator is ending) and exit 0.
+_acq_spin_animator_quit() {
+  rm -f "$1/stop" 2>/dev/null || true
+  rmdir "$1/draw" "$1" 2>/dev/null || true
+  exit 0
 }
 
 # _acq_spin_stop_animation — stop the animator (if any), then clear the line
@@ -508,13 +609,18 @@ _acq_spin_cleanup_exit() {
 #      status, drop the EXIT trap, and re-raise SIG at THIS process (see
 #      _acq_signal_self) so the parent sees a death by signal. Should the
 #      re-raise not end the process (SIG ignored), exit with the status instead.
+#
+# Bash 5 runs this trap again for a second INT or TERM that arrives while the
+# first is still being handled (during the stop's wait for the animator, which
+# can last up to its cap). The nested run returns at once, so the outer one
+# finishes: it, not the nested run, holds the prior handler, and that handler
+# (the provisioning subshells' `_acq_provider_input_signal_exit`) must run
+# before the EXIT cleanup releases the provider-input lock.
 _acq_spin_cleanup_signal() {
   local _acq_spin_sig="$1" _acq_spin_status=1 _acq_spin_prior=""
   case "$_acq_spin_sig" in
-    INT)  _acq_spin_status=130
-          _acq_spin_prior="$_ACQ_SPIN_PRIOR_INT_TRAP";  _ACQ_SPIN_PRIOR_INT_TRAP="" ;;
-    TERM) _acq_spin_status=143
-          _acq_spin_prior="$_ACQ_SPIN_PRIOR_TERM_TRAP"; _ACQ_SPIN_PRIOR_TERM_TRAP="" ;;
+    INT)  _acq_spin_status=130 ;;
+    TERM) _acq_spin_status=143 ;;
   esac
   # A child that inherited this trap (see _acq_spin_is_owner) was being asked
   # to stop: it ends here, without touching the owner's animator, cursor or
@@ -523,6 +629,12 @@ _acq_spin_cleanup_signal() {
     trap - EXIT INT TERM
     exit "$_acq_spin_status"
   fi
+  [ -z "$_ACQ_SPIN_IN_SIGNAL" ] || return 0
+  _ACQ_SPIN_IN_SIGNAL=1
+  case "$_acq_spin_sig" in
+    INT)  _acq_spin_prior="$_ACQ_SPIN_PRIOR_INT_TRAP";  _ACQ_SPIN_PRIOR_INT_TRAP="" ;;
+    TERM) _acq_spin_prior="$_ACQ_SPIN_PRIOR_TERM_TRAP"; _ACQ_SPIN_PRIOR_TERM_TRAP="" ;;
+  esac
   _acq_spin_stop_animation
   trap - "$_acq_spin_sig"
   _acq_run_prior_trap "$_acq_spin_prior" "$_acq_spin_status"
