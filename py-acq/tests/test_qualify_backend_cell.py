@@ -788,6 +788,96 @@ def test_a_second_stop_signal_does_not_cut_a_steps_stop_short(monkeypatch):
     assert events[:4] == ["wait", "group stop", "wait", "group kill"]  # the stop ran to the end
 
 
+def _stop_handlers():
+    import signal
+
+    return {s: signal.getsignal(s) for s in qbc._stop_signals()}
+
+
+def _restore_handlers(saved):
+    import signal
+
+    for sig, handler in saved.items():
+        signal.signal(sig, handler)
+
+
+def test_a_sigterm_that_lands_while_ctrl_c_is_still_unwinding_does_not_leave_the_step_running(monkeypatch):
+    # A terminal's Ctrl+C reaches the oracle as SIGINT and the harness forwards a
+    # SIGTERM as well. Here the SIGTERM lands at the worst moment: the
+    # KeyboardInterrupt is still unwinding and run_process has just entered its
+    # handler, before any guard of its own is in place. The oracle's SIGINT
+    # handler must already have closed that window, so the step is still stopped.
+    import signal
+
+    events = []
+    step = _FakeStep(events, exits=False, ignores_stop=True)
+    unwinding = SimpleNamespace(now=False)
+    waits = []
+
+    def communicate(input=None, timeout=None):
+        events.append("wait")
+        if not waits:
+            waits.append(timeout)
+            try:
+                signal.raise_signal(signal.SIGINT)  # the terminal's Ctrl+C
+            finally:
+                unwinding.now = True
+        if step.dead:
+            step.returncode = 1
+            return "", ""
+        raise subprocess.TimeoutExpired("step", timeout)
+
+    guard = qbc._ignore_stop_signals
+
+    def guard_with_a_late_sigterm():
+        if unwinding.now:
+            unwinding.now = False
+            signal.raise_signal(signal.SIGTERM)  # the harness's forwarded stop
+        return guard()
+
+    def signal_group(proc, kill, job=None):
+        # Recorded only: the fake's pid must never reach a real killpg.
+        events.append("group kill" if kill else "group stop")
+        step.dead = step.dead or kill
+
+    step.communicate = communicate
+    monkeypatch.setattr(qbc, "_spawn", lambda argv, **kwargs: (step, None))
+    monkeypatch.setattr(qbc, "_signal_group", signal_group)
+    monkeypatch.setattr(qbc, "_ignore_stop_signals", guard_with_a_late_sigterm)
+    saved = _stop_handlers()
+    try:
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        qbc._install_stop_handlers()  # as main() does
+        with pytest.raises(KeyboardInterrupt):
+            qbc.run_process(["step"], env={}, timeout=5.0, grace=0.05)
+    finally:
+        _restore_handlers(saved)
+    assert events == ["wait", "group stop", "wait", "group kill", "wait"]  # stopped, then killed
+
+
+def test_the_first_stop_signal_swallows_every_later_one():
+    import signal
+
+    saved = _stop_handlers()
+    stops = qbc._stop_signals()
+    try:
+        for first, raised in ((signal.SIGINT, KeyboardInterrupt), (signal.SIGTERM, SystemExit)):
+            signal.signal(signal.SIGINT, signal.default_int_handler)
+            qbc._install_stop_handlers()
+            assert signal.getsignal(signal.SIGINT) is qbc._interrupt
+            assert signal.getsignal(signal.SIGTERM) is qbc._terminate
+            with pytest.raises(raised):
+                signal.raise_signal(first)
+            assert all(signal.getsignal(s) is qbc._swallow for s in stops)
+            for later in stops:
+                signal.raise_signal(later)  # swallowed: nothing is raised
+        signal.signal(signal.SIGINT, signal.SIG_IGN)  # e.g. started as a background job
+        qbc._install_stop_handlers()
+        assert signal.getsignal(signal.SIGINT) is signal.SIG_IGN
+    finally:
+        _restore_handlers(saved)
+
+
 # ---- Windows: each step runs in a Job object, which the forced kill terminates ----
 
 
@@ -853,6 +943,13 @@ def test_on_windows_a_step_that_honours_ctrl_break_is_not_killed(windows):
 def test_on_windows_a_step_that_cannot_join_a_job_is_killed_before_it_runs(windows):
     windows.adopt_error = OSError("no job")
     assert qbc.run_process(["step"], env={}, timeout=5.0) is None
+    assert windows.events[:3] == [("spawn", 0x200 | qbc.CREATE_SUSPENDED), ("adopt", 4242), "kill"]
+
+
+def test_on_windows_a_stop_before_the_step_joins_its_job_kills_the_suspended_step(windows):
+    windows.adopt_error = KeyboardInterrupt()
+    with pytest.raises(KeyboardInterrupt):
+        qbc.run_process(["step"], env={}, timeout=5.0)
     assert windows.events[:3] == [("spawn", 0x200 | qbc.CREATE_SUSPENDED), ("adopt", 4242), "kill"]
 
 

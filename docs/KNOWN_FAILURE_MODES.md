@@ -306,7 +306,14 @@ The forced kill no longer reaches unrelated processes on Windows. It used to be
 `taskkill /F /T`, which walks parent process ids without a creation-time check
 and, after a pid was reused, could kill a process that had nothing to do with the
 run. Job membership is fixed when a process is created, so `TerminateJobObject`
-kills exactly the step's processes.
+kills the step's processes and nothing else.
+
+One exception is intended: a process that a step starts with
+`CREATE_BREAKAWAY_FROM_JOB` leaves the job (the job sets
+`JOB_OBJECT_LIMIT_BREAKAWAY_OK`, so a backend that detaches its daemon that way is
+not refused) and survives the forced kill, like a POSIX process that left the
+step's group with `setsid`. The job is a cleanup tool, not a security boundary: it
+does not contain a step that sets out to escape it.
 
 ### Mitigation today
 

@@ -259,13 +259,16 @@ grace period before killing it. On POSIX a terminal's Ctrl+C also reaches the or
 directly as SIGINT; the forwarded SIGTERM is what reaches it when only the harness
 was interrupted, for example by a supervisor's `kill -INT`. The harness checks for
 Ctrl+C at least once a second while it waits, Windows included. The oracle turns the
-first signal into a normal exit and tears down, and swallows any further one while
-it stops the step it was waiting on and while it tears down. The oracle runs each acq call and the canary in a
+first signal into a normal exit and tears down, and from then on swallows any further
+one, so it cannot cut short the stop of the step it was waiting on or the teardown. The oracle runs each acq call and the canary in a
 process group of its own and stops a group the same way (SIGTERM, a grace period,
 then kill), so an interrupted `msb create` or canary run cleans up instead of leaving
 a sandbox behind. On Windows each of them also runs in a Job object of its own: the
-kill terminates the job, which holds exactly that call's processes, and if the oracle
-is killed outright the job takes them down with it. A backend daemon that a call
+kill terminates the job, which holds that call's processes and nothing else, and if
+the oracle is killed outright the job takes them down with it. A process that a call
+starts with `CREATE_BREAKAWAY_FROM_JOB` leaves the job and survives the kill; that is
+intended (a backend may detach its daemon that way), because the job is a cleanup
+tool, not a security boundary. A backend daemon that a call
 starts without detaching is stopped with it; start the daemon before the run (see
 `docs/KNOWN_FAILURE_MODES.md`). The oracle is also given a deadline (`ACQ_QUALIFY_DEADLINE`) that ends one grace
 period before the timeout; at the deadline it stops starting steps, tears down and

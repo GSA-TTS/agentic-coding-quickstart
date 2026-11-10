@@ -89,15 +89,18 @@ default (``QUALIFY_IMAGE`` and ``EXPECT_SHA`` are removed, and
 ``ACQ_QUALIFY_OUT_DIR`` is an ``ACQ_*`` variable), and its sandbox gets this run's
 nonce name (``QUALIFY_SANDBOX_NAME``), which teardown also removes.
 
-Aborts: SIGTERM (and SIGBREAK on Windows) raise ``SystemExit``, so teardown runs.
+Aborts: SIGTERM (and SIGBREAK on Windows) raise ``SystemExit`` and SIGINT
+``KeyboardInterrupt``, so teardown runs; the first of them also swallows every
+later one, so a second stop cannot cut the cleanup short.
 Every subprocess runs in its own process group; when it times out, or the oracle
 is interrupted while waiting for it, the group gets SIGTERM (CTRL_BREAK on
 Windows) and a grace period before it is killed, so acq's and the canary's own
 cleanup still runs and no backend command is left running behind them. On
 Windows each subprocess also runs in a Job object of its own (``StepJob``): the
-kill terminates the job, which holds exactly the step's processes, and if the
-oracle itself dies the job takes them down with it. A second stop signal while a
-step is being stopped is swallowed, so it cannot cut that stop short.
+kill terminates the job, which holds the step's processes and nothing else, and if
+the oracle itself dies the job takes them down with it. A process a step starts with
+``CREATE_BREAKAWAY_FROM_JOB`` leaves the job and so survives the kill: the job is
+a cleanup tool, not a security boundary.
 The harness sends one when a run outlives its timeout, then waits a grace period
 before killing it, and exports a deadline (``ACQ_QUALIFY_DEADLINE``, epoch
 seconds) that ends before its timeout; the oracle stops starting steps at that
@@ -380,7 +383,9 @@ class StepJob:
     """A Windows Job object holding one step's process and every process it starts.
 
     Job membership is fixed when a process is created and inherited by its
-    descendants, so terminating the job kills exactly the step's processes. No
+    descendants, so terminating the job kills the step's processes and nothing
+    else (except one that broke away, see below; the job is a cleanup tool, not a
+    security boundary). No
     process is looked up by pid, so a recycled pid cannot lead the kill to an
     unrelated process, as it can with ``taskkill /T``, which walks parent pids.
 
@@ -557,7 +562,9 @@ def run_process(argv: list[str], *, env: dict[str, str], stdin: str | None = Non
         # The oracle itself is being stopped, and that stop is already on its
         # way out. A second stop signal (a terminal's Ctrl+C reaches the oracle
         # as SIGINT and the harness forwards a SIGTERM as well) must not cut
-        # this step's stop short and leave the step running.
+        # this step's stop short and leave the step running. The oracle's own
+        # stop handlers already swallow it (``_first_stop``); this also covers
+        # an interrupt that did not come through them.
         previous = _ignore_stop_signals()
         try:
             stop_process(proc, grace, job)
@@ -591,10 +598,13 @@ def _spawn(argv: list[str], *, env: dict[str, str], cwd: str | None, stdin: bool
         return proc, None
     try:
         return proc, StepJob.adopt(proc.pid)
-    except OSError:
+    except BaseException as exc:
+        # A stop signal that lands here must not leave a suspended process behind.
         proc.kill()
         _reap(proc, REAP_TIMEOUT)
-        return None
+        if isinstance(exc, OSError):
+            return None
+        raise
 
 
 def canary_env(env: dict[str, str], names: Names) -> dict[str, str]:
@@ -985,8 +995,42 @@ def _deadline(environ) -> float:
     return value if math.isfinite(value) else time.time() + DEFAULT_BUDGET
 
 
+def _first_stop() -> None:
+    """Swallow every further stop signal from now on; called by the first stop handler.
+
+    It runs inside the handler, before the handler raises, so there is no window
+    in which a second stop (a terminal's Ctrl+C reaches the oracle as SIGINT and
+    the harness forwards a SIGTERM as well) can land while the first is still
+    unwinding, before a step's stop or teardown sets up its own guard, and cut
+    that cleanup short. The oracle is on its way out by then; the harness still
+    kills it once its grace period runs out.
+    """
+    _ignore_stop_signals()
+
+
 def _terminate(signum, _frame):
+    _first_stop()
     raise SystemExit(128 + signum)
+
+
+def _interrupt(_signum, _frame):
+    """SIGINT: ``KeyboardInterrupt``, as Python's default handler, without the window."""
+    _first_stop()
+    raise KeyboardInterrupt
+
+
+def _install_stop_handlers() -> None:
+    """Turn SIGTERM, SIGBREAK (Windows) and SIGINT into a normal exit that tears down.
+
+    SIGBREAK is what reaches a Windows console process group. SIGINT is taken
+    over only from Python's default handler: one that was ignored when the
+    oracle started (a background job) stays ignored.
+    """
+    signal.signal(signal.SIGTERM, _terminate)
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, _terminate)
+    if signal.getsignal(signal.SIGINT) is signal.default_int_handler:
+        signal.signal(signal.SIGINT, _interrupt)
 
 
 def _swallow(_signum, _frame) -> None:
@@ -1040,11 +1084,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     names = make_names(backend)
     deadline = _deadline(os.environ)
-    # A terminated run must still tear down (SIGBREAK is what reaches a Windows
-    # console process group).
-    signal.signal(signal.SIGTERM, _terminate)
-    if hasattr(signal, "SIGBREAK"):
-        signal.signal(signal.SIGBREAK, _terminate)
+    # A terminated or interrupted run must still tear down.
+    _install_stop_handlers()
     # A Windows file still held open by a just-stopped process must not turn the
     # verdict into a traceback.
     with tempfile.TemporaryDirectory(prefix="acq-qual-", ignore_cleanup_errors=True) as tmp:
