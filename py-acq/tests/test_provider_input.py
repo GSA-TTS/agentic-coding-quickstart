@@ -169,6 +169,22 @@ def test_on_a_terminal_declining_abandons_the_create(monkeypatch, tmp_path, caps
     assert _verb_calls(children, "create") == []
 
 
+@pytest.mark.parametrize("entered", ["", "   ", "bad\tvalue"])
+def test_on_a_terminal_an_empty_or_unusable_key_stores_nothing_and_abandons(monkeypatch, tmp_path, capsys, children,
+                                                                           entered):
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setattr(common, "_stdin_is_terminal", lambda: True)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("y\n"))
+    monkeypatch.setattr(common, "_read_secret_tty", lambda prompt: entered)
+    rc, doc, out, err = _create(capsys, tmp_path)
+    assert rc == errors.EXIT_FAILURE and doc["error"]["code"] == errors.SECRET_MISSING
+    assert "abandoned" in doc["error"]["message"]
+    assert not secretstore.has("usai")
+    assert _verb_calls(children, "create") == []
+    if entered.strip():
+        _no_leak(entered, children, out, err)
+
+
 # ---------------------------------------------------------------------------
 # Provider selection.
 # ---------------------------------------------------------------------------
