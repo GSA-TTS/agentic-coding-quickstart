@@ -1374,16 +1374,19 @@ _acq_workspace_safe() {
 
 # _acq_trusted_host_dirs — acq's own host directories, one per line: the state
 # dir, the provenance dir (which holds each sandbox's read-only trusted config),
-# the config dir, the data dir (the provider-input validator lives there) and the
-# secret store's file, sidecar and index locations. Unresolvable entries are
-# skipped.
+# the config dir, the data dir (the provider-input validator lives there), the
+# cache dir and the sbx and msb kit caches (the kit payloads acq applies), and
+# the secret store's file, sidecar and index locations. Unresolvable entries
+# are skipped.
 _acq_trusted_host_dirs() {
   local d
   if d=$(acq_state_dir 2>/dev/null); then printf '%s\n' "$d"; fi
   if d=$(_acq_provenance_dir 2>/dev/null); then printf '%s\n' "$d"; fi
   if d=$(_acq_config_file 2>/dev/null); then dirname -- "$d"; fi
   if d=$(acq_xdg_dir XDG_DATA_HOME .local/share 2>/dev/null); then printf '%s/acq\n' "$d"; fi
-  for d in "${ACQ_SECRET_FILE_DIR:-}" "${ACQ_SECRET_META_DIR:-}" "${ACQ_PROVIDER_INPUT_DATA_DIR:-}"; do
+  if d=$(acq_xdg_dir XDG_CACHE_HOME .cache 2>/dev/null); then printf '%s/acq\n' "$d"; fi
+  for d in "${ACQ_SECRET_FILE_DIR:-}" "${ACQ_SECRET_META_DIR:-}" "${ACQ_PROVIDER_INPUT_DATA_DIR:-}" \
+      "${ACQ_SBX_KIT_CACHE:-}" "${ACQ_MSB_KIT_CACHE:-}"; do
     if [ -n "$d" ]; then printf '%s\n' "$d"; fi
   done
   if [ -n "${ACQ_SECRET_INDEX_FILE:-}" ]; then dirname -- "$ACQ_SECRET_INDEX_FILE"; fi
@@ -1419,25 +1422,35 @@ _acq_path_physical() {
   printf '%s\n' "${base:-/}"
 }
 
-# _acq_workspace_trusted_safe PATH — refuse a workspace that is, or contains,
-# one of acq's own host directories. The workspace is mounted into the guest, so
-# such a mount would let the sandbox read the secret store and rewrite acq's
-# records and the trusted config that acq otherwise mounts read-only. Both the
-# paths as given and their symlink-resolved forms are compared.
+# _acq_workspace_trusted_safe PATH — refuse a workspace that is, contains, or
+# lies inside one of acq's own host directories. The workspace is mounted into
+# the guest, so such a mount would let the sandbox read the secret store and
+# rewrite acq's records, its kit caches and the trusted config that acq
+# otherwise mounts read-only (one sandbox's workspace inside the provenance dir
+# would reach every other sandbox's trusted config). Both the paths as given and
+# their symlink-resolved forms are compared. A directory that resolves to '/'
+# is ignored for the "inside" test, which would otherwise refuse everything.
 _acq_workspace_trusted_safe() {
-  local ws="$1" wsp d dp
+  local ws="$1" wsp d dp how
   case "$ws" in /*) ;; *) ws="$PWD/$ws" ;; esac
   wsp=$(_acq_path_physical "$ws")
   while IFS= read -r d; do
     [ -n "$d" ] || continue
     acq_path_is_absolute "$d" || continue
     dp=$(_acq_path_physical "$d")
+    how=""
     if _acq_path_within "$d" "$ws" || _acq_path_within "$dp" "$wsp"; then
-      echo "acq: error: workspace $(acq_printable "$1") contains acq's own directory $(acq_printable "$d")." >&2
+      how="contains"
+    elif [ "${d%/}" != "" ] && [ "${dp%/}" != "" ] \
+        && { _acq_path_within "$ws" "$d" || _acq_path_within "$wsp" "$dp"; }; then
+      how="is inside"
+    fi
+    if [ -n "$how" ]; then
+      echo "acq: error: workspace $(acq_printable "$1") $how acq's own directory $(acq_printable "$d")." >&2
       echo "     The sandbox would reach acq's state, config or secret store through the" >&2
       echo "     workspace mount, including the trusted config acq mounts read-only. Use a" >&2
-      echo "     narrower workspace (a project directory), or move acq's directories with" >&2
-      echo "     ACQ_STATE_DIR, XDG_STATE_HOME, XDG_CONFIG_HOME or XDG_DATA_HOME." >&2
+      echo "     project directory outside acq's directories, or move them with ACQ_STATE_DIR," >&2
+      echo "     XDG_STATE_HOME, XDG_CONFIG_HOME, XDG_DATA_HOME or XDG_CACHE_HOME." >&2
       return 1
     fi
   done <<EOF

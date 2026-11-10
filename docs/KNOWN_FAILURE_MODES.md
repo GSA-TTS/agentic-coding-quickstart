@@ -4449,3 +4449,54 @@ active.
 `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe` exists, so both
 implementations use DPAPI. Aligning the two remaining cases (whether Windows
 should ever fall back to plaintext) needs a decision that amends ADR-0028.
+
+---
+
+## Workspace Refused Because It Contains acq's Own Directories
+
+**Symptom:** `acq create` or `acq run` stops before creating anything with:
+
+```text
+acq: error: workspace /home/you contains acq's own directory /home/you/.local/state/acq.
+```
+
+or `... is inside acq's own directory ...`. The usual trigger is
+`acq run opencode ~`, or `acq run opencode` with no path while the current
+directory is your home directory.
+
+**Cause:** The workspace is mounted into the sandbox, and the Bash acq now
+refuses a workspace that is, contains, or lies inside one of acq's own host
+directories (`_acq_workspace_trusted_safe` in `acq.backends/common.sh`). These
+are the state dir and provenance dir (`~/.local/state/acq`, or `ACQ_STATE_DIR`
+and `ACQ_PROVENANCE_DIR`), the config dir (`~/.config/acq`), the data dir and
+secret store (`~/.local/share/acq`, or `ACQ_SECRET_STORE_DIR` and the
+`ACQ_SECRET_*` overrides), the provider-input data dir, and the kit caches
+(`~/.cache/acq`, `ACQ_SBX_KIT_CACHE`, `ACQ_MSB_KIT_CACHE`). Such a mount let the
+agent read a file-backed secret store and rewrite acq's records, its kit
+payloads and the trusted config acq otherwise mounts read-only. A read-only
+(`:ro`) workspace is refused as well, because the guest could still read the
+secret store. The paths are compared both as given and with symlinks resolved.
+
+**Resolution:** Run the agent on a project directory:
+
+```bash
+acq run opencode /path/to/your/project
+```
+
+If acq's directories must live somewhere else, move them with `ACQ_STATE_DIR`
+and the `XDG_STATE_HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `XDG_CACHE_HOME`
+variables.
+
+The check runs only when a sandbox is created. Re-attaching to an existing
+sandbox (`acq run NAME`, `start`, `restart`) does not re-mount the workspace and
+skips it, so a sandbox created on `~` by an older acq keeps its unsafe mount.
+Recreate it on a project directory. Save anything outside the mounted
+workspace first, because the guest filesystem is discarded:
+
+```bash
+acq ls                 # find the sandbox created on your home directory
+acq rm NAME
+acq run opencode /path/to/your/project
+```
+
+The Python acq does not have this check yet.
