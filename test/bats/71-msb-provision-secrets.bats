@@ -331,6 +331,32 @@ LIST
   local log; log=$(cat "$CALLS")
   assert_regex "$log" 'msb modify withusai --secret USAI_API_KEY@api\.gsa\.usai\.gov'
   refute_regex "$log" 'msb modify nousai'
+  # A record that exists but cannot be read or parsed fails closed: reading it as
+  # empty would look like a legacy (default-selection) record.
+  local nf; nf=$(_acq_provenance_file msb nousai)
+  printf 'provider_selection=sideways\n' > "$nf"
+  : > "$CALLS"
+  run env ACQ_SECRET_TEST_VALUE="k2" ACQ_BACKEND=msb "$ACQ" usai-rotate-api-key
+  assert_success
+  refute_regex "$(cat "$CALLS")" 'msb modify nousai'
+  mv -f "$nf" "$nf.saved"
+  mkdir -p "$nf"
+  : > "$CALLS"
+  run env ACQ_SECRET_TEST_VALUE="k3" ACQ_BACKEND=msb "$ACQ" usai-rotate-api-key
+  assert_success
+  refute_regex "$(cat "$CALLS")" 'msb modify nousai'
+  assert_output --partial "provenance record cannot be read"
+  rmdir "$nf"
+  mv -f "$nf.saved" "$nf"
+  if [ "$(id -u)" != 0 ]; then
+    chmod 000 "$nf"
+    : > "$CALLS"
+    run env ACQ_SECRET_TEST_VALUE="k4" ACQ_BACKEND=msb "$ACQ" usai-rotate-api-key
+    chmod 600 "$nf"
+    assert_success
+    refute_regex "$(cat "$CALLS")" 'msb modify nousai'
+    assert_regex "$(cat "$CALLS")" 'msb modify withusai --secret'
+  fi
   # A non-provider service still reaches every sandbox.
   : > "$CALLS"
   run env ACQ_SECRET_TEST_VALUE="gh" ACQ_BACKEND=msb "$ACQ" secret set -g github

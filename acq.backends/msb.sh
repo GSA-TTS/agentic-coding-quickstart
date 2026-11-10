@@ -6722,8 +6722,10 @@ _acq_msb_has_own_value() {
 # provider only when the sandbox's selection delivers it (`--no-provider-kits`
 # or an external-only selection leaves the default provider out), so a later
 # `secret set` or key rotation must not push the key into that sandbox either.
-# The selection is loaded in a subshell so the caller's globals are untouched;
-# a record that cannot be read fails closed (not delivered).
+# The selection is loaded in a subshell so the caller's globals are untouched.
+# A record that exists but cannot be read, or holds an unknown selection mode,
+# fails closed (not delivered): reading it as empty would look like a legacy
+# record and deliver the default provider to a `--no-provider-kits` sandbox.
 _acq_msb_provider_delivered() {
   local service="$1" sandbox="$2" key_env ids
   command -v acq_provider_selection_load >/dev/null 2>&1 || return 0
@@ -6731,6 +6733,10 @@ _acq_msb_provider_delivered() {
   case "$service" in github) return 0 ;; esac
   key_env=$(acq_provider_credential_key_env "$service" 2>/dev/null) || key_env=""
   [ -n "$key_env" ] || return 0
+  if ! acq_provenance_readable msb "$sandbox"; then
+    echo "acq(msb): warning: not applying '$service' to sandbox '$sandbox': its provenance record cannot be read, so its provider selection is unknown." >&2
+    return 1
+  fi
   ids=$(acq_provider_selection_load msb "$sandbox" && acq_provider_delivery_ids "$sandbox" msb) 2>/dev/null || return 1
   case "
 $ids
@@ -6946,12 +6952,13 @@ acq_backend_secret_propagate() {
   # Count only the sandboxes the re-feed is meant to reach, so one that keeps
   # its own value or excludes the provider is not reported as a failure.
   if [ -n "$scope_name" ]; then
-    _acq_msb_refeed_eligible "$service" "$scope_name" "$scope_name" && eligible=1
+    # The re-feed below prints any warning; the count stays quiet.
+    _acq_msb_refeed_eligible "$service" "$scope_name" "$scope_name" 2>/dev/null && eligible=1
   else
     while IFS= read -r sb; do
       sb="${sb%$'\r'}"
       [ -n "$sb" ] || continue
-      _acq_msb_refeed_eligible "$service" "$sb" "" </dev/null && eligible=$((eligible + 1))
+      _acq_msb_refeed_eligible "$service" "$sb" "" </dev/null 2>/dev/null && eligible=$((eligible + 1))
     done <<EOF
 $(_acq_msb_cli list -q 2>/dev/null)
 EOF

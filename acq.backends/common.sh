@@ -2654,6 +2654,22 @@ acq_provenance_field() {
   ' "$file" 2>/dev/null || true
 }
 
+# acq_provenance_readable BACKEND NAME — 0 when the sandbox's provenance record is
+# absent (a sandbox from before records existed) or is a regular file acq can
+# read; 1 when its path cannot be resolved or the record exists but cannot be
+# read. acq_provenance_field reads an unreadable record as empty, which a caller
+# would mistake for a legacy record, so a least-privilege decision checks this
+# first and fails closed.
+acq_provenance_readable() {
+  local file
+  file=$(_acq_provenance_file "${1:-}" "${2:-}") || return 1
+  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    return 0
+  fi
+  [ -f "$file" ] || return 1
+  cat -- "$file" >/dev/null 2>&1
+}
+
 # Remember the primary host workspace mounted into a sandbox. This is non-secret
 # host-side state used by commands that take only SANDBOX later (for example,
 # `acq github-scope SANDBOX`) so they do not accidentally inspect the caller's
