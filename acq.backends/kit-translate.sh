@@ -84,13 +84,9 @@ _kit_git_isolate_repo() {
 # _kit_anon_protocols — the GIT_ALLOW_PROTOCOL value for the anonymous kit
 # fetch: https, the only transport a kit URL may name. An inherited
 # GIT_ALLOW_PROTOCOL only narrows it; when it leaves nothing, a name no
-# transport has allows nothing. Under bats, ACQ_TEST_KIT_ANON_PROTOCOLS replaces
-# https so a test can fetch a local file:// repository through this attempt.
+# transport has allows nothing.
 _kit_anon_protocols() {
   local want="https"
-  if [ -n "${BATS_TEST_NAME:-}" ] && [ -n "${ACQ_TEST_KIT_ANON_PROTOCOLS:-}" ]; then
-    want="$ACQ_TEST_KIT_ANON_PROTOCOLS"
-  fi
   if [ -z "${GIT_ALLOW_PROTOCOL+x}" ]; then
     printf '%s\n' "$want"
     return 0
