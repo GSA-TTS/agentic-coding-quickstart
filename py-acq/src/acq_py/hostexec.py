@@ -321,6 +321,12 @@ _SESSION_SIGNAL_GRACE_S = 10.0
 # The signal being handled by _session_signal in the current foreground run.
 _session_signum: int | None = None
 
+# True only while _wait_session is inside the try block that catches
+# _SessionSignal. Outside it (installing or restoring the handlers, between
+# statements of the function, at a loop's back-jump) a signal is only recorded:
+# raising there would escape as a traceback.
+_session_waiting = False
+
 
 class _SessionSignal(BaseException):
     """A SIGTERM, SIGHUP or SIGBREAK arrived while a foreground child ran."""
@@ -331,12 +337,17 @@ class _SessionSignal(BaseException):
 
 
 def _session_signal(signum: int, _frame: FrameType | None) -> None:
-    """Break out of the child's wait once; a repeat during the grace period is ignored."""
+    """Break out of the child's wait once; a repeat during the grace period is ignored.
+
+    Outside the wait (see ``_session_waiting``) the signal is only recorded,
+    and :func:`_wait_session` acts on it once the handlers are back.
+    """
     global _session_signum
     if _session_signum is not None:
         return
     _session_signum = signum
-    raise _SessionSignal(signum)
+    if _session_waiting:
+        raise _SessionSignal(signum)
 
 
 def _hold_session_signals(saved: dict[int, _Handler]) -> None:
@@ -369,13 +380,15 @@ def _wait_session(child: subprocess.Popen) -> tuple[int, tuple[int, _Handler] | 
     until the child exits. ``KeyboardInterrupt`` cannot come from here (SIGINT
     is held by :func:`_hold_interrupt`). A signal that lands after the child
     exited, while the handlers are being put back, still ends acq (it is
-    reported like one that came during the wait).
+    reported like one that came during the wait): outside the inner try block
+    :func:`_session_signal` only records it.
     """
+    global _session_waiting
     saved: dict[int, _Handler] = {}
     signum: int | None = None
-    late: int | None = None
     try:
         try:
+            _session_waiting = True
             _hold_session_signals(saved)
             if sys.platform == "win32":
                 while True:
@@ -386,31 +399,18 @@ def _wait_session(child: subprocess.Popen) -> tuple[int, tuple[int, _Handler] | 
                         continue
             else:
                 returncode = child.wait()
+            _session_waiting = False
         except _SessionSignal as caught:
+            _session_waiting = False
             signum = caught.signum
             returncode = _end_session(child, signum)
     finally:
-        late = _restore_session_signals(saved)
+        _session_waiting = False
+        for held, handler in saved.items():
+            signal.signal(held, handler)
     if signum is None:
-        signum = late
+        signum = _session_signum  # recorded after the wait, if one came
     return returncode, None if signum is None else (signum, saved.get(signum, signal.SIG_DFL))
-
-
-def _restore_session_signals(saved: dict[int, _Handler]) -> int | None:
-    """Put back the handlers :func:`_hold_session_signals` replaced; returns a signal that came meanwhile.
-
-    :func:`_session_signal` raises at most once per run, so one retry is
-    always enough for a restore it interrupted.
-    """
-    late: int | None = None
-    pending = list(saved.items())
-    while pending:
-        try:
-            signal.signal(*pending[0])
-            pending.pop(0)
-        except _SessionSignal as caught:
-            late = caught.signum
-    return late
 
 
 def _end_session(child: subprocess.Popen, signum: int) -> int:

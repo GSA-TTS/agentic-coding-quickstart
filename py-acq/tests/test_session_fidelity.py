@@ -756,7 +756,7 @@ def test_a_signal_while_the_handlers_are_put_back_still_ends_acq(monkeypatch):
     def restoring(signum, handler):
         if signum != signal.SIGINT and handler is not hostexec._session_signal and not fired:
             fired.append(signum)
-            hostexec._session_signal(signal.SIGTERM, None)  # raises, as the handler would right here
+            hostexec._session_signal(signal.SIGTERM, None)  # the handler running right here
         return real(signum, handler)
 
     previous = real(signal.SIGTERM, acq_handler)
@@ -769,6 +769,50 @@ def test_a_signal_while_the_handlers_are_put_back_still_ends_acq(monkeypatch):
     finally:
         real(signal.SIGTERM, previous)
     assert fired and caught.value.args == (signal.SIGTERM,)
+
+
+def test_outside_the_wait_a_session_signal_is_recorded_not_raised(monkeypatch):
+    # A signal delivered anywhere outside the try that catches it (a function
+    # entry, a loop back-jump in the restore) must not raise: that would escape
+    # as a traceback. It is recorded, and acted on once the handlers are back.
+    monkeypatch.setattr(hostexec, "_session_signum", None)
+    monkeypatch.setattr(hostexec, "_session_waiting", False)
+    hostexec._session_signal(signal.SIGTERM, None)  # no exception
+    assert hostexec._session_signum == signal.SIGTERM
+    monkeypatch.setattr(hostexec, "_session_signum", None)
+    monkeypatch.setattr(hostexec, "_session_waiting", True)
+    with pytest.raises(hostexec._SessionSignal):
+        hostexec._session_signal(signal.SIGTERM, None)
+
+
+def test_a_signal_recorded_after_the_wait_ends_acq_once_the_handlers_are_back(monkeypatch):
+    # The signal lands just after the child's wait returned (here: inside the
+    # wait call, after the child is reaped and the wait flag is cleared).
+    class Ended(BaseException):
+        pass
+
+    def acq_handler(signum, _frame):
+        raise Ended(signum)
+
+    real_wait = subprocess.Popen.wait
+
+    def wait_then_signal(self, timeout=None):
+        code = real_wait(self, timeout)
+        hostexec._session_waiting = False  # as run_foreground leaves it once the wait returned
+        hostexec._session_signal(signal.SIGTERM, None)
+        return code
+
+    previous = signal.signal(signal.SIGTERM, acq_handler)
+    try:
+        monkeypatch.setattr(subprocess.Popen, "wait", wait_then_signal)
+        with pytest.raises(Ended) as caught:
+            hostexec.run_foreground([sys.executable, "-c", "pass"])
+        monkeypatch.undo()
+        assert signal.getsignal(signal.SIGTERM) is acq_handler
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    assert caught.value.args == (signal.SIGTERM,)
+    assert hostexec._session_waiting is False
 
 
 def test_sigint_handler_is_restored_when_the_program_cannot_start(tmp_path):
