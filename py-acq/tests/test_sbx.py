@@ -311,6 +311,20 @@ def test_kit_source_revoked_re_reads_and_fails_closed_when_prefix_remains(monkey
     assert [c[:2] for c in calls] == [["settings", "get"], ["settings", "set"], ["settings", "get"]]
 
 
+def test_kit_source_revoked_fails_closed_when_re_read_keeps_only_a_case_variant(monkeypatch, tmp_path):
+    # sbx accepted the write, but the re-read lists github.com/Acme/ in place of
+    # the removed github.com/acme/. GitHub owners ignore case, so that entry still
+    # grants the removed source's owner: the revocation is not verified.
+    _env(monkeypatch, tmp_path)
+    calls = _fake_settings(monkeypatch, after_set=json.dumps(["docker.io/", "github.com/Acme/"]))
+    with pytest.raises(sbx.SbxError) as excinfo:
+        sbx.kit_source_revoked("github.com/acme/team-kits")
+    assert excinfo.value.code == errors.FAILURE
+    assert "kit.allowedSources still lists it after the update" in excinfo.value.message
+    assert """sbx settings set kit.allowedSources '["docker.io/"]'""" in excinfo.value.remediation
+    assert [c[:2] for c in calls] == [["settings", "get"], ["settings", "set"], ["settings", "get"]]
+
+
 def test_kit_source_revoked_fails_closed_when_re_read_is_unparseable(monkeypatch, tmp_path):
     _env(monkeypatch, tmp_path)
     _fake_settings(monkeypatch, after_set="not json")
