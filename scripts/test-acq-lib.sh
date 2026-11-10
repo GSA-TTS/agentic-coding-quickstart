@@ -236,7 +236,14 @@ case "${1:-}" in
     fi
     ;;
   fetch)
-    if [ "${GIT_ALLOW_PROTOCOL:-}" != none ] \
+    # Model git's transport check: an https URL is fetched only when
+    # GIT_ALLOW_PROTOCOL is unset or lists https (acq's anonymous attempt
+    # narrows it, e.g. to a name no transport has).
+    case ":${GIT_ALLOW_PROTOCOL-https}:" in
+      *:https:*) _https_allowed=1 ;;
+      *) _https_allowed=0 ;;
+    esac
+    if [ "$_https_allowed" = 1 ] \
         && [ "$*" = "fetch --depth 1 origin $ACQ_TEST_PATTERNS_REF" ] \
         && [ "$("$ACQ_TEST_REAL_GIT" config --get remote.origin.url)" = https://github.com/GSA-TTS/agentic-coding-patterns.git ]; then
       IFS= read -r path < .git/info/sparse-checkout || exit 1
