@@ -4867,7 +4867,9 @@ acq_backend_provision() {
   ( local lock rc
     _acq_provider_input_guardian_start || exit 1
     lock=$(acq_provider_input_lock_acquire msb "$1" "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID") || { _acq_provider_input_guardian_stop; exit 1; }
-    trap 'rc=$?; _acq_msb_cleanup_uncreated_attempt; acq_provider_input_lock_release "${lock:-}" || true; _acq_provider_input_guardian_stop; exit "$rc"' EXIT
+    # Only this shell runs the cleanup, never a child that inherited the traps.
+    acq_trap_owner_mark
+    trap 'rc=$?; acq_trap_owner_is_self || exit "$rc"; _acq_msb_cleanup_uncreated_attempt; acq_provider_input_lock_release "${lock:-}" || true; _acq_provider_input_guardian_stop; exit "$rc"' EXIT
     trap '_acq_provider_input_signal_exit 129' HUP
     trap '_acq_provider_input_signal_exit 130' INT
     trap '_acq_provider_input_signal_exit 143' TERM
@@ -6021,7 +6023,9 @@ acq_backend_terminate() {
   ( local lock rc
     _acq_provider_input_guardian_start || exit 1
     lock=$(acq_provider_input_lock_acquire msb "$1" "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID") || { _acq_provider_input_guardian_stop; exit 1; }
-    trap 'rc=$?; acq_provider_input_lock_release "${lock:-}" || true; _acq_provider_input_guardian_stop; exit "$rc"' EXIT
+    # Only this shell runs the cleanup, never a child that inherited the traps.
+    acq_trap_owner_mark
+    trap 'rc=$?; acq_trap_owner_is_self || exit "$rc"; acq_provider_input_lock_release "${lock:-}" || true; _acq_provider_input_guardian_stop; exit "$rc"' EXIT
     trap '_acq_provider_input_signal_exit 129' HUP
     trap '_acq_provider_input_signal_exit 130' INT
     trap '_acq_provider_input_signal_exit 143' TERM

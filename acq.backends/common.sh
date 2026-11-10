@@ -5618,6 +5618,13 @@ _acq_provider_input_guardian_signal_children() {
 
 _acq_provider_input_signal_exit() {
   local status="${1:-1}"
+  # A child that inherited this handler (see acq_trap_owner_is_self in
+  # progress.sh) only ends itself: the backend children and the lock belong to
+  # the transaction subshell.
+  if ! acq_trap_owner_is_self; then
+    trap - EXIT HUP INT TERM
+    exit "$status"
+  fi
   if _acq_provider_input_guardian_signal_children; then
     exit "$status"
   fi

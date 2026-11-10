@@ -1,12 +1,13 @@
 #!/usr/bin/env bats
 #
-# 161-create-signal.bats — Ctrl-C (or SIGTERM) during `acq create`.
+# 161-create-signal.bats — Ctrl-C (or SIGTERM, or SIGHUP) during `acq create`.
 #
 # The spinner composes its INT/TERM/EXIT traps over the provisioning subshell's
 # (acq.backends/progress.sh). A terminal Ctrl-C reaches acq's whole process
 # group while the backend `create` is still running, so the chained handlers must
 # reap the backend child, run the uncreated-attempt cleanup exactly once, and
-# still end with 130 (SIGINT) or 143 (SIGTERM) rather than an arbitrary status.
+# still end with 130 (SIGINT), 143 (SIGTERM) or 129 (SIGHUP) rather than an
+# arbitrary status.
 #
 # create-signal.py drives the real `acq create` against the stub backends with a
 # blocking `create` and a PTY on stderr (so the spinner animates), signals once
@@ -20,7 +21,7 @@ teardown() { acq_teardown_stubs; }
 
 load 'helper'
 
-@test "create: Ctrl-C and SIGTERM with the spinner active clean up once and exit 130/143" {
+@test "create: Ctrl-C, SIGTERM and SIGHUP with the spinner active clean up once and exit 130/143/129" {
   run python3 "$BATS_TEST_DIRNAME/create-signal.py" "$REPO_ROOT" "$STUBDIR" "$BASH"
   printf '%s\n' "$output"
   assert_success
@@ -29,6 +30,9 @@ load 'helper'
   # acq waits for the subshell's cleanup before it exits, as for Ctrl-C.
   assert_line 'PASS sbx-sigterm status 143'
   assert_line 'PASS msb-sigterm status 143'
+  # A closed terminal (group SIGHUP) is handled the same way, with 129.
+  assert_line 'PASS sbx-sighup status 129'
+  assert_line 'PASS msb-sighup status 129'
   # A SIGTERM to acq's PID alone is not forwarded: provisioning finishes first.
   assert_line 'PASS sbx-sigterm-pid status 143'
   assert_line 'PASS msb-sigterm-pid status 143'
