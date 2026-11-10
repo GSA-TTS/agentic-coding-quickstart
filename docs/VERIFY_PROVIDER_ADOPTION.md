@@ -115,8 +115,12 @@ is PENDING at `ec8d5e17` or `8a594932`.
 ### Host Authority Live Validation Record (GSA-TTS/agentic-coding-quickstart#639)
 
 These rows track the items under "Still unverified on a real host" in
-GSA-TTS/agentic-coding-quickstart#639 (ADR-0035 on msb, ADR-0037 on sbx). Every row
-starts as `BLOCKED` (unrun): nothing here has been run live. A human on a
+GSA-TTS/agentic-coding-quickstart#639 (ADR-0035 on msb, ADR-0037 on sbx). Rows
+that say `unrun` have not been run live. The first live run (2026-11-10, macOS arm64,
+msb 0.7.7, sbx v0.51.0) covered the automated steps: all seven msb steps passed, and
+the five sbx steps are `BLOCKED` because sbx 0.51.0 refuses acq's v1/v2 kit
+composition ("cannot mix v3 kits with v1/v2 kits"). A BLOCKED row is not a product
+result. A human on a
 sandbox-capable host runs `scripts/verify-host-authority-live` (see its `--help`
 and `--dry-run`), then copies each row from the `results.tsv` it writes into this
 table: replace `BLOCKED`/`unrun` with the observed result, the tested revision, the
@@ -126,18 +130,18 @@ backend and its version, the date, and the transcript path (kept in a gitignored
 
 | Step id | Backend | Revision | Backend version | Date | Result | Transcript path |
 |---|---|---|---|---|---|---|
-| `msb-ro-kit-create` (readonly kit file end to end on create) | msb | unrun | unrun | unrun | BLOCKED | unrun |
-| `msb-inspect-shape` (`.active_config.mounts` and `.config.mounts`) | msb | unrun | unrun | unrun | BLOCKED | unrun |
-| `msb-exit-code` (guest exit 2 passes through `msb exec`) | msb | unrun | unrun | unrun | BLOCKED | unrun |
-| `msb-ro-kit-heal` (readonly kit file on heal after restart) | msb | unrun | unrun | unrun | BLOCKED | unrun |
-| `msb-forged-markers` (forged legacy guest markers, exec sessions) | msb | unrun | unrun | unrun | BLOCKED | unrun |
-| `msb-install-gate` (deleted host install keys re-run the install) | msb | unrun | unrun | unrun | BLOCKED | unrun |
-| `msb-ro-oci` (shipped `oci-engine` readonly files) | msb | unrun | unrun | unrun | BLOCKED | unrun |
-| `sbx-baseline` (fresh create seeds `builtin-kits`) | sbx | unrun | unrun | unrun | BLOCKED | unrun |
-| `sbx-forged-heal` (removed guest files not re-applied) | sbx | unrun | unrun | unrun | BLOCKED | unrun |
-| `sbx-record-change` (altered host record triggers `kit add`) | sbx | unrun | unrun | unrun | BLOCKED | unrun |
-| `sbx-stale-refresh` (stale-bundle refresh re-applies all kits) | sbx | unrun | unrun | unrun | BLOCKED | unrun |
-| `sbx-legacy-reseed` (legacy notice, then `acq rm` and fresh create re-seed) | sbx | unrun | unrun | unrun | BLOCKED | unrun |
+| `msb-ro-kit-create` (readonly kit file end to end on create) | msb | `ff592e7870439cf03bdf9ffd9de759fb71443ea0` | 0.7.7 | 2026-11-10 | PASS | `tmp/639-run/20261110T064803Z/steps/transcript.log` (host-side, gitignored) |
+| `msb-inspect-shape` (`.active_config.mounts` and `.config.mounts`) | msb | `ff592e7870439cf03bdf9ffd9de759fb71443ea0` | 0.7.7 | 2026-11-10 | PASS | `tmp/639-run/20261110T064803Z/steps/transcript.log` (host-side, gitignored) |
+| `msb-exit-code` (guest exit 2 passes through `msb exec`) | msb | `ff592e7870439cf03bdf9ffd9de759fb71443ea0` | 0.7.7 | 2026-11-10 | PASS | `tmp/639-run/20261110T064803Z/steps/transcript.log` (host-side, gitignored) |
+| `msb-ro-kit-heal` (readonly kit file on heal after restart) | msb | `ff592e7870439cf03bdf9ffd9de759fb71443ea0` | 0.7.7 | 2026-11-10 | PASS | `tmp/639-run/20261110T064803Z/steps/transcript.log` (host-side, gitignored) |
+| `msb-forged-markers` (forged legacy guest markers, exec sessions) | msb | `ff592e7870439cf03bdf9ffd9de759fb71443ea0` | 0.7.7 | 2026-11-10 | PASS | `tmp/639-run/20261110T064803Z/steps/transcript.log` (host-side, gitignored) |
+| `msb-install-gate` (deleted host install keys re-run the install) | msb | `ff592e7870439cf03bdf9ffd9de759fb71443ea0` | 0.7.7 | 2026-11-10 | PASS | `tmp/639-run/20261110T064803Z/steps/transcript.log` (host-side, gitignored) |
+| `msb-ro-oci` (shipped `oci-engine` readonly files) | msb | `ff592e7870439cf03bdf9ffd9de759fb71443ea0` | 0.7.7 | 2026-11-10 | PASS | `tmp/639-run/20261110T064803Z/steps/transcript.log` (host-side, gitignored) |
+| `sbx-baseline` (fresh create seeds `builtin-kits`) | sbx | `ff592e7870439cf03bdf9ffd9de759fb71443ea0` | v0.51.0 | 2026-11-10 | BLOCKED | `tmp/639-run/20261110T064803Z/steps/transcript.log` (host-side, gitignored) |
+| `sbx-forged-heal` (removed guest files not re-applied) | sbx | `ff592e7870439cf03bdf9ffd9de759fb71443ea0` | v0.51.0 | 2026-11-10 | BLOCKED | `tmp/639-run/20261110T064803Z/steps/transcript.log` (host-side, gitignored) |
+| `sbx-record-change` (altered host record triggers `kit add`) | sbx | `ff592e7870439cf03bdf9ffd9de759fb71443ea0` | v0.51.0 | 2026-11-10 | BLOCKED | `tmp/639-run/20261110T064803Z/steps/transcript.log` (host-side, gitignored) |
+| `sbx-stale-refresh` (stale-bundle refresh re-applies all kits) | sbx | `ff592e7870439cf03bdf9ffd9de759fb71443ea0` | v0.51.0 | 2026-11-10 | BLOCKED | `tmp/639-run/20261110T064803Z/steps/transcript.log` (host-side, gitignored) |
+| `sbx-legacy-reseed` (legacy notice, then `acq rm` and fresh create re-seed) | sbx | `ff592e7870439cf03bdf9ffd9de759fb71443ea0` | v0.51.0 | 2026-11-10 | BLOCKED | `tmp/639-run/20261110T064803Z/steps/transcript.log` (host-side, gitignored) |
 | MANUAL 1: msb forged markers on interactive attach and agent key | msb | unrun | unrun | unrun | BLOCKED | unrun |
 | MANUAL 2: msb forged ssh socket with a live ssh-agent forward | msb | unrun | unrun | unrun | BLOCKED | unrun |
 | MANUAL 3: msb persistence across a host reboot | msb | unrun | unrun | unrun | BLOCKED | unrun |
