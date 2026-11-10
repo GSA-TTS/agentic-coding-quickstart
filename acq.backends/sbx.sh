@@ -62,6 +62,11 @@ USAI_PROVIDER_MODELS_URL="${USAI_PROVIDER_MODELS_URL:-https://${USAI_PROVIDER_HO
 # required so `sbx kit add` recreated the sandbox preserving state; the
 # v2-grammar requirement supersedes that.)
 MIN_SBX_VERSION="0.39.0"
+# sbx 0.51.0 resolves the shell agent as a v3 kit; it refuses to compose that
+# kit with the v1/v2 kits acq currently supplies. The behavior of later
+# releases is unverified, so fail closed for provisioning until compatibility
+# is demonstrated. Existing-sandbox verbs retain the minimum-version check.
+ACQ_SBX_INCOMPATIBLE_FROM="0.51.0"
 
 # Max seconds to wait for `sbx exec` to become usable.
 ACQ_EXEC_READY_TIMEOUT="${ACQ_EXEC_READY_TIMEOUT:-60}"
@@ -164,11 +169,28 @@ acq_backend_check_version() {
 }
 
 # ---------------------------------------------------------------------------
-# acq_backend_prepare — sbx version floor check
+# acq_backend_prepare — version floor; optional fresh-create compatibility gate
 # ---------------------------------------------------------------------------
 
 acq_backend_prepare() {
   acq_backend_check_version
+  # `acq run` initially calls prepare even for existing sandboxes. Only its
+  # fresh-create path (and `acq create`) passes `create` for this extra gate.
+  [ "${1:-}" = create ] || return 0
+  local raw current
+  if ! raw=$(sbx version 2>/dev/null) || [[ ! "$raw" =~ ^sbx[[:space:]]version:[[:space:]]v?([0-9]+)\.([0-9]+)\.([0-9]+)([[:space:]]|$) ]]; then
+    echo "error: cannot confirm an sbx version compatible with acq's v1/v2 kits for a new sandbox." >&2
+    echo "       Use --backend msb, or install a verified compatible sbx release." >&2
+    return 1
+  fi
+  current="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+  if [ "$(version_ge "$current" "$ACQ_SBX_INCOMPATIBLE_FROM")" -eq 0 ]; then
+    echo "error: acq cannot create sandboxes with sbx $current: sbx resolves the shell agent as a v3 kit" >&2
+    echo "       and rejects composition with acq's v1/v2 kits. No sandbox was created." >&2
+    echo "       Use the msb backend for now (--backend msb). sbx versions from" >&2
+    echo "       $ACQ_SBX_INCOMPATIBLE_FROM onward need a verified compatibility fix; see KNOWN_FAILURE_MODES 53." >&2
+    return 1
+  fi
 }
 
 # ---------------------------------------------------------------------------

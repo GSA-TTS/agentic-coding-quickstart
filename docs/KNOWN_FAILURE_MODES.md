@@ -3325,6 +3325,20 @@ it is a musl build and is content-pinned rather than signer-authenticated.
 
 ---
 
+## 53. SBX 0.51+ Rejects Mixed v3 Agent and v1/v2 acq Kits
+
+**Symptom:** `acq --backend sbx create` cannot start a new sandbox. SBX
+resolves its `shell` agent as a v3 kit and refuses to compose it with the
+v1/v2 kits acq supplies. This was observed on sbx 0.51.0; later versions have
+not been verified. acq refuses new SBX provisioning from 0.51.0 onward before
+creating a sandbox, with a message explaining the incompatibility.
+
+**Workaround:** Use `acq --backend msb` for new sandboxes. Do not drop acq's
+built-in kits to work around the error: they supply required configuration.
+Existing-sandbox commands still use the normal SBX minimum-version check.
+
+---
+
 ## Contributing
 
 When you discover a new failure mode:

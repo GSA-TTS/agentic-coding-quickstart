@@ -197,6 +197,52 @@ _with_adapter() { # ADAPTER BODY
   refute_output --partial 'requires sbx'
 }
 
+@test "sbx: provisioning refuses v3 shell agent composition on 0.51+ before create" {
+  _with_adapter sbx 'out=$(STUB_SBX_VERSION=0.51.0 acq_backend_prepare create 2>&1); rc=$?; printf "%s\nRC=%s\n" "$out" "$rc"'
+  assert_output --partial 'cannot create sandboxes with sbx 0.51.0'
+  assert_output --partial 'v3 kit'
+  assert_output --partial 'v1/v2 kits'
+  assert_output --partial '--backend msb'
+  assert_output --partial 'RC=1'
+
+  _with_adapter sbx 'out=$(STUB_SBX_VERSION=0.52.0 acq_backend_prepare create 2>&1); printf "%s\nRC=%s\n" "$out" "$?"'
+  assert_output --partial 'RC=1'
+
+  _with_adapter sbx 'STUB_SBX_VERSION=0.51.0 acq_backend_check_version; printf "RC=%s\n" "$?"'
+  assert_output --partial 'RC=0'
+
+  _with_adapter sbx 'STUB_SBX_VERSION=0.48.0 acq_backend_prepare create; printf "RC=%s\n" "$?"'
+  assert_output --partial 'RC=0'
+
+  _with_adapter sbx 'STUB_SBX_VERSION=0.51.0 acq_backend_prepare; printf "RC=%s\n" "$?"'
+  assert_output --partial 'RC=0'
+
+  _with_adapter sbx 'out=$(STUB_SBX_VERSION=dev-build acq_backend_prepare create 2>&1); rc=$?; printf "%s\nRC=%s\n" "$out" "$rc"'
+  assert_output --partial 'cannot confirm an sbx version'
+  assert_output --partial 'RC=1'
+}
+
+@test "sbx: create is blocked but run reattach and existing-sandbox verbs reach sbx 0.51" {
+  local ws="$STUBDIR/workspace"
+  mkdir -p "$ws"
+  run env STUB_SBX_VERSION=0.51.0 ACQ_BACKEND=sbx "$ACQ" create opencode "$ws" --name existing
+  [ "$status" -eq 1 ]
+  assert_output --partial 'cannot create sandboxes with sbx 0.51.0'
+
+  printf 'existing\n' >"$STUBDIR/.sandbox_list"
+  : >"$CALLS"
+  run env STUB_SBX_VERSION=0.51.0 ACQ_BACKEND=sbx STUB_KEY_STATUS=200 ACQ_UPDATE_CHECK=0 "$ACQ" run existing
+  assert_success
+  refute_output --partial 'cannot create sandboxes with sbx 0.51.0'
+  assert_regex "$(cat "$CALLS")" 'sbx run --name existing'
+
+  : >"$CALLS"
+  run env STUB_SBX_VERSION=0.51.0 ACQ_BACKEND=sbx "$ACQ" github-scope existing
+  assert_failure
+  assert_output --partial 'no workspace path was provided'
+  refute_output --partial 'cannot create sandboxes with sbx 0.51.0'
+}
+
 @test "msb: the doctor calls redirect stdin so a prompting doctor cannot hang acq" {
   if ! command -v timeout >/dev/null 2>&1; then skip "no 'timeout' available"; fi
   local hang_rc=0
