@@ -24,6 +24,13 @@ _existing = os.environ.get("PYTHONPATH")
 os.environ["PYTHONPATH"] = str(PY_ACQ_SRC) + (_sep + _existing if _existing else "")
 sys.path.insert(0, str(PY_ACQ_SRC))
 
+# The checks against the real pinned Patterns tree (the kit egress allowlist and
+# the packaged kit bundle) need a checkout of Patterns at the pin, which CI
+# provides through ACQ_TEST_PATTERNS_REPO. Capture it before the ACQ_* scrub
+# below removes it; it is handed to those tests by the pinned_patterns_repo
+# fixture and never put back into the environment acq runs under.
+_PINNED_PATTERNS_REPO = os.environ.get("ACQ_TEST_PATTERNS_REPO", "")
+
 # Collection imports acq_py before any function fixture runs. The timeout
 # tunables are now read lazily, but clear inherited ACQ_* here as well so a
 # developer's shell cannot change anything read during import.
@@ -35,6 +42,18 @@ REAL_HOME = os.path.expanduser("~")
 _USER_DIR_VARS = ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME")
 # Backend-stub homes are consulted before HOME; a developer's export must not leak in.
 _BACKEND_HOME_VARS = ("MSB_HOME", "SBX_HOME")
+
+
+@pytest.fixture
+def pinned_patterns_repo() -> Path:
+    """The checkout of Patterns at the pin that CI provides, or skip without one.
+
+    Ordinary test runs never fetch, so these checks skip locally unless
+    ACQ_TEST_PATTERNS_REPO names such a checkout.
+    """
+    if not _PINNED_PATTERNS_REPO:
+        pytest.skip("pinned Patterns checkout is provided by CI via ACQ_TEST_PATTERNS_REPO")
+    return Path(_PINNED_PATTERNS_REPO)
 
 
 @pytest.fixture(autouse=True)

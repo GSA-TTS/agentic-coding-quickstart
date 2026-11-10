@@ -413,7 +413,7 @@ is required or authorized by this guidance.
 - `acq create` stops before backend creation.
 - The error requires exact `PyYAML` and `jsonschema` versions.
 
-### Fix: release install (Homebrew, npm, `install.sh --release`)
+### Fix: release install (Homebrew, npm, or the upstream release installer)
 
 `--apply` alone uses the offline wheelhouse bundled with the release:
 
@@ -430,8 +430,8 @@ requirements change.
 
 ### Fix: git checkout / development install (no wheelhouse)
 
-A working-tree clone (`install.sh --clone`, or running `./acq` directly from a
-`git checkout`) has no release wheelhouse. Use the `--online` flag, which
+A working-tree clone (the upstream release installer's clone method, or running
+`./acq` directly from a `git checkout`) has no release wheelhouse. Use the `--online` flag, which
 downloads the same hash-locked packages from PyPI instead:
 
 ```bash
@@ -2810,12 +2810,15 @@ amending the wrong branch.
 
 ### Fix
 
-- `acq.ps1` and `install.ps1` prefer known Git-for-Windows locations first and
-  reject the WSL shim (`System32\bash.exe`, `SysWOW64\bash.exe`) when falling back
-  to a PATH lookup.
-- `install.ps1` probes WHP with `WHvCreatePartition` (the same call `msb` relies
-  on) instead of gating on the feature flag; when the state stays undetermined it
-  warns and defers to `msb doctor`, which `acq` surfaces before provisioning.
+- `acq.ps1` (and the upstream release `install.ps1`) prefer known
+  Git-for-Windows locations first and reject the WSL shim (`System32\bash.exe`,
+  `SysWOW64\bash.exe`) when falling back to a PATH lookup.
+- The upstream release `install.ps1` probes WHP with `WHvCreatePartition` (the
+  same call `msb` relies on) instead of gating on the feature flag; when the
+  state stays undetermined it warns and defers to `msb doctor`, which `acq`
+  surfaces before provisioning. This fork's in-repo `install.ps1` (the acq v1
+  installer) neither probes WHP nor installs Git Bash or `msb`; see
+  `docs/howto/acq.md`, "This fork's installers".
 - Treat `msb doctor` as the authoritative readiness signal on Windows.
 - The execution-policy requirement is documented (README "First-Run Snags",
   `docs/howto/acq.md`); allow local scripts with
@@ -4130,3 +4133,39 @@ The new default uses the pinned generic `devenv-shell` image and validates the
 pinned OpenCode kit before provisioning. If that validation fails, correct the
 pinned kit availability or metadata rather than falling back to an unpinned npm
 installation.
+
+---
+
+## Python acq on msb: Egress Policy Requires Recreation
+
+**Symptom:** An msb sandbox created by the Python acq (`acq-python`, or `acq`
+with `ACQ_IMPL=python`) can still reach any host, even though acq now applies a
+deny-by-default egress policy. `msb inspect <sandbox>` shows no
+`default_egress: deny`, and a fetch to a host outside the allowlist (for
+example `curl -sS -o /dev/null -w '%{http_code}' https://example.com/` from
+inside the sandbox) succeeds instead of being refused.
+
+**Cause:** Before the policy was added, the Python acq created msb sandboxes
+with no egress flags at all, so their egress was unrestricted. It now passes the
+same policy the Bash acq does: `--net-default-egress deny`, gateway DNS, the
+built-in kits' hosts and, under the default `balanced` tier, the balanced
+baseline (see `ACQ_NETWORK_TIER` in `docs/BACKEND_GUIDE.md`). msb fixes a
+sandbox's network rules when it is created and gives acq no way to change them
+afterwards, so `start`, `restart` and `run NAME` keep whatever rules the
+sandbox was created with. Only a sandbox created after the upgrade gets the
+policy. Sandboxes created by the Bash acq are not affected, because the Bash
+acq already applied this policy at create (ADR-0018).
+
+**Resolution:** Recreate each such sandbox after upgrading. Save anything
+outside the mounted project directory first, because the guest filesystem is
+discarded (the project directory itself lives on the host and is kept):
+
+```bash
+acq-python rm opencode-your-project
+acq-python run opencode /path/to/your/project
+```
+
+`acq create --recreate` does not apply here: it rebuilds only a sandbox that is
+missing its read-only trusted-config mount, and refuses any other. After
+recreating, `msb inspect <sandbox>` shows `default_egress: deny` (unless
+`ACQ_NETWORK_TIER=open` was confirmed on purpose).

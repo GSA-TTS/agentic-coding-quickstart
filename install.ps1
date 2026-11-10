@@ -165,7 +165,7 @@ function Install-AcqZip {
         Write-Host "  [dry-run] download $($resolved.Url)/$SumsName and $($resolved.Url)/$PackageName"
         Write-Host "  [dry-run] verify $PackageName SHA-256 against $SumsName"
         Write-Host "  [dry-run] expand $PackageName into $InstallDir"
-        Write-Host "  [dry-run] verify the bundled runtime and launcher are present"
+        Write-Host "  [dry-run] verify the launchers, backend tree, bundled runtime and source are present"
         Write-Host "  [dry-run] offer to add $InstallDir to your user PATH"
         return
     }
@@ -214,6 +214,16 @@ function Install-AcqZip {
         }
         if (-not (Test-Path -LiteralPath (Join-Path $sourceDir $RuntimeRelative) -PathType Leaf)) {
             throw "release archive is missing the bundled runtime ($RuntimeRelative)."
+        }
+        # acq.cmd starts acq.ps1, whose default (Bash) branch runs the `acq`
+        # dispatcher, and that sources acq.backends\common.sh first; the Python
+        # branch imports acq_py from py-acq\src. Each is a fail-closed gate, as
+        # in install.sh, so an incomplete zip never installs a launcher that
+        # cannot start.
+        foreach ($required in @("acq.ps1", "acq", "acq.backends\common.sh", "py-acq\src\acq_py\__init__.py")) {
+            if (-not (Test-Path -LiteralPath (Join-Path $sourceDir $required) -PathType Leaf)) {
+                throw "release archive is missing $required."
+            }
         }
 
         # Publish without destroying anything this installer did not create:

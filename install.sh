@@ -279,10 +279,22 @@ confirm() {
   if [ "$ASSUME_YES" -eq 1 ]; then
     return 0
   fi
-  # A non-interactive stdin (piped or redirected) declines rather than guessing.
-  [ -t 0 ] || return 1
-  printf '%s [y/N] ' "$prompt"
-  read -r ans || return 1
+  if [ -t 0 ]; then
+    printf '%s [y/N] ' "$prompt"
+    read -r ans || return 1
+  # Under `curl | sh` stdin is the script pipe, so ask on the controlling
+  # terminal instead. That needs someone watching the run (stdout or stderr is
+  # a terminal) and a /dev/tty that opens for writing and reading; the
+  # redirections sit inside braces so an unusable /dev/tty declines quietly.
+  # Anything else (CI, a harness that captures the output, no controlling
+  # terminal) declines rather than guessing.
+  elif { [ -t 1 ] || [ -t 2 ]; } \
+       && { printf '%s [y/N] ' "$prompt" > /dev/tty; } 2>/dev/null \
+       && { read -r ans < /dev/tty; } 2>/dev/null; then
+    :
+  else
+    return 1
+  fi
   case "$ans" in
     [yY]|[yY][eE][sS]) return 0 ;;
     *) return 1 ;;
@@ -351,7 +363,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
   fi
   printf '  [dry-run] verify sha256 of %s against %s\n' "$ARCHIVE" "$SHA256SUMS_NAME"
   printf '  [dry-run] extract %s into %s\n' "$ARCHIVE" "$INSTALL_DIR"
-  printf '  [dry-run] verify the enumerated set (launcher, runtime, source, wheelhouse) is present\n'
+  printf '  [dry-run] verify the enumerated set (launchers, backend tree, runtime, source, wheelhouse) is present\n'
   printf '  [dry-run] link %s/acq -> %s/acq\n' "$BIN_DIR" "$INSTALL_DIR"
   printf '  [dry-run] link %s/acq-python -> %s/acq-python\n' "$BIN_DIR" "$INSTALL_DIR"
   if path_has_bindir; then
@@ -378,8 +390,12 @@ step "Downloading acq $VERSION"
 # rather than return: a trap that only cleaned up would let the script carry on
 # after its private dir was deleted, and a later mkdir would re-create that
 # now-known path, which another user could have taken in the meantime.
+# The same trap removes this run's temporary ownership marker (set only while
+# it exists, below), so a failure or signal between writing it and renaming it
+# into place leaves no litter in the install dir.
 tmpdir=""
-trap 'rm -rf "$tmpdir"' EXIT
+marker_tmp=""
+trap 'rm -rf "$tmpdir"; [ -z "$marker_tmp" ] || rm -f "$marker_tmp"' EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -463,6 +479,10 @@ fi
 # manifest was fetched alongside SHA256SUMS above.)
 [ -e "$staging/acq" ] || die "release archive is missing the 'acq' launcher"
 [ -e "$staging/acq-python" ] || die "release archive is missing the 'acq-python' launcher"
+# The `acq` launcher is the Bash dispatcher. It sources acq.backends/common.sh
+# before it reads ACQ_IMPL, so without the backend tree neither the default
+# Bash path nor ACQ_IMPL=python can start; only acq-python would work.
+[ -e "$staging/acq.backends/common.sh" ] || die "release archive is missing the Bash backend tree (acq.backends/)"
 [ -e "$staging/py-acq/runtime/bin/python3" ] || die "release archive is missing the bundled runtime (py-acq/runtime/bin/python3)"
 [ -e "$staging/py-acq/src/acq_py/__init__.py" ] || die "release archive is missing the acq source tree (py-acq/src/acq_py/)"
 [ -d "$staging/wheelhouse" ] || die "release archive is missing the dependency wheelhouse (wheelhouse/)"
@@ -510,7 +530,10 @@ done
 
 # Every release name is now absent or already ours, so recording them as owned is
 # truthful. Keep previously owned names too: leftovers from an older release are
-# still ours to replace later.
+# still ours to replace later. The marker is written to a temporary file and
+# renamed into place; the EXIT trap removes the temporary file if the run stops
+# in between.
+marker_tmp="$marker.tmp.$$"
 {
   printf '%s\n' "$VERSION"
   { [ -f "$marker" ] && tail -n +2 "$marker"; } || :
@@ -518,14 +541,21 @@ done
     { [ -e "$entry" ] || [ -L "$entry" ]; } || continue
     printf '%s\n' "${entry##*/}"
   done
-} | awk 'NR == 1 || !seen[$0]++' > "$marker.tmp.$$"
-mv "$marker.tmp.$$" "$marker" || die "could not write $marker"
+} | awk 'NR == 1 || !seen[$0]++' > "$marker_tmp"
+mv "$marker_tmp" "$marker" || die "could not write $marker"
+marker_tmp=""
 
-# Move-aside dirs from an earlier failed run hold only replaced acq files, but
-# only trust that in a directory that was already marked before this run.
+# Move-aside dirs and temporary markers from an earlier interrupted run hold
+# only acq's own files, but only trust that in a directory that was already
+# marked before this run. A temporary marker is a regular file named for the
+# marker plus ".tmp." and a process id; anything else is left alone.
 if [ "$was_marked" -eq 1 ]; then
   for stale in "$INSTALL_DIR"/.acq-previous.*; do
     [ -d "$stale" ] && [ ! -L "$stale" ] && rm -rf "$stale"
+  done
+  for stale in "$marker".tmp.*; do
+    case "${stale#"$marker".tmp.}" in ''|*[!0-9]*) continue ;; esac
+    [ -f "$stale" ] && [ ! -L "$stale" ] && rm -f "$stale"
   done
 fi
 
