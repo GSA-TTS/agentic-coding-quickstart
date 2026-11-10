@@ -1,7 +1,9 @@
-# acq.ps1 - Windows launcher for acq through Git Bash.
+# acq.ps1 - Windows launcher for acq.
 #
-# acq remains a Bash program in the Windows preview path. This launcher finds Git
-# for Windows' bash.exe and delegates to the repository-local Bash entry point.
+# On Windows an unset ACQ_IMPL selects the Python implementation, run natively by
+# acq's managed runtime (ADR-0048m). ACQ_IMPL=bash is the explicit opt-in to the
+# Bash implementation: this launcher then finds Git for Windows' bash.exe and
+# delegates to the repository-local Bash entry point.
 
 $ErrorActionPreference = "Stop"
 
@@ -135,15 +137,19 @@ function Invoke-AcqProcess {
 
 $launcherArgs = Get-AcqLauncherArgs -Self $PSCommandPath
 
-# ACQ_IMPL runtime switch — the coexistence seam (ADR-0047m). On Windows the Bash
-# `acq` dispatches via Git Bash; here the Python implementation runs natively:
-# the managed runtime `py-acq\runtime\python.exe -m acq_py`, else `python` on
-# PATH. Unset / `bash` keeps the existing Git Bash path below; any other value
-# fails closed (exit 2). argv and the exit status are forwarded verbatim. The
-# value is compared case-sensitively (-cne), as the Bash `acq` compares it, so
-# `PYTHON` or `Bash` fails closed here too instead of selecting a branch.
+# ACQ_IMPL runtime switch — the coexistence seam (ADR-0047m), with the Windows
+# default from ADR-0048m. Unset (or empty) and `python` run the Python
+# implementation natively, with the interpreter resolved below. `bash` is the
+# explicit opt-in to the Git Bash path further down; nothing falls back to it
+# when no interpreter qualifies. Any other value fails closed (exit 2). argv and
+# the exit status are forwarded verbatim. The value is compared case-sensitively
+# (-cne), as the Bash `acq` compares it, so `PYTHON` or `Bash` fails closed here
+# too instead of selecting a branch.
 $acqImpl = $env:ACQ_IMPL
-if ($acqImpl -and $acqImpl -cne "bash") {
+if (-not $acqImpl) {
+    $acqImpl = "python"
+}
+if ($acqImpl -cne "bash") {
     if ($acqImpl -cne "python") {
         [Console]::Error.WriteLine("acq: unsupported ACQ_IMPL '$acqImpl' (expected 'bash' or 'python')")
         exit 2
@@ -202,7 +208,8 @@ if ($acqImpl -and $acqImpl -cne "bash") {
             if (Test-AcqPython -Exe $candidate) { $pyCmd = $candidate; break }
         }
         if ($null -eq $pyCmd) {
-            [Console]::Error.WriteLine("acq: ACQ_IMPL=python but no Python 3.12+ was found on PATH. Install acq from a release (it bundles its own runtime), install Python 3.12+ from python.org with 'Add python.exe to PATH' checked, or set ACQ_RUNTIME to the full path of python.exe.")
+            # Fail closed: the Bash implementation is never started in its place.
+            [Console]::Error.WriteLine("acq: no Python 3.12 or newer was found to run acq (no managed runtime at $runtimePy, and none on PATH). Install acq from a release (it bundles its own runtime), install Python 3.12+ from python.org with 'Add python.exe to PATH' checked, set ACQ_RUNTIME to the full path of python.exe, or set ACQ_IMPL=bash to use the Bash implementation through Git Bash.")
             exit 1
         }
         $acqPythonExe = $pyCmd
@@ -221,7 +228,7 @@ if ($acqImpl -and $acqImpl -cne "bash") {
     # than the required 3.12 are refused because they may not honour -P. The
     # probe runs isolated and imports only the builtin sys module.
     if (-not (Test-AcqPython -Exe $acqPythonExe)) {
-        [Console]::Error.WriteLine("acq: ACQ_IMPL=python needs Python 3.12 or newer; $acqPythonExe is not")
+        [Console]::Error.WriteLine("acq: the Python implementation needs Python 3.12 or newer; $acqPythonExe is not")
         exit 1
     }
     if ($null -ne $launcherArgs) {
