@@ -2316,10 +2316,11 @@ _acq_file_mode() {
 # provider-input lock's does.
 #
 # On POSIX a holder whose PID is gone, or now has a different identity (a reused
-# PID), is stale and recovered. A directory with no readable owner line is never
-# removed, since another writer may be between its mkdir and its owner write:
-# the wait times out and prints the recovery command (KNOWN_FAILURE_MODES
-# section 79). On Windows a native Python holder's PID cannot be checked from
+# PID), is stale and recovered. The exclusive create of the owner file decides
+# who holds the lock, so a directory without one is taken (_acq_config_lock_take).
+# An owner file that is still empty is a writer between creating it and writing
+# its token, so it is never removed: the wait times out and prints the recovery
+# command (KNOWN_FAILURE_MODES section 79). On Windows a native Python holder's PID cannot be checked from
 # Git Bash, nor a Git Bash PID from Python, so both count the directory as held
 # while it is younger than
 # _ACQ_CONFIG_LOCK_WINDOWS_STALE_S seconds and recover it after that; a config
@@ -2403,20 +2404,28 @@ EOF
   fi
 }
 
-# _acq_config_lock_take DIR TOKEN — mkdir DIR, then create DIR/owner holding
-# TOKEN. Returns 0 when taken, 1 when not (another holder has it, or the caller
-# should look again). Creating the owner file is what decides: noclobber makes
-# Bash itself open it with O_EXCL, so exactly one taker creates it. mkdir alone
+# _acq_config_lock_take DIR TOKEN — make sure DIR exists, then create DIR/owner
+# holding TOKEN. Returns 0 when taken, 1 when not (another holder has it, or the
+# caller should look again). Creating the owner file is what decides: noclobber
+# makes Bash itself open it with O_EXCL, so exactly one taker creates it. mkdir
 # cannot decide, because it is not atomic everywhere (uutils coreutils mkdir
 # 0.10 reports success to concurrent callers; KNOWN_FAILURE_MODES section 90).
-# A taker that loses never removes the winner's owner file; it only removes an
-# empty directory a failed write of its own left (rmdir refuses a non-empty one).
+# So an existing directory with no owner file is taken too: a leftover from a
+# taker that died before creating its owner heals itself instead of blocking
+# every config write. A taker that loses never removes anything. If writing the
+# token into the owner file it created fails (a full disk, say), that file is
+# its own and is removed again.
 _acq_config_lock_take() {
-  mkdir -- "$1" 2>/dev/null || return 1
-  if ( set -C; printf '%s\n' "$2" > "$1/owner" ) 2>/dev/null; then
+  mkdir -- "$1" 2>/dev/null || true
+  if [ -L "$1" ] || [ ! -d "$1" ]; then
+    return 1
+  fi
+  ( set -C; : > "$1/owner" ) 2>/dev/null || return 1
+  if { printf '%s\n' "$2" > "$1/owner"; } 2>/dev/null; then
     return 0
   fi
-  [ -e "$1/owner" ] || rmdir -- "$1" 2>/dev/null || true
+  rm -f -- "$1/owner" 2>/dev/null
+  rmdir -- "$1" 2>/dev/null || true
   return 1
 }
 

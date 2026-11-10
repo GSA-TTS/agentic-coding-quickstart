@@ -834,11 +834,13 @@ acq take: one per sandbox (`create`, `run`, `rm`, `start`, ending in `.lock`
 under `~/.local/state/acq/provenance/provider-input/<backend>/`) and one for
 `config.yaml` (`~/.local/state/acq/locks/config.lock.d`, or under
 `$ACQ_STATE_DIR/locks/`). Each holds an `owner` file naming the process that
-took it. A lock whose owner has exited is recovered automatically. A lock
-directory with **no** owner file is never removed automatically, because a
-running acq command leaves it in that state for an instant; so if acq ever died
-in that instant, every later command on that sandbox, or every `config.yaml`
-change, waits and then fails, naming the directory.
+took it. A lock whose owner has exited is recovered automatically. A
+per-sandbox lock directory with **no** owner file, or a `config.yaml` lock whose
+owner file is **empty**, is never removed automatically, because a running acq
+command leaves it in that state for an instant; so if acq ever died in that
+instant, every later command on that sandbox, or every `config.yaml` change,
+waits and then fails, naming the directory. (A `config.yaml` lock directory with
+no owner file at all heals itself: the next writer takes it.)
 
 When that happens, first make sure no acq command is running. Then remove the
 directory the message names (acq prints this command with the path filled in):

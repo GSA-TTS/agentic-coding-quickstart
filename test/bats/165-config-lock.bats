@@ -73,16 +73,39 @@ _posix_only() {
   assert_output 'sbx'
 }
 
-@test "config lock: a directory with no owner is never removed, and the recovery command clears it" {
+@test "config lock: a directory with no owner file heals itself" {
+  # The owner file decides, so a directory left without one (a taker that
+  # died before creating it) is simply taken by the next writer.
   _hold ""
+  ACQ_MIGRATION_LOCK_TIMEOUT=0 _cfg '_acq_config_write_field backend msb'
+  assert_success
+  [ ! -e "$LOCK" ]
+  _backend
+  assert_output 'msb'
+}
+
+@test "config lock: an empty owner file is never removed, and the recovery command clears it" {
+  # An empty owner file is a taker between creating it and writing its token,
+  # so it counts as held; a leftover one needs the documented command.
+  _hold ""
+  : > "$LOCK/owner"
   ACQ_MIGRATION_LOCK_TIMEOUT=0.2 _cfg '_acq_config_write_field backend msb'
   assert_failure
-  [ -d "$LOCK" ]
+  assert_output --partial "rm -f -- '$LOCK/owner' && rmdir -- '$LOCK'"
+  [ -f "$LOCK/owner" ]
   rm -f -- "$LOCK/owner" && rmdir -- "$LOCK"
   _cfg '_acq_config_write_field backend msb'
   assert_success
   _backend
   assert_output 'msb'
+}
+
+@test "config lock: a failed token write removes the owner file it created" {
+  # A full disk, say: the owner file this taker created exclusively is its
+  # own, so it is removed again rather than left empty (which would block).
+  _cfg 'printf() { return 1; }; _acq_config_lock_take "$ACQ_STATE_DIR/locks/config.lock.d" "1 x"'
+  assert_failure
+  [ ! -e "$LOCK" ]
 }
 
 @test "config lock: a holder that exited is recovered" {

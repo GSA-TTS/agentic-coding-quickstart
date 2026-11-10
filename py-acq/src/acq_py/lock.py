@@ -23,7 +23,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import IO
 
@@ -611,6 +611,8 @@ class _MkdirLock:
     """
 
     label = "lock"
+    # Whether an existing directory with no owner file is taken (see _take).
+    claims_ownerless = False
 
     def __init__(self, path: Path, root: Path):
         self.path = path
@@ -662,12 +664,16 @@ class _MkdirLock:
         not atomic with every coreutils (uutils ``mkdir`` reports success to
         concurrent callers; KNOWN_FAILURE_MODES section 90), so a Bash taker may
         share the directory this one just made. Losing that race never removes
-        the winner's owner file.
+        the winner's owner file. Where :attr:`claims_ownerless` is set, an
+        existing directory with no owner file is taken as well. If writing the
+        token fails after the owner file was created, that file is this
+        process's own and is removed again.
         """
         try:
             os.mkdir(self.path.name, dir_fd=parent)
         except FileExistsError:
-            return False
+            if not self.claims_ownerless:
+                return False
         try:
             fd = os.open(self.path.name, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW, dir_fd=parent)
         except FileNotFoundError:
@@ -676,16 +682,25 @@ class _MkdirLock:
             self._rmdir_quietly()
             raise
         try:
-            owner = os.open("owner", os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW, 0o644, dir_fd=fd)
-        except FileExistsError:
-            return False  # another taker created the owner file first
-        except OSError:
-            self._rmdir_quietly()
-            raise
+            try:
+                owner = os.open("owner", os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW, 0o644, dir_fd=fd)
+            except FileExistsError:
+                return False  # another taker created the owner file first
+            except FileNotFoundError:
+                return False  # the directory was removed (a releasing or losing taker): look again
+            except OSError:
+                self._rmdir_quietly()
+                raise
+            try:
+                with os.fdopen(owner, "w", encoding="utf-8") as fh:
+                    fh.write(token + "\n")
+            except OSError:
+                with suppress(OSError):
+                    os.unlink("owner", dir_fd=fd)
+                self._rmdir_quietly()
+                raise
         finally:
             os.close(fd)
-        with os.fdopen(owner, "w", encoding="utf-8") as fh:
-            fh.write(token + "\n")
         self.token = token
         return True
 
@@ -856,14 +871,19 @@ class ConfigDirLock(_MkdirLock):
     lock portably (no ``flock(1)`` on macOS; Git Bash's locks are not the ones
     ``msvcrt.locking`` takes), so both also take the directory
     ``locks/config.lock.d`` beside it (Bash ``_acq_config_lock_acquire``), and
-    Python takes it only while it holds the OS lock. On POSIX the owner rules
-    of :class:`_MkdirLock` apply. On Windows neither side can check the other's
+    Python takes it only while it holds the OS lock. Whoever creates the
+    ``owner`` file exclusively holds it, so a directory without one is taken
+    (it is a leftover, or a taker that has not created its owner yet and will
+    lose). On POSIX the owner rules of :class:`_MkdirLock` apply. On Windows neither side can check the other's
     PID, so both take the directory and count an existing one as held for
     :data:`CONFIG_WINDOWS_STALE_S` seconds after it was created, then recover
     it.
     """
 
     label = "config.yaml lock"
+    # Every taker here decides by the owner file alone, so a directory left
+    # without one (a taker that died before creating it) heals itself.
+    claims_ownerless = True
 
     def __init__(self, os_lock_path: Path, root: Path):
         super().__init__(os_lock_path.with_name(os_lock_path.name + ".d"), root)
@@ -875,7 +895,8 @@ class ConfigDirLock(_MkdirLock):
         :data:`CONFIG_WINDOWS_STALE_S` old, or at once when its owner is a
         Python acq (owner line ``PID windows``) whose process has exited. A Git
         Bash owner's PID cannot be checked from here, so only the age rule
-        applies to it. Platform-neutral code (no ``dir_fd``), so it is also
+        applies to it. A directory with no owner file is taken at once
+        (:attr:`claims_ownerless`). Platform-neutral code (no ``dir_fd``), so it is also
         tested off Windows.
         """
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -891,26 +912,41 @@ class ConfigDirLock(_MkdirLock):
                         f"unsafe {self.label} path: {self.path} is a symbolic link or not a directory",
                         f"remove {self.path}, then retry",
                     ) from None
-                line = _owner_line(self.path)
-                if self._abandoned_on_windows(line):
-                    self._remove(line)
-                    continue
-                self.blocked = True
-                return False
-            try:
-                with open(self.path / "owner", "x", encoding="utf-8") as fh:
-                    fh.write(token + "\n")
-            except FileExistsError:
-                continue  # another taker created the owner file first
-            except FileNotFoundError:
-                continue  # released or recovered in the meantime
-            except OSError:
-                self._rmdir_quietly()
-                raise
-            self.token = token
-            return True
+            taken = self._create_owner(token)
+            if taken:
+                return True
+            if taken is None:
+                continue  # the directory went away: look again
+            line = _owner_line(self.path)
+            if self._abandoned_on_windows(line):
+                self._remove(line)
+                continue
+            self.blocked = True
+            return False
         self.blocked = True
         return False
+
+    def _create_owner(self, token: str) -> bool | None:
+        """Create the owner file exclusively; True when taken, False when held, None when the directory went."""
+        try:
+            fh = open(self.path / "owner", "x", encoding="utf-8")
+        except FileExistsError:
+            return False
+        except FileNotFoundError:
+            return None
+        except OSError:
+            self._rmdir_quietly()
+            raise
+        try:
+            with fh:
+                fh.write(token + "\n")
+        except OSError:
+            with suppress(OSError):
+                (self.path / "owner").unlink()
+            self._rmdir_quietly()
+            raise
+        self.token = token
+        return True
 
     def _abandoned_on_windows(self, line: str) -> bool:
         if self._age_s() >= CONFIG_WINDOWS_STALE_S:

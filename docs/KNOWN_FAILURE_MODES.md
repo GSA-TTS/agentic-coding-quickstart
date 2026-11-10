@@ -4615,7 +4615,8 @@ login-shell sync into the agent-user setup.
   every mutating command, whose schema migration takes the same lock) fails
   with `could not take the config.yaml lock` (Bash) or `could not acquire the
   config.yaml lock` (Python, as `migration_failed`). The message names
-  `.../acq/locks/config.lock.d` under the acq state directory.
+  `.../acq/locks/config.lock.d` under the acq state directory, which holds an
+  empty `owner` file.
 
 **Cause:** Both the Bash and the Python acq take these `mkdir` locks and write
 `PID IDENTITY` into the lock's `owner` file; the Python acq takes the
@@ -4623,11 +4624,18 @@ login-shell sync into the agent-user setup.
 Bash cannot take portably (see `_acq_config_lock_acquire` in
 `acq.backends/common.sh` and `ConfigDirLock` in `py-acq/src/acq_py/lock.py`).
 A lock whose owner process is gone, or whose PID now belongs to another process,
-is recovered automatically. A lock directory with no readable owner line is
-not: the same state exists, briefly, while another command is between its
-`mkdir` and its owner write, so removing it automatically could break a live
-lock. Such a directory is left only when an acq process died in exactly that
-moment, or the directory was made by hand.
+is recovered automatically. A per-sandbox lock directory with no readable owner
+line is not: the same state exists, briefly, while another command is between
+its `mkdir` and its owner write, so removing it automatically could break a
+live lock. Such a directory is left only when an acq process died in exactly
+that moment, or the directory was made by hand.
+
+The `config.yaml` lock is decided by the exclusive create of its `owner` file
+(section 90), so a `config.lock.d` directory with no `owner` file heals itself:
+the next writer takes it. What it cannot heal is an `owner` file that exists but
+is empty, which is a writer between creating the file and writing its token;
+one is left only if a writer died in exactly that moment. (A writer that fails
+to write its token, on a full disk say, removes the file it created.)
 
 On Windows neither Git Bash nor native Python can check the other's process
 IDs, so the `config.yaml` lock directory counts as held for 60 seconds after it
@@ -4912,13 +4920,17 @@ one of several concurrent callers. uutils `mkdir` 0.10.0 does not: in 300
 three-way races on one host it reported success 466 times. The `config.yaml`
 lock no longer relies on it: the exclusive create of its `owner` file (Bash
 noclobber, which Bash opens with `O_EXCL` itself, and `O_EXCL` in Python)
-decides who holds it, and a taker that loses never removes the winner's owner
-file (`_acq_config_lock_take` in `acq.backends/common.sh`, `_MkdirLock._take`
-in `py-acq/src/acq_py/lock.py`). The per-sandbox provider-input lock
+decides who holds it, a taker that loses never removes the winner's owner file,
+and an existing directory without an owner file is simply taken
+(`_acq_config_lock_take` in `acq.backends/common.sh`, `_MkdirLock._take` in
+`py-acq/src/acq_py/lock.py`). The per-sandbox provider-input lock
 (`acq_provider_input_lock_acquire`) still writes its owner file without
 noclobber after a successful `mkdir`, so with uutils two Bash commands can both
 take it. The Python acq's own `mkdir` is atomic, but a racing Bash command can
-overwrite a Python holder's owner line in the same way.
+overwrite a Python holder's owner line in the same way. The progress spinner's
+draw lock (`$dir/draw` in `acq.backends/progress.sh`) is also a plain `mkdir`;
+there the effect is cosmetic, at most one stray spinner frame drawn after the
+spinner was stopped.
 
 **Resolution:** Until the provider-input lock is changed, avoid running two
 Bash acq commands on the same sandbox at once on such a host, or put GNU
