@@ -66,6 +66,10 @@ NOT_INPUTS = {
     "CONTRIBUTING.md", "GLOSSARY.md", "LICENSE", "README.md", "SECURITY.md", "SUPPORT.md",
     "package.json", "release-please-config.json", ".release-please-manifest.json",
     "py-acq/README.md", "py-acq/requirements-dev.txt",
+    # the hash-locked build backend only python-vectors.yml installs; the
+    # consistency check that reads it (test_packaging.py) also runs there, on
+    # every pull request
+    "py-acq/requirements-build.txt",
     # lint and hook configuration
     ".gitignore", ".gitleaks.repo.toml", ".gitleaks.toml", ".markdown-link-check.json",
     ".markdownlint-cli2.yaml", ".markdownlint.jsonc", ".markdownlintignore",
