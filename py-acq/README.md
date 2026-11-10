@@ -232,7 +232,9 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   ports the old guest had, for guest ports an applied kit still declares with
   its host side open; a preferred port that is busy by then (the old guest is
   removed first) gets a free one with a warning, a kit-pinned host port is
-  never overridden, and a mapping no kit declares any more is dropped. The create/run JSON carries `ports`. Kits that
+  never overridden, and a mapping no kit declares any more is dropped. A recreate
+  returns to a kit-pinned host port even if the original create overrode it
+  with `--publish`. The create/run JSON carries `ports`. Kits that
   declare `volumes:` are still refused on msb.
 * `acq-py ports NAME --publish HOST:GUEST [--json]` (ADR-0015) — on msb, open a
   tunnel to a running sandbox: an acq-managed ed25519 key under
@@ -246,10 +248,11 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   port listens, and records them in `ACQ_STATE_DIR/ports/NAME.pids` in the
   Bash format, so either implementation lists and tears down what the other
   opened. `stop`, `restart` and `rm` stop them, but only a recorded process
-  that is still an `msb` or `ssh` process (Linux: `/proc/PID/cmdline`; macOS:
-  `ps -o comm=`; Windows: the process image name), so a process id reused by
-  an unrelated program is left alone; one acq cannot check is skipped with a
-  note. Each repeated `--publish` is opened, all or nothing (Bash kept only the
+  whose command matches its serve port or forwarding mapping (Linux:
+  `/proc/PID/cmdline`; macOS: `ps -o command=`; Windows checks only the process
+  image name), so a process id reused by an unrelated program is left alone.
+  A live process that fails the check is left running with a note that it is
+  no longer tracked; one acq cannot check is skipped with a note. Each repeated `--publish` is opened, all or nothing (Bash kept only the
   last); values are checked first, and a `--publish` with no value is refused
   rather than read as a listing. On sbx the values go to `sbx ports NAME
   --publish=V` verbatim and its status is kept, except that a value binding a

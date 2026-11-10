@@ -33,6 +33,7 @@ import itertools
 import os
 import re
 import secrets
+import shlex
 import signal
 import socket
 import subprocess
@@ -381,6 +382,8 @@ def sbx_bind_problem(value: str) -> str | None:
         if len(parts) < 3:
             return None
         addr = ":".join(parts[:-2])
+    if not addr:
+        return f"ports: --publish '{value}' has an empty host address; acq publishes on loopback only"
     if addr.lower() in _LOOPBACK_NAMES:
         return None
     try:
@@ -420,26 +423,41 @@ def _program(path: str) -> str:
     return base[:-4] if base.endswith(".exe") else base
 
 
-def _linux_identity(pid: int) -> bool | None:
+def _matches_tunnel(argv: list[str], program: str, option: str, value: str) -> bool:
+    if not argv or _program(argv[0]) != program:
+        return False
+    if program == "msb" and argv[1:3] != ["ssh", "serve"]:
+        return False
+    return any(argv[i:i + 2] == [option, value] for i in range(1, len(argv) - 1))
+
+
+def _linux_identity(pid: int, program: str, option: str, value: str) -> bool | None:
     try:
         raw = Path(f"/proc/{pid}/cmdline").read_bytes()
     except FileNotFoundError:
         return False  # no such process: nothing to stop
     except OSError:
         return None
-    return any(_program(token.decode("utf-8", "replace")) in _TUNNEL_PROGRAMS for token in raw.split(b"\0") if token)
+    argv = raw.decode("utf-8", "replace").rstrip("\0").split("\0")
+    return _matches_tunnel(argv, program, option, value)
 
 
-def _macos_identity(pid: int) -> bool | None:
+def _macos_identity(pid: int, program: str, option: str, value: str) -> bool | None:
     try:
-        proc = subprocess.run(["/bin/ps", "-o", "comm=", "-p", str(pid)],  # nosec B603 # fixed argv, no shell
+        proc = subprocess.run(["/bin/ps", "-o", "command=", "-p", str(pid)],  # nosec B603 # fixed argv, no shell
                               capture_output=True, text=True, timeout=5, check=False)
     except (OSError, subprocess.TimeoutExpired):
         return None
-    comm = proc.stdout.strip()
-    if proc.returncode != 0 and not comm:
+    command = proc.stdout.strip()
+    if proc.returncode != 0 and not command:
         return False  # ps lists nothing: no such process
-    return _program(comm) in _TUNNEL_PROGRAMS if comm else None
+    if not command:
+        return None
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return None
+    return _matches_tunnel(argv, program, option, value)
 
 
 def _windows_identity(pid: int) -> bool | None:  # pragma: no cover - Windows only
@@ -468,19 +486,19 @@ def _windows_identity(pid: int) -> bool | None:  # pragma: no cover - Windows on
         kernel32.CloseHandle(handle)
 
 
-def process_is_tunnel(pid: int) -> bool | None:
-    """Whether ``pid`` is an ``msb`` or ``ssh`` process now; ``None`` when that cannot be told.
+def process_is_tunnel(pid: int, program: str, option: str, value: str) -> bool | None:
+    """Whether ``pid`` matches its recorded tunnel command; ``None`` when that cannot be told.
 
     A recorded process id can be reused by an unrelated process once the
     tunnel is gone, so it is checked before it is signalled: on Linux the
-    command line (``/proc/PID/cmdline``), on macOS ``ps -o comm=``, on Windows
+    command line (``/proc/PID/cmdline``), on macOS ``ps -o command=``, on Windows
     the image name (``QueryFullProcessImageNameW``). ``False`` also covers a
     process that no longer exists.
     """
     if sys.platform.startswith("linux"):
-        return _linux_identity(pid)
+        return _linux_identity(pid, program, option, value)
     if sys.platform == "darwin":
-        return _macos_identity(pid)
+        return _macos_identity(pid, program, option, value)
     if os.name == "nt":
         try:
             return _windows_identity(pid)
@@ -496,7 +514,7 @@ def _signal(pid: int) -> None:
         pass
 
 
-def _kill_recorded(name: str, pid: int) -> None:
+def _kill_recorded(name: str, pid: int, program: str, option: str, value: str) -> None:
     """Stop a process the tunnel record names, once it is confirmed to be a tunnel process.
 
     Never pid 0 or 1 (a process group or init). On Windows ``os.kill`` is
@@ -504,12 +522,23 @@ def _kill_recorded(name: str, pid: int) -> None:
     """
     if pid <= 1:
         return
-    verdict = process_is_tunnel(pid)
+    verdict = process_is_tunnel(pid, program, option, value)
     if verdict is None:
         print(f"acq(msb): note: not stopping process {pid} from the port record of '{name}': "
               "acq could not confirm it is an msb or ssh process.", file=sys.stderr)
     elif verdict:
         _signal(pid)
+    else:
+        if os.name != "nt":
+            # Signal 0 probes existence on POSIX; on Windows it terminates.
+            try:
+                os.kill(pid, 0)
+            except PermissionError:
+                pass  # alive, but owned by another user
+            except (OSError, ValueError):
+                return
+        _note(f"process {pid} from the port record of '{name}' does not match its tunnel; "
+              "left running and no longer tracked.")
 
 
 def _stop(proc: subprocess.Popen) -> None:
@@ -624,10 +653,12 @@ def _open_tunnel(name: str, serve_cmd: list[str], host: int, guest: int) -> Tunn
         if spawned[1].poll() is not None:
             raise PublishError(errors.FAILURE, f"ports: ssh -L 127.0.0.1:{host} -> 127.0.0.1:{guest} failed to "
                                "establish (forward rejected, auth failed, or bind in use)",
-                               f"check that host port {host} is free, then retry")
+                               f"check that host port {host} is free, then retry; if the sandbox host key changed, run "
+                               f"{shlex.join(['ssh-keygen', '-R', f'acq-msb-{name}', '-f', str(_known_hosts())])}")
         if not _listener_ready(host):
             raise PublishError(errors.FAILURE, f"ports: ssh -L did not open host listener 127.0.0.1:{host}",
-                               f"check that host port {host} is free, then retry")
+                               f"check that host port {host} is free, then retry; if the sandbox host key changed, run "
+                               f"{shlex.join(['ssh-keygen', '-R', f'acq-msb-{name}', '-f', str(_known_hosts())])}")
     except BaseException:
         for proc in reversed(spawned):
             _stop(proc)
@@ -643,12 +674,16 @@ def _free_host_ports(pairs: list[tuple[int, int]]) -> None:
     answers there) while ssh's own bind failed.
     """
     seen: set[int] = set()
+    notice = _Mapper([], [])
     for host, _guest in pairs:
         if host in seen:
             raise PublishError(errors.VALIDATION_FAILED, f"ports: host port {host} is requested more than once",
                                "give each --publish its own host port")
         seen.add(host)
-        if host_port_status(host) == "busy":
+        status = host_port_status(host)
+        if status == "unknown":
+            notice.unprobed()
+        if status == "busy":
             raise PublishError(errors.FAILURE, f"ports: host port {host} is already in use on 127.0.0.1",
                                "free it, or publish on another host port")
 
@@ -726,12 +761,34 @@ def teardown(name: str) -> None:
     if path is None:
         return
     for fields in lines:
-        for token in fields[:2]:
+        if len(fields) != 4 or not fields[2].isascii() or not fields[2].isdigit():
+            continue
+        if posthoc_problem(fields[3]) is not None:
+            continue
+        host, guest = fields[3].split(":")
+        for token, program, option, value in (
+            (fields[0], "msb", "--port", fields[2]),
+            (fields[1], "ssh", "-L", f"127.0.0.1:{int(host)}:127.0.0.1:{int(guest)}"),
+        ):
             if token.isascii() and token.isdigit():
-                _kill_recorded(name, int(token))
+                _kill_recorded(name, int(token), program, option, value)
     try:
         path.unlink()
     except FileNotFoundError:
         pass
     except OSError:
         print(f"acq(msb): warning: could not remove the port record {path}", file=sys.stderr)
+
+
+def forget_host_key(name: str) -> None:
+    """Drop a removed sandbox's host-key pin; missing OpenSSH or state is harmless."""
+    known_hosts = _known_hosts()
+    try:
+        if not known_hosts.is_file():
+            return
+        keygen = hostexec.command("ssh-keygen")
+        subprocess.run([*keygen, "-R", f"acq-msb-{name}", "-f", str(known_hosts)],
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=5, check=False)  # nosec B603 # argv list, no shell
+    except (OSError, subprocess.TimeoutExpired):
+        pass
