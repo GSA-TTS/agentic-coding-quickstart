@@ -1,14 +1,22 @@
 {
   "schema": 1,
   "id": "cli/doctor-human",
-  "oracle": "ADR-0038m §2 human output by default for doctor, diagnostics on stderr",
+  "oracle": "ADR-0038m \u00a72 human output by default for doctor, diagnostics on stderr",
   "tier": 1,
   "backend": null,
   "platform": "any",
   "invoke": {
-    "argv": ["{acq}", "doctor"],
-    "env": {},
-    "unset": ["ACQ_RUNTIME"],
+    "argv": [
+      "{acq}",
+      "doctor"
+    ],
+    "env": {
+      "ACQ_SBX_INSTALLED": "0",
+      "ACQ_MSB_INSTALLED": "0"
+    },
+    "unset": [
+      "ACQ_RUNTIME"
+    ],
     "stdin": "",
     "timeout_ms": 5000
   },
@@ -28,6 +36,12 @@
   "isolation": {
     "offline": true,
     "ssh_stubs": false,
-    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME"
+    ]
   }
 }
