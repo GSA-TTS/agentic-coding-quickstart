@@ -100,12 +100,12 @@ still missing, and the Python CLI rejects each one as a usage error:
 - `--no-update-check` on `run`;
 - `--publish HOST:GUEST` on `ports NAME`.
 
-**Safety-relevant: `ACQ_CLONE` is silently ignored.** Bash treats `ACQ_CLONE=1`
+**Safety-relevant: `ACQ_CLONE` was silently ignored.** Bash treats `ACQ_CLONE=1`
 like `--clone`, so the agent works on a disposable clone of the workspace. The
-Python implementation does not read `ACQ_CLONE` at all and gives no warning. A
-user who sets it to keep the agent away from the real checkout gets the real
-workspace mounted read-write instead. Until it is implemented or refused, do not
-rely on `ACQ_CLONE` under `ACQ_IMPL=python`.
+Python implementation did not read `ACQ_CLONE`, so a user who set it got the real
+workspace mounted read-write with no warning. It now refuses `ACQ_CLONE=1` on
+`create` and `run` with a usage error before anything runs (see `py-acq/README.md`),
+until clone mode is implemented.
 
 The Python implementation also has behaviour gaps against Bash. It reads the
 `extra_kits`, `provider_kit` and `scope_github_token` settings that

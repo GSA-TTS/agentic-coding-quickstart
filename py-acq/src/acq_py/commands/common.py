@@ -93,18 +93,15 @@ def _default_image_for_agent(agent: str) -> str:
     return OPENCODE_DEVENV_IMAGE
 
 
-def _usage_failure(command: str | None, message: str, emit_json: bool) -> int:
+def _usage_failure(
+    command: str | None, message: str, emit_json: bool, remediation: str = "run 'acq --help' for usage"
+) -> int:
     if emit_json:
-        doc = envelope.error(
-            command or "acq",
-            errors.USAGE,
-            message,
-            remediation="run 'acq --help' for usage",
-        )
+        doc = envelope.error(command or "acq", errors.USAGE, message, remediation=remediation)
         print(json.dumps(doc))
     else:
         print(f"acq: {message}", file=sys.stderr)
-        print("run 'acq --help' for usage", file=sys.stderr)
+        print(remediation, file=sys.stderr)
     return errors.EXIT_USAGE
 
 

@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from typing import NoReturn
 
@@ -597,6 +598,40 @@ def _sandbox_name_pre_step(parsed, emit_json: bool) -> int | None:
     return None
 
 
+def _clone_requested() -> bool:
+    """True when ``ACQ_CLONE`` asks for clone mode the way Bash reads it.
+
+    Bash enables clone mode only for the exact value ``1``
+    (``[ "${ACQ_CLONE:-0}" = "1" ]`` in ``acq`` and both adapters); unset,
+    empty, ``0`` or any other value, ``true`` and `` 1`` included, leaves it off.
+    """
+    return os.environ.get("ACQ_CLONE") == "1"
+
+
+def _clone_env_pre_step(parsed, emit_json: bool) -> int | None:
+    """Refuse ``ACQ_CLONE=1`` on ``create``/``run`` until clone mode is ported.
+
+    The Bash acq honours ``--clone`` and its env equivalent ``ACQ_CLONE`` on
+    exactly these two verbs (ADR-0027): the agent then works on a disposable
+    clone of the primary workspace instead of the real checkout. Python rejects
+    ``--clone`` at the parser, but the env var would otherwise be silently
+    ignored and the real workspace mounted read/write. Refused before any state,
+    config or backend access. Bash only notes the setting on a re-attach;
+    refusing every form here is the fail-closed choice, since telling a
+    re-attach from a create would need a backend query.
+    """
+    if parsed.command not in ("create", "run") or not _clone_requested():
+        return None
+    return common._usage_failure(
+        parsed.command,
+        "clone mode (ACQ_CLONE=1) is not supported by the Python implementation yet; "
+        "refusing rather than mounting the real workspace",
+        emit_json,
+        remediation="unset ACQ_CLONE to mount the workspace itself, "
+        "or use the Bash implementation (ACQ_IMPL=bash) for a disposable clone",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Synchronized forward-migration pre-step (ADR-0041m).
 # ---------------------------------------------------------------------------
@@ -774,6 +809,9 @@ def _dispatch(parser: _Parser, parsed, emit_json: bool, backend_override: str | 
         return run_doctor(emit_json, parsed.name)
 
     if parsed.command not in ("help", None):
+        clone_check = _clone_env_pre_step(parsed, emit_json)
+        if clone_check is not None:
+            return clone_check
         label = _command_label(parsed)
         # `secret has` is a silent predicate: its refusal goes to stderr only.
         dirs_check = _user_dirs_pre_step(emit_json and label != "secret has", label)
