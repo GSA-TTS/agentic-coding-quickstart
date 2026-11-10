@@ -4648,6 +4648,10 @@ agent read a file-backed secret store and rewrite acq's records, its kit
 payloads and the trusted config acq otherwise mounts read-only. A read-only
 (`:ro`) workspace is refused as well, because the guest could still read the
 secret store. The paths are compared both as given and with symlinks resolved.
+Under Git Bash or Cygwin the comparison ignores the case of ASCII letters,
+because Windows filesystems are case-insensitive (`/c/USERS/you` is
+`/c/Users/you`); POSIX hosts compare exactly. The Python acq compares through
+`os.path.normcase`, which folds case on Windows.
 
 **Resolution:** Run the agent on a project directory:
 
@@ -4663,7 +4667,10 @@ Re-attaching to an existing sandbox (`acq run NAME`, `acq run AGENT` for an
 existing name, `start`, `restart`) does not re-mount the workspace, so there the
 check runs on the workspace recorded when the sandbox was created
 (`acq_recorded_workspace_safe`). A sandbox created on `~` by an older acq is
-refused with the same message, plus a line naming the sandbox:
+refused with the same message, plus a line naming the sandbox. msb records the
+workspace in drive form (`C:/...`) under Git Bash; that record is converted
+with `cygpath -u` before the comparison, and one that cannot be converted is
+refused with the same remove-and-recreate line:
 
 ```text
      Sandbox NAME was created on that workspace: remove it ('acq rm NAME') and create it again on a project directory.

@@ -1396,9 +1396,22 @@ _acq_trusted_host_dirs() {
 # _acq_path_within CHILD PARENT — 0 when the absolute path CHILD is PARENT or
 # lies below it. A plain string comparison; trailing slashes are ignored and the
 # quoted pattern keeps glob characters in PARENT literal.
+#
+# On MSYS/Cygwin (Git Bash) the comparison ignores ASCII case: Windows
+# filesystems are case-insensitive, so /c/USERS/me/ACQSTATE names the same
+# directory as /c/Users/me/acqstate, and a case-sensitive match would let a
+# workspace reach acq's own directories by spelling them differently. Only
+# ASCII letters are folded; a name that differs only in the case of another
+# letter still compares exactly. POSIX hosts compare exactly.
 _acq_path_within() {
   local c="${1%/}" p="${2%/}"
   [ -n "$p" ] || return 0
+  case "${OSTYPE:-}" in
+    msys*|cygwin*)
+      c=$(printf '%s' "$c" | LC_ALL=C tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')
+      p=$(printf '%s' "$p" | LC_ALL=C tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')
+      ;;
+  esac
   case "$c" in
     "$p"|"$p"/*) return 0 ;;
   esac
