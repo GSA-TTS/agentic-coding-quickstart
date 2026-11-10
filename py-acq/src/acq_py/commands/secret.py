@@ -147,14 +147,30 @@ def run_secret_set(parsed, emit_json: bool, backend: str) -> int:
         )
     if not common._supports(backend, "secret-write"):
         return _unsupported(command, backend, emit_json)
-    return _usai_guarded(command, scope, service, emit_json,
-                         lambda: _set_apply(backend, scope, service, value, host, env, emit_json))
+    return _guarded(command, backend, scope, service, emit_json,
+                    lambda: _set_apply(backend, scope, service, value, host, env, emit_json))
 
 
-def _usai_guarded(command: str, scope: secretstore.Scope, service: str, emit_json: bool, body) -> int:
-    """Run ``body`` under the usai provider lock when it changes the global usai
-    key, so it cannot interleave with ``usai-rotate-api-key``; else as is."""
-    if not (scope.is_global and service == provider_creds.USAI_PROVIDER_ID):
+def _guarded(command: str, backend: str, scope: secretstore.Scope, service: str, emit_json: bool, body) -> int:
+    """Run ``body`` under the lock that keeps it from interleaving with another
+    command that reads or changes the same credential.
+
+    A sandbox-scoped change holds that sandbox's lifecycle lock, so it cannot
+    race a ``create`` (or ``rm``) of the sandbox reading the store to bind it:
+    a create could otherwise bind a value this ``rm`` then deletes. A change to
+    the global usai key holds the usai provider lock, so it cannot interleave
+    with ``usai-rotate-api-key``. Any other global change runs as is.
+    """
+    if scope.sandbox is not None:
+        try:
+            with lock.sandbox_lock(backend, scope.sandbox):
+                return body()
+        except lock.SandboxLockTimeout as exc:
+            return common._operational_failure(
+                command, errors.TIMEOUT, str(exc),
+                exc.remediation or "retry once the other command finishes; nothing was changed", emit_json,
+            )
+    if service != provider_creds.USAI_PROVIDER_ID:
         return body()
     try:
         with lock.provider_credential_lock(service):
@@ -276,8 +292,8 @@ def run_secret_rm(parsed, emit_json: bool, backend: str) -> int:
             command, errors.UNSUPPORTED, f"--accept-unconfirmed is not supported on the {backend} backend",
             "remove the flag; nothing was changed", emit_json,
         )
-    return _usai_guarded(command, scope, service, emit_json,
-                         lambda: _rm_apply(adapter, scope, service, accept, emit_json))
+    return _guarded(command, backend, scope, service, emit_json,
+                    lambda: _rm_apply(adapter, scope, service, accept, emit_json))
 
 
 def _rm_apply(adapter, scope: secretstore.Scope, service: str, accept: list[str] | None, emit_json: bool) -> int:

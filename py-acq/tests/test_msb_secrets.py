@@ -763,6 +763,32 @@ def test_scoped_set_targets_only_that_sandbox(monkeypatch, tmp_path, capsys, chi
     assert msb.held_read("b").bindings["GITHUB_TOKEN"]["scope"] == "sandbox" and msb.held_read("a").bindings == {}
 
 
+@pytest.mark.parametrize("argv, takes_lock", [
+    (["secret", "set", "b", "github"], True),
+    (["secret", "rm", "b", "github"], True),
+    (["secret", "set", "a", "github"], False),
+    (["secret", "set", "-g", "github"], False),
+])
+def test_sandbox_scoped_set_and_rm_take_the_sandbox_lock(monkeypatch, tmp_path, capsys, children, argv, takes_lock):
+    # A create of 'b' holds its lifecycle lock while it reads the store to bind
+    # it; a scoped change to 'b' must wait for it rather than race it.
+    from acq_py import errors, lock
+
+    _running(tmp_path, monkeypatch, "a", "b")
+    secretstore.store(secretstore.key_for("github", "b"), SCOPED)
+    monkeypatch.setenv("ACQ_SANDBOX_LOCK_TIMEOUT", "0.2")
+    children.clear()
+    with lock.sandbox_lock("msb", "b"):
+        rc, doc, out, err = _invoke(capsys, "--backend", "msb", *argv, "--json", stdin=VALUE, monkeypatch=monkeypatch)
+    if takes_lock:
+        assert rc == 1 and doc["error"]["code"] == errors.TIMEOUT
+        assert "sandbox 'b'" in doc["error"]["message"]
+        assert secretstore.resolve("github", "b") == SCOPED and _verb_calls(children, "modify") == []
+    else:
+        assert rc == 0, (doc, err)
+    _assert_value_absent(VALUE, children, out, err)
+
+
 def test_create_first_claim_wins_for_a_shared_env(monkeypatch, tmp_path, capsys, children):
     _env(monkeypatch, tmp_path)
     monkeypatch.setenv("ACQ_PROVIDER_KITS", "")  # no provider kit selected: no usai gate or binding
