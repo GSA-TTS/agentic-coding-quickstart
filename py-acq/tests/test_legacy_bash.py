@@ -527,6 +527,30 @@ def test_an_unreadable_bash_backend_directory_keeps_the_sandbox_import_pending(t
     assert migration.read_generation() == migration.TARGET_GENERATION
 
 
+@pytest.mark.skipif(os.name != "posix" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+                    reason="needs POSIX permissions and a non-root user")
+def test_a_pending_backend_never_brings_back_a_record_removed_from_one_that_imported(tree, capsys):
+    _bash_file("gone", ".env", "agent=shell\nworkspace_source=host\nworkspace=/w/gone\n", backend="sbx")
+    _bash_file("box", ".env", "agent=shell\nworkspace_source=host\nworkspace=/w/box\n")
+    directory = legacy_bash._backend_dir("msb")
+    directory.chmod(0o000)
+    try:
+        migration.migrate_tree()
+        assert state.record_read("sbx", "gone") is not None
+        assert "sandboxes:sbx" in migration.read_import_done()
+        state.record_path("sbx", "gone").unlink()  # what 'acq rm gone' does to the record
+        migration.migrate_tree()  # msb still unreadable: the part stays pending
+        assert state.record_read("sbx", "gone") is None
+        assert "sandboxes" not in migration.read_import_done()
+    finally:
+        directory.chmod(0o755)
+    capsys.readouterr()
+    migration.migrate_tree()
+    assert state.record_read("msb", "box")["imported_from"] == "bash"
+    assert state.record_read("sbx", "gone") is None
+    assert migration.read_generation() == migration.TARGET_GENERATION
+
+
 def test_fresh_tree_without_bash_state_is_quiet(tree, capsys):
     migration.migrate_tree()
     assert migration.read_generation() == migration.TARGET_GENERATION
