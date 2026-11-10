@@ -599,14 +599,14 @@ _acq_spin_cleanup_exit() {
 }
 
 # _acq_spin_cleanup_signal SIG — INT/TERM trap. Order matters:
-#   1. Stop the animation, and reset SIG to its default disposition so a prior
-#      handler that re-raises SIG ends the process instead of re-entering here.
+#   1. Stop the animation, keeping the guarded SIG trap installed through both
+#      prior handlers so another signal cannot interrupt their cleanup.
 #   2. Run the prior SIG handler (once) with `$?` = 128+signal. If it exits (the
 #      provisioning subshells chain `_acq_provider_input_signal_exit 130`), the
 #      EXIT trap, still ours, chains the prior EXIT handler with that status, so
 #      the shell exits 130/143 and the EXIT cleanup runs exactly once.
 #   3. If it returned, or there was none, run the EXIT cleanup with the signal
-#      status, drop the EXIT trap, and re-raise SIG at THIS process (see
+#      status, drop the EXIT trap, reset SIG, and re-raise at THIS process (see
 #      _acq_signal_self) so the parent sees a death by signal. Should the
 #      re-raise not end the process (SIG ignored), exit with the status instead.
 #
@@ -616,6 +616,9 @@ _acq_spin_cleanup_exit() {
 # finishes: it, not the nested run, holds the prior handler, and that handler
 # (the provisioning subshells' `_acq_provider_input_signal_exit`) must run
 # before the EXIT cleanup releases the provider-input lock.
+# Bash 3.2 can defer the second signal until the prior handler exits. Resetting
+# SIG before that handler lets the deferred signal terminate the shell without
+# running EXIT. Keep the guarded trap until the EXIT cleanup has finished.
 _acq_spin_cleanup_signal() {
   local _acq_spin_sig="$1" _acq_spin_status=1 _acq_spin_prior=""
   case "$_acq_spin_sig" in
@@ -636,10 +639,10 @@ _acq_spin_cleanup_signal() {
     TERM) _acq_spin_prior="$_ACQ_SPIN_PRIOR_TERM_TRAP"; _ACQ_SPIN_PRIOR_TERM_TRAP="" ;;
   esac
   _acq_spin_stop_animation
-  trap - "$_acq_spin_sig"
   _acq_run_prior_trap "$_acq_spin_prior" "$_acq_spin_status"
   _acq_spin_cleanup_exit "$_acq_spin_status"
   trap - EXIT
+  trap - "$_acq_spin_sig"
   _acq_signal_self "$_acq_spin_sig"
   exit "$_acq_spin_status"
 }

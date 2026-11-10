@@ -161,14 +161,16 @@ _prog() { # SHELL_SNIPPET
   assert_output --regexp "^trap -- '' (SIG)?INT\$"
 }
 
-@test "progress: Ctrl-C resets INT before the prior handler, so a re-raise cannot recurse" {
+@test "progress: Ctrl-C guards INT through the prior handler, so a re-raise cannot recurse" {
   export PRIOR_COUNT="$STUBDIR/prior-count"
   _prog 'prior() { echo ran >> "$PRIOR_COUNT"; [ "$(wc -l < "$PRIOR_COUNT")" -ge 3 ] || kill -s INT $$; }
+    trap "echo PRIOR_EXIT=\$?" EXIT
     trap prior INT
     _acq_spin_install_traps
     _acq_spin_cleanup_signal INT
     printf "NOT_REACHED\n"'
   assert_equal "$status" 130
+  assert_line 'PRIOR_EXIT=130'
   refute_output --partial 'NOT_REACHED'
   assert_equal "$(wc -l < "$STUBDIR/prior-count" | tr -d ' ')" 1
 }

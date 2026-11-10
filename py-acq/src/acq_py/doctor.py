@@ -36,12 +36,13 @@ FAIL = "fail"
 def runtime_check() -> dict:
     """Report whether acq can resolve the runtime it executes subprocesses with.
 
-    ``resolve_runtime`` never downloads and always returns a usable interpreter
-    — the app-private managed bundle or the documented IT-approved base
-    interpreter fallback — so this check is ``pass`` in both cases and records
-    the supplier in the message (ADR-0042m).
+    Valid resolution records the supplier (ADR-0042m). An invalid explicit
+    ACQ_RUNTIME fails the check instead of falling back to another interpreter.
     """
-    rt = runtime.resolve_runtime()
+    try:
+        rt = runtime.resolve_runtime()
+    except runtime.RuntimeResolutionError as exc:
+        return {"id": "runtime", "status": FAIL, "message": exc.message, "remediation": exc.remediation}
     if rt.managed:
         message = f"app-private runtime present ({rt.supplier})"
     else:

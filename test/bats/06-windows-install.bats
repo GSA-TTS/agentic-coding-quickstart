@@ -72,9 +72,10 @@ teardown() {
   assert_regex "$installer" 'py-acq\\runtime\\python\.exe'
 }
 
-# acq.cmd starts acq.ps1, whose default branch runs the Bash `acq`, which sources
-# acq.backends\common.sh before anything else; the Python branch needs
-# py-acq\src. A zip missing any of them must fail closed, as in install.sh.
+# acq.cmd starts acq.ps1, whose default (Python) branch needs py-acq\src; its
+# ACQ_IMPL=bash branch runs the Bash `acq`, which sources acq.backends\common.sh
+# before anything else. A zip missing any of them must fail closed, as in
+# install.sh.
 @test "windows installer: gates the launchers, the backend tree and the source" {
   installer=$(cat "$REPO_ROOT/install.ps1")
 
@@ -163,6 +164,36 @@ teardown() {
   done
 }
 
+# On Windows an unset ACQ_IMPL selects the Python implementation (ADR-0048m),
+# never the Bash one. The selection and the interpreter checks that come before
+# any Windows-only step run under pwsh on any host: a relative ACQ_RUNTIME is
+# refused, and with no managed runtime and no drive-rooted PATH entry the
+# launcher fails closed with the remedies instead of starting Bash.
+@test "windows launcher: an unset ACQ_IMPL selects the Python implementation" {
+  launcher=$(cat "$REPO_ROOT/acq.ps1")
+  assert_regex "$launcher" 'if \(-not \$acqImpl\) \{'
+  assert_regex "$launcher" 'set ACQ_IMPL=bash to use the Bash implementation through Git Bash'
+
+  command -v pwsh >/dev/null 2>&1 || return 0
+  [ ! -e "$REPO_ROOT/py-acq/runtime" ] || skip "a managed runtime is staged in this checkout"
+  local pwsh_bin launcher_path="$REPO_ROOT/acq.ps1" no_python_path="/nonexistent-acq-bin"
+  pwsh_bin=$(command -v pwsh)
+  if command -v cygpath >/dev/null 2>&1; then
+    launcher_path=$(cygpath -w "$launcher_path")
+    no_python_path="$(cygpath -u "${SYSTEMROOT:-C:\Windows}")/System32"
+  fi
+
+  run env -u ACQ_IMPL ACQ_RUNTIME='python.exe' "$pwsh_bin" -NoLogo -NoProfile -File "$launcher_path" version
+  assert_failure 1
+  assert_output --partial "ACQ_RUNTIME must be an absolute path to python.exe, got 'python.exe'"
+
+  run env -u ACQ_IMPL -u ACQ_RUNTIME PATH="$no_python_path" "$pwsh_bin" -NoLogo -NoProfile -File "$launcher_path" version
+  assert_failure 1
+  assert_output --partial 'no Python 3.12 or newer was found to run acq'
+  assert_output --partial 'set ACQ_IMPL=bash'
+  refute_output --partial 'patterns kit ref'
+}
+
 # Run inside the caller's PowerShell session (`& .\acq.ps1`), acq.ps1 shares
 # its environment; the variables it sets for the programs it starts must be put
 # back when it returns. NoDefaultCurrentDirectoryInExePath is set before the
@@ -218,7 +249,8 @@ teardown() {
   assert_regex "$installer" 'function Test-AbsolutePath'
   assert_regex "$installer" 'if \(-not \(Test-AbsolutePath \$base\)\)'
   refute_regex "$installer" 'Join-Path \$env:LOCALAPPDATA'
-  assert_regex "$launcher" 'if \(\$env:LOCALAPPDATA -match '
+  assert_regex "$launcher" 'function Test-AcqAbsolutePath'
+  assert_regex "$launcher" 'if \(Test-AcqAbsolutePath -Path \$env:LOCALAPPDATA\)'
 }
 
 # As install.sh refuses a relative --install-dir, install.ps1 refuses an

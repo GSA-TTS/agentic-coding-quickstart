@@ -13,6 +13,8 @@ import json
 import subprocess
 import sys
 
+import pytest
+
 import acq_py.doctor as doctor
 from acq_py import envelope, errors
 
@@ -248,3 +250,29 @@ def test_image_check_ids_survive_missing_capabilities():
     missing = cli._image_doctor_checks("  warning: /nix is missing\n  fix: use a devenv-capable image\n  warning: nix is not on PATH\n  fix: install nix\n")
     assert complete[0]["id"] == missing[0]["id"] == "image-nix-store"
     assert complete[2]["id"] == missing[1]["id"] == "image-tool-nix"
+
+
+@pytest.mark.parametrize("kind", ["missing", "directory", "relative"])
+@pytest.mark.parametrize("emit_json", [False, True], ids=["human", "json"])
+def test_doctor_reports_invalid_runtime(tmp_path, monkeypatch, kind, emit_json):
+    override = tmp_path / "invalid-python"
+    if kind == "directory":
+        override.mkdir()
+    value = "relative-python" if kind == "relative" else str(override)
+    monkeypatch.setenv("ACQ_RUNTIME", value)
+    proc = run_cli("doctor", *(["--json"] if emit_json else []))
+    # Doctor diagnostics retain their successful command status; the failed
+    # runtime check and overall status carry the misconfiguration.
+    assert proc.returncode == 0, proc.stderr
+    assert "Traceback" not in proc.stderr
+    if emit_json:
+        data = json.loads(proc.stdout)["data"]
+        assert data["status"] == "fail"
+        check = next(c for c in data["checks"] if c["id"] == "runtime")
+        assert check["status"] == "fail"
+        assert "ACQ_RUNTIME" in check["message"] and value in check["message"]
+        assert "unset ACQ_RUNTIME" in check["remediation"]
+    else:
+        assert "[fail] runtime: ACQ_RUNTIME" in proc.stdout
+        assert "unset ACQ_RUNTIME" in proc.stdout
+        assert "overall: fail" in proc.stdout
