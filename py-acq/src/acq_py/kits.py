@@ -84,8 +84,8 @@ BUILTIN_NEUTRAL_NAMES = tuple(n for n in BUILTIN_KIT_NAMES if n not in PROVIDER_
 # name (``kitspec.AGENT_BUNDLE_KITS``), applied in-guest like every other kit:
 # the opencode kit installs a pinned, SHA-256-verified binary, as Bash does.
 # Only ``opencode`` is a built-in agent kit today; the other known agents
-# select no agent kit but still land on the devenv base (spec implementation
-# decision #4).
+# select no agent kit but still land on the devenv base (implementation
+# decision 4 in docs/spec/acq-v1.md).
 # ---------------------------------------------------------------------------
 
 # Built-in agent kits: kit name -> the entrypoint its spec declares.

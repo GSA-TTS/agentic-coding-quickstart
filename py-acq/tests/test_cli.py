@@ -305,7 +305,7 @@ def test_every_known_command_has_a_dispatch_arm_into_a_command_module():
 
 
 def test_an_unknown_verb_reaches_the_passthrough_not_argparse(monkeypatch):
-    # The passthrough is the deliberate escape hatch (spec user story #9): an unknown
+    # The passthrough is the deliberate escape hatch (spec ordinary-user story 9): an unknown
     # verb must reach it verbatim rather than becoming an argparse usage error. With
     # no backend installed it fails closed with backend_not_found, which is itself
     # proof the verb got past argparse into the passthrough. (--json goes before
