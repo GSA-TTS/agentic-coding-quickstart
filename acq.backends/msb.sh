@@ -7000,12 +7000,25 @@ _acq_msb_secret_keep_own() {
     return 0
   fi
   [ -n "$_oenv" ] && [ -n "$_ohost" ] || return 0
-  _oval=$(acq_secret_resolve "$service" "$sb" 2>/dev/null) && [ -n "$_oval" ] || return 0
+  # The sandbox-scoped key only: a fallback to a global value must never be
+  # re-bound as the sandbox's own.
+  local _okey
+  _okey=$(_acq_secret_key "$service" "$sb" 2>/dev/null) || _okey=""
+  if [ -z "$_okey" ] || ! _oval=$(acq_secret_get "$_okey" 2>/dev/null) || [ -z "$_oval" ]; then
+    _oval=""
+    echo "acq(msb): warning: sandbox '$sb' has its own '$service' value, but it cannot be read; it may still be injected with the removed global value. Re-run 'acq secret set $sb $service', or recreate the sandbox." >&2
+    return 0
+  fi
+  local _rc=0
   # shellcheck disable=SC2163  # dynamic export of the resolved binding env var
   export "$_oenv=$_oval"
-  _acq_msb_cli modify "$sb" --secret "${_oenv}@${_ohost}" </dev/null >/dev/null 2>&1 || true
+  _acq_msb_cli modify "$sb" --secret "${_oenv}@${_ohost}" </dev/null >/dev/null 2>&1 || _rc=$?
   unset "$_oenv"
   _oval=""
+  if [ "$_rc" -ne 0 ]; then
+    echo "acq(msb): warning: could not re-bind sandbox '$sb''s own '$service' value; it may still be injected with the removed global value. Re-run 'acq secret set $sb $service', or recreate the sandbox." >&2
+    return 0
+  fi
   acq_debug "msb modify: '$sb' keeps its own '$service' value"
   return 0
 }

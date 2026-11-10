@@ -291,6 +291,31 @@ LIST
   refute [ -f "$STUBDIR/secrets/acq.github" ]
 }
 
+@test "secret rm(msb): a global rm warns when a sandbox's own value cannot be kept" {
+  printf 'ownbox\n' > "$STUBDIR/.msb_sandbox_list"
+  mkdir -p "$STUBDIR/secrets"
+  # Stored but unreadable here: a DPAPI envelope under the file backend.
+  printf 'acq-dpapi-v1\nAAAA\n' > "$STUBDIR/secrets/acq.ownbox.github"
+  printf 'global-token\n' > "$STUBDIR/secrets/acq.github"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb "$ACQ" secret rm -g github
+  assert_success
+  assert_output --partial "has its own 'github' value, but it cannot be read"
+  refute_regex "$(cat "$CALLS")" 'msb modify ownbox --secret GITHUB_TOKEN@'
+  # A readable own value whose re-bind fails is reported too.
+  printf 'own-token\n' > "$STUBDIR/secrets/acq.ownbox.github"
+  printf 'global-token\n' > "$STUBDIR/secrets/acq.github"
+  mv "$STUBDIR/msb" "$STUBDIR/msb.real"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'case " $* " in *" modify ownbox --secret "*) exit 1 ;; esac' \
+    "exec \"$STUBDIR/msb.real\" \"\$@\"" > "$STUBDIR/msb"
+  chmod +x "$STUBDIR/msb"
+  run env ACQ_BACKEND=msb "$ACQ" secret rm -g github
+  assert_success
+  assert_output --partial "could not re-bind sandbox 'ownbox''s own 'github' value"
+  refute_output --partial 'own-token'
+}
+
 @test "secret set(msb): renaming a service's env var unbinds the old name first" {
   : > "$STUBDIR/.msb_sandbox_list"
   run env ACQ_SECRET_TEST_VALUE="v1" ACQ_BACKEND=msb "$ACQ" secret set -g myapi --host api.example.com --env OLD_KEY
