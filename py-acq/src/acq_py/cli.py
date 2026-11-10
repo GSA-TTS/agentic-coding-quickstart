@@ -87,6 +87,7 @@ _PUBLISH_HELP = (
     "reach the sandbox's GUEST port on host port HOST (repeatable; msb only, create-time only; "
     "a host port in use fails the create)"
 )
+_NO_UPDATE_CHECK_HELP = "skip the stale-sandbox kit-bundle check on a re-attach (as ACQ_UPDATE_CHECK=0)"
 _NO_PROVIDER_KITS_HELP = (
     "create without provider kits; authoritative over ACQ_PROVIDER_KITS and config.yaml provider_kit, "
     "so no provider config or credential is required"
@@ -254,6 +255,7 @@ def build_parser() -> _Parser:
     create_parser.add_argument("--kit", action="append", help=_KIT_HELP)
     create_parser.add_argument("--no-provider-kits", action="store_true", help=_NO_PROVIDER_KITS_HELP)
     create_parser.add_argument("--publish", action="append", nargs="?", metavar="HOST:GUEST", help=_PUBLISH_HELP)
+    create_parser.add_argument("--no-update-check", action="store_true", help=_NO_UPDATE_CHECK_HELP)
     create_parser.add_argument(
         "--recreate",
         metavar="NAME",
@@ -270,6 +272,7 @@ def build_parser() -> _Parser:
     run_parser.add_argument("--kit", action="append", help=_KIT_HELP)
     run_parser.add_argument("--no-provider-kits", action="store_true", help=_NO_PROVIDER_KITS_HELP)
     run_parser.add_argument("--publish", action="append", nargs="?", metavar="HOST:GUEST", help=_PUBLISH_HELP)
+    run_parser.add_argument("--no-update-check", action="store_true", help=_NO_UPDATE_CHECK_HELP)
 
     sub.add_parser("ls", help="list sandboxes")
 

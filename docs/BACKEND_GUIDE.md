@@ -1369,6 +1369,8 @@ override with `ACQ_PROVENANCE_DIR`). It compares that against the **local**
   interactive, default No, EOF declines, and it **never blocks** a launch. A
   non-interactive run prints one advisory and continues.
 - Opt out with `ACQ_UPDATE_CHECK=0` or `acq run --no-update-check`.
+- The Python acq (`ACQ_IMPL=python`) makes the same offer with the same rules,
+  and never asks under `--json`.
 
 Backend behavior: **sbx** injects any absent built-in kits during the heal pass;
 **msb** re-applies all built-in kits idempotently. Both rewrite provenance only

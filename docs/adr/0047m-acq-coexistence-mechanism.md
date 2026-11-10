@@ -95,12 +95,12 @@ That includes `configure`, `start`, `restart`, `backend set`/`unset`,
 `secret import` and `secret set --host/--env`. Some documented Bash flags are
 still missing, and the Python CLI rejects each one as a usage error:
 
-- `--clone` on `run`/`create`;
-- `--no-update-check` on `run`.
+- `--clone` on `run`/`create`.
 
 Update (2026-11-10): `--publish HOST:GUEST` on `run`/`create` and on
 `ports NAME` are implemented in the Python CLI (`py-acq/README.md`, "Published
-ports"), so they are no longer in this list.
+ports"), and so is `--no-update-check` on `run`, with the stale-sandbox check
+it turns off; they are no longer in this list.
 
 **Safety-relevant: `ACQ_CLONE` was silently ignored.** Bash treats `ACQ_CLONE=1`
 like `--clone`, so the agent works on a disposable clone of the workspace. The

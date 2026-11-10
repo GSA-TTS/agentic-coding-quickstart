@@ -38,6 +38,7 @@ from .. import (
     state,
 )
 from . import common, creds, session
+from . import kit as kit_cmd
 
 # Module-local seam for the host OS class (as ``msb.WINDOWS``).
 WINDOWS = os.name == "nt"
@@ -1417,6 +1418,9 @@ def _run_prepare_locked(
     record, recorded = found
     if opts.publish:
         print(publish.reattach_note(name), file=sys.stderr)
+    # Read before the heal, which records the bundle as current (Bash captures
+    # the same status first, or the stale-sandbox offer could never fire).
+    pre_heal = kits.provenance_status(backend, name)
     # A --kit given again on this run is authoritative for the heal, as in Bash.
     _heal_on_reattach(backend, name, record, cli_kits if parsed.kit else None)
     # Re-attach: read the recorded kit/entrypoint (lenient) so the launch surfaces provenance.
@@ -1430,6 +1434,7 @@ def _run_prepare_locked(
         "action": "reattached",
         "kit": applied.get("kit"),
         "entrypoint": applied.get("entrypoint"),
+        _PRE_HEAL: pre_heal,
     }, None
 
 
@@ -1476,6 +1481,8 @@ def _run_run(parsed, emit_json: bool, backend: str) -> int:
             return _lock_failure("run", name, exc, emit_json)
         if data is None:
             return exit_code if exit_code is not None else errors.EXIT_FAILURE
+        if _PRE_HEAL in data:
+            offer_bundle_refresh(backend, name, data.pop(_PRE_HEAL), emit_json, parsed)
         exit_code = _attach_key_check(backend, name, emit_json)
         if exit_code is not None:
             return exit_code
@@ -1497,10 +1504,10 @@ def _run_run(parsed, emit_json: bool, backend: str) -> int:
         )
     if opts.publish:
         print(publish.reattach_note(target), file=sys.stderr)
-    return _run_by_name(backend, target, emit_json)
+    return _run_by_name(backend, target, emit_json, parsed)
 
 
-def _run_by_name(backend: str, target: str, emit_json: bool) -> int:
+def _run_by_name(backend: str, target: str, emit_json: bool, parsed=None) -> int:
     """``run NAME``: re-attach an existing sandbox from its host record.
 
     The record checks and the kit heal hold the lifecycle lock; the launch does not.
@@ -1512,6 +1519,7 @@ def _run_by_name(backend: str, target: str, emit_json: bool) -> int:
         return _lock_failure("run", target, exc, emit_json)
     if record is None:
         return exit_code if exit_code is not None else errors.EXIT_FAILURE
+    offer_bundle_refresh(backend, target, record.pop(_PRE_HEAL, "current"), emit_json, parsed)
     exit_code = _attach_key_check(backend, target, emit_json)
     if exit_code is not None:
         return exit_code
@@ -1560,12 +1568,81 @@ def _by_name_locked(backend: str, target: str, emit_json: bool) -> tuple[dict | 
         overlap = common._workspace_overlap_failure("run", record["workspace"], emit_json)
         if overlap is not None:
             return None, overlap
+    pre_heal = kits.provenance_status(backend, target)  # before the heal records it current
     _heal_on_reattach(backend, target, record, None)
-    return record, None
+    return {**record, _PRE_HEAL: pre_heal}, None
 
 
 def _warn(message: str) -> None:
     print(f"acq: warning: {message}", file=sys.stderr)
+
+
+# The bundle status read before a re-attach heal; carried out of the locked step,
+# never into the JSON envelope.
+_PRE_HEAL = "_pre_heal_bundle_status"
+
+
+def update_check_enabled(parsed) -> bool:
+    """False under ``--no-update-check`` or ``ACQ_UPDATE_CHECK=0`` (Bash reads only ``0``)."""
+    if getattr(parsed, "no_update_check", False):
+        return False
+    return os.environ.get("ACQ_UPDATE_CHECK", "1") != "0"
+
+
+def offer_bundle_refresh(backend: str, name: str, status: str, emit_json: bool, parsed) -> None:
+    """Bash ``maybe_offer_bundle_refresh``: offer to refresh a sandbox behind the pinned bundle.
+
+    ``status`` is the one read before the re-attach heal. Purely local: an
+    exact-ref comparison against the pinned control plane, no network
+    (ADR-0016). Never blocks a launch: without a terminal on stdin, or under
+    ``--json``, it prints how to refresh later and returns; at a terminal it
+    asks ``[y/N]``, where only an explicit yes refreshes (a bare Enter or end of
+    input declines). The refresh itself is ``kit update``'s, best-effort, run
+    under the lifecycle lock after the question, so the prompt never holds it.
+    """
+    if status == "current" or not update_check_enabled(parsed):
+        return
+    lines = (
+        [f"acq: note — '{name}' was built from an older kit bundle than your pinned",
+         f"      version (local patterns ref {kits.CONTROL_PLANE_REF})."]
+        if status == "stale" else
+        [f"acq: note — acq cannot confirm '{name}' is on your pinned kit bundle",
+         "      (no provenance record; it may predate provenance tracking)."]
+    )
+    lines += ["      A refresh updates the built-in kits (USAi config, playbook, Zscaler CA,",
+              "      git-ssh-sign) in place. Your sessions, secrets, and project files are kept."]
+    for line in lines:
+        print(line, file=sys.stderr)
+    if emit_json or not common._stdin_is_terminal():
+        print(f"      To refresh later: acq kit update {name}", file=sys.stderr)
+        print("      To silence this check: ACQ_UPDATE_CHECK=0 (or acq run --no-update-check).", file=sys.stderr)
+        return
+    print(f"acq: refresh the kit bundle in {name} now? [y/N] ", end="", file=sys.stderr, flush=True)
+    try:
+        answer = sys.stdin.readline().strip()
+    except (OSError, ValueError):
+        answer = ""
+    if answer not in ("y", "Y", "yes", "YES"):
+        print(f"acq: continuing without refreshing (run 'acq kit update {name}' anytime).", file=sys.stderr)
+        return
+    _refresh_bundle(backend, name)
+
+
+def _refresh_bundle(backend: str, name: str) -> None:
+    """Bash ``acq_bundle_reapply`` from ``run``: ``kit update``'s reapply, never fatal."""
+    print(f"acq: refreshing the built-in kit bundle in '{name}' (in place; state preserved)...", file=sys.stderr)
+    try:
+        with lock.sandbox_lock(backend, name), contextlib.redirect_stdout(sys.stderr):
+            rc = common.with_recorded_selection(
+                "run", backend, name, False, lambda: kit_cmd._kit_update_locked(name, False, backend)
+            )
+    except lock.SandboxLockTimeout:
+        rc = errors.EXIT_FAILURE
+    if rc != errors.EXIT_SUCCESS:
+        print(f"acq: warning: kit refresh for '{name}' did not complete cleanly; leaving it as-is.", file=sys.stderr)
+        print(f"      The sandbox and its state are untouched. Re-run 'acq kit update {name}' to retry,",
+              file=sys.stderr)
+        print(f"      or 'acq rm {name} && acq run ...' for a clean rebuild.", file=sys.stderr)
 
 
 def _recorded_kit_refs(backend: str, name: str, cli_kits: list[str] | None) -> tuple[list[str], list[str]]:

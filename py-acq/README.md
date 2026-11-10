@@ -3,9 +3,8 @@
 This directory is the Python replacement for the repo-root Bash `acq` wrapper.
 It implements every subcommand the Bash `acq help` lists, on both backends (msb
 and sbx). It is **not yet at parity** with Bash, and it is **not currently
-Tier-3-qualified**. A few documented flags are still missing: `--clone` on
-`run`/`create` and `--no-update-check` on `run`. `ACQ_CLONE=1` is refused with
-a usage error rather than
+Tier-3-qualified**. One documented flag is still missing: `--clone` on
+`run`/`create`. `ACQ_CLONE=1` is refused with a usage error rather than
 mounting the real workspace. Some behaviour also differs; for example,
 a kit outside the pinned built-in bundle is applied only when its ref is pinned
 to a full commit, and a local kit directory is copied into acq's private cache
@@ -113,6 +112,18 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
 * `acq-py run AGENT PATH [--name N] [--image REF] [--json]` — create (if missing)
   then launch the agent in the foreground; `acq-py run NAME` re-attaches to an
   existing sandbox by name.
+* Stale-sandbox check (ADR-0016, Bash `maybe_offer_bundle_refresh`): when `run`
+  re-attaches, acq compares the kit bundle the sandbox recorded (read before
+  the re-attach heal) with the pinned one. Exact-ref, local only: no network.
+  A `stale` or `unknown` bundle gets a note on stderr. Without a terminal on
+  stdin, or under `--json`, the note says how to refresh later (`acq kit update
+  NAME`) and the launch goes on. At a terminal acq asks `[y/N]`; only `y`/`yes`
+  refreshes (the `kit update` reapply, under the lifecycle lock, after the
+  question), and a failed refresh is a warning, never a failed launch.
+  `--no-update-check` (on `run`, and accepted on `create` as in Bash) or
+  `ACQ_UPDATE_CHECK=0` skips the check; only the value `0` turns it off. As in
+  Bash, `ACQ_NO_PROMPT` does not silence this question; only a terminal on
+  stdin and `--json` decide it.
 * Clone mode (ADR-0027) is not ported yet, and `create`/`run` fail closed
   rather than mount the real workspace: `--clone` is an unrecognized argument,
   and `ACQ_CLONE=1` is refused with a usage error (exit 2) before any state or
