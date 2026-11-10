@@ -118,15 +118,19 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   the Bash adapter's host-side scratch clone (`msb_clone.py`): the same git
   isolation, the same refusals and messages, the same layout under
   `ACQ_MSB_CLONES_DIR` (else `<state dir>/clones`), so either implementation
-  can remove or recreate a clone sandbox the other created. On sbx it is
+  can remove a clone sandbox the other created. On sbx it is
   `sbx create --clone`. Both set `ACQ_WORKSPACE` on every create and
   `ACQ_CLONE=1` under clone mode, the kit contract in BACKEND_GUIDE. The
   result data carries `"clone": true`; `rm` adds `"clone_unfetched": true`
   when it discarded commits the checkout never fetched. A re-attach notes that
-  the flag applies only at create; `create --recreate` rebuilds a clone
-  sandbox on its existing scratch clone. Put the flag after the positionals
+  the flag applies only at create; `create --recreate` (Python only) rebuilds
+  a clone sandbox, including one Bash created, on its existing scratch clone,
+  and refuses when that scratch is missing or damaged. The uncommitted-changes
+  note covers staged changes and untracked files only: it never compares file
+  content, so no filter can run. Put the flag after the positionals
   (`acq-py run opencode . --clone`): on Python 3.12 the parser rejects an
-  optional flag between them (KNOWN_FAILURE_MODES §92).
+  optional flag between them (KNOWN_FAILURE_MODES, "Python 3.12: An Optional
+  Flag Between `create`/`run` Positionals Is Refused").
 * Sandbox names and workspace paths follow the Bash `acq` rules
   (`commands/common.py`). Without `--name`, the name is `AGENT-<slug>`, where the
   slug is the lowercased ASCII letters and digits of the workspace's last path

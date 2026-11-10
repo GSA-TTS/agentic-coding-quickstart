@@ -1326,24 +1326,27 @@ def _recreate_clone_source(name: str, record: dict, workspace: str, emit_json: b
     """The scratch a clone sandbox is rebuilt on, never the real checkout; ``(scratch, None)`` or a refusal.
 
     A clone sandbox is one whose record says ``clone``, or, for a record
-    without the key (a sandbox the Bash acq created), one whose scratch clone
-    exists and names the recorded workspace as its origin. A record that says
-    ``clone`` with that scratch gone or naming another checkout is refused
-    before the old guest is touched: rebuilding on the real checkout would
-    hand the agent the repository the user wanted kept out of reach.
+    without the key (a sandbox the Bash acq created), one with anything at its
+    scratch-clone path. The scratch must still be a clone whose ``.origin``
+    names the recorded workspace; otherwise the recreate is refused before the
+    old guest is touched. The guest owns the scratch and can break it (rename
+    its ``.git``, say), and rebuilding on the real checkout would hand the
+    agent the repository the user wanted kept out of reach.
     """
     if not record.get("workspace"):
         return None, None
+    marked = record.get("clone") is True or ("clone" not in record and msb_clone.present(name))
+    if not marked:
+        return None, None
     scratch, matches = msb_clone.recorded_scratch(name, workspace)
-    if record.get("clone") is True and not (scratch and matches):
-        return None, common._operational_failure(
-            "create", errors.VALIDATION_FAILED,
-            f"sandbox '{name}' runs on a disposable clone, but its scratch clone of {workspace} is missing",
-            f"remove it with 'acq rm {name}' and create it again with --clone", emit_json,
-        )
-    if record.get("clone") is True or ("clone" not in record and scratch and matches):
+    if scratch and matches:
         return scratch, None
-    return None, None
+    return None, common._operational_failure(
+        "create", errors.VALIDATION_FAILED,
+        f"sandbox '{name}' runs on a disposable clone, but its scratch clone of {workspace} is missing or "
+        "damaged, or names another checkout; refusing to rebuild it on the real checkout",
+        f"remove it with 'acq rm {name}' and create it again with --clone", emit_json,
+    )
 
 
 def _recreate_msb(

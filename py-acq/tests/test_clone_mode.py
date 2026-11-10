@@ -311,11 +311,16 @@ def test_06_clone_with_no_workspace_positional_fails_with_guidance(env, monkeypa
 
 
 def test_07_a_dirty_working_tree_gets_a_notice_but_the_create_proceeds(env, monkeypatch, capsys):
+    # The check never reads file content (no filter can run), so an unstaged
+    # edit to a tracked file goes unreported; a staged one is noted.
     (env / "file.txt").write_text("one\ntwo\n", encoding="utf-8")
     seen = _msb_spy(monkeypatch)
+    rc, _doc, err = _create(capsys, str(env), "--name", "unstaged", "--clone")
+    assert rc == 0 and "uncommitted changes" not in err
+    _git("-C", str(env), "add", "file.txt")
     rc, _doc, err = _create(capsys, str(env), "--clone")
     assert rc == 0 and "uncommitted changes" in err
-    _create_argv(seen)
+    assert len([a for a in seen if a[0] == "create"]) == 2
 
 
 def test_08_the_dirty_tree_notice_covers_untracked_only_changes(env, monkeypatch, capsys):
@@ -861,9 +866,10 @@ def test_50_a_git_lfs_workspace_gets_a_notice_to_run_git_lfs_pull_in_the_guest(e
     _commit(env, "-m", "lfs")
     rc, _doc, err = _create(capsys, str(env), "--name", "withlfs", "--clone")
     assert rc == 0
-    for text in ("Git LFS", "If git-lfs is available in the sandbox", "git lfs pull",
-                 "LFS-tracked files may appear modified"):
+    for text in ("Git LFS", "If git-lfs is available in the sandbox", "git lfs pull", "uncommitted changes"):
         assert text in err
+    # No file is compared with the index, so LFS pointers cannot look modified.
+    assert "may appear modified" not in err
 
 
 def test_51_a_symlink_anywhere_inside_git_except_hooks_is_refused(env, tmp_path, monkeypatch, capsys):
@@ -1316,3 +1322,129 @@ def test_the_isolation_list_covers_git_local_env_vars():
     assert set(gitrepos.redirects_left(env)) == set(out)
     assert gitrepos.redirects_left(gitrepos.git_env()) == []
     assert re.fullmatch(r"[0-9a-f]+", "abc") and not msb_clone.valid_name("a/b")
+
+
+# ---------------------------------------------------------------------------
+# Review regressions: removing a guest-writable tree, recreating a broken
+# clone, and the dirty-tree check never running a filter.
+# ---------------------------------------------------------------------------
+
+
+@posix_only
+def test_rm_never_chmods_a_host_dir_through_a_guest_symlink(env, tmp_path, capsys):
+    assert _create(capsys, str(env), "--clone")[0] == 0
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    os.chmod(victim, 0o755)
+    trap = _scratch(tmp_path) / "trap"
+    trap.mkdir()
+    os.symlink(victim, trap / "link")
+    os.chmod(trap, 0o555)  # the unlink of trap/link fails until trap is writable
+    locked = _scratch(tmp_path) / "locked"
+    (locked / "deep").mkdir(parents=True)
+    os.chmod(locked, 0)  # a directory the host cannot even list
+    rc, _doc, _err = _acq(capsys, "rm", NAME)
+    assert rc == 0
+    assert stat.S_IMODE(os.stat(victim).st_mode) == 0o755
+    assert not (_clones(tmp_path) / NAME).exists()
+
+
+def test_removing_a_guest_tree_never_touches_a_link_target(tmp_path):
+    outside = tmp_path / "outside.txt"
+    outside.write_text("host\n", encoding="utf-8")
+    os.chmod(outside, stat.S_IREAD)
+    tree = tmp_path / "tree"
+    (tree / "sub").mkdir(parents=True)
+    (tree / "sub" / "ro.txt").write_text("x", encoding="utf-8")
+    os.chmod(tree / "sub" / "ro.txt", stat.S_IREAD)  # git object files are read-only
+    _symlink(outside, tree / "sub" / "link")
+    msb_clone.remove_guest_tree(tree)
+    assert not tree.exists()
+    assert outside.read_text(encoding="utf-8") == "host\n"
+    assert not os.access(outside, os.W_OK) or (POSIX and os.geteuid() == 0)
+    os.chmod(outside, stat.S_IREAD | stat.S_IWRITE)
+
+
+def test_removing_a_link_in_place_of_the_tree_unlinks_it(tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "keep.txt").write_text("k", encoding="utf-8")
+    _symlink(target, tmp_path / "tree")
+    msb_clone.remove_guest_tree(tmp_path / "tree")
+    assert not os.path.lexists(tmp_path / "tree") and (target / "keep.txt").exists()
+
+
+def _keyless_record() -> None:
+    record = state.record_read("msb", NAME)
+    record.pop("clone")  # what the migration imports from a Bash record
+    state.atomic_write_text(state.record_path("msb", NAME), json.dumps(record))
+
+
+@posix_only
+@pytest.mark.parametrize("damage", ["rename-git", "delete-git", "delete-scratch", "other-origin"])
+def test_recreate_refuses_a_keyless_clone_sandbox_whose_scratch_the_guest_broke(env, tmp_path, monkeypatch,
+                                                                               capsys, damage):
+    from acq_py import security
+
+    monkeypatch.setattr(security, "WINDOWS", False)
+    assert _create(capsys, str(env), "--clone")[0] == 0
+    _keyless_record()
+    scratch = _scratch(tmp_path)
+    if damage == "rename-git":
+        os.rename(scratch / ".git", scratch / ".git-moved")
+    elif damage == "delete-git":
+        shutil.rmtree(scratch / ".git")
+    elif damage == "delete-scratch":
+        shutil.rmtree(scratch)
+    else:
+        other = _mk_repo(tmp_path / "otherrepo")
+        (_clones(tmp_path) / NAME / ".origin").write_text(f"{other}\n", encoding="utf-8")
+    _drop_ro_mount(tmp_path, NAME)
+    seen = _msb_spy(monkeypatch)
+    rc, doc, _err = _acq(capsys, "create", "--recreate", NAME, "--yes")
+    assert rc == 1 and doc["error"]["code"] == errors.VALIDATION_FAILED
+    assert "refusing to rebuild it on the real checkout" in doc["error"]["message"]
+    _refute_backend_create(seen)
+    assert not [a for a in seen if a[:1] == ["remove"]]
+
+
+@posix_only
+def test_recreate_of_a_keyless_sandbox_with_no_clone_dir_mounts_the_workspace(env, tmp_path, monkeypatch, capsys):
+    from acq_py import security
+
+    monkeypatch.setattr(security, "WINDOWS", False)
+    assert _create(capsys, str(env))[0] == 0
+    _drop_ro_mount(tmp_path, NAME)
+    seen = _msb_spy(monkeypatch)
+    rc, doc, err = _acq(capsys, "create", "--recreate", NAME, "--yes")
+    assert rc == 0, (doc, err)
+    assert f"{os.path.realpath(env)}:{_guest(env)}" in _create_argv(seen) and "clone" not in doc["data"]
+
+
+def test_the_dirty_tree_check_runs_no_filter_even_with_a_stale_filter_list(env, tmp_path, monkeypatch):
+    # The driver is defined after the filter list was read: the check must not
+    # run it, which a working-tree comparison (git status) of a stat-dirty file would.
+    ran = tmp_path / "ran"
+    _arm_repo_config(tmp_path, env, ran)
+    monkeypatch.setattr(msb_clone, "_filter_settings", lambda ws, hooks: msb_clone._Prep(hooks))
+    calls = _git_spy(monkeypatch)
+    (env / "untracked.txt").write_text("new\n", encoding="utf-8")
+    assert msb_clone._has_uncommitted(str(env)) is True
+    assert not ran.exists()
+    assert not any(" status" in f" {line}" for line in calls.lines())
+
+
+def test_a_staged_change_is_reported_and_a_clean_tree_is_not(env):
+    assert msb_clone._has_uncommitted(str(env)) is False
+    (env / "new.txt").write_text("n\n", encoding="utf-8")
+    _git("-C", str(env), "add", "new.txt")
+    assert msb_clone._has_uncommitted(str(env)) is True
+
+
+def test_unfetched_check_does_not_follow_a_linked_git_dir_out_of_the_scratch(env, tmp_path, capsys):
+    assert _create(capsys, str(env), "--clone")[0] == 0
+    scratch = _scratch(tmp_path)
+    shutil.rmtree(scratch / ".git" / "refs")
+    _symlink(env / ".git" / "refs", scratch / ".git" / "refs")
+    tips, unverifiable = msb_clone._ref_tips(scratch)
+    assert tips == [] and unverifiable is True

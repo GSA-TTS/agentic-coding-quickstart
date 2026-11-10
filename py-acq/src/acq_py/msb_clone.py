@@ -18,7 +18,8 @@ Bash adapter does (``acq.backends/msb.sh``, ``_acq_msb_clone_*``):
   remote and the scratch once the sandbox is gone.
 
 The layout and the hooks path are the Bash adapter's, so either implementation
-can remove or recreate a clone sandbox the other created.
+can remove a clone sandbox the other created, and the Python ``create
+--recreate`` can rebuild one the Bash acq created.
 
 Every host-side git call against the workspace goes through :func:`ws_git`.
 The workspace is mounted read-write into sandboxes that do not use clone mode,
@@ -44,6 +45,7 @@ from __future__ import annotations
 import ntpath
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -194,6 +196,91 @@ def present(name: str) -> bool:
         return os.path.lexists(clones_root() / name)
     except MsbError:
         return False
+
+
+def _lstat_link(info: os.stat_result) -> bool:
+    attrs = getattr(info, "st_file_attributes", 0)
+    return stat.S_ISLNK(info.st_mode) or bool(attrs & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+
+
+def _make_owner_writable(directory: str, root: str) -> bool:
+    """chmod 0700 the real directory ``directory`` inside ``root``; never a link, never outside ``root``.
+
+    The parent is opened without following a link and the entry is checked
+    through that fd, then changed by name relative to it, so a directory with
+    no permissions at all (which cannot be opened itself) can be fixed too.
+    acq removes a scratch only once its guest is gone, so nothing races the
+    check and the change.
+    """
+    parent, base = os.path.split(directory)
+    try:
+        pfd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return False
+    try:
+        info = os.stat(base, dir_fd=pfd, follow_symlinks=False)
+        if _lstat_link(info) or not stat.S_ISDIR(info.st_mode):
+            return False
+        if os.path.commonpath([os.path.join(os.path.realpath(parent), base), root]) != root:
+            return False
+        os.chmod(base, 0o700, dir_fd=pfd)
+        return True
+    except (OSError, ValueError):
+        return False
+    finally:
+        os.close(pfd)
+
+
+def remove_guest_tree(path: Path) -> None:
+    """Remove a tree the guest could write (best-effort), changing nothing outside it.
+
+    The guest controls what is inside: links to host paths, directories
+    without write or search permission. Nothing that ``os.lstat`` reports as a
+    link is ever chmodded or followed (``shutil.rmtree`` unlinks links). On
+    POSIX a permission failure is retried after making the entry's real
+    parent directory (or the unreadable directory itself) owner-writable,
+    checked through its parent's fd to be a real directory inside the tree
+    (:func:`_make_owner_writable`). On Windows a read-only non-link entry is made writable and
+    retried; links are never touched there either.
+    """
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return
+    if _lstat_link(info) or not stat.S_ISDIR(info.st_mode):
+        try:
+            os.unlink(path)
+        except OSError:
+            try:
+                os.rmdir(path)  # a Windows directory junction
+            except OSError:
+                pass
+        return
+    root = os.path.realpath(path)
+
+    def retry(func, target, exc):
+        try:
+            if isinstance(exc, FileNotFoundError):
+                return
+            if WINDOWS:
+                if not _lstat_link(os.lstat(target)):
+                    os.chmod(target, stat.S_IWRITE | stat.S_IREAD)
+                    func(target)
+                return
+            if not isinstance(exc, PermissionError):
+                return
+            if func in (os.unlink, os.rmdir, os.remove):
+                if _make_owner_writable(os.path.dirname(target), root):
+                    func(target)
+            elif _make_owner_writable(target, root):
+                remove_guest_tree(Path(target))  # a directory it could not list
+        except OSError:
+            pass
+
+    try:
+        shutil.rmtree(path, onexc=retry)
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -505,13 +592,23 @@ def preflight(ws: str) -> None:
              "  so LFS-tracked files are checked out in the scratch as pointer files.",
              "  If git-lfs is available in the sandbox, fetch their content there with:",
              "  git lfs pull")
-    if ws_git(ws, "status", "--porcelain", "--ignore-submodules=all").stdout:
+    if _has_uncommitted(ws):
         _say("note: the workspace has uncommitted changes; a git clone carries",
              "  committed state only. Commit first ('git add' untracked files),",
              "  or copy files in with 'acq cp'.")
-        if lfs:
-            _say("  With filters disabled, LFS-tracked files may appear modified here",
-                 "  even when they are not.")
+
+
+def _has_uncommitted(ws: str) -> bool:
+    """Staged changes or untracked files, found with plumbing that never reads file content.
+
+    ``git status`` compares the working tree and so may run a clean filter,
+    and the filter list blanked in :func:`prep` comes from an earlier read of
+    a config the guest can change in between. Comparing the index with HEAD
+    and listing untracked names starts no filter; an edit to a tracked file
+    that is not staged goes unreported.
+    """
+    staged = ws_git(ws, "diff-index", "--cached", "--quiet", "HEAD", "--").returncode == 1
+    return staged or bool(ws_git(ws, "ls-files", "-z", "--others", "--exclude-standard").stdout)
 
 
 def check_stale(name: str, sandbox_dir: Path, exists: Callable[[str], bool]) -> None:
@@ -552,14 +649,14 @@ def make_scratch(ws: str, sandbox_dir: Path, scratch: Path) -> None:
     # Private: the scratch's .git/config carries the source origin URL, which
     # may embed a credential, at a path the user never sees.
     if not _make_private(sandbox_dir):
-        kit_fetch._remove_tree(sandbox_dir)
+        remove_guest_tree(sandbox_dir)
         raise _refuse(f"--clone: could not create a private scratch dir: {sandbox_dir}",
                       "Refusing to clone a config that may embed a credential into a",
                       "directory other users can read.", code=errors.FAILURE)
     try:
         (sandbox_dir / ORIGIN_FILE).write_text(origin_text(ws) + "\n", encoding="utf-8")
     except OSError as exc:
-        kit_fetch._remove_tree(sandbox_dir)
+        remove_guest_tree(sandbox_dir)
         raise _refuse(f"--clone: could not record the source checkout in {sandbox_dir}: {exc.strerror or exc}",
                       "check that the acq state directory is writable, then re-run", code=errors.FAILURE) from exc
     # --no-local goes through upload-pack, so only objects reachable from the
@@ -567,7 +664,7 @@ def make_scratch(ws: str, sandbox_dir: Path, scratch: Path) -> None:
     proc = ws_git(ws, "-c", "protocol.file.allow=always", "clone", "--quiet", "--no-local", "--no-hardlinks",
                   "--", ws, str(scratch), show_stderr=True)
     if proc.returncode != 0:
-        kit_fetch._remove_tree(sandbox_dir)
+        remove_guest_tree(sandbox_dir)
         raise _refuse(f"--clone: git clone of {ws} failed", code=errors.FAILURE)
 
 
@@ -686,7 +783,7 @@ def _wire(name: str, ws: str, sandbox_dir: Path, scratch: Path) -> None:
     try:
         copy_config(ws, str(scratch))
     except MsbError:
-        kit_fetch._remove_tree(sandbox_dir)
+        remove_guest_tree(sandbox_dir)
         raise
     remote = f"{REMOTE_PREFIX}{name}"
     try:
@@ -737,6 +834,8 @@ def _ref_tips(scratch: Path) -> tuple[list[str], bool]:
     followed and only regular files are read (a FIFO would block).
     """
     tips: list[str] = []
+    if _is_link_path(str(scratch / ".git")) or _is_link_path(str(scratch / ".git" / "refs")):
+        return [], True  # redirected out of the scratch: unverifiable, so warn
     heads = scratch / ".git" / "refs" / "heads"
     if heads.is_dir() and not _is_link_path(str(heads)):
         for root, dirs, files in os.walk(heads, followlinks=False):
@@ -804,7 +903,12 @@ def warn_unfetched(name: str) -> bool:
 
 
 def cleanup(name: str) -> None:
-    """Delete ``name``'s scratch clone and drop its fetch-back remote (best-effort)."""
+    """Delete ``name``'s scratch clone and drop its fetch-back remote (best-effort).
+
+    ``git remote remove sandbox-<name>`` also deletes the checkout's
+    ``refs/remotes/sandbox-<name>/*``: branches fetched from the sandbox stay
+    only where the user merged or branched them.
+    """
     if not valid_name(name):
         return
     try:
@@ -823,7 +927,7 @@ def cleanup(name: str) -> None:
             _show(exc)
             _say(f"warning: left the '{remote}' remote in {origin} (see above).",
                  f"  Remove it with: git -C {origin} remote remove {remote}")
-    kit_fetch._remove_tree(sandbox_dir)
+    remove_guest_tree(sandbox_dir)
 
 
 def recorded_scratch(name: str, workspace: str) -> tuple[str | None, bool]:

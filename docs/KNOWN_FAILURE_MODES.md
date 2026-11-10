@@ -4196,16 +4196,21 @@ Clone mode is now ported (`py-acq/src/acq_py/msb_clone.py`, ADR-0027):
   `ACQ_CLONE=1` under clone mode.
 - The `<clones>/<sandbox>/.origin` and scratch layout and the hooks path are
   Bash's, so either implementation removes (`acq rm`) a clone sandbox the
-  other created. Python's `create --recreate` rebuilds a clone sandbox,
-  including one Bash created, on its existing scratch, and refuses when that
-  scratch is gone rather than mount the real checkout.
+  other created. Python's `create --recreate` (Bash has none) rebuilds a
+  clone sandbox, including one Bash created, on its existing scratch, and
+  refuses when that scratch is missing, damaged or names another checkout
+  rather than mount the real checkout.
 - A re-attach (`run AGENT PATH` on an existing sandbox) prints Bash's note that
   the flag applies only at create and continues; `run NAME` ignores it, as in
   Bash.
 - Stricter than Bash: an inherited `GIT_ALLOW_PROTOCOL` is removed from the
   host-side git calls (it would override `protocol.allow=never`), a workspace
-  holding `ACQ_MSB_CLONES_DIR` is refused like acq's other directories, and a
-  leftover link at `<clones>/<sandbox>` is refused as a stale scratch.
+  holding `ACQ_MSB_CLONES_DIR` is refused like acq's other directories, a
+  leftover link at `<clones>/<sandbox>` is refused as a stale scratch, the
+  guest-writable scratch is removed without ever changing a link or anything
+  outside it, and the uncommitted-changes note uses plumbing that never runs
+  a filter (`git diff-index --cached` and `git ls-files --others`), so an
+  unstaged edit to a tracked file is not reported.
 
 Tests: `py-acq/tests/test_clone_mode.py` (a one-to-one port of
 `test/bats/116-clone-option.bats`), `py-acq/tests/test_clone_predicate.py`, and
@@ -5060,13 +5065,13 @@ under Git Bash picks the Microsoft Store `python3` alias, installs under
 
 ---
 
-## 92. Python 3.12: An Optional Flag Between `create`/`run` Positionals Is Refused
+## NN. Python 3.12: An Optional Flag Between `create`/`run` Positionals Is Refused
 
 **Status:** deferred (tracked per AGENTS.md "Track Deferred Work").
 
 ### Symptoms
 
-On Python 3.12 (seen on 3.12.3), `acq-py create shell --clone ~/proj` or
+On Python 3.12 (seen on 3.12.3; fixed in 3.13), `acq-py create shell --clone ~/proj` or
 `acq-py run opencode --image REF ~/proj` fails with
 `unrecognized arguments: ~/proj` (exit 2). The same command with the flags after
 the positionals (`acq-py run opencode ~/proj --clone`) works, and Bash accepts
