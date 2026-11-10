@@ -249,7 +249,8 @@ teardown() {
   assert_regex "$installer" 'function Test-AbsolutePath'
   assert_regex "$installer" 'if \(-not \(Test-AbsolutePath \$base\)\)'
   refute_regex "$installer" 'Join-Path \$env:LOCALAPPDATA'
-  assert_regex "$launcher" 'if \(\$env:LOCALAPPDATA -match '
+  assert_regex "$launcher" 'function Test-AcqAbsolutePath'
+  assert_regex "$launcher" 'if \(Test-AcqAbsolutePath -Path \$env:LOCALAPPDATA\)'
 }
 
 # As install.sh refuses a relative --install-dir, install.ps1 refuses an
