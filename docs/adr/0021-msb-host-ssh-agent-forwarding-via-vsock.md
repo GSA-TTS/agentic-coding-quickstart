@@ -453,14 +453,24 @@ the shell that last started it.
   `SSH_AUTH_SOCK`) and starts no bridge, with a one-line note. Setting
   `SSH_AUTH_SOCK` and running `start` or `run` again reconnects: the re-drive
   makes the link again when `msb inspect` shows the route naming it (a route
-  that names the raw agent path never gets one invented).
+  that names the raw agent path never gets one invented). A sandbox whose route
+  names the raw agent socket (an older sandbox, a link path too long for a
+  socket address, or a link directory that failed its check) cannot be
+  disconnected this way: the route still reaches that socket and guest code can
+  dial it over vsock itself, so acq says so and names the remedy, removing and
+  recreating the sandbox (`acq rm` and a new create).
 - **A link acq cannot re-point is checked.** When the refresh cannot re-point
   the link (`SSH_AUTH_SOCK` not a socket, a socket inside the workspace, a link
   that cannot be replaced), the link's current target is inspected without
-  following another symlink. Unless it is a socket owned by the effective user
-  and outside the workspace, the link is removed and no bridge starts.
-- **The forwarded socket's owner is checked at create.** A socket owned by
-  another user is still forwarded (shared agents exist), with a warning.
+  following another symlink. Unless it is a socket owned by the effective user,
+  in a directory that is the user's own real directory (not a symlink), and
+  outside the workspace, the link is removed and no bridge starts. The target is
+  checked only when acq runs (`start`, `restart`, `run`), while msb dials the
+  route on every guest connection, so a socket swapped between those times is
+  not caught until the next start or re-attach.
+- **The forwarded socket's owner is checked at create and at refresh.** A
+  socket owned by another user is still forwarded (shared agents exist), with a
+  warning, whether create routes it or a start re-points the link at it.
 - **A socket inside the writable workspace is refused,** for `SSH_AUTH_SOCK` and
   `ACQ_FORWARD_HOST_SOCKETS` alike: at create against the writable workspace
   mounts, at refresh against the recorded workspace. The sandbox could otherwise

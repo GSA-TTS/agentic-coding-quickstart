@@ -5087,6 +5087,14 @@ messages are Bash's. These parts differ on purpose:
   `acq start NAME` first.
 - Each guest call of the forward is bounded at 60 seconds (Bash has no bound).
 
+Both implementations share two limits. The route link's target (a socket owned
+by you, in your own real directory, outside the workspace) is checked only when
+acq runs (`start`, `restart`, `run`), while msb dials the route on every guest
+connection, so a socket replaced between those times is not noticed until the
+next start or re-attach. And a sandbox whose route names the raw agent socket
+rather than acq's link stays connected to that agent after the opt-out until it
+is removed and recreated; acq says so when `SSH_AUTH_SOCK` is unset.
+
 **Live checks still owed.** Every behaviour above is covered against the stub
 msb only (`py-acq/tests/test_ssh_agent_forward.py`, which also compares the guest
 argv, the link path and the emitted routes and warnings with the Bash adapter's).
