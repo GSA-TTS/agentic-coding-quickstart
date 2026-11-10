@@ -1,9 +1,8 @@
 [build-system]
 # An exact pin, as for every other dependency (AGENTS.md: exact versions only).
 # The release must be 77 or later, the first setuptools with PEP 639 metadata:
-# an SPDX `license` expression and `license-files` under [project]. CI does not
-# build the package (it imports py-acq/src directly), so this pin governs local
-# `pip install ./py-acq` builds.
+# an SPDX `license` expression and `license-files` under [project]. CI builds the
+# wheel with this exact release, hash-locked in requirements-build.txt.
 requires = ["setuptools==80.9.0"]
 build-backend = "setuptools.build_meta"
 

@@ -61,7 +61,8 @@ jobs:
       # package installed here is hash-verified; pytest has the same pin as
       # requirements-dev.txt and pyproject.toml.
       - name: Install pinned test tools
-        run: python -m pip install --require-hashes --no-deps --only-binary :all: -r py-acq/requirements-quality.txt
+        run: |
+          python -m pip install --require-hashes --no-deps --only-binary :all: -r py-acq/requirements-quality.txt
 
       # A checkout of Patterns at the kits' pinned ref, for the tests that compare
       # acq's copies against the real pinned tree: the kit egress allowlist
@@ -119,3 +120,23 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}/py-acq/src
         run: scripts/run-vectors --acq "python -m acq_py"
+
+      # The steps above run acq from py-acq/src, so they cannot see a file the
+      # wheel fails to ship (the kit bundle, its hidden .config files,
+      # msb-balanced-hosts.txt). Build the wheel with the hash-locked setuptools
+      # (no build isolation, so pip fetches nothing unhashed), install it into a
+      # throwaway venv, and run the cli vectors against the installed console
+      # script. PYTHONPATH stays unset so nothing is imported from the checkout.
+      - name: Build, install and test the wheel
+        run: |
+          set -euo pipefail
+          build="$RUNNER_TEMP/acq-wheel-build"
+          python -m venv --clear "$build"
+          "$build/bin/python" -m pip install --require-hashes --no-deps --only-binary :all: -r py-acq/requirements-build.txt
+          "$build/bin/python" -m pip wheel --no-build-isolation --no-deps --no-index -w "$RUNNER_TEMP/wheel" ./py-acq
+          run="$RUNNER_TEMP/acq-wheel-run"
+          python -m venv --clear "$run"
+          "$run/bin/python" -m pip install --no-deps --no-index "$RUNNER_TEMP"/wheel/acq_py-*.whl
+          (cd "$RUNNER_TEMP" && "$run/bin/python" -c 'import acq_py, sys; sys.exit("site-packages" not in acq_py.__file__)')
+          (cd "$RUNNER_TEMP" && ACQ_SBX_INSTALLED=0 ACQ_MSB_INSTALLED=0 "$run/bin/acq-py" version --json)
+          scripts/run-vectors --acq "$run/bin/acq-py" --section cli
