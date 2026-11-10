@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -867,6 +868,21 @@ def _require_set_custom() -> None:
         raise SbxError(problem.code, problem.message, problem.remediation)
 
 
+# A placeholder acq puts on a command line or prints in a copy-paste command
+# (Bash _acq_sbx_placeholder_ok): never starting with "-", which sbx would read
+# as a flag, and nothing a shell would interpret.
+_PLACEHOLDER_RE = re.compile(r"[A-Za-z0-9_.][A-Za-z0-9._-]*")
+_ODD_PLACEHOLDER = "a placeholder with unexpected characters (find it with 'sbx secret ls')"
+
+
+def _placeholder_ok(placeholder: str) -> bool:
+    return bool(_PLACEHOLDER_RE.fullmatch(placeholder))
+
+
+def _shown_placeholder(placeholder: str) -> str:
+    return placeholder if _placeholder_ok(placeholder) else _ODD_PLACEHOLDER
+
+
 def _same_secret(entry: _Entry, env: str, hosts: frozenset[str]) -> bool:
     """A custom row for ``env`` whose listed targets are all among ``hosts``
     (the match rotation uses). A row with no targets is not counted: acq cannot
@@ -889,12 +905,13 @@ def _duplicate_refusal(scope: Scope, env: str, hosts: frozenset[str], rows: list
     every placeholder and gives one copy-pasteable removal per entry, in the
     form acq itself runs (``sbx secret rm --placeholder P [--sandbox S] -f``);
     ``outcome`` says what acq did, and ``rerun`` what to run afterwards."""
-    placeholders = [e.placeholder for e in rows]
+    placeholders = [_shown_placeholder(e.placeholder) for e in rows]
     where = "global " if scope.is_global else ""
     inside = "" if scope.is_global else f" in sandbox '{scope.sandbox}'"
     scope_flag = "" if scope.is_global else f" --sandbox {scope.sandbox}"
-    host_text = ", ".join(sorted(hosts))
-    removals = ", ".join(f"'sbx secret rm --placeholder {p}{scope_flag} -f'" for p in placeholders)
+    host_text = ", ".join(sorted(hosts)) or "any host"
+    removals = ", ".join(f"'sbx secret rm --placeholder {e.placeholder}{scope_flag} -f'"
+                         if _placeholder_ok(e.placeholder) else _ODD_PLACEHOLDER for e in rows)
     return SbxError(
         errors.FAILURE,
         f"sbx lists {len(rows)} {where}custom secrets for ${env} on {host_text}{inside}, so acq cannot tell "
@@ -908,7 +925,7 @@ def _duplicate_refusal(scope: Scope, env: str, hosts: frozenset[str], rows: list
 
 def _rm_hint(scope: Scope, service: str, entry: _Entry) -> str:
     if entry.table == "custom" and entry.placeholder:
-        return f"acq secret rm {entry.placeholder}"
+        return f"acq secret rm {_shown_placeholder(entry.placeholder)}"
     return f"acq secret rm -g {service}" if scope.is_global else f"acq secret rm {scope.sandbox} {service}"
 
 
@@ -1004,6 +1021,22 @@ def secret_rm(scope: Scope | str, service: str) -> None:
     """
     sc = secretstore.as_scope(scope)
     found, ambiguous = _find(sc, service, removal=True)
+    # More than one custom row for the same env var is refused, as in Bash and
+    # as for `secret set` and rotation: running sandboxes hold one of those
+    # placeholders and acq cannot tell which, so it removes none of them.
+    by_env: dict[str, list[_Entry]] = {}
+    for entry in found:
+        if entry.table == "custom":
+            by_env.setdefault(entry.key, []).append(entry)
+    for env, rows in by_env.items():
+        if len(rows) > 1:
+            again = f"'acq secret rm -g {service}'" if sc.is_global else f"'acq secret rm {sc.sandbox} {service}'"
+            hosts = frozenset().union(*(e.targets for e in rows))
+            raise _duplicate_refusal(sc, env, hosts, rows, "nothing was removed", f"re-run {again}")
+    for entry in found + ambiguous:
+        if entry.table == "custom" and entry.placeholder and not _placeholder_ok(entry.placeholder):
+            raise SbxError(errors.FAILURE, f"sbx lists the custom secret '{entry.key}' with {_ODD_PLACEHOLDER}",
+                           "nothing was removed; remove it with sbx directly")
     plans: dict[tuple[str, ...], bool] = {}  # argv -> only ambiguous rows need it
     for entry, unsure in [(e, False) for e in found] + [(e, True) for e in ambiguous]:
         if entry.table == "service":
@@ -1143,7 +1176,7 @@ def provider_credential_set(provider: str, key_env: str, hosts: list[str], value
                                  f"re-run 'acq provider-credential set {provider} {key_env} --host {','.join(hosts)}'")
     if found:
         # Name every entry by the placeholder sbx lists for it, never a generic one.
-        named = [e.placeholder for e in found if e.placeholder]
+        named = [_shown_placeholder(e.placeholder) for e in found if e.placeholder]
         hint = (", ".join(f"'acq secret rm {p}'" for p in named) if named
                 else "'sbx secret ls' lists it without a placeholder; remove it with sbx directly")
         raise SbxError(
@@ -1260,7 +1293,7 @@ def _rotate_plan(
             raise _rotate_timed_out("sbx ls", budget) from None
         if is_global is None:
             raise _ambiguous(provider_creds.USAI_PROVIDER_ID, outcome)
-        if not entry.placeholder or entry.placeholder.startswith("-"):
+        if not _placeholder_ok(entry.placeholder):
             raise _listing_unreadable(f"a custom secret for ${env} without a usable placeholder")
         rows[0 if is_global else 1].append(entry)
     if len(rows[0]) > 1:

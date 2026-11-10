@@ -345,5 +345,50 @@ _seed_duplicate_usai() {
   assert_output --partial 'sbx-cs-dupb'
   assert_output --partial 'sbx secret rm --placeholder sbx-cs-dupb -f'
   assert_output --partial 'the sbx sandboxes were not updated'
+  # The advice must not be `acq --backend sbx secret set`, which would refuse on
+  # the entry that is kept.
+  assert_output --partial 'then re-run: acq usai-rotate-api-key to update the entry you keep'
+  refute_output --partial 'acq --backend sbx secret set'
   refute_regex "$(cat "$CALLS")" 'sbx secret (rm|set)'
+}
+
+@test "secret rm(sbx): duplicate usai entries are refused and nothing is removed" {
+  mkdir -p "$STUBDIR/secrets"; printf 'k\n' > "$STUBDIR/secrets/acq.usai"
+  printf 'CUSTOM SECRETS\n(global) other.example.gov USAI_API_KEY sbx-cs-other ****\n(global) api.gsa.usai.gov USAI_API_KEY sbx-cs-dupa ****\n(global) api.gsa.usai.gov USAI_API_KEY sbx-cs-dupb ****\n' > "$STUBDIR/sbx_ls"
+  run env SBX_LS_FIXTURE="$STUBDIR/sbx_ls" ACQ_BACKEND=sbx "$ACQ" secret rm -g usai
+  assert_failure
+  assert_output --partial 'sbx holds 2 custom secrets for USAI_API_KEY on api.gsa.usai.gov'
+  assert_output --partial 'sbx secret rm --placeholder sbx-cs-dupa -f'
+  assert_output --partial 'sbx secret rm --placeholder sbx-cs-dupb -f'
+  assert_output --partial 'nothing was removed'
+  refute_output --partial 'sbx-cs-other'
+  refute_regex "$(cat "$CALLS")" 'sbx secret rm'
+  assert [ -f "$STUBDIR/secrets/acq.usai" ]
+}
+
+@test "secret rm(sbx): removes only the usai entry on the usai host" {
+  mkdir -p "$STUBDIR/secrets"; printf 'k\n' > "$STUBDIR/secrets/acq.usai"
+  printf 'CUSTOM SECRETS\n(global) other.example.gov USAI_API_KEY sbx-cs-other ****\n(global) api.gsa.usai.gov USAI_API_KEY sbx-cs-main ****\n' > "$STUBDIR/sbx_ls"
+  run env SBX_LS_FIXTURE="$STUBDIR/sbx_ls" ACQ_BACKEND=sbx "$ACQ" secret rm -g usai
+  assert_success
+  assert_regex "$(cat "$CALLS")" 'sbx secret rm --placeholder sbx-cs-main -f'
+  refute_regex "$(cat "$CALLS")" 'sbx-cs-other'
+  assert [ ! -e "$STUBDIR/secrets/acq.usai" ]
+}
+
+@test "secret set(sbx): the existing-entry hint names the real placeholder" {
+  printf 'CUSTOM SECRETS\n(global) api.gsa.usai.gov USAI_API_KEY sbx-cs-real1 ****\n' > "$STUBDIR/sbx_ls"
+  run bash -c 'printf "k\n" | SBX_LS_FIXTURE="$1" ACQ_BACKEND=sbx "$2" secret set -g usai' _ "$STUBDIR/sbx_ls" "$ACQ"
+  assert_failure
+  assert_output --partial 'sbx secret rm --placeholder sbx-cs-real1 -f'
+  refute_output --partial '<placeholder'
+}
+
+@test "secret set(sbx): a placeholder with unexpected characters is never printed as a command" {
+  printf 'CUSTOM SECRETS\n(global) api.gsa.usai.gov USAI_API_KEY sbx-cs-ok1 ****\n(global) api.gsa.usai.gov USAI_API_KEY $(touch;x) ****\n' > "$STUBDIR/sbx_ls"
+  run bash -c 'printf "k\n" | SBX_LS_FIXTURE="$1" ACQ_BACKEND=sbx "$2" secret set -g usai' _ "$STUBDIR/sbx_ls" "$ACQ"
+  assert_failure
+  assert_output --partial 'sbx secret rm --placeholder sbx-cs-ok1 -f'
+  assert_output --partial 'one placeholder holds unexpected characters'
+  refute_output --partial '$(touch'
 }

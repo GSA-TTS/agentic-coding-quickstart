@@ -4894,8 +4894,9 @@ session left running after a forced kill, or the Windows default flip
 
 ### Symptoms
 
-`acq secret set -g usai`, `acq usai-rotate-api-key` on sbx, or a USAi change
-made on msb that acq passes on to sbx sandboxes, stops with exit 1:
+`acq secret set -g usai`, `acq secret rm -g usai`, `acq usai-rotate-api-key`
+on sbx, or a USAi change made on msb that acq passes on to sbx sandboxes, stops
+with exit 1:
 
 ```text
 acq(sbx): sbx holds 2 custom secrets for USAI_API_KEY on api.gsa.usai.gov in the global scope,
@@ -4907,7 +4908,9 @@ acq(sbx): sbx holds 2 custom secrets for USAI_API_KEY on api.gsa.usai.gov in the
 ```
 
 The Python `acq` gives the same facts in one error and remediation (or
-`--json` envelope). Nothing is stored, removed or re-set.
+`--json` envelope). Nothing is stored, removed or re-set. A placeholder with
+characters outside letters, digits, `.`, `_` and `-` is never printed as a
+command; inspect it with `sbx secret ls`.
 
 ### Root Cause
 
@@ -4927,10 +4930,13 @@ a different secret and is not counted.
    and plan to recreate any sandbox that then fails with `401`.
 2. Remove the others with the printed commands, one per entry
    (`sbx secret rm --placeholder P -f`).
-3. Re-run the command. With one entry left, `acq usai-rotate-api-key` updates
-   it in place and keeps its placeholder. A sandbox whose placeholder you
-   removed is recovered by the rebind in section 23 (ADR-0008) or by
-   recreating it.
+3. With one entry left, run `acq usai-rotate-api-key`: it updates that entry
+   in place and keeps its placeholder. Do not re-run `acq secret set -g usai`
+   on sbx (or `acq --backend sbx secret set -g usai`): it refuses because an
+   entry exists. For a change made on msb, re-running the msb command
+   (`acq --backend msb secret set -g usai`) re-feeds the kept entry too. For
+   `acq secret rm`, re-run it. A sandbox whose placeholder you removed is
+   recovered by the rebind in section 23 (ADR-0008) or by recreating it.
 
 ### Prevention / Status
 

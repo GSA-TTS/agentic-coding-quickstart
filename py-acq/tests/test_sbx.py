@@ -801,6 +801,38 @@ def test_secret_set_refuses_duplicate_global_usai_entries(monkeypatch, tmp_path,
     assert not _store().exists()
 
 
+def test_secret_rm_refuses_duplicate_usai_entries_and_removes_nothing(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path, custom=[*_DUPES, _custom("global", "USAI_API_KEY", "sbx-cs-other", "other.example")])
+    calls = _spy_rm(monkeypatch)
+    rc, doc = _invoke(capsys, "--backend", "sbx", "secret", "rm", "-g", "usai", "--json")
+    assert rc == 1
+    _assert_duplicate_refusal(doc["error"], "sbx-cs-dupa", "sbx-cs-dupb")
+    assert doc["error"]["remediation"].startswith("nothing was removed;")
+    assert "sbx-cs-other" not in json.dumps(doc)
+    assert not any(argv[:2] == ["secret", "rm"] for argv in calls)
+
+
+def test_secret_rm_removes_only_the_entry_on_the_usai_host(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path, custom=[_custom("global", "USAI_API_KEY", "sbx-cs-main", "api.gsa.usai.gov"),
+                                        _custom("global", "USAI_API_KEY", "sbx-cs-other", "other.example")])
+    calls = _spy_rm(monkeypatch)
+    sbx.secret_rm("global", "usai")
+    removals = [argv for argv in calls if argv[:2] == ["secret", "rm"]]
+    assert removals == [["secret", "rm", "--placeholder", "sbx-cs-main", "-f"]]
+
+
+def test_a_placeholder_with_odd_characters_is_never_printed_as_a_command(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path, custom=[_custom("global", "USAI_API_KEY", "sbx-cs-ok1", "api.gsa.usai.gov"),
+                                        _custom("global", "USAI_API_KEY", "$(touch x)", "api.gsa.usai.gov")])
+    monkeypatch.setenv("ACQ_SBX_VERSION", "0.51.0")
+    monkeypatch.setattr(sys, "stdin", io.StringIO("V\n"))
+    rc, doc = _invoke(capsys, "--backend", "sbx", "secret", "set", "-g", "usai", "--json")
+    assert rc == 1
+    text = json.dumps(doc)
+    assert "'sbx secret rm --placeholder sbx-cs-ok1 -f'" in text
+    assert "$(touch" not in text and "unexpected characters" in text
+
+
 def test_provider_credential_set_refuses_duplicate_entries(monkeypatch, tmp_path, capsys):
     _env(monkeypatch, tmp_path, custom=[_custom("global", "ACME_API_KEY", "sbx-cs-a1", "api.acme.example"),
                                         _custom("global", "ACME_API_KEY", "sbx-cs-a2", "api.acme.example")])
