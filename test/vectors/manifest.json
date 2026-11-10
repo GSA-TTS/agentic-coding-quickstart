@@ -566,7 +566,7 @@
     },
     {
       "contract": "A sandbox keeps the provider selection it was created with (Bash acq_provider_selection_load): start, create --recreate and kit update use the recorded selection, not the one current at the time",
-      "vectors": ["cli/start-keeps-no-provider-kits"]
+      "vectors": ["cli/start-keeps-no-provider-kits", "cli/start-unreadable-selection-refused"]
     },
     {
       "contract": "Per-sandbox GitHub-token nudge at create and run (Bash advise_github_scope, ADR-0013): a workspace with GitHub repositories and no sandbox-scoped token is noted on stderr with the command to scope one later, under --json too; the prompt itself is interactive (Tier-2 evidence in py-acq/tests/test_create_config_settings.py)",
