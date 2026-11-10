@@ -387,6 +387,63 @@ def test_start_waits_for_a_global_secret_change(monkeypatch, tmp_path, capsys, c
     assert rc == 0, doc
 
 
+def _store_lock_mode() -> str:
+    """How the secret-store lock is held right now: ``free``, ``shared`` or ``exclusive``."""
+    path = lock.secret_store_lock_path()
+    try:
+        with lock.exclusive_lock(path, 0.0, timeout_cls=lock.SecretStoreLockTimeout):
+            return "free"
+    except lock.SecretStoreLockTimeout:
+        pass
+    if os.name == "nt":
+        return "held"  # no shared mode there: held, in some mode
+    try:
+        with lock.exclusive_lock(path, 0.0, timeout_cls=lock.SecretStoreLockTimeout, shared=True):
+            return "shared"
+    except lock.SecretStoreLockTimeout:
+        return "exclusive"
+
+
+@pytest.mark.parametrize("verb", ["start", "restart"])
+def test_binding_after_the_start_reads_the_store_under_its_lock(monkeypatch, tmp_path, capsys, verb):
+    # reconcile_bindings reads stored values and binds them into the running
+    # guest; a global secret change must not slip between the two.
+    _stopped_box(monkeypatch, tmp_path, capsys, secret=False)
+    _set(capsys, monkeypatch, "-g", "usai")  # stored while stopped: bound by the reconcile
+    modes: list[str] = []
+    real = msb.reconcile_bindings
+
+    def spy(name):
+        modes.append(_store_lock_mode())
+        return real(name)
+
+    monkeypatch.setattr(msb, "reconcile_bindings", spy)
+    rc, doc, _out, err = _acq(capsys, verb, "box", "--json")
+    assert rc == 0, (doc, err)
+    assert modes == ["held" if os.name == "nt" else "shared"]
+    assert "USAI_API_KEY" in msb.held_read("box").bindings
+
+
+def test_start_on_a_running_sandbox_waits_for_a_global_secret_change_before_binding(monkeypatch, tmp_path, capsys,
+                                                                                     children):
+    # msb start is skipped for a running sandbox, so the reconcile's own lock is
+    # the only thing keeping a global change from slipping between read and bind.
+    _env(monkeypatch, tmp_path)
+    _set(capsys, monkeypatch, "-g", "usai")
+    _create(capsys, tmp_path)
+    monkeypatch.setenv("ACQ_SANDBOX_LOCK_TIMEOUT", "0.3")
+    called: list[str] = []
+    monkeypatch.setattr(msb, "reconcile_bindings", lambda name: called.append(name) or [])
+    children.clear()
+    with lock.secret_store_lock():
+        rc, doc, _out, _err = _acq(capsys, "start", "box", "--json")
+    assert rc == 1 and doc["error"]["code"] == errors.TIMEOUT, doc
+    assert "secret-store lock" in doc["error"]["message"]
+    assert "nothing new was bound" in doc["error"]["remediation"]
+    assert called == []
+    assert "start" not in _verbs(children)  # it was running: no msb start either
+
+
 def test_restart_stops_then_starts_then_heals(monkeypatch, tmp_path, capsys, children):
     _env(monkeypatch, tmp_path)
     _set(capsys, monkeypatch, "-g", "usai")
