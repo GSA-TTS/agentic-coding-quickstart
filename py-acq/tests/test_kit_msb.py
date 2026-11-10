@@ -496,6 +496,99 @@ def test_create_fails_when_the_agent_user_cannot_be_set_up(monkeypatch, tmp_path
 
 
 # ---------------------------------------------------------------------------
+# The kit prerequisites are checked before every kit-set apply.
+# ---------------------------------------------------------------------------
+
+
+def _probe(monkeypatch, answer: str) -> list[list[str]]:
+    calls: list[list[str]] = []
+
+    def probe(name, argv):
+        calls.append([name, *argv])
+        return answer
+
+    monkeypatch.setattr(msb, "guest_probe", probe)
+    return calls
+
+
+def test_missing_prereqs_are_warned_before_the_agent_user_and_kits(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path)
+    guest = _Guest(monkeypatch)
+    calls = _probe(monkeypatch, "acq-prereqs: node update-ca-certificates\r\n")
+    probed_before: list[int] = []
+    real_probe = msb.guest_probe
+    monkeypatch.setattr(msb, "guest_probe", lambda n, a: probed_before.append(len(guest.execs)) or real_probe(n, a))
+    a = _kit(tmp_path, "a", "commands:\n  - phase: startup\n    command:\n      - env\n")
+    result = kit_msb.ensure_kits_applied("box", [a], ro_required=False)
+    assert result.applied == ["a"] and result.agent_user is True  # a warning, never a failure
+    assert probed_before == [0]  # once, before the agent-user setup and every kit step
+    assert calls == [["box", "sh", "-c", kit_msb._PREREQ_SCRIPT]]
+    err = capsys.readouterr().err
+    assert "sandbox 'box' is missing kit prerequisite(s): node update-ca-certificates." in err
+    assert kit_msb.SKIP_PREREQ_CHECK_ENV in err
+
+
+def test_prereq_probe_checks_every_kit_tool_in_the_guest():
+    for tool in ("node", "git", "curl", "update-ca-certificates"):
+        assert tool in kit_msb._PREREQ_SCRIPT
+    assert 'printf "acq-prereqs:%s\\n" "$m"' in kit_msb._PREREQ_SCRIPT
+
+
+@pytest.mark.parametrize("answer", [
+    "acq-prereqs:\n",  # nothing missing
+    "",  # no answer (exec failed or timed out)
+    "acq-prereqs: node rm -rf\n",  # not the probe's answer
+    "stub-exec sh -c m=\"\"\nfor t in node git; do\n  printf \"acq-prereqs:%s\\n\" \"$m\"\n",  # an echoed command
+])
+def test_no_warning_without_a_missing_prereq(monkeypatch, tmp_path, capsys, answer):
+    _env(monkeypatch, tmp_path)
+    _probe(monkeypatch, answer)
+    kit_msb.check_prereqs("box")
+    assert "prerequisite" not in capsys.readouterr().err
+
+
+def test_prereq_check_can_be_skipped(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path)
+    calls = _probe(monkeypatch, "acq-prereqs: node\n")
+    monkeypatch.setenv(kit_msb.SKIP_PREREQ_CHECK_ENV, "1")
+    kit_msb.check_prereqs("box")
+    assert calls == [] and capsys.readouterr().err == ""
+
+
+def test_create_warns_about_missing_prereqs_and_still_succeeds(monkeypatch, tmp_path, capsys):
+    ws = _env(monkeypatch, tmp_path)
+    seen = _spy(monkeypatch)
+    real = msb._run
+
+    def run(argv, **kwargs):
+        if argv[:1] == ["exec"] and kit_msb._PREREQ_SCRIPT in argv:
+            seen.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0, stdout="acq-prereqs: curl\n", stderr="")
+        return real(argv, **kwargs)
+
+    monkeypatch.setattr(msb, "_run", run)
+    rc = cli.main(["--backend", "msb", "create", "shell", str(ws), "--name", "box", "--json"])
+    captured = capsys.readouterr()
+    assert rc == 0, captured.out
+    probes = [a for a in seen if a[:1] == ["exec"] and kit_msb._PREREQ_SCRIPT in a]
+    # The image's default user: the agent user may not exist yet.
+    assert probes == [["exec", "box", "--", "sh", "-c", kit_msb._PREREQ_SCRIPT]]
+    assert "missing kit prerequisite(s): curl." in captured.err
+
+
+def test_guest_probe_reads_a_failed_exec_as_no_answer(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setattr(msb, "_run", lambda argv, **kw: subprocess.CompletedProcess(argv, 1, stdout="x", stderr=""))
+    assert msb.guest_probe("box", ["true"]) == ""
+
+    def overrun(argv, **kw):
+        raise subprocess.TimeoutExpired(argv, 60)
+
+    monkeypatch.setattr(msb, "_run", overrun)
+    assert msb.guest_probe("box", ["true"]) == ""
+
+
+# ---------------------------------------------------------------------------
 # Files, read-only staging.
 # ---------------------------------------------------------------------------
 

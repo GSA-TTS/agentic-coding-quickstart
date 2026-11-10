@@ -793,15 +793,65 @@ def ensure_agent_user(name: str) -> bool:
     return ok
 
 
+# The kit prerequisite check (Bash ``_acq_msb_check_prereqs``). The pinned kits
+# assume these tools are in the base image. The default image ships them; a
+# custom image may not, and acq does not install them, because the kits' egress
+# rules lock the sandbox to the kits' own hosts, so a package mirror is out of
+# reach. The probe prints one tagged line, so output that is not its answer
+# (an msb that echoes the command, say) is never read as a missing tool.
+PREREQ_TOOLS = ("node", "git", "curl", "update-ca-certificates")
+SKIP_PREREQ_CHECK_ENV = "ACQ_MSB_SKIP_PREREQ_CHECK"
+_PREREQ_TAG = "acq-prereqs:"
+_PREREQ_SCRIPT = (
+    'm=""\n'
+    f"for t in {' '.join(PREREQ_TOOLS)}; do\n"
+    '  command -v "$t" >/dev/null 2>&1 || m="$m $t"\n'
+    "done\n"
+    f'printf "{_PREREQ_TAG}%s\\n" "$m"\n'
+)
+
+
+def missing_prereqs(name: str) -> list[str] | None:
+    """The kit prerequisites the guest lacks, or ``None`` when the probe gave no answer."""
+    out = msb.guest_probe(name, ["sh", "-c", _PREREQ_SCRIPT])
+    for line in out.replace("\r", "").splitlines():
+        if not line.startswith(_PREREQ_TAG):
+            continue
+        tools = line[len(_PREREQ_TAG):].split()
+        if all(tool in PREREQ_TOOLS for tool in tools):
+            return tools
+    return None
+
+
+def check_prereqs(name: str) -> None:
+    """Warn when the guest lacks a kit prerequisite; never fails the caller.
+
+    Runs before every kit-set apply, ahead of the agent-user setup, as Bash's
+    provision does. ``ACQ_MSB_SKIP_PREREQ_CHECK`` (any non-empty value) skips
+    it. A probe that gives no answer is not reported, as in Bash.
+    """
+    if os.environ.get(SKIP_PREREQ_CHECK_ENV):
+        return
+    missing = missing_prereqs(name)
+    if not missing:
+        return
+    _warn(f"the base image of sandbox '{name}' is missing kit prerequisite(s): {' '.join(missing)}. "
+          f"The pinned kits need {', '.join(PREREQ_TOOLS)}; the default image provides them and a custom "
+          "image must too (acq does not install them, because the kits' egress rules lock the sandbox to "
+          f"the kits' hosts). Affected kits may not fully apply. Set {SKIP_PREREQ_CHECK_ENV}=1 to silence this.")
+
+
 def ensure_kits_applied(name: str, kits: list[Kit], *, ro_required: bool, force: bool = False) -> ApplyResult:
     """Apply the whole kit set (``acq_backend_ensure_kits_applied``); best-effort per kit.
 
-    The agent user is set up first (:func:`ensure_agent_user`); if that fails
-    the kits are still attempted and ``agent_user`` says so. The merged
+    The kit prerequisites are checked first (:func:`check_prereqs`, a warning
+    only), then the agent user is set up (:func:`ensure_agent_user`); if that
+    fails the kits are still attempted and ``agent_user`` says so. The merged
     environment is computed before the first kit runs, so a kit's commands see
     every kit's variables whatever the order (ADR-0033), and the persisted copy
     is rebuilt from the current kits only.
     """
+    check_prereqs(name)
     result = ApplyResult(agent_user=ensure_agent_user(name))
     merged = merge_env(kits)
     hc_clear(name, "kit-env")
