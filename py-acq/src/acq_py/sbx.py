@@ -271,6 +271,7 @@ def create(
     kit_flags: list[str] | None = None,
     extra_workspaces: list[str] | None = None,
     env: list[str] | None = None,
+    clone: bool = False,
 ) -> None:
     """Create a sandbox. Raises :class:`SbxError` on backend failure.
 
@@ -287,6 +288,11 @@ def create(
     (:data:`backends.SBX_MIN_VERSION`, 0.39.0 as Bash ``MIN_SBX_VERSION``) is
     checked before any create, so such an sbx never gets here. Neither may
     carry a secret: both end up on sbx's command line.
+
+    ``clone`` asks for sbx's native disposable clone of the workspace
+    (``--clone``, ADR-0027). The guest gets ``ACQ_WORKSPACE`` (the workspace
+    path as given, the logical path sbx mounts it at) on every create, and
+    ``ACQ_CLONE=1`` with ``clone``, as the Bash adapter sets them.
     """
     _ssh_agent_notice()
     argv = ["create"]
@@ -296,6 +302,11 @@ def create(
     argv += extra_workspaces or []
     argv += ["--name", name]
     argv += ["-t", image]
+    if clone:
+        argv.append("--clone")
+    argv += ["--env", f"ACQ_WORKSPACE={workspace}"]
+    if clone:
+        argv += ["--env", "ACQ_CLONE=1"]
     for assignment in env or []:
         argv += ["--env", assignment]
     argv += kit_flags or []

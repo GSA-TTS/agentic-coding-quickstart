@@ -437,7 +437,9 @@ msb has no native clone mode, so the neutral `--clone`
   scratch dir. `git fetch sandbox-<name>` pulls agent branches back as
   hash-verified objects; hooks and config never transfer over a fetch.
 - `acq rm` warns when the scratch still holds unfetched commits, then deletes
-  it and removes the remote. `acq stop`/restart preserve both.
+  it and removes the remote. Removing the remote also deletes the checkout's
+  `refs/remotes/sandbox-<name>/*`, so keep fetched work on a branch of your
+  own. `acq stop`/restart preserve both.
 
 **Divergence from sbx (deliberate, per ADR-0027):** a git clone carries
 committed state only. Gitignored/untracked files (sbx copies these — the known
@@ -455,6 +457,25 @@ rationale.
 The scratch clone lives on host disk (unlike sbx's in-guest clone), confined to
 the acq-managed state dir — disposable by construction and never executed by
 the host's git.
+
+Both implementations (`ACQ_IMPL=bash` and `ACQ_IMPL=python`) emulate it the same
+way, with the same refusals, the same `<clones>/<sandbox>/.origin` and scratch
+layout (`ACQ_MSB_CLONES_DIR`, else `<acq state dir>/clones`) and the same hooks
+path, so `acq rm` in either removes a clone the other created
+(`acq.backends/msb.sh` `_acq_msb_clone_*`, `py-acq/src/acq_py/msb_clone.py`).
+The Python acq also records `"clone": true` in its state record and reports
+`data.clone` on `create`/`run`, and its `create --recreate` rebuilds a clone
+sandbox, including one Bash created, on its existing scratch clone, never on
+the real checkout (it refuses when that scratch is missing, damaged or names
+another checkout). It is stricter than Bash: an inherited
+`GIT_ALLOW_PROTOCOL` is removed from its host-side git calls, a workspace
+containing `ACQ_MSB_CLONES_DIR` is refused like acq's other directories, a
+leftover link at `<clones>/<sandbox>` counts as a stale scratch, the scratch is
+removed without changing any link or anything outside it, and its
+uncommitted-changes note reports staged changes and untracked files only
+(plumbing that never runs a filter). A scratch the guest made unreadable never
+blocks `acq rm`, and its host-side git calls other than the clone time out
+after 60 seconds.
 
 Note the async-boot caveat:
 

@@ -81,7 +81,8 @@ def test_create_mounts_the_generation_read_only_after_the_workspace(monkeypatch,
     # sbx create AGENT WORKSPACE GENERATION:ro …: the primary workspace stays
     # first (sbx requires it writable), the generation follows it, read-only.
     assert create[1:4] == ["shell", doc["data"]["workspace"], f"{generation}:ro"]
-    assert create[create.index("--env") + 1] == f"ACQ_PROVIDER_INPUT_ROOT={generation}"
+    envs = [create[i + 1] for i, a in enumerate(create) if a == "--env"]
+    assert envs == [f"ACQ_WORKSPACE={doc['data']['workspace']}", f"ACQ_PROVIDER_INPUT_ROOT={generation}"]
     facts = generation / "models" / "providers" / "usai" / "facts.json"
     assert json.loads(facts.read_text(encoding="utf-8"))["host"] == "api.gsa.usai.gov"
     assert stat.S_IMODE(facts.stat().st_mode) == 0o444
@@ -153,7 +154,8 @@ def test_on_windows_nothing_is_mounted_and_the_facts_are_still_recorded(monkeypa
     rc, _doc, err = _create(capsys, ws)
     assert rc == 0, err
     (create,) = [a for a in seen if a[0] == "create"]
-    assert "--env" not in create and not [a for a in create if a.endswith(":ro")]
+    envs = [create[i + 1] for i, a in enumerate(create) if a == "--env"]
+    assert envs == [f"ACQ_WORKSPACE={create[2]}"] and not [a for a in create if a.endswith(":ro")]
     assert _generations() == []
     assert [f.provider for f in provider_input.recorded("sbx", "pi")] == ["usai"]
 
