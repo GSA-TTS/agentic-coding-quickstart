@@ -413,6 +413,56 @@ def test_an_ownerless_bash_lock_is_not_touched(monkeypatch, tmp_path, capsys):
     assert bash_lock.is_dir()
 
 
+@_POSIX_ONLY
+def test_a_stale_lock_retaken_before_its_removal_is_kept(monkeypatch, tmp_path):
+    # Two commands judge the same lock stale. The other one recovers it and
+    # takes it anew first; this one must not then remove that new, live lock.
+    _env(monkeypatch, tmp_path)
+    bash_lock = _bash_lock()
+    bash_lock.mkdir(parents=True)
+    (bash_lock / "owner").write_text("999999999 12345\n", encoding="utf-8")
+    identity = lock._process_identity(os.getpid())
+    assert identity
+    live = f"{os.getpid()} {identity}"
+    real = lock._bash_owner_state
+    calls = []
+
+    def judged_stale_then_retaken(path, line=None):
+        verdict = real(path, line)
+        if not calls:
+            (bash_lock / "owner").write_text(live + "\n", encoding="utf-8")  # the other command's new lock
+        calls.append(verdict)
+        return verdict
+
+    monkeypatch.setattr(lock, "_bash_owner_state", judged_stale_then_retaken)
+    holder = lock._BashLock("msb", "box")
+    assert holder.acquire() is False
+    assert calls == ["stale", "live"] and holder.blocked
+    assert (bash_lock / "owner").read_text(encoding="utf-8") == live + "\n"
+
+
+@_POSIX_ONLY
+@pytest.mark.parametrize("planted", ["provider-input", "provider-input/msb"])
+def test_a_link_in_the_lock_parent_is_never_followed(monkeypatch, tmp_path, capsys, planted):
+    _env(monkeypatch, tmp_path)
+    _write_catalog(tmp_path, {"box": "running"})
+    root = lock.bash_provenance_dir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    link = root / planted
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(elsewhere, target_is_directory=True)
+    with pytest.raises(lock.SandboxLockUnsafe) as info:
+        with lock.sandbox_lock("msb", "box"):
+            pytest.fail("the lock was taken through a link")
+    assert str(link) in str(info.value) and str(link) in (info.value.remediation or "")
+    assert list(elsewhere.iterdir()) == []
+    rc, doc = _invoke(capsys, "--backend", "msb", "rm", "box", "--json")
+    assert rc == 1 and doc["error"]["code"] == errors.VALIDATION_FAILED
+    assert "box" in json.loads(_catalog_path(tmp_path).read_text(encoding="utf-8"))
+    assert list(elsewhere.iterdir()) == []
+
+
 @pytest.mark.parametrize("token", ["12", "007"])
 def test_owner_pid_accepts_ascii_digits(token):
     assert lock._owner_pid(token) == int(token)

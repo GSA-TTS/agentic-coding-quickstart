@@ -482,10 +482,10 @@ def _has_host_records(backend: str, name: str) -> bool:
 
 
 def _lock_failure(command: str, name: str, exc: lock.SandboxLockTimeout, emit_json: bool) -> int:
-    """Report that another acq command holds the sandbox's lifecycle lock."""
+    """Report that another acq command holds the sandbox's lifecycle lock, or that its path is unsafe."""
     return common._operational_failure(
         command,
-        errors.TIMEOUT,
+        errors.VALIDATION_FAILED if isinstance(exc, lock.SandboxLockUnsafe) else errors.TIMEOUT,
         str(exc),
         exc.remediation or f"wait for the other acq command on sandbox '{name}' to finish, then retry",
         emit_json,
