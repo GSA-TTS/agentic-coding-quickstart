@@ -335,8 +335,11 @@ if ($Channel -ne "python") {
 # for it would be relative too. Refuse it before anything else, -DryRun
 # included, as install.sh refuses a relative --install-dir. An empty
 # -InstallDir '' is refused the same way rather than read as "use the default",
-# as install.sh refuses an empty --install-dir.
-if ($PSBoundParameters.ContainsKey('InstallDir') -and -not (Test-AbsolutePath $InstallDir)) {
+# as install.sh refuses an empty --install-dir. Run as `irm ... | iex`, the text
+# runs in the caller's scope, where $PSBoundParameters can be $null, so it is
+# checked first; a non-empty -InstallDir is still validated there.
+$installDirGiven = ($null -ne $PSBoundParameters -and $PSBoundParameters.ContainsKey('InstallDir')) -or $InstallDir
+if ($installDirGiven -and -not (Test-AbsolutePath $InstallDir)) {
     [Console]::Error.WriteLine("error: -InstallDir must be an absolute path, got '$(Format-Shown $InstallDir)'; pass a fully qualified -InstallDir (for example C:\acq) or omit it to use the default")
     exit 1
 }

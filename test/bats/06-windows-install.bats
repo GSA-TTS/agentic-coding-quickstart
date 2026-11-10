@@ -225,10 +225,14 @@ teardown() {
 # -InstallDir that is not fully qualified, before -DryRun or any write.
 @test "windows installer: a relative -InstallDir is refused before anything runs" {
   installer=$(cat "$REPO_ROOT/install.ps1")
-  # Bound at all, not merely non-empty: -InstallDir '' is refused too.
+  # Bound at all, not merely non-empty: -InstallDir '' is refused too. Under
+  # `irm ... | iex` $PSBoundParameters can be $null, so it is checked first.
   local bound_rule unc_rule
-  bound_rule='if ($PSBoundParameters.ContainsKey('\''InstallDir'\'') -and -not (Test-AbsolutePath $InstallDir))'
+  bound_rule='$installDirGiven = ($null -ne $PSBoundParameters -and $PSBoundParameters.ContainsKey('\''InstallDir'\'')) -or $InstallDir'
   grep -qF -- "$bound_rule" "$REPO_ROOT/install.ps1"
+  grep -qF -- 'if ($installDirGiven -and -not (Test-AbsolutePath $InstallDir))' "$REPO_ROOT/install.ps1"
+  # No unguarded use of $PSBoundParameters.
+  [ "$(grep -c 'PSBoundParameters\.ContainsKey' "$REPO_ROOT/install.ps1")" = 1 ]
   # A UNC path needs a share after the server.
   unc_rule='($Path -match '\''^[\\/]{2}[^\\/]+[\\/][^\\/]'\'')'
   grep -qF -- "$unc_rule" "$REPO_ROOT/install.ps1"
