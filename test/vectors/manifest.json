@@ -549,6 +549,10 @@
       "vectors": ["cli/name-create-invalid", "cli/name-form-stop-refused", "cli/workspace-colon-refused"]
     },
     {
+      "contract": "Clone mode fails closed in the Python acq (ADR-0027): ACQ_CLONE set to exactly '1', the only value the Bash acq treats as on, makes create and run refuse with a usage error (exit 2) before any state or backend access, instead of mounting the real workspace; any other value is ignored, as in Bash",
+      "vectors": ["cli/run-acq-clone-refused"]
+    },
+    {
       "contract": "Provider-credential pins are enforced: a selected provider kit whose facts name a host (or key variable) other than the provider's pin is refused before create (Bash _acq_provider_credentials_gate_trust)",
       "vectors": ["cli/create-provider-pin-mismatch-refused"]
     },

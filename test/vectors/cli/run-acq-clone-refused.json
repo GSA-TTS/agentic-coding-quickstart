@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "id": "cli/run-acq-clone-refused",
+  "oracle": "Fail closed on ACQ_CLONE (ADR-0027): the Bash acq runs create/run on a disposable clone when ACQ_CLONE is exactly '1'; the Python acq has no clone mode yet, so it refuses that value with a usage error (exit 2) before any state or backend access instead of mounting the real workspace. No backend is installed here, so without the refusal the run would fail later with backend_not_found (exit 1)",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{acq}", "--json", "run", "opencode", "."],
+    "env": {
+      "ACQ_CLONE": "1",
+      "ACQ_MSB_INSTALLED": "0",
+      "ACQ_SBX_INSTALLED": "0"
+    },
+    "unset": ["ACQ_IMPL", "ACQ_BACKEND", "ACQ_STATE_DIR", "ACQ_MSB_BIN", "ACQ_SBX_BIN"],
+    "stdin": "",
+    "timeout_ms": 10000
+  },
+  "expect": {
+    "exit": 2,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "run",
+        "error": {
+          "code": "usage",
+          "message": "clone mode (ACQ_CLONE=1) is not supported by the Python implementation yet; refusing rather than mounting the real workspace",
+          "remediation": "unset ACQ_CLONE to mount the workspace itself, or use the Bash implementation (ACQ_IMPL=bash) for a disposable clone"
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "ACQ_SECRET_STORE_DIR"]
+  }
+}

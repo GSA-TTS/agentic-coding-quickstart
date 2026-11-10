@@ -273,6 +273,43 @@ remain:
 
 ---
 
+## Deferred: the Python acq has no clone mode (`--clone`, `ACQ_CLONE`)
+
+**Status:** deferred (tracked per AGENTS.md "Track Deferred Work"). The Python
+acq fails closed until clone mode is ported.
+
+The Bash acq's `--clone`, and its env equivalent `ACQ_CLONE=1`, run `create` and
+`run` on a disposable clone of the primary workspace instead of mounting the
+real checkout (ADR-0027; native on sbx, a host-side scratch clone on msb). The
+Python acq has not ported it:
+
+- `--clone` is rejected by its parser as an unrecognized argument (exit 2).
+- `ACQ_CLONE=1` makes `create` and `run` (every form, including `run NAME`
+  and `create --recreate NAME`) refuse with a usage error (exit 2) before any
+  state, config or backend access: "clone mode (ACQ_CLONE=1) is not supported
+  by the Python implementation yet". Before this refusal, the Python acq
+  ignored the variable, so a user expecting isolation got the real workspace
+  mounted read/write.
+- Only the exact value `1` refuses, matching Bash's
+  `[ "${ACQ_CLONE:-0}" = "1" ]`. Unset, empty, `0`, `true` or any other value
+  is clone mode off in both implementations, so the Python acq proceeds. Other
+  verbs ignore the variable, as in Bash.
+- One deliberate difference: on a re-attach to an existing sandbox, Bash prints
+  a note that `ACQ_CLONE` is ignored and continues; the Python acq refuses,
+  because it cannot tell a re-attach from a create without querying the backend.
+
+**Workaround:** unset `ACQ_CLONE` to mount the workspace itself, or run the
+Bash implementation for a disposable clone (`ACQ_IMPL=bash acq run AGENT
+PATH --clone`). Tests: `py-acq/tests/test_clone_refusal.py` and the vector
+`test/vectors/cli/run-acq-clone-refused.json`.
+
+**Unblock trigger:** clone mode is ported to the Python adapters (sbx's native
+`--clone` and the msb scratch-clone emulation in `acq.backends/msb.sh`); then
+replace the refusal with the feature and port `test/bats/116-clone-option.bats`
+to vectors.
+
+---
+
 ## Qualification oracle: a forced stop can reach processes outside the step
 
 **Status:** known limitation, tracked for a fix (per AGENTS.md "Track Deferred Work").

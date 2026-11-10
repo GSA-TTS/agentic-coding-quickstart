@@ -479,7 +479,8 @@ def ports(name: str) -> list[dict]:
 
 # ---------------------------------------------------------------------------
 # Secret verbs. The value is the one thing that must NEVER cross the CLI/adapter
-# boundary except on the child's stdin (ADR-0038m §user story #7).
+# boundary except on the child's stdin (ADR-0038m, and ordinary-user story 7 in
+# docs/spec/acq-v1.md).
 # ---------------------------------------------------------------------------
 
 # sbx's built-in proxy services (Bash ``_ACQ_SBX_BUILTIN_SERVICES``). Only these
