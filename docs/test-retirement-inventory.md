@@ -190,8 +190,8 @@ numeric-prefix order.
 | `105-ports-background.bats` | 9 | preserve | §ports vocabulary (ADR-0014). Covered by `cli/ports-*` + `cli/kit-validate-*`. |
 | `110-volumes.bats` | 12 | re-express | §4 volumes vocabulary (ADR-0023) — no vector — **gap**. terminate-cleanup maps to `cli/lifecycle-rm`. |
 | `111-balanced-egress.bats` | 8 | re-express | §5 deny-by-default egress rules (ADR-0018/0019) — security; no vector — **gap**. |
-| `112-msb-ports.bats` | 18 | preserve | §ports post-hoc publish (ADR-0015). Covered by `cli/ports-*`. |
-| `113-host-port-override.bats` | 24 | preserve | §ports + `--publish` (ADR-0034). Covered by `cli/ports-*`; host-port contention is Tier-2/Tier-3. |
+| `112-msb-ports.bats` | 18 | preserve | §ports post-hoc publish (ADR-0015). Covered by `cli/ports-*` (`cli/ports-publish-invalid` for its validation); the tunnel itself is Tier-2 (`py-acq/tests/test_publish.py`) and Tier-3. |
+| `113-host-port-override.bats` | 24 | preserve | §ports + `--publish` (ADR-0034). Covered by `cli/ports-*` and `cli/create-publish-*` (validation, sbx refusal, the create-time mapping, an explicit host port in use); chosen-port selection is Tier-2 (`py-acq/tests/test_publish.py`) and Tier-3. |
 | `115-ssh-agent-forward.bats` | 38 | preserve | §6 **preserve-with-warning** "unavailable optional SSH-agent forwarding" (ADR-0021). No vector — **gap** (Tier-3 vsock route + Tier-2 probe). |
 | `116-clone-option.bats` | 37 | re-express | §3 clone state (ADR-0027). No vector pins `--clone`/`ACQ_CLONE` — **gap**. |
 | `117-msys-path-forms.bats` | 11 | re-express | §4 Windows host/guest path forms (ADR-0029) — Windows qualification → **gap**. |

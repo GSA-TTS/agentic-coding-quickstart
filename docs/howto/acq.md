@@ -127,6 +127,8 @@ kits, validates your USAi key, and attaches the agent.
 | `./acq exec NAME -- CMD` | Run a command inside a sandbox |
 | `./acq cp SRC DST` | Copy files in/out (NAME:path syntax) |
 | `./acq ports NAME` | Show the sandbox's published port mappings |
+| `./acq ports NAME --publish HOST:GUEST` | Reach the running sandbox's GUEST port on host port HOST |
+| `./acq run opencode /proj --publish HOST:GUEST` | Pin a kit's published port to a host port at create (msb only) |
 | `./acq version` | Show acq version + active backend |
 | `./acq doctor` | Backend health check + write default config |
 

@@ -983,6 +983,13 @@ rationale, the fixed vsock port (3552), and the trust-boundary discussion.
   to choose the host side yourself; a host port already in use **fails the
   create** rather than being substituted. See
   [ADR-0034](adr/0034-host-port-selection-and-publish-override.md).
+  The Python acq (`ACQ_IMPL=python`) does the same, with the same validation and
+  messages, and shares the post-hoc tunnel record (`ACQ_STATE_DIR/ports/NAME.pids`)
+  with the Bash acq, so either one lists and tears down the other's tunnels. It
+  differs in three ways: a repeated `acq ports NAME --publish` opens every
+  mapping, all or nothing, where Bash keeps only the last; it claims explicit
+  host ports before it chooses free ones; and `create --recreate` keeps the old
+  guest's create-time mappings. See `py-acq/README.md`.
 - **No state-preserving in-place kit add.** `acq_backend_ensure_kits_applied`
   re-applies kits idempotently; for a clean rebuild use `acq rm && acq run`.
 - **Agent binaries come from templates, images, or agent kits.** `acq` no longer

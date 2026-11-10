@@ -5055,6 +5055,31 @@ under Git Bash picks the Microsoft Store `python3` alias, installs under
 
 ---
 
+## 95. Bash acq: `acq ports NAME --publish` Accepts an Over-Long Port Number
+
+**Symptom:** `./acq --backend msb ports box --publish 99999999999999999999:80`
+is not refused as out of range. Bash prints `[: 99999999999999999999: integer
+expected` twice, then goes on to generate and authorize the tunnel key, start
+`msb ssh serve`, and hand the value to `ssh -L`, which rejects it. The publish
+then fails with `ssh -L ... failed to establish`.
+
+**Cause:** `_acq_msb_valid_publish` in `acq.backends/msb.sh` checks the range
+with `[ "$p" -lt 1 ] || [ "$p" -gt 65535 ]`. For a digit string too long for
+the shell's integer type, `[` reports an error (status 2) instead of a
+comparison result. Inside the `if`, both tests then read as false, so the value
+passes. The create-time validator (`_acq_validate_publish_pair` in
+`acq.backends/common.sh`) caps the length at five digits before it compares,
+so `acq create/run --publish` refuses the same value. Found while porting the
+post-hoc publish to the Python acq. The Python acq refuses the value before
+anything runs (`ports: port '...' out of range`).
+
+**Resolution:** No harm follows: `ssh` refuses the port, and nothing is
+recorded. Use the Python acq (`ACQ_IMPL=python`) or give a valid port. Tracked
+as a Bash fix: add the same five-digit length check before the comparison in
+`_acq_msb_valid_publish`, with a bats case for an over-long value.
+
+---
+
 ## Contributing
 
 When you discover a new failure mode:

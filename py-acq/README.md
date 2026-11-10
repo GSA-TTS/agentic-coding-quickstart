@@ -3,9 +3,9 @@
 This directory is the Python replacement for the repo-root Bash `acq` wrapper.
 It implements every subcommand the Bash `acq help` lists, on both backends (msb
 and sbx). It is **not yet at parity** with Bash, and it is **not currently
-Tier-3-qualified**. A few documented flags are still missing: `--clone` and
-`--publish` on `run`/`create`, `--no-update-check` on `run`, and
-`ports --publish`. `ACQ_CLONE=1` is refused with a usage error rather than
+Tier-3-qualified**. A few documented flags are still missing: `--clone` on
+`run`/`create` and `--no-update-check` on `run`. `ACQ_CLONE=1` is refused with
+a usage error rather than
 mounting the real workspace. Some behaviour also differs; for example,
 a kit outside the pinned built-in bundle is applied only when its ref is pinned
 to a full commit, and a local kit directory is copied into acq's private cache
@@ -196,9 +196,42 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   plain-drive path is — consistent with the UNC workspace mount (ADR-0029).
   The `msb copy` status is preserved.
 * `acq-py ports NAME [--json]` — report a sandbox's *declared* host/guest port
-  mappings with origin (create-time), never listener health (ADR-0038m §2). A
+  mappings with origin (`create` for a create-time `-p` mapping, `post-hoc` for
+  a tunnel `ports --publish` opened), never listener health (ADR-0038m §2). A
   failed or unreadable `msb inspect` fails closed rather than reporting an empty
   list (ADR-0038m §48).
+* Published ports (ADR-0014, ADR-0034, `acq_py/publish.py`). On msb, every
+  kit's `publishedPorts` become `msb create -p HOST:GUEST` flags, unioned by
+  guest port (last wins). A kit port with no `host:` gets a free loopback port
+  chosen per sandbox (20000-59999, probed by connecting to `127.0.0.1`), so two
+  sandboxes from one kit do not collide. `create`/`run` `--publish HOST:GUEST`
+  (repeatable, `--publish=HOST:GUEST` too) overrides a kit's host port for that
+  guest port, or publishes a guest port no kit declares, with a note. Values
+  follow the Bash rules: both sides, digits only, no leading zero, 1..65535,
+  one host port per guest port; a bad value is `validation_failed` (exit 1)
+  and creates nothing. A requested host port that is in use, or requested
+  twice, fails the create: acq never substitutes another port. When the probe
+  cannot tell (neither a connection nor a refusal), the port is published with
+  one note. On sbx, `--publish` is refused with `unsupported_capability`,
+  because sbx picks the host port itself. It is create-time only: a re-attach
+  (`run AGENT` on an existing sandbox, `run NAME`) notes that it is ignored, and
+  `create --recreate --publish` is a usage error; a recreate keeps the old
+  guest's create-time mappings. The create/run JSON carries `ports`. Kits that
+  declare `volumes:` are still refused on msb.
+* `acq-py ports NAME --publish HOST:GUEST [--json]` (ADR-0015) — on msb, open a
+  tunnel to a running sandbox: an acq-managed ed25519 key under
+  `ACQ_STATE_DIR/ssh` (made with `ssh-keygen` once, authorized with `msb ssh
+  authorize` on every publish), `msb ssh serve` on a loopback port, and an
+  OpenSSH `-L` forward with Bash's options (only the acq key, no user ssh
+  config, no interactive auth). Both run in the background; acq checks that
+  each stayed up and that the host port listens, and records them in
+  `ACQ_STATE_DIR/ports/NAME.pids` in the Bash format, so either implementation
+  lists and tears down what the other opened. `stop`, `restart` and `rm` stop
+  them. Each repeated `--publish` is opened, all or nothing (Bash kept only the
+  last); values are checked first, and a `--publish` with no value is refused
+  rather than read as a listing. On sbx the values go to `sbx ports NAME
+  --publish` verbatim and its status is kept. Needs the OpenSSH client
+  (`ssh`, `ssh-keygen`) on the host.
 * `acq-py secret set (-g | SANDBOX) SERVICE [--host HOST --env ENV] [--json]` —
   store a secret in the acq secret store, which is shared byte for byte with the
   Bash `acq` (`acq_py/secretstore.py`: macOS keychain, `secret-tool`, Windows
