@@ -23,10 +23,11 @@
 #      and any ACQ_EXTRA_KITS. kit_translate_fetch() materializes it locally.
 #   2. A local directory path — used by `acq kit validate PATH` and tests.
 #
-# The sbx backend can still hand remote refs to `sbx --kit` directly (it fetches
-# + parses spec.yaml natively), so sbx does NOT need a local fetch. The msb
-# backend has no native kit mechanism, so it fetches the kit locally and drives
-# the parsed operations itself.
+# Both backends fetch locally through kit_translate_fetch so acq's ref and
+# payload checks always run. The sbx adapter then synthesizes an sbx-v2 kit
+# directory for `sbx --kit`; if the fetch fails it does not apply the kit, and
+# never hands sbx the raw remote ref. The msb backend has no native kit
+# mechanism, so it drives the parsed operations itself.
 #
 # ---------------------------------------------------------------------------
 # Parsed-spec accessor functions (all take the kit's local spec.yaml path)
@@ -136,6 +137,41 @@ _kit_fetch_materialize() (
   mv -- "$stage/payload" "$destdir" || return 1
   printf '%s/%s\n' "$destdir" "$dir"
 )
+
+# ---------------------------------------------------------------------------
+# kit_ref_display REF
+# ---------------------------------------------------------------------------
+# Echo a kit ref safe for a terminal or CI log. Every message that names a ref
+# acq could not fetch or refused goes through this, on both backends, because
+# such a ref may carry a credential that kit_translate_fetch refuses but the
+# message would otherwise repeat. In the part before the '#' fragment:
+#   - a query string (?private_token=…) becomes ?***;
+#   - URL userinfo (scheme://user:token@host) becomes scheme://***@host,
+#     cutting at the last '@';
+#   - without a scheme, a first path segment shaped user:token@host becomes
+#     ***@host.
+# The fragment (#ref=…&dir=…) is kept so the message still names the kit. This
+# over-redacts when a path or host part legitimately contains '@' or ':',
+# which is harmless.
+kit_ref_display() {
+  local ref="${1:-}" base frag query="" first
+  base="${ref%%#*}"
+  frag="${ref#"$base"}"
+  case "$base" in
+    *\?*) base="${base%%\?*}"; query='?***' ;;
+  esac
+  case "$base" in
+    *://*@*) base="${base%%://*}://***@${base##*@}" ;;
+    *://*) ;;
+    *)
+      first="${base%%/*}"
+      case "$first" in
+        *:*@*) base="***@${first##*@}${base#"$first"}" ;;
+      esac
+      ;;
+  esac
+  printf '%s%s%s\n' "$base" "$query" "$frag"
+}
 
 # ---------------------------------------------------------------------------
 # kit_translate_fetch KITREF DESTDIR
@@ -267,7 +303,7 @@ EOM
     *)
       # Local path — use as-is.
       if [ ! -d "$kitref" ]; then
-        echo "kit-translate: local kit path not found: $kitref" >&2
+        echo "kit-translate: local kit path not found: $(kit_ref_display "$kitref")" >&2
         return 1
       fi
       printf '%s\n' "$kitref"
