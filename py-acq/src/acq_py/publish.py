@@ -245,6 +245,17 @@ class _Mapper:
             self.unprobed()
         return True
 
+    def kept(self, host: int, guest: str) -> bool:
+        """Whether a recreate's preferred host port is still usable (never a hard failure)."""
+        status = "busy" if host in self.taken else host_port_status(host)
+        if status == "unknown":
+            self.unprobed()
+        if status == "busy":
+            print(f"acq(msb): warning: host port {host}, which guest port {guest} had before the recreate, "
+                  "is in use now; a free port is chosen instead.", file=sys.stderr)
+            return False
+        return True
+
     def chosen(self, guest: str) -> int | None:
         port, status = pick_free_host_port(self.taken)
         if port is None:
@@ -255,12 +266,18 @@ class _Mapper:
         return port
 
 
-def create_port_flags(name: str, kits: Iterable, overrides: list[str]) -> tuple[list[str], list[dict]]:
+def create_port_flags(name: str, kits: Iterable, overrides: list[str],
+                      preferred: dict[str, int] | None = None) -> tuple[list[str], list[dict]]:
     """``msb create`` ``-p HOST:GUEST`` flags and the mappings they declare.
 
-    Raises :class:`PublishError` when a port cannot be mapped; the create must
-    not go ahead without a mapping the kit or the user asked for.
+    ``preferred`` maps a guest port to the host port a recreated sandbox had.
+    It applies only where a kit still declares that guest port and leaves the
+    host side open, so a host port a kit pins is never overridden; when the
+    preferred port is busy, a free one is chosen with a warning. Raises
+    :class:`PublishError` when a port cannot be mapped; the create must not go
+    ahead without a mapping the kit or the user asked for.
     """
+    preferred = preferred or {}
     mapper = _Mapper([], [])
     records = []
     for guest, host in _records(kits, overrides):
@@ -277,7 +294,13 @@ def create_port_flags(name: str, kits: Iterable, overrides: list[str]) -> tuple[
             hosts[guest] = int(host)
             mapper.taken.append(int(host))
     for guest, host in records:
-        port = None if host else mapper.chosen(guest)
+        if host or guest not in preferred:
+            continue
+        if mapper.kept(preferred[guest], guest):
+            hosts[guest] = preferred[guest]
+            mapper.taken.append(preferred[guest])
+    for guest, host in records:
+        port = None if host or guest in hosts else mapper.chosen(guest)
         if port is not None:
             hosts[guest] = port
             mapper.taken.append(port)

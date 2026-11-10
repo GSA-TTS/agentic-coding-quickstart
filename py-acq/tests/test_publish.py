@@ -315,7 +315,82 @@ def test_recreate_keeps_the_declared_create_time_mappings(monkeypatch):
         {"host_port": 6868, "guest_port": 6767, "origin": "create"},
         {"host_port": 9000, "guest_port": 22, "origin": "post-hoc"},
     ])
-    assert lifecycle._declared_create_ports("box") == ("6868:6767",)
+    assert lifecycle._declared_create_ports("box") == (("6767", 6868),)
+
+
+def test_a_preferred_host_port_is_kept_when_free(monkeypatch):
+    monkeypatch.setenv("ACQ_MSB_HOST_PROBE_STUB", "1")
+    flags, _ = publish.create_port_flags("box", [_kit(("4096", ""))], [], {"4096": 6868})
+    assert flags == ["-p", "6868:4096"]
+
+
+def test_a_busy_preferred_host_port_falls_back_to_a_free_one(monkeypatch, capsys):
+    monkeypatch.setenv("ACQ_MSB_HOST_PROBE_STUB", "1")
+    monkeypatch.setenv("ACQ_MSB_HOST_PORTS_BUSY", "6868")
+    _, mappings = publish.create_port_flags("box", [_kit(("4096", ""))], [], {"4096": 6868})
+    assert mappings[0]["host_port"] not in (6868, 4096)
+    assert "host port 6868, which guest port 4096 had before the recreate, is in use now" in capsys.readouterr().err
+
+
+def test_a_preference_never_overrides_a_kit_pinned_host_port(monkeypatch):
+    monkeypatch.setenv("ACQ_MSB_HOST_PROBE_STUB", "1")
+    flags, _ = publish.create_port_flags("box", [_kit(("3000", "3000"))], [], {"3000": 6868})
+    assert flags == ["-p", "3000:3000"]
+
+
+def test_a_preference_for_a_guest_port_no_kit_declares_is_dropped(monkeypatch, capsys):
+    monkeypatch.setenv("ACQ_MSB_HOST_PROBE_STUB", "1")
+    assert publish.create_port_flags("box", [], [], {"6767": 6868}) == ([], [])
+    assert "no applied kit declares" not in capsys.readouterr().err
+
+
+@PROVIDER
+@pytest.mark.parametrize("busy_after_remove", [False, True])
+def test_recreate_survives_a_kept_port_taken_after_the_old_guest_is_removed(
+        monkeypatch, tmp_path, capsys, busy_after_remove):
+    from acq_py import kit_msb
+
+    _msb_env(monkeypatch, tmp_path, catalog={"sec": "running"})
+    monkeypatch.setenv("ACQ_MSB_STUB_PORTS", json.dumps({"sec": [
+        {"host_port": 6868, "guest_port": 4096}, {"host_port": 7000, "guest_port": 7001}]}))
+    path = state.record_path("msb", "sec")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"schema": 1, "name": "sec", "backend": "msb", "agent": "shell",
+                                "workspace": "/w", "ro_host_config": True}), encoding="utf-8")
+    spec_dir = tmp_path / "kits" / "web"
+    spec_dir.mkdir(parents=True)
+    (spec_dir / "spec.yaml").write_text('schemaVersion: "hybrid/v1"\nkind: mixin\nname: web\n'
+                                        "publishedPorts:\n  - guest: 4096\n", encoding="utf-8")
+    web = kit_msb.Kit("web", "extra", kitspec.load_kit(spec_dir), fetched=True)
+    real_plan = lifecycle._plan_msb_kits
+
+    def plan_with_web(*args, **kwargs):
+        plan, code = real_plan(*args, **kwargs)
+        return (lifecycle.dataclasses.replace(plan, kits=[*plan.kits, web]) if plan else None), code
+
+    monkeypatch.setattr(lifecycle, "_plan_msb_kits", plan_with_web)
+    monkeypatch.setattr(kit_msb, "ensure_kits_applied",
+                        lambda name, kits, **kw: kit_msb.ApplyResult(applied=[k.name for k in kits]))
+    real_remove = msb.remove
+
+    def remove(name):
+        real_remove(name)
+        monkeypatch.delenv("ACQ_MSB_STUB_CATALOG")  # the stub's catalog file now says the guest is gone
+        if busy_after_remove:
+            monkeypatch.setenv("ACQ_MSB_HOST_PORTS_BUSY", "6868")
+
+    monkeypatch.setattr(msb, "remove", remove)
+    seen = _spy(monkeypatch, msb)
+    rc, doc, err = _invoke(capsys, "--backend", "msb", "create", "--recreate", "sec", "--yes", "--json")
+    assert rc == 0, err
+    (create,) = [a for a in seen if a[0] == "create"]
+    (mapping,) = [create[i + 1] for i, a in enumerate(create) if a == "-p"]  # 7001 is no kit's: dropped
+    host, guest = mapping.split(":")
+    assert guest == "4096"
+    if busy_after_remove:
+        assert host != "6868" and "is in use now; a free port is chosen instead" in err
+    else:
+        assert host == "6868"
 
 
 def test_recreate_maps_afresh_when_the_old_ports_cannot_be_read(monkeypatch, capsys):

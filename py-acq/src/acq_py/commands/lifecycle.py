@@ -189,12 +189,15 @@ class _KitPlan:
 
     ``selection`` is the kit selection they came from (the sbx heal records use it).
     ``publish`` are the ``HOST:GUEST`` overrides for the kits' published ports (msb).
+    ``preferred`` are host ports a recreate would like to keep, as ``(guest,
+    host)`` pairs (:func:`publish.create_port_flags`).
     """
 
     kits: list[kit_msb.Kit]
     agent_kit: str | None
     selection: kitspec.KitSelection | None = None
     publish: tuple[str, ...] = ()
+    preferred: tuple[tuple[str, int], ...] = ()
 
     @property
     def entrypoint(self) -> str | None:
@@ -684,7 +687,8 @@ def _create_sandbox(
         else:
             ro_mount = security.ro_mount_supported()
             secret_bindings, port_mappings = _msb_create(name, image, workspace, kit_set, ro_mount=ro_mount,
-                                                         overrides=plan.publish if plan else ())
+                                                         overrides=plan.publish if plan else (),
+                                                         preferred=dict(plan.preferred) if plan else None)
         if not _wait_exec_ready(backend, name):
             _not_exec_ready(backend, adapter, name, error_cls)
     _fresh_guest(backend, adapter, name, ro_mount=ro_mount)
@@ -759,7 +763,8 @@ def _write_record(backend: str, name: str, *, agent: str, workspace: str, image:
 
 
 def _msb_create(name: str, image: str, workspace: str, kit_set: list[kit_msb.Kit], *, ro_mount: bool,
-                overrides: tuple[str, ...] = ()) -> tuple[list[str], list[dict]]:
+                overrides: tuple[str, ...] = (), preferred: dict[str, int] | None = None,
+                ) -> tuple[list[str], list[dict]]:
     """``msb create`` with the kit set's flags; its secret bindings and declared port mappings.
 
     The published ports are mapped first (:func:`publish.create_port_flags`): a
@@ -770,7 +775,7 @@ def _msb_create(name: str, image: str, workspace: str, kit_set: list[kit_msb.Kit
     startup script is removed after.
     """
     try:
-        port_flags, mappings = publish.create_port_flags(name, kit_set, list(overrides))
+        port_flags, mappings = publish.create_port_flags(name, kit_set, list(overrides), preferred)
     except publish.PublishError as exc:
         raise msb.MsbError(exc.code, exc.message, exc.remediation) from exc
     generation = _provider_prepare(name, kit_set, ro_mount=ro_mount)
@@ -1343,7 +1348,7 @@ def _recreate_msb(
     steps, exit_code = _substrate_plan(image, plan.agent_kit, "create", emit_json)
     if exit_code is not None:
         return None, exit_code
-    plan = dataclasses.replace(plan, publish=_declared_create_ports(name))
+    plan = dataclasses.replace(plan, preferred=_declared_create_ports(name))
     try:
         msb.egress_flags(kit_msb.egress_names(plan.kits))
         # A pin mismatch or a missing provider key refuses here, old guest intact.
@@ -1383,13 +1388,16 @@ def _recreate_msb(
     return {**data, **_kit_data(plan, result)}, None
 
 
-def _declared_create_ports(name: str) -> tuple[str, ...]:
-    """The old guest's create-time ``HOST:GUEST`` mappings, which its recreation keeps.
+def _declared_create_ports(name: str) -> tuple[tuple[str, int], ...]:
+    """The old guest's create-time mappings as ``(guest, host)`` preferences for its recreation.
 
-    Without them every kit port would get a new free host port, and a
-    ``--publish`` given at create would be lost (msb holds it, not acq). A guest
-    already gone, or one whose ports cannot be read, has none to keep; the
-    recreation then maps them as a fresh create would, with a warning.
+    They are read before the old guest is removed, and they are preferences,
+    never pins: the new guest's port mapping is decided after the removal, when
+    a host port may have been taken meanwhile. :func:`publish.create_port_flags`
+    keeps one only for a guest port an applied kit still declares with its host
+    side left open, and picks a free port (with a warning) when it is busy. A
+    guest already gone, or one whose ports cannot be read, has none; the
+    recreation then maps its ports as a fresh create would, with a warning.
     """
     try:
         if not msb.exists(name):
@@ -1399,7 +1407,7 @@ def _declared_create_ports(name: str) -> tuple[str, ...]:
         _warn(f"the port mappings of '{name}' could not be read ({exc.message}); "
               "the recreated sandbox maps its ports afresh")
         return ()
-    return tuple(f"{e['host_port']}:{e['guest_port']}" for e in entries
+    return tuple((str(e["guest_port"]), e["host_port"]) for e in entries
                  if e.get("origin") == "create" and isinstance(e.get("host_port"), int)
                  and isinstance(e.get("guest_port"), int))
 
