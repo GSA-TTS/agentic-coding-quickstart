@@ -1284,9 +1284,11 @@ _walk_race_shim() {
 # PATH. The emulated native Windows Python runs the real interpreter with those
 # flags removed and os.name set to "nt", and its os.lstat reports
 # FILE_ATTRIBUTE_REPARSE_POINT for each directory listed in FAKE_REPARSE, which
-# stands in for an NTFS junction (S_ISLNK does not report one). The test mount
-# table maps / to itself, so the Windows path the walk receives is the same
-# POSIX path.
+# stands in for an NTFS junction (S_ISLNK does not report one); a file listed
+# there reads as some other reparse point. FAKE_SWAP_AFTER_LSTAT=leaf:target
+# replaces leaf with a symlink to target right after its lstat, the race the
+# snapshot's handle check exists for. The test mount table maps / to itself, so
+# the Windows path the walk receives is the same POSIX path.
 
 _win_bin() {
   local bin="$STUBDIR/winbin" real
@@ -1313,14 +1315,18 @@ class St:
         self.st_file_attributes = attrs
     def __getattr__(self, name):
         return getattr(self._st, name)
+swap = os.environ.get("FAKE_SWAP_AFTER_LSTAT", "").split(":")
 def lstat(path, *args, **kwargs):
     st = real_lstat(path, *args, **kwargs)
-    if not stat.S_ISDIR(st.st_mode): return st
-    attrs = stat.FILE_ATTRIBUTE_DIRECTORY
+    if len(swap) == 2 and path == swap[0]:
+        os.unlink(path); os.symlink(swap[1], path)
+    if not stat.S_ISDIR(st.st_mode) and path not in marked: return st
+    attrs = stat.FILE_ATTRIBUTE_DIRECTORY if stat.S_ISDIR(st.st_mode) else 0
     if path in marked: attrs |= stat.FILE_ATTRIBUTE_REPARSE_POINT
     return St(st, attrs)
 os.lstat = lstat
 del os.O_NOFOLLOW, os.O_DIRECTORY
+import shutil  # loaded now: with os.name "nt" it would import the missing nt module
 os.name = "nt"
 code = sys.argv[1] or sys.stdin.read()
 sys.argv = ["-"] + sys.argv[2:]
@@ -1662,6 +1668,303 @@ SH
   _win_use "$bin" python3=storestub python=winpython
   got=$(OSTYPE=msys PATH="$bin:$PATH" _acq_provider_input_canonical_path '/c/Users/u/.local/state/acq')
   assert_equal "$got" '/c/Users/u/.local/state/acq'
+}
+
+# ---------------------------------------------------------------------------
+# snapshot / materialize / publish under Git Bash with native Windows Python
+# ---------------------------------------------------------------------------
+
+@test "POSIX snapshot, materialize and swap run through python3 with unchanged arguments" {
+  local bin release="$STUBDIR/release" kit candidate="$STUBDIR/posix_candidate" providers="$STUBDIR/posix_providers"
+  bin=$(_win_bin)
+  _win_use "$bin" python3=msyspython
+  _provider_release "$release"; _provider_kit "$release" alpha
+  kit="$release/integrations/isolation/acq-kits/alpha"
+  mkdir -p "$providers"
+  OSTYPE=linux-gnu PATH="$bin:$PATH" _acq_provider_input_snapshot "$kit" "$candidate"
+  OSTYPE=linux-gnu PATH="$bin:$PATH" _acq_provider_input_materialize "$candidate/provider-input.json" "$candidate" "$providers"
+  : > "$STUBDIR/swap-src"
+  OSTYPE=linux-gnu PATH="$bin:$PATH" _acq_provider_input_atomic_replace "$STUBDIR/swap-src" "$STUBDIR/swap-dst"
+  assert_equal "$(cat "$STUBDIR/py.log")" "msyspython -I - $kit $candidate
+msyspython -I - $candidate/provider-input.json $candidate $providers
+msyspython -I - $STUBDIR/swap-src $STUBDIR/swap-dst"
+  [ -f "$providers/alpha/facts.json" ] && [ -f "$STUBDIR/swap-dst" ]
+}
+
+@test "Git Bash snapshot and materialize use the probed native Windows Python" {
+  local bin release="$STUBDIR/release" kit candidate="$STUBDIR/nt_candidate" providers="$STUBDIR/nt_providers"
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=storestub py=pylauncher
+  _provider_release "$release"; _provider_kit "$release" alpha
+  kit="$release/integrations/isolation/acq-kits/alpha"
+  mkdir -p "$providers"
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_snapshot "$kit" "$candidate"
+  assert_success
+  grep -q "^py -3 -I - $kit $candidate\$" "$STUBDIR/py.log"
+  cmp "$kit/provider-input.json" "$candidate/provider-input.json"
+  cmp "$kit/spec.yaml" "$candidate/spec.yaml"
+  cmp "$kit/provider-input/facts.json" "$candidate/provider-input/facts.json"
+  [ -x "$candidate/scripts/normalize" ]
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_materialize "$candidate/provider-input.json" "$candidate" "$providers"
+  assert_success
+  grep -q "^py -3 -I - $candidate/provider-input.json $candidate $providers\$" "$STUBDIR/py.log"
+  [ -f "$providers/alpha/facts.json" ] && [ ! -w "$providers/alpha/facts.json" ]
+  [ -x "$providers/alpha/normalizer" ]
+}
+
+@test "native Windows snapshot refuses links, reparse points and swapped leaves" {
+  local bin release="$STUBDIR/release" kit outside="$STUBDIR/nt_secret"
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  _provider_release "$release"; _provider_kit "$release" alpha
+  kit="$release/integrations/isolation/acq-kits/alpha"
+  printf 'secret\n' > "$outside"
+  # A symlinked leaf.
+  mv "$kit/provider-input/facts.json" "$STUBDIR/facts.real"
+  ln -s "$outside" "$kit/provider-input/facts.json"
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_snapshot "$kit" "$STUBDIR/c1"
+  assert_failure
+  assert_output --partial 'unsafe provider artifact'
+  rm "$kit/provider-input/facts.json"; mv "$STUBDIR/facts.real" "$kit/provider-input/facts.json"
+  # A junction ancestor, then a leaf that is some other reparse point.
+  FAKE_REPARSE="$kit/provider-input" OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_snapshot "$kit" "$STUBDIR/c2"
+  assert_failure
+  FAKE_REPARSE="$kit/spec.yaml" OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_snapshot "$kit" "$STUBDIR/c3"
+  assert_failure
+  # A kit root that is itself a junction.
+  FAKE_REPARSE="$kit" OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_snapshot "$kit" "$STUBDIR/c4"
+  assert_failure
+  # A leaf replaced with a link after its lstat: the opened handle is another file.
+  FAKE_SWAP_AFTER_LSTAT="$kit/provider-input/facts.json:$outside" OSTYPE=msys PATH="$bin:$PATH" \
+    run _acq_provider_input_snapshot "$kit" "$STUBDIR/c5"
+  assert_failure
+  assert_output --partial 'unsafe provider artifact'
+  [ ! -e "$STUBDIR/c5/provider-input/facts.json" ]
+  # The untouched kit snapshots, so each refusal above came from its own cause.
+  rm "$kit/provider-input/facts.json"; printf '{"providerId":"alpha"}\n' > "$kit/provider-input/facts.json"
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_snapshot "$kit" "$STUBDIR/c6"
+  assert_success
+}
+
+@test "native Windows snapshot refuses artifact paths Win32 would rewrite" {
+  local bin release="$STUBDIR/release" kit name i=0
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  _provider_release "$release"; _provider_kit "$release" alpha
+  kit="$release/integrations/isolation/acq-kits/alpha"
+  for name in 'facts.json.' 'facts.json ' 'facts.json:ads' 'sub\facts.json' 'NUL' 'com1.json' 'COM¹' 'lpt³.txt' 'a|b'; do
+    i=$((i + 1))
+    printf '{"providerId":"alpha","factsPath":"%s","normalizerPath":"scripts/normalize","snapshotPath":"files/snapshot.json"}\n' \
+      "$(printf '%s' "$name" | sed 's/\\/\\\\/g')" > "$kit/provider-input.json"
+    OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_snapshot "$kit" "$STUBDIR/w$i"
+    assert_failure
+    assert_output --partial 'unsafe provider artifact path'
+  done
+  # POSIX keeps accepting the same characters as plain file names.
+  printf '{}\n' > "$kit/a|b"
+  printf '{"providerId":"alpha","factsPath":"a|b","normalizerPath":"scripts/normalize","snapshotPath":"files/snapshot.json"}\n' > "$kit/provider-input.json"
+  run _acq_provider_input_snapshot "$kit" "$STUBDIR/wposix"
+  assert_success
+}
+
+@test "native Windows materialize refuses unsafe provider IDs and reparse-point artifacts" {
+  local bin release="$STUBDIR/release" kit candidate="$STUBDIR/m_candidate" id i=0 providers
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  _provider_release "$release"; _provider_kit "$release" alpha
+  kit="$release/integrations/isolation/acq-kits/alpha"
+  OSTYPE=msys PATH="$bin:$PATH" _acq_provider_input_snapshot "$kit" "$candidate"
+  for id in 'nul' 'lpt²' 'alpha.' 'c:alpha' 'al*ha'; do
+    i=$((i + 1)); providers="$STUBDIR/m_providers$i"; mkdir -p "$providers"
+    printf '{"providerId":"%s","schemaVersion":"acq-provider-input-bundle/v2","providerPath":"models/providers/%s","factsPath":"provider-input/facts.json","normalizerPath":"scripts/normalize","snapshotPath":"files/snapshot.json"}\n' "$id" "$id" > "$STUBDIR/m_manifest.json"
+    OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_materialize "$STUBDIR/m_manifest.json" "$candidate" "$providers"
+    assert_failure
+    assert_output --partial 'unsafe provider ID'
+    [ -z "$(ls -A "$providers")" ]
+  done
+  providers="$STUBDIR/m_providers_reparse"; mkdir -p "$providers"
+  FAKE_REPARSE="$candidate/files/snapshot.json" OSTYPE=msys PATH="$bin:$PATH" \
+    run _acq_provider_input_materialize "$candidate/provider-input.json" "$candidate" "$providers"
+  assert_failure
+  assert_output --partial 'unsafe provider artifact'
+}
+
+@test "native Windows publish writes current as a pointer file and swaps it atomically" {
+  local bin root
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  root=$(acq_provider_input_root msb ntpublish)
+  mkdir -p "$root/generations/generation.one/models/providers" "$root/generations/generation.two/models/providers"
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_publish "$root" "$root/generations/generation.one"
+  assert_success
+  [ -f "$root/current" ] && [ ! -L "$root/current" ]
+  assert_equal "$(cat "$root/current")" "generations/generation.one"
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_publish "$root" "$root/generations/generation.two"
+  assert_success
+  assert_equal "$(cat "$root/current")" "generations/generation.two"
+  [ -d "$root/generations/generation.one" ]
+  [ ! -w "$root/generations/generation.two/models" ]
+  [ -z "$(find "$root" -maxdepth 1 -name '.current.*')" ]
+  grep -q "^winpython -I - $root/.current.[0-9]*.[0-9]* $root/current\$" "$STUBDIR/py.log"
+}
+
+@test "native Windows publish replaces a link left as current but never a real directory" {
+  local bin root
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  root=$(acq_provider_input_root msb ntlinked)
+  mkdir -p "$root/generations/generation.old/models/providers" "$root/generations/generation.new/models/providers"
+  # A symlink, as the Python acq leaves with Developer Mode on.
+  ln -s generations/generation.old "$root/current"
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_publish "$root" "$root/generations/generation.new"
+  assert_success
+  [ -f "$root/current" ] && [ ! -L "$root/current" ]
+  assert_equal "$(cat "$root/current")" "generations/generation.new"
+  [ -d "$root/generations/generation.old/models/providers" ]
+  # A junction: a directory reparse point, which os.replace cannot overwrite.
+  rm "$root/current"; mkdir "$root/current"
+  FAKE_REPARSE="$root/current" OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_publish "$root" "$root/generations/generation.new"
+  assert_success
+  [ -f "$root/current" ]
+  # A real directory (the copy an older Git Bash ln -s made) is refused, kept,
+  # and no temporary pointer is left behind.
+  rm "$root/current"; mkdir -p "$root/current/models"
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_publish "$root" "$root/generations/generation.new"
+  assert_failure
+  assert_output --partial 'it is a directory, not a file or a link'
+  [ -d "$root/current/models" ]
+  [ -z "$(find "$root" -maxdepth 1 -name '.current.*')" ]
+}
+
+@test "native Windows swap fails closed when a path does not map" {
+  local bin
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  : > "$STUBDIR/unmapped-src"
+  ACQ_TEST_MOUNTS_FILE="$STUBDIR/no-such-mounts" OSTYPE=msys PATH="$bin:$PATH" \
+    run _acq_provider_input_atomic_replace "$STUBDIR/unmapped-src" "$STUBDIR/unmapped-dst"
+  assert_failure
+  assert_output --partial 'cannot map provider-input path'
+  [ -f "$STUBDIR/unmapped-src" ] && [ ! -e "$STUBDIR/unmapped-dst" ]
+  refute grep -q '^winpython -I - ' "$STUBDIR/py.log"
+}
+
+@test "Git Bash provider-input transaction completes with native Windows Python" {
+  local bin release="$STUBDIR/release" lock generation root mount
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  _provider_release "$release"; _provider_kit "$release" alpha
+  _use_release
+  _acq_provider_input_control_plane() { printf '%s\n' "$release"; }
+  KITS=("$release/integrations/isolation/acq-kits/alpha")
+  # Not exported: a child bash would take the value as its own OSTYPE.
+  OSTYPE=msys
+  PATH="$bin:$PATH"
+  lock=$(acq_provider_input_lock_acquire msb nttx)
+  generation=$(acq_provider_input_prepare msb nttx)
+  root=$(acq_provider_input_root msb nttx)
+  [[ "$generation" == "$root/generations/generation."* ]]
+  [ -f "$generation/models/providers/alpha/facts.json" ]
+  mount=$(acq_provider_input_msb_mount nttx "$generation")
+  assert_equal "$mount" "$generation:$ACQ_PROVIDER_INPUT_GUEST_DIR/${generation##*/}:ro"
+  _acq_provider_input_publish "$root" "$generation"
+  assert_equal "$(cat "$root/current")" "generations/${generation##*/}"
+  acq_provider_input_remove msb nttx
+  [ ! -e "$root" ]
+  acq_provider_input_lock_release "$lock"
+  [ ! -e "$lock" ]
+  grep -q "^winpython -I - $release/integrations/isolation/acq-kits/alpha " "$STUBDIR/py.log"
+  refute grep -q '^msyspython' "$STUBDIR/py.log"
+}
+
+# _facts_generation DIR ID — a generation holding one provider's full facts.
+_facts_generation() {
+  mkdir -p "$1/models/providers/$2"
+  printf '{"providerId":"%s","keyEnv":"%s_KEY","host":"%s.example.gov","modelsUrl":"https://%s.example.gov/v1/models","apiProtocol":"openai"}\n' \
+    "$2" "$(printf '%s' "$2" | tr '[:lower:]' '[:upper:]')" "$2" "$2" > "$1/models/providers/$2/facts.json"
+}
+
+@test "sandbox facts read the generation a pointer-file current names" {
+  local root
+  root=$(acq_provider_input_root msb pointerfacts)
+  _facts_generation "$root/generations/generation.one" alpha
+  printf 'generations/generation.one\n' > "$root/current"
+  run acq_provider_sandbox_provider_ids msb pointerfacts
+  assert_success
+  assert_output alpha
+  run acq_provider_sandbox_facts msb pointerfacts
+  assert_output "$(printf 'alpha\tALPHA_KEY\talpha.example.gov\thttps://alpha.example.gov/v1/models\topenai')"
+  # The POSIX symlink and a real directory left as current are read too.
+  rm "$root/current"; ln -s generations/generation.one "$root/current"
+  run acq_provider_sandbox_provider_ids msb pointerfacts
+  assert_output alpha
+  rm "$root/current"; _facts_generation "$root/current" beta
+  run acq_provider_sandbox_provider_ids msb pointerfacts
+  assert_output beta
+}
+
+@test "an unusable current falls back to the recorded provider facts" {
+  local root outside="$STUBDIR/outside-generation" target recorded
+  root=$(acq_provider_input_root msb fallbackfacts)
+  _facts_generation "$root/generations/generation.one" alpha
+  _facts_generation "$outside" gamma
+  ln -s "$outside" "$root/generations/generation.link"
+  recorded=$(printf 'beta\tBETA_KEY\tbeta.example.gov\thttps://beta.example.gov/v1/models\topenai')
+  acq_host_config_write msb fallbackfacts provider-credentials "$recorded"
+  for target in '../outside-generation' "$outside" 'generations/generation.one/../generation.one' \
+      'generations/generation.link' 'generations/generation.missing' 'generations/' \
+      "$(printf 'generations/generation.one\r')" "$(printf 'generations/generation.one\nextra')"; do
+    rm -f "$root/current"
+    printf '%s\n' "$target" > "$root/current"
+    run acq_provider_sandbox_provider_ids msb fallbackfacts
+    assert_success
+    assert_output beta
+    # The same text as a symlink is refused the same way.
+    rm -f "$root/current"
+    ln -s "$target" "$root/current"
+    run acq_provider_sandbox_provider_ids msb fallbackfacts
+    assert_success
+    assert_output beta
+  done
+  rm -f "$root/current"
+  run acq_provider_sandbox_provider_ids msb fallbackfacts
+  assert_output beta
+}
+
+@test "provider facts parse when the interpreter writes CRLF line endings" {
+  local python="$STUBDIR/crlf-python" record
+  # Native Windows Python's text-mode stdout ends each line with CRLF; this
+  # interpreter does the same, then runs the program acq sends on stdin.
+  printf '%s\n' 'import io, sys' \
+    'sys.stdout = io.TextIOWrapper(sys.stdout.buffer, newline="\r\n")' \
+    'code = sys.stdin.read()' 'sys.argv = ["-"] + sys.argv[1:]' \
+    'exec(compile(code, "<stdin>", "exec"), {"__name__": "__main__"})' > "$STUBDIR/crlf-boot.py"
+  printf '#!/bin/sh\n[ "$1" = -I ] && shift\n[ "$1" = - ] || exit 97\nshift\nexec "%s" -I "%s" "$@"\n' \
+    "$(command -v python3)" "$STUBDIR/crlf-boot.py" > "$python"
+  chmod +x "$python"
+  _facts_generation "$STUBDIR/crlf" alpha
+  record="$STUBDIR/crlf/models/providers/alpha/facts.json"
+  ACQ_PROVIDER_INPUT_PYTHON="$python" run acq_provider_facts_json_fields "$record"
+  assert_success
+  assert_output "$(printf 'alpha\tALPHA_KEY\talpha.example.gov\thttps://alpha.example.gov/v1/models\topenai')"
+}
+
+@test "snapshot refuses an artifact with another hard link, POSIX and native Windows" {
+  local bin release="$STUBDIR/release" kit outside="$STUBDIR/hard-secret"
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  _provider_release "$release"; _provider_kit "$release" alpha
+  kit="$release/integrations/isolation/acq-kits/alpha"
+  printf 'secret\n' > "$outside"
+  rm "$kit/files/snapshot.json"
+  ln "$outside" "$kit/files/snapshot.json"
+  run _acq_provider_input_snapshot "$kit" "$STUBDIR/hl-posix"
+  assert_failure
+  assert_output --partial 'unsafe provider artifact'
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_snapshot "$kit" "$STUBDIR/hl-nt"
+  assert_failure
+  assert_output --partial 'unsafe provider artifact'
+  [ ! -e "$STUBDIR/hl-posix/files/snapshot.json" ] && [ ! -e "$STUBDIR/hl-nt/files/snapshot.json" ]
 }
 
 @test "publication retains old generation for existing current consumers" {

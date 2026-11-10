@@ -4198,6 +4198,143 @@ it) and add a Windows test that plants the DLL.
 
 ---
 
+## 61. Bash acq on Windows: Provider-Input `current` Is a Pointer File, Not a Symlink
+
+**Status:** Fixed for the Bash `acq` under Git Bash (`ACQ_IMPL=bash`, still the
+Windows default until ADR-0048m's gates are met). Verified on Windows 11 with
+stub backends and a stand-in for the pinned validator: the provider-input
+transaction, provider facts read back through the pointer file, and a stubbed
+`acq create` and `acq rm`. A create against the real pinned Patterns validator
+has not yet been run on Windows. Two follow-ups are tracked: see Prevention /
+Status.
+
+### Symptoms
+
+Before the fix, every Bash `acq create`, `acq run` and `acq rm` under Git Bash
+failed in the provider-input transaction:
+
+- `Python was not found; run without arguments to install from the Microsoft
+  Store …`: the snapshot, materialize and swap helpers ran `python3`, which on
+  Windows is missing or is the App Execution Alias stub.
+- `rm: cannot remove '…/.current.NNNN.NNNN': Is a directory`, then `acq(msb):
+  error: sandbox 'NAME' was created but provider inputs could not be published.`
+- With a provider kit, `acq: invalid provider facts: …/facts.json`: native
+  Windows Python wrote the facts reader's output with CRLF line endings, so each
+  value ended in a carriage return and failed validation.
+
+After the fix, `current` under a sandbox's provider-input root
+(`…/provider-input/<backend>/<name>.<sum>/current`) is a small text file holding
+`generations/generation.XXXXXXXX` on Windows, where Linux and macOS have a
+symlink with that same target.
+
+### Root Cause
+
+The helpers in `acq.backends/common.sh` assumed a POSIX Python. Native Windows
+CPython has no `O_NOFOLLOW`, `O_DIRECTORY`, `dir_fd` or `os.fchmod` (before 3.13).
+Publishing used `ln -s`, and Git Bash's default `ln -s` copies the target
+directory rather than linking it, so the temporary name was a directory that
+`rm -f` cannot remove.
+
+### Fix
+
+- `_acq_provider_input_snapshot`, `_acq_provider_input_materialize` and
+  `_acq_provider_input_atomic_replace` run through the same interpreter probe as
+  the directory helpers (`python3`, `python`, `py -3`, skipping the Store stub),
+  with paths mapped to Windows form by `_acq_provider_input_nt_path`. On native
+  Windows Python the snapshot walks each artifact path with `os.lstat`, refuses
+  symlinks and every reparse point (junctions included), checks that the opened
+  handle is the file it checked, and refuses names Win32 would rewrite
+  (trailing dot or space, `:` streams, device names such as `NUL` or `COM¹`).
+  On every platform the snapshot refuses a file with more than one hard link,
+  which could otherwise bring a file from outside the kit into it.
+- `_acq_provider_input_publish` writes `current` as a pointer file and renames it
+  over the old one with `os.replace`. The POSIX path, a relative symlink, is
+  unchanged.
+- `acq_provider_sandbox_facts`, the one reader of `current`, resolves it through
+  `_acq_provider_input_current_generation`, which accepts the symlink, the
+  pointer file and a real directory. A link or pointer counts only when its text
+  is exactly `generations/generation.<suffix>` and that directory passes the
+  no-link walk; otherwise the reader falls back to the facts recorded in host
+  config, as if `current` were absent.
+- `acq_provider_facts_json_fields` has its Python write bare LF line endings.
+
+The options considered for Windows publish:
+
+| Option | Admin or Developer Mode | Atomic switch | Why not chosen |
+|--------|-------------------------|---------------|----------------|
+| Directory junction (`mklink /J`, `New-Item -ItemType Junction`) | No | No | `MoveFileEx` cannot replace an existing directory, so a swap is remove-then-create. A junction needs an absolute target, so it breaks if the state directory moves, and it puts a reparse point in the tree that the walk is built to refuse and that recursive removal must not follow. |
+| `MSYS=winsymlinks:nativestrict` | Yes | Yes for a file symlink | Fails on a default Windows 11 client. |
+| **Pointer file** | No | Yes (`os.replace` of a file) | Chosen. |
+
+No sandbox mounts `current`. Both backends mount the exact generation
+(`acq_provider_input_sbx_mount`, `acq_provider_input_msb_mount`), and the msb
+mount source is the drive-form path `host_path` produces. On the host, `current`
+has one reader, `acq_provider_sandbox_facts`, which supplies the provider ids
+for the attach-time key check and the credential bindings; it reads the pointer
+file as described above. A sandbox created by an older acq, which mounted the
+whole root, would follow `current` inside the guest, but no such sandbox exists
+on Windows because the Bash transaction never completed there before. The
+Python acq's `provider_input.publish` calls `os.symlink`, which fails on Windows
+without Developer Mode or an administrator; it prints `could not publish the
+provider input` as a warning and continues, and the Bash reader then falls back
+to the recorded facts.
+
+If `current` is a link the Python acq left (a directory symlink or a junction,
+which `os.replace` cannot overwrite), Bash removes that link, never its target,
+and retries, so `current` is absent for that moment and a reader in that moment
+gets the recorded facts. A real directory named
+`current`, such as a copy left by an older Bash acq, is refused (`it is a
+directory, not a file or a link`) and kept; remove it, or run `acq rm NAME`, and
+recreate.
+
+### Residual risk: a parent directory swapped for a junction (Windows)
+
+The Windows snapshot checks each component of an artifact path with `os.lstat`
+and then opens the path by name, so a parent directory replaced with a junction
+between its check and the open is followed. (A swapped leaf is caught: the
+opened handle must be the file that was checked.) The directory walk
+`_acq_provider_input_nt_dir` has the same window. It matters most for local kit
+paths: a kit fetched from a repository is checked out into acq's private
+staging directory, but a local kit directory is read where it is, so anyone who
+can write there can race the walk. The POSIX snapshot has no such window,
+because it opens each component relative to the descriptor of the one before.
+
+Mitigation options, not yet implemented:
+
+1. Copy a local kit into the private staging directory first (with the same
+   no-link checks), so the snapshot only ever reads a tree that only acq writes.
+2. After opening each file, compare `GetFinalPathNameByHandleW` on the handle
+   with the path that was checked, through `ctypes`; a junction anywhere in the
+   path makes them differ.
+3. Walk with handles: open each component with `CreateFileW` and
+   `FILE_FLAG_OPEN_REPARSE_POINT`, without `FILE_SHARE_DELETE`, and open the
+   next relative to it (`NtCreateFile` with a root directory handle), which is
+   the Windows form of the POSIX descriptor walk.
+
+**Tracked:** unblock trigger is any change that makes local provider kits
+common on Windows, or ADR-0048m's default flip, whichever comes first.
+
+### Prevention / Status
+
+`test/bats/147-provider-input-projection.bats` covers the Windows code paths on
+Linux with an emulated native Python (links, junctions, a leaf swapped after its
+lstat, hard links, Win32 names, the pointer swap, a full transaction, provider
+facts read through every form of `current`, and an interpreter that writes
+CRLF). `test/bats/163-provider-input-windows-native.bats` runs on Git Bash with
+native Windows Python, in the Windows CI Git Bash subset: real junctions and
+hard links, a native symlink when one can be made, the pointer file and its
+fallback, provider facts read from native Python, the transaction from lock to
+unlock with a mount source Windows resolves, and a stubbed `acq create` and
+`acq rm`.
+
+**Tracked:** the Python acq still tries a symlink for `current` on Windows, and
+without Developer Mode it leaves none, so Bash falls back to the recorded facts
+for a sandbox the Python acq created. For both implementations to leave the
+same state, it should write the same pointer file. Unblock trigger: ADR-0048m's
+default flip.
+
+---
+
 ## Contributing
 
 When you discover a new failure mode:
