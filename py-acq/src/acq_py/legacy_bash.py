@@ -66,6 +66,8 @@ class LegacyParseError(ValueError):
 # (``bob:TOKEN@github.com/acme/kits``): a token, at the start of a word or
 # after a quote, whose ``@`` is followed by a host and a ``/``.
 _SCHEMELESS_USERINFO_RE = re.compile(r"(?:(?<=^)|(?<=[\s'\"(=,]))[^\s'\"/@]+@(?=[^\s'\"/@]+/)")
+# A recorded kit path quoted back as it is: plain path characters only.
+_PLAIN_PATH_RE = re.compile(r"[A-Za-z0-9._/-]{1,200}")
 # A query string in a URL (``https://host/repo?token=...``).
 _URL_QUERY_RE = re.compile(r"(://[^\s'\"?]*)\?[^\s'\"]*")
 
@@ -213,7 +215,8 @@ def read_cli_kits(
             continue
         if not _is_absolute_ref(value):
             if warn is not None:
-                warn(f"ignoring recorded relative kit path '{value}' for {name}")
+                shown = _shown(value, lambda v: bool(_PLAIN_PATH_RE.fullmatch(v)))
+                warn(f"ignoring recorded relative kit path {shown} for {name}")
             continue
         (cli if key == "kit" else extras).append(value)
     return cli, extras
@@ -307,24 +310,39 @@ def read_sandbox(backend: str, name: str) -> BashSandbox:
 # config.yaml keys.
 # ---------------------------------------------------------------------------
 
+# What a refusal of a Bash config value quotes in place of a part that does not
+# have the expected shape. These refusals become import warnings that are
+# printed, kept in the migration marker and shown by ``acq doctor``, and a
+# malformed part is exactly where a pasted token ends up (a key typed where the
+# env var name belongs, say), so only parts with the expected shape (a provider
+# id, an env var name, a host name, a normalized repository) are ever quoted.
+REDACTED = "<redacted>"
+
+
+def _shown(value: str, ok: Callable[[str], bool]) -> str:
+    """``'value'`` when ``ok(value)``, else :data:`REDACTED`."""
+    return f"'{value}'" if ok(value) else REDACTED
+
+
 def parse_kit_source_entry(entry: str) -> tuple[str, str, str]:
     """``_acq_kit_source_parse_entry``: ``repo[@REF][|DIR]`` to ``(repo, ref, dir)``.
 
     An entry for the shipped control plane without a ref follows the shipped
-    pin, as in Bash. Raises :class:`LegacyParseError` where Bash refuses.
+    pin, as in Bash. Raises :class:`LegacyParseError` where Bash refuses; its
+    message quotes only the normalized repository, never the part refused.
     """
     rest, _, directory = entry.partition("|")
     rest, _, ref = rest.partition("@")
     repo = kits.normalize_repo(rest) if rest == rest.strip() else None
     if not entry or repo is None or len(repo) > 200:
-        raise LegacyParseError(f"invalid kit source '{redact(entry)}'")
+        raise LegacyParseError(f"invalid kit source {REDACTED} (want host/owner/repo[@ref][|dir])")
     if not _REF_RE.fullmatch(ref):
-        raise LegacyParseError(f"invalid ref '{redact(ref)}' for '{redact(repo)}'")
+        raise LegacyParseError(f"invalid ref {REDACTED} for '{repo}'")
     if not ref and repo == kits.CONTROL_PLANE_REPO:
         ref = kits.CONTROL_PLANE_REF
     normalized = kits.normalize_dir(directory or None)
     if normalized is None:
-        raise LegacyParseError(f"unsafe kit dir '{redact(directory)}' for '{redact(repo)}'")
+        raise LegacyParseError(f"unsafe kit dir {REDACTED} for '{repo}'")
     return repo, ref, normalized
 
 
@@ -333,12 +351,19 @@ def kit_sources() -> list[tuple[str, str, str]]:
 
     An absent key reads as no entries, as does the explicit ``none``. One bad
     entry makes Bash refuse the whole list, so this raises
-    :class:`LegacyParseError` rather than returning part of it.
+    :class:`LegacyParseError` rather than returning part of it, naming the
+    entry by its position, since its value is not quoted.
     """
     raw = config.read_field("kit_sources")
     if raw is None or raw in _NO_SOURCES:
         return []
-    return [parse_kit_source_entry(token) for token in raw.split()]
+    out = []
+    for number, token in enumerate(raw.split(), 1):
+        try:
+            out.append(parse_kit_source_entry(token))
+        except LegacyParseError as exc:
+            raise LegacyParseError(f"entry {number}: {exc}") from None
+    return out
 
 
 def _parse_hosts(provider: str, hosts: str) -> list[str]:
@@ -347,28 +372,51 @@ def _parse_hosts(provider: str, hosts: str) -> list[str]:
     if parts and parts[-1] == "":
         parts.pop()
     if any(part == "" for part in parts):
-        raise LegacyParseError(f"invalid host '' for provider '{provider}'")
+        raise LegacyParseError(f"empty host for provider {_shown(provider, provider_creds.provider_id_ok)}")
     return parts
+
+
+def _binding_problem(provider: str, key_env: str, hosts: list[str]) -> str | None:
+    """:func:`provider_creds.validate_binding` for an imported binding, quoting only well-formed parts.
+
+    The checks are validate_binding's. A malformed provider id, env var name or
+    host is never quoted; once the provider id and env var name have their
+    shape, validate_binding's own message (which quotes only those two) is safe.
+    """
+    if not provider_creds.provider_id_ok(provider):
+        return f"invalid provider id {REDACTED}; want ^[a-z0-9]([a-z0-9-]{{0,30}}[a-z0-9])?$"
+    if not provider_creds.key_env_ok(key_env):
+        return f"invalid KEY_ENV {REDACTED} for provider '{provider}'; want an upper-case env var name"
+    if any(not provider_creds.host_ok(host) for host in hosts):
+        owner = provider_creds.key_env_owner(key_env)
+        if owner is None or owner == provider:  # validate_binding would report the host, by value
+            return f"invalid host {REDACTED} for provider '{provider}'; want a bare DNS name such as models.example.gov"
+    return provider_creds.validate_binding(provider, key_env, [h for h in hosts if provider_creds.host_ok(h)])
 
 
 def parse_provider_credential_pairs(pairs: str) -> list[tuple[str, str, list[str]]]:
     """``_acq_provider_credential_parse_pairs``: ``id=KEY_ENV[@h1[,h2]]`` tokens.
 
     Raises :class:`LegacyParseError` for the first malformed token, as Bash
-    fails the whole list.
+    fails the whole list. The message names the entry by its position and
+    quotes only well-formed parts of it (see :data:`REDACTED`).
     """
     out: list[tuple[str, str, list[str]]] = []
-    for token in pairs.split():
+    for number, token in enumerate(pairs.split(), 1):
         if "=" not in token:
-            raise LegacyParseError(f"expected '<providerId>=<KEY_ENV>', got '{token}'")
+            raise LegacyParseError(f"entry {number}: expected '<providerId>=<KEY_ENV>', got {REDACTED}")
         provider, _, rest = token.partition("=")
         key_env, at, hosts = rest.partition("@")
         if "=" in key_env:
-            raise LegacyParseError(f"'{token}' has a malformed credential name")
-        host_list = _parse_hosts(provider, hosts) if at else []
-        problem = provider_creds.validate_binding(provider, key_env, host_list)
+            raise LegacyParseError(f"entry {number}: provider {_shown(provider, provider_creds.provider_id_ok)} "
+                                   f"has a malformed credential name {REDACTED}")
+        try:
+            host_list = _parse_hosts(provider, hosts) if at else []
+        except LegacyParseError as exc:
+            raise LegacyParseError(f"entry {number}: {exc}") from None
+        problem = _binding_problem(provider, key_env, host_list)
         if problem is not None:
-            raise LegacyParseError(problem)
+            raise LegacyParseError(f"entry {number}: {problem}")
         out.append((provider, key_env, host_list))
     return out
 

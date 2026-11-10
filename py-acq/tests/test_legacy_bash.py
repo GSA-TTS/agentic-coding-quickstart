@@ -357,6 +357,11 @@ def test_cli_kits_relative_refs_are_skipped(tree):
     assert legacy_bash.read_cli_kits("msb", "box", warnings.append) == (["/abs"], ["git+https://h/o/r.git"])
     assert warnings and "rel/kit" in warnings[0]
     assert legacy_bash.read_cli_kits("msb", "absent") is None
+    # A recorded value that is not a plain path is not quoted back.
+    _bash_file("box", ".kits", f"schema=1\nkit=bob:{KEY}@host/kit\n")
+    warnings.clear()
+    assert legacy_bash.read_cli_kits("msb", "box", warnings.append) == ([], [])
+    assert warnings and "<redacted>" in warnings[0] and "S3NTINEL" not in warnings[0]
 
 
 def test_config_key_readers(tree):
@@ -458,7 +463,7 @@ def test_a_credential_in_a_bash_kit_source_never_reaches_output_marker_or_doctor
     _config(f"kit_sources: {entry}\n")
     migration.migrate_tree()
     err = capsys.readouterr().err
-    assert "kit_sources was not imported" in err and "***" in err
+    assert "kit_sources was not imported" in err and "entry 1" in err and "<redacted>" in err
     assert "S3NTINEL-tok-1" not in err
     assert "S3NTINEL-tok-1" not in migration.generation_path().read_text(encoding="utf-8")
     assert "S3NTINEL-tok-1" not in json.dumps(doctor.bash_import_check())
@@ -466,6 +471,49 @@ def test_a_credential_in_a_bash_kit_source_never_reaches_output_marker_or_doctor
     out, err = capsys.readouterr()
     assert "kit_sources was not imported" in out
     assert "S3NTINEL-tok-1" not in out + err
+
+
+KEY = "sk-S3NTINEL-pasted-key-9f2c"
+
+
+@pytest.mark.parametrize(("bindings", "phrase"), [
+    (f"opencode-go={KEY}", "invalid KEY_ENV <redacted> for provider 'opencode-go'"),  # key where the name goes
+    (f"opencode-go=OPENCODE_GO_API_KEY=x{KEY}", "has a malformed credential name <redacted>"),
+    (KEY, "expected '<providerId>=<KEY_ENV>', got <redacted>"),  # the key on its own
+    (f"{KEY}=OPENCODE_GO_API_KEY", "invalid provider id <redacted>"),
+    (f"opencode-go=OPENCODE_GO_API_KEY@{KEY}.example", "invalid host <redacted> for provider 'opencode-go'"),
+    (f"good=GOOD_KEY opencode-go={KEY}", "entry 2: invalid KEY_ENV <redacted>"),
+])
+def test_a_key_pasted_into_a_bash_binding_never_reaches_output_marker_or_doctor(tree, capsys, bindings, phrase):
+    from acq_py import cli, doctor
+
+    _config(f"provider_credential_bindings: {bindings}\n")
+    migration.migrate_tree()
+    err = capsys.readouterr().err
+    assert "provider_credential_bindings was not imported" in err and phrase in err, err
+    assert KEY not in err and "S3NTINEL" not in err
+    assert "S3NTINEL" not in migration.generation_path().read_text(encoding="utf-8")
+    assert "S3NTINEL" not in json.dumps(doctor.bash_import_check())
+    assert cli.main(["doctor", "--json"]) == 0
+    out, err = capsys.readouterr()
+    assert "provider_credential_bindings was not imported" in out
+    assert "S3NTINEL" not in out + err
+
+
+def test_a_well_formed_but_refused_binding_still_names_its_parts(tree, capsys):
+    # A provider claiming another service's env var: both parts have their
+    # shape, so the warning can say which ones conflict.
+    _config("provider_credential_bindings: acme=GITHUB_TOKEN@models.acme.example\n")
+    migration.migrate_tree()
+    err = capsys.readouterr().err
+    assert "'GITHUB_TOKEN'" in err and "'acme'" in err and "<redacted>" not in err
+
+
+def test_a_token_in_a_bash_kit_source_without_url_form_is_not_quoted(tree, capsys):
+    _config(f"kit_sources: github.com/acme/kits@{SHA} {KEY}\n")
+    migration.migrate_tree()
+    err = capsys.readouterr().err
+    assert "entry 2: invalid kit source <redacted>" in err and "S3NTINEL" not in err
 
 
 def test_an_old_marker_holding_a_credential_is_redacted_when_read(tree):
