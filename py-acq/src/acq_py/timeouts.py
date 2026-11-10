@@ -94,9 +94,13 @@ def list_timeout_s() -> float:
 # runs with the sandbox's lifecycle lock held, so it is bounded as well: an sbx
 # that hangs must not keep the lock, and every other command on the sandbox,
 # waiting forever. Adding a kit to a live sandbox copies files and sets
-# variables, so ten minutes is generous.
+# variables, so four minutes is generous. The budget stays below the 300 s
+# another command waits for the lifecycle lock (``lock.DEFAULT_SANDBOX_TIMEOUT_S``,
+# ``ACQ_SANDBOX_LOCK_TIMEOUT``): a command that starts waiting as a kit add
+# starts outlasts it, so one hung kit add fails as itself, not as a lock
+# timeout in every other command. Raise both together.
 KIT_ADD_TIMEOUT_ENV = "ACQ_SBX_KIT_ADD_TIMEOUT"
-DEFAULT_KIT_ADD_TIMEOUT_S = 600.0
+DEFAULT_KIT_ADD_TIMEOUT_S = 240.0
 
 
 def kit_add_timeout_s() -> float:

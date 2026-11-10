@@ -669,6 +669,15 @@ def test_kit_add_is_bounded(monkeypatch):
     assert budgets == [timeouts.DEFAULT_KIT_ADD_TIMEOUT_S]
 
 
+def test_kit_add_budget_is_shorter_than_the_lifecycle_lock_wait():
+    # 'sbx kit add' runs with the lifecycle lock held: a command that starts
+    # waiting for the lock as the kit add starts must outlast it, or one hung
+    # kit add shows up as a lock timeout in every other command.
+    from acq_py import lock
+
+    assert timeouts.DEFAULT_KIT_ADD_TIMEOUT_S < lock.DEFAULT_SANDBOX_TIMEOUT_S
+
+
 @pytest.mark.parametrize("failure", ["unavailable", "timeout"])
 def test_run_reattach_attaches_when_kit_add_raises(monkeypatch, tmp_path, capsys, failure):
     # Bash warns and attaches when 'sbx kit add' cannot run; no traceback, no refusal.
