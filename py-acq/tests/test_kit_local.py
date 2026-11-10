@@ -145,6 +145,10 @@ def test_a_tree_nested_too_deep_is_refused_not_a_recursion_error(tmp_path, monke
     if by_fd and not kit_fetch._WALK_BY_FD:
         pytest.skip("no fd-relative walk on this host")
     monkeypatch.setattr(kit_fetch, "_WALK_BY_FD", by_fd)
+    if sys.platform == "win32":
+        # 64 levels under the kit cache would pass MAX_PATH (260) first, which
+        # fails the copy as a plain error before the cap is reached.
+        monkeypatch.setattr(kit_fetch, "_LOCAL_MAX_DEPTH", 8)
     kit = _kit(tmp_path)
     deep = kit / "files"
     for _ in range(kit_fetch._LOCAL_MAX_DEPTH):  # files/ itself is the first level
