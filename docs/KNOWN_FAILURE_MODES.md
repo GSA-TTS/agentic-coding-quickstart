@@ -5033,7 +5033,7 @@ Bash acq counts as held for 15 minutes after it was taken.
 **Cause:** The Bash acq locks a sandbox by creating that directory and writing
 `PID IDENTITY` into its `owner` file. On POSIX the Python acq checks that the
 PID is still the same process and recovers a lock whose owner is gone
-(see [§79](#79-sandbox-lock-directory-without-an-owner-is-never-removed-automatically)).
+(see [§79](#79-lock-directory-without-an-owner-is-never-removed-automatically)).
 On Windows it cannot: Git Bash PIDs are not Windows PIDs, and `os.kill` there
 terminates a process rather than probing it. So the Python acq treats a Bash
 lock directory as held for 15 minutes after it was last modified (when its
