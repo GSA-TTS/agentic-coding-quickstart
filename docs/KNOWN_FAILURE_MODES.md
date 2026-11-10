@@ -969,6 +969,8 @@ sbx secret set-custom <sandbox-name> --host api.gsa.usai.gov \
 
 - Rotate with `acq usai-rotate-api-key`, which preserves the placeholder so
   existing sandboxes keep working. Avoid deleting + re-adding the global secret.
+  When sbx holds more than one global USAi entry, rotation refuses and names
+  each placeholder instead of picking one (see section 88).
 - Remove any `export USAI_API_KEY=...` from your shell profile — the sandbox gets
   its value from sbx injection, and a host env var only causes confusion.
 
@@ -3402,11 +3404,22 @@ kits outside the bundle at their pinned commit. Compared with the Bash acq:
   the spec reader, like Bash's, would read each value with a trailing CR. A
   local kit's later changes reach a sandbox only through a heal or recreate,
   which copies it again.
-- Known limitation, shared with Bash: a payload file that is a hard link
-  (link count above 1) is copied like any other file. A hard link cannot point
-  across file systems or at a directory, but whoever can write to the kit
-  directory can hard-link a file they can read from elsewhere on the same file
-  system into it. Keep local kits in a directory only you can write.
+- A regular file with more than one hard link (link count above 1) anywhere in
+  a local kit is refused, by both the Python and the Bash acq, with the file's
+  path relative to the kit and the remedy: make a plain copy of the kit (for
+  example `cp -R KIT KIT-copy`, which gives each file one link) and use the
+  copy. A hard link cannot point across file systems or at a directory, but
+  whoever can write to the kit directory could hard-link a file they can read
+  from elsewhere on the same file system into it. Directories are exempt:
+  their link count is naturally above 1. The Python acq checks the link count
+  of each file it opens for the copy (`os.fstat`, which reports NTFS hard links
+  on Windows too), so the file checked is the file copied.
+- Bash limit: Bash reads a local kit in place, so its check (one
+  `find KIT -type f -links +1` in `kit_translate_fetch`, POSIX on Linux and
+  macOS) is a check before use, not a guarantee. A hard link created in the
+  kit after the check and before the backend reads the file is not seen.
+  Keep local kits in a directory only you can write, or use the Python acq,
+  which applies only its checked private copy.
 
 ### Root Cause
 
@@ -3444,8 +3457,10 @@ Tracked follow-ups:
   POSIX; `provider_input.publish` already writes Bash's Windows pointer file.
 - **Local kit directories.** Done: the Python acq copies a local kit into its
   private cache with the no-link checks (option 1 in section 61) and applies
-  the copy, on Windows checking each opened file's final path as well. Nothing
-  further is tracked here; the hard-link limitation above is Bash's too.
+  the copy, on Windows checking each opened file's final path as well. Both
+  acq implementations refuse a hard-linked file in a local kit; the Bash
+  check-then-use limit above is a known residual. Nothing further is tracked
+  here.
 - **The rc bridge.** Port `_acq_sbx_ensure_rc_bridge` with the msb login-shell
   work.
 - **Kit fetch on Windows.** The fetch itself has no POSIX-only step, but its
@@ -5052,6 +5067,132 @@ seen on the same run, and tracked with it: `scripts/setup-provider-input-validat
 under Git Bash picks the Microsoft Store `python3` alias, installs under
 `XDG_DATA_HOME` while acq on Windows looks under `LOCALAPPDATA`, and its `ln
 -s` makes a full copy of the runtime that a second run cannot replace.
+
+---
+
+## 88. sbx: More Than One Global USAi Custom Secret Is Refused
+
+**Status:** By design (both the Bash and the Python `acq`).
+
+### Symptoms
+
+`acq secret set -g usai`, `acq secret rm -g usai`, `acq usai-rotate-api-key`
+on sbx, or a USAi change made on msb that acq passes on to sbx sandboxes, stops
+with exit 1:
+
+```text
+acq(sbx): sbx holds 2 custom secrets for USAI_API_KEY on api.gsa.usai.gov in the global scope,
+          so acq cannot tell which one your sandboxes use; nothing was changed.
+          Placeholders: sbx-cs-AAAA sbx-cs-BBBB
+          Warning: a running sandbox may hold one of these placeholders. ...
+            sbx secret rm --placeholder sbx-cs-AAAA -f
+            sbx secret rm --placeholder sbx-cs-BBBB -f
+```
+
+The Python `acq` gives the same facts in one error and remediation (or
+`--json` envelope). Nothing is stored, removed or re-set. A placeholder with
+characters outside letters, digits, `.`, `_` and `-` is never printed as a
+command; inspect it with `sbx secret ls`.
+
+### Root Cause
+
+sbx can hold several custom secrets for the same env var and host, for example
+after a rotation from before ADR-0008 or a manual `sbx secret set-custom`. Each
+sbx sandbox was injected with one placeholder when it was created, and sbx does
+not say which. Updating whichever entry sbx lists first, or removing them all
+and creating one (what the Bash rotation used to do), can leave running
+sandboxes with a placeholder sbx no longer maps, so they get `401` from USAi
+(see section 23). acq therefore refuses and lets you choose. Rows are matched
+by scope, env var **and** host: a secret for `USAI_API_KEY` on another host is
+a different secret and is not counted.
+
+### Fix
+
+1. Decide which entry your sandboxes use. If you do not know, keep the oldest
+   and plan to recreate any sandbox that then fails with `401`.
+2. Remove the others with the printed commands, one per entry
+   (`sbx secret rm --placeholder P -f`).
+3. With one entry left, run `acq usai-rotate-api-key`: it updates that entry
+   in place and keeps its placeholder. Do not re-run `acq secret set -g usai`
+   on sbx (or `acq --backend sbx secret set -g usai`): it refuses because an
+   entry exists. For a change made on msb, re-running the msb command
+   (`acq --backend msb secret set -g usai`) re-feeds the kept entry too. For
+   `acq secret rm`, re-run it. A sandbox whose placeholder you removed is
+   recovered by the rebind in section 23 (ADR-0008) or by recreating it.
+
+### Prevention / Status
+
+Rotate with `acq usai-rotate-api-key` rather than deleting and re-adding the
+secret. The refusal is covered by `test/bats/40-secret-set.bats`,
+`test/bats/77-usai-rotate.bats`, `py-acq/tests/test_sbx.py` and the vectors
+`cli/secret-set-sbx-duplicate-usai` and `cli/sbx-duplicate-usai-nothing-removed`.
+
+---
+
+## 89. Remote Kit Ref With a Query String or an Extra `#` Parameter Is Refused
+
+**Status:** By design (both the Bash and the Python `acq`).
+
+### Symptoms
+
+`acq run`, `acq create`, `acq kit list` or a heal stops before anything is
+fetched:
+
+```text
+acq: --kit: remote kit ref refused: its URL has a query string ('?' before the '#').
+```
+
+or `... its '#' fragment has a parameter other than ref= and dir=.`,
+`... repeats ref= or dir=.` or `... has a ref= or dir= value that is empty,
+starts with '-' or holds a character outside [A-Za-z0-9._/-].` (with `ACQ_EXTRA_KITS:` or
+`ACQ_PROVIDER_KITS:` in place of `--kit` for an entry of that variable). The
+message does not repeat the ref. A refused `--kit` ref stops `run` or `create`
+at once. A refused `ACQ_EXTRA_KITS` or `ACQ_PROVIDER_KITS` ref is enforced only
+where kits are selected or applied (`run`/`create` of a new sandbox,
+`kit list`, and the heal on `start`, `restart` or a re-attach, which skips the
+kits with a warning and attaches anyway), so other commands such as `acq ls`
+or `acq secret rm` keep working. A sandbox whose kit record holds such a ref
+from an older `acq` prints `ignoring a recorded remote kit ref ... that acq now
+refuses` on start; that kit is no longer applied, and recreating the sandbox
+clears it from the record.
+
+### Root Cause
+
+A remote kit ref is `git+https://HOST/REPO.git#ref=<sha>&dir=<path>`, and acq
+uses no other part. A query string (`?private_token=…`), an extra fragment
+parameter (`&token=…`), a second `ref=`/`dir=`, or a value carrying `?`, `;`,
+`#`, a space or a non-ASCII letter is where a credential would ride (and a
+value starting with `-` would reach git as an option; the Bash fetch also
+passes `--` before the ref), and acq used to carry the ref
+verbatim into its debug output, its `.kits` and sbx `extra-kits` records and,
+after a fetch, its messages. acq now refuses such a ref where it enters
+(`--kit`, `ACQ_EXTRA_KITS`, `ACQ_PROVIDER_KITS`), again before any fetch
+(`kit_ref_shape_check` in `acq.backends/kit-translate.sh`,
+`kits.remote_ref_problem` in `py-acq/src/acq_py/kits.py`), and skips it when a
+record is reloaded. Message helpers show only the first plain `ref=` and
+`dir=` and hide the rest (`kit_ref_display`, `kits.ref_display`).
+`test/fixtures/kit-ref-probes.tsv` lists probe refs both implementations must
+judge and display alike.
+
+`%3F` in the URL path is not a query string: git sends it as part of the path,
+so acq does not refuse it at input (the Python acq refuses any percent escape
+when it fetches).
+
+### Fix
+
+Remove the query string, the extra parameter or the repeat, and keep `ref=`
+and `dir=` values to ASCII letters, digits, `.`, `_`, `/` and `-`, not starting
+with `-`. For a kit source
+that needs authentication, configure a git credential helper that does not
+prompt (for GitHub, `gh auth setup-git`); never put a token in the ref. A local
+kit path is not affected: `?` and `#` are ordinary characters in a directory
+name.
+
+### Prevention / Status
+
+Covered by `test/bats/170-kit-ref-shape.bats`, `py-acq/tests/test_kit_fetch.py`,
+`py-acq/tests/test_kits.py`, `py-acq/tests/test_configure.py` and
+`py-acq/tests/test_legacy_bash.py`.
 
 ---
 

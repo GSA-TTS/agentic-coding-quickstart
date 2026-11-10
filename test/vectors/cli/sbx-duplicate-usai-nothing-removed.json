@@ -1,0 +1,83 @@
+{
+  "schema": 1,
+  "id": "cli/sbx-duplicate-usai-nothing-removed",
+  "oracle": "sbx duplicate custom secrets: `secret set -g usai` and `usai-rotate-api-key` both refuse (exit 1) when sbx lists two global custom secrets for the USAi env var and host, and neither removes or re-sets an entry: the listing afterwards still holds both",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{python}",
+      "-I",
+      "test/vectors/drivers/seeded-run.py",
+      "[[[\"--backend\",\"sbx\",\"secret\",\"set\",\"-g\",\"usai\",\"--json\"],true,1],[[\"--backend\",\"sbx\",\"usai-rotate-api-key\",\"--json\"],true,1],[[\"--backend\",\"sbx\",\"secret\",\"ls\",\"-g\",\"--json\"],false,null]]",
+      "{acq}"
+    ],
+    "env": {
+      "ACQ_SBX_BIN": "__stub__",
+      "ACQ_SBX_VERSION": "0.51.0",
+      "ACQ_SBX_INSTALLED": "1",
+      "ACQ_MSB_INSTALLED": "0",
+      "ACQ_SBX_STUB_CUSTOM_SECRETS": "[{\"scope\":\"global\",\"env\":\"USAI_API_KEY\",\"placeholder\":\"sbx-cs-dup-1\",\"targets\":[\"api.gsa.usai.gov\"]},{\"scope\":\"global\",\"env\":\"USAI_API_KEY\",\"placeholder\":\"sbx-cs-dup-2\",\"targets\":[\"api.gsa.usai.gov\"]}]"
+    },
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "MSB_HOME",
+      "SBX_HOME",
+      "ACQ_IMAGE",
+      "ACQ_MSB_IMAGE",
+      "ACQ_MSB_READY_TIMEOUT",
+      "ACQ_MSB_STUB_CATALOG",
+      "ACQ_SBX_STUB_CATALOG",
+      "ACQ_SBX_STUB_FAIL",
+      "ACQ_SBX_STUB_SECRETS",
+      "ACQ_SBX_STUB_SECRET_LS_RAW",
+      "ACQ_SBX_STUB_RAW_PLACEHOLDERS",
+      "ACQ_SBX_STUB_FAIL_CUSTOM_SCOPES",
+      "ACQ_SECRET_NO_LIVE_REFEED",
+      "ACQ_PROVIDER_CREDENTIAL_BINDINGS",
+      "ACQ_PROVIDER_CREDENTIAL_SEED",
+      "USAI_API_KEY",
+      "GITHUB_TOKEN",
+      "GH_TOKEN",
+      "GITLAB_TOKEN"
+    ],
+    "stdin": "duplicate-sentinel-7c41",
+    "timeout_ms": 15000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "secret ls",
+        "data": {
+          "secrets": [
+            {"scope": "global", "scope_kind": "global", "service": "USAI_API_KEY", "value_state": "set"},
+            {"scope": "global", "scope_kind": "global", "service": "USAI_API_KEY", "value_state": "set"}
+          ]
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME",
+      "ACQ_SECRET_STORE_DIR"
+    ]
+  }
+}
