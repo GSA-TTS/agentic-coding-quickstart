@@ -97,3 +97,62 @@ section.
 The AGENTS.md amendment is reviewed adversarially by a distinct agent against
 the seven settled resolutions before merge, and the human merges. No model or
 provider name appears in any public artifact.
+
+## Enforcement status (2026-11-09)
+
+The retained gates above are a policy. Most of them are **not enforced by
+repository settings** on `mogul/agentic-coding-quickstart`; they hold by
+convention. This note records what is enforced and what is not, so that nobody
+reads the gates as technical controls. The decision above is unchanged.
+
+**Enforced by the `main` ruleset:**
+
+- changes reach `main` only through a pull request;
+- commits must be signed;
+- no force-push, and `main` cannot be deleted.
+
+**Not enforced by the ruleset:**
+
+- **Required checks.** The ruleset's required-status-check list is empty. The
+  checks below run in CI on every pull request to `main`, but a red or missing
+  check does not block the merge.
+- **Reviews.** The ruleset requires zero approving reviews and no code-owner
+  review.
+- **CODEOWNERS.** `.github/CODEOWNERS` names `GSA-TTS` teams, and GitHub cannot
+  resolve an organisation team as an owner of a personal repository. So the
+  admin review that ADR-0044m and `docs/howto/qualification.md` describe for the
+  qualification ledger, `qualification/` and the committed oracles applies
+  upstream only. On this fork it is not enforced.
+- **Distinct-agent adversarial review and the human as sole merge approver.**
+  Home agents and the human push and merge as the same GitHub account. So
+  repository records cannot show that a merge was the human's decision and not an
+  agent's, and nothing technical stops an agent with push rights from merging its
+  own pull request. AGENTS.fork.md gates that action, and only the agent's own
+  compliance enforces it. An adversarial review is visible only if the PR body or
+  a comment records it.
+- **The fresh live transcript for a Tier-3 surface change.** The
+  `Tier-3 release gate` workflow reports a stale cell on the pull request, but it
+  is advisory. Its workflow header and `docs/howto/release-gate-setup.md` say not
+  to require it until release PRs reliably report checks. Pull requests that
+  changed `py-acq/src/acq_py/` have merged while that gate was red, and their
+  cells were re-recorded only afterwards or are still pending re-qualification.
+
+**CI checks that run on every pull request to `main`** (job names as they
+appear on a PR):
+
+| Retained gate | Check that implements it |
+|---|---|
+| pre-commit hook (gitleaks, shellcheck, markdownlint and the other hooks) | `pre-commit` |
+| `scripts/run-shellcheck` at `--severity=warning` | inside `pre-commit` |
+| markdownlint | `Markdown Lint` (Markdown changes only), and inside `pre-commit` |
+| Tier-1 vectors | `vectors` |
+| (related) Python quality | `ruff, mypy, bandit and coverage` |
+| (related) bash 3.2 and Windows suites | `acq offline suite under bash 3.2`, `Windows` (aggregate jobs that always report) |
+| (related) PR title | `Conventional Commit Title` |
+| fresh Tier-3 transcript | `Tier-3 release gate` (advisory) |
+
+Making these gates technical controls takes repository settings: required status
+checks, and a review rule that works on a personal fork. Only the maintainer can
+change those settings. Until then, a merge under a red required check or without
+the adversarial review is a convention breach, not something the repository
+blocks.

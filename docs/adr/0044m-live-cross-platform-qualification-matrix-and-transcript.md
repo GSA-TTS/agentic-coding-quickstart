@@ -97,8 +97,8 @@ stale and the cell is blocked until regenerated:
   ADR-0044m's six, the cell oracle (boot contract, credential binding and
   non-exposure, kit apply, and on msb the read-only trusted-config mount,
   `scripts/qualify-backend-cell`) and the ro-mount oracle
-  (`scripts/qualify-msb-ro-mount`, which the cell oracle runs on msb) are committed; oracle #4 (offline
-  completeness) is deferred and #5 (security-exception recreation) is a manual
+  (`scripts/qualify-msb-ro-mount`, which the cell oracle runs on msb) are committed; oracle 4 (offline
+  completeness) is deferred and oracle 5 (security-exception recreation) is a manual
   sequence, and neither drives `acq version` or `acq doctor`.
 
   `cli.py` remains wholly on the surface: it still owns the lifecycle/secret/
@@ -224,3 +224,24 @@ in `docs/KNOWN_FAILURE_MODES.md`. The oracle runs every acq subprocess against a
 private configuration and state tree, and gives every identifier that reaches a
 backend's own store a per-run nonce, so a run leaves the operator's own credentials
 and acq state as it found them. A run must be recorded at a commit that is on `main`.
+
+## Correction (2026-11-09): the CODEOWNERS review is not enforced on this fork
+
+The Verification section says CODEOWNERS requires an admin's review of
+`docs/qualification-ledger.json`, of `qualification/` and of the two committed
+oracles, and that a PR loosening the gate is sent to an admin. That holds only
+where the repository settings make it hold. On this fork it does not hold:
+
+- `.github/CODEOWNERS` names `GSA-TTS` teams, which cannot own paths in a
+  personal repository;
+- the `main` ruleset requires no code-owner review and no approving review;
+- the `main` ruleset requires no status checks, so the `Tier-3 release gate` is
+  advisory.
+
+On this fork the ledger's integrity therefore rests on the maintainer reading
+each ledger PR and auditing its inlined transcripts
+(`python3 -m qualification.gate verify-evidence`). No technical gate enforces
+that review. The technical checks listed above are unchanged.
+`docs/howto/release-gate-setup.md` (step 3) gives the settings that would make
+the review binding, and ADR-0045m's enforcement-status note records what the
+repository enforces today.
