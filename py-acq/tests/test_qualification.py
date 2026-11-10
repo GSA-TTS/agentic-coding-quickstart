@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -492,31 +493,29 @@ def test_matrix_cell_state_applies_the_version_floors():
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
-def test_ctrl_c_on_the_harness_lets_the_command_tear_down_without_a_second_signal(tmp_path, monkeypatch):
-    # On POSIX the terminal's Ctrl+C reaches the harness and the command alike (one
-    # process group). The harness must not add a SIGTERM of its own, which would
-    # interrupt the command's orderly stop; it waits for the command to tear down.
-    # Simulated with SIGALRM: SIGINT to the command, KeyboardInterrupt in the harness.
+def test_ctrl_c_on_the_harness_reaches_the_command_and_waits_for_its_teardown(tmp_path, monkeypatch):
+    # A SIGINT sent to the harness alone (a supervisor's ``kill -INT``) must still
+    # reach the command, which then gets its grace period to tear down rather than
+    # being killed. Simulated with SIGALRM: KeyboardInterrupt in the harness only.
     import signal
 
     from qualification import runner
 
     monkeypatch.setattr(runner, "_grace", lambda timeout: 10.0)
-    log, ready = tmp_path / "signals", tmp_path / "pid"
+    log, ready, done = tmp_path / "signals", tmp_path / "pid", tmp_path / "done"
     script = (
         "import os, signal, sys, time\n"
         f"def note(sig, _):\n    open({str(log)!r}, 'a').write(signal.Signals(sig).name + '\\n')\n"
         "signal.signal(signal.SIGTERM, note)\n"
-        "signal.signal(signal.SIGINT, note)\n"
         f"open({str(ready)!r}, 'w').write(str(os.getpid()))\n"
         "end = time.monotonic() + 60\n"
         f"while time.monotonic() < end and not os.path.exists({str(log)!r}):\n    time.sleep(0.05)\n"
-        "time.sleep(1.0)  # tearing down; a SIGTERM now would be logged\n"
-        "sys.exit(130)\n"
+        "time.sleep(1.0)  # tearing down\n"
+        f"open({str(done)!r}, 'w').write('yes')\n"
+        "sys.exit(143)\n"
     )
 
     def interrupt(*_):
-        os.kill(int(ready.read_text()), signal.SIGINT)
         raise KeyboardInterrupt
 
     old = signal.signal(signal.SIGALRM, interrupt)
@@ -527,11 +526,54 @@ def test_ctrl_c_on_the_harness_lets_the_command_tear_down_without_a_second_signa
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, old)
-    assert log.read_text().splitlines() == ["SIGINT"]  # never a forwarded SIGTERM
+    assert ready.exists()
+    assert log.read_text().splitlines() == ["SIGTERM"]  # the stop was passed on
+    assert done.read_text() == "yes"  # and it was allowed to finish tearing down
+
+
+def test_the_harness_waits_on_the_command_in_short_slices(monkeypatch):
+    # Each wait returns within WAIT_SLICE, so a Ctrl+C on Windows (which does not
+    # interrupt a wait) is handled promptly; the command still gets its whole timeout.
+    import time
+
+    from qualification import runner
+
+    waits = []
+
+    class Spy(subprocess.Popen):
+        def communicate(self, input=None, timeout=None):
+            waits.append(timeout)
+            return super().communicate(input, timeout=timeout)
+
+    monkeypatch.setattr(runner.subprocess, "Popen", Spy)
+    monkeypatch.setattr(runner, "_grace", lambda timeout: 0.5)
+    started = time.monotonic()
+    t = runner._single_run([sys.executable, "-c", "import time; time.sleep(30)"], make_env(), 1, timeout=2.5)
+    elapsed = time.monotonic() - started
+    assert t.verdict is Verdict.BLOCKED and t.detail == "command timed out"
+    assert 2.5 <= elapsed < 2.5 + 0.5 + 3.0  # the timeout, then at most the grace and a reap
+    assert len(waits) >= 3 and all(w is not None and w <= runner.WAIT_SLICE for w in waits)
+
+
+def test_the_harness_keeps_all_output_of_a_command_slower_than_one_slice(tmp_path):
+    from qualification import runner
+    from qualification.model import sha256_hex
+
+    script = (
+        "import sys, time\n"
+        "for i in range(3):\n"
+        "    print(f'line {i} ' + 'x' * 50000, flush=True)\n"
+        "    time.sleep(0.6)\n"
+    )
+    t = runner._single_run([sys.executable, "-c", script], make_env(), 1, timeout=30.0)
+    expected = "".join(f"line {i} " + "x" * 50000 + "\n" for i in range(3)).encode()
+    if os.name == "nt":
+        expected = expected.replace(b"\n", b"\r\n")
+    assert t.verdict is Verdict.PASS and t.output_sha256 == sha256_hex(expected)
 
 
 @pytest.mark.parametrize("platform", ["nt", "posix"])
-def test_ctrl_c_is_forwarded_to_the_command_only_on_windows(monkeypatch, platform):
+def test_ctrl_c_is_forwarded_to_the_command_on_every_platform(monkeypatch, platform):
     from qualification import runner
 
     seen = []
@@ -549,7 +591,7 @@ def test_ctrl_c_is_forwarded_to_the_command_only_on_windows(monkeypatch, platfor
     monkeypatch.setattr(runner.os, "name", platform)
     with pytest.raises(KeyboardInterrupt):
         runner._single_run(["oracle"], make_env(), 1, timeout=60.0)
-    assert seen == [platform == "nt"]
+    assert seen == [True]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")

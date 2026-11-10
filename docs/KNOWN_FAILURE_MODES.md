@@ -310,48 +310,64 @@ to vectors.
 
 ---
 
-## Qualification oracle: a forced stop can reach processes outside the step
+## Qualification oracle: stopping a step can stop a backend daemon the step started
 
 **Status:** known limitation, tracked for a fix (per AGENTS.md "Track Deferred Work").
 
 ### Symptoms and cause
 
-`scripts/qualify-backend-cell` runs each step in its own process group. When a
-step outlives its timeout, or the oracle is stopped, the group gets a polite stop
-(SIGTERM; CTRL_BREAK on Windows) and a grace period. Only if the grace period
-expires is the group force-killed (`run_process` / `stop_process` /
-`_signal_group`): `killpg(SIGKILL)` on POSIX, `taskkill /F /T` on Windows.
+`scripts/qualify-backend-cell` runs each step in its own process group, and on
+Windows also in a Job object of its own (`StepJob`). When a step outlives its
+timeout, or the oracle is stopped, the group gets a polite stop (SIGTERM;
+CTRL_BREAK on Windows) and a grace period. Only if the grace period expires is
+the step force-killed (`run_process` / `stop_process` / `_signal_group`):
+`killpg(SIGKILL)` on POSIX, `TerminateJobObject` on Windows. If the oracle itself
+is killed outright on Windows, its job handles close and the jobs' kill-on-close
+limit takes the steps' processes down too.
 
-That forced kill can reach more than the step:
+A backend daemon that a step's command auto-starts (for example an `msb`
+server) as a child, without detaching it into its own session or process group,
+is in the step's group, and on Windows in the step's job. So:
 
-- **A backend daemon the step auto-started.** If a step's backend command
-  starts its daemon (for example an `msb` server) as a child without detaching
-  it into its own session or process group, the daemon is in the step's group
-  and dies with it. Later steps, and other sandboxes on the host that use the
-  same daemon, then lose it.
-- **An unrelated process on Windows.** `taskkill /T` builds the tree from
-  parent process ids with no process creation-time check. If a process in the
-  tree exited and Windows reused its id, `/T` can walk into, and kill, a process
-  that has nothing to do with the run.
+- **The polite stop reaches it.** The group SIGTERM (CTRL_BREAK on Windows) goes
+  to every process in the group, the daemon included, and a daemon that honours
+  it exits.
+- **The forced kill kills it.** `killpg(SIGKILL)` and `TerminateJobObject` both
+  cover the daemon, as does the kill-on-close of a killed oracle's jobs.
 
-Neither happens on the polite path. Both need a step that ignores the stop for
-the whole grace period (`STOP_GRACE`, `CANARY_GRACE`).
+Later steps, and other sandboxes on the host that use the same daemon, then lose
+it. A step that ends on its own does not affect the daemon: on Windows the job's
+kill-on-close limit is lifted before its handle is closed.
+
+The forced kill no longer reaches unrelated processes on Windows. It used to be
+`taskkill /F /T`, which walks parent process ids without a creation-time check
+and, after a pid was reused, could kill a process that had nothing to do with the
+run. Job membership is fixed when a process is created, so `TerminateJobObject`
+kills the step's processes and nothing else.
+
+One exception is intended: a process that a step starts with
+`CREATE_BREAKAWAY_FROM_JOB` leaves the job (the job sets
+`JOB_OBJECT_LIMIT_BREAKAWAY_OK`, so a backend that detaches its daemon that way is
+not refused) and survives the forced kill, like a POSIX process that left the
+step's group with `setsid`. The job is a cleanup tool, not a security boundary: it
+does not contain a step that sets out to escape it.
 
 ### Mitigation today
 
 Start the backend daemon before a qualification run, so no timed step starts it.
-Leave the grace periods at their defaults so the forced kill stays a last
-resort.
+That protects it from the polite stop and from the forced kill alike. Leave the
+grace periods (`STOP_GRACE`, `CANARY_GRACE`) at their defaults so the forced
+kill stays a last resort.
 
 ### Proposed fix
 
-1. **Windows:** put each step in a Job object created at spawn time and stop it
-   with `TerminateJobObject`. Job membership is fixed at process creation and
-   inherited by descendants, so the kill covers exactly the step's processes and
-   no pid-reuse lookup is involved. This replaces `taskkill /F /T`.
-2. **Both platforms:** before the first timed step, start the backend daemon
-   (or check that it is already running) outside any step's process group, so
-   a forced kill can never take it down.
+Before the first timed step, start the backend daemon (or check that it is
+already running) outside any step's process group and job. **Deferred:** it needs
+each backend's own command to start and probe its daemon (msb and sbx differ, and
+acq does not manage either daemon today), verified live on every platform.
+**Unblock trigger:** the next live qualification round on a host where a step is
+seen to start the daemon, or a backend release that documents a daemon
+start/status command.
 
 ---
 
