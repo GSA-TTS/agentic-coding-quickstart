@@ -507,8 +507,11 @@ at the pin, which fails when any manifest blob id differs from
 
 ## Timeouts
 
-Every wait the Python acq makes on a backend, a lock or the network is bounded.
-Each bound is a number of seconds read from the environment when it is needed.
+The waits in the table below are bounded. Other backend calls run without a
+time limit, among them `create`, `stop` and `rm` on both backends and `msb
+start` (an image pull or a guest boot can legitimately take long), as well as
+copies, port and inspect queries and sbx settings changes. Each bound is a
+number of seconds read from the environment when it is needed.
 A value that is not a finite number, or is negative, is ignored with a warning
 on stderr, and the default is used. Where the table says "more than 0", a value
 of 0 is also ignored, because it would fail the call at once instead of meaning
