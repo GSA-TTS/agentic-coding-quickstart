@@ -393,6 +393,38 @@ def test_a_token_stored_before_the_command_is_kept_when_the_create_fails(monkeyp
 
 
 @pytest.mark.provider_key
+def test_a_token_another_command_stored_during_the_prompt_is_kept(monkeypatch, tmp_path, capsys):
+    # The user declines at the prompt; meanwhile 'acq secret set adv github'
+    # in another terminal stores a token. The failed create must not take
+    # that token for one its own prompt stored.
+    _msb_env(monkeypatch, tmp_path)
+    ws = _github_ws(monkeypatch, tmp_path)
+    _terminal(monkeypatch, answer="n\n")
+
+    def read_line(self):
+        secretstore.set_secret("github", "adv", TOKEN)
+        return "n\n"
+
+    monkeypatch.setattr(configure.Terminal, "read_line", read_line)
+    monkeypatch.setenv("ACQ_MSB_STUB_FAIL", "create")
+    rc, _, _, err = _main(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "adv")
+    assert rc == 1, err
+    assert secretstore.get(secretstore.key_for("github", "adv")) == TOKEN
+    assert "removed the GitHub token" not in err
+
+
+def test_advise_reports_only_a_token_it_stored(monkeypatch, tmp_path):
+    _msb_env(monkeypatch, tmp_path)
+    ws = _github_ws(monkeypatch, tmp_path)
+    _write_config("scope_github_token: yes\n")
+    _terminal(monkeypatch, answer="\n", token=TOKEN)
+    assert creds.advise_github_scope("msb", "adv", str(ws), emit_json=False) is True
+    assert creds.advise_github_scope("msb", "adv", str(ws), emit_json=False) is False  # already has its own
+    _terminal(monkeypatch, answer="\n", token="")
+    assert creds.advise_github_scope("msb", "other", str(ws), emit_json=False) is False  # skipped
+
+
+@pytest.mark.provider_key
 @pytest.mark.parametrize("verb", ["create", "run"])
 def test_the_scope_prompt_does_not_hold_the_sandbox_lock(monkeypatch, tmp_path, capsys, verb):
     # A prompt waits on the user; holding the lifecycle lock meanwhile would

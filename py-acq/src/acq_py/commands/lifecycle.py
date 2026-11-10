@@ -896,14 +896,6 @@ def _exists_quietly(backend: str, name: str) -> bool:
         return False
 
 
-def _own_github_token(name: str) -> bool:
-    """True when the acq store holds a GitHub token in exactly ``name``'s scope."""
-    try:
-        return bool(secretstore.get(secretstore.key_for("github", name)))
-    except (secretstore.SecretStoreError, OSError):
-        return False
-
-
 def _scope_advice(backend: str, name: str, workspace: str, emit_json: bool) -> bool:
     """The GitHub scope advisory, run BEFORE the lifecycle lock; True when it stored a token for ``name``.
 
@@ -912,11 +904,11 @@ def _scope_advice(backend: str, name: str, workspace: str, emit_json: bool) -> b
     own secret path, which may take that lock itself. It runs before the create
     because msb binds a sandbox's secrets only at create. Racing a concurrent
     create of the same name is harmless: the token is scoped to this name
-    either way, and the locked step decides which create proceeds.
+    either way, and the locked step decides which create proceeds. Only a
+    token this prompt stored is reported, never one another command stored
+    while the prompt was open.
     """
-    had = _own_github_token(name)
-    creds.advise_github_scope(backend, name, workspace, emit_json)
-    return not had and _own_github_token(name)
+    return creds.advise_github_scope(backend, name, workspace, emit_json)
 
 
 def _forget_scoped_token(backend: str, name: str) -> None:
