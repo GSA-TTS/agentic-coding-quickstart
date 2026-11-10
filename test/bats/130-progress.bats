@@ -235,13 +235,47 @@ _prog() { # SHELL_SNIPPET
 }
 
 @test "progress: the prior INT/TERM handler runs with \$? set to 130/143" {
+  # The TERM case runs in its own subshell, which installs the traps itself: the
+  # handlers act only in the shell that installed them (next test).
   _prog 'h() { echo "STATUS_$1=$?"; }
+    ( trap "h TERM" TERM; _acq_spin_install_traps; _acq_spin_cleanup_signal TERM )
     trap "h INT" INT; trap "h TERM" TERM
     _acq_spin_install_traps
-    ( _acq_spin_cleanup_signal TERM )
     _acq_spin_cleanup_signal INT'
   assert_line 'STATUS_TERM=143'
   assert_line 'STATUS_INT=130'
+}
+
+# A child forked while the spinner's traps are set can run them: a signal that
+# reaches it before Bash resets its inherited handlers is handled with the
+# parent's trap commands, and Bash 5 then also runs the parent's EXIT trap. The
+# spinner TERMs its animator straight after forking it, so this happened under
+# load and ran the caller's EXIT cleanup twice. Call the handlers from a child
+# directly, as that window does: the child must exit without running any prior
+# handler or touching the owner's animator, and the owner's own exit must still
+# run the prior EXIT handler exactly once with its status.
+@test "progress: a child that inherits the spinner traps never runs the prior handlers" {
+  _prog 'trap "echo PRIOR_EXIT=\$?" EXIT
+    trap "echo PRIOR_TERM; exit 143" TERM
+    trap "echo PRIOR_INT; exit 130" INT
+    _acq_spin_install_traps
+    _ACQ_SPIN_ACTIVE=1 _ACQ_SPIN_PID=999999
+    ( _acq_spin_cleanup_signal TERM; echo NOT_REACHED_TERM ); echo "CHILD_TERM_RC=$?"
+    ( _acq_spin_cleanup_signal INT; echo NOT_REACHED_INT ); echo "CHILD_INT_RC=$?"
+    ( _acq_spin_cleanup_exit 3; echo "CHILD_EXIT_RET=$?" )
+    [ "$_ACQ_SPIN_PID" = 999999 ] && echo OWNER_STATE_KEPT
+    _ACQ_SPIN_ACTIVE="" _ACQ_SPIN_PID=""
+    exit 3'
+  assert_failure 3
+  assert_line 'CHILD_TERM_RC=143'
+  assert_line 'CHILD_INT_RC=130'
+  assert_line 'CHILD_EXIT_RET=0'
+  assert_line 'OWNER_STATE_KEPT'
+  assert_line 'PRIOR_EXIT=3'
+  assert_equal "$(grep -c PRIOR_EXIT <<<"$output")" 1
+  refute_output --partial 'PRIOR_TERM'
+  refute_output --partial 'PRIOR_INT'
+  refute_output --partial 'NOT_REACHED'
 }
 
 # With no prior handler the subshell must die BY the signal, not merely exit

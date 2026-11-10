@@ -26,6 +26,16 @@ import time
 repo, stubdir = (Path(p).resolve() for p in sys.argv[1:3])
 shell = sys.argv[3]
 
+# A terminal's Ctrl-C reaches a shell whose SIGINT is at its default. A runner
+# started in the background by a non-interactive shell (`cmd &`, as a hook
+# runner or a parallel loop may do) instead hands every child SIGINT ignored,
+# and a shell cannot trap a signal that was ignored on entry. acq then rightly
+# ignores the SIGINT, the stub `create` runs to its end, and acq goes on past
+# create. Undo an inherited SIG_IGN here: a handler, unlike SIG_IGN, is reset
+# to the default across exec, so acq starts as it would from a terminal.
+signal.signal(signal.SIGINT, signal.default_int_handler)
+signal.signal(signal.SIGTERM, signal.SIG_DFL)
+
 # Intercept only `create`: record it, publish this process's PID (the one acq
 # registered as its backend child), and block until signalled. SIGINT is ignored
 # in an asynchronous child of a non-interactive shell, so only acq's own
@@ -137,6 +147,10 @@ def run_case(backend, sig):
         until(lambda: not alive(child) and not list(
             provenance.glob(f"provider-input/{backend}/{name}.*.lock")),
             master, output, "cleanup after exit", 30)
+        # The cursor is restored before the lock is released, but `until` stops
+        # as soon as it sees the release, possibly before reading those bytes.
+        # They are already in the PTY, so one more drain collects them.
+        drain(master, output)
         generations = list(provenance.glob(f"provider-input/{backend}/{name}.*/generations/*"))
         assert not generations, (case, "generation not discarded", generations)
         log = calls.read_text().splitlines()
