@@ -4843,33 +4843,215 @@ holding it; such an animator, if resumed after that, can still draw one frame.
 
 ---
 
-## 85. Windows: A Forced Kill of the Python acq Leaves the Session Child Running
+## 85. Windows: A Forced Kill of the Python acq Left the Session Child Running
+
+**Status:** Fixed. Earlier builds behave as described below.
 
 **Symptom:** On Windows, ending the Python acq from outside during `acq attach`,
 `acq shell`, `acq exec` or `acq run` (Task Manager's End task, `taskkill /F
-/PID <acq pid>`, or `Stop-Process`) ends acq at once, while the backend session
-(`msb.exe exec` or `sbx.exe exec`) keeps running in the console and holding it.
+/PID <acq pid>`, or `Stop-Process`) ended acq at once, while the backend session
+(`msb.exe exec` or `sbx.exe exec`) kept running in the console and holding it.
 
 **Cause:** On POSIX a SIGTERM or SIGHUP to acq during a session is passed on to
 the session child, which gets ten seconds to exit before acq kills it, and acq
 exits `128+N` only once the child is gone (`run_foreground` in
 `py-acq/src/acq_py/hostexec.py`). Windows has no catchable termination signal
 from another process: those tools call `TerminateProcess`, which no handler
-sees, so acq cannot pass anything on. What Windows does deliver, a Ctrl-Break
-in the console, reaches acq and the child alike; acq waits up to the same ten
-seconds for the child, ends it if needed, and exits 149 (128 plus SIGBREAK's
-number) without a `--json` envelope, as it does for a Ctrl-Break during any
-other command.
+sees, so acq could not pass anything on.
 
-**Resolution:** End the whole process tree instead: `taskkill /T /F /PID <acq
-pid>`, or press Ctrl-C or Ctrl-Break in the session's console. A session child
-already left behind can be ended the same way by its own PID.
+**Resolution:** Nothing to do as a user. The session child now runs in a Job
+object that kills its processes when the last handle to it closes
+(`_start_session` in `hostexec.py`, reusing the `StepJob` that bounded backend
+calls already use). acq holds the only handle, and a forced kill closes it, so
+the session and everything it started end with acq. The child is created
+suspended and resumed only once it is in the job. The job does not change the
+console, so the PTY, Ctrl-C and Ctrl-Break behave as before: a Ctrl-Break
+reaches acq and the child alike, acq waits up to ten seconds for the child,
+ends it if needed, and exits 149 (128 plus SIGBREAK's number) without a
+`--json` envelope. When the session exits normally, or after a Ctrl-Break, the
+job is released first, so a process the session left running on purpose keeps
+running. Where the job cannot be created or the child cannot be assigned to it,
+the session is started without one, as before.
 
-**Tracked:** run the session in a Job object that kills its processes when acq's
-handle closes (as `run_captured` already does for bounded backend calls), so a
-forced kill of acq takes the session with it. Unblock trigger: a report of a
-session left running after a forced kill, or the Windows default flip
-(ADR-0048m).
+Checked on Windows 11 with msb 0.7.7 and a real guest: `taskkill /F` of the
+acq interpreter (or of the venv launcher above it) during `acq exec` ended
+`msb.exe exec` within three seconds, where the previous build left it running;
+`acq shell` kept its PTY, Ctrl-C reached the guest (`sleep` exited 130 and the
+shell carried on), and a console Ctrl-Break ended acq with 149 and left no
+`msb.exe exec` behind. `msb.exe exec` starts no helper process of its own, and
+it does not start a stopped sandbox (the guest's `msb.exe machine` process is
+started by `create` or `start`, outside the session), so a forced kill no
+longer leaves anything running there.
+
+**Trade-off:** a process the session starts and that is still running when acq
+is force-killed now ends with acq, unless it was started with
+`CREATE_BREAKAWAY_FROM_JOB` (the job allows breakaway). For msb nothing does
+this. For sbx it was not checked, because sbx was not installed on the test
+host: if `sbx.exe exec`, or a command acq passes through to sbx, starts sbx's
+background service on demand as its own child, a forced kill of acq during
+that session also ends the service, and the next sbx command has to start it
+again. An ordinary exit, Ctrl-C or Ctrl-Break does not. Tracked: check this
+with a real `sbx.exe` on Windows at the next re-verification.
+
+---
+
+## 86. Windows: A Non-ASCII Secret Could Read Back Changed
+
+**Status:** Fixed. Earlier builds behave as described below.
+
+**Symptom:** After upgrading, on Windows, **every** secret containing
+characters outside ASCII (an accented letter, CJK text, an emoji) that an
+earlier build stored reads back changed, whatever code page it was stored
+under. Under the default code page 437, `café` now reads back as `caf├⌐`, so
+the sandbox is bound a value that does not work. Earlier builds themselves
+also read such a secret back changed when the console code page was a
+double-byte one (such as 932), or when it was stored and read under different
+code pages (for example `chcp 65001` in one window and 437 in another). ASCII
+values, including ones with quotes, backslashes, `$` or backticks, are not
+affected, before or after the upgrade.
+
+**Cause:** Both implementations encrypt with DPAPI through Windows PowerShell
+5.1, passing the value on stdin and reading the result on stdout. PowerShell
+decodes `[Console]::In` and encodes `[Console]::Out` with the console's code
+page, so the UTF-8 bytes acq sent were reinterpreted on the way in and out.
+Under the 437 default this happened to round-trip, but what DPAPI protected
+was not the value's UTF-8, and any other code page lost or changed bytes.
+Checked on Windows 11 with Python 3.12: under 932 three of eleven test values
+came back wrong, and values stored under 65001 or 932 came back wrong under
+437.
+
+**Resolution:** Nothing to do for new values. Both one-liners now carry only
+base64 over the pipes: the value goes in as base64 of its UTF-8 bytes and comes
+back the same way (`_PS_ENCRYPT` and `_PS_DECRYPT` in
+`py-acq/src/acq_py/secretstore.py`, `_acq_secret_windows_encrypt` and
+`_acq_secret_windows_decrypt` in `acq.backends/secret-store.sh`, still byte
+for byte the same). What an earlier build encrypted was the code-page-decoded
+text, not the value, and that is what now comes back, so after upgrading set
+every non-ASCII secret again, under the service and scope it was stored under:
+
+```bash
+acq secret set -g usai      # repeat for each non-ASCII secret
+```
+
+The stored envelope carries no marker telling the two formats apart: a new
+envelope header would be read as a plaintext value by earlier builds, which
+compare the header exactly, so a mixed install would bind the ciphertext as
+the secret. acq therefore cannot detect or warn about an old non-ASCII value.
+
+ASCII secrets stored by earlier builds read back unchanged.
+
+---
+
+## 87. Windows: Python acq and Git Bash Use Different Stores When USERPROFILE and HOMEPATH Differ
+
+**Symptom:** On Windows, with `HOME` unset, a secret or record written by the
+Python acq is not found by the Bash acq under Git Bash, or the reverse. It
+happens when `USERPROFILE` and `HOMEDRIVE`+`HOMEPATH` name different
+directories: `USERPROFILE` was changed, or the account's home directory is not
+its profile (a domain home share on `HOMEDRIVE`).
+
+**Cause:** With `HOME` unset, the two implementations take the home directory
+from the same variables in the opposite order. The Python acq uses
+`Path.home()` (`py-acq/src/acq_py/userdirs.py`), which reads `USERPROFILE`
+first and falls back to `HOMEDRIVE`+`HOMEPATH`. Git Bash sets `HOME` from
+`HOMEDRIVE`+`HOMEPATH` first and falls back to `USERPROFILE`. Checked on
+Windows 11 with Git for Windows 2.56 and Python 3.12:
+
+| Environment (`HOME` unset) | Python home | Git Bash `HOME` |
+|---|---|---|
+| `USERPROFILE`, `HOMEDRIVE`+`HOMEPATH` all the account profile | profile | profile |
+| `USERPROFILE` changed to a scratch directory | scratch | profile (from `HOMEPATH`) |
+| `HOMEPATH` changed as well | scratch | the new `HOMEPATH` |
+| `HOMEDRIVE` and `HOMEPATH` unset | scratch | scratch (from `USERPROFILE`) |
+
+The secret store, state and config all live under that home, so the two
+implementations then use different directories.
+
+**Resolution:** Set `HOME` (or the `XDG_*` variables) to the same absolute
+path for both implementations whenever `USERPROFILE` and
+`HOMEDRIVE`+`HOMEPATH` differ. Both honour an absolute `HOME` before anything
+else.
+
+---
+
+## 88. Windows: A Bash Provider-Input Lock Holds Off the Python acq for 15 Minutes
+
+**Symptom:** On Windows, a Python acq command on one sandbox (`create`, `run`,
+`rm`, `start`) waits and then fails with `timeout` although no other acq
+command is running. The remediation names a directory ending in `.lock` under
+`.../acq/provenance/provider-input/<backend>/` and says that a lock left by
+Bash acq counts as held for 15 minutes after it was taken.
+
+**Cause:** The Bash acq locks a sandbox by creating that directory and writing
+`PID IDENTITY` into its `owner` file. On POSIX the Python acq checks that the
+PID is still the same process and recovers a lock whose owner is gone
+(see [§79](#79-sandbox-lock-directory-without-an-owner-is-never-removed-automatically)).
+On Windows it cannot: Git Bash PIDs are not Windows PIDs, and `os.kill` there
+terminates a process rather than probing it. So the Python acq treats a Bash
+lock directory as held for 15 minutes after it was last modified (when its
+owner was written), then ignores it (`_BashLock._recent_on_windows` and
+`_BASH_WINDOWS_FRESH_S` in `py-acq/src/acq_py/lock.py`). A Bash command killed
+mid-create leaves the directory behind and blocks Python commands on that
+sandbox for the rest of the 15 minutes. For the same reason the Python acq
+never takes this directory on Windows, so a Bash command started while a
+Python command works on the same sandbox is not held back by it.
+
+**Resolution:**
+
+1. Make sure no acq command (Bash or Python) is running: in Git Bash, `ps`
+   lists no `acq` script; in PowerShell, `Get-Process bash, python
+   -ErrorAction SilentlyContinue` shows none started for acq.
+2. Remove the directory the message names, with its `owner` file:
+
+   ```powershell
+   Remove-Item -Recurse -LiteralPath '<the .lock directory from the message>'
+   ```
+
+3. Retry. Waiting until 15 minutes after the lock was taken also works.
+
+Do not run the Bash and the Python acq against the same sandbox at the same
+time on Windows.
+
+---
+
+## 89. Windows: Bash `acq create` Fails Validation of a Provider Kit's Normalizer
+
+**Symptom:** Under Git Bash on Windows, a Bash `acq create` (or `acq run`)
+whose provider kit carries provider input stops before the backend create
+with:
+
+```text
+provider input contract: C:\...\candidate-<n>\provider-input.json: normalizerPath must be an executable file
+acq(msb): error: provider input projection failed for '<name>'.
+```
+
+**Cause:** The pinned Patterns validator
+(`scripts/validate_provider_input_contract.py`, run by
+`acq_provider_input_prepare` in `acq.backends/common.sh`) requires an execute
+bit on the normalizer (`st_mode & 0o111`). Windows has no execute bit:
+CPython reports one only for `.exe`, `.bat`, `.cmd` and `.com` files, and the
+USAi kit's normalizer is `scripts/normalize-catalog.mjs`, so every Windows
+host fails. The bats suite replaces the validator with a stand-in, so it never
+saw this. Found by running a Bash create on Windows 11 (Git for Windows 2.56,
+Python 3.12) against the real validator with stubbed msb and sbx. A second
+fault on the same path is fixed: once the validator passed, reading the
+provider facts looked for the validator runtime at
+`<data dir>/provider-input-validator.current` instead of
+`<data dir>/provider-input-validator/provider-input-validator.current` (where
+`scripts/setup-provider-input-validator` puts it), fell back to a bare
+`python3` and, on Windows, reached the Microsoft Store alias
+(`_acq_provider_facts_python`). With both faults worked around, create,
+validate, materialize, publish, the backend create with the provider-input
+mount, and `acq rm` all completed for msb and sbx.
+
+**Resolution:** Use the Python acq on Windows (`ACQ_IMPL=python`), which does
+not run that validator. Tracked: skip the execute-bit check on Windows in the
+Patterns validator and bump `PATTERNS_KIT_REF`, or have acq run the pinned
+validator through a small launcher that reports execute bits on Windows. Also
+seen on the same run, and tracked with it: `scripts/setup-provider-input-validator`
+under Git Bash picks the Microsoft Store `python3` alias, installs under
+`XDG_DATA_HOME` while acq on Windows looks under `LOCALAPPDATA`, and its `ln
+-s` makes a full copy of the runtime that a second run cannot replace.
 
 ---
 
