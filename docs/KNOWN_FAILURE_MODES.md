@@ -5386,6 +5386,30 @@ Put every flag after the positionals, as the Python acq's help and README show.
 switches to `parse_intermixed_args` for `create`/`run` (with a test of each flag
 in each position).
 
+## 96. Parallel Bash Tests Intermittently Fail to Materialize an Offline Kit
+
+**Symptom:** Otherwise unrelated bats tests fail with
+`kit-translate: failed to materialize remote kit`, followed by a provider input
+projection error for either backend, then pass on rerun.
+
+**Cause:** `scripts/test-acq-lib.sh` used to publish offline kit specs under
+`BATS_RUN_TMPDIR` every time a test loaded the helper. These fixtures escaped
+the per-test HOME and cache isolation. The offline Git stub implements
+`checkout-index` by copying the shared spec. GNU `cp` can refuse a source
+replaced between its metadata check and open, even when the replacement uses
+an atomic rename: `skipping file ... as it was replaced while being copied`.
+`_kit_fetch_materialize` suppresses checkout stderr and emits the generic
+failure. Replacing the shared fixture concurrently reproduced that exact
+materialization error on the fifth iteration locally. No shared kit cache or
+lock timeout is needed to trigger it.
+
+**Resolution:** Create both offline kit fixtures inside each `make_stubs`
+call's private `STUBDIR`, which `cleanup_stubs` already removes. Tests cannot
+replace or customize another test's fixture. The regression in
+`test/bats/107-offline-kit-isolation.bats` checks fixture ownership and runs
+eight workers materializing distinct fixture contents twenty times each; it
+fails against the old harness. Product materialization behavior is unchanged.
+
 ---
 
 ## Contributing

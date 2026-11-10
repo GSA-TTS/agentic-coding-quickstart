@@ -142,13 +142,9 @@ export -f acq_test_stub_provider_input_boundary
 # pass. On a CI host with git + network this prevents a real fetch that would
 # otherwise hang.
 #
-# bats sources this helper once per @test (each in its own process), so a plain
-# `mktemp -d` here would leak one dir per test with no single EXIT trap to clean
-# them. Instead root a SINGLE shared offline-kit dir under bats' run-scoped
-# temp dir (BATS_RUN_TMPDIR, which bats removes at the end of the run); fall back
-# to a per-process mktemp only when run outside bats. The dir holds a stub spec
-# with no secrets. Publish each complete spec atomically: parallel workers can
-# read these paths while another worker sources this helper.
+# Create offline fixtures with make_stubs, under the private STUBDIR. A shared
+# run-scoped spec, even when published by rename, can make GNU cp refuse it
+# as replaced while being copied by another test's checkout-index stub.
 # _acq_test_tmp_base — where scratch directories go: TMPDIR only when it is
 # absolute, else /tmp, as acq_tmp_dir in acq.backends/userdirs.sh does. A
 # relative TMPDIR would put them under the current directory, and every stub
@@ -160,20 +156,16 @@ _acq_test_tmp_base() {
   esac
 }
 
-if [ -n "${BATS_RUN_TMPDIR:-}" ]; then
-  _ACQ_MSB_OFFLINE_KIT_DIR="${BATS_RUN_TMPDIR}/acq-offline-kit"
-  mkdir -p "$_ACQ_MSB_OFFLINE_KIT_DIR"
-else
-  _ACQ_MSB_OFFLINE_KIT_DIR=$(mktemp -d "$(_acq_test_tmp_base)/acq-nokit.XXXXXX")
-fi
-printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "$_ACQ_MSB_OFFLINE_KIT_DIR/spec.yaml.$$" \
-  && mv -f "$_ACQ_MSB_OFFLINE_KIT_DIR/spec.yaml.$$" "$_ACQ_MSB_OFFLINE_KIT_DIR/spec.yaml" || return 1
-_ACQ_AGENT_OFFLINE_KIT_DIR="${BATS_RUN_TMPDIR:-$_ACQ_MSB_OFFLINE_KIT_DIR}/acq-opencode-kit"
-mkdir -p "$_ACQ_AGENT_OFFLINE_KIT_DIR"
-printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: opencode\ndisplayName: OpenCode\ndescription: offline agent kit\nagent:\n  name: opencode\n  entrypoint: opencode\n' > "$_ACQ_AGENT_OFFLINE_KIT_DIR/spec.yaml.$$" \
-  && mv -f "$_ACQ_AGENT_OFFLINE_KIT_DIR/spec.yaml.$$" "$_ACQ_AGENT_OFFLINE_KIT_DIR/spec.yaml" || return 1
-export ACQ_MSB_KIT_LOCAL_DIR="$_ACQ_MSB_OFFLINE_KIT_DIR"
-export ACQ_TEST_AGENT_KIT="$_ACQ_AGENT_OFFLINE_KIT_DIR"
+_acq_test_offline_kits() {
+  _ACQ_MSB_OFFLINE_KIT_DIR="$STUBDIR/acq-offline-kit"
+  mkdir -p "$_ACQ_MSB_OFFLINE_KIT_DIR" || return 1
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "$_ACQ_MSB_OFFLINE_KIT_DIR/spec.yaml" || return 1
+  _ACQ_AGENT_OFFLINE_KIT_DIR="$STUBDIR/acq-opencode-kit"
+  mkdir -p "$_ACQ_AGENT_OFFLINE_KIT_DIR" || return 1
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: opencode\ndisplayName: OpenCode\ndescription: offline agent kit\nagent:\n  name: opencode\n  entrypoint: opencode\n' > "$_ACQ_AGENT_OFFLINE_KIT_DIR/spec.yaml" || return 1
+  export ACQ_MSB_KIT_LOCAL_DIR="$_ACQ_MSB_OFFLINE_KIT_DIR"
+  export ACQ_TEST_AGENT_KIT="$_ACQ_AGENT_OFFLINE_KIT_DIR"
+}
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +180,7 @@ export ACQ_TEST_AGENT_KIT="$_ACQ_AGENT_OFFLINE_KIT_DIR"
 
 make_stubs() {
   STUBDIR=$(mktemp -d "$(_acq_test_tmp_base)/acq-test.XXXXXX")
+  _acq_test_offline_kits || return 1
   CALLS="$STUBDIR/calls.log"
   : >"$CALLS"
   # Preserve the base PATH (with coreutils etc.) but prepend the stub dir.
