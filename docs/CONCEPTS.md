@@ -39,7 +39,8 @@ covered by the [Python Software Foundation License Version 2](https://docs.pytho
 the release includes its notice as `PYTHON-NOTICE.txt`.
 
 The Windows x64 archive also carries acq's own managed runtime for the Python
-implementation (`ACQ_IMPL=python`): CPython's embedded distribution, pinned and
+implementation, which is the Windows default (`ACQ_IMPL` unset or `python`;
+ADR-0048m): CPython's embedded distribution, pinned and
 SHA-256 verified by release CI, unpacked at `py-acq\runtime\` next to the
 readable source in `py-acq\src\` (`scripts/stage-windows-runtime`). Windows does
 not ship Python: run with arguments, as acq runs it, its `python.exe` App

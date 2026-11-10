@@ -1,10 +1,12 @@
 # Windows CI: the Windows-only surface that the Linux and macOS lanes never run.
 #
 #   windows           pytest on py-acq (native Python 3.12); acq.cmd and acq.ps1
-#                     smoke tests for ACQ_IMPL=python and the default Bash path;
-#                     install.ps1 -DryRun under PowerShell 7 and Windows
-#                     PowerShell 5.1; and the managed runtime staged with
-#                     scripts/stage-windows-runtime, as the release job does.
+#                     smoke tests for the default (ACQ_IMPL unset: the Python
+#                     implementation, ADR-0048m), ACQ_IMPL=python and the
+#                     ACQ_IMPL=bash opt-in; install.ps1 -DryRun under
+#                     PowerShell 7 and Windows PowerShell 5.1; and the managed
+#                     runtime staged with scripts/stage-windows-runtime, as the
+#                     release job does, then run through acq.cmd by default.
 #   windows-git-bash  the bats files that exercise Windows behaviour, run under
 #                     Git Bash: 55-version (the Bash acq), 06-windows-install,
 #                     117-msys-path-forms (the host-form and guest-form paths
@@ -212,23 +214,28 @@ jobs:
       # acq.cmd runs acq.ps1 under Windows PowerShell 5.1, as users run it; acq.ps1
       # invoked directly runs under PowerShell 7. No backend is installed on the
       # runner, so each verb reports none, but it must exit 0 and emit a
-      # well-formed envelope for that verb.
-      - name: Smoke-test acq.cmd and acq.ps1 (ACQ_IMPL=python)
-        env:
-          ACQ_IMPL: python
+      # well-formed envelope for that verb. An unset ACQ_IMPL is the Windows
+      # default (ADR-0048m) and must select the Python implementation, as
+      # ACQ_IMPL=python does. The checkout has no managed runtime, so both find
+      # setup-python's interpreter on PATH.
+      - name: Smoke-test acq.cmd and acq.ps1 (ACQ_IMPL unset and python)
         run: |
-          foreach ($launcher in @('.\acq.cmd', '.\acq.ps1')) {
-            foreach ($verb in @('version', 'doctor', 'backend list')) {
-              $verbArgs = @($verb -split ' ') + '--json'
-              $out = & $launcher @verbArgs
-              $code = $LASTEXITCODE
-              if ($code -ne 0) { throw "${launcher} ${verb} --json exited ${code}" }
-              $doc = ($out -join "`n") | ConvertFrom-Json
-              if ($doc.command -ne $verb) { throw "${launcher} ${verb}: envelope command is '$($doc.command)'" }
-              if ($verb -eq 'version' -and $doc.data.impl -ne 'python') {
-                throw "${launcher} version: impl is '$($doc.data.impl)', expected python"
+          foreach ($impl in @('', 'python')) {
+            if ($impl) { $env:ACQ_IMPL = $impl } else { Remove-Item Env:ACQ_IMPL -ErrorAction SilentlyContinue }
+            $label = if ($impl) { "ACQ_IMPL=$impl" } else { 'ACQ_IMPL unset' }
+            foreach ($launcher in @('.\acq.cmd', '.\acq.ps1')) {
+              foreach ($verb in @('version', 'doctor', 'backend list')) {
+                $verbArgs = @($verb -split ' ') + '--json'
+                $out = & $launcher @verbArgs
+                $code = $LASTEXITCODE
+                if ($code -ne 0) { throw "${launcher} ${verb} --json (${label}) exited ${code}" }
+                $doc = ($out -join "`n") | ConvertFrom-Json
+                if ($doc.command -ne $verb) { throw "${launcher} ${verb} (${label}): envelope command is '$($doc.command)'" }
+                if ($verb -eq 'version' -and $doc.data.impl -ne 'python') {
+                  throw "${launcher} version (${label}): impl is '$($doc.data.impl)', expected python"
+                }
+                Write-Host "ok: ${launcher} ${verb} (${label})"
               }
-              Write-Host "ok: ${launcher} ${verb}"
             }
           }
 
@@ -245,9 +252,11 @@ jobs:
           # The runner exits a pwsh step with the last native exit code (2 here).
           exit 0
 
-      # ACQ_IMPL unset: the launchers find Git for Windows' bash.exe and run the
-      # Bash acq.
-      - name: Smoke-test acq.cmd and acq.ps1 (default Bash path)
+      # ACQ_IMPL=bash, the explicit opt-in: the launchers find Git for Windows'
+      # bash.exe and run the Bash acq.
+      - name: Smoke-test acq.cmd and acq.ps1 (ACQ_IMPL=bash)
+        env:
+          ACQ_IMPL: bash
         run: |
           foreach ($launcher in @('.\acq.cmd', '.\acq.ps1')) {
             $out = & $launcher version
@@ -312,10 +321,16 @@ jobs:
           "$rt" -P -m acq_py version --json > acq-version.json
           python3 -c "import json; d = json.load(open('acq-version.json')); assert d['data']['impl'] == 'python', d"
 
-      - name: Smoke-test the staged layout through acq.cmd (managed runtime)
-        env:
-          ACQ_IMPL: python
+      # ACQ_IMPL unset, as an installed acq runs by default: acq.cmd must pick the
+      # managed runtime beside it over setup-python's interpreter on PATH.
+      - name: Smoke-test the staged layout through acq.cmd (default, managed runtime)
         run: |
+          Remove-Item Env:ACQ_IMPL -ErrorAction SilentlyContinue
+          $out = & .\acq-runtime-smoke\acq.cmd version --json
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { throw "staged acq.cmd version --json exited ${code}" }
+          $doc = ($out -join "`n") | ConvertFrom-Json
+          if ($doc.data.impl -ne 'python') { throw "staged acq.cmd version: impl is '$($doc.data.impl)', expected python" }
           $out = & .\acq-runtime-smoke\acq.cmd doctor --json
           $code = $LASTEXITCODE
           if ($code -ne 0) { throw "staged acq.cmd doctor --json exited ${code}" }
