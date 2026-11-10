@@ -107,6 +107,18 @@ irm https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v4.2.
 > instead: they install a release archive only, and do not install `msb`, pick
 > Homebrew, npm or a clone, or (on Windows) check virtualization or install Git
 > Bash. See [This fork's installers](docs/howto/acq.md#this-forks-installers).
+>
+> **Windows on this fork:** the installed `acq` runs the Python implementation by
+> default, with the managed Python runtime the Windows archive bundles
+> (`py-acq\runtime\python.exe`), so it needs neither Git Bash nor a system
+> Python. `ACQ_RUNTIME` (an absolute path to `python.exe`) selects an
+> IT-approved interpreter instead, and `ACQ_IMPL=bash` selects the Bash
+> implementation, which needs Git for Windows. If no interpreter qualifies, `acq`
+> stops with the remedies rather than falling back to Bash. The launcher runs
+> under your PowerShell execution policy, so a default Windows 11 client needs
+> `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once (see
+> [First-Run Snags](#first-run-snags)). Details:
+> [Which implementation runs on Windows](docs/howto/acq.md#which-implementation-runs-on-windows).
 
 That's it — you don't have to choose *how* to install. The installer:
 
@@ -296,6 +308,9 @@ To allow local scripts for **your user only**, then re-run the command:
 ```powershell
 Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 ```
+
+This is a one-time prerequisite: `acq.cmd` starts `acq.ps1` under your own
+policy and deliberately does not pass `-ExecutionPolicy Bypass`.
 
 `RemoteSigned` runs local scripts but still requires a signature on scripts
 downloaded from the internet. On a **managed device** the policy may be set by

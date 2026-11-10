@@ -9,8 +9,13 @@ mounting the real workspace. Some behaviour also differs; for example,
 a kit outside the pinned built-in bundle is applied only when its ref is pinned
 to a full commit, and a local kit directory is copied into acq's private cache
 and checked there before it is applied. The dated correction in
-ADR-0047m lists the gaps and the qualification state. The Bash `acq` stays the default implementation
-(`ACQ_IMPL` unset); `ACQ_IMPL=python` selects this one.
+ADR-0047m lists the gaps and the qualification state. On macOS and Linux the
+Bash `acq` stays the default implementation (`ACQ_IMPL` unset), and
+`ACQ_IMPL=python` selects this one. On Windows, `acq.cmd` and `acq.ps1` run
+this implementation by default with the managed runtime the Windows archive
+bundles (ADR-0048m); `ACQ_IMPL=bash` selects the Bash one there, and
+`ACQ_RUNTIME` names another interpreter (see
+[`docs/howto/acq.md`](../docs/howto/acq.md#which-implementation-runs-on-windows)).
 
 > AI-assisted; owner: Bret Mogilefsky.
 
@@ -732,7 +737,8 @@ line, such as `# nosec B105 # an error code`. Do not widen the skip lists in
 
 `.github/workflows/windows.yml` runs on a Windows runner when a pull request
 touches Windows-relevant paths. It runs pytest, smoke tests of `acq.cmd` and
-`acq.ps1` for both `ACQ_IMPL` paths, `install.ps1 -DryRun` under PowerShell 7
+`acq.ps1` with `ACQ_IMPL` unset (the Python default), `python` and `bash`,
+`install.ps1 -DryRun` under PowerShell 7
 and Windows PowerShell 5.1, the release job's managed-runtime staging and
-smoke check, and a Git Bash run of `55-version.bats` and
+smoke check (the staged layout run through `acq.cmd` with `ACQ_IMPL` unset), and a Git Bash run of `55-version.bats` and
 `06-windows-install.bats`.

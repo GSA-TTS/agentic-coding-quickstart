@@ -1,6 +1,6 @@
 ---
 title: "Windows defaults to the Python implementation with acq's managed runtime"
-status: proposed
+status: accepted
 date: 2026-11-08
 decision_makers: ["Bret Mogilefsky"]
 category: architecture
@@ -175,6 +175,45 @@ When the gates are met, the launcher change is covered by:
   by `acq version`, `acq doctor` and a create/rm cycle on each Windows backend.
 - **The re-recorded Tier-3 `windows-x64` ledger entry** described in gate 5.
 
+## Amendment (2026-11-10): accepted; the default flips now
+
+The project lead approved the flip on 2026-11-10, before every gate above holds.
+This ADR is `accepted`, and from this change on `acq.cmd` and `acq.ps1` treat an
+unset (or empty) `ACQ_IMPL` as `python`. The Decision section otherwise stands as
+written: the interpreter order, `-P`, the fail-closed message (which names
+`ACQ_IMPL=bash` among its remedies) and exit 2 for an unknown value. The
+sentence "The default flips only when every gate below holds" no longer
+applies. The gates stay as the record of what the default still owes. Gates
+that need a live Tier-3 run or a release no longer block the default; they are
+open follow-ups, tracked under Links.
+
+| Gate | State | Evidence |
+|------|-------|----------|
+| 1. Runtime | Met, with leftovers | The release workflow's "Build release assets" step stages the managed runtime and acq's source with `scripts/stage-windows-runtime`. An archive built the same way from this change (the pinned 3.14.10 embeddable ZIP, its SHA-256 checked) was installed with `install.ps1 -Source <dir>` on a Windows 11 VM, under Windows PowerShell 5.1 and the user's own `RemoteSigned` policy, with the profile and acq state directories redirected. With `ACQ_IMPL` unset, `acq version` reported `"impl": "python"` and `acq doctor` reported `app-private runtime present (python.org-embedded)`. `acq version` still ran with only `System32` on `PATH`, and with the runtime moved away as well it failed closed with the message. The Windows CI job runs the staged layout through `acq.cmd` with `ACQ_IMPL` unset. Leftovers: that archive left out the provider-input validator wheelhouse and runtime, which come from CI-built artifacts and are not used by the Python implementation. The runtime patch cadence is still a proposal in `py-acq/README.md`, with no owner. |
+| 2. Known gaps closed | Met, with leftovers | The findings this gate names are fixed in the Python implementation: secrets are bound to their hosts on both backends (msb `--secret ENV@HOST`, sbx custom secrets); the built-in kits are applied (`kit_msb.py`, `kit_sbx.py`); the persisted backend is honoured; and Bash-created state is read and imported (`legacy_bash.py`, `migration.py`, reported by `acq doctor`). The three gap issues stay open for live checks and low-severity items listed in them (Links). |
+| 3. Sandbox-control parity | Open | No Tier-3 oracle assertion has been run live on a Windows backend for credential binding, network policy, the read-only trusted-config mount or kits. The read-only mount is not requested on Windows by either implementation (KNOWN_FAILURE_MODES §54). Needs live Tier-3 runs; tracked with the re-qualification checklist (Links). |
+| 4. Command parity | Met, with leftovers | Every subcommand the Bash `acq help` lists is implemented in the Python CLI (ADR-0047m, correction and its 2026-11-10 update). `start` and `restart` run on msb and refuse on sbx, as in Bash. `acq configure` has no accepted gaps left (gate 4 updates above). One accepted gap remains: `--clone` on `run`/`create`, with `ACQ_CLONE=1` refused rather than ignored. Its replacement is `ACQ_IMPL=bash acq run AGENT PATH --clone` (KNOWN_FAILURE_MODES §67), which on Windows is subject to the Git Bash limits in KNOWN_FAILURE_MODES §89. |
+| 5a. Windows CI job | Met | `.github/workflows/windows.yml` runs pytest on Windows, which includes the vector corpus (`py-acq/tests/test_vectors.py`) and `py-acq/tests/test_windows_launchers.py`. It smoke-tests both launchers with `ACQ_IMPL` unset, `python` and `bash`, and runs a staged managed runtime through `acq.cmd` with `ACQ_IMPL` unset. |
+| 5b. Tier-3 `windows-x64` transcript | Open | Needs a live Tier-3 run from a gate-1 install with `ACQ_IMPL` unset. Tracked with the re-qualification checklist (Links). |
+| 5c. Tier-3 surface | Open | `TIER3_SURFACE` in `qualification/matrix.py` does not list the launchers, `install.ps1` or `scripts/stage-windows-runtime`, and `TIER3_SURFACE_EXCLUSIONS` excludes `runtime.py` under ADR-0044m's rule for modules reached only through `doctor`. The surface applies to every cell, so adding Windows-only files would also expire the macOS and Linux cells. Changing that is a qualification decision of its own, tracked with the re-qualification checklist (Links). |
+| 6. Documentation | Met | The README, `docs/howto/acq.md` (the Windows install and validation sections), `docs/CONCEPTS.md`, `py-acq/README.md` and ADR-0047m describe the managed runtime, the Windows default, `ACQ_IMPL=bash`, `ACQ_RUNTIME` and the `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` prerequisite. |
+
+The Verification section is met in part:
+
+- **Met:** the CI job's launcher cases. `py-acq/tests/test_windows_launchers.py`
+  covers each bullet: the default runs `py-acq\runtime\python.exe -P -m acq_py`;
+  `ACQ_IMPL=bash` reaches Git Bash; an unknown value exits 2; with no managed
+  runtime, an absolute `ACQ_RUNTIME` is honoured and a relative one refused; a
+  `python.exe` that fails the probe, the real App Execution Alias stub (where
+  present) and relative `PATH` entries are skipped; and with nothing qualifying
+  the launcher fails closed without starting Bash. On the Windows 11 VM these
+  tests passed under Windows PowerShell 5.1 and PowerShell 7.4, and
+  `test/bats/06-windows-install.bats` passed under Git Bash.
+- **Met in part:** the install of a gate-1 archive with `acq version` and
+  `acq doctor` (gate 1 above). The create/rm cycle on each Windows backend is
+  still open; it needs live backends.
+- **Open:** the re-recorded Tier-3 `windows-x64` ledger entry (gate 5b).
+
 ## Links
 
 - ADR-0041m (v1 replaces Bash), ADR-0042m (runtime ownership), ADR-0047m
@@ -186,3 +225,8 @@ When the gates are met, the launcher change is covered by:
 - Release assets: mogul/agentic-coding-quickstart#111
 - Windows CI: mogul/agentic-coding-quickstart#122
 - Bash `create`/`rm` under Git Bash: mogul/agentic-coding-quickstart#128
+- Tier-3 re-qualification, including the `windows-x64` transcript (gate 5b), the
+  Windows sandbox-control oracle assertions (gate 3) and the Tier-3 surface
+  (gate 5c): mogul/agentic-coding-quickstart#60
+- Offline-install completeness transcript, which needs a release:
+  mogul/agentic-coding-quickstart#61

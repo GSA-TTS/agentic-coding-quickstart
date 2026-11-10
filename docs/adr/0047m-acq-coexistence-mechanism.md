@@ -142,6 +142,20 @@ platform currently has a current Tier-3 qualification for the Python
 implementation. `python3 -m qualification.gate check` is the authority, not this
 note.
 
+## Update (2026-11-10): Windows defaults to the Python implementation
+
+ADR-0048m is accepted. On Windows, `acq.cmd` and `acq.ps1` now treat an unset
+`ACQ_IMPL` as `python`, and `bash` is the explicit opt-in to the Git Bash path.
+So "default behaviour is unchanged" (Consequences) and "unset or `bash`: the
+existing Bash body" (Decision) now hold for the Bash `acq` script, which is
+what runs on macOS and Linux and when that script is started directly from a
+Git Bash prompt, but not for the Windows launchers. The `acq.ps1` resolution
+described above also changed: the order is an absolute `ACQ_RUNTIME` (a
+relative value is refused), the managed `py-acq\runtime\python.exe`, then a
+drive-rooted or UNC `PATH` entry that passes an isolated 3.12+ probe, run with
+`-P`, and it fails closed rather than starting Bash when nothing qualifies
+(ADR-0048m, Decision).
+
 ## Links
 
 - Command surface and parity gate: ADR-0038m, ADR-0048m
