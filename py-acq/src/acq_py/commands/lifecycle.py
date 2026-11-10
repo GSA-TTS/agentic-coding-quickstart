@@ -62,20 +62,27 @@ _ADDRESSABLE_SUBSTRATE_GAPS = frozenset({"nix", "devenv", "direnv", "agent-user"
 _UNADDRESSABLE_SUBSTRATE_GAPS = frozenset({"non-linux", "read-only-filesystem"})
 
 
-def _resolve_image(flag_image: str | None, agent: str) -> str:
+def _resolve_image(flag_image: str | None, agent: str, backend: str = "msb", *, notice: bool = True) -> str:
     """Resolve the base image (ADR-0022 precedence).
 
-    ``--image`` flag, then ``ACQ_IMAGE``, then ``ACQ_MSB_IMAGE``, then the
-    devenv-shell default for every agent (ADR-0030).
+    On msb, ``ACQ_MSB_IMAGE`` wins over the neutral image with a notice.
+    Otherwise a local flag wins over the global flag, then ``ACQ_IMAGE``,
+    then the devenv-shell default for every agent (ADR-0030).
     """
+    neutral = flag_image or os.environ.get("ACQ_IMAGE")
+    specific = os.environ.get("ACQ_MSB_IMAGE") if backend == "msb" else None
+    if specific:
+        if notice and neutral and specific != neutral:
+            print("acq(msb): both ACQ_MSB_IMAGE and a neutral image (--image/ACQ_IMAGE) are set;\n"
+                  f"acq(msb):   using the backend-specific ACQ_MSB_IMAGE='{specific}'\n"
+                  "acq(msb):   (most-specific wins; see ADR-0022). Unset ACQ_MSB_IMAGE to use the\n"
+                  f"acq(msb):   neutral image '{neutral}'.", file=sys.stderr)
+        return specific
     if flag_image:
         return flag_image
     acq_image = os.environ.get("ACQ_IMAGE")
     if acq_image:
         return acq_image
-    msb_image = os.environ.get("ACQ_MSB_IMAGE")
-    if msb_image:
-        return msb_image
     return common._default_image_for_agent(agent)
 
 
@@ -223,6 +230,8 @@ class _CreateOpts:
     publish: tuple[str, ...] = ()
     extras: tuple[str, ...] | None = None
     clone: bool = False
+    extra_workspaces: tuple[str, ...] = ()
+    workspace_read_only: bool = False
 
     def extra_refs(self) -> list[str] | None:
         return None if self.extras is None else list(self.extras)
@@ -331,7 +340,8 @@ def _new_msb_sandbox(
     if exit_code is not None:
         return None, exit_code
     try:
-        data = _create_sandbox("msb", agent, workspace, name, image, plan.agent_kit, plan=plan, clone=opts.clone)
+        data = _create_sandbox("msb", agent, workspace, name, image, plan.agent_kit, plan=plan, clone=opts.clone,
+                               extra_workspaces=opts.extra_workspaces, workspace_read_only=opts.workspace_read_only)
     except common._ADAPTER_ERRORS as exc:
         return None, common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
     result, exit_code = _apply_msb_kits(name, plan, steps, command, emit_json, ro_required=data["ro_host_config"])
@@ -373,7 +383,7 @@ def _new_sbx_sandbox(
     does not add its own OpenCode kit as well. ``opts.clone`` is sbx's
     native ``--clone`` (ADR-0027).
     """
-    image = _resolve_image(image_flag, agent)
+    image = _resolve_image(image_flag, agent, "sbx")
     plan, exit_code = _plan_sbx_kits(agent, cli_kits, image, command, emit_json, opts.extra_refs())
     if plan is None:
         return None, exit_code
@@ -397,7 +407,8 @@ def _new_sbx_sandbox(
     try:
         data = _create_sandbox("sbx", agent, workspace, name, image, plan.agent_kit,
                                sbx_create=("shell" if generic else agent, prepared.flags), sbx_extra=mount,
-                               clone=opts.clone)
+                               clone=opts.clone, extra_workspaces=opts.extra_workspaces,
+                               workspace_read_only=opts.workspace_read_only)
     except common._ADAPTER_ERRORS as exc:
         _sbx_provider_abandon(name, generation, created=True)
         return None, common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
@@ -507,7 +518,9 @@ def _finish_sbx_create(name: str, agent: str, plan: _KitPlan, token: str, data: 
             kits.kit_applied_write("sbx", name, plan.agent_kit, plan.entrypoint or plan.agent_kit)
         kits.provenance_write("sbx", name)
         state.record_write("sbx", name, agent=agent, workspace=data["workspace"], image=data["image"],
-                           clone=True if data.get("clone") else None)
+                           clone=True if data.get("clone") else None,
+                           extra_workspaces=data.get("extra_workspaces"),
+                           workspace_read_only=data.get("workspace_read_only", False))
     except OSError as exc:
         raise sbx.SbxError(
             errors.FAILURE, f"could not record the applied kits for sandbox '{name}': {exc.strerror or exc}",
@@ -674,7 +687,7 @@ def _reattach_workspace(
         return None, gate
     recorded = (record or {}).get("workspace")
     if recorded:
-        overlap = common._workspace_overlap_failure("run", recorded, emit_json)
+        overlap = common._recorded_workspaces_failure("run", record, emit_json)
         if overlap is not None:
             return None, overlap
     return (record, recorded or typed), None
@@ -704,6 +717,8 @@ def _create_sandbox(
     sbx_extra: tuple[list[str], list[str]] = ([], []),
     clone: bool = False,
     clone_src: str | None = None,
+    extra_workspaces: tuple[str, ...] = (),
+    workspace_read_only: bool = False,
 ) -> dict:
     """Create + exec-ready gate + record write; returns the result record data.
 
@@ -738,7 +753,8 @@ def _create_sandbox(
             clone_src = msb_clone.setup(name, workspace, lambda n: _exists_quietly("msb", n))
     try:
         return _create_guest(backend, adapter, agent, workspace, name, image, plan,
-                             sbx_create=sbx_create, sbx_extra=sbx_extra, clone=clone, clone_src=clone_src)
+                             sbx_create=sbx_create, sbx_extra=sbx_extra, clone=clone, clone_src=clone_src,
+                             extra_workspaces=extra_workspaces, workspace_read_only=workspace_read_only)
     except BaseException:
         if fresh_clone:
             _drop_fresh_clone(adapter, name)
@@ -749,6 +765,7 @@ def _create_guest(
     backend: str, adapter, agent: str, workspace: str, name: str, image: str, plan: _KitPlan | None, *,
     sbx_create: tuple[str, list[str]] | None, sbx_extra: tuple[list[str], list[str]], clone: bool,
     clone_src: str | None,
+    extra_workspaces: tuple[str, ...], workspace_read_only: bool,
 ) -> dict:
     """The body of :func:`_create_sandbox` once any scratch clone exists."""
     kit_set = plan.kits if plan else []
@@ -759,22 +776,25 @@ def _create_guest(
     with _store_reading(error_cls, "nothing was created"):  # raised before anything was created
         if backend == "sbx":
             sbx_agent, kit_flags = sbx_create or (agent, [])
-            adapter.create(name, image, workspace, agent=sbx_agent, kit_flags=kit_flags,
-                           extra_workspaces=sbx_extra[0], env=sbx_extra[1], clone=clone)
+            adapter.create(name, image, workspace + (":ro" if workspace_read_only else ""), agent=sbx_agent, kit_flags=kit_flags,
+                           extra_workspaces=[*extra_workspaces, *sbx_extra[0]], env=sbx_extra[1], clone=clone)
             # Recorded at once, so no verb attaches to the guest while its kits are unconfirmed.
             _write_record(backend, name, agent=agent, workspace=workspace, image=image, ro_host_config=False,
-                          kits_unconfirmed=True, clone=cloned)
+                          kits_unconfirmed=True, clone=cloned, extra_workspaces=extra_workspaces,
+                          workspace_read_only=workspace_read_only)
         else:
             ro_mount = security.ro_mount_supported()
             secret_bindings, port_mappings = _msb_create(name, image, workspace, kit_set, ro_mount=ro_mount,
                                                          overrides=plan.publish if plan else (),
                                                          preferred=dict(plan.preferred) if plan else None,
-                                                         clone_src=clone_src)
+                                                         clone_src=clone_src, extra_workspaces=extra_workspaces,
+                                                         workspace_read_only=workspace_read_only)
         if not _wait_exec_ready(backend, name):
             _not_exec_ready(backend, adapter, name, error_cls)
     _fresh_guest(backend, adapter, name, ro_mount=ro_mount)
     _write_record(backend, name, agent=agent, workspace=workspace, image=image, ro_host_config=ro_mount,
-                  kits_unconfirmed=unconfirmed, clone=cloned)
+                  kits_unconfirmed=unconfirmed, clone=cloned, extra_workspaces=extra_workspaces,
+                  workspace_read_only=workspace_read_only)
     data: dict = {
         "name": name,
         "backend": backend,
@@ -783,6 +803,10 @@ def _create_guest(
         "state": "running",
         "image": image,
     }
+    if extra_workspaces:
+        data["extra_workspaces"] = list(extra_workspaces)
+    if workspace_read_only:
+        data["workspace_read_only"] = True
     if cloned:
         data["clone"] = True
     if secret_bindings is not None:
@@ -823,7 +847,8 @@ def _fresh_guest(backend: str, adapter, name: str, *, ro_mount: bool) -> None:
 
 
 def _write_record(backend: str, name: str, *, agent: str, workspace: str, image: str, ro_host_config: bool,
-                  kits_unconfirmed: bool = False, clone: bool = False) -> None:
+                  kits_unconfirmed: bool = False, clone: bool = False, extra_workspaces: tuple[str, ...] = (),
+                  workspace_read_only: bool = False) -> None:
     """Write the new guest's host record, or remove the guest and raise the adapter's error.
 
     Without its host record the guest is unusable (run/attach refuse a sandbox
@@ -833,7 +858,8 @@ def _write_record(backend: str, name: str, *, agent: str, workspace: str, image:
         state.record_write(backend, name, agent=agent, workspace=workspace, image=image,
                            ro_host_config=True if ro_host_config else None,
                            kits_unconfirmed=True if kits_unconfirmed else None,
-                           clone=True if clone else None)
+                           clone=True if clone else None, extra_workspaces=list(extra_workspaces),
+                           workspace_read_only=workspace_read_only)
     except OSError as exc:
         removed = _remove_confirmed(common._adapter(backend), name)
         error_cls = sbx.SbxError if backend == "sbx" else msb.MsbError
@@ -848,7 +874,8 @@ def _write_record(backend: str, name: str, *, agent: str, workspace: str, image:
 
 def _msb_create(name: str, image: str, workspace: str, kit_set: list[kit_msb.Kit], *, ro_mount: bool,
                 overrides: tuple[str, ...] = (), preferred: dict[str, int] | None = None,
-                clone_src: str | None = None) -> tuple[list[str], list[dict]]:
+                clone_src: str | None = None, extra_workspaces: tuple[str, ...] = (),
+                workspace_read_only: bool = False) -> tuple[list[str], list[dict]]:
     """``msb create`` with the kit set's flags; its secret bindings and declared port mappings.
 
     ``clone_src`` is a scratch clone to mount at ``workspace``'s guest path.
@@ -878,11 +905,12 @@ def _msb_create(name: str, image: str, workspace: str, kit_set: list[kit_msb.Kit
     if generation is not None:
         flags += provider_input.msb_flags(generation)
     # Host ssh-agent and host socket forwards (ADR-0021): opt-in through SSH_AUTH_SOCK.
-    flags += ssh_agent.vsock_flags(name, [workspace])
+    flags += ssh_agent.vsock_flags(name, [workspace, *(p.removesuffix(":ro") for p in extra_workspaces)])
     try:
         bindings = msb.create(
             name, image, workspace, memory=msb.DEFAULT_MEMORY, cpus=msb.DEFAULT_CPUS,
             egress_kits=kit_msb.egress_names(kit_set), kit_flags=flags, clone_source=clone_src,
+            extra_workspaces=list(extra_workspaces), workspace_read_only=workspace_read_only,
         ) or []
     except BaseException:
         _provider_abandon(name, generation)
@@ -1133,6 +1161,25 @@ def _create_opts(parsed, command: str, backend: str, emit_json: bool) -> tuple[_
     return _CreateOpts(publish=tuple(pairs), clone=common.clone_requested(parsed)), None
 
 
+def _workspace_options(parsed, command: str, backend: str, opts: _CreateOpts,
+                       emit_json: bool) -> tuple[str | None, _CreateOpts, int | None]:
+    """Validate every mount, keeping read-only markers out of host paths and names."""
+    specs = [parsed.path, *getattr(parsed, "extra_paths", [])]
+    mounts = []
+    for spec in specs:
+        path = spec.removesuffix(":ro") if spec else spec
+        workspace, failure = common._validate_workspace(command, path, emit_json)
+        if failure is not None:
+            return None, opts, failure
+        assert workspace is not None
+        mounts.append(workspace)
+    primary = mounts[0]
+    extras = tuple(common._mount_workspace(backend, path) + (":ro" if spec.endswith(":ro") else "")
+                   for path, spec in zip(mounts[1:], specs[1:], strict=True))
+    return primary, dataclasses.replace(opts, extra_workspaces=extras,
+                                       workspace_read_only=bool(parsed.path and parsed.path.endswith(":ro"))), None
+
+
 def run_create(parsed, emit_json: bool, backend: str) -> int:
     with _provider_kits_flag(parsed):
         return _run_create(parsed, emit_json, backend)
@@ -1159,7 +1206,7 @@ def _run_create(parsed, emit_json: bool, backend: str) -> int:
         exit_code = _clone_path_failure("create", backend, parsed.path, emit_json)
         if exit_code is not None:
             return exit_code
-    workspace, exit_code = common._validate_workspace("create", parsed.path, emit_json)
+    workspace, opts, exit_code = _workspace_options(parsed, "create", backend, opts, emit_json)
     if exit_code is not None:
         return exit_code
     assert workspace is not None  # nosec B101 # resolver contract; narrows the type for mypy
@@ -1212,7 +1259,7 @@ def _preflight_new(backend: str, agent: str, cli_kits: list[str], image_flag: st
     Kit problems are reported before the GitHub-token advisory, as in Bash.
     Returns the emitted exit code, or ``None``.
     """
-    image = _resolve_image(image_flag, agent)
+    image = _resolve_image(image_flag, agent, backend, notice=False)
     if backend == "sbx":
         sbx_plan, exit_code = _plan_sbx_kits(agent, cli_kits, image, command, emit_json, extras)
         return exit_code if sbx_plan is None else None
@@ -1419,7 +1466,7 @@ def _recreate_locked(name: str, emit_json: bool, backend: str) -> int:
         # Records written before msb workspaces were canonicalized hold the symlink form.
         workspace = common._mount_workspace(backend, workspace)
         # The recreated guest mounts it writable again, so the same refusal as at create.
-        exit_code = common._workspace_overlap_failure("create", workspace, emit_json)
+        exit_code = common._recorded_workspaces_failure("create", record, emit_json)
         if exit_code is not None:
             return exit_code
     image = record.get("image") or common._default_image_for_agent(agent)
@@ -1520,7 +1567,9 @@ def _recreate_msb(
         # already removed out of band has nothing to destroy.
         if msb.exists(name):
             msb.remove(name)
-        data = _create_sandbox("msb", agent, workspace, name, image, plan.agent_kit, plan=plan, clone_src=clone_src)
+        data = _create_sandbox("msb", agent, workspace, name, image, plan.agent_kit, plan=plan, clone_src=clone_src,
+                               extra_workspaces=tuple(record.get("extra_workspaces", [])),
+                               workspace_read_only=record.get("workspace_read_only", False))
     except common._ADAPTER_ERRORS as exc:
         return None, common._operational_failure("create", exc.code, exc.message, exc.remediation, emit_json)
     if not data["ro_host_config"] and security.ro_mount_platform_problem() is None:
@@ -1599,6 +1648,16 @@ def _run_prepare_locked(
     adapter = common._adapter(backend)
     clone = common.clone_requested(parsed)
     if not adapter.exists(name):
+        # The guest may have disappeared since the unlocked re-attach decision.
+        if clone:
+            exit_code = _clone_path_failure("run", backend, parsed.path, emit_json)
+            if exit_code is not None:
+                return None, exit_code
+        resolved, opts, exit_code = _workspace_options(parsed, "run", backend, opts, emit_json)
+        if exit_code is not None:
+            return None, exit_code
+        assert resolved is not None
+        workspace = common._mount_workspace(backend, resolved)
         new_sandbox = _new_sbx_sandbox if backend == "sbx" else _new_msb_sandbox
         data, exit_code = new_sandbox(
             "run", emit_json, agent=target, workspace=workspace, name=name, image_flag=parsed.image,
@@ -1616,6 +1675,10 @@ def _run_prepare_locked(
     if found is None:
         return None, exit_code
     record, recorded = found
+    if parsed.image or os.environ.get("ACQ_IMAGE"):
+        print("acq: note: --image/ACQ_IMAGE is ignored when re-attaching an existing "
+              f"sandbox ('{name}'); it applies only at create (ADR-0022). Remove the "
+              f"sandbox first ('acq rm {name}') to recreate on a new image.", file=sys.stderr)
     if opts.publish:
         print(publish.reattach_note(name), file=sys.stderr)
     # Read before the heal, which records the bundle as current (Bash captures
@@ -1657,17 +1720,22 @@ def _run_run(parsed, emit_json: bool, backend: str) -> int:
     if opts is None:
         return exit_code if exit_code is not None else errors.EXIT_FAILURE
     if target in common.KNOWN_AGENTS:
-        if common.clone_requested(parsed):
-            exit_code = _clone_path_failure("run", backend, parsed.path, emit_json)
+        typed = common._logical_abspath((parsed.path or ".").removesuffix(":ro"))
+        name = parsed.name or common._derive_name(target, typed)
+        if _exists_quietly(backend, name):
+            # A re-attach uses existing mounts, so only the recorded paths are checked.
+            workspace = common._mount_workspace(backend, typed)
+        else:
+            if common.clone_requested(parsed):
+                exit_code = _clone_path_failure("run", backend, parsed.path, emit_json)
+                if exit_code is not None:
+                    return exit_code
+            resolved, opts, exit_code = _workspace_options(parsed, "run", backend, opts, emit_json)
             if exit_code is not None:
                 return exit_code
-        workspace, exit_code = common._validate_workspace("run", parsed.path, emit_json)
-        if exit_code is not None:
-            return exit_code
-        assert workspace is not None  # nosec B101 # resolver contract; narrows the type for mypy
+            assert resolved is not None
+            workspace = common._mount_workspace(backend, resolved)
         cli_kits = _cli_kit_refs(parsed.kit)
-        name = parsed.name or common._derive_name(target, workspace)
-        workspace = common._mount_workspace(backend, workspace)
         if not _exists_quietly(backend, name):
             opts, exit_code = _onboarding(backend, opts, emit_json)
             if opts is None:
@@ -1699,7 +1767,7 @@ def _run_run(parsed, emit_json: bool, backend: str) -> int:
         # Launch in the foreground; the child's status is `run`'s exit status. In
         # --json mode the child's stdout is routed to stderr so stdout stays one
         # JSON document. A recorded kit entrypoint wins over the agent token.
-        return _launch_after_envelope(backend, name, data["workspace"], data["entrypoint"] or target, emit_json)
+        return _launch_after_envelope(backend, name, data["workspace"], data["entrypoint"] or target, emit_json, getattr(parsed, "agent_args", []))
 
     # Not a known agent: re-attach to an existing sandbox by name, else fail
     # closed as ambiguous (a token that is neither agent nor sandbox is a usage
@@ -1742,7 +1810,8 @@ def _run_by_name(backend: str, target: str, emit_json: bool, parsed=None) -> int
                 )
             )
         )
-    return _launch_after_envelope(backend, target, workspace, common._launch_token(backend, target, agent), emit_json)
+    return _launch_after_envelope(backend, target, workspace, common._launch_token(backend, target, agent), emit_json,
+                                  getattr(parsed, "agent_args", []))
 
 
 def _by_name_locked(backend: str, target: str, emit_json: bool) -> tuple[dict | None, int | None]:
@@ -1773,7 +1842,7 @@ def _by_name_locked(backend: str, target: str, emit_json: bool) -> tuple[dict | 
     if gate is not None:
         return None, gate
     if record.get("workspace"):
-        overlap = common._workspace_overlap_failure("run", record["workspace"], emit_json)
+        overlap = common._recorded_workspaces_failure("run", record, emit_json)
         if overlap is not None:
             return None, overlap
     pre_heal = kits.provenance_status(backend, target)  # before the heal records it current
@@ -1972,7 +2041,8 @@ def _attach_key_check(backend: str, name: str, emit_json: bool) -> int | None:
     return None
 
 
-def _launch_after_envelope(backend: str, name: str, workspace: str | None, token: str | None, emit_json: bool) -> int:
+def _launch_after_envelope(backend: str, name: str, workspace: str | None, token: str | None, emit_json: bool,
+                           agent_args: list[str] | None = None) -> int:
     """Launch for ``run`` once its success envelope may already be on stdout.
 
     Under ``--json`` stdout must carry exactly one document, and ``run`` has
@@ -1983,7 +2053,8 @@ def _launch_after_envelope(backend: str, name: str, workspace: str | None, token
     """
     try:
         env = session.session_env_for(backend, name)
-        return common._adapter(backend).launch(name, workspace, token, json_mode=emit_json, env=env)
+        return common._adapter(backend).launch(name, workspace, token, json_mode=emit_json, env=env,
+                                               **({"agent_args": agent_args} if agent_args else {}))
     except common._ADAPTER_ERRORS as exc:
         return common._operational_failure("run", exc.code, exc.message, exc.remediation, False)
 

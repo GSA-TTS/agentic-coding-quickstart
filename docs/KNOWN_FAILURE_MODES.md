@@ -5358,7 +5358,10 @@ as a Bash fix: add the same five-digit length check before the comparison in
 
 ## 95. Python 3.12: An Optional Flag Between `create`/`run` Positionals Is Refused
 
-**Status:** deferred (tracked per AGENTS.md "Track Deferred Work").
+**Status:** resolved by the Python CLI-form port. `create`/`run` collect remaining
+workspace positionals after parsing known options, retaining their order.
+`py-acq/tests/test_cli_forms.py` covers flags between the agent, primary and
+extra workspaces. The symptoms and workaround below describe older revisions.
 
 ### Symptoms
 

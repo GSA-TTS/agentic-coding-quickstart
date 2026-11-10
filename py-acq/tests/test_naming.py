@@ -243,7 +243,7 @@ def _assert_refused(rc: int, doc: dict, text: str) -> None:
     assert text in doc["error"]["message"]
 
 
-@pytest.mark.parametrize("path", ["/no/such:dir", "rel:ro", "x\nboth:y"])
+@pytest.mark.parametrize("path", ["/no/such:dir", "rel:rw", "x\nboth:y"])
 def test_create_refuses_a_workspace_path_with_a_colon_or_control(monkeypatch, tmp_path, capsys, path):
     _msb_env(monkeypatch, tmp_path)
     rc, doc = _invoke_json(capsys, "--backend", "msb", "create", "opencode", path, "--name", "box")
@@ -261,11 +261,11 @@ def test_windows_create_allows_the_drive_colon_and_refuses_any_other(monkeypatch
     _assert_refused(rc, doc, "does not exist")
 
 
-def test_a_ro_suffix_gets_a_hint(monkeypatch, tmp_path, capsys):
+def test_a_ro_suffix_checks_the_directory_without_the_marker(monkeypatch, tmp_path, capsys):
     _msb_env(monkeypatch, tmp_path)
     rc, doc = _invoke_json(capsys, "--backend", "msb", "create", "opencode", "proj:ro")
-    _assert_refused(rc, doc, "contains ':'")
-    assert "no ':ro' suffix" in doc["error"]["remediation"]
+    _assert_refused(rc, doc, "does not exist")
+    assert "no ':ro' suffix" not in doc["error"]["remediation"]
 
 
 @posix_only

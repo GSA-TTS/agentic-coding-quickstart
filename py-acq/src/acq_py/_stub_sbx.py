@@ -689,6 +689,22 @@ def main(argv: list[str]) -> int:
         print("sbx: unrecognized kit subcommand", file=sys.stderr)
         return 1
 
+    if cmd == "run":
+        # Re-attach through the template command, preserving its opaque argv.
+        try:
+            name = args[args.index("--name") + 1]
+        except (ValueError, IndexError):
+            print("sbx: run requires --name", file=sys.stderr)
+            return 1
+        if name not in catalog:
+            print(f"sbx: no such sandbox '{name}'", file=sys.stderr)
+            return 1
+        catalog[name] = "running"
+        _save(catalog)
+        command = args[args.index("--") + 1:] if "--" in args else []
+        print("[stub sbx run] " + " ".join(command))
+        return _exit_code(EXEC_EXIT_ENV)
+
     if cmd == "exec":
         # `sbx exec [-u USER] [-w DIR] [-e K=V] NAME [-- CMD...]` — exit 0 when
         # NAME exists, else 1. The command after `--` is echoed to stdout and the

@@ -84,7 +84,7 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   (ADR-0040m): exit `0` when `NAME` is installed and supported, else exit `1`
   with `backend_not_found`, `backend_version_unsupported`, or
   `backend_version_unknown`. No mutation occurs.
-* `acq-py create AGENT PATH [--name N] [--image REF] [--json]` — create a sandbox
+* `acq-py create AGENT PATH[:ro] [PATH[:ro]...] [--name N] [--image REF] [--json]` — create a sandbox
   (detached) through the MSB adapter, wait for exec-readiness, and record a
   host-authoritative state record carrying `schema=N` (ADR-0041m).
 * `acq-py create --recreate NAME [--yes] [--json]` — the security-exception
@@ -108,7 +108,7 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   created without it, and `create --recreate` rebuilds a sandbox the same way
   a fresh create would (`"ro_host_config": false`) instead of refusing or
   looping. See KNOWN_FAILURE_MODES §54.
-* `acq-py run AGENT PATH [--name N] [--image REF] [--json]` — create (if missing)
+* `acq-py run AGENT PATH[:ro] [PATH[:ro]...] [--name N] [--image REF] [--json] [-- AGENT_ARGS...]` — create (if missing)
   then launch the agent in the foreground; `acq-py run NAME` re-attaches to an
   existing sandbox by name.
 * Stale-sandbox check (ADR-0016, Bash `maybe_offer_bundle_refresh`): when `run`
@@ -140,9 +140,8 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   a clone sandbox, including one Bash created, on its existing scratch clone,
   and refuses when that scratch is missing or damaged. The uncommitted-changes
   note covers staged changes and untracked files only: it never compares file
-  content, so no filter can run. Put the flag after the positionals
-  (`acq-py run opencode . --clone`): on Python 3.12 the parser rejects an
-  optional flag between them (KNOWN_FAILURE_MODES §95).
+  content, so no filter can run. Flags can appear between workspace positionals
+  on every supported Python version (KNOWN_FAILURE_MODES §95).
 * Sandbox names and workspace paths follow the Bash `acq` rules
   (`commands/common.py`). Without `--name`, the name is `AGENT-<slug>`, where the
   slug is the lowercased ASCII letters and digits of the workspace's last path
@@ -152,7 +151,13 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   `kit apply|check|update`, `create --recreate`) refuse an empty name, `.`,
   `..`, and names containing `/`, `\` or control characters. A workspace path,
   and the path its symlinks resolve to, must not contain control characters or
-  `:`. The backends split mount specs on `:`, and acq-py takes no `:ro` suffix.
+  `:` outside the optional trailing `:ro` mount marker. Every extra workspace
+  receives the same path and trusted-directory containment checks as the primary.
+  Mounts use absolute host paths in the guest (canonicalized on msb); the agent
+  starts in the primary. Clone mode applies only to the primary; on msb it
+  requires a writable primary. Extra mounts and read-only markers are recorded
+  for recreation; re-attach uses the recorded mounts, and removal leaves the
+  original directories alone.
   On Windows the colon of a drive letter (`C:\...`) is allowed, because msb's
   `--volume` source accepts it.
 * `acq-py ls [--json]` — list sandboxes with `name`/`backend`/`state`
@@ -745,3 +750,13 @@ touches Windows-relevant paths. It runs pytest, smoke tests of `acq.cmd` and
 and Windows PowerShell 5.1, the release job's managed-runtime staging and
 smoke check, and a Git Bash run of `55-version.bats` and
 `06-windows-install.bats`.
+
+CLI forms shared with Bash: `--image REF` and `--image=REF` also work before
+the verb. A run/create image flag overrides the global flag, which overrides
+`ACQ_IMAGE`; a set `ACQ_MSB_IMAGE` wins on msb with a notice. Re-attach keeps
+the existing image. Arguments after the first `run ... --` are opaque and
+invocation-specific, including on re-attach by name or agent. On msb they are
+appended to the agent (a shell ignores them). On sbx they replace the template
+command; generic OpenCode prepends `opencode` when the first argument starts
+with `-`, and runs the command through `bash -lc 'exec "$@"' sh ...`, preserving
+argument boundaries without evaluating their contents.

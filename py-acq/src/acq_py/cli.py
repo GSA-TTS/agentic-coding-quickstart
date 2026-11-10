@@ -139,6 +139,8 @@ class _Globals:
         self._backend_seen = False
         # Set when argv is malformed in a way main() reports as a usage error.
         self.backend_missing = False
+        self.image: str | None = None
+        self.image_missing = False
         self.misplaced: list[str] = []
 
     def take(self, args: list[str], i: int) -> int | None:
@@ -195,8 +197,21 @@ def _scan_globals(args: list[str]) -> tuple[_Globals, list[str]]:
     """
     flags = _Globals()
     i = 0
-    while i < len(args) and (nxt := flags.take(args, i)) is not None:
-        i = nxt
+    while i < len(args):
+        if args[i].startswith("--image="):
+            flags.image = args[i].split("=", 1)[1]
+            i += 1
+        elif args[i] == "--image":
+            if i + 1 == len(args):
+                flags.image_missing = True
+                i += 1
+            else:
+                flags.image = args[i + 1]
+                i += 2
+        elif (nxt := flags.take(args, i)) is not None:
+            i = nxt
+        else:
+            break
     if i >= len(args):
         return flags, []
     verb = args[i]
@@ -255,6 +270,7 @@ def build_parser() -> _Parser:
     create_parser = sub.add_parser("create", help="create a sandbox (detached)")
     create_parser.add_argument("agent", nargs="?", help="agent to provision (e.g. opencode, shell)")
     create_parser.add_argument("path", nargs="?", help="workspace directory to mount")
+    create_parser.add_argument("extra_paths", nargs="*", help="additional PATH[:ro] mounts")
     create_parser.add_argument("--name", help="explicit sandbox name (default: derived from agent+path)")
     create_parser.add_argument("--image", help="base image override (default: the devenv shell image)")
     create_parser.add_argument("--kit", action="append", help=_KIT_HELP)
@@ -273,6 +289,7 @@ def build_parser() -> _Parser:
     run_parser = sub.add_parser("run", help="create+attach a sandbox, or re-attach an existing one")
     run_parser.add_argument("target", help="AGENT (create+attach) or an existing sandbox name (re-attach)")
     run_parser.add_argument("path", nargs="?", help="workspace directory to mount (AGENT form)")
+    run_parser.add_argument("extra_paths", nargs="*", help="additional PATH[:ro] mounts")
     run_parser.add_argument("--name", help="explicit sandbox name (AGENT form)")
     run_parser.add_argument("--image", help="base image override (AGENT form)")
     run_parser.add_argument("--kit", action="append", help=_KIT_HELP)
@@ -786,6 +803,8 @@ def _main(argv: list[str] | None) -> int:
     flags, args = _scan_globals(args)
     emit_json = flags.emit_json
     backend_override = flags.backend
+    if flags.image_missing:
+        return common._usage_failure(None, "--image given with no value", emit_json)
     if flags.backend_missing:
         return common._usage_failure(None, "--backend requires a value (sbx or msb)", emit_json)
     if flags.misplaced:
@@ -806,7 +825,21 @@ def _main(argv: list[str] | None) -> int:
 
     parser = build_parser()
     try:
-        parsed = parser.parse_args(args)
+        agent_args: list[str] = []
+        if args[:1] == ["run"] and "--" in args:
+            sep = args.index("--")
+            agent_args, args = args[sep + 1:], args[:sep]
+        parsed, unknown = parser.parse_known_args(args)
+        if unknown:
+            if parsed.command in ("run", "create") and all(not a.startswith("-") for a in unknown):
+                if parsed.path is None and unknown:
+                    parsed.path, unknown = unknown[0], unknown[1:]
+                parsed.extra_paths.extend(unknown)
+            else:
+                parser.error("unrecognized arguments: " + " ".join(unknown))
+        parsed.agent_args = agent_args
+        if parsed.command in ("run", "create") and not parsed.image:
+            parsed.image = flags.image
     except UsageError as exc:
         return common._usage_failure(None, str(exc), emit_json)
 
