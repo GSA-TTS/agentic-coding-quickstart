@@ -413,7 +413,7 @@ is required or authorized by this guidance.
 - `acq create` stops before backend creation.
 - The error requires exact `PyYAML` and `jsonschema` versions.
 
-### Fix: release install (Homebrew, npm, `install.sh --release`)
+### Fix: release install (Homebrew, npm, or the upstream release installer)
 
 `--apply` alone uses the offline wheelhouse bundled with the release:
 
@@ -430,8 +430,8 @@ requirements change.
 
 ### Fix: git checkout / development install (no wheelhouse)
 
-A working-tree clone (`install.sh --clone`, or running `./acq` directly from a
-`git checkout`) has no release wheelhouse. Use the `--online` flag, which
+A working-tree clone (the upstream release installer's clone method, or running
+`./acq` directly from a `git checkout`) has no release wheelhouse. Use the `--online` flag, which
 downloads the same hash-locked packages from PyPI instead:
 
 ```bash
@@ -2801,12 +2801,15 @@ amending the wrong branch.
 
 ### Fix
 
-- `acq.ps1` and `install.ps1` prefer known Git-for-Windows locations first and
-  reject the WSL shim (`System32\bash.exe`, `SysWOW64\bash.exe`) when falling back
-  to a PATH lookup.
-- `install.ps1` probes WHP with `WHvCreatePartition` (the same call `msb` relies
-  on) instead of gating on the feature flag; when the state stays undetermined it
-  warns and defers to `msb doctor`, which `acq` surfaces before provisioning.
+- `acq.ps1` (and the upstream release `install.ps1`) prefer known
+  Git-for-Windows locations first and reject the WSL shim (`System32\bash.exe`,
+  `SysWOW64\bash.exe`) when falling back to a PATH lookup.
+- The upstream release `install.ps1` probes WHP with `WHvCreatePartition` (the
+  same call `msb` relies on) instead of gating on the feature flag; when the
+  state stays undetermined it warns and defers to `msb doctor`, which `acq`
+  surfaces before provisioning. This fork's in-repo `install.ps1` (the acq v1
+  installer) neither probes WHP nor installs Git Bash or `msb`; see
+  `docs/howto/acq.md`, "This fork's installers".
 - Treat `msb doctor` as the authoritative readiness signal on Windows.
 - The execution-policy requirement is documented (README "First-Run Snags",
   `docs/howto/acq.md`); allow local scripts with

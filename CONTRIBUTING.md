@@ -78,7 +78,7 @@ This project operates under professional standards of conduct. All contributors:
 | ----------------------------------- | ---------------------------------------------------------- |
 | `acq`                               | Entry point — pluggable-backend wrapper (msb by default, or sbx) |
 | `acq.backends/`                     | Backend adapters (`common.sh`, `sbx.sh`, `msb.sh`, `kit-translate.sh`, `secret-store.sh`, `progress.sh`, `prompt.sh`) |
-| `install.sh`                        | One-line `curl \| sh` installer (auto-selects brew/npm/clone; direct `sh install.sh` still installs the default release tag from the repo, not the current checkout) |
+| `install.sh`                        | acq v1 `curl \| sh` installer (ADR-0042m): installs a checksum-verified per-platform release archive, or an offline asset set with `--source`, and links `acq` and `acq-python`; it never installs from the current checkout and does not install `msb` or pick brew/npm/clone (see `docs/howto/acq.md`, "This fork's installers") |
 | `scripts/rotate-apikey`             | Rotate your USAi API key secret (`acq usai-rotate-api-key`) |
 | `scripts/test-acq-bats`             | Offline unit suite for acq (bats-core) |
 | `scripts/test-acq-bash32`           | Same suite, or a syntax preflight, under a verified Bash 3.2.57 (helpers: `scan-heredoc-subst.py`, `fetch-bash32-oci.py`) |

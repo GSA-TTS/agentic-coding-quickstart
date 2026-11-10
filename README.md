@@ -101,6 +101,13 @@ irm https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v4.2.
 
 <!-- x-release-please-end -->
 
+> **This fork:** these one-liners fetch the installers published with the
+> upstream GSA-TTS releases, and the rest of this step describes them. The
+> `install.sh` and `install.ps1` in this repository are the acq v1 installers
+> instead: they install a release archive only, and do not install `msb`, pick
+> Homebrew, npm or a clone, or (on Windows) check virtualization or install Git
+> Bash. See [This fork's installers](docs/howto/acq.md#this-forks-installers).
+
 That's it — you don't have to choose *how* to install. The installer:
 
 - **picks the best method already on your computer** — Homebrew or npm on
