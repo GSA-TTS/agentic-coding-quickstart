@@ -331,8 +331,25 @@ if [ -z "$SOURCE" ]; then
   SOURCE="${RELEASE_BASE_URL}/v${VERSION}"
 fi
 case "$SOURCE" in
-  http://*|https://*|file://*) SOURCE_IS_URL=1 ;;
+  https://*|file://*) SOURCE_IS_URL=1 ;;
+  # Plain HTTP would let anyone on the path swap both the archive and the
+  # SHA256SUMS it is checked against.
+  http://*) usage_err "refusing a plaintext http:// source '$(shown "$SOURCE")'; use https:// or a local directory" ;;
   *) SOURCE_IS_URL=0 ;;
+esac
+
+# Remote downloads use HTTPS with TLS 1.2 or newer only, for the first request
+# and for every redirect, so a redirect cannot downgrade the transfer to plain
+# HTTP. A file:// source names a local offline asset set and is fetched as is.
+fetch() {
+  case "$1" in
+    https://*) curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 "$1" -o "$2" ;;
+    *) curl -fsSL "$1" -o "$2" ;;
+  esac
+}
+case "$SOURCE" in
+  https://*) CURL_SHOWN="curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2" ;;
+  *) CURL_SHOWN="curl -fsSL" ;;
 esac
 
 info "  platform:    $KEY"
@@ -354,9 +371,9 @@ fi
 if [ "$DRY_RUN" -eq 1 ]; then
   step "Would install acq $VERSION"
   if [ "$SOURCE_IS_URL" -eq 1 ]; then
-    printf '  [dry-run] curl -fsSL %s/%s -o <tmp>/%s\n' "$SOURCE" "$SHA256SUMS_NAME" "$SHA256SUMS_NAME"
-    printf '  [dry-run] curl -fsSL %s/%s -o <tmp>/%s\n' "$SOURCE" "$PROVENANCE_NAME" "$PROVENANCE_NAME"
-    printf '  [dry-run] curl -fsSL %s/%s -o <tmp>/%s\n' "$SOURCE" "$ARCHIVE" "$ARCHIVE"
+    printf '  [dry-run] %s %s/%s -o <tmp>/%s\n' "$CURL_SHOWN" "$SOURCE" "$SHA256SUMS_NAME" "$SHA256SUMS_NAME"
+    printf '  [dry-run] %s %s/%s -o <tmp>/%s\n' "$CURL_SHOWN" "$SOURCE" "$PROVENANCE_NAME" "$PROVENANCE_NAME"
+    printf '  [dry-run] %s %s/%s -o <tmp>/%s\n' "$CURL_SHOWN" "$SOURCE" "$ARCHIVE" "$ARCHIVE"
   else
     printf '  [dry-run] read %s/%s, %s/%s, and %s/%s from the offline asset set\n' \
       "$SOURCE" "$SHA256SUMS_NAME" "$SOURCE" "$PROVENANCE_NAME" "$SOURCE" "$ARCHIVE"
@@ -393,9 +410,11 @@ step "Downloading acq $VERSION"
 # The same trap removes this run's temporary ownership marker (set only while
 # it exists, below), so a failure or signal between writing it and renaming it
 # into place leaves no litter in the install dir.
+# The staging dir beside the install dir (below) is removed the same way.
 tmpdir=""
+stage_root=""
 marker_tmp=""
-trap 'rm -rf "$tmpdir"; [ -z "$marker_tmp" ] || rm -f "$marker_tmp"' EXIT
+trap 'rm -rf "$tmpdir" "$stage_root"; [ -z "$marker_tmp" ] || rm -f "$marker_tmp"' EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -407,11 +426,11 @@ tmpdir="$(mktemp -d "$tmp_base/acq-install.XXXXXXXX")" \
 chmod 700 "$tmpdir"
 
 if [ "$SOURCE_IS_URL" -eq 1 ]; then
-  curl -fsSL "$SOURCE/$SHA256SUMS_NAME" -o "$tmpdir/$SHA256SUMS_NAME" \
+  fetch "$SOURCE/$SHA256SUMS_NAME" "$tmpdir/$SHA256SUMS_NAME" \
     || die "could not download $SOURCE/$SHA256SUMS_NAME"
-  curl -fsSL "$SOURCE/$PROVENANCE_NAME" -o "$tmpdir/$PROVENANCE_NAME" \
+  fetch "$SOURCE/$PROVENANCE_NAME" "$tmpdir/$PROVENANCE_NAME" \
     || die "could not download $SOURCE/$PROVENANCE_NAME"
-  curl -fsSL "$SOURCE/$ARCHIVE" -o "$tmpdir/$ARCHIVE" \
+  fetch "$SOURCE/$ARCHIVE" "$tmpdir/$ARCHIVE" \
     || die "could not download $SOURCE/$ARCHIVE"
 else
   [ -f "$SOURCE/$SHA256SUMS_NAME" ] || die "offline asset set at $SOURCE has no $SHA256SUMS_NAME"
@@ -453,7 +472,33 @@ step "Installing into $INSTALL_DIR"
 
 command -v tar >/dev/null 2>&1 || die "tar is required to extract the release archive"
 
-staging="$tmpdir/stage"
+# Strip trailing slashes so `[ -L ]` tests the link itself, not its target, and
+# so the parent below is the real parent.
+while :; do
+  case "$INSTALL_DIR" in
+    */) [ "$INSTALL_DIR" = / ] && break; INSTALL_DIR="${INSTALL_DIR%/}" ;;
+    *) break ;;
+  esac
+done
+
+# Extract into a private directory beside the install dir, in its parent, so the
+# release and the install dir share a filesystem and each move into place below
+# is a rename. Staged under TMPDIR, a move across filesystems would become a
+# copy plus a delete, and a failure partway would leave half-copied entries. If
+# the parent cannot hold a new directory (an install dir the user created under
+# a parent they cannot write), stage in the private work dir as before; a failed
+# run there is still finished by re-running the installer.
+install_parent="${INSTALL_DIR%/*}"
+[ -n "$install_parent" ] || install_parent=/
+mkdir -p "$install_parent" 2>/dev/null || :
+if stage_root="$(mktemp -d "$install_parent/.acq-stage.XXXXXXXX" 2>/dev/null)"; then
+  chmod 700 "$stage_root"
+  staging="$stage_root/stage"
+else
+  stage_root=""
+  warn "  cannot create a staging directory in $install_parent; staging under $tmp_base instead"
+  staging="$tmpdir/stage"
+fi
 # No -p: if the private dir has vanished, fail instead of re-creating it.
 mkdir "$staging" || die "could not create the staging directory"
 
@@ -497,13 +542,6 @@ fi
 OWNED_MARKER=".acq-v1-install"
 cp "$tmpdir/$PROVENANCE_NAME" "$staging/$PROVENANCE_NAME"
 
-# Strip trailing slashes so `[ -L ]` tests the link itself, not its target.
-while :; do
-  case "$INSTALL_DIR" in
-    */) [ "$INSTALL_DIR" = / ] && break; INSTALL_DIR="${INSTALL_DIR%/}" ;;
-    *) break ;;
-  esac
-done
 if [ -L "$INSTALL_DIR" ]; then
   die "$INSTALL_DIR is a symlink; refusing to install through it (pass --install-dir with a real directory)"
 fi
@@ -549,12 +587,23 @@ marker_tmp=""
 # only acq's own files, but only trust that in a directory that was already
 # marked before this run. A temporary marker is a regular file named for the
 # marker plus ".tmp." and a process id; anything else is left alone.
+# Both names end in the process id of the run that made them. Another install
+# into the same directory may be running right now, and sweeping its in-flight
+# files would make it fail, so an entry whose process is still alive is skipped.
+# A process owned by another user answers kill -0 with an error, so ps is asked
+# too; a reused PID only means the leftover waits for a later run.
+pid_alive() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$1" 2>/dev/null || ps -p "$1" >/dev/null 2>&1
+}
 if [ "$was_marked" -eq 1 ]; then
   for stale in "$INSTALL_DIR"/.acq-previous.*; do
+    pid_alive "${stale##*/.acq-previous.}" && continue
     [ -d "$stale" ] && [ ! -L "$stale" ] && rm -rf "$stale"
   done
   for stale in "$marker".tmp.*; do
     case "${stale#"$marker".tmp.}" in ''|*[!0-9]*) continue ;; esac
+    pid_alive "${stale#"$marker".tmp.}" && continue
     [ -f "$stale" ] && [ ! -L "$stale" ] && rm -f "$stale"
   done
 fi
