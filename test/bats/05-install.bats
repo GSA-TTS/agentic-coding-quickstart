@@ -75,16 +75,32 @@ _install_dir() {
   [ ! -e "$HOME/.profile" ]
 }
 
+# _elevation_in TEXT — succeeds when TEXT invokes privilege elevation: an
+# elevation command followed by an argument anywhere a command can start
+# (line start, after `run`, `;`, `&&`, `$(`), or osascript "with administrator
+# privileges". Prose such as "no sudo," or "(no sudo)" is not followed by
+# whitespace and does not match.
+_elevation_in() {
+  # Regexes in variables: bash 3.2 and 4+ treat a quoted =~ operand differently.
+  local cmd_re='(^|[^[:alnum:]_-])(sudo|doas|pkexec|runas)[[:space:]]'
+  local osa_re='osascript .*with administrator privileges'
+  [[ $1 =~ $cmd_re ]] || [[ $1 =~ $osa_re ]]
+}
+
 @test "installer: never elevates (no elevation invocation)" {
   # The installer documents non-elevation ("no sudo") in comments and --help
   # prose; that wording must not read as an invocation, but a real elevation
-  # command (a line whose first word is sudo/pkexec/runas, or an osascript
-  # "with administrator privileges") must be caught.
+  # command must be caught, including one wrapped in run() or done via doas.
   grep -q 'no sudo' "$REPO_ROOT/install.sh" || fail "documentation of non-elevation missing"
 
-  run grep -nE '^[[:space:]]*(sudo|pkexec|runas)[[:space:]]|osascript .*with administrator privileges' \
-    "$REPO_ROOT/install.sh"
-  assert_failure
+  local code
+  code="$(grep -v '^[[:space:]]*#' "$REPO_ROOT/install.sh")"
+  ! _elevation_in "$code" || fail "install.sh invokes privilege elevation"
+  # Positive controls: the guard catches each form it claims to.
+  _elevation_in "$code"$'\nsudo true' || fail "a bare sudo line was not caught"
+  _elevation_in "$code"$'\nrun sudo mkdir -p "$BIN_DIR"' || fail "run sudo was not caught"
+  _elevation_in "$code"$'\nrun doas ln -s a b' || fail "doas was not caught"
+  _elevation_in "$code"$'\nx="$(pkexec true)"' || fail "a command substitution was not caught"
 }
 
 @test "installer: never dumps the environment or hardcodes a secret" {
@@ -97,16 +113,21 @@ _install_dir() {
 # --install-dir can name any directory. The installer must never delete content
 # it did not create.
 
-# Copy the offline fixture and add an extra top-level entry to every archive,
-# regenerating SHA256SUMS, to model a future release that ships a new name.
+# Copy the offline fixture and add an extra top-level entry to every archive
+# (or, with "drop", remove one), regenerating SHA256SUMS: a future release that
+# ships a new name, or a checksum-valid release that is incomplete.
 _fixture_with_extra_entry() {
-  local name="$1" out="$STUBDIR/assets-extra" a work
+  local name="$1" mode="${2:-add}" out="$STUBDIR/assets-extra" a work
   mkdir -p "$out"
   cp "$REPO_ROOT/test/fixtures/installer/provenance.json" "$out/"
   for a in "$REPO_ROOT"/test/fixtures/installer/*.tar.gz; do
     work="$STUBDIR/repack"; rm -rf "$work"; mkdir -p "$work"
     tar -xzf "$a" -C "$work"
-    mkdir -p "$work/$name"; printf 'shipped\n' > "$work/$name/README"
+    if [ "$mode" = drop ]; then
+      rm -rf "${work:?}/$name"
+    else
+      mkdir -p "$work/$name"; printf 'shipped\n' > "$work/$name/README"
+    fi
     (cd "$work" && tar -czf "$out/${a##*/}" .)
   done
   (cd "$out" && for a in *.tar.gz; do
@@ -218,6 +239,94 @@ SHIM
   run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
   assert_success
   [ "$(cat "$dir/.acq-previous.mine/f")" = keep ]
+}
+
+# The ownership marker is written to .acq-v1-install.tmp.<pid> and renamed into
+# place. A run stopped in between must not leave that file behind for good.
+@test "installer: a later run sweeps temporary markers left by an interrupted one" {
+  local dir; dir="$(_install_dir)"
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_success
+  printf 'old\n' > "$dir/.acq-v1-install.tmp.12345"
+  # Lookalikes that are not a temporary marker are left alone.
+  printf 'keep\n' > "$dir/.acq-v1-install.tmp.mine"
+  mkdir -p "$dir/.acq-v1-install.tmp.777"
+  ln -s "$STUBDIR/elsewhere" "$dir/.acq-v1-install.tmp.888"
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_success
+  [ ! -e "$dir/.acq-v1-install.tmp.12345" ]
+  [ "$(cat "$dir/.acq-v1-install.tmp.mine")" = keep ]
+  [ -d "$dir/.acq-v1-install.tmp.777" ]
+  [ -L "$dir/.acq-v1-install.tmp.888" ]
+}
+
+@test "installer: a first install never sweeps temporary-marker lookalikes" {
+  local dir; dir="$(_install_dir)"
+  mkdir -p "$dir"; printf 'keep\n' > "$dir/.acq-v1-install.tmp.12345"
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_success
+  [ "$(cat "$dir/.acq-v1-install.tmp.12345")" = keep ]
+}
+
+@test "installer: a failed marker rename leaves no temporary marker behind" {
+  local dir shim; dir="$(_install_dir)"
+  shim="$STUBDIR/mv-shim"; mkdir -p "$shim"
+  cat > "$shim/mv" <<'SHIM'
+#!/bin/sh
+for last; do :; done
+case "$last" in */.acq-v1-install) exit 1 ;; esac
+exec /bin/mv "$@"
+SHIM
+  chmod +x "$shim/mv"
+  PATH="$shim:$PATH" run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_failure
+  assert_output --partial 'could not write'
+  [ -z "$(find "$dir" -maxdepth 1 -name '.acq-v1-install.tmp.*')" ]
+}
+
+# The `acq` launcher is the Bash dispatcher and sources acq.backends/common.sh
+# before it reads ACQ_IMPL, so an archive without the backend tree would install
+# an `acq` that cannot start on either implementation.
+@test "installer: an archive without the Bash backend tree fails closed" {
+  local assets
+  assets="$(_fixture_with_extra_entry acq.backends drop)"
+  run sh "$REPO_ROOT/install.sh" --source "$assets" --yes
+  assert_failure 1
+  assert_output --partial 'missing the Bash backend tree (acq.backends/)'
+  [ ! -e "$(_install_dir)" ]
+}
+
+# Under `curl | sh` the installer's stdin is the script pipe. The PATH prompt then
+# goes to the controlling terminal, and only when that terminal is usable;
+# otherwise it declines as before. install-tty.py drives a pseudo-terminal.
+_tty_install() {
+  command -v python3 >/dev/null 2>&1 || skip "python3 is required to drive a pseudo-terminal"
+  run env SHELL=/bin/sh python3 "$BATS_TEST_DIRNAME/install-tty.py" "$@" "$REPO_ROOT/install.sh" \
+    --source "$REPO_ROOT/test/fixtures/installer" --install-dir "$STUBDIR/inst" \
+    --bin-dir "$STUBDIR/acq-bin"
+}
+
+@test "installer: curl | sh asks for PATH consent on the terminal" {
+  _tty_install tty y
+  assert_success
+  assert_line 'PROMPTS=1'
+  grep -qF "export PATH=\"$STUBDIR/acq-bin:\$PATH\"" "$HOME/.profile"
+}
+
+@test "installer: curl | sh keeps PATH unchanged when the terminal answers no" {
+  _tty_install tty n
+  assert_success
+  assert_line 'PROMPTS=1'
+  assert_output --partial 'Not changing your PATH'
+  [ ! -e "$HOME/.profile" ]
+}
+
+@test "installer: curl | sh declines without asking when /dev/tty is unusable" {
+  _tty_install notty
+  assert_success
+  assert_line 'PROMPTS=0'
+  assert_output --partial 'Not changing your PATH'
+  [ ! -e "$HOME/.profile" ]
 }
 
 # The verified archive is staged in a private work dir: another local user must

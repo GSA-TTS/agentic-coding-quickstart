@@ -55,6 +55,7 @@ supported_platform_only = pytest.mark.skipif(
 _COMPONENTS = {
     "launcher": ("acq", "#!/bin/sh\necho acq test launcher\n"),
     "acq-python": ("acq-python", "#!/bin/sh\necho acq-python test launcher\n"),
+    "backends": ("acq.backends/common.sh", "# acq test backend tree\n"),
     "runtime": ("py-acq/runtime/bin/python3", "#!/bin/sh\necho acq test runtime\n"),
     "source": ("py-acq/src/acq_py/__init__.py", '__version__ = "0.1.0"\n'),
     "wheelhouse": ("wheelhouse/placeholder.whl", "placeholder wheel\n"),
@@ -135,14 +136,14 @@ def _bin_dir(tmp_path: Path) -> Path:
     return tmp_path / "home" / ".local" / "bin"
 
 
-# An elevation command token (sudo/pkexec on POSIX, runas on Windows) followed by
+# An elevation command token (sudo/doas/pkexec on POSIX, runas on Windows) followed by
 # an argument. Requiring a trailing whitespace (i.e. the command has arguments)
 # distinguishes an invocation from prose naming the word — "no sudo," (comma) or
 # "(no sudo)" (paren) do not match — while still catching elevation through a
 # wrapper (`run sudo …`) or a command substitution (`$(sudo …)`). The installer may
 # legitimately mention "no sudo" in comments and --help prose, so a bare substring
 # match is wrong (and is exactly what failed in CI).
-_ELEVATION_COMMAND = re.compile(r"\b(sudo|pkexec|runas)\s")
+_ELEVATION_COMMAND = re.compile(r"\b(sudo|doas|pkexec|runas)\s")
 
 
 def _elevation_invocations(source: str) -> list[str]:
@@ -267,6 +268,7 @@ def test_missing_checksum_entry_fails_closed(tmp_path):
     [
         ("launcher", "launcher"),
         ("acq-python", "acq-python"),
+        ("backends", "backend tree"),
         ("runtime", "runtime"),
         ("source", "source tree"),
         ("wheelhouse", "wheelhouse"),
@@ -344,6 +346,7 @@ def test_elevation_guard_is_a_mutation_proof():
     assert _elevation_invocations(source + "\nsudo true\n") == ["sudo true"]
     assert _elevation_invocations(source + "\nrun sudo true\n") == ["run sudo true"]
     assert _elevation_invocations(source + '\nx="$(sudo true)"\n') == ['x="$(sudo true)"']
+    assert _elevation_invocations(source + "\nrun doas true\n") == ["run doas true"]
     assert _elevation_invocations(source) == []
 
 

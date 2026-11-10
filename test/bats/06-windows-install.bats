@@ -72,6 +72,16 @@ teardown() {
   assert_regex "$installer" 'py-acq\\runtime\\python\.exe'
 }
 
+# acq.cmd starts acq.ps1, whose default branch runs the Bash `acq`, which sources
+# acq.backends\common.sh before anything else; the Python branch needs
+# py-acq\src. A zip missing any of them must fail closed, as in install.sh.
+@test "windows installer: gates the launchers, the backend tree and the source" {
+  installer=$(cat "$REPO_ROOT/install.ps1")
+
+  assert_regex "$installer" '"acq\.ps1", "acq", "acq\.backends\\common\.sh", "py-acq\\src\\acq_py\\__init__\.py"'
+  assert_regex "$installer" 'throw "release archive is missing \$required\."'
+}
+
 @test "windows PowerShell: installer -Help and -DryRun execute when pwsh is available" {
   command -v pwsh >/dev/null 2>&1 || skip "pwsh not available"
 
