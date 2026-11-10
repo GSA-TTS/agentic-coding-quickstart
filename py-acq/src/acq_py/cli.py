@@ -52,7 +52,8 @@ from .commands import common, configure, creds, kit, lifecycle, secret, session
 
 # Every subcommand acq owns. An argv token that is not one of these (and is not a
 # flag) is treated as an unknown verb and forwarded verbatim to the active
-# backend (announced passthrough, spec user story #9 / ADR-0038m §1).
+# backend (announced passthrough: ordinary-user story 9 in docs/spec/acq-v1.md,
+# and ADR-0038m §1).
 KNOWN_COMMANDS = frozenset(
     "version doctor help backend configure create run ls stop start restart rm exec attach shell cp ports "
     "secret kit kit-source provider-credential github-scope usai-rotate-api-key".split()
@@ -713,7 +714,7 @@ def main(argv: list[str] | None = None) -> int:
             emit_json,
         )
 
-    # Announced verbatim backend passthrough (spec user story #9): an unknown
+    # Announced verbatim backend passthrough (spec ordinary-user story 9): an unknown
     # subcommand is forwarded to the active backend binary with a stderr notice,
     # preserving its exit status. Detected before argparse, which would otherwise
     # treat the unknown verb as a usage error.

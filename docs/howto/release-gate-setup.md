@@ -3,7 +3,7 @@ title: "Release Gate Setup (maintainer)"
 description: "The repository settings and token that make the Tier-3 release gate hold a release, so merging the release PR needs no manual verification"
 status: canonical
 tier: 3
-last_updated: "2026-11-07"
+last_updated: "2026-11-09"
 audience: "maintainers"
 keywords: ["release", "release-please", "tier-3", "gate", "branch protection", "required check", "token"]
 related_files: ["docs/howto/qualification.md", "docs/adr/0044m-live-cross-platform-qualification-matrix-and-transcript.md", ".github/workflows/release.yml", ".github/workflows/tier3-release-gate.yml", ".github/CODEOWNERS"]
@@ -87,11 +87,11 @@ release PR and so cannot be required.
 
 **Observed upstream, this is not absolute.** On
 `GSA-TTS/agentic-coding-quickstart`, whose `release.yml` has no `token:` input, the
-release PRs do get `pull_request` runs: PR #683's checks were created four seconds
-after the PR, but as `action_required` — held for approval — and a maintainer then
-approved them, after which they passed. An older one (#592) ran unapproved. The
-mechanism is not clear; treat it as "checks may or may not run, and may need a
-click".
+release PRs do get `pull_request` runs. On one recent release PR, the checks were
+created four seconds after the PR, but as `action_required` (held for approval).
+A maintainer approved them and they passed. An older release PR's checks ran
+without approval. The mechanism is not clear, so treat it as "checks may or may
+not run, and may need a click".
 
 Either way a PAT removes the question: the PR is authored by a real account, so its
 checks run like any other PR's. **Before making the gate a required check, watch one

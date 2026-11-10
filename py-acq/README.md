@@ -1,10 +1,15 @@
-# acq-py — Python skeleton for acq v1 (foundation slice)
+# acq-py — Python implementation of acq v1 (in progress, not at parity)
 
 This directory is the Python replacement for the repo-root Bash `acq` wrapper.
-It is the **foundation slice**: the project skeleton, the CLI entrypoint, the
-structured-output envelope, managed-runtime resolution, and the vector runners'
-corpus. Backend adapters and the remaining command surface arrive in later
-slices.
+It implements every subcommand the Bash `acq help` lists, on both backends (msb
+and sbx). It is **not yet at parity** with Bash, and it is **not currently
+Tier-3-qualified**. A few documented flags are still missing: `--clone` and
+`--publish` on `run`/`create`, `--no-update-check` on `run`, and
+`ports --publish`. `ACQ_CLONE` is **silently ignored**, so setting it mounts the
+real workspace, not a disposable clone. Some behaviour also differs; for example,
+only kits from the pinned built-in bundle are applied. The dated correction in
+ADR-0047m lists the gaps and the qualification state. The Bash `acq` stays the default implementation
+(`ACQ_IMPL` unset); `ACQ_IMPL=python` selects this one.
 
 > AI-assisted; owner: Bret Mogilefsky.
 
@@ -12,12 +17,13 @@ slices.
 
 The new code lives under `py-acq/` (package `acq_py`, console script `acq-py`);
 the language-neutral test corpus lives under `test/vectors/`; the Bash vector
-runner is `scripts/run-vectors`. This deliberately does **not** touch the legacy
-tree:
+runner is `scripts/run-vectors`. The Python code keeps out of the legacy tree.
+The Bash implementation is still maintained beside it, and the `ACQ_IMPL` switch
+in `acq` (ADR-0047m, described below) selects between the two:
 
-| Path | Legacy (unchanged) | New (this slice) |
-|------|--------------------|------------------|
-| `acq`, `acq.backends/`, `scripts/*` (except `run-vectors`), `test/bats/` | shipped Bash CLI + suite | untouched |
+| Path | Legacy | New (Python v1) |
+|------|--------|-----------------|
+| `acq`, `acq.backends/`, `scripts/*` (except `run-vectors`), `test/bats/` | shipped Bash CLI + suite, still maintained | none, apart from the `ACQ_IMPL` switch in `acq` |
 | `py-acq/` | — | Python package + pytest runner |
 | `test/vectors/` | — | language-neutral corpus + manifest |
 | `scripts/run-vectors` | — | Bash vector runner |
@@ -54,7 +60,7 @@ Or run from source without installing:
 PYTHONPATH=py-acq/src python -m acq_py version --json
 ```
 
-## The CLI (foundation surface)
+## The CLI
 
 * `acq-py version` — human version/identity output (ADR-0042m): the acq
   version and source revision, the active backend (resolved as for every other
@@ -264,7 +270,8 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   announces a diagnostic on stderr so "cannot check" is not a silent false
   "absent".
 * Any other subcommand is forwarded verbatim to the active backend binary with an
-  announced stderr notice, preserving its exit status (spec user story #9).
+  announced stderr notice, preserving its exit status (ordinary-user story 9 in
+  `docs/spec/acq-v1.md`).
   Everything after the verb is forwarded, so acq's `--json`/`--backend` must
   come before it.
 * Exit codes (ADR-0038m §1): `0` success, `2` usage, `1` operational. A
