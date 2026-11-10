@@ -388,6 +388,97 @@ _prog() { # SHELL_SNIPPET
   refute_output --partial 'acq-spin.'
 }
 
+# The shell snippet shared by the next tests: an animated spinner whose animator
+# suspends itself (SIGSTOP) inside its first draw, holding the draw lock. It
+# leaves the animator's PID in $anim. $1 is the marker directory, $2 TMPDIR.
+_suspended_spinner() {
+  printf '%s' '_acq_progress_enabled() { return 0; }
+    export TMPDIR="'"$2"'"
+    printf() {
+      if [ "$1" = "\r%s %s" ] && mkdir "'"$1"'" 2>/dev/null; then
+        sh -c "kill -STOP \$PPID"
+      fi
+      builtin printf "$@"
+    }
+    acq_spin_start "phase one"
+    anim=$_ACQ_SPIN_PID
+    i=0
+    while [ ! -d "'"$1"'" ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i + 1)); done
+    sleep 0.3
+'
+}
+
+# A signal that lands while the stop waits for the draw lock runs the stop again
+# from the trap. That second run must wait as well, not find the spinner state
+# already cleared and return at once; and the trap's output (the caller's
+# handler, the cursor restore) must still reach the terminal.
+@test "progress: a signal during the stop's wait still waits for the draw lock" {
+  local mark="$STUBDIR/animator-stopped" spintmp="$STUBDIR/spintmp"
+  mkdir -p "$spintmp"
+  _prog 'trap "echo PRIOR_INT >&2; exit 130" INT
+    '"$(_suspended_spinner "$mark" "$spintmp")"'
+    self=$(exec sh -c "echo \$PPID")
+    ( sleep 1; kill -INT "$self"; sleep 2; echo "CONTINUED" >&2; kill -CONT "$anim" ) &
+    acq_spin_stop
+    echo "NOT-REACHED" >&2'
+  assert_equal "$status" 130
+  [ -d "$mark" ]
+  [[ "$output" == *CONTINUED*PRIOR_INT* ]]
+  [[ "$output" == *$'\033[?25h'* ]]
+  local after="${output##*PRIOR_INT}"
+  [[ "$after" != *"phase one"* ]]
+  refute_output --partial 'NOT-REACHED'
+}
+
+# An animator suspended for good while holding the lock must not hang the stop:
+# the wait is capped (about 30 s; `sleep` is shadowed here to advance SECONDS so
+# the cap arrives at once). Resumed later, the animator ends by itself and
+# removes its directory.
+@test "progress: the stop's wait for a suspended animator is capped" {
+  local mark="$STUBDIR/animator-stopped" spintmp="$STUBDIR/spintmp"
+  mkdir -p "$spintmp"
+  run timeout 60 bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/progress.sh"
+    '"$(_suspended_spinner "$mark" "$spintmp")"'
+    sleep() { SECONDS=$((SECONDS + 10)); command sleep "$@"; }
+    acq_spin_stop
+    echo "STOP-RETURNED" >&2
+    unset -f sleep
+    kill -0 "$anim" 2>/dev/null && echo "ANIMATOR-STILL-SUSPENDED"
+    kill -CONT "$anim"
+    i=0
+    while kill -0 "$anim" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+    kill -0 "$anim" 2>/dev/null && echo "ANIMATOR-ALIVE"
+    ls "'"$spintmp"'"' 2>&1
+  assert_success
+  assert_output --partial 'STOP-RETURNED'
+  assert_output --partial 'ANIMATOR-STILL-SUSPENDED'
+  refute_output --partial 'ANIMATOR-ALIVE'
+  refute_output --partial 'acq-spin.'
+}
+
+# A signal after the directory is recorded but before the animator is forked
+# leaves no PID. With no animator possible the cleanup removes the directory;
+# once an animator may exist (forked, PID not yet recorded) it takes the draw
+# lock, sets the stop marker and leaves the directory for the animator to remove.
+@test "progress: the cleanup removes the directory when no animator was started" {
+  _prog '_acq_spin_install_traps
+    d=$(mktemp -d "'"$STUBDIR"'/acq-spin.XXXXXX")
+    _ACQ_SPIN_DIR=$d _ACQ_SPIN_ACTIVE=1
+    _acq_spin_stop_animation 2>/dev/null
+    [ -e "$d" ] && echo "UNSTARTED-KEPT"
+    d=$(mktemp -d "'"$STUBDIR"'/acq-spin.XXXXXX")
+    _ACQ_SPIN_DIR=$d _ACQ_SPIN_ACTIVE=1 _ACQ_SPIN_FORKED=1
+    _acq_spin_stop_animation 2>/dev/null
+    [ -d "$d/draw" ] && [ -e "$d/stop" ] && echo "FORKED-LOCKED"
+    echo "STATE=[$_ACQ_SPIN_DIR$_ACQ_SPIN_FORKED$_ACQ_SPIN_LOCKED$_ACQ_SPIN_ACTIVE]"
+    _acq_spin_restore_traps'
+  assert_success
+  refute_output --partial 'UNSTARTED-KEPT'
+  assert_line 'FORKED-LOCKED'
+  assert_line 'STATE=[]'
+}
+
 # Without its private directory the animator could not be stopped with that
 # guarantee, so the spinner announces the phase instead and leaves the caller's
 # traps as they were.
