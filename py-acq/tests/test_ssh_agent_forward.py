@@ -526,6 +526,7 @@ def test_a_link_whose_target_is_not_the_users_socket_is_removed_and_no_bridge_st
     assert not os.path.lexists(link) and _bridges(seen) == []
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX socket paths (a Windows host never forwards)")
 def test_the_opt_out_says_plainly_when_the_route_names_the_raw_agent_path(tmp_path, monkeypatch, capsys, roomy):
     _env(monkeypatch, tmp_path, catalog={"rawbox": "running", "linkgone": "running"})
     _seed_recorded("rawbox")
