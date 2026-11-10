@@ -753,6 +753,7 @@ def remove(name: str) -> None:
             f"msb remove failed for sandbox '{name}'",
             "check msb logs and retry",
         )
+    publish.forget_host_key(name)
     held_forget(name)
 
 

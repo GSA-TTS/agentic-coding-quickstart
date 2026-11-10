@@ -473,7 +473,7 @@ def _tunnel_env(monkeypatch, tmp_path, *, serve_alive=True, ssh_alive=True, list
         return proc
 
     monkeypatch.setattr(publish, "_spawn", spawn)
-    monkeypatch.setattr(publish, "_signal", lambda pid: pytest.fail(f"signalled recorded pid {pid}"))
+    monkeypatch.setattr(publish, "_signal", lambda pid, *expected: pytest.fail(f"signalled recorded pid {pid}"))
     monkeypatch.setattr(publish, "_listener_ready", lambda port: listener)
     monkeypatch.setattr(publish.hostexec, "command", lambda name: [f"/usr/bin/{name}"])
     return spawned, killed
@@ -598,7 +598,7 @@ def test_stop_and_rm_tear_the_tunnels_down(monkeypatch, tmp_path, capsys, verb):
     _msb_env(monkeypatch, tmp_path, catalog={"box": "running"})
     serve, ssh = _sleeper(), _sleeper()
     # Real processes are killed; only the identity check is stood in for (it has its own tests).
-    monkeypatch.setattr(publish, "process_is_tunnel", lambda pid: pid in (serve.pid, ssh.pid))
+    monkeypatch.setattr(publish, "process_is_tunnel", lambda pid, *expected: pid in (serve.pid, ssh.pid))
     try:
         pids = tmp_path / "state" / "ports" / "box.pids"
         pids.parent.mkdir(parents=True)
@@ -624,7 +624,7 @@ def test_teardown_never_signals_pid_0_or_1(monkeypatch, tmp_path):
     monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
     sent: list[int] = []
     monkeypatch.setattr(publish.os, "kill", lambda pid, sig: sent.append(pid))
-    monkeypatch.setattr(publish, "process_is_tunnel", lambda pid: True)
+    monkeypatch.setattr(publish, "process_is_tunnel", lambda pid, *expected: True)
     pids = tmp_path / "state" / "ports" / "box.pids"
     pids.parent.mkdir(parents=True)
     pids.write_text("0 1 30001 8080:3000\n-5 777 30002 1:2\n", encoding="utf-8")
@@ -736,7 +736,7 @@ def _record_pids(tmp_path, *pids):
 def test_teardown_signals_only_a_confirmed_tunnel_process(monkeypatch, tmp_path, capsys, verdict, signalled, noted):
     monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
     sent: list[int] = []
-    monkeypatch.setattr(publish, "process_is_tunnel", lambda pid: verdict)
+    monkeypatch.setattr(publish, "process_is_tunnel", lambda pid, *expected: verdict)
     monkeypatch.setattr(publish, "_signal", sent.append)
     path = _record_pids(tmp_path, 4321, 4322)
     publish.teardown("box")
@@ -758,24 +758,57 @@ def _reap(*procs):
         proc.wait(timeout=30)
 
 
-@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
-def test_linux_identity_reads_the_command_line():
-    tunnel, other = _sleeper_as("ssh"), _sleeper_as()
-    try:
-        assert publish.process_is_tunnel(tunnel.pid) is True
-        assert publish.process_is_tunnel(other.pid) is False
-    finally:
-        _reap(tunnel, other)
-    assert publish.process_is_tunnel(other.pid) in (False, None)  # gone (or reused by now)
+@pytest.mark.parametrize("argv,accepted", [
+    (["/usr/bin/rsync", "-e", "ssh", "src", "dst"], False),
+    (["/usr/bin/ssh", "-L", "127.0.0.1:8080:127.0.0.1:3000", "root@127.0.0.1"], True),
+    (["/usr/bin/ssh", "-L", "127.0.0.1:8081:127.0.0.1:3000", "root@127.0.0.1"], False),
+    (["/usr/bin/msb", "ssh", "serve", "box", "--port", "30001"], True),
+    (["/usr/bin/msb", "ssh", "serve", "box", "--port", "30002"], False),
+    (["/usr/bin/rsync", "-e", "msb", "--port", "30001"], False),
+])
+def test_linux_identity_matches_the_recorded_command(monkeypatch, tmp_path, argv, accepted):
+    from pathlib import Path
+
+    monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(publish.sys, "platform", "linux")
+    path = _record_pids(tmp_path, 4321, 4322)
+    reads = []
+
+    def cmdline(proc_path):
+        reads.append(str(proc_path))
+        return ("\0".join(argv) + "\0").encode()
+
+    monkeypatch.setattr(Path, "read_bytes", cmdline)
+    sent = []
+    monkeypatch.setattr(publish, "_signal", sent.append)
+    monkeypatch.setattr(publish.os, "kill", lambda *args: None)
+    publish.teardown("box")
+    expected_pid = 4321 if "msb" in argv[0] else 4322
+    assert sent == ([expected_pid] if accepted else [])
+    assert reads == ["/proc/4321/cmdline", "/proc/4322/cmdline"]
+    assert not path.exists()
 
 
-@pytest.mark.skipif(sys.platform != "darwin", reason="uses ps -o comm=")
-def test_macos_identity_reads_the_command_name():
-    other = _sleeper_as("ssh")  # comm is python's, whatever the arguments
-    try:
-        assert publish.process_is_tunnel(other.pid) is False
-    finally:
-        _reap(other)
+@pytest.mark.parametrize("command,program,option,value,accepted", [
+    ("/usr/bin/rsync -e ssh src dst", "ssh", "-L", "127.0.0.1:8080:127.0.0.1:3000", False),
+    ("/usr/bin/ssh -L 127.0.0.1:8080:127.0.0.1:3000 root@127.0.0.1",
+     "ssh", "-L", "127.0.0.1:8080:127.0.0.1:3000", True),
+    ("/usr/bin/ssh -L 127.0.0.1:8081:127.0.0.1:3000 root@127.0.0.1",
+     "ssh", "-L", "127.0.0.1:8080:127.0.0.1:3000", False),
+    ("/usr/bin/msb ssh serve box --port 30001", "msb", "--port", "30001", True),
+    ("/usr/bin/msb ssh serve box --port 30002", "msb", "--port", "30001", False),
+])
+def test_macos_identity_reads_the_recorded_command(monkeypatch, command, program, option, value, accepted):
+    calls = []
+
+    def ps(argv, **kwargs):
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout=command + "\n")
+
+    monkeypatch.setattr(publish.sys, "platform", "darwin")
+    monkeypatch.setattr(publish.subprocess, "run", ps)
+    assert publish.process_is_tunnel(4321, program, option, value) is accepted
+    assert calls == [["/bin/ps", "-o", "command=", "-p", "4321"]]
 
 
 @pytest.mark.skipif(os.name != "nt", reason="QueryFullProcessImageNameW")
@@ -788,8 +821,8 @@ def test_windows_identity_reads_the_image_name(tmp_path):
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     other = _sleeper_as()
     try:
-        assert publish.process_is_tunnel(tunnel.pid) is True
-        assert publish.process_is_tunnel(other.pid) is False
+        assert publish.process_is_tunnel(tunnel.pid, "ssh", "-L", "unused") is True
+        assert publish.process_is_tunnel(other.pid, "ssh", "-L", "unused") is False
     finally:
         _reap(tunnel, other)
 
@@ -798,9 +831,85 @@ def test_a_reused_pid_is_not_killed(monkeypatch, tmp_path):
     monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
     bystander = _sleeper_as()
     try:
-        monkeypatch.setattr(publish, "process_is_tunnel", lambda pid: False if pid == bystander.pid else None)
+        monkeypatch.setattr(publish, "process_is_tunnel", lambda pid, *expected: False if pid == bystander.pid else None)
         _record_pids(tmp_path, bystander.pid, bystander.pid)
         publish.teardown("box")
         assert bystander.poll() is None
     finally:
         _reap(bystander)
+
+
+def test_teardown_reports_a_live_process_that_no_longer_matches(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(publish, "process_is_tunnel", lambda *args: False)
+    monkeypatch.setattr(publish.os, "kill", lambda pid, sig: None if sig == 0 else pytest.fail("signalled"))
+    path = _record_pids(tmp_path, 4321, 4322)
+    publish.teardown("box")
+    err = capsys.readouterr().err.splitlines()
+    assert len(err) == 2
+    for pid, line in zip((4321, 4322), err):
+        assert f"process {pid}" in line
+        assert "left running and no longer tracked" in line
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("kwargs", [{"ssh_alive": False}, {"listener": False}])
+def test_forward_failure_explains_how_to_remove_a_changed_host_key(monkeypatch, tmp_path, capsys, kwargs):
+    import shlex
+
+    _tunnel_env(monkeypatch, tmp_path, **kwargs)
+    known = tmp_path / "ssh state" / "known_hosts"
+    monkeypatch.setenv("ACQ_MSB_SSH_KNOWN_HOSTS", str(known))
+    rc, doc, _ = _invoke(capsys, "--backend", "msb", "ports", "box", "--publish", "8080:3000", "--json")
+    assert rc == 1
+    hint = doc["error"]["remediation"]
+    assert "host key changed" in hint
+    assert shlex.join(["ssh-keygen", "-R", "acq-msb-box", "-f", str(known)]) in hint
+
+
+@pytest.mark.parametrize("verb,exists", [("rm", True), ("rm", False), ("stop", True)])
+def test_only_rm_removes_an_existing_host_key_pin(monkeypatch, tmp_path, capsys, verb, exists):
+    _msb_env(monkeypatch, tmp_path, catalog={"box": "running"})
+    known = tmp_path / "ssh state" / "known_hosts"
+    monkeypatch.setenv("ACQ_MSB_SSH_KNOWN_HOSTS", str(known))
+    if exists:
+        known.parent.mkdir()
+        known.write_text("acq-msb-box ssh-ed25519 example\n", encoding="utf-8")
+    monkeypatch.setattr(publish.hostexec, "command", lambda name: [f"/usr/bin/{name}"])
+    calls = []
+    real_run = subprocess.run
+
+    def run(argv, **kwargs):
+        if argv[0] != "/usr/bin/ssh-keygen":
+            return real_run(argv, **kwargs)
+        calls.append((argv, kwargs))
+        raise OSError("keygen unavailable")  # cleanup is silent and best-effort
+
+    monkeypatch.setattr(publish.subprocess, "run", run)
+    rc, _, err = _invoke(capsys, "--backend", "msb", verb, "box", "--json")
+    assert rc == 0
+    assert "keygen unavailable" not in err
+    if verb == "rm" and exists:
+        assert len(calls) == 1
+        argv, kwargs = calls[0]
+        assert argv == ["/usr/bin/ssh-keygen", "-R", "acq-msb-box", "-f", str(known)]
+        assert kwargs["stdout"] == subprocess.DEVNULL and kwargs["stderr"] == subprocess.DEVNULL
+    else:
+        assert calls == []
+
+
+def test_posthoc_unknown_probe_prints_the_create_path_note(monkeypatch, capsys):
+    monkeypatch.setattr(publish, "host_port_status", lambda port: "unknown")
+    publish._Mapper([], []).unprobed()
+    create_note = capsys.readouterr().err
+    publish._free_host_ports([(8080, 3000), (8081, 3001)])
+    assert capsys.readouterr().err == create_note
+    assert "cannot probe host port availability" in create_note
+
+
+def test_sbx_empty_host_address_is_refused_clearly(monkeypatch, tmp_path, capsys):
+    _sbx_env(monkeypatch, tmp_path, catalog={"box": "running"})
+    monkeypatch.setattr(lifecycle.sbx, "_run_stream", lambda *a, **k: pytest.fail("reached sbx"))
+    rc, doc, _ = _invoke(capsys, "--backend", "sbx", "ports", "box", "--publish", ":8080:3000", "--json")
+    assert rc == 1 and doc["error"]["code"] == errors.VALIDATION_FAILED
+    assert "has an empty host address" in doc["error"]["message"]
