@@ -415,7 +415,7 @@ def test_migration_refusal_names_full_verb(
     assert doc["command"] == "provider-credential rm"
 
 
-# --- per-path overrides (ACQ_PROVENANCE_DIR, ACQ_MSB_BALANCED_HOSTS_FILE) ----------
+# --- per-path overrides (ACQ_PROVENANCE_DIR, ACQ_MSB_*, ACQ_*_KIT_CACHE) ----------
 
 # Each override py-acq honours, with the default its remediation names (the same
 # text Bash prints, acq.backends/userdirs.sh).
@@ -425,6 +425,9 @@ PATH_OVERRIDES = {
     "ACQ_PROVENANCE_DIR": "the default",
     "ACQ_SECRET_META_DIR": "the default",
     "ACQ_SECRET_INDEX_FILE": "the default",
+    "ACQ_SBX_KIT_CACHE": "the default",
+    "ACQ_MSB_KIT_CACHE": "the default",
+    "ACQ_MSB_STARTUP_STAGE_DIR": "the default",
     "ACQ_MSB_BALANCED_HOSTS_FILE": "the default",
 }
 

@@ -759,6 +759,29 @@ def test_create_registers_the_startup_script_and_removes_the_staged_file(monkeyp
     assert not bodies["path"].exists()
 
 
+def test_relative_startup_stage_dir_is_never_written(monkeypatch, tmp_path, capsys):
+    # A relative ACQ_MSB_STARTUP_STAGE_DIR would resolve against the current
+    # directory (normally the workspace). Staging refuses it with the shared
+    # override text and writes nothing there.
+    _env(monkeypatch, tmp_path)
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv(kit_msb.STARTUP_STAGE_DIR_ENV, "stage")
+    assert kit_msb.stage_startup_script("#!/bin/sh\n") is None
+    assert list(cwd.iterdir()) == []
+    err = capsys.readouterr().err
+    assert "ACQ_MSB_STARTUP_STAGE_DIR must be an absolute path, got 'stage'" in err
+    assert "skipping --script-path" in err
+
+
+def test_absolute_startup_stage_dir_is_honoured(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv(kit_msb.STARTUP_STAGE_DIR_ENV, str(tmp_path / "stage"))
+    path = kit_msb.stage_startup_script("#!/bin/sh\n")
+    assert path is not None and path.parent == tmp_path / "stage"
+
+
 # ---------------------------------------------------------------------------
 # Bash parity.
 # ---------------------------------------------------------------------------

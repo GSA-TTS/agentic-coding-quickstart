@@ -38,7 +38,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import errors, kit_fetch, kitspec, legacy_bash, lock, msb, security, state
+from . import errors, kit_fetch, kitspec, legacy_bash, lock, msb, security, state, userdirs
 
 # Module-local seam for the host OS class (as ``msb.WINDOWS``).
 WINDOWS = os.name == "nt"
@@ -463,19 +463,32 @@ def startup_script(kits: Iterable[Kit], merged: list[str], *, ro_mount: bool) ->
 
 
 def _stage_dir() -> Path:
-    override = os.environ.get(STARTUP_STAGE_DIR_ENV)
-    path = Path(override) if override else state.state_dir() / "msb-startup"
+    """The private staging directory; a relative override raises :class:`userdirs.UserDirError`.
+
+    A relative ``ACQ_MSB_STARTUP_STAGE_DIR`` would resolve against the current
+    directory, normally the agent-writable workspace. The CLI refuses it up
+    front (:func:`userdirs.check_path_overrides`); this is the same refusal for
+    any other caller.
+    """
+    override = userdirs.path_override(STARTUP_STAGE_DIR_ENV)
+    path = override or state.state_dir() / "msb-startup"
     path.mkdir(parents=True, exist_ok=True)
     path.chmod(0o700)
     return path
 
 
 def stage_startup_script(body: str) -> Path | None:
-    """Write ``body`` to a private host file for ``--script-path`` (best-effort, as Bash)."""
+    """Write ``body`` to a private host file for ``--script-path`` (best-effort, as Bash).
+
+    Nothing is written when the staging directory is refused; the warning names why.
+    """
     try:
         fd, raw = tempfile.mkstemp(prefix=f"{STARTUP_SCRIPT_NAME}.", dir=_stage_dir())
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(body)
+    except userdirs.UserDirError as exc:
+        _warn(f"{exc.message}; skipping --script-path")
+        return None
     except OSError:
         _warn("could not stage the kit startup script; skipping --script-path")
         return None

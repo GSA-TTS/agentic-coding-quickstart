@@ -522,7 +522,6 @@ def test_an_acq_location_at_the_filesystem_root_does_not_refuse_every_workspace(
     ws = tmp_path / "ws"
     ws.mkdir()
     monkeypatch.setenv("ACQ_MSB_KIT_CACHE", os.path.abspath(os.sep))
-    monkeypatch.setenv("ACQ_SBX_KIT_CACHE", "relative/cache")  # not absolute: ignored
     rc, doc = _invoke(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "box", "--json")
     assert rc == 0, doc
 
