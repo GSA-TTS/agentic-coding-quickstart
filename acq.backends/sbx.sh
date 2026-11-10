@@ -2172,7 +2172,7 @@ acq_backend_secret_rm() {
   # for `secret set` and rotation: running sandboxes hold one of those
   # placeholders and acq cannot tell which, so it removes none of them (and
   # keeps the acq store entry). A built-in with no sidecar has no custom row.
-  local rm_env="" rm_host="" rm_placeholders=""
+  local rm_env="" rm_host="" rm_placeholders="" rm_unlisted=0
   if [ "$is_builtin" -eq 1 ]; then
     rm_env="$sidecar_env"; rm_host="$sidecar_host"
   else
@@ -2180,7 +2180,10 @@ acq_backend_secret_rm() {
     rm_host="${sidecar_host:-$(_acq_service_hosts_env "$service" "$scope_name" | cut -f1)}"
   fi
   if [ -n "$rm_env" ]; then
-    rm_placeholders=$(_acq_sbx_custom_placeholders "$scope_flag" "$scope_name" "$rm_env" "$rm_host") || rm_placeholders=""
+    # A listing that cannot be read leaves the custom entry unchecked; the
+    # closing message says so rather than claim the proxy was cleared.
+    rm_placeholders=$(_acq_sbx_custom_placeholders "$scope_flag" "$scope_name" "$rm_env" "$rm_host") \
+      || { rm_placeholders=""; rm_unlisted=1; }
     if [ "$(printf '%s\n' "$rm_placeholders" | grep -c .)" -gt 1 ]; then
       local _rm_again="acq secret rm -g ${service}"
       [ -n "$scope_flag" ] || _rm_again="acq secret rm ${scope_name} ${service}"
@@ -2240,7 +2243,17 @@ acq_backend_secret_rm() {
 
   local where="global"
   [ -n "$scope_name" ] && where="sandbox '$scope_name'"
-  if [ "$removed_store" -eq 1 ]; then
+  if [ "$rm_unlisted" -eq 1 ]; then
+    if [ "$removed_store" -eq 1 ]; then
+      echo "acq: removed '$service' secret (${where}) from the acq store, but sbx's secret list could not" >&2
+    else
+      echo "acq: no '$service' secret found in the acq store (${where}), and sbx's secret list could not" >&2
+    fi
+    echo "     be read, so its proxy entry for ${rm_env} was not checked or removed. Check 'sbx secret ls'" >&2
+    local _unl_scope=""
+    [ -n "$scope_flag" ] || _unl_scope=" --sandbox $scope_name"
+    echo "     and remove it with 'sbx secret rm --placeholder P${_unl_scope} -f'." >&2
+  elif [ "$removed_store" -eq 1 ]; then
     echo "acq: removed '$service' secret (${where}) from the acq store and sbx proxy." >&2
   else
     echo "acq: no '$service' secret found in the acq store (${where}); cleared sbx proxy anyway." >&2
@@ -2369,8 +2382,10 @@ _acq_sbx_custom_placeholders() {
 # print in a copy-paste command: letters, digits, '.', '_' and '-', not
 # starting with '-' (which sbx would read as a flag).
 _acq_sbx_placeholder_ok() {
+  # The characters are listed one by one: a glob range such as A-Z follows the
+  # locale's collation and could admit non-ASCII letters under UTF-8.
   case "${1:-}" in
-    "" | -* | *[!A-Za-z0-9._-]*) return 1 ;;
+    "" | -* | *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]*) return 1 ;;
   esac
   return 0
 }

@@ -311,7 +311,10 @@ REMOTE_REF_REMEDIATION = (
 )
 
 
-_REF_VALUE_RE = re.compile(r"[A-Za-z0-9._/-]+")
+# A ref= or dir= value: ASCII letters, digits and ._/- only (Python compares
+# these ranges by code point, so no locale widens them), not starting with "-",
+# which git would read as an option.
+_REF_VALUE_RE = re.compile(r"[A-Za-z0-9._/][A-Za-z0-9._/-]*")
 _REF_KEYS = ("ref", "dir")
 
 
@@ -321,7 +324,8 @@ def remote_ref_problem(ref: str) -> str | None:
     A ref starting ``git+`` is refused when its transport URL (the part before
     the first ``#``) has a query string, or when its fragment has a parameter
     other than ``ref=`` and ``dir=``, names one of them twice, or gives one a
-    value that is empty or holds a character outside ``[A-Za-z0-9._/-]``: that
+    value that is empty, starts with ``-`` or holds a character outside
+    ``[A-Za-z0-9._/-]``: that
     is where a token would ride, and acq would otherwise carry it into records,
     cache paths and messages. The reason names the problem only, never the URL,
     a parameter name or a value. A local path is never refused here, since
@@ -345,8 +349,8 @@ def remote_ref_problem(ref: str) -> str | None:
             return "remote kit ref refused: its '#' fragment repeats ref= or dir="
         seen.add(key)
         if not _REF_VALUE_RE.fullmatch(value):
-            return ("remote kit ref refused: its '#' fragment has a ref= or dir= value that is empty or holds a "
-                    "character outside [A-Za-z0-9._/-]")
+            return ("remote kit ref refused: its '#' fragment has a ref= or dir= value that is empty, starts "
+                    "with '-' or holds a character outside [A-Za-z0-9._/-]")
     return None
 
 

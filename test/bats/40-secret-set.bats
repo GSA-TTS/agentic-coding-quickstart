@@ -376,6 +376,18 @@ _seed_duplicate_usai() {
   assert [ ! -e "$STUBDIR/secrets/acq.usai" ]
 }
 
+@test "secret rm(sbx): an unreadable sbx listing is reported, not claimed as cleared" {
+  load_acq
+  mkdir -p "$STUBDIR/secrets"; printf 'k\n' > "$STUBDIR/secrets/acq.usai"
+  sbx() { if [ "${1:-} ${2:-}" = "secret ls" ]; then return 1; fi; command sbx "$@"; }
+  run acq_backend_secret_rm -g usai
+  assert_success
+  assert_output --partial "removed 'usai' secret (global) from the acq store, but sbx's secret list could not"
+  assert_output --partial 'was not checked or removed'
+  refute_output --partial 'from the acq store and sbx proxy'
+  refute_regex "$(cat "$CALLS")" 'sbx secret rm --placeholder'
+}
+
 @test "secret set(sbx): the existing-entry hint names the real placeholder" {
   printf 'CUSTOM SECRETS\n(global) api.gsa.usai.gov USAI_API_KEY sbx-cs-real1 ****\n' > "$STUBDIR/sbx_ls"
   run bash -c 'printf "k\n" | SBX_LS_FIXTURE="$1" ACQ_BACKEND=sbx "$2" secret set -g usai' _ "$STUBDIR/sbx_ls" "$ACQ"

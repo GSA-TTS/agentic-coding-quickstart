@@ -138,9 +138,9 @@ _kit_git_fetch_into() {
     mkdir -p .git/info
     printf '%s/*\n' "$dir" > .git/info/sparse-checkout
     if [ "$mode" = anon ]; then
-      git -c credential.helper= -c core.hooksPath=/dev/null fetch --depth 1 origin "$ref" 2>&1 || exit 1
+      git -c credential.helper= -c core.hooksPath=/dev/null fetch --depth 1 origin -- "$ref" 2>&1 || exit 1
     else
-      git -c core.hooksPath=/dev/null fetch --depth 1 origin "$ref" 2>&1 || exit 1
+      git -c core.hooksPath=/dev/null fetch --depth 1 origin -- "$ref" 2>&1 || exit 1
     fi
     git -c core.hooksPath=/dev/null checkout -q FETCH_HEAD 2>&1 || exit 1
   )
@@ -216,7 +216,7 @@ _kit_fetch_materialize() (
 #   - without a scheme, a first path segment carrying any userinfo
 #     (user:token@host, or a bare token@host) becomes ***@host.
 # The fragment's first ref= and dir= are kept so the message still names the
-# kit when their value is plain ([A-Za-z0-9._/-]); a repeat or any other
+# kit when their value is plain (_kit_ref_value_plain); a repeat or any other
 # fragment parameter becomes ***, and an odd value becomes ref=*** or dir=***
 # (kit_ref_shape_check refuses such a ref, but a message about it must not
 # repeat the value). This
@@ -238,10 +238,11 @@ kit_ref_display() {
           case "$seen" in
             *" ${p%%=*} "*) out="${out}&***" ;;
             *)
-              case "${p#*=}" in
-                "" | *[!A-Za-z0-9._/-]*) out="${out}&${p%%=*}=***" ;;
-                *) out="${out}&${p}" ;;
-              esac
+              if _kit_ref_value_plain "${p#*=}"; then
+                out="${out}&${p}"
+              else
+                out="${out}&${p%%=*}=***"
+              fi
               ;;
           esac
           seen="${seen}${p%%=*} "
@@ -269,15 +270,28 @@ kit_ref_display() {
   printf '%s%s%s\n' "$base" "$query" "$frag"
 }
 
+# _kit_ref_value_plain VALUE — VALUE is a non-empty ref= or dir= value made only
+# of ASCII letters, digits, '.', '_', '/' and '-', not starting with '-'. The
+# characters are listed one by one rather than as ranges: a range such as A-Z
+# in a glob follows the locale's collation, so under some UTF-8 locales it
+# would also admit letters such as é or ß.
+_kit_ref_value_plain() {
+  case "${1:-}" in
+    "" | -* | *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/-]*) return 1 ;;
+  esac
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # kit_ref_shape_check REF [WHERE]
 # ---------------------------------------------------------------------------
 # Refuse a remote kit ref (one starting git+) whose transport URL, the part
 # before '#', has a query string, or whose '#' fragment has any parameter other
 # than ref= and dir=, names one of them twice, or gives one a value that is
-# empty or holds a character outside [A-Za-z0-9._/-] (the dir= charset the
-# fetch enforces). Such a part is where a token would ride, and acq would
-# otherwise carry it into its records, cache paths and messages. The message
+# empty, starts with '-' or holds a character outside [A-Za-z0-9._/-] (the dir=
+# charset the fetch enforces; see _kit_ref_value_plain). Such a part is where a
+# token would ride (and a leading '-' would reach git as an option), and acq
+# would otherwise carry it into its records, cache paths and messages. The message
 # names the problem only: never the URL, a parameter name or a value. WHERE
 # (for example "--kit" or "ACQ_EXTRA_KITS") says where the ref came from. A
 # local path is not checked, since '?' and '#' are ordinary characters in a
@@ -312,11 +326,10 @@ kit_ref_shape_check() {
       *) problem="has a parameter other than ref= and dir=" ;;
     esac
     # A value may hold only the safe ref/dir characters (no '?', ';', '#',
-    # space or the like, behind which a token could ride).
-    if [ -z "$problem" ]; then
-      case "$val" in
-        "" | *[!A-Za-z0-9._/-]*) problem="has a ref= or dir= value that is empty or holds a character outside [A-Za-z0-9._/-]" ;;
-      esac
+    # space or the like, behind which a token could ride), and must not start
+    # with '-', which git would read as an option.
+    if [ -z "$problem" ] && ! _kit_ref_value_plain "$val"; then
+      problem="has a ref= or dir= value that is empty, starts with '-' or holds a character outside [A-Za-z0-9._/-]"
     fi
     if [ -n "$problem" ]; then
       echo "${prefix} remote kit ref refused: its '#' fragment ${problem}." >&2

@@ -4961,8 +4961,8 @@ acq: --kit: remote kit ref refused: its URL has a query string ('?' before the '
 ```
 
 or `... its '#' fragment has a parameter other than ref= and dir=.`,
-`... repeats ref= or dir=.` or `... has a ref= or dir= value that is empty or
-holds a character outside [A-Za-z0-9._/-].` (with `ACQ_EXTRA_KITS:` or
+`... repeats ref= or dir=.` or `... has a ref= or dir= value that is empty,
+starts with '-' or holds a character outside [A-Za-z0-9._/-].` (with `ACQ_EXTRA_KITS:` or
 `ACQ_PROVIDER_KITS:` in place of `--kit` for an entry of that variable). The
 message does not repeat the ref. A refused `--kit` ref stops `run` or `create`
 at once. A refused `ACQ_EXTRA_KITS` or `ACQ_PROVIDER_KITS` ref is enforced only
@@ -4979,7 +4979,9 @@ clears it from the record.
 A remote kit ref is `git+https://HOST/REPO.git#ref=<sha>&dir=<path>`, and acq
 uses no other part. A query string (`?private_token=…`), an extra fragment
 parameter (`&token=…`), a second `ref=`/`dir=`, or a value carrying `?`, `;`,
-`#` or a space is where a credential would ride, and acq used to carry the ref
+`#`, a space or a non-ASCII letter is where a credential would ride (and a
+value starting with `-` would reach git as an option; the Bash fetch also
+passes `--` before the ref), and acq used to carry the ref
 verbatim into its debug output, its `.kits` and sbx `extra-kits` records and,
 after a fetch, its messages. acq now refuses such a ref where it enters
 (`--kit`, `ACQ_EXTRA_KITS`, `ACQ_PROVIDER_KITS`), again before any fetch
@@ -4997,7 +4999,8 @@ when it fetches).
 ### Fix
 
 Remove the query string, the extra parameter or the repeat, and keep `ref=`
-and `dir=` values to letters, digits, `.`, `_`, `/` and `-`. For a kit source
+and `dir=` values to ASCII letters, digits, `.`, `_`, `/` and `-`, not starting
+with `-`. For a kit source
 that needs authentication, configure a git credential helper that does not
 prompt (for GitHub, `gh auth setup-git`); never put a token in the ref. A local
 kit path is not affected: `?` and `#` are ordinary characters in a directory

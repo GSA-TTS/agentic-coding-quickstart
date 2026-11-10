@@ -28,3 +28,9 @@ refuse	git+https://github.com/o/r.git#ref=***	git+https://github.com/o/r.git#ref
 refuse	git+https://github.com/o/r.git#dir=***&ref=abc	git+https://github.com/o/r.git#dir=a@SEKRIT&ref=abc
 pass	/kits/odd?***#ref=x&***	/kits/odd?name#ref=x&token=y
 pass	./kits/a#***	./kits/a#b
+refuse	git+https://github.com/o/r.git#ref=***&dir=d	git+https://github.com/o/r.git#ref=-oSEKRIT&dir=d
+refuse	git+https://github.com/o/r.git#ref=abc&dir=***	git+https://github.com/o/r.git#ref=abc&dir=-SEKRIT
+refuse	git+https://github.com/o/r.git#ref=***&dir=d	git+https://github.com/o/r.git#ref=abcé&dir=d
+refuse	git+https://github.com/o/r.git#ref=abc&dir=***	git+https://github.com/o/r.git#ref=abc&dir=kitsßSEKRIT
+refuse	git+https://github.com/o/r.git#ref=***&dir=d	git+https://github.com/o/r.git#ref=ａｂｃ&dir=d
+pass	git+https://github.com/o/r.git#ref=a-b&dir=d/-x	git+https://github.com/o/r.git#ref=a-b&dir=d/-x

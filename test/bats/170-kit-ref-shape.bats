@@ -77,6 +77,44 @@ _seed_usai() {
   done
 }
 
+@test "kit_ref_shape_check: a ref= or dir= value starting with '-' is refused" {
+  load_acq
+  local ref
+  for ref in "git+https://example.test/kits.git#ref=-oupload-pack=s3cr3t-tok&dir=k" \
+      "git+https://example.test/kits.git#ref=${_PIN}&dir=-s3cr3t-tok"; do
+    run kit_ref_shape_check "$ref" "--kit"
+    assert_failure
+    assert_output --partial "starts with '-'"
+    refute_output --partial 's3cr3t-tok'
+  done
+}
+
+@test "the fetch passes -- before the ref, so git never reads it as an option" {
+  run grep -c 'fetch --depth 1 origin -- "\$ref"' "$REPO_ROOT/acq.backends/kit-translate.sh"
+  assert_output '2'
+}
+
+@test "charset checks do not widen under a UTF-8 locale" {
+  load_acq
+  local loc="" cand
+  for cand in en_US.UTF-8 en_US.utf8 C.UTF-8 C.utf8; do
+    if locale -a 2>/dev/null | grep -qix "$cand"; then loc="$cand"; break; fi
+  done
+  [ -n "$loc" ] || skip "no UTF-8 locale installed"
+  local v
+  for v in "abcé" "kitsß" "ａｂｃ"; do
+    run env LC_ALL="$loc" bash -c '. "$1"; LC_ALL="$2"; _kit_ref_value_plain "$3"' _ \
+      "$REPO_ROOT/acq.backends/kit-translate.sh" "$loc" "$v"
+    assert_failure
+    run env LC_ALL="$loc" bash -c 'LC_ALL="$1"; eval "$(sed -n "/^_acq_sbx_placeholder_ok() {/,/^}/p" "$2")"; _acq_sbx_placeholder_ok "$3"' _ \
+      "$loc" "$REPO_ROOT/acq.backends/sbx.sh" "sbx-cs-$v"
+    assert_failure
+  done
+  run env LC_ALL="$loc" bash -c '. "$1"; LC_ALL="$2"; _kit_ref_value_plain "kits/one-2.x_y"' _ \
+    "$REPO_ROOT/acq.backends/kit-translate.sh" "$loc"
+  assert_success
+}
+
 @test "kit_translate_fetch: an unsafe dir= is refused without repeating it" {
   load_acq
   run kit_translate_fetch "git+https://example.test/kits.git#ref=${_PIN}&dir=../s3cr3t-tok" "$STUBDIR/u"
