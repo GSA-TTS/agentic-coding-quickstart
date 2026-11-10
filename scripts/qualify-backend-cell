@@ -80,9 +80,10 @@ there, and the oracle qualifies the operator's real backend. The caller's
 (timing knobs such as ``ACQ_MSB_READY_TIMEOUT``): an ``ACQ_MSB_BIN=__stub__`` or
 ``ACQ_SECURITY_MOUNT_STATE`` would otherwise turn a live run into a stubbed one.
 ``PYTHONPATH`` is fixed to this checkout's ``py-acq/src``, the CLI runs under
-``python -P -s``, and ``msb``/``sbx``/``bash`` are resolved from absolute ``PATH``
-entries only (on Windows, never the WSL launcher ``System32\\bash.exe``; Git Bash
-is looked for in its install locations first). The canary honours only
+``python -P -s``, and ``msb``/``sbx``/``bash`` are resolved by acq's own resolver
+(``acq_py.hostexec``) from absolute ``PATH`` entries only, never the current
+directory, and only as ``.exe`` files on Windows (there, never the WSL launcher
+``System32\\bash.exe``; Git Bash is looked for in its install locations first). The canary honours only
 ``STEP_TIMEOUT``/``EXEC_TIMEOUT`` from the caller; its image is always the
 default (``QUALIFY_IMAGE`` and ``EXPECT_SHA`` are removed, and
 ``ACQ_QUALIFY_OUT_DIR`` is an ``ACQ_*`` variable), and its sandbox gets this run's
@@ -110,11 +111,11 @@ only searched for it.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import math
 import os
 import secrets
-import shutil
 import signal
 import subprocess
 import sys
@@ -187,21 +188,38 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def _load_hostexec():
+    """acq's own program resolver, ``acq_py.hostexec``, from this checkout.
+
+    Loaded by file path: this script runs as a plain script, without
+    ``py-acq/src`` on ``sys.path``.
+    """
+    path = _repo_root() / "py-acq" / "src" / "acq_py" / "hostexec.py"
+    spec = importlib.util.spec_from_file_location("qualify_backend_cell_hostexec", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+hostexec = _load_hostexec()
+
+
 def _which_all(name: str, path: str):
-    for entry in path.split(os.pathsep):
-        if entry and os.path.isabs(entry):
-            found = shutil.which(name, path=entry)
-            if found:
-                yield found
+    return hostexec.which_all(name, path)
 
 
 def which(name: str, path: str | None = None) -> str | None:
-    """``name`` resolved from the absolute entries of ``PATH`` only.
+    """``name`` resolved from the absolute entries of ``PATH`` only (``acq_py.hostexec``).
 
     An empty, ``.`` or relative entry would resolve against the current directory,
-    which may be a workspace a sandboxed agent can write to.
+    which may be a workspace a sandboxed agent can write to. ``shutil.which`` is
+    not used: on Windows it searches the current directory first even when given
+    an explicit path, and accepts batch files through ``PATHEXT``; here only an
+    ``.exe`` is accepted there.
     """
-    return next(_which_all(name, os.environ.get("PATH", "") if path is None else path), None)
+    return hostexec.which(name, os.environ.get("PATH", "") if path is None else path)
 
 
 def _is_wsl_launcher(path: str) -> bool:

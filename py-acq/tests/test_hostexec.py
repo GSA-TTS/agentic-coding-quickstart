@@ -230,6 +230,21 @@ def test_passthrough_launches_the_resolved_backend(workspace, tmp_path, monkeypa
     assert seen["argv"] == [str(real), "image", "list"]
 
 
+def test_which_all_yields_every_match_from_an_explicit_path_in_order(workspace, tmp_path, monkeypatch):
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    a = _exe(first / f"msb{_EXE_SUFFIX}")
+    b = _exe(second / f"msb{_EXE_SUFFIX}")
+    monkeypatch.setenv("PATH", str(tmp_path / "elsewhere"))
+    path = os.pathsep.join(["", ".", str(first), "rel", str(second)])
+    assert list(hostexec.which_all("msb", path)) == [str(a), str(b)]
+    assert hostexec.which("msb", path) == str(a)
+    assert hostexec.which("msb") is None  # PATH itself is the default
+    assert list(hostexec.which_all(os.path.join("rel", "msb"), path)) == []
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows current-directory search")
 def test_windows_planted_exe_is_not_resolved(workspace, monkeypatch):
     monkeypatch.setenv("PATH", ".")

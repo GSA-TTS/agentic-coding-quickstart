@@ -19,6 +19,29 @@
 
 set -eu
 
+# Keep only the absolute PATH entries, before anything else runs. An empty entry
+# (a leading, trailing or doubled ':') or a relative one such as '.' makes the
+# shell search the current directory, normally the workspace a sandboxed agent
+# can write to, so `python3` (or dirname/readlink below) could run a planted
+# copy on the host. The same rule as the Bash acq and acq_py.hostexec; only
+# shell builtins are used. With no absolute entry left, refuse rather than
+# search the current directory.
+_abs_path="" _rest="${PATH-}:"
+while [ -n "$_rest" ]; do
+  _entry=${_rest%%:*}
+  _rest=${_rest#*:}
+  case "$_entry" in
+    /*) _abs_path="${_abs_path:+$_abs_path:}$_entry" ;;
+  esac
+done
+if [ -z "$_abs_path" ]; then
+  echo "acq-python: PATH has no absolute directory, so python3 cannot be found without searching the current directory" >&2
+  exit 1
+fi
+PATH=$_abs_path
+export PATH
+unset _abs_path _rest _entry
+
 # Resolve the absolute directory containing this script, following symlinks.
 _self_dir() {
   src="$1" dir=""

@@ -5,6 +5,33 @@
 
 $ErrorActionPreference = "Stop"
 
+# Run from a PowerShell prompt or script (`.\acq.ps1`, or an `acq` alias for it),
+# this script runs inside the caller's process and shares its environment, so
+# the variables it sets for the programs it starts (NoDefaultCurrentDirectoryInExePath,
+# PYTHONPATH, ACQ_PROVIDER_INPUT_DATA_DIR) would stay set in the user's session
+# afterwards. The first invocation therefore saves them, runs the launcher as a
+# nested call of this same script, and puts them back however that call ends:
+# exit, error or Ctrl+C. The nested call sees $acqPs1SavedEnvironment (set in
+# this scope, visible to the child scope) and runs the launcher itself. Started
+# by acq.cmd, the process is acq's own, so the restore changes nothing there.
+if ($null -eq (Get-Variable -Name acqPs1SavedEnvironment -ErrorAction SilentlyContinue)) {
+    $acqPs1SavedEnvironment = @{}
+    foreach ($name in @('NoDefaultCurrentDirectoryInExePath', 'PYTHONPATH', 'ACQ_PROVIDER_INPUT_DATA_DIR')) {
+        $acqPs1SavedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+    }
+    try {
+        & $PSCommandPath @args
+    }
+    finally {
+        foreach ($name in $acqPs1SavedEnvironment.Keys) {
+            # A $null value removes the variable, as it was before.
+            [Environment]::SetEnvironmentVariable($name, $acqPs1SavedEnvironment[$name], 'Process')
+        }
+        Remove-Variable -Name acqPs1SavedEnvironment -ErrorAction SilentlyContinue
+    }
+    exit $LASTEXITCODE
+}
+
 # Programs started by acq never resolve from the current directory (normally the
 # untrusted workspace): cmd.exe, CreateProcess and Python's shutil.which honour
 # this for every child process.
