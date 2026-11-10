@@ -21,6 +21,7 @@ import pytest
 from acq_py import lock
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX dir_fd take path")
 @pytest.mark.parametrize("kind", ["sandbox", "config"])
 def test_recovery_preserves_owner_swapped_after_stale_read(tmp_path, monkeypatch, kind):
     taker = (lock._MkdirLock(tmp_path / "shared.lock", tmp_path) if kind == "sandbox"
@@ -40,7 +41,11 @@ def test_recovery_preserves_owner_swapped_after_stale_read(tmp_path, monkeypatch
         rename(src, dst)
         contender = lock.ConfigDirLock(tmp_path / "config.lock", tmp_path)
         contender.path = taker.path
-        assert not contender._create_owner("contender token")
+        parent = os.open(tmp_path, os.O_RDONLY | lock._O_DIRECTORY)
+        try:
+            assert not contender._take(parent, "contender token")
+        finally:
+            os.close(parent)
         seen.append(True)
 
     monkeypatch.setattr(os, "rename", swap_then_detach)
@@ -72,20 +77,24 @@ def test_recovery_retains_changed_owner_if_exclusive_restore_loses(tmp_path, mon
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX PID probe")
-def test_dead_remover_reservations_heal(tmp_path, monkeypatch):
+@pytest.mark.parametrize("saved", ["999999 stale\n", "", None])
+def test_dead_remover_reservations_heal(tmp_path, monkeypatch, saved):
     taker = lock._MkdirLock(tmp_path / "shared.lock", tmp_path)
     private = taker.path / "owner.stale.999999.example"
     private.mkdir(parents=True)
-    (private / "owner").write_text("999999 stale\n", encoding="utf-8")
+    if saved is not None:
+        (private / "owner").write_text(saved, encoding="utf-8")
     monkeypatch.setattr(lock, "_pid_alive", lambda pid: False)
     monkeypatch.setattr(lock, "_process_identity", lambda pid: None)
     assert not taker._reservations()
     assert not private.exists()
 
 
-def test_take_withdraws_detached_token_when_recovery_starts_during_write(tmp_path, monkeypatch):
-    taker = lock.ConfigDirLock(tmp_path / "config.lock", tmp_path)
-    taker.path.mkdir()
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX dir_fd take path")
+@pytest.mark.parametrize("kind", ["sandbox", "config"])
+def test_take_withdraws_detached_token_when_recovery_starts_during_write(tmp_path, monkeypatch, kind):
+    taker = (lock._MkdirLock(tmp_path / "shared.lock", tmp_path) if kind == "sandbox"
+             else lock.ConfigDirLock(tmp_path / "config.lock", tmp_path))
     reservations = taker._reservations
     calls = []
 
@@ -98,9 +107,104 @@ def test_take_withdraws_detached_token_when_recovery_starts_during_write(tmp_pat
         return reservations(releasing)
 
     monkeypatch.setattr(taker, "_reservations", detach_on_postcheck)
-    assert not taker._create_owner("self token")
+    parent = os.open(tmp_path, os.O_RDONLY | lock._O_DIRECTORY)
+    try:
+        assert not taker._take(parent, "self token")
+    finally:
+        os.close(parent)
     assert taker.token is None
     assert not taker.path.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX dir_fd take path")
+@pytest.mark.parametrize("kind", ["sandbox", "config"])
+def test_acquire_retries_when_directory_vanishes_after_take(tmp_path, monkeypatch, kind):
+    taker = (lock._MkdirLock(tmp_path / "shared.lock", tmp_path) if kind == "sandbox"
+             else lock.ConfigDirLock(tmp_path / "config.lock", tmp_path))
+    take = taker._take
+    calls = []
+
+    def vanished_once(parent, token):
+        calls.append(token)
+        if len(calls) == 1:
+            taker.path.mkdir()
+            taker.path.rmdir()
+            return False
+        return take(parent, token)
+
+    monkeypatch.setattr(taker, "_take", vanished_once)
+    assert taker.acquire()
+    assert len(calls) == 2
+    taker.release()
+
+
+@pytest.mark.parametrize("kind,threshold", [("sandbox", 900), ("config", 60)])
+@pytest.mark.parametrize("saved", [None, "", "123 windows\n"])
+def test_windows_reservations_use_lock_threshold(tmp_path, monkeypatch, kind, threshold, saved):
+    taker = (lock._BashLock("sbx", "example") if kind == "sandbox"
+             else lock.ConfigDirLock(tmp_path / "config.lock", tmp_path))
+    taker.path = tmp_path / "shared.lock"
+    private = taker.path / "owner.stale.999999.example"
+    private.mkdir(parents=True)
+    if saved is not None:
+        (private / "owner").write_text(saved, encoding="utf-8")
+    monkeypatch.setattr(lock.sys, "platform", "win32")
+    def forbidden_pid_probe(pid):
+        pytest.fail("Windows reservations must never probe PIDs")
+    monkeypatch.setattr(lock, "_pid_alive", forbidden_pid_probe)
+    now = time.time()
+    os.utime(private, (now - threshold + 10, now - threshold + 10))
+    assert taker._reservations()
+    os.utime(private, (now - threshold - 10, now - threshold - 10))
+    assert not taker._reservations()
+
+
+def test_windows_sandbox_honours_reservation_beside_old_lock(tmp_path, monkeypatch):
+    taker = lock._BashLock("sbx", "example")
+    taker.path = tmp_path / "shared.lock"
+    private = taker.path / f"owner.stale.{os.getpid()}.example"
+    private.mkdir(parents=True)
+    old = time.time() - 1000
+    os.utime(taker.path, (old, old))
+    monkeypatch.setattr(lock.sys, "platform", "win32")
+    assert not taker._acquire_windows()
+    assert taker.blocked
+
+
+def test_release_cleans_own_detached_token(tmp_path):
+    taker = lock.ConfigDirLock(tmp_path / "config.lock", tmp_path)
+    assert taker.acquire()
+    private = taker.path / f"owner.stale.{os.getpid()}.example"
+    private.mkdir()
+    (taker.path / "owner").rename(private / "owner")
+    taker.release()
+    assert not taker.path.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX dir_fd take path")
+def test_posix_take_exclusive_open_preserves_winning_owner(tmp_path, monkeypatch):
+    taker = lock.ConfigDirLock(tmp_path / "config.lock", tmp_path)
+    taker.path.mkdir()
+    owner = taker.path / "owner"
+    owner.write_text("winner token\n", encoding="utf-8")
+    real_open = os.open
+    calls = []
+
+    def observe_open(path, flags, mode=0o777, *, dir_fd=None):
+        if path == "owner":
+            calls.append(flags)
+            assert dir_fd is not None
+            assert flags & os.O_EXCL and flags & os.O_CREAT
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", observe_open)
+    parent = os.open(tmp_path, os.O_RDONLY | lock._O_DIRECTORY)
+    try:
+        assert not taker._take(parent, "loser token")
+    finally:
+        os.close(parent)
+    assert len(calls) == 1
+    assert owner.read_text(encoding="utf-8") == "winner token\n"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="unprivileged POSIX symlink")

@@ -901,17 +901,89 @@ EOF
 }
 
 @test "lock recovery cleans reservations left by a dead remover" {
-  local lock private take
+  local lock private take saved
   for take in _acq_config_lock_take _acq_provider_input_lock_take; do
+    for saved in stale empty absent; do
     lock="$STUBDIR/$take"
     private="$lock/owner.stale.999999.example"
     mkdir -p "$private"
-    printf '999999 stale\n' > "$private/owner"
+    case "$saved" in
+      stale) printf '999999 stale\n' > "$private/owner" ;;
+      empty) : > "$private/owner" ;;
+    esac
     run "$take" "$lock" 'new token'
     assert_success
     [ ! -e "$private" ]
     assert_equal "$(cat "$lock/owner")" 'new token'
+    rm -f "$lock/owner"
+    rmdir "$lock"
+    done
   done
+}
+
+@test "MSYS reservations use age and each lock's Windows threshold, never PID" {
+  local root lock private kind simulated_age threshold
+  root=$(acq_provider_input_root sbx windows-reservation)
+  export OSTYPE=msys
+  run kill -0 999999
+  assert_failure
+  _acq_pid_alive() { echo 'unexpected PID probe' > "$STUBDIR/pid-probe"; return 1; }
+  for kind in config sandbox; do
+    threshold=60; lock="$STUBDIR/config.lock.d"
+    if [ "$kind" = sandbox ]; then threshold=900; lock="${root}.lock"; fi
+    private="$lock/owner.stale.999999.example"
+    mkdir -p "$private"
+    _acq_config_lock_age() { echo "$simulated_age"; }
+    simulated_age=$((threshold - 1))
+    _acq_lock_reservations "$lock"
+    [ -d "$private" ]
+    simulated_age=$threshold
+    if _acq_lock_reservations "$lock"; then false; fi
+    [ ! -e "$private" ]
+  done
+  [ ! -e "$STUBDIR/pid-probe" ]
+}
+
+@test "projection recovery retries when another recoverer wins the rename" {
+  local root lock
+  root=$(acq_provider_input_root sbx recoverer-lost); lock="${root}.lock"
+  mkdir -p "$lock"
+  printf '999999 stale\n' > "$lock/owner"
+  _acq_lock_remove_owner() {
+    command rm "$1/owner"
+    command rmdir "$1"
+    return 1
+  }
+  run acq_provider_input_lock_acquire sbx recoverer-lost
+  assert_success
+  [ -s "$lock/owner" ]
+}
+
+@test "projection release cleans its explicit transaction token detached into a reservation" {
+  local lock private token tx_pid
+  tx_pid=$(exec sh -c 'echo $PPID')
+  token=$(_acq_config_lock_token "$tx_pid")
+  lock=$(acq_provider_input_lock_acquire sbx detached-release "$tx_pid")
+  assert_equal "$(cat "$lock/owner")" "$token"
+  private="$lock/owner.stale.$$.example"
+  mkdir "$private"
+  mv "$lock/owner" "$private/owner"
+  acq_provider_input_lock_release "$lock" "$token"
+  [ ! -e "$lock" ]
+}
+
+@test "projection guardian retains its acquisition token for detached release" {
+  local lock private token
+  _acq_provider_input_guardian_start
+  token=$_ACQ_PROVIDER_INPUT_LOCK_TOKEN
+  lock=$(acq_provider_input_lock_acquire sbx guardian-release "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID")
+  assert_equal "$(cat "$lock/owner")" "$token"
+  private="$lock/owner.stale.$$.example"
+  mkdir "$private"
+  mv "$lock/owner" "$private/owner"
+  acq_provider_input_lock_release "$lock"
+  _acq_provider_input_guardian_stop
+  [ ! -e "$lock" ]
 }
 
 @test "lock recovery retains a changed token when exclusive restoration loses" {
@@ -947,18 +1019,21 @@ EOF
 }
 
 @test "lock take withdraws its token if recovery starts during its owner write" {
-  local lock="$STUBDIR/postcheck"
+  local lock take
+  for take in _acq_config_lock_take _acq_provider_input_lock_take; do
+  lock="$STUBDIR/$take-postcheck"
   run bash -c '
     ACQ_SOURCE_ONLY=1 . "$1" >/dev/null 2>&1
-    lock=$2; private="$lock/owner.stale.$$.example"
+    lock=$2; reservation="$lock/owner.stale.$$.example"
     printf() {
       builtin printf "$@" || return
-      case "$-" in *C*) command mkdir "$private"; command mv "$lock/owner" "$private/owner" ;; esac
+      case "$-" in *C*) command mkdir "$reservation"; command mv "$lock/owner" "$reservation/owner" ;; esac
     }
-    _acq_config_lock_take "$lock" "self token"
-  ' _ "$ACQ" "$lock"
+    "$3" "$lock" "self token"
+  ' _ "$ACQ" "$lock" "$take"
   assert_failure
   [ ! -e "$lock" ]
+  done
 }
 
 @test "projection lock recovers a stale owner but never breaks a live owner" {
