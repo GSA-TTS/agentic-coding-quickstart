@@ -161,14 +161,16 @@ _prog() { # SHELL_SNIPPET
   assert_output --regexp "^trap -- '' (SIG)?INT\$"
 }
 
-@test "progress: Ctrl-C resets INT before the prior handler, so a re-raise cannot recurse" {
+@test "progress: Ctrl-C guards INT through the prior handler, so a re-raise cannot recurse" {
   export PRIOR_COUNT="$STUBDIR/prior-count"
   _prog 'prior() { echo ran >> "$PRIOR_COUNT"; [ "$(wc -l < "$PRIOR_COUNT")" -ge 3 ] || kill -s INT $$; }
+    trap "echo PRIOR_EXIT=\$?" EXIT
     trap prior INT
     _acq_spin_install_traps
     _acq_spin_cleanup_signal INT
     printf "NOT_REACHED\n"'
   assert_equal "$status" 130
+  assert_line 'PRIOR_EXIT=130'
   refute_output --partial 'NOT_REACHED'
   assert_equal "$(wc -l < "$STUBDIR/prior-count" | tr -d ' ')" 1
 }
@@ -388,6 +390,48 @@ _prog() { # SHELL_SNIPPET
   refute_output --partial 'acq-spin.'
 }
 
+# The same guarantee where mkdir is not exclusive (uutils coreutils mkdir 0.10
+# reports success to concurrent callers; KNOWN_FAILURE_MODES section 92). The
+# mkdir first on PATH here reports success for a directory that already exists,
+# so a draw lock decided by mkdir would let the stop take it while the
+# suspended animator still holds it, and return early.
+@test "progress: a non-exclusive mkdir never lets the stop share the draw lock" {
+  local mark="$STUBDIR/animator-stopped" spintmp="$STUBDIR/spintmp" real
+  real=$(command -v mkdir)
+  mkdir -p "$spintmp" "$STUBDIR/racy-mkdir"
+  printf '#!/bin/sh\n"%s" "$@" 2>/dev/null && exit 0\nfor last; do :; done\n[ -d "$last" ]\n' "$real" \
+    > "$STUBDIR/racy-mkdir/mkdir"
+  chmod +x "$STUBDIR/racy-mkdir/mkdir"
+  _prog '_acq_progress_enabled() { return 0; }
+    export TMPDIR="'"$spintmp"'" PATH="'"$STUBDIR"'/racy-mkdir:$PATH"
+    printf() {
+      if [ "$1" = "\r%s %s" ] && "'"$real"'" "'"$mark"'" 2>/dev/null; then
+        sh -c "kill -STOP \$PPID"
+      fi
+      builtin printf "$@"
+    }
+    acq_spin_start "phase one"
+    anim=$_ACQ_SPIN_PID
+    i=0
+    while [ ! -d "'"$mark"'" ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i + 1)); done
+    sleep 0.3
+    ( sleep 3; echo "CONTINUED" >&2; kill -CONT "$anim" ) &
+    resume=$!
+    acq_spin_stop
+    echo "STOP-RETURNED" >&2
+    builtin wait "$resume"
+    sleep 0.5
+    kill -0 "$anim" 2>/dev/null && echo "ANIMATOR-ALIVE"
+    ls "'"$spintmp"'"'
+  assert_success
+  [ -d "$mark" ]
+  [[ "$output" == *CONTINUED*STOP-RETURNED* ]]
+  local after="${output##*STOP-RETURNED}"
+  [[ "$after" != *"phase one"* ]]
+  refute_output --partial 'ANIMATOR-ALIVE'
+  refute_output --partial 'acq-spin.'
+}
+
 # The shell snippet shared by the next tests: an animated spinner whose animator
 # suspends itself (SIGSTOP) inside its first draw, holding the draw lock. It
 # leaves the animator's PID in $anim. $1 is the marker directory, $2 TMPDIR.
@@ -537,7 +581,7 @@ _suspended_spinner() {
     d=$(mktemp -d "'"$STUBDIR"'/acq-spin.XXXXXX")
     _ACQ_SPIN_DIR=$d _ACQ_SPIN_ACTIVE=1 _ACQ_SPIN_FORKED=1
     _acq_spin_stop_animation 2>/dev/null
-    [ -d "$d/draw" ] && [ -e "$d/stop" ] && echo "FORKED-LOCKED"
+    [ -f "$d/draw" ] && [ -e "$d/stop" ] && echo "FORKED-LOCKED"
     echo "STATE=[$_ACQ_SPIN_DIR$_ACQ_SPIN_FORKED$_ACQ_SPIN_LOCKED$_ACQ_SPIN_ACTIVE]"
     _acq_spin_restore_traps'
   assert_success
