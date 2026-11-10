@@ -634,7 +634,7 @@ before the `#`), or whose `#` part has a parameter other than `ref=` and
 error names the problem but not the ref, since that is where a token would be.
 The same applies to refs in `ACQ_PROVIDER_KITS`. A local kit path may contain `?` and `#`. Credentials never go
 in a kit ref: configure a git credential helper for a source that needs
-authentication. See section 89 of
+authentication. See section 91 of
 [KNOWN_FAILURE_MODES.md](../KNOWN_FAILURE_MODES.md).
 
 ### Provider kits

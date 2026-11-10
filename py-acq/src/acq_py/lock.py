@@ -662,7 +662,7 @@ class _MkdirLock:
         for a directory on the way is never followed. The exclusive create of
         the owner file is what decides who holds the lock: Bash's ``mkdir`` is
         not atomic with every coreutils (uutils ``mkdir`` reports success to
-        concurrent callers; KNOWN_FAILURE_MODES section 90), so a Bash taker may
+        concurrent callers; KNOWN_FAILURE_MODES section 92), so a Bash taker may
         share the directory this one just made. Losing that race never removes
         the winner's owner file. Where :attr:`claims_ownerless` is set, an
         existing directory with no owner file is taken as well. If writing the

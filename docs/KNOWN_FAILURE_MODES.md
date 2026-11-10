@@ -970,7 +970,7 @@ sbx secret set-custom <sandbox-name> --host api.gsa.usai.gov \
 - Rotate with `acq usai-rotate-api-key`, which preserves the placeholder so
   existing sandboxes keep working. Avoid deleting + re-adding the global secret.
   When sbx holds more than one global USAi entry, rotation refuses and names
-  each placeholder instead of picking one (see section 88).
+  each placeholder instead of picking one (see section 90).
 - Remove any `export USAI_API_KEY=...` from your shell profile — the sandbox gets
   its value from sbx injection, and a host env var only causes confusion.
 
@@ -4646,7 +4646,7 @@ live lock. Such a directory is left only when an acq process died in exactly
 that moment, or the directory was made by hand.
 
 The `config.yaml` lock is decided by the exclusive create of its `owner` file
-(section 90), so a `config.lock.d` directory with no `owner` file heals itself:
+(section 92), so a `config.lock.d` directory with no `owner` file heals itself:
 the next writer takes it. What it cannot heal is an `owner` file that exists but
 is empty, which is a writer between creating the file and writing its token;
 one is left only if a writer died in exactly that moment. (A writer that fails
@@ -5103,7 +5103,7 @@ under Git Bash picks the Microsoft Store `python3` alias, installs under
 
 ---
 
-## 88. sbx: More Than One Global USAi Custom Secret Is Refused
+## 90. sbx: More Than One Global USAi Custom Secret Is Refused
 
 **Status:** By design (both the Bash and the Python `acq`).
 
@@ -5162,7 +5162,7 @@ secret. The refusal is covered by `test/bats/40-secret-set.bats`,
 
 ---
 
-## 89. Remote Kit Ref With a Query String or an Extra `#` Parameter Is Refused
+## 91. Remote Kit Ref With a Query String or an Extra `#` Parameter Is Refused
 
 **Status:** By design (both the Bash and the Python `acq`).
 
@@ -5229,7 +5229,7 @@ Covered by `test/bats/170-kit-ref-shape.bats`, `py-acq/tests/test_kit_fetch.py`,
 
 ---
 
-## 90. uutils coreutils: `mkdir` Is Not Exclusive, So Bash's Provider-Input Lock Can Be Shared
+## 92. uutils coreutils: `mkdir` Is Not Exclusive, So Bash's Provider-Input Lock Can Be Shared
 
 **Symptom:** On a host whose `mkdir` is uutils coreutils (Ubuntu 25.10 and
 later ship it as `/usr/bin/mkdir`; `mkdir --version` prints `uutils

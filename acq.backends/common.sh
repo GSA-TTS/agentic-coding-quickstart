@@ -2427,7 +2427,7 @@ EOF
 # caller should look again). Creating the owner file is what decides: noclobber
 # makes Bash itself open it with O_EXCL, so exactly one taker creates it. mkdir
 # cannot decide, because it is not atomic everywhere (uutils coreutils mkdir
-# 0.10 reports success to concurrent callers; KNOWN_FAILURE_MODES section 90).
+# 0.10 reports success to concurrent callers; KNOWN_FAILURE_MODES section 92).
 # So an existing directory with no owner file is taken too: a leftover from a
 # taker that died before creating its owner heals itself instead of blocking
 # every config write. A taker that loses never removes anything. If writing the
