@@ -1557,6 +1557,15 @@ proceeds without prompting), then retries once with your system git config
 It can no longer hang on a
 prompt; a genuine failure now prints this remedy.
 
+On sbx, a failed kit fetch stops the operation: acq prints
+`acq(sbx): error: could not fetch kit; not applying: …`, `acq run`/`acq create`
+does not create the sandbox, and `acq kit apply` or the re-attach heal skips
+that kit. Older acq versions passed the raw ref to sbx so that sbx could try its
+own fetch. That skipped acq's checks (no credentials in the URL, a safe `dir=`,
+the fetched commit matching the pin, and the payload checks), and sbx could not
+parse acq's neutral built-in kits anyway. Fix the fetch (above) and run the
+command again; on msb a failed fetch has always stopped the same way.
+
 ### Related
 
 - Issue #207 (non-interactive fetch), #208 (docs + loud fallback).
@@ -4024,6 +4033,68 @@ SIGTERM once the marker exists, so the signal lands inside the lookup every time
 and acq's stderr must stay empty. A `ps` wrapper that always fails checks that
 acq's root survives a failed lookup, and that the guardian still removes the
 root after acq is killed by SIGKILL.
+
+---
+
+## 59. sbx: The Recreate Notice Repeats on Every Start for a Relative `ACQ_EXTRA_KITS` Entry
+
+**Status:** Known, migration by recreate (sbx, Bash `acq`). Affects only sandboxes
+created by an older acq.
+
+### Symptoms
+
+You created an sbx sandbox with a relative local extra kit, for example
+`ACQ_EXTRA_KITS=./my-kit acq run opencode .`, using an acq release from before
+local kit refs were recorded as absolute paths. After upgrading acq, every
+`acq run NAME` (or other re-attach) with the same `ACQ_EXTRA_KITS=./my-kit`
+prints:
+
+```
+acq: applying extra kit to 'NAME': /abs/path/to/my-kit
+acq: sbx >= 0.38 cannot extend a live sandbox with startup-bearing kits
+     ...
+       acq rm 'NAME' && acq run opencode /path/to/your/project
+```
+
+The kit applied at create is still in the sandbox; only the notice is new.
+
+### Root Cause
+
+The re-attach heal (`acq_backend_ensure_kits_applied` step 4 in
+`acq.backends/sbx.sh`) skips an extra kit only when its ref matches a line in
+the sandbox's host record (`extra-kits`) exactly. acq now turns a relative
+local kit ref into an absolute path as soon as it reads `ACQ_EXTRA_KITS` or
+`--kit` (`_acq_kit_refs_make_absolute` in `acq.backends/common.sh`), so a
+relative ref names the same kit wherever a later start runs. The older acq
+recorded the relative spelling (`./my-kit`), which never matches the absolute
+one, so the heal tries `sbx kit add` again. sbx 0.38 and later refuse to add a
+kit with startup commands to a live sandbox; acq prints the recreate notice and
+does not update the record, so the same thing happens on the next start.
+
+acq does not re-resolve the old relative record against the current directory:
+it cannot know which directory the older acq resolved it from, the same reason
+the start/restart kit record skips relative entries with a warning.
+
+A kit without startup commands is added once and its absolute ref recorded,
+so it stops after one start.
+
+### Fix
+
+Recreate the sandbox so its record is written with absolute refs (this discards
+the sandbox's session and context):
+
+```bash
+acq rm NAME && ACQ_EXTRA_KITS=./my-kit acq run opencode /path/to/your/project
+```
+
+Until then the notice is harmless. Leaving `ACQ_EXTRA_KITS` unset for that
+sandbox also stops it, since the kit is already applied.
+
+### Prevention / Status
+
+New sandboxes record absolute refs (`test/bats/101-kit-source-confinement.bats`,
+"cli-kits and the sbx extra-kits record agree on an absolute ref"), so this
+affects only sandboxes created before that change.
 
 ---
 

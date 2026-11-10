@@ -4083,7 +4083,7 @@ _acq_backend_provision_unlocked() {
 
   for kitref in ${kits[@]+"${kits[@]}"}; do
     kitdir=$(_acq_msb_fetch_kit "$kitref") || {
-      echo "acq(msb): error: could not fetch kit: $kitref" >&2
+      echo "acq(msb): error: could not fetch kit: $(kit_ref_display "$kitref")" >&2
       exit 1
     }
     kitdirs+=("$kitdir")
@@ -6495,7 +6495,7 @@ acq_backend_apply_kit() {
   local name="$1" kitref="$2"
   local kitdir
   kitdir=$(_acq_msb_fetch_kit "$kitref") || {
-    echo "acq(msb): error: could not fetch kit: $kitref" >&2
+    echo "acq(msb): error: could not fetch kit: $(kit_ref_display "$kitref")" >&2
     return 1
   }
   # Volumes are creation-time only (ADR-0023): a mid-life apply cannot attach
@@ -6528,7 +6528,7 @@ _acq_msb_heal_kit_set() {
       _dirs+=("$kitdir")
       if [ "$i" -lt "$builtin_count" ]; then _builtin+=(1); else _builtin+=(0); fi
     else
-      echo "acq(msb): warning: could not fetch kit for healing: $kitref" >&2
+      echo "acq(msb): warning: could not fetch kit for healing: $(kit_ref_display "$kitref")" >&2
       # A built-in kit that can't even be fetched means we cannot claim the
       # bundle is current. Extra-kit fetch failures don't affect the verdict.
       [ "$i" -lt "$builtin_count" ] && ok=0
