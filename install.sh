@@ -495,7 +495,9 @@ fi
 # is asked too; a reused PID only means the leftover waits for a later run. Two
 # PIDs never count as alive: this run's own (an earlier run in a fresh container
 # often had the same PID, and its leftovers are not this run's), and 1, which is
-# init on a host and in most containers rather than an installer.
+# init on a host and in most containers rather than an installer. The check
+# sees only this PID namespace, so an install running in another container or
+# on another host sharing the directory, or one running as PID 1, looks dead.
 pid_alive() {
   case "$1" in ''|*[!0-9]*) return 1 ;; esac
   [ "$1" != "$$" ] && [ "$1" != 1 ] || return 1
@@ -605,11 +607,20 @@ marker_tmp=""
 # marker plus ".tmp." and a process id; anything else is left alone. Staging
 # dirs left in the parent by a killed run (.acq-stage.<pid>.<random>) are swept
 # under the same rule, never this run's own. Entries of a live process are
-# skipped (pid_alive, above).
+# skipped (pid_alive, above). Only entries this user owns are swept, and the
+# sweep is best effort: in a shared parent such as /opt or /tmp another user's
+# killed install can leave a staging dir this user cannot remove, and a failed
+# removal must not stop this install (or every later one) partway through.
+# Ownership is read with find's -user, because test -O is not POSIX.
+my_uid="$(id -u 2>/dev/null)" || my_uid=""
+owned_by_me() {
+  case "$my_uid" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$(find "$1" -prune -user "$my_uid" -print 2>/dev/null)" ]
+}
 if [ "$was_marked" -eq 1 ]; then
   for stale in "$INSTALL_DIR"/.acq-previous.*; do
     pid_alive "${stale##*/.acq-previous.}" && continue
-    [ -d "$stale" ] && [ ! -L "$stale" ] && rm -rf "$stale"
+    [ -d "$stale" ] && [ ! -L "$stale" ] && owned_by_me "$stale" && rm -rf "$stale" 2>/dev/null || :
   done
   for stale in "$install_parent"/.acq-stage.*.*; do
     [ "$stale" != "$stage_root" ] || continue
@@ -617,12 +628,12 @@ if [ "$was_marked" -eq 1 ]; then
     stale_pid="${stale_pid%%.*}"
     case "$stale_pid" in ''|*[!0-9]*) continue ;; esac
     pid_alive "$stale_pid" && continue
-    [ -d "$stale" ] && [ ! -L "$stale" ] && rm -rf "$stale"
+    [ -d "$stale" ] && [ ! -L "$stale" ] && owned_by_me "$stale" && rm -rf "$stale" 2>/dev/null || :
   done
   for stale in "$marker".tmp.*; do
     case "${stale#"$marker".tmp.}" in ''|*[!0-9]*) continue ;; esac
     pid_alive "${stale#"$marker".tmp.}" && continue
-    [ -f "$stale" ] && [ ! -L "$stale" ] && rm -f "$stale"
+    [ -f "$stale" ] && [ ! -L "$stale" ] && owned_by_me "$stale" && rm -f "$stale" 2>/dev/null || :
   done
 fi
 

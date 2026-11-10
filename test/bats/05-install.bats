@@ -335,6 +335,53 @@ SHIM
   [ -L "$XDG_DATA_HOME/.acq-stage.$dead.LiNkLiNk" ]
 }
 
+# Another user's killed install can leave a staging dir in a shared parent that
+# this user cannot remove. The sweep is best effort, so the install still
+# finishes (and so does the next one). A read-only child dir stands in for it.
+@test "installer: a stale staging dir that cannot be removed does not stop the install" {
+  [ "$(id -u)" != 0 ] || skip "root can remove a read-only directory"
+  local dir dead stuck; dir="$(_install_dir)"
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_success
+  sh -c 'exit 0' & dead=$!
+  wait "$dead" || :
+  stuck="$XDG_DATA_HOME/.acq-stage.$dead.StUcKdIr"
+  mkdir -p "$stuck/stage/sub"
+  chmod 500 "$stuck/stage"
+  printf 'stale\n' > "$dir/py-acq/stale-from-old-release"
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  local first=$status
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  local second=$status
+  chmod 700 "$stuck/stage"
+  [ "$first" -eq 0 ] && [ "$second" -eq 0 ]
+  # The publish finished: the old release was replaced and nothing was left mid-way.
+  [ ! -e "$dir/py-acq/stale-from-old-release" ]
+  [ -e "$dir/py-acq/runtime/bin/python3" ]
+  [ -z "$(find "$dir" -maxdepth 1 -name '.acq-previous.*')" ]
+  [ -d "$stuck/stage/sub" ]
+}
+
+# Only leftovers this user owns are swept. An `id` that reports another uid
+# makes every leftover look like someone else's, so all of them stay.
+@test "installer: the sweep leaves leftovers owned by another user alone" {
+  local dir dead; dir="$(_install_dir)"
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_success
+  sh -c 'exit 0' & dead=$!
+  wait "$dead" || :
+  mkdir -p "$dir/.acq-previous.$dead" "$XDG_DATA_HOME/.acq-stage.$dead.OtHeRuSr"
+  printf 'old\n' > "$dir/.acq-v1-install.tmp.$dead"
+  mkdir -p "$STUBDIR/id-shim"
+  printf '#!/bin/sh\ncase "$1" in -u) echo 4199999 ;; *) exec /usr/bin/id "$@" ;; esac\n' > "$STUBDIR/id-shim/id"
+  chmod +x "$STUBDIR/id-shim/id"
+  PATH="$STUBDIR/id-shim:$PATH" run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_success
+  [ -d "$dir/.acq-previous.$dead" ]
+  [ -d "$XDG_DATA_HOME/.acq-stage.$dead.OtHeRuSr" ]
+  [ -f "$dir/.acq-v1-install.tmp.$dead" ]
+}
+
 # The install dir refusals come before anything is extracted or staged.
 @test "installer: a symlinked install dir is refused before extracting anything" {
   local dir real_tar; dir="$(_install_dir)"
