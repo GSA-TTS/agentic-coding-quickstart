@@ -505,14 +505,23 @@ def test_create_fails_closed_when_the_bundle_does_not_verify(monkeypatch, tmp_pa
     assert not [a for a in seen if a[0] == "create"]
 
 
-def test_unfetchable_refs_are_refused_before_create(monkeypatch, tmp_path, capsys):
+@pytest.mark.parametrize(("ref", "code", "phrase"), [
+    # Not pinned to a full commit: Bash would fetch it unverified; Python refuses.
+    ("git+https://github.com/acme/kits.git#ref=abc&dir=k", errors.KIT_REF_NOT_PINNED, "not pinned to a full commit"),
+    # Pinned, but the fetch cannot happen (the test environment allows no network
+    # transport): fail closed, never hand sbx the raw ref.
+    ("git+https://github.com/acme/kits.git#ref=" + "a" * 40 + "&dir=k", errors.FAILURE, "failed to fetch remote kit"),
+    # A local kit directory is not applied by the Python acq.
+    ("./team-kit", errors.UNSUPPORTED, "names a local directory"),
+])
+def test_unfetchable_refs_are_refused_before_create(monkeypatch, tmp_path, capsys, ref, code, phrase):
     ws = _env(monkeypatch, tmp_path)
-    monkeypatch.setenv("ACQ_EXTRA_KITS", "git+https://github.com/acme/kits.git#ref=abc&dir=k")
+    monkeypatch.setenv("ACQ_EXTRA_KITS", ref)
     seen = _spy(monkeypatch)
     rc, doc = _invoke(capsys, "--backend", "sbx", "create", "shell", str(ws), "--name", "ex", "--json")
     assert rc == 1
-    assert doc["error"]["code"] == errors.UNSUPPORTED
-    assert "would have to be fetched" in doc["error"]["message"]
+    assert doc["error"]["code"] == code
+    assert phrase in doc["error"]["message"]
     assert not [a for a in seen if a[0] == "create"]
     assert state.record_read("sbx", "ex") is None
 

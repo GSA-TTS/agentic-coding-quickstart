@@ -16,9 +16,10 @@ adapter does:
   (``sbx kit add`` for each built-in kit not recorded as applied, decided from
   the host-side ``builtin-kits`` record, never from the guest).
 
-Like the msb path, the Python acq applies only its pinned built-in bundle: a
-ref that would have to be fetched is refused before anything is created, and
-the bundle is checked against its manifest first (:func:`resolve`).
+Like the msb path, the bundle is checked against its manifest first, and a kit
+it does not hold is fetched at its pinned commit and checked
+(:mod:`kit_fetch`) before anything is created; a ref that cannot be fetched is
+refused (:func:`resolve`).
 
 Generated kit directories live under the acq state directory, in private
 (0700) directories acq creates itself; an existing path that is a symlink, not
@@ -46,7 +47,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import errors, kit_msb, kitspec, lock, sbx, state, timeouts
+from . import errors, kit_fetch, kit_msb, kitspec, lock, sbx, state, timeouts
 
 # The kit record type is shared with the msb path: name, role, parsed spec, ref.
 Kit = kit_msb.Kit
@@ -683,12 +684,18 @@ def prepare(kits: Iterable[Kit]) -> CreateKits:
 
 
 # ---------------------------------------------------------------------------
-# Selection -> parsed kits (the bundle only; fail closed otherwise).
+# Selection -> parsed kits (the bundle, or a pinned fetch; fail closed otherwise).
 # ---------------------------------------------------------------------------
 
 
 def resolve(selection: kitspec.KitSelection) -> list[Kit]:
-    """Verify the bundle and parse every selected kit; raises :class:`sbx.SbxError`."""
+    """Verify the bundle and parse every selected kit, fetching any the bundle does not hold.
+
+    As on msb (:func:`kit_msb.resolve`), a kit outside the bundle is fetched at
+    its pinned commit and checked before anything is created; sbx is only ever
+    handed acq's own translation of it, never the remote ref. Raises
+    :class:`sbx.SbxError`.
+    """
     try:
         problems = kitspec.verify_bundle()
     except kitspec.KitSpecError as exc:
@@ -702,17 +709,15 @@ def resolve(selection: kitspec.KitSelection) -> list[Kit]:
     out: list[Kit] = []
     seen: set[str] = set()
     for sel in selection.kits:
-        if sel.bundled is None:
-            raise sbx.SbxError(
-                errors.UNSUPPORTED,
-                f"kit {sel.ref!r} ({sel.role} kit) would have to be fetched; the Python acq "
-                "applies only its pinned built-in kits",
-                "drop it from --kit, ACQ_EXTRA_KITS, ACQ_PROVIDER_KITS or config extra_kits/provider_kit, "
-                "or use the Bash acq (ACQ_IMPL=bash) for kits that must be fetched",
-            )
         if sel.ref in seen:
             continue
         seen.add(sel.ref)
+        if sel.bundled is None:
+            try:
+                out.append(kit_msb.fetch_selected(sel, "sbx"))
+            except kit_fetch.KitFetchError as exc:
+                raise sbx.SbxError(exc.code, f"{exc.message} ({sel.role} kit)", exc.remediation) from exc
+            continue
         try:
             spec = kitspec.load_bundled_kit(sel.bundled)
         except kitspec.KitSpecError as exc:
@@ -1006,7 +1011,7 @@ def _heal_extras(name: str, kits: list[Kit], result: HealResult) -> None:
     for kit in kits:
         if kit.role != "extra" or kit.ref in applied:
             continue
-        _warn(f"acq: applying extra kit to '{name}': {kit.ref}")
+        _warn(f"acq: applying extra kit to '{name}': {kit_fetch.ref_display(kit.ref)}")
         if _add(name, kit, "extra kit", result, counts=False):
             _append_extra(name, kit.ref)
 
@@ -1016,7 +1021,8 @@ def _append_extra(name: str, ref: str) -> None:
     try:
         hc_write(name, "extra-kits", f"{current}\n{ref}" if current else ref)
     except OSError:
-        _warn(f"acq: warning: could not record extra kit '{ref}' for '{name}'; re-attach may re-attempt it.")
+        _warn(f"acq: warning: could not record extra kit '{kit_fetch.ref_display(ref)}' for '{name}'; "
+              "re-attach may re-attempt it.")
 
 
 def _wait_exec_ready(name: str) -> bool:

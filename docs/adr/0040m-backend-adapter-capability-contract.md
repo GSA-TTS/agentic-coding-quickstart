@@ -118,6 +118,29 @@ exit 1, the `unsupported_capability` code, and remediation.
 > missing global sbx entry. A global sbx entry that took the new key is
 > reported as `global: updated` (or `created`) in that backend's result.
 
+> **Reconciliation note (2026-11-10, kit refs and provider input):** kit-ref
+> authority stays with the seam. A kit outside the built-in bundle is fetched by
+> the seam (`py-acq/src/acq_py/kit_fetch.py`), never by a backend: only a
+> `git+https` ref pinned to a full 40-hex commit, whose fetched commit must equal
+> the pin, with no userinfo, query string or unsafe `dir=`, and whose checked-out
+> tree may not link outside itself. A ref that is not pinned fails with
+> `kit_ref_not_pinned`, a local kit directory with `unsupported_capability`, and a
+> refused URL or a payload that fails a check with `validation_failed`; a fetch
+> that fails (including for lack of network) is `failure` or `timeout`. Each
+> refuses the create or heal before the backend is called, and a message names
+> the ref only with userinfo and query redacted. The adapter receives only the
+> checked local tree: msb applies it in-guest, and sbx gets acq's sbx-v2
+> translation of it. On msb a fetched kit's egress allowlist comes from its own
+> spec at the pinned commit (the built-in kits keep the vetted table), and a
+> fetched provider kit's facts face the same destination pin as the bundled one,
+> so the backend still never decides where a credential goes. The provider-input
+> generation is projected on sbx as on msb: staged before create, mounted
+> read-only (on sbx an extra `PATH:ro` workspace after the primary one, at the
+> same path in the guest, with `ACQ_PROVIDER_INPUT_ROOT` naming it), published as
+> `current` only after the create succeeds, and discarded after a failed create
+> only once the backend confirms the sandbox is absent. Neither backend projects
+> it on Windows yet.
+
 The record is a declaration; conformance is proven, not trusted: each
 declared capability is asserted by a Tier-1 subprocess vector (working, or
 fail-closed for `unsupported`), and host-enforcement capabilities require

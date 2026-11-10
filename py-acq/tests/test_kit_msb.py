@@ -166,8 +166,14 @@ def test_verify_bundle_runs_on_every_create(monkeypatch, tmp_path, capsys):
     assert calls == [1, 1]
 
 
-@pytest.mark.parametrize("config", ["extra_kits: openchamber\n", "provider_kit: ./local-provider\n"])
-def test_configured_kits_that_need_a_fetch_are_refused(monkeypatch, tmp_path, capsys, config):
+@pytest.mark.parametrize(("config", "code"), [
+    # An opt-in catalog kit is fetched at the control-plane pin; the test
+    # environment allows no network transport, so the fetch fails closed.
+    ("extra_kits: openchamber\n", errors.FAILURE),
+    # A local provider kit directory is not applied by the Python acq.
+    ("provider_kit: ./local-provider\n", errors.UNSUPPORTED),
+])
+def test_configured_kits_that_cannot_be_fetched_are_refused(monkeypatch, tmp_path, capsys, config, code):
     ws = _env(monkeypatch, tmp_path)
     path = Path(os.environ["XDG_CONFIG_HOME"]) / "acq" / "config.yaml"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -175,7 +181,7 @@ def test_configured_kits_that_need_a_fetch_are_refused(monkeypatch, tmp_path, ca
     seen = _spy(monkeypatch)
     rc, doc = _invoke(capsys, "--backend", "msb", "create", "shell", str(ws), "--name", "a", "--json")
     assert rc == 1
-    assert doc["error"]["code"] == errors.UNSUPPORTED
+    assert doc["error"]["code"] == code
     assert not [a for a in seen if a[0] == "create"]
 
 

@@ -38,6 +38,7 @@ import re
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
@@ -446,7 +447,13 @@ def _egress_target(host: str, source: str) -> str:
     return target
 
 
-def _kit_rules(egress_kits: list[str]) -> list[str]:
+# One kit's contribution to the egress policy: a built-in kit's name (its
+# allowlist comes from the vetted table), or a fetched kit's name and the
+# ``caps.network.allow`` read from its own spec at the pinned commit.
+EgressKit = str | tuple[str, Sequence[str]]
+
+
+def _kit_rules(egress_kits: Sequence[EgressKit]) -> list[str]:
     """``--net-rule allow@HOST`` for each kit's allowlist (port stripped, as Bash)."""
     if kits.KIT_NETWORK_ALLOW_REF != kits.CONTROL_PLANE_REF:
         raise _policy_error(
@@ -455,8 +462,12 @@ def _kit_rules(egress_kits: list[str]) -> list[str]:
             "re-derive kits.KIT_NETWORK_ALLOW from the pinned kit specs",
         )
     flags: list[str] = []
-    for kit in egress_kits:
-        allow = kits.KIT_NETWORK_ALLOW.get(kit)
+    for entry in egress_kits:
+        allow: tuple[str, ...] | None
+        if isinstance(entry, tuple):
+            kit, allow = entry[0], tuple(entry[1])
+        else:
+            kit, allow = entry, kits.KIT_NETWORK_ALLOW.get(entry)
         if allow is None:
             raise _policy_error(
                 f"cannot compute the egress policy: no network allowlist is known for kit {kit!r}",
@@ -508,7 +519,7 @@ def _balanced_rules() -> list[str]:
     return flags
 
 
-def egress_flags(egress_kits: list[str]) -> list[str]:
+def egress_flags(egress_kits: Sequence[EgressKit]) -> list[str]:
     """The ``msb create`` egress flags for a sandbox carrying ``egress_kits``.
 
     Raises :class:`MsbError` (``validation_failed``) when the policy cannot be
@@ -539,7 +550,7 @@ def create(
     cpus: str | None = None,
     guest_workspace: str | None = None,
     *,
-    egress_kits: list[str],
+    egress_kits: Sequence[EgressKit],
     kit_flags: list[str] | None = None,
 ) -> list[str]:
     """Create a sandbox; returns its ``ENV@HOST`` secret bindings (non-secret).
@@ -554,8 +565,8 @@ def create(
     ``guest_workspace`` overrides the derived POSIX guest form (ADR-0029,
     ADR-0038m §4 host/guest path types are distinct).
 
-    ``egress_kits`` names the kits whose allowlists form the egress policy
-    (see :func:`egress_flags`). It is required so no caller can create a sandbox
+    ``egress_kits`` names the kits whose allowlists form the egress policy, or
+    carries a fetched kit's own allowlist (see :func:`egress_flags`). It is required so no caller can create a sandbox
     without one; the policy is computed before msb is invoked. ``kit_flags`` are
     the kits' other create-time flags (the read-only host-config mount, the
     startup script, CA trust), built by :mod:`acq_py.kit_msb`.
