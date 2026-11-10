@@ -659,6 +659,7 @@ def test_provider_partial_refeed_then_rm_fully_revokes(monkeypatch, tmp_path, ca
     monkeypatch.setenv("ACQ_PROVIDER_KITS", "")  # no provider kit selected: no usai gate or binding
     for name in ("a", "b"):  # created by acq, so their records are complete
         assert _invoke(capsys, "--backend", "msb", "create", "shell", str(tmp_path / "ws"), "--name", name)[0] == 0
+        _forget_selection(name)  # the recorded "no provider kits" would keep the provider out of both
     monkeypatch.setenv("ACQ_MSB_STUB_FAIL_ADD", "b")
     rc, doc, _out, _err = _invoke(capsys, "--backend", "msb", "provider-credential", "set", "acme", "ACME_KEY",
                                   "--host", "models.acme.gov", "--json", stdin=VALUE, monkeypatch=monkeypatch)
@@ -761,6 +762,16 @@ def test_scoped_set_targets_only_that_sandbox(monkeypatch, tmp_path, capsys, chi
     _set(capsys, monkeypatch, "b", "github", value=SCOPED)
     assert _modify_tails(children) == [["b", "--secret", "GITHUB_TOKEN@github.com,api.github.com,codeload.github.com"]]
     assert msb.held_read("b").bindings["GITHUB_TOKEN"]["scope"] == "sandbox" and msb.held_read("a").bindings == {}
+
+
+def _forget_selection(sandbox):
+    """Drop the recorded provider selection, as for a sandbox from before it was recorded."""
+    from acq_py import kits
+
+    path = kits._provenance_path("msb", sandbox)
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    del doc["provider_selection"]
+    path.write_text(json.dumps(doc), encoding="utf-8")
 
 
 def _record_selection(sandbox, provider_kits):
