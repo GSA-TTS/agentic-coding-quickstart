@@ -411,8 +411,10 @@ _ws_safe() { # ARGS...
 
 @test "create(msb): a workspace containing acq's state dir fails before any backend create" {
   run env ACQ_BACKEND=msb ACQ_NO_PROMPT=1 "$ACQ" create opencode --no-provider-kits "$STUBDIR"
-  assert_failure
+  # Exit 1 and the remediation wording match the Python acq's validation_failed.
+  assert_equal "$status" "1"
   assert_output --partial "contains acq's own directory"
+  assert_output --partial "use a project directory that holds none of acq's state, config or secret-store directories (not your home directory itself), then re-run"
   refute_regex "$(cat "$CALLS")" '^msb create'
 }
 

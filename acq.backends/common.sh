@@ -1448,9 +1448,9 @@ _acq_workspace_trusted_safe() {
     if [ -n "$how" ]; then
       echo "acq: error: workspace $(acq_printable "$1") $how acq's own directory $(acq_printable "$d")." >&2
       echo "     The sandbox would reach acq's state, config or secret store through the" >&2
-      echo "     workspace mount, including the trusted config acq mounts read-only. Use a" >&2
-      echo "     project directory outside acq's directories, or move them with ACQ_STATE_DIR," >&2
-      echo "     XDG_STATE_HOME, XDG_CONFIG_HOME, XDG_DATA_HOME or XDG_CACHE_HOME." >&2
+      echo "     workspace mount, including the trusted config acq mounts read-only." >&2
+      # The remediation wording matches the Python acq's validation_failed error.
+      echo "     use a project directory that holds none of acq's state, config or secret-store directories (not your home directory itself), then re-run" >&2
       return 1
     fi
   done <<EOF
