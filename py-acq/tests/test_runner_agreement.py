@@ -4,7 +4,8 @@ ADR-0043m wants a diverging runner to fail on the feature. Each sentinel shows
 that a mode or transform works on one easy input, so the runners could still
 disagree at the edges: a quote ending an absolute path, a lone CR, ``true``
 against ``1``, several JSON documents, a regex character in TMPDIR, an unknown
-field, a NUL byte ahead of a value that must be absent. The probe vectors in ``runner-probes/probe/`` cover those cases. This
+field, a NUL byte ahead of a value that must be absent, a developer's
+SSH_AUTH_SOCK. The probe vectors in ``runner-probes/probe/`` cover those cases. This
 test runs every probe through the pytest engine and through ``scripts/run-vectors``
 and requires both to give the verdict in ``EXPECTED``, which also records the
 intended behaviour (several probes must fail or be rejected).
@@ -55,6 +56,8 @@ EXPECTED = {
     "probe/unknown-mode": "invalid",
     "probe/empty-assertion-list": "invalid",
     "probe/fixtures-refused": "refused",
+    "probe/ssh-auth-sock-unset": "ok",
+    "probe/ssh-auth-sock-vector-env": "ok",
 }
 
 
@@ -65,6 +68,9 @@ def runner_tmpdir(tmp_path, monkeypatch):
     tmpdir = tmp_path / "a.b"
     tmpdir.mkdir()
     monkeypatch.setenv("TMPDIR", f"{tmpdir}//")
+    # A developer's agent socket, which neither runner may pass on (the
+    # ssh-auth-sock probes).
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/developer/agent.sock")
     return tmpdir
 
 

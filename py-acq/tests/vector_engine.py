@@ -45,6 +45,12 @@ DEFAULT_REDIRECTS = (
     "XDG_CACHE_HOME",
 )
 
+# Removed from every vector's environment before its own ``unset``/``env`` apply,
+# so a developer's real ssh-agent is never forwarded into a stub sandbox and
+# never changes what an oracle sees (SSH_AUTH_SOCK is the forward's opt-in,
+# ADR-0021). A vector that needs it sets it in ``invoke.env``.
+DEFAULT_UNSETS = ("SSH_AUTH_SOCK",)
+
 TRANSFORMS = ("abspath", "tmpdir", "crlf", "timing", "order", "json")
 MODES = ("exact", "contains", "json", "absent")
 
@@ -340,7 +346,7 @@ def run_vector(
 
     argv = resolve_tokens(invoke.get("argv", []), acq_cmd, python_exe)
     env = dict(os.environ)
-    for name in invoke.get("unset", []):
+    for name in DEFAULT_UNSETS + tuple(invoke.get("unset", [])):
         env.pop(name, None)
     for name, value in invoke.get("env", {}).items():
         env[name] = str(value)

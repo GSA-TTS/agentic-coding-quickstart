@@ -381,16 +381,21 @@ def command_env(merged: list[str], own: list[str]) -> list[str]:
     return out
 
 
-def exec_flags(user: str, env: list[str]) -> list[str]:
+def exec_flags(user: str, env: list[str], ssh_auth_sock: str | None = None) -> list[str]:
     """``msb exec`` ``-u``/``-e`` flags (``_acq_msb_exec_flags_into``).
 
     The kits name the unprivileged agent as uid 1000 (the sbx contract); on msb
     it is addressed by name, with HOME set, since uid 1000 may be another user.
+    ``ssh_auth_sock`` is the forwarded agent's guest socket when this command
+    wired the forward (:func:`acq_py.ssh_agent.forwarding_sock`): agent-user
+    commands get it, so a kit that asks the agent for a key (git-ssh-sign) can.
     """
     flags: list[str] = []
     extra: list[str] = []
     if user in _AGENT_USERS:
         flags, extra = ["-u", "agent"], [f"HOME={AGENT_HOME}"]
+        if ssh_auth_sock:
+            extra.append(f"SSH_AUTH_SOCK={ssh_auth_sock}")
     elif user:
         flags = ["-u", user]
     for token in (*extra, *env):
@@ -658,7 +663,8 @@ def _install_marker(argv: list[str]) -> str:
     return "install-" + str(lock.posix_cksum(b"".join(t.encode("utf-8") + b"\0" for t in argv)))
 
 
-def run_command(name: str, cmd: kitspec.Command, env: list[str], rewrite: dict[str, str], *, force: bool) -> bool:
+def run_command(name: str, cmd: kitspec.Command, env: list[str], rewrite: dict[str, str], *, force: bool,
+                ssh_auth_sock: str | None = None) -> bool:
     """Run one kit command with its phase's semantics (``_acq_msb_exec_command``).
 
     ``install`` runs once per guest: a host-held marker (a cache of the guest's
@@ -669,7 +675,7 @@ def run_command(name: str, cmd: kitspec.Command, env: list[str], rewrite: dict[s
     argv = [rewrite.get(t, t) for t in cmd.argv]
     if not argv:
         return True
-    flags = exec_flags(cmd.user, env)
+    flags = exec_flags(cmd.user, env, ssh_auth_sock)
     if cmd.phase == "install":
         marker = _install_marker(argv)
         if not force and hc_has(name, marker):
@@ -691,11 +697,13 @@ def _foreground(argv: list[str]) -> list[str]:
     return ["sh", "-c", '"$@"', "sh", *argv] if argv[0] == "node" else argv
 
 
-def apply_kit(name: str, kit: Kit, merged: list[str], ro: RoGate, *, force: bool) -> bool:
+def apply_kit(name: str, kit: Kit, merged: list[str], ro: RoGate, *, force: bool,
+              ssh_auth_sock: str | None = None) -> bool:
     """Files, then the kit's environment (kept host-side), then its commands.
 
     Returns False when a command failed (warned). Raises :class:`KitApplyFailed`
     when a file could not be placed, so the kit's commands never run against it.
+    ``ssh_auth_sock`` goes to the agent-user commands (:func:`exec_flags`).
     """
     if kit.shortcut:
         return True
@@ -706,7 +714,7 @@ def apply_kit(name: str, kit: Kit, merged: list[str], ro: RoGate, *, force: bool
     env = command_env(merged, own_guards(kit))
     ok = True
     for cmd in kit.spec.commands:
-        if not run_command(name, cmd, env, rewrite, force=force):
+        if not run_command(name, cmd, env, rewrite, force=force, ssh_auth_sock=ssh_auth_sock):
             _warn(f"{cmd.phase or 'a'} command of kit '{kit.name}' failed in sandbox '{name}'")
             ok = False
     return ok
@@ -852,14 +860,16 @@ def check_prereqs(name: str) -> None:
           f"the kits' hosts). Affected kits may not fully apply. Set {SKIP_PREREQ_CHECK_ENV}=1 to silence this.")
 
 
-def ensure_kits_applied(name: str, kits: list[Kit], *, ro_required: bool, force: bool = False) -> ApplyResult:
+def ensure_kits_applied(name: str, kits: list[Kit], *, ro_required: bool, force: bool = False,
+                        ssh_auth_sock: str | None = None) -> ApplyResult:
     """Apply the whole kit set (``acq_backend_ensure_kits_applied``); best-effort per kit.
 
     The agent user is set up first (:func:`ensure_agent_user`); if that fails
     the kits are still attempted and ``agent_user`` says so. The merged
     environment is computed before the first kit runs, so a kit's commands see
     every kit's variables whatever the order (ADR-0033), and the persisted copy
-    is rebuilt from the current kits only.
+    is rebuilt from the current kits only. ``ssh_auth_sock`` is the forwarded
+    agent's guest socket while the forward is wired (see :func:`exec_flags`).
     """
     result = ApplyResult(agent_user=ensure_agent_user(name))
     merged = merge_env(kits)
@@ -867,7 +877,7 @@ def ensure_kits_applied(name: str, kits: list[Kit], *, ro_required: bool, force:
     ro = RoGate(name, ro_required)
     for kit in kits:
         try:
-            ok = apply_kit(name, kit, merged, ro, force=force)
+            ok = apply_kit(name, kit, merged, ro, force=force, ssh_auth_sock=ssh_auth_sock)
         except (KitApplyFailed, msb.MsbError, OSError) as exc:
             reason = exc.message if isinstance(exc, msb.MsbError) else str(exc)
             _warn(f"kit '{kit.name}' did not apply to sandbox '{name}': {reason}")

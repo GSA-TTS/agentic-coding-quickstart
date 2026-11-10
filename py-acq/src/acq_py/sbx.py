@@ -243,6 +243,24 @@ def exists(name: str) -> bool:
     return names is not None and name in names
 
 
+# The sbx CLI forwards the host ssh-agent into the guest by itself whenever
+# SSH_AUTH_SOCK is set (its child inherits acq's environment), so acq has nothing
+# to translate; it only makes that implicit forward a conscious choice with a
+# one-time notice, as the Bash adapter and the msb forward do (ADR-0021).
+_SSH_AGENT_NOTICE_SHOWN = [False]
+SSH_AGENT_NOTICE = (
+    "acq(sbx): sbx forwards your host ssh-agent into the guest because SSH_AUTH_SOCK"
+    " is set. Guest code can use every key the agent holds while the sandbox runs;"
+    " unset SSH_AUTH_SOCK to opt out, or run 'ssh-add -c' to confirm each use. See ADR-0021."
+)
+
+
+def _ssh_agent_notice() -> None:
+    if os.environ.get("SSH_AUTH_SOCK") and not _SSH_AGENT_NOTICE_SHOWN[0]:
+        _SSH_AGENT_NOTICE_SHOWN[0] = True
+        print(SSH_AGENT_NOTICE, file=sys.stderr)
+
+
 def create(
     name: str,
     image: str,
@@ -270,6 +288,7 @@ def create(
     checked before any create, so such an sbx never gets here. Neither may
     carry a secret: both end up on sbx's command line.
     """
+    _ssh_agent_notice()
     argv = ["create"]
     if agent:
         argv.append(agent)
