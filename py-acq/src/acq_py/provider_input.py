@@ -50,6 +50,8 @@ from pathlib import Path
 
 from . import errors, kitspec, lock, provider_creds, state
 
+# Module-local seam for the host OS class (as ``msb.WINDOWS``).
+WINDOWS = os.name == "nt"
 GUEST_DIR = "/var/lib/acq/provider-input"
 ROOT_ENV = "ACQ_PROVIDER_INPUT_ROOT"
 RECORD_KEY = "provider-credentials"
@@ -244,21 +246,26 @@ def kit_facts(kit_root: Path) -> tuple[dict, Facts] | None:
     return manifest, _facts_from(_json_member(kit_root, manifest["factsPath"]), provider)
 
 
-def selected_facts(kit_names: Iterable[str], bundle_dir: Path | None = None) -> list[tuple[str, dict, Facts]]:
-    """``(kit, manifest, facts)`` for every selected kit that carries provider input.
+def selected_facts(kits: Iterable[str | tuple[str, Path | None]],
+                   bundle_dir: Path | None = None) -> list[tuple[Path, dict, Facts]]:
+    """``(kit directory, manifest, facts)`` for every selected kit that carries provider input.
 
+    Each kit is a bundled kit's name, or ``(name, directory)`` for a kit read
+    from its own directory (a fetched kit; a None directory means the bundle).
     Two kits declaring the same provider id are refused (the materialiser's
     duplicate-target rule).
     """
     root = bundle_dir or kitspec.BUNDLE_DIR
-    out: list[tuple[str, dict, Facts]] = []
-    for kit in kit_names:
-        found = kit_facts(root / kit)
+    out: list[tuple[Path, dict, Facts]] = []
+    for kit in kits:
+        name, directory = (kit, None) if isinstance(kit, str) else kit
+        kit_root = directory if directory is not None else root / name
+        found = kit_facts(kit_root)
         if found is None:
             continue
         if any(f.provider == found[1].provider for _k, _m, f in out):
             raise _invalid(f"two selected kits declare provider '{found[1].provider}'", "select one provider kit per provider")
-        out.append((kit, *found))
+        out.append((kit_root, *found))
     return out
 
 
@@ -525,8 +532,8 @@ def materialize(manifest: dict, kit_root: Path, target_root: Path) -> None:
     _copy_out(read_member(kit_root, manifest["snapshotPath"]), target / "snapshot.json", 0o444)
 
 
-def prepare(backend: str, name: str, selected: list[tuple[str, dict, Facts]], bundle_dir: Path | None = None) -> Path:
-    """Stage a complete, immutable generation for ``selected``; returns its path.
+def prepare(backend: str, name: str, selected: list[tuple[Path, dict, Facts]]) -> Path:
+    """Stage a complete, immutable generation for ``selected`` (from :func:`selected_facts`); returns its path.
 
     The generation is not visible through ``current`` until :func:`publish`
     (after the backend create succeeds). A present empty generation is
@@ -539,8 +546,8 @@ def prepare(backend: str, name: str, selected: list[tuple[str, dict, Facts]], bu
         os.chmod(generation, 0o755)  # nosec B103 # a directory the guest reads, through a read-only mount
         providers = generation / "models" / "providers"
         providers.mkdir(parents=True, mode=0o755)
-        for kit, manifest, _facts in selected:
-            materialize(manifest, (bundle_dir or kitspec.BUNDLE_DIR) / kit, providers)
+        for kit_root, manifest, _facts in selected:
+            materialize(manifest, kit_root, providers)
     except (OSError, ProviderInputError) as exc:
         discard(generation)
         if isinstance(exc, ProviderInputError):
@@ -590,9 +597,42 @@ def _make_read_only(generation: Path) -> None:
             _chmod_nofollow(Path(dirpath) / entry, 0o444)
 
 
+def _write_pointer(temp: Path, target: str) -> None:
+    """Write the Windows ``current`` pointer file as a new file (never through an existing name)."""
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | getattr(os, "O_BINARY", 0), 0o644)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(f"{target}\n".encode("ascii"))
+
+
+def _replace_current(temp: Path, current: Path) -> None:
+    """Rename ``temp`` over ``current``; a link left there is removed (never its target) and the rename retried.
+
+    ``os.replace`` cannot replace a directory symlink or junction with a file
+    on Windows. A real directory named ``current`` is refused and kept, as Bash
+    does (``_acq_provider_input_atomic_replace``).
+    """
+    try:
+        os.replace(temp, current)
+        return
+    except OSError:
+        if os.path.isjunction(current):
+            os.rmdir(current)  # removes the junction itself, not what it points at
+        elif os.path.islink(current):
+            os.unlink(current)
+        else:
+            temp.unlink(missing_ok=True)
+            raise
+    os.replace(temp, current)
+
+
 def publish(backend: str, name: str, generation: Path) -> None:
     """Make ``generation``'s files read-only and point ``current`` at it (atomic rename).
 
+    ``current`` is a relative symlink on POSIX. On Windows, where a symlink
+    needs Developer Mode or an administrator, it is a pointer file holding
+    ``generations/generation.<suffix>``, which the Bash reader accepts too
+    (KNOWN_FAILURE_MODES section 61), so both implementations leave the same
+    state. No sandbox mounts ``current``: each mounts its exact generation.
     Earlier generations are kept: a sandbox created by an older acq may still
     mount ``current``. Raises ``OSError``.
     """
@@ -602,8 +642,12 @@ def publish(backend: str, name: str, generation: Path) -> None:
     _make_read_only(generation)
     temp = root / f".current.{os.getpid()}"
     temp.unlink(missing_ok=True)
-    os.symlink(f"generations/{generation.name}", temp)
-    os.replace(temp, root / "current")
+    target = f"generations/{generation.name}"
+    if WINDOWS:
+        _write_pointer(temp, target)
+    else:
+        os.symlink(target, temp)
+    _replace_current(temp, root / "current")
 
 
 def discard(generation: Path) -> None:
@@ -653,6 +697,24 @@ def msb_flags(generation: Path) -> list[str]:
     """The read-only mount and ``ACQ_PROVIDER_INPUT_ROOT`` for an msb create."""
     host = os.path.realpath(generation)
     return ["--volume", f"{host}:{guest_root(generation)}:ro", "--env", f"{ROOT_ENV}={guest_root(generation)}"]
+
+
+def sbx_mount(generation: Path) -> tuple[str, str]:
+    """``(workspace argument, env assignment)`` mounting ``generation`` read-only into an sbx create.
+
+    Bash ``acq_provider_input_sbx_mount`` and ``acq_provider_input_guest_root``:
+    sbx mounts an extra workspace at its own absolute host path, so the guest
+    reads the generation at that path, and the ``:ro`` suffix makes sbx mount it
+    read-only. The argument must come after the primary workspace, which sbx
+    requires to be writable. A path sbx would split differently (one holding a
+    ``:``) or one that is not a single line is refused rather than mounted
+    somewhere unintended. Raises :class:`ProviderInputError`.
+    """
+    host = str(generation)
+    if not generation.name.startswith("generation.") or not os.path.isabs(host) or ":" in host or host.splitlines() != [host]:
+        raise _invalid(f"cannot mount the provider input at {host!r} into an sbx sandbox",
+                       "set ACQ_PROVENANCE_DIR (or XDG_STATE_HOME) to an absolute path without ':', then retry")
+    return f"{host}:ro", f"{ROOT_ENV}={host}"
 
 
 # ---------------------------------------------------------------------------

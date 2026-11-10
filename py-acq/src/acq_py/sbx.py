@@ -265,6 +265,8 @@ def create(
     cpus: str | None = None,
     agent: str | None = None,
     kit_flags: list[str] | None = None,
+    extra_workspaces: list[str] | None = None,
+    env: list[str] | None = None,
 ) -> None:
     """Create a sandbox. Raises :class:`SbxError` on backend failure.
 
@@ -274,13 +276,23 @@ def create(
     signature parity with :mod:`acq_py.msb` but not forwarded (sbx derives guest
     sizing from its templates). ``kit_flags`` are the ``--kit DIR`` pairs
     :func:`acq_py.kit_sbx.prepare` built; sbx applies those kits itself.
+    ``extra_workspaces`` are further workspace positionals (``PATH[:ro]``),
+    always after the primary one, which sbx requires to be writable; ``env``
+    are ``NAME=VALUE`` guest variables (``--env``). An sbx older than 0.39.0
+    rejects ``--env`` and fails the whole create; the adapter version floor
+    (:data:`backends.SBX_MIN_VERSION`, 0.39.0 as Bash ``MIN_SBX_VERSION``) is
+    checked before any create, so such an sbx never gets here. Neither may
+    carry a secret: both end up on sbx's command line.
     """
     argv = ["create"]
     if agent:
         argv.append(agent)
     argv.append(workspace)
+    argv += extra_workspaces or []
     argv += ["--name", name]
     argv += ["-t", image]
+    for assignment in env or []:
+        argv += ["--env", assignment]
     argv += kit_flags or []
     proc = _run(argv)
     if proc.returncode != 0:

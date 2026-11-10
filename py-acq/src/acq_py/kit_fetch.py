@@ -1,0 +1,519 @@
+"""Fetch a remote kit pinned to a commit (ADR-0040m, ADR-0042m).
+
+The built-in bundle covers the kits acq selects by default. Anything else that
+names a remote kit (an opt-in catalog kit from config ``extra_kits``, a remote
+``ACQ_EXTRA_KITS`` or ``--kit`` ref, a provider kit from a registered source)
+is fetched here. This is a port of the Bash ``kit_translate_fetch``,
+``_kit_fetch_reuse`` and ``_kit_fetch_materialize``
+(``acq.backends/kit-translate.sh``), with the same refusals and some stricter
+ones:
+
+* The ref grammar is Bash's: ``git+https://HOST/PATH#ref=REF&dir=DIR``, the
+  fragment split on ``&``, the last ``ref=`` and ``dir=`` winning, other
+  parameters ignored. A ref with userinfo in its authority is refused
+  (``credential-bearing kit URLs are not allowed``), and so is a ``dir=`` that
+  is absolute, contains ``..`` or uses a character outside ``[A-Za-z0-9._/-]``.
+* Stricter than Bash: ``REF`` must be a full 40-hex commit id. Bash fetches a
+  branch or tag name unverified; the Python acq refuses it
+  (``kit_ref_not_pinned``). Only ``https`` is fetched (Bash also tries plain
+  ``http``), and the URL may hold only a host, an optional port and a path of
+  plain characters: no query string, no percent escapes, no whitespace.
+* The commit is fetched into a bare repository in acq's private cache, and the
+  fetched commit must be exactly the pinned one before anything is read from
+  it. The kit is then checked out from the pinned commit's tree with a private
+  index (``read-tree`` and ``checkout-index``, as Bash does), never from a work
+  tree a consumer could have changed.
+* Every git command runs with the repository-redirecting and command-scope
+  config variables removed (:func:`gitrepos.git_env`, Bash
+  ``_kit_git_isolate``), with prompts disabled and stdin closed, resolved
+  through :mod:`hostexec`, under a timeout. The first fetch attempt reads no
+  git config files at all and may use only https; only when it fails is it
+  retried with the user's own config (credential helpers, URL rewrites), still
+  without prompts, and with ``core.hooksPath`` pointed at the null device so
+  the user's global hooks never run in the cache. git's diagnostics are never
+  shown: under the user's config they can name a credential-bearing URL.
+* The checked-out tree must pass :func:`kitspec.tree_symlinks_within` (no name
+  with a newline, no symlink resolving outside the kit), on top of the per-file
+  checks the backends make (:func:`kitspec.resolve_source`).
+
+A failure of any kind, including a network failure, raises
+:class:`KitFetchError`, and the caller refuses the create or heal: a kit that
+cannot be fetched is never skipped and never handed to a backend unchecked.
+
+The cache lives under the backend's kit cache (``ACQ_MSB_KIT_CACHE`` or
+``ACQ_SBX_KIT_CACHE``, defaulting to ``$XDG_CACHE_HOME/acq/kits`` and
+``…/acq/sbx-kits`` as in Bash), in a ``py-fetch`` directory the Bash acq never
+writes. Unlike Bash, which fetches again in every process, a verified commit
+is kept there and reused by later commands, so a heal on ``start`` works
+offline once the create has fetched the kit. Each tree is published by an
+atomic rename, so concurrent commands never see a partial one.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import re
+import secrets
+import shutil
+import stat
+import subprocess
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+
+from . import errors, gitrepos, hostexec, kitspec, timeouts, userdirs
+
+FETCH_TIMEOUT_ENV = "ACQ_KIT_FETCH_TIMEOUT"
+DEFAULT_FETCH_TIMEOUT_S = 120.0
+LOCAL_GIT_TIMEOUT_S = 60.0
+CACHE_ENV = {"msb": "ACQ_MSB_KIT_CACHE", "sbx": "ACQ_SBX_KIT_CACHE"}
+_CACHE_DEFAULT = {"msb": "kits", "sbx": "sbx-kits"}
+PY_DIR = "py-fetch"
+VERIFIED_MARKER = "acq-verified"
+COMPLETE_MARKER = "complete"
+
+# The URL schemes a kit may be fetched over. Tests add "file" to fetch from a
+# local bare repository without a network; nothing in acq changes it.
+SCHEMES: tuple[str, ...] = ("https",)
+
+_SHA = re.compile(r"[0-9a-f]{40}")
+_DIR_CHARS = re.compile(r"[A-Za-z0-9._/-]+")
+_AUTHORITY = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?")
+_PATH_SEGMENT = re.compile(r"[A-Za-z0-9._~+-]+")
+_KIT_NAME = re.compile(r"[A-Za-z0-9._-]+")
+_DRIVE = re.compile(r"[A-Za-z]:")
+
+# What the anonymous attempt neutralizes, and the authenticated retry keeps
+# disabled: a credential prompt (the fetch must never wait on a terminal).
+_PROMPT_ENV_DROP = ("GIT_ASKPASS", "SSH_ASKPASS")
+_GIT_FAILURE_HINT = (
+    "if a kit source needs authentication, configure a git credential helper that does not "
+    "prompt (for GitHub: 'gh auth setup-git'), check for a URL rewrite with "
+    "\"git config --global --get-regexp 'url\\..*insteadOf'\", and check network access"
+)
+
+
+class KitFetchError(Exception):
+    """A kit ref was refused or could not be fetched (an acq-authored message, never git's)."""
+
+    def __init__(self, code: str, message: str, remediation: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.remediation = remediation
+
+
+@dataclass(frozen=True)
+class RemoteRef:
+    """A parsed remote kit ref: the fetch URL, the pinned commit and the kit's directory."""
+
+    url: str
+    commit: str
+    directory: str  # normalized: no "." or empty segments; "" for the repository root
+
+
+def ref_display(ref: str) -> str:
+    """``kit_ref_display``: a kit ref safe for a terminal or a log.
+
+    Before the ``#`` fragment, a query string becomes ``?***``, URL userinfo
+    becomes ``***@``, and without a scheme a first path segment with ``@``
+    becomes ``***@HOST``. The fragment is kept so the message still names the
+    kit. Every message that names a ref goes through this.
+    """
+    base, sep, frag = ref.partition("#")
+    query = ""
+    if "?" in base:
+        base, query = base.split("?", 1)[0], "?***"
+    if "://" in base:
+        scheme, rest = base.split("://", 1)
+        if "@" in rest:
+            base = f"{scheme}://***@{rest.rsplit('@', 1)[1]}"
+    else:
+        first = base.split("/", 1)[0]
+        if "@" in first:
+            base = "***@" + first.rsplit("@", 1)[1] + base[len(first):]
+    return f"{base}{query}{sep}{frag}"
+
+
+def _shown(ref: str) -> str:
+    """A ref as messages quote it: redacted (:func:`ref_display`) and in single quotes."""
+    return f"'{ref_display(ref)}'"
+
+
+def is_remote(ref: str) -> bool:
+    """True for a ref acq would fetch (``git+…``); anything else names a local directory."""
+    return ref.startswith("git+")
+
+
+def _refused(message: str, code: str = errors.VALIDATION_FAILED, remediation: str | None = None) -> KitFetchError:
+    return KitFetchError(code, message, remediation or "fix the kit ref (--kit, ACQ_EXTRA_KITS, ACQ_PROVIDER_KITS, "
+                         "or the kit source registry), then retry")
+
+
+def _check_url(url: str, shown: str) -> None:
+    scheme, sep, rest = url.partition("://")
+    if not sep or scheme not in SCHEMES:
+        raise _refused(f"kit ref {shown} is not an https URL; the Python acq fetches kits over https only")
+    authority, slash, path = rest.partition("/")
+    segments = path.split("/")
+    if scheme == "file":
+        authority_ok = authority == ""
+        if _DRIVE.fullmatch(segments[0]):  # file:///C:/… on Windows
+            segments = segments[1:]
+    else:
+        authority_ok = bool(_AUTHORITY.fullmatch(authority))
+    if not authority_ok or not slash or not all(_PATH_SEGMENT.fullmatch(s) and s not in (".", "..")
+                                                  for s in segments):
+        raise _refused(f"kit ref {shown} has a URL acq does not accept (only a host, an optional port and a "
+                       "plain path; no query string, percent escapes or whitespace)")
+
+
+def _normalize_dir(directory: str) -> str:
+    """The Bash spelling normalization: repeated slashes, ``./`` and a trailing ``/`` or ``/.`` go."""
+    return "/".join(part for part in directory.split("/") if part not in ("", "."))
+
+
+def parse_ref(ref: str) -> RemoteRef:
+    """Parse and validate a ``git+https://…#ref=SHA&dir=DIR`` kit ref. Raises :class:`KitFetchError`."""
+    shown = _shown(ref)
+    if not is_remote(ref):
+        raise _refused(f"kit ref {shown} is not a remote kit ref")
+    url = ref[len("git+"):]
+    frag = url.split("#", 1)[1] if "#" in url else url  # Bash "${url#*#}"
+    url = url.split("#", 1)[0]
+    authority = url.split("://", 1)[-1].split("/", 1)[0]
+    if "@" in authority:
+        raise _refused(f"credential-bearing kit URLs are not allowed: {shown}",
+                       remediation="remove the user name or token from the kit URL; configure a git credential "
+                       "helper for a source that needs authentication")
+    commit = directory = ""
+    for param in frag.split("&"):
+        if param.startswith("ref="):
+            commit = param[len("ref="):]
+        elif param.startswith("dir="):
+            directory = param[len("dir="):]
+    if not commit or not directory:
+        raise _refused(f"malformed kit ref (need #ref=&dir=): {shown}")
+    if directory.startswith("/") or ".." in directory:
+        raise _refused(f"unsafe kit dir (no absolute paths or '..'): {shown}")
+    if not _DIR_CHARS.fullmatch(directory):
+        raise _refused(f"unsafe kit dir (illegal characters): {shown}")
+    if not _SHA.fullmatch(commit):
+        raise _refused(
+            f"kit ref {shown} is not pinned to a full commit id; the Python acq fetches only a kit pinned to "
+            "a 40-character commit SHA", errors.KIT_REF_NOT_PINNED,
+            "pin the ref to a full commit (#ref=<40-hex sha>), or use the Bash acq (ACQ_IMPL=bash)")
+    _check_url(url, shown)
+    return RemoteRef(url, commit, _normalize_dir(directory))
+
+
+# ---------------------------------------------------------------------------
+# The private cache.
+# ---------------------------------------------------------------------------
+
+
+def cache_root(backend: str) -> Path:
+    """The backend's kit cache (the Bash ``ACQ_*_KIT_CACHE`` default). Raises :class:`KitFetchError`."""
+    var = CACHE_ENV[backend]
+    try:
+        override = userdirs.path_override(var)
+        return override or userdirs.xdg_base("XDG_CACHE_HOME", ".cache") / "acq" / _CACHE_DEFAULT[backend]
+    except userdirs.UserDirError as exc:
+        raise KitFetchError(errors.VALIDATION_FAILED, exc.message, exc.remediation) from None
+
+
+def _private_dir(path: Path) -> Path:
+    """Create ``path`` (0700) or accept it only as acq's own directory, never through a link."""
+    try:
+        try:
+            os.mkdir(path, 0o700)
+        except FileExistsError:
+            pass
+        info = os.lstat(path)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or os.path.isjunction(path):
+            raise KitFetchError(errors.VALIDATION_FAILED, f"{str(path)!r} is not a directory acq created",
+                                "remove it, then retry")
+        if hasattr(os, "getuid") and info.st_uid != os.getuid():
+            raise KitFetchError(errors.VALIDATION_FAILED, f"{str(path)!r} is owned by another user",
+                                "remove it or point the kit cache elsewhere, then retry")
+        os.chmod(path, 0o700)
+    except OSError as exc:
+        raise KitFetchError(errors.FAILURE, f"could not prepare the kit cache {str(path)!r}: {exc.strerror or exc}",
+                            "check that the kit cache directory is writable, then retry") from exc
+    return path
+
+
+def _cache_dirs(backend: str) -> tuple[Path, Path, Path]:
+    """``(py-fetch, src, tree)`` under the backend's kit cache, all private."""
+    root = cache_root(backend)
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise KitFetchError(errors.FAILURE, f"could not create the kit cache {str(root)!r}: {exc.strerror or exc}",
+                            "check that the kit cache directory is writable, then retry") from exc
+    base = _private_dir(root / PY_DIR)
+    return base, _private_dir(base / "src"), _private_dir(base / "tree")
+
+
+def _remove_tree(path: Path) -> None:
+    """Remove an acq-owned tree (best-effort); a link in its place is unlinked, never followed."""
+    def _writable(func, target, _exc):  # git writes its objects read-only; Windows needs them writable
+        try:
+            os.chmod(target, stat.S_IWRITE | stat.S_IREAD)
+            func(target)
+        except OSError:
+            pass
+
+    try:
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        elif path.exists():
+            shutil.rmtree(path, onexc=_writable)
+    except OSError:
+        pass
+
+
+def _place(tmp: Path, dest: Path, valid) -> Path:
+    """Rename the finished ``tmp`` to ``dest``, keeping a valid tree a concurrent command put there first."""
+    try:
+        os.rename(tmp, dest)
+        return dest
+    except OSError:
+        if valid(dest):
+            _remove_tree(tmp)
+            return dest
+    trash = dest.parent / f".trash-{secrets.token_hex(8)}"
+    try:
+        os.rename(dest, trash)  # a damaged tree: moved aside, never deleted where a reader may look
+    except OSError:
+        pass
+    _remove_tree(trash)
+    try:
+        os.rename(tmp, dest)
+    except OSError as exc:
+        _remove_tree(tmp)
+        if valid(dest):
+            return dest
+        raise KitFetchError(errors.FAILURE, f"could not place a fetched kit in {str(dest.parent)!r}: "
+                            f"{exc.strerror or exc}", "check that the kit cache directory is writable, then retry") from exc
+    return dest
+
+
+# ---------------------------------------------------------------------------
+# git.
+# ---------------------------------------------------------------------------
+
+
+def _git_program() -> str:
+    git = hostexec.which("git")
+    if git is None:
+        raise KitFetchError(errors.FAILURE, "git is required to fetch a kit that is not in the built-in bundle, "
+                            "and it was not found on PATH", "install git, then retry")
+    return git
+
+
+def _allowed_protocols(inherited: str | None) -> str:
+    """``GIT_ALLOW_PROTOCOL`` for the attempt without config: :data:`SCHEMES`, never wider than inherited.
+
+    An inherited list (one the user or a test set) only narrows it. When
+    nothing is left, a name no transport has allows nothing.
+    """
+    allowed = [s for s in SCHEMES if inherited is None or s in inherited.split(":")]
+    return ":".join(allowed) or "acq-none"
+
+
+def _env(*, user_config: bool) -> dict[str, str]:
+    """git's environment: no repository redirects, no prompts; the user's config files only on request.
+
+    Without the user's config, git may use only the transports a kit URL may
+    name (https). With it (the authenticated retry), the transport is left to
+    git's defaults and the user's ``GIT_ALLOW_PROTOCOL``: the user's own
+    ``url.<base>.insteadOf`` rewrite may send a pinned https URL to an
+    enterprise mirror over ssh, and the commit is verified against the pin
+    whatever the transport.
+    """
+    env = gitrepos.git_env()
+    for var in _PROMPT_ENV_DROP:
+        env.pop(var, None)
+    env.update({"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"})
+    if not user_config:
+        env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+                    "GIT_ALLOW_PROTOCOL": _allowed_protocols(os.environ.get("GIT_ALLOW_PROTOCOL"))})
+        env.pop("GIT_CONFIG_SYSTEM", None)
+    return env
+
+
+def _git(git: str, args: list[str], *, env: dict[str, str], timeout: float) -> subprocess.CompletedProcess[str]:
+    """Run git; its output is captured and only ever parsed, never shown. Raises :class:`KitFetchError`."""
+    try:
+        return subprocess.run(  # nosec B603 # an absolute git and a fixed argument list, no shell
+            [git, *args], env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=timeout, check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise KitFetchError(errors.TIMEOUT, f"git did not finish within {timeout:g}s while fetching a kit",
+                            f"check network access, or raise {FETCH_TIMEOUT_ENV}, then retry") from exc
+    except OSError as exc:
+        raise KitFetchError(errors.FAILURE, f"could not run git: {exc.strerror or exc}",
+                            "check the git installation, then retry") from exc
+
+
+def _local(git: str, repo: Path, *args: str, index: Path | None = None,
+           work_tree: Path | None = None) -> subprocess.CompletedProcess[str]:
+    """A local git command on ``repo`` with no config files read."""
+    env = _env(user_config=False)
+    if index is not None:
+        env["GIT_INDEX_FILE"] = str(index)
+    head = ["--git-dir", str(repo)] + (["--work-tree", str(work_tree)] if work_tree is not None else [])
+    return _git(git, [*head, "-c", "core.autocrlf=false", *args], env=env, timeout=LOCAL_GIT_TIMEOUT_S)
+
+
+def _commit_of(git: str, repo: Path, rev: str) -> str:
+    proc = _local(git, repo, "rev-parse", "--verify", "--quiet", "--end-of-options", f"{rev}^{{commit}}")
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def _source_valid(git: str, repo: Path, commit: str) -> bool:
+    """A bare repository acq fetched and verified: its marker names the commit, which it holds."""
+    try:
+        if repo.is_symlink() or not repo.is_dir():
+            return False
+        marker = (repo / VERIFIED_MARKER).read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    return marker == commit and _commit_of(git, repo, commit) == commit
+
+
+def _fetch_into(git: str, repo: Path, ref: RemoteRef, timeout: float) -> bool:
+    """One fetch of the pinned commit, anonymous first, then with the user's config; True on success.
+
+    ``core.hooksPath`` names the null device, which holds no hook, so the
+    user's global hooks (read by the retry) never run in acq's cache repository.
+    """
+    args = ["-c", "core.askPass=", "-c", "credential.interactive=false", "-c", f"core.hooksPath={os.devnull}",
+            "-C", str(repo), "fetch", "--quiet",
+            "--depth", "1", "--no-tags", "--no-recurse-submodules", "--end-of-options", ref.url, ref.commit]
+    for user_config in (False, True):
+        if _git(git, args, env=_env(user_config=user_config), timeout=timeout).returncode == 0:
+            return True
+    return False
+
+
+def _fetch_source(git: str, ref: RemoteRef, src: Path, shown: str) -> Path:
+    """The verified bare repository holding the pinned commit (reused, or fetched now)."""
+    key = hashlib.sha256(f"{ref.url}\0{ref.commit}".encode()).hexdigest()[:32]
+    dest = src / key
+    if _source_valid(git, dest, ref.commit):
+        return dest
+    timeout = timeouts.positive_seconds(FETCH_TIMEOUT_ENV, DEFAULT_FETCH_TIMEOUT_S)
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix=".fetch.", dir=src))
+    except OSError as exc:
+        raise KitFetchError(errors.FAILURE, f"could not create a fetch directory: {exc.strerror or exc}",
+                            "check that the kit cache directory is writable, then retry") from exc
+    try:
+        if _git(git, ["init", "--bare", "--quiet", "--template=", str(tmp)], env=_env(user_config=False),
+                timeout=LOCAL_GIT_TIMEOUT_S).returncode != 0:
+            raise KitFetchError(errors.FAILURE, "git init failed in the kit cache", "check the git installation")
+        if not _fetch_into(git, tmp, ref, timeout):
+            raise KitFetchError(errors.FAILURE,
+                                f"failed to fetch remote kit {shown} (git fetch failed; details suppressed)",
+                                _GIT_FAILURE_HINT)
+        fetched = _local(git, tmp, "rev-parse", "--verify", "--quiet", "FETCH_HEAD").stdout.strip()
+        if fetched != ref.commit or _commit_of(git, tmp, ref.commit) != ref.commit:
+            raise KitFetchError(errors.VALIDATION_FAILED,
+                                f"failed to fetch remote kit {shown}: the fetched revision does not match the "
+                                "pinned commit", "check the kit source; acq applies only the pinned commit")
+        (tmp / VERIFIED_MARKER).write_text(ref.commit + "\n", encoding="utf-8")
+    except BaseException:
+        _remove_tree(tmp)
+        raise
+    return _place(tmp, dest, lambda p: _source_valid(git, p, ref.commit))
+
+
+def _tree_valid(path: Path, stamp: str) -> bool:
+    try:
+        return (not path.is_symlink() and (path / "kit").is_dir() and not (path / "kit").is_symlink()
+                and (path / COMPLETE_MARKER).read_text(encoding="utf-8") == stamp)
+    except OSError:
+        return False
+
+
+def _materialize(git: str, repo: Path, ref: RemoteRef, tree: Path, shown: str) -> Path:
+    """Check the kit's directory out of the pinned commit into a published, private tree."""
+    stamp = f"{ref.commit}\n{ref.directory}\n"
+    dest = tree / hashlib.sha256(stamp.encode()).hexdigest()[:32]
+    if _tree_valid(dest, stamp):
+        return dest / "kit"
+    rev = f"{ref.commit}:{ref.directory}"
+    if _local(git, repo, "cat-file", "-t", "--end-of-options", rev).stdout.strip() != "tree":
+        raise KitFetchError(errors.VALIDATION_FAILED, f"remote kit directory not found: {shown}",
+                            "fix the kit ref's dir=, then retry")
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix=".tree.", dir=tree))
+    except OSError as exc:
+        raise KitFetchError(errors.FAILURE, f"could not create a kit directory: {exc.strerror or exc}",
+                            "check that the kit cache directory is writable, then retry") from exc
+    try:
+        kit = tmp / "kit"
+        kit.mkdir()
+        index = tmp / "index"
+        # checkout-index keeps files marked export-ignore or export-subst, unlike
+        # git archive, and the private index leaves the verified source untouched.
+        if (_local(git, repo, "read-tree", "--end-of-options", rev, index=index, work_tree=kit).returncode != 0
+                or _local(git, repo, "checkout-index", "--all", index=index, work_tree=kit).returncode != 0):
+            raise KitFetchError(errors.FAILURE, f"failed to materialize remote kit {shown}",
+                                "check the kit cache directory, then retry")
+        index.unlink()
+        problems = kitspec.tree_symlinks_within(kit, kit)
+        if problems:
+            raise KitFetchError(errors.VALIDATION_FAILED, f"remote kit {shown} was refused: {problems[0]}",
+                                "fix the kit's payload, then retry")
+        (tmp / COMPLETE_MARKER).write_text(stamp, encoding="utf-8")
+    except BaseException:
+        _remove_tree(tmp)
+        raise
+    return _place(tmp, dest, lambda p: _tree_valid(p, stamp)) / "kit"
+
+
+def fetch(ref: str, backend: str) -> Path:
+    """The local directory of the kit ``ref`` names, fetched and verified. Raises :class:`KitFetchError`."""
+    parsed = parse_ref(ref)
+    shown = _shown(ref)
+    git = _git_program()
+    _base, src, tree = _cache_dirs(backend)
+    repo = _fetch_source(git, parsed, src, shown)
+    return _materialize(git, repo, parsed, tree, shown)
+
+
+def load(ref: str, backend: str) -> tuple[str, kitspec.KitSpec]:
+    """Fetch ``ref`` and parse its kit: ``(kit name, spec)``. Raises :class:`KitFetchError`.
+
+    A local directory ref is refused: only a pinned remote ref is fetched and
+    checked. The kit must be a neutral ``hybrid/v1`` kit whose ``name`` is a
+    plain kit name (it names host-side records and directories).
+    """
+    shown = _shown(ref)
+    if not is_remote(ref):
+        raise KitFetchError(
+            errors.UNSUPPORTED,
+            f"kit {shown} names a local directory, which the Python acq does not apply; it applies only its "
+            "built-in kits and remote kits pinned to a commit",
+            "use a git+https://…#ref=<commit>&dir=… ref, or use the Bash acq (ACQ_IMPL=bash) for local kits",
+        )
+    kit_dir = fetch(ref, backend)
+    try:
+        spec = kitspec.load_kit(kit_dir)
+    except kitspec.KitSpecError as exc:
+        raise KitFetchError(errors.VALIDATION_FAILED, f"cannot read remote kit {shown}: {exc}",
+                            "fix the kit, then retry") from exc
+    if spec.field("schemaVersion") != "hybrid/v1":
+        raise KitFetchError(errors.UNSUPPORTED,
+                            f"remote kit {shown} is not a neutral hybrid/v1 kit; the Python acq does not pass "
+                            "backend-native kits through", "use a hybrid/v1 kit, or the Bash acq (ACQ_IMPL=bash)")
+    name = spec.field("name") or ""
+    if not _KIT_NAME.fullmatch(name) or name in (".", ".."):
+        raise KitFetchError(errors.VALIDATION_FAILED, f"remote kit {shown} has an unsafe or missing name",
+                            "fix the kit's name: field, then retry")
+    return name, spec

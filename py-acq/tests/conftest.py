@@ -85,6 +85,10 @@ def isolate_user_dirs(tmp_path_factory, monkeypatch):
     store = root / "secret-store"
     monkeypatch.setenv("ACQ_SECRET_STORE_DIR", str(store))
     monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", f"unix:path={root / 'no-session-bus'}")
+    # A kit outside the built-in bundle is fetched with git. Tests must never
+    # reach the network: git refuses every transport but a local file:// one,
+    # which the kit-fetch tests use with a bare repository fixture.
+    monkeypatch.setenv("GIT_ALLOW_PROTOCOL", "file")
     # On a Windows host the store would use real DPAPI even for the throwaway
     # directory; in-process tests stay on the file backend instead, and the
     # Windows path is exercised through its seams (test_secretstore.py).
