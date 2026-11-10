@@ -4659,11 +4659,19 @@ If acq's directories must live somewhere else, move them with `ACQ_STATE_DIR`
 and the `XDG_STATE_HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `XDG_CACHE_HOME`
 variables.
 
-The check runs only when a sandbox is created. Re-attaching to an existing
-sandbox (`acq run NAME`, `start`, `restart`) does not re-mount the workspace and
-skips it, so a sandbox created on `~` by an older acq keeps its unsafe mount.
-Recreate it on a project directory. Save anything outside the mounted
-workspace first, because the guest filesystem is discarded:
+Re-attaching to an existing sandbox (`acq run NAME`, `acq run AGENT` for an
+existing name, `start`, `restart`) does not re-mount the workspace, so there the
+check runs on the workspace recorded when the sandbox was created
+(`acq_recorded_workspace_safe`). A sandbox created on `~` by an older acq is
+refused with the same message, plus a line naming the sandbox:
+
+```text
+     Sandbox NAME was created on that workspace: remove it ('acq rm NAME') and create it again on a project directory.
+```
+
+A sandbox with no recorded host workspace (created before acq recorded it) is
+not checked. Recreate a refused sandbox on a project directory. Save anything
+outside the mounted workspace first, because the guest filesystem is discarded:
 
 ```bash
 acq ls                 # find the sandbox created on your home directory
@@ -4672,17 +4680,26 @@ acq run opencode /path/to/your/project
 ```
 
 The Python acq has its own version of this check, which also runs on
-re-attach; see [§77](#77-python-acq-a-workspace-that-holds-acqs-own-directories-is-refused).
+re-attach (`run NAME`, and `create --recreate`, which the Bash acq does not
+have: there it is refused with a usage error, exit 2); see
+[§77](#77-python-acq-a-workspace-that-holds-acqs-own-directories-is-refused).
+The Python `start` and `restart`, and its `run AGENT PATH` re-attach (which
+checks the typed path instead), do not check the recorded workspace yet, where
+the Bash ones do. Tracked: add the recorded-workspace check to those Python
+paths (`py-acq/src/acq_py/commands/lifecycle.py`: `_start_locked`,
+`_reattach_workspace`) with the same refusal.
 
 ---
 
 ## 82. Bash acq: The Anonymous Kit Fetch Attempt Rewrites Every URL to github.com
 
+**Status:** Fixed. Earlier builds behave as described below.
+
 **Symptom:** None visible. Every remote kit fetch by the Bash acq takes its
 second, authenticated attempt (with the user's git config); the first attempt,
 meant to be anonymous, always fails.
 
-**Cause:** `kit_translate_fetch` (`acq.backends/kit-translate.sh`) runs the
+**Cause:** `kit_translate_fetch` (`acq.backends/kit-translate.sh`) ran the
 first attempt with `-c credential.helper= -c url.https://github.com/.insteadOf=`
 to neutralize a user's `github.com` URL rewrite. An `insteadOf` value is a URL
 prefix, and an empty prefix matches every URL, so git rewrites
@@ -4694,13 +4711,18 @@ repository`). The request goes to github.com without credentials, so nothing
 leaks, but the fallback runs with the user's credential helpers on every fetch.
 The bats tests replace `git fetch` with a stub, so they never saw it.
 
-**Resolution:** Nothing to do as a user. The Python acq does not copy this: its
-first attempt reads no git config files at all (`GIT_CONFIG_NOSYSTEM=1`,
-`GIT_CONFIG_GLOBAL` set to the null device; `py-acq/src/acq_py/kit_fetch.py`).
-
-**Tracked:** change the Bash first attempt to the same config isolation and add
-a bats test that runs a real `git fetch` against a local repository through the
-anonymous attempt. Unblock trigger: the next change to `kit_translate_fetch`.
+**Resolution:** Nothing to do as a user. The first attempt
+(`_kit_git_fetch_into anon`) now reads no git config file at all, as the Python
+acq's does (`py-acq/src/acq_py/kit_fetch.py`): `GIT_CONFIG_NOSYSTEM=1`,
+`GIT_CONFIG_GLOBAL` on the null device, `GIT_ALLOW_PROTOCOL=https` (narrowed
+further by an inherited `GIT_ALLOW_PROTOCOL`), and no URL rewrite of its own.
+Both attempts set `core.hooksPath` to the null device, so a hook from the
+user's config never runs in the kit cache. So an unauthenticated fetch of a
+public kit no longer consults the user's credential helpers, and a kit URL
+starting `git+http://` (not https) now succeeds only through the retry. A bats
+test (`test/bats/100-kit-translate.bats`) runs a real `git fetch` from a local
+repository through the anonymous attempt, with `file://` allowed only in the
+test environment.
 
 ---
 
@@ -4711,6 +4733,8 @@ only) during `acq create` or the create step of `acq run` does not stop the
 backend create. acq keeps running until the provisioning step finishes, then
 prints `acq: stopped by SIGTERM after the provisioning step finished` and exits
 143 (129 for SIGHUP). The sandbox is created; `run` does not go on to attach.
+`acq rm` behaves the same way around the backend remove (`... after the removal
+step finished`).
 
 **Cause:** This is a deliberate choice (`acq_run_signal_deferred` in
 `acq.backends/progress.sh`). The provisioning step runs in a foreground
@@ -4727,7 +4751,49 @@ it could no longer clean up after Ctrl-C.
 **Resolution:** Signal the process group instead: `kill -TERM -<pgid>` (the
 negative process-group ID, which is acq's PID when acq was started from a
 shell), or press Ctrl-C in acq's terminal. The Python acq handles SIGTERM in its
-own process, runs the same cleanup and exits 143.
+own process, runs the same cleanup and exits 143. A second SIGTERM or SIGHUP to
+the Python acq within 10 seconds of the first is ignored so it cannot cut that
+cleanup short; a later one ends acq at once by that signal, so a hung cleanup
+can still be stopped with `kill`.
+
+---
+
+## 84. Bash 5.2: Ctrl-C During `create` Could Hang acq
+
+**Status:** Fixed. Earlier builds behave as described below.
+
+**Symptom:** Under Bash 5.2, pressing Ctrl-C while `acq create` (or the create
+step of `acq run`) showed its "Creating sandbox" spinner sometimes left acq
+hanging: the spinner stopped after its current frame, the cursor stayed
+hidden, nothing more was printed, and acq never exited until it was killed. The
+backend create kept running. In CI this showed as the sbx Ctrl-C case of
+`test/bats/161-create-signal.bats` timing out after about 90 seconds in the
+parallel pre-commit job (Ubuntu 24.04, Bash 5.2.21). It never happened under
+Bash 5.3 or 3.2.
+
+**Cause:** The provisioning subshell's Ctrl-C cleanup
+(`_acq_spin_cleanup_signal` in `acq.backends/progress.sh`) stopped the spinner's
+animator with `kill` and then the `wait` builtin. Bash 5.2 can lose track of a
+child that exits while a trap runs: the animator exited and was reaped, but
+`wait` never returned, so the cleanup never reached the backend child, the lock
+or the exit. Instrumenting the cleanup confirmed it stopped between the `kill`
+and the end of the `wait`, with the animator already gone. It is a Bash 5.2
+behaviour, not a harness artefact, and any real Ctrl-C could hit it; the test
+only made it likely by running six cases at once under load. Driving the sbx
+Ctrl-C case six at a time on four CPUs reproduced it in 5 of 80 runs under Bash
+5.2.21 and 0 of 60 under 5.3; the full `161` file alone, run 20 times under the
+same load, never did. Only the sbx case failed in CI, presumably because of the
+timing of its create path; the msb case runs the same cleanup.
+
+**Resolution:** Nothing to do as a user. The spinner no longer waits for its
+animator with the `wait` builtin (`_acq_spin_end_animator`): it polls with
+`kill -0`, which cannot hang that way, and gives up after about two seconds.
+The animator ends on TERM with `exit 0`, so no "Terminated" job notice is
+printed for it. With the change, the same load reproduced no hang in 120 runs
+under Bash 5.2.21. The provisioning subshell's EXIT trap still stops the
+provider-input guardian with `kill` and `wait`; no hang was seen there in those
+runs. Tracked: if a Bash 5.2 hang ever shows in `_acq_provider_input_guardian_stop`,
+replace its `wait` with the same bounded poll.
 
 ---
 

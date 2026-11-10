@@ -468,3 +468,68 @@ _ws_safe() { # ARGS...
   assert_output --partial 'project environment detected (direnv)'
   refute_output --partial $'\033'
 }
+
+# A re-attach, start or restart does not re-mount the workspace, so the one
+# recorded at create is what the guest still reaches. A sandbox recorded on a
+# directory holding acq's state ($STUBDIR holds ACQ_STATE_DIR, as `~` holds
+# ~/.local/state/acq) is refused before any heal, start or attach, with the
+# create-time remediation.
+_assert_recorded_refusal() { # BACKEND-CLI-PATTERN
+  assert_equal "$status" "1"
+  assert_output --partial "contains acq's own directory"
+  assert_output --partial "use a project directory that holds none of acq's state, config or secret-store directories (not your home directory itself), then re-run"
+  assert_output --partial "Sandbox box was created on that workspace: remove it ('acq rm box')"
+  refute_regex "$(cat "$CALLS")" "$1"
+}
+
+@test "re-attach(msb): run NAME, run AGENT and start/restart refuse a recorded workspace holding acq's state" {
+  printf 'box\n' >"$STUBDIR/.msb_sandbox_list"
+  printf 'box\n' >"$STUBDIR/.msb_running_list"
+  acq_workspace_record_write msb box "$STUBDIR"
+  run env ACQ_BACKEND=msb ACQ_UPDATE_CHECK=0 "$ACQ" run box
+  _assert_recorded_refusal '^msb (exec|start|modify)'
+  : >"$CALLS"
+  run env ACQ_BACKEND=msb ACQ_UPDATE_CHECK=0 ACQ_NO_PROMPT=1 "$ACQ" run opencode --name box "$WT/okdir"
+  _assert_recorded_refusal '^msb (exec|start|modify|create)'
+  : >"$CALLS"
+  run env ACQ_BACKEND=msb "$ACQ" start box
+  _assert_recorded_refusal '^msb (exec|start|modify)'
+  : >"$CALLS"
+  run env ACQ_BACKEND=msb "$ACQ" restart box
+  _assert_recorded_refusal '^msb (exec|start|stop|modify)'
+}
+
+@test "re-attach(sbx): run NAME and run AGENT refuse a recorded workspace holding acq's state" {
+  printf 'box\n' >"$STUBDIR/.sandbox_list"
+  acq_workspace_record_write sbx box "$STUBDIR"
+  run env ACQ_BACKEND=sbx ACQ_UPDATE_CHECK=0 "$ACQ" run box
+  _assert_recorded_refusal '^sbx (exec|run|kit)'
+  : >"$CALLS"
+  run env ACQ_BACKEND=sbx ACQ_UPDATE_CHECK=0 ACQ_NO_PROMPT=1 "$ACQ" run opencode --name box "$WT/okdir"
+  _assert_recorded_refusal '^sbx (exec|run|kit|create)'
+}
+
+@test "re-attach(msb): a recorded project workspace, or none, passes the recorded-workspace check" {
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    acq_workspace_record_write msb box "$1"
+    acq_recorded_workspace_safe msb box 2>&1 && echo ok-project
+    acq_recorded_workspace_safe msb legacy 2>&1 && echo ok-unrecorded
+  ' _ "$WT/okdir"
+  assert_success
+  assert_line ok-project
+  assert_line ok-unrecorded
+  refute_output --partial "acq's own directory"
+}
+
+@test "create --recreate: the Bash acq refuses it before any backend call, rather than create from cwd" {
+  mkdir -p "$WT/okdir"
+  cd "$WT/okdir"
+  run env ACQ_BACKEND=msb ACQ_NO_PROMPT=1 "$ACQ" create --recreate box --yes
+  assert_equal "$status" "2"
+  assert_output --partial "--recreate is not supported by the Bash implementation"
+  assert_equal "$(cat "$CALLS")" ""
+  run env ACQ_BACKEND=sbx ACQ_NO_PROMPT=1 "$ACQ" create opencode . --recreate=box
+  assert_equal "$status" "2"
+  assert_equal "$(cat "$CALLS")" ""
+}

@@ -1459,6 +1459,23 @@ EOF
   return 0
 }
 
+# acq_recorded_workspace_safe BACKEND NAME — refuse, with the same message and
+# remediation as acq_workspace_specs_safe, an existing sandbox whose recorded
+# host workspace is, contains, or lies inside one of acq's own directories. A
+# re-attach, start or restart does not re-mount the workspace, so without this
+# a sandbox created on `~` by an older acq (or before acq's directories moved
+# under its workspace) would keep reaching acq's state through its writable
+# mount. Silent and 0 when nothing is recorded (a legacy sandbox) or the
+# recorded workspace is safe.
+acq_recorded_workspace_safe() {
+  local ws
+  ws=$(acq_workspace_record_read "$1" "$2" 2>/dev/null | tr -d '\r') || ws=""
+  [ -n "$ws" ] || return 0
+  _acq_workspace_trusted_safe "$ws" && return 0
+  echo "     Sandbox $(acq_printable "$2") was created on that workspace: remove it ('acq rm $(acq_printable "$2")') and create it again on a project directory." >&2
+  return 1
+}
+
 # _acq_workspace_path_safe PATH SHOWN — the per-path check behind
 # acq_workspace_specs_safe. SHOWN describes the path for the message.
 _acq_workspace_path_safe() {
@@ -5601,6 +5618,13 @@ _acq_provider_input_guardian_signal_children() {
 
 _acq_provider_input_signal_exit() {
   local status="${1:-1}"
+  # A child that inherited this handler (see acq_trap_owner_is_self in
+  # progress.sh) only ends itself: the backend children and the lock belong to
+  # the transaction subshell.
+  if ! acq_trap_owner_is_self; then
+    trap - EXIT HUP INT TERM
+    exit "$status"
+  fi
   if _acq_provider_input_guardian_signal_children; then
     exit "$status"
   fi

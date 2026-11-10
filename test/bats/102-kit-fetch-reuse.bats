@@ -29,17 +29,26 @@ setup() {
   cat > "$STUBDIR/git" <<'GIT'
 #!/usr/bin/env bash
 args=("$@")
+# The anonymous attempt reads no git config file (GIT_CONFIG_GLOBAL on the
+# null device); the authenticated retry keeps the user's.
 anon=0
-while [ "${1:-}" = -c ]; do anon=1; shift 2; done
+[ "${GIT_CONFIG_GLOBAL:-}" = /dev/null ] && anon=1
+while [ "${1:-}" = -c ]; do shift 2; done
 if [ "${1:-}" = fetch ]; then
   printf 'fetch\n' >> "$FETCH_LOG"
   if [ "${FAIL_FETCH:-0}" = 1 ] || { [ "${AUTH_ONLY:-0}" = 1 ] && [ "$anon" = 1 ]; }; then
     printf 'suppressed transport detail\n' >&2
     exit 1
   fi
+  # The kit URL is https: model git's transport check for it, then serve the
+  # pinned objects from the local fixture over file://.
+  case ":${GIT_ALLOW_PROTOCOL-https}:" in
+    *:https:*) ;;
+    *) exit 1 ;;
+  esac
   revision="${@: -1}"
   [ "${WRONG_REVISION:-0}" != 1 ] || revision="$PIN2"
-  exec "$ACQ_TEST_REAL_GIT" -c protocol.file.allow=always fetch --depth 1 "$SOURCE_REPO" "$revision"
+  GIT_ALLOW_PROTOCOL=file exec "$ACQ_TEST_REAL_GIT" fetch --depth 1 "$SOURCE_REPO" "$revision"
 fi
 exec "$ACQ_TEST_REAL_GIT" "${args[@]}"
 GIT
