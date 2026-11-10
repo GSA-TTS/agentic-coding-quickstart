@@ -109,6 +109,7 @@ PATH_OVERRIDES: tuple[tuple[str, str], ...] = (
     ("ACQ_SECRET_META_DIR", "the default"),
     ("ACQ_SECRET_INDEX_FILE", "the default"),
     ("ACQ_MSB_BALANCED_HOSTS_FILE", "the default"),
+    ("ACQ_MSB_CLONES_DIR", "the default"),
 )
 
 # Read only when ACQ_SECRET_STORE_DIR is unset: the store dir relocates them.
