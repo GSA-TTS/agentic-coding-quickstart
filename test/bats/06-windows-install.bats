@@ -248,11 +248,16 @@ teardown() {
   mkdir -p "$STUBDIR/work"
   cd "$STUBDIR/work" || return 1
 
-  local rel
+  local rel installer="$REPO_ROOT/install.ps1"
+  # MSYS2_ARG_CONV_EXCL below stops Git Bash rewriting every argument, the
+  # script path included, so pass pwsh the script's Windows path explicitly.
+  if command -v cygpath >/dev/null 2>&1; then
+    installer=$(cygpath -w "$installer")
+  fi
   # An empty value and a UNC server with no share are refused like a relative one.
   # MSYS2_ARG_CONV_EXCL keeps Git Bash from rewriting the //server argument.
   for rel in rel-inst 'C:rel-inst' '\rel-inst' '' '\\server' '\\server\' '//server'; do
-    MSYS2_ARG_CONV_EXCL='*' run pwsh -NoLogo -NoProfile -File "$REPO_ROOT/install.ps1" -DryRun -InstallDir "$rel"
+    MSYS2_ARG_CONV_EXCL='*' run pwsh -NoLogo -NoProfile -File "$installer" -DryRun -InstallDir "$rel"
     assert_failure 1
     assert_output --partial "-InstallDir must be an absolute path, got '$rel'"
     refute_output --partial '[dry-run]'
