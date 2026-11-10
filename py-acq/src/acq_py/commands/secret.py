@@ -203,8 +203,6 @@ def _set_apply(backend: str, scope: secretstore.Scope, service: str, value: str,
             exc.remediation,
             emit_json,
         )
-    finally:
-        value = ""
     data = {"scope": scope.label, "scope_kind": _scope_kind(scope), "service": service, "value_state": "set"}
     if emit_json:
         print(json.dumps(envelope.success(command, data)))
@@ -569,7 +567,6 @@ def _import_one(svc: str, envvar: str, opts: _ImportArgs, scope: secretstore.Sco
         if reason is not None:
             return {**entry, "outcome": "skipped", "reason": reason}
     secretstore.store(secretstore.key_for(svc, scope.sandbox), value)
-    value = ""
     say(f"acq: imported '{svc}' ({desc}) from ${envvar}.")
     return {**entry, "outcome": "imported"}
 

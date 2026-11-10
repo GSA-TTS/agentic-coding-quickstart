@@ -1362,7 +1362,6 @@ def secret_bindings(name: str) -> tuple[list[BoundSecret], dict[str, str]]:
         if value:
             env[binding.env] = value
             planned.append(BoundSecret(service, binding, _has_own_value(service, name)))
-        value = None
     return planned, env
 
 
@@ -1405,7 +1404,6 @@ def _start_env(name: str) -> dict[str, str]:
             out.clear()
             raise _start_secret_missing(name, env, entry["service"])
         out[env] = value
-        value = None
     return out
 
 
@@ -1636,7 +1634,6 @@ def _refeed(service: str, scope: Scope) -> None:
             )
         elif not _put(rec, BoundSecret(service, binding, _has_own_value(service, sandbox)), value):
             failed.append(sandbox)
-        value = None
     if failed:
         raise MsbError(
             errors.FAILURE,
@@ -1685,7 +1682,6 @@ def _sweep_unknown(rec: HeldRecord, scope: Scope, service: str) -> bool:
         value = secretstore.resolve(service, rec.name)
         if not value or not _put(rec, BoundSecret(service, guess, True), value):
             return False
-        value = None
         return True
     rec.note(service)
     rec.save()
@@ -1707,7 +1703,6 @@ def _rebind_global(rec: HeldRecord, service: str) -> None:
                 f"global value there; run 'acq secret set -g {service}' or recreate the sandbox",
                 file=sys.stderr,
             )
-    value = None
 
 
 def _unbind_one(scope: Scope, service: str, sandbox: str) -> str:
@@ -1908,7 +1903,6 @@ def provider_credential_set(provider: str, key_env: str, hosts: list[str], value
             f"remove or repair the unreadable provider-credential binding for '{provider}', then retry",
         ) from exc
     secretstore.store(secretstore.key_for(provider), value)
-    value = ""
     _refeed(provider, secretstore.GLOBAL)
 
 
@@ -2008,7 +2002,6 @@ def _rotate_one(service: str, sandbox: str, budget: float) -> str | None:
     msb call is bounded by ``budget`` seconds, and one that times out counts as
     a failure. Any failure is confined to this sandbox.
     """
-    value = None
     try:
         if _has_own_value(service, sandbox):
             return "kept"
@@ -2033,8 +2026,6 @@ def _rotate_one(service: str, sandbox: str, budget: float) -> str | None:
         return _rotate_timed_out("msb modify", budget)
     except (MsbError, secretstore.SecretStoreError) as exc:
         return exc.message
-    finally:
-        value = None
     return None
 
 
