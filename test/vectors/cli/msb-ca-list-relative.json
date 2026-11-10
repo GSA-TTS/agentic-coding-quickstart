@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "id": "cli/msb-ca-list-relative",
+  "oracle": "Bash userdirs upstream-CA preflight refuses unsafe paths before any backend call; same diagnostics and exit 1",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{acq}",
+      "ls"
+    ],
+    "env": {
+      "ACQ_MSB_UPSTREAM_CA_CERT": "/absolute/a.pem:relative.pem"
+    },
+    "unset": [
+      "ACQ_IMPL",
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "ACQ_SECRET_STORE_DIR",
+      "ACQ_SECRET_FILE_DIR"
+    ],
+    "stdin": "",
+    "timeout_ms": 10000
+  },
+  "expect": {
+    "exit": 1,
+    "stdout": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "acq: ACQ_MSB_UPSTREAM_CA_CERT entries must be absolute paths, got 'relative.pem'\nlist absolute PEM paths in ACQ_MSB_UPSTREAM_CA_CERT, or unset it\n",
+      "normalize": [
+        "crlf"
+      ]
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME"
+    ]
+  }
+}

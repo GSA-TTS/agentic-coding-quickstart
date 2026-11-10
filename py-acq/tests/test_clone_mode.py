@@ -676,8 +676,7 @@ def test_36_a_non_clone_create_exports_acq_workspace_but_never_acq_clone(env, mo
 
 
 def test_37_acq_workspace_stays_on_the_clones_mount_root(env, monkeypatch, capsys):
-    # The Python acq has no ACQ_MSB_WORKSPACE start-dir override; the marker
-    # names the guest path the scratch is mounted at, which is also -w.
+    # The start-directory override must never change the clone mount or marker.
     monkeypatch.setenv("ACQ_MSB_WORKSPACE", "/tmp/elsewhere")
     seen = _msb_spy(monkeypatch)
     assert _create(capsys, str(env), "--clone")[0] == 0
@@ -685,7 +684,7 @@ def test_37_acq_workspace_stays_on_the_clones_mount_root(env, monkeypatch, capsy
     target = [argv[i + 1] for i, a in enumerate(argv) if a == "--volume" and "clones" in argv[i + 1]]
     assert target == [f"{os.path.realpath(_scratch_of(argv))}:{_guest(env)}"]
     assert f"ACQ_WORKSPACE={_guest(env)}" in argv and "ACQ_WORKSPACE=/tmp/elsewhere" not in argv
-    assert argv[argv.index("-w") + 1] == _guest(env) and "ACQ_CLONE=1" in argv
+    assert argv[argv.index("-w") + 1] == "/tmp/elsewhere" and "ACQ_CLONE=1" in argv
 
 
 def _scratch_of(argv: list[str]) -> str:

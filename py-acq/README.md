@@ -751,3 +751,39 @@ touches Windows-relevant paths. It runs pytest, smoke tests of `acq.cmd` and
 and Windows PowerShell 5.1, the release job's managed-runtime staging and
 smoke check (the staged layout run through `acq.cmd` with `ACQ_IMPL` unset), and a Git Bash run of `55-version.bats` and
 `06-windows-install.bats`.
+
+### msb tuning and tracing
+
+Python honours `ACQ_MSB_MEMORY` and `ACQ_MSB_CPUS` (defaults `4G` and `2`);
+an explicitly empty value omits that flag. The Bash character-class validators
+are preserved: memory permits digits, dots and `G/g/M/m`; CPUs permit digits
+except the literal `0`. Invalid values warn and omit the flag.
+`ACQ_MSB_PULL` accepts `always`, `if-missing` or `never`; empty keeps msb's
+default, and other values warn and are ignored.
+
+`ACQ_MSB_DNS_NAMESERVER` supplies an explicit resolver when nonempty.
+`ACQ_MSB_DNS_REBIND_PROTECTION` accepts `1/true/yes/on` or `0/false/no/off`,
+case-insensitively. Empty or invalid (with a warning) selects auto: rebind
+protection is disabled only when `/etc/resolv.conf` contains a resolver in
+`100.64.0.0/10`. These controls apply when creating a sandbox.
+
+`ACQ_MSB_UPSTREAM_CA_CERT` lists absolute PEM paths separated by colons or
+whitespace. Relative and drive-letter entries are refused during preflight;
+use POSIX paths in the list. Readable, nonempty regular files are passed as
+`--tls-upstream-ca-cert`; symlink files or ancestors are rejected. If none are
+usable, macOS exports the keychain search list with
+`security find-certificate -a -p`, atomically publishing a bundle only when
+export succeeds and contains `BEGIN CERTIFICATE`. The default output is
+`$ACQ_STATE_DIR/msb/host-upstream-cas.pem`; `ACQ_MSB_UPSTREAM_CA_FILE` overrides
+it and must be absolute. `ACQ_MSB_UPSTREAM_CA_AUTODETECT` defaults on; empty,
+`0/false/no/off` disables it. A nonempty `ACQ_MSB_NO_UPSTREAM_CA` suppresses
+both sources. CA flags are emitted only with TLS interception enabled;
+`ACQ_MSB_NO_TLS_INTERCEPT` disables both. Export failures leave the previous
+bundle intact and use msb's native trust fallback.
+
+`ACQ_MSB_WORKSPACE` overrides the canonical guest start directory at create
+and attach, without changing mount destinations or the `ACQ_WORKSPACE` marker.
+Any nonempty `ACQ_DEBUG` enables timestamped `acq[debug HH:MM:SS]:` command
+traces on stderr. Traces redact URL userinfo and queries, environment values,
+known credential values and guest scripts; stdin and child output are never
+traced. JSON stdout remains unchanged.

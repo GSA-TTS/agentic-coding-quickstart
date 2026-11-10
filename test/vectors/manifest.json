@@ -618,6 +618,15 @@
     {
       "contract": "host ssh-agent forwarding (ADR-0021): SSH_AUTH_SOCK is the opt-in; on msb a value that names no socket is skipped with a warning and never fails the create; on sbx (which forwards the agent itself) a set SSH_AUTH_SOCK prints the one-time trust-boundary notice. The --vsock route, bridge, re-drive and teardown need a real socket and are Tier-2 (py-acq/tests/test_ssh_agent_forward.py)",
       "vectors": ["cli/create-msb-ssh-agent-not-a-socket", "cli/create-sbx-ssh-agent-notice"]
+    },
+    {
+      "contract": "msb environment controls: CA absolute-path refusals and invalid tuning warnings match Bash; emitted flags, macOS export, workspace overrides and debug redaction are Tier-2 in test_msb_options.py",
+      "vectors": [
+        "cli/msb-ca-file-relative",
+        "cli/msb-ca-list-relative",
+        "cli/msb-ca-list-drive",
+        "cli/msb-invalid-tuning"
+      ]
     }
   ]
 }

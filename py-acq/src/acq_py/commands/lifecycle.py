@@ -830,7 +830,9 @@ def _write_record(backend: str, name: str, *, agent: str, workspace: str, image:
     with no readable record), so it must not strand.
     """
     try:
-        state.record_write(backend, name, agent=agent, workspace=workspace, image=image,
+        state.record_write(backend, name, agent=agent,
+                           workspace=(msb.workspace_override() or workspace) if backend == "msb" else workspace,
+                           image=image,
                            ro_host_config=True if ro_host_config else None,
                            kits_unconfirmed=True if kits_unconfirmed else None,
                            clone=True if clone else None)
@@ -881,7 +883,7 @@ def _msb_create(name: str, image: str, workspace: str, kit_set: list[kit_msb.Kit
     flags += ssh_agent.vsock_flags(name, [workspace])
     try:
         bindings = msb.create(
-            name, image, workspace, memory=msb.DEFAULT_MEMORY, cpus=msb.DEFAULT_CPUS,
+            name, image, workspace,
             egress_kits=kit_msb.egress_names(kit_set), kit_flags=flags, clone_source=clone_src,
         ) or []
     except BaseException:
