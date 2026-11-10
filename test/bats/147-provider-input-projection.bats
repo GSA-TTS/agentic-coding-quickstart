@@ -961,7 +961,7 @@ _racy_mkdir() {
   [ ! -e "$lock" ]
 }
 
-# _lock_taker COUNT — take and release the provider-input lock of sandbox
+# _lock_taker COUNT TOTAL — take and release the provider-input lock of sandbox
 # "contended" COUNT times in a fresh Bash. While it holds the lock it creates
 # $STUBDIR/holder exclusively: if that file already exists another taker holds
 # the lock at the same moment, and it records that in $STUBDIR/overlap.
@@ -978,17 +978,27 @@ _lock_taker() {
       else
         sleep 0.05
       fi
-    done' bash "$ACQ" "$STUBDIR" "$1"
+    done
+    # Stay alive until every taker is done: a taker that exits while others
+    # still contend makes its last owner line stale, and stale-owner recovery
+    # is not what these tests measure.
+    : > "$2/done.$$"
+    waited=0
+    while [ "$(ls "$2" | grep -c "^done\\.")" -lt "$4" ] && [ "$waited" -lt 12000 ]; do
+      sleep 0.05; waited=$((waited + 1))
+    done' bash "$ACQ" "$STUBDIR" "$1" "$2"
 }
 
 @test "projection lock: parallel Bash takers never hold it at once, even with a non-exclusive mkdir" {
-  local pids="" pid rc=0 takers="1 2 3 4 5 6" count=15 t
+  local pids="" pid rc=0 takers=6 count=15 n
   export ACQ_PROVENANCE_DIR="$STUBDIR/provenance"
   # Process creation is slow under Git Bash, so fewer takers there.
-  case "${OSTYPE:-}" in msys*|cygwin*) takers="1 2 3" count=5 ;; esac
+  case "${OSTYPE:-}" in msys*|cygwin*) takers=3 count=5 ;; esac
   _racy_mkdir
-  for t in $takers; do
-    _lock_taker "$count" &
+  n=0
+  while [ "$n" -lt "$takers" ]; do
+    n=$((n + 1))
+    _lock_taker "$count" "$takers" &
     pids="$pids $!"
   done
   for pid in $pids; do wait "$pid" || rc=1; done
@@ -1001,11 +1011,12 @@ _lock_taker() {
   case "${OSTYPE:-}" in msys*|cygwin*) skip "the Python acq never takes this lock on Windows" ;; esac
   command -v python3 >/dev/null 2>&1 && python3 -c 'import sys; sys.exit(sys.version_info < (3, 12))' ||
     skip "needs python3 >= 3.12 for the Python acq"
-  local pids="" pid rc=0 t
+  local pids="" pid rc=0 n=0
   export ACQ_PROVENANCE_DIR="$STUBDIR/provenance"
   _racy_mkdir
-  for t in 1 2 3; do
-    _lock_taker 15 &
+  while [ "$n" -lt 3 ]; do
+    n=$((n + 1))
+    _lock_taker 15 6 &
     pids="$pids $!"
     PYTHONPATH="$REPO_ROOT/py-acq/src" timeout 600 python3 -c '
 import os, sys, time
@@ -1032,6 +1043,11 @@ while held < count:
         pass
     taker.release()
     held += 1
+# Stay alive until all six takers are done (see _lock_taker).
+open(os.path.join(stub, "done.py%d" % os.getpid()), "w").close()
+deadline = time.time() + 600
+while len([n for n in os.listdir(stub) if n.startswith("done.")]) < 6 and time.time() < deadline:
+    time.sleep(0.05)
 ' "$STUBDIR" 15 &
     pids="$pids $!"
   done
