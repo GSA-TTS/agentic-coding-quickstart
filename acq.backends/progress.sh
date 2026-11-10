@@ -395,14 +395,18 @@ acq_spin_start() {
     # Each frame is drawn only while holding the draw lock and only when no
     # stop marker exists, so once the stopping shell holds the lock (or this
     # animator is gone) no frame can follow, however late this process runs.
+    # The draw lock is the file $dir/draw, created exclusively: noclobber makes
+    # Bash open it with O_EXCL, and the create runs in this shell, without a
+    # fork per frame (see _acq_spin_end_animator).
     trap '_acq_spin_animator_quit "$dir"' TERM HUP
+    set -C
     while :; do
       for _f in $frames; do
         kill -0 "$owner" 2>/dev/null || _acq_spin_animator_quit "$dir"
-        if mkdir "$dir/draw" 2>/dev/null; then
+        if [ ! -L "$dir/draw" ] && { true >"$dir/draw"; } 2>/dev/null && [ ! -L "$dir/draw" ]; then
           [ ! -e "$dir/stop" ] || _acq_spin_animator_quit "$dir"
           printf '\r%s %s' "$_f" "$msg" >&2
-          rmdir "$dir/draw" 2>/dev/null || true
+          rm -f "$dir/draw" 2>/dev/null || true
         elif [ -e "$dir/stop" ] || [ ! -d "$dir" ]; then
           _acq_spin_animator_quit "$dir"
         fi
@@ -489,8 +493,7 @@ _acq_spin_restore_traps() {
 # scheduled for a while can be past its checks, with the TERM still pending,
 # and write one more frame whenever it next runs, over whatever this shell has
 # printed since (an attached agent session). So the animator draws only while
-# holding a draw lock (a directory made with mkdir, which is atomic) and only
-# when no stop marker exists, and it quits by itself at its next check (within
+# holding a draw lock and only when no stop marker exists, and it quits by itself at its next check (within
 # one frame) once the marker is set. This function writes the stop marker, then
 # waits until it holds the draw lock itself or the animator is gone; from either
 # point on no frame can be drawn. The lock is held only for the moment of one
@@ -500,6 +503,13 @@ _acq_spin_restore_traps() {
 # returns, and such an animator, if it is ever resumed, can still draw that one
 # frame. Once the lock is held, it waits up to about two seconds more for the
 # animator to exit; one still running then ends at its next check.
+#
+# The draw lock is the file $dir/draw, and whoever creates it exclusively holds
+# it (noclobber, which makes Bash open it with O_EXCL). It is not a directory
+# made with mkdir: uutils coreutils mkdir 0.10 reports success to concurrent
+# callers (KNOWN_FAILURE_MODES section 92), which would let both sides hold it.
+# The animator creates it in its own shell, so taking it costs no fork per
+# frame; releasing it costs the one rm that the rmdir it replaces did.
 #
 # The animator is not sent TERM (unless the stop marker cannot be written,
 # when only a TERM can end it). A TERM that reached it before it set its own
@@ -533,7 +543,8 @@ _acq_spin_end_animator() {
     fi
   fi
   while [ "$gone" -eq 0 ]; do
-    if [ "$held" -eq 0 ] && mkdir "$dir/draw" 2>/dev/null; then
+    if [ "$held" -eq 0 ] && [ ! -L "$dir/draw" ] &&
+        ( set -C; : >"$dir/draw" ) 2>/dev/null && [ ! -L "$dir/draw" ]; then
       _ACQ_SPIN_LOCKED=1
       held=1
     fi
@@ -550,8 +561,8 @@ _acq_spin_end_animator() {
     tries=$((tries + 1))
   done
   if [ "$gone" -eq 1 ]; then
-    rm -f "$dir/stop" 2>/dev/null || true
-    rmdir "$dir/draw" "$dir" 2>/dev/null || true
+    rm -f "$dir/stop" "$dir/draw" 2>/dev/null || true
+    rmdir "$dir" 2>/dev/null || true
   fi
   _ACQ_SPIN_DIR=""
   _ACQ_SPIN_FORKED=""
@@ -563,8 +574,8 @@ _acq_spin_end_animator() {
 # directory (the stopping shell may hold the draw lock inside it; that no longer
 # matters once the animator is ending) and exit 0.
 _acq_spin_animator_quit() {
-  rm -f "$1/stop" 2>/dev/null || true
-  rmdir "$1/draw" "$1" 2>/dev/null || true
+  rm -f "$1/stop" "$1/draw" 2>/dev/null || true
+  rmdir "$1" 2>/dev/null || true
   exit 0
 }
 
@@ -599,14 +610,14 @@ _acq_spin_cleanup_exit() {
 }
 
 # _acq_spin_cleanup_signal SIG — INT/TERM trap. Order matters:
-#   1. Stop the animation, and reset SIG to its default disposition so a prior
-#      handler that re-raises SIG ends the process instead of re-entering here.
+#   1. Stop the animation, keeping the guarded SIG trap installed through both
+#      prior handlers so another signal cannot interrupt their cleanup.
 #   2. Run the prior SIG handler (once) with `$?` = 128+signal. If it exits (the
 #      provisioning subshells chain `_acq_provider_input_signal_exit 130`), the
 #      EXIT trap, still ours, chains the prior EXIT handler with that status, so
 #      the shell exits 130/143 and the EXIT cleanup runs exactly once.
 #   3. If it returned, or there was none, run the EXIT cleanup with the signal
-#      status, drop the EXIT trap, and re-raise SIG at THIS process (see
+#      status, drop the EXIT trap, reset SIG, and re-raise at THIS process (see
 #      _acq_signal_self) so the parent sees a death by signal. Should the
 #      re-raise not end the process (SIG ignored), exit with the status instead.
 #
@@ -616,6 +627,9 @@ _acq_spin_cleanup_exit() {
 # finishes: it, not the nested run, holds the prior handler, and that handler
 # (the provisioning subshells' `_acq_provider_input_signal_exit`) must run
 # before the EXIT cleanup releases the provider-input lock.
+# Bash 3.2 can defer the second signal until the prior handler exits. Resetting
+# SIG before that handler lets the deferred signal terminate the shell without
+# running EXIT. Keep the guarded trap until the EXIT cleanup has finished.
 _acq_spin_cleanup_signal() {
   local _acq_spin_sig="$1" _acq_spin_status=1 _acq_spin_prior=""
   case "$_acq_spin_sig" in
@@ -636,10 +650,10 @@ _acq_spin_cleanup_signal() {
     TERM) _acq_spin_prior="$_ACQ_SPIN_PRIOR_TERM_TRAP"; _ACQ_SPIN_PRIOR_TERM_TRAP="" ;;
   esac
   _acq_spin_stop_animation
-  trap - "$_acq_spin_sig"
   _acq_run_prior_trap "$_acq_spin_prior" "$_acq_spin_status"
   _acq_spin_cleanup_exit "$_acq_spin_status"
   trap - EXIT
+  trap - "$_acq_spin_sig"
   _acq_signal_self "$_acq_spin_sig"
   exit "$_acq_spin_status"
 }

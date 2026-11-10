@@ -1391,9 +1391,10 @@ _acq_workspace_safe() {
 # _acq_trusted_host_dirs — acq's own host directories, one per line: the state
 # dir, the provenance dir (which holds each sandbox's read-only trusted config),
 # the config dir, the data dir (the provider-input validator lives there), the
-# cache dir and the sbx and msb kit caches (the kit payloads acq applies), and
-# the secret store's file, sidecar and index locations. Unresolvable entries
-# are skipped.
+# cache dir and the sbx and msb kit caches (the kit payloads acq applies), the
+# msb scratch clones dir (another sandbox's clone, and its record of the
+# checkout acq runs git in at rm), and the secret store's file, sidecar and
+# index locations. Unresolvable entries are skipped.
 _acq_trusted_host_dirs() {
   local d
   if d=$(acq_state_dir 2>/dev/null); then printf '%s\n' "$d"; fi
@@ -1402,7 +1403,7 @@ _acq_trusted_host_dirs() {
   if d=$(acq_xdg_dir XDG_DATA_HOME .local/share 2>/dev/null); then printf '%s/acq\n' "$d"; fi
   if d=$(acq_xdg_dir XDG_CACHE_HOME .cache 2>/dev/null); then printf '%s/acq\n' "$d"; fi
   for d in "${ACQ_SECRET_FILE_DIR:-}" "${ACQ_SECRET_META_DIR:-}" "${ACQ_PROVIDER_INPUT_DATA_DIR:-}" \
-      "${ACQ_SBX_KIT_CACHE:-}" "${ACQ_MSB_KIT_CACHE:-}"; do
+      "${ACQ_SBX_KIT_CACHE:-}" "${ACQ_MSB_KIT_CACHE:-}" "${ACQ_MSB_CLONES_DIR:-}"; do
     if [ -n "$d" ]; then printf '%s\n' "$d"; fi
   done
   if [ -n "${ACQ_SECRET_INDEX_FILE:-}" ]; then dirname -- "$ACQ_SECRET_INDEX_FILE"; fi
@@ -2442,9 +2443,12 @@ _acq_config_lock_take() {
   if [ -L "$1" ] || [ ! -d "$1" ]; then
     return 1
   fi
-  ( set -C; : > "$1/owner" ) 2>/dev/null || return 1
-  if { printf '%s\n' "$2" > "$1/owner"; } 2>/dev/null; then
-    return 0
+  [ ! -L "$1/owner" ] || return 1
+  local rc=0
+  ( set -C; { printf '%s\n' "$2" || exit 2; } > "$1/owner" ) 2>/dev/null || rc=$?
+  [ ! -L "$1/owner" ] || return 1
+  if [ "$rc" -ne 2 ]; then
+    return "$rc"
   fi
   rm -f -- "$1/owner" 2>/dev/null
   rmdir -- "$1" 2>/dev/null || true
@@ -5819,17 +5823,56 @@ _acq_provider_input_publish() {
 #   tx_pid=$(exec sh -c 'echo $PPID')
 # and supply it as the third argument.  The fallback to $$ is retained for
 # tests that call lock_acquire directly (no surrounding subshell).
+#
+# The owner file's exclusive create decides who holds the lock, never mkdir
+# alone (_acq_provider_input_lock_take). The Python acq takes the same directory
+# the same way (_BashLock in py-acq/src/acq_py/lock.py).
+# When Python inspects a Bash lock on Windows, Python applies the 15-minute
+# freshness rule (section 88); Bash itself checks the recorded process identity.
 acq_provider_input_lock_acquire() {
-  local backend="$1" name="$2" tx_pid="${3:-$$}" root parent lock owner tries=0 pid identity actual_identity
+  local backend="$1" name="$2" tx_pid="${3:-$$}" root parent lock owner tries=0 pid identity actual_identity token rc age
   root=$(acq_provider_input_root "$backend" "$name") || return 1
   parent=${root%/*}
   _acq_provider_input_safe_mkdir "$parent" || return 1
   lock="${root}.lock"
-  while ! mkdir "$lock" 2>/dev/null; do
-    [ -d "$lock" ] && [ ! -L "$lock" ] || { echo "acq: unsafe provider-input lock: $lock" >&2; return 1; }
+  # Work the owner line out before creating the directory to minimize the
+  # brief interval in which another taker must wait for its metadata.
+  identity=$(_acq_provider_input_process_identity "$tx_pid") || return 1
+  token="$tx_pid $identity"
+  while :; do
+    rc=0
+    _acq_provider_input_lock_take "$lock" "$token" || rc=$?
+    [ "$rc" -eq 0 ] && break
+    [ "$rc" -eq 1 ] || { echo "acq: could not write the provider-input lock owner: $lock" >&2; return 1; }
+    if [ -L "$lock" ] || { [ -e "$lock" ] && [ ! -d "$lock" ]; }; then
+      echo "acq: unsafe provider-input lock: $lock" >&2
+      return 1
+    fi
+    if [ ! -d "$lock" ]; then
+      # The holder released it (or a losing taker removed its empty directory)
+      # since this take: look again at once. That still counts against the
+      # retries, so a take that keeps failing for another reason cannot loop
+      # forever.
+      tries=$((tries + 1))
+      if [ "$tries" -ge "${ACQ_PROVIDER_INPUT_LOCK_RETRIES:-300}" ]; then
+        echo "acq: gave up waiting for the provider-input lock: $lock" >&2
+        return 1
+      fi
+      continue
+    fi
     owner="$lock/owner"
-    # A lock with no owner file must reach the "no valid owner" branch below,
-    # not stop on an unset variable (set -u) or print a redirection error.
+    [ ! -L "$owner" ] || { echo "acq: unsafe provider-input lock owner: $owner" >&2; return 1; }
+    # A newly created directory can briefly have missing or empty metadata.
+    # As with the config lock, count waiting against the retry budget.
+    age=$(_acq_config_lock_age "$lock") || age=0
+    if { [ ! -e "$owner" ] || [ ! -s "$owner" ]; } && [ "$age" -lt 5 ]; then
+      tries=$((tries + 1))
+      [ "$tries" -lt "${ACQ_PROVIDER_INPUT_LOCK_RETRIES:-300}" ] || {
+        echo "acq: gave up waiting for the provider-input lock: $lock" >&2; return 1;
+      }
+      sleep 1
+      continue
+    fi
     pid="" identity=""
     { IFS=' ' read -r pid identity < "$owner"; } 2>/dev/null || true
     actual_identity=$(_acq_provider_input_process_identity "$pid" 2>/dev/null || true)
@@ -5852,9 +5895,40 @@ acq_provider_input_lock_acquire() {
     fi
     sleep 1
   done
-  identity=$(_acq_provider_input_process_identity "$tx_pid") || { rmdir -- "$lock"; return 1; }
-  printf '%s %s\n' "$tx_pid" "$identity" > "$lock/owner" || { rmdir -- "$lock"; return 1; }
   printf '%s\n' "$lock"
+}
+
+# _acq_provider_input_lock_take LOCK TOKEN — create LOCK and its owner file
+# holding TOKEN. Returns 0 when taken, 1 when not (another holder has it, or the
+# caller should look again), 2 when the token could not be written. As for the
+# config.yaml lock (_acq_config_lock_take), creating the owner file is what
+# decides: noclobber makes Bash open it with O_EXCL, so exactly one taker
+# creates it. A successful mkdir cannot decide, because uutils coreutils mkdir
+# 0.10 reports success to concurrent callers (KNOWN_FAILURE_MODES section 92).
+# Unlike the config.yaml lock, an existing directory is not taken: one with no
+# owner file is left for the user to remove (section 79). A taker that loses
+# never touches the winner's owner file. When its own create fails for another
+# reason it removes the directory only if it is still empty, so a directory
+# another taker has already given an owner stays. If writing the token into the
+# owner file it created fails (a full disk, say), that file is its own and is
+# removed again.
+_acq_provider_input_lock_take() {
+  mkdir -- "$1" 2>/dev/null || return 1
+  [ -d "$1" ] && [ ! -L "$1" ] || return 1
+  [ ! -L "$1/owner" ] || return 1
+  local rc=0
+  ( set -C; { printf '%s\n' "$2" || exit 2; } > "$1/owner" ) 2>/dev/null || rc=$?
+  [ ! -L "$1/owner" ] || return 1
+  if [ "$rc" -eq 1 ]; then
+    [ -e "$1/owner" ] || [ -L "$1/owner" ] || rmdir -- "$1" 2>/dev/null || true
+    return 1
+  fi
+  if [ "$rc" -eq 0 ]; then
+    return 0
+  fi
+  rm -f -- "$1/owner" 2>/dev/null
+  rmdir -- "$1" 2>/dev/null || true
+  return 2
 }
 
 # Start a real process whose lifetime is tied to the transaction subshell. Bash

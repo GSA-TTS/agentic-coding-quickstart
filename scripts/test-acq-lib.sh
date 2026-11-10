@@ -99,11 +99,13 @@ acq_test_stub_provider_input_boundary() {
     parent=${root%/*}
     mkdir -p "$parent" || return 1
     lock="${root}.lock"
+    # As the real lock: the exclusive owner-file create decides, not mkdir.
     mkdir "$lock" 2>/dev/null || return 1
+    ( set -C; printf '%s\n' "$$" > "$lock/owner" ) 2>/dev/null || return 1
     printf '%s\n' "$lock"
   }
   acq_provider_input_lock_release() {
-    case "${1:-}" in "$ACQ_PROVENANCE_DIR"/provider-input/*/*.lock) rmdir "$1" 2>/dev/null || true ;; *) return 1 ;; esac
+    case "${1:-}" in "$ACQ_PROVENANCE_DIR"/provider-input/*/*.lock) rm -f -- "$1/owner"; rmdir "$1" 2>/dev/null || true ;; *) return 1 ;; esac
   }
   acq_provider_input_msb_mount() {
     local generation="$2" host_generation
@@ -815,11 +817,13 @@ acq_provider_input_lock_acquire() {
   parent=${root%/*}
   mkdir -p "$parent" || return 1
   lock="${root}.lock"
+  # As the real lock: the exclusive owner-file create decides, not mkdir.
   mkdir "$lock" 2>/dev/null || return 1
+  ( set -C; printf '%s\n' "$$" > "$lock/owner" ) 2>/dev/null || return 1
   printf '%s\n' "$lock"
 }
 acq_provider_input_lock_release() {
-  case "${1:-}" in "$ACQ_PROVENANCE_DIR"/provider-input/*/*.lock) rmdir "$1" 2>/dev/null || true ;; *) return 1 ;; esac
+  case "${1:-}" in "$ACQ_PROVENANCE_DIR"/provider-input/*/*.lock) rm -f -- "$1/owner"; rmdir "$1" 2>/dev/null || true ;; *) return 1 ;; esac
 }
   acq_provider_input_msb_mount() {
     local generation="$2" host_generation

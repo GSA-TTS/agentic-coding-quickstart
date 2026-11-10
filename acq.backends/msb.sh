@@ -3286,7 +3286,9 @@ _acq_msb_upstream_ca_flags_into() {
 # GIT_CONFIG_PARAMETERS is read after GIT_CONFIG_COUNT, so it would override
 # the filter blanking too. GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM stay (the
 # user's own files). The one reader of the command scope uses
-# _acq_msb_git_ws_cmdscope instead.
+# _acq_msb_git_ws_cmdscope instead. GIT_ALLOW_PROTOCOL is cleared as well:
+# git reads it before protocol.allow, so an exported value would override
+# protocol.allow=never.
 _acq_msb_git_ws() {
   _acq_msb_git_ws_run isolate "$@"
 }
@@ -3311,6 +3313,9 @@ _acq_msb_git_ws_run() {
   [ "$mode" = keep ] || wsenv=(${_ACQ_MSB_WS_ENV[@]+"${_ACQ_MSB_WS_ENV[@]}"})
   (
     if [ "$mode" = keep ]; then _kit_git_isolate_repo; else _kit_git_isolate; fi
+    # An inherited GIT_ALLOW_PROTOCOL takes precedence over protocol.allow, so
+    # it would re-enable the transports the wrapper turns off.
+    unset GIT_ALLOW_PROTOCOL
     GIT_NO_LAZY_FETCH=1 GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
       env ${wsenv[@]+"${wsenv[@]}"} git --no-pager \
         -c core.fsmonitor=false \
@@ -3368,8 +3373,8 @@ _acq_msb_git_ws_prep() {
 }
 
 # _acq_msb_git_ws_filter_cfg DIR — build the settings that blank every filter
-# driver DIR's config defines (reading config runs nothing), so status and
-# clone never start a clean/smudge/process program it names. Sets the arrays
+# driver DIR's config defines (reading config runs nothing), so the clone
+# never starts a clean/smudge/process program it names. Sets the arrays
 # _ACQ_MSB_WS_ENV (environment assignments) and _ACQ_MSB_WS_CFG (`-c` options).
 # The settings travel as GIT_CONFIG_COUNT/GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n>
 # (git 2.31+), numbered from 0 because the wrapper drops any the user exports:
@@ -3518,7 +3523,7 @@ _acq_msb_clone_check_stale() {
 
 # _acq_msb_clone_preflight WS — the checks on the canonical workspace WS that
 # run before anything is created: refuse an unusual layout, borrowed objects or
-# a partial clone; note Git LFS and uncommitted changes.
+# a partial clone; note Git LFS and staged or untracked changes.
 _acq_msb_clone_preflight() {
   local ws_canon="$1"
   _acq_msb_clone_check_layout "$ws_canon" || return 1
@@ -3531,18 +3536,30 @@ _acq_msb_clone_preflight() {
     return 1
   fi
   _acq_msb_clone_check_partial "$ws_canon" || return 1
-  _ACQ_MSB_CLONE_LFS=""
   _acq_msb_clone_note_lfs "$ws_canon"
-  if [ -n "$(_acq_msb_git_ws "$ws_canon" status --porcelain --ignore-submodules=all 2>/dev/null)" ]; then
-    echo "acq(msb): note: the workspace has uncommitted changes; a git clone carries" >&2
-    echo "acq(msb):   committed state only. Commit first ('git add' untracked files)," >&2
-    echo "acq(msb):   or copy files in with 'acq cp'." >&2
-    if [ -n "$_ACQ_MSB_CLONE_LFS" ]; then
-      echo "acq(msb):   With filters disabled, LFS-tracked files may appear modified here" >&2
-      echo "acq(msb):   even when they are not." >&2
-    fi
+  if _acq_msb_clone_has_left_out_changes "$ws_canon"; then
+    echo "acq(msb): note: the workspace has staged or untracked changes that the clone leaves" >&2
+    echo "acq(msb):   out; a git clone carries committed state only. Commit first ('git add'" >&2
+    echo "acq(msb):   untracked files), or copy files in with 'acq cp'." >&2
   fi
   return 0
+}
+
+# _acq_msb_clone_has_left_out_changes WS — true when WS has staged changes
+# (the index differs from HEAD) or untracked, not ignored files. Only plumbing
+# that never reads a tracked file's content is used, so no filter driver can
+# run: `git status` cleans a stat-dirty file through its filter, and the filter
+# blanking (_acq_msb_git_ws_filter_cfg) is computed from a config read made
+# before the call, which a sandbox sharing the checkout can change in between.
+# So unstaged edits to tracked files are not reported (that would need the
+# worktree content compared with the index).
+_acq_msb_clone_has_left_out_changes() {
+  local rc=0 base=HEAD
+  _acq_msb_git_ws "$1" rev-parse --verify -q HEAD >/dev/null 2>&1 ||
+    base=4b825dc642cb6eb9a060e54bf8d69288fbee4904
+  _acq_msb_git_ws "$1" diff-index --cached --quiet "$base" -- >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 1 ] || return 0
+  [ -n "$(_acq_msb_git_ws "$1" ls-files -z --others --exclude-standard 2>/dev/null | tr -d '\0')" ]
 }
 
 # _acq_msb_clone_make_scratch WS DIR SCRATCH — create the private scratch dir
@@ -3678,10 +3695,9 @@ _acq_msb_clone_check_partial() {
   return 1
 }
 
-# _acq_msb_clone_note_lfs WS — print a notice when WS uses Git LFS, and set
-# _ACQ_MSB_CLONE_LFS=1. The wrapper disables filter drivers, so LFS-tracked
-# files land in the scratch as pointer files (the agent can fetch their content
-# in the guest), and the host-side status can show them as modified. Advisory.
+# _acq_msb_clone_note_lfs WS — print a notice when WS uses Git LFS. The wrapper
+# disables filter drivers, so LFS-tracked files land in the scratch as pointer
+# files (the agent can fetch their content in the guest). Advisory.
 _acq_msb_clone_note_lfs() {
   local ws="$1" f found=""
   for f in "${ws}/.gitattributes" "${ws}/.git/info/attributes"; do
@@ -3695,7 +3711,6 @@ _acq_msb_clone_note_lfs() {
     found=1
   fi
   [ -n "$found" ] || return 0
-  _ACQ_MSB_CLONE_LFS=1
   echo "acq(msb): note: this repository uses Git LFS. Clone mode disables filter drivers," >&2
   echo "acq(msb):   so LFS-tracked files are checked out in the scratch as pointer files." >&2
   echo "acq(msb):   If git-lfs is available in the sandbox, fetch their content there with:" >&2
@@ -3939,29 +3954,88 @@ _acq_msb_clone_warn_unfetched() {
   # Branch tips are read straight from the ref files (loose + packed). The
   # scratch is guest-writable, so the host must NEVER execute git inside it —
   # repo-local config (core.fsmonitor, pagers, ...) would let the guest run
-  # commands on the host at rm time.
-  local tips=""
-  if [ -d "${scratch}/.git/refs/heads" ]; then
-    tips=$(find "${scratch}/.git/refs/heads" -type f -exec cat {} + 2>/dev/null) || tips=""
+  # commands on the host at rm time. A running guest can also replace any of
+  # these files at any moment, so they are read without following a link and
+  # without blocking (_acq_msb_clone_read_refs). Linked .git, refs, heads or
+  # packed-refs paths cannot be verified, so the warning is shown.
+  local tips="" unfetched=""
+  if [ -L "${scratch}/.git" ] || [ -L "${scratch}/.git/refs" ] ||
+      [ -L "${scratch}/.git/refs/heads" ] || [ -L "${scratch}/.git/packed-refs" ]; then
+    unfetched=1
+  else
+    tips=$(_acq_msb_clone_read_refs "${scratch}/.git")
   fi
-  if [ -f "${scratch}/.git/packed-refs" ]; then
-    tips="${tips}
-$(awk '$1 ~ /^[0-9a-f]+$/ && $2 ~ /^refs\/heads\//{print $1}' "${scratch}/.git/packed-refs" 2>/dev/null || true)"
-  fi
-  while IFS= read -r t; do
+  while [ -z "$unfetched" ] && IFS= read -r t; do
     [ -n "$t" ] || continue
     # Skip non-SHA lines (e.g. a symbolic "ref: ..." loose ref) rather than
     # letting cat-file fail on them and warn spuriously.
     case "$t" in *[!0-9a-f]*) continue ;; esac
-    if ! _acq_msb_git_ws "$origin" cat-file -e "$t" 2>/dev/null; then
-      echo "acq(msb): warning: discarding unfetched commits in sandbox '$name''s scratch clone" >&2
-      echo "acq(msb):   (they were recoverable with: git fetch sandbox-${name})." >&2
-      return 0
-    fi
+    _acq_msb_git_ws "$origin" cat-file -e "$t" 2>/dev/null || unfetched=1
   done <<EOF
 $tips
 EOF
+  if [ -n "$unfetched" ]; then
+    echo "acq(msb): warning: discarding unfetched commits in sandbox '$name''s scratch clone" >&2
+    echo "acq(msb):   (they were recoverable with: git fetch sandbox-${name})." >&2
+  fi
   return 0
+}
+
+# _acq_msb_clone_plain_file PATH — true when PATH is a regular file and not a
+# symbolic link.
+_acq_msb_clone_plain_file() {
+  [ -f "$1" ] && [ ! -L "$1" ]
+}
+
+# _acq_msb_clone_read_refs GITDIR — print the lines of GITDIR's loose branch
+# refs (refs/heads/**) and the object names of the branches in its
+# packed-refs. GITDIR is in a scratch clone a running guest can change while
+# this reads, so nothing here may follow a link or block:
+#  - find (which never follows links) lists the loose refs, and each one is
+#    skipped unless it is a plain file when it is about to be read;
+#  - it can still be swapped for a FIFO between that check and the open, so
+#    each file is opened read-write (<>), which returns at once even for a FIFO,
+#    and read with a one-second timeout (read -t), and at most 256 bytes of a
+#    loose ref or 64 MiB of packed-refs are read, so a device swapped in ends
+#    the read too. A confirmed read-only regular file is opened read-only.
+# Bash 3.2 and macOS have no portable O_NONBLOCK or O_NOFOLLOW open, and
+# timeout(1) is not on macOS, hence the read-write open.
+_acq_msb_clone_read_refs() {
+  local gitdir="$1" f t
+  if [ -d "${gitdir}/refs/heads" ] && [ ! -L "${gitdir}/refs/heads" ]; then
+    while IFS= read -r -d '' f; do
+      _acq_msb_clone_plain_file "$f" || continue
+      t=""
+      if [ ! -w "$f" ]; then
+        { IFS= read -r -t 1 -n 256 t; } 2>/dev/null <"$f" || true
+      else
+        { IFS= read -r -t 1 -n 256 t; } 2>/dev/null <>"$f" || true
+      fi
+      printf '%s\n' "$t"
+    done < <(find "${gitdir}/refs/heads" -type f -print0 2>/dev/null)
+  fi
+  f="${gitdir}/packed-refs"
+  _acq_msb_clone_plain_file "$f" || return 0
+  if [ ! -w "$f" ]; then
+    _acq_msb_clone_read_packed_refs 2>/dev/null <"$f"
+  else
+    _acq_msb_clone_read_packed_refs 2>/dev/null <>"$f"
+  fi |
+    awk '$1 ~ /^[0-9a-f]+$/ && $2 ~ /^refs\/heads\//{print $1}' 2>/dev/null || true
+}
+
+# Bound every read, including after a FIFO supplies its first line. -n also
+# bounds an unterminated line (Bash 3.2 has no read -N).
+_acq_msb_clone_read_packed_refs() {
+  local t lines=0 bytes=0 rc
+  while [ "$lines" -lt 1000000 ] && [ "$bytes" -lt 67108864 ]; do
+    t="" rc=0
+    IFS= read -r -t 1 -n 4096 t || rc=$?
+    [ -z "$t" ] || printf '%s\n' "$t"
+    [ "$rc" -eq 0 ] || break
+    lines=$((lines + 1))
+    bytes=$((bytes + ${#t} + 1))
+  done
 }
 
 # _acq_msb_clone_cleanup NAME — delete NAME's scratch clone and drop the
