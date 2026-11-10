@@ -329,3 +329,59 @@ def test_nul_is_not_a_console_on_windows():
         assert os.isatty(nul.fileno())  # the trap this guards against
         assert hostexec._windows_console(nul.fileno()) is False
         assert hostexec.stream_is_terminal(nul) is False
+
+
+# A grandchild that appends to a file every 0.1 s for at most ``life`` seconds.
+_HEARTBEAT = "import sys, time\nend = time.time() + float(sys.argv[2])\nwhile time.time() < end:\n" \
+             "    open(sys.argv[1], 'a').write('.')\n    time.sleep(0.1)\n"
+
+
+def _parent(beat: Path, life: float, *, then_sleep: float, inherit: bool) -> list[str]:
+    """argv of a child that starts the heartbeat grandchild, then sleeps ``then_sleep`` s."""
+    streams = "" if inherit else ", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL"
+    code = (f"import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', {_HEARTBEAT!r}, "
+            f"{str(beat)!r}, '{life}']{streams}); time.sleep({then_sleep})")
+    return [sys.executable, "-c", code]
+
+
+def _beating(beat: Path) -> bool:
+    import time
+
+    before = beat.stat().st_size if beat.exists() else 0
+    time.sleep(0.8)
+    return (beat.stat().st_size if beat.exists() else 0) > before
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the real Job object; elsewhere a timeout ends only the child")
+def test_on_windows_a_timeout_ends_what_the_call_started(tmp_path, real_job_objects):
+    import time
+
+    beat = tmp_path / "beat"
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        hostexec.run_captured(_parent(beat, 60, then_sleep=60, inherit=True), timeout=3)
+    assert time.monotonic() - started < 20  # the grandchild's open pipe did not hold the wait
+    assert beat.exists() and not _beating(beat)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the real Job object")
+def test_on_windows_a_call_that_ends_in_time_leaves_what_it_started_running(tmp_path, real_job_objects):
+    beat = tmp_path / "beat"
+    proc = hostexec.run_captured(_parent(beat, 4, then_sleep=0.5, inherit=False), timeout=30)
+    assert proc.returncode == 0
+    assert _beating(beat)  # released, not terminated: a daemon the backend started keeps running
+
+
+def test_acq_starts_without_ctypes():
+    # The Job object code imports ctypes only when it is used (a bounded backend
+    # call on Windows), so a Python without the _ctypes extension still starts acq.
+    src = str(Path(hostexec.__file__).resolve().parents[1])
+    script = ("import sys; sys.modules['ctypes'] = None; sys.modules['_ctypes'] = None; "
+              f"sys.path.insert(0, {src!r}); import acq_py.cli, acq_py.hostexec; print('started')")
+    if sys.platform != "win32":  # elsewhere a bounded call needs no ctypes either
+        script += ("; print(acq_py.hostexec.run_captured([sys.executable, '-c', 'print(7)'], "
+                   "timeout=30).stdout.strip())")
+    proc = subprocess.run([sys.executable, "-I", "-c", script], capture_output=True, text=True, timeout=60,
+                          stdin=subprocess.DEVNULL)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.split()[:2] == (["started"] if sys.platform == "win32" else ["started", "7"])

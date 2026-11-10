@@ -260,26 +260,10 @@ def _run(
             "the input for msb cannot be encoded as UTF-8",
             "check the value for stray bytes and retry",
         )
+    # A bounded call that times out on Windows also ends what msb started (an
+    # msb server it auto-started, say): see hostexec.run_captured.
     try:
-        if input_text is None:
-            return subprocess.run(
-                [*msb_command(), *argv],
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout,
-                env=env,
-            )
-        return subprocess.run(
-            [*msb_command(), *argv],
-            input=input_text,
-            capture_output=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            env=env,
-        )
+        return hostexec.run_captured([*msb_command(), *argv], timeout=timeout, input_text=input_text, env=env)
     except OSError as exc:
         # A missing (or non-executable) msb binary must never surface as an
         # uncaught traceback (ADR-0040m stable error vocabulary): fail closed with

@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from acq_py import cli, errors, kitspec, msb, provider_input, secretstore
+from acq_py import cli, errors, kitspec, msb, provider_input, secretstore, state
 from acq_py.commands import common
 from provider_input_helpers import current_generation
 
@@ -158,6 +158,51 @@ def test_on_a_terminal_the_gate_asks_stores_and_binds(monkeypatch, tmp_path, cap
     (argv, env), = _verb_calls(children, "create")
     assert env is not None and env["USAI_API_KEY"] == VALUE
     _no_leak(VALUE, children, out, err)
+
+
+def test_on_a_terminal_the_prompt_does_not_hold_the_secret_store_lock(monkeypatch, tmp_path, capsys, children):
+    # A global secret change waiting for the store lock must not wait on the user.
+    from acq_py import lock
+
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setattr(common, "_stdin_is_terminal", lambda: True)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("y\n"))
+    free = []
+
+    def read_key(prompt):
+        try:  # exclusive, at once: fails while anything holds the store lock
+            with lock.exclusive_lock(lock.secret_store_lock_path(), 0.0, timeout_cls=lock.SecretStoreLockTimeout):
+                free.append(True)
+        except lock.SecretStoreLockTimeout:
+            free.append(False)
+        return VALUE
+
+    monkeypatch.setattr(common, "_read_secret_tty", read_key)
+    rc, doc, _out, err = _create(capsys, tmp_path)
+    assert rc == 0, (doc, err)
+    assert free == [True]
+    assert secretstore.resolve("usai") == VALUE
+
+
+def test_a_key_removed_after_the_prompt_fails_the_create_closed(monkeypatch, tmp_path, capsys, children):
+    # Under the store lock the gate checks again, without asking.
+    from acq_py.commands import lifecycle
+
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setattr(common, "_stdin_is_terminal", lambda: True)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("y\n"))
+    monkeypatch.setattr(common, "_read_secret_tty", lambda prompt: VALUE)
+    real = lifecycle._provider_pregate
+
+    def pregate_then_removed(name, kit_set):
+        real(name, kit_set)
+        secretstore.delete(secretstore.key_for("usai", None))  # a concurrent 'secret rm -g usai'
+
+    monkeypatch.setattr(lifecycle, "_provider_pregate", pregate_then_removed)
+    rc, doc, _out, err = _create(capsys, tmp_path)
+    assert rc == errors.EXIT_FAILURE and doc["error"]["code"] == errors.SECRET_MISSING, (doc, err)
+    assert err.count("Store a credential for provider 'usai'") == 1  # asked once, before the lock
+    assert _verb_calls(children, "create") == []
 
 
 def test_on_a_terminal_declining_abandons_the_create(monkeypatch, tmp_path, capsys, children):
@@ -660,6 +705,26 @@ def test_sbx_provider_id_colliding_with_a_builtin_service_is_refused(monkeypatch
     monkeypatch.setattr(provider_input, "gate", lambda *a, **k: reached.append(True))
     lifecycle._provider_gate("msb", "sb", ["fake-kit"])
     assert reached == [True]
+
+
+def test_sbx_create_refuses_a_provider_colliding_with_a_builtin_before_anything_is_made(
+        monkeypatch, tmp_path, capsys):
+    # The same refusal through the command: nothing is staged, created or recorded.
+    ws = _sbx_env(monkeypatch, tmp_path)
+    sbx_mod = sys.modules["acq_py.sbx"]
+    facts = provider_input.Facts("github", "GITHUB_TOKEN", "models.example.gov",
+                                 "https://models.example.gov/v1/models", "openai-compatible")
+    monkeypatch.setattr(provider_input, "selected_facts", lambda kit_names: [("fake-kit", {}, facts)])
+    seen: list[list[str]] = []
+    real = sbx_mod._run
+    monkeypatch.setattr(sbx_mod, "_run", lambda argv, **kw: seen.append(list(argv)) or real(argv, **kw))
+    rc, doc, _out, _err = _sbx_create(capsys, ws)
+    assert rc == errors.EXIT_FAILURE and doc["error"]["code"] == errors.VALIDATION_FAILED, doc
+    assert "provider id 'github' collides with an sbx built-in service" in doc["error"]["message"]
+    assert not [a for a in seen if a[:1] == ["create"] or a[:2] == ["secret", "set"]]
+    assert not sbx_mod.exists("sb")
+    assert state.record_read("sbx", "sb") is None
+    assert provider_input.recorded("sbx", "sb") == []
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX directory permissions")

@@ -154,33 +154,42 @@ def run_secret_set(parsed, emit_json: bool, backend: str) -> int:
 
 
 def _guarded(command: str, backend: str, scope: secretstore.Scope, service: str, emit_json: bool, body) -> int:
-    """Run ``body`` under the lock that keeps it from interleaving with another
-    command that reads or changes the same credential.
-
-    A sandbox-scoped change holds that sandbox's lifecycle lock, so it cannot
-    race a ``create`` (or ``rm``) of the sandbox reading the store to bind it:
-    a create could otherwise bind a value this ``rm`` then deletes. A change to
-    the global usai key holds the usai provider lock, so it cannot interleave
-    with ``usai-rotate-api-key``. Any other global change runs as is.
+    """Run ``body`` under the locks that keep it from interleaving with another
+    command that reads or changes the same credential (:func:`_credential_locks`).
     """
-    if scope.sandbox is not None:
-        try:
-            with lock.sandbox_lock(backend, scope.sandbox):
-                return body()
-        except lock.SandboxLockTimeout as exc:
-            return common._operational_failure(
-                command, errors.TIMEOUT, str(exc),
-                exc.remediation or "retry once the other command finishes; nothing was changed", emit_json,
-            )
-    if service != provider_creds.USAI_PROVIDER_ID:
-        return body()
     try:
-        with lock.provider_credential_lock(service):
+        with _credential_locks([backend], scope, service):
             return body()
-    except lock.ProviderCredentialLockTimeout as exc:
+    except lock.LockTimeout as exc:
         return common._operational_failure(
-            command, errors.TIMEOUT, str(exc), "retry once the other command finishes; nothing was changed", emit_json
+            command, errors.TIMEOUT, str(exc),
+            getattr(exc, "remediation", None) or "retry once the other command finishes; nothing was changed",
+            emit_json,
         )
+
+
+@contextlib.contextmanager
+def _credential_locks(lock_backends: list[str], scope: secretstore.Scope, service: str) -> Iterator[None]:
+    """The locks a change to ``service`` in ``scope`` holds, in the order :mod:`acq_py.lock` documents.
+
+    A sandbox-scoped change holds that sandbox's lifecycle lock (one per backend
+    in ``lock_backends``), so it cannot race a ``create`` (or ``rm``) of the
+    sandbox reading the store to bind it: a create could otherwise bind a value
+    this ``rm`` then deletes. Any change to a usai key, the sandbox's own one
+    included, also holds the usai provider lock, so it cannot interleave with
+    ``usai-rotate-api-key``, which could otherwise re-feed the global key over
+    a value just set. A global change holds the secret-store lock last, so it
+    cannot race any create reading the store. Raises :class:`lock.LockTimeout`.
+    """
+    with contextlib.ExitStack() as stack:
+        if scope.sandbox is not None:
+            for backend in lock_backends:
+                stack.enter_context(lock.sandbox_lock(backend, scope.sandbox))
+        if service == provider_creds.USAI_PROVIDER_ID:
+            stack.enter_context(lock.provider_credential_lock(service))
+        if scope.sandbox is None:
+            stack.enter_context(lock.secret_store_lock())
+        yield
 
 
 def _set_apply(backend: str, scope: secretstore.Scope, service: str, value: str, host: str, env: str,
@@ -546,15 +555,10 @@ def _import_write_lock(svc: str, scope: secretstore.Scope) -> Iterator[None]:
 
     ``secret import`` names no backend, so a sandbox-scoped write takes that
     sandbox's lifecycle lock on every backend, in a fixed order (another
-    command holds at most one of them, so the order cannot deadlock). The
-    global usai key takes the usai provider lock. Raises :class:`lock.LockTimeout`.
+    command holds at most one of them, so the order cannot deadlock). The rest
+    is :func:`_credential_locks`. Raises :class:`lock.LockTimeout`.
     """
-    with contextlib.ExitStack() as stack:
-        if scope.sandbox is not None:
-            for backend in backends.BACKENDS:
-                stack.enter_context(lock.sandbox_lock(backend, scope.sandbox))
-        elif svc == provider_creds.USAI_PROVIDER_ID:
-            stack.enter_context(lock.provider_credential_lock(svc))
+    with _credential_locks(list(backends.BACKENDS), scope, svc):
         yield
 
 

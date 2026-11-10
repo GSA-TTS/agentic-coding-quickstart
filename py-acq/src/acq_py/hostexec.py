@@ -14,12 +14,15 @@ matched ``.exe``, and batch files are run through ``cmd.exe`` with its own
 argument-quoting rules.
 
 It also owns :func:`run_foreground`, the one way acq hands the terminal to a
-backend session (``exec``, ``attach``, ``shell`` and passthrough).
+backend session (``exec``, ``attach``, ``shell`` and passthrough), and
+:func:`run_captured`, which bounds a captured backend call so that on Windows a
+timeout ends every process the call started (:class:`StepJob`).
 """
 
 from __future__ import annotations
 
 import errno
+import functools
 import ntpath
 import os
 import shlex
@@ -28,7 +31,7 @@ import subprocess
 import sys
 import threading
 from collections.abc import Callable, Iterator
-from types import FrameType
+from types import FrameType, SimpleNamespace
 from typing import Any
 
 # What signal.getsignal returns and signal.signal accepts (Handlers is an int).
@@ -337,3 +340,264 @@ def _hold_interrupt() -> _Handler | None:
     # getsignal returns None for a handler not installed from Python; put the
     # default back in that case rather than leaving ours behind.
     return signal.SIG_DFL if previous is None else previous
+
+
+# ---------------------------------------------------------------------------
+# Windows Job objects. Shared with the qualification oracle
+# (scripts/qualify-backend-cell), which loads this module by file path.
+# ---------------------------------------------------------------------------
+
+# The process-creation flag and the Job object values StepJob uses (winbase.h, winnt.h).
+CREATE_SUSPENDED = 0x00000004
+_JOB_EXTENDED_LIMITS = 9  # JobObjectExtendedLimitInformation
+_KILL_ON_JOB_CLOSE = 0x00002000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+_BREAKAWAY_OK = 0x00000800  # JOB_OBJECT_LIMIT_BREAKAWAY_OK
+# PROCESS_TERMINATE and PROCESS_SET_QUOTA (both needed to assign a process to a
+# job), and PROCESS_SUSPEND_RESUME.
+_PROCESS_JOB_ACCESS = 0x0001 | 0x0100 | 0x0800
+
+
+@functools.cache
+def job_structures() -> tuple[Any, Any]:
+    """``(JOBOBJECT_BASIC_LIMIT_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION)`` as ctypes structures.
+
+    Built on first use, so ``ctypes`` (and its ``_ctypes`` extension, which a
+    stripped-down Python may lack) is imported only where a Job object is
+    used, never at acq's startup. ``IoInfo`` is IO_COUNTERS (six 64-bit counters).
+    """
+    import ctypes
+
+    class BasicLimits(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_int64),
+            ("PerJobUserTimeLimit", ctypes.c_int64),
+            ("LimitFlags", ctypes.c_uint32),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", ctypes.c_uint32),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", ctypes.c_uint32),
+            ("SchedulingClass", ctypes.c_uint32),
+        ]
+
+    class ExtendedLimits(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", BasicLimits),
+            ("IoInfo", ctypes.c_uint64 * 6),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    return BasicLimits, ExtendedLimits
+
+
+@functools.cache
+def _win32():
+    """kernel32 and ntdll functions with the prototypes StepJob needs (Windows only).
+
+    Private library instances, so these prototypes never change the shared
+    ``ctypes.windll`` ones another module may rely on.
+    """
+    if sys.platform != "win32":
+        raise OSError("Job objects exist only on Windows")
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    ntdll = ctypes.WinDLL("ntdll")
+    handle, flag, dword = ctypes.c_void_p, ctypes.c_int, ctypes.c_uint32
+    prototypes = {
+        "CreateJobObjectW": (kernel32, [handle, ctypes.c_wchar_p], handle),
+        "SetInformationJobObject": (kernel32, [handle, ctypes.c_int, handle, dword], flag),
+        "AssignProcessToJobObject": (kernel32, [handle, handle], flag),
+        "TerminateJobObject": (kernel32, [handle, ctypes.c_uint], flag),
+        "OpenProcess": (kernel32, [dword, flag, dword], handle),
+        "CloseHandle": (kernel32, [handle], flag),
+        "NtResumeProcess": (ntdll, [handle], ctypes.c_long),
+    }
+    api = {}
+    for name, (library, argtypes, restype) in prototypes.items():
+        function = getattr(library, name)
+        function.argtypes, function.restype = argtypes, restype
+        api[name] = function
+    return SimpleNamespace(**api)
+
+
+def _win_error() -> OSError:
+    import ctypes
+
+    return ctypes.WinError(ctypes.get_last_error())  # type: ignore[attr-defined,unused-ignore]
+
+
+class StepJob:
+    """A Windows Job object holding one process and every process it starts.
+
+    Job membership is fixed when a process is created and inherited by its
+    descendants, so terminating the job kills those processes and nothing
+    else (except one that broke away, see below; the job is a cleanup tool, not a
+    security boundary). No process is looked up by pid, so a recycled pid
+    cannot lead the kill to an unrelated process, as it can with
+    ``taskkill /T``, which walks parent pids.
+
+    The job kills its processes when its last handle is closed, so they do not
+    outlive a caller that dies. When the process ends on its own,
+    :meth:`release` lifts that limit before closing the handle: a process it
+    left running on purpose (a backend daemon it started) keeps running, as it
+    would without a job.
+
+    A process started with ``CREATE_BREAKAWAY_FROM_JOB`` is let out of the job
+    (``JOB_OBJECT_LIMIT_BREAKAWAY_OK``) rather than refused, so a backend that
+    detaches its daemon that way still works; like a POSIX process that leaves
+    its group with ``setsid``, it is then outside the kill.
+    """
+
+    def __init__(self, handle: int) -> None:
+        self._handle: int | None = handle
+
+    @classmethod
+    def adopt(cls, pid: int) -> StepJob:
+        """Put the suspended process ``pid`` in a new job, then resume it.
+
+        The process must have been created with ``CREATE_SUSPENDED``, so nothing it
+        starts can escape the job before it is assigned. ``subprocess`` keeps no
+        handle to the primary thread, so it is resumed with ``NtResumeProcess``
+        (ntdll) on a process handle. Raises ``OSError`` on failure; the caller then
+        kills the process.
+        """
+        api = _win32()
+        handle = api.CreateJobObjectW(None, None)
+        if not handle:
+            raise _win_error()
+        job = cls(handle)
+        try:
+            job._limit(_KILL_ON_JOB_CLOSE | _BREAKAWAY_OK)
+            process = api.OpenProcess(_PROCESS_JOB_ACCESS, False, pid)
+            if not process:
+                raise _win_error()
+            try:
+                if not api.AssignProcessToJobObject(handle, process):
+                    raise _win_error()
+                status = api.NtResumeProcess(process)
+                if status != 0:
+                    raise OSError(f"NtResumeProcess failed (NTSTATUS {status & 0xFFFFFFFF:#010x})")
+            finally:
+                api.CloseHandle(process)
+        except BaseException:
+            job._close()
+            raise
+        return job
+
+    def _limit(self, flags: int) -> None:
+        import ctypes
+
+        info = job_structures()[1]()
+        info.BasicLimitInformation.LimitFlags = flags
+        if not _win32().SetInformationJobObject(self._handle, _JOB_EXTENDED_LIMITS,
+                                                ctypes.byref(info), ctypes.sizeof(info)):
+            raise _win_error()
+
+    def terminate(self) -> None:
+        """Kill every process in the job, then close it."""
+        if self._handle is not None:
+            _win32().TerminateJobObject(self._handle, 1)
+            self._close()
+
+    def release(self) -> None:
+        """Close the job, leaving any process still in it running."""
+        if self._handle is not None:
+            try:
+                self._limit(_BREAKAWAY_OK)
+            except OSError:
+                pass  # the close below then kills what is left, as a forced stop would
+            self._close()
+
+    def _close(self) -> None:
+        handle, self._handle = self._handle, None
+        if handle is not None:
+            _win32().CloseHandle(handle)
+
+
+# After a timed-out call's job is terminated, how long to wait for its pipes to
+# close. A process that broke away from the job can hold them open indefinitely.
+_REAP_TIMEOUT_S = 5.0
+
+# Whether bounded calls run in a Job object: the real platform, not the
+# ``_is_windows`` seam other tests turn on to exercise Windows path rules on a
+# POSIX host, where ``Popen`` refuses ``creationflags``. A seam of its own.
+JOB_OBJECTS = sys.platform == "win32"
+
+
+def run_captured(argv: list[str], *, timeout: float | None = None, input_text: str | None = None,
+                 env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+    """Run a backend CLI with its output captured as UTF-8, optionally bounded by ``timeout``.
+
+    Without ``input_text`` the child's stdin is the null device. A call that
+    outlasts ``timeout`` raises ``subprocess.TimeoutExpired``. ``OSError`` from
+    starting the program propagates.
+
+    ``subprocess.run`` kills only the direct child on a timeout. On Windows the
+    wait for the child's output then lasts as long as any process it started
+    (an msb that auto-started its server, say) holds the pipes, which can be
+    forever. So there a bounded call runs in a :class:`StepJob`, and a timeout
+    terminates the job: the child and everything it started. A call that ends
+    in time releases the job, leaving what it started on purpose running. Off
+    Windows, or without a timeout, this is plain ``subprocess.run``.
+    """
+    kwargs: dict[str, Any] = {"capture_output": True, "encoding": "utf-8", "errors": "replace"}
+    if input_text is None:
+        kwargs["stdin"] = subprocess.DEVNULL
+    else:
+        kwargs["input"] = input_text
+    if env is not None:
+        kwargs["env"] = env
+    if timeout is None or not JOB_OBJECTS:
+        return subprocess.run(argv, timeout=timeout, **kwargs)
+    return _run_in_job(argv, timeout, input_text, kwargs)
+
+
+def _run_in_job(argv: list[str], timeout: float, input_text: str | None,
+                run_kwargs: dict[str, Any]) -> subprocess.CompletedProcess:
+    """The Windows half of :func:`run_captured`: the call runs, and on a timeout dies, in its own job.
+
+    The process is created suspended and resumed only once it is in the job. A
+    host that cannot give it a job (``adopt`` fails) gets the process killed
+    before it ran a single instruction, and the call made plainly instead.
+    """
+    proc = subprocess.Popen(
+        argv, stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8", errors="replace",
+        env=run_kwargs.get("env"), creationflags=CREATE_SUSPENDED,
+    )
+    try:
+        job = StepJob.adopt(proc.pid)
+    except BaseException as exc:
+        proc.kill()
+        _reap(proc)
+        if not isinstance(exc, OSError):
+            raise
+        return subprocess.run(argv, timeout=timeout, **run_kwargs)
+    try:
+        out, err = proc.communicate(input_text, timeout=timeout)
+    except BaseException:
+        # A timeout, or acq itself interrupted: nothing the call started may keep running.
+        job.terminate()
+        _reap(proc)
+        raise
+    finally:
+        job.release()  # a no-op once terminated
+    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+
+def _reap(proc: subprocess.Popen) -> None:
+    """Wait a bounded time for a killed ``proc``, then close its pipes."""
+    try:
+        proc.communicate(timeout=_REAP_TIMEOUT_S)
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        pass
+    for pipe in (proc.stdin, proc.stdout, proc.stderr):
+        if pipe is not None:
+            try:
+                pipe.close()
+            except OSError:
+                pass

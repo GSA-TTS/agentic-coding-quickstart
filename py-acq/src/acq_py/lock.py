@@ -91,6 +91,7 @@ def exclusive_lock(
     timeout_cls: type[LockTimeout] = MigrationLockTimeout,
     also_acquire: Callable[[], bool] | None = None,
     retry_s: float = _RETRY_INTERVAL_S,
+    shared: bool = False,
 ) -> Iterator[None]:
     """Hold an exclusive OS advisory lock on ``path`` for the duration of the block.
 
@@ -102,6 +103,10 @@ def exclusive_lock(
     lock once the OS lock is held; when it returns False (held elsewhere) the OS
     lock is released again and the wait continues. The caller releases that
     second lock itself, inside the block. Errors it raises propagate.
+
+    ``shared`` takes a shared lock instead, which other shared holders do not
+    exclude, on POSIX. ``msvcrt.locking`` has no shared mode, so on Windows it
+    is exclusive: holders that could have overlapped take turns instead.
     """
     if timeout_s is None:
         timeout_s = configured_timeout_s()
@@ -111,7 +116,7 @@ def exclusive_lock(
     acquired = False
     try:
         while True:
-            if _try_os_lock(fh):
+            if _try_os_lock(fh, shared=shared):
                 if also_acquire is None or also_acquire():
                     acquired = True
                     break
@@ -126,7 +131,7 @@ def exclusive_lock(
         fh.close()
 
 
-def _try_os_lock(fh) -> bool:
+def _try_os_lock(fh, *, shared: bool = False) -> bool:
     """Take the OS advisory lock without blocking; False when it is held elsewhere."""
     try:
         if sys.platform == "win32":  # pragma: no cover - Windows only
@@ -138,7 +143,7 @@ def _try_os_lock(fh) -> bool:
             fh.seek(0)
             msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
         else:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fh.fileno(), (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
     except OSError:
         # Held elsewhere (EWOULDBLOCK / EACCES / EDEADLK).
         return False
@@ -247,6 +252,61 @@ def provider_credential_lock(provider: str) -> Iterator[None]:
         what=f"the provider-credential lock for '{provider}' (another acq command is changing it)",
         timeout_cls=ProviderCredentialLockTimeout,
         retry_s=_SANDBOX_RETRY_S,
+    ):
+        yield
+
+
+# Lock order. A command that holds more than one of these locks takes them in
+# this order, and never takes an earlier one while it holds a later one, so two
+# commands cannot each hold a lock the other waits for:
+#
+#   1. a sandbox's lifecycle lock (:func:`sandbox_lock`); ``secret import`` takes
+#      one per backend, in the order of ``backends.BACKENDS``;
+#   2. one provider-credential lock (:func:`provider_credential_lock`);
+#   3. the secret-store lock (:func:`secret_store_lock`).
+#
+# Who takes what: create, run and recreate take 1, then 3 shared around the
+# backend create (where the store is read to bind the new guest's secrets);
+# start and restart take 1, then 3 shared around ``msb start`` and again around
+# binding what the store gained while the sandbox was stopped. A provider key
+# stored at the create's prompt takes 2 and 3, before 3 is taken shared. A
+# sandbox-scoped ``secret set``/``rm`` takes 1, and for usai also 2 (usai), so it
+# cannot interleave with a key rotation. A global ``secret set``/``rm`` takes 3,
+# and for usai 2 (usai) first; ``usai-rotate-api-key`` and ``provider-credential
+# set``/``rm`` take 2, then 3. ``secret import`` takes, for each write, what
+# ``secret set`` takes for the same scope and service.
+
+
+class SecretStoreLockTimeout(LockTimeout):
+    """A global secret change and a sandbox create are waiting on each other's store access."""
+
+
+def secret_store_lock_path() -> Path:
+    return state.state_dir() / "locks" / "secret-store.lock"
+
+
+@contextmanager
+def secret_store_lock(*, shared: bool = False) -> Iterator[None]:
+    """Serialize global secret changes against the creates that read the store to bind a guest.
+
+    A global ``secret set``/``rm`` stores or deletes the value and then re-feeds
+    (or unbinds) every running sandbox. A create reads the store and binds what
+    it read into the new guest, which those re-feeds may not see yet; between
+    the two, a removed secret could stay bound in the new sandbox, or a replaced
+    one keep its old value. Global changes take this lock exclusively; creates
+    take it ``shared``, so creates do not wait for each other (except on
+    Windows, see :func:`exclusive_lock`). The wait is the lifecycle lock's
+    (``$ACQ_SANDBOX_LOCK_TIMEOUT``). See the lock order above. Raises
+    :class:`SecretStoreLockTimeout`.
+    """
+    timeout_s = timeouts.env_seconds(SANDBOX_TIMEOUT_ENV, DEFAULT_SANDBOX_TIMEOUT_S)
+    with exclusive_lock(
+        secret_store_lock_path(),
+        timeout_s,
+        what="the secret-store lock (another acq command is changing a global secret or creating a sandbox)",
+        timeout_cls=SecretStoreLockTimeout,
+        retry_s=_SANDBOX_RETRY_S,
+        shared=shared,
     ):
         yield
 

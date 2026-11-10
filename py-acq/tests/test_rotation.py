@@ -658,11 +658,26 @@ def test_rotation_waits_for_the_usai_provider_lock(monkeypatch, tmp_path, capsys
     assert NEW not in out + err
 
 
+def test_rotation_waits_for_a_create_reading_the_store(monkeypatch, tmp_path, capsys, msb_children):
+    _msb_running(monkeypatch, tmp_path, "a")
+    monkeypatch.setenv("ACQ_SANDBOX_LOCK_TIMEOUT", "0.2")
+    with lock.secret_store_lock(shared=True):  # a create binding the new guest's secrets
+        rc, doc, out, err = _rotate(capsys, monkeypatch, "msb")
+    assert rc == 1 and doc["error"]["code"] == errors.TIMEOUT
+    assert "secret-store lock" in doc["error"]["message"]
+    assert secretstore.resolve("usai") == OLD and _modified(msb_children) == {}
+    assert NEW not in out + err
+
+
 @pytest.mark.parametrize("argv, takes_lock", [
     (["secret", "set", "-g", "usai"], True),
     (["secret", "rm", "-g", "usai"], True),
     (["secret", "set", "-g", "github"], False),
-    (["secret", "set", "box", "usai"], False),
+    # The sandbox's own usai key too: a rotation running meanwhile could
+    # otherwise re-feed the global key over the value just set.
+    (["secret", "set", "box", "usai"], True),
+    (["secret", "rm", "box", "usai"], True),
+    (["secret", "set", "box", "github"], False),
 ])
 def test_global_usai_set_and_rm_take_the_usai_provider_lock(monkeypatch, tmp_path, capsys, argv, takes_lock):
     _msb_running(monkeypatch, tmp_path)
