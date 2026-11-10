@@ -93,7 +93,11 @@ Aborts: SIGTERM (and SIGBREAK on Windows) raise ``SystemExit``, so teardown runs
 Every subprocess runs in its own process group; when it times out, or the oracle
 is interrupted while waiting for it, the group gets SIGTERM (CTRL_BREAK on
 Windows) and a grace period before it is killed, so acq's and the canary's own
-cleanup still runs and no backend command is left running behind them.
+cleanup still runs and no backend command is left running behind them. On
+Windows each subprocess also runs in a Job object of its own (``StepJob``): the
+kill terminates the job, which holds exactly the step's processes, and if the
+oracle itself dies the job takes them down with it. A second stop signal while a
+step is being stopped is swallowed, so it cannot cut that stop short.
 The harness sends one when a run outlives its timeout, then waits a grace period
 before killing it, and exports a deadline (``ACQ_QUALIFY_DEADLINE``, epoch
 seconds) that ends before its timeout; the oracle stops starting steps at that
@@ -111,6 +115,8 @@ only searched for it.
 from __future__ import annotations
 
 import argparse
+import ctypes
+import functools
 import importlib.util
 import json
 import math
@@ -123,6 +129,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Callable
 
 # The default shell image every boot-contract cell creates against (the same
@@ -296,15 +303,175 @@ def isolated_env(root: Path, base: dict[str, str] | None = None) -> dict[str, st
 Run = Callable[..., "subprocess.CompletedProcess[str] | None"]
 
 
-def _signal_group(proc: subprocess.Popen, kill: bool) -> None:
-    """Signal ``proc``'s whole process group: stop politely, or kill."""
+# Windows: the process-creation flag and the Job object values StepJob uses
+# (winbase.h, winnt.h).
+CREATE_SUSPENDED = 0x00000004
+_JOB_EXTENDED_LIMITS = 9  # JobObjectExtendedLimitInformation
+_KILL_ON_JOB_CLOSE = 0x00002000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+_BREAKAWAY_OK = 0x00000800  # JOB_OBJECT_LIMIT_BREAKAWAY_OK
+# PROCESS_TERMINATE and PROCESS_SET_QUOTA (both needed to assign a process to a
+# job), and PROCESS_SUSPEND_RESUME.
+_PROCESS_JOB_ACCESS = 0x0001 | 0x0100 | 0x0800
+
+
+class _BasicLimits(ctypes.Structure):
+    """JOBOBJECT_BASIC_LIMIT_INFORMATION."""
+
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_int64),
+        ("PerJobUserTimeLimit", ctypes.c_int64),
+        ("LimitFlags", ctypes.c_uint32),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", ctypes.c_uint32),
+        ("Affinity", ctypes.c_size_t),
+        ("PriorityClass", ctypes.c_uint32),
+        ("SchedulingClass", ctypes.c_uint32),
+    ]
+
+
+class _ExtendedLimits(ctypes.Structure):
+    """JOBOBJECT_EXTENDED_LIMIT_INFORMATION; ``IoInfo`` is IO_COUNTERS (six 64-bit counters)."""
+
+    _fields_ = [
+        ("BasicLimitInformation", _BasicLimits),
+        ("IoInfo", ctypes.c_uint64 * 6),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
+
+
+@functools.cache
+def _win32():
+    """kernel32 and ntdll functions with the prototypes StepJob needs (Windows only).
+
+    Private library instances, so these prototypes never change the shared
+    ``ctypes.windll`` ones another module may rely on.
+    """
+    if sys.platform != "win32":
+        raise OSError("Job objects exist only on Windows")
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    ntdll = ctypes.WinDLL("ntdll")
+    handle, flag, dword = ctypes.c_void_p, ctypes.c_int, ctypes.c_uint32
+    prototypes = {
+        "CreateJobObjectW": (kernel32, [handle, ctypes.c_wchar_p], handle),
+        "SetInformationJobObject": (kernel32, [handle, ctypes.c_int, handle, dword], flag),
+        "AssignProcessToJobObject": (kernel32, [handle, handle], flag),
+        "TerminateJobObject": (kernel32, [handle, ctypes.c_uint], flag),
+        "OpenProcess": (kernel32, [dword, flag, dword], handle),
+        "CloseHandle": (kernel32, [handle], flag),
+        "NtResumeProcess": (ntdll, [handle], ctypes.c_long),
+    }
+    api = {}
+    for name, (library, argtypes, restype) in prototypes.items():
+        function = getattr(library, name)
+        function.argtypes, function.restype = argtypes, restype
+        api[name] = function
+    return SimpleNamespace(**api)
+
+
+def _win_error() -> OSError:
+    return ctypes.WinError(ctypes.get_last_error())  # type: ignore[attr-defined,unused-ignore]
+
+
+class StepJob:
+    """A Windows Job object holding one step's process and every process it starts.
+
+    Job membership is fixed when a process is created and inherited by its
+    descendants, so terminating the job kills exactly the step's processes. No
+    process is looked up by pid, so a recycled pid cannot lead the kill to an
+    unrelated process, as it can with ``taskkill /T``, which walks parent pids.
+
+    The job kills its processes when its last handle is closed, so a step does not
+    outlive an oracle that dies. When the step ends on its own, :meth:`release`
+    lifts that limit before closing the handle: a process the step left running
+    on purpose (a backend daemon it started) keeps running, as it would without a
+    job.
+
+    A process started with ``CREATE_BREAKAWAY_FROM_JOB`` is let out of the job
+    (``JOB_OBJECT_LIMIT_BREAKAWAY_OK``) rather than refused, so a backend that
+    detaches its daemon that way still works under the oracle; like a POSIX
+    process that leaves its group with ``setsid``, it is then outside the kill.
+    """
+
+    def __init__(self, handle: int) -> None:
+        self._handle: int | None = handle
+
+    @classmethod
+    def adopt(cls, pid: int) -> StepJob:
+        """Put the suspended process ``pid`` in a new job, then resume it.
+
+        The process must have been created with ``CREATE_SUSPENDED``, so nothing it
+        starts can escape the job before it is assigned. ``subprocess`` keeps no
+        handle to the primary thread, so it is resumed with ``NtResumeProcess``
+        (ntdll) on a process handle. Raises ``OSError`` on failure; the caller then
+        kills the process.
+        """
+        api = _win32()
+        handle = api.CreateJobObjectW(None, None)
+        if not handle:
+            raise _win_error()
+        job = cls(handle)
+        try:
+            job._limit(_KILL_ON_JOB_CLOSE | _BREAKAWAY_OK)
+            process = api.OpenProcess(_PROCESS_JOB_ACCESS, False, pid)
+            if not process:
+                raise _win_error()
+            try:
+                if not api.AssignProcessToJobObject(handle, process):
+                    raise _win_error()
+                status = api.NtResumeProcess(process)
+                if status != 0:
+                    raise OSError(f"NtResumeProcess failed (NTSTATUS {status & 0xFFFFFFFF:#010x})")
+            finally:
+                api.CloseHandle(process)
+        except BaseException:
+            job._close()
+            raise
+        return job
+
+    def _limit(self, flags: int) -> None:
+        info = _ExtendedLimits()
+        info.BasicLimitInformation.LimitFlags = flags
+        if not _win32().SetInformationJobObject(self._handle, _JOB_EXTENDED_LIMITS,
+                                                ctypes.byref(info), ctypes.sizeof(info)):
+            raise _win_error()
+
+    def terminate(self) -> None:
+        """Kill every process in the job, then close it."""
+        if self._handle is not None:
+            _win32().TerminateJobObject(self._handle, 1)
+            self._close()
+
+    def release(self) -> None:
+        """Close the job, leaving any process still in it running."""
+        if self._handle is not None:
+            try:
+                self._limit(_BREAKAWAY_OK)
+            except OSError:
+                pass  # the close below then kills what is left, as a forced stop would
+            self._close()
+
+    def _close(self) -> None:
+        handle, self._handle = self._handle, None
+        if handle is not None:
+            _win32().CloseHandle(handle)
+
+
+def _signal_group(proc: subprocess.Popen, kill: bool, job: StepJob | None = None) -> None:
+    """Signal ``proc``'s whole process group: stop politely, or kill.
+
+    On Windows the kill terminates the step's Job object (``job``).
+    """
     if os.name == "nt":
         if not kill:
             proc.send_signal(signal.CTRL_BREAK_EVENT)
-            return
-        taskkill = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "taskkill.exe")
-        subprocess.run([taskkill, "/F", "/T", "/PID", str(proc.pid)], capture_output=True, check=False)
-        proc.kill()
+        elif job is not None:
+            job.terminate()
+        else:
+            proc.kill()
         return
     try:
         os.killpg(proc.pid, signal.SIGKILL if kill else signal.SIGTERM)
@@ -333,13 +500,16 @@ def _reap(proc: subprocess.Popen, timeout: float) -> None:
         pass
 
 
-def stop_process(proc: subprocess.Popen, grace: float) -> None:
-    """SIGTERM (CTRL_BREAK on Windows) to the group, ``grace`` seconds, then kill the group."""
+def stop_process(proc: subprocess.Popen, grace: float, job: StepJob | None = None) -> None:
+    """SIGTERM (CTRL_BREAK on Windows) to the group, ``grace`` seconds, then kill the group.
+
+    On Windows the kill terminates ``job``, the step's Job object.
+    """
     try:
         _signal_group(proc, kill=False)
         proc.communicate(timeout=grace)
     except (subprocess.TimeoutExpired, OSError):
-        _signal_group(proc, kill=True)
+        _signal_group(proc, kill=True, job=job)
         _reap(proc, min(REAP_TIMEOUT, grace))
 
 
@@ -370,25 +540,61 @@ def run_process(argv: list[str], *, env: dict[str, str], stdin: str | None = Non
     interrupted (SIGTERM, Ctrl+C) while waiting, the group is stopped with
     :func:`stop_process`, so a backend command it started (an ``msb create``, the
     canary's sandbox) is not left running and its own cleanup gets to run; a plain
-    ``subprocess.run`` timeout would SIGKILL only the direct child.
+    ``subprocess.run`` timeout would SIGKILL only the direct child. On Windows it
+    also runs in a :class:`StepJob`, which the kill terminates and which is
+    released once the step is over.
     """
-    group = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
-             else {"start_new_session": True})
-    try:
-        proc = subprocess.Popen(list(argv), env=env, cwd=cwd, text=True, errors="replace",
-                                stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, **group)
-    except OSError:
+    started = _spawn(argv, env=env, cwd=cwd, stdin=stdin is not None)
+    if started is None:
         return None
+    proc, job = started
     try:
         out, err = _communicate(proc, stdin, timeout)
     except subprocess.TimeoutExpired:
-        stop_process(proc, grace)
+        stop_process(proc, grace, job)
         return None
     except BaseException:
-        stop_process(proc, grace)
+        # The oracle itself is being stopped, and that stop is already on its
+        # way out. A second stop signal (a terminal's Ctrl+C reaches the oracle
+        # as SIGINT and the harness forwards a SIGTERM as well) must not cut
+        # this step's stop short and leave the step running.
+        previous = _ignore_stop_signals()
+        try:
+            stop_process(proc, grace, job)
+        finally:
+            _restore_signals(previous)
         raise
+    finally:
+        if job is not None:
+            job.release()
     return subprocess.CompletedProcess(list(argv), proc.returncode, out, err)
+
+
+def _spawn(argv: list[str], *, env: dict[str, str], cwd: str | None, stdin: bool):
+    """Start ``argv`` in its own process group (and, on Windows, its own Job object).
+
+    Returns ``(proc, job)``, ``job`` being ``None`` off Windows, or ``None`` if it
+    cannot start. On Windows the process is created suspended and resumed only
+    once it is in the job; if that fails it is killed instead, so a step never
+    runs where it could not be stopped completely.
+    """
+    windows = os.name == "nt"
+    group = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | CREATE_SUSPENDED} if windows
+             else {"start_new_session": True})
+    try:
+        proc = subprocess.Popen(list(argv), env=env, cwd=cwd, text=True, errors="replace",
+                                stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, **group)
+    except OSError:
+        return None
+    if not windows:
+        return proc, None
+    try:
+        return proc, StepJob.adopt(proc.pid)
+    except OSError:
+        proc.kill()
+        _reap(proc, REAP_TIMEOUT)
+        return None
 
 
 def canary_env(env: dict[str, str], names: Names) -> dict[str, str]:
