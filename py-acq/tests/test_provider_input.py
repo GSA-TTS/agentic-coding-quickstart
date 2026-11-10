@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from acq_py import cli, errors, kitspec, msb, provider_input, secretstore
+from acq_py import cli, errors, kitspec, msb, provider_input, secretstore, state
 from acq_py.commands import common
 from provider_input_helpers import current_generation
 
@@ -660,6 +660,26 @@ def test_sbx_provider_id_colliding_with_a_builtin_service_is_refused(monkeypatch
     monkeypatch.setattr(provider_input, "gate", lambda *a, **k: reached.append(True))
     lifecycle._provider_gate("msb", "sb", ["fake-kit"])
     assert reached == [True]
+
+
+def test_sbx_create_refuses_a_provider_colliding_with_a_builtin_before_anything_is_made(
+        monkeypatch, tmp_path, capsys):
+    # The same refusal through the command: nothing is staged, created or recorded.
+    ws = _sbx_env(monkeypatch, tmp_path)
+    sbx_mod = sys.modules["acq_py.sbx"]
+    facts = provider_input.Facts("github", "GITHUB_TOKEN", "models.example.gov",
+                                 "https://models.example.gov/v1/models", "openai-compatible")
+    monkeypatch.setattr(provider_input, "selected_facts", lambda kit_names: [("fake-kit", {}, facts)])
+    seen: list[list[str]] = []
+    real = sbx_mod._run
+    monkeypatch.setattr(sbx_mod, "_run", lambda argv, **kw: seen.append(list(argv)) or real(argv, **kw))
+    rc, doc, _out, _err = _sbx_create(capsys, ws)
+    assert rc == errors.EXIT_FAILURE and doc["error"]["code"] == errors.VALIDATION_FAILED, doc
+    assert "provider id 'github' collides with an sbx built-in service" in doc["error"]["message"]
+    assert not [a for a in seen if a[:1] == ["create"] or a[:2] == ["secret", "set"]]
+    assert not sbx_mod.exists("sb")
+    assert state.record_read("sbx", "sb") is None
+    assert provider_input.recorded("sbx", "sb") == []
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX directory permissions")

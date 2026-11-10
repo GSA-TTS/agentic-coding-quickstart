@@ -502,16 +502,28 @@ def _discard_half_created(backend: str, name: str) -> None:
     _clear_host_records(backend, name)
 
 
-def _discard_recreated_guest(backend: str, name: str) -> None:
+def _discard_recreated_guest(backend: str, name: str) -> bool:
     """Remove a recreated guest whose kit apply failed, keeping its state record.
 
     Recreation promises that host records survive: the state record (agent,
     workspace, image, ``ro_host_config``) is the authority a retried
     ``create --recreate`` rebuilds from, so only the guest and the applied-kit
-    record (which no longer describes any guest) go.
+    record (which no longer describes a usable guest) go. Returns True when the
+    guest is confirmed gone. A guest left behind still fails closed (the
+    restored record claims the read-only mount, which the attach probe checks),
+    but the caller must not say it was removed.
     """
-    _remove_quietly(common._adapter(backend), name)
+    removed = _remove_confirmed(common._adapter(backend), name)
     kits.kit_applied_remove(backend, name)
+    return removed
+
+
+def _recreate_discard_note(removed: bool, name: str) -> str:
+    """How a failed recreate left the new guest, for its error message or warning."""
+    if removed:
+        return "the new guest was removed and the host record kept"
+    return (f"the new guest could not be removed, and acq refuses to attach to it; the host record was kept, "
+            f"so 'acq create --recreate {name}' or 'acq rm {name}' replaces or removes it")
 
 
 def _clear_host_records(backend: str, name: str) -> None:
@@ -561,7 +573,10 @@ def _reattach_workspace(
     trusted-config mount is missing or unconfirmed is refused (ADR-0035,
     ADR-0041m). The launch directory is the recorded workspace, not the path typed
     this time, because an older build may have recorded a different form (e.g. a
-    symlink path). An absent record falls back to the typed path.
+    symlink path). An absent record falls back to the typed path. Because the
+    recorded workspace is the one mounted, it gets the same overlap refusal as
+    ``run NAME``: a sandbox an older build created on a directory holding acq's
+    state must not be re-attached just because a safe path was typed this time.
     """
     try:
         record = state.record_read(backend, name)
@@ -576,7 +591,12 @@ def _reattach_workspace(
     gate = common._trusted_gate(record, backend, "run", name, emit_json)
     if gate is not None:
         return None, gate
-    return (record, (record or {}).get("workspace") or typed), None
+    recorded = (record or {}).get("workspace")
+    if recorded:
+        overlap = common._workspace_overlap_failure("run", recorded, emit_json)
+        if overlap is not None:
+            return None, overlap
+    return (record, recorded or typed), None
 
 
 def _wait_exec_ready(backend: str, name: str) -> bool:
@@ -1218,18 +1238,19 @@ def _recreate_msb(
         # the mount (its own version detection disagreed). A record without the
         # mount would stop requiring it, so the new guest goes and the old record
         # comes back, for a retry.
-        _discard_recreated_guest("msb", name)
+        removed = _discard_recreated_guest("msb", name)
         _restore_record("msb", name, record)
         problem = security.ro_mount_version_problem() or "the msb version could not be confirmed during the create"
         return None, common._operational_failure(
             "create", errors.VALIDATION_FAILED,
             f"sandbox '{name}' was recreated without its read-only trusted-config mount ({problem}); "
-            "the new guest was removed and the host record kept",
+            + _recreate_discard_note(removed, name),
             "check 'msb --version', then retry 'acq create --recreate'", emit_json,
         )
     result, exit_code = _apply_msb_kits(name, plan, steps, "create", emit_json, ro_required=data["ro_host_config"])
     if result is None:
-        _discard_recreated_guest("msb", name)
+        if not _discard_recreated_guest("msb", name):
+            _warn(f"sandbox '{name}': {_recreate_discard_note(False, name)}")
         _restore_record("msb", name, record)
         return None, exit_code
     return {**data, **_kit_data(plan, result)}, None
@@ -1491,7 +1512,13 @@ def _heal_sbx_reattach(name: str, record: dict | None, refs: tuple[list[str], li
         reason = exc.message if isinstance(exc, sbx.SbxError) else str(exc)
         _warn(f"the kits of sandbox '{name}' were not re-applied: {reason}")
         return
-    result = kit_sbx.ensure_kits_applied(name, kit_set, selection)
+    try:
+        result = kit_sbx.ensure_kits_applied(name, kit_set, selection)
+    except sbx.SbxError as exc:
+        # An sbx that cannot be started, or a 'kit add' that timed out: the heal
+        # is best-effort, so the attach goes on, as in Bash.
+        _warn(f"the kits of sandbox '{name}' were not re-applied: {exc.message}; attaching anyway")
+        return
     if not result.ok:
         _warn(f"sandbox '{name}': not every built-in kit is in place ({', '.join(result.failed) or 'exec readiness'}); "
               "attaching anyway")

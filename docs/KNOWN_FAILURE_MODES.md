@@ -4512,7 +4512,8 @@ review of provider selection.
 **Symptom:** `acq create` or `acq run` fails with `validation_failed` and a
 message such as `workspace /home/you contains acq's state directory
 (/home/you/.local/state/acq)`. A typical trigger is `acq run opencode ~`. `acq
-run NAME` and `acq create --recreate NAME` refuse the same way when the
+run NAME`, `acq run AGENT PATH --name NAME` re-attaching to an existing
+sandbox, and `acq create --recreate NAME` refuse the same way when the
 sandbox's recorded workspace is such a directory.
 
 **Cause:** acq mounts the workspace into the sandbox writable. acq's state tree

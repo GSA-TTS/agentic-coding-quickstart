@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from acq_py import cli, errors, kit_sbx, kits, kitspec, sbx, state
+from acq_py import cli, errors, kit_sbx, kits, kitspec, sbx, state, timeouts
 
 pytestmark = pytest.mark.provider_key  # creates sandboxes: needs a stored provider key
 from test_kitspec import EDGE_SPECS, _random_spec, _section_spec
@@ -646,6 +646,63 @@ def test_kit_add_classification(monkeypatch):
         monkeypatch.setattr(sbx, "_run", fake(P(rc, err)))
         assert sbx.kit_add("box", "/k") == want
     assert sbx.kit_add("box", "") == sbx.KIT_ADD_FAILED
+
+
+def test_kit_add_is_bounded(monkeypatch):
+    budgets = []
+
+    def hangs(argv, **kw):
+        budgets.append(kw.get("timeout"))
+        raise subprocess.TimeoutExpired(argv, kw.get("timeout") or 0)
+
+    monkeypatch.setattr(sbx, "_run", hangs)
+    monkeypatch.setenv(timeouts.KIT_ADD_TIMEOUT_ENV, "7")
+    with pytest.raises(sbx.SbxError) as caught:
+        sbx.kit_add("box", "/k")
+    assert budgets == [7.0]
+    assert caught.value.code == errors.TIMEOUT
+    assert timeouts.KIT_ADD_TIMEOUT_ENV in caught.value.remediation
+    monkeypatch.delenv(timeouts.KIT_ADD_TIMEOUT_ENV)
+    budgets.clear()
+    with pytest.raises(sbx.SbxError):
+        sbx.kit_add("box", "/k")
+    assert budgets == [timeouts.DEFAULT_KIT_ADD_TIMEOUT_S]
+
+
+@pytest.mark.parametrize("failure", ["unavailable", "timeout"])
+def test_run_reattach_attaches_when_kit_add_raises(monkeypatch, tmp_path, capsys, failure):
+    # Bash warns and attaches when 'sbx kit add' cannot run; no traceback, no refusal.
+    _seed_sandbox(monkeypatch, tmp_path, capsys)
+    kit_sbx.hc_write("hb", "builtin-kits", "zscaler-ca-certificate stale-ref")
+    launched = []
+    monkeypatch.setattr(sbx, "launch", lambda *a, **k: launched.append(a) or 0)
+
+    def kit_add(name, kit_dir):
+        if failure == "unavailable":
+            raise sbx.cli_unavailable()
+        raise sbx.SbxError(errors.TIMEOUT, f"'sbx kit add' did not finish within 1s for sandbox '{name}'")
+
+    monkeypatch.setattr(sbx, "kit_add", kit_add)
+    rc = cli.main(["--backend", "sbx", "run", "hb", "--json"])
+    captured = capsys.readouterr()
+    assert rc == 0, captured
+    assert json.loads(captured.out.strip().splitlines()[-1])["data"]["action"] == "reattached"
+    assert launched
+    assert "were not re-applied" in captured.err and "attaching anyway" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_kit_update_reports_a_kit_add_that_cannot_run(monkeypatch, tmp_path, capsys):
+    _seed_sandbox(monkeypatch, tmp_path, capsys)
+    kits.provenance_remove("sbx", "hb")
+
+    def kit_add(name, kit_dir):
+        raise sbx.cli_unavailable()
+
+    monkeypatch.setattr(sbx, "kit_add", kit_add)
+    rc, doc = _invoke(capsys, "--backend", "sbx", "kit", "update", "hb", "--yes", "--json")
+    assert rc == 1
+    assert doc["error"]["code"] == errors.BACKEND_NOT_FOUND
 
 
 # ---------------------------------------------------------------------------

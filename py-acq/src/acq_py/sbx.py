@@ -332,10 +332,24 @@ def _refused_for_recreate(err: str) -> bool:
 
 
 def kit_add(name: str, kit_dir: str) -> int:
-    """``sbx kit add NAME DIR``: :data:`KIT_ADD_OK`, :data:`KIT_ADD_RECREATE` or :data:`KIT_ADD_FAILED`."""
+    """``sbx kit add NAME DIR``: :data:`KIT_ADD_OK`, :data:`KIT_ADD_RECREATE` or :data:`KIT_ADD_FAILED`.
+
+    Bounded by :func:`timeouts.kit_add_timeout_s`; a call that outlasts it
+    raises :class:`SbxError` (``timeout``), as an sbx that cannot be started at
+    all raises ``backend_not_found``.
+    """
     if not kit_dir:
         return KIT_ADD_FAILED
-    proc = _run(["kit", "add", name, kit_dir])
+    budget = timeouts.kit_add_timeout_s()
+    try:
+        proc = _run(["kit", "add", name, kit_dir], timeout=budget)
+    except subprocess.TimeoutExpired:
+        raise SbxError(
+            errors.TIMEOUT,
+            f"'sbx kit add' did not finish within {budget:g}s for sandbox '{name}'",
+            f"check that sbx responds ('sbx ls'); set {timeouts.KIT_ADD_TIMEOUT_ENV} to a larger number of "
+            "seconds if it is only slow, then retry",
+        ) from None
     if proc.returncode == 0:
         return KIT_ADD_OK
     return KIT_ADD_RECREATE if _refused_for_recreate(proc.stderr or "") else KIT_ADD_FAILED
