@@ -59,6 +59,7 @@ import json
 import os
 import shutil
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from . import (
@@ -509,19 +510,44 @@ def _imported_record(backend: str, name: str) -> bool:
     return record is not None and record.get("imported_from") == "bash"
 
 
-def _import_sandboxes() -> tuple[int, bool]:
+def _import_sandboxes(done: set[str]) -> tuple[int, bool]:
+    """Import every Bash sandbox; returns ``(created, complete)``.
+
+    A Bash backend directory that cannot be read leaves the part pending (with
+    a warning naming it), so the sandboxes in it are imported once it can be,
+    rather than the part completing with them missing. Each backend that
+    imports fully adds its own ``sandboxes:<backend>`` mark to ``done`` and is
+    never imported again, so while another backend keeps the part pending, a
+    record removed afterwards is not brought back.
+    """
     created = 0
+    complete = True
     for backend in backends.BACKENDS:
-        for name in legacy_bash.sandbox_names(backend):
+        mark = f"sandboxes:{backend}"
+        if mark in done:
+            continue
+        try:
+            names = legacy_bash.sandbox_names(backend)
+        except OSError as exc:
+            where = f" {str(exc.filename)!r}" if exc.filename else ""
+            legacy_bash.warn(
+                f"the Bash acq's {backend} sandbox records were not imported: cannot read their "
+                f"directory{where} ({exc.strerror or exc}); fix its permissions to import them"
+            )
+            complete = False
+            continue
+        for name in names:
             created += _import_sandbox(legacy_bash.read_sandbox(backend, name))
-    return created, True
+        done.add(mark)
+    return created, complete
 
 
-# The parts of the import, each completed (and recorded in the marker) on its own.
-_IMPORT_PARTS = {
+# The parts of the import, each completed (and recorded in the marker) on its
+# own. A part may add finer marks of its own to the ``done`` set it is given.
+_IMPORT_PARTS: dict[str, Callable[[set[str]], tuple[int, bool]]] = {
     "sandboxes": _import_sandboxes,
-    "kit_sources": _import_kit_sources,
-    "provider_credentials": _import_provider_bindings,
+    "kit_sources": lambda done: _import_kit_sources(),
+    "provider_credentials": lambda done: _import_provider_bindings(),
 }
 
 
@@ -539,9 +565,12 @@ def import_bash_state() -> bool:
     for part, run in _IMPORT_PARTS.items():
         if part in done:
             continue
-        counts[part], complete = run()
-        if complete:
+        before = set(done)
+        counts[part], complete = run(done)
+        if complete:  # the part's own mark covers its finer ones
+            done.difference_update({mark for mark in done if mark.startswith(f"{part}:")})
             done.add(part)
+        if done != before:
             write_generation(RECORDS_GENERATION, import_done=done)
     if any(counts.values()):
         print(

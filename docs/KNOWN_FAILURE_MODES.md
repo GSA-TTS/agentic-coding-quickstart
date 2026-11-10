@@ -4422,6 +4422,55 @@ recreating, `msb inspect <sandbox>` shows `default_egress: deny` (unless
 
 ---
 
+## Python acq: a Global `secret rm` Can Still Race a `create`
+
+**Symptom:** While `acq create` (or `acq run`) of a new msb sandbox is binding
+its secrets, a concurrent `acq secret rm -g SERVICE` succeeds, but the new
+sandbox ends up holding the removed value. A retried `secret rm -g` then
+reports `secret_missing`, because the store entry is already gone.
+
+**Cause:** A sandbox-scoped `secret set` or `rm` holds that sandbox's lifecycle
+lock, so it waits for a create of the same sandbox. A global change cannot use
+that lock: it would have to lock every sandbox, including ones not created yet.
+Excluding it needs a store-wide lock that `create` takes too, and that lives in
+the lifecycle code. The global usai key is the exception: it holds the usai
+provider lock, which rotation also takes, but `create` does not. The Bash acq
+takes no lock for `secret set` or `rm` at all, so it has the same race for every
+scope.
+
+**Resolution:** Do not run a global `secret rm` while a create is in flight.
+If it happened, recreate the new sandbox (`acq rm NAME`, then `acq create`) so
+it is created without the removed value. Fixing it needs a store-wide lock taken
+by both `create` and global `secret set`/`rm`; revisit when the lifecycle lock
+work lands.
+
+---
+
+## Python acq: No Recorded Provider Selection Means the Current One
+
+**Symptom:** A sandbox whose provenance record carries no provider selection (a
+Python-created sandbox from before the selection was recorded, or a Bash
+sandbox whose record predates it) is started, recreated or kit-updated with the
+selection in effect now (`ACQ_PROVIDER_KITS`, `--no-provider-kits`, or
+config.yaml `provider_kit`). The Bash acq treats such a record as the
+historical default selection instead (`acq_provider_selection_load`), so the
+two implementations can bind different providers for the same sandbox.
+
+**Cause:** `kits.recorded_provider_selection` keeps the current selection when
+nothing is recorded, by design, so a pre-existing sandbox follows today's
+default. The secret re-feeds (`secret set -g`, provider-credential set, usai
+rotation) skip only a sandbox whose recorded selection excludes the provider,
+so they keep re-feeding such a sandbox as before. A record that exists but
+cannot be read is refused (`validation_failed`), never read as "nothing
+recorded".
+
+**Resolution:** Recreate the sandbox (`acq rm NAME`, then `acq create`) so its
+selection is recorded. Whether the Python acq should adopt Bash's "legacy means
+the default" rule is an open decision; revisit it with the Bash/Python parity
+review of provider selection.
+
+---
+
 ## Windows: Bash and Python acq Choose Different Secret Backends in Two Cases
 
 **Symptom:** On Windows (Git Bash), a secret stored by one implementation reads

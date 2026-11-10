@@ -176,6 +176,46 @@ def test_start_binds_a_secret_stored_while_stopped(monkeypatch, tmp_path, capsys
     assert _calls(children, "start")[0][1]["USAI_API_KEY"] == VALUE
 
 
+@pytest.mark.parametrize("recorded", ["no-provider-kits", "default"])
+def test_start_binds_a_secret_stored_while_stopped_under_the_recorded_selection(
+        monkeypatch, tmp_path, capsys, children, recorded):
+    # The sandbox keeps the selection its create recorded: a secret stored while
+    # it was stopped is bound at start only when that selection admits it.
+    GITHUB = "S3NTINEL-github-value-5d21"
+    _env(monkeypatch, tmp_path)
+    if recorded == "default":
+        _set(capsys, monkeypatch, "-g", "usai")  # the default provider kit needs its key at create
+    else:
+        secretstore.delete(secretstore.key_for("usai"))
+        monkeypatch.setenv("ACQ_PROVIDER_KITS", "")
+    _create(capsys, tmp_path)
+    monkeypatch.delenv("ACQ_PROVIDER_KITS", raising=False)  # start runs with today's default selection
+    assert kits.provider_selection_read("msb", "box") == (
+        ("explicit", "") if recorded == "no-provider-kits" else ("default", ""))
+    assert _acq(capsys, "stop", "box")[0] == 0
+    if recorded == "no-provider-kits":
+        _set(capsys, monkeypatch, "-g", "usai")  # stored while stopped: the selection keeps it out
+    _set(capsys, monkeypatch, "-g", "github", value=GITHUB)  # stored while stopped: not a provider
+    assert _calls(children, "modify") == []  # set re-feeds running sandboxes only
+    children.clear()
+    rc, doc, out, err = _acq(capsys, "start", "box", "--json")
+    assert rc == 0, (doc, err)
+    github_flag = "GITHUB_TOKEN@github.com,api.github.com,codeload.github.com"
+    (argv, env), = _calls(children, "modify")
+    assert argv[-3:] == ["box", "--secret", github_flag] and env["GITHUB_TOKEN"] == GITHUB
+    held = msb.held_read("box").bindings
+    if recorded == "default":
+        assert doc["data"]["secret_bindings"] == sorted([github_flag, "USAI_API_KEY@api.gsa.usai.gov"])
+        assert _calls(children, "start")[0][1]["USAI_API_KEY"] == VALUE
+        assert set(held) == {"GITHUB_TOKEN", "USAI_API_KEY"}
+    else:
+        assert doc["data"]["secret_bindings"] == [github_flag]
+        assert _calls(children, "start")[0][1] is None  # nothing was bound when it stopped
+        assert set(held) == {"GITHUB_TOKEN"} and "usai-provider" not in doc["data"]["kits"]
+    _assert_value_absent(VALUE, children, out, err)
+    _assert_value_absent(GITHUB, children, out, err)
+
+
 def test_start_feeds_a_value_changed_while_stopped_and_records_its_scope(monkeypatch, tmp_path, capsys, children):
     _stopped_box(monkeypatch, tmp_path, capsys)
     _set(capsys, monkeypatch, "box", "usai", value=OWN)

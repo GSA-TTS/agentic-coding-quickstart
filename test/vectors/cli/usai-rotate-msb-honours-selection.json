@@ -1,0 +1,92 @@
+{
+  "schema": 1,
+  "id": "cli/usai-rotate-msb-honours-selection",
+  "oracle": "Least privilege for ADR-0012 key-rotate on msb: a running sandbox created with --no-provider-kits was never bound the usai key, so rotation does not hand it the new one either; it re-feeds only the sandboxes whose recorded provider selection includes the usai provider kit, and the key never appears in any step's output",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{python}",
+      "-I",
+      "test/vectors/drivers/seeded-run.py",
+      "[[[\"--backend\",\"msb\",\"secret\",\"set\",\"-g\",\"usai\"],true,0],[[\"--backend\",\"msb\",\"create\",\"shell\",\".\",\"--name\",\"rot-np\",\"--no-provider-kits\",\"--json\"],false,0],[[\"--backend\",\"msb\",\"create\",\"shell\",\".\",\"--name\",\"rot-ok\",\"--json\"],false,0],[[\"--backend\",\"msb\",\"usai-rotate-api-key\",\"--json\"],true,null]]",
+      "{acq}"
+    ],
+    "env": {
+      "ACQ_MSB_BIN": "__stub__",
+      "ACQ_MSB_VERSION": "0.7.7",
+      "ACQ_MSB_INSTALLED": "1",
+      "ACQ_SBX_INSTALLED": "0"
+    },
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "MSB_HOME",
+      "SBX_HOME",
+      "ACQ_IMAGE",
+      "ACQ_MSB_IMAGE",
+      "ACQ_MSB_READY_TIMEOUT",
+      "ACQ_MSB_STUB_CATALOG",
+      "ACQ_MSB_STUB_FAIL",
+      "ACQ_MSB_STUB_FAIL_ADD",
+      "ACQ_MSB_STUB_FAIL_RM",
+      "ACQ_SECRET_NO_LIVE_REFEED",
+      "ACQ_PROVIDER_CREDENTIAL_BINDINGS",
+      "ACQ_PROVIDER_CREDENTIAL_SEED",
+      "ACQ_PROVIDER_KITS",
+      "ACQ_KIT_PROVENANCE_SEED",
+      "ACQ_CONFIG_SEED",
+      "ACQ_EXTRA_KITS",
+      "USAI_API_KEY",
+      "GITHUB_TOKEN",
+      "GH_TOKEN",
+      "GITLAB_TOKEN"
+    ],
+    "stdin": "vector-rotate-sel-sentinel-6a03",
+    "timeout_ms": 15000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "usai-rotate-api-key",
+        "data": {
+          "provider": "usai",
+          "key_env": "USAI_API_KEY",
+          "rotated": true,
+          "backends": [
+            {
+              "backend": "msb",
+              "refed": [
+                "rot-ok"
+              ],
+              "kept_own": [],
+              "not_refed": []
+            }
+          ]
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME",
+      "ACQ_SECRET_STORE_DIR"
+    ]
+  }
+}

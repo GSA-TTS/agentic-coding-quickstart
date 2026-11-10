@@ -300,9 +300,33 @@ def cli_unavailable() -> MsbError:
     )
 
 
-def list_names() -> list[str] | None:
-    """Return sandbox names (one per line), or ``None`` if ``msb list`` failed."""
-    proc = _run(["list", "-q"])
+def _list(argv: list[str], timeout: float | None) -> subprocess.CompletedProcess:
+    """Run one ``msb list`` call, always bounded.
+
+    With an explicit ``timeout`` a call that outlasts it raises
+    ``subprocess.TimeoutExpired`` for the caller to report. Without one it is
+    bounded by :func:`timeouts.list_timeout_s` and a call that outlasts that
+    raises :class:`MsbError` (``timeout``).
+    """
+    if timeout is not None:
+        return _run(argv, timeout=timeout)
+    budget = timeouts.list_timeout_s()
+    try:
+        return _run(argv, timeout=budget)
+    except subprocess.TimeoutExpired:
+        raise MsbError(
+            errors.TIMEOUT,
+            f"'msb list' did not answer within {budget:g}s",
+            f"check that msb responds ('msb list'); set {timeouts.LIST_TIMEOUT_ENV} to a larger number of "
+            "seconds if it is only slow, then retry",
+        ) from None
+
+
+def list_names(*, timeout: float | None = None) -> list[str] | None:
+    """Return sandbox names (one per line), or ``None`` if ``msb list`` failed.
+
+    The call is bounded (see :func:`_list`)."""
+    proc = _list(["list", "-q"], timeout)
     if proc.returncode != 0:
         return None
     return [line for line in proc.stdout.splitlines() if line]
@@ -311,9 +335,10 @@ def list_names() -> list[str] | None:
 def running_names(*, timeout: float | None = None) -> list[str] | None:
     """Return running sandbox names, or ``None`` if ``msb list`` failed.
 
-    Raises ``subprocess.TimeoutExpired`` past ``timeout`` seconds.
+    The call is bounded (see :func:`_list`): an explicit ``timeout`` raises
+    ``subprocess.TimeoutExpired``.
     """
-    proc = _run(["list", "--running", "-q"], timeout=timeout)
+    proc = _list(["list", "--running", "-q"], timeout)
     if proc.returncode != 0:
         return None
     return [line for line in proc.stdout.splitlines() if line]
@@ -1337,7 +1362,6 @@ def secret_bindings(name: str) -> tuple[list[BoundSecret], dict[str, str]]:
         if value:
             env[binding.env] = value
             planned.append(BoundSecret(service, binding, _has_own_value(service, name)))
-        value = None
     return planned, env
 
 
@@ -1380,7 +1404,6 @@ def _start_env(name: str) -> dict[str, str]:
             out.clear()
             raise _start_secret_missing(name, env, entry["service"])
         out[env] = value
-        value = None
     return out
 
 
@@ -1551,20 +1574,65 @@ def _put(rec: HeldRecord, bound: BoundSecret, value: str, timeout: float | None 
     return True
 
 
+def _selection_withholds(service: str, sandbox: str) -> bool:
+    """True when a re-feed must not hand ``sandbox`` the provider credential
+    ``service``: the sandbox was created with a provider selection that leaves
+    the provider out (``--no-provider-kits``, or an explicit list without its
+    kit), and it holds no binding for it.
+
+    The selection test is the one a create applies (:func:`_bind_candidates`)
+    under the recorded selection. Only a recorded selection counts: a service
+    that is not a provider, or a sandbox with no recorded selection (one from
+    before it was recorded), is never withheld here. A sandbox that already
+    holds a binding for the service is re-fed: that grants nothing new, keeps
+    it from running on a stale value, and matches what ``msb start`` passes it
+    (:func:`_start_env` feeds every held binding). Raises :class:`MsbError`
+    when the recorded selection, the provider facts or the binding record
+    cannot be read.
+    """
+    if service not in provider_creds.provider_ids():
+        return False
+    try:
+        if kits.provider_selection_read("msb", sandbox) is None:
+            return False
+        with kits.recorded_provider_selection("msb", sandbox):
+            if service in _bind_candidates(sandbox):
+                return False
+    except kits.ProviderSelectionError as exc:
+        raise MsbError(errors.VALIDATION_FAILED, str(exc), f"recreate sandbox '{sandbox}' so a valid selection "
+                       "is recorded") from exc
+    return not any(entry["service"] == service for entry in held_read(sandbox).bindings.values())
+
+
 def _refeed(service: str, scope: Scope) -> None:
     """Push ``service``'s current value to the running sandboxes ``scope``
     reaches, so a new or changed secret applies without a recreate.
 
-    A sandbox with its own value is left alone on a global change, and a
-    variable already bound there for another service keeps its first claim
-    (warned). Raises :class:`MsbError` naming every sandbox that could not be
-    updated, including one whose value or binding could not be resolved.
+    A sandbox with its own value is left alone on a global change, as is one
+    whose recorded provider selection leaves the provider out and that holds
+    no binding for it (:func:`_selection_withholds`; noted on stderr for a
+    change scoped to that sandbox), and a variable already bound there for
+    another service keeps its first claim (warned). Raises :class:`MsbError`
+    naming every sandbox that could not be updated, including one whose value,
+    binding or recorded selection could not be resolved.
     """
     if _live_refeed_off():
         return
     failed: list[str] = []
     for sandbox in _running_targets(scope):
         if scope.is_global and _has_own_value(service, sandbox):
+            continue
+        try:
+            if _selection_withholds(service, sandbox):
+                if not scope.is_global:
+                    print(
+                        f"acq: note: '{service}' is stored for sandbox '{sandbox}', but it will not reach that "
+                        "sandbox: its provider selection excludes the provider (recreate it to change the selection)",
+                        file=sys.stderr,
+                    )
+                continue
+        except MsbError as exc:
+            failed.append(f"{sandbox} ({exc.message})")
             continue
         binding = service_binding(service, sandbox)
         value = secretstore.resolve(service, sandbox)
@@ -1580,7 +1648,6 @@ def _refeed(service: str, scope: Scope) -> None:
             )
         elif not _put(rec, BoundSecret(service, binding, _has_own_value(service, sandbox)), value):
             failed.append(sandbox)
-        value = None
     if failed:
         raise MsbError(
             errors.FAILURE,
@@ -1629,7 +1696,6 @@ def _sweep_unknown(rec: HeldRecord, scope: Scope, service: str) -> bool:
         value = secretstore.resolve(service, rec.name)
         if not value or not _put(rec, BoundSecret(service, guess, True), value):
             return False
-        value = None
         return True
     rec.note(service)
     rec.save()
@@ -1651,7 +1717,6 @@ def _rebind_global(rec: HeldRecord, service: str) -> None:
                 f"global value there; run 'acq secret set -g {service}' or recreate the sandbox",
                 file=sys.stderr,
             )
-    value = None
 
 
 def _unbind_one(scope: Scope, service: str, sandbox: str) -> str:
@@ -1852,7 +1917,6 @@ def provider_credential_set(provider: str, key_env: str, hosts: list[str], value
             f"remove or repair the unreadable provider-credential binding for '{provider}', then retry",
         ) from exc
     secretstore.store(secretstore.key_for(provider), value)
-    value = ""
     _refeed(provider, secretstore.GLOBAL)
 
 
@@ -1946,15 +2010,17 @@ def _rotate_one(service: str, sandbox: str, budget: float) -> str | None:
     """Re-feed the stored global key to one running sandbox.
 
     Returns None when it was re-fed, ``"kept"`` when the sandbox has its own
-    value, ``"skipped"`` when the variable is bound there for another service
-    (warned, as :func:`_refeed` does), or the reason it was not re-fed. Each
+    value, ``"skipped"`` when its recorded provider selection leaves usai out
+    and it holds no usai binding (:func:`_selection_withholds`), or the variable is bound there for another service (warned, as
+    :func:`_refeed` does), or the reason it was not re-fed. Each
     msb call is bounded by ``budget`` seconds, and one that times out counts as
     a failure. Any failure is confined to this sandbox.
     """
-    value = None
     try:
         if _has_own_value(service, sandbox):
             return "kept"
+        if _selection_withholds(service, sandbox):
+            return "skipped"
         binding = service_binding(service, sandbox)
         value = secretstore.resolve(service, sandbox)
         if binding is None or not value:
@@ -1974,8 +2040,6 @@ def _rotate_one(service: str, sandbox: str, budget: float) -> str | None:
         return _rotate_timed_out("msb modify", budget)
     except (MsbError, secretstore.SecretStoreError) as exc:
         return exc.message
-    finally:
-        value = None
     return None
 
 

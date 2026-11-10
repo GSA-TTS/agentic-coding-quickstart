@@ -65,8 +65,6 @@ def run_provider_credential_set(parsed, emit_json: bool, backend: str) -> int:
         return common._operational_failure(
             command, errors.TIMEOUT, str(exc), "retry once the other command finishes; nothing was changed", emit_json
         )
-    finally:
-        value = ""
 
 
 def _set_locked(adapter, provider: str, key_env: str, hosts: list[str], value: str, emit_json: bool) -> int:
@@ -554,8 +552,6 @@ def run_github_scope(parsed, emit_json: bool, backend: str) -> int:
         adapter.github_scope(sandbox, value)
     except common._ADAPTER_ERRORS as exc:
         return common._operational_failure("github-scope", exc.code, exc.message, exc.remediation, emit_json)
-    finally:
-        value = ""
     try:
         provider_creds.github_scope_write(backend, sandbox, workspace, owner, repos)
     except OSError as exc:
@@ -650,7 +646,6 @@ def _scope_now(backend: str, sandbox: str, workspace: str, repos: list[str]) -> 
     owner = found[0]
     _github_scope_guidance(sandbox, owner, repos, gitrepos.pat_url(owner, sandbox))
     print("      To skip for now, press Enter on an empty line.", file=sys.stderr)
-    value = ""
     try:
         value = common._read_secret_value("Enter GitHub token: ")
         problem = None if value.strip() else "no token entered"
@@ -659,8 +654,6 @@ def _scope_now(backend: str, sandbox: str, workspace: str, repos: list[str]) -> 
             common._adapter(backend).github_scope(sandbox, value)
     except common._ADAPTER_ERRORS as exc:  # a store, backend or terminal-read failure; never a value
         problem = exc.message
-    finally:
-        value = ""
     if problem is not None:
         print(f"acq: GitHub scoping skipped ({problem}); continuing. Re-run later with: {later}", file=sys.stderr)
         return
