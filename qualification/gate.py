@@ -55,6 +55,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 
+from . import hostexec
 from .ledger import (
     DEFAULT_LEDGER,
     Ledger,
@@ -94,13 +95,14 @@ def git_changed_paths(rev: str, cwd=None) -> list[str] | None:
     """
     if not _REV.fullmatch(rev):
         return None
-    ancestor = subprocess.run(["git", "merge-base", "--is-ancestor", rev, "HEAD"], capture_output=True, cwd=cwd)
+    git = hostexec.command("git")
+    ancestor = subprocess.run([*git, "merge-base", "--is-ancestor", rev, "HEAD"], capture_output=True, cwd=cwd)
     if ancestor.returncode != 0:
         return None
     # --no-renames lists both sides of a move (a file moved out of the surface must
     # still count); -z and quotePath=false avoid git's quoting of non-ASCII paths.
     proc = subprocess.run(
-        ["git", "-c", "core.quotePath=false", "diff", "--name-only", "--no-renames", "-z", rev, "HEAD", "--"],
+        [*git, "-c", "core.quotePath=false", "diff", "--name-only", "--no-renames", "-z", rev, "HEAD", "--"],
         capture_output=True,
         cwd=cwd,
     )
@@ -233,14 +235,15 @@ def base_entries(ledger_path: str, rev: str, cwd=None) -> set[str]:
     """The ``transcript_sha256`` of every entry in the ledger as committed at ``rev``."""
     if not rev or rev.startswith("-"):
         raise LedgerError(f"--base {rev!r} is not a revision")
-    top = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, cwd=cwd)
+    git = hostexec.command("git")
+    top = subprocess.run([*git, "rev-parse", "--show-toplevel"], capture_output=True, text=True, cwd=cwd)
     if top.returncode != 0:
         raise LedgerError("--base needs a git checkout")
     try:
         rel = Path(ledger_path).resolve().relative_to(Path(top.stdout.strip()).resolve()).as_posix()
     except ValueError:
         raise LedgerError(f"{ledger_path} is not inside the checkout, so it has no committed version") from None
-    shown = subprocess.run(["git", "show", f"{rev}:{rel}"], capture_output=True, cwd=cwd)
+    shown = subprocess.run([*git, "show", f"{rev}:{rel}"], capture_output=True, cwd=cwd)
     if shown.returncode != 0:
         raise LedgerError(f"cannot read {rel} at {rev}")
     return {e.transcript_sha256 for e in parse_ledger(json.loads(shown.stdout.decode("utf-8"))).entries}

@@ -436,17 +436,14 @@ def _spec_network_allow(spec: Path) -> tuple[str, ...]:
     return tuple(out)
 
 
-def test_kit_network_allow_matches_the_pinned_kit_specs():
+def test_kit_network_allow_matches_the_pinned_kit_specs(pinned_patterns_repo):
     """KIT_NETWORK_ALLOW is a copy of each built-in kit's pinned spec.
 
     Runs where a checkout of the pinned Patterns repository is provided via
-    ACQ_TEST_PATTERNS_REPO (as the pre-commit and bash32 CI workflows do);
-    skipped otherwise, since ordinary tests never fetch.
+    ACQ_TEST_PATTERNS_REPO (as the Python vectors CI workflow does); skipped
+    otherwise, since ordinary tests never fetch.
     """
-    root = os.environ.get("ACQ_TEST_PATTERNS_REPO")
-    if not root:
-        pytest.skip("pinned Patterns checkout is provided by CI via ACQ_TEST_PATTERNS_REPO")
-    repo = Path(root)
+    repo = pinned_patterns_repo
     head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True)
     if head.returncode == 0:
         assert head.stdout.strip() == kits.KIT_NETWORK_ALLOW_REF

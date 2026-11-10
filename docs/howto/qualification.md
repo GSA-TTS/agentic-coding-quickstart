@@ -1,9 +1,9 @@
 ---
 title: "Cross-Platform Qualification How-To (Tier-3)"
-description: "How to run the six ADR-0044m Tier-3 qualification oracles and record honest PASS/FAIL/BLOCKED transcripts on macOS and Linux hosts"
+description: "How to run the six ADR-0044m Tier-3 qualification oracles and record honest PASS/FAIL/BLOCKED transcripts on macOS, Linux and Windows x64 hosts"
 status: canonical
 tier: 3
-last_updated: "2026-11-08"
+last_updated: "2026-11-09"
 audience: "developers"
 keywords: ["qualification", "tier-3", "transcript", "msb", "sbx", "oracle", "adr-0044m", "matrix"]
 related_files: ["docs/howto/release-gate-setup.md", "docs/adr/0044m-live-cross-platform-qualification-matrix-and-transcript.md", "qualification/README.md", "docs/qualification-ledger.json", ".github/workflows/tier3-release-gate.yml", "scripts/qualify-backend-cell", "scripts/qualify-msb-ro-mount", "docs/KNOWN_FAILURE_MODES.md", "docs/adr/0035-host-authoritative-sandbox-config.md", "docs/adr/0041m-configuration-and-state-migration-behavior.md"]
@@ -16,7 +16,7 @@ review_cycle: "quarterly"
 > This is the **Tier-3 live-qualification** runbook for the Python `acq` v1
 > replacement (ADR-0044m). It is the downstream consumer of the
 > [`qualification/`](../../qualification/README.md) harness. It tells a human —
-> or an agent on a macOS/Linux host — exactly how to run the six host-enforced
+> or an agent on a macOS, Linux or Windows x64 host — exactly how to run the six host-enforced
 > oracles, compute the transcript identity fields honestly, and record the
 > verbatim `RESULT` line. The ledger, not this page, says which cells are
 > current: `python3 -m qualification matrix` prints each cell's state.
@@ -240,15 +240,37 @@ caller's `ACQ_*` variables are not passed to acq (a stub seam such as
 those ending in `_TIMEOUT`, such as `ACQ_MSB_READY_TIMEOUT`, which only tune timing.
 `PYTHONPATH` is fixed to this checkout's `py-acq/src`, the CLI runs under
 `python -P -s` (no current directory and no user site-packages on `sys.path`), and
-`msb`, `sbx` and `bash` are resolved from absolute `PATH` entries only.
+`msb`, `sbx` and `bash` are resolved by acq's own resolver (`acq_py.hostexec`) from
+absolute `PATH` entries only, never the current directory, and only as `.exe` files
+on Windows.
+
+The harness tooling follows the same rules. `qualification.host` starts its Python
+children (the harness, and the gate check before a publish) with `-P` and a
+`PYTHONPATH` fixed to the checkout it was imported from, never yours, so the oracle
+it runs inherits that fixed value too. `git`, `gh` and the backend CLIs it calls
+(and the gate's and ledger's `git` calls) are resolved with the same resolver.
 
 **Aborts.** When a run outlives the harness's `--timeout`, the harness sends SIGTERM
 (CTRL_BREAK on Windows), waits a grace period (a quarter of the timeout, at most 300
-seconds) and only then kills it; Ctrl+C on the harness is passed on the same way. The
-oracle turns the signal into a normal exit and tears down. The oracle runs each acq
-call and the canary in a process group of its own and stops a group the same way
-(SIGTERM, a grace period, then kill), so an interrupted `msb create` or canary run
-cleans up instead of leaving a sandbox behind. It is also given a deadline (`ACQ_QUALIFY_DEADLINE`) that ends one grace
+seconds) and only then kills it. Ctrl+C on the harness is passed on too: the harness
+sends the oracle the same SIGTERM (CTRL_BREAK on Windows, where the oracle runs in a
+process group of its own and never sees the console's Ctrl+C) and waits the same
+grace period before killing it. On POSIX a terminal's Ctrl+C also reaches the oracle
+directly as SIGINT; the forwarded SIGTERM is what reaches it when only the harness
+was interrupted, for example by a supervisor's `kill -INT`. The harness checks for
+Ctrl+C at least once a second while it waits, Windows included. The oracle turns the
+first signal into a normal exit and tears down, and from then on swallows any further
+one, so it cannot cut short the stop of the step it was waiting on or the teardown.
+The oracle runs each acq call and the canary in a process group of its own and stops
+a group the same way (SIGTERM, a grace period, then kill), so an interrupted
+`msb create` or canary run cleans up instead of leaving a sandbox behind. On Windows each of them also runs in a Job object of its own: the
+kill terminates the job, which holds that call's processes and nothing else, and if
+the oracle is killed outright the job takes them down with it. A process that a call
+starts with `CREATE_BREAKAWAY_FROM_JOB` leaves the job and survives the kill; that is
+intended (a backend may detach its daemon that way), because the job is a cleanup
+tool, not a security boundary. A backend daemon that a call
+starts without detaching is stopped with it; start the daemon before the run (see
+`docs/KNOWN_FAILURE_MODES.md`). The oracle is also given a deadline (`ACQ_QUALIFY_DEADLINE`) that ends one grace
 period before the timeout; at the deadline it stops starting steps, tears down and
 reports `BLOCKED`; a step the deadline cut short is `BLOCKED` too, not `FAIL`.
 Teardown always tries to remove the nonce-named sandbox, canary sandbox, secret and
@@ -466,8 +488,12 @@ harness's all-zero default, and a commit that only existed on a squash-merged PR
 branch is not in `main`'s history, so the gate could not resolve it. Every outcome
 is recorded, not only `PASS`: the latest entry for a cell decides, so a recorded
 `FAIL`, `BLOCKED` or `FLAKY` blocks a cell that had a current `PASS`. Commit the
-ledger change through a normal PR; CODEOWNERS requires an admin's review of it,
-because the ledger is self-reported evidence.
+ledger change through a normal PR. The ledger is self-reported evidence, so the
+PR needs an admin's review. Upstream, CODEOWNERS enforces that review once code-owner
+review is required. On the `mogul` fork nothing enforces it: the `CODEOWNERS`
+teams cannot own paths in a personal repository and the `main` ruleset requires no
+review. There, the maintainer's own audit of the ledger PR is the control (see
+[`release-gate-setup.md`](release-gate-setup.md), step 3).
 Per-attempt timestamps are in the transcript; for one written by an older harness,
 pass `--recorded-at <ISO 8601 UTC>`.
 

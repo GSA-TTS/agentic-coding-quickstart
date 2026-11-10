@@ -16,13 +16,13 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from . import hostexec
 from .ledger import DEFAULT_LEDGER
 
 UPSTREAM = re.compile(r"github\.com[:/]GSA-TTS/agentic-coding-quickstart(\.git)?/?$", re.I)
@@ -37,7 +37,7 @@ class HostError(Exception):
 
 def git(root: Path, *args: str, env: dict | None = None) -> str:
     proc = subprocess.run(
-        ["git", *args], cwd=root, capture_output=True, text=True, errors="replace",
+        [*hostexec.command("git"), *args], cwd=root, capture_output=True, text=True, errors="replace",
         env={**os.environ, **env} if env else None,
     )
     if proc.returncode != 0:
@@ -66,7 +66,7 @@ def check_checkout(root: Path, remote: str | None = None) -> str:
 def artifact_sha256(root: Path) -> str:
     """SHA-256 of ``git archive HEAD`` (identity of the tested tree, any OS)."""
     digest = hashlib.sha256()
-    with subprocess.Popen(["git", "archive", "HEAD"], cwd=root, stdout=subprocess.PIPE) as proc:
+    with subprocess.Popen([*hostexec.command("git"), "archive", "HEAD"], cwd=root, stdout=subprocess.PIPE) as proc:
         for chunk in iter(lambda: proc.stdout.read(1 << 20), b""):
             digest.update(chunk)
     if proc.returncode != 0:
@@ -130,12 +130,13 @@ def remote_main_tip(root: Path, remote: str, fallback: str) -> str:
     to ``fallback`` (the tested revision) when there is no tracking ref either, so an
     unreachable remote degrades to the old behaviour instead of aborting a long run.
     """
+    git_exe = hostexec.command("git")
     fetched = subprocess.run(
-        ["git", "fetch", "-q", remote, "main"], cwd=root, capture_output=True, text=True,
+        [*git_exe, "fetch", "-q", remote, "main"], cwd=root, capture_output=True, text=True,
         env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
     ).returncode == 0
     for ref in (["FETCH_HEAD"] if fetched else []) + [f"refs/remotes/{remote}/main"]:
-        proc = subprocess.run(["git", "rev-parse", "--verify", "--quiet", ref], cwd=root,
+        proc = subprocess.run([*git_exe, "rev-parse", "--verify", "--quiet", ref], cwd=root,
                               capture_output=True, text=True)
         if proc.returncode == 0 and proc.stdout.strip():
             return proc.stdout.strip()
@@ -184,14 +185,15 @@ def publish(
         git(worktree, "commit", "-q", "-m", title)
         git(worktree, "push", "-q", "--no-follow-tags", remote, branch)
         print(f"pushed {remote}/{branch}")
-        opened = shutil.which("gh") and subprocess.run(
-            ["gh", "pr", "create", "--repo", slug, "--base", "main", "--head", branch, "--title", title, "--body", body]
+        gh = hostexec.which("gh")
+        opened = gh is not None and subprocess.run(
+            [gh, "pr", "create", "--repo", slug, "--base", "main", "--head", branch, "--title", title, "--body", body]
         ).returncode == 0
         if not opened:
             print(f"open the PR yourself (into {slug}:main): https://github.com/{slug}/pull/new/{branch}\n\n{title}\n\n{body}")
         return branch
     finally:
         for args in (("worktree", "remove", "--force", str(worktree)), ("branch", "-D", branch)):
-            proc = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True)
+            proc = subprocess.run([*hostexec.command("git"), *args], cwd=root, capture_output=True, text=True)
             if proc.returncode != 0:
                 sys.stderr.write(f"qualification.host: cleanup 'git {' '.join(args)}' failed: {proc.stderr.strip()}\n")

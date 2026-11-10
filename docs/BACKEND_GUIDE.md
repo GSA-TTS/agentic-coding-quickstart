@@ -164,8 +164,11 @@ brew install GSA-TTS/tap/microsandbox-acq    # version-pinned formula
 ./scripts/verify-msb-pin --install           # verified pinned release bundle
 ```
 
-`./install.sh` does this for you, and also detects and repairs a blocked,
-too-old, unparseable, or PATH-shadowed `msb`. If an already-installed
+The upstream release installer (the README one-liner) does this for you, and
+also detects and repairs a blocked, too-old, unparseable, or PATH-shadowed
+`msb`. This fork's in-repo `install.sh` does not install or check `msb` at all
+(see [This fork's installers](howto/acq.md#this-forks-installers)), so use one
+of the commands above. If an already-installed
 0.7.0-0.7.2 has migrated your sandbox state, the recovery is `msb self update`
 (forward to 0.7.3 or newer) — see §43 of
 [`KNOWN_FAILURE_MODES.md`](KNOWN_FAILURE_MODES.md) and

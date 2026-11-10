@@ -191,7 +191,7 @@ def run_attach(parsed, emit_json: bool, backend: str) -> int:
     """``acq attach NAME`` — attach to an existing sandbox, launching its agent.
 
     This is the interactive path; its non-interactive contract is deterministic
-    (ADR-0038m §1, spec user story #10): fail closed on a missing sandbox or a
+    (ADR-0038m §1, spec ordinary-user story 10): fail closed on a missing sandbox or a
     missing/unreadable host record, then launch the recorded agent and propagate
     its status. The agent comes from host-authoritative state only — there is no
     agent-to-shell fallback (ADR-0038m §48). The adapter gives the session a PTY

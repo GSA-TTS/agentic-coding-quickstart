@@ -44,13 +44,13 @@ import json
 import os
 import platform
 import re
-import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import hostexec
 from . import publish as pub
 from dataclasses import replace
 
@@ -106,7 +106,7 @@ def normalize_arch(machine: str) -> str:
 def _translated_x86_on_arm_mac() -> bool:
     if sys.platform != "darwin":
         return False
-    proc = subprocess.run(["sysctl", "-n", "sysctl.proc_translated"], capture_output=True, text=True)
+    proc = subprocess.run([*hostexec.command("sysctl"), "-n", "sysctl.proc_translated"], capture_output=True, text=True)
     return proc.returncode == 0 and proc.stdout.strip() == "1"
 
 
@@ -114,7 +114,7 @@ def _os_build(system: str) -> str:
     if system == "Darwin":
         version = platform.mac_ver()[0]
         if version.startswith("10.16"):  # a Python built against an old SDK lies on macOS 11+
-            proc = subprocess.run(["sw_vers", "-productVersion"], capture_output=True, text=True)
+            proc = subprocess.run([*hostexec.command("sw_vers"), "-productVersion"], capture_output=True, text=True)
             version = proc.stdout.strip() or version
         return version
     return platform.version() if system == "Windows" else platform.release()
@@ -155,7 +155,7 @@ def detect_host(
     return Host(system, arch, build or _os_build(system), hypervisor, token)
 
 
-def backend_version(backend: str, *, which=shutil.which, run=subprocess.run) -> str | None:
+def backend_version(backend: str, *, which=hostexec.which, run=subprocess.run) -> str | None:
     """The backend CLI's final ``X.Y.Z`` version, or ``None`` when absent, unrunnable or not final."""
     exe = which(backend)
     if exe is None:
@@ -174,18 +174,26 @@ def backend_version(backend: str, *, which=shutil.which, run=subprocess.run) -> 
 
 
 def harness_command(host: Host, backend: str, version: str, rev: str, sha: str, out: Path, timeout: int) -> list[str]:
+    # The oracle's own argv stays ``<python> CELL_ORACLE --backend <b>``: the ledger
+    # accepts exactly that shape. Run as a script, Python puts the script's own
+    # directory on sys.path, not the current one, and the PYTHONPATH it inherits is
+    # the fixed one run_backend sets.
     return [
-        sys.executable, "-m", "qualification", "run",
-        "--backend", backend, "--backend-version", version, "--platform", host.platform,
-        "--os", host.system, "--os-build", host.os_build, "--arch", host.arch,
-        "--hypervisor", host.hypervisor, "--image", IMAGE, "--rev", rev,
-        "--artifact-sha256", sha, "--transcript-dir", str(out), "--timeout", str(timeout),
+        *hostexec.python_command(
+            "qualification", "run",
+            "--backend", backend, "--backend-version", version, "--platform", host.platform,
+            "--os", host.system, "--os-build", host.os_build, "--arch", host.arch,
+            "--hypervisor", host.hypervisor, "--image", IMAGE, "--rev", rev,
+            "--artifact-sha256", sha, "--transcript-dir", str(out), "--timeout", str(timeout),
+        ),
         "--", sys.executable, str(Path(CELL_ORACLE)), "--backend", backend,
     ]
 
 
 def run_backend(command: list[str], out: Path, backend: str, cwd: Path | None = None) -> Result:
-    proc = subprocess.run(command, cwd=cwd or REPO_ROOT, capture_output=True, text=True, errors="replace")
+    """Run the harness ``command``; the qualification package comes from where this one was imported."""
+    proc = subprocess.run(command, cwd=cwd or REPO_ROOT, capture_output=True, text=True, errors="replace",
+                          env=hostexec.python_env(hostexec.PACKAGE_ROOT))
     line = next((x for x in proc.stdout.splitlines() if x.startswith("RESULT ")), "")
     transcript = out / "transcript.json"
     status = _STATUS.get(proc.returncode, "FAIL")
@@ -334,9 +342,12 @@ def _cells_qualified(worktree: Path, host: Host, backends: list[str]) -> str | N
     Run inside the publish worktree, so the surface diff is evaluated against the
     branch point (the remote's current ``main``) — the same comparison CI will make.
     """
+    # The worktree's own gate comes first, as it did when the current directory
+    # led sys.path; the copy this module was imported from is the fallback.
     proc = subprocess.run(
-        [sys.executable, "-m", "qualification.gate", "--ledger", DEFAULT_LEDGER, "check", "--json"],
+        hostexec.python_command("qualification.gate", "--ledger", DEFAULT_LEDGER, "check", "--json"),
         cwd=worktree, capture_output=True, text=True,
+        env=hostexec.python_env(worktree.resolve(), hostexec.PACKAGE_ROOT),
     )
     try:
         cells = {(c["backend"], c["platform"]): c for c in json.loads(proc.stdout)}

@@ -197,10 +197,32 @@ If a rotated key is still rejected, it was likely truncated on copy — see
 ## Installing acq
 
 Most users should use the one-line installer in the
-[README quickstart](../../README.md#step-2-install-acq) — it auto-selects the
-best method already on your Mac or Linux host (Homebrew → npm → self-contained
-download), puts `acq` on your `PATH`, and never needs administrator rights. This
-section covers the manual, developer, and Windows preview paths.
+[README quickstart](../../README.md#step-2-install-acq). That installer, the one
+published with the upstream GSA-TTS releases, auto-selects the best method
+already on your Mac or Linux host (Homebrew → npm → self-contained download),
+puts `acq` on your `PATH`, and never needs administrator rights. This section
+covers the manual, developer, and Windows preview paths.
+
+### This fork's installers
+
+The `install.sh` and `install.ps1` checked into this repository are not the
+upstream release installers described in this guide and the README. They are the
+acq v1 installers (ADR-0042m). Each one downloads a per-platform release archive
+(`acq-<platform>.tar.gz`, or `acq-windows-x64.zip` on Windows), verifies it
+against `SHA256SUMS`, installs it under your home directory and offers to put it
+on your `PATH`. `install.sh` links both `acq` and `acq-python`. They do **not**:
+
+- install, pin, check or repair `msb`; install it yourself as described in
+  [`msb.md`](msb.md#step-1-install-msb), then run `msb doctor`;
+- choose Homebrew, npm or a git clone, or accept the upstream installer's
+  `--method` and `--sha` options (`install.sh` rejects them as a usage error);
+- on Windows, probe Windows Hypervisor Platform or install Git Bash, which the
+  installed `acq` still uses by default (`ACQ_IMPL` unset).
+
+No release of this fork has published those archives yet, so the release they
+download by default does not exist. Until one does, run them against an offline
+asset set: `sh install.sh --source DIR --install-dir DIR --bin-dir DIR`, or
+`.\install.ps1 -Source DIR`.
 
 ### Direct package-manager install
 
@@ -250,6 +272,27 @@ otherwise default host; allow local scripts for your user with
 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` (or use the `irm ... | iex`
 one-liner, which is not affected because piped text is not a script file). On a
 managed device the policy may be set by Group Policy.
+
+**Keep cmd.exe from running programs out of the current directory.** cmd.exe looks
+for a typed command in the current directory before it searches `PATH`. You
+usually run `acq` from inside the workspace it sandboxes, and the agent in the
+sandbox can write to that workspace, so typing `acq` (or `git`, `msb`, ...) at a
+cmd.exe prompt there would run an `acq.cmd`, `acq.bat` or `acq.exe` the agent left
+behind, on the host and outside the sandbox. PowerShell does not do this (it runs
+a program from the current directory only when you type `.\name`), and the
+processes acq starts already skip the current directory. To close it for cmd.exe
+as well, set `NoDefaultCurrentDirectoryInExePath` for your user once, then open a
+new terminal:
+
+```powershell
+[Environment]::SetEnvironmentVariable("NoDefaultCurrentDirectoryInExePath", "1", "User")
+```
+
+With it set, cmd.exe (and any program that asks Windows whether to search the
+current directory) runs a program from the current directory only when you name
+it with a path, such as `.\tool.exe`. Remove the variable to undo it. The variable
+does not change where Windows looks for a program's DLLs; see
+[Known Failure Modes §60](../KNOWN_FAILURE_MODES.md#60-windows-dll-search-can-reach-the-workspace).
 
 If WHP is disabled, stop: enable it from an **elevated** PowerShell
 (`Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All`),

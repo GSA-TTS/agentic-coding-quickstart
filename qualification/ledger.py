@@ -50,6 +50,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from . import hostexec
 from .matrix import CELL_ORACLE, MSB, PLATFORMS, SBX, host_mismatch, is_claimed, version_problem
 from .model import TRANSCRIPT_DIR_TOKEN, canonical_transcript_bytes, publishable_argv
 
@@ -327,7 +328,7 @@ def git_oracle_digest(rev: str, path: str, cwd=None) -> str | None:
     """
     if not _REV.fullmatch(rev) or path.startswith("-"):
         return None
-    proc = subprocess.run(["git", "cat-file", "blob", f"{rev}:{path}"], capture_output=True, cwd=cwd)
+    proc = subprocess.run([*hostexec.command("git"), "cat-file", "blob", f"{rev}:{path}"], capture_output=True, cwd=cwd)
     return hashlib.sha256(proc.stdout).hexdigest() if proc.returncode == 0 else None
 
 

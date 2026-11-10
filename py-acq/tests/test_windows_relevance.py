@@ -35,7 +35,7 @@ pytestmark = pytest.mark.skipif(
 #                             hashed tool pins the job installs
 #   scripts                   staged, run or read by the pytest suite
 #   qualification + ledger    imported and validated by the qualification tests
-#   bats subset               06/55, the helper and stub library, and the
+#   bats subset               06/55/163, the helper and stub library, and the
 #                             pinned bats submodules (.gitmodules)
 #   vectors + fixtures        the corpus pytest runs and the paths it invokes
 #   repo files                .gitattributes (the CRLF guard), CODEOWNERS and
@@ -48,7 +48,8 @@ REQUIRED = {
     "scripts/qualify-backend-cell", "scripts/setup-provider-input-validator",
     "scripts/test-acq-lib.sh", "scripts/refresh-kitbundle",
     "qualification", "docs/qualification-ledger.json",
-    "test/bats/06-windows-install.bats", "test/bats/55-version.bats", "test/bats/helper.bash",
+    "test/bats/06-windows-install.bats", "test/bats/55-version.bats",
+    "test/bats/163-provider-input-windows-native.bats", "test/bats/helper.bash",
     "test/vendor", ".gitmodules", "test/vectors", "test/fixtures",
     ".gitattributes", ".github/CODEOWNERS",
     ".github/workflows/release.yml", ".github/workflows/tier3-release-gate.yml",

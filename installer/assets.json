@@ -20,7 +20,8 @@
         "source": "py-acq/src/acq_py/",
         "runtime": { "supplier": "python.org-embedded", "path": "py-acq/runtime/python.exe" },
         "wheelhouse": "wheelhouse/",
-        "launchers": ["acq.cmd", "acq.ps1"]
+        "backends": "acq.backends/",
+        "launchers": ["acq.cmd", "acq.ps1", "acq"]
       }
     },
     "macos-arm64": {
@@ -30,6 +31,7 @@
         "source": "py-acq/src/acq_py/",
         "runtime": { "supplier": "python-build-standalone", "path": "py-acq/runtime/bin/python3" },
         "wheelhouse": "wheelhouse/",
+        "backends": "acq.backends/",
         "launchers": ["acq", "acq-python"]
       }
     },
@@ -40,6 +42,7 @@
         "source": "py-acq/src/acq_py/",
         "runtime": { "supplier": "python-build-standalone", "path": "py-acq/runtime/bin/python3" },
         "wheelhouse": "wheelhouse/",
+        "backends": "acq.backends/",
         "launchers": ["acq", "acq-python"]
       }
     },
@@ -50,6 +53,7 @@
         "source": "py-acq/src/acq_py/",
         "runtime": { "supplier": "python-build-standalone", "path": "py-acq/runtime/bin/python3" },
         "wheelhouse": "wheelhouse/",
+        "backends": "acq.backends/",
         "launchers": ["acq", "acq-python"]
       }
     },
@@ -60,6 +64,7 @@
         "source": "py-acq/src/acq_py/",
         "runtime": { "supplier": "python-build-standalone", "path": "py-acq/runtime/bin/python3" },
         "wheelhouse": "wheelhouse/",
+        "backends": "acq.backends/",
         "launchers": ["acq", "acq-python"]
       }
     }

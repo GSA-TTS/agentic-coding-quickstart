@@ -1,6 +1,7 @@
 # Specification — Python `acq` v1 replacement
 
-> Status: accepted (pending human review of the user stories below)
+> Status: merged to `main` on 2026-11-02. **Human approval of the user stories
+> below is not recorded.** See "Approval status" at the end.
 > AI-assisted; owner: Bret Mogilefsky.
 
 This specification synthesizes the eight accepted wayfinding decisions
@@ -117,3 +118,26 @@ there, and no test reaches into implementation internals for contract evidence.
 - The implementation tickets this specification decomposes into are authored and
   published separately; each is a vertical slice with native blocking edges.
 - NIST control mappings on the ADRs are best-effort and subject to human review.
+
+## Approval status (recorded 2026-11-09)
+
+This specification originally carried the status "accepted (pending human review
+of the user stories below)". That status contradicted itself, and it does not
+show whether the review happened.
+
+What the record shows:
+
+- The specification merged to `main` on 2026-11-02 through a pull request with no
+  review. The PR was authored and merged under the maintainer's GitHub account,
+  which home agents also use (see ADR-0045m's enforcement-status note), so the
+  merge alone does not show a human decision.
+- No explicit human approval of the user stories is recorded in this repository
+  or on its tracker.
+- Implementation of the Python replacement began after that merge and has
+  continued. ADR-0045m says implementation waits until the final specification is
+  approved. That gate was never visibly closed.
+
+So the user stories above are **not recorded as approved**. Only the maintainer
+can close this, either by recording an approval (with the date and any changed
+stories) or by recording what must change. Until then, read these stories as the
+working contract the implementation targets, not as a human-approved one.

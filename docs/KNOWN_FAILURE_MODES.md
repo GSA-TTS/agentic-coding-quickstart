@@ -273,48 +273,101 @@ remain:
 
 ---
 
-## Qualification oracle: a forced stop can reach processes outside the step
+## Deferred: the Python acq has no clone mode (`--clone`, `ACQ_CLONE`)
+
+**Status:** deferred (tracked per AGENTS.md "Track Deferred Work"). The Python
+acq fails closed until clone mode is ported.
+
+The Bash acq's `--clone`, and its env equivalent `ACQ_CLONE=1`, run `create` and
+`run` on a disposable clone of the primary workspace instead of mounting the
+real checkout (ADR-0027; native on sbx, a host-side scratch clone on msb). The
+Python acq has not ported it:
+
+- `--clone` is rejected by its parser as an unrecognized argument (exit 2).
+- `ACQ_CLONE=1` makes `create` and `run` (every form, including `run NAME`
+  and `create --recreate NAME`) refuse with a usage error (exit 2) before any
+  state, config or backend access: "clone mode (ACQ_CLONE=1) is not supported
+  by the Python implementation yet". Before this refusal, the Python acq
+  ignored the variable, so a user expecting isolation got the real workspace
+  mounted read/write.
+- Only the exact value `1` refuses, matching Bash's
+  `[ "${ACQ_CLONE:-0}" = "1" ]`. Unset, empty, `0`, `true` or any other value
+  is clone mode off in both implementations, so the Python acq proceeds. Other
+  verbs ignore the variable, as in Bash.
+- One deliberate difference: on a re-attach to an existing sandbox, Bash prints
+  a note that `ACQ_CLONE` is ignored and continues; the Python acq refuses,
+  because it cannot tell a re-attach from a create without querying the backend.
+
+**Workaround:** unset `ACQ_CLONE` to mount the workspace itself, or run the
+Bash implementation for a disposable clone (`ACQ_IMPL=bash acq run AGENT
+PATH --clone`). Tests: `py-acq/tests/test_clone_refusal.py` and the vector
+`test/vectors/cli/run-acq-clone-refused.json`.
+
+**Unblock trigger:** clone mode is ported to the Python adapters (sbx's native
+`--clone` and the msb scratch-clone emulation in `acq.backends/msb.sh`); then
+replace the refusal with the feature and port `test/bats/116-clone-option.bats`
+to vectors.
+
+---
+
+## Qualification oracle: stopping a step can stop a backend daemon the step started
 
 **Status:** known limitation, tracked for a fix (per AGENTS.md "Track Deferred Work").
 
 ### Symptoms and cause
 
-`scripts/qualify-backend-cell` runs each step in its own process group. When a
-step outlives its timeout, or the oracle is stopped, the group gets a polite stop
-(SIGTERM; CTRL_BREAK on Windows) and a grace period. Only if the grace period
-expires is the group force-killed (`run_process` / `stop_process` /
-`_signal_group`): `killpg(SIGKILL)` on POSIX, `taskkill /F /T` on Windows.
+`scripts/qualify-backend-cell` runs each step in its own process group, and on
+Windows also in a Job object of its own (`StepJob`). When a step outlives its
+timeout, or the oracle is stopped, the group gets a polite stop (SIGTERM;
+CTRL_BREAK on Windows) and a grace period. Only if the grace period expires is
+the step force-killed (`run_process` / `stop_process` / `_signal_group`):
+`killpg(SIGKILL)` on POSIX, `TerminateJobObject` on Windows. If the oracle itself
+is killed outright on Windows, its job handles close and the jobs' kill-on-close
+limit takes the steps' processes down too.
 
-That forced kill can reach more than the step:
+A backend daemon that a step's command auto-starts (for example an `msb`
+server) as a child, without detaching it into its own session or process group,
+is in the step's group, and on Windows in the step's job. So:
 
-- **A backend daemon the step auto-started.** If a step's backend command
-  starts its daemon (for example an `msb` server) as a child without detaching
-  it into its own session or process group, the daemon is in the step's group
-  and dies with it. Later steps, and other sandboxes on the host that use the
-  same daemon, then lose it.
-- **An unrelated process on Windows.** `taskkill /T` builds the tree from
-  parent process ids with no process creation-time check. If a process in the
-  tree exited and Windows reused its id, `/T` can walk into, and kill, a process
-  that has nothing to do with the run.
+- **The polite stop reaches it.** The group SIGTERM (CTRL_BREAK on Windows) goes
+  to every process in the group, the daemon included, and a daemon that honours
+  it exits.
+- **The forced kill kills it.** `killpg(SIGKILL)` and `TerminateJobObject` both
+  cover the daemon, as does the kill-on-close of a killed oracle's jobs.
 
-Neither happens on the polite path. Both need a step that ignores the stop for
-the whole grace period (`STOP_GRACE`, `CANARY_GRACE`).
+Later steps, and other sandboxes on the host that use the same daemon, then lose
+it. A step that ends on its own does not affect the daemon: on Windows the job's
+kill-on-close limit is lifted before its handle is closed.
+
+The forced kill no longer reaches unrelated processes on Windows. It used to be
+`taskkill /F /T`, which walks parent process ids without a creation-time check
+and, after a pid was reused, could kill a process that had nothing to do with the
+run. Job membership is fixed when a process is created, so `TerminateJobObject`
+kills the step's processes and nothing else.
+
+One exception is intended: a process that a step starts with
+`CREATE_BREAKAWAY_FROM_JOB` leaves the job (the job sets
+`JOB_OBJECT_LIMIT_BREAKAWAY_OK`, so a backend that detaches its daemon that way is
+not refused) and survives the forced kill, like a POSIX process that left the
+step's group with `setsid`. The job is a cleanup tool, not a security boundary: it
+does not contain a step that sets out to escape it.
 
 ### Mitigation today
 
 Start the backend daemon before a qualification run, so no timed step starts it.
-Leave the grace periods at their defaults so the forced kill stays a last
-resort.
+That protects it from the polite stop and from the forced kill alike. Leave the
+grace periods (`STOP_GRACE`, `CANARY_GRACE`) at their defaults so the forced
+kill stays a last resort.
 
 ### Proposed fix
 
-1. **Windows:** put each step in a Job object created at spawn time and stop it
-   with `TerminateJobObject`. Job membership is fixed at process creation and
-   inherited by descendants, so the kill covers exactly the step's processes and
-   no pid-reuse lookup is involved. This replaces `taskkill /F /T`.
-2. **Both platforms:** before the first timed step, start the backend daemon
-   (or check that it is already running) outside any step's process group, so
-   a forced kill can never take it down.
+Before the first timed step, start the backend daemon (or check that it is
+already running) outside any step's process group and job. **Deferred:** it needs
+each backend's own command to start and probe its daemon (msb and sbx differ, and
+acq does not manage either daemon today), verified live on every platform.
+**Unblock trigger:** the next live qualification round on a host where a step is
+seen to start the daemon, or a backend release that documents a daemon
+start/status command.
 
 ---
 
@@ -413,7 +466,7 @@ is required or authorized by this guidance.
 - `acq create` stops before backend creation.
 - The error requires exact `PyYAML` and `jsonschema` versions.
 
-### Fix: release install (Homebrew, npm, `install.sh --release`)
+### Fix: release install (Homebrew, npm, or the upstream release installer)
 
 `--apply` alone uses the offline wheelhouse bundled with the release:
 
@@ -430,8 +483,8 @@ requirements change.
 
 ### Fix: git checkout / development install (no wheelhouse)
 
-A working-tree clone (`install.sh --clone`, or running `./acq` directly from a
-`git checkout`) has no release wheelhouse. Use the `--online` flag, which
+A working-tree clone (the upstream release installer's clone method, or running
+`./acq` directly from a `git checkout`) has no release wheelhouse. Use the `--online` flag, which
 downloads the same hash-locked packages from PyPI instead:
 
 ```bash
@@ -2810,12 +2863,15 @@ amending the wrong branch.
 
 ### Fix
 
-- `acq.ps1` and `install.ps1` prefer known Git-for-Windows locations first and
-  reject the WSL shim (`System32\bash.exe`, `SysWOW64\bash.exe`) when falling back
-  to a PATH lookup.
-- `install.ps1` probes WHP with `WHvCreatePartition` (the same call `msb` relies
-  on) instead of gating on the feature flag; when the state stays undetermined it
-  warns and defers to `msb doctor`, which `acq` surfaces before provisioning.
+- `acq.ps1` (and the upstream release `install.ps1`) prefer known
+  Git-for-Windows locations first and reject the WSL shim (`System32\bash.exe`,
+  `SysWOW64\bash.exe`) when falling back to a PATH lookup.
+- The upstream release `install.ps1` probes WHP with `WHvCreatePartition` (the
+  same call `msb` relies on) instead of gating on the feature flag; when the
+  state stays undetermined it warns and defers to `msb doctor`, which `acq`
+  surfaces before provisioning. This fork's in-repo `install.ps1` (the acq v1
+  installer) neither probes WHP nor installs Git Bash or `msb`; see
+  `docs/howto/acq.md`, "This fork's installers".
 - Treat `msb doctor` as the authoritative readiness signal on Windows.
 - The execution-policy requirement is documented (README "First-Run Snags",
   `docs/howto/acq.md`); allow local scripts with
@@ -4098,6 +4154,203 @@ affects only sandboxes created before that change.
 
 ---
 
+## 60. Windows: DLL Search Can Reach the Workspace
+
+**Status:** Investigated, not hardened in code. Deferred until a Windows host
+check shows a program acq starts probing the current directory for a DLL.
+
+### Symptoms
+
+None observed. The risk: a DLL planted in the workspace is loaded by a native
+program acq starts on the host, the way a planted `git.exe` would have run before
+programs were resolved from absolute `PATH` entries only.
+
+### Root Cause
+
+acq resolves every program it starts to an absolute path, and the launchers set
+`NoDefaultCurrentDirectoryInExePath=1`, but neither changes how Windows finds a
+program's **DLLs**. With safe DLL search mode (the default), `LoadLibrary` looks
+in the program's own directory, then the system directories, then the **current
+directory**, then `PATH`. Every process acq starts inherits acq's current
+directory, which is normally the workspace: the Python acq never passes `cwd=`
+to a child, and the Bash acq runs in the caller's directory. So a DLL that a
+program loads by bare name, and that is in neither its own directory nor the
+system directories, is looked for in the workspace before `PATH`.
+
+What was checked (statically, from the code and the shipped layouts):
+
+- acq's own Python process loads nothing by bare name. Its only `ctypes` use is
+  `kernel32`, a KnownDLL, and CPython 3.8+ loads extension-module dependencies
+  without searching the current directory or `PATH`.
+- The managed runtime's `python.exe`, Git for Windows' `bash.exe`/`git.exe` (with
+  `msys-2.0.dll`) and `powershell.exe` keep their DLLs in their own or the
+  system directories.
+- Not checked: `msb.exe`, `sbx.exe` and anything they start. A phantom DLL (one
+  a program probes for but nobody ships) or a dependency expected on `PATH`
+  would be found in the workspace first. This needs a Windows host to observe.
+
+### Fix
+
+No code change yet: removing the current directory from a child's DLL search
+order would mean starting each child from a directory outside the workspace
+(several commands take workspace-relative paths) or relying on how
+`SetDllDirectoryW("")` is inherited by child processes, and neither can be
+verified without a Windows host. An administrator can close it for every process
+now with the documented `CWDIllegalInDllSearch` setting (system-wide under
+`HKLM\SYSTEM\CurrentControlSet\Control\Session Manager`, or per program under
+`Image File Execution Options\<program>.exe`); `0xFFFFFFFF` removes the current
+directory from the DLL search order.
+
+### Prevention / Status
+
+**Unblock trigger:** the next Windows live check. Run `acq --backend msb run
+shell .` and `acq --backend sbx run shell .` from a workspace under Process
+Monitor, filtered to `.dll` paths inside the workspace (any result, including
+`NAME NOT FOUND`), for `msb.exe`, `sbx.exe`, `git.exe`, `bash.exe` and
+`python.exe` and their children. If none probes the workspace, record that and
+close this entry. If one does, harden that launch (start it from a trusted
+directory, or confirm `SetDllDirectoryW("")` in the launching process reaches
+it) and add a Windows test that plants the DLL.
+
+---
+
+## 61. Bash acq on Windows: Provider-Input `current` Is a Pointer File, Not a Symlink
+
+**Status:** Fixed for the Bash `acq` under Git Bash (`ACQ_IMPL=bash`, still the
+Windows default until ADR-0048m's gates are met). Verified on Windows 11 with
+stub backends and a stand-in for the pinned validator: the provider-input
+transaction, provider facts read back through the pointer file, and a stubbed
+`acq create` and `acq rm`. A create against the real pinned Patterns validator
+has not yet been run on Windows. Two follow-ups are tracked: see Prevention /
+Status.
+
+### Symptoms
+
+Before the fix, every Bash `acq create`, `acq run` and `acq rm` under Git Bash
+failed in the provider-input transaction:
+
+- `Python was not found; run without arguments to install from the Microsoft
+  Store …`: the snapshot, materialize and swap helpers ran `python3`, which on
+  Windows is missing or is the App Execution Alias stub.
+- `rm: cannot remove '…/.current.NNNN.NNNN': Is a directory`, then `acq(msb):
+  error: sandbox 'NAME' was created but provider inputs could not be published.`
+- With a provider kit, `acq: invalid provider facts: …/facts.json`: native
+  Windows Python wrote the facts reader's output with CRLF line endings, so each
+  value ended in a carriage return and failed validation.
+
+After the fix, `current` under a sandbox's provider-input root
+(`…/provider-input/<backend>/<name>.<sum>/current`) is a small text file holding
+`generations/generation.XXXXXXXX` on Windows, where Linux and macOS have a
+symlink with that same target.
+
+### Root Cause
+
+The helpers in `acq.backends/common.sh` assumed a POSIX Python. Native Windows
+CPython has no `O_NOFOLLOW`, `O_DIRECTORY`, `dir_fd` or `os.fchmod` (before 3.13).
+Publishing used `ln -s`, and Git Bash's default `ln -s` copies the target
+directory rather than linking it, so the temporary name was a directory that
+`rm -f` cannot remove.
+
+### Fix
+
+- `_acq_provider_input_snapshot`, `_acq_provider_input_materialize` and
+  `_acq_provider_input_atomic_replace` run through the same interpreter probe as
+  the directory helpers (`python3`, `python`, `py -3`, skipping the Store stub),
+  with paths mapped to Windows form by `_acq_provider_input_nt_path`. On native
+  Windows Python the snapshot walks each artifact path with `os.lstat`, refuses
+  symlinks and every reparse point (junctions included), checks that the opened
+  handle is the file it checked, and refuses names Win32 would rewrite
+  (trailing dot or space, `:` streams, device names such as `NUL` or `COM¹`).
+  On every platform the snapshot refuses a file with more than one hard link,
+  which could otherwise bring a file from outside the kit into it.
+- `_acq_provider_input_publish` writes `current` as a pointer file and renames it
+  over the old one with `os.replace`. The POSIX path, a relative symlink, is
+  unchanged.
+- `acq_provider_sandbox_facts`, the one reader of `current`, resolves it through
+  `_acq_provider_input_current_generation`, which accepts the symlink, the
+  pointer file and a real directory. A link or pointer counts only when its text
+  is exactly `generations/generation.<suffix>` and that directory passes the
+  no-link walk; otherwise the reader falls back to the facts recorded in host
+  config, as if `current` were absent.
+- `acq_provider_facts_json_fields` has its Python write bare LF line endings.
+
+The options considered for Windows publish:
+
+| Option | Admin or Developer Mode | Atomic switch | Why not chosen |
+|--------|-------------------------|---------------|----------------|
+| Directory junction (`mklink /J`, `New-Item -ItemType Junction`) | No | No | `MoveFileEx` cannot replace an existing directory, so a swap is remove-then-create. A junction needs an absolute target, so it breaks if the state directory moves, and it puts a reparse point in the tree that the walk is built to refuse and that recursive removal must not follow. |
+| `MSYS=winsymlinks:nativestrict` | Yes | Yes for a file symlink | Fails on a default Windows 11 client. |
+| **Pointer file** | No | Yes (`os.replace` of a file) | Chosen. |
+
+No sandbox mounts `current`. Both backends mount the exact generation
+(`acq_provider_input_sbx_mount`, `acq_provider_input_msb_mount`), and the msb
+mount source is the drive-form path `host_path` produces. On the host, `current`
+has one reader, `acq_provider_sandbox_facts`, which supplies the provider ids
+for the attach-time key check and the credential bindings; it reads the pointer
+file as described above. A sandbox created by an older acq, which mounted the
+whole root, would follow `current` inside the guest, but no such sandbox exists
+on Windows because the Bash transaction never completed there before. The
+Python acq's `provider_input.publish` calls `os.symlink`, which fails on Windows
+without Developer Mode or an administrator; it prints `could not publish the
+provider input` as a warning and continues, and the Bash reader then falls back
+to the recorded facts.
+
+If `current` is a link the Python acq left (a directory symlink or a junction,
+which `os.replace` cannot overwrite), Bash removes that link, never its target,
+and retries, so `current` is absent for that moment and a reader in that moment
+gets the recorded facts. A real directory named
+`current`, such as a copy left by an older Bash acq, is refused (`it is a
+directory, not a file or a link`) and kept; remove it, or run `acq rm NAME`, and
+recreate.
+
+### Residual risk: a parent directory swapped for a junction (Windows)
+
+The Windows snapshot checks each component of an artifact path with `os.lstat`
+and then opens the path by name, so a parent directory replaced with a junction
+between its check and the open is followed. (A swapped leaf is caught: the
+opened handle must be the file that was checked.) The directory walk
+`_acq_provider_input_nt_dir` has the same window. It matters most for local kit
+paths: a kit fetched from a repository is checked out into acq's private
+staging directory, but a local kit directory is read where it is, so anyone who
+can write there can race the walk. The POSIX snapshot has no such window,
+because it opens each component relative to the descriptor of the one before.
+
+Mitigation options, not yet implemented:
+
+1. Copy a local kit into the private staging directory first (with the same
+   no-link checks), so the snapshot only ever reads a tree that only acq writes.
+2. After opening each file, compare `GetFinalPathNameByHandleW` on the handle
+   with the path that was checked, through `ctypes`; a junction anywhere in the
+   path makes them differ.
+3. Walk with handles: open each component with `CreateFileW` and
+   `FILE_FLAG_OPEN_REPARSE_POINT`, without `FILE_SHARE_DELETE`, and open the
+   next relative to it (`NtCreateFile` with a root directory handle), which is
+   the Windows form of the POSIX descriptor walk.
+
+**Tracked:** unblock trigger is any change that makes local provider kits
+common on Windows, or ADR-0048m's default flip, whichever comes first.
+
+### Prevention / Status
+
+`test/bats/147-provider-input-projection.bats` covers the Windows code paths on
+Linux with an emulated native Python (links, junctions, a leaf swapped after its
+lstat, hard links, Win32 names, the pointer swap, a full transaction, provider
+facts read through every form of `current`, and an interpreter that writes
+CRLF). `test/bats/163-provider-input-windows-native.bats` runs on Git Bash with
+native Windows Python, in the Windows CI Git Bash subset: real junctions and
+hard links, a native symlink when one can be made, the pointer file and its
+fallback, provider facts read from native Python, the transaction from lock to
+unlock with a mount source Windows resolves, and a stubbed `acq create` and
+`acq rm`.
+
+**Tracked:** the Python acq still tries a symlink for `current` on Windows, and
+without Developer Mode it leaves none, so Bash falls back to the recorded facts
+for a sandbox the Python acq created. For both implementations to leave the
+same state, it should write the same pointer file. Unblock trigger: ADR-0048m's
+default flip.
+
+---
+
 ## Contributing
 
 When you discover a new failure mode:
@@ -4130,3 +4383,39 @@ The new default uses the pinned generic `devenv-shell` image and validates the
 pinned OpenCode kit before provisioning. If that validation fails, correct the
 pinned kit availability or metadata rather than falling back to an unpinned npm
 installation.
+
+---
+
+## Python acq on msb: Egress Policy Requires Recreation
+
+**Symptom:** An msb sandbox created by the Python acq (`acq-python`, or `acq`
+with `ACQ_IMPL=python`) can still reach any host, even though acq now applies a
+deny-by-default egress policy. `msb inspect <sandbox>` shows no
+`default_egress: deny`, and a fetch to a host outside the allowlist (for
+example `curl -sS -o /dev/null -w '%{http_code}' https://example.com/` from
+inside the sandbox) succeeds instead of being refused.
+
+**Cause:** Before the policy was added, the Python acq created msb sandboxes
+with no egress flags at all, so their egress was unrestricted. It now passes the
+same policy the Bash acq does: `--net-default-egress deny`, gateway DNS, the
+built-in kits' hosts and, under the default `balanced` tier, the balanced
+baseline (see `ACQ_NETWORK_TIER` in `docs/BACKEND_GUIDE.md`). msb fixes a
+sandbox's network rules when it is created and gives acq no way to change them
+afterwards, so `start`, `restart` and `run NAME` keep whatever rules the
+sandbox was created with. Only a sandbox created after the upgrade gets the
+policy. Sandboxes created by the Bash acq are not affected, because the Bash
+acq already applied this policy at create (ADR-0018).
+
+**Resolution:** Recreate each such sandbox after upgrading. Save anything
+outside the mounted project directory first, because the guest filesystem is
+discarded (the project directory itself lives on the host and is kept):
+
+```bash
+acq-python rm opencode-your-project
+acq-python run opencode /path/to/your/project
+```
+
+`acq create --recreate` does not apply here: it rebuilds only a sandbox that is
+missing its read-only trusted-config mount, and refuses any other. After
+recreating, `msb inspect <sandbox>` shows `default_egress: deny` (unless
+`ACQ_NETWORK_TIER=open` was confirmed on purpose).
