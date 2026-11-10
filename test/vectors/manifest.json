@@ -585,6 +585,22 @@
     {
       "contract": "Per-sandbox GitHub-token nudge at create and run (Bash advise_github_scope, ADR-0013): a workspace with GitHub repositories and no sandbox-scoped token is noted on stderr with the command to scope one later, under --json too; the prompt itself is interactive (Tier-2 evidence in py-acq/tests/test_create_config_settings.py)",
       "vectors": ["cli/create-json-notes-github-scope"]
+    },
+    {
+      "contract": "ADR-0034 --publish HOST:GUEST on run/create: both sides required, digits only, no leading zero, 1..65535, one host port per guest port; a malformed value creates nothing (validation_failed, exit 1)",
+      "vectors": ["cli/create-publish-malformed", "cli/create-publish-duplicate-guest"]
+    },
+    {
+      "contract": "ADR-0034 --publish on an msb create becomes a create-time -p HOST:GUEST mapping that ports reports as declared (origin create); an explicit host port in use fails the create, never substituted",
+      "vectors": ["cli/create-publish-msb", "cli/create-publish-host-busy"]
+    },
+    {
+      "contract": "ADR-0034 --publish is refused on sbx (unsupported_capability), naming the post-hoc acq ports NAME --publish",
+      "vectors": ["cli/create-publish-sbx-refused"]
+    },
+    {
+      "contract": "ADR-0015 acq ports NAME --publish HOST:GUEST is validated before any key, serve or tunnel is touched (the tunnel itself is Tier-2: py-acq/tests/test_publish.py)",
+      "vectors": ["cli/ports-publish-invalid"]
     }
   ]
 }

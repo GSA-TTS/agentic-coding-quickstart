@@ -49,6 +49,7 @@ from . import (
     kits,
     provider_creds,
     provider_input,
+    publish,
     secretstore,
     state,
     timeouts,
@@ -702,6 +703,9 @@ def provision_substrate(name: str, steps: list[tuple[str, list[str]]]) -> None:
 
 
 def stop(name: str) -> None:
+    # A stopped sandbox can no longer serve its post-hoc tunnels (ADR-0015), so
+    # they are stopped first, whatever the stop's outcome, as in Bash.
+    publish.teardown(name)
     proc = _run(["stop", name])
     if proc.returncode != 0:
         raise MsbError(
@@ -712,6 +716,7 @@ def stop(name: str) -> None:
 
 
 def remove(name: str) -> None:
+    publish.teardown(name)
     proc = _run(["remove", "--force", name])
     if proc.returncode != 0:
         raise MsbError(
@@ -953,13 +958,39 @@ def ports(name: str) -> list[dict]:
                 {
                     "host_port": entry["host_port"],
                     "guest_port": entry["guest_port"],
-                    # TODO(publish): post-hoc `--publish` mappings (ADR-0015) must
-                    # carry origin="post-hoc"; only create-time `-p` mappings read
-                    # from `msb inspect` are "create".
                     "origin": "create",
                 }
             )
-    return out
+    # The post-hoc tunnels acq recorded (ADR-0015); msb knows nothing of them.
+    return out + publish.posthoc_ports(name)
+
+
+def publish_ports(name: str, mappings: list[str]) -> list[dict]:
+    """``acq ports NAME --publish H:G...``: open and record one tunnel per mapping (ADR-0015).
+
+    The mappings are validated by the caller. Raises :class:`MsbError`.
+    """
+
+    def authorize(pub: Path) -> bool:
+        return _run(["ssh", "authorize", "--file", str(pub)], timeout=60).returncode == 0
+
+    def run(argv: list[str]) -> int:
+        return hostexec.run_captured(argv, timeout=60).returncode
+
+    try:
+        tunnels = publish.publish_posthoc(name, mappings, msb_command(), authorize, run)
+    except publish.PublishError as exc:
+        raise MsbError(exc.code, exc.message, exc.remediation) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise MsbError(errors.TIMEOUT, f"a host command did not finish while publishing a port of '{name}'",
+                       "check that msb and ssh-keygen respond, then retry") from exc
+    except OSError as exc:
+        raise MsbError(
+            errors.FAILURE,
+            f"could not open a port tunnel for sandbox '{name}': {exc.strerror or exc}",
+            "check that msb and the OpenSSH client run, and that the acq state directory is writable",
+        ) from exc
+    return [{**t.mapping(), "serve_port": t.serve_port} for t in tunnels]
 
 
 # ---------------------------------------------------------------------------

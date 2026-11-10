@@ -10,6 +10,7 @@ so two acq commands never interleave on one sandbox's guest and host records.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import os
 import shlex
@@ -30,6 +31,7 @@ from .. import (
     msb,
     provider_creds,
     provider_input,
+    publish,
     sbx,
     secretstore,
     security,
@@ -185,11 +187,13 @@ class _KitPlan:
     """The kits a create applies, and which of them provides the agent (if any).
 
     ``selection`` is the kit selection they came from (the sbx heal records use it).
+    ``publish`` are the ``HOST:GUEST`` overrides for the kits' published ports (msb).
     """
 
     kits: list[kit_msb.Kit]
     agent_kit: str | None
     selection: kitspec.KitSelection | None = None
+    publish: tuple[str, ...] = ()
 
     @property
     def entrypoint(self) -> str | None:
@@ -197,6 +201,20 @@ class _KitPlan:
             if kit.name == self.agent_kit:
                 return kit.spec.agent_field("entrypoint")
         return None
+
+
+@dataclass(frozen=True)
+class _CreateOpts:
+    """What one ``create``/``run`` adds to a new sandbox beyond its agent, kits and image.
+
+    ``publish`` are the validated ``--publish HOST:GUEST`` values (msb only,
+    ADR-0034).
+    """
+
+    publish: tuple[str, ...] = ()
+
+
+_NO_OPTS = _CreateOpts()
 
 
 def _plan_msb_kits(
@@ -277,13 +295,14 @@ def _kit_data(plan: _KitPlan, result: kit_msb.ApplyResult) -> dict:
 
 def _new_msb_sandbox(
     command: str, emit_json: bool, *, agent: str, workspace: str, name: str, image_flag: str | None,
-    cli_kits: list[str],
+    cli_kits: list[str], opts: _CreateOpts = _NO_OPTS,
 ) -> tuple[dict | None, int | None]:
     """Plan the kits, create the guest, apply the kits; the result data or an emitted exit code."""
     image = _resolve_image(image_flag, agent)
     plan, exit_code = _plan_msb_kits(agent, cli_kits, image, command, emit_json)
     if plan is None:
         return None, exit_code
+    plan = dataclasses.replace(plan, publish=opts.publish)
     steps, exit_code = _substrate_plan(image, plan.agent_kit, command, emit_json)
     if exit_code is not None:
         return None, exit_code
@@ -320,7 +339,7 @@ def _plan_sbx_kits(
 
 def _new_sbx_sandbox(
     command: str, emit_json: bool, *, agent: str, workspace: str, name: str, image_flag: str | None,
-    cli_kits: list[str],
+    cli_kits: list[str], opts: _CreateOpts = _NO_OPTS,
 ) -> tuple[dict | None, int | None]:
     """Translate the kits, create the sandbox with them, then wait for kit startup (Bash sbx provision).
 
@@ -641,7 +660,7 @@ def _create_sandbox(
     """
     adapter = common._adapter(backend)
     error_cls = sbx.SbxError if backend == "sbx" else msb.MsbError
-    secret_bindings, ro_mount = None, False
+    secret_bindings, ro_mount, port_mappings = None, False, None
     unconfirmed = backend == "sbx"  # until the kit startup barrier is seen (_finish_sbx_create)
     kit_set = plan.kits if plan else []
     if backend == "msb":
@@ -656,7 +675,8 @@ def _create_sandbox(
                           kits_unconfirmed=True)
         else:
             ro_mount = security.ro_mount_supported()
-            secret_bindings = _msb_create(name, image, workspace, kit_set, ro_mount=ro_mount)
+            secret_bindings, port_mappings = _msb_create(name, image, workspace, kit_set, ro_mount=ro_mount,
+                                                         overrides=plan.publish if plan else ())
         if not _wait_exec_ready(backend, name):
             _not_exec_ready(backend, adapter, name, error_cls)
     _fresh_guest(backend, adapter, name, ro_mount=ro_mount)
@@ -673,6 +693,8 @@ def _create_sandbox(
     if secret_bindings is not None:
         data["secret_bindings"] = secret_bindings
         data["ro_host_config"] = ro_mount
+    if port_mappings is not None:
+        data["ports"] = port_mappings
     return data
 
 
@@ -728,13 +750,21 @@ def _write_record(backend: str, name: str, *, agent: str, workspace: str, image:
         ) from exc
 
 
-def _msb_create(name: str, image: str, workspace: str, kit_set: list[kit_msb.Kit], *, ro_mount: bool) -> list[str]:
-    """``msb create`` with the kit set's flags; the staged startup script is removed after.
+def _msb_create(name: str, image: str, workspace: str, kit_set: list[kit_msb.Kit], *, ro_mount: bool,
+                overrides: tuple[str, ...] = ()) -> tuple[list[str], list[dict]]:
+    """``msb create`` with the kit set's flags; its secret bindings and declared port mappings.
 
-    The provider credential gate runs first (msb binds credentials only at
+    The published ports are mapped first (:func:`publish.create_port_flags`): a
+    port that cannot be mapped refuses the create before anything is staged.
+    The provider credential gate runs next (msb binds credentials only at
     create), then the provider-input generation is staged and mounted
-    read-only; it is published only once the create succeeded.
+    read-only; it is published only once the create succeeded. The staged
+    startup script is removed after.
     """
+    try:
+        port_flags, mappings = publish.create_port_flags(name, kit_set, list(overrides))
+    except publish.PublishError as exc:
+        raise msb.MsbError(exc.code, exc.message, exc.remediation) from exc
     generation = _provider_prepare(name, kit_set, ro_mount=ro_mount)
     try:
         flags, staged = kit_msb.create_flags(name, kit_set, ro_mount=ro_mount)
@@ -745,6 +775,7 @@ def _msb_create(name: str, image: str, workspace: str, kit_set: list[kit_msb.Kit
             f"could not prepare the host-config directory for sandbox '{name}': {exc.strerror or exc}",
             "check that the acq state directory is writable and has free space, then retry",
         ) from exc
+    flags += port_flags
     if generation is not None:
         flags += provider_input.msb_flags(generation)
     try:
@@ -758,7 +789,7 @@ def _msb_create(name: str, image: str, workspace: str, kit_set: list[kit_msb.Kit
     finally:
         kit_msb.discard_staged(staged)
     _provider_publish("msb", name, generation)
-    return bindings
+    return bindings, mappings
 
 
 def _store_provider_key(adapter, provider: str, value: str) -> None:
@@ -952,6 +983,25 @@ def _provider_kits_flag(parsed) -> contextlib.AbstractContextManager[None]:
     return contextlib.nullcontext()
 
 
+def _create_opts(parsed, command: str, backend: str, emit_json: bool) -> tuple[_CreateOpts | None, int | None]:
+    """The ``create``/``run`` options for a new sandbox, or the emitted refusal.
+
+    ``--publish`` is checked with the Bash rules (a malformed value creates
+    nothing; Bash exits 1, so it is ``validation_failed``), then refused on sbx,
+    which picks the host port itself (Bash's refusal, ADR-0034).
+    """
+    pairs, problems = publish.validate_create_pairs(getattr(parsed, "publish", None) or [])
+    if problems:
+        return None, common._operational_failure(
+            command, errors.VALIDATION_FAILED, "; ".join(problems), publish.PUBLISH_EXAMPLE, emit_json,
+        )
+    if pairs and backend == "sbx":
+        return None, common._operational_failure(
+            command, errors.UNSUPPORTED, publish.SBX_REFUSAL, publish.SBX_REFUSAL_REMEDIATION, emit_json,
+        )
+    return _CreateOpts(publish=tuple(pairs)), None
+
+
 def run_create(parsed, emit_json: bool, backend: str) -> int:
     with _provider_kits_flag(parsed):
         return _run_create(parsed, emit_json, backend)
@@ -959,7 +1009,15 @@ def run_create(parsed, emit_json: bool, backend: str) -> int:
 
 def _run_create(parsed, emit_json: bool, backend: str) -> int:
     if parsed.recreate is not None:
+        if getattr(parsed, "publish", None):
+            return common._usage_failure(
+                "create", "--publish applies to a new sandbox; --recreate keeps the sandbox's own port mappings",
+                emit_json,
+            )
         return run_recreate(parsed, emit_json, backend)
+    opts, exit_code = _create_opts(parsed, "create", backend, emit_json)
+    if opts is None:
+        return exit_code if exit_code is not None else errors.EXIT_FAILURE
     if not parsed.agent or parsed.agent not in common.KNOWN_AGENTS:
         return common._usage_failure(
             "create",
@@ -981,7 +1039,7 @@ def _run_create(parsed, emit_json: bool, backend: str) -> int:
         stored_token = _scope_advice(backend, name, workspace, emit_json)
     try:
         with lock.sandbox_lock(backend, name):
-            return _create_locked(parsed, emit_json, backend, name, workspace, cli_kits, stored_token)
+            return _create_locked(parsed, emit_json, backend, name, workspace, cli_kits, stored_token, opts)
     except lock.SandboxLockTimeout as exc:
         # A stored token is kept: the command holding the lock may be a create
         # of this same sandbox that binds it, and a retry reuses it.
@@ -1051,7 +1109,7 @@ def _forget_scoped_token(backend: str, name: str) -> None:
 
 
 def _create_locked(parsed, emit_json: bool, backend: str, name: str, workspace: str, cli_kits: list[str],
-                   stored_token: bool = False) -> int:
+                   stored_token: bool = False, opts: _CreateOpts = _NO_OPTS) -> int:
     """The body of ``create`` once the sandbox's lifecycle lock is held."""
     adapter = common._adapter(backend)
     if adapter.exists(name):
@@ -1066,7 +1124,7 @@ def _create_locked(parsed, emit_json: bool, backend: str, name: str, workspace: 
     new_sandbox = _new_sbx_sandbox if backend == "sbx" else _new_msb_sandbox
     data, exit_code = new_sandbox(
         "create", emit_json, agent=parsed.agent, workspace=workspace, name=name, image_flag=parsed.image,
-        cli_kits=cli_kits,
+        cli_kits=cli_kits, opts=opts,
     )
     if data is None:
         if stored_token:
@@ -1254,6 +1312,7 @@ def _recreate_msb(
     steps, exit_code = _substrate_plan(image, plan.agent_kit, "create", emit_json)
     if exit_code is not None:
         return None, exit_code
+    plan = dataclasses.replace(plan, publish=_declared_create_ports(name))
     try:
         msb.egress_flags(kit_msb.egress_names(plan.kits))
         # A pin mismatch or a missing provider key refuses here, old guest intact.
@@ -1293,6 +1352,27 @@ def _recreate_msb(
     return {**data, **_kit_data(plan, result)}, None
 
 
+def _declared_create_ports(name: str) -> tuple[str, ...]:
+    """The old guest's create-time ``HOST:GUEST`` mappings, which its recreation keeps.
+
+    Without them every kit port would get a new free host port, and a
+    ``--publish`` given at create would be lost (msb holds it, not acq). A guest
+    already gone, or one whose ports cannot be read, has none to keep; the
+    recreation then maps them as a fresh create would, with a warning.
+    """
+    try:
+        if not msb.exists(name):
+            return ()
+        entries = msb.ports(name)
+    except msb.MsbError as exc:
+        _warn(f"the port mappings of '{name}' could not be read ({exc.message}); "
+              "the recreated sandbox maps its ports afresh")
+        return ()
+    return tuple(f"{e['host_port']}:{e['guest_port']}" for e in entries
+                 if e.get("origin") == "create" and isinstance(e.get("host_port"), int)
+                 and isinstance(e.get("guest_port"), int))
+
+
 def _restore_record(backend: str, name: str, record: dict) -> None:
     """Put back the record a failed recreate started from, so the recreate can be retried.
 
@@ -1308,7 +1388,7 @@ def _restore_record(backend: str, name: str, record: dict) -> None:
 
 def _run_prepare_locked(
     parsed, emit_json: bool, backend: str, target: str, name: str, workspace: str, cli_kits: list[str],
-    stored_token: bool = False,
+    stored_token: bool = False, opts: _CreateOpts = _NO_OPTS,
 ) -> tuple[dict | None, int | None]:
     """Create-or-reattach for ``run AGENT PATH`` with the lifecycle lock held.
 
@@ -1324,7 +1404,7 @@ def _run_prepare_locked(
         new_sandbox = _new_sbx_sandbox if backend == "sbx" else _new_msb_sandbox
         data, exit_code = new_sandbox(
             "run", emit_json, agent=target, workspace=workspace, name=name, image_flag=parsed.image,
-            cli_kits=cli_kits,
+            cli_kits=cli_kits, opts=opts,
         )
         if data is None:
             if stored_token:
@@ -1335,6 +1415,8 @@ def _run_prepare_locked(
     if found is None:
         return None, exit_code
     record, recorded = found
+    if opts.publish:
+        print(publish.reattach_note(name), file=sys.stderr)
     # A --kit given again on this run is authoritative for the heal, as in Bash.
     _heal_on_reattach(backend, name, record, cli_kits if parsed.kit else None)
     # Re-attach: read the recorded kit/entrypoint (lenient) so the launch surfaces provenance.
@@ -1366,6 +1448,9 @@ def _run_run(parsed, emit_json: bool, backend: str) -> int:
     """
     adapter = common._adapter(backend)
     target = parsed.target
+    opts, exit_code = _create_opts(parsed, "run", backend, emit_json)
+    if opts is None:
+        return exit_code if exit_code is not None else errors.EXIT_FAILURE
     if target in common.KNOWN_AGENTS:
         workspace, exit_code = common._validate_workspace("run", parsed.path, emit_json)
         if exit_code is not None:
@@ -1384,7 +1469,7 @@ def _run_run(parsed, emit_json: bool, backend: str) -> int:
         try:
             with lock.sandbox_lock(backend, name):
                 data, exit_code = _run_prepare_locked(parsed, emit_json, backend, target, name, workspace, cli_kits,
-                                                      stored_token)
+                                                      stored_token, opts)
         except lock.SandboxLockTimeout as exc:
             # A stored token is kept: the command holding the lock may be a
             # create of this same sandbox that binds it, and a retry reuses it.
@@ -1410,6 +1495,8 @@ def _run_run(parsed, emit_json: bool, backend: str) -> int:
             f"'{target}' is not a known agent or an existing sandbox",
             emit_json,
         )
+    if opts.publish:
+        print(publish.reattach_note(target), file=sys.stderr)
     return _run_by_name(backend, target, emit_json)
 
 

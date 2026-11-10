@@ -18,6 +18,10 @@ sandbox's bindings in ``secrets.json`` next to the catalog as ``{name: {ENV:
 ``start NAME`` checks the same way that every variable the sandbox has bound is
 set in its environment (msb keeps no value across a stop) and absent from argv.
 
+``create`` records each ``-p HOST:GUEST`` in ``ports.json``, and ``inspect``
+reports them at ``active_config.network.ports`` unless ``ACQ_MSB_STUB_PORTS``
+declares the sandbox's ports itself.
+
 ``create`` also records each ``--volume HOST:GUEST[:ro]`` in ``mounts.json``,
 and ``inspect`` reports them as ``active_config.mounts`` (``{guest, host, type:
 "Bind", options: {readonly}}``), which is what acq reads to confirm a read-only
@@ -166,6 +170,34 @@ def _save_mounts(records: dict[str, list]) -> None:
     path.write_text(json.dumps(records, sort_keys=True), encoding="utf-8")
 
 
+def _ports_path() -> Path:
+    return _catalog_path().with_name("ports.json")
+
+
+def _load_ports() -> dict[str, list]:
+    try:
+        data = json.loads(_ports_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_ports(records: dict[str, list]) -> None:
+    _ports_path().parent.mkdir(parents=True, exist_ok=True)
+    _ports_path().write_text(json.dumps(records), encoding="utf-8")
+
+
+def _published(args: list[str]) -> list[dict]:
+    """``-p HOST:GUEST`` as msb records it (``PublishedPort``)."""
+    out = []
+    for spec in _flag_values(args, "-p"):
+        host, _, guest = spec.partition(":")
+        if host.isdigit() and guest.isdigit():
+            out.append({"host_port": int(host), "guest_port": int(guest), "protocol": "tcp",
+                        "host_bind": "127.0.0.1"})
+    return out
+
+
 def _volume_mounts(args: list[str]) -> list[dict]:
     """``--volume HOST:GUEST[:ro]`` flags as msb inspect mount records."""
     out = []
@@ -297,6 +329,9 @@ def main(argv: list[str]) -> int:
         mounts = _load_mounts()
         mounts[name] = _volume_mounts(args)
         _save_mounts(mounts)
+        published = _load_ports()
+        published[name] = _published(args)
+        _save_ports(published)
         return 0
 
     if cmd == "modify":
@@ -390,12 +425,17 @@ def main(argv: list[str]) -> int:
             declared = {}
         if not isinstance(declared, dict):
             declared = {}
-        port_list = declared.get(name, [])
+        port_list = declared.get(name, []) if ports_env else _load_ports().get(name, [])
         # msb 0.6.7 `inspect --format json` shape (ADR-0014): published ports live
         # at active_config.network.ports[] as {host_port, guest_port, protocol,
         # host_bind}.
         print(json.dumps({"active_config": {"network": {"ports": port_list}, "mounts": _inspect_mounts(name)}}))
         return 0
+
+    if cmd == "ssh" and args[1:2] == ["authorize"]:
+        # ``msb ssh authorize --file PUB``: succeeds when the key file exists.
+        pub = _arg_after(args, "--file")
+        return 0 if pub and Path(pub).is_file() else 1
 
     if cmd == "echo":
         # Used only to exercise verbatim passthrough: prints its args and returns
@@ -439,6 +479,9 @@ def main(argv: list[str]) -> int:
         mounts = _load_mounts()
         if mounts.pop(name, None) is not None:
             _save_mounts(mounts)
+        published = _load_ports()
+        if published.pop(name, None) is not None:
+            _save_ports(published)
         return 0
 
     print(f"msb: unrecognized subcommand '{cmd}'", file=sys.stderr)

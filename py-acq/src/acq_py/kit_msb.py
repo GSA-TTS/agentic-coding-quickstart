@@ -234,10 +234,13 @@ def _load(name: str) -> kitspec.KitSpec:
 
 
 def _check_creatable(name: str, spec: kitspec.KitSpec) -> None:
-    if spec.published_ports or spec.volumes:
+    # Published ports become create-time -p flags (acq_py.publish); volumes are
+    # not created yet, so a kit that needs one is refused rather than created
+    # without its storage.
+    if spec.volumes:
         raise msb.MsbError(
             errors.UNSUPPORTED,
-            f"kit '{name}' declares published ports or volumes, which the Python acq does not create yet",
+            f"kit '{name}' declares volumes, which the Python acq does not create yet",
             "use the Bash acq (ACQ_IMPL=bash) for this kit",
         )
 
