@@ -1556,3 +1556,29 @@ def test_a_fifo_gitignore_cannot_hang_the_dirty_check(env, tmp_path, monkeypatch
     assert rc == 0, err
     assert "could not check the workspace for uncommitted changes" in err and "skipping that note" in err
     assert (_scratch(tmp_path) / ".git").is_dir()
+
+
+@posix_only  # recreation is for the read-only mount, which Windows never requests
+def test_recreate_of_a_clone_sandbox_keeps_ports_as_preferences_and_its_scratch(env, tmp_path, monkeypatch,
+                                                                                capsys):
+    from acq_py import security
+    from acq_py.commands import lifecycle
+
+    monkeypatch.setattr(security, "WINDOWS", False)
+    assert _create(capsys, str(env), "--clone")[0] == 0
+    _drop_ro_mount(tmp_path, NAME)
+    monkeypatch.setattr(lifecycle, "_declared_create_ports", lambda _name: (("6767", 6868),))
+    seen: list[dict] = []
+    real = lifecycle._msb_create
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(lifecycle, "_msb_create", spy)
+    rc, doc, err = _acq(capsys, "create", "--recreate", NAME, "--yes")
+    assert rc == 0, (doc, err)
+    (call,) = seen
+    assert call["preferred"] == {"6767": 6868} and call["overrides"] == ()
+    assert call["clone_src"] == os.path.realpath(_scratch(tmp_path))
+    assert doc["data"]["clone"] is True

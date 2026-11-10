@@ -243,6 +243,24 @@ def exists(name: str) -> bool:
     return names is not None and name in names
 
 
+# The sbx CLI forwards the host ssh-agent into the guest by itself whenever
+# SSH_AUTH_SOCK is set (its child inherits acq's environment), so acq has nothing
+# to translate; it only makes that implicit forward a conscious choice with a
+# one-time notice, as the Bash adapter and the msb forward do (ADR-0021).
+_SSH_AGENT_NOTICE_SHOWN = [False]
+SSH_AGENT_NOTICE = (
+    "acq(sbx): sbx forwards your host ssh-agent into the guest because SSH_AUTH_SOCK"
+    " is set. Guest code can use every key the agent holds while the sandbox runs;"
+    " unset SSH_AUTH_SOCK to opt out, or run 'ssh-add -c' to confirm each use. See ADR-0021."
+)
+
+
+def _ssh_agent_notice() -> None:
+    if os.environ.get("SSH_AUTH_SOCK") and not _SSH_AGENT_NOTICE_SHOWN[0]:
+        _SSH_AGENT_NOTICE_SHOWN[0] = True
+        print(SSH_AGENT_NOTICE, file=sys.stderr)
+
+
 def create(
     name: str,
     image: str,
@@ -276,6 +294,7 @@ def create(
     path as given, the logical path sbx mounts it at) on every create, and
     ``ACQ_CLONE=1`` with ``clone``, as the Bash adapter sets them.
     """
+    _ssh_agent_notice()
     argv = ["create"]
     if agent:
         argv.append(agent)
@@ -470,6 +489,17 @@ def copy(src: str, dst: str) -> int:
     """Invoke ``sbx cp SRC DST``; return its exit status (status preservation)."""
     proc = _run(["cp", src, dst])
     return proc.returncode
+
+
+def publish_ports(name: str, mappings: list[str], *, json_mode: bool) -> int:
+    """``sbx ports NAME --publish=V...``: sbx's own post-hoc publish, as Bash forwards it.
+
+    The values are sbx's to judge (its syntax is not acq's ``HOST:GUEST``), so they
+    go through verbatim, each joined to its flag as one argv element (so a value
+    can never be read as a flag of its own). The caller refuses a non-loopback
+    bind first (:func:`acq_py.publish.sbx_bind_problem`). Returns sbx's exit status.
+    """
+    return _run_stream(["ports", name, *(f"--publish={m}" for m in mappings)], json_mode=json_mode)
 
 
 def ports(name: str) -> list[dict]:

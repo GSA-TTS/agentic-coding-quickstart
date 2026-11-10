@@ -10,6 +10,7 @@ so two acq commands never interleave on one sandbox's guest and host records.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import os
 import shlex
@@ -31,12 +32,15 @@ from .. import (
     msb_clone,
     provider_creds,
     provider_input,
+    publish,
     sbx,
     secretstore,
     security,
+    ssh_agent,
     state,
 )
-from . import common, creds, session
+from . import common, configure, creds, session
+from . import kit as kit_cmd
 
 # Module-local seam for the host OS class (as ``msb.WINDOWS``).
 WINDOWS = os.name == "nt"
@@ -186,11 +190,16 @@ class _KitPlan:
     """The kits a create applies, and which of them provides the agent (if any).
 
     ``selection`` is the kit selection they came from (the sbx heal records use it).
+    ``publish`` are the ``HOST:GUEST`` overrides for the kits' published ports (msb).
+    ``preferred`` are host ports a recreate would like to keep, as ``(guest,
+    host)`` pairs (:func:`publish.create_port_flags`).
     """
 
     kits: list[kit_msb.Kit]
     agent_kit: str | None
     selection: kitspec.KitSelection | None = None
+    publish: tuple[str, ...] = ()
+    preferred: tuple[tuple[str, int], ...] = ()
 
     @property
     def entrypoint(self) -> str | None:
@@ -198,6 +207,28 @@ class _KitPlan:
             if kit.name == self.agent_kit:
                 return kit.spec.agent_field("entrypoint")
         return None
+
+
+@dataclass(frozen=True)
+class _CreateOpts:
+    """What one ``create``/``run`` adds to a new sandbox beyond its agent, kits and image.
+
+    ``publish`` are the validated ``--publish HOST:GUEST`` values (msb only,
+    ADR-0034). ``extras`` are the extra kit refs the create-time picker chose,
+    which replace config ``extra_kits`` for this sandbox; ``None`` keeps the
+    configured selection. ``clone`` is clone mode (``--clone`` or
+    ``ACQ_CLONE=1``, ADR-0027).
+    """
+
+    publish: tuple[str, ...] = ()
+    extras: tuple[str, ...] | None = None
+    clone: bool = False
+
+    def extra_refs(self) -> list[str] | None:
+        return None if self.extras is None else list(self.extras)
+
+
+_NO_OPTS = _CreateOpts()
 
 
 def _plan_msb_kits(
@@ -243,7 +274,8 @@ def _apply_msb_kits(
     # Bash checks the base image's kit prerequisites at provision only, not on
     # a heal; a warning, never a failure.
     kit_msb.check_prereqs(name)
-    result = kit_msb.ensure_kits_applied(name, plan.kits, ro_required=ro_required)
+    result = kit_msb.ensure_kits_applied(name, plan.kits, ro_required=ro_required,
+                                         ssh_auth_sock=ssh_agent.forwarding_sock(name))
     if not result.agent_user:
         # Fatal for a new guest, as in Bash's provision: without a home the agent
         # owns, every agent-user kit command fails.
@@ -256,6 +288,8 @@ def _apply_msb_kits(
             command, errors.FAILURE, f"could not apply kit '{plan.agent_kit}' to sandbox '{name}'",
             "check network access from the sandbox and the warnings above, then retry", emit_json,
         )
+    # The forwarded host ssh-agent's in-guest bridge, once the kits are in (ADR-0021).
+    ssh_agent.provision_bridge(name)
     try:
         kit_msb.cli_kits_write(name, plan.kits)
         if plan.agent_kit is not None:
@@ -281,37 +315,39 @@ def _kit_data(plan: _KitPlan, result: kit_msb.ApplyResult) -> dict:
 
 def _new_msb_sandbox(
     command: str, emit_json: bool, *, agent: str, workspace: str, name: str, image_flag: str | None,
-    cli_kits: list[str], clone: bool = False,
+    cli_kits: list[str], opts: _CreateOpts = _NO_OPTS,
 ) -> tuple[dict | None, int | None]:
     """Plan the kits, create the guest, apply the kits; the result data or an emitted exit code.
 
-    With ``clone`` the guest mounts a fresh scratch clone of ``workspace``
+    With ``opts.clone`` the guest mounts a fresh scratch clone of ``workspace``
     (:mod:`acq_py.msb_clone`); it goes with the guest if the kits fail.
     """
     image = _resolve_image(image_flag, agent)
-    plan, exit_code = _plan_msb_kits(agent, cli_kits, image, command, emit_json)
+    plan, exit_code = _plan_msb_kits(agent, cli_kits, image, command, emit_json, opts.extra_refs())
     if plan is None:
         return None, exit_code
+    plan = dataclasses.replace(plan, publish=opts.publish)
     steps, exit_code = _substrate_plan(image, plan.agent_kit, command, emit_json)
     if exit_code is not None:
         return None, exit_code
     try:
-        data = _create_sandbox("msb", agent, workspace, name, image, plan.agent_kit, plan=plan, clone=clone)
+        data = _create_sandbox("msb", agent, workspace, name, image, plan.agent_kit, plan=plan, clone=opts.clone)
     except common._ADAPTER_ERRORS as exc:
         return None, common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
     result, exit_code = _apply_msb_kits(name, plan, steps, command, emit_json, ro_required=data["ro_host_config"])
     if result is None:
-        _discard_half_created("msb", name, clone=clone)
+        _discard_half_created("msb", name, clone=opts.clone)
         return None, exit_code
     return {**data, **_kit_data(plan, result)}, None
 
 
 def _plan_sbx_kits(
-    agent: str, cli_kits: list[str], image: str, command: str, emit_json: bool
+    agent: str, cli_kits: list[str], image: str, command: str, emit_json: bool, extras: list[str] | None = None
 ) -> tuple[_KitPlan | None, int | None]:
     """Select, verify and parse the kit set for an sbx create (:func:`kit_sbx.select`)."""
     try:
-        resolved, selection = kit_sbx.select(agent, cli_kits, image_is_default=image == common.OPENCODE_DEVENV_IMAGE)
+        resolved, selection = kit_sbx.select(agent, cli_kits, image_is_default=image == common.OPENCODE_DEVENV_IMAGE,
+                                             extras=extras)
     except kitspec.KitSelectionError as exc:
         return None, common._operational_failure(
             command, errors.VALIDATION_FAILED, str(exc),
@@ -328,17 +364,17 @@ def _plan_sbx_kits(
 
 def _new_sbx_sandbox(
     command: str, emit_json: bool, *, agent: str, workspace: str, name: str, image_flag: str | None,
-    cli_kits: list[str], clone: bool = False,
+    cli_kits: list[str], opts: _CreateOpts = _NO_OPTS,
 ) -> tuple[dict | None, int | None]:
     """Translate the kits, create the sandbox with them, then wait for kit startup (Bash sbx provision).
 
     sbx applies the kits itself (``sbx create --kit DIR``). On the default image
     OpenCode comes from the pinned kit, so sbx is given the ``shell`` agent and
-    does not add its own OpenCode kit as well. ``clone`` is sbx's native
-    ``--clone`` (ADR-0027).
+    does not add its own OpenCode kit as well. ``opts.clone`` is sbx's
+    native ``--clone`` (ADR-0027).
     """
     image = _resolve_image(image_flag, agent)
-    plan, exit_code = _plan_sbx_kits(agent, cli_kits, image, command, emit_json)
+    plan, exit_code = _plan_sbx_kits(agent, cli_kits, image, command, emit_json, opts.extra_refs())
     if plan is None:
         return None, exit_code
     selected, exit_code = _sbx_provider_gate(command, name, plan, emit_json)
@@ -361,7 +397,7 @@ def _new_sbx_sandbox(
     try:
         data = _create_sandbox("sbx", agent, workspace, name, image, plan.agent_kit,
                                sbx_create=("shell" if generic else agent, prepared.flags), sbx_extra=mount,
-                               clone=clone)
+                               clone=opts.clone)
     except common._ADAPTER_ERRORS as exc:
         _sbx_provider_abandon(name, generation, created=True)
         return None, common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
@@ -585,6 +621,7 @@ def _clear_host_records(backend: str, name: str) -> None:
         kit_msb.remove_host_config(name)
         kit_msb.cli_kits_remove(name)
         provider_input.remove(backend, name)
+        ssh_agent.link_remove(name)  # the managed ssh-agent route link (ADR-0021)
     else:
         kit_sbx.remove_host_config(name)
         kit_msb.cli_kits_remove(name, backend="sbx")
@@ -700,7 +737,7 @@ def _create_sandbox(
         if fresh_clone:
             clone_src = msb_clone.setup(name, workspace, lambda n: _exists_quietly("msb", n))
     try:
-        return _create_guest(backend, adapter, agent, workspace, name, image, kit_set,
+        return _create_guest(backend, adapter, agent, workspace, name, image, plan,
                              sbx_create=sbx_create, sbx_extra=sbx_extra, clone=clone, clone_src=clone_src)
     except BaseException:
         if fresh_clone:
@@ -709,13 +746,14 @@ def _create_sandbox(
 
 
 def _create_guest(
-    backend: str, adapter, agent: str, workspace: str, name: str, image: str, kit_set: list[kit_msb.Kit], *,
+    backend: str, adapter, agent: str, workspace: str, name: str, image: str, plan: _KitPlan | None, *,
     sbx_create: tuple[str, list[str]] | None, sbx_extra: tuple[list[str], list[str]], clone: bool,
     clone_src: str | None,
 ) -> dict:
     """The body of :func:`_create_sandbox` once any scratch clone exists."""
+    kit_set = plan.kits if plan else []
     error_cls = sbx.SbxError if backend == "sbx" else msb.MsbError
-    secret_bindings, ro_mount = None, False
+    secret_bindings, ro_mount, port_mappings = None, False, None
     unconfirmed = backend == "sbx"  # until the kit startup barrier is seen (_finish_sbx_create)
     cloned = bool(clone_src) if backend == "msb" else clone
     with _store_reading(error_cls, "nothing was created"):  # raised before anything was created
@@ -728,7 +766,10 @@ def _create_guest(
                           kits_unconfirmed=True, clone=cloned)
         else:
             ro_mount = security.ro_mount_supported()
-            secret_bindings = _msb_create(name, image, workspace, kit_set, ro_mount=ro_mount, clone_src=clone_src)
+            secret_bindings, port_mappings = _msb_create(name, image, workspace, kit_set, ro_mount=ro_mount,
+                                                         overrides=plan.publish if plan else (),
+                                                         preferred=dict(plan.preferred) if plan else None,
+                                                         clone_src=clone_src)
         if not _wait_exec_ready(backend, name):
             _not_exec_ready(backend, adapter, name, error_cls)
     _fresh_guest(backend, adapter, name, ro_mount=ro_mount)
@@ -747,6 +788,8 @@ def _create_guest(
     if secret_bindings is not None:
         data["secret_bindings"] = secret_bindings
         data["ro_host_config"] = ro_mount
+    if port_mappings is not None:
+        data["ports"] = port_mappings
     return data
 
 
@@ -804,15 +847,23 @@ def _write_record(backend: str, name: str, *, agent: str, workspace: str, image:
 
 
 def _msb_create(name: str, image: str, workspace: str, kit_set: list[kit_msb.Kit], *, ro_mount: bool,
-                clone_src: str | None = None) -> list[str]:
-    """``msb create`` with the kit set's flags; the staged startup script is removed after.
+                overrides: tuple[str, ...] = (), preferred: dict[str, int] | None = None,
+                clone_src: str | None = None) -> tuple[list[str], list[dict]]:
+    """``msb create`` with the kit set's flags; its secret bindings and declared port mappings.
 
     ``clone_src`` is a scratch clone to mount at ``workspace``'s guest path.
 
-    The provider credential gate runs first (msb binds credentials only at
+    The published ports are mapped first (:func:`publish.create_port_flags`): a
+    port that cannot be mapped refuses the create before anything is staged.
+    The provider credential gate runs next (msb binds credentials only at
     create), then the provider-input generation is staged and mounted
-    read-only; it is published only once the create succeeded.
+    read-only; it is published only once the create succeeded. The staged
+    startup script is removed after.
     """
+    try:
+        port_flags, mappings = publish.create_port_flags(name, kit_set, list(overrides), preferred)
+    except publish.PublishError as exc:
+        raise msb.MsbError(exc.code, exc.message, exc.remediation) from exc
     generation = _provider_prepare(name, kit_set, ro_mount=ro_mount)
     try:
         flags, staged = kit_msb.create_flags(name, kit_set, ro_mount=ro_mount)
@@ -823,8 +874,11 @@ def _msb_create(name: str, image: str, workspace: str, kit_set: list[kit_msb.Kit
             f"could not prepare the host-config directory for sandbox '{name}': {exc.strerror or exc}",
             "check that the acq state directory is writable and has free space, then retry",
         ) from exc
+    flags += port_flags
     if generation is not None:
         flags += provider_input.msb_flags(generation)
+    # Host ssh-agent and host socket forwards (ADR-0021): opt-in through SSH_AUTH_SOCK.
+    flags += ssh_agent.vsock_flags(name, [workspace])
     try:
         bindings = msb.create(
             name, image, workspace, memory=msb.DEFAULT_MEMORY, cpus=msb.DEFAULT_CPUS,
@@ -836,7 +890,7 @@ def _msb_create(name: str, image: str, workspace: str, kit_set: list[kit_msb.Kit
     finally:
         kit_msb.discard_staged(staged)
     _provider_publish("msb", name, generation)
-    return bindings
+    return bindings, mappings
 
 
 def _store_provider_key(adapter, provider: str, value: str) -> None:
@@ -1060,6 +1114,25 @@ def _clone_path_failure(command: str, backend: str, path: str | None, emit_json:
     return None
 
 
+def _create_opts(parsed, command: str, backend: str, emit_json: bool) -> tuple[_CreateOpts | None, int | None]:
+    """The ``create``/``run`` options for a new sandbox, or the emitted refusal.
+
+    ``--publish`` is checked with the Bash rules (a malformed value creates
+    nothing; Bash exits 1, so it is ``validation_failed``), then refused on sbx,
+    which picks the host port itself (Bash's refusal, ADR-0034).
+    """
+    pairs, problems = publish.validate_create_pairs(getattr(parsed, "publish", None) or [])
+    if problems:
+        return None, common._operational_failure(
+            command, errors.VALIDATION_FAILED, "; ".join(problems), publish.PUBLISH_EXAMPLE, emit_json,
+        )
+    if pairs and backend == "sbx":
+        return None, common._operational_failure(
+            command, errors.UNSUPPORTED, publish.SBX_REFUSAL, publish.SBX_REFUSAL_REMEDIATION, emit_json,
+        )
+    return _CreateOpts(publish=tuple(pairs), clone=common.clone_requested(parsed)), None
+
+
 def run_create(parsed, emit_json: bool, backend: str) -> int:
     with _provider_kits_flag(parsed):
         return _run_create(parsed, emit_json, backend)
@@ -1067,7 +1140,15 @@ def run_create(parsed, emit_json: bool, backend: str) -> int:
 
 def _run_create(parsed, emit_json: bool, backend: str) -> int:
     if parsed.recreate is not None:
+        if getattr(parsed, "publish", None):
+            return common._usage_failure(
+                "create", "--publish applies to a new sandbox; --recreate keeps the sandbox's own port mappings",
+                emit_json,
+            )
         return run_recreate(parsed, emit_json, backend)
+    opts, exit_code = _create_opts(parsed, "create", backend, emit_json)
+    if opts is None:
+        return exit_code if exit_code is not None else errors.EXIT_FAILURE
     if not parsed.agent or parsed.agent not in common.KNOWN_AGENTS:
         return common._usage_failure(
             "create",
@@ -1087,21 +1168,44 @@ def _run_create(parsed, emit_json: bool, backend: str) -> int:
     workspace = common._mount_workspace(backend, workspace)
     stored_token = False
     if not _exists_quietly(backend, name):  # an existing sandbox is refused below; no prompt for it
-        exit_code = _preflight_new(backend, parsed.agent, cli_kits, parsed.image, "create", emit_json)
+        opts, exit_code = _onboarding(backend, opts, emit_json)
+        if opts is None:
+            return exit_code if exit_code is not None else errors.EXIT_FAILURE
+        exit_code = _preflight_new(backend, parsed.agent, cli_kits, parsed.image, "create", emit_json,
+                                   opts.extra_refs())
         if exit_code is not None:
             return exit_code
         stored_token = _scope_advice(backend, name, workspace, emit_json)
     try:
         with lock.sandbox_lock(backend, name):
-            return _create_locked(parsed, emit_json, backend, name, workspace, cli_kits, stored_token)
+            return _create_locked(parsed, emit_json, backend, name, workspace, cli_kits, stored_token, opts)
     except lock.SandboxLockTimeout as exc:
         # A stored token is kept: the command holding the lock may be a create
         # of this same sandbox that binds it, and a retry reuses it.
         return _lock_failure("create", name, exc, emit_json)
 
 
+def _onboarding(backend: str, opts: _CreateOpts, emit_json: bool) -> tuple[_CreateOpts | None, int | None]:
+    """The prompts before a new sandbox is planned (ADR-0031), in Bash's order.
+
+    The first-run offer of ``acq configure`` (Bash ``maybe_first_run_configure``),
+    then the create-time kit picker (Bash ``create_time_kit_picker``), whose
+    choice replaces the configured extra kits for this sandbox. Each prompts
+    only where :func:`configure.interactive` allows. Returns the
+    options to create with, or ``(None, exit_code)`` once a prompt ended the
+    command (already reported).
+    """
+    exit_code = configure.first_run_offer(backend, emit_json)
+    if exit_code is not None:
+        return None, exit_code
+    refs, exit_code = configure.create_time_picker(emit_json)
+    if exit_code is not None:
+        return None, exit_code
+    return (opts if refs is None else dataclasses.replace(opts, extras=tuple(refs))), None
+
+
 def _preflight_new(backend: str, agent: str, cli_kits: list[str], image_flag: str | None, command: str,
-                   emit_json: bool) -> int | None:
+                   emit_json: bool, extras: list[str] | None = None) -> int | None:
     """Refuse a kit selection or image a new sandbox cannot use, before the scope prompt.
 
     Read-only, so it needs no lock; the locked create plans again from scratch.
@@ -1110,9 +1214,9 @@ def _preflight_new(backend: str, agent: str, cli_kits: list[str], image_flag: st
     """
     image = _resolve_image(image_flag, agent)
     if backend == "sbx":
-        sbx_plan, exit_code = _plan_sbx_kits(agent, cli_kits, image, command, emit_json)
+        sbx_plan, exit_code = _plan_sbx_kits(agent, cli_kits, image, command, emit_json, extras)
         return exit_code if sbx_plan is None else None
-    plan, exit_code = _plan_msb_kits(agent, cli_kits, image, command, emit_json)
+    plan, exit_code = _plan_msb_kits(agent, cli_kits, image, command, emit_json, extras)
     if plan is None:
         return exit_code if exit_code is not None else errors.EXIT_FAILURE
     _steps, exit_code = _substrate_plan(image, plan.agent_kit, command, emit_json)
@@ -1163,7 +1267,7 @@ def _forget_scoped_token(backend: str, name: str) -> None:
 
 
 def _create_locked(parsed, emit_json: bool, backend: str, name: str, workspace: str, cli_kits: list[str],
-                   stored_token: bool = False) -> int:
+                   stored_token: bool = False, opts: _CreateOpts = _NO_OPTS) -> int:
     """The body of ``create`` once the sandbox's lifecycle lock is held."""
     adapter = common._adapter(backend)
     if adapter.exists(name):
@@ -1178,7 +1282,7 @@ def _create_locked(parsed, emit_json: bool, backend: str, name: str, workspace: 
     new_sandbox = _new_sbx_sandbox if backend == "sbx" else _new_msb_sandbox
     data, exit_code = new_sandbox(
         "create", emit_json, agent=parsed.agent, workspace=workspace, name=name, image_flag=parsed.image,
-        cli_kits=cli_kits, clone=common.clone_requested(parsed),
+        cli_kits=cli_kits, opts=opts,
     )
     if data is None:
         if stored_token:
@@ -1402,6 +1506,7 @@ def _recreate_msb(
     steps, exit_code = _substrate_plan(image, plan.agent_kit, "create", emit_json)
     if exit_code is not None:
         return None, exit_code
+    plan = dataclasses.replace(plan, preferred=_declared_create_ports(name))
     try:
         msb.egress_flags(kit_msb.egress_names(plan.kits))
         # A pin mismatch or a missing provider key refuses here, old guest intact.
@@ -1441,6 +1546,30 @@ def _recreate_msb(
     return {**data, **_kit_data(plan, result)}, None
 
 
+def _declared_create_ports(name: str) -> tuple[tuple[str, int], ...]:
+    """The old guest's create-time mappings as ``(guest, host)`` preferences for its recreation.
+
+    They are read before the old guest is removed, and they are preferences,
+    never pins: the new guest's port mapping is decided after the removal, when
+    a host port may have been taken meanwhile. :func:`publish.create_port_flags`
+    keeps one only for a guest port an applied kit still declares with its host
+    side left open, and picks a free port (with a warning) when it is busy. A
+    guest already gone, or one whose ports cannot be read, has none; the
+    recreation then maps its ports as a fresh create would, with a warning.
+    """
+    try:
+        if not msb.exists(name):
+            return ()
+        entries = msb.ports(name)
+    except msb.MsbError as exc:
+        _warn(f"the port mappings of '{name}' could not be read ({exc.message}); "
+              "the recreated sandbox maps its ports afresh")
+        return ()
+    return tuple((str(e["guest_port"]), e["host_port"]) for e in entries
+                 if e.get("origin") == "create" and isinstance(e.get("host_port"), int)
+                 and isinstance(e.get("guest_port"), int))
+
+
 def _restore_record(backend: str, name: str, record: dict) -> None:
     """Put back the record a failed recreate started from, so the recreate can be retried.
 
@@ -1456,7 +1585,7 @@ def _restore_record(backend: str, name: str, record: dict) -> None:
 
 def _run_prepare_locked(
     parsed, emit_json: bool, backend: str, target: str, name: str, workspace: str, cli_kits: list[str],
-    stored_token: bool = False,
+    stored_token: bool = False, opts: _CreateOpts = _NO_OPTS,
 ) -> tuple[dict | None, int | None]:
     """Create-or-reattach for ``run AGENT PATH`` with the lifecycle lock held.
 
@@ -1473,7 +1602,7 @@ def _run_prepare_locked(
         new_sandbox = _new_sbx_sandbox if backend == "sbx" else _new_msb_sandbox
         data, exit_code = new_sandbox(
             "run", emit_json, agent=target, workspace=workspace, name=name, image_flag=parsed.image,
-            cli_kits=cli_kits, clone=clone,
+            cli_kits=cli_kits, opts=opts,
         )
         if data is None:
             if stored_token:
@@ -1487,6 +1616,11 @@ def _run_prepare_locked(
     if found is None:
         return None, exit_code
     record, recorded = found
+    if opts.publish:
+        print(publish.reattach_note(name), file=sys.stderr)
+    # Read before the heal, which records the bundle as current (Bash captures
+    # the same status first, or the stale-sandbox offer could never fire).
+    pre_heal = kits.provenance_status(backend, name)
     # A --kit given again on this run is authoritative for the heal, as in Bash.
     _heal_on_reattach(backend, name, record, cli_kits if parsed.kit else None)
     # Re-attach: read the recorded kit/entrypoint (lenient) so the launch surfaces provenance.
@@ -1500,6 +1634,7 @@ def _run_prepare_locked(
         "action": "reattached",
         "kit": applied.get("kit"),
         "entrypoint": applied.get("entrypoint"),
+        _PRE_HEAL: pre_heal,
     }, None
 
 
@@ -1518,6 +1653,9 @@ def _run_run(parsed, emit_json: bool, backend: str) -> int:
     """
     adapter = common._adapter(backend)
     target = parsed.target
+    opts, exit_code = _create_opts(parsed, "run", backend, emit_json)
+    if opts is None:
+        return exit_code if exit_code is not None else errors.EXIT_FAILURE
     if target in common.KNOWN_AGENTS:
         if common.clone_requested(parsed):
             exit_code = _clone_path_failure("run", backend, parsed.path, emit_json)
@@ -1531,7 +1669,11 @@ def _run_run(parsed, emit_json: bool, backend: str) -> int:
         name = parsed.name or common._derive_name(target, workspace)
         workspace = common._mount_workspace(backend, workspace)
         if not _exists_quietly(backend, name):
-            exit_code = _preflight_new(backend, target, cli_kits, parsed.image, "run", emit_json)
+            opts, exit_code = _onboarding(backend, opts, emit_json)
+            if opts is None:
+                return exit_code if exit_code is not None else errors.EXIT_FAILURE
+            exit_code = _preflight_new(backend, target, cli_kits, parsed.image, "run", emit_json,
+                                       opts.extra_refs())
             if exit_code is not None:
                 return exit_code
         # Before the lock (it may prompt), and on a re-attach too: a running
@@ -1540,13 +1682,15 @@ def _run_run(parsed, emit_json: bool, backend: str) -> int:
         try:
             with lock.sandbox_lock(backend, name):
                 data, exit_code = _run_prepare_locked(parsed, emit_json, backend, target, name, workspace, cli_kits,
-                                                      stored_token)
+                                                      stored_token, opts)
         except lock.SandboxLockTimeout as exc:
             # A stored token is kept: the command holding the lock may be a
             # create of this same sandbox that binds it, and a retry reuses it.
             return _lock_failure("run", name, exc, emit_json)
         if data is None:
             return exit_code if exit_code is not None else errors.EXIT_FAILURE
+        if _PRE_HEAL in data:
+            offer_bundle_refresh(backend, name, data.pop(_PRE_HEAL), emit_json, parsed)
         exit_code = _attach_key_check(backend, name, emit_json)
         if exit_code is not None:
             return exit_code
@@ -1566,10 +1710,12 @@ def _run_run(parsed, emit_json: bool, backend: str) -> int:
             f"'{target}' is not a known agent or an existing sandbox",
             emit_json,
         )
-    return _run_by_name(backend, target, emit_json)
+    if opts.publish:
+        print(publish.reattach_note(target), file=sys.stderr)
+    return _run_by_name(backend, target, emit_json, parsed)
 
 
-def _run_by_name(backend: str, target: str, emit_json: bool) -> int:
+def _run_by_name(backend: str, target: str, emit_json: bool, parsed=None) -> int:
     """``run NAME``: re-attach an existing sandbox from its host record.
 
     The record checks and the kit heal hold the lifecycle lock; the launch does not.
@@ -1581,6 +1727,7 @@ def _run_by_name(backend: str, target: str, emit_json: bool) -> int:
         return _lock_failure("run", target, exc, emit_json)
     if record is None:
         return exit_code if exit_code is not None else errors.EXIT_FAILURE
+    offer_bundle_refresh(backend, target, record.pop(_PRE_HEAL, "current"), emit_json, parsed)
     exit_code = _attach_key_check(backend, target, emit_json)
     if exit_code is not None:
         return exit_code
@@ -1629,12 +1776,81 @@ def _by_name_locked(backend: str, target: str, emit_json: bool) -> tuple[dict | 
         overlap = common._workspace_overlap_failure("run", record["workspace"], emit_json)
         if overlap is not None:
             return None, overlap
+    pre_heal = kits.provenance_status(backend, target)  # before the heal records it current
     _heal_on_reattach(backend, target, record, None)
-    return record, None
+    return {**record, _PRE_HEAL: pre_heal}, None
 
 
 def _warn(message: str) -> None:
     print(f"acq: warning: {message}", file=sys.stderr)
+
+
+# The bundle status read before a re-attach heal; carried out of the locked step,
+# never into the JSON envelope.
+_PRE_HEAL = "_pre_heal_bundle_status"
+
+
+def update_check_enabled(parsed) -> bool:
+    """False under ``--no-update-check`` or ``ACQ_UPDATE_CHECK=0`` (Bash reads only ``0``)."""
+    if getattr(parsed, "no_update_check", False):
+        return False
+    return os.environ.get("ACQ_UPDATE_CHECK", "1") != "0"
+
+
+def offer_bundle_refresh(backend: str, name: str, status: str, emit_json: bool, parsed) -> None:
+    """Bash ``maybe_offer_bundle_refresh``: offer to refresh a sandbox behind the pinned bundle.
+
+    ``status`` is the one read before the re-attach heal. Purely local: an
+    exact-ref comparison against the pinned control plane, no network
+    (ADR-0016). Never blocks a launch: without a terminal on stdin, or under
+    ``--json``, it prints how to refresh later and returns; at a terminal it
+    asks ``[y/N]``, where only an explicit yes refreshes (a bare Enter or end of
+    input declines). The refresh itself is ``kit update``'s, best-effort, run
+    under the lifecycle lock after the question, so the prompt never holds it.
+    """
+    if status == "current" or not update_check_enabled(parsed):
+        return
+    lines = (
+        [f"acq: note: '{name}' was built from an older kit bundle than your pinned",
+         f"      version (local patterns ref {kits.CONTROL_PLANE_REF})."]
+        if status == "stale" else
+        [f"acq: note: acq cannot confirm '{name}' is on your pinned kit bundle",
+         "      (no provenance record; it may predate provenance tracking)."]
+    )
+    lines += ["      A refresh updates the built-in kits (USAi config, playbook, Zscaler CA,",
+              "      git-ssh-sign) in place. Your sessions, secrets, and project files are kept."]
+    for line in lines:
+        print(line, file=sys.stderr)
+    if emit_json or not common._stdin_is_terminal():
+        print(f"      To refresh later: acq kit update {name}", file=sys.stderr)
+        print("      To silence this check: ACQ_UPDATE_CHECK=0 (or acq run --no-update-check).", file=sys.stderr)
+        return
+    print(f"acq: refresh the kit bundle in {name} now? [y/N] ", end="", file=sys.stderr, flush=True)
+    try:
+        answer = sys.stdin.readline().strip()
+    except (OSError, ValueError):
+        answer = ""
+    if answer not in ("y", "Y", "yes", "YES"):
+        print(f"acq: continuing without refreshing (run 'acq kit update {name}' anytime).", file=sys.stderr)
+        return
+    _refresh_bundle(backend, name)
+
+
+def _refresh_bundle(backend: str, name: str) -> None:
+    """Bash ``acq_bundle_reapply`` from ``run``: ``kit update``'s reapply, never fatal."""
+    print(f"acq: refreshing the built-in kit bundle in '{name}' (in place; state preserved)...", file=sys.stderr)
+    try:
+        with lock.sandbox_lock(backend, name), contextlib.redirect_stdout(sys.stderr):
+            rc = common.with_recorded_selection(
+                "run", backend, name, False, lambda: kit_cmd._kit_update_locked(name, False, backend)
+            )
+    except lock.SandboxLockTimeout:
+        rc = errors.EXIT_FAILURE
+    if rc != errors.EXIT_SUCCESS:
+        print(f"acq: warning: kit refresh for '{name}' did not complete cleanly; leaving it as-is.", file=sys.stderr)
+        print(f"      The sandbox and its state are untouched. Re-run 'acq kit update {name}' to retry,",
+              file=sys.stderr)
+        print(f"      or 'acq rm {name} && acq run ...' for a clean rebuild.", file=sys.stderr)
 
 
 def _recorded_kit_refs(backend: str, name: str, cli_kits: list[str] | None) -> tuple[list[str], list[str]]:
@@ -1682,13 +1898,16 @@ def _heal_msb_reattach(name: str, record: dict | None, refs: tuple[list[str], li
             _warn(f"sandbox '{name}' is not running, so its kits were not re-applied; "
                   f"'acq start {name}' resumes it and re-applies them")
             return
+        # Re-drive the host ssh-agent forward first, as Bash's heal does (ADR-0021).
+        sock = ssh_agent.ensure_forward(name)
         kit_set = kit_msb.select((record or {}).get("agent") or "shell", refs[0],
                                  image_is_default=_image_is_default(record), extras=refs[1])
     except (kitspec.KitSelectionError, msb.MsbError) as exc:
         reason = exc.message if isinstance(exc, msb.MsbError) else str(exc)
         _warn(f"the kits of sandbox '{name}' were not re-applied: {reason}")
         return
-    result = kit_msb.ensure_kits_applied(name, kit_set, ro_required=security.requires_ro_mount(record))
+    result = kit_msb.ensure_kits_applied(name, kit_set, ro_required=security.requires_ro_mount(record),
+                                         ssh_auth_sock=sock)
     if result.incomplete or not result.agent_user:
         failed = ", ".join(result.incomplete) or "the agent user"
         _warn(f"sandbox '{name}': these kits were not re-applied: {failed}; attaching anyway")
@@ -2080,6 +2299,9 @@ def _start_locked(command: str, name: str, emit_json: bool) -> int:
     gate = _start_trusted_gate(command, name, record, emit_json)
     if gate is not None:
         return gate
+    if not was_running:
+        # The bridge process died with the stopped guest; the route persisted (ADR-0021).
+        ssh_agent.start_bridge(name)
     try:
         with _store_reading(msb.MsbError, "nothing new was bound"):
             unbound = msb.reconcile_bindings(name)
@@ -2137,11 +2359,14 @@ def _heal_after_start(command: str, name: str, record: dict | None, emit_json: b
     """
     agent = (record or {}).get("agent") or "shell"
     image = (record or {}).get("image") or common.OPENCODE_DEVENV_IMAGE
+    # Re-drive the host ssh-agent forward before the kits, as Bash's heal does (ADR-0021).
+    sock = ssh_agent.ensure_forward(name)
     cli_kits, extras = kit_msb.cli_kits_read(name)
     plan, exit_code = _plan_msb_kits(agent, cli_kits, image, command, emit_json, extras)
     if plan is None:
         return None, exit_code
-    result = kit_msb.ensure_kits_applied(name, plan.kits, ro_required=security.requires_ro_mount(record))
+    result = kit_msb.ensure_kits_applied(name, plan.kits, ro_required=security.requires_ro_mount(record),
+                                         ssh_auth_sock=sock)
     if result.incomplete:
         return None, common._operational_failure(
             command, errors.FAILURE,

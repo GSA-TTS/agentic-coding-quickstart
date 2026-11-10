@@ -18,8 +18,11 @@ from .. import (
     hostexec,
     kit_msb,
     kit_sbx,
+    lock,
     msb,
+    publish,
     sbx,
+    ssh_agent,
     state,
 )
 from . import common
@@ -90,27 +93,30 @@ def host_git_identity_env() -> list[str]:
     return entries
 
 
-def _forwarded_ssh_auth_sock(record: dict | None) -> str | None:
-    """The guest ssh-agent socket recorded for this sandbox, or ``None``.
+def _forwarded_ssh_auth_sock(record: dict | None, recorded: str | None = None) -> str | None:
+    """The guest ssh-agent socket for this sandbox's sessions, or ``None``.
 
-    The record carries ``ssh_auth_sock`` only when the sandbox was created with
-    host ssh-agent forwarding (see ADR-0021). The host's own ``SSH_AUTH_SOCK`` is
-    never forwarded: it names a host path that means nothing in the guest.
+    ``recorded`` is the msb host-config value the forwarding bridge writes (the
+    one Bash reads, :func:`acq_py.ssh_agent.recorded_sock`); without it, the
+    ``ssh_auth_sock`` a state import copied into the record. Either exists only
+    when the sandbox was created with host ssh-agent forwarding (see ADR-0021).
+    The host's own ``SSH_AUTH_SOCK`` is never forwarded: it names a host path
+    that means nothing in the guest.
     """
-    sock = (record or {}).get("ssh_auth_sock")
+    sock = recorded or (record or {}).get("ssh_auth_sock")
     if isinstance(sock, str) and _SAFE_GUEST_SOCK.fullmatch(sock):
         return sock
     return None
 
 
-def session_env(record: dict | None) -> list[str]:
+def session_env(record: dict | None, recorded_sock: str | None = None) -> list[str]:
     """Backend-neutral ``NAME=value`` entries for a session in this sandbox.
 
     The adapters add their own (HOME, SHELL, and TERM/COLORTERM when the session
     has a terminal).
     """
     entries = host_git_identity_env()
-    sock = _forwarded_ssh_auth_sock(record)
+    sock = _forwarded_ssh_auth_sock(record, recorded_sock)
     if sock is not None:
         entries.append(f"SSH_AUTH_SOCK={sock}")
     return entries
@@ -119,13 +125,15 @@ def session_env(record: dict | None) -> list[str]:
 def prepare_session(backend: str, name: str, record: dict | None) -> list[str]:
     """Ready ``name`` for a session and return the session's ``NAME=value`` entries.
 
-    The entries are :func:`session_env`. On msb, as in Bash, the host's global
-    git identity is first written into the guest's global git config, and the
-    kit environment recorded when the kits were applied is added last, so a
-    kit's ``environment`` reaches every agent session. sbx applies both itself:
-    its kits carry their environment, and the git identity kit sets the config.
+    The entries are :func:`session_env`. On msb, as in Bash, the forwarded
+    ssh-agent socket comes from the host-config record the bridge writes, the
+    host's global git identity is first written into the guest's global git
+    config, and the kit environment recorded when the kits were applied is
+    added last, so a kit's ``environment`` reaches every agent session. sbx
+    applies both itself: its kits carry their environment, and the git identity
+    kit sets the config.
     """
-    entries = session_env(record)
+    entries = session_env(record, ssh_agent.recorded_sock(name) if backend == "msb" else None)
     if backend == "msb":
         # The same host values the sbx git identity kit writes into its guest.
         msb.apply_git_global_config(name, kit_sbx.git_global_config_env())
@@ -353,14 +361,24 @@ def run_cp(parsed, emit_json: bool, backend: str) -> int:
 def run_ports(parsed, emit_json: bool, backend: str) -> int:
     """``acq ports NAME`` — report declared host/guest mappings, never health.
 
-    ADR-0038m §2 fixes the required data: host/guest mappings plus origin. A
-    missing sandbox fails closed with ``sandbox_not_found``; a ports read that
-    fails or returns unparseable output fails closed with a stable code rather
-    than being swallowed as an empty list (ADR-0038m §48 drops
-    "inspection-failure-as-empty"). Post-hoc ``--publish`` (ADR-0015) is deferred.
+    ADR-0038m §2 fixes the required data: host/guest mappings plus origin
+    (``create`` for a create-time mapping, ``post-hoc`` for a tunnel ``acq ports
+    --publish`` opened). A missing sandbox fails closed with
+    ``sandbox_not_found``; a ports read that fails or returns unparseable output
+    fails closed with a stable code rather than being swallowed as an empty list
+    (ADR-0038m §48 drops "inspection-failure-as-empty"). With ``--publish`` it
+    publishes instead (:func:`_publish_ports`).
     """
     adapter = common._adapter(backend)
     name = parsed.name
+    requested = getattr(parsed, "publish", None) or []
+    if requested and None in requested:
+        # A --publish with no value is refused, never read as "list" (ADR-0038m
+        # drops ignored missing values).
+        return common._operational_failure(
+            "ports", errors.VALIDATION_FAILED, "--publish given with no value (expected HOST:GUEST)",
+            f"run 'acq ports {name} --publish HOST:GUEST'", emit_json,
+        )
     if not adapter.exists(name):
         return common._operational_failure(
             "ports",
@@ -369,6 +387,8 @@ def run_ports(parsed, emit_json: bool, backend: str) -> int:
             "list sandboxes with 'acq ls', or create one with 'acq create'",
             emit_json,
         )
+    if requested:
+        return _publish_ports(name, requested, emit_json, backend)
     try:
         mappings = adapter.ports(name)
     except common._ADAPTER_ERRORS as exc:
@@ -382,6 +402,64 @@ def run_ports(parsed, emit_json: bool, backend: str) -> int:
         else:
             for entry in mappings:
                 print(f"guest {entry['guest_port']} -> host {entry['host_port']} ({entry['origin']})")
+    return errors.EXIT_SUCCESS
+
+
+def _publish_ports(name: str, requested: list[str], emit_json: bool, backend: str) -> int:
+    """``acq ports NAME --publish H:G...`` (ADR-0015).
+
+    On msb every value is checked first (two integers 1..65535, as Bash's
+    ``_acq_msb_valid_publish``), then one tunnel per value is opened under the
+    sandbox's lifecycle lock, so an ``rm`` cannot strand a tunnel half recorded.
+    Each repeated ``--publish`` is honoured (Bash kept only the last), all or
+    nothing. On sbx the values are sbx's own publish, forwarded verbatim (one
+    ``--publish=V`` argv element each) once a non-loopback bind is refused; its
+    status is kept.
+    """
+    if backend == "sbx":
+        for mapping in requested:
+            problem = publish.sbx_bind_problem(mapping)
+            if problem is not None:
+                return common._operational_failure(
+                    "ports", errors.VALIDATION_FAILED, problem,
+                    "drop the address, or use 127.0.0.1 (e.g. --publish 127.0.0.1:8080:3000)", emit_json,
+                )
+        rc = sbx.publish_ports(name, requested, json_mode=emit_json)
+        if rc != 0:
+            return common._operational_failure(
+                "ports", errors.FAILURE, f"sbx could not publish the requested port of sandbox '{name}'",
+                "check the value against 'sbx ports --help' and retry", emit_json, exit_code=rc,
+            )
+        if emit_json:
+            print(json.dumps(envelope.success("ports", {"name": name, "requested": requested})))
+        return errors.EXIT_SUCCESS
+    for mapping in requested:
+        problem = publish.posthoc_problem(mapping)
+        if problem is not None:
+            return common._operational_failure(
+                "ports", errors.VALIDATION_FAILED, problem,
+                "give both ports, e.g. 'acq ports NAME --publish 8080:3000'", emit_json,
+            )
+    try:
+        with lock.sandbox_lock(backend, name):
+            opened = msb.publish_ports(name, requested)
+    except lock.SandboxLockTimeout as exc:
+        return common._operational_failure(
+            "ports", errors.TIMEOUT, str(exc),
+            exc.remediation or f"wait for the other acq command on sandbox '{name}' to finish, then retry",
+            emit_json,
+        )
+    except msb.MsbError as exc:
+        return common._operational_failure("ports", exc.code, exc.message, exc.remediation, emit_json)
+    if emit_json:
+        print(json.dumps(envelope.success("ports", {"name": name, "requested": requested, "ports": opened})))
+        return errors.EXIT_SUCCESS
+    for entry in opened:
+        print(f"acq(msb): published host 127.0.0.1:{entry['host_port']} -> sandbox {name} "
+              f"127.0.0.1:{entry['guest_port']}", file=sys.stderr)
+        print(f"acq(msb):   via 'msb ssh serve' on 127.0.0.1:{entry['serve_port']} + ssh -L (ADR-0015).",
+              file=sys.stderr)
+    print(f"acq(msb):   tear down with 'acq rm {name}' (or 'acq stop {name}').", file=sys.stderr)
     return errors.EXIT_SUCCESS
 
 

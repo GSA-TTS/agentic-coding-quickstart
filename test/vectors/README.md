@@ -144,7 +144,11 @@ probe vectors under `py-acq/tests/runner-probes/`, which
 
 `redirect` names environment variables redirected to throwaway directories, so an
 oracle can never read or mutate the developer's real state (ADR-0039m); the
-runner always redirects `HOME` and the `XDG_*` set. A runner that cannot honour a
+runner always redirects `HOME` and the `XDG_*` set. Both runners also remove
+`SSH_AUTH_SOCK` before a vector's own `unset` and `env` apply, so a developer's
+ssh-agent is never forwarded into a stub sandbox and never changes an oracle
+(it is the forward's opt-in, ADR-0021); a vector that needs it sets it in
+`invoke.env`. A runner that cannot honour a
 declared requirement (`offline: false`, `ssh_stubs: true`, a non-null `backend`,
 or an unimplemented `fixtures`/`no_live_refeed`) fails closed with a stable
 refusal code (`unsupported_isolation`, `unsupported_backend`, or

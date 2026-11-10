@@ -265,10 +265,10 @@ def _spy_heal(monkeypatch, events: list) -> list:
     calls: list = []
     real = kit_msb.ensure_kits_applied
 
-    def spy(name, kit_set, *, ro_required, force=False):
+    def spy(name, kit_set, *, ro_required, force=False, ssh_auth_sock=None):
         events.append("heal")
         calls.append(([k.name for k in kit_set], ro_required, force))
-        return real(name, kit_set, ro_required=ro_required, force=force)
+        return real(name, kit_set, ro_required=ro_required, force=force, ssh_auth_sock=ssh_auth_sock)
 
     monkeypatch.setattr(kit_msb, "ensure_kits_applied", spy)
     return calls

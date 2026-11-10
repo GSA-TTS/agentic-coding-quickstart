@@ -1,0 +1,78 @@
+{
+  "schema": 1,
+  "id": "cli/ports-publish-invalid",
+  "oracle": "ADR-0015 acq ports NAME --publish validates HOST:GUEST (two integers 1..65535) before any key, serve or tunnel is touched (validation_failed, exit 1)",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{acq}",
+      "--backend",
+      "msb",
+      "--json",
+      "ports",
+      "box",
+      "--publish",
+      "8080"
+    ],
+    "env": {
+      "ACQ_MSB_BIN": "__stub__",
+      "ACQ_MSB_VERSION": "0.7.7",
+      "ACQ_MSB_INSTALLED": "1",
+      "ACQ_SBX_INSTALLED": "0",
+      "ACQ_MSB_STUB_CATALOG": "{\"box\":\"running\"}"
+    },
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "MSB_HOME",
+      "ACQ_IMAGE",
+      "ACQ_MSB_IMAGE",
+      "ACQ_MSB_READY_TIMEOUT",
+      "ACQ_MSB_STUB_FAIL",
+      "ACQ_MSB_STUB_PORTS",
+      "ACQ_MSB_HOST_PORTS_BUSY",
+      "ACQ_MSB_HOST_PROBE_UNKNOWN",
+      "ACQ_MSB_FORCE_SERVE_PORT",
+      "USAI_API_KEY",
+      "ACQ_PROVIDER_CREDENTIAL_BINDINGS",
+      "ACQ_PROVIDER_CREDENTIAL_SEED",
+      "ACQ_MSB_STUB_PROBE"
+    ],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 1,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "ports",
+        "error": {
+          "code": "validation_failed",
+          "message": "ports: --publish must be HOST:GUEST, got '8080'"
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME",
+      "ACQ_SECRET_STORE_DIR"
+    ]
+  }
+}

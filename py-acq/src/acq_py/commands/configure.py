@@ -38,9 +38,13 @@ provider-credential setting also lists each binding with its own layer (its
 credentials: bindings are an env var name and its hosts, userinfo in a kit ref is
 redacted, and no secret store or keychain is consulted.
 
-The first-run offer and the create-time kit picker that Bash also builds on these
-widgets are not ported (accepted gaps, ADR-0048m; the deliberate differences are
-listed in py-acq/README.md under "configure").
+The same widgets serve two prompts of ``create`` and ``run`` (Bash
+``maybe_first_run_configure`` and ``create_time_kit_picker``):
+:func:`first_run_offer` offers this flow once, when there is no ``config.yaml``
+yet, and :func:`create_time_picker` lets one new sandbox change its opt-in kits.
+Both run only where :func:`interactive` says prompts may (never under
+``--json``, without a terminal, or with ``ACQ_NO_PROMPT``/``ACQ_NO_PROGRESS``).
+The deliberate differences are listed in py-acq/README.md under "configure".
 """
 
 from __future__ import annotations
@@ -55,7 +59,16 @@ import sys
 from collections.abc import Callable, Iterator, Sequence
 from typing import NamedTuple
 
-from .. import backends, config, envelope, errors, hostexec, kits, provider_creds
+from .. import (
+    backends,
+    config,
+    envelope,
+    errors,
+    hostexec,
+    kits,
+    kitspec,
+    provider_creds,
+)
 from . import common
 
 COMMAND = "configure"
@@ -333,6 +346,70 @@ def _configure_interactively(term: Terminal, before_write: Callable[[], int | No
     _err(f"      extra kits:         {selected or '<none>'}")
     _err(f"      provider kit:       {_redacted(provider_sel or current_provider)}")
     return errors.EXIT_SUCCESS
+
+
+FIRST_RUN_PROMPT = "Configure extra kits and token scoping now?"
+PICKER_HEADER = "acq: extra kits for this sandbox (defaults from 'acq configure'):"
+
+
+def first_run_offer(backend: str, emit_json: bool) -> int | None:
+    """Bash ``maybe_first_run_configure``: offer ``acq configure`` once, before a first create.
+
+    Only when there is no ``config.yaml`` yet and prompts may run. A yes runs the
+    configure flow; a no writes the resolved backend, so the offer is never
+    repeated. Returns ``None`` to go on with the create, or an exit code (a
+    configure that failed or was interrupted, already reported) to stop it.
+    """
+    if config.config_path().is_file() or not interactive(emit_json):
+        return None
+    _err("acq: looks like this is your first run; let's set up your kits.")
+    _err("      (You can re-run this anytime with 'acq configure'.)")
+    _err("")
+    try:
+        accepted = confirm(Terminal(), FIRST_RUN_PROMPT, True)
+    except Signalled as exc:
+        return 128 + exc.signum
+    if accepted:
+        rc = run_configure(False, None, lambda: None)
+        return None if rc == errors.EXIT_SUCCESS else rc
+    try:
+        config.write_field("backend", backend)
+    except OSError as exc:  # Bash ignores the write; the offer then simply comes back
+        _err(f"acq: warning: could not write {config.config_path()}: {exc.strerror or exc}")
+    _err("acq: skipped. Run 'acq configure' anytime to change kits/token scoping.")
+    return None
+
+
+def create_time_picker(emit_json: bool) -> tuple[list[str] | None, int | None]:
+    """Bash ``create_time_kit_picker``: the opt-in kits for one new sandbox.
+
+    The checkbox list shows the built-in kits frozen and the opt-in kits
+    pre-checked from config ``extra_kits``. Returns ``(refs, None)`` with the
+    chosen kits' pinned refs, which replace the configured extras for this
+    sandbox only (nothing is written to ``config.yaml``); ``(None, None)`` when
+    no picker runs or it is cancelled, so the configured defaults apply; or
+    ``(None, exit_code)`` when a signal ended it. No picker runs where prompts
+    may not, when ``ACQ_EXTRA_KITS`` is set (env wins over the picker, as in
+    Bash), or when ``extra_kits`` names an unknown kit (the create then refuses
+    it, as Bash refuses before its picker).
+    """
+    if not interactive(emit_json) or os.environ.get("ACQ_EXTRA_KITS"):
+        return None, None
+    try:
+        kitspec.configured_extra_kits(os.environ)
+    except kitspec.KitSelectionError:
+        return None, None
+    configured = (config.read_field("extra_kits") or "").split()
+    rows = [(name, BUILTIN_KIT_DESCS[name]) for name in kits.BUILTIN_KIT_NAMES] + list(OPTIN_KITS)
+    defaults = [i for i, (name, _) in enumerate(OPTIN_KITS, 1) if name in configured]
+    _err(PICKER_HEADER)
+    try:
+        chosen = multiselect(Terminal(), len(kits.BUILTIN_KIT_NAMES), defaults, rows)
+    except Signalled as exc:
+        return None, 128 + exc.signum
+    if chosen is None:
+        return None, None
+    return [kitspec.builtin_kit_ref(OPTIN_KITS[i - 1][0]) for i in chosen], None
 
 
 def provider_kit_candidates() -> list[tuple[str, str]]:

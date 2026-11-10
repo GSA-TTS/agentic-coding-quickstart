@@ -3,9 +3,8 @@
 This directory is the Python replacement for the repo-root Bash `acq` wrapper.
 It implements every subcommand the Bash `acq help` lists, on both backends (msb
 and sbx). It is **not yet at parity** with Bash, and it is **not currently
-Tier-3-qualified**. A few documented flags are still missing: `--publish` on
-`run`/`create`, `--no-update-check` on `run`, and `ports --publish`. Some
-behaviour also differs; for example,
+Tier-3-qualified**. The documented `run`/`create` flags, `--clone` among them,
+are all implemented. Some behaviour also differs; for example,
 a kit outside the pinned built-in bundle is applied only when its ref is pinned
 to a full commit, and a local kit directory is copied into acq's private cache
 and checked there before it is applied. The dated correction in
@@ -112,6 +111,20 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
 * `acq-py run AGENT PATH [--name N] [--image REF] [--json]` — create (if missing)
   then launch the agent in the foreground; `acq-py run NAME` re-attaches to an
   existing sandbox by name.
+* Stale-sandbox check (ADR-0016, Bash `maybe_offer_bundle_refresh`): when `run`
+  re-attaches, acq compares the kit bundle the sandbox recorded (read before
+  the re-attach heal) with the pinned one. Exact-ref, local only: no network.
+  A `stale` or `unknown` bundle gets a note on stderr. Without a terminal on
+  stdin, or under `--json`, the note says how to refresh later (`acq kit update
+  NAME`) and the launch goes on. At a terminal acq asks `[y/N]`; only `y`/`yes`
+  refreshes (the `kit update` reapply, under the lifecycle lock, after the
+  question), and a failed refresh is a warning, never a failed launch.
+  `--no-update-check` (on `run`, and accepted on `create` as in Bash) or
+  `ACQ_UPDATE_CHECK=0` skips the check; only the value `0` turns it off. This
+  question keeps Bash's own gate, which differs from the `configure`,
+  first-run and kit-picker prompts: it is asked when stdin is a terminal and
+  `--json` is not given, and `ACQ_NO_PROMPT`/`ACQ_NO_PROGRESS` do not suppress
+  it (set `ACQ_UPDATE_CHECK=0` for that).
 * Clone mode (ADR-0027): `acq-py create|run AGENT PATH --clone`, or
   `ACQ_CLONE=1` (only the exact value `1`, as in Bash), runs the agent on a
   disposable clone of PATH, which must be a git repository root. On msb it is
@@ -129,8 +142,7 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   note covers staged changes and untracked files only: it never compares file
   content, so no filter can run. Put the flag after the positionals
   (`acq-py run opencode . --clone`): on Python 3.12 the parser rejects an
-  optional flag between them (KNOWN_FAILURE_MODES, "Python 3.12: An Optional
-  Flag Between `create`/`run` Positionals Is Refused").
+  optional flag between them (KNOWN_FAILURE_MODES §95).
 * Sandbox names and workspace paths follow the Bash `acq` rules
   (`commands/common.py`). Without `--name`, the name is `AGENT-<slug>`, where the
   slug is the lowercased ASCII letters and digits of the workspace's last path
@@ -179,7 +191,7 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   `GIT_COMMITTER_*`, and `EMAIL` or the global `user.email`). On msb, `attach`,
   `shell` and `run` also get `SHELL`, with or without a PTY; sbx templates set
   their own. `SSH_AUTH_SOCK` is passed only when the sandbox records a forwarded
-  ssh-agent socket, never the host's own. A child killed by signal N gives exit
+  ssh-agent socket, never the host's own (see "Host ssh-agent forwarding" below). A child killed by signal N gives exit
   status `128+N`. Ctrl-C goes to the child rather than killing it; when the
   child dies of a Ctrl-C that acq received too, acq dies of SIGINT as well, so a
   calling shell loop stops, and under `--json` no envelope is printed. A SIGINT
@@ -206,9 +218,52 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   plain-drive path is — consistent with the UNC workspace mount (ADR-0029).
   The `msb copy` status is preserved.
 * `acq-py ports NAME [--json]` — report a sandbox's *declared* host/guest port
-  mappings with origin (create-time), never listener health (ADR-0038m §2). A
+  mappings with origin (`create` for a create-time `-p` mapping, `post-hoc` for
+  a tunnel `ports --publish` opened), never listener health (ADR-0038m §2). A
   failed or unreadable `msb inspect` fails closed rather than reporting an empty
   list (ADR-0038m §48).
+* Published ports (ADR-0014, ADR-0034, `acq_py/publish.py`). On msb, every
+  kit's `publishedPorts` become `msb create -p HOST:GUEST` flags, unioned by
+  guest port (last wins). A kit port with no `host:` gets a free loopback port
+  chosen per sandbox (20000-59999, probed by connecting to `127.0.0.1`), so two
+  sandboxes from one kit do not collide. `create`/`run` `--publish HOST:GUEST`
+  (repeatable, `--publish=HOST:GUEST` too) overrides a kit's host port for that
+  guest port, or publishes a guest port no kit declares, with a note. Values
+  follow the Bash rules: both sides, digits only, no leading zero, 1..65535,
+  one host port per guest port; a bad value is `validation_failed` (exit 1)
+  and creates nothing. A requested host port that is in use, or requested
+  twice, fails the create: acq never substitutes another port. When the probe
+  cannot tell (neither a connection nor a refusal), the port is published with
+  one note. On sbx, `--publish` is refused with `unsupported_capability`,
+  because sbx picks the host port itself. It is create-time only: a re-attach
+  (`run AGENT` on an existing sandbox, `run NAME`) notes that it is ignored, and
+  `create --recreate --publish` is a usage error. A recreate prefers the host
+  ports the old guest had, for guest ports an applied kit still declares with
+  its host side open; a preferred port that is busy by then (the old guest is
+  removed first) gets a free one with a warning, a kit-pinned host port is
+  never overridden, and a mapping no kit declares any more is dropped. The create/run JSON carries `ports`. Kits that
+  declare `volumes:` are still refused on msb.
+* `acq-py ports NAME --publish HOST:GUEST [--json]` (ADR-0015) — on msb, open a
+  tunnel to a running sandbox: an acq-managed ed25519 key under
+  `ACQ_STATE_DIR/ssh` (made with `ssh-keygen` once, authorized with `msb ssh
+  authorize` on every publish), `msb ssh serve` on a loopback port, and an
+  OpenSSH `-L` forward with Bash's options (only the acq key, no user ssh
+  config, no interactive auth), plus a host key pinned per sandbox
+  (`HostKeyAlias=acq-msb-NAME`) rather than per ephemeral serve port. A host
+  port already in use, or asked for twice, is refused before anything starts.
+  Both run in the background; acq checks that each stayed up and that the host
+  port listens, and records them in `ACQ_STATE_DIR/ports/NAME.pids` in the
+  Bash format, so either implementation lists and tears down what the other
+  opened. `stop`, `restart` and `rm` stop them, but only a recorded process
+  that is still an `msb` or `ssh` process (Linux: `/proc/PID/cmdline`; macOS:
+  `ps -o comm=`; Windows: the process image name), so a process id reused by
+  an unrelated program is left alone; one acq cannot check is skipped with a
+  note. Each repeated `--publish` is opened, all or nothing (Bash kept only the
+  last); values are checked first, and a `--publish` with no value is refused
+  rather than read as a listing. On sbx the values go to `sbx ports NAME
+  --publish=V` verbatim and its status is kept, except that a value binding a
+  non-loopback host address is refused. Needs the OpenSSH client (`ssh`,
+  `ssh-keygen`) on the host.
 * `acq-py secret set (-g | SANDBOX) SERVICE [--host HOST --env ENV] [--json]` —
   store a secret in the acq secret store, which is shared byte for byte with the
   Bash `acq` (`acq_py/secretstore.py`: macOS keychain, `secret-tool`, Windows
@@ -321,8 +376,9 @@ lists each setting as `key`, `value`, `source` and `honoured_by_python`.
 The Python acq reads all three keys at `create` and `run`, with Bash's
 precedence, so `--json` reports `"honoured_by_python": true` for each:
 
-* **`extra_kits`** is used unless `ACQ_EXTRA_KITS` is set and non-empty; `--kit`
-  refs are added after either. An unknown name in `extra_kits` stops the create.
+* **`extra_kits`** is used unless `ACQ_EXTRA_KITS` is set and non-empty, or the
+  create-time picker (below) changes it for one sandbox; `--kit` refs are added
+  after any of them. An unknown name in `extra_kits` stops the create.
 * **`provider_kit`** is the provider kit unless `--no-provider-kits` is given or
   `ACQ_PROVIDER_KITS` is set (an empty value selects no provider kit). The flag
   wins over both and needs no provider credential. The create records which of
@@ -380,8 +436,29 @@ Deliberate differences from Bash:
   it), a malformed `ACQ_PROVIDER_CREDENTIAL_BINDINGS` is `validation_failed`, and
   an unknown `--backend` is a usage error. Ctrl-C exits 130; SIGTERM and SIGHUP
   restore the terminal and exit 128 plus the signal number.
-* **Not ported.** The first-run offer and the create-time kit picker (accepted
-  gaps in ADR-0048m).
+**First-run offer** (Bash `maybe_first_run_configure`). Before a new sandbox is
+created (`create`, or `run` creating one) and while there is no `config.yaml`,
+acq says it looks like a first run and asks "Configure extra kits and token
+scoping now? [Y/n]". Yes (or Enter) runs the `configure` flow above and the
+create goes on; no writes `backend: <the resolved backend>`, so the offer is
+not repeated. It is asked only where configure's prompts are: stdin a terminal
+(a real console on Windows), `ACQ_NO_PROMPT` and `ACQ_NO_PROGRESS` unset, and
+never under `--json`. Unlike Bash, `create` of a sandbox that already exists
+does not ask (it is refused anyway), and an interrupted configure (Ctrl-C, or
+SIGTERM in key mode) stops the create.
+
+**Create-time kit picker** (Bash `create_time_kit_picker`). Right after that
+offer, a new sandbox gets the checkbox list of `configure` ("acq: extra kits
+for this sandbox (defaults from 'acq configure'):"): the built-in kits frozen,
+the opt-in kits checked as `extra_kits` says. The choice replaces the
+configured extra kits for this sandbox only: nothing is written to
+`config.yaml`, and the sandbox records the kits it got, so `start`, `restart`,
+`kit update` and a re-attach heal keep them. Unchecking everything creates it
+with no extra kits; `q` (or Esc) keeps the configured ones. Same conditions as
+the offer, and also not when `ACQ_EXTRA_KITS` is set (it wins, as in Bash), nor
+when `extra_kits` names an unknown kit (the create then refuses it, as Bash
+does before its picker). `--kit` refs are added either way. Unlike Bash, it is
+not shown for a `create` of a sandbox that already exists.
 
 ## State migration (ADR-0041m)
 
@@ -537,6 +614,40 @@ each other. The networked pre-commit job (`.github/workflows/pre-commit.yml`)
 also runs `scripts/refresh-kitbundle --check` against its checkout of Patterns
 at the pin, which fails when any manifest blob id differs from
 `git ls-tree -r <ref>`.
+
+## Host ssh-agent forwarding (ADR-0021)
+
+On msb the host ssh-agent is forwarded into the guest whenever the host
+`SSH_AUTH_SOCK` names a socket, as in Bash (unset it to opt out; there is no
+flag). `src/acq_py/ssh_agent.py` ports the Bash pieces:
+
+* at create, `msb create --vsock LINK:3552/stream`, where `LINK` is
+  `$ACQ_STATE_DIR/msb/ssh-agent/<name>.sock` (or `h<cksum>.sock` when the path
+  would not fit a socket address), a symlink to the agent socket's real path; a
+  name outside `[A-Za-z0-9_-]` routes the raw path with a warning.
+  `ACQ_FORWARD_HOST_SOCKETS` adds other host sockets by their real path. msb
+  older than 0.6.9 gets a warning and no route;
+* agent-user kit commands get `SSH_AUTH_SOCK=/home/agent/.acq/ssh-agent.sock`
+  while the forward is wired; after the kits, the in-guest `socat` bridge starts
+  (a guest without `socat` gets a warning), the guest path is recorded in the
+  `ssh-auth-sock` host-config key that every session reads, and `ssh-add -l`
+  in the guest checks that the agent answers;
+* `start` and `restart` restart the bridge from that key after resuming; their
+  heal, a `run` re-attach to a running sandbox and `kit update` re-drive the
+  forward when the host requests one and `msb inspect` shows the route. The link
+  is re-pointed at the current `SSH_AUTH_SOCK` before each bridge start, so a
+  route survives the host agent moving;
+* with `SSH_AUTH_SOCK` unset, `start`, `restart` and a `run` re-attach
+  disconnect the forward (the link and the recorded guest socket go, no bridge
+  starts); setting it and re-running reconnects;
+* a socket inside the writable workspace is refused, a socket owned by another
+  user is forwarded with a warning, a link whose target is no longer this user's
+  socket is removed, and the link directory is kept 0700;
+* `rm` removes the link, never the agent socket.
+
+sbx forwards the agent itself; acq prints only the one-time trust-boundary
+notice. Nothing is forwarded from a Windows host. The differences from Bash and
+the live checks still owed are in `docs/KNOWN_FAILURE_MODES.md` §93.
 
 ## Timeouts
 

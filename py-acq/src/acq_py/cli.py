@@ -83,6 +83,11 @@ _KIT_HELP = (
     "kit ref to apply (repeatable); a built-in agent kit name such as opencode "
     "selects that kit, and refs outside the built-in bundle are refused"
 )
+_PUBLISH_HELP = (
+    "reach the sandbox's GUEST port on host port HOST (repeatable; msb only, create-time only; "
+    "a host port in use fails the create)"
+)
+_NO_UPDATE_CHECK_HELP = "skip the stale-sandbox kit-bundle check on a re-attach (as ACQ_UPDATE_CHECK=0)"
 _NO_PROVIDER_KITS_HELP = (
     "create without provider kits; authoritative over ACQ_PROVIDER_KITS and config.yaml provider_kit, "
     "so no provider config or credential is required"
@@ -255,6 +260,8 @@ def build_parser() -> _Parser:
     create_parser.add_argument("--kit", action="append", help=_KIT_HELP)
     create_parser.add_argument("--no-provider-kits", action="store_true", help=_NO_PROVIDER_KITS_HELP)
     create_parser.add_argument("--clone", action="store_true", help=_CLONE_HELP)
+    create_parser.add_argument("--publish", action="append", nargs="?", metavar="HOST:GUEST", help=_PUBLISH_HELP)
+    create_parser.add_argument("--no-update-check", action="store_true", help=_NO_UPDATE_CHECK_HELP)
     create_parser.add_argument(
         "--recreate",
         metavar="NAME",
@@ -271,6 +278,8 @@ def build_parser() -> _Parser:
     run_parser.add_argument("--kit", action="append", help=_KIT_HELP)
     run_parser.add_argument("--no-provider-kits", action="store_true", help=_NO_PROVIDER_KITS_HELP)
     run_parser.add_argument("--clone", action="store_true", help=_CLONE_HELP)
+    run_parser.add_argument("--publish", action="append", nargs="?", metavar="HOST:GUEST", help=_PUBLISH_HELP)
+    run_parser.add_argument("--no-update-check", action="store_true", help=_NO_UPDATE_CHECK_HELP)
 
     sub.add_parser("ls", help="list sandboxes")
 
@@ -304,8 +313,10 @@ def build_parser() -> _Parser:
     cp_parser.add_argument("src", help="source (host path or NAME:/guest/path)")
     cp_parser.add_argument("dst", help="destination (host path or NAME:/guest/path)")
 
-    ports_parser = sub.add_parser("ports", help="list a sandbox's declared port mappings")
+    ports_parser = sub.add_parser("ports", help="list a sandbox's declared port mappings, or publish one")
     ports_parser.add_argument("name", help="sandbox name")
+    ports_parser.add_argument("--publish", action="append", nargs="?", metavar="HOST:GUEST",
+                              help="open a tunnel from host port HOST to the sandbox's GUEST port (repeatable)")
 
     secret_parser = sub.add_parser(
         "secret", help="manage sandbox secrets (values are never on argv)"
