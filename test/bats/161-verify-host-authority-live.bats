@@ -112,6 +112,18 @@ _hal() { bash "$REPO_ROOT/scripts/verify-host-authority-live" "$@"; }
 
 @test "hal: the script is executable and has no bash 4 only constructs" {
   [ -x "$REPO_ROOT/scripts/verify-host-authority-live" ]
-  run grep -nE 'declare -A|mapfile|readarray|\$\{[A-Za-z_]+(,,|\^\^)\}|\|&|&>>' "$REPO_ROOT/scripts/verify-host-authority-live"
+  run grep -nE 'declare -A|mapfile|readarray|\$\{[A-Za-z_]+(,,|\^\^)\}|\|&|&>>' "$REPO_ROOT"/scripts/verify-host-authority-live "$REPO_ROOT"/scripts/verify-host-authority-live-lib.sh "$REPO_ROOT"/scripts/verify-host-authority-live-steps.sh
   assert_failure
+}
+
+@test "hal: every file of the script is within the 400 line limit and the MANUAL 5 gaps are stated" {
+  local f
+  for f in verify-host-authority-live verify-host-authority-live-lib.sh verify-host-authority-live-steps.sh verify-host-authority-live-manual.txt; do
+    [ "$(wc -l < "$REPO_ROOT/scripts/$f")" -le 400 ]
+  done
+  run _hal --dry-run
+  assert_output --partial 'NOT COVERED'
+  assert_output --partial 'hal-'
+  refute_output --partial '@RUN@'
+  refute_output --partial '@REPO@'
 }
