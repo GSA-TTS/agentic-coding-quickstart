@@ -409,11 +409,12 @@ def _run_session(argv: list[str], stdout: int | None) -> tuple[int, int | None]:
     The session handlers are already installed, so a signal that lands while
     the child is being started is recorded, and the child is ended as soon as
     it exists (:func:`_wait_session`). The child's job, if it has one, is
-    released once the child is gone.
+    released once the child is gone, unless the child had to be killed, which
+    terminates the job instead (:func:`_end_session`).
     """
     child, job = _start_session(argv, stdout)
     try:
-        return _wait_session(child)
+        return _wait_session(child, job)
     finally:
         if job is not None:
             job.release()
@@ -447,7 +448,7 @@ def _start_session(argv: list[str], stdout: int | None) -> tuple[subprocess.Pope
     return subprocess.Popen(argv, stdout=stdout), None
 
 
-def _wait_session(child: subprocess.Popen) -> tuple[int, int | None]:
+def _wait_session(child: subprocess.Popen, job: StepJob | None = None) -> tuple[int, int | None]:
     """Wait for ``child``; returns its return code and the ending signal, if one came during the wait.
 
     On Windows the wait polls: a blocking wait there runs no signal handler
@@ -476,13 +477,14 @@ def _wait_session(child: subprocess.Popen) -> tuple[int, int | None]:
         _session_waiting = False
     except _SessionSignal as caught:
         _session_waiting = False
-        return _end_session(child, caught.signum, reached_child=early is None), caught.signum
+        return _end_session(child, caught.signum, reached_child=early is None, job=job), caught.signum
     finally:
         _session_waiting = False
     return returncode, None
 
 
-def _end_session(child: subprocess.Popen, signum: int, *, reached_child: bool = True) -> int:
+def _end_session(child: subprocess.Popen, signum: int, *, reached_child: bool = True,
+                 job: StepJob | None = None) -> int:
     """Pass ``signum`` on to ``child``, wait a bounded time, then kill it; returns its return code.
 
     The child shares acq's process group so that Ctrl-C reaches it, so the
@@ -493,6 +495,11 @@ def _end_session(child: subprocess.Popen, signum: int, *, reached_child: bool = 
     passing it on is ending the child. A Ctrl-Break that came before the
     child existed (``reached_child`` false) never reached it, so the child is
     ended for that one too.
+
+    A child still running after the grace period ignored the signal, and what
+    it started may be just as deaf, so when it runs in a ``job`` the whole job
+    is terminated rather than the child alone. A child that exits within the
+    grace period leaves its job to be released as usual.
     """
     try:
         if sys.platform != "win32":
@@ -506,7 +513,10 @@ def _end_session(child: subprocess.Popen, signum: int, *, reached_child: bool = 
     except subprocess.TimeoutExpired:
         pass
     try:
-        child.kill()
+        if job is not None:
+            job.terminate()  # the child and everything it started
+        else:
+            child.kill()
         return child.wait(timeout=_REAP_TIMEOUT_S)
     except (OSError, subprocess.TimeoutExpired):
         return -signal.SIGKILL if hasattr(signal, "SIGKILL") else 1

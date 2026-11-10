@@ -20,6 +20,7 @@ import signal
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 from pathlib import Path
 
@@ -77,21 +78,36 @@ def _sleeper(pid_file: Path, seconds: int = 60) -> list[str]:
 # ---------------------------------------------------------------------------
 
 class _Child:
+    # A deaf child ignores the signal passed on to it: it is still running when
+    # the grace period ends, and only a kill (or its job's end) stops it.
+    deaf = False
+
     def __init__(self, events, pid):
         self.events, self.pid, self.returncode = events, pid, None
+        self.ended = False
 
     def wait(self, timeout=None):
         self.events.append(("wait", self.pid))
+        if self.deaf and not self.ended and timeout == hostexec._SESSION_SIGNAL_GRACE_S:
+            raise subprocess.TimeoutExpired("msb", timeout)
         self.returncode = 0
         return 0
 
     def kill(self):
         self.events.append(("kill", self.pid))
+        self.ended = True
+
+    def send_signal(self, signum):
+        self.events.append(("signal", self.pid))
+
+    def terminate(self):  # TerminateProcess on Windows: it cannot be ignored
+        self.events.append(("terminate-child", self.pid))
+        self.ended = True
 
 
 @pytest.fixture
 def fake_job(monkeypatch, no_job_objects):
-    state = {"events": [], "adopt_error": None}
+    state = {"events": [], "adopt_error": None, "children": [], "deaf": False, "signal_on_start": None}
     events = state["events"]
     pids = iter(range(4242, 4300))
 
@@ -101,10 +117,16 @@ def fake_job(monkeypatch, no_job_objects):
 
         def terminate(self):
             events.append("terminate")
+            for child in state["children"]:
+                child.ended = True
 
     def popen(argv, **kwargs):
         child = _Child(events, next(pids))
+        child.deaf = state["deaf"]
+        state["children"].append(child)
         events.append(("spawn", child.pid, kwargs.get("creationflags"), kwargs.get("stdout")))
+        if state["signal_on_start"] is not None:
+            hostexec._session_signal(state["signal_on_start"], None)  # lands while it starts
         return child
 
     def adopt(pid):
@@ -140,6 +162,29 @@ def test_an_interrupted_adopt_kills_the_suspended_child_and_starts_nothing_else(
         hostexec.run_foreground(["msb", "exec", "box"])
     spawns = [e for e in fake_job["events"] if e[0] == "spawn"]
     assert len(spawns) == 1 and ("kill", 4242) in fake_job["events"]
+
+
+@pytest.mark.parametrize("deaf", [False, True], ids=["exits-in-grace", "killed-after-grace"])
+def test_a_child_killed_after_the_grace_period_takes_its_whole_job_with_it(fake_job, deaf):
+    # A child that ignored the signal may have started others that ignore it
+    # too, so its job is terminated; one that exited in time has it released.
+    if deaf and sys.platform == "win32":
+        pytest.skip("acq passes SIGTERM on as TerminateProcess, which cannot be ignored; "
+                    "the deaf Ctrl-Break case is the real Job object test below")
+    fake_job["deaf"] = deaf
+    fake_job["signal_on_start"] = signal.SIGTERM
+    previous = signal.signal(signal.SIGTERM, _acq_handler)
+    try:
+        with pytest.raises(Ended):
+            hostexec.run_foreground(["msb", "exec", "box"])
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    events = fake_job["events"]
+    assert ("kill", 4242) not in events  # never the child alone
+    if deaf:
+        assert "terminate" in events and events.index("terminate") < events.index("release")
+    else:
+        assert "terminate" not in events and events[-1] == "release"
 
 
 def test_off_windows_the_session_gets_no_job(fake_job, monkeypatch):
@@ -267,6 +312,37 @@ def test_a_forced_kill_of_acq_ends_the_session_child_and_what_it_started(tmp_pat
     finally:
         if acq.poll() is None:
             acq.kill()
+
+
+@windows_only
+def test_a_session_killed_after_the_grace_period_ends_what_it_started(monkeypatch, tmp_path, real_job_objects):
+    # The child ignores Ctrl-Break, so it is still running after the grace
+    # period; its job is terminated, which ends the process it started too.
+    monkeypatch.setattr(hostexec, "_SESSION_SIGNAL_GRACE_S", 0.5)
+    signum = signal.SIGBREAK  # type: ignore[attr-defined,unused-ignore]
+    ready, grandchild_pid = tmp_path / "ready", tmp_path / "grandchild"
+    child = [sys.executable, "-c", textwrap.dedent(f"""
+        import signal, subprocess, time
+        signal.signal(signal.SIGBREAK, signal.SIG_IGN)
+        subprocess.Popen({_sleeper(grandchild_pid)!r})
+        open({str(ready)!r}, 'w').close()
+        time.sleep(60)
+    """)]
+    seen: list[int] = []
+
+    def raise_later():
+        _wait_for(lambda: ready.exists() and grandchild_pid.exists())
+        time.sleep(0.1)
+        signal.raise_signal(signum)  # handled by the main thread at its next poll
+
+    previous = signal.signal(signum, lambda n, _f: seen.append(n))
+    try:
+        threading.Thread(target=raise_later, daemon=True).start()
+        assert hostexec.run_foreground(child) == 128 + signum
+    finally:
+        signal.signal(signum, previous)
+    assert seen == [signum]
+    assert _wait_for(lambda: not _alive(int(grandchild_pid.read_text())), 10)
 
 
 @windows_only
