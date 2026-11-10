@@ -1121,6 +1121,8 @@ _walk_race_shim() {
   ln -s "$base" "$sym"
   run _acq_provider_input_safe_dir "$sym"
   assert_failure
+  # A silent predicate: refused, with no traceback or other output.
+  assert_output ''
 }
 
 @test "safe_mkdir rejects a path whose intermediate component is a symlink (malicious ancestor)" {
@@ -1131,6 +1133,21 @@ _walk_race_shim() {
   ln -s "$evil_target" "$evil_parent"
   run _acq_provider_input_safe_mkdir "$evil_parent/new_child"
   assert_failure
+  # One line naming the refused path, never a Python traceback.
+  refute_output --partial 'Traceback'
+  assert_equal "${#lines[@]}" 1
+  assert_output --partial "acq: unsafe provider-input path $evil_parent/new_child:"
+  [ ! -e "$evil_target/new_child" ]
+}
+
+@test "safe_mkdir refuses a component that is a file with one line, not a traceback" {
+  local file="$STUBDIR/plain_file"
+  : > "$file"
+  run _acq_provider_input_safe_mkdir "$file/child"
+  assert_failure
+  refute_output --partial 'Traceback'
+  assert_equal "${#lines[@]}" 1
+  assert_output --partial "acq: unsafe provider-input path $file/child:"
 }
 
 @test "canonical_path aliases /var /tmp /etc on Darwin via ACQ_TEST_HOST_OS" {
