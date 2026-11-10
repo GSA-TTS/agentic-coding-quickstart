@@ -115,7 +115,7 @@ class _Proc:
 
 
 @pytest.fixture
-def windows_job(monkeypatch):
+def windows_job(monkeypatch, no_job_objects):
     from acq_py import hostexec
 
     state = {"events": [], "hangs": False, "adopt_error": None}

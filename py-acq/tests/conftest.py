@@ -120,6 +120,29 @@ def provider_key(request, isolate_user_dirs):
     return TEST_USAI_KEY
 
 
+@pytest.fixture(autouse=True)
+def no_job_objects(monkeypatch):
+    """Run bounded backend calls through plain ``subprocess.run``, on every host.
+
+    On Windows ``hostexec.run_captured`` puts a bounded call in a Job object,
+    through ``Popen``, which would bypass the many tests that fake
+    ``subprocess.run`` to drive a backend. The Job object path has tests of its
+    own: they turn it on with the ``real_job_objects`` fixture (the real
+    thing, on Windows) or with fakes of their own.
+    """
+    from acq_py import hostexec
+
+    monkeypatch.setattr(hostexec, "JOB_OBJECTS", False)
+
+
+@pytest.fixture
+def real_job_objects(monkeypatch, no_job_objects):
+    """Put back the platform's own Job object setting (on only on Windows)."""
+    from acq_py import hostexec
+
+    monkeypatch.setattr(hostexec, "JOB_OBJECTS", sys.platform == "win32")
+
+
 @pytest.fixture(scope="session")
 def vectors_dir() -> Path:
     return VECTORS_DIR
