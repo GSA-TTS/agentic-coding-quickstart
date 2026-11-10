@@ -172,7 +172,11 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   status `128+N`. Ctrl-C goes to the child rather than killing it; when the
   child dies of a Ctrl-C that acq received too, acq dies of SIGINT as well, so a
   calling shell loop stops, and under `--json` no envelope is printed. A SIGINT
-  sent only to the child gives an ordinary `130` with the envelope.
+  sent only to the child gives an ordinary `130` with the envelope. A SIGTERM
+  or SIGHUP sent to acq during a session (on Windows, a Ctrl-Break) is passed
+  on to the child, which has ten seconds to exit before acq kills it; acq then
+  exits `128+N` with no envelope, so the session never outlives acq holding the
+  terminal.
 * Flag position: acq's own flags (`--json`, `--backend NAME`) may go anywhere
   before `--` for most verbs, so `acq ls --json` and `acq attach box --json`
   work. Only two places are strict: after the `exec` sandbox name, where tokens

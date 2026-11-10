@@ -291,19 +291,150 @@ def run_foreground(argv: list[str], *, stdout: int | None = None) -> int:
     :func:`_die_of_interrupt`). In that case it prints nothing more: under
     ``--json`` there is no envelope. A SIGINT aimed only at the child gives an
     ordinary status 130, and the caller reports it as usual.
+
+    A SIGTERM or SIGHUP (on Windows, a Ctrl-Break) that ends acq while the child
+    runs must not leave the child running and holding the terminal: it is passed
+    on to the child, which gets :data:`_SESSION_SIGNAL_GRACE_S` to exit before it
+    is killed, and only then does acq end by that signal (see
+    :func:`_end_session`).
     """
     global _interrupted
     _interrupted = False
     previous = _hold_interrupt()
     try:
         child = subprocess.Popen(argv, stdout=stdout)
-        returncode = child.wait()
+        returncode, ended_by = _wait_session(child)
     finally:
         if previous is not None:
             signal.signal(signal.SIGINT, previous)
+    if ended_by is not None:
+        return _end_by(*ended_by)
     if returncode == -signal.SIGINT and _interrupted and previous is not None and not _is_windows():
         _die_of_interrupt()
     return exit_status(returncode)
+
+
+# How long a session child has to exit after acq passed it a SIGTERM or SIGHUP
+# (or, on Windows, after a Ctrl-Break reached both), before it is killed.
+_SESSION_SIGNAL_GRACE_S = 10.0
+
+# The signal being handled by _session_signal in the current foreground run.
+_session_signum: int | None = None
+
+
+class _SessionSignal(BaseException):
+    """A SIGTERM, SIGHUP or SIGBREAK arrived while a foreground child ran."""
+
+    def __init__(self, signum: int):
+        super().__init__(signum)
+        self.signum = signum
+
+
+def _session_signal(signum: int, _frame: FrameType | None) -> None:
+    """Break out of the child's wait once; a repeat during the grace period is ignored."""
+    global _session_signum
+    if _session_signum is not None:
+        return
+    _session_signum = signum
+    raise _SessionSignal(signum)
+
+
+def _hold_session_signals() -> dict[int, _Handler]:
+    """Install :func:`_session_signal` for the ending signals; return the handlers it replaced.
+
+    The ending signals are SIGTERM, plus SIGHUP on POSIX and SIGBREAK
+    (Ctrl-Break) on Windows. Nothing changes off the main thread, and a signal
+    ignored on entry (``nohup``) stays ignored, for the child too.
+    """
+    global _session_signum
+    _session_signum = None
+    saved: dict[int, _Handler] = {}
+    if threading.current_thread() is not threading.main_thread():
+        return saved
+    for name in ("SIGTERM", "SIGHUP", "SIGBREAK"):
+        signum = getattr(signal, name, None)
+        if signum is None:
+            continue
+        current = signal.getsignal(signum)
+        if current == signal.SIG_IGN:
+            continue
+        signal.signal(signum, _session_signal)
+        saved[signum] = signal.SIG_DFL if current is None else current
+    return saved
+
+
+def _wait_session(child: subprocess.Popen) -> tuple[int, tuple[int, _Handler] | None]:
+    """Wait for ``child``; returns its return code and, if an ending signal came, (signal, prior handler).
+
+    On Windows the wait polls: a blocking wait there runs no signal handler
+    until the child exits. ``KeyboardInterrupt`` cannot come from here (SIGINT
+    is held by :func:`_hold_interrupt`).
+    """
+    saved = _hold_session_signals()
+    try:
+        try:
+            if sys.platform == "win32":
+                while True:
+                    try:
+                        return child.wait(timeout=0.25), None
+                    except subprocess.TimeoutExpired:
+                        continue
+            return child.wait(), None
+        except _SessionSignal as caught:
+            return _end_session(child, caught.signum), (caught.signum, saved.get(caught.signum, signal.SIG_DFL))
+    finally:
+        for signum, handler in saved.items():
+            signal.signal(signum, handler)
+
+
+def _end_session(child: subprocess.Popen, signum: int) -> int:
+    """Pass ``signum`` on to ``child``, wait a bounded time, then kill it; returns its return code.
+
+    The child shares acq's process group so that Ctrl-C reaches it, so the
+    signal goes to its PID: a signal for the whole group has reached it
+    already, and one more of the same kind changes nothing. On Windows a
+    Ctrl-Break reaches every process on the console, the child included;
+    SIGTERM there can only come from acq itself, and the nearest thing to
+    passing it on is ending the child.
+    """
+    try:
+        if sys.platform != "win32":
+            child.send_signal(signum)
+        elif signum != getattr(signal, "SIGBREAK", None):
+            child.terminate()
+    except OSError:
+        pass  # it has exited already
+    try:
+        return child.wait(timeout=_SESSION_SIGNAL_GRACE_S)
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        child.kill()
+        return child.wait(timeout=_REAP_TIMEOUT_S)
+    except (OSError, subprocess.TimeoutExpired):
+        return -signal.SIGKILL if hasattr(signal, "SIGKILL") else 1
+
+
+def _end_by(signum: int, previous: _Handler) -> int:
+    """End acq by ``signum`` once the session child is gone; returns ``128 + signum`` if acq lives on.
+
+    The handler the signal would have run is run now: acq's own command
+    handler unwinds the command quietly with status ``128 + N``. With no
+    handler (the default disposition) acq dies of the signal, as a shell
+    reports with the same status; on Windows, where re-raising a signal ends
+    the process with an unrelated code, the status is returned instead.
+    """
+    if callable(previous):
+        previous(signum, None)
+    elif previous == signal.SIG_DFL and sys.platform != "win32":
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.flush()
+            except (OSError, ValueError):
+                pass
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+    return 128 + signum
 
 
 def _die_of_interrupt() -> None:
