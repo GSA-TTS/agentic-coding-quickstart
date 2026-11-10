@@ -369,6 +369,18 @@ def test_cli_kits_relative_refs_are_skipped(tree):
     assert warnings and "<redacted>" in warnings[0] and "S3NTINEL" not in warnings[0]
 
 
+def test_cli_kits_refs_refused_at_input_are_skipped_without_naming_them(tree):
+    sha = "0" * 40
+    _bash_file("box", ".kits", f"schema=1\nkit=git+https://h/o/r.git?private_token={KEY}#ref={sha}&dir=k\n"
+                               f"extra=git+https://h/o/r.git#ref={sha}&dir=k&token={KEY}\n"
+                               f"kit=git+https://h/o/r.git#ref={sha}&dir=k\n")
+    warnings: list[str] = []
+    assert legacy_bash.read_cli_kits("msb", "box", warnings.append) == ([f"git+https://h/o/r.git#ref={sha}&dir=k"], [])
+    assert len(warnings) == 2
+    assert all("acq now refuses" in w and "recreate the sandbox" in w for w in warnings)
+    assert all("S3NTINEL" not in w and "h/o/r" not in w for w in warnings)
+
+
 def test_config_key_readers(tree):
     _config("kit_sources: none\nextra_kits: paseo openchamber\n")
     assert legacy_bash.kit_sources() == []

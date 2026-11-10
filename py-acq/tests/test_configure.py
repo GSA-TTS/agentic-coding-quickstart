@@ -175,6 +175,21 @@ def test_kit_ref_userinfo_is_redacted(monkeypatch, tmp_path, capsys):
     assert configure.kits.redact_userinfo("https://u:p@ss@h.gov/x@y") == "https://***@h.gov/x@y"
 
 
+def test_kit_ref_query_and_extra_fragment_values_are_never_shown(monkeypatch, tmp_path, capsys):
+    # configure reports ACQ_EXTRA_KITS and ACQ_PROVIDER_KITS verbatim apart from
+    # the display redaction; a query string or an extra fragment value is hidden.
+    _state_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_EXTRA_KITS", "git+https://github.com/o/r.git?private_token=SEKRIT#ref=x&dir=k ./kit")
+    monkeypatch.setenv("ACQ_PROVIDER_KITS", "git+https://github.com/o/r.git#ref=x&dir=k&token=SEKRIT")
+    rc, out, _ = _run(capsys, "configure", "--json")
+    assert rc == 0 and "SEKRIT" not in out
+    settings = {s["key"]: s["value"] for s in json.loads(out)["data"]["settings"]}
+    assert settings["extra_kits"] == "git+https://github.com/o/r.git?***#ref=x&dir=k ./kit"
+    assert settings["provider_kit"] == "git+https://github.com/o/r.git#ref=x&dir=k&***"
+    rc, _, err = _run(capsys, "configure")
+    assert rc == 0 and "SEKRIT" not in err
+
+
 @pytest.mark.parametrize("argv", [["configure"], ["configure", "--json"]], ids=["human", "json"])
 def test_non_interactive_leaves_a_legacy_config_unchanged(monkeypatch, tmp_path, capsys, argv):
     _state_env(monkeypatch, tmp_path)

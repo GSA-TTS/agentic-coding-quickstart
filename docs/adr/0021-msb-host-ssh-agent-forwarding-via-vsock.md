@@ -484,7 +484,7 @@ the shell that last started it.
 
 `test/bats/115-ssh-agent-forward.bats` cases 10c18f, 10c18g and 10c25-10c25f,
 10c30, and `py-acq/tests/test_ssh_agent_forward.py`, for both implementations.
-Not yet run against a live msb (see `docs/KNOWN_FAILURE_MODES.md` §90).
+Not yet run against a live msb (see `docs/KNOWN_FAILURE_MODES.md` §93).
 
 ## Links
 

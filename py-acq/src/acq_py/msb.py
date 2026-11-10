@@ -692,6 +692,21 @@ def call(argv: list[str], *, timeout: float) -> subprocess.CompletedProcess | No
         return None
 
 
+def guest_probe(name: str, argv: list[str]) -> str:
+    """Run a read-only probe in the guest as the image's default user; its stdout, or "" on failure.
+
+    For checks that must work before the agent user exists (the kit
+    prerequisite check, :func:`kit_msb.check_prereqs`). An exec failure, an
+    overrun or an msb that cannot be run reads as "no answer", and the caller
+    treats that as nothing to report, as Bash does.
+    """
+    try:
+        proc = _run(["exec", name, "--", *argv], timeout=60)
+    except (subprocess.TimeoutExpired, MsbError, OSError):
+        return ""
+    return proc.stdout or "" if proc.returncode == 0 else ""
+
+
 def provision_substrate(name: str, steps: list[tuple[str, list[str]]]) -> None:
     """Provision addressable substrate gaps in-guest (ADR-0030 "bring-your-own
     image contract"): create the agent user and bootstrap single-user Nix +

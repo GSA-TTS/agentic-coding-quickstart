@@ -117,7 +117,7 @@ heal on re-attach. It now sets up host ssh-agent forwarding on msb as Bash
 does (the `--vsock` route, the in-guest bridge and its restarts, ADR-0021),
 reading and writing the same host-config key and route link, so a sandbox
 either implementation created keeps its forward; the differences and the live
-checks still owed are in `docs/KNOWN_FAILURE_MODES.md` §90. Credential
+checks still owed are in `docs/KNOWN_FAILURE_MODES.md` §93. Credential
 rotation, configure settings and Bash-state import have open follow-ups. So
 ADR-0038m's "preserve every documented acq-owned command and meaningful flag"
 is not yet met. ADR-0048m gate 4 (command parity) is where parity is judged
