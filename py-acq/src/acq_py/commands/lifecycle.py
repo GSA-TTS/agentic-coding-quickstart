@@ -209,10 +209,16 @@ class _CreateOpts:
     """What one ``create``/``run`` adds to a new sandbox beyond its agent, kits and image.
 
     ``publish`` are the validated ``--publish HOST:GUEST`` values (msb only,
-    ADR-0034).
+    ADR-0034). ``extras`` are the extra kit refs the create-time picker chose,
+    which replace config ``extra_kits`` for this sandbox; ``None`` keeps the
+    configured selection.
     """
 
     publish: tuple[str, ...] = ()
+    extras: tuple[str, ...] | None = None
+
+    def extra_refs(self) -> list[str] | None:
+        return None if self.extras is None else list(self.extras)
 
 
 _NO_OPTS = _CreateOpts()
@@ -300,7 +306,7 @@ def _new_msb_sandbox(
 ) -> tuple[dict | None, int | None]:
     """Plan the kits, create the guest, apply the kits; the result data or an emitted exit code."""
     image = _resolve_image(image_flag, agent)
-    plan, exit_code = _plan_msb_kits(agent, cli_kits, image, command, emit_json)
+    plan, exit_code = _plan_msb_kits(agent, cli_kits, image, command, emit_json, opts.extra_refs())
     if plan is None:
         return None, exit_code
     plan = dataclasses.replace(plan, publish=opts.publish)
@@ -319,11 +325,12 @@ def _new_msb_sandbox(
 
 
 def _plan_sbx_kits(
-    agent: str, cli_kits: list[str], image: str, command: str, emit_json: bool
+    agent: str, cli_kits: list[str], image: str, command: str, emit_json: bool, extras: list[str] | None = None
 ) -> tuple[_KitPlan | None, int | None]:
     """Select, verify and parse the kit set for an sbx create (:func:`kit_sbx.select`)."""
     try:
-        resolved, selection = kit_sbx.select(agent, cli_kits, image_is_default=image == common.OPENCODE_DEVENV_IMAGE)
+        resolved, selection = kit_sbx.select(agent, cli_kits, image_is_default=image == common.OPENCODE_DEVENV_IMAGE,
+                                             extras=extras)
     except kitspec.KitSelectionError as exc:
         return None, common._operational_failure(
             command, errors.VALIDATION_FAILED, str(exc),
@@ -349,7 +356,7 @@ def _new_sbx_sandbox(
     does not add its own OpenCode kit as well.
     """
     image = _resolve_image(image_flag, agent)
-    plan, exit_code = _plan_sbx_kits(agent, cli_kits, image, command, emit_json)
+    plan, exit_code = _plan_sbx_kits(agent, cli_kits, image, command, emit_json, opts.extra_refs())
     if plan is None:
         return None, exit_code
     selected, exit_code = _sbx_provider_gate(command, name, plan, emit_json)
@@ -1037,7 +1044,8 @@ def _run_create(parsed, emit_json: bool, backend: str) -> int:
         opts, exit_code = _onboarding(backend, opts, emit_json)
         if opts is None:
             return exit_code if exit_code is not None else errors.EXIT_FAILURE
-        exit_code = _preflight_new(backend, parsed.agent, cli_kits, parsed.image, "create", emit_json)
+        exit_code = _preflight_new(backend, parsed.agent, cli_kits, parsed.image, "create", emit_json,
+                                   opts.extra_refs())
         if exit_code is not None:
             return exit_code
         stored_token = _scope_advice(backend, name, workspace, emit_json)
@@ -1053,19 +1061,24 @@ def _run_create(parsed, emit_json: bool, backend: str) -> int:
 def _onboarding(backend: str, opts: _CreateOpts, emit_json: bool) -> tuple[_CreateOpts | None, int | None]:
     """The prompts before a new sandbox is planned (ADR-0031), in Bash's order.
 
-    The first-run offer of ``acq configure`` (Bash ``maybe_first_run_configure``).
-    Each prompts only where :func:`configure.interactive` allows. Returns the
+    The first-run offer of ``acq configure`` (Bash ``maybe_first_run_configure``),
+    then the create-time kit picker (Bash ``create_time_kit_picker``), whose
+    choice replaces the configured extra kits for this sandbox. Each prompts
+    only where :func:`configure.interactive` allows. Returns the
     options to create with, or ``(None, exit_code)`` once a prompt ended the
     command (already reported).
     """
     exit_code = configure.first_run_offer(backend, emit_json)
     if exit_code is not None:
         return None, exit_code
-    return opts, None
+    refs, exit_code = configure.create_time_picker(emit_json)
+    if exit_code is not None:
+        return None, exit_code
+    return (opts if refs is None else dataclasses.replace(opts, extras=tuple(refs))), None
 
 
 def _preflight_new(backend: str, agent: str, cli_kits: list[str], image_flag: str | None, command: str,
-                   emit_json: bool) -> int | None:
+                   emit_json: bool, extras: list[str] | None = None) -> int | None:
     """Refuse a kit selection or image a new sandbox cannot use, before the scope prompt.
 
     Read-only, so it needs no lock; the locked create plans again from scratch.
@@ -1074,9 +1087,9 @@ def _preflight_new(backend: str, agent: str, cli_kits: list[str], image_flag: st
     """
     image = _resolve_image(image_flag, agent)
     if backend == "sbx":
-        sbx_plan, exit_code = _plan_sbx_kits(agent, cli_kits, image, command, emit_json)
+        sbx_plan, exit_code = _plan_sbx_kits(agent, cli_kits, image, command, emit_json, extras)
         return exit_code if sbx_plan is None else None
-    plan, exit_code = _plan_msb_kits(agent, cli_kits, image, command, emit_json)
+    plan, exit_code = _plan_msb_kits(agent, cli_kits, image, command, emit_json, extras)
     if plan is None:
         return exit_code if exit_code is not None else errors.EXIT_FAILURE
     _steps, exit_code = _substrate_plan(image, plan.agent_kit, command, emit_json)
@@ -1485,7 +1498,8 @@ def _run_run(parsed, emit_json: bool, backend: str) -> int:
             opts, exit_code = _onboarding(backend, opts, emit_json)
             if opts is None:
                 return exit_code if exit_code is not None else errors.EXIT_FAILURE
-            exit_code = _preflight_new(backend, target, cli_kits, parsed.image, "run", emit_json)
+            exit_code = _preflight_new(backend, target, cli_kits, parsed.image, "run", emit_json,
+                                       opts.extra_refs())
             if exit_code is not None:
                 return exit_code
         # Before the lock (it may prompt), and on a re-attach too: a running

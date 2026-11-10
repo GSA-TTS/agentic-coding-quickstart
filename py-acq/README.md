@@ -355,8 +355,9 @@ lists each setting as `key`, `value`, `source` and `honoured_by_python`.
 The Python acq reads all three keys at `create` and `run`, with Bash's
 precedence, so `--json` reports `"honoured_by_python": true` for each:
 
-* **`extra_kits`** is used unless `ACQ_EXTRA_KITS` is set and non-empty; `--kit`
-  refs are added after either. An unknown name in `extra_kits` stops the create.
+* **`extra_kits`** is used unless `ACQ_EXTRA_KITS` is set and non-empty, or the
+  create-time picker (below) changes it for one sandbox; `--kit` refs are added
+  after any of them. An unknown name in `extra_kits` stops the create.
 * **`provider_kit`** is the provider kit unless `--no-provider-kits` is given or
   `ACQ_PROVIDER_KITS` is set (an empty value selects no provider kit). The flag
   wins over both and needs no provider credential. The create records which of
@@ -414,8 +415,6 @@ Deliberate differences from Bash:
   it), a malformed `ACQ_PROVIDER_CREDENTIAL_BINDINGS` is `validation_failed`, and
   an unknown `--backend` is a usage error. Ctrl-C exits 130; SIGTERM and SIGHUP
   restore the terminal and exit 128 plus the signal number.
-* **Not ported.** The create-time kit picker (an accepted gap in ADR-0048m).
-
 **First-run offer** (Bash `maybe_first_run_configure`). Before a new sandbox is
 created (`create`, or `run` creating one) and while there is no `config.yaml`,
 acq says it looks like a first run and asks "Configure extra kits and token
@@ -426,6 +425,19 @@ not repeated. It is asked only where configure's prompts are: stdin a terminal
 never under `--json`. Unlike Bash, `create` of a sandbox that already exists
 does not ask (it is refused anyway), and an interrupted configure (Ctrl-C, or
 SIGTERM in key mode) stops the create.
+
+**Create-time kit picker** (Bash `create_time_kit_picker`). Right after that
+offer, a new sandbox gets the checkbox list of `configure` ("acq: extra kits
+for this sandbox (defaults from 'acq configure'):"): the built-in kits frozen,
+the opt-in kits checked as `extra_kits` says. The choice replaces the
+configured extra kits for this sandbox only: nothing is written to
+`config.yaml`, and the sandbox records the kits it got, so `start`, `restart`,
+`kit update` and a re-attach heal keep them. Unchecking everything creates it
+with no extra kits; `q` (or Esc) keeps the configured ones. Same conditions as
+the offer, and also not when `ACQ_EXTRA_KITS` is set (it wins, as in Bash), nor
+when `extra_kits` names an unknown kit (the create then refuses it, as Bash
+does before its picker). `--kit` refs are added either way. Unlike Bash, it is
+not shown for a `create` of a sandbox that already exists.
 
 ## State migration (ADR-0041m)
 

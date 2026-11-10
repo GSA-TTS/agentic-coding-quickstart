@@ -1261,7 +1261,7 @@ list (an empty value selects none); otherwise `provider_kit:` in config.yaml
 the same way: a non-empty `ACQ_EXTRA_KITS` replaces config.yaml `extra_kits:`,
 and `--kit` refs are added after either (at a terminal, the Bash acq's
 create-time picker can still change the extras for one sandbox). The Python acq
-follows the same order and has no picker. A kit outside its pinned built-in
+follows the same order, picker included. A kit outside its pinned built-in
 bundle (every catalog extra kit, a provider kit from a registered source) it
 fetches at its pinned commit and verifies, and a local kit directory it copies
 into its private cache and checks there; it refuses a ref not pinned to a full

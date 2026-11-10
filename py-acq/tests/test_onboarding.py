@@ -14,7 +14,7 @@ import json
 
 import pytest
 
-from acq_py import cli, config, hostexec, kit_msb, kitspec, security, state
+from acq_py import cli, config, hostexec, kit_msb, kit_sbx, kitspec, security, state
 from acq_py.commands import common, configure
 
 pytestmark = pytest.mark.provider_key
@@ -152,7 +152,7 @@ def test_no_prompt_without_a_terminal_under_json_or_when_opted_out(monkeypatch, 
     extra = ["--json"] if how == "json" else []
     rc, _, err = _invoke(capsys, "--backend", "msb", "create", "shell", str(ws), "--name", "fr", *extra)
     assert rc == 0, err
-    assert term.asked == 0 and "first run" not in err
+    assert term.asked == 0 and "first run" not in err and configure.PICKER_HEADER not in err
     assert not config.config_path().exists()
 
 
@@ -184,3 +184,92 @@ def test_run_offers_on_a_fresh_create_but_not_on_a_reattach(monkeypatch, tmp_pat
     before = term.asked
     rc, _, err = _invoke(capsys, "--backend", "msb", "run", "shell", str(ws), "--name", "fr")
     assert rc == 0 and "first run" not in err and term.asked == before
+
+
+# ---------------------------------------------------------------------------
+# The create-time kit picker.
+# ---------------------------------------------------------------------------
+
+
+def test_the_picker_choice_replaces_the_configured_extras(monkeypatch, tmp_path, capsys):
+    ws = _env(monkeypatch, tmp_path)
+    _write_config("schema: 1\nextra_kits: paseo\n")
+    # The cursor starts on openchamber: check it, move to paseo and uncheck it.
+    _Terminal(monkeypatch, keys=["SPACE", "DOWN", "SPACE", "ENTER"])
+    seen = _selections(monkeypatch)
+    rc, _, err = _invoke(capsys, "--backend", "msb", "create", "shell", str(ws), "--name", "pk")
+    assert rc == 0, err
+    assert configure.PICKER_HEADER in err
+    assert seen and all(extras == [REF["openchamber"]] for extras in seen)
+    assert config.read_field("extra_kits") == "paseo"  # this sandbox only
+
+
+def test_the_picker_defaults_come_from_the_config(monkeypatch, tmp_path, capsys):
+    ws = _env(monkeypatch, tmp_path)
+    _write_config("schema: 1\nextra_kits: paseo oci-engine\n")
+    _Terminal(monkeypatch, keys=["ENTER"])
+    seen = _selections(monkeypatch)
+    assert _invoke(capsys, "--backend", "msb", "create", "shell", str(ws), "--name", "pk")[0] == 0
+    assert seen[-1] == [REF["paseo"], REF["oci-engine"]]
+
+
+def test_unchecking_everything_creates_without_extra_kits(monkeypatch, tmp_path, capsys):
+    ws = _env(monkeypatch, tmp_path)
+    _write_config("schema: 1\nextra_kits: openchamber\n")
+    _Terminal(monkeypatch, keys=["SPACE", "ENTER"])
+    seen = _selections(monkeypatch)
+    assert _invoke(capsys, "--backend", "msb", "create", "shell", str(ws), "--name", "pk")[0] == 0
+    assert seen[-1] == []
+
+
+def test_cancelling_the_picker_keeps_the_configured_extras(monkeypatch, tmp_path, capsys):
+    ws = _env(monkeypatch, tmp_path)
+    _write_config("schema: 1\n")
+    _Terminal(monkeypatch, keys=["SPACE", "QUIT"])
+    seen = _selections(monkeypatch)
+    rc, _, err = _invoke(capsys, "--backend", "msb", "create", "shell", str(ws), "--name", "pk")
+    assert rc == 0 and seen and all(extras is None for extras in seen)
+    assert "acq: selection cancelled; keeping current configuration." in err
+
+
+def test_env_extra_kits_win_over_the_picker(monkeypatch, tmp_path, capsys):
+    ws = _env(monkeypatch, tmp_path)
+    _write_config("schema: 1\n")
+    monkeypatch.setenv("ACQ_EXTRA_KITS", kitspec.builtin_kit_ref("git-ssh-sign"))
+    term = _Terminal(monkeypatch)
+    rc, _, err = _invoke(capsys, "--backend", "msb", "create", "shell", str(ws), "--name", "pk")
+    assert rc == 0 and term.asked == 0 and configure.PICKER_HEADER not in err, err
+
+
+def test_an_unknown_configured_kit_is_refused_without_a_picker(monkeypatch, tmp_path, capsys):
+    ws = _env(monkeypatch, tmp_path)
+    _write_config("schema: 1\nextra_kits: nosuchkit\n")
+    term = _Terminal(monkeypatch)
+    rc, doc, _ = _invoke(capsys, "--backend", "msb", "create", "shell", str(ws), "--name", "pk", "--json")
+    assert rc == 1 and doc["error"]["code"] == "validation_failed" and term.asked == 0
+    monkeypatch.setattr(common, "_stdin_is_terminal", lambda: True)
+    rc, _, err = _invoke(capsys, "--backend", "msb", "create", "shell", str(ws), "--name", "pk")
+    assert rc == 1 and "unknown kit 'nosuchkit'" in err and term.asked == 0
+
+
+def test_the_sbx_create_takes_the_picker_choice_too(monkeypatch, tmp_path, capsys):
+    ws = _env(monkeypatch, tmp_path, backend="sbx")
+    _write_config("schema: 1\n")
+    _Terminal(monkeypatch, keys=["SPACE", "ENTER"])
+    seen = _selections(monkeypatch, kit_sbx)
+    rc, _, err = _invoke(capsys, "--backend", "sbx", "create", "shell", str(ws), "--name", "pk")
+    assert rc == 0, err
+    assert seen and all(extras == [REF["openchamber"]] for extras in seen)
+
+
+def test_a_signal_in_the_picker_ends_the_create(monkeypatch, tmp_path, capsys):
+    ws = _env(monkeypatch, tmp_path)
+    _write_config("schema: 1\n")
+    monkeypatch.setattr(common, "_stdin_is_terminal", lambda: True)
+
+    def terminated(term):
+        raise configure.Signalled(15)
+
+    monkeypatch.setattr(configure.Terminal, "read_key", terminated)
+    rc, _, _ = _invoke(capsys, "--backend", "msb", "create", "shell", str(ws), "--name", "pk")
+    assert rc == 143 and state.record_read("msb", "pk") is None

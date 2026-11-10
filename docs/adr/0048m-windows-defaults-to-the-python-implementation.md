@@ -116,7 +116,10 @@ The default flips only when every gate below holds. Until then this ADR stays
      the opt-in kits for that sandbox. Python has no picker. It does not apply
      extra kits at all yet (see "Python reads the configure keys" under Links), so
      until it does the replacement is the Bash acq (`ACQ_IMPL=bash`), whose picker
-     and `ACQ_EXTRA_KITS` still work.
+     and `ACQ_EXTRA_KITS` still work. *Update (2026-11-10): no longer a gap;
+     Python applies extra kits and has the picker, under the same conditions
+     (`py-acq/README.md`, "configure"). So `acq configure` has no accepted gaps
+     left.*
 
    The deliberate behaviour differences of the Python `configure` are listed in
    `py-acq/README.md` under "configure".
