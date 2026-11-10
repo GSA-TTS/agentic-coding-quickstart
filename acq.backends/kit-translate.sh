@@ -138,9 +138,9 @@ _kit_git_fetch_into() {
     mkdir -p .git/info
     printf '%s/*\n' "$dir" > .git/info/sparse-checkout
     if [ "$mode" = anon ]; then
-      git -c credential.helper= -c core.hooksPath=/dev/null fetch --depth 1 origin "$ref" 2>&1 || exit 1
+      git -c credential.helper= -c core.hooksPath=/dev/null fetch --depth 1 origin -- "$ref" 2>&1 || exit 1
     else
-      git -c core.hooksPath=/dev/null fetch --depth 1 origin "$ref" 2>&1 || exit 1
+      git -c core.hooksPath=/dev/null fetch --depth 1 origin -- "$ref" 2>&1 || exit 1
     fi
     git -c core.hooksPath=/dev/null checkout -q FETCH_HEAD 2>&1 || exit 1
   )
@@ -215,13 +215,45 @@ _kit_fetch_materialize() (
 #     cutting at the last '@';
 #   - without a scheme, a first path segment carrying any userinfo
 #     (user:token@host, or a bare token@host) becomes ***@host.
-# The fragment (#ref=…&dir=…) is kept so the message still names the kit. This
+# The fragment's first ref= and dir= are kept so the message still names the
+# kit when their value is plain (_kit_ref_value_plain); a repeat or any other
+# fragment parameter becomes ***, and an odd value becomes ref=*** or dir=***
+# (kit_ref_shape_check refuses such a ref, but a message about it must not
+# repeat the value). This
 # over-redacts when a path or host part legitimately contains '@' or ':',
 # which is harmless.
 kit_ref_display() {
-  local ref="${1:-}" base frag query="" first
+  local ref="${1:-}" base frag query="" first rest p out=""
   base="${ref%%#*}"
   frag="${ref#"$base"}"
+  if [ -n "$frag" ]; then
+    rest="${frag#'#'}"
+    local seen=" "
+    while :; do
+      p="${rest%%&*}"
+      case "$p" in
+        ref=* | dir=*)
+          # The first ref= and dir= are kept when their value is plain; a
+          # repeat, or a value with any other character, is hidden.
+          case "$seen" in
+            *" ${p%%=*} "*) out="${out}&***" ;;
+            *)
+              if _kit_ref_value_plain "${p#*=}"; then
+                out="${out}&${p}"
+              else
+                out="${out}&${p%%=*}=***"
+              fi
+              ;;
+          esac
+          seen="${seen}${p%%=*} "
+          ;;
+        *) out="${out}&***" ;;
+      esac
+      [ "$rest" != "$p" ] || break
+      rest="${rest#*&}"
+    done
+    frag="#${out#&}"
+  fi
   case "$base" in
     *\?*) base="${base%%\?*}"; query='?***' ;;
   esac
@@ -238,6 +270,78 @@ kit_ref_display() {
   printf '%s%s%s\n' "$base" "$query" "$frag"
 }
 
+# _kit_ref_value_plain VALUE — VALUE is a non-empty ref= or dir= value made only
+# of ASCII letters, digits, '.', '_', '/' and '-', not starting with '-'. The
+# characters are listed one by one rather than as ranges: a range such as A-Z
+# in a glob follows the locale's collation, so under some UTF-8 locales it
+# would also admit letters such as é or ß.
+_kit_ref_value_plain() {
+  case "${1:-}" in
+    "" | -* | *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/-]*) return 1 ;;
+  esac
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# kit_ref_shape_check REF [WHERE]
+# ---------------------------------------------------------------------------
+# Refuse a remote kit ref (one starting git+) whose transport URL, the part
+# before '#', has a query string, or whose '#' fragment has any parameter other
+# than ref= and dir=, names one of them twice, or gives one a value that is
+# empty, starts with '-' or holds a character outside [A-Za-z0-9._/-] (the dir=
+# charset the fetch enforces; see _kit_ref_value_plain). Such a part is where a
+# token would ride (and a leading '-' would reach git as an option), and acq
+# would otherwise carry it into its records, cache paths and messages. The message
+# names the problem only: never the URL, a parameter name or a value. WHERE
+# (for example "--kit" or "ACQ_EXTRA_KITS") says where the ref came from. A
+# local path is not checked, since '?' and '#' are ordinary characters in a
+# directory name. Returns 1, with the message on stderr, on a refusal.
+kit_ref_shape_check() {
+  local ref="${1:-}" where="${2:-}" body rest p prefix="kit-translate:"
+  case "$ref" in git+*) ;; *) return 0 ;; esac
+  [ -z "$where" ] || prefix="acq: ${where}:"
+  body="${ref#git+}"
+  case "${body%%#*}" in
+    *\?*)
+      echo "${prefix} remote kit ref refused: its URL has a query string ('?' before the '#')." >&2
+      echo "${prefix}   A kit ref takes no query parameters: git+https://HOST/REPO.git#ref=<commit>&dir=<path>" >&2
+      return 1
+      ;;
+  esac
+  # No fragment at all is reported by the fetch as a malformed ref.
+  case "$body" in *'#'*) ;; *) return 0 ;; esac
+  rest="${body#*#}"
+  local seen_ref=0 seen_dir=0 problem="" val
+  while :; do
+    p="${rest%%&*}"
+    case "$p" in
+      ref=*)
+        [ "$seen_ref" -eq 0 ] || problem="repeats ref= or dir="
+        seen_ref=1; val="${p#ref=}"
+        ;;
+      dir=*)
+        [ "$seen_dir" -eq 0 ] || problem="repeats ref= or dir="
+        seen_dir=1; val="${p#dir=}"
+        ;;
+      *) problem="has a parameter other than ref= and dir=" ;;
+    esac
+    # A value may hold only the safe ref/dir characters (no '?', ';', '#',
+    # space or the like, behind which a token could ride), and must not start
+    # with '-', which git would read as an option.
+    if [ -z "$problem" ] && ! _kit_ref_value_plain "$val"; then
+      problem="has a ref= or dir= value that is empty, starts with '-' or holds a character outside [A-Za-z0-9._/-]"
+    fi
+    if [ -n "$problem" ]; then
+      echo "${prefix} remote kit ref refused: its '#' fragment ${problem}." >&2
+      echo "${prefix}   A kit ref names each once: git+https://HOST/REPO.git#ref=<commit>&dir=<path>" >&2
+      return 1
+    fi
+    [ "$rest" != "$p" ] || break
+    rest="${rest#*&}"
+  done
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # kit_translate_fetch KITREF DESTDIR
 # ---------------------------------------------------------------------------
@@ -247,6 +351,10 @@ kit_ref_display() {
 # On success prints the local kit directory path to stdout and returns 0.
 kit_translate_fetch() {
   local kitref="$1" destdir="$2"
+
+  # Every caller's ref passes the shape check before anything is fetched; the
+  # input points (--kit, ACQ_EXTRA_KITS) also run it before recording a ref.
+  kit_ref_shape_check "$kitref" || return 1
 
   case "$kitref" in
     git+http*)
@@ -284,12 +392,12 @@ kit_translate_fetch() {
       # anything but a safe path charset. Matches the hardening in kit_spec_files.
       case "$dir" in
         /*|*..*)
-          echo "kit-translate: unsafe kit dir (no absolute paths or '..'): $dir" >&2
+          echo "kit-translate: unsafe kit dir (no absolute paths or '..')" >&2
           return 1
           ;;
       esac
       if printf '%s' "$dir" | LC_ALL=C grep -q '[^A-Za-z0-9._/-]'; then
-        echo "kit-translate: unsafe kit dir (illegal characters): $dir" >&2
+        echo "kit-translate: unsafe kit dir (illegal characters)" >&2
         return 1
       fi
       if [ -n "${_ACQ_KIT_FETCH_ROOT:-}" ] && [[ "$ref" =~ ^[0-9a-f]{40}$ ]]; then
@@ -337,6 +445,30 @@ EOM
       # Local path — use as-is.
       if [ ! -d "$kitref" ]; then
         echo "kit-translate: local kit path not found: $(kit_ref_display "$kitref")" >&2
+        return 1
+      fi
+      # A regular file with more than one hard link may be a file from
+      # elsewhere on the same file system that someone who can write to the
+      # kit directory linked in, so it is refused. Directories are exempt
+      # (find -type f): their link count is naturally above 1. Bash reads a
+      # local kit in place, so this is a check before use, not a guarantee: a
+      # link made after it runs is not seen (KNOWN_FAILURE_MODES section 55).
+      # -H follows the kit path itself when it is a symlink to the kit (as the
+      # Python acq resolves it), but no link inside it. A find that cannot
+      # read every directory fails closed: an unchecked file is not passed.
+      local _linked _rel _find_rc=0
+      _linked=$(find -H "$kitref" -type f -links +1 -print 2>/dev/null) || _find_rc=$?
+      if [ "$_find_rc" -ne 0 ]; then
+        echo "kit-translate: local kit refused: acq could not check every file in it (is a directory unreadable?)." >&2
+        echo "kit-translate:   Make the kit readable, or make a plain copy of it (cp -R KIT KIT-copy) and use the copy." >&2
+        return 1
+      fi
+      _linked=$(printf '%s\n' "$_linked" | sed -n 1p)
+      if [ -n "$_linked" ]; then
+        _rel="${_linked#"${kitref%/}"/}"
+        _rel=$(printf '%s' "$_rel" | LC_ALL=C tr '[:cntrl:]' '?')
+        echo "kit-translate: local kit refused: ${_rel} has more than one hard link." >&2
+        echo "kit-translate:   Make a plain copy of the kit (for example: cp -R KIT KIT-copy) and use the copy." >&2
         return 1
       fi
       printf '%s\n' "$kitref"

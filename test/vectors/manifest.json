@@ -333,6 +333,10 @@
       "vectors": ["cli/usai-rotate-sbx"]
     },
     {
+      "contract": "sbx duplicate custom secrets: more than one global custom secret for the USAi env var and host is refused by secret set and key rotation, naming every placeholder with one `sbx secret rm --placeholder P -f` per entry and a warning that running sandboxes may hold one; nothing is stored or removed",
+      "vectors": ["cli/secret-set-sbx-duplicate-usai", "cli/sbx-duplicate-usai-nothing-removed"]
+    },
+    {
       "contract": "ADR-0038m §1 / spec story #9 passthrough: verbatim forwarding, announced stderr notice, status preserved",
       "vectors": ["cli/passthrough", "cli/passthrough-exit-code", "cli/passthrough-sbx-bin-seam"]
     },
@@ -416,7 +420,7 @@
     },
     {
       "contract": "ADR-0038m §46 kit-source add/rm both refuse the control-plane trust anchor (symmetry)",
-      "vectors": ["cli/kit-source-add-control-plane", "cli/kit-source-add-control-plane-case"]
+      "vectors": ["cli/kit-source-add-control-plane", "cli/kit-source-add-control-plane-case", "cli/kit-source-rm-control-plane", "cli/kit-source-rm-control-plane-case"]
     },
     {
       "contract": "ADR-0038m §2 kit list required data: control-plane ref and effective built-in/provider/extra sets",

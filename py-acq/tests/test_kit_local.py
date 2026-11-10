@@ -121,6 +121,42 @@ def test_a_fifo_in_the_kit_is_refused(tmp_path):
     assert "is not a regular file" in _refused(kit)
 
 
+@pytest.mark.parametrize("by_fd", [True, False], ids=["fd-walk", "path-walk"])
+@pytest.mark.parametrize("inside", [False, True], ids=["from-outside", "twin-in-kit"])
+def test_a_hard_linked_file_is_refused_with_the_plain_copy_remedy(tmp_path, monkeypatch, by_fd, inside):
+    # On NTFS too: os.link makes a hard link there, and fstat reports it.
+    if by_fd and not kit_fetch._WALK_BY_FD:
+        pytest.skip("this host has no fd walk")
+    monkeypatch.setattr(kit_fetch, "_WALK_BY_FD", by_fd)
+    kit = _kit(tmp_path)
+    (kit / "files" / "sub").mkdir()
+    source = kit / "files" / "team.txt" if inside else tmp_path / "elsewhere.txt"
+    if not inside:
+        source.write_text("host file\n", encoding="utf-8")
+    os.link(source, kit / "files" / "sub" / "linked.txt")
+    with pytest.raises(kit_fetch.KitFetchError) as info:
+        kit_fetch.load(str(kit), "msb")
+    assert info.value.code == errors.VALIDATION_FAILED
+    assert "has more than one hard link" in info.value.message
+    # Entries are walked in name order, so files/sub/ comes before files/team.txt.
+    assert "files/sub/linked.txt has more than one hard link" in info.value.message
+    assert "cp -R" in info.value.remediation
+    assert "elsewhere" not in info.value.message
+    cache = _cache()
+    assert not cache.exists() or not list(cache.glob("*/kit"))  # nothing was kept
+
+
+def test_a_plain_copy_of_a_hard_linked_kit_passes(tmp_path):
+    import shutil
+
+    kit = _kit(tmp_path)
+    (tmp_path / "elsewhere.txt").write_text("x\n", encoding="utf-8")
+    os.link(tmp_path / "elsewhere.txt", kit / "files" / "linked.txt")
+    copy = tmp_path / "copy"
+    shutil.copytree(kit, copy)  # what 'cp -R' gives: one link per file
+    assert kit_fetch.load(str(copy), "msb")[0] == "team-kit"
+
+
 def test_the_windows_walk_refuses_links_and_copies_files(tmp_path, monkeypatch):
     # The path-based walk Windows uses (no O_NOFOLLOW opens there), run on any host.
     monkeypatch.setattr(kit_fetch, "_WALK_BY_FD", False)

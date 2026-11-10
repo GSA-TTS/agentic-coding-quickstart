@@ -38,7 +38,17 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import errors, kit_fetch, kitspec, legacy_bash, lock, msb, security, state
+from . import (
+    errors,
+    kit_fetch,
+    kitspec,
+    legacy_bash,
+    lock,
+    msb,
+    security,
+    state,
+    userdirs,
+)
 
 # Module-local seam for the host OS class (as ``msb.WINDOWS``).
 WINDOWS = os.name == "nt"
@@ -466,19 +476,32 @@ def startup_script(kits: Iterable[Kit], merged: list[str], *, ro_mount: bool) ->
 
 
 def _stage_dir() -> Path:
-    override = os.environ.get(STARTUP_STAGE_DIR_ENV)
-    path = Path(override) if override else state.state_dir() / "msb-startup"
+    """The private staging directory; a relative override raises :class:`userdirs.UserDirError`.
+
+    A relative ``ACQ_MSB_STARTUP_STAGE_DIR`` would resolve against the current
+    directory, normally the agent-writable workspace. The CLI refuses it up
+    front (:func:`userdirs.check_path_overrides`); this is the same refusal for
+    any other caller.
+    """
+    override = userdirs.path_override(STARTUP_STAGE_DIR_ENV)
+    path = override or state.state_dir() / "msb-startup"
     path.mkdir(parents=True, exist_ok=True)
     path.chmod(0o700)
     return path
 
 
 def stage_startup_script(body: str) -> Path | None:
-    """Write ``body`` to a private host file for ``--script-path`` (best-effort, as Bash)."""
+    """Write ``body`` to a private host file for ``--script-path`` (best-effort, as Bash).
+
+    Nothing is written when the staging directory is refused; the warning names why.
+    """
     try:
         fd, raw = tempfile.mkstemp(prefix=f"{STARTUP_SCRIPT_NAME}.", dir=_stage_dir())
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(body)
+    except userdirs.UserDirError as exc:
+        _warn(f"{exc.message}; skipping --script-path")
+        return None
     except OSError:
         _warn("could not stage the kit startup script; skipping --script-path")
         return None
@@ -781,6 +804,55 @@ def ensure_agent_user(name: str) -> bool:
         _warn(f"could not establish a writable agent home in sandbox '{name}'; /home/agent must exist and be "
               "owned by the 'agent' user (a custom image must ship that user, or useradd/adduser)")
     return ok
+
+
+# The kit prerequisite check (Bash ``_acq_msb_check_prereqs``). The pinned kits
+# assume these tools are in the base image. The default image ships them; a
+# custom image may not, and acq does not install them, because the kits' egress
+# rules lock the sandbox to the kits' own hosts, so a package mirror is out of
+# reach. The probe prints one tagged line, so output that is not its answer
+# (an msb that echoes the command, say) is never read as a missing tool.
+PREREQ_TOOLS = ("node", "git", "curl", "update-ca-certificates")
+SKIP_PREREQ_CHECK_ENV = "ACQ_MSB_SKIP_PREREQ_CHECK"
+_PREREQ_TAG = "acq-prereqs:"
+_PREREQ_SCRIPT = (
+    'm=""\n'
+    f"for t in {' '.join(PREREQ_TOOLS)}; do\n"
+    '  command -v "$t" >/dev/null 2>&1 || m="$m $t"\n'
+    "done\n"
+    f'printf "{_PREREQ_TAG}%s\\n" "$m"\n'
+)
+
+
+def missing_prereqs(name: str) -> list[str] | None:
+    """The kit prerequisites the guest lacks, or ``None`` when the probe gave no answer."""
+    out = msb.guest_probe(name, ["sh", "-c", _PREREQ_SCRIPT])
+    for line in out.replace("\r", "").splitlines():
+        if not line.startswith(_PREREQ_TAG):
+            continue
+        tools = line[len(_PREREQ_TAG):].split()
+        if all(tool in PREREQ_TOOLS for tool in tools):
+            return tools
+    return None
+
+
+def check_prereqs(name: str) -> None:
+    """Warn when the guest lacks a kit prerequisite; never fails the caller.
+
+    Runs when a new guest is provisioned (create and recreate), ahead of the
+    agent-user setup, as Bash's provision does; not on a heal of an existing
+    sandbox. ``ACQ_MSB_SKIP_PREREQ_CHECK`` (any non-empty value) skips
+    it. A probe that gives no answer is not reported, as in Bash.
+    """
+    if os.environ.get(SKIP_PREREQ_CHECK_ENV):
+        return
+    missing = missing_prereqs(name)
+    if not missing:
+        return
+    _warn(f"the base image of sandbox '{name}' is missing kit prerequisite(s): {' '.join(missing)}. "
+          f"The pinned kits need {', '.join(PREREQ_TOOLS)}; the default image provides them and a custom "
+          "image must too (acq does not install them, because the kits' egress rules lock the sandbox to "
+          f"the kits' hosts). Affected kits may not fully apply. Set {SKIP_PREREQ_CHECK_ENV}=1 to silence this.")
 
 
 def ensure_kits_applied(name: str, kits: list[Kit], *, ro_required: bool, force: bool = False) -> ApplyResult:

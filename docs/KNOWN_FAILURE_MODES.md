@@ -969,6 +969,8 @@ sbx secret set-custom <sandbox-name> --host api.gsa.usai.gov \
 
 - Rotate with `acq usai-rotate-api-key`, which preserves the placeholder so
   existing sandboxes keep working. Avoid deleting + re-adding the global secret.
+  When sbx holds more than one global USAi entry, rotation refuses and names
+  each placeholder instead of picking one (see section 90).
 - Remove any `export USAI_API_KEY=...` from your shell profile — the sandbox gets
   its value from sbx injection, and a host env var only causes confusion.
 
@@ -3402,11 +3404,22 @@ kits outside the bundle at their pinned commit. Compared with the Bash acq:
   the spec reader, like Bash's, would read each value with a trailing CR. A
   local kit's later changes reach a sandbox only through a heal or recreate,
   which copies it again.
-- Known limitation, shared with Bash: a payload file that is a hard link
-  (link count above 1) is copied like any other file. A hard link cannot point
-  across file systems or at a directory, but whoever can write to the kit
-  directory can hard-link a file they can read from elsewhere on the same file
-  system into it. Keep local kits in a directory only you can write.
+- A regular file with more than one hard link (link count above 1) anywhere in
+  a local kit is refused, by both the Python and the Bash acq, with the file's
+  path relative to the kit and the remedy: make a plain copy of the kit (for
+  example `cp -R KIT KIT-copy`, which gives each file one link) and use the
+  copy. A hard link cannot point across file systems or at a directory, but
+  whoever can write to the kit directory could hard-link a file they can read
+  from elsewhere on the same file system into it. Directories are exempt:
+  their link count is naturally above 1. The Python acq checks the link count
+  of each file it opens for the copy (`os.fstat`, which reports NTFS hard links
+  on Windows too), so the file checked is the file copied.
+- Bash limit: Bash reads a local kit in place, so its check (one
+  `find KIT -type f -links +1` in `kit_translate_fetch`, POSIX on Linux and
+  macOS) is a check before use, not a guarantee. A hard link created in the
+  kit after the check and before the backend reads the file is not seen.
+  Keep local kits in a directory only you can write, or use the Python acq,
+  which applies only its checked private copy.
 
 ### Root Cause
 
@@ -3444,8 +3457,10 @@ Tracked follow-ups:
   POSIX; `provider_input.publish` already writes Bash's Windows pointer file.
 - **Local kit directories.** Done: the Python acq copies a local kit into its
   private cache with the no-link checks (option 1 in section 61) and applies
-  the copy, on Windows checking each opened file's final path as well. Nothing
-  further is tracked here; the hard-link limitation above is Bash's too.
+  the copy, on Windows checking each opened file's final path as well. Both
+  acq implementations refuse a hard-linked file in a local kit; the Bash
+  check-then-use limit above is a known residual. Nothing further is tracked
+  here.
 - **The rc bridge.** Port `_acq_sbx_ensure_rc_bridge` with the msb login-shell
   work.
 - **Kit fetch on Windows.** The fetch itself has no POSIX-only step, but its
@@ -4602,24 +4617,57 @@ login-shell sync into the agent-user setup.
 
 ---
 
-## 79. Sandbox Lock Directory Without an Owner Is Never Removed Automatically
+## 79. Lock Directory Without an Owner Is Never Removed Automatically
 
-**Symptom:** Every acq command on one sandbox (`create`, `run`, `rm`, `start`)
-waits and then fails with `timeout`. The remediation names a directory ending in
-`.lock` under `.../acq/provenance/provider-input/<backend>/`, and no other acq
-command is running.
+**Symptom:** One of these, with no other acq command running:
 
-**Cause:** Both the Bash and the Python acq take a per-sandbox `mkdir` lock and
-write `PID IDENTITY` into its `owner` file. A lock whose owner process is gone
-is recovered automatically. A lock directory with no readable owner line is
-not: the same state exists, briefly, while another command is between its
-`mkdir` and its owner write, so removing it automatically could break a live
-lock. Such a directory is left only when an acq process died in exactly that
-moment, or the directory was made by hand.
+- Every acq command on one sandbox (`create`, `run`, `rm`, `start`) waits and
+  then fails with `timeout`, or Bash acq stops at once with `provider-input
+  lock has no valid owner metadata`. The message names a directory ending in
+  `.lock` under `.../acq/provenance/provider-input/<backend>/`.
+- Every change to `config.yaml` (`backend set`/`unset`, `configure`,
+  `kit-source` and `provider-credential` in Bash acq, and in the Python acq
+  every mutating command, whose schema migration takes the same lock) fails
+  with `could not take the config.yaml lock` (Bash) or `could not acquire the
+  config.yaml lock` (Python, as `migration_failed`). The message names
+  `.../acq/locks/config.lock.d` under the acq state directory, which holds an
+  empty `owner` file.
+
+**Cause:** Both the Bash and the Python acq take these `mkdir` locks and write
+`PID IDENTITY` into the lock's `owner` file; the Python acq takes the
+`config.yaml` one while it holds its own OS lock on `locks/config.lock`, which
+Bash cannot take portably (see `_acq_config_lock_acquire` in
+`acq.backends/common.sh` and `ConfigDirLock` in `py-acq/src/acq_py/lock.py`).
+A lock whose owner process is gone, or whose PID now belongs to another process,
+is recovered automatically. A per-sandbox lock directory with no readable owner
+line is not: the same state exists, briefly, while another command is between
+its `mkdir` and its owner write, so removing it automatically could break a
+live lock. Such a directory is left only when an acq process died in exactly
+that moment, or the directory was made by hand.
+
+The `config.yaml` lock is decided by the exclusive create of its `owner` file
+(section 92), so a `config.lock.d` directory with no `owner` file heals itself:
+the next writer takes it. What it cannot heal is an `owner` file that exists but
+is empty, which is a writer between creating the file and writing its token;
+one is left only if a writer died in exactly that moment. (A writer that fails
+to write its token, on a full disk say, removes the file it created.)
+
+On Windows neither Git Bash nor native Python can check the other's process
+IDs, so the `config.yaml` lock directory counts as held for 60 seconds after it
+was made and is recovered after that (a `config.yaml` write takes well under a
+second); the per-sandbox lock counts as held for 15 minutes and the Python acq
+never removes it.
 
 **Resolution:** Make sure no acq command is running, then remove the directory
-the message names (`rmdir` it, or delete it with its contents if it has any)
-and retry.
+the message names and retry. Every such message prints the command with the
+path filled in:
+
+```bash
+rm -f -- '<lock dir>/owner' && rmdir -- '<lock dir>'
+```
+
+In PowerShell: `Remove-Item -LiteralPath '<lock dir>' -Recurse -Force`. See also
+[Removing a leftover lock](howto/acq.md#removing-a-leftover-lock).
 
 ---
 
@@ -4985,7 +5033,7 @@ Bash acq counts as held for 15 minutes after it was taken.
 **Cause:** The Bash acq locks a sandbox by creating that directory and writing
 `PID IDENTITY` into its `owner` file. On POSIX the Python acq checks that the
 PID is still the same process and recovers a lock whose owner is gone
-(see [§79](#79-sandbox-lock-directory-without-an-owner-is-never-removed-automatically)).
+(see [§79](#79-lock-directory-without-an-owner-is-never-removed-automatically)).
 On Windows it cannot: Git Bash PIDs are not Windows PIDs, and `os.kill` there
 terminates a process rather than probing it. So the Python acq treats a Bash
 lock directory as held for 15 minutes after it was last modified (when its
@@ -5055,7 +5103,170 @@ under Git Bash picks the Microsoft Store `python3` alias, installs under
 
 ---
 
-## 95. Bash acq: `acq ports NAME --publish` Accepts an Over-Long Port Number
+## 90. sbx: More Than One Global USAi Custom Secret Is Refused
+
+**Status:** By design (both the Bash and the Python `acq`).
+
+### Symptoms
+
+`acq secret set -g usai`, `acq secret rm -g usai`, `acq usai-rotate-api-key`
+on sbx, or a USAi change made on msb that acq passes on to sbx sandboxes, stops
+with exit 1:
+
+```text
+acq(sbx): sbx holds 2 custom secrets for USAI_API_KEY on api.gsa.usai.gov in the global scope,
+          so acq cannot tell which one your sandboxes use; nothing was changed.
+          Placeholders: sbx-cs-AAAA sbx-cs-BBBB
+          Warning: a running sandbox may hold one of these placeholders. ...
+            sbx secret rm --placeholder sbx-cs-AAAA -f
+            sbx secret rm --placeholder sbx-cs-BBBB -f
+```
+
+The Python `acq` gives the same facts in one error and remediation (or
+`--json` envelope). Nothing is stored, removed or re-set. A placeholder with
+characters outside letters, digits, `.`, `_` and `-` is never printed as a
+command; inspect it with `sbx secret ls`.
+
+### Root Cause
+
+sbx can hold several custom secrets for the same env var and host, for example
+after a rotation from before ADR-0008 or a manual `sbx secret set-custom`. Each
+sbx sandbox was injected with one placeholder when it was created, and sbx does
+not say which. Updating whichever entry sbx lists first, or removing them all
+and creating one (what the Bash rotation used to do), can leave running
+sandboxes with a placeholder sbx no longer maps, so they get `401` from USAi
+(see section 23). acq therefore refuses and lets you choose. Rows are matched
+by scope, env var **and** host: a secret for `USAI_API_KEY` on another host is
+a different secret and is not counted.
+
+### Fix
+
+1. Decide which entry your sandboxes use. If you do not know, keep the oldest
+   and plan to recreate any sandbox that then fails with `401`.
+2. Remove the others with the printed commands, one per entry
+   (`sbx secret rm --placeholder P -f`).
+3. With one entry left, run `acq usai-rotate-api-key`: it updates that entry
+   in place and keeps its placeholder. Do not re-run `acq secret set -g usai`
+   on sbx (or `acq --backend sbx secret set -g usai`): it refuses because an
+   entry exists. For a change made on msb, re-running the msb command
+   (`acq --backend msb secret set -g usai`) re-feeds the kept entry too. For
+   `acq secret rm`, re-run it. A sandbox whose placeholder you removed is
+   recovered by the rebind in section 23 (ADR-0008) or by recreating it.
+
+### Prevention / Status
+
+Rotate with `acq usai-rotate-api-key` rather than deleting and re-adding the
+secret. The refusal is covered by `test/bats/40-secret-set.bats`,
+`test/bats/77-usai-rotate.bats`, `py-acq/tests/test_sbx.py` and the vectors
+`cli/secret-set-sbx-duplicate-usai` and `cli/sbx-duplicate-usai-nothing-removed`.
+
+---
+
+## 91. Remote Kit Ref With a Query String or an Extra `#` Parameter Is Refused
+
+**Status:** By design (both the Bash and the Python `acq`).
+
+### Symptoms
+
+`acq run`, `acq create`, `acq kit list` or a heal stops before anything is
+fetched:
+
+```text
+acq: --kit: remote kit ref refused: its URL has a query string ('?' before the '#').
+```
+
+or `... its '#' fragment has a parameter other than ref= and dir=.`,
+`... repeats ref= or dir=.` or `... has a ref= or dir= value that is empty,
+starts with '-' or holds a character outside [A-Za-z0-9._/-].` (with `ACQ_EXTRA_KITS:` or
+`ACQ_PROVIDER_KITS:` in place of `--kit` for an entry of that variable). The
+message does not repeat the ref. A refused `--kit` ref stops `run` or `create`
+at once. A refused `ACQ_EXTRA_KITS` or `ACQ_PROVIDER_KITS` ref is enforced only
+where kits are selected or applied (`run`/`create` of a new sandbox,
+`kit list`, and the heal on `start`, `restart` or a re-attach, which skips the
+kits with a warning and attaches anyway), so other commands such as `acq ls`
+or `acq secret rm` keep working. A sandbox whose kit record holds such a ref
+from an older `acq` prints `ignoring a recorded remote kit ref ... that acq now
+refuses` on start; that kit is no longer applied, and recreating the sandbox
+clears it from the record.
+
+### Root Cause
+
+A remote kit ref is `git+https://HOST/REPO.git#ref=<sha>&dir=<path>`, and acq
+uses no other part. A query string (`?private_token=…`), an extra fragment
+parameter (`&token=…`), a second `ref=`/`dir=`, or a value carrying `?`, `;`,
+`#`, a space or a non-ASCII letter is where a credential would ride (and a
+value starting with `-` would reach git as an option; the Bash fetch also
+passes `--` before the ref), and acq used to carry the ref
+verbatim into its debug output, its `.kits` and sbx `extra-kits` records and,
+after a fetch, its messages. acq now refuses such a ref where it enters
+(`--kit`, `ACQ_EXTRA_KITS`, `ACQ_PROVIDER_KITS`), again before any fetch
+(`kit_ref_shape_check` in `acq.backends/kit-translate.sh`,
+`kits.remote_ref_problem` in `py-acq/src/acq_py/kits.py`), and skips it when a
+record is reloaded. Message helpers show only the first plain `ref=` and
+`dir=` and hide the rest (`kit_ref_display`, `kits.ref_display`).
+`test/fixtures/kit-ref-probes.tsv` lists probe refs both implementations must
+judge and display alike.
+
+`%3F` in the URL path is not a query string: git sends it as part of the path,
+so acq does not refuse it at input (the Python acq refuses any percent escape
+when it fetches).
+
+### Fix
+
+Remove the query string, the extra parameter or the repeat, and keep `ref=`
+and `dir=` values to ASCII letters, digits, `.`, `_`, `/` and `-`, not starting
+with `-`. For a kit source
+that needs authentication, configure a git credential helper that does not
+prompt (for GitHub, `gh auth setup-git`); never put a token in the ref. A local
+kit path is not affected: `?` and `#` are ordinary characters in a directory
+name.
+
+### Prevention / Status
+
+Covered by `test/bats/170-kit-ref-shape.bats`, `py-acq/tests/test_kit_fetch.py`,
+`py-acq/tests/test_kits.py`, `py-acq/tests/test_configure.py` and
+`py-acq/tests/test_legacy_bash.py`.
+
+---
+
+## 92. uutils coreutils: `mkdir` Is Not Exclusive, So Bash's Provider-Input Lock Can Be Shared
+
+**Symptom:** On a host whose `mkdir` is uutils coreutils (Ubuntu 25.10 and
+later ship it as `/usr/bin/mkdir`; `mkdir --version` prints `uutils
+coreutils`), two Bash acq commands on the same sandbox at the same moment (two
+`create`, or `create` and `rm`) can both proceed instead of one waiting for the
+other.
+
+**Cause:** Bash acq takes its `mkdir` locks by running `mkdir DIR` and treating
+success as ownership. GNU and BSD `mkdir` fail with "File exists" for all but
+one of several concurrent callers. uutils `mkdir` 0.10.0 does not: in 300
+three-way races on one host it reported success 466 times. The `config.yaml`
+lock no longer relies on it: the exclusive create of its `owner` file (Bash
+noclobber, which Bash opens with `O_EXCL` itself, and `O_EXCL` in Python)
+decides who holds it, a taker that loses never removes the winner's owner file,
+and an existing directory without an owner file is simply taken
+(`_acq_config_lock_take` in `acq.backends/common.sh`, `_MkdirLock._take` in
+`py-acq/src/acq_py/lock.py`). The per-sandbox provider-input lock
+(`acq_provider_input_lock_acquire`) still writes its owner file without
+noclobber after a successful `mkdir`, so with uutils two Bash commands can both
+take it. The Python acq's own `mkdir` is atomic, but a racing Bash command can
+overwrite a Python holder's owner line in the same way. The progress spinner's
+draw lock (`$dir/draw` in `acq.backends/progress.sh`) is also a plain `mkdir`;
+there the effect is cosmetic, at most one stray spinner frame drawn after the
+spinner was stopped.
+
+**Resolution:** Until the provider-input lock is changed, avoid running two
+Bash acq commands on the same sandbox at once on such a host, or put GNU
+`mkdir` first on `PATH` (for example the `gnu` coreutils package where the
+distribution offers it).
+
+**Tracked:** make the provider-input lock decide by an exclusive owner-file
+create, as the `config.yaml` lock does. Unblock trigger: none; it can be done
+whenever the provider-input transaction is next changed.
+
+---
+
+## NN. Bash acq: `acq ports NAME --publish` Accepts an Over-Long Port Number
 
 **Symptom:** `./acq --backend msb ports box --publish 99999999999999999999:80`
 is not refused as out of range. Bash prints `[: 99999999999999999999: integer

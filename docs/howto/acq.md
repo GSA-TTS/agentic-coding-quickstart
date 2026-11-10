@@ -628,6 +628,17 @@ acq create opencode --kit ./kit-a --kit git+https://github.com/acme/kits.git#ref
 neutral `hybrid/v1` kit is converted to the active backend's format), so they
 work with any backend — they are **not** forwarded raw to the backend CLI.
 
+A remote ref has exactly the form
+`git+https://HOST/REPO.git#ref=<sha>&dir=<path>`. `acq` refuses, before it
+fetches or records anything, a remote ref whose URL has a query string (`?`
+before the `#`), or whose `#` part has a parameter other than `ref=` and
+`dir=`, names one twice, or gives one a value outside `[A-Za-z0-9._/-]`; the
+error names the problem but not the ref, since that is where a token would be.
+The same applies to refs in `ACQ_PROVIDER_KITS`. A local kit path may contain `?` and `#`. Credentials never go
+in a kit ref: configure a git credential helper for a source that needs
+authentication. See section 91 of
+[KNOWN_FAILURE_MODES.md](../KNOWN_FAILURE_MODES.md).
+
 ### Provider kits
 
 New sandboxes include the USAi provider kit by default, unchanged from earlier
@@ -826,6 +837,38 @@ via `acq exec`) to become ready after a sandbox starts is 60 seconds. Override:
 ```bash
 export ACQ_EXEC_READY_TIMEOUT=120
 ```
+
+---
+
+## Removing a leftover lock
+
+acq serializes changes with lock directories that both the Bash and the Python
+acq take: one per sandbox (`create`, `run`, `rm`, `start`, ending in `.lock`
+under `~/.local/state/acq/provenance/provider-input/<backend>/`) and one for
+`config.yaml` (`~/.local/state/acq/locks/config.lock.d`, or under
+`$ACQ_STATE_DIR/locks/`). Each holds an `owner` file naming the process that
+took it. A lock whose owner has exited is recovered automatically. A
+per-sandbox lock directory with **no** owner file, or a `config.yaml` lock whose
+owner file is **empty**, is never removed automatically, because a running acq
+command leaves it in that state for an instant; so if acq ever died in that
+instant, every later command on that sandbox, or every `config.yaml` change,
+waits and then fails, naming the directory. (A `config.yaml` lock directory with
+no owner file at all heals itself: the next writer takes it.)
+
+When that happens, first make sure no acq command is running. Then remove the
+directory the message names (acq prints this command with the path filled in):
+
+```bash
+rm -f -- '<lock dir>/owner' && rmdir -- '<lock dir>'
+```
+
+In PowerShell (the Python acq on Windows):
+
+```powershell
+Remove-Item -LiteralPath '<lock dir>' -Recurse -Force
+```
+
+See [KNOWN_FAILURE_MODES §79](../KNOWN_FAILURE_MODES.md#79-lock-directory-without-an-owner-is-never-removed-automatically).
 
 ---
 

@@ -23,6 +23,7 @@ from acq_py import (
     kit_fetch,
     kit_msb,
     kit_sbx,
+    kits,
     kitspec,
     legacy_bash,
     msb,
@@ -158,8 +159,8 @@ def test_a_pinned_https_ref_parses():
     assert (ref.url, ref.commit, ref.directory) == ("https://github.com/acme/kits.git", SHA, "kits/one")
 
 
-def test_the_dir_spelling_is_normalized_and_the_last_parameter_wins():
-    ref = kit_fetch.parse_ref(f"git+https://h.example/r.git#dir=x&ref={'f' * 40}&other=1&dir=././kits//./one/.")
+def test_the_dir_spelling_is_normalized():
+    ref = kit_fetch.parse_ref(f"git+https://h.example/r.git#ref={'f' * 40}&dir=././kits//./one/.")
     assert (ref.commit, ref.directory) == ("f" * 40, "kits/one")
     assert kit_fetch.parse_ref(f"git+https://h.example/r.git#ref={SHA}&dir=.").directory == ""
 
@@ -176,12 +177,18 @@ def test_the_dir_spelling_is_normalized_and_the_last_parameter_wins():
     (f"git+http://github.com/acme/kits.git#ref={SHA}&dir=k", errors.VALIDATION_FAILED, "https only"),
     (f"git+ssh://github.com/acme/kits.git#ref={SHA}&dir=k", errors.VALIDATION_FAILED, "https only"),
     (f"git+https://github.com/acme/kits.git?private_token=hunter2-token#ref={SHA}&dir=k",
-     errors.VALIDATION_FAILED, "does not accept"),
+     errors.VALIDATION_FAILED, "its URL has a query string"),
+    (f"git+https://github.com/acme/kits.git#ref={SHA}&dir=k&token=hunter2-token",
+     errors.VALIDATION_FAILED, "parameter other than ref= and dir="),
+    (f"git+https://github.com/acme/kits.git#hunter2-token&ref={SHA}&dir=k",
+     errors.VALIDATION_FAILED, "parameter other than ref= and dir="),
+    (f"git+https://github.com/acme/kits.git#ref={SHA}&&dir=k", errors.VALIDATION_FAILED,
+     "parameter other than ref= and dir="),
     (f"git+https://github.com/acme/k%2e%2e/kits.git#ref={SHA}&dir=k", errors.VALIDATION_FAILED, "does not accept"),
     (f"git+https://github.com/acme/../kits.git#ref={SHA}&dir=k", errors.VALIDATION_FAILED, "does not accept"),
     (f"git+https://github.com/acme/kits.git#ref={SHA}&dir=../escape", errors.VALIDATION_FAILED, "unsafe kit dir"),
     (f"git+https://github.com/acme/kits.git#ref={SHA}&dir=/abs", errors.VALIDATION_FAILED, "unsafe kit dir"),
-    (f"git+https://github.com/acme/kits.git#ref={SHA}&dir=a$(id)", errors.VALIDATION_FAILED, "illegal characters"),
+    (f"git+https://github.com/acme/kits.git#ref={SHA}&dir=a$(id)", errors.VALIDATION_FAILED, "holds a character outside"),
     (f"git+https://github.com/acme/kits.git#ref={SHA}", errors.VALIDATION_FAILED, "malformed"),
     ("git+https://github.com/acme/kits.git", errors.VALIDATION_FAILED, "malformed"),
     (f"git+file:///srv/kits.git#ref={SHA}&dir=k", errors.VALIDATION_FAILED, "https only"),
@@ -199,6 +206,81 @@ def test_ref_display_redacts_like_bash_kit_ref_display():
     assert kit_fetch.ref_display("git+https://h.example/r.git?private_token=tok#ref=x") == "git+https://h.example/r.git?***#ref=x"
     assert kit_fetch.ref_display("u:tok@h.example/r") == "***@h.example/r"
     assert kit_fetch.ref_display(GOOD) == GOOD
+    assert kit_fetch.ref_display("git+https://h.example/r.git#ref=x&dir=k&token=tok") == "git+https://h.example/r.git#ref=x&dir=k&***"
+
+
+def _probes() -> list[tuple[str, str, str]]:
+    """test/fixtures/kit-ref-probes.tsv, which test/bats/170-kit-ref-shape.bats reads too."""
+    path = Path(__file__).resolve().parents[2] / "test" / "fixtures" / "kit-ref-probes.tsv"
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line and not line.startswith("#"):
+            verdict, shown, ref = line.split("\t")
+            rows.append((verdict, shown, ref))
+    return rows
+
+
+def test_remote_ref_problem_and_ref_display_agree_with_the_shared_probes():
+    rows = _probes()
+    assert len(rows) >= 20
+    for verdict, shown, ref in rows:
+        problem = kits.remote_ref_problem(ref)
+        assert ("refuse" if problem else "pass") == verdict, ref
+        assert kit_fetch.ref_display(ref) == shown, ref
+        assert "SEKRIT" not in (problem or "")
+
+
+@pytest.mark.parametrize("ref", [
+    f"git+https://kits.example/acme/kits.git#ref={SHA}?token=hunter2-token&dir=k",
+    f"git+https://kits.example/acme/kits.git#ref={SHA};token=hunter2-token&dir=k",
+    f"git+https://kits.example/acme/kits.git#ref={SHA}#token=hunter2-token&dir=k",
+    f"git+https://kits.example/acme/kits.git#ref={SHA}&ref=hunter2-token&dir=k",
+    f"git+https://kits.example/acme/kits.git#ref={SHA}&dir=k?x=hunter2-token",
+])
+def test_a_ref_or_dir_value_with_odd_characters_or_a_repeat_is_refused(ref):
+    for kwargs in ({"cli_kits": [ref], "env": {}}, {"env": {"ACQ_EXTRA_KITS": ref}},
+                   {"env": {"ACQ_PROVIDER_KITS": ref}}):
+        with pytest.raises(kitspec.KitSelectionError) as info:
+            kitspec.select_kits(None, ready=lambda _agent: False, **kwargs)
+        assert "remote kit ref refused" in str(info.value) and "hunter2" not in str(info.value)
+    with pytest.raises(kit_fetch.KitFetchError) as fetch_info:
+        kit_fetch.parse_ref(ref)
+    assert "hunter2" not in fetch_info.value.message + fetch_info.value.remediation
+
+
+@pytest.mark.parametrize("ref", [
+    f"git+https://kits.example/acme/kits.git?private_token=hunter2-token#ref={SHA}&dir=k",
+    f"git+https://kits.example/acme/kits.git#ref={SHA}&dir=k&token=hunter2-token",
+])
+def test_a_query_or_extra_fragment_parameter_is_refused_without_naming_the_ref(ref):
+    # Named neither in the message nor the remediation: not the host, not the
+    # parameter, not the value.
+    with pytest.raises(kit_fetch.KitFetchError) as info:
+        kit_fetch.parse_ref(ref)
+    text = info.value.message + info.value.remediation
+    assert "remote kit ref refused" in info.value.message
+    for part in ("hunter2", "token", "kits.example"):
+        assert part not in text
+
+
+@pytest.mark.parametrize("ref", [
+    f"git+https://kits.example/acme/kits.git?private_token=hunter2-token#ref={SHA}&dir=k",
+    f"git+https://kits.example/acme/kits.git#ref={SHA}&dir=k&token=hunter2-token",
+])
+def test_select_kits_refuses_a_query_or_extra_parameter_at_input(ref):
+    for kwargs in ({"cli_kits": [ref], "env": {}}, {"env": {"ACQ_EXTRA_KITS": f"/kits/fine {ref}"}}):
+        with pytest.raises(kitspec.KitSelectionError) as info:
+            kitspec.select_kits(None, ready=lambda _agent: False, **kwargs)
+        assert "remote kit ref refused" in str(info.value)
+        assert "hunter2" not in str(info.value) and "kits.example" not in str(info.value)
+
+
+def test_canonical_refs_and_local_paths_with_query_or_hash_characters_pass_selection(tmp_path):
+    odd = tmp_path / ("odd#name" if os.name == "nt" else "odd?name#1")  # Windows forbids '?' in a name
+    odd.mkdir()
+    selection = kitspec.select_kits(None, cli_kits=[str(odd), GOOD], env={}, ready=lambda _agent: False)
+    assert [k.ref for k in selection.kits if k.role == "cli"] == [str(odd), GOOD]
+    assert kits.remote_ref_problem(str(odd)) is None and kits.remote_ref_problem(GOOD) is None
 
 
 # ---------------------------------------------------------------------------

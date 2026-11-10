@@ -267,6 +267,9 @@ def _apply_msb_kits(
             msb.provision_substrate(name, provision_steps)
     except msb.MsbError as exc:
         return None, common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
+    # Bash checks the base image's kit prerequisites at provision only, not on
+    # a heal; a warning, never a failure.
+    kit_msb.check_prereqs(name)
     result = kit_msb.ensure_kits_applied(name, plan.kits, ro_required=ro_required)
     if not result.agent_user:
         # Fatal for a new guest, as in Bash's provision: without a home the agent
