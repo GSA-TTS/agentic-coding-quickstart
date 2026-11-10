@@ -5271,6 +5271,19 @@ which makes Bash open the file with `O_EXCL` itself, and `O_EXCL` in Python.
 Bash and Python takers together, with a `mkdir` that reports success for an
 existing directory, and asserts that no two ever hold the lock at once.
 
+**Stale-recovery race:** Exclusive owner creation alone did not prevent overlap.
+A waiter could read an old holder, observe that process exit after release,
+then unlink a new holder's owner. Re-reading before unlink still leaves a race.
+Both shared locks now reserve a private `owner.stale.PID.*` directory, atomically
+rename the owner into it, and compare the detached token before removal. A
+changed token is restored with an exclusive hard link; if restoration loses,
+the saved token remains and blocks takers. Takers check reservations before and
+after creating their owner. Release can remove its exact saved token, and later
+takers clean reservations only after their remover exits and their saved owner
+is provably stale. Deterministic Bash and Python tests swap in a live owner
+between the stale read and recovery and verify that it survives. Owner formats
+and Windows freshness thresholds remain unchanged.
+
 **Resolution:** Update acq. On an older acq, avoid running two Bash acq
 commands on the same sandbox at once on such a host, or put GNU `mkdir` first
 on `PATH` (for example the `gnu` coreutils package where the distribution

@@ -2371,6 +2371,59 @@ _acq_config_lock_owner_line() {
   printf '%s\n' "$line"
 }
 
+# Recovery reserves a private directory before moving owner. Takers check for
+# these reservations both before and after O_EXCL: moving a live owner's file
+# must never open a window in which a second taker can enter. A changed token
+# is restored with ln (exclusive, unlike mv), or retained in the reservation.
+_acq_lock_remove_owner() {
+  local lock="$1" expected="$2" private line pid remove_status=0
+  [ -d "$lock" ] && [ ! -L "$lock" ] || return 1
+  pid=$(exec sh -c 'echo $PPID')
+  private=$(mktemp -d "$lock/owner.stale.$pid.XXXXXXXX") || return 1
+  if mv -f -- "$lock/owner" "$private/owner" 2>/dev/null; then
+    line=$(_acq_config_lock_owner_line "$private")
+    if [ "$line" = "$expected" ]; then
+      rm -f -- "$private/owner" || remove_status=1
+    elif ln -- "$private/owner" "$lock/owner" 2>/dev/null; then
+      rm -f -- "$private/owner"
+    fi
+  else
+    remove_status=1
+  fi
+  _acq_lock_reservations "$lock" "$expected" || true
+  rmdir -- "$private" 2>/dev/null || true
+  rmdir -- "$lock" 2>/dev/null || true
+  return "$remove_status"
+}
+
+# A crashed remover may leave a reservation. Only its dead process, plus a
+# provably stale saved owner (or the releasing holder's exact token), permits
+# cleanup. Empty reservations of live removers are never touched.
+_acq_lock_reservations() {
+  local lock="$1" releasing="${2:-}" private pid line held=1
+  [ ! -L "$lock" ] || return 0
+  for private in "$lock"/owner.stale.*; do
+    [ -e "$private" ] || [ -L "$private" ] || continue
+    if [ -d "$private" ] && [ ! -L "$private" ]; then
+      pid=${private##*/owner.stale.}; pid=${pid%%.*}
+      case "$pid" in ''|*[!0-9]*) held=0; continue ;; esac
+      line=$(_acq_config_lock_owner_line "$private")
+      if [ -n "$releasing" ] && [ "$line" = "$releasing" ]; then
+        rm -f -- "$private/owner"
+        rmdir -- "$private" 2>/dev/null || true
+      elif ! _acq_pid_alive "$pid"; then
+        if [ ! -e "$private/owner" ] ||
+            [ "$(_acq_config_lock_state "$private" "$line")" = stale ]; then
+          rm -f -- "$private/owner"
+          rmdir -- "$private" 2>/dev/null || true
+        fi
+      fi
+    fi
+    [ ! -e "$private" ] && [ ! -L "$private" ] || held=0
+  done
+  return "$held"
+}
+
 # _acq_config_lock_token PID — the owner line for PID, the shell taking the lock.
 # Empty on POSIX when PID's identity cannot be read (no ps): Python could not
 # verify such an owner, so the lock is then honoured but not taken, as Python
@@ -2444,10 +2497,15 @@ _acq_config_lock_take() {
     return 1
   fi
   [ ! -L "$1/owner" ] || return 1
+  _acq_lock_reservations "$1" && return 1
   local rc=0
   ( set -C; { printf '%s\n' "$2" || exit 2; } > "$1/owner" ) 2>/dev/null || rc=$?
   [ ! -L "$1/owner" ] || return 1
   if [ "$rc" -ne 2 ]; then
+    if [ "$rc" -eq 0 ] && _acq_lock_reservations "$1"; then
+      _acq_lock_remove_owner "$1" "$2"
+      return 1
+    fi
     return "$rc"
   fi
   rm -f -- "$1/owner" 2>/dev/null
@@ -2537,10 +2595,10 @@ _acq_config_lock_acquire() {
       continue
     fi
     line=$(_acq_config_lock_owner_line "$lock")
-    if [ "$recovered" -lt 3 ] && [ "$(_acq_config_lock_state "$lock" "$line")" = stale ] &&
-        [ "$(_acq_config_lock_owner_line "$lock")" = "$line" ]; then
+    if [ "$recovered" -lt 3 ] && [ "$(_acq_config_lock_state "$lock" "$line")" = stale ]; then
       recovered=$((recovered + 1))
-      rm -f -- "$lock/owner" 2>/dev/null && rmdir -- "$lock" 2>/dev/null && continue
+      _acq_lock_remove_owner "$lock" "$line"
+      continue
     fi
     [ "$tries" -lt "$ticks" ] || { _acq_config_lock_timed_out "$lock"; return 1; }
     tries=$((tries + 1))
@@ -2554,8 +2612,8 @@ _acq_config_lock_release() {
   _ACQ_CONFIG_LOCK_TOKEN=""
   [ -n "$token" ] || return 0
   lock=$(_acq_config_lock_dir) || return 0
-  [ "$(_acq_config_lock_owner_line "$lock")" = "$token" ] || return 0
-  rm -f -- "$lock/owner" 2>/dev/null && rmdir -- "$lock" 2>/dev/null
+  _acq_lock_reservations "$lock" "$token" || true
+  _acq_lock_remove_owner "$lock" "$token" 2>/dev/null || true
   return 0
 }
 
@@ -5830,7 +5888,7 @@ _acq_provider_input_publish() {
 # When Python inspects a Bash lock on Windows, Python applies the 15-minute
 # freshness rule (section 88); Bash itself checks the recorded process identity.
 acq_provider_input_lock_acquire() {
-  local backend="$1" name="$2" tx_pid="${3:-$$}" root parent lock owner tries=0 pid identity actual_identity token rc age
+  local backend="$1" name="$2" tx_pid="${3:-$$}" root parent lock owner tries=0 pid identity actual_identity token rc age line
   root=$(acq_provider_input_root "$backend" "$name") || return 1
   parent=${root%/*}
   _acq_provider_input_safe_mkdir "$parent" || return 1
@@ -5873,14 +5931,15 @@ acq_provider_input_lock_acquire() {
       sleep 1
       continue
     fi
+    line=$(_acq_config_lock_owner_line "$lock")
     pid="" identity=""
-    { IFS=' ' read -r pid identity < "$owner"; } 2>/dev/null || true
+    IFS=' ' read -r pid identity <<< "$line"
     actual_identity=$(_acq_provider_input_process_identity "$pid" 2>/dev/null || true)
     if [ -n "$pid" ] && [ -n "$identity" ] && [ "$actual_identity" = "$identity" ]; then
       echo "acq: provider-input lock is owned by live pid $pid: $lock" >&2
     elif [ -n "$pid" ] && { ! _acq_pid_alive "$pid" || { [ -n "$actual_identity" ] && [ "$actual_identity" != "$identity" ]; }; }; then
       echo "acq: recovering stale provider-input lock owned by pid $pid: $lock" >&2
-      rm -f -- "$owner" && rmdir -- "$lock" 2>/dev/null || return 1
+      _acq_lock_remove_owner "$lock" "$line" || return 1
       continue
     else
       echo "acq: provider-input lock has no valid owner metadata: $lock" >&2
@@ -5913,9 +5972,18 @@ acq_provider_input_lock_acquire() {
 # owner file it created fails (a full disk, say), that file is its own and is
 # removed again.
 _acq_provider_input_lock_take() {
+  local private
+  [ ! -L "$1" ] || return 1
+  for private in "$1"/owner.stale.*; do
+    [ -e "$private" ] || [ -L "$private" ] || continue
+    _acq_lock_reservations "$1" && return 1
+    rmdir -- "$1" 2>/dev/null || true
+    break
+  done
   mkdir -- "$1" 2>/dev/null || return 1
   [ -d "$1" ] && [ ! -L "$1" ] || return 1
   [ ! -L "$1/owner" ] || return 1
+  _acq_lock_reservations "$1" && return 1
   local rc=0
   ( set -C; { printf '%s\n' "$2" || exit 2; } > "$1/owner" ) 2>/dev/null || rc=$?
   [ ! -L "$1/owner" ] || return 1
@@ -5924,6 +5992,10 @@ _acq_provider_input_lock_take() {
     return 1
   fi
   if [ "$rc" -eq 0 ]; then
+    if _acq_lock_reservations "$1"; then
+      _acq_lock_remove_owner "$1" "$2"
+      return 1
+    fi
     return 0
   fi
   rm -f -- "$1/owner" 2>/dev/null
@@ -6096,7 +6168,13 @@ _acq_provider_input_process_identity() {
 acq_provider_input_lock_release() {
   case "${1:-}" in */provider-input/*/*.lock)
     [ -d "$1" ] && [ ! -L "$1" ] || return 1
-    rm -f -- "$1/owner" && rmdir -- "$1" 2>/dev/null || return 1
+    local token
+    token=$(_acq_config_lock_owner_line "$1")
+    if [ -z "$token" ]; then
+      token=$(_acq_config_lock_token "${_ACQ_PROVIDER_INPUT_GUARDIAN_PID:-$$}")
+    fi
+    _acq_lock_reservations "$1" "$token" || true
+    _acq_lock_remove_owner "$1" "$token" || return 1
     ;;
     *) return 1 ;;
   esac
