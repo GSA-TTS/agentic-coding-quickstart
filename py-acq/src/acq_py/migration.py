@@ -698,6 +698,14 @@ def migrate_tree() -> None:
             str(exc),
             "another migration is in progress; retry shortly",
         ) from exc
+    except config.ConfigLockTimeout as exc:
+        # An OSError too, but a lock wait, not an unwritable directory: the
+        # message names the lock (and, for a leftover one, how to remove it).
+        raise MigrationError(
+            errors.MIGRATION_FAILED,
+            str(exc),
+            "wait for the other acq command that is changing config.yaml to finish, then retry",
+        ) from exc
     except config.ConfigMigrationError as exc:
         raise MigrationError(errors.MIGRATION_FAILED, str(exc), exc.remediation) from exc
     except config.ConfigSchemaError as exc:

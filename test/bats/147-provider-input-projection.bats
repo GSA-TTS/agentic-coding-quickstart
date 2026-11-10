@@ -784,8 +784,11 @@ EOF
   local root lock
   root=$(acq_provider_input_root sbx ownerless); lock="${root}.lock"
   _acq_provider_input_safe_mkdir "$lock"
-  run acq_provider_input_lock_acquire sbx ownerless
+  # Under set -u, as acq itself runs: an owner-less lock once stopped acq with
+  # "pid: unbound variable" before this message.
+  run bash -c 'ACQ_SOURCE_ONLY=1 . "$1" >/dev/null 2>&1; set -u; acq_provider_input_lock_acquire sbx ownerless' bash "$ACQ"
   assert_failure
+  refute_output --partial "unbound variable"
   assert_output --partial "provider-input lock has no valid owner metadata: $lock"
   assert_output --partial "rm -f -- '$lock/owner' && rmdir -- '$lock'"
   [ -d "$lock" ]

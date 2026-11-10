@@ -46,6 +46,7 @@ def test_home_and_xdg_dirs_are_redirected(tmp_path_factory):
         "ACQ_PROVIDER_INPUT_LOCK_RETRIES", "ACQ_SANDBOX_LOCK_TIMEOUT", "ACQ_SECRET_STORE_DIR",
     ]
     assert Path(os.environ["ACQ_SECRET_STORE_DIR"]).resolve().is_relative_to(base)
+    assert "MSB_HOME" not in os.environ and "SBX_HOME" not in os.environ
 
 
 def test_lock_waits_are_short_by_default():
@@ -53,7 +54,6 @@ def test_lock_waits_are_short_by_default():
     # provider-input lock); a release regression must not hang the run that long.
     assert float(os.environ["ACQ_SANDBOX_LOCK_TIMEOUT"]) <= TEST_LOCK_TIMEOUT_S <= 30
     assert int(os.environ["ACQ_PROVIDER_INPUT_LOCK_RETRIES"]) <= 30
-    assert "MSB_HOME" not in os.environ and "SBX_HOME" not in os.environ
 
 
 def test_state_touching_command_writes_only_under_the_test_tree(tmp_path, acq_cmd):
