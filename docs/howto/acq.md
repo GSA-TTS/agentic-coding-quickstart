@@ -233,8 +233,10 @@ on your `PATH`. `install.sh` links both `acq` and `acq-python`. They do **not**:
   [`msb.md`](msb.md#step-1-install-msb), then run `msb doctor`;
 - choose Homebrew, npm or a git clone, or accept the upstream installer's
   `--method` and `--sha` options (`install.sh` rejects them as a usage error);
-- on Windows, probe Windows Hypervisor Platform or install Git Bash, which the
-  installed `acq` still uses by default (`ACQ_IMPL` unset).
+- on Windows, probe Windows Hypervisor Platform or install Git Bash. The
+  installed `acq` does not need Git Bash: it runs the Python implementation by
+  default (see [Which implementation runs on Windows](#which-implementation-runs-on-windows)),
+  and Git Bash is needed only for `ACQ_IMPL=bash`.
 
 No release of this fork has published those archives yet, so the release they
 download by default does not exist. Until one does, run them against an offline
@@ -258,10 +260,9 @@ Package-manager installs give you `upgrade`/`uninstall` for free.
 Windows support is a preview path for Windows 11 hosts using the `msb` backend.
 It is installed from the GitHub release zip with PowerShell; npm remains scoped
 to macOS/Linux until Windows path and secret-storage behavior are fully
-validated. The preview runs the existing Bash `acq` implementation through Git
-Bash. The installer probes Windows Hypervisor Platform and stops when it is not
-usable, but it does not try to enable Windows features, elevate PowerShell, or
-reboot the machine.
+validated. The installer probes Windows Hypervisor Platform and stops when it is
+not usable, but it does not try to enable Windows features, elevate PowerShell,
+or reboot the machine.
 
 <!-- x-release-please-start-version -->
 
@@ -288,7 +289,47 @@ defaults to `Restricted`, so those steps fail with `PSSecurityException` on an
 otherwise default host; allow local scripts for your user with
 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` (or use the `irm ... | iex`
 one-liner, which is not affected because piped text is not a script file). On a
-managed device the policy may be set by Group Policy.
+managed device the policy may be set by Group Policy. The launchers deliberately
+do not pass `-ExecutionPolicy Bypass`, so this is a one-time prerequisite for
+every Windows install.
+
+### Which implementation runs on Windows
+
+On Windows the installed `acq` (`acq.cmd`, which starts `acq.ps1`) runs the
+Python implementation when `ACQ_IMPL` is unset
+([ADR-0048m](../adr/0048m-windows-defaults-to-the-python-implementation.md)).
+On macOS and Linux, and when you run the Bash `acq` script yourself from a Git
+Bash prompt, the Bash implementation stays the default.
+
+The Windows archive bundles acq's **managed runtime**: python.org's embeddable
+CPython, pinned and SHA-256 verified by the release workflow and unpacked at
+`py-acq\runtime\python.exe` next to acq's source in `py-acq\src\`
+(`scripts/stage-windows-runtime`). Its `._pth` file fixes the import path to its
+standard library, its own directory and acq's source, so it ignores
+`PYTHONPATH` and never adds the current directory. You do not need to install
+Python.
+
+The launcher picks the interpreter in this order:
+
+1. `ACQ_RUNTIME`, which must be an absolute path to `python.exe`. Use it to run
+   acq with an IT-approved interpreter (for example where AppLocker blocks
+   executables under `%LOCALAPPDATA%`). A relative value is refused.
+2. The managed runtime at `py-acq\runtime\python.exe`.
+3. The first `python.exe` in a drive-rooted or UNC `PATH` entry that passes an
+   isolated "Python 3.12 or newer" check. Relative entries are never searched,
+   and the Microsoft Store App Execution Alias (which only prints an install
+   hint) fails the check and is skipped.
+
+The interpreter runs `python.exe -P -m acq_py`, so the current directory never
+joins `sys.path`. If nothing qualifies, `acq` exits 1 with a message naming the
+remedies (install acq from a release, install Python 3.12+ on `PATH`, set
+`ACQ_RUNTIME`, or set `ACQ_IMPL=bash`); it never falls back to Bash on its own.
+
+`ACQ_IMPL=bash` is the explicit opt-in to the Bash implementation through Git
+Bash, kept during the transition; it needs Git for Windows. `ACQ_IMPL=python`
+selects the Python implementation explicitly, and any other value exits 2.
+`acq version` reports which one ran (`"impl": "python"` in `--json`), and
+`acq doctor` reports whether the app-private runtime is present.
 
 **Keep cmd.exe from running programs out of the current directory.** cmd.exe looks
 for a typed command in the current directory before it searches `PATH`. You
@@ -312,7 +353,7 @@ does not change where Windows looks for a program's DLLs; see
 [Known Failure Modes §60](../KNOWN_FAILURE_MODES.md#60-windows-dll-search-can-reach-the-workspace).
 
 **acq finds programs on Windows only as `.exe` files.** To keep a planted file
-in the workspace from running, the Python implementation (`ACQ_IMPL=python`)
+in the workspace from running, the Python implementation (the Windows default)
 looks up the programs it starts (`git`, `msb`, `sbx`) itself, in the absolute
 entries of `PATH`, and accepts only `NAME.exe` (see
 `py-acq/src/acq_py/hostexec.py`). The qualification tooling uses the same
@@ -344,9 +385,12 @@ scripts (see the note above) — a default `Restricted` client fails with
 # Installer dry run; should print planned actions and make no changes.
 .\install.ps1 -DryRun
 
-# After install, acq should resolve from PATH and delegate through Git Bash.
+# After install, acq should resolve from PATH and run the Python implementation
+# with its managed runtime: "impl": "python", and doctor's runtime check reports
+# "app-private runtime present".
 Get-Command acq
-acq version
+acq version --json
+acq doctor
 
 # Confirm msb is installed and the host is ready.
 msb --version
@@ -367,6 +411,9 @@ prompted, and installed it via the upstream Windows installer — `acq version`
 through `acq.cmd`, `msb --version` / `msb doctor`, and sandbox provisioning all
 worked. Notes from that validation:
 
+- That validation ran the Bash implementation, the Windows default at the time.
+  The default is now the Python implementation; the Git Bash note below applies
+  to `ACQ_IMPL=bash`.
 - The launcher and installer resolve Git Bash from Git for Windows' standard
   install locations and deliberately ignore the WSL interop shim
   (`C:\Windows\System32\bash.exe`) that a bare `bash.exe` PATH lookup often

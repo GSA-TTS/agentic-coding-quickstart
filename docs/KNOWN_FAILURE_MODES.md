@@ -3468,7 +3468,8 @@ Tracked follow-ups:
   executable modes, so they skip on Windows, where only the ref-grammar tests
   run. Unblock trigger: the Windows default flip (ADR-0048m) or the first
   report of a fetched kit on Windows; then add a fixture without links and run
-  it in the Windows lane.
+  it in the Windows lane. The flip took effect on 2026-11-10, so this is now
+  due.
 
 Re-verify live on a host with sbx 0.51 or later: the guest has the kit files, the
 Zscaler CA and OpenCode configured for USAi, the provider-input mount is
@@ -3793,8 +3794,9 @@ it) and add a Windows test that plants the DLL.
 
 ## 61. Bash acq on Windows: Provider-Input `current` Is a Pointer File, Not a Symlink
 
-**Status:** Fixed for the Bash `acq` under Git Bash (`ACQ_IMPL=bash`, still the
-Windows default until ADR-0048m's gates are met). Verified on Windows 11 with
+**Status:** Fixed for the Bash `acq` under Git Bash (`ACQ_IMPL=bash`; it was the
+Windows default until ADR-0048m made the Python implementation the default on
+2026-11-10). Verified on Windows 11 with
 stub backends and a stand-in for the pinned validator: the provider-input
 transaction, provider facts read back through the pointer file, and a stubbed
 `acq create` and `acq rm`. A create against the real pinned Patterns validator
@@ -3906,7 +3908,8 @@ Mitigation options, not yet implemented:
    the Windows form of the POSIX descriptor walk.
 
 **Tracked:** unblock trigger is any change that makes local provider kits
-common on Windows, or ADR-0048m's default flip, whichever comes first.
+common on Windows, or ADR-0048m's default flip, whichever comes first. The flip
+took effect on 2026-11-10, so this is now due.
 
 ### Prevention / Status
 
@@ -4017,7 +4020,7 @@ reviewed live on Windows 11 under Windows PowerShell 5.1:
   `System.Diagnostics.Process`. The child inherits the console and standard
   handles and starts in the current PowerShell location.
 - **The Bash branch refuses what it cannot forward.** The Bash branch
-  (`ACQ_IMPL` unset or `bash`, the current default) still starts `bash.exe`
+  (`ACQ_IMPL=bash`; before ADR-0048m it was also the default) still starts `bash.exe`
   through the call operator. Where that passes arguments the legacy way
   (Windows PowerShell 5.1, PowerShell before 7.3, or
   `$PSNativeCommandArgumentPassing = 'Legacy'`), an argument that is empty or
@@ -4063,15 +4066,17 @@ directory, case-sensitive `ACQ_IMPL`, and the Bash branch's refusal.
 - **Bash branch quoting.** The Bash branch refuses an empty argument or one
   containing a double quote rather than forward it; use `ACQ_IMPL=python` for
   such a command. MSYS globs unquoted arguments, so switching this branch to an
-  exact command line needs its own analysis. **Unblock trigger:** decide whether
-  the Bash branch stays supported on Windows once ADR-0048m's default flips.
-- **PowerShell 7 is untested.** The launchers were checked live only under
-  Windows PowerShell 5.1, which `acq.cmd` always uses. Running `acq.ps1` from
-  `pwsh` (7.x) has not been tried: neither how 7.x binds `--` and empty
-  arguments in `$args`, nor the Bash branch's refusal, which assumes 7.3 and later
-  pass arguments the standard way unless `$PSNativeCommandArgumentPassing` is
-  `Legacy`. **Unblock trigger:** a Windows host with PowerShell 7 to repeat the
-  launcher checks.
+  exact command line needs its own analysis. ADR-0048m (default flipped on
+  2026-11-10) keeps `ACQ_IMPL=bash` as an explicit opt-in during the
+  transition, so the branch stays supported and this limitation stands.
+  **Unblock trigger:** a decision to retire `ACQ_IMPL=bash` on Windows, or a
+  report that needs such an argument on the Bash branch.
+- **PowerShell 7 coverage.** The launcher tests run under portable PowerShell
+  7.4.22 on the Windows test VM, alongside Windows PowerShell 5.1 (which
+  `acq.cmd` always uses). CI's Windows runner also has PowerShell 7 and requires
+  the `pwsh` launcher cases. These cover `--`, empty arguments, embedded quotes
+  and trailing backslashes on both implementation branches, including the
+  Bash branch's refusal when `$PSNativeCommandArgumentPassing` is `Legacy`.
 
 ---
 
@@ -5097,8 +5102,8 @@ provider facts looked for the validator runtime at
 validate, materialize, publish, the backend create with the provider-input
 mount, and `acq rm` all completed for msb and sbx.
 
-**Resolution:** Use the Python acq on Windows (`ACQ_IMPL=python`), which does
-not run that validator. Tracked: skip the execute-bit check on Windows in the
+**Resolution:** Use the Python acq on Windows (the default there since
+ADR-0048m: `ACQ_IMPL` unset or `python`), which does not run that validator. Tracked: skip the execute-bit check on Windows in the
 Patterns validator and bump `PATTERNS_KIT_REF`, or have acq run the pinned
 validator through a small launcher that reports execute bits on Windows. Also
 seen on the same run, and tracked with it: `scripts/setup-provider-input-validator`

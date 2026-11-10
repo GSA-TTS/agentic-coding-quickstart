@@ -13,6 +13,8 @@ import json
 import subprocess
 import sys
 
+import pytest
+
 import acq_py.doctor as doctor
 from acq_py import envelope, errors
 
@@ -65,3 +67,29 @@ def test_doctor_sandbox_operational_failure_exit_1():
     assert doc["error"]["code"] == errors.UNSUPPORTED
     assert doc["error"]["message"]
     assert doc["error"]["remediation"]
+
+
+@pytest.mark.parametrize("kind", ["missing", "directory", "relative"])
+@pytest.mark.parametrize("emit_json", [False, True], ids=["human", "json"])
+def test_doctor_reports_invalid_runtime(tmp_path, monkeypatch, kind, emit_json):
+    override = tmp_path / "invalid-python"
+    if kind == "directory":
+        override.mkdir()
+    value = "relative-python" if kind == "relative" else str(override)
+    monkeypatch.setenv("ACQ_RUNTIME", value)
+    proc = run_cli("doctor", *(["--json"] if emit_json else []))
+    # Doctor diagnostics retain their successful command status; the failed
+    # runtime check and overall status carry the misconfiguration.
+    assert proc.returncode == 0, proc.stderr
+    assert "Traceback" not in proc.stderr
+    if emit_json:
+        data = json.loads(proc.stdout)["data"]
+        assert data["status"] == "fail"
+        check = next(c for c in data["checks"] if c["id"] == "runtime")
+        assert check["status"] == "fail"
+        assert "ACQ_RUNTIME" in check["message"] and value in check["message"]
+        assert "unset ACQ_RUNTIME" in check["remediation"]
+    else:
+        assert "[fail] runtime: ACQ_RUNTIME" in proc.stdout
+        assert "unset ACQ_RUNTIME" in proc.stdout
+        assert "overall: fail" in proc.stdout
