@@ -30,5 +30,9 @@ if not exist "%ACQ_POWERSHELL%" (
   exit /b 1
 )
 
+rem acq.ps1 recognises exactly this argument shape (-NoLogo -NoProfile -File
+rem then its own path) and then starts Python with an exact command line built
+rem from its own argv, because Windows PowerShell's call operator would drop
+rem empty arguments and mangle embedded quotes. Keep the two in step.
 "%ACQ_POWERSHELL%" -NoLogo -NoProfile -File "%ACQ_PS1%" %*
 exit /b %ERRORLEVEL%

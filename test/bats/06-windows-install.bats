@@ -109,6 +109,74 @@ teardown() {
   assert_success
 }
 
+@test "windows PowerShell: acq.ps1 parses when pwsh is available" {
+  command -v pwsh >/dev/null 2>&1 || skip "pwsh not available"
+
+  if command -v cygpath >/dev/null 2>&1; then
+    repo_root_win=$(cygpath -w "$REPO_ROOT")
+  else
+    repo_root_win="$REPO_ROOT"
+  fi
+
+  run pwsh -NoLogo -NoProfile -Command '
+    $tokens = $null
+    $errors = $null
+    $null = [System.Management.Automation.Language.Parser]::ParseFile(
+      (Join-Path "'"$repo_root_win"'" "acq.ps1"),
+      [ref]$tokens,
+      [ref]$errors
+    )
+    if ($errors.Count) {
+      $errors | ForEach-Object { $_.ToString() }
+      exit 1
+    }
+  '
+  assert_success
+}
+
+# The Bash acq rejects any ACQ_IMPL but the exact strings bash and python, so
+# the launcher must not let PowerShell's case-insensitive -ne/-eq accept
+# PYTHON or Bash. The check runs before anything Windows-specific, so pwsh on
+# any host exercises it.
+@test "windows launcher: ACQ_IMPL is compared case-sensitively" {
+  launcher=$(cat "$REPO_ROOT/acq.ps1")
+  refute_regex "$launcher" '\$acqImpl -(ne|eq|ieq|ine) '
+  assert_regex "$launcher" '\$acqImpl -cne "bash"'
+  assert_regex "$launcher" '\$acqImpl -cne "python"'
+
+  command -v pwsh >/dev/null 2>&1 || return 0
+  local impl
+  for impl in PYTHON Python BASH Bash; do
+    run env ACQ_IMPL="$impl" pwsh -NoLogo -NoProfile -File "$REPO_ROOT/acq.ps1" version
+    assert_failure 2
+    assert_output --partial "unsupported ACQ_IMPL '$impl'"
+  done
+}
+
+# acq.ps1 reads its arguments from its own command line only when it sees the
+# exact shape acq.cmd starts it with; the two files must agree on that shape.
+@test "windows launcher: acq.cmd starts acq.ps1 in the shape acq.ps1 recognises" {
+  cmd=$(cat "$REPO_ROOT/acq.cmd")
+  launcher=$(cat "$REPO_ROOT/acq.ps1")
+  assert_regex "$cmd" '"%ACQ_POWERSHELL%" -NoLogo -NoProfile -File "%ACQ_PS1%" %\*'
+  assert_regex "$launcher" "\\\$argv\\[1\\] -cne '-NoLogo' -or \\\$argv\\[2\\] -cne '-NoProfile' -or \\\$argv\\[3\\] -cne '-File'"
+}
+
+# Windows PowerShell 5.1's call operator drops an empty argument and leaves an
+# embedded double quote unescaped, so the Bash branch (which still uses it)
+# must refuse such an argument with exit 2 rather than run a changed command.
+@test "windows launcher: the Bash branch refuses arguments legacy passing would change" {
+  launcher=$(cat "$REPO_ROOT/acq.ps1")
+  assert_regex "$launcher" 'function Test-AcqLegacyNativeArguments'
+  assert_regex "$launcher" '\$version\.Major -lt 7 -or \(\$version\.Major -eq 7 -and \$version\.Minor -lt 3\)'
+  assert_regex "$launcher" "\\\$text\\.Length -eq 0 -or \\\$text\\.Contains\\('\"'\\)"
+  assert_regex "$launcher" 'Set ACQ_IMPL=python, which forwards arguments unchanged'
+  # The refusal runs before the call operator starts bash.exe.
+  check_line=$(grep -n 'if (Test-AcqLegacyNativeArguments) {' "$REPO_ROOT/acq.ps1" | head -n 1 | cut -d: -f1)
+  bash_line=$(grep -n '^& \$bash --noprofile --norc' "$REPO_ROOT/acq.ps1" | head -n 1 | cut -d: -f1)
+  [ -n "$check_line" ] && [ -n "$bash_line" ] && [ "$check_line" -lt "$bash_line" ]
+}
+
 @test "windows installers: LOCALAPPDATA is used only when fully qualified" {
   installer=$(cat "$REPO_ROOT/install.ps1")
   launcher=$(cat "$REPO_ROOT/acq.ps1")

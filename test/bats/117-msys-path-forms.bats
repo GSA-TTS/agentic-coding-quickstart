@@ -112,6 +112,55 @@ _msys_provision() { # NAME WS
   assert_line 'drive=/c/proj'
 }
 
+# /unc is not an MSYS mount: cygpath -m would put /unc/server/share under the
+# MSYS root, a directory that does not exist on the host.
+@test "msys: host_path maps the /unc/ guest form back to the UNC host path" {
+  _plant_cygpath_stub
+  run bash -c '
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    printf "host=%s\n" "$(host_path /unc/server/share/proj)"
+    printf "roundtrip=%s\n" "$(host_path "$(canonicalize_path "$1")")"
+    printf "bare=%s\n" "$(host_path /unc)"
+  ' _ '\\server\share\proj'
+  assert_success
+  assert_line 'host=//server/share/proj'
+  assert_line 'roundtrip=//server/share/proj'
+  # Only a /unc/<server>... value is a UNC path; anything else is cygpath's.
+  assert_line 'bare=C:/unc'
+}
+
+@test "msys: a UNC workspace mounts its UNC host path at the /unc/ guest path" {
+  # A leading // names the same directory as / on Linux and macOS, so this
+  # workspace exists for the -d check while canonicalize_path treats it as UNC.
+  # Under real MSYS/Cygwin //tmp/... is a network path that does not exist.
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN*) skip "a leading // is a real UNC path on this host" ;;
+  esac
+  _plant_cygpath_stub
+  local ws="/$STUBDIR/uncws"
+  mkdir -p "$ws"
+  _msys_provision uncbox "$ws"
+  local line
+  line=$(_create_line msb)
+  assert_regex "$line" "--volume /${STUBDIR}/uncws:/unc${STUBDIR}/uncws( |\$)"
+  # The regression: the source resolved under the MSYS root (C:/unc/...).
+  refute_regex "$line" "--volume C:[^ ]*/uncws:"
+}
+
+@test "posix: canonicalize_path still resolves a leading-// path without cygpath" {
+  command -v cygpath >/dev/null 2>&1 && skip "cygpath present: a leading // is UNC here"
+  mkdir -p "$STUBDIR/real-ws"
+  ln -s "$STUBDIR/real-ws" "$STUBDIR/link-ws"
+  run bash -c '
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    canonicalize_path "$1"
+  ' _ "/$STUBDIR/link-ws"
+  assert_success
+  assert_output "$(cd "$STUBDIR/real-ws" && pwd -P)"
+}
+
 @test "msys: a mount uses the host form for SOURCE and the guest form for TARGET" {
   _plant_cygpath_stub
   mkdir -p "$STUBDIR/msysws"
