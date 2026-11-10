@@ -3952,29 +3952,68 @@ _acq_msb_clone_warn_unfetched() {
   # Branch tips are read straight from the ref files (loose + packed). The
   # scratch is guest-writable, so the host must NEVER execute git inside it —
   # repo-local config (core.fsmonitor, pagers, ...) would let the guest run
-  # commands on the host at rm time.
-  local tips=""
-  if [ -d "${scratch}/.git/refs/heads" ]; then
-    tips=$(find "${scratch}/.git/refs/heads" -type f -exec cat {} + 2>/dev/null) || tips=""
+  # commands on the host at rm time. A running guest can also replace any of
+  # these files at any moment, so they are read without following a link and
+  # without blocking (_acq_msb_clone_read_refs). A .git or refs directory that
+  # is itself a link points out of the scratch: its tips cannot be checked, so
+  # the warning is shown.
+  local tips="" unfetched=""
+  if [ -L "${scratch}/.git" ] || [ -L "${scratch}/.git/refs" ]; then
+    unfetched=1
+  else
+    tips=$(_acq_msb_clone_read_refs "${scratch}/.git")
   fi
-  if [ -f "${scratch}/.git/packed-refs" ]; then
-    tips="${tips}
-$(awk '$1 ~ /^[0-9a-f]+$/ && $2 ~ /^refs\/heads\//{print $1}' "${scratch}/.git/packed-refs" 2>/dev/null || true)"
-  fi
-  while IFS= read -r t; do
+  while [ -z "$unfetched" ] && IFS= read -r t; do
     [ -n "$t" ] || continue
     # Skip non-SHA lines (e.g. a symbolic "ref: ..." loose ref) rather than
     # letting cat-file fail on them and warn spuriously.
     case "$t" in *[!0-9a-f]*) continue ;; esac
-    if ! _acq_msb_git_ws "$origin" cat-file -e "$t" 2>/dev/null; then
-      echo "acq(msb): warning: discarding unfetched commits in sandbox '$name''s scratch clone" >&2
-      echo "acq(msb):   (they were recoverable with: git fetch sandbox-${name})." >&2
-      return 0
-    fi
+    _acq_msb_git_ws "$origin" cat-file -e "$t" 2>/dev/null || unfetched=1
   done <<EOF
 $tips
 EOF
+  if [ -n "$unfetched" ]; then
+    echo "acq(msb): warning: discarding unfetched commits in sandbox '$name''s scratch clone" >&2
+    echo "acq(msb):   (they were recoverable with: git fetch sandbox-${name})." >&2
+  fi
   return 0
+}
+
+# _acq_msb_clone_plain_file PATH — true when PATH is a regular file and not a
+# symbolic link.
+_acq_msb_clone_plain_file() {
+  [ -f "$1" ] && [ ! -L "$1" ]
+}
+
+# _acq_msb_clone_read_refs GITDIR — print the lines of GITDIR's loose branch
+# refs (refs/heads/**) and the object names of the branches in its
+# packed-refs. GITDIR is in a scratch clone a running guest can change while
+# this reads, so nothing here may follow a link or block:
+#  - find (which never follows links) lists the loose refs, and each one is
+#    skipped unless it is a plain file when it is about to be read;
+#  - it can still be swapped for a FIFO between that check and the open, so
+#    each file is opened read-write (<>), which returns at once even for a FIFO,
+#    and read with a one-second timeout (read -t), and at most 256 bytes of a
+#    loose ref or 64 MiB of packed-refs are read, so a device swapped in ends
+#    the read too. A ref file that cannot be opened for writing is skipped.
+# Bash 3.2 and macOS have no portable O_NONBLOCK or O_NOFOLLOW open, and
+# timeout(1) is not on macOS, hence the read-write open.
+_acq_msb_clone_read_refs() {
+  local gitdir="$1" f t
+  if [ -d "${gitdir}/refs/heads" ] && [ ! -L "${gitdir}/refs/heads" ]; then
+    while IFS= read -r -d '' f; do
+      _acq_msb_clone_plain_file "$f" || continue
+      t=""
+      { IFS= read -r -t 1 -n 256 t; } 2>/dev/null <>"$f" || true
+      printf '%s\n' "$t"
+    done < <(find "${gitdir}/refs/heads" -type f -print0 2>/dev/null)
+  fi
+  f="${gitdir}/packed-refs"
+  _acq_msb_clone_plain_file "$f" || return 0
+  {
+    IFS= read -r -t 1 -n 4096 t && { printf '%s\n' "$t"; head -c 67108864; }
+  } 2>/dev/null <>"$f" |
+    awk '$1 ~ /^[0-9a-f]+$/ && $2 ~ /^refs\/heads\//{print $1}' 2>/dev/null || true
 }
 
 # _acq_msb_clone_cleanup NAME — delete NAME's scratch clone and drop the

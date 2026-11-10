@@ -1128,3 +1128,62 @@ _clone_source() { # MARKER
   [ -d "$STUBDIR/state/clones/shell-cloneproj/cloneproj/.git" ]
   [ ! -e "$marker" ]
 }
+
+# _fifo_find — put first on PATH a find whose `-type f` also matches FIFOs. It
+# models a guest that swaps a ref file for a FIFO after find looked at it.
+_fifo_find() {
+  local real
+  real=$(command -v find)
+  mkdir -p "$STUBDIR/fifo-find"
+  printf '#!/bin/bash\na=()\nwhile [ $# -gt 0 ]; do\n  if [ "$1" = -type ] && [ "${2:-}" = f ]; then a+=("(" -type f -o -type p ")"); shift 2; continue; fi\n  a+=("$1"); shift\ndone\nexec "%s" "${a[@]}"\n' \
+    "$real" > "$STUBDIR/fifo-find/find"
+  chmod +x "$STUBDIR/fifo-find/find"
+}
+
+@test "clone(msb): rm's unfetched check never blocks on a ref swapped for a FIFO" {
+  case "${OSTYPE:-}" in msys*|cygwin*) skip "msb runs on Linux and macOS hosts" ;; esac
+  local box="$STUBDIR/state/clones/box" head
+  head=$(git -C "$CLONEPROJ" rev-parse HEAD)
+  mkdir -p "$box/repo/.git/refs/heads"
+  printf '%s\n' "$CLONEPROJ" > "$box/.origin"
+  printf '%s\n' "$head" > "$box/repo/.git/refs/heads/main"
+  mkfifo "$box/repo/.git/refs/heads/swapped" "$box/repo/.git/packed-refs"
+  _fifo_find
+  # The plain-file check passing models the swap landing after it, too.
+  run timeout 60 env PATH="$STUBDIR/fifo-find:$PATH" ACQ_STATE_DIR="$STUBDIR/state" bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh" 2>/dev/null
+    _acq_msb_clone_plain_file() { return 0; }
+    _acq_msb_clone_warn_unfetched box && echo CHECK-DONE
+  '
+  assert_success
+  assert_output --partial 'CHECK-DONE'
+  refute_output --partial 'unfetched'
+}
+
+@test "clone(msb): rm's unfetched check reads nested loose refs and warns on an unfetched tip" {
+  local box="$STUBDIR/state/clones/box"
+  mkdir -p "$box/repo/.git/refs/heads/team"
+  printf '%s\n' "$CLONEPROJ" > "$box/.origin"
+  git -C "$CLONEPROJ" rev-parse HEAD > "$box/repo/.git/refs/heads/main"
+  printf '%s\n' 0123456789abcdef0123456789abcdef01234567 > "$box/repo/.git/refs/heads/team/agent"
+  run env ACQ_STATE_DIR="$STUBDIR/state" bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh" 2>/dev/null
+    _acq_msb_clone_warn_unfetched box
+  '
+  assert_success
+  assert_output --partial 'discarding unfetched commits'
+}
+
+@test "clone(msb): rm warns when the scratch's refs are a link out of it" {
+  case "${OSTYPE:-}" in msys*|cygwin*) skip "Git Bash's ln -s copies unless native symlinks are enabled" ;; esac
+  local box="$STUBDIR/state/clones/box"
+  mkdir -p "$box/repo/.git"
+  printf '%s\n' "$CLONEPROJ" > "$box/.origin"
+  ln -s "$CLONEPROJ/.git/refs" "$box/repo/.git/refs"
+  run env ACQ_STATE_DIR="$STUBDIR/state" bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh" 2>/dev/null
+    _acq_msb_clone_warn_unfetched box
+  '
+  assert_success
+  assert_output --partial 'discarding unfetched commits'
+}
