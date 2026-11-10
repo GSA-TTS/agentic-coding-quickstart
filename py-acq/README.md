@@ -121,9 +121,11 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   refreshes (the `kit update` reapply, under the lifecycle lock, after the
   question), and a failed refresh is a warning, never a failed launch.
   `--no-update-check` (on `run`, and accepted on `create` as in Bash) or
-  `ACQ_UPDATE_CHECK=0` skips the check; only the value `0` turns it off. As in
-  Bash, `ACQ_NO_PROMPT` does not silence this question; only a terminal on
-  stdin and `--json` decide it.
+  `ACQ_UPDATE_CHECK=0` skips the check; only the value `0` turns it off. This
+  question keeps Bash's own gate, which differs from the `configure`,
+  first-run and kit-picker prompts: it is asked when stdin is a terminal and
+  `--json` is not given, and `ACQ_NO_PROMPT`/`ACQ_NO_PROGRESS` do not suppress
+  it (set `ACQ_UPDATE_CHECK=0` for that).
 * Clone mode (ADR-0027) is not ported yet, and `create`/`run` fail closed
   rather than mount the real workspace: `--clone` is an unrecognized argument,
   and `ACQ_CLONE=1` is refused with a usage error (exit 2) before any state or
@@ -226,23 +228,33 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   one note. On sbx, `--publish` is refused with `unsupported_capability`,
   because sbx picks the host port itself. It is create-time only: a re-attach
   (`run AGENT` on an existing sandbox, `run NAME`) notes that it is ignored, and
-  `create --recreate --publish` is a usage error; a recreate keeps the old
-  guest's create-time mappings. The create/run JSON carries `ports`. Kits that
+  `create --recreate --publish` is a usage error. A recreate prefers the host
+  ports the old guest had, for guest ports an applied kit still declares with
+  its host side open; a preferred port that is busy by then (the old guest is
+  removed first) gets a free one with a warning, a kit-pinned host port is
+  never overridden, and a mapping no kit declares any more is dropped. The create/run JSON carries `ports`. Kits that
   declare `volumes:` are still refused on msb.
 * `acq-py ports NAME --publish HOST:GUEST [--json]` (ADR-0015) — on msb, open a
   tunnel to a running sandbox: an acq-managed ed25519 key under
   `ACQ_STATE_DIR/ssh` (made with `ssh-keygen` once, authorized with `msb ssh
   authorize` on every publish), `msb ssh serve` on a loopback port, and an
   OpenSSH `-L` forward with Bash's options (only the acq key, no user ssh
-  config, no interactive auth). Both run in the background; acq checks that
-  each stayed up and that the host port listens, and records them in
-  `ACQ_STATE_DIR/ports/NAME.pids` in the Bash format, so either implementation
-  lists and tears down what the other opened. `stop`, `restart` and `rm` stop
-  them. Each repeated `--publish` is opened, all or nothing (Bash kept only the
+  config, no interactive auth), plus a host key pinned per sandbox
+  (`HostKeyAlias=acq-msb-NAME`) rather than per ephemeral serve port. A host
+  port already in use, or asked for twice, is refused before anything starts.
+  Both run in the background; acq checks that each stayed up and that the host
+  port listens, and records them in `ACQ_STATE_DIR/ports/NAME.pids` in the
+  Bash format, so either implementation lists and tears down what the other
+  opened. `stop`, `restart` and `rm` stop them, but only a recorded process
+  that is still an `msb` or `ssh` process (Linux: `/proc/PID/cmdline`; macOS:
+  `ps -o comm=`; Windows: the process image name), so a process id reused by
+  an unrelated program is left alone; one acq cannot check is skipped with a
+  note. Each repeated `--publish` is opened, all or nothing (Bash kept only the
   last); values are checked first, and a `--publish` with no value is refused
   rather than read as a listing. On sbx the values go to `sbx ports NAME
-  --publish` verbatim and its status is kept. Needs the OpenSSH client
-  (`ssh`, `ssh-keygen`) on the host.
+  --publish=V` verbatim and its status is kept, except that a value binding a
+  non-loopback host address is refused. Needs the OpenSSH client (`ssh`,
+  `ssh-keygen`) on the host.
 * `acq-py secret set (-g | SANDBOX) SERVICE [--host HOST --env ENV] [--json]` —
   store a secret in the acq secret store, which is shared byte for byte with the
   Bash `acq` (`acq_py/secretstore.py`: macOS keychain, `secret-tool`, Windows

@@ -988,8 +988,10 @@ rationale, the fixed vsock port (3552), and the trust-boundary discussion.
   with the Bash acq, so either one lists and tears down the other's tunnels. It
   differs in three ways: a repeated `acq ports NAME --publish` opens every
   mapping, all or nothing, where Bash keeps only the last; it claims explicit
-  host ports before it chooses free ones; and `create --recreate` keeps the old
-  guest's create-time mappings. See `py-acq/README.md`.
+  host ports before it chooses free ones; and `create --recreate` prefers the
+  old guest's host ports where a kit leaves the host side open. At teardown it
+  signals a recorded process only once it is confirmed to be an `msb` or `ssh`
+  process. See `py-acq/README.md`.
 - **No state-preserving in-place kit add.** `acq_backend_ensure_kits_applied`
   re-applies kits idempotently; for a clean rebuild use `acq rm && acq run`.
 - **Agent binaries come from templates, images, or agent kits.** `acq` no longer
