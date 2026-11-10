@@ -1473,17 +1473,27 @@ EOF
 # starting with '/' as relative to $PWD, so a drive-form record would never
 # match acq's own directories (which the shell names /c/...). Such a record is
 # converted to the shell form with `cygpath -u` first; cygpath exists only on
-# MSYS/Cygwin, where drive-form records are written.
+# MSYS/Cygwin, where drive-form records are written. When that conversion is
+# unavailable (no cygpath, a failure, or no absolute result) the record cannot
+# be checked, so the sandbox is refused rather than passed.
 acq_recorded_workspace_safe() {
-  local ws posix
+  local ws posix=""
   ws=$(acq_workspace_record_read "$1" "$2" 2>/dev/null | tr -d '\r') || ws=""
   [ -n "$ws" ] || return 0
   case "$ws" in
     [abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ]:[/\\]*|\\\\*)
       if command -v cygpath >/dev/null 2>&1; then
         posix=$(cygpath -u "$ws" 2>/dev/null) || posix=""
-        [ -n "$posix" ] && ws="$posix"
       fi
+      case "$posix" in
+        /*) ws="$posix" ;;
+        *)
+          echo "acq: error: the workspace recorded for sandbox $(acq_printable "$2") is a Windows path ($(acq_printable "$ws"))" >&2
+          echo "     that acq cannot convert to compare it with its own directories (cygpath is missing or failed)." >&2
+          echo "     Sandbox $(acq_printable "$2") cannot be checked: remove it ('acq rm $(acq_printable "$2")') and create it again on a project directory." >&2
+          return 1
+          ;;
+      esac
       ;;
   esac
   _acq_workspace_trusted_safe "$ws" && return 0

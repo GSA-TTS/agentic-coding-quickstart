@@ -372,6 +372,46 @@ CYGSTUB
   assert_line proj-passed
 }
 
+# A drive-form record that cannot be converted cannot be compared either, so the
+# check fails closed: a cygpath that fails, one that prints nothing, and (on a
+# host without a real cygpath) none at all. The record names a safe project
+# directory, so only the missing conversion can refuse it.
+_recorded_check_with() { # CYGPATH-BODY ('' removes cygpath)
+  _plant_strip_drive_cygpath
+  mkdir -p "$STUBDIR/okproj"
+  run bash -c '
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    acq_workspace_record_write msb proj "C:$1/okproj" || echo record-failed
+    if [ -n "$2" ]; then
+      printf "#!/usr/bin/env bash\n%s\n" "$2" >"$1/cygpath"
+    else
+      rm -f "$1/cygpath"
+    fi
+    hash -r
+    acq_recorded_workspace_safe msb proj 2>&1 && echo proj-passed
+  ' _ "$STUBDIR" "$1"
+  refute_line record-failed
+  refute_line proj-passed
+  assert_output --partial "cannot convert"
+  assert_output --partial "remove it ('acq rm proj') and create it again"
+}
+
+@test "msys: the re-attach check refuses a drive-form record when cygpath fails" {
+  _recorded_check_with 'exit 1'
+}
+
+@test "msys: the re-attach check refuses a drive-form record when cygpath prints nothing" {
+  _recorded_check_with 'exit 0'
+}
+
+@test "msys: the re-attach check refuses a drive-form record when cygpath is absent" {
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN*) skip "this host has a real cygpath" ;;
+  esac
+  _recorded_check_with ''
+}
+
 @test "msys: run NAME on msb refuses a drive-form recorded workspace holding acq's state" {
   _plant_strip_drive_cygpath
   printf 'box\n' >"$STUBDIR/.msb_sandbox_list"
