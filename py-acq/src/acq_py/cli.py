@@ -32,9 +32,13 @@ Output contract:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
+import signal
 import sys
+import threading
+from collections.abc import Iterator
 from typing import NoReturn
 
 # ``doctor`` and ``version_info`` are deliberately NOT imported here: they are
@@ -697,7 +701,80 @@ def _user_dirs_pre_step(emit_json: bool, command: str) -> int | None:
     return None
 
 
+class _Terminated(BaseException):
+    """SIGTERM or SIGHUP arrived while a command ran.
+
+    A BaseException, like KeyboardInterrupt, so it unwinds through every
+    ``finally`` and ``except BaseException`` cleanup block (the create path
+    discards an uncreated sandbox's provider inputs and releases its lock that
+    way) and no ``except Exception`` handler swallows it.
+    """
+
+    def __init__(self, signum: int):
+        super().__init__(signum)
+        self.signum = signum
+
+
+# True once _raise_terminated has raised in the current main() call.
+_terminating = False
+
+
+def _raise_terminated(signum: int, _frame: object) -> None:
+    # Raise once. A second SIGTERM during the cleanup it started would otherwise
+    # cut that cleanup short and leave the lock or the provider inputs behind.
+    global _terminating
+    if _terminating:
+        return
+    _terminating = True
+    raise _Terminated(signum)
+
+
+@contextlib.contextmanager
+def _terminate_raises() -> Iterator[None]:
+    """Turn SIGTERM and SIGHUP into :class:`_Terminated` while a command runs.
+
+    Python's default for both signals ends the process at once, with no cleanup.
+    Only a default disposition is replaced: a signal ignored on entry (``nohup``)
+    stays ignored, and a handler someone else installed is left alone. Signal
+    handlers can only be set from the main thread, so elsewhere nothing changes.
+    The previous handlers are restored on the way out.
+    """
+    global _terminating
+    _terminating = False
+    saved: list[tuple[int, object]] = []
+    if threading.current_thread() is threading.main_thread():
+        for name in ("SIGTERM", "SIGHUP"):
+            signum = getattr(signal, name, None)
+            if signum is None or signal.getsignal(signum) is not signal.SIG_DFL:
+                continue
+            signal.signal(signum, _raise_terminated)
+            saved.append((signum, signal.SIG_DFL))
+    try:
+        yield
+    finally:
+        for signum, handler in saved:
+            signal.signal(signum, handler)  # type: ignore[arg-type]
+
+
 def main(argv: list[str] | None = None) -> int:
+    """Run one acq command and return its exit status.
+
+    An interrupt ends the command quietly with the shell's status for it: 130
+    for Ctrl-C (KeyboardInterrupt), 128 + N for SIGTERM or SIGHUP. Cleanup still
+    runs first, because both unwind as exceptions through the handlers' own
+    ``finally`` blocks. Nothing more is printed, as for a shell command killed
+    the same way, so ``--json`` leaves no partial envelope.
+    """
+    try:
+        with _terminate_raises():
+            return _main(argv)
+    except KeyboardInterrupt:
+        return 130
+    except _Terminated as exc:
+        return 128 + exc.signum
+
+
+def _main(argv: list[str] | None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
 
     flags, args = _scan_globals(args)
