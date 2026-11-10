@@ -59,9 +59,54 @@ jobs:
       - name: Install test dependencies
         run: python -m pip install -r py-acq/requirements-dev.txt
 
-      # Tier-1 vectors + sentinel coverage + coverage-manifest validation.
+      # A checkout of Patterns at the kits' pinned ref, for the tests that compare
+      # acq's copies against the real pinned tree: the kit egress allowlist
+      # (KIT_NETWORK_ALLOW) and the packaged kit bundle. A pin bump that changes
+      # a kit's allowlist without re-deriving the table then fails here. The ref
+      # is read from acq.backends/common.sh, which py-acq's tests keep equal to
+      # acq_py.kits.CONTROL_PLANE_REF.
+      - name: Read the pinned Patterns ref
+        id: patterns-pin
+        run: |
+          set -euo pipefail
+          patterns_ref=$(sed -n 's/^PATTERNS_KIT_REF="\([0-9a-f]\{40\}\)"$/\1/p' acq.backends/common.sh)
+          [ -n "$patterns_ref" ]
+          printf 'ref=%s\n' "$patterns_ref" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: GSA-TTS/agentic-coding-patterns
+          ref: ${{ steps.patterns-pin.outputs.ref }}
+          path: .ci/agentic-coding-patterns
+          persist-credentials: false
+
+      # Confirm the checkout is exactly the pin and unmodified, then make its
+      # tree read-only so no test can change it. .git stays writable for the
+      # checkout action's post-job cleanup.
+      - name: Verify the pinned Patterns checkout
+        env:
+          PATTERNS_REF: ${{ steps.patterns-pin.outputs.ref }}
+        run: |
+          set -euo pipefail
+          patterns_dir=.ci/agentic-coding-patterns
+          [ "$(git -C "$patterns_dir" rev-parse HEAD)" = "$PATTERNS_REF" ]
+          test -z "$(git -C "$patterns_dir" status --porcelain)"
+          find "$patterns_dir" -path "$patterns_dir/.git" -prune -o -exec chmod a-w {} +
+
+      # Tier-1 vectors + sentinel coverage + coverage-manifest validation, plus
+      # the pinned-tree checks above. Those checks skip when they cannot see the
+      # checkout, which would pass silently, so a skip on that reason fails the
+      # step.
       - name: Run pytest vector runner
-        run: python -m pytest py-acq/tests -q
+        env:
+          ACQ_TEST_PATTERNS_REPO: ${{ github.workspace }}/.ci/agentic-coding-patterns
+        run: |
+          set -euo pipefail
+          python -m pytest py-acq/tests -q -rs | tee "$RUNNER_TEMP/pytest.log"
+          if grep -q 'pinned Patterns checkout is provided' "$RUNNER_TEMP/pytest.log"; then
+            echo "::error::the pinned Patterns checks were skipped; ACQ_TEST_PATTERNS_REPO did not reach them"
+            exit 1
+          fi
 
       # The independent Bash runner over the same corpus; must agree with pytest
       # on the sentinel golden set.

@@ -10,7 +10,6 @@ from __future__ import annotations
 import importlib.machinery
 import importlib.util
 import json
-import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -163,8 +162,5 @@ def test_script_constants_match_acq():
     assert rk.BUNDLE_DIR == kitspec.BUNDLE_DIR
 
 
-def test_bundle_matches_the_pinned_patterns_tree():
-    root = os.environ.get("ACQ_TEST_PATTERNS_REPO")
-    if not root:
-        pytest.skip("pinned Patterns checkout is provided by CI via ACQ_TEST_PATTERNS_REPO")
-    assert rk.check(rk.pinned_ref(), Path(root), rk.BUNDLE_DIR) == []
+def test_bundle_matches_the_pinned_patterns_tree(pinned_patterns_repo):
+    assert rk.check(rk.pinned_ref(), pinned_patterns_repo, rk.BUNDLE_DIR) == []
