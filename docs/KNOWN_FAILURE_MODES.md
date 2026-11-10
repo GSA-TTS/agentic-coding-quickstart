@@ -4878,6 +4878,46 @@ with a real `sbx.exe` on Windows at the next re-verification.
 
 ---
 
+## 86. Windows: A Non-ASCII Secret Could Read Back Changed
+
+**Status:** Fixed. Earlier builds behave as described below.
+
+**Symptom:** On Windows, a secret containing characters outside ASCII (an
+accented letter, CJK text, an emoji) read back with `?` or other characters in
+place of those, so the sandbox was bound a value that did not work. It
+happened when the console code page was a double-byte one (such as 932), or
+when the secret was stored and read under different code pages (for
+example `chcp 65001` in one window and the default 437 in another). An ASCII
+value, including one with quotes, backslashes, `$` or backticks, was never
+affected.
+
+**Cause:** Both implementations encrypt with DPAPI through Windows PowerShell
+5.1, passing the value on stdin and reading the result on stdout. PowerShell
+decodes `[Console]::In` and encodes `[Console]::Out` with the console's code
+page, so the UTF-8 bytes acq sent were reinterpreted on the way in and out.
+Under the 437 default this happened to round-trip, but what DPAPI protected
+was not the value's UTF-8, and any other code page lost or changed bytes.
+Checked on Windows 11 with Python 3.12: under 932 three of eleven test values
+came back wrong, and values stored under 65001 or 932 came back wrong under
+437.
+
+**Resolution:** Nothing to do for new values. Both one-liners now carry only
+base64 over the pipes: the value goes in as base64 of its UTF-8 bytes and comes
+back the same way (`_PS_ENCRYPT` and `_PS_DECRYPT` in
+`py-acq/src/acq_py/secretstore.py`, `_acq_secret_windows_encrypt` and
+`_acq_secret_windows_decrypt` in `acq.backends/secret-store.sh`, still byte
+for byte the same). A non-ASCII secret stored by an earlier build was
+encrypted from the code-page-decoded text and now reads back as that text, so
+set it again:
+
+```bash
+acq secret set -g usai      # or the service and scope it was stored under
+```
+
+ASCII secrets stored by earlier builds read back unchanged.
+
+---
+
 ## Contributing
 
 When you discover a new failure mode:

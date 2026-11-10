@@ -352,3 +352,53 @@ def test_real_dpapi_roundtrip_with_git_bash(monkeypatch):
     raw = (_store_dir() / "acq.global.github").read_bytes()
     assert raw.startswith(b"acq-dpapi-v1\n") and b"python-dpapi-value" not in raw
     assert _bash("keychain-windows", "acq_secret_resolve github global") == "python-dpapi-value"
+
+
+# Values that are awkward for a shell, PowerShell's -Command or a console code page.
+AWKWARD_VALUES = [
+    'a"b""c', "a'b''c", "C:\\path\\to\\", "$env:USERNAME $(whoami) ${x}", "a`nb``c`",
+    "caf\u00e9 na\u00efve \u00fc\u00df", "\u65e5\u672c\u8a9e", "key-\U0001f511-\u2603", "  padded  ",
+]
+
+
+@pytest.mark.skipif(not WINDOWS, reason="real Windows DPAPI")
+@pytest.mark.parametrize("value", AWKWARD_VALUES)
+def test_real_dpapi_awkward_values_cross_both_implementations(monkeypatch, value):
+    monkeypatch.setattr(secretstore, "IS_WINDOWS", True)
+    _bash("keychain-windows", 'printf "%s\\n" "$V" | acq_secret_store "$(_acq_secret_key usai)"', V=value)
+    assert secretstore.resolve("usai") == value
+    secretstore.set_secret("github", "global", value)
+    assert _bash("keychain-windows", 'printf "%s" "$(acq_secret_resolve github global)"') == value
+
+
+def _console_cp(cp: int | None = None) -> int:
+    """The console input/output code page; with ``cp``, set both first. 0 means no console."""
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    if cp is not None:
+        kernel32.SetConsoleCP(cp)
+        kernel32.SetConsoleOutputCP(cp)
+    return int(kernel32.GetConsoleOutputCP())
+
+
+@pytest.mark.skipif(not WINDOWS, reason="real Windows DPAPI and console code pages")
+def test_real_dpapi_value_survives_a_console_code_page_change(monkeypatch):
+    # PowerShell decodes stdin and encodes stdout with the console's code page.
+    # A value stored under one code page must read back the same under another,
+    # from either implementation (Git Bash's children share the console).
+    monkeypatch.setattr(secretstore, "IS_WINDOWS", True)
+    original = _console_cp()
+    if original == 0:
+        pytest.skip("no console attached")
+    value = "caf\u00e9-\u65e5\u672c-\U0001f511"
+    try:
+        _console_cp(932)  # a double-byte code page
+        secretstore.set_secret("usai", None, value)
+        _console_cp(437)
+        assert secretstore.resolve("usai") == value
+        assert _bash("keychain-windows", 'printf "%s" "$(acq_secret_resolve usai)"') == value
+        _console_cp(65001)
+        assert secretstore.resolve("usai") == value
+    finally:
+        _console_cp(original)
