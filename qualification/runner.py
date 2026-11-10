@@ -55,10 +55,29 @@ DEADLINE_ENV = "ACQ_QUALIFY_DEADLINE"
 # After the command is killed, how long to wait for its pipes to close: a process
 # it started and that outlived it can hold them open indefinitely.
 REAP_TIMEOUT = 5.0
+# The wait on the command returns at least this often, so the operator's Ctrl+C
+# is handled promptly (on Windows a wait is not interrupted by it).
+WAIT_SLICE = 1.0
 
 
 def _grace(timeout: float) -> float:
     return min(TERMINATE_GRACE, timeout / 4)
+
+
+def _communicate(proc: subprocess.Popen, timeout: float) -> tuple[bytes, bytes]:
+    """``proc.communicate(timeout=timeout)``, waiting in ``WAIT_SLICE`` slices.
+
+    Retrying after ``TimeoutExpired`` loses no output (documented ``subprocess``
+    behaviour).
+    """
+    end = time.monotonic() + timeout
+    while True:
+        remaining = end - time.monotonic()
+        try:
+            return proc.communicate(timeout=max(0.0, min(remaining, WAIT_SLICE)))
+        except subprocess.TimeoutExpired:
+            if remaining <= WAIT_SLICE:
+                raise
 
 
 def _stop(proc: subprocess.Popen, grace: float, *, ask: bool = True) -> None:
@@ -138,18 +157,19 @@ def _single_run(
             Verdict.BLOCKED, environment, tuple(command), "", "command could not start", _now()
         )
     try:
-        stdout, stderr = proc.communicate(timeout=timeout)
+        stdout, stderr = _communicate(proc, timeout)
     except subprocess.TimeoutExpired:
         _stop(proc, grace)
         return Transcript(
             Verdict.BLOCKED, environment, tuple(command), "", "command timed out", _now()
         )
     except KeyboardInterrupt:
-        # On Windows the command runs in its own process group and never sees the
-        # operator's Ctrl+C, so pass the stop on. On POSIX it shares the terminal's
-        # process group and already has the SIGINT; a second signal would interrupt
-        # its orderly stop. Either way, let it tear down before giving up.
-        _stop(proc, grace, ask=os.name == "nt")
+        # Pass the stop on, then let the command tear down before giving up. On
+        # Windows it runs in its own process group and never sees the operator's
+        # Ctrl+C. On POSIX a terminal's Ctrl+C reaches it too, but a SIGINT sent
+        # to the harness alone (by a supervisor) does not; the oracle swallows a
+        # second stop signal while it is already stopping.
+        _stop(proc, grace)
         raise
 
     verdict = classify_exit(proc.returncode)
