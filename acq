@@ -1568,7 +1568,8 @@ case "$subcommand" in
     advise_project_env_activation "$ws"
     acq_print_selected_agent_kit "$create_agent"
 
-    acq_backend_provision "$local_name" "$@"
+    # A group SIGTERM/SIGHUP waits for the provisioning cleanup (progress.sh).
+    acq_run_signal_deferred acq_backend_provision "$local_name" "$@"
     # `create` is detached and never attaches, so provider credentials are
     # validated on the next attach (ensure_valid_provider_keys), not here.
     ;;
@@ -1691,7 +1692,7 @@ case "$subcommand" in
         advise_github_scope "$local_name" "$ws"
         advise_project_env_activation "$ws"
 
-        acq_backend_provision "$local_name" "${create_args[@]}"
+        acq_run_signal_deferred acq_backend_provision "$local_name" "${create_args[@]}"
       fi
 
       # Validate every selected provider's credential before attaching. This is
