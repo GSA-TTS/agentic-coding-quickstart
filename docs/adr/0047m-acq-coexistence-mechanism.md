@@ -79,3 +79,58 @@ implementation (including the `version` `impl` field); unset/`bash` runs the Bas
 body; `--channel python` parses and installs; and unknown `--channel` / `ACQ_IMPL`
 values exit 2. A live transcript proves `./acq version` (Bash default),
 `ACQ_IMPL=python ./acq version` (Python), and the installer fail-closed paths.
+
+## Correction (2026-11-09): the Python implementation is neither complete nor currently qualified
+
+The Context section says the Python replacement "is complete and
+Tier-3-qualified on Windows". That overstated its state when this ADR was
+accepted, and it is not true now. The decision itself is unaffected: the
+`ACQ_IMPL` switch, the distinct `acq-python` identity and the `--channel` seam
+are what this ADR records. This note corrects only the premise. The text above
+is left as written.
+
+**Command surface.** On 2026-11-09 the Python CLI owns every subcommand that the
+Bash `acq help` lists, so none of them falls through to the backend passthrough.
+That includes `configure`, `start`, `restart`, `backend set`/`unset`,
+`secret import` and `secret set --host/--env`. Some documented Bash flags are
+still missing, and the Python CLI rejects each one as a usage error:
+
+- `--clone` on `run`/`create`, and its `ACQ_CLONE` equivalent;
+- `--publish HOST:GUEST` on `run`/`create`;
+- `--no-update-check` on `run`;
+- `--publish HOST:GUEST` on `ports NAME`.
+
+The Python implementation also has behaviour gaps against Bash. It does not read
+the `extra_kits`, `provider_kit` and `scope_github_token` settings that
+`acq configure` writes. It has no kit heal on re-attach and no ssh-agent
+forwarding. Credential rotation and Bash-state import have open follow-ups. So
+ADR-0038m's "preserve every documented acq-owned command and meaningful flag"
+is not yet met. ADR-0048m gate 4 (command parity) is where parity is judged
+before any default changes. The tracking issues are under Links below.
+
+**Qualification.** PASS transcripts for both backends on `macos-arm64` and
+`windows-x64` were recorded on 2026-11-07 and 2026-11-08. They attest only to
+the tree at their recorded revisions. Every later change to the Tier-3 surface
+(`py-acq/src/acq_py/` among it) expires them, as ADR-0044m requires. On
+2026-11-09, `python3 -m qualification.gate check` reports:
+
+- seven claimed cells;
+- none qualified;
+- four blocked, because the surface changed after they were recorded;
+- three waived with no transcript (`linux-x86_64` on both backends, and
+  `linux-aarch64` on msb).
+
+So the `Tier-3 release gate` is red until those cells are re-qualified. No
+platform currently has a current Tier-3 qualification for the Python
+implementation. `python3 -m qualification.gate check` is the authority, not this
+note.
+
+## Links
+
+- Command surface and parity gate: ADR-0038m, ADR-0048m
+- Python gaps: mogul/agentic-coding-quickstart#107 (credentials),
+  mogul/agentic-coding-quickstart#108 (kits, bootstrap, trusted config),
+  mogul/agentic-coding-quickstart#109 (state and lifecycle),
+  mogul/agentic-coding-quickstart#168 (configure settings)
+- Re-qualification checklist: mogul/agentic-coding-quickstart#60
+- Review finding this note answers: mogul/agentic-coding-quickstart#117
