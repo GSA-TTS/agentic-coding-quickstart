@@ -1668,4 +1668,3 @@ def test_remove_guest_tree_windows_retries_unreadable_dir(tmp_path, monkeypatch)
 
     msb_clone.remove_guest_tree(tree)
     assert not tree.exists()
-
