@@ -27,6 +27,9 @@ from acq_py import cli, msb, provider_input, secretstore
 from acq_py.commands import common
 
 posix_only = pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+# Windows has no SIGHUP; the tests using it are POSIX-only, but parametrize runs at
+# collection, so fall back to its POSIX number there.
+_SIGHUP = getattr(signal, "SIGHUP", 1)
 
 
 def _env(monkeypatch, tmp_path):
@@ -153,7 +156,7 @@ raise SystemExit(cli.main(sys.argv[1:]))
 
 
 @posix_only
-@pytest.mark.parametrize("sig, status", [(signal.SIGINT, 130), (signal.SIGTERM, 143), (signal.SIGHUP, 129)],
+@pytest.mark.parametrize("sig, status", [(signal.SIGINT, 130), (signal.SIGTERM, 143), (_SIGHUP, 129)],
                          ids=["sigint", "sigterm", "sighup"])
 def test_a_signalled_acq_process_exits_quietly_after_cleanup(monkeypatch, tmp_path, sig, status):
     _env(monkeypatch, tmp_path)
@@ -205,7 +208,7 @@ def _hung_cleanup(grace: float) -> subprocess.Popen[str]:
 
 
 @posix_only
-@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGHUP], ids=["sigterm", "sighup"])
+@pytest.mark.parametrize("sig", [signal.SIGTERM, _SIGHUP], ids=["sigterm", "sighup"])
 def test_a_later_second_signal_stops_a_hung_cleanup(sig):
     proc = _hung_cleanup(0.5)
     try:
