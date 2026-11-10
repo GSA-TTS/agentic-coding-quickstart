@@ -99,7 +99,9 @@ def test_valid_timeout_override_is_read_at_call_time(monkeypatch, capsys, env_na
 )
 def test_malformed_timeout_does_not_break_unrelated_commands(tmp_path, env_name):
     # A fresh interpreter, so the module imports themselves see the bad value.
-    env = {**os.environ, env_name: "30s", "ACQ_VERSION": "0.1.0", "ACQ_STATE_DIR": str(tmp_path / "state")}
+    # Both backends absent: `version` would otherwise probe a host's real msb/sbx.
+    env = {**os.environ, env_name: "30s", "ACQ_VERSION": "0.1.0", "ACQ_STATE_DIR": str(tmp_path / "state"),
+           "ACQ_SBX_INSTALLED": "0", "ACQ_MSB_INSTALLED": "0"}
     proc = subprocess.run(
         [sys.executable, "-m", "acq_py", "version", "--json"],
         env=env,

@@ -35,6 +35,9 @@ def _run_acq(env_extra: dict[str, str], *args: str) -> subprocess.CompletedProce
     env = dict(os.environ)
     for name in ("ACQ_IMPL", "ACQ_RUNTIME"):
         env.pop(name, None)
+    # The Python `version` reports the active backend's detected version; with
+    # both backends absent it never runs a real msb or sbx from the host's PATH.
+    env.update(ACQ_SBX_INSTALLED="0", ACQ_MSB_INSTALLED="0")
     env.update(env_extra)
     return subprocess.run(
         ["bash", str(ACQ), *args],

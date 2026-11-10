@@ -79,6 +79,20 @@ def test_backend_adapters_fail_closed_rather_than_fall_back_to_a_bare_name(
     assert backends._run_version_command(backends.BACKENDS["msb"]) is None
 
 
+def test_version_probe_survives_output_that_is_not_utf8_on_a_cp1252_host(monkeypatch):
+    # A Windows host decodes text-mode child output with its ANSI code page
+    # (cp1252) unless the caller names an encoding. Byte 0x81 is undefined in
+    # cp1252 and invalid as UTF-8, so a probe that relied on the host default
+    # would raise UnicodeDecodeError instead of reporting an unparseable version.
+    import locale
+
+    monkeypatch.setattr(locale, "getencoding", lambda: "cp1252")
+    monkeypatch.setattr(locale, "getpreferredencoding", lambda do_setlocale=True: "cp1252")
+    probe = "import sys; sys.stdout.buffer.write(b'msb 0.7.11 \\x81\\n')"
+    monkeypatch.setattr(backends, "_adapter_command", lambda spec: [sys.executable, "-c", probe])
+    assert backends._run_version_command(backends.BACKENDS["msb"]) == "msb 0.7.11 �"
+
+
 def test_names_with_a_directory_part_are_not_searched(workspace, monkeypatch):
     monkeypatch.setenv("PATH", str(workspace))
     assert hostexec.which("./msb") is None

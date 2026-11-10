@@ -7,6 +7,7 @@ directly. Contract evidence lives only in the vector corpus (``test/vectors``).
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -16,13 +17,35 @@ import pytest
 import acq_py
 from acq_py import envelope, errors
 
+# Both backends read as absent, so `version` (which reports the active backend
+# and its detected version) never runs a real msb or sbx found on the host's PATH.
+_NO_BACKENDS = {"ACQ_SBX_INSTALLED": "0", "ACQ_MSB_INSTALLED": "0"}
 
-def run_cli(*args: str) -> subprocess.CompletedProcess:
+
+def run_cli(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, "-m", "acq_py", *args],
         capture_output=True,
         text=True,
+        env={**os.environ, **_NO_BACKENDS, **(env or {})},
+        stdin=subprocess.DEVNULL,
+        timeout=60,
     )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the fake backends are POSIX shell scripts")
+def test_version_subprocess_never_probes_a_host_backend(tmp_path):
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    marker = tmp_path / "probed"
+    for name in ("msb", "sbx"):
+        fake = bindir / name
+        fake.write_text(f'#!/bin/sh\necho {name} >> "{marker}"\necho "{name} 0.7.11"\n')
+        fake.chmod(0o755)
+    proc = run_cli("version", "--json", env={"PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}"})
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["data"]["backend"] is None
+    assert not marker.exists(), marker.read_text()
 
 
 def test_package_version_is_semver():
@@ -122,6 +145,28 @@ def test_version_reports_auto_detected_backend_and_control_plane_ref(monkeypatch
     assert data["backend_version"] == "0.7.11"
     assert data["kit_control_plane_ref"] == kits.CONTROL_PLANE_REF
     assert "warnings" not in data
+
+
+def test_version_probes_the_auto_detected_backend_once(monkeypatch, capsys):
+    # Auto-detect probes every backend; the report reuses that probe for the
+    # chosen backend's version instead of running its version command again.
+    from acq_py import backends
+
+    _stub_backends(monkeypatch, msb="msb 0.7.11")
+    probed: list[str] = []
+    real = backends._detected_version
+
+    def counting(spec):
+        probed.append(spec.name)
+        return real(spec)
+
+    monkeypatch.setattr(backends, "_detected_version", counting)
+    rc, doc, _err = _version_json(capsys)
+    assert rc == 0 and doc["data"]["backend_version"] == "0.7.11"
+    assert probed == ["msb"]
+    # Outside the report nothing is reused: a floor check always probes afresh.
+    backends.detect(backends.BACKENDS["msb"])
+    assert probed == ["msb", "msb"]
 
 
 def test_version_honours_the_backend_flag_and_env(monkeypatch, capsys):
