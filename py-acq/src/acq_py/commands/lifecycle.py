@@ -1171,7 +1171,8 @@ def _workspace_options(parsed, command: str, backend: str, opts: _CreateOpts,
         workspace, failure = common._validate_workspace(command, path, emit_json)
         if failure is not None:
             return None, opts, failure
-        assert workspace is not None
+        if workspace is None:  # guarded by the failure return above
+            raise RuntimeError("workspace unexpectedly unresolved")
         mounts.append(workspace)
     primary = mounts[0]
     extras = tuple(common._mount_workspace(backend, path) + (":ro" if spec.endswith(":ro") else "")
@@ -1656,7 +1657,8 @@ def _run_prepare_locked(
         resolved, opts, exit_code = _workspace_options(parsed, "run", backend, opts, emit_json)
         if exit_code is not None:
             return None, exit_code
-        assert resolved is not None
+        if resolved is None:  # guarded by the failure return above
+            raise RuntimeError("resolved unexpectedly unresolved")
         workspace = common._mount_workspace(backend, resolved)
         new_sandbox = _new_sbx_sandbox if backend == "sbx" else _new_msb_sandbox
         data, exit_code = new_sandbox(
@@ -1733,7 +1735,8 @@ def _run_run(parsed, emit_json: bool, backend: str) -> int:
             resolved, opts, exit_code = _workspace_options(parsed, "run", backend, opts, emit_json)
             if exit_code is not None:
                 return exit_code
-            assert resolved is not None
+            if resolved is None:  # guarded by the failure return above
+                raise RuntimeError("resolved unexpectedly unresolved")
             workspace = common._mount_workspace(backend, resolved)
         cli_kits = _cli_kit_refs(parsed.kit)
         if not _exists_quietly(backend, name):
