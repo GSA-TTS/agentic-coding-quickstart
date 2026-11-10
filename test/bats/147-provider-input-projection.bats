@@ -541,15 +541,22 @@ while [ ! -s "$STUBDIR/guardian.pid" ] && kill -0 "\$parent" 2>/dev/null && [ "\
 done
 [ -s "$STUBDIR/guardian.pid" ] || { echo "guardian never published its pid" >&2; exit 1; }
 guardian_pid=\$(cat "$STUBDIR/guardian.pid")
+# The guardian polls its parent once a second and, by design, exits within a
+# tick of the parent's death. Stop it first so it is certainly still alive when
+# the lock is probed; a probe racing that tick flaked under load. The parent is
+# killed and reaped, so it is fully gone before the probe.
+trap 'kill -CONT "\$guardian_pid" 2>/dev/null || true' EXIT
+kill -STOP "\$guardian_pid"
 kill -KILL "\$parent" 2>/dev/null || true
+wait "\$parent" 2>/dev/null || true
 if ACQ_PROVIDER_INPUT_LOCK_RETRIES=1 acq_provider_input_lock_acquire sbx parentexit >"$STUBDIR/retry.out" 2>&1; then
   echo "lock was recovered while guardian was alive" >&2
   exit 1
 fi
+kill -CONT "\$guardian_pid"
 grep -Fq "owned by live pid \$guardian_pid" "$STUBDIR/retry.out"
-wait "\$parent" 2>/dev/null || true
-# The guardian polls its parent once a second, so it exits within a tick or two
-# of the reap above. Wait for that, with a ceiling far above the normal delay.
+# Resumed, the guardian sees its parent gone and exits within a tick or two.
+# Wait for that, with a ceiling far above the normal delay.
 waited=0
 while kill -0 "\$guardian_pid" 2>/dev/null && [ "\$waited" -lt 600 ]; do
   sleep 0.1
@@ -579,7 +586,7 @@ ACQ_SCRIPT_DIR="$REPO_ROOT" ACQ_SOURCE_ONLY=1 . "$REPO_ROOT/acq"
 (
   _acq_provider_input_guardian_start
   lock=\$(acq_provider_input_lock_acquire sbx backend-child "\$_ACQ_PROVIDER_INPUT_GUARDIAN_PID")
-  sleep 4 & child=\$!
+  sleep 60 & child=\$!
   _acq_provider_input_guardian_register_child "\$child"
   printf '%s %s\n' "\$_ACQ_PROVIDER_INPUT_GUARDIAN_PID" "\$child" > "$STUBDIR/pids"
   sleep 10
@@ -597,10 +604,18 @@ if ACQ_PROVIDER_INPUT_LOCK_RETRIES=1 acq_provider_input_lock_acquire sbx backend
 fi
 grep -Fq "owned by live pid \$guardian" "$STUBDIR/retry"
 wait "\$parent" 2>/dev/null || true
+# The registered child outlives every probe above: it is ended here rather than
+# by a short sleep that a loaded host could outrun before the probe. Once it is
+# gone the guardian has nothing left to wait for and exits within a tick.
+kill "\$child" 2>/dev/null || true
 waited=0
-while kill -0 "\$child" 2>/dev/null && [ "\$waited" -lt 60 ]; do sleep 0.1; waited=\$((waited + 1)); done
+while kill -0 "\$child" 2>/dev/null && [ "\$waited" -lt 600 ]; do sleep 0.1; waited=\$((waited + 1)); done
 waited=0
-while kill -0 "\$guardian" 2>/dev/null && [ "\$waited" -lt 30 ]; do sleep 0.1; waited=\$((waited + 1)); done
+while kill -0 "\$guardian" 2>/dev/null && [ "\$waited" -lt 600 ]; do sleep 0.1; waited=\$((waited + 1)); done
+if kill -0 "\$guardian" 2>/dev/null; then
+  echo "guardian outlived its transaction and registered child" >&2
+  exit 1
+fi
 lock=\$(acq_provider_input_lock_acquire sbx backend-child)
 acq_provider_input_lock_release "\$lock"
 echo retained
