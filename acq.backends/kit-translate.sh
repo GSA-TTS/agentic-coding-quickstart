@@ -81,6 +81,75 @@ _kit_git_isolate_repo() {
     GIT_COMMON_DIR GIT_NAMESPACE
 }
 
+# _kit_anon_protocols — the GIT_ALLOW_PROTOCOL value for the anonymous kit
+# fetch: https, the only transport a kit URL may name. An inherited
+# GIT_ALLOW_PROTOCOL only narrows it; when it leaves nothing, a name no
+# transport has allows nothing. Under bats, ACQ_TEST_KIT_ANON_PROTOCOLS replaces
+# https so a test can fetch a local file:// repository through this attempt.
+_kit_anon_protocols() {
+  local want="https"
+  if [ -n "${BATS_TEST_NAME:-}" ] && [ -n "${ACQ_TEST_KIT_ANON_PROTOCOLS:-}" ]; then
+    want="$ACQ_TEST_KIT_ANON_PROTOCOLS"
+  fi
+  if [ -z "${GIT_ALLOW_PROTOCOL+x}" ]; then
+    printf '%s\n' "$want"
+    return 0
+  fi
+  case ":$GIT_ALLOW_PROTOCOL:" in
+    *":$want:"*) printf '%s\n' "$want" ;;
+    *) printf 'acq-none\n' ;;
+  esac
+}
+
+# _kit_git_fetch_into MODE DESTDIR URL REF DIR — one attempt at fetching REF
+# from URL into a fresh repository in DESTDIR, sparse-checked-out to DIR. git's
+# output goes to stdout, for the caller to capture and never show.
+#
+# MODE anon reads no git config file at all (GIT_CONFIG_NOSYSTEM, and
+# GIT_CONFIG_GLOBAL on the null device), so no credential helper, URL rewrite,
+# hook path or template from the user's config applies, and git may use only
+# the transports _kit_anon_protocols allows. `credential.helper=` also resets
+# the helper list on a git too old to know GIT_CONFIG_GLOBAL.
+# MODE user keeps the user's config files, so a configured credential helper or
+# an enterprise-mirror rewrite can apply, with prompts still disabled.
+# In both modes core.hooksPath names the null device, which holds no hook, so
+# a hook from the user's config never runs in the kit cache.
+_kit_git_fetch_into() {
+  local mode="$1" destdir="$2" url="$3" ref="$4" dir="$5"
+  (
+    cd "$destdir" || exit 1
+    _kit_git_isolate
+    export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/echo GCM_INTERACTIVE=never
+    if [ "$mode" = anon ]; then
+      unset GIT_CONFIG_SYSTEM
+      GIT_ALLOW_PROTOCOL=$(_kit_anon_protocols)
+      export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL
+    fi
+    rm -rf .git 2>/dev/null
+    # Stop if init fails: the cache directory may sit inside another
+    # repository, and every git call below would then reconfigure and
+    # fetch into that enclosing repository instead.
+    if ! git init -q; then
+      echo "kit-translate: git init failed in the kit cache directory: $destdir" >&2
+      exit 1
+    fi
+    { git remote add origin "$url" 2>/dev/null || git remote set-url origin "$url"; } || exit 1
+    git config core.sparseCheckout true || exit 1
+    # `git init` does not always create .git/info/ (platform-dependent),
+    # so create it before writing the sparse-checkout file — otherwise the
+    # redirect fails with ".git/info/sparse-checkout: No such file or
+    # directory" (harmless-but-noisy; fetch still fell back).
+    mkdir -p .git/info
+    printf '%s/*\n' "$dir" > .git/info/sparse-checkout
+    if [ "$mode" = anon ]; then
+      git -c credential.helper= -c core.hooksPath=/dev/null fetch --depth 1 origin "$ref" 2>&1 || exit 1
+    else
+      git -c core.hooksPath=/dev/null fetch --depth 1 origin "$ref" 2>&1 || exit 1
+    fi
+    git -c core.hooksPath=/dev/null checkout -q FETCH_HEAD 2>&1 || exit 1
+  )
+}
+
 # Only full immutable commit IDs participate. Symbolic/abbreviated refs keep
 # their original per-call fetch semantics. The owning acq shell creates and
 # cleans this private root; command substitutions share files, not shell state.
@@ -239,46 +308,14 @@ kit_translate_fetch() {
       # url.<x>.insteadOf rewrite — `gh auth login` authenticates the gh CLI,
       # not plain git. See docs/KNOWN_FAILURE_MODES.md.
       #
-      # Attempt 1 (anonymous): prompts disabled + inherited credential helper and
-      # github.com insteadOf rewrite neutralized, so an unauthenticated fetch
-      # proceeds without prompting.
-      # Attempt 2 (authed retry): if attempt 1 genuinely fails (a source that
-      # needs auth / egress-restricted enterprise mirror that needs the rewrite),
-      # retry with the system git config intact but STILL prompt-disabled, so a
-      # configured credential helper can supply creds without ever hanging.
-      _kit_git_fetch() {
-        # $1 = extra git -c flags (as a single string, word-split intentionally)
-        local _cfg="$1"
-        (
-          cd "$destdir" || exit 1
-          _kit_git_isolate
-          export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/echo GCM_INTERACTIVE=never
-          rm -rf .git 2>/dev/null
-          # Stop if init fails: the cache directory may sit inside another
-          # repository, and every git call below would then reconfigure and
-          # fetch into that enclosing repository instead.
-          if ! git init -q; then
-            echo "kit-translate: git init failed in the kit cache directory: $destdir" >&2
-            exit 1
-          fi
-          { git remote add origin "$url" 2>/dev/null || git remote set-url origin "$url"; } || exit 1
-          git config core.sparseCheckout true || exit 1
-          # `git init` does not always create .git/info/ (platform-dependent),
-          # so create it before writing the sparse-checkout file — otherwise the
-          # redirect fails with ".git/info/sparse-checkout: No such file or
-          # directory" (harmless-but-noisy; fetch still fell back).
-          mkdir -p .git/info
-          printf '%s/*\n' "$dir" > .git/info/sparse-checkout
-          # shellcheck disable=SC2086
-          git $_cfg fetch --depth 1 origin "$ref" 2>&1 || exit 1
-          git checkout -q FETCH_HEAD 2>&1 || exit 1
-        )
-      }
-      local _ferr _anon_cfg
-      _anon_cfg="-c credential.helper= -c url.https://github.com/.insteadOf="
-      if _ferr=$(_kit_git_fetch "$_anon_cfg"); then
+      # Attempt 1 (anonymous) reads no git config file at all and may use only
+      # https; attempt 2 (authenticated retry) runs only when it fails, with the
+      # user's config (credential helpers, URL rewrites) but still without
+      # prompts. See _kit_git_fetch_into.
+      local _ferr
+      if _ferr=$(_kit_git_fetch_into anon "$destdir" "$url" "$ref" "$dir"); then
         :
-      elif _ferr=$(_kit_git_fetch ""); then
+      elif _ferr=$(_kit_git_fetch_into user "$destdir" "$url" "$ref" "$dir"); then
         # authed retry (system config) succeeded
         :
       else

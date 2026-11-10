@@ -230,7 +230,8 @@ SPEC
   local gitlog="$STUBDIR/git-invocations.log"; : >"$gitlog"
   cat >"$STUBDIR/git" <<GITSTUB
 #!/usr/bin/env bash
-printf 'PROMPT=%s ARGS=%s\n' "\${GIT_TERMINAL_PROMPT:-UNSET}" "\$*" >>"$gitlog"
+printf 'PROMPT=%s NOSYSTEM=%s GLOBAL=%s PROTO=%s ARGS=%s\n' "\${GIT_TERMINAL_PROMPT:-UNSET}" \
+  "\${GIT_CONFIG_NOSYSTEM:-UNSET}" "\${GIT_CONFIG_GLOBAL:-UNSET}" "\${GIT_ALLOW_PROTOCOL:-UNSET}" "\$*" >>"$gitlog"
 case "\$*" in
   *fetch*) exit 0 ;;
   *checkout*) mkdir -p "integrations/isolation/acq-kits/usai-provider"; exit 0 ;;
@@ -238,16 +239,82 @@ case "\$*" in
 esac
 GITSTUB
   chmod +x "$STUBDIR/git"
-  run bash -c '
+  run env -u GIT_ALLOW_PROTOCOL bash -c '
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     kit_translate_fetch "git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=deadbeef&dir=integrations/isolation/acq-kits/usai-provider" "'"$STUBDIR"'/kitdest"
   ' >/dev/null 2>&1 || true
-  local fetchline anonline
-  fetchline=$(grep 'fetch' "$gitlog" | head -1)
-  assert_regex "$fetchline" 'PROMPT=0'
-  anonline=$(grep -m1 'credential.helper=' "$gitlog" || true)
-  assert_regex "$anonline" 'credential\.helper='
-  assert_regex "$anonline" 'insteadOf='
+  local fetchline
+  # The anonymous attempt succeeded, so it is the only fetch: no prompt, no git
+  # config file, https only, and no URL rewrite of its own (an empty
+  # url.<base>.insteadOf would rewrite every URL and make it always fail).
+  assert_equal "$(grep -c 'fetch' "$gitlog")" 1
+  fetchline=$(grep 'fetch' "$gitlog")
+  assert_regex "$fetchline" 'PROMPT=0 NOSYSTEM=1 GLOBAL=/dev/null PROTO=https '
+  assert_regex "$fetchline" 'credential\.helper= '
+  assert_regex "$fetchline" 'core\.hooksPath=/dev/null'
+  refute_regex "$fetchline" 'insteadOf'
+}
+
+# The anonymous attempt end to end, with a real git against a local repository:
+# file:// is allowed only through the bats-only ACQ_TEST_KIT_ANON_PROTOCOLS. The
+# user's global config rewrites every file:// URL to a missing path and names a
+# hooks directory whose post-checkout hook leaves a marker; the anonymous
+# attempt must read neither, and the authenticated retry must still run no hook.
+@test "kit fetch: the anonymous attempt really fetches, reading no git config file and running no hook" {
+  local src="$STUBDIR/kitsrc" hooks="$STUBDIR/userhooks" marker="$STUBDIR/hook-ran" sha
+  mkdir -p "$src/kits/demo" "$hooks"
+  printf 'name: demo\n' >"$src/kits/demo/spec.yaml"
+  git -C "$src" init -q
+  git -C "$src" add kits
+  git -C "$src" -c user.name=t -c user.email=t@example.test commit -q -m kit
+  sha=$(git -C "$src" rev-parse HEAD)
+  printf '#!/bin/sh\necho ran >>"%s"\n' "$marker" >"$hooks/post-checkout"
+  chmod +x "$hooks/post-checkout"
+  git config --global core.hooksPath "$hooks"
+  # The hook is live for an ordinary git command, so its absence below means
+  # something.
+  git -C "$src" checkout -q -b probe
+  [ -f "$marker" ]
+  rm -f "$marker"
+  git config --global "url.file://$STUBDIR/missing-acq-repo/.insteadOf" "file://"
+
+  run env -u GIT_ALLOW_PROTOCOL ACQ_TEST_KIT_ANON_PROTOCOLS=file bash -c '
+    . "$1/acq.backends/kit-translate.sh"
+    mkdir -p "$2"
+    _kit_git_fetch_into anon "$2" "file://$3" "$4" kits/demo >/dev/null || exit 1
+    git -C "$2" rev-parse HEAD
+  ' _ "$REPO_ROOT" "$STUBDIR/anon" "$src" "$sha"
+  assert_success
+  assert_output "$sha"
+  assert [ -f "$STUBDIR/anon/kits/demo/spec.yaml" ]
+  assert [ ! -e "$marker" ]
+
+  # Without the test override only https is allowed, so the same fetch fails.
+  run env -u GIT_ALLOW_PROTOCOL bash -c '
+    . "$1/acq.backends/kit-translate.sh"
+    mkdir -p "$2"
+    _kit_git_fetch_into anon "$2" "file://$3" "$4" kits/demo
+  ' _ "$REPO_ROOT" "$STUBDIR/https-only" "$src" "$sha"
+  assert_failure
+
+  # The authenticated retry reads the user's config: the rewrite applies (and
+  # breaks this URL); without it the fetch succeeds and the hook still never runs.
+  run bash -c '
+    . "$1/acq.backends/kit-translate.sh"
+    mkdir -p "$2"
+    _kit_git_fetch_into user "$2" "file://$3" "$4" kits/demo
+  ' _ "$REPO_ROOT" "$STUBDIR/user-rewritten" "$src" "$sha"
+  assert_failure
+  git config --global --unset "url.file://$STUBDIR/missing-acq-repo/.insteadOf"
+  run bash -c '
+    . "$1/acq.backends/kit-translate.sh"
+    mkdir -p "$2"
+    _kit_git_fetch_into user "$2" "file://$3" "$4" kits/demo >/dev/null || exit 1
+    git -C "$2" rev-parse HEAD
+  ' _ "$REPO_ROOT" "$STUBDIR/user" "$src" "$sha"
+  assert_success
+  assert_output "$sha"
+  assert [ ! -e "$marker" ]
 }
 
 @test "#207: authenticated retry diagnostics never expose credential-bearing URLs" {
