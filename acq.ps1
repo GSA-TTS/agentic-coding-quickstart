@@ -12,15 +12,18 @@ $env:NoDefaultCurrentDirectoryInExePath = "1"
 
 # acq.cmd starts this script as
 #   powershell.exe -NoLogo -NoProfile -File "<this script>" <arguments>
-# and by the time PowerShell fills $args it has already changed the arguments:
-# its parameter binder takes the first bare `--` as its own end-of-parameters
-# marker and removes it, although acq needs it to tell its own flags from a
-# guest command's. Get-AcqLauncherArgs recovers the arguments from the
-# process's argv instead, which .NET splits from the raw command line with the
-# Windows (MSVCRT) rules, so `--`, empty arguments and embedded quotes arrive as
-# acq.cmd received them. It returns $null for any other kind of launch, such as
-# `.\acq.ps1` typed at a PowerShell prompt: there PowerShell parsed the line
-# itself and $args is all there is.
+# Recognising that launch tells acq.ps1 two things: no PowerShell pipeline is
+# waiting for the output, and the arguments are exactly what acq.cmd received.
+# The first lets the Python branch start Python with an exact command line
+# (Invoke-AcqProcess) instead of PowerShell's call operator, which under
+# Windows PowerShell 5.1 drops empty arguments, leaves embedded double quotes
+# unescaped and mishandles a backslash run before a quote.
+# Get-AcqLauncherArgs takes the arguments from the process's argv, which .NET
+# splits from the raw command line with the Windows (MSVCRT) rules, rather than
+# from PowerShell's binding of $args. It returns $null for any other kind of
+# launch, such as `.\acq.ps1` typed at a PowerShell prompt: there PowerShell
+# parsed the line itself (and takes a bare `--` as its own end-of-parameters
+# marker), and $args is all there is.
 function Get-AcqLauncherArgs {
     param([Parameter(Mandatory = $true)][string]$Self)
 
@@ -285,6 +288,18 @@ function Convert-ToGitBashPath {
     return $fullPath.Replace('\', '/')
 }
 
+# True when the call operator passes native arguments the legacy way: Windows
+# PowerShell 5.1, PowerShell before 7.3, or $PSNativeCommandArgumentPassing set
+# to Legacy. That way drops an empty argument and leaves an embedded double
+# quote unescaped.
+function Test-AcqLegacyNativeArguments {
+    $version = $PSVersionTable.PSVersion
+    if ($version.Major -lt 7 -or ($version.Major -eq 7 -and $version.Minor -lt 3)) {
+        return $true
+    }
+    return ($PSNativeCommandArgumentPassing -eq 'Legacy')
+}
+
 function Convert-ArgumentForGitBash {
     param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Argument)
 
@@ -324,13 +339,24 @@ if ($env:LOCALAPPDATA -match '^([A-Za-z]:[\\/]|[\\/]{2}[^\\/])') {
 if ($validatorData -and (Test-Path -LiteralPath $validatorData -PathType Container)) {
     $env:ACQ_PROVIDER_INPUT_DATA_DIR = (Convert-ToGitBashPath -Path $validatorData)
 }
-# Started by acq.cmd, the recovered arguments keep the `--` that $args lost.
-# They still reach bash.exe through the call operator, so under Windows
-# PowerShell 5.1 an empty argument or an embedded quote is not preserved on this
-# branch.
+# The Bash branch reaches bash.exe through the call operator. Where that passes
+# arguments the legacy way, an empty argument vanishes and an embedded double
+# quote is not escaped, so bash would run a different command than the one
+# typed. Refuse such an argument (exit 2, as for any other unsupported input)
+# instead of running it changed; the Python branch, started through acq.cmd,
+# forwards it exactly.
 $sourceArgs = $args
 if ($null -ne $launcherArgs) {
     $sourceArgs = $launcherArgs
+}
+if (Test-AcqLegacyNativeArguments) {
+    foreach ($argument in $sourceArgs) {
+        $text = [string]$argument
+        if ($text.Length -eq 0 -or $text.Contains('"')) {
+            [Console]::Error.WriteLine("acq: the Bash implementation cannot be given an empty argument or one containing a double quote from PowerShell $($PSVersionTable.PSVersion): it would be dropped or changed on the way to bash.exe. Set ACQ_IMPL=python, which forwards arguments unchanged.")
+            exit 2
+        }
+    }
 }
 $convertedArgs = @($sourceArgs | ForEach-Object { Convert-ArgumentForGitBash -Argument $_ })
 

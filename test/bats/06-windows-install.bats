@@ -162,6 +162,21 @@ teardown() {
   assert_regex "$launcher" "\\\$argv\\[1\\] -cne '-NoLogo' -or \\\$argv\\[2\\] -cne '-NoProfile' -or \\\$argv\\[3\\] -cne '-File'"
 }
 
+# Windows PowerShell 5.1's call operator drops an empty argument and leaves an
+# embedded double quote unescaped, so the Bash branch (which still uses it)
+# must refuse such an argument with exit 2 rather than run a changed command.
+@test "windows launcher: the Bash branch refuses arguments legacy passing would change" {
+  launcher=$(cat "$REPO_ROOT/acq.ps1")
+  assert_regex "$launcher" 'function Test-AcqLegacyNativeArguments'
+  assert_regex "$launcher" '\$version\.Major -lt 7 -or \(\$version\.Major -eq 7 -and \$version\.Minor -lt 3\)'
+  assert_regex "$launcher" "\\\$text\\.Length -eq 0 -or \\\$text\\.Contains\\('\"'\\)"
+  assert_regex "$launcher" 'Set ACQ_IMPL=python, which forwards arguments unchanged'
+  # The refusal runs before the call operator starts bash.exe.
+  check_line=$(grep -n 'if (Test-AcqLegacyNativeArguments) {' "$REPO_ROOT/acq.ps1" | head -n 1 | cut -d: -f1)
+  bash_line=$(grep -n '^& \$bash --noprofile --norc' "$REPO_ROOT/acq.ps1" | head -n 1 | cut -d: -f1)
+  [ -n "$check_line" ] && [ -n "$bash_line" ] && [ "$check_line" -lt "$bash_line" ]
+}
+
 @test "windows installers: LOCALAPPDATA is used only when fully qualified" {
   installer=$(cat "$REPO_ROOT/install.ps1")
   launcher=$(cat "$REPO_ROOT/acq.ps1")

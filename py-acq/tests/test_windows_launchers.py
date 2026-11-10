@@ -7,6 +7,12 @@ tree beside a fake ``acq_py`` package (and a fake Bash ``acq``) that report the
 argv they received, then run them the ways users do: ``acq.cmd`` (which starts
 Windows PowerShell 5.1 with ``-File``) and ``acq.ps1`` under PowerShell.
 
+Windows PowerShell 5.1's call operator drops an empty argument and leaves an
+embedded double quote unescaped when it starts a native program. Through
+``acq.cmd`` the Python branch avoids it with an exact command line; the Bash
+branch still uses it, so it refuses such an argument instead of running a
+changed command.
+
 Windows only: they need cmd.exe and Windows PowerShell, so they run in the
 Windows CI job's pytest step.
 """
@@ -37,9 +43,10 @@ sys.exit(int(os.environ.get("ACQ_FAKE_EXIT", "0")))
 # The Bash branch runs `bash <dir>/acq ARGS`; print one bracketed line per arg.
 FAKE_BASH_ACQ = '#!/usr/bin/env bash\nfor a in "$@"; do printf \'[%s]\\n\' "$a"; done\n'
 
-# What a user would type after `acq`, including the pieces PowerShell's own
-# argument handling used to lose: the first bare `--`, an empty argument, an
-# embedded double quote and a trailing backslash inside a quoted argument.
+# What a user would type after `acq`, including the pieces Windows PowerShell
+# 5.1's call operator used to lose or change on the way to Python: an empty
+# argument, an embedded double quote and a trailing backslash inside a quoted
+# argument (a backslash run before the closing quote).
 ARGV = ["exec", "box", "--", "echo", "--json", "", "a b", 'say "hi"', "C:\\dir with space\\", "--"]
 
 
@@ -133,10 +140,29 @@ def test_acq_impl_is_compared_case_sensitively(launcher_tree: Path, tmp_path: Pa
     assert '"argv"' not in result.stdout and "[version]" not in result.stdout
 
 
-def test_acq_cmd_keeps_the_double_dash_on_the_bash_branch(launcher_tree: Path, tmp_path: Path) -> None:
+# Through acq.cmd the arguments come from the process argv, so both cases are
+# certain to reach the check; acq.ps1 started otherwise sees PowerShell's $args.
+@pytest.mark.parametrize(
+    ("via", "unsafe"),
+    [(_via_cmd, ""), (_via_cmd, 'say "hi"'), (_via_ps1, 'say "hi"')],
+    ids=["acq.cmd-empty", "acq.cmd-quote", "acq.ps1-quote"],
+)
+def test_bash_branch_refuses_an_argument_powershell_would_change(
+    launcher_tree: Path, tmp_path: Path, unsafe: str, via
+) -> None:
     if _git_bash() is None:
         pytest.skip("Git for Windows is not installed")
-    args = ["exec", "box", "--", "echo", "--json"]
+    result = _run(via(launcher_tree, ["exec", "box", "--", "echo", unsafe]), _env(None), tmp_path)
+    assert result.returncode == 2, (result.stdout, result.stderr)
+    assert "ACQ_IMPL=python" in result.stderr
+    assert "[exec]" not in result.stdout
+
+
+def test_bash_branch_forwards_plain_arguments(launcher_tree: Path, tmp_path: Path) -> None:
+    if _git_bash() is None:
+        pytest.skip("Git for Windows is not installed")
+    # A regression guard for the refusal above: ordinary arguments still pass.
+    args = ["exec", "box", "--", "echo", "--json", "a b"]
     result = _run(_via_cmd(launcher_tree, args), _env(None), tmp_path)
     assert result.returncode == 0, result.stderr
-    assert result.stdout.split() == [f"[{a}]" for a in args]
+    assert result.stdout.splitlines() == [f"[{a}]" for a in args]
