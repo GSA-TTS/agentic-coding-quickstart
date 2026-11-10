@@ -139,6 +139,41 @@ _kit_fetch_materialize() (
 )
 
 # ---------------------------------------------------------------------------
+# kit_ref_display REF
+# ---------------------------------------------------------------------------
+# Echo a kit ref safe for a terminal or CI log. Every message that names a ref
+# acq could not fetch or refused goes through this, on both backends, because
+# such a ref may carry a credential that kit_translate_fetch refuses but the
+# message would otherwise repeat. In the part before the '#' fragment:
+#   - a query string (?private_token=…) becomes ?***;
+#   - URL userinfo (scheme://user:token@host) becomes scheme://***@host,
+#     cutting at the last '@';
+#   - without a scheme, a first path segment shaped user:token@host becomes
+#     ***@host.
+# The fragment (#ref=…&dir=…) is kept so the message still names the kit. This
+# over-redacts when a path or host part legitimately contains '@' or ':',
+# which is harmless.
+kit_ref_display() {
+  local ref="${1:-}" base frag query="" first
+  base="${ref%%#*}"
+  frag="${ref#"$base"}"
+  case "$base" in
+    *\?*) base="${base%%\?*}"; query='?***' ;;
+  esac
+  case "$base" in
+    *://*@*) base="${base%%://*}://***@${base##*@}" ;;
+    *://*) ;;
+    *)
+      first="${base%%/*}"
+      case "$first" in
+        *:*@*) base="***@${first##*@}${base#"$first"}" ;;
+      esac
+      ;;
+  esac
+  printf '%s%s%s\n' "$base" "$query" "$frag"
+}
+
+# ---------------------------------------------------------------------------
 # kit_translate_fetch KITREF DESTDIR
 # ---------------------------------------------------------------------------
 # Materialize a kit's directory locally. KITREF is either:
@@ -268,7 +303,7 @@ EOM
     *)
       # Local path — use as-is.
       if [ ! -d "$kitref" ]; then
-        echo "kit-translate: local kit path not found: $kitref" >&2
+        echo "kit-translate: local kit path not found: $(kit_ref_display "$kitref")" >&2
         return 1
       fi
       printf '%s\n' "$kitref"

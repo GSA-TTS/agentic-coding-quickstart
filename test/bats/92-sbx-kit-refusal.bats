@@ -189,7 +189,7 @@ GIT
   [ "$rc" -ne 0 ]
   [ -z "$out" ]
   run cat "$STUBDIR/u.err"
-  assert_output --partial 'kit translator is not loaded; not applying'
+  assert_output --partial 'kit translator is not loaded; not applying the kit'
 }
 
 @test "sbx: mid-life apply of a kit whose fetch is refused never calls sbx" {
@@ -228,8 +228,41 @@ GIT
   assert_equal "$(acq_host_config_read sbx healbox extra-kits)" ''
 }
 
-@test "sbx: kit ref display redacts URL userinfo and leaves other refs alone" {
-  assert_equal "$(_acq_sbx_kit_ref_display 'git+https://u:p@h.example/r.git#ref=a&dir=b')" 'git+https://***@h.example/r.git#ref=a&dir=b'
-  assert_equal "$(_acq_sbx_kit_ref_display 'git+https://h.example/r.git#ref=a&dir=b@c')" 'git+https://h.example/r.git#ref=a&dir=b@c'
-  assert_equal "$(_acq_sbx_kit_ref_display '/kits/local@1')" '/kits/local@1'
+_NOGIT_REF='https://kituser:s3cr3t-tok@github.com/o/r.git#ref=0123456789abcdef0123456789abcdef01234567&dir=k'
+
+@test "sbx: a credential URL without the git+ prefix is refused and not printed" {
+  local out rc=0
+  out=$(ACQ_SBX_KIT_CACHE="$STUBDIR/cache" _acq_sbx_translate_kit "$_NOGIT_REF" 2>"$STUBDIR/g.err") || rc=$?
+  [ "$rc" -ne 0 ]
+  [ -z "$out" ]
+  run cat "$STUBDIR/g.err"
+  assert_output --partial 'local kit path not found: https://***@github.com/o/r.git#ref='
+  assert_output --partial 'could not fetch kit; not applying: https://***@github.com/o/r.git#ref='
+  refute_output --partial 's3cr3t-tok'
+  refute_output --partial 'kituser'
+}
+
+@test "sbx: apply and heal never print a credential from a ref without git+" {
+  local rc=0
+  : > "$CALLS"
+  ACQ_SBX_KIT_CACHE="$STUBDIR/cache" acq_backend_apply_kit applybox "$_NOGIT_REF" 2>"$STUBDIR/ga.err" || rc=$?
+  [ "$rc" -ne 0 ]
+  refute_regex "$(cat "$STUBDIR/ga.err")" 's3cr3t-tok|kituser'
+  ACQ_SBX_KIT_CACHE="$STUBDIR/cache" ACQ_EXTRA_KITS="$_NOGIT_REF" \
+    run acq_backend_ensure_kits_applied healbox
+  assert_output --partial 'local kit path not found: https://***@github.com/'
+  refute_output --partial 's3cr3t-tok'
+  refute_output --partial 'kituser'
+  refute_regex "$(cat "$CALLS")" 's3cr3t-tok|sbx kit add (applybox|healbox) https://'
+}
+
+@test "kit_ref_display redacts userinfo and query strings and leaves other refs alone" {
+  assert_equal "$(kit_ref_display 'git+https://u:p@h.example/r.git#ref=a&dir=b')" 'git+https://***@h.example/r.git#ref=a&dir=b'
+  assert_equal "$(kit_ref_display 'https://u:p@h.example/r.git#ref=a&dir=b')" 'https://***@h.example/r.git#ref=a&dir=b'
+  assert_equal "$(kit_ref_display 'git+https://h.example/r.git?private_token=tok#ref=a&dir=b')" 'git+https://h.example/r.git?***#ref=a&dir=b'
+  assert_equal "$(kit_ref_display 'https://h.example/r.git?token=a@b&x=1')" 'https://h.example/r.git?***'
+  assert_equal "$(kit_ref_display 'u:tok@h.example/o/r.git#ref=a')" '***@h.example/o/r.git#ref=a'
+  assert_equal "$(kit_ref_display 'git+https://h.example/r.git#ref=a&dir=b@c')" 'git+https://h.example/r.git#ref=a&dir=b@c'
+  assert_equal "$(kit_ref_display '/kits/local@1')" '/kits/local@1'
+  assert_equal "$(kit_ref_display './kits/a:b')" './kits/a:b'
 }

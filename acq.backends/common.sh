@@ -3066,7 +3066,7 @@ _acq_kit_source_ref_trusted() {
       done
     fi
   fi
-  echo "acq: provider_kit names an untrusted remote ref: $ref" >&2
+  echo "acq: provider_kit names an untrusted remote ref: $(kit_ref_display "$ref")" >&2
   if [ -n "$repo" ]; then
     echo "     Trust its source first: acq kit-source add $repo --ref <sha>" >&2
   else

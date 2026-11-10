@@ -377,20 +377,6 @@ _acq_sbx_warn_readonly_files() {
 # ---------------------------------------------------------------------------
 # Neutral-kit → sbx-v2 translation
 # ---------------------------------------------------------------------------
-# _acq_sbx_kit_ref_display REF: echo REF safe for a terminal or CI log. A URL
-# whose part before the fragment carries userinfo (user:token@host) has
-# everything up to the last '@' replaced with ***. kit-translate.sh refuses
-# such URLs, but the messages that name the refused ref must not repeat the
-# credential. Over-redacts when a path also contains '@', which is harmless.
-_acq_sbx_kit_ref_display() {
-  local ref="${1:-}" pre
-  pre="${ref%%#*}"
-  case "$pre" in
-    *://*@*) printf '%s://***@%s%s\n' "${pre%%://*}" "${pre##*@}" "${ref#"$pre"}" ;;
-    *) printf '%s\n' "$ref" ;;
-  esac
-}
-
 # Given a neutral kit ref (remote git+https or local dir), fetch it and
 # synthesize a local sbx-v2 kit directory. Echoes the local sbx-v2 kit dir. A
 # fetched kit that is already sbx-v2 (an extra kit authored for sbx) is used
@@ -407,9 +393,10 @@ _acq_sbx_translate_kit() {
     return 0
   fi
   # kit-translate.sh is sourced by common.sh, so this only fails in a broken
-  # install. Fail closed rather than let sbx fetch the kit unchecked.
+  # install. Fail closed rather than let sbx fetch the kit unchecked. The ref is
+  # not named: kit_ref_display, which redacts it, lives in that same file.
   if ! command -v kit_translate_fetch >/dev/null 2>&1; then
-    echo "acq(sbx): error: the kit translator is not loaded; not applying: $(_acq_sbx_kit_ref_display "$kitref")" >&2
+    echo "acq(sbx): error: the kit translator is not loaded; not applying the kit." >&2
     return 1
   fi
 
@@ -428,7 +415,7 @@ _acq_sbx_translate_kit() {
     # stops on any fetch failure. kit-translate.sh has printed the reason (and,
     # for a git failure, the credential-helper remedy). The offline harness
     # uses ACQ_SBX_KIT_PASSTHROUGH above instead.
-    echo "acq(sbx): error: could not fetch kit; not applying: $(_acq_sbx_kit_ref_display "$kitref")" >&2
+    echo "acq(sbx): error: could not fetch kit; not applying: $(kit_ref_display "$kitref")" >&2
     return 1
   }
 
@@ -442,17 +429,17 @@ _acq_sbx_translate_kit() {
       rm -rf "$out"
       kit_translate_to_sbx "$kitdir" "$out" >/dev/null || {
         # Fail closed: handing the raw ref to sbx would skip acq's payload checks.
-        echo "acq(sbx): error: kit translation failed; not applying: $kitref" >&2
+        echo "acq(sbx): error: kit translation failed; not applying: $(kit_ref_display "$kitref")" >&2
         return 1
       }
       _acq_sbx_warn_readonly_files "$kitdir"
       printf '%s\n' "$out"
       ;;
     *)
-      # Not a neutral kit — use the fetched dir (or the original ref) as-is,
-      # after the same payload check the neutral path applies.
+      # Not a neutral kit (an sbx-v2 kit authored for sbx): use the fetched dir
+      # as-is, after the same payload check the neutral path applies.
       if [ -d "$kitdir" ] && ! kit_tree_symlinks_within "$kitdir" "$kitdir"; then
-        echo "acq(sbx): error: kit payload links outside the kit; not applying: $kitref" >&2
+        echo "acq(sbx): error: kit payload links outside the kit; not applying: $(kit_ref_display "$kitref")" >&2
         return 1
       fi
       printf '%s\n' "$kitdir"
@@ -1553,7 +1540,7 @@ acq_backend_ensure_kits_applied() {
     if grep -Fxq -- "$k" <<<"$applied"; then
       continue
     fi
-    echo "acq: applying extra kit to '$name': $(_acq_sbx_kit_ref_display "$k")" >&2
+    echo "acq: applying extra kit to '$name': $(kit_ref_display "$k")" >&2
     _kadd_rc=0
     if local_extra=$(_acq_sbx_translate_kit "$k"); then
       _acq_sbx_kit_add "$name" "$local_extra" || _kadd_rc=$?

@@ -395,6 +395,16 @@ _fake_source_tree() {
   assert_output --partial 'acq kit-source add github.com/evil'
 }
 
+@test "provider_kit from config with a credential in the URL is refused without printing it" {
+  _acq_config_write_field provider_kit 'git+https://kituser:s3cr3t-tok@github.com/evil/kits.git#ref=abc123&dir=kits'
+
+  run acq_provider_kit_ref
+  assert_failure
+  assert_output --partial 'untrusted remote ref: git+https://***@github.com/evil/kits.git#ref=abc123&dir=kits'
+  refute_output --partial 's3cr3t-tok'
+  refute_output --partial 'kituser'
+}
+
 @test "a trusted remote ref from config is accepted" {
   run "$ACQ" kit-source add github.com/evil/kits --ref abc123
   assert_success
