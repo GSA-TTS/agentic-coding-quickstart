@@ -691,6 +691,13 @@ def _copy_local_tree(root: str, kit: Path, copy: _LocalCopy) -> None:
                             "check that the kit directory is readable and the kit cache writable, then retry") from exc
 
 
+def _has_crlf(path: Path) -> bool:
+    try:
+        return b"\r\n" in path.read_bytes()
+    except OSError:
+        return False  # load_kit reports a missing or unreadable spec
+
+
 def load(ref: str, backend: str) -> tuple[str, kitspec.KitSpec]:
     """Fetch ``ref`` (or copy it, for a local directory) and parse its kit: ``(kit name, spec)``.
 
@@ -703,6 +710,12 @@ def load(ref: str, backend: str) -> tuple[str, kitspec.KitSpec]:
     shown = _shown(ref)
     kind = "remote" if is_remote(ref) else "local"
     kit_dir = fetch(ref, backend) if kind == "remote" else copy_local(ref, backend)
+    if kind == "local" and _has_crlf(kit_dir / "spec.yaml"):
+        # The spec reader, like Bash's, reads a CR as part of each value, so the
+        # kit would be refused with a misleading reason. A Windows editor that
+        # saves CRLF is the usual cause.
+        raise KitFetchError(errors.VALIDATION_FAILED, f"local kit {shown} has a spec.yaml with CRLF line endings",
+                            "save spec.yaml with LF line endings, then retry")
     try:
         spec = kitspec.load_kit(kit_dir)
     except kitspec.KitSpecError as exc:

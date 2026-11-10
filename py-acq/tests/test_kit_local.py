@@ -38,7 +38,7 @@ files:
 def _kit(root: Path, spec: str = TEAM_SPEC) -> Path:
     kit = root / "team"
     (kit / "files").mkdir(parents=True)
-    (kit / "spec.yaml").write_text(spec, encoding="utf-8")
+    (kit / "spec.yaml").write_bytes(spec.encode("utf-8"))  # LF on every host
     (kit / "files" / "team.txt").write_text("first\n", encoding="utf-8")
     return kit
 
@@ -138,6 +138,12 @@ def test_an_oversized_tree_is_refused(tmp_path, monkeypatch):
     monkeypatch.setattr(kit_fetch, "_LOCAL_MAX_ENTRIES", 100)
     monkeypatch.setattr(kit_fetch, "_LOCAL_MAX_BYTES", 4)
     assert "MiB" in _refused(_kit(tmp_path / "big"))
+
+
+def test_a_crlf_spec_is_refused_with_its_real_reason(tmp_path):
+    kit = _kit(tmp_path, TEAM_SPEC.replace("\n", "\r\n"))
+    message = _refused(kit)
+    assert "CRLF line endings" in message and "hybrid/v1" not in message
 
 
 def test_a_missing_directory_is_refused(tmp_path):

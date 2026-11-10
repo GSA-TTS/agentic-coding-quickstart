@@ -3397,7 +3397,9 @@ kits outside the bundle at their pinned commit. Compared with the Bash acq:
   absolute link (even to a file of the same kit) is refused. On Windows a link
   or junction anywhere in a local kit is refused outright. A FIFO, socket or
   device file is refused, and so is a tree of more than 10000 entries or
-  256 MiB. A local kit's later changes reach a sandbox only through a heal or
+  256 MiB. A `spec.yaml` saved with CRLF line endings (a Windows editor's
+  default) is refused with that reason: the spec reader, like Bash's, would
+  read each value with a trailing CR. A local kit's later changes reach a sandbox only through a heal or
   recreate, which copies it again.
 
 ### Root Cause

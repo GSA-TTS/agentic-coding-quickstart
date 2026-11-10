@@ -645,10 +645,11 @@ def _pid_alive(pid: int) -> bool:
 
 
 @posix_only
-@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGHUP], ids=["sigterm", "sighup"])
-def test_a_signal_for_acq_alone_ends_the_session_child_before_acq_exits(fake, monkeypatch, sig):
+@pytest.mark.parametrize("name", ["SIGTERM", "SIGHUP"])
+def test_a_signal_for_acq_alone_ends_the_session_child_before_acq_exits(fake, monkeypatch, name):
     # kill <acq pid> during a session: acq passes the signal on, waits for the
     # child, then exits 128+N; the child no longer runs or holds the terminal.
+    sig = getattr(signal, name)
     monkeypatch.setenv("FAKE_MODE", "trap-term")
     _record("msb")
     proc = subprocess.Popen(_acq("--backend", "msb", "--json", "exec", "box", "--", "agent"),
