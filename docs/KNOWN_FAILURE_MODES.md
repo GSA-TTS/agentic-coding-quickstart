@@ -4618,7 +4618,8 @@ acq rm NAME
 acq run opencode /path/to/your/project
 ```
 
-The Python acq does not have this check yet.
+The Python acq has its own version of this check, which also runs on
+re-attach; see [§77](#77-python-acq-a-workspace-that-holds-acqs-own-directories-is-refused).
 
 ---
 
