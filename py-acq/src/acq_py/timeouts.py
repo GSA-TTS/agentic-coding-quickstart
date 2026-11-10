@@ -54,20 +54,37 @@ ROTATE_TIMEOUT_ENV = "ACQ_ROTATE_TIMEOUT"
 DEFAULT_ROTATE_TIMEOUT_S = 120.0
 
 
-def rotate_timeout_s() -> float:
-    """The per-call budget, in seconds, for a rotation's backend calls.
+def positive_seconds(name: str, default: float) -> float:
+    """Return ``$name`` as seconds for a subprocess timeout, or ``default``.
 
-    Unlike the other budgets, zero is invalid here: a subprocess timeout of 0
-    fails every call at once (it does not mean "no limit", as it does for
-    GNU ``timeout``). Zero, like any other invalid value, falls back to the
-    default with a warning on stderr.
+    Unlike :func:`env_seconds`, zero is invalid here: a subprocess timeout of 0
+    fails every call at once (it does not mean "no limit", as it does for GNU
+    ``timeout``). Zero, like any other invalid value, falls back to the default
+    with a warning on stderr.
     """
-    value = env_seconds(ROTATE_TIMEOUT_ENV, DEFAULT_ROTATE_TIMEOUT_S)
+    value = env_seconds(name, default)
     if value > 0:
         return value
     print(
-        f"acq: ignoring {ROTATE_TIMEOUT_ENV}={os.environ.get(ROTATE_TIMEOUT_ENV)!r}: expected a number of "
-        f"seconds > 0; using {DEFAULT_ROTATE_TIMEOUT_S:g}",
+        f"acq: ignoring {name}={os.environ.get(name)!r}: expected a number of seconds > 0; using {default:g}",
         file=sys.stderr,
     )
-    return DEFAULT_ROTATE_TIMEOUT_S
+    return default
+
+
+def rotate_timeout_s() -> float:
+    """The per-call budget, in seconds, for a rotation's backend calls."""
+    return positive_seconds(ROTATE_TIMEOUT_ENV, DEFAULT_ROTATE_TIMEOUT_S)
+
+
+# Listing the backend's sandboxes (``acq ls``, and every existence or running
+# check behind create, start, rm and the secret re-feeds) is bounded too: a
+# backend that hangs (one waiting on a lock or an interactive login) must make
+# the command fail with a clear message, not wait forever.
+LIST_TIMEOUT_ENV = "ACQ_LIST_TIMEOUT"
+DEFAULT_LIST_TIMEOUT_S = 60.0
+
+
+def list_timeout_s() -> float:
+    """The budget, in seconds, for one backend sandbox-listing call."""
+    return positive_seconds(LIST_TIMEOUT_ENV, DEFAULT_LIST_TIMEOUT_S)

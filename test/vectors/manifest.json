@@ -87,6 +87,10 @@
       "vectors": ["cli/ls-list-failure-msb", "cli/ls-list-failure-sbx"]
     },
     {
+      "contract": "Backend listing calls are bounded (ACQ_LIST_TIMEOUT, default 60 s): a listing that does not answer in time makes ls fail closed with the timeout code, never hang",
+      "vectors": ["cli/ls-list-timeout-msb"]
+    },
+    {
       "contract": "ADR-0041m forward migration of existing installs: the generation-2 step imports a sandbox the Bash acq created (provenance/<backend>/<name>.<cksum>.env) so it is listed and re-attachable instead of orphaned",
       "vectors": ["cli/migration-bash-provenance", "cli/migration-bash-selection-refused"]
     },

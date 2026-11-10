@@ -194,11 +194,34 @@ def capability_record(version: str | None = None) -> dict:
 # Lifecycle verbs.
 # ---------------------------------------------------------------------------
 
+def _list(argv: list[str], timeout: float | None) -> subprocess.CompletedProcess:
+    """Run one ``sbx ls`` call, always bounded.
+
+    With an explicit ``timeout`` a call that outlasts it raises
+    ``subprocess.TimeoutExpired`` for the caller to report. Without one it is
+    bounded by :func:`timeouts.list_timeout_s` and a call that outlasts that
+    raises :class:`SbxError` (``timeout``).
+    """
+    if timeout is not None:
+        return _run(argv, timeout=timeout)
+    budget = timeouts.list_timeout_s()
+    try:
+        return _run(argv, timeout=budget)
+    except subprocess.TimeoutExpired:
+        raise SbxError(
+            errors.TIMEOUT,
+            f"'sbx ls' did not answer within {budget:g}s",
+            f"check that sbx responds ('sbx ls'); set {timeouts.LIST_TIMEOUT_ENV} to a larger number of "
+            "seconds if it is only slow, then retry",
+        ) from None
+
+
 def list_names(*, timeout: float | None = None) -> list[str] | None:
     """Return sandbox names (one per line), or ``None`` if ``sbx ls -q`` failed.
 
-    With a ``timeout``, a call that outlasts it raises ``subprocess.TimeoutExpired``."""
-    proc = _run(["ls", "-q"], timeout=timeout)
+    The call is bounded (see :func:`_list`): an explicit ``timeout`` raises
+    ``subprocess.TimeoutExpired``."""
+    proc = _list(["ls", "-q"], timeout)
     if proc.returncode != 0:
         return None
     return [line for line in proc.stdout.splitlines() if line]
@@ -210,9 +233,10 @@ def running_names() -> list[str] | None:
     The real ``sbx ls`` has no ``--running`` flag (only ``--format``/``--json``/
     ``-q``), so running state is derived from ``sbx ls --json``, whose entries
     carry a ``status`` field. A wrong-shape or unparseable listing is ``None``
-    (the caller treats it as "cannot determine", never as "all stopped").
+    (the caller treats it as "cannot determine", never as "all stopped"). The
+    call is bounded (see :func:`_list`).
     """
-    proc = _run(["ls", "--json"])
+    proc = _list(["ls", "--json"], None)
     if proc.returncode != 0:
         return None
     try:

@@ -300,9 +300,33 @@ def cli_unavailable() -> MsbError:
     )
 
 
-def list_names() -> list[str] | None:
-    """Return sandbox names (one per line), or ``None`` if ``msb list`` failed."""
-    proc = _run(["list", "-q"])
+def _list(argv: list[str], timeout: float | None) -> subprocess.CompletedProcess:
+    """Run one ``msb list`` call, always bounded.
+
+    With an explicit ``timeout`` a call that outlasts it raises
+    ``subprocess.TimeoutExpired`` for the caller to report. Without one it is
+    bounded by :func:`timeouts.list_timeout_s` and a call that outlasts that
+    raises :class:`MsbError` (``timeout``).
+    """
+    if timeout is not None:
+        return _run(argv, timeout=timeout)
+    budget = timeouts.list_timeout_s()
+    try:
+        return _run(argv, timeout=budget)
+    except subprocess.TimeoutExpired:
+        raise MsbError(
+            errors.TIMEOUT,
+            f"'msb list' did not answer within {budget:g}s",
+            f"check that msb responds ('msb list'); set {timeouts.LIST_TIMEOUT_ENV} to a larger number of "
+            "seconds if it is only slow, then retry",
+        ) from None
+
+
+def list_names(*, timeout: float | None = None) -> list[str] | None:
+    """Return sandbox names (one per line), or ``None`` if ``msb list`` failed.
+
+    The call is bounded (see :func:`_list`)."""
+    proc = _list(["list", "-q"], timeout)
     if proc.returncode != 0:
         return None
     return [line for line in proc.stdout.splitlines() if line]
@@ -311,9 +335,10 @@ def list_names() -> list[str] | None:
 def running_names(*, timeout: float | None = None) -> list[str] | None:
     """Return running sandbox names, or ``None`` if ``msb list`` failed.
 
-    Raises ``subprocess.TimeoutExpired`` past ``timeout`` seconds.
+    The call is bounded (see :func:`_list`): an explicit ``timeout`` raises
+    ``subprocess.TimeoutExpired``.
     """
-    proc = _run(["list", "--running", "-q"], timeout=timeout)
+    proc = _list(["list", "--running", "-q"], timeout)
     if proc.returncode != 0:
         return None
     return [line for line in proc.stdout.splitlines() if line]
