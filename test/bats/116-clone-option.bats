@@ -129,21 +129,31 @@ _refute_backend_create() {
   _refute_backend_create
 }
 
-@test "clone(msb): a dirty working tree gets a notice but the create proceeds" {
+@test "clone(msb): a staged change gets a notice but the create proceeds" {
   echo two >> "$CLONEPROJ/file.txt"
+  git -C "$CLONEPROJ" add file.txt
   _msb_clone -- create shell --clone "$CLONEPROJ"
-  assert_output --partial 'uncommitted changes'
+  assert_output --partial 'staged or untracked changes that the clone leaves'
   assert_regex "$(cat "$CALLS")" 'msb create'
 }
 
-@test "clone(msb): the dirty-tree notice covers untracked-only changes ('git add' hint)" {
-  # An untracked file also makes `git status --porcelain` non-empty, and it too
-  # is invisible to the clone — but "commit first" alone is incomplete advice
-  # there (the file must be added first).
+@test "clone(msb): the left-out-changes notice covers untracked-only changes ('git add' hint)" {
+  # An untracked file is invisible to the clone too, but "commit first" alone
+  # is incomplete advice there (the file must be added first).
   echo new > "$CLONEPROJ/untracked.txt"
   _msb_clone -- create shell --clone "$CLONEPROJ"
-  assert_output --partial 'uncommitted changes'
+  assert_output --partial 'staged or untracked changes that the clone leaves'
   assert_output --partial 'git add'
+  assert_regex "$(cat "$CALLS")" 'msb create'
+}
+
+@test "clone(msb): an unstaged edit to a tracked file is not reported (that needs its content)" {
+  # Comparing the worktree with the index reads the file, through its filter
+  # driver; the check uses only plumbing that never does.
+  echo two >> "$CLONEPROJ/file.txt"
+  _msb_clone -- create shell --clone "$CLONEPROJ"
+  assert_success
+  refute_output --partial 'staged or untracked changes'
   assert_regex "$(cat "$CALLS")" 'msb create'
 }
 
@@ -774,14 +784,9 @@ _assert_layout_refused() { # SANDBOX
 }
 
 @test "clone(msb): a Git LFS workspace gets a notice to run 'git lfs pull' in the guest" {
-  # Dirty in both runs, so the uncommitted-changes note is printed each time;
-  # only the LFS run adds the may-appear-modified caveat to it.
-  echo new > "$CLONEPROJ/untracked.txt"
   _msb_clone -- create shell --name nolfs --clone "$CLONEPROJ"
   assert_success
-  assert_output --partial 'uncommitted changes'
   refute_output --partial 'git lfs pull'
-  refute_output --partial 'may appear modified'
   printf '*.bin filter=lfs diff=lfs merge=lfs -text\n' > "$CLONEPROJ/.gitattributes"
   git -C "$CLONEPROJ" add .gitattributes
   git -C "$CLONEPROJ" -c user.email=t@example.com -c user.name=t -c commit.gpgsign=false commit -q -m lfs
@@ -790,7 +795,6 @@ _assert_layout_refused() { # SANDBOX
   assert_output --partial 'Git LFS'
   assert_output --partial 'If git-lfs is available in the sandbox'
   assert_output --partial 'git lfs pull'
-  assert_output --partial 'LFS-tracked files may appear modified'
 }
 
 @test "clone(msb): a symlink anywhere inside .git (except hooks) is refused" {
@@ -1076,4 +1080,51 @@ _mk_other_repo() { # PATH
   assert_equal "$(cat "$other/.git/config")" "$before"
   run git -C "$CLONEPROJ" remote
   assert_output ''
+}
+
+@test "clone(msb): an inherited GIT_ALLOW_PROTOCOL does not re-enable transports" {
+  # git reads GIT_ALLOW_PROTOCOL before protocol.allow, so an exported value
+  # naming ext would let a wrapped call run the command an ext:: URL names.
+  run env GIT_ALLOW_PROTOCOL=ext ACQ_STATE_DIR="$STUBDIR/state" bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh" 2>/dev/null
+    _acq_msb_git_ws "$1" ls-remote "ext::touch $2"
+  ' _ "$CLONEPROJ" "$STUBDIR/ext-ran"
+  assert_failure
+  [ ! -e "$STUBDIR/ext-ran" ]
+}
+
+# _clone_source MARKER — define, in the workspace's own config, a clean filter
+# that touches MARKER, apply it to every file, and leave a tracked file
+# stat-dirty so a `git status` would have to clean it through that filter.
+_clone_source() { # MARKER
+  git -C "$CLONEPROJ" config filter.mark.clean "touch '$1'; cat"
+  git -C "$CLONEPROJ" config filter.mark.smudge cat
+  printf '* filter=mark\n' > "$CLONEPROJ/.git/info/attributes"
+  touch -t 200001010000 "$CLONEPROJ/file.txt"
+}
+
+@test "clone(msb): the left-out-changes check runs no filter, even one its blanking missed" {
+  # A sandbox sharing the checkout can add the filter to .git/config after acq
+  # listed the filter keys to blank. Model that by blanking nothing: the check
+  # must still run no filter, because it never reads a tracked file's content.
+  local marker="$STUBDIR/filter-ran"
+  _clone_source "$marker"
+  echo new > "$CLONEPROJ/untracked.txt"
+  run env ACQ_STATE_DIR="$STUBDIR/state" bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh" 2>/dev/null
+    _acq_msb_git_ws_filter_cfg() { _ACQ_MSB_WS_ENV=(); _ACQ_MSB_WS_CFG=(); return 0; }
+    _acq_msb_clone_preflight "$1"
+  ' _ "$CLONEPROJ"
+  assert_success
+  assert_output --partial 'staged or untracked changes that the clone leaves'
+  [ ! -e "$marker" ]
+}
+
+@test "clone(msb): a filter in the workspace config never runs during a clone create" {
+  local marker="$STUBDIR/filter-ran"
+  _clone_source "$marker"
+  _msb_clone -- create shell --clone "$CLONEPROJ"
+  assert_success
+  [ -d "$STUBDIR/state/clones/shell-cloneproj/cloneproj/.git" ]
+  [ ! -e "$marker" ]
 }

@@ -114,7 +114,10 @@ A git clone carries **committed state only**:
   that doc story is now identical on both backends.
 - **No uncommitted changes to tracked files.** sbx's copy-based clone carries a
   dirty working tree; the msb emulation does not. Create prints a notice when
-  the host tree is dirty: commit first, or `acq cp` the files in.
+  the workspace has staged changes or untracked files ("has staged or untracked
+  changes that the clone leaves out"): commit first, or `acq cp` the files in.
+  Unstaged edits to tracked files are left out too but not reported (amended
+  2026-11-10; see the host-side git section).
 
 Unlike the two divergences above, two pieces of `.git/config` state are carried
 on purpose, written repo-locally into the scratch:
@@ -173,11 +176,13 @@ hooks, and URL rewrites that ride along with a wholesale copy.
 
 In a non-clone run the workspace is mounted read-write, so its repository
 config, attributes and hooks are not trusted input when acq runs git on the
-host against it (status, clone, `remote add`/`remove`, config reads, the
-rm-time `cat-file`). Every such call goes through one wrapper that runs git
+host against it (the left-out-changes check, clone, `remote add`/`remove`,
+config reads, the rm-time `cat-file`). Every such call goes through one wrapper that runs git
 with `--no-pager` and disables fsmonitor, hooks, the untracked cache, every
 transport (so no lazy fetch from a promisor remote) and submodule recursion,
-and blanks every filter driver the config defines. Hooks are disabled by
+and blanks every filter driver the config defines. An inherited
+`GIT_ALLOW_PROTOCOL` is cleared for these calls, since git reads it before
+`protocol.allow` (amended 2026-11-10). Hooks are disabled by
 pointing `core.hooksPath` at a directory under acq's state dir that nothing
 creates, rather than `/dev/null`, which a native Windows git (Git Bash) does
 not treat as a null device. The filter settings travel as `GIT_CONFIG_COUNT`
@@ -245,9 +250,20 @@ part-way through.
 files land in the scratch as pointer files. When the workspace uses LFS
 (`filter=lfs` in its `.gitattributes` or `.git/info/attributes`, a `.git/lfs`
 directory, or `lfs.*` keys in its own config), create prints a notice
-suggesting `git lfs pull` inside the sandbox if git-lfs is available there,
-and the uncommitted-changes note adds that LFS-tracked files may appear
-modified (the host-side status runs with filters disabled too).
+suggesting `git lfs pull` inside the sandbox if git-lfs is available there.
+
+The left-out-changes note uses plumbing that never reads a tracked file's
+content: `git diff-index --cached --quiet HEAD` (staged changes) and `git
+ls-files -z --others --exclude-standard` (untracked files), through the same
+wrapper (amended 2026-11-10). It used to run `git status`, which cleans a
+stat-dirty file through its filter driver. The blanking above is computed from
+a config read made before each call, so a sandbox that mounts the same checkout
+read-write could add a clean filter to `.git/config` between that read and the
+status, and the filter would run on the host. `.git/info/attributes` applies
+even when `GIT_ATTR_SOURCE` is set, so the attributes cannot be pinned instead.
+The cost is that unstaged edits to tracked files are no longer reported, since
+finding them means comparing the worktree content with the index. The clone
+itself checks out into a new repository that has no filter configured.
 
 The clone uses `--no-local`, so only objects reachable from refs are copied;
 on a large repository that costs a full `pack-objects` pass at create, where a
