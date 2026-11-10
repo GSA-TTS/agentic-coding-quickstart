@@ -455,8 +455,9 @@ source) is fetched by `src/acq_py/kit_fetch.py`, a port of Bash
   anything but files, directories and links is refused, as is a tree of more
   than 10000 entries, 256 MiB or 64 levels of directories. On Windows each
   copied file's real path (`GetFinalPathNameByHandleW`) must lie under the kit.
-  A directory that does not exist is `validation_failed`. The copy is named by
-  its content.
+  A regular file with more than one hard link is refused, as in Bash (make a
+  plain copy of the kit, for example with `cp -R`). A directory that does not
+  exist is `validation_failed`. The copy is named by its content.
 * The commit is fetched into a bare repository and must be exactly the pinned
   one; the kit is checked out from that commit's tree with a private index, and
   no symlink in it may resolve outside the kit. Only a neutral `hybrid/v1` kit

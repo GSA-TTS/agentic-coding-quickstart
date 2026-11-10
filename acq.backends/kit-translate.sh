@@ -404,6 +404,21 @@ EOM
         echo "kit-translate: local kit path not found: $(kit_ref_display "$kitref")" >&2
         return 1
       fi
+      # A regular file with more than one hard link may be a file from
+      # elsewhere on the same file system that someone who can write to the
+      # kit directory linked in, so it is refused. Directories are exempt
+      # (find -type f): their link count is naturally above 1. Bash reads a
+      # local kit in place, so this is a check before use, not a guarantee: a
+      # link made after it runs is not seen (KNOWN_FAILURE_MODES section 55).
+      local _linked _rel
+      _linked=$(find "$kitref" -type f -links +1 -print 2>/dev/null | head -n 1) || true
+      if [ -n "$_linked" ]; then
+        _rel="${_linked#"${kitref%/}"/}"
+        _rel=$(printf '%s' "$_rel" | LC_ALL=C tr '[:cntrl:]' '?')
+        echo "kit-translate: local kit refused: ${_rel} has more than one hard link." >&2
+        echo "kit-translate:   Make a plain copy of the kit (for example: cp -R KIT KIT-copy) and use the copy." >&2
+        return 1
+      fi
       printf '%s\n' "$kitref"
       ;;
   esac

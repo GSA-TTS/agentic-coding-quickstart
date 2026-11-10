@@ -3404,11 +3404,22 @@ kits outside the bundle at their pinned commit. Compared with the Bash acq:
   the spec reader, like Bash's, would read each value with a trailing CR. A
   local kit's later changes reach a sandbox only through a heal or recreate,
   which copies it again.
-- Known limitation, shared with Bash: a payload file that is a hard link
-  (link count above 1) is copied like any other file. A hard link cannot point
-  across file systems or at a directory, but whoever can write to the kit
-  directory can hard-link a file they can read from elsewhere on the same file
-  system into it. Keep local kits in a directory only you can write.
+- A regular file with more than one hard link (link count above 1) anywhere in
+  a local kit is refused, by both the Python and the Bash acq, with the file's
+  path relative to the kit and the remedy: make a plain copy of the kit (for
+  example `cp -R KIT KIT-copy`, which gives each file one link) and use the
+  copy. A hard link cannot point across file systems or at a directory, but
+  whoever can write to the kit directory could hard-link a file they can read
+  from elsewhere on the same file system into it. Directories are exempt:
+  their link count is naturally above 1. The Python acq checks the link count
+  of each file it opens for the copy (`os.fstat`, which reports NTFS hard links
+  on Windows too), so the file checked is the file copied.
+- Bash limit: Bash reads a local kit in place, so its check (one
+  `find KIT -type f -links +1` in `kit_translate_fetch`, POSIX on Linux and
+  macOS) is a check before use, not a guarantee. A hard link created in the
+  kit after the check and before the backend reads the file is not seen.
+  Keep local kits in a directory only you can write, or use the Python acq,
+  which applies only its checked private copy.
 
 ### Root Cause
 
@@ -3446,8 +3457,10 @@ Tracked follow-ups:
   POSIX; `provider_input.publish` already writes Bash's Windows pointer file.
 - **Local kit directories.** Done: the Python acq copies a local kit into its
   private cache with the no-link checks (option 1 in section 61) and applies
-  the copy, on Windows checking each opened file's final path as well. Nothing
-  further is tracked here; the hard-link limitation above is Bash's too.
+  the copy, on Windows checking each opened file's final path as well. Both
+  acq implementations refuse a hard-linked file in a local kit; the Bash
+  check-then-use limit above is a known residual. Nothing further is tracked
+  here.
 - **The rc bridge.** Port `_acq_sbx_ensure_rc_bridge` with the msb login-shell
   work.
 - **Kit fetch on Windows.** The fetch itself has no POSIX-only step, but its

@@ -575,6 +575,15 @@ class _LocalCopy:
         info = os.fstat(src_fd)
         if not stat.S_ISREG(info.st_mode):
             raise self.refuse(f"{rel} is not a regular file")
+        if info.st_nlink > 1:
+            # A hard link may be a file from elsewhere on the same file system
+            # that someone who can write to the kit linked in. Checked on the
+            # opened file, so it is the file that would be copied (Windows
+            # reports NTFS hard links here too). Directories never reach this.
+            raise KitFetchError(errors.VALIDATION_FAILED,
+                                f"local kit {self.shown} was refused: {rel} has more than one hard link",
+                                "make a plain copy of the kit (for example 'cp -R KIT KIT-copy') and use the copy, "
+                                "then retry")
         digest = hashlib.sha256()
         out = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
         try:
