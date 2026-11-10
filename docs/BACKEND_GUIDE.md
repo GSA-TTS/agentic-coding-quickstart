@@ -882,8 +882,13 @@ route as a unix socket at `/home/agent/.acq/ssh-agent.sock` and exports it as
   runtime floor already excludes older msb versions.
 - **It widens the host↔microVM trust boundary:** guest code can exercise every
   key the host agent holds while the socket is reachable. It is **opt-in** via
-  `SSH_AUTH_SOCK` — **unset it to disable** — and only agent *operations* (not key
-  material) traverse the socket. Where your agent supports it, use `ssh-add -c` /
+  `SSH_AUTH_SOCK` — **unset it to disable**, which also disconnects an existing
+  sandbox at its next `acq start`, `acq restart` or `acq run` (acq removes its
+  route link and stops passing `SSH_AUTH_SOCK` to its sessions; set it again and
+  re-run to reconnect) — and only agent *operations* (not key material) traverse
+  the socket. acq refuses to forward a socket inside the sandbox's writable
+  workspace, warns when the socket belongs to another user, and removes a route
+  link whose target is no longer your own socket. Where your agent supports it, use `ssh-add -c` /
   `ssh-add -h` to constrain use. Because a set `SSH_AUTH_SOCK` is the *only*
   trigger, acq prints a **one-time startup notice** (on both backends) when the
   forward is active — naming the `unset SSH_AUTH_SOCK` opt-out and the `ssh-add -c`
@@ -892,6 +897,14 @@ route as a unix socket at `/home/agent/.acq/ssh-agent.sock` and exports it as
   `scripts/verify-backends`: the guest's forwarded agent exposes the verifier's
   hermetic throwaway key over the `--vsock` + socat path. It cannot run in CI or
   inside a sandbox (no nested sandboxes); re-run on the ADR-0011 cadence.
+- **Both implementations.** The Python acq (`py-acq/src/acq_py/ssh_agent.py`)
+  wires the same route, link, bridge, re-drive and teardown, with the same
+  warnings, so a sandbox either one created keeps its forward under the other
+  (both read the `ssh-auth-sock` host-config key and the same link). It has not
+  been run against a live msb yet, and it differs in two places: it never
+  forwards from a Windows host (`SSH_AUTH_SOCK` gets the "not a socket" skip), and
+  its "could not verify the route" warning leaves out msb's own error text. See
+  [KNOWN_FAILURE_MODES §93](KNOWN_FAILURE_MODES.md#93-python-acq-host-ssh-agent-forwarding-differences-and-live-checks).
 
 See [ADR-0021](adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md) for the full
 rationale, the fixed vsock port (3552), and the trust-boundary discussion.
@@ -983,6 +996,15 @@ rationale, the fixed vsock port (3552), and the trust-boundary discussion.
   to choose the host side yourself; a host port already in use **fails the
   create** rather than being substituted. See
   [ADR-0034](adr/0034-host-port-selection-and-publish-override.md).
+  The Python acq (`ACQ_IMPL=python`) does the same, with the same validation and
+  messages, and shares the post-hoc tunnel record (`ACQ_STATE_DIR/ports/NAME.pids`)
+  with the Bash acq, so either one lists and tears down the other's tunnels. It
+  differs in three ways: a repeated `acq ports NAME --publish` opens every
+  mapping, all or nothing, where Bash keeps only the last; it claims explicit
+  host ports before it chooses free ones; and `create --recreate` prefers the
+  old guest's host ports where a kit leaves the host side open. At teardown it
+  signals a recorded process only once it is confirmed to be an `msb` or `ssh`
+  process. See `py-acq/README.md`.
 - **No state-preserving in-place kit add.** `acq_backend_ensure_kits_applied`
   re-applies kits idempotently; for a clean rebuild use `acq rm && acq run`.
 - **Agent binaries come from templates, images, or agent kits.** `acq` no longer
@@ -1254,7 +1276,7 @@ list (an empty value selects none); otherwise `provider_kit:` in config.yaml
 the same way: a non-empty `ACQ_EXTRA_KITS` replaces config.yaml `extra_kits:`,
 and `--kit` refs are added after either (at a terminal, the Bash acq's
 create-time picker can still change the extras for one sandbox). The Python acq
-follows the same order and has no picker. A kit outside its pinned built-in
+follows the same order, picker included. A kit outside its pinned built-in
 bundle (every catalog extra kit, a provider kit from a registered source) it
 fetches at its pinned commit and verifies, and a local kit directory it copies
 into its private cache and checks there; it refuses a ref not pinned to a full
@@ -1367,6 +1389,8 @@ override with `ACQ_PROVENANCE_DIR`). It compares that against the **local**
   interactive, default No, EOF declines, and it **never blocks** a launch. A
   non-interactive run prints one advisory and continues.
 - Opt out with `ACQ_UPDATE_CHECK=0` or `acq run --no-update-check`.
+- The Python acq (`ACQ_IMPL=python`) makes the same offer with the same rules,
+  and never asks under `--json`.
 
 Backend behavior: **sbx** injects any absent built-in kits during the heal pass;
 **msb** re-applies all built-in kits idempotently. Both rewrite provenance only

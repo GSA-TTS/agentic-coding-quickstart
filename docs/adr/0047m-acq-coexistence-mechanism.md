@@ -95,10 +95,12 @@ That includes `configure`, `start`, `restart`, `backend set`/`unset`,
 `secret import` and `secret set --host/--env`. Some documented Bash flags are
 still missing, and the Python CLI rejects each one as a usage error:
 
-- `--clone` on `run`/`create`;
-- `--publish HOST:GUEST` on `run`/`create`;
-- `--no-update-check` on `run`;
-- `--publish HOST:GUEST` on `ports NAME`.
+- `--clone` on `run`/`create`.
+
+Update (2026-11-10): `--publish HOST:GUEST` on `run`/`create` and on
+`ports NAME` are implemented in the Python CLI (`py-acq/README.md`, "Published
+ports"), and so is `--no-update-check` on `run`, with the stale-sandbox check
+it turns off; they are no longer in this list.
 
 **Safety-relevant: `ACQ_CLONE` was silently ignored.** Bash treats `ACQ_CLONE=1`
 like `--clone`, so the agent works on a disposable clone of the workspace. The
@@ -113,8 +115,11 @@ The Python implementation also has behaviour gaps against Bash. It reads the
 only when the ref is pinned to a full commit (it fetches and verifies that
 commit), and refuses an unpinned ref at create (a local kit directory, once
 refused too, is now copied into acq's private cache and checked there). It has no kit
-heal on re-attach. It has no ssh-agent forwarding setup: it replays a
-Bash-recorded `ssh_auth_sock` but never sets forwarding up itself. Credential
+heal on re-attach. It now sets up host ssh-agent forwarding on msb as Bash
+does (the `--vsock` route, the in-guest bridge and its restarts, ADR-0021),
+reading and writing the same host-config key and route link, so a sandbox
+either implementation created keeps its forward; the differences and the live
+checks still owed are in `docs/KNOWN_FAILURE_MODES.md` §93. Credential
 rotation, configure settings and Bash-state import have open follow-ups. So
 ADR-0038m's "preserve every documented acq-owned command and meaningful flag"
 is not yet met. ADR-0048m gate 4 (command parity) is where parity is judged

@@ -112,6 +112,10 @@ PATH_OVERRIDES: tuple[tuple[str, str], ...] = (
     ("ACQ_MSB_KIT_CACHE", "the default"),
     ("ACQ_MSB_STARTUP_STAGE_DIR", "the default"),
     ("ACQ_MSB_BALANCED_HOSTS_FILE", "the default"),
+    ("ACQ_MSB_SSH_DIR", "the default"),
+    ("ACQ_MSB_SSH_KEY", "the default"),
+    ("ACQ_MSB_SSH_KNOWN_HOSTS", "the default"),
+    ("ACQ_MSB_PORTS_DIR", "the default"),
 )
 
 # Read only when ACQ_SECRET_STORE_DIR is unset: the store dir relocates them.

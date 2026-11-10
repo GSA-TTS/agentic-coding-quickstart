@@ -592,13 +592,18 @@ def test_msb_heal_uses_the_cached_kit_when_the_source_is_gone(kit_repo, monkeypa
 
 
 @pytest.mark.provider_key
-def test_msb_refuses_a_fetched_kit_with_published_ports(kit_repo, monkeypatch, tmp_path, capsys):
+def test_msb_publishes_a_fetched_kit_s_ports_on_a_free_host_port(kit_repo, monkeypatch, tmp_path, capsys):
     ws = _msb_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_MSB_HOST_PROBE_STUB", "1")
     seen = _spy(monkeypatch, msb)
-    rc, doc, _err = _invoke(capsys, "--backend", "msb", "create", "shell", str(ws), "--name", "fp",
-                            "--kit", kit_repo.ref("kits/ports"), "--json")
-    assert rc == 1 and doc["error"]["code"] == errors.UNSUPPORTED
-    assert not [a for a in seen if a[0] == "create"]
+    rc, doc, err = _invoke(capsys, "--backend", "msb", "create", "shell", str(ws), "--name", "fp",
+                           "--kit", kit_repo.ref("kits/ports"), "--json")
+    assert rc == 0, err
+    (create,) = [a for a in seen if a[0] == "create"]
+    (mapping,) = [create[i + 1] for i, a in enumerate(create) if a == "-p"]
+    host, guest = mapping.split(":")
+    assert guest == "8080" and host != "8080"
+    assert doc["data"]["ports"] == [{"host_port": int(host), "guest_port": 8080, "origin": "create"}]
 
 
 @pytest.mark.provider_key

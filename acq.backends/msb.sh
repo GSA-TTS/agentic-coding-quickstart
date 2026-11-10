@@ -4496,7 +4496,7 @@ EOF
   fi
 
   ACQ_MSB_GUEST_WORKSPACE=""
-  local _wi _wspec _wpath _wro _wsrc _whost _first_record _first_guest="" _first_host=""
+  local _wi _wspec _wpath _wro _wsrc _whost _first_record _first_guest="" _first_host="" _fwd_ws=""
   for _wi in ${_ws_recs[@]+"${!_ws_recs[@]}"}; do
     _wspec="${_ws_recs[$_wi]}"
     # Split an optional trailing ":ro" (read-only) marker from the path.
@@ -4545,6 +4545,14 @@ EOF
       _whost="$_wsrc"
     fi
     create_flags+=(--volume "${_whost}:${_wpath}${_wro}")
+    # Writable mounts, for the forwarded-socket check (ADR-0021): the guest path
+    # and, under --clone, the scratch source actually mounted.
+    if [ -z "$_wro" ]; then
+      _fwd_ws="${_fwd_ws}${_wpath}
+"
+      [ "$_wsrc" = "$_wpath" ] || _fwd_ws="${_fwd_ws}${_wsrc}
+"
+    fi
     acq_debug "msb volume: ${_whost} (host) -> ${_wpath}${_wro} (guest)"
   done
 
@@ -4581,9 +4589,10 @@ EOF
   # Host ssh-agent / socket forwarding (ADR-0021). Translate the neutral
   # host-socket forwards into msb `--vsock HOST:PORT/KIND` create flags. Gated on
   # msb >= 0.6.9; a lower version warns once and skips (forwarding is opt-in
-  # convenience, never a hard failure).
+  # convenience, never a hard failure). A socket inside a writable workspace
+  # mount is refused (_fwd_ws, collected in the mount loop above).
   local _vsock_flags=()
-  _acq_msb_vsock_flags_into _vsock_flags "$name"
+  _acq_msb_vsock_flags_into _vsock_flags "$name" "$_fwd_ws"
   [ "${#_vsock_flags[@]}" -gt 0 ] && create_flags+=("${_vsock_flags[@]}")
 
   # Preserve the existing trusted host-config mount used by read-only startup
@@ -5159,9 +5168,11 @@ _acq_msb_check_prereqs() {
 # re-pointed on every bridge (re)start, so the route survives a host reboot.
 # Custom ACQ_FORWARD_HOST_SOCKETS entries keep their canonical path. Without a
 # NAME, or when the link cannot be staged, the raw path is used as before.
+# WORKSPACES (optional, one path per line) are the writable workspace mounts: a
+# forward whose resolved socket lies inside one is refused.
 # See ADR-0021.
 _acq_msb_vsock_flags_into() {
-  local _arr="$1" _name="${2:-}" _line _path _port _kind _label _current
+  local _arr="$1" _name="${2:-}" _fwd_ws="${3:-}" _line _path _port _kind _label _current _ws
   # Collect the forwards first so the version gate only warns when one is asked.
   local _forwards=()
   while IFS= read -r _line; do
@@ -5186,6 +5197,10 @@ EOF
     _port=$(printf '%s' "$_f" | cut -f2)
     _kind=$(printf '%s' "$_f" | cut -f3)
     _label=$(printf '%s' "$_f" | cut -f4)
+    if _ws=$(_acq_msb_fwd_workspace_holding "$_path" "$_fwd_ws"); then
+      _acq_msb_fwd_refuse_inside "$_path" "$_label" "$_ws"
+      continue
+    fi
     if [ "$_label" = "ssh-agent" ] && [ -n "$_name" ]; then
       _path=$(_acq_msb_ssh_agent_route_path "$_name" "$_path")
     fi
@@ -5205,10 +5220,55 @@ EOF
         _ACQ_MSB_SSH_AGENT_NOTICE_SHOWN=1
         echo "acq(msb): forwarding your host ssh-agent into the guest because SSH_AUTH_SOCK" \
              "is set. Guest code can use every key the agent holds while the sandbox runs;" \
-             "unset SSH_AUTH_SOCK to opt out, or run 'ssh-add -c' to confirm each use. See ADR-0021." >&2
+             "unset SSH_AUTH_SOCK to opt out (an existing sandbox is disconnected at its next start or run)," \
+             "or run 'ssh-add -c' to confirm each use. See ADR-0021." >&2
       fi
     fi
   done
+}
+
+# _acq_msb_fwd_workspace_holding PATH WORKSPACES — print the workspace (one of
+# the newline-separated WORKSPACES) that the resolved PATH lies in, and return
+# 0; return 1 when it lies in none. Both sides are compared in their physical,
+# case-folded form (the workspace checks' helpers in common.sh). A forwarded
+# socket must not be a file the sandbox can create or replace through its
+# workspace mount.
+_acq_msb_fwd_workspace_holding() {
+  local _p="$1" _list="$2" _w _fp _fw
+  [ -n "$_list" ] || return 1
+  _acq_path_case_fold "$(_acq_path_physical "$_p")"; _fp="$_ACQ_PATH_FOLDED"
+  while IFS= read -r _w; do
+    [ -n "$_w" ] || continue
+    _acq_path_case_fold "$(_acq_path_physical "$_w")"; _fw="$_ACQ_PATH_FOLDED"
+    if _acq_path_within "$_fp" "$_fw"; then
+      printf '%s\n' "$_w"
+      return 0
+    fi
+  done <<EOF
+$_list
+EOF
+  return 1
+}
+
+# _acq_msb_fwd_refuse_inside PATH LABEL WORKSPACE — refuse a forwarded socket
+# inside a writable workspace, naming where it came from.
+_acq_msb_fwd_refuse_inside() {
+  local _src="ACQ_FORWARD_HOST_SOCKETS"
+  [ "$2" = "ssh-agent" ] && _src="SSH_AUTH_SOCK"
+  echo "acq(msb): refusing to forward the socket '$1' ($_src): it is inside the workspace '$3'," \
+       "which the sandbox can write." >&2
+}
+
+# _acq_msb_recorded_workspace NAME — the sandbox's recorded host workspace (the
+# one the refresh checks a forwarded socket against), or nothing.
+_acq_msb_recorded_workspace() {
+  local _w
+  _w=$(acq_workspace_record_read msb "$1" 2>/dev/null | tr -d '\r\n')
+  [ -n "$_w" ] || return 0
+  if command -v canonicalize_path >/dev/null 2>&1; then
+    _w=$(canonicalize_path "$_w")
+  fi
+  printf '%s\n' "$_w"
 }
 
 # _acq_msb_ssh_agent_route_path NAME AGENT_PATH — echo the host path to emit as
@@ -5267,7 +5327,7 @@ _acq_msb_ssh_agent_link_point() {
   [ -S "$target" ] || return 1
   if [ -e "$link" ] && [ ! -L "$link" ]; then return 1; fi
   if [ -L "$link" ] && [ "$(readlink "$link")" = "$target" ]; then return 0; fi
-  mkdir -p "$(dirname "$link")" 2>/dev/null || return 1
+  _acq_msb_ssh_agent_link_dir_ok "$(dirname "$link")" || return 1
   # A link that currently resolves to a directory would make `mv` descend into
   # it; drop it first (pathological, never produced by acq).
   [ -L "$link" ] && [ -d "$link" ] && rm -f "$link"
@@ -5282,39 +5342,131 @@ _acq_msb_ssh_agent_link_point() {
   return 1
 }
 
-# _acq_msb_ssh_agent_link_refresh NAME — re-point sandbox NAME's managed route
-# link at the CURRENT host SSH_AUTH_SOCK, if both exist. Runs before every
-# bridge (re)start (provision, acq_backend_start, running re-attach), which is
-# what heals the route after a host reboot. Deliberately a no-op when:
-#   - the sandbox has no managed link (created before this mechanism; its route
-#     is the raw path and only a recreate can change it), or
-#   - SSH_AUTH_SOCK is unset or not a socket (the link is left as is; the
-#     liveness probe will still warn if the agent is unreachable).
+# _acq_msb_ssh_agent_link_dir_ok DIR — create the link directory DIR as 0700, or
+# accept it only as this user's own real directory (checked without following a
+# symlink at DIR). Returns non-zero when DIR cannot be used.
+_acq_msb_ssh_agent_link_dir_ok() {
+  local dir="$1"
+  mkdir -p "$(dirname "$dir")" 2>/dev/null || return 1
+  if [ ! -e "$dir" ] && [ ! -L "$dir" ]; then
+    mkdir -m 700 "$dir" 2>/dev/null || [ -d "$dir" ] || return 1
+  fi
+  [ -d "$dir" ] && [ ! -L "$dir" ] && [ -O "$dir" ] || return 1
+  chmod 700 "$dir" 2>/dev/null || return 1
+  return 0
+}
+
+# _acq_msb_ssh_agent_link_refresh NAME [RELINK] — re-point sandbox NAME's managed
+# route link at the CURRENT host SSH_AUTH_SOCK. Runs before every bridge
+# (re)start (provision, acq_backend_start, running re-attach), which is what
+# heals the route after a host reboot. A no-op when the sandbox has no managed
+# link (created before this mechanism; its route is the raw path and only a
+# recreate can change it), unless RELINK=1 says its route names the link, which
+# is then made again.
+# When the link cannot be re-pointed (SSH_AUTH_SOCK not a socket, a socket
+# inside the recorded workspace, a link that cannot be replaced), check the
+# link's current target: unless it is itself (lstat) a socket owned by this
+# user outside the workspace, remove the link and set
+# _ACQ_MSB_SSH_AGENT_LINK_REMOVED=1, so the caller starts no bridge.
 # Records why the link was left alone, remedy included, in
 # _ACQ_MSB_SSH_AGENT_LINK_SKIPPED (empty when it now points at the live agent) so
 # the unreachable warning tells the truth about what was and was not re-pointed.
 # Never fails the caller.
 _ACQ_MSB_SSH_AGENT_LINK_SKIPPED=""
+_ACQ_MSB_SSH_AGENT_LINK_REMOVED=0
 _acq_msb_ssh_agent_link_refresh() {
-  local name="$1" link target
+  local name="$1" relink="${2:-0}" link target ws="" _cur
   _ACQ_MSB_SSH_AGENT_LINK_SKIPPED=""
+  _ACQ_MSB_SSH_AGENT_LINK_REMOVED=0
   link=$(_acq_msb_ssh_agent_link_path "$name") || return 0
-  [ -L "$link" ] || return 0
+  [ -L "$link" ] || [ "$relink" = "1" ] || return 0
+  local _wslist
+  _wslist=$(_acq_msb_recorded_workspace "$name")
   target="${SSH_AUTH_SOCK:-}"
   if [ -z "$target" ] || [ ! -S "$target" ]; then
     _ACQ_MSB_SSH_AGENT_LINK_SKIPPED="SSH_AUTH_SOCK is unset or not a socket in this shell. Re-run 'acq start $name' or 'acq run $name' from a shell where SSH_AUTH_SOCK names your live agent (e.g. after 'eval \"\$(ssh-agent -s)\"; ssh-add')."
+  else
+    if command -v canonicalize_path >/dev/null 2>&1; then
+      target=$(canonicalize_path "$target")
+    fi
+    if ws=$(_acq_msb_fwd_workspace_holding "$target" "$_wslist"); then
+      _acq_msb_fwd_refuse_inside "$target" ssh-agent "$ws"
+      _ACQ_MSB_SSH_AGENT_LINK_SKIPPED="SSH_AUTH_SOCK names a socket inside the workspace '$ws'. Re-run 'acq start $name' or 'acq run $name' from a shell whose SSH_AUTH_SOCK is outside it."
+    elif _acq_msb_ssh_agent_link_point "$link" "$target"; then
+      acq_debug "msb: ssh-agent route link for $name -> $target"
+      # The same owner check create makes: warn, never refuse.
+      [ -O "$target" ] || printf 'acq: warning: SSH_AUTH_SOCK names a socket owned by another user; forwarding it anyway\n' >&2
+      return 0
+    else
+      _ACQ_MSB_SSH_AGENT_LINK_SKIPPED="the link could not be replaced. Fix or remove '$link' (is its directory writable, and is it still a symlink?), then re-run 'acq start $name' or 'acq run $name'."
+      echo "acq(msb): warning: could not re-point the ssh-agent route link '$link' at" \
+           "'$target'; the forwarded agent may be unreachable in '$name'." >&2
+    fi
+  fi
+  if [ -L "$link" ] && ! _acq_msb_ssh_agent_link_target_ok "$link" "$_wslist"; then
+    _cur=$(readlink "$link" 2>/dev/null)
+    rm -f "$link" 2>/dev/null
+    _ACQ_MSB_SSH_AGENT_LINK_REMOVED=1
+    echo "acq(msb): removed the ssh-agent route link '$link' and did not start the bridge in '$name':" \
+         "its target '$_cur' is not a socket owned by you outside the workspace." >&2
+  fi
+  return 0
+}
+
+# _acq_msb_ssh_agent_link_target_ok LINK WORKSPACES — 0 iff LINK's current target
+# is itself (not through another symlink) a socket owned by the effective user
+# and lies outside the newline-separated WORKSPACES.
+_acq_msb_ssh_agent_link_target_ok() {
+  local link="$1" t
+  t=$(readlink "$link" 2>/dev/null) || return 1
+  [ -n "$t" ] || return 1
+  case "$t" in /*) ;; *) t="$(dirname "$link")/$t" ;; esac
+  [ -S "$t" ] && [ ! -L "$t" ] && [ -O "$t" ] || return 1
+  # Its directory must be this user's own real directory too, so nobody else
+  # can swap the socket for another between checks.
+  local d
+  d=$(dirname "$t")
+  [ -d "$d" ] && [ ! -L "$d" ] && [ -O "$d" ] || return 1
+  ! _acq_msb_fwd_workspace_holding "$t" "$2" >/dev/null
+}
+
+# _acq_msb_ssh_agent_opt_out NAME — SSH_AUTH_SOCK is unset in this shell:
+# disconnect the forward (ADR-0021 opt-out). The managed link goes, so the route
+# reaches nothing; the recorded guest socket goes, so no session gets
+# SSH_AUTH_SOCK; no bridge is started. Setting SSH_AUTH_SOCK and re-running
+# `acq start` or `acq run` reconnects. Never fails the caller.
+# A sandbox whose route names the raw agent socket (no managed link: an older
+# sandbox, a link path too long for a socket address, or a link directory that
+# failed its check) cannot be disconnected this way: the route still reaches
+# that socket, and guest code can dial it over vsock itself. That is said
+# plainly, with the remedy (remove and recreate the sandbox).
+_acq_msb_ssh_agent_opt_out() {
+  local name="$1" link _had_link=0 _had_key=0
+  _ACQ_MSB_SSH_AGENT_FORWARDING=0
+  if link=$(_acq_msb_ssh_agent_link_path "$name") && [ -L "$link" ]; then
+    rm -f "$link" 2>/dev/null
+    _had_link=1
+  fi
+  if [ -n "$(_acq_msb_ssh_auth_sock_for "$name")" ]; then
+    acq_host_config_clear msb "$name" ssh-auth-sock
+    _had_key=1
+  fi
+  [ "$_had_link" = "1" ] || [ "$_had_key" = "1" ] || return 0
+  if [ "$_had_link" = "0" ]; then
+    # No link here: ask msb whether the route names the managed link at all.
+    _ACQ_MSB_ROUTE_FLAT=""
+    _acq_msb_has_ssh_agent_vsock_route "$name" >/dev/null 2>&1 || true
+    _acq_msb_route_names_link "$name" && _had_link=1
+  fi
+  if [ "$_had_link" = "1" ]; then
+    echo "acq(msb): SSH_AUTH_SOCK is unset, so the forwarded ssh-agent was disconnected from '$name';" \
+         "set it and re-run 'acq start $name' or 'acq run $name' to reconnect." >&2
     return 0
   fi
-  if command -v canonicalize_path >/dev/null 2>&1; then
-    target=$(canonicalize_path "$target")
-  fi
-  if _acq_msb_ssh_agent_link_point "$link" "$target"; then
-    acq_debug "msb: ssh-agent route link for $name -> $target"
-  else
-    _ACQ_MSB_SSH_AGENT_LINK_SKIPPED="the link could not be replaced. Fix or remove '$link' (is its directory writable, and is it still a symlink?), then re-run 'acq start $name' or 'acq run $name'."
-    echo "acq(msb): warning: could not re-point the ssh-agent route link '$link' at" \
-         "'$target'; the forwarded agent may be unreachable in '$name'." >&2
-  fi
+  echo "acq(msb): SSH_AUTH_SOCK is unset, so sessions in '$name' no longer get SSH_AUTH_SOCK, but this" \
+       "sandbox's --vsock route names the raw agent socket path, not acq's managed link, so the guest" \
+       "can still reach that agent while the sandbox exists. Remove it with 'acq rm $name' and create" \
+       "it again to disconnect it." >&2
   return 0
 }
 
@@ -5359,12 +5511,19 @@ _acq_msb_check_socat() {
 # acq_backend_start. Fail-soft: warns, never aborts. Works from EITHER the
 # in-provision flag OR the persisted host key (start
 # has no provision flag set), so the guest sock path is resolved from whichever
-# source is authoritative for the call. See ADR-0021.
+# source is authoritative for the call. With SSH_AUTH_SOCK unset on that path
+# the forward is disconnected instead (_acq_msb_ssh_agent_opt_out). RELINK=1
+# lets the refresh make a removed managed link again (the route names it).
+# See ADR-0021.
 _acq_msb_start_ssh_agent_bridge() {
-  local name="$1" _sock="" _port="$ACQ_MSB_SSH_AGENT_VSOCK_PORT"
+  local name="$1" _relink="${2:-0}" _sock="" _port="$ACQ_MSB_SSH_AGENT_VSOCK_PORT"
   if [ "${_ACQ_MSB_SSH_AGENT_FORWARDING:-0}" = "1" ]; then
     _sock="$ACQ_MSB_SSH_AGENT_GUEST_SOCK"
   else
+    if [ -z "${SSH_AUTH_SOCK:-}" ]; then
+      _acq_msb_ssh_agent_opt_out "$name"
+      return 0
+    fi
     # No provision ran this path (e.g. acq_backend_start): read the persisted
     # key recorded at provision. Empty key => forwarding not configured.
     _sock=$(_acq_msb_ssh_auth_sock_for "$name")
@@ -5373,7 +5532,10 @@ _acq_msb_start_ssh_agent_bridge() {
 
   # Heal the HOST end of the route first (re-point the managed link at the
   # current agent socket); no-op for a raw-path route. See ADR-0021 amendment.
-  _acq_msb_ssh_agent_link_refresh "$name"
+  # A link the refresh removed (its target is not this user's socket) means
+  # there is nothing safe to bridge to.
+  _acq_msb_ssh_agent_link_refresh "$name" "$_relink"
+  [ "$_ACQ_MSB_SSH_AGENT_LINK_REMOVED" = "1" ] && return 0
 
   # The guest sock path and port are acq's own constants (word-safe charset), so
   # there is no injection risk; still keep them as fixed literals in the sh -c.
@@ -5624,7 +5786,13 @@ _acq_msb_kit_env_flags_into() {
 # the provision sequence. Fail-soft throughout: this is convenience, never fatal.
 _acq_msb_ensure_ssh_agent_forward() {
   local name="$1"
-  # Cheap opt-out: no host forward requested => nothing to do. Reuse the neutral
+  # SSH_AUTH_SOCK unset in this shell is the opt-out: disconnect the forward
+  # (remove the link and the recorded guest socket) rather than leave it wired.
+  if [ -z "${SSH_AUTH_SOCK:-}" ]; then
+    _acq_msb_ssh_agent_opt_out "$name"
+    return 0
+  fi
+  # Cheap no-op: no host forward requested => nothing to do. Reuse the neutral
   # emitter's decision so this tracks the SSH_AUTH_SOCK opt-in exactly (a set,
   # existing host socket on a supported port). Suppress the emitter's advisory
   # stderr here; provision/attach already surface the trust-boundary notice.
@@ -5670,7 +5838,9 @@ _acq_msb_ensure_ssh_agent_forward() {
   # does. Set the module flag so _acq_msb_check_socat / the bridge starter both
   # resolve from the constant. It is process-scoped and already reset per run.
   _ACQ_MSB_SSH_AGENT_FORWARDING=1
-  _acq_msb_check_socat "$name" && _acq_msb_start_ssh_agent_bridge "$name"
+  local _relink=0
+  _acq_msb_route_names_link "$name" && _relink=1
+  _acq_msb_check_socat "$name" && _acq_msb_start_ssh_agent_bridge "$name" "$_relink"
 }
 
 # _acq_msb_has_ssh_agent_vsock_route NAME — return 0 iff the sandbox's persisted
@@ -5709,10 +5879,24 @@ _acq_msb_has_ssh_agent_vsock_route() {
   # grep reads a here-string, not a pipe: under pipefail, `grep -q` exiting on an
   # early match SIGPIPEs a writer still emitting a large document, which reads as
   # a false "no route".
+  # The port token is anchored at the start of a flattened field, so a
+  # guest_port/host_port field never matches. The flattened document stays in
+  # _ACQ_MSB_ROUTE_FLAT for _acq_msb_route_names_link.
   local _flat
   _flat=$(printf '%s' "$json" | tr -d '" ' | tr ',{}[]' '\n\n\n\n\n')
+  _ACQ_MSB_ROUTE_FLAT="$_flat"
   grep -Eq '(^|:)vsock:?$' <<<"$_flat" 2>/dev/null || return 1
-  grep -Eq "port[:=]${_port}\$" <<<"$_flat" 2>/dev/null
+  grep -Eq "^port[:=]${_port}\$" <<<"$_flat" 2>/dev/null
+}
+
+# _acq_msb_route_names_link NAME — 0 iff the route probe's last document names
+# sandbox NAME's managed link as the route's host socket, so a link the opt-out
+# removed may be made again.
+_ACQ_MSB_ROUTE_FLAT=""
+_acq_msb_route_names_link() {
+  local link
+  link=$(_acq_msb_ssh_agent_link_path "$1") || return 1
+  grep -Fxq "host_socket:${link// /}" <<<"$_ACQ_MSB_ROUTE_FLAT" 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------
