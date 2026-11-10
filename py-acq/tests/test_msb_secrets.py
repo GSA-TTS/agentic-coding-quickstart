@@ -817,8 +817,8 @@ def test_scoped_provider_set_notes_a_sandbox_whose_selection_leaves_it_out(monke
     _record_selection("a", "")
     out, err = _set(capsys, monkeypatch, "a", "usai")
     assert _verb_calls(children, "modify") == []
-    assert ("acq: note: 'usai' is stored for sandbox 'a', but it will not reach that sandbox until its "
-            "provider selection includes the provider") in err
+    assert ("acq: note: 'usai' is stored for sandbox 'a', but it will not reach that sandbox: its "
+            "provider selection excludes the provider (recreate it to change the selection)") in err
     assert secretstore.resolve("usai", "a") == VALUE
     _assert_value_absent(VALUE, children, out, err)
     # A global change says nothing: most sandboxes are simply not meant to get it.

@@ -1627,7 +1627,7 @@ def _refeed(service: str, scope: Scope) -> None:
                 if not scope.is_global:
                     print(
                         f"acq: note: '{service}' is stored for sandbox '{sandbox}', but it will not reach that "
-                        "sandbox until its provider selection includes the provider",
+                        "sandbox: its provider selection excludes the provider (recreate it to change the selection)",
                         file=sys.stderr,
                     )
                 continue
