@@ -1,7 +1,9 @@
 [build-system]
-# 77 is the first setuptools with PEP 639 metadata: an SPDX `license` expression
-# and `license-files` under [project].
-requires = ["setuptools>=77"]
+# An exact pin, as for every other dependency (AGENTS.md: exact versions only).
+# The release must be 77 or later, the first setuptools with PEP 639 metadata:
+# an SPDX `license` expression and `license-files` under [project]. CI builds the
+# wheel with this exact release, hash-locked in requirements-build.txt.
+requires = ["setuptools==80.9.0"]
 build-backend = "setuptools.build_meta"
 
 [project]

@@ -16,6 +16,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -35,6 +36,9 @@ def _run_acq(env_extra: dict[str, str], *args: str) -> subprocess.CompletedProce
     env = dict(os.environ)
     for name in ("ACQ_IMPL", "ACQ_RUNTIME"):
         env.pop(name, None)
+    # The Python `version` reports the active backend's detected version; with
+    # both backends absent it never runs a real msb or sbx from the host's PATH.
+    env.update(ACQ_SBX_INSTALLED="0", ACQ_MSB_INSTALLED="0")
     env.update(env_extra)
     return subprocess.run(
         ["bash", str(ACQ), *args],
@@ -188,6 +192,47 @@ def test_dispatcher_fallback_refuses_an_old_interpreter(tmp_path):
                    {"ACQ_IMPL": "python", "ACQ_RUNTIME": str(fake)})
     assert proc.returncode == 1
     assert "3.12" in proc.stderr
+
+
+def _planted_relative_runtime(tmp_path: Path) -> tuple[Path, Path]:
+    # A workspace holding an executable "interpreter" that records being run,
+    # named by a relative ACQ_RUNTIME.
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    marker = tmp_path / "planted-runtime-ran"
+    planted = ws / "python-planted"
+    planted.write_text(f"#!/bin/sh\n: > {str(marker)!r}\nexit 0\n")
+    planted.chmod(0o755)
+    return ws, marker
+
+
+@pytest.mark.parametrize("runtime", ["python-planted", "./python-planted"])
+def test_launchers_refuse_a_relative_acq_runtime(tmp_path, runtime):
+    # As acq.ps1 refuses one on Windows: a relative ACQ_RUNTIME resolves against
+    # the current directory (the workspace), so it is refused before anything runs.
+    ws, marker = _planted_relative_runtime(tmp_path)
+    root = tmp_path / "install"
+    root.mkdir()
+    shutil.copy2(ACQ, root / "acq")
+    shutil.copytree(REPO_ROOT / "acq.backends", root / "acq.backends")
+    for argv, extra, prefix in (
+        (["bash", str(REPO_ROOT / "acq-python"), "version"], {}, "acq-python:"),
+        # Through the launcher beside acq, and through acq's own fallback.
+        (["bash", str(ACQ), "version"], {"ACQ_IMPL": "python"}, "acq-python:"),
+        (["bash", str(root / "acq"), "version"], {"ACQ_IMPL": "python"}, "acq:"),
+    ):
+        proc = _launch(argv, ws, {"ACQ_RUNTIME": runtime, **extra})
+        assert proc.returncode == 1, (argv, proc.stdout, proc.stderr)
+        assert f"{prefix} ACQ_RUNTIME must be an absolute path to a Python interpreter, got '{runtime}'" in proc.stderr
+        assert not marker.exists(), f"a relative ACQ_RUNTIME ran: {argv}"
+
+
+def test_launchers_still_accept_an_absolute_acq_runtime(tmp_path):
+    ws, marker = _planted_relative_runtime(tmp_path)
+    proc = _launch(["bash", str(REPO_ROOT / "acq-python"), "version", "--json"], ws,
+                   {"ACQ_RUNTIME": str(Path(sys.executable).resolve())})
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["data"]["impl"] == "python"
 
 
 def test_bash_helpers_run_python_isolated_from_the_workspace(tmp_path):

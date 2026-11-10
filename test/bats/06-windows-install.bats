@@ -225,7 +225,17 @@ teardown() {
 # -InstallDir that is not fully qualified, before -DryRun or any write.
 @test "windows installer: a relative -InstallDir is refused before anything runs" {
   installer=$(cat "$REPO_ROOT/install.ps1")
-  assert_regex "$installer" 'if \(\$InstallDir -and -not \(Test-AbsolutePath \$InstallDir\)\)'
+  # Bound at all, not merely non-empty: -InstallDir '' is refused too. Under
+  # `irm ... | iex` $PSBoundParameters can be $null, so it is checked first.
+  local bound_rule unc_rule
+  bound_rule='$installDirGiven = ($null -ne $PSBoundParameters -and $PSBoundParameters.ContainsKey('\''InstallDir'\'')) -or $InstallDir'
+  grep -qF -- "$bound_rule" "$REPO_ROOT/install.ps1"
+  grep -qF -- 'if ($installDirGiven -and -not (Test-AbsolutePath $InstallDir))' "$REPO_ROOT/install.ps1"
+  # No unguarded use of $PSBoundParameters.
+  [ "$(grep -c 'PSBoundParameters\.ContainsKey' "$REPO_ROOT/install.ps1")" = 1 ]
+  # A UNC path needs a share after the server.
+  unc_rule='($Path -match '\''^[\\/]{2}[^\\/]+[\\/][^\\/]'\'')'
+  grep -qF -- "$unc_rule" "$REPO_ROOT/install.ps1"
   assert_regex "$installer" '-InstallDir must be an absolute path, got .\$\(Format-Shown \$InstallDir\).'
   # The check sits before the -DryRun branch, so a dry run refuses it too.
   check_line=$(grep -n 'Test-AbsolutePath \$InstallDir' "$REPO_ROOT/install.ps1" | head -n 1 | cut -d: -f1)
@@ -238,22 +248,32 @@ teardown() {
   mkdir -p "$STUBDIR/work"
   cd "$STUBDIR/work" || return 1
 
-  local rel
-  for rel in rel-inst 'C:rel-inst' '\rel-inst'; do
-    run pwsh -NoLogo -NoProfile -File "$REPO_ROOT/install.ps1" -DryRun -InstallDir "$rel"
+  local rel installer="$REPO_ROOT/install.ps1"
+  # MSYS2_ARG_CONV_EXCL below stops Git Bash rewriting every argument, the
+  # script path included, so pass pwsh the script's Windows path explicitly.
+  if command -v cygpath >/dev/null 2>&1; then
+    installer=$(cygpath -w "$installer")
+  fi
+  # An empty value and a UNC server with no share are refused like a relative one.
+  # MSYS2_ARG_CONV_EXCL keeps Git Bash from rewriting the //server argument.
+  for rel in rel-inst 'C:rel-inst' '\rel-inst' '' '\\server' '\\server\' '//server'; do
+    MSYS2_ARG_CONV_EXCL='*' run pwsh -NoLogo -NoProfile -File "$installer" -DryRun -InstallDir "$rel"
     assert_failure 1
     assert_output --partial "-InstallDir must be an absolute path, got '$rel'"
     refute_output --partial '[dry-run]'
   done
   # The refused value is echoed with control characters replaced.
-  run pwsh -NoLogo -NoProfile -File "$REPO_ROOT/install.ps1" -DryRun -InstallDir $'rel\033]0;t\007x'
+  run pwsh -NoLogo -NoProfile -File "$installer" -DryRun -InstallDir $'rel\033]0;t\007x'
   assert_failure 1
   assert_output --partial "got 'rel?]0;t?x'"
   refute_output --partial $'\033'
   # A fully qualified -InstallDir is accepted.
-  run pwsh -NoLogo -NoProfile -File "$REPO_ROOT/install.ps1" -DryRun -InstallDir 'C:\acq-test'
+  run pwsh -NoLogo -NoProfile -File "$installer" -DryRun -InstallDir 'C:\acq-test'
   assert_success
   assert_output --partial 'install dir: C:\acq-test'
+  MSYS2_ARG_CONV_EXCL='*' run pwsh -NoLogo -NoProfile -File "$installer" -DryRun -InstallDir '\\server\share\acq'
+  assert_success
+  assert_output --partial 'install dir: \\server\share\acq'
   run ls -A "$STUBDIR/work"
   assert_output ''
 }

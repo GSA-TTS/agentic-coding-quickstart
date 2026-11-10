@@ -45,7 +45,7 @@
 #
 # Usage:
 #   ./scripts/verify-backends [WORKDIR]
-#     WORKDIR  optional workspace path (default: a temp git repo under $TMPDIR).
+#     WORKDIR  optional workspace path (default: a git repo under the acq cache dir).
 #
 #   Flags / env:
 #     -v | --verbose | VERIFY_VERBOSE=1   Stream every acq command and its full
@@ -237,7 +237,8 @@ if [ "$_VERIFY_BACKENDS_SOURCED" -eq 0 ]; then
 
   # Keep acq's per-run state hermetic. The verifier should not read the user's
   # default backend, acq-owned secret store, provenance cache, or port/ssh state.
-  VERIFY_STATE=$(mktemp -d "${TMPDIR:-/tmp}/acq-verify-state.XXXXXX") || exit 1
+  # acq_tmp_dir (userdirs.sh): TMPDIR only when it is absolute, else /tmp.
+  VERIFY_STATE=$(mktemp -d "$(acq_tmp_dir)/acq-verify-state.XXXXXX") || exit 1
   export XDG_CONFIG_HOME="$VERIFY_STATE/config"
   export ACQ_SECRET_FORCE_FILE=1
   export ACQ_SECRET_STORE_DIR="$VERIFY_STATE/secrets"
@@ -427,7 +428,7 @@ load_provider_facts() {
   # (acq source-mode is chatty on stdout). Bound the capture to 4 KB, then emit
   # only a diagnostic category. Never replay arbitrary source stderr because a
   # future dependency could include environment-derived sensitive text.
-  _diag_file=$(mktemp "${TMPDIR:-/tmp}/vb-load-diag.XXXXXX") || _diag_file=""
+  _diag_file=$(mktemp "$(acq_tmp_dir)/vb-load-diag.XXXXXX") || _diag_file=""
   # shellcheck disable=SC1090
   if ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$ACQ" >/dev/null \
        2>"${_diag_file:-/dev/null}"; then
@@ -1120,7 +1121,7 @@ _start_ephemeral_agent() {
   # Key material under VERIFY_STATE; socket under a SHORT /tmp root (sun_path).
   EPHEMERAL_AGENT_DIR=$(mktemp -d "${VERIFY_STATE}/ssh-agent.XXXXXX") || return 1
   EPHEMERAL_AGENT_SOCKDIR=$(mktemp -d "/tmp/acq-va.XXXXXX" 2>/dev/null) \
-    || EPHEMERAL_AGENT_SOCKDIR=$(mktemp -d "${TMPDIR:-/tmp}/acq-va.XXXXXX") \
+    || EPHEMERAL_AGENT_SOCKDIR=$(mktemp -d "$(acq_tmp_dir)/acq-va.XXXXXX") \
     || { _stop_ephemeral_agent; return 1; }
   EPHEMERAL_AGENT_SOCK="${EPHEMERAL_AGENT_SOCKDIR}/s"
   local key="${EPHEMERAL_AGENT_DIR}/id_ed25519"

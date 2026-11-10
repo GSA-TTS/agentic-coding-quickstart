@@ -35,7 +35,7 @@ pytestmark = pytest.mark.skipif(
 #                             hashed tool pins the job installs
 #   scripts                   staged, run or read by the pytest suite
 #   qualification + ledger    imported and validated by the qualification tests
-#   bats subset               06/55/163, the helper and stub library, and the
+#   bats subset               06/55/117/163, the helper and stub library, and the
 #                             pinned bats submodules (.gitmodules)
 #   vectors + fixtures        the corpus pytest runs and the paths it invokes
 #   repo files                .gitattributes (the CRLF guard), CODEOWNERS and
@@ -49,6 +49,7 @@ REQUIRED = {
     "scripts/test-acq-lib.sh", "scripts/refresh-kitbundle",
     "qualification", "docs/qualification-ledger.json",
     "test/bats/06-windows-install.bats", "test/bats/55-version.bats",
+    "test/bats/117-msys-path-forms.bats",
     "test/bats/163-provider-input-windows-native.bats", "test/bats/helper.bash",
     "test/vendor", ".gitmodules", "test/vectors", "test/fixtures",
     ".gitattributes", ".github/CODEOWNERS",
@@ -66,6 +67,10 @@ NOT_INPUTS = {
     "CONTRIBUTING.md", "GLOSSARY.md", "LICENSE", "README.md", "SECURITY.md", "SUPPORT.md",
     "package.json", "release-please-config.json", ".release-please-manifest.json",
     "py-acq/README.md", "py-acq/requirements-dev.txt",
+    # the hash-locked build backend only python-vectors.yml installs; the
+    # consistency check that reads it (test_packaging.py) also runs there, on
+    # every pull request
+    "py-acq/requirements-build.txt",
     # lint and hook configuration
     ".gitignore", ".gitleaks.repo.toml", ".gitleaks.toml", ".markdown-link-check.json",
     ".markdownlint-cli2.yaml", ".markdownlint.jsonc", ".markdownlintignore",

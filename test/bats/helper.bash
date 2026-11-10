@@ -52,7 +52,8 @@ acq_setup_stubs() {
   # Tests should never see or write the developer's real git identity. Git reads
   # --global values from HOME and, when exported, XDG_CONFIG_HOME. Point both at
   # the stub dir so tests start from an empty host identity unless they set one
-  # explicitly.
+  # explicitly. make_stubs already put XDG_CACHE_HOME and the kit caches under
+  # this home.
   mkdir -p "$STUBDIR/home"
   export HOME="$STUBDIR/home"
   export XDG_CONFIG_HOME="$STUBDIR/xdg"

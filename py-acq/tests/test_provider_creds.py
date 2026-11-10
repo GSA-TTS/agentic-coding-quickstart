@@ -16,7 +16,9 @@ import json
 import os
 import sys
 
-from acq_py import cli, gitrepos, msb, provider_creds
+import pytest
+
+from acq_py import cli, gitrepos, msb, provider_creds, state
 from gitfixtures import git_repo
 
 
@@ -495,6 +497,35 @@ def test_provider_credential_set_reserved_key_env(monkeypatch, tmp_path, capsys)
     )
     assert rc == 1
     assert doc["error"]["code"] == "validation_failed"
+
+
+def test_every_reserved_key_env_names_its_owner():
+    # Each reserved name, not only GITHUB_TOKEN, is refused for another provider
+    # and named with its exact owning service; the owner itself may use it.
+    for key_env, owner in (("USAI_API_KEY", "usai"), ("GITHUB_TOKEN", "github"),
+                           ("GH_TOKEN", "github"), ("GITLAB_TOKEN", "gitlab")):
+        assert provider_creds.key_env_owner(key_env) == owner
+        problem = provider_creds.validate_binding("opencode-go", key_env, ["api.example.gov"])
+        assert problem is not None and f"belongs to the {owner!r} service" in problem, problem
+        assert provider_creds.validate_binding(owner, key_env, ["api.example.gov"]) is None
+
+
+def test_a_corrupt_binding_record_is_a_schema_error_not_a_missing_binding(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path)
+    path = provider_creds._binding_path("acme")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not json", encoding="utf-8")
+    with pytest.raises(state.StateSchemaError, match="not valid JSON"):
+        provider_creds.get_binding("acme")
+
+
+def test_provider_credential_env_layer_without_equals_names_the_expected_form(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_PROVIDER_CREDENTIAL_BINDINGS", "malformed-token-without-equals")
+    rc, doc = _invoke(capsys, "provider-credential", "ls", "--json")
+    assert rc == 1
+    assert doc["error"]["code"] == "validation_failed"
+    assert "expected '<providerId>=<KEY_ENV>'" in doc["error"]["message"]
 
 
 def test_provider_credential_set_missing_host(monkeypatch, tmp_path, capsys):

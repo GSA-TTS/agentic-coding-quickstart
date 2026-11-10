@@ -116,7 +116,11 @@ if [ "$_jobs" -gt 1 ] 2>/dev/null && { command -v parallel >/dev/null 2>&1 || co
 fi
 
 if [ "$_jobs" -gt 1 ] 2>/dev/null && command -v xargs >/dev/null 2>&1 && printf 'x\0' | xargs -0 -n1 -P 1 true 2>/dev/null; then
-  _tmp="$(mktemp -d "${TMPDIR:-/tmp}/acq-bats.XXXXXX")"
+  # TMPDIR only when it is absolute, else /tmp, as acq_tmp_dir in
+  # acq.backends/userdirs.sh does: a relative TMPDIR would put the per-file
+  # output under the current directory.
+  case "${TMPDIR:-}" in /*) _tmp_base="$TMPDIR" ;; *) _tmp_base=/tmp ;; esac
+  _tmp="$(mktemp -d "$_tmp_base/acq-bats.XXXXXX")"
   trap 'rm -rf "$_tmp"' EXIT HUP INT TERM
   _xargs_files=("${REPO_ROOT}"/test/bats/*.bats)
   if [ "${#_shard_files[@]}" -gt 0 ]; then _xargs_files=("${_shard_files[@]}"); fi

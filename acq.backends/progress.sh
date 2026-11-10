@@ -190,10 +190,64 @@ _acq_spin_self_pid() {
 # under Bash 5.3 (none under 3.2). The spinner kills its animator in exactly
 # that way, so without this check the animator could run the caller's EXIT
 # cleanup (sandbox removal, lock release) a second time, from the wrong process.
+#
+# An unknown PID also counts as the owner. On Bash 3.2 the PID comes from a
+# forked `sh`, and that fork can fail (a process limit). Treating the shell as a
+# non-owner would then skip the caller's EXIT cleanup in the one shell that must
+# run it. The opposite error needs a child whose own fork also failed, inside
+# the brief window described above, and costs a repeated cleanup: the lesser
+# failure of the two.
 _acq_spin_is_owner() {
   [ -n "$_ACQ_SPIN_OWNER" ] || return 0
   _acq_spin_self_pid
+  [ -n "$_ACQ_SPIN_SELF_PID" ] || return 0
   [ "$_ACQ_SPIN_SELF_PID" = "$_ACQ_SPIN_OWNER" ]
+}
+
+# acq_run_signal_deferred COMMAND [ARG...] — run COMMAND (in acq, a provisioning
+# function whose body is a subshell with its own HUP/INT/TERM cleanup) so that a
+# SIGTERM or SIGHUP for acq's own shell waits for it.
+#
+# A terminal's Ctrl-C reaches the whole process group, and Bash already waits
+# for a foreground child that handles SIGINT before acting on it. SIGTERM and
+# SIGHUP had no handler in acq's shell, so a group SIGTERM ended acq at once,
+# 143, while the subshell was still releasing the lock and discarding the
+# uncreated attempt; for a moment the lock outlived acq. With a trap set, Bash
+# runs it only after the foreground subshell has exited, so acq now ends after
+# that cleanup, with the subshell's own status.
+#
+# A signal sent to acq's PID alone, not to its group, is NOT forwarded to the
+# subshell. Forwarding needs the subshell running in the background while acq
+# waits, and a background child of a non-interactive Bash 3.2 starts with
+# SIGINT ignored, so it could no longer trap Ctrl-C at all. Terminals, `timeout`
+# and service managers all signal the process group, which already reaches the
+# create. A lone `kill <acq pid>` therefore lets the provisioning step finish,
+# holding the lock and its backend child to the end, and acq then stops there
+# with 128 + N instead of going on (run would otherwise attach). See
+# docs/KNOWN_FAILURE_MODES.md section 83.
+#
+# COMMAND runs as a plain foreground command, never in an `if` or `||` context,
+# so `set -e` keeps its meaning inside it; under `set -e` a failing COMMAND ends
+# acq here with its status.
+acq_run_signal_deferred() {
+  local _acq_sd_term _acq_sd_hup _acq_sd_rc
+  _acq_sd_term=$(trap -p TERM)
+  _acq_sd_hup=$(trap -p HUP)
+  _ACQ_DEFERRED_SIGNAL=""
+  trap '_ACQ_DEFERRED_SIGNAL=TERM' TERM
+  trap '_ACQ_DEFERRED_SIGNAL=HUP' HUP
+  "$@"
+  _acq_sd_rc=$?
+  _acq_restore_trap_line "$_acq_sd_term" TERM
+  _acq_restore_trap_line "$_acq_sd_hup" HUP
+  [ -n "$_ACQ_DEFERRED_SIGNAL" ] || return "$_acq_sd_rc"
+  if [ "$_acq_sd_rc" -eq 0 ]; then
+    echo "acq: stopped by SIG$_ACQ_DEFERRED_SIGNAL after the provisioning step finished" >&2
+  fi
+  case "$_ACQ_DEFERRED_SIGNAL" in
+    HUP) exit 129 ;;
+    *) exit 143 ;;
+  esac
 }
 
 # _acq_progress_enabled — 0 (true) when animated progress may run, 1 otherwise.

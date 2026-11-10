@@ -105,7 +105,7 @@ kits, validates your USAi key, and attaches the agent.
 > Re-attaching to an existing sandbox skips this check, so if you created one on
 > `~` with an older acq, recreate it on a project directory (`acq rm NAME`, then
 > `acq run opencode /path/to/your/project`). See
-> [Known Failure Modes](../KNOWN_FAILURE_MODES.md#workspace-refused-because-it-contains-acqs-own-directories).
+> [Known Failure Modes](../KNOWN_FAILURE_MODES.md#81-workspace-refused-because-it-contains-acqs-own-directories).
 
 > [!NOTE]
 > The **first** run boots a microVM, applies kits, and prepares the agent — a
@@ -308,6 +308,20 @@ current directory) runs a program from the current directory only when you name
 it with a path, such as `.\tool.exe`. Remove the variable to undo it. The variable
 does not change where Windows looks for a program's DLLs; see
 [Known Failure Modes §60](../KNOWN_FAILURE_MODES.md#60-windows-dll-search-can-reach-the-workspace).
+
+**acq finds programs on Windows only as `.exe` files.** To keep a planted file
+in the workspace from running, the Python implementation (`ACQ_IMPL=python`)
+looks up the programs it starts (`git`, `msb`, `sbx`) itself, in the absolute
+entries of `PATH`, and accepts only `NAME.exe` (see
+`py-acq/src/acq_py/hostexec.py`). The qualification tooling uses the same
+resolver, including for `gh`, and `acq.ps1` looks for `python.exe` the same way.
+A program installed only as a `.cmd` or `.bat` shim (some package managers
+install tools like that) is therefore not found. A `.cmd`-only `git` counts as
+not installed, and with a `.cmd`-only `gh`, `python -m qualification.host`
+prints the pull-request link for you to open instead of opening the pull
+request itself. Install the program's `.exe` (the official Git for Windows and
+GitHub CLI installers both provide one), or put the directory that holds its
+`.exe` on `PATH`.
 
 If WHP is disabled, stop: enable it from an **elevated** PowerShell
 (`Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All`),

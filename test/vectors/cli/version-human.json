@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "id": "cli/version-human",
-  "oracle": "ADR-0038m §2 human output by default on stdout",
+  "oracle": "ADR-0038m §2 human output by default on stdout: every version field, with no backend installed reported as none and the pinned control-plane commit, and nothing on stderr",
   "tier": 1,
   "backend": null,
   "platform": "any",
@@ -20,9 +20,9 @@
   "expect": {
     "exit": 0,
     "stdout": {
-      "mode": "contains",
-      "value": "acq version:",
-      "normalize": []
+      "mode": "exact",
+      "value": "acq v1 (Python skeleton)\n  acq version:       0.1.0\n  impl:              python\n  source revision:   0000000000000000000000000000000000000000\n  backend:           none\n  backend version:   none\n  kit control plane: 941a286f912b99475429c3c00db49a99af5b241e\n",
+      "normalize": ["crlf"]
     },
     "stderr": {
       "mode": "exact",

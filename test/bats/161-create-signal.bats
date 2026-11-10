@@ -26,8 +26,12 @@ load 'helper'
   assert_success
   assert_line 'PASS sbx-sigint status 130'
   assert_line 'PASS msb-sigint status 130'
-  assert_line --partial 'PASS sbx-sigterm status '
-  assert_line --partial 'PASS msb-sigterm status '
+  # acq waits for the subshell's cleanup before it exits, as for Ctrl-C.
+  assert_line 'PASS sbx-sigterm status 143'
+  assert_line 'PASS msb-sigterm status 143'
+  # A SIGTERM to acq's PID alone is not forwarded: provisioning finishes first.
+  assert_line 'PASS sbx-sigterm-pid status 143'
+  assert_line 'PASS msb-sigterm-pid status 143'
 }
 
 # spin-signal-window.py delivers SIGINT at fixed points of acq_spin_start (while

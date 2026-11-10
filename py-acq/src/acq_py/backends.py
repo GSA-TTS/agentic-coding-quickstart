@@ -41,9 +41,11 @@ binary. They are never secrets and are never written to output.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import subprocess
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from . import errors
@@ -272,8 +274,43 @@ def _detected_version(spec: BackendSpec) -> Version | None:
     return parse_version(_run_version_command(spec) or "")
 
 
+# Detection results memoised for the duration of a detection_cache() block,
+# keyed by backend name; None outside one. See detection_cache.
+_DETECT_CACHE: dict[str, BackendStatus] | None = None
+
+
+@contextlib.contextmanager
+def detection_cache() -> Iterator[None]:
+    """Probe each backend at most once inside the block.
+
+    A read-only report can detect the same backend twice: ``version`` resolves
+    the active backend (auto-detect probes every backend) and then reports the
+    chosen one's version. Each probe runs the backend's version command, which
+    can take seconds, so the report reuses the first answer instead. Outside the
+    block every call probes afresh, as a mutating verb's floor check must.
+    """
+    global _DETECT_CACHE
+    outer = _DETECT_CACHE
+    if outer is None:
+        _DETECT_CACHE = {}
+    try:
+        yield
+    finally:
+        _DETECT_CACHE = outer
+
+
 def detect(spec: BackendSpec) -> BackendStatus:
     """Discover one backend's installed state and version (read-only)."""
+    cache = _DETECT_CACHE
+    if cache is not None and spec.name in cache:
+        return cache[spec.name]
+    status = _detect_uncached(spec)
+    if cache is not None:
+        cache[spec.name] = status
+    return status
+
+
+def _detect_uncached(spec: BackendSpec) -> BackendStatus:
     if not _is_installed(spec):
         return BackendStatus(spec.name, False, None, None)
     parsed = _detected_version(spec)

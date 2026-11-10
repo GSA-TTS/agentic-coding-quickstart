@@ -255,15 +255,18 @@ _prog() { # SHELL_SNIPPET
 # handler or touching the owner's animator, and the owner's own exit must still
 # run the prior EXIT handler exactly once with its status.
 @test "progress: a child that inherits the spinner traps never runs the prior handlers" {
-  _prog 'trap "echo PRIOR_EXIT=\$?" EXIT
+  # The animator PID is one known to be dead (a reaped child), so a regression
+  # that signalled it from the child could never reach a live process.
+  _prog '( : ) & dead=$!; wait "$dead"
+    trap "echo PRIOR_EXIT=\$?" EXIT
     trap "echo PRIOR_TERM; exit 143" TERM
     trap "echo PRIOR_INT; exit 130" INT
     _acq_spin_install_traps
-    _ACQ_SPIN_ACTIVE=1 _ACQ_SPIN_PID=999999
+    _ACQ_SPIN_ACTIVE=1 _ACQ_SPIN_PID=$dead
     ( _acq_spin_cleanup_signal TERM; echo NOT_REACHED_TERM ); echo "CHILD_TERM_RC=$?"
     ( _acq_spin_cleanup_signal INT; echo NOT_REACHED_INT ); echo "CHILD_INT_RC=$?"
     ( _acq_spin_cleanup_exit 3; echo "CHILD_EXIT_RET=$?" )
-    [ "$_ACQ_SPIN_PID" = 999999 ] && echo OWNER_STATE_KEPT
+    [ "$_ACQ_SPIN_PID" = "$dead" ] && echo OWNER_STATE_KEPT
     _ACQ_SPIN_ACTIVE="" _ACQ_SPIN_PID=""
     exit 3'
   assert_failure 3
@@ -276,6 +279,21 @@ _prog() { # SHELL_SNIPPET
   refute_output --partial 'PRIOR_TERM'
   refute_output --partial 'PRIOR_INT'
   refute_output --partial 'NOT_REACHED'
+}
+
+# On Bash 3.2 the owner check learns its PID by forking `sh`. If that fork fails
+# (a process limit), the PID is unknown, and the shell that installed the traps
+# must still count as the owner and run the caller's EXIT cleanup. The failed
+# lookup is modelled by a _acq_spin_self_pid that finds nothing.
+@test "progress: an unknown PID counts as the owner, so the caller's EXIT cleanup still runs" {
+  _prog 'trap "echo PRIOR_EXIT=\$?" EXIT
+    _acq_spin_install_traps
+    _acq_spin_self_pid() { _ACQ_SPIN_SELF_PID=""; }
+    _acq_spin_is_owner && echo OWNER
+    exit 4'
+  assert_failure 4
+  assert_line 'OWNER'
+  assert_line 'PRIOR_EXIT=4'
 }
 
 # With no prior handler the subshell must die BY the signal, not merely exit

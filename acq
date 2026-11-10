@@ -817,6 +817,13 @@ _acq_exec_python() {
   fi
 
   # 2. Fallback: run the managed runtime (or a PATH interpreter) directly.
+  # An ACQ_RUNTIME override must be absolute, as acq-python and acq.ps1
+  # require: a relative value would resolve against the current directory,
+  # normally the workspace, and run a planted interpreter on the host.
+  if [ -n "${ACQ_RUNTIME:-}" ] && ! acq_path_is_absolute "$ACQ_RUNTIME"; then
+    echo "acq: ACQ_RUNTIME must be an absolute path to a Python interpreter, got $(acq_quote_value "$ACQ_RUNTIME")" >&2
+    exit 1
+  fi
   local _py=""
   if [ -n "${ACQ_RUNTIME:-}" ] && [ -x "${ACQ_RUNTIME}" ]; then
     _py="${ACQ_RUNTIME}"
@@ -971,8 +978,14 @@ _acq_kit_fetch_start() {
     ' sh "$$" "$_ACQ_KIT_FETCH_ROOT"
   ) </dev/null >/dev/null 2>&1 &
   _ACQ_KIT_FETCH_GUARDIAN=$!
+  # The guardian's stderr is discarded (above), so if it dies before it is
+  # ready (it could not write its ready file, for example on a full disk), say
+  # so here rather than exit with no message.
   while [ ! -f "$_ACQ_KIT_FETCH_ROOT/ready" ]; do
-    kill -0 "$_ACQ_KIT_FETCH_GUARDIAN" 2>/dev/null || exit 1
+    if ! kill -0 "$_ACQ_KIT_FETCH_GUARDIAN" 2>/dev/null; then
+      echo "acq: the kit-fetch cleanup helper exited before it was ready; check that $(acq_quote_value "$(acq_tmp_dir)") is writable and not full" >&2
+      exit 1
+    fi
     sleep 0.01
   done
   trap - HUP INT TERM
@@ -1568,7 +1581,8 @@ case "$subcommand" in
     advise_project_env_activation "$ws"
     acq_print_selected_agent_kit "$create_agent"
 
-    acq_backend_provision "$local_name" "$@"
+    # A group SIGTERM/SIGHUP waits for the provisioning cleanup (progress.sh).
+    acq_run_signal_deferred acq_backend_provision "$local_name" "$@"
     # `create` is detached and never attaches, so provider credentials are
     # validated on the next attach (ensure_valid_provider_keys), not here.
     ;;
@@ -1691,7 +1705,7 @@ case "$subcommand" in
         advise_github_scope "$local_name" "$ws"
         advise_project_env_activation "$ws"
 
-        acq_backend_provision "$local_name" "${create_args[@]}"
+        acq_run_signal_deferred acq_backend_provision "$local_name" "${create_args[@]}"
       fi
 
       # Validate every selected provider's credential before attaching. This is

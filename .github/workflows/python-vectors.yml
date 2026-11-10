@@ -5,8 +5,9 @@
 # (the "IT-approved base interpreter" fallback; the app-private bundle is laid
 # down by the installer slice). jq is pinned to an exact release and
 # SHA256-verified so the Bash runner's dependency is declared, not opportunistic.
-# acq-py has no runtime dependencies; only the pinned pytest dev dependency is
-# installed, so ordinary operation never downloads acq's own assets.
+# acq-py has no runtime dependencies and is run from py-acq/src, not installed;
+# only the hash-locked test tools are installed, so ordinary operation never
+# downloads acq's own assets and no unhashed build dependency is fetched.
 
 name: Python vectors
 
@@ -51,13 +52,17 @@ jobs:
           sudo mv jq /usr/local/bin/jq
           jq --version
 
-      # acq-py has no runtime dependencies (ADR-0042m: offline, app-private).
-      - name: Install acq-py
-        run: python -m pip install ./py-acq
-
-      # Pinned pytest dev dependency (same pin as pyproject.toml).
-      - name: Install test dependencies
-        run: python -m pip install -r py-acq/requirements-dev.txt
+      # acq-py itself is not installed, as in windows.yml: pytest imports it from
+      # py-acq/src through the pyproject `pythonpath`, the tests' child
+      # processes get the same PYTHONPATH from conftest.py, and the Bash runner
+      # step sets it below. Installing would build a wheel, and pip's build
+      # isolation would download setuptools without a hash check. The test
+      # tools are the hash-locked set (ADR-0049m), wheels only, so every
+      # package installed here is hash-verified; pytest has the same pin as
+      # requirements-dev.txt and pyproject.toml.
+      - name: Install pinned test tools
+        run: |
+          python -m pip install --require-hashes --no-deps --only-binary :all: -r py-acq/requirements-quality.txt
 
       # A checkout of Patterns at the kits' pinned ref, for the tests that compare
       # acq's copies against the real pinned tree: the kit egress allowlist
@@ -112,4 +117,26 @@ jobs:
       # The independent Bash runner over the same corpus; must agree with pytest
       # on the sentinel golden set.
       - name: Run Bash vector runner
+        env:
+          PYTHONPATH: ${{ github.workspace }}/py-acq/src
         run: scripts/run-vectors --acq "python -m acq_py"
+
+      # The steps above run acq from py-acq/src, so they cannot see a file the
+      # wheel fails to ship (the kit bundle, its hidden .config files,
+      # msb-balanced-hosts.txt). Build the wheel with the hash-locked setuptools
+      # (no build isolation, so pip fetches nothing unhashed), install it into a
+      # throwaway venv, and run the cli vectors against the installed console
+      # script. PYTHONPATH stays unset so nothing is imported from the checkout.
+      - name: Build, install and test the wheel
+        run: |
+          set -euo pipefail
+          build="$RUNNER_TEMP/acq-wheel-build"
+          python -m venv --clear "$build"
+          "$build/bin/python" -m pip install --require-hashes --no-deps --only-binary :all: -r py-acq/requirements-build.txt
+          "$build/bin/python" -m pip wheel --no-build-isolation --no-deps --no-index -w "$RUNNER_TEMP/wheel" ./py-acq
+          run="$RUNNER_TEMP/acq-wheel-run"
+          python -m venv --clear "$run"
+          "$run/bin/python" -m pip install --no-deps --no-index "$RUNNER_TEMP"/wheel/acq_py-*.whl
+          (cd "$RUNNER_TEMP" && "$run/bin/python" -c 'import acq_py, sys; sys.exit("site-packages" not in acq_py.__file__)')
+          (cd "$RUNNER_TEMP" && ACQ_SBX_INSTALLED=0 ACQ_MSB_INSTALLED=0 "$run/bin/acq-py" version --json)
+          scripts/run-vectors --acq "$run/bin/acq-py" --section cli
