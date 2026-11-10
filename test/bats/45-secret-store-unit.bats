@@ -24,12 +24,18 @@ _plant_powershell_stub() {
 #!/usr/bin/env bash
 { printf 'powershell'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >> "${CALLS:-/dev/null}" 2>/dev/null || true
 _cmd="$*"
+# Both directions carry base64 only, as with the real one-liners. Every stdin
+# is kept, so a test can check that nothing but base64 reached PowerShell.
+_in=$(cat)
+printf '%s\n' "$_in" >> "${PS_STDIN_LOG:-/dev/null}" 2>/dev/null || true
+# Mirror the real one-liner's .Trim(): drop CR so a CRLF-mangled envelope's
+# ciphertext line still decodes.
+_plain=$(printf '%s' "$_in" | tr -d '\r' | base64 -d 2>/dev/null) || exit 1
 if printf '%s' "$_cmd" | grep -q 'Unprotect'; then
-  # Mirror the real one-liner's .Trim(): drop CR so a CRLF-mangled envelope's
-  # ciphertext line still decodes.
-  tr -d '\r' | base64 -d 2>/dev/null || exit 1
+  case "$_plain" in DPAPI:*) ;; *) exit 1 ;; esac
+  printf '%s' "${_plain#DPAPI:}" | base64 | tr -d '\n'
 else
-  printf '%s' "$(cat)" | base64 | tr -d '\n'
+  printf 'DPAPI:%s' "$_plain" | base64 | tr -d '\n'
 fi
 PSSTUB
   chmod +x "$STUBDIR/powershell.exe"
@@ -52,14 +58,11 @@ _plant_powershell_race_stub() {
   cat >"$STUBDIR/powershell-race.exe" <<'PSSTUB'
 #!/usr/bin/env bash
 _cmd="$*"
-if printf '%s' "$_cmd" | grep -q 'Unprotect'; then
-  base64 -d 2>/dev/null || exit 1
-else
-  if [ -n "${STUB_RACE_TARGET:-}" ]; then
-    printf '%s\n%s' "acq-dpapi-v1" "RACE-written-new" > "$STUB_RACE_TARGET"
-  fi
-  printf '%s' "$(cat)" | base64 | tr -d '\n'
+# Both directions carry base64, so the identity stands in for the cipher.
+if ! printf '%s' "$_cmd" | grep -q 'Unprotect' && [ -n "${STUB_RACE_TARGET:-}" ]; then
+  printf '%s\n%s' "acq-dpapi-v1" "RACE-written-new" > "$STUB_RACE_TARGET"
 fi
+tr -d '\r\n'
 PSSTUB
   chmod +x "$STUBDIR/powershell-race.exe"
 }
@@ -284,6 +287,42 @@ PSSTUB
   refute_regex "$(cat "$CALLS")" 'ghp_winSECRET'
 }
 
+@test "keychain-windows: only base64 crosses to PowerShell, so a non-ASCII value round-trips" {
+  _plant_powershell_stub
+  : > "$STUBDIR/ps-stdin"
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/win-utf8"
+    export ACQ_SECRET_POWERSHELL_BIN="'"$STUBDIR"'/powershell.exe"
+    export PS_STDIN_LOG="'"$STUBDIR"'/ps-stdin"
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    unset ACQ_SECRET_FORCE_FILE
+    _acq_secret_backend() { printf "keychain-windows\n"; }
+    ACQ_SECRET_TEST_VALUE="caf$(printf "\303\251")-\$x\`y\"z\\" acq_secret_set_interactive usai >/dev/null 2>&1
+    printf "resolved=[%s]\n" "$(acq_secret_resolve usai)"
+  '
+  assert_success
+  assert_output "resolved=[café-\$x\`y\"z\\]"
+  # Two calls (encrypt, decrypt), each fed base64 and nothing else.
+  [ "$(wc -l < "$STUBDIR/ps-stdin" | tr -d ' ')" -eq 2 ]
+  refute_regex "$(tr -d '\n' < "$STUBDIR/ps-stdin")" '[^A-Za-z0-9+/=]'
+}
+
+@test "keychain-windows: a failing base64 encoder stores nothing, even with partial output" {
+  _plant_powershell_stub
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/win-b64fail"
+    export ACQ_SECRET_POWERSHELL_BIN="'"$STUBDIR"'/powershell.exe"
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    unset ACQ_SECRET_FORCE_FILE
+    _acq_secret_backend() { printf "keychain-windows\n"; }
+    base64() { printf "QUJD"; return 1; }
+    printf "%s\n" "value" | acq_secret_store "$(_acq_secret_key usai)" && printf "stored=yes\n" || printf "stored=no\n"
+    [ -e "$ACQ_SECRET_FILE_DIR/acq.usai" ] && printf "file=yes\n" || printf "file=no\n"
+  '
+  assert_output --partial 'stored=no'
+  assert_output --partial 'file=no'
+}
+
 @test "keychain-windows: a legacy plaintext value is read and migrated to an envelope" {
   _plant_powershell_stub
   : > "$CALLS"
@@ -419,7 +458,7 @@ PSSTUB
     unset ACQ_SECRET_FORCE_FILE
     _acq_secret_backend() { printf "keychain-windows\n"; }
     mkdir -p "$ACQ_SECRET_FILE_DIR"
-    printf "%s\r\n%s\r\n" "$ACQ_SECRET_DPAPI_HEADER" "$(printf "crlfVALUE" | base64 | tr -d "\n")" > "$ACQ_SECRET_FILE_DIR/acq.usai"
+    printf "%s\r\n%s\r\n" "$ACQ_SECRET_DPAPI_HEADER" "$(printf "DPAPI:crlfVALUE" | base64 | tr -d "\n")" > "$ACQ_SECRET_FILE_DIR/acq.usai"
     _acq_secret_file_is_dpapi_envelope "$ACQ_SECRET_FILE_DIR/acq.usai" && printf "envelope=yes\n" || printf "envelope=no\n"
     printf "resolved=[%s]\n" "$(acq_secret_resolve usai)"
   '

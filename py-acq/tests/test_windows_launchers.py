@@ -13,6 +13,15 @@ embedded double quote unescaped when it starts a native program. Through
 branch still uses it, so it refuses such an argument instead of running a
 changed command.
 
+PowerShell 7 fills ``$args`` from ``pwsh -File`` verbatim, and from 7.3 its
+call operator passes native arguments correctly by default
+(``$PSNativeCommandArgumentPassing`` is ``Windows``), so there acq.ps1 forwards
+an empty argument, an embedded quote, a trailing backslash and ``--``
+unchanged on both branches. The PowerShell 7 cases find ``pwsh`` on PATH (or
+the absolute path in ``ACQ_TEST_PWSH``) and skip without it, unless
+``ACQ_TEST_REQUIRE_PWSH=1`` (set in CI) makes a missing ``pwsh`` a failure; an
+``ACQ_TEST_PWSH`` that does not name a usable pwsh fails them too.
+
 Windows only: they need cmd.exe and Windows PowerShell, so they run in the
 Windows CI job's pytest step.
 """
@@ -52,6 +61,47 @@ ARGV = ["exec", "box", "--", "echo", "--json", "", "a b", 'say "hi"', "C:\\dir w
 
 def _windows_powershell() -> str:
     return os.path.join(os.environ["SystemRoot"], "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+
+
+def _find_pwsh(override: str) -> str | None:
+    if override:
+        return override if os.path.isabs(override) and os.path.isfile(override) else None
+    return shutil.which("pwsh")
+
+
+@pytest.fixture(scope="module")
+def pwsh(pwsh_test_settings: tuple[str, bool]) -> tuple[str, tuple[int, int]]:
+    """``(path, (major, minor))`` of PowerShell 7 or newer; skips without it.
+
+    An explicit ``ACQ_TEST_PWSH`` is a request to run these tests, so one that
+    is not usable fails them, as ``ACQ_TEST_REQUIRE_PWSH=1`` does."""
+    override, required = pwsh_test_settings
+    required = required or bool(override)
+    path = _find_pwsh(override)
+    version: tuple[int, int] | None = None
+    if path is not None:
+        probe = subprocess.run(
+            [path, "-NoProfile", "-NonInteractive", "-Command",
+             "'{0} {1}' -f $PSVersionTable.PSVersion.Major, $PSVersionTable.PSVersion.Minor"],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=120,
+        )
+        fields = probe.stdout.split()
+        if probe.returncode == 0 and len(fields) == 2 and all(f.isdigit() for f in fields):
+            version = (int(fields[0]), int(fields[1]))
+    if version is None or version < (7, 0):
+        if required:
+            pytest.fail(f"PowerShell 7 is required here but was not usable (found {path!r}, version {version})")
+        pytest.skip("PowerShell 7 (pwsh) is not installed")
+    assert path is not None and version is not None
+    return path, version
+
+
+def _needs_standard_native_arguments(pwsh: tuple[str, tuple[int, int]]) -> str:
+    """The pwsh path, skipping before 7.3 (the legacy call operator)."""
+    path, version = pwsh
+    if version < (7, 3):
+        pytest.skip(f"PowerShell {version[0]}.{version[1]} passes native arguments the legacy way")
+    return path
 
 
 def _git_bash() -> Path | None:
@@ -175,17 +225,20 @@ def test_bash_branch_forwards_plain_arguments(launcher_tree: Path, tmp_path: Pat
 SESSION_VARS = ("NoDefaultCurrentDirectoryInExePath", "PYTHONPATH", "ACQ_PROVIDER_INPUT_DATA_DIR")
 
 
-def _in_session(tree: Path, args: list[str], before: dict[str, str | None], catch: bool = False) -> list[str]:
+def _in_session(tree: Path, args: list[str], before: dict[str, str | None], catch: bool = False,
+                shell: str | None = None, prelude: str | None = None) -> list[str]:
     """powershell.exe -Command that sets ``before``, runs acq.ps1 in-process, and
     prints ``AFTER <json>`` with the exit status and the variables afterwards.
 
     With ``catch``, the call runs inside try/catch, as a prompt carries on after
-    an error, and a thrown error is printed as ``CAUGHT <message>``."""
+    an error, and a thrown error is printed as ``CAUGHT <message>``. ``shell``
+    replaces Windows PowerShell (with ``pwsh``, say), and ``prelude`` is a
+    PowerShell statement run first."""
 
     def quote(value: str) -> str:
         return "'" + value.replace("'", "''") + "'"
 
-    lines = []
+    lines = [prelude] if prelude else []
     for name, value in before.items():
         if value is None:
             lines.append(f"Remove-Item Env:{name} -ErrorAction SilentlyContinue")
@@ -199,7 +252,7 @@ def _in_session(tree: Path, args: list[str], before: dict[str, str | None], catc
     for name in SESSION_VARS:
         lines.append(f"$after['{name}'] = $env:{name}")
     lines.append("Write-Output ('AFTER ' + (ConvertTo-Json -Compress $after))")
-    return [_windows_powershell(), "-NoProfile", "-NonInteractive", "-Command", "; ".join(lines)]
+    return [shell or _windows_powershell(), "-NoProfile", "-NonInteractive", "-Command", "; ".join(lines)]
 
 
 def _after(stdout: str) -> dict:
@@ -269,3 +322,69 @@ def test_acq_ps1_in_session_restores_the_variables_it_set_for_bash(launcher_tree
     assert after["ACQ_PROVIDER_INPUT_DATA_DIR"] is None
     assert after["NoDefaultCurrentDirectoryInExePath"] is None
     assert after["PYTHONPATH"] == "C:\\user\\keep"
+
+
+# ---- PowerShell 7 ---------------------------------------------------------------
+
+def _bash_view(args: list[str]) -> list[str]:
+    """What the fake Bash acq prints for ``args`` after acq.ps1's path conversion."""
+    converted = {"C:\\dir with space\\": "/c/dir with space/"}
+    return [f"[{converted.get(a, a)}]" for a in args]
+
+
+# `pwsh -NoProfile -NonInteractive -File` reaches acq.ps1 through $args;
+# `pwsh -NoLogo -NoProfile -File` is acq.cmd's shape, so acq.ps1 reads the
+# process argv instead and starts Python with an exact command line.
+PWSH_FILE_SHAPES = {
+    "args": ["-NoProfile", "-NonInteractive", "-File"],
+    "launcher-shape": ["-NoLogo", "-NoProfile", "-File"],
+}
+
+
+@pytest.mark.parametrize("shape", list(PWSH_FILE_SHAPES))
+def test_acq_ps1_under_pwsh_file_forwards_argv_verbatim_to_python(
+    launcher_tree: Path, tmp_path: Path, pwsh, shape: str
+) -> None:
+    path = _needs_standard_native_arguments(pwsh) if shape == "args" else pwsh[0]
+    command = [path, *PWSH_FILE_SHAPES[shape], str(launcher_tree / "acq.ps1"), *ARGV]
+    result = _run(command, _env("python", ACQ_FAKE_EXIT="3"), tmp_path)
+    assert result.returncode == 3, result.stderr
+    assert json.loads(result.stdout)["argv"] == ARGV
+
+
+def test_acq_ps1_in_a_pwsh_session_forwards_native_arguments_verbatim(
+    launcher_tree: Path, tmp_path: Path, pwsh
+) -> None:
+    # Typed at a pwsh prompt every argument is a quoted literal, '--' included.
+    shell = _needs_standard_native_arguments(pwsh)
+    result = _run(_in_session(launcher_tree, ARGV, BEFORE, shell=shell), _env("python"), tmp_path)
+    assert json.loads(result.stdout.splitlines()[0])["argv"] == ARGV, result.stderr
+    after = _after(result.stdout)
+    assert after["code"] == 0
+    assert after["PYTHONPATH"] == "C:\\user\\keep"
+
+
+@pytest.mark.parametrize("shape", list(PWSH_FILE_SHAPES))
+def test_bash_branch_under_pwsh_forwards_empty_and_quoted_arguments(
+    launcher_tree: Path, tmp_path: Path, pwsh, shape: str
+) -> None:
+    if _git_bash() is None:
+        pytest.skip("Git for Windows is not installed")
+    path = _needs_standard_native_arguments(pwsh)
+    command = [path, *PWSH_FILE_SHAPES[shape], str(launcher_tree / "acq.ps1"), *ARGV]
+    result = _run(command, _env(None), tmp_path)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert result.stdout.splitlines() == _bash_view(ARGV)
+
+
+def test_bash_branch_under_pwsh_with_legacy_argument_passing_still_refuses(
+    launcher_tree: Path, tmp_path: Path, pwsh
+) -> None:
+    if _git_bash() is None:
+        pytest.skip("Git for Windows is not installed")
+    command = _in_session(launcher_tree, ["exec", "box", "--", "echo", ""], BEFORE, shell=pwsh[0],
+                          prelude="$PSNativeCommandArgumentPassing = 'Legacy'")
+    result = _run(command, _env(None), tmp_path)
+    assert _after(result.stdout)["code"] == 2, (result.stdout, result.stderr)
+    assert "ACQ_IMPL=python" in result.stderr
+    assert "[exec]" not in result.stdout

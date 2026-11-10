@@ -43,6 +43,8 @@ same message as Bash.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import os
 import re
 import subprocess
@@ -92,16 +94,21 @@ _POWERSHELL_RELATIVE = ("System32", "WindowsPowerShell", "v1.0", "powershell.exe
 
 # The PowerShell one-liners, byte-identical to Bash's so both sides call DPAPI
 # the same way: plaintext and ciphertext move over stdin/stdout, never argv.
+# Both directions carry base64 only. Windows PowerShell decodes stdin and
+# encodes stdout with the console's code page, so raw UTF-8 text across those
+# pipes is altered whenever that code page is not a lossless single-byte one
+# (932 drops bytes) or differs between the write and the read. What DPAPI
+# protects is therefore always the value's own UTF-8 bytes.
 _PS_ENCRYPT = (
     '$ErrorActionPreference="Stop"; Add-Type -AssemblyName System.Security; '
-    "$i=[Console]::In.ReadToEnd(); $b=[Text.Encoding]::UTF8.GetBytes($i); "
+    "$i=[Console]::In.ReadToEnd(); $b=[Convert]::FromBase64String($i.Trim()); "
     "[Console]::Out.Write([Convert]::ToBase64String([Security.Cryptography.ProtectedData]::Protect("
     "$b,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser)))"
 )
 _PS_DECRYPT = (
     '$ErrorActionPreference="Stop"; Add-Type -AssemblyName System.Security; '
     "$i=[Console]::In.ReadToEnd(); $e=[Convert]::FromBase64String($i.Trim()); "
-    "[Console]::Out.Write([Text.Encoding]::UTF8.GetString([Security.Cryptography.ProtectedData]::Unprotect("
+    "[Console]::Out.Write([Convert]::ToBase64String([Security.Cryptography.ProtectedData]::Unprotect("
     "$e,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser)))"
 )
 
@@ -497,8 +504,9 @@ def dpapi_encrypt(plaintext: str) -> str | None:
     ps = _powershell(_layout())
     if ps is None:
         return None
-    rc, out = _run_tool([ps, "-NoLogo", "-NoProfile", "-Command", _PS_ENCRYPT], stdin=plaintext)
-    return out.rstrip("\n") if rc == 0 else None
+    payload = base64.b64encode(_enc(plaintext)).decode("ascii")
+    rc, out = _run_tool([ps, "-NoLogo", "-NoProfile", "-Command", _PS_ENCRYPT], stdin=payload)
+    return out.strip() if rc == 0 else None
 
 
 def dpapi_decrypt(ciphertext: str) -> str | None:
@@ -507,7 +515,13 @@ def dpapi_decrypt(ciphertext: str) -> str | None:
     if ps is None:
         return None
     rc, out = _run_tool([ps, "-NoLogo", "-NoProfile", "-Command", _PS_DECRYPT], stdin=ciphertext)
-    return out.rstrip("\n") if rc == 0 else None
+    if rc != 0:
+        return None
+    try:
+        plaintext = base64.b64decode(out.strip(), validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    return _dec(plaintext).rstrip("\n")
 
 
 def _warn_marker(path: Path) -> Path:

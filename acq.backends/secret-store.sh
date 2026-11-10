@@ -247,15 +247,30 @@ _acq_secret_store_keychain_macos() {
 #     upgrade neither loses the secret nor leaves the plaintext at rest.
 #   - `file` reading a MARKED file = ciphertext it cannot decrypt; it fails
 #     closed (_acq_secret_get_file) rather than exporting the blob as the secret.
+#
+# TRANSPORT: both pipes carry base64 only. Windows PowerShell decodes stdin and
+# encodes stdout with the console's code page, so raw UTF-8 across them is
+# altered whenever that code page is not a lossless single-byte one (932 drops
+# bytes) or differs between the write and the read. The value goes in as base64
+# of its bytes and comes back the same way, so DPAPI always protects the
+# value's own UTF-8 bytes. The one-liners match the Python acq's byte for byte
+# (py-acq/src/acq_py/secretstore.py).
 # ---------------------------------------------------------------------------
 _acq_secret_windows_encrypt() {
-  local ps; ps=$(_acq_secret_powershell_bin)
-  "$ps" -NoLogo -NoProfile -Command '$ErrorActionPreference="Stop"; Add-Type -AssemblyName System.Security; $i=[Console]::In.ReadToEnd(); $b=[Text.Encoding]::UTF8.GetBytes($i); [Console]::Out.Write([Convert]::ToBase64String([Security.Cryptography.ProtectedData]::Protect($b,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser)))' 2>/dev/null
+  local ps b64; ps=$(_acq_secret_powershell_bin)
+  # A failed or empty encoding must not reach PowerShell: it would protect an
+  # empty value.
+  # base64 is captured on its own so its exit status, not tr's, decides.
+  b64=$(base64) || return 1
+  b64=$(printf '%s' "$b64" | tr -d '\r\n')
+  [ -n "$b64" ] || return 1
+  printf '%s' "$b64" | "$ps" -NoLogo -NoProfile -Command '$ErrorActionPreference="Stop"; Add-Type -AssemblyName System.Security; $i=[Console]::In.ReadToEnd(); $b=[Convert]::FromBase64String($i.Trim()); [Console]::Out.Write([Convert]::ToBase64String([Security.Cryptography.ProtectedData]::Protect($b,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser)))' 2>/dev/null
 }
 
 _acq_secret_windows_decrypt() {
-  local ps; ps=$(_acq_secret_powershell_bin)
-  "$ps" -NoLogo -NoProfile -Command '$ErrorActionPreference="Stop"; Add-Type -AssemblyName System.Security; $i=[Console]::In.ReadToEnd(); $e=[Convert]::FromBase64String($i.Trim()); [Console]::Out.Write([Text.Encoding]::UTF8.GetString([Security.Cryptography.ProtectedData]::Unprotect($e,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser)))' 2>/dev/null
+  local ps out; ps=$(_acq_secret_powershell_bin)
+  out=$("$ps" -NoLogo -NoProfile -Command '$ErrorActionPreference="Stop"; Add-Type -AssemblyName System.Security; $i=[Console]::In.ReadToEnd(); $e=[Convert]::FromBase64String($i.Trim()); [Console]::Out.Write([Convert]::ToBase64String([Security.Cryptography.ProtectedData]::Unprotect($e,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser)))' 2>/dev/null) || return 1
+  printf '%s' "$out" | tr -d '\r\n' | base64 -d 2>/dev/null
 }
 
 # _acq_secret_file_is_dpapi_envelope FILE -> 0 if FILE's first line is the DPAPI

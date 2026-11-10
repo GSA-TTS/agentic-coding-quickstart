@@ -179,7 +179,9 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   envelope, so the session never outlives acq holding the terminal. On Windows
   a Ctrl-Break reaches the child from the console itself; acq gives it the same
   ten seconds and exits `149` (SIGBREAK is 21), again with no envelope. A
-  forced kill of acq on Windows cannot be caught (KNOWN_FAILURE_MODES §85).
+  forced kill of acq on Windows (`taskkill /F`, End task) runs no handler, but
+  the session runs in a Job object that closes with acq, so the session and
+  what it started end too (KNOWN_FAILURE_MODES §85).
 * Flag position: acq's own flags (`--json`, `--backend NAME`) may go anywhere
   before `--` for most verbs, so `acq ls --json` and `acq attach box --json`
   work. Only two places are strict: after the `exec` sandbox name, where tokens
