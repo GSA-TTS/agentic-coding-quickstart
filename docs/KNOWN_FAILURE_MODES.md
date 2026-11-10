@@ -5229,40 +5229,56 @@ Covered by `test/bats/170-kit-ref-shape.bats`, `py-acq/tests/test_kit_fetch.py`,
 
 ---
 
-## 92. uutils coreutils: `mkdir` Is Not Exclusive, So Bash's Provider-Input Lock Can Be Shared
+## 92. uutils coreutils: `mkdir` Is Not Exclusive, So Bash's `mkdir` Locks Decide by Their Owner File
 
-**Symptom:** On a host whose `mkdir` is uutils coreutils (Ubuntu 25.10 and
-later ship it as `/usr/bin/mkdir`; `mkdir --version` prints `uutils
-coreutils`), two Bash acq commands on the same sandbox at the same moment (two
-`create`, or `create` and `rm`) can both proceed instead of one waiting for the
-other.
+**Symptom:** Before the fix, on a host whose `mkdir` is uutils coreutils
+(Ubuntu 25.10 and later ship it as `/usr/bin/mkdir`; `mkdir --version` prints
+`uutils coreutils`), two Bash acq commands on the same sandbox at the same
+moment (two `create`, or `create` and `rm`) could both proceed instead of one
+waiting for the other.
 
-**Cause:** Bash acq takes its `mkdir` locks by running `mkdir DIR` and treating
+**Cause:** Bash acq took its `mkdir` locks by running `mkdir DIR` and treating
 success as ownership. GNU and BSD `mkdir` fail with "File exists" for all but
 one of several concurrent callers. uutils `mkdir` 0.10.0 does not: in 300
-three-way races on one host it reported success 466 times. The `config.yaml`
-lock no longer relies on it: the exclusive create of its `owner` file (Bash
-noclobber, which Bash opens with `O_EXCL` itself, and `O_EXCL` in Python)
-decides who holds it, a taker that loses never removes the winner's owner file,
-and an existing directory without an owner file is simply taken
-(`_acq_config_lock_take` in `acq.backends/common.sh`, `_MkdirLock._take` in
-`py-acq/src/acq_py/lock.py`). The per-sandbox provider-input lock
-(`acq_provider_input_lock_acquire`) still writes its owner file without
-noclobber after a successful `mkdir`, so with uutils two Bash commands can both
-take it. The Python acq's own `mkdir` is atomic, but a racing Bash command can
-overwrite a Python holder's owner line in the same way. The progress spinner's
-draw lock (`$dir/draw` in `acq.backends/progress.sh`) is also a plain `mkdir`;
-there the effect is cosmetic, at most one stray spinner frame drawn after the
-spinner was stopped.
+three-way races on one host it reported success 466 times. The Python acq's own
+`mkdir` is atomic, but a racing Bash command could overwrite a Python holder's
+owner line in the same way.
 
-**Resolution:** Until the provider-input lock is changed, avoid running two
-Bash acq commands on the same sandbox at once on such a host, or put GNU
-`mkdir` first on `PATH` (for example the `gnu` coreutils package where the
-distribution offers it).
+**Status:** Fixed. No Bash lock treats a successful `mkdir` as ownership any
+more. Each one decides by an exclusive create of a file: noclobber in Bash,
+which makes Bash open the file with `O_EXCL` itself, and `O_EXCL` in Python.
 
-**Tracked:** make the provider-input lock decide by an exclusive owner-file
-create, as the `config.yaml` lock does. Unblock trigger: none; it can be done
-whenever the provider-input transaction is next changed.
+- **`config.yaml` lock** (`_acq_config_lock_take` in `acq.backends/common.sh`,
+  `ConfigDirLock` in `py-acq/src/acq_py/lock.py`): whoever creates the `owner`
+  file holds it. A taker that loses never removes the winner's owner file, and
+  an existing directory without an owner file is taken (section 79).
+- **Per-sandbox provider-input lock** (`acq_provider_input_lock_acquire` and
+  `_acq_provider_input_lock_take` in `acq.backends/common.sh`, `_BashLock` in
+  `py-acq/src/acq_py/lock.py`): the same rule, except that an existing
+  directory is never taken, so one with no owner file is still left for the
+  user (section 79). A taker whose own owner-file create fails for another
+  reason removes the directory only while it is empty. Bash works out its
+  owner line (`PID IDENTITY`, unchanged) before it makes the directory, which
+  keeps the moment in which the lock has no owner line short. A lock released
+  between a failed take and the look at it is taken again rather than
+  reported as unsafe. The owner format, the stale-owner recovery and the
+  Windows rule (section 88) are unchanged: the directory's age still starts
+  when the owner file is created.
+- **Progress spinner draw lock** (`acq.backends/progress.sh`): the lock is the
+  file `$dir/draw` instead of a directory. The animator creates it in its own
+  shell with noclobber set, so a frame costs no extra fork (Git Bash forks
+  slowly); releasing it costs one `rm`, as the `rmdir` it replaces did. Before
+  the fix the effect was cosmetic, at most one stray spinner frame after the
+  spinner was stopped.
+
+`test/bats/147-provider-input-projection.bats` runs parallel Bash takers, and
+Bash and Python takers together, with a `mkdir` that reports success for an
+existing directory, and asserts that no two ever hold the lock at once.
+
+**Resolution:** Update acq. On an older acq, avoid running two Bash acq
+commands on the same sandbox at once on such a host, or put GNU `mkdir` first
+on `PATH` (for example the `gnu` coreutils package where the distribution
+offers it).
 
 ---
 
