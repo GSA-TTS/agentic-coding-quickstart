@@ -862,6 +862,7 @@ def test_a_socket_inside_the_recorded_workspace_is_refused_at_refresh(tmp_path, 
     assert os.readlink(link) == outside  # kept: still the user's socket outside the workspace
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX socket paths (a Windows host never forwards)")
 def test_the_owner_of_a_forwarded_socket_is_warned_about_not_refused(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(ssh_agent, "is_socket", lambda p: True)
     monkeypatch.setattr(ssh_agent, "_socket_owned_by_me", lambda p: False)
