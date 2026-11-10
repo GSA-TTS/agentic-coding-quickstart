@@ -62,6 +62,27 @@ class LegacyParseError(ValueError):
     """A Bash config value the Bash acq itself would refuse to use."""
 
 
+# A credential written into a kit source as URL userinfo without a scheme
+# (``bob:TOKEN@github.com/acme/kits``): a token, at the start of a word or
+# after a quote, whose ``@`` is followed by a host and a ``/``.
+_SCHEMELESS_USERINFO_RE = re.compile(r"(?:(?<=^)|(?<=[\s'\"(=,]))[^\s'\"/@]+@(?=[^\s'\"/@]+/)")
+# A query string in a URL (``https://host/repo?token=...``).
+_URL_QUERY_RE = re.compile(r"(://[^\s'\"?]*)\?[^\s'\"]*")
+
+
+def redact(text: str) -> str:
+    """``text`` with URL credentials hidden: userinfo becomes ``***@`` and a query ``?***``.
+
+    Bash config values end up in warnings that are printed and kept in the
+    migration marker (``acq doctor`` shows them again), so a token pasted into
+    a kit source must never be quoted back. Applied to each value quoted in a
+    message and again to every message :func:`warn` is given.
+    """
+    text = kits.redact_userinfo(text)
+    text = _SCHEMELESS_USERINFO_RE.sub("***@", text)
+    return _URL_QUERY_RE.sub(r"\1?***", text)
+
+
 @dataclass(frozen=True)
 class BashSandbox:
     """What the Bash acq recorded for one sandbox (fields absent when not recorded)."""
@@ -296,14 +317,14 @@ def parse_kit_source_entry(entry: str) -> tuple[str, str, str]:
     rest, _, ref = rest.partition("@")
     repo = kits.normalize_repo(rest) if rest == rest.strip() else None
     if not entry or repo is None or len(repo) > 200:
-        raise LegacyParseError(f"invalid kit source '{entry}'")
+        raise LegacyParseError(f"invalid kit source '{redact(entry)}'")
     if not _REF_RE.fullmatch(ref):
-        raise LegacyParseError(f"invalid ref '{ref}' for '{repo}'")
+        raise LegacyParseError(f"invalid ref '{redact(ref)}' for '{redact(repo)}'")
     if not ref and repo == kits.CONTROL_PLANE_REPO:
         ref = kits.CONTROL_PLANE_REF
     normalized = kits.normalize_dir(directory or None)
     if normalized is None:
-        raise LegacyParseError(f"unsafe kit dir '{directory}' for '{repo}'")
+        raise LegacyParseError(f"unsafe kit dir '{redact(directory)}' for '{redact(repo)}'")
     return repo, ref, normalized
 
 
@@ -379,6 +400,8 @@ _collected: list[str] | None = None
 
 
 def warn(message: str) -> None:
+    """Print ``message`` as a warning, or collect it (see :func:`collecting_warnings`), redacted either way."""
+    message = redact(message)
     if _collected is not None:
         _collected.append(message)
         return

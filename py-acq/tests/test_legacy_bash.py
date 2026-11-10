@@ -448,6 +448,49 @@ def test_doctor_reports_a_pending_import_after_its_warning_stops_printing(tree, 
     assert migration.read_import_warnings() == []
 
 
+@pytest.mark.parametrize("entry", [
+    f"https://bob:S3NTINEL-tok-1@github.com/acme/kits@{SHA}",
+    f"bob:S3NTINEL-tok-1@github.com/acme/kits@{SHA}",
+])
+def test_a_credential_in_a_bash_kit_source_never_reaches_output_marker_or_doctor(tree, capsys, entry):
+    from acq_py import cli, doctor
+
+    _config(f"kit_sources: {entry}\n")
+    migration.migrate_tree()
+    err = capsys.readouterr().err
+    assert "kit_sources was not imported" in err and "***" in err
+    assert "S3NTINEL-tok-1" not in err
+    assert "S3NTINEL-tok-1" not in migration.generation_path().read_text(encoding="utf-8")
+    assert "S3NTINEL-tok-1" not in json.dumps(doctor.bash_import_check())
+    assert cli.main(["doctor", "--json"]) == 0
+    out, err = capsys.readouterr()
+    assert "kit_sources was not imported" in out
+    assert "S3NTINEL-tok-1" not in out + err
+
+
+def test_an_old_marker_holding_a_credential_is_redacted_when_read(tree):
+    from acq_py import doctor
+
+    migration.write_generation(migration.RECORDS_GENERATION, import_done={"sandboxes"}, import_warned="0" * 64)
+    doc = json.loads(migration.generation_path().read_text(encoding="utf-8"))
+    doc["bash_import_warnings"] = [f"config.yaml kit_sources was not imported: invalid kit source "
+                                   f"'https://bob:S3NTINEL-tok-2@github.com/acme/kits@{SHA}'"]
+    migration.generation_path().write_text(json.dumps(doc), encoding="utf-8")
+    check = doctor.bash_import_check()
+    assert "S3NTINEL-tok-2" not in json.dumps(check) and "https://***@github.com" in check["message"]
+
+
+@pytest.mark.parametrize(("text", "shown"), [
+    ("https://u:p@host/r", "https://***@host/r"),
+    ("'u:p@host/r@sha'", "'***@host/r@sha'"),
+    ("github.com/acme/kits@sha", "github.com/acme/kits@sha"),  # a ref, not userinfo
+    ("https://host/r?token=x", "https://host/r?***"),
+    ("is the path right?", "is the path right?"),
+])
+def test_redact_hides_url_credentials_only(text, shown):
+    assert legacy_bash.redact(text) == shown
+
+
 def test_a_marker_from_before_the_warning_text_was_kept_gets_it_without_a_reprint(tree, capsys):
     from acq_py import doctor
 

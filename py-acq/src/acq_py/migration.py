@@ -173,9 +173,13 @@ def read_import_warned() -> str | None:
 
 
 def read_import_warnings() -> list[str]:
-    """The warnings the pending import last printed (``acq doctor`` shows them again)."""
+    """The warnings the pending import last printed (``acq doctor`` shows them again).
+
+    Redacted again on the way out (:func:`legacy_bash.redact`), so a marker
+    written by an acq that did not redact never shows a credential.
+    """
     warnings = _read_marker().get("bash_import_warnings")
-    return [w for w in warnings if isinstance(w, str)] if isinstance(warnings, list) else []
+    return [legacy_bash.redact(w) for w in warnings if isinstance(w, str)] if isinstance(warnings, list) else []
 
 
 def import_started() -> bool:
@@ -198,7 +202,9 @@ def write_generation(generation: int, *, import_done: set[str] | None = None,
     warnings that import last printed, so the same ones are not printed again,
     and ``import_warnings`` their text, which ``acq doctor`` reports while the
     import stays pending (a mutating command prints them only once). The
-    warnings name paths and settings, never a secret value.
+    warnings name paths and Bash config values; URL credentials in those values
+    are redacted when a warning is raised (:func:`legacy_bash.warn`) and again
+    here, before the text is written.
     """
     path = generation_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -209,7 +215,7 @@ def write_generation(generation: int, *, import_done: set[str] | None = None,
     if import_warned:
         doc["bash_import_warned"] = import_warned
     if import_warnings:
-        doc["bash_import_warnings"] = list(import_warnings)
+        doc["bash_import_warnings"] = [legacy_bash.redact(w) for w in import_warnings]
     data = json.dumps(doc, indent=2)
     with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(data + "\n")
