@@ -1786,7 +1786,10 @@ acq_host_socket_forwards() {
         printf 'acq: SSH_AUTH_SOCK path contains a tab/newline; skipping ssh-agent forwarding\n' >&2
       else
         case "$_p" in
-          /*) printf '%s\t%s\t%s\t%s\n' "$_p" "$_agent_port" "stream" "ssh-agent" ;;
+          /*)
+            # Check the forwarded socket's owner: warn, never refuse.
+            [ -O "$_p" ] || printf 'acq: warning: SSH_AUTH_SOCK names a socket owned by another user; forwarding it anyway\n' >&2
+            printf '%s\t%s\t%s\t%s\n' "$_p" "$_agent_port" "stream" "ssh-agent" ;;
           *) printf 'acq: SSH_AUTH_SOCK path is not absolute; skipping ssh-agent forwarding\n' >&2 ;;
         esac
       fi
@@ -1848,6 +1851,7 @@ acq_host_socket_forwards() {
       printf 'acq: host-socket port %s is invalid (need 1..4294967294, != 123); skipping\n' "$_port" >&2
       continue
     fi
+    [ -O "$_path" ] || printf 'acq: warning: host-socket path %s is a socket owned by another user; forwarding it anyway\n' "$_path" >&2
     printf '%s\t%s\t%s\t%s\n' "$_path" "$_port" "$_kind" "custom"
   done
 }

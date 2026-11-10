@@ -753,7 +753,7 @@ def _msb_create(name: str, image: str, workspace: str, kit_set: list[kit_msb.Kit
     if generation is not None:
         flags += provider_input.msb_flags(generation)
     # Host ssh-agent and host socket forwards (ADR-0021): opt-in through SSH_AUTH_SOCK.
-    flags += ssh_agent.vsock_flags(name)
+    flags += ssh_agent.vsock_flags(name, [workspace])
     try:
         bindings = msb.create(
             name, image, workspace, memory=msb.DEFAULT_MEMORY, cpus=msb.DEFAULT_CPUS,

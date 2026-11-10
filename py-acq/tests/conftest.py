@@ -86,6 +86,7 @@ def isolate_user_dirs(tmp_path_factory, monkeypatch):
 
     monkeypatch.setattr(ssh_agent, "_ACTIVE", set())
     monkeypatch.setattr(ssh_agent, "_NOTICE_SHOWN", [False])
+    monkeypatch.setattr(ssh_agent, "_GUEST_SOCK_WARNED", [False])
     monkeypatch.setattr(sbx, "_SSH_AGENT_NOTICE_SHOWN", [False])
     # The acq secret store would otherwise pick the host keychain (secret-tool,
     # macOS security, DPAPI) and could overwrite a developer's real credential.

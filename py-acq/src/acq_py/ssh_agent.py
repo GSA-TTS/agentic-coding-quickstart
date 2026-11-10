@@ -60,7 +60,8 @@ _VSOCK_PORT_RESERVED = 123  # reserved by msb
 _NOTICE = (
     "acq(msb): forwarding your host ssh-agent into the guest because SSH_AUTH_SOCK"
     " is set. Guest code can use every key the agent holds while the sandbox runs;"
-    " unset SSH_AUTH_SOCK to opt out, or run 'ssh-add -c' to confirm each use. See ADR-0021."
+    " unset SSH_AUTH_SOCK to opt out (an existing sandbox is disconnected at its next start or run),"
+    " or run 'ssh-add -c' to confirm each use. See ADR-0021."
 )
 _NAME_RULE = "the name must use only letters, digits, '_' and '-', not start with '-'"
 
@@ -71,6 +72,7 @@ _NAME_RULE = "the name must use only letters, digits, '_' and '-', not start wit
 # ``SSH_AUTH_SOCK``. The notice prints at most once per process.
 _ACTIVE: set[str] = set()
 _NOTICE_SHOWN = [False]
+_GUEST_SOCK_WARNED = [False]
 
 
 def _say(message: str) -> None:
@@ -116,13 +118,13 @@ def guest_sock() -> str:
     the default is used.
     """
     value = os.environ.get("ACQ_MSB_SSH_AGENT_GUEST_SOCK") or DEFAULT_GUEST_SOCK
-    if not value.startswith("/"):
-        _say(f"acq(msb): warning: ignoring non-absolute ACQ_MSB_SSH_AGENT_GUEST_SOCK='{value}'; using default.")
-        return DEFAULT_GUEST_SOCK
-    if not _SAFE_GUEST_SOCK.fullmatch(value):
-        _say(f"acq(msb): warning: ignoring unsafe ACQ_MSB_SSH_AGENT_GUEST_SOCK='{value}'; using default.")
-        return DEFAULT_GUEST_SOCK
-    return value
+    if _SAFE_GUEST_SOCK.fullmatch(value):
+        return value
+    if not _GUEST_SOCK_WARNED[0]:  # once per process, as Bash warns once when it loads
+        _GUEST_SOCK_WARNED[0] = True
+        kind = "non-absolute" if not value.startswith("/") else "unsafe"
+        _say(f"acq(msb): warning: ignoring {kind} ACQ_MSB_SSH_AGENT_GUEST_SOCK='{value}'; using default.")
+    return DEFAULT_GUEST_SOCK
 
 
 def valid_vsock_port(port: str) -> bool:
@@ -150,6 +152,17 @@ def is_socket(path: str) -> bool:
     try:
         return stat.S_ISSOCK(os.stat(path).st_mode)
     except (OSError, ValueError):
+        return False
+
+
+def _owned_by_me(info: os.stat_result) -> bool:
+    return not hasattr(os, "geteuid") or info.st_uid == os.geteuid()
+
+
+def _socket_owned_by_me(path: str) -> bool:
+    try:
+        return _owned_by_me(os.stat(path))
+    except OSError:
         return False
 
 
@@ -182,6 +195,8 @@ def _agent_forward(say) -> Forward | None:
     elif not path.startswith("/"):
         say("acq: SSH_AUTH_SOCK path is not absolute; skipping ssh-agent forwarding")
     else:
+        if not _socket_owned_by_me(path):
+            say("acq: warning: SSH_AUTH_SOCK names a socket owned by another user; forwarding it anyway")
         return Forward(path, port, "stream", LABEL_AGENT)
     return None
 
@@ -211,6 +226,8 @@ def _custom_forward(entry: str, say) -> Forward | None:
     elif not valid_vsock_port(port):
         say(f"acq: host-socket port {port} is invalid (need 1..4294967294, != 123); skipping")
     else:
+        if not _socket_owned_by_me(path):
+            say(f"acq: warning: host-socket path {path} is a socket owned by another user; forwarding it anyway")
         return Forward(path, port, kind, LABEL_CUSTOM)
     return None
 
@@ -234,6 +251,38 @@ def host_socket_forwards(*, quiet: bool = False) -> list[Forward]:
     return out
 
 
+def workspace_holding(path: str, workspaces: list[str]) -> str | None:
+    """The writable workspace ``path`` lies in (both compared canonical), or ``None``.
+
+    A forwarded socket must never be a file the sandbox itself can create or
+    replace through its workspace mount.
+    """
+    # The shared containment check, imported here because the commands package imports this module.
+    from .commands import common
+
+    real = _canonical(path)
+    for ws in workspaces:
+        if ws and common._within(real, _canonical(ws)):
+            return ws
+    return None
+
+
+def _refuse_inside(fwd_path: str, label: str, ws: str) -> None:
+    source = "SSH_AUTH_SOCK" if label == LABEL_AGENT else "ACQ_FORWARD_HOST_SOCKETS"
+    _say(f"acq(msb): refusing to forward the socket '{fwd_path}' ({source}): it is inside the workspace '{ws}', "
+         "which the sandbox can write.")
+
+
+def recorded_workspaces(name: str) -> list[str]:
+    """The sandbox's recorded host workspace, as the refresh checks it (Bash ``acq_workspace_record_read``)."""
+    try:
+        record = state.record_read("msb", name)
+    except state.StateSchemaError:
+        return []
+    ws = (record or {}).get("workspace")
+    return [ws] if isinstance(ws, str) and ws else []
+
+
 # ---------------------------------------------------------------------------
 # The managed route link (ADR-0021 amendment).
 # ---------------------------------------------------------------------------
@@ -249,9 +298,8 @@ def link_path(name: str) -> str | None:
     """
     if not _SAFE_NAME.fullmatch(name) or name.startswith("-"):
         return None
-    try:
-        base = state.state_dir()
-    except userdirs.UserDirError:
+    base = _state_dir_text()
+    if base is None:
         return None
     link_dir = f"{base}/msb/ssh-agent"
     path = f"{link_dir}/{name}.sock"
@@ -260,6 +308,40 @@ def link_path(name: str) -> str | None:
         if len(path.encode("utf-8")) > SUN_PATH_MAX:
             return None
     return path
+
+
+def _state_dir_text() -> str | None:
+    """The state root spelled as Bash's ``acq_state_dir`` prints it, so both name the same link.
+
+    ``ACQ_STATE_DIR`` and ``XDG_STATE_HOME`` are used as given (a trailing
+    slash included); the length of the result decides the link's name.
+    """
+    try:
+        default = state.state_dir()
+    except userdirs.UserDirError:
+        return None
+    override = os.environ.get("ACQ_STATE_DIR", "")
+    if override:
+        return override
+    xdg = os.environ.get("XDG_STATE_HOME", "")
+    return f"{xdg}/acq" if userdirs.is_absolute(xdg) else str(default)
+
+
+def _private_link_dir(path: str) -> bool:
+    """Create the link directory 0700, or accept it only as this user's own real directory."""
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        try:
+            os.mkdir(path, 0o700)
+        except FileExistsError:
+            pass
+        info = os.lstat(path)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or not _owned_by_me(info):
+            return False
+        os.chmod(path, 0o700)
+    except OSError:
+        return False
+    return True
 
 
 def link_point(link: str, target: str) -> bool:
@@ -275,8 +357,9 @@ def link_point(link: str, target: str) -> bool:
         return False
     if os.path.islink(link) and os.readlink(link) == target:
         return True
+    if not _private_link_dir(os.path.dirname(link)):
+        return False
     try:
-        os.makedirs(os.path.dirname(link), exist_ok=True)
         if os.path.islink(link) and os.path.isdir(link):
             os.unlink(link)  # a rename would land inside the directory it resolves to
     except OSError:
@@ -316,28 +399,92 @@ def route_path(name: str, agent: str) -> str:
     return agent
 
 
-def link_refresh(name: str) -> str:
-    """Re-point an existing managed link at the current ``SSH_AUTH_SOCK``; why it was left alone, or "".
+def link_refresh(name: str, *, relink: bool = False) -> tuple[str, bool]:
+    """Re-point the managed link at the current ``SSH_AUTH_SOCK``: ``(why it was left alone, removed)``.
 
     A sandbox without a link (created before the link existed, or under a name
-    that cannot carry one) is left as it is, and so is the link when
-    ``SSH_AUTH_SOCK`` is not a socket here. Never fails the caller.
+    that cannot carry one) is left as it is, unless ``relink`` says its route
+    names the link, which is then made again. When the link cannot be
+    re-pointed (no socket here, a socket inside the workspace, a link that
+    cannot be replaced), its current target is checked: unless that is a socket
+    owned by this user outside the workspace, the link is removed and
+    ``removed`` is True, so the caller starts no bridge. Never fails the caller.
     """
     link = link_path(name)
-    if link is None or not os.path.islink(link):
-        return ""
+    if link is None or not (relink or os.path.islink(link)):
+        return "", False
+    workspaces = recorded_workspaces(name)
     target = os.environ.get("SSH_AUTH_SOCK", "")
     if not target or not is_socket(target):
-        return (f"SSH_AUTH_SOCK is unset or not a socket in this shell. Re-run 'acq start {name}' or "
-                f"'acq run {name}' from a shell where SSH_AUTH_SOCK names your live agent (e.g. after "
-                "'eval \"$(ssh-agent -s)\"; ssh-add').")
-    target = _canonical(target)
-    if link_point(link, target):
+        reason = (f"SSH_AUTH_SOCK is unset or not a socket in this shell. Re-run 'acq start {name}' or "
+                  f"'acq run {name}' from a shell where SSH_AUTH_SOCK names your live agent (e.g. after "
+                  "'eval \"$(ssh-agent -s)\"; ssh-add').")
+    else:
+        target = _canonical(target)
+        ws = workspace_holding(target, workspaces)
+        if ws is None and link_point(link, target):
+            return "", False
+        if ws is not None:
+            _refuse_inside(target, LABEL_AGENT, ws)
+            reason = (f"SSH_AUTH_SOCK names a socket inside the workspace '{ws}'. Re-run 'acq start {name}' or "
+                      f"'acq run {name}' from a shell whose SSH_AUTH_SOCK is outside it.")
+        else:
+            _say(f"acq(msb): warning: could not re-point the ssh-agent route link '{link}' at '{target}'; "
+                 f"the forwarded agent may be unreachable in '{name}'.")
+            reason = (f"the link could not be replaced. Fix or remove '{link}' (is its directory writable, and is "
+                      f"it still a symlink?), then re-run 'acq start {name}' or 'acq run {name}'.")
+    if os.path.islink(link) and not _link_target_ok(link, workspaces):
+        current = _readlink(link)
+        _unlink_quietly(link)
+        _say(f"acq(msb): removed the ssh-agent route link '{link}' and did not start the bridge in '{name}': "
+             f"its target '{current}' is not a socket owned by you outside the workspace.")
+        return reason, True
+    return reason, False
+
+
+def _readlink(link: str) -> str:
+    try:
+        return os.readlink(link)
+    except OSError:
         return ""
-    _say(f"acq(msb): warning: could not re-point the ssh-agent route link '{link}' at '{target}'; "
-         f"the forwarded agent may be unreachable in '{name}'.")
-    return (f"the link could not be replaced. Fix or remove '{link}' (is its directory writable, and is it "
-            f"still a symlink?), then re-run 'acq start {name}' or 'acq run {name}'.")
+
+
+def _link_target_ok(link: str, workspaces: list[str]) -> bool:
+    """The link's current target is itself (lstat) a socket owned by this user, outside the workspace."""
+    target = _readlink(link)
+    if not target:
+        return False
+    target = os.path.join(os.path.dirname(link), target)
+    try:
+        info = os.lstat(target)
+    except OSError:
+        return False
+    return stat.S_ISSOCK(info.st_mode) and _owned_by_me(info) and workspace_holding(target, workspaces) is None
+
+
+def opt_out(name: str) -> None:
+    """``SSH_AUTH_SOCK`` is unset here: disconnect the forward (ADR-0021 opt-out).
+
+    The managed link goes, so the route reaches nothing; the recorded guest
+    socket goes, so no session gets ``SSH_AUTH_SOCK``; no bridge is started.
+    Setting ``SSH_AUTH_SOCK`` and re-running ``start`` or ``run`` reconnects.
+    """
+    _ACTIVE.discard(name)
+    removed = False
+    link = link_path(name)
+    if link is not None and os.path.islink(link):
+        _unlink_quietly(link)
+        removed = True
+    if _recorded_text(name):
+        kit_msb.hc_clear(name, HOST_CONFIG_KEY)
+        removed = True
+    if removed:
+        _say(f"acq(msb): SSH_AUTH_SOCK is unset, so the forwarded ssh-agent was disconnected from '{name}'; set it "
+             f"and re-run 'acq start {name}' or 'acq run {name}' to reconnect.")
+
+
+def _opted_out() -> bool:
+    return not os.environ.get("SSH_AUTH_SOCK")
 
 
 def link_managed(name: str) -> bool:
@@ -367,12 +514,12 @@ def _vsock_supported() -> bool:
     return False
 
 
-def vsock_flags(name: str) -> list[str]:
+def vsock_flags(name: str, workspaces: list[str]) -> list[str]:
     """``msb create`` ``--vsock`` flags for the requested forwards, and mark ``name`` active.
 
     Called once per create. Nothing is emitted (with a warning) on an msb too
     old for ``--vsock``: forwarding is opt-in convenience and never fails a
-    create.
+    create. A socket inside one of the writable ``workspaces`` is refused.
     """
     _ACTIVE.discard(name)
     forwards = host_socket_forwards()
@@ -380,6 +527,10 @@ def vsock_flags(name: str) -> list[str]:
         return []
     flags: list[str] = []
     for fwd in forwards:
+        ws = workspace_holding(fwd.path, workspaces)
+        if ws is not None:
+            _refuse_inside(fwd.path, fwd.label, ws)
+            continue
         path = route_path(name, fwd.path) if fwd.label == LABEL_AGENT else fwd.path
         flags += ["--vsock", f"{path}:{fwd.port}/{fwd.kind}"]
         if fwd.label == LABEL_AGENT:
@@ -443,26 +594,38 @@ def recorded_sock(name: str) -> str | None:
     Only an absolute path in the word-safe charset is accepted: it is spliced
     into in-guest ``sh -c`` strings and session environments.
     """
-    try:
-        raw = (security.host_config_dir(name) / HOST_CONFIG_KEY).read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return None
-    value = "".join(raw.split())
+    value = _recorded_text(name)
     return value if _SAFE_GUEST_SOCK.fullmatch(value) else None
 
 
-def start_bridge(name: str) -> None:
+def _recorded_text(name: str) -> str:
+    """The ``ssh-auth-sock`` host-config value with all whitespace dropped (Bash's ``tr -d '[:space:]'``)."""
+    try:
+        raw = (security.host_config_dir(name) / HOST_CONFIG_KEY).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+    return "".join(raw.split())
+
+
+def start_bridge(name: str, *, relink: bool = False) -> None:
     """(Re)start the bridge, record the guest socket, then probe the forwarded agent.
 
     The socket is the constant when this process wired the forward, else the
     one recorded host-side; with neither, forwarding was never set up and
-    nothing runs. The host end of the route is healed first (:func:`link_refresh`).
-    Fail-soft: every problem is a warning.
+    nothing runs. With ``SSH_AUTH_SOCK`` unset here the forward is disconnected
+    instead (:func:`opt_out`). The host end of the route is healed first
+    (:func:`link_refresh`, which makes the link again when ``relink``); when it
+    removed the link, no bridge starts. Fail-soft: every problem is a warning.
     """
+    if name not in _ACTIVE and _opted_out():
+        opt_out(name)
+        return
     sock = guest_sock() if name in _ACTIVE else recorded_sock(name)
     if sock is None:
         return
-    skipped = link_refresh(name)
+    skipped, removed = link_refresh(name, relink=relink)
+    if removed:
+        return
     port = bridge_port()
     if not valid_vsock_port(port):
         _say(f"acq(msb): warning: ACQ_MSB_SSH_AGENT_VSOCK_PORT {port} is invalid (need 1..4294967294, != 123); "
@@ -562,33 +725,55 @@ def has_route(name: str) -> int:
     it is not mistaken for a route. :data:`ROUTE_UNKNOWN` when inspect failed or
     printed nothing twice: that says nothing about the route.
     """
-    doc = ""
+    return _route_state(_route_doc(name))
+
+
+def _route_doc(name: str) -> str | None:
+    """``msb inspect NAME --format json`` flattened as Bash flattens it, or ``None`` when it failed twice."""
     for _try in range(2):
         proc = msb.call(["inspect", name, "--format", "json"], timeout=GUEST_TIMEOUT_S)
         doc = (proc.stdout or "").rstrip("\n") if _ok(proc) and proc is not None else ""
         if doc:
-            break
-    if not doc:
+            return doc.translate(_FLATTEN)
+    return None
+
+
+def _route_state(flat: str | None) -> int:
+    if flat is None:
         return ROUTE_UNKNOWN
-    flat = doc.translate(_FLATTEN)
     if not re.search(r"(^|:)vsock:?$", flat, re.MULTILINE):
         return ROUTE_MISSING
-    pattern = rf"port[:=]{re.escape(bridge_port())}$"
+    # Anchored at the start of a flattened field, so guest_port/host_port never match.
+    pattern = rf"^port[:=]{re.escape(bridge_port())}$"
     return ROUTE_PRESENT if re.search(pattern, flat, re.MULTILINE) else ROUTE_MISSING
+
+
+def _route_names_link(flat: str | None, name: str) -> bool:
+    """The route's host socket is this sandbox's managed link (so a removed link may be made again)."""
+    link = link_path(name)
+    if flat is None or link is None:
+        return False
+    return f"host_socket:{link.replace(' ', '')}" in flat.splitlines()
 
 
 def ensure_forward(name: str) -> str | None:
     """Re-establish the forward on a sandbox acq is healing; the guest socket when it is wired.
 
-    A no-op unless the host requests an agent forward AND the sandbox carries
-    the create-time route (it cannot be added later, and a bridge without it
-    would advertise a dead agent). When both hold, the forward is active for
-    this process (so kit commands get ``SSH_AUTH_SOCK``), then the socat check
-    and the bridge run as on create. Fail-soft throughout.
+    With ``SSH_AUTH_SOCK`` unset the forward is disconnected (:func:`opt_out`).
+    Otherwise a no-op unless the host requests an agent forward AND the sandbox
+    carries the create-time route (it cannot be added later, and a bridge
+    without it would advertise a dead agent). When both hold, the forward is
+    active for this process (so kit commands get ``SSH_AUTH_SOCK``), then the
+    socat check and the bridge run as on create; a managed link the opt-out
+    removed is made again when the route names it. Fail-soft throughout.
     """
+    if _opted_out():
+        opt_out(name)
+        return None
     if not any(f.label == LABEL_AGENT for f in host_socket_forwards(quiet=True)):
         return None
-    route = has_route(name)
+    flat = _route_doc(name)
+    route = _route_state(flat)
     if route == ROUTE_UNKNOWN:
         # Bash appends msb's own stderr here; acq-py never surfaces raw backend
         # text (ADR-0040m), so the warning names the failed call only.
@@ -605,6 +790,6 @@ def ensure_forward(name: str) -> str | None:
         return None
     _ACTIVE.add(name)
     if check_socat(name):
-        start_bridge(name)
+        start_bridge(name, relink=_route_names_link(flat, name))
     return guest_sock()
 
