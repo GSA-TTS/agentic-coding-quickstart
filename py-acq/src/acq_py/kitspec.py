@@ -531,18 +531,23 @@ class _FileParser:
     def flush(self) -> None:
         c = self.cur
         self.cur = dict.fromkeys(self._KEYS, "")
-        path, mode, source = c["path"], c["mode"], c["source"]
+        path, mode, source, phase = c["path"], c["mode"], c["source"], c["phase"]
         if path == "":
             return
         if mode != "" and not _OCTAL_MODE.fullmatch(mode):
             self.warn.append(f"kit-translate: skipping file with invalid mode: {mode}")
+        elif phase != "" and phase not in _PHASES:
+            # The phase is one of the lifecycle phases a command may name, as
+            # for commands; anything else (a tab, a typo) would also shift the
+            # columns of the tab-separated record.
+            self.warn.append(f"kit-translate: skipping file with unknown phase: {phase}")
         elif not _SAFE_PATH.fullmatch(path):
             self.warn.append(f"kit-translate: skipping file with unsafe path: {path}")
         elif source != "" and (not _SAFE_PATH.fullmatch(source) or source.startswith("/")
                                or _DOTDOT_SEGMENT.search(source)):
             self.warn.append(f"kit-translate: skipping file with unsafe source: {source}")
         else:
-            self.out.append(FileEntry(path, mode, c["phase"], source, c["readonly"] == "true"))
+            self.out.append(FileEntry(path, mode, phase, source, c["readonly"] == "true"))
 
     def run(self, lines: Sequence[str]) -> list[FileEntry]:
         in_files = False

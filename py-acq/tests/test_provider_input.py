@@ -397,6 +397,33 @@ def test_classify_matches_bash():
     assert provider_input.classify("xx|") == ""
 
 
+def test_classify_splits_where_bash_does():
+    # Bash takes the HTTP code from before the FIRST '|' and curl's exit code
+    # from after the LAST one; with no '|' both are the whole output.
+    assert provider_input.classify("200|7|0") == "200"
+    assert provider_input.classify("401|x|0") == "401"
+    assert provider_input.classify("200") == "unreachable"
+    # Only ASCII digits count (Bash's tr -cd '0-9').
+    assert provider_input.classify("٢٠٠|0") == ""
+
+
+@pytest.mark.skipif(not hasattr(os, "fchmod") or not getattr(os, "O_NOFOLLOW", 0), reason="needs O_NOFOLLOW and fchmod")
+def test_chmod_nofollow_never_follows_a_link_swapped_in_after_the_check(tmp_path, monkeypatch):
+    target = tmp_path / "target"
+    target.write_text("x", encoding="utf-8")
+    target.chmod(0o644)
+    link = tmp_path / "entry"
+    link.symlink_to(target)
+    # The link appears only after any by-name check would have run.
+    monkeypatch.setattr(provider_input.os.path, "islink", lambda _p: False)
+    provider_input._chmod_nofollow(link, 0o400)
+    assert stat.S_IMODE(target.stat().st_mode) == 0o644
+    plain = tmp_path / "plain"
+    plain.write_text("y", encoding="utf-8")
+    provider_input._chmod_nofollow(plain, 0o444)
+    assert stat.S_IMODE(plain.stat().st_mode) == 0o444
+
+
 # ---------------------------------------------------------------------------
 # Recreate gates before it removes the old guest.
 # ---------------------------------------------------------------------------

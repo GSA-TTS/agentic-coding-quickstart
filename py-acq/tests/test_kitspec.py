@@ -129,6 +129,19 @@ def python_report(spec: kitspec.KitSpec) -> str:
     return "".join(out)
 
 
+# The file-entry phase check is added to both parsers, Bash's in kit-translate.sh.
+# Until Bash's copy carries it, a spec whose file entry Python refuses for its
+# phase alone is the one expected difference and is left out of the comparison;
+# once the Bash check is present every spec is compared again, so the two must
+# then agree on the message and its position too.
+_FILE_PHASE_WARNING = "kit-translate: skipping file with unknown phase: "
+_BASH_CHECKS_FILE_PHASE = _FILE_PHASE_WARNING in KIT_TRANSLATE.read_text(encoding="utf-8")
+
+
+def _known_difference(spec: kitspec.KitSpec) -> bool:
+    return not _BASH_CHECKS_FILE_PHASE and any(w.startswith(_FILE_PHASE_WARNING) for w in spec.warnings["files"])
+
+
 def assert_parity(paths: list[Path], locale: str = "C") -> int:
     """Compare every spec; return how many Python refused as a whole."""
     reports = bash_reports(paths, locale)
@@ -141,6 +154,8 @@ def assert_parity(paths: list[Path], locale: str = "C") -> int:
             # multi-byte character, where Bash would print a broken byte.
             assert "multi-byte" in str(exc), (path, exc)
             refused += 1
+            continue
+        if _known_difference(spec):
             continue
         assert python_report(spec) == reports[str(path)], f"parity mismatch for {path}:\n{path.read_bytes()!r}"
     return refused
@@ -696,6 +711,25 @@ def test_typed_records():
     assert zscaler.has_shortcut("msb") and not zscaler.has_shortcut("sbx")
     assert zscaler.shortcut_val("msb", "trust_host_cas") == "true"
     assert zscaler.agent_context[0] == "## Zscaler Root CA"
+
+
+def test_a_file_entry_with_an_unknown_phase_is_skipped():
+    # A file's phase takes the command phases only. A tab in it would also
+    # shift the columns of the tab-separated record, so it is refused rather
+    # than carried.
+    spec = kitspec.parse_spec(
+        b"files:\n"
+        b"  - path: /home/agent/a\n    phase: boot\n"
+        b'  - path: /home/agent/t\n    phase: "init\tFiles"\n'
+        b"  - path: /home/agent/b\n    phase: initFiles\n"
+        b"  - path: /home/agent/c\n"
+    )
+    assert [(f.path, f.phase) for f in spec.files] == [("/home/agent/b", "initFiles"), ("/home/agent/c", "")]
+    assert list(spec.warnings["files"]) == [
+        "kit-translate: skipping file with unknown phase: boot",
+        "kit-translate: skipping file with unknown phase: init\tFiles",
+    ]
+    assert all(len(f.record().split("\t")) == 5 for f in spec.files)
 
 
 # ---------------------------------------------------------------------------
