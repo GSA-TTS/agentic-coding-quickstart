@@ -21,7 +21,6 @@ timeout ends every process the call started (:class:`StepJob`).
 
 from __future__ import annotations
 
-import ctypes
 import errno
 import functools
 import ntpath
@@ -358,33 +357,40 @@ _BREAKAWAY_OK = 0x00000800  # JOB_OBJECT_LIMIT_BREAKAWAY_OK
 _PROCESS_JOB_ACCESS = 0x0001 | 0x0100 | 0x0800
 
 
-class _BasicLimits(ctypes.Structure):
-    """JOBOBJECT_BASIC_LIMIT_INFORMATION."""
+@functools.cache
+def job_structures() -> tuple[Any, Any]:
+    """``(JOBOBJECT_BASIC_LIMIT_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION)`` as ctypes structures.
 
-    _fields_ = [
-        ("PerProcessUserTimeLimit", ctypes.c_int64),
-        ("PerJobUserTimeLimit", ctypes.c_int64),
-        ("LimitFlags", ctypes.c_uint32),
-        ("MinimumWorkingSetSize", ctypes.c_size_t),
-        ("MaximumWorkingSetSize", ctypes.c_size_t),
-        ("ActiveProcessLimit", ctypes.c_uint32),
-        ("Affinity", ctypes.c_size_t),
-        ("PriorityClass", ctypes.c_uint32),
-        ("SchedulingClass", ctypes.c_uint32),
-    ]
+    Built on first use, so ``ctypes`` (and its ``_ctypes`` extension, which a
+    stripped-down Python may lack) is imported only where a Job object is
+    used, never at acq's startup. ``IoInfo`` is IO_COUNTERS (six 64-bit counters).
+    """
+    import ctypes
 
+    class BasicLimits(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_int64),
+            ("PerJobUserTimeLimit", ctypes.c_int64),
+            ("LimitFlags", ctypes.c_uint32),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", ctypes.c_uint32),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", ctypes.c_uint32),
+            ("SchedulingClass", ctypes.c_uint32),
+        ]
 
-class _ExtendedLimits(ctypes.Structure):
-    """JOBOBJECT_EXTENDED_LIMIT_INFORMATION; ``IoInfo`` is IO_COUNTERS (six 64-bit counters)."""
+    class ExtendedLimits(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", BasicLimits),
+            ("IoInfo", ctypes.c_uint64 * 6),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
 
-    _fields_ = [
-        ("BasicLimitInformation", _BasicLimits),
-        ("IoInfo", ctypes.c_uint64 * 6),
-        ("ProcessMemoryLimit", ctypes.c_size_t),
-        ("JobMemoryLimit", ctypes.c_size_t),
-        ("PeakProcessMemoryUsed", ctypes.c_size_t),
-        ("PeakJobMemoryUsed", ctypes.c_size_t),
-    ]
+    return BasicLimits, ExtendedLimits
 
 
 @functools.cache
@@ -396,6 +402,8 @@ def _win32():
     """
     if sys.platform != "win32":
         raise OSError("Job objects exist only on Windows")
+    import ctypes
+
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     ntdll = ctypes.WinDLL("ntdll")
     handle, flag, dword = ctypes.c_void_p, ctypes.c_int, ctypes.c_uint32
@@ -417,6 +425,8 @@ def _win32():
 
 
 def _win_error() -> OSError:
+    import ctypes
+
     return ctypes.WinError(ctypes.get_last_error())  # type: ignore[attr-defined,unused-ignore]
 
 
@@ -479,7 +489,9 @@ class StepJob:
         return job
 
     def _limit(self, flags: int) -> None:
-        info = _ExtendedLimits()
+        import ctypes
+
+        info = job_structures()[1]()
         info.BasicLimitInformation.LimitFlags = flags
         if not _win32().SetInformationJobObject(self._handle, _JOB_EXTENDED_LIMITS,
                                                 ctypes.byref(info), ctypes.sizeof(info)):

@@ -329,3 +329,18 @@ def test_nul_is_not_a_console_on_windows():
         assert os.isatty(nul.fileno())  # the trap this guards against
         assert hostexec._windows_console(nul.fileno()) is False
         assert hostexec.stream_is_terminal(nul) is False
+
+
+def test_acq_starts_without_ctypes():
+    # The Job object code imports ctypes only when it is used (a bounded backend
+    # call on Windows), so a Python without the _ctypes extension still starts acq.
+    src = str(Path(hostexec.__file__).resolve().parents[1])
+    script = ("import sys; sys.modules['ctypes'] = None; sys.modules['_ctypes'] = None; "
+              f"sys.path.insert(0, {src!r}); import acq_py.cli, acq_py.hostexec; print('started')")
+    if sys.platform != "win32":  # elsewhere a bounded call needs no ctypes either
+        script += ("; print(acq_py.hostexec.run_captured([sys.executable, '-c', 'print(7)'], "
+                   "timeout=30).stdout.strip())")
+    proc = subprocess.run([sys.executable, "-I", "-c", script], capture_output=True, text=True, timeout=60,
+                          stdin=subprocess.DEVNULL)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.split()[:2] == (["started"] if sys.platform == "win32" else ["started", "7"])

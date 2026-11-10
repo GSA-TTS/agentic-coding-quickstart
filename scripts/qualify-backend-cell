@@ -308,8 +308,7 @@ Run = Callable[..., "subprocess.CompletedProcess[str] | None"]
 # ``acq_py.hostexec``; the step's job holds the step's processes, the oracle's
 # own included.
 CREATE_SUSPENDED = hostexec.CREATE_SUSPENDED
-_BasicLimits = hostexec._BasicLimits
-_ExtendedLimits = hostexec._ExtendedLimits
+_BasicLimits, _ExtendedLimits = hostexec.job_structures()
 StepJob = hostexec.StepJob
 
 
