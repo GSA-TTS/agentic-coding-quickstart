@@ -406,8 +406,17 @@ EOM
       # (find -type f): their link count is naturally above 1. Bash reads a
       # local kit in place, so this is a check before use, not a guarantee: a
       # link made after it runs is not seen (KNOWN_FAILURE_MODES section 55).
-      local _linked _rel
-      _linked=$(find "$kitref" -type f -links +1 -print 2>/dev/null | head -n 1) || true
+      # -H follows the kit path itself when it is a symlink to the kit (as the
+      # Python acq resolves it), but no link inside it. A find that cannot
+      # read every directory fails closed: an unchecked file is not passed.
+      local _linked _rel _find_rc=0
+      _linked=$(find -H "$kitref" -type f -links +1 -print 2>/dev/null) || _find_rc=$?
+      if [ "$_find_rc" -ne 0 ]; then
+        echo "kit-translate: local kit refused: acq could not check every file in it (is a directory unreadable?)." >&2
+        echo "kit-translate:   Make the kit readable, or make a plain copy of it (cp -R KIT KIT-copy) and use the copy." >&2
+        return 1
+      fi
+      _linked=$(printf '%s\n' "$_linked" | sed -n 1p)
       if [ -n "$_linked" ]; then
         _rel="${_linked#"${kitref%/}"/}"
         _rel=$(printf '%s' "$_rel" | LC_ALL=C tr '[:cntrl:]' '?')
