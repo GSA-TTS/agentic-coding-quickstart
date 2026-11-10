@@ -4834,8 +4834,9 @@ exits `128+N` only once the child is gone (`run_foreground` in
 from another process: those tools call `TerminateProcess`, which no handler
 sees, so acq cannot pass anything on. What Windows does deliver, a Ctrl-Break
 in the console, reaches acq and the child alike; acq waits up to the same ten
-seconds for the child, ends it if needed, and returns status 149 (128 plus
-SIGBREAK's number).
+seconds for the child, ends it if needed, and exits 149 (128 plus SIGBREAK's
+number) without a `--json` envelope, as it does for a Ctrl-Break during any
+other command.
 
 **Resolution:** End the whole process tree instead: `taskkill /T /F /PID <acq
 pid>`, or press Ctrl-C or Ctrl-Break in the session's console. A session child

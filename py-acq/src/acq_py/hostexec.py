@@ -339,18 +339,18 @@ def _session_signal(signum: int, _frame: FrameType | None) -> None:
     raise _SessionSignal(signum)
 
 
-def _hold_session_signals() -> dict[int, _Handler]:
-    """Install :func:`_session_signal` for the ending signals; return the handlers it replaced.
+def _hold_session_signals(saved: dict[int, _Handler]) -> None:
+    """Install :func:`_session_signal` for the ending signals, recording in ``saved`` each handler it replaced.
 
     The ending signals are SIGTERM, plus SIGHUP on POSIX and SIGBREAK
     (Ctrl-Break) on Windows. Nothing changes off the main thread, and a signal
-    ignored on entry (``nohup``) stays ignored, for the child too.
+    ignored on entry (``nohup``) stays ignored, for the child too. ``saved``
+    is filled as it goes, so a signal arriving midway leaves it accurate.
     """
     global _session_signum
     _session_signum = None
-    saved: dict[int, _Handler] = {}
     if threading.current_thread() is not threading.main_thread():
-        return saved
+        return
     for name in ("SIGTERM", "SIGHUP", "SIGBREAK"):
         signum = getattr(signal, name, None)
         if signum is None:
@@ -358,9 +358,8 @@ def _hold_session_signals() -> dict[int, _Handler]:
         current = signal.getsignal(signum)
         if current == signal.SIG_IGN:
             continue
-        signal.signal(signum, _session_signal)
         saved[signum] = signal.SIG_DFL if current is None else current
-    return saved
+        signal.signal(signum, _session_signal)
 
 
 def _wait_session(child: subprocess.Popen) -> tuple[int, tuple[int, _Handler] | None]:
@@ -368,23 +367,50 @@ def _wait_session(child: subprocess.Popen) -> tuple[int, tuple[int, _Handler] | 
 
     On Windows the wait polls: a blocking wait there runs no signal handler
     until the child exits. ``KeyboardInterrupt`` cannot come from here (SIGINT
-    is held by :func:`_hold_interrupt`).
+    is held by :func:`_hold_interrupt`). A signal that lands after the child
+    exited, while the handlers are being put back, still ends acq (it is
+    reported like one that came during the wait).
     """
-    saved = _hold_session_signals()
+    saved: dict[int, _Handler] = {}
+    signum: int | None = None
+    late: int | None = None
     try:
         try:
+            _hold_session_signals(saved)
             if sys.platform == "win32":
                 while True:
                     try:
-                        return child.wait(timeout=0.25), None
+                        returncode = child.wait(timeout=0.25)
+                        break
                     except subprocess.TimeoutExpired:
                         continue
-            return child.wait(), None
+            else:
+                returncode = child.wait()
         except _SessionSignal as caught:
-            return _end_session(child, caught.signum), (caught.signum, saved.get(caught.signum, signal.SIG_DFL))
+            signum = caught.signum
+            returncode = _end_session(child, signum)
     finally:
-        for signum, handler in saved.items():
-            signal.signal(signum, handler)
+        late = _restore_session_signals(saved)
+    if signum is None:
+        signum = late
+    return returncode, None if signum is None else (signum, saved.get(signum, signal.SIG_DFL))
+
+
+def _restore_session_signals(saved: dict[int, _Handler]) -> int | None:
+    """Put back the handlers :func:`_hold_session_signals` replaced; returns a signal that came meanwhile.
+
+    :func:`_session_signal` raises at most once per run, so one retry is
+    always enough for a restore it interrupted.
+    """
+    late: int | None = None
+    pending = list(saved.items())
+    while pending:
+        try:
+            signal.signal(*pending[0])
+            pending.pop(0)
+        except _SessionSignal as caught:
+            late = caught.signum
+    return late
 
 
 def _end_session(child: subprocess.Popen, signum: int) -> int:
@@ -419,10 +445,11 @@ def _end_by(signum: int, previous: _Handler) -> int:
     """End acq by ``signum`` once the session child is gone; returns ``128 + signum`` if acq lives on.
 
     The handler the signal would have run is run now: acq's own command
-    handler unwinds the command quietly with status ``128 + N``. With no
-    handler (the default disposition) acq dies of the signal, as a shell
-    reports with the same status; on Windows, where re-raising a signal ends
-    the process with an unrelated code, the status is returned instead.
+    handler (which covers Ctrl-Break on Windows too) unwinds the command
+    quietly with status ``128 + N``. With no handler (the default disposition)
+    acq dies of the signal, as a shell reports with the same status; on
+    Windows, where re-raising a signal ends the process with an unrelated code,
+    the status is returned instead.
     """
     if callable(previous):
         previous(signum, None)

@@ -741,6 +741,36 @@ def test_run_foreground_returns_128_plus_n_when_the_prior_handler_returns(monkey
     assert time.monotonic() - started < 15  # the child was killed, not waited out
 
 
+def test_a_signal_while_the_handlers_are_put_back_still_ends_acq(monkeypatch):
+    # The child has exited and run_foreground is restoring its handlers when
+    # SIGTERM lands: acq must still end by it, not raise out of the restore.
+    class Ended(BaseException):
+        pass
+
+    def acq_handler(signum, _frame):  # stands in for cli's own SIGTERM handler
+        raise Ended(signum)
+
+    real = signal.signal
+    fired: list[int] = []
+
+    def restoring(signum, handler):
+        if signum != signal.SIGINT and handler is not hostexec._session_signal and not fired:
+            fired.append(signum)
+            hostexec._session_signal(signal.SIGTERM, None)  # raises, as the handler would right here
+        return real(signum, handler)
+
+    previous = real(signal.SIGTERM, acq_handler)
+    try:
+        monkeypatch.setattr(hostexec.signal, "signal", restoring)
+        with pytest.raises(Ended) as caught:
+            hostexec.run_foreground([sys.executable, "-c", "pass"])
+        monkeypatch.undo()
+        assert signal.getsignal(signal.SIGTERM) is acq_handler  # every handler was put back
+    finally:
+        real(signal.SIGTERM, previous)
+    assert fired and caught.value.args == (signal.SIGTERM,)
+
+
 def test_sigint_handler_is_restored_when_the_program_cannot_start(tmp_path):
     before = signal.getsignal(signal.SIGINT)
     with pytest.raises(OSError):

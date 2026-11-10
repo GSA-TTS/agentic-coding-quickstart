@@ -703,7 +703,7 @@ def _user_dirs_pre_step(emit_json: bool, command: str) -> int | None:
 
 
 class _Terminated(BaseException):
-    """SIGTERM or SIGHUP arrived while a command ran.
+    """SIGTERM, SIGHUP or (on Windows) SIGBREAK arrived while a command ran.
 
     A BaseException, like KeyboardInterrupt, so it unwinds through every
     ``finally`` and ``except BaseException`` cleanup block (the create path
@@ -748,9 +748,9 @@ def _raise_terminated(signum: int, _frame: object) -> None:
 
 @contextlib.contextmanager
 def _terminate_raises() -> Iterator[None]:
-    """Turn SIGTERM and SIGHUP into :class:`_Terminated` while a command runs.
+    """Turn SIGTERM and SIGHUP (and on Windows SIGBREAK, Ctrl-Break) into :class:`_Terminated` while a command runs.
 
-    Python's default for both signals ends the process at once, with no cleanup.
+    Python's default for these signals ends the process at once, with no cleanup.
     Only a default disposition is replaced: a signal ignored on entry (``nohup``)
     stays ignored, and a handler someone else installed is left alone. Signal
     handlers can only be set from the main thread, so elsewhere nothing changes.
@@ -760,7 +760,7 @@ def _terminate_raises() -> Iterator[None]:
     _terminating_since = None
     saved: list[tuple[int, object]] = []
     if threading.current_thread() is threading.main_thread():
-        for name in ("SIGTERM", "SIGHUP"):
+        for name in ("SIGTERM", "SIGHUP", "SIGBREAK"):
             signum = getattr(signal, name, None)
             if signum is None or signal.getsignal(signum) is not signal.SIG_DFL:
                 continue
@@ -777,7 +777,8 @@ def main(argv: list[str] | None = None) -> int:
     """Run one acq command and return its exit status.
 
     An interrupt ends the command quietly with the shell's status for it: 130
-    for Ctrl-C (KeyboardInterrupt), 128 + N for SIGTERM or SIGHUP. Cleanup still
+    for Ctrl-C (KeyboardInterrupt), 128 + N for SIGTERM or SIGHUP (149 for a
+    Ctrl-Break on Windows, SIGBREAK being 21). Cleanup still
     runs first, because both unwind as exceptions through the handlers' own
     ``finally`` blocks. Nothing more is printed, as for a shell command killed
     the same way, so ``--json`` leaves no partial envelope.
