@@ -26,9 +26,10 @@ acq on the host, never by a guest.
 
 from __future__ import annotations
 
+import contextlib
 import re
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -372,5 +373,24 @@ def extra_kits() -> list[str]:
     return (config.read_field("extra_kits") or "").split()
 
 
+# Where :func:`warn` puts its messages while :func:`collecting_warnings` is
+# active, instead of printing them.
+_collected: list[str] | None = None
+
+
 def warn(message: str) -> None:
+    if _collected is not None:
+        _collected.append(message)
+        return
     print(f"acq: warning: {message}", file=sys.stderr)
+
+
+@contextlib.contextmanager
+def collecting_warnings() -> Iterator[list[str]]:
+    """Collect the messages :func:`warn` is given in the block, unprinted, for the caller to print."""
+    global _collected
+    previous, _collected = _collected, []
+    try:
+        yield _collected
+    finally:
+        _collected = previous

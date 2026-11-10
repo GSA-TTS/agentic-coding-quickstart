@@ -118,8 +118,6 @@ only searched for it.
 from __future__ import annotations
 
 import argparse
-import ctypes
-import functools
 import importlib.util
 import json
 import math
@@ -132,7 +130,6 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Callable
 
 # The default shell image every boot-contract cell creates against (the same
@@ -306,163 +303,13 @@ def isolated_env(root: Path, base: dict[str, str] | None = None) -> dict[str, st
 Run = Callable[..., "subprocess.CompletedProcess[str] | None"]
 
 
-# Windows: the process-creation flag and the Job object values StepJob uses
-# (winbase.h, winnt.h).
-CREATE_SUSPENDED = 0x00000004
-_JOB_EXTENDED_LIMITS = 9  # JobObjectExtendedLimitInformation
-_KILL_ON_JOB_CLOSE = 0x00002000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-_BREAKAWAY_OK = 0x00000800  # JOB_OBJECT_LIMIT_BREAKAWAY_OK
-# PROCESS_TERMINATE and PROCESS_SET_QUOTA (both needed to assign a process to a
-# job), and PROCESS_SUSPEND_RESUME.
-_PROCESS_JOB_ACCESS = 0x0001 | 0x0100 | 0x0800
-
-
-class _BasicLimits(ctypes.Structure):
-    """JOBOBJECT_BASIC_LIMIT_INFORMATION."""
-
-    _fields_ = [
-        ("PerProcessUserTimeLimit", ctypes.c_int64),
-        ("PerJobUserTimeLimit", ctypes.c_int64),
-        ("LimitFlags", ctypes.c_uint32),
-        ("MinimumWorkingSetSize", ctypes.c_size_t),
-        ("MaximumWorkingSetSize", ctypes.c_size_t),
-        ("ActiveProcessLimit", ctypes.c_uint32),
-        ("Affinity", ctypes.c_size_t),
-        ("PriorityClass", ctypes.c_uint32),
-        ("SchedulingClass", ctypes.c_uint32),
-    ]
-
-
-class _ExtendedLimits(ctypes.Structure):
-    """JOBOBJECT_EXTENDED_LIMIT_INFORMATION; ``IoInfo`` is IO_COUNTERS (six 64-bit counters)."""
-
-    _fields_ = [
-        ("BasicLimitInformation", _BasicLimits),
-        ("IoInfo", ctypes.c_uint64 * 6),
-        ("ProcessMemoryLimit", ctypes.c_size_t),
-        ("JobMemoryLimit", ctypes.c_size_t),
-        ("PeakProcessMemoryUsed", ctypes.c_size_t),
-        ("PeakJobMemoryUsed", ctypes.c_size_t),
-    ]
-
-
-@functools.cache
-def _win32():
-    """kernel32 and ntdll functions with the prototypes StepJob needs (Windows only).
-
-    Private library instances, so these prototypes never change the shared
-    ``ctypes.windll`` ones another module may rely on.
-    """
-    if sys.platform != "win32":
-        raise OSError("Job objects exist only on Windows")
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    ntdll = ctypes.WinDLL("ntdll")
-    handle, flag, dword = ctypes.c_void_p, ctypes.c_int, ctypes.c_uint32
-    prototypes = {
-        "CreateJobObjectW": (kernel32, [handle, ctypes.c_wchar_p], handle),
-        "SetInformationJobObject": (kernel32, [handle, ctypes.c_int, handle, dword], flag),
-        "AssignProcessToJobObject": (kernel32, [handle, handle], flag),
-        "TerminateJobObject": (kernel32, [handle, ctypes.c_uint], flag),
-        "OpenProcess": (kernel32, [dword, flag, dword], handle),
-        "CloseHandle": (kernel32, [handle], flag),
-        "NtResumeProcess": (ntdll, [handle], ctypes.c_long),
-    }
-    api = {}
-    for name, (library, argtypes, restype) in prototypes.items():
-        function = getattr(library, name)
-        function.argtypes, function.restype = argtypes, restype
-        api[name] = function
-    return SimpleNamespace(**api)
-
-
-def _win_error() -> OSError:
-    return ctypes.WinError(ctypes.get_last_error())  # type: ignore[attr-defined,unused-ignore]
-
-
-class StepJob:
-    """A Windows Job object holding one step's process and every process it starts.
-
-    Job membership is fixed when a process is created and inherited by its
-    descendants, so terminating the job kills the step's processes and nothing
-    else (except one that broke away, see below; the job is a cleanup tool, not a
-    security boundary). No
-    process is looked up by pid, so a recycled pid cannot lead the kill to an
-    unrelated process, as it can with ``taskkill /T``, which walks parent pids.
-
-    The job kills its processes when its last handle is closed, so a step does not
-    outlive an oracle that dies. When the step ends on its own, :meth:`release`
-    lifts that limit before closing the handle: a process the step left running
-    on purpose (a backend daemon it started) keeps running, as it would without a
-    job.
-
-    A process started with ``CREATE_BREAKAWAY_FROM_JOB`` is let out of the job
-    (``JOB_OBJECT_LIMIT_BREAKAWAY_OK``) rather than refused, so a backend that
-    detaches its daemon that way still works under the oracle; like a POSIX
-    process that leaves its group with ``setsid``, it is then outside the kill.
-    """
-
-    def __init__(self, handle: int) -> None:
-        self._handle: int | None = handle
-
-    @classmethod
-    def adopt(cls, pid: int) -> StepJob:
-        """Put the suspended process ``pid`` in a new job, then resume it.
-
-        The process must have been created with ``CREATE_SUSPENDED``, so nothing it
-        starts can escape the job before it is assigned. ``subprocess`` keeps no
-        handle to the primary thread, so it is resumed with ``NtResumeProcess``
-        (ntdll) on a process handle. Raises ``OSError`` on failure; the caller then
-        kills the process.
-        """
-        api = _win32()
-        handle = api.CreateJobObjectW(None, None)
-        if not handle:
-            raise _win_error()
-        job = cls(handle)
-        try:
-            job._limit(_KILL_ON_JOB_CLOSE | _BREAKAWAY_OK)
-            process = api.OpenProcess(_PROCESS_JOB_ACCESS, False, pid)
-            if not process:
-                raise _win_error()
-            try:
-                if not api.AssignProcessToJobObject(handle, process):
-                    raise _win_error()
-                status = api.NtResumeProcess(process)
-                if status != 0:
-                    raise OSError(f"NtResumeProcess failed (NTSTATUS {status & 0xFFFFFFFF:#010x})")
-            finally:
-                api.CloseHandle(process)
-        except BaseException:
-            job._close()
-            raise
-        return job
-
-    def _limit(self, flags: int) -> None:
-        info = _ExtendedLimits()
-        info.BasicLimitInformation.LimitFlags = flags
-        if not _win32().SetInformationJobObject(self._handle, _JOB_EXTENDED_LIMITS,
-                                                ctypes.byref(info), ctypes.sizeof(info)):
-            raise _win_error()
-
-    def terminate(self) -> None:
-        """Kill every process in the job, then close it."""
-        if self._handle is not None:
-            _win32().TerminateJobObject(self._handle, 1)
-            self._close()
-
-    def release(self) -> None:
-        """Close the job, leaving any process still in it running."""
-        if self._handle is not None:
-            try:
-                self._limit(_BREAKAWAY_OK)
-            except OSError:
-                pass  # the close below then kills what is left, as a forced stop would
-            self._close()
-
-    def _close(self) -> None:
-        handle, self._handle = self._handle, None
-        if handle is not None:
-            _win32().CloseHandle(handle)
+# Windows: each step's Job object (``StepJob``), and the process-creation flag it
+# needs. acq bounds its own backend calls with the same code, so it lives in
+# ``acq_py.hostexec``; the step's job holds the step's processes, the oracle's
+# own included.
+CREATE_SUSPENDED = hostexec.CREATE_SUSPENDED
+_BasicLimits, _ExtendedLimits = hostexec.job_structures()
+StepJob = hostexec.StepJob
 
 
 def _signal_group(proc: subprocess.Popen, kill: bool, job: StepJob | None = None) -> None:

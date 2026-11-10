@@ -97,7 +97,8 @@ def _run(
 
     Streams are UTF-8 whatever the host's code page, with undecodable output
     bytes replaced, and ``input_text`` (a secret value, often) checked strictly
-    first, as in :func:`acq_py.msb._run`.
+    first, as in :func:`acq_py.msb._run`. A bounded call that times out on
+    Windows also ends what sbx started (:func:`hostexec.run_captured`).
     """
     if not hostexec.utf8_input_ok(input_text):
         raise SbxError(
@@ -106,23 +107,7 @@ def _run(
             "check the value for stray bytes and retry",
         )
     try:
-        if input_text is None:
-            return subprocess.run(
-                [*sbx_command(), *argv],
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout,
-            )
-        return subprocess.run(
-            [*sbx_command(), *argv],
-            input=input_text,
-            capture_output=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-        )
+        return hostexec.run_captured([*sbx_command(), *argv], timeout=timeout, input_text=input_text)
     except OSError as exc:
         # Mirrors msb._run: a missing or non-executable sbx binary fails closed
         # with a stable code, never a raw OSError traceback.
@@ -332,10 +317,24 @@ def _refused_for_recreate(err: str) -> bool:
 
 
 def kit_add(name: str, kit_dir: str) -> int:
-    """``sbx kit add NAME DIR``: :data:`KIT_ADD_OK`, :data:`KIT_ADD_RECREATE` or :data:`KIT_ADD_FAILED`."""
+    """``sbx kit add NAME DIR``: :data:`KIT_ADD_OK`, :data:`KIT_ADD_RECREATE` or :data:`KIT_ADD_FAILED`.
+
+    Bounded by :func:`timeouts.kit_add_timeout_s`; a call that outlasts it
+    raises :class:`SbxError` (``timeout``), as an sbx that cannot be started at
+    all raises ``backend_not_found``.
+    """
     if not kit_dir:
         return KIT_ADD_FAILED
-    proc = _run(["kit", "add", name, kit_dir])
+    budget = timeouts.kit_add_timeout_s()
+    try:
+        proc = _run(["kit", "add", name, kit_dir], timeout=budget)
+    except subprocess.TimeoutExpired:
+        raise SbxError(
+            errors.TIMEOUT,
+            f"'sbx kit add' did not finish within {budget:g}s for sandbox '{name}'",
+            f"check that sbx responds ('sbx ls'); set {timeouts.KIT_ADD_TIMEOUT_ENV} to a larger number of "
+            "seconds if it is only slow, then retry",
+        ) from None
     if proc.returncode == 0:
         return KIT_ADD_OK
     return KIT_ADD_RECREATE if _refused_for_recreate(proc.stderr or "") else KIT_ADD_FAILED

@@ -974,8 +974,9 @@ def test_step_job_drives_the_job_object_api(monkeypatch):
         NtResumeProcess=api("NtResumeProcess", 0), TerminateJobObject=api("TerminateJobObject"),
         CloseHandle=api("CloseHandle"),
     )
-    monkeypatch.setattr(qbc, "_win32", lambda: fake)
-    monkeypatch.setattr(qbc, "_win_error", lambda: OSError("win32 failure"))
+    # The job code is acq's own (acq_py.hostexec), which the oracle loads by path.
+    monkeypatch.setattr(qbc.hostexec, "_win32", lambda: fake)
+    monkeypatch.setattr(qbc.hostexec, "_win_error", lambda: OSError("win32 failure"))
     size = ctypes.sizeof(qbc._ExtendedLimits)
 
     job = qbc.StepJob.adopt(4242)

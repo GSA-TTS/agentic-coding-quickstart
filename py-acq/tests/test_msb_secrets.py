@@ -868,6 +868,60 @@ def test_sandbox_scoped_set_and_rm_take_the_sandbox_lock(monkeypatch, tmp_path, 
     _assert_value_absent(VALUE, children, out, err)
 
 
+@pytest.mark.parametrize("argv, takes_lock", [
+    (["secret", "set", "-g", "github"], True),
+    (["secret", "rm", "-g", "github"], True),
+    (["secret", "set", "-g", "usai"], True),
+    (["secret", "set", "b", "github"], False),  # the sandbox lock covers a create of 'b'
+])
+def test_global_set_and_rm_take_the_secret_store_lock(monkeypatch, tmp_path, capsys, children, argv, takes_lock):
+    # A create holds the store lock (shared) while it reads the store to bind the
+    # new guest; a global change, which would otherwise race it, waits for it.
+    from acq_py import errors, lock
+
+    _running(tmp_path, monkeypatch, "a", "b")
+    secretstore.store(secretstore.key_for("github", None), SCOPED)
+    monkeypatch.setenv("ACQ_SANDBOX_LOCK_TIMEOUT", "0.2")
+    children.clear()
+    with lock.secret_store_lock(shared=True):
+        rc, doc, out, err = _invoke(capsys, "--backend", "msb", *argv, "--json", stdin=VALUE, monkeypatch=monkeypatch)
+    if takes_lock:
+        assert rc == 1 and doc["error"]["code"] == errors.TIMEOUT, doc
+        assert "secret-store lock" in doc["error"]["message"]
+        assert secretstore.resolve("github") == SCOPED and _verb_calls(children, "modify") == []
+    else:
+        assert rc == 0, (doc, err)
+    _assert_value_absent(VALUE, children, out, err)
+
+
+def test_create_waits_for_a_global_secret_change(monkeypatch, tmp_path, capsys, children):
+    from acq_py import errors, lock, state
+
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_PROVIDER_KITS", "")
+    monkeypatch.setenv("ACQ_SANDBOX_LOCK_TIMEOUT", "0.2")
+    with lock.secret_store_lock():  # a global set/rm in progress
+        rc, doc, _out, _err = _invoke(capsys, "--backend", "msb", "create", "shell", str(tmp_path / "ws"),
+                                      "--name", "box", "--json")
+    assert rc == 1 and doc["error"]["code"] == errors.TIMEOUT, doc
+    assert "nothing was created" in doc["error"]["remediation"]
+    assert _verb_calls(children, "create") == []
+    assert state.record_read("msb", "box") is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the store lock is exclusive on Windows")
+def test_creates_share_the_secret_store_lock(monkeypatch, tmp_path, capsys, children):
+    from acq_py import lock
+
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_PROVIDER_KITS", "")
+    monkeypatch.setenv("ACQ_SANDBOX_LOCK_TIMEOUT", "0.2")
+    with lock.secret_store_lock(shared=True):  # another create
+        rc, doc, _out, _err = _invoke(capsys, "--backend", "msb", "create", "shell", str(tmp_path / "ws"),
+                                      "--name", "box", "--json")
+    assert rc == 0, doc
+
+
 def test_create_first_claim_wins_for_a_shared_env(monkeypatch, tmp_path, capsys, children):
     _env(monkeypatch, tmp_path)
     monkeypatch.setenv("ACQ_PROVIDER_KITS", "")  # no provider kit selected: no usai gate or binding

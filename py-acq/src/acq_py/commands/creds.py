@@ -59,9 +59,10 @@ def run_provider_credential_set(parsed, emit_json: bool, backend: str) -> int:
             emit_json,
         )
     try:
-        with lock.provider_credential_lock(provider):
+        # The store lock as well: the value is a global one a create may be binding.
+        with lock.provider_credential_lock(provider), lock.secret_store_lock():
             return _set_locked(adapter, provider, key_env, hosts, value, emit_json)
-    except lock.ProviderCredentialLockTimeout as exc:
+    except lock.LockTimeout as exc:
         return common._operational_failure(
             command, errors.TIMEOUT, str(exc), "retry once the other command finishes; nothing was changed", emit_json
         )
@@ -367,9 +368,9 @@ def run_provider_credential_rm(parsed, emit_json: bool, backend_override: str | 
     if problem is not None:
         return common._operational_failure(command, errors.VALIDATION_FAILED, problem, None, emit_json)
     try:
-        with lock.provider_credential_lock(provider):
+        with lock.provider_credential_lock(provider), lock.secret_store_lock():
             return _rm_locked(provider, backend_override, accept, emit_json)
-    except lock.ProviderCredentialLockTimeout as exc:
+    except lock.LockTimeout as exc:
         return common._operational_failure(
             command, errors.TIMEOUT, str(exc), "retry once the other command finishes; nothing was changed", emit_json
         )
@@ -849,9 +850,9 @@ def run_usai_rotate_api_key(emit_json: bool, backend: str) -> int:
             emit_json,
         )
     try:
-        with lock.provider_credential_lock(provider_creds.USAI_PROVIDER_ID):
+        with lock.provider_credential_lock(provider_creds.USAI_PROVIDER_ID), lock.secret_store_lock():
             return _rotate_locked(backend, value, emit_json)
-    except lock.ProviderCredentialLockTimeout as exc:
+    except lock.LockTimeout as exc:
         return common._operational_failure(
             _ROTATE, errors.TIMEOUT, str(exc), "retry once the other command finishes; nothing was changed", emit_json
         )

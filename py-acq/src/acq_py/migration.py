@@ -43,8 +43,9 @@ scanned again. Each part of it (sandboxes, kit sources, bindings) runs once per
 tree and is recorded in the marker when complete: a record removed afterwards
 with this acq (``rm``, ``kit-source rm``, ``provider-credential rm``) is not
 brought back from the Bash files left behind. A ``config.yaml`` list Bash itself
-would refuse leaves its part pending, with a warning on each mutating verb, and
-the tree stays at generation 1 until the list is fixed and imported.
+would refuse leaves its part pending, retried on each mutating verb (its warning
+is printed again only when it changes), and the tree stays at generation 1 until
+the list is fixed and imported.
 
 ``ACQ_STATE_SEED`` is an internal test seam (never a secret, never written to
 output): a JSON object mapping ``"<backend>/<name>"`` to a record (a dict is
@@ -55,6 +56,7 @@ single-invocation contract vector can seed legacy/newer/unparseable records.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -150,21 +152,33 @@ def read_generation() -> int:
     return gen if isinstance(gen, int) and not isinstance(gen, bool) else 0
 
 
-def read_import_done() -> set[str]:
-    """The parts of the generation-2 Bash import already complete (see :func:`import_bash_state`)."""
+def _read_marker() -> dict:
     try:
         doc = json.loads(generation_path().read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return set()
-    done = doc.get("bash_import_done") if isinstance(doc, dict) else None
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def read_import_done() -> set[str]:
+    """The parts of the generation-2 Bash import already complete (see :func:`import_bash_state`)."""
+    done = _read_marker().get("bash_import_done")
     return {p for p in done if isinstance(p, str)} if isinstance(done, list) else set()
 
 
-def write_generation(generation: int, *, import_done: set[str] | None = None) -> None:
+def read_import_warned() -> str | None:
+    """The digest of the pending import's warnings last printed, if any (see :func:`import_bash_state`)."""
+    warned = _read_marker().get("bash_import_warned")
+    return warned if isinstance(warned, str) else None
+
+
+def write_generation(generation: int, *, import_done: set[str] | None = None,
+                     import_warned: str | None = None) -> None:
     """Write the marker atomically (temp + fsync + rename); called LAST.
 
     ``import_done`` records which parts of a not yet finished generation-2 import
-    are complete, so they are not run again.
+    are complete, so they are not run again; ``import_warned`` the digest of the
+    warnings that import last printed, so the same ones are not printed again.
     """
     path = generation_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -172,6 +186,8 @@ def write_generation(generation: int, *, import_done: set[str] | None = None) ->
     doc: dict = {"schema": state.STATE_SCHEMA, "generation": generation}
     if import_done:
         doc["bash_import_done"] = sorted(import_done)
+    if import_warned:
+        doc["bash_import_warned"] = import_warned
     data = json.dumps(doc, indent=2)
     with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(data + "\n")
@@ -559,19 +575,27 @@ def import_bash_state() -> bool:
     warning. Each part is recorded in the marker once complete and never runs
     again, so a record removed afterwards is not brought back; a config list
     that cannot be parsed leaves its part pending, to be imported once fixed.
+
+    A pending part is retried on every mutating command, but its warnings are
+    printed only when they differ from the ones printed last (a digest of them
+    is kept in the marker): the same unfixed list does not warn on every
+    command, and a change to it, or to what else is pending, warns again.
     """
     done = read_import_done()
     counts = {part: 0 for part in _IMPORT_PARTS}
-    for part, run in _IMPORT_PARTS.items():
-        if part in done:
-            continue
-        before = set(done)
-        counts[part], complete = run(done)
-        if complete:  # the part's own mark covers its finer ones
-            done.difference_update({mark for mark in done if mark.startswith(f"{part}:")})
-            done.add(part)
-        if done != before:
-            write_generation(RECORDS_GENERATION, import_done=done)
+    with legacy_bash.collecting_warnings() as warnings:
+        for part, run in _IMPORT_PARTS.items():
+            if part in done:
+                continue
+            before = set(done)
+            counts[part], complete = run(done)
+            if complete:  # the part's own mark covers its finer ones
+                done.difference_update({mark for mark in done if mark.startswith(f"{part}:")})
+                done.add(part)
+            if done != before:
+                write_generation(RECORDS_GENERATION, import_done=done, import_warned=read_import_warned())
+    finished = done >= set(_IMPORT_PARTS)
+    _report_import_warnings(warnings, done, pending=not finished)
     if any(counts.values()):
         print(
             f"acq: imported {counts['sandboxes']} sandbox record(s), {counts['kit_sources']} kit "
@@ -579,7 +603,26 @@ def import_bash_state() -> bool:
             "from the Bash acq's state",
             file=sys.stderr,
         )
-    return done >= set(_IMPORT_PARTS)
+    return finished
+
+
+def _report_import_warnings(warnings: list[str], done: set[str], *, pending: bool) -> None:
+    """Print the import's warnings, unless a pending import printed exactly these last time.
+
+    A finished import prints whatever it collected (each such warning comes from
+    a part that runs once). A pending one compares a digest of its warnings
+    with the one in the marker, and records the new digest when they differ.
+    """
+    if not pending:
+        for message in warnings:
+            legacy_bash.warn(message)
+        return
+    digest = hashlib.sha256("\n".join(warnings).encode("utf-8")).hexdigest() if warnings else None
+    if digest == read_import_warned():
+        return
+    for message in warnings:
+        legacy_bash.warn(message)
+    write_generation(RECORDS_GENERATION, import_done=done, import_warned=digest)
 
 
 # ---------------------------------------------------------------------------

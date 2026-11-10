@@ -532,7 +532,9 @@ def _within(child: str, parent: str) -> bool:
     By path first (case-folded only where ``os.path.normcase`` folds, which is
     Windows). Then, for whatever part of ``child`` exists, by file identity: a
     case-insensitive filesystem on macOS, say, can spell the same directory
-    differently, and only ``samestat`` sees through that. Windows supports it too.
+    differently, and only ``samestat`` sees through that. Windows supports it too,
+    but some Windows network shares report inode 0 for every directory, where
+    identity proves nothing: it is trusted only for a nonzero inode.
     """
     try:
         if os.path.commonpath([os.path.normcase(child), os.path.normcase(parent)]) == os.path.normcase(parent):
@@ -542,6 +544,8 @@ def _within(child: str, parent: str) -> bool:
     try:
         target = os.stat(parent)
     except OSError:
+        return False
+    if target.st_ino == 0:
         return False
     node = child
     while True:

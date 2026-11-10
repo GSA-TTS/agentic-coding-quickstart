@@ -387,17 +387,30 @@ def test_bad_config_lists_wait_at_generation_1_until_fixed(tree, capsys):
     _config(f"kit_sources: github.com/acme/kits@{SHA} notarepo\n"
             "provider_credential_bindings: good=GOOD_KEY bad\n")
 
-    for _ in range(2):  # every mutating run warns again; nothing is dropped for good
+    for run in range(3):  # every mutating run retries; nothing is dropped for good
         migration.migrate_tree()
         assert kits.list_source_records() == []
         assert provider_creds.get_binding("good") is None
         assert migration.read_generation() == migration.RECORDS_GENERATION
         err = capsys.readouterr().err
-        assert "kit_sources was not imported" in err
-        assert "provider_credential_bindings was not imported" in err
+        if run == 0:
+            assert "kit_sources was not imported" in err
+            assert "provider_credential_bindings was not imported" in err
+        else:  # the same pending warnings are not printed on every command
+            assert "was not imported" not in err
     # The sandbox part completed on the first run and is not run again.
     assert migration.read_import_done() == {"sandboxes"}
     state.record_remove("msb", "box")
+
+    # A change to what is pending warns again, once.
+    _config(f"kit_sources: github.com/acme/kits@{SHA} notarepo\nprovider_credential_bindings: good=GOOD_KEY\n")
+    migration.migrate_tree()
+    err = capsys.readouterr().err
+    assert "kit_sources was not imported" in err and "provider_credential_bindings" not in err
+    assert provider_creds.get_binding("good")["key_env"] == "GOOD_KEY"
+    migration.migrate_tree()
+    assert "was not imported" not in capsys.readouterr().err
+    assert migration.read_generation() == migration.RECORDS_GENERATION
 
     _config(f"kit_sources: github.com/acme/kits@{SHA}\nprovider_credential_bindings: good=GOOD_KEY\n")
     migration.migrate_tree()

@@ -413,7 +413,47 @@ def test_recreate_requires_the_read_only_mount_where_the_platform_has_it(monkeyp
     assert "without its read-only trusted-config mount" in doc["error"]["message"]
     assert applied == []
     assert "sec" not in _catalog(tmp_path)
+    assert "the new guest was removed" in doc["error"]["message"]
     assert state.record_read("msb", "sec")["ro_host_config"] is True  # still eligible for a retry
+
+
+def _fail_remove(monkeypatch):
+    """Removing the new guest fails and leaves it listed (the seeded record has no old guest)."""
+    calls = []
+
+    def remove(name):
+        calls.append(name)
+        raise msb.MsbError(errors.FAILURE, f"msb remove failed for sandbox '{name}'")
+
+    monkeypatch.setattr(msb, "remove", remove)
+    return calls
+
+
+def test_recreate_says_when_the_new_guest_without_the_mount_could_not_be_removed(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path)
+    _seed_sec()
+    monkeypatch.setattr(security, "ro_mount_supported", lambda: False)
+    calls = _fail_remove(monkeypatch)
+    rc, doc = _invoke(capsys, "--backend", "msb", "create", "--recreate", "sec", "--yes", "--json")
+    assert rc == 1 and doc["error"]["code"] == errors.VALIDATION_FAILED, doc
+    assert calls == ["sec"]
+    assert "sec" in _catalog(tmp_path)  # the new guest is still there
+    message = doc["error"]["message"]
+    assert "the new guest could not be removed" in message
+    assert "was removed" not in message
+    assert state.record_read("msb", "sec")["ro_host_config"] is True
+
+
+def test_recreate_kit_failure_warns_when_the_new_guest_could_not_be_removed(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path)
+    _seed_sec()
+    _fail_remove(monkeypatch)
+    monkeypatch.setattr(kit_msb, "ensure_kits_applied", lambda *a, **k: kit_msb.ApplyResult(agent_user=False))
+    rc = cli.main(["--backend", "msb", "create", "--recreate", "sec", "--yes", "--json"])
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "the new guest could not be removed" in captured.err
+    assert state.record_read("msb", "sec")["ro_host_config"] is True
 
 
 # ---------------------------------------------------------------------------

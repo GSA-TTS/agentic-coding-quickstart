@@ -547,6 +547,26 @@ def test_the_overlap_check_compares_by_file_identity_too(monkeypatch, tmp_path):
         alias.unlink()
 
 
+def test_the_identity_check_ignores_a_zero_inode(monkeypatch, tmp_path):
+    # Some Windows network shares report inode 0 for every directory, so two
+    # unrelated directories on one share would "match" by identity.
+    from acq_py.commands import common
+
+    real_stat = os.stat
+
+    def zero_inode(path, *a, **k):
+        st = real_stat(path, *a, **k)
+        return os.stat_result((st.st_mode, 0, 7, *tuple(st)[3:]))
+
+    a = tmp_path / "share" / "a"
+    b = tmp_path / "share" / "b"
+    a.mkdir(parents=True)
+    b.mkdir()
+    monkeypatch.setattr(common.os, "stat", zero_inode)
+    assert not common._within(str(a), str(b))
+    assert common._within(str(a / "inner"), str(a))  # the path comparison still works
+
+
 def test_a_workspace_reached_through_a_link_is_compared_canonically(monkeypatch, tmp_path, capsys):
     _env(monkeypatch, tmp_path)
     link = tmp_path.parent / f"{tmp_path.name}-link"
@@ -563,6 +583,17 @@ def test_run_by_name_refuses_a_recorded_workspace_holding_acq_state(monkeypatch,
     _seed_record({"schema": 1, "name": "old", "backend": "msb", "agent": "shell", "workspace": str(tmp_path)})
     _forbid_launch(monkeypatch)
     rc, doc = _invoke(capsys, "--backend", "msb", "run", "old", "--json")
+    _assert_overlap_refused(rc, doc, "contains", "state directory")
+
+
+def test_run_typed_path_reattach_refuses_a_recorded_workspace_holding_acq_state(monkeypatch, tmp_path, capsys):
+    # The typed path is safe; the recorded one (which is what gets mounted) is not.
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _env(monkeypatch, tmp_path, catalog={"old": "running"})
+    _seed_record({"schema": 1, "name": "old", "backend": "msb", "agent": "shell", "workspace": str(tmp_path)})
+    _forbid_launch(monkeypatch)
+    rc, doc = _invoke(capsys, "--backend", "msb", "run", "opencode", str(ws), "--name", "old", "--json")
     _assert_overlap_refused(rc, doc, "contains", "state directory")
 
 

@@ -88,3 +88,17 @@ DEFAULT_LIST_TIMEOUT_S = 60.0
 def list_timeout_s() -> float:
     """The budget, in seconds, for one backend sandbox-listing call."""
     return positive_seconds(LIST_TIMEOUT_ENV, DEFAULT_LIST_TIMEOUT_S)
+
+
+# ``sbx kit add`` (the heal before an attach, ``kit apply`` and ``kit update``)
+# runs with the sandbox's lifecycle lock held, so it is bounded as well: an sbx
+# that hangs must not keep the lock, and every other command on the sandbox,
+# waiting forever. Adding a kit to a live sandbox copies files and sets
+# variables, so ten minutes is generous.
+KIT_ADD_TIMEOUT_ENV = "ACQ_SBX_KIT_ADD_TIMEOUT"
+DEFAULT_KIT_ADD_TIMEOUT_S = 600.0
+
+
+def kit_add_timeout_s() -> float:
+    """The budget, in seconds, for one ``sbx kit add`` call."""
+    return positive_seconds(KIT_ADD_TIMEOUT_ENV, DEFAULT_KIT_ADD_TIMEOUT_S)

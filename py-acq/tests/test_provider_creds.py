@@ -409,6 +409,25 @@ def test_provider_credential_set_and_rm_wait_for_the_provider_lock(monkeypatch, 
     assert rc == 0
 
 
+def test_provider_credential_set_and_rm_wait_for_a_create_reading_the_store(monkeypatch, tmp_path, capsys):
+    # The credential is a global value a create may be binding into a new guest.
+    from acq_py import lock, secretstore
+
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_SANDBOX_LOCK_TIMEOUT", "0.3")
+    with lock.secret_store_lock(shared=True):
+        monkeypatch.setattr(sys, "stdin", io.StringIO("LOCKED-OUT-VALUE\n"))
+        rc, doc = _invoke(capsys, "--backend", "msb", "provider-credential", "set", "acme", "ACME_KEY",
+                          "--host", "models.acme.gov", "--json")
+        assert rc == 1 and doc["error"]["code"] == "timeout"
+        assert "secret-store lock" in doc["error"]["message"]
+        assert provider_creds.get_binding("acme") is None and secretstore.resolve("acme") is None
+        provider_creds.set_binding("acme", "ACME_KEY", ["models.acme.gov"])
+        rc, doc = _invoke(capsys, "provider-credential", "rm", "acme", "--json")
+        assert rc == 1 and doc["error"]["code"] == "timeout"
+        assert provider_creds.get_binding("acme") is not None
+
+
 def test_provider_credential_min_reader_fails_closed(monkeypatch, tmp_path, capsys):
     # A record whose min_reader exceeds this reader is refused, not misread.
     _env(monkeypatch, tmp_path)
