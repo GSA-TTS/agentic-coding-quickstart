@@ -198,8 +198,14 @@ jobs:
           & (Join-Path $venv 'Scripts\python.exe') -m pip install --require-hashes --no-deps --only-binary :all: -r py-acq/requirements-quality.txt
           if ($LASTEXITCODE -ne 0) { throw "pip install exited $LASTEXITCODE" }
 
+      # The launcher tests also run acq.ps1 under PowerShell 7 (the pwsh this
+      # step runs in); ACQ_TEST_REQUIRE_PWSH makes them fail rather than skip if
+      # the runner image ever stops providing it.
       - name: pytest (py-acq, Python 3.12)
+        env:
+          ACQ_TEST_REQUIRE_PWSH: '1'
         run: |
+          Write-Host "PowerShell $($PSVersionTable.PSVersion) at $((Get-Command pwsh).Source)"
           & (Join-Path $env:RUNNER_TEMP 'acq-test-tools\Scripts\python.exe') -m pytest py-acq/tests -q
           if ($LASTEXITCODE -ne 0) { throw "pytest exited $LASTEXITCODE" }
 

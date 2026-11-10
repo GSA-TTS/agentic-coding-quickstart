@@ -31,6 +31,14 @@ sys.path.insert(0, str(PY_ACQ_SRC))
 # fixture and never put back into the environment acq runs under.
 _PINNED_PATTERNS_REPO = os.environ.get("ACQ_TEST_PATTERNS_REPO", "")
 
+# The Windows launcher tests run acq.ps1 under PowerShell 7 too. ACQ_TEST_PWSH
+# names a pwsh.exe to use instead of the one on PATH; ACQ_TEST_REQUIRE_PWSH=1
+# (set in CI) makes a missing pwsh fail those tests instead of skipping them.
+# Captured before the scrub for the same reason, and handed over by the
+# pwsh_test_settings fixture.
+_TEST_PWSH = os.environ.get("ACQ_TEST_PWSH", "")
+_REQUIRE_PWSH = os.environ.get("ACQ_TEST_REQUIRE_PWSH", "") == "1"
+
 # Collection imports acq_py before any function fixture runs. The timeout
 # tunables are now read lazily, but clear inherited ACQ_* here as well so a
 # developer's shell cannot change anything read during import.
@@ -56,6 +64,12 @@ def pinned_patterns_repo() -> Path:
     if not _PINNED_PATTERNS_REPO:
         pytest.skip("pinned Patterns checkout is provided by CI via ACQ_TEST_PATTERNS_REPO")
     return Path(_PINNED_PATTERNS_REPO)
+
+
+@pytest.fixture(scope="session")
+def pwsh_test_settings() -> tuple[str, bool]:
+    """``(ACQ_TEST_PWSH, ACQ_TEST_REQUIRE_PWSH == "1")`` as the test run started."""
+    return _TEST_PWSH, _REQUIRE_PWSH
 
 
 @pytest.fixture(autouse=True)

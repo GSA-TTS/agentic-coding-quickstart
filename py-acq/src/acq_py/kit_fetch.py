@@ -9,8 +9,10 @@ is fetched here. This is a port of the Bash ``kit_translate_fetch``,
 ones:
 
 * The ref grammar is Bash's: ``git+https://HOST/PATH#ref=REF&dir=DIR``, the
-  fragment split on ``&``, the last ``ref=`` and ``dir=`` winning, other
-  parameters ignored. A ref with userinfo in its authority is refused
+  fragment split on ``&``, the last ``ref=`` and ``dir=`` winning. Both refuse
+  first, without naming the URL or a value, a query string before the ``#``
+  and any fragment parameter other than ``ref=`` and ``dir=``
+  (:func:`kits.remote_ref_problem`). A ref with userinfo in its authority is refused
   (``credential-bearing kit URLs are not allowed``), and so is a ``dir=`` that
   is absolute, contains ``..`` or uses a character outside ``[A-Za-z0-9._/-]``.
 * Stricter than Bash: ``REF`` must be a full 40-hex commit id. Bash fetches a
@@ -68,7 +70,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import errors, gitrepos, hostexec, kitspec, timeouts, userdirs
+from . import errors, gitrepos, hostexec, kits, kitspec, timeouts, userdirs
 
 FETCH_TIMEOUT_ENV = "ACQ_KIT_FETCH_TIMEOUT"
 DEFAULT_FETCH_TIMEOUT_S = 120.0
@@ -119,27 +121,8 @@ class RemoteRef:
     directory: str  # normalized: no "." or empty segments; "" for the repository root
 
 
-def ref_display(ref: str) -> str:
-    """``kit_ref_display``: a kit ref safe for a terminal or a log.
-
-    Before the ``#`` fragment, a query string becomes ``?***``, URL userinfo
-    becomes ``***@``, and without a scheme a first path segment with ``@``
-    becomes ``***@HOST``. The fragment is kept so the message still names the
-    kit. Every message that names a ref goes through this.
-    """
-    base, sep, frag = ref.partition("#")
-    query = ""
-    if "?" in base:
-        base, query = base.split("?", 1)[0], "?***"
-    if "://" in base:
-        scheme, rest = base.split("://", 1)
-        if "@" in rest:
-            base = f"{scheme}://***@{rest.rsplit('@', 1)[1]}"
-    else:
-        first = base.split("/", 1)[0]
-        if "@" in first:
-            base = "***@" + first.rsplit("@", 1)[1] + base[len(first):]
-    return f"{base}{query}{sep}{frag}"
+# ``kit_ref_display``, kept here for the callers that already import it.
+ref_display = kits.ref_display
 
 
 def _shown(ref: str) -> str:
@@ -185,6 +168,9 @@ def parse_ref(ref: str) -> RemoteRef:
     shown = _shown(ref)
     if not is_remote(ref):
         raise _refused(f"kit ref {shown} is not a remote kit ref")
+    problem = kits.remote_ref_problem(ref)
+    if problem is not None:
+        raise _refused(problem, remediation=kits.REMOTE_REF_REMEDIATION)
     url = ref[len("git+"):]
     frag = url.split("#", 1)[1] if "#" in url else url  # Bash "${url#*#}"
     url = url.split("#", 1)[0]
@@ -567,6 +553,15 @@ class _LocalCopy:
         info = os.fstat(src_fd)
         if not stat.S_ISREG(info.st_mode):
             raise self.refuse(f"{rel} is not a regular file")
+        if info.st_nlink > 1:
+            # A hard link may be a file from elsewhere on the same file system
+            # that someone who can write to the kit linked in. Checked on the
+            # opened file, so it is the file that would be copied (Windows
+            # reports NTFS hard links here too). Directories never reach this.
+            raise KitFetchError(errors.VALIDATION_FAILED,
+                                f"local kit {self.shown} was refused: {rel} has more than one hard link",
+                                "make a plain copy of the kit (for example 'cp -R KIT KIT-copy') and use the copy, "
+                                "then retry")
         digest = hashlib.sha256()
         out = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
         try:

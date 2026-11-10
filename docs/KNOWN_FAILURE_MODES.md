@@ -969,6 +969,8 @@ sbx secret set-custom <sandbox-name> --host api.gsa.usai.gov \
 
 - Rotate with `acq usai-rotate-api-key`, which preserves the placeholder so
   existing sandboxes keep working. Avoid deleting + re-adding the global secret.
+  When sbx holds more than one global USAi entry, rotation refuses and names
+  each placeholder instead of picking one (see section 88).
 - Remove any `export USAI_API_KEY=...` from your shell profile — the sandbox gets
   its value from sbx injection, and a host env var only causes confusion.
 
@@ -3402,11 +3404,22 @@ kits outside the bundle at their pinned commit. Compared with the Bash acq:
   the spec reader, like Bash's, would read each value with a trailing CR. A
   local kit's later changes reach a sandbox only through a heal or recreate,
   which copies it again.
-- Known limitation, shared with Bash: a payload file that is a hard link
-  (link count above 1) is copied like any other file. A hard link cannot point
-  across file systems or at a directory, but whoever can write to the kit
-  directory can hard-link a file they can read from elsewhere on the same file
-  system into it. Keep local kits in a directory only you can write.
+- A regular file with more than one hard link (link count above 1) anywhere in
+  a local kit is refused, by both the Python and the Bash acq, with the file's
+  path relative to the kit and the remedy: make a plain copy of the kit (for
+  example `cp -R KIT KIT-copy`, which gives each file one link) and use the
+  copy. A hard link cannot point across file systems or at a directory, but
+  whoever can write to the kit directory could hard-link a file they can read
+  from elsewhere on the same file system into it. Directories are exempt:
+  their link count is naturally above 1. The Python acq checks the link count
+  of each file it opens for the copy (`os.fstat`, which reports NTFS hard links
+  on Windows too), so the file checked is the file copied.
+- Bash limit: Bash reads a local kit in place, so its check (one
+  `find KIT -type f -links +1` in `kit_translate_fetch`, POSIX on Linux and
+  macOS) is a check before use, not a guarantee. A hard link created in the
+  kit after the check and before the backend reads the file is not seen.
+  Keep local kits in a directory only you can write, or use the Python acq,
+  which applies only its checked private copy.
 
 ### Root Cause
 
@@ -3444,8 +3457,10 @@ Tracked follow-ups:
   POSIX; `provider_input.publish` already writes Bash's Windows pointer file.
 - **Local kit directories.** Done: the Python acq copies a local kit into its
   private cache with the no-link checks (option 1 in section 61) and applies
-  the copy, on Windows checking each opened file's final path as well. Nothing
-  further is tracked here; the hard-link limitation above is Bash's too.
+  the copy, on Windows checking each opened file's final path as well. Both
+  acq implementations refuse a hard-linked file in a local kit; the Bash
+  check-then-use limit above is a known residual. Nothing further is tracked
+  here.
 - **The rc bridge.** Port `_acq_sbx_ensure_rc_bridge` with the msb login-shell
   work.
 - **Kit fetch on Windows.** The fetch itself has no POSIX-only step, but its
@@ -4876,33 +4891,341 @@ holding it; such an animator, if resumed after that, can still draw one frame.
 
 ---
 
-## 85. Windows: A Forced Kill of the Python acq Leaves the Session Child Running
+## 85. Windows: A Forced Kill of the Python acq Left the Session Child Running
+
+**Status:** Fixed. Earlier builds behave as described below.
 
 **Symptom:** On Windows, ending the Python acq from outside during `acq attach`,
 `acq shell`, `acq exec` or `acq run` (Task Manager's End task, `taskkill /F
-/PID <acq pid>`, or `Stop-Process`) ends acq at once, while the backend session
-(`msb.exe exec` or `sbx.exe exec`) keeps running in the console and holding it.
+/PID <acq pid>`, or `Stop-Process`) ended acq at once, while the backend session
+(`msb.exe exec` or `sbx.exe exec`) kept running in the console and holding it.
 
 **Cause:** On POSIX a SIGTERM or SIGHUP to acq during a session is passed on to
 the session child, which gets ten seconds to exit before acq kills it, and acq
 exits `128+N` only once the child is gone (`run_foreground` in
 `py-acq/src/acq_py/hostexec.py`). Windows has no catchable termination signal
 from another process: those tools call `TerminateProcess`, which no handler
-sees, so acq cannot pass anything on. What Windows does deliver, a Ctrl-Break
-in the console, reaches acq and the child alike; acq waits up to the same ten
-seconds for the child, ends it if needed, and exits 149 (128 plus SIGBREAK's
-number) without a `--json` envelope, as it does for a Ctrl-Break during any
-other command.
+sees, so acq could not pass anything on.
 
-**Resolution:** End the whole process tree instead: `taskkill /T /F /PID <acq
-pid>`, or press Ctrl-C or Ctrl-Break in the session's console. A session child
-already left behind can be ended the same way by its own PID.
+**Resolution:** Nothing to do as a user. The session child now runs in a Job
+object that kills its processes when the last handle to it closes
+(`_start_session` in `hostexec.py`, reusing the `StepJob` that bounded backend
+calls already use). acq holds the only handle, and a forced kill closes it, so
+the session and everything it started end with acq. The child is created
+suspended and resumed only once it is in the job. The job does not change the
+console, so the PTY, Ctrl-C and Ctrl-Break behave as before: a Ctrl-Break
+reaches acq and the child alike, acq waits up to ten seconds for the child,
+ends it if needed, and exits 149 (128 plus SIGBREAK's number) without a
+`--json` envelope. When the session exits normally, or after a Ctrl-Break, the
+job is released first, so a process the session left running on purpose keeps
+running. Where the job cannot be created or the child cannot be assigned to it,
+the session is started without one, as before.
 
-**Tracked:** run the session in a Job object that kills its processes when acq's
-handle closes (as `run_captured` already does for bounded backend calls), so a
-forced kill of acq takes the session with it. Unblock trigger: a report of a
-session left running after a forced kill, or the Windows default flip
-(ADR-0048m).
+Checked on Windows 11 with msb 0.7.7 and a real guest: `taskkill /F` of the
+acq interpreter (or of the venv launcher above it) during `acq exec` ended
+`msb.exe exec` within three seconds, where the previous build left it running;
+`acq shell` kept its PTY, Ctrl-C reached the guest (`sleep` exited 130 and the
+shell carried on), and a console Ctrl-Break ended acq with 149 and left no
+`msb.exe exec` behind. `msb.exe exec` starts no helper process of its own, and
+it does not start a stopped sandbox (the guest's `msb.exe machine` process is
+started by `create` or `start`, outside the session), so a forced kill no
+longer leaves anything running there.
+
+**Trade-off:** a process the session starts and that is still running when acq
+is force-killed now ends with acq, unless it was started with
+`CREATE_BREAKAWAY_FROM_JOB` (the job allows breakaway). For msb nothing does
+this. For sbx it was not checked, because sbx was not installed on the test
+host: if `sbx.exe exec`, or a command acq passes through to sbx, starts sbx's
+background service on demand as its own child, a forced kill of acq during
+that session also ends the service, and the next sbx command has to start it
+again. An ordinary exit, Ctrl-C or Ctrl-Break does not. Tracked: check this
+with a real `sbx.exe` on Windows at the next re-verification.
+
+---
+
+## 86. Windows: A Non-ASCII Secret Could Read Back Changed
+
+**Status:** Fixed. Earlier builds behave as described below.
+
+**Symptom:** After upgrading, on Windows, **every** secret containing
+characters outside ASCII (an accented letter, CJK text, an emoji) that an
+earlier build stored reads back changed, whatever code page it was stored
+under. Under the default code page 437, `café` now reads back as `caf├⌐`, so
+the sandbox is bound a value that does not work. Earlier builds themselves
+also read such a secret back changed when the console code page was a
+double-byte one (such as 932), or when it was stored and read under different
+code pages (for example `chcp 65001` in one window and 437 in another). ASCII
+values, including ones with quotes, backslashes, `$` or backticks, are not
+affected, before or after the upgrade.
+
+**Cause:** Both implementations encrypt with DPAPI through Windows PowerShell
+5.1, passing the value on stdin and reading the result on stdout. PowerShell
+decodes `[Console]::In` and encodes `[Console]::Out` with the console's code
+page, so the UTF-8 bytes acq sent were reinterpreted on the way in and out.
+Under the 437 default this happened to round-trip, but what DPAPI protected
+was not the value's UTF-8, and any other code page lost or changed bytes.
+Checked on Windows 11 with Python 3.12: under 932 three of eleven test values
+came back wrong, and values stored under 65001 or 932 came back wrong under
+437.
+
+**Resolution:** Nothing to do for new values. Both one-liners now carry only
+base64 over the pipes: the value goes in as base64 of its UTF-8 bytes and comes
+back the same way (`_PS_ENCRYPT` and `_PS_DECRYPT` in
+`py-acq/src/acq_py/secretstore.py`, `_acq_secret_windows_encrypt` and
+`_acq_secret_windows_decrypt` in `acq.backends/secret-store.sh`, still byte
+for byte the same). What an earlier build encrypted was the code-page-decoded
+text, not the value, and that is what now comes back, so after upgrading set
+every non-ASCII secret again, under the service and scope it was stored under:
+
+```bash
+acq secret set -g usai      # repeat for each non-ASCII secret
+```
+
+The stored envelope carries no marker telling the two formats apart: a new
+envelope header would be read as a plaintext value by earlier builds, which
+compare the header exactly, so a mixed install would bind the ciphertext as
+the secret. acq therefore cannot detect or warn about an old non-ASCII value.
+
+ASCII secrets stored by earlier builds read back unchanged.
+
+---
+
+## 87. Windows: Python acq and Git Bash Use Different Stores When USERPROFILE and HOMEPATH Differ
+
+**Symptom:** On Windows, with `HOME` unset, a secret or record written by the
+Python acq is not found by the Bash acq under Git Bash, or the reverse. It
+happens when `USERPROFILE` and `HOMEDRIVE`+`HOMEPATH` name different
+directories: `USERPROFILE` was changed, or the account's home directory is not
+its profile (a domain home share on `HOMEDRIVE`).
+
+**Cause:** With `HOME` unset, the two implementations take the home directory
+from the same variables in the opposite order. The Python acq uses
+`Path.home()` (`py-acq/src/acq_py/userdirs.py`), which reads `USERPROFILE`
+first and falls back to `HOMEDRIVE`+`HOMEPATH`. Git Bash sets `HOME` from
+`HOMEDRIVE`+`HOMEPATH` first and falls back to `USERPROFILE`. Checked on
+Windows 11 with Git for Windows 2.56 and Python 3.12:
+
+| Environment (`HOME` unset) | Python home | Git Bash `HOME` |
+|---|---|---|
+| `USERPROFILE`, `HOMEDRIVE`+`HOMEPATH` all the account profile | profile | profile |
+| `USERPROFILE` changed to a scratch directory | scratch | profile (from `HOMEPATH`) |
+| `HOMEPATH` changed as well | scratch | the new `HOMEPATH` |
+| `HOMEDRIVE` and `HOMEPATH` unset | scratch | scratch (from `USERPROFILE`) |
+
+The secret store, state and config all live under that home, so the two
+implementations then use different directories.
+
+**Resolution:** Set `HOME` (or the `XDG_*` variables) to the same absolute
+path for both implementations whenever `USERPROFILE` and
+`HOMEDRIVE`+`HOMEPATH` differ. Both honour an absolute `HOME` before anything
+else.
+
+---
+
+## 88. Windows: A Bash Provider-Input Lock Holds Off the Python acq for 15 Minutes
+
+**Symptom:** On Windows, a Python acq command on one sandbox (`create`, `run`,
+`rm`, `start`) waits and then fails with `timeout` although no other acq
+command is running. The remediation names a directory ending in `.lock` under
+`.../acq/provenance/provider-input/<backend>/` and says that a lock left by
+Bash acq counts as held for 15 minutes after it was taken.
+
+**Cause:** The Bash acq locks a sandbox by creating that directory and writing
+`PID IDENTITY` into its `owner` file. On POSIX the Python acq checks that the
+PID is still the same process and recovers a lock whose owner is gone
+(see [§79](#79-sandbox-lock-directory-without-an-owner-is-never-removed-automatically)).
+On Windows it cannot: Git Bash PIDs are not Windows PIDs, and `os.kill` there
+terminates a process rather than probing it. So the Python acq treats a Bash
+lock directory as held for 15 minutes after it was last modified (when its
+owner was written), then ignores it (`_BashLock._recent_on_windows` and
+`_BASH_WINDOWS_FRESH_S` in `py-acq/src/acq_py/lock.py`). A Bash command killed
+mid-create leaves the directory behind and blocks Python commands on that
+sandbox for the rest of the 15 minutes. For the same reason the Python acq
+never takes this directory on Windows, so a Bash command started while a
+Python command works on the same sandbox is not held back by it.
+
+**Resolution:**
+
+1. Make sure no acq command (Bash or Python) is running: in Git Bash, `ps`
+   lists no `acq` script; in PowerShell, `Get-Process bash, python
+   -ErrorAction SilentlyContinue` shows none started for acq.
+2. Remove the directory the message names, with its `owner` file:
+
+   ```powershell
+   Remove-Item -Recurse -LiteralPath '<the .lock directory from the message>'
+   ```
+
+3. Retry. Waiting until 15 minutes after the lock was taken also works.
+
+Do not run the Bash and the Python acq against the same sandbox at the same
+time on Windows.
+
+---
+
+## 89. Windows: Bash `acq create` Fails Validation of a Provider Kit's Normalizer
+
+**Symptom:** Under Git Bash on Windows, a Bash `acq create` (or `acq run`)
+whose provider kit carries provider input stops before the backend create
+with:
+
+```text
+provider input contract: C:\...\candidate-<n>\provider-input.json: normalizerPath must be an executable file
+acq(msb): error: provider input projection failed for '<name>'.
+```
+
+**Cause:** The pinned Patterns validator
+(`scripts/validate_provider_input_contract.py`, run by
+`acq_provider_input_prepare` in `acq.backends/common.sh`) requires an execute
+bit on the normalizer (`st_mode & 0o111`). Windows has no execute bit:
+CPython reports one only for `.exe`, `.bat`, `.cmd` and `.com` files, and the
+USAi kit's normalizer is `scripts/normalize-catalog.mjs`, so every Windows
+host fails. The bats suite replaces the validator with a stand-in, so it never
+saw this. Found by running a Bash create on Windows 11 (Git for Windows 2.56,
+Python 3.12) against the real validator with stubbed msb and sbx. A second
+fault on the same path is fixed: once the validator passed, reading the
+provider facts looked for the validator runtime at
+`<data dir>/provider-input-validator.current` instead of
+`<data dir>/provider-input-validator/provider-input-validator.current` (where
+`scripts/setup-provider-input-validator` puts it), fell back to a bare
+`python3` and, on Windows, reached the Microsoft Store alias
+(`_acq_provider_facts_python`). With both faults worked around, create,
+validate, materialize, publish, the backend create with the provider-input
+mount, and `acq rm` all completed for msb and sbx.
+
+**Resolution:** Use the Python acq on Windows (`ACQ_IMPL=python`), which does
+not run that validator. Tracked: skip the execute-bit check on Windows in the
+Patterns validator and bump `PATTERNS_KIT_REF`, or have acq run the pinned
+validator through a small launcher that reports execute bits on Windows. Also
+seen on the same run, and tracked with it: `scripts/setup-provider-input-validator`
+under Git Bash picks the Microsoft Store `python3` alias, installs under
+`XDG_DATA_HOME` while acq on Windows looks under `LOCALAPPDATA`, and its `ln
+-s` makes a full copy of the runtime that a second run cannot replace.
+
+---
+
+## 88. sbx: More Than One Global USAi Custom Secret Is Refused
+
+**Status:** By design (both the Bash and the Python `acq`).
+
+### Symptoms
+
+`acq secret set -g usai`, `acq secret rm -g usai`, `acq usai-rotate-api-key`
+on sbx, or a USAi change made on msb that acq passes on to sbx sandboxes, stops
+with exit 1:
+
+```text
+acq(sbx): sbx holds 2 custom secrets for USAI_API_KEY on api.gsa.usai.gov in the global scope,
+          so acq cannot tell which one your sandboxes use; nothing was changed.
+          Placeholders: sbx-cs-AAAA sbx-cs-BBBB
+          Warning: a running sandbox may hold one of these placeholders. ...
+            sbx secret rm --placeholder sbx-cs-AAAA -f
+            sbx secret rm --placeholder sbx-cs-BBBB -f
+```
+
+The Python `acq` gives the same facts in one error and remediation (or
+`--json` envelope). Nothing is stored, removed or re-set. A placeholder with
+characters outside letters, digits, `.`, `_` and `-` is never printed as a
+command; inspect it with `sbx secret ls`.
+
+### Root Cause
+
+sbx can hold several custom secrets for the same env var and host, for example
+after a rotation from before ADR-0008 or a manual `sbx secret set-custom`. Each
+sbx sandbox was injected with one placeholder when it was created, and sbx does
+not say which. Updating whichever entry sbx lists first, or removing them all
+and creating one (what the Bash rotation used to do), can leave running
+sandboxes with a placeholder sbx no longer maps, so they get `401` from USAi
+(see section 23). acq therefore refuses and lets you choose. Rows are matched
+by scope, env var **and** host: a secret for `USAI_API_KEY` on another host is
+a different secret and is not counted.
+
+### Fix
+
+1. Decide which entry your sandboxes use. If you do not know, keep the oldest
+   and plan to recreate any sandbox that then fails with `401`.
+2. Remove the others with the printed commands, one per entry
+   (`sbx secret rm --placeholder P -f`).
+3. With one entry left, run `acq usai-rotate-api-key`: it updates that entry
+   in place and keeps its placeholder. Do not re-run `acq secret set -g usai`
+   on sbx (or `acq --backend sbx secret set -g usai`): it refuses because an
+   entry exists. For a change made on msb, re-running the msb command
+   (`acq --backend msb secret set -g usai`) re-feeds the kept entry too. For
+   `acq secret rm`, re-run it. A sandbox whose placeholder you removed is
+   recovered by the rebind in section 23 (ADR-0008) or by recreating it.
+
+### Prevention / Status
+
+Rotate with `acq usai-rotate-api-key` rather than deleting and re-adding the
+secret. The refusal is covered by `test/bats/40-secret-set.bats`,
+`test/bats/77-usai-rotate.bats`, `py-acq/tests/test_sbx.py` and the vectors
+`cli/secret-set-sbx-duplicate-usai` and `cli/sbx-duplicate-usai-nothing-removed`.
+
+---
+
+## 89. Remote Kit Ref With a Query String or an Extra `#` Parameter Is Refused
+
+**Status:** By design (both the Bash and the Python `acq`).
+
+### Symptoms
+
+`acq run`, `acq create`, `acq kit list` or a heal stops before anything is
+fetched:
+
+```text
+acq: --kit: remote kit ref refused: its URL has a query string ('?' before the '#').
+```
+
+or `... its '#' fragment has a parameter other than ref= and dir=.`,
+`... repeats ref= or dir=.` or `... has a ref= or dir= value that is empty,
+starts with '-' or holds a character outside [A-Za-z0-9._/-].` (with `ACQ_EXTRA_KITS:` or
+`ACQ_PROVIDER_KITS:` in place of `--kit` for an entry of that variable). The
+message does not repeat the ref. A refused `--kit` ref stops `run` or `create`
+at once. A refused `ACQ_EXTRA_KITS` or `ACQ_PROVIDER_KITS` ref is enforced only
+where kits are selected or applied (`run`/`create` of a new sandbox,
+`kit list`, and the heal on `start`, `restart` or a re-attach, which skips the
+kits with a warning and attaches anyway), so other commands such as `acq ls`
+or `acq secret rm` keep working. A sandbox whose kit record holds such a ref
+from an older `acq` prints `ignoring a recorded remote kit ref ... that acq now
+refuses` on start; that kit is no longer applied, and recreating the sandbox
+clears it from the record.
+
+### Root Cause
+
+A remote kit ref is `git+https://HOST/REPO.git#ref=<sha>&dir=<path>`, and acq
+uses no other part. A query string (`?private_token=…`), an extra fragment
+parameter (`&token=…`), a second `ref=`/`dir=`, or a value carrying `?`, `;`,
+`#`, a space or a non-ASCII letter is where a credential would ride (and a
+value starting with `-` would reach git as an option; the Bash fetch also
+passes `--` before the ref), and acq used to carry the ref
+verbatim into its debug output, its `.kits` and sbx `extra-kits` records and,
+after a fetch, its messages. acq now refuses such a ref where it enters
+(`--kit`, `ACQ_EXTRA_KITS`, `ACQ_PROVIDER_KITS`), again before any fetch
+(`kit_ref_shape_check` in `acq.backends/kit-translate.sh`,
+`kits.remote_ref_problem` in `py-acq/src/acq_py/kits.py`), and skips it when a
+record is reloaded. Message helpers show only the first plain `ref=` and
+`dir=` and hide the rest (`kit_ref_display`, `kits.ref_display`).
+`test/fixtures/kit-ref-probes.tsv` lists probe refs both implementations must
+judge and display alike.
+
+`%3F` in the URL path is not a query string: git sends it as part of the path,
+so acq does not refuse it at input (the Python acq refuses any percent escape
+when it fetches).
+
+### Fix
+
+Remove the query string, the extra parameter or the repeat, and keep `ref=`
+and `dir=` values to ASCII letters, digits, `.`, `_`, `/` and `-`, not starting
+with `-`. For a kit source
+that needs authentication, configure a git credential helper that does not
+prompt (for GitHub, `gh auth setup-git`); never put a token in the ref. A local
+kit path is not affected: `?` and `#` are ordinary characters in a directory
+name.
+
+### Prevention / Status
+
+Covered by `test/bats/170-kit-ref-shape.bats`, `py-acq/tests/test_kit_fetch.py`,
+`py-acq/tests/test_kits.py`, `py-acq/tests/test_configure.py` and
+`py-acq/tests/test_legacy_bash.py`.
 
 ---
 

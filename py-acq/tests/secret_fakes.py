@@ -90,19 +90,27 @@ else:
 
 # Windows PowerShell running acq's DPAPI one-liners. A reversible, deterministic
 # transform stands in for ProtectedData; the mode is picked the way the real
-# one-liner differs (Unprotect vs Protect). $FAKE_DPAPI_FAIL=1 fails every call.
+# one-liner differs (Unprotect vs Protect). Both directions carry base64 only,
+# as the real one-liners do, and input that is not base64 fails the call. Every
+# stdin is appended to $FAKE_KEYCHAIN_DIR/powershell.stdin, one line per call.
+# $FAKE_DPAPI_FAIL=1 fails every call.
 POWERSHELL = _PRELUDE + '''
 if os.environ.get("FAKE_DPAPI_FAIL"):
     sys.exit(1)
 script = " ".join(sys.argv[1:])
 data = sys.stdin.buffer.read()
+with open(os.path.join(root, "powershell.stdin"), "ab") as seen:
+    seen.write(data + b"\\n")
+try:
+    raw = base64.b64decode(data.strip(), validate=True)
+except ValueError:
+    sys.exit(1)
 if "Unprotect" in script:
-    raw = base64.b64decode(data.strip())
     if not raw.startswith(b"DPAPI:"):
         sys.exit(1)
-    sys.stdout.buffer.write(raw[len(b"DPAPI:"):])
+    sys.stdout.buffer.write(base64.b64encode(raw[len(b"DPAPI:"):]))
 else:
-    sys.stdout.buffer.write(base64.b64encode(b"DPAPI:" + data))
+    sys.stdout.buffer.write(base64.b64encode(b"DPAPI:" + raw))
 '''
 
 

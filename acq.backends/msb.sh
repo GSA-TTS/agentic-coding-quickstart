@@ -6566,6 +6566,12 @@ _acq_msb_heal_kit_set() {
 
 acq_backend_ensure_kits_applied() {
   local name="$1"
+  # A kit ref refused at input (latched by _build_kit_list) stops the heal, as
+  # the Python acq does; the caller warns and attaches anyway.
+  if command -v _acq_require_kit_refs >/dev/null 2>&1 && ! _acq_require_kit_refs; then
+    echo "acq: the kits of sandbox '$name' were not re-applied (see above)." >&2
+    return 1
+  fi
   if command -v acq_provider_selection_load >/dev/null 2>&1; then
     acq_provider_selection_load msb "$name" || return 1
   fi

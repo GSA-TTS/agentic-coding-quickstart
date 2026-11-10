@@ -438,6 +438,34 @@ def test_powershell_one_liners_are_byte_identical_to_bash():
     assert one_liners == [secretstore._PS_ENCRYPT, secretstore._PS_DECRYPT]
 
 
+# Values that are awkward for a shell, PowerShell or a console code page.
+AWKWARD_VALUES = [
+    'a"b""c', "a'b''c", "C:\\path\\to\\", "$env:USERNAME $(whoami) ${x}", "a`nb``c`",
+    "caf\u00e9 na\u00efve \u00fc\u00df", "\u65e5\u672c\u8a9e", "key-\U0001f511-\u2603", "  padded  ",
+]
+
+
+@posix_fakes
+@pytest.mark.parametrize("value", AWKWARD_VALUES)
+def test_windows_dpapi_moves_only_base64_across_powershell(monkeypatch, tmp_path, value):
+    # Windows PowerShell reads stdin and writes stdout in the console's code
+    # page, which mangles UTF-8; only base64 may cross those pipes.
+    apply_env(monkeypatch, fake_env(tmp_path))
+    plant(tmp_path / "bin", "powershell.exe", POWERSHELL)
+    monkeypatch.setenv("ACQ_SECRET_POWERSHELL_BIN", str(tmp_path / "bin" / "powershell.exe"))
+    monkeypatch.setattr(secretstore, "IS_WINDOWS", True)
+    secretstore.set_secret("usai", None, value)
+    assert secretstore.resolve("usai") == value
+    sent = (tmp_path / "keychain" / "powershell.stdin").read_bytes().splitlines()
+    assert len(sent) == 2 and all(re.fullmatch(rb"[A-Za-z0-9+/=]+", line) for line in sent), sent
+
+
+def test_dpapi_decrypt_rejects_output_that_is_not_base64(monkeypatch, tmp_path):
+    monkeypatch.setattr(secretstore, "_powershell", lambda _layout: "powershell.exe")
+    monkeypatch.setattr(secretstore, "_run_tool", lambda argv, stdin=None: (0, "caf\u00e9"))
+    assert secretstore.dpapi_decrypt("QUJD") is None
+
+
 # ---------------------------------------------------------------------------
 # Endpoint metadata sidecar.
 # ---------------------------------------------------------------------------

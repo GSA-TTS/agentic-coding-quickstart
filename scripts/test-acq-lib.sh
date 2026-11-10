@@ -244,7 +244,7 @@ case "${1:-}" in
       *) _https_allowed=0 ;;
     esac
     if [ "$_https_allowed" = 1 ] \
-        && [ "$*" = "fetch --depth 1 origin $ACQ_TEST_PATTERNS_REF" ] \
+        && [ "$*" = "fetch --depth 1 origin -- $ACQ_TEST_PATTERNS_REF" ] \
         && [ "$("$ACQ_TEST_REAL_GIT" config --get remote.origin.url)" = https://github.com/GSA-TTS/agentic-coding-patterns.git ]; then
       IFS= read -r path < .git/info/sparse-checkout || exit 1
       path=${path%/\*}

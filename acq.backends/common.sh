@@ -241,6 +241,11 @@ KIT_SOURCE_PREFIXES=()
 # _acq_require_provider_selection, which only create/run call.
 # shellcheck disable=SC2034  # read by _acq_require_provider_selection
 ACQ_PROVIDER_SELECTION_ERROR=""
+# The same latch for a kit ref acq refuses at input (kit_ref_shape_check) in
+# ACQ_EXTRA_KITS or ACQ_PROVIDER_KITS: recorded by _build_kit_list, enforced only
+# where kits are selected or applied (run/create, kit list, the heal), so an
+# unrelated verb such as `acq ls` or `acq secret rm` still works.
+ACQ_KIT_REFS_ERROR=""
 
 # Transitional fallback defaults for the pinned usai-provider kit. ADR-0030's
 # target state is for the kit to export these provider facts as static metadata
@@ -1029,6 +1034,14 @@ _acq_require_provider_selection() {
   return 1
 }
 
+# _acq_require_kit_refs — the gate for the latched ACQ_KIT_REFS_ERROR: print it
+# and fail. Called by run/create, kit list and the backends' heal.
+_acq_require_kit_refs() {
+  [ -n "${ACQ_KIT_REFS_ERROR:-}" ] || return 0
+  printf '%s\n' "$ACQ_KIT_REFS_ERROR" >&2
+  return 1
+}
+
 # Assemble the full kit list: selected built-ins, then extras.
 # Zscaler CA trust FIRST (see ACQ_KIT_NAMES) so later network-fetching kits
 # succeed behind a TLS-intercepting proxy.
@@ -1036,6 +1049,9 @@ _acq_require_provider_selection() {
 _build_kit_list() {
   local agent="${1:-}" kit support_refs
   KITS=()
+  # Latch (do not fail on) a refused ACQ_EXTRA_KITS/ACQ_PROVIDER_KITS ref: this
+  # runs for every verb. The message never names the ref.
+  ACQ_KIT_REFS_ERROR=$(_acq_kit_refs_check 2>&1 >/dev/null) && ACQ_KIT_REFS_ERROR=""
   _acq_kit_refs_make_absolute
   # This runs for EVERY verb (acq_resolve_backend), so a provider-selection
   # failure is LATCHED here and only enforced by create/run through
@@ -1914,6 +1930,8 @@ extract_kit_flags() {
   if [ "$expect_kit" -eq 1 ]; then
     echo "acq: --kit given with no value; ignoring" >&2
   fi
+  # A --kit ref is typed for this run/create, so a refused one stops it now.
+  _acq_kit_refs_check cli || return 1
   _acq_kit_refs_make_absolute
 }
 
@@ -3198,6 +3216,33 @@ _acq_kit_refs_make_absolute() {
   fi
 }
 
+# _acq_kit_refs_check [cli]: refuse the --kit, ACQ_EXTRA_KITS and
+# ACQ_PROVIDER_KITS refs where they enter, before any of them is fetched,
+# recorded (the .kits record, the sbx extra-kits record) or printed. A remote
+# ref kit_ref_shape_check refuses (a query string, or a '#' fragment other than
+# one plain ref= and one plain dir=) fails it, with a message that never
+# repeats the ref. With "cli", only the --kit refs are checked.
+_acq_kit_refs_check() {
+  local only="${1:-}" ref var _x=()
+  for ref in ${ACQ_CLI_KITS[@]+"${ACQ_CLI_KITS[@]}"}; do
+    kit_ref_shape_check "$ref" "--kit" || return 1
+  done
+  [ "$only" != cli ] || return 0
+  for var in ACQ_EXTRA_KITS ACQ_PROVIDER_KITS; do
+    case "$var" in
+      ACQ_EXTRA_KITS) ref="${ACQ_EXTRA_KITS:-}" ;;
+      *) ref="${ACQ_PROVIDER_KITS:-}" ;;
+    esac
+    [ -n "$ref" ] || continue
+    _x=()
+    split_noglob _x "$ref"
+    for ref in ${_x[@]+"${_x[@]}"}; do
+      kit_ref_shape_check "$ref" "$var" || return 1
+    done
+  done
+  return 0
+}
+
 # _acq_kit_ref_absolute REF: echo REF with a relative local kit path made
 # absolute (physical), so a recorded ref names the same kit wherever a later
 # start/restart runs. Remote refs, absolute paths and paths that are not an
@@ -3246,6 +3291,15 @@ acq_cli_kits_load() {
             continue
             ;;
         esac
+        # A remote ref that acq now refuses at input (a query string, or a
+        # fragment parameter other than ref= and dir=) is skipped without
+        # being named, as a ref typed today would be refused.
+        if ! kit_ref_shape_check "$val" "recorded kit for $name" 2>/dev/null; then
+          echo "acq: warning: ignoring a recorded remote kit ref for $name that acq now refuses" >&2
+          echo "acq:   (a query string, or a '#' part other than one plain ref= and dir=); it is no longer applied." >&2
+          echo "acq:   Recreate the sandbox to clear it from the sandbox's kit record." >&2
+          continue
+        fi
         ;;
     esac
     case "$line" in
@@ -4491,7 +4545,9 @@ _acq_provider_facts_python() {
   else
     data_home=$(acq_xdg_dir XDG_DATA_HOME .local/share)/acq || data_home=""
   fi
-  runtime="${ACQ_PROVIDER_INPUT_DATA_DIR:-$data_home/provider-input-validator}.current"
+  # The same place scripts/setup-provider-input-validator publishes it and
+  # _acq_provider_input_python looks for it.
+  runtime="${ACQ_PROVIDER_INPUT_DATA_DIR:-$data_home/provider-input-validator}/provider-input-validator.current"
   # Only an absolute runtime path: a relative one would run an interpreter from
   # the current directory (see userdirs.sh).
   if { [ -n "$data_home" ] || [ -n "${ACQ_PROVIDER_INPUT_DATA_DIR:-}" ]; } \

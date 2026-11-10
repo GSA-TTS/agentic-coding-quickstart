@@ -179,7 +179,9 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   envelope, so the session never outlives acq holding the terminal. On Windows
   a Ctrl-Break reaches the child from the console itself; acq gives it the same
   ten seconds and exits `149` (SIGBREAK is 21), again with no envelope. A
-  forced kill of acq on Windows cannot be caught (KNOWN_FAILURE_MODES §85).
+  forced kill of acq on Windows (`taskkill /F`, End task) runs no handler, but
+  the session runs in a Job object that closes with acq, so the session and
+  what it started end too (KNOWN_FAILURE_MODES §85).
 * Flag position: acq's own flags (`--json`, `--backend NAME`) may go anywhere
   before `--` for most verbs, so `acq ls --json` and `acq attach box --json`
   work. Only two places are strict: after the `exec` sandbox name, where tokens
@@ -442,9 +444,12 @@ source) is fetched by `src/acq_py/kit_fetch.py`, a port of Bash
 * Only `git+https://HOST/PATH#ref=SHA&dir=DIR` is fetched, and `SHA` must be a
   full 40-hex commit id. A branch or tag name is refused with
   `kit_ref_not_pinned` (Bash fetches it unverified). So are URL userinfo
-  (`credential-bearing kit URLs are not allowed`), plain `http`, a query
-  string or percent escapes, and a `dir=` that is absolute, contains `..` or
-  uses a character outside `[A-Za-z0-9._/-]`.
+  (`credential-bearing kit URLs are not allowed`), plain `http`, percent
+  escapes, and a `dir=` that is absolute, contains `..` or uses a character
+  outside `[A-Za-z0-9._/-]`. Like Bash, it refuses first, without naming the
+  ref, a query string before the `#` and a `#` part other than one `ref=` and
+  one `dir=` with values in `[A-Za-z0-9._/-]`, at input (`--kit`,
+  `ACQ_EXTRA_KITS`, `ACQ_PROVIDER_KITS`) as well as at the fetch.
 * A local kit directory (Bash reads it in place) is copied into the same
   private cache first, and every check runs on the copy, so a change to the
   directory during the checks cannot reach the sandbox. The copy follows no
@@ -453,8 +458,9 @@ source) is fetched by `src/acq_py/kit_fetch.py`, a port of Bash
   anything but files, directories and links is refused, as is a tree of more
   than 10000 entries, 256 MiB or 64 levels of directories. On Windows each
   copied file's real path (`GetFinalPathNameByHandleW`) must lie under the kit.
-  A directory that does not exist is `validation_failed`. The copy is named by
-  its content.
+  A regular file with more than one hard link is refused, as in Bash (make a
+  plain copy of the kit, for example with `cp -R`). A directory that does not
+  exist is `validation_failed`. The copy is named by its content.
 * The commit is fetched into a bare repository and must be exactly the pinned
   one; the kit is checked out from that commit's tree with a private index, and
   no symlink in it may resolve outside the kit. Only a neutral `hybrid/v1` kit
