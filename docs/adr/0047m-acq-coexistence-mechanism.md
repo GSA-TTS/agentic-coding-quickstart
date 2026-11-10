@@ -136,7 +136,13 @@ does (the `--vsock` route, the in-guest bridge and its restarts, ADR-0021),
 reading and writing the same host-config key and route link, so a sandbox
 either implementation created keeps its forward; the differences and the live
 checks still owed are in `docs/KNOWN_FAILURE_MODES.md` §93. Credential
-rotation, configure settings and Bash-state import have open follow-ups. So
+rotation, configure settings and Bash-state import have open follow-ups.
+Backend doctor diagnostics now report both installed versions against the
+accepted floors and MSB readiness; named diagnostics port the ADR-0030 guest
+probe with nonfatal warnings and the existing JSON check records. The default
+backend offer is terminal-only and defaults to No. Potentially installing MSB
+repair remains advice only, never an automatic host mutation. Offline stub
+tests cover these paths; live qualification remains subject to the gate below. So
 ADR-0038m's "preserve every documented acq-owned command and meaningful flag"
 is not yet met. ADR-0048m gate 4 (command parity) is where parity is judged
 before any default changes. The tracking issues are under Links below.

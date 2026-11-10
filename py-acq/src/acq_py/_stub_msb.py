@@ -440,6 +440,9 @@ def main(argv: list[str]) -> int:
         _save_secrets(records)
         return 0
 
+    if cmd == "doctor":
+        return 1 if os.environ.get("ACQ_MSB_STUB_DOCTOR_UNFIT") else 0
+
     if cmd == "exec":
         if _should_fail("exec"):
             print(RAW_FAIL_STDERR, file=sys.stderr)
@@ -479,6 +482,11 @@ def main(argv: list[str]) -> int:
         forward = _answer_forward_probe(name, command)
         if forward is not None:
             return forward
+        if any("ACQ_ADR0030_IMAGE_DIAGNOSTIC=1" in token for token in command):
+            from .image_doctor import stub_output
+
+            print(stub_output(os.environ.get("ACQ_MSB_STUB_IMAGE_CONTRACT") == "missing"), end="")
+            return _exit_code(EXEC_EXIT_ENV)
         marker = EXEC_MARKER
         if command:
             marker += " " + " ".join(command)

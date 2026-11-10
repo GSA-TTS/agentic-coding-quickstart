@@ -734,6 +734,11 @@ def main(argv: list[str]) -> int:
             # acq's provider key probe: answered from ACQ_SBX_STUB_PROBE, never a network call.
             print(os.environ.get("ACQ_SBX_STUB_PROBE", "200|0"))
             return 0
+        if any("ACQ_ADR0030_IMAGE_DIAGNOSTIC=1" in token for token in command):
+            from .image_doctor import stub_output
+
+            print(stub_output(os.environ.get("ACQ_SBX_STUB_IMAGE_CONTRACT") == "missing"), end="")
+            return _exit_code(EXEC_EXIT_ENV)
         marker = EXEC_MARKER
         if command:
             marker += " " + " ".join(command)

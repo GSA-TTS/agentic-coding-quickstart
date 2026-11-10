@@ -74,11 +74,15 @@ def test_extra_safety_before_backend(backend, monkeypatch, tmp_path, capsys, bad
         "trusted": str(tmp_path), "inside": str(tmp_path / "state" / "nested"),
         "missing": str(tmp_path / "absent"),
     }
-    target = tmp_path / "bad:target"
-    target.mkdir()
-    link = tmp_path / "link"
-    link.symlink_to(target, target_is_directory=True)
-    paths["symlink"] = str(link)
+    if bad == "symlink":
+        # A link whose target holds a colon; Windows forbids ':' in a name.
+        if os.name == "nt":
+            pytest.skip("a directory name cannot contain ':' on Windows")
+        target = tmp_path / "bad:target"
+        target.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(target, target_is_directory=True)
+        paths["symlink"] = str(link)
     (tmp_path / "state" / "nested").mkdir(parents=True)
     monkeypatch.setattr(lifecycle, "_create_sandbox", lambda *a, **kw: pytest.fail("unsafe create"))
     rc, doc, _ = invoke(capsys, backend, "create", "shell", primary, paths[bad] + (":ro" if ro else ""))
