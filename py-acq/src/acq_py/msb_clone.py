@@ -80,6 +80,11 @@ _LOOSE_REF_CAP = 64 * 1024
 _PACKED_REFS_CAP = 64 * 1024 * 1024
 _READ_FLAGS = kit_fetch._FILE_FLAGS
 
+# Bound on each wrapped git call against the workspace (the clone itself is
+# unbounded): a workspace the guest can write may hold a FIFO where git reads a
+# file (.gitignore, say), and such a read must not hang acq.
+GIT_TIMEOUT_S = 60.0
+
 # Seam for the private-dir chmod, so a test can make it fail.
 _chmod = os.chmod
 
@@ -174,18 +179,48 @@ def _read_origin(sandbox_dir: Path) -> str:
         return ""
 
 
-def _find_scratch(sandbox_dir: Path) -> Path | None:
-    """The last ``<dir>/*/`` holding a ``.git`` directory (Bash's glob order)."""
+def _lstat(path: Path | str) -> os.stat_result | None:
+    try:
+        return os.lstat(path)
+    except OSError:
+        return None
+
+
+def _real_dir(path: Path | str) -> bool:
+    """True for a directory that is not a link; never raises (an unreadable path is False)."""
+    info = _lstat(path)
+    return info is not None and stat.S_ISDIR(info.st_mode) and not _lstat_link(info)
+
+
+def _find_scratch(sandbox_dir: Path) -> tuple[Path | None, bool]:
+    """The last ``<dir>/*/`` holding a ``.git`` directory (Bash's glob order), and whether one was unreadable.
+
+    The guest owns each scratch and can take every permission away from it,
+    its ``.git`` or anything below, or turn ``.git`` into a link: such a
+    candidate is reported as unreadable (unverifiable), never followed, and
+    never raises.
+    """
     try:
         names = sorted(n for n in os.listdir(sandbox_dir) if not n.startswith("."))
     except OSError:
-        return None
-    found = None
+        return None, True
+    found, unreadable = None, False
     for name in names:
         candidate = sandbox_dir / name
-        if candidate.is_dir() and (candidate / ".git").is_dir():
+        if not _real_dir(candidate):
+            continue
+        try:
+            info = os.lstat(candidate / ".git")
+        except FileNotFoundError:
+            continue
+        except OSError:
+            unreadable = True
+            continue
+        if _lstat_link(info):
+            unreadable = True
+        elif stat.S_ISDIR(info.st_mode):
             found = candidate
-    return found
+    return found, unreadable
 
 
 def present(name: str) -> bool:
@@ -203,32 +238,77 @@ def _lstat_link(info: os.stat_result) -> bool:
     return stat.S_ISLNK(info.st_mode) or bool(attrs & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
 
 
-def _make_owner_writable(directory: str, root: str) -> bool:
-    """chmod 0700 the real directory ``directory`` inside ``root``; never a link, never outside ``root``.
+def _fix_dir(directory: str, root: str) -> int | None:
+    """chmod 0700 the real directory ``directory`` inside ``root`` and return an fd for it, else None.
 
-    The parent is opened without following a link and the entry is checked
-    through that fd, then changed by name relative to it, so a directory with
-    no permissions at all (which cannot be opened itself) can be fixed too.
-    acq removes a scratch only once its guest is gone, so nothing races the
-    check and the change.
+    Never a link, never outside ``root``. The parent is opened without
+    following a link and the entry is checked through that fd and changed by
+    name relative to it, so a directory with no permissions at all (which
+    cannot be opened itself) can be fixed too. The returned fd is opened the
+    same way and checked to be that same directory, so the caller can remove
+    entries through it. acq removes a scratch only once its guest is gone, so
+    nothing races the check and the change.
     """
     parent, base = os.path.split(directory)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        pfd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+        pfd = os.open(parent, flags)
     except OSError:
-        return False
+        return None
     try:
         info = os.stat(base, dir_fd=pfd, follow_symlinks=False)
         if _lstat_link(info) or not stat.S_ISDIR(info.st_mode):
-            return False
+            return None
         if os.path.commonpath([os.path.join(os.path.realpath(parent), base), root]) != root:
-            return False
+            return None
         os.chmod(base, 0o700, dir_fd=pfd)
-        return True
+        fd = os.open(base, flags, dir_fd=pfd)
+        if not os.path.samestat(os.fstat(fd), info):
+            os.close(fd)
+            return None
+        return fd
     except (OSError, ValueError):
-        return False
+        return None
     finally:
         os.close(pfd)
+
+
+def _posix_retry(func, target: str, exc: BaseException, root: str, fixed: set[str]) -> None:
+    """Retry one failed removal after fixing permissions, at most once per directory; else re-raise."""
+    if not isinstance(exc, PermissionError):
+        raise exc
+    removing = func in (os.unlink, os.rmdir, os.remove)
+    directory = os.path.dirname(target) if removing else target
+    if directory in fixed:
+        raise exc
+    fixed.add(directory)
+    fd = _fix_dir(directory, root)
+    if fd is None:
+        raise exc
+    try:
+        if removing:  # through the verified directory, not by full path
+            (os.rmdir if func is os.rmdir else os.unlink)(os.path.basename(target), dir_fd=fd)
+    finally:
+        os.close(fd)
+    if not removing:
+        _remove_tree(Path(target), root, fixed)  # a directory it could not list, now listable
+
+
+def _remove_tree(path: Path, root: str, fixed: set[str]) -> None:
+    def retry(func, target, exc):
+        if isinstance(exc, FileNotFoundError):
+            return
+        if not WINDOWS:
+            _posix_retry(func, target, exc, root, fixed)
+            return
+        info = _lstat(target)
+        if info is None or _lstat_link(info) or target in fixed:
+            raise exc
+        fixed.add(target)
+        os.chmod(target, stat.S_IWRITE | stat.S_IREAD)
+        func(target)
+
+    shutil.rmtree(path, onexc=retry)
 
 
 def remove_guest_tree(path: Path) -> None:
@@ -237,15 +317,16 @@ def remove_guest_tree(path: Path) -> None:
     The guest controls what is inside: links to host paths, directories
     without write or search permission. Nothing that ``os.lstat`` reports as a
     link is ever chmodded or followed (``shutil.rmtree`` unlinks links). On
-    POSIX a permission failure is retried after making the entry's real
-    parent directory (or the unreadable directory itself) owner-writable,
-    checked through its parent's fd to be a real directory inside the tree
-    (:func:`_make_owner_writable`). On Windows a read-only non-link entry is made writable and
-    retried; links are never touched there either.
+    POSIX a permission failure is retried once per directory after making the
+    entry's real parent directory (or the unlistable directory itself)
+    owner-writable, checked through its parent's fd to be a real directory
+    inside the tree, and the entry is then removed through that directory's fd
+    (:func:`_fix_dir`). On Windows a read-only non-link entry is made writable
+    and retried once. A failure that persists ends the removal, leaving the
+    rest in place.
     """
-    try:
-        info = os.lstat(path)
-    except OSError:
+    info = _lstat(path)
+    if info is None:
         return
     if _lstat_link(info) or not stat.S_ISDIR(info.st_mode):
         try:
@@ -256,29 +337,8 @@ def remove_guest_tree(path: Path) -> None:
             except OSError:
                 pass
         return
-    root = os.path.realpath(path)
-
-    def retry(func, target, exc):
-        try:
-            if isinstance(exc, FileNotFoundError):
-                return
-            if WINDOWS:
-                if not _lstat_link(os.lstat(target)):
-                    os.chmod(target, stat.S_IWRITE | stat.S_IREAD)
-                    func(target)
-                return
-            if not isinstance(exc, PermissionError):
-                return
-            if func in (os.unlink, os.rmdir, os.remove):
-                if _make_owner_writable(os.path.dirname(target), root):
-                    func(target)
-            elif _make_owner_writable(target, root):
-                remove_guest_tree(Path(target))  # a directory it could not list
-        except OSError:
-            pass
-
     try:
-        shutil.rmtree(path, onexc=retry)
+        _remove_tree(path, os.path.realpath(path), set())
     except OSError:
         pass
 
@@ -315,13 +375,17 @@ def _env(*, keep: bool = False) -> dict[str, str]:
 
 
 def _run(argv: list[str], env: dict[str, str], *, input_text: str | None = None,
-         show_stderr: bool = False) -> subprocess.CompletedProcess[str]:
+         show_stderr: bool = False, timeout: float | None = GIT_TIMEOUT_S) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(  # nosec B603 # an absolute git and a fixed argument list, no shell
             argv, env=env, input=input_text, stdin=subprocess.DEVNULL if input_text is None else None,
             stdout=subprocess.PIPE, stderr=None if show_stderr else subprocess.PIPE, text=True,
-            encoding="utf-8", errors="surrogateescape", check=False,
+            encoding="utf-8", errors="surrogateescape", check=False, timeout=timeout,
         )
+    except subprocess.TimeoutExpired as exc:
+        raise _refuse(f"--clone: git did not finish within {timeout:g}s",
+                      "check the workspace for a file that blocks reads (a FIFO .gitignore, say), then re-run",
+                      code=errors.TIMEOUT) from exc
     except OSError as exc:
         raise _refuse(f"--clone: could not run git: {exc.strerror or exc}",
                       "check the git installation, then re-run", code=errors.FAILURE) from exc
@@ -394,7 +458,7 @@ def prep(ws: str) -> _Prep:
 
 
 def ws_git(ws: str, *args: str, keep: bool = False, input_text: str | None = None,
-           show_stderr: bool = False) -> subprocess.CompletedProcess[str]:
+           show_stderr: bool = False, timeout: float | None = GIT_TIMEOUT_S) -> subprocess.CompletedProcess[str]:
     """Run git against the workspace repository with its config-driven programs off.
 
     ``keep`` keeps the user's command-scope config and leaves the filter
@@ -409,7 +473,7 @@ def ws_git(ws: str, *args: str, keep: bool = False, input_text: str | None = Non
     argv = [_git_program(), "--no-pager", "-c", "core.fsmonitor=false", "-c", f"core.hooksPath={settings.hooks}",
             "-c", "core.untrackedCache=false", "-c", "protocol.allow=never", "-c", "submodule.recurse=false",
             *settings.cfg, "-C", ws, *args]
-    return _run(argv, env, input_text=input_text, show_stderr=show_stderr)
+    return _run(argv, env, input_text=input_text, show_stderr=show_stderr, timeout=timeout)
 
 
 def scratch_git(scratch: str, *args: str) -> subprocess.CompletedProcess[str]:
@@ -592,7 +656,15 @@ def preflight(ws: str) -> None:
              "  so LFS-tracked files are checked out in the scratch as pointer files.",
              "  If git-lfs is available in the sandbox, fetch their content there with:",
              "  git lfs pull")
-    if _has_uncommitted(ws):
+    try:
+        dirty = _has_uncommitted(ws)
+    except MsbError as exc:
+        if exc.code != errors.TIMEOUT:
+            raise
+        _say(f"warning: --clone: could not check the workspace for uncommitted changes ({exc.message});",
+             "  skipping that note.")
+        dirty = False
+    if dirty:
         _say("note: the workspace has uncommitted changes; a git clone carries",
              "  committed state only. Commit first ('git add' untracked files),",
              "  or copy files in with 'acq cp'.")
@@ -662,7 +734,7 @@ def make_scratch(ws: str, sandbox_dir: Path, scratch: Path) -> None:
     # --no-local goes through upload-pack, so only objects reachable from the
     # repository's refs are copied; only the local file transport is allowed.
     proc = ws_git(ws, "-c", "protocol.file.allow=always", "clone", "--quiet", "--no-local", "--no-hardlinks",
-                  "--", ws, str(scratch), show_stderr=True)
+                  "--", ws, str(scratch), show_stderr=True, timeout=None)  # may take long on a big repository
     if proc.returncode != 0:
         remove_guest_tree(sandbox_dir)
         raise _refuse(f"--clone: git clone of {ws} failed", code=errors.FAILURE)
@@ -834,23 +906,33 @@ def _ref_tips(scratch: Path) -> tuple[list[str], bool]:
     followed and only regular files are read (a FIFO would block).
     """
     tips: list[str] = []
-    if _is_link_path(str(scratch / ".git")) or _is_link_path(str(scratch / ".git" / "refs")):
-        return [], True  # redirected out of the scratch: unverifiable, so warn
-    heads = scratch / ".git" / "refs" / "heads"
-    if heads.is_dir() and not _is_link_path(str(heads)):
-        for root, dirs, files in os.walk(heads, followlinks=False):
-            dirs[:] = [d for d in dirs if not _is_link_path(os.path.join(root, d))]
+    git, refs, heads = scratch / ".git", scratch / ".git" / "refs", scratch / ".git" / "refs" / "heads"
+    if not (_real_dir(git) and _real_dir(refs)):
+        return [], True  # unreadable, or redirected out of the scratch: unverifiable, so warn
+    unreadable: list[OSError] = []
+    try:
+        heads_info: os.stat_result | None = os.lstat(heads)
+    except FileNotFoundError:
+        heads_info = None  # no loose branch refs
+    except OSError:
+        return [], True
+    if heads_info is not None and (_lstat_link(heads_info) or not stat.S_ISDIR(heads_info.st_mode)):
+        return [], True  # a link or something other than a directory
+    if heads_info is not None:
+        for root, dirs, files in os.walk(heads, followlinks=False, onerror=unreadable.append):
+            dirs[:] = [d for d in dirs if _real_dir(os.path.join(root, d))]
             for name in files:
                 read = _read_bounded(os.path.join(root, name), _LOOSE_REF_CAP)
                 if read is not None:
                     tips += read[0].decode("ascii", "replace").split("\n")
-    read = _read_bounded(str(scratch / ".git" / "packed-refs"), _PACKED_REFS_CAP)
+    read = _read_bounded(str(git / "packed-refs"), _PACKED_REFS_CAP)
     if read is not None:
         for line in read[0].decode("ascii", "replace").split("\n"):
             fields = line.split()
             if len(fields) >= 2 and _HEX_RE.fullmatch(fields[0]) and fields[1].startswith("refs/heads/"):
                 tips.append(fields[0])
-    return list(dict.fromkeys(t for t in tips if _HEX_RE.fullmatch(t))), bool(read and read[1])
+    truncated = bool(read and read[1]) or bool(unreadable)
+    return list(dict.fromkeys(t for t in tips if _HEX_RE.fullmatch(t))), truncated
 
 
 def _all_present(origin: str, tips: list[str]) -> bool:
@@ -875,7 +957,7 @@ def warn_unfetched(name: str) -> bool:
         sandbox_dir = clones_root() / name
     except MsbError:
         return False
-    if not sandbox_dir.is_dir():
+    if not _real_dir(sandbox_dir):
         return False
     origin = _read_origin(sandbox_dir)
     if not origin or not os.path.isdir(origin):
@@ -887,12 +969,12 @@ def warn_unfetched(name: str) -> bool:
         _say(f"warning: could not check sandbox '{name}''s scratch clone for unfetched",
              "  commits (see above); any it holds are discarded with it.")
         return False
-    scratch = _find_scratch(sandbox_dir)
-    if scratch is None:
+    scratch, unreadable = _find_scratch(sandbox_dir)
+    if scratch is None and not unreadable:
         return False
-    tips, truncated = _ref_tips(scratch)
+    tips, truncated = _ref_tips(scratch) if scratch is not None else ([], True)
     try:
-        fetched = not truncated and _all_present(origin, tips)
+        fetched = not (truncated or unreadable) and _all_present(origin, tips)
     except MsbError:
         fetched = False
     if fetched:
@@ -942,7 +1024,9 @@ def recorded_scratch(name: str, workspace: str) -> tuple[str | None, bool]:
         sandbox_dir = clones_root() / name
     except MsbError:
         return None, False
-    scratch = _find_scratch(sandbox_dir) if sandbox_dir.is_dir() else None
+    scratch, unreadable = _find_scratch(sandbox_dir) if _real_dir(sandbox_dir) else (None, False)
+    if unreadable:
+        return None, False  # a scratch the guest made unreadable is not one to rebuild on
     origin = _read_origin(sandbox_dir) if scratch is not None else ""
     matches = bool(origin) and os.path.isdir(origin) and _same(origin, workspace)
     return (_canon(str(scratch)) if scratch is not None else None), matches

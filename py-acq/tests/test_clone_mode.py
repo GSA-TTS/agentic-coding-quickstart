@@ -1232,7 +1232,7 @@ def test_a_python_created_clone_is_found_by_the_bash_layout(env, tmp_path, capsy
     assert _create(capsys, str(env), "--clone")[0] == 0
     sandbox = _clones(tmp_path) / NAME
     assert (sandbox / ".origin").read_text(encoding="utf-8") == msb_clone.origin_text(os.path.realpath(env)) + "\n"
-    assert msb_clone._find_scratch(sandbox) == _scratch(tmp_path)
+    assert msb_clone._find_scratch(sandbox) == (_scratch(tmp_path), False)
 
 
 def test_a_bash_created_clone_is_removed_with_its_remote(env, tmp_path, capsys):
@@ -1448,3 +1448,111 @@ def test_unfetched_check_does_not_follow_a_linked_git_dir_out_of_the_scratch(env
     _symlink(env / ".git" / "refs", scratch / ".git" / "refs")
     tips, unverifiable = msb_clone._ref_tips(scratch)
     assert tips == [] and unverifiable is True
+
+
+# ---------------------------------------------------------------------------
+# Second review: a guest taking permissions away inside its scratch must never
+# block rm or make recreate fail with a traceback; the remover and the git
+# calls are bounded.
+# ---------------------------------------------------------------------------
+
+root_ignores_modes = pytest.mark.skipif(POSIX and os.geteuid() == 0, reason="root ignores directory permissions")
+
+
+@posix_only
+@root_ignores_modes
+@pytest.mark.parametrize("target", ["", ".git", ".git/refs"], ids=["scratch-root", "git", "git-refs"])
+def test_a_guest_chmod_0_never_blocks_rm(env, tmp_path, capsys, target):
+    assert _create(capsys, str(env), "--clone")[0] == 0
+    victim = _scratch(tmp_path) / target if target else _scratch(tmp_path)
+    os.chmod(victim, 0)
+    rc, doc, err = _acq(capsys, "rm", NAME)
+    assert rc == 0, err
+    assert doc["data"]["clone_unfetched"] is True  # unverifiable, so warned
+    assert "discarding unfetched commits" in err
+    assert not msb.exists(NAME) and not (_clones(tmp_path) / NAME).exists()
+    assert _remote_url(env) is None
+    assert _acq(capsys, "rm", NAME)[0] == 1  # gone for good: a second rm finds nothing
+
+
+@posix_only
+@root_ignores_modes
+@pytest.mark.parametrize("keyed", [True, False], ids=["clone-record", "keyless-record"])
+@pytest.mark.parametrize("target", ["", ".git", ".git/refs"], ids=["scratch-root", "git", "git-refs"])
+def test_recreate_refuses_cleanly_when_the_guest_made_its_scratch_unreadable(env, tmp_path, monkeypatch, capsys,
+                                                                             target, keyed):
+    from acq_py import security
+
+    monkeypatch.setattr(security, "WINDOWS", False)
+    assert _create(capsys, str(env), "--clone")[0] == 0
+    if not keyed:
+        _keyless_record()
+    victim = _scratch(tmp_path) / target if target else _scratch(tmp_path)
+    _drop_ro_mount(tmp_path, NAME)
+    seen = _msb_spy(monkeypatch)
+    os.chmod(victim, 0)
+    try:
+        rc, doc, _err = _acq(capsys, "create", "--recreate", NAME, "--yes")
+    finally:
+        os.chmod(victim, 0o700)
+    if target:
+        # The scratch is still there and still names the checkout: rebuilding on
+        # the guest's own (damaged) scratch keeps the real checkout out of reach.
+        assert rc == 0 and f"{os.path.realpath(_scratch(tmp_path))}:{_guest(env)}" in _create_argv(seen)
+        return
+    assert rc == 1 and "refusing to rebuild it on the real checkout" in doc["error"]["message"]
+    _refute_backend_create(seen)
+
+
+def test_a_failed_unfetched_check_never_blocks_rm(env, tmp_path, monkeypatch, capsys):
+    assert _create(capsys, str(env), "--clone")[0] == 0
+
+    def broken(_name):
+        raise PermissionError(13, "Permission denied", str(_scratch(tmp_path)))
+
+    monkeypatch.setattr(msb_clone, "warn_unfetched", broken)
+    rc, _doc, err = _acq(capsys, "rm", NAME)
+    assert rc == 0 and "could not check sandbox" in err
+    assert not msb.exists(NAME) and not (_clones(tmp_path) / NAME).exists()
+
+
+@posix_only
+@root_ignores_modes
+def test_the_remover_gives_up_on_a_directory_it_still_cannot_list(tmp_path, monkeypatch):
+    # chmod "succeeds" but the directory stays unlistable: one retry, then stop.
+    import threading
+
+    tree = tmp_path / "tree"
+    (tree / "locked" / "deep").mkdir(parents=True)
+    os.chmod(tree / "locked", 0)
+    monkeypatch.setattr(msb_clone, "_fix_dir", lambda _d, _r: os.open(tmp_path, os.O_RDONLY))
+    done: list[bool] = []
+    worker = threading.Thread(target=lambda: done.append(msb_clone.remove_guest_tree(tree) is None), daemon=True)
+    worker.start()
+    worker.join(20)
+    os.chmod(tree / "locked", 0o700)
+    assert done == [True], "the remover kept retrying the same directory"
+    assert (tree / "locked").exists()
+
+
+def test_a_retry_is_attempted_once_per_directory(tmp_path, monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(msb_clone, "_fix_dir", lambda d, _r: calls.append(d))  # returns None: no fix
+    fixed: set[str] = set()
+    exc = PermissionError(13, "Permission denied")
+    target = str(tmp_path / "d" / "f")
+    for _ in range(2):
+        with pytest.raises(PermissionError):
+            msb_clone._posix_retry(os.unlink, target, exc, str(tmp_path), fixed)
+    assert calls == [str(tmp_path / "d")]
+
+
+@posix_only
+def test_a_fifo_gitignore_cannot_hang_the_dirty_check(env, tmp_path, monkeypatch, capsys):
+    os.mkfifo(env / ".gitignore")
+    monkeypatch.setattr(msb_clone, "GIT_TIMEOUT_S", 2.0)
+    monkeypatch.setattr(msb_clone.ws_git, "__defaults__", (False, None, False, 2.0))
+    rc, _doc, err = _create(capsys, str(env), "--clone")
+    assert rc == 0, err
+    assert "could not check the workspace for uncommitted changes" in err and "skipping that note" in err
+    assert (_scratch(tmp_path) / ".git").is_dir()

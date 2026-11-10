@@ -473,7 +473,9 @@ containing `ACQ_MSB_CLONES_DIR` is refused like acq's other directories, a
 leftover link at `<clones>/<sandbox>` counts as a stale scratch, the scratch is
 removed without changing any link or anything outside it, and its
 uncommitted-changes note reports staged changes and untracked files only
-(plumbing that never runs a filter).
+(plumbing that never runs a filter). A scratch the guest made unreadable never
+blocks `acq rm`, and its host-side git calls other than the clone time out
+after 60 seconds.
 
 Note the async-boot caveat:
 

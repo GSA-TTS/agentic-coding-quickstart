@@ -524,7 +524,26 @@ def _drop_fresh_clone(adapter, name: str) -> None:
     its mount source and stays for ``acq rm``.
     """
     if _confirmed_absent(adapter, name) is True:
+        _clone_cleanup_quietly(name)
+
+
+def _warn_unfetched_quietly(name: str) -> bool:
+    """:func:`msb_clone.warn_unfetched`, which must never stop ``rm``: a failure is reported and rm goes on."""
+    try:
+        return msb_clone.warn_unfetched(name)
+    except OSError as exc:
+        print(f"acq(msb): warning: could not check sandbox '{name}''s scratch clone for unfetched commits "
+              f"({exc.strerror or exc}); any it holds are discarded with it.", file=sys.stderr)
+        return False
+
+
+def _clone_cleanup_quietly(name: str) -> None:
+    """:func:`msb_clone.cleanup` (best-effort): a failure is reported, never raised."""
+    try:
         msb_clone.cleanup(name)
+    except OSError as exc:
+        print(f"acq(msb): warning: could not remove sandbox '{name}''s scratch clone ({exc.strerror or exc}); "
+              f"remove it by hand once you no longer need its work.", file=sys.stderr)
 
 
 def _discard_recreated_guest(backend: str, name: str) -> bool:
@@ -1341,7 +1360,10 @@ def _recreate_clone_source(name: str, record: dict, workspace: str, emit_json: b
     marked = record.get("clone") is True or ("clone" not in record and msb_clone.present(name))
     if not marked:
         return None, None
-    scratch, matches = msb_clone.recorded_scratch(name, workspace)
+    try:
+        scratch, matches = msb_clone.recorded_scratch(name, workspace)
+    except OSError:
+        scratch, matches = None, False
     if scratch and matches:
         return scratch, None
     return None, common._operational_failure(
@@ -1889,7 +1911,7 @@ def _rm_locked(name: str, emit_json: bool, backend: str) -> int:
     backend_absent = False
     # Clone mode (ADR-0027): say what the scratch clone holds before anything is
     # deleted; it goes only once the sandbox is known to be gone.
-    unfetched = backend == "msb" and msb_clone.warn_unfetched(name)
+    unfetched = backend == "msb" and _warn_unfetched_quietly(name)
     try:
         adapter.remove(name)
     except common._ADAPTER_ERRORS as exc:
@@ -1916,7 +1938,7 @@ def _rm_locked(name: str, emit_json: bool, backend: str) -> int:
         backend_absent = True
     _clear_host_records(backend, name)
     if backend == "msb":
-        msb_clone.cleanup(name)
+        _clone_cleanup_quietly(name)
     data: dict = {"name": name, "backend": backend, "removed": True}
     if backend_absent:
         data["backend_absent"] = True

@@ -4225,7 +4225,11 @@ Clone mode is now ported (`py-acq/src/acq_py/msb_clone.py`, ADR-0027):
   guest-writable scratch is removed without ever changing a link or anything
   outside it, and the uncommitted-changes note uses plumbing that never runs
   a filter (`git diff-index --cached` and `git ls-files --others`), so an
-  unstaged edit to a tracked file is not reported.
+  unstaged edit to a tracked file is not reported. A scratch the guest made
+  unreadable never blocks `acq rm` (its commits are reported as possibly
+  unfetched, and the sandbox is still removed), and each host-side git call
+  against the workspace other than the clone is bounded at 60 seconds, so a
+  FIFO where git reads a file cannot hang acq.
 
 Tests: `py-acq/tests/test_clone_mode.py` (a one-to-one port of
 `test/bats/116-clone-option.bats`), `py-acq/tests/test_clone_predicate.py`, and
