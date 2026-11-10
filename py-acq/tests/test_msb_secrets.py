@@ -659,6 +659,7 @@ def test_provider_partial_refeed_then_rm_fully_revokes(monkeypatch, tmp_path, ca
     monkeypatch.setenv("ACQ_PROVIDER_KITS", "")  # no provider kit selected: no usai gate or binding
     for name in ("a", "b"):  # created by acq, so their records are complete
         assert _invoke(capsys, "--backend", "msb", "create", "shell", str(tmp_path / "ws"), "--name", name)[0] == 0
+        _forget_selection(name)  # the recorded "no provider kits" would keep the provider out of both
     monkeypatch.setenv("ACQ_MSB_STUB_FAIL_ADD", "b")
     rc, doc, _out, _err = _invoke(capsys, "--backend", "msb", "provider-credential", "set", "acme", "ACME_KEY",
                                   "--host", "models.acme.gov", "--json", stdin=VALUE, monkeypatch=monkeypatch)
@@ -761,6 +762,110 @@ def test_scoped_set_targets_only_that_sandbox(monkeypatch, tmp_path, capsys, chi
     _set(capsys, monkeypatch, "b", "github", value=SCOPED)
     assert _modify_tails(children) == [["b", "--secret", "GITHUB_TOKEN@github.com,api.github.com,codeload.github.com"]]
     assert msb.held_read("b").bindings["GITHUB_TOKEN"]["scope"] == "sandbox" and msb.held_read("a").bindings == {}
+
+
+def _forget_selection(sandbox):
+    """Drop the recorded provider selection, as for a sandbox from before it was recorded."""
+    from acq_py import kits
+
+    path = kits._provenance_path("msb", sandbox)
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    del doc["provider_selection"]
+    path.write_text(json.dumps(doc), encoding="utf-8")
+
+
+def _record_selection(sandbox, provider_kits):
+    """Record the provider selection ``sandbox`` was created with (``""`` is
+    ``--no-provider-kits``), as create does."""
+    from acq_py import kits
+
+    with kits.provider_kits_env(provider_kits):
+        kits.provenance_write("msb", sandbox)
+
+
+def test_global_set_skips_a_sandbox_whose_recorded_selection_leaves_the_provider_out(
+        monkeypatch, tmp_path, capsys, children):
+    _running(tmp_path, monkeypatch, "a", "b", "c")
+    _record_selection("a", "")  # created with --no-provider-kits
+    _record_selection("b", None)  # the default selection: usai's kit is in it
+    # "c" has no recorded selection (from before it was recorded): re-fed as before.
+    out, err = _set(capsys, monkeypatch, "-g", "usai")
+    assert sorted(t[0] for t in _modify_tails(children)) == ["b", "c"]
+    assert msb.held_read("a").bindings == {}
+    _assert_value_absent(VALUE, children, out, err)
+    # A service that is not a provider is not subject to provider selection.
+    children.clear()
+    _set(capsys, monkeypatch, "-g", "github")
+    assert sorted(t[0] for t in _modify_tails(children)) == ["a", "b", "c"]
+
+
+def test_global_set_refeeds_a_held_binding_even_when_the_selection_leaves_the_provider_out(
+        monkeypatch, tmp_path, capsys, children):
+    _running(tmp_path, monkeypatch, "a")
+    _record_selection("a", "")
+    rec = msb.HeldRecord("a", complete=True)
+    rec.bindings["USAI_API_KEY"] = {"service": "usai", "host": "api.gsa.usai.gov", "scope": "global"}
+    rec.save()
+    out, err = _set(capsys, monkeypatch, "-g", "usai")
+    (argv, env), = _verb_calls(children, "modify")
+    assert argv[-3:] == ["a", "--secret", "USAI_API_KEY@api.gsa.usai.gov"] and env["USAI_API_KEY"] == VALUE
+    _assert_value_absent(VALUE, children, out, err)
+
+
+def test_scoped_provider_set_notes_a_sandbox_whose_selection_leaves_it_out(monkeypatch, tmp_path, capsys, children):
+    _running(tmp_path, monkeypatch, "a")
+    _record_selection("a", "")
+    out, err = _set(capsys, monkeypatch, "a", "usai")
+    assert _verb_calls(children, "modify") == []
+    assert ("acq: note: 'usai' is stored for sandbox 'a', but it will not reach that sandbox: its "
+            "provider selection excludes the provider (recreate it to change the selection)") in err
+    assert secretstore.resolve("usai", "a") == VALUE
+    _assert_value_absent(VALUE, children, out, err)
+    # A global change says nothing: most sandboxes are simply not meant to get it.
+    _out, global_err = _set(capsys, monkeypatch, "-g", "usai")
+    assert "acq: note:" not in global_err
+
+
+def test_refeed_with_an_unreadable_recorded_selection_fails_closed_for_that_sandbox(
+        monkeypatch, tmp_path, capsys, children):
+    from acq_py import kits
+
+    _running(tmp_path, monkeypatch, "a", "b")
+    _record_selection("a", "")
+    kits._provenance_path("msb", "a").write_text("{not json", encoding="utf-8")
+    rc, doc, out, err = _invoke(capsys, "--backend", "msb", "secret", "set", "-g", "usai", "--json",
+                                stdin=VALUE, monkeypatch=monkeypatch)
+    assert rc == 1 and doc["error"]["code"] == "failure"
+    assert "a (sandbox 'a' has an unreadable recorded provider selection)" in doc["error"]["message"]
+    assert [t[0] for t in _modify_tails(children)] == ["b"]  # never fed to "a"; the others still are
+    assert secretstore.resolve("usai") == VALUE
+    _assert_value_absent(VALUE, children, out, err)
+
+
+@pytest.mark.parametrize("argv, takes_lock", [
+    (["secret", "set", "b", "github"], True),
+    (["secret", "rm", "b", "github"], True),
+    (["secret", "set", "a", "github"], False),
+    (["secret", "set", "-g", "github"], False),
+])
+def test_sandbox_scoped_set_and_rm_take_the_sandbox_lock(monkeypatch, tmp_path, capsys, children, argv, takes_lock):
+    # A create of 'b' holds its lifecycle lock while it reads the store to bind
+    # it; a scoped change to 'b' must wait for it rather than race it.
+    from acq_py import errors, lock
+
+    _running(tmp_path, monkeypatch, "a", "b")
+    secretstore.store(secretstore.key_for("github", "b"), SCOPED)
+    monkeypatch.setenv("ACQ_SANDBOX_LOCK_TIMEOUT", "0.2")
+    children.clear()
+    with lock.sandbox_lock("msb", "b"):
+        rc, doc, out, err = _invoke(capsys, "--backend", "msb", *argv, "--json", stdin=VALUE, monkeypatch=monkeypatch)
+    if takes_lock:
+        assert rc == 1 and doc["error"]["code"] == errors.TIMEOUT
+        assert "sandbox 'b'" in doc["error"]["message"]
+        assert secretstore.resolve("github", "b") == SCOPED and _verb_calls(children, "modify") == []
+    else:
+        assert rc == 0, (doc, err)
+    _assert_value_absent(VALUE, children, out, err)
 
 
 def test_create_first_claim_wins_for_a_shared_env(monkeypatch, tmp_path, capsys, children):

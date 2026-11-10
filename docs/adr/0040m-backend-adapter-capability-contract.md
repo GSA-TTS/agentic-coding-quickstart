@@ -102,7 +102,11 @@ exit 1, the `unsupported_capability` code, and remediation.
 > adapter's `ROTATE_VALIDATE_TIMEOUT`; it must be more than 0, and 0 or any
 > other invalid value falls back to the default with a warning); a call that
 > times out counts as a failure: of that sandbox for `set-custom` or `modify`,
-> of the whole backend's re-feed for a listing. An installed msb that fails acq's
+> of the whole backend's re-feed for a listing. Outside a rotation, every
+> sandbox listing (msb `list`, sbx `ls`, behind `ls` and the existence and
+> running checks) is bounded by `ACQ_LIST_TIMEOUT` (default 60 s, more than 0,
+> with the same fallback); a listing that times out fails the command with
+> `timeout`. An installed msb that fails acq's
 > version check is never run, since any msb command opens its catalog and may
 > migrate it one way (ADR-0032): whether it holds the key is read from acq's
 > binding records alone, and every record counts, including one left by a

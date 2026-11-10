@@ -25,11 +25,13 @@ appears in argv or output, and is handed to the backend only on a child's stdin.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
+from collections.abc import Iterator
 
-from .. import envelope, errors, lock, provider_creds, secretstore
+from .. import backends, envelope, errors, lock, provider_creds, secretstore
 from . import common
 
 _SET_USAGE = "usage: acq secret set [-g | SANDBOX] SERVICE [--host HOST --env ENV] (value on stdin)"
@@ -147,14 +149,30 @@ def run_secret_set(parsed, emit_json: bool, backend: str) -> int:
         )
     if not common._supports(backend, "secret-write"):
         return _unsupported(command, backend, emit_json)
-    return _usai_guarded(command, scope, service, emit_json,
-                         lambda: _set_apply(backend, scope, service, value, host, env, emit_json))
+    return _guarded(command, backend, scope, service, emit_json,
+                    lambda: _set_apply(backend, scope, service, value, host, env, emit_json))
 
 
-def _usai_guarded(command: str, scope: secretstore.Scope, service: str, emit_json: bool, body) -> int:
-    """Run ``body`` under the usai provider lock when it changes the global usai
-    key, so it cannot interleave with ``usai-rotate-api-key``; else as is."""
-    if not (scope.is_global and service == provider_creds.USAI_PROVIDER_ID):
+def _guarded(command: str, backend: str, scope: secretstore.Scope, service: str, emit_json: bool, body) -> int:
+    """Run ``body`` under the lock that keeps it from interleaving with another
+    command that reads or changes the same credential.
+
+    A sandbox-scoped change holds that sandbox's lifecycle lock, so it cannot
+    race a ``create`` (or ``rm``) of the sandbox reading the store to bind it:
+    a create could otherwise bind a value this ``rm`` then deletes. A change to
+    the global usai key holds the usai provider lock, so it cannot interleave
+    with ``usai-rotate-api-key``. Any other global change runs as is.
+    """
+    if scope.sandbox is not None:
+        try:
+            with lock.sandbox_lock(backend, scope.sandbox):
+                return body()
+        except lock.SandboxLockTimeout as exc:
+            return common._operational_failure(
+                command, errors.TIMEOUT, str(exc),
+                exc.remediation or "retry once the other command finishes; nothing was changed", emit_json,
+            )
+    if service != provider_creds.USAI_PROVIDER_ID:
         return body()
     try:
         with lock.provider_credential_lock(service):
@@ -187,8 +205,6 @@ def _set_apply(backend: str, scope: secretstore.Scope, service: str, value: str,
             exc.remediation,
             emit_json,
         )
-    finally:
-        value = ""
     data = {"scope": scope.label, "scope_kind": _scope_kind(scope), "service": service, "value_state": "set"}
     if emit_json:
         print(json.dumps(envelope.success(command, data)))
@@ -276,8 +292,8 @@ def run_secret_rm(parsed, emit_json: bool, backend: str) -> int:
             command, errors.UNSUPPORTED, f"--accept-unconfirmed is not supported on the {backend} backend",
             "remove the flag; nothing was changed", emit_json,
         )
-    return _usai_guarded(command, scope, service, emit_json,
-                         lambda: _rm_apply(adapter, scope, service, accept, emit_json))
+    return _guarded(command, backend, scope, service, emit_json,
+                    lambda: _rm_apply(adapter, scope, service, accept, emit_json))
 
 
 def _rm_apply(adapter, scope: secretstore.Scope, service: str, accept: list[str] | None, emit_json: bool) -> int:
@@ -523,6 +539,25 @@ def _confirm(svc: str, envvar: str, scope: secretstore.Scope, exists: bool, prev
     return "declined"
 
 
+@contextlib.contextmanager
+def _import_write_lock(svc: str, scope: secretstore.Scope) -> Iterator[None]:
+    """Hold, for one ``secret import`` store write, the locks ``secret set``
+    takes for the same scope and service.
+
+    ``secret import`` names no backend, so a sandbox-scoped write takes that
+    sandbox's lifecycle lock on every backend, in a fixed order (another
+    command holds at most one of them, so the order cannot deadlock). The
+    global usai key takes the usai provider lock. Raises :class:`lock.LockTimeout`.
+    """
+    with contextlib.ExitStack() as stack:
+        if scope.sandbox is not None:
+            for backend in backends.BACKENDS:
+                stack.enter_context(lock.sandbox_lock(backend, scope.sandbox))
+        elif svc == provider_creds.USAI_PROVIDER_ID:
+            stack.enter_context(lock.provider_credential_lock(svc))
+        yield
+
+
 def _import_one(svc: str, envvar: str, opts: _ImportArgs, scope: secretstore.Scope, say) -> dict:
     """Decide and (unless --dry-run) store one detected service. The value is
     read from the environment at the point of use and goes straight to the
@@ -552,8 +587,8 @@ def _import_one(svc: str, envvar: str, opts: _ImportArgs, scope: secretstore.Sco
         reason = _confirm(svc, envvar, scope, exists, _last4(value), say)
         if reason is not None:
             return {**entry, "outcome": "skipped", "reason": reason}
-    secretstore.store(secretstore.key_for(svc, scope.sandbox), value)
-    value = ""
+    with _import_write_lock(svc, scope):
+        secretstore.store(secretstore.key_for(svc, scope.sandbox), value)
     say(f"acq: imported '{svc}' ({desc}) from ${envvar}.")
     return {**entry, "outcome": "imported"}
 
@@ -596,6 +631,11 @@ def run_secret_import(parsed, emit_json: bool) -> int:
             return common._operational_failure(
                 command, exc.code, f"failed to store '{svc}' ({scope.describe()}): {exc.message}",
                 exc.remediation, emit_json,
+            )
+        except lock.LockTimeout as exc:
+            return common._operational_failure(
+                command, errors.TIMEOUT, f"'{svc}' was not imported ({scope.describe()}): {exc}",
+                getattr(exc, "remediation", None) or "retry once the other command finishes", emit_json,
             )
     imported = sum(1 for r in results if r["outcome"] == "imported")
     skipped = len(results) - imported
