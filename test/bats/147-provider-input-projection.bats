@@ -798,6 +798,140 @@ EOF
   acq_provider_input_lock_release "${lines[${#lines[@]} - 1]}"
 }
 
+# _racy_mkdir — put first on PATH a mkdir that is not exclusive: it reports
+# success for a directory that already exists, as uutils coreutils mkdir 0.10
+# does for concurrent callers (KNOWN_FAILURE_MODES section 92). This makes the
+# race the lock must survive happen every time, on any host.
+_racy_mkdir() {
+  local real
+  real=$(command -v mkdir)
+  mkdir -p "$STUBDIR/racy-mkdir"
+  printf '#!/bin/sh\n"%s" "$@" 2>/dev/null && exit 0\nfor last; do :; done\n[ -d "$last" ]\n' "$real" \
+    > "$STUBDIR/racy-mkdir/mkdir"
+  chmod +x "$STUBDIR/racy-mkdir/mkdir"
+  PATH="$STUBDIR/racy-mkdir:$PATH"
+}
+
+@test "projection lock: losing the owner-file race never takes or touches the winner's lock" {
+  local root lock identity
+  root=$(acq_provider_input_root sbx racebox); lock="${root}.lock"
+  identity=$(_acq_provider_input_process_identity "$$")
+  _acq_provider_input_safe_mkdir "$lock"
+  printf '%s %s\n' "$$" "$identity" > "$lock/owner"
+  _racy_mkdir
+  ACQ_PROVIDER_INPUT_LOCK_RETRIES=1 run acq_provider_input_lock_acquire sbx racebox
+  assert_failure
+  assert_output --partial "owned by live pid $$"
+  run cat "$lock/owner"
+  assert_output "$$ $identity"
+  rm -f "$lock/owner"; rmdir "$lock"
+}
+
+@test "projection lock: a lock released since the take is taken, not refused as unsafe" {
+  local real
+  real=$(command -v mkdir)
+  mkdir -p "$STUBDIR/gone-mkdir"
+  # The first mkdir of the lock fails as if it existed, and it is gone by the
+  # time acq looks: the holder released it in between.
+  printf '#!/bin/sh\nfor last; do :; done\ncase "$last" in *.lock) [ -e "%s/failed" ] || { : > "%s/failed"; exit 1; } ;; esac\nexec "%s" "$@"\n' \
+    "$STUBDIR" "$STUBDIR" "$real" > "$STUBDIR/gone-mkdir/mkdir"
+  chmod +x "$STUBDIR/gone-mkdir/mkdir"
+  PATH="$STUBDIR/gone-mkdir:$PATH" run acq_provider_input_lock_acquire sbx gonebox
+  assert_success
+  refute_output --partial "unsafe"
+  [ -e "$STUBDIR/failed" ]
+  acq_provider_input_lock_release "${lines[${#lines[@]} - 1]}"
+}
+
+@test "projection lock: a failed token write removes the owner file it created" {
+  local root lock
+  root=$(acq_provider_input_root sbx fullbox); lock="${root}.lock"
+  _acq_provider_input_safe_mkdir "${root%/*}"
+  run bash -c 'ACQ_SOURCE_ONLY=1 . "$1" >/dev/null 2>&1; printf() { return 1; }; _acq_provider_input_lock_take "$2" "1 x"' bash "$ACQ" "$lock"
+  assert_failure 2
+  [ ! -e "$lock" ]
+}
+
+# _lock_taker COUNT — take and release the provider-input lock of sandbox
+# "contended" COUNT times in a fresh Bash. While it holds the lock it creates
+# $STUBDIR/holder exclusively: if that file already exists another taker holds
+# the lock at the same moment, and it records that in $STUBDIR/overlap.
+_lock_taker() {
+  timeout 600 bash -c 'ACQ_SOURCE_ONLY=1 . "$1" >/dev/null 2>&1
+    held=0
+    while [ "$held" -lt "$3" ]; do
+      if lock=$(ACQ_PROVIDER_INPUT_LOCK_RETRIES=1 acq_provider_input_lock_acquire sbx contended 2>/dev/null); then
+        ( set -C; : > "$2/holder" ) 2>/dev/null || echo "bash $$ owner=[$(cat "$lock/owner" 2>/dev/null)]" >> "$2/overlap"
+        sleep 0.02
+        rm -f -- "$2/holder"
+        acq_provider_input_lock_release "$lock" || true
+        held=$((held + 1))
+      else
+        sleep 0.05
+      fi
+    done' bash "$ACQ" "$STUBDIR" "$1"
+}
+
+@test "projection lock: parallel Bash takers never hold it at once, even with a non-exclusive mkdir" {
+  local pids="" pid rc=0 takers="1 2 3 4 5 6" count=15 t
+  export ACQ_PROVENANCE_DIR="$STUBDIR/provenance"
+  # Process creation is slow under Git Bash, so fewer takers there.
+  case "${OSTYPE:-}" in msys*|cygwin*) takers="1 2 3" count=5 ;; esac
+  _racy_mkdir
+  for t in $takers; do
+    _lock_taker "$count" &
+    pids="$pids $!"
+  done
+  for pid in $pids; do wait "$pid" || rc=1; done
+  [ "$rc" -eq 0 ]
+  [ ! -e "$STUBDIR/overlap" ] || { cat "$STUBDIR/overlap" >&2; false; }
+  [ ! -e "$(acq_provider_input_root sbx contended).lock" ]
+}
+
+@test "projection lock: parallel Bash and Python takers never hold it at once" {
+  case "${OSTYPE:-}" in msys*|cygwin*) skip "the Python acq never takes this lock on Windows" ;; esac
+  command -v python3 >/dev/null 2>&1 && python3 -c 'import sys; sys.exit(sys.version_info < (3, 12))' ||
+    skip "needs python3 >= 3.12 for the Python acq"
+  local pids="" pid rc=0 t
+  export ACQ_PROVENANCE_DIR="$STUBDIR/provenance"
+  _racy_mkdir
+  for t in 1 2 3; do
+    _lock_taker 15 &
+    pids="$pids $!"
+    PYTHONPATH="$REPO_ROOT/py-acq/src" timeout 600 python3 -c '
+import os, sys, time
+from acq_py import lock
+stub, count = sys.argv[1], int(sys.argv[2])
+held = 0
+while held < count:
+    taker = lock._BashLock("sbx", "contended")
+    # A Python acq that cannot work out its own identity (ps failing under
+    # load) only honours the lock and proceeds without taking it; that is not
+    # a hold, so it does not count here.
+    if not taker.acquire() or taker.token is None:
+        time.sleep(0.05)
+        continue
+    try:
+        os.close(os.open(stub + "/holder", os.O_WRONLY | os.O_CREAT | os.O_EXCL))
+    except FileExistsError:
+        with open(stub + "/overlap", "a", encoding="utf-8") as fh:
+            fh.write("python %d token=[%s]\n" % (os.getpid(), taker.token))
+    time.sleep(0.02)
+    try:
+        os.unlink(stub + "/holder")
+    except FileNotFoundError:
+        pass
+    taker.release()
+    held += 1
+' "$STUBDIR" 15 &
+    pids="$pids $!"
+  done
+  for pid in $pids; do wait "$pid" || rc=1; done
+  [ "$rc" -eq 0 ]
+  [ ! -e "$STUBDIR/overlap" ] || { cat "$STUBDIR/overlap" >&2; false; }
+  [ ! -e "$(acq_provider_input_root sbx contended).lock" ]
+}
+
 @test "provision interruption releases provider-input lock" {
   local script="$STUBDIR/signal-lock.sh" root
   root=$(acq_provider_input_root sbx signalbox)

@@ -5815,14 +5815,42 @@ _acq_provider_input_publish() {
 #   tx_pid=$(exec sh -c 'echo $PPID')
 # and supply it as the third argument.  The fallback to $$ is retained for
 # tests that call lock_acquire directly (no surrounding subshell).
+#
+# The owner file's exclusive create decides who holds the lock, never mkdir
+# alone (_acq_provider_input_lock_take). The Python acq takes the same directory
+# the same way (_BashLock in py-acq/src/acq_py/lock.py).
 acq_provider_input_lock_acquire() {
-  local backend="$1" name="$2" tx_pid="${3:-$$}" root parent lock owner tries=0 pid identity actual_identity
+  local backend="$1" name="$2" tx_pid="${3:-$$}" root parent lock owner tries=0 pid identity actual_identity token rc
   root=$(acq_provider_input_root "$backend" "$name") || return 1
   parent=${root%/*}
   _acq_provider_input_safe_mkdir "$parent" || return 1
   lock="${root}.lock"
-  while ! mkdir "$lock" 2>/dev/null; do
-    [ -d "$lock" ] && [ ! -L "$lock" ] || { echo "acq: unsafe provider-input lock: $lock" >&2; return 1; }
+  # Work the owner line out before the directory exists, so the moment in which
+  # the lock has no owner line (which a waiter reports instead of waiting out)
+  # stays as short as possible.
+  identity=$(_acq_provider_input_process_identity "$tx_pid") || return 1
+  token="$tx_pid $identity"
+  while :; do
+    rc=0
+    _acq_provider_input_lock_take "$lock" "$token" || rc=$?
+    [ "$rc" -eq 0 ] && break
+    [ "$rc" -eq 1 ] || { echo "acq: could not write the provider-input lock owner: $lock" >&2; return 1; }
+    if [ -L "$lock" ] || { [ -e "$lock" ] && [ ! -d "$lock" ]; }; then
+      echo "acq: unsafe provider-input lock: $lock" >&2
+      return 1
+    fi
+    if [ ! -d "$lock" ]; then
+      # The holder released it (or a losing taker removed its empty directory)
+      # since this take: look again at once. That still counts against the
+      # retries, so a take that keeps failing for another reason cannot loop
+      # forever.
+      tries=$((tries + 1))
+      if [ "$tries" -ge "${ACQ_PROVIDER_INPUT_LOCK_RETRIES:-300}" ]; then
+        echo "acq: gave up waiting for the provider-input lock: $lock" >&2
+        return 1
+      fi
+      continue
+    fi
     owner="$lock/owner"
     # A lock with no owner file must reach the "no valid owner" branch below,
     # not stop on an unset variable (set -u) or print a redirection error.
@@ -5848,9 +5876,36 @@ acq_provider_input_lock_acquire() {
     fi
     sleep 1
   done
-  identity=$(_acq_provider_input_process_identity "$tx_pid") || { rmdir -- "$lock"; return 1; }
-  printf '%s %s\n' "$tx_pid" "$identity" > "$lock/owner" || { rmdir -- "$lock"; return 1; }
   printf '%s\n' "$lock"
+}
+
+# _acq_provider_input_lock_take LOCK TOKEN — create LOCK and its owner file
+# holding TOKEN. Returns 0 when taken, 1 when not (another holder has it, or the
+# caller should look again), 2 when the token could not be written. As for the
+# config.yaml lock (_acq_config_lock_take), creating the owner file is what
+# decides: noclobber makes Bash open it with O_EXCL, so exactly one taker
+# creates it. A successful mkdir cannot decide, because uutils coreutils mkdir
+# 0.10 reports success to concurrent callers (KNOWN_FAILURE_MODES section 92).
+# Unlike the config.yaml lock, an existing directory is not taken: one with no
+# owner file is left for the user to remove (section 79). A taker that loses
+# never touches the winner's owner file. When its own create fails for another
+# reason it removes the directory only if it is still empty, so a directory
+# another taker has already given an owner stays. If writing the token into the
+# owner file it created fails (a full disk, say), that file is its own and is
+# removed again.
+_acq_provider_input_lock_take() {
+  mkdir -- "$1" 2>/dev/null || return 1
+  [ -d "$1" ] && [ ! -L "$1" ] || return 1
+  if ! ( set -C; : > "$1/owner" ) 2>/dev/null; then
+    [ -e "$1/owner" ] || [ -L "$1/owner" ] || rmdir -- "$1" 2>/dev/null || true
+    return 1
+  fi
+  if { printf '%s\n' "$2" > "$1/owner"; } 2>/dev/null; then
+    return 0
+  fi
+  rm -f -- "$1/owner" 2>/dev/null
+  rmdir -- "$1" 2>/dev/null || true
+  return 2
 }
 
 # Start a real process whose lifetime is tied to the transaction subshell. Bash
