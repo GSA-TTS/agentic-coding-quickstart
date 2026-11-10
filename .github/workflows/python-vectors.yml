@@ -5,8 +5,9 @@
 # (the "IT-approved base interpreter" fallback; the app-private bundle is laid
 # down by the installer slice). jq is pinned to an exact release and
 # SHA256-verified so the Bash runner's dependency is declared, not opportunistic.
-# acq-py has no runtime dependencies; only the pinned pytest dev dependency is
-# installed, so ordinary operation never downloads acq's own assets.
+# acq-py has no runtime dependencies and is run from py-acq/src, not installed;
+# only the hash-locked test tools are installed, so ordinary operation never
+# downloads acq's own assets and no unhashed build dependency is fetched.
 
 name: Python vectors
 
@@ -51,13 +52,16 @@ jobs:
           sudo mv jq /usr/local/bin/jq
           jq --version
 
-      # acq-py has no runtime dependencies (ADR-0042m: offline, app-private).
-      - name: Install acq-py
-        run: python -m pip install ./py-acq
-
-      # Pinned pytest dev dependency (same pin as pyproject.toml).
-      - name: Install test dependencies
-        run: python -m pip install -r py-acq/requirements-dev.txt
+      # acq-py itself is not installed, as in windows.yml: pytest imports it from
+      # py-acq/src through the pyproject `pythonpath`, the tests' child
+      # processes get the same PYTHONPATH from conftest.py, and the Bash runner
+      # step sets it below. Installing would build a wheel, and pip's build
+      # isolation would download setuptools without a hash check. The test
+      # tools are the hash-locked set (ADR-0049m), wheels only, so every
+      # package installed here is hash-verified; pytest has the same pin as
+      # requirements-dev.txt and pyproject.toml.
+      - name: Install pinned test tools
+        run: python -m pip install --require-hashes --no-deps --only-binary :all: -r py-acq/requirements-quality.txt
 
       # A checkout of Patterns at the kits' pinned ref, for the tests that compare
       # acq's copies against the real pinned tree: the kit egress allowlist
@@ -112,4 +116,6 @@ jobs:
       # The independent Bash runner over the same corpus; must agree with pytest
       # on the sentinel golden set.
       - name: Run Bash vector runner
+        env:
+          PYTHONPATH: ${{ github.workspace }}/py-acq/src
         run: scripts/run-vectors --acq "python -m acq_py"
