@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-11-09"
+last_updated: "2026-11-10"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -11,513 +11,6 @@ keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 # Known Failure Modes
 
 This document captures real-world failure patterns when using Docker SBX + USAi + agent frameworks. If you're hitting something weird, it's probably in here.
-
----
-
-## Deferred: live offline-install completeness transcript (Tier-3)
-
-**Status:** deferred (tracked per AGENTS.md "Track Deferred Work").
-
-The acq v1 installer (ADR-0042m) enforces the enumerated offline asset set at
-install time: it checksum-verifies the release archive against `SHA256SUMS` and
-fails closed before publishing if the archive is missing the launcher, the
-bundled runtime, the source tree, or the wheelhouse, or if the provenance
-manifest is absent. It does **not** yet prove the set is *complete enough to run
-acq end-to-end from a blocked network*: that is a Tier-3 live transcript, not a
-unit assertion, and it has not been fabricated.
-
-**What the deferred transcript must assert:**
-
-1. On a network-blocked host, `install.sh --source <offline-set>` (and
-   `install.ps1 -Source <offline-set>` on Windows x64) installs from the
-   enumerated asset set alone — no network is reached for acq's own assets.
-2. After install, `acq version` reports the baked `acq_version` and
-   `source_revision` on a non-git install.
-3. A sandbox starts and runs a smoke command (e.g. `acq run opencode <dir>`).
-
-**Unblock trigger:** release automation assembles and publishes the per-platform
-archives carrying the bundled managed runtime (Python.org embedded on Windows;
-python-build-standalone install-only archives on macOS/Linux) and the exact-hash
-wheelhouse. Until then the fail-closed presence checks are proven offline against
-a checked-in fixture, and the live transcript stays open.
-
----
-
-## Deferred: Tier-3 oracle facets the cell oracle cannot check unattended
-
-**Status:** deferred (tracked per AGENTS.md "Track Deferred Work").
-
-`scripts/qualify-backend-cell` checks the boot contract, credential binding and
-in-guest non-exposure, built-in kit application, host-side secret non-exposure,
-and (msb) the read-only trusted-config mount, including the committed
-`scripts/qualify-msb-ro-mount` canary. Three ADR-0044m facets are not in it:
-
-1. **Swap-on-the-wire substitution.** Showing that the real credential (not the
-   placeholder) reaches the bound host needs an endpoint that reports what it
-   received, and the oracle must not send even a throwaway value to a host that is
-   not on the approved endpoint list, or open a listener on the host. **Unblock
-   trigger:** the maintainer names an approved echo endpoint (or an in-repo test
-   service the backends can reach); then add a step that binds the throwaway
-   value to it and compares what it saw.
-2. **Attach.** Needs a terminal; covered by the Tier-2 tests
-   (`py-acq/tests/test_exec.py`) until a PTY-driving step is added.
-3. **Version fail-closed against a real older backend.** Covered offline by the
-   Tier-1 vectors; a live check needs a second, older backend install on the host.
-4. **Remount attempts in the cell's own guest.** The cell oracle checks `ro` in
-   `/proc/mounts`, an EROFS write and an unchanged host directory in its own guest;
-   attempts to remount read-write are made only by the canary, in a sandbox of its
-   own. The oracle also assumes the Bash layout for where acq keeps a sandbox's
-   host-config directory (`<state>/provenance/<backend>/<sandbox>.<checksum>.config`,
-   mounted at `/var/lib/acq/host`). **Unblock trigger:** the Python implementation
-   establishes the mount; then align the oracle's path constants with it and decide
-   whether to add a remount attempt to the cell's own guest.
-
-**Expected today:** the Python implementation fails the cell oracle on every
-cell (no built-in kits are applied and no read-only trusted-config mount is
-established; the msb credential path exists but has no live run yet), so a Tier-3
-run reports `FAIL` with each
-missing control named, rather than qualifying a sandbox that lacks them. The
-first live run with the extended oracle should also confirm that `sbx` accepts the
-nonce-named global secret service, and that neither backend CLI reads the
-redirected `XDG_*` directories (if one does, its steps fail closed rather than
-pass).
-
----
-
-## Deferred: Windows launcher argv and Bash UNC mount need live Windows checks
-
-**Status:** deferred (tracked per AGENTS.md "Track Deferred Work").
-
-Four Windows fixes were made and unit-tested; the launcher changes were then
-reviewed live on Windows 11 under Windows PowerShell 5.1:
-
-- **acq.cmd forwards argv exactly on the Python branch.** `acq.cmd` starts
-  `acq.ps1` with `powershell.exe -NoLogo -NoProfile -File`. That path keeps a
-  bare `--` in `$args` (Windows PowerShell 5.1 does not remove it there), but
-  5.1's call operator then dropped empty arguments, left embedded double quotes
-  unescaped and mishandled a backslash run before a quote when it started
-  Python. `acq.ps1` now recognises that exact launch shape, takes the arguments
-  from its own process argv (`[Environment]::GetCommandLineArgs()`), and starts
-  Python with an MSVCRT-quoted command line through
-  `System.Diagnostics.Process`. The child inherits the console and standard
-  handles and starts in the current PowerShell location.
-- **The Bash branch refuses what it cannot forward.** The Bash branch
-  (`ACQ_IMPL` unset or `bash`, the current default) still starts `bash.exe`
-  through the call operator. Where that passes arguments the legacy way
-  (Windows PowerShell 5.1, PowerShell before 7.3, or
-  `$PSNativeCommandArgumentPassing = 'Legacy'`), an argument that is empty or
-  contains a double quote now exits 2 with a message pointing to
-  `ACQ_IMPL=python`, instead of reaching Bash silently changed (an empty
-  argument used to vanish, and `say "hi"` arrived as `say hi`).
-- **`ACQ_IMPL` is compared case-sensitively** in `acq.ps1` (`-cne`), as the Bash
-  `acq` compares it: `PYTHON` or `Bash` exits 2.
-- **Bash msb UNC workspace.** `host_path` maps the `/unc/server/share/...` guest
-  form back to the UNC host path `//server/share/...` instead of passing it to
-  `cygpath -m`, which put it under the MSYS root. The msb `--volume` source and
-  the recorded host workspace are the UNC path again (ADR-0029 amendment).
-
-`py-acq/tests/test_windows_launchers.py` runs the launchers on the Windows CI
-job: the argv round trip through `acq.cmd`, the exit status, the working
-directory, case-sensitive `ACQ_IMPL`, and the Bash branch's refusal.
-`test/bats/117-msys-path-forms.bats` covers the UNC mount with a simulated
-`cygpath`.
-
-**Live checks still needed (Windows x64):**
-
-1. **Attach to a real msb guest through `acq.cmd`.** The TTY, Ctrl-C and the
-   exit status were verified live through `acq.cmd` with `ACQ_IMPL=python`; an
-   `acq.cmd run shell <dir>` attach into a real msb guest has not been run yet.
-2. **Bash msb with a UNC workspace.** Under Git Bash with msb,
-   `ACQ_IMPL=bash ACQ_DEBUG=1 acq run shell '\\server\share\proj'` (or a
-   mapped drive whose realpath is UNC) must log
-   `msb volume: //server/share/proj (host) -> /unc/server/share/proj (guest)`, and
-   msb must mount it. The Python adapter's UNC mount was verified live; nothing
-   yet shows msb accepting the forward-slash `//server/share` source the Bash
-   adapter passes.
-
-**Known limitations (not fixed):**
-
-- **`acq.ps1` run from PowerShell.** In PowerShell, `acq` resolves to `acq.ps1`
-  before `acq.cmd`, and PowerShell parses the line itself, so the first bare `--`
-  never reaches acq. Quote it (`acq exec box '--' echo --json`), or run
-  `acq.cmd`. Windows PowerShell 5.1 also drops an empty argument passed to Python
-  there. Recovering the original text from `$MyInvocation` would need the
-  PowerShell parser and `Invoke-Expression`, which is too fragile to adopt
-  without a Windows host to test it. **Unblock trigger:** a Windows host or CI
-  job that can drive an interactive PowerShell session.
-- **Bash branch quoting.** The Bash branch refuses an empty argument or one
-  containing a double quote rather than forward it; use `ACQ_IMPL=python` for
-  such a command. MSYS globs unquoted arguments, so switching this branch to an
-  exact command line needs its own analysis. **Unblock trigger:** decide whether
-  the Bash branch stays supported on Windows once ADR-0048m's default flips.
-- **PowerShell 7 is untested.** The launchers were checked live only under
-  Windows PowerShell 5.1, which `acq.cmd` always uses. Running `acq.ps1` from
-  `pwsh` (7.x) has not been tried: neither how 7.x binds `--` and empty
-  arguments in `$args`, nor the Bash branch's refusal, which assumes 7.3 and later
-  pass arguments the standard way unless `$PSNativeCommandArgumentPassing` is
-  `Legacy`. **Unblock trigger:** a Windows host with PowerShell 7 to repeat the
-  launcher checks.
-
----
-
-## Deferred: Python session parity gaps (attach, shell, exec)
-
-**Status:** deferred (tracked per AGENTS.md "Track Deferred Work").
-
-The Python `attach`, `shell`, `run` and `exec` give the session a PTY when stdin
-is a terminal (`msb exec -t`, `sbx exec -it`), pass `HOME`, `TERM`/`COLORTERM`,
-the host git identity and (msb) `SHELL`, map a signal death to `128+N`, and
-leave Ctrl-C to the child (`py-acq/src/acq_py/hostexec.py` `run_foreground`).
-"Stdin is a terminal" is `hostexec.stdin_is_tty`, which on Windows also needs a
-real console, so `acq attach NAME < NUL` gets no `-t`. On msb every session also
-replays the kit environment recorded when the kits were applied (the `kit-env`
-host-config key, last value wins, as Bash's `_acq_msb_kit_env_flags_into`), and
-first writes the host's global git `user.name`/`user.email` into the guest's
-global git config (as Bash's `_acq_msb_apply_host_git_global_config`); see
-`prepare_session` in `py-acq/src/acq_py/commands/session.py`. On sbx the kits
-carry their own environment and the git identity kit sets the config. These
-values are not secrets (a kit's `environment` is non-secret configuration), so
-they go on the `msb exec` command line as `-e NAME=value`, as in Bash. Four parts
-of the Bash session differ or are not ported yet (the numbering below keeps its
-earlier order; the kit environment and guest git config items are done):
-
-1. *(Done: kit `environment[]` replay on msb.)*
-2. **ssh-agent forwarding** (ADR-0021). Python never creates the `--vsock` route
-   or the in-guest bridge, so it passes `SSH_AUTH_SOCK` only when the sandbox's
-   host record carries an `ssh_auth_sock` guest path. No Python create writes
-   one yet; for a sandbox created by Bash, the state migration copies the path
-   from Bash's host config (`ssh-auth-sock`) into the record (ADR-0041m
-   generation 2). Python still does not start the in-guest bridge that path
-   points at: Bash restarts it on attach and on resume (`acq_backend_start`)
-   because it dies when the sandbox stops, so after a stop the forwarded socket
-   in a Bash-created sandbox is dead until Bash re-attaches it. Porting
-   forwarding must add the bridge to create, attach, `acq start` and
-   `acq restart` (`_start_locked` in `py-acq/src/acq_py/commands/lifecycle.py`).
-   **Unblock trigger:** forwarding is ported.
-3. *(Done: guest git config on msb.)*
-4. **`ACQ_ACTIVATE_PROJECT_ENV`.** With it set to `1`, Bash passes
-   `ACQ_WORKSPACE` and wraps the session in its guest script
-   (`acq_guest_exec_script`, `acq_guest_shell_script` in `acq.backends/common.sh`),
-   which changes into the workspace and loads its `.envrc` through `direnv` before
-   the command runs. Python ignores the variable and starts the command directly.
-   **Unblock trigger:** the Python substrate reliably provides `direnv` in the
-   guest; then port the two scripts into the adapters' session commands.
-5. **sbx attach uses `sbx exec -it`, not `sbx run --name`.** Bash re-attaches with
-   `sbx run --name NAME`, which relaunches the agent baked into the sandbox and
-   reads its launch mode from the `generic-opencode` host record. Python has no
-   such record, and `sbx run` takes no `-e`, so it could not pass the session
-   environment above. Python therefore runs the recorded agent (or kit entrypoint)
-   with `sbx exec -it NAME -- AGENT` from host state, as it does on msb.
-   The reader for Bash's state tree has landed
-   (`legacy_bash.host_config_read("sbx", NAME, "generic-opencode")` in
-   `py-acq/src/acq_py/legacy_bash.py`), so the record is available.
-   **Unblock trigger:** the sbx kit and attach work; decide then whether a
-   Bash-created generic-OpenCode sandbox needs `sbx run` to attach.
-6. **Live check.** A TUI attach, an interactive shell and Ctrl-C have been tested
-   only against a fake backend under a PTY (`py-acq/tests/test_session_fidelity.py`);
-   the tests check the argv and environment acq builds, not what a real backend
-   does with them. Still to confirm on real hosts:
-   * msb (Linux, macOS): `acq attach` renders the opencode TUI through
-     `msb exec -t`; `acq shell` is an interactive login shell; Ctrl-C cancels
-     the agent's step without ending acq; a kit's `environment` (for example
-     `OPENCODE_CONFIG`) is visible in `acq exec NAME -- env`; and
-     `git config --global user.name` in the guest prints the host's value.
-   * sbx 0.51+: `sbx exec -it` gives the agent a PTY and stdin, and `-e` reaches
-     the session.
-   * Windows (Python is the default there, ADR-0048m): from Windows Terminal and
-     from a legacy console, `msb exec -t` gets a working PTY, and Ctrl-C reaches
-     the guest; `acq attach NAME < NUL` exits instead of waiting for keys. A
-     Windows console sets no `TERM`, so the guest gets msb's default terminal
-     type and a TUI may fall back to 16 colours. If it does, the fix is to pass
-     a `TERM` when the host console supports virtual-terminal sequences, which
-     acq does not do today because `terminal_env` never invents a value.
-   **Unblock trigger:** the next Tier-3 run on an msb host, on an sbx 0.51+
-   host for `sbx exec -it`, and on the Windows qualification cell.
-
----
-
-## Deferred: limits of the Python acq's import of Bash state
-
-**Status:** deferred (tracked per AGENTS.md "Track Deferred Work").
-
-The Python acq imports the Bash acq's state once per state tree, in the
-generation-2 step of the migration that runs before the first mutating verb
-(ADR-0041m; `py-acq/src/acq_py/legacy_bash.py`, `migration.py`). Four limits
-remain:
-
-1. **Once per tree.** State the Bash acq writes after that step (a sandbox it
-   creates while both implementations are in use, a `kit-source add` or a
-   `provider-credential set`) is not imported. (A `kit_sources` or
-   `provider_credential_bindings` list that Bash itself would refuse is the
-   exception: it stays pending, with a warning on each mutating verb, until it
-   is fixed.) Kit sources without a full commit SHA are never imported; add them
-   again with `acq kit-source add REPO --ref <full-sha>`. Running the import every time
-   would bring back records removed with the Python acq, including kit sources
-   whose trust the user withdrew. **Mitigation:** create such sandboxes with
-   the Python acq, or re-register the source or binding with it.
-   **Unblock trigger:** the Bash implementation is retired, or a ledger of
-   imported records is needed.
-2. **Read-only verbs do not import.** `acq ls` and `acq doctor` never migrate,
-   so until the first mutating verb (`run`, `create`, `exec`, ...) a Bash
-   sandbox is listed without its agent and workspace, or not at all.
-   **Unblock trigger:** a report that this confuses users; then have `doctor`
-   warn when Bash state is waiting to be imported.
-3. **Workspaces in MSYS form on Windows.** A workspace Git Bash recorded as
-   `/c/Users/...` is not an absolute native path, so it is dropped and
-   re-attach uses the path typed on the command line. **Unblock trigger:** a
-   Windows host shows Bash recording that form; then translate it.
-4. **Names acq did not generate.** A sandbox name that the Bash key sanitizer
-   changed (any character outside `A-Za-z0-9._-`) cannot be recovered from the
-   file name, so that sandbox is skipped. acq's own names are never affected.
-   **Unblock trigger:** none expected.
-
----
-
-## Deferred: the Python acq has no clone mode (`--clone`, `ACQ_CLONE`)
-
-**Status:** deferred (tracked per AGENTS.md "Track Deferred Work"). The Python
-acq fails closed until clone mode is ported.
-
-The Bash acq's `--clone`, and its env equivalent `ACQ_CLONE=1`, run `create` and
-`run` on a disposable clone of the primary workspace instead of mounting the
-real checkout (ADR-0027; native on sbx, a host-side scratch clone on msb). The
-Python acq has not ported it:
-
-- `--clone` is rejected by its parser as an unrecognized argument (exit 2).
-- `ACQ_CLONE=1` makes `create` and `run` (every form, including `run NAME`
-  and `create --recreate NAME`) refuse with a usage error (exit 2) before any
-  state, config or backend access: "clone mode (ACQ_CLONE=1) is not supported
-  by the Python implementation yet". Before this refusal, the Python acq
-  ignored the variable, so a user expecting isolation got the real workspace
-  mounted read/write.
-- Only the exact value `1` refuses, matching Bash's
-  `[ "${ACQ_CLONE:-0}" = "1" ]`. Unset, empty, `0`, `true` or any other value
-  is clone mode off in both implementations, so the Python acq proceeds. Other
-  verbs ignore the variable, as in Bash.
-- One deliberate difference: on a re-attach to an existing sandbox, Bash prints
-  a note that `ACQ_CLONE` is ignored and continues; the Python acq refuses,
-  because it cannot tell a re-attach from a create without querying the backend.
-
-**Workaround:** unset `ACQ_CLONE` to mount the workspace itself, or run the
-Bash implementation for a disposable clone (`ACQ_IMPL=bash acq run AGENT
-PATH --clone`). Tests: `py-acq/tests/test_clone_refusal.py` and the vector
-`test/vectors/cli/run-acq-clone-refused.json`.
-
-**Unblock trigger:** clone mode is ported to the Python adapters (sbx's native
-`--clone` and the msb scratch-clone emulation in `acq.backends/msb.sh`); then
-replace the refusal with the feature and port `test/bats/116-clone-option.bats`
-to vectors.
-
----
-
-## Qualification oracle: stopping a step can stop a backend daemon the step started
-
-**Status:** known limitation, tracked for a fix (per AGENTS.md "Track Deferred Work").
-
-### Symptoms and cause
-
-`scripts/qualify-backend-cell` runs each step in its own process group, and on
-Windows also in a Job object of its own (`StepJob`). When a step outlives its
-timeout, or the oracle is stopped, the group gets a polite stop (SIGTERM;
-CTRL_BREAK on Windows) and a grace period. Only if the grace period expires is
-the step force-killed (`run_process` / `stop_process` / `_signal_group`):
-`killpg(SIGKILL)` on POSIX, `TerminateJobObject` on Windows. If the oracle itself
-is killed outright on Windows, its job handles close and the jobs' kill-on-close
-limit takes the steps' processes down too.
-
-A backend daemon that a step's command auto-starts (for example an `msb`
-server) as a child, without detaching it into its own session or process group,
-is in the step's group, and on Windows in the step's job. So:
-
-- **The polite stop reaches it.** The group SIGTERM (CTRL_BREAK on Windows) goes
-  to every process in the group, the daemon included, and a daemon that honours
-  it exits.
-- **The forced kill kills it.** `killpg(SIGKILL)` and `TerminateJobObject` both
-  cover the daemon, as does the kill-on-close of a killed oracle's jobs.
-
-Later steps, and other sandboxes on the host that use the same daemon, then lose
-it. A step that ends on its own does not affect the daemon: on Windows the job's
-kill-on-close limit is lifted before its handle is closed.
-
-The forced kill no longer reaches unrelated processes on Windows. It used to be
-`taskkill /F /T`, which walks parent process ids without a creation-time check
-and, after a pid was reused, could kill a process that had nothing to do with the
-run. Job membership is fixed when a process is created, so `TerminateJobObject`
-kills the step's processes and nothing else.
-
-One exception is intended: a process that a step starts with
-`CREATE_BREAKAWAY_FROM_JOB` leaves the job (the job sets
-`JOB_OBJECT_LIMIT_BREAKAWAY_OK`, so a backend that detaches its daemon that way is
-not refused) and survives the forced kill, like a POSIX process that left the
-step's group with `setsid`. The job is a cleanup tool, not a security boundary: it
-does not contain a step that sets out to escape it.
-
-### Mitigation today
-
-Start the backend daemon before a qualification run, so no timed step starts it.
-That protects it from the polite stop and from the forced kill alike. Leave the
-grace periods (`STOP_GRACE`, `CANARY_GRACE`) at their defaults so the forced
-kill stays a last resort.
-
-### Proposed fix
-
-Before the first timed step, start the backend daemon (or check that it is
-already running) outside any step's process group and job. **Deferred:** it needs
-each backend's own command to start and probe its daemon (msb and sbx differ, and
-acq does not manage either daemon today), verified live on every platform.
-**Unblock trigger:** the next live qualification round on a host where a step is
-seen to start the daemon, or a backend release that documents a daemon
-start/status command.
-
----
-
-## Python acq on msb: `secret rm` can be blocked by a sandbox it has no record for
-
-**Status:** known limitation, waiting on a live msb check (per AGENTS.md "Track Deferred Work").
-
-### Symptoms and cause
-
-The Python msb adapter records host-side which secret bindings each sandbox it
-creates holds (`<state>/msb-secret-bindings/`), because msb gives acq no binding
-listing to rely on. `secret rm` unbinds exactly what those records show. A
-sandbox msb lists without a record is unknown: one created by the Bash `acq`, by
-`msb` directly, or before the records existed. For each unknown sandbox,
-`secret rm` tries `msb modify NAME --secret-rm ENV`. If that fails, acq cannot
-tell "msb refused because the variable was never bound" from a real failure, so
-it keeps the secret in the acq store and exits 1 with `unbind_failed`, naming
-the sandbox. Until the msb behaviour is known, any unknown sandbox that never
-had the binding can block the removal if msb rejects removing an unbound
-variable (the test stub models it that way). Stopped sandboxes are swept too,
-and `msb modify` on a stopped sandbox is also unverified.
-
-### Mitigation today
-
-Remove the named sandbox (`acq rm NAME`, or `msb remove NAME` for one acq did
-not create), then retry `acq secret rm`. If you know a named sandbox never had
-the secret (or accept that it may keep it), retry with
-`acq secret rm ... --accept-unconfirmed NAME[,NAME]`: only the named unrecorded
-sandboxes are accepted, the JSON data lists them under `unconfirmed`, and a
-stderr note repeats that they may still hold the binding. Sandboxes the Python
-acq creates always have a record and never block it.
-
-On a global removal, an unrecorded sandbox that also has its own stored value is
-not assumed safe: the Bash `acq`'s global set overwrites a sandbox's own binding,
-so acq removes the binding and re-adds the sandbox's own value in a separate
-call, and reports the sandbox as unconfirmed if either call fails.
-
-### Unblock trigger
-
-A live msb run that shows what `msb modify NAME --secret-rm ENV` does for a
-variable that is not bound, on a running and on a stopped sandbox. If msb
-succeeds, or fails in a way acq can tell apart, treat that as "confirmed
-unbound", stop blocking, and retire `--accept-unconfirmed`. The Bash-state import (ADR-0041m generation 2)
-does not help here: Bash records which sandboxes exist, not which secrets each
-one was bound with, so an imported sandbox still has no binding record.
-
----
-
-## Read-only host-config probe misclassifies a denied write
-
-### Symptoms and cause
-
-Readonly kit staging reports that the host-config mount looks writable even
-though host `msb inspect` records a read-only bind and direct writes fail with
-`Read-only file system`. A POSIX shell can exit with status 2 when redirection
-on the special builtin `:` fails. The original probe used that same status to
-signal a successful write, confusing denial with writability.
-
-`acq.backends/msb.sh::_acq_msb_host_config_mount_probe` now isolates the write
-attempt in a subshell. Only an actual successful write selects status 2;
-denial returns 0, while missing/inaccessible mounts and transport errors remain
-refusals. Host mount-record, version and platform checks still apply. The
-real-shell regression is in `test/bats/84-msb-ro-mount-qualification.bats`.
-
-Measured with MSB 0.7.11 on macOS ARM64: the root guest write to a readonly
-canary was denied, a writable control succeeded, and the host sentinel remained
-unchanged. With the fixed probe, the existing OCI kit installed Podman and
-passed its rootless startup self-test. This does not qualify all inner-container
-isolation controls or prove general read-only enforcement across platforms.
-
-## Rootless nested Podman lacks cgroup delegation
-
-The OCI kit may install successfully and pass its storage self-test while an
-inner container with explicit memory/CPU/PID limits still cannot start. In the
-measured MSB 0.7.11 guest, Podman 5.7.0 reported cgroup v2, cgroupfs and an empty
-delegated controller list. The bounded network-off test was refused:
-
-```text
-unable to apply cgroup configuration: rootless needs no limits + no cgrouppath
-when no permission is granted for cgroups
-```
-
-Do not remove mandatory limits to label this a successful isolated runner.
-The outer sandbox owner must provide a reviewed cgroup-delegation path, or use
-another qualified backend, before rootless inner containers can satisfy that
-resource contract. Reopen qualification when delegation is available; verify
-effective memory, CPU and PID enforcement alongside network/source/credential
-separation and cleanup. Kit installation and rootless storage readiness alone
-are insufficient evidence. No host engine socket or privileged-host workaround
-is required or authorized by this guidance.
-
-## Provider-input validator dependencies are missing
-
-### Symptoms
-
-- `acq create` stops before backend creation.
-- The error requires exact `PyYAML` and `jsonschema` versions.
-
-### Fix: release install (Homebrew, npm, or the upstream release installer)
-
-`--apply` alone uses the offline wheelhouse bundled with the release:
-
-```bash
-scripts/setup-provider-input-validator --apply
-```
-
-The runtime is stored under `$XDG_DATA_HOME/acq/provider-input-validator` (or
-`~/.local/share/acq/provider-input-validator`) and does not modify global Python
-packages. The default invocation is a dry run; `--apply` builds a fresh,
-hash-verified environment and only replaces a working runtime after validation
-succeeds. Re-run the command after changing Quickstart versions if the pinned
-requirements change.
-
-### Fix: git checkout / development install (no wheelhouse)
-
-A working-tree clone (the upstream release installer's clone method, or running
-`./acq` directly from a `git checkout`) has no release wheelhouse. Use the `--online` flag, which
-downloads the same hash-locked packages from PyPI instead:
-
-```bash
-scripts/setup-provider-input-validator --apply --online
-```
-
-Network access is restricted to this explicit setup call; `acq create` itself
-remains fully offline after the runtime is installed.
-
-If the error message already names this command, that means `acq` detected a git
-checkout with no wheelhouse and surfaced the hint automatically.
-
-### Alternative: `ACQ_PROVIDER_INPUT_PYTHON`
-
-If you already have a Python interpreter with the exact required versions
-(`PyYAML 6.0.3` and `jsonschema 4.26.0`), point `acq` at it directly:
-
-```bash
-export ACQ_PROVIDER_INPUT_PYTHON=/path/to/python3
-acq create opencode .
-```
-
-`acq` validates the dependency versions at startup and exits with a clear error
-if they do not match. This is useful when a system-managed environment already
-carries the right packages, or when the setup script cannot run (restricted
-network, air-gapped lab). It is not a substitute for the pinned runtime in
-production; the venv created by `setup-provider-input-validator` is preferred
-because it is isolated from system upgrades.
-
-The lock supports Linux x86_64/aarch64 with Python 3.12, macOS x86_64/arm64 with
-Python 3.12-3.14, and Windows x86_64/arm64 with
-Python 3.12. An unsupported OS, architecture, or Python version fails before
-installation; use one of the supported runtimes rather than bypassing hashes.
 
 ---
 
@@ -1625,6 +1118,73 @@ command again; on msb a failed fetch has always stopped the same way.
 
 ---
 
+## 26. macOS Gatekeeper Blocks `mkfs.erofs` at `sbx policy init` (PATH shadowing)
+
+### Symptoms
+
+On macOS (seen on **Tahoe / macOS 26**, Apple Silicon), `sbx policy init balanced`
+— the first command that builds a sandbox filesystem — fails when macOS blocks a
+helper binary:
+
+```
+"mkfs.erofs" cannot be opened because the developer cannot be verified.
+macOS cannot verify that this app is free from malware.
+```
+
+`xattr -d com.apple.quarantine /opt/homebrew/bin/mkfs.erofs` does **not** clear
+it — even run with `sudo`. It only happens on machines that also have Homebrew
+`erofs-utils` installed; users without it never see the block.
+
+### Root Cause
+
+This is an **`sbx` PATH-resolution bug**, **not** a Quickstart / `acq` / `msb`
+issue, and **not** a supply-chain compromise. sbx ships its own **notarized**
+`mkfs.erofs`, but invokes it via `$PATH`, so a Homebrew `erofs-utils` shadows the
+bundled copy:
+
+- sbx v0.37.1 bundles a notarized `mkfs.erofs` at
+  `/opt/homebrew/Caskroom/sbx/<version>/libexec/mkfs.erofs`
+  (`spctl` → *accepted*; Developer ID: **Docker Inc (9BNSXJN65R)**).
+- If Homebrew `erofs-utils` is also installed, `/opt/homebrew/bin/mkfs.erofs`
+  (a symlink into `Cellar/erofs-utils/…`) is earlier on `$PATH`. That binary is
+  **ad-hoc-signed / not notarized** (`spctl` → *rejected*, `Signature=adhoc`,
+  no TeamIdentifier).
+- sbx resolves `mkfs.erofs` from `$PATH`, picks up the unnotarized Homebrew
+  binary instead of its own, and macOS Gatekeeper rejects it.
+- There is **no `com.apple.quarantine` xattr** on the rejected binary — the block
+  is the code-signing / AMFI (`syspolicyd`) assessment, which is why removing the
+  xattr does nothing.
+
+The `erofs-utils` Homebrew formula itself is fine (kernel.org source,
+SHA256-pinned bottles). The problem is purely that sbx's PATH lookup picks the
+unnotarized system copy over its own notarized bundled one.
+
+### Fix
+
+Make sbx use its own notarized binary — remove the shadowing Homebrew copy from
+PATH:
+
+```bash
+brew uninstall erofs-utils    # if nothing else needs it; sbx then uses its bundled, notarized mkfs.erofs
+```
+
+If you cannot remove it, approve the Homebrew binary via **System Settings →
+Privacy & Security → "Allow Anyway"**, then re-run the command and click **"Open"**
+on the pop-up. Do **not** rely on `xattr -d com.apple.quarantine` — it does not
+satisfy the code-signing gate on an unnotarized binary.
+
+### Prevention / Status
+
+- The durable fix is upstream in `sbx`: invoke the bundled
+  `libexec/mkfs.erofs` by absolute path rather than resolving `mkfs.erofs` from
+  `$PATH`. The bundled binary is already notarized, so no notarization change is
+  needed. Tracked at
+  [docker/sbx-releases#392](https://github.com/docker/sbx-releases/issues/392).
+- Until sbx pins the path, `brew uninstall erofs-utils` (or the "Allow Anyway"
+  fallback) unblocks affected machines.
+
+---
+
 ## 27. `500 failed to create network` After a Host Restart (sbx)
 
 > Numbered 27 to avoid colliding with entry 26 (macOS Gatekeeper / `mkfs.erofs`),
@@ -2011,73 +1571,6 @@ Signature 1 (stale state) or Signature 2 (split-horizon DNS).
   guest a resolver that can see internal zones, are host/network-configuration
   matters — resolve them with your network/endpoint administrators where acq's
   tunables don't cover your environment.
-
----
-
-## 26. macOS Gatekeeper Blocks `mkfs.erofs` at `sbx policy init` (PATH shadowing)
-
-### Symptoms
-
-On macOS (seen on **Tahoe / macOS 26**, Apple Silicon), `sbx policy init balanced`
-— the first command that builds a sandbox filesystem — fails when macOS blocks a
-helper binary:
-
-```
-"mkfs.erofs" cannot be opened because the developer cannot be verified.
-macOS cannot verify that this app is free from malware.
-```
-
-`xattr -d com.apple.quarantine /opt/homebrew/bin/mkfs.erofs` does **not** clear
-it — even run with `sudo`. It only happens on machines that also have Homebrew
-`erofs-utils` installed; users without it never see the block.
-
-### Root Cause
-
-This is an **`sbx` PATH-resolution bug**, **not** a Quickstart / `acq` / `msb`
-issue, and **not** a supply-chain compromise. sbx ships its own **notarized**
-`mkfs.erofs`, but invokes it via `$PATH`, so a Homebrew `erofs-utils` shadows the
-bundled copy:
-
-- sbx v0.37.1 bundles a notarized `mkfs.erofs` at
-  `/opt/homebrew/Caskroom/sbx/<version>/libexec/mkfs.erofs`
-  (`spctl` → *accepted*; Developer ID: **Docker Inc (9BNSXJN65R)**).
-- If Homebrew `erofs-utils` is also installed, `/opt/homebrew/bin/mkfs.erofs`
-  (a symlink into `Cellar/erofs-utils/…`) is earlier on `$PATH`. That binary is
-  **ad-hoc-signed / not notarized** (`spctl` → *rejected*, `Signature=adhoc`,
-  no TeamIdentifier).
-- sbx resolves `mkfs.erofs` from `$PATH`, picks up the unnotarized Homebrew
-  binary instead of its own, and macOS Gatekeeper rejects it.
-- There is **no `com.apple.quarantine` xattr** on the rejected binary — the block
-  is the code-signing / AMFI (`syspolicyd`) assessment, which is why removing the
-  xattr does nothing.
-
-The `erofs-utils` Homebrew formula itself is fine (kernel.org source,
-SHA256-pinned bottles). The problem is purely that sbx's PATH lookup picks the
-unnotarized system copy over its own notarized bundled one.
-
-### Fix
-
-Make sbx use its own notarized binary — remove the shadowing Homebrew copy from
-PATH:
-
-```bash
-brew uninstall erofs-utils    # if nothing else needs it; sbx then uses its bundled, notarized mkfs.erofs
-```
-
-If you cannot remove it, approve the Homebrew binary via **System Settings →
-Privacy & Security → "Allow Anyway"**, then re-run the command and click **"Open"**
-on the pop-up. Do **not** rely on `xattr -d com.apple.quarantine` — it does not
-satisfy the code-signing gate on an unnotarized binary.
-
-### Prevention / Status
-
-- The durable fix is upstream in `sbx`: invoke the bundled
-  `libexec/mkfs.erofs` by absolute path rather than resolving `mkfs.erofs` from
-  `$PATH`. The bundled binary is already notarized, so no notarization change is
-  needed. Tracked at
-  [docker/sbx-releases#392](https://github.com/docker/sbx-releases/issues/392).
-- Until sbx pins the path, `brew uninstall erofs-utils` (or the "Allow Anyway"
-  fallback) unblocks affected machines.
 
 ---
 
@@ -2780,6 +2273,8 @@ Notes:
   reachable, so a rebase with `SSH_AUTH_SOCK` set does not need a separate
   `--amend -S` pass.
 
+---
+
 ## 39. Spurious `M` (modified) diffs on scripts across the host/sandbox mount
 
 ### Symptoms
@@ -3416,6 +2911,8 @@ the fix), and covers a transient and a persistent inspect failure via the stub's
 `STUB_MSB_INSPECT_FAIL_TIMES` knob. In new code, do not pipe into `grep -q`
 (or `head`) under `pipefail` when the writer may still be producing output.
 
+---
+
 ## 46. `acq kit-source rm` Refuses to Finish (Backend Allowlist Still Permits the Owner)
 
 ### Symptoms
@@ -3924,6 +3421,8 @@ create can fail if sbx reads the kit while the name is briefly empty or being
 swapped. It needs a damaged directory plus three concurrent creates of the
 same kit; re-running B's create recovers it.
 
+---
+
 ## 56. Python acq: Stricter Provider-Credential Gate Than Bash
 
 **Status:** Intended difference (Python `acq`); revisit if a CI flow depends on it.
@@ -4351,19 +3850,518 @@ default flip.
 
 ---
 
-## Contributing
+## 62. Deferred: live offline-install completeness transcript (Tier-3)
 
-When you discover a new failure mode:
+**Status:** deferred (tracked per AGENTS.md "Track Deferred Work").
 
-1. Document the symptoms clearly
-2. Identify the root cause
-3. Provide a minimal fix
-4. Add it to this document
-5. Consider if it indicates a gap in AGENTS.md rules
+The acq v1 installer (ADR-0042m) enforces the enumerated offline asset set at
+install time: it checksum-verifies the release archive against `SHA256SUMS` and
+fails closed before publishing if the archive is missing the launcher, the
+bundled runtime, the source tree, or the wheelhouse, or if the provenance
+manifest is absent. It does **not** yet prove the set is *complete enough to run
+acq end-to-end from a blocked network*: that is a Tier-3 live transcript, not a
+unit assertion, and it has not been fabricated.
+
+**What the deferred transcript must assert:**
+
+1. On a network-blocked host, `install.sh --source <offline-set>` (and
+   `install.ps1 -Source <offline-set>` on Windows x64) installs from the
+   enumerated asset set alone — no network is reached for acq's own assets.
+2. After install, `acq version` reports the baked `acq_version` and
+   `source_revision` on a non-git install.
+3. A sandbox starts and runs a smoke command (e.g. `acq run opencode <dir>`).
+
+**Unblock trigger:** release automation assembles and publishes the per-platform
+archives carrying the bundled managed runtime (Python.org embedded on Windows;
+python-build-standalone install-only archives on macOS/Linux) and the exact-hash
+wheelhouse. Until then the fail-closed presence checks are proven offline against
+a checked-in fixture, and the live transcript stays open.
 
 ---
 
-## Default OpenCode Generic Base Requires Recreation
+## 63. Deferred: Tier-3 oracle facets the cell oracle cannot check unattended
+
+**Status:** deferred (tracked per AGENTS.md "Track Deferred Work").
+
+`scripts/qualify-backend-cell` checks the boot contract, credential binding and
+in-guest non-exposure, built-in kit application, host-side secret non-exposure,
+and (msb) the read-only trusted-config mount, including the committed
+`scripts/qualify-msb-ro-mount` canary. Three ADR-0044m facets are not in it:
+
+1. **Swap-on-the-wire substitution.** Showing that the real credential (not the
+   placeholder) reaches the bound host needs an endpoint that reports what it
+   received, and the oracle must not send even a throwaway value to a host that is
+   not on the approved endpoint list, or open a listener on the host. **Unblock
+   trigger:** the maintainer names an approved echo endpoint (or an in-repo test
+   service the backends can reach); then add a step that binds the throwaway
+   value to it and compares what it saw.
+2. **Attach.** Needs a terminal; covered by the Tier-2 tests
+   (`py-acq/tests/test_exec.py`) until a PTY-driving step is added.
+3. **Version fail-closed against a real older backend.** Covered offline by the
+   Tier-1 vectors; a live check needs a second, older backend install on the host.
+4. **Remount attempts in the cell's own guest.** The cell oracle checks `ro` in
+   `/proc/mounts`, an EROFS write and an unchanged host directory in its own guest;
+   attempts to remount read-write are made only by the canary, in a sandbox of its
+   own. The oracle also assumes the Bash layout for where acq keeps a sandbox's
+   host-config directory (`<state>/provenance/<backend>/<sandbox>.<checksum>.config`,
+   mounted at `/var/lib/acq/host`). **Unblock trigger:** the Python implementation
+   establishes the mount; then align the oracle's path constants with it and decide
+   whether to add a remount attempt to the cell's own guest.
+
+**Expected today:** the Python implementation fails the cell oracle on every
+cell (no built-in kits are applied and no read-only trusted-config mount is
+established; the msb credential path exists but has no live run yet), so a Tier-3
+run reports `FAIL` with each
+missing control named, rather than qualifying a sandbox that lacks them. The
+first live run with the extended oracle should also confirm that `sbx` accepts the
+nonce-named global secret service, and that neither backend CLI reads the
+redirected `XDG_*` directories (if one does, its steps fail closed rather than
+pass).
+
+---
+
+## 64. Deferred: Windows launcher argv and Bash UNC mount need live Windows checks
+
+**Status:** deferred (tracked per AGENTS.md "Track Deferred Work").
+
+Four Windows fixes were made and unit-tested; the launcher changes were then
+reviewed live on Windows 11 under Windows PowerShell 5.1:
+
+- **acq.cmd forwards argv exactly on the Python branch.** `acq.cmd` starts
+  `acq.ps1` with `powershell.exe -NoLogo -NoProfile -File`. That path keeps a
+  bare `--` in `$args` (Windows PowerShell 5.1 does not remove it there), but
+  5.1's call operator then dropped empty arguments, left embedded double quotes
+  unescaped and mishandled a backslash run before a quote when it started
+  Python. `acq.ps1` now recognises that exact launch shape, takes the arguments
+  from its own process argv (`[Environment]::GetCommandLineArgs()`), and starts
+  Python with an MSVCRT-quoted command line through
+  `System.Diagnostics.Process`. The child inherits the console and standard
+  handles and starts in the current PowerShell location.
+- **The Bash branch refuses what it cannot forward.** The Bash branch
+  (`ACQ_IMPL` unset or `bash`, the current default) still starts `bash.exe`
+  through the call operator. Where that passes arguments the legacy way
+  (Windows PowerShell 5.1, PowerShell before 7.3, or
+  `$PSNativeCommandArgumentPassing = 'Legacy'`), an argument that is empty or
+  contains a double quote now exits 2 with a message pointing to
+  `ACQ_IMPL=python`, instead of reaching Bash silently changed (an empty
+  argument used to vanish, and `say "hi"` arrived as `say hi`).
+- **`ACQ_IMPL` is compared case-sensitively** in `acq.ps1` (`-cne`), as the Bash
+  `acq` compares it: `PYTHON` or `Bash` exits 2.
+- **Bash msb UNC workspace.** `host_path` maps the `/unc/server/share/...` guest
+  form back to the UNC host path `//server/share/...` instead of passing it to
+  `cygpath -m`, which put it under the MSYS root. The msb `--volume` source and
+  the recorded host workspace are the UNC path again (ADR-0029 amendment).
+
+`py-acq/tests/test_windows_launchers.py` runs the launchers on the Windows CI
+job: the argv round trip through `acq.cmd`, the exit status, the working
+directory, case-sensitive `ACQ_IMPL`, and the Bash branch's refusal.
+`test/bats/117-msys-path-forms.bats` covers the UNC mount with a simulated
+`cygpath`.
+
+**Live checks still needed (Windows x64):**
+
+1. **Attach to a real msb guest through `acq.cmd`.** The TTY, Ctrl-C and the
+   exit status were verified live through `acq.cmd` with `ACQ_IMPL=python`; an
+   `acq.cmd run shell <dir>` attach into a real msb guest has not been run yet.
+2. **Bash msb with a UNC workspace.** Under Git Bash with msb,
+   `ACQ_IMPL=bash ACQ_DEBUG=1 acq run shell '\\server\share\proj'` (or a
+   mapped drive whose realpath is UNC) must log
+   `msb volume: //server/share/proj (host) -> /unc/server/share/proj (guest)`, and
+   msb must mount it. The Python adapter's UNC mount was verified live; nothing
+   yet shows msb accepting the forward-slash `//server/share` source the Bash
+   adapter passes.
+
+**Known limitations (not fixed):**
+
+- **`acq.ps1` run from PowerShell.** In PowerShell, `acq` resolves to `acq.ps1`
+  before `acq.cmd`, and PowerShell parses the line itself, so the first bare `--`
+  never reaches acq. Quote it (`acq exec box '--' echo --json`), or run
+  `acq.cmd`. Windows PowerShell 5.1 also drops an empty argument passed to Python
+  there. Recovering the original text from `$MyInvocation` would need the
+  PowerShell parser and `Invoke-Expression`, which is too fragile to adopt
+  without a Windows host to test it. **Unblock trigger:** a Windows host or CI
+  job that can drive an interactive PowerShell session.
+- **Bash branch quoting.** The Bash branch refuses an empty argument or one
+  containing a double quote rather than forward it; use `ACQ_IMPL=python` for
+  such a command. MSYS globs unquoted arguments, so switching this branch to an
+  exact command line needs its own analysis. **Unblock trigger:** decide whether
+  the Bash branch stays supported on Windows once ADR-0048m's default flips.
+- **PowerShell 7 is untested.** The launchers were checked live only under
+  Windows PowerShell 5.1, which `acq.cmd` always uses. Running `acq.ps1` from
+  `pwsh` (7.x) has not been tried: neither how 7.x binds `--` and empty
+  arguments in `$args`, nor the Bash branch's refusal, which assumes 7.3 and later
+  pass arguments the standard way unless `$PSNativeCommandArgumentPassing` is
+  `Legacy`. **Unblock trigger:** a Windows host with PowerShell 7 to repeat the
+  launcher checks.
+
+---
+
+## 65. Deferred: Python session parity gaps (attach, shell, exec)
+
+**Status:** deferred (tracked per AGENTS.md "Track Deferred Work").
+
+The Python `attach`, `shell`, `run` and `exec` give the session a PTY when stdin
+is a terminal (`msb exec -t`, `sbx exec -it`), pass `HOME`, `TERM`/`COLORTERM`,
+the host git identity and (msb) `SHELL`, map a signal death to `128+N`, and
+leave Ctrl-C to the child (`py-acq/src/acq_py/hostexec.py` `run_foreground`).
+"Stdin is a terminal" is `hostexec.stdin_is_tty`, which on Windows also needs a
+real console, so `acq attach NAME < NUL` gets no `-t`. On msb every session also
+replays the kit environment recorded when the kits were applied (the `kit-env`
+host-config key, last value wins, as Bash's `_acq_msb_kit_env_flags_into`), and
+first writes the host's global git `user.name`/`user.email` into the guest's
+global git config (as Bash's `_acq_msb_apply_host_git_global_config`); see
+`prepare_session` in `py-acq/src/acq_py/commands/session.py`. On sbx the kits
+carry their own environment and the git identity kit sets the config. These
+values are not secrets (a kit's `environment` is non-secret configuration), so
+they go on the `msb exec` command line as `-e NAME=value`, as in Bash. Four parts
+of the Bash session differ or are not ported yet (the numbering below keeps its
+earlier order; the kit environment and guest git config items are done):
+
+1. *(Done: kit `environment[]` replay on msb.)*
+2. **ssh-agent forwarding** (ADR-0021). Python never creates the `--vsock` route
+   or the in-guest bridge, so it passes `SSH_AUTH_SOCK` only when the sandbox's
+   host record carries an `ssh_auth_sock` guest path. No Python create writes
+   one yet; for a sandbox created by Bash, the state migration copies the path
+   from Bash's host config (`ssh-auth-sock`) into the record (ADR-0041m
+   generation 2). Python still does not start the in-guest bridge that path
+   points at: Bash restarts it on attach and on resume (`acq_backend_start`)
+   because it dies when the sandbox stops, so after a stop the forwarded socket
+   in a Bash-created sandbox is dead until Bash re-attaches it. Porting
+   forwarding must add the bridge to create, attach, `acq start` and
+   `acq restart` (`_start_locked` in `py-acq/src/acq_py/commands/lifecycle.py`).
+   **Unblock trigger:** forwarding is ported.
+3. *(Done: guest git config on msb.)*
+4. **`ACQ_ACTIVATE_PROJECT_ENV`.** With it set to `1`, Bash passes
+   `ACQ_WORKSPACE` and wraps the session in its guest script
+   (`acq_guest_exec_script`, `acq_guest_shell_script` in `acq.backends/common.sh`),
+   which changes into the workspace and loads its `.envrc` through `direnv` before
+   the command runs. Python ignores the variable and starts the command directly.
+   **Unblock trigger:** the Python substrate reliably provides `direnv` in the
+   guest; then port the two scripts into the adapters' session commands.
+5. **sbx attach uses `sbx exec -it`, not `sbx run --name`.** Bash re-attaches with
+   `sbx run --name NAME`, which relaunches the agent baked into the sandbox and
+   reads its launch mode from the `generic-opencode` host record. Python has no
+   such record, and `sbx run` takes no `-e`, so it could not pass the session
+   environment above. Python therefore runs the recorded agent (or kit entrypoint)
+   with `sbx exec -it NAME -- AGENT` from host state, as it does on msb.
+   The reader for Bash's state tree has landed
+   (`legacy_bash.host_config_read("sbx", NAME, "generic-opencode")` in
+   `py-acq/src/acq_py/legacy_bash.py`), so the record is available.
+   **Unblock trigger:** the sbx kit and attach work; decide then whether a
+   Bash-created generic-OpenCode sandbox needs `sbx run` to attach.
+6. **Live check.** A TUI attach, an interactive shell and Ctrl-C have been tested
+   only against a fake backend under a PTY (`py-acq/tests/test_session_fidelity.py`);
+   the tests check the argv and environment acq builds, not what a real backend
+   does with them. Still to confirm on real hosts:
+   * msb (Linux, macOS): `acq attach` renders the opencode TUI through
+     `msb exec -t`; `acq shell` is an interactive login shell; Ctrl-C cancels
+     the agent's step without ending acq; a kit's `environment` (for example
+     `OPENCODE_CONFIG`) is visible in `acq exec NAME -- env`; and
+     `git config --global user.name` in the guest prints the host's value.
+   * sbx 0.51+: `sbx exec -it` gives the agent a PTY and stdin, and `-e` reaches
+     the session.
+   * Windows (Python is the default there, ADR-0048m): from Windows Terminal and
+     from a legacy console, `msb exec -t` gets a working PTY, and Ctrl-C reaches
+     the guest; `acq attach NAME < NUL` exits instead of waiting for keys. A
+     Windows console sets no `TERM`, so the guest gets msb's default terminal
+     type and a TUI may fall back to 16 colours. If it does, the fix is to pass
+     a `TERM` when the host console supports virtual-terminal sequences, which
+     acq does not do today because `terminal_env` never invents a value.
+   **Unblock trigger:** the next Tier-3 run on an msb host, on an sbx 0.51+
+   host for `sbx exec -it`, and on the Windows qualification cell.
+
+---
+
+## 66. Deferred: limits of the Python acq's import of Bash state
+
+**Status:** deferred (tracked per AGENTS.md "Track Deferred Work").
+
+The Python acq imports the Bash acq's state once per state tree, in the
+generation-2 step of the migration that runs before the first mutating verb
+(ADR-0041m; `py-acq/src/acq_py/legacy_bash.py`, `migration.py`). Four limits
+remain:
+
+1. **Once per tree.** State the Bash acq writes after that step (a sandbox it
+   creates while both implementations are in use, a `kit-source add` or a
+   `provider-credential set`) is not imported. (A `kit_sources` or
+   `provider_credential_bindings` list that Bash itself would refuse is the
+   exception: it stays pending, with a warning on each mutating verb, until it
+   is fixed.) Kit sources without a full commit SHA are never imported; add them
+   again with `acq kit-source add REPO --ref <full-sha>`. Running the import every time
+   would bring back records removed with the Python acq, including kit sources
+   whose trust the user withdrew. **Mitigation:** create such sandboxes with
+   the Python acq, or re-register the source or binding with it.
+   **Unblock trigger:** the Bash implementation is retired, or a ledger of
+   imported records is needed.
+2. **Read-only verbs do not import.** `acq ls` and `acq doctor` never migrate,
+   so until the first mutating verb (`run`, `create`, `exec`, ...) a Bash
+   sandbox is listed without its agent and workspace, or not at all.
+   **Unblock trigger:** a report that this confuses users; then have `doctor`
+   warn when Bash state is waiting to be imported.
+3. **Workspaces in MSYS form on Windows.** A workspace Git Bash recorded as
+   `/c/Users/...` is not an absolute native path, so it is dropped and
+   re-attach uses the path typed on the command line. **Unblock trigger:** a
+   Windows host shows Bash recording that form; then translate it.
+4. **Names acq did not generate.** A sandbox name that the Bash key sanitizer
+   changed (any character outside `A-Za-z0-9._-`) cannot be recovered from the
+   file name, so that sandbox is skipped. acq's own names are never affected.
+   **Unblock trigger:** none expected.
+
+---
+
+## 67. Deferred: the Python acq has no clone mode (`--clone`, `ACQ_CLONE`)
+
+**Status:** deferred (tracked per AGENTS.md "Track Deferred Work"). The Python
+acq fails closed until clone mode is ported.
+
+The Bash acq's `--clone`, and its env equivalent `ACQ_CLONE=1`, run `create` and
+`run` on a disposable clone of the primary workspace instead of mounting the
+real checkout (ADR-0027; native on sbx, a host-side scratch clone on msb). The
+Python acq has not ported it:
+
+- `--clone` is rejected by its parser as an unrecognized argument (exit 2).
+- `ACQ_CLONE=1` makes `create` and `run` (every form, including `run NAME`
+  and `create --recreate NAME`) refuse with a usage error (exit 2) before any
+  state, config or backend access: "clone mode (ACQ_CLONE=1) is not supported
+  by the Python implementation yet". Before this refusal, the Python acq
+  ignored the variable, so a user expecting isolation got the real workspace
+  mounted read/write.
+- Only the exact value `1` refuses, matching Bash's
+  `[ "${ACQ_CLONE:-0}" = "1" ]`. Unset, empty, `0`, `true` or any other value
+  is clone mode off in both implementations, so the Python acq proceeds. Other
+  verbs ignore the variable, as in Bash.
+- One deliberate difference: on a re-attach to an existing sandbox, Bash prints
+  a note that `ACQ_CLONE` is ignored and continues; the Python acq refuses,
+  because it cannot tell a re-attach from a create without querying the backend.
+
+**Workaround:** unset `ACQ_CLONE` to mount the workspace itself, or run the
+Bash implementation for a disposable clone (`ACQ_IMPL=bash acq run AGENT
+PATH --clone`). Tests: `py-acq/tests/test_clone_refusal.py` and the vector
+`test/vectors/cli/run-acq-clone-refused.json`.
+
+**Unblock trigger:** clone mode is ported to the Python adapters (sbx's native
+`--clone` and the msb scratch-clone emulation in `acq.backends/msb.sh`); then
+replace the refusal with the feature and port `test/bats/116-clone-option.bats`
+to vectors.
+
+---
+
+## 68. Qualification oracle: stopping a step can stop a backend daemon the step started
+
+**Status:** known limitation, tracked for a fix (per AGENTS.md "Track Deferred Work").
+
+### Symptoms and cause
+
+`scripts/qualify-backend-cell` runs each step in its own process group, and on
+Windows also in a Job object of its own (`StepJob`). When a step outlives its
+timeout, or the oracle is stopped, the group gets a polite stop (SIGTERM;
+CTRL_BREAK on Windows) and a grace period. Only if the grace period expires is
+the step force-killed (`run_process` / `stop_process` / `_signal_group`):
+`killpg(SIGKILL)` on POSIX, `TerminateJobObject` on Windows. If the oracle itself
+is killed outright on Windows, its job handles close and the jobs' kill-on-close
+limit takes the steps' processes down too.
+
+A backend daemon that a step's command auto-starts (for example an `msb`
+server) as a child, without detaching it into its own session or process group,
+is in the step's group, and on Windows in the step's job. So:
+
+- **The polite stop reaches it.** The group SIGTERM (CTRL_BREAK on Windows) goes
+  to every process in the group, the daemon included, and a daemon that honours
+  it exits.
+- **The forced kill kills it.** `killpg(SIGKILL)` and `TerminateJobObject` both
+  cover the daemon, as does the kill-on-close of a killed oracle's jobs.
+
+Later steps, and other sandboxes on the host that use the same daemon, then lose
+it. A step that ends on its own does not affect the daemon: on Windows the job's
+kill-on-close limit is lifted before its handle is closed.
+
+The forced kill no longer reaches unrelated processes on Windows. It used to be
+`taskkill /F /T`, which walks parent process ids without a creation-time check
+and, after a pid was reused, could kill a process that had nothing to do with the
+run. Job membership is fixed when a process is created, so `TerminateJobObject`
+kills the step's processes and nothing else.
+
+One exception is intended: a process that a step starts with
+`CREATE_BREAKAWAY_FROM_JOB` leaves the job (the job sets
+`JOB_OBJECT_LIMIT_BREAKAWAY_OK`, so a backend that detaches its daemon that way is
+not refused) and survives the forced kill, like a POSIX process that left the
+step's group with `setsid`. The job is a cleanup tool, not a security boundary: it
+does not contain a step that sets out to escape it.
+
+### Mitigation today
+
+Start the backend daemon before a qualification run, so no timed step starts it.
+That protects it from the polite stop and from the forced kill alike. Leave the
+grace periods (`STOP_GRACE`, `CANARY_GRACE`) at their defaults so the forced
+kill stays a last resort.
+
+### Proposed fix
+
+Before the first timed step, start the backend daemon (or check that it is
+already running) outside any step's process group and job. **Deferred:** it needs
+each backend's own command to start and probe its daemon (msb and sbx differ, and
+acq does not manage either daemon today), verified live on every platform.
+**Unblock trigger:** the next live qualification round on a host where a step is
+seen to start the daemon, or a backend release that documents a daemon
+start/status command.
+
+---
+
+## 69. Python acq on msb: `secret rm` can be blocked by a sandbox it has no record for
+
+**Status:** known limitation, waiting on a live msb check (per AGENTS.md "Track Deferred Work").
+
+### Symptoms and cause
+
+The Python msb adapter records host-side which secret bindings each sandbox it
+creates holds (`<state>/msb-secret-bindings/`), because msb gives acq no binding
+listing to rely on. `secret rm` unbinds exactly what those records show. A
+sandbox msb lists without a record is unknown: one created by the Bash `acq`, by
+`msb` directly, or before the records existed. For each unknown sandbox,
+`secret rm` tries `msb modify NAME --secret-rm ENV`. If that fails, acq cannot
+tell "msb refused because the variable was never bound" from a real failure, so
+it keeps the secret in the acq store and exits 1 with `unbind_failed`, naming
+the sandbox. Until the msb behaviour is known, any unknown sandbox that never
+had the binding can block the removal if msb rejects removing an unbound
+variable (the test stub models it that way). Stopped sandboxes are swept too,
+and `msb modify` on a stopped sandbox is also unverified.
+
+### Mitigation today
+
+Remove the named sandbox (`acq rm NAME`, or `msb remove NAME` for one acq did
+not create), then retry `acq secret rm`. If you know a named sandbox never had
+the secret (or accept that it may keep it), retry with
+`acq secret rm ... --accept-unconfirmed NAME[,NAME]`: only the named unrecorded
+sandboxes are accepted, the JSON data lists them under `unconfirmed`, and a
+stderr note repeats that they may still hold the binding. Sandboxes the Python
+acq creates always have a record and never block it.
+
+On a global removal, an unrecorded sandbox that also has its own stored value is
+not assumed safe: the Bash `acq`'s global set overwrites a sandbox's own binding,
+so acq removes the binding and re-adds the sandbox's own value in a separate
+call, and reports the sandbox as unconfirmed if either call fails.
+
+### Unblock trigger
+
+A live msb run that shows what `msb modify NAME --secret-rm ENV` does for a
+variable that is not bound, on a running and on a stopped sandbox. If msb
+succeeds, or fails in a way acq can tell apart, treat that as "confirmed
+unbound", stop blocking, and retire `--accept-unconfirmed`. The Bash-state import (ADR-0041m generation 2)
+does not help here: Bash records which sandboxes exist, not which secrets each
+one was bound with, so an imported sandbox still has no binding record.
+
+---
+
+## 70. Read-only host-config probe misclassifies a denied write
+
+### Symptoms and cause
+
+Readonly kit staging reports that the host-config mount looks writable even
+though host `msb inspect` records a read-only bind and direct writes fail with
+`Read-only file system`. A POSIX shell can exit with status 2 when redirection
+on the special builtin `:` fails. The original probe used that same status to
+signal a successful write, confusing denial with writability.
+
+`acq.backends/msb.sh::_acq_msb_host_config_mount_probe` now isolates the write
+attempt in a subshell. Only an actual successful write selects status 2;
+denial returns 0, while missing/inaccessible mounts and transport errors remain
+refusals. Host mount-record, version and platform checks still apply. The
+real-shell regression is in `test/bats/84-msb-ro-mount-qualification.bats`.
+
+Measured with MSB 0.7.11 on macOS ARM64: the root guest write to a readonly
+canary was denied, a writable control succeeded, and the host sentinel remained
+unchanged. With the fixed probe, the existing OCI kit installed Podman and
+passed its rootless startup self-test. This does not qualify all inner-container
+isolation controls or prove general read-only enforcement across platforms.
+
+---
+
+## 71. Rootless nested Podman lacks cgroup delegation
+
+The OCI kit may install successfully and pass its storage self-test while an
+inner container with explicit memory/CPU/PID limits still cannot start. In the
+measured MSB 0.7.11 guest, Podman 5.7.0 reported cgroup v2, cgroupfs and an empty
+delegated controller list. The bounded network-off test was refused:
+
+```text
+unable to apply cgroup configuration: rootless needs no limits + no cgrouppath
+when no permission is granted for cgroups
+```
+
+Do not remove mandatory limits to label this a successful isolated runner.
+The outer sandbox owner must provide a reviewed cgroup-delegation path, or use
+another qualified backend, before rootless inner containers can satisfy that
+resource contract. Reopen qualification when delegation is available; verify
+effective memory, CPU and PID enforcement alongside network/source/credential
+separation and cleanup. Kit installation and rootless storage readiness alone
+are insufficient evidence. No host engine socket or privileged-host workaround
+is required or authorized by this guidance.
+
+---
+
+## 72. Provider-input validator dependencies are missing
+
+### Symptoms
+
+- `acq create` stops before backend creation.
+- The error requires exact `PyYAML` and `jsonschema` versions.
+
+### Fix: release install (Homebrew, npm, or the upstream release installer)
+
+`--apply` alone uses the offline wheelhouse bundled with the release:
+
+```bash
+scripts/setup-provider-input-validator --apply
+```
+
+The runtime is stored under `$XDG_DATA_HOME/acq/provider-input-validator` (or
+`~/.local/share/acq/provider-input-validator`) and does not modify global Python
+packages. The default invocation is a dry run; `--apply` builds a fresh,
+hash-verified environment and only replaces a working runtime after validation
+succeeds. Re-run the command after changing Quickstart versions if the pinned
+requirements change.
+
+### Fix: git checkout / development install (no wheelhouse)
+
+A working-tree clone (the upstream release installer's clone method, or running
+`./acq` directly from a `git checkout`) has no release wheelhouse. Use the `--online` flag, which
+downloads the same hash-locked packages from PyPI instead:
+
+```bash
+scripts/setup-provider-input-validator --apply --online
+```
+
+Network access is restricted to this explicit setup call; `acq create` itself
+remains fully offline after the runtime is installed.
+
+If the error message already names this command, that means `acq` detected a git
+checkout with no wheelhouse and surfaced the hint automatically.
+
+### Alternative: `ACQ_PROVIDER_INPUT_PYTHON`
+
+If you already have a Python interpreter with the exact required versions
+(`PyYAML 6.0.3` and `jsonschema 4.26.0`), point `acq` at it directly:
+
+```bash
+export ACQ_PROVIDER_INPUT_PYTHON=/path/to/python3
+acq create opencode .
+```
+
+`acq` validates the dependency versions at startup and exits with a clear error
+if they do not match. This is useful when a system-managed environment already
+carries the right packages, or when the setup script cannot run (restricted
+network, air-gapped lab). It is not a substitute for the pinned runtime in
+production; the venv created by `setup-provider-input-validator` is preferred
+because it is isolated from system upgrades.
+
+The lock supports Linux x86_64/aarch64 with Python 3.12, macOS x86_64/arm64 with
+Python 3.12-3.14, and Windows x86_64/arm64 with
+Python 3.12. An unsupported OS, architecture, or Python version fails before
+installation; use one of the supported runtimes rather than bypassing hashes.
+
+---
+
+## 73. Default OpenCode Generic Base Requires Recreation
 
 **Symptom:** An existing OpenCode sandbox still starts through an older
 OpenCode-specific template or does not receive the pinned kit behavior.
@@ -4386,7 +4384,7 @@ installation.
 
 ---
 
-## Python acq on msb: Egress Policy Requires Recreation
+## 74. Python acq on msb: Egress Policy Requires Recreation
 
 **Symptom:** An msb sandbox created by the Python acq (`acq-python`, or `acq`
 with `ACQ_IMPL=python`) can still reach any host, even though acq now applies a
@@ -4422,7 +4420,7 @@ recreating, `msb inspect <sandbox>` shows `default_egress: deny` (unless
 
 ---
 
-## Python acq: a Global `secret rm` Can Still Race a `create`
+## 75. Python acq: a Global `secret rm` Can Still Race a `create`
 
 **Symptom:** While `acq create` (or `acq run`) of a new msb sandbox is binding
 its secrets, a concurrent `acq secret rm -g SERVICE` succeeds, but the new
@@ -4446,7 +4444,7 @@ work lands.
 
 ---
 
-## Python acq: No Recorded Provider Selection Means the Current One
+## 76. Python acq: No Recorded Provider Selection Means the Current One
 
 **Symptom:** A sandbox whose provenance record carries no provider selection (a
 Python-created sandbox from before the selection was recorded, or a Bash
@@ -4471,7 +4469,7 @@ review of provider selection.
 
 ---
 
-## Python acq: A Workspace That Holds acq's Own Directories Is Refused
+## 77. Python acq: A Workspace That Holds acq's Own Directories Is Refused
 
 **Symptom:** `acq create` or `acq run` fails with `validation_failed` and a
 message such as `workspace /home/you contains acq's state directory
@@ -4498,7 +4496,7 @@ the old location.
 
 ---
 
-## Python acq: `run` Re-Attach Heal Differs From Bash in Two Places
+## 78. Python acq: `run` Re-Attach Heal Differs From Bash in Two Places
 
 **Symptom:** (1) `acq run NAME` on a stopped msb sandbox prints `sandbox 'NAME'
 is not running, so its kits were not re-applied`, where the Bash acq starts the
@@ -4522,7 +4520,7 @@ login-shell sync into the agent-user setup.
 
 ---
 
-## Sandbox Lock Directory Without an Owner Is Never Removed Automatically
+## 79. Sandbox Lock Directory Without an Owner Is Never Removed Automatically
 
 **Symptom:** Every acq command on one sandbox (`create`, `run`, `rm`, `start`)
 waits and then fails with `timeout`. The remediation names a directory ending in
@@ -4543,7 +4541,7 @@ and retry.
 
 ---
 
-## Windows: Bash and Python acq Choose Different Secret Backends in Two Cases
+## 80. Windows: Bash and Python acq Choose Different Secret Backends in Two Cases
 
 **Symptom:** On Windows (Git Bash), a secret stored by one implementation reads
 as "not set" in the other. `acq secret ls` from the Bash acq lists the key, but
@@ -4573,7 +4571,7 @@ should ever fall back to plaintext) needs a decision that amends ADR-0028.
 
 ---
 
-## Workspace Refused Because It Contains acq's Own Directories
+## 81. Workspace Refused Because It Contains acq's Own Directories
 
 **Symptom:** `acq create` or `acq run` stops before creating anything with:
 
@@ -4621,3 +4619,16 @@ acq run opencode /path/to/your/project
 ```
 
 The Python acq does not have this check yet.
+
+---
+
+## Contributing
+
+When you discover a new failure mode:
+
+1. Document the symptoms clearly
+2. Identify the root cause
+3. Provide a minimal fix
+4. Add it to this document as the next numbered section, just before this one,
+   so links to it stay stable
+5. Consider if it indicates a gap in AGENTS.md rules

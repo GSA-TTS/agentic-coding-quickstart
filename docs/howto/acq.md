@@ -105,7 +105,7 @@ kits, validates your USAi key, and attaches the agent.
 > Re-attaching to an existing sandbox skips this check, so if you created one on
 > `~` with an older acq, recreate it on a project directory (`acq rm NAME`, then
 > `acq run opencode /path/to/your/project`). See
-> [Known Failure Modes](../KNOWN_FAILURE_MODES.md#workspace-refused-because-it-contains-acqs-own-directories).
+> [Known Failure Modes](../KNOWN_FAILURE_MODES.md#81-workspace-refused-because-it-contains-acqs-own-directories).
 
 > [!NOTE]
 > The **first** run boots a microVM, applies kits, and prepares the agent — a
