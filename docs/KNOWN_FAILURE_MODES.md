@@ -4787,9 +4787,14 @@ timing of its create path; the msb case runs the same cleanup.
 
 **Resolution:** Nothing to do as a user. The spinner no longer waits for its
 animator with the `wait` builtin (`_acq_spin_end_animator`): it polls with
-`kill -0`, which cannot hang that way, and gives up after about two seconds.
-The animator ends on TERM with `exit 0`, so no "Terminated" job notice is
-printed for it. With the change, the same load reproduced no hang in 120 runs
+`kill -0`, which cannot hang that way. The animator ends on TERM with `exit 0`,
+so no "Terminated" job notice is printed for it. A later change closed the gap
+the first version of this poll left: it gave up after about two seconds, and an
+animator not scheduled for that long could still draw one frame over an
+attached session. The animator now draws only while holding a draw lock (an
+`mkdir` directory) and only when no stop marker exists; the stop sets the
+marker and returns once it holds that lock or the animator is gone, waiting at
+most about two seconds more for the animator to exit. With the change, the same load reproduced no hang in 120 runs
 under Bash 5.2.21. The provisioning subshell's EXIT trap still stops the
 provider-input guardian with `kill` and `wait`; no hang was seen there in those
 runs. Tracked: if a Bash 5.2 hang ever shows in `_acq_provider_input_guardian_stop`,
