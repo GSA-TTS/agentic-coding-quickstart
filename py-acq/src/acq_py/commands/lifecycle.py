@@ -37,7 +37,7 @@ from .. import (
     security,
     state,
 )
-from . import common, creds, session
+from . import common, configure, creds, session
 from . import kit as kit_cmd
 
 # Module-local seam for the host OS class (as ``msb.WINDOWS``).
@@ -1034,6 +1034,9 @@ def _run_create(parsed, emit_json: bool, backend: str) -> int:
     workspace = common._mount_workspace(backend, workspace)
     stored_token = False
     if not _exists_quietly(backend, name):  # an existing sandbox is refused below; no prompt for it
+        opts, exit_code = _onboarding(backend, opts, emit_json)
+        if opts is None:
+            return exit_code if exit_code is not None else errors.EXIT_FAILURE
         exit_code = _preflight_new(backend, parsed.agent, cli_kits, parsed.image, "create", emit_json)
         if exit_code is not None:
             return exit_code
@@ -1045,6 +1048,20 @@ def _run_create(parsed, emit_json: bool, backend: str) -> int:
         # A stored token is kept: the command holding the lock may be a create
         # of this same sandbox that binds it, and a retry reuses it.
         return _lock_failure("create", name, exc, emit_json)
+
+
+def _onboarding(backend: str, opts: _CreateOpts, emit_json: bool) -> tuple[_CreateOpts | None, int | None]:
+    """The prompts before a new sandbox is planned (ADR-0031), in Bash's order.
+
+    The first-run offer of ``acq configure`` (Bash ``maybe_first_run_configure``).
+    Each prompts only where :func:`configure.interactive` allows. Returns the
+    options to create with, or ``(None, exit_code)`` once a prompt ended the
+    command (already reported).
+    """
+    exit_code = configure.first_run_offer(backend, emit_json)
+    if exit_code is not None:
+        return None, exit_code
+    return opts, None
 
 
 def _preflight_new(backend: str, agent: str, cli_kits: list[str], image_flag: str | None, command: str,
@@ -1465,6 +1482,9 @@ def _run_run(parsed, emit_json: bool, backend: str) -> int:
         name = parsed.name or common._derive_name(target, workspace)
         workspace = common._mount_workspace(backend, workspace)
         if not _exists_quietly(backend, name):
+            opts, exit_code = _onboarding(backend, opts, emit_json)
+            if opts is None:
+                return exit_code if exit_code is not None else errors.EXIT_FAILURE
             exit_code = _preflight_new(backend, target, cli_kits, parsed.image, "run", emit_json)
             if exit_code is not None:
                 return exit_code

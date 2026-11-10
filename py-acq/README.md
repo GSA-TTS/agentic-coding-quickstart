@@ -414,8 +414,18 @@ Deliberate differences from Bash:
   it), a malformed `ACQ_PROVIDER_CREDENTIAL_BINDINGS` is `validation_failed`, and
   an unknown `--backend` is a usage error. Ctrl-C exits 130; SIGTERM and SIGHUP
   restore the terminal and exit 128 plus the signal number.
-* **Not ported.** The first-run offer and the create-time kit picker (accepted
-  gaps in ADR-0048m).
+* **Not ported.** The create-time kit picker (an accepted gap in ADR-0048m).
+
+**First-run offer** (Bash `maybe_first_run_configure`). Before a new sandbox is
+created (`create`, or `run` creating one) and while there is no `config.yaml`,
+acq says it looks like a first run and asks "Configure extra kits and token
+scoping now? [Y/n]". Yes (or Enter) runs the `configure` flow above and the
+create goes on; no writes `backend: <the resolved backend>`, so the offer is
+not repeated. It is asked only where configure's prompts are: stdin a terminal
+(a real console on Windows), `ACQ_NO_PROMPT` and `ACQ_NO_PROGRESS` unset, and
+never under `--json`. Unlike Bash, `create` of a sandbox that already exists
+does not ask (it is refused anyway), and an interrupted configure (Ctrl-C, or
+SIGTERM in key mode) stops the create.
 
 ## State migration (ADR-0041m)
 

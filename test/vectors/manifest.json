@@ -605,6 +605,10 @@
     {
       "contract": "ADR-0016 stale-sandbox check on a run re-attach (Bash maybe_offer_bundle_refresh): a stale or unknown bundle is noted, never prompted for without a terminal or under --json; --no-update-check skips it (the terminal prompt and refresh are Tier-2: py-acq/tests/test_update_check.py)",
       "vectors": ["cli/run-stale-bundle-advisory", "cli/run-no-update-check"]
+    },
+    {
+      "contract": "ADR-0031 first-run offer of acq configure on a first create (Bash maybe_first_run_configure): never asked without a terminal, so nothing is written (the prompt itself is Tier-2: py-acq/tests/test_onboarding.py)",
+      "vectors": ["cli/create-no-first-run-offer-without-terminal"]
     }
   ]
 }

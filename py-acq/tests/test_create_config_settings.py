@@ -78,6 +78,8 @@ def _terminal(monkeypatch, *, answer: str, token: str | None = None) -> list[str
     shown: list[str] = []
     monkeypatch.setattr(common, "_stdin_is_terminal", lambda: True)
     monkeypatch.setattr(configure.Terminal, "read_line", lambda self: answer)
+    if not config.config_path().is_file():
+        _write_config("schema: 1\n")  # not a first run: no configure offer before the scope prompt
 
     def read_secret(prompt):
         shown.append(prompt)

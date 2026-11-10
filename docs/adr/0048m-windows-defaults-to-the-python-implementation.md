@@ -109,7 +109,9 @@ The default flips only when every gate below holds. Until then this ADR stays
    `acq configure` is implemented, with two accepted gaps:
    - **The first-run offer.** Bash offers to run `acq configure` the first time
      `acq create`/`run` finds no `config.yaml`. Python does not prompt; the
-     replacement is running `acq configure` once by hand.
+     replacement is running `acq configure` once by hand. *Update
+     (2026-11-10): no longer a gap; Python makes the offer, under the same
+     conditions (`py-acq/README.md`, "configure").*
    - **The create-time kit picker.** Bash lets a single `acq create`/`run` change
      the opt-in kits for that sandbox. Python has no picker. It does not apply
      extra kits at all yet (see "Python reads the configure keys" under Links), so

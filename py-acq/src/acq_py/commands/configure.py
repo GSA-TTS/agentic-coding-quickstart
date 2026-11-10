@@ -38,9 +38,12 @@ provider-credential setting also lists each binding with its own layer (its
 credentials: bindings are an env var name and its hosts, userinfo in a kit ref is
 redacted, and no secret store or keychain is consulted.
 
-The first-run offer and the create-time kit picker that Bash also builds on these
-widgets are not ported (accepted gaps, ADR-0048m; the deliberate differences are
-listed in py-acq/README.md under "configure").
+:func:`first_run_offer` (Bash ``maybe_first_run_configure``) offers this flow
+once from ``create`` and ``run``, when there is no ``config.yaml`` yet. It runs
+only where :func:`interactive` says prompts may (never under ``--json``, without
+a terminal, or with ``ACQ_NO_PROMPT``/``ACQ_NO_PROGRESS``). The create-time kit
+picker is not ported (an accepted gap, ADR-0048m).
+The deliberate differences are listed in py-acq/README.md under "configure".
 """
 
 from __future__ import annotations
@@ -331,6 +334,37 @@ def _configure_interactively(term: Terminal, before_write: Callable[[], int | No
     _err(f"      extra kits:         {selected or '<none>'}")
     _err(f"      provider kit:       {_redacted(provider_sel or current_provider)}")
     return errors.EXIT_SUCCESS
+
+
+FIRST_RUN_PROMPT = "Configure extra kits and token scoping now?"
+
+
+def first_run_offer(backend: str, emit_json: bool) -> int | None:
+    """Bash ``maybe_first_run_configure``: offer ``acq configure`` once, before a first create.
+
+    Only when there is no ``config.yaml`` yet and prompts may run. A yes runs the
+    configure flow; a no writes the resolved backend, so the offer is never
+    repeated. Returns ``None`` to go on with the create, or an exit code (a
+    configure that failed or was interrupted, already reported) to stop it.
+    """
+    if config.config_path().is_file() or not interactive(emit_json):
+        return None
+    _err("acq: looks like this is your first run — let's set up your kits.")
+    _err("      (You can re-run this anytime with 'acq configure'.)")
+    _err("")
+    try:
+        accepted = confirm(Terminal(), FIRST_RUN_PROMPT, True)
+    except Signalled as exc:
+        return 128 + exc.signum
+    if accepted:
+        rc = run_configure(False, None, lambda: None)
+        return None if rc == errors.EXIT_SUCCESS else rc
+    try:
+        config.write_field("backend", backend)
+    except OSError as exc:  # Bash ignores the write; the offer then simply comes back
+        _err(f"acq: warning: could not write {config.config_path()}: {exc.strerror or exc}")
+    _err("acq: skipped. Run 'acq configure' anytime to change kits/token scoping.")
+    return None
 
 
 def provider_kit_candidates() -> list[tuple[str, str]]:
