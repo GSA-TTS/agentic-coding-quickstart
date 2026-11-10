@@ -464,6 +464,32 @@ def test_a_stale_lock_retaken_before_its_removal_is_kept(monkeypatch, tmp_path):
 
 
 @_POSIX_ONLY
+def test_a_racing_takers_owner_file_is_never_overwritten(monkeypatch, tmp_path):
+    # A Bash taker's mkdir is not exclusive with every coreutils, so it may
+    # share the directory with this one. The exclusive create of the owner file
+    # decides: this take backs off and leaves the winner's owner line alone.
+    _env(monkeypatch, tmp_path)
+    bash_lock = _bash_lock()
+    bash_lock.mkdir(parents=True)
+    identity = lock._process_identity(os.getpid())
+    assert identity
+    winner = f"{os.getpid()} {identity}\n"
+    (bash_lock / "owner").write_text(winner, encoding="utf-8")
+    real = os.mkdir
+
+    def racy_mkdir(path, *args, **kwargs):
+        with contextlib.suppress(FileExistsError):
+            real(path, *args, **kwargs)
+
+    holder = lock._BashLock("msb", "box")
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(os, "mkdir", racy_mkdir)
+        assert holder.acquire() is False
+    assert holder.blocked and holder.token is None
+    assert (bash_lock / "owner").read_text(encoding="utf-8") == winner
+
+
+@_POSIX_ONLY
 @pytest.mark.parametrize("planted", ["provider-input", "provider-input/msb"])
 def test_a_link_in_the_lock_parent_is_never_followed(monkeypatch, tmp_path, capsys, planted):
     _env(monkeypatch, tmp_path)

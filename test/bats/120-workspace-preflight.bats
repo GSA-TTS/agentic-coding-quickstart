@@ -409,6 +409,22 @@ _ws_safe() { # ARGS...
   assert_success
 }
 
+@test "workspace specs: a workspace containing or inside the msb scratch clones dir is refused" {
+  # The clones dir holds other sandboxes' scratch clones and the record of the
+  # checkout acq runs git in at rm; it may be moved out of the state dir.
+  mkdir -p "$STUBDIR/outer/clones/box/repo"
+  run bash -c '
+    export ACQ_MSB_CLONES_DIR="$1/outer/clones"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    acq_workspace_specs_safe opencode "$1/outer" 2>&1 && echo accepted-parent
+    acq_workspace_specs_safe opencode "$1/outer/clones/box/repo" 2>&1 && echo accepted-inside
+    true
+  ' _ "$STUBDIR"
+  refute_output --partial accepted
+  assert_output --partial "contains acq's own directory $STUBDIR/outer/clones"
+  assert_output --partial "is inside acq's own directory $STUBDIR/outer/clones"
+}
+
 @test "create(msb): a workspace containing acq's state dir fails before any backend create" {
   run env ACQ_BACKEND=msb ACQ_NO_PROMPT=1 "$ACQ" create opencode --no-provider-kits "$STUBDIR"
   # Exit 1 and the remediation wording match the Python acq's validation_failed.
