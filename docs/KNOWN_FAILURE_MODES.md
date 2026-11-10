@@ -4828,31 +4828,53 @@ replace its `wait` with the same bounded poll.
 
 ## 85. Windows: A Forced Kill of the Python acq Leaves the Session Child Running
 
+**Status:** Fixed. Earlier builds behave as described below.
+
 **Symptom:** On Windows, ending the Python acq from outside during `acq attach`,
 `acq shell`, `acq exec` or `acq run` (Task Manager's End task, `taskkill /F
-/PID <acq pid>`, or `Stop-Process`) ends acq at once, while the backend session
-(`msb.exe exec` or `sbx.exe exec`) keeps running in the console and holding it.
+/PID <acq pid>`, or `Stop-Process`) ended acq at once, while the backend session
+(`msb.exe exec` or `sbx.exe exec`) kept running in the console and holding it.
 
 **Cause:** On POSIX a SIGTERM or SIGHUP to acq during a session is passed on to
 the session child, which gets ten seconds to exit before acq kills it, and acq
 exits `128+N` only once the child is gone (`run_foreground` in
 `py-acq/src/acq_py/hostexec.py`). Windows has no catchable termination signal
 from another process: those tools call `TerminateProcess`, which no handler
-sees, so acq cannot pass anything on. What Windows does deliver, a Ctrl-Break
-in the console, reaches acq and the child alike; acq waits up to the same ten
-seconds for the child, ends it if needed, and exits 149 (128 plus SIGBREAK's
-number) without a `--json` envelope, as it does for a Ctrl-Break during any
-other command.
+sees, so acq could not pass anything on.
 
-**Resolution:** End the whole process tree instead: `taskkill /T /F /PID <acq
-pid>`, or press Ctrl-C or Ctrl-Break in the session's console. A session child
-already left behind can be ended the same way by its own PID.
+**Resolution:** Nothing to do as a user. The session child now runs in a Job
+object that kills its processes when the last handle to it closes
+(`_start_session` in `hostexec.py`, reusing the `StepJob` that bounded backend
+calls already use). acq holds the only handle, and a forced kill closes it, so
+the session and everything it started end with acq. The child is created
+suspended and resumed only once it is in the job. The job does not change the
+console, so the PTY, Ctrl-C and Ctrl-Break behave as before: a Ctrl-Break
+reaches acq and the child alike, acq waits up to ten seconds for the child,
+ends it if needed, and exits 149 (128 plus SIGBREAK's number) without a
+`--json` envelope. When the session exits normally, or after a Ctrl-Break, the
+job is released first, so a process the session left running on purpose keeps
+running. Where the job cannot be created or the child cannot be assigned to it,
+the session is started without one, as before.
 
-**Tracked:** run the session in a Job object that kills its processes when acq's
-handle closes (as `run_captured` already does for bounded backend calls), so a
-forced kill of acq takes the session with it. Unblock trigger: a report of a
-session left running after a forced kill, or the Windows default flip
-(ADR-0048m).
+Checked on Windows 11 with msb 0.7.7 and a real guest: `taskkill /F` of the
+acq interpreter (or of the venv launcher above it) during `acq exec` ended
+`msb.exe exec` within three seconds, where the previous build left it running;
+`acq shell` kept its PTY, Ctrl-C reached the guest (`sleep` exited 130 and the
+shell carried on), and a console Ctrl-Break ended acq with 149 and left no
+`msb.exe exec` behind. `msb.exe exec` starts no helper process of its own, and
+it does not start a stopped sandbox (the guest's `msb.exe machine` process is
+started by `create` or `start`, outside the session), so a forced kill no
+longer leaves anything running there.
+
+**Trade-off:** a process the session starts and that is still running when acq
+is force-killed now ends with acq, unless it was started with
+`CREATE_BREAKAWAY_FROM_JOB` (the job allows breakaway). For msb nothing does
+this. For sbx it was not checked, because sbx was not installed on the test
+host: if `sbx.exe exec`, or a command acq passes through to sbx, starts sbx's
+background service on demand as its own child, a forced kill of acq during
+that session also ends the service, and the next sbx command has to start it
+again. An ordinary exit, Ctrl-C or Ctrl-Break does not. Tracked: check this
+with a real `sbx.exe` on Windows at the next re-verification.
 
 ---
 
