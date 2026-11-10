@@ -68,11 +68,15 @@ def _backend_identity(backend_override: str | None) -> tuple[str | None, str | N
     when it is installed but its version cannot be parsed, and ``None`` when no
     backend resolves or the resolved one is not installed. Reporting never
     applies the version floor: ``version`` describes the host, it does not gate.
+
+    Auto-detect already probes every backend, so the chosen one's version comes
+    from that probe rather than a second run of its version command.
     """
-    name = common._resolve_active_backend(backend_override)
-    if name is None:
-        return None, None
-    return name, backends.detect(backends.BACKENDS[name]).version
+    with backends.detection_cache():
+        name = common._resolve_active_backend(backend_override)
+        if name is None:
+            return None, None
+        return name, backends.detect(backends.BACKENDS[name]).version
 
 
 def version_data(backend_override: str | None = None) -> dict:

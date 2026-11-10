@@ -682,8 +682,8 @@ def test_interrupted_barrier_wait_leaves_nothing_attachable(monkeypatch, tmp_pat
         raise KeyboardInterrupt
 
     monkeypatch.setattr(kit_sbx, "wait_startup_barrier", interrupted)
-    with pytest.raises(KeyboardInterrupt):
-        cli.main(["--backend", "sbx", "create", "shell", str(ws), "--name", "intr", "--json"])
+    # Ctrl-C ends the command with 130 once its cleanup has run (cli.main).
+    assert cli.main(["--backend", "sbx", "create", "shell", str(ws), "--name", "intr", "--json"]) == 130
     capsys.readouterr()
     monkeypatch.delenv("ACQ_SBX_STUB_FAIL", raising=False)
     record = state.record_read("sbx", "intr")

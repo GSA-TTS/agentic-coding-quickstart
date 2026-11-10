@@ -149,11 +149,22 @@ export -f acq_test_stub_provider_input_boundary
 # to a per-process mktemp only when run outside bats. The dir holds a stub spec
 # with no secrets. Publish each complete spec atomically: parallel workers can
 # read these paths while another worker sources this helper.
+# _acq_test_tmp_base — where scratch directories go: TMPDIR only when it is
+# absolute, else /tmp, as acq_tmp_dir in acq.backends/userdirs.sh does. A
+# relative TMPDIR would put them under the current directory, and every stub
+# path on PATH would stop resolving after a cd.
+_acq_test_tmp_base() {
+  case "${TMPDIR:-}" in
+    /*) printf '%s\n' "$TMPDIR" ;;
+    *) printf '/tmp\n' ;;
+  esac
+}
+
 if [ -n "${BATS_RUN_TMPDIR:-}" ]; then
   _ACQ_MSB_OFFLINE_KIT_DIR="${BATS_RUN_TMPDIR}/acq-offline-kit"
   mkdir -p "$_ACQ_MSB_OFFLINE_KIT_DIR"
 else
-  _ACQ_MSB_OFFLINE_KIT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/acq-nokit.XXXXXX")
+  _ACQ_MSB_OFFLINE_KIT_DIR=$(mktemp -d "$(_acq_test_tmp_base)/acq-nokit.XXXXXX")
 fi
 printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "$_ACQ_MSB_OFFLINE_KIT_DIR/spec.yaml.$$" \
   && mv -f "$_ACQ_MSB_OFFLINE_KIT_DIR/spec.yaml.$$" "$_ACQ_MSB_OFFLINE_KIT_DIR/spec.yaml" || return 1
@@ -176,7 +187,7 @@ export ACQ_TEST_AGENT_KIT="$_ACQ_AGENT_OFFLINE_KIT_DIR"
 # corrupted line under that concurrency (a source of the concurrency flake this avoids).
 
 make_stubs() {
-  STUBDIR=$(mktemp -d "${TMPDIR:-/tmp}/acq-test.XXXXXX")
+  STUBDIR=$(mktemp -d "$(_acq_test_tmp_base)/acq-test.XXXXXX")
   CALLS="$STUBDIR/calls.log"
   : >"$CALLS"
   # Preserve the base PATH (with coreutils etc.) but prepend the stub dir.
@@ -860,6 +871,16 @@ BASH_ENV
   # Isolate the host-side kit-bundle provenance store to this
   # test's temp dir so provenance reads/writes never touch the real XDG state.
   export ACQ_PROVENANCE_DIR="$STUBDIR/provenance"
+  # The XDG cache and the two kit caches go under the stub home too (the bats
+  # helper points HOME at "$STUBDIR/home"). A developer who exports
+  # XDG_CACHE_HOME or a kit-cache path would otherwise have the suite write
+  # generated kits (for example sbx startup-barrier specs) into their real
+  # ~/.cache. Each value is what acq derives from that HOME with nothing set,
+  # so tests of the default paths still see the defaults; a test of the
+  # fallback itself unsets the variable it exercises.
+  export XDG_CACHE_HOME="$STUBDIR/home/.cache"
+  export ACQ_SBX_KIT_CACHE="$XDG_CACHE_HOME/acq/sbx-kits"
+  export ACQ_MSB_KIT_CACHE="$XDG_CACHE_HOME/acq/kits"
   # Neutralize the developer's real kit customizations: an inherited
   # ACQ_EXTRA_KITS changes _build_kit_list's output (and, pre-#381, triggered
   # the split_noglob errexit loss), making local test runs diverge from CI.

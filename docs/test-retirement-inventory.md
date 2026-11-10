@@ -56,10 +56,15 @@ retire**, **language-specific → re-express**.
 ## Method
 
 Counts are measured from the checkout at `main` `c76b96c`: `@test` blocks in
-`test/bats/*.bats` (64 files, **1053** tests). The vector cross-references
-below are validated against `test/vectors/manifest.json` (the coverage
-manifest). A "gap" is a valuable behavior with **no existing vector**; each
-gap is a named follow-up in the final section.
+`test/bats/*.bats` (64 files, **1053** tests). The counts are that snapshot
+and are not kept current; files have gained tests since. Every vector id cited
+below exists in the corpus: `py-acq/tests/test_coverage.py` fails on an exact
+id with no vector file and on a glob (`cli/secret-ls-*`) that matches none. A
+"gap" is a valuable behavior with **no existing vector**; each gap is a named
+follow-up in the final section.
+
+Tests deleted before that snapshot (the installer rewrite, `95b82b1`) were
+classified afterwards; see "Installer tests removed before the snapshot" below.
 
 ---
 
@@ -116,7 +121,7 @@ numeric-prefix order.
 | `55-version.bats` | 1 | preserve | §2 version identity. Covered by `cli/version-json`, `cli/version-human`. |
 | `60-help.bats` | 18 | preserve | §1 command surface + usage exit 2. Help flags and bare-`acq` exit 2 are covered by `cli/usage-error`/`cli/usage-error-human`; `secret import`/`secret set-custom` are documented verbs. **Mixed → retire:** "backend help is appended for shared verbs / bare `secret`" asserts the **DROP** row "backend help for bare `secret`" (ADR-0038m §6). |
 | `65-doctor-image-contract.bats` | 9 | preserve | §doctor diagnostic command + ADR-0030 image-contract diagnostics. Covered by `cli/doctor-json`, `cli/doctor-human`, `cli/doctor-unsupported`. **Mixed → retire:** the `doctor script:` blocks source `common.sh` and assert `acq_image_contract_doctor_script` internals (implementation detail). |
-| `20-backend-resolution.bats` | 10 | re-express | §active_backend resolution (flag > env > config > auto-detect) is contract. Auto-detect default is covered by `cli/backend-list-none/unknown/default-msb`; the **flag>env>config precedence and PATH self-repair** are Bash-internal and are a **gap**. |
+| `20-backend-resolution.bats` | 10 | re-express | §active_backend resolution (flag > env > config > auto-detect) is contract. Auto-detect default is covered by `cli/backend-list-none`, `cli/backend-list-unknown` and `cli/backend-list-default-msb`; the **flag>env>config precedence and PATH self-repair** are Bash-internal and are a **gap**. |
 | `30-dispatch-routing.bats` | 45 | preserve | §1 command surface + passthrough (spec ordinary-user story 9). Routing maps to `cli/lifecycle-*`, `cli/exec-*`, `cli/shell-*`, `cli/passthrough*`, `cli/github-scope-*`. **Mixed → retire:** `_classify_key_status` token classification and `project-env` direnv detection are in-process internals. |
 | `35-image-override.bats` | 24 | re-express | §4 image-override precedence (ADR-0030, ADR-0022: `--image` → `ACQ_IMAGE` → `ACQ_MSB_IMAGE` → agent default) is contract but no vector pins it — **gap**. `_acq_image_registry_host`/`acq_registry_auth_hint` are Bash internals → retire. |
 | `36-agent-catalog.bats` | 9 | re-express | Known-agent set + template naming is contract (the `create AGENT` surface validates against it, `cli/lifecycle-create-unknown-agent`). No vector pins the catalog/template mapping — **gap**. |
@@ -125,7 +130,7 @@ numeric-prefix order.
 
 | File | Tests | Bucket | Disposition |
 |---|---|---|---|
-| `40-secret-set.bats` | 33 | preserve | §secret set/has + §48. Covered by `cli/secret-set-*`, `cli/secret-has-*`, `cli/secret-rm-*`, `cli/secret-sbx-unsupported`. **Mixed → retire:** `mask` (interactive masked input) is rendering, dropped by §50 "exact … prompt layout … not contracts"; **DROP** "scope-less secret set" (§6) is covered by `cli/secret-set-usage`. |
+| `40-secret-set.bats` | 33 | preserve | §secret set/has + §48. Covered by `cli/secret-set-*`, `cli/secret-has-*`, `cli/secret-rm-*`, and on sbx by `cli/secret-has-sbx-*`, `cli/secret-set-usai-sbx-custom`, `cli/secret-rm-sbx-custom`. **Mixed → retire:** `mask` (interactive masked input) is rendering, dropped by §50 "exact … prompt layout … not contracts"; **DROP** "scope-less secret set" (§6) is covered by `cli/secret-set-usage`. |
 | `45-secret-store-unit.bats` | 20 | re-express | In-process secret-store unit. `secret rm`/`ls` observables map to `cli/secret-rm-*`/`cli/secret-ls-*`. The store itself (keys, scopes, 0600 file backend, DPAPI envelope and legacy migration through a fake PowerShell and the `dpapi_*` seam) is re-expressed for the Python store in `py-acq/tests/test_secretstore.py`, with a Bash↔Python byte round trip in `py-acq/tests/test_secretstore_bash.py`; real DPAPI remains a Windows Tier-3 qualification item (ADR-0028). |
 | `71b-msb-secret-store-backends.bats` | 11 | re-express | keychain-linux/macos/file backends are platform-specific secret storage (ADR-0028); their logic (index, self-heal from sidecars, `security -i`, legacy file fallback) is re-expressed against fake `secret-tool`/`security` in `py-acq/tests/test_secretstore.py` and round-tripped with Bash in `py-acq/tests/test_secretstore_bash.py`; the real keychains remain host qualification items. multi-workspace mount + symlink canonicalization are §4 host/guest-path fidelity → **gap**. |
 | `125-github-scope.bats` | 14 | preserve | ADR-0013 per-sandbox GitHub scoping. Covered by `cli/github-scope-json`, `cli/github-scope-no-value`, `cli/github-scope-sbx`. |
@@ -265,10 +270,41 @@ dropped. All are Tier-1 candidates unless marked Tier-3.
 | G17 | Host-readiness `prepare` (`backend set/unset` persistence is now covered by `cli/backend-set*`, `cli/backend-unset*`) | `70-msb-backend.bats` | §3 + ADR-0040m |
 | G18 | Kit-ref / `ACQ_EXTRA_KITS` persistence round-trip | `95-kit-ref-persistence.bats` | §3 + ADR-0041m |
 | G19 | Installer elevation/secret-safety guard | `05-install.bats` | ADR-0042m |
+| G20 | `install.sh` children never read the `curl \| sh` script pipe (`run()` detaches stdin) | removed `05-install.bats` test, below | ADR-0042m |
+| G21 | Windows launcher guards: `acq.cmd` starts PowerShell with no execution-policy bypass; `acq.ps1` refuses the WSL `bash.exe` shim, converts Windows paths for Git Bash and exposes the validator data dir | removed `06-windows-install.bats` tests, below | ADR-0042m + ADR-0029 |
+| G22 | Provider-input validator wheelhouse layout: `SHA256SUMS` lists only the wheels, and the release archive, `install-provider-input-wheelhouse` and `setup-provider-input-validator` agree on the per-platform path | removed `06-windows-install.bats` tests, below | ADR-0042m |
 
 The gaps marked Tier-3 (G10, G11) are host-enforcement oracles that cannot be
 proven by a mock/stub Tier-1 vector; they map to ADR-0044m live transcripts
 rather than a CLI vector.
+
+---
+
+## Installer tests removed before the snapshot
+
+The installer rewrite (`95b82b1`) cut `05-install.bats` from 31 tests to 9 and
+`06-windows-install.bats` from 23 to 8, before the `c76b96c` snapshot above
+was taken, so the 53 removed tests (37 net of the replacements) were never
+classified. They are classified here. Most guarded the old installer's own
+mechanics: it cloned or brew/npm-installed acq and installed and version-managed
+msb. The v1 installer downloads one checksum-verified release archive and
+installs no backend, so those behaviours are gone from the product rather than
+untested. The msb version floor they partly asserted is enforced by acq itself
+(`cli/backend-check-*`, ADR-0040m).
+
+| Removed test(s) | Count | Bucket | Disposition |
+|---|---|---|---|
+| `05`: msb install and version management (failed msb download degrades; dry-run without msb; missing msb installs the pinned release; pinned bundle fails closed on a checksum mismatch or a missing checksum; active 0.6.8 upgraded; unparseable, failed-probe, prerelease or build-suffixed active msb replaced; platform-suffixed final accepted; self-update rejects non-final; never fetches an msb installer script; local 0.7.2 replaced; blocked msb shadowing fails closed; blocked downgrade can be declined; duplicate msb paths reported) | 17 | retire | **Obsolete.** `install.sh` no longer installs or probes msb. The floor and refused versions are `cli/backend-check-*`; the pinned bundle is verified by `scripts/verify-msb-pin`. |
+| `05`: source, ref and sha selection (release tag default without a pinned sha; release-asset default sha verifies the clone, the auto clone fallback, and does not override brew or npm; explicit sha overrides package-manager selection; explicit ref ignores a valid or malformed default sha; explicit ref and sha keep the sha; empty sha env unset; explicit empty sha refused; shallow clone deepens) | 12 | retire | **Obsolete.** The clone, brew and npm methods and `--sha` were removed. `--ref` now names a release whose archive is checksum-verified: `installer/checksum-fail-closed`, `installer/offline-install`. |
+| `05`: brew method trusts the microsandbox-acq dependency | 1 | retire | **Obsolete** (no brew method). |
+| `05`: `run()` detaches child stdin so the piped script tail survives | 1 | preserve | `run()` still detaches stdin, and no test pins it: **gap G20**. |
+| `06`: help and dry-run execute under pwsh; launcher and installer parse under pwsh | 2 | retire | **Superseded** by the current `06` tests ("installer -Help and -DryRun execute", "installer parses", "acq.ps1 parses"). |
+| `06`: does not enable WHP or elevate; no msb via `iex`; installed layout includes the launchers | 3 | retire | **Covered** by the current `06` tests "never elevates", "never pipes a remote script to iex" and "gates the launchers, the backend tree and the source". The WHP part is obsolete. |
+| `06`: verifies WHP; probes WHP via the API; installs Git for Windows via WinGet; msb WinGet id configurable and version-checked; msb version policy in lockstep with `install.sh`; msb version parser suffix policy | 6 | retire | **Obsolete.** `install.ps1` no longer installs msb, Git or WHP; the release-marker sync test replaced the lockstep check. |
+| `06`: atomically verifies and publishes the embedded validator runtime | 1 | retire | **Superseded.** The runtime ships inside the release zip, which is verified whole ("verifies the zip against SHA256SUMS before writing"). |
+| `06`: launcher provides the validator runtime to Git Bash; converts Windows paths before the Git Bash handoff; rejects the WSL bash shim; `acq.cmd` delegates without an execution-policy bypass | 4 | preserve | The code ships (`acq.ps1`, `acq.cmd`). `py-acq/tests/test_windows_launchers.py` covers argv forwarding and restoring `ACQ_PROVIDER_INPUT_DATA_DIR`, not these guards: **gap G21**. |
+| `06`: release workflow publishes Windows preview assets; wheelhouse tar path matches the upload path; wheelhouse tar extracts into a platform subdir | 3 | retire | **Implementation detail (ADR-0039m):** source-regex checks over `release.yml`. A release is exercised by the release workflow itself and the Tier-3 gate. |
+| `06`: wheelhouse `SHA256SUMS` never hashes itself; `install-provider-input-wheelhouse` installs into the platform subdir; `setup-provider-input-validator` wheelhouse paths match | 3 | re-express | Still-shipping behaviour with no remaining test: **gap G22**. |
 
 ---
 
@@ -288,12 +324,14 @@ rather than a CLI vector.
 
 ## Verification of this inventory
 
-* Every `test/bats/*.bats` file is accounted for above (64 files, 1053 tests).
+* Every `test/bats/*.bats` file is accounted for above (64 files, 1053 tests at
+  the `c76b96c` snapshot), and so is every installer test removed before it.
 * Every `preserve` disposition cites a §1–§6 invariant or required-data row and
-  (where one exists) a `test/vectors/` id from `manifest.json`.
+  (where one exists) a `test/vectors/` id. Every cited id exists in the corpus
+  (checked by `py-acq/tests/test_coverage.py`).
 * Every `retire` disposition names a DROP row, a "covered by vector" cross-ref,
   or "implementation detail (ADR-0039m)".
-* Gaps G1–G19 are the valuable behaviors with no existing vector, recorded as
+* Gaps G1–G22 are the valuable behaviors with no existing vector, recorded as
   named follow-ups per the contract requirement.
 
 This inventory is referenced from `test/vectors/manifest.json` (`inventory`

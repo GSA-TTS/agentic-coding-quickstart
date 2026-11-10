@@ -1,0 +1,10 @@
+# The py-acq build backend, hash-locked, for CI's wheel build
+# (.github/workflows/python-vectors.yml). Policy: ADR-0049m. The version must
+# equal the [build-system] pin in pyproject.toml (py-acq/tests/test_packaging.py
+# checks this). CI installs it into a throwaway venv with
+#   python -m pip install --require-hashes --no-deps --only-binary :all: -r requirements-build.txt
+# and builds with `pip wheel --no-build-isolation`, so pip never resolves a build
+# dependency on its own. setuptools 70.1 and later build wheels without the
+# separate `wheel` package, so nothing else is needed.
+setuptools==80.9.0 \
+    --hash=sha256:062d34222ad13e0cc312a4c02d73f059e86a4acbfbdea8f8f76b28c99f306922

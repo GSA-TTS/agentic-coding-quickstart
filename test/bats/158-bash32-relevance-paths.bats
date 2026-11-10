@@ -123,6 +123,7 @@ GLOSSARY.md
 installer/
 py-acq/README.md
 py-acq/pyproject.toml
+py-acq/requirements-build.txt
 py-acq/requirements-dev.txt
 py-acq/requirements-quality.txt
 py-acq/tests/

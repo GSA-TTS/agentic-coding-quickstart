@@ -27,3 +27,22 @@ load 'helper'
   ' _ "$REPO_ROOT"
   assert_success
 }
+
+# The stub setup must keep acq's caches away from the developer's own, even when
+# their shell exports cache locations: generated kits (sbx startup-barrier specs)
+# otherwise pile up in the real ~/.cache.
+@test "stub setup: the XDG cache and both kit caches are inside the stub dir" {
+  run env XDG_CACHE_HOME=/nonexistent/dev-cache ACQ_SBX_KIT_CACHE=/nonexistent/dev-sbx-kits \
+    ACQ_MSB_KIT_CACHE=/nonexistent/dev-msb-kits bash -c '
+      source "$1/scripts/test-acq-lib.sh"
+      make_stubs
+      printf "%s\n" "$STUBDIR" "$XDG_CACHE_HOME" "$ACQ_SBX_KIT_CACHE" "$ACQ_MSB_KIT_CACHE"
+      cleanup_stubs
+    ' _ "$REPO_ROOT"
+  assert_success
+  local stub="${lines[0]}"
+  [ -n "$stub" ]
+  assert_line --index 1 "$stub/home/.cache"
+  assert_line --index 2 "$stub/home/.cache/acq/sbx-kits"
+  assert_line --index 3 "$stub/home/.cache/acq/kits"
+}

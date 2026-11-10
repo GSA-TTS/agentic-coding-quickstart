@@ -4687,6 +4687,33 @@ anonymous attempt. Unblock trigger: the next change to `kit_translate_fetch`.
 
 ---
 
+## 83. A Signal Sent Only to acq's PID Does Not Interrupt `create`
+
+**Symptom:** `kill <acq pid>` (SIGTERM or SIGHUP to the Bash acq's own process
+only) during `acq create` or the create step of `acq run` does not stop the
+backend create. acq keeps running until the provisioning step finishes, then
+prints `acq: stopped by SIGTERM after the provisioning step finished` and exits
+143 (129 for SIGHUP). The sandbox is created; `run` does not go on to attach.
+
+**Cause:** This is a deliberate choice (`acq_run_signal_deferred` in
+`acq.backends/progress.sh`). The provisioning step runs in a foreground
+subshell that holds the sandbox lock and the backend child and has its own
+signal cleanup. acq's shell now traps SIGTERM and SIGHUP around that step, so a
+signal to the whole process group (a terminal's Ctrl-C, `timeout`, a service
+manager) reaches the subshell, and acq exits only after the subshell has
+released the lock and discarded an uncreated sandbox. Bash runs a trap only once
+a foreground child exits, so a signal for acq alone waits for the step to
+finish. Forwarding it would need the step to run in the background, and a
+background child of a non-interactive Bash 3.2 starts with SIGINT ignored, so
+it could no longer clean up after Ctrl-C.
+
+**Resolution:** Signal the process group instead: `kill -TERM -<pgid>` (the
+negative process-group ID, which is acq's PID when acq was started from a
+shell), or press Ctrl-C in acq's terminal. The Python acq handles SIGTERM in its
+own process, runs the same cleanup and exits 143.
+
+---
+
 ## Contributing
 
 When you discover a new failure mode:

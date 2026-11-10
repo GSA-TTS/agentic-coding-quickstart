@@ -34,3 +34,22 @@ def test_coverage_manifest_is_valid_against_corpus():
 
     orphans = corpus_ids - referenced
     assert not orphans, f"corpus vectors not referenced by the manifest: {sorted(orphans)}"
+
+
+def test_every_vector_the_retirement_inventory_cites_exists():
+    # The inventory (docs/test-retirement-inventory.md) says its vector
+    # cross-references are validated against the corpus; this is that check. A
+    # cited id is exact (`cli/version-json`) or a glob over ids (`cli/secret-ls-*`)
+    # that must match at least one vector.
+    import fnmatch
+    import re
+
+    from conftest import REPO_ROOT
+
+    text = (REPO_ROOT / "docs" / "test-retirement-inventory.md").read_text(encoding="utf-8")
+    sections = "|".join(sorted(p.name for p in VECTORS_DIR.iterdir() if p.is_dir()))
+    cited = set(re.findall(rf"`((?:{sections})/[^`\s]+)`", text))
+    assert cited, "the inventory cites no vectors"
+    corpus_ids = sorted(vid for vid, _ in engine.discover_vectors(VECTORS_DIR))
+    missing = sorted(c for c in cited if not fnmatch.filter(corpus_ids, c))
+    assert not missing, f"the inventory cites vectors that do not exist: {missing}"

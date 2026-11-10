@@ -5277,12 +5277,15 @@ _acq_provider_input_safe_mkdir() {
     return
   fi
   _canon=$(_acq_provider_input_canonical_path "$1") || return 1
+  # A refused component (a symlink, a file, no permission) ends the walk with
+  # one line naming the path and the reason, never a Python traceback.
   "${_ACQ_PROVIDER_INPUT_PATH_PY[@]}" -I - "$_canon" <<'PY'
 import os, stat, sys
 path = sys.argv[1]
 if not os.path.isabs(path): raise SystemExit('provider-input path must be absolute')
-fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+fd = None
 try:
+    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
     for part in (p for p in path.split('/') if p):
         try:
             child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
@@ -5297,8 +5300,12 @@ try:
             child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
         if not stat.S_ISDIR(os.fstat(child).st_mode): raise SystemExit('unsafe provider-input path')
         os.close(fd); fd = child
+except OSError as exc:
+    raise SystemExit('acq: unsafe provider-input path %s: %s (a component is a symbolic link, '
+                     'not a directory, or not accessible)' % (path, exc.strerror or exc))
 finally:
-    os.close(fd)
+    if fd is not None:
+        os.close(fd)
 PY
 }
 
@@ -5310,18 +5317,24 @@ _acq_provider_input_safe_dir() {
     return
   fi
   _canon=$(_acq_provider_input_canonical_path "$1") || return 1
+  # A silent predicate, as the native Windows check is: a refused component
+  # (symlink, file, missing, no permission) is status 1, not a traceback.
   "${_ACQ_PROVIDER_INPUT_PATH_PY[@]}" -I - "$_canon" <<'PY'
 import os, stat, sys
 path = sys.argv[1]
 if not os.path.isabs(path): raise SystemExit(1)
-fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+fd = None
 try:
+    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
     for part in (p for p in path.split('/') if p):
         child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
         if not stat.S_ISDIR(os.fstat(child).st_mode): raise SystemExit(1)
         os.close(fd); fd = child
+except OSError:
+    raise SystemExit(1)
 finally:
-    os.close(fd)
+    if fd is not None:
+        os.close(fd)
 PY
 }
 

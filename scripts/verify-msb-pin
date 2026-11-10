@@ -55,7 +55,7 @@
 #   ./scripts/verify-msb-pin --keep       # keep the scratch dir for inspection
 #
 # Needs ~1.2GB of scratch (three msb bundles plus a staged downgrade target per
-# check). It uses $TMPDIR, and checks up front that there is room — a small /tmp
+# check). It uses an absolute $TMPDIR (else /tmp), and checks up front that there is room — a small /tmp
 # tmpfs otherwise surfaces as a bogus `msb self downgrade` failure rather than as
 # an out-of-space error. Point it elsewhere if needed:
 #   TMPDIR=~/scratch ./scripts/verify-msb-pin
@@ -123,7 +123,11 @@ block() { BLOCKED=$((BLOCKED+1)); printf '  \033[33mskip\033[0m %s\n' "$1"; }
 info()  { printf '\n== %s ==\n' "$1"; }
 note()  { printf '        %s\n' "$1"; }
 
-SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/msb-pin-verify.XXXXXX")
+# TMPDIR only when it is absolute, else /tmp, as acq_tmp_dir in
+# acq.backends/userdirs.sh does: a relative TMPDIR would put the scratch under
+# the current directory.
+case "${TMPDIR:-}" in /*) TMP_BASE="$TMPDIR" ;; *) TMP_BASE=/tmp ;; esac
+SCRATCH=$(mktemp -d "$TMP_BASE/msb-pin-verify.XXXXXX")
 cleanup() {
   if [ "$KEEP" -eq 1 ]; then
     printf '\nscratch kept at %s\n' "$SCRATCH"

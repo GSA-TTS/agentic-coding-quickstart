@@ -35,9 +35,12 @@ BE=(--backend sbx)
 
 # Throwaway workspace + extra-kit dirs. The extra kit declares a `startup`
 # command so it is exactly the class sbx 0.38 refuses to add mid-life — that is
-# what exercises fixes #1 and #3.
-WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/v320-ws.XXXXXX")
-KITDIR=$(mktemp -d "${TMPDIR:-/tmp}/v320-kit.XXXXXX")
+# what exercises fixes #1 and #3. They go under TMPDIR only when it is absolute,
+# else /tmp, as acq_tmp_dir in acq.backends/userdirs.sh does: a relative TMPDIR
+# would put them under the current directory.
+case "${TMPDIR:-}" in /*) TMP_BASE="$TMPDIR" ;; *) TMP_BASE=/tmp ;; esac
+WORKDIR=$(mktemp -d "$TMP_BASE/v320-ws.XXXXXX")
+KITDIR=$(mktemp -d "$TMP_BASE/v320-kit.XXXXXX")
 
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS+1)); printf '  \033[32mok  \033[0m %s\n' "$1"; }

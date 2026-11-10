@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "id": "probe/absent-passes",
+  "oracle": "absent mode passes when the value never appears",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{python}",
+      "-c",
+      "import sys; sys.stdout.buffer.write(b'{\"ok\": true}\\n')"
+    ],
+    "env": {},
+    "unset": [],
+    "stdin": "sentinel-9f2c",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": [
+      {
+        "mode": "json",
+        "value": {
+          "ok": true
+        },
+        "normalize": []
+      },
+      {
+        "mode": "absent",
+        "value": "sentinel-9f2c",
+        "normalize": []
+      }
+    ]
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": []
+  }
+}

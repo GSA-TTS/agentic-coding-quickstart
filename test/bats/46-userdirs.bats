@@ -248,7 +248,7 @@ set ACQ_STATE_DIR to an absolute path, or unset it to use \$XDG_STATE_HOME/acq (
 }
 
 @test "msb adapter: relative XDG_STATE_HOME/XDG_CACHE_HOME fall back to the home defaults" {
-  run env -u ACQ_STATE_DIR XDG_STATE_HOME=rel-state XDG_CACHE_HOME=rel-cache bash -c '
+  run env -u ACQ_STATE_DIR -u ACQ_MSB_KIT_CACHE XDG_STATE_HOME=rel-state XDG_CACHE_HOME=rel-cache bash -c '
     . "$1/acq.backends/msb.sh"
     printf "%s\n" "$ACQ_STATE_DIR" "$ACQ_MSB_SSH_DIR" "$ACQ_MSB_KIT_CACHE" "$ACQ_MSB_UPSTREAM_CA_FILE"
   ' _ "$REPO_ROOT"
@@ -269,7 +269,7 @@ set ACQ_STATE_DIR to an absolute path, or unset it to use \$XDG_STATE_HOME/acq (
 }
 
 @test "sbx adapter: a relative XDG_CACHE_HOME falls back to the home default" {
-  run env XDG_CACHE_HOME=rel-cache bash -c '
+  run env -u ACQ_SBX_KIT_CACHE XDG_CACHE_HOME=rel-cache bash -c '
     . "$1/acq.backends/sbx.sh"
     printf "%s\n" "$ACQ_SBX_KIT_CACHE"
   ' _ "$REPO_ROOT"
@@ -401,7 +401,8 @@ SETUP
 # values, so every acq default derived from them is left empty.
 _no_home_env() {
   printf '%s\n' -u ACQ_STATE_DIR -u ACQ_SECRET_STORE_DIR -u ACQ_SECRET_FILE_DIR \
-    -u ACQ_MSB_KIT_LOCAL_DIR -u ACQ_MSB_STARTUP_STAGE_DIR -u ACQ_SBX_KIT_CACHE -u ACQ_SBX_KIT_PASSTHROUGH \
+    -u ACQ_MSB_KIT_LOCAL_DIR -u ACQ_MSB_STARTUP_STAGE_DIR -u ACQ_SBX_KIT_CACHE -u ACQ_MSB_KIT_CACHE \
+    -u ACQ_SBX_KIT_PASSTHROUGH \
     HOME=relhome XDG_STATE_HOME=rel XDG_DATA_HOME=rel XDG_CACHE_HOME=rel
 }
 
@@ -793,6 +794,42 @@ _plant_failing_curl() {
   run env PATH="$bin" TMPDIR=rel-tmp "$shell" "$REPO_ROOT/scripts/probe-msb-posthoc-ports" </dev/null
   assert_failure 1
   assert_output --regexp 'temp dir: /tmp/acq-msb-ports-probe\.'
+  rmdir rel-tmp
+  _assert_work_empty
+}
+
+@test "dev scripts: no scratch path falls back from a raw TMPDIR" {
+  # ${TMPDIR:-/tmp} keeps a relative TMPDIR; every script uses the absolute rule.
+  run grep -rn 'TMPDIR:-/tmp' "$REPO_ROOT/scripts"
+  assert_failure
+  assert_output ''
+}
+
+@test "test-acq-lib: the stub dir ignores a relative TMPDIR" {
+  mkdir rel-tmp
+  run env TMPDIR=rel-tmp bash -c '
+    . "$1/scripts/test-acq-lib.sh"
+    make_stubs
+    printf "%s\n" "$STUBDIR"
+    cleanup_stubs
+  ' _ "$REPO_ROOT"
+  assert_success
+  assert_line --regexp '^/tmp/acq-test\.'
+  rmdir rel-tmp
+  _assert_work_empty
+}
+
+@test "run-vectors: its scratch dir ignores a relative TMPDIR" {
+  command -v jq >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1 || skip "run-vectors needs jq and timeout"
+  mkdir rel-tmp
+  # A trap on EXIT removes the scratch, so record where it was made: the
+  # negative section only needs the scratch dir, never the CLI-under-test.
+  printf '#!/bin/sh\necho "mktemp $*" >> "$CALLS"\nexec %s "$@"\n' "$(command -v mktemp)" > "$STUBDIR/mktemp"
+  chmod +x "$STUBDIR/mktemp"
+  run env TMPDIR=rel-tmp "$REPO_ROOT/scripts/run-vectors" --python python3 --section negative </dev/null
+  assert_success
+  run cat "$CALLS"
+  assert_output --regexp '^mktemp -d /tmp/run-vectors\.'
   rmdir rel-tmp
   _assert_work_empty
 }

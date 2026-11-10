@@ -66,16 +66,51 @@ _sed_inplace() {
   sed "$@" "$file" > "$file.tmp" && mv "$file.tmp" "$file"
 }
 
+# _replace_literal FILE NEEDLE REPLACEMENT — replace every NEEDLE in FILE with
+# REPLACEMENT, as plain text. sed would read NEEDLE as a regex (a '.' in a
+# temp-dir name matches any character, and a '#' ends the expression), and the
+# Python runner's str.replace is literal. The file is read whole; the trailing
+# 'x' keeps command substitution from dropping its final newlines.
+_replace_literal() {
+  local file="$1" needle="$2" repl="$3" content
+  content="$(cat "$file"; printf x)"
+  content="${content%x}"
+  content="${content//"$needle"/$repl}"
+  printf '%s' "$content" > "$file.tmp" && mv "$file.tmp" "$file"
+}
+
+# _tmpdir_root — the absolute TMPDIR without its trailing slashes (macOS's ends
+# in one), or nothing when TMPDIR is unset, relative or "/". Like acq itself, a
+# relative TMPDIR is ignored, and the Python runner applies the same rule.
+_tmpdir_root() {
+  local root="${TMPDIR:-}"
+  case "$root" in /*) ;; *) return 0 ;; esac
+  while [ "${root%/}" != "$root" ]; do root="${root%/}"; done
+  printf '%s' "$root"
+}
+
 _apply_transform() {
   # $1 = transform name, $2 = file to transform in place
   local name="$1" file="$2" tmpdir _had_nl _size
-  tmpdir="${TMPDIR:-/tmp}"
-  tmpdir="${tmpdir%/}"  # macOS $TMPDIR ends in '/'; the Python runner strips it
   case "$name" in
-    abspath) _sed_inplace "$file" -E 's#/[^[:space:]]+#<abspath>#g' ;;
-    tmpdir)  _sed_inplace "$file" -e "s#$tmpdir#<tmpdir>#g" -e 's#/tmp#<tmpdir>#g' ;;
-    crlf)    _sed_inplace "$file" $'s/\r$//' ;;  # literal CR: BSD sed has no \r escape
-    timing)  _sed_inplace "$file" -E 's#[0-9]+(\.[0-9]+)?(ms|us|µs|s)#<timing>#g' ;;
+    # The excluded characters match the Python runner's: ASCII whitespace and
+    # both quotes, spelled as literal bytes ($'...') because BSD sed has no \t.
+    abspath) LC_ALL=C _sed_inplace "$file" -E $'s#/[^ \t\r\v\f"\']+#<abspath>#g' ;;
+    tmpdir)
+      # Longest root first, as the Python runner does, so /tmp never splits a
+      # TMPDIR that starts with it.
+      tmpdir="$(_tmpdir_root)"
+      if [ "${#tmpdir}" -gt 4 ]; then
+        _replace_literal "$file" "$tmpdir" '<tmpdir>'
+        _replace_literal "$file" /tmp '<tmpdir>'
+      else
+        _replace_literal "$file" /tmp '<tmpdir>'
+        [ -z "$tmpdir" ] || _replace_literal "$file" "$tmpdir" '<tmpdir>'
+      fi
+      ;;
+    # Only CR LF pairs: a lone CR, even one ending the output, is kept.
+    crlf)    _replace_literal "$file" $'\r\n' $'\n' ;;
+    timing)  LC_ALL=C _sed_inplace "$file" -E 's#[0-9]+(\.[0-9]+)?(ms|us|µs|s)#<timing>#g' ;;
     order)
       # Preserve the trailing-newline flag the Python runner tracks, and sort by
       # byte (== codepoint for UTF-8) so both runners order non-ASCII alike.
@@ -92,11 +127,13 @@ _apply_transform() {
       fi
       ;;
     json)
-      if jq -e . "$file" >/dev/null 2>&1; then
-        # Canonical compact+sorted form, without jq's trailing newline, so the
-        # result is byte-identical to the Python runner's json.dumps sort_keys
-        # separators=(',',':').
-        printf '%s' "$(jq -c -S . "$file")" > "$file.tmp" && mv "$file.tmp" "$file"
+      # Only a single JSON document is re-serialised, as Python's json.loads
+      # accepts; `false` and `null` count (a bare `jq -e .` would call them
+      # failures). The canonical form is compact, key-sorted and ASCII-only
+      # (-a), without jq's trailing newline, so it is byte-identical to the
+      # Python runner's json.dumps(sort_keys=True, separators=(',', ':')).
+      if jq -e -s 'length == 1' "$file" >/dev/null 2>&1; then
+        printf '%s' "$(jq -a -c -S . "$file")" > "$file.tmp" && mv "$file.tmp" "$file"
       fi
       ;;
     *) echo "run-vectors: unknown transform '$name'" >&2; exit 2 ;;
@@ -105,10 +142,12 @@ _apply_transform() {
 
 # Structural-subset check for the `json` assertion mode: expected must be a
 # recursive subset of actual (extra fields allowed; ADR-0038m "unknown fields
-# are additive"). Scalars compare by equality, not substring.
+# are additive"). Scalars compare by equality, not substring. The output must be
+# exactly one JSON document, as for the Python runner's json.loads: without
+# --slurp, jq would test each document and pass on the last.
 _jq_subset() {
   local actual="$1" expected="$2"
-  jq -e --slurpfile exp "$expected" '
+  jq -e -s --slurpfile exp "$expected" '
     def subset($e):
       . as $a
       | if ($e | type) == "object" then
@@ -121,31 +160,80 @@ _jq_subset() {
         else
           ($a == $e)
         end;
-    subset($exp[0])
+    length == 1 and (.[0] | subset($exp[0]))
   ' "$actual" >/dev/null 2>&1
+}
+
+# _validate_vector FILE — print the first schema problem in FILE (nothing when it
+# is well formed), with the same rules as the Python runner's _validate: the
+# required fields, no field the schema does not define (a typo such as
+# `expect.stdot` would otherwise make no assertion at all), and each stream's
+# assertion, or non-empty list of assertions, with a known mode and transforms
+# and a value (an absent assertion takes no transforms, and neither a contains
+# nor an absent value may hold a NUL byte). invoke.fixtures and isolation.no_live_refeed are defined by
+# ADR-0043m, so they pass here and are refused later.
+_validate_vector() {
+  jq -r '
+    def unknown($allowed; $prefix):
+      keys_unsorted[] | select(. as $k | $allowed | index([$k]) | not) | "unknown vector field: \($prefix)\(.)";
+    def spec_problems($s):
+      if type != "object" then "expect.\($s): an assertion must be an object"
+      else
+        unknown(["mode", "value", "normalize"]; "expect.\($s).")
+        , ((.mode // "exact") as $m
+           | if (["exact", "contains", "json", "absent"] | index([$m]) | not) then "expect.\($s): unknown mode \($m)"
+             elif has("value") | not then "expect.\($s): value is required"
+             elif $m != "json" and (.value | type) != "string" then "expect.\($s): a \($m) value must be a string"
+             elif $m == "absent" and .value == "" then "expect.\($s): an absent value must not be empty"
+             elif ($m == "contains" or $m == "absent") and (.value | explode | any(. == 0)) then
+               "expect.\($s): a \($m) value must not contain a NUL byte"
+             elif $m == "absent" and ((.normalize // []) | length) > 0 then
+               "expect.\($s): an absent assertion takes no normalize transforms"
+             else empty end)
+        , ((.normalize // []) as $n
+           | if ($n | type) != "array" then "expect.\($s): normalize must be a list"
+             else $n[] | select(. as $t | ["abspath", "tmpdir", "crlf", "timing", "order", "json"] | index([$t]) | not)
+                  | "expect.\($s): unknown transform \(.)" end)
+      end;
+    def stream_problems($s):
+      .expect[$s] as $d
+      | if $d == null then empty
+        elif ($d | type) == "array" then
+          if ($d | length) == 0 then "expect.\($s): an assertion list must not be empty"
+          else $d[] | spec_problems($s) end
+        else $d | spec_problems($s) end;
+    if type != "object" then "a vector must be a JSON object"
+    else
+      [ (["schema", "id", "oracle", "tier", "invoke", "expect", "isolation", "backend", "platform"] - keys)[]
+          | "missing required field: \(.)" ][0]
+      // ([ (.invoke, .expect, .isolation) | select(type != "object") ] | if length > 0 then "invoke, expect and isolation must be objects" else null end)
+      // [ unknown(["schema", "id", "oracle", "tier", "invoke", "expect", "isolation", "backend", "platform"]; "")
+         , (.invoke | unknown(["argv", "env", "unset", "stdin", "timeout_ms", "fixtures"]; "invoke."))
+         , (.expect | unknown(["exit", "stdout", "stderr"]; "expect."))
+         , (.isolation | unknown(["offline", "ssh_stubs", "redirect", "no_live_refeed"]; "isolation."))
+         ][0]
+      // (if (.invoke | has("argv")) | not then "missing required field: invoke.argv"
+          elif (.expect | has("exit")) | not then "missing required field: expect.exit"
+          else null end)
+      // ([ ("stdout", "stderr") as $s | stream_problems($s) ][0])
+      // empty
+    end
+  ' "$1" 2>/dev/null || printf 'not readable as JSON\n'
 }
 
 # --- run one vector ---------------------------------------------------------
 _run_vector() {
   local vecfile="$1" outdir="$2"
-  local vid platform backend f
+  local vid platform backend problem
   local -a cmd=() unset_list=() env_list=() redirect_list=()
 
-  vid="$(jq -r '.id' "$vecfile")"
+  vid="$(jq -r '.id' "$vecfile" 2>/dev/null)" || vid="$vecfile"
 
-  # Structural validation: required fields must be present (fail closed).
-  for f in schema id oracle tier invoke expect isolation backend platform; do
-    if ! jq -e --arg f "$f" 'has($f)' "$vecfile" >/dev/null 2>&1; then
-      printf 'FAIL %s (missing required field: %s)\n' "$vid" "$f"
-      return 3
-    fi
-  done
-  if ! jq -e '.invoke | has("argv")' "$vecfile" >/dev/null 2>&1; then
-    printf 'FAIL %s (missing required field: invoke.argv)\n' "$vid"
-    return 3
-  fi
-  if ! jq -e '.expect | has("exit")' "$vecfile" >/dev/null 2>&1; then
-    printf 'FAIL %s (missing required field: expect.exit)\n' "$vid"
+  # Structural validation (fail closed): an invalid vector is reported as such,
+  # never run with part of its assertions ignored.
+  problem="$(_validate_vector "$vecfile")"
+  if [ -n "$problem" ]; then
+    printf 'FAIL %s (invalid vector: %s)\n' "$vid" "$problem"
     return 3
   fi
 
@@ -237,35 +325,56 @@ _run_vector() {
     return 3
   fi
 
+  # Each stream has one assertion or a list of them. Every assertion starts from
+  # a fresh copy of the raw stream, so one assertion's transforms never change
+  # what the next one sees.
+  local stream count i raw spec="$outdir/spec" actual="$outdir/actual" mode haystack needle
   for stream in stdout stderr; do
-    # Skip a stream that has no expectation.
-    if ! jq -e ".expect.${stream}" "$vecfile" >/dev/null 2>&1; then continue; fi
-    local mode
-    mode="$(jq -r ".expect.${stream}.mode // \"exact\"" "$vecfile")"
-    local file
-    file="$out"; [ "$stream" = "stderr" ] && file="$err"
-    while IFS= read -r t; do [ -n "$t" ] && _apply_transform "$t" "$file"; done \
-      < <(jq -r ".expect.${stream}.normalize[]?" "$vecfile")
-
-    case "$mode" in
-      exact)
-        # Byte-faithful extraction: jq @base64 + base64 -d avoids jq -r's
-        # added trailing newline so the expected value is decoded verbatim.
-        jq -r ".expect.${stream}.value | @base64" "$vecfile" | base64 -d > "$exp"
-        cmp -s "$file" "$exp" || { printf 'FAIL %s (%s exact mismatch)\n' "$vid" "$stream"; return 3; }
-        ;;
-      contains)
-        jq -r ".expect.${stream}.value | @base64" "$vecfile" | base64 -d > "$exp"
-        IFS= read -r -d '' haystack < "$file" || true
-        IFS= read -r -d '' needle < "$exp" || true
-        [[ "$haystack" == *"$needle"* ]] || { printf 'FAIL %s (%s does not contain expected)\n' "$vid" "$stream"; return 3; }
-        ;;
-      json)
-        jq -c ".expect.${stream}.value" "$vecfile" > "$exp"
-        _jq_subset "$file" "$exp" || { printf 'FAIL %s (%s JSON mismatch)\n' "$vid" "$stream"; return 3; }
-        ;;
-      *) printf 'FAIL %s (unknown mode %s)\n' "$vid" "$mode"; return 3 ;;
-    esac
+    raw="$out"; [ "$stream" = "stderr" ] && raw="$err"
+    count="$(jq -r --arg s "$stream" \
+      '.expect[$s] | if . == null then 0 elif type == "array" then length else 1 end' "$vecfile")"
+    i=0
+    while [ "$i" -lt "$count" ]; do
+      jq -c --arg s "$stream" --argjson i "$i" \
+        '.expect[$s] | if type == "array" then .[$i] else . end' "$vecfile" > "$spec"
+      i=$((i + 1))
+      cp "$raw" "$actual"
+      while IFS= read -r t; do [ -n "$t" ] && _apply_transform "$t" "$actual"; done \
+        < <(jq -r '.normalize[]?' "$spec")
+      mode="$(jq -r '.mode // "exact"' "$spec")"
+      # Byte-faithful extraction: jq @base64 + base64 -d avoids jq -r's added
+      # trailing newline so the expected value is decoded verbatim.
+      case "$mode" in
+        exact|contains|absent) jq -r '.value | @base64' "$spec" | base64 -d > "$exp" ;;
+        json) jq -c '.value' "$spec" > "$exp" ;;
+      esac
+      case "$mode" in
+        exact)
+          cmp -s "$actual" "$exp" || { printf 'FAIL %s (%s exact mismatch)\n' "$vid" "$stream"; return 3; }
+          ;;
+        contains|absent)
+          # `read -d ''` stops at a NUL byte, so a value after one would never
+          # be searched and an absent check would pass. Fail such output, as
+          # the Python runner does.
+          if ! LC_ALL=C tr -d '\000' < "$actual" | cmp -s - "$actual"; then
+            printf 'FAIL %s (%s contains a NUL byte, which %s cannot search)\n' "$vid" "$stream" "$mode"
+            return 3
+          fi
+          haystack="" needle=""
+          IFS= read -r -d '' haystack < "$actual" || true
+          IFS= read -r -d '' needle < "$exp" || true
+          if [[ "$haystack" == *"$needle"* ]]; then
+            [ "$mode" = contains ] || { printf 'FAIL %s (%s contains what must be absent)\n' "$vid" "$stream"; return 3; }
+          else
+            [ "$mode" = absent ] || { printf 'FAIL %s (%s does not contain expected)\n' "$vid" "$stream"; return 3; }
+          fi
+          ;;
+        json)
+          _jq_subset "$actual" "$exp" || { printf 'FAIL %s (%s JSON mismatch)\n' "$vid" "$stream"; return 3; }
+          ;;
+        *) printf 'FAIL %s (unknown mode %s)\n' "$vid" "$mode"; return 3 ;;
+      esac
+    done
   done
 
   printf 'ok %s\n' "$vid"
@@ -287,7 +396,11 @@ if [ "${#vector_files[@]}" -eq 0 ]; then
   exit 2
 fi
 
-tmp_root="$(mktemp -d)"
+# Scratch goes under TMPDIR only when it is absolute, else /tmp, as acq_tmp_dir
+# in acq.backends/userdirs.sh does: a bare `mktemp -d` would follow a relative
+# TMPDIR into the current directory.
+tmp_base="$(_tmpdir_root)"
+tmp_root="$(mktemp -d "${tmp_base:-/tmp}/run-vectors.XXXXXX")"
 trap 'rm -rf "$tmp_root"' EXIT
 
 pass=0 fail=0 skip=0
