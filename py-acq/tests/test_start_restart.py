@@ -481,7 +481,8 @@ def test_run_reattach_heals_the_recorded_kit_set_then_attaches(monkeypatch, tmp_
     assert doc["data"]["action"] == "reattached" and launched == ["box"]
     (names, ro, force), = calls
     assert "opencode" in names and "usai-provider" in names  # the .kits record plus the built-ins
-    assert force is False and ro is True  # a heal that keeps the read-only requirement
+    # A heal keeps the read-only requirement wherever the platform can mount it (never on Windows).
+    assert force is False and ro is (security.ro_mount_platform_problem() is None)
 
 
 def test_run_reattach_with_kit_given_again_heals_that_kit_set(monkeypatch, tmp_path, capsys):
