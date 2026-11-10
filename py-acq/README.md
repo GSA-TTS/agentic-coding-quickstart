@@ -105,6 +105,14 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
 * `acq-py run AGENT PATH [--name N] [--image REF] [--json]` — create (if missing)
   then launch the agent in the foreground; `acq-py run NAME` re-attaches to an
   existing sandbox by name.
+* Clone mode (ADR-0027) is not ported yet, and `create`/`run` fail closed
+  rather than mount the real workspace: `--clone` is an unrecognized argument,
+  and `ACQ_CLONE=1` is refused with a usage error (exit 2) before any state or
+  backend access, on every `create`/`run` form, re-attach included. Only the
+  exact value `1` refuses, as only `1` turns clone mode on in Bash; any other
+  value, empty included, is off and ignored. Unset `ACQ_CLONE`, or use the Bash
+  implementation (`ACQ_IMPL=bash`) for a disposable clone. See
+  KNOWN_FAILURE_MODES, "Deferred: the Python acq has no clone mode".
 * Sandbox names and workspace paths follow the Bash `acq` rules
   (`commands/common.py`). Without `--name`, the name is `AGENT-<slug>`, where the
   slug is the lowercased ASCII letters and digits of the workspace's last path
