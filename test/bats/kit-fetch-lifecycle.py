@@ -16,6 +16,13 @@ import time
 
 repo, scratch = (Path(p).resolve() for p in sys.argv[1:3])
 shell = sys.argv[3]
+# A runner started in the background by a non-interactive shell hands every
+# child SIGINT ignored (and `nohup` does the same for SIGHUP), and a shell cannot
+# trap a signal that was ignored on entry, so the signal cases would hang. Undo
+# that here: a handler, unlike SIG_IGN, is reset to the default across exec.
+signal.signal(signal.SIGINT, signal.default_int_handler)
+signal.signal(signal.SIGHUP, signal.SIG_DFL)
+signal.signal(signal.SIGTERM, signal.SIG_DFL)
 source = (repo / "acq").read_text()
 prefix = source.split("# Pre-parse global flags", 1)[0]
 script = scratch / "acq"
