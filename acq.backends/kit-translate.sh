@@ -809,6 +809,11 @@ kit_spec_files() {
           # leading slash and no ".." segment (kit_source_within also resolves
           # symlinks at the point of use).
           print "kit-translate: skipping file with unsafe source: " cur_source > "/dev/stderr"
+        } else if (cur_phase != "" && cur_phase !~ /^(install|initFiles|startup)$/) {
+          # phase is a column of this tab-separated record: an unknown value (a
+          # tab in it would shift every later column) drops the entry, as an
+          # unknown command phase does in kit_spec_commands.
+          print "kit-translate: skipping file with unknown phase: " cur_phase > "/dev/stderr"
         } else {
           printf "%s\t%s\t%s\t%s\t%s\n", cur_path, cur_mode, cur_phase, cur_source, ro
         }

@@ -56,6 +56,27 @@ SPEC
   refute_output --partial $'/home/agent/d\t'
 }
 
+@test "kit_spec_files drops a file entry with an unknown phase" {
+  local k="$STUBDIR/phasekit"
+  mkdir -p "$k"
+  printf '%s\n' 'files:' \
+    '  - path: /home/agent/a' '    phase: initFiles' '    source: files/a' \
+    '  - path: /home/agent/b' '    source: files/b' \
+    '  - path: /home/agent/c' '    phase: bogus' '    source: files/c' \
+    '  - path: /home/agent/d' "    phase: init$(printf '\t')x" '    source: files/d' \
+    > "$k/spec.yaml"
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    kit_spec_files "$1" 2>&1
+  ' _ "$k/spec.yaml"
+  assert_output --partial $'/home/agent/a\t\tinitFiles\tfiles/a'
+  assert_output --partial $'/home/agent/b\t\t\tfiles/b'
+  assert_output --partial 'skipping file with unknown phase: bogus'
+  assert_output --partial 'skipping file with unknown phase: init'
+  refute_output --partial $'/home/agent/c\t'
+  refute_output --partial $'/home/agent/d\t'
+}
+
 @test "kit_source_within accepts in-kit files and in-kit links, refuses the rest" {
   run bash -c '
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
