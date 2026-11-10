@@ -532,12 +532,14 @@ export ACQ_PROVENANCE_DIR="$ACQ_PROVENANCE_DIR"
   sleep 10
 ) &
 parent=\$!
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-  [ -s "$STUBDIR/guardian.pid" ] && break
-  kill -0 "\$parent" 2>/dev/null || break
+# Wait on the published PID, not a fixed delay: sourcing acq and starting the
+# guardian can take seconds on a loaded host. The ceiling only bounds a failure.
+waited=0
+while [ ! -s "$STUBDIR/guardian.pid" ] && kill -0 "\$parent" 2>/dev/null && [ "\$waited" -lt 600 ]; do
   sleep 0.1
+  waited=\$((waited + 1))
 done
-[ -s "$STUBDIR/guardian.pid" ]
+[ -s "$STUBDIR/guardian.pid" ] || { echo "guardian never published its pid" >&2; exit 1; }
 guardian_pid=\$(cat "$STUBDIR/guardian.pid")
 kill -KILL "\$parent" 2>/dev/null || true
 if ACQ_PROVIDER_INPUT_LOCK_RETRIES=1 acq_provider_input_lock_acquire sbx parentexit >"$STUBDIR/retry.out" 2>&1; then
@@ -546,10 +548,17 @@ if ACQ_PROVIDER_INPUT_LOCK_RETRIES=1 acq_provider_input_lock_acquire sbx parente
 fi
 grep -Fq "owned by live pid \$guardian_pid" "$STUBDIR/retry.out"
 wait "\$parent" 2>/dev/null || true
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-  kill -0 "\$guardian_pid" 2>/dev/null || break
+# The guardian polls its parent once a second, so it exits within a tick or two
+# of the reap above. Wait for that, with a ceiling far above the normal delay.
+waited=0
+while kill -0 "\$guardian_pid" 2>/dev/null && [ "\$waited" -lt 600 ]; do
   sleep 0.1
+  waited=\$((waited + 1))
 done
+if kill -0 "\$guardian_pid" 2>/dev/null; then
+  echo "guardian outlived its transaction parent" >&2
+  exit 1
+fi
 lock=\$(acq_provider_input_lock_acquire sbx parentexit)
 acq_provider_input_lock_release "\$lock"
 echo "guardian ownership preserved"
@@ -575,10 +584,12 @@ ACQ_SCRIPT_DIR="$REPO_ROOT" ACQ_SOURCE_ONLY=1 . "$REPO_ROOT/acq"
   printf '%s %s\n' "\$_ACQ_PROVIDER_INPUT_GUARDIAN_PID" "\$child" > "$STUBDIR/pids"
   sleep 10
 ) & parent=\$!
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-  [ -s "$STUBDIR/pids" ] && break
+waited=0
+while [ ! -s "$STUBDIR/pids" ] && kill -0 "\$parent" 2>/dev/null && [ "\$waited" -lt 600 ]; do
   sleep 0.1
+  waited=\$((waited + 1))
 done
+[ -s "$STUBDIR/pids" ] || { echo "transaction never published its pids" >&2; exit 1; }
 read guardian child < "$STUBDIR/pids"
 kill -KILL "\$parent" 2>/dev/null || true
 if ACQ_PROVIDER_INPUT_LOCK_RETRIES=1 acq_provider_input_lock_acquire sbx backend-child >/dev/null 2>"$STUBDIR/retry"; then
@@ -859,15 +870,20 @@ _acq_msb_confirm_absent() { return 0; }  # confirms gone for the rc-ne-0 path
 rc=0
 acq_backend_terminate "$sandbox" & tx=\$!
 # Wait for slow-msb to register its PID (confirms the background executable started).
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-  [ -s "$pid_file" ] && break
+waited=0
+while [ ! -s "$pid_file" ] && kill -0 "\$tx" 2>/dev/null && [ "\$waited" -lt 600 ]; do
   sleep 0.1
+  waited=\$((waited + 1))
 done
 [ -s "$pid_file" ] || { echo "slow-msb never started" >&2; exit 1; }
 msb_pid=\$(cat "$pid_file")
 # The external child waits for its own registry entry before observing this gate.
 touch "$STUBDIR/slow-msb.go"
-for _ in 1 2 3 4 5 6 7 8 9 10; do [ -f "$STUBDIR/slow-msb.signalled" ] && break; sleep 0.1; done
+waited=0
+while [ ! -f "$STUBDIR/slow-msb.signalled" ] && kill -0 "\$msb_pid" 2>/dev/null && [ "\$waited" -lt 600 ]; do
+  sleep 0.1
+  waited=\$((waited + 1))
+done
 [ -f "$STUBDIR/slow-msb.signalled" ] || { echo "slow-msb never signalled" >&2; exit 1; }
 kill -0 "\$msb_pid" 2>/dev/null || { echo "slow-msb exited before lock probe" >&2; exit 1; }
 # Verify the lock is still held while the executable is alive.
@@ -971,14 +987,20 @@ _acq_msb_image_not_found_error() { return 1; }
 # Provision happens synchronously — run in background to probe lock state.
 rc=0
 acq_backend_provision msbcreatebox shell /tmp & tx=\$!
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-  [ -s "$STUBDIR/slow-msb-create.pid" ] && break; sleep 0.1
+waited=0
+while [ ! -s "$STUBDIR/slow-msb-create.pid" ] && kill -0 "\$tx" 2>/dev/null && [ "\$waited" -lt 600 ]; do
+  sleep 0.1
+  waited=\$((waited + 1))
 done
 [ -s "$STUBDIR/slow-msb-create.pid" ] || { echo "slow-msb-create never started" >&2; exit 1; }
 msb_pid=\$(cat "$STUBDIR/slow-msb-create.pid")
 # The external child waits for its own registry entry before observing this gate.
 touch "$STUBDIR/slow-msb-create.go"
-for _ in 1 2 3 4 5 6 7 8 9 10; do [ -f "$STUBDIR/slow-msb-create.signalled" ] && break; sleep 0.1; done
+waited=0
+while [ ! -f "$STUBDIR/slow-msb-create.signalled" ] && kill -0 "\$msb_pid" 2>/dev/null && [ "\$waited" -lt 600 ]; do
+  sleep 0.1
+  waited=\$((waited + 1))
+done
 [ -f "$STUBDIR/slow-msb-create.signalled" ] || { echo "slow-msb-create never signalled" >&2; exit 1; }
 kill -0 "\$msb_pid" 2>/dev/null || { echo "slow-msb-create exited before lock probe" >&2; exit 1; }
 # While slow-msb is running the lock must not be acquirable.
