@@ -4918,6 +4918,47 @@ ASCII secrets stored by earlier builds read back unchanged.
 
 ---
 
+## 89. Windows: Bash `acq create` Fails Validation of a Provider Kit's Normalizer
+
+**Symptom:** Under Git Bash on Windows, a Bash `acq create` (or `acq run`)
+whose provider kit carries provider input stops before the backend create
+with:
+
+```text
+provider input contract: C:\...\candidate-<n>\provider-input.json: normalizerPath must be an executable file
+acq(msb): error: provider input projection failed for '<name>'.
+```
+
+**Cause:** The pinned Patterns validator
+(`scripts/validate_provider_input_contract.py`, run by
+`acq_provider_input_prepare` in `acq.backends/common.sh`) requires an execute
+bit on the normalizer (`st_mode & 0o111`). Windows has no execute bit:
+CPython reports one only for `.exe`, `.bat`, `.cmd` and `.com` files, and the
+USAi kit's normalizer is `scripts/normalize-catalog.mjs`, so every Windows
+host fails. The bats suite replaces the validator with a stand-in, so it never
+saw this. Found by running a Bash create on Windows 11 (Git for Windows 2.56,
+Python 3.12) against the real validator with stubbed msb and sbx. A second
+fault on the same path is fixed: once the validator passed, reading the
+provider facts looked for the validator runtime at
+`<data dir>/provider-input-validator.current` instead of
+`<data dir>/provider-input-validator/provider-input-validator.current` (where
+`scripts/setup-provider-input-validator` puts it), fell back to a bare
+`python3` and, on Windows, reached the Microsoft Store alias
+(`_acq_provider_facts_python`). With both faults worked around, create,
+validate, materialize, publish, the backend create with the provider-input
+mount, and `acq rm` all completed for msb and sbx.
+
+**Resolution:** Use the Python acq on Windows (`ACQ_IMPL=python`), which does
+not run that validator. Tracked: skip the execute-bit check on Windows in the
+Patterns validator and bump `PATTERNS_KIT_REF`, or have acq run the pinned
+validator through a small launcher that reports execute bits on Windows. Also
+seen on the same run, and tracked with it: `scripts/setup-provider-input-validator`
+under Git Bash picks the Microsoft Store `python3` alias, installs under
+`XDG_DATA_HOME` while acq on Windows looks under `LOCALAPPDATA`, and its `ln
+-s` makes a full copy of the runtime that a second run cannot replace.
+
+---
+
 ## Contributing
 
 When you discover a new failure mode:

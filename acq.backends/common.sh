@@ -4194,7 +4194,9 @@ _acq_provider_facts_python() {
   else
     data_home=$(acq_xdg_dir XDG_DATA_HOME .local/share)/acq || data_home=""
   fi
-  runtime="${ACQ_PROVIDER_INPUT_DATA_DIR:-$data_home/provider-input-validator}.current"
+  # The same place scripts/setup-provider-input-validator publishes it and
+  # _acq_provider_input_python looks for it.
+  runtime="${ACQ_PROVIDER_INPUT_DATA_DIR:-$data_home/provider-input-validator}/provider-input-validator.current"
   # Only an absolute runtime path: a relative one would run an interpreter from
   # the current directory (see userdirs.sh).
   if { [ -n "$data_home" ] || [ -n "${ACQ_PROVIDER_INPUT_DATA_DIR:-}" ]; } \

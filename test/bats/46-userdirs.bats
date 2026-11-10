@@ -339,11 +339,25 @@ _plant_relative_runtime() {
 
 @test "common: the provider-facts interpreter comes from the absolute data dir, never a relative XDG_DATA_HOME" {
   _plant_relative_runtime
-  local want="$HOME/.local/share/acq/provider-input-validator.current/bin"
+  # Where scripts/setup-provider-input-validator publishes the runtime.
+  local want="$HOME/.local/share/acq/provider-input-validator/provider-input-validator.current/bin"
   mkdir -p "$want"
   printf '#!/bin/sh\nexit 0\n' >"$want/python3"
   chmod +x "$want/python3"
   run env -u ACQ_PROVIDER_INPUT_PYTHON -u ACQ_PROVIDER_INPUT_DATA_DIR -u LOCALAPPDATA XDG_DATA_HOME=rel-data bash -c '
+    . "$1/acq.backends/common.sh"
+    _acq_provider_facts_python
+  ' _ "$REPO_ROOT"
+  assert_success
+  assert_output "$want/python3"
+}
+
+@test "common: the provider-facts interpreter is the runtime under ACQ_PROVIDER_INPUT_DATA_DIR" {
+  local data="$WORK/pi-data" want="$WORK/pi-data/provider-input-validator.current/bin"
+  mkdir -p "$want"
+  printf '#!/bin/sh\nexit 0\n' >"$want/python3"
+  chmod +x "$want/python3"
+  run env -u ACQ_PROVIDER_INPUT_PYTHON -u LOCALAPPDATA ACQ_PROVIDER_INPUT_DATA_DIR="$data" bash -c '
     . "$1/acq.backends/common.sh"
     _acq_provider_facts_python
   ' _ "$REPO_ROOT"
