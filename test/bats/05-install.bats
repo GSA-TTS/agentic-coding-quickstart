@@ -250,12 +250,14 @@ SHIM
   printf 'old\n' > "$dir/.acq-v1-install.tmp.12345"
   # Lookalikes that are not a temporary marker are left alone.
   printf 'keep\n' > "$dir/.acq-v1-install.tmp.mine"
+  printf 'keep\n' > "$dir/.acq-v1-install.tmp.x.tmp.123"
   mkdir -p "$dir/.acq-v1-install.tmp.777"
   ln -s "$STUBDIR/elsewhere" "$dir/.acq-v1-install.tmp.888"
   run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
   assert_success
   [ ! -e "$dir/.acq-v1-install.tmp.12345" ]
   [ "$(cat "$dir/.acq-v1-install.tmp.mine")" = keep ]
+  [ "$(cat "$dir/.acq-v1-install.tmp.x.tmp.123")" = keep ]
   [ -d "$dir/.acq-v1-install.tmp.777" ]
   [ -L "$dir/.acq-v1-install.tmp.888" ]
 }
@@ -317,6 +319,16 @@ _tty_install() {
   _tty_install tty n
   assert_success
   assert_line 'PROMPTS=1'
+  assert_output --partial 'Not changing your PATH'
+  [ ! -e "$HOME/.profile" ]
+}
+
+@test "installer: curl | sh never prompts when its output is captured" {
+  # A controlling terminal exists, but stdout and stderr go to a file, so no one
+  # is watching: the installer must decline without writing a prompt to it.
+  _tty_install captured
+  assert_success
+  assert_line 'PROMPTS=0'
   assert_output --partial 'Not changing your PATH'
   [ ! -e "$HOME/.profile" ]
 }

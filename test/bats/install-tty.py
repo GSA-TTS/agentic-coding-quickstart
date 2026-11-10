@@ -9,6 +9,11 @@ Two modes:
   notty        a new session with no controlling terminal, so /dev/tty cannot
                be opened, while stdout and stderr are still a pseudo-terminal.
                Nothing is ever typed.
+  captured     a pseudo-terminal is the controlling terminal, but the shell's
+               stdout and stderr go to a file, as when a harness captures the
+               output. A prompt that does reach the terminal is answered "n"
+               (so a regression is counted, not left hanging); the captured
+               output follows the terminal's.
 
 Usage: install-tty.py MODE [ANSWER] INSTALL_SH [INSTALLER ARGS...]
 
@@ -24,6 +29,7 @@ import pty
 import select
 import signal
 import sys
+import tempfile
 import time
 
 DEADLINE = 60.0
@@ -85,11 +91,32 @@ def run_notty(script: str, args: list[str]) -> int:
     return _drain(master, pid, None)
 
 
+def run_captured(script: str, args: list[str]) -> int:
+    fd, log = tempfile.mkstemp(prefix="install-tty.")
+    os.close(fd)
+    try:
+        pid, master = pty.fork()
+        if pid == 0:
+            out = os.open(log, os.O_WRONLY | os.O_TRUNC)
+            os.dup2(out, 1)
+            os.dup2(out, 2)
+            os.close(out)
+            os.execvp("sh", _argv(script, args))
+        code = _drain(master, pid, "n")
+        with open(log, encoding="utf-8", errors="replace") as captured:
+            sys.stdout.write(captured.read())
+        return code
+    finally:
+        os.unlink(log)
+
+
 def main(argv: list[str]) -> int:
     if len(argv) >= 3 and argv[0] == "tty":
         return run_tty(argv[1], argv[2], argv[3:])
     if len(argv) >= 2 and argv[0] == "notty":
         return run_notty(argv[1], argv[2:])
+    if len(argv) >= 2 and argv[0] == "captured":
+        return run_captured(argv[1], argv[2:])
     sys.stderr.write(__doc__ or "")
     return 2
 

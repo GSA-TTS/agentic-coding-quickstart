@@ -82,7 +82,8 @@ jobs:
 
       # Confirm the checkout is exactly the pin and unmodified, then make its
       # tree read-only so no test can change it. .git stays writable for the
-      # checkout action's post-job cleanup.
+      # checkout action's post-job cleanup. Symlinks are skipped: chmod follows
+      # them, so one in a future pin could reach files outside the checkout.
       - name: Verify the pinned Patterns checkout
         env:
           PATTERNS_REF: ${{ steps.patterns-pin.outputs.ref }}
@@ -91,7 +92,7 @@ jobs:
           patterns_dir=.ci/agentic-coding-patterns
           [ "$(git -C "$patterns_dir" rev-parse HEAD)" = "$PATTERNS_REF" ]
           test -z "$(git -C "$patterns_dir" status --porcelain)"
-          find "$patterns_dir" -path "$patterns_dir/.git" -prune -o -exec chmod a-w {} +
+          find "$patterns_dir" -path "$patterns_dir/.git" -prune -o ! -type l -exec chmod a-w {} +
 
       # Tier-1 vectors + sentinel coverage + coverage-manifest validation, plus
       # the pinned-tree checks above. Those checks skip when they cannot see the

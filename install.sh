@@ -554,7 +554,7 @@ if [ "$was_marked" -eq 1 ]; then
     [ -d "$stale" ] && [ ! -L "$stale" ] && rm -rf "$stale"
   done
   for stale in "$marker".tmp.*; do
-    case "${stale##*.tmp.}" in ''|*[!0-9]*) continue ;; esac
+    case "${stale#"$marker".tmp.}" in ''|*[!0-9]*) continue ;; esac
     [ -f "$stale" ] && [ ! -L "$stale" ] && rm -f "$stale"
   done
 fi
