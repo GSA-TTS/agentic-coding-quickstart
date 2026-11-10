@@ -6699,11 +6699,96 @@ _acq_msb_parse_host_env() {
   eval "$_env_out=\$_env_var"
 }
 
-# _acq_msb_secret_refeed SERVICE SCOPE ENV HOST — live add/rotate: re-feed a
-# newly-set/rotated secret to running sandboxes via `msb modify --secret ENV@HOST`
-# (the guest keeps its placeholder; only the injected value changes) so it takes
-# effect without recreate. A named SCOPE targets that sandbox; empty SCOPE sweeps
-# all running sandboxes. Echoes the count of sandboxes re-fed.
+# _acq_msb_has_own_value SERVICE SANDBOX — 0 when SANDBOX holds its own
+# (sandbox-scoped) value for SERVICE, readable or not. The sandbox scope takes
+# precedence over the global one, so a global set or rm must leave such a
+# sandbox's credential bound (a per-sandbox, narrowed GitHub token is the usual
+# case). Never prints a value.
+_acq_msb_has_own_value() {
+  local service="$1" sandbox="${2:-}" key v
+  [ -n "$sandbox" ] || return 1
+  key=$(_acq_secret_key "$service" "$sandbox" 2>/dev/null) || return 1
+  if v=$(acq_secret_get "$key" 2>/dev/null) && [ -n "$v" ]; then
+    v=""
+    return 0
+  fi
+  v=""
+  command -v _acq_secret_value_present_unreadable >/dev/null 2>&1 || return 1
+  _acq_secret_value_present_unreadable "$key"
+}
+
+# _acq_msb_provider_delivered SERVICE SANDBOX — 0 unless SERVICE is a provider
+# credential that SANDBOX's recorded provider selection excludes. Create binds a
+# provider only when the sandbox's selection delivers it (`--no-provider-kits`
+# or an external-only selection leaves the default provider out), so a later
+# `secret set` or key rotation must not push the key into that sandbox either.
+# The selection is loaded in a subshell so the caller's globals are untouched.
+# A record that exists but cannot be read, or holds an unknown selection mode,
+# fails closed (not delivered): reading it as empty would look like a legacy
+# record and deliver the default provider to a `--no-provider-kits` sandbox.
+_acq_msb_provider_delivered() {
+  local service="$1" sandbox="$2" key_env ids
+  command -v acq_provider_selection_load >/dev/null 2>&1 || return 0
+  command -v acq_provider_delivery_ids >/dev/null 2>&1 || return 0
+  case "$service" in github) return 0 ;; esac
+  key_env=$(acq_provider_credential_key_env "$service" 2>/dev/null) || key_env=""
+  [ -n "$key_env" ] || return 0
+  if ! acq_provenance_readable msb "$sandbox"; then
+    echo "acq(msb): warning: not applying '$service' to sandbox '$sandbox': its provenance record cannot be read, so its provider selection is unknown." >&2
+    return 1
+  fi
+  ids=$(acq_provider_selection_load msb "$sandbox" && acq_provider_delivery_ids "$sandbox" msb) 2>/dev/null || return 1
+  case "
+$ids
+" in
+    *"
+$service
+"*) return 0 ;;
+  esac
+  return 1
+}
+
+# _acq_msb_refeed_eligible SERVICE SANDBOX SCOPE — 0 when a change to SERVICE
+# in SCOPE (empty = global) should reach SANDBOX: a global change skips a
+# sandbox with its own value, and any change skips a sandbox whose provider
+# selection excludes the service.
+_acq_msb_refeed_eligible() {
+  local service="$1" sandbox="$2" scope_name="${3:-}"
+  if [ -z "$scope_name" ] && _acq_msb_has_own_value "$service" "$sandbox"; then
+    acq_debug "msb modify: '$sandbox' keeps its own '$service' value"
+    return 1
+  fi
+  if ! _acq_msb_provider_delivered "$service" "$sandbox"; then
+    acq_debug "msb modify: '$sandbox' provider selection excludes '$service'"
+    return 1
+  fi
+  return 0
+}
+
+# _acq_msb_refeed_one SANDBOX ENV HOST [OLD_ENV OLD_HOST] — bind ENV@HOST in one
+# running sandbox (the value is already exported under ENV by the caller). A
+# binding is never left behind under a stale name: when the service's previous
+# binding differs (its env var was renamed, or its host changed), the old name
+# is removed first with its own `--secret-rm`, so the old variable stops
+# receiving the credential.
+_acq_msb_refeed_one() {
+  local sb="$1" _env="$2" _host="$3" _old_env="${4:-}" _old_host="${5:-}"
+  if [ -n "$_old_env" ] && { [ "$_old_env" != "$_env" ] || [ "$_old_host" != "$_host" ]; }; then
+    if ! _acq_msb_cli modify "$sb" --secret-rm "$_old_env" </dev/null >/dev/null 2>&1; then
+      echo "acq(msb): warning: could not unbind the previous binding $_old_env from sandbox '$sb'." >&2
+    fi
+  fi
+  _acq_msb_cli modify "$sb" --secret "${_env}@${_host}" </dev/null >/dev/null 2>&1
+}
+
+# _acq_msb_secret_refeed SERVICE SCOPE ENV HOST [OLD_ENV OLD_HOST] — live
+# add/rotate: re-feed a newly-set/rotated secret to running sandboxes via
+# `msb modify --secret ENV@HOST` (the guest keeps its placeholder; only the
+# injected value changes) so it takes effect without recreate. A named SCOPE
+# targets that sandbox; empty SCOPE sweeps all running sandboxes, except those
+# _acq_msb_refeed_eligible leaves alone. OLD_ENV/OLD_HOST name the service's
+# binding before this change, unbound first when it differs. Echoes the count of
+# sandboxes re-fed.
 #
 # SECRET NEVER ON ARGV: the value is placed in the environment via a dynamic
 # `export "$ENV=$val"` (an env ENTRY, invisible to `ps`/`/proc/<pid>/cmdline`),
@@ -6711,7 +6796,7 @@ _acq_msb_parse_host_env() {
 # would leak the token to any `ps -ww` for the life of the child. The var is
 # unset immediately after the sweep.
 _acq_msb_secret_refeed() {
-  local service="$1" scope_name="$2" _env="$3" _host="$4"
+  local service="$1" scope_name="$2" _env="$3" _host="$4" _old_env="${5:-}" _old_host="${6:-}"
   local val applied=0 sb
   [ -n "$_env" ] && [ -n "$_host" ] || { printf '0\n'; return 0; }
   # OPT-OUT of the live-refeed sweep. A GLOBAL `acq secret set -g <svc>` normally
@@ -6730,8 +6815,8 @@ _acq_msb_secret_refeed() {
   # shellcheck disable=SC2163  # dynamic export of the resolved binding env var
   export "$_env=$val"
   if [ -n "$scope_name" ]; then
-    if acq_backend_exists "$scope_name"; then
-      _acq_msb_cli modify "$scope_name" --secret "${_env}@${_host}" </dev/null >/dev/null 2>&1 \
+    if acq_backend_exists "$scope_name" && _acq_msb_refeed_eligible "$service" "$scope_name" "$scope_name"; then
+      _acq_msb_refeed_one "$scope_name" "$_env" "$_host" "$_old_env" "$_old_host" \
         && applied=$((applied + 1))
     fi
   else
@@ -6741,7 +6826,8 @@ _acq_msb_secret_refeed() {
     while IFS= read -r sb; do
       sb="${sb%$'\r'}"
       [ -n "$sb" ] || continue
-      _acq_msb_cli modify "$sb" --secret "${_env}@${_host}" </dev/null >/dev/null 2>&1 \
+      _acq_msb_refeed_eligible "$service" "$sb" "" </dev/null || continue
+      _acq_msb_refeed_one "$sb" "$_env" "$_host" "$_old_env" "$_old_host" \
         && applied=$((applied + 1))
     done <<EOF
 $(_acq_msb_cli list -q 2>/dev/null)
@@ -6813,6 +6899,13 @@ acq_backend_secret_set() {
     return 1
   fi
 
+  # The binding BEFORE this set: a new --host/--env sidecar can rename the env
+  # var or move the host, and running sandboxes still hold the old binding.
+  local _old_binding _old_env _old_host
+  _old_binding=$(_acq_msb_service_binding "$service" "$scope_name")
+  _old_env=$(printf '%s' "$_old_binding" | cut -f1)
+  _old_host=$(printf '%s' "$_old_binding" | cut -f2)
+
   # Store into the acq-owned store (keychain/file); value read from TTY/stdin.
   # host/env (when supplied) are persisted as a non-secret endpoint sidecar.
   acq_secret_set_interactive "$service" "$scope_name" "$host" "$env_var" || return 1
@@ -6824,7 +6917,7 @@ acq_backend_secret_set() {
   _binding=$(_acq_msb_service_binding "$service" "$scope_name")
   _env=$(printf '%s' "$_binding" | cut -f1)
   _host=$(printf '%s' "$_binding" | cut -f2)
-  applied=$(_acq_msb_secret_refeed "$service" "$scope_name" "$_env" "$_host")
+  applied=$(_acq_msb_secret_refeed "$service" "$scope_name" "$_env" "$_host" "$_old_env" "$_old_host")
 
   _acq_msb_secret_set_guidance "$service" "$_env" "$_host" "$applied"
   return 0
@@ -6856,12 +6949,16 @@ acq_backend_secret_propagate() {
     return 1
   fi
   _probe_val=""
+  # Count only the sandboxes the re-feed is meant to reach, so one that keeps
+  # its own value or excludes the provider is not reported as a failure.
   if [ -n "$scope_name" ]; then
-    eligible=1
+    # The re-feed below prints any warning; the count stays quiet.
+    _acq_msb_refeed_eligible "$service" "$scope_name" "$scope_name" 2>/dev/null && eligible=1
   else
     while IFS= read -r sb; do
       sb="${sb%$'\r'}"
-      [ -n "$sb" ] && eligible=$((eligible + 1))
+      [ -n "$sb" ] || continue
+      _acq_msb_refeed_eligible "$service" "$sb" "" </dev/null 2>/dev/null && eligible=$((eligible + 1))
     done <<EOF
 $(_acq_msb_cli list -q 2>/dev/null)
 EOF
@@ -6886,12 +6983,54 @@ EOF
 # so the injected value stops flowing immediately — a named scope targets that
 # sandbox; a global rm sweeps all running sandboxes. Idempotent (absent secret /
 # absent binding are both success). Scope parsing mirrors acq_backend_secret_set.
-# _acq_msb_secret_unbind SCOPE ENV — live-unbind a secret from running sandboxes
-# via `msb modify --secret-rm ENV`, for services the adapter actually binds. A
-# named SCOPE targets that sandbox; empty SCOPE sweeps every running sandbox.
-# Best-effort per sandbox; echoes the count unbound. Empty ENV => nothing to do.
+# _acq_msb_secret_keep_own SERVICE SANDBOX GLOBAL_ENV — a global rm reaching a
+# sandbox that holds its own value: that credential takes precedence and stays
+# bound. When the sandbox's own binding uses the same env var, its own value is
+# re-asserted (`msb modify --secret` replaces the injected value), which also
+# repairs a sandbox whose own binding an older acq overwrote with the global
+# value. When its own binding uses another name, only the global name is
+# removed. The value travels in the environment, never on argv.
+_acq_msb_secret_keep_own() {
+  local service="$1" sb="$2" global_env="$3" _b _oenv _ohost _oval
+  _b=$(_acq_msb_service_binding "$service" "$sb")
+  _oenv=$(printf '%s' "$_b" | cut -f1)
+  _ohost=$(printf '%s' "$_b" | cut -f2)
+  if [ "$_oenv" != "$global_env" ]; then
+    _acq_msb_cli modify "$sb" --secret-rm "$global_env" </dev/null >/dev/null 2>&1 || true
+    return 0
+  fi
+  [ -n "$_oenv" ] && [ -n "$_ohost" ] || return 0
+  # The sandbox-scoped key only: a fallback to a global value must never be
+  # re-bound as the sandbox's own.
+  local _okey
+  _okey=$(_acq_secret_key "$service" "$sb" 2>/dev/null) || _okey=""
+  if [ -z "$_okey" ] || ! _oval=$(acq_secret_get "$_okey" 2>/dev/null) || [ -z "$_oval" ]; then
+    _oval=""
+    echo "acq(msb): warning: sandbox '$sb' has its own '$service' value, but it cannot be read; it may still be injected with the removed global value. Re-run 'acq secret set $sb $service', or recreate the sandbox." >&2
+    return 0
+  fi
+  local _rc=0
+  # shellcheck disable=SC2163  # dynamic export of the resolved binding env var
+  export "$_oenv=$_oval"
+  _acq_msb_cli modify "$sb" --secret "${_oenv}@${_ohost}" </dev/null >/dev/null 2>&1 || _rc=$?
+  unset "$_oenv"
+  _oval=""
+  if [ "$_rc" -ne 0 ]; then
+    echo "acq(msb): warning: could not re-bind sandbox '$sb''s own '$service' value; it may still be injected with the removed global value. Re-run 'acq secret set $sb $service', or recreate the sandbox." >&2
+    return 0
+  fi
+  acq_debug "msb modify: '$sb' keeps its own '$service' value"
+  return 0
+}
+
+# _acq_msb_secret_unbind SCOPE ENV [SERVICE] — live-unbind a secret from running
+# sandboxes via `msb modify --secret-rm ENV`, for services the adapter actually
+# binds. A named SCOPE targets that sandbox; empty SCOPE sweeps every running
+# sandbox, except that a sandbox holding its own SERVICE value keeps it (see
+# _acq_msb_secret_keep_own). Best-effort per sandbox; echoes the count unbound.
+# Empty ENV => nothing to do.
 _acq_msb_secret_unbind() {
-  local scope_name="$1" env_name="$2" unbound=0 sb
+  local scope_name="$1" env_name="$2" service="${3:-}" unbound=0 sb
   [ -n "$env_name" ] || { printf '0\n'; return 0; }
   # Symmetric opt-out with _acq_msb_secret_refeed: when live refeed is suppressed
   # (ACQ_SECRET_NO_LIVE_REFEED=1, e.g. scripts/verify-backends), do NOT reach into
@@ -6914,6 +7053,10 @@ _acq_msb_secret_unbind() {
     while IFS= read -r sb; do
       sb="${sb%$'\r'}"
       [ -n "$sb" ] || continue
+      if [ -n "$service" ] && _acq_msb_has_own_value "$service" "$sb" </dev/null; then
+        _acq_msb_secret_keep_own "$service" "$sb" "$env_name"
+        continue
+      fi
       _acq_msb_cli modify "$sb" --secret-rm "$env_name" </dev/null >/dev/null 2>&1 \
         && unbound=$((unbound + 1))
     done <<EOF
@@ -6957,7 +7100,7 @@ acq_backend_secret_rm() {
   #    a recorded env). A named scope targets that sandbox; a global rm sweeps
   #    every running sandbox.
   local unbound
-  unbound=$(_acq_msb_secret_unbind "$scope_name" "$env_name")
+  unbound=$(_acq_msb_secret_unbind "$scope_name" "$env_name" "$service")
 
   # 3) Drop the non-secret endpoint sidecar for this service/scope (idempotent),
   #    so a re-set does not resurrect a stale host/env mapping. Done AFTER the

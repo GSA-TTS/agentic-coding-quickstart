@@ -1358,14 +1358,105 @@ _acq_path_folds_to_dot() {
 }
 
 # _acq_workspace_safe PATH — check PATH as given and, when it is a directory, its
-# symlink-resolved form.
+# symlink-resolved form. Then refuse a workspace that contains one of acq's own
+# host directories.
 _acq_workspace_safe() {
   local p="$1" real
   _acq_workspace_path_safe "$p" "$p" || return 1
-  [ -d "$p" ] || return 0
-  real=$(canonicalize_path "$p")
-  [ "$real" = "$p" ] && return 0
-  _acq_workspace_path_safe "$real" "$p (resolves to $real)"
+  if [ -d "$p" ]; then
+    real=$(canonicalize_path "$p")
+    if [ "$real" != "$p" ]; then
+      _acq_workspace_path_safe "$real" "$p (resolves to $real)" || return 1
+    fi
+  fi
+  _acq_workspace_trusted_safe "$p"
+}
+
+# _acq_trusted_host_dirs — acq's own host directories, one per line: the state
+# dir, the provenance dir (which holds each sandbox's read-only trusted config),
+# the config dir, the data dir (the provider-input validator lives there), the
+# cache dir and the sbx and msb kit caches (the kit payloads acq applies), and
+# the secret store's file, sidecar and index locations. Unresolvable entries
+# are skipped.
+_acq_trusted_host_dirs() {
+  local d
+  if d=$(acq_state_dir 2>/dev/null); then printf '%s\n' "$d"; fi
+  if d=$(_acq_provenance_dir 2>/dev/null); then printf '%s\n' "$d"; fi
+  if d=$(_acq_config_file 2>/dev/null); then dirname -- "$d"; fi
+  if d=$(acq_xdg_dir XDG_DATA_HOME .local/share 2>/dev/null); then printf '%s/acq\n' "$d"; fi
+  if d=$(acq_xdg_dir XDG_CACHE_HOME .cache 2>/dev/null); then printf '%s/acq\n' "$d"; fi
+  for d in "${ACQ_SECRET_FILE_DIR:-}" "${ACQ_SECRET_META_DIR:-}" "${ACQ_PROVIDER_INPUT_DATA_DIR:-}" \
+      "${ACQ_SBX_KIT_CACHE:-}" "${ACQ_MSB_KIT_CACHE:-}"; do
+    if [ -n "$d" ]; then printf '%s\n' "$d"; fi
+  done
+  if [ -n "${ACQ_SECRET_INDEX_FILE:-}" ]; then dirname -- "$ACQ_SECRET_INDEX_FILE"; fi
+  return 0
+}
+
+# _acq_path_within CHILD PARENT — 0 when the absolute path CHILD is PARENT or
+# lies below it. A plain string comparison; trailing slashes are ignored and the
+# quoted pattern keeps glob characters in PARENT literal.
+_acq_path_within() {
+  local c="${1%/}" p="${2%/}"
+  [ -n "$p" ] || return 0
+  case "$c" in
+    "$p"|"$p"/*) return 0 ;;
+  esac
+  return 1
+}
+
+# _acq_path_physical PATH — PATH made absolute (against $PWD) with its deepest
+# existing ancestor resolved through symlinks; a missing tail is kept as given,
+# so a directory acq has not created yet still compares correctly.
+_acq_path_physical() {
+  local p="$1" tail="" base
+  case "$p" in /*) ;; *) p="$PWD/$p" ;; esac
+  p="${p%/}"
+  while [ -n "$p" ] && [ ! -e "$p" ]; do
+    tail="/${p##*/}$tail"
+    p="${p%/*}"
+  done
+  [ -n "$p" ] || p="/"
+  base=$(canonicalize_path "$p")
+  base="${base%/}$tail"
+  printf '%s\n' "${base:-/}"
+}
+
+# _acq_workspace_trusted_safe PATH — refuse a workspace that is, contains, or
+# lies inside one of acq's own host directories. The workspace is mounted into
+# the guest, so such a mount would let the sandbox read the secret store and
+# rewrite acq's records, its kit caches and the trusted config that acq
+# otherwise mounts read-only (one sandbox's workspace inside the provenance dir
+# would reach every other sandbox's trusted config). Both the paths as given and
+# their symlink-resolved forms are compared. A directory that resolves to '/'
+# is ignored for the "inside" test, which would otherwise refuse everything.
+_acq_workspace_trusted_safe() {
+  local ws="$1" wsp d dp how
+  case "$ws" in /*) ;; *) ws="$PWD/$ws" ;; esac
+  wsp=$(_acq_path_physical "$ws")
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    acq_path_is_absolute "$d" || continue
+    dp=$(_acq_path_physical "$d")
+    how=""
+    if _acq_path_within "$d" "$ws" || _acq_path_within "$dp" "$wsp"; then
+      how="contains"
+    elif [ "${d%/}" != "" ] && [ "${dp%/}" != "" ] \
+        && { _acq_path_within "$ws" "$d" || _acq_path_within "$wsp" "$dp"; }; then
+      how="is inside"
+    fi
+    if [ -n "$how" ]; then
+      echo "acq: error: workspace $(acq_printable "$1") $how acq's own directory $(acq_printable "$d")." >&2
+      echo "     The sandbox would reach acq's state, config or secret store through the" >&2
+      echo "     workspace mount, including the trusted config acq mounts read-only." >&2
+      # The remediation wording matches the Python acq's validation_failed error.
+      echo "     use a project directory that holds none of acq's state, config or secret-store directories (not your home directory itself), then re-run" >&2
+      return 1
+    fi
+  done <<EOF
+$(_acq_trusted_host_dirs)
+EOF
+  return 0
 }
 
 # _acq_workspace_path_safe PATH SHOWN — the per-path check behind
@@ -2105,8 +2196,42 @@ _acq_config_read_field() {
 # empty VALUE removes the key entirely (so "no extras" is represented by absence,
 # not an empty-valued line). Atomic (temp file + mv). Best-effort: a write failure
 # warns via acq_debug and returns non-zero but never aborts the caller.
+#
+# A symlinked config.yaml (a dotfiles setup) is written THROUGH: the temp file is
+# created beside the link's final target and renamed over the target, so the link
+# survives. An existing file keeps its mode; only a new file gets 0600. The
+# Python writer (config.py) behaves the same way.
+
+# _acq_config_write_target PATH — where a write to PATH lands: a symlink's final
+# target (followed link by link, a relative link resolved against its own
+# directory), else PATH itself, with the parent directory made physical. Fails on
+# a link loop or a parent directory that does not exist.
+_acq_config_write_target() {
+  local p="$1" hops=0 dir link
+  while [ -h "$p" ]; do
+    hops=$((hops + 1))
+    [ "$hops" -le 40 ] || return 1
+    dir=$(CDPATH='' cd -P -- "$(dirname -- "$p")" 2>/dev/null && pwd -P) || return 1
+    link=$(readlink -- "$p") || return 1
+    case "$link" in
+      /*) p="$link" ;;
+      *) p="$dir/$link" ;;
+    esac
+  done
+  dir=$(CDPATH='' cd -P -- "$(dirname -- "$p")" 2>/dev/null && pwd -P) || return 1
+  printf '%s/%s\n' "$dir" "$(basename -- "$p")"
+}
+
+# _acq_file_mode PATH — PATH's permission bits in octal (GNU or BSD stat).
+_acq_file_mode() {
+  local m
+  m=$(stat -c %a -- "$1" 2>/dev/null) || m=$(stat -f %Lp -- "$1" 2>/dev/null) || return 1
+  case "$m" in ''|*[!0-7]*) return 1 ;; esac
+  printf '%s\n' "$m"
+}
+
 _acq_config_write_field() {
-  local key="${1:-}" value="${2:-}" cfg dir tmp
+  local key="${1:-}" value="${2:-}" cfg dir tmp target mode
   case "$key" in
     ''|*[!A-Za-z0-9_]*) acq_debug "config: refusing to write unsafe key '$key'"; return 1 ;;
   esac
@@ -2117,7 +2242,12 @@ _acq_config_write_field() {
     return 1
   fi
   chmod 700 "$dir" 2>/dev/null || { acq_debug "config: chmod failed: $dir"; return 1; }
-  tmp="${cfg}.tmp.$$"
+  target=$(_acq_config_write_target "$cfg") || { acq_debug "config: cannot resolve write target: $cfg"; return 1; }
+  mode=600
+  if [ -f "$target" ]; then
+    mode=$(_acq_file_mode "$target") || { acq_debug "config: cannot read mode: $target"; return 1; }
+  fi
+  tmp="${target}.tmp.$$"
   {
     # Re-emit every existing line except the one for KEY (which we replace/drop).
     if [ -f "$cfg" ]; then
@@ -2136,8 +2266,8 @@ _acq_config_write_field() {
       printf '%s: %s\n' "$key" "$value"
     fi
   } > "$tmp" 2>/dev/null || { acq_debug "config: write failed: $tmp"; rm -f "$tmp" 2>/dev/null; return 1; }
-  chmod 600 "$tmp" 2>/dev/null || { acq_debug "config: chmod failed: $tmp"; rm -f "$tmp" 2>/dev/null; return 1; }
-  mv -f "$tmp" "$cfg" 2>/dev/null || { acq_debug "config: mv failed: $cfg"; rm -f "$tmp" 2>/dev/null; return 1; }
+  chmod "$mode" "$tmp" 2>/dev/null || { acq_debug "config: chmod failed: $tmp"; rm -f "$tmp" 2>/dev/null; return 1; }
+  mv -f "$tmp" "$target" 2>/dev/null || { acq_debug "config: mv failed: $target"; rm -f "$tmp" 2>/dev/null; return 1; }
   acq_debug "config: wrote ${key}"
   return 0
 }
@@ -2537,6 +2667,22 @@ acq_provenance_field() {
   ' "$file" 2>/dev/null || true
 }
 
+# acq_provenance_readable BACKEND NAME — 0 when the sandbox's provenance record is
+# absent (a sandbox from before records existed) or is a regular file acq can
+# read; 1 when its path cannot be resolved or the record exists but cannot be
+# read. acq_provenance_field reads an unreadable record as empty, which a caller
+# would mistake for a legacy record, so a least-privilege decision checks this
+# first and fails closed.
+acq_provenance_readable() {
+  local file
+  file=$(_acq_provenance_file "${1:-}" "${2:-}") || return 1
+  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    return 0
+  fi
+  [ -f "$file" ] || return 1
+  cat -- "$file" >/dev/null 2>&1
+}
+
 # Remember the primary host workspace mounted into a sandbox. This is non-secret
 # host-side state used by commands that take only SANDBOX later (for example,
 # `acq github-scope SANDBOX`) so they do not accidentally inspect the caller's
@@ -2867,13 +3013,13 @@ _acq_kit_source_parse_entry() {
     *'@'*) ref="${rest#*@}"; rest="${rest%%@*}" ;;
   esac
   if ! repo=$(_acq_kit_source_normalize_repo "$rest"); then
-    echo "acq: ${source}: invalid kit source '$entry'" >&2
+    echo "acq: ${source}: invalid kit source '$(kit_ref_display "$entry")'" >&2
     echo "     want host/owner/repo[@REF][|DIR] (for example github.com/acme/kits@<sha>)" >&2
     return 1
   fi
   case "$ref" in
     *[!A-Za-z0-9_.-]*)
-      echo "acq: ${source}: invalid ref '$ref' for '$repo'" >&2
+      echo "acq: ${source}: invalid ref '$(kit_ref_display "$ref")' for '$repo'" >&2
       return 1
       ;;
   esac
@@ -2942,14 +3088,17 @@ _acq_kit_source_owner_prefix() {
 # fetching their kits.
 # shellcheck disable=SC2120  # EXCLUDE_REPO is passed by sbx.sh (another file), which per-file analysis cannot see
 acq_kit_source_prefixes() {
-  local exclude="${1:-}" entries repo rest prefix seen=""
+  local exclude="${1:-}" entries repo rest prefix prefix_lc seen=""
   entries=$(acq_kit_sources_entries) || return 1
   while IFS='|' read -r repo rest; do
     [ -n "$repo" ] || continue
     [ "$repo" != "$exclude" ] || continue
     prefix=$(_acq_kit_source_owner_prefix "$repo")
-    case " $seen " in *" $prefix "*) continue ;; esac
-    seen="$seen $prefix"
+    # Prefixes that differ only in letter case name the same owner: list it once,
+    # under the first spelling seen (as the Python acq does).
+    prefix_lc=$(_acq_ascii_lower "$prefix")
+    case " $seen " in *" $prefix_lc "*) continue ;; esac
+    seen="$seen $prefix_lc"
     printf '%s\n' "$prefix"
   done <<EOF
 $entries
@@ -2965,24 +3114,37 @@ EOF
   return 0
 }
 
-# _acq_kit_source_entry_for_repo REPO — echo "repo<TAB>ref<TAB>dir" for a repo that
-# is registered (exact host/owner/repo), or fail.
+# _acq_kit_source_entry_for_repo REPO — echo "repo|ref|dir" for a registered repo,
+# or fail. GitHub ignores the letter case of hosts, owners and repositories, so
+# the lookup does too: an exact spelling wins, else the first entry that matches
+# ignoring ASCII case. The echoed repo is the REGISTERED spelling, which callers
+# that rewrite the registry must use.
 _acq_kit_source_entry_for_repo() {
-  local wanted="${1:-}" repo ref dir
+  local wanted="${1:-}" repo ref dir entries wanted_lc
   [ -n "$wanted" ] || return 1
+  entries=$(acq_kit_sources_entries) || entries=""
   while IFS='|' read -r repo ref dir; do
     [ -n "$repo" ] || continue
     [ "$repo" = "$wanted" ] || continue
     printf '%s|%s|%s\n' "$repo" "$ref" "$dir"
     return 0
   done <<EOF
-$(acq_kit_sources_entries)
+$entries
+EOF
+  wanted_lc=$(_acq_ascii_lower "$wanted")
+  while IFS='|' read -r repo ref dir; do
+    [ -n "$repo" ] || continue
+    [ "$(_acq_ascii_lower "$repo")" = "$wanted_lc" ] || continue
+    printf '%s|%s|%s\n' "$repo" "$ref" "$dir"
+    return 0
+  done <<EOF
+$entries
 EOF
   # The pinned Patterns release is acq's CONTROL PLANE (validator + schemas), so
   # it stays resolvable even when the registry is overridden for one invocation
   # (ACQ_KIT_SOURCES) or emptied: the default provider kit must not vanish just
   # because an extra source was added for this run.
-  if [ "$wanted" = "$ACQ_KIT_SOURCE_DEFAULT_REPO" ]; then
+  if _acq_kit_source_is_control_plane "$wanted"; then
     printf '%s|%s|%s\n' \
       "$ACQ_KIT_SOURCE_DEFAULT_REPO" "$ACQ_KIT_SOURCE_DEFAULT_REF" "$ACQ_KIT_SOURCE_DEFAULT_DIR"
     return 0
@@ -2993,38 +3155,43 @@ EOF
 # _acq_kit_source_resolve_repo WANT — accept a full repo or a unique source
 # basename ("agentic-coding-patterns") and echo the full repo.
 _acq_kit_source_resolve_repo() {
-  local want="${1:-}" repo ref dir found="" count=0
+  local want="${1:-}" repo ref dir found="" count=0 shown
   [ -n "$want" ] || return 1
+  # Messages name WANT only through kit_ref_display: it is user input and may
+  # carry a credential.
+  shown=$(kit_ref_display "$want")
   # The shipped default source is the pinned control plane: always resolvable.
   if [ "$want" = "${ACQ_KIT_SOURCE_DEFAULT_REPO##*/}" ]; then
     printf '%s\n' "$ACQ_KIT_SOURCE_DEFAULT_REPO"
     return 0
   fi
   case "$want" in
-    */*) _acq_kit_source_entry_for_repo "$want" >/dev/null || {
-           echo "acq: kit source '$want' is not trusted." >&2
-           echo "     Add it first: acq kit-source add $want --ref <sha>" >&2
+    */*) found=$(_acq_kit_source_entry_for_repo "$want") || {
+           echo "acq: kit source '$shown' is not trusted." >&2
+           echo "     Add it first: acq kit-source add $shown --ref <sha>" >&2
            return 1
          }
-         printf '%s\n' "$want"
+         printf '%s\n' "${found%%|*}"
          return 0
          ;;
   esac
+  local want_lc
+  want_lc=$(_acq_ascii_lower "$want")
   while IFS='|' read -r repo ref dir; do
     [ -n "$repo" ] || continue
-    [ "${repo##*/}" = "$want" ] || continue
+    [ "$(_acq_ascii_lower "${repo##*/}")" = "$want_lc" ] || continue
     count=$((count + 1))
     found="$repo"
   done <<EOF
 $(acq_kit_sources_entries)
 EOF
   if [ "$count" -eq 0 ]; then
-    echo "acq: kit source name '$want' is not registered." >&2
+    echo "acq: kit source name '$shown' is not registered." >&2
     echo "     See: acq kit-source ls" >&2
     return 1
   fi
   if [ "$count" -gt 1 ]; then
-    echo "acq: kit source name '$want' is ambiguous; use host/owner/repo." >&2
+    echo "acq: kit source name '$shown' is ambiguous; use host/owner/repo." >&2
     echo "     See: acq kit-source ls" >&2
     return 1
   fi
@@ -3277,7 +3444,14 @@ acq_kit_source_set() {
   [ -n "$dir" ] || dir="$ACQ_KIT_SOURCE_DEFAULT_DIR"
   # Validate the entry before persisting it (same rules the reader enforces).
   _acq_kit_source_parse_entry "${repo}@${ref}|${dir}" "kit-source add" >/dev/null || return 1
-  summary=$(_acq_kit_source_rewrite "$repo" "$repo" "$ref" "$dir") || {
+  # An entry registered under another letter case is the same repository:
+  # replace it rather than add a second entry.
+  local existing drop="$repo"
+  if existing=$(_acq_kit_source_entry_for_repo "$repo" 2>/dev/null) \
+      && ! _acq_kit_source_is_control_plane "$repo"; then
+    drop="${existing%%|*}"
+  fi
+  summary=$(_acq_kit_source_rewrite "$drop" "$repo" "$ref" "$dir") || {
     echo "acq: kit-source add: could not write $(_acq_config_file)" >&2
     return 1
   }
@@ -3319,10 +3493,13 @@ acq_kit_source_rm() {
     echo "     Team/personal sources can be removed; the control plane is the pinned trust anchor." >&2
     return 1
   fi
-  if ! _acq_kit_source_entry_for_repo "$repo" >/dev/null; then
+  local entry
+  if ! entry=$(_acq_kit_source_entry_for_repo "$repo"); then
     echo "acq: kit source '${repo}' is not registered." >&2
     return 1
   fi
+  # Act on the registered spelling (the lookup ignores letter case).
+  repo="${entry%%|*}"
   # Reconcile the BACKEND allowlist first. If it cannot be brought in line, stop
   # with the registry untouched: nothing is reported as removed, the source stays
   # listed, and re-running this command after fixing the backend retries cleanly.

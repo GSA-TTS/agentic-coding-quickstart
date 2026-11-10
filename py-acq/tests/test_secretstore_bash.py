@@ -61,11 +61,12 @@ pytestmark = pytest.mark.skipif(BASH is None, reason="needs bash (Git Bash on Wi
 # The keychain fakes are POSIX scripts with a shebang; Windows cannot exec them.
 posix_fakes = pytest.mark.skipif(WINDOWS, reason="the fake keychain tools are POSIX scripts")
 
-# Bash pins its backend the way its own bats suite does: ACQ_SECRET_STORE_DIR
-# forces `file` at source time, so a keychain test unsets the force flag and
-# overrides the selector.
+# Bash pins its backend by overriding its selector. ACQ_SECRET_STORE_DIR alone
+# no longer forces `file` on Windows (there it only relocates the DPAPI files),
+# so the file case pins the selector too; a keychain test also unsets the force
+# flag.
 _PIN = {
-    "file": "",
+    "file": '_acq_secret_backend() { printf "file\\n"; }',
     "keychain-linux": 'unset ACQ_SECRET_FORCE_FILE; _acq_secret_backend() { printf "keychain-linux\\n"; }',
     "keychain-macos": 'unset ACQ_SECRET_FORCE_FILE; _acq_secret_backend() { printf "keychain-macos\\n"; }',
     "keychain-windows": 'unset ACQ_SECRET_FORCE_FILE; _acq_secret_backend() { printf "keychain-windows\\n"; }',
