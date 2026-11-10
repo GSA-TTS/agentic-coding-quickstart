@@ -363,6 +363,10 @@ def _read_record(path: Path, *, strict: bool, label: str) -> dict | None:
         raw = path.read_text(encoding="utf-8")
     except OSError:
         return None
+    except UnicodeDecodeError as exc:
+        if strict:
+            raise state.StateSchemaError(f"kit record for {label!r} is not valid UTF-8") from exc
+        return None
     try:
         doc = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -662,6 +666,30 @@ def provider_selection_fields(env: Mapping[str, str] | None = None) -> dict:
     return fields
 
 
+def _selection_record(backend: str, sandbox: str) -> dict | None:
+    """The provenance record as the provider selection reads it: absent is
+    None, but a record that exists and cannot be read (not valid JSON, not an
+    object, an unknown schema, or a read error other than "not found") raises
+    :class:`ProviderSelectionError`, so a damaged record never silently turns
+    into "nothing recorded" and the current selection."""
+    if os.environ.get(PROVENANCE_SEED_ENV) is not None:
+        return provenance_read(backend, sandbox)
+    unreadable = ProviderSelectionError(f"sandbox '{sandbox}' has an unreadable recorded provider selection")
+    try:
+        doc = json.loads(_provenance_path(backend, sandbox).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:  # ValueError covers bad UTF-8 and bad JSON
+        raise unreadable from exc
+    if not isinstance(doc, dict):
+        raise unreadable
+    if "schema" not in doc:
+        return None  # legacy v0 (no marker), which predates the recorded selection
+    if doc["schema"] != KIT_SCHEMA or isinstance(doc["schema"], bool):
+        raise unreadable
+    return doc
+
+
 def provider_selection_read(backend: str, sandbox: str) -> tuple[str, str] | None:
     """``(mode, provider_kits)`` as the sandbox's create recorded them.
 
@@ -671,7 +699,7 @@ def provider_selection_read(backend: str, sandbox: str) -> tuple[str, str] | Non
     Raises :class:`ProviderSelectionError` for a value acq never writes, as
     Bash refuses one.
     """
-    rec = provenance_read(backend, sandbox)
+    rec = _selection_record(backend, sandbox)
     if rec is None or "provider_selection" not in rec:
         return None
     mode, kits_value = rec["provider_selection"], rec.get("provider_kits", "")

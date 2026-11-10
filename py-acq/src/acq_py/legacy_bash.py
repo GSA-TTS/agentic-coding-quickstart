@@ -17,7 +17,10 @@ Its user configuration lives in flat ``config.yaml`` keys: ``kit_sources``,
 
 Everything here only reads. Nothing is trusted beyond what the Bash readers
 themselves accept: each field is checked against the grammar Bash validates it
-with, and a value that fails is treated as absent. These files are written by
+with, and a value that fails is treated as absent. The one exception is the
+provider selection, which Bash refuses rather than ignores when it holds a
+value Bash never writes: it is carried over as is, so the Python acq refuses it
+the same way. These files are written by
 acq on the host, never by a guest.
 """
 
@@ -71,7 +74,8 @@ class BashSandbox:
     applied_ref: str | None = None
     applied_at: str | None = None
     # As Bash ``acq_provenance_write`` recorded them; None when the record
-    # predates them or holds a value Bash never writes.
+    # predates them. A ``provider_selection`` Bash never writes is kept as is,
+    # so the imported record is refused where Bash refuses it.
     provider_selection: str | None = None
     provider_kits: str | None = None
 
@@ -210,11 +214,17 @@ def _sandbox_name(stem: str) -> str | None:
 
 
 def sandbox_names(backend: str) -> list[str]:
-    """Every sandbox name with a Bash ``.env``, ``.config`` or ``.kits`` record, sorted."""
+    """Every sandbox name with a Bash ``.env``, ``.config`` or ``.kits`` record, sorted.
+
+    A backend directory that does not exist (or is not a directory) has no
+    records. Any other error reading it (``EACCES``, say) raises ``OSError``:
+    reading it as "no records" would let the import record itself complete
+    with nothing imported, and never look again.
+    """
     directory = _backend_dir(backend)
     try:
         entries = list(directory.iterdir())
-    except OSError:
+    except (FileNotFoundError, NotADirectoryError):
         return []
     names: set[str] = set()
     for entry in entries:
@@ -250,9 +260,10 @@ def read_sandbox(backend: str, name: str) -> BashSandbox:
     sock = _clean(host_config_read(backend, name, "ssh-auth-sock"))
     applied_ref = env.get("applied_ref")
     applied_at = env.get("applied_at")
-    selection = env.get("provider_selection")
-    if selection not in (kits.SELECTION_DEFAULT, kits.SELECTION_EXPLICIT):
-        selection = None
+    # A value Bash never writes is kept as it is, not dropped: Bash
+    # ``acq_provider_selection_load`` refuses it, and so does the Python reader
+    # of the imported record, whereas no record would apply the current selection.
+    selection = env.get("provider_selection") or None
     provider_kits = env.get("provider_kits") if selection == kits.SELECTION_EXPLICIT else None
     if provider_kits is not None and "\0" in provider_kits:
         selection = provider_kits = None  # cannot be an environment value: import nothing

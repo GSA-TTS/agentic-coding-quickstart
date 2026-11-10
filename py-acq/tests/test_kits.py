@@ -287,6 +287,36 @@ def test_kit_check_unknown_current_stale(monkeypatch, tmp_path, capsys):
     assert doc["data"]["status"] == "stale"
 
 
+@pytest.mark.parametrize("raw", [
+    b"{not json",
+    b"[]",
+    b"\xff\xfe",
+    json.dumps({"schema": 99, "provider_selection": "explicit"}).encode(),
+], ids=["bad-json", "not-an-object", "bad-utf8", "unknown-schema"])
+def test_an_unreadable_provenance_record_never_reads_as_no_selection(monkeypatch, tmp_path, raw):
+    # "Nothing recorded" applies the current selection, which could bind a
+    # provider the create left out; a damaged record fails closed instead.
+    _env(monkeypatch, tmp_path)
+    path = kits._provenance_path("msb", "box")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(raw)
+    with pytest.raises(kits.ProviderSelectionError, match="unreadable recorded provider selection"):
+        kits.provider_selection_read("msb", "box")
+    with pytest.raises(kits.ProviderSelectionError):
+        with kits.recorded_provider_selection("msb", "box"):
+            pytest.fail("ran under the current selection")
+    assert kits.provenance_status("msb", "box") == "unknown"  # the currency report stays lenient
+
+
+def test_provider_selection_absent_record_and_legacy_record_read_as_nothing(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path)
+    assert kits.provider_selection_read("msb", "box") is None
+    path = kits._provenance_path("msb", "box")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"applied_ref": "0" * 40}), encoding="utf-8")  # v0: no schema marker
+    assert kits.provider_selection_read("msb", "box") is None
+
+
 def test_kit_check_missing_sandbox_exit_1(monkeypatch, tmp_path, capsys):
     _env(monkeypatch, tmp_path, catalog={"mybox": "running"})
     rc, doc = _invoke(capsys, "--backend", "msb", "kit", "check", "nope", "--json")

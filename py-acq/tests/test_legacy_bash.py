@@ -480,7 +480,75 @@ def test_the_bash_provider_selection_is_imported(tree):
     assert kits.provider_selection_read("msb", "list") == ("explicit", "/k/a /k/b")
     assert kits.provenance_status("msb", "list") == "unknown"  # Bash recorded no bundle ref
     assert kits.provider_selection_read("msb", "dflt") == ("default", "")
-    assert kits.provider_selection_read("msb", "bad") is None  # a value Bash never writes is not carried over
+    # A value Bash never writes is carried over, so it is refused as Bash
+    # acq_provider_selection_load refuses it, instead of reading as "nothing
+    # recorded" and applying the current selection.
+    assert kits.provenance_status("msb", "bad") == "current"
+    with pytest.raises(kits.ProviderSelectionError):
+        kits.provider_selection_read("msb", "bad")
+
+
+@needs_bash
+@pytest.mark.parametrize("mode, accepted", [("default", True), ("explicit", True), ("", True), ("all", False)])
+def test_bash_refuses_the_selection_values_the_import_refuses(tree, mode, accepted):
+    # The oracle: Bash acq_provider_selection_load on the same record.
+    _bash_file("box", ".env", f"agent=shell\nprovider_selection={mode}\n")
+    assert BASH is not None
+    proc = subprocess.run(
+        [BASH, "-c", 'source "$1"; acq_provider_selection_load msb box', "bash", str(COMMON_SH)],
+        capture_output=True, timeout=60, env={**os.environ, "LC_ALL": "C"}, check=False,
+    )
+    assert (proc.returncode == 0) is accepted
+    migration.migrate_tree()
+    if accepted:
+        kits.provider_selection_read("msb", "box")
+    else:
+        with pytest.raises(kits.ProviderSelectionError):
+            kits.provider_selection_read("msb", "box")
+
+
+@pytest.mark.skipif(os.name != "posix" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+                    reason="needs POSIX permissions and a non-root user")
+def test_an_unreadable_bash_backend_directory_keeps_the_sandbox_import_pending(tree, capsys):
+    _bash_file("box", ".env", "agent=shell\nworkspace_source=host\nworkspace=/w/box\n")
+    directory = legacy_bash._backend_dir("msb")
+    directory.chmod(0o000)
+    try:
+        with pytest.raises(PermissionError):
+            legacy_bash.sandbox_names("msb")
+        migration.migrate_tree()
+        assert "sandboxes" not in migration.read_import_done()
+        assert migration.read_generation() == migration.RECORDS_GENERATION
+        assert "msb sandbox records were not imported" in capsys.readouterr().err
+    finally:
+        directory.chmod(0o755)
+    migration.migrate_tree()  # readable again: imported now
+    assert state.record_read("msb", "box")["imported_from"] == "bash"
+    assert migration.read_generation() == migration.TARGET_GENERATION
+
+
+@pytest.mark.skipif(os.name != "posix" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+                    reason="needs POSIX permissions and a non-root user")
+def test_a_pending_backend_never_brings_back_a_record_removed_from_one_that_imported(tree, capsys):
+    _bash_file("gone", ".env", "agent=shell\nworkspace_source=host\nworkspace=/w/gone\n", backend="sbx")
+    _bash_file("box", ".env", "agent=shell\nworkspace_source=host\nworkspace=/w/box\n")
+    directory = legacy_bash._backend_dir("msb")
+    directory.chmod(0o000)
+    try:
+        migration.migrate_tree()
+        assert state.record_read("sbx", "gone") is not None
+        assert "sandboxes:sbx" in migration.read_import_done()
+        state.record_path("sbx", "gone").unlink()  # what 'acq rm gone' does to the record
+        migration.migrate_tree()  # msb still unreadable: the part stays pending
+        assert state.record_read("sbx", "gone") is None
+        assert "sandboxes" not in migration.read_import_done()
+    finally:
+        directory.chmod(0o755)
+    capsys.readouterr()
+    migration.migrate_tree()
+    assert state.record_read("msb", "box")["imported_from"] == "bash"
+    assert state.record_read("sbx", "gone") is None
+    assert migration.read_generation() == migration.TARGET_GENERATION
 
 
 def test_fresh_tree_without_bash_state_is_quiet(tree, capsys):
