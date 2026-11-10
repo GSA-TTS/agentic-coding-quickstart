@@ -511,21 +511,32 @@ def _probe(monkeypatch, answer: str) -> list[list[str]]:
     return calls
 
 
-def test_missing_prereqs_are_warned_before_the_agent_user_and_kits(monkeypatch, tmp_path, capsys):
-    _env(monkeypatch, tmp_path)
+def test_missing_prereqs_are_warned_at_create_before_the_agent_user_and_kits(monkeypatch, tmp_path, capsys):
+    ws = _env(monkeypatch, tmp_path)
     guest = _Guest(monkeypatch)
     calls = _probe(monkeypatch, "acq-prereqs: node update-ca-certificates\r\n")
     probed_before: list[int] = []
     real_probe = msb.guest_probe
     monkeypatch.setattr(msb, "guest_probe", lambda n, a: probed_before.append(len(guest.execs)) or real_probe(n, a))
-    a = _kit(tmp_path, "a", "commands:\n  - phase: startup\n    command:\n      - env\n")
-    result = kit_msb.ensure_kits_applied("box", [a], ro_required=False)
-    assert result.applied == ["a"] and result.agent_user is True  # a warning, never a failure
+    rc = cli.main(["--backend", "msb", "create", "shell", str(ws), "--name", "box", "--json"])
+    err = capsys.readouterr().err
+    assert rc == 0  # a warning, never a failure
     assert probed_before == [0]  # once, before the agent-user setup and every kit step
     assert calls == [["box", "sh", "-c", kit_msb._PREREQ_SCRIPT]]
-    err = capsys.readouterr().err
     assert "sandbox 'box' is missing kit prerequisite(s): node update-ca-certificates." in err
     assert kit_msb.SKIP_PREREQ_CHECK_ENV in err
+
+
+def test_a_heal_does_not_check_prereqs(monkeypatch, tmp_path, capsys):
+    # As in Bash, the check belongs to provisioning a new guest; re-applying
+    # kits to an existing sandbox (start, re-attach, kit update) skips it.
+    _env(monkeypatch, tmp_path)
+    _Guest(monkeypatch)
+    calls = _probe(monkeypatch, "acq-prereqs: node\n")
+    a = _kit(tmp_path, "a", "commands:\n  - phase: startup\n    command:\n      - env\n")
+    result = kit_msb.ensure_kits_applied("box", [a], ro_required=False)
+    assert result.applied == ["a"] and calls == []
+    assert "prerequisite" not in capsys.readouterr().err
 
 
 def test_prereq_probe_checks_every_kit_tool_in_the_guest():

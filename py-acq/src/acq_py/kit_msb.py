@@ -836,8 +836,9 @@ def missing_prereqs(name: str) -> list[str] | None:
 def check_prereqs(name: str) -> None:
     """Warn when the guest lacks a kit prerequisite; never fails the caller.
 
-    Runs before every kit-set apply, ahead of the agent-user setup, as Bash's
-    provision does. ``ACQ_MSB_SKIP_PREREQ_CHECK`` (any non-empty value) skips
+    Runs when a new guest is provisioned (create and recreate), ahead of the
+    agent-user setup, as Bash's provision does; not on a heal of an existing
+    sandbox. ``ACQ_MSB_SKIP_PREREQ_CHECK`` (any non-empty value) skips
     it. A probe that gives no answer is not reported, as in Bash.
     """
     if os.environ.get(SKIP_PREREQ_CHECK_ENV):
@@ -854,14 +855,11 @@ def check_prereqs(name: str) -> None:
 def ensure_kits_applied(name: str, kits: list[Kit], *, ro_required: bool, force: bool = False) -> ApplyResult:
     """Apply the whole kit set (``acq_backend_ensure_kits_applied``); best-effort per kit.
 
-    The kit prerequisites are checked first (:func:`check_prereqs`, a warning
-    only), then the agent user is set up (:func:`ensure_agent_user`); if that
-    fails the kits are still attempted and ``agent_user`` says so. The merged
+    The agent user is set up first (:func:`ensure_agent_user`); if that fails the kits are still attempted and ``agent_user`` says so. The merged
     environment is computed before the first kit runs, so a kit's commands see
     every kit's variables whatever the order (ADR-0033), and the persisted copy
     is rebuilt from the current kits only.
     """
-    check_prereqs(name)
     result = ApplyResult(agent_user=ensure_agent_user(name))
     merged = merge_env(kits)
     hc_clear(name, "kit-env")
