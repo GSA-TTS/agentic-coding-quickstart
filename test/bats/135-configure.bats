@@ -75,6 +75,50 @@ _cfg_src() {
   assert_line 'k=[]'
 }
 
+@test "config: a symlinked config.yaml is written through and keeps its mode" {
+  export XDG_CONFIG_HOME="$STUBDIR/xdg"
+  mkdir -p "$XDG_CONFIG_HOME/acq" "$STUBDIR/dotfiles/acq"
+  printf 'backend: sbx\n' > "$STUBDIR/dotfiles/acq/config.yaml"
+  chmod 640 "$STUBDIR/dotfiles/acq/config.yaml"
+  # A relative link, resolved against the link's own directory.
+  ln -s ../../dotfiles/acq/config.yaml "$XDG_CONFIG_HOME/acq/config.yaml"
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    _acq_config_write_field extra_kits paseo
+  '
+  assert_success
+  assert [ -L "$XDG_CONFIG_HOME/acq/config.yaml" ]
+  run cat "$STUBDIR/dotfiles/acq/config.yaml"
+  assert_line 'backend: sbx'
+  assert_line 'extra_kits: paseo'
+  local mode
+  mode=$(stat -c %a "$STUBDIR/dotfiles/acq/config.yaml" 2>/dev/null || stat -f %Lp "$STUBDIR/dotfiles/acq/config.yaml")
+  assert_equal "$mode" "640"
+  # No temp file is left beside the target or the link.
+  run ls -A "$STUBDIR/dotfiles/acq" "$XDG_CONFIG_HOME/acq"
+  refute_output --partial '.tmp.'
+}
+
+@test "config: a new config.yaml is created 0600; a link loop is refused" {
+  export XDG_CONFIG_HOME="$STUBDIR/xdg"
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    _acq_config_write_field backend msb
+  '
+  assert_success
+  local mode
+  mode=$(stat -c %a "$XDG_CONFIG_HOME/acq/config.yaml" 2>/dev/null || stat -f %Lp "$XDG_CONFIG_HOME/acq/config.yaml")
+  assert_equal "$mode" "600"
+  rm -f "$XDG_CONFIG_HOME/acq/config.yaml"
+  ln -s config.yaml "$XDG_CONFIG_HOME/acq/config.yaml"
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    _acq_config_write_field backend msb
+  '
+  assert_failure
+  assert [ -L "$XDG_CONFIG_HOME/acq/config.yaml" ]
+}
+
 @test "config: an unsafe key name is rejected (fail closed)" {
   export XDG_CONFIG_HOME="$STUBDIR/xdg"
   run bash -c '

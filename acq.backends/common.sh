@@ -2105,8 +2105,42 @@ _acq_config_read_field() {
 # empty VALUE removes the key entirely (so "no extras" is represented by absence,
 # not an empty-valued line). Atomic (temp file + mv). Best-effort: a write failure
 # warns via acq_debug and returns non-zero but never aborts the caller.
+#
+# A symlinked config.yaml (a dotfiles setup) is written THROUGH: the temp file is
+# created beside the link's final target and renamed over the target, so the link
+# survives. An existing file keeps its mode; only a new file gets 0600. The
+# Python writer (config.py) behaves the same way.
+
+# _acq_config_write_target PATH — where a write to PATH lands: a symlink's final
+# target (followed link by link, a relative link resolved against its own
+# directory), else PATH itself, with the parent directory made physical. Fails on
+# a link loop or a parent directory that does not exist.
+_acq_config_write_target() {
+  local p="$1" hops=0 dir link
+  while [ -h "$p" ]; do
+    hops=$((hops + 1))
+    [ "$hops" -le 40 ] || return 1
+    dir=$(CDPATH='' cd -P -- "$(dirname -- "$p")" 2>/dev/null && pwd -P) || return 1
+    link=$(readlink -- "$p") || return 1
+    case "$link" in
+      /*) p="$link" ;;
+      *) p="$dir/$link" ;;
+    esac
+  done
+  dir=$(CDPATH='' cd -P -- "$(dirname -- "$p")" 2>/dev/null && pwd -P) || return 1
+  printf '%s/%s\n' "$dir" "$(basename -- "$p")"
+}
+
+# _acq_file_mode PATH — PATH's permission bits in octal (GNU or BSD stat).
+_acq_file_mode() {
+  local m
+  m=$(stat -c %a -- "$1" 2>/dev/null) || m=$(stat -f %Lp -- "$1" 2>/dev/null) || return 1
+  case "$m" in ''|*[!0-7]*) return 1 ;; esac
+  printf '%s\n' "$m"
+}
+
 _acq_config_write_field() {
-  local key="${1:-}" value="${2:-}" cfg dir tmp
+  local key="${1:-}" value="${2:-}" cfg dir tmp target mode
   case "$key" in
     ''|*[!A-Za-z0-9_]*) acq_debug "config: refusing to write unsafe key '$key'"; return 1 ;;
   esac
@@ -2117,7 +2151,12 @@ _acq_config_write_field() {
     return 1
   fi
   chmod 700 "$dir" 2>/dev/null || { acq_debug "config: chmod failed: $dir"; return 1; }
-  tmp="${cfg}.tmp.$$"
+  target=$(_acq_config_write_target "$cfg") || { acq_debug "config: cannot resolve write target: $cfg"; return 1; }
+  mode=600
+  if [ -f "$target" ]; then
+    mode=$(_acq_file_mode "$target") || { acq_debug "config: cannot read mode: $target"; return 1; }
+  fi
+  tmp="${target}.tmp.$$"
   {
     # Re-emit every existing line except the one for KEY (which we replace/drop).
     if [ -f "$cfg" ]; then
@@ -2136,8 +2175,8 @@ _acq_config_write_field() {
       printf '%s: %s\n' "$key" "$value"
     fi
   } > "$tmp" 2>/dev/null || { acq_debug "config: write failed: $tmp"; rm -f "$tmp" 2>/dev/null; return 1; }
-  chmod 600 "$tmp" 2>/dev/null || { acq_debug "config: chmod failed: $tmp"; rm -f "$tmp" 2>/dev/null; return 1; }
-  mv -f "$tmp" "$cfg" 2>/dev/null || { acq_debug "config: mv failed: $cfg"; rm -f "$tmp" 2>/dev/null; return 1; }
+  chmod "$mode" "$tmp" 2>/dev/null || { acq_debug "config: chmod failed: $tmp"; rm -f "$tmp" 2>/dev/null; return 1; }
+  mv -f "$tmp" "$target" 2>/dev/null || { acq_debug "config: mv failed: $target"; rm -f "$tmp" 2>/dev/null; return 1; }
   acq_debug "config: wrote ${key}"
   return 0
 }
