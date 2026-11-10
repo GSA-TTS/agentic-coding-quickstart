@@ -171,6 +171,17 @@ def test_a_writer_that_crashed_while_waiting_holds_nobody_up(state_dir, monkeypa
         pass
 
 
+def test_a_marker_that_cannot_be_opened_is_the_locks_own_error(state_dir, monkeypatch):
+    # Not a raw OSError: callers report the lock error (fail closed, naming the lock).
+    _intent_path().mkdir(parents=True)  # a directory where the marker file goes
+    monkeypatch.setenv("ACQ_SANDBOX_LOCK_TIMEOUT", "0.3")
+    with pytest.raises(lock.SecretStoreLockTimeout, match="writer marker"):
+        with lock.secret_store_lock():
+            pass
+    with lock.exclusive_lock(lock.secret_store_lock_path(), 0.0):  # nothing was left held
+        pass
+
+
 def test_a_writer_that_times_out_gives_its_marker_up(state_dir, monkeypatch):
     monkeypatch.setenv("ACQ_SANDBOX_LOCK_TIMEOUT", "0.3")
     with lock.secret_store_lock():

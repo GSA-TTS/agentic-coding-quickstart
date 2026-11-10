@@ -124,10 +124,12 @@ def exclusive_lock(
         timeout_s = configured_timeout_s()
     path.parent.mkdir(parents=True, exist_ok=True)
     fh = open(path, "a+b")
-    intent = _WriterIntent(path, shared=shared) if writer_preference else None
+    intent: _WriterIntent | None = None
     start = time.monotonic()
     noticed = acquired = False
     try:
+        if writer_preference:
+            intent = _WriterIntent.open(path, shared=shared, what=what, timeout_cls=timeout_cls)
         while True:
             if (intent is None or intent.may_try()) and _try_os_lock(fh, shared=shared):
                 if also_acquire is None or also_acquire():
@@ -184,10 +186,25 @@ class _WriterIntent:
     see the other as a writer and retry once.
     """
 
-    def __init__(self, path: Path, *, shared: bool):
+    def __init__(self, fh: IO[bytes], *, shared: bool):
         self._shared = shared
         self._held = False
-        self._fh: IO[bytes] | None = open(path.with_name(path.name + ".writer"), "a+b")
+        self._fh: IO[bytes] | None = fh
+
+    @classmethod
+    def open(cls, path: Path, *, shared: bool, what: str, timeout_cls: type[LockTimeout]) -> _WriterIntent:
+        """Open the marker next to ``path``; a marker that cannot be opened is the lock's own error.
+
+        Every caller already reports ``timeout_cls`` (fail closed, naming the
+        lock), so an unusable marker is reported the same way rather than as a
+        raw ``OSError``.
+        """
+        marker = path.with_name(path.name + ".writer")
+        try:
+            return cls(open(marker, "a+b"), shared=shared)
+        except OSError as exc:
+            raise timeout_cls(f"could not acquire {what}: cannot open its writer marker {marker} "
+                              f"({exc.strerror or exc})") from exc
 
     def may_try(self) -> bool:
         """Whether this acquirer may try the lock now; an exclusive one takes the marker first."""
