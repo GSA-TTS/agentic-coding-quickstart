@@ -24,6 +24,7 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import IO
 
 from . import hostexec, state, timeouts
 
@@ -42,6 +43,12 @@ TIMEOUT_ENV = "ACQ_MIGRATION_LOCK_TIMEOUT"
 
 # Poll interval between non-blocking acquisition attempts.
 _RETRY_INTERVAL_S = 0.05
+
+# How long a command waits for a lock in silence. After that it prints one line
+# on stderr saying what it waits for, so a command blocked for minutes behind
+# another acq command does not look hung. Never on stdout: ``--json`` output
+# stays one envelope.
+_WAIT_NOTICE_S = 2.0
 
 
 def configured_timeout_s() -> float:
@@ -92,6 +99,7 @@ def exclusive_lock(
     also_acquire: Callable[[], bool] | None = None,
     retry_s: float = _RETRY_INTERVAL_S,
     shared: bool = False,
+    writer_preference: bool = False,
 ) -> Iterator[None]:
     """Hold an exclusive OS advisory lock on ``path`` for the duration of the block.
 
@@ -102,33 +110,106 @@ def exclusive_lock(
     the process dies without cleanup (a crash). ``also_acquire`` takes a second
     lock once the OS lock is held; when it returns False (held elsewhere) the OS
     lock is released again and the wait continues. The caller releases that
-    second lock itself, inside the block. Errors it raises propagate.
+    second lock itself, inside the block. Errors it raises propagate. A wait
+    longer than :data:`_WAIT_NOTICE_S` prints one notice on stderr.
 
     ``shared`` takes a shared lock instead, which other shared holders do not
     exclude, on POSIX. ``msvcrt.locking`` has no shared mode, so on Windows it
     is exclusive: holders that could have overlapped take turns instead.
+
+    ``writer_preference`` keeps a steady stream of shared holders from starving
+    an exclusive waiter (see :class:`_WriterIntent`).
     """
     if timeout_s is None:
         timeout_s = configured_timeout_s()
     path.parent.mkdir(parents=True, exist_ok=True)
     fh = open(path, "a+b")
-    deadline = time.monotonic() + timeout_s
-    acquired = False
+    intent = _WriterIntent(path, shared=shared) if writer_preference else None
+    start = time.monotonic()
+    noticed = acquired = False
     try:
         while True:
-            if _try_os_lock(fh, shared=shared):
+            if (intent is None or intent.may_try()) and _try_os_lock(fh, shared=shared):
                 if also_acquire is None or also_acquire():
                     acquired = True
                     break
                 _unlock(fh)
-            if time.monotonic() >= deadline:
+            waited = time.monotonic() - start
+            if waited >= timeout_s:
                 raise timeout_cls(f"could not acquire {what} at {path} within {timeout_s:.1f}s")
+            if not noticed and waited >= _WAIT_NOTICE_S:
+                noticed = True
+                _wait_notice(what)
             time.sleep(retry_s)
+        if intent is not None:
+            intent.close()  # held: shared acquirers now wait on the lock itself
         yield
     finally:
+        if intent is not None:
+            intent.close()
         if acquired:
             _unlock(fh)
         fh.close()
+
+
+def _wait_notice(what: str) -> None:
+    """Say once, on stderr, that this command waits for a lock another acq command holds.
+
+    ``what`` names the lock; its parenthetical (who usually holds it) is
+    replaced by the plainer "held by another acq command".
+    """
+    label = what.split(" (", 1)[0]
+    try:
+        print(f"acq: waiting for {label}, held by another acq command...", file=sys.stderr, flush=True)
+    except (OSError, ValueError):  # a closed or broken stderr must not fail the wait
+        pass
+
+
+class _WriterIntent:
+    """A "writer waiting" marker that new shared acquirers of a lock respect.
+
+    Shared holders of a lock overlap, so while at least one always holds it an
+    exclusive waiter never gets a turn. An exclusive waiter therefore also
+    holds an exclusive OS lock on a second file next to the lock
+    (``<lock>.writer``) for as long as it waits. A shared acquirer first checks
+    that file and, while a writer holds it, does not try the lock at all; the
+    holders already in drain and the writer gets the lock next. The writer
+    gives the marker up as soon as it holds the lock (or gives up waiting).
+
+    The marker is an OS lock, not the file's existence, so a writer that
+    crashes while waiting releases it with the process: readers are held up
+    only while the writer is alive and waiting, never by a leftover file. On
+    Windows, where ``msvcrt.locking`` is exclusive only, a shared acquirer's
+    check briefly takes the marker exclusively, so two checks at once may each
+    see the other as a writer and retry once.
+    """
+
+    def __init__(self, path: Path, *, shared: bool):
+        self._shared = shared
+        self._held = False
+        self._fh: IO[bytes] | None = open(path.with_name(path.name + ".writer"), "a+b")
+
+    def may_try(self) -> bool:
+        """Whether this acquirer may try the lock now; an exclusive one takes the marker first."""
+        if self._fh is None:
+            return True
+        if self._shared:
+            if not _try_os_lock(self._fh, shared=True):
+                return False  # a writer is waiting
+            _unlock(self._fh)
+            return True
+        if not self._held:
+            self._held = _try_os_lock(self._fh)
+        return True  # a second writer competes for the lock itself
+
+    def close(self) -> None:
+        if self._fh is None:
+            return
+        if self._held:
+            _unlock(self._fh)
+            self._held = False
+        self._fh.close()
+        self._fh = None
 
 
 def _try_os_lock(fh, *, shared: bool = False) -> bool:
@@ -296,7 +377,10 @@ def secret_store_lock(*, shared: bool = False) -> Iterator[None]:
     one keep its old value. Global changes take this lock exclusively; creates
     take it ``shared``, so creates do not wait for each other (except on
     Windows, see :func:`exclusive_lock`). The wait is the lifecycle lock's
-    (``$ACQ_SANDBOX_LOCK_TIMEOUT``). See the lock order above. Raises
+    (``$ACQ_SANDBOX_LOCK_TIMEOUT``). See the lock order above. A global change
+    waiting for the lock holds back creates that arrive after it, so a steady
+    stream of creates and starts cannot keep it waiting until it times out
+    (writer preference, :class:`_WriterIntent`). Raises
     :class:`SecretStoreLockTimeout`.
     """
     timeout_s = timeouts.env_seconds(SANDBOX_TIMEOUT_ENV, DEFAULT_SANDBOX_TIMEOUT_S)
@@ -307,6 +391,7 @@ def secret_store_lock(*, shared: bool = False) -> Iterator[None]:
         timeout_cls=SecretStoreLockTimeout,
         retry_s=_SANDBOX_RETRY_S,
         shared=shared,
+        writer_preference=True,
     ):
         yield
 

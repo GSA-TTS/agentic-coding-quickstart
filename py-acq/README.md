@@ -529,6 +529,13 @@ of 0 is also ignored, because it would fail the call at once instead of meaning
 | `ACQ_SANDBOX_LOCK_TIMEOUT` | `300` | The wait for a sandbox's lifecycle lock, a provider-credential lock, or the secret-store lock that global secret changes and creates share. |
 | `ACQ_MIGRATION_LOCK_TIMEOUT` | `5` | The wait for the state-migration lock and the config lock. |
 
+A command that has waited about two seconds for any of these locks prints one
+line on stderr, `acq: waiting for <the lock>, held by another acq command...`,
+and keeps waiting. It never writes that line to stdout, so `--json` output is
+unchanged. While a global secret change waits for the secret-store lock, new
+creates and starts wait behind it, so a steady stream of them cannot keep it
+out until it times out.
+
 ## Testing
 
 Two runners consume the same `test/vectors/` corpus and must agree on the
