@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "id": "probe/absent-after-nul",
+  "oracle": "absent fails output holding a NUL byte, which could hide the value from a substring search (expected to FAIL in both runners)",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{python}",
+      "-c",
+      "import sys; sys.stdout.buffer.write(b'x\\x00sentinel-9f2c\\n')"
+    ],
+    "env": {},
+    "unset": [],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "absent",
+      "value": "sentinel-9f2c",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": []
+  }
+}

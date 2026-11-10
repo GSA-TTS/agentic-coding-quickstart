@@ -101,7 +101,13 @@ Placeholders in `invoke.argv`: `{acq}` splices the CLI-under-test command list;
   pinning prose.
 * `absent` — the (non-empty) value appears nowhere in the output. `json` and
   `contains` cannot prove that something is missing, so a vector whose oracle
-  says a secret never appears pairs its structural assertion with this one.
+  says a secret never appears pairs its structural assertion with this one. An
+  `absent` assertion takes no `normalize` transforms (one could rewrite the
+  value it looks for and pass vacuously).
+
+`contains` and `absent` fail output that holds a NUL byte, and their value may
+not hold one: the Bash runner's substring search stops at a NUL, so it could not
+search past it.
 
 ## Normalisation transforms (`expect.<stream>.normalize`, in order)
 

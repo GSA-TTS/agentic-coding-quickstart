@@ -169,7 +169,8 @@ _jq_subset() {
 # required fields, no field the schema does not define (a typo such as
 # `expect.stdot` would otherwise make no assertion at all), and each stream's
 # assertion, or non-empty list of assertions, with a known mode and transforms
-# and a value. invoke.fixtures and isolation.no_live_refeed are defined by
+# and a value (an absent assertion takes no transforms, and neither a contains
+# nor an absent value may hold a NUL byte). invoke.fixtures and isolation.no_live_refeed are defined by
 # ADR-0043m, so they pass here and are refused later.
 _validate_vector() {
   jq -r '
@@ -184,6 +185,10 @@ _validate_vector() {
              elif has("value") | not then "expect.\($s): value is required"
              elif $m != "json" and (.value | type) != "string" then "expect.\($s): a \($m) value must be a string"
              elif $m == "absent" and .value == "" then "expect.\($s): an absent value must not be empty"
+             elif ($m == "contains" or $m == "absent") and (.value | explode | any(. == 0)) then
+               "expect.\($s): a \($m) value must not contain a NUL byte"
+             elif $m == "absent" and ((.normalize // []) | length) > 0 then
+               "expect.\($s): an absent assertion takes no normalize transforms"
              else empty end)
         , ((.normalize // []) as $n
            | if ($n | type) != "array" then "expect.\($s): normalize must be a list"
@@ -348,6 +353,13 @@ _run_vector() {
           cmp -s "$actual" "$exp" || { printf 'FAIL %s (%s exact mismatch)\n' "$vid" "$stream"; return 3; }
           ;;
         contains|absent)
+          # `read -d ''` stops at a NUL byte, so a value after one would never
+          # be searched and an absent check would pass. Fail such output, as
+          # the Python runner does.
+          if ! LC_ALL=C tr -d '\000' < "$actual" | cmp -s - "$actual"; then
+            printf 'FAIL %s (%s contains a NUL byte, which %s cannot search)\n' "$vid" "$stream" "$mode"
+            return 3
+          fi
           haystack="" needle=""
           IFS= read -r -d '' haystack < "$actual" || true
           IFS= read -r -d '' needle < "$exp" || true

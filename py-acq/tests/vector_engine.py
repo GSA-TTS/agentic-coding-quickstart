@@ -174,6 +174,11 @@ def compare(actual: str, expected, mode: str, label: str) -> None:
     if mode == "exact":
         if actual != expected:
             raise AssertionError(f"{label}: expected exact {expected!r}, got {actual!r}")
+    elif mode in ("contains", "absent") and "\x00" in actual:
+        # The Bash runner's substring search stops at a NUL byte, so it could
+        # not see a value after one; both runners therefore fail such output
+        # rather than let an absent check pass on what it never searched.
+        raise AssertionError(f"{label}: output contains a NUL byte, which {mode} cannot search")
     elif mode == "contains":
         if expected not in actual:
             raise AssertionError(f"{label}: expected {expected!r} in {actual!r}")
@@ -286,7 +291,13 @@ def _validate_specs(declared, label: str) -> None:
             raise VectorError(f"{label}: a {mode} value must be a string")
         if mode == "absent" and not spec["value"]:
             raise VectorError(f"{label}: an absent value must not be empty")
+        if mode in ("contains", "absent") and "\x00" in spec["value"]:
+            raise VectorError(f"{label}: a {mode} value must not contain a NUL byte")
         transforms = spec.get("normalize", [])
+        # A transform could rewrite the very value an absent check looks for
+        # (abspath, tmpdir, timing, json all can), making it pass vacuously.
+        if mode == "absent" and transforms:
+            raise VectorError(f"{label}: an absent assertion takes no normalize transforms")
         if not isinstance(transforms, list) or [t for t in transforms if t not in TRANSFORMS]:
             raise VectorError(f"{label}: unknown transform(s) in {transforms!r}")
 
