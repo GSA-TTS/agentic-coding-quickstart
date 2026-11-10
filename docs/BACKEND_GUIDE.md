@@ -1262,7 +1262,7 @@ into its private cache and checks there; it refuses a ref not pinned to a full
 `py-acq/README.md`, "Kits outside the bundle"). Both implementations refuse,
 before anything is fetched or recorded, a remote ref with a query string, or a
 `#` part other than one plain `ref=` and one plain `dir=` (KNOWN_FAILURE_MODES
-section 89),
+section 91),
 and a local kit holding a regular file with more than one hard link (section
 55; make a plain copy of the kit, for example with `cp -R`).
 

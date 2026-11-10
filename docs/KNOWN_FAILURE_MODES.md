@@ -970,7 +970,7 @@ sbx secret set-custom <sandbox-name> --host api.gsa.usai.gov \
 - Rotate with `acq usai-rotate-api-key`, which preserves the placeholder so
   existing sandboxes keep working. Avoid deleting + re-adding the global secret.
   When sbx holds more than one global USAi entry, rotation refuses and names
-  each placeholder instead of picking one (see section 88).
+  each placeholder instead of picking one (see section 90).
 - Remove any `export USAI_API_KEY=...` from your shell profile — the sandbox gets
   its value from sbx injection, and a host env var only causes confusion.
 
@@ -4617,24 +4617,57 @@ login-shell sync into the agent-user setup.
 
 ---
 
-## 79. Sandbox Lock Directory Without an Owner Is Never Removed Automatically
+## 79. Lock Directory Without an Owner Is Never Removed Automatically
 
-**Symptom:** Every acq command on one sandbox (`create`, `run`, `rm`, `start`)
-waits and then fails with `timeout`. The remediation names a directory ending in
-`.lock` under `.../acq/provenance/provider-input/<backend>/`, and no other acq
-command is running.
+**Symptom:** One of these, with no other acq command running:
 
-**Cause:** Both the Bash and the Python acq take a per-sandbox `mkdir` lock and
-write `PID IDENTITY` into its `owner` file. A lock whose owner process is gone
-is recovered automatically. A lock directory with no readable owner line is
-not: the same state exists, briefly, while another command is between its
-`mkdir` and its owner write, so removing it automatically could break a live
-lock. Such a directory is left only when an acq process died in exactly that
-moment, or the directory was made by hand.
+- Every acq command on one sandbox (`create`, `run`, `rm`, `start`) waits and
+  then fails with `timeout`, or Bash acq stops at once with `provider-input
+  lock has no valid owner metadata`. The message names a directory ending in
+  `.lock` under `.../acq/provenance/provider-input/<backend>/`.
+- Every change to `config.yaml` (`backend set`/`unset`, `configure`,
+  `kit-source` and `provider-credential` in Bash acq, and in the Python acq
+  every mutating command, whose schema migration takes the same lock) fails
+  with `could not take the config.yaml lock` (Bash) or `could not acquire the
+  config.yaml lock` (Python, as `migration_failed`). The message names
+  `.../acq/locks/config.lock.d` under the acq state directory, which holds an
+  empty `owner` file.
+
+**Cause:** Both the Bash and the Python acq take these `mkdir` locks and write
+`PID IDENTITY` into the lock's `owner` file; the Python acq takes the
+`config.yaml` one while it holds its own OS lock on `locks/config.lock`, which
+Bash cannot take portably (see `_acq_config_lock_acquire` in
+`acq.backends/common.sh` and `ConfigDirLock` in `py-acq/src/acq_py/lock.py`).
+A lock whose owner process is gone, or whose PID now belongs to another process,
+is recovered automatically. A per-sandbox lock directory with no readable owner
+line is not: the same state exists, briefly, while another command is between
+its `mkdir` and its owner write, so removing it automatically could break a
+live lock. Such a directory is left only when an acq process died in exactly
+that moment, or the directory was made by hand.
+
+The `config.yaml` lock is decided by the exclusive create of its `owner` file
+(section 92), so a `config.lock.d` directory with no `owner` file heals itself:
+the next writer takes it. What it cannot heal is an `owner` file that exists but
+is empty, which is a writer between creating the file and writing its token;
+one is left only if a writer died in exactly that moment. (A writer that fails
+to write its token, on a full disk say, removes the file it created.)
+
+On Windows neither Git Bash nor native Python can check the other's process
+IDs, so the `config.yaml` lock directory counts as held for 60 seconds after it
+was made and is recovered after that (a `config.yaml` write takes well under a
+second); the per-sandbox lock counts as held for 15 minutes and the Python acq
+never removes it.
 
 **Resolution:** Make sure no acq command is running, then remove the directory
-the message names (`rmdir` it, or delete it with its contents if it has any)
-and retry.
+the message names and retry. Every such message prints the command with the
+path filled in:
+
+```bash
+rm -f -- '<lock dir>/owner' && rmdir -- '<lock dir>'
+```
+
+In PowerShell: `Remove-Item -LiteralPath '<lock dir>' -Recurse -Force`. See also
+[Removing a leftover lock](howto/acq.md#removing-a-leftover-lock).
 
 ---
 
@@ -5000,7 +5033,7 @@ Bash acq counts as held for 15 minutes after it was taken.
 **Cause:** The Bash acq locks a sandbox by creating that directory and writing
 `PID IDENTITY` into its `owner` file. On POSIX the Python acq checks that the
 PID is still the same process and recovers a lock whose owner is gone
-(see [§79](#79-sandbox-lock-directory-without-an-owner-is-never-removed-automatically)).
+(see [§79](#79-lock-directory-without-an-owner-is-never-removed-automatically)).
 On Windows it cannot: Git Bash PIDs are not Windows PIDs, and `os.kill` there
 terminates a process rather than probing it. So the Python acq treats a Bash
 lock directory as held for 15 minutes after it was last modified (when its
@@ -5070,7 +5103,7 @@ under Git Bash picks the Microsoft Store `python3` alias, installs under
 
 ---
 
-## 88. sbx: More Than One Global USAi Custom Secret Is Refused
+## 90. sbx: More Than One Global USAi Custom Secret Is Refused
 
 **Status:** By design (both the Bash and the Python `acq`).
 
@@ -5129,7 +5162,7 @@ secret. The refusal is covered by `test/bats/40-secret-set.bats`,
 
 ---
 
-## 89. Remote Kit Ref With a Query String or an Extra `#` Parameter Is Refused
+## 91. Remote Kit Ref With a Query String or an Extra `#` Parameter Is Refused
 
 **Status:** By design (both the Bash and the Python `acq`).
 
@@ -5193,6 +5226,43 @@ name.
 Covered by `test/bats/170-kit-ref-shape.bats`, `py-acq/tests/test_kit_fetch.py`,
 `py-acq/tests/test_kits.py`, `py-acq/tests/test_configure.py` and
 `py-acq/tests/test_legacy_bash.py`.
+
+---
+
+## 92. uutils coreutils: `mkdir` Is Not Exclusive, So Bash's Provider-Input Lock Can Be Shared
+
+**Symptom:** On a host whose `mkdir` is uutils coreutils (Ubuntu 25.10 and
+later ship it as `/usr/bin/mkdir`; `mkdir --version` prints `uutils
+coreutils`), two Bash acq commands on the same sandbox at the same moment (two
+`create`, or `create` and `rm`) can both proceed instead of one waiting for the
+other.
+
+**Cause:** Bash acq takes its `mkdir` locks by running `mkdir DIR` and treating
+success as ownership. GNU and BSD `mkdir` fail with "File exists" for all but
+one of several concurrent callers. uutils `mkdir` 0.10.0 does not: in 300
+three-way races on one host it reported success 466 times. The `config.yaml`
+lock no longer relies on it: the exclusive create of its `owner` file (Bash
+noclobber, which Bash opens with `O_EXCL` itself, and `O_EXCL` in Python)
+decides who holds it, a taker that loses never removes the winner's owner file,
+and an existing directory without an owner file is simply taken
+(`_acq_config_lock_take` in `acq.backends/common.sh`, `_MkdirLock._take` in
+`py-acq/src/acq_py/lock.py`). The per-sandbox provider-input lock
+(`acq_provider_input_lock_acquire`) still writes its owner file without
+noclobber after a successful `mkdir`, so with uutils two Bash commands can both
+take it. The Python acq's own `mkdir` is atomic, but a racing Bash command can
+overwrite a Python holder's owner line in the same way. The progress spinner's
+draw lock (`$dir/draw` in `acq.backends/progress.sh`) is also a plain `mkdir`;
+there the effect is cosmetic, at most one stray spinner frame drawn after the
+spinner was stopped.
+
+**Resolution:** Until the provider-input lock is changed, avoid running two
+Bash acq commands on the same sandbox at once on such a host, or put GNU
+`mkdir` first on `PATH` (for example the `gnu` coreutils package where the
+distribution offers it).
+
+**Tracked:** make the provider-input lock decide by an exclusive owner-file
+create, as the `config.yaml` lock does. Unblock trigger: none; it can be done
+whenever the provider-input transaction is next changed.
 
 ---
 

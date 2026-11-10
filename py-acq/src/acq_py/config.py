@@ -101,6 +101,12 @@ class ConfigLockTimeout(lock.LockTimeout, OSError):
     """
 
 
+# Poll interval while another command holds the config lock. A poll may probe
+# the owner of Bash's lock directory with ``ps``, so it is coarser than the bare
+# OS lock's.
+_CONFIG_LOCK_RETRY_S = 0.1
+
+
 def config_lock_path() -> Path:
     """The lock file that serializes changes to ``config.yaml``.
 
@@ -120,13 +126,39 @@ def config_lock() -> Iterator[None]:
     the migration lock's (``$ACQ_MIGRATION_LOCK_TIMEOUT``), then
     :class:`ConfigLockTimeout`. Not re-entrant: no function here calls another
     one that takes it.
+
+    Bash acq writes config.yaml too (``_acq_config_write_field``) but cannot
+    take this OS lock, so while it is held the ``config.lock.d`` directory
+    beside it is taken as well (:class:`lock.ConfigDirLock`), which is the lock
+    Bash takes: the two implementations exclude each other. When a leftover
+    directory is what kept the wait from succeeding, the error says how to
+    remove it.
     """
-    with lock.exclusive_lock(
-        config_lock_path(),
-        what="the config.yaml lock (another acq command is changing config.yaml)",
-        timeout_cls=ConfigLockTimeout,
-    ):
-        yield
+    path = config_lock_path()
+    shared = lock.ConfigDirLock(path, state.state_dir())
+
+    def take_shared() -> bool:
+        try:
+            return shared.acquire()
+        except (lock.SandboxLockUnsafe, OSError) as exc:
+            raise ConfigLockTimeout(f"could not take the config.yaml lock directory {shared.path}: {exc}") from exc
+
+    try:
+        with lock.exclusive_lock(
+            path,
+            what="the config.yaml lock (another acq command is changing config.yaml)",
+            timeout_cls=ConfigLockTimeout,
+            also_acquire=take_shared,
+            retry_s=_CONFIG_LOCK_RETRY_S,
+        ):
+            try:
+                yield
+            finally:
+                shared.release()
+    except ConfigLockTimeout as exc:
+        if not shared.blocked:
+            raise
+        raise ConfigLockTimeout(f"{exc}; {shared.path} is held; {shared.hint()}") from None
 
 
 class ConfigSchemaError(Exception):
