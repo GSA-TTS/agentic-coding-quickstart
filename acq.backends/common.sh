@@ -1395,27 +1395,38 @@ _acq_trusted_host_dirs() {
 
 # _acq_path_within CHILD PARENT — 0 when the absolute path CHILD is PARENT or
 # lies below it. A plain string comparison; trailing slashes are ignored and the
-# quoted pattern keeps glob characters in PARENT literal.
-#
-# On MSYS/Cygwin (Git Bash) the comparison ignores ASCII case: Windows
-# filesystems are case-insensitive, so /c/USERS/me/ACQSTATE names the same
-# directory as /c/Users/me/acqstate, and a case-sensitive match would let a
-# workspace reach acq's own directories by spelling them differently. Only
-# ASCII letters are folded; a name that differs only in the case of another
-# letter still compares exactly. POSIX hosts compare exactly.
+# quoted pattern keeps glob characters in PARENT literal. Callers fold case
+# first where the filesystem ignores it (_acq_path_case_fold).
 _acq_path_within() {
   local c="${1%/}" p="${2%/}"
   [ -n "$p" ] || return 0
-  case "${OSTYPE:-}" in
-    msys*|cygwin*)
-      c=$(printf '%s' "$c" | LC_ALL=C tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')
-      p=$(printf '%s' "$p" | LC_ALL=C tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')
-      ;;
-  esac
   case "$c" in
     "$p"|"$p"/*) return 0 ;;
   esac
   return 1
+}
+
+# _acq_path_case_fold VALUE — set _ACQ_PATH_FOLDED to VALUE in the form the
+# workspace checks compare. On MSYS/Cygwin (Git Bash) that is lower case:
+# Windows filesystems are case-insensitive, so /c/USERS/me/ACQSTATE names the
+# same directory as /c/Users/me/acqstate, and a case-sensitive match would let
+# a workspace reach acq's own directories by spelling them differently. Bash 4
+# and later (every Git Bash) fold with the `,,` expansion, which needs no fork
+# and lowers every letter the locale knows; an older Bash on Cygwin lowers the
+# ASCII letters with tr. POSIX hosts compare exactly, so VALUE is unchanged.
+# Sets a variable rather than printing, so a caller pays no command
+# substitution per value.
+_acq_path_case_fold() {
+  _ACQ_PATH_FOLDED="$1"
+  case "${OSTYPE:-}" in
+    msys*|cygwin*)
+      if [ "${BASH_VERSINFO[0]:-0}" -ge 4 ]; then
+        _ACQ_PATH_FOLDED="${1,,}"
+      else
+        _ACQ_PATH_FOLDED=$(printf '%s' "$1" | LC_ALL=C tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')
+      fi
+      ;;
+  esac
 }
 
 # _acq_path_physical PATH — PATH made absolute (against $PWD) with its deepest
@@ -1444,18 +1455,24 @@ _acq_path_physical() {
 # their symlink-resolved forms are compared. A directory that resolves to '/'
 # is ignored for the "inside" test, which would otherwise refuse everything.
 _acq_workspace_trusted_safe() {
-  local ws="$1" wsp d dp how
+  local ws="$1" wsp d dp fws fwsp fd fdp how
   case "$ws" in /*) ;; *) ws="$PWD/$ws" ;; esac
   wsp=$(_acq_path_physical "$ws")
+  # Fold each path once (see _acq_path_case_fold); the messages keep the
+  # spelling as given.
+  _acq_path_case_fold "$ws"; fws="$_ACQ_PATH_FOLDED"
+  _acq_path_case_fold "$wsp"; fwsp="$_ACQ_PATH_FOLDED"
   while IFS= read -r d; do
     [ -n "$d" ] || continue
     acq_path_is_absolute "$d" || continue
     dp=$(_acq_path_physical "$d")
+    _acq_path_case_fold "$d"; fd="$_ACQ_PATH_FOLDED"
+    _acq_path_case_fold "$dp"; fdp="$_ACQ_PATH_FOLDED"
     how=""
-    if _acq_path_within "$d" "$ws" || _acq_path_within "$dp" "$wsp"; then
+    if _acq_path_within "$fd" "$fws" || _acq_path_within "$fdp" "$fwsp"; then
       how="contains"
     elif [ "${d%/}" != "" ] && [ "${dp%/}" != "" ] \
-        && { _acq_path_within "$ws" "$d" || _acq_path_within "$wsp" "$dp"; }; then
+        && { _acq_path_within "$fws" "$fd" || _acq_path_within "$fwsp" "$fdp"; }; then
       how="is inside"
     fi
     if [ -n "$how" ]; then
