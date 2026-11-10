@@ -63,6 +63,7 @@ import secrets
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -507,15 +508,23 @@ def fetch(ref: str, backend: str) -> Path:
 # copied.
 _LOCAL_MAX_ENTRIES = 10000
 _LOCAL_MAX_BYTES = 256 * 1024 * 1024
+# Nesting deeper than this is refused too: the walk recurses once per level,
+# and a pathologically deep tree must fail as a refusal, not a RecursionError.
+_LOCAL_MAX_DEPTH = 64
 _COPY_CHUNK = 1024 * 1024
 
 # Open a directory, or a file that must not be a link, relative to its parent.
 # O_NONBLOCK keeps a FIFO swapped in for a file from blocking the open; fstat
-# then refuses it.
+# then refuses it. O_NOCTTY keeps a terminal device swapped in from becoming
+# acq's controlling terminal.
 _DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 _FILE_FLAGS = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-               | getattr(os, "O_BINARY", 0))
+               | getattr(os, "O_NOCTTY", 0) | getattr(os, "O_BINARY", 0))
 _WALK_BY_FD = os.open in os.supports_dir_fd and os.scandir in os.supports_fd and hasattr(os, "O_NOFOLLOW")
+
+# Whether each file the path-based (Windows) walk opens is checked to still lie
+# under the kit: the real platform, so a POSIX host can turn it on in a test.
+_CHECK_FINAL_PATH = sys.platform == "win32"
 
 
 class _LocalCopy:
@@ -527,11 +536,14 @@ class _LocalCopy:
     link that is part of the kit is copied as a link, and the copy is checked
     afterwards (:func:`kitspec.tree_symlinks_within`). On Windows, which has no
     such opens, a reparse point (link or junction) anywhere in the tree is
-    refused, and each file must still be the file listed when it was opened.
+    refused, each file must still be the file listed when it was opened, and
+    the path Windows reports for the opened handle must lie under the kit
+    (so a directory swapped for a junction after it was listed is caught).
     """
 
-    def __init__(self, shown: str):
+    def __init__(self, shown: str, root: str = ""):
         self.shown = shown
+        self.root = root
         self.entries = 0
         self.bytes = 0
         self.record: list[list[str]] = []
@@ -546,6 +558,10 @@ class _LocalCopy:
             raise self.refuse(f"it has more than {_LOCAL_MAX_ENTRIES} entries (is the path right?)")
         if "\n" in rel:
             raise self.refuse("a file name contains a newline")
+
+    def _descend(self, rel: str) -> None:
+        if rel.count("/") + 1 > _LOCAL_MAX_DEPTH:
+            raise self.refuse(f"it nests directories more than {_LOCAL_MAX_DEPTH} deep (is the path right?)")
 
     def copy_file(self, src_fd: int, target: Path, rel: str) -> None:
         info = os.fstat(src_fd)
@@ -578,6 +594,7 @@ class _LocalCopy:
                 os.symlink(link, target)
                 self.record.append(["l", rel, link])
             elif entry.is_dir(follow_symlinks=False):
+                self._descend(rel)
                 child = self._open(entry.name, _DIR_FLAGS, dir_fd, rel)
                 try:
                     target.mkdir()
@@ -607,6 +624,7 @@ class _LocalCopy:
             if entry.is_symlink() or os.path.isjunction(full) or reparse_tag:
                 raise self.refuse(f"{rel} is a link or junction, which a local kit may not hold on this host")
             if stat.S_ISDIR(before.st_mode):
+                self._descend(rel)
                 target.mkdir()
                 self.record.append(["d", rel])
                 self.walk_path(full, target, rel + "/")
@@ -616,6 +634,8 @@ class _LocalCopy:
                     after = os.fstat(src)
                     if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
                         raise self.refuse(f"{rel} changed while it was copied")
+                    if _CHECK_FINAL_PATH and not _within(_final_path(src), self.root):
+                        raise self.refuse(f"{rel} resolves outside the kit directory")
                     self.copy_file(src, target, rel)
                 finally:
                     os.close(src)
@@ -632,6 +652,46 @@ class _LocalCopy:
         # JSON keeps every entry unambiguous, whatever its names hold
         # (undecodable bytes arrive as escaped lone surrogates).
         return hashlib.sha256(json.dumps(self.record).encode("ascii")).hexdigest()
+
+
+def _final_path(fd: int) -> str | None:  # pragma: no cover - Windows only
+    """The path Windows reports for ``fd``'s open handle, links resolved; None when it cannot say.
+
+    ``GetFinalPathNameByHandleW`` (normalized name, DOS volume) names the file
+    the handle really refers to, whatever junctions the path that opened it
+    went through. The ``\\\\?\\`` prefix it returns is dropped so the result
+    compares with :func:`os.path.realpath` output.
+    """
+    if sys.platform != "win32":
+        return None
+    import ctypes
+    import msvcrt
+
+    try:
+        handle = msvcrt.get_osfhandle(fd)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        function = kernel32.GetFinalPathNameByHandleW
+        function.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32]
+        function.restype = ctypes.c_uint32
+        size = 32768
+        buffer = ctypes.create_unicode_buffer(size)
+        length = function(ctypes.c_void_p(handle), buffer, size, 0)
+    except OSError:
+        return None
+    if length == 0 or length >= size:
+        return None
+    path = buffer.value
+    if path.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + path[len("\\\\?\\UNC\\"):]
+    return path[len("\\\\?\\"):] if path.startswith("\\\\?\\") else path
+
+
+def _within(path: str | None, root: str) -> bool:
+    """True when ``path`` lies under ``root`` (case and separators folded, as Windows compares them)."""
+    if path is None or not root:
+        return False
+    folded, base = os.path.normcase(path), os.path.normcase(root).rstrip("\\/")
+    return folded.startswith(base + "\\") or folded.startswith(base + "/")
 
 
 def _local_root(ref: str, shown: str) -> str:
@@ -658,7 +718,7 @@ def copy_local(ref: str, backend: str) -> Path:
     except OSError as exc:
         raise KitFetchError(errors.FAILURE, f"could not create a kit directory: {exc.strerror or exc}",
                             "check that the kit cache directory is writable, then retry") from exc
-    copy = _LocalCopy(shown)
+    copy = _LocalCopy(shown, root)
     try:
         kit = tmp / "kit"
         kit.mkdir()

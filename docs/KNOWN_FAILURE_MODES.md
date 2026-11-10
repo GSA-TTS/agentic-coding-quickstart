@@ -3396,11 +3396,17 @@ kits outside the bundle at their pinned commit. Compared with the Bash acq:
   a link in the kit is copied as a link and must resolve inside the copy, so an
   absolute link (even to a file of the same kit) is refused. On Windows a link
   or junction anywhere in a local kit is refused outright. A FIFO, socket or
-  device file is refused, and so is a tree of more than 10000 entries or
-  256 MiB. A `spec.yaml` saved with CRLF line endings (a Windows editor's
-  default) is refused with that reason: the spec reader, like Bash's, would
-  read each value with a trailing CR. A local kit's later changes reach a sandbox only through a heal or
-  recreate, which copies it again.
+  device file is refused, and so is a tree of more than 10000 entries,
+  256 MiB, or directories nested more than 64 deep. A `spec.yaml` saved with
+  CRLF line endings (a Windows editor's default) is refused with that reason:
+  the spec reader, like Bash's, would read each value with a trailing CR. A
+  local kit's later changes reach a sandbox only through a heal or recreate,
+  which copies it again.
+- Known limitation, shared with Bash: a payload file that is a hard link
+  (link count above 1) is copied like any other file. A hard link cannot point
+  across file systems or at a directory, but whoever can write to the kit
+  directory can hard-link a file they can read from elsewhere on the same file
+  system into it. Keep local kits in a directory only you can write.
 
 ### Root Cause
 
@@ -3412,9 +3418,11 @@ kit only from its private cache, which only acq writes, so it copies a local
 kit there first (option 1 in section 61) and checks the copy. On POSIX the copy
 opens every directory and file relative to its parent with `O_NOFOLLOW`, so a
 link swapped in during the copy is never followed out of the kit. Windows has
-no such opens, so there the copy refuses every reparse point and checks that
-each file is still the one listed; a directory swapped for a junction between
-that check and the listing of its entries is the one window left there. The
+no such opens, so there the copy refuses every reparse point, checks that each
+file is still the one listed, and checks that the path Windows reports for the
+opened handle (`GetFinalPathNameByHandleW`) lies under the kit, so a file
+reached through a directory swapped for a junction after it was listed is
+refused. The
 Python acq passes sbx only local, translated kit directories, so it does not
 need the `kit.allowedSources` update Bash makes before create.
 
@@ -3436,10 +3444,8 @@ Tracked follow-ups:
   POSIX; `provider_input.publish` already writes Bash's Windows pointer file.
 - **Local kit directories.** Done: the Python acq copies a local kit into its
   private cache with the no-link checks (option 1 in section 61) and applies
-  the copy. Left open: the Windows junction window described above. Unblock
-  trigger: a report of local kits used on Windows by more than one user of the
-  host; then copy through handles opened without following reparse points
-  (`FILE_FLAG_OPEN_REPARSE_POINT`).
+  the copy, on Windows checking each opened file's final path as well. Nothing
+  further is tracked here; the hard-link limitation above is Bash's too.
 - **The rc bridge.** Port `_acq_sbx_ensure_rc_bridge` with the msb login-shell
   work.
 - **Kit fetch on Windows.** The fetch itself has no POSIX-only step, but its

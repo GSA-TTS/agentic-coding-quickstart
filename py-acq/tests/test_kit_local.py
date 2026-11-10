@@ -140,6 +140,61 @@ def test_an_oversized_tree_is_refused(tmp_path, monkeypatch):
     assert "MiB" in _refused(_kit(tmp_path / "big"))
 
 
+@pytest.mark.parametrize("by_fd", [True, False], ids=["fd-walk", "path-walk"])
+def test_a_tree_nested_too_deep_is_refused_not_a_recursion_error(tmp_path, monkeypatch, by_fd):
+    if by_fd and not kit_fetch._WALK_BY_FD:
+        pytest.skip("no fd-relative walk on this host")
+    monkeypatch.setattr(kit_fetch, "_WALK_BY_FD", by_fd)
+    kit = _kit(tmp_path)
+    deep = kit / "files"
+    for _ in range(kit_fetch._LOCAL_MAX_DEPTH):  # files/ itself is the first level
+        deep = deep / "d"
+    deep.mkdir(parents=True)
+    assert f"more than {kit_fetch._LOCAL_MAX_DEPTH} deep" in _refused(kit)
+    # One level less is still a kit.
+    deep.rmdir()
+    assert kit_fetch.load(str(kit), "msb")[0] == "team-kit"
+
+
+def test_the_path_walk_refuses_a_file_whose_handle_resolves_outside_the_kit(tmp_path, monkeypatch):
+    # A directory swapped for a junction after it was listed: the file opened
+    # through it is somewhere else, which the handle's final path shows.
+    monkeypatch.setattr(kit_fetch, "_WALK_BY_FD", False)
+    monkeypatch.setattr(kit_fetch, "_CHECK_FINAL_PATH", True)
+    kit = _kit(tmp_path)
+    monkeypatch.setattr(kit_fetch, "_final_path", lambda fd: str(tmp_path / "elsewhere" / "team.txt"))
+    assert "resolves outside the kit directory" in _refused(kit)
+    real_root = os.path.realpath(kit)
+    monkeypatch.setattr(kit_fetch, "_final_path", lambda fd: os.path.join(real_root, "files", "team.txt"))
+    assert kit_fetch.load(str(kit), "msb")[0] == "team-kit"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows handles and junctions")
+def test_final_path_names_the_file_behind_a_junction(tmp_path):
+    import subprocess
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "f.txt").write_text("x", encoding="utf-8")
+    junction = tmp_path / "kit" / "j"
+    junction.parent.mkdir()
+    made = subprocess.run(["cmd", "/c", "mklink", "/J", str(junction), str(outside)], capture_output=True)
+    if made.returncode != 0:
+        pytest.skip("cannot create a junction here")
+    fd = os.open(junction / "f.txt", os.O_RDONLY)
+    try:
+        final = kit_fetch._final_path(fd)
+    finally:
+        os.close(fd)
+    assert kit_fetch._within(final, os.path.realpath(outside))
+    assert not kit_fetch._within(final, os.path.realpath(tmp_path / "kit"))
+
+
+@posix_only
+def test_payload_files_are_opened_without_taking_a_controlling_terminal():
+    assert kit_fetch._FILE_FLAGS & os.O_NOCTTY and kit_fetch._FILE_FLAGS & os.O_NOFOLLOW
+
+
 def test_a_crlf_spec_is_refused_with_its_real_reason(tmp_path):
     kit = _kit(tmp_path, TEAM_SPEC.replace("\n", "\r\n"))
     message = _refused(kit)
