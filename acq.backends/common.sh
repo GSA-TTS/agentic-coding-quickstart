@@ -1036,7 +1036,7 @@ _acq_require_provider_selection() {
 _build_kit_list() {
   local agent="${1:-}" kit support_refs
   KITS=()
-  _acq_kit_refs_make_absolute
+  _acq_kit_refs_make_absolute || return 1
   # This runs for EVERY verb (acq_resolve_backend), so a provider-selection
   # failure is LATCHED here and only enforced by create/run through
   # _acq_require_provider_selection. The kit list still builds (without the
@@ -1859,7 +1859,7 @@ extract_kit_flags() {
   if [ "$expect_kit" -eq 1 ]; then
     echo "acq: --kit given with no value; ignoring" >&2
   fi
-  _acq_kit_refs_make_absolute
+  _acq_kit_refs_make_absolute || return 1
 }
 
 # Extract the explicit empty provider selection without relying on shell export
@@ -2889,6 +2889,7 @@ acq_cli_kits_write() {
 _acq_kit_refs_make_absolute() {
   local i ref out=""
   local _x=()
+  _acq_kit_refs_check || return 1
   for i in ${ACQ_CLI_KITS[@]+"${!ACQ_CLI_KITS[@]}"}; do
     ACQ_CLI_KITS[i]=$(_acq_kit_ref_absolute "${ACQ_CLI_KITS[i]}")
   done
@@ -2899,6 +2900,25 @@ _acq_kit_refs_make_absolute() {
     done
     ACQ_EXTRA_KITS="$out"
   fi
+}
+
+# _acq_kit_refs_check: refuse the --kit and ACQ_EXTRA_KITS refs where they
+# enter, before any of them is fetched, recorded (the .kits record, the sbx
+# extra-kits record) or printed: a remote ref with a query string, or with a
+# fragment parameter other than ref= and dir=, is refused by
+# kit_ref_shape_check, whose message never repeats the ref.
+_acq_kit_refs_check() {
+  local ref _x=()
+  for ref in ${ACQ_CLI_KITS[@]+"${ACQ_CLI_KITS[@]}"}; do
+    kit_ref_shape_check "$ref" "--kit" || return 1
+  done
+  if [ -n "${ACQ_EXTRA_KITS:-}" ]; then
+    split_noglob _x "$ACQ_EXTRA_KITS"
+    for ref in ${_x[@]+"${_x[@]}"}; do
+      kit_ref_shape_check "$ref" "ACQ_EXTRA_KITS" || return 1
+    done
+  fi
+  return 0
 }
 
 # _acq_kit_ref_absolute REF: echo REF with a relative local kit path made
@@ -2949,6 +2969,14 @@ acq_cli_kits_load() {
             continue
             ;;
         esac
+        # A remote ref that acq now refuses at input (a query string, or a
+        # fragment parameter other than ref= and dir=) is skipped without
+        # being named, as a ref typed today would be refused.
+        if ! kit_ref_shape_check "$val" "recorded kit for $name" 2>/dev/null; then
+          echo "acq: warning: ignoring a recorded remote kit ref for $name that acq now refuses" >&2
+          echo "acq:   (a query string, or a '#' parameter other than ref= and dir=); it is no longer applied." >&2
+          continue
+        fi
         ;;
     esac
     case "$line" in

@@ -442,9 +442,11 @@ source) is fetched by `src/acq_py/kit_fetch.py`, a port of Bash
 * Only `git+https://HOST/PATH#ref=SHA&dir=DIR` is fetched, and `SHA` must be a
   full 40-hex commit id. A branch or tag name is refused with
   `kit_ref_not_pinned` (Bash fetches it unverified). So are URL userinfo
-  (`credential-bearing kit URLs are not allowed`), plain `http`, a query
-  string or percent escapes, and a `dir=` that is absolute, contains `..` or
-  uses a character outside `[A-Za-z0-9._/-]`.
+  (`credential-bearing kit URLs are not allowed`), plain `http`, percent
+  escapes, and a `dir=` that is absolute, contains `..` or uses a character
+  outside `[A-Za-z0-9._/-]`. Like Bash, it refuses first, without naming the
+  ref, a query string before the `#` and any `#` parameter other than `ref=`
+  and `dir=`, at input (`--kit`, `ACQ_EXTRA_KITS`) as well as at the fetch.
 * A local kit directory (Bash reads it in place) is copied into the same
   private cache first, and every check runs on the copy, so a change to the
   directory during the checks cannot reach the sandbox. The copy follows no

@@ -23,6 +23,7 @@ from acq_py import (
     kit_fetch,
     kit_msb,
     kit_sbx,
+    kits,
     kitspec,
     legacy_bash,
     msb,
@@ -159,7 +160,7 @@ def test_a_pinned_https_ref_parses():
 
 
 def test_the_dir_spelling_is_normalized_and_the_last_parameter_wins():
-    ref = kit_fetch.parse_ref(f"git+https://h.example/r.git#dir=x&ref={'f' * 40}&other=1&dir=././kits//./one/.")
+    ref = kit_fetch.parse_ref(f"git+https://h.example/r.git#dir=x&ref={'f' * 40}&dir=././kits//./one/.")
     assert (ref.commit, ref.directory) == ("f" * 40, "kits/one")
     assert kit_fetch.parse_ref(f"git+https://h.example/r.git#ref={SHA}&dir=.").directory == ""
 
@@ -176,7 +177,13 @@ def test_the_dir_spelling_is_normalized_and_the_last_parameter_wins():
     (f"git+http://github.com/acme/kits.git#ref={SHA}&dir=k", errors.VALIDATION_FAILED, "https only"),
     (f"git+ssh://github.com/acme/kits.git#ref={SHA}&dir=k", errors.VALIDATION_FAILED, "https only"),
     (f"git+https://github.com/acme/kits.git?private_token=hunter2-token#ref={SHA}&dir=k",
-     errors.VALIDATION_FAILED, "does not accept"),
+     errors.VALIDATION_FAILED, "its URL has a query string"),
+    (f"git+https://github.com/acme/kits.git#ref={SHA}&dir=k&token=hunter2-token",
+     errors.VALIDATION_FAILED, "parameter other than ref= and dir="),
+    (f"git+https://github.com/acme/kits.git#hunter2-token&ref={SHA}&dir=k",
+     errors.VALIDATION_FAILED, "parameter other than ref= and dir="),
+    (f"git+https://github.com/acme/kits.git#ref={SHA}&&dir=k", errors.VALIDATION_FAILED,
+     "parameter other than ref= and dir="),
     (f"git+https://github.com/acme/k%2e%2e/kits.git#ref={SHA}&dir=k", errors.VALIDATION_FAILED, "does not accept"),
     (f"git+https://github.com/acme/../kits.git#ref={SHA}&dir=k", errors.VALIDATION_FAILED, "does not accept"),
     (f"git+https://github.com/acme/kits.git#ref={SHA}&dir=../escape", errors.VALIDATION_FAILED, "unsafe kit dir"),
@@ -199,6 +206,42 @@ def test_ref_display_redacts_like_bash_kit_ref_display():
     assert kit_fetch.ref_display("git+https://h.example/r.git?private_token=tok#ref=x") == "git+https://h.example/r.git?***#ref=x"
     assert kit_fetch.ref_display("u:tok@h.example/r") == "***@h.example/r"
     assert kit_fetch.ref_display(GOOD) == GOOD
+    assert kit_fetch.ref_display("git+https://h.example/r.git#ref=x&dir=k&token=tok") == "git+https://h.example/r.git#ref=x&dir=k&***"
+
+
+@pytest.mark.parametrize("ref", [
+    f"git+https://kits.example/acme/kits.git?private_token=hunter2-token#ref={SHA}&dir=k",
+    f"git+https://kits.example/acme/kits.git#ref={SHA}&dir=k&token=hunter2-token",
+])
+def test_a_query_or_extra_fragment_parameter_is_refused_without_naming_the_ref(ref):
+    # Named neither in the message nor the remediation: not the host, not the
+    # parameter, not the value.
+    with pytest.raises(kit_fetch.KitFetchError) as info:
+        kit_fetch.parse_ref(ref)
+    text = info.value.message + info.value.remediation
+    assert "remote kit ref refused" in info.value.message
+    for part in ("hunter2", "token", "kits.example"):
+        assert part not in text
+
+
+@pytest.mark.parametrize("ref", [
+    f"git+https://kits.example/acme/kits.git?private_token=hunter2-token#ref={SHA}&dir=k",
+    f"git+https://kits.example/acme/kits.git#ref={SHA}&dir=k&token=hunter2-token",
+])
+def test_select_kits_refuses_a_query_or_extra_parameter_at_input(ref):
+    for kwargs in ({"cli_kits": [ref], "env": {}}, {"env": {"ACQ_EXTRA_KITS": f"/kits/fine {ref}"}}):
+        with pytest.raises(kitspec.KitSelectionError) as info:
+            kitspec.select_kits(None, ready=lambda _agent: False, **kwargs)
+        assert "remote kit ref refused" in str(info.value)
+        assert "hunter2" not in str(info.value) and "kits.example" not in str(info.value)
+
+
+def test_canonical_refs_and_local_paths_with_query_or_hash_characters_pass_selection(tmp_path):
+    odd = tmp_path / ("odd#name" if os.name == "nt" else "odd?name#1")  # Windows forbids '?' in a name
+    odd.mkdir()
+    selection = kitspec.select_kits(None, cli_kits=[str(odd), GOOD], env={}, ready=lambda _agent: False)
+    assert [k.ref for k in selection.kits if k.role == "cli"] == [str(odd), GOOD]
+    assert kits.remote_ref_problem(str(odd)) is None and kits.remote_ref_problem(GOOD) is None
 
 
 # ---------------------------------------------------------------------------

@@ -1259,7 +1259,9 @@ bundle (every catalog extra kit, a provider kit from a registered source) it
 fetches at its pinned commit and verifies, and a local kit directory it copies
 into its private cache and checks there; it refuses a ref not pinned to a full
 40-hex commit, and points to `ACQ_IMPL=bash` (see
-`py-acq/README.md`, "Kits outside the bundle").
+`py-acq/README.md`, "Kits outside the bundle"). Both implementations refuse,
+before anything is fetched or recorded, a remote ref with a query string or a
+`#` parameter other than `ref=` and `dir=` (KNOWN_FAILURE_MODES section 89).
 
 The create records which provider selection applied (`provider_selection` and
 `provider_kits` in the sandbox's provenance record). `acq start`,

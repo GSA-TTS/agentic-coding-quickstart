@@ -9,8 +9,10 @@ is fetched here. This is a port of the Bash ``kit_translate_fetch``,
 ones:
 
 * The ref grammar is Bash's: ``git+https://HOST/PATH#ref=REF&dir=DIR``, the
-  fragment split on ``&``, the last ``ref=`` and ``dir=`` winning, other
-  parameters ignored. A ref with userinfo in its authority is refused
+  fragment split on ``&``, the last ``ref=`` and ``dir=`` winning. Both refuse
+  first, without naming the URL or a value, a query string before the ``#``
+  and any fragment parameter other than ``ref=`` and ``dir=``
+  (:func:`kits.remote_ref_problem`). A ref with userinfo in its authority is refused
   (``credential-bearing kit URLs are not allowed``), and so is a ``dir=`` that
   is absolute, contains ``..`` or uses a character outside ``[A-Za-z0-9._/-]``.
 * Stricter than Bash: ``REF`` must be a full 40-hex commit id. Bash fetches a
@@ -68,7 +70,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import errors, gitrepos, hostexec, kitspec, timeouts, userdirs
+from . import errors, gitrepos, hostexec, kits, kitspec, timeouts, userdirs
 
 FETCH_TIMEOUT_ENV = "ACQ_KIT_FETCH_TIMEOUT"
 DEFAULT_FETCH_TIMEOUT_S = 120.0
@@ -124,10 +126,13 @@ def ref_display(ref: str) -> str:
 
     Before the ``#`` fragment, a query string becomes ``?***``, URL userinfo
     becomes ``***@``, and without a scheme a first path segment with ``@``
-    becomes ``***@HOST``. The fragment is kept so the message still names the
-    kit. Every message that names a ref goes through this.
+    becomes ``***@HOST``. The fragment's ``ref=`` and ``dir=`` are kept so the
+    message still names the kit; any other fragment parameter becomes ``***``.
+    Every message that names a ref goes through this.
     """
     base, sep, frag = ref.partition("#")
+    if sep:
+        frag = "&".join(p if p.startswith(("ref=", "dir=")) else "***" for p in frag.split("&"))
     query = ""
     if "?" in base:
         base, query = base.split("?", 1)[0], "?***"
@@ -185,6 +190,9 @@ def parse_ref(ref: str) -> RemoteRef:
     shown = _shown(ref)
     if not is_remote(ref):
         raise _refused(f"kit ref {shown} is not a remote kit ref")
+    problem = kits.remote_ref_problem(ref)
+    if problem is not None:
+        raise _refused(problem, remediation=kits.REMOTE_REF_REMEDIATION)
     url = ref[len("git+"):]
     frag = url.split("#", 1)[1] if "#" in url else url  # Bash "${url#*#}"
     url = url.split("#", 1)[0]

@@ -4911,6 +4911,52 @@ secret. The refusal is covered by `test/bats/40-secret-set.bats`,
 
 ---
 
+## 89. Remote Kit Ref With a Query String or an Extra `#` Parameter Is Refused
+
+**Status:** By design (both the Bash and the Python `acq`).
+
+### Symptoms
+
+`acq run`, `acq create`, `acq kit list` or a heal stops before anything is
+fetched:
+
+```text
+acq: --kit: remote kit ref refused: its URL has a query string ('?' before the '#').
+```
+
+or `... its '#' fragment has a parameter other than ref= and dir=.` (with
+`ACQ_EXTRA_KITS:` in place of `--kit` for an entry of that variable). The
+message does not repeat the ref. A sandbox whose kit record holds such a ref
+from an older `acq` prints `ignoring a recorded remote kit ref ... that acq now
+refuses` on start, and that kit is no longer applied.
+
+### Root Cause
+
+A remote kit ref is `git+https://HOST/REPO.git#ref=<sha>&dir=<path>`, and acq
+uses no other part. A query string (`?private_token=…`) or an extra fragment
+parameter (`&token=…`) is where a credential would ride, and acq used to carry
+the ref verbatim into its debug output, its `.kits` and sbx `extra-kits`
+records and, after a fetch, its messages. acq now refuses such a ref where it
+enters (`--kit`, `ACQ_EXTRA_KITS`), again before any fetch
+(`kit_ref_shape_check` in `acq.backends/kit-translate.sh`,
+`kits.remote_ref_problem` in `py-acq/src/acq_py/kits.py`), and skips it when a
+record is reloaded. Message helpers also hide any fragment parameter other than
+`ref=` and `dir=` (`kit_ref_display`, `kit_fetch.ref_display`).
+
+### Fix
+
+Remove the query string or the extra parameter. For a kit source that needs
+authentication, configure a git credential helper that does not prompt (for
+GitHub, `gh auth setup-git`); never put a token in the ref. A local kit path is
+not affected: `?` and `#` are ordinary characters in a directory name.
+
+### Prevention / Status
+
+Covered by `test/bats/170-kit-ref-shape.bats`, `py-acq/tests/test_kit_fetch.py`,
+`py-acq/tests/test_kits.py` and `py-acq/tests/test_legacy_bash.py`.
+
+---
+
 ## Contributing
 
 When you discover a new failure mode:

@@ -1560,6 +1560,9 @@ acq_backend_ensure_kits_applied() {
     if grep -Fxq -- "$k" <<<"$applied"; then
       continue
     fi
+    # A ref acq refuses at input is never announced, fetched or recorded; the
+    # refusal names the problem, not the ref.
+    kit_ref_shape_check "$k" "ACQ_EXTRA_KITS" || continue
     echo "acq: applying extra kit to '$name': $(kit_ref_display "$k")" >&2
     _kadd_rc=0
     if local_extra=$(_acq_sbx_translate_kit "$k"); then

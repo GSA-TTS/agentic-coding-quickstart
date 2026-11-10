@@ -305,6 +305,35 @@ def redact_userinfo(text: str) -> str:
     return _USERINFO_RE.sub(r"\1***@", text)
 
 
+REMOTE_REF_REMEDIATION = (
+    "a remote kit ref takes only git+https://HOST/REPO.git#ref=<commit>&dir=<path>; fix or remove it "
+    "(--kit, ACQ_EXTRA_KITS), then retry"
+)
+
+
+def remote_ref_problem(ref: str) -> str | None:
+    """Why a remote kit ref is refused at input, or None (Bash ``kit_ref_shape_check``).
+
+    A ref starting ``git+`` is refused when its transport URL (the part before
+    the first ``#``) has a query string, or when its fragment has any
+    parameter other than ``ref=`` and ``dir=``: that is where a token would
+    ride, and acq would otherwise carry it into records, cache paths and
+    messages. The reason names the problem only, never the URL, a parameter
+    name or a value. A local path is never refused here, since ``?`` and ``#``
+    are ordinary characters in a directory name; a ref with no fragment is left
+    to the parser, which reports it as malformed.
+    """
+    if not ref.startswith("git+"):
+        return None
+    body = ref[len("git+"):]
+    transport, sep, fragment = body.partition("#")
+    if "?" in transport:
+        return "remote kit ref refused: its URL has a query string ('?' before the '#')"
+    if sep and any(not p.startswith(("ref=", "dir=")) for p in fragment.split("&")):
+        return "remote kit ref refused: its '#' fragment has a parameter other than ref= and dir="
+    return None
+
+
 def kit_list_data() -> dict:
     """Assemble the ``kit list`` required result data (ADR-0038m §2).
 

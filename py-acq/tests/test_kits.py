@@ -263,6 +263,20 @@ def test_kit_list_effective_sets(monkeypatch, tmp_path, capsys):
     assert data["extra"] == ["./local-kit", "git+https://github.com/acme/kits.git#ref=x&dir=k"]
 
 
+@pytest.mark.parametrize("ref", [
+    "git+https://github.com/acme/kits.git?private_token=s3cr3t-tok#ref=x&dir=k",
+    "git+https://github.com/acme/kits.git#ref=x&dir=k&token=s3cr3t-tok",
+])
+def test_kit_list_refuses_an_extra_ref_refused_at_input(monkeypatch, tmp_path, capsys, ref):
+    # Bash's kit list stops in _build_kit_list on such a ref; neither lists it.
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_EXTRA_KITS", f"./local-kit {ref}")
+    rc, doc = _invoke(capsys, "kit", "list", "--json")
+    assert rc == 1 and doc["error"]["code"] == "validation_failed"
+    assert doc["error"]["message"].startswith("ACQ_EXTRA_KITS: remote kit ref refused")
+    assert "s3cr3t-tok" not in json.dumps(doc)
+
+
 # ---------------------------------------------------------------------------
 # kit check / kit update: provenance currency + consent.
 # ---------------------------------------------------------------------------

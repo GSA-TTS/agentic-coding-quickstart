@@ -626,6 +626,16 @@ acq create opencode --kit ./kit-a --kit git+https://github.com/acme/kits.git#ref
 neutral `hybrid/v1` kit is converted to the active backend's format), so they
 work with any backend — they are **not** forwarded raw to the backend CLI.
 
+A remote ref has exactly the form
+`git+https://HOST/REPO.git#ref=<sha>&dir=<path>`. `acq` refuses, before it
+fetches or records anything, a remote ref whose URL has a query string (`?`
+before the `#`) or whose `#` part has any parameter other than `ref=` and
+`dir=`; the error names the problem but not the ref, since that is where a
+token would be. A local kit path may contain `?` and `#`. Credentials never go
+in a kit ref: configure a git credential helper for a source that needs
+authentication. See section 89 of
+[KNOWN_FAILURE_MODES.md](../KNOWN_FAILURE_MODES.md).
+
 ### Provider kits
 
 New sandboxes include the USAi provider kit by default, unchanged from earlier

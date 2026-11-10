@@ -218,6 +218,12 @@ def read_cli_kits(
                 shown = _shown(value, lambda v: bool(_PLAIN_PATH_RE.fullmatch(v)))
                 warn(f"ignoring recorded relative kit path {shown} for {name}")
             continue
+        if kits.remote_ref_problem(value) is not None:
+            # A ref acq now refuses at input is skipped without being named.
+            if warn is not None:
+                warn(f"ignoring a recorded remote kit ref for {name} that acq now refuses (a query string, "
+                     "or a '#' parameter other than ref= and dir=); it is no longer applied")
+            continue
         (cli if key == "kit" else extras).append(value)
     return cli, extras
 

@@ -219,13 +219,28 @@ _kit_fetch_materialize() (
 #     cutting at the last '@';
 #   - without a scheme, a first path segment carrying any userinfo
 #     (user:token@host, or a bare token@host) becomes ***@host.
-# The fragment (#ref=…&dir=…) is kept so the message still names the kit. This
+# The fragment's ref= and dir= parameters are kept so the message still names
+# the kit; any other fragment parameter becomes *** (kit_ref_shape_check
+# refuses such a ref, but a message about it must not repeat the value). This
 # over-redacts when a path or host part legitimately contains '@' or ':',
 # which is harmless.
 kit_ref_display() {
-  local ref="${1:-}" base frag query="" first
+  local ref="${1:-}" base frag query="" first rest p out=""
   base="${ref%%#*}"
   frag="${ref#"$base"}"
+  if [ -n "$frag" ]; then
+    rest="${frag#'#'}"
+    while :; do
+      p="${rest%%&*}"
+      case "$p" in
+        ref=* | dir=*) out="${out}&${p}" ;;
+        *) out="${out}&***" ;;
+      esac
+      [ "$rest" != "$p" ] || break
+      rest="${rest#*&}"
+    done
+    frag="#${out#&}"
+  fi
   case "$base" in
     *\?*) base="${base%%\?*}"; query='?***' ;;
   esac
@@ -243,6 +258,48 @@ kit_ref_display() {
 }
 
 # ---------------------------------------------------------------------------
+# kit_ref_shape_check REF [WHERE]
+# ---------------------------------------------------------------------------
+# Refuse a remote kit ref (one starting git+) whose transport URL, the part
+# before '#', has a query string, or whose '#' fragment has any parameter other
+# than ref= and dir=. Such a part is where a token would ride, and acq would
+# otherwise carry it into its records, cache paths and messages. The message
+# names the problem only: never the URL, a parameter name or a value. WHERE
+# (for example "--kit" or "ACQ_EXTRA_KITS") says where the ref came from. A
+# local path is not checked, since '?' and '#' are ordinary characters in a
+# directory name. Returns 1, with the message on stderr, on a refusal.
+kit_ref_shape_check() {
+  local ref="${1:-}" where="${2:-}" body rest p prefix="kit-translate:"
+  case "$ref" in git+*) ;; *) return 0 ;; esac
+  [ -z "$where" ] || prefix="acq: ${where}:"
+  body="${ref#git+}"
+  case "${body%%#*}" in
+    *\?*)
+      echo "${prefix} remote kit ref refused: its URL has a query string ('?' before the '#')." >&2
+      echo "${prefix}   A kit ref takes no query parameters: git+https://HOST/REPO.git#ref=<commit>&dir=<path>" >&2
+      return 1
+      ;;
+  esac
+  # No fragment at all is reported by the fetch as a malformed ref.
+  case "$body" in *'#'*) ;; *) return 0 ;; esac
+  rest="${body#*#}"
+  while :; do
+    p="${rest%%&*}"
+    case "$p" in
+      ref=* | dir=*) ;;
+      *)
+        echo "${prefix} remote kit ref refused: its '#' fragment has a parameter other than ref= and dir=." >&2
+        echo "${prefix}   A kit ref names only those two: git+https://HOST/REPO.git#ref=<commit>&dir=<path>" >&2
+        return 1
+        ;;
+    esac
+    [ "$rest" != "$p" ] || break
+    rest="${rest#*&}"
+  done
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # kit_translate_fetch KITREF DESTDIR
 # ---------------------------------------------------------------------------
 # Materialize a kit's directory locally. KITREF is either:
@@ -251,6 +308,10 @@ kit_ref_display() {
 # On success prints the local kit directory path to stdout and returns 0.
 kit_translate_fetch() {
   local kitref="$1" destdir="$2"
+
+  # Every caller's ref passes the shape check before anything is fetched; the
+  # input points (--kit, ACQ_EXTRA_KITS) also run it before recording a ref.
+  kit_ref_shape_check "$kitref" || return 1
 
   case "$kitref" in
     git+http*)

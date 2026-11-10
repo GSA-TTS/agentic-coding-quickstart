@@ -1526,13 +1526,13 @@ case "$subcommand" in
       # var — the override is per-launch by design, and a sticky exported value
       # would silently re-pin the host port of every later sandbox in the shell.
     fi
-    extract_kit_flags "$@"
+    extract_kit_flags "$@" || exit 1
     _acq_kit_agent=""
     _acq_kit_first=$(first_positional "${ACQ_KIT_REMAINING[@]}" || true)
     if [ -n "$_acq_kit_first" ] && is_known_agent "$_acq_kit_first"; then
       _acq_kit_agent="$_acq_kit_first"
     fi
-    _build_kit_list "$_acq_kit_agent"
+    _build_kit_list "$_acq_kit_agent" || exit 1
     unset _acq_kit_agent _acq_kit_first
     # Rebuild positional args as: <subcommand> <remaining args w/o --kit>.
     set -- "$_sub" ${ACQ_KIT_REMAINING[@]+"${ACQ_KIT_REMAINING[@]}"}
@@ -1572,7 +1572,7 @@ case "$subcommand" in
     create_agent=$(first_positional "$@")
     _acq_apply_configured_extra_kits || exit 1
     create_time_kit_picker
-    _build_kit_list "$create_agent"
+    _build_kit_list "$create_agent" || exit 1
     _acq_require_provider_selection || exit 1
     # Pre-flight: validate the workspace path before provisioning (#issue).
     # Refuse unmountable paths (':' or control characters) first: workspace_path
@@ -1717,7 +1717,7 @@ case "$subcommand" in
         maybe_first_run_configure
         _acq_apply_configured_extra_kits || exit 1
         create_time_kit_picker
-        _build_kit_list "$first"
+        _build_kit_list "$first" || exit 1
         _acq_require_provider_selection || exit 1
 
 

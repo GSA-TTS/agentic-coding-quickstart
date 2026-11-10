@@ -39,6 +39,13 @@ def _print_kit_list_human(data: dict) -> None:
 
 
 def run_kit_list(emit_json: bool) -> int:
+    # An extra ref refused at input is never listed (Bash's kit list stops in
+    # _build_kit_list the same way); the refusal does not repeat it.
+    for ref in kits.extra_kits():
+        problem = kits.remote_ref_problem(ref)
+        if problem is not None:
+            return common._operational_failure("kit list", errors.VALIDATION_FAILED, f"ACQ_EXTRA_KITS: {problem}",
+                                               kits.REMOTE_REF_REMEDIATION, emit_json)
     data = kits.kit_list_data()
     if emit_json:
         print(json.dumps(envelope.success("kit list", data)))
