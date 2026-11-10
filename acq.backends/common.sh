@@ -2443,9 +2443,12 @@ _acq_config_lock_take() {
   if [ -L "$1" ] || [ ! -d "$1" ]; then
     return 1
   fi
-  ( set -C; : > "$1/owner" ) 2>/dev/null || return 1
-  if { printf '%s\n' "$2" > "$1/owner"; } 2>/dev/null; then
-    return 0
+  [ ! -L "$1/owner" ] || return 1
+  local rc=0
+  ( set -C; { printf '%s\n' "$2" || exit 2; } > "$1/owner" ) 2>/dev/null || rc=$?
+  [ ! -L "$1/owner" ] || return 1
+  if [ "$rc" -ne 2 ]; then
+    return "$rc"
   fi
   rm -f -- "$1/owner" 2>/dev/null
   rmdir -- "$1" 2>/dev/null || true
@@ -5824,15 +5827,16 @@ _acq_provider_input_publish() {
 # The owner file's exclusive create decides who holds the lock, never mkdir
 # alone (_acq_provider_input_lock_take). The Python acq takes the same directory
 # the same way (_BashLock in py-acq/src/acq_py/lock.py).
+# When Python inspects a Bash lock on Windows, Python applies the 15-minute
+# freshness rule (section 88); Bash itself checks the recorded process identity.
 acq_provider_input_lock_acquire() {
-  local backend="$1" name="$2" tx_pid="${3:-$$}" root parent lock owner tries=0 pid identity actual_identity token rc
+  local backend="$1" name="$2" tx_pid="${3:-$$}" root parent lock owner tries=0 pid identity actual_identity token rc age
   root=$(acq_provider_input_root "$backend" "$name") || return 1
   parent=${root%/*}
   _acq_provider_input_safe_mkdir "$parent" || return 1
   lock="${root}.lock"
-  # Work the owner line out before the directory exists, so the moment in which
-  # the lock has no owner line (which a waiter reports instead of waiting out)
-  # stays as short as possible.
+  # Work the owner line out before creating the directory to minimize the
+  # brief interval in which another taker must wait for its metadata.
   identity=$(_acq_provider_input_process_identity "$tx_pid") || return 1
   token="$tx_pid $identity"
   while :; do
@@ -5857,8 +5861,18 @@ acq_provider_input_lock_acquire() {
       continue
     fi
     owner="$lock/owner"
-    # A lock with no owner file must reach the "no valid owner" branch below,
-    # not stop on an unset variable (set -u) or print a redirection error.
+    [ ! -L "$owner" ] || { echo "acq: unsafe provider-input lock owner: $owner" >&2; return 1; }
+    # A newly created directory can briefly have missing or empty metadata.
+    # As with the config lock, count waiting against the retry budget.
+    age=$(_acq_config_lock_age "$lock") || age=0
+    if { [ ! -e "$owner" ] || [ ! -s "$owner" ]; } && [ "$age" -lt 5 ]; then
+      tries=$((tries + 1))
+      [ "$tries" -lt "${ACQ_PROVIDER_INPUT_LOCK_RETRIES:-300}" ] || {
+        echo "acq: gave up waiting for the provider-input lock: $lock" >&2; return 1;
+      }
+      sleep 1
+      continue
+    fi
     pid="" identity=""
     { IFS=' ' read -r pid identity < "$owner"; } 2>/dev/null || true
     actual_identity=$(_acq_provider_input_process_identity "$pid" 2>/dev/null || true)
@@ -5901,11 +5915,15 @@ acq_provider_input_lock_acquire() {
 _acq_provider_input_lock_take() {
   mkdir -- "$1" 2>/dev/null || return 1
   [ -d "$1" ] && [ ! -L "$1" ] || return 1
-  if ! ( set -C; : > "$1/owner" ) 2>/dev/null; then
+  [ ! -L "$1/owner" ] || return 1
+  local rc=0
+  ( set -C; { printf '%s\n' "$2" || exit 2; } > "$1/owner" ) 2>/dev/null || rc=$?
+  [ ! -L "$1/owner" ] || return 1
+  if [ "$rc" -eq 1 ]; then
     [ -e "$1/owner" ] || [ -L "$1/owner" ] || rmdir -- "$1" 2>/dev/null || true
     return 1
   fi
-  if { printf '%s\n' "$2" > "$1/owner"; } 2>/dev/null; then
+  if [ "$rc" -eq 0 ]; then
     return 0
   fi
   rm -f -- "$1/owner" 2>/dev/null

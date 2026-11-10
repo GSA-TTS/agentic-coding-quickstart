@@ -7,6 +7,115 @@ teardown() { acq_teardown_stubs; }
 
 load 'helper'
 
+@test "projection lock waits for missing or empty fresh owner metadata" {
+  local kind root lock
+  for kind in missing empty; do
+    root=$(acq_provider_input_root sbx "fresh-$kind"); lock="${root}.lock"
+    _acq_provider_input_safe_mkdir "$lock"
+    [ "$kind" != empty ] || : > "$lock/owner"
+    # Release at the first poll, deterministically modeling the holder's exit.
+    sleep() { printf 'waited\n' > "$STUBDIR/waited"; rm -f "$lock/owner"; rmdir "$lock"; }
+    ACQ_PROVIDER_INPUT_LOCK_RETRIES=3 run acq_provider_input_lock_acquire sbx "fresh-$kind"
+    assert_success
+    [ -f "$STUBDIR/waited" ]
+    acq_provider_input_lock_release "$lock"
+    rm "$STUBDIR/waited"
+  done
+}
+
+@test "projection lock fresh empty metadata still exhausts its retry budget" {
+  local root lock
+  root=$(acq_provider_input_root sbx fresh-budget); lock="${root}.lock"
+  _acq_provider_input_safe_mkdir "$lock"
+  : > "$lock/owner"
+  _acq_config_lock_age() { echo 0; }
+  sleep() { :; }
+  ACQ_PROVIDER_INPUT_LOCK_RETRIES=2 run acq_provider_input_lock_acquire sbx fresh-budget
+  assert_failure
+  assert_output --partial 'gave up waiting'
+  [ -f "$lock/owner" ]
+}
+
+@test "lock tokens are written with noclobber still enabled" {
+  local take lock
+  for take in _acq_provider_input_lock_take _acq_config_lock_take; do
+    lock="$STUBDIR/$take"
+    run bash -c '
+      ACQ_SOURCE_ONLY=1 . "$1" >/dev/null 2>&1
+      printf() { case "$-" in *C*) builtin printf "$@" ;; *) return 1 ;; esac; }
+      "$2" "$3" "1 token"
+    ' _ "$ACQ" "$take" "$lock"
+    assert_success
+    assert_equal "$(cat "$lock/owner")" '1 token'
+  done
+}
+
+@test "lock takes refuse owner symlinks to devices and FIFOs before opening" {
+  local take target lock
+  mkfifo "$STUBDIR/owner-fifo"
+  _racy_mkdir
+  for take in _acq_provider_input_lock_take _acq_config_lock_take; do
+    for target in /dev/null "$STUBDIR/owner-fifo"; do
+      lock="$STUBDIR/link-lock"
+      mkdir -p "$lock"
+      ln -s "$target" "$lock/owner"
+      run timeout 5 bash -c 'ACQ_SOURCE_ONLY=1 . "$1" >/dev/null 2>&1; "$2" "$3" token' _ "$ACQ" "$take" "$lock"
+      assert_failure 1
+      [ -L "$lock/owner" ]
+      rm "$lock/owner"; rmdir "$lock"
+    done
+  done
+}
+
+@test "lock takes refuse an owner replaced by a symlink during the write" {
+  local take lock
+  for take in _acq_provider_input_lock_take _acq_config_lock_take; do
+    lock="$STUBDIR/$take"
+    run bash -c '
+      ACQ_SOURCE_ONLY=1 . "$1" >/dev/null 2>&1
+      lock=$3
+      printf() { builtin printf "$@"; rm "$lock/owner"; ln -s /dev/null "$lock/owner"; }
+      "$2" "$lock" token
+    ' _ "$ACQ" "$take" "$lock"
+    assert_failure 1
+    [ -L "$lock/owner" ]
+  done
+}
+
+@test "spinner draws no frame through a symlinked draw lock" {
+  local dir="$STUBDIR/spin-link"
+  mkdir "$dir"
+  ln -s /dev/null "$dir/draw"
+  run timeout 5 bash -c '
+    ACQ_SCRIPT_DIR=$1
+    . "$1/acq.backends/progress.sh"
+    spin_fixture=$2
+    _acq_progress_enabled() { return 0; }
+    mktemp() { echo "$spin_fixture"; }
+    sleep() { : > "$dir/stop"; }
+    acq_spin_start SYMLINK-FRAME
+    wait "$_ACQ_SPIN_PID"
+    acq_spin_stop SAFE-END
+  ' _ "$REPO_ROOT" "$dir"
+  assert_success
+  refute_output --partial SYMLINK-FRAME
+}
+
+@test "spinner shutdown refuses a symlinked draw lock" {
+  local dir="$STUBDIR/spin-end-link"
+  mkdir "$dir"
+  ln -s /dev/null "$dir/draw"
+  run timeout 5 bash -c '
+    ACQ_SCRIPT_DIR=$1
+    . "$1/acq.backends/progress.sh"
+    _ACQ_SPIN_DIR=$2 _ACQ_SPIN_PID=999999 _ACQ_SPIN_FORKED=1
+    kill() { [ -z "$_ACQ_SPIN_LOCKED" ] || echo UNSAFE-TAKE; return 1; }
+    _acq_spin_end_animator
+  ' _ "$REPO_ROOT" "$dir"
+  assert_success
+  refute_output --partial UNSAFE-TAKE
+}
+
 _provider_release() {
   local root="$1"
   mkdir -p "$root/scripts" "$root/integrations/isolation/schemas"

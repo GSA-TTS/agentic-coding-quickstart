@@ -3554,8 +3554,10 @@ _acq_msb_clone_preflight() {
 # So unstaged edits to tracked files are not reported (that would need the
 # worktree content compared with the index).
 _acq_msb_clone_has_left_out_changes() {
-  local rc=0
-  _acq_msb_git_ws "$1" diff-index --cached --quiet HEAD -- >/dev/null 2>&1 || rc=$?
+  local rc=0 base=HEAD
+  _acq_msb_git_ws "$1" rev-parse --verify -q HEAD >/dev/null 2>&1 ||
+    base=4b825dc642cb6eb9a060e54bf8d69288fbee4904
+  _acq_msb_git_ws "$1" diff-index --cached --quiet "$base" -- >/dev/null 2>&1 || rc=$?
   [ "$rc" -ne 1 ] || return 0
   [ -n "$(_acq_msb_git_ws "$1" ls-files -z --others --exclude-standard 2>/dev/null | tr -d '\0')" ]
 }
@@ -3954,11 +3956,11 @@ _acq_msb_clone_warn_unfetched() {
   # repo-local config (core.fsmonitor, pagers, ...) would let the guest run
   # commands on the host at rm time. A running guest can also replace any of
   # these files at any moment, so they are read without following a link and
-  # without blocking (_acq_msb_clone_read_refs). A .git or refs directory that
-  # is itself a link points out of the scratch: its tips cannot be checked, so
-  # the warning is shown.
+  # without blocking (_acq_msb_clone_read_refs). Linked .git, refs, heads or
+  # packed-refs paths cannot be verified, so the warning is shown.
   local tips="" unfetched=""
-  if [ -L "${scratch}/.git" ] || [ -L "${scratch}/.git/refs" ]; then
+  if [ -L "${scratch}/.git" ] || [ -L "${scratch}/.git/refs" ] ||
+      [ -L "${scratch}/.git/refs/heads" ] || [ -L "${scratch}/.git/packed-refs" ]; then
     unfetched=1
   else
     tips=$(_acq_msb_clone_read_refs "${scratch}/.git")
@@ -3995,7 +3997,7 @@ _acq_msb_clone_plain_file() {
 #    each file is opened read-write (<>), which returns at once even for a FIFO,
 #    and read with a one-second timeout (read -t), and at most 256 bytes of a
 #    loose ref or 64 MiB of packed-refs are read, so a device swapped in ends
-#    the read too. A ref file that cannot be opened for writing is skipped.
+#    the read too. A confirmed read-only regular file is opened read-only.
 # Bash 3.2 and macOS have no portable O_NONBLOCK or O_NOFOLLOW open, and
 # timeout(1) is not on macOS, hence the read-write open.
 _acq_msb_clone_read_refs() {
@@ -4004,16 +4006,36 @@ _acq_msb_clone_read_refs() {
     while IFS= read -r -d '' f; do
       _acq_msb_clone_plain_file "$f" || continue
       t=""
-      { IFS= read -r -t 1 -n 256 t; } 2>/dev/null <>"$f" || true
+      if [ ! -w "$f" ]; then
+        { IFS= read -r -t 1 -n 256 t; } 2>/dev/null <"$f" || true
+      else
+        { IFS= read -r -t 1 -n 256 t; } 2>/dev/null <>"$f" || true
+      fi
       printf '%s\n' "$t"
     done < <(find "${gitdir}/refs/heads" -type f -print0 2>/dev/null)
   fi
   f="${gitdir}/packed-refs"
   _acq_msb_clone_plain_file "$f" || return 0
-  {
-    IFS= read -r -t 1 -n 4096 t && { printf '%s\n' "$t"; head -c 67108864; }
-  } 2>/dev/null <>"$f" |
+  if [ ! -w "$f" ]; then
+    _acq_msb_clone_read_packed_refs 2>/dev/null <"$f"
+  else
+    _acq_msb_clone_read_packed_refs 2>/dev/null <>"$f"
+  fi |
     awk '$1 ~ /^[0-9a-f]+$/ && $2 ~ /^refs\/heads\//{print $1}' 2>/dev/null || true
+}
+
+# Bound every read, including after a FIFO supplies its first line. -n also
+# bounds an unterminated line (Bash 3.2 has no read -N).
+_acq_msb_clone_read_packed_refs() {
+  local t lines=0 bytes=0 rc
+  while [ "$lines" -lt 1000000 ] && [ "$bytes" -lt 67108864 ]; do
+    t="" rc=0
+    IFS= read -r -t 1 -n 4096 t || rc=$?
+    [ -z "$t" ] || printf '%s\n' "$t"
+    [ "$rc" -eq 0 ] || break
+    lines=$((lines + 1))
+    bytes=$((bytes + ${#t} + 1))
+  done
 }
 
 # _acq_msb_clone_cleanup NAME — delete NAME's scratch clone and drop the

@@ -403,7 +403,7 @@ acq_spin_start() {
     while :; do
       for _f in $frames; do
         kill -0 "$owner" 2>/dev/null || _acq_spin_animator_quit "$dir"
-        if { true >"$dir/draw"; } 2>/dev/null; then
+        if [ ! -L "$dir/draw" ] && { true >"$dir/draw"; } 2>/dev/null && [ ! -L "$dir/draw" ]; then
           [ ! -e "$dir/stop" ] || _acq_spin_animator_quit "$dir"
           printf '\r%s %s' "$_f" "$msg" >&2
           rm -f "$dir/draw" 2>/dev/null || true
@@ -543,7 +543,8 @@ _acq_spin_end_animator() {
     fi
   fi
   while [ "$gone" -eq 0 ]; do
-    if [ "$held" -eq 0 ] && ( set -C; : >"$dir/draw" ) 2>/dev/null; then
+    if [ "$held" -eq 0 ] && [ ! -L "$dir/draw" ] &&
+        ( set -C; : >"$dir/draw" ) 2>/dev/null && [ ! -L "$dir/draw" ]; then
       _ACQ_SPIN_LOCKED=1
       held=1
     fi

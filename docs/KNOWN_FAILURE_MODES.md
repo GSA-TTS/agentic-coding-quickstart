@@ -5252,9 +5252,14 @@ which makes Bash open the file with `O_EXCL` itself, and `O_EXCL` in Python.
   owner line (`PID IDENTITY`, unchanged) before it makes the directory, which
   keeps the moment in which the lock has no owner line short. A lock released
   between a failed take and the look at it is taken again rather than
-  reported as unsafe. The owner format, the stale-owner recovery and the
-  Windows rule (section 88) are unchanged: the directory's age still starts
-  when the owner file is created.
+  reported as unsafe. Missing or empty owner metadata in a directory younger
+  than five seconds is retried once per second within the normal retry budget.
+  The token is written during the exclusive create, and symlinked owner files
+  are refused before and after it. The owner format, the stale-owner recovery
+  and the Windows rule (section 88) are unchanged: when Python acq inspects a Bash
+  lock on Windows, Python applies the 15-minute freshness rule, measured from
+  the directory modification when the owner file is created. Bash itself
+  checks the recorded process identity; it does not apply that freshness rule.
 - **Progress spinner draw lock** (`acq.backends/progress.sh`): the lock is the
   file `$dir/draw` instead of a directory. The animator creates it in its own
   shell with noclobber set, so a frame costs no extra fork (Git Bash forks

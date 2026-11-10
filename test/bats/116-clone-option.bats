@@ -25,6 +25,69 @@ teardown() {
 
 load 'helper'
 
+@test "clone(msb): a packed-ref FIFO supplying one line cannot hold rm open" {
+  local gd="$STUBDIR/fifo-git"
+  mkdir -p "$gd"
+  mkfifo "$gd/packed-refs"
+  run timeout 8 bash -c '
+    . "$1/acq.backends/msb.sh" 2>/dev/null
+    _acq_msb_clone_plain_file() { return 0; }
+    printf "%s refs/heads/main\n" 0123456789abcdef0123456789abcdef01234567 > "$2/packed-refs" &
+    writer=$!
+    _acq_msb_clone_read_refs "$2"
+    wait "$writer"
+    echo CHECK-DONE
+  ' _ "$REPO_ROOT" "$gd"
+  assert_success
+  assert_output --partial 0123456789abcdef0123456789abcdef01234567
+  assert_output --partial CHECK-DONE
+}
+
+@test "clone(msb): rm warns for symlinked heads or packed refs" {
+  local box="$STUBDIR/state/clones/box" leaf
+  mkdir -p "$box/repo/.git/refs" "$STUBDIR/empty-heads"
+  printf '%s\n' "$CLONEPROJ" > "$box/.origin"
+  : > "$STUBDIR/empty-packed"
+  for leaf in refs/heads packed-refs; do
+    if [ "$leaf" = refs/heads ]; then
+      ln -s "$STUBDIR/empty-heads" "$box/repo/.git/$leaf"
+    else
+      ln -s "$STUBDIR/empty-packed" "$box/repo/.git/$leaf"
+    fi
+    run env ACQ_STATE_DIR="$STUBDIR/state" bash -c '
+      . "$1/acq.backends/msb.sh" 2>/dev/null
+      _acq_msb_clone_warn_unfetched box
+    ' _ "$REPO_ROOT"
+    assert_success
+    assert_output --partial 'discarding unfetched commits'
+    rm "$box/repo/.git/$leaf"
+  done
+}
+
+@test "clone(msb): read-only loose and packed branch refs are inspected" {
+  local gd="$STUBDIR/readonly-git" sha=0123456789abcdef0123456789abcdef01234567
+  mkdir -p "$gd/refs/heads"
+  printf '%s\n' "$sha" > "$gd/refs/heads/main"
+  printf '%s refs/heads/packed\n' "$sha" > "$gd/packed-refs"
+  chmod a-w "$gd/refs/heads/main" "$gd/packed-refs"
+  [ ! -w "$gd/packed-refs" ] || skip 'requires read-only file permissions to be enforced'
+  run bash -c '. "$1/acq.backends/msb.sh" 2>/dev/null; _acq_msb_clone_read_refs "$2"' _ "$REPO_ROOT" "$gd"
+  assert_success
+  assert_output "$(printf '%s\n%s' "$sha" "$sha")"
+}
+
+@test "clone(msb): staged files in an unborn HEAD are left-out changes" {
+  local unborn="$STUBDIR/unborn"
+  git init -q "$unborn"
+  printf 'staged\n' > "$unborn/new"
+  git -C "$unborn" add new
+  run bash -c '
+    . "$1/acq.backends/msb.sh" 2>/dev/null
+    _acq_msb_clone_has_left_out_changes "$2"
+  ' _ "$REPO_ROOT" "$unborn"
+  assert_success
+}
+
 # Minimal real git repo with one committed file (real git; loose objects are
 # what the --no-hardlinks assertion inspects).
 _mk_repo() { # PATH
