@@ -4898,6 +4898,39 @@ session left running after a forced kill, or the Windows default flip
 
 ---
 
+## 90. uutils coreutils: `mkdir` Is Not Exclusive, So Bash's Provider-Input Lock Can Be Shared
+
+**Symptom:** On a host whose `mkdir` is uutils coreutils (Ubuntu 25.10 and
+later ship it as `/usr/bin/mkdir`; `mkdir --version` prints `uutils
+coreutils`), two Bash acq commands on the same sandbox at the same moment (two
+`create`, or `create` and `rm`) can both proceed instead of one waiting for the
+other.
+
+**Cause:** Bash acq takes its `mkdir` locks by running `mkdir DIR` and treating
+success as ownership. GNU and BSD `mkdir` fail with "File exists" for all but
+one of several concurrent callers. uutils `mkdir` 0.10.0 does not: in 300
+three-way races on one host it reported success 466 times. The `config.yaml`
+lock no longer relies on it: the exclusive create of its `owner` file (Bash
+noclobber, which Bash opens with `O_EXCL` itself, and `O_EXCL` in Python)
+decides who holds it, and a taker that loses never removes the winner's owner
+file (`_acq_config_lock_take` in `acq.backends/common.sh`, `_MkdirLock._take`
+in `py-acq/src/acq_py/lock.py`). The per-sandbox provider-input lock
+(`acq_provider_input_lock_acquire`) still writes its owner file without
+noclobber after a successful `mkdir`, so with uutils two Bash commands can both
+take it. The Python acq's own `mkdir` is atomic, but a racing Bash command can
+overwrite a Python holder's owner line in the same way.
+
+**Resolution:** Until the provider-input lock is changed, avoid running two
+Bash acq commands on the same sandbox at once on such a host, or put GNU
+`mkdir` first on `PATH` (for example the `gnu` coreutils package where the
+distribution offers it).
+
+**Tracked:** make the provider-input lock decide by an exclusive owner-file
+create, as the `config.yaml` lock does. Unblock trigger: none; it can be done
+whenever the provider-input transaction is next changed.
+
+---
+
 ## Contributing
 
 When you discover a new failure mode:

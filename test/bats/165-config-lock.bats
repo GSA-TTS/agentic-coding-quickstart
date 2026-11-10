@@ -116,6 +116,25 @@ _posix_only() {
   [ -z "$(ls -A "$STUBDIR/elsewhere")" ]
 }
 
+@test "config lock: a file in place of the lock directory is refused" {
+  : > "$LOCK"
+  ACQ_MIGRATION_LOCK_TIMEOUT=0 _cfg '_acq_config_write_field backend msb'
+  assert_failure
+  assert_output --partial "unsafe config.yaml lock: $LOCK (not a directory)"
+  [ -f "$LOCK" ] && [ ! -s "$LOCK" ]
+}
+
+@test "config lock: losing the owner-file race never removes the winner's owner" {
+  # mkdir is not atomic in every coreutils (uutils mkdir reports success to
+  # concurrent callers), so the exclusive owner-file create decides. Here the
+  # directory and the winner's owner already exist when this take runs.
+  _hold "$$ $(_acq_provider_input_process_identity "$$")"
+  _cfg 'mkdir() { return 0; }; _acq_config_lock_take "$ACQ_STATE_DIR/locks/config.lock.d" "1 x"'
+  assert_failure
+  run cat "$LOCK/owner"
+  assert_output "$$ $(_acq_provider_input_process_identity "$$")"
+}
+
 @test "config lock: on Windows a fresh directory is held and an old one recovered" {
   # Neither Git Bash nor native Python can check the other's PID there, so the
   # directory's age decides (_ACQ_CONFIG_LOCK_WINDOWS_STALE_S).
@@ -126,6 +145,72 @@ _posix_only() {
   touch -t 202001010000 "$LOCK"
   ACQ_MIGRATION_LOCK_TIMEOUT=0.2 _cfg 'OSTYPE=msys; _acq_config_write_field backend msb'
   assert_success
+  [ ! -e "$LOCK" ]
+}
+
+# _bash_writer ID COUNT — write key bID COUNT times, failing on the first error.
+_bash_writer() {
+  timeout 120 bash -c 'ACQ_SOURCE_ONLY=1 . "$1" >/dev/null 2>&1
+    i=1
+    while [ "$i" -le "$3" ]; do
+      _acq_config_write_field "b$2" "$i" || { echo "bash writer $2 failed at write $i" >&2; exit 1; }
+      i=$((i + 1))
+    done' bash "$ACQ" "$1" "$2"
+}
+
+# _wait_writers LOG PID... — wait for every writer; fail if any did.
+_wait_writers() {
+  local log="$1" pid rc=0
+  shift
+  for pid in "$@"; do
+    wait "$pid" || rc=1
+  done
+  [ "$rc" -eq 0 ] || { cat "$log" >&2; return 1; }
+}
+
+@test "config lock: parallel Bash writers all succeed and lose no change" {
+  # A holder that releases between a waiter's failed mkdir and its look at the
+  # directory must make the waiter try again, never report an unsafe lock.
+  export ACQ_MIGRATION_LOCK_TIMEOUT=60
+  local log="$STUBDIR/writers.log" pids="" id
+  for id in 1 2 3 4 5 6; do
+    _bash_writer "$id" 30 2>>"$log" &
+    pids="$pids $!"
+  done
+  # shellcheck disable=SC2086
+  _wait_writers "$log" $pids
+  run grep -c unsafe "$log"
+  assert_output 0
+  for id in 1 2 3 4 5 6; do
+    _cfg "_acq_config_read_field b$id"
+    assert_output '30'
+  done
+  [ ! -e "$LOCK" ]
+}
+
+@test "config lock: parallel Bash and Python writers all succeed and lose no change" {
+  _posix_only "native Windows Python is checked by the Windows interop run"
+  command -v python3 >/dev/null 2>&1 && python3 -c 'import sys; sys.exit(sys.version_info < (3, 12))' ||
+    skip "needs python3 >= 3.12 for the Python acq"
+  export ACQ_MIGRATION_LOCK_TIMEOUT=60
+  local log="$STUBDIR/writers.log" pids="" id
+  for id in 1 2 3; do
+    _bash_writer "$id" 25 2>>"$log" &
+    pids="$pids $!"
+    PYTHONPATH="$REPO_ROOT/py-acq/src" timeout 120 python3 -c '
+import sys
+from acq_py import config
+for i in range(1, 26):
+    config.write_field("p" + sys.argv[1], str(i))
+' "$id" 2>>"$log" &
+    pids="$pids $!"
+  done
+  # shellcheck disable=SC2086
+  _wait_writers "$log" $pids
+  for id in 1 2 3; do
+    _cfg "_acq_config_read_field b$id; _acq_config_read_field p$id"
+    assert_output $'25\n25'
+  done
   [ ! -e "$LOCK" ]
 }
 

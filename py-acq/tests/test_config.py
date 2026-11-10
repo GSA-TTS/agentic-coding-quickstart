@@ -143,6 +143,7 @@ def test_config_writes_wait_for_the_config_lock(monkeypatch):
         assert proc.returncode == 1, proc.stderr
         error = json.loads(proc.stdout)["error"]
         assert error["code"] == "migration_failed" and "config.yaml lock" in error["message"]
+        assert "config.yaml to finish" in error["remediation"] and "writable" not in error["remediation"]
     config.write_field("backend", "sbx")
     assert path.read_bytes() == b"schema: 1\nbackend: sbx\n"
 
@@ -994,3 +995,117 @@ def test_windows_rule_counts_a_fresh_directory_as_held_and_recovers_an_old_one()
     assert lock._owner_line(lock_dir) == f"{os.getpid()} windows"
     shared.release()
     assert not os.path.lexists(lock_dir)
+
+
+def _shared():
+    from acq_py import lock, state
+
+    return lock.ConfigDirLock(config.config_lock_path(), state.state_dir())
+
+
+def _racy_mkdir(monkeypatch):
+    """Make ``os.mkdir`` report success for an existing path, as uutils mkdir can under a race."""
+    real = os.mkdir
+
+    def mkdir(path, *args, **kwargs):
+        try:
+            real(path, *args, **kwargs)
+        except FileExistsError:
+            pass
+
+    monkeypatch.setattr(os, "mkdir", mkdir)
+
+
+@POSIX_ONLY
+def test_losing_the_owner_file_race_never_removes_the_winners_owner(monkeypatch):
+    # Another taker's mkdir "succeeded" on the same directory and created the
+    # owner file first: this taker must back off and leave that file alone.
+    winner = _live_owner()
+    lock_dir = _hold_dir_lock(winner)
+    shared = _shared()
+    _racy_mkdir(monkeypatch)
+    assert shared.acquire() is False and shared.blocked
+    monkeypatch.undo()
+    assert (lock_dir / "owner").read_text(encoding="utf-8") == winner + "\n"
+
+
+def test_windows_rule_never_removes_a_winners_owner_either(monkeypatch):
+    lock_dir = _hold_dir_lock("4242 TueNov1009:00:002026")  # a fresh Git Bash owner
+    shared = _shared()
+    _racy_mkdir(monkeypatch)
+    assert shared._acquire_windows() is False
+    monkeypatch.undo()
+    assert (lock_dir / "owner").read_text(encoding="utf-8") == "4242 TueNov1009:00:002026\n"
+
+
+def test_windows_rule_retries_when_the_directory_vanishes_after_mkdir_fails(monkeypatch):
+    # The holder released between this mkdir's EEXIST and the look at the path:
+    # take it on the next attempt rather than report an unsafe lock.
+    real = os.mkdir
+    calls = []
+
+    def mkdir(path, *args, **kwargs):
+        calls.append(path)
+        if len(calls) == 1:
+            raise FileExistsError(path)
+        real(path, *args, **kwargs)
+
+    shared = _shared()
+    shared.path.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(os, "mkdir", mkdir)
+    assert shared._acquire_windows() is True
+    monkeypatch.undo()
+    assert len(calls) == 2
+    shared.release()
+    assert not os.path.lexists(shared.path)
+
+
+def test_windows_rule_recovers_an_exited_python_owner_at_once(monkeypatch):
+    from acq_py import lock
+
+    lock_dir = _hold_dir_lock("4242 windows")  # fresh, so the age rule alone would wait
+    monkeypatch.setattr(lock, "_windows_pid_alive", lambda pid: pid != 4242)
+    shared = _shared()
+    assert shared._acquire_windows() is True
+    assert lock._owner_line(lock_dir) == f"{os.getpid()} windows"
+    shared.release()
+
+
+def test_windows_rule_waits_for_a_live_python_owner_and_any_fresh_git_bash_owner(monkeypatch):
+    from acq_py import lock
+
+    checked = []
+    monkeypatch.setattr(lock, "_windows_pid_alive", lambda pid: checked.append(pid) or True)
+    lock_dir = _hold_dir_lock("4242 windows")
+    assert _shared()._acquire_windows() is False and checked == [4242]
+    (lock_dir / "owner").write_text("4243 TueNov1009:00:002026\n", encoding="utf-8")
+    checked.clear()
+    assert _shared()._acquire_windows() is False and checked == []  # Git Bash PIDs are not checked
+    assert lock_dir.is_dir()
+
+
+def test_release_retries_a_transient_permission_error_on_windows(monkeypatch):
+    from acq_py import lock
+
+    monkeypatch.setattr(lock, "_PERMISSION_RETRY_S", 0.0)
+    attempts = []
+
+    def flaky():
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise PermissionError("in use by a scanner")
+
+    monkeypatch.setattr(lock, "_RETRY_PERMISSION", True)
+    lock._retry_permission(flaky)
+    assert len(attempts) == 3
+    attempts.clear()
+    monkeypatch.setattr(lock, "_RETRY_PERMISSION", False)
+    with pytest.raises(PermissionError):
+        lock._retry_permission(flaky)
+    assert len(attempts) == 1
+
+
+def test_powershell_recovery_literal_doubles_every_quote_powershell_honours():
+    from acq_py import lock
+
+    assert lock._ps_quote("C:\\a'b\u2018c\u2019d\u201ae\u201bf") == "'C:\\a''b\u2018\u2018c\u2019\u2019d\u201a\u201ae\u201b\u201bf'"

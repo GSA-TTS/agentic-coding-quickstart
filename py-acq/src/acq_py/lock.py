@@ -654,10 +654,15 @@ class _MkdirLock:
         raise NotImplementedError
 
     def _take(self, parent: int, token: str) -> bool:
-        """``mkdir`` the lock under the open ``parent`` and write the owner line; False when it exists.
+        """``mkdir`` the lock under the open ``parent`` and create the owner file; False when held.
 
         Both steps resolve names relative to ``parent``, so a link swapped in
-        for a directory on the way is never followed.
+        for a directory on the way is never followed. The exclusive create of
+        the owner file is what decides who holds the lock: Bash's ``mkdir`` is
+        not atomic with every coreutils (uutils ``mkdir`` reports success to
+        concurrent callers; KNOWN_FAILURE_MODES section 90), so a Bash taker may
+        share the directory this one just made. Losing that race never removes
+        the winner's owner file.
         """
         try:
             os.mkdir(self.path.name, dir_fd=parent)
@@ -665,17 +670,31 @@ class _MkdirLock:
             return False
         try:
             fd = os.open(self.path.name, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW, dir_fd=parent)
-            try:
-                owner = os.open("owner", os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW, 0o644, dir_fd=fd)
-            finally:
-                os.close(fd)
-            with os.fdopen(owner, "w", encoding="utf-8") as fh:
-                fh.write(token + "\n")
+        except FileNotFoundError:
+            return False  # released or recovered in the meantime: look again
         except OSError:
-            self._remove(None)
+            self._rmdir_quietly()
             raise
+        try:
+            owner = os.open("owner", os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW, 0o644, dir_fd=fd)
+        except FileExistsError:
+            return False  # another taker created the owner file first
+        except OSError:
+            self._rmdir_quietly()
+            raise
+        finally:
+            os.close(fd)
+        with os.fdopen(owner, "w", encoding="utf-8") as fh:
+            fh.write(token + "\n")
         self.token = token
         return True
+
+    def _rmdir_quietly(self) -> None:
+        """Remove the lock directory if it is empty (a failed take of this process's own)."""
+        try:
+            _retry_permission(self.path.rmdir)
+        except OSError:
+            pass
 
     def release(self) -> None:
         """Remove the lock if this process still owns it."""
@@ -697,8 +716,7 @@ class _MkdirLock:
         Windows.
         """
         if sys.platform == "win32":  # pragma: no cover - Windows only
-            literal = "'" + str(self.path).replace("'", "''") + "'"
-            return f"Remove-Item -LiteralPath {literal} -Recurse -Force"
+            return f"Remove-Item -LiteralPath {_ps_quote(str(self.path))} -Recurse -Force"
         return f"rm -f -- {shlex.quote(str(self.path / 'owner'))} && rmdir -- {shlex.quote(str(self.path))}"
 
     def _remove(self, expected: str | None) -> None:
@@ -714,15 +732,70 @@ class _MkdirLock:
         if expected is not None and _owner_line(self.path).strip() != expected.strip():
             return
         try:
-            (self.path / "owner").unlink()
+            _retry_permission((self.path / "owner").unlink)
         except FileNotFoundError:
             pass
         except OSError:
             return
         try:
-            self.path.rmdir()
+            _retry_permission(self.path.rmdir)
         except OSError:
             pass
+
+
+# On Windows an antivirus scanner or the search indexer can hold a just-written
+# file open for a moment, so deleting it (or its directory) fails with a
+# PermissionError that clears on its own. A normal release retries briefly
+# rather than leave the lock directory behind. Elsewhere the error is final.
+_RETRY_PERMISSION = sys.platform == "win32"
+_PERMISSION_RETRIES = 10
+_PERMISSION_RETRY_S = 0.05
+
+
+def _retry_permission(op: Callable[[], None]) -> None:
+    """Run ``op``, retrying a PermissionError briefly on Windows."""
+    for attempt in range(_PERMISSION_RETRIES):
+        try:
+            op()
+            return
+        except PermissionError:
+            if not _RETRY_PERMISSION or attempt == _PERMISSION_RETRIES - 1:
+                raise
+            time.sleep(_PERMISSION_RETRY_S)
+
+
+# Characters PowerShell reads as a single quote inside a single-quoted string:
+# the ASCII one and U+2018-U+201B. Each is doubled to stand for itself.
+_PS_QUOTES = frozenset("'\u2018\u2019\u201a\u201b")
+
+
+def _ps_quote(text: str) -> str:
+    """``text`` as a PowerShell single-quoted literal."""
+    return "'" + "".join(c + c if c in _PS_QUOTES else c for c in text) + "'"
+
+
+def _windows_pid_alive(pid: int) -> bool:  # pragma: no cover - Windows only
+    """True unless Windows says process ``pid`` does not exist or has exited.
+
+    ``OpenProcess`` fails with ERROR_INVALID_PARAMETER for a PID no process
+    has; any other failure (access denied, say) counts as alive. An exit code
+    other than STILL_ACTIVE means it has exited.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined,unused-ignore]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return ctypes.get_last_error() != 87  # type: ignore[attr-defined,unused-ignore]  # ERROR_INVALID_PARAMETER
+    try:
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return True
+        return code.value == 259  # STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 class _BashLock(_MkdirLock):
@@ -796,9 +869,14 @@ class ConfigDirLock(_MkdirLock):
         super().__init__(os_lock_path.with_name(os_lock_path.name + ".d"), root)
 
     def _acquire_windows(self) -> bool:
-        """Take the directory, recovering one older than :data:`CONFIG_WINDOWS_STALE_S`.
+        """Take the directory, recovering an abandoned one.
 
-        Platform-neutral code (no ``dir_fd``), so it is also tested off Windows.
+        An existing directory is abandoned once it is
+        :data:`CONFIG_WINDOWS_STALE_S` old, or at once when its owner is a
+        Python acq (owner line ``PID windows``) whose process has exited. A Git
+        Bash owner's PID cannot be checked from here, so only the age rule
+        applies to it. Platform-neutral code (no ``dir_fd``), so it is also
+        tested off Windows.
         """
         self.path.parent.mkdir(parents=True, exist_ok=True)
         token = f"{os.getpid()} windows"
@@ -806,13 +884,15 @@ class ConfigDirLock(_MkdirLock):
             try:
                 os.mkdir(self.path)
             except FileExistsError:
+                if not os.path.lexists(self.path):
+                    continue  # released in the meantime: look again
                 if self.path.is_symlink() or not self.path.is_dir():
                     raise SandboxLockUnsafe(
                         f"unsafe {self.label} path: {self.path} is a symbolic link or not a directory",
                         f"remove {self.path}, then retry",
                     ) from None
                 line = _owner_line(self.path)
-                if self._age_s() >= CONFIG_WINDOWS_STALE_S:
+                if self._abandoned_on_windows(line):
                     self._remove(line)
                     continue
                 self.blocked = True
@@ -820,12 +900,25 @@ class ConfigDirLock(_MkdirLock):
             try:
                 with open(self.path / "owner", "x", encoding="utf-8") as fh:
                     fh.write(token + "\n")
+            except FileExistsError:
+                continue  # another taker created the owner file first
+            except FileNotFoundError:
+                continue  # released or recovered in the meantime
             except OSError:
-                self._remove(None)
+                self._rmdir_quietly()
                 raise
             self.token = token
             return True
         self.blocked = True
+        return False
+
+    def _abandoned_on_windows(self, line: str) -> bool:
+        if self._age_s() >= CONFIG_WINDOWS_STALE_S:
+            return True
+        fields = line.split()
+        if len(fields) == 2 and fields[1] == "windows":
+            pid = _owner_pid(fields[0])
+            return pid is not None and not _windows_pid_alive(pid)
         return False
 
     def _age_s(self) -> float:

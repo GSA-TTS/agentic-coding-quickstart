@@ -2370,6 +2370,16 @@ _acq_config_lock_age() {
   printf '%s\n' "$((now - mtime))"
 }
 
+# _acq_pid_alive PID — true when PID exists. A process owned by another user
+# makes kill -0 fail with "Operation not permitted"; it is alive all the same
+# (as Python's lock._pid_alive treats EPERM).
+_acq_pid_alive() {
+  local err
+  err=$(kill -0 "$1" 2>&1) && return 0
+  case "$err" in *"not permitted"*) return 0 ;; esac
+  return 1
+}
+
 # _acq_config_lock_state DIR LINE — "stale" when the holder recorded in LINE
 # (DIR's owner line) can be recovered, else "held".
 _acq_config_lock_state() {
@@ -2386,23 +2396,28 @@ EOF
   actual=$(_acq_provider_input_process_identity "$pid" 2>/dev/null || true)
   if [ -n "$identity" ] && [ -n "$actual" ] && [ "$actual" = "$identity" ]; then
     echo held
-  elif ! kill -0 "$pid" 2>/dev/null || { [ -n "$actual" ] && [ "$actual" != "$identity" ]; }; then
+  elif ! _acq_pid_alive "$pid" || { [ -n "$actual" ] && [ "$actual" != "$identity" ]; }; then
     echo stale
   else
     echo held
   fi
 }
 
-# _acq_config_lock_take DIR TOKEN — mkdir DIR and write TOKEN as its owner.
-# Returns 0 when taken, 1 when DIR already exists, 2 on any other failure.
+# _acq_config_lock_take DIR TOKEN — mkdir DIR, then create DIR/owner holding
+# TOKEN. Returns 0 when taken, 1 when not (another holder has it, or the caller
+# should look again). Creating the owner file is what decides: noclobber makes
+# Bash itself open it with O_EXCL, so exactly one taker creates it. mkdir alone
+# cannot decide, because it is not atomic everywhere (uutils coreutils mkdir
+# 0.10 reports success to concurrent callers; KNOWN_FAILURE_MODES section 90).
+# A taker that loses never removes the winner's owner file; it only removes an
+# empty directory a failed write of its own left (rmdir refuses a non-empty one).
 _acq_config_lock_take() {
   mkdir -- "$1" 2>/dev/null || return 1
   if ( set -C; printf '%s\n' "$2" > "$1/owner" ) 2>/dev/null; then
     return 0
   fi
-  rm -f -- "$1/owner" 2>/dev/null
-  rmdir -- "$1" 2>/dev/null
-  return 2
+  [ -e "$1/owner" ] || rmdir -- "$1" 2>/dev/null || true
+  return 1
 }
 
 # _acq_config_lock_wait — the bounded wait in seconds: ACQ_MIGRATION_LOCK_TIMEOUT
@@ -2444,7 +2459,7 @@ _acq_config_lock_timed_out() {
 # (empty when it was only honoured; see _acq_config_lock_token). Returns 1, with
 # the reason on stderr, when the lock cannot be taken.
 _acq_config_lock_acquire() {
-  local lock locks pid token ticks tries=0 recovered=0 line rc
+  local lock locks pid token ticks tries=0 recovered=0 line
   _ACQ_CONFIG_LOCK_TOKEN=""
   lock=$(_acq_config_lock_dir) || { echo "acq: cannot locate the config.yaml lock (no absolute acq state directory)" >&2; return 1; }
   locks=${lock%/*}
@@ -2461,16 +2476,30 @@ _acq_config_lock_acquire() {
   ticks=$(_acq_config_lock_ticks)
   while :; do
     if [ -n "$token" ]; then
-      rc=0
-      _acq_config_lock_take "$lock" "$token" || rc=$?
-      [ "$rc" -eq 0 ] && { _ACQ_CONFIG_LOCK_TOKEN="$token"; return 0; }
-      [ "$rc" -eq 1 ] || { echo "acq: could not take the config.yaml lock: $lock" >&2; return 1; }
+      if _acq_config_lock_take "$lock" "$token"; then
+        _ACQ_CONFIG_LOCK_TOKEN="$token"
+        return 0
+      fi
     elif [ ! -e "$lock" ] && [ ! -L "$lock" ]; then
       return 0
     fi
-    if [ -L "$lock" ] || [ ! -d "$lock" ]; then
-      echo "acq: unsafe config.yaml lock: $lock (a symbolic link or not a directory)" >&2
+    # Only what is positively there is unsafe. The holder may release (and
+    # another take may recreate) the directory at any moment, so a path that is
+    # simply not a directory right now has gone away: look again at once. That
+    # still counts against the wait, so a take that keeps failing for another
+    # reason cannot loop forever.
+    if [ -L "$lock" ]; then
+      echo "acq: unsafe config.yaml lock: $lock (a symbolic link)" >&2
       return 1
+    fi
+    if [ -f "$lock" ] || [ -p "$lock" ] || [ -S "$lock" ] || [ -b "$lock" ] || [ -c "$lock" ]; then
+      echo "acq: unsafe config.yaml lock: $lock (not a directory)" >&2
+      return 1
+    fi
+    if [ ! -d "$lock" ]; then
+      [ "$tries" -lt "$ticks" ] || { _acq_config_lock_timed_out "$lock"; return 1; }
+      tries=$((tries + 1))
+      continue
     fi
     line=$(_acq_config_lock_owner_line "$lock")
     if [ "$recovered" -lt 3 ] && [ "$(_acq_config_lock_state "$lock" "$line")" = stale ] &&
@@ -5737,7 +5766,7 @@ acq_provider_input_lock_acquire() {
     actual_identity=$(_acq_provider_input_process_identity "$pid" 2>/dev/null || true)
     if [ -n "$pid" ] && [ -n "$identity" ] && [ "$actual_identity" = "$identity" ]; then
       echo "acq: provider-input lock is owned by live pid $pid: $lock" >&2
-    elif [ -n "$pid" ] && { ! kill -0 "$pid" 2>/dev/null || { [ -n "$actual_identity" ] && [ "$actual_identity" != "$identity" ]; }; }; then
+    elif [ -n "$pid" ] && { ! _acq_pid_alive "$pid" || { [ -n "$actual_identity" ] && [ "$actual_identity" != "$identity" ]; }; }; then
       echo "acq: recovering stale provider-input lock owned by pid $pid: $lock" >&2
       rm -f -- "$owner" && rmdir -- "$lock" 2>/dev/null || return 1
       continue
