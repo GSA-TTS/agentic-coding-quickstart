@@ -56,7 +56,12 @@
     "stderr": [
       {
         "mode": "contains",
-        "value": "      To refresh later: acq kit update box\n      To silence this check: ACQ_UPDATE_CHECK=0 (or acq run --no-update-check).\n",
+        "value": "      To refresh later: acq kit update box",
+        "normalize": []
+      },
+      {
+        "mode": "contains",
+        "value": "      To silence this check: ACQ_UPDATE_CHECK=0 (or acq run --no-update-check).",
         "normalize": []
       },
       {
