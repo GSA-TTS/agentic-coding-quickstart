@@ -510,11 +510,28 @@ def _imported_record(backend: str, name: str) -> bool:
 
 
 def _import_sandboxes() -> tuple[int, bool]:
+    """Import every Bash sandbox; returns ``(created, complete)``.
+
+    A Bash backend directory that cannot be read leaves the part pending (with
+    a warning naming it), so the sandboxes in it are imported once it can be,
+    rather than the part completing with them missing.
+    """
     created = 0
+    complete = True
     for backend in backends.BACKENDS:
-        for name in legacy_bash.sandbox_names(backend):
+        try:
+            names = legacy_bash.sandbox_names(backend)
+        except OSError as exc:
+            where = f" {str(exc.filename)!r}" if exc.filename else ""
+            legacy_bash.warn(
+                f"the Bash acq's {backend} sandbox records were not imported: cannot read their "
+                f"directory{where} ({exc.strerror or exc}); fix its permissions to import them"
+            )
+            complete = False
+            continue
+        for name in names:
             created += _import_sandbox(legacy_bash.read_sandbox(backend, name))
-    return created, True
+    return created, complete
 
 
 # The parts of the import, each completed (and recorded in the marker) on its own.

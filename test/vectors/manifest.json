@@ -88,7 +88,7 @@
     },
     {
       "contract": "ADR-0041m forward migration of existing installs: the generation-2 step imports a sandbox the Bash acq created (provenance/<backend>/<name>.<cksum>.env) so it is listed and re-attachable instead of orphaned",
-      "vectors": ["cli/migration-bash-provenance"]
+      "vectors": ["cli/migration-bash-provenance", "cli/migration-bash-selection-refused"]
     },
     {
       "contract": "ADR-0040m msb stop and remove capabilities (state preserved on stop; record removed on rm)",

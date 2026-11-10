@@ -1,0 +1,73 @@
+{
+  "schema": 1,
+  "id": "cli/migration-bash-selection-refused",
+  "oracle": "ADR-0041m forward migration and Bash acq_provider_selection_load: a Bash provenance record whose provider_selection holds a value Bash never writes is refused by Bash at start. The migration carries the value over instead of dropping it (which would read as no recorded selection and apply the current one), so the Python start refuses it the same way, with validation_failed, before msb runs",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{python}",
+      "-I",
+      "test/vectors/drivers/seeded-run.py",
+      "[{\"bash_state\":\"msb/bash-badsel.3348791181.env\",\"text\":\"schema=1\\nbundle=acq-builtin\\nrepo=GSA-TTS/agentic-coding-patterns\\nbackend=msb\\nprovider_selection=all\\nagent=shell\\napplied_at=2026-11-09T16:04:12Z\\nworkspace_source=host\\nworkspace=/w/proj\\n\"},[[\"--backend\",\"msb\",\"start\",\"bash-badsel\",\"--json\"],false,null]]",
+      "{acq}"
+    ],
+    "env": {
+      "ACQ_MSB_BIN": "__stub__",
+      "ACQ_MSB_VERSION": "0.7.7",
+      "ACQ_MSB_INSTALLED": "1",
+      "ACQ_SBX_INSTALLED": "0",
+      "ACQ_MSB_STUB_CATALOG": "{\"bash-badsel\":\"stopped\"}"
+    },
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "ACQ_PROVENANCE_DIR",
+      "MSB_HOME",
+      "ACQ_IMAGE",
+      "ACQ_MSB_IMAGE",
+      "ACQ_MSB_READY_TIMEOUT",
+      "ACQ_MSB_STUB_FAIL",
+      "ACQ_STATE_SEED",
+      "ACQ_KIT_PROVENANCE_SEED",
+      "ACQ_PROVIDER_KITS",
+      "ACQ_SANDBOX_LOCK_TIMEOUT"
+    ],
+    "stdin": "",
+    "timeout_ms": 20000
+  },
+  "expect": {
+    "exit": 1,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "start",
+        "error": {
+          "code": "validation_failed",
+          "message": "sandbox 'bash-badsel' has an unreadable recorded provider selection",
+          "remediation": "recreate the sandbox ('acq rm bash-badsel', then 'acq create') so a valid selection is recorded"
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "acq: imported 1 sandbox record(s), 0 kit source(s) and 0 provider-credential binding(s) from the Bash acq's state\n",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME",
+      "ACQ_SECRET_STORE_DIR"
+    ]
+  }
+}
