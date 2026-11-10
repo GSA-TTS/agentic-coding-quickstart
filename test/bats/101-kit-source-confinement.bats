@@ -221,6 +221,27 @@ SPEC
   refute_regex "$log" 'msbkbox:/home/agent/out'
 }
 
+@test "msb apply and heal never print a credential from an unfetchable kit ref" {
+  local ref='https://kituser:s3cr3t-tok@github.com/o/r.git#ref=0123456789abcdef0123456789abcdef01234567&dir=k'
+  : > "$CALLS"
+  run bash -c '
+    unset ACQ_MSB_KIT_LOCAL_DIR
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/msbcred-secrets" ACQ_MSB_KIT_CACHE="'"$STUBDIR"'/msbcred-cache"
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_backend_apply_kit credbox "$1" 2>&1; echo "APPLY_RC=$?"
+    _acq_msb_heal_kit_set credbox 0 "$1" 2>&1; echo "HEAL_RC=$?"
+  ' _ "$ref"
+  assert_output --partial 'local kit path not found: https://***@github.com/o/r.git#ref='
+  assert_output --partial 'acq(msb): error: could not fetch kit: https://***@github.com/o/r.git#ref='
+  assert_output --partial 'could not fetch kit for healing: https://***@github.com/o/r.git#ref='
+  refute_output --partial 'APPLY_RC=0'
+  refute_output --partial 's3cr3t-tok'
+  refute_output --partial 'kituser'
+  refute_regex "$(cat "$CALLS")" 's3cr3t-tok'
+}
+
 @test "cli-kits and the sbx extra-kits record agree on an absolute ref" {
   load_acq
   . "$REPO_ROOT/acq.backends/sbx.sh"

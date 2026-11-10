@@ -270,7 +270,7 @@ With it set, cmd.exe (and any program that asks Windows whether to search the
 current directory) runs a program from the current directory only when you name
 it with a path, such as `.\tool.exe`. Remove the variable to undo it. The variable
 does not change where Windows looks for a program's DLLs; see
-[Known Failure Modes §59](../KNOWN_FAILURE_MODES.md#59-windows-dll-search-can-reach-the-workspace).
+[Known Failure Modes §60](../KNOWN_FAILURE_MODES.md#60-windows-dll-search-can-reach-the-workspace).
 
 If WHP is disabled, stop: enable it from an **elevated** PowerShell
 (`Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All`),
