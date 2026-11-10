@@ -99,9 +99,10 @@ case "$1" in
   ls) cat "$HS/list.sbx" ;;
   exec) all="$*"
     case "$all" in
-      *"echo PRESENT"*) [ -n "${STUB_NO_PROVIDER_CFG:-}" ] || echo PRESENT ;;
+      *"echo PRESENT"*) [ -n "${STUB_PRESENT_RC:-}" ] && { echo "sh: not found"; exit "$STUB_PRESENT_RC"; }
+        [ -n "${STUB_NO_PROVIDER_CFG:-}" ] || echo PRESENT ;;
       *"echo REMOVED"*) echo REMOVED ;;
-      *"echo STILL-ABSENT"*) echo STILL-ABSENT ;;
+      *"echo STILL-ABSENT"*) [ -n "${STUB_ABSENT_SILENT:-}" ] || echo STILL-ABSENT ;;
     esac ;;
   rm) shift; for a in "$@"; do case "$a" in -*) ;; *) grep -vxF -- "$a" "$HS/list.sbx" >"$HS/l.tmp"; mv "$HS/l.tmp" "$HS/list.sbx" ;; esac; done ;;
 esac
@@ -123,11 +124,27 @@ case "$1" in
     printf '{"active_config":{"mounts":[{"guest":"/var/lib/acq/host","type":"Bind","host":"%s","options":{"readonly":true}}]},"config":{}}\n' "$hc" ;;
   exec)
     case "$all" in
-      *".hal-install-proof"*"if [ -e"*|*"if [ -e"*".hal-install-proof"*) [ -n "${STUB_PROOF_FAIL:-}" ] && exit 1; cat "$HS/install.count" 2>/dev/null || echo 1 ;;
-      *"if [ -e"*) echo 1 ;;
+      *".hal-install-proof"*"wc -l"*|*"wc -l"*".hal-install-proof"*) [ -n "${STUB_PROOF_FAIL:-}" ] && exit 1; cat "$HS/install.count" 2>/dev/null || echo 1 ;;
+      *"wc -l"*) echo 1 ;;
       *"cat /home/agent/.hal-ro-proof"*) echo "/var/lib/acq/host/kit-files/home-agent-hal-ro-proof-sh.1" ;;
-      *NO-GUEST-COPY*) [ -n "${STUB_MSB_EXEC_HANG:-}" ] && sleep 30.42; echo NO-GUEST-COPY ;;
-      *PLAIN-COPY-OK*) echo PLAIN-COPY-OK ;;
+      *NO-GUEST-COPY*) [ -n "${STUB_MSB_EXEC_HANG:-}" ] && sleep 30.42
+        case "${STUB_COPY1:-}" in
+          rc1) echo NO-GUEST-COPY; exit 1 ;;
+          rc127) echo "sh: not found"; exit 127 ;;
+          present) echo GUEST-COPY-PRESENT; exit 0 ;;
+          silent) exit 0 ;;
+        esac
+        echo NO-GUEST-COPY ;;
+      *PLAIN-COPY-OK*)
+        case "${STUB_COPY2:-}" in
+          rc1) echo PLAIN-COPY-OK; exit 1 ;;
+          rc126) echo "sh: permission denied"; exit 126 ;;
+          missing) echo PLAIN-COPY-MISSING; exit 0 ;;
+        esac
+        echo PLAIN-COPY-OK ;;
+      *"exit 2"*) exit "${STUB_EXIT2_RC:-2}" ;;
+      *"exit 7"*) exit 7 ;;
+      *LS-RC*) echo LS-RC=${STUB_LS_RC:-0}; echo NO-GUEST-COPY-OF-GRANT-SCRIPT ;;
     esac ;;
 esac
 exit 0
@@ -333,4 +350,68 @@ _hang_run() { # extra script args... ; sets HANG_SECS
   [ "$(_res msb-ro-kit-create)" = BLOCKED ]
   assert_output --partial 'BLOCKED(timeout)'
   assert_failure 2
+}
+
+@test "runtime: create step is BLOCKED when the no-guest-copy probe prints its marker but exits 1 (was PASS)" {
+  STUB_COPY1=rc1 _hal --backend msb --only msb-ro-kit-create
+  [ "$(_res msb-ro-kit-create)" = BLOCKED ]
+}
+
+@test "runtime: create step is BLOCKED when the plain-copy probe prints its marker but exits 1 (was PASS)" {
+  STUB_COPY2=rc1 _hal --backend msb --only msb-ro-kit-create
+  [ "$(_res msb-ro-kit-create)" = BLOCKED ]
+}
+
+@test "runtime: create step is BLOCKED, never PASS, when a copy probe exits 127 or 126" {
+  STUB_COPY1=rc127 _hal --backend msb --only msb-ro-kit-create
+  [ "$(_res msb-ro-kit-create)" = BLOCKED ]
+  assert_output --partial 'missing or not executable in the guest'
+  STUB_COPY2=rc126 _hal --backend msb --only msb-ro-kit-create
+  [ "$(_res msb-ro-kit-create)" = BLOCKED ]
+}
+
+@test "runtime: create step is BLOCKED when a copy probe exits 0 with neither verdict marker" {
+  STUB_COPY1=silent _hal --backend msb --only msb-ro-kit-create
+  [ "$(_res msb-ro-kit-create)" = BLOCKED ]
+}
+
+@test "runtime: create step is FAIL when a copy probe reports a real violation with exit 0" {
+  STUB_COPY1=present _hal --backend msb --only msb-ro-kit-create
+  [ "$(_res msb-ro-kit-create)" = FAIL ]
+  STUB_COPY2=missing _hal --backend msb --only msb-ro-kit-create
+  [ "$(_res msb-ro-kit-create)" = FAIL ]
+}
+
+@test "runtime: create step still PASSes when both copy probes exit 0 with their markers" {
+  _hal --backend msb --only msb-ro-kit-create
+  [ "$(_res msb-ro-kit-create)" = PASS ]
+}
+
+@test "runtime: exit-code step is BLOCKED when the guest shell is missing (exit 127), not FAIL" {
+  STUB_EXIT2_RC=127 _hal --backend msb --only msb-ro-kit-create,msb-exit-code
+  [ "$(_res msb-exit-code)" = BLOCKED ]
+}
+
+@test "runtime: exit-code step PASSes with passthrough 2 and 7" {
+  _hal --backend msb --only msb-ro-kit-create,msb-exit-code
+  [ "$(_res msb-exit-code)" = PASS ]
+}
+
+@test "runtime: forged-heal is BLOCKED when the post-heal probe prints no verdict marker" {
+  STUB_RUN_MODE=quiet STUB_ABSENT_SILENT=1 _hal --backend sbx --only sbx-baseline,sbx-forged-heal
+  [ "$(_res sbx-forged-heal)" = BLOCKED ]
+}
+
+@test "runtime: a guest command that exits 127 or 126 is BLOCKED naming the missing tool, never PASS or FAIL" {
+  STUB_RUN_MODE=quiet STUB_PRESENT_RC=127 _hal --backend sbx --only sbx-baseline,sbx-forged-heal
+  [ "$(_res sbx-forged-heal)" = BLOCKED ]
+  assert_output --partial 'missing or not executable in the guest'
+  STUB_RUN_MODE=quiet STUB_PRESENT_RC=126 _hal --backend sbx --only sbx-baseline,sbx-forged-heal
+  [ "$(_res sbx-forged-heal)" = BLOCKED ]
+}
+
+@test "runtime: oci step is BLOCKED when the guest ls of the staged files reports a non-zero status" {
+  STUB_LS_RC=127 _hal --backend msb --only msb-ro-oci
+  [ "$(_res msb-ro-oci)" = BLOCKED ]
+  grep -q "ls of the staged oci-engine files failed" "$HS/out/results.tsv"
 }

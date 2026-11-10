@@ -826,6 +826,7 @@ step_sbx_forged_heal() {
   fi
   run_cmd "$STEP_TIMEOUT" sbx exec "$SBX_A" -- sh -c 'if [ -e /home/agent/usai-config/opencode.jsonc ]; then echo REAPPEARED; else echo STILL-ABSENT; fi'
   need_rc0 "$id" "post-heal absence probe" || return 0
+  if ! last_has STILL-ABSENT && ! last_has REAPPEARED; then record "$id" BLOCKED "the post-heal absence probe printed neither verdict marker (tool missing in the guest?)"; return 0; fi
   if [ "$before" = "$after" ] && last_has STILL-ABSENT; then record "$id" PASS "re-attach did not re-apply removed guest files while the host builtin-kits record was current"
   else record "$id" FAIL "host record changed or the removed guest file reappeared after re-attach"; fi
 }
