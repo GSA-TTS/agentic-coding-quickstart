@@ -1358,14 +1358,92 @@ _acq_path_folds_to_dot() {
 }
 
 # _acq_workspace_safe PATH — check PATH as given and, when it is a directory, its
-# symlink-resolved form.
+# symlink-resolved form. Then refuse a workspace that contains one of acq's own
+# host directories.
 _acq_workspace_safe() {
   local p="$1" real
   _acq_workspace_path_safe "$p" "$p" || return 1
-  [ -d "$p" ] || return 0
-  real=$(canonicalize_path "$p")
-  [ "$real" = "$p" ] && return 0
-  _acq_workspace_path_safe "$real" "$p (resolves to $real)"
+  if [ -d "$p" ]; then
+    real=$(canonicalize_path "$p")
+    if [ "$real" != "$p" ]; then
+      _acq_workspace_path_safe "$real" "$p (resolves to $real)" || return 1
+    fi
+  fi
+  _acq_workspace_trusted_safe "$p"
+}
+
+# _acq_trusted_host_dirs — acq's own host directories, one per line: the state
+# dir, the provenance dir (which holds each sandbox's read-only trusted config),
+# the config dir, the data dir (the provider-input validator lives there) and the
+# secret store's file, sidecar and index locations. Unresolvable entries are
+# skipped.
+_acq_trusted_host_dirs() {
+  local d
+  if d=$(acq_state_dir 2>/dev/null); then printf '%s\n' "$d"; fi
+  if d=$(_acq_provenance_dir 2>/dev/null); then printf '%s\n' "$d"; fi
+  if d=$(_acq_config_file 2>/dev/null); then dirname -- "$d"; fi
+  if d=$(acq_xdg_dir XDG_DATA_HOME .local/share 2>/dev/null); then printf '%s/acq\n' "$d"; fi
+  for d in "${ACQ_SECRET_FILE_DIR:-}" "${ACQ_SECRET_META_DIR:-}" "${ACQ_PROVIDER_INPUT_DATA_DIR:-}"; do
+    if [ -n "$d" ]; then printf '%s\n' "$d"; fi
+  done
+  if [ -n "${ACQ_SECRET_INDEX_FILE:-}" ]; then dirname -- "$ACQ_SECRET_INDEX_FILE"; fi
+  return 0
+}
+
+# _acq_path_within CHILD PARENT — 0 when the absolute path CHILD is PARENT or
+# lies below it. A plain string comparison; trailing slashes are ignored and the
+# quoted pattern keeps glob characters in PARENT literal.
+_acq_path_within() {
+  local c="${1%/}" p="${2%/}"
+  [ -n "$p" ] || return 0
+  case "$c" in
+    "$p"|"$p"/*) return 0 ;;
+  esac
+  return 1
+}
+
+# _acq_path_physical PATH — PATH made absolute (against $PWD) with its deepest
+# existing ancestor resolved through symlinks; a missing tail is kept as given,
+# so a directory acq has not created yet still compares correctly.
+_acq_path_physical() {
+  local p="$1" tail="" base
+  case "$p" in /*) ;; *) p="$PWD/$p" ;; esac
+  p="${p%/}"
+  while [ -n "$p" ] && [ ! -e "$p" ]; do
+    tail="/${p##*/}$tail"
+    p="${p%/*}"
+  done
+  [ -n "$p" ] || p="/"
+  base=$(canonicalize_path "$p")
+  base="${base%/}$tail"
+  printf '%s\n' "${base:-/}"
+}
+
+# _acq_workspace_trusted_safe PATH — refuse a workspace that is, or contains,
+# one of acq's own host directories. The workspace is mounted into the guest, so
+# such a mount would let the sandbox read the secret store and rewrite acq's
+# records and the trusted config that acq otherwise mounts read-only. Both the
+# paths as given and their symlink-resolved forms are compared.
+_acq_workspace_trusted_safe() {
+  local ws="$1" wsp d dp
+  case "$ws" in /*) ;; *) ws="$PWD/$ws" ;; esac
+  wsp=$(_acq_path_physical "$ws")
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    acq_path_is_absolute "$d" || continue
+    dp=$(_acq_path_physical "$d")
+    if _acq_path_within "$d" "$ws" || _acq_path_within "$dp" "$wsp"; then
+      echo "acq: error: workspace $(acq_printable "$1") contains acq's own directory $(acq_printable "$d")." >&2
+      echo "     The sandbox would reach acq's state, config or secret store through the" >&2
+      echo "     workspace mount, including the trusted config acq mounts read-only. Use a" >&2
+      echo "     narrower workspace (a project directory), or move acq's directories with" >&2
+      echo "     ACQ_STATE_DIR, XDG_STATE_HOME, XDG_CONFIG_HOME or XDG_DATA_HOME." >&2
+      return 1
+    fi
+  done <<EOF
+$(_acq_trusted_host_dirs)
+EOF
+  return 0
 }
 
 # _acq_workspace_path_safe PATH SHOWN — the per-path check behind
