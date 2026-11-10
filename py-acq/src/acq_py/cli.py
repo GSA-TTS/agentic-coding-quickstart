@@ -36,6 +36,7 @@ import contextlib
 import json
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -234,6 +235,7 @@ def build_parser() -> _Parser:
     sub.add_parser("version", help="show acq version + backend info")
     doctor_p = sub.add_parser("doctor", help="diagnose the acq environment")
     doctor_p.add_argument("name", nargs="?", default=None, help="sandbox to inspect (requires a backend)")
+    doctor_p.add_argument("extra_names", nargs="*", help=argparse.SUPPRESS)
     sub.add_parser("help", help="show help")
 
     backend_parser = sub.add_parser(
@@ -564,28 +566,105 @@ def _print_doctor_human(data: dict) -> None:
     print(f"overall: {data['status']}")
 
 
-def run_doctor(emit_json: bool, name: str | None) -> int:
-    # `acq doctor NAME` inspects a named sandbox's image contract, a
-    # backend-provided capability (ADR-0040m `doctor`). No adapter is present in
-    # this slice, so the request fails closed with exit 1 rather than inventing
-    # a result.
+def run_doctor(emit_json: bool, name: str | None, backend_override: str | None = None) -> int:
+    from . import doctor
+    from .commands import configure
+
+    requested = backend_override if backend_override is not None else os.environ.get("ACQ_BACKEND")
+    if requested and requested not in backends.BACKENDS:
+        return common._operational_failure("doctor", errors.FAILURE,
+            f"unknown backend '{requested}' (expected sbx or msb)", None, emit_json)
+    active = common._resolve_active_backend(backend_override)
     if name is not None:
-        return common._operational_failure(
-            "doctor",
-            errors.UNSUPPORTED,
-            f"cannot inspect sandbox {name!r}: no backend adapter is available",
-            "backend adapters ship in a later slice; sandbox inspection is unavailable in this build",
-            emit_json,
-        )
-
-    from . import doctor  # lazy: doctor is off-surface (see module docstring)
-
-    data = doctor.doctor_data()
+        return _doctor_sandbox(active, name, emit_json, backend_override)
+    data = doctor.doctor_data(active)
     if emit_json:
         print(json.dumps(envelope.success("doctor", data)))
-        return errors.EXIT_SUCCESS
-    _print_doctor_human(data)
+    else:
+        _print_doctor_human(data)
+        if (configure.interactive(emit_json) and active
+                and all(c["status"] != "fail" for c in data["checks"]
+                        if c["id"] in ("state", "config-schema", "config-backend"))):
+            prompt = f"Write '{active}' as the default backend to {config.config_path()}?"
+            if configure.confirm(configure.Terminal(), prompt, False):
+                try:
+                    config.write_field("backend", active)
+                except OSError as exc:
+                    return _config_write_failure("doctor", exc, emit_json)
+                print(f"  Wrote default backend to {config.config_path()}.", file=sys.stderr)
+            else:
+                print("  Not written.", file=sys.stderr)
     return errors.EXIT_SUCCESS
+
+
+def _doctor_sandbox(active: str | None, name: str, emit_json: bool, override: str | None) -> int:
+    from . import doctor, image_doctor
+
+    invalid = common._invalid_persisted_backend_failure(override, "doctor", emit_json)
+    if invalid is not None:
+        return invalid
+    dirs = _user_dirs_pre_step(emit_json, "doctor")
+    if dirs is not None:
+        return dirs
+    if active is None:
+        return common._operational_failure("doctor", errors.UNSUPPORTED,
+            "doctor: backend 'unknown' cannot inspect sandboxes.", "install msb or sbx and retry", emit_json)
+    adapter = common._adapter(active)
+    try:
+        if not adapter.exists(name):
+            return common._operational_failure("doctor", errors.FAILURE,
+                f"doctor: no such sandbox '{name}'.", None, emit_json)
+        argv = (["exec", "-u", "agent", "-e", "HOME=/home/agent", name, "--", "sh", "-c"]
+                if active == "msb" else ["exec", name, "--", "env", "HOME=/home/agent", "sh", "-c"])
+        result = adapter._run([*argv, image_doctor.SCRIPT], timeout=60)
+    except common._ADAPTER_ERRORS as exc:
+        return common._operational_failure("doctor", exc.code, exc.message, exc.remediation, emit_json)
+    except subprocess.SubprocessError:
+        return common._operational_failure("doctor", errors.FAILURE,
+            "doctor: sandbox diagnostics timed out.", "check the sandbox and retry", emit_json)
+    if result.returncode:
+        return common._operational_failure("doctor", errors.FAILURE,
+            f"doctor: sandbox diagnostics failed for '{name}'.", "check the sandbox and retry",
+            emit_json, exit_code=result.returncode)
+    checks = _image_doctor_checks(result.stdout)
+    data = {"status": doctor.overall_status(checks), "checks": checks}
+    if emit_json:
+        print(json.dumps(envelope.success("doctor", data)))
+    else:
+        print(f"acq: ADR-0030 image contract diagnostics for {name} (backend: {active})")
+        print("  This check is non-enforcing: warnings do not change create/run behavior.")
+        print(result.stdout, end="")
+    return errors.EXIT_SUCCESS
+
+
+def _image_doctor_checks(output: str) -> list[dict]:
+    checks: list[dict] = []
+    for line in output.splitlines():
+        text = line.strip()
+        if text.startswith(("ok: ", "warning: ")):
+            warning = text.startswith("warning:")
+            message = text.split(": ", 1)[1]
+            checks.append({"id": _image_check_id(message), "status": "warn" if warning else "pass",
+                           "message": message})
+        elif text.startswith("fix: ") and checks:
+            checks[-1]["remediation"] = text[5:]
+    return checks
+
+
+def _image_check_id(message: str) -> str:
+    """Keep each capability's identity when other image capabilities are absent."""
+    for prefix, key in (
+        ("HOME ", "home"), ("running as ", "user"), ("diagnostic is ", "user"),
+        ("/nix exists", "nix-store"), ("/nix is missing", "nix-store"),
+        ("/nix is ", "nix-writable"), ("nix is ", "tool-nix"),
+        ("devenv is ", "tool-devenv"), ("direnv is ", "tool-direnv"),
+        ("/home/agent ", "home-writable"), ("passwordless sudo ", "sudo"),
+        ("sudo ", "sudo"), ("~/.rc.d ", "rc-directory"),
+        ("shell startup ", "rc-hook"), ("no shell startup ", "rc-hook"),
+    ):
+        if message.startswith(prefix):
+            return f"image-{key}"
+    return "image-diagnostic"
 
 
 # ---------------------------------------------------------------------------
@@ -889,7 +968,10 @@ def _dispatch(parser: _Parser, parsed, emit_json: bool, backend_override: str | 
         # pre-steps below like every other mutating verb.
 
     if parsed.command == "doctor":
-        return run_doctor(emit_json, parsed.name)
+        if parsed.extra_names:
+            return common._operational_failure("doctor", errors.FAILURE,
+                "doctor: expected at most one sandbox name", None, emit_json)
+        return run_doctor(emit_json, parsed.name, backend_override)
 
     if parsed.command not in ("help", None):
         label = _command_label(parsed)

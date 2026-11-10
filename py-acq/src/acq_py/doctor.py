@@ -15,16 +15,18 @@ Status vocabulary (stable tokens, one scale for both overall and per-check):
 The overall ``status`` is derived from the checks: ``fail`` (any fail) outranks
 ``warn`` (any warn) outranks ``pass``.
 
-The checks are the managed runtime (ADR-0042m), backend-adapter availability
-(ADR-0040m), state-tree migration health, the ``config.yaml`` schema marker
-and persisted backend (ADR-0041m, ADR-0038m), and a pending import of the Bash
-acq's state (ADR-0041m). All are deterministic, read-only
-and never touch the network, so ``doctor`` is a safe diagnostic in any context.
+The checks cover the runtime, active adapter, both backend version policies,
+MSB readiness, state migration, configuration and pending Bash-state imports.
+Host checks never run repairs. Named diagnostics execute the ADR-0030 guest
+probe; a terminal-only offer can persist the selected default backend.
 """
 
 from __future__ import annotations
 
-from . import backends, config, migration, runtime, userdirs
+import os
+import subprocess
+
+from . import backends, config, hostexec, migration, runtime, userdirs
 
 PASS = "pass"  # nosec B105 # a check status
 WARN = "warn"
@@ -47,26 +49,59 @@ def runtime_check() -> dict:
     return {"id": "runtime", "status": PASS, "message": message}
 
 
-def backend_check() -> dict:
-    """Report backend-adapter availability.
-
-    No adapter is present in this slice, so sandbox and backend commands are
-    unavailable. That is a ``warn`` (degraded) condition, not a failure: ``acq``
-    itself still runs. The ID is stable; a later adapter slice reuses it and
-    reports the active backend instead.
-    """
+def backend_check(active: str | None = None) -> dict:
+    """Report the active adapter without requiring one to be installed."""
     return {
-        "id": "backend",
-        "status": WARN,
-        "message": "no sandbox backend adapter is available",
-        "remediation": "backend adapters ship in a later slice; sandbox commands are unavailable in this build",
+        "id": "backend", "status": PASS if active else WARN,
+        "message": f"active backend: {active}" if active else "no sandbox backend adapter is available",
+        **({} if active else {"remediation": "install msb or sbx, or select one with --backend"}),
     }
 
 
-def doctor_checks() -> list[dict]:
+def backend_checks() -> list[dict]:
+    """Report both installed backends and their accepted version policy."""
+    checks = []
+    for name in backends.BACKEND_ORDER:
+        spec = backends.BACKENDS[name]
+        status = backends.detect(spec)
+        problem = backends.check_version(spec)
+        message = f"{name}: installed v{status.version}" if status.installed else f"{name}: not found"
+        check: dict = {"id": f"backend-{name}", "status": PASS, "message": message}
+        if problem:
+            check.update(status=FAIL if status.installed else WARN,
+                         message=message + "; " + problem.message, remediation=problem.remediation)
+        else:
+            check["message"] += f" (>= {spec.min_version.string})"
+        checks.append(check)
+    return checks
+
+
+def readiness_check(active: str | None) -> list[dict]:
+    """Probe MSB host readiness without running its potentially installing repair."""
+    if active != "msb" or os.environ.get("ACQ_SKIP_MSB_DOCTOR"):
+        return []
+    if backends.check_version(backends.BACKENDS["msb"]) is not None:
+        return []
+    try:
+        result = hostexec.run_captured(
+            [*backends._adapter_command(backends.BACKENDS["msb"]), "doctor"], timeout=30)
+        ready = result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if ready:
+        return [{"id": "backend-msb-readiness", "status": PASS, "message": "host ready for microVMs"}]
+    return [{"id": "backend-msb-readiness", "status": WARN,
+             "message": "your machine isn't ready to run microVMs yet.",
+             "remediation": "run 'msb doctor' for details; run 'msb doctor --fix' yourself "
+             "(may install software; acq does not run it). See docs/howto/acq.md#msb-host-setup "
+             "or ask agentic-coding@gsa.gov. Set ACQ_SKIP_MSB_DOCTOR=1 to skip."}]
+
+
+def doctor_checks(active: str | None = None) -> list[dict]:
     """Return the ordered check list for the current build."""
-    return [runtime_check(), backend_check(), state_check(), config.doctor_check(), persisted_backend_check(),
-            bash_import_check()]
+    with backends.detection_cache():
+        return [runtime_check(), backend_check(active), *backend_checks(), *readiness_check(active),
+                state_check(), config.doctor_check(), persisted_backend_check(), bash_import_check()]
 
 
 def bash_import_check() -> dict:
@@ -185,7 +220,7 @@ def overall_status(checks: list[dict]) -> str:
     return PASS
 
 
-def doctor_data() -> dict:
+def doctor_data(active: str | None = None) -> dict:
     """Assemble the ``doctor`` command's required result data (ADR-0038m)."""
-    checks = doctor_checks()
+    checks = doctor_checks(active)
     return {"status": overall_status(checks), "checks": checks}
