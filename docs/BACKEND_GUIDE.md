@@ -1256,8 +1256,9 @@ and `--kit` refs are added after either (at a terminal, the Bash acq's
 create-time picker can still change the extras for one sandbox). The Python acq
 follows the same order and has no picker. A kit outside its pinned built-in
 bundle (every catalog extra kit, a provider kit from a registered source) it
-fetches at its pinned commit and verifies; it refuses a local kit directory or a
-ref not pinned to a full 40-hex commit, and points to `ACQ_IMPL=bash` (see
+fetches at its pinned commit and verifies, and a local kit directory it copies
+into its private cache and checks there; it refuses a ref not pinned to a full
+40-hex commit, and points to `ACQ_IMPL=bash` (see
 `py-acq/README.md`, "Kits outside the bundle").
 
 The create records which provider selection applied (`provider_selection` and

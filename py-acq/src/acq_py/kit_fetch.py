@@ -47,17 +47,23 @@ writes. Unlike Bash, which fetches again in every process, a verified commit
 is kept there and reused by later commands, so a heal on ``start`` works
 offline once the create has fetched the kit. Each tree is published by an
 atomic rename, so concurrent commands never see a partial one.
+
+A local kit directory is not fetched but copied into the same tree cache
+(:func:`copy_local`), following no link on the way, and checked there the same
+way, so the backends never read a directory someone else can change.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import secrets
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -487,33 +493,300 @@ def fetch(ref: str, backend: str) -> Path:
     return _materialize(git, repo, parsed, tree, shown)
 
 
-def load(ref: str, backend: str) -> tuple[str, kitspec.KitSpec]:
-    """Fetch ``ref`` and parse its kit: ``(kit name, spec)``. Raises :class:`KitFetchError`.
+# ---------------------------------------------------------------------------
+# Local kit directories.
+#
+# Bash reads a local kit in place, where anyone who can write to the directory
+# can change it between acq's checks and the backend reading it. The Python acq
+# copies it into the private cache first, without following any link on the
+# way, and runs every check on the copy, so what was checked is what is
+# applied. The copy is named by its content, like a fetched tree.
+# ---------------------------------------------------------------------------
 
-    A local directory ref is refused: only a pinned remote ref is fetched and
-    checked. The kit must be a neutral ``hybrid/v1`` kit whose ``name`` is a
-    plain kit name (it names host-side records and directories).
+# A kit is a spec and a few payload files. A tree larger than this is almost
+# certainly a mistyped path (a home directory, say), and is refused rather than
+# copied.
+_LOCAL_MAX_ENTRIES = 10000
+_LOCAL_MAX_BYTES = 256 * 1024 * 1024
+# Nesting deeper than this is refused too: the walk recurses once per level,
+# and a pathologically deep tree must fail as a refusal, not a RecursionError.
+_LOCAL_MAX_DEPTH = 64
+_COPY_CHUNK = 1024 * 1024
+
+# Open a directory, or a file that must not be a link, relative to its parent.
+# O_NONBLOCK keeps a FIFO swapped in for a file from blocking the open; fstat
+# then refuses it. O_NOCTTY keeps a terminal device swapped in from becoming
+# acq's controlling terminal.
+_DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+_FILE_FLAGS = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+               | getattr(os, "O_NOCTTY", 0) | getattr(os, "O_BINARY", 0))
+_WALK_BY_FD = os.open in os.supports_dir_fd and os.scandir in os.supports_fd and hasattr(os, "O_NOFOLLOW")
+
+# Whether each file the path-based (Windows) walk opens is checked to still lie
+# under the kit: the real platform, so a POSIX host can turn it on in a test.
+_CHECK_FINAL_PATH = sys.platform == "win32"
+
+
+class _LocalCopy:
+    """One copy of a local kit tree into ``dest``, with its budget and a record of what it copied.
+
+    On POSIX every directory is opened relative to its parent with
+    ``O_NOFOLLOW``, and every file likewise, so a link swapped in for a
+    directory or a file during the copy is never followed out of the kit. A
+    link that is part of the kit is copied as a link, and the copy is checked
+    afterwards (:func:`kitspec.tree_symlinks_within`). On Windows, which has no
+    such opens, a reparse point (link or junction) anywhere in the tree is
+    refused, each file must still be the file listed when it was opened, and
+    the path Windows reports for the opened handle must lie under the kit
+    (so a directory swapped for a junction after it was listed is caught).
+    """
+
+    def __init__(self, shown: str, root: str = ""):
+        self.shown = shown
+        self.root = root
+        self.entries = 0
+        self.bytes = 0
+        self.record: list[list[str]] = []
+
+    def refuse(self, why: str) -> KitFetchError:
+        return KitFetchError(errors.VALIDATION_FAILED, f"local kit {self.shown} was refused: {why}",
+                             "fix the kit directory, then retry")
+
+    def _count(self, rel: str) -> None:
+        self.entries += 1
+        if self.entries > _LOCAL_MAX_ENTRIES:
+            raise self.refuse(f"it has more than {_LOCAL_MAX_ENTRIES} entries (is the path right?)")
+        if "\n" in rel:
+            raise self.refuse("a file name contains a newline")
+
+    def _descend(self, rel: str) -> None:
+        if rel.count("/") + 1 > _LOCAL_MAX_DEPTH:
+            raise self.refuse(f"it nests directories more than {_LOCAL_MAX_DEPTH} deep (is the path right?)")
+
+    def copy_file(self, src_fd: int, target: Path, rel: str) -> None:
+        info = os.fstat(src_fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise self.refuse(f"{rel} is not a regular file")
+        digest = hashlib.sha256()
+        out = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+        try:
+            while chunk := os.read(src_fd, _COPY_CHUNK):
+                self.bytes += len(chunk)
+                if self.bytes > _LOCAL_MAX_BYTES:
+                    raise self.refuse(f"it holds more than {_LOCAL_MAX_BYTES // (1024 * 1024)} MiB (is the path right?)")
+                digest.update(chunk)
+                os.write(out, chunk)
+        finally:
+            os.close(out)
+        mode = 0o755 if info.st_mode & 0o111 else 0o644
+        os.chmod(target, mode)
+        self.record.append(["f", rel, f"{mode:o}", digest.hexdigest()])
+
+    def walk_fd(self, dir_fd: int, dest: Path, prefix: str) -> None:
+        with os.scandir(dir_fd) as listing:
+            entries = sorted(listing, key=lambda e: e.name)
+        for entry in entries:
+            rel = prefix + entry.name
+            self._count(rel)
+            target = dest / entry.name
+            if entry.is_symlink():
+                link = os.readlink(entry.name, dir_fd=dir_fd)
+                os.symlink(link, target)
+                self.record.append(["l", rel, link])
+            elif entry.is_dir(follow_symlinks=False):
+                self._descend(rel)
+                child = self._open(entry.name, _DIR_FLAGS, dir_fd, rel)
+                try:
+                    target.mkdir()
+                    self.record.append(["d", rel])
+                    self.walk_fd(child, target, rel + "/")
+                finally:
+                    os.close(child)
+            elif entry.is_file(follow_symlinks=False):
+                src = self._open(entry.name, _FILE_FLAGS, dir_fd, rel)
+                try:
+                    self.copy_file(src, target, rel)
+                finally:
+                    os.close(src)
+            else:
+                raise self.refuse(f"{rel} is not a regular file, directory or link")
+
+    def walk_path(self, directory: str, dest: Path, prefix: str) -> None:
+        with os.scandir(directory) as listing:
+            entries = sorted(listing, key=lambda e: e.name)
+        for entry in entries:
+            rel = prefix + entry.name
+            self._count(rel)
+            full = os.path.join(directory, entry.name)
+            target = dest / entry.name
+            before = os.lstat(full)
+            reparse_tag = getattr(before, "st_reparse_tag", None)  # Windows only: nonzero for any reparse point
+            if entry.is_symlink() or os.path.isjunction(full) or reparse_tag:
+                raise self.refuse(f"{rel} is a link or junction, which a local kit may not hold on this host")
+            if stat.S_ISDIR(before.st_mode):
+                self._descend(rel)
+                target.mkdir()
+                self.record.append(["d", rel])
+                self.walk_path(full, target, rel + "/")
+            elif stat.S_ISREG(before.st_mode):
+                src = self._open(full, _FILE_FLAGS, None, rel)
+                try:
+                    after = os.fstat(src)
+                    if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
+                        raise self.refuse(f"{rel} changed while it was copied")
+                    if _CHECK_FINAL_PATH and not _within(_final_path(src), self.root):
+                        raise self.refuse(f"{rel} resolves outside the kit directory")
+                    self.copy_file(src, target, rel)
+                finally:
+                    os.close(src)
+            else:
+                raise self.refuse(f"{rel} is not a regular file or directory")
+
+    def _open(self, name: str, flags: int, dir_fd: int | None, rel: str) -> int:
+        try:
+            return os.open(name, flags, dir_fd=dir_fd)
+        except OSError as exc:  # a link swapped in (ELOOP, ENOTDIR), or unreadable
+            raise self.refuse(f"{rel} could not be opened safely ({exc.strerror or exc})") from exc
+
+    def digest(self) -> str:
+        # JSON keeps every entry unambiguous, whatever its names hold
+        # (undecodable bytes arrive as escaped lone surrogates).
+        return hashlib.sha256(json.dumps(self.record).encode("ascii")).hexdigest()
+
+
+def _final_path(fd: int) -> str | None:  # pragma: no cover - Windows only
+    """The path Windows reports for ``fd``'s open handle, links resolved; None when it cannot say.
+
+    ``GetFinalPathNameByHandleW`` (normalized name, DOS volume) names the file
+    the handle really refers to, whatever junctions the path that opened it
+    went through. The ``\\\\?\\`` prefix it returns is dropped so the result
+    compares with :func:`os.path.realpath` output.
+    """
+    if sys.platform != "win32":
+        return None
+    import ctypes
+    import msvcrt
+
+    try:
+        handle = msvcrt.get_osfhandle(fd)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        function = kernel32.GetFinalPathNameByHandleW
+        function.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32]
+        function.restype = ctypes.c_uint32
+        size = 32768
+        buffer = ctypes.create_unicode_buffer(size)
+        length = function(ctypes.c_void_p(handle), buffer, size, 0)
+    except OSError:
+        return None
+    if length == 0 or length >= size:
+        return None
+    path = buffer.value
+    if path.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + path[len("\\\\?\\UNC\\"):]
+    return path[len("\\\\?\\"):] if path.startswith("\\\\?\\") else path
+
+
+def _within(path: str | None, root: str) -> bool:
+    """True when ``path`` lies under ``root`` (case and separators folded, as Windows compares them)."""
+    if path is None or not root:
+        return False
+    folded, base = os.path.normcase(path), os.path.normcase(root).rstrip("\\/")
+    return folded.startswith(base + "\\") or folded.startswith(base + "/")
+
+
+def _local_root(ref: str, shown: str) -> str:
+    """The local kit directory ``ref`` names, resolved once (a link to the kit itself is fine)."""
+    if not hostexec._is_absolute(ref) or not os.path.isdir(ref):
+        raise KitFetchError(errors.VALIDATION_FAILED, f"local kit directory {shown} was not found",
+                            "name an existing kit directory (absolute, or relative to the current directory), "
+                            "or a git+https://…#ref=<commit>&dir=… ref, then retry")
+    return os.path.realpath(ref)
+
+
+def copy_local(ref: str, backend: str) -> Path:
+    """Copy the local kit directory ``ref`` into the private cache; returns the checked copy.
+
+    Raises :class:`KitFetchError`. See :class:`_LocalCopy` for how the copy
+    refuses links on the way; the copy must then pass
+    :func:`kitspec.tree_symlinks_within` like a fetched tree.
     """
     shown = _shown(ref)
-    if not is_remote(ref):
-        raise KitFetchError(
-            errors.UNSUPPORTED,
-            f"kit {shown} names a local directory, which the Python acq does not apply; it applies only its "
-            "built-in kits and remote kits pinned to a commit",
-            "use a git+https://…#ref=<commit>&dir=… ref, or use the Bash acq (ACQ_IMPL=bash) for local kits",
-        )
-    kit_dir = fetch(ref, backend)
+    root = _local_root(ref, shown)
+    _base, _src, tree = _cache_dirs(backend)
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix=".local.", dir=tree))
+    except OSError as exc:
+        raise KitFetchError(errors.FAILURE, f"could not create a kit directory: {exc.strerror or exc}",
+                            "check that the kit cache directory is writable, then retry") from exc
+    copy = _LocalCopy(shown, root)
+    try:
+        kit = tmp / "kit"
+        kit.mkdir()
+        _copy_local_tree(root, kit, copy)
+        problems = kitspec.tree_symlinks_within(kit, kit)
+        if problems:
+            raise copy.refuse(problems[0])
+        stamp = f"local\n{copy.digest()}\n"
+        (tmp / COMPLETE_MARKER).write_text(stamp, encoding="utf-8")
+    except BaseException:
+        _remove_tree(tmp)
+        raise
+    return _place(tmp, tree / hashlib.sha256(stamp.encode()).hexdigest()[:32], lambda p: _tree_valid(p, stamp)) / "kit"
+
+
+def _copy_local_tree(root: str, kit: Path, copy: _LocalCopy) -> None:
+    try:
+        if _WALK_BY_FD:
+            fd = os.open(root, _DIR_FLAGS)
+            try:
+                copy.walk_fd(fd, kit, "")
+            finally:
+                os.close(fd)
+        else:
+            copy.walk_path(root, kit, "")
+    except KitFetchError:
+        raise
+    except OSError as exc:
+        raise KitFetchError(errors.FAILURE, f"could not copy local kit {copy.shown}: {exc.strerror or exc}",
+                            "check that the kit directory is readable and the kit cache writable, then retry") from exc
+
+
+def _has_crlf(path: Path) -> bool:
+    try:
+        return b"\r\n" in path.read_bytes()
+    except OSError:
+        return False  # load_kit reports a missing or unreadable spec
+
+
+def load(ref: str, backend: str) -> tuple[str, kitspec.KitSpec]:
+    """Fetch ``ref`` (or copy it, for a local directory) and parse its kit: ``(kit name, spec)``.
+
+    A remote ref is fetched at its pinned commit (:func:`fetch`); a local
+    directory is copied into the private cache and checked there
+    (:func:`copy_local`). Either way the kit must be a neutral ``hybrid/v1``
+    kit whose ``name`` is a plain kit name (it names host-side records and
+    directories). Raises :class:`KitFetchError`.
+    """
+    shown = _shown(ref)
+    kind = "remote" if is_remote(ref) else "local"
+    kit_dir = fetch(ref, backend) if kind == "remote" else copy_local(ref, backend)
+    if kind == "local" and _has_crlf(kit_dir / "spec.yaml"):
+        # The spec reader, like Bash's, reads a CR as part of each value, so the
+        # kit would be refused with a misleading reason. A Windows editor that
+        # saves CRLF is the usual cause.
+        raise KitFetchError(errors.VALIDATION_FAILED, f"local kit {shown} has a spec.yaml with CRLF line endings",
+                            "save spec.yaml with LF line endings, then retry")
     try:
         spec = kitspec.load_kit(kit_dir)
     except kitspec.KitSpecError as exc:
-        raise KitFetchError(errors.VALIDATION_FAILED, f"cannot read remote kit {shown}: {exc}",
+        raise KitFetchError(errors.VALIDATION_FAILED, f"cannot read {kind} kit {shown}: {exc}",
                             "fix the kit, then retry") from exc
     if spec.field("schemaVersion") != "hybrid/v1":
         raise KitFetchError(errors.UNSUPPORTED,
-                            f"remote kit {shown} is not a neutral hybrid/v1 kit; the Python acq does not pass "
+                            f"{kind} kit {shown} is not a neutral hybrid/v1 kit; the Python acq does not pass "
                             "backend-native kits through", "use a hybrid/v1 kit, or the Bash acq (ACQ_IMPL=bash)")
     name = spec.field("name") or ""
     if not _KIT_NAME.fullmatch(name) or name in (".", ".."):
-        raise KitFetchError(errors.VALIDATION_FAILED, f"remote kit {shown} has an unsafe or missing name",
+        raise KitFetchError(errors.VALIDATION_FAILED, f"{kind} kit {shown} has an unsafe or missing name",
                             "fix the kit's name: field, then retry")
     return name, spec

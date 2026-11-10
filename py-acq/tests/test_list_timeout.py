@@ -110,15 +110,19 @@ class _Proc:
         self.returncode = 0
         return "out", "err"
 
+    kill_error: BaseException | None = None
+
     def kill(self):
         self.events.append("kill")
+        if self.kill_error is not None:
+            raise self.kill_error
 
 
 @pytest.fixture
 def windows_job(monkeypatch, no_job_objects):
     from acq_py import hostexec
 
-    state = {"events": [], "hangs": False, "adopt_error": None}
+    state = {"events": [], "hangs": False, "adopt_error": None, "kill_error": None}
     events = state["events"]
 
     class Job:
@@ -130,7 +134,9 @@ def windows_job(monkeypatch, no_job_objects):
 
     def popen(argv, **kwargs):
         events.append(("spawn", kwargs.get("creationflags"), kwargs.get("stdin")))
-        return _Proc(events, hangs=state["hangs"])
+        proc = _Proc(events, hangs=state["hangs"])
+        proc.kill_error = state["kill_error"]
+        return proc
 
     def adopt(pid):
         events.append(("adopt", pid))
@@ -178,6 +184,26 @@ def test_on_windows_a_process_that_cannot_join_a_job_is_killed_before_it_runs_th
     proc = hostexec.run_captured(["msb", "list"], timeout=5.0)
     assert proc.stdout == "plain"
     assert windows_job["events"][1:] == [("adopt", 4242), "kill", ("communicate", None, 0.0), ("run", 5.0)]
+
+
+def test_a_failed_kill_after_a_failed_adopt_still_falls_back_to_a_plain_run(windows_job):
+    from acq_py import hostexec
+
+    windows_job["adopt_error"] = OSError("no job")
+    windows_job["kill_error"] = OSError("access denied")  # the process is already gone
+    proc = hostexec.run_captured(["msb", "list"], timeout=5.0)
+    assert proc.stdout == "plain"
+    assert windows_job["events"][1:] == [("adopt", 4242), "kill", ("communicate", None, 0.0), ("run", 5.0)]
+
+
+def test_a_failed_kill_does_not_mask_an_interrupted_adopt(windows_job):
+    from acq_py import hostexec
+
+    windows_job["adopt_error"] = KeyboardInterrupt()
+    windows_job["kill_error"] = OSError("access denied")
+    with pytest.raises(KeyboardInterrupt):
+        hostexec.run_captured(["msb", "list"], timeout=5.0)
+    assert ("run", 5.0) not in windows_job["events"]
 
 
 def test_an_unbounded_call_or_a_posix_host_uses_plain_subprocess_run(windows_job, monkeypatch):

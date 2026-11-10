@@ -511,8 +511,8 @@ def test_create_fails_closed_when_the_bundle_does_not_verify(monkeypatch, tmp_pa
     # Pinned, but the fetch cannot happen (the test environment allows no network
     # transport): fail closed, never hand sbx the raw ref.
     ("git+https://github.com/acme/kits.git#ref=" + "a" * 40 + "&dir=k", errors.FAILURE, "failed to fetch remote kit"),
-    # A local kit directory is not applied by the Python acq.
-    ("./team-kit", errors.UNSUPPORTED, "names a local directory"),
+    # A local kit directory that does not exist (an existing one is copied and applied).
+    ("./team-kit", errors.VALIDATION_FAILED, "was not found"),
 ])
 def test_unfetchable_refs_are_refused_before_create(monkeypatch, tmp_path, capsys, ref, code, phrase):
     ws = _env(monkeypatch, tmp_path)
@@ -667,6 +667,15 @@ def test_kit_add_is_bounded(monkeypatch):
     with pytest.raises(sbx.SbxError):
         sbx.kit_add("box", "/k")
     assert budgets == [timeouts.DEFAULT_KIT_ADD_TIMEOUT_S]
+
+
+def test_kit_add_budget_is_shorter_than_the_lifecycle_lock_wait():
+    # 'sbx kit add' runs with the lifecycle lock held: a command that starts
+    # waiting for the lock as the kit add starts must outlast it, or one hung
+    # kit add shows up as a lock timeout in every other command.
+    from acq_py import lock
+
+    assert timeouts.DEFAULT_KIT_ADD_TIMEOUT_S < lock.DEFAULT_SANDBOX_TIMEOUT_S
 
 
 @pytest.mark.parametrize("failure", ["unavailable", "timeout"])

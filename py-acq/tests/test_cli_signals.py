@@ -245,6 +245,23 @@ def test_a_second_signal_within_the_grace_period_is_ignored():
         proc.wait()
 
 
+@pytest.mark.skipif(not hasattr(signal, "SIGBREAK"), reason="Windows Ctrl-Break")
+def test_ctrl_break_unwinds_the_command_quietly_with_149(monkeypatch, capsys):
+    cleaned: list[str] = []
+
+    def dispatch(*_args, **_kwargs):
+        try:
+            signal.raise_signal(signal.SIGBREAK)  # type: ignore[attr-defined,unused-ignore]
+            time.sleep(5)
+        finally:
+            cleaned.append("done")
+
+    monkeypatch.setattr(cli, "_dispatch", dispatch)
+    assert cli.main(["ls", "--json"]) == 128 + signal.SIGBREAK  # type: ignore[attr-defined,unused-ignore]
+    assert cleaned == ["done"]
+    assert capsys.readouterr().out == ""  # no envelope
+
+
 def test_main_returns_the_command_status_when_nothing_is_signalled(monkeypatch, capsys):
     monkeypatch.setenv("ACQ_SBX_INSTALLED", "0")
     monkeypatch.setenv("ACQ_MSB_INSTALLED", "0")

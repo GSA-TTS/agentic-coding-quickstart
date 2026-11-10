@@ -6,8 +6,9 @@ A port of the Bash msb adapter's kit path (``acq.backends/msb.sh``):
   (:func:`kitspec.verify_bundle`) and parses every selected kit. A kit the
   bundle does not hold (an opt-in catalog kit, a remote extra or ``--kit``
   ref, a provider kit from a registered source) is fetched at its pinned
-  commit and checked (:mod:`kit_fetch`); a ref that cannot be fetched, or a
-  local kit directory, is refused before anything is created.
+  commit and checked (:mod:`kit_fetch`), and a local kit directory is copied
+  into the private cache and checked there; a ref that cannot be fetched or
+  copied is refused before anything is created.
 * :func:`create_flags` builds a kit set's create-time flags: the read-only
   host-config mount, the ``--script-path`` startup script
   (``_acq_msb_stage_startup_script``) and host CA trust for a kit whose
@@ -63,9 +64,9 @@ _INSTANCE_PREFIXES = ("install-", "agent-installed-")
 class Kit:
     """One selected kit, parsed from the bundle or fetched. ``role`` comes from :class:`kitspec.SelectedKit`.
 
-    ``fetched`` marks a kit fetched at its pinned commit (:mod:`kit_fetch`)
-    rather than read from the bundle: its egress allowlist comes from its own
-    spec, not from the vetted built-in table.
+    ``fetched`` marks a kit from outside the bundle, fetched at its pinned
+    commit or copied from a local directory (:mod:`kit_fetch`): its egress
+    allowlist comes from its own spec, not from the vetted built-in table.
     """
 
     name: str
@@ -111,7 +112,10 @@ def _bundle_problem() -> str | None:
 
 
 def fetch_selected(sel: kitspec.SelectedKit, backend: str) -> Kit:
-    """A kit outside the bundle, fetched at its pinned commit. Raises :class:`kit_fetch.KitFetchError`."""
+    """A kit outside the bundle, fetched at its pinned commit or copied from a local directory.
+
+    Raises :class:`kit_fetch.KitFetchError`.
+    """
     name, spec = kit_fetch.load(sel.ref, backend)
     return Kit(name, sel.role, spec, sel.ref, fetched=True)
 
@@ -119,9 +123,9 @@ def fetch_selected(sel: kitspec.SelectedKit, backend: str) -> Kit:
 def resolve(selection: kitspec.KitSelection) -> list[Kit]:
     """Verify the bundle, then parse every selected kit, fetching any the bundle does not hold.
 
-    A kit outside the bundle is fetched at its pinned commit and checked
-    (:func:`kit_fetch.load`); one that cannot be fetched stops the caller,
-    before anything is created. Raises :class:`msb.MsbError`.
+    A kit outside the bundle is fetched at its pinned commit, or copied from
+    its local directory, and checked (:func:`kit_fetch.load`); one that cannot
+    be stops the caller, before anything is created. Raises :class:`msb.MsbError`.
     """
     problem = _bundle_problem()
     if problem is not None:

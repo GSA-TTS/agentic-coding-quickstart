@@ -246,8 +246,8 @@ def test_empty_baseline_is_refused(monkeypatch, tmp_path, capsys, calls):
 def test_unknown_provider_kit_is_refused(monkeypatch, tmp_path, capsys, calls):
     _env(monkeypatch, tmp_path)
     monkeypatch.setenv("ACQ_PROVIDER_KITS", "someone-elses-provider")
-    # Outside the bundle, the provider kit would have to be fetched: refused.
-    _assert_refused_before_create(*_create(capsys, tmp_path), calls, errors.UNSUPPORTED)
+    # Outside the bundle, and no kit directory of that name exists: refused.
+    _assert_refused_before_create(*_create(capsys, tmp_path), calls)
 
 
 def test_stale_kit_allowlist_is_refused(monkeypatch, tmp_path, capsys, calls):

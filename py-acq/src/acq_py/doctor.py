@@ -16,8 +16,9 @@ The overall ``status`` is derived from the checks: ``fail`` (any fail) outranks
 ``warn`` (any warn) outranks ``pass``.
 
 The checks are the managed runtime (ADR-0042m), backend-adapter availability
-(ADR-0040m), state-tree migration health, and the ``config.yaml`` schema marker
-and persisted backend (ADR-0041m, ADR-0038m). All are deterministic, read-only
+(ADR-0040m), state-tree migration health, the ``config.yaml`` schema marker
+and persisted backend (ADR-0041m, ADR-0038m), and a pending import of the Bash
+acq's state (ADR-0041m). All are deterministic, read-only
 and never touch the network, so ``doctor`` is a safe diagnostic in any context.
 """
 
@@ -64,7 +65,42 @@ def backend_check() -> dict:
 
 def doctor_checks() -> list[dict]:
     """Return the ordered check list for the current build."""
-    return [runtime_check(), backend_check(), state_check(), config.doctor_check(), persisted_backend_check()]
+    return [runtime_check(), backend_check(), state_check(), config.doctor_check(), persisted_backend_check(),
+            bash_import_check()]
+
+
+def bash_import_check() -> dict:
+    """Report an import of the Bash acq's state that ran and is not finished (ADR-0041m).
+
+    A pending part is retried on every mutating command, but its warnings are
+    printed only when they change, so after the first time nothing says the
+    import is stuck. This check says so, with the warnings it last printed.
+    An import that has not run yet (no mutating command since this acq was
+    installed) runs with the next one, and passes. Read-only, like every check.
+    """
+    try:
+        generation = migration.read_generation()
+        started = migration.import_started()
+        done = migration.read_import_done()
+        warnings = migration.read_import_warnings()
+    except userdirs.UserDirError as exc:
+        return {"id": "bash-import", "status": FAIL, "message": exc.message, "remediation": exc.remediation}
+    if generation >= migration.TARGET_GENERATION:
+        return {"id": "bash-import", "status": PASS, "message": "the Bash acq's state is imported (or there was none)"}
+    if generation < migration.RECORDS_GENERATION or not started:
+        return {"id": "bash-import", "status": PASS,
+                "message": "the Bash acq's state is imported by the next mutating acq command"}
+    pending = [part for part in migration.import_parts() if part not in done]
+    message = f"the import of the Bash acq's state is not finished ({', '.join(pending) or 'unknown'} pending)"
+    if warnings:
+        message += ": " + "; ".join(warnings)
+    return {
+        "id": "bash-import",
+        "status": WARN,
+        "message": message,
+        "remediation": "fix what the message names, then run any mutating acq command (create, rm, secret set) "
+        "to import the rest",
+    }
 
 
 def persisted_backend_check() -> dict:

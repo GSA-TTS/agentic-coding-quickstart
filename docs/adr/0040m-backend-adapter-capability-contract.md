@@ -124,7 +124,10 @@ exit 1, the `unsupported_capability` code, and remediation.
 > `git+https` ref pinned to a full 40-hex commit, whose fetched commit must equal
 > the pin, with no userinfo, query string or unsafe `dir=`, and whose checked-out
 > tree may not link outside itself. A ref that is not pinned fails with
-> `kit_ref_not_pinned`, a local kit directory with `unsupported_capability`, and a
+> `kit_ref_not_pinned`, a local kit directory with `unsupported_capability` (since
+> superseded: the seam now copies an existing local kit directory into its
+> private cache and checks the copy, and a missing one is `validation_failed`;
+> see KNOWN_FAILURE_MODES §55), and a
 > refused URL or a payload that fails a check with `validation_failed`; a fetch
 > that fails (including for lack of network) is `failure` or `timeout`. Each
 > refuses the create or heal before the backend is called, and a message names
