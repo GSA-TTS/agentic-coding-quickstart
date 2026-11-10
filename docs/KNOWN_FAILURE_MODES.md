@@ -4752,6 +4752,35 @@ own process, runs the same cleanup and exits 143.
 
 ---
 
+## 84. Windows: A Forced Kill of the Python acq Leaves the Session Child Running
+
+**Symptom:** On Windows, ending the Python acq from outside during `acq attach`,
+`acq shell`, `acq exec` or `acq run` (Task Manager's End task, `taskkill /F
+/PID <acq pid>`, or `Stop-Process`) ends acq at once, while the backend session
+(`msb.exe exec` or `sbx.exe exec`) keeps running in the console and holding it.
+
+**Cause:** On POSIX a SIGTERM or SIGHUP to acq during a session is passed on to
+the session child, which gets ten seconds to exit before acq kills it, and acq
+exits `128+N` only once the child is gone (`run_foreground` in
+`py-acq/src/acq_py/hostexec.py`). Windows has no catchable termination signal
+from another process: those tools call `TerminateProcess`, which no handler
+sees, so acq cannot pass anything on. What Windows does deliver, a Ctrl-Break
+in the console, reaches acq and the child alike; acq waits up to the same ten
+seconds for the child, ends it if needed, and returns status 149 (128 plus
+SIGBREAK's number).
+
+**Resolution:** End the whole process tree instead: `taskkill /T /F /PID <acq
+pid>`, or press Ctrl-C or Ctrl-Break in the session's console. A session child
+already left behind can be ended the same way by its own PID.
+
+**Tracked:** run the session in a Job object that kills its processes when acq's
+handle closes (as `run_captured` already does for bounded backend calls), so a
+forced kill of acq takes the session with it. Unblock trigger: a report of a
+session left running after a forced kill, or the Windows default flip
+(ADR-0048m).
+
+---
+
 ## Contributing
 
 When you discover a new failure mode:
