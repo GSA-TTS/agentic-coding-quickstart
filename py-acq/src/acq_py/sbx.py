@@ -304,7 +304,8 @@ def create(
     argv += ["-t", image]
     if clone:
         argv.append("--clone")
-    argv += ["--env", f"ACQ_WORKSPACE={workspace}"]
+    # The guest sees the path, never the ":ro" mount suffix.
+    argv += ["--env", f"ACQ_WORKSPACE={workspace.removesuffix(':ro')}"]
     if clone:
         argv += ["--env", "ACQ_CLONE=1"]
     for assignment in env or []:

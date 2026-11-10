@@ -202,7 +202,7 @@ def _scan_globals(args: list[str]) -> tuple[_Globals, list[str]]:
             flags.image = args[i].split("=", 1)[1]
             i += 1
         elif args[i] == "--image":
-            if i + 1 == len(args):
+            if i + 1 == len(args) or args[i + 1] == "--":
                 flags.image_missing = True
                 i += 1
             else:

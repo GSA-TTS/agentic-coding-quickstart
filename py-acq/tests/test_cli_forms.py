@@ -178,6 +178,22 @@ def test_image_missing(capsys):
     assert json.loads(capsys.readouterr().out)["error"]["message"] == "--image given with no value"
 
 
+def test_image_followed_by_double_dash_is_missing(capsys):
+    assert cli.main(["--json", "--image", "--", "run", "shell"]) == 2
+    assert json.loads(capsys.readouterr().out)["error"]["message"] == "--image given with no value"
+
+
+def test_sbx_guest_workspace_drops_the_ro_suffix(monkeypatch):
+    calls = []
+    monkeypatch.setattr(sbx, "_run", lambda argv, **kw: calls.append(argv) or type("P", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+    try:
+        sbx.create("box", "shell", "/ws:ro")
+    except Exception:
+        pass
+    flat = [a for argv in calls for a in argv]
+    assert "ACQ_WORKSPACE=/ws" in flat and "ACQ_WORKSPACE=/ws:ro" not in flat
+
+
 def test_recorded_extra_overlap_refused(backend, monkeypatch, tmp_path, capsys):
     primary = workspace(tmp_path, "primary")
     extra = workspace(tmp_path, "extra")
