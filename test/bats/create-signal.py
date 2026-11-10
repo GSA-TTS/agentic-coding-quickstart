@@ -147,6 +147,10 @@ def run_case(backend, sig):
         until(lambda: not alive(child) and not list(
             provenance.glob(f"provider-input/{backend}/{name}.*.lock")),
             master, output, "cleanup after exit", 30)
+        # The cursor is restored before the lock is released, but `until` stops
+        # as soon as it sees the release, possibly before reading those bytes.
+        # They are already in the PTY, so one more drain collects them.
+        drain(master, output)
         generations = list(provenance.glob(f"provider-input/{backend}/{name}.*/generations/*"))
         assert not generations, (case, "generation not discarded", generations)
         log = calls.read_text().splitlines()
