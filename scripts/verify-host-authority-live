@@ -583,8 +583,8 @@ proof_lines() {
   PROOF_N=""
   probe "$STEP_TIMEOUT" msb exec "$1" -u 0 -- sh -c "if [ -e $2 ]; then wc -l < $2; else echo 0; fi"
   [ "$PROBE_RC" -eq 0 ] || return 1
-  PROOF_N=$(printf '%s\n' "$PROBE_OUT" | tail -n 1 | tr -dc '0-9')
-  [ -n "$PROOF_N" ]
+  PROOF_N=$(printf '%s\n' "$PROBE_OUT" | tail -n 1 | tr -d '[:space:]')
+  case "$PROOF_N" in ''|*[!0-9]*) PROOF_N=""; return 1 ;; esac
 }
 
 step_msb_ro_kit_create() {
@@ -600,10 +600,14 @@ step_msb_ro_kit_create() {
   run_cmd "$STEP_TIMEOUT" msb exec "$n" -u 0 -- cat /home/agent/.hal-ro-proof
   need_rc0 "$id" "reading the readonly proof file" || return 0
   last_has "/var/lib/acq/host/kit-files/" || why="startup did not run from the read-only mount path; "
-  run_cmd "$STEP_TIMEOUT" msb exec "$n" -u 0 -- sh -c 'test ! -e /home/agent/hal/ro-proof.sh && echo NO-GUEST-COPY'
-  last_has NO-GUEST-COPY || why="${why}the readonly file was also copied into the guest; "
-  run_cmd "$STEP_TIMEOUT" msb exec "$n" -u 0 -- sh -c 'test -x /home/agent/hal/install-proof.sh && echo PLAIN-COPY-OK'
-  last_has PLAIN-COPY-OK || why="${why}the plain (non-readonly) file was not copied; "
+  run_cmd "$STEP_TIMEOUT" msb exec "$n" -u 0 -- sh -c 'if [ -e /home/agent/hal/ro-proof.sh ]; then echo GUEST-COPY-PRESENT; else echo NO-GUEST-COPY; fi'
+  need_rc0 "$id" "probing for a guest copy of the readonly file" || return 0
+  if last_has GUEST-COPY-PRESENT; then why="${why}the readonly file was also copied into the guest; "
+  elif ! last_has NO-GUEST-COPY; then record "$id" BLOCKED "the guest-copy probe printed neither verdict marker (tool missing in the guest?)"; return 0; fi
+  run_cmd "$STEP_TIMEOUT" msb exec "$n" -u 0 -- sh -c 'if [ -x /home/agent/hal/install-proof.sh ]; then echo PLAIN-COPY-OK; else echo PLAIN-COPY-MISSING; fi'
+  need_rc0 "$id" "probing for the plain (non-readonly) copy" || return 0
+  if last_has PLAIN-COPY-MISSING; then why="${why}the plain (non-readonly) file was not copied; "
+  elif ! last_has PLAIN-COPY-OK; then record "$id" BLOCKED "the plain-copy probe printed neither verdict marker (tool missing in the guest?)"; return 0; fi
   msb_inspect_check "$n"; irc=$?
   [ "$irc" -ne 2 ] || { record "$id" BLOCKED "msb inspect failed, timed out, or returned unusable output"; return 0; }
   [ "$irc" -eq 0 ] || why="${why}msb inspect does not show the read-only host-config Bind; "
@@ -650,6 +654,9 @@ step_msb_exit_code() {
   run_cmd "$STEP_TIMEOUT" msb exec "$MSB_A" -- sh -c 'exit 2'; r2=$LAST_RC
   run_cmd "$STEP_TIMEOUT" msb exec "$MSB_A" -- sh -c 'exit 7'; r7=$LAST_RC
   if [ "$r2" -eq 124 ] || [ "$r7" -eq 124 ]; then record "$id" BLOCKED "msb exec timed out; exit-code passthrough was not exercised"; return 0; fi
+  case "$r2:$r7" in
+    126:*|127:*|*:126|*:127) record "$id" BLOCKED "msb exec exited 126 or 127 (sh missing or not executable in the guest); passthrough was not exercised"; return 0 ;;
+  esac
   if [ "$r2" -eq 2 ] && [ "$r7" -eq 7 ]; then record "$id" PASS "guest exit codes 2 and 7 passed through msb exec unchanged on msb $MSB_VER"
   else record "$id" FAIL "guest exit 2 became $r2 and exit 7 became $r7 on msb $MSB_VER (affects only the wording of a refusal)"; fi
 }
@@ -661,6 +668,7 @@ need_rc0() {
   [ "$LAST_RC" -eq 0 ] && return 0
   if [ "$LAST_RC" -eq 125 ]; then record "$1" BLOCKED "$2 was refused (sandbox name in use, or the backend listing failed)"
   elif [ "$LAST_RC" -eq 124 ]; then record "$1" BLOCKED "BLOCKED(timeout): $2 timed out or the step's wall-clock budget ran out; the step was not exercised to a conclusion"
+  elif [ "$LAST_RC" -eq 126 ] || [ "$LAST_RC" -eq 127 ]; then record "$1" BLOCKED "$2 exited $LAST_RC: a command is missing or not executable in the guest, so the step was not exercised"
   else record "$1" BLOCKED "$2 exited $LAST_RC; the step was not exercised to a conclusion (see transcript)"; fi
   return 1
 }
@@ -754,8 +762,9 @@ step_msb_ro_oci() {
   create_sandbox msb "$n" "$ws" --kit "$ref"
   if last_has "cannot place read-only kit file"; then record "$id" FAIL "acq refused a readonly oci-engine file on create"; return 0; fi
   if [ "$LAST_RC" -ne 0 ]; then record "$id" BLOCKED "acq create with oci-engine exited $LAST_RC (see transcript)"; return 0; fi
-  run_cmd "$STEP_TIMEOUT" msb exec "$n" -u 0 -- sh -c 'ls /var/lib/acq/host/kit-files 2>&1; test ! -e /home/agent/oci-engine-grant-devs.sh && echo NO-GUEST-COPY-OF-GRANT-SCRIPT'
+  run_cmd "$STEP_TIMEOUT" msb exec "$n" -u 0 -- sh -c 'ls /var/lib/acq/host/kit-files 2>&1; echo LS-RC=$?; if [ -e /home/agent/oci-engine-grant-devs.sh ]; then echo GUEST-COPY-OF-GRANT-SCRIPT-PRESENT; else echo NO-GUEST-COPY-OF-GRANT-SCRIPT; fi'
   need_rc0 "$id" "listing the staged oci-engine files" || return 0
+  last_has 'LS-RC=0' || { record "$id" BLOCKED "ls of the staged oci-engine files failed in the guest (tool missing or mount absent); see transcript"; return 0; }
   if last_has 'home-agent-oci-engine-grant-devs-sh.' && last_has 'home-agent-oci-engine-config-oci-engine-storage-driver-sh.' \
       && last_has NO-GUEST-COPY-OF-GRANT-SCRIPT; then
     msb_inspect_check "$n"; irc=$?
@@ -803,7 +812,7 @@ step_sbx_forged_heal() {
   run_cmd "$STEP_TIMEOUT" sbx exec "$SBX_A" -- sh -c 'test -e /home/agent/usai-config/opencode.jsonc && echo PRESENT'
   need_rc0 "$id" "probing that the provider config exists" || return 0
   last_has PRESENT || { record "$id" BLOCKED "the provider config did not exist before removal, so its absence afterwards proves nothing"; return 0; }
-  run_cmd "$STEP_TIMEOUT" sbx exec "$SBX_A" -- sudo sh -c 'rm -f /usr/local/share/ca-certificates/zscaler-ca.crt /home/agent/usai-config/opencode.jsonc; rm -f /home/agent/.agentic-coding-playbook/AGENTS.md; echo REMOVED'
+  run_cmd "$STEP_TIMEOUT" sbx exec "$SBX_A" -- sudo sh -c 'rm -f /usr/local/share/ca-certificates/zscaler-ca.crt /home/agent/usai-config/opencode.jsonc && rm -f /home/agent/.agentic-coding-playbook/AGENTS.md && echo REMOVED'
   need_rc0 "$id" "removing the guest files as root" || return 0
   last_has REMOVED || { record "$id" BLOCKED "could not remove the guest files as root (sudo unavailable?)"; return 0; }
   [ -s "$(sbx_record_path "$SBX_A")" ] || { record "$id" BLOCKED "host builtin-kits record is missing before the re-attach"; return 0; }
@@ -815,7 +824,7 @@ step_sbx_forged_heal() {
   if last_has "injecting with 'sbx kit add'" || last_has "injected into"; then
     record "$id" FAIL "re-attach re-applied a kit although the host record was current"; return 0
   fi
-  run_cmd "$STEP_TIMEOUT" sbx exec "$SBX_A" -- sh -c 'test ! -e /home/agent/usai-config/opencode.jsonc && echo STILL-ABSENT'
+  run_cmd "$STEP_TIMEOUT" sbx exec "$SBX_A" -- sh -c 'if [ -e /home/agent/usai-config/opencode.jsonc ]; then echo REAPPEARED; else echo STILL-ABSENT; fi'
   need_rc0 "$id" "post-heal absence probe" || return 0
   if [ "$before" = "$after" ] && last_has STILL-ABSENT; then record "$id" PASS "re-attach did not re-apply removed guest files while the host builtin-kits record was current"
   else record "$id" FAIL "host record changed or the removed guest file reappeared after re-attach"; fi
