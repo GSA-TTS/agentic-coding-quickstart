@@ -209,6 +209,9 @@ case "$WS_ROOT" in "$OUT"/ws.?*) ;; *) echo "verify-host-authority-live: unexpec
 sandbox_name() { printf 'hal-%s-%s' "$RUN_ID" "$1"; }
 
 # The runner and the step functions live in sibling files (sourced; bash 3.2 safe).
+for _hal_f in lib.sh steps.sh; do
+  [ -r "$HERE/verify-host-authority-live-$_hal_f" ] || { echo "verify-host-authority-live: cannot read $HERE/verify-host-authority-live-$_hal_f (run the script from its checkout path, not through a symlink)" >&2; exit 2; }
+done
 # shellcheck source=verify-host-authority-live-lib.sh
 . "$HERE/verify-host-authority-live-lib.sh"
 # shellcheck source=verify-host-authority-live-steps.sh
