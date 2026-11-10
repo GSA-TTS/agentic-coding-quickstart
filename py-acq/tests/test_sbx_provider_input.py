@@ -18,6 +18,7 @@ import pytest
 
 from acq_py import backends, cli, errors, kit_sbx, provider_input, sbx, state
 from acq_py.commands import lifecycle
+from provider_input_helpers import current_generation
 
 pytestmark = pytest.mark.provider_key
 POSIX = os.name != "nt"
@@ -69,7 +70,7 @@ def _generations(name: str = "pi") -> list[Path]:
     return sorted(root.iterdir()) if root.is_dir() else []
 
 
-@pytest.mark.skipif(not POSIX, reason="file modes and the current symlink are POSIX")
+@posix_only
 def test_create_mounts_the_generation_read_only_after_the_workspace(monkeypatch, tmp_path, capsys):
     ws = _env(monkeypatch, tmp_path)
     seen = _spy(monkeypatch)
@@ -85,8 +86,7 @@ def test_create_mounts_the_generation_read_only_after_the_workspace(monkeypatch,
     assert json.loads(facts.read_text(encoding="utf-8"))["host"] == "api.gsa.usai.gov"
     assert stat.S_IMODE(facts.stat().st_mode) == 0o444
     assert (generation / "models" / "providers" / "usai" / "snapshot.json").is_file()
-    current = provider_input.input_root("sbx", "pi") / "current"
-    assert os.readlink(current) == f"generations/{generation.name}"
+    assert current_generation(provider_input.input_root("sbx", "pi")) == generation
     assert [f.provider for f in provider_input.recorded("sbx", "pi")] == ["usai"]
 
 

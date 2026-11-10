@@ -24,6 +24,7 @@ import pytest
 
 from acq_py import cli, errors, kitspec, msb, provider_input, secretstore
 from acq_py.commands import common
+from provider_input_helpers import current_generation
 
 VALUE = "S3NTINEL-usai-gate-5d0e"
 
@@ -227,16 +228,18 @@ def test_registry_ids_follow_the_selection(monkeypatch):
 
 
 @pytest.mark.provider_key
-def test_create_mounts_the_published_generation_read_only(monkeypatch, tmp_path, capsys, children):
+@pytest.mark.parametrize("pointer", [False, True], ids=["host-form", "windows-pointer"])
+def test_create_mounts_the_published_generation_read_only(monkeypatch, tmp_path, capsys, children, pointer):
     _env(monkeypatch, tmp_path)
+    if pointer:  # publish as a Windows host does, whatever this host is
+        monkeypatch.setattr(provider_input, "WINDOWS", True)
     monkeypatch.setattr(sys.modules["acq_py.security"], "ro_mount_supported", lambda: True)
     monkeypatch.setattr(sys.modules["acq_py.security"], "probe_mount", lambda name: ("ok", ""))
     rc, doc, _out, err = _create(capsys, tmp_path)
     assert rc == 0, (doc, err)
     (argv, _env_map), = _verb_calls(children, "create")
     root = provider_input.input_root("msb", "box")
-    current = root / "current"
-    generation = (root / os.readlink(current)).resolve()
+    generation = current_generation(root).resolve()  # a symlink on POSIX, a pointer file on Windows
     guest = f"{provider_input.GUEST_DIR}/{generation.name}"
     assert f"{os.path.realpath(generation)}:{guest}:ro" in argv
     assert f"{provider_input.ROOT_ENV}={guest}" in argv
