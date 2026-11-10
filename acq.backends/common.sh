@@ -2396,16 +2396,11 @@ _acq_lock_remove_owner() {
   return "$remove_status"
 }
 
-# A crashed remover may leave a reservation. On POSIX its dead process plus a
-# stale or empty saved owner permits cleanup; Windows uses the lock's age
-# threshold because native and MSYS PIDs cannot be compared. A releasing holder
-# can always clean its exact saved token.
+# A crashed remover may leave a reservation. Only its dead process, plus a
+# provably stale saved owner (or the releasing holder's exact token), permits
+# cleanup. Empty reservations of live removers are never touched.
 _acq_lock_reservations() {
-  local lock="$1" releasing="${2:-}" private pid line held=1 age threshold
-  case "$lock" in
-    */provider-input/*/*.lock) threshold=900 ;;
-    *) threshold=$_ACQ_CONFIG_LOCK_WINDOWS_STALE_S ;;
-  esac
+  local lock="$1" releasing="${2:-}" private pid line held=1
   [ ! -L "$lock" ] || return 0
   for private in "$lock"/owner.stale.*; do
     [ -e "$private" ] || [ -L "$private" ] || continue
@@ -2416,14 +2411,8 @@ _acq_lock_reservations() {
       if [ -n "$releasing" ] && [ "$line" = "$releasing" ]; then
         rm -f -- "$private/owner"
         rmdir -- "$private" 2>/dev/null || true
-      elif _acq_config_lock_windows; then
-        age=$(_acq_config_lock_age "$private") || age=0
-        if [ "$age" -ge "$threshold" ]; then
-          rm -f -- "$private/owner"
-          rmdir -- "$private" 2>/dev/null || true
-        fi
       elif ! _acq_pid_alive "$pid"; then
-        if [ ! -s "$private/owner" ] ||
+        if [ ! -e "$private/owner" ] ||
             [ "$(_acq_config_lock_state "$private" "$line")" = stale ]; then
           rm -f -- "$private/owner"
           rmdir -- "$private" 2>/dev/null || true
@@ -5943,14 +5932,14 @@ acq_provider_input_lock_acquire() {
       continue
     fi
     line=$(_acq_config_lock_owner_line "$lock")
-    pid=${line%% *}
-    identity=${line#* }
+    pid="" identity=""
+    IFS=' ' read -r pid identity <<< "$line"
     actual_identity=$(_acq_provider_input_process_identity "$pid" 2>/dev/null || true)
     if [ -n "$pid" ] && [ -n "$identity" ] && [ "$actual_identity" = "$identity" ]; then
       echo "acq: provider-input lock is owned by live pid $pid: $lock" >&2
     elif [ -n "$pid" ] && { ! _acq_pid_alive "$pid" || { [ -n "$actual_identity" ] && [ "$actual_identity" != "$identity" ]; }; }; then
       echo "acq: recovering stale provider-input lock owned by pid $pid: $lock" >&2
-      _acq_lock_remove_owner "$lock" "$line" || true
+      _acq_lock_remove_owner "$lock" "$line" || return 1
       continue
     else
       echo "acq: provider-input lock has no valid owner metadata: $lock" >&2
@@ -6053,9 +6042,6 @@ _acq_provider_input_guardian_start() {
   case "$_ACQ_PROVIDER_INPUT_TRANSACTION_PID" in ""|*[!0-9]*) _acq_provider_input_guardian_stop; return 1 ;; esac
   export _ACQ_PROVIDER_INPUT_GUARDIAN_PID
   export _ACQ_PROVIDER_INPUT_TRANSACTION_PID
-  # Acquisition runs in a command substitution; retain its exact owner token
-  # here in the transaction so release also works after owner is detached.
-  _ACQ_PROVIDER_INPUT_LOCK_TOKEN=$(_acq_config_lock_token "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID")
 }
 
 _acq_provider_input_guardian_register_child() {
@@ -6078,7 +6064,6 @@ _acq_provider_input_guardian_stop() {
   _ACQ_PROVIDER_INPUT_GUARDIAN_PID=""
   _ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN=""
   _ACQ_PROVIDER_INPUT_TRANSACTION_PID=""
-  _ACQ_PROVIDER_INPUT_LOCK_TOKEN=""
 }
 
 # Signal all registered backend children and wait for them to exit before the
@@ -6180,18 +6165,16 @@ _acq_provider_input_process_identity() {
   fi
 }
 
-# acq_provider_input_lock_release LOCK [TOKEN] — explicit tx_pid callers retain
-# and pass their acquisition token; guardian transactions retain it at start.
 acq_provider_input_lock_release() {
   case "${1:-}" in */provider-input/*/*.lock)
     [ -d "$1" ] && [ ! -L "$1" ] || return 1
-    local token="${2:-${_ACQ_PROVIDER_INPUT_LOCK_TOKEN:-}}"
+    local token
+    token=$(_acq_config_lock_owner_line "$1")
     if [ -z "$token" ]; then
       token=$(_acq_config_lock_token "${_ACQ_PROVIDER_INPUT_GUARDIAN_PID:-$$}")
     fi
     _acq_lock_reservations "$1" "$token" || true
-    _acq_lock_remove_owner "$1" "$token" 2>/dev/null || true
-    return 0
+    _acq_lock_remove_owner "$1" "$token" || return 1
     ;;
     *) return 1 ;;
   esac

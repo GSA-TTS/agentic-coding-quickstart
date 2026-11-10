@@ -614,7 +614,6 @@ class _MkdirLock:
     label = "lock"
     # Whether an existing directory with no owner file is taken (see _take).
     claims_ownerless = False
-    windows_stale_s = _BASH_WINDOWS_FRESH_S
 
     def __init__(self, path: Path, root: Path):
         self.path = path
@@ -645,8 +644,6 @@ class _MkdirLock:
                     return True
             finally:
                 os.close(parent)
-            if not self.path.exists():
-                continue
             line = _owner_line(self.path)
             if _bash_owner_state(self.path, line) == "stale":
                 self._remove(line)
@@ -784,13 +781,13 @@ class _MkdirLock:
                 line = _owner_line(private)
                 if sys.platform == "win32":  # no cross-runtime PID probe
                     try:
-                        abandoned = time.time() - private.stat().st_mtime >= self.windows_stale_s
+                        abandoned = time.time() - private.stat().st_mtime >= _BASH_WINDOWS_FRESH_S
                     except OSError:
                         abandoned = False
                     stale = abandoned  # age rule; never os.kill a Windows PID
                 else:
                     abandoned = pid is not None and not _pid_alive(pid)
-                    stale = abandoned and (line == "" or _bash_owner_state(private, line) == "stale")
+                    stale = abandoned and _bash_owner_state(private, line) == "stale"
                 if ((releasing is not None and line == releasing)
                         or (abandoned and (not (private / "owner").exists()
                                            or stale))):
@@ -874,7 +871,7 @@ class _BashLock(_MkdirLock):
         super().__init__(_bash_lock_dir(backend, name), bash_provenance_dir())
 
     def _acquire_windows(self) -> bool:  # pragma: no cover - Windows only
-        self.blocked = self._reservations() or self._recent_on_windows()
+        self.blocked = self._recent_on_windows()
         return not self.blocked
 
     def remediation(self, name: str) -> str:
@@ -928,7 +925,6 @@ class ConfigDirLock(_MkdirLock):
     # Every taker here decides by the owner file alone, so a directory left
     # without one (a taker that died before creating it) heals itself.
     claims_ownerless = True
-    windows_stale_s = CONFIG_WINDOWS_STALE_S
 
     def __init__(self, os_lock_path: Path, root: Path):
         super().__init__(os_lock_path.with_name(os_lock_path.name + ".d"), root)
