@@ -16,6 +16,7 @@ import ntpath
 import os
 import re
 import string
+import subprocess  # for the sbx probe's timeout exception
 import sys
 from collections.abc import Callable
 
@@ -170,7 +171,10 @@ def _resolve_active_backend(explicit: str | None) -> str | None:
     Auto-detect default arms:
 
         * exactly one backend installed -> that backend;
-        * sbx and msb both installed -> msb;
+        * sbx and msb both installed -> sbx when ``sbx ls -q`` lists a sandbox
+          (keeping a user's existing sbx sandboxes reachable), else msb; a
+          listing that fails or times out counts as none (Bash
+          ``_sbx_has_sandboxes``);
         * none installed -> ``None``;
         * (future) two or more installed and none is msb -> prompt the user and
           persist the answer via ``backend set``.
@@ -190,8 +194,21 @@ def _resolve_active_backend(explicit: str | None) -> str | None:
     if len(installed) == 1:
         return installed[0]
     if len(installed) > 1:
-        return "msb"
+        return "sbx" if _sbx_has_sandboxes() else "msb"
     return None
+
+
+# How long auto-detect waits for ``sbx ls -q`` before treating sbx as empty.
+_SBX_PROBE_TIMEOUT_S = 10.0
+
+
+def _sbx_has_sandboxes() -> bool:
+    """True when ``sbx ls -q`` lists at least one sandbox; any failure is False (fail-open, as Bash)."""
+    try:
+        names = sbx.list_names(timeout=_SBX_PROBE_TIMEOUT_S)
+    except (sbx.SbxError, OSError, subprocess.SubprocessError):
+        return False
+    return bool(names)
 
 
 def _invalid_persisted_backend(explicit: str | None) -> str | None:
