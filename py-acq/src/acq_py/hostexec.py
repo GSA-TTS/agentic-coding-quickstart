@@ -572,7 +572,10 @@ def _run_in_job(argv: list[str], timeout: float, input_text: str | None,
     try:
         job = StepJob.adopt(proc.pid)
     except BaseException as exc:
-        proc.kill()
+        try:
+            proc.kill()
+        except OSError:
+            pass  # already gone; the adopt failure is what the caller must see
         _reap(proc)
         if not isinstance(exc, OSError):
             raise
