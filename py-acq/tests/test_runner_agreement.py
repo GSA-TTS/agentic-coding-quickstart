@@ -106,13 +106,24 @@ def test_every_probe_has_an_expected_verdict():
     assert found == set(EXPECTED)
 
 
+# The tmpdir probes rest on the POSIX convention that an absolute TMPDIR names
+# the temp root, which is what both runners replace there. On Windows the
+# transform replaces the interpreter's own temp directory instead (TMPDIR is not
+# a Windows convention, and its paths use backslashes), and the Bash runner does
+# not run at all, so these two probes have no Windows verdict to agree on.
+POSIX_ONLY = {"probe/tmpdir-trailing-slash", "probe/tmpdir-is-literal"}
+
+
 def test_the_pytest_engine_gives_the_expected_verdicts(runner_tmpdir, tmp_path):
+    skipped = POSIX_ONLY if os.name == "nt" else set()
     got = {}
     for vid, path in engine.discover_vectors(PROBES):
+        if vid in skipped:
+            continue
         workdir = tmp_path / "work" / vid.replace("/", "-")
         workdir.mkdir(parents=True)
         got[vid] = _python_verdict(path, workdir)
-    assert got == EXPECTED
+    assert got == {vid: verdict for vid, verdict in EXPECTED.items() if vid not in skipped}
 
 
 @pytest.mark.skipif(
