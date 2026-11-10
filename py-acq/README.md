@@ -86,6 +86,13 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   mount is missing. Explicit and consent-gated — a non-interactive run without
   `--yes` refuses with `consent_required`; host records and secrets are
   preserved, only the guest filesystem is lost.
+* On msb, `create` applies the same deny-by-default egress policy as the Bash
+  acq (`ACQ_NETWORK_TIER`, see `docs/BACKEND_GUIDE.md`). **Upgrade note:** msb
+  fixes a sandbox's network rules at create, so a sandbox the Python acq created
+  before it applied this policy keeps unrestricted egress through `start`,
+  `restart` and `run NAME`. Remove it with `acq-py rm NAME` and create it again
+  to apply the policy (`create --recreate` does not cover this case). See
+  KNOWN_FAILURE_MODES, "Python acq on msb: Egress Policy Requires Recreation".
 * The read-only trusted-config mount (ADR-0035) is msb-only, and POSIX-only. On
   Linux and macOS with msb 0.7.7 or later, create mounts the sandbox's
   host-config directory `:ro` and records `ro_host_config` once `msb inspect`

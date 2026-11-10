@@ -4059,3 +4059,39 @@ The new default uses the pinned generic `devenv-shell` image and validates the
 pinned OpenCode kit before provisioning. If that validation fails, correct the
 pinned kit availability or metadata rather than falling back to an unpinned npm
 installation.
+
+---
+
+## Python acq on msb: Egress Policy Requires Recreation
+
+**Symptom:** An msb sandbox created by the Python acq (`acq-python`, or `acq`
+with `ACQ_IMPL=python`) can still reach any host, even though acq now applies a
+deny-by-default egress policy. `msb inspect <sandbox>` shows no
+`default_egress: deny`, and a fetch to a host outside the allowlist (for
+example `curl -sS -o /dev/null -w '%{http_code}' https://example.com/` from
+inside the sandbox) succeeds instead of being refused.
+
+**Cause:** Before the policy was added, the Python acq created msb sandboxes
+with no egress flags at all, so their egress was unrestricted. It now passes the
+same policy the Bash acq does: `--net-default-egress deny`, gateway DNS, the
+built-in kits' hosts and, under the default `balanced` tier, the balanced
+baseline (see `ACQ_NETWORK_TIER` in `docs/BACKEND_GUIDE.md`). msb fixes a
+sandbox's network rules when it is created and gives acq no way to change them
+afterwards, so `start`, `restart` and `run NAME` keep whatever rules the
+sandbox was created with. Only a sandbox created after the upgrade gets the
+policy. Sandboxes created by the Bash acq are not affected, because the Bash
+acq already applied this policy at create (ADR-0018).
+
+**Resolution:** Recreate each such sandbox after upgrading. Save anything
+outside the mounted project directory first, because the guest filesystem is
+discarded (the project directory itself lives on the host and is kept):
+
+```bash
+acq-python rm opencode-your-project
+acq-python run opencode /path/to/your/project
+```
+
+`acq create --recreate` does not apply here: it rebuilds only a sandbox that is
+missing its read-only trusted-config mount, and refuses any other. After
+recreating, `msb inspect <sandbox>` shows `default_egress: deny` (unless
+`ACQ_NETWORK_TIER=open` was confirmed on purpose).
