@@ -1,0 +1,80 @@
+MANUAL 1 (msb, interactive): forged legacy guest markers vs a real session.
+  The automated step msb-forged-markers covers exec sessions. The agent marker needs an
+  interactive attach, so do it by hand:
+    cd "@REPO@" && ROOT="@REPO@" && mkdir -p "$ROOT/tmp" && WS=$(mktemp -d "$ROOT/tmp/hal-manual.XXXXXX") && case "$WS" in "$ROOT"/tmp/hal-manual.?*) git -C "$WS" init -q ;; *) echo "bad scratch dir"; WS="" ;; esac
+    ./acq --backend msb ls | grep -w hal-@RUN@-m && echo "name in use: pick another"
+    ./acq --backend msb create shell "$WS" --name hal-@RUN@-m --no-provider-kits
+    msb exec hal-@RUN@-m -u 0 -- sh -c 'mkdir -p /var/lib/acq; printf claude > /var/lib/acq/agent; printf /tmp/forged-ws > /var/lib/acq/workspace; printf /tmp/forged.sock > /var/lib/acq/ssh-auth-sock; printf "FORGED_KIT_VAR=pwned\n" > /var/lib/acq/kit-env; touch /var/lib/acq/agent-user-ready /var/lib/acq/agent-installed-claude'
+    ./acq --backend msb shell hal-@RUN@-m
+  Observe inside the shell: pwd is the host-recorded workspace (NOT /tmp/forged-ws);
+  echo "$FORGED_KIT_VAR" is empty; echo "$SSH_AUTH_SOCK" is not /tmp/forged.sock.
+  Then run: ./acq --backend msb run hal-@RUN@-m
+  Observe: it opens the recorded agent (a shell), it does not try to launch claude.
+  Cleanup (only what you created above): ./acq --backend msb rm hal-@RUN@-m; case "$WS" in "$ROOT"/tmp/hal-manual.?*) rm -rf -- "$WS" ;; esac
+
+MANUAL 2 (msb, needs a running ssh-agent): forged socket marker with a live forward.
+  With SSH_AUTH_SOCK set on the host (ssh-add -l works), create a sandbox with
+  ./acq --backend msb create shell "$WS" --name hal-@RUN@-ssh --no-provider-kits (WS as in
+  MANUAL 1; the name must not already exist), then forge
+  /var/lib/acq/ssh-auth-sock as in MANUAL 1 and run: ./acq --backend msb exec hal-@RUN@-ssh -- sh -c 'echo "$SSH_AUTH_SOCK"; ssh-add -l'
+  Observe: SSH_AUTH_SOCK is the acq in-guest bridge path (not the forged one) and
+  ssh-add -l lists your host keys. Cleanup: ./acq --backend msb rm hal-@RUN@-ssh
+
+MANUAL 3 (msb): restart and reboot persistence beyond acq restart.
+  After a host reboot, run ./acq --backend msb run hal-@RUN@-m -- true (the throwaway
+  sandbox from MANUAL 1, if you kept it). Observe: the sandbox resumes, the kit startup re-runs from the
+  read-only mount, and no error mentions a missing mount or marker.
+
+MANUAL 4 (msb, other hosts and versions): Linux hosts and msb versions other than 0.7.7.
+  On each additional host or msb version run this script again (it records the version
+  and host) and also: bash scripts/qualify-msb-ro-mount
+  Record one row per host and version in docs/VERIFY_PROVIDER_ADOPTION.md.
+
+MANUAL 5 (sbx, ADR-0037 steps 1-4 and 6): read-only mount experiments on a real sbx.
+  Coverage: steps 1 and 2 (write, create, rename, chmod) and the read/execute half of step 3
+  have commands below. NOT COVERED, BLOCKED until a procedure is verified against a real sbx:
+  the remount attempt when the guest has no mount command, and the restart half of step 4
+  (a registered startup command that references the mount, and the fail-closed check after
+  the host directory is removed). This script only lists the mount after sbx stop; that shows
+  the mount survives, not that a startup command ran from it. See ADR-0037 step 4.
+    cd "@REPO@" && ROOT="@REPO@" && mkdir -p "$ROOT/tmp" && D=$(mktemp -d "$ROOT/tmp/hal37.XXXXXX") && case "$D" in "$ROOT"/tmp/hal37.?*) ;; *) echo "bad scratch dir"; D="" ;; esac
+    mkdir -p "$D/ro" "$D/ws" && printf 'HOST-ORIGINAL\n' > "$D/ro/sentinel"
+    mkdir -m 0711 "$D/ro/x" && printf '#!/bin/sh\necho EXEC-OK\n' > "$D/ro/x/run.sh" && chmod 0555 "$D/ro/x/run.sh"
+    sbx ls -q | grep -w hal-@RUN@-adr37 && echo "name in use: pick another"
+    sbx create --name hal-@RUN@-adr37 shell "$D/ws" "$D/ro:ro"
+  Step 1 (mount form): sbx exec hal-@RUN@-adr37 -- ls -ld "$D/ro" "$D/ws"
+    Observe: the guest path equals the host absolute path; the workspace is writable.
+  Step 2 (enforcement under sudo): as guest root attempt each of write, create, rename and
+    chmod separately and note each exit status (a status of 126 or 127 or a "not found"
+    message means the tool is missing and the attempt was NOT made, so it is not a denial):
+    sbx exec hal-@RUN@-adr37 -- sudo sh -c 'echo x > "$0/sentinel"; echo write-rc=$?' "$D/ro"
+    sbx exec hal-@RUN@-adr37 -- sudo sh -c ': > "$0/new"; echo create-rc=$?' "$D/ro"
+    sbx exec hal-@RUN@-adr37 -- sudo sh -c 'mv "$0/sentinel" "$0/s2"; echo rename-rc=$?' "$D/ro"
+    sbx exec hal-@RUN@-adr37 -- sudo sh -c 'chmod 0777 "$0/sentinel"; echo chmod-rc=$?' "$D/ro"
+    Observe: each rc is non-zero (not 126/127), and on the HOST ls -la "$D/ro" and
+    cat "$D/ro/sentinel" are unchanged. Judge it from the host, not from guest output.
+    Remount: run sbx exec hal-@RUN@-adr37 -- sh -c 'command -v mount'. If it prints nothing the
+    guest has no mount command, so record the remount as NOT TESTED (never as denied).
+  Step 3 (permissions): sbx exec hal-@RUN@-adr37 -- sh -c 'id -u; cat "$0/sentinel"; "$0/x/run.sh"; ls "$0/x" >/dev/null; echo ls-rc=$?' "$D/ro"
+    Observe: the printed uid is the guest user you are judging (ADR-0037 names uid 1000),
+    it can read the sentinel, EXEC-OK is printed from the 0555 file, and ls-rc is non-zero
+    for the 0711 directory. If the uid is not that user, rerun as that user.
+  Step 4 (restart persistence, mount presence only): sbx stop hal-@RUN@-adr37; sbx exec hal-@RUN@-adr37 -- ls "$D/ro"
+    Observe: mount present after resume. The startup-command and fail-closed halves are
+    NOT COVERED (see Coverage above); do not record them from this procedure.
+  Step 6 (modes): repeat 1 and 4 with: sbx create --clone --name hal-@RUN@-adr37c shell "$D/ws" "$D/ro:ro"
+    and on sbx 0.42+ with no workspace.
+  Cleanup (only what you created above): sbx rm --force hal-@RUN@-adr37 hal-@RUN@-adr37c
+    case "$D" in "$ROOT"/tmp/hal37.?*) rm -rf -- "$D" ;; esac
+
+MANUAL 6 (sbx, ADR-0037 steps 5 and 8): replay integrity and negative control.
+  Step 5: sbx kit inspect on a sandbox, find where the registered startup command is
+    stored (guest and VM filesystem). As guest root edit the registered command and each
+    file it references, restart, and record what executes.
+  Step 8: in the guest, search the read-only mount for host config keys:
+    sbx exec hal-@RUN@-adr37 -- sh -c 'ls -la "$0"; grep -rl "builtin-kits\|extra-kits" "$0" 2>/dev/null' "$D/ro"
+    Observe: no host config key files (workspace, extra-kits, builtin-kits, provenance).
+
+MANUAL 7 (sbx, Windows): ADR-0037 step 7 and ADR-0029 path forms need a Windows host.
+  Create with a drive-form path and confirm the mount path in argv is valid in the guest.
+
