@@ -27,10 +27,11 @@ ones:
   config variables removed (:func:`gitrepos.git_env`, Bash
   ``_kit_git_isolate``), with prompts disabled and stdin closed, resolved
   through :mod:`hostexec`, under a timeout. The first fetch attempt reads no
-  git config files at all; only when it fails is it retried with the user's
-  own config (credential helpers, URL rewrites), still without prompts. git's
-  diagnostics are never shown: under the user's config they can name a
-  credential-bearing URL.
+  git config files at all and may use only https; only when it fails is it
+  retried with the user's own config (credential helpers, URL rewrites), still
+  without prompts, and with ``core.hooksPath`` pointed at the null device so
+  the user's global hooks never run in the cache. git's diagnostics are never
+  shown: under the user's config they can name a credential-bearing URL.
 * The checked-out tree must pass :func:`kitspec.tree_symlinks_within` (no name
   with a newline, no symlink resolving outside the kit), on top of the per-file
   checks the backends make (:func:`kitspec.resolve_source`).
@@ -312,14 +313,33 @@ def _git_program() -> str:
     return git
 
 
+def _allowed_protocols(inherited: str | None) -> str:
+    """``GIT_ALLOW_PROTOCOL`` for the attempt without config: :data:`SCHEMES`, never wider than inherited.
+
+    An inherited list (one the user or a test set) only narrows it. When
+    nothing is left, a name no transport has allows nothing.
+    """
+    allowed = [s for s in SCHEMES if inherited is None or s in inherited.split(":")]
+    return ":".join(allowed) or "acq-none"
+
+
 def _env(*, user_config: bool) -> dict[str, str]:
-    """git's environment: no repository redirects, no prompts; the user's config files only on request."""
+    """git's environment: no repository redirects, no prompts; the user's config files only on request.
+
+    Without the user's config, git may use only the transports a kit URL may
+    name (https). With it (the authenticated retry), the transport is left to
+    git's defaults and the user's ``GIT_ALLOW_PROTOCOL``: the user's own
+    ``url.<base>.insteadOf`` rewrite may send a pinned https URL to an
+    enterprise mirror over ssh, and the commit is verified against the pin
+    whatever the transport.
+    """
     env = gitrepos.git_env()
     for var in _PROMPT_ENV_DROP:
         env.pop(var, None)
     env.update({"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"})
     if not user_config:
-        env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull})
+        env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+                    "GIT_ALLOW_PROTOCOL": _allowed_protocols(os.environ.get("GIT_ALLOW_PROTOCOL"))})
         env.pop("GIT_CONFIG_SYSTEM", None)
     return env
 
@@ -366,8 +386,13 @@ def _source_valid(git: str, repo: Path, commit: str) -> bool:
 
 
 def _fetch_into(git: str, repo: Path, ref: RemoteRef, timeout: float) -> bool:
-    """One fetch of the pinned commit, anonymous first, then with the user's config; True on success."""
-    args = ["-c", "core.askPass=", "-c", "credential.interactive=false", "-C", str(repo), "fetch", "--quiet",
+    """One fetch of the pinned commit, anonymous first, then with the user's config; True on success.
+
+    ``core.hooksPath`` names the null device, which holds no hook, so the
+    user's global hooks (read by the retry) never run in acq's cache repository.
+    """
+    args = ["-c", "core.askPass=", "-c", "credential.interactive=false", "-c", f"core.hooksPath={os.devnull}",
+            "-C", str(repo), "fetch", "--quiet",
             "--depth", "1", "--no-tags", "--no-recurse-submodules", "--end-of-options", ref.url, ref.commit]
     for user_config in (False, True):
         if _git(git, args, env=_env(user_config=user_config), timeout=timeout).returncode == 0:

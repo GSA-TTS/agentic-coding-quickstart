@@ -445,8 +445,12 @@ source) is fetched by `src/acq_py/kit_fetch.py`, a port of Bash
 * git is resolved to an absolute path, runs with `GIT_DIR` and the other
   redirecting variables removed, without prompts, with stdin closed and under
   `ACQ_KIT_FETCH_TIMEOUT` (default 120 s). The first attempt reads no git
-  config files; only if it fails is it retried with the user's config (for a
-  credential helper or a URL rewrite). git's own messages are never shown.
+  config files and may use only https (`GIT_ALLOW_PROTOCOL`, never wider than
+  one the user set); only if it fails is it retried with the user's config (for
+  a credential helper or a URL rewrite, which may lead to another transport such
+  as an ssh mirror; the commit is still checked against the pin). Neither
+  attempt runs a git hook from the user's config. git's own messages are never
+  shown.
 * Any failure, including a network failure, refuses the create (or the heal)
   before anything is created, on both backends; sbx is only ever given acq's
   translation of the kit, never the ref.

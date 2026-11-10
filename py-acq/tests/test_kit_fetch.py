@@ -295,6 +295,66 @@ def test_the_retry_uses_the_users_git_config(kit_repo, monkeypatch):
     assert len(spy.fetches) == 2
 
 
+def test_the_users_global_hooks_never_run_in_the_cache(kit_repo, tmp_path, monkeypatch):
+    # The retry reads the user's config. A by-commit shallow fetch runs the
+    # reference-transaction hook, so a global core.hooksPath would run it in
+    # acq's cache repository unless the fetch overrides it.
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    marker = tmp_path / "hook-ran"
+    (hooks / "reference-transaction").write_text(f"#!/bin/sh\n: > '{marker}'\n", encoding="utf-8")
+    (hooks / "reference-transaction").chmod(0o755)
+    alias = kit_repo.bare.with_name("alias.git").as_uri()
+    gitconfig = Path(os.environ["HOME"]) / ".gitconfig"
+    gitconfig.write_text(f'[core]\n\thooksPath = {hooks}\n[url "{kit_repo.url}"]\n\tinsteadOf = {alias}\n',
+                         encoding="utf-8")
+    spy = _GitSpy(monkeypatch)
+    kit = kit_fetch.fetch(f"git+{alias}#ref={kit_repo.pin}&dir=kits/team", "msb")
+    assert (kit / "spec.yaml").is_file()
+    assert len(spy.fetches) == 2  # the retry, with the user's config, did the fetch
+    assert not marker.exists()
+
+
+def test_the_attempt_without_config_may_use_only_kit_url_transports(kit_repo, monkeypatch):
+    spy = _GitSpy(monkeypatch)
+    missing = kit_repo.bare.with_name("missing.git").as_uri()
+    with pytest.raises(kit_fetch.KitFetchError):
+        kit_fetch.fetch(f"git+{missing}#ref={kit_repo.pin}&dir=kits/team", "msb")
+    # The conftest allows git only "file"; the product never widens that.
+    assert [e.get("GIT_ALLOW_PROTOCOL") for e in spy.fetches] == ["file", "file"]
+    monkeypatch.setattr(kit_fetch, "SCHEMES", ("https",))
+    assert kit_fetch._allowed_protocols(None) == "https"
+    assert kit_fetch._allowed_protocols("https:ssh:file") == "https"
+    assert kit_fetch._allowed_protocols("file") == "acq-none"
+    monkeypatch.delenv("GIT_ALLOW_PROTOCOL")
+    assert kit_fetch._env(user_config=False)["GIT_ALLOW_PROTOCOL"] == "https"
+    # The retry leaves the transport to the user (an insteadOf rewrite may use ssh).
+    assert "GIT_ALLOW_PROTOCOL" not in kit_fetch._env(user_config=True)
+
+
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX ownership check")
+def test_a_cache_directory_owned_by_another_user_is_refused(kit_repo, monkeypatch):
+    kit_fetch._cache_dirs("msb")  # created by this user
+    real = os.getuid()
+    monkeypatch.setattr(kit_fetch.os, "getuid", lambda: real + 1)
+    with pytest.raises(kit_fetch.KitFetchError, match="owned by another user"):
+        kit_fetch.fetch(kit_repo.ref(), "msb")
+
+
+def test_a_cached_tree_without_its_complete_marker_is_rebuilt(kit_repo, monkeypatch):
+    kit = kit_fetch.fetch(kit_repo.ref(), "msb")
+    (kit.parent / kit_fetch.COMPLETE_MARKER).unlink()  # e.g. a crash before the marker
+    (kit / "files" / "team.txt").write_text("tampered\n", encoding="utf-8")
+    (kit / "planted").write_text("x\n", encoding="utf-8")
+    spy = _GitSpy(monkeypatch)
+    again = kit_fetch.fetch(kit_repo.ref(), "msb")
+    assert again == kit
+    assert (again / "files" / "team.txt").read_text(encoding="utf-8") == "first\n"
+    assert not (again / "planted").exists()
+    assert (again.parent / kit_fetch.COMPLETE_MARKER).is_file()
+    assert spy.fetches == []  # rebuilt from the verified source, no new fetch
+
+
 def test_inherited_git_redirects_and_config_injection_do_not_reach_the_cache(kit_repo, tmp_path, monkeypatch):
     other = tmp_path / "other"
     _git("init", "-q", str(other))
