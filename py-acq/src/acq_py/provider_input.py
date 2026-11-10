@@ -36,11 +36,13 @@ same files. No credential value passes through this module.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
 import shutil
 import stat
+import string
 import tempfile
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -549,13 +551,35 @@ def prepare(backend: str, name: str, selected: list[tuple[str, dict, Facts]], bu
 
 
 def _chmod_nofollow(path: str | Path, mode: int) -> None:
-    """chmod ``path`` unless it is a link (a link is skipped, never followed)."""
+    """chmod ``path`` unless it is a link (a link is skipped, never followed).
+
+    Where the platform has ``O_NOFOLLOW``, the entry is opened without following
+    a link and changed through that descriptor, so a link swapped in after any
+    check is never followed. Opening a link that way fails (``ELOOP``;
+    ``EMLINK`` on FreeBSD), which means "skip". An entry the owner cannot even
+    read cannot be opened, and only then, or where ``fchmod`` is missing
+    (Windows, whose ``chmod`` only toggles the read-only attribute), is a link
+    checked for and skipped by name first.
+    """
+    if _O_NOFOLLOW and hasattr(os, "fchmod"):
+        # O_NONBLOCK: a FIFO planted in place of a file must not block the open.
+        try:
+            fd = os.open(path, os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK)
+        except PermissionError:
+            fd = -1
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.EMLINK):
+                return
+            raise
+        if fd >= 0:
+            try:
+                os.fchmod(fd, mode)
+            finally:
+                os.close(fd)
+            return
     if os.path.islink(path):
         return
-    if os.chmod in os.supports_follow_symlinks:
-        os.chmod(path, mode, follow_symlinks=False)
-    else:
-        os.chmod(path, mode)
+    os.chmod(path, mode)
 
 
 def _make_read_only(generation: Path) -> None:
@@ -649,12 +673,14 @@ def probe_argv(f: Facts) -> list[str]:
 
 
 def classify(raw: str) -> str:
-    """Bash ``_classify_key_status``: an HTTP code, ``unresolved``, ``unreachable`` or ``""``."""
-    head, sep, tail = raw.rpartition("|")
-    if not sep:
-        return ""
-    exit_code = "".join(ch for ch in tail if ch.isdigit())
-    code = "".join(ch for ch in head if ch.isdigit())[-3:]
+    """Bash ``_classify_key_status``: an HTTP code, ``unresolved``, ``unreachable`` or ``""``.
+
+    As in Bash, curl's exit code is what follows the LAST ``|`` and the HTTP
+    code is what precedes the FIRST one (with no ``|`` both are the whole
+    output); only their digits count, and only the last three of the code.
+    """
+    exit_code = "".join(ch for ch in raw.rsplit("|", 1)[-1] if ch in string.digits)
+    code = "".join(ch for ch in raw.split("|", 1)[0] if ch in string.digits)[-3:]
     if exit_code == "0" and code and code != "000":
         return code
     if exit_code == "6":

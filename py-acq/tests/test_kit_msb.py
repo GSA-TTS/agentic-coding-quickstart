@@ -107,8 +107,9 @@ class _Guest:
         return not self._fail(argv)
 
     def commands(self):
-        """The kit commands run (file placement and mkdir steps left out)."""
-        return [(f, a) for f, a in self.execs if not (a[:2] == ["sh", "-c"] and a[2] in (kit_msb._PLACE_SCRIPT, 'mkdir -p "$@"'))]
+        """The kit commands run (agent-user setup, file placement and mkdir steps left out)."""
+        steps = (kit_msb._PLACE_SCRIPT, 'mkdir -p "$@"', kit_msb._AGENT_USER_SCRIPT)
+        return [(f, a) for f, a in self.execs if not (a[:2] == ["sh", "-c"] and a[2] in steps)]
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +161,9 @@ def test_verify_bundle_runs_on_every_create(monkeypatch, tmp_path, capsys):
     real, calls = kitspec.verify_bundle, []
     monkeypatch.setattr(kitspec, "verify_bundle", lambda: calls.append(1) or real())
     assert _invoke(capsys, "--backend", "msb", "create", "shell", str(ws), "--name", "a", "--json")[0] == 0
-    assert calls == [1]
+    # Once in the read-only preflight before the GitHub-token prompt, and again
+    # in the locked create that applies the kits.
+    assert calls == [1, 1]
 
 
 @pytest.mark.parametrize("config", ["extra_kits: openchamber\n", "provider_kit: ./local-provider\n"])
@@ -388,6 +391,62 @@ def test_recreate_below_the_floor_refuses_before_removing_the_guest(monkeypatch,
     assert rc == 1 and doc["error"]["code"] == errors.VALIDATION_FAILED
     assert "upgrade msb" in doc["error"]["remediation"]
     assert removed == []
+
+
+def test_recreate_requires_the_read_only_mount_where_the_platform_has_it(monkeypatch, tmp_path, capsys):
+    # The version check before the old guest goes passes; the create's own
+    # detection then disagrees, so the new guest has no mount. Recorded that
+    # way, the sandbox would stop requiring the mount for good.
+    _env(monkeypatch, tmp_path)
+    _seed_sec()
+    monkeypatch.setattr(security, "ro_mount_supported", lambda: False)
+    applied = []
+    monkeypatch.setattr(kit_msb, "ensure_kits_applied", lambda *a, **k: applied.append(1) or kit_msb.ApplyResult())
+    rc, doc = _invoke(capsys, "--backend", "msb", "create", "--recreate", "sec", "--yes", "--json")
+    assert rc == 1 and doc["error"]["code"] == errors.VALIDATION_FAILED, doc
+    assert "without its read-only trusted-config mount" in doc["error"]["message"]
+    assert applied == []
+    assert "sec" not in _catalog(tmp_path)
+    assert state.record_read("msb", "sec")["ro_host_config"] is True  # still eligible for a retry
+
+
+# ---------------------------------------------------------------------------
+# The agent user is set up before every kit-set apply.
+# ---------------------------------------------------------------------------
+
+
+def _agent_user_step(argv) -> bool:
+    return argv[:2] == ["sh", "-c"] and len(argv) > 2 and argv[2] == kit_msb._AGENT_USER_SCRIPT
+
+
+def test_ensure_sets_up_the_agent_user_as_root_before_any_kit(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path)
+    guest = _Guest(monkeypatch)
+    a = _kit(tmp_path, "a", "commands:\n  - phase: startup\n    command:\n      - env\n")
+    result = kit_msb.ensure_kits_applied("box", [a], ro_required=False)
+    assert result.agent_user is True and result.applied == ["a"]
+    flags, argv = guest.execs[0]
+    assert flags == ["-u", "0"] and _agent_user_step(argv)
+    assert "useradd -M -d /home/agent" in argv[2] and "test -w /home/agent" in argv[2]
+
+
+def test_a_failed_agent_user_setup_is_reported_and_the_kits_still_attempted(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path)
+    _Guest(monkeypatch, fail=_agent_user_step)
+    a = _kit(tmp_path, "a", "commands:\n  - phase: startup\n    command:\n      - env\n")
+    result = kit_msb.ensure_kits_applied("box", [a], ro_required=False)
+    assert result.agent_user is False and result.applied == ["a"]  # a heal goes on, as in Bash
+    assert "writable agent home" in capsys.readouterr().err
+
+
+def test_create_fails_when_the_agent_user_cannot_be_set_up(monkeypatch, tmp_path, capsys):
+    ws = _env(monkeypatch, tmp_path)
+    _Guest(monkeypatch, fail=_agent_user_step)
+    rc, doc = _invoke(capsys, "--backend", "msb", "create", "shell", str(ws), "--name", "box", "--json")
+    assert rc == 1 and doc["error"]["code"] == errors.FAILURE, doc
+    assert "agent user" in doc["error"]["message"]
+    assert "box" not in _catalog(tmp_path)
+    assert state.record_read("msb", "box") is None
 
 
 # ---------------------------------------------------------------------------

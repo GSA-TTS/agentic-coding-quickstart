@@ -457,3 +457,115 @@ def test_start_not_exec_ready_is_a_timeout(monkeypatch, tmp_path, capsys):
 
 def test_start_and_restart_are_acq_verbs_not_passthrough():
     assert {"start", "restart"} <= cli.KNOWN_COMMANDS
+
+
+# ---------------------------------------------------------------------------
+# run re-attach heals the kits, as start does (Bash acq_backend_ensure_kits_applied).
+# ---------------------------------------------------------------------------
+
+def _launches(monkeypatch) -> list:
+    launched: list = []
+    monkeypatch.setattr(msb, "launch", lambda name, *a, **k: launched.append(name) or 0)
+    return launched
+
+
+@pytest.mark.parametrize("argv", [["run", "box"], ["run", "shell", "{ws}", "--name", "box"]])
+def test_run_reattach_heals_the_recorded_kit_set_then_attaches(monkeypatch, tmp_path, capsys, argv):
+    _env(monkeypatch, tmp_path)
+    _create(capsys, tmp_path, "--kit", "opencode")
+    calls = _spy_heal(monkeypatch, [])
+    launched = _launches(monkeypatch)
+    argv = [a.replace("{ws}", str(tmp_path / "ws")) for a in argv]
+    rc, doc, _out, err = _acq(capsys, *argv, "--json")
+    assert rc == 0, (doc, err)
+    assert doc["data"]["action"] == "reattached" and launched == ["box"]
+    (names, ro, force), = calls
+    assert "opencode" in names and "usai-provider" in names  # the .kits record plus the built-ins
+    # A heal keeps the read-only requirement wherever the platform can mount it (never on Windows).
+    assert force is False and ro is (security.ro_mount_platform_problem() is None)
+
+
+def test_run_reattach_with_kit_given_again_heals_that_kit_set(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path)
+    _create(capsys, tmp_path)  # created without --kit
+    calls = _spy_heal(monkeypatch, [])
+    _launches(monkeypatch)
+    rc, doc, _out, err = _acq(capsys, "run", "shell", str(tmp_path / "ws"), "--name", "box", "--kit", "opencode",
+                              "--json")
+    assert rc == 0, (doc, err)
+    (names, _ro, _force), = calls
+    assert "opencode" in names
+
+
+def test_run_reattach_with_an_incomplete_heal_warns_and_attaches(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path)
+    _create(capsys, tmp_path)
+    monkeypatch.setattr(kit_msb, "ensure_kits_applied",
+                        lambda name, kit_set, **_kw: kit_msb.ApplyResult(["usai-provider"], ["git-ssh-sign"]))
+    launched = _launches(monkeypatch)
+    # An incomplete heal must not rewrite the provenance record.
+    stamp = json.loads(kits._provenance_path("msb", "box").read_text(encoding="utf-8"))["recorded_at"]
+    rc, doc, _out, err = _acq(capsys, "run", "box", "--json")
+    assert rc == 0 and launched == ["box"], (doc, err)
+    assert "git-ssh-sign" in err and "attaching anyway" in err
+    assert json.loads(kits._provenance_path("msb", "box").read_text(encoding="utf-8"))["recorded_at"] == stamp
+
+
+def test_run_reattach_to_a_stopped_sandbox_skips_the_heal_with_a_warning(monkeypatch, tmp_path, capsys):
+    _stopped_box(monkeypatch, tmp_path, capsys, secret=False)
+    calls = _spy_heal(monkeypatch, [])
+    launched = _launches(monkeypatch)
+    monkeypatch.setattr(sys.modules["acq_py.commands.lifecycle"], "_attach_key_check", lambda *a: None)
+    rc, doc, _out, err = _acq(capsys, "run", "box", "--json")
+    assert rc == 0 and launched == ["box"], (doc, err)
+    assert calls == []
+    assert "is not running, so its kits were not re-applied" in err and "acq start box" in err
+
+
+def test_run_by_name_waits_for_the_sandbox_lock(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path)
+    _create(capsys, tmp_path)
+    launched = _launches(monkeypatch)
+    monkeypatch.setenv("ACQ_SANDBOX_LOCK_TIMEOUT", "0.2")
+    with lock.sandbox_lock("msb", "box"):
+        rc, doc, _out, _err = _acq(capsys, "run", "box", "--json")
+    assert rc == 1 and doc["error"]["code"] == errors.TIMEOUT
+    assert launched == []
+
+
+def test_a_heal_ignores_config_extra_kits_added_after_create(monkeypatch, tmp_path, capsys):
+    # The create recorded the extras it applied; a configured default added
+    # later is not folded into a heal (Bash folds config extra_kits only into a
+    # fresh create). Folded in, it would be refused here as a kit to fetch.
+    _env(monkeypatch, tmp_path)
+    _create(capsys, tmp_path)
+    cfg = Path(os.environ["XDG_CONFIG_HOME"]) / "acq" / "config.yaml"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text("schema: 1\nextra_kits: openchamber\n", encoding="utf-8")
+    calls = _spy_heal(monkeypatch, [])
+    rc, doc, _out, err = _acq(capsys, "start", "box", "--json")
+    assert rc == 0, (doc, err)
+    (names, _ro, _force), = calls
+    assert "openchamber" not in names
+    _launches(monkeypatch)
+    rc, doc, _out, err = _acq(capsys, "run", "box", "--json")
+    assert rc == 0 and "not re-applied" not in err, (doc, err)
+
+
+def test_selection_for_folds_config_extras_into_a_new_sandbox_only(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path)
+    cfg = Path(os.environ["XDG_CONFIG_HOME"]) / "acq" / "config.yaml"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text("schema: 1\nextra_kits: paseo\n", encoding="utf-8")
+    monkeypatch.delenv("ACQ_EXTRA_KITS", raising=False)
+
+    def extras(sel):
+        return [k.ref for k in sel.kits if k.role == "extra"]
+
+    new = kit_msb.selection_for("shell", [], image_is_default=False)
+    assert len(extras(new)) == 1 and "paseo" in extras(new)[0]
+    assert extras(kit_msb.selection_for("shell", [], image_is_default=False, extras=[])) == []
+    # Recorded extras replace ACQ_EXTRA_KITS; with none recorded the live value still applies, as in Bash.
+    monkeypatch.setenv("ACQ_EXTRA_KITS", "/live/kit")
+    assert extras(kit_msb.selection_for("shell", [], image_is_default=False, extras=[])) == ["/live/kit"]
+    assert extras(kit_msb.selection_for("shell", [], image_is_default=False, extras=["/rec/kit"])) == ["/rec/kit"]

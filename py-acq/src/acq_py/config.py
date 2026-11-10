@@ -48,9 +48,11 @@ import stat
 import sys
 import tempfile
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
-from . import backends, userdirs
+from . import backends, lock, state, userdirs
 
 CONFIG_SCHEMA = 1
 
@@ -89,6 +91,42 @@ _READ_ONLY_ERRNOS = frozenset({errno.EACCES, errno.EROFS, errno.EPERM})
 _STALE_TEMP_SECONDS = 300
 _TEMP_INFIX = ".tmp."
 _MKSTEMP_PART = "[a-z0-9_]{8}"
+
+
+class ConfigLockTimeout(lock.LockTimeout, OSError):
+    """Another acq command held the config.yaml lock past the bounded wait.
+
+    An ``OSError`` too, so every caller that reports a failed config write
+    reports this the same way, with the message naming the lock.
+    """
+
+
+def config_lock_path() -> Path:
+    """The lock file that serializes changes to ``config.yaml``.
+
+    It lives in acq's own state tree rather than next to ``config.yaml``, whose
+    directory may be read-only or managed by a dotfiles tool.
+    """
+    return state.state_dir() / "locks" / "config.lock"
+
+
+@contextmanager
+def config_lock() -> Iterator[None]:
+    """Hold the config lock for one read-modify-write of ``config.yaml``.
+
+    ``write_field`` reads the whole file, drops a key's lines and writes the
+    file back, so two acq commands changing different keys at once (``backend
+    set`` and ``configure``, say) would otherwise lose one change. The wait is
+    the migration lock's (``$ACQ_MIGRATION_LOCK_TIMEOUT``), then
+    :class:`ConfigLockTimeout`. Not re-entrant: no function here calls another
+    one that takes it.
+    """
+    with lock.exclusive_lock(
+        config_lock_path(),
+        what="the config.yaml lock (another acq command is changing config.yaml)",
+        timeout_cls=ConfigLockTimeout,
+    ):
+        yield
 
 
 class ConfigSchemaError(Exception):
@@ -309,12 +347,18 @@ def write_field(key: str, value: str) -> Path:
     LF), and ``KEY: VALUE`` is appended. An empty ``value`` removes the key. A new
     file starts with the ``schema:`` marker. Raises ``ValueError`` for a key outside
     ``[A-Za-z0-9_]`` or a value that would break the line format, and ``OSError``
-    when the existing file cannot be read (it is never overwritten blind).
+    when the existing file cannot be read (it is never overwritten blind) or the
+    :func:`config_lock` it holds throughout cannot be taken.
     """
     if not _KEY_RE.fullmatch(key):
         raise ValueError(f"unsafe config key: {key!r}")
     if any(char in value for char in "\n\r\x00"):
         raise ValueError(f"config value for {key!r} contains a line break or NUL")
+    with config_lock():
+        return _write_field_locked(key, value)
+
+
+def _write_field_locked(key: str, value: str) -> Path:
     path = config_path()
     _ensure_config_dir(path)
     try:
@@ -340,8 +384,14 @@ def remove_if_only_marker() -> bool:
     pristine (an empty file would suppress Bash's first-run ``acq configure``
     offer). A Python-written file also carries the marker, so "empty" here means
     no other line. A symlinked config is left in place: deleting the link would
-    break the user's dotfiles setup.
+    break the user's dotfiles setup. Holds :func:`config_lock`, so a key another
+    command adds meanwhile is seen and the file kept.
     """
+    with config_lock():
+        return _remove_if_only_marker_locked()
+
+
+def _remove_if_only_marker_locked() -> bool:
     path = config_path()
     if path.is_symlink():
         return False
@@ -379,8 +429,15 @@ def migrate_config() -> str:
     until the marker is added there by hand.
 
     Raises :class:`ConfigSchemaError` for a newer marker, and
-    :class:`ConfigMigrationError` for a step that failed.
+    :class:`ConfigMigrationError` for a step that failed. Holds
+    :func:`config_lock` (inside the migration lock), so a concurrent ``backend
+    set`` cannot be overwritten by the migrated copy of the old content.
     """
+    with config_lock():
+        return _migrate_config_locked()
+
+
+def _migrate_config_locked() -> str:
     path = config_path()
     backup = path.with_name(path.name + ".bak.0")
     _remove_stale_temps(path)

@@ -75,10 +75,15 @@ class Kit:
 
 @dataclass
 class ApplyResult:
-    """Which kits applied fully, and which did not (a warning was printed for each)."""
+    """Which kits applied fully, and which did not (a warning was printed for each).
+
+    ``agent_user`` is False when the agent user could not be set up first
+    (:func:`ensure_agent_user`); the kits were still attempted, as in Bash's heal.
+    """
 
     applied: list[str] = field(default_factory=list)
     incomplete: list[str] = field(default_factory=list)
+    agent_user: bool = True
 
 
 def _warn(message: str) -> None:
@@ -125,20 +130,36 @@ def resolve(selection: kitspec.KitSelection) -> list[Kit]:
     return out
 
 
-def select(agent: str, cli_kits: list[str], *, image_is_default: bool, extras: list[str] | None = None) -> list[Kit]:
-    """Select, verify and parse a sandbox's kit set (Bash ``_build_kit_list``).
+def selection_for(agent: str, cli_kits: list[str], *, image_is_default: bool,
+                  extras: list[str] | None = None) -> kitspec.KitSelection:
+    """The kit selection for a new sandbox (``extras`` is None) or an existing one.
 
-    Config ``extra_kits`` take part. ``extras``, when recorded for the sandbox,
-    replace ``ACQ_EXTRA_KITS`` (as Bash ``acq_cli_kits_load`` does). On the
-    default image the agent's bundled kit is required, since that image has no
-    agent binary. Raises :class:`kitspec.KitSelectionError` or :class:`msb.MsbError`.
+    A new sandbox folds in config ``extra_kits`` (Bash
+    ``_acq_apply_configured_extra_kits``, which runs only on a fresh create).
+    An existing sandbox is rebuilt from what its create recorded: ``extras``
+    are the recorded extra refs, which replace ``ACQ_EXTRA_KITS`` when there
+    are any, and config ``extra_kits`` never take part, since the create
+    recorded the ones it applied. An empty record therefore adds no configured
+    default, as Bash ``acq_cli_kits_load`` leaves only the live
+    ``ACQ_EXTRA_KITS``. On the default image the agent's bundled kit is
+    required, since that image has no agent binary. Raises
+    :class:`kitspec.KitSelectionError`.
     """
     required = agent if agent in kitspec.AGENT_BUNDLE_KITS and image_is_default else None
     env = {**os.environ, "ACQ_EXTRA_KITS": " ".join(extras)} if extras else os.environ
-    selection = kitspec.select_kits(agent, cli_kits=cli_kits, env=env, configured_extras=True,
+    selection = kitspec.select_kits(agent, cli_kits=cli_kits, env=env, configured_extras=extras is None,
                                     required_agent_kit=required)
     selection.require()
-    return resolve(selection)
+    return selection
+
+
+def select(agent: str, cli_kits: list[str], *, image_is_default: bool, extras: list[str] | None = None) -> list[Kit]:
+    """Select, verify and parse a sandbox's kit set (Bash ``_build_kit_list``).
+
+    See :func:`selection_for` for how ``extras`` decides between a new and an
+    existing sandbox. Raises :class:`kitspec.KitSelectionError` or :class:`msb.MsbError`.
+    """
+    return resolve(selection_for(agent, cli_kits, image_is_default=image_is_default, extras=extras))
 
 
 # ---------------------------------------------------------------------------
@@ -674,17 +695,72 @@ def apply_single(name: str, kit: Kit, *, ro_required: bool) -> bool:
     return apply_kit(name, kit, merged, RoGate(name, ro_required), force=False)
 
 
+# The agent-user setup (Bash ``_acq_msb_ensure_agent_user``), run as guest root.
+# Idempotent and never skipped on a recorded marker: a guest could report
+# success once and so suppress the check for good. An existing ``agent`` user is
+# reused; otherwise it is created with whatever uid is free (uid 1000 may belong
+# to another user on a plain base image; the kits address the agent by name).
+# The home must exist, be owned by the agent and be writable by it, or every
+# agent-user kit command fails, so that part is fatal. The recursive chown is
+# only for a user created here. Passwordless sudo and proxy-variable
+# preservation are set only where sudo exists.
+_AGENT_USER_SCRIPT = (
+    "set -e\n"
+    "created=0\n"
+    "if id agent >/dev/null 2>&1; then :\n"
+    "elif command -v useradd >/dev/null 2>&1; then useradd -M -d /home/agent -s /bin/sh agent; created=1\n"
+    "elif command -v adduser >/dev/null 2>&1; then adduser -h /home/agent -s /bin/sh -D -H agent; created=1\n"
+    "else echo 'acq(msb): no useradd/adduser in base image; cannot create agent user' >&2; exit 1\n"
+    "fi\n"
+    "mkdir -p /home/agent\n"
+    "grp=$(id -gn agent 2>/dev/null || echo agent)\n"
+    'chown "agent:$grp" /home/agent\n'
+    'if [ "$created" = 1 ]; then chown -R "agent:$grp" /home/agent; fi\n'
+    "su agent -s /bin/sh -c 'test -w /home/agent' 2>/dev/null"
+    " || { echo 'acq(msb): /home/agent is not writable by the agent user' >&2; exit 1; }\n"
+    "if command -v sudo >/dev/null 2>&1; then\n"
+    "  mkdir -p /etc/sudoers.d\n"
+    "  printf 'agent ALL=(ALL) NOPASSWD:ALL\\n' > /etc/sudoers.d/90-acq-agent\n"
+    "  chmod 0440 /etc/sudoers.d/90-acq-agent\n"
+    "  printf 'Defaults env_keep += \"HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy\"\\n'"
+    " > /etc/sudoers.d/91-acq-proxy-env\n"
+    "  chmod 0440 /etc/sudoers.d/91-acq-proxy-env\n"
+    "fi\n"
+)
+
+
+def ensure_agent_user(name: str) -> bool:
+    """Make sure the guest has the ``agent`` user and a home it owns; True on success.
+
+    Runs before every kit-set apply (create, recreate, start, re-attach, ``kit
+    update``), as Bash runs ``_acq_msb_ensure_agent_user`` in its provision and
+    heal paths. A failure is warned about here; the caller decides whether it
+    is fatal (a new sandbox) or a warning (a heal).
+    """
+    try:
+        ok = msb.kit_exec(name, ["-u", "0"], ["sh", "-c", _AGENT_USER_SCRIPT])
+    except msb.MsbError as exc:
+        _warn(f"could not set up the agent user in sandbox '{name}': {exc.message}")
+        return False
+    if not ok:
+        _warn(f"could not establish a writable agent home in sandbox '{name}'; /home/agent must exist and be "
+              "owned by the 'agent' user (a custom image must ship that user, or useradd/adduser)")
+    return ok
+
+
 def ensure_kits_applied(name: str, kits: list[Kit], *, ro_required: bool, force: bool = False) -> ApplyResult:
     """Apply the whole kit set (``acq_backend_ensure_kits_applied``); best-effort per kit.
 
-    The merged environment is computed before the first kit runs, so a kit's
-    commands see every kit's variables whatever the order (ADR-0033), and the
-    persisted copy is rebuilt from the current kits only.
+    The agent user is set up first (:func:`ensure_agent_user`); if that fails
+    the kits are still attempted and ``agent_user`` says so. The merged
+    environment is computed before the first kit runs, so a kit's commands see
+    every kit's variables whatever the order (ADR-0033), and the persisted copy
+    is rebuilt from the current kits only.
     """
+    result = ApplyResult(agent_user=ensure_agent_user(name))
     merged = merge_env(kits)
     hc_clear(name, "kit-env")
     ro = RoGate(name, ro_required)
-    result = ApplyResult()
     for kit in kits:
         try:
             ok = apply_kit(name, kit, merged, ro, force=force)
