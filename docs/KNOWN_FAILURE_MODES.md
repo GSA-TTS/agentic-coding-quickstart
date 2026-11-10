@@ -4918,6 +4918,69 @@ ASCII secrets stored by earlier builds read back unchanged.
 
 ---
 
+## 87. Windows: Python acq and Git Bash Use Different Stores When USERPROFILE Is Changed
+
+**Symptom:** On Windows, with `HOME` unset and `USERPROFILE` pointed somewhere
+other than the account's own profile directory, a secret or record written by
+the Python acq is not found by the Bash acq under Git Bash, or the reverse.
+
+**Cause:** With `HOME` unset, the Python acq takes the home directory from
+`USERPROFILE` (`Path.home()`, in `py-acq/src/acq_py/userdirs.py`). Git Bash
+sets `HOME` itself from the account (`db_home: env windows` in Git for
+Windows' `/etc/nsswitch.conf`), which is the account's profile directory or a
+home directory set on the account, and ignores the `USERPROFILE` variable.
+Checked on Windows 11 with Git for Windows 2.56: with `USERPROFILE` set to a
+scratch directory, Python chose `<scratch>\.local\share\acq\secrets`
+while Git Bash chose `C:\Users\<user>\.local\share\acq\secrets`. With
+the account's own `USERPROFILE` both chose the same directory.
+
+**Resolution:** Set `HOME` (or the `XDG_*` variables) to the same absolute
+path for both implementations whenever `USERPROFILE` is changed, or when the
+account has a home directory other than its profile (a domain home share).
+Both honour an absolute `HOME` before anything else.
+
+---
+
+## 88. Windows: A Bash Provider-Input Lock Holds Off the Python acq for 15 Minutes
+
+**Symptom:** On Windows, a Python acq command on one sandbox (`create`, `run`,
+`rm`, `start`) waits and then fails with `timeout` although no other acq
+command is running. The remediation names a directory ending in `.lock` under
+`.../acq/provenance/provider-input/<backend>/` and says that a lock left by
+Bash acq counts as held for 15 minutes after it was taken.
+
+**Cause:** The Bash acq locks a sandbox by creating that directory and writing
+`PID IDENTITY` into its `owner` file. On POSIX the Python acq checks that the
+PID is still the same process and recovers a lock whose owner is gone
+(see [§79](#79-sandbox-lock-directory-without-an-owner-is-never-removed-automatically)).
+On Windows it cannot: Git Bash PIDs are not Windows PIDs, and `os.kill` there
+terminates a process rather than probing it. So the Python acq treats a Bash
+lock directory as held for 15 minutes after it was last modified (when its
+owner was written), then ignores it (`_BashLock._recent_on_windows` and
+`_BASH_WINDOWS_FRESH_S` in `py-acq/src/acq_py/lock.py`). A Bash command killed
+mid-create leaves the directory behind and blocks Python commands on that
+sandbox for the rest of the 15 minutes. For the same reason the Python acq
+never takes this directory on Windows, so a Bash command started while a
+Python command works on the same sandbox is not held back by it.
+
+**Resolution:**
+
+1. Make sure no acq command (Bash or Python) is running: in Git Bash, `ps`
+   lists no `acq` script; in PowerShell, `Get-Process bash, python
+   -ErrorAction SilentlyContinue` shows none started for acq.
+2. Remove the directory the message names, with its `owner` file:
+
+   ```powershell
+   Remove-Item -Recurse -LiteralPath '<the .lock directory from the message>'
+   ```
+
+3. Retry. Waiting until 15 minutes after the lock was taken also works.
+
+Do not run the Bash and the Python acq against the same sandbox at the same
+time on Windows.
+
+---
+
 ## 89. Windows: Bash `acq create` Fails Validation of a Provider Kit's Normalizer
 
 **Symptom:** Under Git Bash on Windows, a Bash `acq create` (or `acq run`)
