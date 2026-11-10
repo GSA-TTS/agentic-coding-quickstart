@@ -38,7 +38,17 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import errors, kit_fetch, kitspec, legacy_bash, lock, msb, security, state, userdirs
+from . import (
+    errors,
+    kit_fetch,
+    kitspec,
+    legacy_bash,
+    lock,
+    msb,
+    security,
+    state,
+    userdirs,
+)
 
 # Module-local seam for the host OS class (as ``msb.WINDOWS``).
 WINDOWS = os.name == "nt"
