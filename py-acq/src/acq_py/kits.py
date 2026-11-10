@@ -32,10 +32,12 @@ emits, and the extra set is reported verbatim, never inferred.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import re
+from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -622,41 +624,133 @@ def provenance_status(backend: str, sandbox: str) -> str:
     """Classify a sandbox's bundle currency: ``current``/``stale``/``unknown``.
 
     Exact-ref mismatch against the local pin; no network, no git ancestry
-    (ADR-0016). A missing/unreadable record reads ``unknown`` (fail-open: it is
-    reported and offered a refresh, never a destructive default).
+    (ADR-0016). A missing/unreadable record, or one that records only the
+    provider selection (a create whose kits did not all apply), reads
+    ``unknown`` (fail-open: it is reported and offered a refresh, never a
+    destructive default).
     """
     rec = provenance_read(backend, sandbox)
-    if rec is None:
+    if rec is None or not rec.get("applied_ref"):
         return "unknown"
     return "current" if rec.get("applied_ref") == CONTROL_PLANE_REF else "stale"
 
 
-def provenance_write(backend: str, sandbox: str) -> dict:
-    """Record a successful bundle reapply (ADR-0016: only after success).
+# ---------------------------------------------------------------------------
+# The provider selection a sandbox was created with (Bash ``provider_selection``
+# and ``provider_kits`` in its provenance record, ``acq_provider_selection_load``).
+# ---------------------------------------------------------------------------
 
-    This writes ``applied_ref``, the only currency signal ``kit check`` reads.
-    Callers write it only after every built-in kit applied in full (create, run
-    and ``kit update``), never on a partial apply (ADR-0038m §3).
+PROVIDER_KITS_ENV = "ACQ_PROVIDER_KITS"
+SELECTION_DEFAULT, SELECTION_EXPLICIT = "default", "explicit"
+
+
+class ProviderSelectionError(Exception):
+    """The provider selection recorded for a sandbox is not one acq writes."""
+
+
+def provider_selection_fields(env: Mapping[str, str] | None = None) -> dict:
+    """The selection in effect, as Bash records it: ``explicit`` when
+    ``ACQ_PROVIDER_KITS`` is set (``--no-provider-kits`` sets it empty), with
+    ``provider_kits`` only when non-empty; otherwise ``default`` (config.yaml
+    ``provider_kit`` or the shipped kit, resolved when it is used)."""
+    env = os.environ if env is None else env
+    if PROVIDER_KITS_ENV not in env:
+        return {"provider_selection": SELECTION_DEFAULT}
+    fields = {"provider_selection": SELECTION_EXPLICIT}
+    if env[PROVIDER_KITS_ENV]:
+        fields["provider_kits"] = env[PROVIDER_KITS_ENV]
+    return fields
+
+
+def provider_selection_read(backend: str, sandbox: str) -> tuple[str, str] | None:
+    """``(mode, provider_kits)`` as the sandbox's create recorded them.
+
+    ``mode`` is :data:`SELECTION_DEFAULT` or :data:`SELECTION_EXPLICIT`;
+    ``provider_kits`` is the explicit list (``""`` for none). ``None`` when
+    nothing is recorded (no record, or one written before the selection was).
+    Raises :class:`ProviderSelectionError` for a value acq never writes, as
+    Bash refuses one.
     """
-    doc = {
-        "schema": KIT_SCHEMA,
-        "backend": backend,
-        "sandbox": sandbox,
-        "applied_ref": CONTROL_PLANE_REF,
-        "recorded_at": datetime.now(UTC).isoformat(timespec="seconds"),
-    }
+    rec = provenance_read(backend, sandbox)
+    if rec is None or "provider_selection" not in rec:
+        return None
+    mode, kits_value = rec["provider_selection"], rec.get("provider_kits", "")
+    if mode in (SELECTION_DEFAULT, SELECTION_EXPLICIT) and isinstance(kits_value, str):
+        return mode, kits_value
+    raise ProviderSelectionError(f"sandbox '{sandbox}' has an unreadable recorded provider selection")
+
+
+@contextlib.contextmanager
+def provider_kits_env(value: str | None) -> Iterator[None]:
+    """Set ``ACQ_PROVIDER_KITS`` to ``value`` (``None`` unsets it) for the
+    duration, then put back what was there. Every provider-selection reader
+    (kit selection, the credential gate, secret bindings) reads that variable,
+    so this is how one invocation takes a selection, as Bash does by assigning
+    ``ACQ_PROVIDER_KITS`` in ``acq_provider_selection_load``."""
+    saved = os.environ.get(PROVIDER_KITS_ENV)
+    if value is None:
+        os.environ.pop(PROVIDER_KITS_ENV, None)
+    else:
+        os.environ[PROVIDER_KITS_ENV] = value
+    try:
+        yield
+    finally:
+        if saved is None:
+            os.environ.pop(PROVIDER_KITS_ENV, None)
+        else:
+            os.environ[PROVIDER_KITS_ENV] = saved
+
+
+@contextlib.contextmanager
+def recorded_provider_selection(backend: str, sandbox: str) -> Iterator[None]:
+    """Apply the selection ``sandbox`` was created with, for start, recreate and
+    ``kit update``, so a later invocation neither adds a provider the create
+    left out nor drops one it chose. With nothing recorded (a sandbox from
+    before the selection was recorded), the current selection stays. Raises
+    :class:`ProviderSelectionError` (before changing anything)."""
+    recorded = provider_selection_read(backend, sandbox)
+    if recorded is None:
+        yield
+        return
+    mode, kits_value = recorded
+    with provider_kits_env(None if mode == SELECTION_DEFAULT else kits_value):
+        yield
+
+
+def provenance_write(backend: str, sandbox: str, *, applied: bool = True) -> dict:
+    """Record a successful bundle reapply (ADR-0016: only after success), and
+    the provider selection in effect.
+
+    ``applied_ref`` is the only currency signal ``kit check`` reads. Callers
+    record it only after every built-in kit applied in full (create, run and
+    ``kit update``), never on a partial apply (ADR-0038m §3). A create whose
+    kits did not all apply passes ``applied=False``: the record then carries
+    only the provider selection, so later verbs still honour it.
+    """
+    doc: dict = {"schema": KIT_SCHEMA, "backend": backend, "sandbox": sandbox}
+    if applied:
+        doc["applied_ref"] = CONTROL_PLANE_REF
+    doc.update(provider_selection_fields())
+    doc["recorded_at"] = datetime.now(UTC).isoformat(timespec="seconds")
     _atomic_write(_provenance_path(backend, sandbox), doc)
     return doc
 
 
-def provenance_import(backend: str, sandbox: str, applied_ref: str, recorded_at: str | None) -> bool:
-    """Carry over the bundle ref the Bash acq recorded for a sandbox; True when written.
+def provenance_import(
+    backend: str, sandbox: str, applied_ref: str | None, recorded_at: str | None, selection: dict | None = None,
+) -> bool:
+    """Carry over what the Bash acq recorded for a sandbox; True when written.
 
     Used only by the forward migration, so ``kit check`` reports a Bash-created
-    sandbox as current or stale instead of unknown. An existing record is never
-    replaced.
+    sandbox as current or stale instead of unknown, and later verbs keep the
+    provider selection it was created with (``selection``: the
+    ``provider_selection``/``provider_kits`` fields). An existing record is
+    never replaced.
     """
-    doc = {"schema": KIT_SCHEMA, "backend": backend, "sandbox": sandbox, "applied_ref": applied_ref}
+    doc: dict = {"schema": KIT_SCHEMA, "backend": backend, "sandbox": sandbox}
+    if applied_ref:
+        doc["applied_ref"] = applied_ref
+    doc.update(selection or {})
     if recorded_at:
         doc["recorded_at"] = recorded_at
     data = json.dumps(doc, indent=2, sort_keys=False) + "\n"

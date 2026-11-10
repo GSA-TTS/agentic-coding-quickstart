@@ -219,8 +219,8 @@ def _adapter_command(spec: BackendSpec) -> list[str]:
 
     Imported lazily: the adapter modules sit above this read-side module, and
     importing them at module load would make ``backends`` depend on everything
-    they import. Raises ``FileNotFoundError`` (no such program) or
-    ``ValueError`` (an override that is not a valid command line).
+    they import. Raises ``FileNotFoundError`` when there is no such program,
+    including an override that does not parse as a command line.
     """
     if spec.name == "msb":
         from . import msb
@@ -239,22 +239,26 @@ def _is_installed(spec: BackendSpec) -> bool:
         return override is None or override == "1"
     try:
         argv = _adapter_command(spec)
-    except (OSError, ValueError):
+    except OSError:
         return False
     return os.path.isfile(argv[0]) and os.access(argv[0], os.X_OK)
 
 
 def _run_version_command(spec: BackendSpec) -> str | None:
+    # Decoded as UTF-8 with replacement, as the adapters decode backend output,
+    # so the probe never fails on the host's code page; bytes that are not
+    # UTF-8 only make the version unparseable.
     try:
         proc = subprocess.run(
             [*_adapter_command(spec), *spec.version_argv],
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
             check=False,
             stdin=subprocess.DEVNULL,
         )
-    except (OSError, ValueError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError):
         return None
     if proc.returncode != 0:
         return None

@@ -1,0 +1,31 @@
+#!/usr/bin/env bats
+#
+# 161-create-signal.bats — Ctrl-C (or SIGTERM) during `acq create`.
+#
+# The spinner composes its INT/TERM/EXIT traps over the provisioning subshell's
+# (acq.backends/progress.sh). A terminal Ctrl-C reaches acq's whole process
+# group while the backend `create` is still running, so the chained handlers must
+# reap the backend child, run the uncreated-attempt cleanup exactly once, and
+# still end with 130 (SIGINT) or 143 (SIGTERM) rather than an arbitrary status.
+#
+# create-signal.py drives the real `acq create` against the stub backends with a
+# blocking `create` and a PTY on stderr (so the spinner animates), signals once
+# the backend child is registered, and asserts status and cleanup. No polling of
+# timing-sensitive windows: every step waits on an observable marker.
+#
+# shellcheck shell=bats
+
+setup() { acq_setup_stubs; }
+teardown() { acq_teardown_stubs; }
+
+load 'helper'
+
+@test "create: Ctrl-C and SIGTERM with the spinner active clean up once and exit 130/143" {
+  run python3 "$BATS_TEST_DIRNAME/create-signal.py" "$REPO_ROOT" "$STUBDIR" "$BASH"
+  printf '%s\n' "$output"
+  assert_success
+  assert_line 'PASS sbx-sigint status 130'
+  assert_line 'PASS msb-sigint status 130'
+  assert_line --partial 'PASS sbx-sigterm status '
+  assert_line --partial 'PASS msb-sigterm status '
+}

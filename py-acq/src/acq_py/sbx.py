@@ -94,21 +94,33 @@ def _run(
     With no ``input_text`` the child's stdin is ``/dev/null``: its output is
     captured, so a prompt it printed (``Remove? (y/N)``) would be invisible
     while it waited on the user's terminal. It sees end-of-input instead.
+
+    Streams are UTF-8 whatever the host's code page, with undecodable output
+    bytes replaced, and ``input_text`` (a secret value, often) checked strictly
+    first, as in :func:`acq_py.msb._run`.
     """
+    if not hostexec.utf8_input_ok(input_text):
+        raise SbxError(
+            errors.VALIDATION_FAILED,
+            "the input for sbx cannot be encoded as UTF-8",
+            "check the value for stray bytes and retry",
+        )
     try:
         if input_text is None:
             return subprocess.run(
                 [*sbx_command(), *argv],
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
-                text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
             )
         return subprocess.run(
             [*sbx_command(), *argv],
             input=input_text,
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
         )
     except OSError as exc:
