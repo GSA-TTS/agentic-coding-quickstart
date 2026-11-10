@@ -868,13 +868,21 @@ unset _acq_impl
 # group can kill the lookup; the subshell running it then reports `Terminated`.
 # The guardian never needs to print, so its stderr goes to /dev/null and that
 # report never reaches acq's stderr.
+# acq's own shell can print the same kind of report from this EXIT trap. When a
+# group SIGTERM ends acq during a foreground command, Bash 3.2 runs the trap as
+# the shell dies, and if it has already reaped the killed child, it prints
+# `acq: line N: PID Terminated  command` on entering this function (N is the
+# line of this definition). Bash 5 prints nothing. The report is about a child
+# that died with acq, so it is noise, not an error. The function therefore runs
+# with stderr on /dev/null. Only rm's diagnostics go to the caller's stderr,
+# through fd 3, so a failed cleanup still shows.
 _acq_kit_fetch_cleanup() {
   if [ -n "${_ACQ_KIT_FETCH_GUARDIAN:-}" ]; then
-    kill -USR1 "$_ACQ_KIT_FETCH_GUARDIAN" 2>/dev/null || true
-    wait "$_ACQ_KIT_FETCH_GUARDIAN" 2>/dev/null || true
+    kill -USR1 "$_ACQ_KIT_FETCH_GUARDIAN" || true
+    wait "$_ACQ_KIT_FETCH_GUARDIAN" || true
   fi
-  rm -rf -- "$_ACQ_KIT_FETCH_ROOT"
-}
+  rm -rf -- "$_ACQ_KIT_FETCH_ROOT" 2>&3
+} 3>&2 2>/dev/null
 
 _acq_kit_fetch_start() {
   _ACQ_KIT_FETCH_ROOT=$(mktemp -d "$(acq_tmp_dir)/acq-kit-fetch.XXXXXX") || exit 1
