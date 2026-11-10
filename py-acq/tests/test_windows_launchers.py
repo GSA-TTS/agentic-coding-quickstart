@@ -175,9 +175,12 @@ def test_bash_branch_forwards_plain_arguments(launcher_tree: Path, tmp_path: Pat
 SESSION_VARS = ("NoDefaultCurrentDirectoryInExePath", "PYTHONPATH", "ACQ_PROVIDER_INPUT_DATA_DIR")
 
 
-def _in_session(tree: Path, args: list[str], before: dict[str, str | None]) -> list[str]:
+def _in_session(tree: Path, args: list[str], before: dict[str, str | None], catch: bool = False) -> list[str]:
     """powershell.exe -Command that sets ``before``, runs acq.ps1 in-process, and
-    prints ``AFTER <json>`` with the exit status and the variables afterwards."""
+    prints ``AFTER <json>`` with the exit status and the variables afterwards.
+
+    With ``catch``, the call runs inside try/catch, as a prompt carries on after
+    an error, and a thrown error is printed as ``CAUGHT <message>``."""
 
     def quote(value: str) -> str:
         return "'" + value.replace("'", "''") + "'"
@@ -188,7 +191,10 @@ def _in_session(tree: Path, args: list[str], before: dict[str, str | None]) -> l
             lines.append(f"Remove-Item Env:{name} -ErrorAction SilentlyContinue")
         else:
             lines.append(f"$env:{name} = {quote(value)}")
-    lines.append("& " + " ".join(quote(a) for a in [str(tree / "acq.ps1"), *args]))
+    call = "& " + " ".join(quote(a) for a in [str(tree / "acq.ps1"), *args])
+    if catch:
+        call = "try { " + call + " } catch { Write-Output ('CAUGHT ' + $_.Exception.Message) }"
+    lines.append(call)
     lines.append("$after = @{ code = $LASTEXITCODE }")
     for name in SESSION_VARS:
         lines.append(f"$after['{name}'] = $env:{name}")
@@ -224,6 +230,31 @@ def test_acq_ps1_in_session_restores_the_variables_when_it_refuses(launcher_tree
     assert after["code"] == 2, result.stderr
     assert after["NoDefaultCurrentDirectoryInExePath"] == "0"
     assert after["PYTHONPATH"] == "C:\\user\\keep"
+
+
+# acq.ps1 throws (rather than exits) when it cannot go on, for example when the
+# Bash entry point beside it is missing. Started with -File that is exit 1 with
+# the message on stderr; run in a session, the error reaches the caller and the
+# variables acq.ps1 set before it threw are still put back.
+def test_acq_ps1_thrown_error_exits_1_with_its_message(launcher_tree: Path, tmp_path: Path) -> None:
+    (launcher_tree / "acq").unlink()
+    result = _run(_via_ps1(launcher_tree, ["version"]), _env(None), tmp_path)
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    assert "Expected acq Bash entry point at" in result.stderr
+    assert "[version]" not in result.stdout
+
+
+def test_acq_ps1_in_session_restores_the_variables_when_it_throws(launcher_tree: Path, tmp_path: Path) -> None:
+    (launcher_tree / "acq").unlink()
+    before = {**BEFORE, "NoDefaultCurrentDirectoryInExePath": "0"}
+    result = _run(_in_session(launcher_tree, ["version"], before, catch=True), _env(None), tmp_path)
+    caught = [x for x in result.stdout.splitlines() if x.startswith("CAUGHT ")]
+    assert caught and "Expected acq Bash entry point at" in caught[0], (result.stdout, result.stderr)
+    after = _after(result.stdout)
+    # acq.ps1 set it to "1" before throwing; the session gets its "0" back.
+    assert after["NoDefaultCurrentDirectoryInExePath"] == "0"
+    assert after["PYTHONPATH"] == "C:\\user\\keep"
+    assert after["ACQ_PROVIDER_INPUT_DATA_DIR"] is None
 
 
 def test_acq_ps1_in_session_restores_the_variables_it_set_for_bash(launcher_tree: Path, tmp_path: Path) -> None:

@@ -58,6 +58,27 @@ _self_dir() {
 
 SELF_DIR=$(_self_dir "$0") || { echo "acq-python: could not resolve script directory" >&2; exit 1; }
 
+# An ACQ_RUNTIME override must be absolute, as acq.ps1 requires on Windows: a
+# relative value would be resolved against the current directory, normally the
+# workspace, so a planted interpreter there would run on the host. Under Git Bash
+# or Cygwin a drive-rooted C:/... or C:\... value is absolute too.
+_bad_runtime=""
+if [ -n "${ACQ_RUNTIME:-}" ]; then
+  case "$ACQ_RUNTIME" in
+    /*) ;;
+    [A-Za-z]:/*|[A-Za-z]:\\*)
+      case "$(uname -s 2>/dev/null)" in
+        MINGW*|MSYS*|CYGWIN*) ;;
+        *) _bad_runtime=1 ;;
+      esac ;;
+    *) _bad_runtime=1 ;;
+  esac
+  if [ -n "$_bad_runtime" ]; then
+    echo "acq-python: ACQ_RUNTIME must be an absolute path to a Python interpreter, got '$(printf '%s' "$ACQ_RUNTIME" | LC_ALL=C tr -c '[:print:]' '?')'" >&2
+    exit 1
+  fi
+fi
+
 py=""
 if [ -n "${ACQ_RUNTIME:-}" ] && [ -x "${ACQ_RUNTIME}" ]; then
   py="$ACQ_RUNTIME"

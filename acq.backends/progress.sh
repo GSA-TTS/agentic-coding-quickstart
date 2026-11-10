@@ -224,7 +224,7 @@ _acq_spin_is_owner() {
 # create. A lone `kill <acq pid>` therefore lets the provisioning step finish,
 # holding the lock and its backend child to the end, and acq then stops there
 # with 128 + N instead of going on (run would otherwise attach). See
-# docs/KNOWN_FAILURE_MODES.md section 62.
+# docs/KNOWN_FAILURE_MODES.md section 83.
 #
 # COMMAND runs as a plain foreground command, never in an `if` or `||` context,
 # so `set -e` keeps its meaning inside it; under `set -e` a failing COMMAND ends
