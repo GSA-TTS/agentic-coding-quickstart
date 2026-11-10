@@ -5,8 +5,8 @@ It implements every subcommand the Bash `acq help` lists, on both backends (msb
 and sbx). It is **not yet at parity** with Bash, and it is **not currently
 Tier-3-qualified**. A few documented flags are still missing: `--clone` and
 `--publish` on `run`/`create`, `--no-update-check` on `run`, and
-`ports --publish`. `ACQ_CLONE` is **silently ignored**, so setting it mounts the
-real workspace, not a disposable clone. Some behaviour also differs; for example,
+`ports --publish`. `ACQ_CLONE=1` is refused with a usage error rather than
+mounting the real workspace. Some behaviour also differs; for example,
 only kits from the pinned built-in bundle are applied. The dated correction in
 ADR-0047m lists the gaps and the qualification state. The Bash `acq` stays the default implementation
 (`ACQ_IMPL` unset); `ACQ_IMPL=python` selects this one.
