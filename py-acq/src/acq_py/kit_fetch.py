@@ -121,30 +121,8 @@ class RemoteRef:
     directory: str  # normalized: no "." or empty segments; "" for the repository root
 
 
-def ref_display(ref: str) -> str:
-    """``kit_ref_display``: a kit ref safe for a terminal or a log.
-
-    Before the ``#`` fragment, a query string becomes ``?***``, URL userinfo
-    becomes ``***@``, and without a scheme a first path segment with ``@``
-    becomes ``***@HOST``. The fragment's ``ref=`` and ``dir=`` are kept so the
-    message still names the kit; any other fragment parameter becomes ``***``.
-    Every message that names a ref goes through this.
-    """
-    base, sep, frag = ref.partition("#")
-    if sep:
-        frag = "&".join(p if p.startswith(("ref=", "dir=")) else "***" for p in frag.split("&"))
-    query = ""
-    if "?" in base:
-        base, query = base.split("?", 1)[0], "?***"
-    if "://" in base:
-        scheme, rest = base.split("://", 1)
-        if "@" in rest:
-            base = f"{scheme}://***@{rest.rsplit('@', 1)[1]}"
-    else:
-        first = base.split("/", 1)[0]
-        if "@" in first:
-            base = "***@" + first.rsplit("@", 1)[1] + base[len(first):]
-    return f"{base}{query}{sep}{frag}"
+# ``kit_ref_display``, kept here for the callers that already import it.
+ref_display = kits.ref_display
 
 
 def _shown(ref: str) -> str:

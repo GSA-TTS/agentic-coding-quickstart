@@ -1464,10 +1464,11 @@ def select_kits(
     caller must call :meth:`KitSelection.require` before building a sandbox.
     """
     env = os.environ if env is None else env
-    # Refuse a --kit or ACQ_EXTRA_KITS ref where it enters, before anything is
+    # Refuse a --kit, ACQ_EXTRA_KITS or ACQ_PROVIDER_KITS ref where it enters, before anything is
     # fetched, recorded or printed (Bash _acq_kit_refs_check); the reason never
     # repeats the ref.
-    for where, refs in (("--kit", cli_kits), ("ACQ_EXTRA_KITS", _ifs_split(env.get("ACQ_EXTRA_KITS", "")))):
+    for where, refs in (("--kit", cli_kits), ("ACQ_EXTRA_KITS", _ifs_split(env.get("ACQ_EXTRA_KITS", ""))),
+                        ("ACQ_PROVIDER_KITS", _ifs_split(env.get("ACQ_PROVIDER_KITS", "")))):
         for ref in refs:
             problem = kits.remote_ref_problem(ref)
             if problem is not None:

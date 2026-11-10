@@ -1,0 +1,30 @@
+# Shared kit-ref shape probes: VERDICT<TAB>DISPLAY<TAB>REF, one per line.
+# Read by test/bats/170-kit-ref-shape.bats (kit_ref_shape_check, kit_ref_display)
+# and py-acq/tests/test_kit_fetch.py (kits.remote_ref_problem, kits.ref_display):
+# both implementations must agree on every line. SEKRIT marks a value that must
+# never be displayed; the one exception is the %3F line, where %3F is part of the
+# URL path (git sends it as such), not a query string.
+pass	git+https://github.com/o/r.git#ref=0123456789abcdef0123456789abcdef01234567&dir=kits/a	git+https://github.com/o/r.git#ref=0123456789abcdef0123456789abcdef01234567&dir=kits/a
+refuse	git+https://github.com/o/r.git?***#ref=abc&dir=d	git+https://github.com/o/r.git?private_token=SEKRIT#ref=abc&dir=d
+pass	git+https://github.com/o/r.git%3Fprivate_token=SEKRIT#ref=abc&dir=d	git+https://github.com/o/r.git%3Fprivate_token=SEKRIT#ref=abc&dir=d
+refuse	git+https://github.com/o/r.git#ref=***&dir=d	git+https://github.com/o/r.git#ref=abc?token=SEKRIT&dir=d
+refuse	git+https://github.com/o/r.git#***&dir=d	git+https://github.com/o/r.git#REF=abc&dir=d
+refuse	git+https://github.com/o/r.git#ref=abc&***&dir=d	git+https://github.com/o/r.git#ref=abc&ref=SEKRIT&dir=d
+refuse	git+https://github.com/o/r.git#ref=***&dir=d	git+https://github.com/o/r.git#ref=abc;token=SEKRIT&dir=d
+refuse	git+https://github.com/o/r.git#ref=abc&dir=d&***	git+https://github.com/o/r.git#ref=abc&dir=d&token=SEKRIT
+refuse	git+https://github.com/o/r.git#ref=***&dir=***	git+https://github.com/o/r.git#ref=&dir=
+refuse	git+https://github.com/o/r.git#ref=abc&***&dir=d	git+https://github.com/o/r.git#ref=abc&&dir=d
+refuse	git+https://github.com/o/r.git#***	git+https://github.com/o/r.git#
+pass	git+https://github.com/o/r.git	git+https://github.com/o/r.git
+refuse	git+https://github.com/o/r.git#ref=***&dir=d	git+https://github.com/o/r.git#ref=abc#token=SEKRIT&dir=d
+refuse	git+https://github.com/o/r.git#ref=abc&dir=***	git+https://github.com/o/r.git#ref=abc&dir=d?x=SEKRIT
+refuse	git+https://github.com/o/r.git#ref=abc&***&dir=d	git+https://github.com/o/r.git#ref=abc& token=SEKRIT&dir=d
+pass	GIT+https://github.com/o/r.git?***#ref=abc&dir=d	GIT+https://github.com/o/r.git?t=SEKRIT#ref=abc&dir=d
+refuse	git+ssh://***@github.com/o/r.git?***#ref=abc&dir=d	git+ssh://git@github.com/o/r.git?t=SEKRIT#ref=abc&dir=d
+pass	git+https://github.com/o/r.git#dir=kits/a&ref=main	git+https://github.com/o/r.git#dir=kits/a&ref=main
+pass	git+https://***@github.com/o/r.git#ref=abc&dir=d	git+https://u:tok@github.com/o/r.git#ref=abc&dir=d
+refuse	git+https://github.com/o/r.git#ref=abc&dir=d&***	git+https://github.com/o/r.git#ref=abc&dir=d&dir=SEKRIT
+refuse	git+https://github.com/o/r.git#ref=***	git+https://github.com/o/r.git#ref=abc#dir=d
+refuse	git+https://github.com/o/r.git#dir=***&ref=abc	git+https://github.com/o/r.git#dir=a@SEKRIT&ref=abc
+pass	/kits/odd?***#ref=x&***	/kits/odd?name#ref=x&token=y
+pass	./kits/a#***	./kits/a#b

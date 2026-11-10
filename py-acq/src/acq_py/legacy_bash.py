@@ -222,7 +222,8 @@ def read_cli_kits(
             # A ref acq now refuses at input is skipped without being named.
             if warn is not None:
                 warn(f"ignoring a recorded remote kit ref for {name} that acq now refuses (a query string, "
-                     "or a '#' parameter other than ref= and dir=); it is no longer applied")
+                     "or a '#' part other than one plain ref= and dir=); it is no longer applied; recreate the "
+                     "sandbox to clear it from the sandbox's kit record")
             continue
         (cli if key == "kit" else extras).append(value)
     return cli, extras

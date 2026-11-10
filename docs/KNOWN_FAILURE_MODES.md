@@ -4960,36 +4960,54 @@ fetched:
 acq: --kit: remote kit ref refused: its URL has a query string ('?' before the '#').
 ```
 
-or `... its '#' fragment has a parameter other than ref= and dir=.` (with
-`ACQ_EXTRA_KITS:` in place of `--kit` for an entry of that variable). The
-message does not repeat the ref. A sandbox whose kit record holds such a ref
+or `... its '#' fragment has a parameter other than ref= and dir=.`,
+`... repeats ref= or dir=.` or `... has a ref= or dir= value that is empty or
+holds a character outside [A-Za-z0-9._/-].` (with `ACQ_EXTRA_KITS:` or
+`ACQ_PROVIDER_KITS:` in place of `--kit` for an entry of that variable). The
+message does not repeat the ref. A refused `--kit` ref stops `run` or `create`
+at once. A refused `ACQ_EXTRA_KITS` or `ACQ_PROVIDER_KITS` ref is enforced only
+where kits are selected or applied (`run`/`create` of a new sandbox,
+`kit list`, and the heal on `start`, `restart` or a re-attach, which skips the
+kits with a warning and attaches anyway), so other commands such as `acq ls`
+or `acq secret rm` keep working. A sandbox whose kit record holds such a ref
 from an older `acq` prints `ignoring a recorded remote kit ref ... that acq now
-refuses` on start, and that kit is no longer applied.
+refuses` on start; that kit is no longer applied, and recreating the sandbox
+clears it from the record.
 
 ### Root Cause
 
 A remote kit ref is `git+https://HOST/REPO.git#ref=<sha>&dir=<path>`, and acq
-uses no other part. A query string (`?private_token=…`) or an extra fragment
-parameter (`&token=…`) is where a credential would ride, and acq used to carry
-the ref verbatim into its debug output, its `.kits` and sbx `extra-kits`
-records and, after a fetch, its messages. acq now refuses such a ref where it
-enters (`--kit`, `ACQ_EXTRA_KITS`), again before any fetch
+uses no other part. A query string (`?private_token=…`), an extra fragment
+parameter (`&token=…`), a second `ref=`/`dir=`, or a value carrying `?`, `;`,
+`#` or a space is where a credential would ride, and acq used to carry the ref
+verbatim into its debug output, its `.kits` and sbx `extra-kits` records and,
+after a fetch, its messages. acq now refuses such a ref where it enters
+(`--kit`, `ACQ_EXTRA_KITS`, `ACQ_PROVIDER_KITS`), again before any fetch
 (`kit_ref_shape_check` in `acq.backends/kit-translate.sh`,
 `kits.remote_ref_problem` in `py-acq/src/acq_py/kits.py`), and skips it when a
-record is reloaded. Message helpers also hide any fragment parameter other than
-`ref=` and `dir=` (`kit_ref_display`, `kit_fetch.ref_display`).
+record is reloaded. Message helpers show only the first plain `ref=` and
+`dir=` and hide the rest (`kit_ref_display`, `kits.ref_display`).
+`test/fixtures/kit-ref-probes.tsv` lists probe refs both implementations must
+judge and display alike.
+
+`%3F` in the URL path is not a query string: git sends it as part of the path,
+so acq does not refuse it at input (the Python acq refuses any percent escape
+when it fetches).
 
 ### Fix
 
-Remove the query string or the extra parameter. For a kit source that needs
-authentication, configure a git credential helper that does not prompt (for
-GitHub, `gh auth setup-git`); never put a token in the ref. A local kit path is
-not affected: `?` and `#` are ordinary characters in a directory name.
+Remove the query string, the extra parameter or the repeat, and keep `ref=`
+and `dir=` values to letters, digits, `.`, `_`, `/` and `-`. For a kit source
+that needs authentication, configure a git credential helper that does not
+prompt (for GitHub, `gh auth setup-git`); never put a token in the ref. A local
+kit path is not affected: `?` and `#` are ordinary characters in a directory
+name.
 
 ### Prevention / Status
 
 Covered by `test/bats/170-kit-ref-shape.bats`, `py-acq/tests/test_kit_fetch.py`,
-`py-acq/tests/test_kits.py` and `py-acq/tests/test_legacy_bash.py`.
+`py-acq/tests/test_kits.py`, `py-acq/tests/test_configure.py` and
+`py-acq/tests/test_legacy_bash.py`.
 
 ---
 

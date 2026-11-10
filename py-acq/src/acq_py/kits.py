@@ -311,17 +311,22 @@ REMOTE_REF_REMEDIATION = (
 )
 
 
+_REF_VALUE_RE = re.compile(r"[A-Za-z0-9._/-]+")
+_REF_KEYS = ("ref", "dir")
+
+
 def remote_ref_problem(ref: str) -> str | None:
     """Why a remote kit ref is refused at input, or None (Bash ``kit_ref_shape_check``).
 
     A ref starting ``git+`` is refused when its transport URL (the part before
-    the first ``#``) has a query string, or when its fragment has any
-    parameter other than ``ref=`` and ``dir=``: that is where a token would
-    ride, and acq would otherwise carry it into records, cache paths and
-    messages. The reason names the problem only, never the URL, a parameter
-    name or a value. A local path is never refused here, since ``?`` and ``#``
-    are ordinary characters in a directory name; a ref with no fragment is left
-    to the parser, which reports it as malformed.
+    the first ``#``) has a query string, or when its fragment has a parameter
+    other than ``ref=`` and ``dir=``, names one of them twice, or gives one a
+    value that is empty or holds a character outside ``[A-Za-z0-9._/-]``: that
+    is where a token would ride, and acq would otherwise carry it into records,
+    cache paths and messages. The reason names the problem only, never the URL,
+    a parameter name or a value. A local path is never refused here, since
+    ``?`` and ``#`` are ordinary characters in a directory name; a ref with no
+    fragment is left to the parser, which reports it as malformed.
     """
     if not ref.startswith("git+"):
         return None
@@ -329,8 +334,81 @@ def remote_ref_problem(ref: str) -> str | None:
     transport, sep, fragment = body.partition("#")
     if "?" in transport:
         return "remote kit ref refused: its URL has a query string ('?' before the '#')"
-    if sep and any(not p.startswith(("ref=", "dir=")) for p in fragment.split("&")):
-        return "remote kit ref refused: its '#' fragment has a parameter other than ref= and dir="
+    if not sep:
+        return None
+    seen: set[str] = set()
+    for param in fragment.split("&"):
+        key, eq, value = param.partition("=")
+        if not eq or key not in _REF_KEYS:
+            return "remote kit ref refused: its '#' fragment has a parameter other than ref= and dir="
+        if key in seen:
+            return "remote kit ref refused: its '#' fragment repeats ref= or dir="
+        seen.add(key)
+        if not _REF_VALUE_RE.fullmatch(value):
+            return ("remote kit ref refused: its '#' fragment has a ref= or dir= value that is empty or holds a "
+                    "character outside [A-Za-z0-9._/-]")
+    return None
+
+
+def ref_display(ref: str) -> str:
+    """Bash ``kit_ref_display``: a kit ref safe for a terminal or a log.
+
+    Before the ``#`` fragment, a query string becomes ``?***``, URL userinfo
+    becomes ``***@``, and without a scheme a first path segment with ``@``
+    becomes ``***@HOST``. In the fragment the first ``ref=`` and ``dir=`` are
+    kept when their value is plain (``[A-Za-z0-9._/-]``), so the message still
+    names the kit; an odd value becomes ``ref=***``/``dir=***``, and a repeat
+    or any other parameter ``***``. Every message that names a ref goes
+    through this.
+    """
+    base, sep, frag = ref.partition("#")
+    if sep:
+        shown: list[str] = []
+        seen: set[str] = set()
+        for param in frag.split("&"):
+            key, eq, value = param.partition("=")
+            if not eq or key not in _REF_KEYS or key in seen:
+                shown.append("***")
+            else:
+                shown.append(param if _REF_VALUE_RE.fullmatch(value) else f"{key}=***")
+            if eq and key in _REF_KEYS:
+                seen.add(key)
+        frag = "&".join(shown)
+    query = ""
+    if "?" in base:
+        base, query = base.split("?", 1)[0], "?***"
+    if "://" in base:
+        scheme, rest = base.split("://", 1)
+        if "@" in rest:
+            base = f"{scheme}://***@{rest.rsplit('@', 1)[1]}"
+    else:
+        first = base.split("/", 1)[0]
+        if "@" in first:
+            base = "***@" + first.rsplit("@", 1)[1] + base[len(first):]
+    return f"{base}{query}{sep}{frag}"
+
+
+def refs_display(text: str) -> str:
+    """``text`` with each whitespace-separated word that is a URL or a remote kit
+    ref (``git+…``, ``…://…``) shown through :func:`ref_display`, and URL
+    userinfo hidden in the rest (:func:`redact_userinfo`); whitespace is kept.
+    For a setting that may hold kit refs, such as ``ACQ_EXTRA_KITS``."""
+    def one(part: str) -> str:
+        if not part or part.isspace():
+            return part
+        return ref_display(part) if part.startswith("git+") or "://" in part else redact_userinfo(part)
+
+    return "".join(one(part) for part in re.split(r"(\s+)", text))
+
+
+def input_ref_problem() -> str | None:
+    """The first ``ACQ_EXTRA_KITS`` or ``ACQ_PROVIDER_KITS`` ref refused at input,
+    as ``"VAR: reason"`` (Bash ``_acq_kit_refs_check``), or None."""
+    for var in ("ACQ_EXTRA_KITS", "ACQ_PROVIDER_KITS"):
+        for ref in os.environ.get(var, "").split():
+            problem = remote_ref_problem(ref)
+            if problem is not None:
+                return f"{var}: {problem}"
     return None
 
 
@@ -344,8 +422,8 @@ def kit_list_data() -> dict:
     return {
         "control_plane_ref": control_plane_ref(),
         "built_in": list(BUILTIN_NEUTRAL_NAMES),
-        "provider": [redact_userinfo(k) for k in provider_kits()],
-        "extra": [redact_userinfo(k) for k in extra_kits()],
+        "provider": [ref_display(k) for k in provider_kits()],
+        "extra": [ref_display(k) for k in extra_kits()],
     }
 
 

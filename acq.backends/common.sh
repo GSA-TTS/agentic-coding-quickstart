@@ -241,6 +241,11 @@ KIT_SOURCE_PREFIXES=()
 # _acq_require_provider_selection, which only create/run call.
 # shellcheck disable=SC2034  # read by _acq_require_provider_selection
 ACQ_PROVIDER_SELECTION_ERROR=""
+# The same latch for a kit ref acq refuses at input (kit_ref_shape_check) in
+# ACQ_EXTRA_KITS or ACQ_PROVIDER_KITS: recorded by _build_kit_list, enforced only
+# where kits are selected or applied (run/create, kit list, the heal), so an
+# unrelated verb such as `acq ls` or `acq secret rm` still works.
+ACQ_KIT_REFS_ERROR=""
 
 # Transitional fallback defaults for the pinned usai-provider kit. ADR-0030's
 # target state is for the kit to export these provider facts as static metadata
@@ -1029,6 +1034,14 @@ _acq_require_provider_selection() {
   return 1
 }
 
+# _acq_require_kit_refs — the gate for the latched ACQ_KIT_REFS_ERROR: print it
+# and fail. Called by run/create, kit list and the backends' heal.
+_acq_require_kit_refs() {
+  [ -n "${ACQ_KIT_REFS_ERROR:-}" ] || return 0
+  printf '%s\n' "$ACQ_KIT_REFS_ERROR" >&2
+  return 1
+}
+
 # Assemble the full kit list: selected built-ins, then extras.
 # Zscaler CA trust FIRST (see ACQ_KIT_NAMES) so later network-fetching kits
 # succeed behind a TLS-intercepting proxy.
@@ -1036,7 +1049,10 @@ _acq_require_provider_selection() {
 _build_kit_list() {
   local agent="${1:-}" kit support_refs
   KITS=()
-  _acq_kit_refs_make_absolute || return 1
+  # Latch (do not fail on) a refused ACQ_EXTRA_KITS/ACQ_PROVIDER_KITS ref: this
+  # runs for every verb. The message never names the ref.
+  ACQ_KIT_REFS_ERROR=$(_acq_kit_refs_check 2>&1 >/dev/null) && ACQ_KIT_REFS_ERROR=""
+  _acq_kit_refs_make_absolute
   # This runs for EVERY verb (acq_resolve_backend), so a provider-selection
   # failure is LATCHED here and only enforced by create/run through
   # _acq_require_provider_selection. The kit list still builds (without the
@@ -1914,7 +1930,9 @@ extract_kit_flags() {
   if [ "$expect_kit" -eq 1 ]; then
     echo "acq: --kit given with no value; ignoring" >&2
   fi
-  _acq_kit_refs_make_absolute || return 1
+  # A --kit ref is typed for this run/create, so a refused one stops it now.
+  _acq_kit_refs_check cli || return 1
+  _acq_kit_refs_make_absolute
 }
 
 # Extract the explicit empty provider selection without relying on shell export
@@ -2944,7 +2962,6 @@ acq_cli_kits_write() {
 _acq_kit_refs_make_absolute() {
   local i ref out=""
   local _x=()
-  _acq_kit_refs_check || return 1
   for i in ${ACQ_CLI_KITS[@]+"${!ACQ_CLI_KITS[@]}"}; do
     ACQ_CLI_KITS[i]=$(_acq_kit_ref_absolute "${ACQ_CLI_KITS[i]}")
   done
@@ -2957,22 +2974,30 @@ _acq_kit_refs_make_absolute() {
   fi
 }
 
-# _acq_kit_refs_check: refuse the --kit and ACQ_EXTRA_KITS refs where they
-# enter, before any of them is fetched, recorded (the .kits record, the sbx
-# extra-kits record) or printed: a remote ref with a query string, or with a
-# fragment parameter other than ref= and dir=, is refused by
-# kit_ref_shape_check, whose message never repeats the ref.
+# _acq_kit_refs_check [cli]: refuse the --kit, ACQ_EXTRA_KITS and
+# ACQ_PROVIDER_KITS refs where they enter, before any of them is fetched,
+# recorded (the .kits record, the sbx extra-kits record) or printed. A remote
+# ref kit_ref_shape_check refuses (a query string, or a '#' fragment other than
+# one plain ref= and one plain dir=) fails it, with a message that never
+# repeats the ref. With "cli", only the --kit refs are checked.
 _acq_kit_refs_check() {
-  local ref _x=()
+  local only="${1:-}" ref var _x=()
   for ref in ${ACQ_CLI_KITS[@]+"${ACQ_CLI_KITS[@]}"}; do
     kit_ref_shape_check "$ref" "--kit" || return 1
   done
-  if [ -n "${ACQ_EXTRA_KITS:-}" ]; then
-    split_noglob _x "$ACQ_EXTRA_KITS"
+  [ "$only" != cli ] || return 0
+  for var in ACQ_EXTRA_KITS ACQ_PROVIDER_KITS; do
+    case "$var" in
+      ACQ_EXTRA_KITS) ref="${ACQ_EXTRA_KITS:-}" ;;
+      *) ref="${ACQ_PROVIDER_KITS:-}" ;;
+    esac
+    [ -n "$ref" ] || continue
+    _x=()
+    split_noglob _x "$ref"
     for ref in ${_x[@]+"${_x[@]}"}; do
-      kit_ref_shape_check "$ref" "ACQ_EXTRA_KITS" || return 1
+      kit_ref_shape_check "$ref" "$var" || return 1
     done
-  fi
+  done
   return 0
 }
 
@@ -3029,7 +3054,8 @@ acq_cli_kits_load() {
         # being named, as a ref typed today would be refused.
         if ! kit_ref_shape_check "$val" "recorded kit for $name" 2>/dev/null; then
           echo "acq: warning: ignoring a recorded remote kit ref for $name that acq now refuses" >&2
-          echo "acq:   (a query string, or a '#' parameter other than ref= and dir=); it is no longer applied." >&2
+          echo "acq:   (a query string, or a '#' part other than one plain ref= and dir=); it is no longer applied." >&2
+          echo "acq:   Recreate the sandbox to clear it from the sandbox's kit record." >&2
           continue
         fi
         ;;

@@ -46,6 +46,64 @@ _seed_usai() {
   done
 }
 
+@test "kit_ref_shape_check and kit_ref_display agree with the shared probes" {
+  # test/fixtures/kit-ref-probes.tsv is also read by py-acq/tests/test_kit_fetch.py.
+  load_acq
+  local verdict shown ref got n=0
+  while IFS="$(printf '\t')" read -r verdict shown ref; do
+    case "$verdict" in '#'* | '') continue ;; esac
+    n=$((n + 1))
+    if kit_ref_shape_check "$ref" 2>"$STUBDIR/probe.err"; then got=pass; else got=refuse; fi
+    assert_equal "$got $ref" "$verdict $ref"
+    assert_equal "$(kit_ref_display "$ref")" "$shown"
+    run cat "$STUBDIR/probe.err"
+    refute_output --partial 'SEKRIT'
+  done < "$REPO_ROOT/test/fixtures/kit-ref-probes.tsv"
+  [ "$n" -ge 20 ]
+}
+
+@test "kit_ref_shape_check: a ref= or dir= value with an odd character, or a repeat, is refused" {
+  load_acq
+  local ref
+  for ref in "git+https://example.test/kits.git#ref=${_PIN}?token=s3cr3t-tok&dir=k" \
+      "git+https://example.test/kits.git#ref=${_PIN};token=s3cr3t-tok&dir=k" \
+      "git+https://example.test/kits.git#ref=${_PIN}#token=s3cr3t-tok&dir=k" \
+      "git+https://example.test/kits.git#ref=${_PIN}&ref=s3cr3t-tok&dir=k" \
+      "git+https://example.test/kits.git#ref=${_PIN}&dir=k?x=s3cr3t-tok"; do
+    run kit_ref_shape_check "$ref" "--kit"
+    assert_failure
+    assert_output --partial 'acq: --kit: remote kit ref refused'
+    refute_output --partial 's3cr3t-tok'
+  done
+}
+
+@test "kit_translate_fetch: an unsafe dir= is refused without repeating it" {
+  load_acq
+  run kit_translate_fetch "git+https://example.test/kits.git#ref=${_PIN}&dir=../s3cr3t-tok" "$STUBDIR/u"
+  assert_failure
+  assert_output --partial 'unsafe kit dir'
+  refute_output --partial 's3cr3t-tok'
+}
+
+@test "ls: a refused ACQ_EXTRA_KITS or ACQ_PROVIDER_KITS ref does not block an unrelated verb" {
+  local var
+  for var in ACQ_EXTRA_KITS ACQ_PROVIDER_KITS; do
+    : > "$CALLS"
+    run env ACQ_BACKEND=sbx "$var=$_QUERY_REF" "$ACQ" ls
+    assert_success
+    refute_output --partial 's3cr3t-tok'
+    refute_output --partial 'remote kit ref refused'
+    assert_regex "$(cat "$CALLS")" 'sbx ls'
+  done
+}
+
+@test "kit list: a refused ACQ_PROVIDER_KITS ref is refused, not listed" {
+  run env ACQ_BACKEND=sbx ACQ_PROVIDER_KITS="$_FRAG_REF" "$ACQ" kit list
+  assert_failure
+  assert_output --partial 'acq: ACQ_PROVIDER_KITS: remote kit ref refused'
+  refute_output --partial 's3cr3t-tok'
+}
+
 @test "kit_ref_shape_check: canonical refs, built-in refs and local paths pass" {
   load_acq
   run kit_ref_shape_check "git+https://github.com/acme/kits.git#ref=${_PIN}&dir=kits/one"
@@ -152,5 +210,19 @@ _seed_usai() {
   assert_equal "$ACQ_EXTRA_KITS" ""
   run cat "$STUBDIR/load.err"
   assert_output --partial 'ignoring a recorded remote kit ref for oldbox'
+  assert_output --partial 'Recreate the sandbox to clear it'
   refute_output --partial 's3cr3t-tok'
+}
+
+@test "heal: a refused extra ref latched by the kit list stops the heal" {
+  load_acq
+  ACQ_EXTRA_KITS="$_QUERY_REF"
+  _build_kit_list
+  : > "$CALLS"
+  run acq_backend_ensure_kits_applied healbox
+  assert_failure
+  assert_output --partial 'acq: ACQ_EXTRA_KITS: remote kit ref refused'
+  assert_output --partial "the kits of sandbox 'healbox' were not re-applied"
+  refute_output --partial 's3cr3t-tok'
+  refute_regex "$(cat "$CALLS")" 'sbx kit add'
 }

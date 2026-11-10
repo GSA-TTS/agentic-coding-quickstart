@@ -372,7 +372,8 @@ def test_cli_kits_refs_refused_at_input_are_skipped_without_naming_them(tree):
     warnings: list[str] = []
     assert legacy_bash.read_cli_kits("msb", "box", warnings.append) == ([f"git+https://h/o/r.git#ref={sha}&dir=k"], [])
     assert len(warnings) == 2
-    assert all("acq now refuses" in w and "S3NTINEL" not in w and "h/o/r" not in w for w in warnings)
+    assert all("acq now refuses" in w and "recreate the sandbox" in w for w in warnings)
+    assert all("S3NTINEL" not in w and "h/o/r" not in w for w in warnings)
 
 
 def test_config_key_readers(tree):

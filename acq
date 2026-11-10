@@ -1228,8 +1228,10 @@ case "$subcommand" in
     sub2="${1:-}"
     case "$sub2" in
       list)
-        # Show the pinned built-in kits (no backend needed).
+        # Show the pinned built-in kits (no backend needed). A refused extra
+        # or provider ref is never listed (the refusal does not name it).
         _build_kit_list
+        _acq_require_kit_refs || exit 1
         printf 'Pinned acq kits (neutral hybrid/v1):\n'
         printf '  patterns ref: %s\n' "$PATTERNS_KIT_REF"
         printf '  patterns dir: %s\n' "$PATTERNS_KIT_DIR"
@@ -1574,6 +1576,7 @@ case "$subcommand" in
     create_time_kit_picker
     _build_kit_list "$create_agent" || exit 1
     _acq_require_provider_selection || exit 1
+    _acq_require_kit_refs || exit 1
     # Pre-flight: validate the workspace path before provisioning (#issue).
     # Refuse unmountable paths (':' or control characters) first: workspace_path
     # cuts a spec at its first ':', so the existence check alone would test the
@@ -1719,6 +1722,7 @@ case "$subcommand" in
         create_time_kit_picker
         _build_kit_list "$first" || exit 1
         _acq_require_provider_selection || exit 1
+        _acq_require_kit_refs || exit 1
 
 
         # Nudge toward a per-sandbox scoped GitHub token BEFORE provisioning, for

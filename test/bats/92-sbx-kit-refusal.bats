@@ -140,7 +140,10 @@ GIT
     [ "$rc" -ne 0 ]
     [ -z "$out" ]
     run cat "$STUBDIR/d.err"
-    assert_output --partial 'unsafe kit dir'
+    # A dir= outside the safe charset is refused at the shape check, before the
+    # fetch's own dir checks; neither repeats the value.
+    assert_output --regexp "unsafe kit dir|holds a character outside"
+    refute_output --partial 'bad;name'
     assert_output --partial 'could not fetch kit; not applying'
   done
 }
@@ -262,7 +265,8 @@ _NOGIT_REF='https://kituser:s3cr3t-tok@github.com/o/r.git#ref=0123456789abcdef01
   assert_equal "$(kit_ref_display 'git+https://h.example/r.git?private_token=tok#ref=a&dir=b')" 'git+https://h.example/r.git?***#ref=a&dir=b'
   assert_equal "$(kit_ref_display 'https://h.example/r.git?token=a@b&x=1')" 'https://h.example/r.git?***'
   assert_equal "$(kit_ref_display 'u:tok@h.example/o/r.git#ref=a')" '***@h.example/o/r.git#ref=a'
-  assert_equal "$(kit_ref_display 'git+https://h.example/r.git#ref=a&dir=b@c')" 'git+https://h.example/r.git#ref=a&dir=b@c'
+  # A dir= value outside [A-Za-z0-9._/-] is hidden (kit_ref_shape_check refuses it).
+  assert_equal "$(kit_ref_display 'git+https://h.example/r.git#ref=a&dir=b@c')" 'git+https://h.example/r.git#ref=a&dir=***'
   assert_equal "$(kit_ref_display '/kits/local@1')" '/kits/local@1'
   assert_equal "$(kit_ref_display './kits/a:b')" './kits/a:b'
   # A bare token@host (no scheme, no password part) is userinfo too.

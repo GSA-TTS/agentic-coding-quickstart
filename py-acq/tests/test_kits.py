@@ -277,6 +277,14 @@ def test_kit_list_refuses_an_extra_ref_refused_at_input(monkeypatch, tmp_path, c
     assert "s3cr3t-tok" not in json.dumps(doc)
 
 
+def test_kit_list_refuses_a_provider_ref_refused_at_input(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_PROVIDER_KITS", "git+https://github.com/acme/kits.git#ref=x&dir=k&token=s3cr3t-tok")
+    rc, doc = _invoke(capsys, "kit", "list", "--json")
+    assert rc == 1 and doc["error"]["message"].startswith("ACQ_PROVIDER_KITS: remote kit ref refused")
+    assert "s3cr3t-tok" not in json.dumps(doc)
+
+
 # ---------------------------------------------------------------------------
 # kit check / kit update: provenance currency + consent.
 # ---------------------------------------------------------------------------

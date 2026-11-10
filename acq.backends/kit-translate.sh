@@ -215,9 +215,11 @@ _kit_fetch_materialize() (
 #     cutting at the last '@';
 #   - without a scheme, a first path segment carrying any userinfo
 #     (user:token@host, or a bare token@host) becomes ***@host.
-# The fragment's ref= and dir= parameters are kept so the message still names
-# the kit; any other fragment parameter becomes *** (kit_ref_shape_check
-# refuses such a ref, but a message about it must not repeat the value). This
+# The fragment's first ref= and dir= are kept so the message still names the
+# kit when their value is plain ([A-Za-z0-9._/-]); a repeat or any other
+# fragment parameter becomes ***, and an odd value becomes ref=*** or dir=***
+# (kit_ref_shape_check refuses such a ref, but a message about it must not
+# repeat the value). This
 # over-redacts when a path or host part legitimately contains '@' or ':',
 # which is harmless.
 kit_ref_display() {
@@ -226,10 +228,24 @@ kit_ref_display() {
   frag="${ref#"$base"}"
   if [ -n "$frag" ]; then
     rest="${frag#'#'}"
+    local seen=" "
     while :; do
       p="${rest%%&*}"
       case "$p" in
-        ref=* | dir=*) out="${out}&${p}" ;;
+        ref=* | dir=*)
+          # The first ref= and dir= are kept when their value is plain; a
+          # repeat, or a value with any other character, is hidden.
+          case "$seen" in
+            *" ${p%%=*} "*) out="${out}&***" ;;
+            *)
+              case "${p#*=}" in
+                "" | *[!A-Za-z0-9._/-]*) out="${out}&${p%%=*}=***" ;;
+                *) out="${out}&${p}" ;;
+              esac
+              ;;
+          esac
+          seen="${seen}${p%%=*} "
+          ;;
         *) out="${out}&***" ;;
       esac
       [ "$rest" != "$p" ] || break
@@ -258,7 +274,9 @@ kit_ref_display() {
 # ---------------------------------------------------------------------------
 # Refuse a remote kit ref (one starting git+) whose transport URL, the part
 # before '#', has a query string, or whose '#' fragment has any parameter other
-# than ref= and dir=. Such a part is where a token would ride, and acq would
+# than ref= and dir=, names one of them twice, or gives one a value that is
+# empty or holds a character outside [A-Za-z0-9._/-] (the dir= charset the
+# fetch enforces). Such a part is where a token would ride, and acq would
 # otherwise carry it into its records, cache paths and messages. The message
 # names the problem only: never the URL, a parameter name or a value. WHERE
 # (for example "--kit" or "ACQ_EXTRA_KITS") says where the ref came from. A
@@ -279,16 +297,32 @@ kit_ref_shape_check() {
   # No fragment at all is reported by the fetch as a malformed ref.
   case "$body" in *'#'*) ;; *) return 0 ;; esac
   rest="${body#*#}"
+  local seen_ref=0 seen_dir=0 problem="" val
   while :; do
     p="${rest%%&*}"
     case "$p" in
-      ref=* | dir=*) ;;
-      *)
-        echo "${prefix} remote kit ref refused: its '#' fragment has a parameter other than ref= and dir=." >&2
-        echo "${prefix}   A kit ref names only those two: git+https://HOST/REPO.git#ref=<commit>&dir=<path>" >&2
-        return 1
+      ref=*)
+        [ "$seen_ref" -eq 0 ] || problem="repeats ref= or dir="
+        seen_ref=1; val="${p#ref=}"
         ;;
+      dir=*)
+        [ "$seen_dir" -eq 0 ] || problem="repeats ref= or dir="
+        seen_dir=1; val="${p#dir=}"
+        ;;
+      *) problem="has a parameter other than ref= and dir=" ;;
     esac
+    # A value may hold only the safe ref/dir characters (no '?', ';', '#',
+    # space or the like, behind which a token could ride).
+    if [ -z "$problem" ]; then
+      case "$val" in
+        "" | *[!A-Za-z0-9._/-]*) problem="has a ref= or dir= value that is empty or holds a character outside [A-Za-z0-9._/-]" ;;
+      esac
+    fi
+    if [ -n "$problem" ]; then
+      echo "${prefix} remote kit ref refused: its '#' fragment ${problem}." >&2
+      echo "${prefix}   A kit ref names each once: git+https://HOST/REPO.git#ref=<commit>&dir=<path>" >&2
+      return 1
+    fi
     [ "$rest" != "$p" ] || break
     rest="${rest#*&}"
   done
@@ -345,12 +379,12 @@ kit_translate_fetch() {
       # anything but a safe path charset. Matches the hardening in kit_spec_files.
       case "$dir" in
         /*|*..*)
-          echo "kit-translate: unsafe kit dir (no absolute paths or '..'): $dir" >&2
+          echo "kit-translate: unsafe kit dir (no absolute paths or '..')" >&2
           return 1
           ;;
       esac
       if printf '%s' "$dir" | LC_ALL=C grep -q '[^A-Za-z0-9._/-]'; then
-        echo "kit-translate: unsafe kit dir (illegal characters): $dir" >&2
+        echo "kit-translate: unsafe kit dir (illegal characters)" >&2
         return 1
       fi
       if [ -n "${_ACQ_KIT_FETCH_ROOT:-}" ] && [[ "$ref" =~ ^[0-9a-f]{40}$ ]]; then
