@@ -509,6 +509,41 @@ _assert_recorded_refusal() { # BACKEND-CLI-PATTERN
   _assert_recorded_refusal '^sbx (exec|run|kit|create)'
 }
 
+# Windows filesystems are case-insensitive, so on MSYS/Cygwin a workspace that
+# spells acq's directories in another case is the same directory and must be
+# refused, at create time and for a recorded workspace alike. OSTYPE selects the
+# MSYS rule here; a POSIX host keeps comparing exactly.
+@test "workspace check: on MSYS/Cygwin a case-variant spelling of acq's directories is refused" {
+  local upper
+  upper=$(printf '%s' "$STUBDIR" | tr '[:lower:]' '[:upper:]')
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    OSTYPE=msys
+    acq_workspace_specs_safe opencode "$1" 2>&1 && echo create-passed
+    _acq_workspace_trusted_safe "$1/STATE/SUB" 2>&1 && echo inside-passed
+    _acq_workspace_trusted_safe "'"$WT"'/okdir" 2>&1 && echo project-passed
+  ' _ "$upper"
+  refute_line create-passed
+  refute_line inside-passed
+  assert_line project-passed
+  assert_output --partial "contains acq's own directory"
+  assert_output --partial "is inside acq's own directory"
+}
+
+@test "workspace check: a POSIX host still compares acq's directories case-sensitively" {
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN*) skip "this host is MSYS/Cygwin" ;;
+  esac
+  local upper
+  upper=$(printf '%s' "$STUBDIR" | tr '[:lower:]' '[:upper:]')
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    OSTYPE=linux-gnu
+    _acq_workspace_trusted_safe "$1" 2>&1 && echo posix-passed
+  ' _ "$upper"
+  assert_line posix-passed
+}
+
 @test "re-attach(msb): a recorded project workspace, or none, passes the recorded-workspace check" {
   run bash -c '
     . "'"$REPO_ROOT"'/acq.backends/common.sh"

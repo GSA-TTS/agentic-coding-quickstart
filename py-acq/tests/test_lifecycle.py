@@ -567,6 +567,30 @@ def test_the_identity_check_ignores_a_zero_inode(monkeypatch, tmp_path):
     assert common._within(str(a / "inner"), str(a))  # the path comparison still works
 
 
+@pytest.mark.skipif(os.name != "nt", reason="needs a case-insensitive Windows filesystem")
+@pytest.mark.parametrize("verb", ["create", "run"])
+def test_a_case_variant_workspace_spelling_is_refused_on_windows(monkeypatch, tmp_path, capsys, verb):
+    # NTFS is case-insensitive: an upper-case spelling of the directory holding
+    # acq's state is that same directory, and must be refused like it.
+    _env(monkeypatch, tmp_path)
+    _forbid_launch(monkeypatch)
+    rc, doc = _invoke(capsys, "--backend", "msb", verb, "opencode", str(tmp_path).upper(), "--name", "box", "--json")
+    _assert_overlap_refused(rc, doc, "contains", "state directory")
+
+
+def test_the_overlap_path_comparison_folds_case_where_normcase_does(monkeypatch, tmp_path):
+    # The path comparison goes through os.path.normcase, which folds case on
+    # Windows. Model that fold here; the upper-case spelling does not exist on
+    # a case-sensitive host, so only the path comparison can match it.
+    from acq_py.commands import common
+
+    monkeypatch.setattr(common.os.path, "normcase", str.lower)
+    upper = str(tmp_path).upper()
+    assert common._within(str(tmp_path / "state"), upper)
+    assert common._within(upper + os.sep + "STATE", str(tmp_path))
+    assert not common._within(str(tmp_path.parent / "elsewhere"), upper)
+
+
 def test_a_workspace_reached_through_a_link_is_compared_canonically(monkeypatch, tmp_path, capsys):
     _env(monkeypatch, tmp_path)
     link = tmp_path.parent / f"{tmp_path.name}-link"
