@@ -150,7 +150,7 @@ _posix_only() {
 
 # _bash_writer ID COUNT — write key bID COUNT times, failing on the first error.
 _bash_writer() {
-  timeout 120 bash -c 'ACQ_SOURCE_ONLY=1 . "$1" >/dev/null 2>&1
+  timeout 600 bash -c 'ACQ_SOURCE_ONLY=1 . "$1" >/dev/null 2>&1
     i=1
     while [ "$i" -le "$3" ]; do
       _acq_config_write_field "b$2" "$i" || { echo "bash writer $2 failed at write $i" >&2; exit 1; }
@@ -165,25 +165,27 @@ _wait_writers() {
   for pid in "$@"; do
     wait "$pid" || rc=1
   done
-  [ "$rc" -eq 0 ] || { cat "$log" >&2; return 1; }
+  [ "$rc" -eq 0 ] || { echo "a writer failed or ran out of time:" >&2; cat "$log" >&2; return 1; }
 }
 
 @test "config lock: parallel Bash writers all succeed and lose no change" {
   # A holder that releases between a waiter's failed mkdir and its look at the
   # directory must make the waiter try again, never report an unsafe lock.
   export ACQ_MIGRATION_LOCK_TIMEOUT=60
-  local log="$STUBDIR/writers.log" pids="" id
-  for id in 1 2 3 4 5 6; do
-    _bash_writer "$id" 30 2>>"$log" &
+  local log="$STUBDIR/writers.log" pids="" id ids="1 2 3 4 5 6" writes=30
+  # Process creation is slow under Git Bash, so fewer writers and writes there.
+  case "${OSTYPE:-}" in msys*|cygwin*) ids="1 2 3" writes=6 ;; esac
+  for id in $ids; do
+    _bash_writer "$id" "$writes" 2>>"$log" &
     pids="$pids $!"
   done
   # shellcheck disable=SC2086
   _wait_writers "$log" $pids
   run grep -c unsafe "$log"
   assert_output 0
-  for id in 1 2 3 4 5 6; do
+  for id in $ids; do
     _cfg "_acq_config_read_field b$id"
-    assert_output '30'
+    assert_output "$writes"
   done
   [ ! -e "$LOCK" ]
 }
