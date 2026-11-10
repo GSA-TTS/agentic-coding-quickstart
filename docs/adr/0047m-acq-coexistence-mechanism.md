@@ -95,15 +95,25 @@ That includes `configure`, `start`, `restart`, `backend set`/`unset`,
 `secret import` and `secret set --host/--env`. Some documented Bash flags are
 still missing, and the Python CLI rejects each one as a usage error:
 
-- `--clone` on `run`/`create`, and its `ACQ_CLONE` equivalent;
+- `--clone` on `run`/`create`;
 - `--publish HOST:GUEST` on `run`/`create`;
 - `--no-update-check` on `run`;
 - `--publish HOST:GUEST` on `ports NAME`.
 
-The Python implementation also has behaviour gaps against Bash. It does not read
-the `extra_kits`, `provider_kit` and `scope_github_token` settings that
-`acq configure` writes. It has no kit heal on re-attach and no ssh-agent
-forwarding. Credential rotation and Bash-state import have open follow-ups. So
+**Safety-relevant: `ACQ_CLONE` is silently ignored.** Bash treats `ACQ_CLONE=1`
+like `--clone`, so the agent works on a disposable clone of the workspace. The
+Python implementation does not read `ACQ_CLONE` at all and gives no warning. A
+user who sets it to keep the agent away from the real checkout gets the real
+workspace mounted read-write instead. Until it is implemented or refused, do not
+rely on `ACQ_CLONE` under `ACQ_IMPL=python`.
+
+The Python implementation also has behaviour gaps against Bash. It reads the
+`extra_kits`, `provider_kit` and `scope_github_token` settings that
+`acq configure` writes, but it applies only kits from its pinned built-in
+bundle; it refuses at create any kit that would have to be fetched. It has no kit
+heal on re-attach. It has no ssh-agent forwarding setup: it replays a
+Bash-recorded `ssh_auth_sock` but never sets forwarding up itself. Credential
+rotation, configure settings and Bash-state import have open follow-ups. So
 ADR-0038m's "preserve every documented acq-owned command and meaningful flag"
 is not yet met. ADR-0048m gate 4 (command parity) is where parity is judged
 before any default changes. The tracking issues are under Links below.
@@ -131,6 +141,7 @@ note.
 - Python gaps: mogul/agentic-coding-quickstart#107 (credentials),
   mogul/agentic-coding-quickstart#108 (kits, bootstrap, trusted config),
   mogul/agentic-coding-quickstart#109 (state and lifecycle),
-  mogul/agentic-coding-quickstart#168 (configure settings)
+  mogul/agentic-coding-quickstart#168 (configure settings: implemented in
+  mogul/agentic-coding-quickstart#188, small follow-ups still open)
 - Re-qualification checklist: mogul/agentic-coding-quickstart#60
 - Review finding this note answers: mogul/agentic-coding-quickstart#117
