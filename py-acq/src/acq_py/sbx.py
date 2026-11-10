@@ -480,6 +480,17 @@ def copy(src: str, dst: str) -> int:
     return proc.returncode
 
 
+def publish_ports(name: str, mappings: list[str], *, json_mode: bool) -> int:
+    """``sbx ports NAME --publish=V...``: sbx's own post-hoc publish, as Bash forwards it.
+
+    The values are sbx's to judge (its syntax is not acq's ``HOST:GUEST``), so they
+    go through verbatim, each joined to its flag as one argv element (so a value
+    can never be read as a flag of its own). The caller refuses a non-loopback
+    bind first (:func:`acq_py.publish.sbx_bind_problem`). Returns sbx's exit status.
+    """
+    return _run_stream(["ports", name, *(f"--publish={m}" for m in mappings)], json_mode=json_mode)
+
+
 def ports(name: str) -> list[dict]:
     """Return a sandbox's *declared* host/guest port mappings (ADR-0038m §ports).
 

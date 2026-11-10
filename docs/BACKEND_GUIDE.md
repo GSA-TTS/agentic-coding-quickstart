@@ -996,6 +996,15 @@ rationale, the fixed vsock port (3552), and the trust-boundary discussion.
   to choose the host side yourself; a host port already in use **fails the
   create** rather than being substituted. See
   [ADR-0034](adr/0034-host-port-selection-and-publish-override.md).
+  The Python acq (`ACQ_IMPL=python`) does the same, with the same validation and
+  messages, and shares the post-hoc tunnel record (`ACQ_STATE_DIR/ports/NAME.pids`)
+  with the Bash acq, so either one lists and tears down the other's tunnels. It
+  differs in three ways: a repeated `acq ports NAME --publish` opens every
+  mapping, all or nothing, where Bash keeps only the last; it claims explicit
+  host ports before it chooses free ones; and `create --recreate` prefers the
+  old guest's host ports where a kit leaves the host side open. At teardown it
+  signals a recorded process only once it is confirmed to be an `msb` or `ssh`
+  process. See `py-acq/README.md`.
 - **No state-preserving in-place kit add.** `acq_backend_ensure_kits_applied`
   re-applies kits idempotently; for a clean rebuild use `acq rm && acq run`.
 - **Agent binaries come from templates, images, or agent kits.** `acq` no longer
@@ -1267,7 +1276,7 @@ list (an empty value selects none); otherwise `provider_kit:` in config.yaml
 the same way: a non-empty `ACQ_EXTRA_KITS` replaces config.yaml `extra_kits:`,
 and `--kit` refs are added after either (at a terminal, the Bash acq's
 create-time picker can still change the extras for one sandbox). The Python acq
-follows the same order and has no picker. A kit outside its pinned built-in
+follows the same order, picker included. A kit outside its pinned built-in
 bundle (every catalog extra kit, a provider kit from a registered source) it
 fetches at its pinned commit and verifies, and a local kit directory it copies
 into its private cache and checks there; it refuses a ref not pinned to a full
@@ -1380,6 +1389,8 @@ override with `ACQ_PROVENANCE_DIR`). It compares that against the **local**
   interactive, default No, EOF declines, and it **never blocks** a launch. A
   non-interactive run prints one advisory and continues.
 - Opt out with `ACQ_UPDATE_CHECK=0` or `acq run --no-update-check`.
+- The Python acq (`ACQ_IMPL=python`) makes the same offer with the same rules,
+  and never asks under `--json`.
 
 Backend behavior: **sbx** injects any absent built-in kits during the heal pass;
 **msb** re-applies all built-in kits idempotently. Both rewrite provenance only

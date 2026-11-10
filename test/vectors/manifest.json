@@ -592,6 +592,30 @@
       "vectors": ["cli/create-json-notes-github-scope"]
     },
     {
+      "contract": "ADR-0034 --publish HOST:GUEST on run/create: both sides required, digits only, no leading zero, 1..65535, one host port per guest port; a malformed value creates nothing (validation_failed, exit 1)",
+      "vectors": ["cli/create-publish-malformed", "cli/create-publish-duplicate-guest"]
+    },
+    {
+      "contract": "ADR-0034 --publish on an msb create becomes a create-time -p HOST:GUEST mapping that ports reports as declared (origin create); an explicit host port in use fails the create, never substituted",
+      "vectors": ["cli/create-publish-msb", "cli/create-publish-host-busy"]
+    },
+    {
+      "contract": "ADR-0034 --publish is refused on sbx (unsupported_capability), naming the post-hoc acq ports NAME --publish",
+      "vectors": ["cli/create-publish-sbx-refused"]
+    },
+    {
+      "contract": "ADR-0015 acq ports NAME --publish HOST:GUEST is validated before any key, serve or tunnel is touched (the tunnel itself is Tier-2: py-acq/tests/test_publish.py)",
+      "vectors": ["cli/ports-publish-invalid"]
+    },
+    {
+      "contract": "ADR-0016 stale-sandbox check on a run re-attach (Bash maybe_offer_bundle_refresh): a stale or unknown bundle is noted, never prompted for without a terminal or under --json; --no-update-check skips it (the terminal prompt and refresh are Tier-2: py-acq/tests/test_update_check.py)",
+      "vectors": ["cli/run-stale-bundle-advisory", "cli/run-no-update-check"]
+    },
+    {
+      "contract": "ADR-0031 first-run offer of acq configure on a first create (Bash maybe_first_run_configure): never asked without a terminal, so nothing is written (the prompt itself is Tier-2: py-acq/tests/test_onboarding.py)",
+      "vectors": ["cli/create-no-first-run-offer-without-terminal"]
+    },
+    {
       "contract": "host ssh-agent forwarding (ADR-0021): SSH_AUTH_SOCK is the opt-in; on msb a value that names no socket is skipped with a warning and never fails the create; on sbx (which forwards the agent itself) a set SSH_AUTH_SOCK prints the one-time trust-boundary notice. The --vsock route, bridge, re-drive and teardown need a real socket and are Tier-2 (py-acq/tests/test_ssh_agent_forward.py)",
       "vectors": ["cli/create-msb-ssh-agent-not-a-socket", "cli/create-sbx-ssh-agent-notice"]
     }

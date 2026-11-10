@@ -1,0 +1,70 @@
+{
+  "schema": 1,
+  "id": "cli/create-publish-sbx-refused",
+  "oracle": "ADR-0034 --publish is msb-only: sbx picks the host port itself, so create refuses it (unsupported_capability, exit 1) and names the post-hoc 'acq ports NAME --publish'",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{acq}",
+      "--backend",
+      "sbx",
+      "create",
+      "shell",
+      ".",
+      "--publish",
+      "6868:6767",
+      "--json"
+    ],
+    "env": {
+      "ACQ_SBX_BIN": "__stub__",
+      "ACQ_SBX_VERSION": "0.51.0",
+      "ACQ_SBX_INSTALLED": "1",
+      "ACQ_MSB_INSTALLED": "0"
+    },
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "SBX_HOME",
+      "ACQ_IMAGE",
+      "ACQ_SBX_STUB_CATALOG",
+      "ACQ_SBX_STUB_FAIL"
+    ],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 1,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "create",
+        "error": {
+          "code": "unsupported_capability",
+          "message": "--publish is not supported on the sbx backend: sbx chooses the host port for a published guest port itself and offers no way to request one at create time",
+          "remediation": "read the assigned mapping with 'acq ports NAME', or open a tunnel on a port you choose with 'acq ports NAME --publish HOST:GUEST' after the sandbox is up"
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME",
+      "ACQ_SECRET_STORE_DIR"
+    ]
+  }
+}
