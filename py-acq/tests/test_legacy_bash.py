@@ -423,6 +423,46 @@ def test_bad_config_lists_wait_at_generation_1_until_fixed(tree, capsys):
     assert "was not imported" not in capsys.readouterr().err
 
 
+def test_doctor_reports_a_pending_import_after_its_warning_stops_printing(tree, capsys):
+    from acq_py import doctor
+
+    assert doctor.bash_import_check()["status"] == "pass"  # nothing has run yet
+    _bash_file("box", ".env", "agent=shell\n")
+    _config(f"kit_sources: github.com/acme/kits@{SHA} notarepo\nprovider_credential_bindings: good=GOOD_KEY\n")
+    migration.migrate_tree()
+    assert "kit_sources was not imported" in capsys.readouterr().err
+    migration.migrate_tree()
+    assert "was not imported" not in capsys.readouterr().err  # printed once only
+
+    check = doctor.bash_import_check()
+    assert check["status"] == "warn", check
+    assert "kit_sources pending" in check["message"]
+    assert "sandboxes" not in check["message"].split("(", 1)[1].split(")", 1)[0]  # that part is done
+    assert "kit_sources was not imported" in check["message"]
+    assert "mutating acq command" in check["remediation"]
+    assert doctor.overall_status(doctor.doctor_checks()) != "pass"
+
+    _config(f"kit_sources: github.com/acme/kits@{SHA}\nprovider_credential_bindings: good=GOOD_KEY\n")
+    migration.migrate_tree()
+    assert doctor.bash_import_check()["status"] == "pass"
+    assert migration.read_import_warnings() == []
+
+
+def test_a_marker_from_before_the_warning_text_was_kept_gets_it_without_a_reprint(tree, capsys):
+    from acq_py import doctor
+
+    _config(f"kit_sources: github.com/acme/kits@{SHA} notarepo\n")
+    migration.migrate_tree()
+    capsys.readouterr()
+    # As an older acq left it: the digest of the warnings, not their text.
+    migration.write_generation(migration.RECORDS_GENERATION, import_done=migration.read_import_done(),
+                               import_warned=migration.read_import_warned())
+    assert migration.read_import_warnings() == []
+    migration.migrate_tree()
+    assert "was not imported" not in capsys.readouterr().err
+    assert "kit_sources was not imported" in doctor.bash_import_check()["message"]
+
+
 def test_mutable_empty_refs_and_the_control_plane_are_not_imported(tree, capsys):
     _config("kit_sources: github.com/acme/kits@main github.com/GSA-TTS/agentic-coding-patterns "
             f"github.com/acme/unpinned github.com/acme/pinned@{SHA}\n")

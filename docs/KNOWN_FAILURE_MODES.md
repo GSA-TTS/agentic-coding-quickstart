@@ -4123,7 +4123,8 @@ remain:
    `provider_credential_bindings` list that Bash itself would refuse is the
    exception: it stays pending, retried on each mutating verb, until it is
    fixed. Its warning is printed on the first such verb, and again only when
-   what is pending, or why, changes.) Kit sources without a full commit SHA are never imported; add them
+   what is pending, or why, changes; meanwhile `acq doctor` reports it, with
+   that warning, in its `bash-import` check.) Kit sources without a full commit SHA are never imported; add them
    again with `acq kit-source add REPO --ref <full-sha>`. Running the import every time
    would bring back records removed with the Python acq, including kit sources
    whose trust the user withdrew. **Mitigation:** create such sandboxes with
