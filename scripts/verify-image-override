@@ -45,6 +45,11 @@ esac
 SCRIPT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 ACQ="$SCRIPT_DIR/acq"
 
+# Scratch files go under TMPDIR only when it is absolute, else /tmp, as
+# acq_tmp_dir in acq.backends/userdirs.sh does: a relative TMPDIR would put them
+# under the current directory.
+case "${TMPDIR:-}" in /*) TMP_BASE="$TMPDIR" ;; *) TMP_BASE=/tmp ;; esac
+
 PASS=0; FAIL=0; BLOCKED=0
 ok()    { PASS=$((PASS+1));    printf '  \033[32mok  \033[0m %s\n' "$1"; }
 bad()   { FAIL=$((FAIL+1));    printf '  \033[31mBAD \033[0m %s\n' "$1"; [ -n "${2:-}" ] && printf '        %s\n' "$2"; }
@@ -125,7 +130,7 @@ build_image() {
     block "no container engine (docker/podman) to build the test image — cannot verify --image live"
     return 1
   fi
-  BUILD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/acq-imgverify.XXXXXX")
+  BUILD_DIR=$(mktemp -d "$TMP_BASE/acq-imgverify.XXXXXX")
   # A `RUN` step executes as the image's current USER. The base
   # (docker/sandbox-templates:shell) sets USER=agent, so a bare
   # `RUN echo > /etc/...` fails EPERM. The contract does grant `agent`
@@ -233,7 +238,7 @@ verify_sbx() {
   # template load` takes a FILE path and does NOT accept `-` for stdin — so the
   # sbx path must write a temp tar. It is removed in cleanup ($TARBALL).
   info "sbx: import the local image via 'sbx template load'"
-  TARBALL=$(mktemp "${TMPDIR:-/tmp}/acq-imgverify.XXXXXX.tar")
+  TARBALL=$(mktemp "$TMP_BASE/acq-imgverify.XXXXXX.tar")
   if "$ENGINE" save "$TAG" -o "$TARBALL" >/tmp/acq-imgsave.log 2>&1; then
     ok "saved $TAG to a tarball via $ENGINE save"
   else
@@ -305,7 +310,7 @@ fi
 # pre-flight prompts to create a missing workspace, and the piped `N` we feed to
 # decline the github-scope prompt would cancel the whole create (the sbx failure
 # seen on the first live run). Removed in cleanup.
-WORKSPACE=$(mktemp -d "${TMPDIR:-/tmp}/acq-imgverify-ws.XXXXXX")
+WORKSPACE=$(mktemp -d "$TMP_BASE/acq-imgverify-ws.XXXXXX")
 
 case "$ONLY" in
   sbx) verify_sbx ;;
