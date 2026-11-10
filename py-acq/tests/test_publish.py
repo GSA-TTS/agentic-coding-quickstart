@@ -775,7 +775,7 @@ def test_linux_identity_matches_the_recorded_command(monkeypatch, tmp_path, argv
     reads = []
 
     def cmdline(proc_path):
-        reads.append(str(proc_path))
+        reads.append(Path(proc_path).as_posix())  # a Windows run renders /proc with backslashes
         return ("\0".join(argv) + "\0").encode()
 
     monkeypatch.setattr(Path, "read_bytes", cmdline)
