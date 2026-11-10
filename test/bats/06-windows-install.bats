@@ -162,10 +162,15 @@ teardown() {
   assert_regex "$launcher" "foreach \\(\\\$name in @\\('NoDefaultCurrentDirectoryInExePath', 'PYTHONPATH', 'ACQ_PROVIDER_INPUT_DATA_DIR'\\)\\)"
 
   command -v pwsh >/dev/null 2>&1 || return 0
+  # pwsh needs a Windows path under Git Bash; an MSYS /d/... path is not a script it can find.
+  local launcher_path="$REPO_ROOT/acq.ps1"
+  if command -v cygpath >/dev/null 2>&1; then
+    launcher_path=$(cygpath -w "$launcher_path")
+  fi
   run env ACQ_IMPL=bogus pwsh -NoLogo -NoProfile -NonInteractive -Command "
     \$env:NoDefaultCurrentDirectoryInExePath = 'kept'
     \$env:PYTHONPATH = 'kept-too'
-    & '$REPO_ROOT/acq.ps1' version
+    & '$launcher_path' version
     Write-Output (\"AFTER code=\$LASTEXITCODE nodefault=\$env:NoDefaultCurrentDirectoryInExePath pythonpath=\$env:PYTHONPATH\")
   "
   assert_output --partial "unsupported ACQ_IMPL 'bogus'"
