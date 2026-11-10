@@ -22,6 +22,7 @@ from .. import (
     msb,
     publish,
     sbx,
+    ssh_agent,
     state,
 )
 from . import common
@@ -92,27 +93,30 @@ def host_git_identity_env() -> list[str]:
     return entries
 
 
-def _forwarded_ssh_auth_sock(record: dict | None) -> str | None:
-    """The guest ssh-agent socket recorded for this sandbox, or ``None``.
+def _forwarded_ssh_auth_sock(record: dict | None, recorded: str | None = None) -> str | None:
+    """The guest ssh-agent socket for this sandbox's sessions, or ``None``.
 
-    The record carries ``ssh_auth_sock`` only when the sandbox was created with
-    host ssh-agent forwarding (see ADR-0021). The host's own ``SSH_AUTH_SOCK`` is
-    never forwarded: it names a host path that means nothing in the guest.
+    ``recorded`` is the msb host-config value the forwarding bridge writes (the
+    one Bash reads, :func:`acq_py.ssh_agent.recorded_sock`); without it, the
+    ``ssh_auth_sock`` a state import copied into the record. Either exists only
+    when the sandbox was created with host ssh-agent forwarding (see ADR-0021).
+    The host's own ``SSH_AUTH_SOCK`` is never forwarded: it names a host path
+    that means nothing in the guest.
     """
-    sock = (record or {}).get("ssh_auth_sock")
+    sock = recorded or (record or {}).get("ssh_auth_sock")
     if isinstance(sock, str) and _SAFE_GUEST_SOCK.fullmatch(sock):
         return sock
     return None
 
 
-def session_env(record: dict | None) -> list[str]:
+def session_env(record: dict | None, recorded_sock: str | None = None) -> list[str]:
     """Backend-neutral ``NAME=value`` entries for a session in this sandbox.
 
     The adapters add their own (HOME, SHELL, and TERM/COLORTERM when the session
     has a terminal).
     """
     entries = host_git_identity_env()
-    sock = _forwarded_ssh_auth_sock(record)
+    sock = _forwarded_ssh_auth_sock(record, recorded_sock)
     if sock is not None:
         entries.append(f"SSH_AUTH_SOCK={sock}")
     return entries
@@ -121,13 +125,15 @@ def session_env(record: dict | None) -> list[str]:
 def prepare_session(backend: str, name: str, record: dict | None) -> list[str]:
     """Ready ``name`` for a session and return the session's ``NAME=value`` entries.
 
-    The entries are :func:`session_env`. On msb, as in Bash, the host's global
-    git identity is first written into the guest's global git config, and the
-    kit environment recorded when the kits were applied is added last, so a
-    kit's ``environment`` reaches every agent session. sbx applies both itself:
-    its kits carry their environment, and the git identity kit sets the config.
+    The entries are :func:`session_env`. On msb, as in Bash, the forwarded
+    ssh-agent socket comes from the host-config record the bridge writes, the
+    host's global git identity is first written into the guest's global git
+    config, and the kit environment recorded when the kits were applied is
+    added last, so a kit's ``environment`` reaches every agent session. sbx
+    applies both itself: its kits carry their environment, and the git identity
+    kit sets the config.
     """
-    entries = session_env(record)
+    entries = session_env(record, ssh_agent.recorded_sock(name) if backend == "msb" else None)
     if backend == "msb":
         # The same host values the sbx git identity kit writes into its guest.
         msb.apply_git_global_config(name, kit_sbx.git_global_config_env())

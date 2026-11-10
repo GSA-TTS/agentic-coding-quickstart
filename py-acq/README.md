@@ -182,7 +182,7 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   `GIT_COMMITTER_*`, and `EMAIL` or the global `user.email`). On msb, `attach`,
   `shell` and `run` also get `SHELL`, with or without a PTY; sbx templates set
   their own. `SSH_AUTH_SOCK` is passed only when the sandbox records a forwarded
-  ssh-agent socket, never the host's own. A child killed by signal N gives exit
+  ssh-agent socket, never the host's own (see "Host ssh-agent forwarding" below). A child killed by signal N gives exit
   status `128+N`. Ctrl-C goes to the child rather than killing it; when the
   child dies of a Ctrl-C that acq received too, acq dies of SIGINT as well, so a
   calling shell loop stops, and under `--json` no envelope is printed. A SIGINT
@@ -605,6 +605,40 @@ each other. The networked pre-commit job (`.github/workflows/pre-commit.yml`)
 also runs `scripts/refresh-kitbundle --check` against its checkout of Patterns
 at the pin, which fails when any manifest blob id differs from
 `git ls-tree -r <ref>`.
+
+## Host ssh-agent forwarding (ADR-0021)
+
+On msb the host ssh-agent is forwarded into the guest whenever the host
+`SSH_AUTH_SOCK` names a socket, as in Bash (unset it to opt out; there is no
+flag). `src/acq_py/ssh_agent.py` ports the Bash pieces:
+
+* at create, `msb create --vsock LINK:3552/stream`, where `LINK` is
+  `$ACQ_STATE_DIR/msb/ssh-agent/<name>.sock` (or `h<cksum>.sock` when the path
+  would not fit a socket address), a symlink to the agent socket's real path; a
+  name outside `[A-Za-z0-9_-]` routes the raw path with a warning.
+  `ACQ_FORWARD_HOST_SOCKETS` adds other host sockets by their real path. msb
+  older than 0.6.9 gets a warning and no route;
+* agent-user kit commands get `SSH_AUTH_SOCK=/home/agent/.acq/ssh-agent.sock`
+  while the forward is wired; after the kits, the in-guest `socat` bridge starts
+  (a guest without `socat` gets a warning), the guest path is recorded in the
+  `ssh-auth-sock` host-config key that every session reads, and `ssh-add -l`
+  in the guest checks that the agent answers;
+* `start` and `restart` restart the bridge from that key after resuming; their
+  heal, a `run` re-attach to a running sandbox and `kit update` re-drive the
+  forward when the host requests one and `msb inspect` shows the route. The link
+  is re-pointed at the current `SSH_AUTH_SOCK` before each bridge start, so a
+  route survives the host agent moving;
+* with `SSH_AUTH_SOCK` unset, `start`, `restart` and a `run` re-attach
+  disconnect the forward (the link and the recorded guest socket go, no bridge
+  starts); setting it and re-running reconnects;
+* a socket inside the writable workspace is refused, a socket owned by another
+  user is forwarded with a warning, a link whose target is no longer this user's
+  socket is removed, and the link directory is kept 0700;
+* `rm` removes the link, never the agent socket.
+
+sbx forwards the agent itself; acq prints only the one-time trust-boundary
+notice. Nothing is forwarded from a Windows host. The differences from Bash and
+the live checks still owed are in `docs/KNOWN_FAILURE_MODES.md` §93.
 
 ## Timeouts
 

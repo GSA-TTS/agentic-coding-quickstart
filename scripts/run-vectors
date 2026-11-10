@@ -308,7 +308,11 @@ _run_vector() {
   # `${arr[@]+"${arr[@]}"}` expands to nothing for an empty array: bash < 4.4
   # (macOS ships 3.2) treats a bare "${arr[@]}" on an empty array as unbound
   # under `set -u` and aborts the subshell before the CLI runs.
+  # SSH_AUTH_SOCK goes first, for every vector: a developer's real ssh-agent must
+  # never be forwarded into a stub sandbox or change what an oracle sees (it is
+  # the forward's opt-in, ADR-0021). A vector that needs it sets it in env.
   (
+    unset SSH_AUTH_SOCK
     for u in ${unset_list[@]+"${unset_list[@]}"}; do unset "$u"; done
     [ "${#env_list[@]}" -gt 0 ] && export "${env_list[@]}"
     for r in "${redirect_list[@]}"; do export "$r"="$outdir/redirect/$r"; done

@@ -4092,23 +4092,14 @@ global git config (as Bash's `_acq_msb_apply_host_git_global_config`); see
 `prepare_session` in `py-acq/src/acq_py/commands/session.py`. On sbx the kits
 carry their own environment and the git identity kit sets the config. These
 values are not secrets (a kit's `environment` is non-secret configuration), so
-they go on the `msb exec` command line as `-e NAME=value`, as in Bash. Four parts
+they go on the `msb exec` command line as `-e NAME=value`, as in Bash. Some parts
 of the Bash session differ or are not ported yet (the numbering below keeps its
-earlier order; the kit environment and guest git config items are done):
+earlier order; the kit environment, ssh-agent and guest git config items are done):
 
 1. *(Done: kit `environment[]` replay on msb.)*
-2. **ssh-agent forwarding** (ADR-0021). Python never creates the `--vsock` route
-   or the in-guest bridge, so it passes `SSH_AUTH_SOCK` only when the sandbox's
-   host record carries an `ssh_auth_sock` guest path. No Python create writes
-   one yet; for a sandbox created by Bash, the state migration copies the path
-   from Bash's host config (`ssh-auth-sock`) into the record (ADR-0041m
-   generation 2). Python still does not start the in-guest bridge that path
-   points at: Bash restarts it on attach and on resume (`acq_backend_start`)
-   because it dies when the sandbox stops, so after a stop the forwarded socket
-   in a Bash-created sandbox is dead until Bash re-attaches it. Porting
-   forwarding must add the bridge to create, attach, `acq start` and
-   `acq restart` (`_start_locked` in `py-acq/src/acq_py/commands/lifecycle.py`).
-   **Unblock trigger:** forwarding is ported.
+2. *(Done: ssh-agent forwarding, ADR-0021. The Python acq creates the route
+   and the bridge and restarts them as Bash does; its differences and the live
+   checks still owed are in §93.)*
 3. *(Done: guest git config on msb.)*
 4. **`ACQ_ACTIVATE_PROJECT_ENV`.** With it set to `1`, Bash passes
    `ACQ_WORKSPACE` and wraps the session in its guest script
@@ -5264,9 +5255,69 @@ distribution offers it).
 create, as the `config.yaml` lock does. Unblock trigger: none; it can be done
 whenever the provider-input transaction is next changed.
 
+## 93. Python acq: Host ssh-agent Forwarding Differences and Live Checks
+
+**Status:** deferred (tracked per AGENTS.md "Track Deferred Work").
+
+The Python acq forwards the host ssh-agent into an msb guest as the Bash acq does
+(ADR-0021, `py-acq/src/acq_py/ssh_agent.py`): the `--vsock` route through the
+per-sandbox link under `$ACQ_STATE_DIR/msb/ssh-agent/`, the in-guest `socat`
+bridge, the `ssh-auth-sock` host-config key that sessions read, the liveness
+probe, the bridge restart after `acq start`/`acq restart`, the re-drive in the
+`start`, `restart`, `run` re-attach and `kit update` heals, link removal on
+`acq rm`, the one-time trust-boundary notice on msb and sbx, and the checks of
+the 2026-11-10 ADR-0021 amendment (the opt-out at start or re-attach, the link
+target and owner checks, the refusal of a socket inside the workspace). The
+messages are Bash's. These parts differ on purpose:
+
+- **Windows never forwards.** On a Windows host the Python acq treats no path
+  as a socket (an MSYS ssh-agent's socket is an emulation file, the OpenSSH for
+  Windows agent is a named pipe, and the route link would need a symlink
+  privilege), so a set `SSH_AUTH_SOCK` gets the "is set but not a socket;
+  skipping ssh-agent forwarding" warning and the create goes on without a route
+  (checked on Windows 11 with Python 3.12 against the stub msb). The Bash acq
+  under Git Bash treats the MSYS emulation file as a socket and hands its
+  drive-form path to msb, which no one has run live. **Unblock trigger:** an msb
+  release whose `--vsock` is documented for Windows host sockets.
+- **"could not verify the ssh-agent --vsock route"** names the failed
+  `msb inspect` but not msb's own error text, which the Python acq never
+  surfaces (ADR-0040m).
+- **Overrides are checked where they are used.** A bad
+  `ACQ_MSB_SSH_AGENT_GUEST_SOCK` gets Bash's warning only when a forward runs
+  (Bash warns on every msb command). An invalid `ACQ_MSB_SSH_AGENT_VSOCK_PORT`
+  stops the bridge with a warning instead of reaching the guest `sh -c`, and a
+  recorded `ssh-auth-sock` value outside the word-safe charset is ignored. A
+  relative `ACQ_FORWARD_HOST_SOCKETS` path is skipped with a warning; Bash
+  refuses it before any command runs.
+- **`acq start` on a running sandbox** does not restart the bridge from the
+  recorded key (there was no resume); the heal's re-drive still restarts it when
+  `SSH_AUTH_SOCK` names a socket. A `run` re-attach to a *stopped* sandbox does
+  not heal at all (see §78), so it does not re-drive the forward either; use
+  `acq start NAME` first.
+- Each guest call of the forward is bounded at 60 seconds (Bash has no bound).
+
+Both implementations share two limits. The route link's target (a socket owned
+by you, in your own real directory, outside the workspace) is checked only when
+acq runs (`start`, `restart`, `run`), while msb dials the route on every guest
+connection, so a socket replaced between those times is not noticed until the
+next start or re-attach. And a sandbox whose route names the raw agent socket
+rather than acq's link stays connected to that agent after the opt-out until it
+is removed and recreated; acq says so when `SSH_AUTH_SOCK` is unset.
+
+**Live checks still owed.** Every behaviour above is covered against the stub
+msb only (`py-acq/tests/test_ssh_agent_forward.py`, which also compares the guest
+argv, the link path and the emitted routes and warnings with the Bash adapter's).
+On a KVM or HVF host with msb, still to run (both implementations for the
+2026-11-10 checks, the Python acq for the rest): the opt-out and reconnect at
+`acq start`; `scripts/verify-backends`-style create with a throwaway agent (in-guest
+`ssh-add -L` shows its key); a re-point after the host agent moves (stop, new
+agent at a new path, `acq start`); the running re-attach re-drive; `acq rm`
+removing the link; and a sandbox created by one implementation and resumed by
+the other. **Unblock trigger:** access to a host with msb.
+
 ---
 
-## NN. Bash acq: `acq ports NAME --publish` Accepts an Over-Long Port Number
+## 94. Bash acq: `acq ports NAME --publish` Accepts an Over-Long Port Number
 
 **Symptom:** `./acq --backend msb ports box --publish 99999999999999999999:80`
 is not refused as out of range. Bash prints `[: 99999999999999999999: integer

@@ -679,6 +679,20 @@ def guest_output(name: str, argv: list[str]) -> str:
     return proc.stdout or ""
 
 
+def call(argv: list[str], *, timeout: float) -> subprocess.CompletedProcess | None:
+    """One bounded ``msb ARGV`` call whose outcome the caller judges, or ``None``.
+
+    ``None`` means msb did not answer within ``timeout`` or could not be run at
+    all. Output is captured and never surfaced as is (see :class:`MsbError`).
+    Used by the host ssh-agent forward (:mod:`acq_py.ssh_agent`), whose guest
+    probes must keep the exact argv the Bash adapter uses.
+    """
+    try:
+        return _run(argv, timeout=timeout)
+    except (MsbError, subprocess.TimeoutExpired):
+        return None
+
+
 def guest_probe(name: str, argv: list[str]) -> str:
     """Run a read-only probe in the guest as the image's default user; its stdout, or "" on failure.
 
