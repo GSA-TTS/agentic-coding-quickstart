@@ -4101,6 +4101,66 @@ affects only sandboxes created before that change.
 
 ---
 
+## 60. Windows: DLL Search Can Reach the Workspace
+
+**Status:** Investigated, not hardened in code. Deferred until a Windows host
+check shows a program acq starts probing the current directory for a DLL.
+
+### Symptoms
+
+None observed. The risk: a DLL planted in the workspace is loaded by a native
+program acq starts on the host, the way a planted `git.exe` would have run before
+programs were resolved from absolute `PATH` entries only.
+
+### Root Cause
+
+acq resolves every program it starts to an absolute path, and the launchers set
+`NoDefaultCurrentDirectoryInExePath=1`, but neither changes how Windows finds a
+program's **DLLs**. With safe DLL search mode (the default), `LoadLibrary` looks
+in the program's own directory, then the system directories, then the **current
+directory**, then `PATH`. Every process acq starts inherits acq's current
+directory, which is normally the workspace: the Python acq never passes `cwd=`
+to a child, and the Bash acq runs in the caller's directory. So a DLL that a
+program loads by bare name, and that is in neither its own directory nor the
+system directories, is looked for in the workspace before `PATH`.
+
+What was checked (statically, from the code and the shipped layouts):
+
+- acq's own Python process loads nothing by bare name. Its only `ctypes` use is
+  `kernel32`, a KnownDLL, and CPython 3.8+ loads extension-module dependencies
+  without searching the current directory or `PATH`.
+- The managed runtime's `python.exe`, Git for Windows' `bash.exe`/`git.exe` (with
+  `msys-2.0.dll`) and `powershell.exe` keep their DLLs in their own or the
+  system directories.
+- Not checked: `msb.exe`, `sbx.exe` and anything they start. A phantom DLL (one
+  a program probes for but nobody ships) or a dependency expected on `PATH`
+  would be found in the workspace first. This needs a Windows host to observe.
+
+### Fix
+
+No code change yet: removing the current directory from a child's DLL search
+order would mean starting each child from a directory outside the workspace
+(several commands take workspace-relative paths) or relying on how
+`SetDllDirectoryW("")` is inherited by child processes, and neither can be
+verified without a Windows host. An administrator can close it for every process
+now with the documented `CWDIllegalInDllSearch` setting (system-wide under
+`HKLM\SYSTEM\CurrentControlSet\Control\Session Manager`, or per program under
+`Image File Execution Options\<program>.exe`); `0xFFFFFFFF` removes the current
+directory from the DLL search order.
+
+### Prevention / Status
+
+**Unblock trigger:** the next Windows live check. Run `acq --backend msb run
+shell .` and `acq --backend sbx run shell .` from a workspace under Process
+Monitor, filtered to `.dll` paths inside the workspace (any result, including
+`NAME NOT FOUND`), for `msb.exe`, `sbx.exe`, `git.exe`, `bash.exe` and
+`python.exe` and their children. If none probes the workspace, record that and
+close this entry. If one does, harden that launch (start it from a trusted
+directory, or confirm `SetDllDirectoryW("")` in the launching process reaches
+it) and add a Windows test that plants the DLL.
+
+---
+
 ## Contributing
 
 When you discover a new failure mode:

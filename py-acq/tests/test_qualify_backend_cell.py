@@ -78,6 +78,30 @@ def test_which_ignores_relative_path_entries(tmp_path, monkeypatch):
     assert qbc.which("msb", path=str(tmp_path)) == str(planted)
 
 
+def test_the_oracle_resolves_programs_with_acqs_own_resolver():
+    # One rule for acq and its qualification oracle: acq_py.hostexec, loaded from
+    # this checkout (the oracle runs as a script, without py-acq/src on sys.path).
+    assert Path(qbc.hostexec.__file__) == REPO_ROOT / "py-acq" / "src" / "acq_py" / "hostexec.py"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows current-directory search")
+def test_which_never_finds_a_program_in_the_current_directory_on_windows(tmp_path, monkeypatch):
+    # shutil.which searches the current directory first on Windows even when given
+    # an explicit path, and accepts batch files through PATHEXT.
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    for name in ("msb.exe", "sbx.exe", "bash.exe"):
+        (ws / name).write_bytes(b"MZ")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "msb.cmd").write_text("@echo off\n")
+    monkeypatch.chdir(ws)
+    monkeypatch.delenv("NoDefaultCurrentDirectoryInExePath", raising=False)
+    for name in ("msb", "sbx"):
+        assert qbc.which(name, path=str(bin_dir)) is None
+    assert qbc.find_bash(str(bin_dir), os_name="nt", environ={}) is None
+
+
 # ---- the checks, against a fake backend --------------------------------------
 
 

@@ -273,6 +273,27 @@ otherwise default host; allow local scripts for your user with
 one-liner, which is not affected because piped text is not a script file). On a
 managed device the policy may be set by Group Policy.
 
+**Keep cmd.exe from running programs out of the current directory.** cmd.exe looks
+for a typed command in the current directory before it searches `PATH`. You
+usually run `acq` from inside the workspace it sandboxes, and the agent in the
+sandbox can write to that workspace, so typing `acq` (or `git`, `msb`, ...) at a
+cmd.exe prompt there would run an `acq.cmd`, `acq.bat` or `acq.exe` the agent left
+behind, on the host and outside the sandbox. PowerShell does not do this (it runs
+a program from the current directory only when you type `.\name`), and the
+processes acq starts already skip the current directory. To close it for cmd.exe
+as well, set `NoDefaultCurrentDirectoryInExePath` for your user once, then open a
+new terminal:
+
+```powershell
+[Environment]::SetEnvironmentVariable("NoDefaultCurrentDirectoryInExePath", "1", "User")
+```
+
+With it set, cmd.exe (and any program that asks Windows whether to search the
+current directory) runs a program from the current directory only when you name
+it with a path, such as `.\tool.exe`. Remove the variable to undo it. The variable
+does not change where Windows looks for a program's DLLs; see
+[Known Failure Modes §60](../KNOWN_FAILURE_MODES.md#60-windows-dll-search-can-reach-the-workspace).
+
 If WHP is disabled, stop: enable it from an **elevated** PowerShell
 (`Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All`),
 restart, and re-run the installer. On a managed device, ask your IT administrator

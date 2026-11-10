@@ -397,7 +397,8 @@ def test_every_harness_module_is_classified_as_surface_or_read_only():
     # as read-only; otherwise editing it would silently not expire any evidence.
     from qualification.matrix import TIER3_SURFACE
 
-    read_only = {"qualification/matrix.py", "qualification/ledger.py", "qualification/gate.py", "qualification/host.py", "qualification/publish.py"}
+    read_only = {"qualification/matrix.py", "qualification/ledger.py", "qualification/gate.py", "qualification/host.py",
+                 "qualification/publish.py", "qualification/hostexec.py"}
     for path in sorted((REPO_ROOT / "qualification").glob("*.py")):
         rel = f"qualification/{path.name}"
         assert rel in TIER3_SURFACE or rel in read_only, f"{rel} is not classified"
@@ -736,6 +737,11 @@ def test_a_pr_cannot_carve_its_own_change_out_of_the_surface_or_rewrite_the_gate
     cli = repo / "py-acq" / "src" / "acq_py" / "cli.py"
     cli.parent.mkdir(parents=True)
     cli.write_text("def main():\n    return 0\n")
+    # The package resolves git through acq's own resolver, loaded from beside it.
+    # Its bytecode cache lands under acq_py/ (the surface); ignore it, as the real
+    # repository does, so running the gate does not itself change the surface.
+    shutil.copy(REPO_ROOT / "py-acq" / "src" / "acq_py" / "hostexec.py", cli.parent / "hostexec.py")
+    (repo / ".gitignore").write_text("__pycache__/\n")
     _git(repo, "init", "-q")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "base")

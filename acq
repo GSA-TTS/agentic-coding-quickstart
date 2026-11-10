@@ -7,6 +7,39 @@
 
 set -euo pipefail
 
+# _acq_path_absolute_only — drop every PATH entry that is not absolute, so a bare
+# program name (msb, sbx, git, python3, and every utility acq runs) is only ever
+# found in an absolute directory. An empty entry (a leading, trailing or doubled
+# ':') and a relative one such as '.' make the shell search the current
+# directory, which is normally the workspace a sandboxed agent can write to: a
+# planted ./git or ./msb would run on the host. This mirrors acq_py.hostexec,
+# which resolves programs from absolute PATH entries only.
+#
+# An entry counts only when it starts with '/'. A drive-rooted form cannot
+# survive the ':' split (C:/x becomes the relative 'C' and '/x'), so Git Bash
+# needs no special case. Order is kept. It runs first, before the script
+# directory is resolved (that runs dirname and readlink), and uses nothing but
+# shell builtins. When no entry is left it changes nothing and returns 1: an
+# empty PATH would itself mean the current directory.
+_acq_path_absolute_only() {
+  local rest="${PATH-}:" entry kept=""
+  while [ -n "$rest" ]; do
+    entry=${rest%%:*}
+    rest=${rest#*:}
+    case "$entry" in
+      /*) kept="${kept:+$kept:}$entry" ;;
+    esac
+  done
+  [ -n "$kept" ] || return 1
+  PATH=$kept
+  export PATH
+}
+
+_acq_path_absolute_only || {
+  echo "acq: PATH has no absolute directory, so programs cannot be found without searching the current directory" >&2
+  exit 1
+}
+
 # Resolve the absolute directory containing this script, following symlinks.
 _acq_script_dir() {
   local src="${BASH_SOURCE[0]}" dir
