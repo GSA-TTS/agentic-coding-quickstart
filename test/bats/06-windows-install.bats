@@ -263,15 +263,15 @@ teardown() {
     refute_output --partial '[dry-run]'
   done
   # The refused value is echoed with control characters replaced.
-  run pwsh -NoLogo -NoProfile -File "$REPO_ROOT/install.ps1" -DryRun -InstallDir $'rel\033]0;t\007x'
+  run pwsh -NoLogo -NoProfile -File "$installer" -DryRun -InstallDir $'rel\033]0;t\007x'
   assert_failure 1
   assert_output --partial "got 'rel?]0;t?x'"
   refute_output --partial $'\033'
   # A fully qualified -InstallDir is accepted.
-  run pwsh -NoLogo -NoProfile -File "$REPO_ROOT/install.ps1" -DryRun -InstallDir 'C:\acq-test'
+  run pwsh -NoLogo -NoProfile -File "$installer" -DryRun -InstallDir 'C:\acq-test'
   assert_success
   assert_output --partial 'install dir: C:\acq-test'
-  MSYS2_ARG_CONV_EXCL='*' run pwsh -NoLogo -NoProfile -File "$REPO_ROOT/install.ps1" -DryRun -InstallDir '\\server\share\acq'
+  MSYS2_ARG_CONV_EXCL='*' run pwsh -NoLogo -NoProfile -File "$installer" -DryRun -InstallDir '\\server\share\acq'
   assert_success
   assert_output --partial 'install dir: \\server\share\acq'
   run ls -A "$STUBDIR/work"
