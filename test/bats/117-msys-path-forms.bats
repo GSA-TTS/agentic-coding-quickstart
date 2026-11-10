@@ -131,9 +131,13 @@ _msys_provision() { # NAME WS
 }
 
 @test "msys: a UNC workspace mounts its UNC host path at the /unc/ guest path" {
-  _plant_cygpath_stub
   # A leading // names the same directory as / on Linux and macOS, so this
   # workspace exists for the -d check while canonicalize_path treats it as UNC.
+  # Under real MSYS/Cygwin //tmp/... is a network path that does not exist.
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN*) skip "a leading // is a real UNC path on this host" ;;
+  esac
+  _plant_cygpath_stub
   local ws="/$STUBDIR/uncws"
   mkdir -p "$ws"
   _msys_provision uncbox "$ws"
@@ -145,12 +149,12 @@ _msys_provision() { # NAME WS
 }
 
 @test "posix: canonicalize_path still resolves a leading-// path without cygpath" {
+  command -v cygpath >/dev/null 2>&1 && skip "cygpath present: a leading // is UNC here"
   mkdir -p "$STUBDIR/real-ws"
   ln -s "$STUBDIR/real-ws" "$STUBDIR/link-ws"
   run bash -c '
     export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
     . "'"$REPO_ROOT"'/acq.backends/common.sh"
-    command -v cygpath >/dev/null 2>&1 && { echo "cygpath present"; exit 1; }
     canonicalize_path "$1"
   ' _ "/$STUBDIR/link-ws"
   assert_success
