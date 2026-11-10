@@ -4602,24 +4602,49 @@ login-shell sync into the agent-user setup.
 
 ---
 
-## 79. Sandbox Lock Directory Without an Owner Is Never Removed Automatically
+## 79. Lock Directory Without an Owner Is Never Removed Automatically
 
-**Symptom:** Every acq command on one sandbox (`create`, `run`, `rm`, `start`)
-waits and then fails with `timeout`. The remediation names a directory ending in
-`.lock` under `.../acq/provenance/provider-input/<backend>/`, and no other acq
-command is running.
+**Symptom:** One of these, with no other acq command running:
 
-**Cause:** Both the Bash and the Python acq take a per-sandbox `mkdir` lock and
-write `PID IDENTITY` into its `owner` file. A lock whose owner process is gone
+- Every acq command on one sandbox (`create`, `run`, `rm`, `start`) waits and
+  then fails with `timeout`, or Bash acq stops at once with `provider-input
+  lock has no valid owner metadata`. The message names a directory ending in
+  `.lock` under `.../acq/provenance/provider-input/<backend>/`.
+- Every change to `config.yaml` (`backend set`/`unset`, `configure`,
+  `kit-source` and `provider-credential` in Bash acq, and in the Python acq
+  every mutating command, whose schema migration takes the same lock) fails
+  with `could not take the config.yaml lock` (Bash) or `could not acquire the
+  config.yaml lock` (Python, as `migration_failed`). The message names
+  `.../acq/locks/config.lock.d` under the acq state directory.
+
+**Cause:** Both the Bash and the Python acq take these `mkdir` locks and write
+`PID IDENTITY` into the lock's `owner` file; the Python acq takes the
+`config.yaml` one while it holds its own OS lock on `locks/config.lock`, which
+Bash cannot take portably (see `_acq_config_lock_acquire` in
+`acq.backends/common.sh` and `ConfigDirLock` in `py-acq/src/acq_py/lock.py`).
+A lock whose owner process is gone, or whose PID now belongs to another process,
 is recovered automatically. A lock directory with no readable owner line is
 not: the same state exists, briefly, while another command is between its
 `mkdir` and its owner write, so removing it automatically could break a live
 lock. Such a directory is left only when an acq process died in exactly that
 moment, or the directory was made by hand.
 
+On Windows neither Git Bash nor native Python can check the other's process
+IDs, so the `config.yaml` lock directory counts as held for 60 seconds after it
+was made and is recovered after that (a `config.yaml` write takes well under a
+second); the per-sandbox lock counts as held for 15 minutes and the Python acq
+never removes it.
+
 **Resolution:** Make sure no acq command is running, then remove the directory
-the message names (`rmdir` it, or delete it with its contents if it has any)
-and retry.
+the message names and retry. Every such message prints the command with the
+path filled in:
+
+```bash
+rm -f -- '<lock dir>/owner' && rmdir -- '<lock dir>'
+```
+
+In PowerShell: `Remove-Item -LiteralPath '<lock dir>' -Recurse -Force`. See also
+[Removing a leftover lock](howto/acq.md#removing-a-leftover-lock).
 
 ---
 

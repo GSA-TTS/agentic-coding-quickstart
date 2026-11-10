@@ -849,3 +849,148 @@ def test_doctor_fails_on_a_dangling_symlink(tmp_path):
     link.symlink_to(tmp_path / "gone.yaml")
     check = config.doctor_check()
     assert check["status"] == "fail" and "dangling symlink" in check["message"]
+
+
+# ---------------------------------------------------------------------------
+# The config.yaml lock Bash and Python share (lock.ConfigDirLock, Bash
+# _acq_config_lock_acquire).
+# ---------------------------------------------------------------------------
+
+def _dir_lock() -> Path:
+    path = config.config_lock_path()
+    return path.with_name(path.name + ".d")
+
+
+def _hold_dir_lock(owner: str | None) -> Path:
+    """Leave the shared lock directory as another command would, with ``owner`` as its owner line."""
+    lock_dir = _dir_lock()
+    lock_dir.mkdir(parents=True)
+    if owner is not None:
+        (lock_dir / "owner").write_text(owner + "\n", encoding="utf-8")
+    return lock_dir
+
+
+def _live_owner() -> str:
+    from acq_py import lock
+
+    identity = lock._process_identity(os.getpid())
+    if identity is None:
+        pytest.skip("no process identity (ps) on this host")
+    return f"{os.getpid()} {identity}"
+
+
+@POSIX_ONLY
+def test_python_config_write_takes_and_releases_the_shared_lock_directory(monkeypatch):
+    from acq_py import lock
+
+    seen = []
+    real = config._write_field_locked
+    monkeypatch.setattr(config, "_write_field_locked",
+                        lambda k, v: seen.append(lock._owner_line(_dir_lock())) or real(k, v))
+    config.write_field("backend", "sbx")
+    assert seen == [_live_owner()]  # held, with this process as its owner, during the write
+    assert not os.path.lexists(_dir_lock())
+
+
+@POSIX_ONLY
+def test_python_config_write_waits_for_a_live_holder_of_the_shared_lock(monkeypatch):
+    path = _write_config(b"schema: 1\nbackend: msb\n")
+    lock_dir = _hold_dir_lock(_live_owner())  # as a running Bash acq leaves it
+    monkeypatch.setenv("ACQ_MIGRATION_LOCK_TIMEOUT", "0.3")
+    with pytest.raises(config.ConfigLockTimeout) as exc:
+        config.write_field("backend", "sbx")
+    message = str(exc.value)
+    assert f"{lock_dir} is held" in message
+    assert f"rm -f -- {lock_dir}/owner && rmdir -- {lock_dir}" in message
+    assert path.read_bytes() == b"schema: 1\nbackend: msb\n"
+    assert lock_dir.is_dir()
+
+
+@POSIX_ONLY
+def test_python_never_removes_a_shared_lock_directory_with_no_owner(monkeypatch):
+    lock_dir = _hold_dir_lock(None)
+    monkeypatch.setenv("ACQ_MIGRATION_LOCK_TIMEOUT", "0.3")
+    with pytest.raises(config.ConfigLockTimeout, match="remove the leftover lock directory"):
+        config.write_field("backend", "sbx")
+    assert lock_dir.is_dir()
+    # The documented recovery command clears it.
+    subprocess.run(["sh", "-c", f"rm -f -- '{lock_dir}/owner' && rmdir -- '{lock_dir}'"], check=True)
+    config.write_field("backend", "sbx")
+    assert config.read_field("backend") == "sbx"
+
+
+@POSIX_ONLY
+def test_python_recovers_a_shared_lock_left_by_a_dead_holder():
+    proc = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"], capture_output=True,
+                          text=True, check=True)
+    lock_dir = _hold_dir_lock(f"{proc.stdout.strip()} Thu1Jan00:00:001970")
+    config.write_field("backend", "sbx")
+    assert config.read_field("backend") == "sbx"
+    assert not os.path.lexists(lock_dir)
+
+
+@needs_bash
+def test_bash_config_write_waits_while_python_holds_the_config_lock():
+    path = _write_config(b"schema: 1\nbackend: msb\n")
+    env = {"ACQ_MIGRATION_LOCK_TIMEOUT": "0.4"}
+    with config.config_lock():
+        proc = subprocess.run(
+            [BASH, "-c", 'source "$1"; _acq_config_write_field backend sbx', "bash", str(COMMON_SH)],
+            capture_output=True, text=True, timeout=60, env={**os.environ, **env},
+        )
+        assert proc.returncode == 1, proc.stderr
+        assert "could not take the config.yaml lock" in proc.stderr
+        assert path.read_bytes() == b"schema: 1\nbackend: msb\n"
+    proc = _bash("_acq_config_write_field backend sbx")
+    assert proc.returncode == 0, proc.stderr
+    assert config.read_field("backend") == "sbx"
+    assert not os.path.lexists(_dir_lock())
+
+
+@needs_bash
+def test_python_config_write_waits_while_bash_holds_the_shared_lock(monkeypatch):
+    # Bash holds the lock while it rewrites config.yaml; a Python write in that
+    # window waits instead of overwriting the Bash change with stale content.
+    path = _write_config(b"schema: 1\nbackend: msb\n")
+    gate = _dir_lock().parent / "gate"
+    script = (
+        '_acq_config_write_field_locked() { : > "$1"; while [ -e "$1" ]; do sleep 0.05; done; }; '
+        '_acq_config_write_field "$1"'
+    )
+    holder = subprocess.Popen([BASH, "-c", f'source "$1"; shift; {script}', "bash", str(COMMON_SH), str(gate)],
+                              stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              env={**os.environ, "LC_ALL": "C"})
+    try:
+        deadline = time.monotonic() + 30
+        while not gate.exists():
+            assert holder.poll() is None, holder.communicate()
+            assert time.monotonic() < deadline, "the Bash writer never took the lock"
+            time.sleep(0.05)
+        monkeypatch.setenv("ACQ_MIGRATION_LOCK_TIMEOUT", "0.3")
+        with pytest.raises(config.ConfigLockTimeout):
+            config.write_field("backend", "sbx")
+        assert path.read_bytes() == b"schema: 1\nbackend: msb\n"
+    finally:
+        gate.unlink(missing_ok=True)
+        holder.communicate(timeout=30)
+    assert holder.returncode == 0
+    monkeypatch.delenv("ACQ_MIGRATION_LOCK_TIMEOUT")
+    config.write_field("backend", "sbx")
+    assert config.read_field("backend") == "sbx"
+
+
+def test_windows_rule_counts_a_fresh_directory_as_held_and_recovers_an_old_one():
+    # ConfigDirLock._acquire_windows is plain os code, so its rule is checked here
+    # on any host: neither side can check the other's PID on Windows, so the age
+    # of the directory decides.
+    from acq_py import lock, state
+
+    shared = lock.ConfigDirLock(config.config_lock_path(), state.state_dir())
+    lock_dir = _hold_dir_lock("4242 unverified")
+    assert shared._acquire_windows() is False and shared.blocked
+    old = time.time() - lock.CONFIG_WINDOWS_STALE_S - 5
+    os.utime(lock_dir, (old, old))
+    assert shared._acquire_windows() is True
+    assert lock._owner_line(lock_dir) == f"{os.getpid()} windows"
+    shared.release()
+    assert not os.path.lexists(lock_dir)

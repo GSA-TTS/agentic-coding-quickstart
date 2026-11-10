@@ -18,6 +18,7 @@ This is an internal primitive, not part of the public ``acq`` command surface.
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -465,18 +466,18 @@ _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 
-def _open_lock_parent(parent: Path) -> int:
-    """Open (creating as needed) the Bash lock's parent directory; returns its descriptor.
+def _open_lock_parent(parent: Path, root: Path, label: str = "sandbox lock") -> int:
+    """Open (creating as needed) a ``mkdir`` lock's parent directory; returns its descriptor.
 
-    The provenance root is acq's own tree and is created normally (it may sit
-    under a home directory that is itself reached through a link). Every
-    directory below it is created and opened relative to the one above with
-    ``O_NOFOLLOW``, as Bash's ``_acq_provider_input_safe_mkdir`` walks its path,
-    so a link planted there can never send the lock, or the owner file written
-    into it, out of the tree. Raises :class:`SandboxLockUnsafe` for a link or
-    non-directory on the way.
+    ``root`` (the provenance root, or the state root) is acq's own tree and is
+    created normally (it may sit under a home directory that is itself reached
+    through a link). Every directory below it is created and opened relative to
+    the one above with ``O_NOFOLLOW``, as Bash's
+    ``_acq_provider_input_safe_mkdir`` walks its path, so a link planted there
+    can never send the lock, or the owner file written into it, out of the tree.
+    Raises :class:`SandboxLockUnsafe` for a link or non-directory on the way;
+    ``label`` names the lock in its message.
     """
-    root = bash_provenance_dir()
     root.mkdir(parents=True, exist_ok=True)
     fd = os.open(root, os.O_RDONLY | _O_DIRECTORY)
     here = root
@@ -491,7 +492,7 @@ def _open_lock_parent(parent: Path) -> int:
                 child = os.open(part, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW, dir_fd=fd)
             except OSError as exc:
                 raise SandboxLockUnsafe(
-                    f"unsafe sandbox lock path: {here} is a symbolic link or not a directory",
+                    f"unsafe {label} path: {here} is a symbolic link or not a directory",
                     f"remove {here} (acq creates it again as a directory), then retry",
                 ) from exc
             os.close(fd)
@@ -590,40 +591,51 @@ def _bash_owner_state(lock_dir: Path, line: str | None = None) -> str:
     return "invalid"
 
 
-class _BashLock:
-    """Bash acq's per-sandbox ``mkdir`` lock, taken and released the Bash way.
+class _MkdirLock:
+    """A ``mkdir`` lock Bash and Python acq share, taken and released the Bash way.
 
-    Bash's provision and terminate paths ``mkdir`` ``<provider-input root>.lock``
-    and write ``PID IDENTITY`` into its ``owner`` file; a holder whose PID is gone
-    or whose identity changed is recovered as stale. Python acq takes the same
-    directory with its own PID and identity, so a Bash command waits for it and
-    can recover it after a crash, and it applies the same rules to a Bash holder.
+    The lock is a directory; whoever creates it writes ``PID IDENTITY`` into its
+    ``owner`` file, and a holder whose PID is gone or whose identity changed is
+    recovered as stale (:func:`_bash_owner_state`). Python takes it with its own
+    PID and identity, so a Bash command waits for it and can recover it after a
+    crash, and it applies the same rules to a Bash holder. A directory with no
+    readable owner line is never removed: it may be another command's lock in
+    the instant between its ``mkdir`` and its owner write, so a waiter times out
+    and :meth:`recovery_command` says how to remove a leftover one.
 
     Where Python cannot compute its own identity (no ``ps``) it does not take the
     directory, since Bash could not verify it, and only waits for a live Bash
-    holder. On Windows there is no usable PID probe (Git Bash PIDs are not
-    Windows PIDs, and ``os.kill`` terminates rather than probes), so Python never
-    takes the directory and treats an existing one as held for
-    ``_BASH_WINDOWS_FRESH_S`` seconds after it was created.
+    holder. Windows has no PID probe that works across Git Bash and native
+    Python; each lock decides there what an existing directory means
+    (:meth:`_acquire_windows`).
     """
 
-    def __init__(self, backend: str, name: str):
-        self.path = _bash_lock_dir(backend, name)
+    label = "lock"
+
+    def __init__(self, path: Path, root: Path):
+        self.path = path
+        self.root = root
         self.token: str | None = None
         self.blocked = False
+        self._identity: tuple[str | None] | None = None
+
+    def _own_identity(self) -> str | None:
+        """This process's identity, worked out once (it cannot change while the process lives)."""
+        if self._identity is None:
+            self._identity = (_process_identity(os.getpid()),)
+        return self._identity[0]
 
     def acquire(self) -> bool:
         """Take the lock, or return False while a Bash or Python holder has it."""
         self.blocked = False
         if sys.platform == "win32":  # pragma: no cover - Windows only
-            self.blocked = self._recent_on_windows()
-            return not self.blocked
-        identity = _process_identity(os.getpid())
+            return self._acquire_windows()
+        identity = self._own_identity()
         for _attempt in range(3):
             if identity is None:
                 self.blocked = self.path.exists() and _bash_owner_state(self.path) != "stale"
                 return not self.blocked
-            parent = _open_lock_parent(self.path.parent)
+            parent = _open_lock_parent(self.path.parent, self.root, self.label)
             try:
                 if self._take(parent, f"{os.getpid()} {identity}"):
                     return True
@@ -637,6 +649,9 @@ class _BashLock:
             return False
         self.blocked = True
         return False
+
+    def _acquire_windows(self) -> bool:  # pragma: no cover - Windows only
+        raise NotImplementedError
 
     def _take(self, parent: int, token: str) -> bool:
         """``mkdir`` the lock under the open ``parent`` and write the owner line; False when it exists.
@@ -674,18 +689,17 @@ class _BashLock:
             self._remove(self.token)
         self.token = None
 
-    def remediation(self, name: str) -> str:
-        """The next step for a user whose command timed out on this sandbox's lock."""
-        base = f"wait for the other acq command on sandbox '{name}' to finish, then retry"
-        if not self.blocked:
-            return base
+    def recovery_command(self) -> str:
+        """The command that removes a leftover lock directory, for a user to paste.
+
+        Only for when no acq command is running: the directory may otherwise be
+        a live command's lock. POSIX shell (and Git Bash) form, or PowerShell on
+        Windows.
+        """
         if sys.platform == "win32":  # pragma: no cover - Windows only
-            return (
-                f"{base}; a lock left by Bash acq ({self.path}) counts as held for "
-                f"{int(_BASH_WINDOWS_FRESH_S // 60)} minutes after it was taken, so if no "
-                "acq command is running, wait or remove that directory"
-            )
-        return f"{base}; if no acq command is running, remove the leftover lock directory {self.path}"
+            literal = "'" + str(self.path).replace("'", "''") + "'"
+            return f"Remove-Item -LiteralPath {literal} -Recurse -Force"
+        return f"rm -f -- {shlex.quote(str(self.path / 'owner'))} && rmdir -- {shlex.quote(str(self.path))}"
 
     def _remove(self, expected: str | None) -> None:
         """Remove the lock, unless its owner line is no longer ``expected``.
@@ -710,6 +724,42 @@ class _BashLock:
         except OSError:
             pass
 
+
+class _BashLock(_MkdirLock):
+    """Bash acq's per-sandbox ``mkdir`` lock (see :class:`_MkdirLock`).
+
+    Bash's provision and terminate paths ``mkdir`` ``<provider-input root>.lock``
+    and write ``PID IDENTITY`` into its ``owner`` file. On Windows there is no
+    usable PID probe (Git Bash PIDs are not Windows PIDs, and ``os.kill``
+    terminates rather than probes), so Python never takes the directory and
+    treats an existing one as held for ``_BASH_WINDOWS_FRESH_S`` seconds after it
+    was created.
+    """
+
+    label = "sandbox lock"
+
+    def __init__(self, backend: str, name: str):
+        super().__init__(_bash_lock_dir(backend, name), bash_provenance_dir())
+
+    def _acquire_windows(self) -> bool:  # pragma: no cover - Windows only
+        self.blocked = self._recent_on_windows()
+        return not self.blocked
+
+    def remediation(self, name: str) -> str:
+        """The next step for a user whose command timed out on this sandbox's lock."""
+        base = f"wait for the other acq command on sandbox '{name}' to finish, then retry"
+        if not self.blocked:
+            return base
+        if sys.platform == "win32":  # pragma: no cover - Windows only
+            return (
+                f"{base}; a lock left by Bash acq ({self.path}) counts as held for "
+                f"{int(_BASH_WINDOWS_FRESH_S // 60)} minutes after it was taken, so if no "
+                f"acq command is running, wait or remove that directory: {self.recovery_command()} "
+                "(see docs/KNOWN_FAILURE_MODES.md, section 79)"
+            )
+        return (f"{base}; if no acq command is running, remove the leftover lock directory: "
+                f"{self.recovery_command()} (see docs/KNOWN_FAILURE_MODES.md, section 79)")
+
     def _recent_on_windows(self) -> bool:  # pragma: no cover - Windows only
         try:
             if self.path.is_symlink() or not self.path.is_dir():
@@ -717,3 +767,74 @@ class _BashLock:
             return time.time() - self.path.stat().st_mtime < _BASH_WINDOWS_FRESH_S
         except OSError:
             return False
+
+
+# On Windows a config.yaml lock directory counts as held for this long after it
+# was created, then as abandoned (Bash ``_ACQ_CONFIG_LOCK_WINDOWS_STALE_S``). A
+# config write takes well under a second.
+CONFIG_WINDOWS_STALE_S = 60.0
+
+
+class ConfigDirLock(_MkdirLock):
+    """The ``mkdir`` half of the config.yaml lock, shared with Bash acq.
+
+    Python serializes config.yaml read-modify-writes with an OS advisory lock
+    on ``locks/config.lock`` (``config.config_lock``). Bash cannot take that
+    lock portably (no ``flock(1)`` on macOS; Git Bash's locks are not the ones
+    ``msvcrt.locking`` takes), so both also take the directory
+    ``locks/config.lock.d`` beside it (Bash ``_acq_config_lock_acquire``), and
+    Python takes it only while it holds the OS lock. On POSIX the owner rules
+    of :class:`_MkdirLock` apply. On Windows neither side can check the other's
+    PID, so both take the directory and count an existing one as held for
+    :data:`CONFIG_WINDOWS_STALE_S` seconds after it was created, then recover
+    it.
+    """
+
+    label = "config.yaml lock"
+
+    def __init__(self, os_lock_path: Path, root: Path):
+        super().__init__(os_lock_path.with_name(os_lock_path.name + ".d"), root)
+
+    def _acquire_windows(self) -> bool:
+        """Take the directory, recovering one older than :data:`CONFIG_WINDOWS_STALE_S`.
+
+        Platform-neutral code (no ``dir_fd``), so it is also tested off Windows.
+        """
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        token = f"{os.getpid()} windows"
+        for _attempt in range(3):
+            try:
+                os.mkdir(self.path)
+            except FileExistsError:
+                if self.path.is_symlink() or not self.path.is_dir():
+                    raise SandboxLockUnsafe(
+                        f"unsafe {self.label} path: {self.path} is a symbolic link or not a directory",
+                        f"remove {self.path}, then retry",
+                    ) from None
+                line = _owner_line(self.path)
+                if self._age_s() >= CONFIG_WINDOWS_STALE_S:
+                    self._remove(line)
+                    continue
+                self.blocked = True
+                return False
+            try:
+                with open(self.path / "owner", "x", encoding="utf-8") as fh:
+                    fh.write(token + "\n")
+            except OSError:
+                self._remove(None)
+                raise
+            self.token = token
+            return True
+        self.blocked = True
+        return False
+
+    def _age_s(self) -> float:
+        try:
+            return time.time() - self.path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    def hint(self) -> str:
+        """What to do when a leftover directory blocked the wait."""
+        return (f"if no acq command is running, remove the leftover lock directory and retry: "
+                f"{self.recovery_command()} (see docs/KNOWN_FAILURE_MODES.md, section 79)")

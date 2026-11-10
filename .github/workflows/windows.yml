@@ -115,6 +115,7 @@ jobs:
             'test/bats/55-version.bats' \
             'test/bats/117-msys-path-forms.bats' \
             'test/bats/163-provider-input-windows-native.bats' \
+            'test/bats/165-config-lock.bats' \
             'test/bats/helper.bash' \
             'test/vendor' \
             '.gitmodules' \
@@ -402,7 +403,8 @@ jobs:
           set -euo pipefail
           bash --version | head -1
           test/vendor/bats-core/bin/bats test/bats/55-version.bats test/bats/06-windows-install.bats \
-            test/bats/117-msys-path-forms.bats test/bats/163-provider-input-windows-native.bats
+            test/bats/117-msys-path-forms.bats test/bats/163-provider-input-windows-native.bats \
+            test/bats/165-config-lock.bats
 
   # The status to require. It always runs, and fails unless `changes` succeeded
   # and each Windows job either passed or was skipped as irrelevant.

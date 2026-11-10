@@ -775,7 +775,24 @@ EOF
   ACQ_PROVIDER_INPUT_LOCK_RETRIES=1 run acq_provider_input_lock_acquire sbx stalebox
   assert_failure
   assert_output --partial "owned by live pid $$"
+  assert_output --partial "gave up waiting for the provider-input lock: $lock"
+  assert_output --partial "rm -f -- '$lock/owner' && rmdir -- '$lock'"
   rm -f "$lock/owner"; rmdir "$lock"
+}
+
+@test "projection lock never removes a lock with no owner and names the recovery command" {
+  local root lock
+  root=$(acq_provider_input_root sbx ownerless); lock="${root}.lock"
+  _acq_provider_input_safe_mkdir "$lock"
+  run acq_provider_input_lock_acquire sbx ownerless
+  assert_failure
+  assert_output --partial "provider-input lock has no valid owner metadata: $lock"
+  assert_output --partial "rm -f -- '$lock/owner' && rmdir -- '$lock'"
+  [ -d "$lock" ]
+  rm -f -- "$lock/owner" && rmdir -- "$lock"
+  run acq_provider_input_lock_acquire sbx ownerless
+  assert_success
+  acq_provider_input_lock_release "${lines[${#lines[@]} - 1]}"
 }
 
 @test "provision interruption releases provider-input lock" {
