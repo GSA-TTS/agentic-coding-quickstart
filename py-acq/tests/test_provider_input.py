@@ -13,6 +13,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -326,7 +327,21 @@ def test_a_models_url_on_another_host_is_refused(tmp_path):
 
 def test_the_bundled_usai_kit_has_valid_facts():
     found = provider_input.selected_facts(["usai-provider", "opencode"], kitspec.BUNDLE_DIR)
-    assert [(k, f.provider, f.host) for k, _m, f in found] == [("usai-provider", "usai", "api.gsa.usai.gov")]
+    assert [(k, f.provider, f.host) for k, _m, f in found] == [
+        (kitspec.BUNDLE_DIR / "usai-provider", "usai", "api.gsa.usai.gov")]
+
+
+def test_a_kit_outside_the_bundle_is_read_from_its_own_directory(tmp_path):
+    # A fetched provider kit carries its own directory; the bundle copy of a kit
+    # with the same name must not be read in its place.
+    kit = tmp_path / "fetched" / "usai-provider"
+    shutil.copytree(kitspec.BUNDLE_DIR / "usai-provider", kit)
+    facts_path = kit / "provider-input" / "facts.json"
+    doc = json.loads(facts_path.read_text(encoding="utf-8"))
+    doc["modelsUrl"] = "https://api.gsa.usai.gov/api/v2/models"
+    facts_path.write_text(json.dumps(doc), encoding="utf-8")
+    found = provider_input.selected_facts([("usai-provider", kit), ("opencode", None)])
+    assert [(k, f.models_url) for k, _m, f in found] == [(kit, "https://api.gsa.usai.gov/api/v2/models")]
 
 
 def test_a_failed_create_discards_the_generation_and_the_record(monkeypatch, tmp_path, capsys):

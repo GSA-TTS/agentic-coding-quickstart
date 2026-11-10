@@ -85,11 +85,11 @@ def test_json_reports_each_setting_with_its_source_layer(monkeypatch, tmp_path, 
     assert doc["data"]["settings"] == [
         {"key": "backend", "value": "sbx", "source": "flag", "honoured_by_python": True},
         {"key": "extra_kits", "value": "git+https://example.invalid/kit", "source": "env", "honoured_by_python": True,
-         "python_applies": "bundled-only"},
+         "python_applies": "pinned-only"},
         {"key": "scope_github_token", "value": "yes", "source": "config", "honoured_by_python": True},
         {"key": "provider_credential_bindings", "value": None, "source": "default", "honoured_by_python": True},
         {"key": "provider_kit", "value": "example/kit", "source": "config", "honoured_by_python": True,
-         "python_applies": "bundled-only"},
+         "python_applies": "pinned-only"},
         {"key": "kit_sources", "value": f"github.com/team/kits@{'a' * 40}|kits", "source": "config",
          "honoured_by_python": True},
     ]
@@ -107,7 +107,7 @@ def test_json_backend_and_provider_layers(monkeypatch, tmp_path, capsys):
     settings = {s["key"]: s for s in json.loads(out)["data"]["settings"]}
     assert settings["backend"] == {"key": "backend", "value": "sbx", "source": "config", "honoured_by_python": True}
     assert settings["provider_kit"] == {"key": "provider_kit", "value": "", "source": "env", "honoured_by_python": True,
-                                        "python_applies": "bundled-only"}
+                                        "python_applies": "pinned-only"}
     assert settings["provider_credential_bindings"] == {
         "key": "provider_credential_bindings", "value": "opencode-go=OPENCODE_GO_API_KEY@opencode.ai",
         "source": "env", "honoured_by_python": True,
@@ -211,7 +211,7 @@ def test_human_report_names_flag_and_env_layers(monkeypatch, tmp_path, capsys):
     assert rc == 0 and out == ""
     assert "      default backend:    msb   [from --backend]\n" in err
     assert "      extra kits:         custom-ref   [from ACQ_EXTRA_KITS]\n" in err
-    assert err.endswith(configure.BUNDLED_ONLY_NOTE + "\n\n"
+    assert err.endswith(configure.PINNED_ONLY_NOTE + "\n\n"
                         "acq: non-interactive; configuration unchanged.\n"
                         "      Run 'acq configure' from a terminal to change kits/token scoping.\n")
     # An unknown --backend is refused, never reported as a flag-layer value.
@@ -269,8 +269,8 @@ def test_human_report_matches_bash(tmp_path):
     python = subprocess.run([sys.executable, "-m", "acq_py", "configure"], env=py_env, capture_output=True,
                             stdin=subprocess.DEVNULL, timeout=120, check=False)
     assert bash.returncode == 0 and python.returncode == 0, (bash.stderr, python.stderr)
-    # The one added line: the note that Python applies only bundled kits.
-    note = configure.BUNDLED_ONLY_NOTE.encode() + b"\n"
+    # The one added line: the note that Python applies only bundled or pinned kits.
+    note = configure.PINNED_ONLY_NOTE.encode() + b"\n"
     assert note in python.stderr
     assert python.stderr.replace(note, b"", 1) == bash.stderr
     assert python.stdout == bash.stdout == b""

@@ -7,7 +7,8 @@ Tier-3-qualified**. A few documented flags are still missing: `--clone` and
 `--publish` on `run`/`create`, `--no-update-check` on `run`, and
 `ports --publish`. `ACQ_CLONE=1` is refused with a usage error rather than
 mounting the real workspace. Some behaviour also differs; for example,
-only kits from the pinned built-in bundle are applied. The dated correction in
+a kit outside the pinned built-in bundle is applied only when its ref is pinned
+to a full commit, and a local kit directory is refused. The dated correction in
 ADR-0047m lists the gaps and the qualification state. The Bash `acq` stays the default implementation
 (`ACQ_IMPL` unset); `ACQ_IMPL=python` selects this one.
 
@@ -313,10 +314,11 @@ precedence, so `--json` reports `"honoured_by_python": true` for each:
   (one from before acq recorded it) uses the current selection; Bash uses the
   default selection there. Records the Bash acq wrote are carried over by the
   state migration.
-* Both are applied only from the pinned built-in bundle: a kit that would have
-  to be fetched (any catalog extra kit today) is refused at create and needs
-  the Bash acq (`ACQ_IMPL=bash`). `--json` marks these two settings
-  `"python_applies": "bundled-only"`.
+* A kit the built-in bundle does not hold (every catalog extra kit, a provider
+  kit from a registered source) is fetched at its pinned commit (see "Kits
+  outside the bundle" below). A local kit directory, or a ref not pinned to a
+  full commit, is refused at create and needs the Bash acq (`ACQ_IMPL=bash`).
+  `--json` marks these two settings `"python_applies": "pinned-only"`.
 * **`scope_github_token`** is the default answer (`yes`, `y` or `Y` mean yes)
   to the per-sandbox GitHub-token prompt (ADR-0013). Before a new sandbox is
   provisioned, and when `run` re-attaches, acq checks the workspace for GitHub
@@ -352,7 +354,7 @@ Deliberate differences from Bash:
   from Python's own registries, and each binding carries its own layer. The
   human report marks a flag or env value with `[from X]`; otherwise it matches
   Bash line for line, plus a note that extra and provider kits apply only from
-  the built-in bundle. Userinfo in a kit ref
+  the built-in bundle or pinned to a commit. Userinfo in a kit ref
   (`https://user:token@host`) is shown as `***@host`.
 * **Stricter failures.** A `config.yaml` write that fails exits 1 (Bash ignores
   it), a malformed `ACQ_PROVIDER_CREDENTIAL_BINDINGS` is `validation_failed`, and
@@ -422,6 +424,45 @@ kits with startup commands, so those report that the sandbox must be recreated.
 `py-acq/tests/test_kit_sbx.py` compares the translator's output with Bash's,
 file by file.
 
+### Kits outside the bundle
+
+A kit the bundle does not hold (an opt-in catalog kit from config `extra_kits`,
+a remote `ACQ_EXTRA_KITS` or `--kit` ref, a provider kit from a registered kit
+source) is fetched by `src/acq_py/kit_fetch.py`, a port of Bash
+`kit_translate_fetch` with the same refusals and some stricter ones:
+
+* Only `git+https://HOST/PATH#ref=SHA&dir=DIR` is fetched, and `SHA` must be a
+  full 40-hex commit id. A branch or tag name is refused with
+  `kit_ref_not_pinned` (Bash fetches it unverified). So are URL userinfo
+  (`credential-bearing kit URLs are not allowed`), plain `http`, a query
+  string or percent escapes, and a `dir=` that is absolute, contains `..` or
+  uses a character outside `[A-Za-z0-9._/-]`. A local kit directory is refused
+  with `unsupported_capability`.
+* The commit is fetched into a bare repository and must be exactly the pinned
+  one; the kit is checked out from that commit's tree with a private index, and
+  no symlink in it may resolve outside the kit. Only a neutral `hybrid/v1` kit
+  with a plain `name:` is applied (Bash also passes sbx-native kits through).
+* git is resolved to an absolute path, runs with `GIT_DIR` and the other
+  redirecting variables removed, without prompts, with stdin closed and under
+  `ACQ_KIT_FETCH_TIMEOUT` (default 120 s). The first attempt reads no git
+  config files; only if it fails is it retried with the user's config (for a
+  credential helper or a URL rewrite). git's own messages are never shown.
+* Any failure, including a network failure, refuses the create (or the heal)
+  before anything is created, on both backends; sbx is only ever given acq's
+  translation of the kit, never the ref.
+* A verified commit is kept under the backend's kit cache (`ACQ_MSB_KIT_CACHE`,
+  `ACQ_SBX_KIT_CACHE`; by default `$XDG_CACHE_HOME/acq/kits` and
+  `.../acq/sbx-kits`) in a private `py-fetch/` directory, so later commands,
+  such as the heal on `start`, reuse it offline. Bash fetches again in every
+  process.
+
+A fetched kit's egress allowlist on msb is read from its own spec, as Bash
+reads every kit's; the built-in kits keep the vetted table in `kits.py`. A
+fetched provider kit's facts face the same pin check as the bundled one's, so a
+kit cannot choose where a stored key is sent. Tests never use the network: the
+test configuration lets git use only its `file` transport, and
+`py-acq/tests/test_kit_fetch.py` fetches from a local bare repository.
+
 Provider-role kits (`usai-provider`) are handled by `src/acq_py/provider_input.py`.
 Before any create (and before `create --recreate` removes the old guest) acq
 checks each selected provider's facts against its pin and checks that a key is
@@ -429,8 +470,17 @@ stored: on a terminal it asks and stores one, otherwise it fails closed with
 `secret_missing`. This is stricter than Bash: a key exported in the host
 environment is not accepted (store it with `acq secret set -g usai`), and a
 provider with no pin is refused even if a host was recorded earlier (see
-`docs/KNOWN_FAILURE_MODES.md`, section 56). On msb the provider-input generation
-is mounted read-only at `ACQ_PROVIDER_INPUT_ROOT` for OpenCode's renderer. Before
+`docs/KNOWN_FAILURE_MODES.md`, section 56). The provider-input generation is
+staged before the create, mounted read-only and named by `ACQ_PROVIDER_INPUT_ROOT`
+for OpenCode's renderer, and published as `current` only once the create
+succeeded. On msb it is mounted with `--volume HOST:GUEST:ro` where msb can
+enforce a read-only mount. On sbx it is an extra workspace `PATH:ro` placed after
+the primary workspace (sbx mounts it at the same path in the guest), as Bash
+does; a generation for a create that failed is discarded only once `sbx ls`
+confirms no sandbox can be mounting it. Neither backend stages or mounts it on
+Windows yet (sections 54 and 55); the facts are still recorded for the key check.
+Where a generation is published on Windows, `current` is written as the pointer
+file the Bash acq writes there, not a symlink (section 61). Before
 `run` attaches, each recorded provider's key is probed from inside the guest
 (`provider_auth_failed`, `provider_unreachable`). Tests that create msb
 sandboxes use the `provider_key` pytest marker, which stores a throwaway usai

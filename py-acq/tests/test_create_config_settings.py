@@ -94,12 +94,12 @@ def _terminal(monkeypatch, *, answer: str, token: str | None = None) -> list[str
 # ---------------------------------------------------------------------------
 
 def test_no_provider_kits_beats_an_exported_provider_kit(monkeypatch, tmp_path, capsys):
-    # An unbundled provider kit would have to be fetched, so it is refused...
+    # An unbundled provider kit not pinned to a commit cannot be fetched, so it is refused...
     _msb_env(monkeypatch, tmp_path)
     monkeypatch.setenv("ACQ_PROVIDER_KITS", UNBUNDLED)
     ws = _plain_ws(tmp_path)
     rc, doc, _, _ = _main(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "np1", "--json")
-    assert rc == 1 and doc["error"]["code"] == "unsupported_capability"
+    assert rc == 1 and doc["error"]["code"] == "kit_ref_not_pinned"
     # ...and --no-provider-kits wins over it: no provider kit, no key required.
     rc, doc, _, err = _main(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "np1",
                             "--no-provider-kits", "--json")
