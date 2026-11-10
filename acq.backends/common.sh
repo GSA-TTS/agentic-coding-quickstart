@@ -900,9 +900,17 @@ acq_validate_agent_builtin_kit_dir() {
 }
 
 acq_validate_agent_builtin_kit_ref() {
-  local agent="$1" kitref="$2" base_dir="${3:-}" kitdir
+  local agent="$1" kitref="$2" base_dir="${3:-}" kitdir namespace
   if [ -z "$base_dir" ]; then
-    base_dir="${ACQ_STATE_DIR:-${TMPDIR:-/tmp}/acq}/agent-kit-validation/$agent"
+    # Historical validation directories may contain repositories. Leave them
+    # intact and use a distinct metadata-free namespace only for the default;
+    # an explicit caller-owned destination keeps its existing semantics.
+    namespace="${ACQ_STATE_DIR:-${TMPDIR:-/tmp}/acq}/agent-kit-validation-payload-v2"
+    if [[ "$kitref" == git+http* ]] && [ -L "$namespace" ]; then
+      echo 'acq: refusing a symlink agent kit validation namespace' >&2
+      return 1
+    fi
+    base_dir="$namespace/$agent"
   fi
   kitdir=$(kit_translate_fetch "$kitref" "$base_dir") || return 1
   acq_validate_agent_builtin_kit_dir "$agent" "$kitdir"
