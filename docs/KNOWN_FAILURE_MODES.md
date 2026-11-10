@@ -4403,3 +4403,75 @@ acq-python run opencode /path/to/your/project
 missing its read-only trusted-config mount, and refuses any other. After
 recreating, `msb inspect <sandbox>` shows `default_egress: deny` (unless
 `ACQ_NETWORK_TIER=open` was confirmed on purpose).
+
+---
+
+## Python acq: A Workspace That Holds acq's Own Directories Is Refused
+
+**Symptom:** `acq create` or `acq run` fails with `validation_failed` and a
+message such as `workspace /home/you contains acq's state directory
+(/home/you/.local/state/acq)`. A typical trigger is `acq run opencode ~`. `acq
+run NAME` and `acq create --recreate NAME` refuse the same way when the
+sandbox's recorded workspace is such a directory.
+
+**Cause:** acq mounts the workspace into the sandbox writable. acq's state tree
+holds the host records acq trusts, and its provenance tree holds each sandbox's
+host-config directory, which acq mounts read-only into the guest as trusted
+configuration (ADR-0035). If the workspace contains either of them, the guest
+can rewrite them through the writable workspace mount, which defeats the
+read-only mount entirely. The config directory and the secret store are
+refused for the same reason. A workspace inside one of those directories is
+refused too. Both paths are compared after symbolic links are resolved.
+
+**Resolution:** Run acq on the project directory itself, not on your home
+directory or another directory above acq's state, for example
+`acq run opencode ~/code/my-project`. If a sandbox was already created on such a
+workspace, remove it (`acq rm NAME`) and create it again on the project
+directory. Moving acq's directories with `XDG_STATE_HOME`, `XDG_CONFIG_HOME` or
+`XDG_DATA_HOME` also works, but it hides the sandboxes and secrets recorded at
+the old location.
+
+---
+
+## Python acq: `run` Re-Attach Heal Differs From Bash in Two Places
+
+**Symptom:** (1) `acq run NAME` on a stopped msb sandbox prints `sandbox 'NAME'
+is not running, so its kits were not re-applied`, where the Bash acq starts the
+sandbox and heals it. (2) In a sandbox the Python acq created, the agent user's
+login shell stays `/bin/sh` and no `~/.profile` bridge to `~/.bashrc` is
+written, even when the image ships bash.
+
+**Cause:** Like the Bash acq, the Python acq now re-applies a sandbox's kits and
+sets up its agent user whenever `run` re-attaches. Two parts of Bash's heal are
+not ported yet. Bash's heal starts a stopped msb sandbox first; the Python acq
+leaves starting to `acq start`, which also binds secrets stored while the
+sandbox was stopped. And the Python agent-user setup ports
+`_acq_msb_ensure_agent_user` but not the login-shell sync and profile bridge in
+`_acq_msb_ensure_agent_shell`.
+
+**Resolution:** For (1), run `acq start NAME` first; it resumes the sandbox and
+re-applies its kits. (2) has no workaround in the Python acq beyond running
+`chsh -s /bin/bash agent` in the guest as root. Both are tracked as follow-up
+work: port the start-if-stopped step into the re-attach heal, and port the
+login-shell sync into the agent-user setup.
+
+---
+
+## Sandbox Lock Directory Without an Owner Is Never Removed Automatically
+
+**Symptom:** Every acq command on one sandbox (`create`, `run`, `rm`, `start`)
+waits and then fails with `timeout`. The remediation names a directory ending in
+`.lock` under `.../acq/provenance/provider-input/<backend>/`, and no other acq
+command is running.
+
+**Cause:** Both the Bash and the Python acq take a per-sandbox `mkdir` lock and
+write `PID IDENTITY` into its `owner` file. A lock whose owner process is gone
+is recovered automatically. A lock directory with no readable owner line is
+not: the same state exists, briefly, while another command is between its
+`mkdir` and its owner write, so removing it automatically could break a live
+lock. Such a directory is left only when an acq process died in exactly that
+moment, or the directory was made by hand.
+
+**Resolution:** Make sure no acq command is running, then remove the directory
+the message names (`rmdir` it, or delete it with its contents if it has any)
+and retry.
