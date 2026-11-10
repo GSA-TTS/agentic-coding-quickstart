@@ -4181,40 +4181,54 @@ remain:
 
 ---
 
-## 67. Deferred: the Python acq has no clone mode (`--clone`, `ACQ_CLONE`)
+## 67. Resolved: the Python acq has clone mode (`--clone`, `ACQ_CLONE`)
 
-**Status:** deferred (tracked per AGENTS.md "Track Deferred Work"). The Python
-acq fails closed until clone mode is ported.
+**Status:** resolved (2026-11-10). Kept for the history of the fail-closed
+refusal it replaced.
 
-The Bash acq's `--clone`, and its env equivalent `ACQ_CLONE=1`, run `create` and
-`run` on a disposable clone of the primary workspace instead of mounting the
-real checkout (ADR-0027; native on sbx, a host-side scratch clone on msb). The
-Python acq has not ported it:
+Until 2026-11-10 the Python acq had no clone mode: `--clone` was an
+unrecognized argument, and `ACQ_CLONE=1` made `create` and `run` refuse with a
+usage error before any state, config or backend access, because before that
+refusal the variable was silently ignored and a user expecting isolation got
+the real workspace mounted read/write.
 
-- `--clone` is rejected by its parser as an unrecognized argument (exit 2).
-- `ACQ_CLONE=1` makes `create` and `run` (every form, including `run NAME`
-  and `create --recreate NAME`) refuse with a usage error (exit 2) before any
-  state, config or backend access: "clone mode (ACQ_CLONE=1) is not supported
-  by the Python implementation yet". Before this refusal, the Python acq
-  ignored the variable, so a user expecting isolation got the real workspace
-  mounted read/write.
-- Only the exact value `1` refuses, matching Bash's
-  `[ "${ACQ_CLONE:-0}" = "1" ]`. Unset, empty, `0`, `true` or any other value
-  is clone mode off in both implementations, so the Python acq proceeds. Other
-  verbs ignore the variable, as in Bash.
-- One deliberate difference: on a re-attach to an existing sandbox, Bash prints
-  a note that `ACQ_CLONE` is ignored and continues; the Python acq refuses,
-  because it cannot tell a re-attach from a create without querying the backend.
+Clone mode is now ported (`py-acq/src/acq_py/msb_clone.py`, ADR-0027):
 
-**Workaround:** unset `ACQ_CLONE` to mount the workspace itself, or run the
-Bash implementation for a disposable clone (`ACQ_IMPL=bash acq run AGENT
-PATH --clone`). Tests: `py-acq/tests/test_clone_refusal.py` and the vector
-`test/vectors/cli/run-acq-clone-refused.json`.
+- `create`/`run AGENT PATH --clone`, or `ACQ_CLONE` set to exactly `1` (as in
+  Bash; any other value is off), runs the agent on a disposable clone. On msb
+  it is the Bash adapter's host-side scratch clone, with the same host-side git
+  isolation, layout checks, refusals and messages; on sbx it is
+  `sbx create --clone`. Both backends set `ACQ_WORKSPACE` on every create and
+  `ACQ_CLONE=1` under clone mode.
+- The `<clones>/<sandbox>/.origin` and scratch layout and the hooks path are
+  Bash's, so either implementation removes (`acq rm`) a clone sandbox the
+  other created. Python's `create --recreate` (Bash has none) rebuilds a
+  clone sandbox, including one Bash created, on its existing scratch, and
+  refuses when that scratch is missing, damaged or names another checkout
+  rather than mount the real checkout.
+- A re-attach (`run AGENT PATH` on an existing sandbox) prints Bash's note that
+  the flag applies only at create and continues; `run NAME` ignores it, as in
+  Bash.
+- Stricter than Bash: an inherited `GIT_ALLOW_PROTOCOL` is removed from the
+  host-side git calls (it would override `protocol.allow=never`), a workspace
+  holding `ACQ_MSB_CLONES_DIR` is refused like acq's other directories, a
+  leftover link at `<clones>/<sandbox>` is refused as a stale scratch, the
+  guest-writable scratch is removed without ever changing a link or anything
+  outside it, and the uncommitted-changes note uses plumbing that never runs
+  a filter (`git diff-index --cached` and `git ls-files --others`), so an
+  unstaged edit to a tracked file is not reported. A scratch the guest made
+  unreadable never blocks `acq rm` (its commits are reported as possibly
+  unfetched, and the sandbox is still removed), and each host-side git call
+  against the workspace other than the clone is bounded at 60 seconds, so a
+  FIFO where git reads a file cannot hang acq.
 
-**Unblock trigger:** clone mode is ported to the Python adapters (sbx's native
-`--clone` and the msb scratch-clone emulation in `acq.backends/msb.sh`); then
-replace the refusal with the feature and port `test/bats/116-clone-option.bats`
-to vectors.
+Tests: `py-acq/tests/test_clone_mode.py` (a one-to-one port of
+`test/bats/116-clone-option.bats`), `py-acq/tests/test_clone_predicate.py`, and
+the vectors `cli/create-clone-flag-msb`, `cli/create-clone-env-msb` and
+`cli/create-clone-not-a-repo`.
+
+**Open follow-up:** clone mode has not been exercised against a live msb or sbx
+from the Python acq; see the qualification checklist in `docs/howto/acq.md`.
 
 ---
 
@@ -5339,6 +5353,35 @@ anything runs (`ports: port '...' out of range`).
 recorded. Use the Python acq (`ACQ_IMPL=python`) or give a valid port. Tracked
 as a Bash fix: add the same five-digit length check before the comparison in
 `_acq_msb_valid_publish`, with a bats case for an over-long value.
+
+---
+
+## 95. Python 3.12: An Optional Flag Between `create`/`run` Positionals Is Refused
+
+**Status:** deferred (tracked per AGENTS.md "Track Deferred Work").
+
+### Symptoms
+
+On Python 3.12 (seen on 3.12.3; fixed in 3.13), `acq-py create shell --clone ~/proj` or
+`acq-py run opencode --image REF ~/proj` fails with
+`unrecognized arguments: ~/proj` (exit 2). The same command with the flags after
+the positionals (`acq-py run opencode ~/proj --clone`) works, and Bash accepts
+either order.
+
+### Root Cause
+
+`create` and `run` declare their positionals with `nargs="?"`. Before the
+argparse fix that shipped in Python 3.13, an optional flag between two such
+positionals ends positional matching, so the second one is left over. Python
+3.13 and 3.14 parse both orders.
+
+### Workaround
+
+Put every flag after the positionals, as the Python acq's help and README show.
+
+**Unblock trigger:** the supported Python floor moves to 3.13, or the parser
+switches to `parse_intermixed_args` for `create`/`run` (with a test of each flag
+in each position).
 
 ---
 

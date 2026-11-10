@@ -3,9 +3,8 @@
 This directory is the Python replacement for the repo-root Bash `acq` wrapper.
 It implements every subcommand the Bash `acq help` lists, on both backends (msb
 and sbx). It is **not yet at parity** with Bash, and it is **not currently
-Tier-3-qualified**. One documented flag is still missing: `--clone` on
-`run`/`create`. `ACQ_CLONE=1` is refused with a usage error rather than
-mounting the real workspace. Some behaviour also differs; for example,
+Tier-3-qualified**. The documented `run`/`create` flags, `--clone` among them,
+are all implemented. Some behaviour also differs; for example,
 a kit outside the pinned built-in bundle is applied only when its ref is pinned
 to a full commit, and a local kit directory is copied into acq's private cache
 and checked there before it is applied. The dated correction in
@@ -126,14 +125,24 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   first-run and kit-picker prompts: it is asked when stdin is a terminal and
   `--json` is not given, and `ACQ_NO_PROMPT`/`ACQ_NO_PROGRESS` do not suppress
   it (set `ACQ_UPDATE_CHECK=0` for that).
-* Clone mode (ADR-0027) is not ported yet, and `create`/`run` fail closed
-  rather than mount the real workspace: `--clone` is an unrecognized argument,
-  and `ACQ_CLONE=1` is refused with a usage error (exit 2) before any state or
-  backend access, on every `create`/`run` form, re-attach included. Only the
-  exact value `1` refuses, as only `1` turns clone mode on in Bash; any other
-  value, empty included, is off and ignored. Unset `ACQ_CLONE`, or use the Bash
-  implementation (`ACQ_IMPL=bash`) for a disposable clone. See
-  KNOWN_FAILURE_MODES, "Deferred: the Python acq has no clone mode".
+* Clone mode (ADR-0027): `acq-py create|run AGENT PATH --clone`, or
+  `ACQ_CLONE=1` (only the exact value `1`, as in Bash), runs the agent on a
+  disposable clone of PATH, which must be a git repository root. On msb it is
+  the Bash adapter's host-side scratch clone (`msb_clone.py`): the same git
+  isolation, the same refusals and messages, the same layout under
+  `ACQ_MSB_CLONES_DIR` (else `<state dir>/clones`), so either implementation
+  can remove a clone sandbox the other created. On sbx it is
+  `sbx create --clone`. Both set `ACQ_WORKSPACE` on every create and
+  `ACQ_CLONE=1` under clone mode, the kit contract in BACKEND_GUIDE. The
+  result data carries `"clone": true`; `rm` adds `"clone_unfetched": true`
+  when it discarded commits the checkout never fetched. A re-attach notes that
+  the flag applies only at create; `create --recreate` (Python only) rebuilds
+  a clone sandbox, including one Bash created, on its existing scratch clone,
+  and refuses when that scratch is missing or damaged. The uncommitted-changes
+  note covers staged changes and untracked files only: it never compares file
+  content, so no filter can run. Put the flag after the positionals
+  (`acq-py run opencode . --clone`): on Python 3.12 the parser rejects an
+  optional flag between them (KNOWN_FAILURE_MODES §95).
 * Sandbox names and workspace paths follow the Bash `acq` rules
   (`commands/common.py`). Without `--name`, the name is `AGENT-<slug>`, where the
   slug is the lowercased ASCII letters and digits of the workspace's last path
