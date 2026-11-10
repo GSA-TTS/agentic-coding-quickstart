@@ -36,7 +36,7 @@ pytestmark = pytest.mark.skipif(
 
 FAKE_MAIN = """\
 import json, os, sys
-print(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd()}))
+print(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd(), "pythonpath": os.environ.get("PYTHONPATH")}))
 sys.exit(int(os.environ.get("ACQ_FAKE_EXIT", "0")))
 """
 
@@ -166,3 +166,75 @@ def test_bash_branch_forwards_plain_arguments(launcher_tree: Path, tmp_path: Pat
     result = _run(_via_cmd(launcher_tree, args), _env(None), tmp_path)
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines() == [f"[{a}]" for a in args]
+
+
+# ---- acq.ps1 run inside the caller's PowerShell session ------------------------
+
+# Run as `& .\acq.ps1` from a prompt, acq.ps1 shares the session's environment.
+# The variables it sets for the programs it starts must not outlive the call.
+SESSION_VARS = ("NoDefaultCurrentDirectoryInExePath", "PYTHONPATH", "ACQ_PROVIDER_INPUT_DATA_DIR")
+
+
+def _in_session(tree: Path, args: list[str], before: dict[str, str | None]) -> list[str]:
+    """powershell.exe -Command that sets ``before``, runs acq.ps1 in-process, and
+    prints ``AFTER <json>`` with the exit status and the variables afterwards."""
+
+    def quote(value: str) -> str:
+        return "'" + value.replace("'", "''") + "'"
+
+    lines = []
+    for name, value in before.items():
+        if value is None:
+            lines.append(f"Remove-Item Env:{name} -ErrorAction SilentlyContinue")
+        else:
+            lines.append(f"$env:{name} = {quote(value)}")
+    lines.append("& " + " ".join(quote(a) for a in [str(tree / "acq.ps1"), *args]))
+    lines.append("$after = @{ code = $LASTEXITCODE }")
+    for name in SESSION_VARS:
+        lines.append(f"$after['{name}'] = $env:{name}")
+    lines.append("Write-Output ('AFTER ' + (ConvertTo-Json -Compress $after))")
+    return [_windows_powershell(), "-NoProfile", "-NonInteractive", "-Command", "; ".join(lines)]
+
+
+def _after(stdout: str) -> dict:
+    line = next(x for x in stdout.splitlines() if x.startswith("AFTER "))
+    return json.loads(line[len("AFTER "):])
+
+
+BEFORE = {"NoDefaultCurrentDirectoryInExePath": None, "PYTHONPATH": "C:\\user\\keep", "ACQ_PROVIDER_INPUT_DATA_DIR": None}
+
+
+def test_acq_ps1_in_session_restores_the_variables_it_set_for_python(launcher_tree: Path, tmp_path: Path) -> None:
+    result = _run(_in_session(launcher_tree, ["version", "a b"], BEFORE), _env("python", ACQ_FAKE_EXIT="5"), tmp_path)
+    child = json.loads(result.stdout.splitlines()[0])
+    assert child["argv"] == ["version", "a b"]
+    # The child got the fixed PYTHONPATH; the session gets its own value back.
+    assert _same_dir(child["pythonpath"], launcher_tree / "py-acq" / "src")
+    after = _after(result.stdout)
+    assert after["code"] == 5, result.stderr
+    assert after["PYTHONPATH"] == "C:\\user\\keep"
+    assert after["NoDefaultCurrentDirectoryInExePath"] is None
+    assert after["ACQ_PROVIDER_INPUT_DATA_DIR"] is None
+
+
+def test_acq_ps1_in_session_restores_the_variables_when_it_refuses(launcher_tree: Path, tmp_path: Path) -> None:
+    before = {**BEFORE, "NoDefaultCurrentDirectoryInExePath": "0"}
+    result = _run(_in_session(launcher_tree, ["version"], before), _env("bogus"), tmp_path)
+    after = _after(result.stdout)
+    assert after["code"] == 2, result.stderr
+    assert after["NoDefaultCurrentDirectoryInExePath"] == "0"
+    assert after["PYTHONPATH"] == "C:\\user\\keep"
+
+
+def test_acq_ps1_in_session_restores_the_variables_it_set_for_bash(launcher_tree: Path, tmp_path: Path) -> None:
+    if _git_bash() is None:
+        pytest.skip("Git for Windows is not installed")
+    local = tmp_path / "local"
+    (local / "acq" / "provider-input-validator").mkdir(parents=True)
+    result = _run(_in_session(launcher_tree, ["version"], BEFORE), _env(None, LOCALAPPDATA=str(local)), tmp_path)
+    assert "[version]" in result.stdout.splitlines()
+    after = _after(result.stdout)
+    assert after["code"] == 0, result.stderr
+    assert after["ACQ_PROVIDER_INPUT_DATA_DIR"] is None
+    assert after["NoDefaultCurrentDirectoryInExePath"] is None
+    assert after["PYTHONPATH"] == "C:\\user\\keep"

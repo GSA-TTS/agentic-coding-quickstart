@@ -153,6 +153,25 @@ teardown() {
   done
 }
 
+# Run inside the caller's PowerShell session (`& .\acq.ps1`), acq.ps1 shares
+# its environment; the variables it sets for the programs it starts must be put
+# back when it returns. NoDefaultCurrentDirectoryInExePath is set before the
+# ACQ_IMPL check, so pwsh on any host exercises the restore.
+@test "windows launcher: acq.ps1 run in a session puts its environment changes back" {
+  launcher=$(cat "$REPO_ROOT/acq.ps1")
+  assert_regex "$launcher" "foreach \\(\\\$name in @\\('NoDefaultCurrentDirectoryInExePath', 'PYTHONPATH', 'ACQ_PROVIDER_INPUT_DATA_DIR'\\)\\)"
+
+  command -v pwsh >/dev/null 2>&1 || return 0
+  run env ACQ_IMPL=bogus pwsh -NoLogo -NoProfile -NonInteractive -Command "
+    \$env:NoDefaultCurrentDirectoryInExePath = 'kept'
+    \$env:PYTHONPATH = 'kept-too'
+    & '$REPO_ROOT/acq.ps1' version
+    Write-Output (\"AFTER code=\$LASTEXITCODE nodefault=\$env:NoDefaultCurrentDirectoryInExePath pythonpath=\$env:PYTHONPATH\")
+  "
+  assert_output --partial "unsupported ACQ_IMPL 'bogus'"
+  assert_output --partial "AFTER code=2 nodefault=kept pythonpath=kept-too"
+}
+
 # acq.ps1 reads its arguments from its own command line only when it sees the
 # exact shape acq.cmd starts it with; the two files must agree on that shape.
 @test "windows launcher: acq.cmd starts acq.ps1 in the shape acq.ps1 recognises" {
