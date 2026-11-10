@@ -65,7 +65,8 @@ def backend_checks() -> list[dict]:
         spec = backends.BACKENDS[name]
         status = backends.detect(spec)
         problem = backends.check_version(spec)
-        message = f"{name}: installed v{status.version}" if status.installed else f"{name}: not found"
+        version = f"v{status.version}" if status.version != "unknown" else "unknown version"
+        message = f"{name}: installed {version}" if status.installed else f"{name}: not found"
         check: dict = {"id": f"backend-{name}", "status": PASS, "message": message}
         if problem:
             check.update(status=FAIL if status.installed else WARN,

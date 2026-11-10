@@ -53,7 +53,17 @@ from typing import NoReturn
 # ``msb`` is imported for its module object alone: the Tier-2 tests patch
 # ``cli.msb.<fn>``, and the adapter is reached through ``commands.common`` at
 # runtime. Keeping it here preserves those addresses across the command split.
-from . import backends, config, envelope, errors, migration, msb, state, userdirs  # noqa: F401
+from . import (  # noqa: F401
+    backends,
+    config,
+    envelope,
+    errors,
+    hostexec,
+    migration,
+    msb,
+    state,
+    userdirs,
+)
 from .commands import common, configure, creds, kit, lifecycle, secret, session
 
 # Every subcommand acq owns. An argv token that is not one of these (and is not a
@@ -571,7 +581,7 @@ def run_doctor(emit_json: bool, name: str | None, backend_override: str | None =
     from .commands import configure
 
     requested = backend_override if backend_override is not None else os.environ.get("ACQ_BACKEND")
-    if requested and requested not in backends.BACKENDS:
+    if (requested or backend_override is not None) and requested not in backends.BACKENDS:
         return common._operational_failure("doctor", errors.FAILURE,
             f"unknown backend '{requested}' (expected sbx or msb)", None, emit_json)
     active = common._resolve_active_backend(backend_override)
@@ -625,7 +635,7 @@ def _doctor_sandbox(active: str | None, name: str, emit_json: bool, override: st
     if result.returncode:
         return common._operational_failure("doctor", errors.FAILURE,
             f"doctor: sandbox diagnostics failed for '{name}'.", "check the sandbox and retry",
-            emit_json, exit_code=result.returncode)
+            emit_json, exit_code=hostexec.exit_status(result.returncode))
     checks = _image_doctor_checks(result.stdout)
     data = {"status": doctor.overall_status(checks), "checks": checks}
     if emit_json:
