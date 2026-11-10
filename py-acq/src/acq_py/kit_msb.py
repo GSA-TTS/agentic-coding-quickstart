@@ -855,7 +855,8 @@ def check_prereqs(name: str) -> None:
 def ensure_kits_applied(name: str, kits: list[Kit], *, ro_required: bool, force: bool = False) -> ApplyResult:
     """Apply the whole kit set (``acq_backend_ensure_kits_applied``); best-effort per kit.
 
-    The agent user is set up first (:func:`ensure_agent_user`); if that fails the kits are still attempted and ``agent_user`` says so. The merged
+    The agent user is set up first (:func:`ensure_agent_user`); if that fails
+    the kits are still attempted and ``agent_user`` says so. The merged
     environment is computed before the first kit runs, so a kit's commands see
     every kit's variables whatever the order (ADR-0033), and the persisted copy
     is rebuilt from the current kits only.
