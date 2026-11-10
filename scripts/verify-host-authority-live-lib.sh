@@ -369,4 +369,3 @@ block_if_not_ready() { # ID BACKEND_READY_VAR REASON
   [ "$2" -eq 1 ] || { record "$1" BLOCKED "$3"; return 1; }
   return 0
 }
-

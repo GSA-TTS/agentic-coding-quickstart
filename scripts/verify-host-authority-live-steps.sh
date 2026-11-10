@@ -330,4 +330,3 @@ step_sbx_legacy_reseed() {
   if [ -s "$rec" ]; then record "$id" PASS "legacy notice shown once; acq rm plus a fresh create re-seeded the builtin-kits record"
   else record "$id" FAIL "fresh create after rm did not re-seed the host builtin-kits record"; fi
 }
-

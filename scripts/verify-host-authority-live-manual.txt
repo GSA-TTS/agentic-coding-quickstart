@@ -77,4 +77,3 @@ MANUAL 6 (sbx, ADR-0037 steps 5 and 8): replay integrity and negative control.
 
 MANUAL 7 (sbx, Windows): ADR-0037 step 7 and ADR-0029 path forms need a Windows host.
   Create with a drive-form path and confirm the mount path in argv is valid in the guest.
-
