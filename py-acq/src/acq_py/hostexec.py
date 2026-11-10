@@ -27,7 +27,7 @@ import signal
 import subprocess
 import sys
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from types import FrameType
 from typing import Any
 
@@ -60,9 +60,10 @@ def _is_absolute(path: str) -> bool:
     return bool(drive) and rest.startswith(("\\", "/"))
 
 
-def _path_entries() -> list[str]:
+def _path_entries(path: str | None = None) -> list[str]:
     entries = []
-    for entry in os.environ.get("PATH", os.defpath).split(os.pathsep):
+    value = os.environ.get("PATH", os.defpath) if path is None else path
+    for entry in value.split(os.pathsep):
         # cmd.exe tolerates a quoted entry such as "C:\Program Files\Git\cmd".
         if _is_windows() and len(entry) >= 2 and entry[0] == entry[-1] == '"':
             entry = entry[1:-1]
@@ -77,20 +78,29 @@ def _file_names(name: str) -> list[str]:
     return [name]
 
 
-def which(name: str) -> str | None:
-    """Return the absolute path of ``name`` from absolute PATH entries, or None.
+def which_all(name: str, path: str | None = None) -> Iterator[str]:
+    """Yield every absolute path of ``name`` in the absolute entries of ``path``.
 
-    The current directory is never searched, whatever ``PATH`` contains:
-    empty, ``.`` and other relative entries are skipped.
+    ``path`` defaults to ``PATH``. The current directory is never searched,
+    whatever it contains: empty, ``.`` and other relative entries are skipped.
+    Callers that must pass over some matches (the qualification oracle skips the
+    WSL ``bash.exe`` launcher) take the first one they accept.
     """
     if not name or _has_dir(name):
-        return None
-    for entry in _path_entries():
+        return
+    for entry in _path_entries(path):
         for file_name in _file_names(name):
             candidate = os.path.join(entry, file_name)
             if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-                return candidate
-    return None
+                yield candidate
+
+
+def which(name: str, path: str | None = None) -> str | None:
+    """Return the absolute path of ``name`` from absolute PATH entries, or None.
+
+    ``path`` defaults to ``PATH``; see :func:`which_all`.
+    """
+    return next(which_all(name, path), None)
 
 
 def command(name: str) -> list[str]:

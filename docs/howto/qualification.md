@@ -240,7 +240,15 @@ caller's `ACQ_*` variables are not passed to acq (a stub seam such as
 those ending in `_TIMEOUT`, such as `ACQ_MSB_READY_TIMEOUT`, which only tune timing.
 `PYTHONPATH` is fixed to this checkout's `py-acq/src`, the CLI runs under
 `python -P -s` (no current directory and no user site-packages on `sys.path`), and
-`msb`, `sbx` and `bash` are resolved from absolute `PATH` entries only.
+`msb`, `sbx` and `bash` are resolved by acq's own resolver (`acq_py.hostexec`) from
+absolute `PATH` entries only, never the current directory, and only as `.exe` files
+on Windows.
+
+The harness tooling follows the same rules. `qualification.host` starts its Python
+children (the harness, and the gate check before a publish) with `-P` and a
+`PYTHONPATH` fixed to the checkout it was imported from, never yours, so the oracle
+it runs inherits that fixed value too. `git`, `gh` and the backend CLIs it calls
+(and the gate's and ledger's `git` calls) are resolved with the same resolver.
 
 **Aborts.** When a run outlives the harness's `--timeout`, the harness sends SIGTERM
 (CTRL_BREAK on Windows), waits a grace period (a quarter of the timeout, at most 300

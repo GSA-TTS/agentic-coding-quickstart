@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -18,8 +19,9 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
-from qualification import host, publish as pub  # noqa: E402
-from qualification.ledger import entry_from_transcript, latest_entry, load_ledger  # noqa: E402
+from qualification import host, hostexec, publish as pub  # noqa: E402
+from qualification.gate import git_changed_paths  # noqa: E402
+from qualification.ledger import entry_from_transcript, git_oracle_digest, latest_entry, load_ledger  # noqa: E402
 from qualification.model import TRANSCRIPT_DIR_TOKEN, canonical_transcript_bytes, publishable_argv  # noqa: E402
 
 CELLS = [("msb", "macos-arm64"), ("sbx", "macos-arm64")]
@@ -240,7 +242,8 @@ def test_exit_code_and_pr_text():
 
 def test_harness_command_has_no_secrets_and_matches_the_cell():
     cmd = host.harness_command(macos(), "msb", "0.7.7", "r" * 40, "s" * 64, Path("out"), 900)
-    assert cmd[:4] == [sys.executable, "-m", "qualification", "run"]
+    # -P: `python -m` must not put the current directory first on sys.path.
+    assert cmd[:5] == [sys.executable, "-P", "-m", "qualification", "run"]
     assert cmd[cmd.index("--platform") + 1] == "macos-arm64"
     assert cmd[cmd.index("--hypervisor") + 1] == "hvf"
     assert cmd[-3:] == ["--backend", "msb"][-3:] or cmd[-2:] == ["--backend", "msb"]
@@ -256,6 +259,72 @@ def test_run_backend_maps_exit_codes_and_reads_the_result_line(tmp_path):
         r = host.run_backend([sys.executable, "-c", script % rc], out, "msb", cwd=tmp_path)
         assert r.status == status and r.result_line.startswith("RESULT PASS")
     assert host.run_backend([sys.executable, "-c", "pass"], tmp_path / "none", "msb", cwd=tmp_path).transcript is None
+
+
+@pytest.mark.parametrize("pythonpath", [os.pathsep, ".", "/nonexistent" + os.pathsep])
+def test_run_backend_fixes_pythonpath_to_this_checkout(tmp_path, monkeypatch, pythonpath):
+    # An empty or relative entry in the caller's PYTHONPATH would put the current
+    # directory on the harness's (and so the oracle's) sys.path.
+    monkeypatch.setenv("PYTHONPATH", pythonpath)
+    script = "import os; print('RESULT ' + os.environ['PYTHONPATH'])"
+    r = host.run_backend([sys.executable, "-c", script], tmp_path, "msb", cwd=tmp_path)
+    assert r.result_line == f"RESULT {hostexec.PACKAGE_ROOT}"
+    assert hostexec.PACKAGE_ROOT == REPO_ROOT
+
+
+def _planted(directory: Path, name: str, marker: Path) -> None:
+    prog = directory / name
+    prog.write_text(f"#!/bin/sh\necho {name} >> '{marker}'\nexit 0\n")
+    prog.chmod(0o755)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX empty PATH entry; Windows is covered by test_hostexec")
+def test_backend_version_never_runs_a_cli_from_the_current_directory(tmp_path, monkeypatch):
+    marker = tmp_path / "hijacked"
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (tmp_path / "empty").mkdir()
+    for name in ("msb", "sbx"):
+        _planted(ws, name, marker)
+    monkeypatch.chdir(ws)
+    monkeypatch.setenv("PATH", os.pathsep.join(["", ".", str(tmp_path / "empty")]))
+    assert host.backend_version("msb") is None
+    assert host.backend_version("sbx") is None
+    assert not marker.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX empty PATH entry; Windows is covered by test_hostexec")
+def test_git_is_never_run_from_the_current_directory(tmp_path, monkeypatch):
+    # Every git call in the harness, gate, ledger and publish code runs with its
+    # cwd in a checkout; an empty PATH entry would make a ./git planted there run.
+    work = make_remote_repo(tmp_path)
+    head = run(work, "rev-parse", "HEAD").strip()
+    marker = tmp_path / "hijacked"
+    _planted(work, "git", marker)
+    real_git = hostexec.which("git")
+    assert real_git is not None
+    monkeypatch.chdir(work)
+    monkeypatch.setenv("PATH", os.pathsep.join(["", ".", os.path.dirname(real_git)]))
+    assert pub.git(work, "rev-parse", "HEAD").strip() == head
+    assert len(pub.artifact_sha256(work)) == 64
+    assert git_oracle_digest(head, ORACLE, cwd=work) == ORACLE_SHA
+    assert git_changed_paths(head, cwd=work) == []
+    assert not marker.exists(), marker.read_text()
+
+
+def test_the_gate_check_in_the_publish_worktree_ignores_the_callers_pythonpath(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen.update(argv=argv, env=kwargs["env"], cwd=kwargs["cwd"])
+        return subprocess.CompletedProcess(argv, 0, "[]", "")
+
+    monkeypatch.setenv("PYTHONPATH", os.pathsep)
+    monkeypatch.setattr(host.subprocess, "run", fake_run)
+    host._cells_qualified(tmp_path, macos(), [])
+    assert seen["argv"][:4] == [sys.executable, "-P", "-m", "qualification.gate"]
+    assert seen["env"]["PYTHONPATH"] == os.pathsep.join([str(tmp_path.resolve()), str(REPO_ROOT)])
+    assert seen["cwd"] == tmp_path
 
 
 # ---- publish.py safety --------------------------------------------------------
@@ -436,10 +505,13 @@ def setup_cli(tmp_path, monkeypatch, doc):
     run(work, "update-ref", "refs/remotes/fork/main", "HEAD")
     head = run(work, "rev-parse", "HEAD").strip()
     monkeypatch.setattr(host, "REPO_ROOT", work)
-    monkeypatch.setenv("PYTHONPATH", str(REPO_ROOT))
+    # The gate check runs `python -P -m qualification.gate` in the publish worktree,
+    # which has no qualification package; it must find this checkout's copy through
+    # the PYTHONPATH it sets, never the caller's.
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path / "nowhere"))
     monkeypatch.setattr(host, "detect_host", lambda: macos())
     monkeypatch.setattr(pub, "check_remote_reachable", lambda root, remote: None)
-    monkeypatch.setattr(pub.shutil, "which", lambda name: None)  # no gh: print the URL
+    monkeypatch.setattr(pub.hostexec, "which", lambda name: None)  # no gh: print the URL
     # The fork here pushes to a local bare repo, which the real remote check rightly
     # rejects (its URLs must all name one GitHub repo; covered by the choose_remote
     # tests). Stub only the explicit-remote path; auto-selection still runs for real.
