@@ -505,6 +505,27 @@ also runs `scripts/refresh-kitbundle --check` against its checkout of Patterns
 at the pin, which fails when any manifest blob id differs from
 `git ls-tree -r <ref>`.
 
+## Timeouts
+
+Every wait the Python acq makes on a backend, a lock or the network is bounded.
+Each bound is a number of seconds read from the environment when it is needed.
+A value that is not a finite number, or is negative, is ignored with a warning
+on stderr, and the default is used. Where the table says "more than 0", a value
+of 0 is also ignored, because it would fail the call at once instead of meaning
+"no limit".
+
+| Env var | Default | Bounds |
+|---------|---------|--------|
+| `ACQ_LIST_TIMEOUT` | `60` (more than 0) | One backend sandbox listing (`msb list`, `sbx ls`), behind `acq ls` and every existence or running check in create, run, start, rm and the secret re-feeds. A listing that does not answer in time fails the command with `timeout`. On Windows the listing runs in a Job object, and a timeout ends it and every process it started, such as an msb server it started itself (as every bounded backend call does there). |
+| `ACQ_ROTATE_TIMEOUT` | `120` (more than 0) | Each backend call `acq usai-rotate-api-key` makes while it holds the usai provider lock. |
+| `ACQ_SBX_KIT_ADD_TIMEOUT` | `600` (more than 0) | One `sbx kit add` (the kit heal before an attach, `kit apply`, `kit update`), which runs with the sandbox's lifecycle lock held. A heal that times out warns and the attach goes on. |
+| `ACQ_KIT_FETCH_TIMEOUT` | `120` (more than 0) | Each git step of fetching a pinned remote kit. |
+| `ACQ_MSB_KIT_TIMEOUT` | `1800` | One in-guest kit-install or substrate step on msb. |
+| `ACQ_MSB_READY_TIMEOUT`, `ACQ_SBX_READY_TIMEOUT` | `30` | The wait for a new sandbox to accept `exec`. |
+| `ACQ_SBX_STARTUP_BARRIER_TIMEOUT` | `60` | The wait for an sbx sandbox's kit startup commands to finish. |
+| `ACQ_SANDBOX_LOCK_TIMEOUT` | `300` | The wait for a sandbox's lifecycle lock, a provider-credential lock, or the secret-store lock that global secret changes and creates share. |
+| `ACQ_MIGRATION_LOCK_TIMEOUT` | `5` | The wait for the state-migration lock and the config lock. |
+
 ## Testing
 
 Two runners consume the same `test/vectors/` corpus and must agree on the
