@@ -25,6 +25,7 @@ from acq_py import (
     lock,
     migration,
     provider_creds,
+    security,
     state,
 )
 from acq_py.commands import session
@@ -262,10 +263,14 @@ def test_records_removed_after_the_import_stay_removed(tree):
 def test_imported_ssh_agent_socket_reaches_the_session(tree, monkeypatch):
     _bash_sandbox(tree)
     monkeypatch.setattr(session, "host_git_identity_env", list)
-    assert session.session_env_for("msb", "opencode-proj") == []
+    # Both implementations read the shared host-config key, as the forward's
+    # bridge writes it (ADR-0021), so it reaches the session before any import.
+    assert session.session_env_for("msb", "opencode-proj") == [f"SSH_AUTH_SOCK={SOCK}"]
 
     migration.migrate_tree()
+    (security.host_config_dir("opencode-proj") / "ssh-auth-sock").unlink()
 
+    # Without the key, the copy the import put in the record still does.
     assert session.session_env_for("msb", "opencode-proj") == [f"SSH_AUTH_SOCK={SOCK}"]
 
 

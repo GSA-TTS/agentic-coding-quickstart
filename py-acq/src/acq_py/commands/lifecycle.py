@@ -33,6 +33,7 @@ from .. import (
     sbx,
     secretstore,
     security,
+    ssh_agent,
     state,
 )
 from . import common, creds, session
@@ -239,7 +240,8 @@ def _apply_msb_kits(
             msb.provision_substrate(name, provision_steps)
     except msb.MsbError as exc:
         return None, common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
-    result = kit_msb.ensure_kits_applied(name, plan.kits, ro_required=ro_required)
+    result = kit_msb.ensure_kits_applied(name, plan.kits, ro_required=ro_required,
+                                         ssh_auth_sock=ssh_agent.forwarding_sock(name))
     if not result.agent_user:
         # Fatal for a new guest, as in Bash's provision: without a home the agent
         # owns, every agent-user kit command fails.
@@ -252,6 +254,8 @@ def _apply_msb_kits(
             command, errors.FAILURE, f"could not apply kit '{plan.agent_kit}' to sandbox '{name}'",
             "check network access from the sandbox and the warnings above, then retry", emit_json,
         )
+    # The forwarded host ssh-agent's in-guest bridge, once the kits are in (ADR-0021).
+    ssh_agent.provision_bridge(name)
     try:
         kit_msb.cli_kits_write(name, plan.kits)
         if plan.agent_kit is not None:
@@ -541,6 +545,7 @@ def _clear_host_records(backend: str, name: str) -> None:
         kit_msb.remove_host_config(name)
         kit_msb.cli_kits_remove(name)
         provider_input.remove(backend, name)
+        ssh_agent.link_remove(name)  # the managed ssh-agent route link (ADR-0021)
     else:
         kit_sbx.remove_host_config(name)
         kit_msb.cli_kits_remove(name, backend="sbx")
@@ -747,6 +752,8 @@ def _msb_create(name: str, image: str, workspace: str, kit_set: list[kit_msb.Kit
         ) from exc
     if generation is not None:
         flags += provider_input.msb_flags(generation)
+    # Host ssh-agent and host socket forwards (ADR-0021): opt-in through SSH_AUTH_SOCK.
+    flags += ssh_agent.vsock_flags(name)
     try:
         bindings = msb.create(
             name, image, workspace, memory=msb.DEFAULT_MEMORY, cpus=msb.DEFAULT_CPUS,
@@ -1526,13 +1533,16 @@ def _heal_msb_reattach(name: str, record: dict | None, refs: tuple[list[str], li
             _warn(f"sandbox '{name}' is not running, so its kits were not re-applied; "
                   f"'acq start {name}' resumes it and re-applies them")
             return
+        # Re-drive the host ssh-agent forward first, as Bash's heal does (ADR-0021).
+        sock = ssh_agent.ensure_forward(name)
         kit_set = kit_msb.select((record or {}).get("agent") or "shell", refs[0],
                                  image_is_default=_image_is_default(record), extras=refs[1])
     except (kitspec.KitSelectionError, msb.MsbError) as exc:
         reason = exc.message if isinstance(exc, msb.MsbError) else str(exc)
         _warn(f"the kits of sandbox '{name}' were not re-applied: {reason}")
         return
-    result = kit_msb.ensure_kits_applied(name, kit_set, ro_required=security.requires_ro_mount(record))
+    result = kit_msb.ensure_kits_applied(name, kit_set, ro_required=security.requires_ro_mount(record),
+                                         ssh_auth_sock=sock)
     if result.incomplete or not result.agent_user:
         failed = ", ".join(result.incomplete) or "the agent user"
         _warn(f"sandbox '{name}': these kits were not re-applied: {failed}; attaching anyway")
@@ -1917,6 +1927,9 @@ def _start_locked(command: str, name: str, emit_json: bool) -> int:
     gate = _start_trusted_gate(command, name, record, emit_json)
     if gate is not None:
         return gate
+    if not was_running:
+        # The bridge process died with the stopped guest; the route persisted (ADR-0021).
+        ssh_agent.start_bridge(name)
     try:
         with _store_reading(msb.MsbError, "nothing new was bound"):
             unbound = msb.reconcile_bindings(name)
@@ -1974,11 +1987,14 @@ def _heal_after_start(command: str, name: str, record: dict | None, emit_json: b
     """
     agent = (record or {}).get("agent") or "shell"
     image = (record or {}).get("image") or common.OPENCODE_DEVENV_IMAGE
+    # Re-drive the host ssh-agent forward before the kits, as Bash's heal does (ADR-0021).
+    sock = ssh_agent.ensure_forward(name)
     cli_kits, extras = kit_msb.cli_kits_read(name)
     plan, exit_code = _plan_msb_kits(agent, cli_kits, image, command, emit_json, extras)
     if plan is None:
         return None, exit_code
-    result = kit_msb.ensure_kits_applied(name, plan.kits, ro_required=security.requires_ro_mount(record))
+    result = kit_msb.ensure_kits_applied(name, plan.kits, ro_required=security.requires_ro_mount(record),
+                                         ssh_auth_sock=sock)
     if result.incomplete:
         return None, common._operational_failure(
             command, errors.FAILURE,

@@ -18,6 +18,7 @@ from .. import (
     msb,
     sbx,
     security,
+    ssh_agent,
     state,
 )
 from . import common
@@ -342,6 +343,8 @@ def _kit_update_locked(name: str, emit_json: bool, backend: str) -> int:
             f"start it (for example by re-attaching with 'acq run {name}'), then retry", emit_json,
         )
     agent = (record or {}).get("agent") or "shell"
+    # Re-drive the host ssh-agent forward before the kits, as Bash's heal does (ADR-0021).
+    sock = ssh_agent.ensure_forward(name)
     try:
         cli_kits, extras = kit_msb.cli_kits_read(name)
         image = (record or {}).get("image") or common.OPENCODE_DEVENV_IMAGE
@@ -352,7 +355,8 @@ def _kit_update_locked(name: str, emit_json: bool, backend: str) -> int:
                                            "fix the kit selection and retry", emit_json)
     except common._ADAPTER_ERRORS as exc:
         return common._operational_failure("kit update", exc.code, exc.message, exc.remediation, emit_json)
-    result = kit_msb.ensure_kits_applied(name, kit_set, ro_required=security.requires_ro_mount(record), force=True)
+    result = kit_msb.ensure_kits_applied(name, kit_set, ro_required=security.requires_ro_mount(record), force=True,
+                                         ssh_auth_sock=sock)
     if result.incomplete:
         return _kit_update_incomplete(name, result.incomplete, emit_json)
     return _kit_update_done(name, backend, result.applied, emit_json)

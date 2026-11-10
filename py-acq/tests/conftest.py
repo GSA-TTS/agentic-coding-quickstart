@@ -78,6 +78,15 @@ def isolate_user_dirs(tmp_path_factory, monkeypatch):
         monkeypatch.setenv(var, str(path))
     for var in [v for v in os.environ if v.startswith("ACQ_")] + list(_BACKEND_HOME_VARS):
         monkeypatch.delenv(var, raising=False)
+    # A developer's real ssh-agent must never be forwarded into a stub sandbox
+    # (or change what a create prints): SSH_AUTH_SOCK is the forward's opt-in
+    # (ADR-0021). The forward's process-scoped state starts clean in every test.
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    from acq_py import sbx, ssh_agent
+
+    monkeypatch.setattr(ssh_agent, "_ACTIVE", set())
+    monkeypatch.setattr(ssh_agent, "_NOTICE_SHOWN", [False])
+    monkeypatch.setattr(sbx, "_SSH_AGENT_NOTICE_SHOWN", [False])
     # The acq secret store would otherwise pick the host keychain (secret-tool,
     # macOS security, DPAPI) and could overwrite a developer's real credential.
     # Force the file backend under the throwaway root; a test that exercises a

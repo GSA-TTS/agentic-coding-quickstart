@@ -30,6 +30,17 @@ names sandboxes whose image has no ``agent`` user: ``exec -u agent`` fails there
 whose command carries curl's ``%{http_code}``): ``<code>|<curl exit>``, default
 ``200|0``.
 
+``create`` records each ``--vsock HOST:PORT[/KIND]`` route in ``vsock.json``, and
+``inspect`` reports them as ``active_config.vsock.routes`` (``{host_socket,
+port}``, the shape msb 0.6.12 prints). ``ACQ_MSB_STUB_INSPECT_FAIL_TIMES=N`` fails
+the next N ``inspect`` calls (counted in ``inspect-fails`` next to the catalog).
+The host ssh-agent forward's guest probes are answered too: ``command -v socat``
+and ``command -v ssh-add`` fail in the sandboxes named (comma separated) by
+``ACQ_MSB_STUB_NO_SOCAT`` / ``ACQ_MSB_STUB_NO_SSH_ADD``, and ``ssh-add -l`` answers
+per ``ACQ_MSB_STUB_AGENT``: ``keys`` (the default, exit 0), ``empty`` ("no
+identities", exit 1), ``unreachable`` ("communication with agent failed", exit 1)
+or ``nosocket`` (exit 2).
+
 ``modify`` models the conservative reading of msb's "add or rotate": ``--secret
 ENV@HOST`` for a variable already bound to the SAME hosts rotates it, but one
 bound to OTHER hosts is an error (no assumption that it is replaced), and
@@ -166,6 +177,74 @@ def _save_mounts(records: dict[str, list]) -> None:
     path.write_text(json.dumps(records, sort_keys=True), encoding="utf-8")
 
 
+def _vsock_path() -> Path:
+    return _catalog_path().with_name("vsock.json")
+
+
+def _load_vsock() -> dict[str, list]:
+    try:
+        doc = json.loads(_vsock_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {k: v for k, v in doc.items() if isinstance(v, list)} if isinstance(doc, dict) else {}
+
+
+def _save_vsock(records: dict[str, list]) -> None:
+    path = _vsock_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(records, sort_keys=True), encoding="utf-8")
+
+
+def _vsock_routes(args: list[str]) -> list[dict]:
+    """``--vsock HOST:PORT[/KIND]`` flags as msb inspect route records."""
+    out = []
+    for spec in _flag_values(args, "--vsock"):
+        host, _, rest = spec.rpartition(":")
+        port = rest.split("/", 1)[0]
+        out.append({"host_socket": host, "port": int(port) if port.isdigit() else port})
+    return out
+
+
+def _inspect_fails() -> bool:
+    """Consume one of the ``ACQ_MSB_STUB_INSPECT_FAIL_TIMES`` failures; True when this call fails."""
+    try:
+        budget = int(os.environ.get("ACQ_MSB_STUB_INSPECT_FAIL_TIMES", "0"))
+    except ValueError:
+        return False
+    counter = _catalog_path().with_name("inspect-fails")
+    try:
+        used = int(counter.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        used = 0
+    if used >= budget:
+        return False
+    counter.parent.mkdir(parents=True, exist_ok=True)
+    counter.write_text(str(used + 1), encoding="utf-8")
+    return True
+
+
+_AGENT_ANSWERS = {
+    "keys": ("256 SHA256:stubkey stub@host (ED25519)", 0),
+    "empty": ("The agent has no identities.", 1),
+    "unreachable": ("error fetching identities: communication with agent failed", 1),
+    "nosocket": ("Error connecting to agent: No such file or directory", 2),
+}
+
+
+def _answer_forward_probe(name: str, command: list[str]) -> int | None:
+    """The host ssh-agent forward's guest probes (``sh -c SCRIPT``); ``None`` for any other command."""
+    script = command[2] if command[:2] == ["sh", "-c"] and len(command) > 2 else ""
+    if "command -v socat" in script:
+        return 1 if _named("ACQ_MSB_STUB_NO_SOCAT", name) else 0
+    if "command -v ssh-add" in script:
+        return 1 if _named("ACQ_MSB_STUB_NO_SSH_ADD", name) else 0
+    if "ssh-add -l" in script:
+        text, code = _AGENT_ANSWERS.get(os.environ.get("ACQ_MSB_STUB_AGENT", "keys"), _AGENT_ANSWERS["keys"])
+        print(text)
+        return code
+    return None
+
+
 def _volume_mounts(args: list[str]) -> list[dict]:
     """``--volume HOST:GUEST[:ro]`` flags as msb inspect mount records."""
     out = []
@@ -297,6 +376,11 @@ def main(argv: list[str]) -> int:
         mounts = _load_mounts()
         mounts[name] = _volume_mounts(args)
         _save_mounts(mounts)
+        routes = _vsock_routes(args)
+        if routes:
+            vsock = _load_vsock()
+            vsock[name] = routes
+            _save_vsock(vsock)
         return 0
 
     if cmd == "modify":
@@ -357,6 +441,9 @@ def main(argv: list[str]) -> int:
             return 1
         if any("%{http_code}" in token for token in command):
             return _answer_probe()
+        forward = _answer_forward_probe(name, command)
+        if forward is not None:
+            return forward
         marker = EXEC_MARKER
         if command:
             marker += " " + " ".join(command)
@@ -370,7 +457,7 @@ def main(argv: list[str]) -> int:
         return _exit_code(COPY_EXIT_ENV)
 
     if cmd == "inspect":
-        if _should_fail("inspect"):
+        if _should_fail("inspect") or _inspect_fails():
             print(RAW_FAIL_STDERR, file=sys.stderr)
             return 1
         name = args[1] if len(args) > 1 else None
@@ -394,7 +481,11 @@ def main(argv: list[str]) -> int:
         # msb 0.6.7 `inspect --format json` shape (ADR-0014): published ports live
         # at active_config.network.ports[] as {host_port, guest_port, protocol,
         # host_bind}.
-        print(json.dumps({"active_config": {"network": {"ports": port_list}, "mounts": _inspect_mounts(name)}}))
+        active: dict = {"network": {"ports": port_list}, "mounts": _inspect_mounts(name)}
+        declared_routes = _load_vsock().get(name)
+        if declared_routes:
+            active["vsock"] = {"routes": declared_routes}
+        print(json.dumps({"active_config": active}))
         return 0
 
     if cmd == "echo":
@@ -439,6 +530,9 @@ def main(argv: list[str]) -> int:
         mounts = _load_mounts()
         if mounts.pop(name, None) is not None:
             _save_mounts(mounts)
+        vsock = _load_vsock()
+        if vsock.pop(name, None) is not None:
+            _save_vsock(vsock)
         return 0
 
     print(f"msb: unrecognized subcommand '{cmd}'", file=sys.stderr)
