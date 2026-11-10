@@ -368,6 +368,25 @@ def test_start_and_restart_wait_for_the_sandbox_lock(monkeypatch, tmp_path, caps
     assert "start" not in _verbs(children) and "stop" not in _verbs(children)
 
 
+def test_start_waits_for_a_global_secret_change(monkeypatch, tmp_path, capsys, children):
+    # msb start binds the values it reads from the store, as a create does, so a
+    # rotation or global set/rm in progress must not slip between read and bind.
+    _stopped_box(monkeypatch, tmp_path, capsys)
+    monkeypatch.setenv("ACQ_SANDBOX_LOCK_TIMEOUT", "0.3")
+    children.clear()
+    with lock.secret_store_lock():
+        rc, doc, _out, _err = _acq(capsys, "start", "box", "--json")
+    assert rc == 1 and doc["error"]["code"] == errors.TIMEOUT, doc
+    assert "secret-store lock" in doc["error"]["message"]
+    assert "nothing was started" in doc["error"]["remediation"]
+    assert "start" not in _verbs(children)
+    if os.name == "nt":
+        return  # the store lock has no shared mode there
+    with lock.secret_store_lock(shared=True):  # another create or start does not hold it up
+        rc, doc, _out, _err = _acq(capsys, "start", "box", "--json")
+    assert rc == 0, doc
+
+
 def test_restart_stops_then_starts_then_heals(monkeypatch, tmp_path, capsys, children):
     _env(monkeypatch, tmp_path)
     _set(capsys, monkeypatch, "-g", "usai")

@@ -160,6 +160,51 @@ def test_on_a_terminal_the_gate_asks_stores_and_binds(monkeypatch, tmp_path, cap
     _no_leak(VALUE, children, out, err)
 
 
+def test_on_a_terminal_the_prompt_does_not_hold_the_secret_store_lock(monkeypatch, tmp_path, capsys, children):
+    # A global secret change waiting for the store lock must not wait on the user.
+    from acq_py import lock
+
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setattr(common, "_stdin_is_terminal", lambda: True)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("y\n"))
+    free = []
+
+    def read_key(prompt):
+        try:  # exclusive, at once: fails while anything holds the store lock
+            with lock.exclusive_lock(lock.secret_store_lock_path(), 0.0, timeout_cls=lock.SecretStoreLockTimeout):
+                free.append(True)
+        except lock.SecretStoreLockTimeout:
+            free.append(False)
+        return VALUE
+
+    monkeypatch.setattr(common, "_read_secret_tty", read_key)
+    rc, doc, _out, err = _create(capsys, tmp_path)
+    assert rc == 0, (doc, err)
+    assert free == [True]
+    assert secretstore.resolve("usai") == VALUE
+
+
+def test_a_key_removed_after_the_prompt_fails_the_create_closed(monkeypatch, tmp_path, capsys, children):
+    # Under the store lock the gate checks again, without asking.
+    from acq_py.commands import lifecycle
+
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setattr(common, "_stdin_is_terminal", lambda: True)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("y\n"))
+    monkeypatch.setattr(common, "_read_secret_tty", lambda prompt: VALUE)
+    real = lifecycle._provider_pregate
+
+    def pregate_then_removed(name, kit_set):
+        real(name, kit_set)
+        secretstore.delete(secretstore.key_for("usai", None))  # a concurrent 'secret rm -g usai'
+
+    monkeypatch.setattr(lifecycle, "_provider_pregate", pregate_then_removed)
+    rc, doc, _out, err = _create(capsys, tmp_path)
+    assert rc == errors.EXIT_FAILURE and doc["error"]["code"] == errors.SECRET_MISSING, (doc, err)
+    assert err.count("Store a credential for provider 'usai'") == 1  # asked once, before the lock
+    assert _verb_calls(children, "create") == []
+
+
 def test_on_a_terminal_declining_abandons_the_create(monkeypatch, tmp_path, capsys, children):
     _env(monkeypatch, tmp_path)
     monkeypatch.setattr(common, "_stdin_is_terminal", lambda: True)

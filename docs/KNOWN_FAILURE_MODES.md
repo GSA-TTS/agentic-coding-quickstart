@@ -4478,12 +4478,16 @@ race for every scope.
 holds it, shared, from before it reads the store for the new guest's secrets
 until the guest runs; a global `secret set`/`rm`, `secret import` of a global
 value, `provider-credential set`/`rm` and `usai-rotate-api-key` hold it
-exclusively. So a global change waits for the creates binding secrets, and a
-create waits for a global change in progress. Either side gives up with
-`timeout` after `ACQ_SANDBOX_LOCK_TIMEOUT` seconds (default 300), having
+exclusively. `acq start` and `acq restart` on msb also hold it, shared, while
+`msb start` binds the stored values and while what the store gained meanwhile
+is bound. So a global change waits for the creates and starts binding
+secrets, and they wait for a global change in progress. Either side gives up
+with `timeout` after `ACQ_SANDBOX_LOCK_TIMEOUT` seconds (default 300), having
 changed nothing. On sbx the create holds the lock for the whole `sbx create`,
 which installs the kits and may pull the image; on msb it holds it for the
-provider gate, `msb create` and the wait for the guest to accept `exec`. On
+provider gate, `msb create` and the wait for the guest to accept `exec`. The
+prompt that offers to store a missing provider key comes before the lock, and
+the gate checks again under it without asking. On
 Windows the lock has no shared mode, so creates there also wait for each other
 for that whole time. The order in which acq takes its locks, which keeps them
 from deadlocking, is documented in `py-acq/src/acq_py/lock.py`. With the Bash

@@ -266,7 +266,10 @@ def provider_credential_lock(provider: str) -> Iterator[None]:
 #   3. the secret-store lock (:func:`secret_store_lock`).
 #
 # Who takes what: create, run and recreate take 1, then 3 shared around the
-# backend create (where the store is read to bind the new guest's secrets). A
+# backend create (where the store is read to bind the new guest's secrets);
+# start and restart take 1, then 3 shared around ``msb start`` and again around
+# binding what the store gained while the sandbox was stopped. A provider key
+# stored at the create's prompt takes 2 and 3, before 3 is taken shared. A
 # sandbox-scoped ``secret set``/``rm`` takes 1, and for usai also 2 (usai), so it
 # cannot interleave with a key rotation. A global ``secret set``/``rm`` takes 3,
 # and for usai 2 (usai) first; ``usai-rotate-api-key`` and ``provider-credential

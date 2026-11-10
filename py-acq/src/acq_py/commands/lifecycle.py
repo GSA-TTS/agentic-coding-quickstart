@@ -15,7 +15,7 @@ import os
 import shlex
 import sys
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -633,29 +633,32 @@ def _create_sandbox(
 
     The secret-store lock is held, shared, from before the store is read for
     the new guest's secrets until the guest runs, where a global secret
-    change's re-feed reaches it (see :func:`lock.secret_store_lock`).
+    change's re-feed reaches it (see :func:`lock.secret_store_lock`). On sbx
+    that is the whole ``sbx create``, kit install and image pull included; on
+    msb the provider gate, ``msb create`` and the exec-ready wait. msb's gate
+    asks for a missing provider key before the lock is taken, so the prompt
+    does not hold it; under the lock the gate runs again without asking.
     """
     adapter = common._adapter(backend)
     error_cls = sbx.SbxError if backend == "sbx" else msb.MsbError
     secret_bindings, ro_mount = None, False
     unconfirmed = backend == "sbx"  # until the kit startup barrier is seen (_finish_sbx_create)
-    try:
-        with lock.secret_store_lock(shared=True):
-            if backend == "sbx":
-                sbx_agent, kit_flags = sbx_create or (agent, [])
-                adapter.create(name, image, workspace, agent=sbx_agent, kit_flags=kit_flags,
-                               extra_workspaces=sbx_extra[0], env=sbx_extra[1])
-                # Recorded at once, so no verb attaches to the guest while its kits are unconfirmed.
-                _write_record(backend, name, agent=agent, workspace=workspace, image=image, ro_host_config=False,
-                              kits_unconfirmed=True)
-            else:
-                ro_mount = security.ro_mount_supported()
-                secret_bindings = _msb_create(name, image, workspace, plan.kits if plan else [], ro_mount=ro_mount)
-            if not _wait_exec_ready(backend, name):
-                _not_exec_ready(backend, adapter, name, error_cls)
-    except lock.SecretStoreLockTimeout as exc:  # raised before anything was created
-        raise error_cls(errors.TIMEOUT, str(exc),
-                        "retry once the other acq command finishes; nothing was created") from None
+    kit_set = plan.kits if plan else []
+    if backend == "msb":
+        _provider_pregate(name, kit_set)
+    with _store_reading(error_cls, "nothing was created"):  # raised before anything was created
+        if backend == "sbx":
+            sbx_agent, kit_flags = sbx_create or (agent, [])
+            adapter.create(name, image, workspace, agent=sbx_agent, kit_flags=kit_flags,
+                           extra_workspaces=sbx_extra[0], env=sbx_extra[1])
+            # Recorded at once, so no verb attaches to the guest while its kits are unconfirmed.
+            _write_record(backend, name, agent=agent, workspace=workspace, image=image, ro_host_config=False,
+                          kits_unconfirmed=True)
+        else:
+            ro_mount = security.ro_mount_supported()
+            secret_bindings = _msb_create(name, image, workspace, kit_set, ro_mount=ro_mount)
+        if not _wait_exec_ready(backend, name):
+            _not_exec_ready(backend, adapter, name, error_cls)
     _fresh_guest(backend, adapter, name, ro_mount=ro_mount)
     _write_record(backend, name, agent=agent, workspace=workspace, image=image, ro_host_config=ro_mount,
                   kits_unconfirmed=unconfirmed)
@@ -759,12 +762,18 @@ def _msb_create(name: str, image: str, workspace: str, kit_set: list[kit_msb.Kit
 
 
 def _store_provider_key(adapter, provider: str, value: str) -> None:
-    """Store a provider key as ``acq secret set -g PROVIDER`` does: preflight, acq store, backend feed."""
-    preflight = getattr(adapter, "secret_preflight", None)
-    if preflight is not None:
-        preflight(secretstore.GLOBAL, provider, "", "")
-    secretstore.set_secret(provider, None, value)
-    adapter.secret_feed(secretstore.GLOBAL, provider, value, "", "")
+    """Store a provider key as ``acq secret set -g PROVIDER`` does: preflight, acq store, backend feed.
+
+    Under the same locks as that command (the provider's, then the secret
+    store's), which the caller does not hold yet: the gate prompts before a
+    create takes the store lock. Raises :class:`lock.LockTimeout`.
+    """
+    with lock.provider_credential_lock(provider), lock.secret_store_lock():
+        preflight = getattr(adapter, "secret_preflight", None)
+        if preflight is not None:
+            preflight(secretstore.GLOBAL, provider, "", "")
+        secretstore.set_secret(provider, None, value)
+        adapter.secret_feed(secretstore.GLOBAL, provider, value, "", "")
 
 
 def _ask_store(adapter) -> Callable[[provider_input.Facts], bool]:
@@ -780,6 +789,9 @@ def _ask_store(adapter) -> Callable[[provider_input.Facts], bool]:
             if not value.strip() or secretstore.value_problem(value) is not None:
                 return False
             _store_provider_key(adapter, facts.provider, value)
+        except lock.LockTimeout as exc:
+            print(f"acq: the '{facts.provider}' key was not stored: {exc}", file=sys.stderr)
+            return False
         finally:
             value = ""
         return True
@@ -787,15 +799,16 @@ def _ask_store(adapter) -> Callable[[provider_input.Facts], bool]:
     return ask
 
 
-def _provider_gate(backend: str, name: str,
-                   kit_set: Iterable[kit_msb.Kit]) -> list[tuple[Path, dict, provider_input.Facts]]:
+def _provider_gate(backend: str, name: str, kit_set: Iterable[kit_msb.Kit], *,
+                   ask: bool = True) -> list[tuple[Path, dict, provider_input.Facts]]:
     """The pre-create credential gate (Bash ``acq_provider_credentials_gate``) for the selected kits.
 
     Checks every selected provider's pin, then that the backend can inject its
     key, prompting on a terminal and failing closed otherwise. Runs before
     anything is created or removed. Returns the selected provider inputs. A
     fetched provider kit is read from its own checked directory, and its facts
-    face the same pin check as a bundled one's.
+    face the same pin check as a bundled one's. With ``ask`` False it never
+    prompts: a missing key fails closed, as off a terminal.
     Raises :class:`provider_input.ProviderInputError` or an adapter error.
     """
     adapter = common._adapter(backend)
@@ -813,21 +826,36 @@ def _provider_gate(backend: str, name: str,
                 )
     provider_input.gate(
         facts, has_key=lambda provider: adapter.secret_has(scope, provider),
-        ask_store=_ask_store(adapter) if common._stdin_is_terminal() else None,
+        ask_store=_ask_store(adapter) if ask and common._stdin_is_terminal() else None,
         backend=backend, stored=lambda provider: secretstore.has(provider, name),
     )
     return selected
 
 
+def _provider_pregate(name: str, kit_set: list[kit_msb.Kit]) -> None:
+    """The msb provider gate before the secret-store lock: the one place it may prompt for a key.
+
+    The prompt waits on the user, and a global secret change waiting for the
+    store lock must not wait on them too. :func:`_provider_prepare` checks again,
+    without prompting, under the lock. Raises :class:`msb.MsbError`.
+    """
+    try:
+        _provider_gate("msb", name, kit_set)
+    except provider_input.ProviderInputError as exc:
+        raise msb.MsbError(exc.code, exc.message, exc.remediation) from exc
+
+
 def _provider_prepare(name: str, kit_set: list[kit_msb.Kit], *, ro_mount: bool):
     """Gate the selected providers' pins and keys, then stage and record their input.
 
+    Runs under the secret-store lock, after :func:`_provider_pregate`, so the
+    gate never prompts here: a key removed since then fails closed.
     Returns the unpublished generation to mount, or None when msb cannot mount
     it read-only (an old msb, or Windows): the facts are still recorded, but
     OpenCode's renderer then leaves its config untouched. Raises :class:`msb.MsbError`.
     """
     try:
-        selected = _provider_gate("msb", name, kit_set)
+        selected = _provider_gate("msb", name, kit_set, ask=False)
         facts = [f for _kit, _manifest, f in selected]
         provider_input.record_write("msb", name, facts)
         if not ro_mount:
@@ -1840,8 +1868,29 @@ def _resume(command: str, name: str) -> bool:
         raise msb.MsbError(errors.FAILURE, "could not list running sandboxes", "check that msb works ('msb list'), then retry")
     if name in running:
         return True
-    msb.start(name)
+    # msb start binds what it reads from the store, like a create does.
+    with _store_reading(msb.MsbError, "nothing was started"):
+        msb.start(name)
     return False
+
+
+@contextlib.contextmanager
+def _store_reading(error_cls, unchanged: str) -> Iterator[None]:
+    """Hold the secret-store lock, shared, while store values are read and bound into a guest.
+
+    A global secret change or rotation holds it exclusively, so it cannot slip
+    between the read and the bind and leave the guest with a stale or removed
+    value (see :func:`lock.secret_store_lock`; the caller already holds the
+    sandbox's lifecycle lock, which comes first in the lock order). A timeout
+    is raised as ``error_cls`` (``timeout``); ``unchanged`` says what did not
+    happen.
+    """
+    try:
+        with lock.secret_store_lock(shared=True):
+            yield
+    except lock.SecretStoreLockTimeout as exc:
+        raise error_cls(errors.TIMEOUT, str(exc),
+                        f"retry once the other acq command finishes; {unchanged}") from None
 
 
 def _start_locked(command: str, name: str, emit_json: bool) -> int:
@@ -1869,7 +1918,8 @@ def _start_locked(command: str, name: str, emit_json: bool) -> int:
     if gate is not None:
         return gate
     try:
-        unbound = msb.reconcile_bindings(name)
+        with _store_reading(msb.MsbError, "nothing new was bound"):
+            unbound = msb.reconcile_bindings(name)
     except common._ADAPTER_ERRORS as exc:
         return common._operational_failure(
             command, exc.code, f"sandbox '{name}' is running, but: {exc.message}", exc.remediation, emit_json,
