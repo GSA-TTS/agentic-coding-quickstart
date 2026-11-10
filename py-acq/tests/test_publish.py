@@ -437,11 +437,15 @@ class _Proc:
 
     _next = 4242
 
-    def __init__(self, argv, alive=True):
+    def __init__(self, argv, alive=True, killed=None):
         self.argv = argv
         self.alive = alive
+        self.killed = killed if killed is not None else []
         _Proc._next += 1
         self.pid = _Proc._next
+
+    def terminate(self):
+        self.killed.append(self.pid)
 
     def poll(self):
         return None if self.alive else 1
@@ -464,12 +468,12 @@ def _tunnel_env(monkeypatch, tmp_path, *, serve_alive=True, ssh_alive=True, list
 
     def spawn(argv):
         is_serve = "serve" in argv
-        proc = _Proc(argv, serve_alive if is_serve else ssh_alive)
+        proc = _Proc(argv, serve_alive if is_serve else ssh_alive, killed)
         spawned.append(proc)
         return proc
 
     monkeypatch.setattr(publish, "_spawn", spawn)
-    monkeypatch.setattr(publish, "_kill", killed.append)
+    monkeypatch.setattr(publish, "_signal", lambda pid: pytest.fail(f"signalled recorded pid {pid}"))
     monkeypatch.setattr(publish, "_listener_ready", lambda port: listener)
     monkeypatch.setattr(publish.hostexec, "command", lambda name: [f"/usr/bin/{name}"])
     return spawned, killed
@@ -488,6 +492,9 @@ def test_post_hoc_publish_opens_a_serve_and_a_tunnel_and_records_them(monkeypatc
         assert opt in ssh.argv
     assert ["-F", "none"] == ssh.argv[5:7]
     assert ssh.argv[-3:] == ["-L", "127.0.0.1:8080:127.0.0.1:3000", "root@127.0.0.1"]
+    assert "HostKeyAlias=acq-msb-box" in ssh.argv  # pinned per sandbox, not per serve port
+    known = tmp_path / "state" / "ssh" / "known_hosts"
+    assert f'UserKnownHostsFile="{str(known).replace(chr(92), chr(92) * 2)}"' in ssh.argv
     assert doc["data"]["ports"] == [{"host_port": 8080, "guest_port": 3000, "origin": "post-hoc",
                                      "serve_port": 31337}]
     pids = tmp_path / "state" / "ports" / "box.pids"
@@ -590,6 +597,8 @@ def _sleeper() -> subprocess.Popen:
 def test_stop_and_rm_tear_the_tunnels_down(monkeypatch, tmp_path, capsys, verb):
     _msb_env(monkeypatch, tmp_path, catalog={"box": "running"})
     serve, ssh = _sleeper(), _sleeper()
+    # Real processes are killed; only the identity check is stood in for (it has its own tests).
+    monkeypatch.setattr(publish, "process_is_tunnel", lambda pid: pid in (serve.pid, ssh.pid))
     try:
         pids = tmp_path / "state" / "ports" / "box.pids"
         pids.parent.mkdir(parents=True)
@@ -615,6 +624,7 @@ def test_teardown_never_signals_pid_0_or_1(monkeypatch, tmp_path):
     monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
     sent: list[int] = []
     monkeypatch.setattr(publish.os, "kill", lambda pid, sig: sent.append(pid))
+    monkeypatch.setattr(publish, "process_is_tunnel", lambda pid: True)
     pids = tmp_path / "state" / "ports" / "box.pids"
     pids.parent.mkdir(parents=True)
     pids.write_text("0 1 30001 8080:3000\n-5 777 30002 1:2\n", encoding="utf-8")
@@ -634,9 +644,163 @@ def test_sbx_post_hoc_publish_is_sbx_s_own(monkeypatch, tmp_path, capfd):
     monkeypatch.setattr(lifecycle.sbx, "_run_stream", spy)
     rc, doc, err = _invoke(capfd, "--backend", "sbx", "ports", "box", "--publish", "8080:3000", "--json")
     assert rc == 0
-    assert seen == [["ports", "box", "--publish", "8080:3000"]]
+    assert seen == [["ports", "box", "--publish=8080:3000"]]
     assert doc["data"] == {"name": "box", "requested": ["8080:3000"]}
     assert "[stub ports] published 8080:3000" in err
     monkeypatch.setenv("ACQ_SBX_STUB_FAIL", "ports")
     rc, doc, _ = _invoke(capfd, "--backend", "sbx", "ports", "box", "--publish", "8080:3000", "--json")
     assert rc == 1 and doc["error"]["code"] == errors.FAILURE
+
+
+def test_an_occupied_host_port_is_refused_before_anything_starts(monkeypatch, tmp_path, capsys):
+    spawned, _ = _tunnel_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_MSB_HOST_PORTS_BUSY", "8080")
+    rc, doc, _ = _invoke(capsys, "--backend", "msb", "ports", "box", "--publish", "8080:3000", "--json")
+    assert rc == 1 and "host port 8080 is already in use on 127.0.0.1" in doc["error"]["message"]
+    assert spawned == []
+    rc, doc, _ = _invoke(capsys, "--backend", "msb", "ports", "box", "--publish", "9090:3000",
+                         "--publish", "9090:3001", "--json")
+    assert rc == 1 and "host port 9090 is requested more than once" in doc["error"]["message"]
+    assert spawned == []
+
+
+def test_ctrl_c_during_a_settle_stops_what_was_started(monkeypatch, tmp_path, capsys):
+    spawned, killed = _tunnel_env(monkeypatch, tmp_path)
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 2:  # the forward's settle
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(publish, "time", SimpleNamespace(sleep=sleep))  # publish's own sleeps only
+    rc, _, _ = _invoke(capsys, "--backend", "msb", "ports", "box", "--publish", "8080:3000", "--json")
+    assert rc == 130
+    assert len(spawned) == 2 and {p.pid for p in spawned} <= set(killed)
+    assert not (tmp_path / "state" / "ports" / "box.pids").exists()
+
+
+def test_ssh_option_paths_survive_spaces_percent_and_backslashes():
+    from pathlib import PureWindowsPath
+
+    assert publish._ssh_path_value(PureWindowsPath(r"C:\Users\a b\100%\kh"), quoted=True) \
+        == '"C:\\\\Users\\\\a b\\\\100%%\\\\kh"'
+    assert publish._ssh_path_value(PureWindowsPath(r"\\srv\share\k"), quoted=True) \
+        == '"\\\\\\\\srv\\\\share\\\\k"'
+    assert publish._ssh_path_value(PureWindowsPath(r"C:\x%y"), quoted=False) == r"C:\x%%y"
+
+
+def test_the_key_directory_made_0700_is_the_acq_ssh_dir(monkeypatch, tmp_path):
+    monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("ACQ_MSB_SSH_DIR", str(tmp_path / "sshdir"))
+    monkeypatch.setenv("ACQ_MSB_SSH_KEY", str(tmp_path / "elsewhere" / "k"))
+    monkeypatch.setattr(publish.hostexec, "command", lambda name: [f"/usr/bin/{name}"])
+    publish._ensure_key(lambda argv: publish.ssh_key().write_text("k", encoding="utf-8") and 0)
+    assert (tmp_path / "sshdir").is_dir() and publish.ssh_key().is_file()
+    if os.name == "posix":
+        assert (tmp_path / "sshdir").stat().st_mode & 0o777 == 0o700
+
+
+@pytest.mark.parametrize("value", ["0.0.0.0:8080:3000", "192.168.1.5:8080:3000", "[::]:8080:3000"])
+def test_sbx_refuses_a_non_loopback_bind(monkeypatch, tmp_path, capfd, value):
+    _sbx_env(monkeypatch, tmp_path, catalog={"box": "running"})
+    monkeypatch.setattr(lifecycle.sbx, "_run_stream", lambda *a, **k: pytest.fail("reached sbx"))
+    rc, doc, _ = _invoke(capfd, "--backend", "sbx", "ports", "box", "--publish", value, "--json")
+    assert rc == 1 and doc["error"]["code"] == errors.VALIDATION_FAILED
+    assert "loopback" in doc["error"]["message"]
+
+
+@pytest.mark.parametrize("value", ["127.0.0.1:8080:3000", "localhost:8080:3000", "[::1]:8080:3000", "3000"])
+def test_sbx_accepts_loopback_and_bare_values(monkeypatch, tmp_path, capfd, value):
+    _sbx_env(monkeypatch, tmp_path, catalog={"box": "running"})
+    seen = []
+    monkeypatch.setattr(lifecycle.sbx, "_run_stream", lambda argv, **k: seen.append(argv) or 0)
+    rc, _, _ = _invoke(capfd, "--backend", "sbx", "ports", "box", "--publish", value, "--json")
+    assert rc == 0 and seen == [["ports", "box", f"--publish={value}"]]
+
+
+# ---------------------------------------------------------------------------
+# Teardown checks a recorded process is still a tunnel before signalling it.
+# ---------------------------------------------------------------------------
+
+
+def _record_pids(tmp_path, *pids):
+    path = tmp_path / "state" / "ports" / "box.pids"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{pids[0]} {pids[1]} 30001 8080:3000\n", encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize("verdict,signalled,noted", [(True, True, False), (False, False, False),
+                                                     (None, False, True)])
+def test_teardown_signals_only_a_confirmed_tunnel_process(monkeypatch, tmp_path, capsys, verdict, signalled, noted):
+    monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
+    sent: list[int] = []
+    monkeypatch.setattr(publish, "process_is_tunnel", lambda pid: verdict)
+    monkeypatch.setattr(publish, "_signal", sent.append)
+    path = _record_pids(tmp_path, 4321, 4322)
+    publish.teardown("box")
+    assert sent == ([4321, 4322] if signalled else [])
+    err = capsys.readouterr().err
+    assert ("acq could not confirm it is an msb or ssh process" in err) is noted
+    assert not path.exists()
+
+
+def _sleeper_as(*extra) -> subprocess.Popen:
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)", *extra],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _reap(*procs):
+    for proc in procs:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=30)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
+def test_linux_identity_reads_the_command_line():
+    tunnel, other = _sleeper_as("ssh"), _sleeper_as()
+    try:
+        assert publish.process_is_tunnel(tunnel.pid) is True
+        assert publish.process_is_tunnel(other.pid) is False
+    finally:
+        _reap(tunnel, other)
+    assert publish.process_is_tunnel(other.pid) in (False, None)  # gone (or reused by now)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="uses ps -o comm=")
+def test_macos_identity_reads_the_command_name():
+    other = _sleeper_as("ssh")  # comm is python's, whatever the arguments
+    try:
+        assert publish.process_is_tunnel(other.pid) is False
+    finally:
+        _reap(other)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="QueryFullProcessImageNameW")
+def test_windows_identity_reads_the_image_name(tmp_path):
+    import shutil
+
+    fake_ssh = tmp_path / "ssh.exe"
+    shutil.copy(os.path.join(os.environ["SystemRoot"], "System32", "PING.EXE"), fake_ssh)
+    tunnel = subprocess.Popen([str(fake_ssh), "-n", "60", "127.0.0.1"], stdin=subprocess.DEVNULL,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    other = _sleeper_as()
+    try:
+        assert publish.process_is_tunnel(tunnel.pid) is True
+        assert publish.process_is_tunnel(other.pid) is False
+    finally:
+        _reap(tunnel, other)
+
+
+def test_a_reused_pid_is_not_killed(monkeypatch, tmp_path):
+    monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
+    bystander = _sleeper_as()
+    try:
+        monkeypatch.setattr(publish, "process_is_tunnel", lambda pid: False if pid == bystander.pid else None)
+        _record_pids(tmp_path, bystander.pid, bystander.pid)
+        publish.teardown("box")
+        assert bystander.poll() is None
+    finally:
+        _reap(bystander)

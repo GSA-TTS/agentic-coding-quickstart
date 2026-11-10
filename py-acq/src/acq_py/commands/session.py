@@ -406,10 +406,18 @@ def _publish_ports(name: str, requested: list[str], emit_json: bool, backend: st
     ``_acq_msb_valid_publish``), then one tunnel per value is opened under the
     sandbox's lifecycle lock, so an ``rm`` cannot strand a tunnel half recorded.
     Each repeated ``--publish`` is honoured (Bash kept only the last), all or
-    nothing. On sbx the values are sbx's own publish, forwarded verbatim; its
+    nothing. On sbx the values are sbx's own publish, forwarded verbatim (one
+    ``--publish=V`` argv element each) once a non-loopback bind is refused; its
     status is kept.
     """
     if backend == "sbx":
+        for mapping in requested:
+            problem = publish.sbx_bind_problem(mapping)
+            if problem is not None:
+                return common._operational_failure(
+                    "ports", errors.VALIDATION_FAILED, problem,
+                    "drop the address, or use 127.0.0.1 (e.g. --publish 127.0.0.1:8080:3000)", emit_json,
+                )
         rc = sbx.publish_ports(name, requested, json_mode=emit_json)
         if rc != 0:
             return common._operational_failure(

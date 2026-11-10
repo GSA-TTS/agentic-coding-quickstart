@@ -28,6 +28,7 @@ reported busy; none of them reaches a secret or widens what is published.
 
 from __future__ import annotations
 
+import ipaddress
 import itertools
 import os
 import re
@@ -38,7 +39,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import errors, hostexec, state, userdirs
@@ -360,6 +361,36 @@ def posthoc_problem(mapping: str) -> str | None:
     return None
 
 
+_LOOPBACK_NAMES = frozenset({"localhost"})
+
+
+def sbx_bind_problem(value: str) -> str | None:
+    """A reason to refuse an sbx ``--publish`` value that binds a non-loopback host address.
+
+    sbx's values may name the host address (``IP:HOST:GUEST``, IPv6 in brackets).
+    acq publishes on loopback only, as Bash's msb path does, so any other
+    address is refused before sbx sees it. Values without an address are sbx's
+    to judge.
+    """
+    if value.startswith("["):
+        addr, sep, _rest = value[1:].partition("]")
+        if not sep:
+            return f"ports: --publish '{value}' has an unterminated IPv6 address"
+    else:
+        parts = value.split(":")
+        if len(parts) < 3:
+            return None
+        addr = ":".join(parts[:-2])
+    if addr.lower() in _LOOPBACK_NAMES:
+        return None
+    try:
+        if ipaddress.ip_address(addr).is_loopback:
+            return None
+    except ValueError:
+        pass
+    return f"ports: --publish '{value}' binds host address '{addr}'; acq publishes on loopback only"
+
+
 def _settle(var: str, default: float) -> float:
     raw = os.environ.get(var, "")
     try:
@@ -380,19 +411,111 @@ def _spawn(argv: list[str]) -> subprocess.Popen:
     return subprocess.Popen(argv, **kwargs)  # nosec B603 # argv list, no shell
 
 
-def _kill(pid: int) -> None:
-    """Signal a recorded process (best-effort; never pid 0 or 1, which mean a group or init)."""
-    if pid <= 1:
-        return
+# The programs a recorded tunnel process can be: ``msb ssh serve`` and ``ssh -L``.
+_TUNNEL_PROGRAMS = frozenset({"msb", "ssh"})
+
+
+def _program(path: str) -> str:
+    base = path.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return base[:-4] if base.endswith(".exe") else base
+
+
+def _linux_identity(pid: int) -> bool | None:
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except FileNotFoundError:
+        return False  # no such process: nothing to stop
+    except OSError:
+        return None
+    return any(_program(token.decode("utf-8", "replace")) in _TUNNEL_PROGRAMS for token in raw.split(b"\0") if token)
+
+
+def _macos_identity(pid: int) -> bool | None:
+    try:
+        proc = subprocess.run(["/bin/ps", "-o", "comm=", "-p", str(pid)],  # nosec B603 # fixed argv, no shell
+                              capture_output=True, text=True, timeout=5, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    comm = proc.stdout.strip()
+    if proc.returncode != 0 and not comm:
+        return False  # ps lists nothing: no such process
+    return _program(comm) in _TUNNEL_PROGRAMS if comm else None
+
+
+def _windows_identity(pid: int) -> bool | None:  # pragma: no cover - Windows only
+    if sys.platform != "win32":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.QueryFullProcessImageNameW.argtypes = (wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                                                    ctypes.POINTER(wintypes.DWORD))
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        # ERROR_INVALID_PARAMETER: no process has that id.
+        return False if ctypes.get_last_error() == 87 else None
+    try:
+        size = wintypes.DWORD(32768)
+        buf = ctypes.create_unicode_buffer(size.value)
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            return None
+        return _program(buf.value) in _TUNNEL_PROGRAMS
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def process_is_tunnel(pid: int) -> bool | None:
+    """Whether ``pid`` is an ``msb`` or ``ssh`` process now; ``None`` when that cannot be told.
+
+    A recorded process id can be reused by an unrelated process once the
+    tunnel is gone, so it is checked before it is signalled: on Linux the
+    command line (``/proc/PID/cmdline``), on macOS ``ps -o comm=``, on Windows
+    the image name (``QueryFullProcessImageNameW``). ``False`` also covers a
+    process that no longer exists.
+    """
+    if sys.platform.startswith("linux"):
+        return _linux_identity(pid)
+    if sys.platform == "darwin":
+        return _macos_identity(pid)
+    if os.name == "nt":
+        try:
+            return _windows_identity(pid)
+        except (OSError, AttributeError, ValueError):
+            return None
+    return None
+
+
+def _signal(pid: int) -> None:
     try:
         os.kill(pid, signal.SIGTERM)
     except (OSError, ValueError):
         pass
 
 
+def _kill_recorded(name: str, pid: int) -> None:
+    """Stop a process the tunnel record names, once it is confirmed to be a tunnel process.
+
+    Never pid 0 or 1 (a process group or init). On Windows ``os.kill`` is
+    TerminateProcess, so the identity check matters as much there.
+    """
+    if pid <= 1:
+        return
+    verdict = process_is_tunnel(pid)
+    if verdict is None:
+        print(f"acq(msb): note: not stopping process {pid} from the port record of '{name}': "
+              "acq could not confirm it is an msb or ssh process.", file=sys.stderr)
+    elif verdict:
+        _signal(pid)
+
+
 def _stop(proc: subprocess.Popen) -> None:
-    _kill(proc.pid)
+    """Stop a process this acq started (its own child, so its id cannot have been reused)."""
     try:
+        proc.terminate()
         proc.wait(timeout=5)
     except (subprocess.TimeoutExpired, OSError):
         pass
@@ -402,11 +525,14 @@ def _ensure_key(run: Callable[[list[str]], int]) -> None:
     key = ssh_key()
     if key.is_file():
         return
-    key.parent.mkdir(parents=True, exist_ok=True)
+    # As Bash: the acq ssh directory is made 0700, wherever ACQ_MSB_SSH_KEY points.
+    ssh_dir = _ssh_dir()
+    ssh_dir.mkdir(parents=True, exist_ok=True)
     try:
-        key.parent.chmod(0o700)
+        ssh_dir.chmod(0o700)
     except OSError:
         pass
+    key.parent.mkdir(parents=True, exist_ok=True)
     try:
         keygen = hostexec.command("ssh-keygen")
     except FileNotFoundError:
@@ -422,7 +548,17 @@ def _ensure_key(run: Callable[[list[str]], int]) -> None:
         pass
 
 
-def _ssh_argv(sport: int, host: int, guest: int) -> list[str]:
+def _ssh_path_value(path: Path, *, quoted: bool) -> str:
+    """A path as ssh reads it from an option: ``%`` doubled (ssh expands ``%`` tokens) and,
+    for a ``-o`` value, double-quoted with ``\\`` and ``"`` escaped, so a space or a UNC
+    path survives ssh's option tokenizer."""
+    text = str(path).replace("%", "%%")
+    if not quoted:
+        return text
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _ssh_argv(name: str, sport: int, host: int, guest: int) -> list[str]:
     user = os.environ.get("ACQ_MSB_SSH_USER") or "root"
     if not _SSH_USER.fullmatch(user):
         raise PublishError(errors.VALIDATION_FAILED, f"ports: ACQ_MSB_SSH_USER {user!r} is not a user name",
@@ -434,9 +570,11 @@ def _ssh_argv(sport: int, host: int, guest: int) -> list[str]:
                            "install the OpenSSH client, then retry") from None
     # Only the acq key (IdentitiesOnly), no user ssh config (-F none), and no
     # interactive auth on a backgrounded tunnel: it fails closed instead of hanging.
-    return [*ssh, "-p", str(sport), "-N", "-n", "-F", "none", "-i", str(ssh_key()),
+    # The host key is pinned per sandbox (HostKeyAlias), not per ephemeral serve port.
+    return [*ssh, "-p", str(sport), "-N", "-n", "-F", "none", "-i", _ssh_path_value(ssh_key(), quoted=False),
             "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes", "-o", "NumberOfPasswordPrompts=0",
-            "-o", "StrictHostKeyChecking=accept-new", "-o", f"UserKnownHostsFile={_known_hosts()}",
+            "-o", "StrictHostKeyChecking=accept-new", "-o", f"HostKeyAlias=acq-msb-{name}",
+            "-o", f"UserKnownHostsFile={_ssh_path_value(_known_hosts(), quoted=True)}",
             "-o", "ExitOnForwardFailure=yes", "-L", f"127.0.0.1:{host}:127.0.0.1:{guest}", f"{user}@127.0.0.1"]
 
 
@@ -459,6 +597,7 @@ class Tunnel:
     serve_port: int
     host: int
     guest: int
+    procs: tuple = field(default=(), compare=False, repr=False)  # this acq's own children
 
     def line(self) -> str:
         return f"{self.serve_pid} {self.ssh_pid} {self.serve_port} {self.host}:{self.guest}\n"
@@ -468,30 +607,50 @@ class Tunnel:
 
 
 def _open_tunnel(name: str, serve_cmd: list[str], host: int, guest: int) -> Tunnel:
-    sport = pick_ephemeral_port()
-    serve = _spawn([*serve_cmd, "ssh", "serve", name, "--host", "127.0.0.1", "--port", str(sport)])
-    time.sleep(_settle("ACQ_MSB_SERVE_SETTLE", 1.0))
-    if serve.poll() is not None:
-        raise PublishError(errors.FAILURE,
-                           f"ports: 'msb ssh serve' on 127.0.0.1:{sport} exited immediately (could not start listener)",
-                           f"check that sandbox '{name}' is running ('acq ls'), then retry")
+    """Start the serve and the forward; on any failure, Ctrl-C in a settle sleep
+    included, stop whatever this call already started."""
+    spawned: list[subprocess.Popen] = []
     try:
-        forward = _spawn(_ssh_argv(sport, host, guest))
+        sport = pick_ephemeral_port()
+        spawned.append(_spawn([*serve_cmd, "ssh", "serve", name, "--host", "127.0.0.1", "--port", str(sport)]))
+        time.sleep(_settle("ACQ_MSB_SERVE_SETTLE", 1.0))
+        if spawned[0].poll() is not None:
+            raise PublishError(
+                errors.FAILURE,
+                f"ports: 'msb ssh serve' on 127.0.0.1:{sport} exited immediately (could not start listener)",
+                f"check that sandbox '{name}' is running ('acq ls'), then retry")
+        spawned.append(_spawn(_ssh_argv(name, sport, host, guest)))
+        time.sleep(_settle("ACQ_MSB_FORWARD_SETTLE", 1.0))
+        if spawned[1].poll() is not None:
+            raise PublishError(errors.FAILURE, f"ports: ssh -L 127.0.0.1:{host} -> 127.0.0.1:{guest} failed to "
+                               "establish (forward rejected, auth failed, or bind in use)",
+                               f"check that host port {host} is free, then retry")
+        if not _listener_ready(host):
+            raise PublishError(errors.FAILURE, f"ports: ssh -L did not open host listener 127.0.0.1:{host}",
+                               f"check that host port {host} is free, then retry")
     except BaseException:
-        _stop(serve)
+        for proc in reversed(spawned):
+            _stop(proc)
         raise
-    time.sleep(_settle("ACQ_MSB_FORWARD_SETTLE", 1.0))
-    problem = None
-    if forward.poll() is not None:
-        problem = (f"ports: ssh -L 127.0.0.1:{host} -> 127.0.0.1:{guest} failed to establish "
-                   "(forward rejected, auth failed, or bind in use)")
-    elif not _listener_ready(host):
-        problem = f"ports: ssh -L did not open host listener 127.0.0.1:{host}"
-    if problem is not None:
-        _stop(forward)
-        _stop(serve)
-        raise PublishError(errors.FAILURE, problem, f"check that host port {host} is free, then retry")
-    return Tunnel(serve.pid, forward.pid, sport, host, guest)
+    serve, forward = spawned
+    return Tunnel(serve.pid, forward.pid, sport, host, guest, (serve, forward))
+
+
+def _free_host_ports(pairs: list[tuple[int, int]]) -> None:
+    """Refuse a host port that is in use, or asked for twice, before anything is started.
+
+    Without this an occupied port would pass the listener check (something
+    answers there) while ssh's own bind failed.
+    """
+    seen: set[int] = set()
+    for host, _guest in pairs:
+        if host in seen:
+            raise PublishError(errors.VALIDATION_FAILED, f"ports: host port {host} is requested more than once",
+                               "give each --publish its own host port")
+        seen.add(host)
+        if host_port_status(host) == "busy":
+            raise PublishError(errors.FAILURE, f"ports: host port {host} is already in use on 127.0.0.1",
+                               "free it, or publish on another host port")
 
 
 def publish_posthoc(name: str, mappings: list[str], serve_cmd: list[str],
@@ -507,20 +666,21 @@ def publish_posthoc(name: str, mappings: list[str], serve_cmd: list[str],
     if path is None:
         raise PublishError(errors.VALIDATION_FAILED, f"ports: refusing unsafe sandbox name '{name}' for state path",
                            "use a sandbox name of letters, digits, '_' and '-'")
+    pairs = [(int(h), int(g)) for h, g in (m.split(":", 1) for m in mappings)]
+    _free_host_ports(pairs)
     _ensure_key(run)
     if not authorize(Path(f"{ssh_key()}.pub")):
         raise PublishError(errors.FAILURE, "ports: 'msb ssh authorize' failed for the acq tunnel key",
                            "check msb logs and retry")
     opened: list[Tunnel] = []
     try:
-        for mapping in mappings:
-            host, guest = (int(p) for p in mapping.split(":", 1))
+        for host, guest in pairs:
             opened.append(_open_tunnel(name, serve_cmd, host, guest))
         _record(path, opened)
     except BaseException:
         for tunnel in opened:
-            _kill(tunnel.ssh_pid)
-            _kill(tunnel.serve_pid)
+            for proc in reversed(tunnel.procs):
+                _stop(proc)
         raise
     return opened
 
@@ -568,7 +728,7 @@ def teardown(name: str) -> None:
     for fields in lines:
         for token in fields[:2]:
             if token.isascii() and token.isdigit():
-                _kill(int(token))
+                _kill_recorded(name, int(token))
     try:
         path.unlink()
     except FileNotFoundError:

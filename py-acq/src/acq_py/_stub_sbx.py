@@ -740,10 +740,11 @@ def main(argv: list[str]) -> int:
         if name is None or name not in catalog:
             print(f"sbx: no such sandbox '{name}'", file=sys.stderr)
             return 1
-        if "--publish" in args:
+        values = [a.split("=", 1)[1] for a in args if a.startswith("--publish=")]
+        values += [args[i + 1] for i, a in enumerate(args[:-1]) if a == "--publish"]
+        if values:
             # sbx's own post-hoc publish: echo what was asked, so a test can
             # assert the values arrived verbatim.
-            values = [args[i + 1] for i, a in enumerate(args[:-1]) if a == "--publish"]
             print("[stub ports] published " + " ".join(values))
             return 0
         raw = os.environ.get(INSPECT_RAW_ENV)
