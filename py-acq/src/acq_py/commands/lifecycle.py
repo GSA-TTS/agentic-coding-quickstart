@@ -1637,10 +1637,10 @@ def offer_bundle_refresh(backend: str, name: str, status: str, emit_json: bool, 
     if status == "current" or not update_check_enabled(parsed):
         return
     lines = (
-        [f"acq: note — '{name}' was built from an older kit bundle than your pinned",
+        [f"acq: note: '{name}' was built from an older kit bundle than your pinned",
          f"      version (local patterns ref {kits.CONTROL_PLANE_REF})."]
         if status == "stale" else
-        [f"acq: note — acq cannot confirm '{name}' is on your pinned kit bundle",
+        [f"acq: note: acq cannot confirm '{name}' is on your pinned kit bundle",
          "      (no provenance record; it may predate provenance tracking)."]
     )
     lines += ["      A refresh updates the built-in kits (USAi config, playbook, Zscaler CA,",

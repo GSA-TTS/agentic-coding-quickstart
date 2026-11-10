@@ -90,8 +90,8 @@ def _kit(*ports: tuple[str, str]):
 
 
 @pytest.mark.parametrize("values,problem", [
-    (["6868"], "--publish '6868' is not HOST:GUEST — both sides are required"),
-    ([""], "--publish '' is not HOST:GUEST — both sides are required"),
+    (["6868"], "--publish '6868' is not HOST:GUEST: both sides are required"),
+    ([""], "--publish '' is not HOST:GUEST: both sides are required"),
     (["a:80"], "--publish 'a:80': 'a' is not a port number (1..65535)"),
     ([":80"], "--publish ':80': '' is not a port number (1..65535)"),
     (["1:2:3"], "--publish '1:2:3': '2:3' is not a port number (1..65535)"),

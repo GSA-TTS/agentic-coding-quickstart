@@ -104,7 +104,7 @@ def test_declining_the_first_run_offer_records_the_backend_and_creates(monkeypat
     term = _Terminal(monkeypatch, keys=["QUIT"], lines=["n\n"])
     rc, _, err = _invoke(capsys, "--backend", "msb", "create", "shell", str(ws), "--name", "fr")
     assert rc == 0, err
-    assert "acq: looks like this is your first run — let's set up your kits." in err
+    assert "acq: looks like this is your first run; let's set up your kits." in err
     assert "Configure extra kits and token scoping now? [Y/n]" in err
     assert "acq: skipped. Run 'acq configure' anytime to change kits/token scoping." in err
     assert config.read_field("backend") == "msb"

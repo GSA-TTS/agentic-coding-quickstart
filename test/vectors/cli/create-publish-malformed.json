@@ -53,7 +53,7 @@
         "command": "create",
         "error": {
           "code": "validation_failed",
-          "message": "--publish '6868' is not HOST:GUEST — both sides are required"
+          "message": "--publish '6868' is not HOST:GUEST: both sides are required"
         }
       },
       "normalize": []

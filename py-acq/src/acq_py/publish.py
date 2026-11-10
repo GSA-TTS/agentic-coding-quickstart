@@ -82,7 +82,7 @@ PUBLISH_EXAMPLE = (
 
 def _pair_problem(pair: str, earlier: list[str]) -> str | None:
     if ":" not in pair:
-        return f"--publish '{pair}' is not HOST:GUEST — both sides are required"
+        return f"--publish '{pair}' is not HOST:GUEST: both sides are required"
     host, guest = pair.split(":", 1)
     for port in (host, guest):
         if not port or not (port.isascii() and port.isdigit()):

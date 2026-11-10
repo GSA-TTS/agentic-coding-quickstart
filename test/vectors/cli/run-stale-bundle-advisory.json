@@ -61,7 +61,7 @@
       },
       {
         "mode": "contains",
-        "value": "acq: note — 'box' was built from an older kit bundle than your pinned",
+        "value": "acq: note: 'box' was built from an older kit bundle than your pinned",
         "normalize": []
       },
       {

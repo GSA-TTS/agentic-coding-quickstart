@@ -360,7 +360,7 @@ def first_run_offer(backend: str, emit_json: bool) -> int | None:
     """
     if config.config_path().is_file() or not interactive(emit_json):
         return None
-    _err("acq: looks like this is your first run — let's set up your kits.")
+    _err("acq: looks like this is your first run; let's set up your kits.")
     _err("      (You can re-run this anytime with 'acq configure'.)")
     _err("")
     try:

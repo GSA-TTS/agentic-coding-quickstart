@@ -68,7 +68,7 @@ def test_a_stale_sandbox_gets_the_advisory_without_a_terminal(monkeypatch, tmp_p
     argv = ["run", "shell", str(ws), "--name", "box"] if form == "agent" else ["run", "box"]
     rc, out, err = _invoke(capsys, "--backend", "msb", *argv)
     assert rc == 0
-    assert f"acq: note — 'box' {STALE_NOTE}" in err
+    assert f"acq: note: 'box' {STALE_NOTE}" in err
     assert f"(local patterns ref {kits.CONTROL_PLANE_REF})." in err
     assert LATER in err and SILENCE in err
     assert "[y/N]" not in err and "[y/N]" not in out
