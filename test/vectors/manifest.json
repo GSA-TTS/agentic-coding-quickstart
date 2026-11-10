@@ -9,6 +9,7 @@
     "github-scope and provider-credential rm (contract change): github-scope no longer reports or records scoped: true. It reports scope (sandbox, or none when the workspace has no GitHub repositories), owner, repos and stored, and refuses multi-owner workspaces; msb now serves it through the acq secret store instead of failing with unsupported_capability. cli/github-scope-json, cli/github-scope-sbx and cli/github-scope-no-value were edited to run against a temporary one-owner git workspace instead of the repository root, whose remotes vary by checkout. provider-credential rm now also unbinds and deletes the provider's stored credential and reports credential_removed, so cli/provider-credential-rm-json gained that field and the rm vectors gained an ACQ_SECRET_STORE_DIR redirect.",
     "msb kit application (contract change): cli/kit-update-yes now expects the in-place reapply (status current, action refreshed) instead of consent recorded with the reapply deferred, and cli/run-inference-ignores-team-kits passes a bundled kit ref in ACQ_EXTRA_KITS, because unbundled extra kits are now refused rather than ignored (cli/run-extra-kit-unfetchable-refused covers that refusal). ACQ_SECURITY_MOUNT_STATE is honoured only with the stub backend; without it the gate runs the real msb inspect plus guest probe against the stub, which records each create's mounts. cli/configure-json-layers now reports extra_kits and provider_kit as honoured by Python, which reads them at create, with python_applies: bundled-only because it applies only kits from its built-in bundle. cli/security-gate-real-probe and cli/security-gate-real-probe-writable are scoped to linux (the schema has no posix value) because Windows never requests the read-only mount (KNOWN_FAILURE_MODES 54); cli/security-recreate-then-run is scoped to linux too, because ACQ_STATE_SEED re-seeds the ro_host_config record on every call, which no Windows recreate can clear; cli/security-recreate-windows covers Windows (recreate rebuilds without claiming the mount) and cli/security-recreate-yes runs everywhere.",
     "usai key rotation (contract change): cli/usai-rotate-ok and cli/usai-rotate-sbx expected unsupported_capability; they now run rotation through test/vectors/drivers/seeded-run.py (so the driver fails them if the key appears in any output) and assert the per-backend re-feed. cli/usai-rotate-unreachable and cli/usai-rotate-auth-failed were renamed cli/usai-rotate-sbx-partial and cli/usai-rotate-msb-partial: rotation never calls the provider (the provider_unreachable / provider_auth_failed codes belong to the attach-time key check), so they now cover a partial re-feed that exits 1 naming the sandbox and the retry that fixes it, using the driver's env step to clear the stub failure knob between the two calls.",
+    "config.yaml settings read by Python (contract change): cli/configure-json-layers now reports scope_github_token as honoured by Python (honoured_by_python: true), because create and run use it as the default answer to the per-sandbox GitHub-token prompt; that prompt is interactive, so its evidence is Tier-2 (py-acq/tests/test_create_config_settings.py). create and run gained --no-provider-kits (cli/create-no-provider-kits). Because create and run now note a workspace's GitHub repositories on stderr, every create or run vector that asserts an exact stderr and used the runner's working directory (the acq checkout, itself a GitHub repository) as its workspace now gets an empty workspace from test/vectors/drivers/seeded-run.py ({\"git_repos\": {}}): cli/create-msb-binds-usai, cli/create-no-provider-kits, cli/create-provider-pin-mismatch-refused, cli/lifecycle-create, cli/lifecycle-create-backend-failure, cli/lifecycle-create-config-sbx, cli/lifecycle-sbx-create, cli/run-missing-key-noninteractive, cli/security-gate-real-probe and cli/security-gate-real-probe-writable; their oracles are unchanged.",
     "version identity (contract change): cli/version-json expected kit_control_plane_ref null; it now expects the pinned control-plane commit, and it and cli/version-human mark both backends uninstalled, because version now reports the resolved active backend and its detected version, which would otherwise depend on what the host has installed. cli/version-json-backend covers a resolved backend.",
     "Legacy-suite retirement classification: docs/test-retirement-inventory.md buckets every test/bats file as preserve/re-express/retire and records gaps G1-G19. This manifest maps only the preserve-tier contract rows to vectors; the inventory is the authoritative cross-reference from legacy tests to vectors and DROP rows."
   ],
@@ -330,8 +331,8 @@
       "vectors": ["cli/exec-flags-after-name-verbatim", "cli/passthrough-trailing-flags"]
     },
     {
-      "contract": "ADR-0038m §1/§2 passthrough failures before the handoff keep the error contract: unknown --backend is usage (exit 2); a backend CLI that cannot be run is backend_not_found (exit 1)",
-      "vectors": ["cli/passthrough-unknown-backend", "cli/passthrough-backend-missing", "cli/passthrough-sbx-backend-missing"]
+      "contract": "ADR-0038m §1/§2 passthrough failures before the handoff keep the error contract: unknown --backend is usage (exit 2); a backend CLI that cannot be run, or an override that does not parse, is backend_not_found (exit 1)",
+      "vectors": ["cli/passthrough-unknown-backend", "cli/passthrough-backend-missing", "cli/passthrough-sbx-backend-missing", "cli/passthrough-bin-override-unparseable"]
     },
     {
       "contract": "ADR-0038m §2 / ADR-0040m command boundary: a backend CLI missing after detection gives backend_not_found with an envelope, never a traceback (ls, session verbs)",
@@ -554,6 +555,18 @@
     {
       "contract": "Pre-create provider credential gate (Bash acq_provider_credentials_gate): a selected provider with no stored key fails closed without a terminal (on a terminal acq asks and stores it)",
       "vectors": ["cli/run-missing-key-noninteractive"]
+    },
+    {
+      "contract": "Provider-kit precedence at create/run, as in Bash: --no-provider-kits, then a set ACQ_PROVIDER_KITS (an empty value selects none), then config.yaml provider_kit, then the shipped default; --no-provider-kits needs no provider kit or credential",
+      "vectors": ["cli/create-no-provider-kits"]
+    },
+    {
+      "contract": "A sandbox keeps the provider selection it was created with (Bash acq_provider_selection_load): start, create --recreate and kit update use the recorded selection, not the one current at the time",
+      "vectors": ["cli/start-keeps-no-provider-kits"]
+    },
+    {
+      "contract": "Per-sandbox GitHub-token nudge at create and run (Bash advise_github_scope, ADR-0013): a workspace with GitHub repositories and no sandbox-scoped token is noted on stderr with the command to scope one later, under --json too; the prompt itself is interactive (Tier-2 evidence in py-acq/tests/test_create_config_settings.py)",
+      "vectors": ["cli/create-json-notes-github-scope"]
     }
   ]
 }

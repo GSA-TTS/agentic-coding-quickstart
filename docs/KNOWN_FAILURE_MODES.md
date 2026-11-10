@@ -167,14 +167,21 @@ directory, case-sensitive `ACQ_IMPL`, and the Bash branch's refusal.
 The Python `attach`, `shell`, `run` and `exec` give the session a PTY when stdin
 is a terminal (`msb exec -t`, `sbx exec -it`), pass `HOME`, `TERM`/`COLORTERM`,
 the host git identity and (msb) `SHELL`, map a signal death to `128+N`, and
-leave Ctrl-C to the child (`py-acq/src/acq_py/hostexec.py` `run_foreground`). Six
-parts of the Bash session differ or are not ported yet:
+leave Ctrl-C to the child (`py-acq/src/acq_py/hostexec.py` `run_foreground`).
+"Stdin is a terminal" is `hostexec.stdin_is_tty`, which on Windows also needs a
+real console, so `acq attach NAME < NUL` gets no `-t`. On msb every session also
+replays the kit environment recorded when the kits were applied (the `kit-env`
+host-config key, last value wins, as Bash's `_acq_msb_kit_env_flags_into`), and
+first writes the host's global git `user.name`/`user.email` into the guest's
+global git config (as Bash's `_acq_msb_apply_host_git_global_config`); see
+`prepare_session` in `py-acq/src/acq_py/commands/session.py`. On sbx the kits
+carry their own environment and the git identity kit sets the config. These
+values are not secrets (a kit's `environment` is non-secret configuration), so
+they go on the `msb exec` command line as `-e NAME=value`, as in Bash. Four parts
+of the Bash session differ or are not ported yet (the numbering below keeps its
+earlier order; the kit environment and guest git config items are done):
 
-1. **Kit `environment[]` replay** (Bash `_acq_msb_kit_env_flags_into`). The
-   Python kit engine does not persist a kit's declared environment, so there is
-   nothing to replay. **Unblock trigger:** the Python kit engine applies kits
-   through the neutral engine and records their environment; then add it to the
-   adapters' session flags.
+1. *(Done: kit `environment[]` replay on msb.)*
 2. **ssh-agent forwarding** (ADR-0021). Python never creates the `--vsock` route
    or the in-guest bridge, so it passes `SSH_AUTH_SOCK` only when the sandbox's
    host record carries an `ssh_auth_sock` guest path. No Python create writes
@@ -187,11 +194,7 @@ parts of the Bash session differ or are not ported yet:
    forwarding must add the bridge to create, attach, `acq start` and
    `acq restart` (`_start_locked` in `py-acq/src/acq_py/commands/lifecycle.py`).
    **Unblock trigger:** forwarding is ported.
-3. **Guest git config on msb** (Bash `_acq_msb_apply_host_git_global_config`).
-   On msb, Python passes the identity as `GIT_*`/`EMAIL` session variables only;
-   it does not write `user.name`/`user.email` into the guest's global git config.
-   On sbx the git identity kit (`py-acq/src/acq_py/kit_sbx.py`) does, as in Bash.
-   **Unblock trigger:** same as item 1.
+3. *(Done: guest git config on msb.)*
 4. **`ACQ_ACTIVATE_PROJECT_ENV`.** With it set to `1`, Bash passes
    `ACQ_WORKSPACE` and wraps the session in its guest script
    (`acq_guest_exec_script`, `acq_guest_shell_script` in `acq.backends/common.sh`),
@@ -211,9 +214,25 @@ parts of the Bash session differ or are not ported yet:
    **Unblock trigger:** the sbx kit and attach work; decide then whether a
    Bash-created generic-OpenCode sandbox needs `sbx run` to attach.
 6. **Live check.** A TUI attach, an interactive shell and Ctrl-C have been tested
-   only against a fake backend under a PTY (`py-acq/tests/test_session_fidelity.py`).
-   **Unblock trigger:** the next Tier-3 run on an msb host, and on an sbx 0.51+
-   host for `sbx exec -it`.
+   only against a fake backend under a PTY (`py-acq/tests/test_session_fidelity.py`);
+   the tests check the argv and environment acq builds, not what a real backend
+   does with them. Still to confirm on real hosts:
+   * msb (Linux, macOS): `acq attach` renders the opencode TUI through
+     `msb exec -t`; `acq shell` is an interactive login shell; Ctrl-C cancels
+     the agent's step without ending acq; a kit's `environment` (for example
+     `OPENCODE_CONFIG`) is visible in `acq exec NAME -- env`; and
+     `git config --global user.name` in the guest prints the host's value.
+   * sbx 0.51+: `sbx exec -it` gives the agent a PTY and stdin, and `-e` reaches
+     the session.
+   * Windows (Python is the default there, ADR-0048m): from Windows Terminal and
+     from a legacy console, `msb exec -t` gets a working PTY, and Ctrl-C reaches
+     the guest; `acq attach NAME < NUL` exits instead of waiting for keys. A
+     Windows console sets no `TERM`, so the guest gets msb's default terminal
+     type and a TUI may fall back to 16 colours. If it does, the fix is to pass
+     a `TERM` when the host console supports virtual-terminal sequences, which
+     acq does not do today because `terminal_env` never invents a value.
+   **Unblock trigger:** the next Tier-3 run on an msb host, on an sbx 0.51+
+   host for `sbx exec -it`, and on the Windows qualification cell.
 
 ---
 
@@ -3876,10 +3895,19 @@ non-default provider (`acq provider-credential set ID KEY_ENV --host HOST`).
 ### Prevention / Status
 
 Documented in `docs/BACKEND_GUIDE.md` (host pinning) and `py-acq/README.md`.
-The Python gate also lacks Bash's `--no-provider-kits` flag (an explicitly
-empty `ACQ_PROVIDER_KITS` is the equivalent) and does not record the provider
-selection per sandbox, so a later `start` of a sandbox with an incomplete
-binding record uses the current selection.
+The Python acq takes Bash's `--no-provider-kits` flag on `create` and `run`,
+ahead of `ACQ_PROVIDER_KITS` and config.yaml `provider_kit`, as Bash does.
+
+Like Bash, it records the selection a sandbox was created with
+(`provider_selection` and `provider_kits` in its provenance record), and
+`start`, `create --recreate` and `kit update` use the recorded selection, so a
+sandbox created without provider kits is never bound with a provider key or
+given a provider kit later. The selection is recorded even when a kit did not
+apply at create. One difference remains: a sandbox with no recorded selection
+(from before it was recorded) uses the selection current at the time, as the
+Python acq always did, where Bash uses the default one. The first `start` or
+`kit update` that completes then records the selection it used, so run it with
+the intended `ACQ_PROVIDER_KITS` (an empty value for none).
 
 ---
 

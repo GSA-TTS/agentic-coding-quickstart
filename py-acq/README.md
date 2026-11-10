@@ -276,13 +276,41 @@ keys, including unknown ones, are kept. Without a terminal (or with
 `ACQ_NO_PROMPT`, `ACQ_NO_PROGRESS` or `--json`) nothing is written; `--json`
 lists each setting as `key`, `value`, `source` and `honoured_by_python`.
 
-**`scope_github_token` takes effect only under the Bash acq for now**, and both
-the report and `--json` (`"honoured_by_python": false`) say so. The Python acq
-reads `extra_kits` and `provider_kit` when it creates a sandbox, but applies
-only kits from its pinned built-in bundle: a kit that would have to be fetched
-(any catalog extra kit today) is refused at create and needs the Bash acq
-(`ACQ_IMPL=bash`). `--json` marks those two settings `"python_applies":
-"bundled-only"`.
+The Python acq reads all three keys at `create` and `run`, with Bash's
+precedence, so `--json` reports `"honoured_by_python": true` for each:
+
+* **`extra_kits`** is used unless `ACQ_EXTRA_KITS` is set and non-empty; `--kit`
+  refs are added after either. An unknown name in `extra_kits` stops the create.
+* **`provider_kit`** is the provider kit unless `--no-provider-kits` is given or
+  `ACQ_PROVIDER_KITS` is set (an empty value selects no provider kit). The flag
+  wins over both and needs no provider credential. The create records which of
+  these applied (`provider_selection` and `provider_kits`, as Bash records them),
+  and `start`, `create --recreate` and `kit update` use that record instead of
+  the selection current at the time, so a sandbox created without provider kits
+  never gains a provider key or kit later. A sandbox with no recorded selection
+  (one from before acq recorded it) uses the current selection; Bash uses the
+  default selection there. Records the Bash acq wrote are carried over by the
+  state migration.
+* Both are applied only from the pinned built-in bundle: a kit that would have
+  to be fetched (any catalog extra kit today) is refused at create and needs
+  the Bash acq (`ACQ_IMPL=bash`). `--json` marks these two settings
+  `"python_applies": "bundled-only"`.
+* **`scope_github_token`** is the default answer (`yes`, `y` or `Y` mean yes)
+  to the per-sandbox GitHub-token prompt (ADR-0013). Before a new sandbox is
+  provisioned, and when `run` re-attaches, acq checks the workspace for GitHub
+  repositories. If it finds some and the sandbox has no token of its own, it
+  says so on stderr and asks "Scope a GitHub token for this sandbox now?". A
+  yes runs the `github-scope` steps; it stores the token before the create, so
+  msb binds it. Declining, an empty token or a multi-owner workspace never stops
+  the create.
+
+  Without a terminal on stdin, both implementations print only the
+  `acq github-scope SANDBOX PATH` command to run later. Python also does that
+  under `--json` (stdout stays one document), and at a terminal when
+  `ACQ_NO_PROMPT` or `ACQ_NO_PROGRESS` is set. That last case is the one
+  difference from Bash, which then takes the configured answer without asking
+  and, on `yes`, reads a token from the terminal. Python never reads a token
+  while prompts are off.
 
 Deliberate differences from Bash:
 
@@ -301,7 +329,8 @@ Deliberate differences from Bash:
   shows only `config.yaml`. Kit sources and provider-credential bindings come
   from Python's own registries, and each binding carries its own layer. The
   human report marks a flag or env value with `[from X]`; otherwise it matches
-  Bash line for line, plus a note about the keys above. Userinfo in a kit ref
+  Bash line for line, plus a note that extra and provider kits apply only from
+  the built-in bundle. Userinfo in a kit ref
   (`https://user:token@host`) is shown as `***@host`.
 * **Stricter failures.** A `config.yaml` write that fails exits 1 (Bash ignores
   it), a malformed `ACQ_PROVIDER_CREDENTIAL_BINDINGS` is `validation_failed`, and

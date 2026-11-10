@@ -7,15 +7,11 @@
   "platform": "any",
   "invoke": {
     "argv": [
-      "{acq}",
-      "--backend",
-      "msb",
-      "run",
-      "opencode",
-      ".",
-      "--name",
-      "nokey-box",
-      "--json"
+      "{python}",
+      "-I",
+      "test/vectors/drivers/seeded-run.py",
+      "[{\"git_repos\":{}},[[\"--backend\",\"msb\",\"run\",\"opencode\",\"{workspace}\",\"--name\",\"nokey-box\",\"--json\"],false,null]]",
+      "{acq}"
     ],
     "env": {
       "ACQ_MSB_BIN": "__stub__",

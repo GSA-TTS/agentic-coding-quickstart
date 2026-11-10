@@ -467,6 +467,22 @@ def test_provenance_is_retried_after_a_crash_between_record_and_provenance(tree,
     assert migration.read_generation() == migration.TARGET_GENERATION
 
 
+def test_the_bash_provider_selection_is_imported(tree):
+    # As Bash acq_provenance_write wrote them: an explicit empty selection
+    # (--no-provider-kits) omits provider_kits; a list is kept verbatim.
+    _bash_file("none", ".env", f"agent=shell\napplied_ref={kits.CONTROL_PLANE_REF}\nprovider_selection=explicit\n")
+    _bash_file("list", ".env", "agent=shell\nprovider_selection=explicit\nprovider_kits=/k/a /k/b\n")
+    _bash_file("dflt", ".env", "agent=shell\nprovider_selection=default\nprovider_kits=ignored\n")
+    _bash_file("bad", ".env", f"agent=shell\napplied_ref={kits.CONTROL_PLANE_REF}\nprovider_selection=all\n")
+    migration.migrate_tree()
+    assert kits.provider_selection_read("msb", "none") == ("explicit", "")
+    assert kits.provenance_status("msb", "none") == "current"
+    assert kits.provider_selection_read("msb", "list") == ("explicit", "/k/a /k/b")
+    assert kits.provenance_status("msb", "list") == "unknown"  # Bash recorded no bundle ref
+    assert kits.provider_selection_read("msb", "dflt") == ("default", "")
+    assert kits.provider_selection_read("msb", "bad") is None  # a value Bash never writes is not carried over
+
+
 def test_fresh_tree_without_bash_state_is_quiet(tree, capsys):
     migration.migrate_tree()
     assert migration.read_generation() == migration.TARGET_GENERATION

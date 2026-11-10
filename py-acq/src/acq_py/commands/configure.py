@@ -12,13 +12,15 @@ defaults, and writes the same three ``config.yaml`` keys Bash writes:
   per-sandbox GitHub-token prompt;
 * ``provider_kit`` — the first checked provider-kit candidate.
 
-The Python acq reads ``extra_kits`` and ``provider_kit`` when it creates an msb
-sandbox, but it applies only kits from its pinned built-in bundle: a kit that
-would have to be fetched (every catalog extra kit today) is refused at create,
-and needs the Bash acq (``ACQ_IMPL=bash``). ``--json`` says so with
-``"python_applies": "bundled-only"`` on those two settings, next to
-``honoured_by_python: true``. ``scope_github_token`` takes effect only under the
-Bash acq for now (``honoured_by_python: false``). Every write goes through :func:`acq_py.config.write_field`, so other
+The Python acq reads all three. ``extra_kits`` and ``provider_kit`` feed the kit
+selection at create and run, with Bash's precedence (a non-empty
+``ACQ_EXTRA_KITS`` over ``extra_kits``; ``--no-provider-kits``, then a set
+``ACQ_PROVIDER_KITS``, over ``provider_kit``), but it applies only kits from its
+pinned built-in bundle: a kit that would have to be fetched (every catalog extra
+kit today) is refused at create, and needs the Bash acq (``ACQ_IMPL=bash``).
+``--json`` says so with ``"python_applies": "bundled-only"`` on those two
+settings. ``scope_github_token`` is the default answer to the per-sandbox
+GitHub-token prompt at create and run. Every write goes through :func:`acq_py.config.write_field`, so other
 keys (including ones acq does not know) are kept, a symlinked config is written
 through, and each write is atomic. A newer ``config.yaml`` schema is refused
 before the first prompt; the forward-migration pre-step (the one every mutating
@@ -79,13 +81,11 @@ _HEADER = "? Select kits (dimmed rows are always applied · ↑/↓ move · SPAC
 
 FLAG, ENV, CONFIG, DEFAULT, MIXED = "flag", "env", "config", "default", "mixed"
 
-# The keys configure writes that only the Bash acq reads so far.
-BASH_ONLY_KEYS = frozenset({"scope_github_token"})
 # The keys the Python acq reads but serves only from its pinned built-in bundle.
 BUNDLED_ONLY_KEYS = frozenset({"extra_kits", "provider_kit"})
-BASH_ONLY_NOTE = (
+BUNDLED_ONLY_NOTE = (
     "      note: the Python acq applies extra and provider kits only from its built-in bundle "
-    "(others need ACQ_IMPL=bash); scope GitHub token takes effect only under the Bash acq for now."
+    "(others need ACQ_IMPL=bash)."
 )
 
 # Raw terminal control bytes (C0, DEL, C1) are dropped from displayed labels.
@@ -104,7 +104,9 @@ class Setting(NamedTuple):
             "key": self.key,
             "value": _redacted(self.value),
             "source": self.source,
-            "honoured_by_python": self.key not in BASH_ONLY_KEYS,
+            # Every reported setting is read by the Python acq; the field stays
+            # in the contract, and python_applies qualifies a partial reading.
+            "honoured_by_python": True,
         }
         if self.key in BUNDLED_ONLY_KEYS:
             doc["python_applies"] = "bundled-only"
@@ -222,7 +224,7 @@ def _show_current(settings: list[Setting]) -> None:
     _err(f"      provider creds:     {shown('provider_credential_bindings', '<none>', '   (acq provider-credential ls)')}")
     _err(f"      provider kit:       {shown('provider_kit', '<none>', '   (acq kit-source ls)')}")
     _err(f"      kit sources:        {shown('kit_sources', '<shipped default>')}")
-    _err(BASH_ONLY_NOTE)
+    _err(BUNDLED_ONLY_NOTE)
     _err("")
 
 

@@ -12,6 +12,7 @@ import sys
 
 from .. import (
     backends,
+    config,
     envelope,
     errors,
     gitrepos,
@@ -560,6 +561,116 @@ def run_github_scope(parsed, emit_json: bool, backend: str) -> int:
     except OSError as exc:
         print(f"acq: warning: could not record the GitHub scope for '{sandbox}': {exc.strerror or exc}", file=sys.stderr)
     return _github_scope_result(backend, sandbox, repos, owner, emit_json)
+
+
+# ---------------------------------------------------------------------------
+# The create/run nudge toward a per-sandbox GitHub token (ADR-0013, ADR-0031).
+# ---------------------------------------------------------------------------
+
+SCOPE_NOW_PROMPT = "Scope a GitHub token for this sandbox now?"
+
+
+def scope_github_token_default() -> bool:
+    """config.yaml ``scope_github_token`` as the default answer to :data:`SCOPE_NOW_PROMPT`.
+
+    ``yes``, ``y`` or ``Y`` answer yes; anything else, or no value, answers no
+    (Bash ``advise_github_scope``). ``acq configure`` writes the key; no
+    environment variable or flag overrides it, in either implementation.
+    """
+    return config.read_field("scope_github_token") in ("yes", "y", "Y")
+
+
+def _stored_github_token(sandbox: str | None) -> bool:
+    """True when the acq store holds a GitHub token in exactly this scope
+    (``None`` is the global scope). A store that cannot be read counts as none:
+    the nudge is advisory and must never stop a create."""
+    try:
+        return bool(secretstore.get(secretstore.key_for("github", sandbox)))
+    except (secretstore.SecretStoreError, OSError):
+        return False
+
+
+def _scope_later_hint(sandbox: str, workspace: str) -> str:
+    return f"acq github-scope {sandbox} {common._printable(workspace)}"
+
+
+def advise_github_scope(backend: str, sandbox: str, workspace: str, emit_json: bool) -> None:
+    """Nudge toward a token limited to the workspace's repositories (Bash ``advise_github_scope``).
+
+    Runs before a new sandbox is provisioned (msb binds secrets only at create,
+    so a token stored afterwards would not reach it) and when ``run`` re-attaches.
+    Silent when the sandbox already has its own token or the workspace holds no
+    GitHub repository. Otherwise it says so on stderr and, at a terminal, asks
+    :data:`SCOPE_NOW_PROMPT`, whose default answer is config.yaml
+    ``scope_github_token``. A yes walks through the ``github-scope`` steps.
+    Warn-not-block: declining, an empty token or a failed store never stops
+    the create.
+
+    Without a terminal, with ``ACQ_NO_PROMPT`` or ``ACQ_NO_PROGRESS``, or with
+    ``--json`` (whose stdout stays one document) it only prints the command to
+    scope later: a token is never read while prompts are off.
+    """
+    if _stored_github_token(sandbox):
+        return
+    repos = gitrepos.detect_workspace_repos(workspace)
+    if not repos:
+        return
+    # ASCII only: on Windows stderr is often in the console code page, where
+    # Bash's em dash would not decode as UTF-8.
+    lines = ["acq: note: this sandbox has no repo-scoped GitHub token."]
+    if _stored_github_token(None):
+        lines += ["      A GLOBAL GitHub token is set; it grants this sandbox access to ALL",
+                  "      your repositories, broader than the repos mounted here."]
+    else:
+        lines.append("      No GitHub token is set for this sandbox.")
+    lines.append("      For least privilege, scope a token to just the mounted repo(s).")
+    print("\n".join(lines), file=sys.stderr)
+    from . import configure  # lazy: configure's terminal widgets are needed only here
+
+    if not configure.interactive(emit_json):
+        print(f"      To scope it later: {_scope_later_hint(sandbox, workspace)}", file=sys.stderr)
+        return
+    if configure.confirm(configure.Terminal(), SCOPE_NOW_PROMPT, scope_github_token_default()):
+        _scope_now(backend, sandbox, workspace, repos)
+    else:
+        print(f"acq: continuing without scoping (run '{_scope_later_hint(sandbox, workspace)}' anytime).",
+              file=sys.stderr)
+
+
+def _scope_now(backend: str, sandbox: str, workspace: str, repos: list[str]) -> None:
+    """The ``github-scope`` steps at the create prompt; every failure is a warning."""
+    later = _scope_later_hint(sandbox, workspace)
+    found = gitrepos.owners(repos)
+    if len(found) != 1:
+        print(f"acq: cannot scope one GitHub token for sandbox '{sandbox}': the workspace has repositories "
+              f"owned by {len(found)} accounts ({', '.join(repos)}), and a fine-grained token covers a "
+              f"single owner. Re-run with a one-owner workspace: acq github-scope {sandbox} PATH",
+              file=sys.stderr)
+        return
+    owner = found[0]
+    _github_scope_guidance(sandbox, owner, repos, gitrepos.pat_url(owner, sandbox))
+    print("      To skip for now, press Enter on an empty line.", file=sys.stderr)
+    value = ""
+    try:
+        value = common._read_secret_value("Enter GitHub token: ")
+        problem = None if value.strip() else "no token entered"
+        problem = problem or secretstore.value_problem(value)
+        if problem is None:
+            common._adapter(backend).github_scope(sandbox, value)
+    except common._ADAPTER_ERRORS as exc:  # a store, backend or terminal-read failure; never a value
+        problem = exc.message
+    finally:
+        value = ""
+    if problem is not None:
+        print(f"acq: GitHub scoping skipped ({problem}); continuing. Re-run later with: {later}", file=sys.stderr)
+        return
+    try:
+        provider_creds.github_scope_write(backend, sandbox, workspace, owner, repos)
+    except OSError as exc:
+        print(f"acq: warning: could not record the GitHub scope for '{sandbox}': {exc.strerror or exc}",
+              file=sys.stderr)
+    print(f"acq: stored a GitHub token for sandbox '{sandbox}' only, requested for {', '.join(repos)}.",
+          file=sys.stderr)
 
 
 _ROTATE = "usai-rotate-api-key"

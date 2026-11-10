@@ -196,6 +196,15 @@ def test_relative_override_never_runs_a_workspace_file(workspace, monkeypatch, v
         msb.msb_command()
 
 
+@pytest.mark.parametrize("windows", [False, True])
+def test_override_that_does_not_split_is_file_not_found(monkeypatch, windows):
+    # Every caller maps OSError to "backend CLI cannot be run"; a ValueError
+    # from shlex would bypass that and surface as a traceback.
+    monkeypatch.setattr(hostexec, "_is_windows", lambda: windows)
+    with pytest.raises(FileNotFoundError):
+        hostexec.override_command('"/opt/msb --debug')
+
+
 def test_windows_drive_relative_override_is_refused(monkeypatch):
     monkeypatch.setattr(hostexec, "_is_windows", lambda: True)
     with pytest.raises(FileNotFoundError):

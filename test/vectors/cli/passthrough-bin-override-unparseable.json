@@ -1,0 +1,63 @@
+{
+  "schema": 1,
+  "id": "cli/passthrough-bin-override-unparseable",
+  "oracle": "ADR-0038m §1/§2 passthrough failures before the handoff keep the error contract: a backend override that does not parse as a command line (an unbalanced quote) is backend_not_found (exit 1), never a traceback",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{acq}",
+      "--backend",
+      "msb",
+      "--json",
+      "notaverb"
+    ],
+    "env": {
+      "ACQ_MSB_BIN": "\"/nonexistent/acq-vector/msb --flag",
+      "ACQ_SBX_INSTALLED": "0"
+    },
+    "unset": [
+      "ACQ_MSB_VERSION",
+      "ACQ_MSB_INSTALLED",
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "ACQ_MSB_READY_TIMEOUT",
+      "ACQ_MSB_STUB_EXIT_CODE",
+      "ACQ_MSB_STUB_CATALOG",
+      "ACQ_MSB_STUB_FAIL"
+    ],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 1,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "notaverb",
+        "error": {
+          "code": "backend_not_found"
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME"
+    ]
+  }
+}

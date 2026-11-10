@@ -10,7 +10,7 @@
       "{python}",
       "-I",
       "test/vectors/drivers/seeded-run.py",
-      "[[[\"--backend\",\"msb\",\"secret\",\"set\",\"-g\",\"usai\"],true,0],[[\"--backend\",\"msb\",\"create\",\"opencode\",\".\",\"--name\",\"life-test\",\"--json\"],false,null]]",
+      "[{\"git_repos\":{}},[[\"--backend\",\"msb\",\"secret\",\"set\",\"-g\",\"usai\"],true,0],[[\"--backend\",\"msb\",\"create\",\"opencode\",\"{workspace}\",\"--name\",\"life-test\",\"--json\"],false,null]]",
       "{acq}"
     ],
     "env": {

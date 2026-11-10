@@ -476,8 +476,8 @@ def _import_sandbox(sandbox: legacy_bash.BashSandbox) -> bool:
     """Create the Python record for one Bash sandbox; True when it was created.
 
     A sandbox the Bash acq knows nothing useful about (no agent, no workspace:
-    a create that never finished) is skipped. The recorded bundle ref is carried
-    over only to a record this import created (``imported_from: bash``), so it
+    a create that never finished) is skipped. The recorded bundle ref and
+    provider selection are carried over only to a record this import created (``imported_from: bash``), so it
     never describes a different sandbox that this acq already has under the same
     name; it is retried for such a record, in case a crash came between the two.
     """
@@ -490,8 +490,13 @@ def _import_sandbox(sandbox: legacy_bash.BashSandbox) -> bool:
         fields["ssh_auth_sock"] = sandbox.ssh_auth_sock
     fields["imported_from"] = "bash"
     created = state.record_import(sandbox.backend, sandbox.name, fields)
-    if sandbox.applied_ref and (created or _imported_record(sandbox.backend, sandbox.name)):
-        kits.provenance_import(sandbox.backend, sandbox.name, sandbox.applied_ref, sandbox.applied_at)
+    selection: dict = {}
+    if sandbox.provider_selection:  # so start and kit update keep what Bash created it with
+        selection["provider_selection"] = sandbox.provider_selection
+        if sandbox.provider_kits:
+            selection["provider_kits"] = sandbox.provider_kits
+    if (sandbox.applied_ref or selection) and (created or _imported_record(sandbox.backend, sandbox.name)):
+        kits.provenance_import(sandbox.backend, sandbox.name, sandbox.applied_ref, sandbox.applied_at, selection)
     return created
 
 
