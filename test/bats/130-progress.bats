@@ -461,6 +461,73 @@ _suspended_spinner() {
 # leaves no PID. With no animator possible the cleanup removes the directory;
 # once an animator may exist (forked, PID not yet recorded) it takes the draw
 # lock, sets the stop marker and leaves the directory for the animator to remove.
+# Bash 5 runs the INT trap again for a second Ctrl-C during the first one's wait
+# for the animator. The nested run must return and leave the outer one to run
+# the prior INT handler (in acq, the provisioning subshell's handler, which
+# stops the backend child before the lock is released).
+@test "progress: a second Ctrl-C during the stop's wait still runs the prior INT handler" {
+  local mark="$STUBDIR/animator-stopped" spintmp="$STUBDIR/spintmp"
+  mkdir -p "$spintmp"
+  _prog 'trap "echo PRIOR_INT >&2; exit 130" INT
+    trap "echo PRIOR_EXIT=\$? >&2" EXIT
+    '"$(_suspended_spinner "$mark" "$spintmp")"'
+    self=$(exec sh -c "echo \$PPID")
+    ( sleep 1; kill -INT "$self"; sleep 0.3; kill -INT "$self"; sleep 1.5
+      echo "CONTINUED" >&2; kill -CONT "$anim" ) &
+    acq_spin_stop
+    echo "NOT-REACHED" >&2'
+  assert_equal "$status" 130
+  [ -d "$mark" ]
+  assert_output --partial 'PRIOR_INT'
+  assert_line 'PRIOR_EXIT=130'
+  [[ "$output" == *CONTINUED*PRIOR_INT* ]]
+  refute_output --partial 'NOT-REACHED'
+}
+
+# The animator quits when it sees the stop marker. If the marker cannot be
+# written (here, the directory is made read-only), only a TERM can end it, so
+# the stop sends one rather than wait out its cap and leave the animator
+# polling for the rest of the session.
+@test "progress: the stop sends TERM when it cannot write the stop marker" {
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN*) skip "chmod cannot make a directory read-only here" ;;
+  esac
+  [ "$(id -u)" != 0 ] || skip "root writes into a read-only directory"
+  _prog '_acq_progress_enabled() { return 0; }
+    acq_spin_start "phase one"
+    anim=$_ACQ_SPIN_PID d=$_ACQ_SPIN_DIR
+    sleep 0.3
+    chmod 500 "$d"
+    SECONDS=0
+    acq_spin_stop
+    echo "STOP-SECONDS=$SECONDS"
+    i=0
+    while kill -0 "$anim" 2>/dev/null && [ "$i" -lt 40 ]; do sleep 0.05; i=$((i + 1)); done
+    kill -0 "$anim" 2>/dev/null && { echo "ANIMATOR-ALIVE"; kill "$anim"; }
+    chmod 700 "$d"; rm -rf "$d"'
+  assert_success
+  refute_output --partial 'ANIMATOR-ALIVE'
+  assert_regex "$output" 'STOP-SECONDS=[0-3]'$'\n'
+}
+
+# A hangup reaches the animator too (it is in the terminal's process group): it
+# must end through its own cleanup and remove its private directory.
+@test "progress: a hangup ends the animator and removes its directory" {
+  _prog '_acq_progress_enabled() { return 0; }
+    acq_spin_start "phase one"
+    anim=$_ACQ_SPIN_PID d=$_ACQ_SPIN_DIR
+    sleep 0.3
+    kill -HUP "$anim"
+    i=0
+    while kill -0 "$anim" 2>/dev/null && [ "$i" -lt 40 ]; do sleep 0.05; i=$((i + 1)); done
+    kill -0 "$anim" 2>/dev/null && echo "ANIMATOR-ALIVE"
+    [ -e "$d" ] && echo "DIR-LEFT"
+    acq_spin_stop 2>/dev/null'
+  assert_success
+  refute_output --partial 'ANIMATOR-ALIVE'
+  refute_output --partial 'DIR-LEFT'
+}
+
 @test "progress: the cleanup removes the directory when no animator was started" {
   _prog '_acq_spin_install_traps
     d=$(mktemp -d "'"$STUBDIR"'/acq-spin.XXXXXX")
