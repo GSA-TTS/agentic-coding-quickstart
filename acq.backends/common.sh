@@ -3019,7 +3019,7 @@ _acq_kit_source_parse_entry() {
   fi
   case "$ref" in
     *[!A-Za-z0-9_.-]*)
-      echo "acq: ${source}: invalid ref '$ref' for '$repo'" >&2
+      echo "acq: ${source}: invalid ref '$(kit_ref_display "$ref")' for '$repo'" >&2
       return 1
       ;;
   esac
@@ -3155,8 +3155,11 @@ EOF
 # _acq_kit_source_resolve_repo WANT — accept a full repo or a unique source
 # basename ("agentic-coding-patterns") and echo the full repo.
 _acq_kit_source_resolve_repo() {
-  local want="${1:-}" repo ref dir found="" count=0
+  local want="${1:-}" repo ref dir found="" count=0 shown
   [ -n "$want" ] || return 1
+  # Messages name WANT only through kit_ref_display: it is user input and may
+  # carry a credential.
+  shown=$(kit_ref_display "$want")
   # The shipped default source is the pinned control plane: always resolvable.
   if [ "$want" = "${ACQ_KIT_SOURCE_DEFAULT_REPO##*/}" ]; then
     printf '%s\n' "$ACQ_KIT_SOURCE_DEFAULT_REPO"
@@ -3164,8 +3167,8 @@ _acq_kit_source_resolve_repo() {
   fi
   case "$want" in
     */*) found=$(_acq_kit_source_entry_for_repo "$want") || {
-           echo "acq: kit source '$want' is not trusted." >&2
-           echo "     Add it first: acq kit-source add $want --ref <sha>" >&2
+           echo "acq: kit source '$shown' is not trusted." >&2
+           echo "     Add it first: acq kit-source add $shown --ref <sha>" >&2
            return 1
          }
          printf '%s\n' "${found%%|*}"
@@ -3183,12 +3186,12 @@ _acq_kit_source_resolve_repo() {
 $(acq_kit_sources_entries)
 EOF
   if [ "$count" -eq 0 ]; then
-    echo "acq: kit source name '$want' is not registered." >&2
+    echo "acq: kit source name '$shown' is not registered." >&2
     echo "     See: acq kit-source ls" >&2
     return 1
   fi
   if [ "$count" -gt 1 ]; then
-    echo "acq: kit source name '$want' is ambiguous; use host/owner/repo." >&2
+    echo "acq: kit source name '$shown' is ambiguous; use host/owner/repo." >&2
     echo "     See: acq kit-source ls" >&2
     return 1
   fi

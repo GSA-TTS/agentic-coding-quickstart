@@ -275,6 +275,18 @@ _NOGIT_REF='https://kituser:s3cr3t-tok@github.com/o/r.git#ref=0123456789abcdef01
   assert_output --partial "invalid kit source 'https://***@"
   refute_output --partial 's3cr3t-tok'
   refute_output --partial 'kituser'
+  # An invalid ref and an untrusted or unknown source name are redacted too.
+  run _acq_kit_source_parse_entry 'github.com/acme/kits@kituser:s3cr3t-tok@x' kit_sources
+  assert_failure
+  assert_output --partial "invalid ref '***@x'"
+  refute_output --partial 's3cr3t-tok'
+  run _acq_kit_source_resolve_repo 'https://kituser:s3cr3t-tok@github.com/acme/kits'
+  assert_failure
+  assert_output --partial "kit source 'https://***@github.com/acme/kits' is not trusted"
+  refute_output --partial 's3cr3t-tok'
+  run _acq_kit_source_resolve_repo 'kituser:s3cr3t-tok@kits'
+  assert_failure
+  refute_output --partial 's3cr3t-tok'
 }
 
 @test "sbx: the extra-kit record warning redacts the ref" {
