@@ -11,7 +11,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from conftest import REAL_HOME
+from conftest import REAL_HOME, TEST_LOCK_TIMEOUT_S
 
 _REAL_ACQ_DIRS = (
     Path(REAL_HOME, ".config", "acq"),
@@ -39,11 +39,21 @@ def test_home_and_xdg_dirs_are_redirected(tmp_path_factory):
     assert os.environ["HOME"] != REAL_HOME
     for var in ("HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
         assert Path(os.environ[var]).resolve().is_relative_to(base), var
-    # The one ACQ_* the fixture sets: the secret store is pinned to a throwaway
-    # file backend so no test can reach the host keychain.
-    assert [v for v in os.environ if v.startswith("ACQ_")] == ["ACQ_SECRET_STORE_DIR"]
+    # The ACQ_* the fixture sets: the secret store is pinned to a throwaway
+    # file backend so no test can reach the host keychain, and the lock waits
+    # are short so a lock that is never released fails fast.
+    assert sorted(v for v in os.environ if v.startswith("ACQ_")) == [
+        "ACQ_PROVIDER_INPUT_LOCK_RETRIES", "ACQ_SANDBOX_LOCK_TIMEOUT", "ACQ_SECRET_STORE_DIR",
+    ]
     assert Path(os.environ["ACQ_SECRET_STORE_DIR"]).resolve().is_relative_to(base)
     assert "MSB_HOME" not in os.environ and "SBX_HOME" not in os.environ
+
+
+def test_lock_waits_are_short_by_default():
+    # The shipped waits are 300 s (lifecycle) and 300 one-second retries (Bash's
+    # provider-input lock); a release regression must not hang the run that long.
+    assert float(os.environ["ACQ_SANDBOX_LOCK_TIMEOUT"]) <= TEST_LOCK_TIMEOUT_S <= 30
+    assert int(os.environ["ACQ_PROVIDER_INPUT_LOCK_RETRIES"]) <= 30
 
 
 def test_state_touching_command_writes_only_under_the_test_tree(tmp_path, acq_cmd):

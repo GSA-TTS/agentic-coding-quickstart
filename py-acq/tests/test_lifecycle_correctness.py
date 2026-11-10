@@ -377,6 +377,28 @@ def test_a_live_bash_lock_for_the_same_sandbox_blocks_rm(monkeypatch, tmp_path, 
 
 
 @_POSIX_ONLY
+def test_a_bash_lock_with_no_owner_is_kept_and_the_timeout_names_the_recovery_command(monkeypatch, tmp_path, capsys):
+    # A directory with no owner file may be another command's lock in the
+    # instant before it writes its owner, so it is never removed automatically.
+    # The timeout says how to remove a leftover one, and that command works.
+    _env(monkeypatch, tmp_path)
+    _write_catalog(tmp_path, {"box": "running"})
+    monkeypatch.setenv("ACQ_SANDBOX_LOCK_TIMEOUT", "0.3")
+    bash_lock = _bash_lock()
+    bash_lock.mkdir(parents=True)
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "rm", "box", "--json")
+    assert rc == 1 and doc["error"]["code"] == errors.TIMEOUT
+    command = f"rm -f -- {shlex.quote(str(bash_lock / 'owner'))} && rmdir -- {shlex.quote(str(bash_lock))}"
+    assert doc["error"]["remediation"].endswith(
+        f"remove the leftover lock directory: {command} (see docs/KNOWN_FAILURE_MODES.md, section 79)")
+    assert bash_lock.is_dir()
+    subprocess.run(["sh", "-c", command], check=True)
+    rc, doc = _invoke(capsys, "--backend", "msb", "rm", "box", "--json")
+    assert rc == 0, doc
+
+
+@_POSIX_ONLY
 @pytest.mark.parametrize(
     "owner",
     [

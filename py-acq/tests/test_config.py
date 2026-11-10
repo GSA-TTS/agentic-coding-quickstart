@@ -143,6 +143,7 @@ def test_config_writes_wait_for_the_config_lock(monkeypatch):
         assert proc.returncode == 1, proc.stderr
         error = json.loads(proc.stdout)["error"]
         assert error["code"] == "migration_failed" and "config.yaml lock" in error["message"]
+        assert "config.yaml to finish" in error["remediation"] and "writable" not in error["remediation"]
     config.write_field("backend", "sbx")
     assert path.read_bytes() == b"schema: 1\nbackend: sbx\n"
 
@@ -849,3 +850,362 @@ def test_doctor_fails_on_a_dangling_symlink(tmp_path):
     link.symlink_to(tmp_path / "gone.yaml")
     check = config.doctor_check()
     assert check["status"] == "fail" and "dangling symlink" in check["message"]
+
+
+# ---------------------------------------------------------------------------
+# The config.yaml lock Bash and Python share (lock.ConfigDirLock, Bash
+# _acq_config_lock_acquire).
+# ---------------------------------------------------------------------------
+
+def _dir_lock() -> Path:
+    path = config.config_lock_path()
+    return path.with_name(path.name + ".d")
+
+
+def _hold_dir_lock(owner: str | None) -> Path:
+    """Leave the shared lock directory as another command would, with ``owner`` as its owner line."""
+    lock_dir = _dir_lock()
+    lock_dir.mkdir(parents=True)
+    if owner is not None:
+        (lock_dir / "owner").write_text(owner + "\n", encoding="utf-8")
+    return lock_dir
+
+
+def _live_owner() -> str:
+    from acq_py import lock
+
+    identity = lock._process_identity(os.getpid())
+    if identity is None:
+        pytest.skip("no process identity (ps) on this host")
+    return f"{os.getpid()} {identity}"
+
+
+@POSIX_ONLY
+def test_python_config_write_takes_and_releases_the_shared_lock_directory(monkeypatch):
+    from acq_py import lock
+
+    seen = []
+    real = config._write_field_locked
+    monkeypatch.setattr(config, "_write_field_locked",
+                        lambda k, v: seen.append(lock._owner_line(_dir_lock())) or real(k, v))
+    config.write_field("backend", "sbx")
+    assert seen == [_live_owner()]  # held, with this process as its owner, during the write
+    assert not os.path.lexists(_dir_lock())
+
+
+@POSIX_ONLY
+def test_python_config_write_waits_for_a_live_holder_of_the_shared_lock(monkeypatch):
+    path = _write_config(b"schema: 1\nbackend: msb\n")
+    lock_dir = _hold_dir_lock(_live_owner())  # as a running Bash acq leaves it
+    monkeypatch.setenv("ACQ_MIGRATION_LOCK_TIMEOUT", "0.3")
+    with pytest.raises(config.ConfigLockTimeout) as exc:
+        config.write_field("backend", "sbx")
+    message = str(exc.value)
+    assert f"{lock_dir} is held" in message
+    assert f"rm -f -- {lock_dir}/owner && rmdir -- {lock_dir}" in message
+    assert path.read_bytes() == b"schema: 1\nbackend: msb\n"
+    assert lock_dir.is_dir()
+
+
+@POSIX_ONLY
+def test_python_takes_a_shared_lock_directory_with_no_owner_file():
+    # The owner file decides, so a directory left without one (a taker that
+    # died before creating it) heals itself on the next write.
+    lock_dir = _hold_dir_lock(None)
+    config.write_field("backend", "sbx")
+    assert config.read_field("backend") == "sbx"
+    assert not os.path.lexists(lock_dir)
+
+
+@POSIX_ONLY
+def test_python_never_removes_a_shared_lock_whose_owner_file_is_empty(monkeypatch):
+    # An empty owner file is a taker between creating it and writing its
+    # token, so it is held; a leftover one needs the recovery command.
+    lock_dir = _hold_dir_lock(None)
+    (lock_dir / "owner").write_bytes(b"")
+    monkeypatch.setenv("ACQ_MIGRATION_LOCK_TIMEOUT", "0.3")
+    with pytest.raises(config.ConfigLockTimeout, match="remove the leftover lock directory"):
+        config.write_field("backend", "sbx")
+    assert lock_dir.is_dir()
+    subprocess.run(["sh", "-c", f"rm -f -- '{lock_dir}/owner' && rmdir -- '{lock_dir}'"], check=True)
+    config.write_field("backend", "sbx")
+    assert config.read_field("backend") == "sbx"
+
+
+@POSIX_ONLY
+def test_python_retries_when_the_directory_goes_before_its_owner_file_is_created(monkeypatch):
+    # A losing or releasing taker removed the directory between Python's mkdir
+    # and its owner create: look again rather than fail the write.
+    real = os.open
+    seen = []
+
+    def flaky_open(path, flags, *args, **kwargs):
+        if path == "owner" and not seen:
+            seen.append(path)
+            raise FileNotFoundError(path)
+        return real(path, flags, *args, **kwargs)
+
+    # A separate patch context: undoing the test's own monkeypatch would also
+    # undo the isolation fixture's redirected home and state directories.
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(os, "open", flaky_open)
+        config.write_field("backend", "sbx")
+    assert seen == ["owner"] and config.read_field("backend") == "sbx"
+    assert not os.path.lexists(_dir_lock())
+
+
+@POSIX_ONLY
+def test_python_removes_its_own_owner_file_when_writing_the_token_fails(monkeypatch):
+    from acq_py import lock
+
+    real = os.fdopen
+
+    class Full:
+        def __init__(self, fd):
+            self.fh = real(fd, "w", encoding="utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.fh.close()
+
+        def write(self, _text):
+            raise OSError(28, "No space left on device")
+
+    shared = _shared()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(os, "fdopen", lambda fd, *a, **k: Full(fd))
+        with pytest.raises(OSError, match="No space left"):
+            shared.acquire()
+    assert not os.path.lexists(_dir_lock()) and shared.token is None
+    assert lock._owner_line(_dir_lock()) == ""
+
+
+@POSIX_ONLY
+def test_python_recovers_a_shared_lock_left_by_a_dead_holder():
+    proc = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"], capture_output=True,
+                          text=True, check=True)
+    lock_dir = _hold_dir_lock(f"{proc.stdout.strip()} Thu1Jan00:00:001970")
+    config.write_field("backend", "sbx")
+    assert config.read_field("backend") == "sbx"
+    assert not os.path.lexists(lock_dir)
+
+
+@needs_bash
+def test_bash_config_write_waits_while_python_holds_the_config_lock():
+    path = _write_config(b"schema: 1\nbackend: msb\n")
+    env = {"ACQ_MIGRATION_LOCK_TIMEOUT": "0.4"}
+    with config.config_lock():
+        proc = subprocess.run(
+            [BASH, "-c", 'source "$1"; _acq_config_write_field backend sbx', "bash", str(COMMON_SH)],
+            capture_output=True, text=True, timeout=60, env={**os.environ, **env},
+        )
+        assert proc.returncode == 1, proc.stderr
+        assert "could not take the config.yaml lock" in proc.stderr
+        assert path.read_bytes() == b"schema: 1\nbackend: msb\n"
+    proc = _bash("_acq_config_write_field backend sbx")
+    assert proc.returncode == 0, proc.stderr
+    assert config.read_field("backend") == "sbx"
+    assert not os.path.lexists(_dir_lock())
+
+
+@needs_bash
+def test_python_config_write_waits_while_bash_holds_the_shared_lock(monkeypatch):
+    # Bash holds the lock while it rewrites config.yaml; a Python write in that
+    # window waits instead of overwriting the Bash change with stale content.
+    path = _write_config(b"schema: 1\nbackend: msb\n")
+    gate = _dir_lock().parent / "gate"
+    script = (
+        '_acq_config_write_field_locked() { : > "$1"; while [ -e "$1" ]; do sleep 0.05; done; }; '
+        '_acq_config_write_field "$1"'
+    )
+    holder = subprocess.Popen([BASH, "-c", f'source "$1"; shift; {script}', "bash", str(COMMON_SH), str(gate)],
+                              stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              env={**os.environ, "LC_ALL": "C"})
+    try:
+        deadline = time.monotonic() + 30
+        while not gate.exists():
+            assert holder.poll() is None, holder.communicate()
+            assert time.monotonic() < deadline, "the Bash writer never took the lock"
+            time.sleep(0.05)
+        monkeypatch.setenv("ACQ_MIGRATION_LOCK_TIMEOUT", "0.3")
+        with pytest.raises(config.ConfigLockTimeout):
+            config.write_field("backend", "sbx")
+        assert path.read_bytes() == b"schema: 1\nbackend: msb\n"
+    finally:
+        gate.unlink(missing_ok=True)
+        holder.communicate(timeout=30)
+    assert holder.returncode == 0
+    monkeypatch.delenv("ACQ_MIGRATION_LOCK_TIMEOUT")
+    config.write_field("backend", "sbx")
+    assert config.read_field("backend") == "sbx"
+
+
+def test_windows_rule_counts_a_fresh_directory_as_held_and_recovers_an_old_one():
+    # ConfigDirLock._acquire_windows is plain os code, so its rule is checked here
+    # on any host: neither side can check the other's PID on Windows, so the age
+    # of the directory decides.
+    from acq_py import lock, state
+
+    shared = lock.ConfigDirLock(config.config_lock_path(), state.state_dir())
+    lock_dir = _hold_dir_lock("4242 unverified")
+    assert shared._acquire_windows() is False and shared.blocked
+    old = time.time() - lock.CONFIG_WINDOWS_STALE_S - 5
+    os.utime(lock_dir, (old, old))
+    assert shared._acquire_windows() is True
+    assert lock._owner_line(lock_dir) == f"{os.getpid()} windows"
+    shared.release()
+    assert not os.path.lexists(lock_dir)
+
+
+def _shared():
+    from acq_py import lock, state
+
+    return lock.ConfigDirLock(config.config_lock_path(), state.state_dir())
+
+
+def _racy_mkdir(monkeypatch):
+    """Make ``os.mkdir`` report success for an existing path, as uutils mkdir can under a race."""
+    real = os.mkdir
+
+    def mkdir(path, *args, **kwargs):
+        try:
+            real(path, *args, **kwargs)
+        except FileExistsError:
+            pass
+
+    monkeypatch.setattr(os, "mkdir", mkdir)
+
+
+@POSIX_ONLY
+def test_losing_the_owner_file_race_never_removes_the_winners_owner(monkeypatch):
+    # Another taker's mkdir "succeeded" on the same directory and created the
+    # owner file first: this taker must back off and leave that file alone.
+    winner = _live_owner()
+    lock_dir = _hold_dir_lock(winner)
+    shared = _shared()
+    with pytest.MonkeyPatch.context() as mp:
+        _racy_mkdir(mp)
+        assert shared.acquire() is False and shared.blocked
+    assert (lock_dir / "owner").read_text(encoding="utf-8") == winner + "\n"
+
+
+def test_windows_rule_never_removes_a_winners_owner_either(monkeypatch):
+    lock_dir = _hold_dir_lock("4242 TueNov1009:00:002026")  # a fresh Git Bash owner
+    shared = _shared()
+    with pytest.MonkeyPatch.context() as mp:
+        _racy_mkdir(mp)
+        assert shared._acquire_windows() is False
+    assert (lock_dir / "owner").read_text(encoding="utf-8") == "4242 TueNov1009:00:002026\n"
+
+
+def test_windows_rule_retries_when_the_directory_vanishes_after_mkdir_fails(monkeypatch):
+    # The holder released between this mkdir's EEXIST and the look at the path:
+    # take it on the next attempt rather than report an unsafe lock.
+    real = os.mkdir
+    calls = []
+
+    def mkdir(path, *args, **kwargs):
+        calls.append(path)
+        if len(calls) == 1:
+            raise FileExistsError(path)
+        real(path, *args, **kwargs)
+
+    shared = _shared()
+    shared.path.parent.mkdir(parents=True, exist_ok=True)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(os, "mkdir", mkdir)
+        assert shared._acquire_windows() is True
+    assert len(calls) == 2
+    shared.release()
+    assert not os.path.lexists(shared.path)
+
+
+def test_windows_rule_recovers_an_exited_python_owner_at_once(monkeypatch):
+    from acq_py import lock
+
+    lock_dir = _hold_dir_lock("4242 windows")  # fresh, so the age rule alone would wait
+    monkeypatch.setattr(lock, "_windows_pid_alive", lambda pid: pid != 4242)
+    shared = _shared()
+    assert shared._acquire_windows() is True
+    assert lock._owner_line(lock_dir) == f"{os.getpid()} windows"
+    shared.release()
+
+
+def test_windows_rule_waits_for_a_live_python_owner_and_any_fresh_git_bash_owner(monkeypatch):
+    from acq_py import lock
+
+    checked = []
+    monkeypatch.setattr(lock, "_windows_pid_alive", lambda pid: checked.append(pid) or True)
+    lock_dir = _hold_dir_lock("4242 windows")
+    assert _shared()._acquire_windows() is False and checked == [4242]
+    (lock_dir / "owner").write_text("4243 TueNov1009:00:002026\n", encoding="utf-8")
+    checked.clear()
+    assert _shared()._acquire_windows() is False and checked == []  # Git Bash PIDs are not checked
+    assert lock_dir.is_dir()
+
+
+def test_release_retries_a_transient_permission_error_on_windows(monkeypatch):
+    from acq_py import lock
+
+    monkeypatch.setattr(lock, "_PERMISSION_RETRY_S", 0.0)
+    attempts = []
+
+    def flaky():
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise PermissionError("in use by a scanner")
+
+    monkeypatch.setattr(lock, "_RETRY_PERMISSION", True)
+    lock._retry_permission(flaky)
+    assert len(attempts) == 3
+    attempts.clear()
+    monkeypatch.setattr(lock, "_RETRY_PERMISSION", False)
+    with pytest.raises(PermissionError):
+        lock._retry_permission(flaky)
+    assert len(attempts) == 1
+
+
+def test_powershell_recovery_literal_doubles_every_quote_powershell_honours():
+    from acq_py import lock
+
+    assert lock._ps_quote("C:\\a'b\u2018c\u2019d\u201ae\u201bf") == "'C:\\a''b\u2018\u2018c\u2019\u2019d\u201a\u201ae\u201b\u201bf'"
+
+
+def test_windows_rule_takes_a_directory_with_no_owner_file_at_once():
+    lock_dir = _hold_dir_lock(None)  # fresh, so the age rule alone would wait
+    shared = _shared()
+    assert shared._acquire_windows() is True
+    shared.release()
+    assert not os.path.lexists(lock_dir)
+
+
+def test_windows_rule_removes_its_own_owner_file_when_writing_the_token_fails(monkeypatch):
+    import builtins
+
+    real = builtins.open
+
+    class Full:
+        def __init__(self, fh):
+            self.fh = fh
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.fh.close()
+
+        def write(self, _text):
+            raise OSError(28, "No space left on device")
+
+    def fake_open(path, mode="r", *a, **k):
+        fh = real(path, mode, *a, **k)
+        return Full(fh) if mode == "x" else fh
+
+    shared = _shared()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(builtins, "open", fake_open)
+        with pytest.raises(OSError, match="No space left"):
+            shared._acquire_windows()
+    assert not os.path.lexists(_dir_lock())

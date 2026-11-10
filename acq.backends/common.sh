@@ -241,6 +241,11 @@ KIT_SOURCE_PREFIXES=()
 # _acq_require_provider_selection, which only create/run call.
 # shellcheck disable=SC2034  # read by _acq_require_provider_selection
 ACQ_PROVIDER_SELECTION_ERROR=""
+# The same latch for a kit ref acq refuses at input (kit_ref_shape_check) in
+# ACQ_EXTRA_KITS or ACQ_PROVIDER_KITS: recorded by _build_kit_list, enforced only
+# where kits are selected or applied (run/create, kit list, the heal), so an
+# unrelated verb such as `acq ls` or `acq secret rm` still works.
+ACQ_KIT_REFS_ERROR=""
 
 # Transitional fallback defaults for the pinned usai-provider kit. ADR-0030's
 # target state is for the kit to export these provider facts as static metadata
@@ -1029,6 +1034,14 @@ _acq_require_provider_selection() {
   return 1
 }
 
+# _acq_require_kit_refs — the gate for the latched ACQ_KIT_REFS_ERROR: print it
+# and fail. Called by run/create, kit list and the backends' heal.
+_acq_require_kit_refs() {
+  [ -n "${ACQ_KIT_REFS_ERROR:-}" ] || return 0
+  printf '%s\n' "$ACQ_KIT_REFS_ERROR" >&2
+  return 1
+}
+
 # Assemble the full kit list: selected built-ins, then extras.
 # Zscaler CA trust FIRST (see ACQ_KIT_NAMES) so later network-fetching kits
 # succeed behind a TLS-intercepting proxy.
@@ -1036,6 +1049,9 @@ _acq_require_provider_selection() {
 _build_kit_list() {
   local agent="${1:-}" kit support_refs
   KITS=()
+  # Latch (do not fail on) a refused ACQ_EXTRA_KITS/ACQ_PROVIDER_KITS ref: this
+  # runs for every verb. The message never names the ref.
+  ACQ_KIT_REFS_ERROR=$(_acq_kit_refs_check 2>&1 >/dev/null) && ACQ_KIT_REFS_ERROR=""
   _acq_kit_refs_make_absolute
   # This runs for EVERY verb (acq_resolve_backend), so a provider-selection
   # failure is LATCHED here and only enforced by create/run through
@@ -1914,6 +1930,8 @@ extract_kit_flags() {
   if [ "$expect_kit" -eq 1 ]; then
     echo "acq: --kit given with no value; ignoring" >&2
   fi
+  # A --kit ref is typed for this run/create, so a refused one stops it now.
+  _acq_kit_refs_check cli || return 1
   _acq_kit_refs_make_absolute
 }
 
@@ -2302,7 +2320,249 @@ _acq_file_mode() {
   printf '%s\n' "$m"
 }
 
+# ---------------------------------------------------------------------------
+# The config.yaml lock, shared with the Python acq
+# ---------------------------------------------------------------------------
+# Python serializes every config.yaml read-modify-write (backend set/unset,
+# configure, the schema migration) with an OS advisory lock on
+# <state>/locks/config.lock: fcntl.flock on POSIX, msvcrt.locking on Windows.
+# Bash 3.2 cannot take that lock portably: flock(1) is not on macOS, and the
+# locks Git Bash takes are not the ones native Windows Python takes. So the two
+# implementations also share a mkdir lock beside it, <state>/locks/config.lock.d,
+# which Python takes while it holds its OS lock (ConfigDirLock in
+# py-acq/src/acq_py/lock.py). Its owner file holds "PID IDENTITY", as the
+# provider-input lock's does.
+#
+# On POSIX a holder whose PID is gone, or now has a different identity (a reused
+# PID), is stale and recovered. The exclusive create of the owner file decides
+# who holds the lock, so a directory without one is taken (_acq_config_lock_take).
+# An owner file that is still empty is a writer between creating it and writing
+# its token, so it is never removed: the wait times out and prints the recovery
+# command (KNOWN_FAILURE_MODES section 79). On Windows a native Python holder's PID cannot be checked from
+# Git Bash, nor a Git Bash PID from Python, so both count the directory as held
+# while it is younger than
+# _ACQ_CONFIG_LOCK_WINDOWS_STALE_S seconds and recover it after that; a config
+# write takes well under a second. The wait is Python's for the same lock,
+# ACQ_MIGRATION_LOCK_TIMEOUT (default 5 seconds).
+_ACQ_CONFIG_LOCK_WINDOWS_STALE_S=60
+_ACQ_CONFIG_LOCK_TOKEN=""
+
+# _acq_config_lock_dir — print the shared config.yaml lock directory.
+_acq_config_lock_dir() {
+  local state
+  state=$(acq_state_dir) || return 1
+  printf '%s/locks/config.lock.d\n' "${state%/}"
+}
+
+_acq_config_lock_windows() {
+  case "${OSTYPE:-}" in msys*|cygwin*) return 0 ;; esac
+  return 1
+}
+
+# _acq_config_lock_owner_line DIR — the first line of DIR/owner ("" if unreadable).
+_acq_config_lock_owner_line() {
+  local line=""
+  { IFS= read -r line < "$1/owner"; } 2>/dev/null || true
+  printf '%s\n' "$line"
+}
+
+# _acq_config_lock_token PID — the owner line for PID, the shell taking the lock.
+# Empty on POSIX when PID's identity cannot be read (no ps): Python could not
+# verify such an owner, so the lock is then honoured but not taken, as Python
+# does in that case.
+_acq_config_lock_token() {
+  local pid="$1" identity
+  identity=$(_acq_provider_input_process_identity "$pid" 2>/dev/null || true)
+  if [ -z "$identity" ]; then
+    _acq_config_lock_windows || return 0
+    identity=unverified
+  fi
+  printf '%s %s\n' "$pid" "$identity"
+}
+
+# _acq_config_lock_age DIR — DIR's age in whole seconds (GNU or BSD stat).
+_acq_config_lock_age() {
+  local mtime now
+  mtime=$(stat -c %Y -- "$1" 2>/dev/null) || mtime=$(stat -f %m -- "$1" 2>/dev/null) || return 1
+  now=$(date +%s) || return 1
+  case "$mtime$now" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$((now - mtime))"
+}
+
+# _acq_pid_alive PID — true when PID exists. A process owned by another user
+# makes kill -0 fail with "Operation not permitted"; it is alive all the same
+# (as Python's lock._pid_alive treats EPERM).
+_acq_pid_alive() {
+  local err
+  err=$(kill -0 "$1" 2>&1) && return 0
+  case "$err" in *"not permitted"*) return 0 ;; esac
+  return 1
+}
+
+# _acq_config_lock_state DIR LINE — "stale" when the holder recorded in LINE
+# (DIR's owner line) can be recovered, else "held".
+_acq_config_lock_state() {
+  local lock="$1" pid identity actual age
+  if _acq_config_lock_windows; then
+    age=$(_acq_config_lock_age "$lock") || age=0
+    [ "$age" -ge "$_ACQ_CONFIG_LOCK_WINDOWS_STALE_S" ] && echo stale || echo held
+    return 0
+  fi
+  IFS=' ' read -r pid identity <<EOF
+$2
+EOF
+  case "$pid" in ''|*[!0-9]*) echo held; return 0 ;; esac
+  actual=$(_acq_provider_input_process_identity "$pid" 2>/dev/null || true)
+  if [ -n "$identity" ] && [ -n "$actual" ] && [ "$actual" = "$identity" ]; then
+    echo held
+  elif ! _acq_pid_alive "$pid" || { [ -n "$actual" ] && [ "$actual" != "$identity" ]; }; then
+    echo stale
+  else
+    echo held
+  fi
+}
+
+# _acq_config_lock_take DIR TOKEN — make sure DIR exists, then create DIR/owner
+# holding TOKEN. Returns 0 when taken, 1 when not (another holder has it, or the
+# caller should look again). Creating the owner file is what decides: noclobber
+# makes Bash itself open it with O_EXCL, so exactly one taker creates it. mkdir
+# cannot decide, because it is not atomic everywhere (uutils coreutils mkdir
+# 0.10 reports success to concurrent callers; KNOWN_FAILURE_MODES section 92).
+# So an existing directory with no owner file is taken too: a leftover from a
+# taker that died before creating its owner heals itself instead of blocking
+# every config write. A taker that loses never removes anything. If writing the
+# token into the owner file it created fails (a full disk, say), that file is
+# its own and is removed again.
+_acq_config_lock_take() {
+  mkdir -- "$1" 2>/dev/null || true
+  if [ -L "$1" ] || [ ! -d "$1" ]; then
+    return 1
+  fi
+  ( set -C; : > "$1/owner" ) 2>/dev/null || return 1
+  if { printf '%s\n' "$2" > "$1/owner"; } 2>/dev/null; then
+    return 0
+  fi
+  rm -f -- "$1/owner" 2>/dev/null
+  rmdir -- "$1" 2>/dev/null || true
+  return 1
+}
+
+# _acq_config_lock_wait — the bounded wait in seconds: ACQ_MIGRATION_LOCK_TIMEOUT
+# when it is a plain non-negative number, else 5.
+_acq_config_lock_wait() {
+  local t="${ACQ_MIGRATION_LOCK_TIMEOUT:-}"
+  case "$t" in ''|.|*[!0-9.]*|*.*.*) t=5 ;; esac
+  printf '%s\n' "$t"
+}
+
+# _acq_config_lock_ticks — the bounded wait, in 0.2-second polls.
+_acq_config_lock_ticks() {
+  awk -v t="$(_acq_config_lock_wait)" 'BEGIN { printf "%d\n", t * 5 }'
+}
+
+# _acq_sh_quote TEXT — TEXT single-quoted for a pasted shell command.
+_acq_sh_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+# _acq_lock_recovery_hint LOCK — tell the user how to remove a leftover mkdir
+# lock (its owner file, then the directory). Only safe when no acq command is
+# running, which is why acq never does it on its own for a lock with no owner.
+_acq_lock_recovery_hint() {
+  local q
+  q=$(_acq_sh_quote "$1")
+  echo "acq:   if no acq command is running, remove the leftover lock and retry:" >&2
+  echo "acq:     rm -f -- ${q%\'}/owner' && rmdir -- $q" >&2
+  echo "acq:   (see docs/KNOWN_FAILURE_MODES.md, section 79)" >&2
+}
+
+_acq_config_lock_timed_out() {
+  echo "acq: could not take the config.yaml lock within $(_acq_config_lock_wait)s; another acq command holds $1" >&2
+  _acq_lock_recovery_hint "$1"
+}
+
+# _acq_config_lock_acquire — take the shared config.yaml lock, waiting up to
+# ACQ_MIGRATION_LOCK_TIMEOUT seconds. Sets _ACQ_CONFIG_LOCK_TOKEN when taken
+# (empty when it was only honoured; see _acq_config_lock_token). Returns 1, with
+# the reason on stderr, when the lock cannot be taken.
+_acq_config_lock_acquire() {
+  local lock locks pid token ticks tries=0 recovered=0 line
+  _ACQ_CONFIG_LOCK_TOKEN=""
+  lock=$(_acq_config_lock_dir) || { echo "acq: cannot locate the config.yaml lock (no absolute acq state directory)" >&2; return 1; }
+  locks=${lock%/*}
+  ( umask 077; mkdir -p -- "$locks" ) 2>/dev/null || true
+  if [ -L "$locks" ] || [ ! -d "$locks" ]; then
+    echo "acq: unsafe config.yaml lock directory: $locks (a symbolic link or not a directory)" >&2
+    return 1
+  fi
+  # This shell's own PID ($$ is the top-level shell's even in a subshell, and
+  # Bash 3.2 has no BASHPID). It must be taken here, not inside the command
+  # substitution that builds the token, whose subshell exits at once.
+  pid=$(exec sh -c 'echo $PPID')
+  token=$(_acq_config_lock_token "$pid")
+  ticks=$(_acq_config_lock_ticks)
+  while :; do
+    if [ -n "$token" ]; then
+      if _acq_config_lock_take "$lock" "$token"; then
+        _ACQ_CONFIG_LOCK_TOKEN="$token"
+        return 0
+      fi
+    elif [ ! -e "$lock" ] && [ ! -L "$lock" ]; then
+      return 0
+    fi
+    # Only what is positively there is unsafe. The holder may release (and
+    # another take may recreate) the directory at any moment, so a path that is
+    # simply not a directory right now has gone away: look again at once. That
+    # still counts against the wait, so a take that keeps failing for another
+    # reason cannot loop forever.
+    if [ -L "$lock" ]; then
+      echo "acq: unsafe config.yaml lock: $lock (a symbolic link)" >&2
+      return 1
+    fi
+    if [ -f "$lock" ] || [ -p "$lock" ] || [ -S "$lock" ] || [ -b "$lock" ] || [ -c "$lock" ]; then
+      echo "acq: unsafe config.yaml lock: $lock (not a directory)" >&2
+      return 1
+    fi
+    if [ ! -d "$lock" ]; then
+      [ "$tries" -lt "$ticks" ] || { _acq_config_lock_timed_out "$lock"; return 1; }
+      tries=$((tries + 1))
+      continue
+    fi
+    line=$(_acq_config_lock_owner_line "$lock")
+    if [ "$recovered" -lt 3 ] && [ "$(_acq_config_lock_state "$lock" "$line")" = stale ] &&
+        [ "$(_acq_config_lock_owner_line "$lock")" = "$line" ]; then
+      recovered=$((recovered + 1))
+      rm -f -- "$lock/owner" 2>/dev/null && rmdir -- "$lock" 2>/dev/null && continue
+    fi
+    [ "$tries" -lt "$ticks" ] || { _acq_config_lock_timed_out "$lock"; return 1; }
+    tries=$((tries + 1))
+    sleep 0.2
+  done
+}
+
+# _acq_config_lock_release — remove the lock if this shell still owns it.
+_acq_config_lock_release() {
+  local lock token="$_ACQ_CONFIG_LOCK_TOKEN"
+  _ACQ_CONFIG_LOCK_TOKEN=""
+  [ -n "$token" ] || return 0
+  lock=$(_acq_config_lock_dir) || return 0
+  [ "$(_acq_config_lock_owner_line "$lock")" = "$token" ] || return 0
+  rm -f -- "$lock/owner" 2>/dev/null && rmdir -- "$lock" 2>/dev/null
+  return 0
+}
+
+# _acq_config_write_field KEY VALUE — see above. Holds the shared config.yaml
+# lock for the whole read-modify-write, so a Bash and a Python acq changing
+# different keys at once never lose one change.
 _acq_config_write_field() {
+  local rc=0
+  _acq_config_lock_acquire || return 1
+  _acq_config_write_field_locked "$@" || rc=$?
+  _acq_config_lock_release
+  return "$rc"
+}
+
+_acq_config_write_field_locked() {
   local key="${1:-}" value="${2:-}" cfg dir tmp target mode
   case "$key" in
     ''|*[!A-Za-z0-9_]*) acq_debug "config: refusing to write unsafe key '$key'"; return 1 ;;
@@ -2956,6 +3216,33 @@ _acq_kit_refs_make_absolute() {
   fi
 }
 
+# _acq_kit_refs_check [cli]: refuse the --kit, ACQ_EXTRA_KITS and
+# ACQ_PROVIDER_KITS refs where they enter, before any of them is fetched,
+# recorded (the .kits record, the sbx extra-kits record) or printed. A remote
+# ref kit_ref_shape_check refuses (a query string, or a '#' fragment other than
+# one plain ref= and one plain dir=) fails it, with a message that never
+# repeats the ref. With "cli", only the --kit refs are checked.
+_acq_kit_refs_check() {
+  local only="${1:-}" ref var _x=()
+  for ref in ${ACQ_CLI_KITS[@]+"${ACQ_CLI_KITS[@]}"}; do
+    kit_ref_shape_check "$ref" "--kit" || return 1
+  done
+  [ "$only" != cli ] || return 0
+  for var in ACQ_EXTRA_KITS ACQ_PROVIDER_KITS; do
+    case "$var" in
+      ACQ_EXTRA_KITS) ref="${ACQ_EXTRA_KITS:-}" ;;
+      *) ref="${ACQ_PROVIDER_KITS:-}" ;;
+    esac
+    [ -n "$ref" ] || continue
+    _x=()
+    split_noglob _x "$ref"
+    for ref in ${_x[@]+"${_x[@]}"}; do
+      kit_ref_shape_check "$ref" "$var" || return 1
+    done
+  done
+  return 0
+}
+
 # _acq_kit_ref_absolute REF: echo REF with a relative local kit path made
 # absolute (physical), so a recorded ref names the same kit wherever a later
 # start/restart runs. Remote refs, absolute paths and paths that are not an
@@ -3004,6 +3291,15 @@ acq_cli_kits_load() {
             continue
             ;;
         esac
+        # A remote ref that acq now refuses at input (a query string, or a
+        # fragment parameter other than ref= and dir=) is skipped without
+        # being named, as a ref typed today would be refused.
+        if ! kit_ref_shape_check "$val" "recorded kit for $name" 2>/dev/null; then
+          echo "acq: warning: ignoring a recorded remote kit ref for $name that acq now refuses" >&2
+          echo "acq:   (a query string, or a '#' part other than one plain ref= and dir=); it is no longer applied." >&2
+          echo "acq:   Recreate the sandbox to clear it from the sandbox's kit record." >&2
+          continue
+        fi
         ;;
     esac
     case "$line" in
@@ -5528,20 +5824,28 @@ acq_provider_input_lock_acquire() {
   while ! mkdir "$lock" 2>/dev/null; do
     [ -d "$lock" ] && [ ! -L "$lock" ] || { echo "acq: unsafe provider-input lock: $lock" >&2; return 1; }
     owner="$lock/owner"
-    IFS=' ' read -r pid identity < "$owner" 2>/dev/null || true
+    # A lock with no owner file must reach the "no valid owner" branch below,
+    # not stop on an unset variable (set -u) or print a redirection error.
+    pid="" identity=""
+    { IFS=' ' read -r pid identity < "$owner"; } 2>/dev/null || true
     actual_identity=$(_acq_provider_input_process_identity "$pid" 2>/dev/null || true)
     if [ -n "$pid" ] && [ -n "$identity" ] && [ "$actual_identity" = "$identity" ]; then
       echo "acq: provider-input lock is owned by live pid $pid: $lock" >&2
-    elif [ -n "$pid" ] && { ! kill -0 "$pid" 2>/dev/null || { [ -n "$actual_identity" ] && [ "$actual_identity" != "$identity" ]; }; }; then
+    elif [ -n "$pid" ] && { ! _acq_pid_alive "$pid" || { [ -n "$actual_identity" ] && [ "$actual_identity" != "$identity" ]; }; }; then
       echo "acq: recovering stale provider-input lock owned by pid $pid: $lock" >&2
       rm -f -- "$owner" && rmdir -- "$lock" 2>/dev/null || return 1
       continue
     else
       echo "acq: provider-input lock has no valid owner metadata: $lock" >&2
+      _acq_lock_recovery_hint "$lock"
       return 1
     fi
     tries=$((tries + 1))
-    [ "$tries" -lt "${ACQ_PROVIDER_INPUT_LOCK_RETRIES:-300}" ] || return 1
+    if [ "$tries" -ge "${ACQ_PROVIDER_INPUT_LOCK_RETRIES:-300}" ]; then
+      echo "acq: gave up waiting for the provider-input lock: $lock" >&2
+      _acq_lock_recovery_hint "$lock"
+      return 1
+    fi
     sleep 1
   done
   identity=$(_acq_provider_input_process_identity "$tx_pid") || { rmdir -- "$lock"; return 1; }

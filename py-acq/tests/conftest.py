@@ -47,6 +47,8 @@ for _var in [v for v in os.environ if v.startswith("ACQ_")]:
 
 
 REAL_HOME = os.path.expanduser("~")
+# The lock wait every test gets unless it sets its own (see isolate_user_dirs).
+TEST_LOCK_TIMEOUT_S = 30.0
 _USER_DIR_VARS = ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME")
 # Backend-stub homes are consulted before HOME; a developer's export must not leak in.
 _BACKEND_HOME_VARS = ("MSB_HOME", "SBX_HOME")
@@ -92,6 +94,14 @@ def isolate_user_dirs(tmp_path_factory, monkeypatch):
         monkeypatch.setenv(var, str(path))
     for var in [v for v in os.environ if v.startswith("ACQ_")] + list(_BACKEND_HOME_VARS):
         monkeypatch.delenv(var, raising=False)
+    # Bounded lock waits well below the shipped defaults (300 s for the
+    # lifecycle, provider-credential and secret-store locks; 300 one-second
+    # retries for Bash's provider-input lock), so a lock that is never released
+    # fails its test in seconds instead of hanging the run. They stay long
+    # enough for a stub create another command waits behind. A test that
+    # measures waiting sets its own value, which replaces these.
+    monkeypatch.setenv("ACQ_SANDBOX_LOCK_TIMEOUT", str(TEST_LOCK_TIMEOUT_S))
+    monkeypatch.setenv("ACQ_PROVIDER_INPUT_LOCK_RETRIES", str(int(TEST_LOCK_TIMEOUT_S)))
     # The acq secret store would otherwise pick the host keychain (secret-tool,
     # macOS security, DPAPI) and could overwrite a developer's real credential.
     # Force the file backend under the throwaway root; a test that exercises a

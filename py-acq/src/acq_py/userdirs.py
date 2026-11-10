@@ -99,8 +99,8 @@ def xdg_base(var: str, *default: str) -> Path:
 
 # Host path overrides py-acq honours from the environment, in the order Bash
 # checks them, each with the default it falls back to (named in the
-# remediation). Bash acq honours more (its kit caches, msb ssh/ports state and
-# so on) and refuses those too.
+# remediation). Bash acq honours more (msb ssh/ports state and so on) and
+# refuses those too.
 _STORE_FALLBACK = "the default secret store"
 PATH_OVERRIDES: tuple[tuple[str, str], ...] = (
     ("ACQ_SECRET_STORE_DIR", _STORE_FALLBACK),
@@ -108,6 +108,9 @@ PATH_OVERRIDES: tuple[tuple[str, str], ...] = (
     ("ACQ_PROVENANCE_DIR", "the default"),
     ("ACQ_SECRET_META_DIR", "the default"),
     ("ACQ_SECRET_INDEX_FILE", "the default"),
+    ("ACQ_SBX_KIT_CACHE", "the default"),
+    ("ACQ_MSB_KIT_CACHE", "the default"),
+    ("ACQ_MSB_STARTUP_STAGE_DIR", "the default"),
     ("ACQ_MSB_BALANCED_HOSTS_FILE", "the default"),
     ("ACQ_MSB_CLONES_DIR", "the default"),
 )

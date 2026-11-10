@@ -120,7 +120,9 @@ class Setting(NamedTuple):
 
 
 def _redacted(value: str | None) -> str | None:
-    return None if value is None else kits.redact_userinfo(value)
+    # A value can hold kit refs (ACQ_EXTRA_KITS, ACQ_PROVIDER_KITS): each goes
+    # through the same display as acq's messages.
+    return None if value is None else kits.refs_display(value)
 
 
 class Signalled(BaseException):
@@ -501,7 +503,7 @@ def multiselect(term: Terminal, locked: int, defaults: Sequence[int], items: Seq
     are frozen. ``defaults`` and the result are 1-based indices relative to the
     toggleable rows; the result is ascending, and ``None`` means cancelled."""
     # Rows can carry kit refs, so userinfo is redacted as everywhere else.
-    labels = [(_sanitize(kits.redact_userinfo(label)), _sanitize(kits.redact_userinfo(desc))) for label, desc in items]
+    labels = [(_sanitize(kits.refs_display(label)), _sanitize(kits.redact_userinfo(desc))) for label, desc in items]
     total = len(labels)
     locked = min(locked, total)
     first = locked + 1
