@@ -4843,7 +4843,7 @@ holding it; such an animator, if resumed after that, can still draw one frame.
 
 ---
 
-## 85. Windows: A Forced Kill of the Python acq Leaves the Session Child Running
+## 85. Windows: A Forced Kill of the Python acq Left the Session Child Running
 
 **Status:** Fixed. Earlier builds behave as described below.
 
@@ -4899,14 +4899,16 @@ with a real `sbx.exe` on Windows at the next re-verification.
 
 **Status:** Fixed. Earlier builds behave as described below.
 
-**Symptom:** On Windows, a secret containing characters outside ASCII (an
-accented letter, CJK text, an emoji) read back with `?` or other characters in
-place of those, so the sandbox was bound a value that did not work. It
-happened when the console code page was a double-byte one (such as 932), or
-when the secret was stored and read under different code pages (for
-example `chcp 65001` in one window and the default 437 in another). An ASCII
-value, including one with quotes, backslashes, `$` or backticks, was never
-affected.
+**Symptom:** After upgrading, on Windows, **every** secret containing
+characters outside ASCII (an accented letter, CJK text, an emoji) that an
+earlier build stored reads back changed, whatever code page it was stored
+under. Under the default code page 437, `café` now reads back as `caf├⌐`, so
+the sandbox is bound a value that does not work. Earlier builds themselves
+also read such a secret back changed when the console code page was a
+double-byte one (such as 932), or when it was stored and read under different
+code pages (for example `chcp 65001` in one window and 437 in another). ASCII
+values, including ones with quotes, backslashes, `$` or backticks, are not
+affected, before or after the upgrade.
 
 **Cause:** Both implementations encrypt with DPAPI through Windows PowerShell
 5.1, passing the value on stdin and reading the result on stdout. PowerShell
@@ -4923,38 +4925,52 @@ base64 over the pipes: the value goes in as base64 of its UTF-8 bytes and comes
 back the same way (`_PS_ENCRYPT` and `_PS_DECRYPT` in
 `py-acq/src/acq_py/secretstore.py`, `_acq_secret_windows_encrypt` and
 `_acq_secret_windows_decrypt` in `acq.backends/secret-store.sh`, still byte
-for byte the same). A non-ASCII secret stored by an earlier build was
-encrypted from the code-page-decoded text and now reads back as that text, so
-set it again:
+for byte the same). What an earlier build encrypted was the code-page-decoded
+text, not the value, and that is what now comes back, so after upgrading set
+every non-ASCII secret again, under the service and scope it was stored under:
 
 ```bash
-acq secret set -g usai      # or the service and scope it was stored under
+acq secret set -g usai      # repeat for each non-ASCII secret
 ```
+
+The stored envelope carries no marker telling the two formats apart: a new
+envelope header would be read as a plaintext value by earlier builds, which
+compare the header exactly, so a mixed install would bind the ciphertext as
+the secret. acq therefore cannot detect or warn about an old non-ASCII value.
 
 ASCII secrets stored by earlier builds read back unchanged.
 
 ---
 
-## 87. Windows: Python acq and Git Bash Use Different Stores When USERPROFILE Is Changed
+## 87. Windows: Python acq and Git Bash Use Different Stores When USERPROFILE and HOMEPATH Differ
 
-**Symptom:** On Windows, with `HOME` unset and `USERPROFILE` pointed somewhere
-other than the account's own profile directory, a secret or record written by
-the Python acq is not found by the Bash acq under Git Bash, or the reverse.
+**Symptom:** On Windows, with `HOME` unset, a secret or record written by the
+Python acq is not found by the Bash acq under Git Bash, or the reverse. It
+happens when `USERPROFILE` and `HOMEDRIVE`+`HOMEPATH` name different
+directories: `USERPROFILE` was changed, or the account's home directory is not
+its profile (a domain home share on `HOMEDRIVE`).
 
-**Cause:** With `HOME` unset, the Python acq takes the home directory from
-`USERPROFILE` (`Path.home()`, in `py-acq/src/acq_py/userdirs.py`). Git Bash
-sets `HOME` itself from the account (`db_home: env windows` in Git for
-Windows' `/etc/nsswitch.conf`), which is the account's profile directory or a
-home directory set on the account, and ignores the `USERPROFILE` variable.
-Checked on Windows 11 with Git for Windows 2.56: with `USERPROFILE` set to a
-scratch directory, Python chose `<scratch>\.local\share\acq\secrets`
-while Git Bash chose `C:\Users\<user>\.local\share\acq\secrets`. With
-the account's own `USERPROFILE` both chose the same directory.
+**Cause:** With `HOME` unset, the two implementations take the home directory
+from the same variables in the opposite order. The Python acq uses
+`Path.home()` (`py-acq/src/acq_py/userdirs.py`), which reads `USERPROFILE`
+first and falls back to `HOMEDRIVE`+`HOMEPATH`. Git Bash sets `HOME` from
+`HOMEDRIVE`+`HOMEPATH` first and falls back to `USERPROFILE`. Checked on
+Windows 11 with Git for Windows 2.56 and Python 3.12:
+
+| Environment (`HOME` unset) | Python home | Git Bash `HOME` |
+|---|---|---|
+| `USERPROFILE`, `HOMEDRIVE`+`HOMEPATH` all the account profile | profile | profile |
+| `USERPROFILE` changed to a scratch directory | scratch | profile (from `HOMEPATH`) |
+| `HOMEPATH` changed as well | scratch | the new `HOMEPATH` |
+| `HOMEDRIVE` and `HOMEPATH` unset | scratch | scratch (from `USERPROFILE`) |
+
+The secret store, state and config all live under that home, so the two
+implementations then use different directories.
 
 **Resolution:** Set `HOME` (or the `XDG_*` variables) to the same absolute
-path for both implementations whenever `USERPROFILE` is changed, or when the
-account has a home directory other than its profile (a domain home share).
-Both honour an absolute `HOME` before anything else.
+path for both implementations whenever `USERPROFILE` and
+`HOMEDRIVE`+`HOMEPATH` differ. Both honour an absolute `HOME` before anything
+else.
 
 ---
 
