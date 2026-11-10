@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from acq_py import cli, errors, kit_sbx, provider_input, sbx, state
+from acq_py import backends, cli, errors, kit_sbx, provider_input, sbx, state
 from acq_py.commands import lifecycle
 
 pytestmark = pytest.mark.provider_key
@@ -169,6 +169,30 @@ def test_a_state_path_sbx_would_split_is_refused_before_create(monkeypatch, tmp_
     assert not [a for a in seen if a[0] == "create"]
     assert _generations() == []
     assert state.record_read("sbx", "pi") is None
+
+
+def test_the_env_flag_needs_sbx_0_39_which_the_floor_enforces():
+    # `sbx create --env` first exists in sbx 0.39.0, and an older sbx fails the
+    # whole create on the unknown flag (Bash MIN_SBX_VERSION, same reason). The
+    # adapter floor is what keeps such an sbx from ever seeing the flag; do not
+    # lower it below 0.39.0 without gating ACQ_PROVIDER_INPUT_ROOT on the version.
+    assert backends.SBX_MIN_VERSION >= (0, 39, 0)
+
+
+@pytest.mark.parametrize("version", ["0.38.9", "garbled"])
+def test_an_sbx_below_the_floor_is_refused_before_anything_is_staged(monkeypatch, tmp_path, capsys, version):
+    ws = _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_SBX_VERSION", version)
+    seen = _spy(monkeypatch)
+    rc, doc, _err = _create(capsys, ws)
+    assert rc == 1
+    if version == "garbled":
+        assert doc["error"]["code"] == errors.BACKEND_VERSION_UNKNOWN  # unknown fails closed (Bash warns)
+    else:
+        assert doc["error"]["code"] == errors.BACKEND_VERSION_UNSUPPORTED
+        assert "sbx >= 0.39.0, but found 0.38.9" in doc["error"]["message"]
+    assert not [a for a in seen if a and a[0] == "create"]
+    assert _generations() == []
 
 
 @posix_only

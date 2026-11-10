@@ -396,7 +396,10 @@ def _sbx_provider_stage(
     Returns the unpublished generation and the create's extra workspace and env
     arguments. sbx mounts an extra workspace at its host path, and the ``:ro``
     suffix makes the mount read-only, so OpenCode's startup renderer reads the
-    generation at ``ACQ_PROVIDER_INPUT_ROOT``. On Windows nothing is staged:
+    generation at ``ACQ_PROVIDER_INPUT_ROOT``, passed with ``sbx create --env``,
+    which needs sbx 0.39.0; the backend version floor refused an older sbx
+    (``backend_version_unsupported``) before this create began, as Bash's
+    ``MIN_SBX_VERSION`` does. On Windows nothing is staged:
     where sbx mounts a Windows host path in the guest has not been verified, so
     the variable could not name it (KNOWN_FAILURE_MODES section 55). Raises
     :class:`provider_input.ProviderInputError`.

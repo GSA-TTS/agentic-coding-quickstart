@@ -278,8 +278,11 @@ def create(
     :func:`acq_py.kit_sbx.prepare` built; sbx applies those kits itself.
     ``extra_workspaces`` are further workspace positionals (``PATH[:ro]``),
     always after the primary one, which sbx requires to be writable; ``env``
-    are ``NAME=VALUE`` guest variables (``--env``, sbx 0.39 and later). Neither
-    may carry a secret: both end up on sbx's command line.
+    are ``NAME=VALUE`` guest variables (``--env``). An sbx older than 0.39.0
+    rejects ``--env`` and fails the whole create; the adapter version floor
+    (:data:`backends.SBX_MIN_VERSION`, 0.39.0 as Bash ``MIN_SBX_VERSION``) is
+    checked before any create, so such an sbx never gets here. Neither may
+    carry a secret: both end up on sbx's command line.
     """
     argv = ["create"]
     if agent:
