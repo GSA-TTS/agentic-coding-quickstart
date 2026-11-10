@@ -25,11 +25,13 @@ appears in argv or output, and is handed to the backend only on a child's stdin.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
+from collections.abc import Iterator
 
-from .. import envelope, errors, lock, provider_creds, secretstore
+from .. import backends, envelope, errors, lock, provider_creds, secretstore
 from . import common
 
 _SET_USAGE = "usage: acq secret set [-g | SANDBOX] SERVICE [--host HOST --env ENV] (value on stdin)"
@@ -537,6 +539,25 @@ def _confirm(svc: str, envvar: str, scope: secretstore.Scope, exists: bool, prev
     return "declined"
 
 
+@contextlib.contextmanager
+def _import_write_lock(svc: str, scope: secretstore.Scope) -> Iterator[None]:
+    """Hold, for one ``secret import`` store write, the locks ``secret set``
+    takes for the same scope and service.
+
+    ``secret import`` names no backend, so a sandbox-scoped write takes that
+    sandbox's lifecycle lock on every backend, in a fixed order (another
+    command holds at most one of them, so the order cannot deadlock). The
+    global usai key takes the usai provider lock. Raises :class:`lock.LockTimeout`.
+    """
+    with contextlib.ExitStack() as stack:
+        if scope.sandbox is not None:
+            for backend in backends.BACKENDS:
+                stack.enter_context(lock.sandbox_lock(backend, scope.sandbox))
+        elif svc == provider_creds.USAI_PROVIDER_ID:
+            stack.enter_context(lock.provider_credential_lock(svc))
+        yield
+
+
 def _import_one(svc: str, envvar: str, opts: _ImportArgs, scope: secretstore.Scope, say) -> dict:
     """Decide and (unless --dry-run) store one detected service. The value is
     read from the environment at the point of use and goes straight to the
@@ -566,7 +587,8 @@ def _import_one(svc: str, envvar: str, opts: _ImportArgs, scope: secretstore.Sco
         reason = _confirm(svc, envvar, scope, exists, _last4(value), say)
         if reason is not None:
             return {**entry, "outcome": "skipped", "reason": reason}
-    secretstore.store(secretstore.key_for(svc, scope.sandbox), value)
+    with _import_write_lock(svc, scope):
+        secretstore.store(secretstore.key_for(svc, scope.sandbox), value)
     say(f"acq: imported '{svc}' ({desc}) from ${envvar}.")
     return {**entry, "outcome": "imported"}
 
@@ -609,6 +631,11 @@ def run_secret_import(parsed, emit_json: bool) -> int:
             return common._operational_failure(
                 command, exc.code, f"failed to store '{svc}' ({scope.describe()}): {exc.message}",
                 exc.remediation, emit_json,
+            )
+        except lock.LockTimeout as exc:
+            return common._operational_failure(
+                command, errors.TIMEOUT, f"'{svc}' was not imported ({scope.describe()}): {exc}",
+                getattr(exc, "remediation", None) or "retry once the other command finishes", emit_json,
             )
     imported = sum(1 for r in results if r["outcome"] == "imported")
     skipped = len(results) - imported
