@@ -273,8 +273,11 @@ forward is active:
 ```
 acq(msb): forwarding your host ssh-agent into the guest because SSH_AUTH_SOCK
 is set. Guest code can use every key the agent holds while the sandbox runs;
-unset SSH_AUTH_SOCK to opt out, or run 'ssh-add -c' to confirm each use. See ADR-0021.
+unset SSH_AUTH_SOCK to opt out (an existing sandbox is disconnected at its next
+start or run), or run 'ssh-add -c' to confirm each use. See ADR-0021.
 ```
+
+(The sbx notice keeps the shorter opt-out wording: sbx decides per session.)
 
 - On **msb** the notice is emitted from `_acq_msb_vsock_flags_into` when the
   ssh-agent `--vsock` route is emitted (acq actively wires the forward).
@@ -438,6 +441,40 @@ the shell that last started it.
   starting a new agent at a different socket path and `acq start` re-pointed the
   link, `ssh-add -l` listed the key again, and `git commit` in the guest produced
   a good signature (`%G?` = `G`) with no recreate. `acq rm` removed the link.
+
+## Amendment (2026-11-10): opt-out after create, link checks, workspace sockets
+
+### Decision
+
+- **The opt-out works after create.** When `SSH_AUTH_SOCK` is unset at
+  `acq start`, `acq restart` or a `run` re-attach (and `kit update`, which shares
+  the heal), acq removes the sandbox's managed link (so the route reaches
+  nothing), clears the recorded `ssh-auth-sock` key (so no session gets
+  `SSH_AUTH_SOCK`) and starts no bridge, with a one-line note. Setting
+  `SSH_AUTH_SOCK` and running `start` or `run` again reconnects: the re-drive
+  makes the link again when `msb inspect` shows the route naming it (a route
+  that names the raw agent path never gets one invented).
+- **A link acq cannot re-point is checked.** When the refresh cannot re-point
+  the link (`SSH_AUTH_SOCK` not a socket, a socket inside the workspace, a link
+  that cannot be replaced), the link's current target is inspected without
+  following another symlink. Unless it is a socket owned by the effective user
+  and outside the workspace, the link is removed and no bridge starts.
+- **The forwarded socket's owner is checked at create.** A socket owned by
+  another user is still forwarded (shared agents exist), with a warning.
+- **A socket inside the writable workspace is refused,** for `SSH_AUTH_SOCK` and
+  `ACQ_FORWARD_HOST_SOCKETS` alike: at create against the writable workspace
+  mounts, at refresh against the recorded workspace. The sandbox could otherwise
+  create or replace the socket file that acq forwards.
+- **The link directory** `$ACQ_STATE_DIR/msb/ssh-agent` is created 0700 and used
+  only when it is this user's own real directory (not a symlink).
+- **The route probe** matches the agent port only as a whole `port` field, so a
+  `guest_port` or `host_port` field of the same value is not taken for the route.
+
+### Validation
+
+`test/bats/115-ssh-agent-forward.bats` cases 10c18f, 10c18g and 10c25-10c25f,
+10c30, and `py-acq/tests/test_ssh_agent_forward.py`, for both implementations.
+Not yet run against a live msb (see `docs/KNOWN_FAILURE_MODES.md` §90).
 
 ## Links
 

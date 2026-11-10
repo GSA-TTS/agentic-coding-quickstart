@@ -544,6 +544,12 @@ flag). `src/acq_py/ssh_agent.py` ports the Bash pieces:
   forward when the host requests one and `msb inspect` shows the route. The link
   is re-pointed at the current `SSH_AUTH_SOCK` before each bridge start, so a
   route survives the host agent moving;
+* with `SSH_AUTH_SOCK` unset, `start`, `restart` and a `run` re-attach
+  disconnect the forward (the link and the recorded guest socket go, no bridge
+  starts); setting it and re-running reconnects;
+* a socket inside the writable workspace is refused, a socket owned by another
+  user is forwarded with a warning, a link whose target is no longer this user's
+  socket is removed, and the link directory is kept 0700;
 * `rm` removes the link, never the agent socket.
 
 sbx forwards the agent itself; acq prints only the one-time trust-boundary

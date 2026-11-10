@@ -882,8 +882,13 @@ route as a unix socket at `/home/agent/.acq/ssh-agent.sock` and exports it as
   runtime floor already excludes older msb versions.
 - **It widens the host↔microVM trust boundary:** guest code can exercise every
   key the host agent holds while the socket is reachable. It is **opt-in** via
-  `SSH_AUTH_SOCK` — **unset it to disable** — and only agent *operations* (not key
-  material) traverse the socket. Where your agent supports it, use `ssh-add -c` /
+  `SSH_AUTH_SOCK` — **unset it to disable**, which also disconnects an existing
+  sandbox at its next `acq start`, `acq restart` or `acq run` (acq removes its
+  route link and stops passing `SSH_AUTH_SOCK` to its sessions; set it again and
+  re-run to reconnect) — and only agent *operations* (not key material) traverse
+  the socket. acq refuses to forward a socket inside the sandbox's writable
+  workspace, warns when the socket belongs to another user, and removes a route
+  link whose target is no longer your own socket. Where your agent supports it, use `ssh-add -c` /
   `ssh-add -h` to constrain use. Because a set `SSH_AUTH_SOCK` is the *only*
   trigger, acq prints a **one-time startup notice** (on both backends) when the
   forward is active — naming the `unset SSH_AUTH_SOCK` opt-out and the `ssh-add -c`

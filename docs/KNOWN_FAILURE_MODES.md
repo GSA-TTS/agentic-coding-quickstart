@@ -4874,8 +4874,10 @@ per-sandbox link under `$ACQ_STATE_DIR/msb/ssh-agent/`, the in-guest `socat`
 bridge, the `ssh-auth-sock` host-config key that sessions read, the liveness
 probe, the bridge restart after `acq start`/`acq restart`, the re-drive in the
 `start`, `restart`, `run` re-attach and `kit update` heals, link removal on
-`acq rm`, and the one-time trust-boundary notice on msb and sbx. The messages
-are Bash's. These parts differ on purpose:
+`acq rm`, the one-time trust-boundary notice on msb and sbx, and the checks of
+the 2026-11-10 ADR-0021 amendment (the opt-out at start or re-attach, the link
+target and owner checks, the refusal of a socket inside the workspace). The
+messages are Bash's. These parts differ on purpose:
 
 - **Windows never forwards.** On a Windows host the Python acq treats no path
   as a socket (an MSYS ssh-agent's socket is an emulation file, the OpenSSH for
@@ -4906,8 +4908,9 @@ are Bash's. These parts differ on purpose:
 **Live checks still owed.** Every behaviour above is covered against the stub
 msb only (`py-acq/tests/test_ssh_agent_forward.py`, which also compares the guest
 argv, the link path and the emitted routes and warnings with the Bash adapter's).
-On a KVM or HVF host with msb, still to run with the Python acq:
-`scripts/verify-backends`-style create with a throwaway agent (in-guest
+On a KVM or HVF host with msb, still to run (both implementations for the
+2026-11-10 checks, the Python acq for the rest): the opt-out and reconnect at
+`acq start`; `scripts/verify-backends`-style create with a throwaway agent (in-guest
 `ssh-add -L` shows its key); a re-point after the host agent moves (stop, new
 agent at a new path, `acq start`); the running re-attach re-drive; `acq rm`
 removing the link; and a sandbox created by one implementation and resumed by
