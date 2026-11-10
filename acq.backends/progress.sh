@@ -52,6 +52,10 @@
 # retained so acq_spin_stop can render the final "done" line for the same label.
 _ACQ_SPIN_PID=""
 _ACQ_SPIN_MSG=""
+# Non-empty from the moment an animated spinner starts composing its traps until
+# it is stopped, so cleanup also runs in the gap before _ACQ_SPIN_PID is set.
+_ACQ_SPIN_ACTIVE=""
+_ACQ_SPIN_SELF_PID=""
 
 # Prior EXIT/INT/TERM trap COMMANDS captured at acq_spin_start time, so the
 # spinner's own cleanup traps COMPOSE with (rather than clobber) a caller's
@@ -161,6 +165,20 @@ _acq_signal_self() {
   kill -s "$1" "$_acq_self_pid" 2>/dev/null || true
 }
 
+# _acq_spin_self_pid — set _ACQ_SPIN_SELF_PID to the PID of the CURRENT shell,
+# found the same way as in _acq_signal_self. It sets a variable rather than
+# printing, because a `$(...)` around it would report the command
+# substitution's own process.
+_acq_spin_self_pid() {
+  _ACQ_SPIN_SELF_PID=""
+  # BASHPID only from bash 4 on: bash 3.2 has no such special variable, so
+  # there it is an ordinary one that the environment can set to another PID.
+  if [ "${BASH_VERSINFO[0]:-0}" -ge 4 ]; then
+    _ACQ_SPIN_SELF_PID="${BASHPID:-}"
+  fi
+  [ -n "$_ACQ_SPIN_SELF_PID" ] || _ACQ_SPIN_SELF_PID=$(exec sh -c 'echo "$PPID"')
+}
+
 # _acq_progress_enabled — 0 (true) when animated progress may run, 1 otherwise.
 # Animate only when ALL hold:
 #   - stderr is an interactive TTY            ([ -t 2 ])
@@ -218,28 +236,42 @@ acq_spin_start() {
     return 0
   fi
 
+  local frames owner
+  frames=$(_acq_spin_frames)
+  _acq_spin_self_pid
+  owner="$_ACQ_SPIN_SELF_PID"
+  # Compose the cleanup traps BEFORE the cursor is hidden or the animator
+  # exists. In the other order, a Ctrl-C or SIGTERM that landed while the traps
+  # were still being captured ran only the caller's handlers: the shell exited,
+  # but the animator (an asynchronous child, so it ignores SIGINT) kept drawing
+  # forever and the cursor stayed hidden. _ACQ_SPIN_ACTIVE tells the cleanup
+  # that the cursor may be hidden even before the animator's PID is recorded.
+  _ACQ_SPIN_ACTIVE=1
+  _acq_spin_install_traps
   # Hide the cursor for the duration of the animation; the stop path (and the
   # trap) restore it. Then spawn the animator in the background.
   printf '\033[?25l' >&2
-  local frames
-  frames=$(_acq_spin_frames)
   (
     # The animator loop. Writes "\r<frame> <msg>" to stderr, sleeping between
     # frames. Runs until killed by acq_spin_stop. `_f` is a plain (not `local`)
     # variable: this is a subshell body, not a function, so `local` is invalid
     # here — and the subshell's own scope means it can't leak to the parent.
+    # It also stops by itself once the shell that started it is gone. That
+    # covers a signal handled between the fork and the `$!` below (the cleanup
+    # then has no PID to kill) and an owner killed by SIGKILL, which runs no
+    # trap at all.
     # NOTE: do NOT redirect this subshell's stderr to /dev/null — the frames ARE
     # the stderr output. The "Terminated" job notice is suppressed instead by
     # reaping under `wait … 2>/dev/null` in the stop/cleanup paths.
     while :; do
       for _f in $frames; do
+        kill -0 "$owner" 2>/dev/null || exit 0
         printf '\r%s %s' "$_f" "$msg" >&2
         sleep 0.1
       done
     done
   ) &
   _ACQ_SPIN_PID=$!
-  _acq_spin_install_traps
 }
 
 # _acq_spin_install_traps — COMPOSE the spinner's cleanup with any pre-existing
@@ -270,12 +302,15 @@ acq_spin_stop() {
   local final
   final=$(_acq_sanitize_msg "${1:-$_ACQ_SPIN_MSG}")
 
-  if [ -n "$_ACQ_SPIN_PID" ]; then
+  if [ -n "$_ACQ_SPIN_ACTIVE" ]; then
     # Kill the animator and reap it silently (suppress the shell's "Terminated"
     # job notice by waiting with output discarded).
-    kill "$_ACQ_SPIN_PID" 2>/dev/null || true
-    wait "$_ACQ_SPIN_PID" 2>/dev/null || true
+    if [ -n "$_ACQ_SPIN_PID" ]; then
+      kill "$_ACQ_SPIN_PID" 2>/dev/null || true
+      wait "$_ACQ_SPIN_PID" 2>/dev/null || true
+    fi
     _ACQ_SPIN_PID=""
+    _ACQ_SPIN_ACTIVE=""
     # Clear the animated line (\r + clear-to-EOL) and restore the cursor.
     printf '\r\033[K\033[?25h' >&2
     # Print a completion marker for the phase, if we have a label.
@@ -305,10 +340,13 @@ _acq_spin_restore_traps() {
 # _acq_spin_stop_animation — kill and reap the animator (if any), then clear the
 # line and restore the cursor. Prints no "done" marker.
 _acq_spin_stop_animation() {
-  if [ -n "$_ACQ_SPIN_PID" ]; then
-    kill "$_ACQ_SPIN_PID" 2>/dev/null || true
-    wait "$_ACQ_SPIN_PID" 2>/dev/null || true
+  if [ -n "$_ACQ_SPIN_ACTIVE" ]; then
+    if [ -n "$_ACQ_SPIN_PID" ]; then
+      kill "$_ACQ_SPIN_PID" 2>/dev/null || true
+      wait "$_ACQ_SPIN_PID" 2>/dev/null || true
+    fi
     _ACQ_SPIN_PID=""
+    _ACQ_SPIN_ACTIVE=""
     printf '\r\033[K\033[?25h' >&2
   fi
   _ACQ_SPIN_MSG=""

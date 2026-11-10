@@ -29,3 +29,18 @@ load 'helper'
   assert_line --partial 'PASS sbx-sigterm status '
   assert_line --partial 'PASS msb-sigterm status '
 }
+
+# spin-signal-window.py delivers SIGINT at fixed points of acq_spin_start (while
+# the frames are chosen, while each prior trap is captured, before each spinner
+# trap is installed, and while animating) and SIGKILLs the shell mid-animation.
+# Each must leave no animator running and the cursor visible; the signal cases
+# must also run the caller's INT and EXIT handlers exactly once and exit 130.
+@test "spinner start: a signal at any point leaves no animator and restores the cursor" {
+  run python3 "$BATS_TEST_DIRNAME/spin-signal-window.py" "$REPO_ROOT" "$BASH" "$STUBDIR"
+  printf '%s\n' "$output"
+  assert_success
+  local point
+  for point in frames capture install-exit install-int install-term running owner; do
+    assert_line "PASS $point"
+  done
+}
