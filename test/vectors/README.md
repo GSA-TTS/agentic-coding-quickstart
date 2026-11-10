@@ -60,14 +60,32 @@ runner and `scripts/run-vectors`) carry the *how*.
 }
 ```
 
-`invoke.fixtures` and `isolation.no_live_refeed` are enumerated by ADR-0043m but
-not implemented in this slice; a vector that declares either is refused (fail
-closed) rather than silently ignored.
+`expect.stdout` and `expect.stderr` each take one assertion object or a
+non-empty list of them; every assertion in a list must hold, and each one starts
+from the raw stream, so one assertion's transforms never change what the next
+one sees. A list pairs a structural check with a never-appears check:
+`[{"mode": "json", …}, {"mode": "absent", "value": "<stdin sentinel>"}]`.
 
-Until `invoke.fixtures` exists, a vector that needs acq state seeded by earlier
-acq calls runs `drivers/seeded-run.py` (`["{python}", "-I",
-"test/vectors/drivers/seeded-run.py", STEPS, "{acq}"]`); the script documents
-the step format, and the coverage manifest records which vectors use it.
+Both runners reject a vector with a field the schema above does not define (for
+example a typo such as `expect.stdot`, or an `expect.side_effects` block):
+it is reported as an invalid vector rather than run with part of its oracle
+silently ignored. A missing `value`, an unknown mode or transform, and an empty
+assertion list are invalid too.
+
+`invoke.fixtures` and `isolation.no_live_refeed` are enumerated by ADR-0043m but
+not implemented; a vector that declares either is refused (fail closed) rather
+than silently ignored.
+
+`invoke.fixtures` stays unimplemented on purpose. Every vector that needs prior
+state today needs acq state created through acq's own CLI (a stored secret, a
+recorded binding, a git workspace), which `drivers/seeded-run.py` produces by
+running the earlier acq calls (`["{python}", "-I",
+"test/vectors/drivers/seeded-run.py", STEPS, "{acq}"]`; the script documents
+the step format, and the coverage manifest records which vectors use it). A
+static file fixture could only write acq's on-disk formats directly, which
+would tie a language-neutral vector to one implementation's storage layout. Add
+`invoke.fixtures` to both runners when a vector needs a fixture that is not acq
+state, such as an input file the CLI reads.
 
 Placeholders in `invoke.argv`: `{acq}` splices the CLI-under-test command list;
 `{python}` splices the interpreter used by deterministic sentinel subjects.
@@ -76,10 +94,14 @@ Placeholders in `invoke.argv`: `{acq}` splices the CLI-under-test command list;
 
 * `exact` — byte-exact equality (after transforms). The default.
 * `contains` — the expected value is a substring of the output.
-* `json` — the output is parsed as JSON; `value` must be a *structural subset*
-  of it (extra fields are allowed, per ADR-0038m "unknown fields are additive").
-  This is how a vector asserts the stable envelope fields (`code`, `command`)
-  without pinning prose.
+* `json` — the output is parsed as exactly one JSON document; `value` must be a
+  *structural subset* of it (extra fields are allowed, per ADR-0038m "unknown
+  fields are additive"). Booleans equal only booleans (`true` is not `1`). This
+  is how a vector asserts the stable envelope fields (`code`, `command`) without
+  pinning prose.
+* `absent` — the (non-empty) value appears nowhere in the output. `json` and
+  `contains` cannot prove that something is missing, so a vector whose oracle
+  says a secret never appears pairs its structural assertion with this one.
 
 ## Normalisation transforms (`expect.<stream>.normalize`, in order)
 
@@ -87,17 +109,30 @@ Exact-by-default: a field is byte-exact unless it declares transforms, and only
 declared transforms apply. Regex is not a mode. Placeholders are `<abspath>`,
 `<tmpdir>`, `<timing>`.
 
-* `abspath` — replace a POSIX absolute path with `<abspath>`. (Windows drive/UNC
-  path normalisation is deferred to the platform-qualification slice.)
-* `tmpdir` — replace the temporary-directory root with `<tmpdir>`.
-* `crlf` — normalize CRLF line endings to LF.
+* `abspath` — replace a POSIX absolute path with `<abspath>`. The path ends at
+  ASCII whitespace or a quote. (Windows drive/UNC path normalisation is deferred
+  to the platform-qualification slice.)
+* `tmpdir` — replace the temporary-directory root with `<tmpdir>`, as literal
+  text, longest root first. The roots are `/tmp` and, when it is absolute,
+  `$TMPDIR` without its trailing slashes (a relative `TMPDIR` is ignored, as acq
+  ignores it); on Windows the interpreter's temp directory replaces `$TMPDIR`.
+* `crlf` — normalize CRLF line endings to LF. A CR that is not followed by LF,
+  including one that ends the output, is kept.
 * `timing` — replace a duration literal (`123ms`, `1.5s`, `150µs`, …) with
   `<timing>`. Both runners match the same duration pattern, including the `µs`
   microsecond suffix.
 * `order` — sort the lines of the output by codepoint (byte) order, preserving
   whether the input ended in a newline. Non-ASCII lines are ordered identically
   by both runners.
-* `json` — canonical re-serialisation (compact, sorted keys) of a JSON document.
+* `json` — canonical re-serialisation (compact, sorted keys, non-ASCII escaped as
+  `\uXXXX`) of output that is exactly one JSON document, `false` and `null`
+  included; anything else is left as it is.
+
+The sentinel set shows each mode and transform working; the edge cases where the
+two runners once disagreed (a quote ending a path, a lone CR, `true` against `1`,
+several JSON documents, a regex character in `TMPDIR`, unknown fields) are
+probe vectors under `py-acq/tests/runner-probes/`, which
+`py-acq/tests/test_runner_agreement.py` runs through both runners.
 
 ## Isolation
 

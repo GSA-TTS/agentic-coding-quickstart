@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "id": "probe/unknown-expect-field",
+  "oracle": "a typo'd stream name is invalid, not silently skipped",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{python}",
+      "-c",
+      "import sys; sys.stdout.buffer.write(b'x')"
+    ],
+    "env": {},
+    "unset": [],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdot": {
+      "mode": "exact",
+      "value": "not what is printed",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": []
+  }
+}

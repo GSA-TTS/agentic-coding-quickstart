@@ -23,8 +23,7 @@ def test_sentinels_cover_every_mode_and_transform():
     for vector in vectors:
         expect = vector.get("expect", {})
         for stream in ("stdout", "stderr"):
-            spec = expect.get(stream)
-            if spec:
+            for spec in engine.stream_specs(expect, stream):
                 modes.add(spec.get("mode", "exact"))
                 transforms.update(spec.get("normalize", []))
 

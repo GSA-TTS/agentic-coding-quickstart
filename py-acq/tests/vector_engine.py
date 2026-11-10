@@ -7,9 +7,12 @@ runner (``scripts/run-vectors``) implements the same transforms and modes
 independently; the sentinel corpus proves the two stay in lock-step.
 
 Contract (see ``test/vectors/README.md``):
-    * assertion modes: ``exact``, ``contains``, ``json``
+    * assertion modes: ``exact``, ``contains``, ``json``, ``absent``
     * normalisation transforms: ``abspath``, ``tmpdir``, ``crlf``, ``timing``,
       ``order``, ``json`` (exact-by-default; only declared transforms apply)
+    * ``expect.stdout`` / ``expect.stderr`` is one assertion or a non-empty list
+      of assertions, each applied to the raw stream
+    * a field the schema does not define makes the vector invalid
 
 The ``{acq}`` token in ``invoke.argv[0]`` splices the CLI-under-test command
 list; the ``{python}`` token splices the interpreter for deterministic sentinel
@@ -26,7 +29,10 @@ import sys
 import tempfile
 from pathlib import Path
 
-ABSPATH_RE = re.compile(r"/[^ \t\r\n\"']+")
+# The excluded characters are spelled out (ASCII whitespace and both quotes)
+# rather than written as \s, whose Unicode meaning the Bash runner's sed does
+# not share.
+ABSPATH_RE = re.compile(r"/[^ \t\n\r\v\f\"']+")
 TIMING_RE = re.compile(r"[0-9]+(?:\.[0-9]+)?(?:ms|us|µs|s)")
 
 # Throwaway redirects applied to every vector so an oracle can never read or
@@ -40,7 +46,18 @@ DEFAULT_REDIRECTS = (
 )
 
 TRANSFORMS = ("abspath", "tmpdir", "crlf", "timing", "order", "json")
-MODES = ("exact", "contains", "json")
+MODES = ("exact", "contains", "json", "absent")
+
+# Every field the schema defines, per object. Anything else is a typo (an
+# assertion under ``expect.stdot`` would otherwise never run) or a feature this
+# runner does not have, so the vector is invalid rather than silently weaker.
+# ``invoke.fixtures`` and ``isolation.no_live_refeed`` are defined by ADR-0043m
+# but not implemented; they pass validation and are then refused.
+TOP_FIELDS = ("schema", "id", "oracle", "tier", "invoke", "expect", "isolation", "backend", "platform")
+INVOKE_FIELDS = ("argv", "env", "unset", "stdin", "timeout_ms", "fixtures")
+EXPECT_FIELDS = ("exit", "stdout", "stderr")
+SPEC_FIELDS = ("mode", "value", "normalize")
+ISOLATION_FIELDS = ("offline", "ssh_stubs", "redirect", "no_live_refeed")
 
 
 class VectorError(Exception):
@@ -69,9 +86,28 @@ def current_platform() -> str:
     return "linux"
 
 
+def _tmpdir_roots() -> set[str]:
+    """The temporary-directory roots the ``tmpdir`` transform replaces.
+
+    POSIX follows the Bash runner and acq's own rule: ``$TMPDIR`` only when it
+    is absolute (trailing slashes dropped; macOS's ends in one), plus ``/tmp``.
+    A relative ``TMPDIR`` is ignored, as acq ignores it. Windows has no
+    ``TMPDIR`` convention, so there the interpreter's temp directory is used.
+    """
+    roots = {"/tmp"}
+    if os.name == "nt":
+        roots.add(tempfile.gettempdir())
+        return roots
+    env = os.environ.get("TMPDIR", "")
+    if env.startswith("/") and env.rstrip("/"):
+        roots.add(env.rstrip("/"))
+    return roots
+
+
 def _tmpdir_transform(text: str) -> str:
-    roots = sorted({tempfile.gettempdir(), "/tmp"}, key=len, reverse=True)
-    for root in roots:
+    # Literal replacement, longest root first, so a root that contains another
+    # (/tmp/x and /tmp) is replaced whole.
+    for root in sorted(_tmpdir_roots(), key=len, reverse=True):
         text = text.replace(root, "<tmpdir>")
     return text
 
@@ -117,7 +153,9 @@ def _is_subset(expected, actual) -> bool:
     """Structural subset: every key/value of ``expected`` must be present in
     ``actual``, recursively. Extra fields in ``actual`` are allowed (ADR-0038m:
     unknown fields are additive). Scalars compare by equality; lists compare
-    element-wise by length.
+    element-wise by length. A JSON boolean equals only a boolean: Python's
+    ``True == 1`` would otherwise accept ``{"ok": 1}`` for ``{"ok": true}``,
+    which jq (the Bash runner) rejects.
     """
     if isinstance(expected, dict):
         if not isinstance(actual, dict):
@@ -127,6 +165,8 @@ def _is_subset(expected, actual) -> bool:
         if not isinstance(actual, list) or len(actual) != len(expected):
             return False
         return all(_is_subset(e, a) for e, a in zip(expected, actual))
+    if isinstance(expected, bool) or isinstance(actual, bool):
+        return type(expected) is type(actual) and expected == actual
     return expected == actual
 
 
@@ -137,6 +177,11 @@ def compare(actual: str, expected, mode: str, label: str) -> None:
     elif mode == "contains":
         if expected not in actual:
             raise AssertionError(f"{label}: expected {expected!r} in {actual!r}")
+    elif mode == "absent":
+        # The output is not echoed: what must be absent is usually a secret
+        # sentinel, and the failure only needs to say that it appeared.
+        if expected in actual:
+            raise AssertionError(f"{label}: expected {expected!r} to be absent, but it appears")
     elif mode == "json":
         try:
             parsed = json.loads(actual)
@@ -181,17 +226,69 @@ def load_vector(path: Path) -> dict:
     return vector
 
 
-def _validate(vector: dict, path: Path) -> None:
-    required = ("schema", "id", "oracle", "tier", "invoke", "expect", "isolation", "backend", "platform")
-    missing = [k for k in required if k not in vector]
+def stream_specs(expect: dict, stream: str) -> list[dict]:
+    """The assertions declared for ``stream``: none, one, or a list of them."""
+    spec = expect.get(stream)
+    if spec is None:
+        return []
+    return spec if isinstance(spec, list) else [spec]
+
+
+def _unknown_fields(obj, allowed: tuple[str, ...], prefix: str) -> list[str]:
+    return [f"{prefix}{key}" for key in obj if key not in allowed]
+
+
+def _validate(vector, path: Path) -> None:
+    if not isinstance(vector, dict):
+        raise VectorError(f"{path}: a vector must be a JSON object")
+    missing = [k for k in TOP_FIELDS if k not in vector]
     if missing:
         raise VectorError(f"{path}: missing required field(s): {', '.join(missing)}")
-    invoke = vector.get("invoke", {})
-    expect = vector.get("expect", {})
+    for name in ("invoke", "expect", "isolation"):
+        if not isinstance(vector[name], dict):
+            raise VectorError(f"{path}: {name} must be an object")
+    invoke, expect, isolation = vector["invoke"], vector["expect"], vector["isolation"]
+    unknown = (
+        _unknown_fields(vector, TOP_FIELDS, "")
+        + _unknown_fields(invoke, INVOKE_FIELDS, "invoke.")
+        + _unknown_fields(expect, EXPECT_FIELDS, "expect.")
+        + _unknown_fields(isolation, ISOLATION_FIELDS, "isolation.")
+    )
+    if unknown:
+        raise VectorError(f"{path}: unknown vector field(s): {', '.join(unknown)}")
     if "argv" not in invoke:
         raise VectorError(f"{path}: invoke.argv is required")
     if "exit" not in expect:
         raise VectorError(f"{path}: expect.exit is required")
+    for stream in ("stdout", "stderr"):
+        _validate_specs(expect.get(stream), f"{path}: expect.{stream}")
+
+
+def _validate_specs(declared, label: str) -> None:
+    """Check one stream's assertion (or non-empty list of assertions) up front,
+    so a bad mode or transform is reported before the CLI-under-test runs."""
+    if declared is None:
+        return
+    if isinstance(declared, list) and not declared:
+        raise VectorError(f"{label}: an assertion list must not be empty")
+    for spec in declared if isinstance(declared, list) else [declared]:
+        if not isinstance(spec, dict):
+            raise VectorError(f"{label}: an assertion must be an object")
+        unknown = _unknown_fields(spec, SPEC_FIELDS, "")
+        if unknown:
+            raise VectorError(f"{label}: unknown vector field(s): {', '.join(unknown)}")
+        mode = spec.get("mode", "exact")
+        if mode not in MODES:
+            raise VectorError(f"{label}: unknown mode {mode!r}")
+        if "value" not in spec:
+            raise VectorError(f"{label}: value is required")
+        if mode != "json" and not isinstance(spec["value"], str):
+            raise VectorError(f"{label}: a {mode} value must be a string")
+        if mode == "absent" and not spec["value"]:
+            raise VectorError(f"{label}: an absent value must not be empty")
+        transforms = spec.get("normalize", [])
+        if not isinstance(transforms, list) or [t for t in transforms if t not in TRANSFORMS]:
+            raise VectorError(f"{label}: unknown transform(s) in {transforms!r}")
 
 
 def _refuse_unsupported(vector: dict, invoke: dict, isolation: dict) -> None:
@@ -279,16 +376,12 @@ def run_vector(
     raw_stdout = proc.stdout.decode("utf-8")
     raw_stderr = proc.stderr.decode("utf-8")
 
+    # Modes and transforms were validated when the vector was loaded. Each
+    # assertion starts from the raw stream, so one assertion's transforms never
+    # change what the next one sees.
     for stream in ("stdout", "stderr"):
-        spec = expect.get(stream)
-        if spec is None:
-            continue
-        mode = spec.get("mode", "exact")
-        if mode not in MODES:
-            raise VectorError(f"{vector['id']}: unknown mode {mode!r}")
-        transforms = spec.get("normalize", [])
-        unknown = [t for t in transforms if t not in TRANSFORMS]
-        if unknown:
-            raise VectorError(f"{vector['id']}: unknown transform(s) {unknown}")
         actual = raw_stdout if stream == "stdout" else raw_stderr
-        compare(apply_transforms(actual, transforms), spec.get("value"), mode, f"{vector['id']}.{stream}")
+        for spec in stream_specs(expect, stream):
+            transforms = spec.get("normalize", [])
+            compare(apply_transforms(actual, transforms), spec["value"], spec.get("mode", "exact"),
+                    f"{vector['id']}.{stream}")
