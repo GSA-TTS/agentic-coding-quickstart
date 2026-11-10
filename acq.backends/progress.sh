@@ -56,6 +56,8 @@ _ACQ_SPIN_MSG=""
 # it is stopped, so cleanup also runs in the gap before _ACQ_SPIN_PID is set.
 _ACQ_SPIN_ACTIVE=""
 _ACQ_SPIN_SELF_PID=""
+# PID of the shell that installed the spinner's traps (see _acq_spin_is_owner).
+_ACQ_SPIN_OWNER=""
 
 # Prior EXIT/INT/TERM trap COMMANDS captured at acq_spin_start time, so the
 # spinner's own cleanup traps COMPOSE with (rather than clobber) a caller's
@@ -179,6 +181,21 @@ _acq_spin_self_pid() {
   [ -n "$_ACQ_SPIN_SELF_PID" ] || _ACQ_SPIN_SELF_PID=$(exec sh -c 'echo "$PPID"')
 }
 
+# _acq_spin_is_owner — true in the shell that installed the spinner's traps (or
+# when none recorded an owner), false in any other process. A child forked while
+# the traps are set can run them: a signal that reaches it before Bash resets
+# its inherited handlers is handled with the parent's trap commands, and Bash 5
+# then also runs the parent's EXIT trap there. Measured: TERMing a subshell
+# straight after `( ... ) &` ran the parent's EXIT trap in 173 of 200 children
+# under Bash 5.3 (none under 3.2). The spinner kills its animator in exactly
+# that way, so without this check the animator could run the caller's EXIT
+# cleanup (sandbox removal, lock release) a second time, from the wrong process.
+_acq_spin_is_owner() {
+  [ -n "$_ACQ_SPIN_OWNER" ] || return 0
+  _acq_spin_self_pid
+  [ "$_ACQ_SPIN_SELF_PID" = "$_ACQ_SPIN_OWNER" ]
+}
+
 # _acq_progress_enabled — 0 (true) when animated progress may run, 1 otherwise.
 # Animate only when ALL hold:
 #   - stderr is an interactive TTY            ([ -t 2 ])
@@ -238,8 +255,6 @@ acq_spin_start() {
 
   local frames owner
   frames=$(_acq_spin_frames)
-  _acq_spin_self_pid
-  owner="$_ACQ_SPIN_SELF_PID"
   # Compose the cleanup traps BEFORE the cursor is hidden or the animator
   # exists. In the other order, a Ctrl-C or SIGTERM that landed while the traps
   # were still being captured ran only the caller's handlers: the shell exited,
@@ -248,6 +263,7 @@ acq_spin_start() {
   # that the cursor may be hidden even before the animator's PID is recorded.
   _ACQ_SPIN_ACTIVE=1
   _acq_spin_install_traps
+  owner="$_ACQ_SPIN_OWNER"
   # Hide the cursor for the duration of the animation; the stop path (and the
   # trap) restore it. Then spawn the animator in the background.
   printf '\033[?25l' >&2
@@ -281,6 +297,8 @@ acq_spin_start() {
 # sandbox) still runs on Ctrl-C or error. acq_spin_stop restores the prior EXIT
 # trap on the normal path so no lingering no-op trap is left behind (NIT 3).
 _acq_spin_install_traps() {
+  _acq_spin_self_pid
+  _ACQ_SPIN_OWNER="$_ACQ_SPIN_SELF_PID"
   _ACQ_SPIN_PRIOR_EXIT_LINE=$(trap -p EXIT)
   _ACQ_SPIN_PRIOR_INT_LINE=$(trap -p INT)
   _ACQ_SPIN_PRIOR_TERM_LINE=$(trap -p TERM)
@@ -335,6 +353,7 @@ _acq_spin_restore_traps() {
   _ACQ_SPIN_PRIOR_EXIT_LINE=""
   _ACQ_SPIN_PRIOR_INT_LINE=""
   _ACQ_SPIN_PRIOR_TERM_LINE=""
+  _ACQ_SPIN_OWNER=""
 }
 
 # _acq_spin_stop_animation — kill and reap the animator (if any), then clear the
@@ -362,6 +381,8 @@ _acq_spin_stop_animation() {
 # prior handler reads.
 _acq_spin_cleanup_exit() {
   local _acq_spin_rc="${1:-$?}"
+  # Only the owner runs the cleanup; a child that inherited the trap just exits.
+  _acq_spin_is_owner || return 0
   _acq_spin_stop_animation
   local _acq_spin_prior="$_ACQ_SPIN_PRIOR_EXIT_TRAP"
   _ACQ_SPIN_PRIOR_EXIT_TRAP=""
@@ -387,6 +408,13 @@ _acq_spin_cleanup_signal() {
     TERM) _acq_spin_status=143
           _acq_spin_prior="$_ACQ_SPIN_PRIOR_TERM_TRAP"; _ACQ_SPIN_PRIOR_TERM_TRAP="" ;;
   esac
+  # A child that inherited this trap (see _acq_spin_is_owner) was being asked
+  # to stop: it ends here, without touching the owner's animator, cursor or
+  # handlers.
+  if ! _acq_spin_is_owner; then
+    trap - EXIT INT TERM
+    exit "$_acq_spin_status"
+  fi
   _acq_spin_stop_animation
   trap - "$_acq_spin_sig"
   _acq_run_prior_trap "$_acq_spin_prior" "$_acq_spin_status"
