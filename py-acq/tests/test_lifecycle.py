@@ -9,6 +9,7 @@ corpus (``test/vectors``); the stub is an internal test seam, never a secret.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -439,3 +440,139 @@ def test_run_typed_path_reattach_fails_closed_on_newer_schema(monkeypatch, tmp_p
     rc, doc = _invoke(capsys, "--backend", "msb", "run", "opencode", str(ws), "--name", "future", "--json")
     assert rc == 1
     assert doc["error"]["code"] == "state_schema_unsupported"
+
+
+# ---------------------------------------------------------------------------
+# A workspace must not hold acq's own directories: the guest could rewrite
+# acq's records and its read-only trusted config through the writable mount.
+# ---------------------------------------------------------------------------
+
+def _assert_overlap_refused(rc, doc, relation, what):
+    assert rc == 1, doc
+    assert doc["error"]["code"] == "validation_failed"
+    assert f"{relation} acq's {what}" in doc["error"]["message"]
+    assert "not your home directory itself" in doc["error"]["remediation"]
+
+
+@pytest.mark.parametrize("verb", ["create", "run"])
+def test_a_workspace_containing_the_state_dir_is_refused(monkeypatch, tmp_path, capsys, verb):
+    _env(monkeypatch, tmp_path)  # ACQ_STATE_DIR is tmp_path/state
+    _forbid_launch(monkeypatch)
+    rc, doc = _invoke(capsys, "--backend", "msb", verb, "opencode", str(tmp_path), "--name", "box", "--json")
+    _assert_overlap_refused(rc, doc, "contains", "state directory")
+    assert not cli.msb.exists("box")
+    assert state.record_read("msb", "box") is None
+
+
+def test_a_workspace_inside_the_state_dir_is_refused(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path)
+    ws = tmp_path / "state" / "msb" / "ws"
+    ws.mkdir(parents=True)
+    rc, doc = _invoke(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "box", "--json")
+    _assert_overlap_refused(rc, doc, "is inside", "state directory")
+    assert not cli.msb.exists("box")
+
+
+@pytest.mark.parametrize("var,what", [("XDG_CONFIG_HOME", "config directory"),
+                                      ("ACQ_SECRET_STORE_DIR", "secret store"),
+                                      ("XDG_STATE_HOME", "state directory")])
+def test_a_workspace_holding_the_config_secret_store_or_provenance_dir_is_refused(
+        monkeypatch, tmp_path, capsys, var, what):
+    _env(monkeypatch, tmp_path)
+    ws = tmp_path / "project"
+    (ws / "inner").mkdir(parents=True)
+    monkeypatch.setenv(var, str(ws / "inner"))  # XDG_STATE_HOME moves the provenance tree (host-config dirs)
+    rc, doc = _invoke(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "box", "--json")
+    _assert_overlap_refused(rc, doc, "contains", what)
+    assert not cli.msb.exists("box")
+
+
+@pytest.mark.parametrize("var,what", [
+    ("XDG_DATA_HOME", "data directory"),  # where the host-run provider-input validator lives
+    ("XDG_CACHE_HOME", "cache directory"),
+    ("ACQ_PROVIDER_INPUT_DATA_DIR", "provider-input directory"),
+    ("ACQ_SBX_KIT_CACHE", "kit cache"),
+    ("ACQ_MSB_KIT_CACHE", "kit cache"),
+    ("ACQ_MSB_STARTUP_STAGE_DIR", "kit startup staging directory"),
+])
+def test_a_workspace_holding_another_acq_directory_is_refused(monkeypatch, tmp_path, capsys, var, what):
+    _env(monkeypatch, tmp_path)
+    ws = tmp_path / "project"
+    (ws / "inner").mkdir(parents=True)
+    monkeypatch.setenv(var, str(ws / "inner"))
+    rc, doc = _invoke(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "box", "--json")
+    _assert_overlap_refused(rc, doc, "contains", what)
+    assert not cli.msb.exists("box")
+
+
+def test_a_workspace_holding_the_balanced_hosts_file_is_refused(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path)
+    ws = tmp_path / "project"
+    ws.mkdir()
+    hosts = ws / "balanced-hosts.txt"
+    hosts.write_text("example.gov\n", encoding="utf-8")
+    monkeypatch.setenv("ACQ_MSB_BALANCED_HOSTS_FILE", str(hosts))
+    rc, doc = _invoke(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "box", "--json")
+    _assert_overlap_refused(rc, doc, "contains", "balanced-tier hosts file")
+
+
+def test_an_acq_location_at_the_filesystem_root_does_not_refuse_every_workspace(monkeypatch, tmp_path, capsys):
+    # As in Bash: every workspace lies inside '/', so that is not a refusal.
+    _env(monkeypatch, tmp_path)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    monkeypatch.setenv("ACQ_MSB_KIT_CACHE", os.path.abspath(os.sep))
+    monkeypatch.setenv("ACQ_SBX_KIT_CACHE", "relative/cache")  # not absolute: ignored
+    rc, doc = _invoke(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "box", "--json")
+    assert rc == 0, doc
+
+
+def test_the_overlap_check_compares_by_file_identity_too(monkeypatch, tmp_path):
+    # A case-insensitive filesystem (macOS) can spell one directory two ways,
+    # which no path comparison sees. Here a link plays that part, with link
+    # resolution switched off so only the identity check can catch it.
+    from acq_py.commands import common
+
+    _env(monkeypatch, tmp_path)
+    alias = tmp_path.parent / f"{tmp_path.name}-alias"  # outside tmp_path, so no path comparison matches
+    alias.symlink_to(tmp_path, target_is_directory=True)
+    try:
+        monkeypatch.setattr(common, "REALPATH", lambda p: p)
+        monkeypatch.setenv("ACQ_STATE_DIR", str(alias / "state"))
+        (tmp_path / "state").mkdir(exist_ok=True)
+        assert common._within(str(alias / "state"), str(tmp_path))
+        assert not common._within(str(tmp_path.parent / "elsewhere"), str(tmp_path))
+        assert common._workspace_overlap_failure("create", str(tmp_path), True) == 1
+    finally:
+        alias.unlink()
+
+
+def test_a_workspace_reached_through_a_link_is_compared_canonically(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path)
+    link = tmp_path.parent / f"{tmp_path.name}-link"
+    link.symlink_to(tmp_path, target_is_directory=True)
+    try:
+        rc, doc = _invoke(capsys, "--backend", "msb", "create", "opencode", str(link), "--name", "box", "--json")
+    finally:
+        link.unlink()
+    _assert_overlap_refused(rc, doc, "contains", "state directory")
+
+
+def test_run_by_name_refuses_a_recorded_workspace_holding_acq_state(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path, catalog={"old": "running"})
+    _seed_record({"schema": 1, "name": "old", "backend": "msb", "agent": "shell", "workspace": str(tmp_path)})
+    _forbid_launch(monkeypatch)
+    rc, doc = _invoke(capsys, "--backend", "msb", "run", "old", "--json")
+    _assert_overlap_refused(rc, doc, "contains", "state directory")
+
+
+def test_recreate_refuses_a_recorded_workspace_holding_acq_state(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path, catalog={"sec": "running"})
+    _seed_record({**_SEC_RECORD, "workspace": str(tmp_path)})
+    monkeypatch.setenv("ACQ_SECURITY_MOUNT_STATE", json.dumps({"sec": "missing"}))
+    removed = []
+    monkeypatch.setattr(cli.msb, "remove", lambda name: removed.append(name))
+    rc, doc = _invoke(capsys, "--backend", "msb", "create", "--recreate", "sec", "--yes", "--json")
+    _assert_overlap_refused(rc, doc, "contains", "state directory")
+    assert removed == []
+    assert state.record_read("msb", "sec")["ro_host_config"] is True

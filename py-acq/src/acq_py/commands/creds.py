@@ -590,7 +590,7 @@ def _scope_later_hint(sandbox: str, workspace: str) -> str:
     return f"acq github-scope {sandbox} {common._printable(workspace)}"
 
 
-def advise_github_scope(backend: str, sandbox: str, workspace: str, emit_json: bool) -> None:
+def advise_github_scope(backend: str, sandbox: str, workspace: str, emit_json: bool) -> bool:
     """Nudge toward a token limited to the workspace's repositories (Bash ``advise_github_scope``).
 
     Runs before a new sandbox is provisioned (msb binds secrets only at create,
@@ -605,12 +605,16 @@ def advise_github_scope(backend: str, sandbox: str, workspace: str, emit_json: b
     Without a terminal, with ``ACQ_NO_PROMPT`` or ``ACQ_NO_PROGRESS``, or with
     ``--json`` (whose stdout stays one document) it only prints the command to
     scope later: a token is never read while prompts are off.
+
+    Returns True only when THIS call stored a token, so a caller whose create
+    then fails removes that token and never one stored meanwhile by another
+    command (``acq secret set SANDBOX github`` while the prompt was open).
     """
     if _stored_github_token(sandbox):
-        return
+        return False
     repos = gitrepos.detect_workspace_repos(workspace)
     if not repos:
-        return
+        return False
     # ASCII only: on Windows stderr is often in the console code page, where
     # Bash's em dash would not decode as UTF-8.
     lines = ["acq: note: this sandbox has no repo-scoped GitHub token."]
@@ -625,16 +629,21 @@ def advise_github_scope(backend: str, sandbox: str, workspace: str, emit_json: b
 
     if not configure.interactive(emit_json):
         print(f"      To scope it later: {_scope_later_hint(sandbox, workspace)}", file=sys.stderr)
-        return
+        return False
     if configure.confirm(configure.Terminal(), SCOPE_NOW_PROMPT, scope_github_token_default()):
-        _scope_now(backend, sandbox, workspace, repos)
-    else:
-        print(f"acq: continuing without scoping (run '{_scope_later_hint(sandbox, workspace)}' anytime).",
-              file=sys.stderr)
+        return _scope_now(backend, sandbox, workspace, repos)
+    print(f"acq: continuing without scoping (run '{_scope_later_hint(sandbox, workspace)}' anytime).",
+          file=sys.stderr)
+    return False
 
 
-def _scope_now(backend: str, sandbox: str, workspace: str, repos: list[str]) -> None:
-    """The ``github-scope`` steps at the create prompt; every failure is a warning."""
+def _scope_now(backend: str, sandbox: str, workspace: str, repos: list[str]) -> bool:
+    """The ``github-scope`` steps at the create prompt; every failure is a warning.
+
+    True only when the token was stored here: a store that failed part-way is
+    reported as skipped and not claimed, so a caller never removes a value it
+    cannot prove was its own.
+    """
     later = _scope_later_hint(sandbox, workspace)
     found = gitrepos.owners(repos)
     if len(found) != 1:
@@ -642,7 +651,7 @@ def _scope_now(backend: str, sandbox: str, workspace: str, repos: list[str]) -> 
               f"owned by {len(found)} accounts ({', '.join(repos)}), and a fine-grained token covers a "
               f"single owner. Re-run with a one-owner workspace: acq github-scope {sandbox} PATH",
               file=sys.stderr)
-        return
+        return False
     owner = found[0]
     _github_scope_guidance(sandbox, owner, repos, gitrepos.pat_url(owner, sandbox))
     print("      To skip for now, press Enter on an empty line.", file=sys.stderr)
@@ -656,7 +665,7 @@ def _scope_now(backend: str, sandbox: str, workspace: str, repos: list[str]) -> 
         problem = exc.message
     if problem is not None:
         print(f"acq: GitHub scoping skipped ({problem}); continuing. Re-run later with: {later}", file=sys.stderr)
-        return
+        return False
     try:
         provider_creds.github_scope_write(backend, sandbox, workspace, owner, repos)
     except OSError as exc:
@@ -664,6 +673,7 @@ def _scope_now(backend: str, sandbox: str, workspace: str, repos: list[str]) -> 
               file=sys.stderr)
     print(f"acq: stored a GitHub token for sandbox '{sandbox}' only, requested for {', '.join(repos)}.",
           file=sys.stderr)
+    return True
 
 
 _ROTATE = "usai-rotate-api-key"

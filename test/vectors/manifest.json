@@ -39,8 +39,8 @@
       "vectors": ["cli/backend-list-none", "cli/backend-list-versions", "cli/backend-list-unknown"]
     },
     {
-      "contract": "ADR-0038m §2 backend list active_backend auto-detect default (none / single / both)",
-      "vectors": ["cli/backend-list-none", "cli/backend-list-unknown", "cli/backend-list-default-msb"]
+      "contract": "ADR-0038m §2 backend list active_backend auto-detect default (none / single / both; both with existing sbx sandboxes keeps sbx)",
+      "vectors": ["cli/backend-list-none", "cli/backend-list-unknown", "cli/backend-list-default-msb", "cli/backend-list-autodetect-keeps-sbx"]
     },
     {
       "contract": "spec backend seam: active_backend precedence flag -> env -> config (backend set) -> auto-detect; backend set/unset persist and clear only the backend key; an invalid backend is never persisted, and one found in config.yaml fails closed",
@@ -555,6 +555,10 @@
     {
       "contract": "Bash parity for sandbox names and workspace paths: an explicit --name must match [A-Za-z0-9_-] without a leading '-'; a name given to a verb that acts on an existing sandbox must not be empty, '.' or '..', or contain '/', '\\' or control characters; a workspace path containing ':' (outside a Windows drive designator) or a control character is refused before it is checked for existence",
       "vectors": ["cli/name-create-invalid", "cli/name-form-stop-refused", "cli/workspace-colon-refused"]
+    },
+    {
+      "contract": "ADR-0035 read-only trusted config: create and run refuse (validation_failed) a workspace that contains, or lies inside, acq's state, provenance, config or secret-store directory, since the writable workspace mount would let the guest rewrite acq's host records and its read-only trusted configuration",
+      "vectors": ["cli/workspace-holding-acq-state-refused"]
     },
     {
       "contract": "Clone mode fails closed in the Python acq (ADR-0027): ACQ_CLONE set to exactly '1', the only value the Bash acq treats as on, makes create and run refuse with a usage error (exit 2) before any state or backend access, instead of mounting the real workspace; any other value is ignored, as in Bash",

@@ -74,6 +74,14 @@ class SandboxLockTimeout(LockTimeout):
         self.remediation = remediation
 
 
+class SandboxLockUnsafe(SandboxLockTimeout):
+    """The Bash lock's directory is a link or not a directory, so it is not taken.
+
+    A :class:`SandboxLockTimeout` so every lifecycle verb refuses it the same
+    way, with its own remediation.
+    """
+
+
 @contextmanager
 def exclusive_lock(
     path: Path,
@@ -205,6 +213,8 @@ def sandbox_lock(backend: str, name: str) -> Iterator[None]:
                 yield
             finally:
                 bash.release()
+    except SandboxLockUnsafe:
+        raise
     except SandboxLockTimeout as exc:
         raise SandboxLockTimeout(str(exc), bash.remediation(name)) from None
 
@@ -289,6 +299,47 @@ def _bash_lock_dir(backend: str, name: str) -> Path:
     return bash_provenance_dir() / "provider-input" / _bash_safe(backend) / f"{bash_sandbox_key(name)}.lock"
 
 
+_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+
+
+def _open_lock_parent(parent: Path) -> int:
+    """Open (creating as needed) the Bash lock's parent directory; returns its descriptor.
+
+    The provenance root is acq's own tree and is created normally (it may sit
+    under a home directory that is itself reached through a link). Every
+    directory below it is created and opened relative to the one above with
+    ``O_NOFOLLOW``, as Bash's ``_acq_provider_input_safe_mkdir`` walks its path,
+    so a link planted there can never send the lock, or the owner file written
+    into it, out of the tree. Raises :class:`SandboxLockUnsafe` for a link or
+    non-directory on the way.
+    """
+    root = bash_provenance_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    fd = os.open(root, os.O_RDONLY | _O_DIRECTORY)
+    here = root
+    try:
+        for part in parent.relative_to(root).parts:
+            here = here / part
+            try:
+                os.mkdir(part, dir_fd=fd)
+            except FileExistsError:
+                pass
+            try:
+                child = os.open(part, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW, dir_fd=fd)
+            except OSError as exc:
+                raise SandboxLockUnsafe(
+                    f"unsafe sandbox lock path: {here} is a symbolic link or not a directory",
+                    f"remove {here} (acq creates it again as a directory), then retry",
+                ) from exc
+            os.close(fd)
+            fd = child
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 def _owner_pid(token: str) -> int | None:
     """An owner PID field as an int, or ``None`` unless it is plain ASCII digits."""
     if not (token.isascii() and token.isdigit()):
@@ -342,21 +393,29 @@ def _pid_alive(pid: int | None) -> bool:
     return True
 
 
-def _bash_owner_state(lock_dir: Path) -> str:
+def _owner_line(lock_dir: Path) -> str:
+    """The first line of a lock's ``owner`` file ("" when it cannot be read)."""
+    try:
+        return (lock_dir / "owner").read_text(encoding="utf-8").split("\n", 1)[0]
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def _bash_owner_state(lock_dir: Path, line: str | None = None) -> str:
     """Classify an existing Bash lock as ``live``, ``stale`` or ``invalid``.
 
     The same rules as ``acq_provider_input_lock_acquire``: the owner line is
     ``PID IDENTITY``; it is live when the PID's current identity equals the
     recorded one, stale when the PID is gone or now has a different identity (a
-    reused PID), and otherwise invalid (Bash refuses to touch it). A symlinked
-    or non-directory lock path is invalid.
+    reused PID), and otherwise invalid (Bash refuses to touch it, and so does
+    this: a directory with no owner line may be another command's lock in the
+    instant between its ``mkdir`` and its owner write). A symlinked or
+    non-directory lock path is invalid. ``line`` is the owner line already read.
     """
     if lock_dir.is_symlink() or not lock_dir.is_dir():
         return "invalid"
-    try:
-        line = (lock_dir / "owner").read_text(encoding="utf-8").split("\n", 1)[0]
-    except (OSError, UnicodeDecodeError):
-        line = ""
+    if line is None:
+        line = _owner_line(lock_dir)
     fields = line.strip(" ").split(" ", 1)
     pid_token = fields[0]
     identity = fields[1].strip(" ") if len(fields) > 1 else ""
@@ -402,25 +461,44 @@ class _BashLock:
             if identity is None:
                 self.blocked = self.path.exists() and _bash_owner_state(self.path) != "stale"
                 return not self.blocked
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+            parent = _open_lock_parent(self.path.parent)
             try:
-                os.mkdir(self.path)
-            except FileExistsError:
-                if _bash_owner_state(self.path) == "stale":
-                    self._remove()
-                    continue
-                self.blocked = True
-                return False
-            token = f"{os.getpid()} {identity}"
-            try:
-                (self.path / "owner").write_text(token + "\n", encoding="utf-8")
-            except OSError:
-                self._remove()
-                raise
-            self.token = token
-            return True
+                if self._take(parent, f"{os.getpid()} {identity}"):
+                    return True
+            finally:
+                os.close(parent)
+            line = _owner_line(self.path)
+            if _bash_owner_state(self.path, line) == "stale":
+                self._remove(line)
+                continue
+            self.blocked = True
+            return False
         self.blocked = True
         return False
+
+    def _take(self, parent: int, token: str) -> bool:
+        """``mkdir`` the lock under the open ``parent`` and write the owner line; False when it exists.
+
+        Both steps resolve names relative to ``parent``, so a link swapped in
+        for a directory on the way is never followed.
+        """
+        try:
+            os.mkdir(self.path.name, dir_fd=parent)
+        except FileExistsError:
+            return False
+        try:
+            fd = os.open(self.path.name, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW, dir_fd=parent)
+            try:
+                owner = os.open("owner", os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW, 0o644, dir_fd=fd)
+            finally:
+                os.close(fd)
+            with os.fdopen(owner, "w", encoding="utf-8") as fh:
+                fh.write(token + "\n")
+        except OSError:
+            self._remove(None)
+            raise
+        self.token = token
+        return True
 
     def release(self) -> None:
         """Remove the lock if this process still owns it."""
@@ -431,7 +509,7 @@ class _BashLock:
         except OSError:
             current = ""
         if current == self.token:
-            self._remove()
+            self._remove(self.token)
         self.token = None
 
     def remediation(self, name: str) -> str:
@@ -447,7 +525,18 @@ class _BashLock:
             )
         return f"{base}; if no acq command is running, remove the leftover lock directory {self.path}"
 
-    def _remove(self) -> None:
+    def _remove(self, expected: str | None) -> None:
+        """Remove the lock, unless its owner line is no longer ``expected``.
+
+        A stale lock is judged on the owner line read first. Another command
+        may recover it and take it anew before this one gets here, and that
+        new lock must survive, so the line is read again right before the
+        removal. ``None`` is for a lock this process has just created and not
+        yet given an owner. (The read and the removal are still two steps, the
+        same narrow window Bash's own recovery has.)
+        """
+        if expected is not None and _owner_line(self.path).strip() != expected.strip():
+            return
         try:
             (self.path / "owner").unlink()
         except FileNotFoundError:

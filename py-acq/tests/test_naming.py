@@ -306,7 +306,9 @@ def test_an_explicit_name_outside_the_charset_is_refused(monkeypatch, tmp_path, 
 
 def test_an_explicit_name_is_checked_against_the_charset_only(monkeypatch, tmp_path, capsys):
     _msb_env(monkeypatch, tmp_path)
-    monkeypatch.chdir(tmp_path)
+    # A workspace beside the state tree: one that contains it is refused.
+    (tmp_path / "ws").mkdir()
+    monkeypatch.chdir(tmp_path / "ws")
     rc, doc = _invoke_json(capsys, "--backend", "msb", "create", "opencode", ".", "--name", "My.Box")
     _assert_refused(rc, doc, "invalid sandbox name 'My.Box'")
     rc, doc = _invoke_json(capsys, "--backend", "msb", "create", "opencode", ".", "--name", "My_Box-2")

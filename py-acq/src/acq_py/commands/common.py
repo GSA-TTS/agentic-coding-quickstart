@@ -16,6 +16,7 @@ import ntpath
 import os
 import re
 import string
+import subprocess  # for the sbx probe's timeout exception
 import sys
 from collections.abc import Callable
 
@@ -31,6 +32,7 @@ from .. import (
     secretstore,
     security,
     state,
+    userdirs,
 )
 
 # Both adapters and the acq secret store raise an error carrying the same
@@ -170,7 +172,10 @@ def _resolve_active_backend(explicit: str | None) -> str | None:
     Auto-detect default arms:
 
         * exactly one backend installed -> that backend;
-        * sbx and msb both installed -> msb;
+        * sbx and msb both installed -> sbx when ``sbx ls -q`` lists a sandbox
+          (keeping a user's existing sbx sandboxes reachable), else msb; a
+          listing that fails or times out counts as none (Bash
+          ``_sbx_has_sandboxes``);
         * none installed -> ``None``;
         * (future) two or more installed and none is msb -> prompt the user and
           persist the answer via ``backend set``.
@@ -190,8 +195,21 @@ def _resolve_active_backend(explicit: str | None) -> str | None:
     if len(installed) == 1:
         return installed[0]
     if len(installed) > 1:
-        return "msb"
+        return "sbx" if _sbx_has_sandboxes() else "msb"
     return None
+
+
+# How long auto-detect waits for ``sbx ls -q`` before treating sbx as empty.
+_SBX_PROBE_TIMEOUT_S = 10.0
+
+
+def _sbx_has_sandboxes() -> bool:
+    """True when ``sbx ls -q`` lists at least one sandbox; any failure is False (fail-open, as Bash)."""
+    try:
+        names = sbx.list_names(timeout=_SBX_PROBE_TIMEOUT_S)
+    except (sbx.SbxError, OSError, subprocess.SubprocessError):
+        return False
+    return bool(names)
 
 
 def _invalid_persisted_backend(explicit: str | None) -> str | None:
@@ -455,7 +473,124 @@ def _validate_workspace(command: str, path: str | None, emit_json: bool) -> tupl
         unsafe = _workspace_unsafe(command, real, f"{path} (resolves to {real})", emit_json)
         if unsafe is not None:
             return None, unsafe
+    overlap = _workspace_overlap_failure(command, resolved, emit_json)
+    if overlap is not None:
+        return None, overlap
     return resolved, None
+
+
+# Overrides that move one of acq's own host locations (Bash _acq_trusted_host_dirs
+# reads the first three; the last two exist only in the Python acq). The
+# balanced-tier hosts file is one file, not a directory.
+_ACQ_PATH_OVERRIDES = (
+    ("provider-input directory", "ACQ_PROVIDER_INPUT_DATA_DIR"),
+    ("kit cache", "ACQ_SBX_KIT_CACHE"),
+    ("kit cache", "ACQ_MSB_KIT_CACHE"),
+    ("kit startup staging directory", "ACQ_MSB_STARTUP_STAGE_DIR"),
+    ("balanced-tier hosts file", "ACQ_MSB_BALANCED_HOSTS_FILE"),
+)
+
+
+def _acq_host_dirs() -> list[tuple[str, str]]:
+    """acq's own host locations, as ``(what, path)``: what a sandbox must never reach.
+
+    The state tree (sandbox records), the provenance tree (each sandbox's
+    host-config directory and provider input, which acq mounts READ-ONLY into
+    the guest as trusted configuration), the config directory, the data and
+    cache directories (the host-run provider-input validator, kit payloads),
+    the secret store, and the overrides in :data:`_ACQ_PATH_OVERRIDES` (Bash
+    ``_acq_trusted_host_dirs``). A location that cannot be resolved, or an
+    override that is not an absolute path, is left out here; the command's own
+    setup refuses a relative override.
+    """
+    getters: list[tuple[str, Callable[[], object]]] = [
+        ("state directory", state.state_dir),
+        ("state directory", state.provenance_dir),
+        ("config directory", lambda: config.config_path().parent),
+        ("data directory", lambda: userdirs.xdg_base("XDG_DATA_HOME", ".local", "share") / "acq"),
+        ("cache directory", lambda: userdirs.xdg_base("XDG_CACHE_HOME", ".cache") / "acq"),
+        ("secret store", lambda: secretstore._layout().file_dir),
+        ("secret store", lambda: secretstore._layout().meta_dir),
+        ("secret store", lambda: secretstore._layout().index_file),
+    ]
+    out: list[tuple[str, str]] = []
+    for what, get in getters:
+        try:
+            out.append((what, str(get())))
+        except (userdirs.UserDirError, secretstore.SecretStoreError, OSError):
+            continue
+    for what, var in _ACQ_PATH_OVERRIDES:
+        value = os.environ.get(var, "")
+        if value and os.path.isabs(value):
+            out.append((what, value))
+    return out
+
+
+def _within(child: str, parent: str) -> bool:
+    """True when ``child`` is ``parent`` or below it (both absolute and canonical).
+
+    By path first (case-folded only where ``os.path.normcase`` folds, which is
+    Windows). Then, for whatever part of ``child`` exists, by file identity: a
+    case-insensitive filesystem on macOS, say, can spell the same directory
+    differently, and only ``samestat`` sees through that. Windows supports it too.
+    """
+    try:
+        if os.path.commonpath([os.path.normcase(child), os.path.normcase(parent)]) == os.path.normcase(parent):
+            return True
+    except ValueError:  # different drives on Windows
+        return False
+    try:
+        target = os.stat(parent)
+    except OSError:
+        return False
+    node = child
+    while True:
+        try:
+            if os.path.samestat(os.stat(node), target):
+                return True
+        except OSError:
+            pass
+        up = os.path.dirname(node)
+        if up == node:
+            return False
+        node = up
+
+
+def _is_root(path: str) -> bool:
+    return os.path.dirname(path) == path
+
+
+def _workspace_overlap_failure(command: str, workspace: str, emit_json: bool) -> int | None:
+    """Refuse a workspace that contains, or lies inside, one of acq's own locations.
+
+    The workspace is mounted WRITABLE. Were acq's state under it (``acq run
+    opencode ~``, say), the guest could rewrite the host records acq trusts and
+    the trusted configuration acq mounts read-only, through the writable mount,
+    which defeats the read-only mount entirely (ADR-0035). Both sides are
+    compared with links resolved (see :func:`_within` for case). A location
+    that resolves to the filesystem root is skipped for the "inside" test, as
+    in Bash, since every workspace lies inside it. Returns the emitted exit
+    code (``validation_failed``).
+    """
+    ws = REALPATH(workspace)
+    for what, path in _acq_host_dirs():
+        own = REALPATH(path)
+        if _within(own, ws):
+            relation = "contains"
+        elif not _is_root(own) and _within(ws, own):
+            relation = "is inside"
+        else:
+            continue
+        return _operational_failure(
+            command,
+            errors.VALIDATION_FAILED,
+            f"workspace {_printable(workspace)} {relation} acq's {what} ({_printable(path)}); a sandbox could "
+            "change acq's host records and its read-only trusted configuration through the writable workspace mount",
+            "use a project directory that holds none of acq's state, config or secret-store directories "
+            "(not your home directory itself), then re-run",
+            emit_json,
+        )
+    return None
 
 
 # Module-local seam for the host OS class, read by the workspace colon check so

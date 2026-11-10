@@ -608,6 +608,21 @@ def test_heal_skips_recorded_builtins(monkeypatch, tmp_path, capsys):
     assert "stale-ref" not in kit_sbx.hc_read("hb", "builtin-kits")
 
 
+def test_run_reattach_heals_a_builtin_kit_not_recorded_as_applied(monkeypatch, tmp_path, capsys):
+    # As Bash's re-attach does: a built-in kit the host record does not show at
+    # its pinned ref is added with 'sbx kit add' before the attach.
+    _seed_sandbox(monkeypatch, tmp_path, capsys)
+    kit_sbx.hc_write("hb", "builtin-kits", "zscaler-ca-certificate stale-ref")
+    monkeypatch.setenv("ACQ_SBX_STUB_KIT_ADD", "allow")
+    monkeypatch.setattr(sbx, "launch", lambda *a, **k: 0)
+    seen = _spy(monkeypatch)
+    rc, doc = _invoke(capsys, "--backend", "sbx", "run", "hb", "--json")
+    assert rc == 0 and doc["data"]["action"] == "reattached", doc
+    added = [a for a in seen if a[:2] == ["kit", "add"]]
+    assert added and all(a[2] == "hb" for a in added)
+    assert kit_sbx._recorded("hb", "zscaler-ca-certificate", kitspec.builtin_kit_ref("zscaler-ca-certificate"))
+
+
 def test_kit_add_classification(monkeypatch):
     class P:
         def __init__(self, rc, err):

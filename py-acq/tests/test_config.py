@@ -121,6 +121,32 @@ def test_write_field_new_file_carries_the_schema_marker():
         assert _mode(path.parent) == 0o700
 
 
+def test_config_writes_wait_for_the_config_lock(monkeypatch):
+    # backend set/unset and configure read, edit and rewrite the whole file, so
+    # a second writer waits for the lock rather than losing the first change.
+    from acq_py import lock
+
+    path = _write_config(b"schema: 1\nbackend: msb\n")
+    monkeypatch.setenv("ACQ_MIGRATION_LOCK_TIMEOUT", "0.2")
+    with lock.exclusive_lock(config.config_lock_path()):  # another acq command holds it
+        with pytest.raises(config.ConfigLockTimeout) as exc:
+            config.write_field("backend", "sbx")
+        assert isinstance(exc.value, OSError) and "config.yaml lock" in str(exc.value)
+        with pytest.raises(config.ConfigLockTimeout):
+            config.remove_if_only_marker()
+        with pytest.raises(config.ConfigLockTimeout):
+            config.migrate_config()
+        assert path.read_bytes() == b"schema: 1\nbackend: msb\n"
+        # The CLI's migration pre-step rewrites config.yaml under the same lock,
+        # so it is the step that reports it.
+        proc = _run_cli("backend", "set", "sbx", "--json")
+        assert proc.returncode == 1, proc.stderr
+        error = json.loads(proc.stdout)["error"]
+        assert error["code"] == "migration_failed" and "config.yaml lock" in error["message"]
+    config.write_field("backend", "sbx")
+    assert path.read_bytes() == b"schema: 1\nbackend: sbx\n"
+
+
 @pytest.mark.parametrize("value", ["a\nb", "a\rb", "a\x00b"])
 def test_write_field_refuses_values_that_would_inject_lines(value):
     path = _write_config(b"backend: msb\n")
@@ -363,6 +389,24 @@ def both_installed(monkeypatch):
     monkeypatch.setenv("ACQ_MSB_INSTALLED", "1")
     monkeypatch.setenv("ACQ_SBX_VERSION", "0.51.0")
     monkeypatch.setenv("ACQ_MSB_VERSION", "0.7.7")
+
+
+def test_auto_detect_keeps_sbx_while_it_has_sandboxes(both_installed, monkeypatch):
+    monkeypatch.delenv("ACQ_BACKEND", raising=False)
+    monkeypatch.setenv("ACQ_SBX_STUB_CATALOG", '{"old-box": "running"}')
+    assert common._resolve_active_backend(None) == "sbx"
+    monkeypatch.setenv("ACQ_SBX_STUB_CATALOG", "{}")
+    assert common._resolve_active_backend(None) == "msb"
+    # A listing that fails (or times out) counts as no sandboxes, as in Bash.
+    monkeypatch.setenv("ACQ_SBX_STUB_CATALOG", '{"old-box": "running"}')
+    monkeypatch.setattr(common.sbx, "list_names", lambda **_kw: None)
+    assert common._resolve_active_backend(None) == "msb"
+
+    def timed_out(**_kw):
+        raise subprocess.TimeoutExpired(["sbx", "ls", "-q"], 10)
+
+    monkeypatch.setattr(common.sbx, "list_names", timed_out)
+    assert common._resolve_active_backend(None) == "msb"
 
 
 def test_persisted_backend_beats_auto_detect(both_installed):
