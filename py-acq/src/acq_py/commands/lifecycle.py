@@ -618,6 +618,7 @@ def _clear_host_records(backend: str, name: str) -> None:
     kits.provenance_remove(backend, name)
     if backend == "msb":
         msb.held_forget(name)
+        msb.remove_derived_volumes(name)
         kit_msb.remove_host_config(name)
         kit_msb.cli_kits_remove(name)
         provider_input.remove(backend, name)

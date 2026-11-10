@@ -1,0 +1,73 @@
+{
+  "schema": 1,
+  "id": "cli/kit-apply-msb-volumes",
+  "oracle": "ADR-0023 mid-life msb kit apply skips create-time volumes with the Bash notice and succeeds",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{acq}",
+      "--backend",
+      "msb",
+      "kit",
+      "apply",
+      "mybox",
+      "test/fixtures/kit-volumes",
+      "--json"
+    ],
+    "env": {
+      "ACQ_MSB_BIN": "__stub__",
+      "ACQ_MSB_VERSION": "0.7.7",
+      "ACQ_MSB_INSTALLED": "1",
+      "ACQ_SBX_INSTALLED": "0",
+      "ACQ_MSB_STUB_CATALOG": "{\"mybox\": \"running\"}"
+    },
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "MSB_HOME",
+      "ACQ_IMAGE",
+      "ACQ_MSB_IMAGE",
+      "ACQ_MSB_STUB_FAIL",
+      "ACQ_KIT_APPLIED_SEED"
+    ],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "kit apply",
+        "data": {
+          "sandbox": "mybox",
+          "backend": "msb",
+          "kit": "test/fixtures/kit-volumes",
+          "entrypoint": "",
+          "applied": true,
+          "action": "applied"
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "acq(msb): note: this kit declares volumes:, which apply at CREATE time only \u2014\nacq(msb):   this apply skips them. Recreate the sandbox (acq rm && acq run) to mount them.\n",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME"
+    ]
+  }
+}

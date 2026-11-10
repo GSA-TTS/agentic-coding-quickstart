@@ -1072,3 +1072,89 @@ def test_restaging_on_windows_clears_the_read_only_attribute_first(monkeypatch, 
     assert (dest, stat.S_IWRITE) not in calls  # nothing to clear the first time
     kit_msb.stage_readonly_file("box", "/home/agent/s.sh", src)
     assert (dest, stat.S_IWRITE) in calls
+
+
+def test_empty_recorded_extras_suppress_live_environment(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path)
+    kit_msb.cli_kits_write("box", [])
+    monkeypatch.setenv("ACQ_EXTRA_KITS", "would-need-a-fetch")
+    refs, extras = kit_msb.cli_kits_read("box")
+    assert [k.name for k in kit_msb.select("shell", refs, image_is_default=True, extras=extras)] == BUILTINS
+
+
+@needs_bash
+def test_volume_flags_match_bash_union_and_crc(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path)
+    first = _kit(tmp_path, "first", "volumes:\n  - path: /data/app\n    size: 1G\n  - path: /scratch\n    type: tmpfs\n    size: 2G\n")
+    last = _kit(tmp_path, "last", "volumes:\n  - path: /data.app\n    size: 3G\n  - path: /data/app\n    size: 4G\n")
+    script = f'. "{REPO_ROOT}/acq.backends/msb.sh"; arr=(); _acq_msb_volume_flags_from_records arr box <<EOF\n' \
+             '/scratch\ttmpfs\t2G\n/data.app\t\t3G\n/data/app\t\t4G\nEOF\nprintf "%s\\n" "${arr[@]}"'
+    expected = subprocess.run([BASH, "-c", script], capture_output=True, text=True, check=True).stdout.splitlines()
+    flags, staged = kit_msb.create_flags("box", [first, last], ro_mount=False)
+    try:
+        assert flags == expected
+        assert flags.count("--mount-named") == 2 and flags.count("--tmpfs") == 1
+        assert "data-app-" in flags[3] and flags[3] != flags[5]
+    finally:
+        kit_msb.discard_staged(staged)
+
+
+@pytest.mark.parametrize("path,size", [("relative/path", "1G"), ("/bad path", "1G"),
+                                      ("/bad", "1G;evil"), ("/a/../b", "1G"),
+                                      ("//data", "1G"), ("/data/", "1G"), ("/data", "0")])
+def test_invalid_volume_never_becomes_a_mount(tmp_path, path, size):
+    kit = _kit(tmp_path, "invalid-vol", f'volumes:\n  - path: {path}\n    size: {size}\n')
+    assert kit.spec.warnings["volumes"]
+    assert kit_msb.volume_flags("box", [kit]) == []
+
+
+def test_midlife_volume_apply_warns_and_only_executes(monkeypatch, tmp_path, capsys):
+    kit = _kit(tmp_path, "late", "volumes:\n  - path: /late\n    size: 1G\n")
+    _Guest(monkeypatch)
+    assert kit_msb.apply_single("box", kit, ro_required=False)
+    assert capsys.readouterr().err == (
+        "acq(msb): note: this kit declares volumes:, which apply at CREATE time only —\n"
+        "acq(msb):   this apply skips them. Recreate the sandbox (acq rm && acq run) to mount them.\n")
+
+
+def test_volume_cleanup_after_confirmed_removal(monkeypatch, tmp_path, capsys):
+    from acq_py.commands import lifecycle
+
+    _env(monkeypatch, tmp_path, catalog={"box": "running"})
+    seen = _spy(monkeypatch)
+    real = msb._run
+
+    def volumes(argv, **kw):
+        if argv[:2] == ["volume", "ls"]:
+            seen.append(argv)
+            return subprocess.CompletedProcess(argv, 0, "acq-box-data-1\nacq-other-data-2\nuser-data\n", "")
+        return real(argv, **kw)
+
+    monkeypatch.setattr(msb, "_run", volumes)
+    assert cli.main(["--backend", "msb", "rm", "box", "--json"]) == 0
+    capsys.readouterr()
+    assert ["volume", "rm", "acq-box-data-1"] in seen
+    assert ["volume", "rm", "acq-other-data-2"] not in seen
+    seen.clear()
+    monkeypatch.setenv("ACQ_MSB_STUB_CATALOG", '{"box":"running"}')
+    monkeypatch.setenv("ACQ_MSB_STUB_FAIL", "remove")
+    assert not lifecycle._remove_confirmed(lifecycle.common._adapter("msb"), "box")
+    assert not any(a[0] == "volume" for a in seen)
+
+
+def test_missing_extras_record_retains_live_environment(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path)
+    ref = kitspec.builtin_kit_ref("opencode")
+    monkeypatch.setenv("ACQ_EXTRA_KITS", ref)
+    refs, extras = kit_msb.cli_kits_read("legacy")
+    assert extras == [ref]
+    assert kit_msb.select("shell", refs, image_is_default=True, extras=extras)[-1].name == "opencode"
+    monkeypatch.setenv("ACQ_EXTRA_KITS", "one\u00a0ref\tanother")
+    assert kit_msb.cli_kits_read("legacy") == ([], ["one\u00a0ref", "another"])
+
+
+def test_volume_create_emits_bash_parser_warning(tmp_path, capsys):
+    kit = _kit(tmp_path, "unsafe-volume", "volumes:\n  - path: /bad path\n    size: 1G\n")
+    flags, staged = kit_msb.create_flags("box", [kit], ro_mount=False)
+    assert flags == [] and staged == []
+    assert capsys.readouterr().err == "kit-translate: skipping volume with unsafe path: /bad path\n"

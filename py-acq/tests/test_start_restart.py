@@ -641,7 +641,7 @@ def test_selection_for_folds_config_extras_into_a_new_sandbox_only(monkeypatch, 
     new = kit_msb.selection_for("shell", [], image_is_default=False)
     assert len(extras(new)) == 1 and "paseo" in extras(new)[0]
     assert extras(kit_msb.selection_for("shell", [], image_is_default=False, extras=[])) == []
-    # Recorded extras replace ACQ_EXTRA_KITS; with none recorded the live value still applies, as in Bash.
+    # Recorded extras replace ACQ_EXTRA_KITS, including an explicitly empty selection.
     monkeypatch.setenv("ACQ_EXTRA_KITS", "/live/kit")
-    assert extras(kit_msb.selection_for("shell", [], image_is_default=False, extras=[])) == ["/live/kit"]
+    assert extras(kit_msb.selection_for("shell", [], image_is_default=False, extras=[])) == []
     assert extras(kit_msb.selection_for("shell", [], image_is_default=False, extras=["/rec/kit"])) == ["/rec/kit"]

@@ -115,13 +115,29 @@ run `create`/`run` on a disposable clone in the Python implementation too, with
 the Bash adapter's isolation, refusals and on-disk layout (`py-acq/README.md`,
 KNOWN_FAILURE_MODES §67).
 
+*Kit parity update (2026-11-10):* `kit apply NAME KITREF` now uses the same
+checked fetch/private local copy as create, retaining Python's full-commit pin
+rule and neutral-kit validation. On msb, neutral volumes now map to named disks
+and tmpfs at create, unioned last-wins by guest path, with Bash's CRC naming,
+safety checks, cleanup after confirmed removal and mid-life skip notice
+(ADR-0023). An empty recorded extras list is authoritative over the live
+environment. Unlike the current Bash loader's empty-record fallback, Python
+keeps that explicit empty selection empty. Python retains configured extras in
+its record as well as env/CLI extras so restart and heal keep the complete
+create-time kit set even after config changes. These recording choices and their
+rationale are documented in `py-acq/README.md`, "Kits outside the bundle".
+Sbx-native passthrough remains an accepted gap with `ACQ_IMPL=bash` as its
+replacement: the checked Python loader and translator validate neutral fields,
+and passing native specs through requires a separate validation path for native
+payload references. Neutral-kit checks remain mandatory.
+
 The Python implementation also has behaviour gaps against Bash. It reads the
 `extra_kits`, `provider_kit` and `scope_github_token` settings that
 `acq configure` writes, but it applies a kit outside its pinned built-in bundle
 only when the ref is pinned to a full commit (it fetches and verifies that
-commit), and refuses an unpinned ref at create (a local kit directory, once
-refused too, is now copied into acq's private cache and checked there). It has no kit
-heal on re-attach. It now sets up host ssh-agent forwarding on msb as Bash
+commit), and refuses an unpinned ref at create or mid-life apply (a local kit directory, once
+refused too, is now copied into acq's private cache and checked there). It now
+heals the recorded kit set on re-attach. It now sets up host ssh-agent forwarding on msb as Bash
 does (the `--vsock` route, the in-guest bridge and its restarts, ADR-0021),
 reading and writing the same host-config key and route link, so a sandbox
 either implementation created keeps its forward; the differences and the live

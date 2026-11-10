@@ -275,13 +275,23 @@ def test_the_probe_reads_a_real_listener(monkeypatch):
     assert publish.host_port_status(port) in ("free", "unknown")
 
 
-def test_a_kit_with_volumes_is_still_refused_but_ports_are_not():
-    from acq_py import kit_msb
-
-    kit_msb._check_creatable("ports", SimpleNamespace(volumes=(), published_ports=(object(),)))
-    with pytest.raises(msb.MsbError) as info:
-        kit_msb._check_creatable("vol", SimpleNamespace(volumes=(object(),), published_ports=()))
-    assert info.value.code == errors.UNSUPPORTED and "volumes" in info.value.message
+@PROVIDER
+def test_a_kit_with_volumes_and_ports_is_created(monkeypatch, tmp_path, capsys):
+    ws = _msb_env(monkeypatch, tmp_path)
+    kit = tmp_path / "storage-kit"
+    kit.mkdir()
+    (kit / "spec.yaml").write_text(
+        'schemaVersion: "hybrid/v1"\nkind: mixin\nname: storage-kit\n'
+        'volumes:\n  - path: /data\n    size: 1G\n'
+        'publishedPorts:\n  - guest: 8080\n', encoding="utf-8")
+    seen = _spy(monkeypatch, msb)
+    rc, doc, err = _invoke(capsys, "--backend", "msb", "create", "shell", str(ws), "--name", "storage",
+                           "--kit", str(kit), "--publish", "6868:8080", "--json")
+    assert rc == 0, (doc, err)
+    create = next(a for a in seen if a[0] == "create")
+    disk = create[create.index("--mount-named") + 1]
+    assert disk.startswith("acq-storage-data-") and disk.endswith(":/data:kind=disk,size=1G")
+    assert create[create.index("-p") + 1] == "6868:8080"
 
 
 # ---------------------------------------------------------------------------

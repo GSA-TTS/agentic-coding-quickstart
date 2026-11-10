@@ -370,3 +370,10 @@ def test_an_unknown_verb_reaches_the_passthrough_not_argparse(monkeypatch):
     doc = json.loads(out.getvalue().splitlines()[-1])
     assert doc["command"] == "definitely-not-a-verb"  # the verb was carried through
     assert doc["error"]["code"] == "backend_not_found"
+
+
+def test_kit_apply_help_describes_external_refs():
+    proc = run_cli("kit", "apply", "--help")
+    assert proc.returncode == 0
+    text = " ".join(proc.stdout.split())
+    assert "local kit directory" in text and "pinned git+https ref" in text

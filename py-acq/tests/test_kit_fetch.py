@@ -647,3 +647,39 @@ def test_a_fetched_provider_kit_cannot_choose_where_the_key_goes(kit_repo, monke
     assert rc == 1 and doc["error"]["code"] == errors.VALIDATION_FAILED
     assert "evil.example.test" in doc["error"]["message"] and "pinned hosts" in doc["error"]["message"]
     assert not [a for a in seen if a[0] == "create"]
+
+
+@pytest.mark.parametrize("backend", ["msb", "sbx"])
+def test_midlife_apply_fetches_and_checks_external_ref(backend, kit_repo, monkeypatch, tmp_path, capsys):
+    (_msb_env if backend == "msb" else _sbx_env)(monkeypatch, tmp_path)
+    monkeypatch.setenv(f"ACQ_{backend.upper()}_STUB_CATALOG", '{"box":"running"}')
+    module = msb if backend == "msb" else sbx
+    seen = _spy(monkeypatch, module)
+    rc, doc, err = _invoke(capsys, "--backend", backend, "kit", "apply", "box", kit_repo.ref(), "--json")
+    assert rc == 0, (doc, err)
+    assert doc["data"] == {"sandbox": "box", "backend": backend, "kit": kit_repo.ref(),
+                           "entrypoint": "", "applied": True, "action": "applied"}
+    assert kits.kit_applied_read(backend, "box") is None
+    assert not any(a[0] == "create" for a in seen)
+    if backend == "msb":
+        assert any(a[0] == "exec" for a in seen)
+        assert not any("--script-path" in a for a in seen)
+    else:
+        add = next(a for a in seen if a[:2] == ["kit", "add"])
+        assert kit_repo.ref() not in add
+        assert kitspec.load_kit(add[-1]).field("schemaVersion") == "2"
+
+
+@pytest.mark.parametrize("ref,code", [
+    ("git+https://github.com/acme/kits#ref=main&dir=kit", "kit_ref_not_pinned"),
+    ("git+https://github.com/acme/kits?token=private#ref=main&dir=kit", "validation_failed"),
+    ("git+https://github.com/acme/kits#ref=main&dir=kit&token=private", "validation_failed"),
+    ("git+https://user:private@github.com/acme/kits#ref=main&dir=kit", "validation_failed"),
+])
+def test_midlife_apply_refuses_unsafe_or_unpinned_ref(ref, code, monkeypatch, tmp_path, capsys):
+    _msb_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_MSB_STUB_CATALOG", '{"box":"running"}')
+    monkeypatch.setattr(kit_fetch, "_git", lambda *a, **k: pytest.fail("refusal must precede git"))
+    rc, doc, err = _invoke(capsys, "--backend", "msb", "kit", "apply", "box", ref, "--json")
+    assert rc == 1 and doc["error"]["code"] == code
+    assert "private" not in json.dumps(doc) + err
