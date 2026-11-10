@@ -95,7 +95,6 @@ That includes `configure`, `start`, `restart`, `backend set`/`unset`,
 `secret import` and `secret set --host/--env`. Some documented Bash flags are
 still missing, and the Python CLI rejects each one as a usage error:
 
-- `--clone` on `run`/`create`;
 - `--publish HOST:GUEST` on `run`/`create`;
 - `--no-update-check` on `run`;
 - `--publish HOST:GUEST` on `ports NAME`.
@@ -106,6 +105,11 @@ Python implementation did not read `ACQ_CLONE`, so a user who set it got the rea
 workspace mounted read-write with no warning. It now refuses `ACQ_CLONE=1` on
 `create` and `run` with a usage error before anything runs (see `py-acq/README.md`),
 until clone mode is implemented.
+
+*Update (2026-11-10):* clone mode is ported. `--clone` and `ACQ_CLONE=1` now
+run `create`/`run` on a disposable clone in the Python implementation too, with
+the Bash adapter's isolation, refusals and on-disk layout (`py-acq/README.md`,
+KNOWN_FAILURE_MODES §67).
 
 The Python implementation also has behaviour gaps against Bash. It reads the
 `extra_kits`, `provider_kit` and `scope_github_token` settings that

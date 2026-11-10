@@ -456,6 +456,20 @@ The scratch clone lives on host disk (unlike sbx's in-guest clone), confined to
 the acq-managed state dir — disposable by construction and never executed by
 the host's git.
 
+Both implementations (`ACQ_IMPL=bash` and `ACQ_IMPL=python`) emulate it the same
+way, with the same refusals, the same `<clones>/<sandbox>/.origin` and scratch
+layout (`ACQ_MSB_CLONES_DIR`, else `<acq state dir>/clones`) and the same hooks
+path, so `acq rm` in either removes a clone the other created
+(`acq.backends/msb.sh` `_acq_msb_clone_*`, `py-acq/src/acq_py/msb_clone.py`).
+The Python acq also records `"clone": true` in its state record and reports
+`data.clone` on `create`/`run`, and its `create --recreate` rebuilds a clone
+sandbox on its existing scratch clone, never on the real checkout (it refuses
+when that scratch is gone). It differs from Bash in three stricter ways: an
+inherited `GIT_ALLOW_PROTOCOL` is removed from its host-side git calls, a
+workspace containing `ACQ_MSB_CLONES_DIR` is refused like acq's other
+directories, and a leftover link at `<clones>/<sandbox>` counts as a stale
+scratch.
+
 Note the async-boot caveat:
 
 > **`msb create` starts asynchronously.** `msb create` returns success even if

@@ -193,7 +193,7 @@ numeric-prefix order.
 | `112-msb-ports.bats` | 18 | preserve | §ports post-hoc publish (ADR-0015). Covered by `cli/ports-*`. |
 | `113-host-port-override.bats` | 24 | preserve | §ports + `--publish` (ADR-0034). Covered by `cli/ports-*`; host-port contention is Tier-2/Tier-3. |
 | `115-ssh-agent-forward.bats` | 38 | preserve | §6 **preserve-with-warning** "unavailable optional SSH-agent forwarding" (ADR-0021). No vector — **gap** (Tier-3 vsock route + Tier-2 probe). |
-| `116-clone-option.bats` | 37 | re-express | §3 clone state (ADR-0027). No vector pins `--clone`/`ACQ_CLONE` — **gap**. |
+| `116-clone-option.bats` | 37 | re-express | §3 clone state (ADR-0027). Ported one-to-one to `py-acq/tests/test_clone_mode.py`; `cli/create-clone-flag-msb`, `cli/create-clone-env-msb` and `cli/create-clone-not-a-repo` pin `--clone`/`ACQ_CLONE`. |
 | `117-msys-path-forms.bats` | 11 | re-express | §4 Windows host/guest path forms (ADR-0029) — Windows qualification → **gap**. |
 | `120-workspace-preflight.bats` | 15 | re-express | §4 workspace preflight validation (path/identity) — language-specific validation; no vector — **gap**. |
 | `130-progress.bats` | 9 | retire | **DROP** (ADR-0038m §50): "exact … progress rendering are not contracts"; only stream separation/no-progress is contract. |
