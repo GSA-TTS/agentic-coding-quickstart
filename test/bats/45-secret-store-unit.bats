@@ -231,6 +231,33 @@ PSSTUB
   assert_output --partial 'no-powershell=file'
 }
 
+@test "keychain-windows: ACQ_SECRET_STORE_DIR relocates the DPAPI files instead of forcing plaintext" {
+  _plant_powershell_stub
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/win-store"
+    export ACQ_SECRET_POWERSHELL_BIN="'"$STUBDIR"'/powershell.exe"
+    unset ACQ_SECRET_FORCE_FILE
+    uname() { printf "MINGW64_NT-10.0-26200\n"; }
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    printf "backend=%s\n" "$(_acq_secret_backend)"
+    printf "dir=%s\n" "$ACQ_SECRET_FILE_DIR"
+    ACQ_SECRET_TEST_VALUE="ghp_reloc" acq_secret_set_interactive github >/dev/null 2>&1
+    _acq_secret_file_is_dpapi_envelope "$ACQ_SECRET_STORE_DIR/acq.github" && printf "envelope=yes\n" || printf "envelope=no\n"
+  '
+  assert_output --partial 'backend=keychain-windows'
+  assert_output --partial "dir=$STUBDIR/win-store"
+  assert_output --partial 'envelope=yes'
+  # Elsewhere the directory still forces the file backend.
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/lin-store"
+    unset ACQ_SECRET_FORCE_FILE
+    uname() { printf "Linux\n"; }
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    printf "backend=%s\n" "$(_acq_secret_backend)"
+  '
+  assert_output --partial 'backend=file'
+}
+
 @test "keychain-windows: stores DPAPI ciphertext (not plaintext), reads back, lists, deletes" {
   _plant_powershell_stub
   : > "$CALLS"

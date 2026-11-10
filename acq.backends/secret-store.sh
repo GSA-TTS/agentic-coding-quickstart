@@ -72,11 +72,18 @@ _acq_ud=$(acq_xdg_dir XDG_DATA_HOME .local/share) || _acq_ud=""
 ACQ_SECRET_FILE_DIR="${ACQ_SECRET_FILE_DIR:-${_acq_ud:+$_acq_ud/acq/secrets}}"
 unset _acq_ud
 
-# Offline-test escape hatch: when ACQ_SECRET_STORE_DIR is set, force the file
-# backend rooted there (no real keychain touched). Used by the offline test suite.
+# Offline-test escape hatch: when ACQ_SECRET_STORE_DIR is set, root the store
+# there. Outside Windows it also forces the file backend (no real keychain
+# touched). On Windows (Git Bash, MSYS, Cygwin) it only relocates the DPAPI
+# files, as in the Python acq: the plaintext file backend would leave secrets in
+# cleartext on NTFS, and the two implementations could not read each other's
+# entries. ACQ_SECRET_FORCE_FILE set explicitly still forces the file backend.
 if [ -n "${ACQ_SECRET_STORE_DIR:-}" ]; then
   ACQ_SECRET_FILE_DIR="$ACQ_SECRET_STORE_DIR"
-  ACQ_SECRET_FORCE_FILE=1
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) ;;
+    *) ACQ_SECRET_FORCE_FILE=1 ;;
+  esac
 fi
 
 # ---------------------------------------------------------------------------

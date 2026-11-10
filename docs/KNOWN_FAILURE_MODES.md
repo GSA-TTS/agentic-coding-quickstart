@@ -4403,3 +4403,33 @@ acq-python run opencode /path/to/your/project
 missing its read-only trusted-config mount, and refuses any other. After
 recreating, `msb inspect <sandbox>` shows `default_egress: deny` (unless
 `ACQ_NETWORK_TIER=open` was confirmed on purpose).
+
+---
+
+## Windows: Bash and Python acq Choose Different Secret Backends in Two Cases
+
+**Symptom:** On Windows (Git Bash), a secret stored by one implementation reads
+as "not set" in the other. `acq secret ls` from the Bash acq lists the key, but
+the Python acq (`acq-python`) reports it absent or unreadable, or the reverse.
+
+**Cause:** Both implementations normally store Windows secrets as DPAPI
+envelopes (`acq-dpapi-v1`) through in-box PowerShell, including when
+`ACQ_SECRET_STORE_DIR` is set: that variable only relocates the DPAPI files on
+Windows (`acq.backends/secret-store.sh`, `py-acq/src/acq_py/secretstore.py`).
+They still differ in two cases:
+
+- `ACQ_SECRET_FORCE_FILE=1` makes the Bash acq write plaintext files. The Python
+  acq ignores the variable on Windows and keeps using DPAPI.
+- When Windows PowerShell cannot be found, the Bash acq falls back to its
+  plaintext file backend (ADR-0028), while the Python acq refuses to store the
+  secret.
+
+A plaintext value written by the Bash acq is still read by the Python acq and
+re-encrypted in place, so the first case loses no data. A DPAPI envelope written
+by the Python acq can be read by the Bash acq only when its DPAPI backend is
+active.
+
+**Resolution:** On Windows, leave `ACQ_SECRET_FORCE_FILE` unset and make sure
+`%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe` exists, so both
+implementations use DPAPI. Aligning the two remaining cases (whether Windows
+should ever fall back to plaintext) needs a decision that amends ADR-0028.
