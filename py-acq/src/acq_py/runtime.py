@@ -48,9 +48,9 @@ def _managed_runtime_executable() -> str | None:
     if override:
         path = Path(override)
         if not path.is_absolute():
-            raise RuntimeResolutionError(f"ACQ_RUNTIME must be an absolute path to Python, got {override!r}")
+            raise RuntimeResolutionError(f"ACQ_RUNTIME must be an absolute path to Python, got '{override}'")
         if not path.is_file():
-            raise RuntimeResolutionError(f"ACQ_RUNTIME does not name an existing file: {override!r}")
+            raise RuntimeResolutionError(f"ACQ_RUNTIME does not name an existing file: '{override}'")
         return str(path)
     # 2. A runtime bundle laid down beside the source by the installer.
     here = Path(__file__).resolve().parent
