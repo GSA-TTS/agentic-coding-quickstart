@@ -630,23 +630,32 @@ def _create_sandbox(
     are reported by name and host only. ``sbx_create`` is sbx's agent and ``--kit``
     flags, ``sbx_extra`` its extra workspace and ``--env`` arguments (the
     read-only provider-input mount).
+
+    The secret-store lock is held, shared, from before the store is read for
+    the new guest's secrets until the guest runs, where a global secret
+    change's re-feed reaches it (see :func:`lock.secret_store_lock`).
     """
     adapter = common._adapter(backend)
     error_cls = sbx.SbxError if backend == "sbx" else msb.MsbError
     secret_bindings, ro_mount = None, False
     unconfirmed = backend == "sbx"  # until the kit startup barrier is seen (_finish_sbx_create)
-    if backend == "sbx":
-        sbx_agent, kit_flags = sbx_create or (agent, [])
-        adapter.create(name, image, workspace, agent=sbx_agent, kit_flags=kit_flags,
-                       extra_workspaces=sbx_extra[0], env=sbx_extra[1])
-        # Recorded at once, so no verb attaches to the guest while its kits are unconfirmed.
-        _write_record(backend, name, agent=agent, workspace=workspace, image=image, ro_host_config=False,
-                      kits_unconfirmed=True)
-    else:
-        ro_mount = security.ro_mount_supported()
-        secret_bindings = _msb_create(name, image, workspace, plan.kits if plan else [], ro_mount=ro_mount)
-    if not _wait_exec_ready(backend, name):
-        _not_exec_ready(backend, adapter, name, error_cls)
+    try:
+        with lock.secret_store_lock(shared=True):
+            if backend == "sbx":
+                sbx_agent, kit_flags = sbx_create or (agent, [])
+                adapter.create(name, image, workspace, agent=sbx_agent, kit_flags=kit_flags,
+                               extra_workspaces=sbx_extra[0], env=sbx_extra[1])
+                # Recorded at once, so no verb attaches to the guest while its kits are unconfirmed.
+                _write_record(backend, name, agent=agent, workspace=workspace, image=image, ro_host_config=False,
+                              kits_unconfirmed=True)
+            else:
+                ro_mount = security.ro_mount_supported()
+                secret_bindings = _msb_create(name, image, workspace, plan.kits if plan else [], ro_mount=ro_mount)
+            if not _wait_exec_ready(backend, name):
+                _not_exec_ready(backend, adapter, name, error_cls)
+    except lock.SecretStoreLockTimeout as exc:  # raised before anything was created
+        raise error_cls(errors.TIMEOUT, str(exc),
+                        "retry once the other acq command finishes; nothing was created") from None
     _fresh_guest(backend, adapter, name, ro_mount=ro_mount)
     _write_record(backend, name, agent=agent, workspace=workspace, image=image, ro_host_config=ro_mount,
                   kits_unconfirmed=unconfirmed)

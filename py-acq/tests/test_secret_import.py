@@ -83,23 +83,29 @@ def test_all_skips_existing_force_overwrites(monkeypatch, capsys):
     (("sandbox", "msb"), ["usai", "other", "--all"], False),
     (("provider", "usai"), ["usai", "--all"], True),
     (("provider", "usai"), ["github", "--all"], False),
-    (("provider", "usai"), ["usai", "box", "--all"], False),
+    (("provider", "usai"), ["usai", "box", "--all"], True),
+    (("store", ""), ["github", "--all"], True),
+    (("store", ""), ["github", "box", "--all"], False),
 ])
 def test_import_takes_the_lock_secret_set_takes(monkeypatch, capsys, held, argv, blocked):
     # A sandbox-scoped import waits for a create of that sandbox on either
-    # backend, and the global usai key waits for a rotation, as secret set does.
+    # backend, any usai key waits for a rotation, and a global value waits for a
+    # create reading the store, as secret set does.
     from acq_py import errors, lock
 
     monkeypatch.setenv("USAI_API_KEY", "usai-secret-0003")
     monkeypatch.setenv("GITHUB_TOKEN", "gh-secret-0004")
     monkeypatch.setenv("ACQ_SANDBOX_LOCK_TIMEOUT", "0.2")
     kind, name = held
-    holder = lock.sandbox_lock(name, "box") if kind == "sandbox" else lock.provider_credential_lock(name)
+    if kind == "store":
+        holder = lock.secret_store_lock(shared=True)
+    else:
+        holder = lock.sandbox_lock(name, "box") if kind == "sandbox" else lock.provider_credential_lock(name)
     with holder:
         rc, doc, err = _run(capsys, *argv)
     if blocked:
         assert rc == 1 and doc["error"]["code"] == errors.TIMEOUT
-        assert secretstore.resolve("usai", argv[1] if len(argv) > 2 else None) is None
+        assert secretstore.resolve(argv[0], argv[1] if len(argv) > 2 else None) is None
     else:
         assert rc == 0, doc
     assert "secret-000" not in json.dumps(doc) + err

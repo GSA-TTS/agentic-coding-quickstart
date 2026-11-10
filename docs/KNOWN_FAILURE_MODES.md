@@ -4461,25 +4461,34 @@ recreating, `msb inspect <sandbox>` shows `default_egress: deny` (unless
 
 ## Python acq: a Global `secret rm` Can Still Race a `create`
 
+**Status:** fixed in the Python acq; the Bash acq still has the race.
+
 **Symptom:** While `acq create` (or `acq run`) of a new msb sandbox is binding
 its secrets, a concurrent `acq secret rm -g SERVICE` succeeds, but the new
 sandbox ends up holding the removed value. A retried `secret rm -g` then
-reports `secret_missing`, because the store entry is already gone.
+reports `secret_missing`, because the store entry is already gone. A
+concurrent `secret set -g`, `provider-credential set` or key rotation can
+likewise leave the new sandbox with the old value.
 
 **Cause:** A sandbox-scoped `secret set` or `rm` holds that sandbox's lifecycle
 lock, so it waits for a create of the same sandbox. A global change cannot use
 that lock: it would have to lock every sandbox, including ones not created yet.
-Excluding it needs a store-wide lock that `create` takes too, and that lives in
-the lifecycle code. The global usai key is the exception: it holds the usai
-provider lock, which rotation also takes, but `create` does not. The Bash acq
-takes no lock for `secret set` or `rm` at all, so it has the same race for every
-scope.
+The Bash acq takes no lock for `secret set` or `rm` at all, so it has the same
+race for every scope.
 
-**Resolution:** Do not run a global `secret rm` while a create is in flight.
-If it happened, recreate the new sandbox (`acq rm NAME`, then `acq create`) so
-it is created without the removed value. Fixing it needs a store-wide lock taken
-by both `create` and global `secret set`/`rm`; revisit when the lifecycle lock
-work lands.
+**Resolution:** The Python acq now has a store-wide secret-store lock. A create
+holds it, shared, from before it reads the store for the new guest's secrets
+until the guest runs; a global `secret set`/`rm`, `secret import` of a global
+value, `provider-credential set`/`rm` and `usai-rotate-api-key` hold it
+exclusively. So a global change waits for the creates binding secrets, and a
+create waits for a global change in progress. Either side gives up with
+`timeout` after `ACQ_SANDBOX_LOCK_TIMEOUT` seconds (default 300), having
+changed nothing. On Windows the lock has no shared mode, so creates also wait
+for each other while they bind secrets (not while they install kits). The
+order in which acq takes its locks, which keeps them from deadlocking, is
+documented in `py-acq/src/acq_py/lock.py`. With the Bash acq, do not run a
+global `secret rm` while a create is in flight; if it happened, recreate the
+new sandbox (`acq rm NAME`, then `acq create`).
 
 ---
 
