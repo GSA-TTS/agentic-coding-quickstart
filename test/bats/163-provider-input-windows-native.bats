@@ -46,7 +46,8 @@ sys.stdout.write("1" if stat.S_ISLNK(st.st_mode) or st.st_file_attributes & stat
 _win_kit() {
   mkdir -p "$1/provider-input" "$1/scripts" "$1/files"
   printf '{"providerId":"%s","schemaVersion":"acq-provider-input-bundle/v2","providerPath":"models/providers/%s","factsPath":"provider-input/facts.json","normalizerPath":"scripts/normalize","snapshotPath":"files/snapshot.json"}\n' "$2" "$2" > "$1/provider-input.json"
-  printf '{"providerId":"%s"}\n' "$2" > "$1/provider-input/facts.json"
+  printf '{"providerId":"%s","keyEnv":"ALPHA_KEY","host":"%s.example.gov","modelsUrl":"https://%s.example.gov/v1/models","apiProtocol":"openai"}\n' \
+    "$2" "$2" "$2" > "$1/provider-input/facts.json"
   printf '#!/bin/sh\n' > "$1/scripts/normalize"
   printf '{"providerId":"%s","models":[]}\n' "$2" > "$1/files/snapshot.json"
   printf 'caps: {}\n' > "$1/spec.yaml"
@@ -185,11 +186,59 @@ _win_release() {
   assert_equal "$(_win_native 'import os, sys; sys.stdout.write(str(os.path.isfile(sys.argv[1])))' "$source/models/providers/alpha/facts.json")" True
   _acq_provider_input_publish "$root" "$generation"
   assert_equal "$(cat "$root/current")" "generations/${generation##*/}"
+  # After create, the key check and the credential bindings read the published
+  # generation through the pointer file, with native Python writing the facts.
+  # shellcheck disable=SC2034 # acq_provider_sandbox_facts reads it
+  ACQ_PROVIDER_BINDINGS_GENERATION=""
+  assert_equal "$(acq_provider_sandbox_provider_ids msb wintx)" alpha
+  assert_equal "$(acq_provider_sandbox_facts msb wintx)" \
+    "$(printf 'alpha\tALPHA_KEY\talpha.example.gov\thttps://alpha.example.gov/v1/models\topenai')"
   acq_provider_input_remove msb wintx
   [ ! -e "$root" ]
   acq_provider_input_lock_release "$lock"
   [ ! -e "$lock" ]
   _acq_provider_input_guardian_stop
+}
+
+@test "native Windows: provider facts parse from native Python's CRLF output" {
+  local record="$STUBDIR/kit/provider-input/facts.json"
+  [ "${#_ACQ_PROVIDER_INPUT_PATH_PY[@]}" -eq 1 ] || skip "only py -3 found; ACQ_PROVIDER_INPUT_PYTHON takes one path"
+  _win_kit "$STUBDIR/kit" alpha
+  ACQ_PROVIDER_INPUT_PYTHON="${_ACQ_PROVIDER_INPUT_PATH_PY[0]}" run acq_provider_facts_json_fields "$record"
+  assert_success
+  assert_output "$(printf 'alpha\tALPHA_KEY\talpha.example.gov\thttps://alpha.example.gov/v1/models\topenai')"
+}
+
+@test "native Windows: a pointer to a junction or outside the root falls back to recorded facts" {
+  local root recorded target
+  # The provider-input Python stand-in also reads the facts.
+  _win_release "$STUBDIR/release"
+  _win_kit "$STUBDIR/kit" alpha
+  root=$(acq_provider_input_root msb winfallback)
+  _acq_provider_input_safe_mkdir "$root/generations/generation.real/models/providers/alpha"
+  cp "$STUBDIR/kit/provider-input/facts.json" "$root/generations/generation.real/models/providers/alpha/facts.json"
+  _junction "$root/generations/generation.junction" "$root/generations/generation.real"
+  recorded=$(printf 'beta\tBETA_KEY\tbeta.example.gov\thttps://beta.example.gov/v1/models\topenai')
+  acq_host_config_write msb winfallback provider-credentials "$recorded"
+  printf 'generations/generation.real\n' > "$root/current"
+  assert_equal "$(acq_provider_sandbox_provider_ids msb winfallback)" alpha
+  for target in generations/generation.junction ../generation.real "$(cygpath -m "$root/generations/generation.real")"; do
+    printf '%s\n' "$target" > "$root/current"
+    assert_equal "$(acq_provider_sandbox_provider_ids msb winfallback)" beta
+  done
+}
+
+@test "native Windows: snapshot refuses an artifact with another hard link" {
+  local kit="$STUBDIR/kit"
+  _win_kit "$kit" alpha
+  printf 'secret\n' > "$STUBDIR/secret"
+  rm "$kit/files/snapshot.json"
+  ln "$STUBDIR/secret" "$kit/files/snapshot.json"
+  [ "$(stat -c %h "$STUBDIR/secret")" = 2 ]
+  run _acq_provider_input_snapshot "$kit" "$STUBDIR/c1"
+  assert_failure
+  assert_output --partial 'unsafe provider artifact'
+  [ ! -e "$STUBDIR/c1/files/snapshot.json" ]
 }
 
 @test "native Windows: stubbed acq create and acq rm with the Bash implementation" {

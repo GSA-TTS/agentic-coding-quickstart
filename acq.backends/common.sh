@@ -4077,6 +4077,10 @@ if parsed.scheme != "https" or parsed.hostname != values["host"]:
     raise SystemExit(2)
 if parsed.port not in (None, 443):
     raise SystemExit(2)
+# Native Windows Python ends text-mode lines with CRLF, and a value ending in
+# "\r" fails validation in Bash; write bare LF on every platform.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(newline="\n")
 for value in values.values():
     print(value)
 PY
@@ -4153,18 +4157,48 @@ EOF
 # published generation, else the recorded host-config copy. Fails closed when a
 # facts document exists but does not validate.
 acq_provider_sandbox_facts() {
-  local backend="${1:-}" name="${2:-}" generation="$ACQ_PROVIDER_BINDINGS_GENERATION" root
+  local backend="${1:-}" name="${2:-}" generation="$ACQ_PROVIDER_BINDINGS_GENERATION" root current
   if [ -n "$generation" ] && [ -d "$generation" ]; then
     acq_provider_facts_list_generation "$generation" || return 1
     return 0
   fi
   [ -n "$backend" ] && [ -n "$name" ] || return 0
   root=$(acq_provider_input_root "$backend" "$name") || return 0
-  if [ -e "$root/current" ]; then
-    acq_provider_facts_list_generation "$root/current" || return 1
+  if current=$(_acq_provider_input_current_generation "$root"); then
+    acq_provider_facts_list_generation "$current" || return 1
     return 0
   fi
   acq_provider_recorded_facts "$backend" "$name"
+}
+
+# _acq_provider_input_current_generation ROOT — print the generation directory
+# that ROOT/current names, or fail when it names none that is usable. current
+# takes three forms: the relative symlink POSIX publishes, the pointer file
+# Windows publishes (see _acq_provider_input_publish), both holding
+# generations/generation.<suffix>, or a real directory an older acq left. A link
+# or pointer is followed only when its text is exactly that form, and the
+# directory it names, like a real directory current, must pass
+# _acq_provider_input_safe_dir, so no component is a symlink, a junction or
+# another reparse point. A caller treats a failure as if current were absent.
+_acq_provider_input_current_generation() {
+  local root="${1:-}" current target
+  [ -n "$root" ] || return 1
+  current="$root/current"
+  if [ -L "$current" ]; then
+    target=$(readlink -- "$current") || return 1
+  elif [ -f "$current" ]; then
+    target=$(cat -- "$current") || return 1
+  elif [ -d "$current" ]; then
+    _acq_provider_input_safe_dir "$current" 2>/dev/null || return 1
+    printf '%s\n' "$current"
+    return 0
+  else
+    return 1
+  fi
+  case "$target" in generations/generation.?*) ;; *) return 1 ;; esac
+  case "${target#generations/generation.}" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+  _acq_provider_input_safe_dir "$root/$target" 2>/dev/null || return 1
+  printf '%s/%s\n' "$root" "$target"
 }
 
 # acq_provider_sandbox_provider_ids BACKEND NAME — the provider ids this sandbox
@@ -5142,9 +5176,11 @@ _acq_provider_input_remove_tree() {
 # which replaces a file atomically but cannot replace a directory. So when DST
 # is a link to a directory (a directory symlink or a junction, both of which the
 # Python acq can leave as current), the link itself is removed, never followed,
-# and the rename is retried. current is briefly absent in that one case, which
-# no reader depends on: every sandbox mounts its exact generation. A real
-# directory at DST is refused rather than removed.
+# and the rename is retried. current is briefly absent in that one case. No
+# sandbox mounts current (each mounts its exact generation), and its one reader,
+# acq_provider_sandbox_facts, falls back to the facts recorded in host config
+# while current is absent. A real directory at DST is refused rather than
+# removed.
 _acq_provider_input_atomic_replace() {
   _acq_provider_input_path_python || return 1
   if [ "$_ACQ_PROVIDER_INPUT_PATH_PY_KIND" = nt ]; then
@@ -5180,9 +5216,10 @@ PY
 # native symlink needs Developer Mode or an administrator, and a junction can
 # neither be renamed over an existing one nor hold a relative target. So there
 # current is a pointer file holding that same relative path, written to a
-# temporary name and renamed over current, which is atomic for a file. No
-# sandbox mounts current: both backends mount the exact generation, so the
-# pointer is a record, and it keeps every link out of the state tree.
+# temporary name and renamed over current, which is atomic for a file, and it
+# keeps every link out of the state tree. No sandbox mounts current: both
+# backends mount the exact generation. acq_provider_sandbox_facts reads it,
+# through _acq_provider_input_current_generation, which accepts either form.
 _acq_provider_input_publish() {
   local root="$1" generation="$2" base temp current
   case "$root" in ""|/|/*/) return 1 ;; esac
@@ -5451,7 +5488,10 @@ _acq_provider_input_control_plane() {
 
 # Snapshot only the declared regular files with descriptor-relative, no-follow
 # reads. Validation and later materialization therefore cannot observe a changed
-# candidate manifest, symlink, or path outside the fetched kit.
+# candidate manifest, symlink, or path outside the fetched kit. A file with more
+# than one hard link is refused as well: a hard link is not a symlink, so the
+# no-follow checks pass it, yet it can make a file from outside the kit appear
+# inside it.
 #
 # Native Windows CPython has no O_NOFOLLOW, O_DIRECTORY or dir_fd, so there each
 # artifact is reached by an os.lstat walk from the kit root, which follows no
@@ -5461,16 +5501,18 @@ _acq_provider_input_control_plane() {
 # opened and its handle must name the same file (volume and file index) the
 # walk checked, so a link swapped in for the leaf after its lstat is refused.
 # As in _acq_provider_input_nt_dir, an ancestor swapped for a link between its
-# check and the open is not caught; the kit sits in acq's private staging
-# directory. Artifact paths there must also be names Win32 keeps as written: no
-# backslash, ":" (a drive or an alternate data stream), <>"|?*, control
-# character, trailing dot or space, or reserved device name such as NUL.
+# check and the open is not caught. A fetched kit sits in acq's private staging
+# directory, but a local kit path is read where it is, in a directory its owner
+# can change (docs/KNOWN_FAILURE_MODES.md has the mitigation options). Artifact
+# paths there must also be names Win32 keeps as written: no backslash, ":" (a
+# drive or an alternate data stream), <>"|?*, control character, trailing dot
+# or space, or reserved device name such as NUL or COM¹.
 _acq_provider_input_snapshot() {
   _acq_provider_input_run_py "$1" "$2" <<'PY'
 import io, json, os, stat, sys
 kit, target = sys.argv[1:]
 posix = all(hasattr(os, n) for n in ('O_NOFOLLOW', 'O_DIRECTORY')) and os.open in os.supports_dir_fd
-RESERVED = {'CON', 'PRN', 'AUX', 'NUL', 'CONIN$', 'CONOUT$'} | {d + str(i) for d in ('COM', 'LPT') for i in range(1, 10)}
+RESERVED = {'CON', 'PRN', 'AUX', 'NUL', 'CONIN$', 'CONOUT$'} | {d + c for d in ('COM', 'LPT') for c in '123456789\u00b9\u00b2\u00b3'}
 def check_value(value):
     if not isinstance(value, str) or value.startswith('/') or not value or any(part in ('', '.', '..') for part in value.split('/')):
         raise SystemExit('unsafe provider artifact path')
@@ -5484,7 +5526,8 @@ def open_relative(root, value):
         for part in value.split('/'):
             nextfd = os.open(part, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
             os.close(fd); fd = nextfd
-        if not stat.S_ISREG(os.fstat(fd).st_mode): raise SystemExit('unsafe provider artifact')
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink > 1: raise SystemExit('unsafe provider artifact')
         return fd
     except:
         os.close(fd); raise
@@ -5504,7 +5547,8 @@ def open_walk(value):
     stream = open(path, 'rb')
     try:
         opened = os.fstat(stream.fileno())
-        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (st.st_dev, st.st_ino):
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink > 1
+                or (opened.st_dev, opened.st_ino) != (st.st_dev, st.st_ino)):
             raise SystemExit('unsafe provider artifact')
     except BaseException:
         stream.close(); raise
@@ -5541,15 +5585,17 @@ PY
 }
 
 # Copy only validator-approved regular files into the backend-owned readonly tree.
-# On native Windows Python the provider ID and artifact paths must also be names
-# Win32 keeps as written (see _acq_provider_input_snapshot), and an artifact
-# that is a reparse point is refused, as a symlink is everywhere.
+# The source is the candidate _acq_provider_input_snapshot wrote into acq's
+# private staging directory, so only the last component of each artifact path
+# is checked: it must be a regular file and not a symlink, and on native Windows
+# Python not a reparse point either. There the provider ID and artifact paths
+# must also be names Win32 keeps as written (see _acq_provider_input_snapshot).
 _acq_provider_input_materialize() {
   _acq_provider_input_run_py "$1" "$2" "$3" <<'PY'
 import json, os, shutil, stat, sys
 manifest, kit, target_root = sys.argv[1:]
 posix = all(hasattr(os, n) for n in ('O_NOFOLLOW', 'O_DIRECTORY')) and os.open in os.supports_dir_fd
-RESERVED = {'CON', 'PRN', 'AUX', 'NUL', 'CONIN$', 'CONOUT$'} | {d + str(i) for d in ('COM', 'LPT') for i in range(1, 10)}
+RESERVED = {'CON', 'PRN', 'AUX', 'NUL', 'CONIN$', 'CONOUT$'} | {d + c for d in ('COM', 'LPT') for c in '123456789\u00b9\u00b2\u00b3'}
 def nt_unsafe(name):
     return (not posix and (name[-1] in '. ' or name.split('.')[0].rstrip(' ').upper() in RESERVED
                            or any(c in '\\:<>"|?*' or ord(c) < 32 for c in name)))

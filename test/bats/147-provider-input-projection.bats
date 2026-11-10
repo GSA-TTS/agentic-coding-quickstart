@@ -1752,7 +1752,7 @@ msyspython -I - $STUBDIR/swap-src $STUBDIR/swap-dst"
   _win_use "$bin" python3=storestub python=winpython
   _provider_release "$release"; _provider_kit "$release" alpha
   kit="$release/integrations/isolation/acq-kits/alpha"
-  for name in 'facts.json.' 'facts.json ' 'facts.json:ads' 'sub\facts.json' 'NUL' 'com1.json' 'a|b'; do
+  for name in 'facts.json.' 'facts.json ' 'facts.json:ads' 'sub\facts.json' 'NUL' 'com1.json' 'COM¹' 'lpt³.txt' 'a|b'; do
     i=$((i + 1))
     printf '{"providerId":"alpha","factsPath":"%s","normalizerPath":"scripts/normalize","snapshotPath":"files/snapshot.json"}\n' \
       "$(printf '%s' "$name" | sed 's/\\/\\\\/g')" > "$kit/provider-input.json"
@@ -1774,7 +1774,7 @@ msyspython -I - $STUBDIR/swap-src $STUBDIR/swap-dst"
   _provider_release "$release"; _provider_kit "$release" alpha
   kit="$release/integrations/isolation/acq-kits/alpha"
   OSTYPE=msys PATH="$bin:$PATH" _acq_provider_input_snapshot "$kit" "$candidate"
-  for id in 'nul' 'alpha.' 'c:alpha' 'al*ha'; do
+  for id in 'nul' 'lpt²' 'alpha.' 'c:alpha' 'al*ha'; do
     i=$((i + 1)); providers="$STUBDIR/m_providers$i"; mkdir -p "$providers"
     printf '{"providerId":"%s","schemaVersion":"acq-provider-input-bundle/v2","providerPath":"models/providers/%s","factsPath":"provider-input/facts.json","normalizerPath":"scripts/normalize","snapshotPath":"files/snapshot.json"}\n' "$id" "$id" > "$STUBDIR/m_manifest.json"
     OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_materialize "$STUBDIR/m_manifest.json" "$candidate" "$providers"
@@ -1875,6 +1875,96 @@ msyspython -I - $STUBDIR/swap-src $STUBDIR/swap-dst"
   [ ! -e "$lock" ]
   grep -q "^winpython -I - $release/integrations/isolation/acq-kits/alpha " "$STUBDIR/py.log"
   refute grep -q '^msyspython' "$STUBDIR/py.log"
+}
+
+# _facts_generation DIR ID — a generation holding one provider's full facts.
+_facts_generation() {
+  mkdir -p "$1/models/providers/$2"
+  printf '{"providerId":"%s","keyEnv":"%s_KEY","host":"%s.example.gov","modelsUrl":"https://%s.example.gov/v1/models","apiProtocol":"openai"}\n' \
+    "$2" "$(printf '%s' "$2" | tr '[:lower:]' '[:upper:]')" "$2" "$2" > "$1/models/providers/$2/facts.json"
+}
+
+@test "sandbox facts read the generation a pointer-file current names" {
+  local root
+  root=$(acq_provider_input_root msb pointerfacts)
+  _facts_generation "$root/generations/generation.one" alpha
+  printf 'generations/generation.one\n' > "$root/current"
+  run acq_provider_sandbox_provider_ids msb pointerfacts
+  assert_success
+  assert_output alpha
+  run acq_provider_sandbox_facts msb pointerfacts
+  assert_output "$(printf 'alpha\tALPHA_KEY\talpha.example.gov\thttps://alpha.example.gov/v1/models\topenai')"
+  # The POSIX symlink and a real directory left as current are read too.
+  rm "$root/current"; ln -s generations/generation.one "$root/current"
+  run acq_provider_sandbox_provider_ids msb pointerfacts
+  assert_output alpha
+  rm "$root/current"; _facts_generation "$root/current" beta
+  run acq_provider_sandbox_provider_ids msb pointerfacts
+  assert_output beta
+}
+
+@test "an unusable current falls back to the recorded provider facts" {
+  local root outside="$STUBDIR/outside-generation" target recorded
+  root=$(acq_provider_input_root msb fallbackfacts)
+  _facts_generation "$root/generations/generation.one" alpha
+  _facts_generation "$outside" gamma
+  ln -s "$outside" "$root/generations/generation.link"
+  recorded=$(printf 'beta\tBETA_KEY\tbeta.example.gov\thttps://beta.example.gov/v1/models\topenai')
+  acq_host_config_write msb fallbackfacts provider-credentials "$recorded"
+  for target in '../outside-generation' "$outside" 'generations/generation.one/../generation.one' \
+      'generations/generation.link' 'generations/generation.missing' 'generations/' \
+      "$(printf 'generations/generation.one\r')" "$(printf 'generations/generation.one\nextra')"; do
+    rm -f "$root/current"
+    printf '%s\n' "$target" > "$root/current"
+    run acq_provider_sandbox_provider_ids msb fallbackfacts
+    assert_success
+    assert_output beta
+    # The same text as a symlink is refused the same way.
+    rm -f "$root/current"
+    ln -s "$target" "$root/current"
+    run acq_provider_sandbox_provider_ids msb fallbackfacts
+    assert_success
+    assert_output beta
+  done
+  rm -f "$root/current"
+  run acq_provider_sandbox_provider_ids msb fallbackfacts
+  assert_output beta
+}
+
+@test "provider facts parse when the interpreter writes CRLF line endings" {
+  local python="$STUBDIR/crlf-python" record
+  # Native Windows Python's text-mode stdout ends each line with CRLF; this
+  # interpreter does the same, then runs the program acq sends on stdin.
+  printf '%s\n' 'import io, sys' \
+    'sys.stdout = io.TextIOWrapper(sys.stdout.buffer, newline="\r\n")' \
+    'code = sys.stdin.read()' 'sys.argv = ["-"] + sys.argv[1:]' \
+    'exec(compile(code, "<stdin>", "exec"), {"__name__": "__main__"})' > "$STUBDIR/crlf-boot.py"
+  printf '#!/bin/sh\n[ "$1" = -I ] && shift\n[ "$1" = - ] || exit 97\nshift\nexec "%s" -I "%s" "$@"\n' \
+    "$(command -v python3)" "$STUBDIR/crlf-boot.py" > "$python"
+  chmod +x "$python"
+  _facts_generation "$STUBDIR/crlf" alpha
+  record="$STUBDIR/crlf/models/providers/alpha/facts.json"
+  ACQ_PROVIDER_INPUT_PYTHON="$python" run acq_provider_facts_json_fields "$record"
+  assert_success
+  assert_output "$(printf 'alpha\tALPHA_KEY\talpha.example.gov\thttps://alpha.example.gov/v1/models\topenai')"
+}
+
+@test "snapshot refuses an artifact with another hard link, POSIX and native Windows" {
+  local bin release="$STUBDIR/release" kit outside="$STUBDIR/hard-secret"
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  _provider_release "$release"; _provider_kit "$release" alpha
+  kit="$release/integrations/isolation/acq-kits/alpha"
+  printf 'secret\n' > "$outside"
+  rm "$kit/files/snapshot.json"
+  ln "$outside" "$kit/files/snapshot.json"
+  run _acq_provider_input_snapshot "$kit" "$STUBDIR/hl-posix"
+  assert_failure
+  assert_output --partial 'unsafe provider artifact'
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_snapshot "$kit" "$STUBDIR/hl-nt"
+  assert_failure
+  assert_output --partial 'unsafe provider artifact'
+  [ ! -e "$STUBDIR/hl-posix/files/snapshot.json" ] && [ ! -e "$STUBDIR/hl-nt/files/snapshot.json" ]
 }
 
 @test "publication retains old generation for existing current consumers" {
