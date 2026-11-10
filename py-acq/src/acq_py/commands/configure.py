@@ -17,8 +17,9 @@ selection at create and run, with Bash's precedence (a non-empty
 ``ACQ_EXTRA_KITS`` over ``extra_kits``; ``--no-provider-kits``, then a set
 ``ACQ_PROVIDER_KITS``, over ``provider_kit``). It applies a kit from its pinned
 built-in bundle, or fetches it at a pinned commit (every catalog extra kit is
-pinned to the control plane); a local kit directory or a ref not pinned to a
-commit is refused at create, and needs the Bash acq (``ACQ_IMPL=bash``).
+pinned to the control plane), and copies a local kit directory into its private
+cache and checks it there; a ref not pinned to a commit is refused at create,
+and needs the Bash acq (``ACQ_IMPL=bash``).
 ``--json`` says so with ``"python_applies": "pinned-only"`` on those two
 settings. ``scope_github_token`` is the default answer to the per-sandbox
 GitHub-token prompt at create and run. Every write goes through :func:`acq_py.config.write_field`, so other
@@ -82,12 +83,13 @@ _HEADER = "? Select kits (dimmed rows are always applied · ↑/↓ move · SPAC
 
 FLAG, ENV, CONFIG, DEFAULT, MIXED = "flag", "env", "config", "default", "mixed"
 
-# The keys the Python acq reads but serves only from its pinned built-in bundle
-# or a remote kit pinned to a commit (no local kit directory, no unpinned ref).
+# The keys the Python acq reads but serves only from its pinned built-in bundle,
+# a remote kit pinned to a commit, or a local kit directory it copies first (no
+# unpinned ref).
 PINNED_ONLY_KEYS = frozenset({"extra_kits", "provider_kit"})
 PINNED_ONLY_NOTE = (
-    "      note: the Python acq applies extra and provider kits from its built-in bundle or pinned to a "
-    "commit (local kit directories and unpinned refs need ACQ_IMPL=bash)."
+    "      note: the Python acq applies extra and provider kits from its built-in bundle, pinned to a "
+    "commit, or copied from a local directory (unpinned refs need ACQ_IMPL=bash)."
 )
 
 # Raw terminal control bytes (C0, DEL, C1) are dropped from displayed labels.

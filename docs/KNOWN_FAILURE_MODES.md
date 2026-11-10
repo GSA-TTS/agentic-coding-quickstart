@@ -3383,29 +3383,46 @@ kits outside the bundle at their pinned commit. Compared with the Bash acq:
   credential gate and the attach-time key probe still run.
 - Kit-delivered `~/.rc.d/*.sh` snippets are not sourced at login: the post-create
   bridge Bash writes (`_acq_sbx_ensure_rc_bridge`) is not ported.
-- A kit outside the bundle is applied only from a `git+https` ref pinned to a
-  full 40-hex commit (`py-acq/src/acq_py/kit_fetch.py`, as on msb). A local kit
-  directory (`unsupported_capability`), a branch or tag ref
-  (`kit_ref_not_pinned`; Bash fetches it unverified) and a kit that is not
-  neutral `hybrid/v1` (Bash passes an sbx-native kit through) are refused before
-  create. A fetch that fails, including for lack of network, refuses the create;
-  a commit fetched once is reused offline by later commands.
+- A kit outside the bundle is applied from a `git+https` ref pinned to a full
+  40-hex commit (`py-acq/src/acq_py/kit_fetch.py`, as on msb), or from a local
+  kit directory, which is copied into acq's private kit cache first and checked
+  there (`kit_fetch.copy_local`, on both backends). A branch or tag ref
+  (`kit_ref_not_pinned`; Bash fetches it unverified), a local directory that
+  does not exist (`validation_failed`) and a kit that is not neutral `hybrid/v1`
+  (Bash passes an sbx-native kit through) are refused before create. A fetch
+  that fails, including for lack of network, refuses the create; a commit
+  fetched once is reused offline by later commands.
+- A local kit differs from Bash in what it may hold. The copy follows no link:
+  a link in the kit is copied as a link and must resolve inside the copy, so an
+  absolute link (even to a file of the same kit) is refused. On Windows a link
+  or junction anywhere in a local kit is refused outright. A FIFO, socket or
+  device file is refused, and so is a tree of more than 10000 entries or
+  256 MiB. A local kit's later changes reach a sandbox only through a heal or
+  recreate, which copies it again.
 
 ### Root Cause
 
 The Windows guest path and the login-profile bridge belong to other parts of the
-port. Local kit directories are refused because the Python acq reads a kit only
-from its private fetch cache, which only acq writes; a local directory would be
-read where anyone who can write there can change it during the checks (the
-residual race section 61 describes for Bash on Windows). The Python acq passes
-sbx only local, translated kit directories, so it does not need the
-`kit.allowedSources` update Bash makes before create.
+port. Bash reads a local kit directory in place, where anyone who can write
+there can change it between acq's checks and the backend reading it (the
+residual race section 61 describes for Bash on Windows). The Python acq reads a
+kit only from its private cache, which only acq writes, so it copies a local
+kit there first (option 1 in section 61) and checks the copy. On POSIX the copy
+opens every directory and file relative to its parent with `O_NOFOLLOW`, so a
+link swapped in during the copy is never followed out of the kit. Windows has
+no such opens, so there the copy refuses every reparse point and checks that
+each file is still the one listed; a directory swapped for a junction between
+that check and the listing of its entries is the one window left there. The
+Python acq passes sbx only local, translated kit directories, so it does not
+need the `kit.allowedSources` update Bash makes before create.
 
 ### Fix
 
-Use the Bash acq (`ACQ_IMPL=bash`) for a local kit directory, an unpinned kit
-ref, or a Windows host where OpenCode must be configured for USAi. Pin a remote
-kit ref to its commit (`#ref=<40-hex sha>`) to apply it with the Python acq.
+Use the Bash acq (`ACQ_IMPL=bash`) for an unpinned kit ref, a local kit that
+needs an absolute link (or any link, on Windows), or a Windows host where
+OpenCode must be configured for USAi. Pin a remote kit ref to its commit
+(`#ref=<40-hex sha>`) to apply it with the Python acq; a local kit directory
+works as it is.
 
 ### Prevention / Status
 
@@ -3415,9 +3432,12 @@ Tracked follow-ups:
   that shows where an extra workspace `C:\…\generation.X:ro` appears in the guest
   (and that sbx accepts that argument). Then stage and mount it there as on
   POSIX; `provider_input.publish` already writes Bash's Windows pointer file.
-- **Local kit directories.** Copy the kit into the private fetch cache with the
-  same no-link checks (option 1 in section 61), then apply the copy. Unblock
-  trigger: a documented need for local kits with the Python acq.
+- **Local kit directories.** Done: the Python acq copies a local kit into its
+  private cache with the no-link checks (option 1 in section 61) and applies
+  the copy. Left open: the Windows junction window described above. Unblock
+  trigger: a report of local kits used on Windows by more than one user of the
+  host; then copy through handles opened without following reparse points
+  (`FILE_FLAG_OPEN_REPARSE_POINT`).
 - **The rc bridge.** Port `_acq_sbx_ensure_rc_bridge` with the msb login-shell
   work.
 - **Kit fetch on Windows.** The fetch itself has no POSIX-only step, but its

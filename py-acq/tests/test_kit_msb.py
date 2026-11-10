@@ -170,8 +170,8 @@ def test_verify_bundle_runs_on_every_create(monkeypatch, tmp_path, capsys):
     # An opt-in catalog kit is fetched at the control-plane pin; the test
     # environment allows no network transport, so the fetch fails closed.
     ("extra_kits: openchamber\n", errors.FAILURE),
-    # A local provider kit directory is not applied by the Python acq.
-    ("provider_kit: ./local-provider\n", errors.UNSUPPORTED),
+    # A local provider kit directory that does not exist.
+    ("provider_kit: ./local-provider\n", errors.VALIDATION_FAILED),
 ])
 def test_configured_kits_that_cannot_be_fetched_are_refused(monkeypatch, tmp_path, capsys, config, code):
     ws = _env(monkeypatch, tmp_path)

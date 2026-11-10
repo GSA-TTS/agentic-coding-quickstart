@@ -511,8 +511,8 @@ def test_create_fails_closed_when_the_bundle_does_not_verify(monkeypatch, tmp_pa
     # Pinned, but the fetch cannot happen (the test environment allows no network
     # transport): fail closed, never hand sbx the raw ref.
     ("git+https://github.com/acme/kits.git#ref=" + "a" * 40 + "&dir=k", errors.FAILURE, "failed to fetch remote kit"),
-    # A local kit directory is not applied by the Python acq.
-    ("./team-kit", errors.UNSUPPORTED, "names a local directory"),
+    # A local kit directory that does not exist (an existing one is copied and applied).
+    ("./team-kit", errors.VALIDATION_FAILED, "was not found"),
 ])
 def test_unfetchable_refs_are_refused_before_create(monkeypatch, tmp_path, capsys, ref, code, phrase):
     ws = _env(monkeypatch, tmp_path)

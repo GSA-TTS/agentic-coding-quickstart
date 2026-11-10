@@ -111,7 +111,8 @@ The Python implementation also has behaviour gaps against Bash. It reads the
 `extra_kits`, `provider_kit` and `scope_github_token` settings that
 `acq configure` writes, but it applies a kit outside its pinned built-in bundle
 only when the ref is pinned to a full commit (it fetches and verifies that
-commit), and refuses a local kit directory or an unpinned ref at create. It has no kit
+commit), and refuses an unpinned ref at create (a local kit directory, once
+refused too, is now copied into acq's private cache and checked there). It has no kit
 heal on re-attach. It has no ssh-agent forwarding setup: it replays a
 Bash-recorded `ssh_auth_sock` but never sets forwarding up itself. Credential
 rotation, configure settings and Bash-state import have open follow-ups. So

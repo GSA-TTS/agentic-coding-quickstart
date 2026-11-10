@@ -750,8 +750,8 @@ def test_run_claude_ignores_team_kits(monkeypatch, tmp_path, capsys):
 
 
 def test_run_unfetchable_extra_kits_are_refused_not_ignored(monkeypatch, tmp_path, capsys):
-    # Extra kits the Python acq would have to fetch are refused before create,
-    # never silently dropped.
+    # Extra kits that are neither bundled nor existing local kit directories are
+    # refused before create, never silently dropped.
     ws = tmp_path / "workspace"
     ws.mkdir()
     _env(monkeypatch, tmp_path)
@@ -760,7 +760,8 @@ def test_run_unfetchable_extra_kits_are_refused_not_ignored(monkeypatch, tmp_pat
 
     rc, doc = _invoke(capsys, "--backend", "msb", "run", "claude", str(ws), "--name", "cl-box", "--json")
     assert rc == 1
-    assert doc["error"]["code"] == "unsupported_capability"
+    assert doc["error"]["code"] == "validation_failed"
+    assert "was not found" in doc["error"]["message"]
     assert "'opencode'" in doc["error"]["message"]
     assert not [a for a in seen if a[0] == "create"]
     assert state.record_read("msb", "cl-box") is None
@@ -877,15 +878,15 @@ def test_run_kit_substrate_ok_no_provision(monkeypatch, tmp_path, capsys):
 
 def test_run_unbundled_kit_ref_is_refused(monkeypatch, tmp_path, capsys):
     # Mutation-proof guard: --kit takes kit refs (Bash semantics); one outside the
-    # built-in bundle would need a fetch, so it is refused before create, never
-    # silently dropped or replaced by inference.
+    # built-in bundle that names no kit directory is refused before create,
+    # never silently dropped or replaced by inference.
     ws = tmp_path / "workspace"
     ws.mkdir()
     _env(monkeypatch, tmp_path)
 
     rc, doc = _invoke(capsys, "--backend", "msb", "run", "opencode", str(ws), "--name", "oc-box", "--kit", "team-kit", "--json")
     assert rc == 1
-    assert doc["error"]["code"] == "unsupported_capability"
+    assert doc["error"]["code"] == "validation_failed"
     assert state.record_read("msb", "oc-box") is None
 
 

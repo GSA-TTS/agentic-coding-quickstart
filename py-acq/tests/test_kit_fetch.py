@@ -431,15 +431,6 @@ def test_load_refuses_kits_it_cannot_name_or_apply(kit_repo, directory, code, ph
     assert (info.value.code, phrase in info.value.message) == (code, True)
 
 
-def test_load_refuses_a_local_directory_without_reading_it(tmp_path):
-    kit = tmp_path / "local"
-    kit.mkdir()
-    (kit / "spec.yaml").write_text(TEAM_SPEC, encoding="utf-8")
-    with pytest.raises(kit_fetch.KitFetchError) as info:
-        kit_fetch.load(str(kit), "msb")
-    assert info.value.code == errors.UNSUPPORTED
-
-
 # ---------------------------------------------------------------------------
 # Both backends apply fetched kits.
 # ---------------------------------------------------------------------------

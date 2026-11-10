@@ -8,7 +8,8 @@ Tier-3-qualified**. A few documented flags are still missing: `--clone` and
 `ports --publish`. `ACQ_CLONE=1` is refused with a usage error rather than
 mounting the real workspace. Some behaviour also differs; for example,
 a kit outside the pinned built-in bundle is applied only when its ref is pinned
-to a full commit, and a local kit directory is refused. The dated correction in
+to a full commit, and a local kit directory is copied into acq's private cache
+and checked there before it is applied. The dated correction in
 ADR-0047m lists the gaps and the qualification state. The Bash `acq` stays the default implementation
 (`ACQ_IMPL` unset); `ACQ_IMPL=python` selects this one.
 
@@ -320,9 +321,10 @@ precedence, so `--json` reports `"honoured_by_python": true` for each:
   state migration.
 * A kit the built-in bundle does not hold (every catalog extra kit, a provider
   kit from a registered source) is fetched at its pinned commit (see "Kits
-  outside the bundle" below). A local kit directory, or a ref not pinned to a
-  full commit, is refused at create and needs the Bash acq (`ACQ_IMPL=bash`).
-  `--json` marks these two settings `"python_applies": "pinned-only"`.
+  outside the bundle" below), and a local kit directory is copied and checked
+  first. A ref not pinned to a full commit is refused at create and needs the
+  Bash acq (`ACQ_IMPL=bash`). `--json` marks these two settings
+  `"python_applies": "pinned-only"`.
 * **`scope_github_token`** is the default answer (`yes`, `y` or `Y` mean yes)
   to the per-sandbox GitHub-token prompt (ADR-0013). Before a new sandbox is
   provisioned, and when `run` re-attaches, acq checks the workspace for GitHub
@@ -440,8 +442,15 @@ source) is fetched by `src/acq_py/kit_fetch.py`, a port of Bash
   `kit_ref_not_pinned` (Bash fetches it unverified). So are URL userinfo
   (`credential-bearing kit URLs are not allowed`), plain `http`, a query
   string or percent escapes, and a `dir=` that is absolute, contains `..` or
-  uses a character outside `[A-Za-z0-9._/-]`. A local kit directory is refused
-  with `unsupported_capability`.
+  uses a character outside `[A-Za-z0-9._/-]`.
+* A local kit directory (Bash reads it in place) is copied into the same
+  private cache first, and every check runs on the copy, so a change to the
+  directory during the checks cannot reach the sandbox. The copy follows no
+  link: a link in the kit is copied as a link and must resolve inside the copy
+  (on Windows a link or junction in a local kit is refused outright), and
+  anything but files, directories and links is refused, as is a tree of more
+  than 10000 entries or 256 MiB. A directory that does not exist is
+  `validation_failed`. The copy is named by its content.
 * The commit is fetched into a bare repository and must be exactly the pinned
   one; the kit is checked out from that commit's tree with a private index, and
   no symlink in it may resolve outside the kit. Only a neutral `hybrid/v1` kit
