@@ -1551,20 +1551,51 @@ def _put(rec: HeldRecord, bound: BoundSecret, value: str, timeout: float | None 
     return True
 
 
+def _selection_excludes(service: str, sandbox: str) -> bool:
+    """True when ``sandbox`` was created with a provider selection that leaves
+    out the provider ``service`` (``--no-provider-kits``, or an explicit list
+    without its kit), so a re-feed must not hand it that credential.
+
+    The test is the one a create applies (:func:`_bind_candidates`) under the
+    recorded selection. Only a recorded selection counts: a service that is not
+    a provider, or a sandbox with no recorded selection (one from before it was
+    recorded), is never excluded here. Raises :class:`MsbError` when the
+    recorded selection or the sandbox's provider facts cannot be read.
+    """
+    if service not in provider_creds.provider_ids():
+        return False
+    try:
+        if kits.provider_selection_read("msb", sandbox) is None:
+            return False
+        with kits.recorded_provider_selection("msb", sandbox):
+            return service not in _bind_candidates(sandbox)
+    except kits.ProviderSelectionError as exc:
+        raise MsbError(errors.VALIDATION_FAILED, str(exc), f"recreate sandbox '{sandbox}' so a valid selection "
+                       "is recorded") from exc
+
+
 def _refeed(service: str, scope: Scope) -> None:
     """Push ``service``'s current value to the running sandboxes ``scope``
     reaches, so a new or changed secret applies without a recreate.
 
-    A sandbox with its own value is left alone on a global change, and a
-    variable already bound there for another service keeps its first claim
-    (warned). Raises :class:`MsbError` naming every sandbox that could not be
-    updated, including one whose value or binding could not be resolved.
+    A sandbox with its own value is left alone on a global change, as is one
+    whose recorded provider selection leaves the provider out, and a variable
+    already bound there for another service keeps its first claim (warned).
+    Raises :class:`MsbError` naming every sandbox that could not be updated,
+    including one whose value, binding or recorded selection could not be
+    resolved.
     """
     if _live_refeed_off():
         return
     failed: list[str] = []
     for sandbox in _running_targets(scope):
         if scope.is_global and _has_own_value(service, sandbox):
+            continue
+        try:
+            if _selection_excludes(service, sandbox):
+                continue
+        except MsbError as exc:
+            failed.append(f"{sandbox} ({exc.message})")
             continue
         binding = service_binding(service, sandbox)
         value = secretstore.resolve(service, sandbox)
@@ -1946,8 +1977,9 @@ def _rotate_one(service: str, sandbox: str, budget: float) -> str | None:
     """Re-feed the stored global key to one running sandbox.
 
     Returns None when it was re-fed, ``"kept"`` when the sandbox has its own
-    value, ``"skipped"`` when the variable is bound there for another service
-    (warned, as :func:`_refeed` does), or the reason it was not re-fed. Each
+    value, ``"skipped"`` when its recorded provider selection leaves usai out
+    or the variable is bound there for another service (warned, as
+    :func:`_refeed` does), or the reason it was not re-fed. Each
     msb call is bounded by ``budget`` seconds, and one that times out counts as
     a failure. Any failure is confined to this sandbox.
     """
@@ -1955,6 +1987,8 @@ def _rotate_one(service: str, sandbox: str, budget: float) -> str | None:
     try:
         if _has_own_value(service, sandbox):
             return "kept"
+        if _selection_excludes(service, sandbox):
+            return "skipped"
         binding = service_binding(service, sandbox)
         value = secretstore.resolve(service, sandbox)
         if binding is None or not value:

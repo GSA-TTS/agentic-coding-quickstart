@@ -763,6 +763,47 @@ def test_scoped_set_targets_only_that_sandbox(monkeypatch, tmp_path, capsys, chi
     assert msb.held_read("b").bindings["GITHUB_TOKEN"]["scope"] == "sandbox" and msb.held_read("a").bindings == {}
 
 
+def _record_selection(sandbox, provider_kits):
+    """Record the provider selection ``sandbox`` was created with (``""`` is
+    ``--no-provider-kits``), as create does."""
+    from acq_py import kits
+
+    with kits.provider_kits_env(provider_kits):
+        kits.provenance_write("msb", sandbox)
+
+
+def test_global_set_skips_a_sandbox_whose_recorded_selection_leaves_the_provider_out(
+        monkeypatch, tmp_path, capsys, children):
+    _running(tmp_path, monkeypatch, "a", "b", "c")
+    _record_selection("a", "")  # created with --no-provider-kits
+    _record_selection("b", None)  # the default selection: usai's kit is in it
+    # "c" has no recorded selection (from before it was recorded): re-fed as before.
+    out, err = _set(capsys, monkeypatch, "-g", "usai")
+    assert sorted(t[0] for t in _modify_tails(children)) == ["b", "c"]
+    assert msb.held_read("a").bindings == {}
+    _assert_value_absent(VALUE, children, out, err)
+    # A service that is not a provider is not subject to provider selection.
+    children.clear()
+    _set(capsys, monkeypatch, "-g", "github")
+    assert sorted(t[0] for t in _modify_tails(children)) == ["a", "b", "c"]
+
+
+def test_refeed_with_an_unreadable_recorded_selection_fails_closed_for_that_sandbox(
+        monkeypatch, tmp_path, capsys, children):
+    from acq_py import kits
+
+    _running(tmp_path, monkeypatch, "a", "b")
+    _record_selection("a", "")
+    kits._provenance_path("msb", "a").write_text("{not json", encoding="utf-8")
+    rc, doc, out, err = _invoke(capsys, "--backend", "msb", "secret", "set", "-g", "usai", "--json",
+                                stdin=VALUE, monkeypatch=monkeypatch)
+    assert rc == 1 and doc["error"]["code"] == "failure"
+    assert "a (sandbox 'a' has an unreadable recorded provider selection)" in doc["error"]["message"]
+    assert [t[0] for t in _modify_tails(children)] == ["b"]  # never fed to "a"; the others still are
+    assert secretstore.resolve("usai") == VALUE
+    _assert_value_absent(VALUE, children, out, err)
+
+
 @pytest.mark.parametrize("argv, takes_lock", [
     (["secret", "set", "b", "github"], True),
     (["secret", "rm", "b", "github"], True),

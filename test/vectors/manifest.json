@@ -311,6 +311,10 @@
       "vectors": ["cli/usai-rotate-ok"]
     },
     {
+      "contract": "Least privilege for re-feeds: secret set -g and usai key rotation do not hand a provider's credential to a running msb sandbox whose recorded provider selection leaves that provider out (--no-provider-kits, or an explicit list without its kit); a sandbox with no recorded selection is re-fed as before",
+      "vectors": ["cli/usai-rotate-msb-honours-selection"]
+    },
+    {
       "contract": "ADR-0012 key-rotate partial re-feed: when a sandbox does not take the new key the command exits 1 naming it (and the ones that did), and re-running the rotation with the same key fixes it",
       "vectors": ["cli/usai-rotate-msb-partial", "cli/usai-rotate-sbx-partial"]
     },
