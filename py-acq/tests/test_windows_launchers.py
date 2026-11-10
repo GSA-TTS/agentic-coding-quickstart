@@ -19,7 +19,8 @@ call operator passes native arguments correctly by default
 an empty argument, an embedded quote, a trailing backslash and ``--``
 unchanged on both branches. The PowerShell 7 cases find ``pwsh`` on PATH (or
 the absolute path in ``ACQ_TEST_PWSH``) and skip without it, unless
-``ACQ_TEST_REQUIRE_PWSH=1`` (set in CI) makes a missing ``pwsh`` a failure.
+``ACQ_TEST_REQUIRE_PWSH=1`` (set in CI) makes a missing ``pwsh`` a failure; an
+``ACQ_TEST_PWSH`` that does not name a usable pwsh fails them too.
 
 Windows only: they need cmd.exe and Windows PowerShell, so they run in the
 Windows CI job's pytest step.
@@ -70,8 +71,12 @@ def _find_pwsh(override: str) -> str | None:
 
 @pytest.fixture(scope="module")
 def pwsh(pwsh_test_settings: tuple[str, bool]) -> tuple[str, tuple[int, int]]:
-    """``(path, (major, minor))`` of PowerShell 7 or newer; skips without it."""
+    """``(path, (major, minor))`` of PowerShell 7 or newer; skips without it.
+
+    An explicit ``ACQ_TEST_PWSH`` is a request to run these tests, so one that
+    is not usable fails them, as ``ACQ_TEST_REQUIRE_PWSH=1`` does."""
     override, required = pwsh_test_settings
+    required = required or bool(override)
     path = _find_pwsh(override)
     version: tuple[int, int] | None = None
     if path is not None:
