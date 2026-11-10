@@ -8,8 +8,8 @@ This module owns the **host-authoritative** records for two credential concerns:
   host(s) that credential may be sent to (``hosts``), plus the precedence layer
   it came from (``source_layer``). The *binding* is durable, user-owned, and
   recorded host-side as a ``schema=N`` record; the credential *value* is a
-  backend secret and is never stored or surfaced here (ADR-0038m §user story #7
-  "no secret exposure").
+  backend secret and is never stored or surfaced here (ADR-0038m, and
+  ordinary-user story 7 "no secret exposure" in docs/spec/acq-v1.md).
 * **GitHub per-sandbox scope** — a per-sandbox (never global) record of the
   workspace, owner and GitHub repositories a sandbox's own GitHub token was
   requested for (ADR-0013). acq cannot check a token's permissions offline, so

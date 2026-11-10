@@ -56,3 +56,34 @@ Existing users retain their command surface and state without inheriting every B
 ## Verification
 
 Maintain language-neutral acceptance cases for every command, exit class, required result field, precedence rule, migration, and disputed-behavior classification. Adversarial and live tests must establish guest-tamper resistance, immutable kit provenance, destination-bound secret substitution, no secret exposure, deny-by-default egress, version refusal, rotation, host/guest path fidelity, and explicit security-exception recreation. Mocks alone do not qualify backend enforcement.
+
+## Citation key (added 2026-11-09)
+
+The Decision section above has no numbered sections. Code comments, tests, test vectors and docs nonetheless cite this ADR as "ADR-0038m §N", so this key makes those citations followable. It changes nothing in the decision, and it is placed after the decision so the paragraph line numbers above stay the same.
+
+**§1 to §8** are the numbered sections of the wayfinding resolution that this ADR condensed:
+
+| Citation | Section of the resolution | Where it lands in the Decision above |
+|---|---|---|
+| §1 | Commands, arguments, and exit status | the command-surface and passthrough paragraph, and the exit-code paragraph |
+| §2 | Machine-readable results | the structured-output paragraph and the "Required result data" list |
+| §3 | Configuration, credentials, and state migration | the `config.yaml`, precedence and migration paragraph |
+| §4 | Host/guest value boundary | the host-path / guest-path paragraph |
+| §5 | Non-negotiable security guarantees | the trusted-lifecycle and security paragraph |
+| §6 | Disputed and undocumented behavior (preserve / preserve-with-warning / drop) | the preserve/drop paragraph |
+| §7 | Interaction, presentation, and installers | the noninteractive-operation paragraph |
+| §8 | Follow-ups owned by later tickets | the sibling ADRs (ADR-0039m to ADR-0045m) |
+
+**§46, §48 and §50** are line numbers in this file:
+
+- §46: the trusted-lifecycle and security paragraph (§5);
+- §48: the preserve/drop paragraph (§6);
+- §50: the noninteractive-operation and presentation paragraph (§7).
+
+**Named anchors** such as "§doctor", "§kit check" or "§secret set" refer to that command's entry in the "Required result data" list, or to the command's general rules where it has no entry.
+
+A few citations use a number whose section does not match their topic. For example, some cite §3 for "drops false partial success", which is a §6 drop. In those cases, follow the topic. Spec user stories are in `docs/spec/acq-v1.md`, not in this ADR.
+
+## Links
+
+- Wayfinding resolution with the numbered sections: the resolution comment on mogul/agentic-coding-quickstart#2

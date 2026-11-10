@@ -1,9 +1,9 @@
 ---
 title: "Cross-Platform Qualification How-To (Tier-3)"
-description: "How to run the six ADR-0044m Tier-3 qualification oracles and record honest PASS/FAIL/BLOCKED transcripts on macOS and Linux hosts"
+description: "How to run the six ADR-0044m Tier-3 qualification oracles and record honest PASS/FAIL/BLOCKED transcripts on macOS, Linux and Windows x64 hosts"
 status: canonical
 tier: 3
-last_updated: "2026-11-08"
+last_updated: "2026-11-09"
 audience: "developers"
 keywords: ["qualification", "tier-3", "transcript", "msb", "sbx", "oracle", "adr-0044m", "matrix"]
 related_files: ["docs/howto/release-gate-setup.md", "docs/adr/0044m-live-cross-platform-qualification-matrix-and-transcript.md", "qualification/README.md", "docs/qualification-ledger.json", ".github/workflows/tier3-release-gate.yml", "scripts/qualify-backend-cell", "scripts/qualify-msb-ro-mount", "docs/KNOWN_FAILURE_MODES.md", "docs/adr/0035-host-authoritative-sandbox-config.md", "docs/adr/0041m-configuration-and-state-migration-behavior.md"]
@@ -16,7 +16,7 @@ review_cycle: "quarterly"
 > This is the **Tier-3 live-qualification** runbook for the Python `acq` v1
 > replacement (ADR-0044m). It is the downstream consumer of the
 > [`qualification/`](../../qualification/README.md) harness. It tells a human —
-> or an agent on a macOS/Linux host — exactly how to run the six host-enforced
+> or an agent on a macOS, Linux or Windows x64 host — exactly how to run the six host-enforced
 > oracles, compute the transcript identity fields honestly, and record the
 > verbatim `RESULT` line. The ledger, not this page, says which cells are
 > current: `python3 -m qualification matrix` prints each cell's state.
@@ -474,8 +474,12 @@ harness's all-zero default, and a commit that only existed on a squash-merged PR
 branch is not in `main`'s history, so the gate could not resolve it. Every outcome
 is recorded, not only `PASS`: the latest entry for a cell decides, so a recorded
 `FAIL`, `BLOCKED` or `FLAKY` blocks a cell that had a current `PASS`. Commit the
-ledger change through a normal PR; CODEOWNERS requires an admin's review of it,
-because the ledger is self-reported evidence.
+ledger change through a normal PR. The ledger is self-reported evidence, so the
+PR needs an admin's review. Upstream, CODEOWNERS enforces that review once code-owner
+review is required. On the `mogul` fork nothing enforces it: the `CODEOWNERS`
+teams cannot own paths in a personal repository and the `main` ruleset requires no
+review. There, the maintainer's own audit of the ledger PR is the control (see
+[`release-gate-setup.md`](release-gate-setup.md), step 3).
 Per-attempt timestamps are in the transcript; for one written by an older harness,
 pass `--recorded-at <ISO 8601 UTC>`.
 

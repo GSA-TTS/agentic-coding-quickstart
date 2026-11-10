@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "acq-py"
 version = "0.1.0"
-description = "Python skeleton for the acq v1 replacement (foundation slice)"
+description = "Python implementation of the acq v1 replacement (in progress, not at parity with Bash)"
 readme = "README.md"
 requires-python = ">=3.12"
 # acq is CC0-1.0. The bundled git-ssh-sign kit (src/acq_py/kitbundle) is
