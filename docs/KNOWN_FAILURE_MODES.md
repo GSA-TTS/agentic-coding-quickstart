@@ -969,6 +969,8 @@ sbx secret set-custom <sandbox-name> --host api.gsa.usai.gov \
 
 - Rotate with `acq usai-rotate-api-key`, which preserves the placeholder so
   existing sandboxes keep working. Avoid deleting + re-adding the global secret.
+  When sbx holds more than one global USAi entry, rotation refuses and names
+  each placeholder instead of picking one (see section 88).
 - Remove any `export USAI_API_KEY=...` from your shell profile — the sandbox gets
   its value from sbx injection, and a host env var only causes confusion.
 
@@ -4853,6 +4855,59 @@ handle closes (as `run_captured` already does for bounded backend calls), so a
 forced kill of acq takes the session with it. Unblock trigger: a report of a
 session left running after a forced kill, or the Windows default flip
 (ADR-0048m).
+
+---
+
+## 88. sbx: More Than One Global USAi Custom Secret Is Refused
+
+**Status:** By design (both the Bash and the Python `acq`).
+
+### Symptoms
+
+`acq secret set -g usai`, `acq usai-rotate-api-key` on sbx, or a USAi change
+made on msb that acq passes on to sbx sandboxes, stops with exit 1:
+
+```text
+acq(sbx): sbx holds 2 custom secrets for USAI_API_KEY on api.gsa.usai.gov in the global scope,
+          so acq cannot tell which one your sandboxes use; nothing was changed.
+          Placeholders: sbx-cs-AAAA sbx-cs-BBBB
+          Warning: a running sandbox may hold one of these placeholders. ...
+            sbx secret rm --placeholder sbx-cs-AAAA -f
+            sbx secret rm --placeholder sbx-cs-BBBB -f
+```
+
+The Python `acq` gives the same facts in one error and remediation (or
+`--json` envelope). Nothing is stored, removed or re-set.
+
+### Root Cause
+
+sbx can hold several custom secrets for the same env var and host, for example
+after a rotation from before ADR-0008 or a manual `sbx secret set-custom`. Each
+sbx sandbox was injected with one placeholder when it was created, and sbx does
+not say which. Updating whichever entry sbx lists first, or removing them all
+and creating one (what the Bash rotation used to do), can leave running
+sandboxes with a placeholder sbx no longer maps, so they get `401` from USAi
+(see section 23). acq therefore refuses and lets you choose. Rows are matched
+by scope, env var **and** host: a secret for `USAI_API_KEY` on another host is
+a different secret and is not counted.
+
+### Fix
+
+1. Decide which entry your sandboxes use. If you do not know, keep the oldest
+   and plan to recreate any sandbox that then fails with `401`.
+2. Remove the others with the printed commands, one per entry
+   (`sbx secret rm --placeholder P -f`).
+3. Re-run the command. With one entry left, `acq usai-rotate-api-key` updates
+   it in place and keeps its placeholder. A sandbox whose placeholder you
+   removed is recovered by the rebind in section 23 (ADR-0008) or by
+   recreating it.
+
+### Prevention / Status
+
+Rotate with `acq usai-rotate-api-key` rather than deleting and re-adding the
+secret. The refusal is covered by `test/bats/40-secret-set.bats`,
+`test/bats/77-usai-rotate.bats`, `py-acq/tests/test_sbx.py` and the vectors
+`cli/secret-set-sbx-duplicate-usai` and `cli/sbx-duplicate-usai-nothing-removed`.
 
 ---
 

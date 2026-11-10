@@ -306,3 +306,44 @@ LS
   assert_equal "$status" "2"
   assert_output --partial 'missing service name'
 }
+
+# Two global custom secrets for the USAi env var and host: acq cannot tell which
+# placeholder the running sandboxes hold, so every path refuses, names each
+# placeholder with its removal command, and removes nothing.
+_seed_duplicate_usai() {
+  printf 'CUSTOM SECRETS\nSCOPE TARGETS ENV PLACEHOLDER SECRET\n(global) api.gsa.usai.gov USAI_API_KEY sbx-cs-dupa ****\n(global) api.gsa.usai.gov USAI_API_KEY sbx-cs-dupb ****\n' > "$STUBDIR/sbx_ls"
+}
+
+@test "secret set(sbx): -g usai with duplicate global entries is refused before storing" {
+  _seed_duplicate_usai
+  run bash -c 'printf "k\n" | SBX_LS_FIXTURE="$1" ACQ_BACKEND=sbx "$2" secret set -g usai' _ "$STUBDIR/sbx_ls" "$ACQ"
+  assert_failure
+  assert_output --partial 'sbx holds 2 custom secrets for USAI_API_KEY on api.gsa.usai.gov'
+  assert_output --partial 'sbx secret rm --placeholder sbx-cs-dupa -f'
+  assert_output --partial 'sbx secret rm --placeholder sbx-cs-dupb -f'
+  assert_output --partial 'a running sandbox may hold one of these placeholders'
+  assert_output --partial 'nothing was stored'
+  refute_regex "$(cat "$CALLS")" 'sbx secret (rm|set)'
+  assert [ ! -e "$STUBDIR/secrets/acq.usai" ]
+}
+
+@test "secret set(sbx): a same-env entry on another host is not a duplicate" {
+  printf 'CUSTOM SECRETS\n(global) api.gsa.usai.gov USAI_API_KEY sbx-cs-dupa ****\n(global) usai.alt.example.gov USAI_API_KEY sbx-cs-alt ****\n' > "$STUBDIR/sbx_ls"
+  run bash -c 'printf "k\n" | SBX_LS_FIXTURE="$1" ACQ_BACKEND=sbx "$2" secret set -g usai' _ "$STUBDIR/sbx_ls" "$ACQ"
+  assert_failure
+  refute_output --partial 'custom secrets for USAI_API_KEY'
+  assert_output --partial 'already has'
+}
+
+@test "secret set(msb): usai propagation to sbx refuses duplicate global entries" {
+  printf 'runningbox\n' > "$STUBDIR/.msb_sandbox_list"
+  printf 'legacy-sbx\n' > "$STUBDIR/.sandbox_list"
+  _seed_duplicate_usai
+  run bash -c 'printf "k\n" | SBX_LS_FIXTURE="$2" ACQ_SECRET_TEST_VALUE="k" ACQ_BACKEND=msb "$1" secret set -g usai' _ "$ACQ" "$STUBDIR/sbx_ls"
+  assert_failure
+  assert_output --partial 'sbx-cs-dupa'
+  assert_output --partial 'sbx-cs-dupb'
+  assert_output --partial 'sbx secret rm --placeholder sbx-cs-dupb -f'
+  assert_output --partial 'the sbx sandboxes were not updated'
+  refute_regex "$(cat "$CALLS")" 'sbx secret (rm|set)'
+}

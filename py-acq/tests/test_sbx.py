@@ -747,6 +747,87 @@ def test_provider_credential_set_existing_custom_secret_hint(monkeypatch, tmp_pa
     assert "acq secret rm sbx-cs-acme" in doc["error"]["remediation"]
 
 
+def test_provider_credential_set_names_every_existing_placeholder(monkeypatch, tmp_path, capsys):
+    # Two entries for the env var on different hosts are not duplicates, but
+    # both block the set: each is named by its own placeholder, none generically.
+    _env(monkeypatch, tmp_path, custom=[_custom("global", "ACME_API_KEY", "sbx-cs-acme", "api.acme.example"),
+                                        _custom("global", "ACME_API_KEY", "sbx-cs-other", "other.example")])
+    monkeypatch.setenv("ACQ_SBX_VERSION", "0.51.0")
+    monkeypatch.setattr(sys, "stdin", io.StringIO("ACME\n"))
+    rc, doc = _invoke(capsys, "--backend", "sbx", "provider-credential", "set", "acme", "ACME_API_KEY",
+                      "--host", "api.acme.example", "--json")
+    assert rc == 1 and "already exists" in doc["error"]["message"]
+    remediation = doc["error"]["remediation"]
+    assert "acq secret rm sbx-cs-acme" in remediation and "acq secret rm sbx-cs-other" in remediation
+    assert "<placeholder>" not in remediation
+
+
+_DUPES = [_custom("global", "USAI_API_KEY", "sbx-cs-dupa", "api.gsa.usai.gov"),
+          _custom("global", "USAI_API_KEY", "sbx-cs-dupb", "api.gsa.usai.gov")]
+
+
+def _assert_duplicate_refusal(error, *placeholders, host="api.gsa.usai.gov"):
+    assert f"sbx lists {len(placeholders)} global custom secrets for $" in error["message"]
+    assert f" on {host}" in error["message"]
+    for placeholder in placeholders:
+        assert placeholder in error["message"]
+        assert f"'sbx secret rm --placeholder {placeholder} -f'" in error["remediation"]
+    assert "a running sandbox may hold one of these placeholders" in error["remediation"]
+
+
+def _spy_rm(monkeypatch):
+    calls: list[list[str]] = []
+    real_run = sbx._run
+
+    def spy(argv, *, timeout=None, input_text=None):
+        calls.append(list(argv))
+        return real_run(argv, timeout=timeout, input_text=input_text)
+
+    monkeypatch.setattr(sbx, "_run", spy)
+    return calls
+
+
+def test_secret_set_refuses_duplicate_global_usai_entries(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path, custom=_DUPES)
+    monkeypatch.setenv("ACQ_SBX_VERSION", "0.51.0")
+    calls = _spy_rm(monkeypatch)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("V\n"))
+    rc, doc = _invoke(capsys, "--backend", "sbx", "secret", "set", "-g", "usai", "--json")
+    assert rc == 1
+    _assert_duplicate_refusal(doc["error"], "sbx-cs-dupa", "sbx-cs-dupb")
+    assert doc["error"]["remediation"].startswith("nothing was stored;")
+    assert "acq usai-rotate-api-key" in doc["error"]["remediation"]
+    assert not any(argv[:2] in (["secret", "rm"], ["secret", "set-custom"]) for argv in calls)
+    assert not _store().exists()
+
+
+def test_provider_credential_set_refuses_duplicate_entries(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path, custom=[_custom("global", "ACME_API_KEY", "sbx-cs-a1", "api.acme.example"),
+                                        _custom("global", "ACME_API_KEY", "sbx-cs-a2", "api.acme.example")])
+    monkeypatch.setenv("ACQ_SBX_VERSION", "0.51.0")
+    calls = _spy_rm(monkeypatch)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("ACME\n"))
+    rc, doc = _invoke(capsys, "--backend", "sbx", "provider-credential", "set", "acme", "ACME_API_KEY",
+                      "--host", "api.acme.example", "--json")
+    assert rc == 1
+    _assert_duplicate_refusal(doc["error"], "sbx-cs-a1", "sbx-cs-a2", host="api.acme.example")
+    assert not any(argv[:2] in (["secret", "rm"], ["secret", "set-custom"]) for argv in calls)
+
+
+def test_rotation_refuses_duplicate_global_usai_entries_with_removal_commands(monkeypatch, tmp_path, capsys):
+    # Two global entries on the USAi host: refused with every placeholder named;
+    # an entry for the same env var on another host does not count.
+    _env(monkeypatch, tmp_path, custom=[*_DUPES, _custom("global", "USAI_API_KEY", "sbx-cs-alt", "alt.example")])
+    monkeypatch.setenv("ACQ_SBX_VERSION", "0.51.0")
+    calls = _spy_rm(monkeypatch)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("NEW-KEY\n"))
+    rc, doc = _invoke(capsys, "--backend", "sbx", "usai-rotate-api-key", "--json")
+    assert rc == 1
+    _assert_duplicate_refusal(doc["error"], "sbx-cs-dupa", "sbx-cs-dupb")
+    assert "sbx-cs-alt" not in doc["error"]["message"] + doc["error"]["remediation"]
+    assert not any(argv[:2] in (["secret", "rm"], ["secret", "set-custom"]) for argv in calls)
+
+
 def test_malformed_provider_binding_fails_closed(monkeypatch, tmp_path, capsys):
     _env(monkeypatch, tmp_path)
     monkeypatch.setenv("ACQ_SBX_VERSION", "0.51.0")

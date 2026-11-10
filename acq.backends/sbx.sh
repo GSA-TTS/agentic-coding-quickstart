@@ -1783,6 +1783,25 @@ acq_backend_secret_set() {
       ;;
   esac
 
+  # Duplicate custom entries: when sbx already holds more than one custom secret
+  # for this env var and host in the target scope, refuse BEFORE anything is
+  # stored. Running sandboxes were injected with one of those placeholders and
+  # acq cannot tell which, so the user must choose which to keep. A built-in
+  # service fed natively (no explicit --host) has no custom entry to check.
+  local _dup_custom=1 _dup_rerun
+  case "$_ACQ_SBX_BUILTIN_SERVICES" in
+    *" $service "*) [ "$host_explicit" -eq 1 ] || _dup_custom=0 ;;
+  esac
+  if [ "$_dup_custom" -eq 1 ] && [ -n "$env_var" ] && [ -n "$host" ]; then
+    if [ -n "$scope_flag" ]; then _dup_rerun="acq secret set -g ${service}"; else _dup_rerun="acq secret set ${scope_name} ${service}"; fi
+    # The global USAi key has an in-place update that keeps the placeholder.
+    if [ "$service" = "usai" ] && [ -n "$scope_flag" ]; then
+      _dup_rerun="acq usai-rotate-api-key to update the entry you keep (or ${_dup_rerun} after removing them all)"
+    fi
+    _acq_sbx_refuse_duplicate_custom "$scope_flag" "$scope_name" "$env_var" "$host" \
+      "nothing was stored" "$_dup_rerun" || return 1
+  fi
+
   # --- Step 1: store the value in the acq-owned secret store (keychain/file). --
   # This is the source of truth both backends read from. The value is read from
   # a TTY (silent) or piped stdin and never appears in argv.
@@ -2023,8 +2042,16 @@ acq_backend_secret_propagate() {
     return 0
   fi
 
+  # Every placeholder for this env var and host in the scope: with more than
+  # one, acq cannot tell which the sandboxes hold, so it refuses rather than
+  # update whichever sbx happens to list first.
   local placeholder cmd_args=("secret" "set-custom")
-  placeholder=$(_acq_sbx_custom_placeholder "$scope_flag" "$scope_name" "$env_var" "$host")
+  placeholder=$(_acq_sbx_custom_placeholders "$scope_flag" "$scope_name" "$env_var" "$host") || placeholder=""
+  if [ "$(printf '%s\n' "$placeholder" | grep -c .)" -gt 1 ]; then
+    _acq_sbx_print_duplicate_custom "$scope_flag" "$scope_name" "$env_var" "$host" \
+      "the sbx sandboxes were not updated" "$rerun_cmd" "$placeholder"
+    return 1
+  fi
   if [ -z "$placeholder" ]; then
     echo "acq(sbx): stored 'usai' in the acq secret store, but no existing sbx" >&2
     echo "          USAi placeholder was found for this scope. Run:" >&2
@@ -2282,6 +2309,75 @@ _acq_sbx_custom_placeholder() {
 }
 
 # ---------------------------------------------------------------------------
+# _acq_sbx_custom_placeholders SCOPE_FLAG SCOPE_NAME ENV_VAR HOST -> placeholders
+# ---------------------------------------------------------------------------
+# Every placeholder sbx lists for a CUSTOM secret in exactly this scope whose
+# ENV is ENV_VAR and whose TARGETS cell is HOST, one per line (nothing when
+# there is none). Unlike _acq_sbx_custom_placeholder it never stops at the
+# first row and it always matches the host, so a secret for the same env var on
+# another host is not counted. Returns 1 when `sbx secret ls` fails.
+_acq_sbx_custom_placeholders() {
+  local scope_flag="$1" scope_name="$2" env_var="$3" host="$4" listing want_scope
+  [ -n "$env_var" ] && [ -n "$host" ] || return 0
+  listing=$(sbx secret ls 2>/dev/null) || return 1
+  if [ -n "$scope_flag" ]; then want_scope="(global)"; else want_scope="$scope_name"; fi
+  printf '%s\n' "$listing" | awk \
+    -v scope="$want_scope" -v env="$env_var" -v host="$host" '
+    /^CUSTOM SECRETS/ { in_custom = 1; next }
+    !in_custom { next }
+    NF == 0 { next }
+    $1 == "SCOPE" { next }
+    $1 == scope {
+      for (i = 2; i < NF; i++) {
+        if ($i == env && $(i-1) == host) { print $(i+1); break }
+      }
+    }
+  '
+}
+
+# ---------------------------------------------------------------------------
+# _acq_sbx_print_duplicate_custom SCOPE_FLAG SCOPE_NAME ENV_VAR HOST OUTCOME RERUN PLACEHOLDERS
+# ---------------------------------------------------------------------------
+# The refusal for a scope where sbx holds more than one custom secret for the
+# same env var and host. acq cannot tell which placeholder the running
+# sandboxes were injected with, so it neither picks one nor removes any. The
+# message names every placeholder and prints one copy-pasteable removal per
+# entry, in the same form acq itself uses (`sbx secret rm --placeholder P -f`,
+# plus `--sandbox NAME` for a sandbox scope). OUTCOME says what acq did (for
+# example "nothing was stored"); RERUN is the command to run afterwards.
+_acq_sbx_print_duplicate_custom() {
+  local scope_flag="$1" scope_name="$2" env_var="$3" host="$4" outcome="$5" rerun="$6" list="$7"
+  local where rm_scope="" count ph
+  if [ -n "$scope_flag" ]; then where="the global scope"; else where="sandbox '$scope_name'"; rm_scope=" --sandbox $scope_name"; fi
+  count=$(printf '%s\n' "$list" | grep -c . || true)
+  echo "acq(sbx): sbx holds ${count} custom secrets for ${env_var} on ${host} in ${where}," >&2
+  echo "          so acq cannot tell which one your sandboxes use; ${outcome}." >&2
+  echo "          Placeholders: $(printf '%s\n' "$list" | tr '\n' ' ' | sed 's/ *$//')" >&2
+  echo "          Warning: a running sandbox may hold one of these placeholders. A sandbox" >&2
+  echo "          whose placeholder you remove can no longer reach ${host} until it is" >&2
+  echo "          recreated (or rebound as ADR-0008 describes). Remove the entries your" >&2
+  echo "          sandboxes do not use; one command per entry:" >&2
+  while IFS= read -r ph; do
+    [ -n "$ph" ] && echo "            sbx secret rm --placeholder ${ph}${rm_scope} -f" >&2
+  done <<EOF
+$list
+EOF
+  echo "          then re-run: ${rerun}" >&2
+}
+
+# _acq_sbx_refuse_duplicate_custom SCOPE_FLAG SCOPE_NAME ENV_VAR HOST OUTCOME RERUN
+# Returns 1 (after printing the refusal) when sbx lists more than one custom
+# secret for ENV_VAR on HOST in the scope; 0 otherwise, including when the
+# listing cannot be read (the caller's own existence checks then decide).
+_acq_sbx_refuse_duplicate_custom() {
+  local list
+  list=$(_acq_sbx_custom_placeholders "$1" "$2" "$3" "$4") || return 0
+  [ "$(printf '%s\n' "$list" | grep -c .)" -gt 1 ] || return 0
+  _acq_sbx_print_duplicate_custom "$1" "$2" "$3" "$4" "$5" "$6" "$list"
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # acq_backend_rotate_key — rotate the global USAi key (per ADR-0012)
 # ---------------------------------------------------------------------------
 # Rotate the global USAi custom secret in sbx, PRESERVING its proxy
@@ -2294,97 +2390,45 @@ acq_backend_rotate_key() {
   local usai_models_url="$USAI_PROVIDER_MODELS_URL"
   local usai_env="$USAI_PROVIDER_KEY_ENV"
 
-  # Read the current secret table once (avoids a TOCTOU window + a second call).
-  local secret_ls
-  secret_ls=$(sbx secret ls -g) || {
-    echo "acq(sbx): could not read the sbx secret table ('sbx secret ls -g')." >&2
+  # The global USAi custom secrets: rows in the global scope whose ENV is the
+  # provider key env AND whose TARGETS is the provider host, so a secret for the
+  # same env var on another host is never mistaken for this one.
+  local placeholders
+  placeholders=$(_acq_sbx_custom_placeholders -g "" "$usai_env" "$usai_host") || {
+    echo "acq(sbx): could not read the sbx secret table ('sbx secret ls')." >&2
     return 1
   }
 
-  # Grab the existing placeholder, anchoring on the provider key env token rather
-  # than a fixed column, taking only the FIRST match so a duplicated state can't
-  # produce a multi-line value. Preserved across rotation so running sandboxes
-  # that already injected it keep resolving to the new secret.
-  local placeholder
-  placeholder=$(printf '%s\n' "$secret_ls" \
-    | awk -v env="$usai_env" '{ for (i = 1; i <= NF; i++) if ($i == env) { print $(i+1); exit } }')
-
-  if [ -z "$placeholder" ]; then
+  if [ -z "$placeholders" ]; then
     echo "acq(sbx): $usai_env not found. Run 'acq secret ls' to check." >&2
     return 1
   fi
 
-  # Count provider key env rows. More than one means a previous rotation (before
-  # the fix in ADR-0008) left duplicate/ghost entries; the proxy can then resolve
-  # the placeholder to an empty entry and validation fails with 401.
-  local row_count
-  row_count=$(printf '%s\n' "$secret_ls" \
-    | grep -cE "[[:space:]]${usai_env}[[:space:]]" || true)
-
-  if [ "${row_count:-0}" -gt 1 ]; then
-    # --- Cleanup path for data corrupted by the pre-fix rotation bug ----------
-    # Only taken when duplicates exist. We must remove every custom secret for
-    # the host and recreate a single one — there's no in-place "dedupe". This is
-    # destructive and non-atomic: between the rm and the set-custom the host has
-    # NO USAi secret, so a Ctrl-C or a failed/cancelled set-custom would leave the
-    # host with no key at all. Guard that window with a trap that prints exact
-    # recovery steps, and disarm it once set-custom succeeds.
-    #
-    # sbx CLI scope/flag change (see docs/VERIFY_BACKENDS_HANDOFF.md "sbx CLI
-    # secret scope-flag change"): GLOBAL is the DEFAULT (no `-g`), and `secret rm`
-    # has NO `--host` flag — a custom secret is removed by its `--placeholder`.
-    # We hold the placeholder already, so remove EACH duplicate row by placeholder
-    # (rm by placeholder targets the one row; loop while any remain), then recreate
-    # a single canonical entry.
-    echo "Found $row_count $usai_env entries; consolidating to a single secret." >&2
-
-    local _ph="$placeholder" _host="$usai_host" _env="$usai_env"
-    # shellcheck disable=SC2064
-    trap "{
-      echo '' >&2
-      echo 'ERROR: rotation was interrupted while the USAi secret was removed' >&2
-      echo 'but before the new value was set. Your sandboxes currently have NO USAi key.' >&2
-      echo 'Recover by re-running this rotation, or manually:' >&2
-      echo '  sbx secret set-custom --host ${_host} --env ${_env} --placeholder ${_ph}' >&2
-    }" EXIT
-
-    # Remove every USAi custom row. Each row's placeholder is re-read from
-    # a fresh listing so we clear duplicates that may share OR differ in
-    # placeholder; -f avoids the confirm prompt, </dev/null guards our stdin.
-    local _guard=0 _dup_ph rm_err
-    while :; do
-      _dup_ph=$(sbx secret ls -g 2>/dev/null \
-        | awk -v env="$usai_env" '{ for (i = 1; i <= NF; i++) if ($i == env) { print $(i+1); exit } }')
-      [ -n "$_dup_ph" ] || break
-      if ! rm_err=$(sbx secret rm --placeholder "$_dup_ph" -f </dev/null 2>&1); then
-        trap - EXIT
-        echo "acq(sbx): failed to remove existing secrets: $rm_err" >&2
-        return 1
-      fi
-      _guard=$((_guard + 1))
-      [ "$_guard" -ge "${row_count:-0}" ] && break
-    done
-
-    # Recreate the single secret with the preserved placeholder. Omitting
-    # --value makes sbx prompt for the new key (keeps it out of shell history).
-    sbx secret set-custom --host "$usai_host" \
-          --env "$usai_env" --placeholder "$placeholder" || {
-      echo "acq(sbx): 'sbx secret set-custom' failed. See recovery steps above." >&2
-      return 1
-    }
-
-    trap - EXIT
-  else
-    # Healthy single-row case: set-custom updates the existing entry in place, so
-    # there's no need for the destructive rm (which would only add risk here).
-    # Omitting --value makes sbx prompt for the new key (no shell-history leak).
-    # Global is the default (no `-g`); see the CLI-change note above.
-    sbx secret set-custom --host "$usai_host" \
-          --env "$usai_env" --placeholder "$placeholder" || {
-      echo "acq(sbx): 'sbx secret set-custom' failed." >&2
-      return 1
-    }
+  # More than one global entry (for example left by a rotation from before
+  # ADR-0008) is refused, never consolidated: each running sandbox was injected
+  # with one of those placeholders at create, and acq cannot tell which one, so
+  # removing all of them and recreating one would cut sandboxes off. The
+  # refusal names every placeholder with its removal command and changes
+  # nothing; the user chooses which to keep.
+  if [ "$(printf '%s\n' "$placeholders" | grep -c .)" -gt 1 ]; then
+    local outcome="nothing was changed"
+    [ -z "${ACQ_PROPAGATING_SECRET:-}" ] || outcome="the sbx sandboxes were not re-fed"
+    _acq_sbx_print_duplicate_custom -g "" "$usai_env" "$usai_host" \
+      "$outcome" "acq usai-rotate-api-key" "$placeholders"
+    return 1
   fi
+
+  # One entry: set-custom with its placeholder updates it in place, so running
+  # sandboxes that already injected it keep resolving to the new secret.
+  # Omitting --value makes sbx prompt for the new key (no shell-history leak).
+  # Global is the default (no `-g`); see the "sbx CLI secret scope-flag change"
+  # note in docs/VERIFY_BACKENDS_HANDOFF.md.
+  local placeholder="$placeholders"
+  sbx secret set-custom --host "$usai_host" \
+        --env "$usai_env" --placeholder "$placeholder" || {
+    echo "acq(sbx): 'sbx secret set-custom' failed." >&2
+    return 1
+  }
 
   if [ -n "${ACQ_PROPAGATING_SECRET:-}" ]; then
     echo "acq(sbx): updated the USAi proxy placeholder for existing sbx sandbox(es)." >&2

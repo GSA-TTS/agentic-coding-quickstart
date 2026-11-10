@@ -15,7 +15,7 @@ teardown() { acq_teardown_stubs; }
 load 'helper'
 
 @test "rotate(sbx): dispatches to sbx secret set-custom + validates in a throwaway sandbox" {
-  printf 'placeholder-token USAI_API_KEY {}\n' > "$STUBDIR/sbx_ls"
+  printf 'CUSTOM SECRETS\n(global) api.gsa.usai.gov USAI_API_KEY placeholder-token ****\n' > "$STUBDIR/sbx_ls"
   run env SBX_LS_FIXTURE="$STUBDIR/sbx_ls" ACQ_BACKEND=sbx "$ACQ" usai-rotate-api-key
   local log
   log=$(cat "$CALLS")
@@ -86,4 +86,39 @@ load 'helper'
 @test "rotate: scripts/rotate-apikey is a thin shim with no direct sbx call" {
   run grep -qE '(^|[^[:alnum:]_])sbx[[:space:]]+secret' "$REPO_ROOT/scripts/rotate-apikey"
   assert_failure
+}
+
+@test "rotate(sbx): duplicate global USAi entries are refused, not consolidated" {
+  printf 'CUSTOM SECRETS\nSCOPE TARGETS ENV PLACEHOLDER SECRET\n(global) api.gsa.usai.gov USAI_API_KEY sbx-cs-dupa ****\n(global) api.gsa.usai.gov USAI_API_KEY sbx-cs-dupb ****\n' > "$STUBDIR/sbx_ls"
+  run env SBX_LS_FIXTURE="$STUBDIR/sbx_ls" ACQ_BACKEND=sbx "$ACQ" usai-rotate-api-key
+  assert_failure
+  assert_output --partial 'sbx holds 2 custom secrets for USAI_API_KEY on api.gsa.usai.gov in the global scope'
+  assert_output --partial 'sbx secret rm --placeholder sbx-cs-dupa -f'
+  assert_output --partial 'sbx secret rm --placeholder sbx-cs-dupb -f'
+  assert_output --partial 'a running sandbox may hold one of these placeholders'
+  assert_output --partial 'then re-run: acq usai-rotate-api-key'
+  refute_output --partial 'consolidating'
+  refute_regex "$(cat "$CALLS")" 'sbx secret (rm|set-custom)|sbx create'
+}
+
+@test "rotate(sbx): a same-env entry on another host or in a sandbox is not a duplicate" {
+  load_acq
+  printf 'CUSTOM SECRETS\n(global) usai.alt.example.gov USAI_API_KEY ph-alt ****\nsomebox api.gsa.usai.gov USAI_API_KEY ph-box ****\n(global) api.gsa.usai.gov USAI_API_KEY ph-main ****\n' > "$STUBDIR/sbx_ls"
+  export SBX_LS_FIXTURE="$STUBDIR/sbx_ls"
+  export ACQ_PROPAGATING_SECRET=1
+  run acq_backend_rotate_key
+  assert_success
+  assert_regex "$(cat "$CALLS")" 'sbx secret set-custom --host api\.gsa\.usai\.gov --env USAI_API_KEY --placeholder ph-main'
+  refute_regex "$(cat "$CALLS")" 'sbx secret rm'
+}
+
+@test "rotate(msb): propagation to sbx refuses duplicate global USAi entries" {
+  printf 'runningbox\n' > "$STUBDIR/.msb_sandbox_list"
+  printf 'legacy-sbx\n' > "$STUBDIR/.sandbox_list"
+  printf 'CUSTOM SECRETS\n(global) api.gsa.usai.gov USAI_API_KEY sbx-cs-dupa ****\n(global) api.gsa.usai.gov USAI_API_KEY sbx-cs-dupb ****\n' > "$STUBDIR/sbx_ls"
+  run env SBX_LS_FIXTURE="$STUBDIR/sbx_ls" ACQ_SECRET_TEST_VALUE="new-usai-key" ACQ_BACKEND=msb "$ACQ" usai-rotate-api-key
+  assert_failure
+  assert_output --partial 'sbx secret rm --placeholder sbx-cs-dupa -f'
+  assert_output --partial 'sbx secret rm --placeholder sbx-cs-dupb -f'
+  refute_regex "$(cat "$CALLS")" 'sbx secret (rm|set-custom)'
 }
