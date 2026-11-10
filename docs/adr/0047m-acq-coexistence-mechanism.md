@@ -113,8 +113,11 @@ The Python implementation also has behaviour gaps against Bash. It reads the
 only when the ref is pinned to a full commit (it fetches and verifies that
 commit), and refuses an unpinned ref at create (a local kit directory, once
 refused too, is now copied into acq's private cache and checked there). It has no kit
-heal on re-attach. It has no ssh-agent forwarding setup: it replays a
-Bash-recorded `ssh_auth_sock` but never sets forwarding up itself. Credential
+heal on re-attach. It now sets up host ssh-agent forwarding on msb as Bash
+does (the `--vsock` route, the in-guest bridge and its restarts, ADR-0021),
+reading and writing the same host-config key and route link, so a sandbox
+either implementation created keeps its forward; the differences and the live
+checks still owed are in `docs/KNOWN_FAILURE_MODES.md` §90. Credential
 rotation, configure settings and Bash-state import have open follow-ups. So
 ADR-0038m's "preserve every documented acq-owned command and meaningful flag"
 is not yet met. ADR-0048m gate 4 (command parity) is where parity is judged

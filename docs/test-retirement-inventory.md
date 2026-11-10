@@ -192,7 +192,7 @@ numeric-prefix order.
 | `111-balanced-egress.bats` | 8 | re-express | §5 deny-by-default egress rules (ADR-0018/0019) — security; no vector — **gap**. |
 | `112-msb-ports.bats` | 18 | preserve | §ports post-hoc publish (ADR-0015). Covered by `cli/ports-*`. |
 | `113-host-port-override.bats` | 24 | preserve | §ports + `--publish` (ADR-0034). Covered by `cli/ports-*`; host-port contention is Tier-2/Tier-3. |
-| `115-ssh-agent-forward.bats` | 38 | preserve | §6 **preserve-with-warning** "unavailable optional SSH-agent forwarding" (ADR-0021). No vector — **gap** (Tier-3 vsock route + Tier-2 probe). |
+| `115-ssh-agent-forward.bats` | 38 | preserve | §6 **preserve-with-warning** "unavailable optional SSH-agent forwarding" (ADR-0021). Python port at Tier-2 (`py-acq/tests/test_ssh_agent_forward.py`); vectors `cli/create-msb-ssh-agent-not-a-socket` and `cli/create-sbx-ssh-agent-notice` cover the skip and the sbx notice. Still a **gap** for the Tier-3 vsock route. |
 | `116-clone-option.bats` | 37 | re-express | §3 clone state (ADR-0027). No vector pins `--clone`/`ACQ_CLONE` — **gap**. |
 | `117-msys-path-forms.bats` | 11 | re-express | §4 Windows host/guest path forms (ADR-0029) — Windows qualification → **gap**. |
 | `120-workspace-preflight.bats` | 15 | re-express | §4 workspace preflight validation (path/identity) — language-specific validation; no vector — **gap**. |

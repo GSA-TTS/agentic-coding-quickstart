@@ -892,6 +892,14 @@ route as a unix socket at `/home/agent/.acq/ssh-agent.sock` and exports it as
   `scripts/verify-backends`: the guest's forwarded agent exposes the verifier's
   hermetic throwaway key over the `--vsock` + socat path. It cannot run in CI or
   inside a sandbox (no nested sandboxes); re-run on the ADR-0011 cadence.
+- **Both implementations.** The Python acq (`py-acq/src/acq_py/ssh_agent.py`)
+  wires the same route, link, bridge, re-drive and teardown, with the same
+  warnings, so a sandbox either one created keeps its forward under the other
+  (both read the `ssh-auth-sock` host-config key and the same link). It has not
+  been run against a live msb yet, and it differs in two places: it never
+  forwards from a Windows host (`SSH_AUTH_SOCK` gets the "not a socket" skip), and
+  its "could not verify the route" warning leaves out msb's own error text. See
+  [KNOWN_FAILURE_MODES §90](KNOWN_FAILURE_MODES.md#90-python-acq-host-ssh-agent-forwarding-differences-and-live-checks).
 
 See [ADR-0021](adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md) for the full
 rationale, the fixed vsock port (3552), and the trust-boundary discussion.
