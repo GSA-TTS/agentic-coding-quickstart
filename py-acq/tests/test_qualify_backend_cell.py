@@ -726,3 +726,485 @@ def test_run_process_does_not_wait_on_a_process_that_left_the_group():
     started = time.monotonic()
     proc = qbc.run_process(["sh", "-c", "setsid sleep 8 & sleep 30"], env=dict(os.environ), timeout=1, grace=1)
     assert proc is None and time.monotonic() - started < 6
+
+
+class _FakeStep:
+    """A stand-in for a step's ``Popen``: no real process, every call recorded."""
+
+    def __init__(self, events, *, exits=True, ignores_stop=False, interrupt=False):
+        self.events, self.exits, self.ignores_stop, self.interrupt = events, exits, ignores_stop, interrupt
+        self.pid, self.returncode, self.dead = 4242, None, False
+        self.stdin = self.stdout = self.stderr = None
+
+    def communicate(self, input=None, timeout=None):
+        self.events.append("wait")
+        if self.interrupt:
+            self.interrupt = False
+            raise KeyboardInterrupt  # the operator's Ctrl+C lands while the oracle waits
+        if self.exits or self.dead:
+            self.returncode = 0 if self.exits else 1
+            return "", ""
+        raise subprocess.TimeoutExpired("step", timeout)
+
+    def send_signal(self, sig):
+        self.events.append(("signal", sig))
+        self.dead = self.dead or not self.ignores_stop
+
+    def kill(self):
+        self.events.append("kill")
+        self.dead = True
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
+def test_a_second_stop_signal_does_not_cut_a_steps_stop_short(monkeypatch):
+    # A terminal's Ctrl+C reaches the oracle as SIGINT, and the harness forwards a
+    # SIGTERM as well. That second signal lands while the oracle is stopping the
+    # step it was waiting on; the step must still get its stop and, as it ignores
+    # it, the kill, and the first interrupt is the one that propagates.
+    import signal
+
+    events = []
+    step = _FakeStep(events, exits=False, ignores_stop=True, interrupt=True)
+
+    def signal_group(proc, kill, job=None):
+        # Recorded only: the fake's pid must never reach a real killpg.
+        events.append("group kill" if kill else "group stop")
+        if kill:
+            step.dead = True
+        else:
+            signal.raise_signal(signal.SIGTERM)  # the harness's forwarded stop
+
+    monkeypatch.setattr(qbc, "_spawn", lambda argv, **kwargs: (step, None))
+    monkeypatch.setattr(qbc, "_signal_group", signal_group)
+    saved = signal.signal(signal.SIGTERM, qbc._terminate)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            qbc.run_process(["step"], env={}, timeout=5.0, grace=0.05)
+        assert signal.getsignal(signal.SIGTERM) is qbc._terminate
+    finally:
+        signal.signal(signal.SIGTERM, saved)
+    assert events[:4] == ["wait", "group stop", "wait", "group kill"]  # the stop ran to the end
+
+
+def _stop_handlers():
+    import signal
+
+    return {s: signal.getsignal(s) for s in qbc._stop_signals()}
+
+
+def _restore_handlers(saved):
+    import signal
+
+    for sig, handler in saved.items():
+        signal.signal(sig, handler)
+
+
+def test_a_sigterm_that_lands_while_ctrl_c_is_still_unwinding_does_not_leave_the_step_running(monkeypatch):
+    # A terminal's Ctrl+C reaches the oracle as SIGINT and the harness forwards a
+    # SIGTERM as well. Here the SIGTERM lands at the worst moment: the
+    # KeyboardInterrupt is still unwinding and run_process has just entered its
+    # handler, before any guard of its own is in place. The oracle's SIGINT
+    # handler must already have closed that window, so the step is still stopped.
+    import signal
+
+    events = []
+    step = _FakeStep(events, exits=False, ignores_stop=True)
+    unwinding = SimpleNamespace(now=False)
+    waits = []
+
+    def communicate(input=None, timeout=None):
+        events.append("wait")
+        if not waits:
+            waits.append(timeout)
+            try:
+                signal.raise_signal(signal.SIGINT)  # the terminal's Ctrl+C
+            finally:
+                unwinding.now = True
+        if step.dead:
+            step.returncode = 1
+            return "", ""
+        raise subprocess.TimeoutExpired("step", timeout)
+
+    guard = qbc._ignore_stop_signals
+
+    def guard_with_a_late_sigterm():
+        if unwinding.now:
+            unwinding.now = False
+            signal.raise_signal(signal.SIGTERM)  # the harness's forwarded stop
+        return guard()
+
+    def signal_group(proc, kill, job=None):
+        # Recorded only: the fake's pid must never reach a real killpg.
+        events.append("group kill" if kill else "group stop")
+        step.dead = step.dead or kill
+
+    step.communicate = communicate
+    monkeypatch.setattr(qbc, "_spawn", lambda argv, **kwargs: (step, None))
+    monkeypatch.setattr(qbc, "_signal_group", signal_group)
+    monkeypatch.setattr(qbc, "_ignore_stop_signals", guard_with_a_late_sigterm)
+    saved = _stop_handlers()
+    try:
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        qbc._install_stop_handlers()  # as main() does
+        with pytest.raises(KeyboardInterrupt):
+            qbc.run_process(["step"], env={}, timeout=5.0, grace=0.05)
+    finally:
+        _restore_handlers(saved)
+    assert events == ["wait", "group stop", "wait", "group kill", "wait"]  # stopped, then killed
+
+
+def test_the_first_stop_signal_swallows_every_later_one():
+    import signal
+
+    saved = _stop_handlers()
+    stops = qbc._stop_signals()
+    try:
+        for first, raised in ((signal.SIGINT, KeyboardInterrupt), (signal.SIGTERM, SystemExit)):
+            signal.signal(signal.SIGINT, signal.default_int_handler)
+            qbc._install_stop_handlers()
+            assert signal.getsignal(signal.SIGINT) is qbc._interrupt
+            assert signal.getsignal(signal.SIGTERM) is qbc._terminate
+            with pytest.raises(raised):
+                signal.raise_signal(first)
+            assert all(signal.getsignal(s) is qbc._swallow for s in stops)
+            for later in stops:
+                signal.raise_signal(later)  # swallowed: nothing is raised
+        signal.signal(signal.SIGINT, signal.SIG_IGN)  # e.g. started as a background job
+        qbc._install_stop_handlers()
+        assert signal.getsignal(signal.SIGINT) is signal.SIG_IGN
+    finally:
+        _restore_handlers(saved)
+
+
+# ---- Windows: each step runs in a Job object, which the forced kill terminates ----
+
+
+@pytest.fixture
+def windows(monkeypatch):
+    """Drive the oracle's process handling down its Windows path, with fakes for the OS."""
+    state = SimpleNamespace(events=[], exits=True, ignores_stop=False, adopt_error=None, step=None)
+
+    class Job:
+        def terminate(self):
+            state.events.append("terminate")
+            state.step.dead = True
+
+        def release(self):
+            state.events.append("release")
+
+    def popen(argv, **kwargs):
+        state.events.append(("spawn", kwargs.get("creationflags")))
+        state.step = _FakeStep(state.events, exits=state.exits, ignores_stop=state.ignores_stop)
+        return state.step
+
+    def adopt(pid):
+        state.events.append(("adopt", pid))
+        if state.adopt_error is not None:
+            raise state.adopt_error
+        return Job()
+
+    def no_run(*args, **kwargs):
+        raise AssertionError(f"unexpected subprocess.run{args}")  # e.g. a taskkill
+
+    monkeypatch.setattr(qbc.subprocess, "Popen", popen)
+    monkeypatch.setattr(qbc.subprocess, "run", no_run)
+    monkeypatch.setattr(qbc.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
+    monkeypatch.setattr(qbc.signal, "CTRL_BREAK_EVENT", 1, raising=False)
+    monkeypatch.setattr(qbc.StepJob, "adopt", staticmethod(adopt))
+    monkeypatch.setattr(qbc.os, "name", "nt")
+    return state
+
+
+def test_on_windows_a_step_starts_suspended_in_its_own_job_which_is_released_after(windows):
+    proc = qbc.run_process(["step"], env={}, timeout=5.0)
+    assert proc is not None and proc.returncode == 0
+    assert windows.events == [("spawn", 0x200 | qbc.CREATE_SUSPENDED), ("adopt", 4242), "wait", "release"]
+
+
+def test_on_windows_the_forced_kill_terminates_the_steps_job(windows):
+    windows.exits, windows.ignores_stop = False, True
+    assert qbc.run_process(["step"], env={}, timeout=0.05, grace=0.05) is None
+    events = windows.events
+    assert events[:3] == [("spawn", 0x200 | qbc.CREATE_SUSPENDED), ("adopt", 4242), "wait"]
+    # CTRL_BREAK first, and only after the grace the job; nothing is looked up by pid.
+    assert events.index(("signal", 1)) < events.index("terminate")
+    assert "kill" not in events
+
+
+def test_on_windows_a_step_that_honours_ctrl_break_is_not_killed(windows):
+    windows.exits = False
+    assert qbc.run_process(["step"], env={}, timeout=0.05, grace=0.05) is None
+    assert ("signal", 1) in windows.events and windows.events[-1] == "release"
+    assert "terminate" not in windows.events and "kill" not in windows.events
+
+
+def test_on_windows_a_step_that_cannot_join_a_job_is_killed_before_it_runs(windows):
+    windows.adopt_error = OSError("no job")
+    assert qbc.run_process(["step"], env={}, timeout=5.0) is None
+    assert windows.events[:3] == [("spawn", 0x200 | qbc.CREATE_SUSPENDED), ("adopt", 4242), "kill"]
+
+
+def test_on_windows_a_stop_before_the_step_joins_its_job_kills_the_suspended_step(windows):
+    windows.adopt_error = KeyboardInterrupt()
+    with pytest.raises(KeyboardInterrupt):
+        qbc.run_process(["step"], env={}, timeout=5.0)
+    assert windows.events[:3] == [("spawn", 0x200 | qbc.CREATE_SUSPENDED), ("adopt", 4242), "kill"]
+
+
+def test_step_job_drives_the_job_object_api(monkeypatch):
+    import ctypes
+
+    calls = []
+
+    def api(name, result=1):
+        def call(*args):
+            if name == "SetInformationJobObject":
+                info = args[2]._obj  # the structure passed by reference
+                calls.append((name, args[0], args[1], info.BasicLimitInformation.LimitFlags, args[3]))
+            else:
+                calls.append((name, *args))
+            return result
+        return call
+
+    fake = SimpleNamespace(
+        CreateJobObjectW=api("CreateJobObjectW", 77), SetInformationJobObject=api("SetInformationJobObject"),
+        OpenProcess=api("OpenProcess", 88), AssignProcessToJobObject=api("AssignProcessToJobObject"),
+        NtResumeProcess=api("NtResumeProcess", 0), TerminateJobObject=api("TerminateJobObject"),
+        CloseHandle=api("CloseHandle"),
+    )
+    monkeypatch.setattr(qbc, "_win32", lambda: fake)
+    monkeypatch.setattr(qbc, "_win_error", lambda: OSError("win32 failure"))
+    size = ctypes.sizeof(qbc._ExtendedLimits)
+
+    job = qbc.StepJob.adopt(4242)
+    assert calls == [
+        ("CreateJobObjectW", None, None),
+        ("SetInformationJobObject", 77, 9, 0x2000 | 0x800, size),  # kill on job close; breakaway allowed
+        ("OpenProcess", 0x0901, False, 4242),  # terminate, set quota, suspend/resume
+        ("AssignProcessToJobObject", 77, 88),
+        ("NtResumeProcess", 88),  # resumed only once it is in the job
+        ("CloseHandle", 88),
+    ]
+    calls.clear()
+    job.release()  # the limit is lifted before the handle closes
+    assert calls == [("SetInformationJobObject", 77, 9, 0x800, size), ("CloseHandle", 77)]
+    calls.clear()
+    job.release()
+    job.terminate()
+    assert calls == []  # closed once
+
+    job = qbc.StepJob.adopt(4242)
+    calls.clear()
+    job.terminate()
+    job.release()
+    assert calls == [("TerminateJobObject", 77, 1), ("CloseHandle", 77)]
+
+    fake.NtResumeProcess = api("NtResumeProcess", -1073741790)
+    calls.clear()
+    with pytest.raises(OSError, match="NtResumeProcess"):
+        qbc.StepJob.adopt(4242)
+    assert calls[-2:] == [("CloseHandle", 88), ("CloseHandle", 77)]  # nothing is left open
+
+    fake.AssignProcessToJobObject = api("AssignProcessToJobObject", 0)
+    calls.clear()
+    with pytest.raises(OSError):
+        qbc.StepJob.adopt(4242)
+    assert ("NtResumeProcess", 88) not in calls  # a process outside the job is never resumed
+    assert calls[-2:] == [("CloseHandle", 88), ("CloseHandle", 77)]
+
+
+def test_the_job_limit_structure_has_the_windows_layout():
+    import ctypes
+
+    if ctypes.sizeof(ctypes.c_void_p) != 8:
+        pytest.skip("the expected sizes are the 64-bit ones")
+    assert ctypes.sizeof(qbc._BasicLimits) == 64
+    assert qbc._BasicLimits.LimitFlags.offset == 16
+    assert ctypes.sizeof(qbc._ExtendedLimits) == 144
+
+
+# Live Windows checks: real processes, a real Job object.
+
+_STUBBORN_STEP = """\
+import os, signal, subprocess, sys, time
+pidfile, log = sys.argv[1], sys.argv[2]
+def note(*_):
+    with open(log, 'a') as f:
+        f.write(f'{os.getpid()} break\\n')
+signal.signal(signal.SIGBREAK, note)  # CTRL_BREAK is noted, then ignored
+with open(log, 'a') as f:
+    f.write(f'{os.getpid()} ready\\n')
+if pidfile != '-':
+    # A venv's python.exe is a launcher that runs the interpreter as its own child,
+    # so the grandchild's pid is the one it logs, not necessarily child.pid.
+    child = subprocess.Popen([sys.executable, __file__, '-', log])
+    ready = []
+    for _ in range(600):
+        with open(log) as f:
+            ready = [line.split()[0] for line in f if line.endswith(' ready\\n')]
+        if len(ready) >= 2:
+            break
+        time.sleep(0.05)
+    with open(pidfile + '.tmp', 'w') as f:
+        f.write(' '.join(sorted({*ready, str(child.pid)})))
+    os.replace(pidfile + '.tmp', pidfile)
+for _ in range(1200):
+    time.sleep(0.1)
+"""
+
+_DRIVER = """\
+import importlib.util, os, sys
+from importlib.machinery import SourceFileLoader
+loader = SourceFileLoader('qualify_backend_cell_driver', sys.argv[1])
+spec = importlib.util.spec_from_loader(loader.name, loader)
+module = importlib.util.module_from_spec(spec)
+sys.modules[loader.name] = module
+loader.exec_module(module)
+module.run_process([sys.executable, *sys.argv[2:]], env=dict(os.environ), timeout=120.0)
+"""
+
+
+class _Win:
+    """Process handles for the live Windows checks (a handle pins its pid)."""
+
+    def __init__(self):
+        import ctypes
+
+        self.ctypes = ctypes
+        k = ctypes.WinDLL("kernel32", use_last_error=True)
+        h = ctypes.c_void_p
+        for name, args, res in (("OpenProcess", [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32], h),
+                                ("WaitForSingleObject", [h, ctypes.c_uint32], ctypes.c_uint32),
+                                ("TerminateProcess", [h, ctypes.c_uint], ctypes.c_int),
+                                ("CloseHandle", [h], ctypes.c_int),
+                                ("GetCurrentProcess", [], h),
+                                ("GetProcessHandleCount", [h, ctypes.POINTER(ctypes.c_uint32)], ctypes.c_int)):
+            getattr(k, name).argtypes, getattr(k, name).restype = args, res
+        self.k = k
+
+    def open(self, pid):
+        # SYNCHRONIZE | PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION
+        handle = self.k.OpenProcess(0x00100000 | 0x0001 | 0x1000, False, pid)
+        assert handle, f"process {pid} is already gone"
+        return handle
+
+    def ended(self, handle, seconds=0.0):
+        return self.k.WaitForSingleObject(handle, int(seconds * 1000)) == 0
+
+    def kill(self, handle):
+        self.k.TerminateProcess(handle, 1)
+        self.k.CloseHandle(handle)
+
+    def handle_count(self):
+        count = self.ctypes.c_uint32()
+        assert self.k.GetProcessHandleCount(self.k.GetCurrentProcess(), self.ctypes.byref(count))
+        return count.value
+
+
+def _wait_for(path, seconds=60.0):
+    import time
+
+    end = time.monotonic() + seconds
+    while not path.exists():
+        assert time.monotonic() < end, f"{path.name} never appeared"
+        time.sleep(0.05)
+    return [int(x) for x in path.read_text().split()]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows Job objects")
+def test_on_windows_the_forced_kill_ends_a_grandchild_that_ignores_ctrl_break_and_nothing_else(tmp_path):
+    import threading
+
+    win = _Win()
+    step, pids, log = tmp_path / "step.py", tmp_path / "pids", tmp_path / "log"
+    step.write_text(_STUBBORN_STEP)
+    bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    result = []
+    # The timeout leaves room for two interpreter start-ups on a slow host.
+    runner = threading.Thread(target=lambda: result.append(qbc.run_process(
+        [sys.executable, str(step), str(pids), str(log)], env=dict(os.environ), timeout=20.0, grace=2.0)))
+    runner.start()
+    handles = []
+    try:
+        handles = [win.open(pid) for pid in _wait_for(pids)]
+        runner.join(60)
+        assert not runner.is_alive() and result == [None]
+        assert all(win.ended(h, 10.0) for h in handles)  # the step and its grandchild
+        assert bystander.poll() is None  # a process outside the job is untouched
+        # Both were sent CTRL_BREAK and ignored it; only the job's termination ended them.
+        noted = log.read_text().split("\n")
+        ready = [line.split()[0] for line in noted if line.endswith(" ready")]
+        assert len(ready) == 2 and all(f"{pid} break" in noted for pid in ready), noted
+    finally:
+        for h in handles:
+            win.kill(h)
+        bystander.kill()
+        bystander.wait()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows Job objects")
+def test_on_windows_a_step_that_exits_leaves_no_job_handle_and_its_daemon_running():
+    win = _Win()
+    leaver = ("import subprocess, sys\n"
+              "d = subprocess.DEVNULL\n"
+              # the interpreter itself, not a venv launcher, so its pid is the process to check
+              "exe = getattr(sys, '_base_executable', sys.executable)\n"
+              "child = subprocess.Popen([exe, '-c', 'import time; time.sleep(60)'],"
+              " stdin=d, stdout=d, stderr=d)\n"
+              "print(child.pid)\n")
+    # The interpreter itself as the step, not a venv launcher with a job of its own.
+    step = getattr(sys, "_base_executable", sys.executable)
+    proc = qbc.run_process([step, "-c", leaver], env=dict(os.environ), timeout=60.0)
+    assert proc is not None and proc.returncode == 0
+    daemon = win.open(int(proc.stdout))
+    try:
+        assert not win.ended(daemon, 1.0)  # closing the job did not kill what the step left running
+    finally:
+        win.kill(daemon)
+    qbc.run_process([sys.executable, "-c", "pass"], env=dict(os.environ))  # warm up
+    before = win.handle_count()
+    for _ in range(5):
+        assert qbc.run_process([sys.executable, "-c", "pass"], env=dict(os.environ)).returncode == 0
+    assert win.handle_count() <= before + 2  # no job (or process) handle is left behind
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows Job objects")
+def test_on_windows_a_step_may_start_a_process_that_breaks_away_from_its_job():
+    # A backend that detaches its daemon with CREATE_BREAKAWAY_FROM_JOB must not be
+    # refused under the oracle (it would be, with ERROR_ACCESS_DENIED, if the job
+    # did not allow breakaway).
+    win = _Win()
+    detacher = ("import subprocess, sys\n"
+                "d = subprocess.DEVNULL\n"
+                "exe = getattr(sys, '_base_executable', sys.executable)\n"
+                "child = subprocess.Popen([exe, '-c', 'import time; time.sleep(60)'],"
+                " stdin=d, stdout=d, stderr=d, creationflags=0x01000000)\n"
+                "print(child.pid)\n")
+    # The interpreter itself as the step: a venv's python.exe launcher puts the
+    # interpreter in a job of its own, which would decide the breakaway instead.
+    step = getattr(sys, "_base_executable", sys.executable)
+    proc = qbc.run_process([step, "-c", detacher], env=dict(os.environ), timeout=60.0)
+    assert proc is not None and proc.returncode == 0, proc and proc.stderr
+    win.kill(win.open(int(proc.stdout)))
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows Job objects")
+def test_on_windows_a_step_dies_with_an_oracle_that_is_killed_outright(tmp_path):
+    win = _Win()
+    step, driver, pids, log = tmp_path / "step.py", tmp_path / "driver.py", tmp_path / "pids", tmp_path / "log"
+    step.write_text(_STUBBORN_STEP)
+    driver.write_text(_DRIVER)
+    oracle = subprocess.Popen([sys.executable, str(driver), str(ORACLE_PATH), str(step), str(pids), str(log)])
+    handles = []
+    try:
+        handles = [win.open(pid) for pid in _wait_for(pids)]
+        oracle.kill()  # TerminateProcess: no cleanup runs in the oracle
+        oracle.wait(30)
+        assert all(win.ended(h, 10.0) for h in handles)  # the job closed with it, and killed them
+    finally:
+        for h in handles:
+            win.kill(h)
+        if oracle.poll() is None:
+            oracle.kill()
