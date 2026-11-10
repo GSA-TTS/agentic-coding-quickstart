@@ -3059,14 +3059,17 @@ _acq_kit_source_owner_prefix() {
 # fetching their kits.
 # shellcheck disable=SC2120  # EXCLUDE_REPO is passed by sbx.sh (another file), which per-file analysis cannot see
 acq_kit_source_prefixes() {
-  local exclude="${1:-}" entries repo rest prefix seen=""
+  local exclude="${1:-}" entries repo rest prefix prefix_lc seen=""
   entries=$(acq_kit_sources_entries) || return 1
   while IFS='|' read -r repo rest; do
     [ -n "$repo" ] || continue
     [ "$repo" != "$exclude" ] || continue
     prefix=$(_acq_kit_source_owner_prefix "$repo")
-    case " $seen " in *" $prefix "*) continue ;; esac
-    seen="$seen $prefix"
+    # Prefixes that differ only in letter case name the same owner: list it once,
+    # under the first spelling seen (as the Python acq does).
+    prefix_lc=$(_acq_ascii_lower "$prefix")
+    case " $seen " in *" $prefix_lc "*) continue ;; esac
+    seen="$seen $prefix_lc"
     printf '%s\n' "$prefix"
   done <<EOF
 $entries
@@ -3082,24 +3085,37 @@ EOF
   return 0
 }
 
-# _acq_kit_source_entry_for_repo REPO — echo "repo<TAB>ref<TAB>dir" for a repo that
-# is registered (exact host/owner/repo), or fail.
+# _acq_kit_source_entry_for_repo REPO — echo "repo|ref|dir" for a registered repo,
+# or fail. GitHub ignores the letter case of hosts, owners and repositories, so
+# the lookup does too: an exact spelling wins, else the first entry that matches
+# ignoring ASCII case. The echoed repo is the REGISTERED spelling, which callers
+# that rewrite the registry must use.
 _acq_kit_source_entry_for_repo() {
-  local wanted="${1:-}" repo ref dir
+  local wanted="${1:-}" repo ref dir entries wanted_lc
   [ -n "$wanted" ] || return 1
+  entries=$(acq_kit_sources_entries) || entries=""
   while IFS='|' read -r repo ref dir; do
     [ -n "$repo" ] || continue
     [ "$repo" = "$wanted" ] || continue
     printf '%s|%s|%s\n' "$repo" "$ref" "$dir"
     return 0
   done <<EOF
-$(acq_kit_sources_entries)
+$entries
+EOF
+  wanted_lc=$(_acq_ascii_lower "$wanted")
+  while IFS='|' read -r repo ref dir; do
+    [ -n "$repo" ] || continue
+    [ "$(_acq_ascii_lower "$repo")" = "$wanted_lc" ] || continue
+    printf '%s|%s|%s\n' "$repo" "$ref" "$dir"
+    return 0
+  done <<EOF
+$entries
 EOF
   # The pinned Patterns release is acq's CONTROL PLANE (validator + schemas), so
   # it stays resolvable even when the registry is overridden for one invocation
   # (ACQ_KIT_SOURCES) or emptied: the default provider kit must not vanish just
   # because an extra source was added for this run.
-  if [ "$wanted" = "$ACQ_KIT_SOURCE_DEFAULT_REPO" ]; then
+  if _acq_kit_source_is_control_plane "$wanted"; then
     printf '%s|%s|%s\n' \
       "$ACQ_KIT_SOURCE_DEFAULT_REPO" "$ACQ_KIT_SOURCE_DEFAULT_REF" "$ACQ_KIT_SOURCE_DEFAULT_DIR"
     return 0
@@ -3118,18 +3134,20 @@ _acq_kit_source_resolve_repo() {
     return 0
   fi
   case "$want" in
-    */*) _acq_kit_source_entry_for_repo "$want" >/dev/null || {
+    */*) found=$(_acq_kit_source_entry_for_repo "$want") || {
            echo "acq: kit source '$want' is not trusted." >&2
            echo "     Add it first: acq kit-source add $want --ref <sha>" >&2
            return 1
          }
-         printf '%s\n' "$want"
+         printf '%s\n' "${found%%|*}"
          return 0
          ;;
   esac
+  local want_lc
+  want_lc=$(_acq_ascii_lower "$want")
   while IFS='|' read -r repo ref dir; do
     [ -n "$repo" ] || continue
-    [ "${repo##*/}" = "$want" ] || continue
+    [ "$(_acq_ascii_lower "${repo##*/}")" = "$want_lc" ] || continue
     count=$((count + 1))
     found="$repo"
   done <<EOF
@@ -3394,7 +3412,14 @@ acq_kit_source_set() {
   [ -n "$dir" ] || dir="$ACQ_KIT_SOURCE_DEFAULT_DIR"
   # Validate the entry before persisting it (same rules the reader enforces).
   _acq_kit_source_parse_entry "${repo}@${ref}|${dir}" "kit-source add" >/dev/null || return 1
-  summary=$(_acq_kit_source_rewrite "$repo" "$repo" "$ref" "$dir") || {
+  # An entry registered under another letter case is the same repository:
+  # replace it rather than add a second entry.
+  local existing drop="$repo"
+  if existing=$(_acq_kit_source_entry_for_repo "$repo" 2>/dev/null) \
+      && ! _acq_kit_source_is_control_plane "$repo"; then
+    drop="${existing%%|*}"
+  fi
+  summary=$(_acq_kit_source_rewrite "$drop" "$repo" "$ref" "$dir") || {
     echo "acq: kit-source add: could not write $(_acq_config_file)" >&2
     return 1
   }
@@ -3436,10 +3461,13 @@ acq_kit_source_rm() {
     echo "     Team/personal sources can be removed; the control plane is the pinned trust anchor." >&2
     return 1
   fi
-  if ! _acq_kit_source_entry_for_repo "$repo" >/dev/null; then
+  local entry
+  if ! entry=$(_acq_kit_source_entry_for_repo "$repo"); then
     echo "acq: kit source '${repo}' is not registered." >&2
     return 1
   fi
+  # Act on the registered spelling (the lookup ignores letter case).
+  repo="${entry%%|*}"
   # Reconcile the BACKEND allowlist first. If it cannot be brought in line, stop
   # with the registry untouched: nothing is reported as removed, the source stays
   # listed, and re-running this command after fixing the backend retries cleanly.

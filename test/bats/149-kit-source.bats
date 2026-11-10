@@ -133,6 +133,40 @@ _fake_source_tree() {
     || ! grep -Fq 'kit_sources: none' "$XDG_CONFIG_HOME/acq/config.yaml"
 }
 
+@test "kit-source lookups ignore letter case, as GitHub does" {
+  run "$ACQ" kit-source add github.com/acme/kits --ref aaaa
+  assert_success
+  # Trust and resolution find the registered spelling.
+  run _acq_kit_source_entry_for_repo github.com/Acme/Kits
+  assert_success
+  assert_output 'github.com/acme/kits|aaaa|integrations/isolation/acq-kits'
+  run _acq_kit_source_resolve_repo github.com/ACME/kits
+  assert_success
+  assert_output 'github.com/acme/kits'
+  run _acq_kit_source_resolve_repo KITS
+  assert_success
+  assert_output 'github.com/acme/kits'
+  # Adding a case variant updates the one entry instead of adding a second.
+  run "$ACQ" kit-source add github.com/Acme/kits --ref bbbb
+  assert_success
+  assert_output --partial 'updated kit source'
+  run acq_kit_sources_entries
+  assert_equal "$(printf '%s\n' "$output" | grep -ic 'github.com/acme/kits|')" "1"
+  assert_output --partial 'github.com/Acme/kits|bbbb|'
+  # Prefixes differing only in case are listed once.
+  run "$ACQ" kit-source add github.com/ACME/other --ref cccc
+  assert_success
+  run acq_kit_source_prefixes
+  assert_equal "$(printf '%s\n' "$output" | grep -ic '^github.com/acme/$')" "1"
+  # rm finds the entry in another letter case and removes it.
+  run "$ACQ" kit-source rm github.com/acme/KITS
+  assert_success
+  assert_output --partial "removed kit source 'github.com/Acme/kits'"
+  run acq_kit_sources_entries
+  refute_output --partial '/kits|'
+  assert_output --partial 'github.com/ACME/other|cccc|'
+}
+
 @test "kit-source rm reports an unregistered repository" {
   run "$ACQ" kit-source rm github.com/other/repo
   assert_failure
