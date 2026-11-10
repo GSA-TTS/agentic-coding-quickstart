@@ -480,6 +480,27 @@ while :; do
     *) break ;;
   esac
 done
+# Refuse an unusable install dir before anything is written or extracted.
+if [ -L "$INSTALL_DIR" ]; then
+  die "$INSTALL_DIR is a symlink; refusing to install through it (pass --install-dir with a real directory)"
+fi
+if [ -e "$INSTALL_DIR" ] && [ ! -d "$INSTALL_DIR" ]; then
+  die "$INSTALL_DIR exists and is not a directory; move it aside or pass --install-dir"
+fi
+
+# Leftovers of an earlier run are named for that run's process id. A PID that
+# is still alive may be another install into the same directory, running right
+# now, and sweeping its in-flight files would make it fail, so its entries are
+# skipped. A process owned by another user answers kill -0 with an error, so ps
+# is asked too; a reused PID only means the leftover waits for a later run. Two
+# PIDs never count as alive: this run's own (an earlier run in a fresh container
+# often had the same PID, and its leftovers are not this run's), and 1, which is
+# init on a host and in most containers rather than an installer.
+pid_alive() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$1" != "$$" ] && [ "$1" != 1 ] || return 1
+  kill -0 "$1" 2>/dev/null || ps -p "$1" >/dev/null 2>&1
+}
 
 # Extract into a private directory beside the install dir, in its parent, so the
 # release and the install dir share a filesystem and each move into place below
@@ -487,11 +508,12 @@ done
 # copy plus a delete, and a failure partway would leave half-copied entries. If
 # the parent cannot hold a new directory (an install dir the user created under
 # a parent they cannot write), stage in the private work dir as before; a failed
-# run there is still finished by re-running the installer.
+# run there is still finished by re-running the installer. The name carries this
+# run's PID so a later run can sweep a staging dir left by one that was killed.
 install_parent="${INSTALL_DIR%/*}"
 [ -n "$install_parent" ] || install_parent=/
 mkdir -p "$install_parent" 2>/dev/null || :
-if stage_root="$(mktemp -d "$install_parent/.acq-stage.XXXXXXXX" 2>/dev/null)"; then
+if stage_root="$(mktemp -d "$install_parent/.acq-stage.$$.XXXXXXXX" 2>/dev/null)"; then
   chmod 700 "$stage_root"
   staging="$stage_root/stage"
 else
@@ -542,12 +564,6 @@ fi
 OWNED_MARKER=".acq-v1-install"
 cp "$tmpdir/$PROVENANCE_NAME" "$staging/$PROVENANCE_NAME"
 
-if [ -L "$INSTALL_DIR" ]; then
-  die "$INSTALL_DIR is a symlink; refusing to install through it (pass --install-dir with a real directory)"
-fi
-if [ -e "$INSTALL_DIR" ] && [ ! -d "$INSTALL_DIR" ]; then
-  die "$INSTALL_DIR exists and is not a directory; move it aside or pass --install-dir"
-fi
 mkdir -p "$INSTALL_DIR"
 marker="$INSTALL_DIR/$OWNED_MARKER"
 was_marked=0
@@ -586,19 +602,21 @@ marker_tmp=""
 # Move-aside dirs and temporary markers from an earlier interrupted run hold
 # only acq's own files, but only trust that in a directory that was already
 # marked before this run. A temporary marker is a regular file named for the
-# marker plus ".tmp." and a process id; anything else is left alone.
-# Both names end in the process id of the run that made them. Another install
-# into the same directory may be running right now, and sweeping its in-flight
-# files would make it fail, so an entry whose process is still alive is skipped.
-# A process owned by another user answers kill -0 with an error, so ps is asked
-# too; a reused PID only means the leftover waits for a later run.
-pid_alive() {
-  case "$1" in ''|*[!0-9]*) return 1 ;; esac
-  kill -0 "$1" 2>/dev/null || ps -p "$1" >/dev/null 2>&1
-}
+# marker plus ".tmp." and a process id; anything else is left alone. Staging
+# dirs left in the parent by a killed run (.acq-stage.<pid>.<random>) are swept
+# under the same rule, never this run's own. Entries of a live process are
+# skipped (pid_alive, above).
 if [ "$was_marked" -eq 1 ]; then
   for stale in "$INSTALL_DIR"/.acq-previous.*; do
     pid_alive "${stale##*/.acq-previous.}" && continue
+    [ -d "$stale" ] && [ ! -L "$stale" ] && rm -rf "$stale"
+  done
+  for stale in "$install_parent"/.acq-stage.*.*; do
+    [ "$stale" != "$stage_root" ] || continue
+    stale_pid="${stale##*/.acq-stage.}"
+    stale_pid="${stale_pid%%.*}"
+    case "$stale_pid" in ''|*[!0-9]*) continue ;; esac
+    pid_alive "$stale_pid" && continue
     [ -d "$stale" ] && [ ! -L "$stale" ] && rm -rf "$stale"
   done
   for stale in "$marker".tmp.*; do

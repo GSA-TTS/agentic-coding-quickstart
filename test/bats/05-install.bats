@@ -288,6 +288,68 @@ SHIM
   [ "$(cat "$dir/.acq-previous.$$/acq")" = 'moved aside' ]
 }
 
+# In a fresh container PIDs repeat, so an earlier interrupted run often had this
+# run's PID. Its move-aside dir is a leftover, not this run's, and must be swept
+# rather than block this run's own `mkdir`. exec keeps the planting shell's PID.
+@test "installer: a leftover named for this run's own PID is swept" {
+  local dir; dir="$(_install_dir)"
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_success
+  run sh -c 'mkdir -p "$1/.acq-previous.$$" && printf "leftover\n" > "$1/.acq-previous.$$/acq" \
+    && exec sh "$2" --source "$3" --yes' _ "$dir" "$REPO_ROOT/install.sh" "$REPO_ROOT/test/fixtures/installer"
+  assert_success
+  [ -z "$(find "$dir" -maxdepth 1 -name '.acq-previous.*')" ]
+}
+
+# PID 1 is init on a host and in most containers, never a concurrent install.
+@test "installer: a leftover named for PID 1 is swept" {
+  local dir; dir="$(_install_dir)"
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_success
+  mkdir -p "$dir/.acq-previous.1"; printf 'leftover\n' > "$dir/.acq-previous.1/acq"
+  printf 'old\n' > "$dir/.acq-v1-install.tmp.1"
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_success
+  [ ! -e "$dir/.acq-previous.1" ]
+  [ ! -e "$dir/.acq-v1-install.tmp.1" ]
+}
+
+# A killed run leaves its staging dir (.acq-stage.<pid>.<random>) in the install
+# dir's parent; a later run sweeps it unless its process is still running.
+@test "installer: stale staging dirs in the parent are swept, live ones kept" {
+  local dir dead; dir="$(_install_dir)"
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_success
+  sh -c 'exit 0' & dead=$!
+  wait "$dead" || :
+  mkdir -p "$XDG_DATA_HOME/.acq-stage.$dead.AbCdEfGh/stage" "$XDG_DATA_HOME/.acq-stage.$$.AbCdEfGh/stage" \
+    "$XDG_DATA_HOME/.acq-stage.mine"
+  printf 'x\n' > "$XDG_DATA_HOME/.acq-stage.$dead.AbCdEfGh/stage/acq"
+  ln -s "$STUBDIR/elsewhere" "$XDG_DATA_HOME/.acq-stage.$dead.LiNkLiNk"
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_success
+  [ ! -e "$XDG_DATA_HOME/.acq-stage.$dead.AbCdEfGh" ]
+  # A live process's staging dir, a lookalike and a symlink are left alone.
+  [ -d "$XDG_DATA_HOME/.acq-stage.$$.AbCdEfGh/stage" ]
+  [ -d "$XDG_DATA_HOME/.acq-stage.mine" ]
+  [ -L "$XDG_DATA_HOME/.acq-stage.$dead.LiNkLiNk" ]
+}
+
+# The install dir refusals come before anything is extracted or staged.
+@test "installer: a symlinked install dir is refused before extracting anything" {
+  local dir real_tar; dir="$(_install_dir)"
+  real_tar="$(command -v tar)"
+  mkdir -p "$STUBDIR/elsewhere" "$STUBDIR/tar-shim" "$(dirname "$dir")"
+  ln -s "$STUBDIR/elsewhere" "$dir"
+  printf '#!/bin/sh\n: > "%s/tar-ran"\nexec "%s" "$@"\n' "$STUBDIR" "$real_tar" > "$STUBDIR/tar-shim/tar"
+  chmod +x "$STUBDIR/tar-shim/tar"
+  PATH="$STUBDIR/tar-shim:$PATH" run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_failure
+  assert_output --partial 'is a symlink'
+  [ ! -e "$STUBDIR/tar-ran" ]
+  [ -z "$(find "$XDG_DATA_HOME" -maxdepth 1 -name '.acq-stage.*')" ]
+}
+
 @test "installer: a failed marker rename leaves no temporary marker behind" {
   local dir shim; dir="$(_install_dir)"
   shim="$STUBDIR/mv-shim"; mkdir -p "$shim"
@@ -397,8 +459,9 @@ SHIM
   [ -e "$(_install_dir)/py-acq/runtime/bin/python3" ]
   run cat "$STUBDIR/mv.log"
   # Each release entry moves from a staging dir in the install dir's parent.
-  assert_line --regexp "^$XDG_DATA_HOME/\\.acq-stage\\.[A-Za-z0-9]+/stage/(.*/)?py-acq\$"
-  assert_line --regexp "^$XDG_DATA_HOME/\\.acq-stage\\.[A-Za-z0-9]+/stage/(.*/)?acq\$"
+  # The staging dir is named .acq-stage.<installer pid>.<random>.
+  assert_line --regexp "^$XDG_DATA_HOME/\\.acq-stage\\.[0-9]+\\.[A-Za-z0-9]+/stage/(.*/)?py-acq\$"
+  assert_line --regexp "^$XDG_DATA_HOME/\\.acq-stage\\.[0-9]+\\.[A-Za-z0-9]+/stage/(.*/)?acq\$"
   refute_output --partial "$STUBDIR/tmp/"
   # The staging dir is gone afterwards.
   [ -z "$(find "$XDG_DATA_HOME" -maxdepth 1 -name '.acq-stage.*')" ]
