@@ -21,7 +21,6 @@ import os
 import shlex
 import subprocess
 import sys
-import tempfile
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
@@ -636,7 +635,7 @@ class _MkdirLock:
         identity = self._own_identity()
         for _attempt in range(3):
             if identity is None:
-                self.blocked = self._reservations() or (self.path.exists() and _bash_owner_state(self.path) != "stale")
+                self.blocked = self.path.exists() and _bash_owner_state(self.path) != "stale"
                 return not self.blocked
             parent = _open_lock_parent(self.path.parent, self.root, self.label)
             try:
@@ -674,8 +673,6 @@ class _MkdirLock:
             os.mkdir(self.path.name, dir_fd=parent)
         except FileExistsError:
             if not self.claims_ownerless:
-                if any(self.path.glob("owner.stale.*")) and not self._reservations():
-                    self._rmdir_quietly()
                 return False
         try:
             fd = os.open(self.path.name, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW, dir_fd=parent)
@@ -685,8 +682,6 @@ class _MkdirLock:
             self._rmdir_quietly()
             raise
         try:
-            if self._reservations():
-                return False
             try:
                 owner = os.open("owner", os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW, 0o644, dir_fd=fd)
             except FileExistsError:
@@ -706,9 +701,6 @@ class _MkdirLock:
                 raise
         finally:
             os.close(fd)
-        if self._reservations():
-            self._remove(token)
-            return False
         self.token = token
         return True
 
@@ -723,8 +715,12 @@ class _MkdirLock:
         """Remove the lock if this process still owns it."""
         if self.token is None:
             return
-        self._reservations(self.token)
-        self._remove(self.token)
+        try:
+            current = (self.path / "owner").read_text(encoding="utf-8").strip()
+        except OSError:
+            current = ""
+        if current == self.token:
+            self._remove(self.token)
         self.token = None
 
     def recovery_command(self) -> str:
@@ -739,64 +735,27 @@ class _MkdirLock:
         return f"rm -f -- {shlex.quote(str(self.path / 'owner'))} && rmdir -- {shlex.quote(str(self.path))}"
 
     def _remove(self, expected: str | None) -> None:
-        """Detach owner atomically, then remove only the exact token judged.
+        """Remove the lock, unless its owner line is no longer ``expected``.
 
-        The private directory blocks new takers while owner is absent. If the
-        token changed, hard-link it back exclusively; if another file is there
-        already, retain it privately so takers remain blocked until cleanup.
-        Bash uses the same reservation protocol in common.sh.
+        A stale lock is judged on the owner line read first. Another command
+        may recover it and take it anew before this one gets here, and that
+        new lock must survive, so the line is read again right before the
+        removal. ``None`` is for a lock this process has just created and not
+        yet given an owner. (The read and the removal are still two steps, the
+        same narrow window Bash's own recovery has.)
         """
-        if self.path.is_symlink():
-            return
-        if expected is None:
-            self._rmdir_quietly()
+        if expected is not None and _owner_line(self.path).strip() != expected.strip():
             return
         try:
-            private = Path(tempfile.mkdtemp(prefix=f"owner.stale.{os.getpid()}.", dir=self.path))
+            _retry_permission((self.path / "owner").unlink)
+        except FileNotFoundError:
+            pass
         except OSError:
             return
-        saved = private / "owner"
         try:
-            _retry_permission(lambda: os.rename(self.path / "owner", saved))
-            if _owner_line(private) == expected:
-                _retry_permission(saved.unlink)
-            else:
-                os.link(saved, self.path / "owner")  # exclusive: never overwrite a newer owner
-                _retry_permission(saved.unlink)
+            _retry_permission(self.path.rmdir)
         except OSError:
             pass
-        self._reservations(expected)
-        with suppress(OSError):
-            _retry_permission(private.rmdir)
-        self._rmdir_quietly()
-
-    def _reservations(self, releasing: str | None = None) -> bool:
-        """Clean provably abandoned reservations; True while any still block takers."""
-        if self.path.is_symlink():
-            return True
-        held = False
-        for private in self.path.glob("owner.stale.*"):
-            if private.is_dir() and not private.is_symlink():
-                pid = _owner_pid(private.name.split(".")[2])
-                line = _owner_line(private)
-                if sys.platform == "win32":  # no cross-runtime PID probe
-                    try:
-                        abandoned = time.time() - private.stat().st_mtime >= _BASH_WINDOWS_FRESH_S
-                    except OSError:
-                        abandoned = False
-                    stale = abandoned  # age rule; never os.kill a Windows PID
-                else:
-                    abandoned = pid is not None and not _pid_alive(pid)
-                    stale = abandoned and _bash_owner_state(private, line) == "stale"
-                if ((releasing is not None and line == releasing)
-                        or (abandoned and (not (private / "owner").exists()
-                                           or stale))):
-                    with suppress(OSError):
-                        _retry_permission((private / "owner").unlink)
-                    with suppress(OSError):
-                        _retry_permission(private.rmdir)
-            held = held or os.path.lexists(private)
-        return held
 
 
 # On Windows an antivirus scanner or the search indexer can hold a just-written
@@ -969,8 +928,6 @@ class ConfigDirLock(_MkdirLock):
 
     def _create_owner(self, token: str) -> bool | None:
         """Create the owner file exclusively; True when taken, False when held, None when the directory went."""
-        if self._reservations():
-            return False
         try:
             fh = open(self.path / "owner", "x", encoding="utf-8")
         except FileExistsError:
@@ -988,9 +945,6 @@ class ConfigDirLock(_MkdirLock):
                 (self.path / "owner").unlink()
             self._rmdir_quietly()
             raise
-        if self._reservations():
-            self._remove(token)
-            return False
         self.token = token
         return True
 

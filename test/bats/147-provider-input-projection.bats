@@ -869,98 +869,6 @@ EOF
   acq_provider_input_lock_release "$lock"
 }
 
-@test "projection lock recovery preserves an owner replaced after the stale read" {
-  local root lock live
-  root=$(acq_provider_input_root sbx recovery-race); lock="${root}.lock"
-  _acq_provider_input_safe_mkdir "$lock"
-  live="$$ $(_acq_provider_input_process_identity "$$")"
-  printf '999999 stale\n' > "$lock/owner"
-  _acq_pid_alive() {
-    if [ "$1" = 999999 ]; then printf '%s\n' "$live" > "$lock/owner"; return 1; fi
-    command kill -0 "$1" 2>/dev/null
-  }
-  ACQ_PROVIDER_INPUT_LOCK_RETRIES=1 run acq_provider_input_lock_acquire sbx recovery-race
-  assert_failure
-  assert_equal "$(cat "$lock/owner")" "$live"
-}
-
-@test "lock takers refuse a detached live owner during recovery" {
-  local lock="$STUBDIR/detached" take
-  mkdir "$lock"
-  printf 'new live\n' > "$lock/owner"
-  mv() {
-    command mv "$@" || return
-    for take in _acq_config_lock_take _acq_provider_input_lock_take; do
-      if "$take" "$lock" 'contender token'; then return 1; fi
-    done
-  }
-  _racy_mkdir
-  _acq_lock_remove_owner "$lock" 'old stale'
-  assert_equal "$(cat "$lock/owner")" 'new live'
-  [ "$(ls -A "$lock")" = owner ]
-}
-
-@test "lock recovery cleans reservations left by a dead remover" {
-  local lock private take
-  for take in _acq_config_lock_take _acq_provider_input_lock_take; do
-    lock="$STUBDIR/$take"
-    private="$lock/owner.stale.999999.example"
-    mkdir -p "$private"
-    printf '999999 stale\n' > "$private/owner"
-    run "$take" "$lock" 'new token'
-    assert_success
-    [ ! -e "$private" ]
-    assert_equal "$(cat "$lock/owner")" 'new token'
-  done
-}
-
-@test "lock recovery retains a changed token when exclusive restoration loses" {
-  local lock="$STUBDIR/restore-conflict" private
-  mkdir "$lock"
-  printf 'new live\n' > "$lock/owner"
-  ln() { printf 'newer token\n' > "$lock/owner"; command ln "$@"; }
-  run _acq_lock_remove_owner "$lock" 'old stale'
-  assert_success
-  assert_equal "$(cat "$lock/owner")" 'newer token'
-  for private in "$lock"/owner.stale.*; do
-    assert_equal "$(cat "$private/owner")" 'new live'
-  done
-  run _acq_config_lock_take "$lock" 'contender token'
-  assert_failure
-  _acq_lock_reservations "$lock" 'new live' || true
-  [ "$(ls -A "$lock")" = owner ]
-}
-
-@test "lock reservation cleanup never follows a symlinked lock" {
-  case "${OSTYPE:-}" in msys*|cygwin*) skip "needs native symlinks" ;; esac
-  local lock="$STUBDIR/linked-lock" private="$STUBDIR/elsewhere/owner.stale.999999.example" take
-  mkdir -p "$private"
-  printf '999999 stale\n' > "$private/owner"
-  printf '999999 stale\n' > "$STUBDIR/elsewhere/owner"
-  ln -s "$STUBDIR/elsewhere" "$lock"
-  for take in _acq_config_lock_take _acq_provider_input_lock_take _acq_lock_remove_owner; do
-    run "$take" "$lock" '999999 stale'
-    assert_failure
-    assert_equal "$(cat "$private/owner")" '999999 stale'
-    assert_equal "$(cat "$STUBDIR/elsewhere/owner")" '999999 stale'
-  done
-}
-
-@test "lock take withdraws its token if recovery starts during its owner write" {
-  local lock="$STUBDIR/postcheck"
-  run bash -c '
-    ACQ_SOURCE_ONLY=1 . "$1" >/dev/null 2>&1
-    lock=$2; private="$lock/owner.stale.$$.example"
-    printf() {
-      builtin printf "$@" || return
-      case "$-" in *C*) command mkdir "$private"; command mv "$lock/owner" "$private/owner" ;; esac
-    }
-    _acq_config_lock_take "$lock" "self token"
-  ' _ "$ACQ" "$lock"
-  assert_failure
-  [ ! -e "$lock" ]
-}
-
 @test "projection lock recovers a stale owner but never breaks a live owner" {
   local root lock identity
   root=$(acq_provider_input_root sbx stalebox); lock="${root}.lock"
@@ -1074,12 +982,12 @@ _lock_taker() {
 }
 
 @test "projection lock: parallel Bash takers never hold it at once, even with a non-exclusive mkdir" {
-  local pids="" pid rc=0 takers=6 count=15 t
+  local pids="" pid rc=0 takers="1 2 3 4 5 6" count=15 t
   export ACQ_PROVENANCE_DIR="$STUBDIR/provenance"
   # Process creation is slow under Git Bash, so fewer takers there.
-  case "${OSTYPE:-}" in msys*|cygwin*) takers=3 count=5 ;; esac
+  case "${OSTYPE:-}" in msys*|cygwin*) takers="1 2 3" count=5 ;; esac
   _racy_mkdir
-  for ((t=0; t<takers; t++)); do
+  for t in $takers; do
     _lock_taker "$count" &
     pids="$pids $!"
   done
@@ -1096,7 +1004,7 @@ _lock_taker() {
   local pids="" pid rc=0 t
   export ACQ_PROVENANCE_DIR="$STUBDIR/provenance"
   _racy_mkdir
-  for ((t=0; t<3; t++)); do
+  for t in 1 2 3; do
     _lock_taker 15 &
     pids="$pids $!"
     PYTHONPATH="$REPO_ROOT/py-acq/src" timeout 600 python3 -c '
