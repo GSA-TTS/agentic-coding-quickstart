@@ -92,6 +92,21 @@ project, run `git init .` in it first so the agent can track its changes.
 That's it. `acq run` creates the sandbox if it doesn't exist, heals any missing
 kits, validates your USAi key, and attaches the agent.
 
+> [!IMPORTANT]
+> Pick a project directory, not your home directory. `acq create` and `acq run`
+> refuse a workspace that contains, or lies inside, one of acq's own
+> directories: the state dir (`~/.local/state/acq`), config dir
+> (`~/.config/acq`), data dir and secret store (`~/.local/share/acq`), and kit
+> caches (`~/.cache/acq`), or wherever `ACQ_STATE_DIR` and the `XDG_*` variables
+> put them. A workspace is mounted into the sandbox, so the agent could otherwise
+> read the secret store and change the trusted config acq mounts read-only. So
+> `acq run opencode ~`, or `acq run opencode` with no path from your home
+> directory, now fails with `workspace … contains acq's own directory`.
+> Re-attaching to an existing sandbox skips this check, so if you created one on
+> `~` with an older acq, recreate it on a project directory (`acq rm NAME`, then
+> `acq run opencode /path/to/your/project`). See
+> [Known Failure Modes](../KNOWN_FAILURE_MODES.md#workspace-refused-because-it-contains-acqs-own-directories).
+
 > [!NOTE]
 > The **first** run boots a microVM, applies kits, and prepares the agent — a
 > minute or two, with a progress spinner and status lines so you can follow

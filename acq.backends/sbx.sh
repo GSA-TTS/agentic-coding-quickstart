@@ -425,7 +425,9 @@ _acq_sbx_translate_kit() {
   schema=$(kit_spec_field "${kitdir}/spec.yaml" schemaVersion 2>/dev/null || true)
   case "$schema" in
     hybrid/v1)
-      acq_debug "translate(sbx): $kitref -> $out"
+      # Named through kit_ref_display only: the cache path is a slug of the raw
+      # ref, so it would repeat anything the ref carries.
+      acq_debug "translate(sbx): $(kit_ref_display "$kitref")"
       rm -rf "$out"
       kit_translate_to_sbx "$kitdir" "$out" >/dev/null || {
         # Fail closed: handing the raw ref to sbx would skip acq's payload checks.
@@ -1412,7 +1414,11 @@ acq_backend_ensure_kits_applied() {
   _acq_sbx_ensure_kit_sources_allowed
 
   # Neutral kits must be translated to local sbx-v2 kit dirs before sbx kit add.
-  local playbook_local zscaler_local
+  # Each built-in kit is fetched and translated only inside its needs-apply
+  # branch, so a re-attach whose kits are all recorded as applied makes no fetch
+  # (and prints no fetch error when offline). A failed translation counts as a
+  # failed add.
+  local playbook_local="" zscaler_local=""
   # The default provider is DATA (provider_kit), so heal resolves the selected
   # ref instead of naming the USAi kit. An invalid selection FAILS CLOSED here:
   # silently healing without the provider kit would leave a half-configured sandbox.
@@ -1423,11 +1429,6 @@ acq_backend_ensure_kits_applied() {
     return 1
   fi
   provider_ref=$(printf '%s\n' "$provider_refs" | head -n1)
-  if [ -n "$provider_ref" ]; then
-    provider_local=$(_acq_sbx_translate_kit "$provider_ref")
-  fi
-  playbook_local=$(_acq_sbx_translate_kit "$PLAYBOOK_KIT")
-  zscaler_local=$(_acq_sbx_translate_kit "$ZSCALER_KIT")
 
   # 1) Zscaler CA kit — FIRST, so its CA trust is in place before any later kit
   # makes an outbound HTTPS request. Behind a TLS-intercepting proxy (Zscaler),
@@ -1437,7 +1438,12 @@ acq_backend_ensure_kits_applied() {
     echo "acq: '$name' is missing the Zscaler CA kit; injecting with 'sbx kit add'..." >&2
     # `set -e`-safe: _acq_sbx_kit_add's non-zero returns (3=refusal, 1=other) are
     # normal signalling — capture the status inline so the loop is not aborted.
-    _kadd_rc=0; _acq_sbx_kit_add "$name" "$zscaler_local" || _kadd_rc=$?
+    _kadd_rc=0
+    if zscaler_local=$(_acq_sbx_translate_kit "$ZSCALER_KIT"); then
+      _acq_sbx_kit_add "$name" "$zscaler_local" || _kadd_rc=$?
+    else
+      _kadd_rc=1
+    fi
     case $_kadd_rc in
       0) healed=1; _acq_sbx_builtin_kit_record "$name" zscaler-ca-certificate "$ZSCALER_KIT"; echo "acq: Zscaler CA kit injected into '$name'." >&2 ;;
       3) _acq_sbx_print_recreate_notice "$name"; ok=0 ;;
@@ -1453,7 +1459,12 @@ acq_backend_ensure_kits_applied() {
   if [ -n "$provider_ref" ] \
       && _acq_sbx_builtin_kit_needs_apply "$name" "$USAI_PROVIDER_KIT_NAME" "$provider_ref" "test -f '$USAI_KIT_CONFIG_PATH' && echo present"; then
     echo "acq: '$name' is missing the provider kit; injecting with 'sbx kit add'..." >&2
-    _kadd_rc=0; _acq_sbx_kit_add "$name" "$provider_local" || _kadd_rc=$?
+    _kadd_rc=0
+    if provider_local=$(_acq_sbx_translate_kit "$provider_ref"); then
+      _acq_sbx_kit_add "$name" "$provider_local" || _kadd_rc=$?
+    else
+      _kadd_rc=1
+    fi
     case $_kadd_rc in
       0)
         healed=1
@@ -1476,7 +1487,12 @@ acq_backend_ensure_kits_applied() {
   # forever on tarball-provisioned sandboxes.
   if _acq_sbx_builtin_kit_needs_apply "$name" agentic-coding-playbook "$PLAYBOOK_KIT" 'test -e "$HOME/.agentic-coding-playbook/AGENTS.md" && echo present'; then
     echo "acq: '$name' is missing the playbook kit; injecting with 'sbx kit add'..." >&2
-    _kadd_rc=0; _acq_sbx_kit_add "$name" "$playbook_local" || _kadd_rc=$?
+    _kadd_rc=0
+    if playbook_local=$(_acq_sbx_translate_kit "$PLAYBOOK_KIT"); then
+      _acq_sbx_kit_add "$name" "$playbook_local" || _kadd_rc=$?
+    else
+      _kadd_rc=1
+    fi
     case $_kadd_rc in
       0) healed=1; _acq_sbx_builtin_kit_record "$name" agentic-coding-playbook "$PLAYBOOK_KIT"; echo "acq: playbook kit injected into '$name'. Restart the agent to pick it up." >&2 ;;
       3) _acq_sbx_print_recreate_notice "$name"; ok=0 ;;
@@ -1551,7 +1567,7 @@ acq_backend_ensure_kits_applied() {
       0)
         healed=1
         acq_host_config_append sbx "$name" extra-kits "$k" || \
-          echo "acq: warning: could not record extra kit '$k' for '$name'; re-attach may re-attempt it." >&2
+          echo "acq: warning: could not record extra kit '$(kit_ref_display "$k")' for '$name'; re-attach may re-attempt it." >&2
         ;;
       3) _acq_sbx_print_recreate_notice "$name" ;;
       *) echo "acq: warning: 'sbx kit add' (extra kit) failed for '$name' (see error above)." >&2 ;;
