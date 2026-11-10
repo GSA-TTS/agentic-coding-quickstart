@@ -260,3 +260,80 @@ LIST
   assert_success
   assert_output --partial 'SCOPE'
 }
+
+@test "secret set(msb): a global set leaves a sandbox's own credential bound" {
+  printf 'ownbox\nplainbox\n' > "$STUBDIR/.msb_sandbox_list"
+  mkdir -p "$STUBDIR/secrets"
+  printf 'own-token\n' > "$STUBDIR/secrets/acq.ownbox.github"
+  : > "$CALLS"
+  run env ACQ_SECRET_TEST_VALUE="global-token" ACQ_BACKEND=msb "$ACQ" secret set -g github
+  assert_success
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'msb modify plainbox --secret GITHUB_TOKEN@'
+  refute_regex "$log" 'msb modify ownbox'
+}
+
+@test "secret rm(msb): a global rm keeps a sandbox's own credential bound" {
+  printf 'ownbox\nplainbox\n' > "$STUBDIR/.msb_sandbox_list"
+  mkdir -p "$STUBDIR/secrets"
+  printf 'own-token\n' > "$STUBDIR/secrets/acq.ownbox.github"
+  printf 'global-token\n' > "$STUBDIR/secrets/acq.github"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb "$ACQ" secret rm -g github
+  assert_success
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'msb modify plainbox --secret-rm GITHUB_TOKEN'
+  refute_regex "$log" 'msb modify ownbox --secret-rm'
+  # Its own value is re-asserted under the same name (never on argv).
+  assert_regex "$log" 'msb modify ownbox --secret GITHUB_TOKEN@'
+  refute_regex "$log" 'own-token'
+  assert [ -f "$STUBDIR/secrets/acq.ownbox.github" ]
+  refute [ -f "$STUBDIR/secrets/acq.github" ]
+}
+
+@test "secret set(msb): renaming a service's env var unbinds the old name first" {
+  : > "$STUBDIR/.msb_sandbox_list"
+  run env ACQ_SECRET_TEST_VALUE="v1" ACQ_BACKEND=msb "$ACQ" secret set -g myapi --host api.example.com --env OLD_KEY
+  assert_success
+  printf 'runbox\n' > "$STUBDIR/.msb_sandbox_list"
+  : > "$CALLS"
+  run env ACQ_SECRET_TEST_VALUE="v2" ACQ_BACKEND=msb "$ACQ" secret set -g myapi --host api.example.com --env NEW_KEY
+  assert_success
+  local log rm_line add_line
+  log=$(cat "$CALLS")
+  assert_regex "$log" 'msb modify runbox --secret-rm OLD_KEY'
+  assert_regex "$log" 'msb modify runbox --secret NEW_KEY@api\.example\.com'
+  rm_line=$(grep -n -- '--secret-rm OLD_KEY' "$CALLS" | head -1 | cut -d: -f1)
+  add_line=$(grep -n -- '--secret NEW_KEY@' "$CALLS" | head -1 | cut -d: -f1)
+  assert [ "$rm_line" -lt "$add_line" ]
+  # An unchanged binding is rotated in place, with no unbind.
+  : > "$CALLS"
+  run env ACQ_SECRET_TEST_VALUE="v3" ACQ_BACKEND=msb "$ACQ" secret set -g myapi --host api.example.com --env NEW_KEY
+  assert_success
+  refute_regex "$(cat "$CALLS")" 'secret-rm'
+}
+
+@test "rotate(msb): the re-feed skips a sandbox whose provider selection excludes usai" {
+  printf 'nousai\nwithusai\n' > "$STUBDIR/.msb_sandbox_list"
+  # nousai was created with --no-provider-kits (an explicit, empty selection).
+  (
+    # shellcheck disable=SC2034 # acq_provenance_write reads these globals
+    ACQ_PROVIDER_KITS=""
+    # shellcheck disable=SC2034
+    ACQ_PROVIDER_KITS_FROM_ENV=1
+    acq_provenance_write msb nousai
+  )
+  acq_provenance_write msb withusai
+  assert_equal "$(acq_provenance_field msb nousai provider_selection)" "explicit"
+  : > "$CALLS"
+  run env ACQ_SECRET_TEST_VALUE="new-usai-key" ACQ_BACKEND=msb "$ACQ" usai-rotate-api-key
+  assert_success
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'msb modify withusai --secret USAI_API_KEY@api\.gsa\.usai\.gov'
+  refute_regex "$log" 'msb modify nousai'
+  # A non-provider service still reaches every sandbox.
+  : > "$CALLS"
+  run env ACQ_SECRET_TEST_VALUE="gh" ACQ_BACKEND=msb "$ACQ" secret set -g github
+  assert_success
+  assert_regex "$(cat "$CALLS")" 'msb modify nousai --secret GITHUB_TOKEN@'
+}
