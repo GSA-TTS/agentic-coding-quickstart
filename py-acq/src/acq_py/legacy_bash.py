@@ -324,6 +324,25 @@ def _shown(value: str, ok: Callable[[str], bool]) -> str:
     return f"'{value}'" if ok(value) else REDACTED
 
 
+# Prefixes of common access tokens (GitHub, GitLab, OpenAI-style, Slack).
+_TOKEN_PREFIXES = ("ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "glpat-", "sk-", "xox")
+
+
+def _plausible_ref(ref: str) -> bool:
+    """True for a ref that looks like a branch, tag or short commit, not a pasted token.
+
+    ``_REF_RE`` admits any word-ish string, a token included; a ref is quoted
+    back only when it is at most 40 characters and does not start like a
+    common access token. An empty ref (no ref at all) is shown as ``''``.
+    """
+    return len(ref) <= 40 and not ref.lower().startswith(_TOKEN_PREFIXES)
+
+
+def shown_ref(ref: str) -> str:
+    """A kit-source ref as a warning may quote it: ``'ref'``, or :data:`REDACTED` when it may be a token."""
+    return _shown(ref, _plausible_ref)
+
+
 def parse_kit_source_entry(entry: str) -> tuple[str, str, str]:
     """``_acq_kit_source_parse_entry``: ``repo[@REF][|DIR]`` to ``(repo, ref, dir)``.
 

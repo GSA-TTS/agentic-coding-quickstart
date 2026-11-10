@@ -499,7 +499,7 @@ def _import_kit_sources() -> tuple[int, bool]:
             continue
         if not kits.is_full_ref(ref):
             legacy_bash.warn(
-                f"kit source '{repo}' was not imported: ref '{ref}' is not a full commit SHA; "
+                f"kit source '{repo}' was not imported: ref {legacy_bash.shown_ref(ref)} is not a full commit SHA; "
                 f"run 'acq kit-source add {repo} --ref <full-sha>' to trust it"
             )
             continue

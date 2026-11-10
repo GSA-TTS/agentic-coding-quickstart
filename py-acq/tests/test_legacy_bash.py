@@ -509,6 +509,32 @@ def test_a_well_formed_but_refused_binding_still_names_its_parts(tree, capsys):
     assert "'GITHUB_TOKEN'" in err and "'acme'" in err and "<redacted>" not in err
 
 
+@pytest.mark.parametrize("ref", ["ghp_S3NTINELtoken0123456789abcdef", "github_pat_S3NTINEL_x",
+                                 "glpat-S3NTINEL", "sk-S3NTINEL", "xoxb-S3NTINEL", "S3NTINEL" + "x" * 40])
+def test_a_token_shaped_kit_source_ref_never_reaches_output_marker_or_doctor(tree, capsys, ref):
+    from acq_py import cli, doctor
+
+    # The bad binding keeps the import pending, so its warnings are kept and doctor shows them.
+    _config(f"kit_sources: github.com/acme/kits@{ref}\nprovider_credential_bindings: bad\n")
+    migration.migrate_tree()
+    err = capsys.readouterr().err
+    assert "kit source 'github.com/acme/kits' was not imported: ref <redacted>" in err, err
+    assert "S3NTINEL" not in err
+    assert "S3NTINEL" not in migration.generation_path().read_text(encoding="utf-8")
+    check = doctor.bash_import_check()
+    assert "ref <redacted>" in check["message"] and "S3NTINEL" not in json.dumps(check)
+    assert cli.main(["doctor", "--json"]) == 0
+    out, err = capsys.readouterr()
+    assert "S3NTINEL" not in out + err
+
+
+def test_a_branch_or_short_sha_kit_source_ref_is_still_named(tree, capsys):
+    _config("kit_sources: github.com/acme/kits@main github.com/acme/other@0123abc\n")
+    migration.migrate_tree()
+    err = capsys.readouterr().err
+    assert "ref 'main' is not a full commit SHA" in err and "ref '0123abc'" in err
+
+
 def test_a_token_in_a_bash_kit_source_without_url_form_is_not_quoted(tree, capsys):
     _config(f"kit_sources: github.com/acme/kits@{SHA} {KEY}\n")
     migration.migrate_tree()
