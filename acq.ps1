@@ -39,6 +39,11 @@ if ($null -eq (Get-Variable -Name acqPs1SavedEnvironment -ErrorAction SilentlyCo
 # this for every child process.
 $env:NoDefaultCurrentDirectoryInExePath = "1"
 
+function Test-AcqAbsolutePath {
+    param([AllowNull()][AllowEmptyString()][string]$Path)
+    return ($Path -match '^([A-Za-z]:[\\/]|[\\/]{2}[^\\/])')
+}
+
 # acq.cmd starts this script as
 #   powershell.exe -NoLogo -NoProfile -File "<this script>" <arguments>
 # Recognising that launch tells acq.ps1 two things: no PowerShell pipeline is
@@ -177,11 +182,15 @@ if ($acqImpl -cne "bash") {
     $runtimePy = Join-Path $acqImplRepoRoot "py-acq\runtime\python.exe"
     # An ACQ_RUNTIME override must be a drive-rooted or UNC path: a relative
     # value would be resolved against the current directory (the workspace).
-    if ($env:ACQ_RUNTIME -and -not ($env:ACQ_RUNTIME -match '^[A-Za-z]:[\\/]' -or $env:ACQ_RUNTIME.StartsWith('\\'))) {
+    if ($env:ACQ_RUNTIME -and -not (Test-AcqAbsolutePath -Path $env:ACQ_RUNTIME)) {
         [Console]::Error.WriteLine("acq: ACQ_RUNTIME must be an absolute path to python.exe, got '$($env:ACQ_RUNTIME)'")
         exit 1
     }
-    if ($env:ACQ_RUNTIME -and (Test-Path -LiteralPath $env:ACQ_RUNTIME -PathType Leaf)) {
+    if ($env:ACQ_RUNTIME) {
+        if (-not (Test-Path -LiteralPath $env:ACQ_RUNTIME -PathType Leaf)) {
+            [Console]::Error.WriteLine("acq: ACQ_RUNTIME does not name an existing file: '$($env:ACQ_RUNTIME)'. Set ACQ_RUNTIME to the full path of an existing python.exe, or unset ACQ_RUNTIME to use runtime discovery.")
+            exit 1
+        }
         $acqPythonExe = $env:ACQ_RUNTIME
     }
     elseif (Test-Path -LiteralPath $runtimePy -PathType Leaf) {
@@ -199,11 +208,11 @@ if ($acqImpl -cne "bash") {
         $pyCmd = $null
         foreach ($entry in ($env:Path -split ';')) {
             $dir = $entry.Trim().Trim('"')
-            if (-not ($dir -match '^[A-Za-z]:[\\/]' -or $dir.StartsWith('\\'))) { continue }
+            if (-not (Test-AcqAbsolutePath -Path $dir)) { continue }
             $candidate = $dir.TrimEnd('\', '/') + '\python.exe'
             # Re-check after trimming: an entry of just "\\" would become the
             # drive-relative "\python.exe".
-            if (-not ($candidate -match '^[A-Za-z]:[\\/]' -or $candidate.StartsWith('\\'))) { continue }
+            if (-not (Test-AcqAbsolutePath -Path $candidate)) { continue }
             if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
             if (Test-AcqPython -Exe $candidate) { $pyCmd = $candidate; break }
         }
@@ -367,7 +376,7 @@ $bashAcq = Convert-ToGitBashPath -Path $acqScript
 # LOCALAPPDATA counts only when fully qualified (drive-rooted or UNC): a relative
 # value would point acq at a directory under the current one.
 $validatorData = $null
-if ($env:LOCALAPPDATA -match '^([A-Za-z]:[\\/]|[\\/]{2}[^\\/])') {
+if (Test-AcqAbsolutePath -Path $env:LOCALAPPDATA) {
     $validatorData = Join-Path $env:LOCALAPPDATA "acq\provider-input-validator"
 }
 if ($validatorData -and (Test-Path -LiteralPath $validatorData -PathType Container)) {

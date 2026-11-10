@@ -344,6 +344,26 @@ def test_default_honours_an_absolute_acq_runtime(
 
 
 @pytest.mark.parametrize("via", [_via_cmd, _via_ps1], ids=["acq.cmd", "acq.ps1"])
+@pytest.mark.parametrize("kind", ["missing", "directory"])
+def test_default_refuses_an_invalid_absolute_acq_runtime(
+    launcher_tree: Path, tmp_path: Path, base_python: Path, junction, via, kind: str
+) -> None:
+    # Both discovery alternatives could run, but an explicit override must win
+    # even when it is invalid.
+    junction(launcher_tree / "py-acq" / "runtime", base_python)
+    override = tmp_path / "invalid-python.exe"
+    if kind == "directory":
+        override.mkdir()
+    env = _default_env([str(base_python)], ACQ_RUNTIME=str(override))
+    result = _run(via(launcher_tree, ["version"]), env, tmp_path)
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    assert "ACQ_RUNTIME does not name an existing file" in result.stderr
+    assert str(override) in result.stderr
+    assert "Set ACQ_RUNTIME" in result.stderr and "unset ACQ_RUNTIME" in result.stderr
+    assert '"argv"' not in result.stdout and "[version]" not in result.stdout
+
+
+@pytest.mark.parametrize("via", [_via_cmd, _via_ps1], ids=["acq.cmd", "acq.ps1"])
 def test_default_refuses_a_relative_acq_runtime(
     launcher_tree: Path, tmp_path: Path, base_python: Path, junction, via
 ) -> None:
@@ -380,8 +400,9 @@ def test_default_skips_the_app_execution_alias_stub(launcher_tree: Path, tmp_pat
 
 
 @pytest.mark.parametrize("entry", [".", "rel", ".\\rel", "rel\\"])
+@pytest.mark.parametrize("via", [_via_cmd, _via_ps1], ids=["acq.cmd", "acq.ps1"])
 def test_default_never_selects_a_relative_path_entry(
-    launcher_tree: Path, tmp_path: Path, base_python: Path, junction, failing_python: Path, entry: str
+    launcher_tree: Path, tmp_path: Path, base_python: Path, junction, failing_python: Path, entry: str, via
 ) -> None:
     # Each relative entry resolves, from the working directory, to a directory
     # holding a real interpreter that would pass the probe.
@@ -392,7 +413,7 @@ def test_default_never_selects_a_relative_path_entry(
         work.mkdir()
         junction(work / "rel", base_python)
     env = _default_env([entry, str(failing_python)])
-    _assert_failed_closed(_run(_via_cmd(launcher_tree, ["version"]), env, work))
+    _assert_failed_closed(_run(via(launcher_tree, ["version"]), env, work))
 
 
 @pytest.mark.parametrize("via", [_via_cmd, _via_ps1], ids=["acq.cmd", "acq.ps1"])

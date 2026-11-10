@@ -30,11 +30,28 @@ class Runtime:
     managed: bool  # True when the app-private bundle is in use
 
 
+class RuntimeResolutionError(Exception):
+    """An explicit runtime override is invalid; discovery must not replace it."""
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.message = message
+        self.remediation = (
+            "set ACQ_RUNTIME to the full path of an existing Python executable, "
+            "or unset ACQ_RUNTIME to use runtime discovery"
+        )
+
+
 def _managed_runtime_executable() -> str | None:
     # 1. Explicit override for tests/fleet selection.
     override = os.environ.get("ACQ_RUNTIME")
-    if override and Path(override).exists():
-        return str(Path(override))
+    if override:
+        path = Path(override)
+        if not path.is_absolute():
+            raise RuntimeResolutionError(f"ACQ_RUNTIME must be an absolute path to Python, got {override!r}")
+        if not path.is_file():
+            raise RuntimeResolutionError(f"ACQ_RUNTIME does not name an existing file: {override!r}")
+        return str(path)
     # 2. A runtime bundle laid down beside the source by the installer.
     here = Path(__file__).resolve().parent
     names: tuple[str, ...]
@@ -53,7 +70,8 @@ def resolve_runtime() -> Runtime:
     """Return the interpreter that should execute acq's subprocesses.
 
     Resolution is purely local (an env override or a filesystem check); it never
-    downloads. When no app-private bundle is present the IT-approved base
+    downloads. An invalid explicit ACQ_RUNTIME raises RuntimeResolutionError.
+    When no override or app-private bundle is present the IT-approved base
     interpreter (the one currently running acq) is the documented fallback.
     """
     managed = _managed_runtime_executable()

@@ -4071,13 +4071,12 @@ directory, case-sensitive `ACQ_IMPL`, and the Bash branch's refusal.
   transition, so the branch stays supported and this limitation stands.
   **Unblock trigger:** a decision to retire `ACQ_IMPL=bash` on Windows, or a
   report that needs such an argument on the Bash branch.
-- **PowerShell 7 is untested.** The launchers were checked live only under
-  Windows PowerShell 5.1, which `acq.cmd` always uses. Running `acq.ps1` from
-  `pwsh` (7.x) has not been tried: neither how 7.x binds `--` and empty
-  arguments in `$args`, nor the Bash branch's refusal, which assumes 7.3 and later
-  pass arguments the standard way unless `$PSNativeCommandArgumentPassing` is
-  `Legacy`. **Unblock trigger:** a Windows host with PowerShell 7 to repeat the
-  launcher checks.
+- **PowerShell 7 coverage.** The launcher tests run under portable PowerShell
+  7.4.22 on the Windows test VM, alongside Windows PowerShell 5.1 (which
+  `acq.cmd` always uses). CI's Windows runner also has PowerShell 7 and requires
+  the `pwsh` launcher cases. These cover `--`, empty arguments, embedded quotes
+  and trailing backslashes on both implementation branches, including the
+  Bash branch's refusal when `$PSNativeCommandArgumentPassing` is `Legacy`.
 
 ---
 
