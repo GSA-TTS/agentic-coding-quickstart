@@ -59,7 +59,7 @@ jobs:
             runtime_url: https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.14.10%2B20261026-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz
             runtime_sha256: 90f48337bc3dd4ae6eda81e001e4c981236d403b6b5a07778bbdf94ee423dc00
           - platform: macos-arm64
-            runner: macos-15
+            runner: macos-14
             pip_platform: macosx_11_0_arm64
             lock: scripts/provider-input-validator-requirements-macos.txt
             python_versions: "312 313 314"
@@ -167,9 +167,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macos-14 is Apple silicon like macos-15. The macos-15 label never got a
-        # runner for this job on the fork (each attempt was cancelled after 15
-        # minutes without one), while the build legs did.
+        # macos-14 is Apple silicon like macos-15. On the fork, macos-15 jobs were
+        # repeatedly cancelled after 15 minutes without ever getting a runner, so
+        # both Apple-silicon legs (here and in build) use macos-14.
         runner: [ubuntu-24.04, macos-14, windows-2022]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
