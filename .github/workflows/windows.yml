@@ -125,6 +125,9 @@ jobs:
             'test/fixtures' \
             '.gitattributes' \
             '.github/CODEOWNERS' \
+            '.github/workflows/build-assets.yml' \
+            'scripts/assemble-release' \
+            'scripts/gen-provenance' \
             '.github/workflows/release.yml' \
             '.github/workflows/tier3-release-gate.yml' \
             '.github/workflows/windows.yml')"

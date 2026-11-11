@@ -18,6 +18,7 @@ and source checks in the bats suite.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -372,6 +373,7 @@ _GEN_ASSETS = (
     "acq-macos-arm64.tar.gz",
     "acq-macos-x86_64.tar.gz",
     "acq-windows-x64.zip",
+    *json.loads((REPO_ROOT / "installer/assets.json").read_text())["wheelhouses"],
 )
 # The only line form SHA256SUMS may contain: "HASH  name", two spaces, no "*".
 _SUMS_LINE = re.compile(r"[0-9a-f]{64}  [^ *][^\r]*")

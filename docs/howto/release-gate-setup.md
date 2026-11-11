@@ -17,12 +17,14 @@ The goal: **merging the release-please PR is the only manual step in a release**
 it is held automatically when a Tier-3 cell is stale, blocked, or waived past its
 expiry (ADR-0044m).
 
-The complete ADR-0042m asset builder is currently a **dry run** in
-`.github/workflows/build-assets.yml` (`workflow_dispatch` or `workflow_call`). It
-builds all five installable archives, provenance and checksums, then verifies
-local offline installs on Linux, macOS and Windows. It uploads workflow artifacts
-only and has read-only repository permissions. A follow-up will wire it into
-`release.yml`; the existing publishing jobs still build the legacy asset set.
+The ADR-0042m reusable builder in `.github/workflows/build-assets.yml` builds all
+five installable archives, standalone validator wheelhouses, provenance and
+checksums, then verifies local offline installs on Linux, macOS and Windows.
+`release.yml` calls it at the release-please tag and publishes the downloaded
+`dist` after attesting every file. The builder also runs without publishing on
+pull requests and manual dispatch. Optional platform signing happens before
+packing and hashing; see [release signing setup](release-signing.md) for variables,
+credentials, verification and rollback (ADR-0049m).
 
 The release gate code is in place. `release.yml` is split so the gate sits
 **before the tag and the GitHub Release exist**:
@@ -32,7 +34,7 @@ The release gate code is in place. `release.yml` is split so the gate sits
 | `Release PR` | keeps the release PR up to date (`skip-github-release`) |
 | `Tier-3 release gate (release)` | every claimed cell holds a current green transcript or an unexpired waiver |
 | `Release Tag` | creates the tag and the GitHub Release (`skip-github-pull-request`) |
-| `Validator Wheelhouse`, `Release Assets` | build and upload, after the tag |
+| `build-assets`, `publish` | build at the tag, attest and upload every dist file |
 
 A failing gate therefore leaves **no tag and no Release**. `tier3-release-gate.yml`
 reports the same check on pull requests, pushes to `main`, and weekly.

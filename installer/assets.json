@@ -68,5 +68,12 @@
         "launchers": ["acq", "acq-python"]
       }
     }
-  }
+  },
+  "wheelhouses": [
+      "provider-input-validator-wheelhouse-windows-x86_64.tar.gz",
+      "provider-input-validator-wheelhouse-macos-arm64.tar.gz",
+      "provider-input-validator-wheelhouse-macos-x86_64.tar.gz",
+      "provider-input-validator-wheelhouse-linux-x86_64.tar.gz",
+      "provider-input-validator-wheelhouse-linux-aarch64.tar.gz"
+  ]
 }
