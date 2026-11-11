@@ -177,8 +177,13 @@ read-only trusted-config mount (ADR-0035/ADR-0041m):
 - a write there, as root when `sudo -n` works, fails with EROFS (`Read-only file
   system`), not merely with a permission error;
 - the host directory acq keeps for the sandbox
-  (`<state>/provenance/msb/<sandbox>.<checksum>.config`, the Bash implementation's
-  layout) is byte-identical after the attempt.
+  (`$XDG_STATE_HOME/acq/provenance/msb/<sandbox>.<checksum>.config`, the layout both
+  implementations use) is byte-identical after the attempt.
+
+On Windows acq never requests this mount, because msb's Windows filesystem backend
+has not been reviewed for read-only enforcement (ADR-0048m). The oracle reports that
+as `BLOCKED` with the reason, not `FAIL`: the windows-x64 msb cell cannot qualify until
+that review is done or the cell is waived.
 
 It also checks that acq's sandbox record declares the mount (`ro_host_config`, what
 acq's own fail-closed gate keys on), and runs the committed canary. The canary shows,

@@ -220,7 +220,7 @@ CANARY_LINES = {0: "RESULT: PASS\nRESULT PASS msb=0.7.7 image=i host=h rev=r dir
                 1: "RESULT: FAIL\nRESULT FAIL msb=0.7.7 image=i host=h rev=r dir=d\n"}
 
 
-def cell(tmp_path, backend="msb", canary=0, deadline=None, **knobs):
+def cell(tmp_path, backend="msb", canary=0, deadline=None, windows=False, **knobs):
     """``canary`` is an exit status (0 and 1 come with the canary's RESULT line) or ``(status, stdout)``."""
     names = qbc.make_names(backend, NONCE)
     state = tmp_path / "state"
@@ -229,7 +229,7 @@ def cell(tmp_path, backend="msb", canary=0, deadline=None, **knobs):
     result = canary if isinstance(canary, tuple) else (canary, CANARY_LINES.get(canary, ""))
     c = qbc.Cell(backend, names, str(tmp_path / "ws"), state, fake, raw, lambda timeout: result,
                  *([deadline] if deadline is not None else []),
-                 provenance_dir=tmp_path / "xdg-state" / "acq" / "provenance")
+                 provenance_dir=tmp_path / "xdg-state" / "acq" / "provenance", windows=windows)
     return c, fake, raw
 
 
@@ -342,6 +342,24 @@ def test_an_unreadable_pid1_environment_is_a_reported_gap(tmp_path, capsys):
     assert c.run() == 2
     assert c.blocked == ["guest credential"]
     assert "/proc/1/environ is unreadable" in capsys.readouterr().err
+
+
+def test_windows_msb_reports_the_ro_mount_platform_exception_as_blocked(tmp_path, capsys):
+    # acq never asks for the mount on Windows, so the guest has none; that is a
+    # documented platform exception (BLOCKED), not a failure this run found.
+    c, _fake, _raw = cell(tmp_path, "msb", 0, windows=True, ro=False, mount_opts="", host_dir=False)
+    assert c.run() == 2
+    assert c.failures == [] and c.blocked == ["ro mount"]
+    assert "not reviewed for read-only enforcement" in capsys.readouterr().err
+
+
+def test_provenance_root_matches_where_the_isolated_acq_keeps_it(tmp_path):
+    env = qbc.isolated_env(tmp_path, {"HOME": "/home/operator", "PATH": "/usr/bin",
+                                      "ACQ_PROVENANCE_DIR": "/elsewhere"})
+    assert "ACQ_PROVENANCE_DIR" not in env
+    root = qbc.provenance_root(env)
+    assert root == Path(env["XDG_STATE_HOME"]) / "acq" / "provenance"
+    assert root.is_relative_to(tmp_path)
 
 
 def test_sbx_does_not_run_the_msb_ro_mount_checks(tmp_path):
