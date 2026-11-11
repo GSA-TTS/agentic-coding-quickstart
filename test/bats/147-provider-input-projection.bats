@@ -1672,8 +1672,12 @@ class St:
     def __getattr__(self, name):
         return getattr(self._st, name)
 swap = os.environ.get("FAKE_SWAP_AFTER_LSTAT", "").split(":")
+parent_swap = os.environ.get("FAKE_SWAP_PARENT_AFTER_LSTAT", "").split(":")
 def lstat(path, *args, **kwargs):
     st = real_lstat(path, *args, **kwargs)
+    if len(parent_swap) == 2 and path == parent_swap[0]:
+        os.rename(path, path + ".old"); os.symlink(parent_swap[1], path)
+        parent_swap.clear()
     if len(swap) == 2 and path == swap[0]:
         os.unlink(path); os.symlink(swap[1], path)
     if not stat.S_ISDIR(st.st_mode) and path not in marked: return st
@@ -2662,4 +2666,62 @@ EOF
     assert_equal "$(grep -c "trap '_acq_provider_input_signal_exit 129' HUP" "$REPO_ROOT/acq.backends/$f.sh")" 2
     refute grep -q "_acq_provider_input_signal_exit 128" "$REPO_ROOT/acq.backends/$f.sh"
   done
+}
+
+# This pins the documented residual, rather than claiming a path recheck closes
+# the race. A transient junction can be restored before any second path walk.
+@test "native Windows snapshot documents the parent-junction race for local kits" {
+  local bin release="$STUBDIR/release" kit outside="$STUBDIR/outside" candidate="$STUBDIR/raced"
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  _provider_release "$release"; _provider_kit "$release" alpha
+  kit="$release/integrations/isolation/acq-kits/alpha"
+  mkdir -p "$outside"
+  printf '{"outside":true}\n' > "$outside/facts.json"
+  FAKE_SWAP_PARENT_AFTER_LSTAT="$kit/provider-input:$outside" OSTYPE=msys PATH="$bin:$PATH" \
+    run _acq_provider_input_snapshot "$kit" "$candidate"
+  assert_success
+  cmp "$outside/facts.json" "$candidate/provider-input/facts.json"
+  grep -Fq 'ACQ_IMPL=python' "$REPO_ROOT/docs/KNOWN_FAILURE_MODES.md"
+}
+
+_nt_validator_python() {
+  # Preserve stdin (the real launcher), changing only Python's platform branch.
+  shift 2  # -I -
+  python3 -I -c 'import os, runpy, sys; os.name = "nt"; exec(compile(sys.stdin.read(), "<launcher>", "exec"))' "$@"
+}
+
+@test "provider validator adapts only regular normalizers on Windows and keeps POSIX strict" {
+  local root="$STUBDIR/validate" validator manifest
+  mkdir -p "$root"
+  validator="$root/validator.py"; manifest="$root/provider-input.json"
+  printf '{"normalizerPath":"normalize.mjs"}\n' > "$manifest"
+  printf 'script\n' > "$root/normalize.mjs"
+  printf 'data\n' > "$root/data.json"
+  chmod 644 "$root/normalize.mjs" "$root/data.json"
+  # The stdin launcher must not import a module from the invoking directory.
+  printf 'raise RuntimeError("cwd module imported")\n' > "$root/json.py"
+  cd "$root"
+  cat > "$validator" <<'PYTHON'
+import os, stat, sys
+root = os.path.dirname(__file__)
+# Unrelated files and all non-file normalizers must keep their original modes.
+assert not os.stat(os.path.join(root, 'data.json')).st_mode & 0o111
+normalizer = os.path.join(root, 'normalize.mjs')
+info = os.stat(normalizer)
+assert stat.S_ISREG(info.st_mode) and info.st_mode & 0o111, 'normalizer must be executable'
+assert sys.argv[1:] == ['--bundle', os.path.join(root, 'provider-input.json')]
+PYTHON
+  run _acq_provider_input_validate "$validator" "$(command -v python3)" --bundle "$manifest"
+  assert_failure
+  assert_output --partial 'normalizer must be executable'
+  run _acq_provider_input_validate "$validator" _nt_validator_python --bundle "$manifest"
+  assert_success
+  rm "$root/normalize.mjs"; mkdir "$root/normalize.mjs"
+  run _acq_provider_input_validate "$validator" _nt_validator_python --bundle "$manifest"
+  assert_failure
+  assert_output --partial 'normalizer must be executable'
+  rmdir "$root/normalize.mjs"; printf 'script\n' > "$root/normalize.mjs"; chmod 755 "$root/normalize.mjs"
+  run _acq_provider_input_validate "$validator" "$(command -v python3)" --bundle "$manifest"
+  assert_success
 }

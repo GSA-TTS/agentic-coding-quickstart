@@ -5,7 +5,7 @@
 #
 # kit-translate: neutral hybrid/v1 -> sbx-v2 synthesis (offline). Translates
 # local neutral kits and asserts the synthesized sbx-v2 spec; also the
-# non-interactive git+https fetch hardening (#207) and the environment
+# non-interactive git+https fetch hardening and the environment
 # vocabulary. Helpers run in isolated subshells.
 #
 # shellcheck shell=bats
@@ -708,4 +708,20 @@ GITSTUB
   '
   assert_equal "$(cat "$other/.git/config")" "$before"
   grep -q '\[remote "origin"\]' "$STUBDIR/control-plane/.git/config"
+}
+
+@test "fetch refuses percent-escaped local kit paths even when the directory exists" {
+  local name
+  for name in kit%3F kit%25 kit%zz; do
+    mkdir -p "$STUBDIR/$name"
+    run bash -c '. "$1/acq.backends/kit-translate.sh"; kit_translate_fetch "$2" "$3"' _ \
+      "$REPO_ROOT" "$STUBDIR/$name" "$STUBDIR/dest"
+    assert_failure
+    assert_output --partial 'percent escapes are not allowed'
+    [ ! -e "$STUBDIR/dest" ]
+  done
+  run bash -c '. "$1/acq.backends/kit-translate.sh"; kit_translate_fetch "$2" "$3"' _ \
+    "$REPO_ROOT" "$STUBDIR" "$STUBDIR/dest"
+  assert_success
+  assert_output "$STUBDIR"
 }
