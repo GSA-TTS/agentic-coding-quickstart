@@ -3,8 +3,7 @@
 A one-to-one port of ``test/bats/116-clone-option.bats``: each Bats test has a
 test here with the same name (as ``test_<n>_...``, numbered in Bats order), run
 in-process against the ``__stub__`` msb or sbx with a real git. Where the
-Python acq has no equivalent of what the Bats test drives (secondary
-workspaces, a workspace-less create, ``ACQ_MSB_WORKSPACE``, a missing
+Python acq has no equivalent of what the Bats test drives (a workspace-less create, ``ACQ_MSB_WORKSPACE``, a missing
 ``kit-translate.sh``), the port pins the Python behaviour that stands in for
 it, and says so. Python-only behaviour (``create --recreate`` on a clone
 sandbox, a Bash-created clone layout, the JSON fields) follows the port.
@@ -348,20 +347,17 @@ def test_09_a_path_unsafe_explicit_name_is_rejected_before_any_host_path_is_buil
 
 
 def test_10_secondary_workspaces_keep_their_direct_mounts(env, tmp_path, monkeypatch, capsys):
-    # The Python acq mounts one workspace: a second path is a usage error, so
-    # nothing is cloned and the scratch is the only workspace mount.
+    # Clone mode changes only the primary mount source; the library stays read-only.
     second = tmp_path / "secondlib"
     second.mkdir()
     seen = _msb_spy(monkeypatch)
     rc = cli.main(["--backend", "msb", "create", "shell", str(env), f"{second}:ro", "--clone", "--json"])
     capsys.readouterr()
-    assert rc == errors.EXIT_USAGE
-    _refute_backend_create(seen)
-    assert not _clones(tmp_path).exists()
-    assert _create(capsys, str(env), "--clone")[0] == 0
+    assert rc == 0
     argv = _create_argv(seen)
     mounts = [argv[i + 1] for i, a in enumerate(argv) if a == "--volume" and argv[i + 1].endswith(_guest(env))]
     assert mounts == [f"{os.path.realpath(_scratch(tmp_path))}:{_guest(env)}"]
+    assert f"{os.path.realpath(second)}:{_guest(second)}:ro" in argv
 
 
 def test_11_acq_rm_removes_the_scratch_clone_and_the_host_remote(env, tmp_path, capsys):

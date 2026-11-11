@@ -538,6 +538,8 @@ def create(
     egress_kits: Sequence[EgressKit],
     kit_flags: list[str] | None = None,
     clone_source: str | None = None,
+    extra_workspaces: list[str] | None = None,
+    workspace_read_only: bool = False,
 ) -> list[str]:
     """Create a sandbox; returns its ``ENV@HOST`` secret bindings (non-secret).
 
@@ -577,12 +579,16 @@ def create(
         "--name",
         name,
         "--volume",
-        f"{clone_source or workspace}:{guest}",
+        f"{clone_source or workspace}:{guest}" + (":ro" if workspace_read_only else ""),
         "-w",
         guest,
         "--env",
         f"ACQ_WORKSPACE={guest}",
     ]
+    for spec in extra_workspaces or []:
+        path = spec.removesuffix(":ro")
+        suffix = ":ro" if spec.endswith(":ro") else ""
+        argv += ["--volume", f"{path}:{_guest_path(path)}{suffix}"]
     if clone_source:
         argv += ["--env", "ACQ_CLONE=1"]
     if memory:
@@ -887,6 +893,7 @@ def launch(
     json_mode: bool = False,
     env: list[str] | None = None,
     tty: bool | None = None,
+    agent_args: list[str] | None = None,
 ) -> int:
     """Launch the recorded agent (or a login shell) in the foreground.
 
@@ -900,6 +907,8 @@ def launch(
     interactive = hostexec.stdin_is_tty() if tty is None else tty
     shell = agent_shell(name)
     command = [agent] if agent and agent != "shell" else [shell, "-l"]
+    if agent and agent != "shell":
+        command += agent_args or []
     session = [f"HOME={AGENT_HOME}", f"SHELL={shell}"]
     if interactive:
         session += hostexec.terminal_env()
