@@ -42,6 +42,11 @@ needs_bash = pytest.mark.skipif(BASH is None or os.name == "nt" or shutil.which(
 
 
 
+def _native(text: str) -> str:
+    """Messages join the link path with '/', so on Windows they mix separators."""
+    return text.replace("/", os.sep)
+
+
 def _target(link) -> str:
     """The link's target, without the ``\\\\?\\`` prefix Windows' readlink adds."""
     target = os.readlink(link)
@@ -639,7 +644,7 @@ def test_a_link_that_cannot_be_replaced_is_reported_as_such(tmp_path, monkeypatc
     seen = _spy(monkeypatch)
     ssh_agent.start_bridge("rofs")
     err = capsys.readouterr().err
-    assert f"Fix or remove '{link.parent}'" in err and "skipping the bridge" in err
+    assert f"Fix or remove '{link.parent}'" in _native(err) and "skipping the bridge" in err
     assert len(err.splitlines()) == 1
     assert link.is_symlink() and _target(link) == str(tmp_path / "old.sock")
     assert not any("nohup socat" in " ".join(argv) for argv in seen)
@@ -1174,8 +1179,7 @@ def test_untrusted_route_directories_are_never_modified(
     assert link.is_symlink() and _target(link) == str(tmp_path / "missing-agent.sock")
     assert not any("nohup socat" in " ".join(argv) for argv in seen)
     err = capsys.readouterr().err
-    # The link path is joined with '/', so on Windows the message mixes separators.
-    assert len(err.splitlines()) == 1 and f"Fix or remove '{bad}'" in err.replace("/", os.sep)
+    assert len(err.splitlines()) == 1 and f"Fix or remove '{bad}'" in _native(err)
     # The low-level failed-attempt cleanup must honor the same boundary.
     ssh_agent._unlink_quietly(str(link))
     assert link.is_symlink()
@@ -1193,7 +1197,7 @@ def test_route_directory_guard_refuses_regular_files(tmp_path, monkeypatch, caps
     monkeypatch.setattr(ssh_agent, "recorded_sock", lambda name: GUEST_SOCK)
     monkeypatch.setattr(msb, "call", lambda *a, **kw: pytest.fail("bridge must not start"))
     ssh_agent.start_bridge("box")
-    assert f"Fix or remove '{bad}'" in capsys.readouterr().err
+    assert f"Fix or remove '{bad}'" in _native(capsys.readouterr().err)
     assert bad.read_text() == "keep"
 
 
@@ -1210,7 +1214,7 @@ def test_refresh_leaves_link_through_symlinked_msb_parent_untouched(tmp_path, mo
     monkeypatch.setenv("SSH_AUTH_SOCK", agent)
     _, skip_bridge = ssh_agent.link_refresh("box")
     assert skip_bridge and link.is_symlink() and _target(link) == agent
-    assert f"Fix or remove '{parent}'" in capsys.readouterr().err
+    assert f"Fix or remove '{parent}'" in _native(capsys.readouterr().err)
     assert Path(agent).exists()
 
 
