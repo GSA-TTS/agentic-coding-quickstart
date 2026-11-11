@@ -5,6 +5,9 @@ from acq_py import version_info
 
 
 def test_checkout_fallback(monkeypatch):
+    # A source checkout never carries a baked identity (it is generated into
+    # release trees only and ignored by git).
+    assert version_info._build_info is None
     monkeypatch.delenv("ACQ_VERSION", raising=False)
     monkeypatch.delenv("ACQ_SOURCE_REVISION", raising=False)
     monkeypatch.setattr(version_info, "_build_info", None)

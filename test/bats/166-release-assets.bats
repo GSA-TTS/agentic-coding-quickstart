@@ -20,8 +20,11 @@ p = w / 'supplier/python'
 (p / 'bin').mkdir(parents=True)
 # A regular-file stub allows the extraction filter to reject external symlinks
 # while still running the host interpreter for the installed-launcher test.
-(p / 'bin/python3').write_text('#!/bin/sh\nexec ' + shlex.quote(sys.executable) + ' "$@"\n')
-(p / 'bin/python3').chmod(0o755)
+# python-build-standalone ships bin/python3 as a symlink to the versioned
+# interpreter; keep that shape so staging and packing are exercised on a link.
+(p / 'bin/python3.14').write_text('#!/bin/sh\nexec ' + shlex.quote(sys.executable) + ' "$@"\n')
+(p / 'bin/python3.14').chmod(0o755)
+(p / 'bin/python3').symlink_to('python3.14')
 (p / 'LICENSE.cpython.txt').write_text('fake supplier license\n')
 (p / 'NOTICE').write_text('fake supplier notice\n')
 with tarfile.open(w / 'runtime.tar.gz', 'w:gz') as tf:
@@ -94,6 +97,25 @@ PY
   [ ! -e "$WORK/escaped" ]
 }
 
+@test "release assets: a runtime symlink escaping the archive fails closed" {
+  python3 -I - "$WORK" <<'PY'
+from pathlib import Path
+import io
+import tarfile
+import sys
+with tarfile.open(Path(sys.argv[1]) / 'link.tar.gz', 'w:gz') as tf:
+    entry = tarfile.TarInfo('python/bin/python3')
+    entry.type = tarfile.SYMTYPE
+    entry.linkname = '../../../outside'
+    tf.addfile(entry)
+PY
+  local digest
+  digest=$(sha256sum "$WORK/link.tar.gz"); digest=${digest%% *}
+  run scripts/stage-posix-runtime "$WORK/link.tar.gz" "$digest" "$WORK/tree"
+  assert_failure
+  [ -z "$(ls -A "$WORK/tree")" ]
+}
+
 @test "release assets: POSIX stage retains notices and copies source without caches" {
   run scripts/stage-posix-runtime "$WORK/runtime.tar.gz" "$POSIX_SHA" "$WORK/tree"
   assert_success
@@ -125,6 +147,9 @@ for platform, spec in assets['platforms'].items():
     else:
         with tarfile.open(path) as tf:
             names = set(tf.getnames())
+            for launcher in spec['components']['launchers']:
+                assert tf.getmember(launcher).mode & 0o111, (platform, launcher)
+            assert tf.getmember('py-acq/runtime/bin/python3').issym(), platform
             baked = tf.extractfile('py-acq/src/acq_py/_build_info.py').read().decode()
             assert 'py-acq/runtime/NOTICE' in names
     comp = spec['components']
@@ -185,6 +210,8 @@ PY
 @test "release assets: fake complete dist installs offline and reports the baked Python identity" {
   _build_dist
   run sh "$WORK/dist/install.sh" --source "$WORK/dist" --install-dir "$WORK/installed" --bin-dir "$WORK/bin" --yes
+  assert_success
+  run "$WORK/installed/acq-python" version --json
   assert_success
   run env ACQ_IMPL=python "$WORK/installed/acq" version --json
   assert_success
