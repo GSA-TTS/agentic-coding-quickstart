@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 #
-# 130-progress.bats — bats port of scripts/test-acq.d/130-progress.sh (issue #287,
-# ADR-0025)
+# 130-progress.bats — bats port of scripts/test-acq.d/130-progress.sh
+# (ADR-0025)
 #
 # Progress-feedback helpers (acq.backends/progress.sh). bats' `run` captures
 # output from a PIPE (not a TTY) — exactly the condition under which the spinner

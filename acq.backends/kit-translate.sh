@@ -971,8 +971,8 @@ _kit_pp_validate() {
 # copy step. Multiple kits union by path, last wins — sbx resolves that itself.
 # The neutral schema carries no volume `mode` (msb has no equivalent; kits
 # chmod in a startup step instead — see ADR-0023). files[].mode is different:
-# the translator synthesizes its chmod into setup.install itself (#381,
-# _kit_sbx_mode_chmod_script).
+# the translator synthesizes its chmod into setup.install itself
+# (see _kit_sbx_mode_chmod_script).
 #
 # VALIDATION (SI-10): these values reach a generated sbx-v2 spec and an msb
 # create argv, so they are untrusted. path must be absolute, charset-restricted
@@ -1468,9 +1468,9 @@ kit_spec_agent_context() {
 #     NOT re-emitted as a command — the static file-drop is sbx's create-time
 #     mechanism and already lands the payload before setup hooks run.
 #   files[].mode (home-staged)      -> setup.install[] combined chmod step
-#     sbx pins every files/ payload to 0644 at materialization (docker/
-#     sbx-releases#499), so declared modes are synthesized into one chmod
-#     install command — see _kit_sbx_mode_chmod_script (#381).
+#     sbx pins every files/ payload to 0644 at materialization, so declared
+#     modes are synthesized into one chmod install command — see
+#     _kit_sbx_mode_chmod_script.
 #   commands[phase=install]         -> setup.install[]
 #   commands[phase=initFiles]       -> setup.startup[]
 #   commands[phase=startup]         -> setup.startup[]
@@ -1607,16 +1607,16 @@ kit_translate_to_sbx() {
   printf '%s\n' "$out"
 }
 
-# Build the combined chmod script for kit-declared file modes (#381). sbx pins
+# Build the combined chmod script for kit-declared file modes. sbx pins
 # every kit files/ payload to 0644 at materialization (content-addressed,
-# reproducible layers — docker/sbx-releases#499; v0.39 extended the pin to
-# local/git kit loads), so a declared `mode:` only takes effect through the
+# reproducible layers; v0.39 extended the pin to local/git kit loads), so a
+# declared `mode:` only takes effect through the
 # maintainer-sanctioned workaround: a setup.install chmod that runs after
 # files/home/ staging. Emits one `chmod && echo || echo` line per home-staged
 # mode-bearing files[] entry, in SPEC ORDER (deterministic output). Non-home
 # (workspace-targeted) modes get a translate-time WARNING and no chmod:
 # files/workspace/ is written AFTER install commands run, so a chmod there
-# would always fail (same sbx#499 thread).
+# would always fail.
 #
 # VALIDATION (SI-10, mirroring _kit_vol_validate): mode reaches a generated
 # sbx-v2 spec as a root shell command, so it is untrusted input. Only a
@@ -1674,11 +1674,11 @@ _kit_tmp_dir() {
 # commands. v2 has no initFiles command phase, so neutral initFiles commands are
 # emitted before startup commands under setup.startup.
 #
-# The synthesized file-mode chmod (#381, _kit_sbx_mode_chmod_script) is emitted
+# The synthesized file-mode chmod (_kit_sbx_mode_chmod_script) is emitted
 # as ONE combined setup.install entry BEFORE the kit's own install commands, so
 # an install command may exec a kit-shipped script. One line per file (no set
 # -e) so a missing file doesn't skip the rest, and each line prints what it did
-# — sbx install-command failures are NON-fatal at create time (sbx#499), so the
+# — sbx install-command failures are NON-fatal at create time, so the
 # startup log is the only place a failed chmod surfaces. Nothing is emitted for
 # a mode-less kit: its generated spec must stay byte-identical.
 _kit_sbx_emit_setup() {
@@ -1905,7 +1905,7 @@ EOF
 
   # Raw-spec scan: any `mode:` value that is not a 0-prefixed 4-digit octal
   # string is rejected — it reaches the root `chmod $mode` in the msb adapter
-  # AND the synthesized sbx setup.install chmod (#381), so the accepted grammar
+  # AND the synthesized sbx setup.install chmod, so the accepted grammar
   # is the strict intersection both emit safely (no 3-digit shorthand, no
   # setuid/setgid/sticky leading digit).
   local bad_mode
@@ -1919,7 +1919,7 @@ EOF
       # FAIL the pattern, to reject the spec), so under mawk EVERY mode would
       # look invalid and the whole spec would be wrongly rejected. See the
       # detailed note in the files[] parser above; do not "simplify" to {n,m}.
-      # Stricter than the parser gate on purpose (#381): the leading zero is
+      # Stricter than the parser gate on purpose: the leading zero is
       # required and setuid/setgid/sticky forms are rejected — this value
       # reaches a root chmod in the msb adapter AND the synthesized sbx
       # setup.install chmod.

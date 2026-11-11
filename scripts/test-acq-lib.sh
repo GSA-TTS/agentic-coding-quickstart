@@ -890,8 +890,8 @@ BASH_ENV
   export ACQ_SBX_KIT_CACHE="$XDG_CACHE_HOME/acq/sbx-kits"
   export ACQ_MSB_KIT_CACHE="$XDG_CACHE_HOME/acq/kits"
   # Neutralize the developer's real kit customizations: an inherited
-  # ACQ_EXTRA_KITS changes _build_kit_list's output (and, pre-#381, triggered
-  # the split_noglob errexit loss), making local test runs diverge from CI.
+  # ACQ_EXTRA_KITS changes _build_kit_list's output, making local test runs
+  # diverge from CI.
   # Tests that exercise extras set these themselves.
   unset ACQ_EXTRA_KITS ACQ_EXTRA_KIT_SOURCES
 }
@@ -910,7 +910,7 @@ load_acq() {
   _build_kit_list
   # Do NOT `set +e` here (the pre-ADR-0025 bespoke runner did): bats detects a
   # failing command via errexit inherited into the @test body, so disabling it
-  # in setup() makes every assertion in the suite pass vacuously (#381 review).
+  # in setup() makes every assertion in the suite pass vacuously.
 }
 
 # Seed host-authoritative config values for session-path tests. Unset knobs model

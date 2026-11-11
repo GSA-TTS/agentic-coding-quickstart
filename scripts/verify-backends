@@ -976,8 +976,7 @@ verify_backend() {
   # 4) playbook fetch appears (AGENTS.md present in the tree AND linked into the
   #    OpenCode config). The kit fetches the repo SOURCE TARBALL via the REST API
   #    (api.github.com), which BOTH backends substitute the github token for
-  #    (msb 0.6.7 verified) — so given a token this is a hard requirement on both
-  #    (quickstart#203 is resolved by the tarball approach). We seed a
+  #    (msb 0.6.7 verified) — so given a token this is a hard requirement on both. We seed a
   #    sandbox-scoped token from `gh` before create; if `gh` was unavailable
   #    (GH_SEEDED_FOR empty) there is no token and we SKIP rather than fail — a
   #    token-less run still passes.
@@ -1604,8 +1603,8 @@ verify_agent_install() {
   fi
 
   # The guest must have enough RAM to actually RUN a Node.js agent TUI. msb's
-  # 512 MiB default OOM-kills opencode on launch (quickstart#228 follow-up: it
-  # started, then the terminal died with "Killed"). Assert a generous ceiling
+  # 512 MiB default OOM-kills opencode on launch (the terminal dies
+  # with "Killed"). Assert a generous ceiling
   # (>= ~2 GiB) so a regression that drops the sizing flags is caught live, not
   # just at exec-present. MemTotal is in kB; 2 GiB ~= 2000000 kB.
   local memkb

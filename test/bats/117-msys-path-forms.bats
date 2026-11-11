@@ -5,8 +5,8 @@
 # Under MSYS/Cygwin acq must hand msb TWO different forms of a workspace path:
 # the native HOST form for the mount source / copied file / host socket
 # (host_path → C:/...), and the POSIX GUEST form for the mount target, the
-# start dir, and the ACQ_WORKSPACE env (canonicalize_path → /c/...). A single
-# value for both is the GSA-TTS/agentic-coding-quickstart#463 regression.
+# start dir, and the ACQ_WORKSPACE env (canonicalize_path → /c/...). Using the
+# same form for both confuses host mount sources with guest paths.
 #
 # MSYS is simulated with a fake `cygpath` (STUBDIR is prepended to PATH) that
 # implements a stable, invertible POSIX<->drive bijection, so these assertions

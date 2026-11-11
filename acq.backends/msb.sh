@@ -65,8 +65,9 @@ ACQ_BACKEND_CAN_RESUME=1                   # msb stop / msb start preserve state
 # shellcheck disable=SC2034
 ACQ_BACKEND_SUPPORTS_CREDENTIAL_REWRITE=1  # msb --secret ENV@HOST + --tls-intercept
 
-# Shared agent catalog (issue #377). common.sh normally sources this, but some
-# tests source this adapter directly; guard so a re-source is cheap and so the
+# Shared agent catalog for consistent agent tokens and image names. common.sh
+# normally sources this, but some tests source this adapter directly; guard so
+# a re-source is cheap and so the
 # catalog helpers (acq_is_known_agent, acq_agent_template_image, …) are always
 # defined when this file's functions run.
 if ! command -v acq_is_known_agent >/dev/null 2>&1; then
@@ -346,7 +347,7 @@ ACQ_MSB_GITHUB_HOST="${ACQ_MSB_GITHUB_HOST:-github.com,api.github.com,codeload.g
 # The optional SANDBOX arg gives scoped-sidecar precedence over the global one.
 _acq_msb_service_binding() {
   local _service="$1" _sandbox="${2:-}" _meta _host _env
-  # Sidecar FIRST (#384): an explicit `--host` recorded at `acq secret set`
+  # Sidecar FIRST: an explicit `--host` recorded at `acq secret set`
   # must win over the compiled-in usai/github mapping — the sbx backend gives
   # the user's host the same precedence, and a compiled-in short-circuit here
   # silently re-bound a self-hosted token to the default endpoint. Absent
@@ -1005,7 +1006,7 @@ _acq_msb_bind_secrets_into() {
   if command -v acq_secret_resolve >/dev/null 2>&1; then
     # github hosts resolve through the SAME binding table set/rm/refeed use
     # (_acq_msb_service_binding), so a `--host` sidecar recorded at
-    # `acq secret set` overrides the compiled-in endpoint here too (#384) instead
+    # `acq secret set` overrides the compiled-in endpoint here too instead
     # of being written-but-ignored at provision.
     #
     # Providers (the default one included) are bound by the generic provider loop
@@ -4600,7 +4601,7 @@ EOF
     ACQ_MSB_GUEST_WORKSPACE="$_first_guest"
   fi
 
-  # Guest-visible workspace markers (GSA-TTS/agentic-coding-quickstart#456).
+  # Guest-visible workspace markers identify the primary path and clone status.
   # ACQ_WORKSPACE names the primary's guest path; ACQ_CLONE=1 marks it as the
   # disposable clone. A kit that must write into the clone and never the real
   # checkout keys on these instead of a mount-type heuristic (which the

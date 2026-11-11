@@ -101,7 +101,7 @@ SPEC
   assert_equal "${ACQ_CLI_KITS[0]}" "SENTINEL"
 }
 
-# End-to-end (#33 / Paseo): provision with --kit persists the ref; a later resume
+# End-to-end: provision with --kit persists the ref; a later resume
 # with an EMPTY in-memory set reloads it and the heal re-applies the kit's file.
 @test "cli-kits: provision persists --kit and resume heal re-applies it" {
   load_acq

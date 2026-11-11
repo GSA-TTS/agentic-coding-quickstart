@@ -1,7 +1,6 @@
 #!/usr/bin/env bats
 #
-# 71c-msb-canonical-host-config.bats — regression for
-# GSA-TTS/agentic-coding-quickstart#594 / #601
+# 71c-msb-canonical-host-config.bats — host-config mount path canonicalization
 #
 # msb cannot mount a symlinked host path (macOS /var -> /private/var alias, or
 # any arbitrary symlink); the host-config dir must be canonicalized before it

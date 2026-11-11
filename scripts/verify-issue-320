@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # verify-issue-320 — live end-to-end check for the sbx-0.38 re-attach heal-loop
-# fix (GSA-TTS/agentic-coding-quickstart#320). This is the ONE host-side command
-# that reproduces the exact issue scenario against the real sbx toolchain and
+# fix. This is the ONE host-side command that reproduces the re-attach
+# failure against the real sbx toolchain and
 # asserts all three fixes:
 #
 #   1. sbx 0.38 `kit add` refuses startup-bearing kits — a genuine mid-life add

@@ -5,7 +5,7 @@
 # Sourced by common.sh. Provides friendly, always-safe progress output for the
 # long, quiet phases of `acq run` (booting a microVM, installing the agent,
 # fetching/applying kits) so a user — especially a novice — can tell that work
-# is happening and acq has not hung. See issue #287.
+# is happening and acq has not hung.
 #
 # Three public functions, ALL writing to STDERR only (so a user intentionally
 # piping stdout gets a clean stream):
@@ -38,7 +38,7 @@
 #   only, gated, secret-free (it only ever prints caller-supplied phase labels,
 #   never a secret value).
 #
-# TEST-SAFETY (issue #287 acceptance criteria):
+# TEST-SAFETY: keep animation bytes out of captured output:
 #   The animation is gated on stderr being a TTY (`[ -t 2 ]`). The offline test
 #   suite captures stderr into a variable (a pipe, not a TTY) and asserts on it,
 #   so the spinner NEVER starts there and no frame bytes or carriage returns leak

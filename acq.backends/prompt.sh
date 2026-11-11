@@ -6,7 +6,7 @@
 # set of interactive widgets so `acq configure` (and the create-time picker) can
 # offer a friendly, colorful selection UI — modeled on the multiselect installers
 # users already like — WITHOUT pinning a TUI dependency (gum/fzf/whiptail). See
-# ADR-0031 and issue GSA-TTS/agentic-coding-quickstart#499.
+# ADR-0031.
 #
 # Two public functions:
 #
