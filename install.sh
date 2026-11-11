@@ -260,12 +260,17 @@ sha256_of() {
 # The expected sha256 for $2 as recorded in a SHA256SUMS file ($1). Empty when the
 # file has no entry for it; callers fail closed on empty. Accepts both the
 # standard "HASH  name" (two spaces) form and the GNU binary "HASH *name" form.
+# The name must match the whole filename field, as install.ps1 requires: a
+# substring match would take the hash of "x-acq.tar.gz" or "acq.tar.gz.sig".
 sha256_expected() {
   sums="$1" name="$2"
-  line="$(grep -F " $name" "$sums" 2>/dev/null | head -n1 || true)"
-  [ -n "$line" ] || line="$(grep -F " *$name" "$sums" 2>/dev/null | head -n1 || true)"
-  [ -n "$line" ] || return 0
-  printf '%s\n' "$line" | awk '{print $1}'
+  awk -v want="$name" '
+    { sub(/\r$/, "") }
+    NF == 2 && length($1) == 64 && $1 !~ /[^0-9A-Fa-f]/ {
+      file = $2; sub(/^\*/, "", file)
+      if (file == want) { print tolower($1); exit }
+    }
+  ' "$sums" 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
@@ -515,12 +520,25 @@ pid_alive() {
 install_parent="${INSTALL_DIR%/*}"
 [ -n "$install_parent" ] || install_parent=/
 mkdir -p "$install_parent" 2>/dev/null || :
-if stage_root="$(mktemp -d "$install_parent/.acq-stage.$$.XXXXXXXX" 2>/dev/null)"; then
+# When the install dir is itself a mount point, its parent is another filesystem
+# and every move out of a parent-side staging dir would be a copy. Stage inside
+# the install dir instead; its staging dir is not a release name, so the
+# collision check below never sees it, and the sweep below covers both places.
+stage_base="$install_parent"
+if [ -d "$INSTALL_DIR" ] && [ ! -L "$INSTALL_DIR" ]; then
+  install_real="$(cd "$INSTALL_DIR" 2>/dev/null && pwd -P)" || install_real=""
+  # df -P is POSIX; the mount point is everything after the capacity column
+  # ("NN%"). Anchoring there keeps spaces in the filesystem name or in the mount
+  # point (even several in a row) from shifting or collapsing the path.
+  install_mount="$(df -P "$INSTALL_DIR" 2>/dev/null | awk 'NR == 2 && match($0, /[0-9]+%[[:space:]]+/) { print substr($0, RSTART + RLENGTH) }')" || install_mount=""
+  [ -n "$install_real" ] && [ "$install_mount" = "$install_real" ] && stage_base="$INSTALL_DIR"
+fi
+if stage_root="$(mktemp -d "$stage_base/.acq-stage.$$.XXXXXXXX" 2>/dev/null)"; then
   chmod 700 "$stage_root"
   staging="$stage_root/stage"
 else
   stage_root=""
-  warn "  cannot create a staging directory in $install_parent; staging under $tmp_base instead"
+  warn "  cannot create a staging directory in $stage_base; staging under $tmp_base instead"
   staging="$tmpdir/stage"
 fi
 # No -p: if the private dir has vanished, fail instead of re-creating it.
@@ -622,7 +640,7 @@ if [ "$was_marked" -eq 1 ]; then
     pid_alive "${stale##*/.acq-previous.}" && continue
     [ -d "$stale" ] && [ ! -L "$stale" ] && owned_by_me "$stale" && rm -rf "$stale" 2>/dev/null || :
   done
-  for stale in "$install_parent"/.acq-stage.*.*; do
+  for stale in "$install_parent"/.acq-stage.*.* "$INSTALL_DIR"/.acq-stage.*.*; do
     [ "$stale" != "$stage_root" ] || continue
     stale_pid="${stale##*/.acq-stage.}"
     stale_pid="${stale_pid%%.*}"

@@ -67,6 +67,52 @@ _install_dir() {
   [ ! -e "$(_install_dir)" ]
 }
 
+@test "installer: a SHA256SUMS entry must name the archive exactly" {
+  # A decoy whose name only contains the archive's name (a signature, another
+  # build) comes first; its hash must not be taken for the archive's.
+  local src="$STUBDIR/assets-decoy" zeros
+  zeros=$(printf '0%.0s' $(seq 64))
+  cp -R "$REPO_ROOT/test/fixtures/installer" "$src"
+  awk -v z="$zeros" '{ print z "  " $2 ".sig"; print z "  x-" $2; print }' \
+    "$REPO_ROOT/test/fixtures/installer/SHA256SUMS" > "$src/SHA256SUMS"
+  run sh "$REPO_ROOT/install.sh" --source "$src" --yes
+  assert_success
+  assert_output --regexp 'verified acq-(macos|linux)-(arm64|x86_64|aarch64)\.tar\.gz'
+  # CRLF line endings (a SHA256SUMS saved on Windows) still match exactly.
+  awk '{ printf "%s\r\n", $0 }' "$REPO_ROOT/test/fixtures/installer/SHA256SUMS" > "$src/SHA256SUMS"
+  rm -rf "$(_install_dir)"
+  run sh "$REPO_ROOT/install.sh" --source "$src" --yes
+  assert_success
+  # With only decoys left, the archive has no entry and nothing is installed.
+  awk -v z="$zeros" '{ print z "  " $2 ".sig"; print z "  x-" $2 }' \
+    "$REPO_ROOT/test/fixtures/installer/SHA256SUMS" > "$src/SHA256SUMS"
+  rm -rf "$(_install_dir)"
+  run sh "$REPO_ROOT/install.sh" --source "$src" --yes
+  assert_failure
+  [ ! -e "$(_install_dir)/py-acq" ]
+}
+
+@test "installer: a mount-point install dir is staged inside itself, not in its parent" {
+  # A stub df reports the install dir as its own mount point. The parent is made
+  # read-only, so staging there is impossible and the old fallback would warn.
+  local dir parent fakebin real
+  dir="$(_install_dir)"; parent="$(dirname "$dir")"
+  mkdir -p "$dir"
+  real="$(cd "$dir" && pwd -P)"
+  fakebin="$STUBDIR/fakedf"; mkdir -p "$fakebin"
+  printf '#!/bin/sh\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\necho "//server/Share Name 1 1 1 10%% %s"\n' "$real" > "$fakebin/df"
+  chmod +x "$fakebin/df"
+  chmod 555 "$parent"
+  PATH="$fakebin:$PATH" run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  chmod 755 "$parent"
+  assert_success
+  refute_output --partial 'cannot create a staging directory'
+  [ -e "$dir/py-acq/runtime/bin/python3" ]
+  # The staging dir is removed on exit.
+  run find "$dir" -maxdepth 1 -name '.acq-stage.*'
+  assert_output ''
+}
+
 @test "installer: consent is never inferred non-interactively" {
   run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer"
   assert_success
