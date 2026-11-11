@@ -10,6 +10,7 @@ from .. import (
     backends,
     envelope,
     errors,
+    kit_fetch,
     kit_msb,
     kit_sbx,
     kits,
@@ -88,18 +89,7 @@ def run_kit_validate(parsed, emit_json: bool) -> int:
 
 
 def run_kit_apply(parsed, emit_json: bool, backend_override: str | None) -> int:
-    """``acq kit apply NAME KITREF`` — apply a built-in agent kit to a sandbox.
-
-    The ``kit-apply`` capability maps through the adapter seam (ADR-0040m): a
-    backend that declares it ``unsupported`` fails closed with
-    ``unsupported_capability``. On sbx the kit is added with ``sbx kit add``,
-    which sbx 0.38 and later refuse for a kit with startup commands
-    (``unsupported_capability``: recreate the sandbox). Only built-in agent kits are
-    applicable by name here; team/personal kit application is deferred. The
-    install runs in-guest and is idempotent: a re-apply of the same kit is a no-op
-    (no duplicate install), tracked by the host-authoritative applied-kit record
-    (ADR-0041m).
-    """
+    """Apply a bundled agent kit or a checked external neutral kit under the lifecycle lock."""
     backend, exit_code = common._resolve_backend_for_mutation(
         backend_override, emit_json, "kit apply", domain="kit"
     )
@@ -143,13 +133,7 @@ def _kit_apply_locked(name: str, kitref: str, emit_json: bool, backend: str) -> 
             emit_json,
         )
     if not kits.is_agent_kit(kitref):
-        return common._operational_failure(
-            "kit apply",
-            errors.VALIDATION_FAILED,
-            f"kit ref {kitref!r} is not a built-in agent kit (expected one of: {', '.join(kits.AGENT_KIT_NAMES)})",
-            "this slice applies built-in agent kits by name; team/personal kit application is deferred",
-            emit_json,
-        )
+        return _kit_apply_external(name, kitref, emit_json, backend)
     kit_name = kitref
     entrypoint = kits.agent_kit_entrypoint(kit_name)
     existing = kits.kit_applied_read(backend, name)
@@ -173,6 +157,38 @@ def _kit_apply_locked(name: str, kitref: str, emit_json: bool, backend: str) -> 
         print(f"applied kit '{kit_name}' to sandbox '{name}' (entrypoint {entrypoint}).")
     else:
         print(f"kit '{kit_name}' already applied to sandbox '{name}'.")
+    return errors.EXIT_SUCCESS
+
+
+def _kit_apply_external(name: str, ref: str, emit_json: bool, backend: str) -> int:
+    """Use the create-time checked loader, then apply without suppressing a later reapply.
+
+    A local directory can change without changing its ref. Install markers belong
+    to the kit adapter; the built-in agent selection record must stay untouched.
+    """
+    record, exit_code = _trusted_record(backend, name, "kit apply", emit_json)
+    if exit_code is not None:
+        return exit_code
+    try:
+        kit = kit_msb.fetch_selected(kitspec.SelectedKit(kitspec.kit_ref_absolute(ref), "cli", None), backend)
+        if backend == "sbx":
+            kit_sbx.apply_single(name, kit)
+        elif not kit_msb.apply_single(name, kit, ro_required=security.requires_ro_mount(record)):
+            raise kit_msb.KitApplyFailed(f"could not apply kit '{kit.name}' to sandbox '{name}'")
+    except kit_fetch.KitFetchError as exc:
+        return common._operational_failure("kit apply", exc.code, exc.message, exc.remediation, emit_json)
+    except kit_msb.KitApplyFailed as exc:
+        return common._operational_failure("kit apply", errors.FAILURE, str(exc), "check msb logs and retry", emit_json)
+    except common._ADAPTER_ERRORS as exc:
+        return common._operational_failure("kit apply", exc.code, exc.message, exc.remediation, emit_json)
+    data = {"sandbox": name, "backend": backend, "kit": kits.ref_display(ref),
+            "entrypoint": kit.spec.agent_field("entrypoint") or "", "applied": True, "action": "applied"}
+    if emit_json:
+        print(json.dumps(envelope.success("kit apply", data)))
+    else:
+        entrypoint = kit.spec.agent_field("entrypoint")
+        suffix = f" (entrypoint {entrypoint})" if entrypoint else ""
+        print(f"applied kit '{kit.name}' to sandbox '{name}'{suffix}.")
     return errors.EXIT_SUCCESS
 
 

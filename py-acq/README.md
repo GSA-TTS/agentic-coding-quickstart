@@ -264,8 +264,7 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   removed first) gets a free one with a warning, a kit-pinned host port is
   never overridden, and a mapping no kit declares any more is dropped. A recreate
   returns to a kit-pinned host port even if the original create overrode it
-  with `--publish`. The create/run JSON carries `ports`. Kits that
-  declare `volumes:` are still refused on msb.
+  with `--publish`. The create/run JSON carries `ports`.
 * `acq-py ports NAME --publish HOST:GUEST [--json]` (ADR-0015) — on msb, open a
   tunnel to a running sandbox: an acq-managed ed25519 key under
   `ACQ_STATE_DIR/ssh` (made with `ssh-keygen` once, authorized with `msb ssh
@@ -549,8 +548,8 @@ file by file.
 
 A kit the bundle does not hold (an opt-in catalog kit from config `extra_kits`,
 a remote `ACQ_EXTRA_KITS` or `--kit` ref, a provider kit from a registered kit
-source) is fetched by `src/acq_py/kit_fetch.py`, a port of Bash
-`kit_translate_fetch` with the same refusals and some stricter ones:
+source, or `acq-py kit apply NAME KITREF`) is fetched by
+`src/acq_py/kit_fetch.py`, a port of Bash `kit_translate_fetch` with the same refusals and some stricter ones:
 
 * Only `git+https://HOST/PATH#ref=SHA&dir=DIR` is fetched, and `SHA` must be a
   full 40-hex commit id. A branch or tag name is refused with
@@ -560,7 +559,7 @@ source) is fetched by `src/acq_py/kit_fetch.py`, a port of Bash
   outside `[A-Za-z0-9._/-]`. Like Bash, it refuses first, without naming the
   ref, a query string before the `#` and a `#` part other than one `ref=` and
   one `dir=` with values in `[A-Za-z0-9._/-]`, at input (`--kit`,
-  `ACQ_EXTRA_KITS`, `ACQ_PROVIDER_KITS`) as well as at the fetch.
+  `ACQ_EXTRA_KITS`, `ACQ_PROVIDER_KITS`, `kit apply`) as well as at the fetch.
 * A local kit directory (Bash reads it in place) is copied into the same
   private cache first, and every check runs on the copy, so a change to the
   directory during the checks cannot reach the sandbox. The copy follows no
@@ -575,7 +574,43 @@ source) is fetched by `src/acq_py/kit_fetch.py`, a port of Bash
 * The commit is fetched into a bare repository and must be exactly the pinned
   one; the kit is checked out from that commit's tree with a private index, and
   no symlink in it may resolve outside the kit. Only a neutral `hybrid/v1` kit
-  with a plain `name:` is applied (Bash also passes sbx-native kits through).
+  with a plain `name:` is applied. **Accepted gap:** sbx-native kits are
+  refused with `unsupported_capability`; use `ACQ_IMPL=bash` for those. The
+  checked loader and translator validate neutral fields only. Passing an
+  arbitrary native spec through that path would leave its native payload
+  references unchecked; a separate native validation path is needed before
+  supporting passthrough without weakening neutral-kit validation.
+* `kit apply NAME KITREF` accepts local directories and pinned remote refs on
+  both backends, using the same checked private copy as create. It performs no
+  create and stages no create-time startup script on msb. External applies leave
+  the built-in agent selection record intact and can be repeated; install
+  markers still belong to the adapter. The JSON success envelope retains
+  `sandbox`, `backend`, `kit` (the input ref), `entrypoint` (empty if undeclared),
+  `applied: true` and `action: applied`. Sbx retains its recreate refusal for
+  startup-bearing kits.
+* On msb, neutral `volumes:` entries become `--mount-named` disk flags or
+  `--tmpfs` flags at create, as in Bash (ADR-0023). The existing neutral parser
+  drops unsafe or non-normalized guest paths, invalid types, missing sizes,
+  nonportable sizes and zero sizes. Disk names combine the sandbox name, guest
+  path slug and POSIX CRC; disks live in msb's own volume store, with no
+  arbitrary host bind path from the kit. The last declaration for each guest
+  path wins, in its final position. After confirmed sandbox removal, cleanup
+  removes derived volumes by the same prefix as Bash, with the same documented
+  prefix overlap for sandbox names such as `web` and `web-2`. Mid-life apply
+  emits Bash's two-line CREATE-time-only notice and skips the volume mounts.
+* An existing `.kits` record is authoritative even when its extras list is
+  empty: later heals and updates ignore live `ACQ_EXTRA_KITS` and configured
+  extras. With no record, live extras still apply. The current Bash loader
+  retains live extras for an empty record, despite its authoritative-record
+  comment; Python clears them so an explicit empty selection stays empty.
+  Python also keeps recording **configured** extras alongside env/CLI extras.
+  This preserves the complete create-time selection across restarts and config
+  changes, preventing an installed kit's startup or environment from silently
+  disappearing. Python records the resolved selection rather than only the
+  env/CLI input variables. Bash's writer serializes `ACQ_EXTRA_KITS` and
+  `ACQ_CLI_KITS`; its config/picker path may fold configured refs into those
+  variables before writing. Python deliberately keeps configured refs explicit
+  in the record regardless of that input path.
 * git is resolved to an absolute path, runs with `GIT_DIR` and the other
   redirecting variables removed, without prompts, with stdin closed and under
   `ACQ_KIT_FETCH_TIMEOUT` (default 120 s). The first attempt reads no git

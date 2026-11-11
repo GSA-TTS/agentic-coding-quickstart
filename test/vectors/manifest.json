@@ -448,7 +448,7 @@
       "vectors": ["cli/kit-apply-opencode", "cli/kit-apply-noop"]
     },
     {
-      "contract": "ADR-0030 inference scope + ADR-0040m error vocabulary: kit apply refuses a non-built-in kit ref (validation_failed) and a missing sandbox (sandbox_not_found)",
+      "contract": "ADR-0040m error vocabulary: kit apply refuses a missing local kit directory (validation_failed) and a missing sandbox (sandbox_not_found)",
       "vectors": ["cli/kit-apply-unknown-kit", "cli/kit-apply-missing"]
     },
     {
@@ -618,6 +618,10 @@
     {
       "contract": "host ssh-agent forwarding (ADR-0021): SSH_AUTH_SOCK is the opt-in; on msb a value that names no socket is skipped with a warning and never fails the create; on sbx (which forwards the agent itself) a set SSH_AUTH_SOCK prints the one-time trust-boundary notice. The --vsock route, bridge, re-drive and teardown need a real socket and are Tier-2 (py-acq/tests/test_ssh_agent_forward.py)",
       "vectors": ["cli/create-msb-ssh-agent-not-a-socket", "cli/create-sbx-ssh-agent-notice"]
+    },
+    {
+      "contract": "External neutral kit apply, msb create-time volumes (ADR-0023), and authoritative empty extras records, retaining Python full-commit pinning",
+      "vectors": ["cli/kit-apply-local", "cli/kit-apply-help-external", "cli/kit-apply-msb-volumes", "cli/create-msb-kit-volumes", "cli/kit-apply-unpinned-ref", "cli/kit-update-empty-extras-record"]
     },
     {
       "contract": "Bash CLI forms: run/create accept multiple PATH[:ro] mounts, run preserves opaque agent tails, and pre-verb --image supports both spellings with local flags taking precedence",

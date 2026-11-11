@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "id": "cli/kit-apply-help-external",
+  "oracle": "Kit apply help describes local directories and pinned remote refs",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{acq}",
+      "kit",
+      "apply",
+      "--help"
+    ],
+    "env": {},
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "MSB_HOME",
+      "ACQ_IMAGE",
+      "ACQ_MSB_IMAGE",
+      "ACQ_MSB_STUB_FAIL",
+      "ACQ_KIT_APPLIED_SEED"
+    ],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": [
+      {
+        "mode": "contains",
+        "value": "local kit directory",
+        "normalize": []
+      },
+      {
+        "mode": "contains",
+        "value": "git+https ref",
+        "normalize": []
+      }
+    ],
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME"
+    ]
+  }
+}
