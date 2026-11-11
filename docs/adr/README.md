@@ -56,3 +56,4 @@ in each ADR; corrections and amendments are part of the record.
 | [0047m](0047m-acq-coexistence-mechanism.md) | acq coexistence mechanism (ACQ_IMPL runtime switch and --channel installer seam) | accepted |
 | [0048m](0048m-windows-defaults-to-the-python-implementation.md) | Windows defaults to the Python implementation with acq's managed runtime | accepted |
 | [0049m](0049m-ci-only-python-quality-tools.md) | CI-only Python quality tools, pinned with hashes | accepted |
+| [0050m](0050m-release-signing-scaffolding.md) | Release signing scaffolding | accepted |
