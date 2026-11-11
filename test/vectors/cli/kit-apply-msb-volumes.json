@@ -56,7 +56,7 @@
     "stderr": {
       "mode": "exact",
       "value": "acq(msb): note: this kit declares volumes:, which apply at CREATE time only;\nacq(msb):   this apply skips them. Recreate the sandbox (acq rm && acq run) to mount them.\n",
-      "normalize": []
+      "normalize": ["crlf"]
     }
   },
   "isolation": {
