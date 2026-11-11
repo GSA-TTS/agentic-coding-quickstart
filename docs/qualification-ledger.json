@@ -212,16 +212,24 @@
       "artifact_sha256": "d5d31ce159e368f4f36ed843876035a1f7aaceddc0375d8f23fc816cd1a2564b",
       "recorded_at": "2026-11-08T16:57:11+00:00",
       "transcript_sha256": "a5305f2d9ac836fa8d5bcf5cd069cac609818c681a0d6754a572c1a297c8c7ab"
-    }
-  ],
-  "waivers": [
+    },
     {
       "backend": "msb",
       "platform": "linux-x86_64",
-      "reason": "no current Tier-3 transcript recorded yet",
-      "expires": "2027-02-05",
-      "issue": "mogul/agentic-coding-quickstart#60"
-    },
+      "verdict": "PASS",
+      "backend_version": "0.7.11",
+      "os_build": "7.0.0-38-generic",
+      "arch": "x86_64",
+      "hypervisor": "kvm",
+      "rev": "96358bee8feddbe3a6fe038af2da19ef514f365f",
+      "artifact_sha256": "1f280bf9b1fff725848dc5467fa3af39f7c830dcbfb555cc22cd2047901dc9cd",
+      "recorded_at": "2026-11-11T18:01:26+00:00",
+      "transcript_sha256": "fd8940eea553898f89aabf08a52060fc9b604959a3a77717a14dc830a41a8e1e",
+      "oracle": "scripts/qualify-backend-cell",
+      "oracle_sha256": "9ff30f9cfdf7da6d1eb796b60290c1b127bdc5a9a3bcbdde20287dafa0760091"
+    }
+  ],
+  "waivers": [
     {
       "backend": "msb",
       "platform": "linux-aarch64",

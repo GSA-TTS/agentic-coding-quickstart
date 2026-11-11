@@ -73,7 +73,7 @@ Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All
 Restart when it finishes. After that, the installer (or `msb doctor`) will confirm
 the host is ready. On a work or managed device you may not be able to enable it
 yourself — ask your IT administrator to turn on "Windows Hypervisor Platform."
-If it can't be enabled, the installer stops with a clear message telling you so.
+The acq v1 installer reports missing WHP with repair guidance after installing acq.
 
 </details>
 
@@ -104,9 +104,12 @@ irm https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v4.2.
 > **Installer versions:** these one-liners fetch the installers published with
 > the pinned GSA-TTS release, and the rest of this step describes them. The
 > `install.sh` and `install.ps1` in this repository are the acq v1 installers
-> instead: they install a release archive only, and do not install `msb`, pick
-> Homebrew, npm or a clone, or (on Windows) check virtualization or install Git
-> Bash. See [acq v1 installers](docs/howto/acq.md#acq-v1-installers).
+> instead: they install a checksum-verified release archive, support an independent
+> `SHA256SUMS` pin and opportunistic GitHub attestation verification, then report
+> sandbox prerequisites (including Windows virtualization). They offer pinned msb
+> installation only with explicit interactive consent; `--yes`/`-Yes` never
+> installs msb. They do not choose an acq package manager or install Git Bash.
+> See [acq v1 installers](docs/howto/acq.md#acq-v1-installers).
 >
 > **Windows with the acq v1 installer:** the installed `acq` runs the Python implementation by
 > default, with the managed Python runtime the Windows archive bundles
@@ -133,8 +136,8 @@ That's it — you don't have to choose *how* to install. The installer:
 
 **Answer "yes" to each prompt** — it may take a few minutes. When it finishes,
 **close and reopen your terminal** so the new `acq` command is available, then
-continue to Step 3. (On Windows, the installer stops with clear guidance if
-virtualization isn't enabled — see the box in Step 1. And if a later `acq`
+continue to Step 3. (On Windows, the acq v1 installer reports missing
+virtualization with repair guidance — see the box in Step 1. And if a later `acq`
 command reports that *running scripts is disabled*, that's PowerShell's
 execution policy, not `acq` — see the `PSSecurityException` box in
 [First-Run Snags](#first-run-snags).)

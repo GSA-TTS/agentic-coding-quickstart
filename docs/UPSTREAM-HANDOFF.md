@@ -13,24 +13,27 @@ GitHub settings audit. The `m`-suffix ADR identifiers are retained.
   `ACQ_IMPL` selects the implementation; Windows launchers default to Python,
   while the POSIX Bash entry point defaults to Bash (ADR-0047m/0048m).
 - **Installers:** `install.sh` and `install.ps1` verify release archives against
-  `SHA256SUMS`, support offline sources and user-scope installation, and expose
-  the `python` channel. They do not install the sandbox backend. See
+  `SHA256SUMS`, accept an independent `--sha256`/`-Sha256` pin of that file,
+  verify GitHub artifact attestations when `gh` is available, support offline
+  sources and user-scope installation, and expose the `python` channel. After
+  installing they report sandbox prerequisites and offer, only interactively and
+  on an explicit yes, to install the pinned msb. See
   [acq v1 installers](howto/acq.md#acq-v1-installers).
 - **Qualification:** the [`qualification/`](../qualification/README.md) harness,
   language-neutral vectors, live backend oracles, and
   [`qualification-ledger.json`](qualification-ledger.json) implement three tiers
   of evidence. Supported platforms and currently qualified cells are different
   claims; offline tests do not establish live enforcement.
-- **Release asset build:** `.github/workflows/release.yml` builds validator
-  wheelhouses, stages the managed Windows runtime with
-  `scripts/stage-windows-runtime`, packages the Windows archive, generates
-  checksums and attests assets before upload. `installer/assets.json`,
-  `installer/provenance.json` and `scripts/gen-install-assets` describe and
-  validate the intended offline set. In this branch, the publishing workflow
-  does not yet assemble the complete five-platform set: the POSIX archives and
-  provenance/enumeration integration remain work before that contract can be
-  claimed complete. Reconcile that work with any separately offered asset-build
-  branch, then prove it with offline installs (ADR-0042m).
+- **Release asset build:** `.github/workflows/build-assets.yml` builds all five
+  per-platform archives from pinned runtimes (python-build-standalone for POSIX,
+  the python.org embed for Windows) as `installer/assets.json` enumerates them,
+  generates `provenance.json`, enumerates the complete set with
+  `scripts/gen-install-assets`, and installs it offline on Linux, macOS and
+  Windows. It is a dry run on pull requests: it never tags or publishes. On the
+  fork the Apple-silicon archive is cross-built on Linux and checked statically,
+  because Apple-silicon runners did not start there; the native
+  `smoke-macos-arm64` job must pass on a dispatched or release run before a
+  release is cut (ADR-0042m).
 
 ## Suggested review order
 

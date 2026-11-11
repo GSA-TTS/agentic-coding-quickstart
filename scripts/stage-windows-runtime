@@ -100,6 +100,9 @@ printf '%s.zip\r\n.\r\n..\\src\r\n' "$tag" > "$pth"
 cp -R "$src" "$staging/src"
 find "$staging/src" -name __pycache__ -type d -prune -exec rm -rf {} +
 find "$staging/src" -name '_stub_*.py' -type f -exec rm -f {} +
+# A release identity left by an earlier local build must not ship; assemble-release
+# writes the current one.
+find "$staging/src" -name '_build_info.py' -type f -exec rm -f {} +
 [ -f "$staging/src/acq_py/__main__.py" ] || die "copied source is incomplete"
 
 mv "$staging/runtime" "$tree/py-acq/runtime"

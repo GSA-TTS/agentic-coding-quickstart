@@ -81,3 +81,6 @@ Thumbs.db
 *~
 .nexus-agents/
 .paseo-worktrees/
+
+# Generated only inside staged release trees.
+py-acq/src/acq_py/_build_info.py

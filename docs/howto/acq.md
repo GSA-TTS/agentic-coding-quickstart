@@ -227,16 +227,69 @@ installers in the pinned release described in this guide and the README. They ar
 acq v1 installers (ADR-0042m). Each one downloads a per-platform release archive
 (`acq-<platform>.tar.gz`, or `acq-windows-x64.zip` on Windows), verifies it
 against `SHA256SUMS`, installs it under your home directory and offers to put it
-on your `PATH`. `install.sh` links both `acq` and `acq-python`. They do **not**:
+on your `PATH`. `install.sh` links both `acq` and `acq-python`. They do not
+choose an acq package manager or clone, accept the upstream `--method`/`--sha`
+options, or install Git Bash. Windows runs the Python implementation by default;
+Git Bash is needed only for `ACQ_IMPL=bash`.
 
-- install, pin, check or repair `msb`; install it yourself as described in
-  [`msb.md`](msb.md#step-1-install-msb), then run `msb doctor`;
-- choose Homebrew, npm or a git clone, or accept the upstream installer's
-  `--method` and `--sha` options (`install.sh` rejects them as a usage error);
-- on Windows, probe Windows Hypervisor Platform or install Git Bash. The
-  installed `acq` does not need Git Bash: it runs the Python implementation by
-  default (see [Which implementation runs on Windows](#which-implementation-runs-on-windows)),
-  and Git Bash is needed only for `ACQ_IMPL=bash`.
+For an independent integrity pin, pass `--sha256 <digest>` to `install.sh` or
+`-Sha256 <digest>` to `install.ps1`. This is the SHA-256 of **the SHA256SUMS file
+itself**, exactly 64 hex characters (either case), not the archive's digest.
+The installer verifies that pin before trusting any manifest entry; a mismatch
+exits 1 without installing anything, and malformed pins are usage errors (exit
+2). Obtain the digest from published release notes, or run
+`sha256sum SHA256SUMS` on a trusted copy. A pin obtained through an independent
+trusted channel gives cryptographic proof independent of the download host.
+The pin also works with a local offline asset set:
+
+```sh
+sh install.sh --source /trusted/assets --sha256 "$TRUSTED_SUMS_SHA256" --yes
+```
+
+```powershell
+.\install.ps1 -Source C:\trusted\assets -Sha256 $TrustedSumsSha256 -Yes
+```
+
+For GitHub release URLs, if `gh` is on `PATH`, both installers run
+`gh attestation verify <archive> --repo <owner/repo>` before extraction.
+Success prints “verified attestation”. Missing `gh` or an absent attestation
+prints an informational line and continues. Failed verification or another
+verifier error stops installation. Local directory and `file://` installs skip
+attestation. Set `ACQ_INSTALL_NO_ATTESTATION=1`, or pass `-NoAttestation` in
+PowerShell, to skip it explicitly.
+
+After a successful install, a **Next steps** report checks `msb` (including its
+version), `sbx`, hardware virtualization, and `git` on `PATH`. Only one backend
+is needed. The msb policy is >= 0.6.9 excluding 0.7.0–0.7.2; unknown and
+prerelease/build-suffixed versions are reported as out of policy, matching
+[ADR-0032](../adr/0032-msb-version-policy-and-migration-recovery.md).
+Linux checks that `/dev/kvm` exists and is readable and writable; macOS checks
+`sysctl -n kern.hv_support` for `1`. Windows calls `WHvGetCapability` with
+`WHvCapabilityCodeHypervisorPresent`, rather than reading a DISM feature flag.
+Missing prerequisites produce guidance; they do not undo or fail the acq install.
+`msb doctor` remains the authoritative host-readiness check.
+
+The report prints these repair commands as applicable:
+
+- msb: `brew install GSA-TTS/tap/microsandbox-acq`, or
+  `scripts/verify-msb-pin --install` from a trusted checkout on macOS/Linux.
+- sbx: `brew install docker/tap/sbx && sbx login` on a supported Homebrew host
+  (see [the sbx guide](sbx.md) for other hosts).
+- Virtualization: `msb doctor --fix`. On Windows it also prints
+  `Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All`
+  to run yourself from an elevated shell, then restart.
+- Git: `xcode-select --install` on macOS, `brew install git` or your distribution's
+  package manager on Linux, and `winget install --id Git.Git -e` on Windows.
+
+When msb is missing, an interactive session without `--yes`/`-Yes` offers to
+install the pinned msb, defaulting to **No**. Only an explicit `y` or `yes`
+starts installation: Homebrew's pinned formula when available on POSIX,
+otherwise a checksum-verified msb 0.7.7 release bundle (also used on Windows).
+No upstream install script is executed. Non-interactive sessions and
+`--yes`/`-Yes` only print the commands; they never install msb. The installers
+never elevate, enable Windows features or reboot. Skip the whole report and
+offer with `--no-prereq-check` or `-NoPrereqCheck`. Dry runs make no probes or
+prerequisite changes.
 
 Until a release publishes the acq v1 archives, use an offline
 asset set: `sh install.sh --source DIR --install-dir DIR --bin-dir DIR`, or
@@ -259,9 +312,9 @@ Package-manager installs give you `upgrade`/`uninstall` for free.
 Windows support is a preview path for Windows 11 hosts using the `msb` backend.
 It is installed from the GitHub release zip with PowerShell; npm remains scoped
 to macOS/Linux until Windows path and secret-storage behavior are fully
-validated. The installer probes Windows Hypervisor Platform and stops when it is
-not usable, but it does not try to enable Windows features, elevate PowerShell,
-or reboot the machine.
+validated. The acq v1 installer reports Windows Hypervisor Platform capability
+after installation and prints repair guidance if it is unavailable; it does not
+enable Windows features, elevate PowerShell, reboot, or fail the acq install.
 
 <!-- x-release-please-start-version -->
 
@@ -418,8 +471,8 @@ worked. Notes from that validation:
   (`C:\Windows\System32\bash.exe`) that a bare `bash.exe` PATH lookup often
   returns. If `acq` still lands in WSL, run it from a Git Bash terminal or add
   Git for Windows' `bin` directory to your PATH.
-- The installer checks WHP by probing the WHP API (`WHvCreatePartition`), the
-  same signal `msb` uses, rather than the DISM feature flag — the flag can report
+- The acq v1 installer checks WHP after installation by probing the WHP API
+  (`WHvGetCapability` / `WHvCapabilityCodeHypervisorPresent`), rather than the DISM feature flag — the flag can report
   `Disabled` on hosts where WHP genuinely works (WSL2/VirtualMachine Platform,
   VBS, or a virtualized guest). Treat `msb doctor` as the authoritative readiness
   check.
@@ -575,8 +628,9 @@ time: Apple Silicon Macs include the hypervisor support msb uses.
 **Windows 11** — Windows support is in **preview**. Local sandboxes need the
 **Windows Hypervisor Platform** feature (this is separate from the
 `VirtualMachinePlatform` feature that WSL2 and Docker Desktop enable). The
-Windows preview installer probes WHP and stops when it is not usable; it does not
-elevate PowerShell, enable the feature, or reboot the machine.
+acq v1 Windows installer reports WHP capability after installation and
+prints repair guidance when it is unavailable. It does not elevate PowerShell,
+enable the feature, reboot the machine, or fail an otherwise successful install.
 
 Enable WHP yourself from an **elevated** PowerShell
 (`Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All`),

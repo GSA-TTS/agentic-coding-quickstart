@@ -141,11 +141,20 @@ IMAGE = "docker.io/docker/sandbox-templates:shell-docker"
 CRED_HOST = "qualify.invalid"
 
 # Where acq mounts a sandbox's host-config directory read-only in the guest, and
-# where it keeps that directory on the host (under its provenance directory, one
-# ``<sandbox>.<checksum>.config`` directory per sandbox), as the Bash
-# implementation does (``ACQ_HOST_CONFIG_GUEST_DIR`` in acq.backends/common.sh).
+# where it keeps that directory on the host: one ``<sandbox>.<checksum>.config``
+# directory per sandbox under its provenance root, as both implementations do
+# (``ACQ_HOST_CONFIG_GUEST_DIR`` and ``_acq_provenance_dir`` in
+# acq.backends/common.sh, ``state.provenance_dir`` in py-acq). The provenance
+# root is ``$XDG_STATE_HOME/acq/provenance``; it does not follow ACQ_STATE_DIR.
 HOST_CONFIG_GUEST_DIR = "/var/lib/acq/host"
-HOST_CONFIG_GLOB = "provenance/{backend}/{sandbox}.*.config"
+# acq never requests the read-only trusted-config mount on Windows: msb's Windows
+# filesystem backend has not been reviewed for read-only enforcement (ADR-0048m,
+# py-acq ``security.ro_mount_platform_problem``). Oracle 1 cannot pass there, and
+# that is a known platform exception, not a defect this run found.
+WINDOWS_RO_MOUNT = ("acq does not request the read-only trusted-config mount on Windows "
+                    "(msb's Windows filesystem backend is not reviewed for read-only enforcement, "
+                    "ADR-0048m); this cell needs that review, or a waiver")
+HOST_CONFIG_GLOB = "{backend}/{sandbox}.*.config"
 
 # A file the pinned usai-provider kit places in the guest (its ``files`` list).
 # Its presence shows the built-in kits were applied at create. Update it with the
@@ -284,6 +293,15 @@ def make_names(backend: str, nonce: str | None = None) -> Names:
         canary_sandbox=f"acq-qual-ro-{nonce}",
         seed=int(nonce, 16),
     )
+
+
+def provenance_root(env: dict[str, str]) -> Path:
+    """acq's provenance root for a run with ``env``: ``$XDG_STATE_HOME/acq/provenance``.
+
+    ``isolated_env`` drops ``ACQ_PROVENANCE_DIR`` with the other caller ``ACQ_*``
+    variables, so the child acq resolves exactly this path.
+    """
+    return Path(env["XDG_STATE_HOME"]) / "acq" / "provenance"
 
 
 def isolated_env(root: Path, base: dict[str, str] | None = None) -> dict[str, str]:
@@ -495,9 +513,10 @@ class Cell:
     ``acq(argv, stdin=None, timeout=...)`` runs the shipped CLI; ``raw(argv, ...)``
     runs a program directly; ``canary(timeout)`` runs the ro-mount canary and
     returns ``(exit status, stdout)`` (status ``None`` when no usable ``bash``
-    exists or it timed out); ``state_dir`` is acq's private state root, where its sandbox records and
-    host-config directories are read. Steps stop starting at ``deadline`` (epoch
-    seconds).
+    exists or it timed out); ``state_dir`` is acq's private state root, where its
+    sandbox records are read, and ``provenance_dir`` its private provenance root,
+    where host-config directories are read. Steps stop starting at ``deadline``
+    (epoch seconds).
     """
 
     backend: str
@@ -508,6 +527,8 @@ class Cell:
     raw: Run
     canary: Callable[[float], "tuple[int | None, str]"]
     deadline: float = math.inf
+    provenance_dir: Path | None = None
+    windows: bool = os.name == "nt"
     failures: list[str] = field(default_factory=list)
     blocked: list[str] = field(default_factory=list)
     bound: bool = False
@@ -646,11 +667,16 @@ class Cell:
             self.fail("kit apply", f"{KIT_PROBE_FILE} (placed by the usai-provider kit) is missing in the guest")
 
     def host_config_dir(self) -> Path | None:
-        found = sorted(self.state_dir.glob(HOST_CONFIG_GLOB.format(backend=self.backend, sandbox=self.names.sandbox)))
+        if self.provenance_dir is None:
+            return None
+        found = sorted(self.provenance_dir.glob(HOST_CONFIG_GLOB.format(backend=self.backend, sandbox=self.names.sandbox)))
         return found[0] if len(found) == 1 and found[0].is_dir() else None
 
     def ro_mount(self) -> None:
         """oracle 1 (msb): the trusted-config mount is read-only in this guest; acq records it; msb enforces ``:ro``."""
+        if self.windows:
+            self.block("ro mount", WINDOWS_RO_MOUNT)
+            return
         n = self.names
         records = sorted((self.state_dir / self.backend).glob(f"{n.sandbox}.*.json"))
         try:
@@ -700,7 +726,7 @@ class Cell:
             self.fail("ro mount", f"the write to {HOST_CONFIG_GUEST_DIR} did not fail with EROFS")
         if host is None:
             self.fail("ro mount", "acq keeps no host-config directory for the sandbox "
-                      f"(expected <state>/{HOST_CONFIG_GLOB.format(backend=self.backend, sandbox=n.sandbox)})")
+                      f"(expected <provenance>/{HOST_CONFIG_GLOB.format(backend=self.backend, sandbox=n.sandbox)})")
         elif before is None or snapshot(host) != before:
             self.fail("ro mount", "the host-config directory changed while the guest tried to write to it")
 
@@ -972,7 +998,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"BLOCKED: usai key: {why}; acq refuses the create without it "
                       "(store one with 'acq --backend sbx secret set -g usai')", file=sys.stderr)
                 return 2
-        cell = Cell(backend, names, str(workspace), Path(env["ACQ_STATE_DIR"]), acq, raw, canary, deadline)
+        cell = Cell(backend, names, str(workspace), Path(env["ACQ_STATE_DIR"]), acq, raw, canary, deadline,
+                    provenance_dir=provenance_root(env))
         return cell.run()
 
 

@@ -17,8 +17,15 @@ The goal: **merging the release-please PR is the only manual step in a release**
 it is held automatically when a Tier-3 cell is stale, blocked, or waived past its
 expiry (ADR-0044m).
 
-The code side is done. `release.yml` is split so the gate sits **before the tag and
-the GitHub Release exist**:
+The complete ADR-0042m asset builder is currently a **dry run** in
+`.github/workflows/build-assets.yml` (`workflow_dispatch` or `workflow_call`). It
+builds all five installable archives, provenance and checksums, then verifies
+local offline installs on Linux, macOS and Windows. It uploads workflow artifacts
+only and has read-only repository permissions. A follow-up will wire it into
+`release.yml`; the existing publishing jobs still build the legacy asset set.
+
+The release gate code is in place. `release.yml` is split so the gate sits
+**before the tag and the GitHub Release exist**:
 
 | Job | What it does |
 |-----|--------------|

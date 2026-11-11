@@ -608,3 +608,28 @@ _suspended_spinner() {
   refute_output --partial $'\r'
   refute_output --partial 'done'
 }
+
+@test "progress: a signal during mktemp removes the directory before running caller cleanup" {
+  local sig
+  for sig in INT TERM HUP; do
+    _prog '_acq_progress_enabled() { return 0; }
+      export TMPDIR="'"$STUBDIR"'"
+      trap '\''echo PRIOR_EXIT=$?; test ! -d "$TMPDIR/allocated" || echo DIR-LEFT'\'' EXIT
+      mktemp() {
+        command mkdir "$TMPDIR/allocated"
+        kill -s '"$sig"' "$_ACQ_SPIN_OWNER"
+        builtin printf "%s\n" "$TMPDIR/allocated"
+      }
+      acq_spin_start "phase"
+      echo NOT-REACHED'
+    case "$sig" in
+      INT) assert_failure 130 ;;
+      TERM) assert_failure 143 ;;
+      HUP) assert_failure 129 ;;
+    esac
+    assert_output --partial 'PRIOR_EXIT='
+    refute_output --partial DIR-LEFT
+    refute_output --partial NOT-REACHED
+    [ ! -d "$STUBDIR/allocated" ]
+  done
+}
