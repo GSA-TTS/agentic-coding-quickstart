@@ -809,7 +809,8 @@ when the guest sends that placeholder to an allowed host over **intercepted TLS*
 (`--tls-intercept`, which acq enables), msb swaps in the real value on the wire —
 so the credential **never enters the guest** and **never appears in argv**.
 `acq secret set` also re-feeds running sandboxes with `msb modify --secret` so a
-rotated key takes effect without recreating the sandbox.
+rotation of an existing binding takes effect live. A new credential binds at
+the next start, after `acq stop NAME && acq start NAME`.
 
 - **USAi** binds to `api.gsa.usai.gov`. The USAi provider sends the key as an
   `Authorization: Bearer` header, which msb substitutes correctly.

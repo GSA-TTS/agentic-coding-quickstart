@@ -7148,13 +7148,19 @@ _acq_msb_refeed_one() {
       echo "acq(msb): warning: could not unbind the previous binding $_old_env from sandbox '$sb'." >&2
     fi
   fi
-  _acq_msb_cli modify "$sb" --secret "${_env}@${_host}" </dev/null >/dev/null 2>&1
+  if _acq_msb_cli modify "$sb" --secret "${_env}@${_host}" </dev/null >/dev/null 2>&1; then
+    return 0
+  fi
+  # msb can replace a bound secret live but cannot add a new one to a running
+  # VM; the stored value is kept either way.
+  echo "acq(msb): could not apply the credential to running sandbox '$sb' (msb cannot add a new secret to a running sandbox). It is stored; recreate the sandbox to bind it, or start it with ACQ_IMPL=python, whose start binds stored credentials before boot." >&2
+  return 1
 }
 
 # _acq_msb_secret_refeed SERVICE SCOPE ENV HOST [OLD_ENV OLD_HOST] — live
-# add/rotate: re-feed a newly-set/rotated secret to running sandboxes via
+# rotate: re-feed an existing secret to running sandboxes via
 # `msb modify --secret ENV@HOST` (the guest keeps its placeholder; only the
-# injected value changes) so it takes effect without recreate. A named SCOPE
+# injected value changes). New bindings require a restart. A named SCOPE
 # targets that sandbox; empty SCOPE sweeps all running sandboxes, except those
 # _acq_msb_refeed_eligible leaves alone. OLD_ENV/OLD_HOST name the service's
 # binding before this change, unbound first when it differs. Echoes the count of
@@ -7185,7 +7191,7 @@ _acq_msb_secret_refeed() {
   # shellcheck disable=SC2163  # dynamic export of the resolved binding env var
   export "$_env=$val"
   if [ -n "$scope_name" ]; then
-    if acq_backend_exists "$scope_name" && _acq_msb_refeed_eligible "$service" "$scope_name" "$scope_name"; then
+    if _acq_msb_is_running "$scope_name" && _acq_msb_refeed_eligible "$service" "$scope_name" "$scope_name"; then
       _acq_msb_refeed_one "$scope_name" "$_env" "$_host" "$_old_env" "$_old_host" \
         && applied=$((applied + 1))
     fi
@@ -7200,7 +7206,7 @@ _acq_msb_secret_refeed() {
       _acq_msb_refeed_one "$sb" "$_env" "$_host" "$_old_env" "$_old_host" \
         && applied=$((applied + 1))
     done <<EOF
-$(_acq_msb_cli list -q 2>/dev/null)
+$(_acq_msb_cli list --running -q 2>/dev/null)
 EOF
   fi
   unset "$_env"
@@ -7280,9 +7286,8 @@ acq_backend_secret_set() {
   # host/env (when supplied) are persisted as a non-secret endpoint sidecar.
   acq_secret_set_interactive "$service" "$scope_name" "$host" "$env_var" || return 1
 
-  # Live add/rotate: re-feed running sandboxes so a newly-set or rotated secret
-  # takes effect without recreate. Driven off the single binding table so EVERY
-  # bound service (usai, github, ...) rotates in place — not just usai.
+  # Live rotation: new bindings require a restart; report failures per sandbox.
+  # Driven off the single binding table so every bound service (usai, github, ...) rotates in place — not just usai.
   local _env _host _binding applied
   _binding=$(_acq_msb_service_binding "$service" "$scope_name")
   _env=$(printf '%s' "$_binding" | cut -f1)
@@ -7303,8 +7308,8 @@ acq_backend_secret_propagate() {
     return 1
   fi
   if [ -n "$scope_name" ]; then
-    acq_backend_exists "$scope_name" || return 0
-  elif [ -z "$(_acq_msb_cli list -q 2>/dev/null)" ]; then
+    _acq_msb_is_running "$scope_name" || return 0
+  elif [ -z "$(_acq_msb_cli list --running -q 2>/dev/null)" ]; then
     return 0
   fi
 
@@ -7323,14 +7328,14 @@ acq_backend_secret_propagate() {
   # its own value or excludes the provider is not reported as a failure.
   if [ -n "$scope_name" ]; then
     # The re-feed below prints any warning; the count stays quiet.
-    _acq_msb_refeed_eligible "$service" "$scope_name" "$scope_name" 2>/dev/null && eligible=1
+    _acq_msb_is_running "$scope_name" && _acq_msb_refeed_eligible "$service" "$scope_name" "$scope_name" 2>/dev/null && eligible=1
   else
     while IFS= read -r sb; do
       sb="${sb%$'\r'}"
       [ -n "$sb" ] || continue
       _acq_msb_refeed_eligible "$service" "$sb" "" </dev/null 2>/dev/null && eligible=$((eligible + 1))
     done <<EOF
-$(_acq_msb_cli list -q 2>/dev/null)
+$(_acq_msb_cli list --running -q 2>/dev/null)
 EOF
   fi
   applied=$(_acq_msb_secret_refeed "$service" "$scope_name" "$_env" "$_host")
@@ -7486,7 +7491,7 @@ acq_backend_secret_rm() {
     echo "acq(msb): no '$service' secret found in the acq store (${where})." >&2
   fi
   if [ "$unbound" -gt 0 ]; then
-    echo "      Live-unbound it from $unbound running sandbox(es) (msb modify --secret-rm)." >&2
+    echo "      Confirmed it unbound from $unbound sandbox(es) (msb modify --secret-rm)." >&2
   fi
   return 0
 }

@@ -39,6 +39,7 @@ load 'helper'
 
 @test "rotate(msb): stores the key and re-feeds via msb modify" {
   printf 'runningbox\n' > "$STUBDIR/.msb_sandbox_list"
+  cp "$STUBDIR/.msb_sandbox_list" "$STUBDIR/.msb_running_list"
   run env ACQ_SECRET_TEST_VALUE="new-usai-key" ACQ_BACKEND=msb "$ACQ" usai-rotate-api-key
   local log
   log=$(cat "$CALLS")
@@ -49,6 +50,7 @@ load 'helper'
 
 @test "rotate(msb): also propagates to existing sbx sandboxes" {
   printf 'runningbox\n' > "$STUBDIR/.msb_sandbox_list"
+  cp "$STUBDIR/.msb_sandbox_list" "$STUBDIR/.msb_running_list"
   printf 'legacy-sbx\n' > "$STUBDIR/.sandbox_list"
   printf 'CUSTOM SECRETS\n(global) api.gsa.usai.gov USAI_API_KEY ph-existing ****\n' > "$STUBDIR/sbx_ls"
   run env SBX_LS_FIXTURE="$STUBDIR/sbx_ls" ACQ_SECRET_TEST_VALUE="new-usai-key" ACQ_BACKEND=msb "$ACQ" usai-rotate-api-key

@@ -367,7 +367,7 @@ def build_parser() -> _Parser:
     secret_rm = secret_sub.add_parser("rm", help="remove a secret")
     secret_rm.add_argument(
         "--accept-unconfirmed", dest="accept_unconfirmed", action="append", metavar="NAME[,NAME]",
-        help="accept these sandboxes (with no acq binding record) staying unconfirmed (msb)",
+        help="accept these sandboxes (with no acq binding record) staying unconfirmed after a remove failure or missing mapping (msb)",
     )
     common._secret_scope_args(secret_rm, remainder_help="[-g | SANDBOX] SERVICE")
 
@@ -433,7 +433,7 @@ def build_parser() -> _Parser:
     pc_rm.add_argument("provider", help="provider id")
     pc_rm.add_argument(
         "--accept-unconfirmed", dest="accept_unconfirmed", action="append", metavar="NAME[,NAME]",
-        help="accept these sandboxes (with no acq binding record) staying unconfirmed (msb)",
+        help="accept these sandboxes (with no acq binding record) staying unconfirmed after a remove failure or missing mapping (msb)",
     )
 
     # github-scope: per-sandbox GitHub token scoping (ADR-0013). The token is on

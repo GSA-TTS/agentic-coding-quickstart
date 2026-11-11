@@ -2330,6 +2330,17 @@ def _resume(command: str, name: str) -> bool:
         raise msb.MsbError(errors.FAILURE, "could not list running sandboxes", "check that msb works ('msb list'), then retry")
     if name in running:
         return True
+    # A stopped guest cannot answer the write probe. Check the host-enforced
+    # mount record before adding credentials; the guest probe still gates healing.
+    record = state.record_read("msb", name)
+    if security.requires_ro_mount(record):
+        hcfg = security.host_config_dir(name)
+        mount, reason = msb.ro_mount_recorded(name, security.HOST_CONFIG_GUEST_DIR,
+                                             [str(hcfg), os.path.realpath(hcfg)])
+        if mount != "ok":
+            raise msb.MsbError(errors.SECURITY_EXCEPTION,
+                               f"sandbox '{name}' lacks the required read-only trusted-config mount: {reason}",
+                               f"recreate sandbox '{name}' to restore its trusted-config mount")
     # msb start binds what it reads from the store, like a create does.
     with _store_reading(msb.MsbError, "nothing was started"):
         msb.start(name)
@@ -2358,8 +2369,8 @@ def _store_reading(error_cls, unchanged: str) -> Iterator[None]:
 def _start_locked(command: str, name: str, emit_json: bool) -> int:
     """Resume, wait for exec-readiness, check the read-only mount, rebind secrets, heal the kits.
 
-    The mount is checked before any secret is bound, so a sandbox missing its
-    read-only trusted config never receives a newly added credential. Once the
+    Missing credentials are bound while stopped, before msb start. The guest
+    mount is checked before re-feeding an already running sandbox or healing kits. Once the
     sandbox runs, every failure says so: it is not stopped again, and a heal
     that did not complete is never reported as success (ADR-0038m).
     """
@@ -2384,7 +2395,7 @@ def _start_locked(command: str, name: str, emit_json: bool) -> int:
         ssh_agent.start_bridge(name)
     try:
         with _store_reading(msb.MsbError, "nothing new was bound"):
-            unbound = msb.reconcile_bindings(name)
+            unbound = msb.reconcile_bindings(name) if was_running else []
     except common._ADAPTER_ERRORS as exc:
         return common._operational_failure(
             command, exc.code, f"sandbox '{name}' is running, but: {exc.message}", exc.remediation, emit_json,
@@ -2416,7 +2427,8 @@ def _finish_start(
         return common._operational_failure(
             command, errors.FAILURE,
             f"sandbox '{name}' is running and its kits were re-applied, but {', '.join(unbound)} could not be bound in it",
-            f"retry 'acq {command} {name}', or recreate the sandbox to bind the stored values", emit_json,
+            f"a new credential requires a restart: run 'acq stop {name} && acq start {name}'; "
+            "start will bind the stored values", emit_json,
         )
     if command == "restart" and was_running:
         return common._operational_failure(

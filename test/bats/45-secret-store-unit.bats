@@ -131,6 +131,7 @@ PSSTUB
 @test "secret rm -g(msb): sweeps all running sandboxes" {
   load_acq
   printf 'boxA\nboxB\n' > "$STUBDIR/.msb_sandbox_list"
+  cp "$STUBDIR/.msb_sandbox_list" "$STUBDIR/.msb_running_list"
   : > "$CALLS"
   run bash -c '
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/rmg-secrets"
@@ -146,6 +147,7 @@ PSSTUB
 @test "secret set(msb): live-rotates github into a running sandbox, value never on argv" {
   load_acq
   printf 'setbox\n' > "$STUBDIR/.msb_sandbox_list"
+  cp "$STUBDIR/.msb_sandbox_list" "$STUBDIR/.msb_running_list"
   : > "$CALLS"
   run bash -c '
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/set-secrets"
@@ -161,6 +163,7 @@ PSSTUB
 @test "secret set -g(msb): sweeps all running sandboxes (stdin-loop regression)" {
   load_acq
   printf 'sboxA\nsboxB\n' > "$STUBDIR/.msb_sandbox_list"
+  cp "$STUBDIR/.msb_sandbox_list" "$STUBDIR/.msb_running_list"
   : > "$CALLS"
   run bash -c '
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/setg-secrets"
@@ -500,6 +503,7 @@ PSSTUB
 @test "secret set -g(msb): CRLF list output re-feeds the bare sandbox names" {
   load_acq
   printf 'crA\r\ncrB\r\n' > "$STUBDIR/.msb_sandbox_list"
+  cp "$STUBDIR/.msb_sandbox_list" "$STUBDIR/.msb_running_list"
   : > "$CALLS"
   run bash -c '
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/crlf-set-secrets"

@@ -220,6 +220,7 @@ LS
 
 @test "secret set(msb): scoped usai propagates to matching sbx sandbox" {
   printf 'my-sandbox\n' > "$STUBDIR/.msb_sandbox_list"
+  cp "$STUBDIR/.msb_sandbox_list" "$STUBDIR/.msb_running_list"
   printf 'my-sandbox\n' > "$STUBDIR/.sandbox_list"
   printf 'CUSTOM SECRETS\nmy-sandbox api.gsa.usai.gov USAI_API_KEY ph-scoped ****\n' > "$STUBDIR/sbx_ls"
   run bash -c 'printf "k\n" | SBX_LS_FIXTURE="$2" ACQ_SECRET_TEST_VALUE="k" ACQ_BACKEND=msb "$1" secret set my-sandbox usai' _ "$ACQ" "$STUBDIR/sbx_ls"
@@ -262,6 +263,7 @@ LS
 
 @test "secret propagate(msb): missing store value fails closed" {
   printf 'runningbox\n' > "$STUBDIR/.msb_sandbox_list"
+  cp "$STUBDIR/.msb_sandbox_list" "$STUBDIR/.msb_running_list"
   run env ACQ_PROPAGATING_SECRET=1 ACQ_BACKEND=msb "$ACQ" secret _propagate -g usai
   assert_failure
   assert_output --partial "no value is present in the acq secret store"

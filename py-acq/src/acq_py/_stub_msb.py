@@ -48,7 +48,8 @@ or ``nosocket`` (exit 2).
 ``modify`` models the conservative reading of msb's "add or rotate": ``--secret
 ENV@HOST`` for a variable already bound to the SAME hosts rotates it, but one
 bound to OTHER hosts is an error (no assumption that it is replaced), and
-``--secret-rm`` of a variable that is not bound is an error.
+``--secret-rm`` of an absent variable succeeds (verified with msb 0.7.11).
+``ACQ_MSB_STUB_REQUIRE_RESTART`` models running additions requiring a restart.
 ``ACQ_MSB_STUB_FAIL_ADD`` / ``ACQ_MSB_STUB_FAIL_RM`` name sandboxes (comma
 separated) whose ``modify --secret`` / ``--secret-rm`` fails.
 
@@ -317,9 +318,7 @@ def _apply_secrets(args: list[str], bindings: dict) -> str | None:
             return f"secret {env} is already bound to other hosts; remove it first"
         bindings[env] = {"host": host, "env_present": True}
     for env in _flag_values(args, "--secret-rm"):
-        if env not in bindings:
-            return f"no secret named {env}"
-        del bindings[env]
+        bindings.pop(env, None)
     return None
 
 
@@ -396,6 +395,11 @@ def main(argv: list[str]) -> int:
             print(f"msb: sandbox '{name}' already exists", file=sys.stderr)
             return 1
         bindings: dict = {}
+        if os.environ.get("ACQ_MSB_STUB_REQUIRE_RESTART") and catalog[name] == "running":
+            for spec in _flag_values(args, "--secret"):
+                if spec.partition("@")[0] not in bindings:
+                    print("msb: new secret requires restart; no changes were applied", file=sys.stderr)
+                    return 1
         problem = _apply_secrets(args, bindings)
         if problem is not None:
             print(f"msb: {problem}", file=sys.stderr)
@@ -432,6 +436,11 @@ def main(argv: list[str]) -> int:
                 return 1
         records = _load_secrets()
         bindings = records.get(name, {})
+        if os.environ.get("ACQ_MSB_STUB_REQUIRE_RESTART") and catalog[name] == "running":
+            for spec in _flag_values(args, "--secret"):
+                if spec.partition("@")[0] not in bindings:
+                    print("msb: new secret requires restart; no changes were applied", file=sys.stderr)
+                    return 1
         problem = _apply_secrets(args, bindings)
         if problem is not None:
             print(f"msb: {problem}", file=sys.stderr)
