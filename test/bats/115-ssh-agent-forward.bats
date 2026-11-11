@@ -1288,7 +1288,7 @@ PQ
   refute_output --partial 'UNREACHABLE'
   refute_output --partial 'just re-pointed'
   refute_output --partial 'names your live agent'
-  run rg -q 'nohup socat' "$CALLS"
+  run grep -q 'nohup socat' "$CALLS"
   assert_failure 1
   # (b) at create: a valid name whose link cannot be created is not told its
   #     name is wrong; the warning names the link path instead.

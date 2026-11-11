@@ -5220,8 +5220,8 @@ EOF
     for _arg in "$@"; do
       if [ "$_next" = 1 ]; then
         _port=${_arg##*:}; _port=${_port%%/*}
-        while [ "${_port#0}" != "$_port" ]; do _port=${_port#0}; done
-        _used="$_used$_port "
+        while [ "${_port#0}" != "$_port" ] && [ -n "${_port#0}" ]; do _port=${_port#0}; done
+        [ -z "$_port" ] || _used="$_used$_port "
       fi
       _next=0
       case "$_arg" in -p|--publish|--port) _next=1 ;; esac
@@ -5553,7 +5553,8 @@ _acq_msb_ssh_agent_opt_out() {
   [ "$_had_link" = "1" ] || [ "$_had_key" = "1" ] || return 0
   if [ "$_had_link" = "0" ]; then
     # No link here: ask msb whether the route names the managed link at all.
-    _ACQ_MSB_ROUTE_FLAT=""
+    _ACQ_MSB_ROUTE_JSON=""
+    _ACQ_MSB_ROUTE_NAME=""
     _acq_msb_has_ssh_agent_vsock_route "$name" >/dev/null 2>&1 || true
     _acq_msb_route_names_link "$name" && _had_link=1
   fi
@@ -5957,6 +5958,7 @@ _acq_msb_has_ssh_agent_vsock_route() {
   local name="$1" json _port="$ACQ_MSB_SSH_AGENT_VSOCK_PORT" _errf _rc _try
   _ACQ_MSB_ROUTE_PROBE_ERR=""
   _ACQ_MSB_ROUTE_NAME=""
+  _ACQ_MSB_ROUTE_JSON=""
   # stderr goes to a file, not into $json: a warning mentioning vsock would
   # otherwise flatten into a false route match.
   _errf=$(mktemp "$(acq_tmp_dir)/acq-msb-inspect.XXXXXX" 2>/dev/null) || _errf=/dev/null
@@ -6008,6 +6010,8 @@ except (ValueError, TypeError, AttributeError):
 
 _acq_msb_route_names_link() {
   local link
+  # Only trust the cached inspect document when it was fetched for this sandbox.
+  [ "${_ACQ_MSB_ROUTE_NAME:-}" = "$1" ] || return 1
   link=$(_acq_msb_ssh_agent_link_path "$1") || return 1
   printf '%s' "$_ACQ_MSB_ROUTE_JSON" | _acq_msb_agent_json link "$ACQ_MSB_SSH_AGENT_VSOCK_PORT" "$link"
 }

@@ -834,18 +834,18 @@ def _routes(doc: dict) -> list[dict]:
     return [r for r in routes if isinstance(r, dict)] if isinstance(routes, list) else []
 
 
-def _route_state(flat: dict | None) -> int:
-    if flat is None:
+def _route_state(doc: dict | None) -> int:
+    if doc is None:
         return ROUTE_UNKNOWN
-    return ROUTE_PRESENT if any(str(r.get("port")) == bridge_port() for r in _routes(flat)) else ROUTE_MISSING
+    return ROUTE_PRESENT if any(str(r.get("port")) == bridge_port() for r in _routes(doc)) else ROUTE_MISSING
 
 
-def _route_names_link(flat: dict | None, name: str) -> bool:
+def _route_names_link(doc: dict | None, name: str) -> bool:
     """The route's host socket is this sandbox's managed link (so a removed link may be made again)."""
     link = link_path(name)
-    if flat is None or link is None:
+    if doc is None or link is None:
         return False
-    return any(str(r.get("port")) == bridge_port() and r.get("host_socket") == link for r in _routes(flat))
+    return any(str(r.get("port")) == bridge_port() and r.get("host_socket") == link for r in _routes(doc))
 
 
 def ensure_forward(name: str) -> str | None:
