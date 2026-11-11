@@ -75,10 +75,10 @@ SPEC
   assert_regex "$spec" 'line two'
   assert_regex "$spec" 'agentInstructions:'
   assert_regex "$spec" 'Translate kit context\.'
-  # #220: wildcard + host:port allow entries must be YAML-quoted.
+  # Wildcard + host:port allow entries must be YAML-quoted to stay strings.
   assert_regex "$spec" "- '\*\.example\.com'"
   assert_regex "$spec" "- 'api\.example\.com:443'"
-  # #224: neutral publishedPorts -> sbx-v2 ports (keyed on container).
+  # Translate neutral publishedPorts to sbx-v2 ports, keyed on container.
   assert_regex "$spec" 'ports:'
   refute_regex "$spec" 'publishedPorts:'
   assert_regex "$spec" '- container: 3000'
@@ -557,7 +557,7 @@ SPEC
 # Debian/Ubuntu — has no interval-expression support, so that form matches
 # NOTHING under mawk and every kit's files are silently dropped (parser site)
 # or every valid mode is reported invalid (kit_validate raw-scan site, whose
-# stricter leading-zero pattern is /^0[0-7][0-7][0-7]$/ — #381). All mode
+# stricter leading-zero pattern is /^0[0-7][0-7][0-7]$/). All mode
 # validator sites must stay longhand. This source-level check catches a
 # regression regardless of which awk the test runner ships (gawk/BSD-awk would
 # not reproduce the failure at runtime).

@@ -30,8 +30,9 @@ ACQ_BACKEND_CAN_RESUME=1
 # shellcheck disable=SC2034
 ACQ_BACKEND_SUPPORTS_CREDENTIAL_REWRITE=1
 
-# Shared agent catalog (issue #377). common.sh normally sources this, but some
-# tests source this adapter directly; guard so a re-source is cheap and so the
+# Shared agent catalog for consistent agent tokens and image names. common.sh
+# normally sources this, but some tests source this adapter directly; guard so
+# a re-source is cheap and so the
 # catalog helpers (acq_is_known_agent, …) are always defined.
 if ! command -v acq_is_known_agent >/dev/null 2>&1; then
   # shellcheck source=acq.backends/agents.sh
@@ -725,7 +726,7 @@ _acq_backend_provision_unlocked() {
   local _cf=()
   [ "${ACQ_CLONE:-0}" = "1" ] && _cf=(--clone)
 
-  # Guest-visible workspace markers (GSA-TTS/agentic-coding-quickstart#456),
+  # Guest-visible workspace markers identify the primary path and clone status,
   # same contract as msb: ACQ_WORKSPACE always, ACQ_CLONE=1 under --clone.
   # sbx mounts the primary at its LOGICAL absolute host path (`.` resolves to
   # $PWD-form, not realpath; verified sbx 0.42.1), so resolve the same way or
@@ -1723,7 +1724,7 @@ acq_backend_secret_set() {
 
   # Collect remaining flags; detect --host and --env presence. host_explicit
   # marks a --host the USER supplied (vs one filled from the service mapping
-  # below): an explicit host must win over any compiled-in binding (#384).
+  # below): an explicit host must win over any compiled-in binding.
   local host="" env_var="" extra_flags=() host_explicit=0
   local prev=""
   for arg in "$@"; do
@@ -1753,7 +1754,7 @@ acq_backend_secret_set() {
   # sbx BUILT-INS (github, anthropic, ...) must NOT be given a DEFAULT host/env
   # here — they use `sbx secret set <service>` so the sbx proxy injects them
   # natively. Only non-built-in services (usai) get a host/env mapping →
-  # set-custom. An EXPLICIT --host is different (#384): it survives untouched
+  # set-custom. An EXPLICIT --host is different: it survives untouched
   # for any service and forces the set-custom route below, but a built-in still
   # gets no auto-filled env, so the --env requirement is enforced next.
   case "$_ACQ_SBX_BUILTIN_SERVICES" in
@@ -1770,7 +1771,7 @@ acq_backend_secret_set() {
   # An explicit --host with no env var (neither --env nor a service mapping)
   # cannot be bound: the custom-secret path injects by ENV placeholder. Fail
   # BEFORE storing anything — silently discarding the flags bound the token to
-  # the wrong endpoint with exit 0 (#384), the worst of the options.
+  # the wrong endpoint with exit 0, the worst of the options.
   if [ "$host_explicit" -eq 1 ] && [ -z "$env_var" ]; then
     echo "acq: secret set: --host ${host} needs --env ENV as well ('$service' has no env mapping)." >&2
     echo "     usage: acq secret set [-g | SANDBOX] <service> [--host HOST --env ENV]" >&2
@@ -1853,7 +1854,7 @@ acq_backend_secret_set() {
   case "$_ACQ_SBX_BUILTIN_SERVICES" in
     *" $service "*) is_builtin=1; builtin_name=1 ;;
   esac
-  # An explicit --host overrides the compiled-in service binding (#384): a
+  # An explicit --host overrides the compiled-in service binding: a
   # self-hosted endpoint (e.g. gitlab.<agency>.gov) must go through set-custom.
   # Feeding `sbx secret set gitlab` would bind the token to sbx's gitlab.com
   # proxy service and silently discard the requested host.
@@ -1878,8 +1879,8 @@ acq_backend_secret_set() {
   if [ -n "$scope_flag" ]; then scope_desc="global"; rm_scope=""; else scope_desc="sandbox '$scope_name'"; rm_scope="--sandbox $scope_name"; fi
 
   # When a built-in NAME takes the custom route (explicit --host), also refuse
-  # on a stale NATIVE entry for that name — e.g. one created by the pre-#384
-  # behavior that discarded --host. Left in place, sbx would keep injecting the
+  # on a stale NATIVE entry for that name — e.g. one created when
+  # --host was silently discarded. Left in place, sbx would keep injecting the
   # token to its native endpoint even after set-custom succeeds.
   if [ "$builtin_name" -eq 1 ] && [ "$is_builtin" -eq 0 ] && \
      _acq_sbx_secret_exists "$scope_flag" "$scope_name" "$service" ""; then
@@ -1967,7 +1968,7 @@ EOF
     if [ -z "$scope_flag" ]; then cmd_args+=(--sandbox "$scope_name"); fi
     local svc_hosts h
     if [ "$host_explicit" -eq 1 ]; then
-      # The user's --host wins over the static service mapping (#384).
+      # The user's --host wins over the static service mapping.
       svc_hosts="$host"
     else
       svc_hosts=$(_acq_service_hosts_env "$service" "$scope_name" | cut -f1)
@@ -2154,7 +2155,7 @@ acq_backend_secret_rm() {
   [ -n "$scope_name" ] && acq_sandbox="$scope_name"
 
   # Capture the endpoint sidecar BEFORE step 1 deletes it: a built-in name set
-  # with an explicit --host (#384) was fed to sbx as a CUSTOM secret, and its
+  # with an explicit --host was fed to sbx as a CUSTOM secret, and its
   # sidecar env is the only key that can find that placeholder in step 2.
   # EXACT scope only — the resolve variant's sandbox->global fallback would let
   # a global sidecar's env steer a sandbox-scoped destructive removal.
@@ -2233,7 +2234,7 @@ acq_backend_secret_rm() {
   # empty, and `"${arr[@]}"` on an empty array is a fatal "unbound variable"
   # under `set -u` on bash 3.2 (the macOS system bash) — the same class as the
   # builtin_scope_args guard in the set path. Every `acq secret rm -g <built-in>`
-  # on stock macOS crashed here before the guard (#384).
+  # on stock macOS crashed here before the guard.
   local scope_args=()
   [ -z "$scope_flag" ] && scope_args+=(--sandbox "$scope_name")
 
@@ -2506,8 +2507,8 @@ acq_backend_rotate_key() {
 
   # `sbx create` needs an authenticated sbx session. If it has expired, sbx
   # triggers an interactive browser login — and if its output is swallowed and
-  # it's unbounded, rotation appears to hang with no explanation (quickstart
-  # #211). Two guards: (1) do NOT silence stderr, so any login prompt is
+  # it's unbounded, rotation appears to hang with no explanation. Two guards:
+  # (1) do NOT silence stderr, so any login prompt is
   # visible; (2) bound the create with a timeout so an interactive-login
   # handshake can never hang indefinitely. sbx has no non-interactive
   # auth-status probe, so the timeout is the safety net.

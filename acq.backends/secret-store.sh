@@ -701,7 +701,7 @@ acq_secret_meta_resolve() {
 
 # acq_secret_meta_resolve_exact SERVICE [SANDBOX] -> "HOST<TAB>ENV" on STDOUT
 # EXACT-scope variant of acq_secret_meta_resolve: no sandbox->global fallback.
-# The sbx rm path uses it (#384 review): a GLOBAL sidecar must never steer a
+# The sbx rm path uses it: a GLOBAL sidecar must never steer a
 # sandbox-scoped DESTRUCTIVE placeholder removal toward an entry the sidecar
 # never described.
 acq_secret_meta_resolve_exact() {

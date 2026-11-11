@@ -38,7 +38,7 @@
 #   only, gated, secret-free (it only ever prints caller-supplied phase labels,
 #   never a secret value).
 #
-# TEST-SAFETY:
+# TEST-SAFETY: keep animation bytes out of captured output:
 #   The animation is gated on stderr being a TTY (`[ -t 2 ]`). The offline test
 #   suite captures stderr into a variable (a pipe, not a TTY) and asserts on it,
 #   so the spinner NEVER starts there and no frame bytes or carriage returns leak
