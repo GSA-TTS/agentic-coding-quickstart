@@ -47,6 +47,7 @@ from . import (
     errors,
     hostexec,
     kits,
+    msb_options,
     provider_creds,
     provider_input,
     publish,
@@ -154,6 +155,22 @@ def _guest_path(host: str) -> str:
     if len(drive) == 2 and drive[1] == ":" and drive[0].isalpha():
         return "/" + drive[0].lower() + (root + tail).replace("\\", "/")
     return host.replace("\\", "/")
+
+
+def workspace_override() -> str | None:
+    """Canonicalize the operator's start directory without changing mount roots."""
+    value = os.environ.get("ACQ_MSB_WORKSPACE", "")
+    if not value:
+        return None
+    if WINDOWS:
+        # Keep guest POSIX paths intact; resolve native paths on the host first.
+        return _guest_path(os.path.realpath(value) if ntpath.splitdrive(value)[0] else value)
+    return _guest_path(os.path.realpath(value))
+
+
+def start_directory(name: str) -> str | None:
+    """Use the current guest override, then the separately recorded guest path."""
+    return workspace_override() or (state.record_read("msb", name) or {}).get("guest_workspace")
 
 
 class MsbError(Exception):
@@ -523,7 +540,9 @@ def egress_flags(egress_kits: Sequence[EgressKit]) -> list[str]:
     else:
         baseline = _balanced_rules() if tier == "balanced" else []
         flags += ["--net-default-egress", "deny", "--net-rule", "allow@dns", *baseline]
-    flags.append("--tls-intercept")
+    if not os.environ.get("ACQ_MSB_NO_TLS_INTERCEPT"):
+        flags.append("--tls-intercept")
+        flags += msb_options.upstream_ca_flags()
     return flags
 
 
@@ -570,10 +589,12 @@ def create(
     environment mapping. The bindings are recorded host-side so a later
     ``secret rm`` knows which sandboxes hold them.
     """
+    pull = msb_options.pull_flags()
     egress = egress_flags(egress_kits)
     planned, secret_env = secret_bindings(name)
     secret_flags = [token for bound in planned for token in ("--secret", bound.binding.flag)]
     guest = guest_workspace or _guest_path(workspace)
+    start = start_directory(name) or guest
     argv = [
         "create",
         "--name",
@@ -581,7 +602,7 @@ def create(
         "--volume",
         f"{clone_source or workspace}:{guest}" + (":ro" if workspace_read_only else ""),
         "-w",
-        guest,
+        start,
         "--env",
         f"ACQ_WORKSPACE={guest}",
     ]
@@ -591,10 +612,12 @@ def create(
         argv += ["--volume", f"{path}:{_guest_path(path)}{suffix}"]
     if clone_source:
         argv += ["--env", "ACQ_CLONE=1"]
-    if memory:
-        argv += ["-m", memory]
-    if cpus:
-        argv += ["-c", cpus]
+    argv += msb_options.sizing(
+        os.environ.get("ACQ_MSB_MEMORY", DEFAULT_MEMORY) if memory is None else memory,
+        os.environ.get("ACQ_MSB_CPUS", DEFAULT_CPUS) if cpus is None else cpus,
+    )
+    argv += pull
+    argv += msb_options.dns_flags()
     argv += egress
     argv += kit_flags or []
     argv += secret_flags
@@ -892,6 +915,7 @@ def _session(
     """Run ``command`` as ``agent`` in the workspace with ``env``; ``-t`` if ``tty``."""
     argv = ["exec", "-t"] if tty else ["exec"]
     argv += ["-u", "agent"]
+    workspace = start_directory(name) or workspace
     if workspace:
         # `-w` is the POSIX *guest* start directory (ADR-0029): the adapter owns
         # the host->guest translation, so the native host path the seam passed is

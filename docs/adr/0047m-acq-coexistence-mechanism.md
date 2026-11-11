@@ -194,6 +194,20 @@ drive-rooted or UNC `PATH` entry that passes an isolated 3.12+ probe, run with
 `-P`, and it fails closed rather than starting Bash when nothing qualifies
 (ADR-0048m, Decision).
 
+## Update (2026-11-10): msb tuning and environment controls
+
+Python now honours the Bash msb memory/CPU, pull-policy, DNS, upstream-proxy-CA
+and workspace controls, plus `ACQ_DEBUG` tracing. Empty sizing values omit the
+flags, invalid values retain Bash's warning/fallback rules, and CA path
+preflight uses the shared refusal contract. Certificate inputs must be
+nonempty readable regular files without symlink components; macOS detection
+publishes successful exports atomically. The workspace override changes the
+start directory, independently of mount roots and clone markers. Traces use
+stderr and redact credentials. These items are removed from ADR-0048m gate 4's
+accepted gaps; the remaining gaps and live qualification requirements still
+apply. See `py-acq/README.md`, `py-acq/tests/test_msb_options.py` and the shared
+CA refusal and invalid-tuning vectors in `test/vectors/cli/`.
+
 ## Links
 
 - Command surface and parity gate: ADR-0038m, ADR-0048m

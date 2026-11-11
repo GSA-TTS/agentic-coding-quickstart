@@ -620,6 +620,15 @@
       "vectors": ["cli/create-msb-ssh-agent-not-a-socket", "cli/create-sbx-ssh-agent-notice"]
     },
     {
+      "contract": "msb environment controls: CA absolute-path refusals and invalid tuning warnings match Bash; emitted flags, macOS export, workspace overrides and debug redaction are Tier-2 in test_msb_options.py",
+      "vectors": [
+        "cli/msb-ca-file-relative",
+        "cli/msb-ca-list-relative",
+        "cli/msb-ca-list-drive",
+        "cli/msb-invalid-tuning"
+      ]
+    },
+    {
       "contract": "External neutral kit apply, msb create-time volumes (ADR-0023), and authoritative empty extras records, retaining Python full-commit pinning",
       "vectors": ["cli/kit-apply-local", "cli/kit-apply-help-external", "cli/kit-apply-msb-volumes", "cli/create-msb-kit-volumes", "cli/kit-apply-unpinned-ref", "cli/kit-update-empty-extras-record"]
     },
