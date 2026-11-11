@@ -1174,7 +1174,8 @@ def test_untrusted_route_directories_are_never_modified(
     assert link.is_symlink() and _target(link) == str(tmp_path / "missing-agent.sock")
     assert not any("nohup socat" in " ".join(argv) for argv in seen)
     err = capsys.readouterr().err
-    assert len(err.splitlines()) == 1 and f"Fix or remove '{bad}'" in err
+    # The link path is joined with '/', so on Windows the message mixes separators.
+    assert len(err.splitlines()) == 1 and f"Fix or remove '{bad}'" in err.replace("/", os.sep)
     # The low-level failed-attempt cleanup must honor the same boundary.
     ssh_agent._unlink_quietly(str(link))
     assert link.is_symlink()
