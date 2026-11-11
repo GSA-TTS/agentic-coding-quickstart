@@ -5470,6 +5470,36 @@ fails against the old harness. Product materialization behavior is unchanged.
 
 ---
 
+## 97. Python Provider-Kit Facts Bypassed the Pinned Validator's URL Rules
+
+**Symptoms:** Python accepted provider-kit facts with an IP literal destination
+or an explicit HTTPS port that Bash rejects through the pinned Patterns
+validator. Invalid URL schemes and host mismatches shared a generic diagnostic
+and incorrectly suggested reinstalling acq. Python also refused an exported
+provider key on MSB even though Bash binds it at create.
+
+**Resolution:** `py-acq/src/acq_py/provider_input.py` checks kit destinations
+for IP literals, HTTPS, explicit ports and declared-host equality, with a
+diagnostic for each refusal and remediation directed at the kit's input.
+Credential registry hosts retain the grammar in
+`acq.backends/common.sh` (`_acq_provider_credential_host_ok`); that registry
+alone permits IPv4 literals, while provider-kit facts must pass stricter checks.
+The MSB gate and binding builder accept exported provider keys when no stored
+value resolves, matching `_acq_provider_credentials_gate_one` and
+`_acq_msb_bind_secrets_into` in the Bash implementation.
+Starting a sandbox with an exported provider key uses that same resolver only
+when the resulting service, variable and host match its recorded binding.
+
+**Verification:** `py-acq/tests/test_provider_input.py` covers the individual
+refusals and compares credential-host and exported-key acceptance with real
+Bash helpers, without contacting a provider. The pinned-validator comparison
+uses the existing `pinned_patterns_repo` fixture and skips when its checkout is
+unavailable. Re-run that comparison when `ACQ_TEST_PATTERNS_REPO` supplies the
+pinned release and its validator dependencies are installed; this is the
+remaining full-validator acceptance check for an offline checkout without it.
+
+---
+
 ## Contributing
 
 When you discover a new failure mode:

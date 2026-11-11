@@ -22,7 +22,16 @@ from pathlib import Path
 
 import pytest
 
-from acq_py import cli, errors, kitspec, msb, provider_input, secretstore, state
+from acq_py import (
+    cli,
+    errors,
+    kitspec,
+    msb,
+    provider_creds,
+    provider_input,
+    secretstore,
+    state,
+)
 from acq_py.commands import common
 from provider_input_helpers import current_generation
 
@@ -135,14 +144,61 @@ def test_no_terminal_and_no_key_fails_closed_without_prompting(monkeypatch, tmp_
     assert not secretstore.has("usai")
 
 
-def test_a_host_exported_key_is_not_taken_for_a_stored_one(monkeypatch, tmp_path, capsys, children):
+def test_a_host_exported_key_is_bound_on_msb_without_storing(monkeypatch, tmp_path, capsys, children):
     _env(monkeypatch, tmp_path)
     monkeypatch.setenv("USAI_API_KEY", VALUE)
     rc, doc, out, err = _create(capsys, tmp_path)
-    assert rc == errors.EXIT_FAILURE and doc["error"]["code"] == errors.SECRET_MISSING
-    assert "exported on the host" in doc["error"]["message"]
-    assert _verb_calls(children, "create") == []
+    assert rc == 0, (doc, err)
+    assert doc["data"]["secret_bindings"] == ["USAI_API_KEY@api.gsa.usai.gov"]
+    (_argv, env), = _verb_calls(children, "create")
+    assert env["USAI_API_KEY"] == VALUE
+    msb.stop("box")
+    msb.start("box")
+    (_argv, env), = _verb_calls(children, "start")
+    assert env["USAI_API_KEY"] == VALUE
+    assert not secretstore.has("usai")
     _no_leak(VALUE, children, out, err)
+
+
+def test_an_exported_key_is_not_reused_for_a_changed_recorded_binding(monkeypatch, tmp_path, capsys, children):
+    # start reuses an exported key only for the identical recorded binding; a
+    # record that now names another host must not receive it.
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("USAI_API_KEY", VALUE)
+    rc, doc, _out, err = _create(capsys, tmp_path)
+    assert rc == 0, (doc, err)
+    msb.stop("box")
+    rec = msb.held_read("box")
+    rec.bindings["USAI_API_KEY"]["host"] = "elsewhere.example.gov"
+    msb._held_write(rec)
+    with pytest.raises(msb.MsbError) as exc:
+        msb.start("box")
+    assert exc.value.code == errors.SECRET_MISSING
+    assert not _verb_calls(children, "start")
+
+
+@pytest.mark.provider_key
+def test_a_stored_provider_key_takes_precedence_over_host_env(monkeypatch, tmp_path, capsys, children):
+    _env(monkeypatch, tmp_path)
+    stored = secretstore.resolve("usai")
+    monkeypatch.setenv("USAI_API_KEY", VALUE)
+    rc, doc, out, err = _create(capsys, tmp_path)
+    assert rc == 0, (doc, err)
+    (_argv, env), = _verb_calls(children, "create")
+    assert env["USAI_API_KEY"] == stored
+    _no_leak(VALUE, children, out, err)
+
+
+def test_an_exported_nondefault_provider_key_uses_its_pinned_binding(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_PROVIDER_CREDENTIAL_BINDINGS", "acme=ACME_KEY@api.example.gov")
+    monkeypatch.setenv("ACME_KEY", VALUE)
+    planned, env = msb.secret_bindings("box")
+    assert [(item.service, item.binding.env, item.binding.host) for item in planned] == [
+        ("acme", "ACME_KEY", "api.example.gov"),
+    ]
+    assert env == {"ACME_KEY": VALUE}
+    assert not secretstore.has("acme")
 
 
 def test_on_a_terminal_the_gate_asks_stores_and_binds(monkeypatch, tmp_path, capsys, children):
@@ -407,6 +463,122 @@ def test_a_models_url_on_another_host_is_refused(tmp_path):
     path.write_text(json.dumps(doc), encoding="utf-8")
     with pytest.raises(provider_input.ProviderInputError, match="models URL"):
         provider_input.kit_facts(kit)
+
+
+@pytest.mark.parametrize(("host", "url", "message"), [
+    ("127.0.0.1", "https://127.0.0.1/models", "host: IP address literals are not permitted"),
+    ("[::1]", "https://[::1]/models", "host: IP address literals are not permitted"),
+    ("api.example.gov", "https://127.0.0.1/models", "models URL: IP address literals are not permitted"),
+    ("api.example.gov", "https://[::1]/models", "models URL: IP address literals are not permitted"),
+    ("api.example.gov", "http://api.example.gov/models", "scheme must be https"),
+    ("api.example.gov", "https://api.example.gov:443/models", "explicit port"),
+    ("api.example.gov", "https://api.example.gov:8443/models", "explicit port"),
+    ("api.example.gov", "https://other.example.gov/models", "host does not match its declared host"),
+    ("api.example.gov", "https://user:pass@api.example.gov/models", "must not contain user information"),
+    ("api.example.gov", "https://user@api.example.gov/models", "must not contain user information"),
+    ("api.example.gov", "https://api.example.gov./models", "models URL"),
+    ("api.example.gov", "https://api.example.gov/models#fragment", "models URL"),
+])
+def test_provider_kit_facts_refusals_explain_the_problem(tmp_path, host, url, message):
+    kit = _kit(tmp_path, host=host)
+    path = kit / "provider-input" / "facts.json"
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc["modelsUrl"] = url
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    with pytest.raises(provider_input.ProviderInputError) as exc:
+        provider_input.kit_facts(kit)
+    assert exc.value.code == errors.VALIDATION_FAILED
+    assert message in exc.value.message
+    assert "kit's provider input" in exc.value.remediation
+    assert "reinstall" not in exc.value.remediation
+    assert not provider_input.strict_url_ok(url, host)
+
+
+@pytest.mark.parametrize(("host", "url", "accepted"), [
+    ("api.example.gov", "https://api.example.gov/v1/models", True),
+    ("127.0.0.1", "https://127.0.0.1/v1/models", False),
+    ("api.example.gov", "https://127.0.0.1/v1/models", False),
+    ("api.example.gov", "http://api.example.gov/v1/models", False),
+    ("api.example.gov", "https://api.example.gov:443/v1/models", False),
+    ("api.example.gov", "https://other.example.gov/v1/models", False),
+])
+def test_provider_facts_match_bash_pinned_validator(pinned_patterns_repo, tmp_path, host, url, accepted):
+    # Use the same validator as Bash when CI supplies its pinned checkout.
+    # A valid control prevents a broken fixture from passing every refusal.
+    # The validator needs PyYAML and jsonschema in the interpreter that runs it
+    # (with -I); a job that has the checkout but not those cannot compare.
+    probe = subprocess.run([sys.executable, "-I", "-c", "import jsonschema, yaml"], capture_output=True)
+    if probe.returncode != 0:
+        pytest.skip("the pinned validator's dependencies (jsonschema, PyYAML) are not installed")
+    kit = _kit(tmp_path)
+    manifest_path = kit / provider_input.MANIFEST
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["credentialEnvNames"] = ["ACME_KEY"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    normalizer = kit / "scripts" / "n.mjs"
+    normalizer.parent.mkdir()
+    normalizer.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    normalizer.chmod(0o755)
+    (kit / "snap" / "s.json").write_text(json.dumps({
+        "schemaVersion": "acq-neutral-model-catalog/v1", "providerId": "acme", "models": [],
+    }), encoding="utf-8")
+    (kit / "spec.yaml").write_text(
+        'schemaVersion: "hybrid/v1"\nkind: mixin\nname: acme\ndisplayName: Acme\n'
+        'description: Provider facts parity fixture\ncaps:\n  network:\n    allow:\n'
+        f'      - "{host}"\n', encoding="utf-8",
+    )
+    path = kit / "provider-input" / "facts.json"
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc.update(host=host, baseUrl=f"https://{host}/v1", modelsUrl=url)
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    bindings = tmp_path / "bindings.json"
+    bindings.write_text(json.dumps({"providers": {"acme": "ACME_KEY"}}), encoding="utf-8")
+    result = subprocess.run([
+        sys.executable, "-I", str(pinned_patterns_repo / "scripts" / "validate_provider_input_contract.py"),
+        "--schema-dir", str(pinned_patterns_repo / "integrations" / "isolation" / "schemas"),
+        "--credential-bindings", str(bindings), "--bundle", str(manifest_path),
+    ], capture_output=True, text=True)
+    assert (result.returncode == 0) == accepted, result.stdout + result.stderr
+    if accepted:
+        assert provider_input.kit_facts(kit) is not None
+    else:
+        with pytest.raises(provider_input.ProviderInputError):
+            provider_input.kit_facts(kit)
+
+
+@pytest.mark.skipif(os.name == "nt" or shutil.which("bash") is None, reason="requires POSIX Bash")
+@pytest.mark.parametrize("host", ["api.example.gov", "127.0.0.1", "::1", "api.example.gov:443"])
+def test_provider_credential_host_grammar_matches_bash(host):
+    # The registry grammar is broader than kit facts, which Bash validates
+    # separately with Patterns. Tightening the registry would break parity.
+    script = 'source "$1/acq.backends/common.sh"; _acq_provider_credential_host_ok "$2"'
+    result = subprocess.run(["bash", "-c", script, "bash", str(Path(__file__).resolve().parents[2]), host],
+                            capture_output=True, text=True)
+    assert provider_creds.host_ok(host) == (result.returncode == 0)
+
+
+@pytest.mark.skipif(os.name == "nt" or shutil.which("bash") is None, reason="requires POSIX Bash")
+@pytest.mark.parametrize("backend", ["msb", "sbx"])
+@pytest.mark.parametrize("exported", [False, True])
+def test_provider_exported_key_gate_matches_bash(monkeypatch, backend, exported):
+    facts = provider_input.Facts("acme", "ACME_KEY", "api.example.gov", "https://api.example.gov/models", "openai")
+    monkeypatch.setenv("ACQ_PROVIDER_CREDENTIAL_BINDINGS", "acme=ACME_KEY@api.example.gov")
+    monkeypatch.setenv("ACME_KEY", VALUE if exported else "")
+    script = '''source "$1/acq.backends/common.sh"
+acq_secret_has() { return 1; }
+_acq_provider_credentials_gate_one "$2" box acme ACME_KEY api.example.gov
+'''
+    result = subprocess.run(["bash", "-c", script, "bash", str(Path(__file__).resolve().parents[2]), backend],
+                            stdin=subprocess.DEVNULL, capture_output=True, text=True)
+    try:
+        provider_input.gate([facts], has_key=lambda p: False, ask_store=None, backend=backend)
+        accepted = True
+    except provider_input.ProviderInputError as exc:
+        accepted = False
+        if exported:
+            assert "exported on the host" in exc.message
+    assert accepted == (result.returncode == 0)
+    assert VALUE not in result.stdout + result.stderr
 
 
 def test_the_bundled_usai_kit_has_valid_facts():

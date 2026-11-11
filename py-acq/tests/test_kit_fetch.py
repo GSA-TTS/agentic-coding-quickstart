@@ -324,14 +324,15 @@ def test_a_cached_kit_is_reused_offline(kit_repo, monkeypatch):
 
 
 def test_a_revision_other_than_the_pin_is_refused_and_not_cached(kit_repo, monkeypatch):
-    # The server answers with another commit (Bash's WRONG_REVISION case).
-    _GitSpy(monkeypatch, rewrite=lambda args: [kit_repo.pin2 if a == kit_repo.pin else a for a in args])
-    with pytest.raises(kit_fetch.KitFetchError) as info:
-        kit_fetch.fetch(kit_repo.ref(), "msb")
+    # The server answers with another commit (Bash's WRONG_REVISION case). The
+    # rewrite is scoped so undoing it keeps the fixture's directory isolation;
+    # a global monkeypatch.undo() would point the cache back at the real home.
+    with monkeypatch.context() as scoped:
+        _GitSpy(scoped, rewrite=lambda args: [kit_repo.pin2 if a == kit_repo.pin else a for a in args])
+        with pytest.raises(kit_fetch.KitFetchError) as info:
+            kit_fetch.fetch(kit_repo.ref(), "msb")
     assert info.value.code == errors.VALIDATION_FAILED
     assert "does not match the pinned commit" in info.value.message
-    monkeypatch.undo()
-    monkeypatch.setattr(kit_fetch, "SCHEMES", ("https", "file"))
     spy = _GitSpy(monkeypatch)
     kit = kit_fetch.fetch(kit_repo.ref(), "msb")  # nothing unverified was kept: it fetches again
     assert len(spy.fetches) == 1
@@ -488,11 +489,11 @@ def test_a_linked_cache_directory_is_refused(kit_repo, tmp_path):
 
 
 def test_git_missing_and_a_hung_git_fail_closed(kit_repo, monkeypatch):
-    monkeypatch.setattr(kit_fetch.hostexec, "which", lambda name, path=None: None)
-    with pytest.raises(kit_fetch.KitFetchError, match="git is required"):
-        kit_fetch.fetch(kit_repo.ref(), "msb")
-    monkeypatch.undo()
-    monkeypatch.setattr(kit_fetch, "SCHEMES", ("https", "file"))
+    # Scoped, so restoring `which` keeps the fixture's directory isolation.
+    with monkeypatch.context() as scoped:
+        scoped.setattr(kit_fetch.hostexec, "which", lambda name, path=None: None)
+        with pytest.raises(kit_fetch.KitFetchError, match="git is required"):
+            kit_fetch.fetch(kit_repo.ref(), "msb")
 
     def hung(*_args, **kwargs):
         raise subprocess.TimeoutExpired(["git"], kwargs.get("timeout", 0))
