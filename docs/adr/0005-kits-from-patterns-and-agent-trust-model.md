@@ -105,8 +105,8 @@ skills into each agent's search paths. The tradeoff:
 ## Validation
 
 > **Update ([ADR-0009](0009-require-sbx-0.35.0-in-place-kit-healing.md)):** the
-> in-place healing described below was originally gated off (upstream sbx #133
-> broke `sbx kit add` on file-shipping kits). sbx 0.35.0 fixes #133, so ADR-0009
+> in-place healing described below was originally gated off (sbx
+> broke `sbx kit add` on file-shipping kits). sbx 0.35.0 fixes that file-payload failure, so ADR-0009
 > raises the floor to sbx >= 0.35.0 and `ensure_kit_applied` now heals
 > unconditionally by recreating the sandbox with the added kit (state preserved).
 

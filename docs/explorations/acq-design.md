@@ -286,7 +286,7 @@ package.json                # acq shell completion helpers
 **Removed (no longer needed for v2):**
 - `qsbx` (replaced by `acq`)
 - `opencode-web.sh` (removed — superseded by the `openchamber` acq kit, which
-  publishes the OpenCode server port with a supervised lifecycle; patterns #233)
+  publishes the OpenCode server port with a supervised lifecycle)
 - ADRs 0003, 0004 (superseded by 0005; kept for history)
 - `docs/QUICKSTART_SBX.md` (replaced by `docs/QUICKSTART.md` + per-backend sections)
 
@@ -506,7 +506,7 @@ Capability flags per backend:
 
 ## 7.5 Secret model — unified swap-on-access across backends
 
-Adopted from Omnigent's `credential_proxy` design (`designs/SANDBOX_CREDENTIAL_PROXY.md`, PR #236). The key insight: every backend already has an L7 MITM path for egress allow-listing, so secret injection is **a rewrite rule on the same MITM**, not a per-backend storage problem.
+Adopted from Omnigent's `credential_proxy` design (`designs/SANDBOX_CREDENTIAL_PROXY.md`). The key insight: every backend already has an L7 MITM path for egress allow-listing, so secret injection is **a rewrite rule on the same MITM**, not a per-backend storage problem.
 
 ### One secret store, one command
 
@@ -691,7 +691,7 @@ The adapter ABC (section 7), the unified swap-on-access secret model (section 7.
 
 1. **`SandboxLauncher` ABC + `ClassVar` capability flags + raising-default optionals** (Omnigent `omnigent/onboarding/sandboxes/base.py`) — replaced our earlier flat `backend__*` bash function list. Omnigent's pattern of 3 abstract methods + optional methods that raise with a remediation hint, plus sparse `ClassVar[bool]` capability gates, is cleaner than a flat function list and maps directly to a Python ABC (which `acq` can adopt when it moves from bash to Python/Go in v2.1).
 
-2. **Credential proxy with swap-on-access + opt-in placeholder + cross-host leak guard** (Omnigent PR #236, `designs/SANDBOX_CREDENTIAL_PROXY.md`, `omnigent/inner/credential_proxy.py`) — replaced our earlier per-backend `backend__secret_set` divergence. The key insight is that every backend already has an L7 MITM path for egress allow-listing, so secret injection is a rewrite rule on the same MITM, not a per-backend storage problem. Omnigent's two-mode distinction (swap-on-access default; opt-in `oa_cred_*` placeholder with 403 on cross-host replay) and trust hygiene (real secret never in argv / serialized policy config; CA bundle host-only) are directly adopted.
+2. **Credential proxy with swap-on-access + opt-in placeholder + cross-host leak guard** (Omnigent, `designs/SANDBOX_CREDENTIAL_PROXY.md`, `omnigent/inner/credential_proxy.py`) — replaced our earlier per-backend `backend__secret_set` divergence. The key insight is that every backend already has an L7 MITM path for egress allow-listing, so secret injection is a rewrite rule on the same MITM, not a per-backend storage problem. Omnigent's two-mode distinction (swap-on-access default; opt-in `oa_cred_*` placeholder with 403 on cross-host replay) and trust hygiene (real secret never in argv / serialized policy config; CA bundle host-only) are directly adopted.
 
 3. **Capability model as code, not YAML** (Omnigent `omnigent/harness_capabilities.py`) — capabilities are `Enum` axes + a frozen `@dataclass` + `.as_dict()` for a catalog, asserted in tests. We adopt this for `acq`'s backend capability flags (the `ClassVar` pattern) rather than inventing a YAML capability schema that would drift from the implementation.
 
@@ -711,7 +711,7 @@ Omnigent's design has three weaknesses we improve on:
 
 Two ADRs will record this design:
 
-**agentic-coding-quickstart ADR-0008**: "Pluggable isolation backends via `acq`; hybrid v1 neutral kit spec; unified swap-on-access secret model (adopted from Omnigent)." Records: why we chose Option 3 (hybrid), the three backends, what we deliberately don't promise (parity is best-effort + documented, not enforced), the qsbx→acq replacement, the adapter ABC pattern (from Omnigent's `SandboxLauncher`), the credential-proxy model (from Omnigent's PR #236), the target date for v2.0.0.
+**agentic-coding-quickstart ADR-0008**: "Pluggable isolation backends via `acq`; hybrid v1 neutral kit spec; unified swap-on-access secret model (adopted from Omnigent)." Records: why we chose Option 3 (hybrid), the three backends, what we deliberately don't promise (parity is best-effort + documented, not enforced), the qsbx→acq replacement, the adapter ABC pattern (from Omnigent's `SandboxLauncher`), the credential-proxy model (from Omnigent's credential-proxy design), the target date for v2.0.0.
 
 **agentic-coding-patterns ADR-0009**: "Move sbx-kits → kits/ with hybrid/v1 spec; preserve one-release redirect." Records: why the neutral spec, the four kits' new shape, the msb `--trust-host-cas` shortcut for zscaler-ca, the registry file, the migration path from v1 sbx-kits.
 
@@ -950,8 +950,8 @@ kit vocabulary** with a translation layer. Recorded in
     now bound on msb, see the secret-model note above.
 
 6. **`PATTERNS_KIT_REF` is pinned to the patterns v1.7.0 release commit**
-   (`9c277c09ed4ad45fd11709d6b048a58adc785443`), which includes Part A (#221),
-   the openchamber conversion (#224), and the `environment` vocabulary (#227).
+   (`9c277c09ed4ad45fd11709d6b048a58adc785443`), which includes Part A (the neutral acq-kits and schema),
+   the openchamber conversion, and the `environment` vocabulary.
    The Phase 2 handoff §4.1 gate is satisfied; pinning to a release tag mirrors
    the Phase 1 v1.5.0 pin.
 

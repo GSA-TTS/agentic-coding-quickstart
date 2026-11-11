@@ -46,18 +46,14 @@ modeled in the neutral vocabulary and live only under `backend_extras.sbx`:
 Because both live under the sbx-only extras block, `openchamber` can only
 declare `backends: [sbx]`. The `msb` adapter has **zero** consumption of either
 field (verified: no `publishedPorts`/`background` reference in
-`acq.backends/msb.sh`). This is gap **A** in the
-[sbx↔msb backend parity epic (#234)](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/234)
-and the largest blocker to a kit declaring `backends: [sbx, msb]`
+`acq.backends/msb.sh`). This missing neutral vocabulary is the largest
+blocker to a kit declaring `backends: [sbx, msb]`
 (patterns [#233](https://github.com/GSA-TTS/agentic-coding-patterns/issues/233)).
 
 > **Update (main after rebase):** the sbx half of the port path already landed —
-> quickstart [#221](https://github.com/GSA-TTS/agentic-coding-quickstart/pull/221)
-> made `kit_translate_to_sbx` carry `backend_extras.sbx.publishedPorts` into the
-> synthesized sbx-v2 spec (closing [#219](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/219))
-> and quote wildcard allow hosts (closing [#220](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/220)),
-> and [#223](https://github.com/GSA-TTS/agentic-coding-quickstart/pull/223) taught
-> `acq run/create` to intercept and translate a user `--kit <ref>`. This ADR's
+> `kit_translate_to_sbx` now carries `backend_extras.sbx.publishedPorts` into
+> the synthesized sbx-v2 spec and quotes wildcard allow hosts.
+> `acq run/create` also intercepts and translates a user `--kit <ref>`. This ADR's
 > remaining work is the **neutral** promotion of the field (out of the sbx-only
 > extras block) plus the **msb consumer** — the sbx side is now a rename +
 > deprecated-fallback, not a from-scratch carry.
@@ -78,12 +74,12 @@ msb 0.6.7** (released 2026-07-27), which corrects three assumptions:
    OpenSSH `-L`/`-D` forwarding — but through an SSH tunnel, not a NAT publish,
    and only against a running sandbox after an authorized key. That is a
    **separate capability** from create-time `-p` and is handled incrementally in
-   its own decision record (see Links: post-hoc publish ADR + gap K). This ADR
+   its own decision record (ADR-0015). This ADR
    remains scoped to create/run-time `-p`.
 3. **`msb snapshot` exists as a full CLI verb** (create/list/inspect/verify/
    remove/save/load, plus `run --from-snapshot`). This is unrelated to ports but
    corrects a stale "no snapshot verb" claim elsewhere; snapshot wiring stays
-   out of scope as beyond-sbx-parity (see epic #234 / #225).
+   out of scope as beyond-sbx-parity (it exceeds the shared backend capability set).
 
 The neutral schema is owned by the **patterns** repo
 (`schemas/kit-hybrid-v1.schema.json`, `validate-kits.py`); the translator and
@@ -94,7 +90,7 @@ same fail-closed gating ADR-0011 used: quickstart pins a released
 ## Decision Drivers
 
 - **Enable `backends: [sbx, msb]` for port/background kits** — the concrete
-  driver from patterns #233.
+  need of the openchamber kit.
 - **Backend-neutral by construction** — a kit should express "publish this port"
   and "run this in the background" once, not per backend.
 - **No behavior change for existing sbx kits** — a kit still using
@@ -115,7 +111,7 @@ same fail-closed gating ADR-0011 used: quickstart pins a released
    perpetuates per-backend duplication (the exact drift ADR-0011 set out to
    avoid) and does not make kits backend-neutral.
 3. **Leave openchamber sbx-only.** Rejected: abandons msb parity for a
-   first-class opt-in kit and blocks patterns #233 indefinitely.
+   first-class opt-in kit and prevents backend-neutral openchamber support indefinitely.
 
 ## Decision Outcome
 
@@ -150,9 +146,7 @@ same fail-closed gating ADR-0011 used: quickstart pins a released
   `nohup … &` equivalent — msb wraps the argv itself, so it does NOT depend on
   the command self-backgrounding the way the sbx path does) so it does not block
   provision. The msb adapter already backgrounds its own agent
-  launch and marker-gates install commands (quickstart
-  [#230](https://github.com/GSA-TTS/agentic-coding-quickstart/pull/230),
-  **merged to main**), so the detached-command plumbing this ADR needs is now in
+  launch and marker-gates install commands (ADR-0011), so the detached-command plumbing this ADR needs is now in
   place to build on.
 
 ### Validation (SI-10)
@@ -193,7 +187,7 @@ that path is wired in the incremental post-hoc-publish ADR (see Links), not here
 - **Cross-repo gate (satisfied):** `PATTERNS_KIT_REF` is bumped to a **released**
   patterns commit that includes the `publishedPorts`/`background` schema
   properties and validator — mirroring ADR-0011's v1.7.0 pin discipline. This is
-  now met: patterns#276 released the schema and patterns#283 republished the
+  now met: patterns released the schema and republished the
   openchamber kit against it, both merged to patterns `main`; the quickstart pin
   is bumped to `6230faa` (this PR). Before that release the pin was held and the
   neutral fields were read defensively (absence a no-op, not an error); that

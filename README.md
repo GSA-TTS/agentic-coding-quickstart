@@ -101,14 +101,14 @@ irm https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v4.2.
 
 <!-- x-release-please-end -->
 
-> **This fork:** these one-liners fetch the installers published with the
-> upstream GSA-TTS releases, and the rest of this step describes them. The
+> **Installer versions:** these one-liners fetch the installers published with
+> the pinned GSA-TTS release, and the rest of this step describes them. The
 > `install.sh` and `install.ps1` in this repository are the acq v1 installers
 > instead: they install a release archive only, and do not install `msb`, pick
 > Homebrew, npm or a clone, or (on Windows) check virtualization or install Git
-> Bash. See [This fork's installers](docs/howto/acq.md#this-forks-installers).
+> Bash. See [acq v1 installers](docs/howto/acq.md#acq-v1-installers).
 >
-> **Windows on this fork:** the installed `acq` runs the Python implementation by
+> **Windows with the acq v1 installer:** the installed `acq` runs the Python implementation by
 > default, with the managed Python runtime the Windows archive bundles
 > (`py-acq\runtime\python.exe`), so it needs neither Git Bash nor a system
 > Python. `ACQ_RUNTIME` (an absolute path to `python.exe`) selects an

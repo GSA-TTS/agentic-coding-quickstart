@@ -31,7 +31,7 @@ Commits produced inside a sandbox were **unsigned**. Federal guidance favors
 attributable, integrity-verified commits (SI-7, SC-17), and unsigned agent
 commits make it harder to distinguish agent-authored changes from tampering in
 the history. The patterns repo has since vendored a `git-ssh-sign` mixin kit
-(PR #200), which signs commits/tags using the SSH key **forwarded from the
+that signs commits/tags using the SSH key **forwarded from the
 host's SSH agent** — the private key never enters the sandbox.
 
 The question: should `qsbx` apply `git-ssh-sign` to every sandbox by default,
@@ -42,8 +42,7 @@ and at which pinned ref?
 ### Bump `PATTERNS_KIT_REF` to include git-ssh-sign
 
 Advance the single `PATTERNS_KIT_REF` from `598a57c…` to
-`b791e04a4dd6b97fe2cf172897e8cb3e9ddef1a1` (patterns `main` at the PR #200
-merge, which adds `git-ssh-sign`). The three existing kits are unchanged between
+`b791e04a4dd6b97fe2cf172897e8cb3e9ddef1a1` (the patterns `main` merge commit for the signing kit). The three existing kits are unchanged between
 those commits, so this bump is purely additive. Pinning by full SHA continues to
 defeat content substitution through the ZScaler TLS-inspecting proxy (SA-12,
 SI-7), per ADR-0005.

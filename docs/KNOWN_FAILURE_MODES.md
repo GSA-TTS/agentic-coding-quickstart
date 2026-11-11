@@ -1097,7 +1097,7 @@ git config --global --get-regexp 'url\..*insteadOf'
 
 ### Prevention
 
-As of #207, acq's kit fetch is **non-interactive**: it sets `GIT_TERMINAL_PROMPT=0`
+The acq kit fetch is **non-interactive**: it sets `GIT_TERMINAL_PROMPT=0`
 and first attempts an anonymous fetch with any inherited credential helper /
 `github.com` `insteadOf` rewrite neutralized (so an unauthenticated fetch
 proceeds without prompting), then retries once with your system git config
@@ -1116,7 +1116,7 @@ command again; on msb a failed fetch has always stopped the same way.
 
 ### Related
 
-- Issue #207 (non-interactive fetch), #208 (docs + loud fallback).
+- Kit fetch disables credential prompts and reports fallback failures explicitly.
 
 ---
 
@@ -2083,7 +2083,7 @@ Three issues compounded:
    "Recover with: sbx kit add …" hint that could never succeed.
 2. **A stale playbook feature-probe.** The heal probed the playbook with
    `test -e "$HOME/.agentic-coding-playbook/.git"`. Since patterns v1.8.0 moved
-   playbook delivery from a git clone to a REST tarball (the #203 fix), the tree
+   playbook delivery from a git clone to a REST tarball, the tree
    has **no `.git`**, so the probe reported the playbook absent on every re-attach,
    forever — re-triggering the (now-refused) add each time.
 3. **The `~/.acq-extra-kits` marker was never written at create.** The re-attach
@@ -2366,9 +2366,9 @@ amending the wrong branch.
 - The upstream release `install.ps1` probes WHP with `WHvCreatePartition` (the
   same call `msb` relies on) instead of gating on the feature flag; when the
   state stays undetermined it warns and defers to `msb doctor`, which `acq`
-  surfaces before provisioning. This fork's in-repo `install.ps1` (the acq v1
+  surfaces before provisioning. The in-repo `install.ps1` (the acq v1
   installer) neither probes WHP nor installs Git Bash or `msb`; see
-  `docs/howto/acq.md`, "This fork's installers".
+  `docs/howto/acq.md`, "acq v1 installers".
 - Treat `msb doctor` as the authoritative readiness signal on Windows.
 - The execution-policy requirement is documented (README "First-Run Snags",
   `docs/howto/acq.md`); allow local scripts with
@@ -2470,8 +2470,8 @@ structurally never created satisfies nothing, so the PR sits blocked
 indefinitely — even for changes entirely unrelated to what the workflow tests.
 This is a documented GitHub failure mode ("Handling skipped but required
 checks" in GitHub's required-status-checks troubleshooting docs), not specific
-to this repo, but it hit real CI here: agentic-coding-quickstart#449 (a routine
-dependabot bump) needed an admin-bypass merge to get past it.
+to this repo, but it hit real CI here: a routine
+dependabot bump needed an admin-bypass merge to get past it.
 
 ### Fix
 

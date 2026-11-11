@@ -96,7 +96,7 @@ sandbox; both cross-reference the kit's `TROUBLESHOOTING.md`. A
   identity.
 - **Boundary respected:** the wrapper adds no identity mechanism of its own. The
   actual kit-level fix (a `git-identity` mixin or provider-kit identity) remains
-  tracked upstream in patterns#211; this repo does not fork that decision.
+  owned by the patterns repository; this wrapper adds only the advisory.
 - **Advisory only:** a missing identity never blocks work — consistent with the
   signing-key warning and with treating identity as user-owned. A user who
   ignores the advisory still gets signed (if Unverified) commits.

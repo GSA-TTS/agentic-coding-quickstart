@@ -220,10 +220,10 @@ already on your Mac or Linux host (Homebrew → npm → self-contained download)
 puts `acq` on your `PATH`, and never needs administrator rights. This section
 covers the manual, developer, and Windows preview paths.
 
-### This fork's installers
+### acq v1 installers
 
 The `install.sh` and `install.ps1` checked into this repository are not the
-upstream release installers described in this guide and the README. They are the
+installers in the pinned release described in this guide and the README. They are the
 acq v1 installers (ADR-0042m). Each one downloads a per-platform release archive
 (`acq-<platform>.tar.gz`, or `acq-windows-x64.zip` on Windows), verifies it
 against `SHA256SUMS`, installs it under your home directory and offers to put it
@@ -238,8 +238,7 @@ on your `PATH`. `install.sh` links both `acq` and `acq-python`. They do **not**:
   default (see [Which implementation runs on Windows](#which-implementation-runs-on-windows)),
   and Git Bash is needed only for `ACQ_IMPL=bash`.
 
-No release of this fork has published those archives yet, so the release they
-download by default does not exist. Until one does, run them against an offline
+Until a release publishes the acq v1 archives, use an offline
 asset set: `sh install.sh --source DIR --install-dir DIR --bin-dir DIR`, or
 `.\install.ps1 -Source DIR`.
 
@@ -851,7 +850,7 @@ The provider kit `acq` uses by default is likewise data:
 ```yaml
 provider_kit: agentic-coding-patterns/usai-provider   # default
 # or: agentic-coding-kits/opencode-go-provider
-# or: opencode-go-provider@github.com/mogul/agentic-coding-kits
+# or: opencode-go-provider@github.com/acme/agentic-coding-kits
 ```
 
 `acq configure` offers the discovered kits in a picker, so you can select one

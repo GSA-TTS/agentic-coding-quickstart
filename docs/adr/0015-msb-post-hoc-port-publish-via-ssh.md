@@ -33,7 +33,7 @@ something on msb instead of printing "re-create the sandbox."
 ## Decision Drivers
 
 - **Parity with sbx's post-hoc `acq ports`** — the one remaining port capability
-  sbx has and msb lacks; this is gap **K** in the parity epic (#234).
+  sbx has and msb lacks; this is the post-hoc port-publishing parity requirement.
 - **No sandbox restart** — the whole point of post-hoc publish is to expose a
   port without tearing down running state (which `msb -p` would require).
 - **Least privilege / auditable exposure (AC-6, SC-7)** — a tunnel opens a host

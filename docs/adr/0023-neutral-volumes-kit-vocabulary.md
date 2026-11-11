@@ -25,14 +25,13 @@ vocabulary, so a neutral kit has no way to declare storage. Teams that need it
 script around the fixed disk layout in `commands.startup` instead — which runs
 *after* the sandbox already accepts execs, so any storage rearrangement races
 the user and the agent. The concrete driver
-([#329](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/329),
-login.gov Team Data): a kit that relocates a multi-GB `/nix` store onto larger
+(login.gov Team Data): a kit that relocates a multi-GB `/nix` store onto larger
 storage hit exactly that race in production (a first `direnv allow` died with
 ENOENT mid-swap), and an unfixable ~1 s empty-`/nix` window per restart
 remained — the startup step itself is what races. A create-time volume mounts
 before any exec is possible, eliminating the race class entirely.
 
-msb parity was researched in the #329 thread against the v0.6.8 tag (flags
+msb parity was researched against the v0.6.8 tag (flags
 exist at acq's `MIN_MSB_VERSION` floor): msb's storage primitives are a
 superset of what the vocabulary needs — disk-backed named volumes
 (`--mount-named NAME:PATH:kind=disk,size=SIZE`, raw ext4 via virtio-blk) and
@@ -41,7 +40,7 @@ superset of what the vocabulary needs — disk-backed named volumes
 ## Decision Drivers
 
 - **Kill the startup-storage race class** — volumes mount at boot, before any
-  exec, on BOTH backends (the same ordering guarantee that motivated #329).
+  exec, on BOTH backends.
 - **Backend-neutral by construction** — a kit expresses "give this path sized
   storage" once, not per backend (ADR-0011 doctrine).
 - **No new runtime dependency** — parse with `awk`, consistent with ADR-0011.
@@ -59,7 +58,7 @@ superset of what the vocabulary needs — disk-backed named volumes
    perpetuates the per-backend drift ADR-0011 exists to avoid, and msb has
    full-parity primitives at the current version floor.
 3. **Keep scripting storage in `commands.startup`.** Rejected: the race class
-   is unfixable from inside a startup step (#329).
+   is unfixable from inside a startup step.
 
 ## Decision Outcome
 
