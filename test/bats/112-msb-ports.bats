@@ -42,7 +42,12 @@ HOLD
   export ACQ_MSB_FORWARD_PROBE_ATTEMPTS=600
   export -f ports_finish ports_wait_records
 }
-teardown() { acq_teardown_stubs; }
+# Release any held port children first, so a test that failed before its own
+# release does not leave them polling for up to a minute.
+teardown() {
+  [ -z "${STUBDIR:-}" ] || touch "$STUBDIR/ports-release" 2>/dev/null || true
+  acq_teardown_stubs
+}
 
 load 'helper'
 
