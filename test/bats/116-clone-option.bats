@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 #
-# 116-clone-option.bats — neutral --clone option (GSA-TTS/agentic-coding-quickstart#403)
+# 116-clone-option.bats — neutral --clone option for disposable primary workspaces
 #
 # --clone is acq-owned neutral vocabulary: on sbx it forwards to the native
 # `sbx create --clone`; on msb the adapter emulates disposable-primary semantics
@@ -511,7 +511,7 @@ _stub_git() { # PATTERN RC
   assert_failure
 }
 
-# --- Origin-carry gaps (GSA-TTS/agentic-coding-quickstart#467) ---
+# --- Origin URL preservation and scratch-directory failure handling ---
 
 @test "clone(msb #467): a multi-valued origin URL is carried in full and in order" {
   # `git remote set-url --add` (push-to-two-forges) is legal; `config --get`
@@ -604,7 +604,7 @@ _stub_git() { # PATTERN RC
   assert_regex "$(cat "$CALLS")" 'msb create'
 }
 
-# --- Guest-visible workspace markers (GSA-TTS/agentic-coding-quickstart#456) ---
+# --- Guest-visible workspace and clone markers ---
 # A kit that must act only on the disposable clone (write agent instructions,
 # install a repo-local permission gate) and never on the real checkout needs a
 # deliberate, backend-neutral signal: ACQ_WORKSPACE (guest path of the primary)

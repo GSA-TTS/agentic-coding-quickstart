@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 #
 # 135-configure.bats — interactive `acq configure` + config.yaml + prompt widgets
-# (ADR-0031; issue GSA-TTS/agentic-coding-quickstart#499).
+# (ADR-0031).
 #
 # Covers, offline (no TTY, no backend CLI, no network):
 #   - the generalized config.yaml reader/writer (multi-key, preserve-others)

@@ -261,7 +261,7 @@ USAI_PROVIDER_MODELS_URL="${USAI_PROVIDER_BASE_URL}/models"
 USAI_PROVIDER_BIND_HOSTS="${USAI_PROVIDER_HOST}"
 
 # Source the shared agent catalog (single source of truth for agent tokens and
-# the sandbox-template image naming convention; issue #377). Both adapters also
+# the sandbox-template image naming convention). Both adapters also
 # source it defensively so they work when loaded without common.sh (some tests
 # source an adapter directly). Guard so a re-source is cheap.
 if ! command -v acq_is_known_agent >/dev/null 2>&1; then
@@ -808,8 +808,8 @@ split_noglob() {
   # `_oldopts=$(set +o)` is a trap: a command-substitution subshell runs with
   # errexit CLEARED (pre-inherit_errexit bash, incl. macOS 3.2), so the captured
   # state says `set +o errexit` and the eval restore silently turned `set -e`
-  # OFF in the caller for the rest of the run (found via #381: it also disabled
-  # bats' failure detection whenever ACQ_EXTRA_KITS was set).
+  # OFF in the caller for the rest of the run, disabling bats' failure
+  # detection whenever ACQ_EXTRA_KITS was set.
   case "$-" in *f*) _had_noglob=1 ;; esac
   set -f
   # shellcheck disable=SC2086
@@ -2006,9 +2006,9 @@ extract_image_flag() {
   fi
 }
 
-# Extract the acq-owned boolean `--clone` (neutral disposable-primary option,
-# GSA-TTS/agentic-coding-quickstart#403) from an arg list, mirroring
-# extract_image_flag: ACQ_CLONE_FLAG=1 if seen before `--`, everything else in
+# Extract the acq-owned boolean `--clone` (neutral disposable-primary option)
+# from an arg list, mirroring extract_image_flag: ACQ_CLONE_FLAG=1 if seen
+# before `--`, everything else in
 # ACQ_CLONE_REMAINING. Acq owns the flag on both backends — sbx re-injects it
 # for the native `sbx create --clone`; msb emulates with a host-side scratch
 # clone — so it must never survive raw on a backend argv.
