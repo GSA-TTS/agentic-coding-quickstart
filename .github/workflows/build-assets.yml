@@ -58,8 +58,12 @@ jobs:
             python_versions: "312"
             runtime_url: https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.14.10%2B20261026-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz
             runtime_sha256: 90f48337bc3dd4ae6eda81e001e4c981236d403b6b5a07778bbdf94ee423dc00
+          # Cross-built on Linux: packing the archive never runs the target
+          # runtime, and Apple-silicon runners did not start on the fork. This
+          # leg checks the runtime statically; smoke-macos-arm64 runs it.
           - platform: macos-arm64
-            runner: macos-14
+            runner: ubuntu-24.04
+            execute: false
             pip_platform: macosx_11_0_arm64
             lock: scripts/provider-input-validator-requirements-macos.txt
             python_versions: "312 313 314"
@@ -116,7 +120,27 @@ jobs:
           curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error "$RUNTIME_URL" -o runtime.archive
           # The matching stage script verifies the pinned digest before extraction.
           scripts/assemble-release "$PLATFORM" runtime.archive "$RUNTIME_SHA256" wheelhouse dist
+      - name: Check the cross-built runtime statically (not executed on this host)
+        if: ${{ matrix.execute == false }}
+        run: |
+          set -euo pipefail
+          mkdir unpacked
+          tar -xzf dist/*.tar.gz -C unpacked
+          # A 64-bit little-endian Mach-O header (cf fa ed fe) for ARM64 (cputype
+          # 0x0100000c) catches a wrong-architecture runtime pin without running it.
+          python3 -I - unpacked <<'PY'
+          import json, pathlib, subprocess, sys
+          root = pathlib.Path(sys.argv[1])
+          head = (root / "py-acq/runtime/bin/python3").resolve().read_bytes()[:8]
+          assert head[:4] == bytes.fromhex("cffaedfe") and head[4:8] == bytes.fromhex("0c000001"), head.hex()
+          ident = {}
+          exec((root / "py-acq/src/acq_py/_build_info.py").read_text(), ident)
+          assert ident["ACQ_VERSION"] == json.load(open("package.json"))["version"], ident
+          assert ident["SOURCE_REVISION"] == subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(), ident
+          print("arm64 Mach-O runtime and baked identity verified statically")
+          PY
       - name: Smoke-test the runtime and baked identity from the unpacked archive
+        if: ${{ matrix.execute != false }}
         env:
           PLATFORM: ${{ matrix.platform }}
         run: |
@@ -167,10 +191,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macos-14 is Apple silicon like macos-15. On the fork, macos-15 jobs were
-        # repeatedly cancelled after 15 minutes without ever getting a runner, so
-        # both Apple-silicon legs (here and in build) use macos-14.
-        runner: [ubuntu-24.04, macos-14, windows-2022]
+        # Apple-silicon runners (macos-14/15) did not start on the fork, so the
+        # macOS install runs on Intel; smoke-macos-arm64 covers Apple silicon on
+        # dispatched and release runs.
+        runner: [ubuntu-24.04, macos-15-intel, windows-2022]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -197,3 +221,29 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'installed launcher failed' }
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
           if ($data.impl -ne 'python' -or $data.acq_version -ne $version) { throw 'installed identity mismatch' }
+
+  # Runs the cross-built Apple-silicon archive's runtime natively. It is not a
+  # dependency of assemble and does not run on pull requests (Apple-silicon
+  # runners did not start on the fork); it must pass on a dispatched or release
+  # run before a release is cut.
+  smoke-macos-arm64:
+    needs: build
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: archive-macos-arm64
+          path: dist
+      - name: Run the arm64 runtime and check the baked identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir unpacked
+          tar -xzf dist/acq-macos-arm64.tar.gz -C unpacked
+          unpacked/py-acq/runtime/bin/python3 -I -c 'import pathlib,runpy,sys; sys.path.insert(0,str(pathlib.Path("unpacked/py-acq/src").resolve())); sys.argv=["acq_py","version","--json"]; runpy.run_module("acq_py",run_name="__main__")' > version.json
+          python3 -I -c 'import json,subprocess; d=json.load(open("version.json"))["data"]; assert d["impl"]=="python"; assert d["acq_version"]==json.load(open("package.json"))["version"]; assert d["source_revision"]==subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip(), d'
