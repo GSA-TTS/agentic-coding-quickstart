@@ -83,8 +83,11 @@ function Confirm-Action {
 
     if ($Yes) { return $true }
     # A non-interactive run never infers consent (ADR-0038m section 50): fail closed.
-    if ([Console]::IsInputRedirected) { return $false }
-    $answer = Read-Host "$Prompt [y/N]"
+    if ([Console]::IsInputRedirected -or -not [Environment]::UserInteractive) { return $false }
+    # Under -NonInteractive, Read-Host throws even with a console attached; that
+    # is a refusal, not a crash.
+    try { $answer = Read-Host "$Prompt [y/N]" }
+    catch { return $false }
     return $answer -match '^(y|yes)$'
 }
 
@@ -169,16 +172,25 @@ function Test-ReleaseAttestation {
         Write-Host "  attestation unavailable: gh missing; continuing"
         return
     }
+    # gh gained `attestation` in 2.49; an older gh cannot verify, which is the
+    # same as having no verifier.
+    $help = Start-Process -FilePath $gh.Source -ArgumentList @('attestation', 'verify', '--help') -Wait -PassThru -NoNewWindow -RedirectStandardError "$Archive.gh-help.err" -RedirectStandardOutput "$Archive.gh-help.out"
+    if ($help.ExitCode -ne 0) {
+        Write-Host "  attestation unavailable: this gh has no 'attestation' command; continuing"
+        return
+    }
     # Capture native stderr without Windows PowerShell turning it into a
     # terminating error before we can distinguish absence from failed verification.
     $log = "$Archive.attestation.log"
     $process = Start-Process -FilePath $gh.Source -ArgumentList @('attestation', 'verify', ('"' + $Archive + '"'), '--repo', $repo) -Wait -PassThru -NoNewWindow -RedirectStandardError $log -RedirectStandardOutput "$log.out"
     $message = (Get-Content -LiteralPath $log -Raw) + (Get-Content -LiteralPath "$log.out" -Raw)
-    if ($process.ExitCode -eq 0) {
-        Write-Host "  verified attestation for $PackageName"
-    }
-    elseif ($message -match 'no attestations found|no attestations associated|HTTP 404: Not Found') {
+    # Absence first: some gh releases print "no attestations found" yet exit 0.
+    # Success then needs gh's own success line, not just exit status 0.
+    if ($message -match 'no attestations found|no attestations associated|HTTP 404: Not Found') {
         Write-Host "  attestation absent for $PackageName; continuing"
+    }
+    elseif ($process.ExitCode -eq 0 -and $message -cmatch 'Verification succeeded') {
+        Write-Host "  verified attestation for $PackageName"
     }
     else { throw "attestation verification failed for ${PackageName}: $message" }
 }
@@ -234,15 +246,11 @@ function Install-PinnedMsb {
     try {
         New-Item -ItemType Directory -Path $scratch | Out-Null
         $zip = Join-Path $scratch $bundle
-        $sums = Join-Path $scratch 'checksums.sha256'
+        # Pinned here, not read from the release's checksums.sha256, so a tampered
+        # download host cannot supply both a bundle and a matching checksum.
+        # Checked against v0.7.7's checksums.sha256 and GitHub's asset digest.
+        $expected = 'ae526aa2d7bfc230a6e9149d2b7483ac0992462c221a8add85d1429a005575e0'
         Invoke-WebRequest -Uri "$base/$bundle" -OutFile $zip
-        Invoke-WebRequest -Uri "$base/checksums.sha256" -OutFile $sums
-        $expected = ''
-        foreach ($line in (Get-Content -LiteralPath $sums)) {
-            if ($line -match "^([0-9a-fA-F]{64})\s+\*?$([regex]::Escape($bundle))\s*$") {
-                $expected = $Matches[1]; break
-            }
-        }
         if (-not $expected -or (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash -ine $expected) {
             throw "pinned msb checksum mismatch"
         }
@@ -287,18 +295,18 @@ function Show-Prerequisites {
     if ($msb) {
         try {
             $text = (& $msb.Source --version 2>$null | Out-String).Trim()
-            if ($LASTEXITCODE -ne 0) { $text = 'unknown' }
+            if ($LASTEXITCODE -ne 0 -or -not $text) { $text = 'unknown' }
         }
         catch { $text = 'unknown' }
         if (Test-MsbVersion $text) { Write-Host "  msb: found ($text; supported)" }
         else {
             Write-Host "  msb: found ($text; out-of-policy or unknown version)"
-            Write-Host "    Fix: brew install GSA-TTS/tap/microsandbox-acq or scripts/verify-msb-pin --install"
+            Write-Host "    Fix: re-run install.ps1 in an interactive PowerShell to install the pinned msb, or see docs/howto/msb.md"
         }
     }
     else {
         Write-Host "  msb: missing"
-        Write-Host "    Fix: brew install GSA-TTS/tap/microsandbox-acq or scripts/verify-msb-pin --install"
+        Write-Host "    Fix: answer yes below, or see docs/howto/msb.md"
         # -Yes consents only to PATH changes, never to backend installation.
         if (-not $Yes -and -not [Console]::IsInputRedirected) {
             if (Confirm-Action "Install pinned msb?") { Install-PinnedMsb }

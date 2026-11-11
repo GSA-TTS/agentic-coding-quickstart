@@ -857,9 +857,14 @@ IDSTUB
 _plant_attestation_gh() {
   cat > "$STUBDIR/gh" <<'SHIM'
 #!/bin/sh
+case "$*" in
+  *--help*) [ "$GH_RESULT" = old ] && { echo 'unknown command "attestation" for "gh"' >&2; exit 1; }; exit 0 ;;
+esac
 printf '%s\n' "$*" >> "$STUBDIR/gh.log"
 case "$GH_RESULT" in
   success) echo 'Verification succeeded'; exit 0 ;;
+  absent-ok) echo 'Warning: no attestations found' >&2; exit 0 ;;
+  silent-ok) exit 0 ;;
   absent) echo 'no attestations found' >&2; exit 1 ;;
   failed) echo 'Verification FAILED: signature invalid' >&2; exit 1 ;;
   transport) echo 'connection refused' >&2; exit 1 ;;
@@ -880,16 +885,31 @@ SHIM
 
 @test "installer: absent GitHub archive attestation is informational" {
   _plant_attestation_gh
-  GH_RESULT=absent run sh "$REPO_ROOT/install.sh" --source https://github.com/example/acq/releases/download/v1 --yes
+  local result
+  # absent-ok: some gh releases warn about missing attestations yet exit 0.
+  for result in absent absent-ok; do
+    rm -rf "$(_install_dir)"
+    GH_RESULT="$result" run sh "$REPO_ROOT/install.sh" --source https://github.com/example/acq/releases/download/v1 --yes
+    assert_success
+    assert_output --partial 'attestation absent'
+    refute_output --partial 'verified attestation'
+    [ -e "$(_install_dir)/acq" ]
+  done
+}
+
+@test "installer: a gh without the attestation command is no verifier" {
+  _plant_attestation_gh
+  GH_RESULT=old run sh "$REPO_ROOT/install.sh" --source https://github.com/example/acq/releases/download/v1 --yes
   assert_success
-  assert_output --partial 'attestation absent'
-  [ -e "$(_install_dir)/acq" ]
+  assert_output --partial "no 'attestation' command"
+  [ ! -e "$STUBDIR/gh.log" ]
 }
 
 @test "installer: failed attestation and unknown verifier errors fail closed" {
   _plant_attestation_gh
   local result
-  for result in failed transport; do
+  # silent-ok: exit 0 without gh's success line is not proof of verification.
+  for result in failed transport silent-ok; do
     GH_RESULT="$result" run sh "$REPO_ROOT/install.sh" --source https://github.com/example/acq/releases/download/v1 --yes
     assert_failure 1
     assert_output --partial 'attestation verification failed'
@@ -1064,6 +1084,12 @@ esac
 cp "$STUBDIR/msb-assets/\${url##*/}" "\$out"
 SHIM
   chmod +x "$STUBDIR/only-tools/curl"
+  # The digest override is a bats-only hook: outside bats it is ignored.
+  env -u BATS_TEST_NAME ACQ_TEST_MSB_BUNDLE_SHA256="$digest" MSB_HOME="$STUBDIR/msb-home" PATH="$STUBDIR/acq-bin:$STUBDIR/only-tools" \
+    "$python" "$BATS_TEST_DIRNAME/install-tty.py" tty y "$REPO_ROOT/install.sh" \
+    --source "$REPO_ROOT/test/fixtures/installer" --bin-dir "$STUBDIR/acq-bin" > "$STUBDIR/no-hook.out" 2>&1 || true
+  grep -q 'pinned msb checksum mismatch' "$STUBDIR/no-hook.out"
+  [ ! -e "$STUBDIR/msb-home/bin/msb" ]
   # Without the override the fixture cannot match the pinned release digest.
   MSB_HOME="$STUBDIR/msb-home" PATH="$STUBDIR/acq-bin:$STUBDIR/only-tools" \
     run "$python" "$BATS_TEST_DIRNAME/install-tty.py" tty y "$REPO_ROOT/install.sh" \

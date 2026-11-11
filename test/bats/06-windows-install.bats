@@ -345,6 +345,9 @@ teardown() {
   assert_regex "$installer" 'verified attestation'
   assert_regex "$installer" 'attestation absent'
   assert_regex "$installer" 'throw "attestation verification failed'
+  # An old gh without the subcommand is "no verifier"; success needs gh's own line.
+  assert_regex "$installer" "'attestation', 'verify', '--help'"
+  assert_regex "$installer" "-cmatch 'Verification succeeded'"
   assert_regex "$installer" 'ACQ_INSTALL_NO_ATTESTATION'
   assert_regex "$installer" '\$NoAttestation.*-not \$Resolved.IsUrl'
 }
@@ -358,7 +361,13 @@ teardown() {
   refute_regex "$installer" 'Get-WindowsOptionalFeature|dism.exe'
   assert_regex "$installer" '-not \$Yes -and -not \[Console\]::IsInputRedirected'
   assert_regex "$installer" '-not \$DryRun -and -not \$NoPrereqCheck'
-  assert_regex "$installer" 'scripts/verify-msb-pin --install'
+  assert_regex "$installer" 'see docs/howto/msb.md'
+  # The pinned msb digest is embedded, never read from a downloaded checksum file.
+  assert_regex "$installer" "\\\$expected = 'ae526aa2d7bfc230a6e9149d2b7483ac0992462c221a8add85d1429a005575e0'"
+  refute_regex "$installer" 'checksums\.sha256"? -OutFile'
+  # Consent is refused, not crashed, when the host cannot prompt.
+  assert_regex "$installer" '\[Environment\]::UserInteractive'
+  assert_regex "$installer" 'catch \{ return \$false \}'
   assert_regex "$installer" 'msb doctor --fix'
   assert_regex "$installer" 'Get-Command git -CommandType Application'
   assert_regex "$installer" 'Get-Command sbx -CommandType Application'

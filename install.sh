@@ -325,14 +325,28 @@ confirm() {
 # since an authentication, transport or signature error is not proof of absence.
 verify_attestation() {
   [ "${ACQ_INSTALL_NO_ATTESTATION:-0}" = 1 ] && return 0
-  repo=$(printf '%s\n' "$SOURCE" | sed -n 's@^https://github\.com/\([A-Za-z0-9_.-][A-Za-z0-9_.-]*/[A-Za-z0-9_.-][A-Za-z0-9_.-]*\)/releases/download/[^?#][^?#]*$@\1@p')
+  # GitHub's host name is case-insensitive; normalise it so a differently cased
+  # URL is not silently exempted from verification.
+  repo=$(printf '%s\n' "$SOURCE" | sed 's@^[Hh][Tt][Tt][Pp][Ss]://[Gg][Ii][Tt][Hh][Uu][Bb]\.[Cc][Oo][Mm]/@https://github.com/@' | sed -n 's@^https://github\.com/\([A-Za-z0-9_.-][A-Za-z0-9_.-]*/[A-Za-z0-9_.-][A-Za-z0-9_.-]*\)/releases/download/[^?#][^?#]*$@\1@p')
   [ -n "$repo" ] || return 0
   if ! command -v gh >/dev/null 2>&1; then
     info "  attestation unavailable: gh missing; continuing"
-  elif gh attestation verify "$1" --repo "$repo" > "$tmpdir/attestation.log" 2>&1; then
-    ok "  verified attestation for $ARCHIVE"
-  elif LC_ALL=C grep -Eiq 'no attestations found|no attestations associated|HTTP 404: Not Found' "$tmpdir/attestation.log"; then
+    return 0
+  fi
+  # gh gained `attestation` in 2.49; an older gh (e.g. a distribution package)
+  # cannot verify, which is the same as having no verifier.
+  if ! gh attestation verify --help >/dev/null 2>&1; then
+    info "  attestation unavailable: this gh has no 'attestation' command; continuing"
+    return 0
+  fi
+  att_rc=0
+  gh attestation verify "$1" --repo "$repo" > "$tmpdir/attestation.log" 2>&1 || att_rc=$?
+  # Absence is checked first: some gh releases print "no attestations found" yet
+  # exit 0. Success then needs gh's own success line, not just exit status 0.
+  if LC_ALL=C grep -Eiq 'no attestations found|no attestations associated|HTTP 404: Not Found' "$tmpdir/attestation.log"; then
     info "  attestation absent for $ARCHIVE; continuing"
+  elif [ "$att_rc" -eq 0 ] && LC_ALL=C grep -q 'Verification succeeded' "$tmpdir/attestation.log"; then
+    ok "  verified attestation for $ARCHIVE"
   else
     cat "$tmpdir/attestation.log" >&2
     die "attestation verification failed for $ARCHIVE"
@@ -445,6 +459,7 @@ report_prerequisites() {
   step "Next steps: sandbox prerequisites (one backend is sufficient)"
   if command -v msb >/dev/null 2>&1; then
     msb_text=$(msb --version 2>/dev/null) || msb_text=unknown
+    [ -n "$msb_text" ] || msb_text=unknown
     msb_ver=$(printf '%s\n' "$msb_text" | sed -n 's/^[^0-9]*\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*[^[:space:]]*\).*$/\1/p' | head -n 1)
     if [ -n "$msb_ver" ] && msb_version_supported "$msb_ver"; then
       info "  msb: found ($msb_text; supported)"
@@ -457,7 +472,9 @@ report_prerequisites() {
     info "    Fix: brew install GSA-TTS/tap/microsandbox-acq or scripts/verify-msb-pin --install"
     # --yes consents only to PATH changes, never to installing a backend.
     if [ "$ASSUME_YES" -eq 0 ] && { [ -t 0 ] || [ -t 1 ] || [ -t 2 ]; } && confirm "  Install pinned msb?"; then
-      install_pinned_msb
+      # msb is optional for acq itself: a failed backend install warns rather
+      # than aborting after acq is already in place.
+      install_pinned_msb || warn "  msb install failed; see docs/howto/msb.md"
     fi
   fi
   if command -v sbx >/dev/null 2>&1; then info "  sbx: found";
