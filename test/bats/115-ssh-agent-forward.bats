@@ -19,6 +19,173 @@ teardown() { acq_teardown_stubs; }
 
 load 'helper'
 
+@test "leftovers: inspect preserves JSON punctuation and matches only the agent route" {
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    ACQ_MSB_SSH_AGENT_LINK_DIR="'"$STUBDIR"'/s ,{}[]\"/msb/ssh-agent"
+    ACQ_MSB_SUN_PATH_MAX=4096
+    link=$(_acq_msb_ssh_agent_link_path box)
+    doc=$(python3 -I -c "import json,sys; print(json.dumps({\"vsock\":{\"routes\":[{\"host_socket\":sys.argv[1],\"port\":3552}]}}))" "$link")
+    _acq_msb_cli() { printf "%s" "$doc"; }
+    _acq_msb_has_ssh_agent_vsock_route box || exit 1
+    _acq_msb_route_names_link box || exit 2
+    doc="{\"vsock\":{\"routes\":[{\"port\":6000}]},\"network\":{\"port\":3552}}"
+    if _acq_msb_has_ssh_agent_vsock_route box; then exit 3; fi
+  '
+  assert_success
+}
+
+@test "leftovers: link directory refuses a symlinked msb parent" {
+  mkdir -p "$STUBDIR/real"
+  ln -s "$STUBDIR/real" "$STUBDIR/parentlink"
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _acq_msb_ssh_agent_link_dir_ok "'"$STUBDIR"'/parentlink/ssh-agent"
+  '
+  assert_failure
+  [ ! -d "$STUBDIR/real/ssh-agent" ]
+}
+
+@test "leftovers: refresh mount parser includes every writable host mount" {
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    printf "%s" '\''{"active_config":{"mounts":[{"host":"/primary","options":{"readonly":false}},{"host":"/extra ,[]","options":{}},{"host":"/ro","options":{"readonly":true}}]}}'\'' | _acq_msb_agent_json mounts
+  '
+  assert_success
+  assert_output $'/primary\n/extra ,[]'
+}
+
+@test "leftovers: untrusted route directories block start opt-out and cleanup without sockets" {
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    ACQ_MSB_SUN_PATH_MAX=4096
+    _acq_msb_ssh_auth_sock_for() { printf "%s" /home/agent/.acq/ssh-agent.sock; }
+    _acq_msb_cli() { echo unexpected-bridge >"'"$STUBDIR"'/unexpected-bridge"; }
+    for component in msb ssh-agent; do
+      base="'"$STUBDIR"'/case-$component"
+      mkdir -p "$base/msb/ssh-agent"
+      ln -s /missing-agent.sock "$base/msb/ssh-agent/box.sock"
+      if [ "$component" = msb ]; then bad="$base/msb"; else bad="$base/msb/ssh-agent"; fi
+      mv "$bad" "$base/moved"
+      ln -s "$base/moved" "$bad"
+      ACQ_MSB_SSH_AGENT_LINK_DIR="$base/msb/ssh-agent"
+      export SSH_AUTH_SOCK=/no-live-agent
+      _acq_msb_start_ssh_agent_bridge box
+      _acq_msb_ssh_agent_link_refresh box
+      _acq_msb_ssh_agent_link_remove box
+      unset SSH_AUTH_SOCK
+      _acq_msb_start_ssh_agent_bridge box
+      _acq_msb_ssh_agent_link_unlink "$base/msb/ssh-agent/box.sock" && exit 1
+      [ "$(readlink "$base/msb/ssh-agent/box.sock")" = /missing-agent.sock ] || exit 2
+    done
+  '
+  assert_success
+  [ "${#lines[@]}" -eq 8 ]
+  assert_output --partial "Fix or remove '$STUBDIR/case-msb/msb'"
+  assert_output --partial "Fix or remove '$STUBDIR/case-ssh-agent/msb/ssh-agent'"
+  [ ! -e "$STUBDIR/unexpected-bridge" ]
+  refute_output --partial 'removed the ssh-agent route link'
+}
+
+@test "leftovers: refresh leaves a link through a symlinked msb parent untouched" {
+  _skip_unless_link_fits box
+  _mk_unix_socket "$STUBDIR/a.sock" || skip "python3 AF_UNIX socket unavailable"
+  mkdir -p "$STUBDIR/state/moved/ssh-agent"
+  ln -s "$STUBDIR/a.sock" "$STUBDIR/state/moved/ssh-agent/box.sock"
+  ln -s "$STUBDIR/state/moved" "$STUBDIR/state/msb"
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    export SSH_AUTH_SOCK="'"$STUBDIR"'/a.sock"
+    _acq_msb_ssh_agent_link_refresh box
+    [ "$_ACQ_MSB_SSH_AGENT_LINK_REMOVED" = 0 ] && [ "$_ACQ_MSB_SSH_AGENT_LINK_BLOCKED" = 1 ]
+  '
+  assert_success
+  [ -L "$STUBDIR/state/moved/ssh-agent/box.sock" ]
+  assert_output --partial "Fix or remove '$STUBDIR/state/msb'"
+  [ -S "$STUBDIR/a.sock" ]
+}
+
+@test "leftovers: bridge stops the exact listener before unlink and sets private umask" {
+  # The bridge suppresses stdout; capture argv through a separate file.
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _ACQ_MSB_SSH_AGENT_FORWARDING=1
+    _acq_msb_cli() { printf "%s\n" "${@: -1}" >"'"$STUBDIR"'/bridge"; }
+    _acq_msb_warn_if_agent_unreachable() { :; }
+    _acq_msb_start_ssh_agent_bridge box
+    python3 -I -c "import pathlib,sys; s=pathlib.Path(sys.argv[1]).read_text(); stop=\"pkill -f -x '\''socat UNIX-LISTEN:/home/agent/\\\\.acq/ssh-agent\\\\.sock,fork,reuseaddr VSOCK-CONNECT:2:3552'\''\"; assert s.index(stop) < s.index(\"rm -f\") < s.index(\"nohup socat\"); assert s.index(\"umask 077\") < s.index(\"nohup socat\")" "'"$STUBDIR"'/bridge"
+  '
+  assert_success
+}
+
+@test "leftovers: duplicate custom and published vsock ports are refused before staging links" {
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_host_socket_forwards() { printf "/agent\t3552\tstream\tssh-agent\n/custom\t03552\tstream\tcustom\n"; }
+    f=(); _acq_msb_vsock_flags_into f box
+  '
+  assert_failure
+  assert_output --partial 'collides with a published port or another host-socket forward'
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_host_socket_forwards() { printf "/agent\t3552\tstream\tssh-agent\n"; }
+    f=(); _acq_msb_vsock_flags_into f box "" -p 5000:3552
+  '
+  assert_failure
+  assert_output --partial 'collides with a published port'
+  [ ! -L "$STUBDIR/state/msb/ssh-agent/box.sock" ]
+}
+
+@test "leftovers: refresh refuses current and stale sockets in secondary writable mounts" {
+  _skip_unless_link_fits box
+  mkdir -p "$STUBDIR/extra" "$STUBDIR/state/msb/ssh-agent"
+  _mk_unix_socket "$STUBDIR/extra/a.sock" || skip "python3 AF_UNIX socket unavailable"
+  ln -s "$STUBDIR/extra/a.sock" "$STUBDIR/state/msb/ssh-agent/box.sock"
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    export SSH_AUTH_SOCK="'"$STUBDIR"'/extra/a.sock"
+    _acq_msb_cli() { printf "{\"active_config\":{\"mounts\":[{\"host\":\"%s\",\"options\":{\"readonly\":false}}]}}" "'"$STUBDIR"'/extra"; }
+    _acq_msb_ssh_agent_link_refresh box
+    [ "$_ACQ_MSB_SSH_AGENT_LINK_REMOVED" = 1 ]
+  '
+  assert_success
+  assert_output --partial 'inside the workspace'
+  [ ! -L "$STUBDIR/state/msb/ssh-agent/box.sock" ]
+}
+
+@test "leftovers: provision checks published guest ports before msb create" {
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_host_socket_forwards() { printf "/agent\t3552\tstream\tssh-agent\n"; }
+    _acq_msb_port_flags_from_records() { eval "$1+=(-p 5000:3552)"; }
+    acq_backend_provision collisionbox shell "'"$STUBDIR"'"
+  '
+  assert_failure
+  assert_output --partial 'forwarded vsock port 3552 collides'
+  refute_regex "$(cat "$CALLS")" '^msb create'
+}
+
+@test "leftovers: failed msb create removes its staged agent link" {
+  _skip_unless_link_fits failbox
+  _mk_unix_socket "$STUBDIR/agent.sock" || skip "python3 AF_UNIX socket unavailable"
+  mkdir -p "$STUBDIR/ws"
+  run bash -c '
+    export SSH_AUTH_SOCK="'"$STUBDIR"'/agent.sock" STUB_MSB_CREATE_FAIL_IMAGE=test:fail ACQ_MSB_IMAGE=test:fail
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_backend_provision failbox shell "'"$STUBDIR"'/ws"
+  '
+  assert_failure
+  assert_output --partial "msb create' failed"
+  assert_regex "$(cat "$CALLS")" "vsock.*$STUBDIR/state/msb/ssh-agent/failbox.sock:3552/stream"
+  [ ! -L "$STUBDIR/state/msb/ssh-agent/failbox.sock" ]
+  [ -S "$STUBDIR/agent.sock" ]
+}
+
 # Mint a real unix socket at $1; returns 0 iff one was created (needs python3).
 _mk_unix_socket() {
   python3 -c 'import socket,sys
@@ -1099,8 +1266,7 @@ PQ
   _mk_unix_socket "$STUBDIR/agent30.sock" || skip "python3 AF_UNIX socket unavailable"
   _mk_unix_socket "$STUBDIR/old30.sock" || skip "python3 AF_UNIX socket unavailable"
   # (a) at start: the link directory is itself a symlink, which acq refuses to
-  #     write through, so the link cannot be re-pointed. Its target is still
-  #     the user's own socket, so it is kept and the bridge runs.
+  #     write through: keep the link untouched and skip the bridge.
   mkdir -p "$STUBDIR/state/msb" "$STUBDIR/linkdir30"
   ln -s "$STUBDIR/linkdir30" "$STUBDIR/state/msb/ssh-agent"
   ln -s "$STUBDIR/old30.sock" "$STUBDIR/state/msb/ssh-agent/rofs.sock"
@@ -1113,13 +1279,17 @@ PQ
     _acq_msb_start_ssh_agent_bridge rofs 2>&1
     wait
   '
-  assert_output --partial 'could not re-point'
-  assert_output --partial 'UNREACHABLE'
-  assert_output --partial 'NOT re-pointed'
-  assert_output --partial 'ssh-agent/rofs.sock'
-  assert_output --partial 'Fix or remove'
+  assert_output --partial "Fix or remove '$STUBDIR/state/msb/ssh-agent'"
+  assert_output --partial 'skipping the bridge'
+  [ "${#lines[@]}" -eq 1 ]
+  [ -L "$STUBDIR/state/msb/ssh-agent/rofs.sock" ]
+  [ "$(readlink "$STUBDIR/state/msb/ssh-agent/rofs.sock")" = "$STUBDIR/old30.sock" ]
+  refute_output --partial 'removed the ssh-agent route link'
+  refute_output --partial 'UNREACHABLE'
   refute_output --partial 'just re-pointed'
   refute_output --partial 'names your live agent'
+  run rg -q 'nohup socat' "$CALLS"
+  assert_failure 1
   # (b) at create: a valid name whose link cannot be created is not told its
   #     name is wrong; the warning names the link path instead.
   run bash -c '

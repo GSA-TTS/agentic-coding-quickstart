@@ -905,14 +905,16 @@ def _msb_create(name: str, image: str, workspace: str, kit_set: list[kit_msb.Kit
     if generation is not None:
         flags += provider_input.msb_flags(generation)
     # Host ssh-agent and host socket forwards (ADR-0021): opt-in through SSH_AUTH_SOCK.
-    flags += ssh_agent.vsock_flags(name, [workspace, *(p.removesuffix(":ro") for p in extra_workspaces)])
     try:
+        flags += ssh_agent.vsock_flags(name, [workspace, *extra_workspaces],
+                                       [str(m["guest_port"]) for m in mappings])
         bindings = msb.create(
             name, image, workspace, memory=msb.DEFAULT_MEMORY, cpus=msb.DEFAULT_CPUS,
             egress_kits=kit_msb.egress_names(kit_set), kit_flags=flags, clone_source=clone_src,
             extra_workspaces=list(extra_workspaces), workspace_read_only=workspace_read_only,
         ) or []
     except BaseException:
+        ssh_agent.link_remove(name)
         _provider_abandon(name, generation)
         raise
     finally:

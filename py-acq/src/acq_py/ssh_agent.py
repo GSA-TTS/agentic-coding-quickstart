@@ -26,6 +26,7 @@ in-guest ``sh -c`` string is validated first (SI-10).
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import stat
@@ -274,13 +275,21 @@ def _refuse_inside(fwd_path: str, label: str, ws: str) -> None:
 
 
 def recorded_workspaces(name: str) -> list[str]:
-    """The sandbox's recorded host workspace, as the refresh checks it (Bash ``acq_workspace_record_read``)."""
+    """Every writable host mount, plus the recorded workspaces when inspect is unavailable."""
     try:
         record = state.record_read("msb", name)
     except state.StateSchemaError:
-        return []
+        record = None
     ws = (record or {}).get("workspace")
-    return [ws] if isinstance(ws, str) and ws else []
+    extra = (record or {}).get("extra_workspaces", [])
+    paths = [ws, *extra] if isinstance(extra, list) else [ws]
+    doc = _route_doc(name)
+    if doc is not None:
+        config = doc.get("active_config", doc.get("config", doc))
+        if isinstance(config, dict) and isinstance(config.get("mounts"), list):
+            paths += [m.get("host") for m in config["mounts"] if isinstance(m, dict)
+                      and not (isinstance(m.get("options"), dict) and m["options"].get("readonly") is True)]
+    return [p for p in paths if isinstance(p, str) and p and not p.endswith(":ro")]
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +340,9 @@ def _private_link_dir(path: str) -> bool:
     """Create the link directory 0700, or accept it only as this user's own real directory."""
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
+        parent = os.lstat(os.path.dirname(path))
+        if not stat.S_ISDIR(parent.st_mode) or not _owned_by_me(parent):
+            return False
         try:
             os.mkdir(path, 0o700)
         except FileExistsError:
@@ -355,10 +367,10 @@ def link_point(link: str, target: str) -> bool:
         return False
     if os.path.exists(link) and not os.path.islink(link):
         return False
-    if os.path.islink(link) and os.readlink(link) == target:
-        return True
     if not _private_link_dir(os.path.dirname(link)):
         return False
+    if os.path.islink(link) and os.readlink(link) == target:
+        return True
     try:
         if os.path.islink(link) and os.path.isdir(link):
             os.unlink(link)  # a rename would land inside the directory it resolves to
@@ -377,7 +389,33 @@ def link_point(link: str, target: str) -> bool:
     return False
 
 
+def _unsafe_link_dir(link: str) -> str | None:
+    """Find an untrusted existing route directory without changing anything."""
+    directory = os.path.dirname(link)
+    for path in (os.path.dirname(directory), directory):
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            continue  # creation checks missing directories separately
+        except OSError:
+            return path
+        if not stat.S_ISDIR(info.st_mode) or not _owned_by_me(info):
+            return path
+    return None
+
+
+def _link_access_ok(link: str) -> bool:
+    directory = _unsafe_link_dir(link)
+    if directory is None:
+        return True
+    _say(f"acq(msb): warning: unsafe ssh-agent route directory '{directory}'; leaving the link untouched and "
+         f"skipping the bridge. Fix or remove '{directory}'.")
+    return False
+
+
 def _unlink_quietly(path: str) -> None:
+    if _unsafe_link_dir(path) is not None:
+        return
     try:
         if os.path.islink(path) or os.path.isfile(path):
             os.unlink(path)
@@ -400,7 +438,7 @@ def route_path(name: str, agent: str) -> str:
 
 
 def link_refresh(name: str, *, relink: bool = False) -> tuple[str, bool]:
-    """Re-point the managed link at the current ``SSH_AUTH_SOCK``: ``(why it was left alone, removed)``.
+    """Re-point the managed link: ``(why it was left alone, skip bridge)``.
 
     A sandbox without a link (created before the link existed, or under a name
     that cannot carry one) is left as it is, unless ``relink`` says its route
@@ -408,10 +446,15 @@ def link_refresh(name: str, *, relink: bool = False) -> tuple[str, bool]:
     re-pointed (no socket here, a socket inside the workspace, a link that
     cannot be replaced), its current target is checked: unless that is a socket
     owned by this user outside the workspace, the link is removed and
-    ``removed`` is True, so the caller starts no bridge. Never fails the caller.
+    the second result is True, so the caller starts no bridge. Untrusted route
+    directories also skip the bridge, leaving the link untouched. Never fails the caller.
     """
     link = link_path(name)
-    if link is None or not (relink or os.path.islink(link)):
+    if link is None:
+        return "", False
+    if not _link_access_ok(link):
+        return "unsafe ssh-agent route directory", True
+    if not (relink or os.path.islink(link)):
         return "", False
     workspaces = recorded_workspaces(name)
     target = os.environ.get("SSH_AUTH_SOCK", "")
@@ -457,6 +500,13 @@ def _link_target_ok(link: str, workspaces: list[str]) -> bool:
     Its directory must be this user's own real directory too (lstat, not a
     symlink), so nobody else can swap the socket for another between checks.
     """
+    try:
+        for directory in (os.path.dirname(link), os.path.dirname(os.path.dirname(link))):
+            info = os.lstat(directory)
+            if not stat.S_ISDIR(info.st_mode) or not _owned_by_me(info):
+                return False
+    except OSError:
+        return False
     target = _readlink(link)
     if not target:
         return False
@@ -486,6 +536,8 @@ def opt_out(name: str) -> None:
     """
     _ACTIVE.discard(name)
     link = link_path(name)
+    if link is not None and not _link_access_ok(link):
+        return
     had_link = link is not None and os.path.islink(link)
     if had_link and link is not None:
         _unlink_quietly(link)
@@ -516,6 +568,8 @@ def link_remove(name: str) -> None:
     """Drop the sandbox's managed link (the link only, never the agent socket behind it)."""
     link = link_path(name)
     if link is not None and os.path.islink(link):
+        if not _link_access_ok(link):
+            return
         _unlink_quietly(link)
 
 
@@ -534,7 +588,7 @@ def _vsock_supported() -> bool:
     return False
 
 
-def vsock_flags(name: str, workspaces: list[str]) -> list[str]:
+def vsock_flags(name: str, workspaces: list[str], published: list[str] | None = None) -> list[str]:
     """``msb create`` ``--vsock`` flags for the requested forwards, and mark ``name`` active.
 
     Called once per create. Nothing is emitted (with a warning) on an msb too
@@ -545,6 +599,15 @@ def vsock_flags(name: str, workspaces: list[str]) -> list[str]:
     forwards = host_socket_forwards()
     if not forwards or not _vsock_supported():
         return []
+    used = {int(p) for p in published or []}
+    for fwd in forwards:
+        if int(fwd.port) in used:
+            raise msb.MsbError(
+                "validation_failed",
+                f"forwarded vsock port {int(fwd.port)} collides with a published port or another host-socket forward",
+                "choose distinct ports for published ports and host-socket forwards",
+            )
+        used.add(int(fwd.port))
     flags: list[str] = []
     for fwd in forwards:
         ws = workspace_holding(fwd.path, workspaces)
@@ -578,11 +641,14 @@ def bridge_script(sock: str, port: str) -> str:
     """The bridge's ``sh -c`` string, byte for byte the Bash adapter's.
 
     Both values are validated before they are spliced in. One detached socat,
-    relaunched fresh on each (re)start; ``rm -f`` clears a stale socket first.
+    relaunched fresh on each (re)start after stopping the previous listener.
     """
+    pattern_sock = sock.replace(".", r"\.")
     return (
         "\n"
         f"    mkdir -p \"$(dirname '{sock}')\" 2>/dev/null || true\n"
+        f"    pkill -f -x 'socat UNIX-LISTEN:{pattern_sock},fork,reuseaddr VSOCK-CONNECT:2:{port}' 2>/dev/null || true\n"
+        "    umask 077\n"
         f"    rm -f '{sock}' 2>/dev/null || true\n"
         f"    nohup socat UNIX-LISTEN:'{sock}',fork,reuseaddr VSOCK-CONNECT:2:'{port}' >/dev/null 2>&1 &\n"
         "  "
@@ -643,8 +709,8 @@ def start_bridge(name: str, *, relink: bool = False) -> None:
     sock = guest_sock() if name in _ACTIVE else recorded_sock(name)
     if sock is None:
         return
-    skipped, removed = link_refresh(name, relink=relink)
-    if removed:
+    skipped, skip_bridge = link_refresh(name, relink=relink)
+    if skip_bridge:
         return
     port = bridge_port()
     if not valid_vsock_port(port):
@@ -734,7 +800,6 @@ def _raw_unreachable(name: str) -> str:
 # ---------------------------------------------------------------------------
 
 ROUTE_PRESENT, ROUTE_MISSING, ROUTE_UNKNOWN = 0, 1, 2
-_FLATTEN = str.maketrans({",": "\n", "{": "\n", "}": "\n", "[": "\n", "]": "\n", '"': None, " ": None})
 
 
 def has_route(name: str) -> int:
@@ -748,32 +813,39 @@ def has_route(name: str) -> int:
     return _route_state(_route_doc(name))
 
 
-def _route_doc(name: str) -> str | None:
-    """``msb inspect NAME --format json`` flattened as Bash flattens it, or ``None`` when it failed twice."""
+def _route_doc(name: str) -> dict | None:
+    """Parse ``msb inspect NAME --format json``, or return None when unavailable."""
     for _try in range(2):
         proc = msb.call(["inspect", name, "--format", "json"], timeout=GUEST_TIMEOUT_S)
         doc = (proc.stdout or "").rstrip("\n") if _ok(proc) and proc is not None else ""
         if doc:
-            return doc.translate(_FLATTEN)
+            try:
+                parsed = json.loads(doc)
+            except ValueError:
+                return None
+            return parsed if isinstance(parsed, dict) else None
     return None
 
 
-def _route_state(flat: str | None) -> int:
+def _routes(doc: dict) -> list[dict]:
+    config = doc.get("active_config", doc.get("config", doc))
+    vsock = config.get("vsock", {}) if isinstance(config, dict) else {}
+    routes = vsock.get("routes", []) if isinstance(vsock, dict) else []
+    return [r for r in routes if isinstance(r, dict)] if isinstance(routes, list) else []
+
+
+def _route_state(flat: dict | None) -> int:
     if flat is None:
         return ROUTE_UNKNOWN
-    if not re.search(r"(^|:)vsock:?$", flat, re.MULTILINE):
-        return ROUTE_MISSING
-    # Anchored at the start of a flattened field, so guest_port/host_port never match.
-    pattern = rf"^port[:=]{re.escape(bridge_port())}$"
-    return ROUTE_PRESENT if re.search(pattern, flat, re.MULTILINE) else ROUTE_MISSING
+    return ROUTE_PRESENT if any(str(r.get("port")) == bridge_port() for r in _routes(flat)) else ROUTE_MISSING
 
 
-def _route_names_link(flat: str | None, name: str) -> bool:
+def _route_names_link(flat: dict | None, name: str) -> bool:
     """The route's host socket is this sandbox's managed link (so a removed link may be made again)."""
     link = link_path(name)
     if flat is None or link is None:
         return False
-    return f"host_socket:{link.replace(' ', '')}" in flat.splitlines()
+    return any(str(r.get("port")) == bridge_port() and r.get("host_socket") == link for r in _routes(flat))
 
 
 def ensure_forward(name: str) -> str | None:
