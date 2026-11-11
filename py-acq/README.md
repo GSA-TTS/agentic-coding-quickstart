@@ -511,7 +511,14 @@ for a real binary.
 install-only archives on macOS and Linux. An IT-approved base interpreter is the
 optional per-fleet fallback. `acq_py/runtime.py` resolves the runtime to use and
 never downloads one; acquisition (download + checksum + provenance) belongs to
-the installer slice.
+release automation. `scripts/stage-posix-runtime` and
+`scripts/stage-windows-runtime` verify pinned supplier archives and retain their
+notices. `scripts/assemble-release` adds source, launchers, backend files and the
+wheelhouse, and bakes the version and source revision into `_build_info.py`.
+
+`.github/workflows/build-assets.yml` is a dry run: it builds all five archives,
+generates provenance and checksums, and verifies offline installs. It uploads
+workflow artifacts only; publishing integration remains a follow-up.
 
 **Patch cadence (PROPOSAL — pending developer decision, not yet settled):**
 re-verify and re-pin the managed runtime and dependency wheelhouse on the

@@ -42,6 +42,8 @@ WORKFLOW_REL='.github/workflows/bash32-compat.yml'
 #                         POSIX entry points the job parses with --posix -n
 #   test/fixtures         offline installer and kit fixtures read by
 #                         05-install.bats and by the vectors
+#   installer package.json staging scripts
+#                         release-assets.bats builds the enumerated offline dist
 REQUIRED_PATHSPECS='
 acq
 acq.backends
@@ -81,6 +83,12 @@ test/vendor
 .github/workflows/bash32-compat.yml
 scripts/run-vectors
 scripts/gen-install-assets
+scripts/stage-posix-runtime
+scripts/stage-windows-runtime
+scripts/assemble-release
+scripts/gen-provenance
+installer
+package.json
 test/vectors
 acq-python
 py-acq/src
@@ -106,12 +114,10 @@ PENDING_PATHSPECS='
 #   .github (other than the listed)   templates, linters, other workflows
 #   repo metadata / lint config       not read by any @test
 #   other scripts/verify-* and probes live or manual tools, never run by the suite
-#   py-acq/ (except src) installer/
-#                                     Python packaging, pytest suite and installer
-#                                     metadata; the job runs none of them
+#   py-acq/ (except src)              Python packaging and pytest suite; the job
+#                                     runs none of them
 #                                     (py-acq/src and qualification are listed)
-#   scripts/qualify-backend-cell scripts/stage-windows-runtime
-#                                     live qualification and release staging tools
+#   scripts/qualify-backend-cell      live qualification tool
 #   scripts/refresh-kitbundle         regenerates and checks the Python acq's kit
 #                                     bundle (package data under py-acq/src); run by
 #                                     hand, by the pre-commit job and by the pytest
@@ -120,7 +126,6 @@ PENDING_PATHSPECS='
 NOT_INPUTS='
 AGENTS.fork.md
 GLOSSARY.md
-installer/
 py-acq/README.md
 py-acq/pyproject.toml
 py-acq/requirements-build.txt
@@ -128,12 +133,12 @@ py-acq/requirements-dev.txt
 py-acq/requirements-quality.txt
 py-acq/tests/
 scripts/qualify-backend-cell
-scripts/stage-windows-runtime
 scripts/refresh-kitbundle
 .github/workflows/python-quality.yml
 .github/workflows/python-vectors.yml
 .github/workflows/tier3-release-gate.yml
 .github/workflows/windows.yml
+.github/workflows/build-assets.yml
 docs/
 checklists/
 governance/
@@ -165,7 +170,6 @@ CONTRIBUTING.md
 LICENSE
 SECURITY.md
 SUPPORT.md
-package.json
 release-please-config.json
 scripts/diagnose-host-egress-diff
 scripts/diagnose-tls-intercept

@@ -45,3 +45,6 @@ scripts/verify-sbx-startup-barrier text eol=lf
 # (py-acq/src/acq_py/kitbundle/MANIFEST.json records each file's git blob id), and
 # some of its files are shell scripts.
 py-acq/src/acq_py/kitbundle/** text eol=lf
+scripts/stage-posix-runtime text eol=lf
+scripts/assemble-release text eol=lf
+scripts/gen-provenance text eol=lf

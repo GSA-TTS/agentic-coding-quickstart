@@ -25,6 +25,15 @@
         {
           "type": "generic",
           "path": "docs/howto/acq.md"
+        },
+        {
+          "type": "toml",
+          "path": "py-acq/pyproject.toml",
+          "jsonpath": "$.project.version"
+        },
+        {
+          "type": "generic",
+          "path": "py-acq/src/acq_py/__init__.py"
         }
       ]
     }
