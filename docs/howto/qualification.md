@@ -494,11 +494,10 @@ branch is not in `main`'s history, so the gate could not resolve it. Every outco
 is recorded, not only `PASS`: the latest entry for a cell decides, so a recorded
 `FAIL`, `BLOCKED` or `FLAKY` blocks a cell that had a current `PASS`. Commit the
 ledger change through a normal PR. The ledger is self-reported evidence, so the
-PR needs an admin's review. Upstream, CODEOWNERS enforces that review once code-owner
-review is required. On the `mogul` fork nothing enforces it: the `CODEOWNERS`
-teams cannot own paths in a personal repository and the `main` ruleset requires no
-review. There, the maintainer's own audit of the ledger PR is the control (see
-[`release-gate-setup.md`](release-gate-setup.md), step 3).
+PR needs an admin's review. CODEOWNERS enforces that review only when the named
+teams can own paths in the repository and code-owner review is required by its
+ruleset. Without those settings, the maintainer's audit is the control; see
+[`release-gate-setup.md`](release-gate-setup.md), step 3 and its status note.
 Per-attempt timestamps are in the transcript; for one written by an older harness,
 pass `--recorded-at <ISO 8601 UTC>`.
 
@@ -525,8 +524,9 @@ recorded.
 
 Making it hold a release (maintainer setup is collected in
 [`docs/howto/release-gate-setup.md`](release-gate-setup.md)): `release.yml` already
-consults the gate, though no job runs on this fork — releases are upstream's job, so
-every job is gated on the `ENABLE_RELEASES` repository variable. It is split into `Release PR` -> `Tier-3 release gate (release)`
+consults the gate when `ENABLE_RELEASES` is `true`; otherwise the release jobs
+do not run. `Release PR` and the release gate are directly gated on that repository
+variable, and the remaining jobs depend on them. It is split into `Release PR` -> `Tier-3 release gate (release)`
 -> `Release Tag`, so a stale cell leaves no tag and no GitHub Release.
 
 Making it a **required status check** on `main` is a separate step, and the order

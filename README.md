@@ -73,7 +73,7 @@ Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All
 Restart when it finishes. After that, the installer (or `msb doctor`) will confirm
 the host is ready. On a work or managed device you may not be able to enable it
 yourself — ask your IT administrator to turn on "Windows Hypervisor Platform."
-This fork's installer reports missing WHP with repair guidance after installing acq.
+The acq v1 installer reports missing WHP with repair guidance after installing acq.
 
 </details>
 
@@ -101,17 +101,17 @@ irm https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v4.2.
 
 <!-- x-release-please-end -->
 
-> **This fork:** these one-liners fetch the installers published with the
-> upstream GSA-TTS releases, and the rest of this step describes them. The
+> **Installer versions:** these one-liners fetch the installers published with
+> the pinned GSA-TTS release, and the rest of this step describes them. The
 > `install.sh` and `install.ps1` in this repository are the acq v1 installers
 > instead: they install a checksum-verified release archive, support an independent
 > `SHA256SUMS` pin and opportunistic GitHub attestation verification, then report
 > sandbox prerequisites (including Windows virtualization). They offer pinned msb
 > installation only with explicit interactive consent; `--yes`/`-Yes` never
 > installs msb. They do not choose an acq package manager or install Git Bash.
-> See [This fork's installers](docs/howto/acq.md#this-forks-installers).
+> See [acq v1 installers](docs/howto/acq.md#acq-v1-installers).
 >
-> **Windows on this fork:** the installed `acq` runs the Python implementation by
+> **Windows with the acq v1 installer:** the installed `acq` runs the Python implementation by
 > default, with the managed Python runtime the Windows archive bundles
 > (`py-acq\runtime\python.exe`), so it needs neither Git Bash nor a system
 > Python. `ACQ_RUNTIME` (an absolute path to `python.exe`) selects an
@@ -136,7 +136,7 @@ That's it — you don't have to choose *how* to install. The installer:
 
 **Answer "yes" to each prompt** — it may take a few minutes. When it finishes,
 **close and reopen your terminal** so the new `acq` command is available, then
-continue to Step 3. (On Windows, this fork's installer reports missing
+continue to Step 3. (On Windows, the acq v1 installer reports missing
 virtualization with repair guidance — see the box in Step 1. And if a later `acq`
 command reports that *running scripts is disabled*, that's PowerShell's
 execution policy, not `acq` — see the `PSSecurityException` box in

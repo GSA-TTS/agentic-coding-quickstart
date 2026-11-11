@@ -127,7 +127,7 @@ requirements while maintaining simplicity and being backed by Google's well-main
    > **Update (2026-06):** The original plan specified local `commitlint` with a
    > `.commitlintrc.yml` and a pre-commit hook. That was never wired to CI and
    > added an npm dependency tree for a check the merge gate already performs;
-   > it was removed (see issue #145). Enforcement is the PR-title Action above.
+   > it was removed. Enforcement is the PR-title Action above.
 
 ### Positive Consequences
 
@@ -228,7 +228,7 @@ fix(sbx): correct secret injection path in SBX configuration
 The previous configuration used an incorrect path that caused
 secrets to fail injection on container startup.
 
-Fixes: #42
+Fixes: GSA-TTS/agentic-coding-quickstart#42
 ```
 
 ```
