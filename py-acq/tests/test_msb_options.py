@@ -268,6 +268,8 @@ def test_workspace_override_record_and_session(create_env, monkeypatch, tmp_path
     monkeypatch.setattr(msb, "_run_stream", lambda argv, **kw: seen.append(argv) or 0)
     msb._session("knobs", ["true"], workspace="/old", env=[], tty=False, json_mode=True)
     assert seen[0][seen[0].index("-w") + 1] == guest
+    if os.name == "nt":
+        return  # Windows requests no read-only mount, so it never qualifies for recreate
     monkeypatch.setenv("ACQ_SECURITY_MOUNT_STATE", json.dumps({"knobs": "missing"}))
     assert cli.main(["--backend", "msb", "create", "--recreate", "knobs", "--yes", "--json"]) == 0
     recreated = [a for a in create_env[1] if a[0] == "create"][-1]
