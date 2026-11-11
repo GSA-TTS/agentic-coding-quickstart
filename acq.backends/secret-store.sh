@@ -459,7 +459,7 @@ acq_secret_store() {
   fi
 
   local backend
-  backend=$(_acq_secret_backend) || return 1
+  backend=$(_acq_secret_backend) || { value=""; return 1; }
   acq_debug "secret store: key=$key backend=$backend"
 
   case "$backend" in
