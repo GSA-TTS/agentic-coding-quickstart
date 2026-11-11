@@ -220,10 +220,10 @@ already on your Mac or Linux host (Homebrew → npm → self-contained download)
 puts `acq` on your `PATH`, and never needs administrator rights. This section
 covers the manual, developer, and Windows preview paths.
 
-### This fork's installers
+### acq v1 installers
 
 The `install.sh` and `install.ps1` checked into this repository are not the
-upstream release installers described in this guide and the README. They are the
+installers in the pinned release described in this guide and the README. They are the
 acq v1 installers (ADR-0042m). Each one downloads a per-platform release archive
 (`acq-<platform>.tar.gz`, or `acq-windows-x64.zip` on Windows), verifies it
 against `SHA256SUMS`, installs it under your home directory and offers to put it
@@ -291,8 +291,7 @@ never elevate, enable Windows features or reboot. Skip the whole report and
 offer with `--no-prereq-check` or `-NoPrereqCheck`. Dry runs make no probes or
 prerequisite changes.
 
-No release of this fork has published those archives yet, so the release they
-download by default does not exist. Until one does, run them against an offline
+Until a release publishes the acq v1 archives, use an offline
 asset set: `sh install.sh --source DIR --install-dir DIR --bin-dir DIR`, or
 `.\install.ps1 -Source DIR`.
 
@@ -313,7 +312,7 @@ Package-manager installs give you `upgrade`/`uninstall` for free.
 Windows support is a preview path for Windows 11 hosts using the `msb` backend.
 It is installed from the GitHub release zip with PowerShell; npm remains scoped
 to macOS/Linux until Windows path and secret-storage behavior are fully
-validated. This fork’s installer reports Windows Hypervisor Platform capability
+validated. The acq v1 installer reports Windows Hypervisor Platform capability
 after installation and prints repair guidance if it is unavailable; it does not
 enable Windows features, elevate PowerShell, reboot, or fail the acq install.
 
@@ -472,7 +471,7 @@ worked. Notes from that validation:
   (`C:\Windows\System32\bash.exe`) that a bare `bash.exe` PATH lookup often
   returns. If `acq` still lands in WSL, run it from a Git Bash terminal or add
   Git for Windows' `bin` directory to your PATH.
-- This fork’s installer checks WHP after installation by probing the WHP API
+- The acq v1 installer checks WHP after installation by probing the WHP API
   (`WHvGetCapability` / `WHvCapabilityCodeHypervisorPresent`), rather than the DISM feature flag — the flag can report
   `Disabled` on hosts where WHP genuinely works (WSL2/VirtualMachine Platform,
   VBS, or a virtualized guest). Treat `msb doctor` as the authoritative readiness
@@ -629,7 +628,7 @@ time: Apple Silicon Macs include the hypervisor support msb uses.
 **Windows 11** — Windows support is in **preview**. Local sandboxes need the
 **Windows Hypervisor Platform** feature (this is separate from the
 `VirtualMachinePlatform` feature that WSL2 and Docker Desktop enable). The
-Windows installer on this fork reports WHP capability after installation and
+acq v1 Windows installer reports WHP capability after installation and
 prints repair guidance when it is unavailable. It does not elevate PowerShell,
 enable the feature, reboot the machine, or fail an otherwise successful install.
 
@@ -905,7 +904,7 @@ The provider kit `acq` uses by default is likewise data:
 ```yaml
 provider_kit: agentic-coding-patterns/usai-provider   # default
 # or: agentic-coding-kits/opencode-go-provider
-# or: opencode-go-provider@github.com/mogul/agentic-coding-kits
+# or: opencode-go-provider@github.com/acme/agentic-coding-kits
 ```
 
 `acq configure` offers the discovered kits in a picker, so you can select one

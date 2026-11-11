@@ -71,9 +71,9 @@ brew install GSA-TTS/tap/microsandbox-acq    # version-pinned formula
 ```
 
 The upstream release installer (the README one-liner) does this for you and
-also repairs a blocked, too-old, unparseable, or PATH-shadowed `msb`. This
-fork's in-repo `install.sh` does not install or check `msb` (see
-[This fork's installers](acq.md#this-forks-installers)), so use one of the
+also repairs a blocked, too-old, unparseable, or PATH-shadowed `msb`. The
+in-repo acq v1 `install.sh` does not install or check `msb` (see
+[acq v1 installers](acq.md#acq-v1-installers)), so use one of the
 commands above.
 
 > **Do not use the upstream one-liners to get a specific version.**

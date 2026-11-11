@@ -33,7 +33,7 @@ something on msb instead of printing "re-create the sandbox."
 ## Decision Drivers
 
 - **Parity with sbx's post-hoc `acq ports`** — the one remaining port capability
-  sbx has and msb lacks; this is gap **K** in the parity epic (#234).
+  sbx has and msb lacks; this is the post-hoc port-publishing parity requirement.
 - **No sandbox restart** — the whole point of post-hoc publish is to expose a
   port without tearing down running state (which `msb -p` would require).
 - **Least privilege / auditable exposure (AC-6, SC-7)** — a tunnel opens a host
@@ -111,7 +111,7 @@ microsandbox source:
 ```
 
 Source of truth (pinned to msb 0.6.7):
-[`crates/network/lib/config/types.rs` → `struct PublishedPort`](https://github.com/superradcompany/microsandbox/blob/main/crates/network/lib/config/types.rs)
+[`crates/network/lib/model/config/types.rs` → `struct PublishedPort`](https://github.com/superradcompany/microsandbox/blob/main/crates/network/lib/model/config/types.rs)
 and the `--format json` assembly in
 [`crates/cli/lib/commands/inspect.rs`](https://github.com/superradcompany/microsandbox/blob/main/crates/cli/lib/commands/inspect.rs).
 The parser (`_acq_msb_ports_from_inspect`) keys on the explicit `host_port` /
@@ -167,6 +167,6 @@ failure mode entirely.
   (gap K)
 - Implementation: [#238](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/238)
 - msb `inspect --format json` port shape (canonical):
-  [`crates/network/lib/config/types.rs`](https://github.com/superradcompany/microsandbox/blob/main/crates/network/lib/config/types.rs)
+  [`crates/network/lib/model/config/types.rs`](https://github.com/superradcompany/microsandbox/blob/main/crates/network/lib/model/config/types.rs)
   (`struct PublishedPort`) and
   [`crates/cli/lib/commands/inspect.rs`](https://github.com/superradcompany/microsandbox/blob/main/crates/cli/lib/commands/inspect.rs)

@@ -48,28 +48,22 @@ release is stalled until the cell is re-qualified.
 
 What remains is repository configuration, which only a maintainer can do.
 
-## 0. Releases are upstream's job (why nothing releases on the fork)
+## Status in this fork
 
-The acq v1 rewrite merges into `GSA-TTS/agentic-coding-quickstart`, and **upstream's**
-release-please numbers it there, so upstream users keep one unbroken SemVer line: they
-upgrade from one version to the next as always, and somewhere in that sequence the
-default implementation becomes the Python one.
+The proposed ruleset, CODEOWNERS review and required checks are not enforced
+in this fork. The Tier-3 check is advisory. Upstream decides whether and how
+to enforce them; workflow presence does not establish enforcement.
+See [UPSTREAM-HANDOFF](../UPSTREAM-HANDOFF.md) for the governance record.
 
-A fork release would be a second, conflicting version line for the same tool. It also
-cannot produce a sane number: the fork carries no release tags, so release-please on
-the fork walks all of history and proposes a *downgrade* (for example, it once proposed
-`4.0.1` against a manifest of `4.1.1`; that PR was closed).
+## 0. Enable releases deliberately
 
-So every job in `release.yml` is gated on the repository variable
-`ENABLE_RELEASES == 'true'`, which is **unset on the fork**. The workflow and the gate
-are maintained here and contributed upstream; upstream sets the variable (Settings >
-Secrets and variables > Actions > Variables) or drops the condition. The steps below
-are what upstream — or this fork, if it ever does cut its own releases — needs.
-
-Each job's structure was exercised once on the fork before the variable was
-introduced: `Release PR`, `Tier-3 release gate (release)` and `Release Tag` all ran
-green, the gate ran before the tag, and the release PR carried the gate check. Only
-the version number it proposed was wrong.
+`release.yml` directly gates `Release PR` and `Tier-3 release gate (release)`
+on `vars.ENABLE_RELEASES == 'true'`; the tag and asset jobs depend on them.
+A maintainer chooses whether to set that variable (Settings > Secrets and
+variables > Actions > Variables) or change the condition. Release history and
+the release-please manifest must agree before enabling it. The fork's release
+experiment and disabled-release status are recorded in
+[UPSTREAM-HANDOFF](../UPSTREAM-HANDOFF.md).
 
 ## 1. Let release-please open its PR (required — releases are broken without it)
 
@@ -134,15 +128,10 @@ Settings > Branches (or Rules) > the `main` protection rule:
 > Requiring the check before step 2 makes the release PR unmergeable: the check
 > would never report on it.
 
-> **On a personal fork** (`mogul/agentic-coding-quickstart`): every `CODEOWNERS` line
-> names a `GSA-TTS` team, which cannot own files in a repository outside that
-> organisation, so GitHub reports each line as an unknown owner and code-owner review
-> cannot be required there. Until the fork's maintainer decides how to replace it
-> (for example a fork-only `CODEOWNERS` naming the fork owner, or a ruleset that
-> requires one approving review on `main`), the gate on the fork is advisory: it
-> reports a stale cell but does not stop the merge. Requiring the `Tier-3 release
-> gate` status check in the fork's `main` ruleset is the part that needs no policy
-> choice. Both are repository settings, not code.
+> **Owner applicability:** the `GSA-TTS` teams in CODEOWNERS can own paths
+> only in a repository where those teams are eligible owners. A personal
+> repository needs its own ownership and review policy. The maintainer chooses
+> the ruleset and required checks; see "Status in this fork" above.
 
 Verify: open a throwaway PR and confirm `Tier-3 release gate` is listed as required.
 
