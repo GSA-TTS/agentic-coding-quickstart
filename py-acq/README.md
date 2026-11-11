@@ -74,8 +74,19 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   unknown backend pinned in config.yaml is a warning.
 * `acq-py doctor` — human diagnostic output (ADR-0038m §doctor): an overall
   `status` plus a check list, each with a stable `id`, `status`, `message`, and
-  optional `remediation`. In this slice the checks are `runtime` (managed-runtime
-  resolution, ADR-0042m) and `backend` (adapter availability, ADR-0040m).
+  optional `remediation`. Checks cover runtime, active adapter, both installed
+  backend versions and accepted floors (including MSB's blocked releases),
+  MSB host readiness, state and configuration. `ACQ_SKIP_MSB_DOCTOR=1` skips
+  readiness. Failed checks remain diagnostic: the command exits zero.
+  At a terminal, without `--json` or `ACQ_NO_PROMPT`, doctor offers to save
+  the active backend as the default, defaulting to No. MSB repair
+  (`msb doctor --fix`) is advice only because it may install software;
+  Python never runs that repair or installs software from doctor.
+* `acq-py doctor NAME [--json]` — ADR-0030 image diagnostics as the agent user,
+  with `HOME=/home/agent`, without secret injection. Reports Nix, devenv,
+  direnv, writable directories, sudo and shell startup hooks. Warnings are
+  nonfatal; missing sandboxes and failed guest execution return failure.
+  JSON retains the same status/check-record envelope.
 * `acq-py version --json` and `acq-py doctor --json` (and `acq-py --json version`
   / `acq-py --json doctor`) — the structured-output envelope (ADR-0038m §2):
   `{"schema_version", "command", "data"}` on success,
