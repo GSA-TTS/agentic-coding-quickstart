@@ -14,7 +14,7 @@ import sys
 import tarfile
 import tempfile
 
-# hashlib.file_digest and tarfile's 'data' extraction filter need Python 3.12.
+# hashlib.file_digest and the tarfile "data" extraction filter need Python 3.12.
 if sys.version_info < (3, 12):
     sys.exit('stage-posix-runtime needs python3 >= 3.12')
 repo, archive, tree = map(Path, (sys.argv[1], sys.argv[2], sys.argv[4]))
