@@ -21,6 +21,9 @@ param(
     [string]$InstallDir = "",
     [string]$Source = "",
     [string]$Channel = "python",
+    [string]$Sha256 = "",
+    [switch]$NoAttestation,
+    [switch]$NoPrereqCheck,
     [switch]$DryRun,
     [switch]$Yes,
     [switch]$Help
@@ -54,6 +57,9 @@ Options:
   -Version <ver>       Release version to install. Default: $Version
   -Channel <name>      Update channel to install (default: python; the only
                        channel supported on this fork).
+  -Sha256 <digest>     Expected SHA-256 of SHA256SUMS (64 hex characters).
+  -NoAttestation       Skip attestation (also ACQ_INSTALL_NO_ATTESTATION=1).
+  -NoPrereqCheck       Skip the post-install sandbox prerequisite report.
   -DryRun              Print actions without making changes.
   -Yes                 Assume yes for the PATH prompt (non-interactive/CI).
   -Help                Show this help.
@@ -77,8 +83,11 @@ function Confirm-Action {
 
     if ($Yes) { return $true }
     # A non-interactive run never infers consent (ADR-0038m section 50): fail closed.
-    if ([Console]::IsInputRedirected) { return $false }
-    $answer = Read-Host "$Prompt [y/N]"
+    if ([Console]::IsInputRedirected -or -not [Environment]::UserInteractive) { return $false }
+    # Under -NonInteractive, Read-Host throws even with a console attached; that
+    # is a refusal, not a crash.
+    try { $answer = Read-Host "$Prompt [y/N]" }
+    catch { return $false }
     return $answer -match '^(y|yes)$'
 }
 
@@ -153,6 +162,174 @@ function Get-ExpectedHash {
     throw "SHA256SUMS has no entry for $PackageName; refusing to install an unverified archive."
 }
 
+function Test-ReleaseAttestation {
+    param([string]$Archive, [hashtable]$Resolved)
+    if ($NoAttestation -or $env:ACQ_INSTALL_NO_ATTESTATION -eq '1' -or -not $Resolved.IsUrl) { return }
+    if ($Resolved.Url -notmatch '^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/releases/download/[^?#]+$') { return }
+    $repo = $Matches[1]
+    $gh = Get-Command gh -CommandType Application -ErrorAction SilentlyContinue
+    if (-not $gh) {
+        Write-Host "  attestation unavailable: gh missing; continuing"
+        return
+    }
+    # gh gained `attestation` in 2.49; an older gh cannot verify, which is the
+    # same as having no verifier.
+    $help = Start-Process -FilePath $gh.Source -ArgumentList @('attestation', 'verify', '--help') -Wait -PassThru -NoNewWindow -RedirectStandardError "$Archive.gh-help.err" -RedirectStandardOutput "$Archive.gh-help.out"
+    if ($help.ExitCode -ne 0) {
+        Write-Host "  attestation unavailable: this gh has no 'attestation' command; continuing"
+        return
+    }
+    # Capture native stderr without Windows PowerShell turning it into a
+    # terminating error before we can distinguish absence from failed verification.
+    $log = "$Archive.attestation.log"
+    $process = Start-Process -FilePath $gh.Source -ArgumentList @('attestation', 'verify', ('"' + $Archive + '"'), '--repo', $repo) -Wait -PassThru -NoNewWindow -RedirectStandardError $log -RedirectStandardOutput "$log.out"
+    $message = (Get-Content -LiteralPath $log -Raw) + (Get-Content -LiteralPath "$log.out" -Raw)
+    # Absence first: some gh releases print "no attestations found" yet exit 0.
+    # Success then needs gh's own success line, not just exit status 0.
+    if ($message -match 'no attestations found|no attestations associated|HTTP 404: Not Found') {
+        Write-Host "  attestation absent for $PackageName; continuing"
+    }
+    elseif ($process.ExitCode -eq 0 -and $message -cmatch 'Verification succeeded') {
+        Write-Host "  verified attestation for $PackageName"
+    }
+    else { throw "attestation verification failed for ${PackageName}: $message" }
+}
+
+function Test-MsbVersion {
+    param([string]$Text)
+    # Keep the >= 0.6.9 floor and blocked 0.7.0-0.7.2 range in lockstep with
+    # install.sh, acq.backends/msb.sh and ADR-0032. Compare components, not suffixes.
+    if ($Text -notmatch '(?<![0-9])([0-9]+)\.([0-9]+)\.([0-9]+)(?=\s|$)') { return $false }
+    try { $major = [uint64]$Matches[1]; $minor = [uint64]$Matches[2]; $patch = [uint64]$Matches[3] }
+    catch { return $false }
+    if ($major -eq 0 -and $minor -eq 7 -and $patch -le 2) { return $false }
+    return ($major -gt 0 -or $minor -gt 6 -or ($minor -eq 6 -and $patch -ge 9))
+}
+
+function Test-WhpAvailable {
+    # The API tests actual host capability; a DISM feature flag can disagree
+    # when another Windows virtualization component provides the hypervisor.
+    try {
+        if (-not ('AcqInstaller.Whp' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace AcqInstaller {
+    public static class Whp {
+        public const uint WHvCapabilityCodeHypervisorPresent = 0;
+        [DllImport("WinHvPlatform.dll", ExactSpelling = true)]
+        public static extern int WHvGetCapability(uint code, out uint present,
+            uint size, out uint written);
+    }
+}
+'@
+        }
+        [uint32]$present = 0
+        [uint32]$written = 0
+        $result = [AcqInstaller.Whp]::WHvGetCapability(
+            [AcqInstaller.Whp]::WHvCapabilityCodeHypervisorPresent,
+            [ref]$present, 4, [ref]$written)
+        return ($result -eq 0 -and $written -ge 4 -and $present -ne 0)
+    }
+    catch { return $false }
+}
+
+function Install-PinnedMsb {
+    # Same pin and verified bundle layout as ADR-0032 and install.sh. Never
+    # execute the upstream installer, which resolves to the newest release.
+    $base = 'https://github.com/superradcompany/microsandbox/releases/download/v0.7.7'
+    $bundle = 'microsandbox-windows-x86_64.zip'
+    $root = $env:MSB_HOME
+    if (-not $root) { $root = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.microsandbox' }
+    if (-not (Test-AbsolutePath $root)) { throw "MSB_HOME must be absolute" }
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ('acq-msb-' + [guid]::NewGuid().ToString('N'))
+    try {
+        New-Item -ItemType Directory -Path $scratch | Out-Null
+        $zip = Join-Path $scratch $bundle
+        # Pinned here, not read from the release's checksums.sha256, so a tampered
+        # download host cannot supply both a bundle and a matching checksum.
+        # Checked against v0.7.7's checksums.sha256 and GitHub's asset digest.
+        $expected = 'ae526aa2d7bfc230a6e9149d2b7483ac0992462c221a8add85d1429a005575e0'
+        Invoke-WebRequest -Uri "$base/$bundle" -OutFile $zip
+        if (-not $expected -or (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash -ine $expected) {
+            throw "pinned msb checksum mismatch"
+        }
+        $extract = Join-Path $scratch 'extract'
+        Expand-Archive -LiteralPath $zip -DestinationPath $extract
+        Publish-PinnedMsb -Extract $extract -Root $root
+    }
+    finally { Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+function Publish-PinnedMsb {
+    param([string]$Extract, [string]$Root)
+    foreach ($name in @('msb.exe', 'libkrunfw.dll')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $Extract $name) -PathType Leaf)) {
+            throw "pinned bundle missing $name"
+        }
+    }
+    $bin = Join-Path $Root 'bin'
+    $lib = Join-Path $Root 'lib'
+    New-Item -ItemType Directory -Force -Path $bin, $lib | Out-Null
+    # Windows cannot overwrite a running image; check before starting to copy.
+    foreach ($name in @('msb.exe', 'microsandbox.exe')) {
+        $target = Join-Path $bin $name
+        if (Test-Path -LiteralPath $target) {
+            try {
+                $stream = [IO.File]::Open($target, 'Open', 'ReadWrite', 'None')
+                $stream.Close()
+            }
+            catch { throw "$target is in use; close msb processes and retry" }
+        }
+    }
+    Copy-Item -LiteralPath (Join-Path $Extract 'msb.exe') -Destination (Join-Path $bin 'msb.exe') -Force
+    Copy-Item -LiteralPath (Join-Path $Extract 'msb.exe') -Destination (Join-Path $bin 'microsandbox.exe') -Force
+    Copy-Item -LiteralPath (Join-Path $Extract 'libkrunfw.dll') -Destination $lib -Force
+    Write-Host "  installed pinned msb 0.7.7 into $Root"
+    Add-UserPath -Directory $bin
+}
+
+function Show-Prerequisites {
+    Write-Step "Next steps: sandbox prerequisites (one backend is sufficient)"
+    $msb = Get-Command msb -CommandType Application -ErrorAction SilentlyContinue
+    if ($msb) {
+        try {
+            $text = (& $msb.Source --version 2>$null | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0 -or -not $text) { $text = 'unknown' }
+        }
+        catch { $text = 'unknown' }
+        if (Test-MsbVersion $text) { Write-Host "  msb: found ($text; supported)" }
+        else {
+            Write-Host "  msb: found ($text; out-of-policy or unknown version)"
+            Write-Host "    Fix: re-run install.ps1 in an interactive PowerShell to install the pinned msb, or see docs/howto/msb.md"
+        }
+    }
+    else {
+        Write-Host "  msb: missing"
+        Write-Host "    Fix: answer yes below, or see docs/howto/msb.md"
+        # -Yes consents only to PATH changes, never to backend installation.
+        if (-not $Yes -and -not [Console]::IsInputRedirected) {
+            if (Confirm-Action "Install pinned msb?") { Install-PinnedMsb }
+        }
+    }
+    if (Get-Command sbx -CommandType Application -ErrorAction SilentlyContinue) { Write-Host "  sbx: found" }
+    else {
+        Write-Host "  sbx: missing"
+        Write-Host "    Fix: brew install docker/tap/sbx && sbx login (on a supported Homebrew host; see docs/howto/sbx.md)"
+    }
+    if (Test-WhpAvailable) { Write-Host "  hardware virtualization: found (Windows Hypervisor Platform)" }
+    else {
+        Write-Host "  hardware virtualization: missing (Windows Hypervisor Platform unavailable)"
+        Write-Host "    Fix: msb doctor --fix"
+        Write-Host "    From an elevated shell: Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All"
+    }
+    if (Get-Command git -CommandType Application -ErrorAction SilentlyContinue) { Write-Host "  git: found" }
+    else {
+        Write-Host "  git: missing"
+        Write-Host "    Fix: winget install --id Git.Git -e"
+    }
+}
+
 function Install-AcqZip {
     $resolved = Resolve-Source
 
@@ -164,6 +341,7 @@ function Install-AcqZip {
 
     if ($DryRun) {
         Write-Host "  [dry-run] download $($resolved.Url)/$SumsName and $($resolved.Url)/$PackageName"
+        if ($sha256Given) { Write-Host "  [dry-run] verify SHA256SUMS against -Sha256 before reading entries" }
         Write-Host "  [dry-run] verify $PackageName SHA-256 against $SumsName"
         Write-Host "  [dry-run] expand $PackageName into $InstallDir"
         Write-Host "  [dry-run] verify the launchers, backend tree, bundled runtime and source are present"
@@ -192,12 +370,19 @@ function Install-AcqZip {
             Copy-Item -LiteralPath (Join-Path $resolved.Url $PackageName) -Destination $zipPath
         }
 
+        if ($sha256Given) {
+            $sumsActual = (Get-FileHash -Algorithm SHA256 -LiteralPath $sumsPath).Hash
+            if ($sumsActual -ine $Sha256) { throw "SHA256SUMS pin mismatch; refusing to install" }
+            Write-Host "  verified SHA256SUMS pin"
+        }
         $expected = Get-ExpectedHash -SumsPath $sumsPath
         $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash.ToLowerInvariant()
         if ($actual -ne $expected) {
             throw "SHA-256 verification failed for $PackageName. Expected $expected, got $actual."
         }
         Write-Host "  verified $PackageName SHA-256: $actual"
+
+        Test-ReleaseAttestation -Archive $zipPath -Resolved $resolved
 
         $extractDir = Join-Path $tmpRoot "extract"
         Expand-Archive -LiteralPath $zipPath -DestinationPath $extractDir -Force
@@ -323,6 +508,12 @@ if ($Help) {
     exit 0
 }
 
+$sha256Given = ($null -ne $PSBoundParameters -and $PSBoundParameters.Keys -contains 'Sha256') -or $Sha256
+if ($sha256Given -and $Sha256 -cnotmatch '\A[0-9a-fA-F]{64}\z') {
+    [Console]::Error.WriteLine("error: -Sha256 requires exactly 64 hex characters")
+    exit 2
+}
+
 # The -Channel flag is the update-channel seam (ADR-0047m). On this fork the only
 # channel is `python` (the default); any other value fails closed.
 if ($Channel -ne "python") {
@@ -366,6 +557,8 @@ else {
 Write-Step "Installing acq"
 Install-AcqZip
 Add-UserPath -Directory $InstallDir
+
+if (-not $DryRun -and -not $NoPrereqCheck) { Show-Prerequisites }
 
 Write-Step "Done"
 Write-Host "Try it now: acq version"

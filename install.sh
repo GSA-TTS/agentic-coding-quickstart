@@ -91,6 +91,9 @@ CHANNEL="${ACQ_INSTALL_CHANNEL:-python}"
 DRY_RUN=0
 ASSUME_YES=0
 NEED_PATH_HELP=0
+SHA256_PIN=""
+SHA256_PIN_GIVEN=0
+NO_PREREQ_CHECK=0
 
 # ---------------------------------------------------------------------------
 # Output helpers (no color when not a TTY)
@@ -143,6 +146,8 @@ Options:
                         into this installer).
   --channel <name>      Update channel to install (default: python; the only
                         channel supported on this fork).
+  --sha256 <digest>    Expected SHA-256 of SHA256SUMS (64 hex characters).
+  --no-prereq-check     Skip the post-install sandbox prerequisite report.
   --dry-run             Print what would happen; make no changes, no network.
   --yes, -y             Assume "yes" to the PATH prompt (non-interactive/CI).
   --help                Show this help.
@@ -150,7 +155,7 @@ Options:
 
 Environment overrides:
   ACQ_INSTALL_VERSION, ACQ_INSTALL_SOURCE, ACQ_INSTALL_DIR, ACQ_INSTALL_BIN_DIR,
-  ACQ_INSTALL_CHANNEL
+  ACQ_INSTALL_CHANNEL, ACQ_INSTALL_NO_ATTESTATION=1 (skip attestation)
 
 This installer uses no sudo, installs only under your home directory, and never
 changes your PATH without asking.
@@ -173,6 +178,9 @@ while [ $# -gt 0 ]; do
     --ref=*) VERSION="${1#--ref=}"; shift ;;
     --channel) [ $# -ge 2 ] || usage_err "--channel needs a value"; CHANNEL="$2"; shift 2 ;;
     --channel=*) CHANNEL="${1#--channel=}"; shift ;;
+    --sha256) [ $# -ge 2 ] || usage_err "--sha256 needs a value"; SHA256_PIN="$2"; SHA256_PIN_GIVEN=1; shift 2 ;;
+    --sha256=*) SHA256_PIN="${1#--sha256=}"; SHA256_PIN_GIVEN=1; shift ;;
+    --no-prereq-check) NO_PREREQ_CHECK=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --yes|-y) ASSUME_YES=1; shift ;;
     --help|-h) usage; exit 0 ;;
@@ -180,6 +188,12 @@ while [ $# -gt 0 ]; do
     *) usage_err "unknown option: $1 (try --help)" ;;
   esac
 done
+
+if [ "$SHA256_PIN_GIVEN" -eq 1 ]; then
+  [ "${#SHA256_PIN}" -eq 64 ] || usage_err "--sha256 requires exactly 64 hex characters"
+  case "$SHA256_PIN" in *[!0-9a-fA-F]*) usage_err "--sha256 requires exactly 64 hex characters" ;; esac
+  SHA256_PIN="$(printf '%s' "$SHA256_PIN" | tr 'A-F' 'a-f')"
+fi
 
 # The `--channel` flag is the update-channel seam (ADR-0047m). On this fork the
 # only channel is `python` (the default), so any other value fails closed.
@@ -306,6 +320,176 @@ confirm() {
   esac
 }
 
+# Only a GitHub release URL supplies a repository identity for attestations.
+# Missing attestations are informational; every other verifier error fails closed,
+# since an authentication, transport or signature error is not proof of absence.
+verify_attestation() {
+  [ "${ACQ_INSTALL_NO_ATTESTATION:-0}" = 1 ] && return 0
+  # GitHub's host name is case-insensitive; normalise it so a differently cased
+  # URL is not silently exempted from verification.
+  repo=$(printf '%s\n' "$SOURCE" | sed 's@^[Hh][Tt][Tt][Pp][Ss]://[Gg][Ii][Tt][Hh][Uu][Bb]\.[Cc][Oo][Mm]/@https://github.com/@' | sed -n 's@^https://github\.com/\([A-Za-z0-9_.-][A-Za-z0-9_.-]*/[A-Za-z0-9_.-][A-Za-z0-9_.-]*\)/releases/download/[^?#][^?#]*$@\1@p')
+  [ -n "$repo" ] || return 0
+  if ! command -v gh >/dev/null 2>&1; then
+    info "  attestation unavailable: gh missing; continuing"
+    return 0
+  fi
+  # gh gained `attestation` in 2.49; an older gh (e.g. a distribution package)
+  # cannot verify, which is the same as having no verifier.
+  if ! gh attestation verify --help >/dev/null 2>&1; then
+    info "  attestation unavailable: this gh has no 'attestation' command; continuing"
+    return 0
+  fi
+  att_rc=0
+  gh attestation verify "$1" --repo "$repo" > "$tmpdir/attestation.log" 2>&1 || att_rc=$?
+  # Absence is checked first: some gh releases print "no attestations found" yet
+  # exit 0. Success then needs gh's own success line, not just exit status 0.
+  if LC_ALL=C grep -Eiq 'no attestations found|no attestations associated|HTTP 404: Not Found' "$tmpdir/attestation.log"; then
+    info "  attestation absent for $ARCHIVE; continuing"
+  elif [ "$att_rc" -eq 0 ] && LC_ALL=C grep -q 'Verification succeeded' "$tmpdir/attestation.log"; then
+    ok "  verified attestation for $ARCHIVE"
+  else
+    cat "$tmpdir/attestation.log" >&2
+    die "attestation verification failed for $ARCHIVE"
+  fi
+}
+
+# Keep the policy in lockstep with acq.backends/msb.sh and ADR-0032:
+# >= 0.6.9, excluding 0.7.0 through 0.7.2. Unknown versions need attention too.
+msb_version_supported() {
+  printf '%s\n' "$1" | awk '
+    /^[0-9]+\.[0-9]+\.[0-9]+$/ {
+      split($0, v, ".")
+      if (v[1] == 0 && v[2] == 7 && v[3] <= 2) exit 1
+      if (v[1] > 0 || v[2] > 6 || (v[2] == 6 && v[3] >= 9)) exit 0
+      exit 1
+    }
+    !/^[0-9]+\.[0-9]+\.[0-9]+$/ { exit 1 }
+  '
+}
+
+# Use the same checksum-verified bundle layout as scripts/verify-msb-pin.
+# This runs only after explicit interactive consent, never from --yes.
+install_pinned_msb() (
+  set -e
+  if command -v brew >/dev/null 2>&1; then
+    brew install GSA-TTS/tap/microsandbox-acq </dev/null
+    exit
+  fi
+  msb_root="${MSB_HOME:-$USER_HOME/.microsandbox}"
+  is_abs_path "$msb_root" || die "MSB_HOME must be absolute"
+  # The digests are pinned here rather than read from the release's own
+  # checksums.sha256, so a tampered download host cannot supply both a bundle and
+  # a matching checksum. They were checked against the v0.7.7 release's
+  # checksums.sha256 and GitHub's asset digests; update them with the version.
+  case "$KEY" in
+    linux-x86_64) bundle=microsandbox-linux-x86_64.tar.gz
+      expected=b3cc4a5e3f52dfdd938a6f67ac4a9a959ddfe304bab56de4964044b8613f01bb ;;
+    linux-aarch64) bundle=microsandbox-linux-aarch64.tar.gz
+      expected=8997b1ea76de58689fb6d0fa7b32af6fbe8cbc24612da40b168a5b433c7d8318 ;;
+    macos-arm64) bundle=microsandbox-darwin-aarch64.tar.gz
+      expected=eed5faa16217ad375ad9a4eb5e819656baeab8ccde0d3ab7e79c4af49319d403 ;;
+    *) die "no pinned msb bundle for $KEY; see docs/howto/msb.md" ;;
+  esac
+  base=https://github.com/superradcompany/microsandbox/releases/download/v0.7.7
+  msb_tmp=$(mktemp -d "$tmp_base/acq-msb.XXXXXXXX")
+  trap 'rm -rf "$msb_tmp"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+  # Test hook, honoured only under bats like the KVM path override: fixture
+  # bundles cannot match the real release digests.
+  if [ -n "${BATS_TEST_NAME:-}" ] && [ -n "${ACQ_TEST_MSB_BUNDLE_SHA256:-}" ]; then
+    expected=$ACQ_TEST_MSB_BUNDLE_SHA256
+  fi
+  fetch "$base/$bundle" "$msb_tmp/$bundle"
+  actual=$(sha256_of "$msb_tmp/$bundle")
+  [ -n "$expected" ] && [ "$expected" = "$actual" ] || die "pinned msb checksum mismatch"
+  tar -xzf "$msb_tmp/$bundle" -C "$msb_tmp"
+  [ -f "$msb_tmp/msb" ] || die "pinned bundle missing msb"
+  publish_pinned_msb
+)
+
+publish_pinned_msb() {
+  libname=""
+  for candidate in "$msb_tmp"/libkrunfw.so.*.*.* "$msb_tmp"/libkrunfw.*.dylib; do
+    [ -f "$candidate" ] || continue
+    [ -z "$libname" ] || die "pinned bundle has multiple libkrunfw libraries"
+    libname=${candidate##*/}
+  done
+  [ -n "$libname" ] || die "pinned bundle missing libkrunfw"
+  case "$libname" in
+    *.dylib) abi=${libname#libkrunfw.}; abi=${abi%.dylib} ;;
+    *) abi=${libname#libkrunfw.so.}; abi=${abi%%.*} ;;
+  esac
+  case "$abi" in ''|*[!0-9]*) die "invalid libkrunfw ABI" ;; esac
+  mkdir -p "$msb_root/bin" "$msb_root/lib" "$BIN_DIR"
+  install -m 755 "$msb_tmp/msb" "$msb_root/bin/msb"
+  ln -sf msb "$msb_root/bin/microsandbox"
+  # Rename avoids retaining macOS's code-signature cache for an overwritten vnode.
+  cp "$msb_tmp/$libname" "$msb_root/lib/$libname.tmp"
+  mv "$msb_root/lib/$libname.tmp" "$msb_root/lib/$libname"
+  case "$libname" in
+    *.dylib) ln -sf "$libname" "$msb_root/lib/libkrunfw.dylib" ;;
+    *) ln -sf "$libname" "$msb_root/lib/libkrunfw.so.$abi"
+       ln -sf "libkrunfw.so.$abi" "$msb_root/lib/libkrunfw.so" ;;
+  esac
+  for name in msb microsandbox; do
+    if [ -e "$BIN_DIR/$name" ] || [ -L "$BIN_DIR/$name" ]; then
+      warn "  leaving existing $BIN_DIR/$name alone"
+    else ln -s "$msb_root/bin/$name" "$BIN_DIR/$name"; fi
+  done
+  ok "  installed pinned msb 0.7.7 into $msb_root"
+}
+
+report_virtualization() {
+  kvm_path=/dev/kvm
+  # Device substitution is only for bats; normal installs always probe /dev/kvm.
+  if [ -n "${BATS_TEST_NAME:-}" ] && [ -n "${ACQ_TEST_KVM_PATH:-}" ]; then kvm_path=$ACQ_TEST_KVM_PATH; fi
+  case "$(uname -s)" in
+    Linux) if [ -e "$kvm_path" ] && [ -r "$kvm_path" ] && [ -w "$kvm_path" ]; then
+      info "  hardware virtualization: found (KVM readable and writable)"
+    else info "  hardware virtualization: missing (KVM unavailable or inaccessible)"; info "    Fix: msb doctor --fix"; fi ;;
+    Darwin) if [ "$(sysctl -n kern.hv_support 2>/dev/null || :)" = 1 ]; then
+      info "  hardware virtualization: found (Hypervisor.framework)"
+    else info "  hardware virtualization: missing"; info "    Fix: msb doctor --fix"; fi ;;
+  esac
+}
+
+report_prerequisites() {
+  step "Next steps: sandbox prerequisites (one backend is sufficient)"
+  if command -v msb >/dev/null 2>&1; then
+    msb_text=$(msb --version 2>/dev/null) || msb_text=unknown
+    [ -n "$msb_text" ] || msb_text=unknown
+    msb_ver=$(printf '%s\n' "$msb_text" | sed -n 's/^[^0-9]*\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*[^[:space:]]*\).*$/\1/p' | head -n 1)
+    if [ -n "$msb_ver" ] && msb_version_supported "$msb_ver"; then
+      info "  msb: found ($msb_text; supported)"
+    else
+      info "  msb: found ($msb_text; out-of-policy or unknown version)"
+      info "    Fix: brew install GSA-TTS/tap/microsandbox-acq or scripts/verify-msb-pin --install"
+    fi
+  else
+    info "  msb: missing"
+    info "    Fix: brew install GSA-TTS/tap/microsandbox-acq or scripts/verify-msb-pin --install"
+    # --yes consents only to PATH changes, never to installing a backend.
+    if [ "$ASSUME_YES" -eq 0 ] && { [ -t 0 ] || [ -t 1 ] || [ -t 2 ]; } && confirm "  Install pinned msb?"; then
+      # msb is optional for acq itself: a failed backend install warns rather
+      # than aborting after acq is already in place.
+      install_pinned_msb || warn "  msb install failed; see docs/howto/msb.md"
+    fi
+  fi
+  if command -v sbx >/dev/null 2>&1; then info "  sbx: found";
+  else info "  sbx: missing"; info "    Fix: brew install docker/tap/sbx && sbx login"; fi
+  report_virtualization
+  if command -v git >/dev/null 2>&1; then info "  git: found";
+  else
+    info "  git: missing"
+    case "$(uname -s)" in
+      Darwin) info "    Fix: xcode-select --install" ;;
+      *) info "    Fix: brew install git (or install git with your distribution's package manager)" ;;
+    esac
+  fi
+}
+
 path_has_bindir() {
   case ":$PATH:" in
     *":$BIN_DIR:"*) return 0 ;;
@@ -383,6 +567,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
     printf '  [dry-run] read %s/%s, %s/%s, and %s/%s from the offline asset set\n' \
       "$SOURCE" "$SHA256SUMS_NAME" "$SOURCE" "$PROVENANCE_NAME" "$SOURCE" "$ARCHIVE"
   fi
+  [ "$SHA256_PIN_GIVEN" -eq 0 ] || info "  [dry-run] verify SHA256SUMS against --sha256 before reading entries"
   printf '  [dry-run] verify sha256 of %s against %s\n' "$ARCHIVE" "$SHA256SUMS_NAME"
   printf '  [dry-run] extract %s into %s\n' "$ARCHIVE" "$INSTALL_DIR"
   printf '  [dry-run] verify the enumerated set (launchers, backend tree, runtime, source, wheelhouse) is present\n'
@@ -452,6 +637,12 @@ fi
 
 step "Verifying $ARCHIVE"
 
+if [ "$SHA256_PIN_GIVEN" -eq 1 ]; then
+  sums_actual="$(sha256_of "$tmpdir/$SHA256SUMS_NAME" | tr 'A-F' 'a-f')"
+  [ "$sums_actual" = "$SHA256_PIN" ] || die "SHA256SUMS pin mismatch; refusing to install"
+  ok "  verified SHA256SUMS pin"
+fi
+
 expected="$(sha256_expected "$tmpdir/$SHA256SUMS_NAME" "$ARCHIVE")"
 if [ -z "$expected" ]; then
   die "SHA256SUMS has no entry for $ARCHIVE; refusing to install an unverified archive"
@@ -464,6 +655,7 @@ if [ "$expected" != "$actual" ]; then
   die "checksum mismatch for $ARCHIVE (expected $expected, got $actual)"
 fi
 ok "  verified $ARCHIVE (sha256 $actual)"
+verify_attestation "$tmpdir/$ARCHIVE"
 
 # The provenance manifest travels alongside SHA256SUMS and is part of the
 # enumerated offline asset set; its absence is a fail-closed gate.
@@ -712,6 +904,8 @@ fi
 # ---------------------------------------------------------------------------
 # Done
 # ---------------------------------------------------------------------------
+
+[ "$NO_PREREQ_CHECK" -eq 1 ] || report_prerequisites
 
 step "Done"
 if [ "$NEED_PATH_HELP" -eq 1 ]; then

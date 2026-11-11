@@ -51,8 +51,19 @@ provenance manifest, and GitHub artifact attestations; completeness is proven
 by a live offline-install transcript, not asserted.
 
 Provenance rests on GitHub artifact attestations, `SHA256SUMS`, and a pinned
-supplier provenance manifest with retained notices. OS code signing and
-notarization are deferred to a later increment.
+supplier provenance manifest with retained notices. Installers accept an optional
+SHA-256 pin of `SHA256SUMS` itself, checked before reading any entries, including
+for offline source directories. For GitHub release downloads they opportunistically
+verify archive attestations with `gh`: missing tooling or attestations are
+informational; verification failures stop installation before extraction.
+
+After installation a prerequisite report checks backend presence, the msb version
+policy in ADR-0032, hardware virtualization and Git. It never elevates. Only
+explicit interactive consent can install pinned msb; the PATH consent flag never
+authorizes that installation. Windows probes WHP capability through
+`WHvGetCapability`, not DISM state. Reports are advisory and can be skipped.
+
+OS code signing and notarization are deferred to a later increment.
 
 `version` reports `acq_version` (SemVer), `source_revision` (the baked release
 commit SHA), and nullable `backend`/`backend_version` plus
