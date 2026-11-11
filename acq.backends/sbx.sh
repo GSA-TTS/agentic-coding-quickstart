@@ -383,7 +383,7 @@ _acq_sbx_warn_readonly_files() {
 # as-is after the same payload check. Any failure returns non-zero with no
 # output, so callers never hand sbx a raw ref (see the fetch branch below).
 _acq_sbx_translate_kit() {
-  local kitref="$1" slug fetchdir kitdir out
+  local kitref="$1" slug fetchdir kitdir out namespace
   # Offline/test escape hatch: pass the ref through unchanged. Used by the
   # offline unit harness (no network) and by any environment that pre-resolves
   # kits. Never set this in production — sbx would then receive a neutral
@@ -402,10 +402,15 @@ _acq_sbx_translate_kit() {
 
   acq_require_base "sbx kit cache" "$ACQ_SBX_KIT_CACHE" || return 1
   slug=$(printf '%s' "$kitref" | tr -c 'A-Za-z0-9._-' '_')
-  fetchdir="${ACQ_SBX_KIT_CACHE}/fetch/${slug}"
+  # Historical fetch/slug directories may be repositories. Preserve them and
+  # publish only metadata-free payloads in a distinct namespace; never follow a
+  # namespace symlink back into the old layout.
+  namespace="${ACQ_SBX_KIT_CACHE}/fetch-payload-v2"
+  fetchdir="${namespace}/${slug}"
   out="${ACQ_SBX_KIT_CACHE}/v2/${slug}"
 
-  kitdir=$(kit_translate_fetch "$kitref" "$fetchdir") || {
+  if { [[ "$kitref" == git+http* ]] && [ -L "$namespace" ]; } ||
+      ! kitdir=$(kit_translate_fetch "$kitref" "$fetchdir"); then
     # Fail closed on every fetch failure. Handing the raw ref to sbx would let
     # sbx fetch and apply the kit itself, skipping acq's ref checks (no
     # credentials in the URL, a safe dir=, the fetched commit matching the pin)
@@ -417,7 +422,7 @@ _acq_sbx_translate_kit() {
     # uses ACQ_SBX_KIT_PASSTHROUGH above instead.
     echo "acq(sbx): error: could not fetch kit; not applying: $(kit_ref_display "$kitref")" >&2
     return 1
-  }
+  fi
 
   # Only translate kits that are neutral hybrid/v1. If the fetched kit is
   # already an sbx-v2 kit (an extra kit authored for sbx), pass its dir through.

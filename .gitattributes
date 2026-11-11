@@ -33,6 +33,7 @@ scripts/test-acq-bash32 text eol=lf
 scripts/test-acq-bats text eol=lf
 scripts/verify-backends text eol=lf
 scripts/verify-git-https-secret-msb text eol=lf
+scripts/verify-host-authority-live text eol=lf
 scripts/verify-image-override text eol=lf
 scripts/verify-issue-320 text eol=lf
 scripts/verify-msb-pin text eol=lf

@@ -62,11 +62,26 @@ acq_setup_stubs() {
   # attempt; an inherited value would make them refuse every fetch. Tests that
   # need one set it themselves.
   unset GIT_ALLOW_PROTOCOL
+  acq_clear_git_local_env
   # Git for Windows sets core.autocrlf=true system-wide, which rewrites LF->CRLF
   # in the stub repos and breaks byte-exact fixture assertions on Windows hosts.
   # Isolate the stub git from that host default so line endings are deterministic.
   git config --global core.autocrlf false 2>/dev/null || true
   load_acq
+}
+
+# acq_clear_git_local_env — drop Git's repository-local environment so a fixture
+# repo created by this suite can never be redirected at another repository.
+#
+# `git -C <dir>` does not override hook-inherited GIT_DIR. Clear Git's documented
+# local-env-vars before fixture operations. Capture the list first so unsets run
+# in the current shell, not a pipeline subshell that discards them on Bash 3.2.
+acq_clear_git_local_env() {
+  local _vars _v
+  _vars=$(git rev-parse --local-env-vars 2>/dev/null) || return 0
+  for _v in $_vars; do
+    unset "$_v"
+  done
 }
 
 # acq_untrace_subshell — call first inside a ( ... ) subshell that provisions a
