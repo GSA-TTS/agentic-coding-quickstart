@@ -140,9 +140,11 @@ def test_explicit_ca_split_missing_and_suppression(create_env, monkeypatch, tmp_
     a, b = tmp_path / "a.pem", tmp_path / "b.pem"
     a.write_text("root a")
     b.write_text("root b")
-    monkeypatch.setenv("ACQ_MSB_UPSTREAM_CA_CERT", f"{a}:\t{b}\n{tmp_path}/missing")
+    ca_paths = [msb._guest_path(str(p)) for p in (a, b, tmp_path / "missing")]
+    monkeypatch.setenv("ACQ_MSB_UPSTREAM_CA_CERT", f"{ca_paths[0]}:\t{ca_paths[1]}\n{ca_paths[2]}")
     argv, err = create(create_env, capsys)
-    assert [argv[i+1] for i,a in enumerate(argv) if a == "--tls-upstream-ca-cert"] == [str(a), str(b)]
+    actual = [argv[i+1] for i, a in enumerate(argv) if a == "--tls-upstream-ca-cert"]
+    assert actual == [opts.ca_host_path(p) for p in ca_paths[:2]]
     assert "path not readable, skipping:" in err
     monkeypatch.setenv("ACQ_MSB_NO_UPSTREAM_CA", "0")
     assert opts.upstream_ca_flags() == []
@@ -163,7 +165,7 @@ def test_ca_unsafe_inputs(monkeypatch, tmp_path, kind):
     else:
         path.symlink_to(tmp_path, target_is_directory=True)
         path = path / "target"
-    monkeypatch.setenv("ACQ_MSB_UPSTREAM_CA_CERT", str(path))
+    monkeypatch.setenv("ACQ_MSB_UPSTREAM_CA_CERT", msb._guest_path(str(path)))
     monkeypatch.setenv("ACQ_MSB_UPSTREAM_CA_AUTODETECT", "0")
     assert opts.upstream_ca_flags() == []
 
@@ -206,10 +208,20 @@ def test_ca_auto_off(mac_ca, monkeypatch, value):
 def test_ca_explicit_wins_and_missing_falls_back(mac_ca, monkeypatch, tmp_path, capsys):
     pem = tmp_path / "explicit"
     pem.write_text("CA")
-    monkeypatch.setenv("ACQ_MSB_UPSTREAM_CA_CERT", str(pem))
-    assert opts.upstream_ca_flags() == ["--tls-upstream-ca-cert", str(pem)]
-    assert not mac_ca
-    pem.unlink()
+    # Exercise explicit files with the real host path rules, then simulate the
+    # macOS-only fallback. A simulated Darwin platform cannot read /c/... on NT.
+    with monkeypatch.context() as native:
+        if os.name == "nt":
+            native.setattr(opts.sys, "platform", "win32")
+        value = msb._guest_path(str(pem))
+        native.setenv("ACQ_MSB_UPSTREAM_CA_CERT", value)
+        assert opts.upstream_ca_flags() == ["--tls-upstream-ca-cert", opts.ca_host_path(value)]
+        assert not mac_ca
+        pem.unlink()
+        native.setenv("ACQ_MSB_UPSTREAM_CA_AUTODETECT", "0")
+        assert opts.upstream_ca_flags() == []
+        assert "path not readable, skipping:" in capsys.readouterr().err
+    monkeypatch.setenv("ACQ_MSB_UPSTREAM_CA_CERT", "/missing-explicit.pem")
     assert opts.upstream_ca_flags()
     assert len(mac_ca) == 1
 
@@ -244,23 +256,25 @@ def test_workspace_override_record_and_session(create_env, monkeypatch, tmp_path
     link.symlink_to(directory, target_is_directory=True)
     monkeypatch.setenv("ACQ_MSB_WORKSPACE", str(link))
     argv, _ = create(create_env, capsys)
-    assert argv[argv.index("-w") + 1] == str(directory)
-    assert argv[argv.index("--volume") + 1] == f"{create_env[0]}:{create_env[0]}"
+    guest = msb._guest_path(str(directory.resolve()))
+    mount = f"{create_env[0]}:{msb._guest_path(str(create_env[0]))}"
+    assert argv[argv.index("-w") + 1] == guest
+    assert argv[argv.index("--volume") + 1] == mount
     assert state.record_read("msb", "knobs")["workspace"] == str(create_env[0])
-    assert state.record_read("msb", "knobs")["guest_workspace"] == str(directory)
+    assert state.record_read("msb", "knobs")["guest_workspace"] == guest
     assert ssh_agent.recorded_workspaces("knobs") == [str(create_env[0])]
     monkeypatch.delenv("ACQ_MSB_WORKSPACE")
     seen = []
     monkeypatch.setattr(msb, "_run_stream", lambda argv, **kw: seen.append(argv) or 0)
     msb._session("knobs", ["true"], workspace="/old", env=[], tty=False, json_mode=True)
-    assert seen[0][seen[0].index("-w") + 1] == str(directory)
+    assert seen[0][seen[0].index("-w") + 1] == guest
     monkeypatch.setenv("ACQ_SECURITY_MOUNT_STATE", json.dumps({"knobs": "missing"}))
     assert cli.main(["--backend", "msb", "create", "--recreate", "knobs", "--yes", "--json"]) == 0
     recreated = [a for a in create_env[1] if a[0] == "create"][-1]
-    assert recreated[recreated.index("--volume") + 1] == f"{create_env[0]}:{create_env[0]}"
-    assert recreated[recreated.index("-w") + 1] == str(directory)
+    assert recreated[recreated.index("--volume") + 1] == mount
+    assert recreated[recreated.index("-w") + 1] == guest
     assert state.record_read("msb", "knobs")["workspace"] == str(create_env[0])
-    assert state.record_read("msb", "knobs")["guest_workspace"] == str(directory)
+    assert state.record_read("msb", "knobs")["guest_workspace"] == guest
 
 
 def test_debug_off_and_nonempty_toggle(monkeypatch, capsys):
@@ -301,7 +315,8 @@ def test_debug_wired_to_captured_and_foreground(monkeypatch, capsys):
 
 
 @pytest.mark.parametrize("source,target", [("/c/certs/root.pem", "C:/certs/root.pem"),
-                                          ("/unc/server/share/root.pem", "//server/share/root.pem")])
+                                          ("/unc/server/share/root.pem", "//server/share/root.pem"),
+                                          ("//server/share/root.pem", "//server/share/root.pem")])
 @pytest.mark.parametrize("unsafe", [None, "symlink", "junction"])
 def test_ca_windows_host_form(monkeypatch, source, target, unsafe):
     monkeypatch.setattr(opts.sys, "platform", "win32")
@@ -317,6 +332,7 @@ def test_ca_windows_host_form(monkeypatch, source, target, unsafe):
             return unsafe == "symlink" and self == PureWindowsPath(target).parent
         def is_junction(self):
             return unsafe == "junction" and self == PureWindowsPath(target).parent
+    userdirs.check_ca_paths()
     monkeypatch.setattr(opts, "Path", WindowsFixturePath)
     monkeypatch.setattr(opts.os, "access", lambda path, mode: path == PureWindowsPath(target))
     assert opts.upstream_ca_flags() == ([] if unsafe else ["--tls-upstream-ca-cert", target])
@@ -327,7 +343,7 @@ def test_ca_windows_host_form(monkeypatch, source, target, unsafe):
 def test_ca_unreadable_file(monkeypatch, tmp_path):
     pem = tmp_path / "unreadable.pem"
     pem.write_text("CA")
-    monkeypatch.setenv("ACQ_MSB_UPSTREAM_CA_CERT", str(pem))
+    monkeypatch.setenv("ACQ_MSB_UPSTREAM_CA_CERT", msb._guest_path(str(pem)))
     monkeypatch.setenv("ACQ_MSB_UPSTREAM_CA_AUTODETECT", "0")
     monkeypatch.setattr(opts.os, "access", lambda *args: False)
     assert opts.upstream_ca_flags() == []

@@ -72,7 +72,7 @@
     "stderr": {
       "mode": "exact",
       "value": "acq(msb): ignoring invalid ACQ_MSB_PULL='NEVER' (expected: always | if-missing | never)\nacq(msb): warning: ignoring invalid ACQ_MSB_MEMORY='4GiB' (expected e.g. 4G, 4096, 512M).\nacq(msb): warning: ignoring invalid ACQ_MSB_CPUS='0' (expected a positive integer).\n",
-      "normalize": []
+      "normalize": ["crlf"]
     }
   },
   "isolation": {
