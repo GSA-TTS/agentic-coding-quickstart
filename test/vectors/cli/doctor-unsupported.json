@@ -6,8 +6,16 @@
   "backend": null,
   "platform": "any",
   "invoke": {
-    "argv": ["{acq}", "doctor", "mysandbox", "--json"],
-    "env": {},
+    "argv": [
+      "{acq}",
+      "doctor",
+      "mysandbox",
+      "--json"
+    ],
+    "env": {
+      "ACQ_SBX_INSTALLED": "0",
+      "ACQ_MSB_INSTALLED": "0"
+    },
     "unset": [],
     "stdin": "",
     "timeout_ms": 5000
@@ -34,6 +42,12 @@
   "isolation": {
     "offline": true,
     "ssh_stubs": false,
-    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME"
+    ]
   }
 }

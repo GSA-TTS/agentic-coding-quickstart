@@ -622,6 +622,10 @@
     {
       "contract": "External neutral kit apply, msb create-time volumes (ADR-0023), and authoritative empty extras records, retaining Python full-commit pinning",
       "vectors": ["cli/kit-apply-local", "cli/kit-apply-help-external", "cli/kit-apply-msb-volumes", "cli/create-msb-kit-volumes", "cli/kit-apply-unpinned-ref", "cli/kit-update-empty-extras-record"]
+    },
+    {
+      "contract": "Backend doctor versions, readiness and named image diagnostics (ADR-0030, ADR-0040m)",
+      "vectors": ["cli/doctor-msb-installed", "cli/doctor-sbx-installed", "cli/doctor-msb-sandbox", "cli/doctor-sbx-sandbox", "cli/doctor-msb-blocked", "cli/doctor-sbx-below-floor", "cli/doctor-msb-unready", "cli/doctor-msb-readiness-skipped", "cli/doctor-msb-missing-sandbox", "cli/doctor-sbx-missing-sandbox", "cli/doctor-extra-operands"]
     }
   ]
 }
