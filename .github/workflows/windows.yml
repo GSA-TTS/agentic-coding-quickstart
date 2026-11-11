@@ -304,14 +304,15 @@ jobs:
             *'attr/text eol=lf'*) ;;
             *) echo "::error::scripts/stage-windows-runtime is not pinned LF in .gitattributes: $eol"; exit 1 ;;
           esac
-          ver=$(sed -n 's/^  ACQ_PYTHON_EMBED_VERSION: *\([0-9][0-9.]*\)$/\1/p' .github/workflows/release.yml)
-          sha=$(sed -n 's/^  ACQ_PYTHON_EMBED_SHA256: *\([0-9a-f]\{64\}\)$/\1/p' .github/workflows/release.yml)
-          if [ -z "$ver" ] || [ -z "$sha" ]; then
-            echo "::error::could not read ACQ_PYTHON_EMBED_VERSION/ACQ_PYTHON_EMBED_SHA256 from release.yml"
+          # The pin lives in build-assets.yml's windows-x86_64 matrix entry (the
+          # release build uses the same runtime), so this smoke test cannot drift.
+          url=$(sed -n 's/^ *runtime_url: \(https:\/\/www\.python\.org\/ftp\/python\/[0-9.]*\/python-[0-9.]*-embed-amd64\.zip\)$/\1/p' .github/workflows/build-assets.yml)
+          sha=$(sed -n '/runtime_url: https:\/\/www\.python\.org\//{n;s/^ *runtime_sha256: *\([0-9a-f]\{64\}\)$/\1/p;}' .github/workflows/build-assets.yml)
+          if [ -z "$url" ] || [ -z "$sha" ]; then
+            echo "::error::could not read the Windows embed runtime pin from build-assets.yml"
             exit 1
           fi
-          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
-            "https://www.python.org/ftp/python/${ver}/python-${ver}-embed-amd64.zip" \
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error "$url" \
             -o acq-python-embed.zip
           mkdir acq-runtime-smoke
           # The launchers go beside py-acq\ as in the release archive, so the next
