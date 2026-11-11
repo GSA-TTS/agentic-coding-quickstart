@@ -66,7 +66,7 @@ def _git(*args: str) -> str:
 def _write(root: Path, rel: str, text: str) -> None:
     path = root / rel
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    path.write_text(text, encoding="utf-8", newline="\n")
 
 
 def _commit(src: Path, message: str) -> str:
@@ -120,7 +120,7 @@ def kit_repo(tmp_path_factory, monkeypatch) -> KitRepo:
     doc = json.loads(facts.read_text(encoding="utf-8"))
     doc.update({"host": "evil.example.test", "baseUrl": "https://evil.example.test/api/v1",
                 "modelsUrl": "https://evil.example.test/api/v1/models"})
-    facts.write_text(json.dumps(doc), encoding="utf-8")
+    facts.write_text(json.dumps(doc), encoding="utf-8", newline="\n")
     pin = _commit(src, "first")
     _write(src, "kits/team/files/team.txt", "second\n")
     pin2 = _commit(src, "second")
@@ -342,7 +342,7 @@ def test_a_damaged_cached_source_is_fetched_again(kit_repo, monkeypatch):
     kit_fetch.fetch(kit_repo.ref(), "msb")
     _base, src, tree = kit_fetch._cache_dirs("msb")
     for entry in src.iterdir():
-        (entry / kit_fetch.VERIFIED_MARKER).write_text("0" * 40 + "\n", encoding="utf-8")
+        (entry / kit_fetch.VERIFIED_MARKER).write_text("0" * 40 + "\n", encoding="utf-8", newline="\n")
     for entry in tree.iterdir():
         shutil.rmtree(entry)
     spy = _GitSpy(monkeypatch)
@@ -370,7 +370,7 @@ def test_the_retry_uses_the_users_git_config(kit_repo, monkeypatch):
     # anonymous attempt (no config files) fails, the retry with config succeeds.
     alias = kit_repo.bare.with_name("alias.git").as_uri()
     gitconfig = Path(os.environ["HOME"]) / ".gitconfig"
-    gitconfig.write_text(f'[url "{kit_repo.url}"]\n\tinsteadOf = {alias}\n', encoding="utf-8")
+    gitconfig.write_text(f'[url "{kit_repo.url}"]\n\tinsteadOf = {alias}\n', encoding="utf-8", newline="\n")
     spy = _GitSpy(monkeypatch)
     kit = kit_fetch.fetch(f"git+{alias}#ref={kit_repo.pin}&dir=kits/team", "msb")
     assert (kit / "spec.yaml").is_file()
@@ -384,7 +384,7 @@ def test_the_users_global_hooks_never_run_in_the_cache(kit_repo, tmp_path, monke
     hooks = tmp_path / "hooks"
     hooks.mkdir()
     marker = tmp_path / "hook-ran"
-    (hooks / "reference-transaction").write_text(f"#!/bin/sh\n: > '{marker}'\n", encoding="utf-8")
+    (hooks / "reference-transaction").write_text(f"#!/bin/sh\n: > '{marker}'\n", encoding="utf-8", newline="\n")
     (hooks / "reference-transaction").chmod(0o755)
     alias = kit_repo.bare.with_name("alias.git").as_uri()
     gitconfig = Path(os.environ["HOME"]) / ".gitconfig"
@@ -426,8 +426,8 @@ def test_a_cache_directory_owned_by_another_user_is_refused(kit_repo, monkeypatc
 def test_a_cached_tree_without_its_complete_marker_is_rebuilt(kit_repo, monkeypatch):
     kit = kit_fetch.fetch(kit_repo.ref(), "msb")
     (kit.parent / kit_fetch.COMPLETE_MARKER).unlink()  # e.g. a crash before the marker
-    (kit / "files" / "team.txt").write_text("tampered\n", encoding="utf-8")
-    (kit / "planted").write_text("x\n", encoding="utf-8")
+    (kit / "files" / "team.txt").write_text("tampered\n", encoding="utf-8", newline="\n")
+    (kit / "planted").write_text("x\n", encoding="utf-8", newline="\n")
     spy = _GitSpy(monkeypatch)
     again = kit_fetch.fetch(kit_repo.ref(), "msb")
     assert again == kit
@@ -445,7 +445,7 @@ def test_inherited_git_redirects_and_config_injection_do_not_reach_the_cache(kit
     hooks.mkdir()
     marker = tmp_path / "hook-ran"
     for hook in ("post-checkout", "reference-transaction", "post-index-change"):
-        (hooks / hook).write_text(f"#!/bin/sh\n: > '{marker}'\n", encoding="utf-8")
+        (hooks / hook).write_text(f"#!/bin/sh\n: > '{marker}'\n", encoding="utf-8", newline="\n")
         (hooks / hook).chmod(0o755)
     monkeypatch.setenv("GIT_DIR", str(other / ".git"))
     monkeypatch.setenv("GIT_WORK_TREE", str(other))

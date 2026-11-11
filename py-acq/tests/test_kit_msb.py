@@ -85,10 +85,10 @@ def _catalog(tmp_path) -> dict:
 def _kit(tmp_path, name, body, files=None) -> kit_msb.Kit:
     root = tmp_path / "kits" / name
     root.mkdir(parents=True)
-    (root / "spec.yaml").write_text(f'schemaVersion: "hybrid/v1"\nkind: mixin\nname: {name}\n{body}', encoding="utf-8")
+    (root / "spec.yaml").write_text(f'schemaVersion: "hybrid/v1"\nkind: mixin\nname: {name}\n{body}', encoding="utf-8", newline="\n")
     for rel, text in (files or {}).items():
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
-        (root / rel).write_text(text, encoding="utf-8")
+        (root / rel).write_text(text, encoding="utf-8", newline="\n")
     return kit_msb.Kit(name, "extra", kitspec.load_kit(root))
 
 
@@ -177,7 +177,7 @@ def test_configured_kits_that_cannot_be_fetched_are_refused(monkeypatch, tmp_pat
     ws = _env(monkeypatch, tmp_path)
     path = Path(os.environ["XDG_CONFIG_HOME"]) / "acq" / "config.yaml"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(config, encoding="utf-8")
+    path.write_text(config, encoding="utf-8", newline="\n")
     seen = _spy(monkeypatch)
     rc, doc = _invoke(capsys, "--backend", "msb", "create", "shell", str(ws), "--name", "a", "--json")
     assert rc == 1
@@ -189,7 +189,7 @@ def test_configured_unknown_extra_kit_fails_selection(monkeypatch, tmp_path, cap
     ws = _env(monkeypatch, tmp_path)
     path = Path(os.environ["XDG_CONFIG_HOME"]) / "acq" / "config.yaml"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("extra_kits: nope\n", encoding="utf-8")
+    path.write_text("extra_kits: nope\n", encoding="utf-8", newline="\n")
     rc, doc = _invoke(capsys, "--backend", "msb", "create", "shell", str(ws), "--name", "a", "--json")
     assert rc == 1
     assert doc["error"]["code"] == errors.VALIDATION_FAILED
@@ -282,7 +282,7 @@ _SEC = {"schema": 1, "name": "sec", "backend": "msb", "agent": "shell", "workspa
 def _seed_sec():
     path = state.record_path("msb", "sec")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(_SEC), encoding="utf-8")
+    path.write_text(json.dumps(_SEC), encoding="utf-8", newline="\n")
 
 
 def test_probe_confirms_a_stub_created_mount(monkeypatch, tmp_path, capsys):
@@ -686,7 +686,7 @@ def test_a_file_that_never_lands_fails_the_kit_after_one_retry(monkeypatch, tmp_
 def test_a_source_outside_the_kit_is_skipped(monkeypatch, tmp_path, capsys):
     _env(monkeypatch, tmp_path)
     guest = _Guest(monkeypatch)
-    (tmp_path / "secret.txt").write_text("s", encoding="utf-8")
+    (tmp_path / "secret.txt").write_text("s", encoding="utf-8", newline="\n")
     kit = _kit(tmp_path, "f", "files:\n  - path: /home/agent/x\n    source: files/link\n")
     (kit.spec.kit_dir / "files").mkdir()
     (kit.spec.kit_dir / "files" / "link").symlink_to(tmp_path / "secret.txt")
@@ -948,9 +948,9 @@ def test_ro_guest_path_matches_bash(tmp_path):
 def test_restaging_a_readonly_file_replaces_the_0555_copy(monkeypatch, tmp_path):
     _env(monkeypatch, tmp_path)
     src = tmp_path / "start.sh"
-    src.write_text("one\n", encoding="utf-8")
+    src.write_text("one\n", encoding="utf-8", newline="\n")
     guest = kit_msb.stage_readonly_file("box", "/home/agent/start.sh", src)
-    src.write_text("two\n", encoding="utf-8")
+    src.write_text("two\n", encoding="utf-8", newline="\n")
     assert kit_msb.stage_readonly_file("box", "/home/agent/start.sh", src) == guest  # no EACCES
     dest = security.host_config_dir("box") / "kit-files" / guest.rsplit("/", 1)[1]
     assert dest.read_text(encoding="utf-8") == "two\n"
@@ -991,7 +991,7 @@ def test_kit_kits_are_recorded_and_reapplied_by_kit_update_and_recreate(monkeypa
     assert rc == 0 and doc["data"]["kits"] == [*BUILTINS, "opencode"]
     # Recreate rebuilds from the same record (here after the guest was lost out of band).
     catalog = tmp_path / "msb-home" / ".microsandbox" / "catalog.json"
-    catalog.write_text("{}", encoding="utf-8")
+    catalog.write_text("{}", encoding="utf-8", newline="\n")
     assert security.mount_state("msb", "box") == "unknown"
     rc, doc = _invoke(capsys, "--backend", "msb", "create", "--recreate", "box", "--yes", "--json")
     assert rc == 0 and doc["data"]["kits"][-1] == "opencode"
@@ -1004,7 +1004,7 @@ def test_recorded_extra_kits_replace_the_environment(monkeypatch, tmp_path):
     ref = kitspec.builtin_kit_ref("git-ssh-sign")
     kit_msb.cli_kits_write("box", [kit_msb.Kit("git-ssh-sign", "extra", kitspec.load_bundled_kit("git-ssh-sign"), ref)])
     path = kit_msb._cli_kits_path("box")
-    path.write_text(path.read_text(encoding="utf-8") + "kit=relative/kit\n", encoding="utf-8")
+    path.write_text(path.read_text(encoding="utf-8") + "kit=relative/kit\n", encoding="utf-8", newline="\n")
     assert kit_msb.cli_kits_read("box") == ([], [ref])  # the relative ref is skipped
     monkeypatch.setenv("ACQ_EXTRA_KITS", "would-need-a-fetch")
     names = [k.name for k in kit_msb.select("shell", [], image_is_default=True, extras=[ref])]
@@ -1066,7 +1066,7 @@ def test_restaging_on_windows_clears_the_read_only_attribute_first(monkeypatch, 
     real_chmod = os.chmod
     monkeypatch.setattr(os, "chmod", lambda p, m, **kw: calls.append((str(p), m)) or real_chmod(p, m, **kw))
     src = tmp_path / "s.sh"
-    src.write_text("a\n", encoding="utf-8")
+    src.write_text("a\n", encoding="utf-8", newline="\n")
     guest = kit_msb.stage_readonly_file("box", "/home/agent/s.sh", src)
     dest = str(security.host_config_dir("box") / "kit-files" / guest.rsplit("/", 1)[1])
     assert (dest, stat.S_IWRITE) not in calls  # nothing to clear the first time

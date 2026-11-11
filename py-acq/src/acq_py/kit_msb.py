@@ -777,7 +777,7 @@ def apply_single(name: str, kit: Kit, *, ro_required: bool) -> bool:
     :func:`apply_kit`.
     """
     if kit.spec.volumes:
-        print("acq(msb): note: this kit declares volumes:, which apply at CREATE time only —", file=sys.stderr)
+        print("acq(msb): note: this kit declares volumes:, which apply at CREATE time only;", file=sys.stderr)
         print("acq(msb):   this apply skips them. Recreate the sandbox (acq rm && acq run) to mount them.",
               file=sys.stderr)
     merged = _dedupe_env([*_persisted_env(name), *(f"{e.name}={e.value}" for e in kit.spec.env)])

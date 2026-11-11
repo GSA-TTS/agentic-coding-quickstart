@@ -283,7 +283,7 @@ def test_a_kit_with_volumes_and_ports_is_created(monkeypatch, tmp_path, capsys):
     (kit / "spec.yaml").write_text(
         'schemaVersion: "hybrid/v1"\nkind: mixin\nname: storage-kit\n'
         'volumes:\n  - path: /data\n    size: 1G\n'
-        'publishedPorts:\n  - guest: 8080\n', encoding="utf-8")
+        'publishedPorts:\n  - guest: 8080\n', encoding="utf-8", newline="\n")
     seen = _spy(monkeypatch, msb)
     rc, doc, err = _invoke(capsys, "--backend", "msb", "create", "shell", str(ws), "--name", "storage",
                            "--kit", str(kit), "--publish", "6868:8080", "--json")
@@ -366,11 +366,11 @@ def test_recreate_survives_a_kept_port_taken_after_the_old_guest_is_removed(
     path = state.record_path("msb", "sec")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"schema": 1, "name": "sec", "backend": "msb", "agent": "shell",
-                                "workspace": "/w", "ro_host_config": True}), encoding="utf-8")
+                                "workspace": "/w", "ro_host_config": True}), encoding="utf-8", newline="\n")
     spec_dir = tmp_path / "kits" / "web"
     spec_dir.mkdir(parents=True)
     (spec_dir / "spec.yaml").write_text('schemaVersion: "hybrid/v1"\nkind: mixin\nname: web\n'
-                                        "publishedPorts:\n  - guest: 4096\n", encoding="utf-8")
+                                        "publishedPorts:\n  - guest: 4096\n", encoding="utf-8", newline="\n")
     web = kit_msb.Kit("web", "extra", kitspec.load_kit(spec_dir), fetched=True)
     real_plan = lifecycle._plan_msb_kits
 
@@ -471,8 +471,8 @@ def _tunnel_env(monkeypatch, tmp_path, *, serve_alive=True, ssh_alive=True, list
     monkeypatch.setenv("ACQ_MSB_FORCE_SERVE_PORT", "31337")
     key = tmp_path / "state" / "ssh" / "msb_id_ed25519"
     key.parent.mkdir(parents=True)
-    key.write_text("k", encoding="utf-8")
-    key.with_name("msb_id_ed25519.pub").write_text("p", encoding="utf-8")
+    key.write_text("k", encoding="utf-8", newline="\n")
+    key.with_name("msb_id_ed25519.pub").write_text("p", encoding="utf-8", newline="\n")
     spawned: list[_Proc] = []
     killed: list[int] = []
 
@@ -561,7 +561,7 @@ def test_the_key_is_made_once_with_ssh_keygen(monkeypatch, tmp_path):
 
     def run(argv):
         calls.append(argv)
-        publish.ssh_key().write_text("k", encoding="utf-8")
+        publish.ssh_key().write_text("k", encoding="utf-8", newline="\n")
         return 0
 
     publish._ensure_key(run)
@@ -591,7 +591,7 @@ def test_listing_reads_a_bash_written_record(monkeypatch, tmp_path):
     monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
     pids = tmp_path / "state" / "ports" / "box.pids"
     pids.parent.mkdir(parents=True)
-    pids.write_text("11 12 30001 8080:3000\n\ngarbage\n13 14 30002 9090:4000\n", encoding="utf-8")
+    pids.write_text("11 12 30001 8080:3000\n\ngarbage\n13 14 30002 9090:4000\n", encoding="utf-8", newline="\n")
     assert publish.posthoc_ports("box") == [
         {"host_port": 8080, "guest_port": 3000, "origin": "post-hoc"},
         {"host_port": 9090, "guest_port": 4000, "origin": "post-hoc"},
@@ -612,7 +612,7 @@ def test_stop_and_rm_tear_the_tunnels_down(monkeypatch, tmp_path, capsys, verb):
     try:
         pids = tmp_path / "state" / "ports" / "box.pids"
         pids.parent.mkdir(parents=True)
-        pids.write_text(f"{serve.pid} {ssh.pid} 30001 8080:3000\n", encoding="utf-8")
+        pids.write_text(f"{serve.pid} {ssh.pid} 30001 8080:3000\n", encoding="utf-8", newline="\n")
         rc, _, _ = _invoke(capsys, "--backend", "msb", verb, "box", "--json")
         assert rc == 0
         assert serve.wait(timeout=30) is not None and ssh.wait(timeout=30) is not None
@@ -637,7 +637,7 @@ def test_teardown_never_signals_pid_0_or_1(monkeypatch, tmp_path):
     monkeypatch.setattr(publish, "process_is_tunnel", lambda pid, *expected: True)
     pids = tmp_path / "state" / "ports" / "box.pids"
     pids.parent.mkdir(parents=True)
-    pids.write_text("0 1 30001 8080:3000\n-5 777 30002 1:2\n", encoding="utf-8")
+    pids.write_text("0 1 30001 8080:3000\n-5 777 30002 1:2\n", encoding="utf-8", newline="\n")
     publish.teardown("box")
     assert sent == [777]
 
@@ -705,7 +705,7 @@ def test_the_key_directory_made_0700_is_the_acq_ssh_dir(monkeypatch, tmp_path):
     monkeypatch.setenv("ACQ_MSB_SSH_DIR", str(tmp_path / "sshdir"))
     monkeypatch.setenv("ACQ_MSB_SSH_KEY", str(tmp_path / "elsewhere" / "k"))
     monkeypatch.setattr(publish.hostexec, "command", lambda name: [f"/usr/bin/{name}"])
-    publish._ensure_key(lambda argv: publish.ssh_key().write_text("k", encoding="utf-8") and 0)
+    publish._ensure_key(lambda argv: publish.ssh_key().write_text("k", encoding="utf-8", newline="\n") and 0)
     assert (tmp_path / "sshdir").is_dir() and publish.ssh_key().is_file()
     if os.name == "posix":
         assert (tmp_path / "sshdir").stat().st_mode & 0o777 == 0o700
@@ -737,7 +737,7 @@ def test_sbx_accepts_loopback_and_bare_values(monkeypatch, tmp_path, capfd, valu
 def _record_pids(tmp_path, *pids):
     path = tmp_path / "state" / "ports" / "box.pids"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f"{pids[0]} {pids[1]} 30001 8080:3000\n", encoding="utf-8")
+    path.write_text(f"{pids[0]} {pids[1]} 30001 8080:3000\n", encoding="utf-8", newline="\n")
     return path
 
 
@@ -884,7 +884,7 @@ def test_only_rm_removes_an_existing_host_key_pin(monkeypatch, tmp_path, capsys,
     monkeypatch.setenv("ACQ_MSB_SSH_KNOWN_HOSTS", str(known))
     if exists:
         known.parent.mkdir()
-        known.write_text("acq-msb-box ssh-ed25519 example\n", encoding="utf-8")
+        known.write_text("acq-msb-box ssh-ed25519 example\n", encoding="utf-8", newline="\n")
     monkeypatch.setattr(publish.hostexec, "command", lambda name: [f"/usr/bin/{name}"])
     calls = []
     real_run = subprocess.run
