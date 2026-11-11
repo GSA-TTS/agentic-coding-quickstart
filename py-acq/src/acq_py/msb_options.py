@@ -81,8 +81,15 @@ def dns_flags() -> list[str]:
 
 
 def _safe_path(path: Path) -> bool:
-    """Reject symlinks in both the file and its ancestor directories."""
+    """Reject symlinks except for macOS's standard root directory aliases."""
     try:
+        if sys.platform == "darwin" and len(path.parts) > 1 and path.parts[1] in ("var", "tmp", "etc"):
+            root = Path(path.anchor) / path.parts[1]
+            canonical = Path("/private") / path.parts[1]
+            # Only trust the OS alias to its standard destination. All remaining
+            # components, including the destination's ancestors, are checked.
+            if root.resolve() == canonical:
+                path = canonical.joinpath(*path.parts[2:])
         return not any(p.is_symlink() or p.is_junction() for p in (path, *path.parents))
     except OSError:
         return False

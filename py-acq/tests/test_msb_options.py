@@ -3,11 +3,12 @@
 import json
 import os
 import subprocess
-from pathlib import Path
+import stat
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
-from acq_py import cli, debug, hostexec, msb, msb_options as opts, state, userdirs
+from acq_py import cli, debug, hostexec, msb, msb_options as opts, ssh_agent, state, userdirs
 
 
 @pytest.fixture
@@ -50,6 +51,8 @@ def create(create_env, capsys):
     ("4GiB", "0", []),
     ("--bad", "-1", []),
     ("4 G", "two", []),
+    ("4G", "0", ["-m", "4G"]),
+    ("4GiB", "2", ["-c", "2"]),
     ("1.5G", "00", ["-m", "1.5G", "-c", "00"]),
     ("GM..", "01", ["-m", "GM..", "-c", "01"]),
 ])
@@ -60,9 +63,14 @@ def test_sizing_reaches_create(create_env, monkeypatch, capsys, memory, cpus, ex
     argv, err = create(create_env, capsys)
     actual = [t for i, a in enumerate(argv) if a in ("-m", "-c") for t in argv[i:i+2]]
     assert actual == expected
-    if memory and not expected:
+    if memory and "-m" not in expected:
         assert f"acq(msb): warning: ignoring invalid ACQ_MSB_MEMORY='{memory}' (expected e.g. 4G, 4096, 512M)." in err
+    else:
+        assert "invalid ACQ_MSB_MEMORY" not in err
+    if cpus and "-c" not in expected:
         assert f"acq(msb): warning: ignoring invalid ACQ_MSB_CPUS='{cpus}' (expected a positive integer)." in err
+    else:
+        assert "invalid ACQ_MSB_CPUS" not in err
 
 
 @pytest.mark.parametrize("value", ["", "always", "if-missing", "never", "NEVER", "--bad"])
@@ -99,12 +107,14 @@ def test_dns_auto_bounds(create_env, monkeypatch, capsys, ip, off):
     assert "--dns-nameserver" not in argv
 
 
-def test_dns_explicit_keep_overrides_cgnat(monkeypatch):
+def test_dns_explicit_keep_overrides_cgnat(monkeypatch, capsys):
     monkeypatch.setattr(opts, "host_resolver_lines", lambda: "nameserver 100.64.0.1")
     monkeypatch.setenv("ACQ_MSB_DNS_REBIND_PROTECTION", "1")
     assert "--no-dns-rebind-protection" not in opts.dns_flags()
+    assert capsys.readouterr().err == ""
     monkeypatch.setenv("ACQ_MSB_DNS_REBIND_PROTECTION", "invalid")
     assert "--no-dns-rebind-protection" in opts.dns_flags()
+    assert "WARNING: invalid ACQ_MSB_DNS_REBIND_PROTECTION=invalid" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("key,value", [("ACQ_MSB_UPSTREAM_CA_FILE", "relative.pem"),
@@ -235,11 +245,22 @@ def test_workspace_override_record_and_session(create_env, monkeypatch, tmp_path
     monkeypatch.setenv("ACQ_MSB_WORKSPACE", str(link))
     argv, _ = create(create_env, capsys)
     assert argv[argv.index("-w") + 1] == str(directory)
-    assert state.record_read("msb", "knobs")["workspace"] == str(directory)
+    assert argv[argv.index("--volume") + 1] == f"{create_env[0]}:{create_env[0]}"
+    assert state.record_read("msb", "knobs")["workspace"] == str(create_env[0])
+    assert state.record_read("msb", "knobs")["guest_workspace"] == str(directory)
+    assert ssh_agent.recorded_workspaces("knobs") == [str(create_env[0])]
+    monkeypatch.delenv("ACQ_MSB_WORKSPACE")
     seen = []
     monkeypatch.setattr(msb, "_run_stream", lambda argv, **kw: seen.append(argv) or 0)
     msb._session("knobs", ["true"], workspace="/old", env=[], tty=False, json_mode=True)
     assert seen[0][seen[0].index("-w") + 1] == str(directory)
+    monkeypatch.setenv("ACQ_SECURITY_MOUNT_STATE", json.dumps({"knobs": "missing"}))
+    assert cli.main(["--backend", "msb", "create", "--recreate", "knobs", "--yes", "--json"]) == 0
+    recreated = [a for a in create_env[1] if a[0] == "create"][-1]
+    assert recreated[recreated.index("--volume") + 1] == f"{create_env[0]}:{create_env[0]}"
+    assert recreated[recreated.index("-w") + 1] == str(directory)
+    assert state.record_read("msb", "knobs")["workspace"] == str(create_env[0])
+    assert state.record_read("msb", "knobs")["guest_workspace"] == str(directory)
 
 
 def test_debug_off_and_nonempty_toggle(monkeypatch, capsys):
@@ -281,12 +302,26 @@ def test_debug_wired_to_captured_and_foreground(monkeypatch, capsys):
 
 @pytest.mark.parametrize("source,target", [("/c/certs/root.pem", "C:/certs/root.pem"),
                                           ("/unc/server/share/root.pem", "//server/share/root.pem")])
-def test_ca_windows_host_form(monkeypatch, source, target):
+@pytest.mark.parametrize("unsafe", [None, "symlink", "junction"])
+def test_ca_windows_host_form(monkeypatch, source, target, unsafe):
     monkeypatch.setattr(opts.sys, "platform", "win32")
     monkeypatch.setenv("ACQ_MSB_UPSTREAM_CA_CERT", source)
     monkeypatch.delenv("ACQ_MSB_NO_UPSTREAM_CA", raising=False)
-    monkeypatch.setattr(opts, "_readable_pem", lambda path: str(path) == target)
-    assert opts.upstream_ca_flags() == ["--tls-upstream-ca-cert", target]
+    checked = []
+    class WindowsFixturePath(PureWindowsPath):
+        def lstat(self):
+            assert self == PureWindowsPath(target)
+            return os.stat_result((stat.S_IFREG | 0o644, 0, 0, 1, 0, 0, 2, 0, 0, 0))
+        def is_symlink(self):
+            checked.append(self)
+            return unsafe == "symlink" and self == PureWindowsPath(target).parent
+        def is_junction(self):
+            return unsafe == "junction" and self == PureWindowsPath(target).parent
+    monkeypatch.setattr(opts, "Path", WindowsFixturePath)
+    monkeypatch.setattr(opts.os, "access", lambda path, mode: path == PureWindowsPath(target))
+    assert opts.upstream_ca_flags() == ([] if unsafe else ["--tls-upstream-ca-cert", target])
+    native = PureWindowsPath(target)
+    assert checked == ([native, native.parent] if unsafe else [native, *native.parents])
 
 
 def test_ca_unreadable_file(monkeypatch, tmp_path):
@@ -330,3 +365,72 @@ def test_debug_create_keeps_json_stdout(create_env, monkeypatch, capsys):
     monkeypatch.setenv("ACQ_DEBUG", "1")
     _argv, err = create(create_env, capsys)
     assert "acq[debug " in err and " create " in err
+
+
+@pytest.mark.parametrize("argument", [
+    "user:trace-sentinel@github.com/org/repo?foo=bar",
+    "trace-sentinel=value",
+    "https://user:password@host/path#token=trace-sentinel",
+    "https://host/path?foo=bar#token=trace-sentinel",
+    "user:equals-secret=tail@github.com/org/repo?foo=bar",
+])
+@pytest.mark.parametrize("prefix", [[], ["--env"], ["--password"]])
+def test_debug_sanitizes_every_branch(monkeypatch, capsys, argument, prefix):
+    monkeypatch.setenv("ACQ_DEBUG", "1")
+    debug.trace_command(["msb", *prefix, argument], {"ACCESS_TOKEN": "trace-sentinel"})
+    err = capsys.readouterr().err
+    assert "trace-sentinel" not in err
+    assert "user:password" not in err
+    assert "equals-secret" not in err
+
+
+def test_debug_redacts_complete_environment_value_before_assignment_mask(monkeypatch, capsys):
+    monkeypatch.setenv("ACQ_DEBUG", "1")
+    debug.trace_command(["msb", "--env", "equals-secret=tail=value"],
+                        {"ACCESS_TOKEN": "equals-secret=tail"})
+    assert "equals-secret" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("key", ["APIKEY", "USAI_KEY", "OPENAI_KEY", "ACCESS_KEY"])
+def test_debug_key_spellings(monkeypatch, capsys, key):
+    monkeypatch.setenv("ACQ_DEBUG", "1")
+    debug.trace_command(["msb", "key-sentinel"], {key: "key-sentinel"})
+    assert "key-sentinel" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("argv,visible", [
+    (["msb", "create", "-c", "2"], "-c 2"),
+    (["sh", "-c", "echo shell-sentinel"], "-c '***'"),
+    (["sh", "-c", "42"], "-c '***'"),
+    (["sh", "-c", "echo shell-sentinel=value"], "-c '***'"),
+    (["/bin/bash", "--noprofile", "-c", "echo shell-sentinel=value"], "-c '***'"),
+])
+def test_debug_cpu_count_and_shell_scripts(monkeypatch, capsys, argv, visible):
+    monkeypatch.setenv("ACQ_DEBUG", "1")
+    debug.trace_command(argv)
+    err = capsys.readouterr().err
+    assert visible in err
+    assert "shell-sentinel" not in err
+
+
+@pytest.mark.parametrize("root", ["/var", "/tmp", "/etc"])
+@pytest.mark.parametrize("unsafe", [None, "file", "parent"])
+def test_ca_macos_system_aliases(monkeypatch, root, unsafe):
+    monkeypatch.setattr(opts.sys, "platform", "darwin")
+    alias = Path(root)
+    canonical = Path("/private") / alias.name
+    path = alias / "acq-certs" / "root.pem"
+    real = canonical / "acq-certs" / "root.pem"
+    resolve = Path.resolve
+    monkeypatch.setattr(Path, "resolve", lambda p, **kw: canonical if p == alias else resolve(p, **kw))
+    linked = {alias}
+    if unsafe:
+        linked.add(real if unsafe == "file" else real.parent)
+    checked = []
+    def is_link(p):
+        checked.append(p)
+        return p in linked
+    monkeypatch.setattr(Path, "is_symlink", is_link)
+    monkeypatch.setattr(Path, "is_junction", lambda p: False)
+    assert opts._safe_path(path) == (unsafe is None)
+    assert real in checked

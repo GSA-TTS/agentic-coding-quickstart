@@ -576,6 +576,8 @@ def test_an_old_marker_holding_a_credential_is_redacted_when_read(tree):
     ("'u:p@host/r@sha'", "'***@host/r@sha'"),
     ("github.com/acme/kits@sha", "github.com/acme/kits@sha"),  # a ref, not userinfo
     ("https://host/r?token=x", "https://host/r?***"),
+    ("https://host/r#token=x", "https://host/r#***"),
+    ("https://host/r?token=x#secret=y", "https://host/r?***"),
     ("is the path right?", "is the path right?"),
 ])
 def test_redact_hides_url_credentials_only(text, shown):

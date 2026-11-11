@@ -831,7 +831,8 @@ def _write_record(backend: str, name: str, *, agent: str, workspace: str, image:
     """
     try:
         state.record_write(backend, name, agent=agent,
-                           workspace=(msb.workspace_override() or workspace) if backend == "msb" else workspace,
+                           workspace=workspace,
+                           guest_workspace=msb.start_directory(name) if backend == "msb" else None,
                            image=image,
                            ro_host_config=True if ro_host_config else None,
                            kits_unconfirmed=True if kits_unconfirmed else None,

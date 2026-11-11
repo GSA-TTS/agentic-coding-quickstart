@@ -68,12 +68,12 @@ class LegacyParseError(ValueError):
 _SCHEMELESS_USERINFO_RE = re.compile(r"(?:(?<=^)|(?<=[\s'\"(=,]))[^\s'\"/@]+@(?=[^\s'\"/@]+/)")
 # A recorded kit path quoted back as it is: plain path characters only.
 _PLAIN_PATH_RE = re.compile(r"[A-Za-z0-9._/-]{1,200}")
-# A query string in a URL (``https://host/repo?token=...``).
-_URL_QUERY_RE = re.compile(r"(://[^\s'\"?]*)\?[^\s'\"]*")
+# Query strings and fragments can both carry URL credentials.
+_URL_QUERY_RE = re.compile(r"(://[^\s'\"?#]*)([?#])[^\s'\"]*")
 
 
 def redact(text: str) -> str:
-    """``text`` with URL credentials hidden: userinfo becomes ``***@`` and a query ``?***``.
+    """Hide URL userinfo, queries and fragments before displaying ``text``.
 
     Bash config values end up in warnings that are printed and kept in the
     migration marker (``acq doctor`` shows them again), so a token pasted into
@@ -82,7 +82,7 @@ def redact(text: str) -> str:
     """
     text = kits.redact_userinfo(text)
     text = _SCHEMELESS_USERINFO_RE.sub("***@", text)
-    return _URL_QUERY_RE.sub(r"\1?***", text)
+    return _URL_QUERY_RE.sub(r"\1\2***", text)
 
 
 @dataclass(frozen=True)

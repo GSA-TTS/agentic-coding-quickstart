@@ -168,6 +168,11 @@ def workspace_override() -> str | None:
     return _guest_path(os.path.realpath(value))
 
 
+def start_directory(name: str) -> str | None:
+    """Use the current guest override, then the separately recorded guest path."""
+    return workspace_override() or (state.record_read("msb", name) or {}).get("guest_workspace")
+
+
 class MsbError(Exception):
     """A backend-native failure the seam maps to a stable error code.
 
@@ -587,7 +592,7 @@ def create(
     planned, secret_env = secret_bindings(name)
     secret_flags = [token for bound in planned for token in ("--secret", bound.binding.flag)]
     guest = guest_workspace or _guest_path(workspace)
-    start = workspace_override() or guest
+    start = start_directory(name) or guest
     argv = [
         "create",
         "--name",
@@ -886,7 +891,7 @@ def _session(
     """Run ``command`` as ``agent`` in the workspace with ``env``; ``-t`` if ``tty``."""
     argv = ["exec", "-t"] if tty else ["exec"]
     argv += ["-u", "agent"]
-    workspace = workspace_override() or workspace
+    workspace = start_directory(name) or workspace
     if workspace:
         # `-w` is the POSIX *guest* start directory (ADR-0029): the adapter owns
         # the host->guest translation, so the native host path the seam passed is

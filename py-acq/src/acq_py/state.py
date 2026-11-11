@@ -191,6 +191,7 @@ def record_write(
     ro_host_config: bool | None = None,
     kits_unconfirmed: bool | None = None,
     clone: bool | None = None,
+    guest_workspace: str | None = None,
 ) -> dict:
     """Write (atomically) a sandbox's host-authoritative state record.
 
@@ -204,6 +205,8 @@ def record_write(
     finish; every verb that attaches to a sandbox refuses one so marked.
     ``clone`` records that the guest mounts a disposable clone of ``workspace``
     (ADR-0027); ``workspace`` itself stays the real checkout.
+    ``guest_workspace`` is an optional guest start directory; it never changes
+    the host workspace used for mounts and socket isolation checks.
     """
     doc: dict = {
         "schema": STATE_SCHEMA,
@@ -214,6 +217,8 @@ def record_write(
     }
     if image:
         doc["image"] = image
+    if guest_workspace:
+        doc["guest_workspace"] = guest_workspace
     if created_at:
         doc["created_at"] = created_at
     if ro_host_config:
