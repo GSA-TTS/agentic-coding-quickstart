@@ -25,7 +25,9 @@ permissions:
 jobs:
   pre-commit:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The bats suite alone takes 9-14 minutes on a hosted runner, and the upstream
+    # sync added three suites; 15 minutes cancelled runs that were still passing.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:

@@ -226,6 +226,9 @@ SPEC
   refute_regex "$spec" "chmod 0755 '/workspace/w\.sh'"
 }
 
+# Transport and metadata assertions target the private fetch helper. Public
+# fetch destinations contain no Git metadata; reuse/publication is covered in
+# 102-kit-fetch-reuse.bats.
 @test "#207: a git+https kit fetch is non-interactive and neutralizes credentials" {
   local gitlog="$STUBDIR/git-invocations.log"; : >"$gitlog"
   cat >"$STUBDIR/git" <<GITSTUB
@@ -241,7 +244,8 @@ GITSTUB
   chmod +x "$STUBDIR/git"
   run env -u GIT_ALLOW_PROTOCOL bash -c '
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
-    kit_translate_fetch "git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=deadbeef&dir=integrations/isolation/acq-kits/usai-provider" "'"$STUBDIR"'/kitdest"
+    mkdir -p "'"$STUBDIR"'/kitdest"
+    _kit_git_fetch_into anon "'"$STUBDIR"'/kitdest" "https://github.com/GSA-TTS/agentic-coding-patterns.git" "deadbeef" "integrations/isolation/acq-kits/usai-provider"
   ' >/dev/null 2>&1 || true
   local fetchline
   # The anonymous attempt succeeded, so it is the only fetch: no prompt, no git
@@ -586,7 +590,8 @@ GITSTUB
   chmod +x "$STUBDIR/git"
   run bash -c '
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
-    kit_translate_fetch "git+https://github.com/x/y.git#ref=deadbeef&dir=kit" "'"$STUBDIR"'/initdest" 2>&1
+    mkdir -p "'"$STUBDIR"'/initdest"
+    _kit_git_fetch_into anon "'"$STUBDIR"'/initdest" "https://github.com/x/y.git" "deadbeef" "kit" 2>&1
   '
   assert_failure
   assert_output --partial 'git init failed'
@@ -606,7 +611,8 @@ GITSTUB
   chmod +x "$STUBDIR/git"
   run bash -c '
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
-    kit_translate_fetch "git+https://github.com/x/y.git#ref=deadbeef&dir=kit" "'"$STUBDIR"'/remotedest" 2>&1
+    mkdir -p "'"$STUBDIR"'/remotedest"
+    _kit_git_fetch_into anon "'"$STUBDIR"'/remotedest" "https://github.com/x/y.git" "deadbeef" "kit" 2>&1
   '
   assert_failure
   refute_regex "$(cat "$gitlog")" '(^|[[:space:]])(config|fetch|checkout)([[:space:]]|$)'
@@ -625,7 +631,8 @@ GITSTUB
   chmod +x "$STUBDIR/git"
   run bash -c '
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
-    kit_translate_fetch "git+https://github.com/x/y.git#ref=deadbeef&dir=kit" "'"$STUBDIR"'/configdest" 2>&1
+    mkdir -p "'"$STUBDIR"'/configdest"
+    _kit_git_fetch_into anon "'"$STUBDIR"'/configdest" "https://github.com/x/y.git" deadbeef kit 2>&1
   '
   assert_failure
   refute_regex "$(cat "$gitlog")" '(^|[[:space:]])(fetch|checkout)([[:space:]]|$)'
@@ -640,7 +647,8 @@ GITSTUB
   run env GIT_DIR="$other/.git" GIT_WORK_TREE="$other" GIT_INDEX_FILE="$other/.git/index" \
     bash -c '
       . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
-      kit_translate_fetch "git+https://example.test/x/y.git#ref=deadbeef&dir=kit" "'"$STUBDIR"'/gitdirdest" 2>&1
+      mkdir -p "'"$STUBDIR"'/gitdirdest"
+      _kit_git_fetch_into anon "'"$STUBDIR"'/gitdirdest" "https://example.test/x/y.git" "deadbeef" "kit" 2>&1
     '
   assert_equal "$(cat "$other/.git/config")" "$before"
   [ -d "$STUBDIR/gitdirdest/.git" ]
@@ -683,7 +691,8 @@ GITSTUB
   : >"$fake"
   run env GIT_CONFIG="$fake" bash -c '
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
-    kit_translate_fetch "git+https://example.test/x/y.git#ref=deadbeef&dir=kit" "'"$STUBDIR"'/gitconfigdest" 2>&1
+    mkdir -p "'"$STUBDIR"'/gitconfigdest"
+    _kit_git_fetch_into anon "'"$STUBDIR"'/gitconfigdest" "https://example.test/x/y.git" "deadbeef" "kit" 2>&1
   '
   assert_equal "$(cat "$fake")" ""
   grep -q 'sparseCheckout = true' "$STUBDIR/gitconfigdest/.git/config"

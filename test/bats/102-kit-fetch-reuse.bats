@@ -36,6 +36,7 @@ anon=0
 while [ "${1:-}" = -c ]; do shift 2; done
 if [ "${1:-}" = fetch ]; then
   printf 'fetch\n' >> "$FETCH_LOG"
+  [ -z "${INSERT_METADATA:-}" ] || mkdir -p "$INSERT_METADATA/.git"
   if [ "${FAIL_FETCH:-0}" = 1 ] || { [ "${AUTH_ONLY:-0}" = 1 ] && [ "$anon" = 1 ]; }; then
     printf 'suppressed transport detail\n' >&2
     exit 1
@@ -124,9 +125,11 @@ teardown() { acq_teardown_stubs; }
   assert_failure
   assert_output --partial 'failed to fetch remote kit'
   refute_output --partial 'suppressed transport detail'
+  assert_equal "$(find "$_ACQ_KIT_FETCH_ROOT" -mindepth 1 -print)" ''
   run env WRONG_REVISION=1 bash -c '. "$REPO_ROOT/acq.backends/kit-translate.sh"; _ACQ_KIT_FETCH_ROOT=$1; kit_translate_fetch "$REF" "$2"' _ "$_ACQ_KIT_FETCH_ROOT" "$STUBDIR/a"
   assert_failure
   assert_output --partial 'fetched revision does not match pinned commit'
+  assert_equal "$(find "$_ACQ_KIT_FETCH_ROOT" -mindepth 1 -print)" ''
   local path
   path=$(kit_translate_fetch "$REF" "$STUBDIR/a")
   assert_equal "$(cat "$path/spec.yaml")" first
@@ -188,4 +191,224 @@ teardown() { acq_teardown_stubs; }
   assert_equal "$(cat "$path/spec.yaml")" first
   assert_equal "$(ls -A "$elsewhere")" ""
   assert [ ! -e "$STUBDIR/hook-ran" ]
+}
+
+@test "direct: failed refresh preserves payload and retries without Git metadata" {
+  _ACQ_KIT_FETCH_ROOT=''
+  export TMPDIR="$STUBDIR/direct-tmp"
+  mkdir -p "$TMPDIR"
+  local path
+  path=$(kit_translate_fetch "$REF" "$STUBDIR/dest")
+  assert_equal "$(cat "$path/spec.yaml")" first
+  printf 'keep until success\n' > "$path/stale"
+  run env FAIL_FETCH=1 bash -c '. "$REPO_ROOT/acq.backends/kit-translate.sh"; kit_translate_fetch "$REF" "$1"' _ "$STUBDIR/dest"
+  assert_failure
+  assert_output --partial 'failed to fetch remote kit'
+  refute_output --partial 'suppressed transport detail'
+  assert_equal "$(cat "$path/spec.yaml")" first
+  assert_equal "$(cat "$path/stale")" 'keep until success'
+  assert [ ! -e "$STUBDIR/dest/.git" ]
+  assert_equal "$(find "$TMPDIR" -mindepth 1 -print)" ''
+  path=$(kit_translate_fetch "${REF/$PIN/HEAD}" "$STUBDIR/dest")
+  assert_equal "$(cat "$path/spec.yaml")" changed
+  assert [ ! -e "$path/stale" ]
+  assert [ -x "$path/files/tool" ]
+  assert [ -L "$path/files/link" ]
+  assert_equal "$(readlink "$path/files/link")" tool
+  assert [ ! -e "$STUBDIR/dest/.git" ]
+  kit_translate_fetch "${REF/$PIN/HEAD}" "$STUBDIR/dest" >/dev/null
+  assert_equal "$(wc -l < "$FETCH_LOG" | tr -d ' ')" 5
+  assert_equal "$(find "$TMPDIR" -mindepth 1 -print)" ''
+}
+
+@test "direct: materialization and wrong revision failures preserve a nonempty payload" {
+  _ACQ_KIT_FETCH_ROOT=''
+  mkdir -p "$STUBDIR/dest"
+  printf 'old payload\n' > "$STUBDIR/dest/keep"
+  run kit_translate_fetch "${REF%dir=*}dir=kits/missing" "$STUBDIR/dest"
+  assert_failure
+  assert_output --partial 'remote kit directory not found'
+  run env WRONG_REVISION=1 bash -c '. "$REPO_ROOT/acq.backends/kit-translate.sh"; kit_translate_fetch "$REF" "$1"' _ "$STUBDIR/dest"
+  assert_failure
+  assert_output --partial 'fetched revision does not match pinned commit'
+  assert_equal "$(cat "$STUBDIR/dest/keep")" 'old payload'
+  local path
+  path=$(kit_translate_fetch "$REF" "$STUBDIR/dest")
+  assert_equal "$(cat "$path/spec.yaml")" first
+  assert [ ! -e "$STUBDIR/dest/keep" ]
+  assert [ ! -e "$STUBDIR/dest/.git" ]
+  assert_equal "$(wc -l < "$FETCH_LOG" | tr -d ' ')" 3
+}
+
+@test "reuse: cache miss and hit refuse repositories and metadata before any fetch" {
+  local bare="$STUBDIR/bare.git" mode dest
+  "$ACQ_TEST_REAL_GIT" clone -q --bare "$SOURCE_REPO" "$bare"
+  ln -s "$bare/objects" "$STUBDIR/metadata-alias"
+  ln -s "$SOURCE_REPO" "$STUBDIR/repo-alias"
+  mkdir -p "$STUBDIR/payload"
+  printf 'keep\n' > "$STUBDIR/payload/sentinel"
+  ln -s "$STUBDIR/payload" "$STUBDIR/payload-alias"
+  # A consumer can forge this filename; it must never bless a destination.
+  touch "$SOURCE_REPO/.git/acq-verified"
+  cp "$SOURCE_REPO/.git/config" "$STUBDIR/config.before"
+  for mode in miss hit; do
+    if [ "$mode" = hit ]; then
+      kit_translate_fetch "$REF" "$STUBDIR/safe" >/dev/null
+      : > "$FETCH_LOG"
+    fi
+    for dest in "$SOURCE_REPO" "$SOURCE_REPO/new/child" \
+        "$SOURCE_REPO/.git/objects" "$bare" "$bare/objects/new" \
+        "$STUBDIR/metadata-alias" "$STUBDIR/metadata-alias/new" \
+        "$STUBDIR/repo-alias/kits/one"; do
+      run kit_translate_fetch "$REF" "$dest"
+      assert_failure
+      assert_output --partial 'refusing to fetch into a git repository'
+    done
+    for dest in '' / // /. /usr/.. "$STUBDIR/payload-alias"; do
+      run kit_translate_fetch "$REF" "$dest"
+      assert_failure
+      assert_output --partial 'refusing to fetch into'
+    done
+    assert_equal "$(cat "$STUBDIR/payload/sentinel")" keep
+    assert [ -L "$STUBDIR/payload-alias" ]
+    assert [ ! -s "$FETCH_LOG" ]
+    assert [ ! -e "$SOURCE_REPO/new" ]
+    assert [ ! -e "$bare/objects/new" ]
+    assert_equal "$("$ACQ_TEST_REAL_GIT" -C "$SOURCE_REPO" rev-parse HEAD)" "$PIN2"
+    assert_equal "$("$ACQ_TEST_REAL_GIT" -C "$bare" rev-parse HEAD)" "$PIN2"
+    cmp "$SOURCE_REPO/.git/config" "$STUBDIR/config.before"
+  done
+}
+
+@test "fetch: hook Git environment cannot hide repositories or redirect private writes" {
+  local mode dest="$STUBDIR/safe" index_before config_before
+  index_before="$STUBDIR/index.before"; config_before="$STUBDIR/config.before"
+  cp "$SOURCE_REPO/.git/index" "$index_before"
+  cp "$SOURCE_REPO/.git/config" "$config_before"
+  for mode in direct miss hit; do
+    run env GIT_DIR="$SOURCE_REPO/.git" GIT_WORK_TREE="$SOURCE_REPO" \
+      GIT_INDEX_FILE="$SOURCE_REPO/.git/index" GIT_COMMON_DIR="$SOURCE_REPO/.git" \
+      GIT_OBJECT_DIRECTORY="$SOURCE_REPO/.git/objects" \
+      GIT_CEILING_DIRECTORIES="$STUBDIR" \
+      bash -c '
+        . "$REPO_ROOT/acq.backends/kit-translate.sh"
+        [ "$3" = direct ] || _ACQ_KIT_FETCH_ROOT=$2
+        kit_translate_fetch "$REF" "$1" || exit 1
+        [ "$GIT_DIR" = "$SOURCE_REPO/.git" ] || exit 1
+        [ "$GIT_INDEX_FILE" = "$SOURCE_REPO/.git/index" ]
+      ' _ "$dest" "$_ACQ_KIT_FETCH_ROOT" "$mode"
+    assert_success
+    assert_equal "$(cat "$dest/kits/one/spec.yaml")" first
+    assert [ ! -e "$dest/.git" ]
+    cmp "$SOURCE_REPO/.git/index" "$index_before"
+    cmp "$SOURCE_REPO/.git/config" "$config_before"
+    assert_equal "$("$ACQ_TEST_REAL_GIT" -C "$SOURCE_REPO" rev-parse HEAD)" "$PIN2"
+    assert_equal "$(cat "$SOURCE_REPO/kits/one/spec.yaml")" changed
+  done
+  assert_equal "$(wc -l < "$FETCH_LOG" | tr -d ' ')" 2
+  # A bogus inherited repository must not make the real destination look safe.
+  run env GIT_DIR="$STUBDIR/nonexistent.git" GIT_WORK_TREE="$STUBDIR/safe" \
+    bash -c '. "$REPO_ROOT/acq.backends/kit-translate.sh"; _ACQ_KIT_FETCH_ROOT=$1; kit_translate_fetch "$REF" "$SOURCE_REPO"' _ "$_ACQ_KIT_FETCH_ROOT"
+  assert_failure
+  assert_output --partial 'refusing to fetch into a git repository'
+  assert_equal "$(wc -l < "$FETCH_LOG" | tr -d ' ')" 2
+  cmp "$SOURCE_REPO/.git/index" "$index_before"
+  cmp "$SOURCE_REPO/.git/config" "$config_before"
+}
+
+@test "fetch: nested repositories and explicit-only bare layouts block direct miss and hit" {
+  local root="$_ACQ_KIT_FETCH_ROOT" mode dest
+  mkdir -p "$STUBDIR/nested/work" "$STUBDIR/nested/bare" "$STUBDIR/nested/gitfile/child"
+  "$ACQ_TEST_REAL_GIT" clone -q "$SOURCE_REPO" "$STUBDIR/nested/work/child"
+  "$ACQ_TEST_REAL_GIT" clone -q --bare "$SOURCE_REPO" "$STUBDIR/nested/bare/archive.git"
+  printf 'gitdir: /missing\n' > "$STUBDIR/nested/gitfile/child/.git"
+  mkdir -p "$STUBDIR/nested/link/child"
+  ln -s /missing "$STUBDIR/nested/link/child/.git"
+  "$ACQ_TEST_REAL_GIT" config --global safe.bareRepository explicit
+  for mode in direct miss hit; do
+    _ACQ_KIT_FETCH_ROOT="$root"
+    [ "$mode" != direct ] || _ACQ_KIT_FETCH_ROOT=''
+    if [ "$mode" = hit ]; then kit_translate_fetch "$REF" "$STUBDIR/safe" >/dev/null; fi
+    : > "$FETCH_LOG"
+    for dest in "$STUBDIR/nested/work" "$STUBDIR/nested/gitfile" "$STUBDIR/nested/link" \
+        "$STUBDIR/nested/bare" "$STUBDIR/nested/bare/archive.git" \
+        "$STUBDIR/nested/bare/archive.git/objects/new"; do
+      run kit_translate_fetch "$REF" "$dest"
+      assert_failure
+      assert_output --partial 'refusing to fetch into a git repository'
+    done
+    assert [ ! -s "$FETCH_LOG" ]
+    assert_equal "$(cat "$STUBDIR/nested/work/child/kits/one/spec.yaml")" changed
+    assert_equal "$("$ACQ_TEST_REAL_GIT" --git-dir="$STUBDIR/nested/bare/archive.git" rev-parse HEAD)" "$PIN2"
+    assert [ ! -e "$STUBDIR/nested/bare/archive.git/objects/new" ]
+  done
+}
+
+@test "fetch: rechecks nested metadata after transport without following payload links" {
+  mkdir -p "$STUBDIR/dest"
+  printf 'keep\n' > "$STUBDIR/dest/old"
+  export INSERT_METADATA="$STUBDIR/dest/new-repo"
+  run kit_translate_fetch "$REF" "$STUBDIR/dest"
+  assert_failure
+  assert_output --partial 'refusing to fetch into a git repository'
+  assert_equal "$(cat "$STUBDIR/dest/old")" keep
+  assert [ -d "$INSERT_METADATA/.git" ]
+  unset INSERT_METADATA
+  mkdir -p "$STUBDIR/links"
+  ln -s "$SOURCE_REPO" "$STUBDIR/links/repo-link"
+  ln -s /missing "$STUBDIR/links/broken-link"
+  kit_translate_fetch "$REF" "$STUBDIR/links" >/dev/null
+  assert_equal "$(cat "$SOURCE_REPO/kits/one/spec.yaml")" changed
+  assert [ -L "$STUBDIR/links/kits/one/files/link" ]
+}
+
+@test "publish: final move failure restores old bytes and retry cleans private staging" {
+  local dest="$STUBDIR/dest" mode
+  export TMPDIR="$STUBDIR/source-tmp"
+  mkdir -p "$TMPDIR"
+  export REAL_MV
+  REAL_MV=$(command -v mv)
+  cat > "$STUBDIR/mv" <<'MV'
+#!/usr/bin/env bash
+case "$2" in
+  */.acq-kit-publish.*/payload)
+    # Publication must not move from the source temp filesystem. Enforce the
+    # sibling-stage contract even when this fixture has only one filesystem.
+    [ "$(dirname "$(dirname "$2")")" = "$(dirname "$3")" ] || exit 2
+    [ "${FAIL_PUBLISH:-0}" != 1 ] || exit 1 ;;
+  */.acq-kit-publish.*/backup) [ "${FAIL_ROLLBACK:-0}" != 1 ] || exit 1 ;;
+esac
+exec "$REAL_MV" "$@"
+MV
+  chmod +x "$STUBDIR/mv"
+  hash -r
+  kit_translate_fetch "$REF" "$dest" >/dev/null
+  printf 'old bytes\n' > "$dest/old"
+  for mode in restored retained direct; do
+    export FAIL_PUBLISH=1 FAIL_ROLLBACK=0
+    [ "$mode" != retained ] || export FAIL_ROLLBACK=1
+    [ "$mode" != direct ] || _ACQ_KIT_FETCH_ROOT=''
+    run kit_translate_fetch "$REF" "$dest"
+    assert_failure
+    assert_output --partial 'failed to publish remote kit'
+    local stages=("$STUBDIR"/.acq-kit-publish.*)
+    if [ "$mode" != retained ]; then
+      assert_equal "$(cat "$dest/old")" 'old bytes'
+      assert_equal "$(cat "$dest/kits/one/spec.yaml")" first
+      assert [ ! -e "${stages[0]}" ]
+    else
+      assert_output --partial 'previous payload retained at'
+      assert_equal "$(cat "${stages[0]}/backup/old")" 'old bytes'
+      assert_equal "$(cat "${stages[0]}/backup/kits/one/spec.yaml")" first
+      "$REAL_MV" -- "${stages[0]}/backup" "$dest"
+      rm -rf -- "${stages[0]}"
+    fi
+  done
+  unset FAIL_PUBLISH FAIL_ROLLBACK
+  kit_translate_fetch "$REF" "$dest" >/dev/null
+  assert [ ! -e "$dest/old" ]
+  assert_equal "$(cat "$dest/kits/one/spec.yaml")" first
+  local stages=("$STUBDIR"/.acq-kit-publish.*)
+  assert [ ! -e "${stages[0]}" ]
+  assert_equal "$(find "$TMPDIR" -mindepth 1 -print)" ''
 }

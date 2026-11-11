@@ -1306,7 +1306,7 @@ _acq_msb_wait_for_exec_ready() {
 
 # Fetch a kit ref into the cache and echo its local dir. Returns 1 on failure.
 _acq_msb_fetch_kit() {
-  local kitref="$1" slug dest
+  local kitref="$1" slug dest namespace
   # Offline/test escape hatch: when ACQ_MSB_KIT_LOCAL_DIR is set, resolve REMOTE
   # (git+) kit refs to that local directory instead of fetching. Mirrors the sbx
   # adapter's ACQ_SBX_KIT_PASSTHROUGH: it keeps the offline unit harness fully
@@ -1322,13 +1322,19 @@ _acq_msb_fetch_kit() {
   fi
   # Derive a stable cache subdir from the ref (sha + dir tail).
   acq_require_base "msb kit cache" "$ACQ_MSB_KIT_CACHE" || return 1
+  # Legacy slug directories contain Git repositories. Leave them untouched;
+  # only materialize metadata-free payloads in the versioned namespace.
+  namespace="${ACQ_MSB_KIT_CACHE}/payload-v2"
+  case "$kitref" in
+    git+http*)
+      if [ -L "$namespace" ]; then
+        echo 'acq(msb): refusing a symlink kit cache namespace' >&2
+        return 1
+      fi
+      ;;
+  esac
   slug=$(printf '%s' "$kitref" | tr -c 'A-Za-z0-9._-' '_' )
-  dest="${ACQ_MSB_KIT_CACHE}/${slug}"
-  if [ -d "$dest/.git" ]; then
-    # Already fetched — recompute the kit subdir path from the ref's dir=.
-    kit_translate_fetch "$kitref" "$dest"
-    return $?
-  fi
+  dest="${namespace}/${slug}"
   kit_translate_fetch "$kitref" "$dest"
 }
 

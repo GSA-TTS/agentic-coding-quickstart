@@ -681,14 +681,14 @@ give each ACQ_FORWARD_HOST_SOCKETS entry as /absolute/path.sock:PORT, or unset i
     acq_validate_agent_builtin_kit_ref opencode some-ref || echo refused
   ' _ "$REPO_ROOT"
   assert_success
-  assert_output "fetch base=$STUBDIR/xs/acq/agent-kit-validation/opencode
+  assert_output "fetch base=$STUBDIR/xs/acq/agent-kit-validation-payload-v2/opencode
 refused"
   run env -u ACQ_STATE_DIR XDG_STATE_HOME="$STUBDIR/xs" TMPDIR="$STUBDIR/tmp" bash -c '
     . "$1/acq.backends/common.sh"
     kit_translate_fetch() { printf "fetch base=%s\n" "$2" >&2; return 1; }
     acq_validate_agent_builtin_kit_ref opencode some-ref || echo refused
   ' _ "$REPO_ROOT"
-  assert_line --index 0 "fetch base=$STUBDIR/xs/acq/agent-kit-validation/opencode"
+  assert_line --index 0 "fetch base=$STUBDIR/xs/acq/agent-kit-validation-payload-v2/opencode"
   _assert_work_empty
 }
 

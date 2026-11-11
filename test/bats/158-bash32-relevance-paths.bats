@@ -174,6 +174,10 @@ scripts/probe-msb-posthoc-ports
 scripts/probe-msb-startup
 scripts/test-probe-msb-startup.py
 scripts/verify-git-https-secret-msb
+scripts/verify-host-authority-live
+scripts/verify-host-authority-live-lib.sh
+scripts/verify-host-authority-live-manual.txt
+scripts/verify-host-authority-live-steps.sh
 scripts/verify-image-override
 scripts/verify-issue-320
 scripts/verify-msb-pin

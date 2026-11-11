@@ -99,6 +99,8 @@ NOT_INPUTS = {
     "scripts/test-acq-bash32", "scripts/test-acq-bats",
     "scripts/test-probe-msb-node-startup.py", "scripts/test-probe-msb-startup.py",
     "scripts/verify-backends", "scripts/verify-git-https-secret-msb",
+    "scripts/verify-host-authority-live", "scripts/verify-host-authority-live-lib.sh",
+    "scripts/verify-host-authority-live-manual.txt", "scripts/verify-host-authority-live-steps.sh",
     "scripts/verify-image-override", "scripts/verify-issue-320", "scripts/verify-msb-pin",
     "scripts/verify-net-default-egress", "scripts/verify-ports-live",
     "scripts/verify-sbx-startup-barrier",
