@@ -614,6 +614,19 @@ def _workspace_overlap_failure(command: str, workspace: str, emit_json: bool) ->
     return None
 
 
+def _recorded_workspaces_failure(command: str, record: dict | None, emit_json: bool) -> int | None:
+    """Check every recorded mount before trusting or recreating an existing guest."""
+    if not record:
+        return None
+    specs = ([record["workspace"]] if record.get("workspace") else []) + record.get("extra_workspaces", [])
+    for spec in specs:
+        path = spec.removesuffix(":ro")
+        failure = _workspace_overlap_failure(command, path, emit_json)
+        if failure is not None:
+            return failure
+    return None
+
+
 # Module-local seam for the host OS class, read by the workspace colon check so
 # the Windows drive-letter rule is testable on a POSIX host (as ``msb.WINDOWS``).
 WINDOWS = os.name == "nt"
@@ -669,8 +682,6 @@ def _workspace_unsafe(command: str, path: str, shown: str, emit_json: bool) -> i
             "acq and the sandbox backends use ':' to separate a mount's path from its options "
             "(PATH:ro), so this path cannot be mounted. Rename the directory, then re-run."
         )
-        if path.endswith(":ro"):
-            remediation = "This acq takes no ':ro' suffix: give the directory alone. " + remediation
     else:
         return None
     return _operational_failure(command, errors.VALIDATION_FAILED, message, remediation, emit_json)

@@ -240,8 +240,11 @@ def test_image_override_precedence(monkeypatch):
     assert cli._resolve_image(None, "opencode") == "msb-image"
 
     monkeypatch.setenv("ACQ_IMAGE", "acq-image")
-    assert cli._resolve_image(None, "opencode") == "acq-image"
+    assert cli._resolve_image(None, "opencode") == "msb-image"
+    assert cli._resolve_image(None, "opencode", "sbx") == "acq-image"
 
+    assert cli._resolve_image("flag-image", "opencode") == "msb-image"
+    monkeypatch.delenv("ACQ_MSB_IMAGE")
     assert cli._resolve_image("flag-image", "opencode") == "flag-image"
 
 
