@@ -7,22 +7,33 @@ the active ``backend`` and its detected ``backend_version`` (both nullable), and
 
 The two baked values may be overridden via the ``ACQ_VERSION`` and
 ``ACQ_SOURCE_REVISION`` environment variables for reproducible builds/tests.
-They are build-time overrides, never secrets. ``source_revision`` falls back to
-``git rev-parse HEAD`` when run from a checkout; that lookup is local and never
+They are identity overrides, never secrets. A generated ``_build_info`` module
+provides the release defaults before any checkout fallback. ``source_revision``
+falls back to ``git rev-parse HEAD`` when run from a checkout; that lookup is local and never
 reaches the network (ADR-0042m: ordinary operation never downloads acq's own
 assets).
 """
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
+from types import ModuleType
 
 from . import __version__, backends, envelope, errors, hostexec, kits
 from .commands import common
+
+_build_info: ModuleType | None
+try:
+    _build_info = importlib.import_module("acq_py._build_info")
+except ModuleNotFoundError as exc:
+    if exc.name != "acq_py._build_info":
+        raise
+    _build_info = None
 
 # The checkout acq runs from: src/acq_py -> src -> py-acq -> repository root.
 _CHECKOUT_ROOT = Path(__file__).resolve().parents[3]
@@ -49,14 +60,14 @@ def _git_revision() -> str | None:
 
 
 def acq_version() -> str:
-    return os.environ.get("ACQ_VERSION") or __version__
+    return os.environ.get("ACQ_VERSION") or (_build_info.ACQ_VERSION if _build_info else __version__)
 
 
 def source_revision() -> str | None:
     override = os.environ.get("ACQ_SOURCE_REVISION")
     if override:
         return override
-    return _git_revision()
+    return _build_info.SOURCE_REVISION if _build_info else _git_revision()
 
 
 def _backend_identity(backend_override: str | None) -> tuple[str | None, str | None]:

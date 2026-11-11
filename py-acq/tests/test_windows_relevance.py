@@ -62,6 +62,8 @@ REQUIRED = {
 # prefix ending in "/". A path covered by the list wins over a prefix here
 # (docs/qualification-ledger.json is listed; the rest of docs/ is prose).
 NOT_INPUTS = {
+    ".github/workflows/build-assets.yml",
+    "scripts/stage-posix-runtime", "scripts/assemble-release", "scripts/gen-provenance",
     # prose, governance and repo metadata no Windows test reads
     "docs/", "checklists/", "governance/",
     "AGENTS.md", "AGENTS.fork.md", "CHANGELOG.md", "CODE_OF_CONDUCT.md", "CONTEXT-GUIDE.md",

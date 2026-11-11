@@ -34,7 +34,7 @@ command -v python3 >/dev/null 2>&1 || die "python3 is required"
 # stdout would end every line with CRLF, and $(...) strips only the trailing
 # newline, so under Git Bash every name but the last kept a stray CR and failed
 # the completeness check below.
-assets="$(python3 -c '
+assets="$(python3 -I -c '
 import json, sys
 a = json.load(open("installer/assets.json", encoding="utf-8"))
 names = [a["provenance"]] + sorted(p["archive"] for p in a["platforms"].values())

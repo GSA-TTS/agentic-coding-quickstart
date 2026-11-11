@@ -20,5 +20,27 @@
   "verification": {
     "sha256sums": "SHA256SUMS",
     "attestation": "GitHub artifact attestations (signed build provenance)"
+  },
+  "runtimes": {
+    "windows-x86_64": {
+      "supplier": "python.org-embedded",
+      "version": "<cpython version>"
+    },
+    "macos-arm64": {
+      "supplier": "python-build-standalone",
+      "version": "<cpython version>"
+    },
+    "macos-x86_64": {
+      "supplier": "python-build-standalone",
+      "version": "<cpython version>"
+    },
+    "linux-x86_64": {
+      "supplier": "python-build-standalone",
+      "version": "<cpython version>"
+    },
+    "linux-aarch64": {
+      "supplier": "python-build-standalone",
+      "version": "<cpython version>"
+    }
   }
 }

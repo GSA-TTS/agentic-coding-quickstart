@@ -182,6 +182,12 @@ jobs:
             '.github/workflows/release.yml' \
             'scripts/run-vectors' \
             'scripts/gen-install-assets' \
+            'scripts/stage-posix-runtime' \
+            'scripts/stage-windows-runtime' \
+            'scripts/assemble-release' \
+            'scripts/gen-provenance' \
+            'installer' \
+            'package.json' \
             'test/vectors' \
             'acq-python' \
             'py-acq/src' \

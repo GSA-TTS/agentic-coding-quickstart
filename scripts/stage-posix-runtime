@@ -1,0 +1,58 @@
+#!/bin/sh
+# Stage the supplier's complete install-only tree, including notices (ADR-0042m).
+# Validation and extraction happen privately before either target is installed.
+set -eu
+[ "$#" -eq 3 ] || { echo 'usage: stage-posix-runtime <runtime.tar.gz> <sha256> <release-tree>' >&2; exit 1; }
+repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+python3 -I - "$repo_root" "$@" <<'PY'
+import hashlib
+import os
+from pathlib import Path, PurePosixPath
+import re
+import shutil
+import sys
+import tarfile
+import tempfile
+
+repo, archive, tree = map(Path, (sys.argv[1], sys.argv[2], sys.argv[4]))
+want = sys.argv[3]
+if not re.fullmatch('[0-9a-f]{64}', want):
+    sys.exit('expected a lowercase SHA-256')
+if not tree.is_dir():
+    sys.exit('release tree must exist')
+if (tree / 'py-acq').is_symlink():
+    sys.exit('py-acq must not be a symlink')
+for name in ('runtime', 'src'):
+    if os.path.lexists(tree / 'py-acq' / name):
+        sys.exit(f'{name} already exists; refusing to overwrite')
+with archive.open('rb') as f:
+    got = hashlib.file_digest(f, 'sha256').hexdigest()
+if got != want:
+    sys.exit(f'SHA-256 mismatch: expected {want}, got {got}')
+with tempfile.TemporaryDirectory(prefix='.posix-runtime-', dir=tree) as tmp:
+    stage = Path(tmp)
+    with tarfile.open(archive) as tf:
+        members = tf.getmembers()
+        for m in members:
+            path = PurePosixPath(m.name)
+            if (not path.parts or path.parts[0] != 'python' or path.is_absolute()
+                    or '..' in path.parts or '\\' in m.name):
+                sys.exit(f'unexpected runtime layout: {m.name}')
+            if not (m.isfile() or m.isdir() or m.issym() or m.islnk()):
+                sys.exit(f'unexpected runtime entry: {m.name}')
+        # The data filter refuses links escaping the private extraction directory.
+        tf.extractall(stage, filter='data')
+    runtime = stage / 'python'
+    if not (runtime / 'bin/python3').is_file() or not os.access(runtime / 'bin/python3', os.X_OK):
+        sys.exit('runtime has no executable bin/python3')
+    if not any(p.is_file() for p in runtime.rglob('*')
+               if p.name.upper().startswith(('LICENSE', 'COPYING'))):
+        sys.exit('runtime has no supplier license')
+    shutil.copytree(repo / 'py-acq/src', stage / 'src',
+                    ignore=shutil.ignore_patterns('__pycache__', '_stub_*.py', '_build_info.py'))
+    target = tree / 'py-acq'
+    target.mkdir(exist_ok=True)
+    (stage / 'src').rename(target / 'src')
+    runtime.rename(target / 'runtime')
+print(f'staged POSIX runtime ({got}) and acq source')
+PY

@@ -11,4 +11,4 @@ See ``py-acq/README.md`` for the coexistence plan, the runtime supplier, and the
 patch-cadence proposal.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.0"  # x-release-please-version
