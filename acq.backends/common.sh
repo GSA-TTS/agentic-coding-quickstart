@@ -6103,12 +6103,14 @@ _acq_provider_input_process_identity() {
 # Release only our token: normal transactions use their live guardian's PID;
 # direct callers use $$, or pass the same explicit PID they used to acquire.
 acq_provider_input_lock_release() {
-  local pid="${2:-${_ACQ_PROVIDER_INPUT_GUARDIAN_PID:-$$}}" identity token
+  local pid="${2:-${_ACQ_PROVIDER_INPUT_GUARDIAN_PID:-$$}}" line
   case "${1:-}" in */provider-input/*/*.lock)
     [ -d "$1" ] && [ ! -L "$1" ] || return 1
-    identity=$(_acq_provider_input_process_identity "$pid") || return 1
-    token="$pid $identity"
-    [ "$(_acq_config_lock_owner_line "$1")" = "$token" ] || return 0
+    # Compare the PID field only: release often runs from a signal trap, where
+    # re-deriving the process identity (ps) can fail or differ, and a PID that
+    # is ours already rules out removing another holder's owner.
+    line=$(_acq_config_lock_owner_line "$1")
+    [ "${line%% *}" = "$pid" ] || return 0
     rm -f -- "$1/owner" && rmdir -- "$1" 2>/dev/null || return 1
     ;;
     *) return 1 ;;
