@@ -821,3 +821,260 @@ IDSTUB
   run ls -A "$work"
   assert_output ''
 }
+
+@test "installer: SHA256SUMS pin matches case-insensitively for offline assets" {
+  local pin
+  pin=$(sha256sum "$REPO_ROOT/test/fixtures/installer/SHA256SUMS" | cut -d' ' -f1 | tr 'a-f' 'A-F')
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --sha256 "$pin" --yes
+  assert_success
+  assert_output --partial 'verified SHA256SUMS pin'
+  [ -L "$HOME/.local/bin/acq" ]
+}
+
+@test "installer: SHA256SUMS pin mismatch fails before trusting manifest entries" {
+  local pin
+  pin=$(printf '%064d' 0)
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --sha256 "$pin" --yes
+  assert_failure 1
+  assert_output --partial 'SHA256SUMS pin mismatch'
+  refute_output --partial 'verified acq-'
+  [ ! -e "$(_install_dir)" ]
+  [ ! -e "$HOME/.local/bin" ]
+}
+
+@test "installer: malformed or empty SHA256SUMS pins are usage errors" {
+  local pin
+  for pin in '' abc "$(printf '%065d' 0)" "g$(printf '%063d' 0)" "$(printf '%063d' 0)"; do
+    run sh "$REPO_ROOT/install.sh" --sha256 "$pin" --dry-run
+    assert_failure 2
+    assert_output --partial '64 hex characters'
+  done
+  run sh "$REPO_ROOT/install.sh" --sha256
+  assert_failure 2
+  [ ! -e "$(_install_dir)" ]
+}
+
+_plant_attestation_gh() {
+  cat > "$STUBDIR/gh" <<'SHIM'
+#!/bin/sh
+printf '%s\n' "$*" >> "$STUBDIR/gh.log"
+case "$GH_RESULT" in
+  success) echo 'Verification succeeded'; exit 0 ;;
+  absent) echo 'no attestations found' >&2; exit 1 ;;
+  failed) echo 'Verification FAILED: signature invalid' >&2; exit 1 ;;
+  transport) echo 'connection refused' >&2; exit 1 ;;
+esac
+SHIM
+  chmod +x "$STUBDIR/gh"
+  export STUBDIR
+  _plant_logging_curl
+}
+
+@test "installer: GitHub archive attestation succeeds with PATH-overridden gh" {
+  _plant_attestation_gh
+  GH_RESULT=success run sh "$REPO_ROOT/install.sh" --source https://github.com/example/acq/releases/download/v1 --yes
+  assert_success
+  assert_output --partial 'verified attestation'
+  grep -Eq '^attestation verify .*acq-.*tar.gz --repo example/acq$' "$STUBDIR/gh.log"
+}
+
+@test "installer: absent GitHub archive attestation is informational" {
+  _plant_attestation_gh
+  GH_RESULT=absent run sh "$REPO_ROOT/install.sh" --source https://github.com/example/acq/releases/download/v1 --yes
+  assert_success
+  assert_output --partial 'attestation absent'
+  [ -e "$(_install_dir)/acq" ]
+}
+
+@test "installer: failed attestation and unknown verifier errors fail closed" {
+  _plant_attestation_gh
+  local result
+  for result in failed transport; do
+    GH_RESULT="$result" run sh "$REPO_ROOT/install.sh" --source https://github.com/example/acq/releases/download/v1 --yes
+    assert_failure 1
+    assert_output --partial 'attestation verification failed'
+    [ ! -e "$(_install_dir)" ]
+    [ ! -e "$HOME/.local/bin" ]
+  done
+}
+
+@test "installer: attestation is skipped for local assets and when opted out" {
+  _plant_attestation_gh
+  GH_RESULT=failed run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_success
+  [ ! -e "$STUBDIR/gh.log" ]
+  ACQ_INSTALL_NO_ATTESTATION=1 GH_RESULT=failed run sh "$REPO_ROOT/install.sh" --source https://github.com/example/acq/releases/download/v1 --yes
+  assert_success
+  [ ! -e "$STUBDIR/gh.log" ]
+}
+
+@test "installer: prerequisite report probes PATH tools and the test KVM device" {
+  printf '#!/bin/sh\necho "msb 0.7.7"\n' > "$STUBDIR/msb"
+  printf '#!/bin/sh\nexit 0\n' > "$STUBDIR/sbx"
+  printf '#!/bin/sh\nexit 0\n' > "$STUBDIR/git"
+  chmod +x "$STUBDIR/msb" "$STUBDIR/sbx" "$STUBDIR/git"
+  touch "$STUBDIR/kvm"
+  ACQ_TEST_KVM_PATH="$STUBDIR/kvm" run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_success
+  assert_output --partial 'Next steps'
+  assert_output --partial 'msb: found (msb 0.7.7; supported)'
+  assert_output --partial 'sbx: found'
+  assert_output --partial 'git: found'
+  assert_output --partial 'hardware virtualization: found'
+}
+
+@test "installer: prerequisite report flags blocked old and unknown msb versions" {
+  local version
+  for version in 0.7.0 0.7.1 0.7.2 0.6.8 0.7.3-rc1 0.7.7+build unknown; do
+    printf '#!/bin/sh\necho "msb %s"\n' "$version" > "$STUBDIR/msb"
+    chmod +x "$STUBDIR/msb"
+    ACQ_TEST_KVM_PATH="$STUBDIR/nonexistent" run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+    assert_success
+    assert_output --partial 'out-of-policy or unknown version'
+    assert_output --partial 'scripts/verify-msb-pin --install'
+    assert_output --partial 'hardware virtualization: missing'
+    assert_output --partial 'msb doctor --fix'
+  done
+}
+
+# Build a PATH with just the installer's tools, excluding sandbox backends and
+# git even when the developer has them installed. brew logs any attempted install.
+_prereq_missing_path() {
+  local tool real
+  mkdir -p "$STUBDIR/only-tools"
+  for tool in sh uname tr cat curl awk cut sha256sum shasum sed head tail mktemp chmod cp mkdir tar gzip dirname df mv ln rm find id grep; do
+    real=$(command -v "$tool") || continue
+    ln -s "$real" "$STUBDIR/only-tools/$tool"
+  done
+  printf '#!/bin/sh\necho invoked > "%s/brew.log"\n' "$STUBDIR" > "$STUBDIR/only-tools/brew"
+  chmod +x "$STUBDIR/only-tools/brew"
+}
+
+@test "installer: noninteractive and --yes report missing prerequisites without prompting or installing" {
+  _prereq_missing_path
+  local flag
+  for flag in '' --yes; do
+    # An empty unquoted flag deliberately supplies no argument.
+    # shellcheck disable=SC2086
+    PATH="$STUBDIR/only-tools" ACQ_TEST_KVM_PATH="$STUBDIR/missing" run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" $flag
+    assert_success
+    assert_output --partial 'msb: missing'
+    assert_output --partial 'sbx: missing'
+    assert_output --partial 'git: missing'
+    refute_output --partial '[y/N]'
+    refute_output --partial 'Install pinned msb?'
+    [ ! -e "$STUBDIR/brew.log" ]
+  done
+}
+
+@test "installer: --no-prereq-check skips probes and the whole report" {
+  printf '#!/bin/sh\necho invoked > "%s/msb.log"\n' "$STUBDIR" > "$STUBDIR/msb"
+  chmod +x "$STUBDIR/msb"
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --no-prereq-check --yes
+  assert_success
+  refute_output --partial 'Next steps'
+  [ ! -e "$STUBDIR/msb.log" ]
+}
+
+@test "installer: a terminal offers pinned msb and installs only after explicit yes" {
+  command -v python3 >/dev/null 2>&1 || skip "python3 is required to drive a pseudo-terminal"
+  local python answer
+  python=$(python3 -c 'import sys; print(sys.executable)')
+  _prereq_missing_path
+  mkdir -p "$STUBDIR/acq-bin"
+  for answer in n '' y; do
+    PATH="$STUBDIR/acq-bin:$STUBDIR/only-tools" run "$python" "$BATS_TEST_DIRNAME/install-tty.py" tty "$answer" \
+      "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --bin-dir "$STUBDIR/acq-bin"
+    assert_success
+    assert_output --partial 'Install pinned msb?'
+    assert_line 'PROMPTS=1'
+    if [ "$answer" = y ]; then [ -e "$STUBDIR/brew.log" ];
+    else [ ! -e "$STUBDIR/brew.log" ]; fi
+  done
+}
+
+@test "installer: --yes on a terminal never offers or installs msb" {
+  command -v python3 >/dev/null 2>&1 || skip "python3 is required to drive a pseudo-terminal"
+  local python
+  python=$(python3 -c 'import sys; print(sys.executable)')
+  _prereq_missing_path
+  mkdir -p "$STUBDIR/acq-bin"
+  PATH="$STUBDIR/acq-bin:$STUBDIR/only-tools" run "$python" "$BATS_TEST_DIRNAME/install-tty.py" tty y \
+    "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --bin-dir "$STUBDIR/acq-bin" --yes
+  assert_success
+  assert_line 'PROMPTS=0'
+  [ ! -e "$STUBDIR/brew.log" ]
+}
+
+@test "installer: missing gh reports unavailable and continues" {
+  _prereq_missing_path
+  _plant_logging_curl
+  ln -sf "$STUBDIR/curl" "$STUBDIR/only-tools/curl"
+  PATH="$STUBDIR/only-tools" run sh "$REPO_ROOT/install.sh" --source https://github.com/example/acq/releases/download/v1 --yes
+  assert_success
+  assert_output --partial 'gh missing; continuing'
+}
+
+@test "installer: a fake KVM override is ignored outside bats" {
+  run env -u BATS_TEST_NAME ACQ_TEST_KVM_PATH="$STUBDIR/nonexistent" sh "$REPO_ROOT/install.sh" \
+    --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_success
+  if [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+    assert_output --partial 'hardware virtualization: found'
+  else
+    assert_output --partial 'hardware virtualization: missing'
+  fi
+}
+
+@test "installer: explicit consent installs only the checksum-verified pinned msb bundle" {
+  command -v python3 >/dev/null 2>&1 || skip "python3 is required to drive a pseudo-terminal"
+  local python real bundle
+  python=$(python3 -c 'import sys; print(sys.executable)')
+  _prereq_missing_path
+  # No Homebrew on this PATH: exercise the pinned bundle fallback, fully offline.
+  rm "$STUBDIR/only-tools/brew"
+  real=$(command -v install)
+  ln -s "$real" "$STUBDIR/only-tools/install"
+  mkdir -p "$STUBDIR/msb-assets" "$STUBDIR/msb-stage" "$STUBDIR/acq-bin"
+  printf '#!/bin/sh\necho "msb 0.7.7"\n' > "$STUBDIR/msb-stage/msb"
+  printf 'fixture library\n' > "$STUBDIR/msb-stage/libkrunfw.so.5.6.1"
+  # One fixture tarball serves every platform name, so a single digest override
+  # matches whichever bundle this host asks for.
+  tar -czf "$STUBDIR/msb-fixture.tar.gz" -C "$STUBDIR/msb-stage" .
+  for bundle in microsandbox-linux-x86_64.tar.gz microsandbox-linux-aarch64.tar.gz microsandbox-darwin-aarch64.tar.gz; do
+    cp "$STUBDIR/msb-fixture.tar.gz" "$STUBDIR/msb-assets/$bundle"
+  done
+  local digest
+  digest=$(sha256sum "$STUBDIR/msb-fixture.tar.gz"); digest=${digest%% *}
+  rm "$STUBDIR/only-tools/curl"
+  cat > "$STUBDIR/only-tools/curl" <<SHIM
+#!/bin/sh
+url='' out=''
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -o) out="\$2"; shift 2 ;;
+    https://*) url="\$1"; shift ;;
+    *) shift ;;
+  esac
+done
+case "\$url" in
+  https://github.com/superradcompany/microsandbox/releases/download/v0.7.7/*) ;;
+  *) exit 1 ;;
+esac
+cp "$STUBDIR/msb-assets/\${url##*/}" "\$out"
+SHIM
+  chmod +x "$STUBDIR/only-tools/curl"
+  # Without the override the fixture cannot match the pinned release digest.
+  MSB_HOME="$STUBDIR/msb-home" PATH="$STUBDIR/acq-bin:$STUBDIR/only-tools" \
+    run "$python" "$BATS_TEST_DIRNAME/install-tty.py" tty y "$REPO_ROOT/install.sh" \
+    --source "$REPO_ROOT/test/fixtures/installer" --bin-dir "$STUBDIR/acq-bin"
+  assert_output --partial 'pinned msb checksum mismatch'
+  [ ! -e "$STUBDIR/msb-home/bin/msb" ]
+  ACQ_TEST_MSB_BUNDLE_SHA256="$digest" MSB_HOME="$STUBDIR/msb-home" PATH="$STUBDIR/acq-bin:$STUBDIR/only-tools" \
+    run "$python" "$BATS_TEST_DIRNAME/install-tty.py" tty y "$REPO_ROOT/install.sh" \
+    --source "$REPO_ROOT/test/fixtures/installer" --bin-dir "$STUBDIR/acq-bin"
+  assert_success
+  assert_output --partial 'installed pinned msb 0.7.7'
+  [ -x "$STUBDIR/msb-home/bin/msb" ]
+  [ -L "$STUBDIR/acq-bin/msb" ]
+}

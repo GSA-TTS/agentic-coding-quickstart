@@ -41,9 +41,11 @@ teardown() {
 }
 
 @test "windows installer: never elevates" {
-  run grep -E 'Enable-WindowsOptionalFeature|Start-Process.*-Verb RunAs|Restart-Computer' \
-    "$REPO_ROOT/install.ps1"
-  assert_failure
+  local code
+  code=$(sed '/^[[:space:]]*Write-Host /d' "$REPO_ROOT/install.ps1")
+  refute_regex "$code" 'Enable-WindowsOptionalFeature|Start-Process.*-Verb RunAs|Restart-Computer'
+  # A printed command is allowed; an executable one must still trip the guard.
+  assert_regex "$code"$'\nEnable-WindowsOptionalFeature -Online' 'Enable-WindowsOptionalFeature'
 }
 
 @test "windows installer: never pipes a remote script to iex" {
@@ -319,4 +321,45 @@ teardown() {
   assert_success
   assert_output --partial '[dry-run]'
   refute_output --partial 'rel-local'
+}
+
+@test "windows installer: SHA256SUMS pin is strict and checked before reading entries" {
+  local installer pin_line read_line
+  installer=$(cat "$REPO_ROOT/install.ps1")
+  assert_regex "$installer" '\[string\]\$Sha256'
+  grep -qF "\\A[0-9a-fA-F]{64}\\z" "$REPO_ROOT/install.ps1"
+  assert_regex "$installer" '\$sumsActual -ine \$Sha256'
+  pin_line=$(grep -n 'if (\$sumsActual -ine' "$REPO_ROOT/install.ps1" | cut -d: -f1)
+  read_line=$(grep -n '\$expected = Get-ExpectedHash' "$REPO_ROOT/install.ps1" | cut -d: -f1)
+  [ "$pin_line" -lt "$read_line" ]
+  command -v pwsh >/dev/null 2>&1 || return 0
+  run pwsh -NoProfile -File "$REPO_ROOT/install.ps1" -Sha256 invalid -DryRun
+  assert_failure 2
+}
+
+@test "windows installer: attestation uses PATH gh and fails closed except absence" {
+  local installer
+  installer=$(cat "$REPO_ROOT/install.ps1")
+  assert_regex "$installer" 'Get-Command gh -CommandType Application'
+  assert_regex "$installer" "'attestation', 'verify'"
+  assert_regex "$installer" 'verified attestation'
+  assert_regex "$installer" 'attestation absent'
+  assert_regex "$installer" 'throw "attestation verification failed'
+  assert_regex "$installer" 'ACQ_INSTALL_NO_ATTESTATION'
+  assert_regex "$installer" '\$NoAttestation.*-not \$Resolved.IsUrl'
+}
+
+@test "windows installer: prerequisites probe WHP capability and never use DISM state" {
+  local installer
+  installer=$(cat "$REPO_ROOT/install.ps1")
+  assert_regex "$installer" 'WHvGetCapability'
+  assert_regex "$installer" 'WHvCapabilityCodeHypervisorPresent = 0'
+  assert_regex "$installer" '\$result -eq 0 -and \$written -ge 4 -and \$present -ne 0'
+  refute_regex "$installer" 'Get-WindowsOptionalFeature|dism.exe'
+  assert_regex "$installer" '-not \$Yes -and -not \[Console\]::IsInputRedirected'
+  assert_regex "$installer" '-not \$DryRun -and -not \$NoPrereqCheck'
+  assert_regex "$installer" 'scripts/verify-msb-pin --install'
+  assert_regex "$installer" 'msb doctor --fix'
+  assert_regex "$installer" 'Get-Command git -CommandType Application'
+  assert_regex "$installer" 'Get-Command sbx -CommandType Application'
 }
