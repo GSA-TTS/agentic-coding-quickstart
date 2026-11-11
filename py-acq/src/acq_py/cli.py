@@ -91,8 +91,8 @@ _ADAPTER_ERRORS = common._ADAPTER_ERRORS
 # Bash semantics: --kit is repeatable and each value is a kit ref applied after
 # the built-ins. A built-in agent kit name stands for that bundled kit.
 _KIT_HELP = (
-    "kit ref to apply (repeatable); a built-in agent kit name such as opencode "
-    "selects that kit, and refs outside the built-in bundle are refused"
+    "kit ref to apply (repeatable): a local kit directory, git+https ref, or "
+    "built-in agent kit name such as opencode"
 )
 _PUBLISH_HELP = (
     "reach the sandbox's GUEST port on host port HOST (repeatable; msb only, create-time only; "

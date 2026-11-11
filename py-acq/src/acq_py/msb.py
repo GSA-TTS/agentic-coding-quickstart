@@ -1472,11 +1472,19 @@ def secret_bindings(name: str) -> tuple[list[BoundSecret], dict[str, str]]:
     """
     planned: list[BoundSecret] = []
     env: dict[str, str] = {}
+    try:
+        providers = provider_input.delivery_ids("msb", name)
+    except provider_input.ProviderInputError as exc:
+        raise MsbError(exc.code, exc.message, exc.remediation) from exc
     for service in _bind_candidates(name):
         binding = service_binding(service, name)
         if binding is None or binding.env in env:
             continue
         value = secretstore.resolve(service, name)
+        # Bash falls back to CI's exported provider key after the store lookup;
+        # passing the gate must also produce a live binding at create.
+        if not value and service in providers and service not in provider_input.HOST_SERVICES:
+            value = os.environ.get(binding.env)
         if value:
             env[binding.env] = value
             planned.append(BoundSecret(service, binding, _has_own_value(service, name)))
@@ -1518,6 +1526,14 @@ def _start_env(name: str) -> dict[str, str]:
         _planned, out = secret_bindings(name)
     for env, entry in rec.bindings.items():
         value = secretstore.resolve(entry["service"], name)
+        if not value:
+            # A provider bound from CI's environment must remain startable.
+            # Reuse create's resolver only for the identical recorded binding.
+            planned, available = secret_bindings(name)
+            if any(bound.service == entry["service"] and bound.binding == SecretBinding(env, entry["host"])
+                   for bound in planned):
+                value = available.get(env)
+            available.clear()
         if not value:
             out.clear()
             raise _start_secret_missing(name, env, entry["service"])

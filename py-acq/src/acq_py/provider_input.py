@@ -37,6 +37,7 @@ same files. No credential value passes through this module.
 from __future__ import annotations
 
 import errno
+import ipaddress
 import json
 import os
 import re
@@ -47,6 +48,7 @@ import tempfile
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from . import errors, kitspec, lock, provider_creds, state
 
@@ -83,7 +85,7 @@ class ProviderInputError(Exception):
         self.remediation = remediation
 
 
-def _invalid(message: str, remediation: str = "reinstall acq; it will not use provider input it cannot verify") -> ProviderInputError:
+def _invalid(message: str, remediation: str = "correct the kit's provider input, then retry") -> ProviderInputError:
     return ProviderInputError(errors.VALIDATION_FAILED, message, remediation)
 
 
@@ -103,21 +105,55 @@ class Facts:
 
 
 def strict_url_ok(url: str, host: str) -> bool:
-    """True when ``url`` is an https URL on exactly ``host`` (port 443 at most)."""
-    if not _URL_RE.fullmatch(url):
+    """True when the models URL meets the provider-kit contract."""
+    return _models_url_problem(url, host) is None
+
+
+def _ip_literal(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
         return False
-    return url == f"https://{host}" or url.startswith((f"https://{host}/", f"https://{host}:443/"))
+    return True
+
+
+def _models_url_problem(url: str, host: str) -> str | None:
+    # Bash validates kit facts with the pinned Patterns contract before its
+    # shell-safe URL check; that contract also excludes IPs and explicit ports.
+    try:
+        parsed = urlsplit(url)
+        if parsed.scheme != "https":
+            return "models URL scheme must be https"
+        if _ip_literal(parsed.hostname or ""):
+            return "models URL: IP address literals are not permitted"
+        if parsed.username is not None or parsed.password is not None:
+            return "models URL must not contain user information"
+        if ":" in parsed.netloc:
+            return "models URL must not contain an explicit port"
+        if parsed.hostname != host:
+            return f"models URL host does not match its declared host ({host})"
+    except ValueError:
+        return "models URL is malformed"
+    if (not _URL_RE.fullmatch(url) or parsed.netloc != host
+            or not (url == f"https://{host}" or url.startswith(f"https://{host}/"))):
+        return "models URL contains unsafe characters or an invalid authority"
+    return None
 
 
 def facts_problem(f: Facts) -> str | None:
     """Why ``f`` must not be used, or None (Bash's re-validation of every field)."""
     if not provider_creds.provider_id_ok(f.provider):
         return f"invalid provider id {f.provider!r}"
+    # Credential registry hosts retain Bash's broader grammar; a provider kit
+    # additionally passes the pinned validator's DNS-only destination rule.
+    if _ip_literal(f.host):
+        return f"provider '{f.provider}' host: IP address literals are not permitted"
     problem = provider_creds.validate_binding(f.provider, f.key_env, [f.host])
     if problem is not None:
         return problem
-    if not strict_url_ok(f.models_url, f.host):
-        return f"provider '{f.provider}' models URL does not match its declared host ({f.host})"
+    problem = _models_url_problem(f.models_url, f.host)
+    if problem is not None:
+        return f"provider '{f.provider}' {problem}"
     if not _PROTOCOL_RE.fullmatch(f.api_protocol):
         return f"provider '{f.provider}' declares an unsafe API protocol"
     return None
@@ -321,7 +357,7 @@ _AT_CREATE = {
 
 def _missing(f: Facts, backend: str, *, exported: bool, stored: bool) -> ProviderInputError:
     why = _AT_CREATE.get(backend, f"the {backend} backend binds credentials only at create")
-    if stored:
+    if stored and not exported:
         return ProviderInputError(
             errors.SECRET_MISSING,
             f"the '{f.provider}' key is stored, but the {backend} backend cannot inject it for '{f.host}' yet; "
@@ -350,6 +386,7 @@ def gate(
     """Check every provider's pin and key before a create; raises :class:`ProviderInputError`.
 
     ``has_key(provider)`` says whether the backend can inject a stored key.
+    MSB can also bind a nonempty exported key at create, as Bash does.
     ``ask_store(facts)`` asks on a terminal and stores a key, returning False
     when the user declines; it is None when there is no terminal, and the gate
     then fails closed instead of prompting. ``stored(provider)`` says whether
@@ -362,6 +399,10 @@ def gate(
         check_pin(f)
         if has_key(f.provider):
             continue
+        if os.environ.get(f.key_env):
+            if backend == "msb":
+                continue
+            raise _missing(f, backend, exported=True, stored=stored(f.provider))
         if ask_store is None:
             raise _missing(f, backend, exported=bool(os.environ.get(f.key_env)), stored=stored(f.provider))
         if not ask_store(f):

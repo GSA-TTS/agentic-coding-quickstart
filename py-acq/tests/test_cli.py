@@ -377,3 +377,12 @@ def test_kit_apply_help_describes_external_refs():
     assert proc.returncode == 0
     text = " ".join(proc.stdout.split())
     assert "local kit directory" in text and "pinned git+https ref" in text
+
+
+@pytest.mark.parametrize("verb", ["create", "run"])
+def test_kit_help_describes_local_and_remote_refs(verb):
+    proc = run_cli(verb, "--help")
+    assert proc.returncode == 0
+    text = " ".join(proc.stdout.split())
+    assert "local kit directory, git+https ref" in text
+    assert "outside the built-in bundle are refused" not in text
