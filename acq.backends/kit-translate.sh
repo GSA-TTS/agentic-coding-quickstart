@@ -1609,7 +1609,8 @@ kit_translate_to_sbx() {
 
 # Build the combined chmod script for kit-declared file modes. sbx pins
 # every kit files/ payload to 0644 at materialization (content-addressed,
-# reproducible layers; v0.39 extended the pin to local/git kit loads), so a declared `mode:` only takes effect through the
+# reproducible layers; v0.39 extended the pin to local/git kit loads), so a
+# declared `mode:` only takes effect through the
 # maintainer-sanctioned workaround: a setup.install chmod that runs after
 # files/home/ staging. Emits one `chmod && echo || echo` line per home-staged
 # mode-bearing files[] entry, in SPEC ORDER (deterministic output). Non-home

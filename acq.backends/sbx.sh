@@ -2507,7 +2507,8 @@ acq_backend_rotate_key() {
 
   # `sbx create` needs an authenticated sbx session. If it has expired, sbx
   # triggers an interactive browser login — and if its output is swallowed and
-  # it's unbounded, rotation appears to hang with no explanation. Two guards: (1) do NOT silence stderr, so any login prompt is
+  # it's unbounded, rotation appears to hang with no explanation. Two guards:
+  # (1) do NOT silence stderr, so any login prompt is
   # visible; (2) bound the create with a timeout so an interactive-login
   # handshake can never hang indefinitely. sbx has no non-interactive
   # auth-status probe, so the timeout is the safety net.
