@@ -63,7 +63,7 @@ jobs:
           # leg checks the runtime statically; smoke-macos-arm64 runs it.
           - platform: macos-arm64
             runner: ubuntu-24.04
-            execute: false
+            cross_built: true
             pip_platform: macosx_11_0_arm64
             lock: scripts/provider-input-validator-requirements-macos.txt
             python_versions: "312 313 314"
@@ -121,7 +121,7 @@ jobs:
           # The matching stage script verifies the pinned digest before extraction.
           scripts/assemble-release "$PLATFORM" runtime.archive "$RUNTIME_SHA256" wheelhouse dist
       - name: Check the cross-built runtime statically (not executed on this host)
-        if: ${{ matrix.execute == false }}
+        if: ${{ matrix.cross_built == true }}
         run: |
           set -euo pipefail
           mkdir unpacked
@@ -140,7 +140,7 @@ jobs:
           print("arm64 Mach-O runtime and baked identity verified statically")
           PY
       - name: Smoke-test the runtime and baked identity from the unpacked archive
-        if: ${{ matrix.execute != false }}
+        if: ${{ matrix.cross_built != true }}
         env:
           PLATFORM: ${{ matrix.platform }}
         run: |
