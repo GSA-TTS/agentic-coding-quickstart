@@ -18,12 +18,18 @@ setup() {
   ( cd "$WT/repoA" && git init -q )
   ( cd "$WT/wsB/sub1" && git init -q ); ( cd "$WT/wsB/sub2" && git init -q )
   ( cd "$WT/realrepo" && git init -q )
-  ( cd "$WT/wsB" && ln -s "$WT/realrepo" symlinked )
+  ( cd "$WT/wsB" && ln -s "$WT/realrepo" symlinked ) 2>/dev/null || true
   touch "$WT/afile"
 }
 teardown() { acq_teardown_stubs; }
 
 load 'helper'
+
+# Git Bash can copy ln -s targets. Exercise link semantics only when the
+# fixture really is a native symlink, including on hosts with Developer Mode.
+_require_native_symlinks() {
+  [ -L "$WT/wsB/symlinked" ] || skip "native symlinks unavailable: ln -s did not create a symbolic link"
+}
 
 # warn_if_no_git_identity in an isolated HOME so case (a) sees an empty identity.
 _id() { # PATH
@@ -184,6 +190,7 @@ _pf_out() { # PATH
 }
 
 @test "identity (b): non-repo root with sub-repos, symlinked child not followed" {
+  _require_native_symlinks
   export GIT_CEILING_DIRECTORIES="$STUBDIR"
   _id "$WT/wsB"
   assert_output --partial 'workspace root is not a git repo'
@@ -288,6 +295,7 @@ _ws_safe() { # ARGS...
 }
 
 @test "workspace specs: a symlink whose target contains ':' is refused, naming the target" {
+  _require_native_symlinks
   mkdir -p "$WT/real:dir"
   ln -s "$WT/real:dir" "$WT/plainlink"
   _ws_safe opencode "$WT/plainlink"
@@ -319,6 +327,7 @@ _ws_safe() { # ARGS...
 }
 
 @test "workspace specs: '.' is checked as the logical cwd, so a ':' symlink on the way is refused" {
+  _require_native_symlinks
   mkdir -p "$WT/real/proj"
   ln -s "$WT/real" "$WT/c:link"
   run bash -c '
@@ -335,6 +344,7 @@ _ws_safe() { # ARGS...
 }
 
 @test "workspace specs: a workspace containing acq's state, config or secret dirs is refused" {
+  _require_native_symlinks
   local d
   # The state dir, config dir and secret store each make their parent unsafe;
   # the read-only flag does not help (the guest could still read the store).

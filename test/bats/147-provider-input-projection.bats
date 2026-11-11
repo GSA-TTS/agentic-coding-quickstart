@@ -2725,3 +2725,24 @@ PYTHON
   run _acq_provider_input_validate "$validator" "$(command -v python3)" --bundle "$manifest"
   assert_success
 }
+
+@test "guardian cleanup is bounded for a suspended child and never calls wait" {
+  run timeout 10 env BASH_ENV= bash -c '
+    . "$1/acq.backends/common.sh"
+    sleep 60 >/dev/null 2>&1 &
+    child=$!
+    trap '\''kill -KILL "$child" 2>/dev/null || true'\'' EXIT
+    kill -STOP "$child"
+    _ACQ_PROVIDER_INPUT_GUARDIAN_PID=$child
+    _ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN="$2/children"
+    : > "$_ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN"
+    wait() { echo WAIT-CALLED; return 1; }
+    _acq_provider_input_guardian_stop
+    [ ! -e "$2/children" ] || exit 2
+    [ -z "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID" ] || exit 3
+    echo CLEANUP-RETURNED
+  ' _ "$REPO_ROOT" "$STUBDIR"
+  assert_success
+  assert_output --partial CLEANUP-RETURNED
+  refute_output --partial WAIT-CALLED
+}
