@@ -129,6 +129,26 @@ _posix_only() {
   [ ! -e "$LOCK" ]
 }
 
+@test "config lock: stale recovery preserves a replacement owner" {
+  _hold '999999 stale'
+  ACQ_MIGRATION_LOCK_TIMEOUT=0 _cfg '
+    _acq_config_lock_state() {
+      printf "1 replacement\n" > "$ACQ_STATE_DIR/locks/config.lock.d/owner"
+      echo stale
+    }
+    _acq_config_lock_acquire'
+  assert_failure
+  assert_equal "$(cat "$LOCK/owner")" '1 replacement'
+}
+
+@test "config lock: release preserves a replacement owner" {
+  _cfg '_acq_config_lock_acquire
+        printf "1 replacement\n" > "$ACQ_STATE_DIR/locks/config.lock.d/owner"
+        _acq_config_lock_release'
+  assert_success
+  assert_equal "$(cat "$LOCK/owner")" '1 replacement'
+}
+
 @test "config lock: a symlinked lock is refused, never followed" {
   _posix_only "Git Bash's ln -s copies unless native symlinks are enabled"
   mkdir "$STUBDIR/elsewhere"

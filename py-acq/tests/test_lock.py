@@ -34,6 +34,47 @@ def _intent_path():
     return path.with_name(path.name + ".writer")
 
 
+@posix_only
+@pytest.mark.parametrize("kind", ["sandbox", "config"])
+def test_stale_recovery_preserves_replacement_owner(state_dir, monkeypatch, kind):
+    holder = (lock._BashLock("msb", "box") if kind == "sandbox" else
+              lock.ConfigDirLock(state_dir / "locks" / "config.lock", state_dir))
+    holder.path.mkdir(parents=True)
+    owner = holder.path / "owner"
+    owner.write_text("999999 stale\n", encoding="utf-8")
+    identity = lock._process_identity(os.getpid())
+    assert identity
+    replacement = f"{os.getpid()} {identity}\n"
+    read_owner = lock._owner_line
+    reads = []
+
+    def swap_after_read(path):
+        line = read_owner(path)
+        if not reads:
+            owner.write_text(replacement, encoding="utf-8")
+        reads.append(line)
+        return line
+
+    monkeypatch.setattr(lock, "_owner_line", swap_after_read)
+    assert holder.acquire() is False
+    assert reads[0] == "999999 stale"
+    assert owner.read_text(encoding="utf-8") == replacement
+
+
+@posix_only
+@pytest.mark.parametrize("kind", ["sandbox", "config"])
+def test_release_preserves_replacement_owner(state_dir, monkeypatch, kind):
+    holder = (lock._BashLock("msb", "box") if kind == "sandbox" else
+              lock.ConfigDirLock(state_dir / "locks" / "config.lock", state_dir))
+    assert holder.acquire()
+    owner = holder.path / "owner"
+    # Even whitespace changes mean the full owner line is no longer our token.
+    replacement = holder.token + " \n"
+    owner.write_text(replacement, encoding="utf-8")
+    holder.release()
+    assert owner.read_text(encoding="utf-8") == replacement
+
+
 def _marker_held() -> bool:
     """True while some acquirer holds the writer-waiting marker."""
     path = _intent_path()
