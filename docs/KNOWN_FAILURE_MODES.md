@@ -855,7 +855,7 @@ failure modes, see the kit's
 
 > The end-to-end verification/identity gap in the kits themselves is tracked
 > upstream in
-> [agentic-coding-patterns#211](https://github.com/GSA-TTS/agentic-coding-patterns/issues/211);
+> the [agentic-coding-patterns issue on commit verification identity](https://github.com/GSA-TTS/agentic-coding-patterns/issues/211);
 > the quickstart-side decision (docs + advisory) is recorded in
 > [ADR-0007](adr/0007-commit-verification-identity-guidance.md).
 >

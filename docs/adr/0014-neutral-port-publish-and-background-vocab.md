@@ -48,7 +48,7 @@ declare `backends: [sbx]`. The `msb` adapter has **zero** consumption of either
 field (verified: no `publishedPorts`/`background` reference in
 `acq.backends/msb.sh`). This missing neutral vocabulary is the largest
 blocker to a kit declaring `backends: [sbx, msb]`
-(patterns [#233](https://github.com/GSA-TTS/agentic-coding-patterns/issues/233)).
+(see the [agentic-coding-patterns issue on backend-neutral kits](https://github.com/GSA-TTS/agentic-coding-patterns/issues/233)).
 
 > **Update (main after rebase):** the sbx half of the port path already landed —
 > `kit_translate_to_sbx` now carries `backend_extras.sbx.publishedPorts` into
@@ -161,8 +161,7 @@ Both fields are untrusted kit input that reach argv:
 
 The patterns `kit-hybrid-v1.schema.json` gains the matching properties and
 `validate-kits.py` enforces them (the shared choke point). This dovetails with
-patterns [#225](https://github.com/GSA-TTS/agentic-coding-patterns/issues/225)
-(field validation at the gate).
+the [agentic-coding-patterns work on field validation at the gate](https://github.com/GSA-TTS/agentic-coding-patterns/issues/225).
 
 ### Capability flags
 

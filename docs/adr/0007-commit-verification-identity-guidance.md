@@ -31,7 +31,7 @@ do the sibling kits (`usai-provider`, `agentic-coding-playbook`,
 `zscaler-ca-certificate`). Net effect: a standard `qsbx` sandbox produces
 **signed-but-Unverified** commits until the user configures a verified identity
 and registers a signing key. This is the gap raised upstream in
-[agentic-coding-patterns#211](https://github.com/GSA-TTS/agentic-coding-patterns/issues/211).
+the [agentic-coding-patterns issue on commit verification identity](https://github.com/GSA-TTS/agentic-coding-patterns/issues/211).
 
 The question for **this** repo (the `qsbx` wrapper): what should the wrapper do
 about the identity gap, given that the kit-level fix (a `git-identity` mixin, or

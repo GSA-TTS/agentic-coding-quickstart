@@ -85,7 +85,7 @@ session.
   as a *signing* key). `qsbx` surfaces a missing identity up front and the
   quickstart documents the end-to-end path; see
   [ADR-0007](0007-commit-verification-identity-guidance.md) and
-  [patterns#211](https://github.com/GSA-TTS/agentic-coding-patterns/issues/211).
+  the [agentic-coding-patterns issue on commit verification identity](https://github.com/GSA-TTS/agentic-coding-patterns/issues/211).
 - **New host dependency:** committing inside a sandbox now requires an SSH key
   loaded in the host agent. Without it, commits fail closed. The up-front warning
   mitigates surprise; non-committing work is unaffected.
