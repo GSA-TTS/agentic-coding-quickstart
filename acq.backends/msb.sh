@@ -4614,7 +4614,7 @@ EOF
   # convenience, never a hard failure). A socket inside a writable workspace
   # mount is refused (_fwd_ws, collected in the mount loop above).
   local _vsock_flags=()
-  _acq_msb_vsock_flags_into _vsock_flags "$name" "$_fwd_ws"
+  _acq_msb_vsock_flags_into _vsock_flags "$name" "$_fwd_ws" "${create_flags[@]}" || return 1
   [ "${#_vsock_flags[@]}" -gt 0 ] && create_flags+=("${_vsock_flags[@]}")
 
   # Preserve the existing trusted host-config mount used by read-only startup
@@ -4741,6 +4741,7 @@ EOF
   done
   [ -n "${ACQ_MSB_KEEP_STARTUP_STAGE:-}" ] || _ACQ_MSB_STARTUP_STAGE_FILES=()
   if [ "$_create_rc" -ne 0 ]; then
+    _acq_msb_ssh_agent_link_remove "$name"
     echo "acq(msb): error: 'msb create' failed for '$name'." >&2
     echo "acq(msb):   flags: ${create_flags[*]}" >&2
     echo "acq(msb):   image: $_msb_image" >&2
@@ -5212,6 +5213,31 @@ EOF
     return 0
   fi
 
+  # Validate the whole port set before staging a managed link.
+  local _used=' ' _arg _next=0
+  if [ "$#" -gt 3 ]; then
+    shift 3
+    for _arg in "$@"; do
+      if [ "$_next" = 1 ]; then
+        _port=${_arg##*:}; _port=${_port%%/*}
+        while [ "${_port#0}" != "$_port" ] && [ -n "${_port#0}" ]; do _port=${_port#0}; done
+        [ -z "$_port" ] || _used="$_used$_port "
+      fi
+      _next=0
+      case "$_arg" in -p|--publish|--port) _next=1 ;; esac
+    done
+  fi
+  for _line in "${_forwards[@]}"; do
+    _port=$(printf '%s' "$_line" | cut -f2)
+    # Decimal normalization also catches 03552 versus 3552 on bash 3.2.
+    while [ "${_port#0}" != "$_port" ]; do _port=${_port#0}; done
+    case "$_used" in *" $_port "*)
+      echo "acq(msb): forwarded vsock port $_port collides with a published port or another host-socket forward" >&2
+      return 1 ;;
+    esac
+    _used="$_used$_port "
+  done
+
   local _f
   for _f in "${_forwards[@]}"; do
     # Each line is "HOST_PATH<TAB>PORT<TAB>KIND<TAB>LABEL" (see common.sh).
@@ -5348,19 +5374,19 @@ _acq_msb_ssh_agent_link_point() {
   local link="$1" target="$2" tmp
   [ -S "$target" ] || return 1
   if [ -e "$link" ] && [ ! -L "$link" ]; then return 1; fi
-  if [ -L "$link" ] && [ "$(readlink "$link")" = "$target" ]; then return 0; fi
   _acq_msb_ssh_agent_link_dir_ok "$(dirname "$link")" || return 1
+  if [ -L "$link" ] && [ "$(readlink "$link")" = "$target" ]; then return 0; fi
   # A link that currently resolves to a directory would make `mv` descend into
   # it; drop it first (pathological, never produced by acq).
-  [ -L "$link" ] && [ -d "$link" ] && rm -f "$link"
+  [ -L "$link" ] && [ -d "$link" ] && _acq_msb_ssh_agent_link_unlink "$link"
   tmp="${link}.tmp.$$"
-  rm -f "$tmp" 2>/dev/null
+  _acq_msb_ssh_agent_link_unlink "$tmp" 2>/dev/null
   # `[ -L "$tmp" ]` guards hosts whose `ln -s` copies instead of linking (MSYS
   # without native symlinks): a copied socket would be a dead route.
   if ln -s "$target" "$tmp" 2>/dev/null && [ -L "$tmp" ] && mv -f "$tmp" "$link" 2>/dev/null; then
     return 0
   fi
-  rm -f "$tmp" 2>/dev/null
+  _acq_msb_ssh_agent_link_unlink "$tmp" 2>/dev/null
   return 1
 }
 
@@ -5368,14 +5394,43 @@ _acq_msb_ssh_agent_link_point() {
 # accept it only as this user's own real directory (checked without following a
 # symlink at DIR). Returns non-zero when DIR cannot be used.
 _acq_msb_ssh_agent_link_dir_ok() {
-  local dir="$1"
-  mkdir -p "$(dirname "$dir")" 2>/dev/null || return 1
+  local dir="$1" parent
+  parent=$(dirname "$dir")
+  mkdir -p "$parent" 2>/dev/null || return 1
+  [ -d "$parent" ] && [ ! -L "$parent" ] && [ -O "$parent" ] || return 1
   if [ ! -e "$dir" ] && [ ! -L "$dir" ]; then
     mkdir -m 700 "$dir" 2>/dev/null || [ -d "$dir" ] || return 1
   fi
   [ -d "$dir" ] && [ ! -L "$dir" ] && [ -O "$dir" ] || return 1
   chmod 700 "$dir" 2>/dev/null || return 1
   return 0
+}
+
+# Read-only guard for every managed-link mutation. Missing directories are
+# harmless (creation checks them separately); existing ones must be trusted.
+_acq_msb_ssh_agent_link_dirs_trusted() {
+  local dir="$1" d
+  _ACQ_MSB_SSH_AGENT_UNSAFE_DIR=""
+  for d in "$(dirname "$dir")" "$dir"; do
+    if [ ! -e "$d" ] && [ ! -L "$d" ]; then continue; fi
+    if [ ! -d "$d" ] || [ -L "$d" ] || [ ! -O "$d" ]; then
+      _ACQ_MSB_SSH_AGENT_UNSAFE_DIR="$d"
+      return 1
+    fi
+  done
+  return 0
+}
+
+_acq_msb_ssh_agent_link_access_ok() {
+  _acq_msb_ssh_agent_link_dirs_trusted "$(dirname "$1")" && return 0
+  echo "acq(msb): warning: unsafe ssh-agent route directory '$_ACQ_MSB_SSH_AGENT_UNSAFE_DIR';" \
+       "leaving the link untouched and skipping the bridge. Fix or remove '$_ACQ_MSB_SSH_AGENT_UNSAFE_DIR'." >&2
+  return 1
+}
+
+_acq_msb_ssh_agent_link_unlink() {
+  _acq_msb_ssh_agent_link_dirs_trusted "$(dirname "$1")" || return 1
+  rm -f "$1"
 }
 
 # _acq_msb_ssh_agent_link_refresh NAME [RELINK] — re-point sandbox NAME's managed
@@ -5390,20 +5445,36 @@ _acq_msb_ssh_agent_link_dir_ok() {
 # link's current target: unless it is itself (lstat) a socket owned by this
 # user outside the workspace, remove the link and set
 # _ACQ_MSB_SSH_AGENT_LINK_REMOVED=1, so the caller starts no bridge.
+# An untrusted route directory instead leaves the link untouched and sets
+# _ACQ_MSB_SSH_AGENT_LINK_BLOCKED=1, also skipping the bridge.
 # Records why the link was left alone, remedy included, in
 # _ACQ_MSB_SSH_AGENT_LINK_SKIPPED (empty when it now points at the live agent) so
 # the unreachable warning tells the truth about what was and was not re-pointed.
 # Never fails the caller.
 _ACQ_MSB_SSH_AGENT_LINK_SKIPPED=""
 _ACQ_MSB_SSH_AGENT_LINK_REMOVED=0
+_ACQ_MSB_SSH_AGENT_LINK_BLOCKED=0
 _acq_msb_ssh_agent_link_refresh() {
   local name="$1" relink="${2:-0}" link target ws="" _cur
   _ACQ_MSB_SSH_AGENT_LINK_SKIPPED=""
   _ACQ_MSB_SSH_AGENT_LINK_REMOVED=0
+  _ACQ_MSB_SSH_AGENT_LINK_BLOCKED=0
   link=$(_acq_msb_ssh_agent_link_path "$name") || return 0
+  if ! _acq_msb_ssh_agent_link_access_ok "$link"; then
+    _ACQ_MSB_SSH_AGENT_LINK_BLOCKED=1
+    return 0
+  fi
   [ -L "$link" ] || [ "$relink" = "1" ] || return 0
   local _wslist
   _wslist=$(_acq_msb_recorded_workspace "$name")
+  local _inspect
+  if [ "${_ACQ_MSB_ROUTE_NAME:-}" = "$name" ]; then
+    _inspect=$_ACQ_MSB_ROUTE_JSON
+  else
+    _inspect=$(_acq_msb_cli inspect "$name" --format json 2>/dev/null) || _inspect='{}'
+  fi
+  _wslist="$_wslist
+$(printf '%s' "$_inspect" | _acq_msb_agent_json mounts || true)"
   target="${SSH_AUTH_SOCK:-}"
   if [ -z "$target" ] || [ ! -S "$target" ]; then
     _ACQ_MSB_SSH_AGENT_LINK_SKIPPED="SSH_AUTH_SOCK is unset or not a socket in this shell. Re-run 'acq start $name' or 'acq run $name' from a shell where SSH_AUTH_SOCK names your live agent (e.g. after 'eval \"\$(ssh-agent -s)\"; ssh-add')."
@@ -5427,7 +5498,7 @@ _acq_msb_ssh_agent_link_refresh() {
   fi
   if [ -L "$link" ] && ! _acq_msb_ssh_agent_link_target_ok "$link" "$_wslist"; then
     _cur=$(readlink "$link" 2>/dev/null)
-    rm -f "$link" 2>/dev/null
+    _acq_msb_ssh_agent_link_unlink "$link" 2>/dev/null
     _ACQ_MSB_SSH_AGENT_LINK_REMOVED=1
     echo "acq(msb): removed the ssh-agent route link '$link' and did not start the bridge in '$name':" \
          "its target '$_cur' is not a socket owned by you outside the workspace." >&2
@@ -5439,7 +5510,10 @@ _acq_msb_ssh_agent_link_refresh() {
 # is itself (not through another symlink) a socket owned by the effective user
 # and lies outside the newline-separated WORKSPACES.
 _acq_msb_ssh_agent_link_target_ok() {
-  local link="$1" t
+  local link="$1" t _dir _parent
+  _dir=$(dirname "$link"); _parent=$(dirname "$_dir")
+  [ -d "$_dir" ] && [ ! -L "$_dir" ] && [ -O "$_dir" ] || return 1
+  [ -d "$_parent" ] && [ ! -L "$_parent" ] && [ -O "$_parent" ] || return 1
   t=$(readlink "$link" 2>/dev/null) || return 1
   [ -n "$t" ] || return 1
   case "$t" in /*) ;; *) t="$(dirname "$link")/$t" ;; esac
@@ -5465,9 +5539,12 @@ _acq_msb_ssh_agent_link_target_ok() {
 _acq_msb_ssh_agent_opt_out() {
   local name="$1" link _had_link=0 _had_key=0
   _ACQ_MSB_SSH_AGENT_FORWARDING=0
-  if link=$(_acq_msb_ssh_agent_link_path "$name") && [ -L "$link" ]; then
-    rm -f "$link" 2>/dev/null
-    _had_link=1
+  if link=$(_acq_msb_ssh_agent_link_path "$name"); then
+    _acq_msb_ssh_agent_link_access_ok "$link" || return 0
+    if [ -L "$link" ]; then
+      _acq_msb_ssh_agent_link_unlink "$link" 2>/dev/null
+      _had_link=1
+    fi
   fi
   if [ -n "$(_acq_msb_ssh_auth_sock_for "$name")" ]; then
     acq_host_config_clear msb "$name" ssh-auth-sock
@@ -5476,7 +5553,8 @@ _acq_msb_ssh_agent_opt_out() {
   [ "$_had_link" = "1" ] || [ "$_had_key" = "1" ] || return 0
   if [ "$_had_link" = "0" ]; then
     # No link here: ask msb whether the route names the managed link at all.
-    _ACQ_MSB_ROUTE_FLAT=""
+    _ACQ_MSB_ROUTE_JSON=""
+    _ACQ_MSB_ROUTE_NAME=""
     _acq_msb_has_ssh_agent_vsock_route "$name" >/dev/null 2>&1 || true
     _acq_msb_route_names_link "$name" && _had_link=1
   fi
@@ -5505,7 +5583,8 @@ _acq_msb_ssh_agent_link_managed() {
 _acq_msb_ssh_agent_link_remove() {
   local link
   link=$(_acq_msb_ssh_agent_link_path "$1") || return 0
-  [ -L "$link" ] && rm -f "$link"
+  _acq_msb_ssh_agent_link_access_ok "$link" || return 0
+  [ -L "$link" ] && _acq_msb_ssh_agent_link_unlink "$link"
   return 0
 }
 
@@ -5558,14 +5637,17 @@ _acq_msb_start_ssh_agent_bridge() {
   # there is nothing safe to bridge to.
   _acq_msb_ssh_agent_link_refresh "$name" "$_relink"
   [ "$_ACQ_MSB_SSH_AGENT_LINK_REMOVED" = "1" ] && return 0
+  [ "$_ACQ_MSB_SSH_AGENT_LINK_BLOCKED" = "1" ] && return 0
 
   # The guest sock path and port are acq's own constants (word-safe charset), so
   # there is no injection risk; still keep them as fixed literals in the sh -c.
   # A SINGLE socat under nohup (detached): the --vsock route reconnects lazily,
   # and the bridge is re-launched fresh on each provision/start, so no supervisor
-  # loop is needed. `rm -f` clears any stale socket before re-listening.
+  # loop is needed. Stop the exact previous listener before unlinking its socket.
   _acq_msb_cli exec "$name" -u agent -- sh -c "
     mkdir -p \"\$(dirname '$_sock')\" 2>/dev/null || true
+    pkill -f -x 'socat UNIX-LISTEN:${_sock//./\\.},fork,reuseaddr VSOCK-CONNECT:2:$_port' 2>/dev/null || true
+    umask 077
     rm -f '$_sock' 2>/dev/null || true
     nohup socat UNIX-LISTEN:'$_sock',fork,reuseaddr VSOCK-CONNECT:2:'$_port' >/dev/null 2>&1 &
   " </dev/null >/dev/null 2>&1 || {
@@ -5875,6 +5957,8 @@ _acq_msb_ensure_ssh_agent_forward() {
 _acq_msb_has_ssh_agent_vsock_route() {
   local name="$1" json _port="$ACQ_MSB_SSH_AGENT_VSOCK_PORT" _errf _rc _try
   _ACQ_MSB_ROUTE_PROBE_ERR=""
+  _ACQ_MSB_ROUTE_NAME=""
+  _ACQ_MSB_ROUTE_JSON=""
   # stderr goes to a file, not into $json: a warning mentioning vsock would
   # otherwise flatten into a false route match.
   _errf=$(mktemp "$(acq_tmp_dir)/acq-msb-inspect.XXXXXX" 2>/dev/null) || _errf=/dev/null
@@ -5888,37 +5972,48 @@ _acq_msb_has_ssh_agent_vsock_route() {
     rm -f "$_errf" 2>/dev/null
   fi
   [ "$_rc" -eq 0 ] && [ -n "$json" ] || return 2
-  # Require BOTH a `vsock` key AND the ssh-agent guest-port token, so a published
-  # `ports:[{port:<vsock-port>}]` that merely happens to equal the (user-
-  # overridable) vsock port cannot masquerade as a route on a sandbox that has no
-  # vsock forwarding at all. We do not have a JSON parser here, so flatten the
-  # document (strip quotes/spaces; turn structural punctuation into newlines) and
-  # test the two facts independently against the whole flattened form. The real
-  # shape is `"vsock":{"routes":[{…,"port":3552}]}` — after flattening, `vsock:`
-  # and `port:3552` land on separate lines, so both greps must be run over the
-  # full text (not a single line). The port is anchored as a whole token so 3552
-  # can't match e.g. 35521. See ADR-0021; shape confirmed against msb 0.6.12.
-  # grep reads a here-string, not a pipe: under pipefail, `grep -q` exiting on an
-  # early match SIGPIPEs a writer still emitting a large document, which reads as
-  # a false "no route".
-  # The port token is anchored at the start of a flattened field, so a
-  # guest_port/host_port field never matches. The flattened document stays in
-  # _ACQ_MSB_ROUTE_FLAT for _acq_msb_route_names_link.
-  local _flat
-  _flat=$(printf '%s' "$json" | tr -d '" ' | tr ',{}[]' '\n\n\n\n\n')
-  _ACQ_MSB_ROUTE_FLAT="$_flat"
-  grep -Eq '(^|:)vsock:?$' <<<"$_flat" 2>/dev/null || return 1
-  grep -Eq "^port[:=]${_port}\$" <<<"$_flat" 2>/dev/null
+  _ACQ_MSB_ROUTE_JSON="$json"
+  _ACQ_MSB_ROUTE_NAME="$name"
+  printf '%s' "$json" | _acq_msb_agent_json route "$_port"
 }
 
-# _acq_msb_route_names_link NAME — 0 iff the route probe's last document names
-# sandbox NAME's managed link as the route's host socket, so a link the opt-out
-# removed may be made again.
-_ACQ_MSB_ROUTE_FLAT=""
+# Parse actual route fields; never split JSON string values on punctuation.
+_ACQ_MSB_ROUTE_JSON=""
+_acq_msb_agent_json() {
+  local _python
+  _python=$(_acq_msb_ro_python) || return 2
+  "$_python" -I -c '
+import json, sys
+try:
+    doc = json.load(sys.stdin)
+    config = doc.get("active_config", doc.get("config", doc))
+    if not isinstance(config, dict):
+        sys.exit(2)
+    mode = sys.argv[1]
+    if mode == "mounts":
+        for m in config.get("mounts", []):
+            if isinstance(m, dict) and not (isinstance(m.get("options"), dict) and m["options"].get("readonly") is True):
+                host = m.get("host")
+                if isinstance(host, str):
+                    print(host)
+        sys.exit(0)
+    vsock = config.get("vsock") or {}
+    routes = vsock.get("routes", [])
+    found = any(isinstance(r, dict) and str(r.get("port")) == sys.argv[2]
+                and (mode == "route" or r.get("host_socket") == sys.argv[3])
+                for r in routes)
+    sys.exit(0 if found else 1)
+except (ValueError, TypeError, AttributeError):
+    sys.exit(2)
+' "$@"
+}
+
 _acq_msb_route_names_link() {
   local link
+  # Only trust the cached inspect document when it was fetched for this sandbox.
+  [ "${_ACQ_MSB_ROUTE_NAME:-}" = "$1" ] || return 1
   link=$(_acq_msb_ssh_agent_link_path "$1") || return 1
-  grep -Fxq "host_socket:${link// /}" <<<"$_ACQ_MSB_ROUTE_FLAT" 2>/dev/null
+  printf '%s' "$_ACQ_MSB_ROUTE_JSON" | _acq_msb_agent_json link "$ACQ_MSB_SSH_AGENT_VSOCK_PORT" "$link"
 }
 
 # ---------------------------------------------------------------------------

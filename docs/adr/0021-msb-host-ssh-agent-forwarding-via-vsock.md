@@ -473,12 +473,23 @@ the shell that last started it.
   warning, whether create routes it or a start re-points the link at it.
 - **A socket inside the writable workspace is refused,** for `SSH_AUTH_SOCK` and
   `ACQ_FORWARD_HOST_SOCKETS` alike: at create against the writable workspace
-  mounts, at refresh against the recorded workspace. The sandbox could otherwise
+  mounts, at refresh against every writable mount reported by `msb inspect`
+  and the recorded workspaces. The sandbox could otherwise
   create or replace the socket file that acq forwards.
 - **The link directory** `$ACQ_STATE_DIR/msb/ssh-agent` is created 0700 and used
-  only when it is this user's own real directory (not a symlink).
-- **The route probe** matches the agent port only as a whole `port` field, so a
+  only when it and its `msb` parent are this user's own real directories (not
+  symlinks). An unsafe directory leaves the link untouched and skips the bridge
+  with one warning naming the directory to fix or remove. This check also guards
+  stale-target removal, opt-out, and failed-create cleanup; refusing a directory
+  never authorizes deleting through it.
+- **The route probe** parses JSON and matches the agent port on its actual
+  vsock route, preserving punctuation in host paths, so a
   `guest_port` or `host_port` field of the same value is not taken for the route.
+- **Bridge restarts** stop the previous socat listener by its exact command
+  line before unlinking the socket, and set `umask 077` before creating its
+  replacement. A failed `msb create` removes its staged managed link.
+- **Forwarded ports must be distinct** from published guest ports and other
+  host-socket forwards. A collision refuses create before staging the link.
 
 ### Validation
 
