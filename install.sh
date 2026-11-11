@@ -658,8 +658,14 @@ ok "  verified $ARCHIVE (sha256 $actual)"
 verify_attestation "$tmpdir/$ARCHIVE"
 
 # The provenance manifest travels alongside SHA256SUMS and is part of the
-# enumerated offline asset set; its absence is a fail-closed gate.
+# enumerated offline asset set; its absence is a fail-closed gate. SHA256SUMS
+# lists it too, so it is verified like the archive: an installed provenance
+# record that nothing checked would be a claim, not evidence.
 [ -f "$tmpdir/$PROVENANCE_NAME" ] || die "release is missing the provenance manifest ($PROVENANCE_NAME)"
+prov_expected="$(sha256_expected "$tmpdir/$SHA256SUMS_NAME" "$PROVENANCE_NAME")"
+[ -n "$prov_expected" ] || die "$SHA256SUMS_NAME has no entry for $PROVENANCE_NAME; refusing to install unverified provenance"
+prov_actual="$(sha256_of "$tmpdir/$PROVENANCE_NAME")"
+[ "$prov_expected" = "$prov_actual" ] || die "checksum mismatch for $PROVENANCE_NAME (expected $prov_expected, got $prov_actual)"
 
 # ---------------------------------------------------------------------------
 # Extract into a staging directory, then publish atomically (update-by-reinstall).

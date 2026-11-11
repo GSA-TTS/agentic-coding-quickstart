@@ -113,6 +113,22 @@ _install_dir() {
   assert_output ''
 }
 
+@test "installer: provenance.json is verified against SHA256SUMS" {
+  local src="$STUBDIR/assets-prov"
+  cp -R "$REPO_ROOT/test/fixtures/installer" "$src"
+  printf '{"tampered": true}\n' > "$src/provenance.json"
+  run sh "$REPO_ROOT/install.sh" --source "$src" --yes
+  assert_failure
+  assert_output --partial "checksum mismatch for provenance.json"
+  [ ! -e "$(_install_dir)" ]
+  cp "$REPO_ROOT/test/fixtures/installer/provenance.json" "$src/provenance.json"
+  grep -v ' provenance.json$' "$REPO_ROOT/test/fixtures/installer/SHA256SUMS" > "$src/SHA256SUMS"
+  run sh "$REPO_ROOT/install.sh" --source "$src" --yes
+  assert_failure
+  assert_output --partial "no entry for provenance.json"
+  [ ! -e "$(_install_dir)" ]
+}
+
 @test "installer: consent is never inferred non-interactively" {
   run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer"
   assert_success
@@ -176,7 +192,7 @@ _fixture_with_extra_entry() {
     fi
     (cd "$work" && tar -czf "$out/${a##*/}" .)
   done
-  (cd "$out" && for a in *.tar.gz; do
+  (cd "$out" && for a in *.tar.gz provenance.json; do
     if command -v sha256sum >/dev/null 2>&1; then sha256sum "$a"; else shasum -a 256 "$a"; fi
   done) > "$out/SHA256SUMS"
   printf '%s' "$out"
