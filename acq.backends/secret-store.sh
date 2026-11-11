@@ -16,7 +16,7 @@
 #   - Storage in the OS keychain when available (macOS `security -i`, Linux
 #     `secret-tool`), Windows DPAPI (Keychain-equivalent, user-scoped) via
 #     in-box PowerShell, and a 0600 file fallback under
-#     $XDG_DATA_HOME/acq/secrets/ when no protected backend exists. The Windows
+#     $XDG_DATA_HOME/acq/secrets/ on POSIX when no protected backend exists. The Windows
 #     backend wraps each value in a versioned envelope and migrates a legacy
 #     plaintext value on first read, so switching backends never mis-reads the
 #     shared file path in either direction (see the keychain-windows notes).
@@ -77,7 +77,7 @@ unset _acq_ud
 # touched). On Windows (Git Bash, MSYS, Cygwin) it only relocates the DPAPI
 # files, as in the Python acq: the plaintext file backend would leave secrets in
 # cleartext on NTFS, and the two implementations could not read each other's
-# entries. ACQ_SECRET_FORCE_FILE set explicitly still forces the file backend.
+# entries. ACQ_SECRET_FORCE_FILE applies only outside Windows.
 if [ -n "${ACQ_SECRET_STORE_DIR:-}" ]; then
   ACQ_SECRET_FILE_DIR="$ACQ_SECRET_STORE_DIR"
   case "$(uname -s 2>/dev/null)" in
@@ -132,22 +132,40 @@ _acq_secret_powershell_bin() {
     printf '%s\n' "$ACQ_SECRET_POWERSHELL_BIN"
     return 0
   fi
-  printf 'powershell.exe\n'
+  local root="${SystemRoot:-${SYSTEMROOT:-}}" powershell
+  # A drive-relative or rooted-without-drive path can resolve under the caller's
+  # directory. Only a fully qualified Windows directory may select DPAPI code.
+  case "$root" in
+    [a-zA-Z]:[\\/]*|\\\\?*\\?*) ;;
+    *) return 1 ;;
+  esac
+  powershell="${root%[\\/]}/System32/WindowsPowerShell/v1.0/powershell.exe"
+  if command -v cygpath >/dev/null 2>&1; then
+    powershell=$(cygpath -u "$powershell") || return 1
+  fi
+  [ -f "$powershell" ] && [ -x "$powershell" ] || return 1
+  printf '%s\n' "$powershell"
 }
 
 _acq_secret_backend() {
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      # Windows cannot enforce the plaintext store's POSIX permissions. Even
+      # FORCE_FILE must not turn a missing DPAPI runtime into a plaintext write.
+      local powershell
+      if powershell=$(_acq_secret_powershell_bin) && [ -f "$powershell" ] && [ -x "$powershell" ]; then
+        printf 'keychain-windows\n'; return 0
+      fi
+      echo "acq: Windows DPAPI is unavailable: Windows PowerShell was not found under %SystemRoot%; secrets are never stored in plaintext on Windows." >&2
+      echo "     Set SystemRoot to an absolute Windows directory (e.g. C:\Windows) and retry." >&2
+      return 1 ;;
+  esac
   if [ -n "${ACQ_SECRET_FORCE_FILE:-}" ]; then
     printf 'file\n'; return 0
   fi
   case "$(uname -s 2>/dev/null)" in
     Darwin) [ -x "$(_acq_secret_security_bin)" ] && { printf 'keychain-macos\n'; return 0; } ;;
-    MINGW*|MSYS*|CYGWIN*)
-      # Git Bash on Windows has neither a keychain nor secret-tool, so the plain
-      # file fallback would leave secrets in cleartext on NTFS (which cannot
-      # enforce 0600). Use Windows DPAPI via in-box PowerShell instead
-      # (ADR-0028); fall back to the file backend only if PowerShell is absent.
-      command -v "$(_acq_secret_powershell_bin)" >/dev/null 2>&1 && { printf 'keychain-windows\n'; return 0; } ;;
-    *)      command -v secret-tool >/dev/null 2>&1 && { printf 'keychain-linux\n'; return 0; } ;;
+    *) command -v secret-tool >/dev/null 2>&1 && { printf 'keychain-linux\n'; return 0; } ;;
   esac
   printf 'file\n'
 }
@@ -441,7 +459,7 @@ acq_secret_store() {
   fi
 
   local backend
-  backend=$(_acq_secret_backend)
+  backend=$(_acq_secret_backend) || { value=""; return 1; }
   acq_debug "secret store: key=$key backend=$backend"
 
   case "$backend" in
@@ -507,7 +525,7 @@ _acq_secret_store_file() {
 # ---------------------------------------------------------------------------
 acq_secret_get() {
   local key="$1" backend value security_bin
-  backend=$(_acq_secret_backend)
+  backend=$(_acq_secret_backend) || return 1
   case "$backend" in
     keychain-macos)
       # Prefer the Keychain. Fall back to the old 0600 file location so existing
@@ -791,7 +809,7 @@ acq_secret_meta_list() {
 #     fails `ls`.
 acq_secret_list_keys() {
   local backend
-  backend=$(_acq_secret_backend)
+  backend=$(_acq_secret_backend) || return 1
   case "$backend" in
     keychain-macos|keychain-linux) _acq_secret_list_keys_keychain ;;
     *)                            _acq_secret_list_keys_file ;;
@@ -910,7 +928,7 @@ _acq_secret_decode_key() {
 # file backend on macOS (see the acq_secret_store note about avoiding argv).
 acq_secret_delete() {
   local key="$1" backend rc=0 security_bin
-  backend=$(_acq_secret_backend)
+  backend=$(_acq_secret_backend) || return 1
   acq_debug "secret delete: key=$key backend=$backend"
   case "$backend" in
     keychain-macos)

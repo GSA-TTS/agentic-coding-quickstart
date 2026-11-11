@@ -214,7 +214,7 @@ PSSTUB
   refute_regex "$(cat "$CALLS")" 'msb secret'
 }
 
-@test "keychain-windows: detection picks DPAPI on MSYS (file when PowerShell is absent)" {
+@test "keychain-windows: detection picks DPAPI on MSYS and fails closed without PowerShell" {
   _plant_powershell_stub
   run bash -c '
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/win-detect"
@@ -227,11 +227,13 @@ PSSTUB
     printf "forced=%s\n" "$(_acq_secret_backend)"
     unset ACQ_SECRET_FORCE_FILE
     export ACQ_SECRET_POWERSHELL_BIN="'"$STUBDIR"'/missing-powershell"
-    printf "no-powershell=%s\n" "$(_acq_secret_backend)"
+    _acq_secret_backend && exit 99
+    printf "no-powershell=refused\n"
   '
   assert_output --partial 'detected=keychain-windows'
-  assert_output --partial 'forced=file'
-  assert_output --partial 'no-powershell=file'
+  assert_output --partial 'forced=keychain-windows'
+  assert_output --partial 'no-powershell=refused'
+  assert_output --partial 'secrets are never stored in plaintext on Windows'
 }
 
 @test "keychain-windows: ACQ_SECRET_STORE_DIR relocates the DPAPI files instead of forcing plaintext" {
@@ -522,4 +524,52 @@ PSSTUB
   local log; log=$(cat "$CALLS")
   assert_regex "$log" 'msb modify crA --secret-rm USAI_API_KEY'
   assert_regex "$log" 'msb modify crB --secret-rm USAI_API_KEY'
+}
+
+@test "Windows DPAPI resolves only SystemRoot PowerShell, never the PATH candidate" {
+  load_acq
+  _plant_powershell_stub
+  unset ACQ_SECRET_POWERSHELL_BIN
+  export SystemRoot='C:\Windows'
+  local trusted="$STUBDIR/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+  mkdir -p "${trusted%/*}"
+  cp "$STUBDIR/powershell.exe" "$trusted"
+  cygpath() {
+    [ "$1" = -u ] && [ "$2" = 'C:\Windows/System32/WindowsPowerShell/v1.0/powershell.exe' ] || return 1
+    printf '%s\n' "$trusted"
+  }
+  run _acq_secret_powershell_bin
+  assert_success
+  assert_output "$trusted"
+  uname() { echo MINGW64_NT; }
+  run _acq_secret_backend
+  assert_success
+  assert_output keychain-windows
+  # Git Bash may uppercase inherited Windows environment variable names.
+  unset SystemRoot
+  export SYSTEMROOT='C:\Windows'
+  run _acq_secret_powershell_bin
+  assert_success
+  assert_output "$trusted"
+  # A working PATH executable must not rescue an absent trusted executable.
+  rm "$trusted"
+  run _acq_secret_backend
+  assert_failure
+  assert_output --partial 'Windows DPAPI is unavailable'
+  refute_output --partial $'\nfile'
+}
+
+@test "Windows DPAPI refuses nonabsolute SystemRoot and never writes plaintext" {
+  load_acq
+  _plant_powershell_stub
+  unset ACQ_SECRET_POWERSHELL_BIN
+  uname() { echo MINGW64_NT; }
+  unset SYSTEMROOT
+  local root
+  for root in '' Windows 'C:Windows' '\Windows' /tmp/Windows; do
+    SystemRoot="$root" ACQ_SECRET_FORCE_FILE=1 run acq_secret_store acq.usai <<< test-value
+    assert_failure
+    assert_output --partial 'absolute Windows directory'
+    [ ! -e "$ACQ_SECRET_FILE_DIR/acq.usai" ]
+  done
 }

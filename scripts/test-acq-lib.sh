@@ -391,7 +391,11 @@ case "${1:-}" in
     # `secret ls` returns the optional fixture (to simulate existing secrets);
     # everything else is logged (must NOT contain actual key values) and no-ops.
     if [ "${2:-}" = "ls" ]; then
-      [ -n "${SBX_LS_FIXTURE:-}" ] && [ -f "$SBX_LS_FIXTURE" ] && cat "$SBX_LS_FIXTURE"
+      if [ -n "${SBX_LS_FIXTURE:-}" ] && [ -f "$SBX_LS_FIXTURE" ]; then
+        cat "$SBX_LS_FIXTURE"
+      else
+        printf 'SCOPE TYPE NAME SECRET\n\nCUSTOM SECRETS\nSCOPE TARGETS ENV PLACEHOLDER SECRET\n'
+      fi
       exit 0
     fi
     exit 0 ;;

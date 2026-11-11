@@ -376,16 +376,20 @@ _seed_duplicate_usai() {
   assert [ ! -e "$STUBDIR/secrets/acq.usai" ]
 }
 
-@test "secret rm(sbx): an unreadable sbx listing is reported, not claimed as cleared" {
+@test "secret rm(sbx): a failed sbx listing preserves the credential and sidecar" {
   load_acq
   mkdir -p "$STUBDIR/secrets"; printf 'k\n' > "$STUBDIR/secrets/acq.usai"
+  acq_secret_meta_store usai "" api.gsa.usai.gov USAI_API_KEY
+  local meta
+  meta=$(cat "$ACQ_SECRET_META_DIR/acq.usai")
   sbx() { if [ "${1:-} ${2:-}" = "secret ls" ]; then return 1; fi; command sbx "$@"; }
   run acq_backend_secret_rm -g usai
-  assert_success
-  assert_output --partial "removed 'usai' secret (global) from the acq store, but sbx's secret list could not"
-  assert_output --partial 'was not checked or removed'
-  refute_output --partial 'from the acq store and sbx proxy'
-  refute_regex "$(cat "$CALLS")" 'sbx secret rm --placeholder'
+  assert_failure
+  assert_output --partial "sbx's secret list could not be read; nothing was removed"
+  assert_equal "$(cat "$STUBDIR/secrets/acq.usai")" k
+  assert_equal "$(cat "$ACQ_SECRET_META_DIR/acq.usai")" "$meta"
+  refute_regex "$(cat "$CALLS")" 'sbx secret rm'
+
 }
 
 @test "secret set(sbx): the existing-entry hint names the real placeholder" {
@@ -403,4 +407,32 @@ _seed_duplicate_usai() {
   assert_output --partial 'sbx secret rm --placeholder sbx-cs-ok1 -f'
   assert_output --partial 'one placeholder holds unexpected characters'
   refute_output --partial '$(touch'
+}
+
+@test "secret rm(sbx): unparseable listings preserve the credential and sidecar" {
+  load_acq
+  mkdir -p "$STUBDIR/secrets"; printf 'k\n' > "$STUBDIR/secrets/acq.usai"
+  acq_secret_meta_store usai "" api.gsa.usai.gov USAI_API_KEY
+  local listing meta
+  meta=$(cat "$ACQ_SECRET_META_DIR/acq.usai")
+  for listing in '' 'unexpected output' $'CUSTOM SECRETS\n(global) truncated' $'CUSTOM SECRETS\n(global) host 123 placeholder masked'; do
+    printf '%s\n' "$listing" > "$STUBDIR/sbx_ls"
+    SBX_LS_FIXTURE="$STUBDIR/sbx_ls" run acq_backend_secret_rm -g usai
+    assert_failure
+    assert_output --partial 'nothing was removed'
+    assert_equal "$(cat "$STUBDIR/secrets/acq.usai")" k
+    assert_equal "$(cat "$ACQ_SECRET_META_DIR/acq.usai")" "$meta"
+    refute_regex "$(cat "$CALLS")" 'sbx secret rm'
+  done
+}
+
+@test "secret rm(sbx): a builtin credential survives an unreadable listing" {
+  load_acq
+  mkdir -p "$STUBDIR/secrets"; printf 'k\n' > "$STUBDIR/secrets/acq.github"
+  sbx() { if [ "${1:-} ${2:-}" = "secret ls" ]; then return 1; fi; command sbx "$@"; }
+  run acq_backend_secret_rm -g github
+  assert_failure
+  assert_output --partial 'nothing was removed'
+  assert_equal "$(cat "$STUBDIR/secrets/acq.github")" k
+  refute_regex "$(cat "$CALLS")" 'sbx secret rm'
 }

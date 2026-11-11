@@ -2177,30 +2177,31 @@ acq_backend_secret_rm() {
   # for `secret set` and rotation: running sandboxes hold one of those
   # placeholders and acq cannot tell which, so it removes none of them (and
   # keeps the acq store entry). A built-in with no sidecar has no custom row.
-  local rm_env="" rm_host="" rm_placeholders="" rm_unlisted=0
+  local rm_env="" rm_host="" rm_placeholders=""
   if [ "$is_builtin" -eq 1 ]; then
     rm_env="$sidecar_env"; rm_host="$sidecar_host"
   else
     rm_env="${sidecar_env:-$(_acq_service_hosts_env "$service" "$scope_name" | cut -f2)}"
     rm_host="${sidecar_host:-$(_acq_service_hosts_env "$service" "$scope_name" | cut -f1)}"
   fi
-  if [ -n "$rm_env" ]; then
-    # A listing that cannot be read leaves the custom entry unchecked; the
-    # closing message says so rather than claim the proxy was cleared.
-    rm_placeholders=$(_acq_sbx_custom_placeholders "$scope_flag" "$scope_name" "$rm_env" "$rm_host") \
-      || { rm_placeholders=""; rm_unlisted=1; }
-    if [ "$(printf '%s\n' "$rm_placeholders" | grep -c .)" -gt 1 ]; then
-      local _rm_again="acq secret rm -g ${service}"
-      [ -n "$scope_flag" ] || _rm_again="acq secret rm ${scope_name} ${service}"
-      _acq_sbx_print_duplicate_custom "$scope_flag" "$scope_name" "$rm_env" "${rm_host:-any host}" \
-        "nothing was removed" "$_rm_again" "$rm_placeholders"
-      return 1
-    fi
-    if [ -n "$rm_placeholders" ] && ! _acq_sbx_placeholder_ok "$rm_placeholders"; then
-      echo "acq: secret rm: sbx lists the placeholder for ${rm_env} with unexpected characters;" >&2
-      echo "     nothing was removed. Check 'sbx secret ls' and remove it with sbx directly." >&2
-      return 1
-    fi
+  # An unreadable listing is unknown state, not proof of absence. Retain
+  # the stored credential and sidecar so the removal can be retried intact.
+  rm_placeholders=$(_acq_sbx_custom_placeholders "$scope_flag" "$scope_name" "$rm_env" "$rm_host") || {
+    echo "acq: secret rm: sbx's secret list could not be read; nothing was removed." >&2
+    echo "     Check 'sbx secret ls' and retry the removal." >&2
+    return 1
+  }
+  if [ "$(printf '%s\n' "$rm_placeholders" | grep -c .)" -gt 1 ]; then
+    local _rm_again="acq secret rm -g ${service}"
+    [ -n "$scope_flag" ] || _rm_again="acq secret rm ${scope_name} ${service}"
+    _acq_sbx_print_duplicate_custom "$scope_flag" "$scope_name" "$rm_env" "${rm_host:-any host}" \
+      "nothing was removed" "$_rm_again" "$rm_placeholders"
+    return 1
+  fi
+  if [ -n "$rm_placeholders" ] && ! _acq_sbx_placeholder_ok "$rm_placeholders"; then
+    echo "acq: secret rm: sbx lists the placeholder for ${rm_env} with unexpected characters;" >&2
+    echo "     nothing was removed. Check 'sbx secret ls' and remove it with sbx directly." >&2
+    return 1
   fi
 
   # 1) Remove from the acq store (source of truth). Idempotent.
@@ -2248,17 +2249,7 @@ acq_backend_secret_rm() {
 
   local where="global"
   [ -n "$scope_name" ] && where="sandbox '$scope_name'"
-  if [ "$rm_unlisted" -eq 1 ]; then
-    if [ "$removed_store" -eq 1 ]; then
-      echo "acq: removed '$service' secret (${where}) from the acq store, but sbx's secret list could not" >&2
-    else
-      echo "acq: no '$service' secret found in the acq store (${where}), and sbx's secret list could not" >&2
-    fi
-    echo "     be read, so its proxy entry for ${rm_env} was not checked or removed. Check 'sbx secret ls'" >&2
-    local _unl_scope=""
-    [ -n "$scope_flag" ] || _unl_scope=" --sandbox $scope_name"
-    echo "     and remove it with 'sbx secret rm --placeholder P${_unl_scope} -f'." >&2
-  elif [ "$removed_store" -eq 1 ]; then
+  if [ "$removed_store" -eq 1 ]; then
     echo "acq: removed '$service' secret (${where}) from the acq store and sbx proxy." >&2
   else
     echo "acq: no '$service' secret found in the acq store (${where}); cleared sbx proxy anyway." >&2
@@ -2356,10 +2347,10 @@ acq_backend_key_present() {
 # them, the match the Python acq uses, so a secret for the same env var on
 # another host is not counted; an empty HOST matches any host. ENV is located
 # by value and the next field is the placeholder, robust to a multi-token
-# TARGETS cell. Returns 1 when `sbx secret ls` fails.
+# TARGETS cell. Returns 1 when the listing fails or its table cannot be parsed.
+# With an empty ENV, validate the listing without selecting a custom entry.
 _acq_sbx_custom_placeholders() {
   local scope_flag="$1" scope_name="$2" env_var="$3" host="${4:-}" listing want_scope
-  [ -n "$env_var" ] || return 0
   listing=$(sbx secret ls 2>/dev/null) || return 1
   if [ -n "$scope_flag" ]; then want_scope="(global)"; else want_scope="$scope_name"; fi
   printf '%s\n' "$listing" | awk \
@@ -2371,15 +2362,18 @@ _acq_sbx_custom_placeholders() {
       return n > 0
     }
     BEGIN { m = split(host, h, ","); for (k = 1; k <= m; k++) if (h[k] != "") want[h[k]] = 1 }
-    /^CUSTOM SECRETS/ { in_custom = 1; next }
-    !in_custom { next }
+    /^SCOPE[[:space:]]+TYPE[[:space:]]+NAME[[:space:]]+SECRET/ { known = 1; next }
+    /^CUSTOM SECRETS/ { known = 1; in_custom = 1; next }
     NF == 0 { next }
-    $1 == "SCOPE" { next }
+    !in_custom { if (!known || NF != 4) bad = 1; next }
+    $1 == "SCOPE" { if ($2 != "TARGETS" || $3 != "ENV" || $4 != "PLACEHOLDER") bad = 1; next }
+    NF < 5 || $(NF-2) !~ /^[A-Za-z_][A-Za-z0-9_]*$/ { bad = 1; next }
     $1 == scope {
       for (i = 2; i < NF; i++) {
         if ($i == env && within($(i-1))) { print $(i+1); break }
       }
     }
+    END { if (!known || bad) exit 1 }
   '
 }
 

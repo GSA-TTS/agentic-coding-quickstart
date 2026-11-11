@@ -587,6 +587,11 @@ kit_translate_fetch() (
       _kit_fetch_materialize "$root/source" HEAD "$dir" "$destdir"
       ;;
     *)
+      # Percent escapes can hide delimiters from the input checks. Local paths
+      # are literal; do not decode them or pass an escaped spelling downstream.
+      case "$kitref" in
+        *%*) echo "kit-translate: percent escapes are not allowed in local kit paths" >&2; return 1 ;;
+      esac
       # Local path — use as-is.
       if [ ! -d "$kitref" ]; then
         echo "kit-translate: local kit path not found: $(kit_ref_display "$kitref")" >&2

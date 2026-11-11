@@ -5272,6 +5272,46 @@ if actual != required:
   printf '%s\n' "$python"
 }
 
+# Native Windows reports no execute bit for script files. Adapt only the
+# snapshotted normalizers' stat results for the pinned validator; every other
+# validation and all POSIX mode checks still run unchanged.
+# Usage: _acq_provider_input_validate VALIDATOR PYTHON ARGS... (the interpreter
+# runs with -I below).
+_acq_provider_input_validate() {
+  local validator="$1" python="$2"
+  shift 2
+  "$python" -I - "$validator" "$@" <<'PYTHON'
+import json, os, runpy, stat, sys
+validator = sys.argv[1]
+sys.argv = sys.argv[1:]
+sys.path.insert(0, os.path.dirname(os.path.abspath(validator)))
+if os.name == 'nt':
+    normalizers = set()
+    for index, arg in enumerate(sys.argv[:-1]):
+        if arg == '--bundle':
+            manifest = os.path.abspath(sys.argv[index + 1])
+            with open(manifest, encoding='utf-8') as stream:
+                path = json.load(stream).get('normalizerPath')
+            if isinstance(path, str):
+                normalizers.add(os.path.normcase(os.path.abspath(os.path.join(os.path.dirname(manifest), path))))
+    original_stat = os.stat
+    class NormalizerStat:
+        def __init__(self, result):
+            self.result = result
+            self.st_mode = result.st_mode | 0o111
+        def __getattr__(self, name):
+            return getattr(self.result, name)
+    def validator_stat(path, *args, **kwargs):
+        result = original_stat(path, *args, **kwargs)
+        if (not isinstance(path, int) and stat.S_ISREG(result.st_mode)
+                and os.path.normcase(os.path.abspath(path)) in normalizers):
+            return NormalizerStat(result)
+        return result
+    os.stat = validator_stat
+runpy.run_path(validator, run_name='__main__')
+PYTHON
+}
+
 acq_provider_input_prepare() {
   local backend="$1" name="$2" root kitref kitdir manifest release_root="" python=""
   local validator="" schema_dir="" bindings="" merged_bindings="" token stage generation manifests=() kitdirs=()
@@ -5328,9 +5368,9 @@ acq_provider_input_prepare() {
   local validator_args=(--schema-dir "$schema_dir" --credential-bindings "$merged_bindings")
   local i
   for i in "${!manifests[@]}"; do validator_args+=(--bundle "${manifests[$i]}"); done
-  # -E -s: ignore PYTHON* env (an empty PYTHONPATH entry is the cwd) and user
-  # site-packages, but keep the pinned validator's own directory on sys.path.
-  "$python" -E -s "$validator" "${validator_args[@]}" >&2 || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
+  # Isolate the launcher's imports from the cwd, PYTHON* and user packages,
+  # then allow imports from the pinned validator directory only.
+  _acq_provider_input_validate "$validator" "$python" "${validator_args[@]}" >&2 || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
   for i in "${!manifests[@]}"; do
     _acq_provider_input_materialize "${manifests[$i]}" "${kitdirs[$i]}" "$generation/models/providers" || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
   done

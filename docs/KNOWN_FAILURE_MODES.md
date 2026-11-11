@@ -3885,31 +3885,35 @@ recreate.
 
 ### Residual risk: a parent directory swapped for a junction (Windows)
 
-The Windows snapshot checks each component of an artifact path with `os.lstat`
-and then opens the path by name, so a parent directory replaced with a junction
-between its check and the open is followed. (A swapped leaf is caught: the
-opened handle must be the file that was checked.) The directory walk
-`_acq_provider_input_nt_dir` has the same window. It matters most for local kit
-paths: a kit fetched from a repository is checked out into acq's private
-staging directory, but a local kit directory is read where it is, so anyone who
-can write there can race the walk. The POSIX snapshot has no such window,
-because it opens each component relative to the descriptor of the one before.
+The opt-in Bash implementation (`ACQ_IMPL=bash`) checks each component of an
+artifact path with `os.lstat`, then opens the file by name. A writable parent
+replaced with a junction after its check can redirect later lookups outside the
+kit. The leaf's volume/file-index comparison does not catch this if both the
+leaf lookup and open occur through the replacement parent. The directory walk
+`_acq_provider_input_nt_dir` has the same check/use window, including during
+creation. Local kits are especially exposed because Bash reads them in place;
+remote checkouts are in acq's private staging directory. The POSIX snapshot
+opens components relative to directory descriptors with `O_NOFOLLOW`.
 
-Mitigation options, not yet implemented:
+**Status:** This residual remains on the supported Windows Bash opt-in path.
+A second path walk after opening does not close it: a writer can restore the
+original parent before that walk. Copying into private staging also needs a
+safe source open. Closing it requires a native Windows handle check (such as
+`GetFinalPathNameByHandleW` containment on every opened source) and directory
+handles held against replacement during traversal and creation. That is not a
+small, portable Bash correction, so no path-based recheck is presented as a fix.
+The deterministic parent-swap regression in
+`test/bats/147-provider-input-projection.bats` records the current exposure.
 
-1. Copy a local kit into the private staging directory first (with the same
-   no-link checks), so the snapshot only ever reads a tree that only acq writes.
-2. After opening each file, compare `GetFinalPathNameByHandleW` on the handle
-   with the path that was checked, through `ctypes`; a junction anywhere in the
-   path makes them differ.
-3. Walk with handles: open each component with `CreateFileW` and
-   `FILE_FLAG_OPEN_REPARSE_POINT`, without `FILE_SHARE_DELETE`, and open the
-   next relative to it (`NtCreateFile` with a root directory handle), which is
-   the Windows form of the POSIX descriptor walk.
+`ACQ_IMPL=python`, the Windows default under ADR-0048m, is not affected by this
+Bash snapshot race: `py-acq/src/acq_py/kit_fetch.py` copies local kits into a
+private cache and checks each opened source handle's final path remains inside
+the kit before copying. It does not invoke Bash's directory walker or snapshot.
 
-**Tracked:** unblock trigger is any change that makes local provider kits
-common on Windows, or ADR-0048m's default flip, whichever comes first. The flip
-took effect on 2026-11-10, so this is now due.
+**Tracked:** implement native Windows handle-based source and directory
+traversal before claiming the Bash opt-in path is safe against concurrent
+parent-junction replacement. This entry remains the durable tracking record;
+the Windows default flip does not resolve the Bash residual.
 
 ### Prevention / Status
 
@@ -5102,14 +5106,24 @@ provider facts looked for the validator runtime at
 validate, materialize, publish, the backend create with the provider-input
 mount, and `acq rm` all completed for msb and sbx.
 
-**Resolution:** Use the Python acq on Windows (the default there since
-ADR-0048m: `ACQ_IMPL` unset or `python`), which does not run that validator. Tracked: skip the execute-bit check on Windows in the
-Patterns validator and bump `PATTERNS_KIT_REF`, or have acq run the pinned
-validator through a small launcher that reports execute bits on Windows. Also
-seen on the same run, and tracked with it: `scripts/setup-provider-input-validator`
-under Git Bash picks the Microsoft Store `python3` alias, installs under
-`XDG_DATA_HOME` while acq on Windows looks under `LOCALAPPDATA`, and its `ln
--s` makes a full copy of the runtime that a second run cannot replace.
+**Resolution:** `acq.backends/common.sh` now runs the pinned validator through
+`_acq_provider_input_validate`. On native Windows Python only, this launcher
+reports execute bits for the regular normalizer files declared in the private
+snapshots. It preserves the real file type, other stat attributes, and all
+other validation. POSIX retains the original execute-bit and access checks.
+The materializer still sets the guest normalizer mode explicitly. The Bats
+regression exercises a non-executable script, an unrelated data file, a
+non-file normalizer, and the strict POSIX path. Native Windows verification
+against the released validator remains required; Linux platform emulation does
+not establish a successful Windows create.
+
+Use `ACQ_IMPL=python` (the Windows default under ADR-0048m) to avoid the Bash
+validator path. Separate bootstrap problems remain tracked here:
+`scripts/setup-provider-input-validator` under Git Bash can pick the Microsoft
+Store `python3` alias, installs under `XDG_DATA_HOME` while acq on Windows looks
+under `LOCALAPPDATA`, and its `ln -s` makes a full copy of the runtime that a
+second run cannot replace. Revisit these before claiming the Bash Windows
+bootstrap works from scratch.
 
 ---
 
