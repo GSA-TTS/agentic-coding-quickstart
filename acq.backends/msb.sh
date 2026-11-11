@@ -7151,9 +7151,9 @@ _acq_msb_refeed_one() {
   if _acq_msb_cli modify "$sb" --secret "${_env}@${_host}" </dev/null >/dev/null 2>&1; then
     return 0
   fi
-  # msb can replace a bound secret live but cannot add a new one to a running
-  # VM; the stored value is kept either way.
-  echo "acq(msb): could not apply the credential to running sandbox '$sb' (msb cannot add a new secret to a running sandbox). It is stored; recreate the sandbox to bind it, or start it with ACQ_IMPL=python, whose start binds stored credentials before boot." >&2
+  # msb binds a secret on a stopped sandbox and replaces a bound one live, but
+  # cannot add a new one to a running VM; the stored value is kept either way.
+  echo "acq(msb): could not apply the credential to sandbox '$sb'. If it is running, msb cannot add a new secret to a running sandbox: run 'acq stop $sb', then re-run this 'acq secret set' (or start it with ACQ_IMPL=python, whose start binds stored credentials before boot)." >&2
   return 1
 }
 
@@ -7191,7 +7191,7 @@ _acq_msb_secret_refeed() {
   # shellcheck disable=SC2163  # dynamic export of the resolved binding env var
   export "$_env=$val"
   if [ -n "$scope_name" ]; then
-    if _acq_msb_is_running "$scope_name" && _acq_msb_refeed_eligible "$service" "$scope_name" "$scope_name"; then
+    if acq_backend_exists "$scope_name" && _acq_msb_refeed_eligible "$service" "$scope_name" "$scope_name"; then
       _acq_msb_refeed_one "$scope_name" "$_env" "$_host" "$_old_env" "$_old_host" \
         && applied=$((applied + 1))
     fi
@@ -7206,7 +7206,7 @@ _acq_msb_secret_refeed() {
       _acq_msb_refeed_one "$sb" "$_env" "$_host" "$_old_env" "$_old_host" \
         && applied=$((applied + 1))
     done <<EOF
-$(_acq_msb_cli list --running -q 2>/dev/null)
+$(_acq_msb_cli list -q 2>/dev/null)
 EOF
   fi
   unset "$_env"
@@ -7233,14 +7233,14 @@ _acq_msb_secret_set_guidance() {
     usai|github)
       echo "acq: stored '$service' in the acq secret store." >&2
       if [ "$applied" -gt 0 ]; then
-        echo "      Applied to $applied running sandbox(es); no recreate needed." >&2
+        echo "      Applied to $applied sandbox(es); no recreate needed." >&2
       fi
       ;;
     *)
       if [ -n "$_env" ] && [ -n "$_host" ]; then
         echo "acq: stored '$service' in the acq secret store (bound as ${_env}@${_host})." >&2
         if [ "$applied" -gt 0 ]; then
-          echo "      Applied to $applied running sandbox(es); no recreate needed." >&2
+          echo "      Applied to $applied sandbox(es); no recreate needed." >&2
         fi
       else
         echo "acq: stored '$service' in the acq secret store, but it has no endpoint" >&2
@@ -7308,8 +7308,8 @@ acq_backend_secret_propagate() {
     return 1
   fi
   if [ -n "$scope_name" ]; then
-    _acq_msb_is_running "$scope_name" || return 0
-  elif [ -z "$(_acq_msb_cli list --running -q 2>/dev/null)" ]; then
+    acq_backend_exists "$scope_name" || return 0
+  elif [ -z "$(_acq_msb_cli list -q 2>/dev/null)" ]; then
     return 0
   fi
 
@@ -7328,19 +7328,19 @@ acq_backend_secret_propagate() {
   # its own value or excludes the provider is not reported as a failure.
   if [ -n "$scope_name" ]; then
     # The re-feed below prints any warning; the count stays quiet.
-    _acq_msb_is_running "$scope_name" && _acq_msb_refeed_eligible "$service" "$scope_name" "$scope_name" 2>/dev/null && eligible=1
+    _acq_msb_refeed_eligible "$service" "$scope_name" "$scope_name" 2>/dev/null && eligible=1
   else
     while IFS= read -r sb; do
       sb="${sb%$'\r'}"
       [ -n "$sb" ] || continue
       _acq_msb_refeed_eligible "$service" "$sb" "" </dev/null 2>/dev/null && eligible=$((eligible + 1))
     done <<EOF
-$(_acq_msb_cli list --running -q 2>/dev/null)
+$(_acq_msb_cli list -q 2>/dev/null)
 EOF
   fi
   applied=$(_acq_msb_secret_refeed "$service" "$scope_name" "$_env" "$_host")
   if [ "$applied" -gt 0 ]; then
-    echo "acq(msb): applied '$service' to $applied running sandbox(es)." >&2
+    echo "acq(msb): applied '$service' to $applied sandbox(es)." >&2
   elif [ "$eligible" -gt 0 ]; then
     echo "acq(msb): failed to apply '$service' to existing sandbox(es)." >&2
     return 1

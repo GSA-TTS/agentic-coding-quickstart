@@ -158,8 +158,10 @@ the [Backend Guide](../BACKEND_GUIDE.md) for the full per-backend secret model.
 > `acq create` gate on the USAi key on a fresh create and offer to
 > scope a GitHub token **before** provisioning, so a token you supply binds to the
 > new sandbox. Rotating an existing binding with `acq secret set` /
-> `acq github-scope` applies live via `msb modify`. A new credential binds at
-> the next start: run `acq stop NAME && acq start NAME`.
+> `acq github-scope` applies live via `msb modify`. msb cannot add a new
+> credential to a running sandbox: run `acq stop NAME`, then set it (it binds to
+> the stopped sandbox) and `acq start NAME`. With `ACQ_IMPL=python`, `acq start`
+> also binds a credential that was stored while the sandbox was stopped.
 >
 > Because msb swaps the real value in on the wire, inspecting the guest
 > environment is not automatically a leak — but never deliberately dump secret

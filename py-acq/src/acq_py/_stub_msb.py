@@ -395,11 +395,6 @@ def main(argv: list[str]) -> int:
             print(f"msb: sandbox '{name}' already exists", file=sys.stderr)
             return 1
         bindings: dict = {}
-        if os.environ.get("ACQ_MSB_STUB_REQUIRE_RESTART") and catalog[name] == "running":
-            for spec in _flag_values(args, "--secret"):
-                if spec.partition("@")[0] not in bindings:
-                    print("msb: new secret requires restart; no changes were applied", file=sys.stderr)
-                    return 1
         problem = _apply_secrets(args, bindings)
         if problem is not None:
             print(f"msb: {problem}", file=sys.stderr)

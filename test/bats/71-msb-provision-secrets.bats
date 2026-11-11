@@ -394,7 +394,9 @@ LIST
   assert_regex "$(cat "$CALLS")" 'msb modify nousai --secret GITHUB_TOKEN@'
 }
 
-@test "msb: live refeed counts successful running targets and reports restart failures" {
+@test "msb: refeed binds stopped sandboxes, counts what applied, and explains a running one" {
+  # msb binds a secret on a stopped sandbox (idle) and rotates a bound one live
+  # (live), but refuses to add a new one to a running sandbox (fresh).
   run bash -c '
     export ACQ_SCRIPT_DIR="$1"
     . "$1/acq.backends/common.sh"
@@ -404,22 +406,23 @@ LIST
     _acq_msb_cli() {
       printf "%s\n" "$*" >> "$CALLS"
       case "$*" in
-        "list --running -q") printf "%s\n" live fresh ;;
         "list -q") printf "%s\n" live fresh idle ;;
         "modify live --secret API_KEY@api.example.gov") return 0 ;;
+        "modify idle --secret API_KEY@api.example.gov") return 0 ;;
         *) return 1 ;;
       esac
     }
     applied=$(_acq_msb_secret_refeed custom "" API_KEY api.example.gov)
     _acq_msb_secret_set_guidance custom API_KEY api.example.gov "$applied"
-    [ "$applied" = 1 ] || exit 1
-    _acq_msb_is_running() { return 1; }
-    [ "$(_acq_msb_secret_refeed custom idle API_KEY api.example.gov)" = 0 ]
+    [ "$applied" = 2 ] || exit 1
+    # A named, stopped sandbox is bound too: msb accepts a new secret there.
+    [ "$(_acq_msb_secret_refeed custom idle API_KEY api.example.gov)" = 1 ]
   ' _ "$REPO_ROOT"
   assert_success
-  assert_regex "$output" 'Applied to 1 running sandbox'
+  assert_regex "$output" 'Applied to 2 sandbox'
+  assert_regex "$output" "could not apply the credential to sandbox 'fresh'"
   assert_regex "$output" 'cannot add a new secret to a running sandbox'
-  refute_regex "$(cat "$CALLS")" 'modify idle'
+  assert_regex "$(cat "$CALLS")" 'modify idle --secret API_KEY@api.example.gov'
 }
 
 @test "msb: rm count includes stopped targets and excludes failed removes" {
