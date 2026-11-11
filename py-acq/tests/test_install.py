@@ -297,6 +297,28 @@ def test_missing_provenance_fails_closed(tmp_path):
 
 
 @supported_platform_only
+def test_tampered_provenance_fails_closed(tmp_path):
+    release = _make_release(tmp_path)
+    (release / "provenance.json").write_text('{"tampered": true}\n')
+    proc = _run_installer(tmp_path, "--source", str(release), "--yes")
+    assert proc.returncode == 1
+    assert "checksum mismatch for provenance.json" in proc.stderr.decode()
+    assert not _install_dir(tmp_path).exists()
+
+
+@supported_platform_only
+def test_provenance_without_a_sha256sums_entry_fails_closed(tmp_path):
+    release = _make_release(tmp_path)
+    sums = release / "SHA256SUMS"
+    sums.write_text("".join(line + "\n" for line in sums.read_text().splitlines()
+                            if not line.endswith("  provenance.json")))
+    proc = _run_installer(tmp_path, "--source", str(release), "--yes")
+    assert proc.returncode == 1
+    assert "no entry for provenance.json" in proc.stderr.decode()
+    assert not _install_dir(tmp_path).exists()
+
+
+@supported_platform_only
 def test_consent_is_not_inferred_when_noninteractive(tmp_path):
     release = _make_release(tmp_path)
     # No --yes and a non-interactive stdin: consent must decline (fail closed).

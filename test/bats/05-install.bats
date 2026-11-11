@@ -120,13 +120,13 @@ _install_dir() {
   run sh "$REPO_ROOT/install.sh" --source "$src" --yes
   assert_failure
   assert_output --partial "checksum mismatch for provenance.json"
-  [ ! -e "$(_install_dir)/py-acq" ]
+  [ ! -e "$(_install_dir)" ]
   cp "$REPO_ROOT/test/fixtures/installer/provenance.json" "$src/provenance.json"
   grep -v ' provenance.json$' "$REPO_ROOT/test/fixtures/installer/SHA256SUMS" > "$src/SHA256SUMS"
   run sh "$REPO_ROOT/install.sh" --source "$src" --yes
   assert_failure
   assert_output --partial "no entry for provenance.json"
-  [ ! -e "$(_install_dir)/py-acq" ]
+  [ ! -e "$(_install_dir)" ]
 }
 
 @test "installer: consent is never inferred non-interactively" {

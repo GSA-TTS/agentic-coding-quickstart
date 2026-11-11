@@ -86,7 +86,7 @@ teardown() {
 }
 
 @test "windows installer: requires provenance from URL and offline sources before extraction" {
-  local installer check_line extract_line
+  local installer check_line extract_line hash_line
   installer=$(cat "$REPO_ROOT/install.ps1")
 
   grep -qF '$ProvenanceName = "provenance.json"' "$REPO_ROOT/install.ps1"
@@ -94,7 +94,7 @@ teardown() {
   grep -qF 'Invoke-WebRequest -Uri "$($resolved.Url)/$ProvenanceName" -OutFile $provenancePath' "$REPO_ROOT/install.ps1"
   grep -qF 'throw "could not download $($resolved.Url)/$ProvenanceName"' "$REPO_ROOT/install.ps1"
   grep -qF 'Test-Path -LiteralPath (Join-Path $resolved.Url $ProvenanceName) -PathType Leaf' "$REPO_ROOT/install.ps1"
-  grep -qF 'throw "offline asset set at $($resolved.Url) has no $ProvenanceName"' "$REPO_ROOT/install.ps1"
+  grep -qF 'throw "offline asset set at $($resolved.Url) has no $ProvenanceName."' "$REPO_ROOT/install.ps1"
   grep -qF 'Copy-Item -LiteralPath (Join-Path $resolved.Url $ProvenanceName) -Destination $provenancePath' "$REPO_ROOT/install.ps1"
   grep -qF 'Test-Path -LiteralPath $provenancePath -PathType Leaf' "$REPO_ROOT/install.ps1"
   grep -qF 'throw "release is missing the provenance manifest ($ProvenanceName)"' "$REPO_ROOT/install.ps1"
@@ -106,6 +106,9 @@ teardown() {
   check_line=$(grep -nF 'throw "release is missing the provenance manifest' "$REPO_ROOT/install.ps1" | cut -d: -f1)
   extract_line=$(grep -nF 'Expand-Archive -LiteralPath $zipPath' "$REPO_ROOT/install.ps1" | cut -d: -f1)
   [ -n "$check_line" ] && [ -n "$extract_line" ] && [ "$check_line" -lt "$extract_line" ]
+  # The provenance checksum is verified before anything is extracted, too.
+  hash_line=$(grep -nF 'throw "checksum mismatch for $ProvenanceName' "$REPO_ROOT/install.ps1" | cut -d: -f1)
+  [ -n "$hash_line" ] && [ "$hash_line" -lt "$extract_line" ]
 }
 
 @test "windows installer: requires a wheelhouse directory before publishing" {

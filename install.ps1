@@ -153,7 +153,7 @@ function Resolve-Source {
 function Get-ExpectedHash {
     param(
         [Parameter(Mandatory = $true)][string]$SumsPath,
-        [string]$Name = $PackageName
+        [ValidateNotNullOrEmpty()][string]$Name = $PackageName
     )
 
     foreach ($line in (Get-Content -LiteralPath $SumsPath)) {
@@ -376,7 +376,7 @@ function Install-AcqZip {
                 throw "offline asset set at $($resolved.Url) has no $SumsName."
             }
             if (-not (Test-Path -LiteralPath (Join-Path $resolved.Url $ProvenanceName) -PathType Leaf)) {
-                throw "offline asset set at $($resolved.Url) has no $ProvenanceName"
+                throw "offline asset set at $($resolved.Url) has no $ProvenanceName."
             }
             if (-not (Test-Path -LiteralPath (Join-Path $resolved.Url $PackageName) -PathType Leaf)) {
                 throw "offline asset set at $($resolved.Url) has no $PackageName."
