@@ -192,6 +192,8 @@ def record_write(
     kits_unconfirmed: bool | None = None,
     clone: bool | None = None,
     guest_workspace: str | None = None,
+    extra_workspaces: list[str] | None = None,
+    workspace_read_only: bool = False,
 ) -> dict:
     """Write (atomically) a sandbox's host-authoritative state record.
 
@@ -215,6 +217,10 @@ def record_write(
         "agent": agent,
         "workspace": workspace,
     }
+    if extra_workspaces:
+        doc["extra_workspaces"] = extra_workspaces
+    if workspace_read_only:
+        doc["workspace_read_only"] = True
     if image:
         doc["image"] = image
     if guest_workspace:

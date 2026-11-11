@@ -115,6 +115,16 @@ run `create`/`run` on a disposable clone in the Python implementation too, with
 the Bash adapter's isolation, refusals and on-disk layout (`py-acq/README.md`,
 KNOWN_FAILURE_MODES §67).
 
+The CLI-form gaps for multiple run/create workspaces, per-path `:ro`, opaque
+`run ... -- AGENT_ARGS...`, and pre-verb `--image REF` / `--image=REF` are now
+ported. Each workspace receives path and trusted-directory containment checks;
+clone mode affects only the primary. Extra mounts and read-only markers persist
+through recreate and are checked on re-attach; agent arguments remain specific
+to each invocation. Image precedence and backend-specific argument dispatch
+follow the Bash adapters. Evidence is in `py-acq/tests/test_cli_forms.py` and
+the CLI-form rows in `test/vectors/manifest.json`; this is offline parity
+evidence, not a new Tier-3 qualification.
+
 The Python implementation also has behaviour gaps against Bash. It reads the
 `extra_kits`, `provider_kit` and `scope_github_token` settings that
 `acq configure` writes, but it applies a kit outside its pinned built-in bundle
