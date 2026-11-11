@@ -289,7 +289,8 @@ def recorded_workspaces(name: str) -> list[str]:
         if isinstance(config, dict) and isinstance(config.get("mounts"), list):
             paths += [m.get("host") for m in config["mounts"] if isinstance(m, dict)
                       and not (isinstance(m.get("options"), dict) and m["options"].get("readonly") is True)]
-    return [p for p in paths if isinstance(p, str) and p and not p.endswith(":ro")]
+    # The record and inspect usually name the same workspace; keep each path once, in order.
+    return list(dict.fromkeys(p for p in paths if isinstance(p, str) and p and not p.endswith(":ro")))
 
 
 # ---------------------------------------------------------------------------

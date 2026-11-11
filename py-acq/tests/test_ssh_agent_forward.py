@@ -41,6 +41,12 @@ needs_bash = pytest.mark.skipif(BASH is None or os.name == "nt" or shutil.which(
                                 reason="the Bash parity check needs bash and realpath")
 
 
+
+def _target(link) -> str:
+    """The link's target, without the ``\\\\?\\`` prefix Windows' readlink adds."""
+    target = os.readlink(link)
+    return target[4:] if target.startswith("\\\\?\\") else target
+
 def _sock(path: Path) -> str:
     """Bind (and close) a unix socket at ``path``; the socket file stays."""
     here = os.getcwd()
@@ -268,7 +274,7 @@ def test_the_route_names_the_managed_link_and_the_link_resolves_to_the_agent(tmp
     flags = ssh_agent.vsock_flags("linkbox", [])
     link = _link(tmp_path, "linkbox")
     assert flags == ["--vsock", f"{link}:3552/stream"]
-    assert os.readlink(link) == os.path.realpath(agent)
+    assert _target(link) == os.path.realpath(agent)
     assert ssh_agent.forwarding_sock("linkbox") == GUEST_SOCK
     err = capsys.readouterr().err
     assert "forwarding your host ssh-agent into the guest" in err
@@ -480,7 +486,7 @@ def test_a_bridge_restart_re_points_an_existing_link_at_the_current_agent(tmp_pa
     monkeypatch.setenv("SSH_AUTH_SOCK", new)
     _seed_recorded("rebootbox")
     ssh_agent.start_bridge("rebootbox")
-    assert os.readlink(link) == os.path.realpath(new)
+    assert _target(link) == os.path.realpath(new)
     assert sorted(p.name for p in link.parent.iterdir()) == ["rebootbox.sock"]  # no temp link left
     _seed_recorded("legacybox")
     ssh_agent.start_bridge("legacybox")
@@ -502,7 +508,7 @@ def test_a_non_socket_agent_leaves_a_link_to_the_users_socket_alone(tmp_path, mo
     err = capsys.readouterr().err
     assert "UNREACHABLE" in err and "NOT re-pointed" in err and "just re-pointed" not in err
     assert "names your live agent" in err
-    assert os.readlink(link) == held
+    assert _target(link) == held
 
 
 @pytest.mark.parametrize("target", ["missing", "file", "symlink"])
@@ -573,7 +579,7 @@ def test_re_pointing_the_link_at_another_users_socket_warns_as_create_does(tmp_p
     monkeypatch.setattr(ssh_agent, "_socket_owned_by_me", lambda p: False)
     assert ssh_agent.link_refresh("ownbox") == ("", False)
     assert "SSH_AUTH_SOCK names a socket owned by another user; forwarding it anyway" in capsys.readouterr().err
-    assert os.readlink(link) == os.path.realpath(tmp_path / "theirs.sock")
+    assert _target(link) == os.path.realpath(tmp_path / "theirs.sock")
 
 
 @needs_unix_sockets
@@ -635,7 +641,7 @@ def test_a_link_that_cannot_be_replaced_is_reported_as_such(tmp_path, monkeypatc
     err = capsys.readouterr().err
     assert f"Fix or remove '{link.parent}'" in err and "skipping the bridge" in err
     assert len(err.splitlines()) == 1
-    assert link.is_symlink() and os.readlink(link) == str(tmp_path / "old.sock")
+    assert link.is_symlink() and _target(link) == str(tmp_path / "old.sock")
     assert not any("nohup socat" in " ".join(argv) for argv in seen)
     assert "removed the ssh-agent route link" not in err and "UNREACHABLE" not in err
     assert "just re-pointed" not in err and "names your live agent" not in err
@@ -779,7 +785,7 @@ def test_create_routes_the_agent_wires_the_bridge_and_sessions_get_the_socket(tm
     assert rc == 0, doc
     link = _link(tmp_path, "box")
     assert _vsock(_create_argv(seen)) == [f"{link}:3552/stream"]
-    assert os.readlink(link) == os.path.realpath(agent)
+    assert _target(link) == os.path.realpath(agent)
     assert "forwarding your host ssh-agent" in err
     # Forwarding adds no envelope field (``ports`` comes from port publishing).
     assert set(doc["data"]) == {"name", "backend", "agent", "workspace", "state", "image", "secret_bindings",
@@ -876,7 +882,7 @@ def test_a_start_with_an_agent_after_the_opt_out_reconnects(tmp_path, monkeypatc
     seen = _spy(monkeypatch)
     rc, doc, _err = _invoke(capsys, "--backend", "msb", "start", "box", "--json")
     assert rc == 0, doc
-    assert os.readlink(_link(tmp_path, "box")) == os.path.realpath(agent)  # the route names the link
+    assert _target(_link(tmp_path, "box")) == os.path.realpath(agent)  # the route names the link
     assert len(_bridges(seen)) == 1 and _recorded("box") == GUEST_SOCK
 
 
@@ -911,12 +917,12 @@ def test_a_socket_inside_the_workspace_is_refused_at_create(tmp_path, monkeypatc
 def test_a_socket_inside_the_recorded_workspace_is_refused_at_refresh(tmp_path, monkeypatch, capsys, roomy):
     ws = _created(tmp_path, monkeypatch, capsys)
     link = _link(tmp_path, "box")
-    outside = os.readlink(link)
+    outside = _target(link)
     monkeypatch.setenv("SSH_AUTH_SOCK", _sock(ws / "inside.sock"))
     ssh_agent.start_bridge("box")
     err = capsys.readouterr().err
     assert "(SSH_AUTH_SOCK): it is inside the workspace" in err
-    assert os.readlink(link) == outside  # kept: still the user's socket outside the workspace
+    assert _target(link) == outside  # kept: still the user's socket outside the workspace
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX socket paths (a Windows host never forwards)")
@@ -1116,7 +1122,7 @@ def test_refresh_checks_secondary_writable_mounts(tmp_path, monkeypatch, capsys,
     _, removed = ssh_agent.link_refresh("box")
     assert removed == old_inside
     assert "inside the workspace" in capsys.readouterr().err
-    assert not link.is_symlink() if old_inside else os.readlink(link) == outside
+    assert not link.is_symlink() if old_inside else _target(link) == outside
 
 
 def test_link_directory_refuses_symlinked_or_foreign_msb_parent(tmp_path, monkeypatch):
@@ -1165,7 +1171,7 @@ def test_untrusted_route_directories_are_never_modified(
         ssh_agent.link_remove("box")
     else:
         assert ssh_agent.link_refresh("box")[1]
-    assert link.is_symlink() and os.readlink(link) == str(tmp_path / "missing-agent.sock")
+    assert link.is_symlink() and _target(link) == str(tmp_path / "missing-agent.sock")
     assert not any("nohup socat" in " ".join(argv) for argv in seen)
     err = capsys.readouterr().err
     assert len(err.splitlines()) == 1 and f"Fix or remove '{bad}'" in err
@@ -1202,7 +1208,7 @@ def test_refresh_leaves_link_through_symlinked_msb_parent_untouched(tmp_path, mo
     parent.symlink_to(moved, target_is_directory=True)
     monkeypatch.setenv("SSH_AUTH_SOCK", agent)
     _, skip_bridge = ssh_agent.link_refresh("box")
-    assert skip_bridge and link.is_symlink() and os.readlink(link) == agent
+    assert skip_bridge and link.is_symlink() and _target(link) == agent
     assert f"Fix or remove '{parent}'" in capsys.readouterr().err
     assert Path(agent).exists()
 
