@@ -1113,7 +1113,7 @@ def test_midlife_volume_apply_warns_and_only_executes(monkeypatch, tmp_path, cap
     _Guest(monkeypatch)
     assert kit_msb.apply_single("box", kit, ro_required=False)
     assert capsys.readouterr().err == (
-        "acq(msb): note: this kit declares volumes:, which apply at CREATE time only —\n"
+        "acq(msb): note: this kit declares volumes:, which apply at CREATE time only;\n"
         "acq(msb):   this apply skips them. Recreate the sandbox (acq rm && acq run) to mount them.\n")
 
 
