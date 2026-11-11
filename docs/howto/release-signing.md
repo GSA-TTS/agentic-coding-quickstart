@@ -7,7 +7,7 @@ audience: "maintainers"
 
 # Release signing setup
 
-ADR-0049m adds optional signing to the release path. Releases still require
+ADR-0050m adds optional signing to the release path. Releases still require
 `ENABLE_RELEASES=true` and a release-please-created tag. The fork leaves signing
 disabled. Set the following repository variables and Actions secrets in Settings
 > Secrets and variables > Actions. Never put credential values in source or logs.

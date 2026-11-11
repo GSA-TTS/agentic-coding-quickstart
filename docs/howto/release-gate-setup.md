@@ -24,7 +24,7 @@ checksums, then verifies local offline installs on Linux, macOS and Windows.
 `dist` after attesting every file. The builder also runs without publishing on
 pull requests and manual dispatch. Optional platform signing happens before
 packing and hashing; see [release signing setup](release-signing.md) for variables,
-credentials, verification and rollback (ADR-0049m).
+credentials, verification and rollback (ADR-0050m).
 
 The release gate code is in place. `release.yml` is split so the gate sits
 **before the tag and the GitHub Release exist**:

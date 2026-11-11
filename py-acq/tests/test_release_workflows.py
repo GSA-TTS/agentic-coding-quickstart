@@ -1,4 +1,4 @@
-"""Offline contracts for release publishing and optional signing (ADR-0049m)."""
+"""Offline contracts for release publishing and optional signing (ADR-0050m)."""
 from pathlib import Path
 import re
 
@@ -62,7 +62,10 @@ def test_publish_attests_and_uploads_the_complete_dist():
 
 
 def test_sign_then_pack_then_hash_and_checkout_release_ref():
-    assert BUILD.count('ref: ${{ inputs.ref || github.ref }}') == 3
+    # Every checkout builds or checks the release ref, never the triggering commit.
+    checkouts = BUILD.count('uses: actions/checkout@')
+    assert checkouts == 4
+    assert BUILD.count('ref: ${{ inputs.ref || github.ref }}') == checkouts
     assert BUILD.index('--stage release-tree') < BUILD.index('Authenticode PowerShell files')
     assert BUILD.index('Authenticode PowerShell files') < BUILD.index('--pack release-tree')
     assert BUILD.index('codesign --force') < BUILD.index('notarytool submit') < BUILD.index('--pack release-tree')

@@ -1,8 +1,8 @@
 ---
 title: "Release signing scaffolding"
-status: proposed
+status: accepted
 date: 2026-11-11
-decision_makers: ["Bret Mogilefsky"]
+decision_makers: ["Bret Mogilefsky", "William Zujkowski"]
 category: architecture
 nist_controls: ["CM-5", "SI-7", "SR-11"]
 impact_level: moderate
@@ -11,7 +11,10 @@ risk_treatment: mitigate
 supersedes: []
 ---
 
-# ADR-0049m: Release signing scaffolding
+# ADR-0050m: Release signing scaffolding
+
+Accepted on 2026-11-11: the project lead chose secret-gated signing scaffolding
+that upstream can switch on, as recorded here.
 
 ## Context and Problem Statement
 
