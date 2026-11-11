@@ -125,7 +125,8 @@ class FakeBackend:
 
     @property
     def host_dir(self):
-        return self.state_dir / "provenance" / self.backend / f"{self.names.sandbox}.abc123.config"
+        # acq's provenance root is $XDG_STATE_HOME/acq/provenance, not under ACQ_STATE_DIR.
+        return self.state_dir.parent / "xdg-state" / "acq" / "provenance" / self.backend / f"{self.names.sandbox}.abc123.config"
 
     def secret(self, verb):
         if verb[1:4] == ["set", "-g", "usai"] and "--host" not in verb:
@@ -227,7 +228,8 @@ def cell(tmp_path, backend="msb", canary=0, deadline=None, **knobs):
     raw = FakeRaw(names)
     result = canary if isinstance(canary, tuple) else (canary, CANARY_LINES.get(canary, ""))
     c = qbc.Cell(backend, names, str(tmp_path / "ws"), state, fake, raw, lambda timeout: result,
-                 *([deadline] if deadline is not None else []))
+                 *([deadline] if deadline is not None else []),
+                 provenance_dir=tmp_path / "xdg-state" / "acq" / "provenance")
     return c, fake, raw
 
 
