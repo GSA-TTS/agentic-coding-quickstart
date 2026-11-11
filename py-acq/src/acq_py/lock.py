@@ -715,12 +715,7 @@ class _MkdirLock:
         """Remove the lock if this process still owns it."""
         if self.token is None:
             return
-        try:
-            current = (self.path / "owner").read_text(encoding="utf-8").strip()
-        except OSError:
-            current = ""
-        if current == self.token:
-            self._remove(self.token)
+        self._remove(self.token)
         self.token = None
 
     def recovery_command(self) -> str:
@@ -744,7 +739,7 @@ class _MkdirLock:
         yet given an owner. (The read and the removal are still two steps, the
         same narrow window Bash's own recovery has.)
         """
-        if expected is not None and _owner_line(self.path).strip() != expected.strip():
+        if expected is not None and _owner_line(self.path) != expected:
             return
         try:
             _retry_permission((self.path / "owner").unlink)

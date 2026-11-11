@@ -142,8 +142,8 @@ def agent_kit_for(agent: str) -> str | None:
 def is_agent_kit(name: str) -> bool:
     """True when ``name`` is a built-in agent kit.
 
-    This is the only kit set ``kit apply`` and implicit agent-kit selection
-    resolve by name in this slice; team/personal kit application is deferred.
+    These kits resolve by name for ``kit apply`` and implicit agent-kit
+    selection. Other kits require an explicit checked directory or remote ref.
     """
     return name in AGENT_KITS
 

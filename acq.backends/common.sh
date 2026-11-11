@@ -2537,10 +2537,12 @@ _acq_config_lock_acquire() {
       continue
     fi
     line=$(_acq_config_lock_owner_line "$lock")
-    if [ "$recovered" -lt 3 ] && [ "$(_acq_config_lock_state "$lock" "$line")" = stale ] &&
-        [ "$(_acq_config_lock_owner_line "$lock")" = "$line" ]; then
+    if [ "$recovered" -lt 3 ] && [ "$(_acq_config_lock_state "$lock" "$line")" = stale ]; then
+      # The comparison and unlink cannot be atomic; see failure mode 92.
       recovered=$((recovered + 1))
-      rm -f -- "$lock/owner" 2>/dev/null && rmdir -- "$lock" 2>/dev/null && continue
+      if [ "$(_acq_config_lock_owner_line "$lock")" = "$line" ]; then
+        rm -f -- "$lock/owner" 2>/dev/null && rmdir -- "$lock" 2>/dev/null && continue
+      fi
     fi
     [ "$tries" -lt "$ticks" ] || { _acq_config_lock_timed_out "$lock"; return 1; }
     tries=$((tries + 1))
@@ -5830,7 +5832,7 @@ _acq_provider_input_publish() {
 # When Python inspects a Bash lock on Windows, Python applies the 15-minute
 # freshness rule (section 88); Bash itself checks the recorded process identity.
 acq_provider_input_lock_acquire() {
-  local backend="$1" name="$2" tx_pid="${3:-$$}" root parent lock owner tries=0 pid identity actual_identity token rc age
+  local backend="$1" name="$2" tx_pid="${3:-$$}" root parent lock owner tries=0 pid identity actual_identity token rc age line
   root=$(acq_provider_input_root "$backend" "$name") || return 1
   parent=${root%/*}
   _acq_provider_input_safe_mkdir "$parent" || return 1
@@ -5873,15 +5875,20 @@ acq_provider_input_lock_acquire() {
       sleep 1
       continue
     fi
+    line=$(_acq_config_lock_owner_line "$lock")
     pid="" identity=""
-    { IFS=' ' read -r pid identity < "$owner"; } 2>/dev/null || true
+    IFS=' ' read -r pid identity <<< "$line" || true
     actual_identity=$(_acq_provider_input_process_identity "$pid" 2>/dev/null || true)
     if [ -n "$pid" ] && [ -n "$identity" ] && [ "$actual_identity" = "$identity" ]; then
       echo "acq: provider-input lock is owned by live pid $pid: $lock" >&2
     elif [ -n "$pid" ] && { ! _acq_pid_alive "$pid" || { [ -n "$actual_identity" ] && [ "$actual_identity" != "$identity" ]; }; }; then
       echo "acq: recovering stale provider-input lock owned by pid $pid: $lock" >&2
-      rm -f -- "$owner" && rmdir -- "$lock" 2>/dev/null || return 1
-      continue
+      # Re-read after the process checks: another waiter may have recovered
+      # this lock already. Compare and unlink still race (failure mode 92).
+      if [ "$(_acq_config_lock_owner_line "$lock")" = "$line" ]; then
+        rm -f -- "$owner" && rmdir -- "$lock" 2>/dev/null || return 1
+        continue
+      fi
     else
       echo "acq: provider-input lock has no valid owner metadata: $lock" >&2
       _acq_lock_recovery_hint "$lock"
@@ -6093,9 +6100,17 @@ _acq_provider_input_process_identity() {
   fi
 }
 
+# Release only our token: normal transactions use their live guardian's PID;
+# direct callers use $$, or pass the same explicit PID they used to acquire.
 acq_provider_input_lock_release() {
+  local pid="${2:-${_ACQ_PROVIDER_INPUT_GUARDIAN_PID:-$$}}" line
   case "${1:-}" in */provider-input/*/*.lock)
     [ -d "$1" ] && [ ! -L "$1" ] || return 1
+    # Compare the PID field only: release often runs from a signal trap, where
+    # re-deriving the process identity (ps) can fail or differ, and a PID that
+    # is ours already rules out removing another holder's owner.
+    line=$(_acq_config_lock_owner_line "$1")
+    [ "${line%% *}" = "$pid" ] || return 0
     rm -f -- "$1/owner" && rmdir -- "$1" 2>/dev/null || return 1
     ;;
     *) return 1 ;;

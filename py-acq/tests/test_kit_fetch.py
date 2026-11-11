@@ -66,7 +66,7 @@ def _git(*args: str) -> str:
 def _write(root: Path, rel: str, text: str) -> None:
     path = root / rel
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    path.write_text(text, encoding="utf-8", newline="\n")
 
 
 def _commit(src: Path, message: str) -> str:
@@ -120,7 +120,7 @@ def kit_repo(tmp_path_factory, monkeypatch) -> KitRepo:
     doc = json.loads(facts.read_text(encoding="utf-8"))
     doc.update({"host": "evil.example.test", "baseUrl": "https://evil.example.test/api/v1",
                 "modelsUrl": "https://evil.example.test/api/v1/models"})
-    facts.write_text(json.dumps(doc), encoding="utf-8")
+    facts.write_text(json.dumps(doc), encoding="utf-8", newline="\n")
     pin = _commit(src, "first")
     _write(src, "kits/team/files/team.txt", "second\n")
     pin2 = _commit(src, "second")
@@ -342,7 +342,7 @@ def test_a_damaged_cached_source_is_fetched_again(kit_repo, monkeypatch):
     kit_fetch.fetch(kit_repo.ref(), "msb")
     _base, src, tree = kit_fetch._cache_dirs("msb")
     for entry in src.iterdir():
-        (entry / kit_fetch.VERIFIED_MARKER).write_text("0" * 40 + "\n", encoding="utf-8")
+        (entry / kit_fetch.VERIFIED_MARKER).write_text("0" * 40 + "\n", encoding="utf-8", newline="\n")
     for entry in tree.iterdir():
         shutil.rmtree(entry)
     spy = _GitSpy(monkeypatch)
@@ -370,7 +370,7 @@ def test_the_retry_uses_the_users_git_config(kit_repo, monkeypatch):
     # anonymous attempt (no config files) fails, the retry with config succeeds.
     alias = kit_repo.bare.with_name("alias.git").as_uri()
     gitconfig = Path(os.environ["HOME"]) / ".gitconfig"
-    gitconfig.write_text(f'[url "{kit_repo.url}"]\n\tinsteadOf = {alias}\n', encoding="utf-8")
+    gitconfig.write_text(f'[url "{kit_repo.url}"]\n\tinsteadOf = {alias}\n', encoding="utf-8", newline="\n")
     spy = _GitSpy(monkeypatch)
     kit = kit_fetch.fetch(f"git+{alias}#ref={kit_repo.pin}&dir=kits/team", "msb")
     assert (kit / "spec.yaml").is_file()
@@ -384,7 +384,7 @@ def test_the_users_global_hooks_never_run_in_the_cache(kit_repo, tmp_path, monke
     hooks = tmp_path / "hooks"
     hooks.mkdir()
     marker = tmp_path / "hook-ran"
-    (hooks / "reference-transaction").write_text(f"#!/bin/sh\n: > '{marker}'\n", encoding="utf-8")
+    (hooks / "reference-transaction").write_text(f"#!/bin/sh\n: > '{marker}'\n", encoding="utf-8", newline="\n")
     (hooks / "reference-transaction").chmod(0o755)
     alias = kit_repo.bare.with_name("alias.git").as_uri()
     gitconfig = Path(os.environ["HOME"]) / ".gitconfig"
@@ -426,8 +426,8 @@ def test_a_cache_directory_owned_by_another_user_is_refused(kit_repo, monkeypatc
 def test_a_cached_tree_without_its_complete_marker_is_rebuilt(kit_repo, monkeypatch):
     kit = kit_fetch.fetch(kit_repo.ref(), "msb")
     (kit.parent / kit_fetch.COMPLETE_MARKER).unlink()  # e.g. a crash before the marker
-    (kit / "files" / "team.txt").write_text("tampered\n", encoding="utf-8")
-    (kit / "planted").write_text("x\n", encoding="utf-8")
+    (kit / "files" / "team.txt").write_text("tampered\n", encoding="utf-8", newline="\n")
+    (kit / "planted").write_text("x\n", encoding="utf-8", newline="\n")
     spy = _GitSpy(monkeypatch)
     again = kit_fetch.fetch(kit_repo.ref(), "msb")
     assert again == kit
@@ -445,7 +445,7 @@ def test_inherited_git_redirects_and_config_injection_do_not_reach_the_cache(kit
     hooks.mkdir()
     marker = tmp_path / "hook-ran"
     for hook in ("post-checkout", "reference-transaction", "post-index-change"):
-        (hooks / hook).write_text(f"#!/bin/sh\n: > '{marker}'\n", encoding="utf-8")
+        (hooks / hook).write_text(f"#!/bin/sh\n: > '{marker}'\n", encoding="utf-8", newline="\n")
         (hooks / hook).chmod(0o755)
     monkeypatch.setenv("GIT_DIR", str(other / ".git"))
     monkeypatch.setenv("GIT_WORK_TREE", str(other))
@@ -647,3 +647,73 @@ def test_a_fetched_provider_kit_cannot_choose_where_the_key_goes(kit_repo, monke
     assert rc == 1 and doc["error"]["code"] == errors.VALIDATION_FAILED
     assert "evil.example.test" in doc["error"]["message"] and "pinned hosts" in doc["error"]["message"]
     assert not [a for a in seen if a[0] == "create"]
+
+
+@pytest.mark.parametrize("backend", ["msb", "sbx"])
+def test_midlife_apply_fetches_and_checks_external_ref(backend, kit_repo, monkeypatch, tmp_path, capsys):
+    (_msb_env if backend == "msb" else _sbx_env)(monkeypatch, tmp_path)
+    monkeypatch.setenv(f"ACQ_{backend.upper()}_STUB_CATALOG", '{"box":"running"}')
+    module = msb if backend == "msb" else sbx
+    seen = _spy(monkeypatch, module)
+    rc, doc, err = _invoke(capsys, "--backend", backend, "kit", "apply", "box", kit_repo.ref(), "--json")
+    assert rc == 0, (doc, err)
+    assert doc["data"] == {"sandbox": "box", "backend": backend, "kit": kit_repo.ref(),
+                           "entrypoint": "", "applied": True, "action": "applied"}
+    assert kits.kit_applied_read(backend, "box") is None
+    assert not any(a[0] == "create" for a in seen)
+    if backend == "msb":
+        assert any(a[0] == "exec" for a in seen)
+        assert not any("--script-path" in a for a in seen)
+    else:
+        add = next(a for a in seen if a[:2] == ["kit", "add"])
+        assert kit_repo.ref() not in add
+        assert kitspec.load_kit(add[-1]).field("schemaVersion") == "2"
+
+
+@pytest.mark.parametrize("backend", ["msb", "sbx"])
+@pytest.mark.parametrize("entrypoint", ["", "team-agent"])
+def test_midlife_external_apply_confirms_to_human(backend, entrypoint, monkeypatch, tmp_path, capsys):
+    (_msb_env if backend == "msb" else _sbx_env)(monkeypatch, tmp_path)
+    monkeypatch.setenv(f"ACQ_{backend.upper()}_STUB_CATALOG", '{"box":"running"}')
+    kit_dir = tmp_path / "human-kit"
+    spec = TEAM_SPEC + (f"agent:\n  entrypoint: {entrypoint}\n" if entrypoint else "")
+    _write(kit_dir, "spec.yaml", spec)
+    _write(kit_dir, "files/team.txt", "hello\n")
+    assert cli.main(["--backend", backend, "kit", "apply", "box", str(kit_dir)]) == 0
+    suffix = f" (entrypoint {entrypoint})" if entrypoint else ""
+    assert capsys.readouterr().out == f"applied kit 'team-kit' to sandbox 'box'{suffix}.\n"
+    assert kits.kit_applied_read(backend, "box") is None
+
+
+def test_midlife_external_startup_kit_requires_sbx_recreate(monkeypatch, tmp_path, capsys):
+    _sbx_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_SBX_STUB_CATALOG", '{"box":"running"}')
+    kit_dir = tmp_path / "startup-kit"
+    _write(kit_dir, "spec.yaml", TEAM_SPEC +
+           "commands:\n  - phase: startup\n    command:\n      - echo\n      - ready\n")
+    _write(kit_dir, "files/team.txt", "hello\n")
+    seen = _spy(monkeypatch, sbx)
+    rc, doc, err = _invoke(capsys, "--backend", "sbx", "kit", "apply", "box", str(kit_dir), "--json")
+    assert rc == 1, err
+    assert doc["error"]["code"] == errors.UNSUPPORTED
+    assert "startup commands" in doc["error"]["message"]
+    assert "recreate" in doc["error"]["remediation"]
+    assert "session/context" in doc["error"]["remediation"]
+    assert any(a[:2] == ["kit", "add"] for a in seen)
+    assert not any(a[0] in {"create", "remove", "exec"} for a in seen)
+    assert kits.kit_applied_read("sbx", "box") is None
+
+
+@pytest.mark.parametrize("ref,code", [
+    ("git+https://github.com/acme/kits#ref=main&dir=kit", "kit_ref_not_pinned"),
+    ("git+https://github.com/acme/kits?token=private#ref=main&dir=kit", "validation_failed"),
+    ("git+https://github.com/acme/kits#ref=main&dir=kit&token=private", "validation_failed"),
+    ("git+https://user:private@github.com/acme/kits#ref=main&dir=kit", "validation_failed"),
+])
+def test_midlife_apply_refuses_unsafe_or_unpinned_ref(ref, code, monkeypatch, tmp_path, capsys):
+    _msb_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_MSB_STUB_CATALOG", '{"box":"running"}')
+    monkeypatch.setattr(kit_fetch, "_git", lambda *a, **k: pytest.fail("refusal must precede git"))
+    rc, doc, err = _invoke(capsys, "--backend", "msb", "kit", "apply", "box", ref, "--json")
+    assert rc == 1 and doc["error"]["code"] == code
+    assert "private" not in json.dumps(doc) + err

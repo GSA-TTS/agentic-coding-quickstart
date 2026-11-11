@@ -1260,8 +1260,8 @@ _KIT_NAME = re.compile(r"[A-Za-z0-9._-]+")
 
 
 def _ifs_split(value: str) -> list[str]:
-    """Word-split like the shell's default IFS (space, tab, newline), without globbing."""
-    return [t for t in re.split("[ \t\n]+", value) if t]
+    """Split on shell IFS whitespace, accepting CRLF line endings, without globbing."""
+    return [t for t in re.split("[ \t\r\n]+", value) if t]
 
 
 def kit_ref_absolute(ref: str) -> str:

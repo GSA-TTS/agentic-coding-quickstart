@@ -157,7 +157,6 @@ def resolve(selection: kitspec.KitSelection) -> list[Kit]:
             kit = fetch_selected(sel, "msb")
         except kit_fetch.KitFetchError as exc:
             raise msb.MsbError(exc.code, f"{exc.message} ({sel.role} kit)", exc.remediation) from exc
-        _check_creatable(kit.name, kit.spec)
         out.append(kit)
     return out
 
@@ -169,16 +168,15 @@ def selection_for(agent: str, cli_kits: list[str], *, image_is_default: bool,
     A new sandbox folds in config ``extra_kits`` (Bash
     ``_acq_apply_configured_extra_kits``, which runs only on a fresh create).
     An existing sandbox is rebuilt from what its create recorded: ``extras``
-    are the recorded extra refs, which replace ``ACQ_EXTRA_KITS`` when there
-    are any, and config ``extra_kits`` never take part, since the create
-    recorded the ones it applied. An empty record therefore adds no configured
-    default, as Bash ``acq_cli_kits_load`` leaves only the live
-    ``ACQ_EXTRA_KITS``. On the default image the agent's bundled kit is
-    required, since that image has no agent binary. Raises
+    are the recorded extra refs, which replace ``ACQ_EXTRA_KITS`` even when
+    empty, and config ``extra_kits`` never take part, since the create
+    recorded the ones it applied. An empty record suppresses live extras too.
+    On the default image the agent's bundled kit is required, since that image
+    has no agent binary. Raises
     :class:`kitspec.KitSelectionError`.
     """
     required = agent if agent in kitspec.AGENT_BUNDLE_KITS and image_is_default else None
-    env = {**os.environ, "ACQ_EXTRA_KITS": " ".join(extras)} if extras else os.environ
+    env = {**os.environ, "ACQ_EXTRA_KITS": " ".join(extras)} if extras is not None else os.environ
     selection = kitspec.select_kits(agent, cli_kits=cli_kits, env=env, configured_extras=extras is None,
                                     required_agent_kit=required)
     selection.require()
@@ -215,12 +213,15 @@ def cli_kits_write(name: str, kit_set: Iterable[Kit], backend: str = "msb") -> N
 
 
 def cli_kits_read(name: str, backend: str = "msb") -> tuple[list[str], list[str]]:
-    """The recorded ``(--kit refs, extra refs)``; empty when there is no record.
+    """The recorded ``(--kit refs, extra refs)``; live extras only if there is no record.
 
     A relative local ref (left by an older Bash acq) would resolve against the
     current directory, so it is skipped with a warning, as Bash does.
     """
-    return legacy_bash.read_cli_kits(backend, name, _warn) or ([], [])
+    recorded = legacy_bash.read_cli_kits(backend, name, _warn)
+    if recorded is not None:
+        return recorded
+    return ([], kitspec._ifs_split(os.environ.get("ACQ_EXTRA_KITS", "")))
 
 
 def cli_kits_remove(name: str, backend: str = "msb") -> None:
@@ -239,20 +240,7 @@ def _load(name: str) -> kitspec.KitSpec:
     except kitspec.KitSpecError as exc:
         raise msb.MsbError(errors.VALIDATION_FAILED, f"cannot read built-in kit '{name}': {exc}",
                            "reinstall acq") from exc
-    _check_creatable(name, spec)
     return spec
-
-
-def _check_creatable(name: str, spec: kitspec.KitSpec) -> None:
-    # Published ports become create-time -p flags (acq_py.publish); volumes are
-    # not created yet, so a kit that needs one is refused rather than created
-    # without its storage.
-    if spec.volumes:
-        raise msb.MsbError(
-            errors.UNSUPPORTED,
-            f"kit '{name}' declares volumes, which the Python acq does not create yet",
-            "use the Bash acq (ACQ_IMPL=bash) for this kit",
-        )
 
 
 def egress_names(kits: Iterable[Kit]) -> list[msb.EgressKit]:
@@ -524,12 +512,43 @@ def discard_staged(paths: Iterable[Path]) -> None:
             pass
 
 
+def volume_flags(name: str, kits: Iterable[Kit]) -> list[str]:
+    """Create-time storage, unioned by guest path with the last declaration winning.
+
+    Named disks live in msb's volume store; no arbitrary host path is mounted.
+    The POSIX CRC keeps distinct paths with the same readable slug separate.
+    """
+    volumes: dict[str, kitspec.Volume] = {}
+    for kit in kits:
+        for warning in kit.spec.warnings["volumes"]:
+            print(warning, file=sys.stderr)
+        for volume in kit.spec.volumes:
+            volumes.pop(volume.path, None)
+            volumes[volume.path] = volume
+    flags: list[str] = []
+    for path, volume in volumes.items():
+        if not path.startswith("/"):
+            print(f"acq(msb): warning: skipping volume with non-absolute path: {path}", file=sys.stderr)
+            continue
+        if re.search(r"[^A-Za-z0-9._/-]", path + volume.size):
+            print(f"acq(msb): warning: skipping volume with unsafe path/size: {path}:{volume.size}",
+                  file=sys.stderr)
+            continue
+        if volume.type == "tmpfs":
+            flags += ["--tmpfs", f"{path}:{volume.size}"]
+        else:
+            slug = re.sub(r"[^A-Za-z0-9]+", "-", path[1:]).rstrip("-")
+            crc = legacy_bash.posix_cksum(path.encode("utf-8"))
+            flags += ["--mount-named", f"acq-{name}-{slug}-{crc}:{path}:kind=disk,size={volume.size}"]
+    return flags
+
+
 def create_flags(name: str, kits: list[Kit], *, ro_mount: bool) -> tuple[list[str], list[Path]]:
     """The kit set's ``msb create`` flags and the staged files to discard afterwards.
 
     Raises ``OSError`` when the host-config directory cannot be prepared.
     """
-    flags = mount_flags(name) if ro_mount else []
+    flags = [*(mount_flags(name) if ro_mount else []), *volume_flags(name, kits)]
     staged: list[Path] = []
     body = startup_script(kits, merge_env(kits), ro_mount=ro_mount)
     path = stage_startup_script(body) if body else None
@@ -757,6 +776,10 @@ def apply_single(name: str, kit: Kit, *, ro_required: bool) -> bool:
     layered last. Raises :class:`KitApplyFailed` or :class:`msb.MsbError` like
     :func:`apply_kit`.
     """
+    if kit.spec.volumes:
+        print("acq(msb): note: this kit declares volumes:, which apply at CREATE time only;", file=sys.stderr)
+        print("acq(msb):   this apply skips them. Recreate the sandbox (acq rm && acq run) to mount them.",
+              file=sys.stderr)
     merged = _dedupe_env([*_persisted_env(name), *(f"{e.name}={e.value}" for e in kit.spec.env)])
     return apply_kit(name, kit, merged, RoGate(name, ro_required), force=False)
 

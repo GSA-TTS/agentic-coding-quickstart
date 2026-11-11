@@ -1,0 +1,78 @@
+{
+  "schema": 1,
+  "id": "cli/kit-update-empty-extras-record",
+  "oracle": "An existing empty .kits extras record is authoritative over the live environment when updating a sandbox",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{python}",
+      "-I",
+      "test/vectors/drivers/seeded-run.py",
+      "[{\"bash_state\": \"msb/mybox.1245765386.kits\", \"text\": \"schema=1\\n\"}, [[\"--backend\", \"msb\", \"kit\", \"update\", \"mybox\", \"--yes\", \"--json\"], false, null]]",
+      "{acq}"
+    ],
+    "env": {
+      "ACQ_MSB_BIN": "__stub__",
+      "ACQ_MSB_VERSION": "0.7.7",
+      "ACQ_MSB_INSTALLED": "1",
+      "ACQ_SBX_INSTALLED": "0",
+      "ACQ_MSB_STUB_CATALOG": "{\"mybox\": \"running\"}",
+      "ACQ_EXTRA_KITS": "test/fixtures/kit-volumes"
+    },
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "MSB_HOME",
+      "ACQ_IMAGE",
+      "ACQ_MSB_IMAGE",
+      "ACQ_MSB_STUB_FAIL",
+      "ACQ_MSB_READY_TIMEOUT",
+      "ACQ_KIT_PROVENANCE_SEED"
+    ],
+    "stdin": "",
+    "timeout_ms": 10000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "kit update",
+        "data": {
+          "sandbox": "mybox",
+          "backend": "msb",
+          "local": "941a286f912b99475429c3c00db49a99af5b241e",
+          "applied": "941a286f912b99475429c3c00db49a99af5b241e",
+          "status": "current",
+          "action": "refreshed",
+          "kits": [
+            "zscaler-ca-certificate",
+            "usai-provider",
+            "agentic-coding-playbook",
+            "git-ssh-sign"
+          ]
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME"
+    ]
+  }
+}
