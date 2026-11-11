@@ -106,7 +106,9 @@ def test_primary_read_only_msb(backend, monkeypatch, tmp_path, capsys):
     rc, doc, err = invoke(capsys, backend, "create", "shell", primary + ":ro", "--name", "box")
     assert rc == 0, (doc, err)
     create = next(a for a in calls if a[0] == "create")
-    assert f"{primary}:{primary}:ro" in create
+    host = next(a for a in create if a.endswith(":ro")).split(":ro")[0].rsplit(":", 1)[0]
+    assert f"{host}:{msb._guest_path(host)}:ro" in create  # the guest form differs on Windows
+    assert os.path.normcase(os.path.realpath(host)) == os.path.normcase(os.path.realpath(primary))
     assert state.record_read(backend, "box")["workspace_read_only"] is True
 
 
