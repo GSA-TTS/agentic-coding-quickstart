@@ -6047,9 +6047,16 @@ _acq_provider_input_guardian_register_if_active() {
 }
 
 _acq_provider_input_guardian_stop() {
-  local pid="${_ACQ_PROVIDER_INPUT_GUARDIAN_PID:-}"
+  local pid="${_ACQ_PROVIDER_INPUT_GUARDIAN_PID:-}" tries=0
   [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
-  [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
+  # Bash can lose a child's exit notification while running a trap. Poll
+  # instead of waiting for that notification, and cap cleanup even if the
+  # guardian is suspended or cannot handle TERM.
+  while [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ "$tries" -lt 20 ]; do
+    command sleep 0.1
+    tries=$((tries + 1))
+  done
+  [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
   [ -z "${_ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN:-}" ] || rm -f -- "$_ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN"
   _ACQ_PROVIDER_INPUT_GUARDIAN_PID=""
   _ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN=""

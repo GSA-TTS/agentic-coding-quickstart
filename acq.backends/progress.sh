@@ -359,21 +359,31 @@ acq_spin_start() {
   _ACQ_SPIN_ACTIVE=1
   _acq_spin_install_traps
   owner="$_ACQ_SPIN_OWNER"
-  # A private directory for the draw lock and the stop marker (see
-  # _acq_spin_end_animator), made once the cleanup traps are in place so that
-  # they remove it from the moment it is recorded. A signal that lands while
-  # mktemp runs, before the name is recorded, can still leave an empty
-  # acq-spin.* directory behind. Without the directory the animator could not
-  # be stopped with a guarantee, so animate nothing and announce the phase
-  # instead.
-  dir=$(mktemp -d "${TMPDIR:-/tmp}/acq-spin.XXXXXX" 2>/dev/null) || dir=""
+  # Bash runs a pending trap before assigning command-substitution output.
+  # Defer signals until mktemp's path is recorded, then dispatch through the
+  # composed cleanup. The allocator ignores those signals so a process-group
+  # signal cannot kill it between creating the directory and printing its path.
+  # Otherwise cleanup cannot find the directory it owns.
+  local pending="" prior_hup
+  prior_hup=$(trap -p HUP)
+  trap 'pending=${pending:-INT}' INT
+  trap 'pending=${pending:-TERM}' TERM
+  trap 'pending=${pending:-HUP}' HUP
+  _ACQ_SPIN_DIR=$(trap '' INT TERM HUP; mktemp -d "${TMPDIR:-/tmp}/acq-spin.XXXXXX" 2>/dev/null) || _ACQ_SPIN_DIR=""
+  trap '_acq_spin_cleanup_signal INT' INT
+  trap '_acq_spin_cleanup_signal TERM' TERM
+  _acq_restore_trap_line "$prior_hup" HUP
+  case "$pending" in
+    HUP) _acq_signal_self HUP ;;
+    INT|TERM) _acq_spin_cleanup_signal "$pending" ;;
+  esac
+  dir="$_ACQ_SPIN_DIR"
   if [ -z "$dir" ] || [ ! -d "$dir" ]; then
     _ACQ_SPIN_ACTIVE=""
     _acq_spin_restore_traps
     acq_status "$msg"
     return 0
   fi
-  _ACQ_SPIN_DIR="$dir"
   # Hide the cursor for the duration of the animation; the stop path (and the
   # trap) restore it. Then spawn the animator in the background.
   printf '\033[?25l' >&2
