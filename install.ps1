@@ -33,6 +33,7 @@ $ErrorActionPreference = "Stop"
 $ReleaseBaseUrl = "https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v$Version"
 $PackageName = "acq-windows-x64.zip"
 $SumsName = "SHA256SUMS"
+$ProvenanceName = "provenance.json"
 $RuntimeRelative = "py-acq\runtime\python.exe"
 $LauncherRelative = "acq.cmd"
 
@@ -52,8 +53,8 @@ Usage:
 Options:
   -InstallDir <path>   User-writable install location, as an absolute path.
                        Default: %LOCALAPPDATA%\Programs\acq
-  -Source <url|dir>    Release source. A URL fetches SHA256SUMS + the zip; a local
-                       directory (the offline asset set) is read in place.
+  -Source <url|dir>    Release source. A URL fetches SHA256SUMS, provenance.json
+                       and the zip; a local offline asset set is read in place.
   -Version <ver>       Release version to install. Default: $Version
   -Channel <name>      Update channel to install (default: python; the only
                        channel supported on this fork).
@@ -151,15 +152,16 @@ function Resolve-Source {
 
 function Get-ExpectedHash {
     param(
-        [Parameter(Mandatory = $true)][string]$SumsPath
+        [Parameter(Mandatory = $true)][string]$SumsPath,
+        [string]$Name = $PackageName
     )
 
     foreach ($line in (Get-Content -LiteralPath $SumsPath)) {
-        if ($line -match "^([0-9a-fA-F]{64})\s+\*?$([regex]::Escape($PackageName))\s*$") {
+        if ($line -match "^([0-9a-fA-F]{64})\s+\*?$([regex]::Escape($Name))\s*$") {
             return $Matches[1].ToLowerInvariant()
         }
     }
-    throw "SHA256SUMS has no entry for $PackageName; refusing to install an unverified archive."
+    throw "SHA256SUMS has no entry for $Name; refusing to install an unverified file."
 }
 
 function Test-ReleaseAttestation {
@@ -340,11 +342,18 @@ function Install-AcqZip {
     Write-Host "  install dir: $InstallDir"
 
     if ($DryRun) {
-        Write-Host "  [dry-run] download $($resolved.Url)/$SumsName and $($resolved.Url)/$PackageName"
+        if ($resolved.IsUrl) {
+            Write-Host "  [dry-run] download $($resolved.Url)/$SumsName, $($resolved.Url)/$ProvenanceName and $($resolved.Url)/$PackageName"
+        }
+        else {
+            Write-Host "  [dry-run] read $($resolved.Url)/$SumsName, $($resolved.Url)/$ProvenanceName and $($resolved.Url)/$PackageName from the offline asset set"
+        }
         if ($sha256Given) { Write-Host "  [dry-run] verify SHA256SUMS against -Sha256 before reading entries" }
         Write-Host "  [dry-run] verify $PackageName SHA-256 against $SumsName"
+        Write-Host "  [dry-run] require the provenance manifest ($ProvenanceName)"
         Write-Host "  [dry-run] expand $PackageName into $InstallDir"
-        Write-Host "  [dry-run] verify the launchers, backend tree, bundled runtime and source are present"
+        Write-Host "  [dry-run] verify the enumerated set (launchers, backend tree, runtime, source, wheelhouse) is present"
+        Write-Host "  [dry-run] install $ProvenanceName into $InstallDir and record it in .acq-v1-install"
         Write-Host "  [dry-run] offer to add $InstallDir to your user PATH"
         return
     }
@@ -354,19 +363,26 @@ function Install-AcqZip {
         New-Item -ItemType Directory -Force -Path $tmpRoot | Out-Null
         $zipPath = Join-Path $tmpRoot $PackageName
         $sumsPath = Join-Path $tmpRoot $SumsName
+        $provenancePath = Join-Path $tmpRoot $ProvenanceName
 
         if ($resolved.IsUrl) {
             Invoke-WebRequest -Uri "$($resolved.Url)/$SumsName" -OutFile $sumsPath
+            try { Invoke-WebRequest -Uri "$($resolved.Url)/$ProvenanceName" -OutFile $provenancePath }
+            catch { throw "could not download $($resolved.Url)/$ProvenanceName" }
             Invoke-WebRequest -Uri "$($resolved.Url)/$PackageName" -OutFile $zipPath
         }
         else {
             if (-not (Test-Path -LiteralPath (Join-Path $resolved.Url $SumsName) -PathType Leaf)) {
                 throw "offline asset set at $($resolved.Url) has no $SumsName."
             }
+            if (-not (Test-Path -LiteralPath (Join-Path $resolved.Url $ProvenanceName) -PathType Leaf)) {
+                throw "offline asset set at $($resolved.Url) has no $ProvenanceName"
+            }
             if (-not (Test-Path -LiteralPath (Join-Path $resolved.Url $PackageName) -PathType Leaf)) {
                 throw "offline asset set at $($resolved.Url) has no $PackageName."
             }
             Copy-Item -LiteralPath (Join-Path $resolved.Url $SumsName) -Destination $sumsPath
+            Copy-Item -LiteralPath (Join-Path $resolved.Url $ProvenanceName) -Destination $provenancePath
             Copy-Item -LiteralPath (Join-Path $resolved.Url $PackageName) -Destination $zipPath
         }
 
@@ -383,6 +399,18 @@ function Install-AcqZip {
         Write-Host "  verified $PackageName SHA-256: $actual"
 
         Test-ReleaseAttestation -Archive $zipPath -Resolved $resolved
+
+        # As in install.sh, provenance is a required companion asset, and
+        # SHA256SUMS lists it, so it is verified like the archive before anything
+        # is extracted: an unchecked provenance record would be a claim, not evidence.
+        if (-not (Test-Path -LiteralPath $provenancePath -PathType Leaf)) {
+            throw "release is missing the provenance manifest ($ProvenanceName)"
+        }
+        $provExpected = Get-ExpectedHash -SumsPath $sumsPath -Name $ProvenanceName
+        $provActual = (Get-FileHash -Algorithm SHA256 -LiteralPath $provenancePath).Hash.ToLowerInvariant()
+        if ($provActual -ne $provExpected) {
+            throw "checksum mismatch for $ProvenanceName (expected $provExpected, got $provActual)"
+        }
 
         $extractDir = Join-Path $tmpRoot "extract"
         Expand-Archive -LiteralPath $zipPath -DestinationPath $extractDir -Force
@@ -411,6 +439,9 @@ function Install-AcqZip {
                 throw "release archive is missing $required."
             }
         }
+        if (-not (Test-Path -LiteralPath (Join-Path $sourceDir "wheelhouse") -PathType Container)) {
+            throw "release archive is missing the dependency wheelhouse (wheelhouse/)"
+        }
 
         # Publish without destroying anything this installer did not create:
         # -InstallDir can name any directory. Record the exact top-level names
@@ -420,6 +451,9 @@ function Install-AcqZip {
         # Get-Item (not Test-Path) is used for existence so dangling links and
         # junctions are seen too.
         $ownedMarker = ".acq-v1-install"
+        # Stage the companion manifest with the archive entries so it gets the
+        # same collision protection and ownership record as every release name.
+        Copy-Item -LiteralPath $provenancePath -Destination (Join-Path $sourceDir $ProvenanceName) -Force
         if ($InstallDir.Length -gt 3) { $InstallDir = $InstallDir.TrimEnd('\', '/') }  # keep a drive root like C:\
         $existing = Get-Item -LiteralPath $InstallDir -Force -ErrorAction SilentlyContinue
         if ($existing) {
