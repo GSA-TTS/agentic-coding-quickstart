@@ -160,6 +160,23 @@ def test_a_host_exported_key_is_bound_on_msb_without_storing(monkeypatch, tmp_pa
     _no_leak(VALUE, children, out, err)
 
 
+def test_an_exported_key_is_not_reused_for_a_changed_recorded_binding(monkeypatch, tmp_path, capsys, children):
+    # start reuses an exported key only for the identical recorded binding; a
+    # record that now names another host must not receive it.
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("USAI_API_KEY", VALUE)
+    rc, doc, _out, err = _create(capsys, tmp_path)
+    assert rc == 0, (doc, err)
+    msb.stop("box")
+    rec = msb.held_read("box")
+    rec.bindings["USAI_API_KEY"]["host"] = "elsewhere.example.gov"
+    msb._held_write(rec)
+    with pytest.raises(msb.MsbError) as exc:
+        msb.start("box")
+    assert exc.value.code == errors.SECRET_MISSING
+    assert not _verb_calls(children, "start")
+
+
 @pytest.mark.provider_key
 def test_a_stored_provider_key_takes_precedence_over_host_env(monkeypatch, tmp_path, capsys, children):
     _env(monkeypatch, tmp_path)
@@ -457,6 +474,10 @@ def test_a_models_url_on_another_host_is_refused(tmp_path):
     ("api.example.gov", "https://api.example.gov:443/models", "explicit port"),
     ("api.example.gov", "https://api.example.gov:8443/models", "explicit port"),
     ("api.example.gov", "https://other.example.gov/models", "host does not match its declared host"),
+    ("api.example.gov", "https://user:pass@api.example.gov/models", "must not contain user information"),
+    ("api.example.gov", "https://user@api.example.gov/models", "must not contain user information"),
+    ("api.example.gov", "https://api.example.gov./models", "models URL"),
+    ("api.example.gov", "https://api.example.gov/models#fragment", "models URL"),
 ])
 def test_provider_kit_facts_refusals_explain_the_problem(tmp_path, host, url, message):
     kit = _kit(tmp_path, host=host)
@@ -484,6 +505,11 @@ def test_provider_kit_facts_refusals_explain_the_problem(tmp_path, host, url, me
 def test_provider_facts_match_bash_pinned_validator(pinned_patterns_repo, tmp_path, host, url, accepted):
     # Use the same validator as Bash when CI supplies its pinned checkout.
     # A valid control prevents a broken fixture from passing every refusal.
+    # The validator needs PyYAML and jsonschema in the interpreter that runs it
+    # (with -I); a job that has the checkout but not those cannot compare.
+    probe = subprocess.run([sys.executable, "-I", "-c", "import jsonschema, yaml"], capture_output=True)
+    if probe.returncode != 0:
+        pytest.skip("the pinned validator's dependencies (jsonschema, PyYAML) are not installed")
     kit = _kit(tmp_path)
     manifest_path = kit / provider_input.MANIFEST
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
