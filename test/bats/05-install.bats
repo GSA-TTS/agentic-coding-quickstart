@@ -78,8 +78,14 @@ _install_dir() {
   run sh "$REPO_ROOT/install.sh" --source "$src" --yes
   assert_success
   assert_output --regexp 'verified acq-(macos|linux)-(arm64|x86_64|aarch64)\.tar\.gz'
+  # CRLF line endings (a SHA256SUMS saved on Windows) still match exactly.
+  awk '{ printf "%s\r\n", $0 }' "$REPO_ROOT/test/fixtures/installer/SHA256SUMS" > "$src/SHA256SUMS"
+  rm -rf "$(_install_dir)"
+  run sh "$REPO_ROOT/install.sh" --source "$src" --yes
+  assert_success
   # With only decoys left, the archive has no entry and nothing is installed.
-  grep -F "$zeros" "$src/SHA256SUMS" > "$src/SHA256SUMS.only" && mv "$src/SHA256SUMS.only" "$src/SHA256SUMS"
+  awk -v z="$zeros" '{ print z "  " $2 ".sig"; print z "  x-" $2 }' \
+    "$REPO_ROOT/test/fixtures/installer/SHA256SUMS" > "$src/SHA256SUMS"
   rm -rf "$(_install_dir)"
   run sh "$REPO_ROOT/install.sh" --source "$src" --yes
   assert_failure
@@ -94,7 +100,7 @@ _install_dir() {
   mkdir -p "$dir"
   real="$(cd "$dir" && pwd -P)"
   fakebin="$STUBDIR/fakedf"; mkdir -p "$fakebin"
-  printf '#!/bin/sh\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\necho "/dev/x 1 1 1 1 %s"\n' "$real" > "$fakebin/df"
+  printf '#!/bin/sh\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\necho "//server/Share Name 1 1 1 10%% %s"\n' "$real" > "$fakebin/df"
   chmod +x "$fakebin/df"
   chmod 555 "$parent"
   PATH="$fakebin:$PATH" run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes

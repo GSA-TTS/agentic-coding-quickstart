@@ -265,6 +265,7 @@ sha256_of() {
 sha256_expected() {
   sums="$1" name="$2"
   awk -v want="$name" '
+    { sub(/\r$/, "") }
     NF == 2 && length($1) == 64 && $1 !~ /[^0-9A-Fa-f]/ {
       file = $2; sub(/^\*/, "", file)
       if (file == want) { print tolower($1); exit }
@@ -526,9 +527,10 @@ mkdir -p "$install_parent" 2>/dev/null || :
 stage_base="$install_parent"
 if [ -d "$INSTALL_DIR" ] && [ ! -L "$INSTALL_DIR" ]; then
   install_real="$(cd "$INSTALL_DIR" 2>/dev/null && pwd -P)" || install_real=""
-  # df -P is POSIX; the mount point is everything after the fifth field, so a
-  # mount point containing spaces still compares whole.
-  install_mount="$(df -P "$INSTALL_DIR" 2>/dev/null | awk 'NR == 2 { for (i = 1; i <= 5; i++) $i = ""; sub(/^ +/, ""); print }')" || install_mount=""
+  # df -P is POSIX; the mount point is everything after the capacity column
+  # ("NN%"). Anchoring there keeps spaces in the filesystem name or in the mount
+  # point (even several in a row) from shifting or collapsing the path.
+  install_mount="$(df -P "$INSTALL_DIR" 2>/dev/null | awk 'NR == 2 && match($0, /[0-9]+%[[:space:]]+/) { print substr($0, RSTART + RLENGTH) }')" || install_mount=""
   [ -n "$install_real" ] && [ "$install_mount" = "$install_real" ] && stage_base="$INSTALL_DIR"
 fi
 if stage_root="$(mktemp -d "$stage_base/.acq-stage.$$.XXXXXXXX" 2>/dev/null)"; then
