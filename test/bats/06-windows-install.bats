@@ -85,6 +85,62 @@ teardown() {
   assert_regex "$installer" 'throw "release archive is missing \$required\."'
 }
 
+@test "windows installer: requires provenance from URL and offline sources before extraction" {
+  local installer check_line extract_line hash_line
+  installer=$(cat "$REPO_ROOT/install.ps1")
+
+  grep -qF '$ProvenanceName = "provenance.json"' "$REPO_ROOT/install.ps1"
+  grep -qF '$provenancePath = Join-Path $tmpRoot $ProvenanceName' "$REPO_ROOT/install.ps1"
+  grep -qF 'Invoke-WebRequest -Uri "$($resolved.Url)/$ProvenanceName" -OutFile $provenancePath' "$REPO_ROOT/install.ps1"
+  grep -qF 'throw "could not download $($resolved.Url)/$ProvenanceName"' "$REPO_ROOT/install.ps1"
+  grep -qF 'Test-Path -LiteralPath (Join-Path $resolved.Url $ProvenanceName) -PathType Leaf' "$REPO_ROOT/install.ps1"
+  grep -qF 'throw "offline asset set at $($resolved.Url) has no $ProvenanceName."' "$REPO_ROOT/install.ps1"
+  grep -qF 'Copy-Item -LiteralPath (Join-Path $resolved.Url $ProvenanceName) -Destination $provenancePath' "$REPO_ROOT/install.ps1"
+  grep -qF 'Test-Path -LiteralPath $provenancePath -PathType Leaf' "$REPO_ROOT/install.ps1"
+  grep -qF 'throw "release is missing the provenance manifest ($ProvenanceName)"' "$REPO_ROOT/install.ps1"
+  # Like install.sh, the manifest is verified against its SHA256SUMS entry
+  # before extraction; keep the two installers' verification scope equal.
+  assert_regex "$installer" 'Get-ExpectedHash -SumsPath \$sumsPath -Name \$ProvenanceName'
+  assert_regex "$installer" 'Get-FileHash -Algorithm SHA256 -LiteralPath \$provenancePath'
+  assert_regex "$installer" 'checksum mismatch for \$ProvenanceName'
+  check_line=$(grep -nF 'throw "release is missing the provenance manifest' "$REPO_ROOT/install.ps1" | cut -d: -f1)
+  extract_line=$(grep -nF 'Expand-Archive -LiteralPath $zipPath' "$REPO_ROOT/install.ps1" | cut -d: -f1)
+  [ -n "$check_line" ] && [ -n "$extract_line" ] && [ "$check_line" -lt "$extract_line" ]
+  # The provenance checksum is verified before anything is extracted, too.
+  hash_line=$(grep -nF 'throw "checksum mismatch for $ProvenanceName' "$REPO_ROOT/install.ps1" | cut -d: -f1)
+  [ -n "$hash_line" ] && [ "$hash_line" -lt "$extract_line" ]
+}
+
+@test "windows installer: requires a wheelhouse directory before publishing" {
+  local check_line publish_line
+  grep -qF 'Test-Path -LiteralPath (Join-Path $sourceDir "wheelhouse") -PathType Container' "$REPO_ROOT/install.ps1"
+  grep -qF 'throw "release archive is missing the dependency wheelhouse (wheelhouse/)"' "$REPO_ROOT/install.ps1"
+  check_line=$(grep -nF 'throw "release archive is missing the dependency wheelhouse' "$REPO_ROOT/install.ps1" | cut -d: -f1)
+  publish_line=$(grep -nF 'New-Item -ItemType Directory -Force -Path $InstallDir' "$REPO_ROOT/install.ps1" | cut -d: -f1)
+  [ -n "$check_line" ] && [ -n "$publish_line" ] && [ "$check_line" -lt "$publish_line" ]
+}
+
+@test "windows installer: stages provenance before enumerating owned release names" {
+  local copy_line entries_line marker_line
+  copy_line=$(grep -nF 'Copy-Item -LiteralPath $provenancePath -Destination (Join-Path $sourceDir $ProvenanceName) -Force' "$REPO_ROOT/install.ps1" | cut -d: -f1)
+  entries_line=$(grep -nF '$entries = @(Get-ChildItem -LiteralPath $sourceDir -Force)' "$REPO_ROOT/install.ps1" | cut -d: -f1)
+  marker_line=$(grep -nF 'Set-Content -LiteralPath $markerPath' "$REPO_ROOT/install.ps1" | cut -d: -f1)
+  [ -n "$copy_line" ] && [ -n "$entries_line" ] && [ -n "$marker_line" ]
+  [ "$copy_line" -lt "$entries_line" ] && [ "$entries_line" -lt "$marker_line" ]
+  grep -qF '$names = @($owned) + @($entries | ForEach-Object { $_.Name })' "$REPO_ROOT/install.ps1"
+  grep -qF 'Move-Item -LiteralPath $entry.FullName -Destination $target' "$REPO_ROOT/install.ps1"
+}
+
+@test "windows installer: dry-run describes provenance and the complete enumerated set" {
+  local plan
+  plan=$(sed -n '/^    if (\$DryRun) {/,/^        return/p' "$REPO_ROOT/install.ps1")
+  grep -qF '[dry-run] download $($resolved.Url)/$SumsName, $($resolved.Url)/$ProvenanceName and $($resolved.Url)/$PackageName' <<< "$plan"
+  grep -qF '[dry-run] read $($resolved.Url)/$SumsName, $($resolved.Url)/$ProvenanceName and $($resolved.Url)/$PackageName from the offline asset set' <<< "$plan"
+  grep -qF 'require the provenance manifest ($ProvenanceName)' <<< "$plan"
+  grep -qF 'launchers, backend tree, runtime, source, wheelhouse' <<< "$plan"
+  grep -qF 'install $ProvenanceName into $InstallDir and record it in .acq-v1-install' <<< "$plan"
+}
+
 @test "windows PowerShell: installer -Help and -DryRun execute when pwsh is available" {
   command -v pwsh >/dev/null 2>&1 || skip "pwsh not available"
 
@@ -95,6 +151,16 @@ teardown() {
   run pwsh -NoLogo -NoProfile -File "$REPO_ROOT/install.ps1" -DryRun
   assert_success
   assert_output --partial '[dry-run]'
+  assert_output --partial '/provenance.json'
+  assert_output --partial 'require the provenance manifest (provenance.json)'
+  assert_output --partial 'launchers, backend tree, runtime, source, wheelhouse'
+  assert_output --partial 'install provenance.json into'
+  assert_output --partial 'record it in .acq-v1-install'
+
+  run pwsh -NoLogo -NoProfile -File "$REPO_ROOT/install.ps1" -DryRun -Source 'offline-assets'
+  assert_success
+  assert_output --partial '[dry-run] read offline-assets/SHA256SUMS, offline-assets/provenance.json and offline-assets/acq-windows-x64.zip from the offline asset set'
+  refute_output --partial '[dry-run] download'
 }
 
 @test "windows PowerShell: installer parses when pwsh is available" {

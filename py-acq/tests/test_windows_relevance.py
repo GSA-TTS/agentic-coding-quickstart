@@ -45,6 +45,7 @@ REQUIRED = {
     "install.ps1", "install.sh", "installer",
     "py-acq/src", "py-acq/tests", "py-acq/pyproject.toml", "py-acq/requirements-quality.txt",
     "scripts/stage-windows-runtime", "scripts/gen-install-assets",
+    ".github/workflows/build-assets.yml", "scripts/assemble-release", "scripts/gen-provenance",
     "scripts/qualify-backend-cell", "scripts/setup-provider-input-validator",
     "scripts/test-acq-lib.sh", "scripts/refresh-kitbundle",
     "qualification", "docs/qualification-ledger.json",
@@ -62,8 +63,7 @@ REQUIRED = {
 # prefix ending in "/". A path covered by the list wins over a prefix here
 # (docs/qualification-ledger.json is listed; the rest of docs/ is prose).
 NOT_INPUTS = {
-    ".github/workflows/build-assets.yml",
-    "scripts/stage-posix-runtime", "scripts/assemble-release", "scripts/gen-provenance",
+    "scripts/stage-posix-runtime",
     # prose, governance and repo metadata no Windows test reads
     "docs/", "checklists/", "governance/",
     "AGENTS.md", "AGENTS.fork.md", "CHANGELOG.md", "CODE_OF_CONDUCT.md", "CONTEXT-GUIDE.md",

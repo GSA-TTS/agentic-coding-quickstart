@@ -48,3 +48,8 @@ py-acq/src/acq_py/kitbundle/** text eol=lf
 scripts/stage-posix-runtime text eol=lf
 scripts/assemble-release text eol=lf
 scripts/gen-provenance text eol=lf
+
+# Release signing records and workflow contract tests.
+docs/adr/0049m-release-signing-scaffolding.md text eol=lf
+docs/howto/release-signing.md text eol=lf
+py-acq/tests/test_release_workflows.py text eol=lf

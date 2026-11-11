@@ -18,6 +18,7 @@ and source checks in the bats suite.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -100,14 +101,15 @@ def _make_release(
                 tf.add(path, arcname=path.relative_to(stage).as_posix())
         sha = hashlib.sha256(archive.read_bytes()).hexdigest()
         sums.append(f"{'0' * 64 if bad else sha}  {name}\n")
+    # The provenance manifest travels alongside SHA256SUMS (a separate asset),
+    # and SHA256SUMS lists it, as gen-install-assets does for a real release.
+    provenance = release / "provenance.json"
+    provenance.write_text('{"schema": 1, "note": "test fixture provenance (no secrets)"}\n')
+    sums.append(f"{hashlib.sha256(provenance.read_bytes()).hexdigest()}  provenance.json\n")
     if drop_entry:
         (release / "SHA256SUMS").write_text(f"{sha}  some-other-asset.tar.gz\n")
     else:
         (release / "SHA256SUMS").write_text("".join(sums))
-    # The provenance manifest travels alongside SHA256SUMS (a separate asset).
-    (release / "provenance.json").write_text(
-        '{"schema": 1, "note": "test fixture provenance (no secrets)"}\n'
-    )
     return release
 
 
@@ -295,6 +297,28 @@ def test_missing_provenance_fails_closed(tmp_path):
 
 
 @supported_platform_only
+def test_tampered_provenance_fails_closed(tmp_path):
+    release = _make_release(tmp_path)
+    (release / "provenance.json").write_text('{"tampered": true}\n')
+    proc = _run_installer(tmp_path, "--source", str(release), "--yes")
+    assert proc.returncode == 1
+    assert "checksum mismatch for provenance.json" in proc.stderr.decode()
+    assert not _install_dir(tmp_path).exists()
+
+
+@supported_platform_only
+def test_provenance_without_a_sha256sums_entry_fails_closed(tmp_path):
+    release = _make_release(tmp_path)
+    sums = release / "SHA256SUMS"
+    sums.write_text("".join(line + "\n" for line in sums.read_text().splitlines()
+                            if not line.endswith("  provenance.json")))
+    proc = _run_installer(tmp_path, "--source", str(release), "--yes")
+    assert proc.returncode == 1
+    assert "no entry for provenance.json" in proc.stderr.decode()
+    assert not _install_dir(tmp_path).exists()
+
+
+@supported_platform_only
 def test_consent_is_not_inferred_when_noninteractive(tmp_path):
     release = _make_release(tmp_path)
     # No --yes and a non-interactive stdin: consent must decline (fail closed).
@@ -372,6 +396,7 @@ _GEN_ASSETS = (
     "acq-macos-arm64.tar.gz",
     "acq-macos-x86_64.tar.gz",
     "acq-windows-x64.zip",
+    *json.loads((REPO_ROOT / "installer/assets.json").read_text())["wheelhouses"],
 )
 # The only line form SHA256SUMS may contain: "HASH  name", two spaces, no "*".
 _SUMS_LINE = re.compile(r"[0-9a-f]{64}  [^ *][^\r]*")

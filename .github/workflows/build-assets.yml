@@ -1,10 +1,46 @@
 # Dry-run contract (ADR-0042m): build and verify the complete offline asset set.
 # Only workflow artifacts are uploaded; this workflow never tags or publishes.
-name: Build assets (dry run)
+name: Build assets
 
 on:
   workflow_dispatch:
   workflow_call:
+    inputs:
+      ref:
+        description: Source ref; an empty value uses the triggering ref
+        type: string
+        default: ''
+      sign:
+        description: Allow optional platform signing on trusted release calls
+        type: boolean
+        default: false
+    secrets:
+      AZURE_SIGNING_ENDPOINT:
+        required: false
+      AZURE_SIGNING_ACCOUNT:
+        required: false
+      AZURE_CERTIFICATE_PROFILE:
+        required: false
+      AZURE_TENANT_ID:
+        required: false
+      AZURE_CLIENT_ID:
+        required: false
+      AZURE_CLIENT_SECRET:
+        required: false
+      MACOS_CERTIFICATE_BASE64:
+        required: false
+      MACOS_CERTIFICATE_PASSWORD:
+        required: false
+      MACOS_SIGNING_IDENTITY:
+        required: false
+      MACOS_KEYCHAIN_PASSWORD:
+        required: false
+      APPLE_API_KEY_BASE64:
+        required: false
+      APPLE_API_KEY_ID:
+        required: false
+      APPLE_API_ISSUER:
+        required: false
   # Run the dry run on changes to what it builds, so packaging regressions show
   # up on the pull request rather than at release time.
   pull_request:
@@ -62,8 +98,11 @@ jobs:
           # runtime, and Apple-silicon runners did not start on the fork. This
           # leg checks the runtime statically; smoke-macos-arm64 runs it.
           - platform: macos-arm64
-            runner: ubuntu-24.04
-            cross_built: true
+            # Signed release calls build natively (codesign and notarytool need
+            # macOS); other runs cross-build on Linux because Apple-silicon
+            # runners did not start on the fork.
+            runner: ${{ inputs.sign && 'macos-15' || 'ubuntu-24.04' }}
+            cross_built: ${{ !inputs.sign }}
             pip_platform: macosx_11_0_arm64
             lock: scripts/provider-input-validator-requirements-macos.txt
             python_versions: "312 313 314"
@@ -86,6 +125,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.ref || github.ref }}
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -110,7 +150,7 @@ jobs:
               --implementation cp --python-version "$py" --abi "cp$py" --dest wheelhouse
           done
           (cd wheelhouse && python3 -I -c "import hashlib,pathlib; print(''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n' for p in sorted(pathlib.Path('.').glob('*.whl'))), end='')" > SHA256SUMS)
-      - name: Fetch and verify pinned runtime, then assemble
+      - name: Fetch and verify pinned runtime, then stage
         env:
           RUNTIME_URL: ${{ matrix.runtime_url }}
           RUNTIME_SHA256: ${{ matrix.runtime_sha256 }}
@@ -119,13 +159,114 @@ jobs:
           set -euo pipefail
           curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error "$RUNTIME_URL" -o runtime.archive
           # The matching stage script verifies the pinned digest before extraction.
-          scripts/assemble-release "$PLATFORM" runtime.archive "$RUNTIME_SHA256" wheelhouse dist
+          scripts/assemble-release "$PLATFORM" runtime.archive "$RUNTIME_SHA256" wheelhouse dist --stage release-tree
+      # Secrets are scoped to signing steps, never PR build steps.
+      - name: Check optional Windows credentials
+        id: windows-signing
+        if: ${{ inputs.sign && vars.ENABLE_WINDOWS_SIGNING == 'true' && github.event_name != 'pull_request' && runner.os == 'Windows' }}
+        env:
+          AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          AZURE_CERTIFICATE_PROFILE: ${{ secrets.AZURE_CERTIFICATE_PROFILE }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+        run: |
+          if [ -n "$AZURE_SIGNING_ENDPOINT" ] && [ -n "$AZURE_SIGNING_ACCOUNT" ] && [ -n "$AZURE_CERTIFICATE_PROFILE" ] && [ -n "$AZURE_TENANT_ID" ] && [ -n "$AZURE_CLIENT_ID" ] && [ -n "$AZURE_CLIENT_SECRET" ]; then
+            echo 'ready=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Stage standalone PowerShell installer
+        if: runner.os == 'Windows'
+        run: cp install.ps1 release-tree/install.ps1
+      - name: Authenticode PowerShell files
+        if: ${{ inputs.sign && vars.ENABLE_WINDOWS_SIGNING == 'true' && github.event_name != 'pull_request' && steps.windows-signing.outputs.ready == 'true' }}
+        uses: Azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_CERTIFICATE_PROFILE }}
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          files-folder: release-tree
+          files-folder-filter: ps1
+          files-folder-recurse: false
+      - name: Verify Authenticode signatures
+        if: ${{ inputs.sign && vars.ENABLE_WINDOWS_SIGNING == 'true' && github.event_name != 'pull_request' && steps.windows-signing.outputs.ready == 'true' }}
+        shell: pwsh
+        run: |
+          foreach ($file in @('release-tree/install.ps1', 'release-tree/acq.ps1')) {
+            if ((Get-AuthenticodeSignature -LiteralPath $file).Status -ne 'Valid') {
+              throw "Authenticode signature is invalid: $file"
+            }
+          }
+      - name: Check optional macOS credentials
+        id: macos-signing
+        if: ${{ inputs.sign && vars.ENABLE_MACOS_SIGNING == 'true' && github.event_name != 'pull_request' && runner.os == 'macOS' }}
+        env:
+          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          MACOS_KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          if [ -n "$MACOS_CERTIFICATE_BASE64" ] && [ -n "$MACOS_CERTIFICATE_PASSWORD" ] && [ -n "$MACOS_SIGNING_IDENTITY" ] && [ -n "$MACOS_KEYCHAIN_PASSWORD" ] && [ -n "$APPLE_API_KEY_BASE64" ] && [ -n "$APPLE_API_KEY_ID" ] && [ -n "$APPLE_API_ISSUER" ]; then
+            echo 'ready=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Sign and notarize macOS runtime
+        if: ${{ inputs.sign && vars.ENABLE_MACOS_SIGNING == 'true' && github.event_name != 'pull_request' && steps.macos-signing.outputs.ready == 'true' }}
+        env:
+          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          MACOS_KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/acq-signing.keychain-db"
+          python3 -I -c 'import base64,os,pathlib; pathlib.Path(os.environ["RUNNER_TEMP"],"certificate.p12").write_bytes(base64.b64decode(os.environ["MACOS_CERTIFICATE_BASE64"])); pathlib.Path(os.environ["RUNNER_TEMP"],"notary.p8").write_bytes(base64.b64decode(os.environ["APPLE_API_KEY_BASE64"]))'
+          security create-keychain -p "$MACOS_KEYCHAIN_PASSWORD" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$MACOS_KEYCHAIN_PASSWORD" "$keychain"
+          security import "$RUNNER_TEMP/certificate.p12" -P "$MACOS_CERTIFICATE_PASSWORD" -k "$keychain" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$MACOS_KEYCHAIN_PASSWORD" "$keychain" >/dev/null
+          while IFS= read -r -d '' binary; do
+            if file -b "$binary" | grep -q 'Mach-O'; then
+              codesign --force --options runtime --timestamp --keychain "$keychain" --sign "$MACOS_SIGNING_IDENTITY" "$binary"
+            fi
+          done < <(find release-tree/py-acq/runtime -type f -print0)
+          ditto -c -k --keepParent release-tree/py-acq/runtime "$RUNNER_TEMP/notary.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notary.zip" --wait --key "$RUNNER_TEMP/notary.p8" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER" --output-format json > "$RUNNER_TEMP/notary-result.json"
+          python3 -I -c 'import json,os,pathlib; result=json.loads(pathlib.Path(os.environ["RUNNER_TEMP"],"notary-result.json").read_text()); assert result["status"] == "Accepted", result'
+      - name: Clean up signing keychain and credentials
+        if: ${{ always() && inputs.sign && vars.ENABLE_MACOS_SIGNING == 'true' && github.event_name != 'pull_request' && steps.macos-signing.outputs.ready == 'true' }}
+        run: |
+          keychain="$RUNNER_TEMP/acq-signing.keychain-db"
+          rc=0
+          if [ -f "$keychain" ]; then security delete-keychain "$keychain" || rc=$?; fi
+          rm -f "$RUNNER_TEMP/certificate.p12" "$RUNNER_TEMP/notary.p8" "$RUNNER_TEMP/notary.zip" "$RUNNER_TEMP/notary-result.json"
+          exit "$rc"
+      - name: Pack staged bytes and validator wheelhouse
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          RUNTIME_SHA256: ${{ matrix.runtime_sha256 }}
+        run: |
+          set -euo pipefail
+          scripts/assemble-release "$PLATFORM" runtime.archive "$RUNTIME_SHA256" wheelhouse dist --pack release-tree
+          tar -czf "dist/provider-input-validator-wheelhouse-${PLATFORM}.tar.gz" -C wheelhouse .
+          if [ "$PLATFORM" = windows-x86_64 ]; then cp release-tree/install.ps1 dist/install.ps1; fi
       - name: Check the cross-built runtime statically (not executed on this host)
         if: ${{ matrix.cross_built == true }}
+        env:
+          ARCHIVE: acq-macos-arm64.tar.gz
         run: |
           set -euo pipefail
           mkdir unpacked
-          tar -xzf dist/*.tar.gz -C unpacked
+          tar -xzf "dist/$ARCHIVE" -C unpacked
           # A 64-bit little-endian Mach-O header (cf fa ed fe) for ARM64 (cputype
           # 0x0100000c) catches a wrong-architecture runtime pin without running it.
           python3 -I - unpacked <<'PY'
@@ -150,7 +291,8 @@ jobs:
             python3 -I -m zipfile -e dist/acq-windows-x64.zip unpacked
             unpacked/py-acq/runtime/python.exe -I -m acq_py version --json > version.json
           else
-            tar -xzf dist/*.tar.gz -C unpacked
+            archive="$(python3 -I -c 'import json,os; print(json.load(open("installer/assets.json"))["platforms"][os.environ["PLATFORM"]]["archive"])')"
+            tar -xzf "dist/$archive" -C unpacked
             unpacked/py-acq/runtime/bin/python3 -I -c 'import pathlib,runpy,sys; sys.path.insert(0,str(pathlib.Path("unpacked/py-acq/src").resolve())); sys.argv=["acq_py","version","--json"]; runpy.run_module("acq_py",run_name="__main__")' > version.json
           fi
           python3 -I -c 'import json,subprocess; d=json.load(open("version.json"))["data"]; assert d["impl"]=="python"; assert d["acq_version"]==json.load(open("package.json"))["version"]; assert d["source_revision"]==subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip(), d'
@@ -167,6 +309,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.ref || github.ref }}
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -175,7 +318,8 @@ jobs:
           path: dist
       - name: Complete and verify the enumerated dist
         run: |
-          cp install.sh install.ps1 dist/
+          cp install.sh dist/
+          test -f dist/install.ps1
           scripts/gen-provenance dist
           scripts/gen-install-assets dist
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -191,13 +335,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Apple-silicon runners (macos-14/15) did not start on the fork, so the
+        # Apple-silicon runners (macos-15) did not start on the fork, so the
         # macOS install runs on Intel; smoke-macos-arm64 covers Apple silicon on
         # dispatched and release runs.
         runner: [ubuntu-24.04, macos-15-intel, windows-2022]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.ref || github.ref }}
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -229,12 +374,15 @@ jobs:
   smoke-macos-arm64:
     needs: build
     if: ${{ github.event_name != 'pull_request' }}
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # The baked identity is compared with this checkout's HEAD, so it
+          # must be the ref the archive was built from.
+          ref: ${{ inputs.ref || github.ref }}
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: archive-macos-arm64
