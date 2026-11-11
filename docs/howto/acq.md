@@ -817,7 +817,8 @@ From there the injection is generic — no provider-specific `acq` code:
   same data `usai` gets from `provider-facts/usai.env`), the registry decides the
   ENV var, and the credential is bound as `KEY_ENV@host` by both backends (`sbx`
   custom secret; msb `--secret ENV@HOST`). A value exported by CI is bindable on
-  msb; on sbx, which snapshots its own proxy table, `acq` fails closed and tells
+  msb when no stored value resolves (the store takes precedence); on sbx,
+  which snapshots its own proxy table, `acq` fails closed and tells
   you to store it;
 - the binding (`providerId`, `keyEnv`, `host`, `modelsUrl`) is recorded in the
   sandbox's host config, so resume/heal re-injects it without re-prompting, and a
