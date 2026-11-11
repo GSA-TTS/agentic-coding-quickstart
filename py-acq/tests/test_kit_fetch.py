@@ -670,6 +670,40 @@ def test_midlife_apply_fetches_and_checks_external_ref(backend, kit_repo, monkey
         assert kitspec.load_kit(add[-1]).field("schemaVersion") == "2"
 
 
+@pytest.mark.parametrize("backend", ["msb", "sbx"])
+@pytest.mark.parametrize("entrypoint", ["", "team-agent"])
+def test_midlife_external_apply_confirms_to_human(backend, entrypoint, monkeypatch, tmp_path, capsys):
+    (_msb_env if backend == "msb" else _sbx_env)(monkeypatch, tmp_path)
+    monkeypatch.setenv(f"ACQ_{backend.upper()}_STUB_CATALOG", '{"box":"running"}')
+    kit_dir = tmp_path / "human-kit"
+    spec = TEAM_SPEC + (f"agent:\n  entrypoint: {entrypoint}\n" if entrypoint else "")
+    _write(kit_dir, "spec.yaml", spec)
+    _write(kit_dir, "files/team.txt", "hello\n")
+    assert cli.main(["--backend", backend, "kit", "apply", "box", str(kit_dir)]) == 0
+    suffix = f" (entrypoint {entrypoint})" if entrypoint else ""
+    assert capsys.readouterr().out == f"applied kit 'team-kit' to sandbox 'box'{suffix}.\n"
+    assert kits.kit_applied_read(backend, "box") is None
+
+
+def test_midlife_external_startup_kit_requires_sbx_recreate(monkeypatch, tmp_path, capsys):
+    _sbx_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_SBX_STUB_CATALOG", '{"box":"running"}')
+    kit_dir = tmp_path / "startup-kit"
+    _write(kit_dir, "spec.yaml", TEAM_SPEC +
+           "commands:\n  - phase: startup\n    command:\n      - echo\n      - ready\n")
+    _write(kit_dir, "files/team.txt", "hello\n")
+    seen = _spy(monkeypatch, sbx)
+    rc, doc, err = _invoke(capsys, "--backend", "sbx", "kit", "apply", "box", str(kit_dir), "--json")
+    assert rc == 1, err
+    assert doc["error"]["code"] == errors.UNSUPPORTED
+    assert "startup commands" in doc["error"]["message"]
+    assert "recreate" in doc["error"]["remediation"]
+    assert "session/context" in doc["error"]["remediation"]
+    assert any(a[:2] == ["kit", "add"] for a in seen)
+    assert not any(a[0] in {"create", "remove", "exec"} for a in seen)
+    assert kits.kit_applied_read("sbx", "box") is None
+
+
 @pytest.mark.parametrize("ref,code", [
     ("git+https://github.com/acme/kits#ref=main&dir=kit", "kit_ref_not_pinned"),
     ("git+https://github.com/acme/kits?token=private#ref=main&dir=kit", "validation_failed"),

@@ -1118,8 +1118,6 @@ def test_midlife_volume_apply_warns_and_only_executes(monkeypatch, tmp_path, cap
 
 
 def test_volume_cleanup_after_confirmed_removal(monkeypatch, tmp_path, capsys):
-    from acq_py.commands import lifecycle
-
     _env(monkeypatch, tmp_path, catalog={"box": "running"})
     seen = _spy(monkeypatch)
     real = msb._run
@@ -1138,7 +1136,9 @@ def test_volume_cleanup_after_confirmed_removal(monkeypatch, tmp_path, capsys):
     seen.clear()
     monkeypatch.setenv("ACQ_MSB_STUB_CATALOG", '{"box":"running"}')
     monkeypatch.setenv("ACQ_MSB_STUB_FAIL", "remove")
-    assert not lifecycle._remove_confirmed(lifecycle.common._adapter("msb"), "box")
+    assert cli.main(["--backend", "msb", "rm", "box", "--json"]) != 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["command"] == "rm" and "error" in doc
     assert not any(a[0] == "volume" for a in seen)
 
 
@@ -1151,6 +1151,33 @@ def test_missing_extras_record_retains_live_environment(monkeypatch, tmp_path):
     assert kit_msb.select("shell", refs, image_is_default=True, extras=extras)[-1].name == "opencode"
     monkeypatch.setenv("ACQ_EXTRA_KITS", "one\u00a0ref\tanother")
     assert kit_msb.cli_kits_read("legacy") == ([], ["one\u00a0ref", "another"])
+
+
+def test_recorded_extras_do_not_consult_the_live_environment(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path)
+    kit_msb.cli_kits_write("box", [])
+    monkeypatch.setattr(kitspec, "_ifs_split", lambda _: pytest.fail("record is authoritative"))
+    assert kit_msb.cli_kits_read("box") == ([], [])
+
+
+def test_record_presence_is_checked_without_tuple_truthiness(monkeypatch, tmp_path):
+    from acq_py import legacy_bash
+
+    _env(monkeypatch, tmp_path)
+
+    class RecordedKits(tuple):
+        def __bool__(self):
+            pytest.fail("record presence must be checked against None")
+
+    recorded = RecordedKits(([], []))
+    monkeypatch.setattr(legacy_bash, "read_cli_kits", lambda *args: recorded)
+    assert kit_msb.cli_kits_read("box") is recorded
+
+
+def test_missing_extras_record_accepts_crlf(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_EXTRA_KITS", "first\r\nsecond\r\n")
+    assert kit_msb.cli_kits_read("legacy") == ([], ["first", "second"])
 
 
 def test_volume_create_emits_bash_parser_warning(tmp_path, capsys):

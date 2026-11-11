@@ -185,6 +185,10 @@ def _kit_apply_external(name: str, ref: str, emit_json: bool, backend: str) -> i
             "entrypoint": kit.spec.agent_field("entrypoint") or "", "applied": True, "action": "applied"}
     if emit_json:
         print(json.dumps(envelope.success("kit apply", data)))
+    else:
+        entrypoint = kit.spec.agent_field("entrypoint")
+        suffix = f" (entrypoint {entrypoint})" if entrypoint else ""
+        print(f"applied kit '{kit.name}' to sandbox '{name}'{suffix}.")
     return errors.EXIT_SUCCESS
 
 

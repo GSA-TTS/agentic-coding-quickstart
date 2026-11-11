@@ -218,7 +218,10 @@ def cli_kits_read(name: str, backend: str = "msb") -> tuple[list[str], list[str]
     A relative local ref (left by an older Bash acq) would resolve against the
     current directory, so it is skipped with a warning, as Bash does.
     """
-    return legacy_bash.read_cli_kits(backend, name, _warn) or ([], kitspec._ifs_split(os.environ.get("ACQ_EXTRA_KITS", "")))
+    recorded = legacy_bash.read_cli_kits(backend, name, _warn)
+    if recorded is not None:
+        return recorded
+    return ([], kitspec._ifs_split(os.environ.get("ACQ_EXTRA_KITS", "")))
 
 
 def cli_kits_remove(name: str, backend: str = "msb") -> None:
