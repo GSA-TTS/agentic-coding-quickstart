@@ -304,7 +304,8 @@ def create(
     argv += ["-t", image]
     if clone:
         argv.append("--clone")
-    argv += ["--env", f"ACQ_WORKSPACE={workspace}"]
+    # The guest sees the path, never the ":ro" mount suffix.
+    argv += ["--env", f"ACQ_WORKSPACE={workspace.removesuffix(':ro')}"]
     if clone:
         argv += ["--env", "ACQ_CLONE=1"]
     for assignment in env or []:
@@ -448,6 +449,7 @@ def launch(
     json_mode: bool = False,
     env: list[str] | None = None,
     tty: bool | None = None,
+    agent_args: list[str] | None = None,
 ) -> int:
     """Launch the recorded agent (or a login shell) in the foreground.
 
@@ -458,6 +460,20 @@ def launch(
     (ADR-0038m §1). ``workspace`` is accepted for parity (see
     :func:`exec_command`).
     """
+    if agent_args:
+        from . import kit_sbx, state
+
+        record = state.record_read("sbx", name) or {}
+        recorded_agent = record.get("agent") or "shell"
+        generic = (recorded_agent == "opencode" and
+                   kit_sbx.hc_read(name, "generic-opencode") in ("generic-opencode", "1"))
+        command = list(agent_args)
+        if generic:
+            if command[0].startswith("-"):
+                command.insert(0, agent or "opencode")
+            command = ["-lc", 'exec "$@"', "sh", *command]
+        return _run_stream(["run", "--name", name, "shell" if generic else recorded_agent,
+                            "--", *command], json_mode=json_mode)
     interactive = hostexec.stdin_is_tty() if tty is None else tty
     command = [agent] if agent and agent != "shell" else list(SHELL_COMMAND)
     session = [f"HOME={AGENT_HOME}"]

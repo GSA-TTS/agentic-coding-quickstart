@@ -624,6 +624,18 @@
       "vectors": ["cli/kit-apply-local", "cli/kit-apply-help-external", "cli/kit-apply-msb-volumes", "cli/create-msb-kit-volumes", "cli/kit-apply-unpinned-ref", "cli/kit-update-empty-extras-record"]
     },
     {
+      "contract": "Bash CLI forms: run/create accept multiple PATH[:ro] mounts, run preserves opaque agent tails, and pre-verb --image supports both spellings with local flags taking precedence",
+      "vectors": [
+        "cli/extra-workspace-colon-refused",
+        "cli/multi-workspaces-msb",
+        "cli/global-image-msb",
+        "cli/agent-args-msb",
+        "cli/multi-workspaces-sbx",
+        "cli/global-image-sbx",
+        "cli/agent-args-sbx"
+      ]
+    },
+    {
       "contract": "Backend doctor versions, readiness and named image diagnostics (ADR-0030, ADR-0040m)",
       "vectors": ["cli/doctor-msb-installed", "cli/doctor-sbx-installed", "cli/doctor-msb-sandbox", "cli/doctor-sbx-sandbox", "cli/doctor-msb-blocked", "cli/doctor-sbx-below-floor", "cli/doctor-msb-unready", "cli/doctor-msb-readiness-skipped", "cli/doctor-msb-missing-sandbox", "cli/doctor-sbx-missing-sandbox", "cli/doctor-extra-operands"]
     }

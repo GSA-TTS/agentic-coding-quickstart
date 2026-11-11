@@ -115,6 +115,16 @@ run `create`/`run` on a disposable clone in the Python implementation too, with
 the Bash adapter's isolation, refusals and on-disk layout (`py-acq/README.md`,
 KNOWN_FAILURE_MODES §67).
 
+The CLI-form gaps for multiple run/create workspaces, per-path `:ro`, opaque
+`run ... -- AGENT_ARGS...`, and pre-verb `--image REF` / `--image=REF` are now
+ported. Each workspace receives path and trusted-directory containment checks;
+clone mode affects only the primary. Extra mounts and read-only markers persist
+through recreate and are checked on re-attach; agent arguments remain specific
+to each invocation. Image precedence and backend-specific argument dispatch
+follow the Bash adapters. Evidence is in `py-acq/tests/test_cli_forms.py` and
+the CLI-form rows in `test/vectors/manifest.json`; this is offline parity
+evidence, not a new Tier-3 qualification.
+
 *Kit parity update (2026-11-10):* `kit apply NAME KITREF` now uses the same
 checked fetch/private local copy as create, retaining Python's full-commit pin
 rule and neutral-kit validation. On msb, neutral volumes now map to named disks
