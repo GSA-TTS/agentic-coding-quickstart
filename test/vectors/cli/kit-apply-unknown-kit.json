@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "id": "cli/kit-apply-unknown-kit",
-  "oracle": "ADR-0030 inference scope: kit apply refuses a non-built-in kit ref (team/personal kits are not applied by name in this slice) with validation_failed",
+  "oracle": "A nonexistent local kit directory is refused with validation_failed",
   "tier": 1,
   "backend": null,
   "platform": "any",

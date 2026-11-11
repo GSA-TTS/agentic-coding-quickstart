@@ -326,3 +326,25 @@ def test_sbx_create_hands_sbx_only_the_translated_local_kit(monkeypatch, tmp_pat
     assert len(team) == 1 and kit_sbx.kit_root() in team[0].parents
     assert not [a for a in seen if any(str(kit) in token for token in a)]
     assert state.record_read("sbx", "ls") is not None
+
+
+@pytest.mark.parametrize("backend", ["msb", "sbx"])
+def test_midlife_local_apply_reads_private_copy(backend, monkeypatch, tmp_path, capsys):
+    from acq_py import kit_msb, kits
+
+    root = _kit(tmp_path)
+    monkeypatch.setenv(f"ACQ_{backend.upper()}_BIN", "__stub__")
+    monkeypatch.setenv(f"ACQ_{backend.upper()}_VERSION", "0.7.7" if backend == "msb" else "0.51.0")
+    monkeypatch.setenv(f"ACQ_{backend.upper()}_INSTALLED", "1")
+    monkeypatch.setenv(f"ACQ_{backend.upper()}_STUB_CATALOG", '{"box":"running"}')
+    applied = []
+    module = kit_msb if backend == "msb" else kit_sbx
+    monkeypatch.setattr(module, "apply_single", lambda n, kit, **kw: applied.append(kit) or True)
+    for content in ("first\n", "changed\n"):
+        (root / "files" / "team.txt").write_text(content)
+        assert cli.main(["--backend", backend, "kit", "apply", "box", str(root), "--json"]) == 0
+        assert json.loads(capsys.readouterr().out)["data"]["applied"] is True
+        copy = Path(applied[-1].spec.kit_dir)
+        assert copy != root and (copy / "files" / "team.txt").read_text() == content
+    assert len(applied) == 2
+    assert kits.kit_applied_read(backend, "box") is None

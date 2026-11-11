@@ -797,6 +797,24 @@ def remove(name: str) -> None:
     held_forget(name)
 
 
+def remove_derived_volumes(name: str) -> None:
+    """Best-effort cleanup of kit disks after the sandbox is confirmed gone.
+
+    Bash uses the same prefix match, including its documented overlap when one
+    sandbox name is another sandbox's name followed by a hyphen.
+    """
+    try:
+        proc = _run(["volume", "ls", "-q"])
+        if proc.returncode != 0:
+            return
+        volumes = [v for v in proc.stdout.splitlines() if v.startswith(f"acq-{name}-")]
+        for volume in volumes:
+            if _run(["volume", "rm", volume]).returncode != 0:
+                print(f"acq(msb): warning: could not remove derived volume: {volume}", file=sys.stderr)
+    except MsbError:
+        return
+
+
 def _run_stream(argv: list[str], *, json_mode: bool) -> int:
     """Run a backend command in the foreground; return its shell-style exit status.
 

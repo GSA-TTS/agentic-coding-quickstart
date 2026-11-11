@@ -436,8 +436,8 @@ class _FakeStdin:
 
 
 def test_kit_apply_unknown_kit_ref_fails_closed(monkeypatch, tmp_path, capsys):
-    # Mutation-proof guard: only a built-in agent kit can be applied by name; a
-    # team/personal ref (or unknown name) is refused with validation_failed.
+    # A name that is neither a built-in agent kit nor an existing local kit
+    # directory is refused before anything can be applied.
     _env(monkeypatch, tmp_path, catalog={"mybox": "running"})
     rc, doc = _invoke(capsys, "--backend", "msb", "kit", "apply", "mybox", "some-ref", "--json")
     assert rc == 1
