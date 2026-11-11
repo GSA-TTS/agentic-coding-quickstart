@@ -38,6 +38,15 @@ from typing import Any
 _Handler = Callable[[int, FrameType | None], Any] | int
 
 
+def _trace_command(argv: list[str], env: dict[str, str] | None = None) -> None:
+    # Qualification tools also load this resolver as a standalone module. Only
+    # the application package owns tracing and its credential redaction helpers.
+    if __package__ == "acq_py":
+        from .debug import trace_command
+
+        trace_command(argv, env)
+
+
 def _is_windows() -> bool:
     return sys.platform == "win32"
 
@@ -412,6 +421,7 @@ def _run_session(argv: list[str], stdout: int | None) -> tuple[int, int | None]:
     released once the child is gone, unless the child had to be killed, which
     terminates the job instead (:func:`_end_session`).
     """
+    _trace_command(argv)
     child, job = _start_session(argv, stdout)
     try:
         return _wait_session(child, job)
@@ -783,6 +793,7 @@ def run_captured(argv: list[str], *, timeout: float | None = None, input_text: s
     in time releases the job, leaving what it started on purpose running. Off
     Windows, or without a timeout, this is plain ``subprocess.run``.
     """
+    _trace_command(argv, env)
     kwargs: dict[str, Any] = {"capture_output": True, "encoding": "utf-8", "errors": "replace"}
     if input_text is None:
         kwargs["stdin"] = subprocess.DEVNULL

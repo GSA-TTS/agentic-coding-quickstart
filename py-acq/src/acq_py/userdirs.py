@@ -24,6 +24,7 @@ acq refuses the same variables with the same message
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path, PurePath
 
 
@@ -111,6 +112,7 @@ PATH_OVERRIDES: tuple[tuple[str, str], ...] = (
     ("ACQ_SBX_KIT_CACHE", "the default"),
     ("ACQ_MSB_KIT_CACHE", "the default"),
     ("ACQ_MSB_STARTUP_STAGE_DIR", "the default"),
+    ("ACQ_MSB_UPSTREAM_CA_FILE", "the default"),
     ("ACQ_MSB_BALANCED_HOSTS_FILE", "the default"),
     ("ACQ_MSB_SSH_DIR", "the default"),
     ("ACQ_MSB_SSH_KEY", "the default"),
@@ -148,3 +150,25 @@ def check_path_overrides() -> None:
         if store_set and var in _STORE_RELOCATED:
             continue
         path_override(var, default)
+    check_ca_paths()
+
+
+def check_ca_paths() -> None:
+    """Refuse relative CA entries before list splitting can reinterpret drive paths."""
+    var = "ACQ_MSB_UPSTREAM_CA_CERT"
+    rest = os.environ.get(var, "")
+    while rest:
+        parts = re.split(r"[:\s]", rest, maxsplit=1)
+        value, rest = parts[0], parts[1] if len(parts) > 1 else ""
+        if re.fullmatch(r"[A-Za-z]", value) and rest.startswith(("/", "\\")):
+            value += ":" + re.split(r"[:\s]", rest, maxsplit=1)[0]
+            posix = "/" + value[0].lower() + value[2:].replace("\\", "/")
+            raise UserDirError(
+                f"{var} entries must be absolute POSIX paths (the list is split on ':'), got {value!r}",
+                f"use the POSIX form of a Windows path in {var}, e.g. {posix!r}",
+            )
+        if value and not value.startswith("/"):
+            raise UserDirError(
+                f"{var} entries must be absolute paths, got {value!r}",
+                f"list absolute PEM paths in {var}, or unset it",
+            )
