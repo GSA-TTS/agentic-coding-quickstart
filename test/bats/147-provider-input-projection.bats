@@ -7,6 +7,29 @@ teardown() { acq_teardown_stubs; }
 
 load 'helper'
 
+@test "projection lock: stale recovery preserves a replacement owner" {
+  local root lock
+  root=$(acq_provider_input_root sbx swapped); lock="${root}.lock"
+  _acq_provider_input_safe_mkdir "$lock"
+  printf '999999 stale\n' > "$lock/owner"
+  # The identity check runs after the initial owner read. Replace the owner
+  # there, without timing or another process, before recovery can unlink it.
+  _acq_pid_alive() { printf '1 replacement\n' > "$lock/owner"; return 1; }
+  ACQ_PROVIDER_INPUT_LOCK_RETRIES=1 run acq_provider_input_lock_acquire sbx swapped
+  assert_failure
+  assert_equal "$(cat "$lock/owner")" '1 replacement'
+}
+
+@test "projection lock: release preserves a replacement owner" {
+  local root lock
+  root=$(acq_provider_input_root sbx release-swapped); lock="${root}.lock"
+  run acq_provider_input_lock_acquire sbx release-swapped
+  assert_success
+  printf '1 replacement\n' > "$lock/owner"
+  acq_provider_input_lock_release "$lock"
+  assert_equal "$(cat "$lock/owner")" '1 replacement'
+}
+
 @test "projection lock waits for missing or empty fresh owner metadata" {
   local kind root lock
   for kind in missing empty; do

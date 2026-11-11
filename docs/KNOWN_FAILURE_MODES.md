@@ -5286,6 +5286,24 @@ which makes Bash open the file with `O_EXCL` itself, and `O_EXCL` in Python.
   the fix the effect was cosmetic, at most one stray spinner frame after the
   spinner was stopped.
 
+**Residual stale-recovery race:** Bash and Python re-read the owner line
+immediately before removing it and remove it only if the line is unchanged.
+Release likewise checks the holder's own token. This narrows the recovery race
+from the entire process/identity check to the gap between the re-read and the
+unlink; it does not close it. The old holder must exit after a waiter reads its
+line, and a new holder must take the lock in the microsecond-scale window
+before the waiter's unlink. That waiter can then remove the new holder's owner
+file. Two holders of one sandbox lock can result, allowing overlapping
+provisioning on that sandbox. This requires concurrent acq commands on the same
+sandbox while another acq exits.
+
+Neither portable Bash nor a shared-file protocol provides atomic
+compare-and-delete. A mutex released on process death (`flock` or `fcntl`)
+would avoid this recovery protocol, but is not available to Bash on macOS.
+The residual race remains open; serializing acq commands on each sandbox
+avoids it. Deterministic owner-swap tests cover changes before the final
+re-read, not the remaining gap after it.
+
 `test/bats/147-provider-input-projection.bats` runs parallel Bash takers, and
 Bash and Python takers together, with a `mkdir` that reports success for an
 existing directory, and asserts that no two ever hold the lock at once.
