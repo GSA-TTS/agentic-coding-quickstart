@@ -1,7 +1,7 @@
 #!/bin/sh
 # Build the enumerated offline archive without publishing anything (ADR-0042m).
 set -eu
-[ "$#" -eq 5 ] || { echo 'usage: assemble-release <platform-key> <runtime-archive> <runtime-sha256> <wheelhouse-dir> <out-dir>' >&2; exit 1; }
+[ "$#" -eq 5 ] || [ "$#" -eq 7 ] || { echo 'usage: assemble-release <platform-key> <runtime-archive> <runtime-sha256> <wheelhouse-dir> <out-dir> [--stage|--pack <tree>]' >&2; exit 1; }
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 python3 -I - "$repo_root" "$@" <<'PY'
 import json
@@ -15,7 +15,10 @@ import tempfile
 import zipfile
 
 repo = Path(sys.argv[1])
-platform, runtime, digest, wheels, out = sys.argv[2:]
+platform, runtime, digest, wheels, out = sys.argv[2:7]
+mode, stage_tree = sys.argv[7:] if len(sys.argv) == 9 else ("", "")
+if mode not in ("", "--stage", "--pack"):
+    sys.exit("unsupported assembly mode")
 spec = json.loads((repo / 'installer/assets.json').read_text())['platforms'][platform]
 wheels, out = Path(wheels).resolve(), Path(out).resolve()
 if not wheels.is_dir() or not list(wheels.glob('*.whl')) or not (wheels / 'SHA256SUMS').is_file():
@@ -28,17 +31,22 @@ version = os.environ.get('ACQ_BUILD_VERSION') or json.loads((repo / 'package.jso
 revision = os.environ.get('ACQ_BUILD_REVISION') or subprocess.check_output(
     ['git', '-C', str(repo), 'rev-parse', 'HEAD'], text=True).strip()
 with tempfile.TemporaryDirectory(prefix='.assemble-', dir=out) as tmp:
-    tree = Path(tmp) / 'tree'
-    tree.mkdir()
-    stage = 'stage-windows-runtime' if spec['format'] == 'zip' else 'stage-posix-runtime'
-    subprocess.run(['sh', str(repo / 'scripts' / stage), str(Path(runtime).resolve()), digest, str(tree)], check=True)
-    for name in [*spec['components']['launchers'], 'LICENSE', 'README.md']:
-        shutil.copy2(repo / name, tree / name)
-    shutil.copytree(repo / 'acq.backends', tree / 'acq.backends')
-    shutil.copytree(wheels, tree / 'wheelhouse')
-    (tree / 'py-acq/src/acq_py/_build_info.py').write_text(
-        f'# Generated release identity (ADR-0042m).\nACQ_VERSION = {version!r}\nSOURCE_REVISION = {revision!r}\n',
-        encoding='utf-8')
+    tree = Path(stage_tree).resolve() if mode else Path(tmp) / 'tree'
+    if mode != '--pack':
+        tree.mkdir()
+        stage = 'stage-windows-runtime' if spec['format'] == 'zip' else 'stage-posix-runtime'
+        subprocess.run(['sh', str(repo / 'scripts' / stage), str(Path(runtime).resolve()), digest, str(tree)], check=True)
+        for name in [*spec['components']['launchers'], 'LICENSE', 'README.md']:
+            shutil.copy2(repo / name, tree / name)
+        shutil.copytree(repo / 'acq.backends', tree / 'acq.backends')
+        shutil.copytree(wheels, tree / 'wheelhouse')
+        (tree / 'py-acq/src/acq_py/_build_info.py').write_text(
+            f'# Generated release identity (ADR-0042m).\nACQ_VERSION = {version!r}\nSOURCE_REVISION = {revision!r}\n',
+            encoding='utf-8')
+    if mode == '--stage':
+        sys.exit(0)
+    if not (tree / 'py-acq/runtime').is_dir() or not (tree / 'acq').is_file():
+        sys.exit('staged release tree is incomplete')
     packed = Path(tmp) / spec['archive']
     if spec['format'] == 'zip':
         with zipfile.ZipFile(packed, 'w', zipfile.ZIP_DEFLATED) as zf:

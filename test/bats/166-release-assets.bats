@@ -48,6 +48,9 @@ _build_dist() {
     else
       scripts/assemble-release "$platform" "$WORK/runtime.tar.gz" "$POSIX_SHA" "$WORK/wheelhouse" "$WORK/dist"
     fi
+    # The release also publishes each platform's validator wheelhouse, as
+    # build-assets.yml packs it, and gen-install-assets enumerates those too.
+    tar -czf "$WORK/dist/provider-input-validator-wheelhouse-$platform.tar.gz" -C "$WORK/wheelhouse" .
   done
   cp install.sh install.ps1 "$WORK/dist/"
   scripts/gen-provenance "$WORK/dist"
@@ -168,7 +171,8 @@ assert provenance['runtimes'].keys() == assets['platforms'].keys()
 for platform, spec in assets['platforms'].items():
     assert provenance['runtimes'][platform] == {'supplier': spec['components']['runtime']['supplier'], 'version': '3.14.10'}
 lines = (root / 'SHA256SUMS').read_text().splitlines()
-assert len(lines) == 8
+# install.sh, install.ps1 and provenance.json, plus every archive and wheelhouse.
+assert len(lines) == 3 + len(assets['platforms']) + len(assets.get('wheelhouses', []))
 for line in lines:
     digest, name = line.split('  ')
     assert hashlib.sha256((root / name).read_bytes()).hexdigest() == digest

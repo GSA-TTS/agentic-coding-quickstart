@@ -73,6 +73,7 @@ record; sibling fork decisions are cited in the records themselves.
 | [0047m — acq coexistence mechanism (ACQ_IMPL runtime switch and --channel installer seam)](adr/0047m-acq-coexistence-mechanism.md) | accepted | Defines implementation selection and installer channels; corrects earlier completeness claims. | None. |
 | [0048m — Windows defaults to the Python implementation with acq's managed runtime](adr/0048m-windows-defaults-to-the-python-implementation.md) | accepted | Changes the Windows default and records gates still owed after the approved flip. | None; amends ADR-0047m's Windows default. |
 | [0049m — CI-only Python quality tools, pinned with hashes](adr/0049m-ci-only-python-quality-tools.md) | accepted | Pins lint, typing, security and coverage tooling outside the runtime. | None. |
+| [0050m — Release signing scaffolding](adr/0050m-release-signing-scaffolding.md) | accepted | Secret-gated Sigstore, Authenticode and macOS signing that is a no-op until upstream configures credentials. | None; extends ADR-0042m's release provenance. |
 
 ## Governance facts for upstream decision
 
@@ -104,10 +105,13 @@ record; sibling fork decisions are cited in the records themselves.
   A fork experiment exercised the PR/gate/tag sequence but proposed `4.0.1`
   against a `4.1.1` manifest without release tags; that PR was closed. Upstream
   decides release enablement, version history, token ownership and permissions.
-- **Signing:** ADR-0042m defers OS signing/notarization. Upstream decides signing
-  identities, credential custody and access, and runtime patch ownership/cadence
-  (still a proposal in `py-acq/README.md`). Artifact attestations and checksums
-  do not supply OS code signing.
+- **Signing:** ADR-0050m adds release steps for Sigstore keyless signing of
+  `SHA256SUMS`, Windows Authenticode and macOS codesign plus notarization, each a
+  no-op until its repository variable and credentials are set
+  ([release signing](howto/release-signing.md)). Upstream decides whether to
+  enable them, the signing identities, credential custody and access, and runtime
+  patch ownership/cadence (still a proposal in `py-acq/README.md`). Artifact
+  attestations and checksums do not supply OS code signing.
 
 ## CI and administration assumptions
 
@@ -166,4 +170,5 @@ assertions, and a qualification decision about the launcher/runtime surface
 (ADR-0048m gates 3, 5b and 5c). Offline-install completeness needs the assembled
 release set and a network-blocked host (mogul/agentic-coding-quickstart#61).
 Code signing and macOS notarization need signing credentials and platform
-validation before managed-fleet execution can be claimed (ADR-0042m).
+validation before managed-fleet execution can be claimed (ADR-0042m); the
+workflow steps exist (ADR-0050m) but have never run with real credentials.

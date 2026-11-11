@@ -5,8 +5,9 @@
 # Reads the per-platform archive names and the provenance manifest name from
 # installer/assets.json (the single source of truth) and verifies the release
 # dist directory is complete, then writes SHA256SUMS covering install.sh,
-# install.ps1, the provenance manifest, and every platform archive. Completeness
-# is enforced by enumeration, not asserted: a missing enumerated asset fails
+# install.ps1, the provenance manifest, every platform archive, and the
+# standalone validator wheelhouses. Completeness is enforced by enumeration, not
+# asserted: a missing enumerated asset fails
 # rather than producing a silently incomplete manifest.
 #
 # Usage:
@@ -37,7 +38,7 @@ command -v python3 >/dev/null 2>&1 || die "python3 is required"
 assets="$(python3 -I -c '
 import json, sys
 a = json.load(open("installer/assets.json", encoding="utf-8"))
-names = [a["provenance"]] + sorted(p["archive"] for p in a["platforms"].values())
+names = [a["provenance"]] + sorted(p["archive"] for p in a["platforms"].values()) + sorted(a.get("wheelhouses", []))
 sys.stdout.buffer.write(("\n".join(names) + "\n").encode("ascii"))
 ')"
 

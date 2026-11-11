@@ -152,21 +152,15 @@ def test_traversal_entries_stay_inside_the_tree(tmp_path: Path) -> None:
 
 
 def test_release_workflow_pins_the_runtime_and_calls_the_script() -> None:
-    text = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
-        encoding="utf-8"
-    )
-    version = re.search(r"ACQ_PYTHON_EMBED_VERSION:\s*(\d+\.\d+\.\d+)\s*$", text, re.M)
-    sha = re.search(r"ACQ_PYTHON_EMBED_SHA256:\s*([0-9a-f]{64})\s*$", text, re.M)
-    assert version and sha
-    call = (
-        "scripts/stage-windows-runtime acq-python-embed.zip "
-        '"$ACQ_PYTHON_EMBED_SHA256" dist/acq-windows-x64'
-    )
-    assert call in text
-    # The release archive is staged before it is zipped, and the shipped runtime
-    # is smoke-tested on the Windows runner.
-    assert text.index(call) < text.index("zip -qr acq-windows-x64.zip")
-    assert "Smoke-test acq's managed Windows runtime" in text
+    text = (REPO_ROOT / ".github/workflows/build-assets.yml").read_text()
+    assert "python-3.14.10-embed-amd64.zip" in text
+    assert re.search(r"runtime_sha256: [0-9a-f]{64}", text)
+    assert "--stage release-tree" in text
+    assert "--pack release-tree" in text
+    assert text.index("--stage release-tree") < text.index("--pack release-tree")
+    assert "unpacked/py-acq/runtime/python.exe -I -m acq_py version" in text
+    assembler = (REPO_ROOT / "scripts/assemble-release").read_text()
+    assert "stage-windows-runtime" in assembler
 
 
 def test_assets_manifest_matches_the_staged_layout() -> None:
@@ -176,3 +170,25 @@ def test_assets_manifest_matches_the_staged_layout() -> None:
     win = assets["platforms"]["windows-x86_64"]["components"]
     assert win["runtime"]["path"] == "py-acq/runtime/python.exe"
     assert win["source"] == "py-acq/src/acq_py/"
+
+
+def test_assembly_preserves_modified_staged_bytes(tmp_path: Path) -> None:
+    embed = tmp_path / 'embed.zip'
+    sha = _fake_embed(embed)
+    wheels = tmp_path / 'wheelhouse'
+    wheels.mkdir()
+    (wheels / 'fake.whl').write_bytes(b'wheel')
+    (wheels / 'SHA256SUMS').write_text('placeholder\n')
+    dist, tree = tmp_path / 'dist', tmp_path / 'tree'
+    args = ['sh', str(REPO_ROOT / 'scripts/assemble-release'), 'windows-x86_64',
+            str(embed), sha, str(wheels), str(dist)]
+    stage = subprocess.run([*args, '--stage', str(tree)], capture_output=True, text=True)
+    assert stage.returncode == 0, stage.stderr
+    assert not list(dist.glob('*.zip'))
+    signed = (tree / 'acq.ps1').read_bytes() + b'\n# simulated signature\n'
+    (tree / 'acq.ps1').write_bytes(signed)
+    packed = subprocess.run([*args, '--pack', str(tree)], capture_output=True, text=True)
+    assert packed.returncode == 0, packed.stderr
+    with zipfile.ZipFile(dist / 'acq-windows-x64.zip') as archive:
+        assert archive.read('acq.ps1') == signed
+        assert archive.read('wheelhouse/fake.whl') == b'wheel'
