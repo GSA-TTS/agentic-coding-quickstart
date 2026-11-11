@@ -295,8 +295,8 @@ acq run kiro .          # Kiro
 acq run shell .         # Just a shell (no agent)
 ```
 
-This list is sourced from `acq.backends/agents.sh`; `prime-agent` is not added by
-this change.
+This list is sourced from `acq.backends/agents.sh` (`prime-agent` was retired in
+`GSA-TTS/agentic-coding-patterns#584`).
 
 ### Create with Custom Name
 
