@@ -369,7 +369,7 @@ _acq_sbx_warn_readonly_files() {
 # (e.g. an extra kit that is already an sbx-v2 kit), so existing extra-kit
 # workflows keep working.
 _acq_sbx_translate_kit() {
-  local kitref="$1" slug fetchdir kitdir out
+  local kitref="$1" slug fetchdir kitdir out namespace
   # Offline/test escape hatch: pass the ref through unchanged. Used by the
   # offline unit harness (no network) and by any environment that pre-resolves
   # kits. Never set this in production — sbx would then receive a neutral
@@ -385,11 +385,16 @@ _acq_sbx_translate_kit() {
   fi
 
   slug=$(printf '%s' "$kitref" | tr -c 'A-Za-z0-9._-' '_')
-  fetchdir="${ACQ_SBX_KIT_CACHE}/fetch/${slug}"
+  # Historical fetch/slug directories may be repositories. Preserve them and
+  # publish only metadata-free payloads in a distinct namespace; never follow a
+  # namespace symlink back into the old layout.
+  namespace="${ACQ_SBX_KIT_CACHE}/fetch-payload-v2"
+  fetchdir="${namespace}/${slug}"
   out="${ACQ_SBX_KIT_CACHE}/v2/${slug}"
 
-  kitdir=$(kit_translate_fetch "$kitref" "$fetchdir") || {
-    # #208: make this loud + actionable rather than a terse warning. For a
+  if { [[ "$kitref" == git+http* ]] && [ -L "$namespace" ]; } ||
+      ! kitdir=$(kit_translate_fetch "$kitref" "$fetchdir"); then
+    # Make this loud + actionable rather than a terse warning. For a
     # git+https ref, a failure here (after kit-translate's non-interactive
     # anonymous+authed retries) is a real fetch problem, not a prompt hang.
     # Passing the ref through lets sbx try its own fetch (and keeps pre-resolved
@@ -408,7 +413,7 @@ _acq_sbx_translate_kit() {
     esac
     printf '%s\n' "$kitref"
     return 0
-  }
+  fi
 
   # Only translate kits that are neutral hybrid/v1. If the fetched kit is
   # already an sbx-v2 kit (an extra kit authored for sbx), pass its dir through.
