@@ -227,6 +227,21 @@
       "transcript_sha256": "fd8940eea553898f89aabf08a52060fc9b604959a3a77717a14dc830a41a8e1e",
       "oracle": "scripts/qualify-backend-cell",
       "oracle_sha256": "9ff30f9cfdf7da6d1eb796b60290c1b127bdc5a9a3bcbdde20287dafa0760091"
+    },
+    {
+      "backend": "msb",
+      "platform": "linux-x86_64",
+      "verdict": "PASS",
+      "backend_version": "0.7.11",
+      "os_build": "7.0.0-38-generic",
+      "arch": "x86_64",
+      "hypervisor": "kvm",
+      "rev": "c0b17a1c0052358751cdb33a03e0d01680972f0d",
+      "artifact_sha256": "b600eb0e7f2ace9a0b52075fce8ea14163ad06ba795ab3d199cb06ee04d94a37",
+      "recorded_at": "2026-11-12T20:57:33+00:00",
+      "transcript_sha256": "4c180be5e47f2d68ddfc1c5cbd72e76ae1c8fb031dfbe0bf3bab654a9300f1db",
+      "oracle": "scripts/qualify-backend-cell",
+      "oracle_sha256": "ede04ecd3617f529b1c93bc44b6f4767307e62bb95aee70bc7fe338f9316041b"
     }
   ],
   "waivers": [
