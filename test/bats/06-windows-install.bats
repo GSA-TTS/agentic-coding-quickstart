@@ -708,6 +708,7 @@ _windows_pid_alive() {
   _windows_install "$dir" "$assets"
   assert_failure
   assert_output --partial 'could not write'
+  assert_output --partial '.acq-v1-install'
   [ -f "$dir/.acq-v1-install" ]
   [ "$(cat "$dir/.acq-v1-install")" = "$before" ]
   [ -z "$(find "$dir" -maxdepth 1 -name '.acq-v1-install.tmp.*')" ]
@@ -788,6 +789,6 @@ _windows_pid_alive() {
 
 # Deliberately not ported from the bash suite: "a leftover named for this run's
 # own PID is swept". That test execs the installer so it inherits the planting
-# shell's PID. On Windows the installer always runs as a child with its own PID,
-# so there is no equivalent handoff; the own-PID exclusion in Test-ProcessAlive
-# is covered by the static shape instead.
+# shell's PID, and Windows has no equivalent way to hand a chosen PID to the
+# installer. The `-eq $PID` exclusion therefore runs on every sweep but is
+# asserted nowhere; this is the one bash case with no Windows test.

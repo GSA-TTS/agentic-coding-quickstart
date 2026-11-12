@@ -529,7 +529,8 @@ function Install-AcqZip {
             }
         }
         catch {
-            throw "could not write ${markerPath}: $($_.Exception.Message)"
+            $detail = if ($_.Exception.InnerException) { $_.Exception.InnerException.Message } else { $_.Exception.Message }
+            throw "could not write ${markerPath}: $detail"
         }
         $markerTmp = $null
         # Leftover move-aside dirs and temporary markers hold only acq's own
