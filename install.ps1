@@ -123,6 +123,24 @@ function Format-Shown {
     return ($Value -replace '[^\x20-\x7E]', '?')
 }
 
+function Test-ProcessAlive {
+    param([string]$ProcessId)
+
+    # Leftover move-aside dirs and temporary ownership markers are named for the
+    # PID of the run that made them. A PID that is still alive may be another
+    # install into the same directory, running right now and between moving its
+    # files aside and moving the new ones in, so its entries are skipped. A
+    # non-numeric suffix is a lookalike, not a leftover. This run's own PID is
+    # never treated as alive: a recycled PID would make a leftover look like this
+    # run's, and its sweep must not be blocked. PID 1 counts as init rather than
+    # an installer, as in install.sh. A reused PID only means the leftover waits
+    # for a later run.
+    if ($ProcessId -notmatch '\A[0-9]+\z') { return $false }
+    $target = [int64]$ProcessId
+    if ($target -le 1 -or $target -eq $PID -or $target -gt [int]::MaxValue) { return $false }
+    return [bool](Get-Process -Id ([int]$target) -ErrorAction SilentlyContinue)
+}
+
 function Get-DefaultInstallDir {
     # LOCALAPPDATA counts only when it is fully qualified, the rule acq applies to
     # XDG_* and HOME (see acq.backends/userdirs.sh): a relative value would
@@ -359,6 +377,7 @@ function Install-AcqZip {
     }
 
     $tmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("acq-install-" + [guid]::NewGuid().ToString("N"))
+    $markerTmp = $null
     try {
         New-Item -ItemType Directory -Force -Path $tmpRoot | Out-Null
         $zipPath = Join-Path $tmpRoot $PackageName
@@ -481,12 +500,37 @@ function Install-AcqZip {
         # Every release name is now absent or already ours; keep previously owned
         # names too (leftovers from an older release are still ours to replace).
         $names = @($owned) + @($entries | ForEach-Object { $_.Name }) | Select-Object -Unique
-        Set-Content -LiteralPath $markerPath -Value (@($Version) + $names) -Encoding ascii
-        # Only trust leftover move-aside dirs in a directory marked before this run.
+        # Write the marker to .acq-v1-install.tmp.<pid> and rename it into place,
+        # as install.sh does. A run interrupted inside Set-Content then leaves the
+        # previous marker intact instead of a truncated one, which the collision
+        # check above would read as "these files are not ours" and refuse the
+        # next run's own files. The finally block removes the temporary marker if
+        # the rename never happens (ADR-0042m).
+        $markerTmp = Join-Path $InstallDir "$ownedMarker.tmp.$PID"
+        Set-Content -LiteralPath $markerTmp -Value (@($Version) + $names) -Encoding ascii
+        Move-Item -LiteralPath $markerTmp -Destination $markerPath -Force
+        $markerTmp = $null
+        # Leftover move-aside dirs and temporary markers hold only acq's own
+        # files, but only trust that in a directory that was already marked
+        # before this run: a first install must not sweep a name it cannot prove
+        # is an interrupted run's. The suffix is a process id, so entries of a
+        # live process are skipped (Test-ProcessAlive, above), a non-numeric
+        # suffix is a lookalike rather than a leftover, and a reparse point is
+        # never followed. The sweep is best effort: a leftover this run cannot
+        # remove must not stop the install, or every later one.
         if ($wasMarked) {
-            Get-ChildItem -LiteralPath $InstallDir -Force -Directory -Filter ".acq-previous.*" |
-                Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } |
-                ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force }
+            foreach ($stale in @(Get-ChildItem -LiteralPath $InstallDir -Force -Directory -Filter ".acq-previous.*")) {
+                if ($stale.Name -notmatch '\A\.acq-previous\.([0-9]+)\z') { continue }
+                if (Test-ProcessAlive -ProcessId $Matches[1]) { continue }
+                if ($stale.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+                Remove-Item -LiteralPath $stale.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            foreach ($stale in @(Get-ChildItem -LiteralPath $InstallDir -Force -File -Filter "$ownedMarker.tmp.*")) {
+                if ($stale.Name -notmatch ('\A' + [regex]::Escape($ownedMarker) + '\.tmp\.([0-9]+)\z')) { continue }
+                if (Test-ProcessAlive -ProcessId $Matches[1]) { continue }
+                if ($stale.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+                Remove-Item -LiteralPath $stale.FullName -Force -ErrorAction SilentlyContinue
+            }
         }
         $previous = Join-Path $InstallDir ".acq-previous.$PID"
         New-Item -ItemType Directory -Path $previous | Out-Null
@@ -501,6 +545,9 @@ function Install-AcqZip {
         Remove-Item -LiteralPath $previous -Recurse -Force
     }
     finally {
+        if ($markerTmp -and (Test-Path -LiteralPath $markerTmp)) {
+            Remove-Item -LiteralPath $markerTmp -Force -ErrorAction SilentlyContinue
+        }
         if (Test-Path -LiteralPath $tmpRoot) {
             Remove-Item -LiteralPath $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
         }
