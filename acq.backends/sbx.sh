@@ -134,10 +134,12 @@ EOF
 # acq_backend_check_version — sbx presence + version floor ONLY; fail closed
 # ---------------------------------------------------------------------------
 # Kept separate from acq_backend_prepare so verbs that only touch existing
-# sandbox state can be guarded with the cheap check. On sbx the two are currently
-# the same work (there is no host-readiness probe here), but the split keeps the
-# adapter contract identical across backends — acq calls check_version on
-# state-touching verbs and prepare on provisioning verbs. See ADR-0032.
+# sandbox state can be guarded with the cheap check. On sbx check_version and
+# prepare do the same work (there is no host-readiness probe here), but the split
+# keeps the adapter contract identical across backends — acq calls check_version on
+# state-touching verbs and prepare on provisioning verbs. sbx additionally
+# implements the optional acq_backend_check_create_compat hook (below), which is
+# not part of prepare. See ADR-0032.
 acq_backend_check_version() {
   if ! command -v sbx >/dev/null 2>&1; then
     echo "error: sbx CLI not found on PATH. Install sbx >= $MIN_SBX_VERSION." >&2
@@ -169,14 +171,21 @@ acq_backend_check_version() {
 }
 
 # ---------------------------------------------------------------------------
-# acq_backend_prepare — version floor; optional fresh-create compatibility gate
+# acq_backend_prepare — version floor
 # ---------------------------------------------------------------------------
 
 acq_backend_prepare() {
   acq_backend_check_version
-  # `acq run` initially calls prepare even for existing sandboxes. Only its
-  # fresh-create path (and `acq create`) passes `create` for this extra gate.
-  [ "${1:-}" = create ] || return 0
+}
+
+# ---------------------------------------------------------------------------
+# acq_backend_check_create_compat — optional fresh-create compatibility gate
+# ---------------------------------------------------------------------------
+# Optional adapter hook, called by acq only where a NEW sandbox is about to be
+# provisioned (`acq create`, and the fresh-create branch of `acq run`). Kept apart
+# from acq_backend_prepare so host preparation never runs twice and existing
+# sandbox re-attach is unaffected. Fails closed on an unparseable sbx version.
+acq_backend_check_create_compat() {
   local raw current
   if ! raw=$(sbx version 2>/dev/null) || [[ ! "$raw" =~ ^sbx[[:space:]]version:[[:space:]]v?([0-9]+)\.([0-9]+)\.([0-9]+)([[:space:]]|$) ]]; then
     echo "error: cannot confirm an sbx version compatible with acq's v1/v2 kits for a new sandbox." >&2

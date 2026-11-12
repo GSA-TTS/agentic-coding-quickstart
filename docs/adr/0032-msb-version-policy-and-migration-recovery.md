@@ -178,7 +178,11 @@ Provisioning verbs (`run`, `create`) call `prepare`. Verbs that merely touch
 verbs reached `msb` unguarded and surfaced the raw upstream error instead of
 `acq`'s explanation — which is the exact moment a stranded user most needs the
 explanation. `acq.backends/sbx.sh` implements the same split for contract
-parity, even though on `sbx` the two currently do the same work.
+parity, even though on `sbx` the two currently do the same work. `sbx` also
+implements the optional `acq_backend_check_create_compat` hook, which `acq`
+calls (when defined) only at the fresh-create points of `run` and `create`,
+after `prepare`; it is deliberately not part of `prepare`, so host preparation
+never repeats.
 
 ### 2. Installing a specific version
 

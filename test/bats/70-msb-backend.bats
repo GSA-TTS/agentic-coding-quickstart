@@ -198,26 +198,26 @@ _with_adapter() { # ADAPTER BODY
 }
 
 @test "sbx: provisioning refuses v3 shell agent composition on 0.51+ before create" {
-  _with_adapter sbx 'out=$(STUB_SBX_VERSION=0.51.0 acq_backend_prepare create 2>&1); rc=$?; printf "%s\nRC=%s\n" "$out" "$rc"'
+  _with_adapter sbx 'out=$(STUB_SBX_VERSION=0.51.0 acq_backend_check_create_compat 2>&1); rc=$?; printf "%s\nRC=%s\n" "$out" "$rc"'
   assert_output --partial 'cannot create sandboxes with sbx 0.51.0'
   assert_output --partial 'v3 kit'
   assert_output --partial 'v1/v2 kits'
   assert_output --partial '--backend msb'
   assert_output --partial 'RC=1'
 
-  _with_adapter sbx 'out=$(STUB_SBX_VERSION=0.52.0 acq_backend_prepare create 2>&1); printf "%s\nRC=%s\n" "$out" "$?"'
+  _with_adapter sbx 'out=$(STUB_SBX_VERSION=0.52.0 acq_backend_check_create_compat 2>&1); printf "%s\nRC=%s\n" "$out" "$?"'
   assert_output --partial 'RC=1'
 
   _with_adapter sbx 'STUB_SBX_VERSION=0.51.0 acq_backend_check_version; printf "RC=%s\n" "$?"'
   assert_output --partial 'RC=0'
 
-  _with_adapter sbx 'STUB_SBX_VERSION=0.48.0 acq_backend_prepare create; printf "RC=%s\n" "$?"'
+  _with_adapter sbx 'STUB_SBX_VERSION=0.48.0 acq_backend_check_create_compat; printf "RC=%s\n" "$?"'
   assert_output --partial 'RC=0'
 
   _with_adapter sbx 'STUB_SBX_VERSION=0.51.0 acq_backend_prepare; printf "RC=%s\n" "$?"'
   assert_output --partial 'RC=0'
 
-  _with_adapter sbx 'out=$(STUB_SBX_VERSION=dev-build acq_backend_prepare create 2>&1); rc=$?; printf "%s\nRC=%s\n" "$out" "$rc"'
+  _with_adapter sbx 'out=$(STUB_SBX_VERSION=dev-build acq_backend_check_create_compat 2>&1); rc=$?; printf "%s\nRC=%s\n" "$out" "$rc"'
   assert_output --partial 'cannot confirm an sbx version'
   assert_output --partial 'RC=1'
 }
@@ -262,4 +262,41 @@ _with_adapter() { # ADAPTER BODY
   run bash -c 'ACQ_SECRET_TEST_VALUE="ghp_x" ACQ_BACKEND=msb "$1" secret set -g github' _ "$ACQ"
   assert_output --partial 'acq secret store'
   assert [ -f "$STUBDIR/secrets/acq.github" ]
+}
+
+@test "msb: a fresh agent-form run on an unfit host runs doctor --fix exactly once" {
+  local ws="$STUBDIR/workspace"
+  mkdir -p "$ws"
+  : >"$CALLS"
+  run env ACQ_BACKEND=msb ACQ_NO_PROMPT=1 ACQ_UPDATE_CHECK=0 STUB_MSB_DOCTOR_UNFIT=1 STUB_OPENCODE_OK=1 \
+    "$ACQ" run opencode "$ws" --name freshbox
+  assert_equal "$(grep -c 'msb doctor --fix' "$CALLS")" 1
+  assert_equal "$(grep -c "isn't ready to run microVMs" <<<"$output")" 1
+}
+
+@test "msb: a fresh create on an unfit host runs doctor --fix exactly once" {
+  local ws="$STUBDIR/workspace"
+  mkdir -p "$ws"
+  : >"$CALLS"
+  run env ACQ_BACKEND=msb ACQ_NO_PROMPT=1 ACQ_UPDATE_CHECK=0 STUB_MSB_DOCTOR_UNFIT=1 STUB_OPENCODE_OK=1 \
+    "$ACQ" create opencode "$ws" --name freshbox
+  assert_equal "$(grep -c 'msb doctor --fix' "$CALLS")" 1
+}
+
+@test "sbx: a fresh run and create on 0.51 are rejected before any sbx create" {
+  local ws="$STUBDIR/workspace"
+  mkdir -p "$ws"
+  : >"$CALLS"
+  run env STUB_SBX_VERSION=0.51.0 ACQ_BACKEND=sbx ACQ_NO_PROMPT=1 ACQ_UPDATE_CHECK=0 \
+    "$ACQ" run opencode "$ws" --name freshbox
+  assert_failure
+  assert_output --partial 'cannot create sandboxes with sbx 0.51.0'
+  refute_regex "$(cat "$CALLS")" 'sbx create'
+
+  : >"$CALLS"
+  run env STUB_SBX_VERSION=0.51.0 ACQ_BACKEND=sbx ACQ_NO_PROMPT=1 ACQ_UPDATE_CHECK=0 \
+    "$ACQ" create opencode "$ws" --name freshbox
+  assert_failure
+  assert_output --partial 'cannot create sandboxes with sbx 0.51.0'
+  refute_regex "$(cat "$CALLS")" 'sbx create'
 }
