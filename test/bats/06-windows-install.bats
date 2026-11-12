@@ -13,6 +13,11 @@ setup() {
 }
 
 teardown() {
+  # A test may mark the ownership marker read-only to force a failed rename;
+  # clear that so the stub tree can be removed.
+  if [ -n "${READONLY_MARKER:-}" ] && [ -e "$READONLY_MARKER" ]; then
+    chmod u+w "$READONLY_MARKER" 2>/dev/null || true
+  fi
   acq_teardown_stubs
 }
 
@@ -443,21 +448,27 @@ teardown() {
 # place, so a run stopped inside the write leaves the previous marker intact
 # instead of a truncated one the next run would read as "these files are not
 # ours". Proving that behaviourally would mean interrupting the write inside
-# Set-Content between the temporary file and the rename, which a test cannot do
-# from outside the process, so the shape is asserted instead.
+# Set-Content between the temporary file and the replace/rename, which a test
+# cannot do from outside the process, so the shape is asserted instead; the
+# failed-rename test below covers the fail-closed behaviour.
 @test "windows installer: the ownership marker is renamed into place from a temporary file" {
-  local installer write_line move_line
+  local installer write_line replace_line
   installer=$(cat "$REPO_ROOT/install.ps1")
   refute_regex "$installer" 'Set-Content -LiteralPath \$markerPath'
+  # Move-Item -Force is delete-then-move on Windows: a failed move would destroy
+  # the previous marker. Only File.Replace / File.Move are safe here.
+  refute_regex "$installer" 'Move-Item -LiteralPath \$markerTmp'
   assert_regex "$installer" '\$markerTmp = Join-Path \$InstallDir "\$ownedMarker\.tmp\.\$PID"'
   assert_regex "$installer" 'Set-Content -LiteralPath \$markerTmp -Value \(@\(\$Version\) \+ \$names\) -Encoding ascii'
-  assert_regex "$installer" 'Move-Item -LiteralPath \$markerTmp -Destination \$markerPath -Force'
+  assert_regex "$installer" '\[IO\.File\]::Replace\(\$markerTmp, \$markerPath, \[NullString\]::Value\)'
+  assert_regex "$installer" '\[IO\.File\]::Move\(\$markerTmp, \$markerPath\)'
+  assert_regex "$installer" 'could not write \$\{markerPath\}'
   # The publish block's finally removes the temporary marker if the rename never
   # happens, as install.sh's EXIT trap does.
   assert_regex "$installer" 'Remove-Item -LiteralPath \$markerTmp -Force'
   write_line=$(grep -nF 'Set-Content -LiteralPath $markerTmp' "$REPO_ROOT/install.ps1" | cut -d: -f1)
-  move_line=$(grep -nF 'Move-Item -LiteralPath $markerTmp -Destination $markerPath' "$REPO_ROOT/install.ps1" | cut -d: -f1)
-  [ -n "$write_line" ] && [ -n "$move_line" ] && [ "$write_line" -lt "$move_line" ]
+  replace_line=$(grep -nF '[IO.File]::Replace($markerTmp, $markerPath' "$REPO_ROOT/install.ps1" | cut -d: -f1)
+  [ -n "$write_line" ] && [ -n "$replace_line" ] && [ "$write_line" -lt "$replace_line" ]
 }
 
 # Leftovers of an earlier run are named for that run's process id. A live PID may
@@ -556,6 +567,15 @@ _stop_windows_pid() {
   pwsh -NoLogo -NoProfile -Command "Stop-Process -Id $1 -Force -ErrorAction SilentlyContinue" >/dev/null 2>&1 || true
 }
 
+# True when PID $1 names a running Windows process. Used to notice a helper PID
+# that Windows recycled between planting a leftover and asserting on it.
+_windows_pid_alive() {
+  case "$1" in
+    '' | *[!0-9]*) return 1 ;;
+  esac
+  pwsh -NoLogo -NoProfile -Command "if (Get-Process -Id $1 -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }" >/dev/null 2>&1
+}
+
 @test "windows PowerShell: the sweep keeps a live run's move-aside dir and sweeps a dead one" {
   _windows_pwsh || skip "pwsh, cygpath and a Windows host are required"
   _python_with_zipfile >/dev/null || skip "python with zipfile is required"
@@ -588,6 +608,9 @@ _stop_windows_pid() {
   status=$install_status
   assert_success
 
+  if _windows_pid_alive "$dead"; then
+    skip "helper PID $dead was recycled before the dead-leftover assertion"
+  fi
   [ "$(cat "$dir/.acq-previous.$live/acq")" = 'moved aside' ]
   [ ! -e "$dir/.acq-previous.$dead" ]
   [ "$(cat "$dir/.acq-previous.mine/acq")" = keep ]
@@ -623,9 +646,148 @@ _stop_windows_pid() {
   status=$install_status
   assert_success
 
+  if _windows_pid_alive "$dead"; then
+    skip "helper PID $dead was recycled before the dead-leftover assertion"
+  fi
   [ "$(cat "$dir/.acq-v1-install.tmp.$live")" = 'in flight' ]
   [ ! -e "$dir/.acq-v1-install.tmp.$dead" ]
   [ "$(cat "$dir/.acq-v1-install.tmp.mine")" = keep ]
   # The marker itself is the renamed temporary file; no temporary survives.
   [ -f "$dir/.acq-v1-install" ]
 }
+
+# A PID suffix too large for the Windows process-id type is a leftover name, not
+# a live process. The sweep must remove it rather than abort the install and
+# leave every later run stuck on the same entry.
+@test "windows PowerShell: an oversized PID suffix does not stop the install" {
+  _windows_pwsh || skip "pwsh, cygpath and a Windows host are required"
+  _python_with_zipfile >/dev/null || skip "python with zipfile is required"
+
+  local dir assets huge
+  dir="$STUBDIR/acq-install"
+  assets="$STUBDIR/assets"
+  _windows_asset_set "$assets" || skip "could not build the offline asset set"
+
+  _windows_install "$dir" "$assets"
+  assert_success
+
+  huge=99999999999999999999999999
+  mkdir -p "$dir/.acq-previous.$huge"
+  printf 'leftover\n' > "$dir/.acq-previous.$huge/acq"
+  printf 'old\n' > "$dir/.acq-v1-install.tmp.$huge"
+
+  _windows_install "$dir" "$assets"
+  assert_success
+  [ ! -e "$dir/.acq-previous.$huge" ]
+  [ ! -e "$dir/.acq-v1-install.tmp.$huge" ]
+}
+
+# A failing rename must leave the previous marker in place and remove the
+# temporary one: an unmarked directory makes the next run refuse the installer's
+# own files. A read-only marker makes File.Replace fail, which is the same
+# fail-closed path a sharing violation takes. Move-Item -Force deletes the
+# destination before it moves, so it would lose the marker here instead.
+@test "windows PowerShell: a failed marker rename keeps the previous marker and no temporary" {
+  _windows_pwsh || skip "pwsh, cygpath and a Windows host are required"
+  _python_with_zipfile >/dev/null || skip "python with zipfile is required"
+
+  local dir assets before readonly_win
+  dir="$STUBDIR/acq-install"
+  assets="$STUBDIR/assets"
+  _windows_asset_set "$assets" || skip "could not build the offline asset set"
+
+  _windows_install "$dir" "$assets"
+  assert_success
+  before=$(cat "$dir/.acq-v1-install")
+
+  READONLY_MARKER="$dir/.acq-v1-install"
+  readonly_win=$(cygpath -w "$READONLY_MARKER")
+  readonly_win="$readonly_win" pwsh -NoLogo -NoProfile -Command \
+    '$item = Get-Item -LiteralPath $env:readonly_win; $item.Attributes = "ReadOnly"'
+
+  _windows_install "$dir" "$assets"
+  assert_failure
+  assert_output --partial 'could not write'
+  [ -f "$dir/.acq-v1-install" ]
+  [ "$(cat "$dir/.acq-v1-install")" = "$before" ]
+  [ -z "$(find "$dir" -maxdepth 1 -name '.acq-v1-install.tmp.*')" ]
+}
+
+# PID 1 is init on POSIX, never a concurrent installer, and no Windows installer
+# runs as PID 1 either, so leftovers named for it are swept as in install.sh.
+@test "windows PowerShell: leftovers named for PID 1 are swept" {
+  _windows_pwsh || skip "pwsh, cygpath and a Windows host are required"
+  _python_with_zipfile >/dev/null || skip "python with zipfile is required"
+
+  local dir assets
+  dir="$STUBDIR/acq-install"
+  assets="$STUBDIR/assets"
+  _windows_asset_set "$assets" || skip "could not build the offline asset set"
+
+  _windows_install "$dir" "$assets"
+  assert_success
+
+  mkdir -p "$dir/.acq-previous.1"
+  printf 'leftover\n' > "$dir/.acq-previous.1/acq"
+  printf 'old\n' > "$dir/.acq-v1-install.tmp.1"
+
+  _windows_install "$dir" "$assets"
+  assert_success
+  [ ! -e "$dir/.acq-previous.1" ]
+  [ ! -e "$dir/.acq-v1-install.tmp.1" ]
+}
+
+# A first install must not sweep a name it cannot prove is an interrupted run's:
+# the directory was not marked before, so only a later run may treat leftovers
+# as acq's own.
+@test "windows PowerShell: a first install never sweeps lookalike leftovers" {
+  _windows_pwsh || skip "pwsh, cygpath and a Windows host are required"
+  _python_with_zipfile >/dev/null || skip "python with zipfile is required"
+
+  local dir assets
+  dir="$STUBDIR/acq-install"
+  assets="$STUBDIR/assets"
+  _windows_asset_set "$assets" || skip "could not build the offline asset set"
+
+  mkdir -p "$dir/.acq-previous.mine" "$dir/.acq-v1-install.tmp.777"
+  printf 'keep\n' > "$dir/.acq-previous.mine/f"
+  printf 'keep\n' > "$dir/.acq-v1-install.tmp.12345"
+
+  _windows_install "$dir" "$assets"
+  assert_success
+  [ "$(cat "$dir/.acq-previous.mine/f")" = keep ]
+  [ "$(cat "$dir/.acq-v1-install.tmp.12345")" = keep ]
+  [ -d "$dir/.acq-v1-install.tmp.777" ]
+}
+
+# Only a regular file named for the marker plus a numeric PID is a temporary
+# marker. A non-numeric suffix, a longer name that merely contains ".tmp.", and
+# a directory of that name are left alone on a marked install too.
+@test "windows PowerShell: temporary-marker lookalikes survive a marked install" {
+  _windows_pwsh || skip "pwsh, cygpath and a Windows host are required"
+  _python_with_zipfile >/dev/null || skip "python with zipfile is required"
+
+  local dir assets
+  dir="$STUBDIR/acq-install"
+  assets="$STUBDIR/assets"
+  _windows_asset_set "$assets" || skip "could not build the offline asset set"
+
+  _windows_install "$dir" "$assets"
+  assert_success
+
+  printf 'keep\n' > "$dir/.acq-v1-install.tmp.mine"
+  printf 'keep\n' > "$dir/.acq-v1-install.tmp.x.tmp.123"
+  mkdir -p "$dir/.acq-v1-install.tmp.777"
+
+  _windows_install "$dir" "$assets"
+  assert_success
+  [ "$(cat "$dir/.acq-v1-install.tmp.mine")" = keep ]
+  [ "$(cat "$dir/.acq-v1-install.tmp.x.tmp.123")" = keep ]
+  [ -d "$dir/.acq-v1-install.tmp.777" ]
+}
+
+# Deliberately not ported from the bash suite: "a leftover named for this run's
+# own PID is swept". That test execs the installer so it inherits the planting
+# shell's PID. On Windows the installer always runs as a child with its own PID,
+# so there is no equivalent handoff; the own-PID exclusion in Test-ProcessAlive
+# is covered by the static shape instead.

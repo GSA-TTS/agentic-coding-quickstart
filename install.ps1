@@ -136,7 +136,12 @@ function Test-ProcessAlive {
     # an installer, as in install.sh. A reused PID only means the leftover waits
     # for a later run.
     if ($ProcessId -notmatch '\A[0-9]+\z') { return $false }
-    $target = [int64]$ProcessId
+    # TryParse, not a cast: a suffix too large for Int64 is a leftover name, not
+    # a reason to abort the install, and it can never be a live PID.
+    $target = 0L
+    if (-not [int64]::TryParse($ProcessId, [ref]$target)) { return $false }
+    # A value above Int32.MaxValue parses but cannot name a Windows PID, and the
+    # Get-Process conversion to Int32 would throw; treat it as not alive.
     if ($target -le 1 -or $target -eq $PID -or $target -gt [int]::MaxValue) { return $false }
     return [bool](Get-Process -Id ([int]$target) -ErrorAction SilentlyContinue)
 }
@@ -506,9 +511,26 @@ function Install-AcqZip {
         # check above would read as "these files are not ours" and refuse the
         # next run's own files. The finally block removes the temporary marker if
         # the rename never happens (ADR-0042m).
+        #
+        # ReplaceFile (File.Replace) and rename (File.Move), not Move-Item -Force:
+        # on Windows Move-Item -Force deletes the destination before it moves, so
+        # a failed move leaves no marker at all and the next run refuses its own
+        # files. Both primitives below fail closed with the old marker in place.
+        # File.Replace needs an existing destination, hence the branch for a
+        # first install.
         $markerTmp = Join-Path $InstallDir "$ownedMarker.tmp.$PID"
         Set-Content -LiteralPath $markerTmp -Value (@($Version) + $names) -Encoding ascii
-        Move-Item -LiteralPath $markerTmp -Destination $markerPath -Force
+        try {
+            if (Test-Path -LiteralPath $markerPath -PathType Leaf) {
+                [IO.File]::Replace($markerTmp, $markerPath, [NullString]::Value)
+            }
+            else {
+                [IO.File]::Move($markerTmp, $markerPath)
+            }
+        }
+        catch {
+            throw "could not write ${markerPath}: $($_.Exception.Message)"
+        }
         $markerTmp = $null
         # Leftover move-aside dirs and temporary markers hold only acq's own
         # files, but only trust that in a directory that was already marked
@@ -521,13 +543,15 @@ function Install-AcqZip {
         if ($wasMarked) {
             foreach ($stale in @(Get-ChildItem -LiteralPath $InstallDir -Force -Directory -Filter ".acq-previous.*")) {
                 if ($stale.Name -notmatch '\A\.acq-previous\.([0-9]+)\z') { continue }
-                if (Test-ProcessAlive -ProcessId $Matches[1]) { continue }
+                $stalePid = $Matches[1]
+                if (Test-ProcessAlive -ProcessId $stalePid) { continue }
                 if ($stale.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
                 Remove-Item -LiteralPath $stale.FullName -Recurse -Force -ErrorAction SilentlyContinue
             }
             foreach ($stale in @(Get-ChildItem -LiteralPath $InstallDir -Force -File -Filter "$ownedMarker.tmp.*")) {
                 if ($stale.Name -notmatch ('\A' + [regex]::Escape($ownedMarker) + '\.tmp\.([0-9]+)\z')) { continue }
-                if (Test-ProcessAlive -ProcessId $Matches[1]) { continue }
+                $stalePid = $Matches[1]
+                if (Test-ProcessAlive -ProcessId $stalePid) { continue }
                 if ($stale.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
                 Remove-Item -LiteralPath $stale.FullName -Force -ErrorAction SilentlyContinue
             }
