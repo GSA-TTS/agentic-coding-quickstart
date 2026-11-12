@@ -1,8 +1,14 @@
 ---
 title: "Release signing setup"
-status: proposed
-last_updated: "2026-11-11"
+description: "Optional Sigstore, Windows Authenticode, and macOS codesign/notarization variables and secrets for release.yml"
+status: canonical
+tier: 2
+last_updated: "2026-11-12"
 audience: "maintainers"
+keywords: ["release", "signing", "sigstore", "cosign", "authenticode", "codesign", "notarization"]
+related_files: [".github/workflows/release.yml", ".github/workflows/build-assets.yml", "docs/adr/0050m-release-signing-scaffolding.md", "docs/howto/release-gate-setup.md"]
+load_priority: "on-demand"
+review_cycle: "quarterly"
 ---
 
 # Release signing setup

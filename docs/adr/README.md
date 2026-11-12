@@ -42,9 +42,9 @@ in each ADR; corrections and amendments are part of the record.
 | [0035](0035-host-authoritative-sandbox-config.md) | Host-Authoritative Sandbox Configuration (no trust in guest-generated state) | accepted |
 | [0036](0036-msb-foreground-node-invocation.md) | Use a fixed shell for foreground MSB Node kit commands | proposed |
 | [0037](0037-sbx-trusted-startup-parity.md) | SBX Trusted-Startup Parity (read-only host mount vs native replay vs exec-time injection) | proposed |
-| [0038](0038-local-bash32-test-runner.md) | Local Bash 3.2.57 test runner and its provisioning | proposed |
+| [0038](0038-local-bash32-test-runner.md) | Local Bash 3.2.57 test runner and its provisioning | accepted |
 | [0038m](0038m-portable-acq-v1-compatibility-contract.md) | Portable acq v1 compatibility contract | accepted |
-| [0039](0039-bash32-ci-shard-matrix-and-interpreter-handoff.md) | Shard the bash 3.2 CI suite and hand the interpreter to the shards | proposed |
+| [0039](0039-bash32-ci-shard-matrix-and-interpreter-handoff.md) | Shard the bash 3.2 CI suite and hand the interpreter to the shards | accepted |
 | [0039m](0039m-rewrite-verification-and-test-retirement-strategy.md) | Rewrite verification and test-retirement strategy | accepted |
 | [0040m](0040m-backend-adapter-capability-contract.md) | Backend adapter capability contract | accepted |
 | [0041m](0041m-configuration-and-state-migration-behavior.md) | Configuration and state migration behavior | accepted |

@@ -141,44 +141,45 @@ replacement: the checked Python loader and translator validate neutral fields,
 and passing native specs through requires a separate validation path for native
 payload references. Neutral-kit checks remain mandatory.
 
-The Python implementation also has behaviour gaps against Bash. It reads the
-`extra_kits`, `provider_kit` and `scope_github_token` settings that
-`acq configure` writes, but it applies a kit outside its pinned built-in bundle
-only when the ref is pinned to a full commit (it fetches and verifies that
-commit), and refuses an unpinned ref at create or mid-life apply (a local kit directory, once
-refused too, is now copied into acq's private cache and checked there). It now
-heals the recorded kit set on re-attach. It now sets up host ssh-agent forwarding on msb as Bash
-does (the `--vsock` route, the in-guest bridge and its restarts, ADR-0021),
-reading and writing the same host-config key and route link, so a sandbox
-either implementation created keeps its forward; the differences and the live
-checks still owed are in `docs/KNOWN_FAILURE_MODES.md` §93. Credential
-rotation, configure settings and Bash-state import have open follow-ups.
-Backend doctor diagnostics now report both installed versions against the
-accepted floors and MSB readiness; named diagnostics port the ADR-0030 guest
-probe with nonfatal warnings and the existing JSON check records. The default
-backend offer is terminal-only and defaults to No. Potentially installing MSB
-repair remains advice only, never an automatic host mutation. Offline stub
-tests cover these paths; live qualification remains subject to the gate below. So
-ADR-0038m's "preserve every documented acq-owned command and meaningful flag"
-is not yet met. ADR-0048m gate 4 (command parity) is where parity is judged
-before any default changes. The tracking issues are under Links below.
+The Python implementation also has documented behaviour differences from Bash.
+It reads the `extra_kits`, `provider_kit`, `scope_github_token` and
+`default_agent` settings that `acq configure` writes, applies a kit outside its
+pinned built-in bundle only when the ref is pinned to a full commit (fetching
+and verifying that commit), and copies a local kit directory into acq's private
+cache and checks it there before applying. It heals the recorded kit set on
+re-attach, binds any newly added `msb` secrets while stopped before `msb start`,
+and sets up host ssh-agent forwarding on msb as Bash does (the `--vsock` route,
+the in-guest bridge and its restarts, ADR-0021), reading and writing the same
+host-config key and route link, so a sandbox either implementation created keeps
+its forward; the remaining differences from Bash are recorded in
+`docs/KNOWN_FAILURE_MODES.md` (§55, §56, §69, §72, §73, §74, §93, §97). Backend
+doctor diagnostics report both installed versions against the accepted floors
+and MSB readiness; named diagnostics port the ADR-0030 guest probe with nonfatal
+warnings and the existing JSON check records. The default backend offer is
+terminal-only and defaults to No. Potentially installing MSB repair remains
+advice only, never an automatic host mutation. Offline stub and vector tests
+cover these paths; live qualification remains subject to the gate below. All
+documented `acq`-owned commands and meaningful flags are now implemented in the
+Python CLI, with the two explicit accepted gaps (`sbx`-native non-neutral kit
+passthrough and `ACQ_ACTIVATE_PROJECT_ENV`) recorded in ADR-0048m gate 4. The
+historical tracking issues are under Links below.
 
 **Qualification.** PASS transcripts for both backends on `macos-arm64` and
-`windows-x64` were recorded on 2026-11-07 and 2026-11-08. They attest only to
-the tree at their recorded revisions. Every later change to the Tier-3 surface
-(`py-acq/src/acq_py/` among it) expires them, as ADR-0044m requires. On
-2026-11-09, `python3 -m qualification.gate check` reports:
+`windows-x64` were recorded on 2026-11-07 and 2026-11-08, and for `msb` on
+`linux-x86_64` on 2026-11-11 and 2026-11-12. They attest only to the tree at
+their recorded revisions. Every later change to the Tier-3 surface
+(`py-acq/src/acq_py/` among it) expires earlier transcripts, as ADR-0044m
+requires. At upstream handoff (2026-11-12), `python3 -P -m qualification.gate check`
+reports:
 
 - seven claimed cells;
-- none qualified;
-- four blocked, because the surface changed after they were recorded;
-- three waived with no transcript (`linux-x86_64` on both backends, and
-  `linux-aarch64` on msb).
+- one qualified (`msb/linux-x86_64`);
+- four blocked, because the surface changed after their earlier transcripts were recorded (`macos-arm64` and `windows-x64` on both backends);
+- two waived with no transcript (`sbx/linux-x86_64` and `msb/linux-aarch64`).
 
-So the `Tier-3 release gate` is red until those cells are re-qualified. No
-platform currently has a current Tier-3 qualification for the Python
-implementation. `python3 -m qualification.gate check` is the authority, not this
-note.
+So the `Tier-3 release gate` stays red until the remaining six cells are
+re-qualified against the release revision. `python3 -P -m qualification.gate check`
+is the authority, not this note.
 
 ## Update (2026-11-10): Windows defaults to the Python implementation
 
@@ -211,10 +212,10 @@ CA refusal and invalid-tuning vectors in `test/vectors/cli/`.
 ## Links
 
 - Command surface and parity gate: ADR-0038m, ADR-0048m
-- Python gaps: mogul/agentic-coding-quickstart#107 (credentials),
+- Closed Python parity tracking issues: mogul/agentic-coding-quickstart#107 (credentials),
   mogul/agentic-coding-quickstart#108 (kits, bootstrap, trusted config),
   mogul/agentic-coding-quickstart#109 (state and lifecycle),
-  mogul/agentic-coding-quickstart#168 (configure settings: implemented in
-  mogul/agentic-coding-quickstart#188, small follow-ups still open)
+  mogul/agentic-coding-quickstart#168 (configure settings, implemented in
+  mogul/agentic-coding-quickstart#188 and mogul/agentic-coding-quickstart#225)
 - Re-qualification checklist: mogul/agentic-coding-quickstart#60
 - Review finding this note answers: mogul/agentic-coding-quickstart#117

@@ -48,12 +48,14 @@ release is stalled until the cell is re-qualified.
 
 What remains is repository configuration, which only a maintainer can do.
 
-## Status in this fork
+## Status at handoff
 
-The proposed ruleset, CODEOWNERS review and required checks are not enforced
-in this fork. The Tier-3 check is advisory. Upstream decides whether and how
-to enforce them; workflow presence does not establish enforcement.
-See [UPSTREAM-HANDOFF](../UPSTREAM-HANDOFF.md) for the governance record.
+In the `mogul/agentic-coding-quickstart` handoff branch, the proposed ruleset,
+CODEOWNERS review and required checks are not enforced, and the Tier-3 check
+runs as an advisory check. `GSA-TTS/agentic-coding-quickstart` maintainers
+decide whether and how to enforce them; workflow presence does not establish
+enforcement. See [UPSTREAM-HANDOFF](../UPSTREAM-HANDOFF.md) for the governance
+record.
 
 ## 0. Enable releases deliberately
 
@@ -131,7 +133,7 @@ Settings > Branches (or Rules) > the `main` protection rule:
 > **Owner applicability:** the `GSA-TTS` teams in CODEOWNERS can own paths
 > only in a repository where those teams are eligible owners. A personal
 > repository needs its own ownership and review policy. The maintainer chooses
-> the ruleset and required checks; see "Status in this fork" above.
+> the ruleset and required checks; see "Status at handoff" above.
 
 Verify: open a throwaway PR and confirm `Tier-3 release gate` is listed as required.
 

@@ -166,9 +166,10 @@ brew install GSA-TTS/tap/microsandbox-acq    # version-pinned formula
 
 The upstream release installer (the README one-liner) does this for you, and
 also detects and repairs a blocked, too-old, unparseable, or PATH-shadowed
-`msb`. The in-repo acq v1 `install.sh` does not install or check `msb` at all
-(see [acq v1 installers](howto/acq.md#acq-v1-installers)), so use one
-of the commands above. If an already-installed
+`msb`. After installing `acq`, the acq v1 `install.sh` and `install.ps1`
+check `msb` against the version policy and, when `msb` is missing in an
+interactive terminal without `--yes`/`-Yes`, offer to install the pinned `msb`
+(defaulting to No; see [acq v1 installers](howto/acq.md#acq-v1-installers)). If an already-installed
 0.7.0-0.7.2 has migrated your sandbox state, the recovery is `msb self update`
 (forward to 0.7.3 or newer) — see §43 of
 [`KNOWN_FAILURE_MODES.md`](KNOWN_FAILURE_MODES.md) and
@@ -970,7 +971,7 @@ rationale, the fixed vsock port (3552), and the trust-boundary discussion.
 | Git commit signing / ssh-agent | host SSH agent forwarded implicitly by the sbx CLI (when SSH_AUTH_SOCK set) | host SSH agent forwarded via `--vsock` + an in-guest socat bridge when SSH_AUTH_SOCK set, msb >= 0.6.9 (ADR-0021) |
 | Secret binding breadth | 7 built-in services + any custom `--host/--env` endpoint | usai + github + **any** custom `--host/--env` endpoint bound generically via `--secret ENV@HOST` (shipped) |
 | Snapshots | not supported (`SUPPORTS_SNAPSHOTS=0`) | `msb snapshot` verb exists but **not surfaced by `acq`** (beyond-parity; `SUPPORTS_SNAPSHOTS=0`) |
-| Port forwarding | `acq ports` (post-hoc) | create/run (`-p`) via neutral `publishedPorts` now (shipped); **plus** post-hoc `acq ports --publish` via `msb ssh serve` + `ssh -L` now implemented (ADR-0015) — live end-to-end verification pending a KVM host |
+| Port forwarding | `acq ports` (post-hoc) | create/run (`-p`) via neutral `publishedPorts` (shipped); **plus** post-hoc `acq ports --publish` via `msb ssh serve` + `ssh -L` (ADR-0015, live-verified via `scripts/verify-ports-live`) |
 | Kit volumes | neutral `volumes:` passed through 1:1 to kit-spec v2 §5.7 (sized block device / tmpfs, mounted at create; dies with the sandbox) | neutral `volumes:` unioned across kits (last wins by path) and mapped to a derived named disk volume (`--mount-named acq-<sandbox>-<pathslug>-<crc>:<path>:kind=disk,size=<size>`) or `--tmpfs <path>:<size>`; derived volumes removed on `acq rm` (ADR-0023) |
 | Agent binary | supplied by the sbx agent template | supplied by the selected agent kit or the base image, then launched on attach |
 | OpenCode web UI | `openchamber` acq kit (publishes port 4096) | same kit once it declares `backends: [sbx, msb]` against the released patterns schema (neutral port/background vocab consumed by both backends; the patterns repo's openchamber kit) |
@@ -978,7 +979,7 @@ rationale, the fixed vsock port (3552), and the trust-boundary discussion.
 
 ### Known limitations
 
-- **Ports: create/run publish shipped; post-hoc implemented (live e2e pending).**
+- **Ports: create/run publish and post-hoc tunnel shipped.**
   Kits declare ports in the **neutral top-level `publishedPorts`** vocabulary
   (`{guest, host?, protocol?, name?}`), which both backends now consume — on msb
   each entry maps to a create/run-time `-p HOST:GUEST`
@@ -996,11 +997,9 @@ rationale, the fixed vsock port (3552), and the trust-boundary discussion.
   ed25519 key (never the user's `~/.ssh`) and tearing the serve/ssh pair down on
   `acq stop`/`rm`
   ([ADR-0015](adr/0015-msb-post-hoc-port-publish-via-ssh.md)); this
-  is what flips `SUPPORTS_PORT_FORWARD=1`. **Live end-to-end verification is
-  still pending** — the real forward needs a KVM-capable host, so run
-  `scripts/verify-backends` on such a host per the ADR-0011 periodic-validation
-  cadence (see the live end-to-end note below) before treating it as verified
-  working. (`msb -p` also accepts `BIND_ADDR:HOST:GUEST` and `/udp`, but acq
+  is what flips `SUPPORTS_PORT_FORWARD=1` (live-verified on a KVM host via
+  `scripts/verify-ports-live`; re-run on the ADR-0011 periodic-validation
+  cadence). (`msb -p` also accepts `BIND_ADDR:HOST:GUEST` and `/udp`, but acq
   stays TCP + loopback for sbx parity.)
   **Loopback-only guest services need the post-hoc path or a wider bind.** The
   host-side bind for `-p HOST:GUEST` is loopback by default, but the msb publisher
@@ -1331,26 +1330,26 @@ existing record **fails closed**; moving a credential to a new host is an
 explicit re-pin. The gate prompt and `acq provider-credential ls` both show the
 destination host.
 
-> **Python acq is stricter here.** The Python implementation
+> **Python acq is stricter on host pinning.** The Python implementation
 > (`py-acq/src/acq_py/provider_input.py`) has no recorded-host fallback: a
 > provider with no pin (other than the shipped `usai` trust anchor) is refused
 > even if a host was recorded for the sandbox, so pin it with
 > `acq provider-credential set`. It also refuses a pin whose `KEY_ENV` differs
 > from the kit's `facts.keyEnv`, and re-checks the recorded facts against the pin
-> before every attach. It validates the bundled provider input in code instead of
-> running the pinned Patterns validator; only the pinned, manifest-verified
-> built-in bundle can be selected there today.
+> before every attach. It enforces the `provider-input-v1.schema.json` contract
+> directly in stdlib Python (for both the built-in bundle and fetched/local
+> provider kits) instead of shelling out to the external Patterns validator.
 
 Injection is then data-driven per backend — no provider-specific `acq` code:
 
 | Backend | How `keyEnv@host` is bound at create |
 |---------|--------------------------------------|
 | sbx | a custom proxy secret (`sbx secret set-custom --host … --env …`) derived from the provider's facts; create snapshots the table, so a host-exported value cannot be bound and acq fails closed instead |
-| msb | `--secret ENV@HOST` from the same facts, value resolved out of the acq store (or, in the Bash acq only, from a host-exported value, for CI) |
+| msb | `--secret ENV@HOST` from the same facts, value resolved out of the acq store (or, when no stored value resolves, from a host-exported value, for CI) |
 
-The Python acq binds only stored values on both backends, so its gate refuses a
-host-exported key (`secret_missing`, naming `acq secret set -g <providerId>`);
-in CI, store the key first (`printf '%s' "$KEY" | acq secret set -g usai`).
+On sbx, both implementations require a stored value and refuse a host-exported
+key (`secret_missing`, naming `acq secret set -g <providerId>`); in CI on sbx,
+store the key first (`printf '%s' "$KEY" | acq secret set -g usai`).
 
 `acq secret set -g <providerId>` stores the value under that provider; the
 injected `providerId`/`keyEnv`/`host`/`modelsUrl` are recorded in the sandbox's
@@ -1446,9 +1445,8 @@ See [ADR-0016](adr/0016-kit-bundle-provenance-and-stale-refresh.md).
 - Post-hoc port publish on msb — `acq ports <sandbox> --publish HOST:GUEST`
   via `msb ssh serve` + OpenSSH `-L` against a running sandbox (acq-managed ed25519
   key, serve/ssh teardown on `acq stop`/`rm`); flips `SUPPORTS_PORT_FORWARD=1`
-  ([ADR-0015](adr/0015-msb-post-hoc-port-publish-via-ssh.md)). **Implemented,
-  not yet live-verified** — live end-to-end run needs a KVM host per the ADR-0011
-  `scripts/verify-backends` cadence
+  ([ADR-0015](adr/0015-msb-post-hoc-port-publish-via-ssh.md)). **Live-verified**
+  on a KVM-capable host via `scripts/verify-ports-live`
 - Neutral top-level `volumes` vocab consumed by **both** backends (sbx: 1:1
   into kit-spec v2 §5.7; msb: derived named disk volume / `--tmpfs`, with
   derived-volume cleanup on `acq rm`)
@@ -1466,13 +1464,6 @@ See [ADR-0016](adr/0016-kit-bundle-provenance-and-stale-refresh.md).
 
 ## Still deferred
 
-- Live end-to-end verification of msb **post-hoc port publish**
-  (`acq ports --publish` via `msb ssh serve` + `ssh -L`) on a KVM-capable host —
-  code is implemented and the review's liveness fix landed, but the real
-  forward has not yet been exercised end-to-end (`scripts/verify-backends` covers
-  the kit/agent/USAi rows, not `--publish`), so run it per the
-  [ADR-0011](adr/0011-msb-backend-and-neutral-kits.md) periodic-validation
-  cadence before treating the tunnel as verified working
 - `acq snapshot` verb (beyond sbx parity; msb's own `msb snapshot` verb is not
   surfaced)
 - Full Go/keychain swap-on-access secret component of design §7.5 (age fallback,

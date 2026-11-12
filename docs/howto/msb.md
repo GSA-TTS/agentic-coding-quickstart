@@ -71,10 +71,11 @@ brew install GSA-TTS/tap/microsandbox-acq    # version-pinned formula
 ```
 
 The upstream release installer (the README one-liner) does this for you and
-also repairs a blocked, too-old, unparseable, or PATH-shadowed `msb`. The
-in-repo acq v1 `install.sh` does not install or check `msb` (see
-[acq v1 installers](acq.md#acq-v1-installers)), so use one of the
-commands above.
+also repairs a blocked, too-old, unparseable, or PATH-shadowed `msb`. After
+installing `acq`, the in-repo acq v1 `install.sh` and `install.ps1` also check
+`msb` against the version policy and, when `msb` is missing in an interactive
+terminal without `--yes`/`-Yes`, offer to install the pinned `msb` (defaulting
+to No; see [acq v1 installers](acq.md#acq-v1-installers)).
 
 > **Do not use the upstream one-liners to get a specific version.**
 > `curl -fsSL https://install.microsandbox.dev | sh` (and its Windows

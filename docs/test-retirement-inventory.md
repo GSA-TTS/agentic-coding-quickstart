@@ -252,11 +252,11 @@ dropped. All are Tier-1 candidates unless marked Tier-3.
 | # | Follow-up (working title) | Legacy evidence | Contract row |
 |---|---|---|---|
 | G1 | Backend resolution precedence (flag > env > config > auto-detect) | `20-backend-resolution.bats` | §active_backend (spec §4) |
-| G2 | Image-override precedence (`--image` → `ACQ_IMAGE` → `ACQ_MSB_IMAGE` → agent default) | `35-image-override.bats` | §4 + ADR-0022/0030 |
+| G2 | Image-override precedence (`--image` → `ACQ_IMAGE` → `ACQ_MSB_IMAGE` → agent default; covered for pre-verb `--image` by `cli/global-image-*`) | `35-image-override.bats` | §4 + ADR-0022/0030 |
 | G3 | Agent catalog / template-image naming + known-agent set | `36-agent-catalog.bats` | §4 + ADR-0030 |
 | G4 | Sandbox name derivation (`--name` wins; agent+path slug) | `10-name-derivation.bats` | §create surface |
-| G5 | Clone option (`--clone` / `ACQ_CLONE`, scratch clone, origin carry) | `116-clone-option.bats` | §3 + ADR-0027 |
-| G6 | Volumes vocabulary + terminate cleanup | `110-volumes.bats` | §4 + ADR-0023 |
+| G5 | Clone option (`--clone` / `ACQ_CLONE`, scratch clone, origin carry; covered by `cli/create-clone-*`) | `116-clone-option.bats` | §3 + ADR-0027 |
+| G6 | Volumes vocabulary + terminate cleanup (covered by `cli/create-msb-kit-volumes`, `cli/kit-apply-msb-volumes`) | `110-volumes.bats` | §4 + ADR-0023 |
 | G7 | Balanced-egress rule translation (deny-by-default) | `111-balanced-egress.bats` | §5 + ADR-0018/0019 |
 | G8 | start/restart durability + secret re-export (no-leak). Covered for the Python CLI by `cli/start-msb` and `cli/restart-msb` | `74-msb-restart-durability.bats` | §start/restart + §5 |
 | G9 | Host/guest path fidelity (canonicalization, symlink, Windows forms) | `71c`, `117-msys-path-forms.bats` | §4 + ADR-0029 |
@@ -265,12 +265,12 @@ dropped. All are Tier-1 candidates unless marked Tier-3.
 | G12 | OpenCode migration/agent-kit gate | `140-opencode-migration-gate.bats` | §3 + ADR-0030/0041m |
 | G13 | Provider-input projection / state locks | `147-provider-input-projection.bats` | §3 + ADR-0041m |
 | G14 | Windows installer (PowerShell) | `06-windows-install.bats` | ADR-0042m + ADR-0044m |
-| G15 | Noninteractive `configure` output (effective key/value, no secrets) | `135-configure.bats` | §2 required data |
-| G16 | SSH-agent forwarding (`--vsock` / `ACQ_FORWARD_HOST_SOCKETS`) | `115-ssh-agent-forward.bats` | §6 preserve-with-warning |
+| G15 | Noninteractive `configure` output (effective key/value, no secrets; covered by `cli/configure-json-layers`) | `135-configure.bats` | §2 required data |
+| G16 | SSH-agent forwarding (`--vsock` / `ACQ_FORWARD_HOST_SOCKETS`; covered by `cli/create-*-ssh-agent-*`) | `115-ssh-agent-forward.bats` | §6 preserve-with-warning |
 | G17 | Host-readiness `prepare` (`backend set/unset` persistence is now covered by `cli/backend-set*`, `cli/backend-unset*`) | `70-msb-backend.bats` | §3 + ADR-0040m |
-| G18 | Kit-ref / `ACQ_EXTRA_KITS` persistence round-trip | `95-kit-ref-persistence.bats` | §3 + ADR-0041m |
+| G18 | Kit-ref / `ACQ_EXTRA_KITS` persistence round-trip (covered by `cli/run-extra-kit-*`) | `95-kit-ref-persistence.bats` | §3 + ADR-0041m |
 | G19 | Installer elevation/secret-safety guard | `05-install.bats` | ADR-0042m |
-| G20 | `install.sh` children never read the `curl \| sh` script pipe (`run()` detaches stdin) | removed `05-install.bats` test, below | ADR-0042m |
+| G20 | `install.sh` children never read the `curl \| sh` script pipe (`run()` detaches stdin; re-covered in `05-install.bats`) | removed `05-install.bats` test, below | ADR-0042m |
 | G21 | Windows launcher guards: `acq.cmd` starts PowerShell with no execution-policy bypass; `acq.ps1` refuses the WSL `bash.exe` shim, converts Windows paths for Git Bash and exposes the validator data dir | removed `06-windows-install.bats` tests, below | ADR-0042m + ADR-0029 |
 | G22 | Provider-input validator wheelhouse layout: `SHA256SUMS` lists only the wheels, and the release archive, `install-provider-input-wheelhouse` and `setup-provider-input-validator` agree on the per-platform path | removed `06-windows-install.bats` tests, below | ADR-0042m |
 
@@ -282,25 +282,27 @@ rather than a CLI vector.
 
 ## Installer tests removed before the snapshot
 
-The installer rewrite (`95b82b1`) cut `05-install.bats` from 31 tests to 9 and
-`06-windows-install.bats` from 23 to 8, before the `c76b96c` snapshot above
-was taken, so the 53 removed tests (37 net of the replacements) were never
-classified. They are classified here. Most guarded the old installer's own
-mechanics: it cloned or brew/npm-installed acq and installed and version-managed
-msb. The v1 installer downloads one checksum-verified release archive and
-installs no backend, so those behaviours are gone from the product rather than
-untested. The msb version floor they partly asserted is enforced by acq itself
-(`cli/backend-check-*`, ADR-0040m).
+The installer rewrite (`95b82b1`) initially cut `05-install.bats` from 31 tests
+to 9 and `06-windows-install.bats` from 23 to 8 before the `c76b96c` snapshot
+above was taken; subsequent commits (`e0d0e15`, `8b2bf92`, `b59734a`) added
+prerequisite reporting, interactive pinned-`msb` (`0.7.7`) installation when
+`msb` is absent, `provenance.json` / attestation checks, and atomic marker
+replacement (growing `05-install.bats` to 64 tests and `06-windows-install.bats`
+to 34 tests). The table below classifies the 53 tests removed in `95b82b1`:
+tests for `clone`, `brew`, `npm`, WinGet, and replacing an already-installed
+`msb` remain obsolete, while missing-`msb` interactive pinned bootstrap, WHP API
+probing, and `run()` stdin detachment are covered again in `05-install.bats` and
+`06-windows-install.bats`.
 
 | Removed test(s) | Count | Bucket | Disposition |
 |---|---|---|---|
-| `05`: msb install and version management (failed msb download degrades; dry-run without msb; missing msb installs the pinned release; pinned bundle fails closed on a checksum mismatch or a missing checksum; active 0.6.8 upgraded; unparseable, failed-probe, prerelease or build-suffixed active msb replaced; platform-suffixed final accepted; self-update rejects non-final; never fetches an msb installer script; local 0.7.2 replaced; blocked msb shadowing fails closed; blocked downgrade can be declined; duplicate msb paths reported) | 17 | retire | **Obsolete.** `install.sh` no longer installs or probes msb. The floor and refused versions are `cli/backend-check-*`; the pinned bundle is verified by `scripts/verify-msb-pin`. |
+| `05`: msb install and version management (failed msb download degrades; dry-run without msb; missing msb installs the pinned release; pinned bundle fails closed on a checksum mismatch or a missing checksum; active 0.6.8 upgraded; unparseable, failed-probe, prerelease or build-suffixed active msb replaced; platform-suffixed final accepted; self-update rejects non-final; never fetches an msb installer script; local 0.7.2 replaced; blocked msb shadowing fails closed; blocked downgrade can be declined; duplicate msb paths reported) | 17 | retire | **Mostly obsolete; missing-`msb` bootstrap re-covered.** Active-`msb` replacement/downgrade was removed from `install.sh`; missing-`msb` interactive pinned install and version-policy probing are re-covered in `05-install.bats`, the floor and refused versions are `cli/backend-check-*`, and the pinned bundle is verified by `scripts/verify-msb-pin`. |
 | `05`: source, ref and sha selection (release tag default without a pinned sha; release-asset default sha verifies the clone, the auto clone fallback, and does not override brew or npm; explicit sha overrides package-manager selection; explicit ref ignores a valid or malformed default sha; explicit ref and sha keep the sha; empty sha env unset; explicit empty sha refused; shallow clone deepens) | 12 | retire | **Obsolete.** The clone, brew and npm methods and `--sha` were removed. `--ref` now names a release whose archive is checksum-verified: `installer/checksum-fail-closed`, `installer/offline-install`. |
 | `05`: brew method trusts the microsandbox-acq dependency | 1 | retire | **Obsolete** (no brew method). |
-| `05`: `run()` detaches child stdin so the piped script tail survives | 1 | preserve | `run()` still detaches stdin, and no test pins it: **gap G20**. |
+| `05`: `run()` detaches child stdin so the piped script tail survives | 1 | preserve | Re-covered in `05-install.bats` (**gap G20** closed). |
 | `06`: help and dry-run execute under pwsh; launcher and installer parse under pwsh | 2 | retire | **Superseded** by the current `06` tests ("installer -Help and -DryRun execute", "installer parses", "acq.ps1 parses"). |
-| `06`: does not enable WHP or elevate; no msb via `iex`; installed layout includes the launchers | 3 | retire | **Covered** by the current `06` tests "never elevates", "never pipes a remote script to iex" and "gates the launchers, the backend tree and the source". The WHP part is obsolete. |
-| `06`: verifies WHP; probes WHP via the API; installs Git for Windows via WinGet; msb WinGet id configurable and version-checked; msb version policy in lockstep with `install.sh`; msb version parser suffix policy | 6 | retire | **Obsolete.** `install.ps1` no longer installs msb, Git or WHP; the release-marker sync test replaced the lockstep check. |
+| `06`: does not enable WHP or elevate; no msb via `iex`; installed layout includes the launchers | 3 | retire | **Covered** by the current `06` tests "never elevates", "never pipes a remote script to iex" and "gates the launchers, the backend tree and the source". |
+| `06`: verifies WHP; probes WHP via the API; installs Git for Windows via WinGet; msb WinGet id configurable and version-checked; msb version policy in lockstep with `install.sh`; msb version parser suffix policy | 6 | retire | **WinGet obsolete; WHP API probe and `msb` version policy re-covered.** `install.ps1` no longer runs WinGet; WHP API probing (`WHvGetCapability`) and `msb` version-policy probing are re-covered in `06-windows-install.bats`. |
 | `06`: atomically verifies and publishes the embedded validator runtime | 1 | retire | **Superseded.** The runtime ships inside the release zip, which is verified whole ("verifies the zip against SHA256SUMS before writing"). |
 | `06`: launcher provides the validator runtime to Git Bash; converts Windows paths before the Git Bash handoff; rejects the WSL bash shim; `acq.cmd` delegates without an execution-policy bypass | 4 | preserve | The code ships (`acq.ps1`, `acq.cmd`). `py-acq/tests/test_windows_launchers.py` covers argv forwarding and restoring `ACQ_PROVIDER_INPUT_DATA_DIR`, not these guards: **gap G21**. |
 | `06`: release workflow publishes Windows preview assets; wheelhouse tar path matches the upload path; wheelhouse tar extracts into a platform subdir | 3 | retire | **Implementation detail (ADR-0039m):** source-regex checks over `release.yml`. A release is exercised by the release workflow itself and the Tier-3 gate. |
