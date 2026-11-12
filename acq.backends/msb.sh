@@ -7136,11 +7136,11 @@ _acq_msb_refeed_eligible() {
 }
 
 # _acq_msb_refeed_one SANDBOX ENV HOST [OLD_ENV OLD_HOST] — bind ENV@HOST in one
-# running sandbox (the value is already exported under ENV by the caller). A
-# binding is never left behind under a stale name: when the service's previous
-# binding differs (its env var was renamed, or its host changed), the old name
-# is removed first with its own `--secret-rm`, so the old variable stops
-# receiving the credential.
+# sandbox (the value is already exported under ENV by the caller). A binding is
+# never left behind under a stale name: when the service's previous binding
+# differs (its env var was renamed, or its host changed), the old name is
+# removed first with its own `--secret-rm`, so the old variable stops receiving
+# the credential.
 _acq_msb_refeed_one() {
   local sb="$1" _env="$2" _host="$3" _old_env="${4:-}" _old_host="${5:-}"
   if [ -n "$_old_env" ] && { [ "$_old_env" != "$_env" ] || [ "$_old_host" != "$_host" ]; }; then
@@ -7157,14 +7157,14 @@ _acq_msb_refeed_one() {
   return 1
 }
 
-# _acq_msb_secret_refeed SERVICE SCOPE ENV HOST [OLD_ENV OLD_HOST] — live
-# rotate: re-feed an existing secret to running sandboxes via
-# `msb modify --secret ENV@HOST` (the guest keeps its placeholder; only the
-# injected value changes). New bindings require a restart. A named SCOPE
-# targets that sandbox; empty SCOPE sweeps all running sandboxes, except those
-# _acq_msb_refeed_eligible leaves alone. OLD_ENV/OLD_HOST name the service's
-# binding before this change, unbound first when it differs. Echoes the count of
-# sandboxes re-fed.
+# _acq_msb_secret_refeed SERVICE SCOPE ENV HOST [OLD_ENV OLD_HOST] — bind or
+# rotate a secret across sandboxes via `msb modify --secret ENV@HOST` (stopped
+# sandboxes accept new bindings; running ones rotate existing bindings live,
+# while adding a new binding to a running sandbox requires a stop first). A
+# named SCOPE targets that sandbox; empty SCOPE sweeps all sandboxes, except
+# those _acq_msb_refeed_eligible leaves alone. OLD_ENV/OLD_HOST name the
+# service's binding before this change, unbound first when it differs. Echoes
+# the count of sandboxes re-fed.
 #
 # SECRET NEVER ON ARGV: the value is placed in the environment via a dynamic
 # `export "$ENV=$val"` (an env ENTRY, invisible to `ps`/`/proc/<pid>/cmdline`),

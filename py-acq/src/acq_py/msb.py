@@ -1547,22 +1547,30 @@ def start(name: str) -> None:
     Raises :class:`MsbError` when a bound secret has no value or msb fails.
     Missing bindings are applied while stopped: msb cannot add them while running.
     """
-    # msb can rotate a running binding, but adding one requires a stopped guest.
-    failed = reconcile_bindings(name)
-    if failed:
-        raise MsbError(errors.FAILURE, f"could not bind credentials before starting '{name}': {', '.join(failed)}",
-                       "check msb logs, then retry the start")
-    secret_env = _start_env(name)
+    # Validate existing endpoints before reconciliation can replace them. An
+    # exported key is reusable only for the identical recorded binding.
+    _start_env(name).clear()
+    previous = set(held_flags(name))
     try:
-        proc = _run(["start", name], secret_env=secret_env)
-    finally:
-        secret_env.clear()
-    if proc.returncode != 0:
-        raise MsbError(
-            errors.FAILURE,
-            f"msb start failed for sandbox '{name}'",
-            "check msb logs and retry",
-        )
+        # msb can rotate a running binding, but adding one requires a stopped guest.
+        failed = reconcile_bindings(name)
+        if failed:
+            raise MsbError(errors.FAILURE, f"could not bind credentials before starting '{name}': {', '.join(failed)}",
+                           "check msb logs, then retry the start")
+        secret_env = _start_env(name)
+        try:
+            proc = _run(["start", name], secret_env=secret_env)
+        finally:
+            secret_env.clear()
+        if proc.returncode != 0:
+            raise MsbError(
+                errors.FAILURE,
+                f"msb start failed for sandbox '{name}'",
+                "check msb logs and retry",
+            )
+    except BaseException:
+        rollback_start_bindings(name, previous)
+        raise
 
 
 def reconcile_bindings(name: str) -> list[str]:
@@ -1597,6 +1605,26 @@ def reconcile_bindings(name: str) -> list[str]:
 def held_flags(name: str) -> list[str]:
     """The ``ENV@HOST`` bindings the record shows for ``name`` (no values)."""
     return sorted(f"{env}@{entry['host']}" for env, entry in held_read(name).bindings.items())
+
+
+def rollback_start_bindings(name: str, previous: set[str]) -> list[str]:
+    """Remove bindings added by this start when its guest mount check refuses trust.
+
+    Compare endpoints, not values: a rotation of an existing binding grants no
+    new access and must remain bound. Keep failed removals recorded for retry.
+    """
+    rec = held_read(name)
+    failed: list[str] = []
+    for env, entry in list(rec.bindings.items()):
+        if f"{env}@{entry['host']}" in previous:
+            continue
+        try:
+            removed = _drop(rec, env)
+        except MsbError:
+            removed = False
+        if not removed:
+            failed.append(env)
+    return failed
 
 
 # --- secret set ----------------------------------------------------------------

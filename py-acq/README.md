@@ -186,9 +186,11 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   under the sandbox's lifecycle lock. `msb start` gets the sandbox's bound
   secrets from the acq store in its environment only (msb keeps no value across a
   stop); a recorded binding with no readable value is refused before anything
-  starts. Once the guest is exec-ready, a secret stored while it was stopped is
-  bound with `msb modify`, the read-only trusted-config mount is checked when the
-  record requires it, and the kit set (the recorded agent, image and `.kits`
+  starts. While the sandbox is stopped, the host-side read-only trusted-config
+  mount record is checked when the record requires it, and a secret stored while
+  stopped is bound with `msb modify` before `msb start` runs. Once the guest is
+  exec-ready, the guest read-only probe runs (revoking newly added bindings on
+  contradiction) and the kit set (the recorded agent, image and `.kits`
   refs) is re-applied so kit startup runs again (ADR-0017). Any failure after
   the start says the sandbox is running and exits 1. On sbx both fail with
   `unsupported_capability` and point to `acq run NAME`.
@@ -334,11 +336,11 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   unrecorded sandbox cannot be confirmed unbound, the secret is kept and the
   command fails with `unbind_failed`, naming the sandboxes.
   `--accept-unconfirmed NAME[,NAME]` (msb only) accepts the named unrecorded
-  sandboxes staying unconfirmed: the removal then succeeds, the JSON data lists
-  them under `unconfirmed`, and a note on stderr says they may still hold the
-  binding. It never covers a recorded binding that failed. It is a stopgap
-  until a live msb check settles what removing an unbound variable does (see
-  `docs/KNOWN_FAILURE_MODES.md`), and can be retired then.
+  sandboxes staying unconfirmed after a real remove failure or an unresolved
+  endpoint mapping (removing an absent variable succeeds in msb): the removal
+  then succeeds, the JSON data lists them under `unconfirmed`, and a note on
+  stderr says they may still hold the binding. It never covers a recorded
+  binding that failed.
   On sbx a built-in is removed by name and a custom secret by the placeholder
   found for its env var (`sbx secret rm --placeholder P -f`); a single bare token
   is a raw placeholder. Every sbx removal passes `-f` with stdin closed, so sbx's
