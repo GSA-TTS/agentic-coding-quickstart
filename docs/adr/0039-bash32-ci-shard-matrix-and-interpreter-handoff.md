@@ -1,7 +1,7 @@
 ---
 title: "Shard the bash 3.2 CI suite and hand the interpreter to the shards"
 description: "Why the bash 3.2 gate builds the interpreter once and runs the offline suite as a matrix of shards, and why it does not use the Docker Hub bash:3.2.57 image"
-status: proposed
+status: accepted
 tier: 2
 date: 2026-10-29
 last_updated: "2026-10-29"

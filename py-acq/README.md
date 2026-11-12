@@ -1,15 +1,16 @@
-# acq-py — Python implementation of acq v1 (in progress, not at parity)
+# acq-py — Python implementation of acq v1
 
-This directory is the Python replacement for the repo-root Bash `acq` wrapper.
-It implements every subcommand the Bash `acq help` lists, on both backends (msb
-and sbx). It is **not yet at parity** with Bash, and it is **not currently
-Tier-3-qualified**. The documented `run`/`create` flags, `--clone` among them,
-are all implemented. Some behaviour also differs; for example,
-a kit outside the pinned built-in bundle is applied only when its ref is pinned
-to a full commit, and a local kit directory is copied into acq's private cache
-and checked there before it is applied. The dated correction in
-ADR-0047m lists the gaps and the qualification state. On macOS and Linux the
-Bash `acq` stays the default implementation (`ACQ_IMPL` unset), and
+This directory is the Python implementation of the `acq` wrapper (ADR-0038m).
+It implements every subcommand the Bash `acq help` lists and all documented
+`run`/`create` flags (`--clone` among them) on both backends (msb and sbx).
+Some intentional security and UX differences from Bash are documented; for
+example, a kit outside the pinned built-in bundle is applied only when its ref
+is pinned to a full commit, and a local kit directory is copied into acq's
+private cache and checked there before it is applied. ADR-0047m and ADR-0048m
+record the remaining non-CLI behavioural differences and the Tier-3
+qualification state across platforms (`msb/linux-x86_64` is currently
+Tier-3-qualified; remaining cells await host re-qualification). On macOS and
+Linux the Bash `acq` stays the default implementation (`ACQ_IMPL` unset), and
 `ACQ_IMPL=python` selects this one. On Windows, `acq.cmd` and `acq.ps1` run
 this implementation by default with the managed runtime the Windows archive
 bundles (ADR-0048m); `ACQ_IMPL=bash` selects the Bash one there, and
@@ -518,9 +519,13 @@ release automation. `scripts/stage-posix-runtime` and
 notices. `scripts/assemble-release` adds source, launchers, backend files and the
 wheelhouse, and bakes the version and source revision into `_build_info.py`.
 
-`.github/workflows/build-assets.yml` is a dry run: it builds all five archives,
-generates provenance and checksums, and verifies offline installs. It uploads
-workflow artifacts only; publishing integration remains a follow-up.
+`.github/workflows/build-assets.yml` builds all five archives, generates
+`provenance.json` and `SHA256SUMS`, and verifies offline installs on Linux,
+macOS and Windows. On pull requests and `workflow_dispatch` it runs as a dry
+run (uploading workflow artifacts only); `.github/workflows/release.yml` calls
+it at the release tag (`sign: true`), runs secret-gated signing, attests every
+file in `dist`, and publishes the complete asset set to the GitHub Release
+(ADR-0050m).
 
 **Patch cadence (PROPOSAL — pending developer decision, not yet settled):**
 re-verify and re-pin the managed runtime and dependency wheelhouse on the
@@ -648,11 +653,14 @@ test configuration lets git use only its `file` transport, and
 Provider-role kits (`usai-provider`) are handled by `src/acq_py/provider_input.py`.
 Before any create (and before `create --recreate` removes the old guest) acq
 checks each selected provider's facts against its pin and checks that a key is
-stored: on a terminal it asks and stores one, otherwise it fails closed with
-`secret_missing`. This is stricter than Bash: a key exported in the host
-environment is not accepted (store it with `acq secret set -g usai`), and a
-provider with no pin is refused even if a host was recorded earlier (see
-`docs/KNOWN_FAILURE_MODES.md`, section 56). The provider-input generation is
+available: on `msb`, a key exported in the host environment is accepted and
+bound when no stored value resolves (the store takes precedence, matching
+Bash), while on `sbx` (which snapshots its own proxy table) a key must be
+stored (on a terminal acq prompts and stores one; otherwise it fails closed
+with `secret_missing`, naming `acq secret set -g <providerId>`). Python remains
+stricter than Bash on host pinning: a provider with no pin (other than the
+shipped `usai` trust anchor) is refused even if a host was recorded earlier
+(see `docs/KNOWN_FAILURE_MODES.md`, sections 56 and 97). The provider-input generation is
 staged before the create, mounted read-only and named by `ACQ_PROVIDER_INPUT_ROOT`
 for OpenCode's renderer, and published as `current` only once the create
 succeeded. On msb it is mounted with `--volume HOST:GUEST:ro` where msb can

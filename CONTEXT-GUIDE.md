@@ -53,7 +53,7 @@ Load only when the specific activity is being performed.
 |----------|-----------|
 | `checklists/pre-deployment.md` | Running pre-deployment checklist |
 | `docs/risk-assessment.md` | Performing a risk assessment |
-| `docs/howto/qualification.md` | Running the ADR-0044m Tier-3 qualification oracles and recording transcripts on a macOS/Linux host |
+| `docs/howto/qualification.md` | Running the ADR-0044m Tier-3 qualification oracles and recording transcripts on macOS, Linux, and Windows x64 hosts |
 
 ## Typical Task Profiles
 

@@ -148,8 +148,9 @@ an msb run is evidence only at 0.7.7 or later.
 Which cells are current is the ledger's to say, not this page's:
 `python3 -m qualification matrix`. The macOS arm64 and Windows x64 runs recorded so
 far were made with the earlier cell oracle, which did not check credentials, kits or
-the read-only mount; any change to the oracle expires them (it is on the Tier-3
-surface), so every cell needs a run with the current oracle.
+the read-only mount (`msb` on `linux-x86_64` was recorded with the current oracle);
+any change to the Tier-3 surface expires earlier runs, so every cell needs a current
+run at the release candidate revision.
 
 **Unqualified (not claimed, reported honestly, never a pass):** Windows ARM64,
 musl libc, macOS x86_64 (Intel Mac, every backend), and sbx on Linux aarch64.
@@ -221,9 +222,10 @@ AGENTS.md documents for a service that is not built in
 (`secret set -g <service> --host qualify.invalid --env <nonce variable>`). Both
 backends are checked: AGENTS.md documents a credential path on msb (`--secret
 ENV@HOST`) as well as on sbx. The Python implementation keeps msb secrets in the acq
-secret store and binds them as `--secret ENV@HOST` at create (running sandboxes are
-updated with `msb modify --secret`/`--secret-rm`); a live msb run of this step is
-still to be recorded.
+secret store and binds them as `--secret ENV@HOST` at create (existing bindings are
+rotated on running sandboxes with `msb modify --secret`, and secrets added while
+stopped are bound before `msb start`); this step was live-verified on `msb`
+(`linux-x86_64`).
 
 Swap-on-the-wire (the real value, not the placeholder, reaching the bound host) is
 **not** checked: it needs an endpoint that reports what it received, and the oracle
@@ -372,8 +374,11 @@ Record the sequence and its observed refusal/recovery in the transcript.
 
 ### Oracle 6 — native-Windows ordinary-user operation
 
-**Done.** Both Windows x64 cells qualified PASS as an ordinary (non-admin) user;
-no further host is needed.
+Ordinary-user (`principal_elevation: "ordinary_user"`) installation and
+hypervisor operation were demonstrated in the initial Windows x64 cell runs.
+Both Windows x64 cells still require a current `scripts/qualify-backend-cell`
+run under the default Python launcher (ADR-0048m) and, for `msb`, the Windows
+sandbox-control review noted under Oracle 1 above.
 
 ---
 

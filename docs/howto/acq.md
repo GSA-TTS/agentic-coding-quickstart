@@ -225,9 +225,10 @@ covers the manual, developer, and Windows preview paths.
 The `install.sh` and `install.ps1` checked into this repository are not the
 installers in the pinned release described in this guide and the README. They are the
 acq v1 installers (ADR-0042m). Each one downloads a per-platform release archive
-(`acq-<platform>.tar.gz`, or `acq-windows-x64.zip` on Windows), verifies it
-against `SHA256SUMS`, installs it under your home directory and offers to put it
-on your `PATH`. `install.sh` links both `acq` and `acq-python`. They do not
+(`acq-<platform>.tar.gz`, or `acq-windows-x64.zip` on Windows) and
+`provenance.json`, verifies both against `SHA256SUMS`, installs them under your
+home directory and offers to put `acq` on your `PATH`. `install.sh` links both
+`acq` and `acq-python`. They do not
 choose an acq package manager or clone, accept the upstream `--method`/`--sha`
 options, or install Git Bash. Windows runs the Python implementation by default;
 Git Bash is needed only for `ACQ_IMPL=bash`.
@@ -291,8 +292,9 @@ never elevate, enable Windows features or reboot. Skip the whole report and
 offer with `--no-prereq-check` or `-NoPrereqCheck`. Dry runs make no probes or
 prerequisite changes.
 
-Until a release publishes the acq v1 archives, use an offline
-asset set: `sh install.sh --source DIR --install-dir DIR --bin-dir DIR`, or
+For an offline or air-gapped install (or before the first release tag with the
+acq v1 archives is published), install from a local asset set:
+`sh install.sh --source DIR --install-dir DIR --bin-dir DIR`, or
 `.\install.ps1 -Source DIR`.
 
 ### Direct package-manager install
@@ -463,9 +465,11 @@ prompted, and installed it via the upstream Windows installer — `acq version`
 through `acq.cmd`, `msb --version` / `msb doctor`, and sandbox provisioning all
 worked. Notes from that validation:
 
-- That validation ran the Bash implementation, the Windows default at the time.
-  The default is now the Python implementation; the Git Bash note below applies
-  to `ACQ_IMPL=bash`.
+- That validation ran the pre-v1 installer and the Bash implementation (the
+  Windows default at the time). The default is now the Python implementation,
+  and the acq v1 `install.ps1` installs the checksum-verified `msb 0.7.7`
+  release bundle directly rather than running the upstream Windows install
+  script; the Git Bash note below applies to `ACQ_IMPL=bash`.
 - The launcher and installer resolve Git Bash from Git for Windows' standard
   install locations and deliberately ignore the WSL interop shim
   (`C:\Windows\System32\bash.exe`) that a bare `bash.exe` PATH lookup often
@@ -527,7 +531,7 @@ back to the latest, run `git switch main`.
 3. `backend:` in `~/.config/acq/config.yaml`
 4. Auto-detect: first installed backend found (msb preferred, then sbx)
 
-**Today (1.2.x), two backends ship: `msb` (default) and `sbx`.** See
+**Two backends ship: `msb` (default) and `sbx`.** See
 [docs/BACKEND_GUIDE.md](../BACKEND_GUIDE.md) for per-backend details. A third
 backend (`ppp` — Podman-Plus-Proxy) is deferred.
 

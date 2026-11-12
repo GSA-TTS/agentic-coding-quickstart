@@ -12,10 +12,11 @@ GitHub settings audit. The `m`-suffix ADR identifiers are retained.
   host-held configuration and state migration, and bundled pinned kits.
   `ACQ_IMPL` selects the implementation; Windows launchers default to Python,
   while the POSIX Bash entry point defaults to Bash (ADR-0047m/0048m).
-- **Installers:** `install.sh` and `install.ps1` verify release archives against
-  `SHA256SUMS`, accept an independent `--sha256`/`-Sha256` pin of that file,
-  verify GitHub artifact attestations when `gh` is available, support offline
-  sources and user-scope installation, and expose the `python` channel. After
+- **Installers:** `install.sh` and `install.ps1` verify release archives and
+  `provenance.json` against `SHA256SUMS`, accept an independent
+  `--sha256`/`-Sha256` pin of that file, verify GitHub artifact attestations
+  when `gh` is available, support offline sources and user-scope installation,
+  use atomic PID-safe ownership markers, and expose the `python` channel. After
   installing they report sandbox prerequisites and offer, only interactively and
   on an explicit yes, to install the pinned msb. See
   [acq v1 installers](howto/acq.md#acq-v1-installers).
@@ -26,14 +27,16 @@ GitHub settings audit. The `m`-suffix ADR identifiers are retained.
   claims; offline tests do not establish live enforcement.
 - **Release asset build:** `.github/workflows/build-assets.yml` builds all five
   per-platform archives from pinned runtimes (python-build-standalone for POSIX,
-  the python.org embed for Windows) as `installer/assets.json` enumerates them,
-  generates `provenance.json`, enumerates the complete set with
-  `scripts/gen-install-assets`, and installs it offline on Linux, macOS and
-  Windows. It is a dry run on pull requests: it never tags or publishes. On the
-  fork the Apple-silicon archive is cross-built on Linux and checked statically,
-  because Apple-silicon runners did not start there; the native
-  `smoke-macos-arm64` job must pass on a dispatched or release run before a
-  release is cut (ADR-0042m).
+  the python.org embed for Windows) and the exact-hash validator `wheelhouse/`
+  as `installer/assets.json` enumerates them, generates `provenance.json`,
+  enumerates the complete set with `scripts/gen-install-assets`, and installs it
+  offline on Linux, macOS and Windows. On pull requests it runs as a dry run
+  (uploading workflow artifacts only, cross-building `macos-arm64` on Linux
+  because Apple-silicon runners did not start on the fork);
+  `.github/workflows/release.yml` calls it at the release tag with `sign: true`
+  (building `macos-arm64` natively on `macos-15`), runs secret-gated signing,
+  attests every file in `dist`, and publishes the complete set to the GitHub
+  Release (ADR-0042m, ADR-0050m).
 
 ## Suggested review order
 
@@ -96,11 +99,12 @@ record; sibling fork decisions are cited in the records themselves.
   no-force-push protections, but an empty required-check list and zero required
   approvals. The proposed release ruleset and CODEOWNERS review are not enforced;
   upstream chooses rulesets, owners, required checks and review requirements.
-- **Ledger waivers:** three waivers for msb/Linux x86_64, msb/Linux aarch64 and
-  sbx/Linux x86_64 expire on 2027-02-05 and point to
-  mogul/agentic-coding-quickstart#60. They are retained as evidence metadata,
-  not silently transferred acceptance. Upstream decides ownership and any
-  replacement tracking; new live runs can replace the waivers.
+- **Ledger waivers:** two waivers for msb/Linux aarch64 and sbx/Linux x86_64
+  expire on 2027-02-05 and point to mogul/agentic-coding-quickstart#60 (the
+  earlier msb/Linux x86_64 waiver was retired by a live PASS run). They are
+  retained as evidence metadata, not silently transferred acceptance. Upstream
+  decides ownership and any replacement tracking; new live runs can replace the
+  waivers.
 - **Releases and tokens:** `ENABLE_RELEASES` is recorded as unset in the fork.
   A fork experiment exercised the PR/gate/tag sequence but proposed `4.0.1`
   against a `4.1.1` manifest without release tags; that PR was closed. Upstream
@@ -157,13 +161,15 @@ alter the restriction.
 ## Open work requiring hosts or credentials
 
 The live re-qualification checklist is mogul/agentic-coding-quickstart#60;
-Windows gate details are retained in ADR-0048m. Re-run claimed macOS arm64
-cells on both backends, msb/Linux aarch64, and sbx/Linux x86_64 and Windows x64
-against the offered revision; a historical PASS is not proof of currency after
-surface edits. msb/Linux x86_64 and Windows x64 also need current evidence.
-macOS Intel and sbx/Linux aarch64 remain unqualified rather than implicitly
-supported live cells. These runs need the appropriate virtualization hosts;
-credential substitution needs a suitable endpoint and injected credentials.
+Windows gate details are retained in ADR-0048m. At handoff, `msb/Linux x86_64`
+holds a current `PASS` transcript in `docs/qualification-ledger.json`. Re-run
+the remaining cells with historical `PASS` entries (`macos-arm64` and
+`windows-x64` on both `msb` and `sbx`) against the offered revision, and qualify
+the two waived cells (`msb/Linux aarch64` and `sbx/Linux x86_64`); a historical
+`PASS` is not proof of currency after Tier-3 surface edits. macOS Intel and
+sbx/Linux aarch64 remain unqualified rather than implicitly supported live
+cells. These runs need the appropriate virtualization hosts; credential
+substitution needs a suitable endpoint and injected credentials.
 
 Windows still owes the default-launcher Tier-3 transcript and sandbox-control
 assertions, and a qualification decision about the launcher/runtime surface
@@ -172,3 +178,38 @@ release set and a network-blocked host (mogul/agentic-coding-quickstart#61).
 Code signing and macOS notarization need signing credentials and platform
 validation before managed-fleet execution can be claimed (ADR-0042m); the
 workflow steps exist (ADR-0050m) but have never run with real credentials.
+
+## Upstream migration and post-merge checklist
+
+1. **Merge preserving ancestry (`--no-ff`):** Merge the handoff branch into
+   `GSA-TTS/agentic-coding-quickstart` with a merge commit (`git merge --no-ff`
+   or GitHub's *Create a merge commit*) rather than squash or rebase, so the
+   revisions recorded in `docs/qualification-ledger.json` remain ancestors of
+   `HEAD` (`PYTHONPATH=. python3 -P -m qualification.gate check`).
+2. **Fork governance and ADR disposition:** Decide whether to remove or
+   supersede [`AGENTS.fork.md`](../AGENTS.fork.md) (and its callout at the top
+   of [`AGENTS.md`](../AGENTS.md)), and whether to retain the `0038m`–`0050m`
+   ADR identifiers or renumber them (noting that `0038` and `0039` already exist
+   for the Bash 3.2 test runner and CI shard matrix).
+3. **Rulesets, required checks and `CODEOWNERS`
+   (mogul/agentic-coding-quickstart#117):** Confirm `@GSA-TTS/agentic-coding-team`
+   and `@GSA-TTS/agentic-coding-admins` team access for
+   [`.github/CODEOWNERS`](../.github/CODEOWNERS), configure the `main` branch
+   ruleset and required check contexts (see [release gate setup](howto/release-gate-setup.md)),
+   and decide whether `qualification/publish.py` should keep its `GSA-TTS/*`
+   personal-fork guard or permit direct maintainer ledger branches.
+4. **Live Tier-3 hardware qualification (mogul/agentic-coding-quickstart#60):**
+   Run `PYTHONPATH=. python3 -P -m qualification.host` on the remaining six
+   claimed cells (`msb/macos-arm64`, `sbx/macos-arm64`, `msb/windows-x64`,
+   `sbx/windows-x64`, `msb/linux-aarch64`, and `sbx/linux-x86_64`;
+   `msb/linux-x86_64` is already current at handoff) and close out ADR-0048m
+   Windows gates 3, 5b and 5c.
+5. **Release enablement, signing and offline-install oracle
+   (mogul/agentic-coding-quickstart#61):** Set `ENABLE_RELEASES=true` (plus
+   optional `RELEASE_PLEASE_TOKEN` and ADR-0050m signing variables/secrets per
+   [release signing](howto/release-signing.md)) when ready to cut a release;
+   then record the live offline-install completeness transcript against the
+   published release archive set on a network-blocked host.
+6. **Cross-repo Patterns tracking (mogul/agentic-coding-quickstart#240):**
+   Coordinate with `GSA-TTS/agentic-coding-patterns` on the upstream `opencode`
+   kit renderer and any future custom-provider secret UX follow-ups.

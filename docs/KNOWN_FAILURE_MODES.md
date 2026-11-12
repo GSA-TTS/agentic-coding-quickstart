@@ -2634,8 +2634,7 @@ brew install GSA-TTS/tap/microsandbox-acq@0.7.3
 ```
 
 **If every catalog-opening msb command reports `self_downgrade_recovery_required`,**
-the only exit is removing that one operation directory. `install.sh` detects this
-and offers to do it; by hand:
+the only exit is removing that one operation directory by hand:
 
 ```bash
 rm -rf ~/.microsandbox/db/self-downgrade/<id>
@@ -2673,15 +2672,13 @@ or adjust `PATH` so the intended `msb` appears first.
 - `acq_backend_check_version` fails closed on the blocked range before any
   command that opens the catalog — including state-touching verbs like `acq ls`,
   which previously reached `msb` unguarded and surfaced the raw upstream error.
-- `install.sh` installs the pinned `0.7.7` from a checksum-verified release
-  bundle, prompts before replacing a too-old, unparseable, or blocked active
-  version, offers the forward path first when the catalog was already migrated,
-  refuses to drive a rollback with a binary that would wedge the install, and
-  fails closed when another blocked `msb` earlier on `PATH` would still shadow
-  the install.
-- `install.ps1` applies the same policy on Windows, which previously had none.
-  The Windows-specific logic has been smoke-tested on a real Windows host, but
-  remains lower-confidence than the POSIX path.
+- After installing `acq`, the v1 `install.sh` and `install.ps1` probe any
+  existing `msb` on `PATH` against the policy (`0.6.9` through `0.6.18` or
+  `>= 0.7.3`) and report out-of-policy versions with remediation commands without
+  replacing an active binary. When `msb` is not on `PATH` and the session is
+  interactive without `--yes`/`-Yes`, both installers offer to install the
+  pinned `0.7.7` from a checksum-verified release bundle (or Homebrew's pinned
+  formula on POSIX).
 - `scripts/verify-msb-pin` verifies the 0.7.7 install pin plus recovery behavior
   against real 0.6.18 / 0.7.2 / 0.7.3 binaries in a throwaway `MSB_HOME`. It
   boots no VM, so it needs no virtualization and runs inside a sandbox.
@@ -3504,25 +3501,28 @@ same kit; re-running B's create recovers it.
 
 ### Symptoms
 
-- `acq create`/`acq run` fails with `secret_missing` ("`$USAI_API_KEY` is exported
-  on the host, but acq binds only stored credentials") where the Bash acq on msb
-  would bind the exported value.
+- On `sbx`, `acq create`/`acq run` fails with `secret_missing` when `$USAI_API_KEY`
+  is only exported in the host environment and not stored (on `msb`, both Bash
+  and Python accept and bind a host-exported key when no stored value resolves;
+  see §97).
 - A provider with no pin fails with `validation_failed` ("is not pinned to a
   host") even though the Bash acq would accept the host recorded for that
   sandbox at an earlier create.
 - `acq run NAME` fails with `validation_failed` when the sandbox's recorded
   provider facts no longer match the provider's pin (a re-pin to another host,
   or an edited record).
-- Without a terminal on stdin, any selected provider with no stored key fails
-  closed; nothing is prompted. On sbx, a key that is in the acq store but not in
-  sbx's own proxy table fails the same way, asking for it to be re-stored.
+- Without a terminal on stdin, any selected provider with no available key fails
+  closed; nothing is prompted. On sbx, a key that is in the acq store or host
+  environment but not in sbx's own proxy table fails the same way, asking for it
+  to be stored.
 
 ### Root Cause
 
 Each backend takes its credentials at create: msb binds `--secret ENV@HOST`
-from the acq secret store, and sbx injects from the proxy table it snapshots
-then. Neither Python path reads a value exported in the host environment, so
-accepting one would create a sandbox with a dead credential. The recorded-host
+from the acq secret store (falling back to a host-exported value when no stored
+value resolves), while sbx injects from the proxy table it snapshots at create
+(so on sbx, accepting a host-exported value that is not in sbx's store would
+create a sandbox with a dead credential). The recorded-host
 fallback was not ported: refusing is the safe direction, since acq never lets a
 kit choose where a credential goes. That holds for a provider kit the Python acq
 fetches from a registered kit source too (`py-acq/src/acq_py/kit_fetch.py`): its
@@ -3957,11 +3957,14 @@ unit assertion, and it has not been fabricated.
    `source_revision` on a non-git install.
 3. A sandbox starts and runs a smoke command (e.g. `acq run opencode <dir>`).
 
-**Unblock trigger:** release automation assembles and publishes the per-platform
-archives carrying the bundled managed runtime (Python.org embedded on Windows;
-python-build-standalone install-only archives on macOS/Linux) and the exact-hash
-wheelhouse. Until then the fail-closed presence checks are proven offline against
-a checked-in fixture, and the live transcript stays open.
+**Unblock trigger:** `.github/workflows/build-assets.yml` and
+`.github/workflows/release.yml` (ADR-0050m) now assemble and publish all five
+per-platform archives carrying the bundled managed runtime (Python.org embedded
+on Windows; python-build-standalone install-only archives on macOS/Linux), the
+exact-hash validator `wheelhouse/`, `provenance.json`, and `SHA256SUMS`, and
+verify offline installs in CI. Recording the live Tier-3 transcript against a
+published release on a network-blocked host with a live backend remains open
+until the first v1 release tag is published.
 
 ---
 
@@ -3972,7 +3975,7 @@ a checked-in fixture, and the live transcript stays open.
 `scripts/qualify-backend-cell` checks the boot contract, credential binding and
 in-guest non-exposure, built-in kit application, host-side secret non-exposure,
 and (msb) the read-only trusted-config mount, including the committed
-`scripts/qualify-msb-ro-mount` canary. Three ADR-0044m facets are not in it:
+`scripts/qualify-msb-ro-mount` canary. Four ADR-0044m facets have specific limits:
 
 1. **Swap-on-the-wire substitution.** Showing that the real credential (not the
    placeholder) reaches the bound host needs an endpoint that reports what it
@@ -3985,24 +3988,15 @@ and (msb) the read-only trusted-config mount, including the committed
    (`py-acq/tests/test_exec.py`) until a PTY-driving step is added.
 3. **Version fail-closed against a real older backend.** Covered offline by the
    Tier-1 vectors; a live check needs a second, older backend install on the host.
-4. **Remount attempts in the cell's own guest.** The cell oracle checks `ro` in
-   `/proc/mounts`, an EROFS write and an unchanged host directory in its own guest;
-   attempts to remount read-write are made only by the canary, in a sandbox of its
-   own. The oracle also assumes the Bash layout for where acq keeps a sandbox's
-   host-config directory (`<state>/provenance/<backend>/<sandbox>.<checksum>.config`,
-   mounted at `/var/lib/acq/host`). **Unblock trigger:** the Python implementation
-   establishes the mount; then align the oracle's path constants with it and decide
-   whether to add a remount attempt to the cell's own guest.
-
-**Expected today:** the Python implementation fails the cell oracle on every
-cell (no built-in kits are applied and no read-only trusted-config mount is
-established; the msb credential path exists but has no live run yet), so a Tier-3
-run reports `FAIL` with each
-missing control named, rather than qualifying a sandbox that lacks them. The
-first live run with the extended oracle should also confirm that `sbx` accepts the
-nonce-named global secret service, and that neither backend CLI reads the
-redirected `XDG_*` directories (if one does, its steps fail closed rather than
-pass).
+4. **Remount attempts in the cell's own guest and Windows `ro_mount`.** On POSIX
+   `msb` cells, the Python implementation stages the host-config tree and enforces
+   the read-only mount gate (`py-acq/src/acq_py/security.py`), and the cell oracle
+   checks `ro` in `/proc/mounts`, an EROFS write, and an unchanged host directory
+   in its own guest (passing live on `msb/linux-x86_64`), while attempts to
+   remount read-write are made by the canary in a sandbox of its own. On Windows,
+   where `acq` does not request a read-only trusted-config mount (ADR-0048m),
+   `scripts/qualify-backend-cell` detects `"platform": "windows"` in
+   `acq doctor --json` and reports the `ro_mount` facet as `BLOCKED`.
 
 ---
 
@@ -4302,9 +4296,9 @@ start/status command.
 
 ---
 
-## 69. Python acq on msb: `secret rm` can be blocked by a sandbox it has no record for
+## 69. Python acq on msb: `secret rm` on an unrecorded sandbox fails closed if `msb modify` errors
 
-**Status:** known limitation, waiting on a live msb check (per AGENTS.md "Track Deferred Work").
+**Status:** Verified against live `msb 0.7.11` (fail-closed).
 
 ### Symptoms and cause
 
@@ -4313,37 +4307,29 @@ creates holds (`<state>/msb-secret-bindings/`), because msb gives acq no binding
 listing to rely on. `secret rm` unbinds exactly what those records show. A
 sandbox msb lists without a record is unknown: one created by the Bash `acq`, by
 `msb` directly, or before the records existed. For each unknown sandbox,
-`secret rm` tries `msb modify NAME --secret-rm ENV`. If that fails, acq cannot
-tell "msb refused because the variable was never bound" from a real failure, so
-it keeps the secret in the acq store and exits 1 with `unbind_failed`, naming
-the sandbox. Until the msb behaviour is known, any unknown sandbox that never
-had the binding can block the removal if msb rejects removing an unbound
-variable (the test stub models it that way). Stopped sandboxes are swept too,
-and `msb modify` on a stopped sandbox is also unverified.
+`secret rm` runs `msb modify NAME --secret-rm ENV`. Live verification against
+`msb 0.7.11` confirmed that `msb modify NAME --secret-rm ENV` exits `0` both
+when `ENV` was never bound and when `NAME` is stopped (`_stub_msb.py` models
+this idempotence). If `msb modify --secret-rm` still returns a non-zero exit
+(for example, a genuine backend error, or on a global removal when re-adding an
+unrecorded running sandbox's own scoped secret via `msb modify --secret` for a
+variable that was not already bound on that running sandbox), `acq` keeps the
+secret in the acq store and exits 1 with `unbind_failed`, naming the sandbox.
 
 ### Mitigation today
 
-Remove the named sandbox (`acq rm NAME`, or `msb remove NAME` for one acq did
-not create), then retry `acq secret rm`. If you know a named sandbox never had
-the secret (or accept that it may keep it), retry with
-`acq secret rm ... --accept-unconfirmed NAME[,NAME]`: only the named unrecorded
-sandboxes are accepted, the JSON data lists them under `unconfirmed`, and a
-stderr note repeats that they may still hold the binding. Sandboxes the Python
-acq creates always have a record and never block it.
+Remove or stop the named unrecorded sandbox (`acq rm NAME`, `acq stop NAME`, or
+`msb remove NAME` for one acq did not create), then retry `acq secret rm`. If
+you know a named sandbox never had the secret (or accept that it may keep it),
+retry with `acq secret rm ... --accept-unconfirmed NAME[,NAME]`: only the named
+unrecorded sandboxes are accepted, the JSON data lists them under `unconfirmed`,
+and a stderr note repeats that they may still hold the binding. Sandboxes the
+Python acq creates always have a record and never block it.
 
 On a global removal, an unrecorded sandbox that also has its own stored value is
 not assumed safe: the Bash `acq`'s global set overwrites a sandbox's own binding,
 so acq removes the binding and re-adds the sandbox's own value in a separate
 call, and reports the sandbox as unconfirmed if either call fails.
-
-### Unblock trigger
-
-A live msb run that shows what `msb modify NAME --secret-rm ENV` does for a
-variable that is not bound, on a running and on a stopped sandbox. If msb
-succeeds, or fails in a way acq can tell apart, treat that as "confirmed
-unbound", stop blocking, and retire `--accept-unconfirmed`. The Bash-state import (ADR-0041m generation 2)
-does not help here: Bash records which sandboxes exist, not which secrets each
-one was bound with, so an imported sandbox still has no binding record.
 
 ---
 
