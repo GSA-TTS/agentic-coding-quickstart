@@ -159,11 +159,11 @@ def test_start_binds_a_secret_stored_while_stopped(monkeypatch, tmp_path, capsys
     rc, doc, out, err = _acq(capsys, "start", "box", "--json")
     assert rc == 0, (doc, err)
     (start_argv, start_env), = _calls(children, "start")
-    assert start_env is None  # nothing was bound when the sandbox stopped
+    assert start_env["USAI_API_KEY"] == VALUE
     (argv, env), = _calls(children, "modify")
     assert argv[-3:] == ["box", "--secret", "USAI_API_KEY@api.gsa.usai.gov"]
     assert env["USAI_API_KEY"] == VALUE
-    assert _verbs(children).index("start") < _verbs(children).index("modify")
+    assert _verbs(children).index("modify") < _verbs(children).index("start")
     assert msb.held_read("box").bindings["USAI_API_KEY"]["service"] == "usai"
     assert _stub_records(tmp_path)["box"]["USAI_API_KEY"]["host"] == "api.gsa.usai.gov"
     assert doc["data"]["secret_bindings"] == ["USAI_API_KEY@api.gsa.usai.gov"]
@@ -197,9 +197,11 @@ def test_start_binds_a_secret_stored_while_stopped_under_the_recorded_selection(
         _set(capsys, monkeypatch, "-g", "usai")  # stored while stopped: the selection keeps it out
     _set(capsys, monkeypatch, "-g", "github", value=GITHUB)  # stored while stopped: not a provider
     assert _calls(children, "modify") == []  # set re-feeds running sandboxes only
+    monkeypatch.setenv("ACQ_MSB_STUB_REQUIRE_RESTART", "1")
     children.clear()
     rc, doc, out, err = _acq(capsys, "start", "box", "--json")
     assert rc == 0, (doc, err)
+    assert _verbs(children).index("modify") < _verbs(children).index("start")
     github_flag = "GITHUB_TOKEN@github.com,api.github.com,codeload.github.com"
     (argv, env), = _calls(children, "modify")
     assert argv[-3:] == ["box", "--secret", github_flag] and env["GITHUB_TOKEN"] == GITHUB
@@ -210,7 +212,7 @@ def test_start_binds_a_secret_stored_while_stopped_under_the_recorded_selection(
         assert set(held) == {"GITHUB_TOKEN", "USAI_API_KEY"}
     else:
         assert doc["data"]["secret_bindings"] == [github_flag]
-        assert _calls(children, "start")[0][1] is None  # nothing was bound when it stopped
+        assert _calls(children, "start")[0][1]["GITHUB_TOKEN"] == GITHUB
         assert set(held) == {"GITHUB_TOKEN"} and "usai-provider" not in doc["data"]["kits"]
     _assert_value_absent(VALUE, children, out, err)
     _assert_value_absent(GITHUB, children, out, err)
@@ -244,7 +246,7 @@ def test_start_reports_a_binding_that_could_not_be_added(monkeypatch, tmp_path, 
     monkeypatch.setenv("ACQ_MSB_STUB_FAIL_ADD", "box")
     rc, doc, _out, _err = _acq(capsys, "start", "box", "--json")
     assert rc == 1 and doc["error"]["code"] == errors.FAILURE
-    assert "is running" in doc["error"]["message"] and "usai" in doc["error"]["message"]
+    assert "before starting" in doc["error"]["message"] and "usai" in doc["error"]["message"]
 
 
 def test_start_failure_is_reported_and_no_heal_runs(monkeypatch, tmp_path, capsys, children):
@@ -314,34 +316,101 @@ def _spy_reconcile(monkeypatch, events: list) -> None:
     monkeypatch.setattr(msb, "reconcile_bindings", spy)
 
 
-def test_start_runs_the_ro_probe_before_binding_secrets_and_the_heal(monkeypatch, tmp_path, capsys):
+@pytest.mark.skipif(os.name == "nt", reason="acq does not request the read-only mount on Windows")
+def test_start_runs_the_ro_probe_before_binding_secrets_and_the_heal(monkeypatch, tmp_path, capsys, children):
     _stopped_box(monkeypatch, tmp_path, capsys, secret=False)
     _require_ro("box")
+    _set(capsys, monkeypatch, "-g", "usai")
     events: list = []
     calls = _spy_heal(monkeypatch, events)
     _spy_reconcile(monkeypatch, events)
-    monkeypatch.setattr(security, "probe_mount", lambda name: (events.append("probe"), ("ok", ""))[1])
+    real = msb.ro_mount_recorded
+
+    def host_probe(*args):
+        events.append("host-probe")
+        return real(*args)
+
+    monkeypatch.setattr(msb, "ro_mount_recorded", host_probe)
+    monkeypatch.setattr(security, "probe_mount", lambda name: (events.append("guest-probe"), ("ok", ""))[1])
+    monkeypatch.setenv("ACQ_MSB_STUB_REQUIRE_RESTART", "1")
+    children.clear()
     rc, doc, _out, err = _acq(capsys, "start", "box", "--json")
     assert rc == 0, (doc, err)
-    assert events[:3] == ["probe", "reconcile", "heal"]
+    assert events == ["host-probe", "reconcile", "guest-probe", "heal"]
+    assert _verbs(children).index("modify") < _verbs(children).index("start")
     assert calls[0][1] is True  # the heal keeps the read-only requirement
 
 
-def test_start_missing_ro_mount_binds_no_new_secret_and_skips_the_heal(monkeypatch, tmp_path, capsys, children):
+@pytest.mark.skipif(os.name == "nt", reason="acq does not request the read-only mount on Windows")
+@pytest.mark.parametrize("mount", ["missing", "unknown", "error"])
+def test_start_missing_ro_mount_binds_no_new_secret_and_skips_the_heal(
+    monkeypatch, tmp_path, capsys, children, mount,
+):
     _stopped_box(monkeypatch, tmp_path, capsys, secret=False)
     _require_ro("box")
-    _set(capsys, monkeypatch, "-g", "usai")  # stored while stopped: would be bound after the start
+    _set(capsys, monkeypatch, "-g", "usai")
     events: list = []
     calls = _spy_heal(monkeypatch, events)
     _spy_reconcile(monkeypatch, events)
-    monkeypatch.setattr(security, "probe_mount", lambda name: ("missing", "the host-config mount looks WRITABLE"))
+    def host_probe(*args):
+        if mount == "error":
+            raise msb.MsbError(errors.FAILURE, "inspect failed")
+        return mount, "no confirmed read-only bind"
+
+    monkeypatch.setattr(msb, "ro_mount_recorded", host_probe)
+    monkeypatch.setattr(security, "probe_mount", lambda name: pytest.fail("guest probe before boot"))
+    children.clear()
+    rc, doc, _out, _err = _acq(capsys, "start", "box", "--json")
+    assert rc == 1 and doc["error"]["code"] == errors.SECURITY_EXCEPTION
+    assert calls == [] and events == []
+    assert _calls(children, "modify") == [] and _calls(children, "start") == []
+    assert "USAI_API_KEY" not in msb.held_read("box").bindings
+    assert "USAI_API_KEY" not in _stub_records(tmp_path).get("box", {})
+
+
+@pytest.mark.skipif(os.name == "nt", reason="acq does not request the read-only mount on Windows")
+@pytest.mark.parametrize("probe", [2, 1])
+def test_start_contradictory_guest_ro_probe_skips_the_heal(monkeypatch, tmp_path, capsys, children, probe):
+    _stopped_box(monkeypatch, tmp_path, capsys, secret=False)
+    _require_ro("box")
+    _set(capsys, monkeypatch, "-g", "usai")  # stored while stopped: bound before start
+    events: list = []
+    calls = _spy_heal(monkeypatch, events)
+    _spy_reconcile(monkeypatch, events)
+    monkeypatch.setattr(msb, "ro_mount_guest_probe", lambda *args: probe)
     children.clear()
     rc, doc, _out, _err = _acq(capsys, "start", "box", "--json")
     assert rc == 1 and doc["error"]["code"] == errors.SECURITY_EXCEPTION
     assert "is running" in doc["error"]["message"]
-    assert calls == [] and events == []
-    assert _calls(children, "modify") == []
+    assert calls == [] and events == ["reconcile"]
+    assert _verbs(children).index("modify") < _verbs(children).index("start")
+    added, removed = _calls(children, "modify")
+    assert added[0][-2:] == ["--secret", "USAI_API_KEY@api.gsa.usai.gov"]
+    assert removed[0][-2:] == ["--secret-rm", "USAI_API_KEY"]
+    assert _verbs(children).index("start") < max(i for i, verb in enumerate(_verbs(children)) if verb == "modify")
     assert "USAI_API_KEY" not in msb.held_read("box").bindings
+    assert "USAI_API_KEY" not in _stub_records(tmp_path)["box"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="acq does not request the read-only mount on Windows")
+def test_start_contradictory_guest_ro_probe_keeps_an_existing_rotation(monkeypatch, tmp_path, capsys, children):
+    _stopped_box(monkeypatch, tmp_path, capsys)
+    _require_ro("box")
+    _set(capsys, monkeypatch, "-g", "usai", value=OWN)
+    # Mix an existing binding's rotation with an addition to prove rollback is selective.
+    _set(capsys, monkeypatch, "-g", "github", value=VALUE)
+    monkeypatch.setattr(msb, "ro_mount_guest_probe", lambda *args: 2)
+    calls = _spy_heal(monkeypatch, [])
+    children.clear()
+    rc, doc, out, err = _acq(capsys, "start", "box", "--json")
+    assert rc == 1 and doc["error"]["code"] == errors.SECURITY_EXCEPTION
+    assert calls == []
+    assert _calls(children, "start")[0][1]["USAI_API_KEY"] == OWN
+    removes = [argv[-1] for argv, _env in _calls(children, "modify") if "--secret-rm" in argv]
+    assert removes == ["GITHUB_TOKEN"]
+    assert set(msb.held_read("box").bindings) == {"USAI_API_KEY"}
+    assert set(_stub_records(tmp_path)["box"]) == {"USAI_API_KEY"}
+    _assert_value_absent(OWN, children, out, err)
 
 
 def test_start_without_the_ro_requirement_does_not_probe(monkeypatch, tmp_path, capsys):
@@ -351,6 +420,20 @@ def test_start_without_the_ro_requirement_does_not_probe(monkeypatch, tmp_path, 
                        ro_host_config=None)
     monkeypatch.setattr(security, "probe_mount", lambda name: pytest.fail("probed without the requirement"))
     assert _acq(capsys, "start", "box")[0] == 0
+
+
+def test_windows_start_binds_before_boot_without_a_ro_mount(monkeypatch, tmp_path, capsys, children):
+    monkeypatch.setattr(security, "WINDOWS", True)
+    _stopped_box(monkeypatch, tmp_path, capsys, secret=False)
+    assert not security.requires_ro_mount(state.record_read("msb", "box"))
+    _set(capsys, monkeypatch, "-g", "usai")
+    monkeypatch.setattr(msb, "ro_mount_recorded", lambda *args: pytest.fail("host mount probe on Windows"))
+    monkeypatch.setattr(security, "probe_mount", lambda name: pytest.fail("guest mount probe on Windows"))
+    children.clear()
+    rc, doc, _out, err = _acq(capsys, "start", "box", "--json")
+    assert rc == 0, (doc, err)
+    assert _verbs(children).index("modify") < _verbs(children).index("start")
+    assert "USAI_API_KEY" in msb.held_read("box").bindings
 
 
 # ---------------------------------------------------------------------------
@@ -405,9 +488,8 @@ def _store_lock_mode() -> str:
 
 
 @pytest.mark.parametrize("verb", ["start", "restart"])
-def test_binding_after_the_start_reads_the_store_under_its_lock(monkeypatch, tmp_path, capsys, verb):
-    # reconcile_bindings reads stored values and binds them into the running
-    # guest; a global secret change must not slip between the two.
+def test_binding_before_the_start_reads_the_store_under_its_lock(monkeypatch, tmp_path, capsys, verb):
+    # reconcile_bindings reads stored values and binds them while stopped; a global secret change must not slip between the two.
     _stopped_box(monkeypatch, tmp_path, capsys, secret=False)
     _set(capsys, monkeypatch, "-g", "usai")  # stored while stopped: bound by the reconcile
     modes: list[str] = []
@@ -645,3 +727,58 @@ def test_selection_for_folds_config_extras_into_a_new_sandbox_only(monkeypatch, 
     monkeypatch.setenv("ACQ_EXTRA_KITS", "/live/kit")
     assert extras(kit_msb.selection_for("shell", [], image_is_default=False, extras=[])) == []
     assert extras(kit_msb.selection_for("shell", [], image_is_default=False, extras=["/rec/kit"])) == ["/rec/kit"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="acq does not request the read-only mount on Windows")
+def test_start_missing_host_ro_record_binds_no_new_secret(monkeypatch, tmp_path, capsys, children):
+    _stopped_box(monkeypatch, tmp_path, capsys, secret=False)
+    _require_ro("box")
+    _set(capsys, monkeypatch, "-g", "usai")
+    monkeypatch.setenv("ACQ_MSB_STUB_INSPECT_RAW", '{"active_config": {"mounts": []}}')
+    children.clear()
+    rc, doc, _out, _err = _acq(capsys, "start", "box", "--json")
+    assert rc == 1 and doc["error"]["code"] == errors.SECURITY_EXCEPTION
+    assert "ADR-0035" in doc["error"]["message"]
+    assert "acq create --recreate box --yes" in doc["error"]["remediation"]
+    assert _calls(children, "modify") == [] and _calls(children, "start") == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="acq does not request the read-only mount on Windows")
+def test_start_old_msb_version_binds_no_new_secret_on_ro_sandbox(monkeypatch, tmp_path, capsys, children):
+    _stopped_box(monkeypatch, tmp_path, capsys, secret=False)
+    _require_ro("box")
+    _set(capsys, monkeypatch, "-g", "usai")
+    monkeypatch.setenv("ACQ_MSB_VERSION", "0.7.6")
+    children.clear()
+    rc, doc, _out, _err = _acq(capsys, "start", "box", "--json")
+    assert rc == 1 and doc["error"]["code"] == errors.SECURITY_EXCEPTION
+    assert "upgrade msb" in doc["error"]["remediation"]
+    assert _calls(children, "modify") == [] and _calls(children, "start") == []
+    assert "USAI_API_KEY" not in msb.held_read("box").bindings
+
+
+def test_start_failure_rolls_back_bindings_added_before_boot(monkeypatch, tmp_path, capsys, children):
+    _stopped_box(monkeypatch, tmp_path, capsys, secret=False)
+    _set(capsys, monkeypatch, "-g", "usai")
+    monkeypatch.setenv("ACQ_MSB_STUB_FAIL", "start")
+    children.clear()
+    rc, doc, _out, _err = _acq(capsys, "start", "box", "--json")
+    assert rc == 1 and doc["error"]["code"] == errors.FAILURE
+    removes = [argv[-1] for argv, _env in _calls(children, "modify") if "--secret-rm" in argv]
+    assert removes == ["USAI_API_KEY"]
+    assert "USAI_API_KEY" not in msb.held_read("box").bindings
+    assert "USAI_API_KEY" not in _stub_records(tmp_path).get("box", {})
+
+
+def test_start_not_exec_ready_rolls_back_bindings_added_before_boot(monkeypatch, tmp_path, capsys, children):
+    _stopped_box(monkeypatch, tmp_path, capsys, secret=False)
+    _set(capsys, monkeypatch, "-g", "usai")
+    monkeypatch.setenv("ACQ_MSB_READY_TIMEOUT", "0")
+    monkeypatch.setattr(msb, "exec_ready", lambda name: False)
+    children.clear()
+    rc, doc, _out, _err = _acq(capsys, "start", "box", "--json")
+    assert rc == 1 and doc["error"]["code"] == errors.TIMEOUT
+    removes = [argv[-1] for argv, _env in _calls(children, "modify") if "--secret-rm" in argv]
+    assert removes == ["USAI_API_KEY"]
+    assert "USAI_API_KEY" not in msb.held_read("box").bindings
+    assert "USAI_API_KEY" not in _stub_records(tmp_path).get("box", {})

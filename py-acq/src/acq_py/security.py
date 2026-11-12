@@ -100,17 +100,22 @@ def ro_mount_supported() -> bool:
     return ro_mount_version_problem() is None
 
 
+def probe_host_mount(name: str) -> tuple[str, str]:
+    """The host-side read-only-mount check for an msb sandbox: ``(state, reason)``."""
+    problem = ro_mount_version_problem()
+    if problem is not None:
+        return "unknown", problem
+    hcfg = host_config_dir(name)
+    return msb.ro_mount_recorded(name, HOST_CONFIG_GUEST_DIR, [str(hcfg), os.path.realpath(hcfg)])
+
+
 def probe_mount(name: str) -> tuple[str, str]:
     """The real read-only-mount check for an msb sandbox: ``(state, reason)``.
 
     ``state`` is ``ok`` (reason ``""``), ``missing`` (msb's record or the guest
     contradicts the guarantee) or ``unknown`` (it could not be confirmed).
     """
-    problem = ro_mount_version_problem()
-    if problem is not None:
-        return "unknown", problem
-    hcfg = host_config_dir(name)
-    state, reason = msb.ro_mount_recorded(name, HOST_CONFIG_GUEST_DIR, [str(hcfg), os.path.realpath(hcfg)])
+    state, reason = probe_host_mount(name)
     if state != "ok":
         return state, reason
     probe = msb.ro_mount_guest_probe(name, HOST_CONFIG_GUEST_DIR)
@@ -134,7 +139,7 @@ def _seam_state(backend: str, name: str) -> str | None:
     return state if state in _STATES else "unknown"
 
 
-def mount_check(backend: str, name: str) -> tuple[str, str]:
+def mount_check(backend: str, name: str, *, guest_running: bool = True) -> tuple[str, str]:
     """``(state, reason)`` for the sandbox's read-only mount; only ``ok`` is trusted."""
     seam = _seam_state(backend, name)
     if seam is not None:
@@ -142,7 +147,7 @@ def mount_check(backend: str, name: str) -> tuple[str, str]:
     if backend != "msb":
         return "unknown", "the read-only trusted-config mount is an msb-only guarantee"
     try:
-        return probe_mount(name)
+        return probe_mount(name) if guest_running else probe_host_mount(name)
     except msb.MsbError as exc:
         return "unknown", exc.message
 
@@ -157,7 +162,7 @@ def requires_ro_mount(record: dict | None) -> bool:
     return bool(record and record.get("ro_host_config"))
 
 
-def assert_trusted(record: dict | None, backend: str, name: str) -> None:
+def assert_trusted(record: dict | None, backend: str, name: str, *, guest_running: bool = True) -> None:
     """Fail closed when a record-required read-only mount is not confirmed.
 
     A sandbox that never recorded the requirement takes the legacy path (no gate);
@@ -167,7 +172,7 @@ def assert_trusted(record: dict | None, backend: str, name: str) -> None:
     """
     if not requires_ro_mount(record):
         return
-    state, reason = mount_check(backend, name)
+    state, reason = mount_check(backend, name, guest_running=guest_running)
     if state == "ok":
         return
     detail = f": {reason}" if reason else ""

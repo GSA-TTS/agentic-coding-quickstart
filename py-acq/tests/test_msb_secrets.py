@@ -387,11 +387,11 @@ def test_unrecorded_sandbox_holding_it_is_swept(monkeypatch, tmp_path, capsys, c
 
 
 def test_unrecorded_sandbox_that_cannot_be_confirmed_blocks_rm(monkeypatch, tmp_path, capsys):
-    # msb refuses to remove a variable the sandbox does not hold, which acq cannot
-    # tell apart from a real failure, so it keeps the secret and says why.
+    # A real remove failure keeps the store entry available for retry.
     _env(monkeypatch, tmp_path, catalog={"legacy": "running", "other": "stopped"})
     secretstore.store(secretstore.key_for("usai"), VALUE)
     _stub_bind(tmp_path, "legacy", "USAI_API_KEY", "api.gsa.usai.gov")
+    monkeypatch.setenv("ACQ_MSB_STUB_FAIL_RM", "other")
     rc, doc, out, err = _invoke(capsys, "--backend", "msb", "secret", "rm", "-g", "usai", "--json")
     assert rc == 1 and doc["error"]["code"] == "unbind_failed"
     assert "acq has no binding record for: other" in doc["error"]["message"]
@@ -436,10 +436,11 @@ def test_global_rm_reassert_failure_is_unconfirmed(monkeypatch, tmp_path, capsys
     assert secretstore.resolve("usai") == VALUE
 
 
-def test_global_rm_own_value_never_bound_is_unconfirmed(monkeypatch, tmp_path, capsys):
+def test_global_rm_own_value_add_failure_is_unconfirmed(monkeypatch, tmp_path, capsys):
     _env(monkeypatch, tmp_path, catalog={"legacy": "running"})
     secretstore.store(secretstore.key_for("usai"), VALUE)
     secretstore.store(secretstore.key_for("usai", "legacy"), SCOPED)
+    monkeypatch.setenv("ACQ_MSB_STUB_REQUIRE_RESTART", "1")
     rc, doc, _out, _err = _invoke(capsys, "--backend", "msb", "secret", "rm", "-g", "usai", "--json")
     assert rc == 1 and doc["error"]["code"] == "unbind_failed"
 
@@ -453,6 +454,7 @@ def test_accept_unconfirmed_accepts_only_the_named_sandboxes(monkeypatch, tmp_pa
     _env(monkeypatch, tmp_path, catalog={"legacy": "running", "other": "stopped", "third": "running"})
     secretstore.store(secretstore.key_for("usai"), VALUE)
     _stub_bind(tmp_path, "legacy", "USAI_API_KEY", "api.gsa.usai.gov")
+    monkeypatch.setenv("ACQ_MSB_STUB_FAIL_RM", "other,third")
     rc, doc, _out, _err = _rm_json(capsys, "-g", "usai", "--accept-unconfirmed", "other")
     assert rc == 1 and "binding record for: third" in doc["error"]["message"]
     assert secretstore.resolve("usai") == VALUE
@@ -703,6 +705,7 @@ def test_provider_rm_accept_unconfirmed(monkeypatch, tmp_path, capsys):
     _env(monkeypatch, tmp_path, catalog={"other": "stopped"})
     provider_creds.set_binding("acme", "ACME_KEY", ["models.acme.gov"])
     secretstore.store(secretstore.key_for("acme"), VALUE)
+    monkeypatch.setenv("ACQ_MSB_STUB_FAIL_RM", "other")
     rc, doc, _out, _err = _invoke(capsys, "--backend", "msb", "provider-credential", "rm", "acme", "--json")
     assert rc == 1 and doc["error"]["code"] == "unbind_failed"
     assert "acq provider-credential rm acme --accept-unconfirmed NAME" in doc["error"]["remediation"]
@@ -1029,9 +1032,34 @@ def test_stub_refuses_a_value_on_argv(monkeypatch, tmp_path, capsys):
     assert _stub_records(tmp_path) == {"x": {"TOK": {"host": "h.example", "env_present": True}}}
     assert _stub(monkeypatch, tmp_path, "modify", "x", "--secret", "TOK@h.example") == 0  # rotate
     assert _stub(monkeypatch, tmp_path, "modify", "x", "--secret", "TOK@other.example") == 1  # no replace
-    assert _stub(monkeypatch, tmp_path, "modify", "x", "--secret-rm", "NOPE") == 1
+    assert _stub(monkeypatch, tmp_path, "modify", "x", "--secret-rm", "NOPE") == 0
     assert _stub(monkeypatch, tmp_path, "modify", "x", "--secret-rm", "TOK") == 0
     assert _stub(monkeypatch, tmp_path, "modify", "nobox", "--secret-rm", "TOK") == 1
     assert _stub(monkeypatch, tmp_path, "remove", "x") == 0
     assert _stub_records(tmp_path) == {}
     assert VALUE not in Path(tmp_path / "msb-home").joinpath(".microsandbox", "secrets.json").read_text()
+
+
+def test_new_running_binding_reports_restart_and_rotation_stays_live(monkeypatch, tmp_path, capsys, children):
+    _running(tmp_path, monkeypatch, "a")
+    monkeypatch.setenv("ACQ_MSB_STUB_REQUIRE_RESTART", "1")
+    rc, doc, out, err = _invoke(capsys, "--backend", "msb", "secret", "set", "-g", "usai", "--json",
+                                stdin=VALUE, monkeypatch=monkeypatch)
+    assert rc == 1
+    assert "acq stop NAME && acq start NAME" in doc["error"]["remediation"]
+    assert "start will bind" in doc["error"]["remediation"]
+    assert "re-run the command" not in doc["error"]["remediation"]
+    _stub_bind(tmp_path, "a", "USAI_API_KEY", "api.gsa.usai.gov")
+    _set(capsys, monkeypatch, "-g", "usai", value=SCOPED)
+    _set(capsys, monkeypatch, "a", "usai", value=VALUE)
+    rc, _doc, _out, err = _invoke(capsys, "--backend", "msb", "secret", "rm", "a", "usai")
+    assert rc == 0
+    assert "acq stop a && acq start a" in err and "start will bind the stored global value" in err
+    _assert_value_absent(VALUE, children, out, err)
+
+
+@pytest.mark.parametrize("status", ["running", "stopped"])
+def test_absent_binding_remove_succeeds(monkeypatch, tmp_path, capsys, status):
+    _env(monkeypatch, tmp_path, catalog={"legacy": status})
+    secretstore.store(secretstore.key_for("usai"), VALUE)
+    assert _rm_json(capsys, "-g", "usai")[0] == 0

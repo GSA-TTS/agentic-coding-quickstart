@@ -7136,11 +7136,11 @@ _acq_msb_refeed_eligible() {
 }
 
 # _acq_msb_refeed_one SANDBOX ENV HOST [OLD_ENV OLD_HOST] — bind ENV@HOST in one
-# running sandbox (the value is already exported under ENV by the caller). A
-# binding is never left behind under a stale name: when the service's previous
-# binding differs (its env var was renamed, or its host changed), the old name
-# is removed first with its own `--secret-rm`, so the old variable stops
-# receiving the credential.
+# sandbox (the value is already exported under ENV by the caller). A binding is
+# never left behind under a stale name: when the service's previous binding
+# differs (its env var was renamed, or its host changed), the old name is
+# removed first with its own `--secret-rm`, so the old variable stops receiving
+# the credential.
 _acq_msb_refeed_one() {
   local sb="$1" _env="$2" _host="$3" _old_env="${4:-}" _old_host="${5:-}"
   if [ -n "$_old_env" ] && { [ "$_old_env" != "$_env" ] || [ "$_old_host" != "$_host" ]; }; then
@@ -7148,17 +7148,23 @@ _acq_msb_refeed_one() {
       echo "acq(msb): warning: could not unbind the previous binding $_old_env from sandbox '$sb'." >&2
     fi
   fi
-  _acq_msb_cli modify "$sb" --secret "${_env}@${_host}" </dev/null >/dev/null 2>&1
+  if _acq_msb_cli modify "$sb" --secret "${_env}@${_host}" </dev/null >/dev/null 2>&1; then
+    return 0
+  fi
+  # msb binds a secret on a stopped sandbox and replaces a bound one live, but
+  # cannot add a new one to a running VM; the stored value is kept either way.
+  echo "acq(msb): could not apply the credential to sandbox '$sb'. If it is running, msb cannot add a new secret to a running sandbox: run 'acq stop $sb', then re-run this 'acq secret set' (or start it with ACQ_IMPL=python, whose start binds stored credentials before boot)." >&2
+  return 1
 }
 
-# _acq_msb_secret_refeed SERVICE SCOPE ENV HOST [OLD_ENV OLD_HOST] — live
-# add/rotate: re-feed a newly-set/rotated secret to running sandboxes via
-# `msb modify --secret ENV@HOST` (the guest keeps its placeholder; only the
-# injected value changes) so it takes effect without recreate. A named SCOPE
-# targets that sandbox; empty SCOPE sweeps all running sandboxes, except those
-# _acq_msb_refeed_eligible leaves alone. OLD_ENV/OLD_HOST name the service's
-# binding before this change, unbound first when it differs. Echoes the count of
-# sandboxes re-fed.
+# _acq_msb_secret_refeed SERVICE SCOPE ENV HOST [OLD_ENV OLD_HOST] — bind or
+# rotate a secret across sandboxes via `msb modify --secret ENV@HOST` (stopped
+# sandboxes accept new bindings; running ones rotate existing bindings live,
+# while adding a new binding to a running sandbox requires a stop first). A
+# named SCOPE targets that sandbox; empty SCOPE sweeps all sandboxes, except
+# those _acq_msb_refeed_eligible leaves alone. OLD_ENV/OLD_HOST name the
+# service's binding before this change, unbound first when it differs. Echoes
+# the count of sandboxes re-fed.
 #
 # SECRET NEVER ON ARGV: the value is placed in the environment via a dynamic
 # `export "$ENV=$val"` (an env ENTRY, invisible to `ps`/`/proc/<pid>/cmdline`),
@@ -7227,14 +7233,14 @@ _acq_msb_secret_set_guidance() {
     usai|github)
       echo "acq: stored '$service' in the acq secret store." >&2
       if [ "$applied" -gt 0 ]; then
-        echo "      Applied to $applied running sandbox(es); no recreate needed." >&2
+        echo "      Applied to $applied sandbox(es); no recreate needed." >&2
       fi
       ;;
     *)
       if [ -n "$_env" ] && [ -n "$_host" ]; then
         echo "acq: stored '$service' in the acq secret store (bound as ${_env}@${_host})." >&2
         if [ "$applied" -gt 0 ]; then
-          echo "      Applied to $applied running sandbox(es); no recreate needed." >&2
+          echo "      Applied to $applied sandbox(es); no recreate needed." >&2
         fi
       else
         echo "acq: stored '$service' in the acq secret store, but it has no endpoint" >&2
@@ -7280,9 +7286,8 @@ acq_backend_secret_set() {
   # host/env (when supplied) are persisted as a non-secret endpoint sidecar.
   acq_secret_set_interactive "$service" "$scope_name" "$host" "$env_var" || return 1
 
-  # Live add/rotate: re-feed running sandboxes so a newly-set or rotated secret
-  # takes effect without recreate. Driven off the single binding table so EVERY
-  # bound service (usai, github, ...) rotates in place — not just usai.
+  # Live rotation: new bindings require a restart; report failures per sandbox.
+  # Driven off the single binding table so every bound service (usai, github, ...) rotates in place — not just usai.
   local _env _host _binding applied
   _binding=$(_acq_msb_service_binding "$service" "$scope_name")
   _env=$(printf '%s' "$_binding" | cut -f1)
@@ -7335,7 +7340,7 @@ EOF
   fi
   applied=$(_acq_msb_secret_refeed "$service" "$scope_name" "$_env" "$_host")
   if [ "$applied" -gt 0 ]; then
-    echo "acq(msb): applied '$service' to $applied running sandbox(es)." >&2
+    echo "acq(msb): applied '$service' to $applied sandbox(es)." >&2
   elif [ "$eligible" -gt 0 ]; then
     echo "acq(msb): failed to apply '$service' to existing sandbox(es)." >&2
     return 1
@@ -7486,7 +7491,7 @@ acq_backend_secret_rm() {
     echo "acq(msb): no '$service' secret found in the acq store (${where})." >&2
   fi
   if [ "$unbound" -gt 0 ]; then
-    echo "      Live-unbound it from $unbound running sandbox(es) (msb modify --secret-rm)." >&2
+    echo "      Confirmed it unbound from $unbound sandbox(es) (msb modify --secret-rm)." >&2
   fi
   return 0
 }

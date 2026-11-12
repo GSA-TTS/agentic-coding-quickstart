@@ -1497,7 +1497,7 @@ def secret_bindings(name: str) -> tuple[list[BoundSecret], dict[str, str]]:
 # needs every ENV in its own environment: msb keeps no value across a stop. The
 # values come from the acq store, as at create, and travel only in the child's
 # environment mapping. `secret set` re-feeds running sandboxes only, so once the
-# sandbox runs again :func:`reconcile_bindings` binds what changed meanwhile.
+# sandbox starts again :func:`reconcile_bindings` binds what changed meanwhile.
 
 
 def _start_secret_missing(name: str, env: str, service: str) -> MsbError:
@@ -1544,29 +1544,42 @@ def _start_env(name: str) -> dict[str, str]:
 def start(name: str) -> None:
     """``msb start NAME`` with the sandbox's bound secrets in the child's environment only.
 
-    Raises :class:`MsbError` when a bound secret has no value or msb fails. The
-    caller then waits for exec-readiness and calls :func:`reconcile_bindings`.
+    Raises :class:`MsbError` when a bound secret has no value or msb fails.
+    Missing bindings are applied while stopped: msb cannot add them while running.
     """
-    secret_env = _start_env(name)
+    # Validate existing endpoints before reconciliation can replace them. An
+    # exported key is reusable only for the identical recorded binding.
+    _start_env(name).clear()
+    previous = set(held_flags(name))
     try:
-        proc = _run(["start", name], secret_env=secret_env)
-    finally:
-        secret_env.clear()
-    if proc.returncode != 0:
-        raise MsbError(
-            errors.FAILURE,
-            f"msb start failed for sandbox '{name}'",
-            "check msb logs and retry",
-        )
+        # msb can rotate a running binding, but adding one requires a stopped guest.
+        failed = reconcile_bindings(name)
+        if failed:
+            raise MsbError(errors.FAILURE, f"could not bind credentials before starting '{name}': {', '.join(failed)}",
+                           "check msb logs, then retry the start")
+        secret_env = _start_env(name)
+        try:
+            proc = _run(["start", name], secret_env=secret_env)
+        finally:
+            secret_env.clear()
+        if proc.returncode != 0:
+            raise MsbError(
+                errors.FAILURE,
+                f"msb start failed for sandbox '{name}'",
+                "check msb logs and retry",
+            )
+    except BaseException:
+        rollback_start_bindings(name, previous)
+        raise
 
 
 def reconcile_bindings(name: str) -> list[str]:
-    """Bind, in the running sandbox ``name``, what the store gained while it was stopped.
+    """Bind, before starting sandbox ``name``, what the store gained while it was stopped.
 
     Each binding a new sandbox would get (:func:`secret_bindings`) that the
     record does not show is added with ``msb modify`` (:func:`_put`, which first
     removes a binding it replaces). One whose only change is its scope is just
-    recorded: ``msb start`` already received the value that takes precedence.
+    recorded: ``msb start`` receives the value that takes precedence.
     Nothing is unbound here; that is ``secret rm``'s job. Returns the services
     that could not be bound.
     """
@@ -1592,6 +1605,26 @@ def reconcile_bindings(name: str) -> list[str]:
 def held_flags(name: str) -> list[str]:
     """The ``ENV@HOST`` bindings the record shows for ``name`` (no values)."""
     return sorted(f"{env}@{entry['host']}" for env, entry in held_read(name).bindings.items())
+
+
+def rollback_start_bindings(name: str, previous: set[str]) -> list[str]:
+    """Remove bindings added by this start when its guest mount check refuses trust.
+
+    Compare endpoints, not values: a rotation of an existing binding grants no
+    new access and must remain bound. Keep failed removals recorded for retry.
+    """
+    rec = held_read(name)
+    failed: list[str] = []
+    for env, entry in list(rec.bindings.items()):
+        if f"{env}@{entry['host']}" in previous:
+            continue
+        try:
+            removed = _drop(rec, env)
+        except MsbError:
+            removed = False
+        if not removed:
+            failed.append(env)
+    return failed
 
 
 # --- secret set ----------------------------------------------------------------
@@ -1740,7 +1773,7 @@ def _selection_withholds(service: str, sandbox: str) -> bool:
 
 def _refeed(service: str, scope: Scope) -> None:
     """Push ``service``'s current value to the running sandboxes ``scope``
-    reaches, so a new or changed secret applies without a recreate.
+    reaches. Existing bindings rotate live; a new binding needs a restart.
 
     A sandbox with its own value is left alone on a global change, as is one
     whose recorded provider selection leaves the provider out and that holds
@@ -1786,7 +1819,8 @@ def _refeed(service: str, scope: Scope) -> None:
         raise MsbError(
             errors.FAILURE,
             f"could not apply '{service}' to running sandbox(es): {', '.join(failed)}",
-            "re-run the command, or recreate those sandboxes to bind the stored value",
+            "check msb logs for failures; a new credential requires a restart: "
+            "run 'acq stop NAME && acq start NAME'; start will bind the stored credential",
         )
 
 
@@ -1808,8 +1842,8 @@ def _sweep_unknown(rec: HeldRecord, scope: Scope, service: str) -> bool:
 
     Returns True when the sandbox is confirmed not to hold the removed value:
     the variable is recorded for another service, or ``msb modify --secret-rm``
-    succeeded. A failed remove cannot be told apart from "it was never bound",
-    so it is not a confirmation.
+    succeeded. msb returns success even if the variable was never bound; a
+    non-zero exit is a real failure and is not a confirmation.
 
     On a global removal a sandbox with its own value is not assumed to hold it:
     a global set by the Bash ``acq`` overwrites a sandbox's own binding, so the
@@ -1848,7 +1882,8 @@ def _rebind_global(rec: HeldRecord, service: str) -> None:
         if not _put(rec, BoundSecret(service, fallback, False), value):
             print(
                 f"acq: warning: removed '{service}' from sandbox '{rec.name}', but could not bind the "
-                f"global value there; run 'acq secret set -g {service}' or recreate the sandbox",
+                f"global value there; a new credential requires a restart: run 'acq stop {rec.name} && "
+                f"acq start {rec.name}'; start will bind the stored global value",
                 file=sys.stderr,
             )
 
@@ -1892,9 +1927,9 @@ def secret_unbind(scope: Scope | str, service: str, *, accept_unconfirmed: list[
     them, and the caller keeps the store entry so the removal can be retried.
 
     ``accept_unconfirmed`` names unknown sandboxes the user accepts leaving
-    unconfirmed (an explicit override until msb's handling of removing an unbound
-    variable is checked live). Only those are accepted, with a stderr note;
-    they are returned. A recorded binding that fails is never accepted.
+    unconfirmed after a real remove failure or an unresolved endpoint mapping.
+    Removing an absent variable succeeds in msb. Only those are accepted, with
+    a stderr note; they are returned. A recorded binding that fails is never accepted.
     """
     sc = secretstore.as_scope(scope)
     if service_binding(service, sc.sandbox) is None:

@@ -2312,7 +2312,7 @@ def _start_record(command: str, name: str, emit_json: bool) -> tuple[dict | None
         return None, common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
 
 
-def _resume(command: str, name: str) -> bool:
+def _resume(command: str, name: str, record: dict | None = None) -> bool:
     """Stop first for ``restart``, then ``msb start`` unless it already runs; True if it was running.
 
     A failed stop is a warning and the start is still attempted (Bash parity);
@@ -2330,6 +2330,11 @@ def _resume(command: str, name: str) -> bool:
         raise msb.MsbError(errors.FAILURE, "could not list running sandboxes", "check that msb works ('msb list'), then retry")
     if name in running:
         return True
+    # A stopped guest cannot answer the write probe. Check the host-enforced
+    # mount record before adding credentials; the guest probe still gates healing.
+    if record is None:
+        record = state.record_read("msb", name)
+    security.assert_trusted(record, "msb", name, guest_running=False)
     # msb start binds what it reads from the store, like a create does.
     with _store_reading(msb.MsbError, "nothing was started"):
         msb.start(name)
@@ -2358,25 +2363,31 @@ def _store_reading(error_cls, unchanged: str) -> Iterator[None]:
 def _start_locked(command: str, name: str, emit_json: bool) -> int:
     """Resume, wait for exec-readiness, check the read-only mount, rebind secrets, heal the kits.
 
-    The mount is checked before any secret is bound, so a sandbox missing its
-    read-only trusted config never receives a newly added credential. Once the
-    sandbox runs, every failure says so: it is not stopped again, and a heal
-    that did not complete is never reported as success (ADR-0038m).
+    Missing credentials are bound while stopped, after the host mount check.
+    A contradictory guest probe removes newly added bindings before refusing
+    the heal. Once the sandbox runs, every failure says so: it is not stopped
+    again, and an incomplete heal is never reported as success (ADR-0038m).
     """
     record, exit_code = _start_record(command, name, emit_json)
     if exit_code is not None:
         return exit_code
     try:
-        was_running = _resume(command, name)
-    except common._ADAPTER_ERRORS as exc:
+        previous_bindings = set(msb.held_flags(name))
+        was_running = _resume(command, name, record)
+    except (*common._ADAPTER_ERRORS, security.SecurityException) as exc:
         return common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
     if not _wait_exec_ready("msb", name):
+        # Revoke any bindings this start added before boot: the guest probe never
+        # ran, and a later retry finds the sandbox already running.
+        failed = msb.rollback_start_bindings(name, previous_bindings) if not was_running else []
+        detail = f"; could not remove newly added bindings: {', '.join(failed)}" if failed else ""
         return common._operational_failure(
             command, errors.TIMEOUT,
-            f"sandbox '{name}' was started but did not become exec-ready, so its secrets and kits were not re-applied",
+            f"sandbox '{name}' was started but did not become exec-ready, so its secrets and kits were not re-applied{detail}",
             f"check msb logs, then retry 'acq {command} {name}'", emit_json,
         )
-    gate = _start_trusted_gate(command, name, record, emit_json)
+    gate = _start_trusted_gate(command, name, record, emit_json,
+                              previous_bindings if not was_running else None)
     if gate is not None:
         return gate
     if not was_running:
@@ -2384,7 +2395,7 @@ def _start_locked(command: str, name: str, emit_json: bool) -> int:
         ssh_agent.start_bridge(name)
     try:
         with _store_reading(msb.MsbError, "nothing new was bound"):
-            unbound = msb.reconcile_bindings(name)
+            unbound = msb.reconcile_bindings(name) if was_running else []
     except common._ADAPTER_ERRORS as exc:
         return common._operational_failure(
             command, exc.code, f"sandbox '{name}' is running, but: {exc.message}", exc.remediation, emit_json,
@@ -2395,13 +2406,19 @@ def _start_locked(command: str, name: str, emit_json: bool) -> int:
     return _finish_start(command, name, applied, unbound, was_running, emit_json)
 
 
-def _start_trusted_gate(command: str, name: str, record: dict | None, emit_json: bool) -> int | None:
+def _start_trusted_gate(
+    command: str, name: str, record: dict | None, emit_json: bool, previous_bindings: set[str] | None = None,
+) -> int | None:
     """Refuse to rebind or heal a running sandbox whose recorded read-only mount is not confirmed (ADR-0035)."""
     try:
         security.assert_trusted(record, "msb", name)
     except security.SecurityException as exc:
+        # The host record permits binding before boot, but a guest contradiction
+        # must revoke that start's additions. Existing bindings may still rotate.
+        failed = msb.rollback_start_bindings(name, previous_bindings) if previous_bindings is not None else []
+        detail = f"; could not remove newly added bindings: {', '.join(failed)}" if failed else ""
         return common._operational_failure(
-            command, exc.code, f"{exc.message}; the sandbox is running, but its secrets and kits were not re-applied",
+            command, exc.code, f"{exc.message}; the sandbox is running, but its kits were not re-applied{detail}",
             exc.remediation, emit_json,
         )
     return None
@@ -2416,7 +2433,8 @@ def _finish_start(
         return common._operational_failure(
             command, errors.FAILURE,
             f"sandbox '{name}' is running and its kits were re-applied, but {', '.join(unbound)} could not be bound in it",
-            f"retry 'acq {command} {name}', or recreate the sandbox to bind the stored values", emit_json,
+            f"a new credential requires a restart: run 'acq stop {name} && acq start {name}'; "
+            "start will bind the stored values", emit_json,
         )
     if command == "restart" and was_running:
         return common._operational_failure(
