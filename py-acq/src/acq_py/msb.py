@@ -911,9 +911,16 @@ def _session(
     env: list[str],
     tty: bool,
     json_mode: bool,
+    stream: bool = False,
 ) -> int:
-    """Run ``command`` as ``agent`` in the workspace with ``env``; ``-t`` if ``tty``."""
+    """Run ``command`` as ``agent`` in the workspace with ``env``; ``-t`` if ``tty``.
+
+    ``stream`` adds ``--stream`` (byte-faithful bidirectional stdio without a
+    PTY, which ``acq acp`` needs, ADR-0053m); it never combines with ``tty``.
+    """
     argv = ["exec", "-t"] if tty else ["exec"]
+    if stream:
+        argv.append("--stream")
     argv += ["-u", "agent"]
     workspace = start_directory(name) or workspace
     if workspace:
@@ -974,6 +981,22 @@ def exec_command(
     """
     session = [f"HOME={AGENT_HOME}", *(env or [])]
     return _session(name, command, workspace=workspace, env=session, tty=False, json_mode=json_mode)
+
+
+def stream_command(
+    name: str,
+    command: list[str],
+    *,
+    workspace: str | None = None,
+    env: list[str] | None = None,
+) -> int:
+    """Run ``command`` with bidirectional pipe-clean stdio and no PTY (``msb exec --stream``).
+
+    The ``acq acp`` launch (ADR-0053m): the client's JSON-RPC frames flow over
+    stdin/stdout, so nothing may buffer until EOF or allocate a terminal.
+    """
+    session = [f"HOME={AGENT_HOME}", *(env or [])]
+    return _session(name, command, workspace=workspace, env=session, tty=False, json_mode=False, stream=True)
 
 
 def copy(src: str, dst: str) -> int:

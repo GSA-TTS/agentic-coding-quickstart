@@ -282,9 +282,9 @@ def test_every_known_command_has_a_dispatch_arm_into_a_command_module():
     import inspect
 
     from acq_py import cli
-    from acq_py.commands import common, configure, creds, kit, lifecycle, secret, session
+    from acq_py.commands import acp, common, configure, creds, kit, lifecycle, secret, session
 
-    modules = {"common": common, "configure": configure, "creds": creds, "kit": kit,
+    modules = {"acp": acp, "common": common, "configure": configure, "creds": creds, "kit": kit,
                "lifecycle": lifecycle, "secret": secret, "session": session}
 
     def verbs_of(test):

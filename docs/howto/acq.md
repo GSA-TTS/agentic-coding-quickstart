@@ -3,10 +3,10 @@ title: "acq How-To Guide"
 description: "Detailed how-to for acq, the pluggable-backend wrapper for agentic-coding-quickstart"
 status: canonical
 tier: 2
-last_updated: "2026-10-28"
+last_updated: "2026-11-13"
 audience: "developers"
-keywords: ["acq", "backend", "sbx", "msb", "howto", "sandbox"]
-related_files: ["docs/BACKEND_GUIDE.md", "docs/CONCEPTS.md", "docs/howto/msb.md", "docs/howto/sbx.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md"]
+keywords: ["acq", "backend", "sbx", "msb", "howto", "sandbox", "acp", "zed"]
+related_files: ["docs/BACKEND_GUIDE.md", "docs/CONCEPTS.md", "docs/howto/msb.md", "docs/howto/sbx.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md", "docs/adr/0053m-acq-acp-python-implementation.md"]
 load_priority: "on-demand"
 review_cycle: "quarterly"
 ---
@@ -208,6 +208,53 @@ subcommand above is the direct path — no session restart required.
 
 If a rotated key is still rejected, it was likely truncated on copy — see
 [Known Failure Modes §20](../KNOWN_FAILURE_MODES.md#20-authentication-failed-after-copying-a-new-key).
+
+---
+
+## IDE integration via Agent Client Protocol (`acq acp`)
+
+`acq acp` runs a sandboxed agent's
+[Agent Client Protocol (ACP)](https://agentclientprotocol.com/) server over the
+process's own stdin and stdout, with no terminal, so an editor such as Zed can use
+`acq` as its agent command. It is part of the Python implementation
+([ADR-0053m](../adr/0053m-acq-acp-python-implementation.md)); run it with
+`ACQ_IMPL=python`, or through `acq-python`.
+
+```bash
+acq acp opencode .          # create the sandbox if needed, then stream its ACP server
+acq acp my-sandbox          # re-attach an existing sandbox by name
+acq acp opencode . -- --print-logs      # flags after -- go to the agent's ACP command
+acq acp my-sandbox -- custom-acp --stdio    # any other first word replaces the command
+```
+
+It takes the same create flags as `acq run` (`--name`, `--image`, `--kit`,
+`--clone`, `--publish`, `--no-provider-kits`). Three behaviours differ from
+`acq run`:
+
+- **stdout carries only the protocol.** Everything `acq` prints while it creates
+  or heals the sandbox goes to stderr, and `--json` is refused.
+- **It never prompts.** A missing or rejected provider key fails with the command
+  that fixes it. Store the key once from a terminal before the first launch from
+  an editor: `acq secret set -g usai`.
+- **`shell` is refused** (exit 2), because a shell is not an ACP server.
+
+### Zed (`~/.config/zed/settings.json`)
+
+```jsonc
+{
+  "agent_servers": {
+    "opencode-acq": {
+      "type": "custom",
+      "command": "/path/to/agentic-coding-quickstart/acq",
+      "args": ["acp", "opencode", "."],
+      "env": { "ACQ_IMPL": "python" }
+    }
+  }
+}
+```
+
+OpenCode keeps its session state in the sandbox, so sessions survive an editor
+restart and an `acq stop` / `acq start`.
 
 ---
 

@@ -14,7 +14,8 @@
     "Legacy-suite retirement classification: docs/test-retirement-inventory.md buckets every test/bats file as preserve/re-express/retire and records gaps G1-G22. This manifest maps only the preserve-tier contract rows to vectors; the inventory is the authoritative cross-reference from legacy tests to vectors and DROP rows.",
     "never-appears oracles (vector change): json and contains cannot show that something is missing, so the vectors that feed a value on stdin straight to acq and assert stdout as a json subset now pair that assertion with an absent one for the value (cli/provider-credential-set-json, cli/provider-credential-set-invalid-provider, cli/provider-credential-set-missing-host, cli/provider-credential-sbx-set-version-floor, cli/secret-set-host-needs-env, cli/secret-set-service-dash-refused). Vectors run through drivers/seeded-run.py already fail when the stdin sentinel appears in any output. cli/version-human now pins the whole human output instead of one label.",
     "Python kit fetch (contract change): the Python acq now fetches a kit outside its built-in bundle when the ref is a git+https ref pinned to a full 40-hex commit, verifies the fetched commit and checks the payload, instead of refusing every such kit with unsupported_capability. cli/configure-json-layers now reports python_applies: pinned-only (was bundled-only) on extra_kits and provider_kit. cli/run-extra-kit-unfetchable-refused is unchanged (its refs name local directories, still refused with unsupported_capability); cli/run-extra-kit-unpinned-refused (kit_ref_not_pinned) and cli/run-extra-kit-credential-ref-refused (validation_failed, with the userinfo redacted in the exact message) cover the other refusals. No vector fetches: a successful fetch needs a repository fixture, which py-acq/tests/test_kit_fetch.py provides over file://.",
-    "Both runners now remove SSH_AUTH_SOCK from every vector's environment before the vector's own unset/env apply, so a developer's ssh-agent never reaches a stub sandbox or changes an oracle (it is the forward's opt-in, ADR-0021); a vector that needs it sets it in invoke.env (py-acq/tests/runner-probes/probe/ssh-auth-sock-*)."
+    "Both runners now remove SSH_AUTH_SOCK from every vector's environment before the vector's own unset/env apply, so a developer's ssh-agent never reaches a stub sandbox or changes an oracle (it is the forward's opt-in, ADR-0021); a vector that needs it sets it in invoke.env (py-acq/tests/runner-probes/probe/ssh-auth-sock-*).",
+    "acq acp's streaming launch (invariants 1-3: fd 1 purity, no prompts, --stream / -i with no PTY) is Tier-2 only, in py-acq/tests/test_acp.py: reaching the launch needs a seeded host-authoritative state record, which the vector harness cannot yet seed (see the attach note above), and the contract is about file descriptors rather than the output of a one-shot run. The Tier-1 vectors cover the refusals that need no record."
   ],
   "rows": [
     {
@@ -140,6 +141,18 @@
     {
       "contract": "ADR-0038m §1 attach fails closed (sandbox_not_found) on a missing sandbox",
       "vectors": ["cli/attach-missing"]
+    },
+    {
+      "contract": "ADR-0053m invariant 4: acq acp refuses the shell agent (not an ACP server) with exit 2 and an empty stdout",
+      "vectors": ["cli/acp-shell-refused"]
+    },
+    {
+      "contract": "ADR-0053m acq acp: a token that is neither an agent nor a sandbox is a usage error with an empty stdout",
+      "vectors": ["cli/acp-unknown-target"]
+    },
+    {
+      "contract": "ADR-0053m invariant 1: stdout belongs to the JSON-RPC stream, so acq acp --json is refused with the usage envelope",
+      "vectors": ["cli/acp-json-refused"]
     },
     {
       "contract": "ADR-0038m §4 cp host/guest path types are distinct (direction in/out, never implicit)",

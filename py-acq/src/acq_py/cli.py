@@ -64,14 +64,14 @@ from . import (  # noqa: F401
     state,
     userdirs,
 )
-from .commands import common, configure, creds, kit, lifecycle, secret, session
+from .commands import acp, common, configure, creds, kit, lifecycle, secret, session
 
 # Every subcommand acq owns. An argv token that is not one of these (and is not a
 # flag) is treated as an unknown verb and forwarded verbatim to the active
 # backend (announced passthrough: ordinary-user story 9 in docs/spec/acq-v1.md,
 # and ADR-0038m §1).
 KNOWN_COMMANDS = frozenset(
-    "version doctor help backend configure create run ls stop start restart rm exec attach shell cp ports "
+    "version doctor help backend configure create run acp ls stop start restart rm exec attach shell cp ports "
     "secret kit kit-source provider-credential github-scope usai-rotate-api-key".split()
 )
 
@@ -309,6 +309,20 @@ def build_parser() -> _Parser:
     run_parser.add_argument("--clone", action="store_true", help=_CLONE_HELP)
     run_parser.add_argument("--publish", action="append", nargs="?", metavar="HOST:GUEST", help=_PUBLISH_HELP)
     run_parser.add_argument("--no-update-check", action="store_true", help=_NO_UPDATE_CHECK_HELP)
+
+    acp_parser = sub.add_parser(
+        "acp", help="run an agent's ACP (Agent Client Protocol) server over clean stdio (ADR-0053m)"
+    )
+    acp_parser.add_argument("target", help="AGENT (create or re-attach) or an existing sandbox name")
+    acp_parser.add_argument("path", nargs="?", help="workspace directory to mount (AGENT form)")
+    acp_parser.add_argument("extra_paths", nargs="*", help="additional PATH[:ro] mounts")
+    acp_parser.add_argument("--name", help="explicit sandbox name (AGENT form)")
+    acp_parser.add_argument("--image", help="base image override (AGENT form)")
+    acp_parser.add_argument("--kit", action="append", help=_KIT_HELP)
+    acp_parser.add_argument("--no-provider-kits", action="store_true", help=_NO_PROVIDER_KITS_HELP)
+    acp_parser.add_argument("--clone", action="store_true", help=_CLONE_HELP)
+    acp_parser.add_argument("--publish", action="append", nargs="?", metavar="HOST:GUEST", help=_PUBLISH_HELP)
+    acp_parser.add_argument("--no-update-check", action="store_true", help=_NO_UPDATE_CHECK_HELP)
 
     sub.add_parser("ls", help="list sandboxes")
 
@@ -713,7 +727,7 @@ def _sandbox_name_pre_step(parsed, emit_json: bool) -> int | None:
     be path-safe. Returns the emitted exit code, else ``None`` (proceed).
     """
     cmd = parsed.command
-    if cmd in ("create", "run") and parsed.name is not None:
+    if cmd in ("create", "run", "acp") and parsed.name is not None:
         if cmd == "create" or parsed.target in KNOWN_AGENTS:
             refused = common._new_sandbox_name_failure(cmd, parsed.name, emit_json)
             if refused is not None:
@@ -741,7 +755,7 @@ def _is_mutating(parsed) -> bool:
     trigger migration (ADR-0041m: read-only diagnostics may report ``unknown``).
     """
     cmd = parsed.command
-    if cmd in ("create", "run", "stop", "start", "restart", "rm", "exec", "attach", "shell", "cp", "ports"):
+    if cmd in ("create", "run", "acp", "stop", "start", "restart", "rm", "exec", "attach", "shell", "cp", "ports"):
         return True
     if cmd == "secret":
         return parsed.secret_command in ("set", "rm", "import")
@@ -915,19 +929,19 @@ def _main(argv: list[str] | None) -> int:
     parser = build_parser()
     try:
         agent_args: list[str] = []
-        if args[:1] == ["run"] and "--" in args:
+        if args[:1] in (["run"], ["acp"]) and "--" in args:
             sep = args.index("--")
             agent_args, args = args[sep + 1:], args[:sep]
         parsed, unknown = parser.parse_known_args(args)
         if unknown:
-            if parsed.command in ("run", "create") and all(not a.startswith("-") for a in unknown):
+            if parsed.command in ("run", "create", "acp") and all(not a.startswith("-") for a in unknown):
                 if parsed.path is None and unknown:
                     parsed.path, unknown = unknown[0], unknown[1:]
                 parsed.extra_paths.extend(unknown)
             else:
                 parser.error("unrecognized arguments: " + " ".join(unknown))
         parsed.agent_args = agent_args
-        if parsed.command in ("run", "create") and not parsed.image:
+        if parsed.command in ("run", "create", "acp") and not parsed.image:
             parsed.image = flags.image
     except UsageError as exc:
         return common._usage_failure(None, str(exc), emit_json)
@@ -1049,7 +1063,7 @@ def _dispatch(parser: _Parser, parsed, emit_json: bool, backend_override: str | 
         )
 
     if parsed.command in (
-        "create", "run", "ls", "stop", "start", "restart", "rm", "exec", "attach", "shell", "cp", "ports",
+        "create", "run", "acp", "ls", "stop", "start", "restart", "rm", "exec", "attach", "shell", "cp", "ports",
     ):
         _backend, exit_code = common._resolve_backend_for_lifecycle(backend_override, emit_json, parsed.command)
         if exit_code is not None:
@@ -1059,6 +1073,8 @@ def _dispatch(parser: _Parser, parsed, emit_json: bool, backend_override: str | 
             return lifecycle.run_create(parsed, emit_json, _backend)
         if parsed.command == "run":
             return lifecycle.run_run(parsed, emit_json, _backend)
+        if parsed.command == "acp":
+            return acp.run_acp(parsed, emit_json, _backend)
         if parsed.command == "ls":
             return lifecycle.run_ls(emit_json, _backend)
         if parsed.command == "stop":

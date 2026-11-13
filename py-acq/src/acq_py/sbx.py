@@ -432,9 +432,14 @@ AGENT_HOME = "/home/agent"
 SHELL_COMMAND = ("bash",)
 
 
-def _session(name: str, command: list[str], *, env: list[str], tty: bool, json_mode: bool) -> int:
-    """Run ``command`` in ``name`` with ``env``; ``-it`` (stdin and a PTY) if ``tty``."""
-    argv = ["exec", "-it"] if tty else ["exec"]
+def _session(
+    name: str, command: list[str], *, env: list[str], tty: bool, json_mode: bool, stream: bool = False
+) -> int:
+    """Run ``command`` in ``name`` with ``env``; ``-it`` (stdin and a PTY) if ``tty``.
+
+    ``stream`` gives ``-i`` alone (stdin held open, no PTY) for ``acq acp`` (ADR-0053m).
+    """
+    argv = ["exec", "-it"] if tty else ["exec", "-i"] if stream else ["exec"]
     for entry in env:
         argv += ["-e", entry]
     argv += [name, "--", *command]
@@ -480,6 +485,22 @@ def launch(
     if interactive:
         session += hostexec.terminal_env()
     return _session(name, command, env=[*session, *(env or [])], tty=interactive, json_mode=json_mode)
+
+
+def stream_command(
+    name: str,
+    command: list[str],
+    *,
+    workspace: str | None = None,
+    env: list[str] | None = None,
+) -> int:
+    """Run ``command`` with bidirectional pipe-clean stdio and no PTY (``sbx exec -i``).
+
+    The ``acq acp`` launch (ADR-0053m). ``workspace`` is accepted for parity, as
+    in :func:`exec_command`.
+    """
+    session = [f"HOME={AGENT_HOME}", *(env or [])]
+    return _session(name, command, env=session, tty=False, json_mode=False, stream=True)
 
 
 def exec_command(

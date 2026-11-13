@@ -1722,12 +1722,13 @@ def _run_prepare_locked(
     }, None
 
 
-def run_run(parsed, emit_json: bool, backend: str) -> int:
+def run_run(parsed, emit_json: bool, backend: str, launch: Callable[..., int] | None = None) -> int:
+    """``run``; ``launch`` replaces the final foreground launch (``acq acp`` streams instead of attaching)."""
     with _provider_kits_flag(parsed):
-        return _run_run(parsed, emit_json, backend)
+        return _run_run(parsed, emit_json, backend, launch)
 
 
-def _run_run(parsed, emit_json: bool, backend: str) -> int:
+def _run_run(parsed, emit_json: bool, backend: str, launch: Callable[..., int] | None = None) -> int:
     """Create (if missing) then launch, or re-attach an existing sandbox by name.
 
     In ``--json`` mode the create/attach result is emitted as one JSON envelope on
@@ -1789,7 +1790,9 @@ def _run_run(parsed, emit_json: bool, backend: str) -> int:
         # Launch in the foreground; the child's status is `run`'s exit status. In
         # --json mode the child's stdout is routed to stderr so stdout stays one
         # JSON document. A recorded kit entrypoint wins over the agent token.
-        return _launch_after_envelope(backend, name, data["workspace"], data["entrypoint"] or target, emit_json, getattr(parsed, "agent_args", []))
+        return (launch or _launch_after_envelope)(
+            backend, name, data["workspace"], data["entrypoint"] or target, emit_json, getattr(parsed, "agent_args", [])
+        )
 
     # Not a known agent: re-attach to an existing sandbox by name, else fail
     # closed as ambiguous (a token that is neither agent nor sandbox is a usage
@@ -1802,10 +1805,10 @@ def _run_run(parsed, emit_json: bool, backend: str) -> int:
         )
     if opts.publish:
         print(publish.reattach_note(target), file=sys.stderr)
-    return _run_by_name(backend, target, emit_json, parsed)
+    return _run_by_name(backend, target, emit_json, parsed, launch)
 
 
-def _run_by_name(backend: str, target: str, emit_json: bool, parsed=None) -> int:
+def _run_by_name(backend: str, target: str, emit_json: bool, parsed=None, launch: Callable[..., int] | None = None) -> int:
     """``run NAME``: re-attach an existing sandbox from its host record.
 
     The record checks and the kit heal hold the lifecycle lock; the launch does not.
@@ -1832,8 +1835,10 @@ def _run_by_name(backend: str, target: str, emit_json: bool, parsed=None) -> int
                 )
             )
         )
-    return _launch_after_envelope(backend, target, workspace, common._launch_token(backend, target, agent), emit_json,
-                                  getattr(parsed, "agent_args", []))
+    return (launch or _launch_after_envelope)(
+        backend, target, workspace, common._launch_token(backend, target, agent), emit_json,
+        getattr(parsed, "agent_args", []),
+    )
 
 
 def _by_name_locked(backend: str, target: str, emit_json: bool) -> tuple[dict | None, int | None]:
