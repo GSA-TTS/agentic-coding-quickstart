@@ -146,6 +146,16 @@ repos:
   # stay correctly non-executable; a shebang is not the criterion.
   - repo: local
     hooks:
+      # A fresh checkout uses the Git index's modes, not mount-reported disk
+      # modes. Keep this read-only gate separate from fix-exec-bits, which may
+      # repair local worktree drift for developer convenience.
+      - id: git-executable-modes
+        name: intended executables are 100755 in the Git index
+        entry: bash scripts/validate-git-executable-modes
+        language: system
+        pass_filenames: false
+        always_run: true
+
       - id: fix-exec-bits
         name: executable bits match the git index
         entry: bash scripts/fix-exec-bits --check

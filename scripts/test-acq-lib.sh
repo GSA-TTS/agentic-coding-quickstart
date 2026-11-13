@@ -258,7 +258,7 @@ GITSTUB
   cat >"$STUBDIR/provider-python" <<'PYTHON'
 #!/bin/sh
 case "${1:-}" in
-  -c) exit 0 ;;
+  -c) printf '3.12\n'; exit 0 ;;
   */validate_provider_input_contract.py) exit 0 ;;
   *) exec /usr/bin/python3 "$@" ;;
 esac

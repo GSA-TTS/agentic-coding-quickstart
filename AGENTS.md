@@ -530,6 +530,7 @@ Before adding any dependency, the agent MUST:
 - [ ] Document what worked, what failed, and why
 - [ ] Verification must not expose secrets
 - [ ] Test inside the sandbox (SBX or MSB), not directly on host
+- [ ] Directly executed scripts: verify version control preserves executability (Git: `100755`) with `npm run validate:exec-bits`, not only filesystem permissions; do not use blanket `chmod` or global VCS-setting changes. Interpreter-only scripts need no execute bit unless their distribution contract requires one.
 
 ### Periodic Re-Verification
 

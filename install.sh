@@ -18,6 +18,7 @@
 #   curl -fsSL <release-asset-url>/install.sh | sh
 #   sh install.sh [--method brew|npm|clone] [--ref <tag-or-branch>]
 #                 [--sha <full-commit>] [--no-msb] [--dry-run] [--yes]
+#                 [--non-interactive]
 #                 [--help]
 #
 # Running this script from a source checkout still installs from REPO_URL at the
@@ -109,6 +110,7 @@ MSB_HOME_DIR="${MSB_HOME:-$HOME/.microsandbox}"
 INSTALL_MSB=1   # offer to install msb; --no-msb disables
 DRY_RUN=0
 ASSUME_YES=0
+NON_INTERACTIVE="${ACQ_INSTALL_NON_INTERACTIVE:-0}"
 NEED_PATH_HELP=0   # set by the clone method when BIN_DIR is not on PATH
 
 # ---------------------------------------------------------------------------
@@ -159,11 +161,12 @@ Options:
   --dry-run            Print what would happen; make no changes.
   --yes, -y            Assume "yes" to prompts (PATH edit, msb install).
                        Intended for non-interactive/CI use.
+  --non-interactive    Decline consent-gated actions without reading /dev/tty.
   --help               Show this help.
 
 Environment overrides:
   ACQ_INSTALL_METHOD, ACQ_INSTALL_REF, ACQ_INSTALL_SHA, ACQ_INSTALL_REPO_URL,
-  ACQ_INSTALL_CLONE_DIR, ACQ_INSTALL_BIN_DIR
+  ACQ_INSTALL_CLONE_DIR, ACQ_INSTALL_BIN_DIR, ACQ_INSTALL_NON_INTERACTIVE
 
 This installer uses no sudo, installs only under your home directory, and
 never changes your PATH without asking.
@@ -185,6 +188,7 @@ while [ $# -gt 0 ]; do
     --no-msb) INSTALL_MSB=0; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --yes|-y) ASSUME_YES=1; shift ;;
+    --non-interactive) NON_INTERACTIVE=1; shift ;;
     --help|-h) usage; exit 0 ;;
     *) die "unknown option: $1 (try --help)" ;;
   esac
@@ -193,6 +197,11 @@ done
 case "$METHOD" in
   auto|brew|npm|clone) : ;;
   *) die "invalid --method '$METHOD' (expected: brew, npm, or clone)" ;;
+esac
+
+case "$NON_INTERACTIVE" in
+  0|1) : ;;
+  *) die "ACQ_INSTALL_NON_INTERACTIVE must be 0 or 1" ;;
 esac
 
 # A release asset's baked SHA only describes its baked default ref. If callers
@@ -230,6 +239,7 @@ confirm() {
   if [ "$ASSUME_YES" -eq 1 ]; then
     return 0
   fi
+  [ "$NON_INTERACTIVE" = 1 ] && return 1
   # If stdin is a terminal, ask there.
   if [ -t 0 ]; then
     printf '%s [y/N] ' "$prompt"
@@ -477,15 +487,20 @@ ensure_git() {
   # terminal): the dialog can't be clicked and the job would just block until the
   # timeout. Fail fast instead, with the same actionable guidance.
   #
-  # "Interactive" here means: we can reach a terminal to guide the user. That is
-  # true if stdin is a TTY, or if we can open the controlling terminal /dev/tty.
-  # Probe /dev/tty in a subshell so a failed open can't abort this script.
-  can_reach_tty=1
-  [ -t 0 ] || ( : >/dev/tty ) 2>/dev/null || can_reach_tty=0
+  # --yes and --non-interactive never inspect the controlling terminal. In the
+  # remaining interactive path, probe /dev/tty so piped invocations can still
+  # guide a human without treating the script stream as an answer.
+  can_reach_tty=0
+  if [ "$ASSUME_YES" -ne 1 ] && [ "$NON_INTERACTIVE" != 1 ]; then
+    if [ -t 0 ] || ( : >/dev/tty ) 2>/dev/null; then
+      can_reach_tty=1
+    fi
+  fi
   if [ "$ASSUME_YES" -eq 1 ] || [ "$can_reach_tty" -eq 0 ]; then
     die "git is required but the macOS Command Line Tools are not installed.
 This installer can set them up interactively, but it is running non-interactively
-(--yes or no terminal), so it will not launch the GUI installer and wait. Install
+(--yes, --non-interactive, or no terminal), so it will not launch the GUI installer
+and wait. Install
 the tools first, then re-run:
 
     xcode-select --install"
@@ -1042,10 +1057,21 @@ recover_migrated_catalog() {
     return 1
   fi
 
+  # --yes authorizes this installer's ordinary consent gates, but never msb's
+  # separate rollback-plan prompt. Refuse rather than borrowing /dev/tty in a
+  # non-interactive invocation; the human must run this state-changing command.
+  if [ "$ASSUME_YES" -eq 1 ] || [ "$NON_INTERACTIVE" = 1 ]; then
+    warn "  This catalog rollback needs interactive review of msb's own plan."
+    info "  Run this yourself, then re-run this installer:"
+    info "    msb self downgrade $MSB_ROLLBACK_VERSION"
+    return 1
+  fi
+
   # Interactive on purpose: msb prints the plan (including any user-data
   # warnings) and prompts. Do not pass --yes; the user is approving msb's plan,
   # not just our question. stdin is wired to the terminal because a piped
-  # `curl | sh` leaves fd 0 pointing at the script.
+  # `curl | sh` leaves fd 0 pointing at the script. The --yes and
+  # --non-interactive paths returned above, so neither borrows /dev/tty.
   if [ "$DRY_RUN" -eq 1 ]; then
     printf '  [dry-run] %s self downgrade %s\n' "$blocked_msb" "$MSB_ROLLBACK_VERSION"
     return 0

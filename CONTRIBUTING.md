@@ -117,7 +117,8 @@ npm ci --prefix .github/linters
 | `npm run lint` | Run all linters |
 | `npm run lint:secrets` | Run gitleaks at the version pinned in `.pre-commit-config.yaml` (pre-commit fetches it; no separate install) |
 | `npm run check` | Run the full pre-commit suite (gitleaks, shellcheck, YAML/JSON validation, whitespace, markdown lint) |
-| `npm run fix:exec-bits` | Restore executable bits the git index records (see below) |
+| `npm run validate:exec-bits` | Verify intended entry points are `100755` in the Git index (see below) |
+| `npm run fix:exec-bits` | Restore working-tree executable bits the Git index records (see below) |
 
 > [!NOTE]
 > `npm run check` auto-fixes some issues (markdown, whitespace, EOF) — review and stage the changes it makes.
@@ -162,6 +163,33 @@ and restores the bit. The index is the criterion, not the presence of a shebang:
 both are correctly non-executable. It covers initialized submodules too, and
 `--check` makes it report-only (that form runs as a pre-commit hook, and
 `scripts/verify-backends` self-heals at startup).
+
+`npm run validate:exec-bits` is the separate, read-only fresh-checkout gate. It
+checks the curated user-facing, package, and verification entry points against
+the Git **stage-0 index**, requiring exactly `100755`. This catches a different
+failure: a file can be executable on a permissive shared mount while its staged
+mode is `100644`, so a fresh CI checkout receives a non-executable file. It does
+not infer executability from shebangs; sourced adapters and Bats files remain
+non-executable by design. For an intended executable, stage its content and set
+only that path's recorded mode:
+
+```sh
+git update-index --chmod=+x scripts/example-entry-point
+```
+
+Do not use a blanket `chmod`, change `core.fileMode`, or use the repair command
+to make this index check pass: those actions do not record the intended Git mode.
+
+The fresh-checkout gate covers this repository's own shipped entry points. Its
+vendored Bats runner is a Git submodule, so `scripts/fix-exec-bits` checks and
+repairs the Bats repository's **own** recorded modes too. If a shared mount has
+dropped local execute bits, inspect first, then apply only that index-derived
+repair:
+
+```sh
+bash scripts/fix-exec-bits --check
+bash scripts/fix-exec-bits
+```
 
 There is one offline unit suite (stubbed `sbx`/`msb`/`opencode`, no Docker or
 network), built on [bats-core](https://github.com/bats-core/bats-core) (ADR-0025):

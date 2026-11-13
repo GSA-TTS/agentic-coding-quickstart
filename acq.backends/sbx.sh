@@ -89,15 +89,17 @@ _ACQ_SBX_SSH_AGENT_NOTICE_SHOWN=0
 # has been printed, so it appears at most once per process.
 _ACQ_SBX_IMAGE_NOTICE_SHOWN=0
 _ACQ_SBX_ATTEMPT_GENERATION=""
+_ACQ_SBX_ATTEMPT_PYTHON=""
 _ACQ_SBX_ATTEMPT_ACTIVE=""
 _ACQ_SBX_CREATE_STARTED=""
 
 _acq_sbx_cleanup_uncreated_attempt() {
   [ -n "${_ACQ_SBX_ATTEMPT_ACTIVE:-}" ] || return 0
   if [ -z "${_ACQ_SBX_CREATE_STARTED:-}" ] || _acq_sbx_confirm_absent "${_ACQ_SBX_ATTEMPT_NAME:-}"; then
-    acq_provider_input_discard sbx "$_ACQ_SBX_ATTEMPT_NAME" "$_ACQ_SBX_ATTEMPT_GENERATION" || true
+    acq_provider_input_discard sbx "$_ACQ_SBX_ATTEMPT_NAME" "$_ACQ_SBX_ATTEMPT_GENERATION" "$_ACQ_SBX_ATTEMPT_PYTHON" || true
   fi
   _ACQ_SBX_ATTEMPT_GENERATION=""
+  _ACQ_SBX_ATTEMPT_PYTHON=""
   _ACQ_SBX_ATTEMPT_ACTIVE=""
   _ACQ_SBX_CREATE_STARTED=""
 }
@@ -713,12 +715,15 @@ _acq_backend_provision_unlocked() {
   # This sandbox mounts the exact generation; publication follows successful
   # creation, so an older sandbox mounting current cannot observe a loser.
   local _provider_generation
-  if ! _provider_generation=$(acq_provider_input_prepare sbx "$name"); then
+  local _provider_python
+  _provider_python=$(_acq_provider_input_path_python) || return 2
+  if ! _provider_generation=$(acq_provider_input_prepare sbx "$name" "$_provider_python"); then
     echo "acq(sbx): error: provider input projection failed for '$name'." >&2
     return 1
   fi
   _ACQ_SBX_ATTEMPT_NAME="$name"
   _ACQ_SBX_ATTEMPT_GENERATION="$_provider_generation"
+  _ACQ_SBX_ATTEMPT_PYTHON="$_provider_python"
   _ACQ_SBX_ATTEMPT_ACTIVE=1
   # Provider credentials must exist in sbx's proxy table BEFORE create (create
   # snapshots it). USAi keeps its own pre-create gate; this covers every other
@@ -773,7 +778,7 @@ _acq_backend_provision_unlocked() {
     # A successful create may have produced a live sandbox even if a later
     # readiness/provenance step fails; never discard its mounted generation.
     _ACQ_SBX_ATTEMPT_ACTIVE=""
-    if ! _acq_provider_input_publish "$(acq_provider_input_root sbx "$name")" "$_provider_generation"; then
+    if ! _acq_provider_input_publish "$(acq_provider_input_root sbx "$name")" "$_provider_generation" "$_provider_python"; then
       echo "acq(sbx): error: sandbox '$name' was created but provider inputs could not be published." >&2
       return 1
     fi
