@@ -19,8 +19,9 @@ Both paths require administrator review through CODEOWNERS.
 ## Evaluation contract
 
 On a subsequent PR, use a clean checkout of these base-branch rules with a
-trusted Python interpreter and Git executable. Set PYTHONPATH to that checkout
-only, keep the candidate repository as the working directory, fetch complete
+trusted Python interpreter and Git executable. Run `python -P` with PYTHONPATH
+set to that checkout as its sole, absolute entry (no empty or relative entries).
+Keep the candidate repository as the working directory, fetch complete
 history, and verify its expected HEAD. Clear Git redirection/config injection
 variables and replacement refs. Candidate code must not execute in the evaluator
 job before evaluation. Store reports in a fresh runner-temporary file rather
@@ -34,5 +35,6 @@ as new evidence. The package does not authenticate who approved a waiver.
 ## Offline checks
 
 Run `python -m unittest discover -s qualification/tests` in an isolated checkout.
-Tests use synthetic data and temporary Git repositories. Live macOS, Windows
+Tests use synthetic data and temporary directories; they do not exercise Git
+ancestry, committed oracle hashing, or surface-change detection. Live macOS, Windows
 and Linux backend qualification belongs to the subsequent integration work.
