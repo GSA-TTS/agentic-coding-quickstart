@@ -153,6 +153,7 @@ governance/
 .github/workflows/pre-commit.yml
 .gitattributes
 .gitignore
+.gitleaksignore
 .gitleaks.repo.toml
 .gitleaks.toml
 .markdown-link-check.json

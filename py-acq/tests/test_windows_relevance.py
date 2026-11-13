@@ -75,7 +75,7 @@ NOT_INPUTS = {
     # every pull request
     "py-acq/requirements-build.txt",
     # lint and hook configuration
-    ".gitignore", ".gitleaks.repo.toml", ".gitleaks.toml", ".markdown-link-check.json",
+    ".gitignore", ".gitleaksignore", ".gitleaks.repo.toml", ".gitleaks.toml", ".markdown-link-check.json",
     ".markdownlint-cli2.yaml", ".markdownlint.jsonc", ".markdownlintignore",
     ".pre-commit-config.yaml", ".prettierrc", ".shellcheckrc",
     # GitHub configuration and the other workflows
