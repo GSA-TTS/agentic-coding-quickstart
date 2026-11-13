@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from acq_py import cli, errors, kit_sbx, kits, kitspec, sbx, state, timeouts
+from acq_py.commands import common
 
 pytestmark = pytest.mark.provider_key  # creates sandboxes: needs a stored provider key
 from test_kitspec import EDGE_SPECS, _random_spec, _section_spec
@@ -431,6 +432,23 @@ def test_capability_record_declares_kit_apply():
     assert cli._supports("sbx", "kit-apply") is True
 
 
+def test_base_sandbox_spec_is_a_v2_sandbox_kit():
+    image = common.OPENCODE_DEVENV_IMAGE
+    text = kit_sbx.base_sandbox_spec(image)
+    assert text.startswith('schemaVersion: "2"\n')
+    assert "kind: sandbox\n" in text
+    assert f"  image: {kit_sbx.yaml_quote(image)}\n" in text
+    assert "  entrypoint:\n    - bash\n" in text
+    # The workload sbx runs by default: a login bash that execs the agent/args.
+    assert "      - -c\n      - 'exec \"$@\"'\n      - bash\n      - bash\n      - -l\n" in text
+
+
+def test_base_sandbox_spec_rejects_an_unsafe_image_reference():
+    for bad in ("", "a\nb", "a\tb", "a\x00b", "a\x7fb"):
+        with pytest.raises(kit_sbx.KitTranslateError):
+            kit_sbx.base_sandbox_spec(bad)
+
+
 def test_run_opencode_creates_with_every_kit(monkeypatch, tmp_path, capsys):
     ws = _env(monkeypatch, tmp_path)
     seen = _spy(monkeypatch)
@@ -439,8 +457,16 @@ def test_run_opencode_creates_with_every_kit(monkeypatch, tmp_path, capsys):
     assert doc["data"]["kits"] == [*BUILTINS, "opencode"]
     assert (doc["data"]["kit"], doc["data"]["entrypoint"]) == ("opencode", "opencode")
     argv = _create_argv(seen)
-    # sbx gets the shell agent: OpenCode comes from the pinned kit, not sbx's own.
-    assert argv[1] == "shell"
+    # sbx starts from acq's own base kit, not a built-in agent: the built-in agents are
+    # v3 kits, which do not mix with acq's translated v2 kits (ADR-0051m). OpenCode still
+    # comes from the pinned kit, not sbx's own.
+    base = Path(argv[1])
+    assert base.is_relative_to(tmp_path / "state" / kit_sbx.KIT_DIR_NAME / "generated")
+    assert base.name.startswith("acq-base.")
+    base_spec = (base / "spec.yaml").read_text(encoding="utf-8")
+    assert 'schemaVersion: "2"\n' in base_spec
+    assert "kind: sandbox\n" in base_spec
+    assert common.OPENCODE_DEVENV_IMAGE in base_spec
     assert _kit_names(argv) == [*BUILTINS, "opencode", "acq-startup-barrier"]
     for path in _kit_flags(argv):
         assert path.is_relative_to(tmp_path / "state" / kit_sbx.KIT_DIR_NAME)
@@ -466,6 +492,26 @@ def test_other_agents_get_the_builtin_kits(monkeypatch, tmp_path, capsys):
     argv = _create_argv(seen)
     assert argv[1] == "claude"
     assert _kit_names(argv) == [*BUILTINS, "acq-startup-barrier"]
+
+
+def test_opencode_on_a_custom_image_uses_acq_s_base_kit_and_launches_generic(monkeypatch, tmp_path, capsys):
+    ws = _env(monkeypatch, tmp_path)
+    seen = _spy(monkeypatch)
+    rc, doc = _invoke(capsys, "--backend", "sbx", "create", "opencode", str(ws), "--name", "occ",
+                      "--image", "localhost/agent-base:v1", "--json")
+    assert rc == 0, doc
+    # The base kit is the positional (so the create is all-v2), and the pinned opencode
+    # kit still installs OpenCode (ADR-0051m).
+    argv = _create_argv(seen)
+    assert Path(argv[1]).name.startswith("acq-base.")
+    assert "opencode" in doc["data"]["kits"]
+    # The launch mode follows the base workload: the custom-image sandbox records
+    # generic-opencode, so `acq run` prepends OpenCode instead of forwarding to bash.
+    assert kit_sbx.hc_read("occ", "generic-opencode") == "generic-opencode"
+    calls = []
+    monkeypatch.setattr(sbx, "_run_stream", lambda argv, **kw: calls.append(argv) or 0)
+    sbx.launch("occ", str(ws), "opencode", agent_args=["--help"])
+    assert calls == [["run", "--name", "occ", "shell", "--", "-lc", 'exec "$@"', "sh", "opencode", "--help"]]
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="needs git")

@@ -396,17 +396,30 @@ def _new_sbx_sandbox(
     except provider_input.ProviderInputError as exc:
         return None, common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
     try:
-        prepared = kit_sbx.prepare(plan.kits)
+        prepared = kit_sbx.prepare(plan.kits, image)
     except kit_sbx.KitTranslateError as exc:
         _sbx_provider_abandon(name, generation, created=False)
         return None, common._operational_failure(
             command, errors.VALIDATION_FAILED, f"a kit could not be prepared, so the sandbox was not created: {exc}",
             "check that the acq state directory is acq's own and writable, or reinstall acq", emit_json,
         )
-    generic = agent == "opencode" and image == common.OPENCODE_DEVENV_IMAGE
+    use_base = agent in ("shell", "opencode")
+    # The launch mode follows the selected base workload: an opencode sandbox on the base kit
+    # has a plain bash entrypoint and gets OpenCode from its pinned kit, so ``acq run`` must
+    # prepend OpenCode even when the base image is custom. Only a create writes this record,
+    # so a genuinely legacy sandbox keeps its recorded ``legacy-opencode``.
+    generic = agent == "opencode" and use_base
+    # acq supplies its own base sandbox kit (its image + a plain bash workload) instead of
+    # borrowing a built-in sbx agent kit. sbx's built-in agents are now v3 kits while acq's
+    # translated mixins are v2, and sbx refuses to mix formats in one sandbox, so a create
+    # that named a built-in agent failed (ADR-0051m). The agents acq owns are ``shell``
+    # (the base workload itself) and ``opencode`` (its pinned kit installs it — on the
+    # default image, and on top of a custom one); they use the base kit on every image so
+    # the create stays all-v2. Any other agent still uses the built-in (a follow-up).
+    base_agent = str(prepared.base_dir) if use_base else agent
     try:
         data = _create_sandbox("sbx", agent, workspace, name, image, plan.agent_kit,
-                               sbx_create=("shell" if generic else agent, prepared.flags), sbx_extra=mount,
+                               sbx_create=(base_agent, prepared.flags), sbx_extra=mount,
                                clone=opts.clone, extra_workspaces=opts.extra_workspaces,
                                workspace_read_only=opts.workspace_read_only)
     except common._ADAPTER_ERRORS as exc:

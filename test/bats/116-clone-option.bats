@@ -709,7 +709,7 @@ _assert_layout_refused() { # SANDBOX
   _msb_clone -- rm shell-cloneproj
   assert_success
   local wrapped; wrapped=$(_wrapped_calls "$STUBDIR/gitlog")
-  assert_regex "$wrapped" ' remote remove sandbox-shell-cloneproj'
+  assert_regex "$wrapped" ' config --local --remove-section remote.sandbox-shell-cloneproj'
   [ -z "$(printf '%s\n' "$wrapped" | grep -v -- '^--no-pager ')" ]
 }
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -30,6 +31,22 @@ CELLS = [("msb", "macos-arm64"), ("sbx", "macos-arm64")]
 ORACLE = "scripts/qualify-backend-cell"
 ORACLE_BYTES = b"#!/usr/bin/env python3\nraise SystemExit(0)\n"
 ORACLE_SHA = hashlib.sha256(ORACLE_BYTES).hexdigest()
+
+
+def test_host_image_label_is_acq_default_base_image():
+    """The transcript's ``image=`` label is the image the cell creates from (ADR-0051m)."""
+    from acq_py.commands import common
+
+    assert host.IMAGE == common.OPENCODE_DEVENV_IMAGE
+
+
+def test_canary_default_image_is_acq_default_base_image():
+    """The ro-mount canary defaults to the base image acq creates from (ADR-0051m)."""
+    from acq_py.commands import common
+
+    canary = (REPO_ROOT / "scripts" / "qualify-msb-ro-mount").read_text(encoding="utf-8")
+    match = re.search(r'IMAGE="\$\{QUALIFY_IMAGE:-([^}]+)\}"', canary)
+    assert match and match.group(1) == common.OPENCODE_DEVENV_IMAGE
 
 
 def run(cwd, *args):

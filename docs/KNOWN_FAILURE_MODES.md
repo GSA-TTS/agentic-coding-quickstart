@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-11-10"
+last_updated: "2026-11-13"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -5483,6 +5483,65 @@ uses the existing `pinned_patterns_repo` fixture and skips when its checkout is
 unavailable. Re-run that comparison when `ACQ_TEST_PATTERNS_REPO` supplies the
 pinned release and its validator dependencies are installed; this is the
 remaining full-validator acceptance check for an offline checkout without it.
+
+---
+
+## 98. Tier-3 Qualification Fails on msb When Other msb Sandboxes Are Running
+
+**Symptoms:** `qualify-backend-cell --backend msb` printed `FAIL: provider-credential set: exit 1`,
+`FAIL: guest credential: no credential was bound` and `FAIL: secret set: exit 1` on a host that
+already had running msb sandboxes.
+
+**Root cause:** the oracle kept the operator's `HOME`, so `msb` used the operator's `MSB_HOME`, and
+acq's credential steps re-feed every running sandbox in that catalog. msb 0.7.7 refuses to add a new
+secret binding to a running sandbox (it needs a restart), so those steps exit 1. A rotation of an
+existing binding is accepted, so a run could also leave a throwaway `USAI_API_KEY` in your sandboxes:
+stop and start them, or run `acq usai-rotate-api-key`, to bind the real key again.
+
+**Resolution:** an msb run now uses a private `MSB_HOME` and sets `ACQ_SECRET_NO_LIVE_REFEED=1`
+(ADR-0044m, "Amendment (2026-11-13)"; `docs/howto/qualification.md`). The private directory must be
+short: msb derives a unix socket path about 48 bytes below it and macOS allows fewer than 104 bytes, so
+a path under the default `$TMPDIR` fails with `sandbox runtime socket path is too long`. It costs a
+fresh image pull (about 2 GB) per run, so a create that times out on a slow network is BLOCKED, not
+FAIL. Only macOS arm64 has been verified; on Linux the run also requires 6 GB free under `/tmp` and
+an executable `/tmp`, and is BLOCKED where it cannot be made.
+
+**Not isolated:** sbx has no state override, and an empty `HOME` loses `sbx login` and the secret table
+the oracle requires, so an sbx run shares them with the operator. acq does not touch other sbx sandboxes.
+
+---
+
+## 99. sbx: v3 Built-in Agent Kits Break Creates Under the Bash Implementation
+
+**Symptoms:** On a current sbx (0.51.0/0.53.0), every `acq create` under the Bash
+implementation (`ACQ_IMPL=bash`, the default on macOS/Linux) fails at create:
+
+```text
+error: resolve kits: cannot mix v3 kits with v1/v2 kits in one sandbox; compositions are single-format
+(v3: shell; v1/v2: …)
+```
+
+`sbx kit inspect docker.io/sbx/shell:latest` reports `"schemaVersion": "3"`, and
+every published `sbx/shell` tag back to 2026-10-26 is v3.
+
+**Root Cause:** sbx's built-in agents are now v3 kits. acq's neutral kits are
+translated to v2, and sbx refuses to mix kit formats in one sandbox. The Bash
+adapter still passes the built-in agent (`shell` / the agent name) as `sbx create`'s
+first positional and layers the v2 mixins on top. The Python implementation is
+fixed (ADR-0051m): it generates a v2 `kind: sandbox` base kit from acq's own image
+and passes it as that positional. Downgrading the sbx CLI does not help — the agent
+is a floating `:latest` kit, so 0.51.0 resolves the same v3 shell kit as 0.53.0.
+
+**Fix:** Port the base-kit generation and positional to `acq.backends/sbx.sh`, or
+make the POSIX default the Python implementation. Until then, use
+`ACQ_IMPL=python`.
+
+**Prevention / Status:** Python is fixed and covered by
+`py-acq/tests/test_kit_sbx.py`. The Bash gap and the agents acq has no install kit
+for (`claude`, `codex`, …) are tracked in
+`mogul/agentic-coding-quickstart#250`. The offline suite stubs `ACQ_SBX_BIN`, so it
+cannot catch a real format mix; re-run the live cell
+(`scripts/qualify-backend-cell`) after an sbx upgrade.
 
 ---
 

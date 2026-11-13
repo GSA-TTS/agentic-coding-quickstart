@@ -78,9 +78,13 @@ def test_create_mounts_the_generation_read_only_after_the_workspace(monkeypatch,
     assert rc == 0, err
     (create,) = [a for a in seen if a[0] == "create"]
     (generation,) = _generations()
-    # sbx create AGENT WORKSPACE GENERATION:ro …: the primary workspace stays
-    # first (sbx requires it writable), the generation follows it, read-only.
-    assert create[1:4] == ["shell", doc["data"]["workspace"], f"{generation}:ro"]
+    # sbx create BASE-KIT WORKSPACE GENERATION:ro …: the base kit is the positional
+    # (acq's own v2 sandbox kit, ADR-0051m), the primary workspace stays first among the
+    # paths (sbx requires it writable), the generation follows it, read-only.
+    base = Path(create[1])
+    assert base.is_dir() and base.name.startswith("acq-base.")
+    assert (base / "spec.yaml").is_file()
+    assert create[2:4] == [doc["data"]["workspace"], f"{generation}:ro"]
     envs = [create[i + 1] for i, a in enumerate(create) if a == "--env"]
     assert envs == [f"ACQ_WORKSPACE={doc['data']['workspace']}", f"ACQ_PROVIDER_INPUT_ROOT={generation}"]
     facts = generation / "models" / "providers" / "usai" / "facts.json"

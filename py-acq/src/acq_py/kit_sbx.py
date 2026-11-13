@@ -617,10 +617,54 @@ def startup_barrier_kit(token: str) -> Path:
                     lambda tmp: _write_private(tmp / "spec.yaml", text))
 
 
+_BASE_KIT_NAME = "acq-base"
+
+
+def base_sandbox_spec(image: str) -> str:
+    """The base ``kind: sandbox`` kit ``sbx create`` starts from: acq's image and a plain bash workload.
+
+    acq hands sbx this kit as the first positional instead of a built-in agent, so a
+    create does not depend on Docker's own shell/agent kits or their format. It is
+    emitted as sbx-v2 to match the translated mixins, because sbx refuses to mix kit
+    formats in one sandbox (ADR-0051m).
+    """
+    description = (
+        "acq's base sandbox: a plain bash workload on acq's own pinned image, supplied "
+        "so a create does not depend on a built-in sbx agent kit")
+    if not image or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in image):
+        raise KitTranslateError(f"the base image reference is not a single safe line: {image!r}")
+    return "".join(f"{line}\n" for line in (
+        'schemaVersion: "2"',
+        "kind: sandbox",
+        f"name: {_BASE_KIT_NAME}",
+        "displayName: ACQ Base",
+        f"description: {yaml_quote(description)}",
+        "sandbox:",
+        f"  image: {yaml_quote(image)}",
+        "  entrypoint:",
+        "    - bash",
+        "  command:",
+        "    default:",
+        "      - -c",
+        '      - \'exec "$@"\'',
+        "      - bash",
+        "      - bash",
+        "      - -l",
+    ))
+
+
+def base_sandbox_kit(image: str) -> Path:
+    """The base sandbox kit's directory (``generated/acq-base.<digest>``), keyed on the image."""
+    text = base_sandbox_spec(image)
+    return _publish(_subdir("generated"), _BASE_KIT_NAME,
+                    lambda tmp: _write_private(tmp / "spec.yaml", text), by_content=True)
+
+
 @dataclass(frozen=True)
 class CreateKits:
-    """The ``sbx create`` kit flags, the token the startup barrier kit writes, and that kit's directory."""
+    """The base ``sbx create`` kit, the ``--kit`` flags, and the startup barrier kit's token and directory."""
 
+    base_dir: Path
     flags: list[str]
     barrier_token: str
     barrier_dir: Path
@@ -662,13 +706,16 @@ def prune_stale(keep: Iterable[Path], *, now: float | None = None) -> None:
                 pass
 
 
-def prepare(kits: Iterable[Kit]) -> CreateKits:
-    """Every ``--kit`` flag for a create: the kits in order, the git identity kit, then the barrier.
+def prepare(kits: Iterable[Kit], image: str) -> CreateKits:
+    """The base kit and every ``--kit`` flag for a create: the kits in order, the git identity kit, then the barrier.
 
-    Raises :class:`KitTranslateError`: a kit that cannot be prepared stops the create.
+    ``image`` is the base kit's image (acq's pinned default or an ``--image`` override),
+    so the sandbox is not composed from a built-in sbx agent kit (ADR-0051m). Raises
+    :class:`KitTranslateError`: a kit that cannot be prepared stops the create.
     """
     flags: list[str] = []
     try:
+        base = base_sandbox_kit(image)
         for kit in kits:
             flags += ["--kit", str(translated_kit(kit))]
         identity = git_identity_kit()
@@ -679,8 +726,8 @@ def prepare(kits: Iterable[Kit]) -> CreateKits:
         flags += ["--kit", str(barrier)]
     except OSError as exc:
         raise KitTranslateError(f"could not prepare the sandbox's kits: {exc.strerror or exc}") from exc
-    prune_stale(Path(flags[i + 1]) for i in range(0, len(flags), 2))
-    return CreateKits(flags, token, barrier)
+    prune_stale([base, *(Path(flags[i + 1]) for i in range(0, len(flags), 2))])
+    return CreateKits(base, flags, token, barrier)
 
 
 # ---------------------------------------------------------------------------

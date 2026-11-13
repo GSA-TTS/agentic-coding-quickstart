@@ -58,7 +58,10 @@ set -uo pipefail
 
 STEP_TIMEOUT="${STEP_TIMEOUT:-600}"
 EXEC_TIMEOUT="${EXEC_TIMEOUT:-90}"
-IMAGE="${QUALIFY_IMAGE:-docker.io/docker/sandbox-templates:shell-docker}"
+# acq's default msb image (ADR-0030): the same devenv base acq creates from, so the
+# canary tests the image a real sandbox uses rather than Docker's shell template
+# (ADR-0051m). A Python test holds this equal to common.OPENCODE_DEVENV_IMAGE.
+IMAGE="${QUALIFY_IMAGE:-ghcr.io/gsa-tts/agentic-coding-patterns/devenv-shell@sha256:0b5f4cc95c8fa7dd7f3ffd02b56e63d0caf9b151421ff6ea3cb34b2139e3966c}"
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 REPO=$(cd "$HERE/.." && pwd -P)
 

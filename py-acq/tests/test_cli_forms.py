@@ -158,6 +158,18 @@ def test_agent_tail_fresh_and_reattach(backend, monkeypatch, tmp_path, capsys, t
     assert "agent_args" not in state.record_read(backend, "box")
 
 
+def test_sbx_legacy_opencode_keeps_its_launch_mode(monkeypatch):
+    from acq_py import kit_sbx
+
+    monkeypatch.setattr(state, "record_read", lambda *a: {"agent": "opencode"})
+    kit_sbx.hc_write("box", "generic-opencode", "legacy-opencode")
+    calls = []
+    monkeypatch.setattr(sbx, "_run_stream", lambda argv, **kw: calls.append(argv) or 0)
+    sbx.launch("box", "/ws", "opencode", agent_args=["--help"])
+    assert calls == [["run", "--name", "box", "opencode", "--", "--help"]]
+    assert kit_sbx.hc_read("box", "generic-opencode") == "legacy-opencode"
+
+
 def test_sbx_non_generic_command_escape(monkeypatch):
     monkeypatch.setattr(state, "record_read", lambda *a: {"agent": "shell"})
     calls = []

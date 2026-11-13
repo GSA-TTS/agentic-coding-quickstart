@@ -263,6 +263,14 @@ _acq_msb_resolve_image() {
     _ACQ_MSB_RESOLVED_IMAGE_SOURCE="generic-opencode-default"
     return 0
   fi
+  if [ "$agent" = "shell" ]; then
+    # The `shell` positional uses acq's own base image, like the Python backend and the
+    # sbx base kit: a plain bash workload on the pinned devenv image, never Docker's
+    # sandbox-templates template (ADR-0051m).
+    _ACQ_MSB_RESOLVED_IMAGE="$ACQ_DEFAULT_OPENCODE_DEVENV_IMAGE"
+    _ACQ_MSB_RESOLVED_IMAGE_SOURCE="acq-base-default"
+    return 0
+  fi
   if _ACQ_MSB_RESOLVED_IMAGE=$(acq_agent_template_image "$agent" 2>/dev/null) \
      && [ "$_ACQ_MSB_RESOLVED_IMAGE" != "$_ACQ_MSB_DEFAULT_IMAGE" ]; then
     _ACQ_MSB_RESOLVED_IMAGE_SOURCE="agent-default"
@@ -3611,7 +3619,7 @@ _acq_msb_clone_wire() {
   fi
   # Fetch-back remote in the host checkout (replace a stale same-name remote —
   # its scratch dir was just verified absent, so it cannot hold unfetched work).
-  _acq_msb_git_ws "$ws_canon" remote remove "sandbox-${name}" >/dev/null 2>&1 || true
+  _acq_msb_clone_remove_remote "$ws_canon" "sandbox-${name}" >/dev/null 2>&1 || true
   if ! _acq_msb_git_ws "$ws_canon" remote add "sandbox-${name}" "$scratch" >/dev/null 2>&1; then
     echo "acq(msb): warning: could not register the 'sandbox-${name}' remote in $ws_canon;" >&2
     echo "acq(msb):   fetch agent work directly: git fetch $scratch" >&2
@@ -4045,6 +4053,28 @@ _acq_msb_clone_read_packed_refs() {
   done
 }
 
+# Older Git remote-remove ref transactions can lose the command-scope hooksPath
+# override. Direct update-ref honors it; no-deref preserves local branch targets
+# when a remote-tracking ref is symbolic.
+_acq_msb_clone_remove_remote() {
+  local ws="$1" remote="$2" refs ref commands rc=0
+  refs=$(_acq_msb_git_ws "$ws" for-each-ref --format='%(refname)' "refs/remotes/${remote}/") || return 1
+  if [ -n "$refs" ]; then
+    commands=$'option no-deref\n'
+    while IFS= read -r ref; do
+      case "$ref" in "refs/remotes/${remote}/"*) ;; *) return 1 ;; esac
+      case "$ref" in *[[:space:]]*) return 1 ;; esac
+      commands="${commands}delete ${ref}"$'\n'
+    done <<< "$refs"
+    printf '%s' "$commands" | _acq_msb_git_ws "$ws" update-ref --stdin || return 1
+  fi
+  # --get-regexp returns 1 for an absent section; every other error is a refusal.
+  _acq_msb_git_ws "$ws" config --local --name-only --get-regexp "^remote\\.${remote//./\\.}\\." >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 1 ] || return 0
+  [ "$rc" -eq 0 ] || return 1
+  _acq_msb_git_ws "$ws" config --local --remove-section "remote.${remote}"
+}
+
 # _acq_msb_clone_cleanup NAME — delete NAME's scratch clone and drop the
 # fetch-back remote from the origin checkout. Best-effort: returns 0, except
 # that it refuses (returns 1) when the clones dir is unresolved, so it can never
@@ -4059,9 +4089,7 @@ _acq_msb_clone_cleanup() {
   [ -d "$dir" ] || return 0
   origin=$(cat "${dir}/.origin" 2>/dev/null) || origin=""
   if [ -n "$origin" ] && [ -d "$origin" ]; then
-    if _acq_msb_git_ws_prep "$origin"; then
-      _acq_msb_git_ws "$origin" remote remove "sandbox-${name}" >/dev/null 2>&1 || true
-    else
+    if ! _acq_msb_clone_remove_remote "$origin" "sandbox-${name}"; then
       echo "acq(msb): warning: left the 'sandbox-${name}' remote in $origin (see above)." >&2
       echo "acq(msb):   Remove it with: git -C $origin remote remove sandbox-${name}" >&2
     fi

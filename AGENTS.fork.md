@@ -1,5 +1,10 @@
 # Fork rules — mogul/agentic-coding-quickstart
 
+> Historical fork guidance retained for provenance. It applies only when working
+> in `mogul/agentic-coding-quickstart`, not to the GSA-TTS upstream repository or
+> its integration branches. Upstream work follows `AGENTS.md` and the applicable
+> maintainer workspace instructions.
+
 These rules apply to this fork. They supplement `AGENTS.md` and override it
 where the two conflict. The human is the sole merge approver and the sole
 decider of exceptions, license acceptance, and dependency installation.

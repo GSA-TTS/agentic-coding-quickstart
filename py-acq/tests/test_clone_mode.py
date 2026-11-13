@@ -420,6 +420,18 @@ def test_15_rm_starts_no_program_named_by_the_workspace_repos_config(env, tmp_pa
     assert not ran.exists()
 
 
+def test_rm_remote_symbolic_ref_does_not_delete_a_local_branch(env, tmp_path, capsys):
+    assert _create(capsys, str(env), "--clone")[0] == 0
+    _git("-C", str(env), "branch", "keep-local")
+    before = _git("-C", str(env), "rev-parse", "refs/heads/keep-local").stdout.strip()
+    _git("-C", str(env), "symbolic-ref", f"refs/remotes/{REMOTE}/alias", "refs/heads/keep-local")
+    rc, _doc, _err = _acq(capsys, "rm", NAME)
+    assert rc == 0
+    assert _git("-C", str(env), "rev-parse", "refs/heads/keep-local").stdout.strip() == before
+    assert not _git("-C", str(env), "for-each-ref", f"refs/remotes/{REMOTE}").stdout.strip()
+    assert _remote_url(env) is None
+
+
 def test_16_a_workspace_that_borrows_objects_via_alternates_is_refused(env, tmp_path, monkeypatch, capsys):
     other = _mk_repo(tmp_path / "otherrepo")
     (env / ".git" / "objects" / "info" / "alternates").write_text(f"{other / '.git' / 'objects'}\n",
@@ -728,9 +740,11 @@ def test_40_sbx_a_relative_workspace_resolves_against_pwd_to_the_logical_path(sb
 def test_41_host_side_git_runs_with_no_pager_at_create_and_rm(env, monkeypatch, capsys):
     calls = _git_spy(monkeypatch)
     assert _create(capsys, str(env), "--clone")[0] == 0
+    _git("-C", str(env), "update-ref", f"refs/remotes/{REMOTE}/main", "HEAD")
     assert _acq(capsys, "rm", NAME)[0] == 0
     wrapped = calls.wrapped()
-    assert any(line.endswith(f" remote remove {REMOTE}") for line in wrapped)
+    assert any(line.endswith(" update-ref --stdin") for line in wrapped)
+    assert any(line.endswith(f" config --local --remove-section remote.{REMOTE}") for line in wrapped)
     assert wrapped and all(line.startswith("--no-pager ") for line in wrapped)
 
 

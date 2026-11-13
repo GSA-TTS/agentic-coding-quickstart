@@ -12,6 +12,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
+import stat
 import subprocess
 import sys
 from importlib.machinery import SourceFileLoader
@@ -151,6 +153,8 @@ class FakeBackend:
             proc = self.secret(verb)
             return self.done(proc.returncode, leak)
         if verb[0] == "create":
+            if k["create"] == "timeout":
+                return None  # run_process reports a timed-out step as None
             if k["create"]:
                 record = {"name": n.sandbox, **({"ro_host_config": True} if k["ro"] else {})}
                 (self.state_dir / self.backend).mkdir(parents=True, exist_ok=True)
@@ -258,6 +262,15 @@ def test_a_compliant_backend_passes(tmp_path, backend, capsys):
     secret_set = next(call for call in fake.calls if call[2:4] == ["secret", "set"] and "--host" in call)
     assert secret_set[secret_set.index("--host") + 1] == "qualify.invalid"
     assert secret_set[secret_set.index("--env") + 1] == c.names.secret_env
+
+
+@pytest.mark.parametrize("backend", ["msb", "sbx"])
+def test_the_cell_does_not_pin_an_image_so_acq_uses_its_default(tmp_path, backend, capsys):
+    """No ``--image``: the cell creates from acq's own default base image (ADR-0051m)."""
+    c, fake, _raw = cell(tmp_path, backend)
+    assert c.run() == 0, capsys.readouterr().err
+    create = next(call for call in fake.calls if call[2] == "create")
+    assert "--image" not in create
 
 
 def test_the_nonce_names_are_printed_first(tmp_path, capsys):
@@ -575,7 +588,7 @@ def test_sigterm_mid_create_still_tears_the_sandbox_down(tmp_path):
         if proc.poll() is None:
             proc.kill()
     assert proc.returncode == 128 + signal.SIGTERM
-    sandbox = err.splitlines()[0].split("sandbox=")[1].split()[0]
+    sandbox = next(x for x in err.splitlines() if "sandbox=" in x).split("sandbox=")[1].split()[0]
     calls = log.read_text().splitlines()
     assert any(c.startswith("create") and sandbox in c for c in calls)
     after = calls[calls.index(next(c for c in calls if c.startswith("exec"))) + 1:]
@@ -584,6 +597,182 @@ def test_sigterm_mid_create_still_tears_the_sandbox_down(tmp_path):
     assert sandbox not in (catalog.read_text() if catalog.exists() else "")
     assert list(tmp.iterdir()) == []  # the private state tree is gone too
 
+
+
+@pytest.mark.skipif(os.name == "nt", reason="MSB_HOME is not redirected on Windows")
+def test_private_msb_home_is_short_empty_and_real():
+    home = qbc.private_msb_home("/tmp")  # pytest's own tmp_path is already too long for msb
+    try:
+        assert home is not None and home.is_dir() and list(home.iterdir()) == []
+        assert home == home.resolve() and home.parent == Path("/tmp").resolve()
+        assert len(os.fsencode(home)) <= qbc.MSB_HOME_MAX_BYTES
+    finally:
+        if home is not None:
+            shutil.rmtree(home, ignore_errors=True)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="MSB_HOME is not redirected on Windows")
+def test_private_msb_home_refuses_a_path_too_long_or_a_missing_parent(tmp_path):
+    deep = tmp_path / ("d" * 60)
+    deep.mkdir()
+    assert qbc.private_msb_home(str(deep)) is None
+    assert list(deep.iterdir()) == []  # the too-long directory is not left behind
+    assert qbc.private_msb_home(str(tmp_path / "missing")) is None
+
+
+@pytest.fixture
+def restore_stop_signals():
+    # main() installs the oracle's stop handlers, which would outlive the test.
+    import signal
+
+    saved = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+    yield
+    for sig, handler in saved.items():
+        signal.signal(sig, handler)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="MSB_HOME is not redirected on Windows")
+def test_msb_run_without_a_usable_private_home_is_blocked_not_run_against_the_real_one(
+        monkeypatch, capsys, restore_stop_signals):
+    calls = []
+    monkeypatch.setattr(qbc, "which", lambda name, path=None: "/usr/bin/msb")
+    monkeypatch.setattr(qbc, "private_msb_home", lambda *a: None)
+    monkeypatch.setattr(qbc, "_run_cell", lambda *a, **k: calls.append(a) or 0)
+    assert qbc.main(["--backend", "msb"]) == 2
+    assert "BLOCKED: msb state" in capsys.readouterr().err
+    assert calls == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="MSB_HOME is not redirected on Windows")
+def test_private_msb_home_needs_free_space_for_the_image(tmp_path):
+    assert qbc.private_msb_home(str(tmp_path), min_free=2**62) is None
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_remove_tree_deletes_read_only_layers(tmp_path):
+    layer = tmp_path / "root" / "layer"
+    layer.mkdir(parents=True)
+    (layer / "f").write_text("x")
+    layer.chmod(0o500)
+    qbc.remove_tree(tmp_path / "root")
+    assert not (tmp_path / "root").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_remove_tree_never_chmods_through_a_layer_symlink(tmp_path):
+    # A read-only layer holding a symlink to an operator-owned sentinel outside the tree:
+    # unlinking must repair the layer directory, never follow the link to the sentinel.
+    sentinel = tmp_path / "sentinel"
+    sentinel.write_text("keep", encoding="utf-8")
+    sentinel.chmod(0o600)
+    layer = tmp_path / "root" / "layer"
+    layer.mkdir(parents=True)
+    (layer / "link").symlink_to(sentinel)
+    layer.chmod(0o500)
+    qbc.remove_tree(tmp_path / "root")
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+    assert stat.S_IMODE(sentinel.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_remove_tree_leaves_unreadable_layers_without_raising(tmp_path):
+    if os.geteuid() == 0:
+        pytest.skip("root bypasses directory read permissions")
+    root = tmp_path / "root"
+    layer = root / "layer"
+    layer.mkdir(parents=True)
+    (layer / "file").write_text("keep", encoding="utf-8")
+    layer.chmod(0)
+    try:
+        qbc.remove_tree(root)
+        assert layer.exists()  # best effort: caller reports the retained state
+    finally:
+        layer.chmod(0o700)
+        shutil.rmtree(root)
+
+
+def test_remove_tree_does_not_retry_directory_open_with_missing_flags(tmp_path):
+    # Also cover hosts whose rmtree does not use the fd-based implementation.
+    qbc._make_writable(os.open, str(tmp_path), None, root=tmp_path)
+
+
+def test_remove_tree_does_not_repair_the_shared_parent(tmp_path, monkeypatch):
+    root = tmp_path / "private"
+    root.mkdir()
+    calls = []
+    monkeypatch.setattr(os, "chmod", lambda *a, **kw: calls.append(a))
+    qbc._make_writable(os.rmdir, str(root), None, root=root)
+    assert calls == []
+    assert root.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="MSB_HOME is not redirected on Windows")
+def test_a_stop_signal_after_the_directory_is_made_does_not_leave_it_behind(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "resolve", lambda self, *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()))
+    with pytest.raises(KeyboardInterrupt):
+        qbc.private_msb_home(str(tmp_path))
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the stub shims are POSIX shell scripts")
+@pytest.mark.skipif(sys.version_info < (3, 11), reason="the oracle runs the CLI under python -P")
+def test_an_msb_run_never_touches_the_callers_running_sandboxes_and_removes_its_own_state(tmp_path):
+    # A caller whose own msb already has a running sandbox: msb keeps its catalog under
+    # MSB_HOME, and acq's credential steps re-feed every running sandbox in it.
+    caller_msb = tmp_path / "caller-msb"
+    catalog = caller_msb / ".microsandbox" / "catalog.json"
+    catalog.parent.mkdir(parents=True)
+    catalog.write_text(json.dumps({"operators-box": "running"}), encoding="utf-8")
+    before = catalog.read_text(encoding="utf-8")
+    home, tmp, log = tmp_path / "home", tmp_path / "tmp", tmp_path / "msb.log"
+    home.mkdir(), tmp.mkdir()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    shim = bin_dir / "msb"
+    shim.write_text(
+        "#!/bin/sh\n"
+        f"echo \"MSB_HOME=$MSB_HOME NO_REFEED=$ACQ_SECRET_NO_LIVE_REFEED $*\" >> {log}\n"
+        f"ACQ_MSB_STUB_VERSION=0.7.11 PYTHONPATH={REPO_ROOT / 'py-acq' / 'src'} "
+        f"exec {sys.executable} -P -m acq_py._stub_msb \"$@\"\n"
+    )
+    shim.chmod(0o755)
+    env = {"PATH": os.pathsep.join([str(bin_dir), "/usr/bin", "/bin"]), "HOME": str(home), "TMPDIR": str(tmp),
+           "MSB_HOME": str(caller_msb)}
+    proc = subprocess.run([sys.executable, str(ORACLE_PATH), "--backend", "msb"], env=env, cwd=tmp_path,
+                          capture_output=True, text=True, timeout=300)
+
+    assert catalog.read_text(encoding="utf-8") == before
+    text = log.read_text(encoding="utf-8")
+    calls = [c for c in text.splitlines() if c.startswith("MSB_HOME=")]  # a call's argv may span lines
+    assert calls and "operators-box" not in text, text
+    assert not any(c.startswith(f"MSB_HOME={caller_msb} ") for c in calls), calls
+    assert all(" NO_REFEED=1 " in c for c in calls), calls  # the only protection where MSB_HOME is not redirected
+    private = {c.split()[0] for c in calls}
+    assert len(private) == 1, private  # one private MSB_HOME for every call, the canary's included
+    path = Path(private.pop().removeprefix("MSB_HOME="))
+    assert path != caller_msb and len(os.fsencode(path)) <= qbc.MSB_HOME_MAX_BYTES
+    assert f"msb-home={path}" in proc.stderr  # printed up front, for a hand cleanup after a hard kill
+    assert not path.exists()  # removed with the run
+    assert list(tmp.iterdir()) == []
+
+
+def test_a_timed_out_msb_create_is_blocked_not_failed(tmp_path, capsys):
+    c, _fake, _raw = cell(tmp_path, "msb", create="timeout")
+    assert c.boot() is False
+    assert c.blocked == ["create"] and c.failures == []
+    # Through run(): a blocked-only boot is BLOCKED (exit 2), not FAIL, and teardown still ran.
+    grown = tmp_path / "run"
+    grown.mkdir()
+    c2, fake2, _raw2 = cell(grown, "msb", create="timeout")
+    assert c2.run() == 2, capsys.readouterr().err
+    assert fake2.calls[-3:] == teardown_calls(c2, fake2)
+
+
+def test_a_timed_out_sbx_create_is_still_a_failure(tmp_path):
+    c, _fake, _raw = cell(tmp_path, "sbx", create="timeout")
+    assert c.boot() is False
+    assert c.failures == ["create"]
 
 
 def test_canary_env_pins_the_image_and_names_the_sandbox_after_the_run(tmp_path):

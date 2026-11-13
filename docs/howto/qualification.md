@@ -3,7 +3,7 @@ title: "Cross-Platform Qualification How-To (Tier-3)"
 description: "How to run the six ADR-0044m Tier-3 qualification oracles and record honest PASS/FAIL/BLOCKED transcripts on macOS, Linux and Windows x64 hosts"
 status: canonical
 tier: 3
-last_updated: "2026-11-09"
+last_updated: "2026-11-13"
 audience: "developers"
 keywords: ["qualification", "tier-3", "transcript", "msb", "sbx", "oracle", "adr-0044m", "matrix"]
 related_files: ["docs/howto/release-gate-setup.md", "docs/adr/0044m-live-cross-platform-qualification-matrix-and-transcript.md", "qualification/README.md", "docs/qualification-ledger.json", ".github/workflows/tier3-release-gate.yml", "scripts/qualify-backend-cell", "scripts/qualify-msb-ro-mount", "docs/KNOWN_FAILURE_MODES.md", "docs/adr/0035-host-authoritative-sandbox-config.md", "docs/adr/0041m-configuration-and-state-migration-behavior.md"]
@@ -240,9 +240,29 @@ subprocess gets a private configuration and state tree (`XDG_CONFIG_HOME`,
 provider id and the credential variable all carry a per-run nonce, so nothing in a
 backend's own store can be overwritten, and the sbx teardown removes only the custom
 secrets whose variables are this run's. The names are printed to stderr before
-anything else, so a run that is killed outright can be cleaned up by hand. `HOME` is
-kept, because the backend CLIs keep their login, daemon and image cache there. The
-caller's `ACQ_*` variables are not passed to acq (a stub seam such as
+anything else, so a run that is killed outright can be cleaned up by hand.
+
+An msb run also gets a private `MSB_HOME` (msb's catalog, database and image cache),
+removed afterwards, so the operator's own msb sandboxes are not listed, rebound or
+re-fed with the throwaway credential. It is made under `/tmp` and must be short: msb
+puts a unix socket about 48 bytes below it and macOS allows fewer than 104 bytes, which
+the default `$TMPDIR` already exceeds. If no such directory can be made the run is
+BLOCKED; it never falls back to your own `MSB_HOME`. **Cost:** the image is pulled
+again on every msb run (about 2 GB on macOS arm64, roughly a minute or more), then
+deleted; a create that times out on a slow network is BLOCKED, not FAIL. The path is
+printed up front (`msb-home=`), so a run killed outright can be cleaned up with `rm -rf`.
+The run needs 6 GB free under `/tmp`, and only macOS arm64 has been verified (Linux
+needs an executable `/tmp`). On Windows `MSB_HOME` is not redirected (unverified
+there). Every msb run also sets `ACQ_SECRET_NO_LIVE_REFEED=1`, so credentials are
+stored without `msb modify` against any running sandbox; on Windows that is the only
+protection.
+
+sbx cannot be isolated this way. It has no state override, and an empty `HOME` loses
+the operator's `sbx login` and secret table (the oracle requires the global
+`USAI_API_KEY` secret), so `HOME` is kept for sbx: its login, daemon and global secret
+table are shared with the run. acq does not touch other sbx sandboxes.
+
+The caller's `ACQ_*` variables are not passed to acq (a stub seam such as
 `ACQ_MSB_BIN=__stub__` would otherwise turn a live run into a stubbed one), except
 those ending in `_TIMEOUT`, such as `ACQ_MSB_READY_TIMEOUT`, which only tune timing.
 `PYTHONPATH` is fixed to this checkout's `py-acq/src`, the CLI runs under
@@ -289,7 +309,7 @@ python -m qualification run \
   --backend sbx --backend-version "$V" \
   --os "$(uname -s)" --os-build "$(uname -r)" --arch "$(uname -m)" \
   --hypervisor "$HYPERVISOR" \
-  --image docker.io/docker/sandbox-templates:shell-docker \
+  --image ghcr.io/gsa-tts/agentic-coding-patterns/devenv-shell@sha256:0b5f4cc95c8fa7dd7f3ffd02b56e63d0caf9b151421ff6ea3cb34b2139e3966c \
   --rev "$(git rev-parse HEAD)" \
   --artifact-sha256 "$ARTIFACT_SHA256" \
   --transcript-dir "$TRANSCRIPT_DIR" \
@@ -327,7 +347,7 @@ for B in msb sbx; do
     --backend "$B" --backend-version "$V" \
     --os "$(uname -s)" --os-build "$(uname -r)" --arch "$(uname -m)" \
     --hypervisor "$HYPERVISOR" \
-    --image docker.io/docker/sandbox-templates:shell-docker \
+    --image ghcr.io/gsa-tts/agentic-coding-patterns/devenv-shell@sha256:0b5f4cc95c8fa7dd7f3ffd02b56e63d0caf9b151421ff6ea3cb34b2139e3966c \
     --rev "$(git rev-parse HEAD)" \
     --artifact-sha256 "$ARTIFACT_SHA256" \
     --transcript-dir "$TRANSCRIPT_DIR" \
@@ -335,6 +355,11 @@ for B in msb sbx; do
     -- scripts/qualify-backend-cell --backend "$B"
 done
 ```
+
+> `--image` in these snippets is only the transcript's `image=` label; the cell
+> creates from acq's default base image. Keep the label equal to
+> `common.OPENCODE_DEVENV_IMAGE` (`qualification.host` does this automatically;
+> ADR-0051m).
 
 > **Note on the oracle invocation.** The committed oracle is a shebang-executable
 > Python script (`#!/usr/bin/env python3`), so the bare `scripts/qualify-backend-cell`

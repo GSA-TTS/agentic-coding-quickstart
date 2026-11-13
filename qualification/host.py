@@ -71,8 +71,14 @@ from .model import TRANSCRIPT_DIR_TOKEN
 from .publish import HostError
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-# The image the cell oracle creates sandboxes from (scripts/qualify-backend-cell).
-IMAGE = "docker.io/docker/sandbox-templates:shell-docker"
+# The image the cell oracle creates sandboxes from: acq's own default base image
+# (``common.OPENCODE_DEVENV_IMAGE``, ADR-0030). The cell gets it by not passing
+# ``--image``, so this label must match that pin; a test keeps them equal
+# (ADR-0051m).
+IMAGE = (
+    "ghcr.io/gsa-tts/agentic-coding-patterns/devenv-shell@"
+    "sha256:0b5f4cc95c8fa7dd7f3ffd02b56e63d0caf9b151421ff6ea3cb34b2139e3966c"
+)
 # ASCII digits only: ``\d`` also matches other scripts' digits, which int() accepts.
 _VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 _VERSION_ARGV = {MSB: ["--version"], SBX: ["version"]}

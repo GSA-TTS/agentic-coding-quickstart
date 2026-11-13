@@ -245,3 +245,22 @@ that review. The technical checks listed above are unchanged.
 `docs/howto/release-gate-setup.md` (step 3) gives the settings that would make
 the review binding, and ADR-0045m's enforcement-status note records what the
 repository enforces today.
+
+## Amendment (2026-11-13): an msb run is isolated from the operator's msb state
+
+**Status of this amendment:** accepted (2026-11-13), by Bret Mogilefsky.
+
+The decision above says the oracle leaves the operator's own credentials and acq state
+as it found them. Live runs on a macOS host showed that did not extend to msb's own
+state. The oracle kept `HOME`, so `msb` used the operator's `MSB_HOME`; acq's credential
+steps re-feed every running sandbox in that catalog, so a run on a host with other
+running msb sandboxes failed (msb 0.7.7 will not add a new binding to a running
+sandbox) and had rebound a throwaway `USAI_API_KEY` into the operator's sandboxes.
+
+Decision: an msb run gets a private, short `MSB_HOME` under `/tmp`, removed afterwards,
+and sets `ACQ_SECRET_NO_LIVE_REFEED=1`. Where no short directory can be made, the run is
+BLOCKED rather than using the operator's `MSB_HOME`. sbx is not isolated: it has no state
+override and an empty `HOME` loses its login and secrets; its shared state is documented
+and acq does not touch other sbx sandboxes. Consequence: every msb run pulls the image
+again (about 2 GB). Because `scripts/qualify-backend-cell` is on the Tier-3 surface,
+merging this expires the recorded cells, which are then re-qualified with the same command.

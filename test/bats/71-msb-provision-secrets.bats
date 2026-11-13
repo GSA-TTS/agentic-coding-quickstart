@@ -55,7 +55,8 @@ _provision() { # NAME PRE_SNIPPET
   assert_regex "$log" "--volume ${wshost}:${ws}"
   refute_regex "$log" "--volume ${ws}:/home/agent/workspace"
   assert_regex "$log" 'msb create --name provbox'
-  assert_regex "$log" 'docker\.io/docker/sandbox-templates:shell-docker'
+  assert_regex "$log" 'ghcr\.io/gsa-tts/agentic-coding-patterns/devenv-shell@sha256:0b5f4cc95c8fa7dd7f3ffd02b56e63d0caf9b151421ff6ea3cb34b2139e3966c'
+  refute_regex "$log" 'docker\.io/docker/sandbox-templates:shell-docker'
   refute_regex "$log" 'docker\.io/library/node:22-bookworm'
 }
 
@@ -100,6 +101,7 @@ _provision() { # NAME PRE_SNIPPET
   '
   local log; log=$(cat "$CALLS")
   assert_regex "$log" 'docker\.io/library/node:22-bookworm'
+  refute_regex "$log" 'ghcr\.io/gsa-tts/agentic-coding-patterns/devenv-shell@sha256:0b5f4cc95c8fa7dd7f3ffd02b56e63d0caf9b151421ff6ea3cb34b2139e3966c'
   refute_regex "$log" 'docker\.io/docker/sandbox-templates:shell-docker'
 }
 

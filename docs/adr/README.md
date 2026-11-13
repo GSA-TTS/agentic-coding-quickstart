@@ -57,3 +57,5 @@ in each ADR; corrections and amendments are part of the record.
 | [0048m](0048m-windows-defaults-to-the-python-implementation.md) | Windows defaults to the Python implementation with acq's managed runtime | accepted |
 | [0049m](0049m-ci-only-python-quality-tools.md) | CI-only Python quality tools, pinned with hashes | accepted |
 | [0050m](0050m-release-signing-scaffolding.md) | Release signing scaffolding | accepted |
+| [0051m](0051m-sbx-base-kit-is-acq-owned.md) | acq supplies the sbx sandbox base kit instead of a built-in agent | accepted |
+| [0052m](0052m-msb-base-image-is-acq-owned.md) | msb's shell agent and the ro-mount canary use acq's base image | accepted |

@@ -902,7 +902,8 @@ route as a unix socket at `/home/agent/.acq/ssh-agent.sock` and exports it as
   recreate; acq's warning says which case applies.
 
 - **Needs msb >= 0.6.9** (the release that adds `--vsock`) **and `socat` in the
-  base image** (the default `docker/sandbox-templates:shell-docker` ships it). On
+  base image** (acq's default devenv base ships it, as does
+  `docker/sandbox-templates:shell-docker`). On
   a guest without `socat`, acq **warns and skips** the forward (fail-soft); the
   runtime floor already excludes older msb versions.
 - **It widens the host↔microVM trust boundary:** guest code can exercise every

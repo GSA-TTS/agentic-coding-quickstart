@@ -857,6 +857,34 @@ def copy_config(src: str, scratch: str) -> None:
                 _config_fail("set", key)
 
 
+def _remove_remote(ws: str, remote: str) -> None:
+    """Remove fetch-back refs without remote-remove's nested Git hook handling.
+
+    Older Git releases lose command-scope hooksPath during remote remove's ref
+    transaction. Direct update-ref preserves it; no-deref prevents a symbolic
+    remote ref from deleting a local branch outside this namespace.
+    """
+    prefix = f"refs/remotes/{remote}/"
+    refs = ws_git(ws, "for-each-ref", "--format=%(refname)", prefix)
+    if refs.returncode != 0:
+        raise _refuse(f"could not enumerate fetch-back refs for {remote}")
+    names = refs.stdout.splitlines()
+    if any(not ref.startswith(prefix) or any(c.isspace() for c in ref) for ref in names):
+        raise _refuse(f"invalid fetch-back ref for {remote}")
+    if names:
+        commands = "option no-deref\n" + "".join(f"delete {ref}\n" for ref in names)
+        if ws_git(ws, "update-ref", "--stdin", input_text=commands).returncode != 0:
+            raise _refuse(f"could not remove fetch-back refs for {remote}")
+    configured = ws_git(ws, "config", "--local", "--name-only", "--get-regexp",
+                        rf"^remote\.{re.escape(remote)}\.")
+    if configured.returncode == 1:
+        return
+    if configured.returncode != 0:
+        raise _refuse(f"could not read fetch-back configuration for {remote}")
+    if ws_git(ws, "config", "--local", "--remove-section", f"remote.{remote}").returncode != 0:
+        raise _refuse(f"could not remove fetch-back configuration for {remote}")
+
+
 def _wire(name: str, ws: str, sandbox_dir: Path, scratch: Path) -> None:
     try:
         copy_config(ws, str(scratch))
@@ -866,7 +894,7 @@ def _wire(name: str, ws: str, sandbox_dir: Path, scratch: Path) -> None:
     remote = f"{REMOTE_PREFIX}{name}"
     try:
         # Replace a stale same-name remote: its scratch was just verified absent.
-        ws_git(ws, "remote", "remove", remote)
+        _remove_remote(ws, remote)
         added = ws_git(ws, "remote", "add", remote, str(scratch)).returncode == 0
     except MsbError:
         added = False
@@ -1016,7 +1044,7 @@ def cleanup(name: str) -> None:
     remote = f"{REMOTE_PREFIX}{name}"
     if origin and os.path.isdir(origin):
         try:
-            ws_git(origin, "remote", "remove", remote)
+            _remove_remote(origin, remote)
         except MsbError as exc:
             _show(exc)
             _say(f"warning: left the '{remote}' remote in {origin} (see above).",
