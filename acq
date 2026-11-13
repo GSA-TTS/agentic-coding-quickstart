@@ -1153,6 +1153,17 @@ acq_backend_guard_version() {
   fi
 }
 
+# acq_backend_guard_create_compat — optional fresh-create compatibility gate
+# ---------------------------------------------------------------------------
+# Called only where a NEW sandbox is about to be provisioned, separately from
+# acq_backend_prepare so host preparation never runs twice. Only a backend that
+# defines acq_backend_check_create_compat (sbx) is checked; others skip it.
+acq_backend_guard_create_compat() {
+  if command -v acq_backend_check_create_compat >/dev/null 2>&1; then
+    acq_backend_check_create_compat || exit 1
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Intercept user-supplied `--kit <ref>` on run/create (repeatable).
 # ---------------------------------------------------------------------------
@@ -1273,6 +1284,7 @@ case "$subcommand" in
   create)
     shift
     acq_backend_prepare
+    acq_backend_guard_create_compat
     # First-run onboarding (ADR-0031): offer `acq configure` once before we
     # provision, so a brand-new user picks kits up front. No-op after first run
     # and in non-interactive sessions.
@@ -1402,6 +1414,9 @@ case "$subcommand" in
         advise_github_scope "$local_name" "$ws"
         advise_project_env_activation "$ws"
       else
+        # Only the fresh-create path needs the SBX kit-format compatibility gate.
+        # Existing-sandbox runs still use the backend's minimum-version check.
+        acq_backend_guard_create_compat
         # Fresh create: the USAi API key MUST be stored before we provision,
         # because a backend (msb) binds secrets only at create time. Creating the
         # sandbox first and setting the key after would leave the real sandbox

@@ -62,6 +62,11 @@ USAI_PROVIDER_MODELS_URL="${USAI_PROVIDER_MODELS_URL:-https://${USAI_PROVIDER_HO
 # required so `sbx kit add` recreated the sandbox preserving state; the
 # v2-grammar requirement supersedes that.)
 MIN_SBX_VERSION="0.39.0"
+# sbx 0.51.0 resolves the shell agent as a v3 kit; it refuses to compose that
+# kit with the v1/v2 kits acq currently supplies. The behavior of later
+# releases is unverified, so fail closed for provisioning until compatibility
+# is demonstrated. Existing-sandbox verbs retain the minimum-version check.
+ACQ_SBX_INCOMPATIBLE_FROM="0.51.0"
 
 # Max seconds to wait for `sbx exec` to become usable.
 ACQ_EXEC_READY_TIMEOUT="${ACQ_EXEC_READY_TIMEOUT:-60}"
@@ -129,10 +134,12 @@ EOF
 # acq_backend_check_version — sbx presence + version floor ONLY; fail closed
 # ---------------------------------------------------------------------------
 # Kept separate from acq_backend_prepare so verbs that only touch existing
-# sandbox state can be guarded with the cheap check. On sbx the two are currently
-# the same work (there is no host-readiness probe here), but the split keeps the
-# adapter contract identical across backends — acq calls check_version on
-# state-touching verbs and prepare on provisioning verbs. See ADR-0032.
+# sandbox state can be guarded with the cheap check. On sbx check_version and
+# prepare do the same work (there is no host-readiness probe here), but the split
+# keeps the adapter contract identical across backends — acq calls check_version on
+# state-touching verbs and prepare on provisioning verbs. sbx additionally
+# implements the optional acq_backend_check_create_compat hook (below), which is
+# not part of prepare. See ADR-0032.
 acq_backend_check_version() {
   if ! command -v sbx >/dev/null 2>&1; then
     echo "error: sbx CLI not found on PATH. Install sbx >= $MIN_SBX_VERSION." >&2
@@ -164,11 +171,35 @@ acq_backend_check_version() {
 }
 
 # ---------------------------------------------------------------------------
-# acq_backend_prepare — sbx version floor check
+# acq_backend_prepare — version floor
 # ---------------------------------------------------------------------------
 
 acq_backend_prepare() {
   acq_backend_check_version
+}
+
+# ---------------------------------------------------------------------------
+# acq_backend_check_create_compat — optional fresh-create compatibility gate
+# ---------------------------------------------------------------------------
+# Optional adapter hook, called by acq only where a NEW sandbox is about to be
+# provisioned (`acq create`, and the fresh-create branch of `acq run`). Kept apart
+# from acq_backend_prepare so host preparation never runs twice and existing
+# sandbox re-attach is unaffected. Fails closed on an unparseable sbx version.
+acq_backend_check_create_compat() {
+  local raw current
+  if ! raw=$(sbx version 2>/dev/null) || [[ ! "$raw" =~ ^sbx[[:space:]]version:[[:space:]]v?([0-9]+)\.([0-9]+)\.([0-9]+)([[:space:]]|$) ]]; then
+    echo "error: cannot confirm an sbx version compatible with acq's v1/v2 kits for a new sandbox." >&2
+    echo "       Use --backend msb, or install a verified compatible sbx release." >&2
+    return 1
+  fi
+  current="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+  if [ "$(version_ge "$current" "$ACQ_SBX_INCOMPATIBLE_FROM")" -eq 0 ]; then
+    echo "error: acq cannot create sandboxes with sbx $current: sbx resolves the shell agent as a v3 kit" >&2
+    echo "       and rejects composition with acq's v1/v2 kits. No sandbox was created." >&2
+    echo "       Use the msb backend for now (--backend msb). sbx versions from" >&2
+    echo "       $ACQ_SBX_INCOMPATIBLE_FROM onward need a verified compatibility fix; see KNOWN_FAILURE_MODES 53." >&2
+    return 1
+  fi
 }
 
 # ---------------------------------------------------------------------------
