@@ -872,8 +872,10 @@ def _remove_remote(ws: str, remote: str) -> None:
     if any(not ref.startswith(prefix) or any(c.isspace() for c in ref) for ref in names):
         raise _refuse(f"invalid fetch-back ref for {remote}")
     if names:
-        commands = "".join(f"delete {ref}\n" for ref in names)
-        if ws_git(ws, "update-ref", "--no-deref", "--stdin", input_text=commands).returncode != 0:
+        # Text-mode stdin translates LF to CRLF on Windows. Git's -z protocol
+        # has no line endings: the empty old-value field means no value check.
+        commands = "".join(f"delete {ref}\0\0" for ref in names)
+        if ws_git(ws, "update-ref", "--no-deref", "--stdin", "-z", input_text=commands).returncode != 0:
             raise _refuse(f"could not remove fetch-back refs for {remote}")
     configured = ws_git(ws, "config", "--local", "--name-only", "--get-regexp",
                         rf"^remote\.{re.escape(remote)}\.")

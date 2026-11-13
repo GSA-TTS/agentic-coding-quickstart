@@ -436,6 +436,26 @@ def test_rm_remote_symbolic_ref_does_not_delete_a_local_branch(env, tmp_path, ca
     assert _remote_url(env) is None
 
 
+def test_remote_removal_survives_windows_text_stdin_translation(env, monkeypatch, capsys):
+    assert _create(capsys, str(env), "--clone")[0] == 0
+    _git("-C", str(env), "update-ref", f"refs/remotes/{REMOTE}/main", "HEAD")
+    real_run = msb_clone._run
+    payloads = []
+
+    def text_pipe(argv, child_env, *, input_text=None, **kwargs):
+        if "update-ref" in argv and input_text is not None:
+            payloads.append(input_text)
+            input_text = input_text.replace("\n", "\r\n")
+        return real_run(argv, child_env, input_text=input_text, **kwargs)
+
+    monkeypatch.setattr(msb_clone, "_run", text_pipe)
+    rc, _doc, err = _acq(capsys, "rm", NAME)
+    assert rc == 0, err
+    assert payloads and all("\n" not in p and "\0" in p for p in payloads)
+    assert not _git("-C", str(env), "for-each-ref", f"refs/remotes/{REMOTE}/").stdout.strip()
+    assert _remote_url(env) is None
+
+
 def test_16_a_workspace_that_borrows_objects_via_alternates_is_refused(env, tmp_path, monkeypatch, capsys):
     other = _mk_repo(tmp_path / "otherrepo")
     (env / ".git" / "objects" / "info" / "alternates").write_text(f"{other / '.git' / 'objects'}\n",
@@ -747,7 +767,7 @@ def test_41_host_side_git_runs_with_no_pager_at_create_and_rm(env, monkeypatch, 
     _git("-C", str(env), "update-ref", f"refs/remotes/{REMOTE}/main", "HEAD")
     assert _acq(capsys, "rm", NAME)[0] == 0
     wrapped = calls.wrapped()
-    assert any(line.endswith(" update-ref --no-deref --stdin") for line in wrapped)
+    assert any(line.endswith(" update-ref --no-deref --stdin -z") for line in wrapped)
     assert any(line.endswith(f" config --local --remove-section remote.{REMOTE}") for line in wrapped)
     assert wrapped and all(line.startswith("--no-pager ") for line in wrapped)
 
