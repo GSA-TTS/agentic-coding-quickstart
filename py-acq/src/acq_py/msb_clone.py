@@ -872,8 +872,8 @@ def _remove_remote(ws: str, remote: str) -> None:
     if any(not ref.startswith(prefix) or any(c.isspace() for c in ref) for ref in names):
         raise _refuse(f"invalid fetch-back ref for {remote}")
     if names:
-        commands = "option no-deref\n" + "".join(f"delete {ref}\n" for ref in names)
-        if ws_git(ws, "update-ref", "--stdin", input_text=commands).returncode != 0:
+        commands = "".join(f"delete {ref}\n" for ref in names)
+        if ws_git(ws, "update-ref", "--no-deref", "--stdin", input_text=commands).returncode != 0:
             raise _refuse(f"could not remove fetch-back refs for {remote}")
     configured = ws_git(ws, "config", "--local", "--name-only", "--get-regexp",
                         rf"^remote\.{re.escape(remote)}\.")
@@ -1027,9 +1027,11 @@ def warn_unfetched(name: str) -> bool:
 def cleanup(name: str) -> None:
     """Delete ``name``'s scratch clone and drop its fetch-back remote (best-effort).
 
-    ``git remote remove sandbox-<name>`` also deletes the checkout's
-    ``refs/remotes/sandbox-<name>/*``: branches fetched from the sandbox stay
-    only where the user merged or branched them.
+    Only ``refs/remotes/sandbox-<name>/*`` and the local remote configuration
+    section are removed. Local branches, branch upstream settings and custom
+    fetch destinations are preserved; an upstream that names the removed remote
+    must be changed by the user. Unmerged tracking refs in this namespace are
+    discarded.
     """
     if not valid_name(name):
         return

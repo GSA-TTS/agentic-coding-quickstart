@@ -4056,17 +4056,19 @@ _acq_msb_clone_read_packed_refs() {
 # Older Git remote-remove ref transactions can lose the command-scope hooksPath
 # override. Direct update-ref honors it; no-deref preserves local branch targets
 # when a remote-tracking ref is symbolic.
+# Only this literal ref namespace and the local remote section are removed;
+# branch upstream settings and custom fetch destinations are preserved.
 _acq_msb_clone_remove_remote() {
   local ws="$1" remote="$2" refs ref commands rc=0
   refs=$(_acq_msb_git_ws "$ws" for-each-ref --format='%(refname)' "refs/remotes/${remote}/") || return 1
   if [ -n "$refs" ]; then
-    commands=$'option no-deref\n'
+    commands=""
     while IFS= read -r ref; do
       case "$ref" in "refs/remotes/${remote}/"*) ;; *) return 1 ;; esac
       case "$ref" in *[[:space:]]*) return 1 ;; esac
       commands="${commands}delete ${ref}"$'\n'
     done <<< "$refs"
-    printf '%s' "$commands" | _acq_msb_git_ws "$ws" update-ref --stdin || return 1
+    printf '%s' "$commands" | _acq_msb_git_ws "$ws" update-ref --no-deref --stdin || return 1
   fi
   # --get-regexp returns 1 for an absent section; every other error is a refusal.
   _acq_msb_git_ws "$ws" config --local --name-only --get-regexp "^remote\\.${remote//./\\.}\\." >/dev/null 2>&1 || rc=$?

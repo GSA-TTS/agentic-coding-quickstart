@@ -378,9 +378,9 @@ def _new_sbx_sandbox(
 ) -> tuple[dict | None, int | None]:
     """Translate the kits, create the sandbox with them, then wait for kit startup (Bash sbx provision).
 
-    sbx applies the kits itself (``sbx create --kit DIR``). On the default image
-    OpenCode comes from the pinned kit, so sbx is given the ``shell`` agent and
-    does not add its own OpenCode kit as well. ``opts.clone`` is sbx's
+    sbx applies the kits itself (``sbx create --kit DIR``). Shell and OpenCode
+    use acq's base sandbox kit; OpenCode comes from its pinned install kit on
+    both default and custom images. ``opts.clone`` is sbx's
     native ``--clone`` (ADR-0027).
     """
     image = _resolve_image(image_flag, agent, "sbx")

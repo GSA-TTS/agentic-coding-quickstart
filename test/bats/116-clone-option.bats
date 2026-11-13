@@ -702,6 +702,23 @@ _assert_layout_refused() { # SANDBOX
   [ ! -e "$STUBDIR/state/clones/$1" ]
 }
 
+@test "clone(msb): removing multiple remote refs preserves symbolic targets" {
+  _msb_clone -- create shell --clone "$CLONEPROJ"
+  assert_success
+  git -C "$CLONEPROJ" branch keep-local
+  git -C "$CLONEPROJ" branch keep-other
+  local before
+  before=$(git -C "$CLONEPROJ" rev-parse refs/heads/keep-local)
+  git -C "$CLONEPROJ" update-ref refs/remotes/sandbox-shell-cloneproj/a HEAD
+  git -C "$CLONEPROJ" symbolic-ref refs/remotes/sandbox-shell-cloneproj/y-alias refs/heads/keep-local
+  git -C "$CLONEPROJ" symbolic-ref refs/remotes/sandbox-shell-cloneproj/z-alias refs/heads/keep-other
+  _msb_clone -- rm shell-cloneproj
+  assert_success
+  [ "$(git -C "$CLONEPROJ" rev-parse refs/heads/keep-local)" = "$before" ]
+  [ "$(git -C "$CLONEPROJ" rev-parse refs/heads/keep-other)" = "$before" ]
+  [ -z "$(git -C "$CLONEPROJ" for-each-ref refs/remotes/sandbox-shell-cloneproj/)" ]
+}
+
 @test "clone(msb): host-side git runs with --no-pager at create and rm" {
   _record_git "$STUBDIR/gitlog"
   _msb_clone -- create shell --clone "$CLONEPROJ"
