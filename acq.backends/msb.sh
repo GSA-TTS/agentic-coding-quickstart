@@ -5242,7 +5242,8 @@ acq_backend_run() {
   # Kit-declared environment[] entries persisted at provision are replayed the
   # same way, mirroring the flag order the provisioning execs use (HOME, sock,
   # then kit env — see _acq_msb_exec_flags_into).
-  local _sock _sockflag=() _gitident=() _kitenv=() ws
+  local _sock _sockflag=() _gitident=() _kitenv=() _streamflag=() ws
+  [ "${ACQ_SESSION_KIND:-}" = "acp" ] && _streamflag=(--stream)
   _sock=$(_acq_msb_ssh_auth_sock_for "$name")
   [ -n "$_sock" ] && _sockflag=(-e "SSH_AUTH_SOCK=$_sock")
   _acq_msb_apply_host_git_global_config "$name"
@@ -5270,11 +5271,11 @@ acq_backend_run() {
       && command -v acq_session_is_user >/dev/null 2>&1 && acq_session_is_user \
       && command -v acq_guest_exec_script >/dev/null 2>&1 && [ "${1:-}" = "--" ]; then
     shift
-    _acq_msb_cli exec -u agent -e HOME=/home/agent -w "$ws" ${_sockflag[@]+"${_sockflag[@]}"} \
+    _acq_msb_cli exec ${_streamflag[@]+"${_streamflag[@]}"} -u agent -e HOME=/home/agent -w "$ws" ${_sockflag[@]+"${_sockflag[@]}"} \
       ${_gitident[@]+"${_gitident[@]}"} ${_kitenv[@]+"${_kitenv[@]}"} \
       -e "ACQ_WORKSPACE=$ws" "$name" -- sh -c "$(acq_guest_exec_script)" sh "$@"
   else
-    _acq_msb_cli exec -u agent -e HOME=/home/agent -w "$ws" ${_sockflag[@]+"${_sockflag[@]}"} \
+    _acq_msb_cli exec ${_streamflag[@]+"${_streamflag[@]}"} -u agent -e HOME=/home/agent -w "$ws" ${_sockflag[@]+"${_sockflag[@]}"} \
       ${_gitident[@]+"${_gitident[@]}"} ${_kitenv[@]+"${_kitenv[@]}"} "$name" "$@"
   fi
 }

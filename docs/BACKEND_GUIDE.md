@@ -893,6 +893,7 @@ rationale, the fixed vsock port (3552), and the trust-boundary discussion.
 | Kit volumes | neutral `volumes:` passed through 1:1 to kit-spec v2 §5.7 (sized block device / tmpfs, mounted at create; dies with the sandbox) | neutral `volumes:` unioned across kits (last wins by path) and mapped to a derived named disk volume (`--mount-named acq-<sandbox>-<pathslug>-<crc>:<path>:kind=disk,size=<size>`) or `--tmpfs <path>:<size>`; derived volumes removed on `acq rm` (ADR-0023) |
 | Agent binary | supplied by the sbx agent template | supplied by the selected agent kit or the base image, then launched on attach |
 | OpenCode web UI | `openchamber` acq kit (publishes port 4096) | same kit once it declares `backends: [sbx, msb]` against the released patterns schema (neutral port/background vocab consumed by both backends; the patterns repo's openchamber kit) |
+| ACP (`acq acp`) stdio streaming | `sbx exec -i` (interactive stdin, no PTY; [ADR-0040](adr/0040-acp-standard-agent-interface.md)) | `msb exec --stream` (bidirectional byte-faithful stdin/stdout without PTY or EOF buffering; [ADR-0040](adr/0040-acp-standard-agent-interface.md)) |
 | In-place kit heal | `sbx kit add` (state-preserving, 0.35.0+; **no startup-bearing kits on 0.38+ — recreate to extend/refresh**) | re-apply kits idempotently (no state-preserving add) |
 
 ### Known limitations

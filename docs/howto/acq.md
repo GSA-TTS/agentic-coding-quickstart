@@ -3,10 +3,10 @@ title: "acq How-To Guide"
 description: "Detailed how-to for acq, the pluggable-backend wrapper for agentic-coding-quickstart"
 status: canonical
 tier: 2
-last_updated: "2026-10-28"
+last_updated: "2026-11-13"
 audience: "developers"
-keywords: ["acq", "backend", "sbx", "msb", "howto", "sandbox"]
-related_files: ["docs/BACKEND_GUIDE.md", "docs/CONCEPTS.md", "docs/howto/msb.md", "docs/howto/sbx.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md"]
+keywords: ["acq", "backend", "sbx", "msb", "howto", "sandbox", "acp", "zed"]
+related_files: ["docs/BACKEND_GUIDE.md", "docs/CONCEPTS.md", "docs/howto/msb.md", "docs/howto/sbx.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md", "docs/adr/0040-acp-standard-agent-interface.md"]
 load_priority: "on-demand"
 review_cycle: "quarterly"
 ---
@@ -748,10 +748,75 @@ export ACQ_EXEC_READY_TIMEOUT=120
 
 ---
 
+## IDE integration via Agent Client Protocol (`acq acp`)
+
+`acq acp` launches a sandboxed coding agent's
+[Agent Client Protocol (ACP)](https://agentclientprotocol.com/) server over raw
+`stdin`/`stdout` (no PTY; see
+[ADR-0040](../adr/0040-acp-standard-agent-interface.md)):
+
+```bash
+acq acp opencode .
+# or attach to an existing sandbox by name:
+acq acp <sandbox-name>
+```
+
+During the prologue (creating or resuming the sandbox, healing kits, and
+validating credentials), `acq acp` forces non-interactive mode
+(`ACQ_NO_PROMPT=1`) and routes all status output to `stderr`, keeping `stdout`
+strictly reserved for JSON-RPC 2.0 frames.
+
+> **Prerequisite:** Store your provider key once in a terminal (`acq secret set
+> -g usai`) before launching a brand-new sandbox from a headless IDE.
+
+### Zed configuration (`~/.config/zed/settings.json`)
+
+Add `acq acp` under `agent_servers` in your Zed settings (when Zed spawns an
+agent server for an open workspace, `PWD` is the workspace root):
+
+```jsonc
+{
+  "agent_servers": {
+    "opencode-acq": {
+      "default_config_options": {
+        "effort": "high",
+        "mode": "build",
+        "model": "usai/claude-sonnet-5.5"
+      },
+      "type": "custom",
+      "command": "/path/to/agentic-coding-quickstart/acq",
+      "args": ["acp", "opencode", "."],
+      "env": {}
+    }
+  }
+}
+```
+
+Pass additional ACP flags or a custom ACP server binary inside the sandbox after
+`--`:
+
+```bash
+acq acp opencode . -- --print-logs
+acq acp my-sandbox -- custom-acp-server --stdio
+```
+
+### Session persistence and caching
+
+OpenCode's ACP server advertises `loadSession: true` and `sessionCapabilities`
+(`list`, `resume`, `fork`, `close`), storing session state in
+`/home/agent/.local/share/opencode/opencode.db` inside the sandbox. Sessions
+automatically survive IDE restarts and `acq stop` / `acq start`. For dedicated
+block storage, attach a kit declaring a `volumes:` entry at
+`/home/agent/.local/share/opencode` (see
+[ADR-0023](../adr/0023-neutral-volumes-kit-vocabulary.md)).
+
+---
+
 ## See also
 
 - [docs/BACKEND_GUIDE.md](../BACKEND_GUIDE.md) — per-backend strengths and tradeoffs
 - [docs/howto/msb.md](msb.md) — detailed msb (microsandbox) reference (the default backend)
 - [docs/howto/sbx.md](sbx.md) — detailed sbx CLI reference
 - [docs/adr/0010-acq-pluggable-backends.md](../adr/0010-acq-pluggable-backends.md) — architecture decision
+- [docs/adr/0040-acp-standard-agent-interface.md](../adr/0040-acp-standard-agent-interface.md) — ACP standard agent interface decision
 - [docs/KNOWN_FAILURE_MODES.md](../KNOWN_FAILURE_MODES.md) — troubleshooting

@@ -105,3 +105,32 @@ load 'helper'
   assert_success
   assert_output ""
 }
+
+@test "agents: acq_agent_kit_acp_entrypoint resolves coding agents and rejects shell" {
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/agents.sh"
+    acq_agent_kit_acp_entrypoint opencode
+    acq_agent_kit_acp_entrypoint claude
+    if acq_agent_kit_acp_entrypoint shell; then exit 1; fi
+    if acq_agent_kit_acp_entrypoint ""; then exit 2; fi
+    if acq_agent_kit_acp_entrypoint notanagent; then exit 3; fi
+  '
+  assert_success
+  assert_output $'opencode\nclaude'
+}
+
+@test "agents: acq_build_acp_argv builds opencode acp and honors -- flags and command escape" {
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    acq_build_acp_argv opencode
+    printf "%s\n" "${ACQ_ACP_ARGV[*]}"
+    acq_build_acp_argv opencode --print-logs
+    printf "%s\n" "${ACQ_ACP_ARGV[*]}"
+    acq_build_acp_argv opencode --log-level debug
+    printf "%s\n" "${ACQ_ACP_ARGV[*]}"
+    acq_build_acp_argv opencode custom-acp --stdio
+    printf "%s\n" "${ACQ_ACP_ARGV[*]}"
+  '
+  assert_success
+  assert_output $'opencode acp\nopencode acp --print-logs\nopencode acp --log-level debug\ncustom-acp --stdio'
+}

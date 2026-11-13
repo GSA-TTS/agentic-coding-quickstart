@@ -1254,9 +1254,37 @@ advise_project_env_activation() {
 
 acq_session_is_user() {
   case "${ACQ_SESSION_KIND:-}" in
-    exec|shell|attach) return 0 ;;
+    exec|shell|attach|acp) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# Build the guest command argv for `acq acp` (ADR-0040) into ACQ_ACP_ARGV.
+# Usage: acq_build_acp_argv AGENT [POST_SEP_ARGS...]
+#   - Rejects non-ACP tokens such as `shell` (via acq_agent_kit_acp_entrypoint).
+#   - If POST_SEP_ARGS starts with a non-flag token, treats it as an explicit
+#     command override (matching `acq run NAME -- CMD...`), allowing custom ACP
+#     servers inside the sandbox.
+#   - Otherwise invokes `<entrypoint> acp` followed by any post-`--` flags
+#     (working directory is set by acq_backend_run via `-w "$ws"`).
+acq_build_acp_argv() {
+  # shellcheck disable=SC2034  # consumed by the acq entry point's acp arm
+  ACQ_ACP_ARGV=()
+  local agent="${1:-}" bin
+  shift 1 2>/dev/null || shift "$#"
+  bin=$(acq_agent_kit_acp_entrypoint "$agent") || return 1
+  if [ "$#" -gt 0 ]; then
+    case "$1" in
+      -*) ;;
+      *)
+        # Explicit command escape (e.g. `acq acp box -- custom-acp --stdio`).
+        ACQ_ACP_ARGV=("$@")
+        return 0
+        ;;
+    esac
+  fi
+  ACQ_ACP_ARGV=("$bin" acp "$@")
+  return 0
 }
 
 acq_guest_exec_script() {
@@ -2052,7 +2080,9 @@ acq_resolve_backend() {
   [ "$autodetected" -eq 1 ] && _announce_autodetect_backend
 
   _load_backend_adapter "$name"
-  _build_kit_list
+  if [ "${_ACQ_SKIP_RESOLVE_KIT_BUILD:-0}" != "1" ]; then
+    _build_kit_list
+  fi
 }
 
 # ============================================================================

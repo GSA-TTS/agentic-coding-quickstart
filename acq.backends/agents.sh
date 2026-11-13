@@ -78,6 +78,21 @@ acq_agent_kit_entrypoint() {
   esac
 }
 
+# Resolve the ACP (Agent Client Protocol) server binary for a known agent
+# (see ADR-0040). `shell` is an interactive shell, not an ACP agent, and returns
+# 1. Known coding agents return their validated entrypoint token.
+acq_agent_kit_acp_entrypoint() {
+  case "${1:-}" in
+    shell|"") return 1 ;;
+    opencode) printf '%s\n' opencode ;;
+    *)
+      acq_is_known_agent "$1" || return 1
+      acq_agent_safe_token "$1" || return 1
+      printf '%s\n' "$1"
+      ;;
+  esac
+}
+
 acq_agent_kit_install_owner() {
   case "$1" in
     opencode) printf '%s\n' kit ;;

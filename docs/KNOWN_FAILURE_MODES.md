@@ -3325,6 +3325,41 @@ it is a musl build and is content-pinned rather than signer-authenticated.
 
 ---
 
+## 53. Agent Client Protocol (ACP) Client Hangs on "Loading..." Without `msb exec --stream` / `sbx exec -i`
+
+**Status:** Fixed in `acq acp` ([ADR-0040](adr/0040-acp-standard-agent-interface.md)).
+
+### Symptoms
+
+- A desktop IDE or ACP client (such as Zed via `agent_servers`) spawns `acq` to
+  connect to an in-sandbox agent (`opencode acp`) and hangs on "Loading..." with
+  no error, even though a one-shot shell pipe test (`(printf ...; sleep 3) | ...`)
+  appears to return a valid JSON-RPC `initialize` response after 3 seconds.
+
+### Root Cause
+
+- ACP clients keep `stdin` **open** for the lifetime of the bidirectional
+  JSON-RPC 2.0 session and wait for the `initialize` response before sending
+  `session/new`.
+- On `msb`, a plain `msb exec` buffers or waits for `stdin` `EOF` before
+  completing non-interactive I/O; in a shell one-liner (`(printf ...; sleep 3) |
+  ...`), `sleep 3` closes `stdin` (`EOF`), masking the hang. `msb exec --stream`
+  is required for byte-faithful, line-by-line bidirectional streaming without a
+  PTY. Similarly, `sbx exec` requires `-i` (`--interactive`) without `-t`.
+- In addition, OpenCode v2 (`2.0.30+`) removed V1's `--cwd` CLI flag on
+  `opencode acp`; passing `--cwd` exits 1 with `Unrecognized flag: --cwd in
+  command opencode acp`.
+
+### Fix
+
+Use `acq acp opencode .` ([ADR-0040](adr/0040-acp-standard-agent-interface.md)).
+It sets `ACQ_SESSION_KIND="acp"`, which passes `--stream` to `msb exec` and `-i`
+to `sbx exec`, routes all prologue output to `stderr`, skips redundant resolve-time
+kit fetches when attaching to an already-running `current` sandbox, and relies on
+`acq_backend_run`'s `-w "$ws"` flag rather than `--cwd`.
+
+---
+
 ## Contributing
 
 When you discover a new failure mode:

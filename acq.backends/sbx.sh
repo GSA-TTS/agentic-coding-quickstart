@@ -1074,9 +1074,14 @@ _acq_sbx_opencode_launch_mode() {
 # ---------------------------------------------------------------------------
 
 acq_backend_run() {
-  local name="$1"
+  local name="$1" _iflag=()
   shift
-  _acq_sbx_apply_git_identity_kit "$name"
+  if [ "${ACQ_SESSION_KIND:-}" = "acp" ]; then
+    _acq_sbx_apply_git_identity_kit "$name" </dev/null >&2
+    _iflag=(-i)
+  else
+    _acq_sbx_apply_git_identity_kit "$name"
+  fi
   # Expect `-- CMD...` separator. No `-u agent` needed: sbx's agent templates
   # bake the unprivileged `agent` user (UID 1000, HOME=/home/agent) as the
   # default exec user, unlike a plain msb OCI base (which defaults to root).
@@ -1084,9 +1089,9 @@ acq_backend_run() {
       && command -v acq_session_is_user >/dev/null 2>&1 && acq_session_is_user \
       && command -v acq_guest_exec_script >/dev/null 2>&1 && [ "${1:-}" = "--" ]; then
     shift
-    sbx exec "$name" -- sh -c "$(acq_guest_exec_script)" sh "$@"
+    sbx exec ${_iflag[@]+"${_iflag[@]}"} "$name" -- sh -c "$(acq_guest_exec_script)" sh "$@"
   else
-    sbx exec "$name" "$@"
+    sbx exec ${_iflag[@]+"${_iflag[@]}"} "$name" "$@"
   fi
 }
 

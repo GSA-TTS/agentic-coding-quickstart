@@ -529,3 +529,63 @@ SPEC
   refute_output --partial 'built-in agent kit candidate'
   refute_regex "$(cat "$CALLS")" 'acq-kits/opencode'
 }
+
+@test "acp: acq acp opencode creates sandbox if missing, keeps stdout pure, and runs opencode acp over exec -i (no PTY)" {
+  local proj="$STUBDIR/acp-proj"; mkdir -p "$proj"
+  _seed_usai
+  local stdout_file="$STUBDIR/acp-stdout.out" stderr_file="$STUBDIR/acp-stderr.out"
+  env ACQ_BACKEND=sbx "$ACQ" acp opencode "$proj" >"$stdout_file" 2>"$stderr_file"
+  assert_equal "$(cat "$stdout_file")" ""
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'sbx create .* opencode-acp-proj'
+  assert_regex "$log" "sbx exec -i opencode-acp-proj -- opencode acp$"
+  refute_regex "$log" 'sbx run --name opencode-acp-proj'
+}
+
+@test "acp: acq acp on existing msb sandbox heals and runs msb exec --stream without -t" {
+  printf 'acpbox\n' > "$STUBDIR/.msb_sandbox_list"
+  printf 'acpbox\n' > "$STUBDIR/.msb_running_list"
+  run bash -c '
+    export ACQ_MSB_KIT_PASSTHROUGH=1
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    acq_host_config_write msb acpbox agent opencode
+    acq_host_config_write msb acpbox workspace /work/acp
+    exec env ACQ_BACKEND=msb "'"$ACQ"'" acp acpbox -- --print-logs
+  '
+  assert_success
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'msb exec --stream -u agent -e HOME=/home/agent -w /work/acp (.* )?acpbox -- opencode acp --print-logs'
+  refute_regex "$log" 'msb exec -t'
+}
+
+@test "acp: acq acp fast-paths an already-running current sandbox without re-applying kits" {
+  printf 'acpfast\n' > "$STUBDIR/.msb_sandbox_list"
+  printf 'acpfast\n' > "$STUBDIR/.msb_running_list"
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    acq_provenance_write msb acpfast /work/fast opencode
+    acq_host_config_write msb acpfast agent opencode
+    acq_host_config_write msb acpfast workspace /work/fast
+    acq_host_config_write msb acpfast generic-opencode generic-opencode
+    exec env ACQ_BACKEND=msb "'"$ACQ"'" acp acpfast
+  '
+  assert_success
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'msb exec --stream -u agent -e HOME=/home/agent -w /work/fast (.* )?acpfast -- opencode acp$'
+  refute_regex "$log" 'useradd|adduser'
+}
+
+@test "acp: acq acp rejects shell and unknown targets with exit 2" {
+  local proj="$STUBDIR/acp-shell"; mkdir -p "$proj"
+  run env ACQ_BACKEND=sbx "$ACQ" acp shell "$proj"
+  assert_equal "$status" "2"
+  assert_output --partial "'shell' is an interactive shell, not an ACP-capable agent"
+
+  run env ACQ_BACKEND=sbx "$ACQ" acp notanagent "$proj"
+  assert_equal "$status" "2"
+  assert_output --partial "'notanagent' is not a known agent or an existing sandbox"
+
+  run env ACQ_BACKEND=sbx "$ACQ" acp
+  assert_equal "$status" "2"
+  assert_output --partial "no agent or sandbox specified"
+}

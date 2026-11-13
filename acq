@@ -91,6 +91,10 @@ Subcommands:
                                            agent on a disposable clone of the
                                            primary, see run/create flags below.)
   create AGENT PATH [...]                  Create a sandbox (detached).
+  acp AGENT PATH [...] [-- ACP_ARGS...]    Create+start (or resume+heal) a sandbox
+                                           and run AGENT's ACP (Agent Client
+                                           Protocol) server over clean stdio.
+                                           Also accepts an existing sandbox NAME.
   ls                                       List sandboxes.
   stop NAME                                Stop a sandbox (without removing).
   start NAME                               Start a stopped sandbox and re-run its
@@ -401,6 +405,23 @@ returns without attaching. Attach later with `acq run NAME`.
 Every flag above is recognized only AFTER the subcommand (see `acq run --help`).
 U
       ;;
+    acp)
+      cat >&2 <<'U'
+acq acp — launch an agent's ACP (Agent Client Protocol) server over clean stdio
+
+Usage:
+  acq acp AGENT PATH [--kit REF]... [--image REF] [--clone] [--publish H:G]...
+          [--no-provider-kits] [--no-update-check] [-- AGENT_ACP_ARGS...]
+  acq acp NAME [-- AGENT_ACP_ARGS...]     # use an existing sandbox by name
+
+Creates a sandbox for AGENT (e.g. opencode) mounted at PATH if one does not
+already exist, or resumes and heals an existing one, then launches AGENT's ACP
+server inside the sandbox over raw stdin/stdout (no PTY; see ADR-0040). All
+provisioning, kit-heal, and credential-validation output is routed to stderr
+with interactive prompts disabled (ACQ_NO_PROMPT=1), keeping stdout strictly
+reserved for JSON-RPC 2.0 frames.
+U
+      ;;
     ls)
       cat >&2 <<'U'
 acq ls — list sandboxes
@@ -564,7 +585,7 @@ U
 _acq_verb_backend_help_kind() {
   case "${1%% *}" in
     run|ls|stop|rm|exec|cp|ports|secret|kit) printf 'shared' ;;
-    start|restart|create|shell|version|doctor|github-scope|usai-rotate-api-key|backend|provider-credential|kit-source) printf 'acqonly' ;;
+    start|restart|create|acp|shell|version|doctor|github-scope|usai-rotate-api-key|backend|provider-credential|kit-source) printf 'acqonly' ;;
     *) printf '' ;;
   esac
 }
@@ -1135,7 +1156,11 @@ esac
 # ---------------------------------------------------------------------------
 # Resolve and load the backend adapter (required for all other subcommands).
 # ---------------------------------------------------------------------------
-acq_resolve_backend "${explicit_backend}"
+if [ "$subcommand" = "acp" ]; then
+  _ACQ_SKIP_RESOLVE_KIT_BUILD=1 acq_resolve_backend "${explicit_backend}" </dev/null >&2
+else
+  acq_resolve_backend "${explicit_backend}"
+fi
 
 # ---------------------------------------------------------------------------
 # acq_backend_guard_version — cheap version floor for state-touching verbs
@@ -1164,7 +1189,7 @@ acq_backend_guard_version() {
 # shell so the array assignments survive. acq_resolve_backend already built the
 # kit list once; re-run _build_kit_list to include the CLI kits.
 case "$subcommand" in
-  run|create)
+  run|create|acp)
     _sub="$subcommand"
     shift                       # drop the subcommand token; $@ is now its args
     # Strip acq-owned `--no-update-check` BEFORE kit extraction
@@ -1240,11 +1265,13 @@ case "$subcommand" in
     fi
     extract_kit_flags "$@"
     _acq_kit_agent=""
-    _acq_kit_first=$(first_positional "${ACQ_KIT_REMAINING[@]}" || true)
-    if [ -n "$_acq_kit_first" ] && is_known_agent "$_acq_kit_first"; then
-      _acq_kit_agent="$_acq_kit_first"
+    if [ "$_sub" != "acp" ]; then
+      _acq_kit_first=$(first_positional ${ACQ_KIT_REMAINING[@]+"${ACQ_KIT_REMAINING[@]}"} || true)
+      if [ -n "$_acq_kit_first" ] && is_known_agent "$_acq_kit_first"; then
+        _acq_kit_agent="$_acq_kit_first"
+      fi
+      _build_kit_list "$_acq_kit_agent"
     fi
-    _build_kit_list "$_acq_kit_agent"
     unset _acq_kit_agent _acq_kit_first
     # Rebuild positional args as: <subcommand> <remaining args w/o --kit>.
     set -- "$_sub" ${ACQ_KIT_REMAINING[@]+"${ACQ_KIT_REMAINING[@]}"}
@@ -1554,6 +1581,142 @@ case "$subcommand" in
       echo "  - To list sandboxes:                        acq ls" >&2
       exit 2
     fi
+    ;;
+
+  acp)
+    # Launch an agent's ACP (Agent Client Protocol) server over clean stdio
+    # (ADR-0040). The entire prologue runs inside a brace group with stdin bound
+    # to /dev/null and stdout redirected to stderr, plus ACQ_NO_PROMPT=1 and
+    # ACQ_UPDATE_CHECK=0, so:
+    #   1. No provisioning, heal, or advisory output ever contaminates stdout
+    #      (fd 1 is reserved exclusively for JSON-RPC 2.0 frames).
+    #   2. No prologue subcommand or interactive picker can read or block on the
+    #      ACP client's stdin pipe (fd 0).
+    shift
+    export ACQ_NO_PROMPT=1
+    export ACQ_UPDATE_CHECK=0
+
+    create_args=()
+    agent_args=()
+    seen_sep=0
+    for arg in "$@"; do
+      if [ "$seen_sep" -eq 1 ]; then
+        agent_args+=("$arg")
+      elif [ "$arg" = "--" ]; then
+        seen_sep=1
+      else
+        create_args+=("$arg")
+      fi
+    done
+
+    first=""
+    if [ "${#create_args[@]}" -gt 0 ]; then
+      first=$(first_positional "${create_args[@]}")
+    fi
+    local_name=""
+    _acp_ws=""
+
+    {
+      acq_backend_prepare
+
+      if [ -n "$first" ] && is_known_agent "$first"; then
+        if ! acq_agent_kit_acp_entrypoint "$first" >/dev/null 2>&1; then
+          echo "acq: acp: '$first' is an interactive shell, not an ACP-capable agent." >&2
+          echo "  Usage: acq acp <agent|sandbox-name> [create-args] [-- ACP_ARGS...]" >&2
+          exit 2
+        fi
+        local_name=$(derive_name "${create_args[@]}") || exit 1
+        [ -n "$local_name" ] || { echo "acq: could not determine sandbox name" >&2; exit 1; }
+
+        ws=$(workspace_path "${create_args[@]}")
+        if ! acq_backend_exists "$local_name"; then
+          preflight_workspace_path "$ws" || exit 1
+        fi
+
+        if acq_backend_exists "$local_name"; then
+          note_publish_ignored_on_reattach "$local_name"
+          _acp_already_ready=0
+          if [ "$(acq_provenance_status "${ACQ_RESOLVED_BACKEND}" "$local_name")" = "current" ]; then
+            if ! command -v _acq_msb_is_running >/dev/null 2>&1 || _acq_msb_is_running "$local_name"; then
+              _acp_already_ready=1
+            fi
+          fi
+          if [ "$_acp_already_ready" -eq 0 ]; then
+            acq_provider_selection_load "${ACQ_RESOLVED_BACKEND}" "$local_name" || exit 1
+            _build_kit_list "$first"
+            acq_print_selected_agent_kit "$first"
+            if [ "${#ACQ_CLI_KITS[@]}" -eq 0 ]; then
+              acq_cli_kits_load "${ACQ_RESOLVED_BACKEND}" "$local_name"
+            fi
+            acq_backend_ensure_kits_applied "$local_name" || true
+            if ! ensure_valid_provider_keys "$local_name"; then
+              exit 1
+            fi
+          fi
+          [ -n "$ws" ] || ws="$PWD"
+          advise_project_env_activation "$ws"
+        else
+          _acq_apply_configured_extra_kits || exit 1
+          _build_kit_list "$first"
+          _acq_require_provider_selection || exit 1
+          acq_print_selected_agent_kit "$first"
+          [ -n "$ws" ] || ws="$PWD"
+          advise_project_env_activation "$ws"
+          acq_backend_provision "$local_name" "${create_args[@]}"
+          if ! ensure_valid_provider_keys "$local_name"; then
+            exit 1
+          fi
+        fi
+
+        if [ "$first" = "opencode" ] \
+            && ! acq_instance_uses_generic_opencode "$ACQ_RESOLVED_BACKEND" "$local_name"; then
+          ensure_opencode_postinstall "$local_name"
+        fi
+
+        acq_build_acp_argv "$first" ${agent_args[@]+"${agent_args[@]}"} || exit 2
+
+      elif [ -n "$first" ] && acq_backend_exists "$first"; then
+        local_name="$first"
+        _acp_agent=$(acq_backend_recorded_agent "$local_name" 2>/dev/null | tr -d '[:space:]' || true)
+        if ! acq_agent_kit_acp_entrypoint "$_acp_agent" >/dev/null 2>&1; then
+          echo "acq: acp: sandbox '$local_name' has recorded agent '${_acp_agent:-shell}', which is not an ACP-capable agent." >&2
+          exit 2
+        fi
+        note_publish_ignored_on_reattach "$local_name"
+        _acp_already_ready=0
+        if [ "$(acq_provenance_status "${ACQ_RESOLVED_BACKEND}" "$local_name")" = "current" ]; then
+          if ! command -v _acq_msb_is_running >/dev/null 2>&1 || _acq_msb_is_running "$local_name"; then
+            _acp_already_ready=1
+          fi
+        fi
+        if [ "$_acp_already_ready" -eq 0 ]; then
+          _build_kit_list "$_acp_agent"
+          if [ "${#ACQ_CLI_KITS[@]}" -eq 0 ]; then
+            acq_cli_kits_load "${ACQ_RESOLVED_BACKEND}" "$local_name"
+          fi
+          acq_backend_ensure_kits_applied "$local_name" || true
+        fi
+        if command -v acq_backend_workspace_for >/dev/null 2>&1; then
+          _acp_ws=$(acq_backend_workspace_for "$local_name" 2>/dev/null || true)
+        fi
+        advise_project_env_activation "$_acp_ws"
+        acq_build_acp_argv "$_acp_agent" ${agent_args[@]+"${agent_args[@]}"} || exit 2
+
+      else
+        if [ -z "$first" ]; then
+          echo "acq: acp: no agent or sandbox specified." >&2
+        else
+          echo "acq: acp: '$first' is not a known agent or an existing sandbox." >&2
+        fi
+        echo "  Usage: acq acp <agent|sandbox-name> [create-args] [-- ACP_ARGS...]" >&2
+        echo "  Known agents: ${ACQ_KNOWN_AGENTS# }" >&2
+        exit 2
+      fi
+      _acq_kit_fetch_cleanup || true
+    } </dev/null >&2
+
+    ACQ_SESSION_KIND="acp"
+    acq_backend_run "$local_name" -- "${ACQ_ACP_ARGV[@]}"
     ;;
 
   ls)

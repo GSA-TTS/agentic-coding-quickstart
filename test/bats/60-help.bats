@@ -85,6 +85,7 @@ load 'helper'
   local cases=(
     'run|acq run — create+attach a sandbox'
     'create|acq create — create a sandbox (detached'
+    'acp|acq acp — launch an agent'\''s ACP'
     'ls|acq ls — list sandboxes'
     'stop|acq stop — stop a sandbox'
     'start|acq start — resume a stopped sandbox'
