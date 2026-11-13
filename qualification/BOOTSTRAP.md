@@ -28,6 +28,18 @@ job before evaluation. Store reports in a fresh runner-temporary file rather
 than a candidate-controlled path. Enforce a job timeout and treat every nonzero
 exit as failure.
 
+Use a trusted Python >=3.11 executable, clear inherited Python startup/path
+overrides, disable user-site loading, and then set the one evaluator path:
+
+```sh
+PYTHONPATH="$TRUSTED_EVALUATOR" "$TRUSTED_PYTHON" -B -s -P -m qualification.gate check
+```
+
+The variables above are trusted absolute paths supplied by the reviewed job,
+not candidate inputs. The available bootstrap command is `qualification.gate`;
+the broader `python -m qualification` CLI mentioned in the imported package
+documentation is not included here.
+
 Ledger entries and waivers remain reviewed assertions. A waived cell is not a
 qualified cell. Old or nonancestor transcript revisions must not be relabeled
 as new evidence. The package does not authenticate who approved a waiver.
@@ -35,6 +47,6 @@ as new evidence. The package does not authenticate who approved a waiver.
 ## Offline checks
 
 Run `python -m unittest discover -s qualification/tests` in an isolated checkout.
-Tests use synthetic data and temporary directories; they do not exercise Git
-ancestry, committed oracle hashing, or surface-change detection. Live macOS, Windows
+Tests use synthetic data and temporary directories, including a Git-backed
+qualification/surface-change/ancestry check. Live macOS, Windows
 and Linux backend qualification belongs to the subsequent integration work.
