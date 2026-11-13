@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 #
 # 74-msb-restart-durability.bats — bats port of
-# scripts/test-acq.d/74-msb-restart-durability.sh (ADR-0017, #247, ADR-0025)
+# scripts/test-acq.d/74-msb-restart-durability.sh (ADR-0017, ADR-0025)
 #
 # acq start/restart verbs, acq_backend_start, start-if-stopped-on-attach, the
 # ordering guarantees (readiness probe / stop<start<heal), sbx capability-gating,

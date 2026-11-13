@@ -39,7 +39,7 @@ load "${REPO_ROOT}/test/vendor/bats-assert/load"
 # assertion locally while CI stayed green). Tests that need a knob set it
 # explicitly per invocation.
 acq_setup_stubs() {
-  unset ACQ_BACKEND ACQ_IMAGE ACQ_CLONE ACQ_EXTRA_KITS ACQ_PROVIDER_KITS \
+  unset ACQ_IMPL ACQ_RUNTIME ACQ_BACKEND ACQ_IMAGE ACQ_CLONE ACQ_EXTRA_KITS ACQ_PROVIDER_KITS \
         ACQ_PROVIDER_KITS_FROM_ENV ACQ_PROVIDER_KITS_FROM_CLI ACQ_UPDATE_CHECK \
         ACQ_PROVIDER_CREDENTIAL_BINDINGS ACQ_PROVIDER_INPUT_PYTHON \
         ACQ_PROVIDER_BINDINGS_GENERATION ACQ_KIT_SOURCES \
@@ -52,11 +52,16 @@ acq_setup_stubs() {
   # Tests should never see or write the developer's real git identity. Git reads
   # --global values from HOME and, when exported, XDG_CONFIG_HOME. Point both at
   # the stub dir so tests start from an empty host identity unless they set one
-  # explicitly.
+  # explicitly. make_stubs already put XDG_CACHE_HOME and the kit caches under
+  # this home.
   mkdir -p "$STUBDIR/home"
   export HOME="$STUBDIR/home"
   export XDG_CONFIG_HOME="$STUBDIR/xdg"
   unset GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
+  # The fetch stubs read the transport allowlist acq sets on its anonymous
+  # attempt; an inherited value would make them refuse every fetch. Tests that
+  # need one set it themselves.
+  unset GIT_ALLOW_PROTOCOL
   acq_clear_git_local_env
   # Git for Windows sets core.autocrlf=true system-wide, which rewrites LF->CRLF
   # in the stub repos and breaks byte-exact fixture assertions on Windows hosts.

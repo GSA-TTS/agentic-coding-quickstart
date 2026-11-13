@@ -36,8 +36,8 @@ and you have that SHA.
 
 ## 1. Where Phase 1 left things (context you can rely on)
 
-Phase 1 shipped in **PR #201** (`feat(acq): add pluggable-backend acq wrapper
-(sbx driver) and deprecate qsbx`). What exists today on `main`:
+Phase 1 shipped the pluggable-backend acq wrapper with an sbx driver and
+deprecated qsbx (ADR-0010). What exists today on `main`:
 
 | File | Role |
 |------|------|

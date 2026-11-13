@@ -89,7 +89,7 @@ SPEC
   assert_regex "$log" 'ocistartbox:/home/agent/oci-engine-marker'
   run cat "$(_acq_cli_kits_file msb ocistartbox)"
   assert_output --partial 'dir=integrations/isolation/acq-kits/oci-engine'
-   assert_output --partial 'ref=941a286f912b99475429c3c00db49a99af5b241e'
+  assert_output --partial 'ref=941a286f912b99475429c3c00db49a99af5b241e'
 }
 
 @test "cli-kits: backend keying — an sbx read does not see an msb record" {
@@ -101,7 +101,7 @@ SPEC
   assert_equal "${ACQ_CLI_KITS[0]}" "SENTINEL"
 }
 
-# End-to-end (#33 / Paseo): provision with --kit persists the ref; a later resume
+# End-to-end: provision with --kit persists the ref; a later resume
 # with an EMPTY in-memory set reloads it and the heal re-applies the kit's file.
 @test "cli-kits: provision persists --kit and resume heal re-applies it" {
   load_acq

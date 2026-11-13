@@ -5,8 +5,8 @@
 # Under MSYS/Cygwin acq must hand msb TWO different forms of a workspace path:
 # the native HOST form for the mount source / copied file / host socket
 # (host_path → C:/...), and the POSIX GUEST form for the mount target, the
-# start dir, and the ACQ_WORKSPACE env (canonicalize_path → /c/...). A single
-# value for both is the GSA-TTS/agentic-coding-quickstart#463 regression.
+# start dir, and the ACQ_WORKSPACE env (canonicalize_path → /c/...). Using the
+# same form for both confuses host mount sources with guest paths.
 #
 # MSYS is simulated with a fake `cygpath` (STUBDIR is prepended to PATH) that
 # implements a stable, invertible POSIX<->drive bijection, so these assertions
@@ -23,8 +23,11 @@ load 'helper'
 # The single logged `msb create` line from the stub call log.
 _create_line() { printf '%s\n' "$(cat "$CALLS")" | grep "^$1 create"; }
 
-# Minimal cygpath: -u maps a drive form to POSIX, -m maps an absolute POSIX path
-# to C: drive form. Distinct and invertible, which is all the split needs.
+# Minimal cygpath: -u maps a drive form to POSIX and a backslash UNC
+# (\\server\share) to the Cygwin //server/share form, -m maps an absolute POSIX
+# path to C: drive form. Distinct and invertible, which is all the split needs.
+# Emitting //server/share for \\server\share lets the UNC test exercise the full
+# cygpath -u -> //server/share -> /unc/ chain (ADR-0029 amendment).
 _plant_cygpath_stub() {
   cat >"$STUBDIR/cygpath" <<'CYGSTUB'
 #!/usr/bin/env bash
@@ -35,6 +38,7 @@ case "$mode" in
       case "$p" in
         C:/tmp/*) printf '/tmp/%s\n' "${p#C:/tmp/}" ;;
         [A-Za-z]:/*) d=$(printf '%s' "${p%%:*}" | tr 'A-Z' 'a-z'); printf '/%s%s\n' "$d" "${p#*:}" ;;
+        \\\\*) printf '//%s\n' "$(printf '%s' "${p#??}" | tr '\\' '/')" ;;
         *) printf '%s\n' "$p" ;;
       esac
     done ;;
@@ -82,6 +86,79 @@ _msys_provision() { # NAME WS
   assert_success
   assert_line 'guest=/c/Users/me/proj'
   assert_line 'host=C:/Users/me/proj'
+}
+
+@test "msys: canonicalize_path maps a UNC host path to the /unc/ guest namespace" {
+  _plant_cygpath_stub
+  run bash -c '
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    printf "unc=%s\n" "$(canonicalize_path "$1")"
+  ' _ '\\server\share\proj'
+  assert_success
+  assert_output 'unc=/unc/server/share/proj'
+}
+
+@test "msys: canonicalize_path does not re-namespace a three-slash or drive-form path" {
+  _plant_cygpath_stub
+  run bash -c '
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    printf "triple=%s\n" "$(canonicalize_path "///server/share")"
+    printf "drive=%s\n" "$(canonicalize_path "/c/proj")"
+  '
+  assert_success
+  assert_line 'triple=///server/share'
+  assert_line 'drive=/c/proj'
+}
+
+# /unc is not an MSYS mount: cygpath -m would put /unc/server/share under the
+# MSYS root, a directory that does not exist on the host.
+@test "msys: host_path maps the /unc/ guest form back to the UNC host path" {
+  _plant_cygpath_stub
+  run bash -c '
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    printf "host=%s\n" "$(host_path /unc/server/share/proj)"
+    printf "roundtrip=%s\n" "$(host_path "$(canonicalize_path "$1")")"
+    printf "bare=%s\n" "$(host_path /unc)"
+  ' _ '\\server\share\proj'
+  assert_success
+  assert_line 'host=//server/share/proj'
+  assert_line 'roundtrip=//server/share/proj'
+  # Only a /unc/<server>... value is a UNC path; anything else is cygpath's.
+  assert_line 'bare=C:/unc'
+}
+
+@test "msys: a UNC workspace mounts its UNC host path at the /unc/ guest path" {
+  # A leading // names the same directory as / on Linux and macOS, so this
+  # workspace exists for the -d check while canonicalize_path treats it as UNC.
+  # Under real MSYS/Cygwin //tmp/... is a network path that does not exist.
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN*) skip "a leading // is a real UNC path on this host" ;;
+  esac
+  _plant_cygpath_stub
+  local ws="/$STUBDIR/uncws"
+  mkdir -p "$ws"
+  _msys_provision uncbox "$ws"
+  local line
+  line=$(_create_line msb)
+  assert_regex "$line" "--volume /${STUBDIR}/uncws:/unc${STUBDIR}/uncws( |\$)"
+  # The regression: the source resolved under the MSYS root (C:/unc/...).
+  refute_regex "$line" "--volume C:[^ ]*/uncws:"
+}
+
+@test "posix: canonicalize_path still resolves a leading-// path without cygpath" {
+  command -v cygpath >/dev/null 2>&1 && skip "cygpath present: a leading // is UNC here"
+  mkdir -p "$STUBDIR/real-ws"
+  ln -s "$STUBDIR/real-ws" "$STUBDIR/link-ws"
+  run bash -c '
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    canonicalize_path "$1"
+  ' _ "/$STUBDIR/link-ws"
+  assert_success
+  assert_output "$(cd "$STUBDIR/real-ws" && pwd -P)"
 }
 
 @test "msys: a mount uses the host form for SOURCE and the guest form for TARGET" {
@@ -254,4 +331,94 @@ MSBENVSTUB
   '
   assert_success
   assert_output 'EXCL=*'
+}
+
+# msb records the workspace in drive form (host_path). The re-attach check must
+# compare it in the shell form, or a sandbox created on a directory holding
+# acq's state would pass as a "relative" path that matches nothing. This cygpath
+# stub maps C:/x to /x, which round-trips on any host's temp directory.
+_plant_strip_drive_cygpath() {
+  cat >"$STUBDIR/cygpath" <<'CYGSTUB'
+#!/usr/bin/env bash
+mode="${1:-}"; shift || true
+for p in "$@"; do
+  case "$mode:$p" in
+    -u:C:/*) printf '%s\n' "${p#C:}" ;;
+    -m:/*) printf 'C:%s\n' "$p" ;;
+    *) printf '%s\n' "$p" ;;
+  esac
+done
+CYGSTUB
+  chmod +x "$STUBDIR/cygpath"
+}
+
+@test "msys: the re-attach check reads a drive-form recorded workspace in the shell form" {
+  _plant_strip_drive_cygpath
+  mkdir -p "$STUBDIR/okproj"
+  run bash -c '
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    acq_workspace_record_write msb box "C:$1" || echo record-failed
+    acq_workspace_record_write msb proj "C:$1/okproj" || echo record-failed
+    printf "recorded=%s\n" "$(acq_workspace_record_read msb box)"
+    acq_recorded_workspace_safe msb box 2>&1 && echo box-passed
+    acq_recorded_workspace_safe msb proj 2>&1 && echo proj-passed
+  ' _ "$STUBDIR"
+  refute_line record-failed
+  assert_line "recorded=C:$STUBDIR"
+  assert_output --partial "contains acq's own directory"
+  assert_output --partial "Sandbox box was created on that workspace"
+  refute_line box-passed
+  assert_line proj-passed
+}
+
+# A drive-form record that cannot be converted cannot be compared either, so the
+# check fails closed: a cygpath that fails, one that prints nothing, and (on a
+# host without a real cygpath) none at all. The record names a safe project
+# directory, so only the missing conversion can refuse it.
+_recorded_check_with() { # CYGPATH-BODY ('' removes cygpath)
+  _plant_strip_drive_cygpath
+  mkdir -p "$STUBDIR/okproj"
+  run bash -c '
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    acq_workspace_record_write msb proj "C:$1/okproj" || echo record-failed
+    if [ -n "$2" ]; then
+      printf "#!/usr/bin/env bash\n%s\n" "$2" >"$1/cygpath"
+    else
+      rm -f "$1/cygpath"
+    fi
+    hash -r
+    acq_recorded_workspace_safe msb proj 2>&1 && echo proj-passed
+  ' _ "$STUBDIR" "$1"
+  refute_line record-failed
+  refute_line proj-passed
+  assert_output --partial "cannot convert"
+  assert_output --partial "remove it ('acq rm proj') and create it again"
+}
+
+@test "msys: the re-attach check refuses a drive-form record when cygpath fails" {
+  _recorded_check_with 'exit 1'
+}
+
+@test "msys: the re-attach check refuses a drive-form record when cygpath prints nothing" {
+  _recorded_check_with 'exit 0'
+}
+
+@test "msys: the re-attach check refuses a drive-form record when cygpath is absent" {
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN*) skip "this host has a real cygpath" ;;
+  esac
+  _recorded_check_with ''
+}
+
+@test "msys: run NAME on msb refuses a drive-form recorded workspace holding acq's state" {
+  _plant_strip_drive_cygpath
+  printf 'box\n' >"$STUBDIR/.msb_sandbox_list"
+  printf 'box\n' >"$STUBDIR/.msb_running_list"
+  acq_workspace_record_write msb box "C:$STUBDIR"
+  run env ACQ_BACKEND=msb ACQ_UPDATE_CHECK=0 "$ACQ" run box
+  assert_equal "$status" "1"
+  assert_output --partial "contains acq's own directory"
+  refute_regex "$(cat "$CALLS")" '^msb (exec|start|modify)'
 }

@@ -1,0 +1,82 @@
+{
+  "schema": 1,
+  "id": "cli/github-scope-no-value",
+  "oracle": "ADR-0038m §1: with a one-owner workspace, an empty stdin token is a validation failure (exit 1, validation_failed) and nothing is stored",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{python}",
+      "-I",
+      "test/vectors/drivers/seeded-run.py",
+      "[{\"git_repos\":{\"app\":\"https://github.com/alpha/app.git\"}},[[\"--backend\",\"msb\",\"github-scope\",\"mybox\",\"{workspace}\",\"--json\"],true,null],[[\"--backend\",\"msb\",\"secret\",\"has\",\"mybox\",\"github\"],false,1]]",
+      "{acq}"
+    ],
+    "env": {
+      "ACQ_MSB_BIN": "__stub__",
+      "ACQ_MSB_VERSION": "0.7.7",
+      "ACQ_MSB_INSTALLED": "1",
+      "ACQ_SBX_INSTALLED": "0"
+    },
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "ACQ_SECRET_NO_LIVE_REFEED",
+      "ACQ_PROVIDER_CREDENTIAL_BINDINGS",
+      "ACQ_PROVIDER_CREDENTIAL_SEED",
+      "USAI_API_KEY",
+      "GITHUB_TOKEN",
+      "GH_TOKEN",
+      "GITLAB_TOKEN",
+      "GIT_DIR",
+      "GIT_WORK_TREE",
+      "GIT_CEILING_DIRECTORIES",
+      "MSB_HOME",
+      "ACQ_IMAGE",
+      "ACQ_MSB_IMAGE",
+      "ACQ_MSB_READY_TIMEOUT",
+      "ACQ_MSB_STUB_CATALOG",
+      "ACQ_MSB_STUB_FAIL",
+      "ACQ_MSB_STUB_FAIL_ADD",
+      "ACQ_MSB_STUB_FAIL_RM",
+      "ACQ_MSB_STUB_SECRETS",
+      "ACQ_MSB_STUB_SECRET_LS_RAW",
+      "ACQ_MSB_STUB_ROTATE"
+    ],
+    "stdin": "",
+    "timeout_ms": 15000
+  },
+  "expect": {
+    "exit": 1,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "github-scope",
+        "error": {
+          "code": "validation_failed",
+          "message": "no GitHub token provided on stdin"
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME",
+      "ACQ_SECRET_STORE_DIR"
+    ]
+  }
+}

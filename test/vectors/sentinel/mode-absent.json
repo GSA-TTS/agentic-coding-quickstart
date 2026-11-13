@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "id": "sentinel/mode-absent",
+  "oracle": "ADR-0043m assertion mode: absent (the value never appears), combined with a second assertion on the same stream; each assertion sees the raw stream, so the abspath transform does not hide the sentinel from the absent check",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{python}", "-c", "import sys; sys.stdin.buffer.read(); sys.stdout.buffer.write(b'{\"ok\": true, \"path\": \"/opt/acq\"}\\n')"],
+    "env": {},
+    "unset": [],
+    "stdin": "sentinel-absent-7d31",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": [
+      {
+        "mode": "exact",
+        "value": "{\"ok\": true, \"path\": \"<abspath>\"}\n",
+        "normalize": ["abspath"]
+      },
+      {
+        "mode": "absent",
+        "value": "sentinel-absent-7d31",
+        "normalize": []
+      },
+      {
+        "mode": "contains",
+        "value": "/opt/acq",
+        "normalize": []
+      }
+    ],
+    "stderr": {
+      "mode": "absent",
+      "value": "sentinel-absent-7d31",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": []
+  }
+}

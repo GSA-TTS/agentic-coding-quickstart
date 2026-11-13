@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "id": "qualification/result-line-blocked",
+  "oracle": "ADR-0044m BLOCKED is a first-class recorded verdict, never a pass (missing command)",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{python}", "-m", "qualification", "run",
+      "--backend", "msb", "--backend-version", "0.7.7",
+      "--os", "Linux", "--os-build", "6.1.0", "--arch", "x86_64",
+      "--hypervisor", "native", "--image", "img",
+      "--", "definitely-not-a-real-command-xyz"
+    ],
+    "env": {},
+    "unset": [],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 2,
+    "stdout": {
+      "mode": "exact",
+      "value": "OUTCOME BLOCKED\nRESULT BLOCKED msb=0.7.7 image=img host=Linux x86_64 rev=0000000000000000000000000000000000000000 dir=none\n",
+      "normalize": ["crlf"]
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": []
+  }
+}

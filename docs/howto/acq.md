@@ -92,6 +92,21 @@ project, run `git init .` in it first so the agent can track its changes.
 That's it. `acq run` creates the sandbox if it doesn't exist, heals any missing
 kits, validates your USAi key, and attaches the agent.
 
+> [!IMPORTANT]
+> Pick a project directory, not your home directory. `acq create` and `acq run`
+> refuse a workspace that contains, or lies inside, one of acq's own
+> directories: the state dir (`~/.local/state/acq`), config dir
+> (`~/.config/acq`), data dir and secret store (`~/.local/share/acq`), and kit
+> caches (`~/.cache/acq`), or wherever `ACQ_STATE_DIR` and the `XDG_*` variables
+> put them. A workspace is mounted into the sandbox, so the agent could otherwise
+> read the secret store and change the trusted config acq mounts read-only. So
+> `acq run opencode ~`, or `acq run opencode` with no path from your home
+> directory, now fails with `workspace … contains acq's own directory`.
+> Re-attaching to an existing sandbox skips this check, so if you created one on
+> `~` with an older acq, recreate it on a project directory (`acq rm NAME`, then
+> `acq run opencode /path/to/your/project`). See
+> [Known Failure Modes](../KNOWN_FAILURE_MODES.md#81-workspace-refused-because-it-contains-acqs-own-directories).
+
 > [!NOTE]
 > The **first** run boots a microVM, applies kits, and prepares the agent — a
 > minute or two, with a progress spinner and status lines so you can follow
@@ -112,6 +127,8 @@ kits, validates your USAi key, and attaches the agent.
 | `./acq exec NAME -- CMD` | Run a command inside a sandbox |
 | `./acq cp SRC DST` | Copy files in/out (NAME:path syntax) |
 | `./acq ports NAME` | Show the sandbox's published port mappings |
+| `./acq ports NAME --publish HOST:GUEST` | Reach the running sandbox's GUEST port on host port HOST |
+| `./acq run opencode /proj --publish HOST:GUEST` | Pin a kit's published port to a host port at create (msb only) |
 | `./acq version` | Show acq version + active backend |
 | `./acq doctor` | Backend health check + write default config |
 
@@ -197,10 +214,88 @@ If a rotated key is still rejected, it was likely truncated on copy — see
 ## Installing acq
 
 Most users should use the one-line installer in the
-[README quickstart](../../README.md#step-2-install-acq) — it auto-selects the
-best method already on your Mac or Linux host (Homebrew → npm → self-contained
-download), puts `acq` on your `PATH`, and never needs administrator rights. This
-section covers the manual, developer, and Windows preview paths.
+[README quickstart](../../README.md#step-2-install-acq). That installer, the one
+published with the upstream GSA-TTS releases, auto-selects the best method
+already on your Mac or Linux host (Homebrew → npm → self-contained download),
+puts `acq` on your `PATH`, and never needs administrator rights. This section
+covers the manual, developer, and Windows preview paths.
+
+### acq v1 installers
+
+The `install.sh` and `install.ps1` checked into this repository are not the
+installers in the pinned release described in this guide and the README. They are the
+acq v1 installers (ADR-0042m). Each one downloads a per-platform release archive
+(`acq-<platform>.tar.gz`, or `acq-windows-x64.zip` on Windows) and
+`provenance.json`, verifies both against `SHA256SUMS`, installs them under your
+home directory and offers to put `acq` on your `PATH`. `install.sh` links both
+`acq` and `acq-python`. They do not
+choose an acq package manager or clone, accept the upstream `--method`/`--sha`
+options, or install Git Bash. Windows runs the Python implementation by default;
+Git Bash is needed only for `ACQ_IMPL=bash`.
+
+For an independent integrity pin, pass `--sha256 <digest>` to `install.sh` or
+`-Sha256 <digest>` to `install.ps1`. This is the SHA-256 of **the SHA256SUMS file
+itself**, exactly 64 hex characters (either case), not the archive's digest.
+The installer verifies that pin before trusting any manifest entry; a mismatch
+exits 1 without installing anything, and malformed pins are usage errors (exit
+2). Obtain the digest from published release notes, or run
+`sha256sum SHA256SUMS` on a trusted copy. A pin obtained through an independent
+trusted channel gives cryptographic proof independent of the download host.
+The pin also works with a local offline asset set:
+
+```sh
+sh install.sh --source /trusted/assets --sha256 "$TRUSTED_SUMS_SHA256" --yes
+```
+
+```powershell
+.\install.ps1 -Source C:\trusted\assets -Sha256 $TrustedSumsSha256 -Yes
+```
+
+For GitHub release URLs, if `gh` is on `PATH`, both installers run
+`gh attestation verify <archive> --repo <owner/repo>` before extraction.
+Success prints “verified attestation”. Missing `gh` or an absent attestation
+prints an informational line and continues. Failed verification or another
+verifier error stops installation. Local directory and `file://` installs skip
+attestation. Set `ACQ_INSTALL_NO_ATTESTATION=1`, or pass `-NoAttestation` in
+PowerShell, to skip it explicitly.
+
+After a successful install, a **Next steps** report checks `msb` (including its
+version), `sbx`, hardware virtualization, and `git` on `PATH`. Only one backend
+is needed. The msb policy is >= 0.6.9 excluding 0.7.0–0.7.2; unknown and
+prerelease/build-suffixed versions are reported as out of policy, matching
+[ADR-0032](../adr/0032-msb-version-policy-and-migration-recovery.md).
+Linux checks that `/dev/kvm` exists and is readable and writable; macOS checks
+`sysctl -n kern.hv_support` for `1`. Windows calls `WHvGetCapability` with
+`WHvCapabilityCodeHypervisorPresent`, rather than reading a DISM feature flag.
+Missing prerequisites produce guidance; they do not undo or fail the acq install.
+`msb doctor` remains the authoritative host-readiness check.
+
+The report prints these repair commands as applicable:
+
+- msb: `brew install GSA-TTS/tap/microsandbox-acq`, or
+  `scripts/verify-msb-pin --install` from a trusted checkout on macOS/Linux.
+- sbx: `brew install docker/tap/sbx && sbx login` on a supported Homebrew host
+  (see [the sbx guide](sbx.md) for other hosts).
+- Virtualization: `msb doctor --fix`. On Windows it also prints
+  `Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All`
+  to run yourself from an elevated shell, then restart.
+- Git: `xcode-select --install` on macOS, `brew install git` or your distribution's
+  package manager on Linux, and `winget install --id Git.Git -e` on Windows.
+
+When msb is missing, an interactive session without `--yes`/`-Yes` offers to
+install the pinned msb, defaulting to **No**. Only an explicit `y` or `yes`
+starts installation: Homebrew's pinned formula when available on POSIX,
+otherwise a checksum-verified msb 0.7.7 release bundle (also used on Windows).
+No upstream install script is executed. Non-interactive sessions and
+`--yes`/`-Yes` only print the commands; they never install msb. The installers
+never elevate, enable Windows features or reboot. Skip the whole report and
+offer with `--no-prereq-check` or `-NoPrereqCheck`. Dry runs make no probes or
+prerequisite changes.
+
+For an offline or air-gapped install (or before the first release tag with the
+acq v1 archives is published), install from a local asset set:
+`sh install.sh --source DIR --install-dir DIR --bin-dir DIR`, or
+`.\install.ps1 -Source DIR`.
 
 ### Direct package-manager install
 
@@ -219,10 +314,9 @@ Package-manager installs give you `upgrade`/`uninstall` for free.
 Windows support is a preview path for Windows 11 hosts using the `msb` backend.
 It is installed from the GitHub release zip with PowerShell; npm remains scoped
 to macOS/Linux until Windows path and secret-storage behavior are fully
-validated. The preview runs the existing Bash `acq` implementation through Git
-Bash. The installer probes Windows Hypervisor Platform and stops when it is not
-usable, but it does not try to enable Windows features, elevate PowerShell, or
-reboot the machine.
+validated. The acq v1 installer reports Windows Hypervisor Platform capability
+after installation and prints repair guidance if it is unavailable; it does not
+enable Windows features, elevate PowerShell, reboot, or fail the acq install.
 
 <!-- x-release-please-start-version -->
 
@@ -249,7 +343,82 @@ defaults to `Restricted`, so those steps fail with `PSSecurityException` on an
 otherwise default host; allow local scripts for your user with
 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` (or use the `irm ... | iex`
 one-liner, which is not affected because piped text is not a script file). On a
-managed device the policy may be set by Group Policy.
+managed device the policy may be set by Group Policy. The launchers deliberately
+do not pass `-ExecutionPolicy Bypass`, so this is a one-time prerequisite for
+every Windows install.
+
+### Which implementation runs on Windows
+
+On Windows the installed `acq` (`acq.cmd`, which starts `acq.ps1`) runs the
+Python implementation when `ACQ_IMPL` is unset
+([ADR-0048m](../adr/0048m-windows-defaults-to-the-python-implementation.md)).
+On macOS and Linux, and when you run the Bash `acq` script yourself from a Git
+Bash prompt, the Bash implementation stays the default.
+
+The Windows archive bundles acq's **managed runtime**: python.org's embeddable
+CPython, pinned and SHA-256 verified by the release workflow and unpacked at
+`py-acq\runtime\python.exe` next to acq's source in `py-acq\src\`
+(`scripts/stage-windows-runtime`). Its `._pth` file fixes the import path to its
+standard library, its own directory and acq's source, so it ignores
+`PYTHONPATH` and never adds the current directory. You do not need to install
+Python.
+
+The launcher picks the interpreter in this order:
+
+1. `ACQ_RUNTIME`, which must be an absolute path to `python.exe`. Use it to run
+   acq with an IT-approved interpreter (for example where AppLocker blocks
+   executables under `%LOCALAPPDATA%`). A relative value is refused.
+2. The managed runtime at `py-acq\runtime\python.exe`.
+3. The first `python.exe` in a drive-rooted or UNC `PATH` entry that passes an
+   isolated "Python 3.12 or newer" check. Relative entries are never searched,
+   and the Microsoft Store App Execution Alias (which only prints an install
+   hint) fails the check and is skipped.
+
+The interpreter runs `python.exe -P -m acq_py`, so the current directory never
+joins `sys.path`. If nothing qualifies, `acq` exits 1 with a message naming the
+remedies (install acq from a release, install Python 3.12+ on `PATH`, set
+`ACQ_RUNTIME`, or set `ACQ_IMPL=bash`); it never falls back to Bash on its own.
+
+`ACQ_IMPL=bash` is the explicit opt-in to the Bash implementation through Git
+Bash, kept during the transition; it needs Git for Windows. `ACQ_IMPL=python`
+selects the Python implementation explicitly, and any other value exits 2.
+`acq version` reports which one ran (`"impl": "python"` in `--json`), and
+`acq doctor` reports whether the app-private runtime is present.
+
+**Keep cmd.exe from running programs out of the current directory.** cmd.exe looks
+for a typed command in the current directory before it searches `PATH`. You
+usually run `acq` from inside the workspace it sandboxes, and the agent in the
+sandbox can write to that workspace, so typing `acq` (or `git`, `msb`, ...) at a
+cmd.exe prompt there would run an `acq.cmd`, `acq.bat` or `acq.exe` the agent left
+behind, on the host and outside the sandbox. PowerShell does not do this (it runs
+a program from the current directory only when you type `.\name`), and the
+processes acq starts already skip the current directory. To close it for cmd.exe
+as well, set `NoDefaultCurrentDirectoryInExePath` for your user once, then open a
+new terminal:
+
+```powershell
+[Environment]::SetEnvironmentVariable("NoDefaultCurrentDirectoryInExePath", "1", "User")
+```
+
+With it set, cmd.exe (and any program that asks Windows whether to search the
+current directory) runs a program from the current directory only when you name
+it with a path, such as `.\tool.exe`. Remove the variable to undo it. The variable
+does not change where Windows looks for a program's DLLs; see
+[Known Failure Modes §60](../KNOWN_FAILURE_MODES.md#60-windows-dll-search-can-reach-the-workspace).
+
+**acq finds programs on Windows only as `.exe` files.** To keep a planted file
+in the workspace from running, the Python implementation (the Windows default)
+looks up the programs it starts (`git`, `msb`, `sbx`) itself, in the absolute
+entries of `PATH`, and accepts only `NAME.exe` (see
+`py-acq/src/acq_py/hostexec.py`). The qualification tooling uses the same
+resolver, including for `gh`, and `acq.ps1` looks for `python.exe` the same way.
+A program installed only as a `.cmd` or `.bat` shim (some package managers
+install tools like that) is therefore not found. A `.cmd`-only `git` counts as
+not installed, and with a `.cmd`-only `gh`, `python -m qualification.host`
+prints the pull-request link for you to open instead of opening the pull
+request itself. Install the program's `.exe` (the official Git for Windows and
+GitHub CLI installers both provide one), or put the directory that holds its
+`.exe` on `PATH`.
 
 If WHP is disabled, stop: enable it from an **elevated** PowerShell
 (`Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All`),
@@ -270,9 +439,12 @@ scripts (see the note above) — a default `Restricted` client fails with
 # Installer dry run; should print planned actions and make no changes.
 .\install.ps1 -DryRun
 
-# After install, acq should resolve from PATH and delegate through Git Bash.
+# After install, acq should resolve from PATH and run the Python implementation
+# with its managed runtime: "impl": "python", and doctor's runtime check reports
+# "app-private runtime present".
 Get-Command acq
-acq version
+acq version --json
+acq doctor
 
 # Confirm msb is installed and the host is ready.
 msb --version
@@ -293,13 +465,18 @@ prompted, and installed it via the upstream Windows installer — `acq version`
 through `acq.cmd`, `msb --version` / `msb doctor`, and sandbox provisioning all
 worked. Notes from that validation:
 
+- That validation ran the pre-v1 installer and the Bash implementation (the
+  Windows default at the time). The default is now the Python implementation,
+  and the acq v1 `install.ps1` installs the checksum-verified `msb 0.7.7`
+  release bundle directly rather than running the upstream Windows install
+  script; the Git Bash note below applies to `ACQ_IMPL=bash`.
 - The launcher and installer resolve Git Bash from Git for Windows' standard
   install locations and deliberately ignore the WSL interop shim
   (`C:\Windows\System32\bash.exe`) that a bare `bash.exe` PATH lookup often
   returns. If `acq` still lands in WSL, run it from a Git Bash terminal or add
   Git for Windows' `bin` directory to your PATH.
-- The installer checks WHP by probing the WHP API (`WHvCreatePartition`), the
-  same signal `msb` uses, rather than the DISM feature flag — the flag can report
+- The acq v1 installer checks WHP after installation by probing the WHP API
+  (`WHvGetCapability` / `WHvCapabilityCodeHypervisorPresent`), rather than the DISM feature flag — the flag can report
   `Disabled` on hosts where WHP genuinely works (WSL2/VirtualMachine Platform,
   VBS, or a virtualized guest). Treat `msb doctor` as the authoritative readiness
   check.
@@ -354,7 +531,7 @@ back to the latest, run `git switch main`.
 3. `backend:` in `~/.config/acq/config.yaml`
 4. Auto-detect: first installed backend found (msb preferred, then sbx)
 
-**Today (1.2.x), two backends ship: `msb` (default) and `sbx`.** See
+**Two backends ship: `msb` (default) and `sbx`.** See
 [docs/BACKEND_GUIDE.md](../BACKEND_GUIDE.md) for per-backend details. A third
 backend (`ppp` — Podman-Plus-Proxy) is deferred.
 
@@ -455,8 +632,9 @@ time: Apple Silicon Macs include the hypervisor support msb uses.
 **Windows 11** — Windows support is in **preview**. Local sandboxes need the
 **Windows Hypervisor Platform** feature (this is separate from the
 `VirtualMachinePlatform` feature that WSL2 and Docker Desktop enable). The
-Windows preview installer probes WHP and stops when it is not usable; it does not
-elevate PowerShell, enable the feature, or reboot the machine.
+acq v1 Windows installer reports WHP capability after installation and
+prints repair guidance when it is unavailable. It does not elevate PowerShell,
+enable the feature, reboot the machine, or fail an otherwise successful install.
 
 Enable WHP yourself from an **elevated** PowerShell
 (`Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All`),
@@ -554,6 +732,17 @@ acq create opencode --kit ./kit-a --kit git+https://github.com/acme/kits.git#ref
 neutral `hybrid/v1` kit is converted to the active backend's format), so they
 work with any backend — they are **not** forwarded raw to the backend CLI.
 
+A remote ref has exactly the form
+`git+https://HOST/REPO.git#ref=<sha>&dir=<path>`. `acq` refuses, before it
+fetches or records anything, a remote ref whose URL has a query string (`?`
+before the `#`), or whose `#` part has a parameter other than `ref=` and
+`dir=`, names one twice, or gives one a value outside `[A-Za-z0-9._/-]`; the
+error names the problem but not the ref, since that is where a token would be.
+The same applies to refs in `ACQ_PROVIDER_KITS`. A local kit path may contain `?` and `#`. Credentials never go
+in a kit ref: configure a git credential helper for a source that needs
+authentication. See section 91 of
+[KNOWN_FAILURE_MODES.md](../KNOWN_FAILURE_MODES.md).
+
 ### Provider kits
 
 New sandboxes include the USAi provider kit by default, unchanged from earlier
@@ -632,7 +821,8 @@ From there the injection is generic — no provider-specific `acq` code:
   same data `usai` gets from `provider-facts/usai.env`), the registry decides the
   ENV var, and the credential is bound as `KEY_ENV@host` by both backends (`sbx`
   custom secret; msb `--secret ENV@HOST`). A value exported by CI is bindable on
-  msb; on sbx, which snapshots its own proxy table, `acq` fails closed and tells
+  msb when no stored value resolves (the store takes precedence); on sbx,
+  which snapshots its own proxy table, `acq` fails closed and tells
   you to store it;
 - the binding (`providerId`, `keyEnv`, `host`, `modelsUrl`) is recorded in the
   sandbox's host config, so resume/heal re-injects it without re-prompting, and a
@@ -707,12 +897,19 @@ fails), the command exits non-zero, leaves the source registered, and prints the
 exact `sbx settings set kit.allowedSources …` recovery command. Fix the cause (or
 apply the printed command) and re-run `acq kit-source rm`; it is safe to repeat.
 
+GitHub ignores letter case in owners and repositories, so `kit-source rm` does
+too where trust is concerned. It refuses the shipped default (the pinned
+control-plane repository) in any letter case, and the control plane's owner
+prefix always stays on the backend allowlist. Owner prefixes compare
+case-insensitively, and when one is revoked every letter-case variant that sbx
+lists is dropped with it.
+
 The provider kit `acq` uses by default is likewise data:
 
 ```yaml
 provider_kit: agentic-coding-patterns/usai-provider   # default
 # or: agentic-coding-kits/opencode-go-provider
-# or: opencode-go-provider@github.com/mogul/agentic-coding-kits
+# or: opencode-go-provider@github.com/acme/agentic-coding-kits
 ```
 
 `acq configure` offers the discovered kits in a picker, so you can select one
@@ -745,6 +942,38 @@ via `acq exec`) to become ready after a sandbox starts is 60 seconds. Override:
 ```bash
 export ACQ_EXEC_READY_TIMEOUT=120
 ```
+
+---
+
+## Removing a leftover lock
+
+acq serializes changes with lock directories that both the Bash and the Python
+acq take: one per sandbox (`create`, `run`, `rm`, `start`, ending in `.lock`
+under `~/.local/state/acq/provenance/provider-input/<backend>/`) and one for
+`config.yaml` (`~/.local/state/acq/locks/config.lock.d`, or under
+`$ACQ_STATE_DIR/locks/`). Each holds an `owner` file naming the process that
+took it. A lock whose owner has exited is recovered automatically. A
+per-sandbox lock directory with **no** owner file, or a `config.yaml` lock whose
+owner file is **empty**, is never removed automatically, because a running acq
+command leaves it in that state for an instant; so if acq ever died in that
+instant, every later command on that sandbox, or every `config.yaml` change,
+waits and then fails, naming the directory. (A `config.yaml` lock directory with
+no owner file at all heals itself: the next writer takes it.)
+
+When that happens, first make sure no acq command is running. Then remove the
+directory the message names (acq prints this command with the path filled in):
+
+```bash
+rm -f -- '<lock dir>/owner' && rmdir -- '<lock dir>'
+```
+
+In PowerShell (the Python acq on Windows):
+
+```powershell
+Remove-Item -LiteralPath '<lock dir>' -Recurse -Force
+```
+
+See [KNOWN_FAILURE_MODES §79](../KNOWN_FAILURE_MODES.md#79-lock-directory-without-an-owner-is-never-removed-automatically).
 
 ---
 

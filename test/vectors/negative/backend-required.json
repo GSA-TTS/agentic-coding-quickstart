@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "id": "negative/backend-required",
+  "oracle": "ADR-0040m unsupported-capability fail-closed: a non-null backend is refused by the runner",
+  "tier": 1,
+  "backend": "sbx",
+  "platform": "any",
+  "invoke": {
+    "argv": ["{acq}", "version"],
+    "env": {},
+    "unset": [],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 1
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": []
+  }
+}

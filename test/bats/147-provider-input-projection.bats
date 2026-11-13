@@ -7,11 +7,144 @@ teardown() { acq_teardown_stubs; }
 
 load 'helper'
 
+@test "projection lock: stale recovery preserves a replacement owner" {
+  local root lock
+  root=$(acq_provider_input_root sbx swapped); lock="${root}.lock"
+  _acq_provider_input_safe_mkdir "$lock"
+  printf '999999 stale\n' > "$lock/owner"
+  # The identity check runs after the initial owner read. Replace the owner
+  # there, without timing or another process, before recovery can unlink it.
+  _acq_pid_alive() { printf '1 replacement\n' > "$lock/owner"; return 1; }
+  ACQ_PROVIDER_INPUT_LOCK_RETRIES=1 run acq_provider_input_lock_acquire sbx swapped
+  assert_failure
+  assert_equal "$(cat "$lock/owner")" '1 replacement'
+}
+
+@test "projection lock: release preserves a replacement owner" {
+  local root lock
+  root=$(acq_provider_input_root sbx release-swapped); lock="${root}.lock"
+  run acq_provider_input_lock_acquire sbx release-swapped
+  assert_success
+  printf '1 replacement\n' > "$lock/owner"
+  acq_provider_input_lock_release "$lock"
+  assert_equal "$(cat "$lock/owner")" '1 replacement'
+}
+
+@test "projection lock waits for missing or empty fresh owner metadata" {
+  local kind root lock
+  for kind in missing empty; do
+    root=$(acq_provider_input_root sbx "fresh-$kind"); lock="${root}.lock"
+    _acq_provider_input_safe_mkdir "$lock"
+    [ "$kind" != empty ] || : > "$lock/owner"
+    # Release at the first poll, deterministically modeling the holder's exit.
+    sleep() { printf 'waited\n' > "$STUBDIR/waited"; rm -f "$lock/owner"; rmdir "$lock"; }
+    ACQ_PROVIDER_INPUT_LOCK_RETRIES=3 run acq_provider_input_lock_acquire sbx "fresh-$kind"
+    assert_success
+    [ -f "$STUBDIR/waited" ]
+    acq_provider_input_lock_release "$lock"
+    rm "$STUBDIR/waited"
+  done
+}
+
+@test "projection lock fresh empty metadata still exhausts its retry budget" {
+  local root lock
+  root=$(acq_provider_input_root sbx fresh-budget); lock="${root}.lock"
+  _acq_provider_input_safe_mkdir "$lock"
+  : > "$lock/owner"
+  _acq_config_lock_age() { echo 0; }
+  sleep() { :; }
+  ACQ_PROVIDER_INPUT_LOCK_RETRIES=2 run acq_provider_input_lock_acquire sbx fresh-budget
+  assert_failure
+  assert_output --partial 'gave up waiting'
+  [ -f "$lock/owner" ]
+}
+
+@test "lock tokens are written with noclobber still enabled" {
+  local take lock
+  for take in _acq_provider_input_lock_take _acq_config_lock_take; do
+    lock="$STUBDIR/$take"
+    run bash -c '
+      ACQ_SOURCE_ONLY=1 . "$1" >/dev/null 2>&1
+      printf() { case "$-" in *C*) builtin printf "$@" ;; *) return 1 ;; esac; }
+      "$2" "$3" "1 token"
+    ' _ "$ACQ" "$take" "$lock"
+    assert_success
+    assert_equal "$(cat "$lock/owner")" '1 token'
+  done
+}
+
+@test "lock takes refuse owner symlinks to devices and FIFOs before opening" {
+  local take target lock
+  mkfifo "$STUBDIR/owner-fifo"
+  _racy_mkdir
+  for take in _acq_provider_input_lock_take _acq_config_lock_take; do
+    for target in /dev/null "$STUBDIR/owner-fifo"; do
+      lock="$STUBDIR/link-lock"
+      mkdir -p "$lock"
+      ln -s "$target" "$lock/owner"
+      run timeout 5 bash -c 'ACQ_SOURCE_ONLY=1 . "$1" >/dev/null 2>&1; "$2" "$3" token' _ "$ACQ" "$take" "$lock"
+      assert_failure 1
+      [ -L "$lock/owner" ]
+      rm "$lock/owner"; rmdir "$lock"
+    done
+  done
+}
+
+@test "lock takes refuse an owner replaced by a symlink during the write" {
+  local take lock
+  for take in _acq_provider_input_lock_take _acq_config_lock_take; do
+    lock="$STUBDIR/$take"
+    run bash -c '
+      ACQ_SOURCE_ONLY=1 . "$1" >/dev/null 2>&1
+      lock=$3
+      printf() { builtin printf "$@"; rm "$lock/owner"; ln -s /dev/null "$lock/owner"; }
+      "$2" "$lock" token
+    ' _ "$ACQ" "$take" "$lock"
+    assert_failure 1
+    [ -L "$lock/owner" ]
+  done
+}
+
+@test "spinner draws no frame through a symlinked draw lock" {
+  local dir="$STUBDIR/spin-link"
+  mkdir "$dir"
+  ln -s /dev/null "$dir/draw"
+  run timeout 5 bash -c '
+    ACQ_SCRIPT_DIR=$1
+    . "$1/acq.backends/progress.sh"
+    spin_fixture=$2
+    _acq_progress_enabled() { return 0; }
+    mktemp() { echo "$spin_fixture"; }
+    sleep() { : > "$dir/stop"; }
+    acq_spin_start SYMLINK-FRAME
+    wait "$_ACQ_SPIN_PID"
+    acq_spin_stop SAFE-END
+  ' _ "$REPO_ROOT" "$dir"
+  assert_success
+  refute_output --partial SYMLINK-FRAME
+}
+
+@test "spinner shutdown refuses a symlinked draw lock" {
+  local dir="$STUBDIR/spin-end-link"
+  mkdir "$dir"
+  ln -s /dev/null "$dir/draw"
+  run timeout 5 bash -c '
+    ACQ_SCRIPT_DIR=$1
+    . "$1/acq.backends/progress.sh"
+    _ACQ_SPIN_DIR=$2 _ACQ_SPIN_PID=999999 _ACQ_SPIN_FORKED=1
+    kill() { [ -z "$_ACQ_SPIN_LOCKED" ] || echo UNSAFE-TAKE; return 1; }
+    _acq_spin_end_animator
+  ' _ "$REPO_ROOT" "$dir"
+  assert_success
+  refute_output --partial UNSAFE-TAKE
+}
+
 _provider_release() {
   local root="$1"
   mkdir -p "$root/scripts" "$root/integrations/isolation/schemas"
   cat > "$root/provider-python" <<'PYTHON'
 #!/bin/sh
+[ "${1:-}" = -I ] && shift  # acq runs python -I (no cwd/env on sys.path)
 if [ "$1" = -c ]; then exit 0; fi
 exec /usr/bin/python3 "$@"
 PYTHON
@@ -76,6 +209,7 @@ EOF
   mkdir -p "$runtime"
   cat > "$runtime/python3" <<'EOF'
 #!/bin/sh
+[ "${1:-}" = -I ] && shift  # acq runs python -I (no cwd/env on sys.path)
 if [ "$1" = -c ]; then exit 0; fi
 exit 1
 EOF
@@ -103,6 +237,7 @@ EOF
   cat > "$fakebin/python-custom" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$VALIDATOR_SETUP_LOG"
+[ "${1:-}" = -I ] && shift  # acq runs python -I (no cwd/env on sys.path)
 if [ "$1" = -c ]; then printf '3.14\n'; exit 0; fi
 if [ "$1" = -m ] && [ "$2" = venv ]; then
   mkdir -p "$3/bin"; cp "$0" "$3/bin/python3"; exit 0
@@ -134,6 +269,7 @@ EOF
   cat > "$fakebin/python3.14" <<'EOF'
 #!/bin/sh
 printf 'selected-3.14 %s\n' "$*" >> "$VALIDATOR_SETUP_LOG"
+[ "${1:-}" = -I ] && shift  # acq runs python -I (no cwd/env on sys.path)
 if [ "$1" = -c ]; then printf '3.14\n'; exit 0; fi
 if [ "$1" = -m ] && [ "$2" = venv ]; then
   mkdir -p "$3/bin"; cp "$0" "$3/bin/python3"; exit 0
@@ -175,6 +311,7 @@ EOF
   cat > "$fakebin/python3.12" <<'EOF'
 #!/bin/sh
 printf 'selected-3.12 %s\n' "$*" >> "$VALIDATOR_SETUP_LOG"
+[ "${1:-}" = -I ] && shift  # acq runs python -I (no cwd/env on sys.path)
 if [ "$1" = -c ]; then printf '3.12\n'; exit 0; fi
 if [ "$1" = -m ] && [ "$2" = venv ]; then
   mkdir -p "$3/bin"; cp "$0" "$3/bin/python3"; exit 0
@@ -214,6 +351,7 @@ EOF
   cat > "$fakebin/python3" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$VALIDATOR_SETUP_LOG"
+ [ "${1:-}" = -I ] && shift  # acq runs python -I (no cwd/env on sys.path)
  if [ "$1" = -c ]; then
    printf '3.12\n'
    exit 0
@@ -316,6 +454,7 @@ EOF
   _provider_release "$release"; _provider_kit "$release" alpha
   cat > "$python" <<EOF
 #!/bin/sh
+[ "\${1:-}" = -I ] && shift  # acq runs python -I (no cwd/env on sys.path)
 if [ "\$1" = -c ]; then exit 2; fi
 printf 'validator unexpectedly invoked\n' >> "$STUBDIR/validator-invoked"
 exit 0
@@ -525,24 +664,40 @@ export ACQ_PROVENANCE_DIR="$ACQ_PROVENANCE_DIR"
   sleep 10
 ) &
 parent=\$!
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-  [ -s "$STUBDIR/guardian.pid" ] && break
-  kill -0 "\$parent" 2>/dev/null || break
+# Wait on the published PID, not a fixed delay: sourcing acq and starting the
+# guardian can take seconds on a loaded host. The ceiling only bounds a failure.
+waited=0
+while [ ! -s "$STUBDIR/guardian.pid" ] && kill -0 "\$parent" 2>/dev/null && [ "\$waited" -lt 600 ]; do
   sleep 0.1
+  waited=\$((waited + 1))
 done
-[ -s "$STUBDIR/guardian.pid" ]
+[ -s "$STUBDIR/guardian.pid" ] || { echo "guardian never published its pid" >&2; exit 1; }
 guardian_pid=\$(cat "$STUBDIR/guardian.pid")
+# The guardian polls its parent once a second and, by design, exits within a
+# tick of the parent's death. Stop it first so it is certainly still alive when
+# the lock is probed; a probe racing that tick flaked under load. The parent is
+# killed and reaped, so it is fully gone before the probe.
+trap 'kill -CONT "\$guardian_pid" 2>/dev/null || true' EXIT
+kill -STOP "\$guardian_pid"
 kill -KILL "\$parent" 2>/dev/null || true
+wait "\$parent" 2>/dev/null || true
 if ACQ_PROVIDER_INPUT_LOCK_RETRIES=1 acq_provider_input_lock_acquire sbx parentexit >"$STUBDIR/retry.out" 2>&1; then
   echo "lock was recovered while guardian was alive" >&2
   exit 1
 fi
+kill -CONT "\$guardian_pid"
 grep -Fq "owned by live pid \$guardian_pid" "$STUBDIR/retry.out"
-wait "\$parent" 2>/dev/null || true
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-  kill -0 "\$guardian_pid" 2>/dev/null || break
+# Resumed, the guardian sees its parent gone and exits within a tick or two.
+# Wait for that, with a ceiling far above the normal delay.
+waited=0
+while kill -0 "\$guardian_pid" 2>/dev/null && [ "\$waited" -lt 600 ]; do
   sleep 0.1
+  waited=\$((waited + 1))
 done
+if kill -0 "\$guardian_pid" 2>/dev/null; then
+  echo "guardian outlived its transaction parent" >&2
+  exit 1
+fi
 lock=\$(acq_provider_input_lock_acquire sbx parentexit)
 acq_provider_input_lock_release "\$lock"
 echo "guardian ownership preserved"
@@ -563,15 +718,17 @@ ACQ_SCRIPT_DIR="$REPO_ROOT" ACQ_SOURCE_ONLY=1 . "$REPO_ROOT/acq"
 (
   _acq_provider_input_guardian_start
   lock=\$(acq_provider_input_lock_acquire sbx backend-child "\$_ACQ_PROVIDER_INPUT_GUARDIAN_PID")
-  sleep 4 & child=\$!
+  sleep 60 & child=\$!
   _acq_provider_input_guardian_register_child "\$child"
   printf '%s %s\n' "\$_ACQ_PROVIDER_INPUT_GUARDIAN_PID" "\$child" > "$STUBDIR/pids"
   sleep 10
 ) & parent=\$!
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-  [ -s "$STUBDIR/pids" ] && break
+waited=0
+while [ ! -s "$STUBDIR/pids" ] && kill -0 "\$parent" 2>/dev/null && [ "\$waited" -lt 600 ]; do
   sleep 0.1
+  waited=\$((waited + 1))
 done
+[ -s "$STUBDIR/pids" ] || { echo "transaction never published its pids" >&2; exit 1; }
 read guardian child < "$STUBDIR/pids"
 kill -KILL "\$parent" 2>/dev/null || true
 if ACQ_PROVIDER_INPUT_LOCK_RETRIES=1 acq_provider_input_lock_acquire sbx backend-child >/dev/null 2>"$STUBDIR/retry"; then
@@ -579,10 +736,18 @@ if ACQ_PROVIDER_INPUT_LOCK_RETRIES=1 acq_provider_input_lock_acquire sbx backend
 fi
 grep -Fq "owned by live pid \$guardian" "$STUBDIR/retry"
 wait "\$parent" 2>/dev/null || true
+# The registered child outlives every probe above: it is ended here rather than
+# by a short sleep that a loaded host could outrun before the probe. Once it is
+# gone the guardian has nothing left to wait for and exits within a tick.
+kill "\$child" 2>/dev/null || true
 waited=0
-while kill -0 "\$child" 2>/dev/null && [ "\$waited" -lt 60 ]; do sleep 0.1; waited=\$((waited + 1)); done
+while kill -0 "\$child" 2>/dev/null && [ "\$waited" -lt 600 ]; do sleep 0.1; waited=\$((waited + 1)); done
 waited=0
-while kill -0 "\$guardian" 2>/dev/null && [ "\$waited" -lt 30 ]; do sleep 0.1; waited=\$((waited + 1)); done
+while kill -0 "\$guardian" 2>/dev/null && [ "\$waited" -lt 600 ]; do sleep 0.1; waited=\$((waited + 1)); done
+if kill -0 "\$guardian" 2>/dev/null; then
+  echo "guardian outlived its transaction and registered child" >&2
+  exit 1
+fi
 lock=\$(acq_provider_input_lock_acquire sbx backend-child)
 acq_provider_input_lock_release "\$lock"
 echo retained
@@ -742,7 +907,177 @@ EOF
   ACQ_PROVIDER_INPUT_LOCK_RETRIES=1 run acq_provider_input_lock_acquire sbx stalebox
   assert_failure
   assert_output --partial "owned by live pid $$"
+  assert_output --partial "gave up waiting for the provider-input lock: $lock"
+  assert_output --partial "rm -f -- '$lock/owner' && rmdir -- '$lock'"
   rm -f "$lock/owner"; rmdir "$lock"
+}
+
+@test "projection lock never removes a lock with no owner and names the recovery command" {
+  local root lock
+  root=$(acq_provider_input_root sbx ownerless); lock="${root}.lock"
+  _acq_provider_input_safe_mkdir "$lock"
+  # Under set -u, as acq itself runs: an owner-less lock once stopped acq with
+  # "pid: unbound variable" before this message.
+  run bash -c 'ACQ_SOURCE_ONLY=1 . "$1" >/dev/null 2>&1; set -u; acq_provider_input_lock_acquire sbx ownerless' bash "$ACQ"
+  assert_failure
+  refute_output --partial "unbound variable"
+  assert_output --partial "provider-input lock has no valid owner metadata: $lock"
+  assert_output --partial "rm -f -- '$lock/owner' && rmdir -- '$lock'"
+  [ -d "$lock" ]
+  rm -f -- "$lock/owner" && rmdir -- "$lock"
+  run acq_provider_input_lock_acquire sbx ownerless
+  assert_success
+  acq_provider_input_lock_release "${lines[${#lines[@]} - 1]}"
+}
+
+# _racy_mkdir — put first on PATH a mkdir that is not exclusive: it reports
+# success for a directory that already exists, as uutils coreutils mkdir 0.10
+# does for concurrent callers (KNOWN_FAILURE_MODES section 92). This makes the
+# race the lock must survive happen every time, on any host.
+_racy_mkdir() {
+  local real
+  real=$(command -v mkdir)
+  mkdir -p "$STUBDIR/racy-mkdir"
+  printf '#!/bin/sh\n"%s" "$@" 2>/dev/null && exit 0\nfor last; do :; done\n[ -d "$last" ]\n' "$real" \
+    > "$STUBDIR/racy-mkdir/mkdir"
+  chmod +x "$STUBDIR/racy-mkdir/mkdir"
+  PATH="$STUBDIR/racy-mkdir:$PATH"
+}
+
+@test "projection lock: losing the owner-file race never takes or touches the winner's lock" {
+  local root lock identity
+  root=$(acq_provider_input_root sbx racebox); lock="${root}.lock"
+  identity=$(_acq_provider_input_process_identity "$$")
+  _acq_provider_input_safe_mkdir "$lock"
+  printf '%s %s\n' "$$" "$identity" > "$lock/owner"
+  _racy_mkdir
+  ACQ_PROVIDER_INPUT_LOCK_RETRIES=1 run acq_provider_input_lock_acquire sbx racebox
+  assert_failure
+  assert_output --partial "owned by live pid $$"
+  run cat "$lock/owner"
+  assert_output "$$ $identity"
+  rm -f "$lock/owner"; rmdir "$lock"
+}
+
+@test "projection lock: a lock released since the take is taken, not refused as unsafe" {
+  local real
+  real=$(command -v mkdir)
+  mkdir -p "$STUBDIR/gone-mkdir"
+  # The first mkdir of the lock fails as if it existed, and it is gone by the
+  # time acq looks: the holder released it in between.
+  printf '#!/bin/sh\nfor last; do :; done\ncase "$last" in *.lock) [ -e "%s/failed" ] || { : > "%s/failed"; exit 1; } ;; esac\nexec "%s" "$@"\n' \
+    "$STUBDIR" "$STUBDIR" "$real" > "$STUBDIR/gone-mkdir/mkdir"
+  chmod +x "$STUBDIR/gone-mkdir/mkdir"
+  PATH="$STUBDIR/gone-mkdir:$PATH" run acq_provider_input_lock_acquire sbx gonebox
+  assert_success
+  refute_output --partial "unsafe"
+  [ -e "$STUBDIR/failed" ]
+  acq_provider_input_lock_release "${lines[${#lines[@]} - 1]}"
+}
+
+@test "projection lock: a failed token write removes the owner file it created" {
+  local root lock
+  root=$(acq_provider_input_root sbx fullbox); lock="${root}.lock"
+  _acq_provider_input_safe_mkdir "${root%/*}"
+  run bash -c 'ACQ_SOURCE_ONLY=1 . "$1" >/dev/null 2>&1; printf() { return 1; }; _acq_provider_input_lock_take "$2" "1 x"' bash "$ACQ" "$lock"
+  assert_failure 2
+  [ ! -e "$lock" ]
+}
+
+# _lock_taker COUNT TOTAL — take and release the provider-input lock of sandbox
+# "contended" COUNT times in a fresh Bash. While it holds the lock it creates
+# $STUBDIR/holder exclusively: if that file already exists another taker holds
+# the lock at the same moment, and it records that in $STUBDIR/overlap.
+_lock_taker() {
+  timeout 600 bash -c 'ACQ_SOURCE_ONLY=1 . "$1" >/dev/null 2>&1
+    held=0
+    while [ "$held" -lt "$3" ]; do
+      if lock=$(ACQ_PROVIDER_INPUT_LOCK_RETRIES=1 acq_provider_input_lock_acquire sbx contended 2>/dev/null); then
+        ( set -C; : > "$2/holder" ) 2>/dev/null || echo "bash $$ owner=[$(cat "$lock/owner" 2>/dev/null)]" >> "$2/overlap"
+        sleep 0.02
+        rm -f -- "$2/holder"
+        acq_provider_input_lock_release "$lock" || true
+        held=$((held + 1))
+      else
+        sleep 0.05
+      fi
+    done
+    # Stay alive until every taker is done: a taker that exits while others
+    # still contend makes its last owner line stale, and stale-owner recovery
+    # is not what these tests measure.
+    : > "$2/done.$$"
+    waited=0
+    while [ "$(ls "$2" | grep -c "^done\\.")" -lt "$4" ] && [ "$waited" -lt 12000 ]; do
+      sleep 0.05; waited=$((waited + 1))
+    done' bash "$ACQ" "$STUBDIR" "$1" "$2"
+}
+
+@test "projection lock: parallel Bash takers never hold it at once, even with a non-exclusive mkdir" {
+  local pids="" pid rc=0 takers=6 count=15 n
+  export ACQ_PROVENANCE_DIR="$STUBDIR/provenance"
+  # Process creation is slow under Git Bash, so fewer takers there.
+  case "${OSTYPE:-}" in msys*|cygwin*) takers=3 count=5 ;; esac
+  _racy_mkdir
+  n=0
+  while [ "$n" -lt "$takers" ]; do
+    n=$((n + 1))
+    _lock_taker "$count" "$takers" &
+    pids="$pids $!"
+  done
+  for pid in $pids; do wait "$pid" || rc=1; done
+  [ "$rc" -eq 0 ]
+  [ ! -e "$STUBDIR/overlap" ] || { cat "$STUBDIR/overlap" >&2; false; }
+  [ ! -e "$(acq_provider_input_root sbx contended).lock" ]
+}
+
+@test "projection lock: parallel Bash and Python takers never hold it at once" {
+  case "${OSTYPE:-}" in msys*|cygwin*) skip "the Python acq never takes this lock on Windows" ;; esac
+  command -v python3 >/dev/null 2>&1 && python3 -c 'import sys; sys.exit(sys.version_info < (3, 12))' ||
+    skip "needs python3 >= 3.12 for the Python acq"
+  local pids="" pid rc=0 n=0
+  export ACQ_PROVENANCE_DIR="$STUBDIR/provenance"
+  _racy_mkdir
+  while [ "$n" -lt 3 ]; do
+    n=$((n + 1))
+    _lock_taker 15 6 &
+    pids="$pids $!"
+    PYTHONPATH="$REPO_ROOT/py-acq/src" timeout 600 python3 -c '
+import os, sys, time
+from acq_py import lock
+stub, count = sys.argv[1], int(sys.argv[2])
+held = 0
+while held < count:
+    taker = lock._BashLock("sbx", "contended")
+    # A Python acq that cannot work out its own identity (ps failing under
+    # load) only honours the lock and proceeds without taking it; that is not
+    # a hold, so it does not count here.
+    if not taker.acquire() or taker.token is None:
+        time.sleep(0.05)
+        continue
+    try:
+        os.close(os.open(stub + "/holder", os.O_WRONLY | os.O_CREAT | os.O_EXCL))
+    except FileExistsError:
+        with open(stub + "/overlap", "a", encoding="utf-8") as fh:
+            fh.write("python %d token=[%s]\n" % (os.getpid(), taker.token))
+    time.sleep(0.02)
+    try:
+        os.unlink(stub + "/holder")
+    except FileNotFoundError:
+        pass
+    taker.release()
+    held += 1
+# Stay alive until all six takers are done (see _lock_taker).
+open(os.path.join(stub, "done.py%d" % os.getpid()), "w").close()
+deadline = time.time() + 600
+while len([n for n in os.listdir(stub) if n.startswith("done.")]) < 6 and time.time() < deadline:
+    time.sleep(0.05)
+' "$STUBDIR" 15 &
+    pids="$pids $!"
+  done
+  for pid in $pids; do wait "$pid" || rc=1; done
+  [ "$rc" -eq 0 ]
+  [ ! -e "$STUBDIR/overlap" ] || { cat "$STUBDIR/overlap" >&2; false; }
+  [ ! -e "$(acq_provider_input_root sbx contended).lock" ]
 }
 
 @test "provision interruption releases provider-input lock" {
@@ -852,15 +1187,20 @@ _acq_msb_confirm_absent() { return 0; }  # confirms gone for the rc-ne-0 path
 rc=0
 acq_backend_terminate "$sandbox" & tx=\$!
 # Wait for slow-msb to register its PID (confirms the background executable started).
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-  [ -s "$pid_file" ] && break
+waited=0
+while [ ! -s "$pid_file" ] && kill -0 "\$tx" 2>/dev/null && [ "\$waited" -lt 600 ]; do
   sleep 0.1
+  waited=\$((waited + 1))
 done
 [ -s "$pid_file" ] || { echo "slow-msb never started" >&2; exit 1; }
 msb_pid=\$(cat "$pid_file")
 # The external child waits for its own registry entry before observing this gate.
 touch "$STUBDIR/slow-msb.go"
-for _ in 1 2 3 4 5 6 7 8 9 10; do [ -f "$STUBDIR/slow-msb.signalled" ] && break; sleep 0.1; done
+waited=0
+while [ ! -f "$STUBDIR/slow-msb.signalled" ] && kill -0 "\$msb_pid" 2>/dev/null && [ "\$waited" -lt 600 ]; do
+  sleep 0.1
+  waited=\$((waited + 1))
+done
 [ -f "$STUBDIR/slow-msb.signalled" ] || { echo "slow-msb never signalled" >&2; exit 1; }
 kill -0 "\$msb_pid" 2>/dev/null || { echo "slow-msb exited before lock probe" >&2; exit 1; }
 # Verify the lock is still held while the executable is alive.
@@ -884,9 +1224,9 @@ EOF
   [ ! -e "${root}.lock" ]
 }
 
-@test "handled signal helper reaps real children and yields 128/130/143" {
+@test "handled signal helper reaps real children and yields 129/130/143" {
   local rc_expected script
-  for rc_expected in 128 130 143; do
+  for rc_expected in 129 130 143; do
     script="$STUBDIR/signal-exit-${rc_expected}.sh"
     cat > "$script" << EOF
 #!/usr/bin/env bash
@@ -964,14 +1304,20 @@ _acq_msb_image_not_found_error() { return 1; }
 # Provision happens synchronously — run in background to probe lock state.
 rc=0
 acq_backend_provision msbcreatebox shell /tmp & tx=\$!
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-  [ -s "$STUBDIR/slow-msb-create.pid" ] && break; sleep 0.1
+waited=0
+while [ ! -s "$STUBDIR/slow-msb-create.pid" ] && kill -0 "\$tx" 2>/dev/null && [ "\$waited" -lt 600 ]; do
+  sleep 0.1
+  waited=\$((waited + 1))
 done
 [ -s "$STUBDIR/slow-msb-create.pid" ] || { echo "slow-msb-create never started" >&2; exit 1; }
 msb_pid=\$(cat "$STUBDIR/slow-msb-create.pid")
 # The external child waits for its own registry entry before observing this gate.
 touch "$STUBDIR/slow-msb-create.go"
-for _ in 1 2 3 4 5 6 7 8 9 10; do [ -f "$STUBDIR/slow-msb-create.signalled" ] && break; sleep 0.1; done
+waited=0
+while [ ! -f "$STUBDIR/slow-msb-create.signalled" ] && kill -0 "\$msb_pid" 2>/dev/null && [ "\$waited" -lt 600 ]; do
+  sleep 0.1
+  waited=\$((waited + 1))
+done
 [ -f "$STUBDIR/slow-msb-create.signalled" ] || { echo "slow-msb-create never signalled" >&2; exit 1; }
 kill -0 "\$msb_pid" 2>/dev/null || { echo "slow-msb-create exited before lock probe" >&2; exit 1; }
 # While slow-msb is running the lock must not be acquirable.
@@ -1028,6 +1374,42 @@ EOF
   [ -d "$real_path" ]
 }
 
+# _walk_race_shim — put a `python3` first on PATH that runs acq's path walks
+# through walk-race-python.py, which lets a rival create the component named by
+# ACQ_TEST_WALK_RACE between the walk's lookup and its mkdir. One deterministic
+# pass stands in for two acq processes creating the same missing directory.
+_walk_race_shim() {
+  local real
+  real=$(command -v python3)
+  mkdir -p "$STUBDIR/walk-race"
+  printf '#!/bin/sh\nexec "%s" -I "%s" "$@"\n' "$real" "$BATS_TEST_DIRNAME/walk-race-python.py" \
+    > "$STUBDIR/walk-race/python3"
+  chmod +x "$STUBDIR/walk-race/python3"
+  export PATH="$STUBDIR/walk-race:$PATH"
+  export ACQ_TEST_WALK_RACE_MARK="$STUBDIR/walk-race/raced"
+}
+
+@test "safe_mkdir tolerates a rival creating a missing component mid-walk" {
+  local real_path="$STUBDIR/race/shared/leaf"
+  _walk_race_shim
+  ACQ_TEST_WALK_RACE=shared run _acq_provider_input_safe_mkdir "$real_path"
+  assert_success
+  assert_equal "$(cat "$ACQ_TEST_WALK_RACE_MARK")" shared
+  [ -d "$real_path" ]
+  [ ! -L "$STUBDIR/race/shared" ]
+}
+
+@test "safe_mkdir still rejects a symlink a rival plants mid-walk" {
+  local real_path="$STUBDIR/race-link/shared/leaf"
+  mkdir -p "$STUBDIR/race-link-target"
+  _walk_race_shim
+  ACQ_TEST_WALK_RACE=shared ACQ_TEST_WALK_RACE_LINK="$STUBDIR/race-link-target" \
+    run _acq_provider_input_safe_mkdir "$real_path"
+  assert_failure
+  assert_equal "$(cat "$ACQ_TEST_WALK_RACE_MARK")" shared
+  [ ! -e "$STUBDIR/race-link-target/leaf" ]
+}
+
 @test "safe_dir accepts an existing real path with no symlinks" {
   local real_path="$STUBDIR/safe_dir_real/p/q"
   mkdir -p "$real_path"
@@ -1041,6 +1423,8 @@ EOF
   ln -s "$base" "$sym"
   run _acq_provider_input_safe_dir "$sym"
   assert_failure
+  # A silent predicate: refused, with no traceback or other output.
+  assert_output ''
 }
 
 @test "safe_mkdir rejects a path whose intermediate component is a symlink (malicious ancestor)" {
@@ -1051,6 +1435,21 @@ EOF
   ln -s "$evil_target" "$evil_parent"
   run _acq_provider_input_safe_mkdir "$evil_parent/new_child"
   assert_failure
+  # One line naming the refused path, never a Python traceback.
+  refute_output --partial 'Traceback'
+  assert_equal "${#lines[@]}" 1
+  assert_output --partial "acq: unsafe provider-input path $evil_parent/new_child:"
+  [ ! -e "$evil_target/new_child" ]
+}
+
+@test "safe_mkdir refuses a component that is a file with one line, not a traceback" {
+  local file="$STUBDIR/plain_file"
+  : > "$file"
+  run _acq_provider_input_safe_mkdir "$file/child"
+  assert_failure
+  refute_output --partial 'Traceback'
+  assert_equal "${#lines[@]}" 1
+  assert_output --partial "acq: unsafe provider-input path $file/child:"
 }
 
 @test "canonical_path aliases /var /tmp /etc on Darwin via ACQ_TEST_HOST_OS" {
@@ -1230,6 +1629,702 @@ EOF
   run _acq_provider_input_safe_dir "$user_sym/acq/state"
   unset ACQ_TEST_HOST_OS ACQ_TEST_ALIAS_TABLE
   assert_failure
+}
+
+# ---------------------------------------------------------------------------
+# safe_mkdir / safe_dir under Git Bash, MSYS2 and Cygwin
+# ---------------------------------------------------------------------------
+# Git for Windows ships no python3 (or only the Microsoft Store alias stub), and
+# native Windows CPython has no O_NOFOLLOW, O_DIRECTORY or dir_fd. These tests
+# set OSTYPE the way those shells do and put emulated interpreters first on
+# PATH. The emulated native Windows Python runs the real interpreter with those
+# flags removed and os.name set to "nt", and its os.lstat reports
+# FILE_ATTRIBUTE_REPARSE_POINT for each directory listed in FAKE_REPARSE, which
+# stands in for an NTFS junction (S_ISLNK does not report one); a file listed
+# there reads as some other reparse point. FAKE_SWAP_AFTER_LSTAT=leaf:target
+# replaces leaf with a symlink to target right after its lstat, the race the
+# snapshot's handle check exists for. The test mount table maps / to itself, so
+# the Windows path the walk receives is the same POSIX path.
+
+_win_bin() {
+  local bin="$STUBDIR/winbin" real
+  real=$(command -v python3)
+  mkdir -p "$bin"
+  printf '%s\n' "$bin"
+  cat > "$bin/winpython" <<SH
+#!/bin/sh
+printf '%s\n' "winpython \$*" >> "$STUBDIR/py.log"
+[ "\$1" = -I ] || exit 97
+shift
+case "\$1" in
+  -c) code=\$2; shift 2 ;;
+  -) code=; shift ;;
+  *) exit 97 ;;
+esac
+exec "$real" -I -c '
+import os, stat, sys
+real_lstat = os.lstat
+marked = set(p for p in os.environ.get("FAKE_REPARSE", "").split(":") if p)
+class St:
+    def __init__(self, st, attrs):
+        self._st = st
+        self.st_file_attributes = attrs
+    def __getattr__(self, name):
+        return getattr(self._st, name)
+swap = os.environ.get("FAKE_SWAP_AFTER_LSTAT", "").split(":")
+parent_swap = os.environ.get("FAKE_SWAP_PARENT_AFTER_LSTAT", "").split(":")
+def lstat(path, *args, **kwargs):
+    st = real_lstat(path, *args, **kwargs)
+    if len(parent_swap) == 2 and path == parent_swap[0]:
+        os.rename(path, path + ".old"); os.symlink(parent_swap[1], path)
+        parent_swap.clear()
+    if len(swap) == 2 and path == swap[0]:
+        os.unlink(path); os.symlink(swap[1], path)
+    if not stat.S_ISDIR(st.st_mode) and path not in marked: return st
+    attrs = stat.FILE_ATTRIBUTE_DIRECTORY if stat.S_ISDIR(st.st_mode) else 0
+    if path in marked: attrs |= stat.FILE_ATTRIBUTE_REPARSE_POINT
+    return St(st, attrs)
+os.lstat = lstat
+del os.O_NOFOLLOW, os.O_DIRECTORY
+import shutil  # loaded now: with os.name "nt" it would import the missing nt module
+os.name = "nt"
+code = sys.argv[1] or sys.stdin.read()
+sys.argv = ["-"] + sys.argv[2:]
+exec(compile(code, "<emulated-nt>", "exec"), {"__name__": "__main__"})
+' "\$code" "\$@"
+SH
+  cat > "$bin/storestub" <<SH
+#!/bin/sh
+printf '%s\n' "storestub \$*" >> "$STUBDIR/py.log"
+echo 'Python was not found; run without arguments to install from the Microsoft Store' >&2
+exit 49
+SH
+  cat > "$bin/msyspython" <<SH
+#!/bin/sh
+printf '%s\n' "msyspython \$*" >> "$STUBDIR/py.log"
+exec "$real" "\$@"
+SH
+  cat > "$bin/pylauncher" <<SH
+#!/bin/sh
+printf '%s\n' "py \$*" >> "$STUBDIR/py.log"
+[ "\$1" = -3 ] || exit 98
+shift
+exec "$bin/winpython" "\$@"
+SH
+  chmod +x "$bin"/*
+  printf '/ / ntfs binary,noacl,auto 1 1\n' > "$STUBDIR/mounts"
+}
+
+# _win_use BIN python3=X python=Y py=Z — link the chosen emulations.
+_win_use() {
+  local bin="$1" pair
+  shift
+  rm -f "$bin/python3" "$bin/python" "$bin/py"
+  for pair in "$@"; do ln -s "$bin/${pair#*=}" "$bin/${pair%%=*}"; done
+  export ACQ_TEST_MOUNTS_FILE="$STUBDIR/mounts"
+}
+
+@test "POSIX hosts run safe_dir through python3 with no interpreter probe" {
+  # Exactly the two `python3 -I -` runs this helper always made (canonical_path,
+  # then the walk), and no `-c` probe.
+  local bin real="$STUBDIR/posix_once/a"
+  bin=$(_win_bin)
+  _win_use "$bin" python3=msyspython
+  mkdir -p "$real"
+  OSTYPE=linux-gnu PATH="$bin:$PATH" _acq_provider_input_safe_dir "$real"
+  assert_equal "$(cat "$STUBDIR/py.log")" "msyspython -I - $real
+msyspython -I - $real"
+}
+
+@test "Git Bash skips the python3 Store stub and walks with native Windows Python" {
+  local bin real="$STUBDIR/nt_real/a/b"
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_mkdir "$real"
+  assert_success
+  [ -d "$real" ]
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_dir "$real"
+  assert_success
+  grep -q '^storestub -I -c ' "$STUBDIR/py.log"
+  grep -q "^winpython -I - mkdir $real\$" "$STUBDIR/py.log"
+  grep -q "^winpython -I - check $real\$" "$STUBDIR/py.log"
+}
+
+@test "native Windows walk rejects a symlinked ancestor without outside mutation" {
+  local bin outside="$STUBDIR/nt_outside" link="$STUBDIR/nt_link"
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  mkdir -p "$outside/existing"
+  ln -s "$outside" "$link"
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_mkdir "$link/new/child"
+  assert_failure
+  assert_output --partial 'unsafe provider-input path'
+  [ ! -e "$outside/new" ]
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_dir "$link/existing"
+  assert_failure
+}
+
+@test "native Windows walk rejects a junction (reparse point that is not S_ISLNK)" {
+  local bin junction="$STUBDIR/nt_junction"
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  mkdir -p "$junction/existing"
+  export FAKE_REPARSE="$junction"
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_mkdir "$junction/new"
+  assert_failure
+  [ ! -e "$junction/new" ]
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_dir "$junction/existing"
+  assert_failure
+  # The same tree without the reparse attribute is accepted, so the rejection
+  # above comes from the attribute check alone.
+  unset FAKE_REPARSE
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_dir "$junction/existing"
+  assert_success
+}
+
+@test "native Windows walk rejects a leaf reparse point, a file component and dot-dot" {
+  local bin base="$STUBDIR/nt_misc"
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  mkdir -p "$base/dir/leaf"
+  : > "$base/file"
+  FAKE_REPARSE="$base/dir/leaf" OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_dir "$base/dir/leaf"
+  assert_failure
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_mkdir "$base/file/child"
+  assert_failure
+  [ -f "$base/file" ]
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_mkdir "$base/dir/../made"
+  assert_failure
+  [ ! -e "$base/made" ]
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_dir "$base/missing"
+  assert_failure
+}
+
+@test "Git Bash falls back to py -3 when python3 and python are unusable" {
+  local bin real="$STUBDIR/nt_py/a"
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=storestub py=pylauncher
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_mkdir "$real"
+  assert_success
+  [ -d "$real" ]
+  grep -q "^py -3 -I - mkdir $real\$" "$STUBDIR/py.log"
+}
+
+@test "Git Bash with no usable Python fails closed before touching the path" {
+  local bin real="$STUBDIR/nt_none/a"
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=storestub py=storestub
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_mkdir "$real"
+  assert_failure
+  assert_output --partial 'need Python 3 (python3, python or py -3)'
+  [ ! -e "$STUBDIR/nt_none" ]
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_dir "$STUBDIR"
+  assert_failure
+}
+
+@test "native Windows walk fails closed when the mount table cannot map the path" {
+  local bin real="$STUBDIR/nt_nocyg/a"
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  ACQ_TEST_MOUNTS_FILE="$STUBDIR/no-such-mounts" OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_mkdir "$real"
+  assert_failure
+  assert_output --partial 'cannot map provider-input path'
+  [ ! -e "$STUBDIR/nt_nocyg" ]
+}
+
+@test "MSYS2 or Cygwin Python with POSIX primitives keeps the descriptor-relative walk" {
+  local bin real="$STUBDIR/msys_real/a" outside="$STUBDIR/msys_outside" link="$STUBDIR/msys_link"
+  bin=$(_win_bin)
+  _win_use "$bin" python3=msyspython
+  export ACQ_TEST_MOUNTS_FILE="$STUBDIR/no-such-mounts"
+  mkdir -p "$outside"
+  ln -s "$outside" "$link"
+  OSTYPE=cygwin PATH="$bin:$PATH" run _acq_provider_input_safe_mkdir "$real"
+  assert_success
+  [ -d "$real" ]
+  OSTYPE=cygwin PATH="$bin:$PATH" run _acq_provider_input_safe_mkdir "$link/new"
+  assert_failure
+  [ ! -e "$outside/new" ]
+  grep -q "^msyspython -I - $real\$" "$STUBDIR/py.log"
+}
+
+@test "nt_path maps MSYS paths lexically through the longest mount point" {
+  # The layout Git for Windows reports in /proc/mounts, octal escapes included.
+  local table="$STUBDIR/gitbash-mounts" pair input expected got
+  printf '%s\n' \
+    'C:/Program\040Files/Git / ntfs binary,noacl,auto 1 1' \
+    'C:/Program\040Files/Git/usr/bin /bin ntfs binary,noacl,auto 1 1' \
+    'C:/Users/u/AppData/Local/Temp /tmp ntfs binary,noacl,posix=0,usertemp 1 1' \
+    'C: /c ntfs binary,noacl,posix=0,user,noumount,auto 1 1' > "$table"
+  local cases=(
+    '/c/Users/u/.local/state/acq|C:/Users/u/.local/state/acq'
+    '/c|C:/'
+    '/C/Users/u|C:/Users/u'
+    '/TMP/x|C:/Users/u/AppData/Local/Temp/x'
+    '/BIN/bash|C:/Program Files/Git/BIN/bash'
+    '/Usr/share|C:/Program Files/Git/Usr/share'
+    '/tmp/acq-x|C:/Users/u/AppData/Local/Temp/acq-x'
+    '/bin/bash|C:/Program Files/Git/usr/bin/bash'
+    '/usr/share|C:/Program Files/Git/usr/share'
+    '/cx/y|C:/Program Files/Git/cx/y'
+    '/c/a/../b|C:/a/../b'
+    'C:\Users\u|C:\Users\u'
+    'D:/x|D:/x'
+  )
+  for pair in "${cases[@]}"; do
+    input="${pair%%|*}"; expected="${pair#*|}"
+    got=$(ACQ_TEST_MOUNTS_FILE="$table" _acq_provider_input_nt_path "$input") || got="<rc=$?>"
+    [ "$got" = "$expected" ] || {
+      printf 'FAIL nt_path %s -> %s, want %s\n' "$input" "$got" "$expected" >&2
+      return 1
+    }
+  done
+  ACQ_TEST_MOUNTS_FILE="$table" run _acq_provider_input_nt_path 'relative/x'
+  assert_failure
+  ACQ_TEST_MOUNTS_FILE="$table" run _acq_provider_input_nt_path '//server/share/x'
+  assert_failure
+  # The match leaves the caller's nocasematch setting as it was.
+  ACQ_TEST_MOUNTS_FILE="$table" _acq_provider_input_nt_path '/C/x' >/dev/null
+  run shopt -q nocasematch
+  assert_failure
+  ACQ_TEST_MOUNTS_FILE="$STUBDIR/no-such-mounts" run _acq_provider_input_nt_path '/c/x'
+  assert_failure
+}
+
+@test "nt_path takes the longest mount prefix whatever the table order" {
+  # / is listed last, and /usr/bin is nested in /usr with a different target, so
+  # a first-match or shortest-match lookup gives a wrong answer.
+  local table="$STUBDIR/nested-mounts" pair input expected got
+  printf '%s\n' \
+    'E:/usrbin /usr/bin ntfs binary,noacl,auto 1 1' \
+    'F:/usr /usr ntfs binary,noacl,auto 1 1' \
+    'C: /c ntfs binary,noacl,posix=0,user,noumount,auto 1 1' \
+    'G:/root / ntfs binary,noacl,auto 1 1' > "$table"
+  local cases=(
+    '/usr/bin/bash|E:/usrbin/bash'
+    '/usr/bin|E:/usrbin/'
+    '/usr/binx/y|F:/usr/binx/y'
+    '/usr/lib/x|F:/usr/lib/x'
+    '/c/x|C:/x'
+    '/opt/x|G:/root/opt/x'
+  )
+  for pair in "${cases[@]}"; do
+    input="${pair%%|*}"; expected="${pair#*|}"
+    got=$(ACQ_TEST_MOUNTS_FILE="$table" _acq_provider_input_nt_path "$input") || got="<rc=$?>"
+    [ "$got" = "$expected" ] || {
+      printf 'FAIL nt_path %s -> %s, want %s\n' "$input" "$got" "$expected" >&2
+      return 1
+    }
+  done
+}
+
+@test "nt_path ignores ACQ_TEST_MOUNTS_FILE outside bats" {
+  local table="$STUBDIR/zmounts" got
+  printf 'Z:/fake / ntfs binary,noacl,auto 1 1\n' > "$table"
+  got=$(ACQ_TEST_MOUNTS_FILE="$table" _acq_provider_input_nt_path /x/y)
+  assert_equal "$got" 'Z:/fake/x/y'
+  got=$(unset BATS_TEST_NAME; ACQ_TEST_MOUNTS_FILE="$table" _acq_provider_input_nt_path /x/y) || got="<rc=$?>"
+  [ "$got" != 'Z:/fake/x/y' ]
+}
+
+@test "native Windows walk rejects names Win32 would rewrite, before touching them" {
+  local bin base="$STUBDIR/nt_names" name names
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  names=('dot.' 'space ' 'c:' 'a:b' 'lt<' 'gt>' 'q"' 'pipe|' 'ask?' 'star*' "tab$(printf '\t')x")
+  mkdir -p "$base"
+  for name in "${names[@]}"; do
+    OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_mkdir "$base/$name/child"
+    assert_failure
+    [ ! -e "$base/$name" ] || { printf 'FAIL created %s\n' "$name" >&2; return 1; }
+    # An existing directory with the name is still refused by the check.
+    mkdir "$base/$name"
+    OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_dir "$base/$name"
+    assert_failure
+  done
+  # The same walk accepts an ordinary name, so the refusals come from the names.
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_mkdir "$base/plain.name/child"
+  assert_success
+}
+
+@test "native Windows walk checks the drive root itself" {
+  local bin
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_dir "$STUBDIR"
+  assert_success
+  FAKE_REPARSE=/ OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_dir "$STUBDIR"
+  assert_failure
+}
+
+@test "interpreter probe trusts only absolute command paths and runs them by path" {
+  local bin
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  OSTYPE=msys PATH="$bin:$PATH" _acq_provider_input_path_python
+  assert_equal "${_ACQ_PROVIDER_INPUT_PATH_PY[*]}" "$bin/python"
+  assert_equal "$_ACQ_PROVIDER_INPUT_PATH_PY_KIND" nt
+  # A shell function named python is not a candidate, even though it would
+  # answer the probe.
+  unset _ACQ_PROVIDER_INPUT_PATH_PY _ACQ_PROVIDER_INPUT_PATH_PY_KIND
+  rm -f "$bin/python"
+  eval "python() { \"$bin/winpython\" \"\$@\"; }"
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_safe_mkdir "$STUBDIR/fn_python/a"
+  unset -f python
+  assert_failure
+  assert_output --partial 'need Python 3'
+  [ ! -e "$STUBDIR/fn_python" ]
+}
+
+@test "interpreter probe result is cached and warmed by the transaction guardian" {
+  local bin probes
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  OSTYPE=msys PATH="$bin:$PATH" _acq_provider_input_guardian_start
+  _acq_provider_input_guardian_stop
+  assert_equal "$_ACQ_PROVIDER_INPUT_PATH_PY_KIND" nt
+  # Later helpers reuse the cached interpreter: no further probe runs, even
+  # inside command substitutions.
+  OSTYPE=msys PATH="$bin:$PATH" _acq_provider_input_safe_mkdir "$STUBDIR/cached/a"
+  : "$(OSTYPE=msys PATH="$bin:$PATH" _acq_provider_input_safe_dir "$STUBDIR/cached/a"; echo checked)"
+  probes=$(grep -c -- ' -I -c ' "$STUBDIR/py.log")
+  assert_equal "$probes" 2
+  grep -q "^winpython -I - check $STUBDIR/cached/a\$" "$STUBDIR/py.log"
+}
+
+@test "interpreter cache inherited from the environment is ignored" {
+  # An exported cache must not choose the interpreter: sourcing acq drops it, so
+  # the probe runs, finds no usable Python here, and safe_dir fails closed
+  # without running the planted command.
+  local bin planted="$STUBDIR/planted-python" script="$STUBDIR/inherited-cache.sh"
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=storestub py=storestub
+  mkdir -p "$STUBDIR/inherited/a"
+  cat > "$planted" <<SH
+#!/bin/sh
+printf '%s\n' "planted \$*" >> "$STUBDIR/planted.log"
+exit 0
+SH
+  chmod +x "$planted"
+  cat > "$script" <<SH
+#!/usr/bin/env bash
+ACQ_SCRIPT_DIR="$REPO_ROOT"; ACQ_SOURCE_ONLY=1
+. "$REPO_ROOT/acq"
+set +e
+OSTYPE=msys
+PATH="$bin:\$PATH"
+_acq_provider_input_safe_dir "$STUBDIR/inherited/a"
+SH
+  chmod +x "$script"
+  _ACQ_PROVIDER_INPUT_PATH_PY="$planted" _ACQ_PROVIDER_INPUT_PATH_PY_KIND=nt run "$script"
+  assert_failure
+  assert_output --partial 'need Python 3'
+  [ ! -e "$STUBDIR/planted.log" ]
+}
+
+@test "canonical_path passes the path through unchanged for native Windows Python" {
+  local bin got
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  got=$(OSTYPE=msys PATH="$bin:$PATH" _acq_provider_input_canonical_path '/c/Users/u/.local/state/acq')
+  assert_equal "$got" '/c/Users/u/.local/state/acq'
+}
+
+# ---------------------------------------------------------------------------
+# snapshot / materialize / publish under Git Bash with native Windows Python
+# ---------------------------------------------------------------------------
+
+@test "POSIX snapshot, materialize and swap run through python3 with unchanged arguments" {
+  local bin release="$STUBDIR/release" kit candidate="$STUBDIR/posix_candidate" providers="$STUBDIR/posix_providers"
+  bin=$(_win_bin)
+  _win_use "$bin" python3=msyspython
+  _provider_release "$release"; _provider_kit "$release" alpha
+  kit="$release/integrations/isolation/acq-kits/alpha"
+  mkdir -p "$providers"
+  OSTYPE=linux-gnu PATH="$bin:$PATH" _acq_provider_input_snapshot "$kit" "$candidate"
+  OSTYPE=linux-gnu PATH="$bin:$PATH" _acq_provider_input_materialize "$candidate/provider-input.json" "$candidate" "$providers"
+  : > "$STUBDIR/swap-src"
+  OSTYPE=linux-gnu PATH="$bin:$PATH" _acq_provider_input_atomic_replace "$STUBDIR/swap-src" "$STUBDIR/swap-dst"
+  assert_equal "$(cat "$STUBDIR/py.log")" "msyspython -I - $kit $candidate
+msyspython -I - $candidate/provider-input.json $candidate $providers
+msyspython -I - $STUBDIR/swap-src $STUBDIR/swap-dst"
+  [ -f "$providers/alpha/facts.json" ] && [ -f "$STUBDIR/swap-dst" ]
+}
+
+@test "Git Bash snapshot and materialize use the probed native Windows Python" {
+  local bin release="$STUBDIR/release" kit candidate="$STUBDIR/nt_candidate" providers="$STUBDIR/nt_providers"
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=storestub py=pylauncher
+  _provider_release "$release"; _provider_kit "$release" alpha
+  kit="$release/integrations/isolation/acq-kits/alpha"
+  mkdir -p "$providers"
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_snapshot "$kit" "$candidate"
+  assert_success
+  grep -q "^py -3 -I - $kit $candidate\$" "$STUBDIR/py.log"
+  cmp "$kit/provider-input.json" "$candidate/provider-input.json"
+  cmp "$kit/spec.yaml" "$candidate/spec.yaml"
+  cmp "$kit/provider-input/facts.json" "$candidate/provider-input/facts.json"
+  [ -x "$candidate/scripts/normalize" ]
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_materialize "$candidate/provider-input.json" "$candidate" "$providers"
+  assert_success
+  grep -q "^py -3 -I - $candidate/provider-input.json $candidate $providers\$" "$STUBDIR/py.log"
+  [ -f "$providers/alpha/facts.json" ] && [ ! -w "$providers/alpha/facts.json" ]
+  [ -x "$providers/alpha/normalizer" ]
+}
+
+@test "native Windows snapshot refuses links, reparse points and swapped leaves" {
+  local bin release="$STUBDIR/release" kit outside="$STUBDIR/nt_secret"
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  _provider_release "$release"; _provider_kit "$release" alpha
+  kit="$release/integrations/isolation/acq-kits/alpha"
+  printf 'secret\n' > "$outside"
+  # A symlinked leaf.
+  mv "$kit/provider-input/facts.json" "$STUBDIR/facts.real"
+  ln -s "$outside" "$kit/provider-input/facts.json"
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_snapshot "$kit" "$STUBDIR/c1"
+  assert_failure
+  assert_output --partial 'unsafe provider artifact'
+  rm "$kit/provider-input/facts.json"; mv "$STUBDIR/facts.real" "$kit/provider-input/facts.json"
+  # A junction ancestor, then a leaf that is some other reparse point.
+  FAKE_REPARSE="$kit/provider-input" OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_snapshot "$kit" "$STUBDIR/c2"
+  assert_failure
+  FAKE_REPARSE="$kit/spec.yaml" OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_snapshot "$kit" "$STUBDIR/c3"
+  assert_failure
+  # A kit root that is itself a junction.
+  FAKE_REPARSE="$kit" OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_snapshot "$kit" "$STUBDIR/c4"
+  assert_failure
+  # A leaf replaced with a link after its lstat: the opened handle is another file.
+  FAKE_SWAP_AFTER_LSTAT="$kit/provider-input/facts.json:$outside" OSTYPE=msys PATH="$bin:$PATH" \
+    run _acq_provider_input_snapshot "$kit" "$STUBDIR/c5"
+  assert_failure
+  assert_output --partial 'unsafe provider artifact'
+  [ ! -e "$STUBDIR/c5/provider-input/facts.json" ]
+  # The untouched kit snapshots, so each refusal above came from its own cause.
+  rm "$kit/provider-input/facts.json"; printf '{"providerId":"alpha"}\n' > "$kit/provider-input/facts.json"
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_snapshot "$kit" "$STUBDIR/c6"
+  assert_success
+}
+
+@test "native Windows snapshot refuses artifact paths Win32 would rewrite" {
+  local bin release="$STUBDIR/release" kit name i=0
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  _provider_release "$release"; _provider_kit "$release" alpha
+  kit="$release/integrations/isolation/acq-kits/alpha"
+  for name in 'facts.json.' 'facts.json ' 'facts.json:ads' 'sub\facts.json' 'NUL' 'com1.json' 'COM¹' 'lpt³.txt' 'a|b'; do
+    i=$((i + 1))
+    printf '{"providerId":"alpha","factsPath":"%s","normalizerPath":"scripts/normalize","snapshotPath":"files/snapshot.json"}\n' \
+      "$(printf '%s' "$name" | sed 's/\\/\\\\/g')" > "$kit/provider-input.json"
+    OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_snapshot "$kit" "$STUBDIR/w$i"
+    assert_failure
+    assert_output --partial 'unsafe provider artifact path'
+  done
+  # POSIX keeps accepting the same characters as plain file names.
+  printf '{}\n' > "$kit/a|b"
+  printf '{"providerId":"alpha","factsPath":"a|b","normalizerPath":"scripts/normalize","snapshotPath":"files/snapshot.json"}\n' > "$kit/provider-input.json"
+  run _acq_provider_input_snapshot "$kit" "$STUBDIR/wposix"
+  assert_success
+}
+
+@test "native Windows materialize refuses unsafe provider IDs and reparse-point artifacts" {
+  local bin release="$STUBDIR/release" kit candidate="$STUBDIR/m_candidate" id i=0 providers
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  _provider_release "$release"; _provider_kit "$release" alpha
+  kit="$release/integrations/isolation/acq-kits/alpha"
+  OSTYPE=msys PATH="$bin:$PATH" _acq_provider_input_snapshot "$kit" "$candidate"
+  for id in 'nul' 'lpt²' 'alpha.' 'c:alpha' 'al*ha'; do
+    i=$((i + 1)); providers="$STUBDIR/m_providers$i"; mkdir -p "$providers"
+    printf '{"providerId":"%s","schemaVersion":"acq-provider-input-bundle/v2","providerPath":"models/providers/%s","factsPath":"provider-input/facts.json","normalizerPath":"scripts/normalize","snapshotPath":"files/snapshot.json"}\n' "$id" "$id" > "$STUBDIR/m_manifest.json"
+    OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_materialize "$STUBDIR/m_manifest.json" "$candidate" "$providers"
+    assert_failure
+    assert_output --partial 'unsafe provider ID'
+    [ -z "$(ls -A "$providers")" ]
+  done
+  providers="$STUBDIR/m_providers_reparse"; mkdir -p "$providers"
+  FAKE_REPARSE="$candidate/files/snapshot.json" OSTYPE=msys PATH="$bin:$PATH" \
+    run _acq_provider_input_materialize "$candidate/provider-input.json" "$candidate" "$providers"
+  assert_failure
+  assert_output --partial 'unsafe provider artifact'
+}
+
+@test "native Windows publish writes current as a pointer file and swaps it atomically" {
+  local bin root
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  root=$(acq_provider_input_root msb ntpublish)
+  mkdir -p "$root/generations/generation.one/models/providers" "$root/generations/generation.two/models/providers"
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_publish "$root" "$root/generations/generation.one"
+  assert_success
+  [ -f "$root/current" ] && [ ! -L "$root/current" ]
+  assert_equal "$(cat "$root/current")" "generations/generation.one"
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_publish "$root" "$root/generations/generation.two"
+  assert_success
+  assert_equal "$(cat "$root/current")" "generations/generation.two"
+  [ -d "$root/generations/generation.one" ]
+  [ ! -w "$root/generations/generation.two/models" ]
+  [ -z "$(find "$root" -maxdepth 1 -name '.current.*')" ]
+  grep -q "^winpython -I - $root/.current.[0-9]*.[0-9]* $root/current\$" "$STUBDIR/py.log"
+}
+
+@test "native Windows publish replaces a link left as current but never a real directory" {
+  local bin root
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  root=$(acq_provider_input_root msb ntlinked)
+  mkdir -p "$root/generations/generation.old/models/providers" "$root/generations/generation.new/models/providers"
+  # A symlink, as the Python acq leaves with Developer Mode on.
+  ln -s generations/generation.old "$root/current"
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_publish "$root" "$root/generations/generation.new"
+  assert_success
+  [ -f "$root/current" ] && [ ! -L "$root/current" ]
+  assert_equal "$(cat "$root/current")" "generations/generation.new"
+  [ -d "$root/generations/generation.old/models/providers" ]
+  # A junction: a directory reparse point, which os.replace cannot overwrite.
+  rm "$root/current"; mkdir "$root/current"
+  FAKE_REPARSE="$root/current" OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_publish "$root" "$root/generations/generation.new"
+  assert_success
+  [ -f "$root/current" ]
+  # A real directory (the copy an older Git Bash ln -s made) is refused, kept,
+  # and no temporary pointer is left behind.
+  rm "$root/current"; mkdir -p "$root/current/models"
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_publish "$root" "$root/generations/generation.new"
+  assert_failure
+  assert_output --partial 'it is a directory, not a file or a link'
+  [ -d "$root/current/models" ]
+  [ -z "$(find "$root" -maxdepth 1 -name '.current.*')" ]
+}
+
+@test "native Windows swap fails closed when a path does not map" {
+  local bin
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  : > "$STUBDIR/unmapped-src"
+  ACQ_TEST_MOUNTS_FILE="$STUBDIR/no-such-mounts" OSTYPE=msys PATH="$bin:$PATH" \
+    run _acq_provider_input_atomic_replace "$STUBDIR/unmapped-src" "$STUBDIR/unmapped-dst"
+  assert_failure
+  assert_output --partial 'cannot map provider-input path'
+  [ -f "$STUBDIR/unmapped-src" ] && [ ! -e "$STUBDIR/unmapped-dst" ]
+  refute grep -q '^winpython -I - ' "$STUBDIR/py.log"
+}
+
+@test "Git Bash provider-input transaction completes with native Windows Python" {
+  local bin release="$STUBDIR/release" lock generation root mount
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  _provider_release "$release"; _provider_kit "$release" alpha
+  _use_release
+  _acq_provider_input_control_plane() { printf '%s\n' "$release"; }
+  KITS=("$release/integrations/isolation/acq-kits/alpha")
+  # Not exported: a child bash would take the value as its own OSTYPE.
+  OSTYPE=msys
+  PATH="$bin:$PATH"
+  lock=$(acq_provider_input_lock_acquire msb nttx)
+  generation=$(acq_provider_input_prepare msb nttx)
+  root=$(acq_provider_input_root msb nttx)
+  [[ "$generation" == "$root/generations/generation."* ]]
+  [ -f "$generation/models/providers/alpha/facts.json" ]
+  mount=$(acq_provider_input_msb_mount nttx "$generation")
+  assert_equal "$mount" "$generation:$ACQ_PROVIDER_INPUT_GUEST_DIR/${generation##*/}:ro"
+  _acq_provider_input_publish "$root" "$generation"
+  assert_equal "$(cat "$root/current")" "generations/${generation##*/}"
+  acq_provider_input_remove msb nttx
+  [ ! -e "$root" ]
+  acq_provider_input_lock_release "$lock"
+  [ ! -e "$lock" ]
+  grep -q "^winpython -I - $release/integrations/isolation/acq-kits/alpha " "$STUBDIR/py.log"
+  refute grep -q '^msyspython' "$STUBDIR/py.log"
+}
+
+# _facts_generation DIR ID — a generation holding one provider's full facts.
+_facts_generation() {
+  mkdir -p "$1/models/providers/$2"
+  printf '{"providerId":"%s","keyEnv":"%s_KEY","host":"%s.example.gov","modelsUrl":"https://%s.example.gov/v1/models","apiProtocol":"openai"}\n' \
+    "$2" "$(printf '%s' "$2" | tr '[:lower:]' '[:upper:]')" "$2" "$2" > "$1/models/providers/$2/facts.json"
+}
+
+@test "sandbox facts read the generation a pointer-file current names" {
+  local root
+  root=$(acq_provider_input_root msb pointerfacts)
+  _facts_generation "$root/generations/generation.one" alpha
+  printf 'generations/generation.one\n' > "$root/current"
+  run acq_provider_sandbox_provider_ids msb pointerfacts
+  assert_success
+  assert_output alpha
+  run acq_provider_sandbox_facts msb pointerfacts
+  assert_output "$(printf 'alpha\tALPHA_KEY\talpha.example.gov\thttps://alpha.example.gov/v1/models\topenai')"
+  # The POSIX symlink and a real directory left as current are read too.
+  rm "$root/current"; ln -s generations/generation.one "$root/current"
+  run acq_provider_sandbox_provider_ids msb pointerfacts
+  assert_output alpha
+  rm "$root/current"; _facts_generation "$root/current" beta
+  run acq_provider_sandbox_provider_ids msb pointerfacts
+  assert_output beta
+}
+
+@test "an unusable current falls back to the recorded provider facts" {
+  local root outside="$STUBDIR/outside-generation" target recorded
+  root=$(acq_provider_input_root msb fallbackfacts)
+  _facts_generation "$root/generations/generation.one" alpha
+  _facts_generation "$outside" gamma
+  ln -s "$outside" "$root/generations/generation.link"
+  recorded=$(printf 'beta\tBETA_KEY\tbeta.example.gov\thttps://beta.example.gov/v1/models\topenai')
+  acq_host_config_write msb fallbackfacts provider-credentials "$recorded"
+  for target in '../outside-generation' "$outside" 'generations/generation.one/../generation.one' \
+      'generations/generation.link' 'generations/generation.missing' 'generations/' \
+      "$(printf 'generations/generation.one\r')" "$(printf 'generations/generation.one\nextra')"; do
+    rm -f "$root/current"
+    printf '%s\n' "$target" > "$root/current"
+    run acq_provider_sandbox_provider_ids msb fallbackfacts
+    assert_success
+    assert_output beta
+    # The same text as a symlink is refused the same way.
+    rm -f "$root/current"
+    ln -s "$target" "$root/current"
+    run acq_provider_sandbox_provider_ids msb fallbackfacts
+    assert_success
+    assert_output beta
+  done
+  rm -f "$root/current"
+  run acq_provider_sandbox_provider_ids msb fallbackfacts
+  assert_output beta
+}
+
+@test "provider facts parse when the interpreter writes CRLF line endings" {
+  local python="$STUBDIR/crlf-python" record
+  # Native Windows Python's text-mode stdout ends each line with CRLF; this
+  # interpreter does the same, then runs the program acq sends on stdin.
+  printf '%s\n' 'import io, sys' \
+    'sys.stdout = io.TextIOWrapper(sys.stdout.buffer, newline="\r\n")' \
+    'code = sys.stdin.read()' 'sys.argv = ["-"] + sys.argv[1:]' \
+    'exec(compile(code, "<stdin>", "exec"), {"__name__": "__main__"})' > "$STUBDIR/crlf-boot.py"
+  printf '#!/bin/sh\n[ "$1" = -I ] && shift\n[ "$1" = - ] || exit 97\nshift\nexec "%s" -I "%s" "$@"\n' \
+    "$(command -v python3)" "$STUBDIR/crlf-boot.py" > "$python"
+  chmod +x "$python"
+  _facts_generation "$STUBDIR/crlf" alpha
+  record="$STUBDIR/crlf/models/providers/alpha/facts.json"
+  ACQ_PROVIDER_INPUT_PYTHON="$python" run acq_provider_facts_json_fields "$record"
+  assert_success
+  assert_output "$(printf 'alpha\tALPHA_KEY\talpha.example.gov\thttps://alpha.example.gov/v1/models\topenai')"
+}
+
+@test "snapshot refuses an artifact with another hard link, POSIX and native Windows" {
+  local bin release="$STUBDIR/release" kit outside="$STUBDIR/hard-secret"
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  _provider_release "$release"; _provider_kit "$release" alpha
+  kit="$release/integrations/isolation/acq-kits/alpha"
+  printf 'secret\n' > "$outside"
+  rm "$kit/files/snapshot.json"
+  ln "$outside" "$kit/files/snapshot.json"
+  run _acq_provider_input_snapshot "$kit" "$STUBDIR/hl-posix"
+  assert_failure
+  assert_output --partial 'unsafe provider artifact'
+  OSTYPE=msys PATH="$bin:$PATH" run _acq_provider_input_snapshot "$kit" "$STUBDIR/hl-nt"
+  assert_failure
+  assert_output --partial 'unsafe provider artifact'
+  [ ! -e "$STUBDIR/hl-posix/files/snapshot.json" ] && [ ! -e "$STUBDIR/hl-nt/files/snapshot.json" ]
 }
 
 @test "publication retains old generation for existing current consumers" {
@@ -1429,4 +2524,225 @@ EOF
   assert_success
   grep -Fqx "fetch -q --depth 1 origin $PATTERNS_KIT_REF" "$log"
   grep -Fqx "checkout -q --detach FETCH_HEAD" "$log"
+}
+
+# _spinner_provision BACKEND NAME ACTION — run acq_backend_provision under
+# `set -euo pipefail` (as acq does) with the spinner animating (progress gate
+# forced on) and the unlocked provision stubbed to run ACTION while the spinner
+# is active. Records cleanup and INT-handler calls in $STUBDIR/<name>.log.
+_spinner_provision() {
+  local backend="$1" name="$2" action="$3" script log
+  script="$STUBDIR/spinner-$name.sh"
+  log="$STUBDIR/$name.log"
+  : > "$log"
+  cat > "$script" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+ACQ_SCRIPT_DIR="$REPO_ROOT"; ACQ_SOURCE_ONLY=1
+. "$REPO_ROOT/acq"
+. "$REPO_ROOT/acq.backends/$backend.sh"
+_acq_progress_enabled() { return 0; }
+_acq_${backend}_cleanup_uncreated_attempt() { printf 'cleanup\n' >> "$log"; }
+eval "_test_orig_signal_exit() \$(declare -f _acq_provider_input_signal_exit | sed 1d)"
+_acq_provider_input_signal_exit() { printf 'handler %s\n' "\$*" >> "$log"; _test_orig_signal_exit "\$@"; }
+_acq_backend_provision_unlocked() {
+  acq_spin_start "Creating the sandbox"
+  $action
+  printf 'not-reached\n' >> "$log"
+}
+rc=0
+acq_backend_provision "$name" shell /tmp 2>/dev/null || rc=\$?
+printf 'rc=%s\n' "\$rc"
+EOF
+  chmod +x "$script"
+  BASH_ENV='' run "$script"
+}
+
+@test "provision with the spinner active keeps a failing exit status" {
+  local backend root
+  for backend in sbx msb; do
+    root=$(acq_provider_input_root "$backend" "spinexit-$backend")
+    _spinner_provision "$backend" "spinexit-$backend" 'exit 3'
+    assert_success
+    assert_output 'rc=3'
+    assert_equal "$(cat "$STUBDIR/spinexit-$backend.log")" cleanup
+    [ ! -e "${root}.lock" ]
+  done
+}
+
+@test "Ctrl-C during provision with the spinner active exits 130 via the chained handler" {
+  local backend root
+  for backend in sbx msb; do
+    root=$(acq_provider_input_root "$backend" "spinint-$backend")
+    _spinner_provision "$backend" "spinint-$backend" \
+      'kill -s INT "$_ACQ_PROVIDER_INPUT_TRANSACTION_PID"; sleep 5'
+    assert_success
+    assert_output 'rc=130'
+    assert_equal "$(cat "$STUBDIR/spinint-$backend.log")" "$(printf 'handler 130\ncleanup')"
+    [ ! -e "${root}.lock" ]
+  done
+}
+
+@test "HUP during provision exits 129 via the chained handler" {
+  local backend root
+  for backend in sbx msb; do
+    root=$(acq_provider_input_root "$backend" "spinhup-$backend")
+    _spinner_provision "$backend" "spinhup-$backend" \
+      'kill -s HUP "$_ACQ_PROVIDER_INPUT_TRANSACTION_PID"; sleep 5'
+    assert_success
+    assert_output 'rc=129'
+    assert_equal "$(cat "$STUBDIR/spinhup-$backend.log")" "$(printf 'handler 129\ncleanup')"
+    [ ! -e "${root}.lock" ]
+  done
+}
+
+# A child forked while the transaction subshell's traps are set can run them:
+# a signal that reaches it before Bash resets its inherited handlers is handled
+# with the subshell's trap commands, and Bash 5 then also runs the subshell's
+# EXIT trap there. Call the handlers from a child directly, as that window does,
+# for provision and terminate on both backends. The child must exit with the
+# handler's status without signalling the registered backend child, running the
+# uncreated-attempt cleanup or releasing the lock; the owner's own exit must
+# still do all of that exactly once.
+_owner_guard_script() { # BACKEND NAME VERB LOG
+  local backend="$1" name="$2" verb="$3" log="$4" script="$STUBDIR/owner-$2.sh"
+  cat > "$script" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+ACQ_SCRIPT_DIR="$REPO_ROOT"; ACQ_SOURCE_ONLY=1
+. "$REPO_ROOT/acq"
+. "$REPO_ROOT/acq.backends/$backend.sh"
+_acq_${backend}_cleanup_uncreated_attempt() { printf 'cleanup\n' >> "$log"; }
+lock="\$(acq_provider_input_root $backend $name).lock"
+_owner_body() {
+  sleep 30 & backend_child=\$!
+  _acq_provider_input_guardian_register_child "\$backend_child"
+  exit_line=\$(trap -p EXIT)
+  exit_cmd=\$(_acq_trap_line_cmd "\$exit_line")
+  [ -n "\$exit_cmd" ] || printf 'no-exit-trap\n' >> "$log"
+  ( _acq_provider_input_signal_exit 143; printf 'not-reached\n' >> "$log" ) || printf 'child-term=%s\n' "\$?" >> "$log"
+  ( _acq_provider_input_signal_exit 129; printf 'not-reached\n' >> "$log" ) || printf 'child-hup=%s\n' "\$?" >> "$log"
+  ( _acq_return_status 5; eval "\$exit_cmd" ) || printf 'child-exit=%s\n' "\$?" >> "$log"
+  kill -0 "\$backend_child" 2>/dev/null && printf 'backend-child-alive\n' >> "$log"
+  [ -d "\$lock" ] && printf 'lock-held\n' >> "$log"
+  kill "\$backend_child" 2>/dev/null || true
+  wait "\$backend_child" 2>/dev/null || true
+  exit 3
+}
+_acq_backend_${verb}_unlocked() { _owner_body; }
+rc=0
+acq_backend_$verb "$name" shell /tmp 2>/dev/null || rc=\$?
+printf 'rc=%s\n' "\$rc"
+[ -d "\$lock" ] && printf 'lock-left\n'
+true
+EOF
+  chmod +x "$script"
+  BASH_ENV='' run "$script"
+}
+
+@test "a child that inherits the transaction traps never cleans up for the owner" {
+  local backend verb name log want
+  for backend in sbx msb; do
+    for verb in provision terminate; do
+      name="owner-$verb-$backend"
+      log="$STUBDIR/$name.log"
+      : > "$log"
+      _owner_guard_script "$backend" "$name" "$verb" "$log"
+      assert_success
+      assert_output 'rc=3'
+      want=$(printf 'child-term=143\nchild-hup=129\nchild-exit=5\nbackend-child-alive\nlock-held')
+      # Only provision has an uncreated attempt to clean up; the owner runs it once.
+      [ "$verb" = provision ] && want=$(printf '%s\ncleanup' "$want")
+      assert_equal "$(cat "$log")" "$want"
+    done
+  done
+}
+
+# HUP is signal 1, so the conventional status is 129. Pin every provider-input
+# transaction HUP trap (provision and terminate, both backends).
+@test "provider-input transaction HUP traps exit 129" {
+  local f
+  for f in sbx msb; do
+    assert_equal "$(grep -c "trap '_acq_provider_input_signal_exit 129' HUP" "$REPO_ROOT/acq.backends/$f.sh")" 2
+    refute grep -q "_acq_provider_input_signal_exit 128" "$REPO_ROOT/acq.backends/$f.sh"
+  done
+}
+
+# This pins the documented residual, rather than claiming a path recheck closes
+# the race. A transient junction can be restored before any second path walk.
+@test "native Windows snapshot documents the parent-junction race for local kits" {
+  local bin release="$STUBDIR/release" kit outside="$STUBDIR/outside" candidate="$STUBDIR/raced"
+  bin=$(_win_bin)
+  _win_use "$bin" python3=storestub python=winpython
+  _provider_release "$release"; _provider_kit "$release" alpha
+  kit="$release/integrations/isolation/acq-kits/alpha"
+  mkdir -p "$outside"
+  printf '{"outside":true}\n' > "$outside/facts.json"
+  FAKE_SWAP_PARENT_AFTER_LSTAT="$kit/provider-input:$outside" OSTYPE=msys PATH="$bin:$PATH" \
+    run _acq_provider_input_snapshot "$kit" "$candidate"
+  assert_success
+  cmp "$outside/facts.json" "$candidate/provider-input/facts.json"
+  grep -Fq 'ACQ_IMPL=python' "$REPO_ROOT/docs/KNOWN_FAILURE_MODES.md"
+}
+
+_nt_validator_python() {
+  # Preserve stdin (the real launcher), changing only Python's platform branch.
+  shift 2  # -I -
+  python3 -I -c 'import os, runpy, sys; os.name = "nt"; exec(compile(sys.stdin.read(), "<launcher>", "exec"))' "$@"
+}
+
+@test "provider validator adapts only regular normalizers on Windows and keeps POSIX strict" {
+  local root="$STUBDIR/validate" validator manifest
+  mkdir -p "$root"
+  validator="$root/validator.py"; manifest="$root/provider-input.json"
+  printf '{"normalizerPath":"normalize.mjs"}\n' > "$manifest"
+  printf 'script\n' > "$root/normalize.mjs"
+  printf 'data\n' > "$root/data.json"
+  chmod 644 "$root/normalize.mjs" "$root/data.json"
+  # The stdin launcher must not import a module from the invoking directory.
+  printf 'raise RuntimeError("cwd module imported")\n' > "$root/json.py"
+  cd "$root"
+  cat > "$validator" <<'PYTHON'
+import os, stat, sys
+root = os.path.dirname(__file__)
+# Unrelated files and all non-file normalizers must keep their original modes.
+assert not os.stat(os.path.join(root, 'data.json')).st_mode & 0o111
+normalizer = os.path.join(root, 'normalize.mjs')
+info = os.stat(normalizer)
+assert stat.S_ISREG(info.st_mode) and info.st_mode & 0o111, 'normalizer must be executable'
+assert sys.argv[1:] == ['--bundle', os.path.join(root, 'provider-input.json')]
+PYTHON
+  run _acq_provider_input_validate "$validator" "$(command -v python3)" --bundle "$manifest"
+  assert_failure
+  assert_output --partial 'normalizer must be executable'
+  run _acq_provider_input_validate "$validator" _nt_validator_python --bundle "$manifest"
+  assert_success
+  rm "$root/normalize.mjs"; mkdir "$root/normalize.mjs"
+  run _acq_provider_input_validate "$validator" _nt_validator_python --bundle "$manifest"
+  assert_failure
+  assert_output --partial 'normalizer must be executable'
+  rmdir "$root/normalize.mjs"; printf 'script\n' > "$root/normalize.mjs"; chmod 755 "$root/normalize.mjs"
+  run _acq_provider_input_validate "$validator" "$(command -v python3)" --bundle "$manifest"
+  assert_success
+}
+
+@test "guardian cleanup is bounded for a suspended child and never calls wait" {
+  run timeout 10 env BASH_ENV= bash -c '
+    . "$1/acq.backends/common.sh"
+    sleep 60 >/dev/null 2>&1 &
+    child=$!
+    trap '\''kill -KILL "$child" 2>/dev/null || true'\'' EXIT
+    kill -STOP "$child"
+    _ACQ_PROVIDER_INPUT_GUARDIAN_PID=$child
+    _ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN="$2/children"
+    : > "$_ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN"
+    wait() { echo WAIT-CALLED; return 1; }
+    _acq_provider_input_guardian_stop
+    [ ! -e "$2/children" ] || exit 2
+    [ -z "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID" ] || exit 3
+    echo CLEANUP-RETURNED
+  ' _ "$REPO_ROOT" "$STUBDIR"
+  assert_success
+  assert_output --partial CLEANUP-RETURNED
+  refute_output --partial WAIT-CALLED
 }

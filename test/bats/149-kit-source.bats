@@ -109,14 +109,62 @@ _fake_source_tree() {
   assert_success
   refute_output --partial 'mogul'
 
-  # Removing the shipped default leaves acq with NOTHING to fetch (the flat
-  # writer would otherwise drop the key and resurrect the default).
-  run "$ACQ" kit-source rm github.com/GSA-TTS/agentic-coding-patterns
+  # Removing the last registered source leaves the registry empty: the flat
+  # writer would otherwise drop the key and resurrect the default.
+  mkdir -p "$XDG_CONFIG_HOME/acq"
+  printf 'kit_sources: github.com/mogul/kits@abcd\n' > "$XDG_CONFIG_HOME/acq/config.yaml"
+  run "$ACQ" kit-source rm github.com/mogul/kits
   assert_success
   grep -Fq 'kit_sources: none' "$XDG_CONFIG_HOME/acq/config.yaml"
   run acq_kit_sources_entries
   assert_success
   assert_output ''
+}
+
+@test "kit-source rm refuses the control plane in any letter case" {
+  local repo
+  for repo in github.com/GSA-TTS/agentic-coding-patterns \
+      github.com/gsa-tts/Agentic-Coding-Patterns https://github.com/gsa-TTS/agentic-coding-patterns.git; do
+    run "$ACQ" kit-source rm "$repo"
+    assert_failure
+    assert_output --partial 'control-plane source cannot be removed'
+  done
+  [ ! -e "$XDG_CONFIG_HOME/acq/config.yaml" ] \
+    || ! grep -Fq 'kit_sources: none' "$XDG_CONFIG_HOME/acq/config.yaml"
+}
+
+@test "kit-source lookups ignore letter case, as GitHub does" {
+  run "$ACQ" kit-source add github.com/acme/kits --ref aaaa
+  assert_success
+  # Trust and resolution find the registered spelling.
+  run _acq_kit_source_entry_for_repo github.com/Acme/Kits
+  assert_success
+  assert_output 'github.com/acme/kits|aaaa|integrations/isolation/acq-kits'
+  run _acq_kit_source_resolve_repo github.com/ACME/kits
+  assert_success
+  assert_output 'github.com/acme/kits'
+  run _acq_kit_source_resolve_repo KITS
+  assert_success
+  assert_output 'github.com/acme/kits'
+  # Adding a case variant updates the one entry instead of adding a second.
+  run "$ACQ" kit-source add github.com/Acme/kits --ref bbbb
+  assert_success
+  assert_output --partial 'updated kit source'
+  run acq_kit_sources_entries
+  assert_equal "$(printf '%s\n' "$output" | grep -ic 'github.com/acme/kits|')" "1"
+  assert_output --partial 'github.com/Acme/kits|bbbb|'
+  # Prefixes differing only in case are listed once.
+  run "$ACQ" kit-source add github.com/ACME/other --ref cccc
+  assert_success
+  run acq_kit_source_prefixes
+  assert_equal "$(printf '%s\n' "$output" | grep -ic '^github.com/acme/$')" "1"
+  # rm finds the entry in another letter case and removes it.
+  run "$ACQ" kit-source rm github.com/acme/KITS
+  assert_success
+  assert_output --partial "removed kit source 'github.com/Acme/kits'"
+  run acq_kit_sources_entries
+  refute_output --partial '/kits|'
+  assert_output --partial 'github.com/ACME/other|cccc|'
 }
 
 @test "kit-source rm reports an unregistered repository" {
@@ -381,6 +429,16 @@ _fake_source_tree() {
   assert_output --partial 'acq kit-source add github.com/evil'
 }
 
+@test "provider_kit from config with a credential in the URL is refused without printing it" {
+  _acq_config_write_field provider_kit 'git+https://kituser:s3cr3t-tok@github.com/evil/kits.git#ref=abc123&dir=kits'
+
+  run acq_provider_kit_ref
+  assert_failure
+  assert_output --partial 'untrusted remote ref: git+https://***@github.com/evil/kits.git#ref=abc123&dir=kits'
+  refute_output --partial 's3cr3t-tok'
+  refute_output --partial 'kituser'
+}
+
 @test "a trusted remote ref from config is accepted" {
   run "$ACQ" kit-source add github.com/evil/kits --ref abc123
   assert_success
@@ -560,6 +618,72 @@ STUB
   assert_output --partial 'NOT removed'
   run acq_kit_sources_entries
   assert_output --partial 'github.com/acme/one'
+}
+
+@test "kit-source rm drops every letter-case variant of the owner prefix" {
+  _plant_sbx_allowlist_stub '["docker.io/","GitHub.com/ACME/","github.com/acme/","github.com/other/"]'
+  run "$ACQ" kit-source add github.com/acme/one --ref aaaa
+  assert_success
+
+  run env ACQ_BACKEND=sbx "$ACQ" kit-source rm github.com/acme/one
+  assert_success
+  refute grep -Fiq 'github.com/acme/' "$STUBDIR/allowed"
+  grep -Fq 'github.com/other/' "$STUBDIR/allowed"
+  grep -Fq 'docker.io/' "$STUBDIR/allowed"
+}
+
+@test "kit-source rm keeps a prefix another source needs in another letter case" {
+  _plant_sbx_allowlist_stub '["docker.io/","github.com/acme/"]'
+  run "$ACQ" kit-source add github.com/acme/one --ref aaaa
+  assert_success
+  run "$ACQ" kit-source add github.com/ACME/two --ref bbbb
+  assert_success
+
+  run env ACQ_BACKEND=sbx "$ACQ" kit-source rm github.com/acme/one
+  assert_success
+  grep -Fq 'github.com/acme/' "$STUBDIR/allowed"
+  refute grep -Fq 'settings set' "$CALLS"
+}
+
+@test "kit-source rm keeps the control plane's owner prefix even when the registry omits it" {
+  _plant_sbx_allowlist_stub '["docker.io/","github.com/GSA-TTS/"]'
+  mkdir -p "$XDG_CONFIG_HOME/acq"
+  printf 'kit_sources: github.com/GSA-TTS/team-kits@aaaa\n' > "$XDG_CONFIG_HOME/acq/config.yaml"
+
+  run env ACQ_BACKEND=sbx "$ACQ" kit-source rm github.com/GSA-TTS/team-kits
+  assert_success
+  grep -Fq 'github.com/GSA-TTS/' "$STUBDIR/allowed"
+  refute grep -Fq 'settings set' "$CALLS"
+}
+
+@test "kit-source rm quotes the recovery command so it pastes back intact" {
+  _plant_sbx_allowlist_stub '["docker.io/","it'"'"'s/","github.com/acme/"]'
+  run "$ACQ" kit-source add github.com/acme/one --ref aaaa
+  assert_success
+
+  run env ACQ_BACKEND=sbx STUB_SET_FAIL=1 "$ACQ" kit-source rm github.com/acme/one
+  assert_failure
+  local line cmd
+  line=$(printf '%s\n' "$output" | grep -F 'Run:   sbx settings set kit.allowedSources ')
+  cmd=${line#*kit.allowedSources }
+  # The printed word must evaluate back to the exact JSON acq would have written.
+  eval "set -- $cmd"
+  [ "$#" -eq 1 ]
+  [ "$1" = '["docker.io/","it'"'"'s/"]' ]
+}
+
+@test "kit-source rm says when the allowlist cannot be read back after the update" {
+  _plant_sbx_allowlist_stub '["docker.io/","github.com/acme/"]'
+  # `settings set` succeeds but leaves an unreadable value behind.
+  sed -i 's|printf .%s\\n. "\$4" > "\$STUBDIR/allowed" ;;|printf "garbage\\n" > "$STUBDIR/allowed" ;;|' "$STUBDIR/sbx"
+  run "$ACQ" kit-source add github.com/acme/one --ref aaaa
+  assert_success
+
+  run env ACQ_BACKEND=sbx "$ACQ" kit-source rm github.com/acme/one
+  assert_failure
+  assert_output --partial 'could not read kit.allowedSources back after the update'
+  refute_output --partial 'still lists it'
+  assert_output --partial 'NOT removed'
 }
 
 @test "kit-source rm still works on a backend with no allowlist (msb)" {

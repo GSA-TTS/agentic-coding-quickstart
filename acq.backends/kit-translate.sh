@@ -23,10 +23,11 @@
 #      and any ACQ_EXTRA_KITS. kit_translate_fetch() materializes it locally.
 #   2. A local directory path — used by `acq kit validate PATH` and tests.
 #
-# The sbx backend can still hand remote refs to `sbx --kit` directly (it fetches
-# + parses spec.yaml natively), so sbx does NOT need a local fetch. The msb
-# backend has no native kit mechanism, so it fetches the kit locally and drives
-# the parsed operations itself.
+# Both backends fetch locally through kit_translate_fetch so acq's ref and
+# payload checks always run. The sbx adapter then synthesizes an sbx-v2 kit
+# directory for `sbx --kit`; if the fetch fails it does not apply the kit, and
+# never hands sbx the raw remote ref. The msb backend has no native kit
+# mechanism, so it drives the parsed operations itself.
 #
 # ---------------------------------------------------------------------------
 # Parsed-spec accessor functions (all take the kit's local spec.yaml path)
@@ -44,12 +45,111 @@
 #
 # These read the spec file each call (kits are tiny; simplicity over caching).
 
+# _kit_git_isolate — unset the environment variables that point git at a
+# repository, work tree, index, object store or ref namespace other than the one
+# found from the current directory or -C, or that inject configuration. Call it
+# inside a subshell before running git on the kit cache: an inherited GIT_DIR
+# (set by a hook, an editor or a parent git command) would otherwise make
+# `git init`, `remote`, `config` and `fetch` rewrite that repository, GIT_CONFIG
+# would redirect `git config` writes to another file, and GIT_CONFIG_PARAMETERS
+# or GIT_CONFIG_COUNT/KEY_n/VALUE_n could set core.worktree and move the
+# checkout. The fixed list is a superset of `git rev-parse --local-env-vars`
+# (git 2.53), plus GIT_NAMESPACE; a test checks it against the installed git.
+# GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM are kept: they select the user's own
+# config files, which the authenticated retry reads for credential helpers.
+# The msb clone mode (msb.sh) uses it for its host-side git calls too.
+_kit_git_isolate() {
+  local _v
+  _kit_git_isolate_repo
+  unset GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
+  for _v in $(compgen -v GIT_CONFIG_KEY_) $(compgen -v GIT_CONFIG_VALUE_); do
+    unset "$_v"
+  done
+}
+
+# _kit_git_isolate_repo — the part of _kit_git_isolate that keeps the command
+# scope: unset the variables that point git at another repository, work tree,
+# index, object store or ref namespace, or send `git config` to another file,
+# but keep GIT_CONFIG_PARAMETERS and GIT_CONFIG_COUNT/KEY_n/VALUE_n. Only for a
+# caller that reads the user's command-scope config on purpose and runs
+# nothing that config could name (a `git config` read); everything else calls
+# _kit_git_isolate.
+_kit_git_isolate_repo() {
+  unset GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG GIT_OBJECT_DIRECTORY \
+    GIT_DIR GIT_WORK_TREE GIT_IMPLICIT_WORK_TREE GIT_GRAFT_FILE GIT_INDEX_FILE \
+    GIT_NO_REPLACE_OBJECTS GIT_REPLACE_REF_BASE GIT_PREFIX GIT_SHALLOW_FILE \
+    GIT_COMMON_DIR GIT_NAMESPACE
+}
+
+# _kit_anon_protocols — the GIT_ALLOW_PROTOCOL value for the anonymous kit
+# fetch: https, the only transport a kit URL may name. An inherited
+# GIT_ALLOW_PROTOCOL only narrows it; when it leaves nothing, a name no
+# transport has allows nothing.
+_kit_anon_protocols() {
+  local want="https"
+  if [ -z "${GIT_ALLOW_PROTOCOL+x}" ]; then
+    printf '%s\n' "$want"
+    return 0
+  fi
+  case ":$GIT_ALLOW_PROTOCOL:" in
+    *":$want:"*) printf '%s\n' "$want" ;;
+    *) printf 'acq-none\n' ;;
+  esac
+}
+
+# _kit_git_fetch_into MODE DESTDIR URL REF DIR — one attempt at fetching REF
+# from URL into a fresh repository in DESTDIR, sparse-checked-out to DIR. git's
+# output goes to stdout, for the caller to capture and never show.
+#
+# MODE anon reads no git config file at all (GIT_CONFIG_NOSYSTEM, and
+# GIT_CONFIG_GLOBAL on the null device), so no credential helper, URL rewrite,
+# hook path or template from the user's config applies, and git may use only
+# the transports _kit_anon_protocols allows. `credential.helper=` also resets
+# the helper list on a git too old to know GIT_CONFIG_GLOBAL.
+# MODE user keeps the user's config files, so a configured credential helper or
+# an enterprise-mirror rewrite can apply, with prompts still disabled.
+# In both modes core.hooksPath names the null device, which holds no hook, so
+# a hook from the user's config never runs in the kit cache.
+_kit_git_fetch_into() {
+  local mode="$1" destdir="$2" url="$3" ref="$4" dir="$5"
+  (
+    cd "$destdir" || exit 1
+    _kit_git_isolate
+    export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/echo GCM_INTERACTIVE=never
+    if [ "$mode" = anon ]; then
+      unset GIT_CONFIG_SYSTEM
+      GIT_ALLOW_PROTOCOL=$(_kit_anon_protocols)
+      export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL
+    fi
+    rm -rf .git 2>/dev/null || exit 1
+    # Stop if init fails: the cache directory may sit inside another
+    # repository, and every git call below would then reconfigure and
+    # fetch into that enclosing repository instead.
+    if ! git init -q --template=; then
+      echo "kit-translate: git init failed in the kit cache directory: $destdir" >&2
+      exit 1
+    fi
+    { git remote add origin "$url" 2>/dev/null || git remote set-url origin "$url"; } || exit 1
+    git config core.sparseCheckout true || exit 1
+    # `git init` does not always create .git/info/ (platform-dependent),
+    # so create it before writing the sparse-checkout file — otherwise the
+    # redirect fails with ".git/info/sparse-checkout: No such file or
+    # directory" (harmless-but-noisy; fetch still fell back).
+    mkdir -p .git/info || exit 1
+    printf '%s/*\n' "$dir" > .git/info/sparse-checkout || exit 1
+    if [ "$mode" = anon ]; then
+      git -c credential.helper= -c core.hooksPath=/dev/null fetch --depth 1 origin -- "$ref" 2>&1 || exit 1
+    else
+      git -c core.hooksPath=/dev/null fetch --depth 1 origin -- "$ref" 2>&1 || exit 1
+    fi
+    git -c core.hooksPath=/dev/null checkout -q FETCH_HEAD 2>&1 || exit 1
+  )
+}
+
 # Run only in the fetch subshell: hook-local Git variables must neither hide a
 # destination repository nor redirect private init/read-tree writes into it.
 _kit_fetch_clear_git_env() {
-  local vars v
-  vars=$(git rev-parse --local-env-vars 2>/dev/null) || return 1
-  for v in $vars; do unset "$v"; done
+  _kit_git_isolate
   unset GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM
 }
 
@@ -67,7 +167,7 @@ _kit_fetch_bare_layout() {
 # delete the tree. Any .git entry (including a broken symlink) is protected.
 _kit_fetch_tree_safe() (
   local listing entry
-  listing=$(mktemp "${TMPDIR:-/tmp}/acq-kit-inspect.XXXXXX") || return 1
+  listing=$(mktemp "$(_kit_tmp_dir)/acq-kit-inspect.XXXXXX") || return 1
   trap 'rm -f -- "$listing"' EXIT
   if ! find -P "$1" \( -name .git -o -type d \) -print0 > "$listing" 2>/dev/null; then
     echo 'kit-translate: refusing to fetch into an uninspectable destination' >&2
@@ -154,25 +254,6 @@ _kit_fetch_destination() {
   (cd -P -- "$dest" && pwd -P)
 }
 
-# This helper accepts ONLY a newly allocated private stage, never a consumer
-# destination. A retry starts with fresh metadata and never checks out into a
-# user tree. Both attempts are prompt-disabled; only the retry retains helpers
-# and URL rewrites from system config.
-_kit_git_fetch() (
-  local stage="$1" url="$2" ref="$3" dir="$4" cfg="$5"
-  cd -- "$stage" || exit 1
-  export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/echo GCM_INTERACTIVE=never
-  rm -rf -- .git || exit 1
-  git init -q --template= || exit 1
-  git remote add origin "$url" || exit 1
-  git config core.sparseCheckout true || exit 1
-  mkdir -p .git/info || exit 1
-  printf '%s/*\n' "$dir" > .git/info/sparse-checkout || exit 1
-  # shellcheck disable=SC2086
-  git $cfg fetch --depth 1 origin "$ref" || exit 1
-  git -c core.hooksPath=/dev/null checkout -q FETCH_HEAD
-)
-
 # Publish metadata only inside a private invocation/direct-fetch root, and only
 # after fetching and verifying. Failed or wrong-revision attempts leave no
 # reusable source behind, so the next call can retry normally.
@@ -180,9 +261,9 @@ _kit_fetch_source() (
   local source="$1" url="$2" ref="$3" dir="$4" stage actual ferr
   stage=$(mktemp -d "${source}.XXXXXX") || return 1
   trap 'rm -rf -- "$stage"' EXIT
-  if ferr=$(_kit_git_fetch "$stage" "$url" "$ref" "$dir" '-c credential.helper= -c url.https://github.com/.insteadOf=' 2>&1); then
+  if ferr=$(_kit_git_fetch_into anon "$stage" "$url" "$ref" "$dir" 2>&1); then
     :
-  elif ferr=$(_kit_git_fetch "$stage" "$url" "$ref" "$dir" '' 2>&1); then
+  elif ferr=$(_kit_git_fetch_into user "$stage" "$url" "$ref" "$dir" 2>&1); then
     :
   else
     echo 'kit-translate: failed to fetch remote kit' >&2
@@ -256,6 +337,7 @@ _kit_fetch_publish() {
 _kit_fetch_materialize() (
   set -o pipefail
   local source="$1" ref="$2" dir="$3" destdir="$4" stage tree
+  _kit_git_isolate
   # Filesystem spelling permits ./ and repeated slashes; Git tree lookup does
   # not. Traversal has already been rejected by the shared source validator.
   dir=$(printf '%s' "$dir" | sed -e 's|//*|/|g' -e ':again' \
@@ -289,6 +371,145 @@ _kit_fetch_materialize() (
 )
 
 # ---------------------------------------------------------------------------
+# kit_ref_display REF
+# ---------------------------------------------------------------------------
+# Echo a kit ref safe for a terminal or CI log. Every message that names a ref
+# acq could not fetch or refused goes through this, on both backends, because
+# such a ref may carry a credential that kit_translate_fetch refuses but the
+# message would otherwise repeat. In the part before the '#' fragment:
+#   - a query string (?private_token=…) becomes ?***;
+#   - URL userinfo (scheme://user:token@host) becomes scheme://***@host,
+#     cutting at the last '@';
+#   - without a scheme, a first path segment carrying any userinfo
+#     (user:token@host, or a bare token@host) becomes ***@host.
+# The fragment's first ref= and dir= are kept so the message still names the
+# kit when their value is plain (_kit_ref_value_plain); a repeat or any other
+# fragment parameter becomes ***, and an odd value becomes ref=*** or dir=***
+# (kit_ref_shape_check refuses such a ref, but a message about it must not
+# repeat the value). This
+# over-redacts when a path or host part legitimately contains '@' or ':',
+# which is harmless.
+kit_ref_display() {
+  local ref="${1:-}" base frag query="" first rest p out=""
+  base="${ref%%#*}"
+  frag="${ref#"$base"}"
+  if [ -n "$frag" ]; then
+    rest="${frag#'#'}"
+    local seen=" "
+    while :; do
+      p="${rest%%&*}"
+      case "$p" in
+        ref=* | dir=*)
+          # The first ref= and dir= are kept when their value is plain; a
+          # repeat, or a value with any other character, is hidden.
+          case "$seen" in
+            *" ${p%%=*} "*) out="${out}&***" ;;
+            *)
+              if _kit_ref_value_plain "${p#*=}"; then
+                out="${out}&${p}"
+              else
+                out="${out}&${p%%=*}=***"
+              fi
+              ;;
+          esac
+          seen="${seen}${p%%=*} "
+          ;;
+        *) out="${out}&***" ;;
+      esac
+      [ "$rest" != "$p" ] || break
+      rest="${rest#*&}"
+    done
+    frag="#${out#&}"
+  fi
+  case "$base" in
+    *\?*) base="${base%%\?*}"; query='?***' ;;
+  esac
+  case "$base" in
+    *://*@*) base="${base%%://*}://***@${base##*@}" ;;
+    *://*) ;;
+    *)
+      first="${base%%/*}"
+      case "$first" in
+        *@*) base="***@${first##*@}${base#"$first"}" ;;
+      esac
+      ;;
+  esac
+  printf '%s%s%s\n' "$base" "$query" "$frag"
+}
+
+# _kit_ref_value_plain VALUE — VALUE is a non-empty ref= or dir= value made only
+# of ASCII letters, digits, '.', '_', '/' and '-', not starting with '-'. The
+# characters are listed one by one rather than as ranges: a range such as A-Z
+# in a glob follows the locale's collation, so under some UTF-8 locales it
+# would also admit letters such as é or ß.
+_kit_ref_value_plain() {
+  case "${1:-}" in
+    "" | -* | *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/-]*) return 1 ;;
+  esac
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# kit_ref_shape_check REF [WHERE]
+# ---------------------------------------------------------------------------
+# Refuse a remote kit ref (one starting git+) whose transport URL, the part
+# before '#', has a query string, or whose '#' fragment has any parameter other
+# than ref= and dir=, names one of them twice, or gives one a value that is
+# empty, starts with '-' or holds a character outside [A-Za-z0-9._/-] (the dir=
+# charset the fetch enforces; see _kit_ref_value_plain). Such a part is where a
+# token would ride (and a leading '-' would reach git as an option), and acq
+# would otherwise carry it into its records, cache paths and messages. The message
+# names the problem only: never the URL, a parameter name or a value. WHERE
+# (for example "--kit" or "ACQ_EXTRA_KITS") says where the ref came from. A
+# local path is not checked, since '?' and '#' are ordinary characters in a
+# directory name. Returns 1, with the message on stderr, on a refusal.
+kit_ref_shape_check() {
+  local ref="${1:-}" where="${2:-}" body rest p prefix="kit-translate:"
+  case "$ref" in git+*) ;; *) return 0 ;; esac
+  [ -z "$where" ] || prefix="acq: ${where}:"
+  body="${ref#git+}"
+  case "${body%%#*}" in
+    *\?*)
+      echo "${prefix} remote kit ref refused: its URL has a query string ('?' before the '#')." >&2
+      echo "${prefix}   A kit ref takes no query parameters: git+https://HOST/REPO.git#ref=<commit>&dir=<path>" >&2
+      return 1
+      ;;
+  esac
+  # No fragment at all is reported by the fetch as a malformed ref.
+  case "$body" in *'#'*) ;; *) return 0 ;; esac
+  rest="${body#*#}"
+  local seen_ref=0 seen_dir=0 problem="" val
+  while :; do
+    p="${rest%%&*}"
+    case "$p" in
+      ref=*)
+        [ "$seen_ref" -eq 0 ] || problem="repeats ref= or dir="
+        seen_ref=1; val="${p#ref=}"
+        ;;
+      dir=*)
+        [ "$seen_dir" -eq 0 ] || problem="repeats ref= or dir="
+        seen_dir=1; val="${p#dir=}"
+        ;;
+      *) problem="has a parameter other than ref= and dir=" ;;
+    esac
+    # A value may hold only the safe ref/dir characters (no '?', ';', '#',
+    # space or the like, behind which a token could ride), and must not start
+    # with '-', which git would read as an option.
+    if [ -z "$problem" ] && ! _kit_ref_value_plain "$val"; then
+      problem="has a ref= or dir= value that is empty, starts with '-' or holds a character outside [A-Za-z0-9._/-]"
+    fi
+    if [ -n "$problem" ]; then
+      echo "${prefix} remote kit ref refused: its '#' fragment ${problem}." >&2
+      echo "${prefix}   A kit ref names each once: git+https://HOST/REPO.git#ref=<commit>&dir=<path>" >&2
+      return 1
+    fi
+    [ "$rest" != "$p" ] || break
+    rest="${rest#*&}"
+  done
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # kit_translate_fetch KITREF DESTDIR
 # ---------------------------------------------------------------------------
 # Materialize a kit's directory locally. KITREF is either:
@@ -297,6 +518,15 @@ _kit_fetch_materialize() (
 # On success prints the local kit directory path to stdout and returns 0.
 kit_translate_fetch() (
   local kitref="$1" destdir="$2"
+  # Keep private staging out of the workspace when TMPDIR is relative.
+  case "${TMPDIR:-}" in
+    /*) ;;
+    *) local TMPDIR=/tmp; export TMPDIR ;;
+  esac
+
+  # Every caller's ref passes the shape check before anything is fetched; the
+  # input points (--kit, ACQ_EXTRA_KITS) also run it before recording a ref.
+  kit_ref_shape_check "$kitref" || return 1
 
   case "$kitref" in
     git+http*)
@@ -334,12 +564,12 @@ kit_translate_fetch() (
       # anything but a safe path charset. Matches the hardening in kit_spec_files.
       case "$dir" in
         /*|*..*)
-          echo "kit-translate: unsafe kit dir (no absolute paths or '..'): $dir" >&2
+          echo "kit-translate: unsafe kit dir (no absolute paths or '..')" >&2
           return 1
           ;;
       esac
       if printf '%s' "$dir" | LC_ALL=C grep -q '[^A-Za-z0-9._/-]'; then
-        echo "kit-translate: unsafe kit dir (illegal characters): $dir" >&2
+        echo "kit-translate: unsafe kit dir (illegal characters)" >&2
         return 1
       fi
       _kit_fetch_clear_git_env || return 1
@@ -348,24 +578,146 @@ kit_translate_fetch() (
         _kit_fetch_reuse "$destdir" "$url" "$ref" "$dir"
         return $?
       fi
-      command -v acq_debug >/dev/null 2>&1 && acq_debug "fetch: ref=$ref dir=$dir -> $destdir"
+      command -v acq_debug >/dev/null 2>&1 && acq_debug "fetch: remote kit -> $destdir"
       local root
-      root=$(mktemp -d "${TMPDIR:-/tmp}/acq-kit-direct.XXXXXX") || return 1
+      root=$(mktemp -d "$(_kit_tmp_dir)/acq-kit-direct.XXXXXX") || return 1
       trap 'rm -rf -- "$root"' EXIT
       root=$(cd -- "$root" && pwd -P) || return 1
       _kit_fetch_source "$root/source" "$url" "$ref" "$dir" || return 1
       _kit_fetch_materialize "$root/source" HEAD "$dir" "$destdir"
       ;;
     *)
+      # Percent escapes can hide delimiters from the input checks. Local paths
+      # are literal; do not decode them or pass an escaped spelling downstream.
+      case "$kitref" in
+        *%*) echo "kit-translate: percent escapes are not allowed in local kit paths" >&2; return 1 ;;
+      esac
       # Local path — use as-is.
       if [ ! -d "$kitref" ]; then
-        echo "kit-translate: local kit path not found: $kitref" >&2
+        echo "kit-translate: local kit path not found: $(kit_ref_display "$kitref")" >&2
+        return 1
+      fi
+      # A regular file with more than one hard link may be a file from
+      # elsewhere on the same file system that someone who can write to the
+      # kit directory linked in, so it is refused. Directories are exempt
+      # (find -type f): their link count is naturally above 1. Bash reads a
+      # local kit in place, so this is a check before use, not a guarantee: a
+      # link made after it runs is not seen (KNOWN_FAILURE_MODES section 55).
+      # -H follows the kit path itself when it is a symlink to the kit (as the
+      # Python acq resolves it), but no link inside it. A find that cannot
+      # read every directory fails closed: an unchecked file is not passed.
+      local _linked _rel _find_rc=0
+      _linked=$(find -H "$kitref" -type f -links +1 -print 2>/dev/null) || _find_rc=$?
+      if [ "$_find_rc" -ne 0 ]; then
+        echo "kit-translate: local kit refused: acq could not check every file in it (is a directory unreadable?)." >&2
+        echo "kit-translate:   Make the kit readable, or make a plain copy of it (cp -R KIT KIT-copy) and use the copy." >&2
+        return 1
+      fi
+      _linked=$(printf '%s\n' "$_linked" | sed -n 1p)
+      if [ -n "$_linked" ]; then
+        _rel="${_linked#"${kitref%/}"/}"
+        _rel=$(printf '%s' "$_rel" | LC_ALL=C tr '[:cntrl:]' '?')
+        echo "kit-translate: local kit refused: ${_rel} has more than one hard link." >&2
+        echo "kit-translate:   Make a plain copy of the kit (for example: cp -R KIT KIT-copy) and use the copy." >&2
         return 1
       fi
       printf '%s\n' "$kitref"
       ;;
   esac
 )
+
+# ---------------------------------------------------------------------------
+# kit_source_resolve KITDIR SOURCE / kit_source_within KITDIR SOURCE
+#
+# A kit's files[] payload must come from the kit itself. kit_source_resolve
+# prints the fully resolved path of KITDIR/SOURCE and succeeds only when that is
+# a regular file inside the resolved KITDIR; callers copy from the printed path,
+# so what is checked is what is copied. kit_source_within is the status-only
+# form. Both fail closed when a path cannot be resolved.
+kit_source_resolve() {
+  local kitdir="${1:-}" src="${2:-}" root target
+  case "$src" in "" | /*) return 1 ;; esac
+  case "/$src/" in */../*) return 1 ;; esac
+  root=$(_kit_resolve_path "$kitdir") || return 1
+  target=$(_kit_resolve_path "$kitdir/$src") || return 1
+  case "$target" in
+    "$root"/*) [ -f "$target" ] || return 1 ;;
+    *) return 1 ;;
+  esac
+  printf '%s\n' "$target"
+}
+
+kit_source_within() {
+  kit_source_resolve "$@" >/dev/null
+}
+
+# _kit_resolve_path PATH: print PATH with every symlink resolved, or fail.
+# The kit root and its sources go through this same function so both sides of a
+# containment check use one resolver. It prefers realpath, then readlink -f, and
+# otherwise follows links with plain readlink and resolves directories with
+# cd -P (older macOS has neither realpath nor readlink -f). CDPATH is ignored.
+_kit_resolve_path() {
+  local p="${1:-}" out="" link dir base n=0
+  [ -n "$p" ] || return 1
+  if command -v realpath >/dev/null 2>&1 && out=$(realpath -- "$p" 2>/dev/null) && [ -n "$out" ]; then
+    printf '%s\n' "$out"
+    return 0
+  fi
+  if out=$(readlink -f -- "$p" 2>/dev/null) && [ -n "$out" ]; then
+    printf '%s\n' "$out"
+    return 0
+  fi
+  while [ -L "$p" ]; do
+    n=$((n + 1))
+    [ "$n" -le 40 ] || return 1
+    link=$(readlink -- "$p") || return 1
+    case "$link" in
+      /*) p="$link" ;;
+      *) p="$(dirname -- "$p")/$link" ;;
+    esac
+  done
+  [ -e "$p" ] || return 1
+  if [ -d "$p" ]; then
+    (CDPATH='' cd -P -- "$p" 2>/dev/null && pwd -P)
+    return
+  fi
+  dir=$(CDPATH='' cd -P -- "$(dirname -- "$p")" 2>/dev/null && pwd -P) || return 1
+  base=$(basename -- "$p")
+  printf '%s/%s\n' "$dir" "$base"
+}
+
+# kit_tree_symlinks_within KITDIR TREE: succeed when TREE has no entry whose
+# name contains a newline and every symlink under it resolves inside KITDIR.
+# Used before a kit's files/ tree is copied verbatim (cp -a keeps links), so a
+# link cannot carry host content into a generated kit. Names are read
+# NUL-delimited; a newline-bearing name is refused outright.
+kit_tree_symlinks_within() {
+  local kitdir="${1:-}" tree="${2:-}" root link target bad=0 nl
+  [ -d "$tree" ] || return 0
+  root=$(_kit_resolve_path "$kitdir") || return 1
+  nl='
+'
+  while IFS= read -r -d '' link; do
+    case "$link" in
+      *"$nl"*)
+        echo "kit-translate: kit payload has a file name containing a newline; refusing it" >&2
+        bad=1
+        continue
+        ;;
+    esac
+    [ -L "$link" ] || continue
+    if ! target=$(_kit_resolve_path "$link"); then
+      echo "kit-translate: unresolvable symlink in kit payload: ${link#"$kitdir"/}" >&2
+      bad=1
+      continue
+    fi
+    case "$target" in
+      "$root" | "$root"/*) ;;
+      *) echo "kit-translate: kit payload symlink points outside the kit: ${link#"$kitdir"/}" >&2; bad=1 ;;
+    esac
+  done < <(find "$tree" -print0 2>/dev/null)
+  [ "$bad" -eq 0 ]
+}
 
 # ---------------------------------------------------------------------------
 # kit_spec_field SPEC KEY
@@ -619,8 +971,8 @@ _kit_pp_validate() {
 # copy step. Multiple kits union by path, last wins — sbx resolves that itself.
 # The neutral schema carries no volume `mode` (msb has no equivalent; kits
 # chmod in a startup step instead — see ADR-0023). files[].mode is different:
-# the translator synthesizes its chmod into setup.install itself (#381,
-# _kit_sbx_mode_chmod_script).
+# the translator synthesizes its chmod into setup.install itself
+# (see _kit_sbx_mode_chmod_script).
 #
 # VALIDATION (SI-10): these values reach a generated sbx-v2 spec and an msb
 # create argv, so they are untrusted. path must be absolute, charset-restricted
@@ -765,9 +1117,18 @@ kit_spec_files() {
         ro = (cur_readonly == "true") ? "true" : ""
         if (cur_mode != "" && cur_mode !~ /^[0-7][0-7][0-7][0-7]?$/) {
           print "kit-translate: skipping file with invalid mode: " cur_mode > "/dev/stderr"
+        } else if (cur_phase != "" && cur_phase !~ /^(install|initFiles|startup)$/) {
+          # phase is a column of this tab-separated record: an unknown value (a
+          # tab in it would shift every later column) drops the entry, as an
+          # unknown command phase does in kit_spec_commands. Checked after the
+          # mode and before the path, in the same order as the Python acq.
+          print "kit-translate: skipping file with unknown phase: " cur_phase > "/dev/stderr"
         } else if (cur_path !~ /^[A-Za-z0-9._\/-]+$/) {
           print "kit-translate: skipping file with unsafe path: " cur_path > "/dev/stderr"
-        } else if (cur_source != "" && cur_source !~ /^[A-Za-z0-9._\/-]+$/) {
+        } else if (cur_source != "" && (cur_source !~ /^[A-Za-z0-9._\/-]+$/ || cur_source ~ /^\// || cur_source ~ /(^|\/)\.\.(\/|$)/)) {
+          # A source is relative to the kit directory and stays inside it: no
+          # leading slash and no ".." segment (kit_source_within also resolves
+          # symlinks at the point of use).
           print "kit-translate: skipping file with unsafe source: " cur_source > "/dev/stderr"
         } else {
           printf "%s\t%s\t%s\t%s\t%s\n", cur_path, cur_mode, cur_phase, cur_source, ro
@@ -1107,9 +1468,9 @@ kit_spec_agent_context() {
 #     NOT re-emitted as a command — the static file-drop is sbx's create-time
 #     mechanism and already lands the payload before setup hooks run.
 #   files[].mode (home-staged)      -> setup.install[] combined chmod step
-#     sbx pins every files/ payload to 0644 at materialization (docker/
-#     sbx-releases#499), so declared modes are synthesized into one chmod
-#     install command — see _kit_sbx_mode_chmod_script (#381).
+#     sbx pins every files/ payload to 0644 at materialization, so declared
+#     modes are synthesized into one chmod install command — see
+#     _kit_sbx_mode_chmod_script.
 #   commands[phase=install]         -> setup.install[]
 #   commands[phase=initFiles]       -> setup.startup[]
 #   commands[phase=startup]         -> setup.startup[]
@@ -1137,7 +1498,10 @@ kit_translate_to_sbx() {
 
   # Copy the entire files/ payload tree verbatim (static file drop). sbx v2
   # auto-maps files/home/... -> /home/... etc.
+  # cp -a keeps symlinks, so refuse a payload whose links resolve outside the
+  # kit before copying it into the generated kit.
   if [ -d "${kitdir}/files" ]; then
+    kit_tree_symlinks_within "$kitdir" "${kitdir}/files" || return 1
     mkdir -p "${out}/files"
     cp -a "${kitdir}/files/." "${out}/files/"
   fi
@@ -1243,16 +1607,16 @@ kit_translate_to_sbx() {
   printf '%s\n' "$out"
 }
 
-# Build the combined chmod script for kit-declared file modes (#381). sbx pins
+# Build the combined chmod script for kit-declared file modes. sbx pins
 # every kit files/ payload to 0644 at materialization (content-addressed,
-# reproducible layers — docker/sbx-releases#499; v0.39 extended the pin to
-# local/git kit loads), so a declared `mode:` only takes effect through the
+# reproducible layers; v0.39 extended the pin to local/git kit loads), so a
+# declared `mode:` only takes effect through the
 # maintainer-sanctioned workaround: a setup.install chmod that runs after
 # files/home/ staging. Emits one `chmod && echo || echo` line per home-staged
 # mode-bearing files[] entry, in SPEC ORDER (deterministic output). Non-home
 # (workspace-targeted) modes get a translate-time WARNING and no chmod:
 # files/workspace/ is written AFTER install commands run, so a chmod there
-# would always fail (same sbx#499 thread).
+# would always fail.
 #
 # VALIDATION (SI-10, mirroring _kit_vol_validate): mode reaches a generated
 # sbx-v2 spec as a root shell command, so it is untrusted input. Only a
@@ -1291,22 +1655,37 @@ EOF
   printf '%s' "$script"
 }
 
+# _kit_tmp_dir — where the translator makes its scratch files: acq_tmp_dir
+# (userdirs.sh) when it is loaded, else TMPDIR when it is absolute, else /tmp.
+# A relative TMPDIR would resolve against the current directory, normally the
+# workspace the guest can write.
+_kit_tmp_dir() {
+  if declare -F acq_tmp_dir >/dev/null 2>&1; then
+    acq_tmp_dir
+    return
+  fi
+  case "${TMPDIR:-}" in
+    /*) printf '%s\n' "$TMPDIR" ;;
+    *) printf '/tmp\n' ;;
+  esac
+}
+
 # Emit setup.install/setup.startup blocks into an sbx-v2 spec from the neutral
 # commands. v2 has no initFiles command phase, so neutral initFiles commands are
 # emitted before startup commands under setup.startup.
 #
-# The synthesized file-mode chmod (#381, _kit_sbx_mode_chmod_script) is emitted
+# The synthesized file-mode chmod (_kit_sbx_mode_chmod_script) is emitted
 # as ONE combined setup.install entry BEFORE the kit's own install commands, so
 # an install command may exec a kit-shipped script. One line per file (no set
 # -e) so a missing file doesn't skip the rest, and each line prints what it did
-# — sbx install-command failures are NON-fatal at create time (sbx#499), so the
+# — sbx install-command failures are NON-fatal at create time, so the
 # startup log is the only place a failed chmod surfaces. Nothing is emitted for
 # a mode-less kit: its generated spec must stay byte-identical.
 _kit_sbx_emit_setup() {
   local spec="$1" out="$2"
   local phases="install initFiles startup"
   local phase have_setup=0 have_install=0 have_startup=0 tmp
-  tmp=$(mktemp)
+  tmp=$(mktemp "$(_kit_tmp_dir)/acq-kit-setup.XXXXXX") || return 1
 
   local chmod_script
   chmod_script=$(_kit_sbx_mode_chmod_script "$spec")
@@ -1494,17 +1873,39 @@ kit_validate() {
       /*) ;;
       *) echo "kit: validate: file path must be absolute: '$p'" >&2; errs=$((errs + 1)) ;;
     esac
-    if [ -n "$src" ] && [ ! -f "${kitdir}/${src}" ]; then
-      echo "kit: validate: file source not found: ${src}" >&2
+    if [ -n "$src" ] && ! kit_source_within "$kitdir" "$src"; then
+      if [ ! -e "${kitdir}/${src}" ] && [ ! -L "${kitdir}/${src}" ]; then
+        echo "kit: validate: file source not found: ${src}" >&2
+      else
+        echo "kit: validate: file source must be a regular file inside the kit directory: ${src}" >&2
+      fi
       errs=$((errs + 1))
     fi
   done <<EOF
 $(kit_spec_files "$spec")
 EOF
 
+  # Raw-spec scan for sources kit_spec_files drops (absolute, "..", or outside
+  # its path charset), so `acq kit validate` reports them instead of passing.
+  local bad_src
+  bad_src=$(awk '
+    /^[A-Za-z]/ { in_f = ($0 ~ /^files:/) }
+    in_f && /^[[:space:]]+-?[[:space:]]*source:/ {
+      v=$0; sub(/^[^:]*:[[:space:]]*/,"",v); sub(/[[:space:]]*#.*/,"",v)
+      gsub(/^["'\'' ]+|["'\'' ]+$/,"",v)
+      if (v !~ /^[A-Za-z0-9._\/-]+$/ || v ~ /^\// || v ~ /(^|\/)\.\.(\/|$)/) print v
+    }' "$spec")
+  if [ -n "$bad_src" ]; then
+    while IFS= read -r m; do
+      [ -n "$m" ] && { echo "kit: validate: file source must be a path inside the kit directory: '$m'" >&2; errs=$((errs + 1)); }
+    done <<EOF
+$bad_src
+EOF
+  fi
+
   # Raw-spec scan: any `mode:` value that is not a 0-prefixed 4-digit octal
   # string is rejected — it reaches the root `chmod $mode` in the msb adapter
-  # AND the synthesized sbx setup.install chmod (#381), so the accepted grammar
+  # AND the synthesized sbx setup.install chmod, so the accepted grammar
   # is the strict intersection both emit safely (no 3-digit shorthand, no
   # setuid/setgid/sticky leading digit).
   local bad_mode
@@ -1518,7 +1919,7 @@ EOF
       # FAIL the pattern, to reject the spec), so under mawk EVERY mode would
       # look invalid and the whole spec would be wrongly rejected. See the
       # detailed note in the files[] parser above; do not "simplify" to {n,m}.
-      # Stricter than the parser gate on purpose (#381): the leading zero is
+      # Stricter than the parser gate on purpose: the leading zero is
       # required and setuid/setgid/sticky forms are rejected — this value
       # reaches a root chmod in the msb adapter AND the synthesized sbx
       # setup.install chmod.

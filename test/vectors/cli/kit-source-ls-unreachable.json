@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "id": "cli/kit-source-ls-unreachable",
+  "oracle": "ADR-0038m §48 / ADR-0038m §46: unreachable kit-source discovery returns 0 with an explicit discovery_status (not an operational failure)",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{acq}", "kit-source", "ls", "--json"],
+    "env": {
+      "ACQ_KIT_SOURCE_SEED": "[{\"repository\": \"github.com/acme/team-kits\", \"ref\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"directory\": \"integrations/isolation/acq-kits\"}]"
+    },
+    "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "ACQ_MSB_BIN", "ACQ_MSB_INSTALLED", "ACQ_SBX_INSTALLED", "ACQ_KIT_SOURCE_DISCOVERY"],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "kit-source ls",
+        "data": {
+          "sources": [
+            {
+              "repository": "github.com/GSA-TTS/agentic-coding-patterns",
+              "ref": "941a286f912b99475429c3c00db49a99af5b241e",
+              "directory": "integrations/isolation/acq-kits",
+              "provider_kits": ["usai-provider"],
+              "discovery_status": "reachable"
+            },
+            {
+              "repository": "github.com/acme/team-kits",
+              "ref": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "directory": "integrations/isolation/acq-kits",
+              "provider_kits": [],
+              "discovery_status": "unreachable"
+            }
+          ]
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {"mode": "exact", "value": "", "normalize": []}
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+  }
+}

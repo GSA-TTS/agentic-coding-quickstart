@@ -1,0 +1,266 @@
+---
+title: "Live cross-platform qualification matrix and transcript"
+status: accepted
+date: 2026-11-02
+decision_makers: ["Bret Mogilefsky"]
+category: development-process
+nist_controls: ["CA-2", "CA-7", "SA-11"]
+impact_level: moderate
+ato_relevance: no
+risk_treatment: mitigate
+supersedes: []
+---
+
+# ADR-0044m: Live cross-platform qualification matrix and transcript
+
+## Context and Problem Statement
+
+The verification strategy settled that host-enforcement oracles require a
+green live transcript against real MSB/SBX, real microVMs, and a native
+Windows host, gating release and gating any PR that touches a security oracle.
+It left the exact oracle list, the qualified platform/backend matrix, the
+transcript contents and durability, and the BLOCKED/staleness/flakiness
+handling open.
+
+## Decision
+
+Six oracles require Tier 3 (everything else stays Tier 1): the
+host-enforced read-only trusted-config mount (ADR-0035/ADR-0037); secret
+placeholder/proxy and swap-on-the-wire substitution and secret non-exposure;
+real backend behaviour (kit apply, attach, boot contract, version
+fail-closed); offline completeness (network-blocked install plus smoke);
+the security-exception recreation flow (ADR-0041m); and native-Windows
+ordinary-user operation.
+
+The qualified matrix is: msb on Linux x86_64, Linux aarch64, macOS arm64,
+and Windows x64 (floor ≥ 0.6.9, refusing 0.7.0–0.7.2, with
+oracles 1–3 at ≥ 0.7.7); sbx on Linux x86_64, macOS arm64, and Windows x64
+(floor ≥ 0.39.0). macOS x86_64 (Intel Mac) is unqualified for every backend,
+and sbx on Linux aarch64 is unqualified (not claimed). Each matrix cell is in
+exactly one of three states:
+qualified (green current transcript), unqualified (not claimed), or
+blocked (attempted, no verdict).
+
+A transcript records environment identity (OS build, arch, hypervisor
+state), backend and version, glibc floor where relevant, the commit SHA,
+artifact SHA-256, the commands run, observed output or a verified digest,
+and a PASS/FAIL/BLOCKED verdict with the canonical one-pasteable signature
+line already emitted by `scripts/qualify-msb-ro-mount`:
+`RESULT <PASS|FAIL|BLOCKED> msb=<ver> image=<image> host=<os arch>
+rev=<sha> dir=<abs path>` (the backend token generalises `msb=` to `sbx=`
+for sbx cells). Transcripts are attached to the release and, for a PR
+touching the Tier-3 surface, to that PR as artifacts with attestations where
+available; they are not committed.
+
+BLOCKED is a first-class recorded outcome, never a pass, distinct from an
+unqualified (unclaimed) cell. The release gate is every qualified cell
+holding a green current transcript; a PR touching the Tier-3 surface (below)
+attaches a fresh transcript; the developer owns and runs the fleet. An unavailable
+qualified cell records blocked and holds the gate.
+
+A transcript is *current* while all of the following hold; otherwise it is
+stale and the cell is blocked until regenerated:
+
+- it was recorded within the last 90 days (the quarterly re-verification
+  cadence, so re-verification is simply the age limit);
+- its backend `major.minor` version equals the version under acceptance (a
+  patch release does not expire it; a minor or major upgrade does);
+- no change to the Tier-3 surface landed after it was recorded. The surface is
+  the CLI source tree `py-acq/src/acq_py/` as a whole, the cell and ro-mount
+  oracles (`scripts/qualify-backend-cell`, `scripts/qualify-msb-ro-mount`), and
+  the run path of the harness (`qualification/__init__.py`, `__main__.py`,
+  `cli.py`, `model.py`, `runner.py`, `repro.py`); the matrix, ledger and gate
+  only read transcripts, so editing them expires nothing. A commit that
+  touches none of these (a release-please version bump, changelog, docs, tests,
+  CI) does not expire anything.
+
+  The CLI is on the surface as a whole, not as a per-file whitelist, so a new
+  module, subpackage, or data file under `py-acq/src/acq_py/` is on the surface
+  by default (the gate fails closed). The code is normative: `TIER3_SURFACE` in
+  `qualification/matrix.py` lists the entries and `TIER3_SURFACE_EXCLUSIONS`
+  lists the carve-outs, so this prose is not the authority.
+
+  The `version` command is deliberately *off* the surface. Its data assembly and
+  human/JSON output live together in `py-acq/src/acq_py/version_info.py` (the
+  `run_version` handler was split out of `cli.py`), so a diff confined to the
+  `version` output touches only `version_info.py` and never expires a
+  transcript. `cli.py` imports `version_info` (and `doctor`) lazily, so a break
+  in either affects only `acq version`/`acq doctor`, never the oracle's contract
+  commands; `test_off_surface_modules_are_not_loaded_by_cli` asserts that
+  closure. The other excluded modules are `doctor.py`, `runtime.py` (reached
+  only through `doctor.py`), and the deterministic test-only `_stub_*.py`
+  backends. The package `__init__.py` stays *on* the surface: it is the
+  always-loaded package marker, and the release-please version bump edits
+  `package.json` etc., not this file.
+
+  "No oracle asserts it" refers to the two *committed* oracles only: of
+  ADR-0044m's six, the cell oracle (boot contract, credential binding and
+  non-exposure, kit apply, and on msb the read-only trusted-config mount,
+  `scripts/qualify-backend-cell`) and the ro-mount oracle
+  (`scripts/qualify-msb-ro-mount`, which the cell oracle runs on msb) are committed; oracle 4 (offline
+  completeness) is deferred and oracle 5 (security-exception recreation) is a manual
+  sequence, and neither drives `acq version` or `acq doctor`.
+
+  `cli.py` remains wholly on the surface: it still owns the lifecycle/secret/
+  migration dispatch and the `version`/`--version` subparser registration, so
+  any `cli.py` edit (help strings, whitespace, dispatch) still expires every
+  cell's transcript — only output-confined changes, which now live in
+  `version_info.py`, are exempt. This is a deliberate coarse residue, not a
+  per-line exclusion.
+
+The commit SHA and artifact SHA-256 are recorded as provenance, not as part of
+the currency test: every release commit changes both without changing
+behaviour, and treating them as binding would force a full live re-run of every
+cell for each release. The same host fields (OS build, arch, hypervisor)
+remain in the transcript; a different OS major version or hypervisor is a
+different environment and is qualified by its own run. The trade-off, accepted
+here, is that a release can ship non-surface changes that no live run covered;
+those are covered by the Tier-1 vectors and Tier-2 tests, and a surface change
+always requires a fresh transcript. The default sandbox image is a mutable tag,
+so an upstream image change is bounded only by the 90-day limit. Backend
+versions are compared as final `X.Y.Z`; an unknown, pre-release, or otherwise
+unparseable version on either side is never current.
+
+"No surface change since the transcript" is computed per transcript from its
+recorded commit: the changes between that commit and the commit under
+acceptance, restricted to the surface paths. The recorded commit SHA is
+therefore the anchor for that computation (and provenance), even though it no
+longer decides currency by itself.
+
+A FAIL is confirmed real by re-running up to three attempts where the commit
+SHA, artifact SHA-256, backend version, and OS build plus hypervisor state
+must match (wall-clock time, transcript directory, nonce, and sandbox name may
+differ); a result diverging across three attempts is flaky and is escalated to
+a tracking issue plus KNOWN_FAILURE_MODES, never softened. (Within one run
+these fields are fixed, so the rule detects genuinely nondeterministic
+results.)
+
+## Consequences
+
+A release cannot be declared ready without a green current transcript (or an
+unexpired waiver) on every qualified cell, and a Tier-3 surface change cannot merge without fresh live
+evidence. Both hold only where the `Tier-3 release gate` check is required on `main`
+and code-owner review is enforced (`docs/howto/release-gate-setup.md`); without those
+repository settings the gate reports but does not block. A release that changes none of the Tier-3 surface needs no new live
+run, which lets the release gate be evaluated automatically from existing
+transcripts. A claimed cell may carry a dated, reasoned waiver in the ledger,
+which lowers the bar: the gate reports it as waived and blocks again once it
+expires. Cells that cannot reach a verdict are visible as blocked,
+not silently dropped. The repository does not accumulate transcript files;
+the durable reference is the release/PR artifact plus its hashes and
+attestations.
+
+## Verification
+
+The matrix and the reproduction rule are themselves asserted by the
+transcripts they govern: a green current transcript per qualified cell at
+release, and a fresh transcript on any PR touching the Tier-3 surface.
+`qualification.is_current` and `touches_surface` implement the currency test and
+are covered by `py-acq/tests/test_qualification.py`. The ledger
+(`docs/qualification-ledger.json`) records each run as metadata plus the SHA-256
+of its `transcript.json`; `python -m qualification.gate check` evaluates the
+release gate from it, and the `Tier-3 release gate` workflow runs that on every
+PR, every push to `main`, and weekly. The ledger may carry dated, reasoned
+waivers for a claimed cell that has no current transcript; a waiver lowers the
+bar, is reported as such, and blocks again once it expires. The ledger is
+self-reported and committed, so its integrity is chiefly a review control
+(CODEOWNERS requires an admin's review of `docs/qualification-ledger.json`, of
+`qualification/`, and of the two committed oracles). Technical checks narrow
+what that review has to catch, but none of them proves a run happened:
+
+- `record` sees the transcript and refuses one whose attempts did not run exactly
+  the committed cell oracle for the transcript's backend, or a `--platform` that
+  is not the transcript's own host. It runs on the recorder's machine, so it stops
+  mistakes and tooling misuse, not someone who edits the ledger by hand.
+- The gate sees only ledger entries. Each must name the committed cell oracle and
+  carry the SHA-256 of that file as committed at the entry's revision (re-read
+  from git); its arch and hypervisor must be a host of its cell; no transcript
+  hash may be filed twice; its revision must be a full commit id and an ancestor
+  of the commit being evaluated; its backend version, and the accepted version,
+  must meet the floors above (for the cell oracle, which exercises oracles 1–3:
+  msb ≥ 0.7.7 and outside 0.7.0–0.7.2, sbx ≥ 0.39.0; `version_problem` in
+  `qualification/matrix.py`). An entry recorded before the binding existed
+  counts only if it is field-for-field one of the legacy entries listed in
+  `qualification/ledger.py`, and that exemption ends on 2027-02-06
+  (`binding_problem`).
+- On a pull request the `Tier-3 release gate` workflow runs `qualification/` from
+  the base branch, not the PR under test, so a PR cannot change the claimed cells,
+  the surface or its carve-outs, or the gate itself and be judged by its own
+  version; loosening any of them takes a separate PR, which CODEOWNERS sends to an
+  admin.
+
+A fabricated transcript, or a hand-written entry that satisfies the gate's checks,
+is caught only by that admin review together with an audit of the evidence. The
+ledger PR inlines each transcript it records byte for byte (a PR body is not a
+committed file). The harness writes a transcript in one canonical byte form with no
+host-local path in it (the transcript directory is a token and an absolute
+command-line path keeps only its last component, because a local path names the
+operator's account); `record` refuses any other transcript; and the published block
+is the file itself. So anyone holding the PR can recompute each
+`transcript_sha256` and check that the transcript reproduces its entry, without
+the runner's files (`python -m qualification.gate verify-evidence --base <rev>`, which
+also requires exactly one shown block for every entry the PR adds and rejects
+duplicated blocks and blocks hidden in HTML comments). That shows the entries and
+the published transcripts agree; it does not show that the run happened.
+
+The sixteen entries recorded before that rule (the legacy entries listed in
+`qualification/ledger.py`) hash transcripts that carried local paths and were
+published re-serialized and scrubbed, so their PR bodies cannot reproduce their
+hashes; only the files on the hosts that ran them can. They need no migration: they
+stay valid ledger entries, later Tier-3 surface changes have already expired them,
+and the legacy exemption ends on 2027-02-06.
+
+The committed cell oracle checks oracles 1–3 except the facets it cannot check
+unattended: swap-on-the-wire substitution (it needs an endpoint that reports what it
+received), attach (it needs a terminal) and version fail-closed against a real
+older backend. For oracle 1 on msb what it shows is narrower than "the trusted
+config is read-only": in the cell's own guest the trusted-config mount point is
+listed `ro` in `/proc/mounts`, a write to it fails with EROFS and the host directory
+behind it is unchanged; acq's record declares the mount; and the canary shows, in a
+separate sandbox, that this msb keeps a `:ro` volume read-only against remount
+attempts. It does not show that every trusted file acq relies on lives on that mount,
+and it makes no remount attempt in the cell's own guest. Those stay with the Tier-1 vectors and Tier-2 tests and are tracked
+in `docs/KNOWN_FAILURE_MODES.md`. The oracle runs every acq subprocess against a
+private configuration and state tree, and gives every identifier that reaches a
+backend's own store a per-run nonce, so a run leaves the operator's own credentials
+and acq state as it found them. A run must be recorded at a commit that is on `main`.
+
+## Correction (2026-11-09): the CODEOWNERS review is not enforced on this fork
+
+The Verification section says CODEOWNERS requires an admin's review of
+`docs/qualification-ledger.json`, of `qualification/` and of the two committed
+oracles, and that a PR loosening the gate is sent to an admin. That holds only
+where the repository settings make it hold. On this fork it does not hold:
+
+- `.github/CODEOWNERS` names `GSA-TTS` teams, which cannot own paths in a
+  personal repository;
+- the `main` ruleset requires no code-owner review and no approving review;
+- the `main` ruleset requires no status checks, so the `Tier-3 release gate` is
+  advisory.
+
+On this fork the ledger's integrity therefore rests on the maintainer reading
+each ledger PR and auditing its inlined transcripts
+(`python3 -m qualification.gate verify-evidence`). No technical gate enforces
+that review. The technical checks listed above are unchanged.
+`docs/howto/release-gate-setup.md` (step 3) gives the settings that would make
+the review binding, and ADR-0045m's enforcement-status note records what the
+repository enforces today.
+
+## Amendment (2026-11-13): an msb run is isolated from the operator's msb state
+
+**Status of this amendment:** accepted (2026-11-13), by Bret Mogilefsky.
+
+The decision above says the oracle leaves the operator's own credentials and acq state
+as it found them. Live runs on a macOS host showed that did not extend to msb's own
+state. The oracle kept `HOME`, so `msb` used the operator's `MSB_HOME`; acq's credential
+steps re-feed every running sandbox in that catalog, so a run on a host with other
+running msb sandboxes failed (msb 0.7.7 will not add a new binding to a running
+sandbox) and had rebound a throwaway `USAI_API_KEY` into the operator's sandboxes.
+
+Decision: an msb run gets a private, short `MSB_HOME` under `/tmp`, removed afterwards,
+and sets `ACQ_SECRET_NO_LIVE_REFEED=1`. Where no short directory can be made, the run is
+BLOCKED rather than using the operator's `MSB_HOME`. sbx is not isolated: it has no state
+override and an empty `HOME` loses its login and secrets; its shared state is documented
+and acq does not touch other sbx sandboxes. Consequence: every msb run pulls the image
+again (about 2 GB). Because `scripts/qualify-backend-cell` is on the Tier-3 surface,
+merging this expires the recorded cells, which are then re-qualified with the same command.

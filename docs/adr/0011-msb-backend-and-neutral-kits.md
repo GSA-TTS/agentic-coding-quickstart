@@ -13,6 +13,15 @@ supersedes: []
 
 # ADR-0011: Add msb (microsandbox) Backend and Neutral hybrid/v1 Kit Translation
 
+> **Update (2026-11-05):** `sbx secret set-custom` gained a `--value-stdin` flag in
+> sbx 0.51.0, so a custom endpoint's value no longer has to be placed on argv
+> (`--value`) or entered at an interactive prompt. The Python acq v1 adapter
+> (`acq_py`, ADR-0040m) stores a provider credential via `secret set-custom
+> --value-stdin` (value on stdin only, never argv), gated by a per-capability
+> version floor of **sbx ≥ 0.51.0** — below that floor it fails closed with
+> `backend_version_unsupported`. The Bash adapter's interactive /
+> print-the-command fallback described below remains for older sbx releases.
+
 > **Update (2026-09-01):** The macOS acq secret store now uses
 > `/usr/bin/security -i` for Keychain writes. The secret value is embedded in the
 > `security -i` stdin command stream and the stream is terminated by EOF, keeping
@@ -221,14 +230,13 @@ at create/run time via `-p HOST:GUEST`; the flag gates the sbx-style post-hoc
   state-preserving in-place add (msb has no `sbx kit add` equivalent); it never
   silently destroys state.
 
-### Agent install + base-image contract + attach (fix for quickstart#228)
+### Agent install + base-image contract + attach
 
 The initial 1.2.0 msb adapter provisioned a sandbox with the four kits but
 **never installed or launched the requested agent** (`opencode`): `msb create`
 booted a plain `node:22-bookworm`, no step installed opencode, and
 `acq_backend_attach` ran a bare `msb ssh NAME` — dropping the user into a **root
-shell with no agent** (reported in
-[quickstart#228](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/228)).
+shell with no agent**.
 Both defects stem from the adapter ignoring the AGENT token that
 `acq_backend_provision`/`attach` receive. On sbx this "just works" because the
 agent **template supplies the binary and its launch wiring**; msb runs a plain
@@ -264,7 +272,7 @@ for `docker/sandbox-templates:shell-docker`:
 Egress note: this adds one create-time allow-list host (the npm registry) only
 when an installable agent is requested; it does not widen egress for `shell`.
 
-### Guest sizing (follow-up to quickstart#228)
+### Guest sizing after agent installation
 
 Installing and launching the agent (above) exposed a further defect on the same
 report: `opencode` **started and was immediately `Killed`**. msb defaults a
@@ -277,7 +285,7 @@ msb's own default). Values are validated before reaching the create line (memory
 to msb's `[0-9GMgm.]` SIZE grammar, cpus to a positive integer) so a stray value
 cannot smuggle another flag onto `msb create`.
 
-### Workspace mount at the host path (fix for PR #230)
+### Workspace mount at the host path
 
 An earlier revision mounted the host workspace at a **fixed guest path**
 (`/home/agent/workspace`). That failed on a plain base image with
@@ -456,11 +464,10 @@ credential/secret path (sbx proxy, msb `--secret ENV@HOST`), never the kit spec.
 
 > **Cross-repo dependency (satisfied):** the authoritative `environment` schema
 > property + the field-level validator live in the **patterns** repo
-> (`schemas/kit-hybrid-v1.schema.json`, `validate-kits.py`, PR #227), and the
-> playbook kit's REST-tarball fetch (the quickstart#203 fix) landed in
-> patterns#269. Both are merged to patterns `main`, and `PATTERNS_KIT_REF`
-> (`acq.backends/common.sh`) is pinned to `3fcde8e` (the #269 merge commit on
-> `main`, which includes #227). The release gate is satisfied.
+> (`schemas/kit-hybrid-v1.schema.json`, `validate-kits.py`), and the
+> playbook kit's REST-tarball fetch landed alongside it. Both are merged to patterns `main`, and `PATTERNS_KIT_REF`
+> (`acq.backends/common.sh`) is pinned to `3fcde8e` (the merge commit on
+> `main` containing both changes). The release gate is satisfied.
 
 ## Live verification (msb, on a KVM host)
 
@@ -489,7 +496,7 @@ using only the guest placeholder.
 
 - `bash -n acq acq.backends/*.sh scripts/test-acq scripts/verify-backends` clean.
 - `./scripts/test-acq` passes (incl. msb + kit + translation +
-  untrusted-input-hardening cases, and the quickstart#228 regression cases:
+  untrusted-input-hardening cases, and the agent-install and attach regression cases:
   agent install, base-image contract — passwordless sudo + proxy `env_keep` —
   and attach-launches-agent-as-agent-user).
 - Neutral→sbx-v2 synthesis for all four kits parses as valid YAML (verified with
@@ -498,13 +505,13 @@ using only the guest placeholder.
 - **Deferred, requires a sandbox-capable host (no nested sandboxes):**
   the full `acq run … --backend msb` create→install→exec→attach loop and the
   `scripts/verify-backends` msb rows (now including the `opencode`-installed
-  assertion added for quickstart#228) cannot run inside an sbx/msb sandbox and
+  assertion for agent installation) cannot run inside an sbx/msb sandbox and
   need host virtualization (`/dev/kvm` on Linux). The msb CLI flag shapes were
   verified against `msb 0.6.6`, and the git-HTTPS secret-substitution behavior
   was re-verified statically and live-confirmed with a private-repo
   `git ls-remote` against `msb 0.6.9`; the remaining live loop mirrors how
   ADR-0009/ADR-0010 defer live verification. Run `./scripts/verify-backends`
-  on a sandbox-capable host and attach the transcript. **The quickstart#228 fix
+  on a sandbox-capable host and attach the transcript. **The adapter fix
   (agent install + attach launch) is verified offline via the stubbed harness;
   its live create→install→attach path still needs a KVM host run.**
 
@@ -513,8 +520,8 @@ using only the guest placeholder.
 - **`PATTERNS_KIT_REF` points at a merged, released SHA.** `common.sh` is pinned
   to the patterns **v1.7.0** release commit
   `9c277c09ed4ad45fd11709d6b048a58adc785443`, which includes Part A (the neutral
-  acq-kits + schema, #221), the openchamber conversion (#224), and the
-  `environment` vocabulary (#227 + the review follow-up #228). Pinning to a
+  acq-kits + schema), the openchamber conversion, and the
+  `environment` vocabulary with its review corrections. Pinning to a
   release tag mirrors Phase 1's v1.5.0 pin. The acq-kits and the kit-hybrid-v1
   schema (with `environment`) are present at this commit, and a live
   sparse-fetch + neutral→sbx-v2 translation of the kits was verified against the

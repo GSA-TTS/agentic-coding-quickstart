@@ -1,0 +1,113 @@
+# spec.yaml — agentic-coding-playbook (a neutral acq mixin kit, hybrid/v1)
+#
+# Delivers the GSA agentic-coding-playbook (federal AGENTS.md rules + Agent
+# Skills) into a sandbox. At startup it fetches the playbook at a pinned ref and
+# symlinks its AGENTS.md and skills into every supported agent's search paths.
+#
+# NEUTRAL (backend-agnostic) form. Converted from the former sbx kit in Phase 2;
+# see integrations/isolation/docs/decisions/0001-neutral-hybrid-v1-acq-kits.md.
+# The inline startup shell of the old sbx kit was extracted into a tested,
+# standalone script (files/home/playbook-clone.sh) per the acq design doc §6.
+#
+# Behavior:
+#   - caps.network: allow egress to the GitHub REST API + archive CDN.
+#   - files: drop the fetch/link script into the agent home.
+#   - commands (phase startup, agent uid): run the script. It is idempotent
+#     (fetch-if-missing) and NON-FATAL (warns + exits 0 on any failure, so the
+#     sandbox still starts and self-heals on a later start).
+#
+# FETCH MECHANISM (cross-backend parity, fixes quickstart#203): the script does
+# NOT `git clone`. It fetches the repo SOURCE TARBALL from the REST API
+# (api.github.com/repos/<repo>/tarball/<ref>, 302 -> codeload.github.com) with a
+# Bearer token. git's smart-HTTP transport is NOT credential-substituted on the
+# msb backend (verified msb 0.6.7), but the api.github.com path IS — on both sbx
+# and msb. So one tarball codepath authenticates on both backends, needs no .git,
+# and needs no `gh` install.
+#
+# Pinning: the ref + integrity hash are passed via the startup command env (the
+# neutral spec has no environment block; the pins also live as fallback defaults
+# inside the script — keep the two in sync). A GitHub source tarball is NOT
+# byte-stable (server recompression), so integrity is verified on the extracted
+# CONTENT — a sha256 over AGENTS.md plus every file under .agents/skills (a
+# sorted per-file digest manifest) — not the archive bytes. This covers skills
+# (executable agent instructions), not just AGENTS.md. To bump the playbook:
+# change PLAYBOOK_REF, then regenerate PLAYBOOK_AGENTS_SHA256 by extracting the
+# tarball and running the SAME manifest hash the script uses, e.g.:
+#   d=$(mktemp -d)
+#   curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
+#     https://api.github.com/repos/GSA-TTS/agentic-coding-playbook/tarball/<REF> \
+#     | tar xz -C "$d" --strip-components=1
+#   { sha256sum "$d/AGENTS.md" | cut -d' ' -f1
+#     find "$d/.agents/skills" -type f | LC_ALL=C sort \
+#       | while read -r f; do sha256sum "$f" | cut -d' ' -f1; done
+#   } | sha256sum | cut -d' ' -f1
+# (update BOTH this command's env and the script's fallback default.)
+#
+# GitHub auth (while the playbook repo is PRIVATE): this kit does NOT declare a
+# github credential. The base agent sandbox already provides one; acq's backend
+# injects it to api.github.com (sbx proxy / msb --secret GITHUB_TOKEN@api.github.com).
+# This kit only allow-lists the egress and reads GITHUB_TOKEN/GH_TOKEN.
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: agentic-coding-playbook
+displayName: Agentic Coding Playbook (federal rules + skills)
+description: >
+  Fetches the GSA agentic-coding-playbook at a pinned ref at container startup
+  (via the GitHub REST source tarball) and links its AGENTS.md and Agent Skills
+  into each supported agent's search paths (OpenCode, Claude Code, Codex, Copilot,
+  Cursor, Droid, Kiro, Docker Agent). Degrades gracefully (warns and continues)
+  when the fetch is unavailable; self-heals on a later start. Relies on the base
+  sandbox's github credential (injected to api.github.com) while the repo is private.
+
+caps:
+  network:
+    allow:
+      # The playbook is fetched as a REST-API source tarball, NOT a git clone:
+      #   GET https://api.github.com/repos/<owner>/<repo>/tarball/<ref>
+      # which 302-redirects to codeload.github.com for the archive bytes. This
+      # rides the api.github.com credential path both backends substitute (the
+      # git smart-HTTP transport is NOT substituted on msb — the origin of
+      # quickstart#203). codeload.github.com serves the redirected archive bytes.
+      # github.com is retained as defense-in-depth (some GitHub archive redirects
+      # have historically traversed it). Pinned to the minimal set. Network allow
+      # lists union across kits.
+      - api.github.com:443
+      - codeload.github.com:443
+      - github.com:443
+
+files:
+  - path: /home/agent/playbook-clone.sh
+    mode: "0755"
+    source: files/home/playbook-clone.sh
+    description: Fetch the playbook at the pinned ref and link rules + skills
+
+commands:
+  # Run the extracted fetch/link script as the agent user at every start. The
+  # pins are exported here (the script also carries matching fallback defaults);
+  # bump BOTH together with the script's defaults to adopt a newer playbook.
+  - phase: startup
+    user: "1000"
+    description: Fetch the playbook at the pinned ref and link rules + skills
+    command:
+      - sh
+      - -c
+      - |
+        PLAYBOOK_REF="v0.14.0" \
+        PLAYBOOK_AGENTS_SHA256="a9c438acfe8082ba959fd248be9b667f26f17c10c1c763ca57fdcb2396e43759" \
+          sh /home/agent/playbook-clone.sh
+
+agentContext: |
+  ## Agentic Coding Playbook
+
+  The GSA agentic-coding-playbook is fetched into `~/.agentic-coding-playbook` and
+  its `AGENTS.md` (federal behavioral rules) plus its Agent Skills are linked into
+  your search paths. Follow the playbook's rules; use its skills when a task
+  matches one. If the fetch was unavailable at start, the playbook may be absent —
+  it self-heals on a later start.
+
+# No backend shortcuts: every backend allow-lists the GitHub REST/archive hosts
+# and runs the same fetch+link script at startup. The github token is injected by
+# the backend (to api.github.com), not declared by the kit.
+backend_shortcuts:
+  sbx: {}
+  msb: {}

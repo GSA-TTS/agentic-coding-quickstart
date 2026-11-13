@@ -1,0 +1,69 @@
+{
+  "schema": 1,
+  "id": "cli/ls-backend-missing",
+  "oracle": "ADR-0040m backend_not_found at the command boundary: ls whose ACQ_MSB_BIN names a missing program exits 1 with an envelope, not a traceback (the version floor probes that same program, so it refuses before the adapter runs)",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{acq}",
+      "--backend",
+      "msb",
+      "ls",
+      "--json"
+    ],
+    "env": {
+      "ACQ_MSB_BIN": "/nonexistent/acq-vector/msb",
+      "ACQ_SBX_INSTALLED": "0"
+    },
+    "unset": [
+      "ACQ_MSB_VERSION",
+      "ACQ_MSB_INSTALLED",
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "MSB_HOME",
+      "ACQ_IMAGE",
+      "ACQ_MSB_IMAGE",
+      "ACQ_MSB_STUB_CATALOG",
+      "ACQ_MSB_READY_TIMEOUT",
+      "ACQ_MSB_STUB_FAIL",
+      "ACQ_MSB_STUB_EXEC_EXIT",
+      "ACQ_MSB_STUB_COPY_EXIT",
+      "ACQ_MSB_STUB_EXIT_CODE",
+      "ACQ_MSB_STUB_PORTS"
+    ],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 1,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "ls",
+        "error": {
+          "code": "backend_not_found"
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME"
+    ]
+  }
+}

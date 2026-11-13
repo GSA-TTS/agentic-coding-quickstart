@@ -57,6 +57,14 @@ node_modules/
 # =========================
 __pycache__/
 *.pyc
+*.egg-info/
+.pytest_cache/
+# coverage.py data from the py-acq quality gate (pytest --cov)
+.coverage
+.coverage.*
+build/
+dist/
+.venv/
 
 # =========================
 # OS
@@ -73,3 +81,6 @@ Thumbs.db
 *~
 .nexus-agents/
 .paseo-worktrees/
+
+# Generated only inside staged release trees.
+py-acq/src/acq_py/_build_info.py

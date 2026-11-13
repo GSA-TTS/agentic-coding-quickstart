@@ -7,6 +7,39 @@
 
 set -euo pipefail
 
+# _acq_path_absolute_only — drop every PATH entry that is not absolute, so a bare
+# program name (msb, sbx, git, python3, and every utility acq runs) is only ever
+# found in an absolute directory. An empty entry (a leading, trailing or doubled
+# ':') and a relative one such as '.' make the shell search the current
+# directory, which is normally the workspace a sandboxed agent can write to: a
+# planted ./git or ./msb would run on the host. This mirrors acq_py.hostexec,
+# which resolves programs from absolute PATH entries only.
+#
+# An entry counts only when it starts with '/'. A drive-rooted form cannot
+# survive the ':' split (C:/x becomes the relative 'C' and '/x'), so Git Bash
+# needs no special case. Order is kept. It runs first, before the script
+# directory is resolved (that runs dirname and readlink), and uses nothing but
+# shell builtins. When no entry is left it changes nothing and returns 1: an
+# empty PATH would itself mean the current directory.
+_acq_path_absolute_only() {
+  local rest="${PATH-}:" entry kept=""
+  while [ -n "$rest" ]; do
+    entry=${rest%%:*}
+    rest=${rest#*:}
+    case "$entry" in
+      /*) kept="${kept:+$kept:}$entry" ;;
+    esac
+  done
+  [ -n "$kept" ] || return 1
+  PATH=$kept
+  export PATH
+}
+
+_acq_path_absolute_only || {
+  echo "acq: PATH has no absolute directory, so programs cannot be found without searching the current directory" >&2
+  exit 1
+}
+
 # Resolve the absolute directory containing this script, following symlinks.
 _acq_script_dir() {
   local src="${BASH_SOURCE[0]}" dir
@@ -42,22 +75,35 @@ fi
 # Print version/identity
 # ---------------------------------------------------------------------------
 
+# _acq_version_git_line — the banner's git line for acq's own clone. Each git
+# call goes through _acq_git_host (common.sh), which clears an inherited
+# GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE and the like, so the banner reports on
+# ACQ_SCRIPT_DIR and not on whatever repository the caller's environment names;
+# the user's command-scope config is dropped too, since none of these reads
+# needs it and `git diff` may run programs that config names.
+_acq_version_git_line() {
+  local d="${ACQ_SCRIPT_DIR}" branch sha dirty=""
+  if ! command -v git >/dev/null 2>&1; then
+    echo "  git:         (not a git clone — cannot report branch/commit)"
+  elif ! _acq_git_host_ready; then
+    echo "  git:         (cannot report: kit-translate.sh is not loaded)"
+  elif _acq_git_host isolate -C "$d" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    branch=$(_acq_git_host isolate -C "$d" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?")
+    sha=$(_acq_git_host isolate -C "$d" rev-parse --short HEAD 2>/dev/null || echo "?")
+    _acq_git_host isolate -C "$d" diff --quiet 2>/dev/null &&
+      _acq_git_host isolate -C "$d" diff --cached --quiet 2>/dev/null || dirty=" (dirty)"
+    echo "  git:         ${branch}@${sha}${dirty}"
+  else
+    echo "  git:         (not a git clone — cannot report branch/commit)"
+  fi
+}
+
 print_version() {
   local resolved_backend="${ACQ_RESOLVED_BACKEND:-unknown}"
   echo "acq"
   echo "  script:      ${ACQ_RESOLVED_PATH}"
   echo "  clone dir:   ${ACQ_SCRIPT_DIR}"
-  if command -v git >/dev/null 2>&1 \
-      && git -C "${ACQ_SCRIPT_DIR}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    local branch sha dirty=""
-    branch=$(git -C "${ACQ_SCRIPT_DIR}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?")
-    sha=$(git -C "${ACQ_SCRIPT_DIR}" rev-parse --short HEAD 2>/dev/null || echo "?")
-    git -C "${ACQ_SCRIPT_DIR}" diff --quiet 2>/dev/null && \
-      git -C "${ACQ_SCRIPT_DIR}" diff --cached --quiet 2>/dev/null || dirty=" (dirty)"
-    echo "  git:         ${branch}@${sha}${dirty}"
-  else
-    echo "  git:         (not a git clone — cannot report branch/commit)"
-  fi
+  _acq_version_git_line
   echo "  backend:     ${resolved_backend}"
   if command -v acq_backend_version >/dev/null 2>&1; then
     echo "  backend ver: $(acq_backend_version 2>/dev/null || echo '?')"
@@ -311,6 +357,8 @@ against. ACQ_KIT_SOURCES overrides the list for one invocation, and
 ACQ_EXTRA_KIT_SOURCES still ADDS allowlist prefixes (backward compatibility).
 
 Trust is per repository: trusting host/owner/one does not trust host/owner/two.
+The shipped default is the pinned control plane: `rm` refuses it (in any letter
+case), and its owner prefix stays on the backend allowlist.
 `rm` also revokes the backend's owner-wide allowlist entry (sbx) unless another
 trusted source still needs it, and FAILS (leaving the source registered, with a
 recovery command) if the backend allowlist cannot be updated.
@@ -624,6 +672,65 @@ _acq_backend_passthrough() {
   command "${ACQ_RESOLVED_BACKEND}" "$@"
 }
 
+# _acq_recreate_name_check ARGS... — `create --recreate NAME` names an existing
+# sandbox, so refuse a NAME that could steer a host path (acq_name_form_check),
+# as the Python implementation does. Only arguments before `--` count; a
+# trailing --recreate with no value is checked as an empty name.
+_acq_recreate_name_check() {
+  local prev="" a
+  for a in "$@"; do
+    [ "$a" = "--" ] && break
+    if [ "$prev" = "--recreate" ]; then
+      acq_name_form_check create "$a" || return 1
+    else
+      case "$a" in
+        --recreate=*) acq_name_form_check create "${a#--recreate=}" || return 1 ;;
+      esac
+    fi
+    prev="$a"
+  done
+  [ "$prev" != "--recreate" ] || acq_name_form_check create ""
+}
+
+# _acq_recreate_unsupported ARGS... — the Bash acq has no `create --recreate`
+# (the Python acq's recreation of a sandbox missing its read-only trusted-config
+# mount). Without this refusal the flag reached the backend arguments and NAME
+# was read as the agent, so a new sandbox was created from the current
+# directory instead. Only arguments before `--` count. Prints the refusal and
+# returns 1 when the flag is present.
+_acq_recreate_unsupported() {
+  local a
+  for a in "$@"; do
+    case "$a" in
+      --) return 0 ;;
+      --recreate|--recreate=*)
+        echo "acq: create: --recreate is not supported by the Bash implementation." >&2
+        echo "     Remove the sandbox ('acq rm NAME') and create it again, or use the Python acq (ACQ_IMPL=python)." >&2
+        return 1
+        ;;
+    esac
+  done
+  return 0
+}
+
+# _acq_attach_name_check ARGS... — `attach` is forwarded to the backend CLI, but
+# its first positional names an existing sandbox, so refuse one that could steer
+# a host path (acq_name_form_check) before forwarding, as Python's attach does.
+# After `--` the next argument is that positional whatever it looks like.
+_acq_attach_name_check() {
+  local a after_dashdash=0
+  for a in "$@"; do
+    if [ "$after_dashdash" -eq 0 ]; then
+      [ "$a" = "--" ] && { after_dashdash=1; continue; }
+      case "$a" in
+        -?*) continue ;;
+      esac
+    fi
+    acq_name_form_check attach "$a"
+    return
+  done
+}
+
 _acq_secret_service_arg() {
   local a1="${1:-}" a2="${2:-}"
   case "$a1" in
@@ -706,6 +813,86 @@ acq_propagate_usai_rotation() {
 # ---------------------------------------------------------------------------
 if [ -n "${ACQ_SOURCE_ONLY:-}" ]; then return 0 2>/dev/null || exit 0; fi
 
+# ---------------------------------------------------------------------------
+# ACQ_IMPL runtime switch — the coexistence seam (ADR-0047m). `acq` is the
+# neutral entry point over two implementations:
+#   * unset / `bash`   the existing Bash body below (default unchanged)
+#   * `python`         the Python acq v1 replacement (py-acq/src/acq_py)
+#   * anything else    fail closed (exit 2) with a clear message
+#
+# Resolution order for the Python implementation (env-only in this slice,
+# mirroring active_backend's flag -> env -> config -> auto-detect precedence):
+#   1. $ACQ_SCRIPT_DIR/acq-python   the installer-linked launcher — the Python
+#                                   impl's distinct identity, never the `acq` name
+#   2. python -m acq_py             the managed runtime ($ACQ_SCRIPT_DIR/py-acq/
+#                                   runtime/bin/python3, or python.exe on Windows),
+#                                   else python3/python on PATH, with PYTHONPATH (only)
+#                                   pointed at $ACQ_SCRIPT_DIR/py-acq/src
+# argv and the exit status are forwarded verbatim in every case.
+# ---------------------------------------------------------------------------
+_acq_exec_python() {
+  # 1. The distinct launcher (checked into the repo root and linked by the
+  #    installer as `acq-python`); it resolves its own interpreter and source.
+  if [ -x "${ACQ_SCRIPT_DIR}/acq-python" ]; then
+    exec "${ACQ_SCRIPT_DIR}/acq-python" "$@"
+  fi
+
+  # 2. Fallback: run the managed runtime (or a PATH interpreter) directly.
+  # An ACQ_RUNTIME override must be absolute, as acq-python and acq.ps1
+  # require: a relative value would resolve against the current directory,
+  # normally the workspace, and run a planted interpreter on the host.
+  if [ -n "${ACQ_RUNTIME:-}" ] && ! acq_path_is_absolute "$ACQ_RUNTIME"; then
+    echo "acq: ACQ_RUNTIME must be an absolute path to a Python interpreter, got $(acq_quote_value "$ACQ_RUNTIME")" >&2
+    exit 1
+  fi
+  local _py=""
+  if [ -n "${ACQ_RUNTIME:-}" ] && [ -x "${ACQ_RUNTIME}" ]; then
+    _py="${ACQ_RUNTIME}"
+  elif [ -x "${ACQ_SCRIPT_DIR}/py-acq/runtime/bin/python3" ]; then
+    _py="${ACQ_SCRIPT_DIR}/py-acq/runtime/bin/python3"
+  elif [ -x "${ACQ_SCRIPT_DIR}/py-acq/runtime/python.exe" ]; then
+    _py="${ACQ_SCRIPT_DIR}/py-acq/runtime/python.exe"
+  elif command -v python3 >/dev/null 2>&1; then
+    _py="$(command -v python3)"
+  elif command -v python >/dev/null 2>&1; then
+    _py="$(command -v python)"
+  fi
+  if [ -z "$_py" ]; then
+    echo "acq: ACQ_IMPL=python but no Python implementation was found" >&2
+    echo "     (run the installer to link acq-python, or put python3 on PATH)" >&2
+    exit 1
+  fi
+  # -P keeps `python -m` from putting the current directory first on sys.path
+  # (a workspace json.py would otherwise run on the host); interpreters older
+  # than the required 3.12 are refused because they may not honour -P. The probe
+  # runs isolated and imports only the builtin sys module.
+  if ! "$_py" -I -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' >/dev/null 2>&1; then
+    echo "acq: ACQ_IMPL=python needs Python 3.12 or newer; $_py is not" >&2
+    echo "     (set ACQ_RUNTIME, run the installer, or put python3 >= 3.12 on PATH)" >&2
+    exit 1
+  fi
+  # acq is stdlib-only, so the user's PYTHONPATH is never inherited: an empty or
+  # relative entry would put the current directory back on sys.path despite -P.
+  if [ -d "${ACQ_SCRIPT_DIR}/py-acq/src" ]; then
+    PYTHONPATH="${ACQ_SCRIPT_DIR}/py-acq/src" exec "$_py" -P -m acq_py "$@"
+  fi
+  unset PYTHONPATH
+  exec "$_py" -P -m acq_py "$@"
+}
+
+_acq_impl="${ACQ_IMPL:-bash}"
+case "$_acq_impl" in
+  bash) : ;;
+  python) _acq_exec_python "$@" ;;
+  *)
+    echo "acq: unsupported ACQ_IMPL '${_acq_impl}' (expected 'bash' or 'python')" >&2
+    echo "     leave ACQ_IMPL unset (or set it to 'bash') for the Bash implementation," >&2
+    echo "     or set ACQ_IMPL=python for the Python v1 implementation." >&2
+    exit 2
+    ;;
+esac
+unset _acq_impl
+
 # Dispatch stays in the original foreground shell: $$, stdin, terminal signals,
 # and exec retain their normal meaning. A private guardian covers replaced EXIT
 # traps and exec; ordinary exits also reap it synchronously. No root is exported.
@@ -715,20 +902,51 @@ if [ -n "${ACQ_SOURCE_ONLY:-}" ]; then return 0 2>/dev/null || exit 0; fi
 # waiting out the rest of the tick (up to one second). `tick` still holds the
 # child's PID for a moment after `wait` has reaped it, and USR1 can be handled in
 # exactly that window, so the exit trap never signals the saved PID on trust: it
-# first asks ps whether that PID is a `sleep` whose parent is this guardian, and
-# signals nothing otherwise. A stale PID that has been reused by another process
-# has a different parent and is left alone. A second USR1 is ignored once cleanup
-# has started so it cannot cut the exit trap short.
+# first asks proc_info whether that PID is a `sleep` whose parent is this
+# guardian, and signals nothing otherwise. A stale PID that has been reused by
+# another process has a different parent and is left alone. A second USR1 is
+# ignored once cleanup has started so it cannot cut the exit trap short.
+# Parent and command lookups go through proc_info. Git Bash (MSYS2/Cygwin) ships a
+# ps without -o, so there they come from the per-process `ppid` and `exename`
+# files that its /proc provides; without this the guardian's first lookup failed,
+# it exited at once and its EXIT trap deleted the root out from under every later
+# kit fetch. Linux /proc has no `ppid` file and macOS has no /proc, so both keep
+# using ps -o. Any lookup that fails yields no answer, so nothing is signalled.
+# The two files are separate reads, so `exename` is read first and `ppid` last:
+# if the PID is reused between them, the parent reported is the new process's,
+# and it can only be this guardian if the guardian forked that process itself.
+# An owner killed outside Cygwin (taskkill /F) stays the recorded parent there,
+# so each tick also requires the owner to still answer kill -0. If Cygwin reuses
+# the dead owner's PID before the next tick (its PIDs only wrap after a long
+# run), the guardian and its private root would stay until that process exits.
+# That is a leak only: the guardian never signals anything based on the owner.
+# A parent lookup that fails skips only the parent comparison for that tick; the
+# kill -0 check on the owner still runs, so a lookup that keeps failing cannot
+# keep the guardian alive after an owner killed by SIGKILL (which runs no EXIT
+# trap). Without this, one failed lookup ended the guardian and deleted the root
+# while acq was still using it. procps ps installs its own SIGTERM handler even
+# when SIGTERM is inherited as ignored, so a SIGTERM sent to acq's whole process
+# group can kill the lookup; the subshell running it then reports `Terminated`.
+# The guardian never needs to print, so its stderr goes to /dev/null and that
+# report never reaches acq's stderr.
+# acq's own shell can print the same kind of report from this EXIT trap. When a
+# group SIGTERM ends acq during a foreground command, Bash 3.2 runs the trap as
+# the shell dies, and if it has already reaped the killed child, it prints
+# `acq: line N: PID Terminated  command` on entering this function (N is the
+# line of this definition). Bash 5 prints nothing. The report is about a child
+# that died with acq, so it is noise, not an error. The function therefore runs
+# with stderr on /dev/null. Only rm's diagnostics go to the caller's stderr,
+# through fd 3, so a failed cleanup still shows.
 _acq_kit_fetch_cleanup() {
   if [ -n "${_ACQ_KIT_FETCH_GUARDIAN:-}" ]; then
-    kill -USR1 "$_ACQ_KIT_FETCH_GUARDIAN" 2>/dev/null || true
-    wait "$_ACQ_KIT_FETCH_GUARDIAN" 2>/dev/null || true
+    kill -USR1 "$_ACQ_KIT_FETCH_GUARDIAN" || true
+    wait "$_ACQ_KIT_FETCH_GUARDIAN" || true
   fi
-  rm -rf -- "$_ACQ_KIT_FETCH_ROOT"
-}
+  rm -rf -- "$_ACQ_KIT_FETCH_ROOT" 2>&3
+} 3>&2 2>/dev/null
 
 _acq_kit_fetch_start() {
-  _ACQ_KIT_FETCH_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/acq-kit-fetch.XXXXXX") || exit 1
+  _ACQ_KIT_FETCH_ROOT=$(mktemp -d "$(acq_tmp_dir)/acq-kit-fetch.XXXXXX") || exit 1
   export -n _ACQ_KIT_FETCH_ROOT
   _ACQ_KIT_FETCH_GUARDIAN=""
   trap '_acq_kit_fetch_cleanup' EXIT
@@ -740,11 +958,26 @@ _acq_kit_fetch_start() {
     trap '' HUP INT TERM
     exec sh -c '
       owner=$1 root=$2 tick=""
+      proc_info() {
+        if [ -r "/proc/$1/ppid" ]; then
+          pp="" exe=""
+          if [ "$#" -gt 1 ]; then
+            { read -r exe || [ -n "$exe" ]; } 2>/dev/null < "/proc/$1/exename" || return 1
+          fi
+          { read -r pp || [ -n "$pp" ]; } 2>/dev/null < "/proc/$1/ppid" || return 1
+          [ "$#" -gt 1 ] || { printf "%s\n" "$pp"; return 0; }
+          printf "%s %s\n" "$pp" "${exe##*/}"
+        elif [ "$#" -gt 1 ]; then
+          ps -o ppid= -o comm= -p "$1"
+        else
+          ps -o ppid= -p "$1"
+        fi
+      }
       stop_tick() {
         trap "" USR1
         set -f
         [ -n "$tick" ] || return 0
-        info=$(ps -o ppid= -o comm= -p "$tick" 2>/dev/null) || info=""
+        info=$(proc_info "$tick" comm 2>/dev/null) || info=""
         set -- $info
         if [ "$#" -eq 2 ] && [ "$1" = "$$" ]; then
           case "$2" in sleep|*/sleep) kill -s KILL "$tick" 2>/dev/null || : ;; esac
@@ -755,17 +988,25 @@ _acq_kit_fetch_start() {
       trap "exit 0" USR1
       : > "$root/ready" || exit 1
       while [ -d "$root" ]; do
-        parent=$(ps -o ppid= -p "$$") || exit 1
-        [ "$(printf "%s" "$parent" | tr -d "[:space:]")" = "$owner" ] || exit 0
+        if parent=$(proc_info "$$"); then
+          [ "$(printf "%s" "$parent" | tr -d "[:space:]")" = "$owner" ] || exit 0
+        fi
+        kill -0 "$owner" 2>/dev/null || exit 0
         sleep 1 & tick=$!
         wait "$tick" || :
         tick=""
       done
     ' sh "$$" "$_ACQ_KIT_FETCH_ROOT"
-  ) </dev/null >/dev/null &
+  ) </dev/null >/dev/null 2>&1 &
   _ACQ_KIT_FETCH_GUARDIAN=$!
+  # The guardian's stderr is discarded (above), so if it dies before it is
+  # ready (it could not write its ready file, for example on a full disk), say
+  # so here rather than exit with no message.
   while [ ! -f "$_ACQ_KIT_FETCH_ROOT/ready" ]; do
-    kill -0 "$_ACQ_KIT_FETCH_GUARDIAN" 2>/dev/null || exit 1
+    if ! kill -0 "$_ACQ_KIT_FETCH_GUARDIAN" 2>/dev/null; then
+      echo "acq: the kit-fetch cleanup helper exited before it was ready; check that $(acq_quote_value "$(acq_tmp_dir)") is writable and not full" >&2
+      exit 1
+    fi
     sleep 0.01
   done
   trap - HUP INT TERM
@@ -872,7 +1113,7 @@ if [ -n "$_acq_wants_help" ]; then
   if ! _acq_print_topic_help "$_acq_help_topic"; then
     print_help
   fi
-  acq_resolve_backend "${explicit_backend}" 2>/dev/null || true
+  acq_resolve_backend_best_effort "${explicit_backend}"
   if [ -z "$_acq_help_topic" ]; then
     _acq_backend_help ""
   elif [ "$(_acq_verb_backend_help_kind "$_acq_help_topic")" = "shared" ]; then
@@ -882,6 +1123,35 @@ if [ -n "$_acq_wants_help" ]; then
   # request is success (exit 0).
   [ -z "$subcommand" ] && exit 2 || exit 0
 fi
+
+# ---------------------------------------------------------------------------
+# User directories: refuse up front when acq's state, config, data or cache
+# directory cannot be resolved to an absolute path (a relative ACQ_STATE_DIR, or
+# no absolute home to fall back to), so every acq verb that reads or writes host
+# state fails closed with one actionable message. Relative XDG_* values are
+# simply ignored (see acq.backends/userdirs.sh). Help, version, `backend list`
+# and unknown verbs (passed through to the backend CLI) touch no acq state and
+# are not checked, matching the Python implementation. `doctor` is not refused
+# either: like Python, it reports the problem as a failed `state` check and
+# completes (see acq_print_doctor).
+# ---------------------------------------------------------------------------
+case "$subcommand" in
+  version|--version|-v) : ;;
+  # Recorded now, before the adapter loads (msb.sh replaces a relative
+  # ACQ_STATE_DIR with an empty one), for acq_print_doctor to report.
+  doctor) acq_userdirs_problem || true ;;
+  backend)
+    case "${2:-}" in
+      set|unset) acq_userdirs_check || exit 1 ;;
+    esac
+    ;;
+  configure) acq_userdirs_check || exit 1 ;;
+  *)
+    if [ -n "$(_acq_verb_backend_help_kind "$subcommand")" ]; then
+      acq_userdirs_check || exit 1
+    fi
+    ;;
+esac
 
 # ---------------------------------------------------------------------------
 # Subcommands that don't need a backend resolved first.
@@ -917,7 +1187,11 @@ case "$subcommand" in
         shift
         local_backend="${1:-}"
         [ -z "$local_backend" ] && { echo "acq: backend set: missing backend name" >&2; exit 1; }
-        local_config_file="${XDG_CONFIG_HOME:-$HOME/.config}/acq/config.yaml"
+        acq_backend_name_known "$local_backend" || {
+          echo "acq: backend set: unknown backend '$(acq_printable "$local_backend")' (expected sbx or msb)" >&2
+          exit 1
+        }
+        local_config_file=$(_acq_config_file)
         # Write only the `backend:` key, preserving any other config (extra_kits,
         # scope_github_token) written by `acq configure` (ADR-0031).
         _acq_config_write_field backend "$local_backend" \
@@ -928,7 +1202,7 @@ case "$subcommand" in
         # Clear ONLY the persisted default backend so acq falls back to
         # auto-detection (see the resolution order in `acq help`). Preserves any
         # other config keys (extra_kits, scope_github_token). Idempotent.
-        local_config_file="${XDG_CONFIG_HOME:-$HOME/.config}/acq/config.yaml"
+        local_config_file=$(_acq_config_file)
         if [ -f "$local_config_file" ] && [ -n "$(_acq_config_read_field backend)" ]; then
           _acq_config_write_field backend ""   # empty value removes the key
           # If the config is now empty (backend was the only key), remove the
@@ -954,8 +1228,10 @@ case "$subcommand" in
     sub2="${1:-}"
     case "$sub2" in
       list)
-        # Show the pinned built-in kits (no backend needed).
+        # Show the pinned built-in kits (no backend needed). A refused extra
+        # or provider ref is never listed (the refusal does not name it).
         _build_kit_list
+        _acq_require_kit_refs || exit 1
         printf 'Pinned acq kits (neutral hybrid/v1):\n'
         printf '  patterns ref: %s\n' "$PATTERNS_KIT_REF"
         printf '  patterns dir: %s\n' "$PATTERNS_KIT_DIR"
@@ -993,6 +1269,7 @@ case "$subcommand" in
           echo "acq: kit apply: usage: acq kit apply NAME KITREF" >&2
           exit 1
         fi
+        acq_name_form_check "kit apply" "$local_name" || exit 1
         # kit apply needs the backend resolved.
         acq_resolve_backend "${explicit_backend}"
         acq_backend_apply_kit "$local_name" "$local_kitref"
@@ -1007,6 +1284,7 @@ case "$subcommand" in
           echo "acq: kit check: usage: acq kit check SANDBOX" >&2
           exit 1
         fi
+        acq_name_form_check "kit check" "$local_name" || exit 1
         acq_resolve_backend "${explicit_backend}"
         if ! acq_backend_exists "$local_name"; then
           echo "acq: kit check: no such sandbox '$local_name'." >&2
@@ -1052,6 +1330,7 @@ case "$subcommand" in
           echo "acq: kit update: usage: acq kit update SANDBOX [--yes]" >&2
           exit 1
         fi
+        acq_name_form_check "kit update" "$local_name" || exit 1
         acq_resolve_backend "${explicit_backend}"
         if ! acq_backend_exists "$local_name"; then
           echo "acq: kit update: no such sandbox '$local_name'." >&2
@@ -1104,24 +1383,35 @@ case "$subcommand" in
     # writes config.yaml. Resolve the backend best-effort so a first-run decline
     # can persist the detected default, but never fail on no backend.
     shift
-    acq_resolve_backend "${explicit_backend}" 2>/dev/null || true
+    acq_resolve_backend_diagnostic "${explicit_backend}"
     acq_configure
     exit 0
     ;;
 
   version|--version|-v)
     # Resolve backend best-effort so version can report it; don't fail.
-    acq_resolve_backend "${explicit_backend}" 2>/dev/null || true
+    acq_resolve_backend_best_effort "${explicit_backend}"
     print_version
     exit 0
     ;;
 
   doctor)
     shift
-    acq_resolve_backend "${explicit_backend}" 2>/dev/null || true
+    acq_resolve_backend_diagnostic "${explicit_backend}"
     if [ -n "${1:-}" ]; then
       if [ -n "${2:-}" ]; then
         echo "acq: doctor: expected at most one sandbox name" >&2
+        exit 1
+      fi
+      # Inspecting a sandbox needs its backend, so a broken pin ends it here.
+      if [ -n "${ACQ_INVALID_BACKEND_PIN:-}" ]; then
+        _acq_unknown_backend_message "$ACQ_INVALID_BACKEND_PIN" "$(_acq_config_file || echo config.yaml)" >&2
+        exit 1
+      fi
+      # Inspecting a sandbox reads its host records, so it needs usable dirs
+      # (the problem was recorded by the entry check, before the adapter loaded).
+      if [ -n "${ACQ_USERDIRS_MESSAGE:-}" ]; then
+        printf 'acq: %s\n%s\n' "$ACQ_USERDIRS_MESSAGE" "$ACQ_USERDIRS_REMEDIATION" >&2
         exit 1
       fi
       acq_print_image_contract_doctor "$1"
@@ -1238,13 +1528,13 @@ case "$subcommand" in
       # var — the override is per-launch by design, and a sticky exported value
       # would silently re-pin the host port of every later sandbox in the shell.
     fi
-    extract_kit_flags "$@"
+    extract_kit_flags "$@" || exit 1
     _acq_kit_agent=""
     _acq_kit_first=$(first_positional "${ACQ_KIT_REMAINING[@]}" || true)
     if [ -n "$_acq_kit_first" ] && is_known_agent "$_acq_kit_first"; then
       _acq_kit_agent="$_acq_kit_first"
     fi
-    _build_kit_list "$_acq_kit_agent"
+    _build_kit_list "$_acq_kit_agent" || exit 1
     unset _acq_kit_agent _acq_kit_first
     # Rebuild positional args as: <subcommand> <remaining args w/o --kit>.
     set -- "$_sub" ${ACQ_KIT_REMAINING[@]+"${ACQ_KIT_REMAINING[@]}"}
@@ -1272,6 +1562,8 @@ case "$subcommand" in
 
   create)
     shift
+    _acq_recreate_name_check "$@" || exit 1
+    _acq_recreate_unsupported "$@" || exit 2
     acq_backend_prepare
     # First-run onboarding (ADR-0031): offer `acq configure` once before we
     # provision, so a brand-new user picks kits up front. No-op after first run
@@ -1282,9 +1574,14 @@ case "$subcommand" in
     create_agent=$(first_positional "$@")
     _acq_apply_configured_extra_kits || exit 1
     create_time_kit_picker
-    _build_kit_list "$create_agent"
+    _build_kit_list "$create_agent" || exit 1
     _acq_require_provider_selection || exit 1
+    _acq_require_kit_refs || exit 1
     # Pre-flight: validate the workspace path before provisioning (#issue).
+    # Refuse unmountable paths (':' or control characters) first: workspace_path
+    # cuts a spec at its first ':', so the existence check alone would test the
+    # wrong path.
+    acq_workspace_specs_safe "$@" || exit 1
     ws=$(workspace_path "$@")
     preflight_workspace_path "$ws" || exit 1
     local_name=$(derive_name "$@") || exit 1
@@ -1309,7 +1606,8 @@ case "$subcommand" in
     advise_project_env_activation "$ws"
     acq_print_selected_agent_kit "$create_agent"
 
-    acq_backend_provision "$local_name" "$@"
+    # A group SIGTERM/SIGHUP waits for the provisioning cleanup (progress.sh).
+    acq_run_signal_deferred acq_backend_provision "$local_name" "$@"
     # `create` is detached and never attaches, so provider credentials are
     # validated on the next attach (ensure_valid_provider_keys), not here.
     ;;
@@ -1345,11 +1643,16 @@ case "$subcommand" in
       acq_print_selected_agent_kit "$first"
 
       # Pre-flight: validate the workspace path before provisioning (#issue).
-      # Only enforce on a fresh create — a re-attach to an existing sandbox
-      # doesn't re-mount, and the path may legitimately differ from cwd.
+      # The typed path is checked only on a fresh create — a re-attach to an
+      # existing sandbox doesn't re-mount, and the path may legitimately differ
+      # from cwd. A re-attach checks the workspace recorded at create instead,
+      # which is the one still mounted.
       ws=$(workspace_path "${create_args[@]}")
       if ! acq_backend_exists "$local_name"; then
+        acq_workspace_specs_safe "${create_args[@]}" || exit 1
         preflight_workspace_path "$ws" || exit 1
+      else
+        acq_recorded_workspace_safe "${ACQ_RESOLVED_BACKEND}" "$local_name" || exit 1
       fi
 
       if acq_backend_exists "$local_name"; then
@@ -1417,8 +1720,9 @@ case "$subcommand" in
         maybe_first_run_configure
         _acq_apply_configured_extra_kits || exit 1
         create_time_kit_picker
-        _build_kit_list "$first"
+        _build_kit_list "$first" || exit 1
         _acq_require_provider_selection || exit 1
+        _acq_require_kit_refs || exit 1
 
 
         # Nudge toward a per-sandbox scoped GitHub token BEFORE provisioning, for
@@ -1431,7 +1735,7 @@ case "$subcommand" in
         advise_github_scope "$local_name" "$ws"
         advise_project_env_activation "$ws"
 
-        acq_backend_provision "$local_name" "${create_args[@]}"
+        acq_run_signal_deferred acq_backend_provision "$local_name" "${create_args[@]}"
       fi
 
       # Validate every selected provider's credential before attaching. This is
@@ -1483,6 +1787,9 @@ case "$subcommand" in
       # Capture staleness BEFORE the heal (the heal rewrites provenance to
       # "current"), then heal, then offer a refresh. Never
       # blocks; skipped under --no-update-check / ACQ_UPDATE_CHECK=0.
+      # The workspace recorded at create is still mounted: refuse it before the
+      # heal if it reaches acq's own directories.
+      acq_recorded_workspace_safe "${ACQ_RESOLVED_BACKEND}" "$first" || exit 1
       note_publish_ignored_on_reattach "$first"
       _pre_heal_status=$(acq_provenance_status "${ACQ_RESOLVED_BACKEND}" "$first")
       # Reload persisted CLI (`--kit`) / extra kit refs so the heal re-runs their
@@ -1567,6 +1874,7 @@ case "$subcommand" in
     acq_backend_guard_version
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: stop: missing sandbox name" >&2; exit 1; }
+    acq_name_form_check stop "$local_name" || exit 1
     acq_backend_stop "$local_name"
     ;;
 
@@ -1584,6 +1892,7 @@ case "$subcommand" in
     acq_backend_guard_version
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: start: missing sandbox name" >&2; exit 1; }
+    acq_name_form_check start "$local_name" || exit 1
     if ! command -v acq_backend_start >/dev/null 2>&1; then
       # e.g. sbx: no 'start' verb, and no detached-resume model — a stopped
       # sandbox is auto-resumed by the next attach, so 'acq run' is the path.
@@ -1592,6 +1901,7 @@ case "$subcommand" in
       echo "       acq run $local_name" >&2
       exit 1
     fi
+    acq_recorded_workspace_safe "${ACQ_RESOLVED_BACKEND}" "$local_name" || exit 1
     acq_backend_start "$local_name"
     # Reload the CLI (`--kit`) / extra kit refs persisted at provision so the
     # heal below re-runs THEIR startup too, not just the built-ins. Without this
@@ -1619,6 +1929,7 @@ case "$subcommand" in
     acq_backend_guard_version
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: restart: missing sandbox name" >&2; exit 1; }
+    acq_name_form_check restart "$local_name" || exit 1
     if ! command -v acq_backend_start >/dev/null 2>&1; then
       # e.g. sbx: no 'restart' verb. Attach auto-resumes a stopped sandbox, so
       # bouncing it is just 'acq run' (optionally 'acq stop' first).
@@ -1627,6 +1938,7 @@ case "$subcommand" in
       echo "       acq run $local_name        # (optionally 'acq stop $local_name' first)" >&2
       exit 1
     fi
+    acq_recorded_workspace_safe "${ACQ_RESOLVED_BACKEND}" "$local_name" || exit 1
     acq_backend_stop "$local_name" \
       || echo "acq: restart: stop failed; attempting start anyway." >&2
     acq_backend_start "$local_name"
@@ -1642,7 +1954,11 @@ case "$subcommand" in
     acq_backend_guard_version
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: rm: missing sandbox name" >&2; exit 1; }
-    acq_backend_terminate "$local_name"
+    acq_name_form_check rm "$local_name" || exit 1
+    # A group SIGTERM/SIGHUP waits for the terminate cleanup (progress.sh), as
+    # for create: the terminate subshell holds the lock and the backend remove.
+    _ACQ_DEFERRED_STEP=removal
+    acq_run_signal_deferred acq_backend_terminate "$local_name"
     ;;
 
   exec)
@@ -1650,6 +1966,7 @@ case "$subcommand" in
     acq_backend_guard_version
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: exec: missing sandbox name" >&2; exit 1; }
+    acq_name_form_check exec "$local_name" || exit 1
     shift
     _exec_ws=""
     if command -v acq_backend_workspace_for >/dev/null 2>&1; then
@@ -1665,6 +1982,7 @@ case "$subcommand" in
     acq_backend_guard_version
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: shell: missing sandbox name" >&2; exit 1; }
+    acq_name_form_check shell "$local_name" || exit 1
     _shell_ws=""
     if command -v acq_backend_workspace_for >/dev/null 2>&1; then
       _shell_ws=$(acq_backend_workspace_for "$local_name" 2>/dev/null || true)
@@ -1687,6 +2005,7 @@ case "$subcommand" in
     acq_backend_guard_version
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: ports: missing sandbox name" >&2; exit 1; }
+    acq_name_form_check ports "$local_name" || exit 1
     shift
     acq_backend_ports "$local_name" "$@"
     ;;
@@ -1979,6 +2298,9 @@ case "$subcommand" in
     # drop it before forwarding the remaining args — otherwise the verb would be
     # doubled (e.g. `acq policy init` → `sbx policy policy init`).
     shift
+    if [ "$subcommand" = attach ]; then
+      _acq_attach_name_check "$@" || exit 1
+    fi
     _acq_backend_passthrough "$subcommand" "$@"
     ;;
 esac

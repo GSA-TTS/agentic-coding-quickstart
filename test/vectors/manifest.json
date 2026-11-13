@@ -1,0 +1,652 @@
+{
+  "schema": 1,
+  "description": "Maps each contract row to at least one vector id. CI-validated against the actual corpus: a missing or renamed vector fails the check rather than being assumed absent.",
+  "inventory": "docs/test-retirement-inventory.md",
+  "notes": [
+    "attach child/backend exit-status preservation is Tier-2 only: the vector harness cannot yet seed host-authoritative state records (a readable record is required before attach will launch an agent). attach's status propagation shares the launch -> exec_command -> _run_stream path that cli/shell-exit-code covers at Tier-1, so it is covered transitively; attach-specific fail-closed behavior (missing sandbox, missing/unreadable record) is Tier-1 covered directly by cli/attach-missing and cli/attach-json. Do not re-add an attach-exit-code vector until the harness can seed state.",
+    "msb credential path (contract change): cli/secret-msb-unsupported, cli/secret-has-present, cli/secret-has-absent and cli/provider-credential-set-json were edited because msb now serves the secret verbs and provider-credential set from the acq secret store instead of failing with unsupported_capability (secret-msb-unsupported keeps its id but now asserts an empty listing). The msb create/run vectors gained an ACQ_SECRET_STORE_DIR redirect because create now reads the store to bind secrets.",
+    "ADR-0043m deviation: a vector is one CLI invocation with no fixtures, and neither runner implements invoke.fixtures yet. Vectors whose oracle needs a seeded acq secret store (cli/secret-ls-msb, cli/secret-has-msb-scoped-over-global, cli/secret-rm-msb, cli/create-msb-binds-usai, cli/secret-has-present, cli/secret-ls-msb-sandbox-named-global, cli/start-msb, cli/restart-msb, and every msb create/run vector that needs the default provider key stored first: cli/lifecycle-create, cli/lifecycle-create-backend-failure, cli/lifecycle-run, cli/run-inference-ignores-team-kits, cli/run-kit-explicit-override, cli/run-kit-substrate-provision, cli/run-opencode-applies-builtins, cli/run-opencode-kit, cli/run-shell-no-kit, cli/security-gate-real-probe, cli/security-gate-real-probe-writable, cli/security-recreate-then-run, cli/security-recreate-yes, cli/security-recreate-windows), or a fixture acq cannot create through its CLI (temporary git workspaces for cli/github-scope-json, cli/github-scope-sbx, cli/github-scope-no-value and cli/github-scope-multi-owner; a hand-written or undeletable binding record for cli/provider-credential-set-schema-error-no-orphan and cli/provider-credential-rm-unlink-fails; a Bash acq provenance record for cli/migration-bash-provenance), or a committed git workspace for the clone-mode vectors cli/create-clone-flag-msb, cli/create-clone-env-msb and cli/create-clone-not-a-repo (an empty one for the last), therefore invoke test/vectors/drivers/seeded-run.py, which runs earlier acq calls to seed state, reports one observed acq invocation, and fails the vector if any other step exits unexpectedly or the stdin sentinel appears in any step's output. Replace the driver with invoke.fixtures once both runners implement it.",
+    "github-scope and provider-credential rm (contract change): github-scope no longer reports or records scoped: true. It reports scope (sandbox, or none when the workspace has no GitHub repositories), owner, repos and stored, and refuses multi-owner workspaces; msb now serves it through the acq secret store instead of failing with unsupported_capability. cli/github-scope-json, cli/github-scope-sbx and cli/github-scope-no-value were edited to run against a temporary one-owner git workspace instead of the repository root, whose remotes vary by checkout. provider-credential rm now also unbinds and deletes the provider's stored credential and reports credential_removed, so cli/provider-credential-rm-json gained that field and the rm vectors gained an ACQ_SECRET_STORE_DIR redirect.",
+    "msb kit application (contract change): cli/kit-update-yes now expects the in-place reapply (status current, action refreshed) instead of consent recorded with the reapply deferred, and cli/run-inference-ignores-team-kits passes a bundled kit ref in ACQ_EXTRA_KITS, because unbundled extra kits are now refused rather than ignored (cli/run-extra-kit-unfetchable-refused covers that refusal). ACQ_SECURITY_MOUNT_STATE is honoured only with the stub backend; without it the gate runs the real msb inspect plus guest probe against the stub, which records each create's mounts. cli/configure-json-layers now reports extra_kits and provider_kit as honoured by Python, which reads them at create, with python_applies: bundled-only because it applies only kits from its built-in bundle. cli/security-gate-real-probe and cli/security-gate-real-probe-writable are scoped to linux (the schema has no posix value) because Windows never requests the read-only mount (KNOWN_FAILURE_MODES 54); cli/security-recreate-then-run is scoped to linux too, because ACQ_STATE_SEED re-seeds the ro_host_config record on every call, which no Windows recreate can clear; cli/security-recreate-windows covers Windows (recreate rebuilds without claiming the mount) and cli/security-recreate-yes runs everywhere.",
+    "usai key rotation (contract change): cli/usai-rotate-ok and cli/usai-rotate-sbx expected unsupported_capability; they now run rotation through test/vectors/drivers/seeded-run.py (so the driver fails them if the key appears in any output) and assert the per-backend re-feed. cli/usai-rotate-unreachable and cli/usai-rotate-auth-failed were renamed cli/usai-rotate-sbx-partial and cli/usai-rotate-msb-partial: rotation never calls the provider (the provider_unreachable / provider_auth_failed codes belong to the attach-time key check), so they now cover a partial re-feed that exits 1 naming the sandbox and the retry that fixes it, using the driver's env step to clear the stub failure knob between the two calls.",
+    "config.yaml settings read by Python (contract change): cli/configure-json-layers now reports scope_github_token as honoured by Python (honoured_by_python: true), because create and run use it as the default answer to the per-sandbox GitHub-token prompt; that prompt is interactive, so its evidence is Tier-2 (py-acq/tests/test_create_config_settings.py). create and run gained --no-provider-kits (cli/create-no-provider-kits). Because create and run now note a workspace's GitHub repositories on stderr, every create or run vector that asserts an exact stderr and used the runner's working directory (the acq checkout, itself a GitHub repository) as its workspace now gets an empty workspace from test/vectors/drivers/seeded-run.py ({\"git_repos\": {}}): cli/create-msb-binds-usai, cli/create-no-provider-kits, cli/create-provider-pin-mismatch-refused, cli/lifecycle-create, cli/lifecycle-create-backend-failure, cli/lifecycle-create-config-sbx, cli/lifecycle-sbx-create, cli/run-missing-key-noninteractive, cli/security-gate-real-probe and cli/security-gate-real-probe-writable; their oracles are unchanged.",
+    "version identity (contract change): cli/version-json expected kit_control_plane_ref null; it now expects the pinned control-plane commit, and it and cli/version-human mark both backends uninstalled, because version now reports the resolved active backend and its detected version, which would otherwise depend on what the host has installed. cli/version-json-backend covers a resolved backend.",
+    "Legacy-suite retirement classification: docs/test-retirement-inventory.md buckets every test/bats file as preserve/re-express/retire and records gaps G1-G22. This manifest maps only the preserve-tier contract rows to vectors; the inventory is the authoritative cross-reference from legacy tests to vectors and DROP rows.",
+    "never-appears oracles (vector change): json and contains cannot show that something is missing, so the vectors that feed a value on stdin straight to acq and assert stdout as a json subset now pair that assertion with an absent one for the value (cli/provider-credential-set-json, cli/provider-credential-set-invalid-provider, cli/provider-credential-set-missing-host, cli/provider-credential-sbx-set-version-floor, cli/secret-set-host-needs-env, cli/secret-set-service-dash-refused). Vectors run through drivers/seeded-run.py already fail when the stdin sentinel appears in any output. cli/version-human now pins the whole human output instead of one label.",
+    "Python kit fetch (contract change): the Python acq now fetches a kit outside its built-in bundle when the ref is a git+https ref pinned to a full 40-hex commit, verifies the fetched commit and checks the payload, instead of refusing every such kit with unsupported_capability. cli/configure-json-layers now reports python_applies: pinned-only (was bundled-only) on extra_kits and provider_kit. cli/run-extra-kit-unfetchable-refused is unchanged (its refs name local directories, still refused with unsupported_capability); cli/run-extra-kit-unpinned-refused (kit_ref_not_pinned) and cli/run-extra-kit-credential-ref-refused (validation_failed, with the userinfo redacted in the exact message) cover the other refusals. No vector fetches: a successful fetch needs a repository fixture, which py-acq/tests/test_kit_fetch.py provides over file://.",
+    "Both runners now remove SSH_AUTH_SOCK from every vector's environment before the vector's own unset/env apply, so a developer's ssh-agent never reaches a stub sandbox or changes an oracle (it is the forward's opt-in, ADR-0021); a vector that needs it sets it in invoke.env (py-acq/tests/runner-probes/probe/ssh-auth-sock-*)."
+  ],
+  "rows": [
+    {
+      "contract": "ADR-0038m §1 exit codes 0 (success) and 2 (usage)",
+      "vectors": ["cli/version-json", "cli/version-human", "cli/usage-error", "cli/usage-error-human"]
+    },
+    {
+      "contract": "ADR-0038m §2 structured output success envelope",
+      "vectors": ["cli/version-json"]
+    },
+    {
+      "contract": "ADR-0038m §2 structured output failure envelope",
+      "vectors": ["cli/usage-error"]
+    },
+    {
+      "contract": "ADR-0038m §2 human output on stdout, diagnostics on stderr",
+      "vectors": ["cli/version-human", "cli/usage-error-human"]
+    },
+    {
+      "contract": "ADR-0038m §2 version required result data fields",
+      "vectors": ["cli/version-json", "cli/version-json-backend"]
+    },
+    {
+      "contract": "ADR-0038m §2 backend list required data: active backend and installed/name/version records",
+      "vectors": ["cli/backend-list-none", "cli/backend-list-versions", "cli/backend-list-unknown"]
+    },
+    {
+      "contract": "ADR-0038m §2 backend list active_backend auto-detect default (none / single / both; both with existing sbx sandboxes keeps sbx)",
+      "vectors": ["cli/backend-list-none", "cli/backend-list-unknown", "cli/backend-list-default-msb", "cli/backend-list-autodetect-keeps-sbx"]
+    },
+    {
+      "contract": "spec backend seam: active_backend precedence flag -> env -> config (backend set) -> auto-detect; backend set/unset persist and clear only the backend key; an invalid backend is never persisted, and one found in config.yaml fails closed",
+      "vectors": ["cli/lifecycle-create-config-sbx", "cli/lifecycle-config-backend-invalid", "cli/backend-set", "cli/backend-set-unknown", "cli/backend-unset", "cli/backend-unset-none"]
+    },
+    {
+      "contract": "ADR-0031 configure: non-interactive --json reports each setting with its value, source layer (flag, env, config, default) and honoured_by_python (the no-write and no-secret guarantees are enforced by py-acq/tests/test_configure.py)",
+      "vectors": ["cli/configure-json-layers"]
+    },
+    {
+      "contract": "ADR-0040m version floor fail-closed (backend_not_found / backend_version_unsupported / backend_version_unknown)",
+      "vectors": ["cli/backend-check-ok", "cli/backend-check-unsupported", "cli/backend-check-blocked", "cli/backend-check-unknown", "cli/backend-check-not-found", "cli/backend-check-bin-override-blocked", "cli/backend-check-forced-version-ignored-for-real-bin", "cli/backend-check-installed-ignored-for-missing-bin"]
+    },
+    {
+      "contract": "ADR-0038m §2 doctor required result data fields (overall status + per-check id/status)",
+      "vectors": ["cli/doctor-json"]
+    },
+    {
+      "contract": "ADR-0038m §2 human output by default for doctor, diagnostics on stderr",
+      "vectors": ["cli/doctor-human"]
+    },
+    {
+      "contract": "ADR-0038m §1 exit 1 (operational failure)",
+      "vectors": ["cli/doctor-unsupported"]
+    },
+    {
+      "contract": "ADR-0040m unsupported-capability fail-closed (sandbox inspection without a backend)",
+      "vectors": ["cli/doctor-unsupported"]
+    },
+    {
+      "contract": "ADR-0040m msb provision capability (create end to end, host-authoritative state record)",
+      "vectors": ["cli/lifecycle-create", "cli/lifecycle-run"]
+    },
+    {
+      "contract": "ADR-0040m sbx provision + list capabilities (create end to end, host-authoritative state record keyed by backend)",
+      "vectors": ["cli/lifecycle-sbx-create", "cli/lifecycle-sbx-ls"]
+    },
+    {
+      "contract": "ADR-0038m §2 ls required data: sandboxes with name/backend/state",
+      "vectors": ["cli/lifecycle-ls"]
+    },
+    {
+      "contract": "ADR-0038m §48 drop inspection-failure-as-empty: ls fails closed (failure) when the backend listing exits non-zero, never 'no sandboxes' (msb and sbx)",
+      "vectors": ["cli/ls-list-failure-msb", "cli/ls-list-failure-sbx"]
+    },
+    {
+      "contract": "Backend listing calls are bounded (ACQ_LIST_TIMEOUT, default 60 s): a listing that does not answer in time makes ls fail closed with the timeout code, never hang",
+      "vectors": ["cli/ls-list-timeout-msb"]
+    },
+    {
+      "contract": "ADR-0041m forward migration of existing installs: the generation-2 step imports a sandbox the Bash acq created (provenance/<backend>/<name>.<cksum>.env) so it is listed and re-attachable instead of orphaned",
+      "vectors": ["cli/migration-bash-provenance", "cli/migration-bash-selection-refused"]
+    },
+    {
+      "contract": "ADR-0040m msb stop and remove capabilities (state preserved on stop; record removed on rm)",
+      "vectors": ["cli/lifecycle-stop", "cli/lifecycle-rm"]
+    },
+    {
+      "contract": "ADR-0040m msb start/restart capability (ADR-0017): resume with the bound secrets in msb's environment only, bind what was stored while stopped, re-apply the kit set; sbx declares start unsupported and fails closed pointing to acq run; a missing sandbox is sandbox_not_found",
+      "vectors": ["cli/start-msb", "cli/restart-msb", "cli/start-sbx-unsupported", "cli/start-missing"]
+    },
+    {
+      "contract": "ADR-0040m msb remove capability: rm clears every per-sandbox host record (state and applied-kit), including for a sandbox removed outside acq, which reports backend_absent true instead of sandbox_not_found",
+      "vectors": ["cli/lifecycle-rm-orphan", "cli/lifecycle-rm-clears-kit-record"]
+    },
+    {
+      "contract": "ADR-0040m error vocabulary sandbox_not_found / sandbox_exists (fail closed, no mutation)",
+      "vectors": ["cli/lifecycle-rm-missing", "cli/lifecycle-create-exists"]
+    },
+    {
+      "contract": "ADR-0038m §1 usage exit 2: create validates the agent against the known-agent set",
+      "vectors": ["cli/lifecycle-create-unknown-agent"]
+    },
+    {
+      "contract": "ADR-0040m raw backend text is never a portable field (stable prose in remediation)",
+      "vectors": ["cli/lifecycle-create-backend-failure"]
+    },
+    {
+      "contract": "ADR-0038m §1 child/backend status preservation for exec/shell (not acq's 0/1)",
+      "vectors": ["cli/exec-exit-code", "cli/shell-exit-code"]
+    },
+    {
+      "contract": "ADR-0038m §2 --json envelope for exec (one document, child stdout routed to stderr)",
+      "vectors": ["cli/exec-json"]
+    },
+    {
+      "contract": "ADR-0038m §2 --json envelope for shell (login shell as the agent user)",
+      "vectors": ["cli/shell-json"]
+    },
+    {
+      "contract": "ADR-0038m §48 drop agent-to-shell fallback: attach fails closed (validation_failed) on a missing host record",
+      "vectors": ["cli/attach-json"]
+    },
+    {
+      "contract": "ADR-0038m §1 attach fails closed (sandbox_not_found) on a missing sandbox",
+      "vectors": ["cli/attach-missing"]
+    },
+    {
+      "contract": "ADR-0038m §4 cp host/guest path types are distinct (direction in/out, never implicit)",
+      "vectors": ["cli/cp-in", "cli/cp-out"]
+    },
+    {
+      "contract": "ADR-0029 cp forwards a UNC/network host path verbatim to the backend (resolved natively), accepted like a plain-drive path — slash and backslash forms, in and out, msb and sbx",
+      "vectors": ["cli/cp-unc-host", "cli/cp-unc-host-backslash", "cli/cp-unc-host-out", "cli/cp-unc-host-sbx"]
+    },
+    {
+      "contract": "ADR-0038m §4 cp requires exactly one NAME:/guest reference (usage error otherwise)",
+      "vectors": ["cli/cp-no-ref"]
+    },
+    {
+      "contract": "ADR-0038m §1 cp preserves the backend copy status and emits a stable failure envelope",
+      "vectors": ["cli/cp-backend-failure"]
+    },
+    {
+      "contract": "ADR-0038m §2 ports reports declared host/guest mappings with origin, not listener health",
+      "vectors": ["cli/ports-json"]
+    },
+    {
+      "contract": "ADR-0038m §2 ports legitimate empty result (successful inspect, no declared ports)",
+      "vectors": ["cli/ports-empty"]
+    },
+    {
+      "contract": "ADR-0038m §48 drop inspection-failure-as-empty: ports fails closed (failure) on a failed inspect",
+      "vectors": ["cli/ports-inspect-failure"]
+    },
+    {
+      "contract": "ADR-0038m §48: ports fails closed (failure) on a wrong-shape inspect (no uncaught traceback)",
+      "vectors": ["cli/ports-inspect-bad-shape"]
+    },
+    {
+      "contract": "ADR-0040m ports fails closed (sandbox_not_found) on a missing sandbox",
+      "vectors": ["cli/ports-missing"]
+    },
+    {
+      "contract": "ADR-0038m §2 secret set success envelope: scope/service/value_state, value on stdin only, never a value field",
+      "vectors": ["cli/secret-set-json", "cli/secret-set-sandbox-json"]
+    },
+    {
+      "contract": "ADR-0038m §48 drop scope-less secret set: usage error (exit 2)",
+      "vectors": ["cli/secret-set-usage"]
+    },
+    {
+      "contract": "ADR-0038m §1 empty/whitespace-only stdin value is a validation failure (exit 1, validation_failed), not usage",
+      "vectors": ["cli/secret-set-no-value"]
+    },
+    {
+      "contract": "ADR-0038m §secret has silent predicate: exit 0 present / 1 absent / 2 usage, no stdout body",
+      "vectors": ["cli/secret-has-present", "cli/secret-has-absent", "cli/secret-has-usage"]
+    },
+    {
+      "contract": "ADR-0040m sbx-only key_present obligation: secret has on sbx reports presence via the proxy table (exit 0 present / 1 absent), never a value",
+      "vectors": ["cli/secret-has-sbx-present", "cli/secret-has-sbx-absent"]
+    },
+    {
+      "contract": "ADR-0038m §2 secret ls required data: scope/service/value_state, non-secret bindings only",
+      "vectors": ["cli/secret-ls-json", "cli/secret-ls-empty"]
+    },
+    {
+      "contract": "ADR-0038m §secret rm exit semantics: exit 0 and value_state unset on success",
+      "vectors": ["cli/secret-rm-json"]
+    },
+    {
+      "contract": "ADR-0038m §48 sbx raw-placeholder removal: a raw placeholder token is removed from sbx's proxy table, leaving the acq store unchanged",
+      "vectors": ["cli/secret-rm-raw-placeholder-sbx"]
+    },
+    {
+      "contract": "ADR-0040m secret rm on a down backend reports backend_not_found (not secret_missing) and never deletes",
+      "vectors": ["cli/secret-rm-backend-error"]
+    },
+    {
+      "contract": "ADR-0040m error vocabulary secret_missing / secret_unreadable on the secret failure paths",
+      "vectors": ["cli/secret-rm-missing", "cli/secret-ls-unreadable", "cli/secret-ls-bad-shape", "cli/secret-ls-entry-bad-shape"]
+    },
+    {
+      "contract": "msb secret-write/rm/list (ADR-0040m reconciliation): msb has no `secret` subcommand, so the verbs are served from the acq secret store and delivered as --secret ENV@HOST bindings; ls reports each entry's ENV@HOST binding, a service msb cannot bind is refused before it is stored, and no value is ever echoed",
+      "vectors": ["cli/secret-msb-unsupported", "cli/secret-set-msb", "cli/secret-ls-msb", "cli/secret-rm-msb"]
+    },
+    {
+      "contract": "ADR-0038m scoped-over-global credentials on msb: secret has means 'can be injected'; a sandbox value answers only for that sandbox, and a sandbox without one falls back to the global value",
+      "vectors": ["cli/secret-has-msb-scoped-over-global"]
+    },
+    {
+      "contract": "msb create binds every injectable secret as --secret ENV@HOST (reported as secret_bindings); the value reaches msb only through its environment, never argv or output",
+      "vectors": ["cli/create-msb-binds-usai"]
+    },
+    {
+      "contract": "secret import (Bash acq_secret_import parity): known host tokens (USAI_API_KEY, GITHUB_TOKEN/GH_TOKEN, GITLAB_TOKEN, registered provider KEY_ENVs) go to the acq secret store with no backend; --all never overwrites, --dry-run writes nothing, a non-TTY interactive run skips, a multi-line value is refused, and no value is ever echoed",
+      "vectors": ["cli/secret-import-all", "cli/secret-import-dry-run", "cli/secret-import-noninteractive-skip", "cli/secret-import-refuses-multiline", "cli/secret-import-none", "cli/secret-import-unknown-flag"]
+    },
+    {
+      "contract": "Secret service and sandbox names follow the acq store-key rule [A-Za-z0-9_-]+ with no leading '-', and are refused before any store or backend access",
+      "vectors": ["cli/secret-set-service-dash-refused"]
+    },
+    {
+      "contract": "A sandbox literally named 'global' is a sandbox scope, never the global scope (typed scope parse)",
+      "vectors": ["cli/secret-scope-sandbox-named-global", "cli/secret-import-sandbox-named-global"]
+    },
+    {
+      "contract": "secret set --host/--env binds a custom endpoint's host and env var together; either alone is refused before anything is stored",
+      "vectors": ["cli/secret-set-host-needs-env"]
+    },
+    {
+      "contract": "sbx credential routing: built-in services go through `sbx secret set`; usai, registered providers and any --host go through `sbx secret set-custom --host --env --value-stdin` (sbx >= 0.51.0), value on stdin only",
+      "vectors": ["cli/secret-set-usai-sbx-custom", "cli/secret-set-json"]
+    },
+    {
+      "contract": "JSON scope_kind (global | sandbox | unknown) tells a sandbox named 'global' apart from the global scope, where scope alone reads 'global' for both",
+      "vectors": ["cli/secret-set-sandbox-named-global", "cli/secret-ls-scope-kind-sbx", "cli/secret-ls-json", "cli/secret-ls-msb-sandbox-named-global"]
+    },
+    {
+      "contract": "sbx secret has means 'sbx can inject it': a service maps to its native entry or custom env var, and a sandbox scope falls back to global (ADR-0038m scoped-over-global)",
+      "vectors": ["cli/secret-has-sbx-usai-custom", "cli/secret-has-sbx-global-fallback"]
+    },
+    {
+      "contract": "sbx secret rm of a custom secret looks up its placeholder and removes it with `sbx secret rm --placeholder P -f`, stdin closed; raw-placeholder removal does the same",
+      "vectors": ["cli/secret-rm-sbx-custom", "cli/secret-rm-raw-placeholder-force"]
+    },
+    {
+      "contract": "ADR-0038m §2 provider-credential set success: value on stdin only, binding reports provider/key_env/hosts/source_layer, never a value",
+      "vectors": ["cli/provider-credential-set-json"]
+    },
+    {
+      "contract": "ADR-0038m §2 provider-credential ls required data: provider/key_env/hosts/source_layer, non-secret bindings only",
+      "vectors": ["cli/provider-credential-ls-json", "cli/provider-credential-ls-empty"]
+    },
+    {
+      "contract": "ADR-0038m §provider-credential rm exit semantics: exit 0 removed true, absent binding fails closed with secret_missing",
+      "vectors": ["cli/provider-credential-rm-json", "cli/provider-credential-rm-missing"]
+    },
+    {
+      "contract": "ADR-0038m fail-closed provider-credential rm: a binding record that cannot be deleted is a failure (exit 1), never removed true",
+      "vectors": ["cli/provider-credential-rm-unlink-fails"]
+    },
+    {
+      "contract": "ADR-0038m / ADR-0041m provider-credential set ordering: the binding is checked and written before the value reaches the backend, so an unreadable record leaves no orphaned credential",
+      "vectors": ["cli/provider-credential-set-schema-error-no-orphan"]
+    },
+    {
+      "contract": "ADR-0038m §1 provider-credential set validation: empty value, missing --host, and malformed provider id fail closed (validation_failed)",
+      "vectors": ["cli/provider-credential-set-no-value", "cli/provider-credential-set-missing-host", "cli/provider-credential-set-invalid-provider"]
+    },
+    {
+      "contract": "ADR-0038m §1 usage exit 2: provider-credential set requires PROVIDER and KEY_ENV",
+      "vectors": ["cli/provider-credential-set-usage"]
+    },
+    {
+      "contract": "ADR-0040m sbx provider-credential set (common secret-write): value on stdin only, binding reports provider/key_env/hosts/source_layer, never a value",
+      "vectors": ["cli/provider-credential-sbx-set"]
+    },
+    {
+      "contract": "ADR-0040m per-capability version floor: provider-credential set on sbx requires sbx >= 0.51.0 (set-custom --value-stdin); an older sbx fails closed with backend_version_unsupported",
+      "vectors": ["cli/provider-credential-sbx-set-version-floor"]
+    },
+    {
+      "contract": "ADR-0013 per-sandbox GitHub token flow: github-scope detects the workspace's GitHub repositories, stores the token for that sandbox only (never global, never exposed), and reports the owner and repositories it was requested for without claiming it was narrowed",
+      "vectors": ["cli/github-scope-json"]
+    },
+    {
+      "contract": "ADR-0013 multi-owner refusal: a workspace with GitHub repositories from more than one owner is refused before the token is read",
+      "vectors": ["cli/github-scope-multi-owner"]
+    },
+    {
+      "contract": "ADR-0038m §1 github-scope validation: an empty stdin token fails closed (validation_failed)",
+      "vectors": ["cli/github-scope-no-value"]
+    },
+    {
+      "contract": "ADR-0040m sbx github-scope (common): a per-sandbox (never global) scope is recorded with the token never exposed",
+      "vectors": ["cli/github-scope-sbx"]
+    },
+    {
+      "contract": "ADR-0012 / ADR-0040m msb key-rotate: rotation stores the new key in the acq secret store and re-feeds every running sandbox (msb modify --secret), never emitting it (provider/key_env/rotated/backends, no value)",
+      "vectors": ["cli/usai-rotate-ok"]
+    },
+    {
+      "contract": "Least privilege for re-feeds: secret set -g and usai key rotation do not hand a provider's credential to a running msb sandbox whose recorded provider selection leaves that provider out (--no-provider-kits, or an explicit list without its kit); a sandbox with no recorded selection is re-fed as before",
+      "vectors": ["cli/usai-rotate-msb-honours-selection"]
+    },
+    {
+      "contract": "ADR-0012 key-rotate partial re-feed: when a sandbox does not take the new key the command exits 1 naming it (and the ones that did), and re-running the rotation with the same key fixes it",
+      "vectors": ["cli/usai-rotate-msb-partial", "cli/usai-rotate-sbx-partial"]
+    },
+    {
+      "contract": "ADR-0038m §1 usai-rotate-api-key validation: an empty stdin key fails closed (validation_failed)",
+      "vectors": ["cli/usai-rotate-no-value"]
+    },
+    {
+      "contract": "ADR-0012 / ADR-0008 sbx key-rotate: rotation re-sets every custom secret that carries the key with secret set-custom --placeholder P --value-stdin, keeping each placeholder, and never emits the new key",
+      "vectors": ["cli/usai-rotate-sbx"]
+    },
+    {
+      "contract": "sbx duplicate custom secrets: more than one global custom secret for the USAi env var and host is refused by secret set and key rotation, naming every placeholder with one `sbx secret rm --placeholder P -f` per entry and a warning that running sandboxes may hold one; nothing is stored or removed",
+      "vectors": ["cli/secret-set-sbx-duplicate-usai", "cli/sbx-duplicate-usai-nothing-removed"]
+    },
+    {
+      "contract": "ADR-0038m §1 / spec story #9 passthrough: verbatim forwarding, announced stderr notice, status preserved",
+      "vectors": ["cli/passthrough", "cli/passthrough-exit-code", "cli/passthrough-sbx-bin-seam"]
+    },
+    {
+      "contract": "ADR-0038m §4 global flag position: acq reads --json/--backend before the verb; exec stops at the sandbox name and passthrough at the verb, so later flags reach the guest command or backend verbatim",
+      "vectors": ["cli/exec-flags-after-name-verbatim", "cli/passthrough-trailing-flags"]
+    },
+    {
+      "contract": "ADR-0038m §1/§2 passthrough failures before the handoff keep the error contract: unknown --backend is usage (exit 2); a backend CLI that cannot be run, or an override that does not parse, is backend_not_found (exit 1)",
+      "vectors": ["cli/passthrough-unknown-backend", "cli/passthrough-backend-missing", "cli/passthrough-sbx-backend-missing", "cli/passthrough-bin-override-unparseable"]
+    },
+    {
+      "contract": "ADR-0038m §2 / ADR-0040m command boundary: a backend CLI missing after detection gives backend_not_found with an envelope, never a traceback (ls, session verbs)",
+      "vectors": ["cli/ls-backend-missing", "cli/exec-backend-missing"]
+    },
+    {
+      "contract": "ADR-0042m runtime: offline operation, no opportunistic download",
+      "vectors": ["cli/version-json", "cli/version-human", "cli/doctor-json", "cli/doctor-human"]
+    },
+    {
+      "contract": "ADR-0043m runner assertion modes (exact/contains/json/absent), and a list of assertions on one stream, each applied to the raw stream",
+      "vectors": ["sentinel/mode-exact", "sentinel/mode-contains", "sentinel/mode-json", "sentinel/mode-absent"]
+    },
+    {
+      "contract": "ADR-0043m runner normalisation transforms (abspath/tmpdir/crlf/timing/order/json)",
+      "vectors": [
+        "sentinel/transform-abspath",
+        "sentinel/transform-tmpdir",
+        "sentinel/transform-crlf",
+        "sentinel/transform-timing",
+        "sentinel/transform-timing-micro",
+        "sentinel/transform-order",
+        "sentinel/transform-order-no-newline",
+        "sentinel/transform-order-nonascii",
+        "sentinel/transform-json"
+      ]
+    },
+    {
+      "contract": "ADR-0043m isolation fail-closed refusal / ADR-0040m unsupported-capability fail-closed",
+      "vectors": ["negative/isolation-offline", "negative/isolation-ssh-stubs", "negative/backend-required"]
+    },
+    {
+      "contract": "ADR-0038m §46 kit-source add persists a full immutable ref (pinned-ref provenance)",
+      "vectors": ["cli/kit-source-add"]
+    },
+    {
+      "contract": "ADR-0038m §46 kit-source add refuses a non-full (mutable) ref with a stable code",
+      "vectors": ["cli/kit-source-add-nonpinned"]
+    },
+    {
+      "contract": "ADR-0038m §2 kit-source ls required data: repository/ref/directory/provider-kits/discovery-status",
+      "vectors": ["cli/kit-source-ls"]
+    },
+    {
+      "contract": "ADR-0038m §48 / ADR-0038m §46 unreachable kit-source discovery returns 0 with an explicit discovery_status",
+      "vectors": ["cli/kit-source-ls-unreachable"]
+    },
+    {
+      "contract": "ADR-0038m §46 kit-source rm stops trusting a registered repository / fails closed on an unregistered one",
+      "vectors": ["cli/kit-source-rm", "cli/kit-source-rm-not-found"]
+    },
+    {
+      "contract": "ADR-0040m sbx-only kit_source_revoked obligation: kit-source rm revokes the source from sbx's kit.allowedSources and drops the host registry entry",
+      "vectors": ["cli/kit-source-rm-sbx"]
+    },
+    {
+      "contract": "ADR-0040m sbx-only kit_source_revoked obligation via auto-detect: kit-source rm revokes on the resolved active backend (sbx auto-detected), not only on explicit selection",
+      "vectors": ["cli/kit-source-rm-sbx-autodetect"]
+    },
+    {
+      "contract": "ADR-0040m sbx kit_source_revoked drops an owner prefix only when no remaining trusted source (control plane, registry, ACQ_EXTRA_KIT_SOURCES) needs it, and re-reads kit.allowedSources to confirm",
+      "vectors": ["cli/kit-source-rm-sbx-shared-owner", "cli/kit-source-rm-sbx-gsa-tts"]
+    },
+    {
+      "contract": "ADR-0040m sbx kit_source_revoked fails closed on a refused write or an unreadable re-read: the source stays registered, the error names which step failed, and the recovery command is shell-quoted",
+      "vectors": ["cli/kit-source-rm-sbx-write-fails", "cli/kit-source-rm-sbx-readback-fails"]
+    },
+    {
+      "contract": "ADR-0040m unknown-backend validation for kit-source rm: --backend bogus is rejected with a usage error (matching the other mutating verbs)",
+      "vectors": ["cli/kit-source-rm-unknown-backend"]
+    },
+    {
+      "contract": "ADR-0038m §46 kit-source add/rm both refuse the control-plane trust anchor (symmetry)",
+      "vectors": ["cli/kit-source-add-control-plane", "cli/kit-source-add-control-plane-case", "cli/kit-source-rm-control-plane", "cli/kit-source-rm-control-plane-case"]
+    },
+    {
+      "contract": "ADR-0038m §2 kit list required data: control-plane ref and effective built-in/provider/extra sets",
+      "vectors": ["cli/kit-list"]
+    },
+    {
+      "contract": "ADR-0038m §2 kit check required data: sandbox/backend/local/applied refs and current/stale/unknown",
+      "vectors": ["cli/kit-check-unknown", "cli/kit-check-current", "cli/kit-check-stale"]
+    },
+    {
+      "contract": "ADR-0038m §kit check exit semantics: exit 1 (sandbox_not_found) for a missing sandbox",
+      "vectors": ["cli/kit-check-missing"]
+    },
+    {
+      "contract": "ADR-0038m §3 / §46 kit update consent: non-interactive refusal, and --yes reapplies the bundle in place before recording applied_ref",
+      "vectors": ["cli/kit-update-consent", "cli/kit-update-yes"]
+    },
+    {
+      "contract": "ADR-0040m unsupported-capability fail-closed for kit apply: on sbx a kit with startup commands cannot be added to a live sandbox, so kit apply fails closed and names the recreate",
+      "vectors": ["cli/kit-apply-unsupported"]
+    },
+    {
+      "contract": "ADR-0030 agent install contract: kit apply installs the built-in opencode kit (pinned by content) and declares its entrypoint, idempotently (applied / re-apply no-op)",
+      "vectors": ["cli/kit-apply-opencode", "cli/kit-apply-noop"]
+    },
+    {
+      "contract": "ADR-0040m error vocabulary: kit apply refuses a missing local kit directory (validation_failed) and a missing sandbox (sandbox_not_found)",
+      "vectors": ["cli/kit-apply-unknown-kit", "cli/kit-apply-missing"]
+    },
+    {
+      "contract": "ADR-0030 default path: acq run opencode . provisions the pinned generic devenv base and applies the pinned opencode kit while shell lands on the same devenv base with no agent kit",
+      "vectors": ["cli/run-opencode-kit", "cli/run-shell-no-kit"]
+    },
+    {
+      "contract": "Built-in kits on msb: create/run verify the packaged bundle and apply every built-in kit (CA trust, provider, playbook, git signing) and then the bundled agent kit, in Bash's order",
+      "vectors": ["cli/run-opencode-applies-builtins"]
+    },
+    {
+      "contract": "Kit refs outside the built-in bundle that acq cannot copy or fetch and verify (a local kit directory that does not exist, a ref not pinned to a full commit, a credential-bearing URL) are refused before create, never silently ignored, and a refused ref is never echoed with its credential",
+      "vectors": ["cli/run-extra-kit-unfetchable-refused", "cli/run-extra-kit-unpinned-refused", "cli/run-extra-kit-credential-ref-refused"]
+    },
+    {
+      "contract": "Built-in kits on sbx: create/run verify the packaged bundle, translate every built-in kit and the bundled agent kit to sbx-v2 kits passed to sbx create --kit, wait for the startup barrier, and launch the agent kit's entrypoint",
+      "vectors": ["cli/run-opencode-sbx"]
+    },
+    {
+      "contract": "ADR-0030 agent-kit inference: an explicit --kit wins over inference, and an extra kit is never inferred as the agent kit (built-in bundle only)",
+      "vectors": ["cli/run-kit-explicit-override", "cli/run-inference-ignores-team-kits"]
+    },
+    {
+      "contract": "ADR-0030 bring-your-own image contract: a kit verifies the substrate — addressable gaps are provisioned in-guest, while an unverified or unaddressable substrate fails closed with validation_failed",
+      "vectors": ["cli/run-kit-substrate-provision", "cli/run-kit-substrate-unknown", "cli/run-kit-substrate-unaddressable"]
+    },
+    {
+      "contract": "ADR-0038m §2 kit validate required data: validity + coded findings (valid / findings / missing-path and missing-spec fail-closed)",
+      "vectors": ["cli/kit-validate-valid", "cli/kit-validate-findings", "cli/kit-validate-missing", "cli/kit-validate-no-spec"]
+    },
+    {
+      "contract": "ADR-0041m forward-only migration: a legacy v0 record migrates forward in place and a mutating verb then reads it",
+      "vectors": ["cli/migration-forward"]
+    },
+    {
+      "contract": "ADR-0041m fail-closed migration: a newer/unparseable/min_reader record is refused with a stable code before any mutation",
+      "vectors": ["cli/migration-newer-refused"]
+    },
+    {
+      "contract": "ADR-0041m state root: a relative ACQ_STATE_DIR is refused before any state is read or written (XDG Base Directory: relative values are never resolved against the current directory)",
+      "vectors": ["cli/state-dir-relative-refused"]
+    },
+    {
+      "contract": "Path overrides: a relative per-path override (ACQ_PROVENANCE_DIR and the others each implementation honours) is refused before any state is read or written, with the same message in both implementations",
+      "vectors": ["cli/path-override-relative-refused"]
+    },
+    {
+      "contract": "ADR-0035/0041m security exception: a sandbox missing its read-only mount fails closed on trusted operations",
+      "vectors": ["cli/security-exception-attach", "cli/security-exception-unprobed", "cli/security-gate-real-probe", "cli/security-gate-real-probe-writable"]
+    },
+    {
+      "contract": "ADR-0041m security-exception recreation is explicit and consent-gated (refused without --yes, recreates preserving host records with --yes), and the recreated sandbox passes the gate on its next run",
+      "vectors": ["cli/security-recreate-consent", "cli/security-recreate-yes", "cli/security-recreate-then-run", "cli/security-recreate-windows"]
+    },
+    {
+      "contract": "ADR-0042m installer entry options (--help / --version / usage error exit 2)",
+      "vectors": ["installer/help", "installer/version", "installer/usage-error"]
+    },
+    {
+      "contract": "ADR-0042m installer dry-run: prints a plan with no writes and no network",
+      "vectors": ["installer/dry-run"]
+    },
+    {
+      "contract": "ADR-0042m installer fail-closed checksum verification (mismatch exits 1 before any write)",
+      "vectors": ["installer/checksum-fail-closed"]
+    },
+    {
+      "contract": "ADR-0042m installer installs from the enumerated offline asset set alone",
+      "vectors": ["installer/offline-install"]
+    },
+    {
+      "contract": "ADR-0042m installer consent: PATH is never modified without an explicit yes",
+      "vectors": ["installer/consent-declined"]
+    },
+    {
+      "contract": "ADR-0047m coexistence: an unset ACQ_IMPL runs the Bash body (default unchanged)",
+      "vectors": ["coexistence/impl-bash"]
+    },
+    {
+      "contract": "ADR-0047m coexistence: ACQ_IMPL=python dispatches to the Python implementation and version reports the impl field",
+      "vectors": ["coexistence/impl-python", "coexistence/impl-python-json"]
+    },
+    {
+      "contract": "ADR-0047m coexistence: an unknown ACQ_IMPL value fails closed with exit 2",
+      "vectors": ["coexistence/impl-unknown"]
+    },
+    {
+      "contract": "ADR-0047m installer --channel: --channel python parses and dry-runs unchanged (the only channel, also the default)",
+      "vectors": ["installer/channel-python-dry-run"]
+    },
+    {
+      "contract": "ADR-0047m installer --channel: an unknown channel fails closed with exit 2",
+      "vectors": ["installer/channel-unknown"]
+    },
+    {
+      "contract": "ADR-0044m verbatim RESULT transcript signature (PASS/FAIL/BLOCKED, backend=, image=, host=, rev=, dir=)",
+      "vectors": ["qualification/result-line-pass", "qualification/result-line-blocked"]
+    },
+    {
+      "contract": "ADR-0044m BLOCKED is a first-class recorded verdict, never a pass (missing command / unqualified cell)",
+      "vectors": ["qualification/result-line-blocked", "qualification/result-line-unqualified"]
+    },
+    {
+      "contract": "ADR-0044m 3-attempt reproduction rule: a FAIL that reproduces is FAIL, one that diverges is flaky",
+      "vectors": ["qualification/repro-fail", "qualification/repro-flaky"]
+    },
+    {
+      "contract": "ADR-0044m matrix reports unqualified cells honestly (Windows ARM64, musl, unclaimed sbx cells)",
+      "vectors": ["qualification/matrix-unqualified"]
+    },
+    {
+      "contract": "Bash parity for sandbox names and workspace paths: an explicit --name must match [A-Za-z0-9_-] without a leading '-'; a name given to a verb that acts on an existing sandbox must not be empty, '.' or '..', or contain '/', '\\' or control characters; a workspace path containing ':' (outside a Windows drive designator) or a control character is refused before it is checked for existence",
+      "vectors": ["cli/name-create-invalid", "cli/name-form-stop-refused", "cli/workspace-colon-refused"]
+    },
+    {
+      "contract": "ADR-0035 read-only trusted config: create and run refuse (validation_failed) a workspace that contains, or lies inside, acq's state, provenance, config or secret-store directory, since the writable workspace mount would let the guest rewrite acq's host records and its read-only trusted configuration",
+      "vectors": ["cli/workspace-holding-acq-state-refused"]
+    },
+    {
+      "contract": "Clone mode (ADR-0027, Bash parity): create --clone, or ACQ_CLONE set to exactly '1', runs an msb sandbox on a host-side scratch clone of the workspace repository and reports data.clone; a workspace that is not a git repository is refused before any backend call with the Bash message",
+      "vectors": ["cli/create-clone-flag-msb", "cli/create-clone-env-msb", "cli/create-clone-not-a-repo"]
+    },
+    {
+      "contract": "Provider-credential pins are enforced: a selected provider kit whose facts name a host (or key variable) other than the provider's pin is refused before create (Bash _acq_provider_credentials_gate_trust)",
+      "vectors": ["cli/create-provider-pin-mismatch-refused"]
+    },
+    {
+      "contract": "Pre-create provider credential gate (Bash acq_provider_credentials_gate): a selected provider with no stored key fails closed without a terminal (on a terminal acq asks and stores it)",
+      "vectors": ["cli/run-missing-key-noninteractive"]
+    },
+    {
+      "contract": "Provider-kit precedence at create/run, as in Bash: --no-provider-kits, then a set ACQ_PROVIDER_KITS (an empty value selects none), then config.yaml provider_kit, then the shipped default; --no-provider-kits needs no provider kit or credential",
+      "vectors": ["cli/create-no-provider-kits"]
+    },
+    {
+      "contract": "A sandbox keeps the provider selection it was created with (Bash acq_provider_selection_load): start, create --recreate and kit update use the recorded selection, not the one current at the time",
+      "vectors": ["cli/start-keeps-no-provider-kits", "cli/start-unreadable-selection-refused"]
+    },
+    {
+      "contract": "Per-sandbox GitHub-token nudge at create and run (Bash advise_github_scope, ADR-0013): a workspace with GitHub repositories and no sandbox-scoped token is noted on stderr with the command to scope one later, under --json too; the prompt itself is interactive (Tier-2 evidence in py-acq/tests/test_create_config_settings.py)",
+      "vectors": ["cli/create-json-notes-github-scope"]
+    },
+    {
+      "contract": "ADR-0034 --publish HOST:GUEST on run/create: both sides required, digits only, no leading zero, 1..65535, one host port per guest port; a malformed value creates nothing (validation_failed, exit 1)",
+      "vectors": ["cli/create-publish-malformed", "cli/create-publish-duplicate-guest"]
+    },
+    {
+      "contract": "ADR-0034 --publish on an msb create becomes a create-time -p HOST:GUEST mapping that ports reports as declared (origin create); an explicit host port in use fails the create, never substituted",
+      "vectors": ["cli/create-publish-msb", "cli/create-publish-host-busy"]
+    },
+    {
+      "contract": "ADR-0034 --publish is refused on sbx (unsupported_capability), naming the post-hoc acq ports NAME --publish",
+      "vectors": ["cli/create-publish-sbx-refused"]
+    },
+    {
+      "contract": "ADR-0015 acq ports NAME --publish HOST:GUEST is validated before any key, serve or tunnel is touched (the tunnel itself is Tier-2: py-acq/tests/test_publish.py)",
+      "vectors": ["cli/ports-publish-invalid"]
+    },
+    {
+      "contract": "ADR-0016 stale-sandbox check on a run re-attach (Bash maybe_offer_bundle_refresh): a stale or unknown bundle is noted, never prompted for without a terminal or under --json; --no-update-check skips it (the terminal prompt and refresh are Tier-2: py-acq/tests/test_update_check.py)",
+      "vectors": ["cli/run-stale-bundle-advisory", "cli/run-no-update-check"]
+    },
+    {
+      "contract": "ADR-0031 first-run offer of acq configure on a first create (Bash maybe_first_run_configure): never asked without a terminal, so nothing is written (the prompt itself is Tier-2: py-acq/tests/test_onboarding.py)",
+      "vectors": ["cli/create-no-first-run-offer-without-terminal"]
+    },
+    {
+      "contract": "host ssh-agent forwarding (ADR-0021): SSH_AUTH_SOCK is the opt-in; on msb a value that names no socket is skipped with a warning and never fails the create; on sbx (which forwards the agent itself) a set SSH_AUTH_SOCK prints the one-time trust-boundary notice. The --vsock route, bridge, re-drive and teardown need a real socket and are Tier-2 (py-acq/tests/test_ssh_agent_forward.py)",
+      "vectors": ["cli/create-msb-ssh-agent-not-a-socket", "cli/create-sbx-ssh-agent-notice"]
+    },
+    {
+      "contract": "msb environment controls: CA absolute-path refusals and invalid tuning warnings match Bash; emitted flags, macOS export, workspace overrides and debug redaction are Tier-2 in test_msb_options.py",
+      "vectors": [
+        "cli/msb-ca-file-relative",
+        "cli/msb-ca-list-relative",
+        "cli/msb-ca-list-drive",
+        "cli/msb-invalid-tuning"
+      ]
+    },
+    {
+      "contract": "External neutral kit apply, msb create-time volumes (ADR-0023), and authoritative empty extras records, retaining Python full-commit pinning",
+      "vectors": ["cli/kit-apply-local", "cli/kit-apply-help-external", "cli/kit-apply-msb-volumes", "cli/create-msb-kit-volumes", "cli/kit-apply-unpinned-ref", "cli/kit-update-empty-extras-record"]
+    },
+    {
+      "contract": "Bash CLI forms: run/create accept multiple PATH[:ro] mounts, run preserves opaque agent tails, and pre-verb --image supports both spellings with local flags taking precedence",
+      "vectors": [
+        "cli/extra-workspace-colon-refused",
+        "cli/multi-workspaces-msb",
+        "cli/global-image-msb",
+        "cli/agent-args-msb",
+        "cli/multi-workspaces-sbx",
+        "cli/global-image-sbx",
+        "cli/agent-args-sbx"
+      ]
+    },
+    {
+      "contract": "Backend doctor versions, readiness and named image diagnostics (ADR-0030, ADR-0040m)",
+      "vectors": ["cli/doctor-msb-installed", "cli/doctor-sbx-installed", "cli/doctor-msb-sandbox", "cli/doctor-sbx-sandbox", "cli/doctor-msb-blocked", "cli/doctor-sbx-below-floor", "cli/doctor-msb-unready", "cli/doctor-msb-readiness-skipped", "cli/doctor-msb-missing-sandbox", "cli/doctor-sbx-missing-sandbox", "cli/doctor-extra-operands"]
+    }
+  ]
+}

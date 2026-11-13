@@ -1,0 +1,79 @@
+{
+  "schema": 1,
+  "note": "Enumerated offline asset set for acq v1 (ADR-0042m). A release is the per-platform archive below plus the shared SHA256SUMS and provenance manifest. The archive bundles readable source, the managed CPython runtime, the exact-hash wheelhouse, and launcher scripts. Completeness is proven by the Tier-3 live offline-install transcript, not asserted here.",
+  "runtime": {
+    "suppliers": {
+      "windows": "python.org-embedded",
+      "posix": "python-build-standalone",
+      "fallback": "it-approved-base"
+    },
+    "patch_owner": "acq",
+    "cadence": "quarterly re-verify plus out-of-band patch for critical/high CVEs (see py-acq/README.md)"
+  },
+  "sha256sums": "SHA256SUMS",
+  "provenance": "provenance.json",
+  "platforms": {
+    "windows-x86_64": {
+      "archive": "acq-windows-x64.zip",
+      "format": "zip",
+      "components": {
+        "source": "py-acq/src/acq_py/",
+        "runtime": { "supplier": "python.org-embedded", "path": "py-acq/runtime/python.exe" },
+        "wheelhouse": "wheelhouse/",
+        "backends": "acq.backends/",
+        "launchers": ["acq.cmd", "acq.ps1", "acq"]
+      }
+    },
+    "macos-arm64": {
+      "archive": "acq-macos-arm64.tar.gz",
+      "format": "tar.gz",
+      "components": {
+        "source": "py-acq/src/acq_py/",
+        "runtime": { "supplier": "python-build-standalone", "path": "py-acq/runtime/bin/python3" },
+        "wheelhouse": "wheelhouse/",
+        "backends": "acq.backends/",
+        "launchers": ["acq", "acq-python"]
+      }
+    },
+    "macos-x86_64": {
+      "archive": "acq-macos-x86_64.tar.gz",
+      "format": "tar.gz",
+      "components": {
+        "source": "py-acq/src/acq_py/",
+        "runtime": { "supplier": "python-build-standalone", "path": "py-acq/runtime/bin/python3" },
+        "wheelhouse": "wheelhouse/",
+        "backends": "acq.backends/",
+        "launchers": ["acq", "acq-python"]
+      }
+    },
+    "linux-x86_64": {
+      "archive": "acq-linux-x86_64.tar.gz",
+      "format": "tar.gz",
+      "components": {
+        "source": "py-acq/src/acq_py/",
+        "runtime": { "supplier": "python-build-standalone", "path": "py-acq/runtime/bin/python3" },
+        "wheelhouse": "wheelhouse/",
+        "backends": "acq.backends/",
+        "launchers": ["acq", "acq-python"]
+      }
+    },
+    "linux-aarch64": {
+      "archive": "acq-linux-aarch64.tar.gz",
+      "format": "tar.gz",
+      "components": {
+        "source": "py-acq/src/acq_py/",
+        "runtime": { "supplier": "python-build-standalone", "path": "py-acq/runtime/bin/python3" },
+        "wheelhouse": "wheelhouse/",
+        "backends": "acq.backends/",
+        "launchers": ["acq", "acq-python"]
+      }
+    }
+  },
+  "wheelhouses": [
+      "provider-input-validator-wheelhouse-windows-x86_64.tar.gz",
+      "provider-input-validator-wheelhouse-macos-arm64.tar.gz",
+      "provider-input-validator-wheelhouse-macos-x86_64.tar.gz",
+      "provider-input-validator-wheelhouse-linux-x86_64.tar.gz",
+      "provider-input-validator-wheelhouse-linux-aarch64.tar.gz"
+  ]
+}

@@ -30,12 +30,18 @@ ACQ_BACKEND_CAN_RESUME=1
 # shellcheck disable=SC2034
 ACQ_BACKEND_SUPPORTS_CREDENTIAL_REWRITE=1
 
-# Shared agent catalog (issue #377). common.sh normally sources this, but some
-# tests source this adapter directly; guard so a re-source is cheap and so the
+# Shared agent catalog for consistent agent tokens and image names. common.sh
+# normally sources this, but some tests source this adapter directly; guard so
+# a re-source is cheap and so the
 # catalog helpers (acq_is_known_agent, …) are always defined.
 if ! command -v acq_is_known_agent >/dev/null 2>&1; then
   # shellcheck source=acq.backends/agents.sh
   . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/agents.sh"
+fi
+# Absolute-only XDG/HOME resolution, for the same reason.
+if ! command -v acq_xdg_dir >/dev/null 2>&1; then
+  # shellcheck source=acq.backends/userdirs.sh
+  . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/userdirs.sh"
 fi
 
 USAI_PROVIDER_HOST="${USAI_PROVIDER_HOST:-api.gsa.usai.gov}"
@@ -78,8 +84,12 @@ ACQ_SBX_STARTUP_BARRIER_PATH="/tmp/acq/startup-complete"
 USAI_KIT_CONFIG_PATH="/home/agent/usai-config/opencode.jsonc"
 
 # Where synthesized sbx-v2 kits (translated from the neutral hybrid/v1 kits)
-# are materialized for this run.
-ACQ_SBX_KIT_CACHE="${ACQ_SBX_KIT_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/acq/sbx-kits}"
+# are materialized for this run. The resolver runs outside the expansion: a
+# failing command substitution in an assignment would trip errexit while this
+# file is sourced.
+_acq_ud=$(acq_xdg_dir XDG_CACHE_HOME .cache) || _acq_ud=""
+ACQ_SBX_KIT_CACHE="${ACQ_SBX_KIT_CACHE:-${_acq_ud:+$_acq_ud/acq/sbx-kits}}"
+unset _acq_ud
 
 # Module-scope flag: set to 1 once the ssh-agent trust-boundary notice has been
 # printed, so it appears at most once per process. See ADR-0021.
@@ -178,7 +188,7 @@ acq_backend_prepare() {
 acq_backend_exists() {
   local listed
   listed=$(sbx ls -q 2>/dev/null) || return 1
-  grep -Fxq -- "$1" <<<"$listed"
+  _acq_list_has_line "$1" "$listed"
 }
 
 # Return success only when sbx successfully lists sandboxes and NAME is absent.
@@ -187,7 +197,10 @@ acq_backend_exists() {
 _acq_sbx_confirm_absent() {
   local name="$1" listed
   listed=$(sbx ls -q 2>/dev/null) || return 1
-  ! grep -Fxq -- "$name" <<<"$listed"
+  # A name that cannot appear as one listed line cannot be confirmed absent:
+  # treat it as indeterminate, never as permission to clean up.
+  _acq_name_is_one_line "$name" || return 1
+  ! _acq_list_has_line "$name" "$listed"
 }
 
 # ---------------------------------------------------------------------------
@@ -216,29 +229,48 @@ _acq_sbx_kit_sources_manual_hint() {
     cmd="$_acc]"
   fi
   echo "      If kit resolution fails, review the current value and run:" >&2
-  echo "        sbx settings set kit.allowedSources '${cmd}'" >&2
+  echo "        sbx settings set kit.allowedSources $(_acq_sbx_sh_quote "$cmd")" >&2
+}
+
+# _acq_sbx_sh_quote VALUE — VALUE as one single-quoted shell word (each ' is
+# written as '\''), so a printed recovery command pastes back intact whatever
+# the JSON holds.
+_acq_sbx_sh_quote() {
+  printf "'%s'" "$(printf '%s' "${1:-}" | sed "s/'/'\\\\''/g")"
+}
+
+# _acq_sbx_prefix_remains PREFIX REPO — true when a source that stays trusted
+# once REPO is removed still needs PREFIX: the pinned control plane (always
+# trusted; kit-source rm refuses it), another registry entry, or an
+# ACQ_EXTRA_KIT_SOURCES grant. GitHub ignores letter case, so prefixes compare
+# ASCII-lower-cased.
+_acq_sbx_prefix_remains() {
+  local key cp_key remaining
+  key=$(_acq_ascii_lower "$1")
+  cp_key=$(_acq_ascii_lower "$(_acq_kit_source_owner_prefix "$ACQ_KIT_SOURCE_DEFAULT_REPO")")
+  [ "$key" != "$cp_key" ] || return 0
+  remaining=$(acq_kit_source_prefixes "$2") || remaining=""
+  printf '%s\n' "$remaining" | LC_ALL=C tr '[:upper:]' '[:lower:]' | grep -Fxq -- "$key"
 }
 
 # acq_backend_kit_source_revoked REPO — a trusted kit source was removed. sbx's
 # kit.allowedSources is owner-granular (host/owner/) and _acq_sbx_ensure_kit_sources_allowed
 # only ever UNIONS, so a revoked source stayed fetchable until the setting was
 # edited by hand. Recompute against what REMAINS trusted once REPO is gone: the
-# owner prefix is dropped only when no remaining registry entry (and no explicit legacy
-# ACQ_EXTRA_KIT_SOURCES grant) still needs it. Returns 0 only when the backend
-# allowlist is verified to no longer grant a prefix nothing needs; any inability
-# to read, write, or verify returns 1 with a recovery command, never a quiet 0.
+# owner prefix is dropped only when nothing remaining still needs it
+# (_acq_sbx_prefix_remains). Entries compare ASCII-lower-cased and every
+# letter-case variant of the prefix is dropped with it, since sbx would honour
+# any of them. Returns 0 only when the backend allowlist is verified to no
+# longer grant a prefix nothing needs; any inability to read, write, or verify
+# returns 1 with a recovery command, never a quiet 0.
 acq_backend_kit_source_revoked() {
-  local repo="${1:-}" prefix remaining current desired verify
+  local repo="${1:-}" prefix key current desired verify
+  # shellcheck disable=SC2016  # $k is a jq variable, not a shell one
+  local grants='any(.[]; type == "string" and ascii_downcase == $k)'
   [ -n "$repo" ] || return 0
   prefix=$(_acq_kit_source_owner_prefix "$repo")
-  remaining=$(acq_kit_source_prefixes "$repo") || remaining=""
-  case "
-$remaining
-" in
-    *"
-$prefix
-"*) return 0 ;;
-  esac
+  _acq_sbx_prefix_remains "$prefix" "$repo" && return 0
+  key=$(_acq_ascii_lower "$prefix")
   if ! command -v sbx >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
     _acq_sbx_kit_source_revoke_failed "$prefix" "sbx and jq are both needed to update kit.allowedSources"
     return 1
@@ -248,10 +280,11 @@ $prefix
     _acq_sbx_kit_source_revoke_failed "$prefix" "could not read kit.allowedSources as a JSON array"
     return 1
   fi
-  if ! printf '%s' "$current" | jq -e --arg p "$prefix" 'index($p) != null' >/dev/null 2>&1; then
+  if ! printf '%s' "$current" | jq -e --arg k "$key" "$grants" >/dev/null 2>&1; then
     return 0
   fi
-  desired=$(printf '%s' "$current" | jq -c --arg p "$prefix" 'map(select(. != $p))' 2>/dev/null)
+  desired=$(printf '%s' "$current" | jq -c --arg k "$key" \
+    'map(select((type == "string" and ascii_downcase == $k) | not))' 2>/dev/null)
   if [ -z "$desired" ]; then
     _acq_sbx_kit_source_revoke_failed "$prefix" "could not compute the updated allowlist"
     return 1
@@ -261,7 +294,11 @@ $prefix
     return 1
   fi
   verify=$(sbx settings get kit.allowedSources 2>/dev/null) || verify=""
-  if ! printf '%s' "$verify" | jq -e --arg p "$prefix" 'type == "array" and (index($p) == null)' >/dev/null 2>&1; then
+  if ! printf '%s' "$verify" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    _acq_sbx_kit_source_revoke_failed "$prefix" "could not read kit.allowedSources back after the update" "$desired"
+    return 1
+  fi
+  if printf '%s' "$verify" | jq -e --arg k "$key" "$grants" >/dev/null 2>&1; then
     _acq_sbx_kit_source_revoke_failed "$prefix" "kit.allowedSources still lists it after the update" "$desired"
     return 1
   fi
@@ -277,7 +314,7 @@ _acq_sbx_kit_source_revoke_failed() {
   echo "     Revocation is NOT complete: the source stays registered because the sbx" >&2
   echo "     backend could still fetch kits from that owner." >&2
   if [ -n "$desired" ]; then
-    echo "     Run:   sbx settings set kit.allowedSources '$desired'" >&2
+    echo "     Run:   sbx settings set kit.allowedSources $(_acq_sbx_sh_quote "$desired")" >&2
   else
     echo "     Review: sbx settings get kit.allowedSources   (remove '$prefix', then 'sbx settings set kit.allowedSources <json-array>')" >&2
   fi
@@ -342,10 +379,10 @@ _acq_sbx_warn_readonly_files() {
 # Neutral-kit → sbx-v2 translation
 # ---------------------------------------------------------------------------
 # Given a neutral kit ref (remote git+https or local dir), fetch it and
-# synthesize a local sbx-v2 kit directory. Echoes the local sbx-v2 kit dir.
-# Falls back to passing the ref through unchanged if translation is unavailable
-# (e.g. an extra kit that is already an sbx-v2 kit), so existing extra-kit
-# workflows keep working.
+# synthesize a local sbx-v2 kit directory. Echoes the local sbx-v2 kit dir. A
+# fetched kit that is already sbx-v2 (an extra kit authored for sbx) is used
+# as-is after the same payload check. Any failure returns non-zero with no
+# output, so callers never hand sbx a raw ref (see the fetch branch below).
 _acq_sbx_translate_kit() {
   local kitref="$1" slug fetchdir kitdir out namespace
   # Offline/test escape hatch: pass the ref through unchanged. Used by the
@@ -356,12 +393,15 @@ _acq_sbx_translate_kit() {
     printf '%s\n' "$kitref"
     return 0
   fi
-  # If kit-translate isn't loaded (shouldn't happen), pass through unchanged.
+  # kit-translate.sh is sourced by common.sh, so this only fails in a broken
+  # install. Fail closed rather than let sbx fetch the kit unchecked. The ref is
+  # not named: kit_ref_display, which redacts it, lives in that same file.
   if ! command -v kit_translate_fetch >/dev/null 2>&1; then
-    printf '%s\n' "$kitref"
-    return 0
+    echo "acq(sbx): error: the kit translator is not loaded; not applying the kit." >&2
+    return 1
   fi
 
+  acq_require_base "sbx kit cache" "$ACQ_SBX_KIT_CACHE" || return 1
   slug=$(printf '%s' "$kitref" | tr -c 'A-Za-z0-9._-' '_')
   # Historical fetch/slug directories may be repositories. Preserve them and
   # publish only metadata-free payloads in a distinct namespace; never follow a
@@ -372,25 +412,17 @@ _acq_sbx_translate_kit() {
 
   if { [[ "$kitref" == git+http* ]] && [ -L "$namespace" ]; } ||
       ! kitdir=$(kit_translate_fetch "$kitref" "$fetchdir"); then
-    # Make this loud + actionable rather than a terse warning. For a
-    # git+https ref, a failure here (after kit-translate's non-interactive
-    # anonymous+authed retries) is a real fetch problem, not a prompt hang.
-    # Passing the ref through lets sbx try its own fetch (and keeps pre-resolved
-    # extra-kit workflows working), but the user needs to know WHY it failed.
-    case "$kitref" in
-      git+http*)
-        echo "acq(sbx): WARNING: could not fetch kit: $kitref" >&2
-        echo "acq(sbx):   If git prompted for a GitHub username/password, run 'gh auth" >&2
-        echo "acq(sbx):   setup-git' once (gh auth != git auth), or check for a rewrite:" >&2
-        echo "acq(sbx):   git config --global --get-regexp 'url\\..*insteadOf'." >&2
-        echo "acq(sbx):   Passing the ref through to sbx to attempt its own fetch." >&2
-        ;;
-      *)
-        echo "acq(sbx): warning: could not fetch kit; passing ref through: $kitref" >&2
-        ;;
-    esac
-    printf '%s\n' "$kitref"
-    return 0
+    # Fail closed on every fetch failure. Handing the raw ref to sbx would let
+    # sbx fetch and apply the kit itself, skipping acq's ref checks (no
+    # credentials in the URL, a safe dir=, the fetched commit matching the pin)
+    # and its payload checks. A plain network failure is not passed through
+    # either: acq's built-in kits are neutral hybrid/v1 kits that sbx cannot
+    # parse, so its own fetch could not apply them, and the msb adapter already
+    # stops on any fetch failure. kit-translate.sh has printed the reason (and,
+    # for a git failure, the credential-helper remedy). The offline harness
+    # uses ACQ_SBX_KIT_PASSTHROUGH above instead.
+    echo "acq(sbx): error: could not fetch kit; not applying: $(kit_ref_display "$kitref")" >&2
+    return 1
   fi
 
   # Only translate kits that are neutral hybrid/v1. If the fetched kit is
@@ -399,18 +431,25 @@ _acq_sbx_translate_kit() {
   schema=$(kit_spec_field "${kitdir}/spec.yaml" schemaVersion 2>/dev/null || true)
   case "$schema" in
     hybrid/v1)
-      acq_debug "translate(sbx): $kitref -> $out"
+      # Named through kit_ref_display only: the cache path is a slug of the raw
+      # ref, so it would repeat anything the ref carries.
+      acq_debug "translate(sbx): $(kit_ref_display "$kitref")"
       rm -rf "$out"
       kit_translate_to_sbx "$kitdir" "$out" >/dev/null || {
-        echo "acq(sbx): warning: kit translation failed; passing ref through: $kitref" >&2
-        printf '%s\n' "$kitref"
-        return 0
+        # Fail closed: handing the raw ref to sbx would skip acq's payload checks.
+        echo "acq(sbx): error: kit translation failed; not applying: $(kit_ref_display "$kitref")" >&2
+        return 1
       }
       _acq_sbx_warn_readonly_files "$kitdir"
       printf '%s\n' "$out"
       ;;
     *)
-      # Not a neutral kit — use the fetched dir (or the original ref) as-is.
+      # Not a neutral kit (an sbx-v2 kit authored for sbx): use the fetched dir
+      # as-is, after the same payload check the neutral path applies.
+      if [ -d "$kitdir" ] && ! kit_tree_symlinks_within "$kitdir" "$kitdir"; then
+        echo "acq(sbx): error: kit payload links outside the kit; not applying: $(kit_ref_display "$kitref")" >&2
+        return 1
+      fi
       printf '%s\n' "$kitdir"
       ;;
   esac
@@ -421,7 +460,7 @@ _acq_sbx_translate_kit() {
 _acq_sbx_kit_flags() {
   local k local_kit
   for k in "${KITS[@]}"; do
-    local_kit=$(_acq_sbx_translate_kit "$k")
+    local_kit=$(_acq_sbx_translate_kit "$k") || return 1
     printf '%s\n%s\n' "--kit" "$local_kit"
   done
 }
@@ -437,6 +476,7 @@ _acq_sbx_git_identity_kit() {
   [ -n "$allrecs" ] || return 0
   slug=$(printf '%s' "$allrecs" | cksum | cut -d' ' -f1)
 
+  acq_require_base "sbx kit cache" "$ACQ_SBX_KIT_CACHE" || return 1
   local dir="${ACQ_SBX_KIT_CACHE}/generated/git-identity-${slug}"
   mkdir -p "$dir"
   {
@@ -473,6 +513,7 @@ _acq_sbx_git_identity_kit() {
 
 _acq_sbx_startup_barrier_kit() {
   local token="$1" dir
+  acq_require_base "sbx kit cache" "$ACQ_SBX_KIT_CACHE" || return 1
   dir="${ACQ_SBX_KIT_CACHE}/generated/startup-barrier-${token}"
   mkdir -p "$dir"
   cat >"$dir/spec.yaml" <<EOF
@@ -685,7 +726,7 @@ _acq_backend_provision_unlocked() {
   local _cf=()
   [ "${ACQ_CLONE:-0}" = "1" ] && _cf=(--clone)
 
-  # Guest-visible workspace markers (GSA-TTS/agentic-coding-quickstart#456),
+  # Guest-visible workspace markers identify the primary path and clone status,
   # same contract as msb: ACQ_WORKSPACE always, ACQ_CLONE=1 under --clone.
   # sbx mounts the primary at its LOGICAL absolute host path (`.` resolves to
   # $PWD-form, not realpath; verified sbx 0.42.1), so resolve the same way or
@@ -747,8 +788,14 @@ _acq_backend_provision_unlocked() {
   # read-only marker cannot become the primary workspace.
   local _sbx_args_final=("${_sbx_args[@]}" "$_provider_mount_val")
 
-  local kf=()
-  while IFS= read -r line; do kf+=("$line"); done < <(_acq_sbx_kit_flags)
+  local kf=() _kflags
+  if ! _kflags=$(_acq_sbx_kit_flags); then
+    echo "acq(sbx): error: a kit could not be prepared; not creating the sandbox." >&2
+    return 1
+  fi
+  while IFS= read -r line; do [ -n "$line" ] && kf+=("$line"); done <<EOF
+$_kflags
+EOF
   local _git_identity_kit=""
   _git_identity_kit=$(_acq_sbx_git_identity_kit)
   [ -n "$_git_identity_kit" ] && kf+=(--kit "$_git_identity_kit")
@@ -846,8 +893,10 @@ acq_backend_provision() {
   ( local lock rc
     _acq_provider_input_guardian_start || exit 1
     lock=$(acq_provider_input_lock_acquire sbx "$1" "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID") || { _acq_provider_input_guardian_stop; exit 1; }
-    trap 'rc=$?; _acq_sbx_cleanup_uncreated_attempt; acq_provider_input_lock_release "${lock:-}" || true; _acq_provider_input_guardian_stop; exit "$rc"' EXIT
-    trap '_acq_provider_input_signal_exit 128' HUP
+    # Only this shell runs the cleanup, never a child that inherited the traps.
+    acq_trap_owner_mark
+    trap 'rc=$?; acq_trap_owner_is_self || exit "$rc"; _acq_sbx_cleanup_uncreated_attempt; acq_provider_input_lock_release "${lock:-}" || true; _acq_provider_input_guardian_stop; exit "$rc"' EXIT
+    trap '_acq_provider_input_signal_exit 129' HUP
     trap '_acq_provider_input_signal_exit 130' INT
     trap '_acq_provider_input_signal_exit 143' TERM
     _acq_backend_provision_unlocked "$@"; rc=$?; exit "$rc" )
@@ -1221,8 +1270,10 @@ acq_backend_terminate() {
   ( local lock rc
     _acq_provider_input_guardian_start || exit 1
     lock=$(acq_provider_input_lock_acquire sbx "$1" "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID") || { _acq_provider_input_guardian_stop; exit 1; }
-    trap 'rc=$?; acq_provider_input_lock_release "${lock:-}" || true; _acq_provider_input_guardian_stop; exit "$rc"' EXIT
-    trap '_acq_provider_input_signal_exit 128' HUP
+    # Only this shell runs the cleanup, never a child that inherited the traps.
+    acq_trap_owner_mark
+    trap 'rc=$?; acq_trap_owner_is_self || exit "$rc"; acq_provider_input_lock_release "${lock:-}" || true; _acq_provider_input_guardian_stop; exit "$rc"' EXIT
+    trap '_acq_provider_input_signal_exit 129' HUP
     trap '_acq_provider_input_signal_exit 130' INT
     trap '_acq_provider_input_signal_exit 143' TERM
     _acq_backend_terminate_unlocked "$@"; rc=$?; exit "$rc" )
@@ -1265,6 +1316,12 @@ acq_backend_ports() {
 # Usage: _acq_sbx_kit_add SANDBOX LOCAL_KIT_DIR
 _acq_sbx_kit_add() {
   local name="$1" local_kit="$2" err rc
+  # An empty kit means translation refused it (the reason is printed above);
+  # never hand sbx an empty path. Callers treat 1 as an ordinary failure.
+  if [ -z "$local_kit" ]; then
+    echo "acq(sbx): error: no usable kit to add to '$name' (it was refused above)." >&2
+    return 1
+  fi
   # CRITICAL: acq runs under `set -e`. A refusal (the common case this whole
   # helper exists to classify) makes `sbx kit add` exit non-zero, which would
   # abort the entire heal at THIS assignment — before rc/classification run —
@@ -1325,7 +1382,7 @@ _acq_sbx_print_recreate_notice() {
 
 acq_backend_apply_kit() {
   local name="$1" kitref="$2" local_kit rc
-  local_kit=$(_acq_sbx_translate_kit "$kitref")
+  local_kit=$(_acq_sbx_translate_kit "$kitref") || return 1
   # `set -e`-safe: _acq_sbx_kit_add returns 3 (refusal) or 1 (other failure) as
   # its NORMAL signalling. A bare call on its own line would abort under `set -e`
   # before we read $?. Capture the status inline.
@@ -1351,6 +1408,12 @@ acq_backend_apply_kit() {
 
 acq_backend_ensure_kits_applied() {
   local name="$1"
+  # A kit ref refused at input (latched by _build_kit_list) stops the heal, as
+  # the Python acq does; the caller warns and attaches anyway.
+  if command -v _acq_require_kit_refs >/dev/null 2>&1 && ! _acq_require_kit_refs; then
+    echo "acq: the kits of sandbox '$name' were not re-applied (see above)." >&2
+    return 1
+  fi
   local force="${ACQ_FORCE_KIT_REAPPLY:-0}"
   local ok=1
   local healed=0
@@ -1367,7 +1430,11 @@ acq_backend_ensure_kits_applied() {
   _acq_sbx_ensure_kit_sources_allowed
 
   # Neutral kits must be translated to local sbx-v2 kit dirs before sbx kit add.
-  local playbook_local zscaler_local
+  # Each built-in kit is fetched and translated only inside its needs-apply
+  # branch, so a re-attach whose kits are all recorded as applied makes no fetch
+  # (and prints no fetch error when offline). A failed translation counts as a
+  # failed add.
+  local playbook_local="" zscaler_local=""
   # The default provider is DATA (provider_kit), so heal resolves the selected
   # ref instead of naming the USAi kit. An invalid selection FAILS CLOSED here:
   # silently healing without the provider kit would leave a half-configured sandbox.
@@ -1378,11 +1445,6 @@ acq_backend_ensure_kits_applied() {
     return 1
   fi
   provider_ref=$(printf '%s\n' "$provider_refs" | head -n1)
-  if [ -n "$provider_ref" ]; then
-    provider_local=$(_acq_sbx_translate_kit "$provider_ref")
-  fi
-  playbook_local=$(_acq_sbx_translate_kit "$PLAYBOOK_KIT")
-  zscaler_local=$(_acq_sbx_translate_kit "$ZSCALER_KIT")
 
   # 1) Zscaler CA kit — FIRST, so its CA trust is in place before any later kit
   # makes an outbound HTTPS request. Behind a TLS-intercepting proxy (Zscaler),
@@ -1392,7 +1454,12 @@ acq_backend_ensure_kits_applied() {
     echo "acq: '$name' is missing the Zscaler CA kit; injecting with 'sbx kit add'..." >&2
     # `set -e`-safe: _acq_sbx_kit_add's non-zero returns (3=refusal, 1=other) are
     # normal signalling — capture the status inline so the loop is not aborted.
-    _kadd_rc=0; _acq_sbx_kit_add "$name" "$zscaler_local" || _kadd_rc=$?
+    _kadd_rc=0
+    if zscaler_local=$(_acq_sbx_translate_kit "$ZSCALER_KIT"); then
+      _acq_sbx_kit_add "$name" "$zscaler_local" || _kadd_rc=$?
+    else
+      _kadd_rc=1
+    fi
     case $_kadd_rc in
       0) healed=1; _acq_sbx_builtin_kit_record "$name" zscaler-ca-certificate "$ZSCALER_KIT"; echo "acq: Zscaler CA kit injected into '$name'." >&2 ;;
       3) _acq_sbx_print_recreate_notice "$name"; ok=0 ;;
@@ -1408,7 +1475,12 @@ acq_backend_ensure_kits_applied() {
   if [ -n "$provider_ref" ] \
       && _acq_sbx_builtin_kit_needs_apply "$name" "$USAI_PROVIDER_KIT_NAME" "$provider_ref" "test -f '$USAI_KIT_CONFIG_PATH' && echo present"; then
     echo "acq: '$name' is missing the provider kit; injecting with 'sbx kit add'..." >&2
-    _kadd_rc=0; _acq_sbx_kit_add "$name" "$provider_local" || _kadd_rc=$?
+    _kadd_rc=0
+    if provider_local=$(_acq_sbx_translate_kit "$provider_ref"); then
+      _acq_sbx_kit_add "$name" "$provider_local" || _kadd_rc=$?
+    else
+      _kadd_rc=1
+    fi
     case $_kadd_rc in
       0)
         healed=1
@@ -1431,7 +1503,12 @@ acq_backend_ensure_kits_applied() {
   # forever on tarball-provisioned sandboxes.
   if _acq_sbx_builtin_kit_needs_apply "$name" agentic-coding-playbook "$PLAYBOOK_KIT" 'test -e "$HOME/.agentic-coding-playbook/AGENTS.md" && echo present'; then
     echo "acq: '$name' is missing the playbook kit; injecting with 'sbx kit add'..." >&2
-    _kadd_rc=0; _acq_sbx_kit_add "$name" "$playbook_local" || _kadd_rc=$?
+    _kadd_rc=0
+    if playbook_local=$(_acq_sbx_translate_kit "$PLAYBOOK_KIT"); then
+      _acq_sbx_kit_add "$name" "$playbook_local" || _kadd_rc=$?
+    else
+      _kadd_rc=1
+    fi
     case $_kadd_rc in
       0) healed=1; _acq_sbx_builtin_kit_record "$name" agentic-coding-playbook "$PLAYBOOK_KIT"; echo "acq: playbook kit injected into '$name'. Restart the agent to pick it up." >&2 ;;
       3) _acq_sbx_print_recreate_notice "$name"; ok=0 ;;
@@ -1495,14 +1572,21 @@ acq_backend_ensure_kits_applied() {
     if grep -Fxq -- "$k" <<<"$applied"; then
       continue
     fi
-    echo "acq: applying extra kit to '$name': $k" >&2
-    local_extra=$(_acq_sbx_translate_kit "$k")
-    _kadd_rc=0; _acq_sbx_kit_add "$name" "$local_extra" || _kadd_rc=$?
+    # A ref acq refuses at input is never announced, fetched or recorded; the
+    # refusal names the problem, not the ref.
+    kit_ref_shape_check "$k" "ACQ_EXTRA_KITS" || continue
+    echo "acq: applying extra kit to '$name': $(kit_ref_display "$k")" >&2
+    _kadd_rc=0
+    if local_extra=$(_acq_sbx_translate_kit "$k"); then
+      _acq_sbx_kit_add "$name" "$local_extra" || _kadd_rc=$?
+    else
+      _kadd_rc=1
+    fi
     case $_kadd_rc in
       0)
         healed=1
         acq_host_config_append sbx "$name" extra-kits "$k" || \
-          echo "acq: warning: could not record extra kit '$k' for '$name'; re-attach may re-attempt it." >&2
+          echo "acq: warning: could not record extra kit '$(kit_ref_display "$k")' for '$name'; re-attach may re-attempt it." >&2
         ;;
       3) _acq_sbx_print_recreate_notice "$name" ;;
       *) echo "acq: warning: 'sbx kit add' (extra kit) failed for '$name' (see error above)." >&2 ;;
@@ -1640,7 +1724,7 @@ acq_backend_secret_set() {
 
   # Collect remaining flags; detect --host and --env presence. host_explicit
   # marks a --host the USER supplied (vs one filled from the service mapping
-  # below): an explicit host must win over any compiled-in binding (#384).
+  # below): an explicit host must win over any compiled-in binding.
   local host="" env_var="" extra_flags=() host_explicit=0
   local prev=""
   for arg in "$@"; do
@@ -1670,7 +1754,7 @@ acq_backend_secret_set() {
   # sbx BUILT-INS (github, anthropic, ...) must NOT be given a DEFAULT host/env
   # here — they use `sbx secret set <service>` so the sbx proxy injects them
   # natively. Only non-built-in services (usai) get a host/env mapping →
-  # set-custom. An EXPLICIT --host is different (#384): it survives untouched
+  # set-custom. An EXPLICIT --host is different: it survives untouched
   # for any service and forces the set-custom route below, but a built-in still
   # gets no auto-filled env, so the --env requirement is enforced next.
   case "$_ACQ_SBX_BUILTIN_SERVICES" in
@@ -1687,7 +1771,7 @@ acq_backend_secret_set() {
   # An explicit --host with no env var (neither --env nor a service mapping)
   # cannot be bound: the custom-secret path injects by ENV placeholder. Fail
   # BEFORE storing anything — silently discarding the flags bound the token to
-  # the wrong endpoint with exit 0 (#384), the worst of the options.
+  # the wrong endpoint with exit 0, the worst of the options.
   if [ "$host_explicit" -eq 1 ] && [ -z "$env_var" ]; then
     echo "acq: secret set: --host ${host} needs --env ENV as well ('$service' has no env mapping)." >&2
     echo "     usage: acq secret set [-g | SANDBOX] <service> [--host HOST --env ENV]" >&2
@@ -1713,6 +1797,25 @@ acq_backend_secret_set() {
       fi
       ;;
   esac
+
+  # Duplicate custom entries: when sbx already holds more than one custom secret
+  # for this env var and host in the target scope, refuse BEFORE anything is
+  # stored. Running sandboxes were injected with one of those placeholders and
+  # acq cannot tell which, so the user must choose which to keep. A built-in
+  # service fed natively (no explicit --host) has no custom entry to check.
+  local _dup_custom=1 _dup_rerun
+  case "$_ACQ_SBX_BUILTIN_SERVICES" in
+    *" $service "*) [ "$host_explicit" -eq 1 ] || _dup_custom=0 ;;
+  esac
+  if [ "$_dup_custom" -eq 1 ] && [ -n "$env_var" ] && [ -n "$host" ]; then
+    if [ -n "$scope_flag" ]; then _dup_rerun="acq secret set -g ${service}"; else _dup_rerun="acq secret set ${scope_name} ${service}"; fi
+    # The global USAi key has an in-place update that keeps the placeholder.
+    if [ "$service" = "usai" ] && [ -n "$scope_flag" ]; then
+      _dup_rerun="acq usai-rotate-api-key to update the entry you keep (or ${_dup_rerun} after removing them all)"
+    fi
+    _acq_sbx_refuse_duplicate_custom "$scope_flag" "$scope_name" "$env_var" "$host" \
+      "nothing was stored" "$_dup_rerun" || return 1
+  fi
 
   # --- Step 1: store the value in the acq-owned secret store (keychain/file). --
   # This is the source of truth both backends read from. The value is read from
@@ -1751,7 +1854,7 @@ acq_backend_secret_set() {
   case "$_ACQ_SBX_BUILTIN_SERVICES" in
     *" $service "*) is_builtin=1; builtin_name=1 ;;
   esac
-  # An explicit --host overrides the compiled-in service binding (#384): a
+  # An explicit --host overrides the compiled-in service binding: a
   # self-hosted endpoint (e.g. gitlab.<agency>.gov) must go through set-custom.
   # Feeding `sbx secret set gitlab` would bind the token to sbx's gitlab.com
   # proxy service and silently discard the requested host.
@@ -1776,8 +1879,8 @@ acq_backend_secret_set() {
   if [ -n "$scope_flag" ]; then scope_desc="global"; rm_scope=""; else scope_desc="sandbox '$scope_name'"; rm_scope="--sandbox $scope_name"; fi
 
   # When a built-in NAME takes the custom route (explicit --host), also refuse
-  # on a stale NATIVE entry for that name — e.g. one created by the pre-#384
-  # behavior that discarded --host. Left in place, sbx would keep injecting the
+  # on a stale NATIVE entry for that name — e.g. one created when
+  # --host was silently discarded. Left in place, sbx would keep injecting the
   # token to its native endpoint even after set-custom succeeds.
   if [ "$builtin_name" -eq 1 ] && [ "$is_builtin" -eq 0 ] && \
      _acq_sbx_secret_exists "$scope_flag" "$scope_name" "$service" ""; then
@@ -1796,7 +1899,21 @@ acq_backend_secret_set() {
     if [ "$is_builtin" -eq 1 ]; then
       echo "       sbx secret rm ${service}${rm_scope:+ $rm_scope}" >&2
     else
-      echo "       sbx secret rm --placeholder <placeholder-for-${env_var}>${rm_scope:+ $rm_scope}" >&2
+      # Name the placeholders sbx lists for this env var in the scope (any host:
+      # a same-env entry makes sbx refuse too), never a generic one.
+      local _ex_list _ex_ph _ex_named=0
+      _ex_list=$(_acq_sbx_custom_placeholders "$scope_flag" "$scope_name" "$env_var" "") || _ex_list=""
+      while IFS= read -r _ex_ph; do
+        if [ -n "$_ex_ph" ] && _acq_sbx_placeholder_ok "$_ex_ph"; then
+          echo "       sbx secret rm --placeholder ${_ex_ph}${rm_scope:+ $rm_scope} -f" >&2
+          _ex_named=1
+        fi
+      done <<EOF
+$_ex_list
+EOF
+      if [ "$_ex_named" -eq 0 ]; then
+        echo "       sbx secret rm --placeholder <the placeholder 'sbx secret ls' lists for ${env_var}>${rm_scope:+ $rm_scope} -f" >&2
+      fi
     fi
     if [ -n "$scope_flag" ]; then
       echo "       acq secret set -g ${service}" >&2
@@ -1851,7 +1968,7 @@ acq_backend_secret_set() {
     if [ -z "$scope_flag" ]; then cmd_args+=(--sandbox "$scope_name"); fi
     local svc_hosts h
     if [ "$host_explicit" -eq 1 ]; then
-      # The user's --host wins over the static service mapping (#384).
+      # The user's --host wins over the static service mapping.
       svc_hosts="$host"
     else
       svc_hosts=$(_acq_service_hosts_env "$service" "$scope_name" | cut -f1)
@@ -1954,8 +2071,27 @@ acq_backend_secret_propagate() {
     return 0
   fi
 
+  # Every placeholder for this env var and host in the scope: with more than
+  # one, acq cannot tell which the sandboxes hold, so it refuses rather than
+  # update whichever sbx happens to list first.
   local placeholder cmd_args=("secret" "set-custom")
-  placeholder=$(_acq_sbx_custom_placeholder "$scope_flag" "$scope_name" "$env_var" "$host")
+  placeholder=$(_acq_sbx_custom_placeholders "$scope_flag" "$scope_name" "$env_var" "$host") || placeholder=""
+  if [ "$(printf '%s\n' "$placeholder" | grep -c .)" -gt 1 ]; then
+    # `acq --backend sbx secret set` would refuse on the entry that is kept, so
+    # point at the commands that update it in place: rotation for the global
+    # key, or the original msb command, which re-runs this propagation.
+    local dup_rerun="acq --backend msb secret set ${scope_name} ${service}"
+    if [ -n "$scope_flag" ]; then
+      dup_rerun="acq usai-rotate-api-key to update the entry you keep (or acq --backend msb secret set -g ${service})"
+    fi
+    _acq_sbx_print_duplicate_custom "$scope_flag" "$scope_name" "$env_var" "$host" \
+      "the sbx sandboxes were not updated" "$dup_rerun" "$placeholder"
+    return 1
+  fi
+  if [ -n "$placeholder" ] && ! _acq_sbx_placeholder_ok "$placeholder"; then
+    echo "acq(sbx): sbx lists the USAi placeholder with unexpected characters; check 'sbx secret ls'." >&2
+    return 1
+  fi
   if [ -z "$placeholder" ]; then
     echo "acq(sbx): stored 'usai' in the acq secret store, but no existing sbx" >&2
     echo "          USAi placeholder was found for this scope. Run:" >&2
@@ -2019,13 +2155,54 @@ acq_backend_secret_rm() {
   [ -n "$scope_name" ] && acq_sandbox="$scope_name"
 
   # Capture the endpoint sidecar BEFORE step 1 deletes it: a built-in name set
-  # with an explicit --host (#384) was fed to sbx as a CUSTOM secret, and its
+  # with an explicit --host was fed to sbx as a CUSTOM secret, and its
   # sidecar env is the only key that can find that placeholder in step 2.
   # EXACT scope only — the resolve variant's sandbox->global fallback would let
   # a global sidecar's env steer a sandbox-scoped destructive removal.
-  local sidecar_env=""
+  local sidecar_env="" sidecar_host="" sidecar_meta=""
   if command -v acq_secret_meta_resolve_exact >/dev/null 2>&1; then
-    sidecar_env=$(acq_secret_meta_resolve_exact "$service" "$acq_sandbox" 2>/dev/null | cut -f2) || sidecar_env=""
+    sidecar_meta=$(acq_secret_meta_resolve_exact "$service" "$acq_sandbox" 2>/dev/null) || sidecar_meta=""
+    sidecar_host=$(printf '%s' "$sidecar_meta" | cut -f1)
+    sidecar_env=$(printf '%s' "$sidecar_meta" | cut -f2)
+  fi
+
+  local is_builtin=0
+  case "$_ACQ_SBX_BUILTIN_SERVICES" in
+    *" $service "*) is_builtin=1 ;;
+  esac
+
+  # Find the custom secret to clear BEFORE anything is removed. A custom row is
+  # matched on scope, env var AND host (the sidecar records what was actually
+  # bound; otherwise the service mapping), so a secret for the same env var on
+  # another host is never removed. More than one matching row is refused, as
+  # for `secret set` and rotation: running sandboxes hold one of those
+  # placeholders and acq cannot tell which, so it removes none of them (and
+  # keeps the acq store entry). A built-in with no sidecar has no custom row.
+  local rm_env="" rm_host="" rm_placeholders=""
+  if [ "$is_builtin" -eq 1 ]; then
+    rm_env="$sidecar_env"; rm_host="$sidecar_host"
+  else
+    rm_env="${sidecar_env:-$(_acq_service_hosts_env "$service" "$scope_name" | cut -f2)}"
+    rm_host="${sidecar_host:-$(_acq_service_hosts_env "$service" "$scope_name" | cut -f1)}"
+  fi
+  # An unreadable listing is unknown state, not proof of absence. Retain
+  # the stored credential and sidecar so the removal can be retried intact.
+  rm_placeholders=$(_acq_sbx_custom_placeholders "$scope_flag" "$scope_name" "$rm_env" "$rm_host") || {
+    echo "acq: secret rm: sbx's secret list could not be read; nothing was removed." >&2
+    echo "     Check 'sbx secret ls' and retry the removal." >&2
+    return 1
+  }
+  if [ "$(printf '%s\n' "$rm_placeholders" | grep -c .)" -gt 1 ]; then
+    local _rm_again="acq secret rm -g ${service}"
+    [ -n "$scope_flag" ] || _rm_again="acq secret rm ${scope_name} ${service}"
+    _acq_sbx_print_duplicate_custom "$scope_flag" "$scope_name" "$rm_env" "${rm_host:-any host}" \
+      "nothing was removed" "$_rm_again" "$rm_placeholders"
+    return 1
+  fi
+  if [ -n "$rm_placeholders" ] && ! _acq_sbx_placeholder_ok "$rm_placeholders"; then
+    echo "acq: secret rm: sbx lists the placeholder for ${rm_env} with unexpected characters;" >&2
+    echo "     nothing was removed. Check 'sbx secret ls' and remove it with sbx directly." >&2
+    return 1
   fi
 
   # 1) Remove from the acq store (source of truth). Idempotent.
@@ -2053,40 +2230,22 @@ acq_backend_secret_rm() {
   #    is non-interactive by contract. Also </dev/null as belt-and-suspenders so
   #    no sbx prompt can ever consume our stdin. Best-effort — a missing sbx
   #    entry is not an error.
-  local is_builtin=0
-  case "$_ACQ_SBX_BUILTIN_SERVICES" in
-    *" $service "*) is_builtin=1 ;;
-  esac
   # Empty-array-safe expansion below: for the GLOBAL scope scope_args stays
   # empty, and `"${arr[@]}"` on an empty array is a fatal "unbound variable"
   # under `set -u` on bash 3.2 (the macOS system bash) — the same class as the
   # builtin_scope_args guard in the set path. Every `acq secret rm -g <built-in>`
-  # on stock macOS crashed here before the guard (#384).
+  # on stock macOS crashed here before the guard.
   local scope_args=()
   [ -z "$scope_flag" ] && scope_args+=(--sandbox "$scope_name")
 
   if [ "$is_builtin" -eq 1 ]; then
     sbx secret rm "$service" ${scope_args[@]+"${scope_args[@]}"} -f </dev/null >/dev/null 2>&1 || true
-    # A built-in set with an explicit --host lives in sbx as a CUSTOM secret
-    # (#384): if the sidecar recorded an env for it, clear that placeholder too.
-    if [ -n "$sidecar_env" ]; then
-      local placeholder
-      placeholder=$(_acq_sbx_custom_placeholder "$scope_flag" "$scope_name" "$sidecar_env")
-      if [ -n "$placeholder" ]; then
-        sbx secret rm --placeholder "$placeholder" ${scope_args[@]+"${scope_args[@]}"} -f </dev/null >/dev/null 2>&1 || true
-      fi
-    fi
-  else
-    # Custom endpoint (usai, ...): sbx removes a custom secret by its PLACEHOLDER
-    # (there is no --host on `secret rm`). Look up the placeholder from the custom
-    # secrets table for this scope + env var — the sidecar env wins over the
-    # static mapping (it records what was actually bound) — then remove it.
-    local env_var placeholder
-    env_var="${sidecar_env:-$(_acq_service_hosts_env "$service" "$scope_name" | cut -f2)}"
-    placeholder=$(_acq_sbx_custom_placeholder "$scope_flag" "$scope_name" "$env_var")
-    if [ -n "$placeholder" ]; then
-      sbx secret rm --placeholder "$placeholder" ${scope_args[@]+"${scope_args[@]}"} -f </dev/null >/dev/null 2>&1 || true
-    fi
+  fi
+  # A custom endpoint (usai, ...), or a built-in set with an explicit --host
+  # (which lives in sbx as a CUSTOM secret), is removed by the one placeholder
+  # found above (there is no --host on `secret rm`).
+  if [ -n "$rm_placeholders" ]; then
+    sbx secret rm --placeholder "$rm_placeholders" ${scope_args[@]+"${scope_args[@]}"} -f </dev/null >/dev/null 2>&1 || true
   fi
 
   local where="global"
@@ -2180,36 +2339,102 @@ acq_backend_key_present() {
 }
 
 # ---------------------------------------------------------------------------
-# _acq_sbx_custom_placeholder SCOPE_FLAG SCOPE_NAME ENV_VAR [HOST] -> placeholder|empty
+# _acq_sbx_custom_placeholders SCOPE_FLAG SCOPE_NAME ENV_VAR [HOST] -> placeholders
 # ---------------------------------------------------------------------------
-# Look up the PLACEHOLDER of a CUSTOM secret (from the CUSTOM SECRETS table of
-# `sbx secret ls`) for a given scope + env var, optionally constrained to the
-# target host(s), so `sbx secret rm --placeholder` can target it. Echoes the
-# placeholder (e.g. sbx-cs-...) or nothing if absent.
-_acq_sbx_custom_placeholder() {
-  local scope_flag="$1" scope_name="$2" env_var="$3" host="${4:-}"
-  [ -n "$env_var" ] || return 0
-  local listing want_scope
-  listing=$(sbx secret ls 2>/dev/null) || return 0
+# Every placeholder sbx lists for a CUSTOM secret (the CUSTOM SECRETS table of
+# `sbx secret ls`: SCOPE TARGETS ENV PLACEHOLDER SECRET) in exactly this scope
+# whose ENV is ENV_VAR, one per line, nothing when there is none. With HOST
+# (comma-separated hosts) a row must also have every one of its TARGETS among
+# them, the match the Python acq uses, so a secret for the same env var on
+# another host is not counted; an empty HOST matches any host. ENV is located
+# by value and the next field is the placeholder, robust to a multi-token
+# TARGETS cell. Returns 1 when the listing fails or its table cannot be parsed.
+# With an empty ENV, validate the listing without selecting a custom entry.
+_acq_sbx_custom_placeholders() {
+  local scope_flag="$1" scope_name="$2" env_var="$3" host="${4:-}" listing want_scope
+  listing=$(sbx secret ls 2>/dev/null) || return 1
   if [ -n "$scope_flag" ]; then want_scope="(global)"; else want_scope="$scope_name"; fi
-
-  # CUSTOM table columns: SCOPE TARGETS ENV PLACEHOLDER SECRET. Find the row in
-  # the custom section whose SCOPE == want_scope and ENV == env_var, and when a
-  # host is supplied require TARGETS to match too. We locate ENV by value (not
-  # fixed index) and take the NEXT field as the placeholder, robust to a
-  # multi-token TARGETS cell.
   printf '%s\n' "$listing" | awk \
     -v scope="$want_scope" -v env="$env_var" -v host="$host" '
-    /^CUSTOM SECRETS/ { in_custom = 1; next }
-    !in_custom { next }
+    function within(targets,   n, t, k, ok) {
+      if (host == "") return 1
+      n = split(targets, t, ",")
+      for (k = 1; k <= n; k++) if (t[k] == "" || !(t[k] in want)) return 0
+      return n > 0
+    }
+    BEGIN { m = split(host, h, ","); for (k = 1; k <= m; k++) if (h[k] != "") want[h[k]] = 1 }
+    /^SCOPE[[:space:]]+TYPE[[:space:]]+NAME[[:space:]]+SECRET/ { known = 1; next }
+    /^CUSTOM SECRETS/ { known = 1; in_custom = 1; next }
     NF == 0 { next }
-    $1 == "SCOPE" { next }
+    !in_custom { if (!known || NF != 4) bad = 1; next }
+    $1 == "SCOPE" { if ($2 != "TARGETS" || $3 != "ENV" || $4 != "PLACEHOLDER") bad = 1; next }
+    NF < 5 || $(NF-2) !~ /^[A-Za-z_][A-Za-z0-9_]*$/ { bad = 1; next }
     $1 == scope {
       for (i = 2; i < NF; i++) {
-        if ($i == env && (host == "" || $(i-1) == host)) { print $(i+1); exit }
+        if ($i == env && within($(i-1))) { print $(i+1); break }
       }
     }
+    END { if (!known || bad) exit 1 }
   '
+}
+
+# _acq_sbx_placeholder_ok P — a placeholder acq will put on a command line or
+# print in a copy-paste command: letters, digits, '.', '_' and '-', not
+# starting with '-' (which sbx would read as a flag).
+_acq_sbx_placeholder_ok() {
+  # The characters are listed one by one: a glob range such as A-Z follows the
+  # locale's collation and could admit non-ASCII letters under UTF-8.
+  case "${1:-}" in
+    "" | -* | *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]*) return 1 ;;
+  esac
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# _acq_sbx_print_duplicate_custom SCOPE_FLAG SCOPE_NAME ENV_VAR HOST OUTCOME RERUN PLACEHOLDERS
+# ---------------------------------------------------------------------------
+# The refusal for a scope where sbx holds more than one custom secret for the
+# same env var and host. acq cannot tell which placeholder the running
+# sandboxes were injected with, so it neither picks one nor removes any. The
+# message names every placeholder and prints one copy-pasteable removal per
+# entry, in the same form acq itself uses (`sbx secret rm --placeholder P -f`,
+# plus `--sandbox NAME` for a sandbox scope). OUTCOME says what acq did (for
+# example "nothing was stored"); RERUN is the command to run afterwards.
+_acq_sbx_print_duplicate_custom() {
+  local scope_flag="$1" scope_name="$2" env_var="$3" host="$4" outcome="$5" rerun="$6" list="$7"
+  local where rm_scope="" count ph
+  if [ -n "$scope_flag" ]; then where="the global scope"; else where="sandbox '$scope_name'"; rm_scope=" --sandbox $scope_name"; fi
+  count=$(printf '%s\n' "$list" | grep -c . || true)
+  echo "acq(sbx): sbx holds ${count} custom secrets for ${env_var} on ${host} in ${where}," >&2
+  echo "          so acq cannot tell which one your sandboxes use; ${outcome}." >&2
+  echo "          Placeholders: $(printf '%s\n' "$list" | LC_ALL=C tr -c 'A-Za-z0-9._\n-' '?' | tr '\n' ' ' | sed 's/ *$//')" >&2
+  echo "          Warning: a running sandbox may hold one of these placeholders. A sandbox" >&2
+  echo "          whose placeholder you remove can no longer reach ${host} until it is" >&2
+  echo "          recreated (or rebound as ADR-0008 describes). Remove the entries your" >&2
+  echo "          sandboxes do not use; one command per entry:" >&2
+  while IFS= read -r ph; do
+    [ -n "$ph" ] || continue
+    if _acq_sbx_placeholder_ok "$ph"; then
+      echo "            sbx secret rm --placeholder ${ph}${rm_scope} -f" >&2
+    else
+      echo "            (one placeholder holds unexpected characters; find it with 'sbx secret ls')" >&2
+    fi
+  done <<EOF
+$list
+EOF
+  echo "          then re-run: ${rerun}" >&2
+}
+
+# _acq_sbx_refuse_duplicate_custom SCOPE_FLAG SCOPE_NAME ENV_VAR HOST OUTCOME RERUN
+# Returns 1 (after printing the refusal) when sbx lists more than one custom
+# secret for ENV_VAR on HOST in the scope; 0 otherwise, including when the
+# listing cannot be read (the caller's own existence checks then decide).
+_acq_sbx_refuse_duplicate_custom() {
+  local list
+  list=$(_acq_sbx_custom_placeholders "$1" "$2" "$3" "$4") || return 0
+  [ "$(printf '%s\n' "$list" | grep -c .)" -gt 1 ] || return 0
+  _acq_sbx_print_duplicate_custom "$1" "$2" "$3" "$4" "$5" "$6" "$list"
+  return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -2225,97 +2450,49 @@ acq_backend_rotate_key() {
   local usai_models_url="$USAI_PROVIDER_MODELS_URL"
   local usai_env="$USAI_PROVIDER_KEY_ENV"
 
-  # Read the current secret table once (avoids a TOCTOU window + a second call).
-  local secret_ls
-  secret_ls=$(sbx secret ls -g) || {
-    echo "acq(sbx): could not read the sbx secret table ('sbx secret ls -g')." >&2
+  # The global USAi custom secrets: rows in the global scope whose ENV is the
+  # provider key env AND whose TARGETS is the provider host, so a secret for the
+  # same env var on another host is never mistaken for this one.
+  local placeholders
+  placeholders=$(_acq_sbx_custom_placeholders -g "" "$usai_env" "$usai_host") || {
+    echo "acq(sbx): could not read the sbx secret table ('sbx secret ls')." >&2
     return 1
   }
 
-  # Grab the existing placeholder, anchoring on the provider key env token rather
-  # than a fixed column, taking only the FIRST match so a duplicated state can't
-  # produce a multi-line value. Preserved across rotation so running sandboxes
-  # that already injected it keep resolving to the new secret.
-  local placeholder
-  placeholder=$(printf '%s\n' "$secret_ls" \
-    | awk -v env="$usai_env" '{ for (i = 1; i <= NF; i++) if ($i == env) { print $(i+1); exit } }')
-
-  if [ -z "$placeholder" ]; then
+  if [ -z "$placeholders" ]; then
     echo "acq(sbx): $usai_env not found. Run 'acq secret ls' to check." >&2
     return 1
   fi
 
-  # Count provider key env rows. More than one means a previous rotation (before
-  # the fix in ADR-0008) left duplicate/ghost entries; the proxy can then resolve
-  # the placeholder to an empty entry and validation fails with 401.
-  local row_count
-  row_count=$(printf '%s\n' "$secret_ls" \
-    | grep -cE "[[:space:]]${usai_env}[[:space:]]" || true)
-
-  if [ "${row_count:-0}" -gt 1 ]; then
-    # --- Cleanup path for data corrupted by the pre-fix rotation bug ----------
-    # Only taken when duplicates exist. We must remove every custom secret for
-    # the host and recreate a single one — there's no in-place "dedupe". This is
-    # destructive and non-atomic: between the rm and the set-custom the host has
-    # NO USAi secret, so a Ctrl-C or a failed/cancelled set-custom would leave the
-    # host with no key at all. Guard that window with a trap that prints exact
-    # recovery steps, and disarm it once set-custom succeeds.
-    #
-    # sbx CLI scope/flag change (see docs/VERIFY_BACKENDS_HANDOFF.md "sbx CLI
-    # secret scope-flag change"): GLOBAL is the DEFAULT (no `-g`), and `secret rm`
-    # has NO `--host` flag — a custom secret is removed by its `--placeholder`.
-    # We hold the placeholder already, so remove EACH duplicate row by placeholder
-    # (rm by placeholder targets the one row; loop while any remain), then recreate
-    # a single canonical entry.
-    echo "Found $row_count $usai_env entries; consolidating to a single secret." >&2
-
-    local _ph="$placeholder" _host="$usai_host" _env="$usai_env"
-    # shellcheck disable=SC2064
-    trap "{
-      echo '' >&2
-      echo 'ERROR: rotation was interrupted while the USAi secret was removed' >&2
-      echo 'but before the new value was set. Your sandboxes currently have NO USAi key.' >&2
-      echo 'Recover by re-running this rotation, or manually:' >&2
-      echo '  sbx secret set-custom --host ${_host} --env ${_env} --placeholder ${_ph}' >&2
-    }" EXIT
-
-    # Remove every USAi custom row. Each row's placeholder is re-read from
-    # a fresh listing so we clear duplicates that may share OR differ in
-    # placeholder; -f avoids the confirm prompt, </dev/null guards our stdin.
-    local _guard=0 _dup_ph rm_err
-    while :; do
-      _dup_ph=$(sbx secret ls -g 2>/dev/null \
-        | awk -v env="$usai_env" '{ for (i = 1; i <= NF; i++) if ($i == env) { print $(i+1); exit } }')
-      [ -n "$_dup_ph" ] || break
-      if ! rm_err=$(sbx secret rm --placeholder "$_dup_ph" -f </dev/null 2>&1); then
-        trap - EXIT
-        echo "acq(sbx): failed to remove existing secrets: $rm_err" >&2
-        return 1
-      fi
-      _guard=$((_guard + 1))
-      [ "$_guard" -ge "${row_count:-0}" ] && break
-    done
-
-    # Recreate the single secret with the preserved placeholder. Omitting
-    # --value makes sbx prompt for the new key (keeps it out of shell history).
-    sbx secret set-custom --host "$usai_host" \
-          --env "$usai_env" --placeholder "$placeholder" || {
-      echo "acq(sbx): 'sbx secret set-custom' failed. See recovery steps above." >&2
-      return 1
-    }
-
-    trap - EXIT
-  else
-    # Healthy single-row case: set-custom updates the existing entry in place, so
-    # there's no need for the destructive rm (which would only add risk here).
-    # Omitting --value makes sbx prompt for the new key (no shell-history leak).
-    # Global is the default (no `-g`); see the CLI-change note above.
-    sbx secret set-custom --host "$usai_host" \
-          --env "$usai_env" --placeholder "$placeholder" || {
-      echo "acq(sbx): 'sbx secret set-custom' failed." >&2
-      return 1
-    }
+  # More than one global entry (for example left by a rotation from before
+  # ADR-0008) is refused, never consolidated: each running sandbox was injected
+  # with one of those placeholders at create, and acq cannot tell which one, so
+  # removing all of them and recreating one would cut sandboxes off. The
+  # refusal names every placeholder with its removal command and changes
+  # nothing; the user chooses which to keep.
+  if [ "$(printf '%s\n' "$placeholders" | grep -c .)" -gt 1 ]; then
+    local outcome="nothing was changed"
+    [ -z "${ACQ_PROPAGATING_SECRET:-}" ] || outcome="the sbx sandboxes were not re-fed"
+    _acq_sbx_print_duplicate_custom -g "" "$usai_env" "$usai_host" \
+      "$outcome" "acq usai-rotate-api-key" "$placeholders"
+    return 1
   fi
+
+  # One entry: set-custom with its placeholder updates it in place, so running
+  # sandboxes that already injected it keep resolving to the new secret.
+  # Omitting --value makes sbx prompt for the new key (no shell-history leak).
+  # Global is the default (no `-g`); see the "sbx CLI secret scope-flag change"
+  # note in docs/VERIFY_BACKENDS_HANDOFF.md.
+  local placeholder="$placeholders"
+  if ! _acq_sbx_placeholder_ok "$placeholder"; then
+    echo "acq(sbx): sbx lists the USAi placeholder with unexpected characters; check 'sbx secret ls'." >&2
+    return 1
+  fi
+  sbx secret set-custom --host "$usai_host" \
+        --env "$usai_env" --placeholder "$placeholder" || {
+    echo "acq(sbx): 'sbx secret set-custom' failed." >&2
+    return 1
+  }
 
   if [ -n "${ACQ_PROPAGATING_SECRET:-}" ]; then
     echo "acq(sbx): updated the USAi proxy placeholder for existing sbx sandbox(es)." >&2
@@ -2330,8 +2507,8 @@ acq_backend_rotate_key() {
 
   # `sbx create` needs an authenticated sbx session. If it has expired, sbx
   # triggers an interactive browser login — and if its output is swallowed and
-  # it's unbounded, rotation appears to hang with no explanation (quickstart
-  # #211). Two guards: (1) do NOT silence stderr, so any login prompt is
+  # it's unbounded, rotation appears to hang with no explanation. Two guards:
+  # (1) do NOT silence stderr, so any login prompt is
   # visible; (2) bound the create with a timeout so an interactive-login
   # handshake can never hang indefinitely. sbx has no non-interactive
   # auth-status probe, so the timeout is the safety net.

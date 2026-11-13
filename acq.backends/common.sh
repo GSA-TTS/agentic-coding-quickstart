@@ -241,6 +241,11 @@ KIT_SOURCE_PREFIXES=()
 # _acq_require_provider_selection, which only create/run call.
 # shellcheck disable=SC2034  # read by _acq_require_provider_selection
 ACQ_PROVIDER_SELECTION_ERROR=""
+# The same latch for a kit ref acq refuses at input (kit_ref_shape_check) in
+# ACQ_EXTRA_KITS or ACQ_PROVIDER_KITS: recorded by _build_kit_list, enforced only
+# where kits are selected or applied (run/create, kit list, the heal), so an
+# unrelated verb such as `acq ls` or `acq secret rm` still works.
+ACQ_KIT_REFS_ERROR=""
 
 # Transitional fallback defaults for the pinned usai-provider kit. ADR-0030's
 # target state is for the kit to export these provider facts as static metadata
@@ -256,7 +261,7 @@ USAI_PROVIDER_MODELS_URL="${USAI_PROVIDER_BASE_URL}/models"
 USAI_PROVIDER_BIND_HOSTS="${USAI_PROVIDER_HOST}"
 
 # Source the shared agent catalog (single source of truth for agent tokens and
-# the sandbox-template image naming convention; issue #377). Both adapters also
+# the sandbox-template image naming convention). Both adapters also
 # source it defensively so they work when loaded without common.sh (some tests
 # source an adapter directly). Guard so a re-source is cheap.
 if ! command -v acq_is_known_agent >/dev/null 2>&1; then
@@ -269,12 +274,34 @@ if ! command -v acq_is_known_agent >/dev/null 2>&1; then
   fi
 fi
 
+# Source the host user-directory resolvers (absolute-only XDG/HOME/ACQ_STATE_DIR
+# handling). Needed before secret-store.sh, whose defaults are assigned when it
+# is sourced. The adapters source it defensively too, for tests that load them
+# directly.
+if ! command -v acq_xdg_dir >/dev/null 2>&1; then
+  # shellcheck source=acq.backends/userdirs.sh
+  . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/userdirs.sh"
+fi
+
 # Source the neutral-kit translation layer (spec.yaml parser + shortcut
 # dispatch). ACQ_SCRIPT_DIR is exported by the acq entry point; in the offline
 # test harness it is set before common.sh is sourced.
 if [ -n "${ACQ_SCRIPT_DIR:-}" ] && [ -f "${ACQ_SCRIPT_DIR}/acq.backends/kit-translate.sh" ]; then
   # shellcheck disable=SC1091
   . "${ACQ_SCRIPT_DIR}/acq.backends/kit-translate.sh"
+fi
+# The host-side git reads below (workspace repo detection, the identity note)
+# clear the inherited git environment with _kit_git_isolate*, which live in
+# kit-translate.sh. When common.sh is sourced without ACQ_SCRIPT_DIR, load it
+# from beside this file; if it is still missing, those reads fail closed
+# (_acq_git_host). CDPATH is cleared so `cd` cannot land elsewhere or print.
+if ! declare -F _kit_git_isolate >/dev/null 2>&1; then
+  _acq_common_dir=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P) || _acq_common_dir=""
+  if [ -n "$_acq_common_dir" ] && [ -f "$_acq_common_dir/kit-translate.sh" ]; then
+    # shellcheck source=acq.backends/kit-translate.sh
+    . "$_acq_common_dir/kit-translate.sh"
+  fi
+  unset _acq_common_dir
 fi
 
 # Source the acq-owned, backend-neutral secret store (keychain-backed; both the
@@ -781,8 +808,8 @@ split_noglob() {
   # `_oldopts=$(set +o)` is a trap: a command-substitution subshell runs with
   # errexit CLEARED (pre-inherit_errexit bash, incl. macOS 3.2), so the captured
   # state says `set +o errexit` and the eval restore silently turned `set -e`
-  # OFF in the caller for the rest of the run (found via #381: it also disabled
-  # bats' failure detection whenever ACQ_EXTRA_KITS was set).
+  # OFF in the caller for the rest of the run, disabling bats' failure
+  # detection whenever ACQ_EXTRA_KITS was set.
   case "$-" in *f*) _had_noglob=1 ;; esac
   set -f
   # shellcheck disable=SC2086
@@ -902,10 +929,16 @@ acq_validate_agent_builtin_kit_dir() {
 acq_validate_agent_builtin_kit_ref() {
   local agent="$1" kitref="$2" base_dir="${3:-}" kitdir namespace
   if [ -z "$base_dir" ]; then
+    # Scratch under the per-user state root, never TMPDIR: a shared /tmp/acq is
+    # a fixed name another local user could create first and fill, and a
+    # relative TMPDIR would resolve against the current directory. acq_state_dir
+    # refuses a relative ACQ_STATE_DIR and ignores relative XDG values (see
+    # userdirs.sh), so this fails closed when no absolute root exists.
+    base_dir=$(acq_state_dir) || return 1
     # Historical validation directories may contain repositories. Leave them
     # intact and use a distinct metadata-free namespace only for the default;
     # an explicit caller-owned destination keeps its existing semantics.
-    namespace="${ACQ_STATE_DIR:-${TMPDIR:-/tmp}/acq}/agent-kit-validation-payload-v2"
+    namespace="$base_dir/agent-kit-validation-payload-v2"
     if [[ "$kitref" == git+http* ]] && [ -L "$namespace" ]; then
       echo 'acq: refusing a symlink agent kit validation namespace' >&2
       return 1
@@ -1009,6 +1042,14 @@ _acq_require_provider_selection() {
   return 1
 }
 
+# _acq_require_kit_refs — the gate for the latched ACQ_KIT_REFS_ERROR: print it
+# and fail. Called by run/create, kit list and the backends' heal.
+_acq_require_kit_refs() {
+  [ -n "${ACQ_KIT_REFS_ERROR:-}" ] || return 0
+  printf '%s\n' "$ACQ_KIT_REFS_ERROR" >&2
+  return 1
+}
+
 # Assemble the full kit list: selected built-ins, then extras.
 # Zscaler CA trust FIRST (see ACQ_KIT_NAMES) so later network-fetching kits
 # succeed behind a TLS-intercepting proxy.
@@ -1016,6 +1057,10 @@ _acq_require_provider_selection() {
 _build_kit_list() {
   local agent="${1:-}" kit support_refs
   KITS=()
+  # Latch (do not fail on) a refused ACQ_EXTRA_KITS/ACQ_PROVIDER_KITS ref: this
+  # runs for every verb. The message never names the ref.
+  ACQ_KIT_REFS_ERROR=$(_acq_kit_refs_check 2>&1 >/dev/null) && ACQ_KIT_REFS_ERROR=""
+  _acq_kit_refs_make_absolute
   # This runs for EVERY verb (acq_resolve_backend), so a provider-selection
   # failure is LATCHED here and only enforced by create/run through
   # _acq_require_provider_selection. The kit list still builds (without the
@@ -1072,10 +1117,88 @@ EOF
 
 # Normalize a string into a sandbox-name slug: lowercase, runs of
 # non-alphanumerics collapsed to a single hyphen, leading/trailing hyphens trimmed.
+# Only ASCII a-z0-9 survive, byte-wise under the C locale, so the result is the
+# same single-line slug the Python implementation derives: a newline, an escape
+# sequence or a non-ASCII letter in a directory name becomes a hyphen instead of
+# leaking into the sandbox name (where a newline would split `list -q` lookups).
 slugify() {
   printf '%s' "$1" \
-    | tr '[:upper:]' '[:lower:]' \
-    | sed -e 's/[^a-z0-9]\{1,\}/-/g' -e 's/^-*//' -e 's/-*$//'
+    | LC_ALL=C tr 'A-Z' 'a-z' \
+    | LC_ALL=C tr -cs 'a-z0-9' '-' \
+    | sed -e 's/^-*//' -e 's/-*$//'
+}
+
+# acq_printable STR — STR with every control character (newline, tab, ESC, DEL)
+# replaced by '?', for echoing a user-supplied path or name to the terminal. A
+# directory name can carry ESC/OSC sequences that would otherwise drive the
+# terminal, or a newline that would forge extra output lines.
+acq_printable() {
+  printf '%s' "${1//[[:cntrl:]]/?}"
+}
+
+# _acq_name_is_one_line NAME — 0 when NAME is non-empty and has no newline, i.e.
+# it could appear as one line of a backend's `list -q` output.
+_acq_name_is_one_line() {
+  case "$1" in
+    ''|*$'\n'*) return 1 ;;
+  esac
+  return 0
+}
+
+# _acq_list_has_line NAME LIST — 0 when NAME equals a whole line of LIST. The
+# adapters' existence probes use this instead of `grep -Fx`, which treats each
+# line of a multi-line pattern as a separate pattern: a name with an embedded
+# newline would then match an unrelated sandbox listed on its own line, and an
+# empty name would match a blank line. A trailing CR is ignored so a native
+# Windows CLI's CRLF output still matches.
+_acq_list_has_line() {
+  local want="$1" line
+  _acq_name_is_one_line "$want" || return 1
+  while IFS= read -r line; do
+    [ "${line%$'\r'}" = "$want" ] && return 0
+  done <<EOF
+$2
+EOF
+  return 1
+}
+
+# acq_sandbox_name_check NAME — fail with a message unless NAME is safe to use
+# as the name of a NEW sandbox (an explicit --name). The name is passed to the
+# backend as an argument, matched against `list -q` output line by line, used as
+# msb's NAME:PATH copy target, joined into host paths and printed. Only ASCII
+# letters, digits, '_' and '-' are accepted, the same set the secret store and
+# the msb ports state accept for a sandbox name, so every per-sandbox feature
+# works with any name acq lets you create; a leading '-' would read as an
+# option. The characters are spelled out because a bracket range follows the
+# locale's collation order under bash 3.2.
+acq_sandbox_name_check() {
+  case "$1" in
+    ''|-*|*[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-]*)
+      echo "acq: error: invalid sandbox name '$(acq_printable "$1")'." >&2
+      echo "     Use only letters, digits, '_' and '-', not starting with '-'." >&2
+      echo "     An existing sandbox with another name is still reachable with" >&2
+      echo "     'acq run NAME', 'acq shell NAME' or 'acq rm NAME'." >&2
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+# acq_name_form_check VERB NAME — refuse a NAME given to a verb that acts on an
+# existing sandbox (rm, stop, exec, ...) when it cannot be a sandbox name but
+# could steer a host path built from it: empty, '.', '..', anything containing
+# '/' or '\', or a control character. Unlike acq_sandbox_name_check this accepts
+# every other character, so a sandbox created outside acq stays reachable.
+acq_name_form_check() {
+  case "$2" in
+    ''|.|..|*/*|*\\*|*[[:cntrl:]]*)
+      echo "acq: $1: refusing sandbox name '$(acq_printable "$2")'." >&2
+      echo "     A sandbox name cannot be empty, '.' or '..', or contain '/', '\\'" >&2
+      echo "     or control characters." >&2
+      return 1
+      ;;
+  esac
+  return 0
 }
 
 # True if PREV is a flag that consumes the next argument as its value.
@@ -1092,11 +1215,13 @@ derive_name() {
   local agent="" first_path="" prev=""
   for arg in "$@"; do
     if [ "$prev" = "--name" ]; then
+      acq_sandbox_name_check "$arg" || return 1
       printf '%s\n' "$arg"
       return 0
     fi
     case "$arg" in
       --name=*)
+        acq_sandbox_name_check "${arg#--name=}" || return 1
         printf '%s\n' "${arg#--name=}"
         return 0
         ;;
@@ -1127,10 +1252,39 @@ derive_name() {
     return 1
   fi
 
-  local base="."
-  [ -n "$first_path" ] && base=$(basename "$first_path")
-  [ "$base" = "." ] && base=$(basename "$PWD")
-  printf '%s\n' "$(slugify "$agent")-$(slugify "$base")"
+  _acq_path_basename "${first_path:-.}"
+  [ -n "$_ACQ_BASENAME" ] || _ACQ_BASENAME=workspace
+  printf '%s\n' "$(slugify "$agent")-$(slugify "$_ACQ_BASENAME")"
+}
+
+# _acq_path_basename PATH — set _ACQ_BASENAME to the last component of PATH
+# made absolute and lexically normalised, as the Python implementation's
+# os.path.abspath does: trailing '/', '.' and '..' steps are folded, a relative
+# path that folds to '.' names the logical $PWD, any other relative path is
+# joined onto the physical working directory, and the root yields "" (which
+# derive_name turns into "workspace"). It sets a variable rather than printing,
+# so a component ending in a newline is kept intact.
+_acq_path_basename() {
+  local p="$1" c up=0 abs=0
+  _ACQ_BASENAME=""
+  case "$p" in /*) abs=1 ;; esac
+  while :; do
+    while [ -n "$p" ]; do
+      c="${p##*/}"
+      case "$p" in */*) p="${p%/*}" ;; *) p="" ;; esac
+      case "$c" in
+        ''|.) ;;
+        ..) up=$((up + 1)) ;;
+        *)
+          if [ "$up" -eq 0 ]; then _ACQ_BASENAME="$c"; return 0; fi
+          up=$((up - 1))
+          ;;
+      esac
+    done
+    [ "$abs" -eq 0 ] || return 0
+    abs=1
+    if [ "$up" -eq 0 ]; then p="$PWD"; else p=$(pwd -P); fi
+  done
 }
 
 # Find the workspace path in an AGENT-form create/run arg list: the SECOND
@@ -1176,6 +1330,258 @@ workspace_paths() {
   done
 }
 
+# acq_workspace_specs_safe ARGS... — refuse, with a message, any workspace
+# positional in an AGENT-form create/run arg list that the backends cannot
+# represent. Each positional is PATH[:ro], and the ':ro' suffix is the only colon
+# acq understands: a colon anywhere else is read as a separator (workspace_path
+# here, sbx's own PATH:ro parsing, msb's SOURCE:DEST[:OPTIONS] volume spec), so
+# the mount would silently target a different path. A control character splits
+# the line-oriented workspace list the adapters read and reaches the terminal
+# when the path is echoed. The symlink-resolved path is checked too, because it
+# is what msb mounts. With no path argument the current directory is the
+# workspace, so it is checked instead, and so is a path that folds to '.' (the
+# logical $PWD, which a symlink named with ':' can carry even when the resolved
+# path has none). Silent and 0 when every path is usable.
+acq_workspace_specs_safe() {
+  local agent="" prev="" arg ws seen=0
+  for arg in "$@"; do
+    if _takes_value "$prev"; then prev="$arg"; continue; fi
+    prev="$arg"
+    case "$arg" in
+      -*) continue ;;
+    esac
+    if [ -z "$agent" ]; then
+      agent="$arg"
+      continue
+    fi
+    seen=1
+    ws="${arg%:ro}"
+    _acq_path_folds_to_dot "$ws" && ws="$PWD"
+    _acq_workspace_safe "$ws" || return 1
+  done
+  [ "$seen" -eq 1 ] || _acq_workspace_safe "$PWD" || return 1
+  return 0
+}
+
+# _acq_path_folds_to_dot PATH — 0 when PATH is relative and its '.' and '..'
+# steps fold it to '.' ('.', './', 'src/..'), the paths the Python
+# implementation resolves against the logical $PWD.
+_acq_path_folds_to_dot() {
+  local p="$1" c up=0
+  case "$p" in ''|/*) return 1 ;; esac
+  while [ -n "$p" ]; do
+    c="${p##*/}"
+    case "$p" in */*) p="${p%/*}" ;; *) p="" ;; esac
+    case "$c" in
+      ''|.) ;;
+      ..) up=$((up + 1)) ;;
+      *) [ "$up" -gt 0 ] || return 1; up=$((up - 1)) ;;
+    esac
+  done
+  [ "$up" -eq 0 ]
+}
+
+# _acq_workspace_safe PATH — check PATH as given and, when it is a directory, its
+# symlink-resolved form. Then refuse a workspace that contains one of acq's own
+# host directories.
+_acq_workspace_safe() {
+  local p="$1" real
+  _acq_workspace_path_safe "$p" "$p" || return 1
+  if [ -d "$p" ]; then
+    real=$(canonicalize_path "$p")
+    if [ "$real" != "$p" ]; then
+      _acq_workspace_path_safe "$real" "$p (resolves to $real)" || return 1
+    fi
+  fi
+  _acq_workspace_trusted_safe "$p"
+}
+
+# _acq_trusted_host_dirs — acq's own host directories, one per line: the state
+# dir, the provenance dir (which holds each sandbox's read-only trusted config),
+# the config dir, the data dir (the provider-input validator lives there), the
+# cache dir and the sbx and msb kit caches (the kit payloads acq applies), the
+# msb scratch clones dir (another sandbox's clone, and its record of the
+# checkout acq runs git in at rm), and the secret store's file, sidecar and
+# index locations. Unresolvable entries are skipped.
+_acq_trusted_host_dirs() {
+  local d
+  if d=$(acq_state_dir 2>/dev/null); then printf '%s\n' "$d"; fi
+  if d=$(_acq_provenance_dir 2>/dev/null); then printf '%s\n' "$d"; fi
+  if d=$(_acq_config_file 2>/dev/null); then dirname -- "$d"; fi
+  if d=$(acq_xdg_dir XDG_DATA_HOME .local/share 2>/dev/null); then printf '%s/acq\n' "$d"; fi
+  if d=$(acq_xdg_dir XDG_CACHE_HOME .cache 2>/dev/null); then printf '%s/acq\n' "$d"; fi
+  for d in "${ACQ_SECRET_FILE_DIR:-}" "${ACQ_SECRET_META_DIR:-}" "${ACQ_PROVIDER_INPUT_DATA_DIR:-}" \
+      "${ACQ_SBX_KIT_CACHE:-}" "${ACQ_MSB_KIT_CACHE:-}" "${ACQ_MSB_CLONES_DIR:-}"; do
+    if [ -n "$d" ]; then printf '%s\n' "$d"; fi
+  done
+  if [ -n "${ACQ_SECRET_INDEX_FILE:-}" ]; then dirname -- "$ACQ_SECRET_INDEX_FILE"; fi
+  return 0
+}
+
+# _acq_path_within CHILD PARENT — 0 when the absolute path CHILD is PARENT or
+# lies below it. A plain string comparison; trailing slashes are ignored and the
+# quoted pattern keeps glob characters in PARENT literal. Callers fold case
+# first where the filesystem ignores it (_acq_path_case_fold).
+_acq_path_within() {
+  local c="${1%/}" p="${2%/}"
+  [ -n "$p" ] || return 0
+  case "$c" in
+    "$p"|"$p"/*) return 0 ;;
+  esac
+  return 1
+}
+
+# _acq_path_case_fold VALUE — set _ACQ_PATH_FOLDED to VALUE in the form the
+# workspace checks compare. On MSYS/Cygwin (Git Bash) that is lower case:
+# Windows filesystems are case-insensitive, so /c/USERS/me/ACQSTATE names the
+# same directory as /c/Users/me/acqstate, and a case-sensitive match would let
+# a workspace reach acq's own directories by spelling them differently. Bash 4
+# and later (every Git Bash) fold with the `,,` expansion, which needs no fork
+# and lowers every letter the locale knows; an older Bash on Cygwin lowers the
+# ASCII letters with tr. POSIX hosts compare exactly, so VALUE is unchanged.
+# Sets a variable rather than printing, so a caller pays no command
+# substitution per value.
+_acq_path_case_fold() {
+  _ACQ_PATH_FOLDED="$1"
+  case "${OSTYPE:-}" in
+    msys*|cygwin*)
+      if [ "${BASH_VERSINFO[0]:-0}" -ge 4 ]; then
+        _ACQ_PATH_FOLDED="${1,,}"
+      else
+        _ACQ_PATH_FOLDED=$(printf '%s' "$1" | LC_ALL=C tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')
+      fi
+      ;;
+  esac
+}
+
+# _acq_path_physical PATH — PATH made absolute (against $PWD) with its deepest
+# existing ancestor resolved through symlinks; a missing tail is kept as given,
+# so a directory acq has not created yet still compares correctly.
+_acq_path_physical() {
+  local p="$1" tail="" base
+  case "$p" in /*) ;; *) p="$PWD/$p" ;; esac
+  p="${p%/}"
+  while [ -n "$p" ] && [ ! -e "$p" ]; do
+    tail="/${p##*/}$tail"
+    p="${p%/*}"
+  done
+  [ -n "$p" ] || p="/"
+  base=$(canonicalize_path "$p")
+  base="${base%/}$tail"
+  printf '%s\n' "${base:-/}"
+}
+
+# _acq_workspace_trusted_safe PATH — refuse a workspace that is, contains, or
+# lies inside one of acq's own host directories. The workspace is mounted into
+# the guest, so such a mount would let the sandbox read the secret store and
+# rewrite acq's records, its kit caches and the trusted config that acq
+# otherwise mounts read-only (one sandbox's workspace inside the provenance dir
+# would reach every other sandbox's trusted config). Both the paths as given and
+# their symlink-resolved forms are compared. A directory that resolves to '/'
+# is ignored for the "inside" test, which would otherwise refuse everything.
+_acq_workspace_trusted_safe() {
+  local ws="$1" wsp d dp fws fwsp fd fdp how
+  case "$ws" in /*) ;; *) ws="$PWD/$ws" ;; esac
+  wsp=$(_acq_path_physical "$ws")
+  # Fold each path once (see _acq_path_case_fold); the messages keep the
+  # spelling as given.
+  _acq_path_case_fold "$ws"; fws="$_ACQ_PATH_FOLDED"
+  _acq_path_case_fold "$wsp"; fwsp="$_ACQ_PATH_FOLDED"
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    acq_path_is_absolute "$d" || continue
+    dp=$(_acq_path_physical "$d")
+    _acq_path_case_fold "$d"; fd="$_ACQ_PATH_FOLDED"
+    _acq_path_case_fold "$dp"; fdp="$_ACQ_PATH_FOLDED"
+    how=""
+    if _acq_path_within "$fd" "$fws" || _acq_path_within "$fdp" "$fwsp"; then
+      how="contains"
+    elif [ "${d%/}" != "" ] && [ "${dp%/}" != "" ] \
+        && { _acq_path_within "$fws" "$fd" || _acq_path_within "$fwsp" "$fdp"; }; then
+      how="is inside"
+    fi
+    if [ -n "$how" ]; then
+      echo "acq: error: workspace $(acq_printable "$1") $how acq's own directory $(acq_printable "$d")." >&2
+      echo "     The sandbox would reach acq's state, config or secret store through the" >&2
+      echo "     workspace mount, including the trusted config acq mounts read-only." >&2
+      # The remediation wording matches the Python acq's validation_failed error.
+      echo "     use a project directory that holds none of acq's state, config or secret-store directories (not your home directory itself), then re-run" >&2
+      return 1
+    fi
+  done <<EOF
+$(_acq_trusted_host_dirs)
+EOF
+  return 0
+}
+
+# acq_recorded_workspace_safe BACKEND NAME — refuse, with the same message and
+# remediation as acq_workspace_specs_safe, an existing sandbox whose recorded
+# host workspace is, contains, or lies inside one of acq's own directories. A
+# re-attach, start or restart does not re-mount the workspace, so without this
+# a sandbox created on `~` by an older acq (or before acq's directories moved
+# under its workspace) would keep reaching acq's state through its writable
+# mount. Silent and 0 when nothing is recorded (a legacy sandbox) or the
+# recorded workspace is safe.
+#
+# msb records the workspace in the native host form (host_path), which under
+# Git Bash is drive form (C:/...). The comparison below treats anything not
+# starting with '/' as relative to $PWD, so a drive-form record would never
+# match acq's own directories (which the shell names /c/...). Such a record is
+# converted to the shell form with `cygpath -u` first; cygpath exists only on
+# MSYS/Cygwin, where drive-form records are written. When that conversion is
+# unavailable (no cygpath, a failure, or no absolute result) the record cannot
+# be checked, so the sandbox is refused rather than passed.
+acq_recorded_workspace_safe() {
+  local ws posix=""
+  ws=$(acq_workspace_record_read "$1" "$2" 2>/dev/null | tr -d '\r') || ws=""
+  [ -n "$ws" ] || return 0
+  case "$ws" in
+    [abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ]:[/\\]*|\\\\*)
+      if command -v cygpath >/dev/null 2>&1; then
+        posix=$(cygpath -u "$ws" 2>/dev/null) || posix=""
+      fi
+      case "$posix" in
+        /*) ws="$posix" ;;
+        *)
+          echo "acq: error: the workspace recorded for sandbox $(acq_printable "$2") is a Windows path ($(acq_printable "$ws"))" >&2
+          echo "     that acq cannot convert to compare it with its own directories (cygpath is missing or failed)." >&2
+          echo "     Sandbox $(acq_printable "$2") cannot be checked: remove it ('acq rm $(acq_printable "$2")') and create it again on a project directory." >&2
+          return 1
+          ;;
+      esac
+      ;;
+  esac
+  _acq_workspace_trusted_safe "$ws" && return 0
+  echo "     Sandbox $(acq_printable "$2") was created on that workspace: remove it ('acq rm $(acq_printable "$2")') and create it again on a project directory." >&2
+  return 1
+}
+
+# _acq_workspace_path_safe PATH SHOWN — the per-path check behind
+# acq_workspace_specs_safe. SHOWN describes the path for the message.
+_acq_workspace_path_safe() {
+  case "$1" in
+    *[[:cntrl:]]*)
+      echo "acq: error: workspace path contains a control character (newline, tab or escape): $(acq_printable "$2")" >&2
+      echo "     acq cannot mount it safely. Rename the directory, then re-run." >&2
+      return 1
+      ;;
+    *:*)
+      echo "acq: error: workspace path contains ':': $(acq_printable "$2")" >&2
+      case "$2" in
+        [abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ]:[/\\]*)
+          echo "     In Git Bash, give a Windows drive path in /c/... form instead of C:/..." >&2
+          return 1
+          ;;
+      esac
+      echo "     acq and the sandbox backends use ':' to separate a mount's path from its" >&2
+      echo "     options (PATH:ro), so this path cannot be mounted. Rename the directory," >&2
+      echo "     then re-run." >&2
+      return 1
+      ;;
+  esac
+  return 0
+}
+
 # Canonicalize a filesystem path to its real, symlink-free absolute form, in the
 # running shell's OWN (POSIX) vocabulary. Echoes the resolved path, or the input
 # unchanged if it cannot be resolved (e.g. a nonexistent path, or no
@@ -1187,20 +1593,48 @@ workspace_paths() {
 # On MSYS/Cygwin this is also the GUEST form: a native tool (git.exe) may report
 # a drive-form path (C:/...), but the guest is a Linux microVM where a drive-form
 # path is not absolute. `cygpath -u` maps drive-form to the shell/guest form
-# (/c/...); cygpath only exists on MSYS/Cygwin, so POSIX hosts are unaffected.
-# For the HOST form a native tool needs, use host_path (below). See ADR-0029.
+# (/c/...), and a UNC host path (\\server\share, the realpath form of a mapped
+# network drive) to the Cygwin //server/share form; cygpath only exists on
+# MSYS/Cygwin, so POSIX hosts are unaffected. The //server/share form is then
+# re-namespaced to /unc/server/share (single leading slash) so it matches the
+# Python adapter and cannot collide with a guest system directory (a share named
+# "home" would otherwise become //home/... = the agent HOME). See ADR-0029.
+# For the HOST form a native tool needs, use host_path (below).
 canonicalize_path() {
-  local p="${1:-}" _out=""
+  local p="${1:-}" _out="" _resolve=1
   [ -n "$p" ] || return 0
-  if command -v realpath >/dev/null 2>&1; then
-    _out=$(realpath "$p" 2>/dev/null) || _out=""
-  elif command -v readlink >/dev/null 2>&1; then
-    _out=$(readlink -f "$p" 2>/dev/null) || _out=""
+  # A UNC host path (\\server\share or //server/share) is already absolute in
+  # the Windows sense and names a network path realpath cannot resolve. A POSIX
+  # host's realpath would treat the backslash form as a RELATIVE path and mangle
+  # it (resolving \\server\share under the cwd), so skip the realpath/readlink
+  # step for UNC and let it flow straight to cygpath -u (ADR-0029 amendment).
+  # The //server form is UNC only where cygpath exists (MSYS/Cygwin). On a
+  # POSIX host a leading // is an ordinary absolute path (macOS keeps it in
+  # `cd //var/...; pwd`), so it still goes through realpath there: skipping it
+  # would hand msb the symlinked $TMPDIR form it cannot mount.
+  case "$p" in
+    \\\\*) _resolve=0 ;;
+    //[^/]*) command -v cygpath >/dev/null 2>&1 && _resolve=0 ;;
+  esac
+  if [ "$_resolve" -eq 1 ]; then
+    if command -v realpath >/dev/null 2>&1; then
+      _out=$(realpath "$p" 2>/dev/null) || _out=""
+    elif command -v readlink >/dev/null 2>&1; then
+      _out=$(readlink -f "$p" 2>/dev/null) || _out=""
+    fi
+    [ -n "$_out" ] && p="$_out"
   fi
-  [ -n "$_out" ] && p="$_out"
   if command -v cygpath >/dev/null 2>&1; then
     _out=$(cygpath -u "$p" 2>/dev/null) || _out=""
     [ -n "$_out" ] && p="$_out"
+    # cygpath -u maps UNC to the Cygwin //server/share form. The guest must see
+    # a single-slash /unc/ namespace instead (ADR-0029 amendment): it matches
+    # the Python adapter's /unc/server/share/... form, and a leading // is never
+    # handed to the Linux guest (whose meaning is implementation-defined).
+    # Drive-form and already-POSIX values are unaffected.
+    case "$p" in
+      //[^/]*) p="/unc/${p#//}" ;;
+    esac
   fi
   printf '%s\n' "$p"
 }
@@ -1212,10 +1646,22 @@ canonicalize_path() {
 # native host tool must resolve on the host filesystem (a mount SOURCE, a file
 # to copy, a host socket, a host PEM). On POSIX the two are identical. See
 # ADR-0029.
+#
+# host_path is the inverse of canonicalize_path's /unc/ re-namespacing: a guest
+# /unc/server/share/... value names the UNC path //server/share/... on the
+# host. /unc is not an MSYS mount, so cygpath -m would place it under the MSYS
+# root (C:/Program Files/Git/unc/...), a directory that does not exist; the
+# mount source for a mapped-drive workspace must stay the UNC path.
 host_path() {
   local p="${1:-}" _out=""
   [ -n "$p" ] || return 0
   if command -v cygpath >/dev/null 2>&1; then
+    case "$p" in
+      /unc/?*)
+        printf '//%s\n' "${p#/unc/}"
+        return 0
+        ;;
+    esac
     _out=$(cygpath -m "$p" 2>/dev/null) || _out=""
     [ -n "$_out" ] && p="$_out"
   fi
@@ -1246,7 +1692,7 @@ advise_project_env_activation() {
     echo "     use already-approved direnv export when available." >&2
     return 0
   fi
-  echo "acq: project environment detected ($kind) in $ws." >&2
+  echo "acq: project environment detected ($kind) in $(acq_printable "$ws")." >&2
   echo "     acq will not run project activation, 'direnv allow', or 'devenv shell' automatically." >&2
   echo "     If you trust this repo and have approved its .envrc yourself, re-run" >&2
   echo "     this acq command with ACQ_ACTIVATE_PROJECT_ENV=1 to use direnv export." >&2
@@ -1365,7 +1811,10 @@ acq_host_socket_forwards() {
         printf 'acq: SSH_AUTH_SOCK path contains a tab/newline; skipping ssh-agent forwarding\n' >&2
       else
         case "$_p" in
-          /*) printf '%s\t%s\t%s\t%s\n' "$_p" "$_agent_port" "stream" "ssh-agent" ;;
+          /*)
+            # Check the forwarded socket's owner: warn, never refuse.
+            [ -O "$_p" ] || printf 'acq: warning: SSH_AUTH_SOCK names a socket owned by another user; forwarding it anyway\n' >&2
+            printf '%s\t%s\t%s\t%s\n' "$_p" "$_agent_port" "stream" "ssh-agent" ;;
           *) printf 'acq: SSH_AUTH_SOCK path is not absolute; skipping ssh-agent forwarding\n' >&2 ;;
         esac
       fi
@@ -1402,6 +1851,13 @@ acq_host_socket_forwards() {
       printf 'acq: malformed host-socket forward %s (expected PATH:PORT); skipping\n' "$_entry" >&2
       continue
     fi
+    # Absoluteness is checked on the path as given, before canonicalizing: a
+    # relative path (or a relative symlink) would resolve against the current
+    # directory, normally the agent-writable workspace (see userdirs.sh).
+    if ! acq_path_is_absolute "$_path"; then
+      printf 'acq: host-socket path %s is not absolute; skipping\n' "$_path" >&2
+      continue
+    fi
     if command -v canonicalize_path >/dev/null 2>&1; then
       _path=$(canonicalize_path "$_path")
     fi
@@ -1420,6 +1876,7 @@ acq_host_socket_forwards() {
       printf 'acq: host-socket port %s is invalid (need 1..4294967294, != 123); skipping\n' "$_port" >&2
       continue
     fi
+    [ -O "$_path" ] || printf 'acq: warning: host-socket path %s is a socket owned by another user; forwarding it anyway\n' "$_path" >&2
     printf '%s\t%s\t%s\t%s\n' "$_path" "$_port" "$_kind" "custom"
   done
 }
@@ -1486,6 +1943,9 @@ extract_kit_flags() {
   if [ "$expect_kit" -eq 1 ]; then
     echo "acq: --kit given with no value; ignoring" >&2
   fi
+  # A --kit ref is typed for this run/create, so a refused one stops it now.
+  _acq_kit_refs_check cli || return 1
+  _acq_kit_refs_make_absolute
 }
 
 # Extract the explicit empty provider selection without relying on shell export
@@ -1546,9 +2006,9 @@ extract_image_flag() {
   fi
 }
 
-# Extract the acq-owned boolean `--clone` (neutral disposable-primary option,
-# GSA-TTS/agentic-coding-quickstart#403) from an arg list, mirroring
-# extract_image_flag: ACQ_CLONE_FLAG=1 if seen before `--`, everything else in
+# Extract the acq-owned boolean `--clone` (neutral disposable-primary option)
+# from an arg list, mirroring extract_image_flag: ACQ_CLONE_FLAG=1 if seen
+# before `--`, everything else in
 # ACQ_CLONE_REMAINING. Acq owns the flag on both backends — sbx re-injects it
 # for the native `sbx create --clone`; msb emulates with a host-side scratch
 # clone — so it must never survive raw on a backend argv.
@@ -1759,8 +2219,12 @@ acq_registry_auth_hint() {
 
 ACQ_RESOLVED_BACKEND=""
 
+# Only an absolute XDG_CONFIG_HOME/HOME is honored (see userdirs.sh); returns 1
+# with no output when no absolute home can be determined.
 _acq_config_file() {
-  printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/acq/config.yaml"
+  local base
+  base=$(acq_xdg_dir XDG_CONFIG_HOME .config) || return 1
+  printf '%s\n' "$base/acq/config.yaml"
 }
 
 _read_config_backend() {
@@ -1782,7 +2246,7 @@ _acq_config_read_field() {
   case "$key" in
     ''|*[!A-Za-z0-9_]*) return 0 ;;   # fail closed on an unexpected key name
   esac
-  cfg=$(_acq_config_file)
+  cfg=$(_acq_config_file) || return 0
   [ -f "$cfg" ] || return 0
   awk -v k="$key" '
     {
@@ -1835,19 +2299,305 @@ _acq_config_read_field() {
 # empty VALUE removes the key entirely (so "no extras" is represented by absence,
 # not an empty-valued line). Atomic (temp file + mv). Best-effort: a write failure
 # warns via acq_debug and returns non-zero but never aborts the caller.
+#
+# A symlinked config.yaml (a dotfiles setup) is written THROUGH: the temp file is
+# created beside the link's final target and renamed over the target, so the link
+# survives. An existing file keeps its mode; only a new file gets 0600. The
+# Python writer (config.py) behaves the same way.
+
+# _acq_config_write_target PATH — where a write to PATH lands: a symlink's final
+# target (followed link by link, a relative link resolved against its own
+# directory), else PATH itself, with the parent directory made physical. Fails on
+# a link loop or a parent directory that does not exist.
+_acq_config_write_target() {
+  local p="$1" hops=0 dir link
+  while [ -h "$p" ]; do
+    hops=$((hops + 1))
+    [ "$hops" -le 40 ] || return 1
+    dir=$(CDPATH='' cd -P -- "$(dirname -- "$p")" 2>/dev/null && pwd -P) || return 1
+    link=$(readlink -- "$p") || return 1
+    case "$link" in
+      /*) p="$link" ;;
+      *) p="$dir/$link" ;;
+    esac
+  done
+  dir=$(CDPATH='' cd -P -- "$(dirname -- "$p")" 2>/dev/null && pwd -P) || return 1
+  printf '%s/%s\n' "$dir" "$(basename -- "$p")"
+}
+
+# _acq_file_mode PATH — PATH's permission bits in octal (GNU or BSD stat).
+_acq_file_mode() {
+  local m
+  m=$(stat -c %a -- "$1" 2>/dev/null) || m=$(stat -f %Lp -- "$1" 2>/dev/null) || return 1
+  case "$m" in ''|*[!0-7]*) return 1 ;; esac
+  printf '%s\n' "$m"
+}
+
+# ---------------------------------------------------------------------------
+# The config.yaml lock, shared with the Python acq
+# ---------------------------------------------------------------------------
+# Python serializes every config.yaml read-modify-write (backend set/unset,
+# configure, the schema migration) with an OS advisory lock on
+# <state>/locks/config.lock: fcntl.flock on POSIX, msvcrt.locking on Windows.
+# Bash 3.2 cannot take that lock portably: flock(1) is not on macOS, and the
+# locks Git Bash takes are not the ones native Windows Python takes. So the two
+# implementations also share a mkdir lock beside it, <state>/locks/config.lock.d,
+# which Python takes while it holds its OS lock (ConfigDirLock in
+# py-acq/src/acq_py/lock.py). Its owner file holds "PID IDENTITY", as the
+# provider-input lock's does.
+#
+# On POSIX a holder whose PID is gone, or now has a different identity (a reused
+# PID), is stale and recovered. The exclusive create of the owner file decides
+# who holds the lock, so a directory without one is taken (_acq_config_lock_take).
+# An owner file that is still empty is a writer between creating it and writing
+# its token, so it is never removed: the wait times out and prints the recovery
+# command (KNOWN_FAILURE_MODES section 79). On Windows a native Python holder's PID cannot be checked from
+# Git Bash, nor a Git Bash PID from Python, so both count the directory as held
+# while it is younger than
+# _ACQ_CONFIG_LOCK_WINDOWS_STALE_S seconds and recover it after that; a config
+# write takes well under a second. The wait is Python's for the same lock,
+# ACQ_MIGRATION_LOCK_TIMEOUT (default 5 seconds).
+_ACQ_CONFIG_LOCK_WINDOWS_STALE_S=60
+_ACQ_CONFIG_LOCK_TOKEN=""
+
+# _acq_config_lock_dir — print the shared config.yaml lock directory.
+_acq_config_lock_dir() {
+  local state
+  state=$(acq_state_dir) || return 1
+  printf '%s/locks/config.lock.d\n' "${state%/}"
+}
+
+_acq_config_lock_windows() {
+  case "${OSTYPE:-}" in msys*|cygwin*) return 0 ;; esac
+  return 1
+}
+
+# _acq_config_lock_owner_line DIR — the first line of DIR/owner ("" if unreadable).
+_acq_config_lock_owner_line() {
+  local line=""
+  { IFS= read -r line < "$1/owner"; } 2>/dev/null || true
+  printf '%s\n' "$line"
+}
+
+# _acq_config_lock_token PID — the owner line for PID, the shell taking the lock.
+# Empty on POSIX when PID's identity cannot be read (no ps): Python could not
+# verify such an owner, so the lock is then honoured but not taken, as Python
+# does in that case.
+_acq_config_lock_token() {
+  local pid="$1" identity
+  identity=$(_acq_provider_input_process_identity "$pid" 2>/dev/null || true)
+  if [ -z "$identity" ]; then
+    _acq_config_lock_windows || return 0
+    identity=unverified
+  fi
+  printf '%s %s\n' "$pid" "$identity"
+}
+
+# _acq_config_lock_age DIR — DIR's age in whole seconds (GNU or BSD stat).
+_acq_config_lock_age() {
+  local mtime now
+  mtime=$(stat -c %Y -- "$1" 2>/dev/null) || mtime=$(stat -f %m -- "$1" 2>/dev/null) || return 1
+  now=$(date +%s) || return 1
+  case "$mtime$now" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$((now - mtime))"
+}
+
+# _acq_pid_alive PID — true when PID exists. A process owned by another user
+# makes kill -0 fail with "Operation not permitted"; it is alive all the same
+# (as Python's lock._pid_alive treats EPERM).
+_acq_pid_alive() {
+  local err
+  err=$(kill -0 "$1" 2>&1) && return 0
+  case "$err" in *"not permitted"*) return 0 ;; esac
+  return 1
+}
+
+# _acq_config_lock_state DIR LINE — "stale" when the holder recorded in LINE
+# (DIR's owner line) can be recovered, else "held".
+_acq_config_lock_state() {
+  local lock="$1" pid identity actual age
+  if _acq_config_lock_windows; then
+    age=$(_acq_config_lock_age "$lock") || age=0
+    [ "$age" -ge "$_ACQ_CONFIG_LOCK_WINDOWS_STALE_S" ] && echo stale || echo held
+    return 0
+  fi
+  IFS=' ' read -r pid identity <<EOF
+$2
+EOF
+  case "$pid" in ''|*[!0-9]*) echo held; return 0 ;; esac
+  actual=$(_acq_provider_input_process_identity "$pid" 2>/dev/null || true)
+  if [ -n "$identity" ] && [ -n "$actual" ] && [ "$actual" = "$identity" ]; then
+    echo held
+  elif ! _acq_pid_alive "$pid" || { [ -n "$actual" ] && [ "$actual" != "$identity" ]; }; then
+    echo stale
+  else
+    echo held
+  fi
+}
+
+# _acq_config_lock_take DIR TOKEN — make sure DIR exists, then create DIR/owner
+# holding TOKEN. Returns 0 when taken, 1 when not (another holder has it, or the
+# caller should look again). Creating the owner file is what decides: noclobber
+# makes Bash itself open it with O_EXCL, so exactly one taker creates it. mkdir
+# cannot decide, because it is not atomic everywhere (uutils coreutils mkdir
+# 0.10 reports success to concurrent callers; KNOWN_FAILURE_MODES section 92).
+# So an existing directory with no owner file is taken too: a leftover from a
+# taker that died before creating its owner heals itself instead of blocking
+# every config write. A taker that loses never removes anything. If writing the
+# token into the owner file it created fails (a full disk, say), that file is
+# its own and is removed again.
+_acq_config_lock_take() {
+  mkdir -- "$1" 2>/dev/null || true
+  if [ -L "$1" ] || [ ! -d "$1" ]; then
+    return 1
+  fi
+  [ ! -L "$1/owner" ] || return 1
+  local rc=0
+  ( set -C; { printf '%s\n' "$2" || exit 2; } > "$1/owner" ) 2>/dev/null || rc=$?
+  [ ! -L "$1/owner" ] || return 1
+  if [ "$rc" -ne 2 ]; then
+    return "$rc"
+  fi
+  rm -f -- "$1/owner" 2>/dev/null
+  rmdir -- "$1" 2>/dev/null || true
+  return 1
+}
+
+# _acq_config_lock_wait — the bounded wait in seconds: ACQ_MIGRATION_LOCK_TIMEOUT
+# when it is a plain non-negative number, else 5.
+_acq_config_lock_wait() {
+  local t="${ACQ_MIGRATION_LOCK_TIMEOUT:-}"
+  case "$t" in ''|.|*[!0-9.]*|*.*.*) t=5 ;; esac
+  printf '%s\n' "$t"
+}
+
+# _acq_config_lock_ticks — the bounded wait, in 0.2-second polls.
+_acq_config_lock_ticks() {
+  awk -v t="$(_acq_config_lock_wait)" 'BEGIN { printf "%d\n", t * 5 }'
+}
+
+# _acq_sh_quote TEXT — TEXT single-quoted for a pasted shell command.
+_acq_sh_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+# _acq_lock_recovery_hint LOCK — tell the user how to remove a leftover mkdir
+# lock (its owner file, then the directory). Only safe when no acq command is
+# running, which is why acq never does it on its own for a lock with no owner.
+_acq_lock_recovery_hint() {
+  local q
+  q=$(_acq_sh_quote "$1")
+  echo "acq:   if no acq command is running, remove the leftover lock and retry:" >&2
+  echo "acq:     rm -f -- ${q%\'}/owner' && rmdir -- $q" >&2
+  echo "acq:   (see docs/KNOWN_FAILURE_MODES.md, section 79)" >&2
+}
+
+_acq_config_lock_timed_out() {
+  echo "acq: could not take the config.yaml lock within $(_acq_config_lock_wait)s; another acq command holds $1" >&2
+  _acq_lock_recovery_hint "$1"
+}
+
+# _acq_config_lock_acquire — take the shared config.yaml lock, waiting up to
+# ACQ_MIGRATION_LOCK_TIMEOUT seconds. Sets _ACQ_CONFIG_LOCK_TOKEN when taken
+# (empty when it was only honoured; see _acq_config_lock_token). Returns 1, with
+# the reason on stderr, when the lock cannot be taken.
+_acq_config_lock_acquire() {
+  local lock locks pid token ticks tries=0 recovered=0 line
+  _ACQ_CONFIG_LOCK_TOKEN=""
+  lock=$(_acq_config_lock_dir) || { echo "acq: cannot locate the config.yaml lock (no absolute acq state directory)" >&2; return 1; }
+  locks=${lock%/*}
+  ( umask 077; mkdir -p -- "$locks" ) 2>/dev/null || true
+  if [ -L "$locks" ] || [ ! -d "$locks" ]; then
+    echo "acq: unsafe config.yaml lock directory: $locks (a symbolic link or not a directory)" >&2
+    return 1
+  fi
+  # This shell's own PID ($$ is the top-level shell's even in a subshell, and
+  # Bash 3.2 has no BASHPID). It must be taken here, not inside the command
+  # substitution that builds the token, whose subshell exits at once.
+  pid=$(exec sh -c 'echo $PPID')
+  token=$(_acq_config_lock_token "$pid")
+  ticks=$(_acq_config_lock_ticks)
+  while :; do
+    if [ -n "$token" ]; then
+      if _acq_config_lock_take "$lock" "$token"; then
+        _ACQ_CONFIG_LOCK_TOKEN="$token"
+        return 0
+      fi
+    elif [ ! -e "$lock" ] && [ ! -L "$lock" ]; then
+      return 0
+    fi
+    # Only what is positively there is unsafe. The holder may release (and
+    # another take may recreate) the directory at any moment, so a path that is
+    # simply not a directory right now has gone away: look again at once. That
+    # still counts against the wait, so a take that keeps failing for another
+    # reason cannot loop forever.
+    if [ -L "$lock" ]; then
+      echo "acq: unsafe config.yaml lock: $lock (a symbolic link)" >&2
+      return 1
+    fi
+    if [ -f "$lock" ] || [ -p "$lock" ] || [ -S "$lock" ] || [ -b "$lock" ] || [ -c "$lock" ]; then
+      echo "acq: unsafe config.yaml lock: $lock (not a directory)" >&2
+      return 1
+    fi
+    if [ ! -d "$lock" ]; then
+      [ "$tries" -lt "$ticks" ] || { _acq_config_lock_timed_out "$lock"; return 1; }
+      tries=$((tries + 1))
+      continue
+    fi
+    line=$(_acq_config_lock_owner_line "$lock")
+    if [ "$recovered" -lt 3 ] && [ "$(_acq_config_lock_state "$lock" "$line")" = stale ]; then
+      # The comparison and unlink cannot be atomic; see failure mode 92.
+      recovered=$((recovered + 1))
+      if [ "$(_acq_config_lock_owner_line "$lock")" = "$line" ]; then
+        rm -f -- "$lock/owner" 2>/dev/null && rmdir -- "$lock" 2>/dev/null && continue
+      fi
+    fi
+    [ "$tries" -lt "$ticks" ] || { _acq_config_lock_timed_out "$lock"; return 1; }
+    tries=$((tries + 1))
+    sleep 0.2
+  done
+}
+
+# _acq_config_lock_release — remove the lock if this shell still owns it.
+_acq_config_lock_release() {
+  local lock token="$_ACQ_CONFIG_LOCK_TOKEN"
+  _ACQ_CONFIG_LOCK_TOKEN=""
+  [ -n "$token" ] || return 0
+  lock=$(_acq_config_lock_dir) || return 0
+  [ "$(_acq_config_lock_owner_line "$lock")" = "$token" ] || return 0
+  rm -f -- "$lock/owner" 2>/dev/null && rmdir -- "$lock" 2>/dev/null
+  return 0
+}
+
+# _acq_config_write_field KEY VALUE — see above. Holds the shared config.yaml
+# lock for the whole read-modify-write, so a Bash and a Python acq changing
+# different keys at once never lose one change.
 _acq_config_write_field() {
-  local key="${1:-}" value="${2:-}" cfg dir tmp
+  local rc=0
+  _acq_config_lock_acquire || return 1
+  _acq_config_write_field_locked "$@" || rc=$?
+  _acq_config_lock_release
+  return "$rc"
+}
+
+_acq_config_write_field_locked() {
+  local key="${1:-}" value="${2:-}" cfg dir tmp target mode
   case "$key" in
     ''|*[!A-Za-z0-9_]*) acq_debug "config: refusing to write unsafe key '$key'"; return 1 ;;
   esac
-  cfg=$(_acq_config_file)
+  cfg=$(_acq_config_file) || { acq_debug "config: no absolute config directory"; return 1; }
   dir=$(dirname "$cfg")
   if ! ( umask 077; mkdir -p "$dir" ) 2>/dev/null; then
     acq_debug "config: could not create config dir: $dir"
     return 1
   fi
   chmod 700 "$dir" 2>/dev/null || { acq_debug "config: chmod failed: $dir"; return 1; }
-  tmp="${cfg}.tmp.$$"
+  target=$(_acq_config_write_target "$cfg") || { acq_debug "config: cannot resolve write target: $cfg"; return 1; }
+  mode=600
+  if [ -f "$target" ]; then
+    mode=$(_acq_file_mode "$target") || { acq_debug "config: cannot read mode: $target"; return 1; }
+  fi
+  tmp="${target}.tmp.$$"
   {
     # Re-emit every existing line except the one for KEY (which we replace/drop).
     if [ -f "$cfg" ]; then
@@ -1866,8 +2616,8 @@ _acq_config_write_field() {
       printf '%s: %s\n' "$key" "$value"
     fi
   } > "$tmp" 2>/dev/null || { acq_debug "config: write failed: $tmp"; rm -f "$tmp" 2>/dev/null; return 1; }
-  chmod 600 "$tmp" 2>/dev/null || { acq_debug "config: chmod failed: $tmp"; rm -f "$tmp" 2>/dev/null; return 1; }
-  mv -f "$tmp" "$cfg" 2>/dev/null || { acq_debug "config: mv failed: $cfg"; rm -f "$tmp" 2>/dev/null; return 1; }
+  chmod "$mode" "$tmp" 2>/dev/null || { acq_debug "config: chmod failed: $tmp"; rm -f "$tmp" 2>/dev/null; return 1; }
+  mv -f "$tmp" "$target" 2>/dev/null || { acq_debug "config: mv failed: $target"; rm -f "$tmp" 2>/dev/null; return 1; }
   acq_debug "config: wrote ${key}"
   return 0
 }
@@ -1882,8 +2632,11 @@ _acq_config_write_field() {
 _ACQ_LOCAL_BIN_ANNOUNCED=""
 _ensure_local_bin_on_path() {
   local be="$1"
-  local lb="${HOME:-}/.local/bin"
-  [ -n "${HOME:-}" ] || return 1
+  local lb
+  # Only an absolute home: a relative entry on PATH would resolve against the
+  # current directory (see userdirs.sh).
+  lb=$(acq_home_dir) || return 1
+  lb="$lb/.local/bin"
   [ -x "$lb/$be" ] || return 1
 
   # Already on PATH? Then nothing to do (defensive; caller only reaches here
@@ -1995,9 +2748,24 @@ _announce_autodetect_backend() {
   esac
 }
 
-# Source the adapter for a named backend. Fails closed if the file is missing.
+# acq_backend_name_known NAME — 0 when NAME is a backend acq ships an adapter for.
+# The name picks the file under acq.backends/ that acq sources, so it is checked
+# against this fixed set before any path is built from it.
+acq_backend_name_known() {
+  case "$1" in
+    sbx|msb) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Source the adapter for a named backend. Fails closed on a name outside the
+# known set (before any file is touched) or if the file is missing.
 _load_backend_adapter() {
   local name="$1"
+  if ! acq_backend_name_known "$name"; then
+    echo "acq: error: unknown backend '$(acq_printable "$name")' (expected sbx or msb)" >&2
+    exit 1
+  fi
   local adapter="${ACQ_SCRIPT_DIR}/acq.backends/${name}.sh"
   if [ ! -f "$adapter" ]; then
     echo "acq: error: no backend adapter found for '${name}' (expected: ${adapter})" >&2
@@ -2017,21 +2785,65 @@ _load_backend_adapter() {
   ACQ_RESOLVED_BACKEND="$name"
 }
 
+# acq_resolve_backend_best_effort [EXPLICIT] — resolve the backend for a verb that
+# works without one (version, doctor, configure, help). Its diagnostics are
+# silenced, so "nothing installed" lets the verb report "unknown", but the
+# unknown-backend refusal still reaches stderr through fd 3 before it exits:
+# a broken pin must not end the verb with a bare exit 1.
+acq_resolve_backend_best_effort() {
+  _ACQ_RESOLVE_ERR_FD=3 acq_resolve_backend "${1:-}" 3>&2 2>/dev/null || true
+}
+
+# acq_resolve_backend_diagnostic [EXPLICIT] — acq_resolve_backend_best_effort
+# for doctor and configure. An unknown backend pinned in config.yaml does not
+# end the verb: it is recorded in ACQ_INVALID_BACKEND_PIN (no backend is
+# loaded), so doctor reports a failed config-backend check and configure shows
+# it, both completing as Python's do. An unknown --backend or
+# ACQ_BACKEND value still exits.
+acq_resolve_backend_diagnostic() {
+  ACQ_INVALID_BACKEND_PIN=""
+  _ACQ_RESOLVE_PIN_REPORT=1 acq_resolve_backend_best_effort "${1:-}"
+}
+
+# _acq_unknown_backend_message NAME ORIGIN — the refusal for a backend name acq
+# cannot load (stdout; callers redirect).
+_acq_unknown_backend_message() {
+  echo "acq: error: unknown backend '$(acq_printable "$1")' from ${2} (expected sbx or msb)."
+  echo "     Fix or unset it, or pin a valid one with 'acq backend set msb'."
+}
+
+# _acq_unknown_backend NAME ORIGIN FROM_CONFIG — refuse a backend name acq
+# cannot load. Exits 1, as a missing adapter file always has: a backend the user
+# named but acq cannot load is an error even for the best-effort callers,
+# unlike "nothing installed". The one exception is the config.yaml pin
+# (FROM_CONFIG=1) under acq_resolve_backend_diagnostic, which records the name
+# in ACQ_INVALID_BACKEND_PIN and returns 1 for the verb to report.
+_acq_unknown_backend() {
+  if [ "$3" = 1 ] && [ -n "${_ACQ_RESOLVE_PIN_REPORT:-}" ]; then
+    ACQ_INVALID_BACKEND_PIN="$1"
+    return 1
+  fi
+  _acq_unknown_backend_message "$1" "$2" >&"${_ACQ_RESOLVE_ERR_FD:-2}"
+  exit 1
+}
+
 # Resolve and load the backend. $1 (optional) = explicit --backend value.
 acq_resolve_backend() {
   local explicit="${1:-}"
-  local name=""
+  local name="" origin="" from_config=0
   local autodetected=0
 
   if [ -n "$explicit" ]; then
-    name="$explicit"
+    name="$explicit"; origin="--backend"
   elif [ -n "${ACQ_BACKEND:-}" ]; then
-    name="$ACQ_BACKEND"
+    name="$ACQ_BACKEND"; origin="ACQ_BACKEND"
   else
     local cfg_name
     cfg_name=$(_read_config_backend)
     if [ -n "$cfg_name" ]; then
       name="$cfg_name"
+      from_config=1
+      origin=$(_acq_config_file) || origin="config.yaml"
     else
       _auto_detect_backend || {
         echo "acq: error: no backend detected (looked on PATH and in ~/.local/bin)." >&2
@@ -2039,7 +2851,13 @@ acq_resolve_backend() {
         echo "     If it is already installed elsewhere, add its directory to PATH," >&2
         echo "     e.g.:  export PATH=\"\$HOME/.local/bin:\$PATH\"" >&2
         echo "     Run 'acq doctor' for installation hints." >&2
-        exit 1
+        # Return, not exit: acq_resolve_backend is a RESOLUTION function. A bare
+        # caller (the mutating verbs) still fails via `set -e`; a best-effort
+        # caller (`acq version` / `doctor` / `configure` / help) wraps the call
+        # in `… || true` and must be able to recover and report "unknown"
+        # rather than dying mid-report. An `exit 1` here would terminate the
+        # shell and bypass that `|| true` (see the coexistence `version` oracle).
+        return 1
       }
       name="$ACQ_AUTODETECT_BACKEND"
       autodetected=1
@@ -2051,6 +2869,10 @@ acq_resolve_backend() {
   # silent.
   [ "$autodetected" -eq 1 ] && _announce_autodetect_backend
 
+  # An unknown name is refused (see _acq_unknown_backend).
+  if ! acq_backend_name_known "$name"; then
+    _acq_unknown_backend "$name" "${origin:-auto-detect}" "$from_config" || return 1
+  fi
   _load_backend_adapter "$name"
   _build_kit_list
 }
@@ -2087,12 +2909,17 @@ acq_resolve_backend() {
 
 # Provenance state directory (host-side). Overridable via ACQ_PROVENANCE_DIR for
 # tests and for users who relocate XDG state. Mirrors _acq_config_file's style.
+# A relative override is never honoured (see userdirs.sh): the entry point
+# refuses it up front, and this fails closed if reached anyway.
 _acq_provenance_dir() {
   if [ -n "${ACQ_PROVENANCE_DIR:-}" ]; then
+    acq_path_is_absolute "$ACQ_PROVENANCE_DIR" || return 1
     printf '%s\n' "$ACQ_PROVENANCE_DIR"
     return 0
   fi
-  printf '%s\n' "${XDG_STATE_HOME:-$HOME/.local/state}/acq/provenance"
+  local base
+  base=$(acq_xdg_dir XDG_STATE_HOME .local/state) || return 1
+  printf '%s\n' "$base/acq/provenance"
 }
 
 # Path to one sandbox's provenance record. Keyed by backend + sandbox name so the
@@ -2109,7 +2936,9 @@ _acq_provenance_file() {
   # cksum of the raw name disambiguates sanitizer collisions (fail-open: if cksum
   # is somehow unavailable the name still resolves, just without the suffix).
   name_sum=$(printf '%s' "$name" | cksum 2>/dev/null | cut -d' ' -f1 2>/dev/null || echo 0)
-  printf '%s/%s/%s.%s.env\n' "$(_acq_provenance_dir)" "$safe_backend" "$safe_name" "$name_sum"
+  local _acq_pd
+  _acq_pd=$(_acq_provenance_dir) || return 1
+  printf '%s/%s/%s.%s.env\n' "$_acq_pd" "$safe_backend" "$safe_name" "$name_sum"
 }
 
 # Write (or overwrite) a sandbox's provenance record. Call ONLY after a
@@ -2186,6 +3015,22 @@ acq_provenance_field() {
   awk -F= -v k="$field" '
     $1 == k { sub(/^[^=]*=/, ""); print; exit }
   ' "$file" 2>/dev/null || true
+}
+
+# acq_provenance_readable BACKEND NAME — 0 when the sandbox's provenance record is
+# absent (a sandbox from before records existed) or is a regular file acq can
+# read; 1 when its path cannot be resolved or the record exists but cannot be
+# read. acq_provenance_field reads an unreadable record as empty, which a caller
+# would mistake for a legacy record, so a least-privilege decision checks this
+# first and fails closed.
+acq_provenance_readable() {
+  local file
+  file=$(_acq_provenance_file "${1:-}" "${2:-}") || return 1
+  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    return 0
+  fi
+  [ -f "$file" ] || return 1
+  cat -- "$file" >/dev/null 2>&1
 }
 
 # Remember the primary host workspace mounted into a sandbox. This is non-secret
@@ -2327,7 +3172,9 @@ _acq_cli_kits_file() {
   safe_backend=$(printf '%s' "$backend" | tr -c 'A-Za-z0-9._-' '_')
   safe_name=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')
   name_sum=$(printf '%s' "$name" | cksum 2>/dev/null | cut -d' ' -f1 2>/dev/null || echo 0)
-  printf '%s/%s/%s.%s.kits\n' "$(_acq_provenance_dir)" "$safe_backend" "$safe_name" "$name_sum"
+  local _acq_pd
+  _acq_pd=$(_acq_provenance_dir) || return 1
+  printf '%s/%s/%s.%s.kits\n' "$_acq_pd" "$safe_backend" "$safe_name" "$name_sum"
 }
 
 # Persist the current CLI (`--kit`) and extra (ACQ_EXTRA_KITS) kit refs for a
@@ -2354,18 +3201,80 @@ acq_cli_kits_write() {
       local _extra=()
       split_noglob _extra "$ACQ_EXTRA_KITS"
       for ref in ${_extra[@]+"${_extra[@]}"}; do
-        [ -n "$ref" ] && printf 'extra=%s\n' "$ref"
+        [ -n "$ref" ] && printf 'extra=%s\n' "$(_acq_kit_ref_absolute "$ref")"
       done
     fi
     # CLI (`--kit`) refs, one per array element (already un-split).
     for ref in ${ACQ_CLI_KITS[@]+"${ACQ_CLI_KITS[@]}"}; do
-      [ -n "$ref" ] && printf 'kit=%s\n' "$ref"
+      [ -n "$ref" ] && printf 'kit=%s\n' "$(_acq_kit_ref_absolute "$ref")"
     done
   } > "$tmp" 2>/dev/null || { acq_debug "cli-kits: write failed: $tmp"; rm -f "$tmp" 2>/dev/null; return 1; }
   chmod 600 "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$file" 2>/dev/null || { acq_debug "cli-kits: mv failed: $file"; rm -f "$tmp" 2>/dev/null; return 1; }
   acq_debug "cli-kits: recorded $backend/$name (kit=$(printf '%s ' ${ACQ_CLI_KITS[@]+"${ACQ_CLI_KITS[@]}"}))"
   return 0
+}
+
+# _acq_kit_refs_make_absolute: rewrite ACQ_CLI_KITS and ACQ_EXTRA_KITS in place
+# so every relative local kit ref is absolute. Called where the refs enter (the
+# --kit parser and the kit-list build), so the cli-kits record, the sbx
+# extra-kits heal record and the applied list all name the same kits.
+_acq_kit_refs_make_absolute() {
+  local i ref out=""
+  local _x=()
+  for i in ${ACQ_CLI_KITS[@]+"${!ACQ_CLI_KITS[@]}"}; do
+    ACQ_CLI_KITS[i]=$(_acq_kit_ref_absolute "${ACQ_CLI_KITS[i]}")
+  done
+  if [ -n "${ACQ_EXTRA_KITS:-}" ]; then
+    split_noglob _x "$ACQ_EXTRA_KITS"
+    for ref in ${_x[@]+"${_x[@]}"}; do
+      [ -n "$ref" ] && out="${out:+$out }$(_acq_kit_ref_absolute "$ref")"
+    done
+    ACQ_EXTRA_KITS="$out"
+  fi
+}
+
+# _acq_kit_refs_check [cli]: refuse the --kit, ACQ_EXTRA_KITS and
+# ACQ_PROVIDER_KITS refs where they enter, before any of them is fetched,
+# recorded (the .kits record, the sbx extra-kits record) or printed. A remote
+# ref kit_ref_shape_check refuses (a query string, or a '#' fragment other than
+# one plain ref= and one plain dir=) fails it, with a message that never
+# repeats the ref. With "cli", only the --kit refs are checked.
+_acq_kit_refs_check() {
+  local only="${1:-}" ref var _x=()
+  for ref in ${ACQ_CLI_KITS[@]+"${ACQ_CLI_KITS[@]}"}; do
+    kit_ref_shape_check "$ref" "--kit" || return 1
+  done
+  [ "$only" != cli ] || return 0
+  for var in ACQ_EXTRA_KITS ACQ_PROVIDER_KITS; do
+    case "$var" in
+      ACQ_EXTRA_KITS) ref="${ACQ_EXTRA_KITS:-}" ;;
+      *) ref="${ACQ_PROVIDER_KITS:-}" ;;
+    esac
+    [ -n "$ref" ] || continue
+    _x=()
+    split_noglob _x "$ref"
+    for ref in ${_x[@]+"${_x[@]}"}; do
+      kit_ref_shape_check "$ref" "$var" || return 1
+    done
+  done
+  return 0
+}
+
+# _acq_kit_ref_absolute REF: echo REF with a relative local kit path made
+# absolute (physical), so a recorded ref names the same kit wherever a later
+# start/restart runs. Remote refs, absolute paths and paths that are not an
+# existing directory are echoed unchanged.
+_acq_kit_ref_absolute() {
+  local ref="${1:-}" abs
+  case "$ref" in
+    "" | git+http* | /* | [A-Za-z]:/* | [A-Za-z]:\\*) printf '%s\n' "$ref"; return 0 ;;
+  esac
+  if [ -d "$ref" ] && abs=$(CDPATH='' cd -P -- "$ref" 2>/dev/null && pwd -P) && [ -n "$abs" ]; then
+    printf '%s\n' "$abs"
+  else
+    printf '%s\n' "$ref"
+  fi
 }
 
 # Reload a sandbox's persisted CLI (`--kit`) and extra kit refs into ACQ_CLI_KITS
@@ -2385,9 +3294,35 @@ acq_cli_kits_load() {
   ACQ_CLI_KITS=()
   local _extras="" line val
   while IFS= read -r line; do
+    val=""
     case "$line" in
-      kit=*)   ACQ_CLI_KITS+=("${line#kit=}") ;;
-      extra=*) val="${line#extra=}"; [ -n "$val" ] && _extras="${_extras:+$_extras }$val" ;;
+      kit=* | extra=*)
+        val="${line#*=}"
+        # A relative local ref would be re-resolved against whatever directory
+        # this command runs from; records now store absolute paths, so skip a
+        # relative one left by an older acq instead of guessing.
+        case "$val" in
+          "" | git+http* | /* | [A-Za-z]:/* | [A-Za-z]:\\*) ;;
+          *)
+            echo "acq: warning: ignoring recorded relative kit path '$val' for $name (recorded by an older acq);" >&2
+            echo "acq:   recreate the sandbox with an absolute --kit path or ACQ_EXTRA_KITS entry to keep applying it." >&2
+            continue
+            ;;
+        esac
+        # A remote ref that acq now refuses at input (a query string, or a
+        # fragment parameter other than ref= and dir=) is skipped without
+        # being named, as a ref typed today would be refused.
+        if ! kit_ref_shape_check "$val" "recorded kit for $name" 2>/dev/null; then
+          echo "acq: warning: ignoring a recorded remote kit ref for $name that acq now refuses" >&2
+          echo "acq:   (a query string, or a '#' part other than one plain ref= and dir=); it is no longer applied." >&2
+          echo "acq:   Recreate the sandbox to clear it from the sandbox's kit record." >&2
+          continue
+        fi
+        ;;
+    esac
+    case "$line" in
+      kit=*)   ACQ_CLI_KITS+=("$val") ;;
+      extra=*) [ -n "$val" ] && _extras="${_extras:+$_extras }$val" ;;
     esac
   done < "$file"
   # Only overwrite ACQ_EXTRA_KITS from the record if the record carried extras;
@@ -2464,13 +3399,13 @@ _acq_kit_source_parse_entry() {
     *'@'*) ref="${rest#*@}"; rest="${rest%%@*}" ;;
   esac
   if ! repo=$(_acq_kit_source_normalize_repo "$rest"); then
-    echo "acq: ${source}: invalid kit source '$entry'" >&2
+    echo "acq: ${source}: invalid kit source '$(kit_ref_display "$entry")'" >&2
     echo "     want host/owner/repo[@REF][|DIR] (for example github.com/acme/kits@<sha>)" >&2
     return 1
   fi
   case "$ref" in
     *[!A-Za-z0-9_.-]*)
-      echo "acq: ${source}: invalid ref '$ref' for '$repo'" >&2
+      echo "acq: ${source}: invalid ref '$(kit_ref_display "$ref")' for '$repo'" >&2
       return 1
       ;;
   esac
@@ -2539,14 +3474,17 @@ _acq_kit_source_owner_prefix() {
 # fetching their kits.
 # shellcheck disable=SC2120  # EXCLUDE_REPO is passed by sbx.sh (another file), which per-file analysis cannot see
 acq_kit_source_prefixes() {
-  local exclude="${1:-}" entries repo rest prefix seen=""
+  local exclude="${1:-}" entries repo rest prefix prefix_lc seen=""
   entries=$(acq_kit_sources_entries) || return 1
   while IFS='|' read -r repo rest; do
     [ -n "$repo" ] || continue
     [ "$repo" != "$exclude" ] || continue
     prefix=$(_acq_kit_source_owner_prefix "$repo")
-    case " $seen " in *" $prefix "*) continue ;; esac
-    seen="$seen $prefix"
+    # Prefixes that differ only in letter case name the same owner: list it once,
+    # under the first spelling seen (as the Python acq does).
+    prefix_lc=$(_acq_ascii_lower "$prefix")
+    case " $seen " in *" $prefix_lc "*) continue ;; esac
+    seen="$seen $prefix_lc"
     printf '%s\n' "$prefix"
   done <<EOF
 $entries
@@ -2562,24 +3500,37 @@ EOF
   return 0
 }
 
-# _acq_kit_source_entry_for_repo REPO — echo "repo<TAB>ref<TAB>dir" for a repo that
-# is registered (exact host/owner/repo), or fail.
+# _acq_kit_source_entry_for_repo REPO — echo "repo|ref|dir" for a registered repo,
+# or fail. GitHub ignores the letter case of hosts, owners and repositories, so
+# the lookup does too: an exact spelling wins, else the first entry that matches
+# ignoring ASCII case. The echoed repo is the REGISTERED spelling, which callers
+# that rewrite the registry must use.
 _acq_kit_source_entry_for_repo() {
-  local wanted="${1:-}" repo ref dir
+  local wanted="${1:-}" repo ref dir entries wanted_lc
   [ -n "$wanted" ] || return 1
+  entries=$(acq_kit_sources_entries) || entries=""
   while IFS='|' read -r repo ref dir; do
     [ -n "$repo" ] || continue
     [ "$repo" = "$wanted" ] || continue
     printf '%s|%s|%s\n' "$repo" "$ref" "$dir"
     return 0
   done <<EOF
-$(acq_kit_sources_entries)
+$entries
+EOF
+  wanted_lc=$(_acq_ascii_lower "$wanted")
+  while IFS='|' read -r repo ref dir; do
+    [ -n "$repo" ] || continue
+    [ "$(_acq_ascii_lower "$repo")" = "$wanted_lc" ] || continue
+    printf '%s|%s|%s\n' "$repo" "$ref" "$dir"
+    return 0
+  done <<EOF
+$entries
 EOF
   # The pinned Patterns release is acq's CONTROL PLANE (validator + schemas), so
   # it stays resolvable even when the registry is overridden for one invocation
   # (ACQ_KIT_SOURCES) or emptied: the default provider kit must not vanish just
   # because an extra source was added for this run.
-  if [ "$wanted" = "$ACQ_KIT_SOURCE_DEFAULT_REPO" ]; then
+  if _acq_kit_source_is_control_plane "$wanted"; then
     printf '%s|%s|%s\n' \
       "$ACQ_KIT_SOURCE_DEFAULT_REPO" "$ACQ_KIT_SOURCE_DEFAULT_REF" "$ACQ_KIT_SOURCE_DEFAULT_DIR"
     return 0
@@ -2590,38 +3541,43 @@ EOF
 # _acq_kit_source_resolve_repo WANT — accept a full repo or a unique source
 # basename ("agentic-coding-patterns") and echo the full repo.
 _acq_kit_source_resolve_repo() {
-  local want="${1:-}" repo ref dir found="" count=0
+  local want="${1:-}" repo ref dir found="" count=0 shown
   [ -n "$want" ] || return 1
+  # Messages name WANT only through kit_ref_display: it is user input and may
+  # carry a credential.
+  shown=$(kit_ref_display "$want")
   # The shipped default source is the pinned control plane: always resolvable.
   if [ "$want" = "${ACQ_KIT_SOURCE_DEFAULT_REPO##*/}" ]; then
     printf '%s\n' "$ACQ_KIT_SOURCE_DEFAULT_REPO"
     return 0
   fi
   case "$want" in
-    */*) _acq_kit_source_entry_for_repo "$want" >/dev/null || {
-           echo "acq: kit source '$want' is not trusted." >&2
-           echo "     Add it first: acq kit-source add $want --ref <sha>" >&2
+    */*) found=$(_acq_kit_source_entry_for_repo "$want") || {
+           echo "acq: kit source '$shown' is not trusted." >&2
+           echo "     Add it first: acq kit-source add $shown --ref <sha>" >&2
            return 1
          }
-         printf '%s\n' "$want"
+         printf '%s\n' "${found%%|*}"
          return 0
          ;;
   esac
+  local want_lc
+  want_lc=$(_acq_ascii_lower "$want")
   while IFS='|' read -r repo ref dir; do
     [ -n "$repo" ] || continue
-    [ "${repo##*/}" = "$want" ] || continue
+    [ "$(_acq_ascii_lower "${repo##*/}")" = "$want_lc" ] || continue
     count=$((count + 1))
     found="$repo"
   done <<EOF
 $(acq_kit_sources_entries)
 EOF
   if [ "$count" -eq 0 ]; then
-    echo "acq: kit source name '$want' is not registered." >&2
+    echo "acq: kit source name '$shown' is not registered." >&2
     echo "     See: acq kit-source ls" >&2
     return 1
   fi
   if [ "$count" -gt 1 ]; then
-    echo "acq: kit source name '$want' is ambiguous; use host/owner/repo." >&2
+    echo "acq: kit source name '$shown' is ambiguous; use host/owner/repo." >&2
     echo "     See: acq kit-source ls" >&2
     return 1
   fi
@@ -2680,7 +3636,7 @@ _acq_kit_source_ref_trusted() {
       done
     fi
   fi
-  echo "acq: provider_kit names an untrusted remote ref: $ref" >&2
+  echo "acq: provider_kit names an untrusted remote ref: $(kit_ref_display "$ref")" >&2
   if [ -n "$repo" ]; then
     echo "     Trust its source first: acq kit-source add $repo --ref <sha>" >&2
   else
@@ -2874,7 +3830,14 @@ acq_kit_source_set() {
   [ -n "$dir" ] || dir="$ACQ_KIT_SOURCE_DEFAULT_DIR"
   # Validate the entry before persisting it (same rules the reader enforces).
   _acq_kit_source_parse_entry "${repo}@${ref}|${dir}" "kit-source add" >/dev/null || return 1
-  summary=$(_acq_kit_source_rewrite "$repo" "$repo" "$ref" "$dir") || {
+  # An entry registered under another letter case is the same repository:
+  # replace it rather than add a second entry.
+  local existing drop="$repo"
+  if existing=$(_acq_kit_source_entry_for_repo "$repo" 2>/dev/null) \
+      && ! _acq_kit_source_is_control_plane "$repo"; then
+    drop="${existing%%|*}"
+  fi
+  summary=$(_acq_kit_source_rewrite "$drop" "$repo" "$ref" "$dir") || {
     echo "acq: kit-source add: could not write $(_acq_config_file)" >&2
     return 1
   }
@@ -2885,8 +3848,21 @@ acq_kit_source_set() {
   return 0
 }
 
-# acq_kit_source_rm REPO — drop one source (the shipped default included; with no
-# sources left acq fetches nothing instead of silently reinstating it).
+# _acq_ascii_lower TEXT — TEXT with ASCII letters lower-cased. GitHub ignores the
+# letter case of hosts, owners and repositories, so trust decisions compare this.
+_acq_ascii_lower() {
+  printf '%s' "${1:-}" | LC_ALL=C tr '[:upper:]' '[:lower:]'
+}
+
+# _acq_kit_source_is_control_plane REPO — true when REPO is the pinned
+# control-plane repository (the shipped default) in any letter case.
+_acq_kit_source_is_control_plane() {
+  [ "$(_acq_ascii_lower "${1:-}")" = "$(_acq_ascii_lower "$ACQ_KIT_SOURCE_DEFAULT_REPO")" ]
+}
+
+# acq_kit_source_rm REPO — drop one registered source. The pinned control plane
+# (the shipped default, in any letter case) is refused, as Python refuses it:
+# it is the trust anchor and stays resolvable whatever the registry says.
 acq_kit_source_rm() {
   local repo_arg="${1:-}" repo summary
   if [ -z "$repo_arg" ]; then
@@ -2898,10 +3874,18 @@ acq_kit_source_rm() {
     echo "acq: kit-source rm: invalid repository '$repo_arg'" >&2
     return 1
   }
-  if ! _acq_kit_source_entry_for_repo "$repo" >/dev/null; then
+  if _acq_kit_source_is_control_plane "$repo"; then
+    echo "acq: kit-source rm: the built-in control-plane source cannot be removed." >&2
+    echo "     Team/personal sources can be removed; the control plane is the pinned trust anchor." >&2
+    return 1
+  fi
+  local entry
+  if ! entry=$(_acq_kit_source_entry_for_repo "$repo"); then
     echo "acq: kit source '${repo}' is not registered." >&2
     return 1
   fi
+  # Act on the registered spelling (the lookup ignores letter case).
+  repo="${entry%%|*}"
   # Reconcile the BACKEND allowlist first. If it cannot be brought in line, stop
   # with the registry untouched: nothing is reported as removed, the source stays
   # listed, and re-running this command after fixing the backend retries cleanly.
@@ -2938,9 +3922,10 @@ acq_kit_source_provider_kits() {
   [ -n "$repo" ] && [ -n "$ref" ] && [ -n "$dir" ] || return 0
   command -v kit_translate_fetch >/dev/null 2>&1 || return 0
   seed=$(printf '%s@%s' "$repo" "$ref" | cksum 2>/dev/null | cut -d' ' -f1)
+  cache=$(acq_xdg_dir XDG_CACHE_HOME .cache) || return 0
   # Historical seed directories may contain Git metadata. Preserve them rather
   # than adopting or deleting repositories while upgrading discovery payloads.
-  namespace="${XDG_CACHE_HOME:-${HOME:-}/.cache}/acq/kit-sources/payload-v2"
+  namespace="$cache/acq/kit-sources/payload-v2"
   if [ -L "$namespace" ]; then
     acq_debug 'kit-source: refusing a symlink kit cache namespace'
     return 0
@@ -3315,7 +4300,7 @@ acq_provider_credential_merge_json() {
   [ -n "$base" ] && [ -n "$out" ] && [ -n "$python" ] || return 1
   overrides=$(acq_provider_credential_overrides) || return 1
   # shellcheck disable=SC2086  # validated entries; word splitting is the framing
-  "$python" - "$base" "$out" $overrides <<'PY'
+  "$python" -I - "$base" "$out" $overrides <<'PY'
 import json, os, sys
 
 base_path, out_path = sys.argv[1], sys.argv[2]
@@ -3573,27 +4558,37 @@ acq_provider_recorded_facts() {
 # Windows (`Scripts/python.exe`) and custom interpreters work; only then PATH.
 _acq_provider_facts_python() {
   local python="${ACQ_PROVIDER_INPUT_PYTHON:-}" runtime data_home
-  if [ -n "$python" ] && [ -x "$python" ]; then
+  # Only an absolute interpreter path: a relative one would run a program from
+  # the current directory (see userdirs.sh).
+  if acq_path_is_absolute "$python" && [ -x "$python" ]; then
     printf '%s\n' "$python"
     return 0
   fi
-  if [ -n "${LOCALAPPDATA:-}" ] && [ "$(uname -s 2>/dev/null)" != "Linux" ]; then
+  # LOCALAPPDATA, like the XDG variables, counts only when absolute.
+  if acq_path_is_absolute "${LOCALAPPDATA:-}" && [ "$(uname -s 2>/dev/null)" != "Linux" ]; then
     data_home="$LOCALAPPDATA/acq"
   else
-    data_home="${XDG_DATA_HOME:-${HOME:-}/.local/share}/acq"
+    data_home=$(acq_xdg_dir XDG_DATA_HOME .local/share)/acq || data_home=""
   fi
-  runtime="${ACQ_PROVIDER_INPUT_DATA_DIR:-$data_home/provider-input-validator}.current"
-  if [ -x "$runtime/bin/python3" ]; then
-    printf '%s\n' "$runtime/bin/python3"
-    return 0
-  fi
-  if [ -x "$runtime/Scripts/python.exe" ]; then
-    printf '%s\n' "$runtime/Scripts/python.exe"
-    return 0
-  fi
-  if [ -x "$runtime/python.exe" ]; then
-    printf '%s\n' "$runtime/python.exe"
-    return 0
+  # The same place scripts/setup-provider-input-validator publishes it and
+  # _acq_provider_input_python looks for it.
+  runtime="${ACQ_PROVIDER_INPUT_DATA_DIR:-$data_home/provider-input-validator}/provider-input-validator.current"
+  # Only an absolute runtime path: a relative one would run an interpreter from
+  # the current directory (see userdirs.sh).
+  if { [ -n "$data_home" ] || [ -n "${ACQ_PROVIDER_INPUT_DATA_DIR:-}" ]; } \
+      && acq_path_is_absolute "$runtime"; then
+    if [ -x "$runtime/bin/python3" ]; then
+      printf '%s\n' "$runtime/bin/python3"
+      return 0
+    fi
+    if [ -x "$runtime/Scripts/python.exe" ]; then
+      printf '%s\n' "$runtime/Scripts/python.exe"
+      return 0
+    fi
+    if [ -x "$runtime/python.exe" ]; then
+      printf '%s\n' "$runtime/python.exe"
+      return 0
+    fi
   fi
   if command -v python3 >/dev/null 2>&1; then
     printf '%s\n' "python3"
@@ -3628,7 +4623,7 @@ acq_provider_facts_json_fields() {
       4) models_url="$value" ;;
       5) api_protocol="$value" ;;
     esac
-  done < <("$python" - "$file" <<'PY'
+  done < <("$python" -I - "$file" <<'PY'
 import json, sys
 from urllib.parse import urlsplit
 
@@ -3654,6 +4649,10 @@ if parsed.scheme != "https" or parsed.hostname != values["host"]:
     raise SystemExit(2)
 if parsed.port not in (None, 443):
     raise SystemExit(2)
+# Native Windows Python ends text-mode lines with CRLF, and a value ending in
+# "\r" fails validation in Bash; write bare LF on every platform.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(newline="\n")
 for value in values.values():
     print(value)
 PY
@@ -3730,18 +4729,48 @@ EOF
 # published generation, else the recorded host-config copy. Fails closed when a
 # facts document exists but does not validate.
 acq_provider_sandbox_facts() {
-  local backend="${1:-}" name="${2:-}" generation="$ACQ_PROVIDER_BINDINGS_GENERATION" root
+  local backend="${1:-}" name="${2:-}" generation="$ACQ_PROVIDER_BINDINGS_GENERATION" root current
   if [ -n "$generation" ] && [ -d "$generation" ]; then
     acq_provider_facts_list_generation "$generation" || return 1
     return 0
   fi
   [ -n "$backend" ] && [ -n "$name" ] || return 0
   root=$(acq_provider_input_root "$backend" "$name") || return 0
-  if [ -e "$root/current" ]; then
-    acq_provider_facts_list_generation "$root/current" || return 1
+  if current=$(_acq_provider_input_current_generation "$root"); then
+    acq_provider_facts_list_generation "$current" || return 1
     return 0
   fi
   acq_provider_recorded_facts "$backend" "$name"
+}
+
+# _acq_provider_input_current_generation ROOT — print the generation directory
+# that ROOT/current names, or fail when it names none that is usable. current
+# takes three forms: the relative symlink POSIX publishes, the pointer file
+# Windows publishes (see _acq_provider_input_publish), both holding
+# generations/generation.<suffix>, or a real directory an older acq left. A link
+# or pointer is followed only when its text is exactly that form, and the
+# directory it names, like a real directory current, must pass
+# _acq_provider_input_safe_dir, so no component is a symlink, a junction or
+# another reparse point. A caller treats a failure as if current were absent.
+_acq_provider_input_current_generation() {
+  local root="${1:-}" current target
+  [ -n "$root" ] || return 1
+  current="$root/current"
+  if [ -L "$current" ]; then
+    target=$(readlink -- "$current") || return 1
+  elif [ -f "$current" ]; then
+    target=$(cat -- "$current") || return 1
+  elif [ -d "$current" ]; then
+    _acq_provider_input_safe_dir "$current" 2>/dev/null || return 1
+    printf '%s\n' "$current"
+    return 0
+  else
+    return 1
+  fi
+  case "$target" in generations/generation.?*) ;; *) return 1 ;; esac
+  case "${target#generations/generation.}" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+  _acq_provider_input_safe_dir "$root/$target" 2>/dev/null || return 1
+  printf '%s/%s\n' "$root" "$target"
 }
 
 # acq_provider_sandbox_provider_ids BACKEND NAME — the provider ids this sandbox
@@ -4163,17 +5192,32 @@ ACQ_PROVIDER_INPUT_GUEST_DIR="${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provi
 _acq_provider_input_python() {
   local python="${ACQ_PROVIDER_INPUT_PYTHON:-}" version_check runtime data_home tools_dir setup
   if [ -n "$python" ]; then
+    acq_path_is_absolute "$python" || {
+      echo "acq: ACQ_PROVIDER_INPUT_PYTHON must be an absolute path, got $(acq_quote_value "$python")" >&2
+      return 2
+    }
     [ -x "$python" ] || {
       echo "acq: configured provider-input Python is not executable: $python" >&2
       return 2
     }
   else
-    if [ -n "${LOCALAPPDATA:-}" ] && [[ "$(uname -s 2>/dev/null)" = MINGW* || "$(uname -s 2>/dev/null)" = MSYS* || "$(uname -s 2>/dev/null)" = CYGWIN* ]]; then
+    if acq_path_is_absolute "${LOCALAPPDATA:-}" && [[ "$(uname -s 2>/dev/null)" = MINGW* || "$(uname -s 2>/dev/null)" = MSYS* || "$(uname -s 2>/dev/null)" = CYGWIN* ]]; then
       data_home="$LOCALAPPDATA/acq"
     else
-      data_home="${XDG_DATA_HOME:-${HOME:-}/.local/share}/acq"
+      data_home=$(acq_xdg_dir XDG_DATA_HOME .local/share)/acq || data_home=""
     fi
+    [ -n "$data_home" ] || [ -n "${ACQ_PROVIDER_INPUT_DATA_DIR:-}" ] || {
+      echo "acq: cannot determine an absolute data directory for the provider-input validator" >&2
+      echo "     set HOME or XDG_DATA_HOME (or ACQ_PROVIDER_INPUT_DATA_DIR) to an absolute path" >&2
+      return 2
+    }
     tools_dir="${ACQ_PROVIDER_INPUT_DATA_DIR:-$data_home/provider-input-validator}"
+    # A relative directory would run (and bootstrap) an interpreter under the
+    # current directory, so it is refused (see userdirs.sh).
+    acq_path_is_absolute "$tools_dir" || {
+      echo "acq: ACQ_PROVIDER_INPUT_DATA_DIR must be an absolute path, got $(acq_quote_value "$tools_dir")" >&2
+      return 2
+    }
     runtime="$tools_dir/provider-input-validator.current"
     if [ -x "$runtime/bin/python3" ]; then python="$runtime/bin/python3"
     elif [ -x "$runtime/Scripts/python.exe" ]; then python="$runtime/Scripts/python.exe"
@@ -4199,7 +5243,9 @@ _acq_provider_input_python() {
         echo "     Or set ACQ_PROVIDER_INPUT_PYTHON to a Python interpreter with PyYAML 6.0.3 and jsonschema 4.26.0." >&2
       fi
     fi
-    "$setup" --apply >&2 || return 2
+    # Hand the bootstrap the exact directory checked below, so the two can never
+    # disagree about where the runtime is published.
+    ACQ_PROVIDER_INPUT_DATA_DIR="$tools_dir" "$setup" --apply >&2 || return 2
     runtime="$tools_dir/provider-input-validator.current"
     if [ -x "$runtime/bin/python3" ]; then python="$runtime/bin/python3"
     elif [ -x "$runtime/Scripts/python.exe" ]; then python="$runtime/Scripts/python.exe"
@@ -4222,8 +5268,48 @@ if actual != required:
     print("acq: provider-input validation requires PyYAML 6.0.3 and jsonschema 4.26.0; found " + ", ".join("%s=%s" % (package, actual[package] or "missing") for package in required), file=sys.stderr)
     print("     Run: scripts/setup-provider-input-validator --apply", file=sys.stderr)
     raise SystemExit(2)'
-  "$python" -c "$version_check" || return 2
+  "$python" -I -c "$version_check" || return 2
   printf '%s\n' "$python"
+}
+
+# Native Windows reports no execute bit for script files. Adapt only the
+# snapshotted normalizers' stat results for the pinned validator; every other
+# validation and all POSIX mode checks still run unchanged.
+# Usage: _acq_provider_input_validate VALIDATOR PYTHON ARGS... (the interpreter
+# runs with -I below).
+_acq_provider_input_validate() {
+  local validator="$1" python="$2"
+  shift 2
+  "$python" -I - "$validator" "$@" <<'PYTHON'
+import json, os, runpy, stat, sys
+validator = sys.argv[1]
+sys.argv = sys.argv[1:]
+sys.path.insert(0, os.path.dirname(os.path.abspath(validator)))
+if os.name == 'nt':
+    normalizers = set()
+    for index, arg in enumerate(sys.argv[:-1]):
+        if arg == '--bundle':
+            manifest = os.path.abspath(sys.argv[index + 1])
+            with open(manifest, encoding='utf-8') as stream:
+                path = json.load(stream).get('normalizerPath')
+            if isinstance(path, str):
+                normalizers.add(os.path.normcase(os.path.abspath(os.path.join(os.path.dirname(manifest), path))))
+    original_stat = os.stat
+    class NormalizerStat:
+        def __init__(self, result):
+            self.result = result
+            self.st_mode = result.st_mode | 0o111
+        def __getattr__(self, name):
+            return getattr(self.result, name)
+    def validator_stat(path, *args, **kwargs):
+        result = original_stat(path, *args, **kwargs)
+        if (not isinstance(path, int) and stat.S_ISREG(result.st_mode)
+                and os.path.normcase(os.path.abspath(path)) in normalizers):
+            return NormalizerStat(result)
+        return result
+    os.stat = validator_stat
+runpy.run_path(validator, run_name='__main__')
+PYTHON
 }
 
 acq_provider_input_prepare() {
@@ -4234,7 +5320,7 @@ acq_provider_input_prepare() {
   root=$(acq_provider_input_root "$backend" "$name") || return 1
   _acq_provider_input_safe_mkdir "$root/generations" || return 1
   chmod 755 "$root" "$root/generations" || return 1
-  stage=$(mktemp -d "${TMPDIR:-/tmp}/acq-provider-input.XXXXXXXX") || return 1
+  stage=$(mktemp -d "$(acq_tmp_dir)/acq-provider-input.XXXXXXXX") || return 1
   chmod 700 "$stage" || { rm -rf "$stage"; return 1; }
   for kitref in ${KITS[@]+"${KITS[@]}"}; do
     token=$(printf '%s' "$kitref" | cksum | cut -d' ' -f1) || { rm -rf "$stage"; return 1; }
@@ -4282,7 +5368,9 @@ acq_provider_input_prepare() {
   local validator_args=(--schema-dir "$schema_dir" --credential-bindings "$merged_bindings")
   local i
   for i in "${!manifests[@]}"; do validator_args+=(--bundle "${manifests[$i]}"); done
-  "$python" "$validator" "${validator_args[@]}" >&2 || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
+  # Isolate the launcher's imports from the cwd, PYTHON* and user packages,
+  # then allow imports from the pinned validator directory only.
+  _acq_provider_input_validate "$validator" "$python" "${validator_args[@]}" >&2 || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
   for i in "${!manifests[@]}"; do
     _acq_provider_input_materialize "${manifests[$i]}" "${kitdirs[$i]}" "$generation/models/providers" || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
   done
@@ -4314,7 +5402,9 @@ acq_provider_input_root() {
   safe_backend=$(printf '%s' "$backend" | tr -c 'A-Za-z0-9._-' '_')
   safe_name=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')
   name_sum=$(printf '%s' "$name" | cksum 2>/dev/null | cut -d' ' -f1 2>/dev/null || echo 0)
-  printf '%s/provider-input/%s/%s.%s\n' "$(_acq_provenance_dir)" "$safe_backend" "$safe_name" "$name_sum"
+  local _acq_pd
+  _acq_pd=$(_acq_provenance_dir) || return 1
+  printf '%s/provider-input/%s/%s.%s\n' "$_acq_pd" "$safe_backend" "$safe_name" "$name_sum"
 }
 
 acq_provider_input_guest_root() {
@@ -4351,6 +5441,213 @@ acq_provider_input_discard() {
   _acq_provider_input_cleanup_generation "$root" "$generation"
 }
 
+# Choose the interpreter for the provider-input path helpers below. It sets
+# _ACQ_PROVIDER_INPUT_PATH_PY (an argv prefix) and
+# _ACQ_PROVIDER_INPUT_PATH_PY_KIND:
+#   posix  the interpreter has O_NOFOLLOW, O_DIRECTORY and dir_fd, so the
+#          descriptor-relative traversal runs unchanged;
+#   nt     native Windows CPython, which has none of those, so the helpers use
+#          _acq_provider_input_nt_dir instead.
+# Outside Git Bash, MSYS2 and Cygwin this is exactly `python3`, with no probe.
+# On those Windows shells python3 is often missing, or is the Microsoft Store
+# alias stub that only prints an install hint, so python3, python and py -3 are
+# probed in that order, and the first working Python 3 is used. A candidate is
+# used only when `command -v` resolves it to an absolute path, and it is run by
+# that path, so a shell function or alias of the same name is never trusted. The
+# result is cached in the calling shell; _acq_provider_input_guardian_start
+# resolves it in the transaction shell before any command substitution, so the
+# helpers inside one transaction share a single probe. No usable interpreter
+# fails closed.
+# The cache is only trusted when this process set it. Neither name is a public
+# setting, so values inherited from the environment are dropped at source time;
+# otherwise an exported value could pick the interpreter.
+unset _ACQ_PROVIDER_INPUT_PATH_PY _ACQ_PROVIDER_INPUT_PATH_PY_KIND
+_acq_provider_input_path_python() {
+  local cand kind probe path
+  case "${OSTYPE:-}" in
+    msys*|cygwin*) ;;
+    *)
+      _ACQ_PROVIDER_INPUT_PATH_PY=(python3)
+      _ACQ_PROVIDER_INPUT_PATH_PY_KIND=posix
+      return 0
+      ;;
+  esac
+  if [ -n "${_ACQ_PROVIDER_INPUT_PATH_PY_KIND:-}" ] && [ -n "${_ACQ_PROVIDER_INPUT_PATH_PY[0]:-}" ]; then
+    return 0
+  fi
+  # Write the kind without a newline: native Windows Python emits CRLF.
+  probe='import os, sys
+if sys.version_info < (3, 6): raise SystemExit(1)
+posix = all(hasattr(os, n) for n in ("O_NOFOLLOW", "O_DIRECTORY")) and os.open in os.supports_dir_fd and os.mkdir in os.supports_dir_fd
+sys.stdout.write("posix" if posix else "nt" if os.name == "nt" else "none")'
+  for cand in python3 python py; do
+    path=$(command -v "$cand" 2>/dev/null) || continue
+    case "$path" in /*) ;; *) continue ;; esac
+    case "$cand" in
+      py) _ACQ_PROVIDER_INPUT_PATH_PY=("$path" -3) ;;
+      *) _ACQ_PROVIDER_INPUT_PATH_PY=("$path") ;;
+    esac
+    kind=$("${_ACQ_PROVIDER_INPUT_PATH_PY[@]}" -I -c "$probe" </dev/null 2>/dev/null) || continue
+    case "$kind" in
+      posix|nt) _ACQ_PROVIDER_INPUT_PATH_PY_KIND=$kind; return 0 ;;
+    esac
+  done
+  _ACQ_PROVIDER_INPUT_PATH_PY=()
+  _ACQ_PROVIDER_INPUT_PATH_PY_KIND=
+  echo "acq: provider-input path checks need Python 3 (python3, python or py -3); none is usable" >&2
+  return 1
+}
+
+# _acq_provider_input_run_py PATH... — run the Python program on stdin with the
+# interpreter chosen by _acq_provider_input_path_python, passing each PATH as an
+# argument. Native Windows Python cannot open an MSYS path, so for it each PATH
+# is first mapped by _acq_provider_input_nt_path and passed with MSYS argument
+# conversion off, as _acq_provider_input_nt_dir does; a PATH that does not map
+# fails closed before the program runs. Every other interpreter gets the PATHs
+# unchanged.
+_acq_provider_input_run_py() {
+  local arg mapped args=()
+  _acq_provider_input_path_python || return 1
+  if [ "$_ACQ_PROVIDER_INPUT_PATH_PY_KIND" != nt ]; then
+    "${_ACQ_PROVIDER_INPUT_PATH_PY[@]}" -I - "$@"
+    return
+  fi
+  for arg in "$@"; do
+    mapped=$(_acq_provider_input_nt_path "$arg") && [ -n "$mapped" ] || {
+      echo "acq: cannot map provider-input path to a Windows path: $arg" >&2
+      return 1
+    }
+    args+=("$mapped")
+  done
+  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
+    "${_ACQ_PROVIDER_INPUT_PATH_PY[@]}" -I - ${args[@]+"${args[@]}"}
+}
+
+# _acq_provider_input_nt_path PATH — print the Windows path for an MSYS or
+# Cygwin PATH, mapped lexically: the longest mount point in the mount table that
+# prefixes PATH is replaced by its Windows target, and the rest is kept as is. A
+# drive-absolute path (C:\... or C:/...) is printed unchanged. Mapping the
+# text is the conservative choice: cygpath -w has been seen both to keep and to
+# resolve a junction in the path on Git for Windows, and a resolved link would
+# be hidden from the walk, so the result must not depend on how cygpath
+# resolves. ".." is kept so the walk rejects it. A mount whose options include
+# posix=0 (the drive and /tmp mounts on Git for Windows) matches
+# case-insensitively, as MSYS does (/C/x is C:\x); any other mount matches
+# case-sensitively. A leading "//" is a UNC path there and is rejected. Mount
+# points are OS-level aliases, like the macOS /var link, and their Windows
+# targets are walked from the drive root like everything else.
+# ACQ_TEST_MOUNTS_FILE replaces /proc/mounts, and only under bats.
+_acq_provider_input_nt_path() {
+  local p="$1" mounts=/proc/mounts win mnt _fstype opts _fields
+  local best_mnt="" best_win="" found="" rest nocase=0
+  case "$p" in
+    [A-Za-z]:[\\/]*) printf '%s\n' "$p"; return 0 ;;
+    //*) return 1 ;;
+    /*) ;;
+    *) return 1 ;;
+  esac
+  if [ -n "${BATS_TEST_NAME:-}" ] && [ -n "${ACQ_TEST_MOUNTS_FILE:-}" ]; then
+    mounts=$ACQ_TEST_MOUNTS_FILE
+  fi
+  [ -r "$mounts" ] || return 1
+  shopt -q nocasematch && nocase=1
+  # /proc/mounts escapes spaces and other bytes as octal (\040); %b decodes them.
+  while read -r win mnt _fstype opts _fields; do
+    printf -v win '%b' "$win"
+    printf -v mnt '%b' "$mnt"
+    case "$mnt" in /*) ;; *) continue ;; esac
+    case ",$opts," in
+      *,posix=0,*) shopt -s nocasematch ;;
+      *) shopt -u nocasematch ;;
+    esac
+    case "$p/" in
+      "${mnt%/}/"*)
+        if [ -z "$found" ] || [ "${#mnt}" -gt "${#best_mnt}" ]; then
+          best_mnt=$mnt best_win=$win found=1
+        fi
+        ;;
+    esac
+  done < "$mounts"
+  if [ "$nocase" = 1 ]; then shopt -s nocasematch; else shopt -u nocasematch; fi
+  [ -n "$found" ] && [ -n "$best_win" ] || return 1
+  # Strip the matched prefix by length: it may differ from PATH in case.
+  best_mnt=${best_mnt%/}
+  rest=${p:${#best_mnt}}
+  [ -n "$rest" ] || rest=/
+  printf '%s%s\n' "${best_win%/}" "$rest"
+}
+
+# _acq_provider_input_nt_dir mkdir|check PATH — the native Windows form of
+# _acq_provider_input_safe_mkdir / _acq_provider_input_safe_dir. Windows CPython
+# has no O_NOFOLLOW, O_DIRECTORY or dir_fd, so each component, from the drive
+# root down, is checked with os.lstat, which does not follow symlinks or
+# junctions. The walk fails closed if a component is a symlink, is not a
+# directory, or has FILE_ATTRIBUTE_REPARSE_POINT set. That last check catches
+# junctions and every other reparse point, which S_ISLNK does not report. A
+# component created by mkdir is checked again afterwards, so a link swapped in
+# at that moment is still rejected.
+#
+# A race remains. The POSIX walk holds a descriptor for each checked directory,
+# but each lstat here resolves the whole path again, so a component replaced
+# with a link after it was checked could be followed by a later lstat or mkdir.
+# That window is no wider than the one every caller already has, since callers
+# act on the path string after this check returns. Holding each component open
+# with CreateFileW (FILE_FLAG_OPEN_REPARSE_POINT, no FILE_SHARE_DELETE) would
+# close it within the walk, at the cost of a ctypes implementation.
+#
+# A component that Win32 would rewrite is rejected before anything is touched:
+# a trailing dot or space (stripped by Win32), ":" (a drive or stream, which
+# ntpath.join would also merge), <>"|?* and control characters. Otherwise the
+# walk could check a different directory from the one bash then uses. The path
+# is mapped by
+# _acq_provider_input_nt_path and passed with MSYS argument conversion off, so
+# nothing resolves a link before the walk sees it. Anything other than a
+# drive-letter path (UNC, device or relative) is rejected, as are "." and ".."
+# components.
+_acq_provider_input_nt_dir() {
+  local mode="$1" winpath
+  winpath=$(_acq_provider_input_nt_path "$2") && [ -n "$winpath" ] || {
+    echo "acq: cannot map provider-input path to a Windows path: $2" >&2
+    return 1
+  }
+  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
+    "${_ACQ_PROVIDER_INPUT_PATH_PY[@]}" -I - "$mode" "$winpath" <<'PY'
+import os, stat, sys
+mode, path = sys.argv[1:]
+def fail():
+    raise SystemExit('unsafe provider-input path' if mode == 'mkdir' else 1)
+def check(st):
+    if (stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode)
+            or getattr(st, 'st_file_attributes', 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+        fail()
+drive, rest = os.path.splitdrive(path)
+if os.sep == '\\' and not (len(drive) == 2 and drive[1] == ':'): fail()
+if os.altsep: rest = rest.replace(os.altsep, os.sep)
+if not rest.startswith(os.sep): fail()
+parts = [p for p in rest.split(os.sep) if p]
+if any(p in ('.', '..') for p in parts): fail()
+for p in parts:
+    if p[-1] in '. ' or any(c in ':<>"|?*' or ord(c) < 32 for c in p): fail()
+current = drive + os.sep
+try:
+    check(os.lstat(current))
+    for part in parts:
+        current = os.path.join(current, part)
+        try:
+            st = os.lstat(current)
+        except FileNotFoundError:
+            if mode != 'mkdir': fail()
+            try:
+                os.mkdir(current, 0o755)
+            except FileExistsError:
+                pass
+            st = os.lstat(current)
+        check(st)
+except OSError:
+    fail()
+PY
+}
+
 # Normalize the three macOS kernel-managed path aliases to their canonical
 # /private/{var,tmp,etc} spellings so O_NOFOLLOW traversal never sees a
 # symlink at the first path component.  Also collapses harmless absolute
@@ -4366,7 +5663,14 @@ acq_provider_input_discard() {
 # builds never set this variable; it is documented alongside ACQ_TEST_HOST_OS as
 # a test-seam-only override.
 _acq_provider_input_canonical_path() {
-  python3 - "$1" <<'PY'
+  _acq_provider_input_path_python || return 1
+  # The aliases are macOS-only, and the native Windows walk maps the path
+  # itself (_acq_provider_input_nt_path), so there is nothing to rewrite here.
+  if [ "$_ACQ_PROVIDER_INPUT_PATH_PY_KIND" = nt ]; then
+    printf '%s' "$1"
+    return 0
+  fi
+  "${_ACQ_PROVIDER_INPUT_PATH_PY[@]}" -I - "$1" <<'PY'
 import os, re, sys
 path = sys.argv[1]
 # Collapse harmless absolute spelling variants before alias matching.
@@ -4398,49 +5702,79 @@ PY
 # those three OS-level prefixes (plus harmless double-slash/dot variants) so
 # O_NOFOLLOW does not reject them with ELOOP.  All subsequent components —
 # including every user-influenced one — still traverse with O_NOFOLLOW.
-# Linux is unaffected.
+# Linux is unaffected.  Native Windows Python, which lacks these primitives,
+# gets the equivalent check from _acq_provider_input_nt_dir.
 _acq_provider_input_safe_mkdir() {
   local _canon
+  _acq_provider_input_path_python || return 1
+  if [ "$_ACQ_PROVIDER_INPUT_PATH_PY_KIND" = nt ]; then
+    _acq_provider_input_nt_dir mkdir "$1"
+    return
+  fi
   _canon=$(_acq_provider_input_canonical_path "$1") || return 1
-  python3 - "$_canon" <<'PY'
+  # A refused component (a symlink, a file, no permission) ends the walk with
+  # one line naming the path and the reason, never a Python traceback.
+  "${_ACQ_PROVIDER_INPUT_PATH_PY[@]}" -I - "$_canon" <<'PY'
 import os, stat, sys
 path = sys.argv[1]
 if not os.path.isabs(path): raise SystemExit('provider-input path must be absolute')
-fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+fd = None
 try:
+    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
     for part in (p for p in path.split('/') if p):
         try:
             child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
         except FileNotFoundError:
-            os.mkdir(part, 0o755, dir_fd=fd)
+            # Another acq may create the same component between the lookup and
+            # this mkdir. Its directory is as good as ours; the O_NOFOLLOW open
+            # and the S_ISDIR check below still reject anything else it left.
+            try:
+                os.mkdir(part, 0o755, dir_fd=fd)
+            except FileExistsError:
+                pass
             child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
         if not stat.S_ISDIR(os.fstat(child).st_mode): raise SystemExit('unsafe provider-input path')
         os.close(fd); fd = child
+except OSError as exc:
+    raise SystemExit('acq: unsafe provider-input path %s: %s (a component is a symbolic link, '
+                     'not a directory, or not accessible)' % (path, exc.strerror or exc))
 finally:
-    os.close(fd)
+    if fd is not None:
+        os.close(fd)
 PY
 }
 
 _acq_provider_input_safe_dir() {
   local _canon
+  _acq_provider_input_path_python || return 1
+  if [ "$_ACQ_PROVIDER_INPUT_PATH_PY_KIND" = nt ]; then
+    _acq_provider_input_nt_dir check "$1"
+    return
+  fi
   _canon=$(_acq_provider_input_canonical_path "$1") || return 1
-  python3 - "$_canon" <<'PY'
+  # A silent predicate, as the native Windows check is: a refused component
+  # (symlink, file, missing, no permission) is status 1, not a traceback.
+  "${_ACQ_PROVIDER_INPUT_PATH_PY[@]}" -I - "$_canon" <<'PY'
 import os, stat, sys
 path = sys.argv[1]
 if not os.path.isabs(path): raise SystemExit(1)
-fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+fd = None
 try:
+    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
     for part in (p for p in path.split('/') if p):
         child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
         if not stat.S_ISDIR(os.fstat(child).st_mode): raise SystemExit(1)
         os.close(fd); fd = child
+except OSError:
+    raise SystemExit(1)
 finally:
-    os.close(fd)
+    if fd is not None:
+        os.close(fd)
 PY
 }
 
 _acq_provider_input_cleanup_stage() {
-  case "${1:-}" in "${TMPDIR:-/tmp}"/acq-provider-input.*) rm -rf -- "$1" ;; *) return 1 ;; esac
+  case "${1:-}" in "$(acq_tmp_dir)"/acq-provider-input.*) rm -rf -- "$1" ;; *) return 1 ;; esac
 }
 
 _acq_provider_input_cleanup_generation() {
@@ -4462,13 +5796,55 @@ _acq_provider_input_remove_tree() {
   rm -rf -- "$1"
 }
 
+# _acq_provider_input_atomic_replace SRC DST — rename SRC over DST in one step.
+# On native Windows Python os.replace is MoveFileEx with REPLACE_EXISTING,
+# which replaces a file atomically but cannot replace a directory. So when DST
+# is a link to a directory (a directory symlink or a junction, both of which the
+# Python acq can leave as current), the link itself is removed, never followed,
+# and the rename is retried. current is briefly absent in that one case. No
+# sandbox mounts current (each mounts its exact generation), and its one reader,
+# acq_provider_sandbox_facts, falls back to the facts recorded in host config
+# while current is absent. A real directory at DST is refused rather than
+# removed.
 _acq_provider_input_atomic_replace() {
-  python3 - "$1" "$2" <<'PY'
+  _acq_provider_input_path_python || return 1
+  if [ "$_ACQ_PROVIDER_INPUT_PATH_PY_KIND" = nt ]; then
+    _acq_provider_input_run_py "$1" "$2" <<'PY'
+import os, stat, sys
+src, dst = sys.argv[1:]
+try:
+    os.replace(src, dst)
+except OSError:
+    st = os.lstat(dst)
+    if not (stat.S_ISLNK(st.st_mode)
+            or getattr(st, 'st_file_attributes', 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+        if stat.S_ISDIR(st.st_mode):
+            raise SystemExit('acq: cannot replace %s: it is a directory, not a file or a link' % dst)
+        raise
+    if stat.S_ISDIR(st.st_mode):
+        os.rmdir(dst)
+    else:
+        os.unlink(dst)
+    os.replace(src, dst)
+PY
+    return
+  fi
+  _acq_provider_input_run_py "$1" "$2" <<'PY'
 import os, sys
 os.replace(sys.argv[1], sys.argv[2])
 PY
 }
 
+# current names the generation the last successful create published. On POSIX
+# it is a relative symlink, generations/<generation>. Native Windows has no
+# unprivileged symlink: Git Bash's ln -s copies the directory instead, a
+# native symlink needs Developer Mode or an administrator, and a junction can
+# neither be renamed over an existing one nor hold a relative target. So there
+# current is a pointer file holding that same relative path, written to a
+# temporary name and renamed over current, which is atomic for a file, and it
+# keeps every link out of the state tree. No sandbox mounts current: both
+# backends mount the exact generation. acq_provider_sandbox_facts reads it,
+# through _acq_provider_input_current_generation, which accepts either form.
 _acq_provider_input_publish() {
   local root="$1" generation="$2" base temp current
   case "$root" in ""|/|/*/) return 1 ;; esac
@@ -4479,7 +5855,12 @@ _acq_provider_input_publish() {
   base=${generation##*/}
   temp="$root/.current.$$.$RANDOM"
   current="$root/current"
-  ln -s "generations/$base" "$temp" || return 1
+  if [ "${_ACQ_PROVIDER_INPUT_PATH_PY_KIND:-}" = nt ]; then
+    # noclobber: never write through a name that already exists.
+    ( set -C; printf 'generations/%s\n' "$base" > "$temp" ) 2>/dev/null || return 1
+  else
+    ln -s "generations/$base" "$temp" || return 1
+  fi
   # rename is atomic within root; do not remove current first.
   _acq_provider_input_atomic_replace "$temp" "$current" || { rm -f "$temp"; return 1; }
   # Retain prior generations. A sandbox created by an older acq may still mount
@@ -4499,34 +5880,117 @@ _acq_provider_input_publish() {
 #   tx_pid=$(exec sh -c 'echo $PPID')
 # and supply it as the third argument.  The fallback to $$ is retained for
 # tests that call lock_acquire directly (no surrounding subshell).
+#
+# The owner file's exclusive create decides who holds the lock, never mkdir
+# alone (_acq_provider_input_lock_take). The Python acq takes the same directory
+# the same way (_BashLock in py-acq/src/acq_py/lock.py).
+# When Python inspects a Bash lock on Windows, Python applies the 15-minute
+# freshness rule (section 88); Bash itself checks the recorded process identity.
 acq_provider_input_lock_acquire() {
-  local backend="$1" name="$2" tx_pid="${3:-$$}" root parent lock owner tries=0 pid identity actual_identity
+  local backend="$1" name="$2" tx_pid="${3:-$$}" root parent lock owner tries=0 pid identity actual_identity token rc age line
   root=$(acq_provider_input_root "$backend" "$name") || return 1
   parent=${root%/*}
   _acq_provider_input_safe_mkdir "$parent" || return 1
   lock="${root}.lock"
-  while ! mkdir "$lock" 2>/dev/null; do
-    [ -d "$lock" ] && [ ! -L "$lock" ] || { echo "acq: unsafe provider-input lock: $lock" >&2; return 1; }
+  # Work the owner line out before creating the directory to minimize the
+  # brief interval in which another taker must wait for its metadata.
+  identity=$(_acq_provider_input_process_identity "$tx_pid") || return 1
+  token="$tx_pid $identity"
+  while :; do
+    rc=0
+    _acq_provider_input_lock_take "$lock" "$token" || rc=$?
+    [ "$rc" -eq 0 ] && break
+    [ "$rc" -eq 1 ] || { echo "acq: could not write the provider-input lock owner: $lock" >&2; return 1; }
+    if [ -L "$lock" ] || { [ -e "$lock" ] && [ ! -d "$lock" ]; }; then
+      echo "acq: unsafe provider-input lock: $lock" >&2
+      return 1
+    fi
+    if [ ! -d "$lock" ]; then
+      # The holder released it (or a losing taker removed its empty directory)
+      # since this take: look again at once. That still counts against the
+      # retries, so a take that keeps failing for another reason cannot loop
+      # forever.
+      tries=$((tries + 1))
+      if [ "$tries" -ge "${ACQ_PROVIDER_INPUT_LOCK_RETRIES:-300}" ]; then
+        echo "acq: gave up waiting for the provider-input lock: $lock" >&2
+        return 1
+      fi
+      continue
+    fi
     owner="$lock/owner"
-    IFS=' ' read -r pid identity < "$owner" 2>/dev/null || true
+    [ ! -L "$owner" ] || { echo "acq: unsafe provider-input lock owner: $owner" >&2; return 1; }
+    # A newly created directory can briefly have missing or empty metadata.
+    # As with the config lock, count waiting against the retry budget.
+    age=$(_acq_config_lock_age "$lock") || age=0
+    if { [ ! -e "$owner" ] || [ ! -s "$owner" ]; } && [ "$age" -lt 5 ]; then
+      tries=$((tries + 1))
+      [ "$tries" -lt "${ACQ_PROVIDER_INPUT_LOCK_RETRIES:-300}" ] || {
+        echo "acq: gave up waiting for the provider-input lock: $lock" >&2; return 1;
+      }
+      sleep 1
+      continue
+    fi
+    line=$(_acq_config_lock_owner_line "$lock")
+    pid="" identity=""
+    IFS=' ' read -r pid identity <<< "$line" || true
     actual_identity=$(_acq_provider_input_process_identity "$pid" 2>/dev/null || true)
     if [ -n "$pid" ] && [ -n "$identity" ] && [ "$actual_identity" = "$identity" ]; then
       echo "acq: provider-input lock is owned by live pid $pid: $lock" >&2
-    elif [ -n "$pid" ] && { ! kill -0 "$pid" 2>/dev/null || { [ -n "$actual_identity" ] && [ "$actual_identity" != "$identity" ]; }; }; then
+    elif [ -n "$pid" ] && { ! _acq_pid_alive "$pid" || { [ -n "$actual_identity" ] && [ "$actual_identity" != "$identity" ]; }; }; then
       echo "acq: recovering stale provider-input lock owned by pid $pid: $lock" >&2
-      rm -f -- "$owner" && rmdir -- "$lock" 2>/dev/null || return 1
-      continue
+      # Re-read after the process checks: another waiter may have recovered
+      # this lock already. Compare and unlink still race (failure mode 92).
+      if [ "$(_acq_config_lock_owner_line "$lock")" = "$line" ]; then
+        rm -f -- "$owner" && rmdir -- "$lock" 2>/dev/null || return 1
+        continue
+      fi
     else
       echo "acq: provider-input lock has no valid owner metadata: $lock" >&2
+      _acq_lock_recovery_hint "$lock"
       return 1
     fi
     tries=$((tries + 1))
-    [ "$tries" -lt "${ACQ_PROVIDER_INPUT_LOCK_RETRIES:-300}" ] || return 1
+    if [ "$tries" -ge "${ACQ_PROVIDER_INPUT_LOCK_RETRIES:-300}" ]; then
+      echo "acq: gave up waiting for the provider-input lock: $lock" >&2
+      _acq_lock_recovery_hint "$lock"
+      return 1
+    fi
     sleep 1
   done
-  identity=$(_acq_provider_input_process_identity "$tx_pid") || { rmdir -- "$lock"; return 1; }
-  printf '%s %s\n' "$tx_pid" "$identity" > "$lock/owner" || { rmdir -- "$lock"; return 1; }
   printf '%s\n' "$lock"
+}
+
+# _acq_provider_input_lock_take LOCK TOKEN — create LOCK and its owner file
+# holding TOKEN. Returns 0 when taken, 1 when not (another holder has it, or the
+# caller should look again), 2 when the token could not be written. As for the
+# config.yaml lock (_acq_config_lock_take), creating the owner file is what
+# decides: noclobber makes Bash open it with O_EXCL, so exactly one taker
+# creates it. A successful mkdir cannot decide, because uutils coreutils mkdir
+# 0.10 reports success to concurrent callers (KNOWN_FAILURE_MODES section 92).
+# Unlike the config.yaml lock, an existing directory is not taken: one with no
+# owner file is left for the user to remove (section 79). A taker that loses
+# never touches the winner's owner file. When its own create fails for another
+# reason it removes the directory only if it is still empty, so a directory
+# another taker has already given an owner stays. If writing the token into the
+# owner file it created fails (a full disk, say), that file is its own and is
+# removed again.
+_acq_provider_input_lock_take() {
+  mkdir -- "$1" 2>/dev/null || return 1
+  [ -d "$1" ] && [ ! -L "$1" ] || return 1
+  [ ! -L "$1/owner" ] || return 1
+  local rc=0
+  ( set -C; { printf '%s\n' "$2" || exit 2; } > "$1/owner" ) 2>/dev/null || rc=$?
+  [ ! -L "$1/owner" ] || return 1
+  if [ "$rc" -eq 1 ]; then
+    [ -e "$1/owner" ] || [ -L "$1/owner" ] || rmdir -- "$1" 2>/dev/null || true
+    return 1
+  fi
+  if [ "$rc" -eq 0 ]; then
+    return 0
+  fi
+  rm -f -- "$1/owner" 2>/dev/null
+  rmdir -- "$1" 2>/dev/null || true
+  return 2
 }
 
 # Start a real process whose lifetime is tied to the transaction subshell. Bash
@@ -4534,7 +5998,11 @@ acq_provider_input_lock_acquire() {
 # guardian PID instead. The guardian exits if its transaction parent disappears,
 # including after SIGKILL, making stale recovery safe.
 _acq_provider_input_guardian_start() {
-  _ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN=$(mktemp "${TMPDIR:-/tmp}/acq-provider-children.XXXXXX") || return 1
+  # Resolve the path-helper interpreter here, in the transaction shell, so the
+  # command substitutions that follow inherit the cached result. A failure is
+  # reported again, and fails closed, by the first helper that needs it.
+  _acq_provider_input_path_python 2>/dev/null || true
+  _ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN=$(mktemp "$(acq_tmp_dir)/acq-provider-children.XXXXXX") || return 1
   export _ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN
   sh -c '
     parent=$PPID
@@ -4554,7 +6022,13 @@ _acq_provider_input_guardian_start() {
     done
   ' sh "$_ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN" &
   _ACQ_PROVIDER_INPUT_GUARDIAN_PID=$!
-  _ACQ_PROVIDER_INPUT_TRANSACTION_PID=$(ps -o ppid= -p "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID" 2>/dev/null | tr -d '[:space:]')
+  # Git Bash (MSYS2/Cygwin) ps has no -o, but its /proc has a per-process ppid
+  # file. Linux /proc has no such file and macOS has no /proc, so both use ps -o.
+  if [ -r "/proc/$_ACQ_PROVIDER_INPUT_GUARDIAN_PID/ppid" ]; then
+    _ACQ_PROVIDER_INPUT_TRANSACTION_PID=$(tr -d '[:space:]' 2>/dev/null < "/proc/$_ACQ_PROVIDER_INPUT_GUARDIAN_PID/ppid")
+  else
+    _ACQ_PROVIDER_INPUT_TRANSACTION_PID=$(ps -o ppid= -p "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID" 2>/dev/null | tr -d '[:space:]')
+  fi
   case "$_ACQ_PROVIDER_INPUT_TRANSACTION_PID" in ""|*[!0-9]*) _acq_provider_input_guardian_stop; return 1 ;; esac
   export _ACQ_PROVIDER_INPUT_GUARDIAN_PID
   export _ACQ_PROVIDER_INPUT_TRANSACTION_PID
@@ -4573,9 +6047,16 @@ _acq_provider_input_guardian_register_if_active() {
 }
 
 _acq_provider_input_guardian_stop() {
-  local pid="${_ACQ_PROVIDER_INPUT_GUARDIAN_PID:-}"
+  local pid="${_ACQ_PROVIDER_INPUT_GUARDIAN_PID:-}" tries=0
   [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
-  [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
+  # Bash can lose a child's exit notification while running a trap. Poll
+  # instead of waiting for that notification, and cap cleanup even if the
+  # guardian is suspended or cannot handle TERM.
+  while [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ "$tries" -lt 20 ]; do
+    command sleep 0.1
+    tries=$((tries + 1))
+  done
+  [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
   [ -z "${_ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN:-}" ] || rm -f -- "$_ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN"
   _ACQ_PROVIDER_INPUT_GUARDIAN_PID=""
   _ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN=""
@@ -4645,6 +6126,13 @@ _acq_provider_input_guardian_signal_children() {
 
 _acq_provider_input_signal_exit() {
   local status="${1:-1}"
+  # A child that inherited this handler (see acq_trap_owner_is_self in
+  # progress.sh) only ends itself: the backend children and the lock belong to
+  # the transaction subshell.
+  if ! acq_trap_owner_is_self; then
+    trap - EXIT HUP INT TERM
+    exit "$status"
+  fi
   if _acq_provider_input_guardian_signal_children; then
     exit "$status"
   fi
@@ -4654,15 +6142,37 @@ _acq_provider_input_signal_exit() {
   exit 1
 }
 
+# Start time of a live PID, so a lock owner whose PID was reused reads as stale.
+# Git Bash (MSYS2/Cygwin) ps has no -o; there the /proc/<pid> directory's mtime
+# is the process start time in whole seconds (as ps -o lstart is elsewhere) and,
+# unlike the starttime field of /proc/<pid>/stat, it is kept across exec, which
+# matters because the guardian is a forked shell that then execs sh. The ppid
+# file identifies that procfs: Linux /proc has none and macOS has no /proc, so
+# both keep using ps -o lstart. Whole-second resolution can only cost liveness:
+# a PID reused within the same second still matches, so the waiter keeps
+# retrying instead of recovering the lock. It can never make a held lock look
+# stale, because a live owner's start time never changes.
 _acq_provider_input_process_identity() {
   local pid="${1:-}"
   case "$pid" in ""|*[!0-9]*) return 1 ;; esac
-  ps -o lstart= -p "$pid" 2>/dev/null | tr -d '[:space:]' | grep .
+  if [ -r "/proc/$pid/ppid" ]; then
+    stat -c %Y "/proc/$pid" 2>/dev/null | tr -d '[:space:]' | grep .
+  else
+    ps -o lstart= -p "$pid" 2>/dev/null | tr -d '[:space:]' | grep .
+  fi
 }
 
+# Release only our token: normal transactions use their live guardian's PID;
+# direct callers use $$, or pass the same explicit PID they used to acquire.
 acq_provider_input_lock_release() {
+  local pid="${2:-${_ACQ_PROVIDER_INPUT_GUARDIAN_PID:-$$}}" line
   case "${1:-}" in */provider-input/*/*.lock)
     [ -d "$1" ] && [ ! -L "$1" ] || return 1
+    # Compare the PID field only: release often runs from a signal trap, where
+    # re-deriving the process identity (ps) can fail or differ, and a PID that
+    # is ours already rules out removing another holder's owner.
+    line=$(_acq_config_lock_owner_line "$1")
+    [ "${line%% *}" = "$pid" ] || return 0
     rm -f -- "$1/owner" && rmdir -- "$1" 2>/dev/null || return 1
     ;;
     *) return 1 ;;
@@ -4691,6 +6201,9 @@ _acq_provider_input_control_plane() {
   mkdir -p "$dest" || return 1
   (
     cd "$dest" || exit 1
+    # Keep every git call below on this checkout, whatever GIT_DIR or config
+    # injection the caller's environment carries (see _kit_git_isolate).
+    _kit_git_isolate
     export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/echo GCM_INTERACTIVE=never
     git init -q || exit 1
     git remote add origin "${PATTERNS_KIT_REPO#git+}" || exit 1
@@ -4705,27 +6218,76 @@ _acq_provider_input_control_plane() {
 
 # Snapshot only the declared regular files with descriptor-relative, no-follow
 # reads. Validation and later materialization therefore cannot observe a changed
-# candidate manifest, symlink, or path outside the fetched kit.
+# candidate manifest, symlink, or path outside the fetched kit. A file with more
+# than one hard link is refused as well: a hard link is not a symlink, so the
+# no-follow checks pass it, yet it can make a file from outside the kit appear
+# inside it.
+#
+# Native Windows CPython has no O_NOFOLLOW, O_DIRECTORY or dir_fd, so there each
+# artifact is reached by an os.lstat walk from the kit root, which follows no
+# symlink or junction. The walk refuses a symlink or any reparse point
+# (FILE_ATTRIBUTE_REPARSE_POINT, which also covers junctions), a non-directory
+# ancestor and a final component that is not a regular file. The file is then
+# opened and its handle must name the same file (volume and file index) the
+# walk checked, so a link swapped in for the leaf after its lstat is refused.
+# As in _acq_provider_input_nt_dir, an ancestor swapped for a link between its
+# check and the open is not caught. A fetched kit sits in acq's private staging
+# directory, but a local kit path is read where it is, in a directory its owner
+# can change (docs/KNOWN_FAILURE_MODES.md has the mitigation options). Artifact
+# paths there must also be names Win32 keeps as written: no backslash, ":" (a
+# drive or an alternate data stream), <>"|?*, control character, trailing dot
+# or space, or reserved device name such as NUL or COM¹.
 _acq_provider_input_snapshot() {
-  python3 - "$1" "$2" <<'PY'
-import json, os, stat, sys
+  _acq_provider_input_run_py "$1" "$2" <<'PY'
+import io, json, os, stat, sys
 kit, target = sys.argv[1:]
-def open_relative(root, value):
+posix = all(hasattr(os, n) for n in ('O_NOFOLLOW', 'O_DIRECTORY')) and os.open in os.supports_dir_fd
+RESERVED = {'CON', 'PRN', 'AUX', 'NUL', 'CONIN$', 'CONOUT$'} | {d + c for d in ('COM', 'LPT') for c in '123456789\u00b9\u00b2\u00b3'}
+def check_value(value):
     if not isinstance(value, str) or value.startswith('/') or not value or any(part in ('', '.', '..') for part in value.split('/')):
         raise SystemExit('unsafe provider artifact path')
+    if not posix and any(part[-1] in '. ' or part.split('.')[0].rstrip(' ').upper() in RESERVED
+                         or any(c in '\\:<>"|?*' or ord(c) < 32 for c in part) for part in value.split('/')):
+        raise SystemExit('unsafe provider artifact path')
+def open_relative(root, value):
+    check_value(value)
     fd = os.dup(root)
     try:
         for part in value.split('/'):
             nextfd = os.open(part, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
             os.close(fd); fd = nextfd
-        if not stat.S_ISREG(os.fstat(fd).st_mode): raise SystemExit('unsafe provider artifact')
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink > 1: raise SystemExit('unsafe provider artifact')
         return fd
     except:
         os.close(fd); raise
-root = os.open(kit, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+def linked(st):
+    return stat.S_ISLNK(st.st_mode) or getattr(st, 'st_file_attributes', 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+def open_walk(value):
+    check_value(value)
+    path = kit
+    st = os.lstat(path)
+    if linked(st) or not stat.S_ISDIR(st.st_mode): raise SystemExit('unsafe provider artifact')
+    parts = value.split('/')
+    for index, part in enumerate(parts):
+        path = os.path.join(path, part)
+        st = os.lstat(path)
+        kind = stat.S_ISREG if index == len(parts) - 1 else stat.S_ISDIR
+        if linked(st) or not kind(st.st_mode): raise SystemExit('unsafe provider artifact')
+    stream = open(path, 'rb')
+    try:
+        opened = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink > 1
+                or (opened.st_dev, opened.st_ino) != (st.st_dev, st.st_ino)):
+            raise SystemExit('unsafe provider artifact')
+    except BaseException:
+        stream.close(); raise
+    return stream
+root = os.open(kit, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) if posix else None
+def open_member(value):
+    return os.fdopen(open_relative(root, value), 'rb') if posix else open_walk(value)
 try:
-    manifest_fd = open_relative(root, 'provider-input.json')
-    with os.fdopen(manifest_fd, encoding='utf-8') as stream: manifest_bytes = stream.read()
+    with io.TextIOWrapper(open_member('provider-input.json'), encoding='utf-8') as stream: manifest_bytes = stream.read()
     try:
         bundle = json.loads(manifest_bytes)
     except json.JSONDecodeError as exc:
@@ -4734,31 +6296,42 @@ try:
             f'invalid JSON at line {exc.lineno} column {exc.colno}'
         )
     os.mkdir(target, 0o700)
-    with open(os.path.join(target, 'provider-input.json'), 'x', encoding='utf-8') as stream: stream.write(manifest_bytes)
+    with open(os.path.join(target, 'provider-input.json'), 'x', encoding='utf-8', newline='\n') as stream: stream.write(manifest_bytes)
     for path in ('spec.yaml', bundle['factsPath'], bundle['normalizerPath'], bundle['snapshotPath']):
-        source = open_relative(root, path)
+        source = open_member(path)
         destination = os.path.join(target, path)
         os.makedirs(os.path.dirname(destination), mode=0o700, exist_ok=True)
-        with os.fdopen(source, 'rb') as src, open(destination, 'xb') as dst:
+        with source as src, open(destination, 'xb') as dst:
             source_mode = stat.S_IMODE(os.fstat(src.fileno()).st_mode)
             while True:
                 chunk = src.read(1024 * 1024)
                 if not chunk: break
                 dst.write(chunk)
-            os.fchmod(dst.fileno(), source_mode)
+            if posix: os.fchmod(dst.fileno(), source_mode)
+        if not posix: os.chmod(destination, source_mode)
 finally:
-    os.close(root)
+    if root is not None: os.close(root)
 PY
 }
 
 # Copy only validator-approved regular files into the backend-owned readonly tree.
+# The source is the candidate _acq_provider_input_snapshot wrote into acq's
+# private staging directory, so only the last component of each artifact path
+# is checked: it must be a regular file and not a symlink, and on native Windows
+# Python not a reparse point either. There the provider ID and artifact paths
+# must also be names Win32 keeps as written (see _acq_provider_input_snapshot).
 _acq_provider_input_materialize() {
-  python3 - "$1" "$2" "$3" <<'PY'
-import json, os, shutil, sys
+  _acq_provider_input_run_py "$1" "$2" "$3" <<'PY'
+import json, os, shutil, stat, sys
 manifest, kit, target_root = sys.argv[1:]
+posix = all(hasattr(os, n) for n in ('O_NOFOLLOW', 'O_DIRECTORY')) and os.open in os.supports_dir_fd
+RESERVED = {'CON', 'PRN', 'AUX', 'NUL', 'CONIN$', 'CONOUT$'} | {d + c for d in ('COM', 'LPT') for c in '123456789\u00b9\u00b2\u00b3'}
+def nt_unsafe(name):
+    return (not posix and (name[-1] in '. ' or name.split('.')[0].rstrip(' ').upper() in RESERVED
+                           or any(c in '\\:<>"|?*' or ord(c) < 32 for c in name)))
 bundle = json.load(open(manifest, encoding="utf-8"))
 provider = bundle["providerId"]
-if not isinstance(provider, str) or not provider or provider in ('.', '..') or '/' in provider or '\\' in provider:
+if not isinstance(provider, str) or not provider or provider in ('.', '..') or '/' in provider or '\\' in provider or nt_unsafe(provider):
     raise SystemExit("unsafe provider ID")
 if bundle.get("schemaVersion") != "acq-provider-input-bundle/v2" or bundle.get("providerPath") != "models/providers/" + provider:
     raise SystemExit("unsafe provider bundle layout")
@@ -4767,10 +6340,12 @@ if os.path.lexists(target) or os.path.dirname(target) != target_root or os.path.
     raise SystemExit("duplicate or unsafe provider target")
 os.mkdir(target, 0o755)
 for source, destination, mode in ((bundle["factsPath"], "facts.json", 0o444), (bundle["normalizerPath"], "normalizer", 0o555), (bundle["snapshotPath"], "snapshot.json", 0o444)):
-    if not isinstance(source, str) or source.startswith('/') or any(part in ('', '.', '..') for part in source.split('/')):
+    if not isinstance(source, str) or source.startswith('/') or any(part in ('', '.', '..') or nt_unsafe(part) for part in source.split('/')):
         raise SystemExit("unsafe provider artifact path")
     source = os.path.join(kit, source)
     if os.path.islink(source) or not os.path.isfile(source):
+        raise SystemExit("unsafe provider artifact")
+    if getattr(os.lstat(source), 'st_file_attributes', 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
         raise SystemExit("unsafe provider artifact")
     destination = os.path.join(target, destination)
     shutil.copyfile(source, destination)
@@ -4789,7 +6364,9 @@ acq_host_config_dir() {
   safe_backend=$(printf '%s' "$backend" | tr -c 'A-Za-z0-9._-' '_')
   safe_name=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')
   name_sum=$(printf '%s' "$name" | cksum 2>/dev/null | cut -d' ' -f1 2>/dev/null || echo 0)
-  printf '%s/%s/%s.%s.config\n' "$(_acq_provenance_dir)" "$safe_backend" "$safe_name" "$name_sum"
+  local _acq_pd
+  _acq_pd=$(_acq_provenance_dir) || return 1
+  printf '%s/%s/%s.%s.config\n' "$_acq_pd" "$safe_backend" "$safe_name" "$name_sum"
 }
 
 # Validate a config KEY: fixed-literal callers only, restricted charset, never a
@@ -5234,9 +6811,20 @@ warn_if_no_ssh_signing_key() {
   echo "      Then commit as usual. (You can still work; only committing needs it.)" >&2
 }
 
+# _acq_host_git_config_value KEY — the user's global git value for KEY. An
+# inherited GIT_CONFIG makes `git config --global` fail ("only one config file
+# at a time"), so it is unset in a subshell first. Nothing else the caller's
+# environment can carry redirects a --global read: GIT_DIR and the like name a
+# repository, which this read never opens, and command-scope config is not
+# consulted when a file scope is given. GIT_CONFIG_GLOBAL is kept, since it
+# names the user's own global file. Self-contained on purpose: callers (and the
+# Python golden tests) lift this function on its own.
 _acq_host_git_config_value() {
   command -v git >/dev/null 2>&1 || return 0
-  HOME="${HOME:-}" git config --global --get "$1" 2>/dev/null || true
+  (
+    unset GIT_CONFIG
+    HOME="${HOME:-}" git config --global --get "$1"
+  ) 2>/dev/null || true
 }
 
 _acq_git_identity_value_is_safe() {
@@ -5285,6 +6873,64 @@ acq_host_git_global_config_env() {
   fi
 }
 
+# _acq_git_host_ready — 0 when _acq_git_host can clear the inherited git
+# environment (kit-translate.sh is loaded), 1 otherwise.
+_acq_git_host_ready() {
+  declare -F _kit_git_isolate >/dev/null 2>&1 &&
+    declare -F _kit_git_isolate_repo >/dev/null 2>&1
+}
+
+# _acq_git_host MODE ARGS... — run a read-only host git command in a subshell
+# that first clears the inherited git environment. A GIT_DIR, GIT_WORK_TREE,
+# GIT_INDEX_FILE or similar exported by a hook, an editor or a parent git
+# command would otherwise point the read at another repository, so acq would
+# report on the wrong one. MODE keep (_kit_git_isolate_repo) keeps the user's
+# command-scope config (GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT/KEY_n/VALUE_n),
+# for `git config` reads that report the user's effective settings; MODE
+# isolate (_kit_git_isolate) drops it too, for everything else. Fails closed
+# (return 1, git not run) when kit-translate.sh is not loaded.
+_acq_git_host() {
+  local mode="$1"
+  shift
+  _acq_git_host_ready || return 1
+  (
+    if [ "$mode" = keep ]; then _kit_git_isolate_repo; else _kit_git_isolate; fi
+    git "$@"
+  )
+}
+
+# _acq_host_git_identity_set — 0 when the host supplies a usable identity that
+# acq forwards (EMAIL, both GIT_AUTHOR_EMAIL and GIT_COMMITTER_EMAIL, or the
+# global user.email), so no workspace identity note is needed.
+_acq_host_git_identity_set() {
+  local host_email
+  if [ -n "${EMAIL:-}" ] && _acq_git_identity_value_is_safe "$EMAIL"; then
+    return 0
+  fi
+  if [ -n "${GIT_AUTHOR_EMAIL:-}" ] && [ -n "${GIT_COMMITTER_EMAIL:-}" ] \
+      && _acq_git_identity_value_is_safe "$GIT_AUTHOR_EMAIL" \
+      && _acq_git_identity_value_is_safe "$GIT_COMMITTER_EMAIL"; then
+    return 0
+  fi
+  host_email=$(_acq_host_git_config_value user.email)
+  [ -n "$host_email" ] && _acq_git_identity_value_is_safe "$host_email"
+}
+
+# _acq_warn_repo_git_identity REPO — case (a) of warn_if_no_git_identity: note
+# when REPO has no effective user.email. Reads the EFFECTIVE identity (not just
+# --local), with the user's command-scope config kept, so an already-resolvable
+# value doesn't false-warn.
+_acq_warn_repo_git_identity() {
+  local email
+  email=$(_acq_git_host keep -C "$1" config user.email 2>/dev/null || true)
+  [ -n "$email" ] && return 0
+  echo "acq: note — this repo has no git user.email set." >&2
+  echo "      The sandbox home is isolated, so commits will be SIGNED but show" >&2
+  echo "      'Unverified' on GitHub until you set an identity. Fix (in this repo):" >&2
+  echo "        git config user.email you@verified-on-github.example" >&2
+  echo "        git config user.name  \"Your Name\"" >&2
+}
+
 # Warn (do not block) if the mounted workspace has no usable git identity.
 # A repo-local identity crosses through the mounted workspace. When present, acq
 # also forwards the host's explicit GIT_* identity env or global git identity as
@@ -5300,34 +6946,13 @@ acq_host_git_global_config_env() {
 warn_if_no_git_identity() {
   local path="${1:-}"
   command -v git >/dev/null 2>&1 || return 0
+  _acq_git_host_ready || return 0   # advisory: skip rather than read blind
   [ -n "$path" ] && [ -d "$path" ] || return 0   # (d) handled by pre-flight
-
-  local host_email
-  if [ -n "${EMAIL:-}" ] && _acq_git_identity_value_is_safe "$EMAIL"; then
-    return 0
-  fi
-  if [ -n "${GIT_AUTHOR_EMAIL:-}" ] && [ -n "${GIT_COMMITTER_EMAIL:-}" ] \
-      && _acq_git_identity_value_is_safe "$GIT_AUTHOR_EMAIL" \
-      && _acq_git_identity_value_is_safe "$GIT_COMMITTER_EMAIL"; then
-    return 0
-  fi
-  host_email=$(_acq_host_git_config_value user.email)
-  if [ -n "$host_email" ] && _acq_git_identity_value_is_safe "$host_email"; then
-    return 0
-  fi
+  _acq_host_git_identity_set && return 0
 
   # (a) P is itself a git work tree.
-  if git -C "$path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    local email
-    # Prefer EFFECTIVE identity (not just --local) so an already-resolvable
-    # value doesn't false-warn.
-    email=$(git -C "$path" config user.email 2>/dev/null || true)
-    [ -n "$email" ] && return 0
-    echo "acq: note — this repo has no git user.email set." >&2
-    echo "      The sandbox home is isolated, so commits will be SIGNED but show" >&2
-    echo "      'Unverified' on GitHub until you set an identity. Fix (in this repo):" >&2
-    echo "        git config user.email you@verified-on-github.example" >&2
-    echo "        git config user.name  \"Your Name\"" >&2
+  if _acq_git_host isolate -C "$path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    _acq_warn_repo_git_identity "$path"
     return 0
   fi
 
@@ -5366,6 +6991,11 @@ warn_if_no_git_identity() {
 
   # (c) A directory with no repos yet — a NEW/intended workspace. Forward-looking
   # onboarding note (emitted only on first create; the caller gates this).
+  _acq_note_new_workspace_identity
+}
+
+# _acq_note_new_workspace_identity — case (c) of warn_if_no_git_identity.
+_acq_note_new_workspace_identity() {
   echo "acq: note — this workspace has no git repos yet." >&2
   echo "      When you clone one in, set its identity so commits are Verified:" >&2
   echo "        git -C <repo> config user.email you@verified-on-github.example" >&2
@@ -5414,9 +7044,14 @@ detect_workspace_repos() {
   local path="${1:-}"
   command -v git >/dev/null 2>&1 || return 0
   [ -n "$path" ] && [ -d "$path" ] || return 0
+  if ! _acq_git_host_ready; then
+    echo "acq: error: kit-translate.sh is not loaded, so acq cannot clear the inherited" >&2
+    echo "acq:   git environment (GIT_DIR and the like) to read the workspace's remotes." >&2
+    return 1
+  fi
 
   local dirs=() d
-  if git -C "$path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  if _acq_git_host isolate -C "$path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     dirs=("$path")
   else
     local scanned=0
@@ -5430,11 +7065,14 @@ detect_workspace_repos() {
     done < <(find "$path" -maxdepth 1 -mindepth 1 -type d ! -type l 2>/dev/null)
   fi
 
+  # Remotes are read with the command-scope config dropped too (isolate, as
+  # Python's gitrepos does): GIT_CONFIG_PARAMETERS or GIT_CONFIG_COUNT/KEY/VALUE
+  # could otherwise inject a remote, and the scope decision follows the remote.
   local url nwo seen="" out=""
   for d in ${dirs[@]+"${dirs[@]}"}; do
-    url=$(git -C "$d" config --get remote.origin.url 2>/dev/null || true)
+    url=$(_acq_git_host isolate -C "$d" config --get remote.origin.url 2>/dev/null || true)
     if [ -z "$url" ]; then
-      url=$(git -C "$d" config --get-regexp '^remote\..*\.url$' 2>/dev/null \
+      url=$(_acq_git_host isolate -C "$d" config --get-regexp '^remote\..*\.url$' 2>/dev/null \
         | head -n1 | cut -d' ' -f2- || true)
     fi
     [ -n "$url" ] || continue
@@ -5493,7 +7131,7 @@ github_scope_sandbox() {
   local sandbox="$1" ws="${2:-}"
   local repos owners="" nwo owner owner_key owner_count=0
 
-  repos=$(detect_workspace_repos "$ws")
+  repos=$(detect_workspace_repos "$ws") || return 1
   if [ -z "$repos" ]; then
     echo "acq: no GitHub repositories detected in the workspace; nothing to scope." >&2
     return 0
@@ -5566,7 +7204,7 @@ EOF
   if command -v acq_backend_secret_set >/dev/null 2>&1; then
     acq_backend_secret_set "$sandbox" github || {
       echo "acq: github scoping skipped or failed; continuing (you can re-run later" >&2
-      echo "      with: acq github-scope $sandbox $ws)." >&2
+      echo "      with: acq github-scope $sandbox $(acq_printable "$ws"))." >&2
       return 0
     }
   else
@@ -5593,7 +7231,7 @@ advise_github_scope() {
   fi
 
   local repos
-  repos=$(detect_workspace_repos "$ws")
+  repos=$(detect_workspace_repos "$ws") || return 0   # advisory only
   [ -n "$repos" ] || return 0   # no GitHub repos → nothing to scope
 
   local has_global="no"
@@ -5613,7 +7251,7 @@ advise_github_scope() {
 
   # Non-interactive (CI, piped): advise and continue.
   if [ ! -t 0 ]; then
-    echo "      To scope it later: acq github-scope $sandbox $ws" >&2
+    echo "      To scope it later: acq github-scope $sandbox $(acq_printable "$ws")" >&2
     return 0
   fi
 
@@ -5629,7 +7267,7 @@ advise_github_scope() {
   if acq_prompt_confirm "Scope a GitHub token for this sandbox now?" "$scope_default"; then
     github_scope_sandbox "$sandbox" "$ws"
   else
-    echo "acq: continuing without scoping (run 'acq github-scope $sandbox $ws' anytime)." >&2
+    echo "acq: continuing without scoping (run 'acq github-scope $sandbox $(acq_printable "$ws")' anytime)." >&2
   fi
   return 0
 }
@@ -5644,12 +7282,12 @@ preflight_workspace_path() {
   [ -n "$path" ] || return 0            # no path arg -> caller's $PWD default
   if [ -e "$path" ]; then
     if [ ! -d "$path" ]; then
-      echo "acq: error — workspace must be a directory: $path" >&2
+      echo "acq: error — workspace must be a directory: $(acq_printable "$path")" >&2
       return 1
     fi
     return 0
   fi
-  echo "acq: error — workspace path does not exist: $path" >&2
+  echo "acq: error — workspace path does not exist: $(acq_printable "$path")" >&2
   echo "      If this is a new workspace, create it first, then re-run:" >&2
   printf '        mkdir -p %q && acq run …\n' "$path" >&2
   return 1
@@ -5789,6 +7427,34 @@ acq_print_image_contract_doctor() {
   acq_backend_doctor_sandbox "$name"
 }
 
+# _acq_doctor_broken_pin — print the unknown backend config.yaml pins, or
+# nothing. Resolution records a broken pin (ACQ_INVALID_BACKEND_PIN, from
+# acq_resolve_backend_diagnostic) only when it used the pin; with --backend or
+# ACQ_BACKEND set it never reads config.yaml, so the file is read here. As in
+# Python's doctor, the pin is reported either way: every later invocation
+# without the override still refuses it.
+_acq_doctor_broken_pin() {
+  local pin
+  if [ -n "${ACQ_INVALID_BACKEND_PIN:-}" ]; then
+    printf '%s\n' "$ACQ_INVALID_BACKEND_PIN"
+    return 0
+  fi
+  pin=$(_read_config_backend)
+  if [ -n "$pin" ] && ! acq_backend_name_known "$pin"; then
+    printf '%s\n' "$pin"
+  fi
+  return 0
+}
+
+# _acq_doctor_backend_pin_check PIN — report PIN, an unknown backend pinned in
+# config.yaml (from _acq_doctor_broken_pin), as a failed config-backend check,
+# with the message and remediation Python's doctor uses. No PIN, no output.
+_acq_doctor_backend_pin_check() {
+  [ -n "${1:-}" ] || return 0
+  echo "  [fail] config-backend: config.yaml sets an unknown backend: '$(acq_printable "$1")' (expected sbx or msb)"
+  echo "           run 'acq backend set msb' or 'acq backend set sbx' (or 'acq backend unset' to auto-detect)"
+}
+
 acq_print_doctor() {
   local sbx_status msb_status
 
@@ -5820,9 +7486,25 @@ acq_print_doctor() {
   echo "  [msb: ${msb_status}]"
   echo ""
 
-  local config_file
-  config_file=$(_acq_config_file)
-  if [ -f "$config_file" ]; then
+  # User directories: report an unusable state/config location as a failed
+  # check with the same text Python's doctor uses, and keep going (a diagnostic
+  # must complete). Nothing is offered for writing below in that case.
+  # The entry point records the problem before the adapter loads; compute it
+  # here only when called without it.
+  local dirs_ok=1
+  [ -n "${ACQ_USERDIRS_MESSAGE+set}" ] || acq_userdirs_problem || true
+  if [ -n "${ACQ_USERDIRS_MESSAGE:-}" ]; then
+    dirs_ok=""
+    echo "  [fail] state: ${ACQ_USERDIRS_MESSAGE}"
+    echo "           ${ACQ_USERDIRS_REMEDIATION}"
+    echo ""
+  fi
+
+  local config_file=""
+  config_file=$(_acq_config_file) || config_file=""
+  if [ -z "$config_file" ]; then
+    echo "  config: (no absolute config directory)"
+  elif [ -f "$config_file" ]; then
     echo "  config: ${config_file}"
     local cfg_backend
     cfg_backend=$(_read_config_backend)
@@ -5834,6 +7516,9 @@ acq_print_doctor() {
   if [ -n "${ACQ_BACKEND:-}" ]; then
     echo "  ACQ_BACKEND env override: ${ACQ_BACKEND}"
   fi
+  local broken_pin
+  broken_pin=$(_acq_doctor_broken_pin)
+  _acq_doctor_backend_pin_check "$broken_pin"
 
   echo ""
 
@@ -5845,6 +7530,10 @@ acq_print_doctor() {
   fi
 
   echo ""
+  # A broken pin is not overwritten from here: configure offers that fix.
+  if [ -z "$dirs_ok" ] || [ -z "$config_file" ] || [ -n "$broken_pin" ]; then
+    return 0
+  fi
   # ACQ_RESOLVED_BACKEND is always set by acq_resolve_backend before doctor runs,
   # so the ':-msb' here is only a defensive fallback — it mirrors auto-detect's
   # default and does NOT let doctor independently pick a backend.
@@ -5872,7 +7561,7 @@ acq_print_doctor() {
 # (config.yaml) to stderr, so `acq configure` opens by showing what is in effect.
 _acq_configure_show_current() {
   local cfg backend extras scope bindings provider_kit sources
-  cfg=$(_acq_config_file)
+  cfg=$(_acq_config_file) || return 1
   backend=$(_acq_config_read_field backend)
   extras=$(_acq_config_read_field extra_kits)
   scope=$(_acq_config_read_field scope_github_token)
@@ -5889,6 +7578,16 @@ _acq_configure_show_current() {
   echo "" >&2
 }
 
+# _acq_configure_backend_pin — when config.yaml pins a backend acq cannot load
+# (ACQ_INVALID_BACKEND_PIN, from acq_resolve_backend_diagnostic), say so. The
+# pin is left as it is: configure does not manage the backend, and 'acq backend
+# set' or 'acq backend unset' fixes it.
+_acq_configure_backend_pin() {
+  [ -n "${ACQ_INVALID_BACKEND_PIN:-}" ] || return 0
+  _acq_unknown_backend_message "$ACQ_INVALID_BACKEND_PIN" "$(_acq_config_file || echo config.yaml)" >&2
+  echo "" >&2
+}
+
 # acq_configure — the interactive configuration flow. Presents the opt-in kit
 # catalog as a multiselect (pre-checked from the current config), then a confirm
 # for the GitHub-token-scoping default, and persists both to config.yaml
@@ -5902,6 +7601,7 @@ _acq_configure_show_current() {
 # via ACQ_EXTRA_KITS) are layered separately and are not managed here.
 acq_configure() {
   _acq_configure_show_current
+  _acq_configure_backend_pin
 
   # Non-interactive (CI / piped / ACQ_NO_PROMPT): make NO changes — just show the
   # current config above and return. Writing here would clobber a hand-edited or
@@ -6027,7 +7727,7 @@ acq_configure() {
 # non-interactive (CI / piped) — fail-open, preserving today's behavior.
 maybe_first_run_configure() {
   local cfg dir
-  cfg=$(_acq_config_file)
+  cfg=$(_acq_config_file) || return 0
   [ -f "$cfg" ] && return 0        # already configured (or previously offered)
   _acq_prompt_interactive || return 0   # non-interactive: skip silently
 

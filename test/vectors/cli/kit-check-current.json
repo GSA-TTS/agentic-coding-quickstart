@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "id": "cli/kit-check-current",
+  "oracle": "ADR-0038m §2 kit check current (applied ref == local pin), exit 0",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{acq}", "--backend", "msb", "kit", "check", "mybox", "--json"],
+    "env": {
+      "ACQ_MSB_BIN": "__stub__",
+      "ACQ_MSB_VERSION": "0.7.7",
+      "ACQ_MSB_INSTALLED": "1",
+      "ACQ_SBX_INSTALLED": "0",
+      "ACQ_MSB_STUB_CATALOG": "{\"mybox\": \"running\"}",
+      "ACQ_KIT_PROVENANCE_SEED": "{\"mybox\": \"941a286f912b99475429c3c00db49a99af5b241e\"}"
+    },
+    "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "MSB_HOME", "ACQ_IMAGE", "ACQ_MSB_IMAGE", "ACQ_MSB_STUB_FAIL", "ACQ_MSB_READY_TIMEOUT"],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "kit check",
+        "data": {
+          "sandbox": "mybox",
+          "backend": "msb",
+          "local": "941a286f912b99475429c3c00db49a99af5b241e",
+          "applied": "941a286f912b99475429c3c00db49a99af5b241e",
+          "status": "current"
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {"mode": "exact", "value": "", "normalize": []}
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+  }
+}

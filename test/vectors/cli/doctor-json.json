@@ -1,0 +1,88 @@
+{
+  "schema": 1,
+  "id": "cli/doctor-json",
+  "oracle": "ADR-0038m \u00a72 structured output success envelope for doctor: overall status and per-check id/status",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{acq}",
+      "doctor",
+      "--json"
+    ],
+    "env": {
+      "ACQ_SBX_INSTALLED": "0",
+      "ACQ_MSB_INSTALLED": "0"
+    },
+    "unset": [
+      "ACQ_RUNTIME"
+    ],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "doctor",
+        "data": {
+          "status": "warn",
+          "checks": [
+            {
+              "id": "runtime",
+              "status": "pass"
+            },
+            {
+              "id": "backend",
+              "status": "warn"
+            },
+            {
+              "id": "backend-sbx",
+              "status": "warn"
+            },
+            {
+              "id": "backend-msb",
+              "status": "warn"
+            },
+            {
+              "id": "state",
+              "status": "pass"
+            },
+            {
+              "id": "config-schema",
+              "status": "pass"
+            },
+            {
+              "id": "config-backend",
+              "status": "pass"
+            },
+            {
+              "id": "bash-import",
+              "status": "pass"
+            }
+          ]
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME"
+    ]
+  }
+}

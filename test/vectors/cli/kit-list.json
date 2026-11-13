@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "id": "cli/kit-list",
+  "oracle": "ADR-0038m §2 kit list required data: control-plane ref and effective built-in/provider/extra sets",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{acq}", "kit", "list", "--json"],
+    "env": {
+      "ACQ_EXTRA_KITS": "./local-kit git+https://github.com/acme/kits.git#ref=x&dir=k"
+    },
+    "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "ACQ_MSB_BIN", "ACQ_MSB_INSTALLED", "ACQ_SBX_INSTALLED", "ACQ_PROVIDER_KITS"],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "kit list",
+        "data": {
+          "control_plane_ref": "git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=941a286f912b99475429c3c00db49a99af5b241e&dir=integrations/isolation/acq-kits",
+          "built_in": ["zscaler-ca-certificate", "agentic-coding-playbook", "git-ssh-sign"],
+          "provider": ["usai-provider"],
+          "extra": ["./local-kit", "git+https://github.com/acme/kits.git#ref=x&dir=k"]
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {"mode": "exact", "value": "", "normalize": []}
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+  }
+}

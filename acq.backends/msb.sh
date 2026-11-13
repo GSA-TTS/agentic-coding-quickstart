@@ -65,13 +65,19 @@ ACQ_BACKEND_CAN_RESUME=1                   # msb stop / msb start preserve state
 # shellcheck disable=SC2034
 ACQ_BACKEND_SUPPORTS_CREDENTIAL_REWRITE=1  # msb --secret ENV@HOST + --tls-intercept
 
-# Shared agent catalog (issue #377). common.sh normally sources this, but some
-# tests source this adapter directly; guard so a re-source is cheap and so the
+# Shared agent catalog for consistent agent tokens and image names. common.sh
+# normally sources this, but some tests source this adapter directly; guard so
+# a re-source is cheap and so the
 # catalog helpers (acq_is_known_agent, acq_agent_template_image, …) are always
 # defined when this file's functions run.
 if ! command -v acq_is_known_agent >/dev/null 2>&1; then
   # shellcheck source=acq.backends/agents.sh
   . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/agents.sh"
+fi
+# Absolute-only XDG/HOME/ACQ_STATE_DIR resolution, for the same reason.
+if ! command -v acq_xdg_dir >/dev/null 2>&1; then
+  # shellcheck source=acq.backends/userdirs.sh
+  . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/userdirs.sh"
 fi
 
 _acq_msb_select_kits() {
@@ -92,6 +98,16 @@ _acq_msb_select_kits() {
 if ! command -v acq_host_config_read >/dev/null 2>&1; then
   # shellcheck source=acq.backends/common.sh
   . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+fi
+# The --clone host-side git calls clear the inherited git environment with
+# _kit_git_isolate (kit-translate.sh). common.sh sources that file only when
+# ACQ_SCRIPT_DIR is set, so load it from beside this adapter when it is
+# missing. If it still is not defined, those calls refuse to run
+# (_acq_msb_git_ws_prep).
+if ! declare -F _kit_git_isolate >/dev/null 2>&1 &&
+  [ -f "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/kit-translate.sh" ]; then
+  # shellcheck source=acq.backends/kit-translate.sh
+  . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/kit-translate.sh"
 fi
 
 # Keep the adapter-local validator used by attach while delegating the canonical
@@ -247,6 +263,14 @@ _acq_msb_resolve_image() {
     _ACQ_MSB_RESOLVED_IMAGE_SOURCE="generic-opencode-default"
     return 0
   fi
+  if [ "$agent" = "shell" ]; then
+    # The `shell` positional uses acq's own base image, like the Python backend and the
+    # sbx base kit: a plain bash workload on the pinned devenv image, never Docker's
+    # sandbox-templates template (ADR-0051m).
+    _ACQ_MSB_RESOLVED_IMAGE="$ACQ_DEFAULT_OPENCODE_DEVENV_IMAGE"
+    _ACQ_MSB_RESOLVED_IMAGE_SOURCE="acq-base-default"
+    return 0
+  fi
   if _ACQ_MSB_RESOLVED_IMAGE=$(acq_agent_template_image "$agent" 2>/dev/null) \
      && [ "$_ACQ_MSB_RESOLVED_IMAGE" != "$_ACQ_MSB_DEFAULT_IMAGE" ]; then
     _ACQ_MSB_RESOLVED_IMAGE_SOURCE="agent-default"
@@ -290,7 +314,11 @@ ACQ_MSB_SKIP_PREREQ_CHECK="${ACQ_MSB_SKIP_PREREQ_CHECK:-}"
 
 # Where fetched neutral kits are materialized for this run (msb has no native
 # kit mechanism, so acq drives the parsed operations itself).
-ACQ_MSB_KIT_CACHE="${ACQ_MSB_KIT_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/acq/kits}"
+# (The resolvers run outside the expansions below: a failing command
+# substitution in an assignment would trip errexit while this file is sourced.)
+_acq_ud=$(acq_xdg_dir XDG_CACHE_HOME .cache) || _acq_ud=""
+ACQ_MSB_KIT_CACHE="${ACQ_MSB_KIT_CACHE:-${_acq_ud:+$_acq_ud/acq/kits}}"
+unset _acq_ud
 
 # Max seconds to wait for `msb exec` to work after create (the guest boots in
 # the background; kit application must not race it). Mirrors sbx's
@@ -327,7 +355,7 @@ ACQ_MSB_GITHUB_HOST="${ACQ_MSB_GITHUB_HOST:-github.com,api.github.com,codeload.g
 # The optional SANDBOX arg gives scoped-sidecar precedence over the global one.
 _acq_msb_service_binding() {
   local _service="$1" _sandbox="${2:-}" _meta _host _env
-  # Sidecar FIRST (#384): an explicit `--host` recorded at `acq secret set`
+  # Sidecar FIRST: an explicit `--host` recorded at `acq secret set`
   # must win over the compiled-in usai/github mapping — the sbx backend gives
   # the user's host the same precedence, and a compiled-in short-circuit here
   # silently re-bound a self-hosted token to the default endpoint. Absent
@@ -504,7 +532,9 @@ case "$(printf '%s' "$ACQ_MSB_UPSTREAM_CA_AUTODETECT" | tr '[:upper:]' '[:lower:
 esac
 
 # Where the auto-detected host CA bundle is written for the upstream verifier.
-ACQ_MSB_UPSTREAM_CA_FILE="${ACQ_MSB_UPSTREAM_CA_FILE:-${ACQ_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/acq}/msb/host-upstream-cas.pem}"
+_acq_ud=$(acq_state_dir) || _acq_ud=""
+ACQ_MSB_UPSTREAM_CA_FILE="${ACQ_MSB_UPSTREAM_CA_FILE:-${_acq_ud:+$_acq_ud/msb/host-upstream-cas.pem}}"
+unset _acq_ud
 
 # REPRODUCTION / TESTING toggle. A host whose corporate proxy does NOT intercept
 # api.gsa.usai.gov / github.com (e.g. those domains are on a proxy bypass list)
@@ -610,12 +640,16 @@ ACQ_MSB_BALANCED_HOSTS_FILE="${ACQ_MSB_BALANCED_HOSTS_FILE:-${ACQ_SCRIPT_DIR:-.}
 # and records the `msb ssh serve` + `ssh -L` PIDs per sandbox so `acq rm`/stop can
 # tear them down. State lives under $XDG_STATE_HOME/acq (falling back to
 # ~/.local/state/acq); override the whole root with ACQ_STATE_DIR (tests do).
-ACQ_STATE_DIR="${ACQ_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/acq}"
-ACQ_MSB_SSH_DIR="${ACQ_MSB_SSH_DIR:-${ACQ_STATE_DIR}/ssh}"
-ACQ_MSB_SSH_KEY="${ACQ_MSB_SSH_KEY:-${ACQ_MSB_SSH_DIR}/msb_id_ed25519}"
-ACQ_MSB_SSH_KNOWN_HOSTS="${ACQ_MSB_SSH_KNOWN_HOSTS:-${ACQ_MSB_SSH_DIR}/known_hosts}"
-ACQ_MSB_PORTS_DIR="${ACQ_MSB_PORTS_DIR:-${ACQ_STATE_DIR}/ports}"
-ACQ_MSB_CLONES_DIR="${ACQ_MSB_CLONES_DIR:-${ACQ_STATE_DIR}/clones}"
+# Only absolute values are honored (see userdirs.sh). A relative ACQ_STATE_DIR is
+# refused by the entry point before any adapter loads; here it resolves to empty
+# rather than to a directory under the current one, and so do the defaults
+# derived from it (empty, never root-anchored).
+ACQ_STATE_DIR="$(acq_state_dir)" || ACQ_STATE_DIR=""
+ACQ_MSB_SSH_DIR="${ACQ_MSB_SSH_DIR:-${ACQ_STATE_DIR:+$ACQ_STATE_DIR/ssh}}"
+ACQ_MSB_SSH_KEY="${ACQ_MSB_SSH_KEY:-${ACQ_MSB_SSH_DIR:+$ACQ_MSB_SSH_DIR/msb_id_ed25519}}"
+ACQ_MSB_SSH_KNOWN_HOSTS="${ACQ_MSB_SSH_KNOWN_HOSTS:-${ACQ_MSB_SSH_DIR:+$ACQ_MSB_SSH_DIR/known_hosts}}"
+ACQ_MSB_PORTS_DIR="${ACQ_MSB_PORTS_DIR:-${ACQ_STATE_DIR:+$ACQ_STATE_DIR/ports}}"
+ACQ_MSB_CLONES_DIR="${ACQ_MSB_CLONES_DIR:-${ACQ_STATE_DIR:+$ACQ_STATE_DIR/clones}}"
 # Create-time startup-script staging state (ADR-0017). The staged host file list
 # is reset per provision; declare it at module scope so cleanup references are
 # always defined even if provision is not the entry point.
@@ -689,7 +723,7 @@ esac
 # SSH_AUTH_SOCK on every bridge (re)start; msb dials that path per guest
 # connection and follows the link, so the persisted route never goes stale when
 # the host agent moves (macOS launchd mints a new socket path per login).
-ACQ_MSB_SSH_AGENT_LINK_DIR="${ACQ_STATE_DIR}/msb/ssh-agent"
+ACQ_MSB_SSH_AGENT_LINK_DIR="${ACQ_STATE_DIR:+$ACQ_STATE_DIR/msb/ssh-agent}"
 # msb connect()s to the link path itself, so it must fit a sockaddr_un: 104
 # bytes on macOS including the NUL terminator (108 on Linux). Budget for the
 # smaller platform.
@@ -722,7 +756,7 @@ _ACQ_MSB_HOST_PROBE_NOTICE_SHOWN=0
 # value — exactly the bug this avoids). The counter is therefore persisted in a small
 # file under the ports state dir so consecutive publishes in one process read
 # distinct, increasing values. Seeded from a per-process random base.
-_ACQ_MSB_PORT_SEQ_FILE="${ACQ_MSB_PORTS_DIR}/.port-seq"
+_ACQ_MSB_PORT_SEQ_FILE="${ACQ_MSB_PORTS_DIR:+$ACQ_MSB_PORTS_DIR/.port-seq}"
 
 # Per-process random base offset for ephemeral serve-port selection, evaluated
 # ONCE when this file is sourced (not per call). Spreads different processes
@@ -892,7 +926,7 @@ acq_backend_prepare() {
 acq_backend_exists() {
   local listed
   listed=$(_acq_msb_cli list -q 2>/dev/null) || return 1
-  grep -Fxq -- "$1" <<<"$listed"
+  _acq_list_has_line "$1" "$listed"
 }
 
 # Return success only when msb successfully lists sandboxes and NAME is absent.
@@ -900,7 +934,10 @@ acq_backend_exists() {
 _acq_msb_confirm_absent() {
   local name="$1" listed
   listed=$(_acq_msb_cli list -q 2>/dev/null) || return 1
-  ! grep -Fxq -- "$name" <<<"$listed"
+  # A name that cannot appear as one listed line cannot be confirmed absent:
+  # treat it as indeterminate, never as permission to clean up.
+  _acq_name_is_one_line "$name" || return 1
+  ! _acq_list_has_line "$name" "$listed"
 }
 
 # ---------------------------------------------------------------------------
@@ -919,7 +956,7 @@ _acq_msb_confirm_absent() {
 _acq_msb_is_running() {
   local listed
   listed=$(_acq_msb_cli list --running -q 2>/dev/null) || return 1
-  grep -Fxq -- "$1" <<<"$listed"
+  _acq_list_has_line "$1" "$listed"
 }
 
 # ---------------------------------------------------------------------------
@@ -977,7 +1014,7 @@ _acq_msb_bind_secrets_into() {
   if command -v acq_secret_resolve >/dev/null 2>&1; then
     # github hosts resolve through the SAME binding table set/rm/refeed use
     # (_acq_msb_service_binding), so a `--host` sidecar recorded at
-    # `acq secret set` overrides the compiled-in endpoint here too (#384) instead
+    # `acq secret set` overrides the compiled-in endpoint here too instead
     # of being written-but-ignored at provision.
     #
     # Providers (the default one included) are bound by the generic provider loop
@@ -1292,6 +1329,8 @@ _acq_msb_fetch_kit() {
       git+*|*://*) printf '%s\n' "$ACQ_MSB_KIT_LOCAL_DIR"; return 0 ;;
     esac
   fi
+  # Derive a stable cache subdir from the ref (sha + dir tail).
+  acq_require_base "msb kit cache" "$ACQ_MSB_KIT_CACHE" || return 1
   # Legacy slug directories contain Git repositories. Leave them untouched;
   # only materialize metadata-free payloads in the versioned namespace.
   namespace="${ACQ_MSB_KIT_CACHE}/payload-v2"
@@ -1353,9 +1392,13 @@ EOF
 #   - `crl*.h` (intra-label glob msb can't express) -> broadened to `*.<parent>`;
 #     the CALLER emits the one-time widening warning (keyed off the `crl*.` input)
 #   - anything else -> the host unchanged (exact domain)
-# The result is charset-guarded ([A-Za-z0-9.*_-]) and single-label `*.` suffixes
-# (which msb rejects for blast radius) are dropped, so the value is safe to place
-# in an argv via the caller's eval-by-name append (SI-10).
+# The result is charset-guarded ([A-Za-z0-9.*_-]), `*` is accepted only as the
+# leading `*.` wildcard, and the name must be two or more well-formed labels, so
+# the value is safe to place in an argv via the caller's eval-by-name append
+# (SI-10). The two-label floor drops single-label `*.` suffixes (msb rejects them
+# for blast radius) AND single-label exact targets: msb reads `any`, `public`,
+# `private`, `multicast`, `host`, and `dns` as GROUP keywords, so an entry such as
+# `any:443` would otherwise become `allow@any:tcp:443` and reopen all egress.
 _acq_msb_balanced_target() {
   local _host="$1" _context="${2:-balanced entry}" _target
   case "$_host" in
@@ -1372,17 +1415,25 @@ _acq_msb_balanced_target() {
       ;;
   esac
 
-  # Reject a single-label suffix (`*.com`): msb refuses it (accidental blast
-  # radius), so drop it here rather than let `msb create` hard-fail on the set.
-  case "$_target" in
-    "*."*)
-      case "${_target#*.}" in
-        *.*) : ;;  # two+ labels after `*.` -> OK
-        *)
-          echo "acq(msb): warning: skipping single-label suffix ${_context} (msb rejects it): ${_target}" >&2
-          return 1
-          ;;
-      esac
+  # Split off the one permitted wildcard form, then require a well-formed name:
+  # no other `*`, no empty label, no label starting or ending with `-`.
+  local _name="$_target"
+  case "$_target" in "*."*) _name="${_target#??}" ;; esac
+  case "$_name" in
+    *"*"*|.*|*.|*..*|-*|*-|*.-*|*-.*)
+      echo "acq(msb): warning: skipping non-hostname ${_context}: ${_host}" >&2
+      return 1
+      ;;
+  esac
+
+  # Require two or more labels. A single-label suffix (`*.com`) is refused by
+  # msb; a single-label exact target (`any`, `public`, `host`, ...) is an msb
+  # group keyword that would widen egress. Drop both.
+  case "$_name" in
+    *.*) : ;;
+    *)
+      echo "acq(msb): warning: skipping single-label ${_context} (msb rejects a single-label suffix and reads a single label as a group such as any/public/host): ${_target}" >&2
+      return 1
       ;;
   esac
 
@@ -1874,7 +1925,13 @@ EOF
     [ -n "$path" ] || continue
     src=""
     if [ -n "$source" ]; then
-      src="${kitdir}/${source}"
+      # The payload must be a regular file inside the kit (symlinks resolved);
+      # a source that resolves elsewhere on the host is skipped. The resolved
+      # path is what gets copied, so the checked file is the copied file.
+      if ! src=$(kit_source_resolve "$kitdir" "$source"); then
+        echo "acq(msb): warning: skipping kit file '$path': its source is not a regular file inside the kit directory" >&2
+        continue
+      fi
     fi
     if [ "$_readonly" = "true" ] && [ -n "$src" ] && [ -f "$src" ] && [ "$_hcfg_done" -eq 0 ]; then
       _hcfg_done=1
@@ -2120,7 +2177,7 @@ _acq_msb_ro_mount_recorded_readonly() {
       return 1
     fi
     rc=0
-    res=$(printf '%s' "$json" | "$py" -c "$_ACQ_MSB_RO_INSPECT_PY" "$ACQ_HOST_CONFIG_GUEST_DIR" "$hcfg" "$hcfg_canon" "$hcfg_host" 2>/dev/null) || rc=$?
+    res=$(printf '%s' "$json" | "$py" -I -c "$_ACQ_MSB_RO_INSPECT_PY" "$ACQ_HOST_CONFIG_GUEST_DIR" "$hcfg" "$hcfg_canon" "$hcfg_host" 2>/dev/null) || rc=$?
     case "$rc" in
       0) [ "$res" = "ok" ] && return 0
          _ACQ_MSB_RO_MOUNT_REASON="the mount record check returned an unexpected result"; return 1 ;;
@@ -3051,7 +3108,8 @@ _acq_msb_stage_startup_script() {
 
   # Private staging dir (0700) under the acq state tree — not a world-readable
   # /tmp. Mirrors how ssh keys/state are kept under ACQ_STATE_DIR.
-  local _dir="${ACQ_MSB_STARTUP_STAGE_DIR:-${ACQ_STATE_DIR}/msb-startup}"
+  local _dir="${ACQ_MSB_STARTUP_STAGE_DIR:-${ACQ_STATE_DIR:+$ACQ_STATE_DIR/msb-startup}}"
+  acq_require_base "startup staging dir" "$_dir" || return 0   # best-effort, like the mktemp failure below
   mkdir -p "$_dir" 2>/dev/null || true
   chmod 700 "$_dir" 2>/dev/null || true
 
@@ -3131,6 +3189,13 @@ _acq_msb_upstream_ca_flags_into() {
     IFS="$_oldifs"
     for _p in "$@"; do
       [ -n "$_p" ] || continue
+      # A relative entry (including the "C" of a split C:/x.pem) would name a
+      # file under the current directory, normally the agent-writable
+      # workspace, so it is never trusted (see userdirs.sh).
+      if ! acq_path_is_absolute "$_p"; then
+        echo "acq(msb): warning: ACQ_MSB_UPSTREAM_CA_CERT path is not absolute, skipping: ${_p}" >&2
+        continue
+      fi
       if [ -r "$_p" ] && [ -s "$_p" ]; then
         # --tls-upstream-ca-cert names a HOST PEM native msb reads: host form.
         local _phost="$_p"
@@ -3160,6 +3225,8 @@ _acq_msb_upstream_ca_flags_into() {
   command -v security >/dev/null 2>&1 || return 0
 
   local _out="$ACQ_MSB_UPSTREAM_CA_FILE" _dir
+  # No resolvable state dir: skip (dirname of "" is ".", the current dir).
+  acq_require_base "upstream-CA bundle" "$_out" 2>/dev/null || return 0
   _dir=$(dirname -- "$_out")
   if ! mkdir -p "$_dir" 2>/dev/null; then
     echo "acq(msb): warning: cannot create upstream-CA dir ${_dir}; skipping auto-detect" >&2
@@ -3211,64 +3278,316 @@ _acq_msb_upstream_ca_flags_into() {
 # documented in the ADR): gitignored/untracked files and uncommitted changes to
 # tracked files do NOT enter the clone — commit first, or `acq cp` them in.
 
+# _acq_msb_git_ws DIR ARGS... — run host-side git against the user's workspace
+# repository with its config-driven programs disabled. The workspace is mounted
+# read-write into sandboxes in normal mode, so its repository config, attributes
+# and hooks are treated as untrusted here: no hooks, no fsmonitor, no filter
+# drivers, no transports (so no lazy fetch from a promisor remote), no
+# submodule recursion, no pager. Callers that need the local file transport
+# (the scratch clone) re-allow only that one after the wrapper's defaults.
+# Hooks are disabled by pointing core.hooksPath at a directory under acq's own
+# state dir that nothing ever creates, rather than /dev/null, which a native
+# Windows git (Git Bash) does not resolve to a POSIX null device. The path
+# must be absolute: a relative hooksPath resolves against the workspace
+# itself, which the guest can write.
+# Each call runs in a subshell that first clears the inherited git environment
+# (_kit_git_isolate): an inherited GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE or
+# similar would point the call at another repository (the clone would copy
+# it, `remote add` would write to it), and the user's command-scope config
+# (GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT/KEY_n/VALUE_n) is dropped with it,
+# so only the wrapper's own settings are on the command scope. That scope
+# is read after every config file, so a user value there would otherwise
+# override the repository config acq reads to decide what to blank, and
+# GIT_CONFIG_PARAMETERS is read after GIT_CONFIG_COUNT, so it would override
+# the filter blanking too. GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM stay (the
+# user's own files). The one reader of the command scope uses
+# _acq_msb_git_ws_cmdscope instead. GIT_ALLOW_PROTOCOL is cleared as well:
+# git reads it before protocol.allow, so an exported value would override
+# protocol.allow=never.
+_acq_msb_git_ws() {
+  _acq_msb_git_ws_run isolate "$@"
+}
+
+# _acq_msb_git_ws_cmdscope DIR ARGS... — _acq_msb_git_ws for a `git config`
+# read that wants the user's command-scope config (the identity read): the
+# variables that locate a repository are still cleared, but
+# GIT_CONFIG_PARAMETERS and GIT_CONFIG_COUNT/KEY_n/VALUE_n are kept. The filter
+# blanking entries are left off, since they would renumber the user's entries
+# and a config read starts no filter. Use it for nothing that can run a program.
+_acq_msb_git_ws_cmdscope() {
+  _acq_msb_git_ws_run keep "$@"
+}
+
+# _acq_msb_git_ws_run MODE DIR ARGS... — the body of both wrappers. MODE is
+# isolate (clear the whole inherited git environment) or keep (keep the
+# command scope).
+_acq_msb_git_ws_run() {
+  local mode="$1" dir="$2" wsenv=()
+  shift 2
+  _acq_msb_git_ws_prep "$dir" || return 1
+  [ "$mode" = keep ] || wsenv=(${_ACQ_MSB_WS_ENV[@]+"${_ACQ_MSB_WS_ENV[@]}"})
+  (
+    if [ "$mode" = keep ]; then _kit_git_isolate_repo; else _kit_git_isolate; fi
+    # An inherited GIT_ALLOW_PROTOCOL takes precedence over protocol.allow, so
+    # it would re-enable the transports the wrapper turns off.
+    unset GIT_ALLOW_PROTOCOL
+    GIT_NO_LAZY_FETCH=1 GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
+      env ${wsenv[@]+"${wsenv[@]}"} git --no-pager \
+        -c core.fsmonitor=false \
+        -c "core.hooksPath=${_ACQ_MSB_WS_HOOKS}" \
+        -c core.untrackedCache=false \
+        -c protocol.allow=never \
+        -c submodule.recurse=false \
+        ${_ACQ_MSB_WS_CFG[@]+"${_ACQ_MSB_WS_CFG[@]}"} \
+        -C "$dir" "$@"
+  )
+}
+
+# _acq_msb_git_scratch SCRATCH ARGS... — run git against the scratch clone acq
+# has just created (and not yet exposed to the guest) with the inherited git
+# environment cleared, as _acq_msb_git_ws does: an inherited GIT_DIR would
+# send its config writes to another repository, and GIT_CONFIG to another
+# file. Refuses (return 1) when _kit_git_isolate is not loaded.
+_acq_msb_git_scratch() {
+  local scratch="$1"
+  shift
+  declare -F _kit_git_isolate >/dev/null 2>&1 || return 1
+  (
+    _kit_git_isolate
+    git --no-pager -C "$scratch" "$@"
+  )
+}
+
+# _acq_msb_git_ws_prep DIR — compute the wrapper's per-call settings for DIR:
+# _ACQ_MSB_WS_HOOKS (the never-created hooks path) and the filter settings
+# (_acq_msb_git_ws_filter_cfg). Returns 1, saying why, when either cannot be
+# made safe; clone setup calls it once up front, where that message is shown.
+# Hooks stay off only while the hooks path does not exist, so an existing file,
+# directory or symlink there fails closed rather than becoming a hooks dir.
+_acq_msb_git_ws_prep() {
+  if ! declare -F _kit_git_isolate >/dev/null 2>&1 ||
+    ! declare -F _kit_git_isolate_repo >/dev/null 2>&1; then
+    echo "acq(msb): error: --clone: kit-translate.sh is not loaded, so acq cannot clear the" >&2
+    echo "acq(msb):   inherited git environment (GIT_DIR and the like); refusing to run git." >&2
+    return 1
+  fi
+  _ACQ_MSB_WS_HOOKS="${ACQ_STATE_DIR}/.git-hooks-disabled"
+  case "$_ACQ_MSB_WS_HOOKS" in
+    /* | [A-Za-z]:[/\\]*) ;;
+    *)
+      echo "acq(msb): error: --clone: ACQ_STATE_DIR must be an absolute path: ${ACQ_STATE_DIR}" >&2
+      return 1
+      ;;
+  esac
+  if [ -e "$_ACQ_MSB_WS_HOOKS" ] || [ -L "$_ACQ_MSB_WS_HOOKS" ]; then
+    echo "acq(msb): error: --clone: $_ACQ_MSB_WS_HOOKS exists. acq disables git hooks by" >&2
+    echo "acq(msb):   pointing core.hooksPath at that path and needs it absent. Remove it, then re-run." >&2
+    return 1
+  fi
+  _acq_msb_git_ws_filter_cfg "$1"
+}
+
+# _acq_msb_git_ws_filter_cfg DIR — build the settings that blank every filter
+# driver DIR's config defines (reading config runs nothing), so the clone
+# never starts a clean/smudge/process program it names. Sets the arrays
+# _ACQ_MSB_WS_ENV (environment assignments) and _ACQ_MSB_WS_CFG (`-c` options).
+# The settings travel as GIT_CONFIG_COUNT/GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n>
+# (git 2.31+), numbered from 0 because the wrapper drops any the user exports:
+# a `-c name=value` splits at the first '=', so it cannot name a driver whose
+# name itself contains one. The config is read with the same environment the
+# wrapper gives git (_kit_git_isolate), so the list matches what git sees.
+# On an older git the `-c` form is the only one, and a driver name
+# containing '=' is refused (return 1) because it cannot be blanked.
+# A config read that fails (any status but 0, or 1 for "no filter keys") is
+# refused too: without the list, a driver could be left live.
+_acq_msb_git_ws_filter_cfg() {
+  local dir="$1" key val n envok="" keys rc=0
+  _ACQ_MSB_WS_ENV=()
+  _ACQ_MSB_WS_CFG=()
+  keys=$(
+    _kit_git_isolate
+    git --no-pager -C "$dir" config --name-only --get-regexp '^filter\.' 2>/dev/null
+  ) || rc=$?
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
+    echo "acq(msb): error: --clone: could not read the git config for $dir (git exit $rc);" >&2
+    echo "acq(msb):   refusing to run git there without knowing its filter drivers." >&2
+    return 1
+  fi
+  n=0
+  while IFS= read -r key; do
+    case "$key" in
+      filter.*.clean | filter.*.smudge | filter.*.process) val="" ;;
+      filter.*.required) val=false ;;
+      *) continue ;;
+    esac
+    [ -n "$envok" ] || { _acq_msb_git_version_ge 2 31 && envok=1 || envok=0; }
+    if [ "$envok" = 1 ]; then
+      _ACQ_MSB_WS_ENV+=("GIT_CONFIG_KEY_${n}=${key}" "GIT_CONFIG_VALUE_${n}=${val}")
+      n=$((n + 1))
+      continue
+    fi
+    case "$key" in
+      *=*)
+        echo "acq(msb): error: --clone: the repository config defines a filter driver whose" >&2
+        echo "acq(msb):   name contains '=' ($key). This git cannot disable it; git 2.31 or" >&2
+        echo "acq(msb):   later can. Upgrade git, or remove or rename that filter, then re-run." >&2
+        return 1
+        ;;
+    esac
+    _ACQ_MSB_WS_CFG+=(-c "${key}=${val}")
+  done <<EOF
+$keys
+EOF
+  [ "${#_ACQ_MSB_WS_ENV[@]}" -eq 0 ] || _ACQ_MSB_WS_ENV+=("GIT_CONFIG_COUNT=${n}")
+  return 0
+}
+
+# _acq_msb_git_version_ge MAJOR MINOR — succeed when the host git is at least
+# MAJOR.MINOR (2.31 reads GIT_CONFIG_COUNT; 2.26 has `config --show-scope`).
+_acq_msb_git_version_ge() {
+  local v maj min
+  v=$(git --version 2>/dev/null) || return 1
+  v=${v#git version }
+  maj=${v%%.*}
+  min=${v#*.}
+  min=${min%%.*}
+  case "$maj" in '' | *[!0-9]*) return 1 ;; esac
+  case "$min" in '' | *[!0-9]*) return 1 ;; esac
+  [ "$maj" -gt "$1" ] || { [ "$maj" -eq "$1" ] && [ "$min" -ge "$2" ]; }
+}
+
 # _acq_msb_clone_setup NAME WSPATH — create the scratch clone + fetch-back
 # remote for NAME's primary workspace WSPATH. On success sets
 # _ACQ_MSB_CLONE_DIR to the canonicalized scratch path (the mount source).
 # Fails (return 1) without touching the backend when WSPATH is not a git
-# repository root or a previous scratch is still present.
+# repository root or a previous scratch is still present. The steps run in
+# order and each refusal stops the create: name, wrapper settings, repository
+# root, stale scratch, preflight, scratch clone, then the config and remote
+# wiring.
 _acq_msb_clone_setup() {
-  local name="$1" ws="$2" top=""
-  # NAME lands verbatim in host paths (mkdir/git clone, and rm -rf at cleanup)
-  # under the clones root, and in the sandbox-<name> remote — and an EXPLICIT
-  # --name bypasses slugify, reaching here before msb's own name validation
-  # ever runs. Fail closed on anything that is not a single safe path
-  # component, so a traversal-shaped name can never build a path outside the
-  # clones root.
-  case "$name" in
+  local name="$1" ws="$2" ws_canon dir scratch
+  _acq_msb_clone_check_name "$name" || return 1
+  # Checked up front so its refusal is shown: the wrapper calls below hide
+  # git's stderr, and each one would refuse the same way.
+  _acq_msb_git_ws_prep "$ws" || return 1
+  ws_canon=$(_acq_msb_clone_repo_root "$ws") || return 1
+  acq_require_base "scratch clones dir" "$ACQ_MSB_CLONES_DIR" || return 1
+  dir="${ACQ_MSB_CLONES_DIR}/${name}"
+  scratch="${dir}/$(basename "$ws_canon")"
+  _acq_msb_clone_check_stale "$name" "$dir" || return 1
+  _acq_msb_clone_preflight "$ws_canon" || return 1
+  _acq_msb_clone_make_scratch "$ws_canon" "$dir" "$scratch" || return 1
+  _acq_msb_clone_wire "$name" "$ws_canon" "$dir" "$scratch" || return 1
+  _ACQ_MSB_CLONE_DIR=$(canonicalize_path "$scratch")
+  return 0
+}
+
+# _acq_msb_clone_check_name NAME — refuse a NAME that is not a single safe path
+# component. NAME lands verbatim in host paths (mkdir/git clone, and rm -rf at
+# cleanup) under the clones root, and in the sandbox-<name> remote — and an
+# EXPLICIT --name bypasses slugify, reaching here before msb's own name
+# validation ever runs. Failing closed means a traversal-shaped name can never
+# build a path outside the clones root.
+_acq_msb_clone_check_name() {
+  case "$1" in
     ''|.|..|*[!A-Za-z0-9._-]*)
-      echo "acq(msb): error: --clone: invalid sandbox name '$name' for the scratch clone" >&2
+      echo "acq(msb): error: --clone: invalid sandbox name '$1' for the scratch clone" >&2
       echo "acq(msb):   (allowed: letters, digits, '.', '_', '-')." >&2
       return 1
       ;;
   esac
-  if ! top=$(git -C "$ws" rev-parse --show-toplevel 2>/dev/null); then
+  return 0
+}
+
+# _acq_msb_clone_repo_root WSPATH — print WSPATH canonicalized, or refuse
+# (return 1) when it is not a git repository or not the repository's root.
+_acq_msb_clone_repo_root() {
+  local ws="$1" top="" ws_canon top_canon
+  if ! top=$(_acq_msb_git_ws "$ws" rev-parse --show-toplevel 2>/dev/null); then
     echo "acq(msb): error: --clone: workspace is not a git repository: $ws" >&2
     echo "acq(msb):   --clone runs the agent on a clone of the primary workspace's repo." >&2
     return 1
   fi
-  local ws_canon top_canon
   ws_canon=$(canonicalize_path "$ws")
   top_canon=$(canonicalize_path "$top")
   if [ "$ws_canon" != "$top_canon" ]; then
     echo "acq(msb): error: --clone: workspace must be the repository root: $top_canon" >&2
     return 1
   fi
-  local dir="${ACQ_MSB_CLONES_DIR}/${name}" scratch
-  scratch="${dir}/$(basename "$ws_canon")"
-  if [ -e "$dir" ]; then
-    echo "acq(msb): error: --clone: a scratch clone for '$name' already exists: $dir" >&2
-    if acq_backend_exists "$name"; then
-      # The scratch is the LIVE mount source of an existing sandbox — advising
-      # manual deletion here would destroy its workspace and skip the rm-time
-      # unfetched-commit warning.
-      echo "acq(msb):   sandbox '$name' still exists and mounts it. Remove the sandbox with" >&2
-      echo "acq(msb):   'acq rm $name' (it warns about unfetched work and cleans up), then re-run." >&2
-    else
-      echo "acq(msb):   it may hold unfetched work from an earlier sandbox. Recover it" >&2
-      echo "acq(msb):   ('git fetch sandbox-${name}') and remove the directory, then re-run." >&2
-    fi
+  printf '%s\n' "$ws_canon"
+}
+
+# _acq_msb_clone_check_stale NAME DIR — refuse when NAME's scratch dir DIR is
+# still present, with advice that matches whether the sandbox still exists.
+_acq_msb_clone_check_stale() {
+  local name="$1" dir="$2"
+  [ -e "$dir" ] || return 0
+  echo "acq(msb): error: --clone: a scratch clone for '$name' already exists: $dir" >&2
+  if acq_backend_exists "$name"; then
+    # The scratch is the LIVE mount source of an existing sandbox — advising
+    # manual deletion here would destroy its workspace and skip the rm-time
+    # unfetched-commit warning.
+    echo "acq(msb):   sandbox '$name' still exists and mounts it. Remove the sandbox with" >&2
+    echo "acq(msb):   'acq rm $name' (it warns about unfetched work and cleans up), then re-run." >&2
+  else
+    echo "acq(msb):   it may hold unfetched work from an earlier sandbox. Recover it" >&2
+    echo "acq(msb):   ('git fetch sandbox-${name}') and remove the directory, then re-run." >&2
+  fi
+  return 1
+}
+
+# _acq_msb_clone_preflight WS — the checks on the canonical workspace WS that
+# run before anything is created: refuse an unusual layout, borrowed objects or
+# a partial clone; note Git LFS and staged or untracked changes.
+_acq_msb_clone_preflight() {
+  local ws_canon="$1"
+  _acq_msb_clone_check_layout "$ws_canon" || return 1
+  # An alternates file makes the object store borrow from other repositories
+  # on the host; a scratch clone must carry only this repository's objects.
+  if [ -s "${ws_canon}/.git/objects/info/alternates" ]; then
+    echo "acq(msb): error: --clone: $ws_canon borrows objects from other repositories" >&2
+    echo "acq(msb):   (.git/objects/info/alternates). Run 'git repack -a -d' and remove that" >&2
+    echo "acq(msb):   file, or use a regular clone, then re-run." >&2
     return 1
   fi
-  if [ -n "$(git -C "$ws_canon" status --porcelain 2>/dev/null)" ]; then
-    echo "acq(msb): note: the workspace has uncommitted changes; a git clone carries" >&2
-    echo "acq(msb):   committed state only. Commit first ('git add' untracked files)," >&2
-    echo "acq(msb):   or copy files in with 'acq cp'." >&2
+  _acq_msb_clone_check_partial "$ws_canon" || return 1
+  _acq_msb_clone_note_lfs "$ws_canon"
+  if _acq_msb_clone_has_left_out_changes "$ws_canon"; then
+    echo "acq(msb): note: the workspace has staged or untracked changes that the clone leaves" >&2
+    echo "acq(msb):   out; a git clone carries committed state only. Commit first ('git add'" >&2
+    echo "acq(msb):   untracked files), or copy files in with 'acq cp'." >&2
   fi
+  return 0
+}
+
+# _acq_msb_clone_has_left_out_changes WS — true when WS has staged changes
+# (the index differs from HEAD) or untracked, not ignored files. Only plumbing
+# that never reads a tracked file's content is used, so no filter driver can
+# run: `git status` cleans a stat-dirty file through its filter, and the filter
+# blanking (_acq_msb_git_ws_filter_cfg) is computed from a config read made
+# before the call, which a sandbox sharing the checkout can change in between.
+# So unstaged edits to tracked files are not reported (that would need the
+# worktree content compared with the index).
+_acq_msb_clone_has_left_out_changes() {
+  local rc=0 base=HEAD
+  _acq_msb_git_ws "$1" rev-parse --verify -q HEAD >/dev/null 2>&1 ||
+    base=4b825dc642cb6eb9a060e54bf8d69288fbee4904
+  _acq_msb_git_ws "$1" diff-index --cached --quiet "$base" -- >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 1 ] || return 0
+  [ -n "$(_acq_msb_git_ws "$1" ls-files -z --others --exclude-standard 2>/dev/null | tr -d '\0')" ]
+}
+
+# _acq_msb_clone_make_scratch WS DIR SCRATCH — create the private scratch dir
+# DIR, record WS as its origin, and clone WS into SCRATCH. On failure removes
+# DIR and returns 1.
+_acq_msb_clone_make_scratch() {
+  local ws_canon="$1" dir="$2" scratch="$3"
   # Private (0700): the scratch .git/config carries the source origin URL,
   # which may embed a credential, at a path the user never sees. Check the
-  # status explicitly: this function runs as an `if !` condition, which
-  # suppresses errexit for its whole body, so a bare `&&` chain would let a
-  # failed chmod fall through and clone that config in at the ambient umask.
+  # status explicitly: this runs inside an `if !` condition (the create calls
+  # _acq_msb_clone_setup that way), which suppresses errexit for the whole
+  # call chain, so a bare `&&` chain would let a failed chmod fall through and
+  # clone that config in at the ambient umask.
   if ! (umask 077 && mkdir -p "$dir") || ! chmod 700 "$dir"; then
     echo "acq(msb): error: --clone: could not create a private scratch dir: $dir" >&2
     echo "acq(msb):   Refusing to clone a config that may embed a credential into a" >&2
@@ -3277,19 +3596,31 @@ _acq_msb_clone_setup() {
     return 1
   fi
   printf '%s\n' "$ws_canon" > "${dir}/.origin"
-  if ! git clone --quiet --no-hardlinks -- "$ws_canon" "$scratch"; then
+  # --no-local goes through upload-pack, so only objects reachable from the
+  # repository's refs are copied. The wrapper disables the workspace's
+  # config-driven programs; only the local file transport is re-allowed.
+  if ! _acq_msb_git_ws "$ws_canon" -c protocol.file.allow=always \
+      clone --quiet --no-local --no-hardlinks -- "$ws_canon" "$scratch"; then
     echo "acq(msb): error: --clone: git clone of $ws_canon failed" >&2
     rm -rf "$dir"
     return 1
   fi
+  return 0
+}
+
+# _acq_msb_clone_wire NAME WS DIR SCRATCH — carry the identity and origin
+# config into SCRATCH (on failure removes DIR and returns 1), then register
+# the sandbox-NAME fetch-back remote in WS and tell the user how to recover.
+_acq_msb_clone_wire() {
+  local name="$1" ws_canon="$2" dir="$3" scratch="$4"
   if ! _acq_msb_clone_copy_config "$ws_canon" "$scratch"; then
     rm -rf "$dir"
     return 1
   fi
   # Fetch-back remote in the host checkout (replace a stale same-name remote —
   # its scratch dir was just verified absent, so it cannot hold unfetched work).
-  git -C "$ws_canon" remote remove "sandbox-${name}" >/dev/null 2>&1 || true
-  if ! git -C "$ws_canon" remote add "sandbox-${name}" "$scratch" >/dev/null 2>&1; then
+  _acq_msb_clone_remove_remote "$ws_canon" "sandbox-${name}" >/dev/null 2>&1 || true
+  if ! _acq_msb_git_ws "$ws_canon" remote add "sandbox-${name}" "$scratch" >/dev/null 2>&1; then
     echo "acq(msb): warning: could not register the 'sandbox-${name}' remote in $ws_canon;" >&2
     echo "acq(msb):   fetch agent work directly: git fetch $scratch" >&2
   fi
@@ -3301,18 +3632,115 @@ _acq_msb_clone_setup() {
   # reads the guest-writable scratch").
   echo "acq(msb): agent runs on a disposable clone; the real checkout is untouched." >&2
   echo "acq(msb):   Recover agent branches with: git fetch sandbox-${name}" >&2
-  _ACQ_MSB_CLONE_DIR=$(canonicalize_path "$scratch")
+  return 0
+}
+
+# _acq_msb_clone_check_layout WS — refuse (return 1) unless the canonical
+# workspace WS is an ordinary repository whose .git is its own directory. In a
+# linked worktree or a submodule checkout (.git is a gitfile, or the git dir
+# names a commondir), with a symlink anywhere inside .git, or with git's
+# directories resolving elsewhere, git can read objects, refs or config from
+# outside WS/.git, where the alternates check and the scratch clone are not
+# looking. A pass means that, at the time of the check, git's directories are
+# WS/.git and every directory below it except .git/hooks was listed with no
+# symlink found. .git/hooks is exempt (pruned before it is read): the wrapper
+# never runs hooks. The scan fails closed when find reports any error, such as
+# a directory it cannot list (an execute-only .git would otherwise hide a
+# link that git can still open by name). It only asks whether any link exists,
+# so odd file names cannot confuse it, and it runs from inside .git so the
+# workspace path is never parsed as a find pattern.
+_acq_msb_clone_check_layout() {
+  local ws="$1" want why="" gd="" common="" links=""
+  want="${ws}/.git"
+  if [ -L "$want" ]; then
+    why=".git is a symlink"
+  elif [ ! -d "$want" ]; then
+    why=".git is a file pointing at another git directory"
+  elif [ -e "${want}/commondir" ] || [ -L "${want}/commondir" ]; then
+    why=".git/commondir exists"
+  elif ! links=$(cd "$want" && find . -path ./hooks -prune -o -type l -print 2>/dev/null); then
+    why="could not scan .git (an unreadable directory inside it)"
+  elif [ -n "$links" ]; then
+    why=".git contains a symlink (outside .git/hooks)"
+  else
+    want=$(canonicalize_path "$want")
+    gd=$(_acq_msb_git_ws "$ws" rev-parse --absolute-git-dir 2>/dev/null) || gd=""
+    common=$(_acq_msb_git_ws "$ws" rev-parse --git-common-dir 2>/dev/null) || common=""
+    # --git-common-dir may print a path relative to WS (git -C WS).
+    case "$common" in '' | /* | [A-Za-z]:*) ;; *) common="${ws}/${common}" ;; esac
+    [ -z "$gd" ] || gd=$(canonicalize_path "$gd")
+    [ -z "$common" ] || common=$(canonicalize_path "$common")
+    if [ "$gd" != "$want" ] || [ "$common" != "$want" ]; then
+      why="git resolves its directory to ${gd:-?} (common: ${common:-?})"
+    fi
+  fi
+  [ -n "$why" ] || return 0
+  echo "acq(msb): error: --clone: $ws is not an ordinary repository checkout: $why." >&2
+  echo "acq(msb):   Clone mode needs .git to be the repository's own directory; 'git worktree'" >&2
+  echo "acq(msb):   checkouts and submodule checkouts are not supported. Run it from the main" >&2
+  echo "acq(msb):   checkout or a regular clone, then re-run." >&2
+  return 1
+}
+
+# _acq_msb_clone_check_partial WS — refuse (return 1) a partial clone, up
+# front: objects left on the server are missing locally and the wrapper never
+# fetches them, so the clone would otherwise fail part-way through. A bare
+# `promisor` key is boolean true; anything git would not read as false is
+# treated as true (fail closed).
+_acq_msb_clone_check_partial() {
+  local ws="$1" entry val partial=""
+  if _acq_msb_git_ws "$ws" config --get-all extensions.partialClone >/dev/null 2>&1; then
+    partial=1
+  else
+    while IFS= read -r -d '' entry; do
+      case "$entry" in
+        *$'\n'*) val=${entry#*$'\n'} ;;
+        *) val=true ;;
+      esac
+      case "$val" in
+        '' | [Ff][Aa][Ll][Ss][Ee] | [Nn][Oo] | [Oo][Ff][Ff] | 0) ;;
+        *) partial=1; break ;;
+      esac
+    done < <(_acq_msb_git_ws "$ws" config -z --get-regexp '^remote\..*\.promisor$' 2>/dev/null)
+  fi
+  [ -n "$partial" ] || return 0
+  echo "acq(msb): error: --clone: $ws is a partial clone (it has a promisor remote)." >&2
+  echo "acq(msb):   Objects left on the server are missing locally and clone mode never" >&2
+  echo "acq(msb):   fetches them. Use a full clone of the repository, then re-run." >&2
+  return 1
+}
+
+# _acq_msb_clone_note_lfs WS — print a notice when WS uses Git LFS. The wrapper
+# disables filter drivers, so LFS-tracked files land in the scratch as pointer
+# files (the agent can fetch their content in the guest). Advisory.
+_acq_msb_clone_note_lfs() {
+  local ws="$1" f found=""
+  for f in "${ws}/.gitattributes" "${ws}/.git/info/attributes"; do
+    if [ -f "$f" ] && [ ! -L "$f" ] && grep -q 'filter=lfs' "$f" 2>/dev/null; then
+      found=1
+    fi
+  done
+  [ -d "${ws}/.git/lfs" ] && found=1
+  if [ -z "$found" ] &&
+    _acq_msb_git_ws "$ws" config --local --no-includes --get-regexp '^lfs\.' >/dev/null 2>&1; then
+    found=1
+  fi
+  [ -n "$found" ] || return 0
+  echo "acq(msb): note: this repository uses Git LFS. Clone mode disables filter drivers," >&2
+  echo "acq(msb):   so LFS-tracked files are checked out in the scratch as pointer files." >&2
+  echo "acq(msb):   If git-lfs is available in the sandbox, fetch their content there with:" >&2
+  echo "acq(msb):   git lfs pull" >&2
   return 0
 }
 
 # _acq_msb_clone_copy_config SRC SCRATCH — write the few repo-local config
 # values a clone drops but the guest needs, from SRC into the scratch (see
 # ADR-0027 for what a clone carries and why):
-#   - user.name/user.email: SRC's EFFECTIVE identity. A per-forge identity
-#     often lives only in .git/config or behind a gitdir-scoped includeIf; the
-#     guest's synced global tier cannot express a per-repo value, so without
-#     this the first in-guest commit fails with "Author identity unknown".
-#     `git -C SRC config --get` resolves it exactly as the user's own commits do.
+#   - user.name/user.email: SRC's identity. A per-forge identity often lives
+#     only in .git/config or behind a gitdir-scoped includeIf in the global
+#     config; the guest's synced global tier cannot express a per-repo value,
+#     so without this the first in-guest commit fails with "Author identity
+#     unknown". See _acq_msb_clone_read_identity for which scopes are read.
 #   - remote.origin.url/remote.origin.pushurl: `git clone <host path>` points
 #     the scratch's origin at the host checkout path, and the scratch is
 #     mounted AT that path in the guest — so origin resolves to the scratch
@@ -3349,14 +3777,23 @@ _acq_msb_clone_setup() {
 # warns: a missing identity already fails loudly at the first in-guest commit.
 _acq_msb_clone_copy_config() {
   local src="$1" scratch="$2" key rc val first
-  for key in user.name user.email remote.origin.url remote.origin.pushurl; do
+  for key in user.name user.email; do
     rc=0
-    git -C "$src" config --get-all "$key" >/dev/null 2>&1 || rc=$?
+    _acq_msb_clone_read_identity "$src" "$key" || rc=$?
+    case "$rc" in
+      0)
+        _acq_msb_git_scratch "$scratch" config --replace-all "$key" "$_ACQ_MSB_IDENT_VAL" >/dev/null 2>&1 ||
+          _acq_msb_clone_config_fail set "$key"
+        ;;
+      1) _acq_msb_clone_unset_key "$scratch" "$key" ;;
+      *) _acq_msb_clone_config_fail read "$key" ;;
+    esac
+  done
+  for key in remote.origin.url remote.origin.pushurl; do
+    rc=0
+    _acq_msb_git_ws "$src" config --no-includes --get-all "$key" >/dev/null 2>&1 || rc=$?
     if [ "$rc" -eq 1 ]; then
-      rc=0
-      git -C "$scratch" config --unset-all "$key" >/dev/null 2>&1 || rc=$?
-      # 5: nothing to unset.
-      [ "$rc" -eq 0 ] || [ "$rc" -eq 5 ] || _acq_msb_clone_config_fail set "$key" || return 1
+      _acq_msb_clone_unset_key "$scratch" "$key" || return 1
       continue
     fi
     if [ "$rc" -ne 0 ]; then
@@ -3366,13 +3803,127 @@ _acq_msb_clone_copy_config() {
     first=1
     while IFS= read -r -d '' val; do
       if [ -n "$first" ]; then
-        git -C "$scratch" config --replace-all "$key" "$val" >/dev/null 2>&1
+        _acq_msb_git_scratch "$scratch" config --replace-all "$key" "$val" >/dev/null 2>&1
       else
-        git -C "$scratch" config --add "$key" "$val" >/dev/null 2>&1
+        _acq_msb_git_scratch "$scratch" config --add "$key" "$val" >/dev/null 2>&1
       fi || { _acq_msb_clone_config_fail set "$key" || return 1; continue 2; }
       first=""
-    done < <(git -C "$src" config -z --get-all "$key" 2>/dev/null)
+    done < <(_acq_msb_git_ws "$src" config --no-includes -z --get-all "$key" 2>/dev/null)
   done
+  return 0
+}
+
+# _acq_msb_clone_unset_key SCRATCH KEY — remove KEY from the scratch config
+# (the source has no value for it). Failure goes through the policy in
+# _acq_msb_clone_config_fail, whose status this returns.
+_acq_msb_clone_unset_key() {
+  local rc=0
+  _acq_msb_git_scratch "$1" config --unset-all "$2" >/dev/null 2>&1 || rc=$?
+  # 5: nothing to unset.
+  [ "$rc" -eq 0 ] || [ "$rc" -eq 5 ] || _acq_msb_clone_config_fail set "$2"
+}
+
+# _acq_msb_clone_read_identity SRC KEY — resolve the identity KEY (user.name or
+# user.email) for the checkout SRC into _ACQ_MSB_IDENT_VAL. Returns 0 when set,
+# 1 when no scope sets it, 2 when a scope's config cannot be read.
+# The scopes are read in git's own order, system -> global -> local ->
+# worktree -> command, and the last value wins, as it does for the user's own
+# commits. The system and global files are the user's (the guest never writes
+# them), so they are read with --includes: a per-forge identity commonly sits
+# behind a gitdir-scoped includeIf there. The repository's own config files
+# are reachable from the guest in normal mode, so they are read with
+# --no-includes and cannot point the host at another file.
+#   - system: skipped when GIT_CONFIG_NOSYSTEM is true by git's boolean rules
+#     (_acq_msb_git_bool_true), as git does (`config --system` reads it
+#     regardless).
+#   - worktree (.git/config.worktree): read only when extensions.worktreeConfig
+#     is true; otherwise `--worktree` would just re-read the local file.
+#   - command (values the user exports via GIT_CONFIG_COUNT or
+#     GIT_CONFIG_PARAMETERS): picked out of `config --show-scope`, which needs
+#     git 2.26. Known gap: on an older git the command scope is not read.
+_acq_msb_clone_read_identity() {
+  local src="$1" key="$2" scope rc found=""
+  _ACQ_MSB_IDENT_VAL=""
+  for scope in system global local worktree command; do
+    rc=0
+    case "$scope" in
+      system)
+        _acq_msb_git_bool_true "${GIT_CONFIG_NOSYSTEM:-}" && continue
+        _acq_msb_clone_read_scope "$src" "$key" --system --includes || rc=$?
+        ;;
+      global) _acq_msb_clone_read_scope "$src" "$key" --global --includes || rc=$? ;;
+      local) _acq_msb_clone_read_scope "$src" "$key" --local --no-includes || rc=$? ;;
+      worktree)
+        [ "$(_acq_msb_git_ws "$src" config --local --no-includes --bool \
+          --get extensions.worktreeConfig 2>/dev/null)" = true ] || continue
+        _acq_msb_clone_read_scope "$src" "$key" --worktree --no-includes || rc=$?
+        ;;
+      command) _acq_msb_clone_read_command_scope "$src" "$key" || rc=$? ;;
+    esac
+    case "$rc" in
+      0) found=1 ;;
+      1) ;;
+      *) return 2 ;;
+    esac
+  done
+  [ -n "$found" ] || return 1
+  return 0
+}
+
+# _acq_msb_git_bool_true VALUE — succeed when git's boolean parsing reads VALUE
+# as true: true/yes/on in any case, or an integer (optional sign and k/m/g
+# suffix) that is not zero, so `00` is false. Empty and false/no/off are false.
+# git refuses anything else outright; that is treated as true here.
+_acq_msb_git_bool_true() {
+  local d="$1"
+  case "$d" in
+    '' | [Ff][Aa][Ll][Ss][Ee] | [Nn][Oo] | [Oo][Ff][Ff]) return 1 ;;
+    [Tt][Rr][Uu][Ee] | [Yy][Ee][Ss] | [Oo][Nn]) return 0 ;;
+  esac
+  d=${d#[+-]}
+  d=${d%[kKmMgG]}
+  case "$d" in
+    '' | *[!0-9]*) return 0 ;;
+    *[!0]*) return 0 ;;
+  esac
+  return 1
+}
+
+# _acq_msb_clone_read_scope SRC KEY FLAGS... — read KEY from SRC's config with
+# the scope FLAGS; on success put its last value in _ACQ_MSB_IDENT_VAL. Returns
+# 0 when set, 1 when absent, 2 when the config cannot be read.
+_acq_msb_clone_read_scope() {
+  local src="$1" key="$2" rc=0 val
+  shift 2
+  _acq_msb_git_ws "$src" config "$@" --get-all "$key" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] && return 1
+  [ "$rc" -eq 0 ] || return 2
+  while IFS= read -r -d '' val; do
+    _ACQ_MSB_IDENT_VAL="$val"
+  done < <(_acq_msb_git_ws "$src" config "$@" -z --get-all "$key" 2>/dev/null)
+  return 0
+}
+
+# _acq_msb_clone_read_command_scope SRC KEY — like _acq_msb_clone_read_scope,
+# for the command scope. `config --show-scope -z` prints scope/value pairs,
+# NUL-delimited; includes stay off, so only values from the environment and
+# the wrapper's own settings (which never set user.*) are command-scoped here.
+# It is the one call that keeps the user's exported command-scope config
+# (_acq_msb_git_ws_cmdscope); every other host-side git call drops it.
+_acq_msb_clone_read_command_scope() {
+  local src="$1" key="$2" rc=0 scope val found=""
+  _acq_msb_git_version_ge 2 26 || return 1
+  _acq_msb_git_ws_cmdscope "$src" config --no-includes --show-scope --get-all "$key" \
+    >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] && return 1
+  [ "$rc" -eq 0 ] || return 2
+  while IFS= read -r -d '' scope && IFS= read -r -d '' val; do
+    [ "$scope" = command ] || continue
+    _ACQ_MSB_IDENT_VAL="$val"
+    found=1
+  done < <(_acq_msb_git_ws_cmdscope "$src" config --no-includes --show-scope -z \
+    --get-all "$key" 2>/dev/null)
+  [ -n "$found" ] || return 1
   return 0
 }
 
@@ -3396,55 +3947,154 @@ _acq_msb_clone_config_fail() {
 # _acq_msb_clone_warn_unfetched NAME — warn (sbx-parity, never blocks) when
 # NAME's scratch clone holds commits absent from the origin checkout's object
 # store. Branch tips are checked with cat-file -e; a fetch transfers exactly
-# those objects, so tip-present == nothing to lose.
+# those objects, so tip-present == nothing to lose. When the wrapper refuses to
+# run git against the origin checkout, its reason is shown and the check is
+# reported as skipped, rather than every tip looking unfetched.
 _acq_msb_clone_warn_unfetched() {
   # NOTE: `local a="$1" b="…${a}"` is a trap — the whole statement's words
   # expand BEFORE `local` assigns, so ${a} is unbound under set -u. Split them.
   local name="$1" origin="" scratch="" d t
+  [ -n "$ACQ_MSB_CLONES_DIR" ] || return 0   # no clones dir: nothing to inspect
   local dir="${ACQ_MSB_CLONES_DIR}/${name}"
   [ -d "$dir" ] || return 0
   origin=$(cat "${dir}/.origin" 2>/dev/null) || origin=""
   [ -n "$origin" ] && [ -d "$origin" ] || return 0
+  if ! _acq_msb_git_ws_prep "$origin"; then
+    echo "acq(msb): warning: could not check sandbox '$name''s scratch clone for unfetched" >&2
+    echo "acq(msb):   commits (see above); any it holds are discarded with it." >&2
+    return 0
+  fi
   for d in "$dir"/*/; do [ -d "${d}.git" ] && scratch="${d%/}"; done
   [ -n "$scratch" ] || return 0
   # Branch tips are read straight from the ref files (loose + packed). The
   # scratch is guest-writable, so the host must NEVER execute git inside it —
   # repo-local config (core.fsmonitor, pagers, ...) would let the guest run
-  # commands on the host at rm time.
-  local tips=""
-  if [ -d "${scratch}/.git/refs/heads" ]; then
-    tips=$(find "${scratch}/.git/refs/heads" -type f -exec cat {} + 2>/dev/null) || tips=""
+  # commands on the host at rm time. A running guest can also replace any of
+  # these files at any moment, so they are read without following a link and
+  # without blocking (_acq_msb_clone_read_refs). Linked .git, refs, heads or
+  # packed-refs paths cannot be verified, so the warning is shown.
+  local tips="" unfetched=""
+  if [ -L "${scratch}/.git" ] || [ -L "${scratch}/.git/refs" ] ||
+      [ -L "${scratch}/.git/refs/heads" ] || [ -L "${scratch}/.git/packed-refs" ]; then
+    unfetched=1
+  else
+    tips=$(_acq_msb_clone_read_refs "${scratch}/.git")
   fi
-  if [ -f "${scratch}/.git/packed-refs" ]; then
-    tips="${tips}
-$(awk '$1 ~ /^[0-9a-f]+$/ && $2 ~ /^refs\/heads\//{print $1}' "${scratch}/.git/packed-refs" 2>/dev/null || true)"
-  fi
-  while IFS= read -r t; do
+  while [ -z "$unfetched" ] && IFS= read -r t; do
     [ -n "$t" ] || continue
     # Skip non-SHA lines (e.g. a symbolic "ref: ..." loose ref) rather than
     # letting cat-file fail on them and warn spuriously.
     case "$t" in *[!0-9a-f]*) continue ;; esac
-    if ! git -C "$origin" cat-file -e "$t" 2>/dev/null; then
-      echo "acq(msb): warning: discarding unfetched commits in sandbox '$name''s scratch clone" >&2
-      echo "acq(msb):   (they were recoverable with: git fetch sandbox-${name})." >&2
-      return 0
-    fi
+    _acq_msb_git_ws "$origin" cat-file -e "$t" 2>/dev/null || unfetched=1
   done <<EOF
 $tips
 EOF
+  if [ -n "$unfetched" ]; then
+    echo "acq(msb): warning: discarding unfetched commits in sandbox '$name''s scratch clone" >&2
+    echo "acq(msb):   (they were recoverable with: git fetch sandbox-${name})." >&2
+  fi
   return 0
 }
 
+# _acq_msb_clone_plain_file PATH — true when PATH is a regular file and not a
+# symbolic link.
+_acq_msb_clone_plain_file() {
+  [ -f "$1" ] && [ ! -L "$1" ]
+}
+
+# _acq_msb_clone_read_refs GITDIR — print the lines of GITDIR's loose branch
+# refs (refs/heads/**) and the object names of the branches in its
+# packed-refs. GITDIR is in a scratch clone a running guest can change while
+# this reads, so nothing here may follow a link or block:
+#  - find (which never follows links) lists the loose refs, and each one is
+#    skipped unless it is a plain file when it is about to be read;
+#  - it can still be swapped for a FIFO between that check and the open, so
+#    each file is opened read-write (<>), which returns at once even for a FIFO,
+#    and read with a one-second timeout (read -t), and at most 256 bytes of a
+#    loose ref or 64 MiB of packed-refs are read, so a device swapped in ends
+#    the read too. A confirmed read-only regular file is opened read-only.
+# Bash 3.2 and macOS have no portable O_NONBLOCK or O_NOFOLLOW open, and
+# timeout(1) is not on macOS, hence the read-write open.
+_acq_msb_clone_read_refs() {
+  local gitdir="$1" f t
+  if [ -d "${gitdir}/refs/heads" ] && [ ! -L "${gitdir}/refs/heads" ]; then
+    while IFS= read -r -d '' f; do
+      _acq_msb_clone_plain_file "$f" || continue
+      t=""
+      if [ ! -w "$f" ]; then
+        { IFS= read -r -t 1 -n 256 t; } 2>/dev/null <"$f" || true
+      else
+        { IFS= read -r -t 1 -n 256 t; } 2>/dev/null <>"$f" || true
+      fi
+      printf '%s\n' "$t"
+    done < <(find "${gitdir}/refs/heads" -type f -print0 2>/dev/null)
+  fi
+  f="${gitdir}/packed-refs"
+  _acq_msb_clone_plain_file "$f" || return 0
+  if [ ! -w "$f" ]; then
+    _acq_msb_clone_read_packed_refs 2>/dev/null <"$f"
+  else
+    _acq_msb_clone_read_packed_refs 2>/dev/null <>"$f"
+  fi |
+    awk '$1 ~ /^[0-9a-f]+$/ && $2 ~ /^refs\/heads\//{print $1}' 2>/dev/null || true
+}
+
+# Bound every read, including after a FIFO supplies its first line. -n also
+# bounds an unterminated line (Bash 3.2 has no read -N).
+_acq_msb_clone_read_packed_refs() {
+  local t lines=0 bytes=0 rc
+  while [ "$lines" -lt 1000000 ] && [ "$bytes" -lt 67108864 ]; do
+    t="" rc=0
+    IFS= read -r -t 1 -n 4096 t || rc=$?
+    [ -z "$t" ] || printf '%s\n' "$t"
+    [ "$rc" -eq 0 ] || break
+    lines=$((lines + 1))
+    bytes=$((bytes + ${#t} + 1))
+  done
+}
+
+# Older Git remote-remove ref transactions can lose the command-scope hooksPath
+# override. Direct update-ref honors it; no-deref preserves local branch targets
+# when a remote-tracking ref is symbolic.
+# Only this literal ref namespace and the local remote section are removed;
+# branch upstream settings and custom fetch destinations are preserved.
+_acq_msb_clone_remove_remote() {
+  local ws="$1" remote="$2" refs ref commands rc=0
+  refs=$(_acq_msb_git_ws "$ws" for-each-ref --format='%(refname)' "refs/remotes/${remote}/") || return 1
+  if [ -n "$refs" ]; then
+    commands=""
+    while IFS= read -r ref; do
+      case "$ref" in "refs/remotes/${remote}/"*) ;; *) return 1 ;; esac
+      case "$ref" in *[[:space:]]*) return 1 ;; esac
+      commands="${commands}delete ${ref}"$'\n'
+    done <<< "$refs"
+    printf '%s' "$commands" | _acq_msb_git_ws "$ws" update-ref --no-deref --stdin || return 1
+  fi
+  # --get-regexp returns 1 for an absent section; every other error is a refusal.
+  _acq_msb_git_ws "$ws" config --local --name-only --get-regexp "^remote\\.${remote//./\\.}\\." >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 1 ] || return 0
+  [ "$rc" -eq 0 ] || return 1
+  _acq_msb_git_ws "$ws" config --local --remove-section "remote.${remote}"
+}
+
 # _acq_msb_clone_cleanup NAME — delete NAME's scratch clone and drop the
-# fetch-back remote from the origin checkout. Best-effort, always returns 0
-# (a sandbox created without --clone has no dir: quiet no-op).
+# fetch-back remote from the origin checkout. Best-effort: returns 0, except
+# that it refuses (returns 1) when the clones dir is unresolved, so it can never
+# remove a path built from an empty base. A sandbox created without --clone has
+# no dir: quiet no-op. When the wrapper
+# refuses to run git against the origin checkout, its reason is shown along
+# with the command that removes the remote by hand.
 _acq_msb_clone_cleanup() {
+  acq_require_base "scratch clones dir" "$ACQ_MSB_CLONES_DIR" || return 1   # never rm -rf "/$name"
   local name="$1" origin=""
   local dir="${ACQ_MSB_CLONES_DIR}/${name}"
   [ -d "$dir" ] || return 0
   origin=$(cat "${dir}/.origin" 2>/dev/null) || origin=""
   if [ -n "$origin" ] && [ -d "$origin" ]; then
-    git -C "$origin" remote remove "sandbox-${name}" >/dev/null 2>&1 || true
+    if ! _acq_msb_clone_remove_remote "$origin" "sandbox-${name}"; then
+      echo "acq(msb): warning: left the 'sandbox-${name}' remote in $origin (see above)." >&2
+      echo "acq(msb):   Remove it with: git -C $origin remote remove sandbox-${name}" >&2
+    fi
   fi
   rm -rf "$dir"
   return 0
@@ -3544,7 +4194,7 @@ _acq_backend_provision_unlocked() {
 
   for kitref in ${kits[@]+"${kits[@]}"}; do
     kitdir=$(_acq_msb_fetch_kit "$kitref") || {
-      echo "acq(msb): error: could not fetch kit: $kitref" >&2
+      echo "acq(msb): error: could not fetch kit: $(kit_ref_display "$kitref")" >&2
       exit 1
     }
     kitdirs+=("$kitdir")
@@ -3905,7 +4555,7 @@ EOF
   fi
 
   ACQ_MSB_GUEST_WORKSPACE=""
-  local _wi _wspec _wpath _wro _wsrc _whost _first_record _first_guest="" _first_host=""
+  local _wi _wspec _wpath _wro _wsrc _whost _first_record _first_guest="" _first_host="" _fwd_ws=""
   for _wi in ${_ws_recs[@]+"${!_ws_recs[@]}"}; do
     _wspec="${_ws_recs[$_wi]}"
     # Split an optional trailing ":ro" (read-only) marker from the path.
@@ -3954,6 +4604,14 @@ EOF
       _whost="$_wsrc"
     fi
     create_flags+=(--volume "${_whost}:${_wpath}${_wro}")
+    # Writable mounts, for the forwarded-socket check (ADR-0021): the guest path
+    # and, under --clone, the scratch source actually mounted.
+    if [ -z "$_wro" ]; then
+      _fwd_ws="${_fwd_ws}${_wpath}
+"
+      [ "$_wsrc" = "$_wpath" ] || _fwd_ws="${_fwd_ws}${_wsrc}
+"
+    fi
     acq_debug "msb volume: ${_whost} (host) -> ${_wpath}${_wro} (guest)"
   done
 
@@ -3973,7 +4631,7 @@ EOF
     ACQ_MSB_GUEST_WORKSPACE="$_first_guest"
   fi
 
-  # Guest-visible workspace markers (GSA-TTS/agentic-coding-quickstart#456).
+  # Guest-visible workspace markers identify the primary path and clone status.
   # ACQ_WORKSPACE names the primary's guest path; ACQ_CLONE=1 marks it as the
   # disposable clone. A kit that must write into the clone and never the real
   # checkout keys on these instead of a mount-type heuristic (which the
@@ -3990,9 +4648,10 @@ EOF
   # Host ssh-agent / socket forwarding (ADR-0021). Translate the neutral
   # host-socket forwards into msb `--vsock HOST:PORT/KIND` create flags. Gated on
   # msb >= 0.6.9; a lower version warns once and skips (forwarding is opt-in
-  # convenience, never a hard failure).
+  # convenience, never a hard failure). A socket inside a writable workspace
+  # mount is refused (_fwd_ws, collected in the mount loop above).
   local _vsock_flags=()
-  _acq_msb_vsock_flags_into _vsock_flags "$name"
+  _acq_msb_vsock_flags_into _vsock_flags "$name" "$_fwd_ws" "${create_flags[@]}" || return 1
   [ "${#_vsock_flags[@]}" -gt 0 ] && create_flags+=("${_vsock_flags[@]}")
 
   # Preserve the existing trusted host-config mount used by read-only startup
@@ -4067,7 +4726,7 @@ EOF
   acq_debug "msb create: invoking (this returns fast; guest boots in background)"
   acq_spin_start "Creating sandbox '$name'"
   _ACQ_MSB_CREATE_STARTED=1
-  _create_output_file=$(mktemp "${TMPDIR:-/tmp}/acq-msb-create.XXXXXX") || return 1
+  _create_output_file=$(mktemp "$(acq_tmp_dir)/acq-msb-create.XXXXXX") || return 1
   # Inline the env assignment so the fork exec-optimizes into the actual msb binary
   # (or test-stub script), making $! the backend executable's own PID.  An extra
   # shell wrapper (_acq_msb_cli) would interpose another fork level, leaving the
@@ -4090,7 +4749,7 @@ EOF
     _create_output=""
     acq_debug "msb create --name $name ${create_flags[*]} $_msb_image"
     acq_spin_start "Creating sandbox '$name'"
-    _create_output_file=$(mktemp "${TMPDIR:-/tmp}/acq-msb-create.XXXXXX") || return 1
+    _create_output_file=$(mktemp "$(acq_tmp_dir)/acq-msb-create.XXXXXX") || return 1
     # Same inline-env pattern as above: expose the msb executable PID directly.
     MSYS2_ARG_CONV_EXCL='*' msb create --name "$name" "${create_flags[@]}" "$_msb_image" >"$_create_output_file" 2>&1 &
     _create_pid=$!
@@ -4119,6 +4778,7 @@ EOF
   done
   [ -n "${ACQ_MSB_KEEP_STARTUP_STAGE:-}" ] || _ACQ_MSB_STARTUP_STAGE_FILES=()
   if [ "$_create_rc" -ne 0 ]; then
+    _acq_msb_ssh_agent_link_remove "$name"
     echo "acq(msb): error: 'msb create' failed for '$name'." >&2
     echo "acq(msb):   flags: ${create_flags[*]}" >&2
     echo "acq(msb):   image: $_msb_image" >&2
@@ -4328,8 +4988,10 @@ acq_backend_provision() {
   ( local lock rc
     _acq_provider_input_guardian_start || exit 1
     lock=$(acq_provider_input_lock_acquire msb "$1" "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID") || { _acq_provider_input_guardian_stop; exit 1; }
-    trap 'rc=$?; _acq_msb_cleanup_uncreated_attempt; acq_provider_input_lock_release "${lock:-}" || true; _acq_provider_input_guardian_stop; exit "$rc"' EXIT
-    trap '_acq_provider_input_signal_exit 128' HUP
+    # Only this shell runs the cleanup, never a child that inherited the traps.
+    acq_trap_owner_mark
+    trap 'rc=$?; acq_trap_owner_is_self || exit "$rc"; _acq_msb_cleanup_uncreated_attempt; acq_provider_input_lock_release "${lock:-}" || true; _acq_provider_input_guardian_stop; exit "$rc"' EXIT
+    trap '_acq_provider_input_signal_exit 129' HUP
     trap '_acq_provider_input_signal_exit 130' INT
     trap '_acq_provider_input_signal_exit 143' TERM
     _acq_backend_provision_unlocked "$@"; rc=$?; exit "$rc" )
@@ -4566,9 +5228,11 @@ _acq_msb_check_prereqs() {
 # re-pointed on every bridge (re)start, so the route survives a host reboot.
 # Custom ACQ_FORWARD_HOST_SOCKETS entries keep their canonical path. Without a
 # NAME, or when the link cannot be staged, the raw path is used as before.
+# WORKSPACES (optional, one path per line) are the writable workspace mounts: a
+# forward whose resolved socket lies inside one is refused.
 # See ADR-0021.
 _acq_msb_vsock_flags_into() {
-  local _arr="$1" _name="${2:-}" _line _path _port _kind _label _current
+  local _arr="$1" _name="${2:-}" _fwd_ws="${3:-}" _line _path _port _kind _label _current _ws
   # Collect the forwards first so the version gate only warns when one is asked.
   local _forwards=()
   while IFS= read -r _line; do
@@ -4586,6 +5250,31 @@ EOF
     return 0
   fi
 
+  # Validate the whole port set before staging a managed link.
+  local _used=' ' _arg _next=0
+  if [ "$#" -gt 3 ]; then
+    shift 3
+    for _arg in "$@"; do
+      if [ "$_next" = 1 ]; then
+        _port=${_arg##*:}; _port=${_port%%/*}
+        while [ "${_port#0}" != "$_port" ] && [ -n "${_port#0}" ]; do _port=${_port#0}; done
+        [ -z "$_port" ] || _used="$_used$_port "
+      fi
+      _next=0
+      case "$_arg" in -p|--publish|--port) _next=1 ;; esac
+    done
+  fi
+  for _line in "${_forwards[@]}"; do
+    _port=$(printf '%s' "$_line" | cut -f2)
+    # Decimal normalization also catches 03552 versus 3552 on bash 3.2.
+    while [ "${_port#0}" != "$_port" ]; do _port=${_port#0}; done
+    case "$_used" in *" $_port "*)
+      echo "acq(msb): forwarded vsock port $_port collides with a published port or another host-socket forward" >&2
+      return 1 ;;
+    esac
+    _used="$_used$_port "
+  done
+
   local _f
   for _f in "${_forwards[@]}"; do
     # Each line is "HOST_PATH<TAB>PORT<TAB>KIND<TAB>LABEL" (see common.sh).
@@ -4593,6 +5282,10 @@ EOF
     _port=$(printf '%s' "$_f" | cut -f2)
     _kind=$(printf '%s' "$_f" | cut -f3)
     _label=$(printf '%s' "$_f" | cut -f4)
+    if _ws=$(_acq_msb_fwd_workspace_holding "$_path" "$_fwd_ws"); then
+      _acq_msb_fwd_refuse_inside "$_path" "$_label" "$_ws"
+      continue
+    fi
     if [ "$_label" = "ssh-agent" ] && [ -n "$_name" ]; then
       _path=$(_acq_msb_ssh_agent_route_path "$_name" "$_path")
     fi
@@ -4612,10 +5305,55 @@ EOF
         _ACQ_MSB_SSH_AGENT_NOTICE_SHOWN=1
         echo "acq(msb): forwarding your host ssh-agent into the guest because SSH_AUTH_SOCK" \
              "is set. Guest code can use every key the agent holds while the sandbox runs;" \
-             "unset SSH_AUTH_SOCK to opt out, or run 'ssh-add -c' to confirm each use. See ADR-0021." >&2
+             "unset SSH_AUTH_SOCK to opt out (an existing sandbox is disconnected at its next start or run)," \
+             "or run 'ssh-add -c' to confirm each use. See ADR-0021." >&2
       fi
     fi
   done
+}
+
+# _acq_msb_fwd_workspace_holding PATH WORKSPACES — print the workspace (one of
+# the newline-separated WORKSPACES) that the resolved PATH lies in, and return
+# 0; return 1 when it lies in none. Both sides are compared in their physical,
+# case-folded form (the workspace checks' helpers in common.sh). A forwarded
+# socket must not be a file the sandbox can create or replace through its
+# workspace mount.
+_acq_msb_fwd_workspace_holding() {
+  local _p="$1" _list="$2" _w _fp _fw
+  [ -n "$_list" ] || return 1
+  _acq_path_case_fold "$(_acq_path_physical "$_p")"; _fp="$_ACQ_PATH_FOLDED"
+  while IFS= read -r _w; do
+    [ -n "$_w" ] || continue
+    _acq_path_case_fold "$(_acq_path_physical "$_w")"; _fw="$_ACQ_PATH_FOLDED"
+    if _acq_path_within "$_fp" "$_fw"; then
+      printf '%s\n' "$_w"
+      return 0
+    fi
+  done <<EOF
+$_list
+EOF
+  return 1
+}
+
+# _acq_msb_fwd_refuse_inside PATH LABEL WORKSPACE — refuse a forwarded socket
+# inside a writable workspace, naming where it came from.
+_acq_msb_fwd_refuse_inside() {
+  local _src="ACQ_FORWARD_HOST_SOCKETS"
+  [ "$2" = "ssh-agent" ] && _src="SSH_AUTH_SOCK"
+  echo "acq(msb): refusing to forward the socket '$1' ($_src): it is inside the workspace '$3'," \
+       "which the sandbox can write." >&2
+}
+
+# _acq_msb_recorded_workspace NAME — the sandbox's recorded host workspace (the
+# one the refresh checks a forwarded socket against), or nothing.
+_acq_msb_recorded_workspace() {
+  local _w
+  _w=$(acq_workspace_record_read msb "$1" 2>/dev/null | tr -d '\r\n')
+  [ -n "$_w" ] || return 0
+  if command -v canonicalize_path >/dev/null 2>&1; then
+    _w=$(canonicalize_path "$_w")
+  fi
+  printf '%s\n' "$_w"
 }
 
 # _acq_msb_ssh_agent_route_path NAME AGENT_PATH — echo the host path to emit as
@@ -4654,6 +5392,7 @@ _acq_msb_ssh_agent_link_path() {
   case "$name" in
     ""|*[!A-Za-z0-9_-]*|-*) return 1 ;;
   esac
+  [ -n "$ACQ_MSB_SSH_AGENT_LINK_DIR" ] || return 1   # no state dir: no managed link
   _p="${ACQ_MSB_SSH_AGENT_LINK_DIR}/${name}.sock"
   if [ "$(printf '%s' "$_p" | wc -c | tr -d ' ')" -gt "$ACQ_MSB_SUN_PATH_MAX" ]; then
     _sum=$(printf '%s' "$name" | cksum | cut -d' ' -f1)
@@ -4672,55 +5411,199 @@ _acq_msb_ssh_agent_link_point() {
   local link="$1" target="$2" tmp
   [ -S "$target" ] || return 1
   if [ -e "$link" ] && [ ! -L "$link" ]; then return 1; fi
+  _acq_msb_ssh_agent_link_dir_ok "$(dirname "$link")" || return 1
   if [ -L "$link" ] && [ "$(readlink "$link")" = "$target" ]; then return 0; fi
-  mkdir -p "$(dirname "$link")" 2>/dev/null || return 1
   # A link that currently resolves to a directory would make `mv` descend into
   # it; drop it first (pathological, never produced by acq).
-  [ -L "$link" ] && [ -d "$link" ] && rm -f "$link"
+  [ -L "$link" ] && [ -d "$link" ] && _acq_msb_ssh_agent_link_unlink "$link"
   tmp="${link}.tmp.$$"
-  rm -f "$tmp" 2>/dev/null
+  _acq_msb_ssh_agent_link_unlink "$tmp" 2>/dev/null
   # `[ -L "$tmp" ]` guards hosts whose `ln -s` copies instead of linking (MSYS
   # without native symlinks): a copied socket would be a dead route.
   if ln -s "$target" "$tmp" 2>/dev/null && [ -L "$tmp" ] && mv -f "$tmp" "$link" 2>/dev/null; then
     return 0
   fi
-  rm -f "$tmp" 2>/dev/null
+  _acq_msb_ssh_agent_link_unlink "$tmp" 2>/dev/null
   return 1
 }
 
-# _acq_msb_ssh_agent_link_refresh NAME — re-point sandbox NAME's managed route
-# link at the CURRENT host SSH_AUTH_SOCK, if both exist. Runs before every
-# bridge (re)start (provision, acq_backend_start, running re-attach), which is
-# what heals the route after a host reboot. Deliberately a no-op when:
-#   - the sandbox has no managed link (created before this mechanism; its route
-#     is the raw path and only a recreate can change it), or
-#   - SSH_AUTH_SOCK is unset or not a socket (the link is left as is; the
-#     liveness probe will still warn if the agent is unreachable).
+# _acq_msb_ssh_agent_link_dir_ok DIR — create the link directory DIR as 0700, or
+# accept it only as this user's own real directory (checked without following a
+# symlink at DIR). Returns non-zero when DIR cannot be used.
+_acq_msb_ssh_agent_link_dir_ok() {
+  local dir="$1" parent
+  parent=$(dirname "$dir")
+  mkdir -p "$parent" 2>/dev/null || return 1
+  [ -d "$parent" ] && [ ! -L "$parent" ] && [ -O "$parent" ] || return 1
+  if [ ! -e "$dir" ] && [ ! -L "$dir" ]; then
+    mkdir -m 700 "$dir" 2>/dev/null || [ -d "$dir" ] || return 1
+  fi
+  [ -d "$dir" ] && [ ! -L "$dir" ] && [ -O "$dir" ] || return 1
+  chmod 700 "$dir" 2>/dev/null || return 1
+  return 0
+}
+
+# Read-only guard for every managed-link mutation. Missing directories are
+# harmless (creation checks them separately); existing ones must be trusted.
+_acq_msb_ssh_agent_link_dirs_trusted() {
+  local dir="$1" d
+  _ACQ_MSB_SSH_AGENT_UNSAFE_DIR=""
+  for d in "$(dirname "$dir")" "$dir"; do
+    if [ ! -e "$d" ] && [ ! -L "$d" ]; then continue; fi
+    if [ ! -d "$d" ] || [ -L "$d" ] || [ ! -O "$d" ]; then
+      _ACQ_MSB_SSH_AGENT_UNSAFE_DIR="$d"
+      return 1
+    fi
+  done
+  return 0
+}
+
+_acq_msb_ssh_agent_link_access_ok() {
+  _acq_msb_ssh_agent_link_dirs_trusted "$(dirname "$1")" && return 0
+  echo "acq(msb): warning: unsafe ssh-agent route directory '$_ACQ_MSB_SSH_AGENT_UNSAFE_DIR';" \
+       "leaving the link untouched and skipping the bridge. Fix or remove '$_ACQ_MSB_SSH_AGENT_UNSAFE_DIR'." >&2
+  return 1
+}
+
+_acq_msb_ssh_agent_link_unlink() {
+  _acq_msb_ssh_agent_link_dirs_trusted "$(dirname "$1")" || return 1
+  rm -f "$1"
+}
+
+# _acq_msb_ssh_agent_link_refresh NAME [RELINK] — re-point sandbox NAME's managed
+# route link at the CURRENT host SSH_AUTH_SOCK. Runs before every bridge
+# (re)start (provision, acq_backend_start, running re-attach), which is what
+# heals the route after a host reboot. A no-op when the sandbox has no managed
+# link (created before this mechanism; its route is the raw path and only a
+# recreate can change it), unless RELINK=1 says its route names the link, which
+# is then made again.
+# When the link cannot be re-pointed (SSH_AUTH_SOCK not a socket, a socket
+# inside the recorded workspace, a link that cannot be replaced), check the
+# link's current target: unless it is itself (lstat) a socket owned by this
+# user outside the workspace, remove the link and set
+# _ACQ_MSB_SSH_AGENT_LINK_REMOVED=1, so the caller starts no bridge.
+# An untrusted route directory instead leaves the link untouched and sets
+# _ACQ_MSB_SSH_AGENT_LINK_BLOCKED=1, also skipping the bridge.
 # Records why the link was left alone, remedy included, in
 # _ACQ_MSB_SSH_AGENT_LINK_SKIPPED (empty when it now points at the live agent) so
 # the unreachable warning tells the truth about what was and was not re-pointed.
 # Never fails the caller.
 _ACQ_MSB_SSH_AGENT_LINK_SKIPPED=""
+_ACQ_MSB_SSH_AGENT_LINK_REMOVED=0
+_ACQ_MSB_SSH_AGENT_LINK_BLOCKED=0
 _acq_msb_ssh_agent_link_refresh() {
-  local name="$1" link target
+  local name="$1" relink="${2:-0}" link target ws="" _cur
   _ACQ_MSB_SSH_AGENT_LINK_SKIPPED=""
+  _ACQ_MSB_SSH_AGENT_LINK_REMOVED=0
+  _ACQ_MSB_SSH_AGENT_LINK_BLOCKED=0
   link=$(_acq_msb_ssh_agent_link_path "$name") || return 0
-  [ -L "$link" ] || return 0
+  if ! _acq_msb_ssh_agent_link_access_ok "$link"; then
+    _ACQ_MSB_SSH_AGENT_LINK_BLOCKED=1
+    return 0
+  fi
+  [ -L "$link" ] || [ "$relink" = "1" ] || return 0
+  local _wslist
+  _wslist=$(_acq_msb_recorded_workspace "$name")
+  local _inspect
+  if [ "${_ACQ_MSB_ROUTE_NAME:-}" = "$name" ]; then
+    _inspect=$_ACQ_MSB_ROUTE_JSON
+  else
+    _inspect=$(_acq_msb_cli inspect "$name" --format json 2>/dev/null) || _inspect='{}'
+  fi
+  _wslist="$_wslist
+$(printf '%s' "$_inspect" | _acq_msb_agent_json mounts || true)"
   target="${SSH_AUTH_SOCK:-}"
   if [ -z "$target" ] || [ ! -S "$target" ]; then
     _ACQ_MSB_SSH_AGENT_LINK_SKIPPED="SSH_AUTH_SOCK is unset or not a socket in this shell. Re-run 'acq start $name' or 'acq run $name' from a shell where SSH_AUTH_SOCK names your live agent (e.g. after 'eval \"\$(ssh-agent -s)\"; ssh-add')."
+  else
+    if command -v canonicalize_path >/dev/null 2>&1; then
+      target=$(canonicalize_path "$target")
+    fi
+    if ws=$(_acq_msb_fwd_workspace_holding "$target" "$_wslist"); then
+      _acq_msb_fwd_refuse_inside "$target" ssh-agent "$ws"
+      _ACQ_MSB_SSH_AGENT_LINK_SKIPPED="SSH_AUTH_SOCK names a socket inside the workspace '$ws'. Re-run 'acq start $name' or 'acq run $name' from a shell whose SSH_AUTH_SOCK is outside it."
+    elif _acq_msb_ssh_agent_link_point "$link" "$target"; then
+      acq_debug "msb: ssh-agent route link for $name -> $target"
+      # The same owner check create makes: warn, never refuse.
+      [ -O "$target" ] || printf 'acq: warning: SSH_AUTH_SOCK names a socket owned by another user; forwarding it anyway\n' >&2
+      return 0
+    else
+      _ACQ_MSB_SSH_AGENT_LINK_SKIPPED="the link could not be replaced. Fix or remove '$link' (is its directory writable, and is it still a symlink?), then re-run 'acq start $name' or 'acq run $name'."
+      echo "acq(msb): warning: could not re-point the ssh-agent route link '$link' at" \
+           "'$target'; the forwarded agent may be unreachable in '$name'." >&2
+    fi
+  fi
+  if [ -L "$link" ] && ! _acq_msb_ssh_agent_link_target_ok "$link" "$_wslist"; then
+    _cur=$(readlink "$link" 2>/dev/null)
+    _acq_msb_ssh_agent_link_unlink "$link" 2>/dev/null
+    _ACQ_MSB_SSH_AGENT_LINK_REMOVED=1
+    echo "acq(msb): removed the ssh-agent route link '$link' and did not start the bridge in '$name':" \
+         "its target '$_cur' is not a socket owned by you outside the workspace." >&2
+  fi
+  return 0
+}
+
+# _acq_msb_ssh_agent_link_target_ok LINK WORKSPACES — 0 iff LINK's current target
+# is itself (not through another symlink) a socket owned by the effective user
+# and lies outside the newline-separated WORKSPACES.
+_acq_msb_ssh_agent_link_target_ok() {
+  local link="$1" t _dir _parent
+  _dir=$(dirname "$link"); _parent=$(dirname "$_dir")
+  [ -d "$_dir" ] && [ ! -L "$_dir" ] && [ -O "$_dir" ] || return 1
+  [ -d "$_parent" ] && [ ! -L "$_parent" ] && [ -O "$_parent" ] || return 1
+  t=$(readlink "$link" 2>/dev/null) || return 1
+  [ -n "$t" ] || return 1
+  case "$t" in /*) ;; *) t="$(dirname "$link")/$t" ;; esac
+  [ -S "$t" ] && [ ! -L "$t" ] && [ -O "$t" ] || return 1
+  # Its directory must be this user's own real directory too, so nobody else
+  # can swap the socket for another between checks.
+  local d
+  d=$(dirname "$t")
+  [ -d "$d" ] && [ ! -L "$d" ] && [ -O "$d" ] || return 1
+  ! _acq_msb_fwd_workspace_holding "$t" "$2" >/dev/null
+}
+
+# _acq_msb_ssh_agent_opt_out NAME — SSH_AUTH_SOCK is unset in this shell:
+# disconnect the forward (ADR-0021 opt-out). The managed link goes, so the route
+# reaches nothing; the recorded guest socket goes, so no session gets
+# SSH_AUTH_SOCK; no bridge is started. Setting SSH_AUTH_SOCK and re-running
+# `acq start` or `acq run` reconnects. Never fails the caller.
+# A sandbox whose route names the raw agent socket (no managed link: an older
+# sandbox, a link path too long for a socket address, or a link directory that
+# failed its check) cannot be disconnected this way: the route still reaches
+# that socket, and guest code can dial it over vsock itself. That is said
+# plainly, with the remedy (remove and recreate the sandbox).
+_acq_msb_ssh_agent_opt_out() {
+  local name="$1" link _had_link=0 _had_key=0
+  _ACQ_MSB_SSH_AGENT_FORWARDING=0
+  if link=$(_acq_msb_ssh_agent_link_path "$name"); then
+    _acq_msb_ssh_agent_link_access_ok "$link" || return 0
+    if [ -L "$link" ]; then
+      _acq_msb_ssh_agent_link_unlink "$link" 2>/dev/null
+      _had_link=1
+    fi
+  fi
+  if [ -n "$(_acq_msb_ssh_auth_sock_for "$name")" ]; then
+    acq_host_config_clear msb "$name" ssh-auth-sock
+    _had_key=1
+  fi
+  [ "$_had_link" = "1" ] || [ "$_had_key" = "1" ] || return 0
+  if [ "$_had_link" = "0" ]; then
+    # No link here: ask msb whether the route names the managed link at all.
+    _ACQ_MSB_ROUTE_JSON=""
+    _ACQ_MSB_ROUTE_NAME=""
+    _acq_msb_has_ssh_agent_vsock_route "$name" >/dev/null 2>&1 || true
+    _acq_msb_route_names_link "$name" && _had_link=1
+  fi
+  if [ "$_had_link" = "1" ]; then
+    echo "acq(msb): SSH_AUTH_SOCK is unset, so the forwarded ssh-agent was disconnected from '$name';" \
+         "set it and re-run 'acq start $name' or 'acq run $name' to reconnect." >&2
     return 0
   fi
-  if command -v canonicalize_path >/dev/null 2>&1; then
-    target=$(canonicalize_path "$target")
-  fi
-  if _acq_msb_ssh_agent_link_point "$link" "$target"; then
-    acq_debug "msb: ssh-agent route link for $name -> $target"
-  else
-    _ACQ_MSB_SSH_AGENT_LINK_SKIPPED="the link could not be replaced. Fix or remove '$link' (is its directory writable, and is it still a symlink?), then re-run 'acq start $name' or 'acq run $name'."
-    echo "acq(msb): warning: could not re-point the ssh-agent route link '$link' at" \
-         "'$target'; the forwarded agent may be unreachable in '$name'." >&2
-  fi
+  echo "acq(msb): SSH_AUTH_SOCK is unset, so sessions in '$name' no longer get SSH_AUTH_SOCK, but this" \
+       "sandbox's --vsock route names the raw agent socket path, not acq's managed link, so the guest" \
+       "can still reach that agent while the sandbox exists. Remove it with 'acq rm $name' and create" \
+       "it again to disconnect it." >&2
   return 0
 }
 
@@ -4737,7 +5620,8 @@ _acq_msb_ssh_agent_link_managed() {
 _acq_msb_ssh_agent_link_remove() {
   local link
   link=$(_acq_msb_ssh_agent_link_path "$1") || return 0
-  [ -L "$link" ] && rm -f "$link"
+  _acq_msb_ssh_agent_link_access_ok "$link" || return 0
+  [ -L "$link" ] && _acq_msb_ssh_agent_link_unlink "$link"
   return 0
 }
 
@@ -4765,12 +5649,19 @@ _acq_msb_check_socat() {
 # acq_backend_start. Fail-soft: warns, never aborts. Works from EITHER the
 # in-provision flag OR the persisted host key (start
 # has no provision flag set), so the guest sock path is resolved from whichever
-# source is authoritative for the call. See ADR-0021.
+# source is authoritative for the call. With SSH_AUTH_SOCK unset on that path
+# the forward is disconnected instead (_acq_msb_ssh_agent_opt_out). RELINK=1
+# lets the refresh make a removed managed link again (the route names it).
+# See ADR-0021.
 _acq_msb_start_ssh_agent_bridge() {
-  local name="$1" _sock="" _port="$ACQ_MSB_SSH_AGENT_VSOCK_PORT"
+  local name="$1" _relink="${2:-0}" _sock="" _port="$ACQ_MSB_SSH_AGENT_VSOCK_PORT"
   if [ "${_ACQ_MSB_SSH_AGENT_FORWARDING:-0}" = "1" ]; then
     _sock="$ACQ_MSB_SSH_AGENT_GUEST_SOCK"
   else
+    if [ -z "${SSH_AUTH_SOCK:-}" ]; then
+      _acq_msb_ssh_agent_opt_out "$name"
+      return 0
+    fi
     # No provision ran this path (e.g. acq_backend_start): read the persisted
     # key recorded at provision. Empty key => forwarding not configured.
     _sock=$(_acq_msb_ssh_auth_sock_for "$name")
@@ -4779,15 +5670,21 @@ _acq_msb_start_ssh_agent_bridge() {
 
   # Heal the HOST end of the route first (re-point the managed link at the
   # current agent socket); no-op for a raw-path route. See ADR-0021 amendment.
-  _acq_msb_ssh_agent_link_refresh "$name"
+  # A link the refresh removed (its target is not this user's socket) means
+  # there is nothing safe to bridge to.
+  _acq_msb_ssh_agent_link_refresh "$name" "$_relink"
+  [ "$_ACQ_MSB_SSH_AGENT_LINK_REMOVED" = "1" ] && return 0
+  [ "$_ACQ_MSB_SSH_AGENT_LINK_BLOCKED" = "1" ] && return 0
 
   # The guest sock path and port are acq's own constants (word-safe charset), so
   # there is no injection risk; still keep them as fixed literals in the sh -c.
   # A SINGLE socat under nohup (detached): the --vsock route reconnects lazily,
   # and the bridge is re-launched fresh on each provision/start, so no supervisor
-  # loop is needed. `rm -f` clears any stale socket before re-listening.
+  # loop is needed. Stop the exact previous listener before unlinking its socket.
   _acq_msb_cli exec "$name" -u agent -- sh -c "
     mkdir -p \"\$(dirname '$_sock')\" 2>/dev/null || true
+    pkill -f -x 'socat UNIX-LISTEN:${_sock//./\\.},fork,reuseaddr VSOCK-CONNECT:2:$_port' 2>/dev/null || true
+    umask 077
     rm -f '$_sock' 2>/dev/null || true
     nohup socat UNIX-LISTEN:'$_sock',fork,reuseaddr VSOCK-CONNECT:2:'$_port' >/dev/null 2>&1 &
   " </dev/null >/dev/null 2>&1 || {
@@ -5030,7 +5927,13 @@ _acq_msb_kit_env_flags_into() {
 # the provision sequence. Fail-soft throughout: this is convenience, never fatal.
 _acq_msb_ensure_ssh_agent_forward() {
   local name="$1"
-  # Cheap opt-out: no host forward requested => nothing to do. Reuse the neutral
+  # SSH_AUTH_SOCK unset in this shell is the opt-out: disconnect the forward
+  # (remove the link and the recorded guest socket) rather than leave it wired.
+  if [ -z "${SSH_AUTH_SOCK:-}" ]; then
+    _acq_msb_ssh_agent_opt_out "$name"
+    return 0
+  fi
+  # Cheap no-op: no host forward requested => nothing to do. Reuse the neutral
   # emitter's decision so this tracks the SSH_AUTH_SOCK opt-in exactly (a set,
   # existing host socket on a supported port). Suppress the emitter's advisory
   # stderr here; provision/attach already surface the trust-boundary notice.
@@ -5076,7 +5979,9 @@ _acq_msb_ensure_ssh_agent_forward() {
   # does. Set the module flag so _acq_msb_check_socat / the bridge starter both
   # resolve from the constant. It is process-scoped and already reset per run.
   _ACQ_MSB_SSH_AGENT_FORWARDING=1
-  _acq_msb_check_socat "$name" && _acq_msb_start_ssh_agent_bridge "$name"
+  local _relink=0
+  _acq_msb_route_names_link "$name" && _relink=1
+  _acq_msb_check_socat "$name" && _acq_msb_start_ssh_agent_bridge "$name" "$_relink"
 }
 
 # _acq_msb_has_ssh_agent_vsock_route NAME — return 0 iff the sandbox's persisted
@@ -5089,9 +5994,11 @@ _acq_msb_ensure_ssh_agent_forward() {
 _acq_msb_has_ssh_agent_vsock_route() {
   local name="$1" json _port="$ACQ_MSB_SSH_AGENT_VSOCK_PORT" _errf _rc _try
   _ACQ_MSB_ROUTE_PROBE_ERR=""
+  _ACQ_MSB_ROUTE_NAME=""
+  _ACQ_MSB_ROUTE_JSON=""
   # stderr goes to a file, not into $json: a warning mentioning vsock would
   # otherwise flatten into a false route match.
-  _errf=$(mktemp "${TMPDIR:-/tmp}/acq-msb-inspect.XXXXXX" 2>/dev/null) || _errf=/dev/null
+  _errf=$(mktemp "$(acq_tmp_dir)/acq-msb-inspect.XXXXXX" 2>/dev/null) || _errf=/dev/null
   for _try in 1 2; do
     _rc=0
     json=$(_acq_msb_cli inspect "$name" --format json 2>"$_errf") || _rc=$?
@@ -5102,23 +6009,48 @@ _acq_msb_has_ssh_agent_vsock_route() {
     rm -f "$_errf" 2>/dev/null
   fi
   [ "$_rc" -eq 0 ] && [ -n "$json" ] || return 2
-  # Require BOTH a `vsock` key AND the ssh-agent guest-port token, so a published
-  # `ports:[{port:<vsock-port>}]` that merely happens to equal the (user-
-  # overridable) vsock port cannot masquerade as a route on a sandbox that has no
-  # vsock forwarding at all. We do not have a JSON parser here, so flatten the
-  # document (strip quotes/spaces; turn structural punctuation into newlines) and
-  # test the two facts independently against the whole flattened form. The real
-  # shape is `"vsock":{"routes":[{…,"port":3552}]}` — after flattening, `vsock:`
-  # and `port:3552` land on separate lines, so both greps must be run over the
-  # full text (not a single line). The port is anchored as a whole token so 3552
-  # can't match e.g. 35521. See ADR-0021; shape confirmed against msb 0.6.12.
-  # grep reads a here-string, not a pipe: under pipefail, `grep -q` exiting on an
-  # early match SIGPIPEs a writer still emitting a large document, which reads as
-  # a false "no route".
-  local _flat
-  _flat=$(printf '%s' "$json" | tr -d '" ' | tr ',{}[]' '\n\n\n\n\n')
-  grep -Eq '(^|:)vsock:?$' <<<"$_flat" 2>/dev/null || return 1
-  grep -Eq "port[:=]${_port}\$" <<<"$_flat" 2>/dev/null
+  _ACQ_MSB_ROUTE_JSON="$json"
+  _ACQ_MSB_ROUTE_NAME="$name"
+  printf '%s' "$json" | _acq_msb_agent_json route "$_port"
+}
+
+# Parse actual route fields; never split JSON string values on punctuation.
+_ACQ_MSB_ROUTE_JSON=""
+_acq_msb_agent_json() {
+  local _python
+  _python=$(_acq_msb_ro_python) || return 2
+  "$_python" -I -c '
+import json, sys
+try:
+    doc = json.load(sys.stdin)
+    config = doc.get("active_config", doc.get("config", doc))
+    if not isinstance(config, dict):
+        sys.exit(2)
+    mode = sys.argv[1]
+    if mode == "mounts":
+        for m in config.get("mounts", []):
+            if isinstance(m, dict) and not (isinstance(m.get("options"), dict) and m["options"].get("readonly") is True):
+                host = m.get("host")
+                if isinstance(host, str):
+                    print(host)
+        sys.exit(0)
+    vsock = config.get("vsock") or {}
+    routes = vsock.get("routes", [])
+    found = any(isinstance(r, dict) and str(r.get("port")) == sys.argv[2]
+                and (mode == "route" or r.get("host_socket") == sys.argv[3])
+                for r in routes)
+    sys.exit(0 if found else 1)
+except (ValueError, TypeError, AttributeError):
+    sys.exit(2)
+' "$@"
+}
+
+_acq_msb_route_names_link() {
+  local link
+  # Only trust the cached inspect document when it was fetched for this sandbox.
+  [ "${_ACQ_MSB_ROUTE_NAME:-}" = "$1" ] || return 1
+  link=$(_acq_msb_ssh_agent_link_path "$1") || return 1
+  printf '%s' "$_ACQ_MSB_ROUTE_JSON" | _acq_msb_agent_json link "$ACQ_MSB_SSH_AGENT_VSOCK_PORT" "$link"
 }
 
 # ---------------------------------------------------------------------------
@@ -5481,8 +6413,10 @@ acq_backend_terminate() {
   ( local lock rc
     _acq_provider_input_guardian_start || exit 1
     lock=$(acq_provider_input_lock_acquire msb "$1" "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID") || { _acq_provider_input_guardian_stop; exit 1; }
-    trap 'rc=$?; acq_provider_input_lock_release "${lock:-}" || true; _acq_provider_input_guardian_stop; exit "$rc"' EXIT
-    trap '_acq_provider_input_signal_exit 128' HUP
+    # Only this shell runs the cleanup, never a child that inherited the traps.
+    acq_trap_owner_mark
+    trap 'rc=$?; acq_trap_owner_is_self || exit "$rc"; acq_provider_input_lock_release "${lock:-}" || true; _acq_provider_input_guardian_stop; exit "$rc"' EXIT
+    trap '_acq_provider_input_signal_exit 129' HUP
     trap '_acq_provider_input_signal_exit 130' INT
     trap '_acq_provider_input_signal_exit 143' TERM
     _acq_backend_terminate_unlocked "$@"; rc=$?; exit "$rc" )
@@ -5596,6 +6530,8 @@ _acq_msb_valid_publish() {
 # _acq_msb_ssh_key_ensure — create the acq-managed ed25519 key on first use.
 # 0700 dir, 0600 key, under acq state (NOT the user's ~/.ssh). Idempotent.
 _acq_msb_ssh_key_ensure() {
+  acq_require_base "acq-managed ssh key dir" "$ACQ_MSB_SSH_DIR" || return 1
+  acq_require_base "acq-managed ssh key" "$ACQ_MSB_SSH_KEY" || return 1
   if [ -f "$ACQ_MSB_SSH_KEY" ]; then
     return 0
   fi
@@ -5666,11 +6602,15 @@ _acq_msb_pick_ephemeral_port() {
   # missing/garbage file resets to 0; failures fall back to 0 (fail-open to a
   # valid port — a same-value collision only re-fails a real serve bind, never
   # corrupts state).
-  seq=$(cat "$_ACQ_MSB_PORT_SEQ_FILE" 2>/dev/null)
+  # With no ports dir the counter is simply not persisted (never written to "/").
+  seq=""
+  [ -n "$_ACQ_MSB_PORT_SEQ_FILE" ] && seq=$(cat "$_ACQ_MSB_PORT_SEQ_FILE" 2>/dev/null)
   case "$seq" in ""|*[!0-9]*) seq=0 ;; esac
   seq=$(( seq + 1 ))
-  mkdir -p "$ACQ_MSB_PORTS_DIR" 2>/dev/null || true
-  printf '%s\n' "$seq" >"$_ACQ_MSB_PORT_SEQ_FILE" 2>/dev/null || true
+  if [ -n "$ACQ_MSB_PORTS_DIR" ] && [ -n "$_ACQ_MSB_PORT_SEQ_FILE" ]; then
+    mkdir -p "$ACQ_MSB_PORTS_DIR" 2>/dev/null || true
+    printf '%s\n' "$seq" >"$_ACQ_MSB_PORT_SEQ_FILE" 2>/dev/null || true
+  fi
 
   # Deterministic test seam: pin the serve port for exact-shape assertions.
   case "${ACQ_MSB_FORCE_SERVE_PORT:-}" in
@@ -5802,6 +6742,7 @@ _acq_msb_ports_pidfile() {
       return 1
       ;;
   esac
+  acq_require_base "ports state dir" "$ACQ_MSB_PORTS_DIR" || return 1
   printf '%s/%s.pids' "$ACQ_MSB_PORTS_DIR" "$name"
 }
 
@@ -5948,7 +6889,7 @@ acq_backend_apply_kit() {
   local name="$1" kitref="$2"
   local kitdir
   kitdir=$(_acq_msb_fetch_kit "$kitref") || {
-    echo "acq(msb): error: could not fetch kit: $kitref" >&2
+    echo "acq(msb): error: could not fetch kit: $(kit_ref_display "$kitref")" >&2
     return 1
   }
   # Volumes are creation-time only (ADR-0023): a mid-life apply cannot attach
@@ -5981,7 +6922,7 @@ _acq_msb_heal_kit_set() {
       _dirs+=("$kitdir")
       if [ "$i" -lt "$builtin_count" ]; then _builtin+=(1); else _builtin+=(0); fi
     else
-      echo "acq(msb): warning: could not fetch kit for healing: $kitref" >&2
+      echo "acq(msb): warning: could not fetch kit for healing: $(kit_ref_display "$kitref")" >&2
       # A built-in kit that can't even be fetched means we cannot claim the
       # bundle is current. Extra-kit fetch failures don't affect the verdict.
       [ "$i" -lt "$builtin_count" ] && ok=0
@@ -6015,6 +6956,12 @@ _acq_msb_heal_kit_set() {
 
 acq_backend_ensure_kits_applied() {
   local name="$1"
+  # A kit ref refused at input (latched by _build_kit_list) stops the heal, as
+  # the Python acq does; the caller warns and attaches anyway.
+  if command -v _acq_require_kit_refs >/dev/null 2>&1 && ! _acq_require_kit_refs; then
+    echo "acq: the kits of sandbox '$name' were not re-applied (see above)." >&2
+    return 1
+  fi
   if command -v acq_provider_selection_load >/dev/null 2>&1; then
     acq_provider_selection_load msb "$name" || return 1
   fi
@@ -6152,11 +7099,102 @@ _acq_msb_parse_host_env() {
   eval "$_env_out=\$_env_var"
 }
 
-# _acq_msb_secret_refeed SERVICE SCOPE ENV HOST — live add/rotate: re-feed a
-# newly-set/rotated secret to running sandboxes via `msb modify --secret ENV@HOST`
-# (the guest keeps its placeholder; only the injected value changes) so it takes
-# effect without recreate. A named SCOPE targets that sandbox; empty SCOPE sweeps
-# all running sandboxes. Echoes the count of sandboxes re-fed.
+# _acq_msb_has_own_value SERVICE SANDBOX — 0 when SANDBOX holds its own
+# (sandbox-scoped) value for SERVICE, readable or not. The sandbox scope takes
+# precedence over the global one, so a global set or rm must leave such a
+# sandbox's credential bound (a per-sandbox, narrowed GitHub token is the usual
+# case). Never prints a value.
+_acq_msb_has_own_value() {
+  local service="$1" sandbox="${2:-}" key v
+  [ -n "$sandbox" ] || return 1
+  key=$(_acq_secret_key "$service" "$sandbox" 2>/dev/null) || return 1
+  if v=$(acq_secret_get "$key" 2>/dev/null) && [ -n "$v" ]; then
+    v=""
+    return 0
+  fi
+  v=""
+  command -v _acq_secret_value_present_unreadable >/dev/null 2>&1 || return 1
+  _acq_secret_value_present_unreadable "$key"
+}
+
+# _acq_msb_provider_delivered SERVICE SANDBOX — 0 unless SERVICE is a provider
+# credential that SANDBOX's recorded provider selection excludes. Create binds a
+# provider only when the sandbox's selection delivers it (`--no-provider-kits`
+# or an external-only selection leaves the default provider out), so a later
+# `secret set` or key rotation must not push the key into that sandbox either.
+# The selection is loaded in a subshell so the caller's globals are untouched.
+# A record that exists but cannot be read, or holds an unknown selection mode,
+# fails closed (not delivered): reading it as empty would look like a legacy
+# record and deliver the default provider to a `--no-provider-kits` sandbox.
+_acq_msb_provider_delivered() {
+  local service="$1" sandbox="$2" key_env ids
+  command -v acq_provider_selection_load >/dev/null 2>&1 || return 0
+  command -v acq_provider_delivery_ids >/dev/null 2>&1 || return 0
+  case "$service" in github) return 0 ;; esac
+  key_env=$(acq_provider_credential_key_env "$service" 2>/dev/null) || key_env=""
+  [ -n "$key_env" ] || return 0
+  if ! acq_provenance_readable msb "$sandbox"; then
+    echo "acq(msb): warning: not applying '$service' to sandbox '$sandbox': its provenance record cannot be read, so its provider selection is unknown." >&2
+    return 1
+  fi
+  ids=$(acq_provider_selection_load msb "$sandbox" && acq_provider_delivery_ids "$sandbox" msb) 2>/dev/null || return 1
+  case "
+$ids
+" in
+    *"
+$service
+"*) return 0 ;;
+  esac
+  return 1
+}
+
+# _acq_msb_refeed_eligible SERVICE SANDBOX SCOPE — 0 when a change to SERVICE
+# in SCOPE (empty = global) should reach SANDBOX: a global change skips a
+# sandbox with its own value, and any change skips a sandbox whose provider
+# selection excludes the service.
+_acq_msb_refeed_eligible() {
+  local service="$1" sandbox="$2" scope_name="${3:-}"
+  if [ -z "$scope_name" ] && _acq_msb_has_own_value "$service" "$sandbox"; then
+    acq_debug "msb modify: '$sandbox' keeps its own '$service' value"
+    return 1
+  fi
+  if ! _acq_msb_provider_delivered "$service" "$sandbox"; then
+    acq_debug "msb modify: '$sandbox' provider selection excludes '$service'"
+    return 1
+  fi
+  return 0
+}
+
+# _acq_msb_refeed_one SANDBOX ENV HOST [OLD_ENV OLD_HOST] — bind ENV@HOST in one
+# sandbox (the value is already exported under ENV by the caller). A binding is
+# never left behind under a stale name: when the service's previous binding
+# differs (its env var was renamed, or its host changed), the old name is
+# removed first with its own `--secret-rm`, so the old variable stops receiving
+# the credential.
+_acq_msb_refeed_one() {
+  local sb="$1" _env="$2" _host="$3" _old_env="${4:-}" _old_host="${5:-}"
+  if [ -n "$_old_env" ] && { [ "$_old_env" != "$_env" ] || [ "$_old_host" != "$_host" ]; }; then
+    if ! _acq_msb_cli modify "$sb" --secret-rm "$_old_env" </dev/null >/dev/null 2>&1; then
+      echo "acq(msb): warning: could not unbind the previous binding $_old_env from sandbox '$sb'." >&2
+    fi
+  fi
+  if _acq_msb_cli modify "$sb" --secret "${_env}@${_host}" </dev/null >/dev/null 2>&1; then
+    return 0
+  fi
+  # msb binds a secret on a stopped sandbox and replaces a bound one live, but
+  # cannot add a new one to a running VM; the stored value is kept either way.
+  echo "acq(msb): could not apply the credential to sandbox '$sb'. If it is running, msb cannot add a new secret to a running sandbox: run 'acq stop $sb', then re-run this 'acq secret set' (or start it with ACQ_IMPL=python, whose start binds stored credentials before boot)." >&2
+  return 1
+}
+
+# _acq_msb_secret_refeed SERVICE SCOPE ENV HOST [OLD_ENV OLD_HOST] — bind or
+# rotate a secret across sandboxes via `msb modify --secret ENV@HOST` (stopped
+# sandboxes accept new bindings; running ones rotate existing bindings live,
+# while adding a new binding to a running sandbox requires a stop first). A
+# named SCOPE targets that sandbox; empty SCOPE sweeps all sandboxes, except
+# those _acq_msb_refeed_eligible leaves alone. OLD_ENV/OLD_HOST name the
+# service's binding before this change, unbound first when it differs. Echoes
+# the count of sandboxes re-fed.
 #
 # SECRET NEVER ON ARGV: the value is placed in the environment via a dynamic
 # `export "$ENV=$val"` (an env ENTRY, invisible to `ps`/`/proc/<pid>/cmdline`),
@@ -6164,7 +7202,7 @@ _acq_msb_parse_host_env() {
 # would leak the token to any `ps -ww` for the life of the child. The var is
 # unset immediately after the sweep.
 _acq_msb_secret_refeed() {
-  local service="$1" scope_name="$2" _env="$3" _host="$4"
+  local service="$1" scope_name="$2" _env="$3" _host="$4" _old_env="${5:-}" _old_host="${6:-}"
   local val applied=0 sb
   [ -n "$_env" ] && [ -n "$_host" ] || { printf '0\n'; return 0; }
   # OPT-OUT of the live-refeed sweep. A GLOBAL `acq secret set -g <svc>` normally
@@ -6183,8 +7221,8 @@ _acq_msb_secret_refeed() {
   # shellcheck disable=SC2163  # dynamic export of the resolved binding env var
   export "$_env=$val"
   if [ -n "$scope_name" ]; then
-    if acq_backend_exists "$scope_name"; then
-      _acq_msb_cli modify "$scope_name" --secret "${_env}@${_host}" </dev/null >/dev/null 2>&1 \
+    if acq_backend_exists "$scope_name" && _acq_msb_refeed_eligible "$service" "$scope_name" "$scope_name"; then
+      _acq_msb_refeed_one "$scope_name" "$_env" "$_host" "$_old_env" "$_old_host" \
         && applied=$((applied + 1))
     fi
   else
@@ -6192,8 +7230,10 @@ _acq_msb_secret_refeed() {
     # heredoc (else only the first sandbox is processed — a real msb drains
     # stdin). Same trap guarded in acq_backend_secret_rm's sweep.
     while IFS= read -r sb; do
+      sb="${sb%$'\r'}"
       [ -n "$sb" ] || continue
-      _acq_msb_cli modify "$sb" --secret "${_env}@${_host}" </dev/null >/dev/null 2>&1 \
+      _acq_msb_refeed_eligible "$service" "$sb" "" </dev/null || continue
+      _acq_msb_refeed_one "$sb" "$_env" "$_host" "$_old_env" "$_old_host" \
         && applied=$((applied + 1))
     done <<EOF
 $(_acq_msb_cli list -q 2>/dev/null)
@@ -6223,14 +7263,14 @@ _acq_msb_secret_set_guidance() {
     usai|github)
       echo "acq: stored '$service' in the acq secret store." >&2
       if [ "$applied" -gt 0 ]; then
-        echo "      Applied to $applied running sandbox(es); no recreate needed." >&2
+        echo "      Applied to $applied sandbox(es); no recreate needed." >&2
       fi
       ;;
     *)
       if [ -n "$_env" ] && [ -n "$_host" ]; then
         echo "acq: stored '$service' in the acq secret store (bound as ${_env}@${_host})." >&2
         if [ "$applied" -gt 0 ]; then
-          echo "      Applied to $applied running sandbox(es); no recreate needed." >&2
+          echo "      Applied to $applied sandbox(es); no recreate needed." >&2
         fi
       else
         echo "acq: stored '$service' in the acq secret store, but it has no endpoint" >&2
@@ -6265,18 +7305,24 @@ acq_backend_secret_set() {
     return 1
   fi
 
+  # The binding BEFORE this set: a new --host/--env sidecar can rename the env
+  # var or move the host, and running sandboxes still hold the old binding.
+  local _old_binding _old_env _old_host
+  _old_binding=$(_acq_msb_service_binding "$service" "$scope_name")
+  _old_env=$(printf '%s' "$_old_binding" | cut -f1)
+  _old_host=$(printf '%s' "$_old_binding" | cut -f2)
+
   # Store into the acq-owned store (keychain/file); value read from TTY/stdin.
   # host/env (when supplied) are persisted as a non-secret endpoint sidecar.
   acq_secret_set_interactive "$service" "$scope_name" "$host" "$env_var" || return 1
 
-  # Live add/rotate: re-feed running sandboxes so a newly-set or rotated secret
-  # takes effect without recreate. Driven off the single binding table so EVERY
-  # bound service (usai, github, ...) rotates in place — not just usai.
+  # Live rotation: new bindings require a restart; report failures per sandbox.
+  # Driven off the single binding table so every bound service (usai, github, ...) rotates in place — not just usai.
   local _env _host _binding applied
   _binding=$(_acq_msb_service_binding "$service" "$scope_name")
   _env=$(printf '%s' "$_binding" | cut -f1)
   _host=$(printf '%s' "$_binding" | cut -f2)
-  applied=$(_acq_msb_secret_refeed "$service" "$scope_name" "$_env" "$_host")
+  applied=$(_acq_msb_secret_refeed "$service" "$scope_name" "$_env" "$_host" "$_old_env" "$_old_host")
 
   _acq_msb_secret_set_guidance "$service" "$_env" "$_host" "$applied"
   return 0
@@ -6308,18 +7354,23 @@ acq_backend_secret_propagate() {
     return 1
   fi
   _probe_val=""
+  # Count only the sandboxes the re-feed is meant to reach, so one that keeps
+  # its own value or excludes the provider is not reported as a failure.
   if [ -n "$scope_name" ]; then
-    eligible=1
+    # The re-feed below prints any warning; the count stays quiet.
+    _acq_msb_refeed_eligible "$service" "$scope_name" "$scope_name" 2>/dev/null && eligible=1
   else
     while IFS= read -r sb; do
-      [ -n "$sb" ] && eligible=$((eligible + 1))
+      sb="${sb%$'\r'}"
+      [ -n "$sb" ] || continue
+      _acq_msb_refeed_eligible "$service" "$sb" "" </dev/null 2>/dev/null && eligible=$((eligible + 1))
     done <<EOF
 $(_acq_msb_cli list -q 2>/dev/null)
 EOF
   fi
   applied=$(_acq_msb_secret_refeed "$service" "$scope_name" "$_env" "$_host")
   if [ "$applied" -gt 0 ]; then
-    echo "acq(msb): applied '$service' to $applied running sandbox(es)." >&2
+    echo "acq(msb): applied '$service' to $applied sandbox(es)." >&2
   elif [ "$eligible" -gt 0 ]; then
     echo "acq(msb): failed to apply '$service' to existing sandbox(es)." >&2
     return 1
@@ -6337,12 +7388,54 @@ EOF
 # so the injected value stops flowing immediately — a named scope targets that
 # sandbox; a global rm sweeps all running sandboxes. Idempotent (absent secret /
 # absent binding are both success). Scope parsing mirrors acq_backend_secret_set.
-# _acq_msb_secret_unbind SCOPE ENV — live-unbind a secret from running sandboxes
-# via `msb modify --secret-rm ENV`, for services the adapter actually binds. A
-# named SCOPE targets that sandbox; empty SCOPE sweeps every running sandbox.
-# Best-effort per sandbox; echoes the count unbound. Empty ENV => nothing to do.
+# _acq_msb_secret_keep_own SERVICE SANDBOX GLOBAL_ENV — a global rm reaching a
+# sandbox that holds its own value: that credential takes precedence and stays
+# bound. When the sandbox's own binding uses the same env var, its own value is
+# re-asserted (`msb modify --secret` replaces the injected value), which also
+# repairs a sandbox whose own binding an older acq overwrote with the global
+# value. When its own binding uses another name, only the global name is
+# removed. The value travels in the environment, never on argv.
+_acq_msb_secret_keep_own() {
+  local service="$1" sb="$2" global_env="$3" _b _oenv _ohost _oval
+  _b=$(_acq_msb_service_binding "$service" "$sb")
+  _oenv=$(printf '%s' "$_b" | cut -f1)
+  _ohost=$(printf '%s' "$_b" | cut -f2)
+  if [ "$_oenv" != "$global_env" ]; then
+    _acq_msb_cli modify "$sb" --secret-rm "$global_env" </dev/null >/dev/null 2>&1 || true
+    return 0
+  fi
+  [ -n "$_oenv" ] && [ -n "$_ohost" ] || return 0
+  # The sandbox-scoped key only: a fallback to a global value must never be
+  # re-bound as the sandbox's own.
+  local _okey
+  _okey=$(_acq_secret_key "$service" "$sb" 2>/dev/null) || _okey=""
+  if [ -z "$_okey" ] || ! _oval=$(acq_secret_get "$_okey" 2>/dev/null) || [ -z "$_oval" ]; then
+    _oval=""
+    echo "acq(msb): warning: sandbox '$sb' has its own '$service' value, but it cannot be read; it may still be injected with the removed global value. Re-run 'acq secret set $sb $service', or recreate the sandbox." >&2
+    return 0
+  fi
+  local _rc=0
+  # shellcheck disable=SC2163  # dynamic export of the resolved binding env var
+  export "$_oenv=$_oval"
+  _acq_msb_cli modify "$sb" --secret "${_oenv}@${_ohost}" </dev/null >/dev/null 2>&1 || _rc=$?
+  unset "$_oenv"
+  _oval=""
+  if [ "$_rc" -ne 0 ]; then
+    echo "acq(msb): warning: could not re-bind sandbox '$sb''s own '$service' value; it may still be injected with the removed global value. Re-run 'acq secret set $sb $service', or recreate the sandbox." >&2
+    return 0
+  fi
+  acq_debug "msb modify: '$sb' keeps its own '$service' value"
+  return 0
+}
+
+# _acq_msb_secret_unbind SCOPE ENV [SERVICE] — live-unbind a secret from running
+# sandboxes via `msb modify --secret-rm ENV`, for services the adapter actually
+# binds. A named SCOPE targets that sandbox; empty SCOPE sweeps every running
+# sandbox, except that a sandbox holding its own SERVICE value keeps it (see
+# _acq_msb_secret_keep_own). Best-effort per sandbox; echoes the count unbound.
+# Empty ENV => nothing to do.
 _acq_msb_secret_unbind() {
-  local scope_name="$1" env_name="$2" unbound=0 sb
+  local scope_name="$1" env_name="$2" service="${3:-}" unbound=0 sb
   [ -n "$env_name" ] || { printf '0\n'; return 0; }
   # Symmetric opt-out with _acq_msb_secret_refeed: when live refeed is suppressed
   # (ACQ_SECRET_NO_LIVE_REFEED=1, e.g. scripts/verify-backends), do NOT reach into
@@ -6363,7 +7456,12 @@ _acq_msb_secret_unbind() {
     # only the FIRST sandbox is processed (a real `msb` drains stdin). This is
     # the same stdin-consumption trap the test stub deliberately reproduces.
     while IFS= read -r sb; do
+      sb="${sb%$'\r'}"
       [ -n "$sb" ] || continue
+      if [ -n "$service" ] && _acq_msb_has_own_value "$service" "$sb" </dev/null; then
+        _acq_msb_secret_keep_own "$service" "$sb" "$env_name"
+        continue
+      fi
       _acq_msb_cli modify "$sb" --secret-rm "$env_name" </dev/null >/dev/null 2>&1 \
         && unbound=$((unbound + 1))
     done <<EOF
@@ -6407,7 +7505,7 @@ acq_backend_secret_rm() {
   #    a recorded env). A named scope targets that sandbox; a global rm sweeps
   #    every running sandbox.
   local unbound
-  unbound=$(_acq_msb_secret_unbind "$scope_name" "$env_name")
+  unbound=$(_acq_msb_secret_unbind "$scope_name" "$env_name" "$service")
 
   # 3) Drop the non-secret endpoint sidecar for this service/scope (idempotent),
   #    so a re-set does not resurrect a stale host/env mapping. Done AFTER the
@@ -6423,7 +7521,7 @@ acq_backend_secret_rm() {
     echo "acq(msb): no '$service' secret found in the acq store (${where})." >&2
   fi
   if [ "$unbound" -gt 0 ]; then
-    echo "      Live-unbound it from $unbound running sandbox(es) (msb modify --secret-rm)." >&2
+    echo "      Confirmed it unbound from $unbound sandbox(es) (msb modify --secret-rm)." >&2
   fi
   return 0
 }

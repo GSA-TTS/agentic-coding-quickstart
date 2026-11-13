@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "id": "cli/kit-source-ls",
+  "oracle": "ADR-0038m §2 kit-source ls required data: repository/ref/directory/provider-kits/discovery-status",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{acq}", "kit-source", "ls", "--json"],
+    "env": {},
+    "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "ACQ_MSB_BIN", "ACQ_MSB_INSTALLED", "ACQ_SBX_INSTALLED", "ACQ_KIT_SOURCE_SEED", "ACQ_KIT_SOURCE_DISCOVERY"],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "kit-source ls",
+        "data": {
+          "sources": [
+            {
+              "repository": "github.com/GSA-TTS/agentic-coding-patterns",
+              "ref": "941a286f912b99475429c3c00db49a99af5b241e",
+              "directory": "integrations/isolation/acq-kits",
+              "provider_kits": ["usai-provider"],
+              "discovery_status": "reachable"
+            }
+          ]
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {"mode": "exact", "value": "", "normalize": []}
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+  }
+}

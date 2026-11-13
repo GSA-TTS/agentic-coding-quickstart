@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 #
 # 135-configure.bats — interactive `acq configure` + config.yaml + prompt widgets
-# (ADR-0031; issue GSA-TTS/agentic-coding-quickstart#499).
+# (ADR-0031).
 #
 # Covers, offline (no TTY, no backend CLI, no network):
 #   - the generalized config.yaml reader/writer (multi-key, preserve-others)
@@ -73,6 +73,50 @@ _cfg_src() {
   assert_success
   assert_line 'b=msb'
   assert_line 'k=[]'
+}
+
+@test "config: a symlinked config.yaml is written through and keeps its mode" {
+  export XDG_CONFIG_HOME="$STUBDIR/xdg"
+  mkdir -p "$XDG_CONFIG_HOME/acq" "$STUBDIR/dotfiles/acq"
+  printf 'backend: sbx\n' > "$STUBDIR/dotfiles/acq/config.yaml"
+  chmod 640 "$STUBDIR/dotfiles/acq/config.yaml"
+  # A relative link, resolved against the link's own directory.
+  ln -s ../../dotfiles/acq/config.yaml "$XDG_CONFIG_HOME/acq/config.yaml"
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    _acq_config_write_field extra_kits paseo
+  '
+  assert_success
+  assert [ -L "$XDG_CONFIG_HOME/acq/config.yaml" ]
+  run cat "$STUBDIR/dotfiles/acq/config.yaml"
+  assert_line 'backend: sbx'
+  assert_line 'extra_kits: paseo'
+  local mode
+  mode=$(stat -c %a "$STUBDIR/dotfiles/acq/config.yaml" 2>/dev/null || stat -f %Lp "$STUBDIR/dotfiles/acq/config.yaml")
+  assert_equal "$mode" "640"
+  # No temp file is left beside the target or the link.
+  run ls -A "$STUBDIR/dotfiles/acq" "$XDG_CONFIG_HOME/acq"
+  refute_output --partial '.tmp.'
+}
+
+@test "config: a new config.yaml is created 0600; a link loop is refused" {
+  export XDG_CONFIG_HOME="$STUBDIR/xdg"
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    _acq_config_write_field backend msb
+  '
+  assert_success
+  local mode
+  mode=$(stat -c %a "$XDG_CONFIG_HOME/acq/config.yaml" 2>/dev/null || stat -f %Lp "$XDG_CONFIG_HOME/acq/config.yaml")
+  assert_equal "$mode" "600"
+  rm -f "$XDG_CONFIG_HOME/acq/config.yaml"
+  ln -s config.yaml "$XDG_CONFIG_HOME/acq/config.yaml"
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    _acq_config_write_field backend msb
+  '
+  assert_failure
+  assert [ -L "$XDG_CONFIG_HOME/acq/config.yaml" ]
 }
 
 @test "config: an unsafe key name is rejected (fail closed)" {
@@ -160,7 +204,7 @@ _cfg_src() {
   '
   assert_success
   assert_line 'oci-engine'
-   assert_output --partial 'ref=941a286f912b99475429c3c00db49a99af5b241e'
+  assert_output --partial 'ref=941a286f912b99475429c3c00db49a99af5b241e'
   assert_output --partial 'dir=integrations/isolation/acq-kits/oci-engine'
 }
 
@@ -219,6 +263,182 @@ _cfg_src() {
   '
   assert_success
   assert_output 'CANCELLED'
+}
+
+# multiselect saves the caller's INT/TERM traps as full `trap -p` lines and must
+# put them back verbatim. Those lines end in a signal name (`SIGINT`, or `INT` in
+# POSIX mode), so stripping only the `trap -- ` prefix and eval'ing the rest runs
+# the handler body as a command instead of re-installing it.
+@test "prompt: multiselect restores prior INT/TERM traps without running them" {
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    # The widget runs with stdout/stderr discarded, so record via a file.
+    cleanup() { echo "args=$*" >> "'"$STUBDIR"'/cleanup-ran"; }
+    trap cleanup INT; trap "echo multi word" TERM
+    ACQ_PROMPT_TEST_INPUT="ENTER" acq_prompt_multiselect 0 "" "a" "d" "b" "d" >/dev/null 2>&1
+    trap -p INT; trap -p TERM
+    trap "echo multi word" INT
+    ACQ_PROMPT_TEST_INPUT="QUIT" acq_prompt_multiselect 0 "" "a" "d" "b" "d" >/dev/null 2>&1
+    echo "after-quit:"; trap -p INT
+  '
+  assert_success
+  assert [ ! -e "$STUBDIR/cleanup-ran" ]
+  assert_line --index 0 --regexp "^trap -- 'cleanup' (SIG)?INT\$"
+  assert_line --index 1 --regexp "^trap -- 'echo multi word' (SIG)?TERM\$"
+  assert_line --index 2 'after-quit:'
+  assert_line --index 3 --regexp "^trap -- 'echo multi word' (SIG)?INT\$"
+}
+
+@test "prompt: multiselect with no prior traps leaves INT/TERM at their defaults" {
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    trap - INT TERM
+    # Check each exit path on its own (print directly: a compound $(...) runs in
+    # a subshell where traps are reset, which would hide a leftover handler).
+    ACQ_PROMPT_TEST_INPUT="ENTER" acq_prompt_multiselect 0 "" "a" "d" >/dev/null 2>&1
+    echo "after-enter:"; trap -p INT; trap -p TERM
+    trap - INT TERM
+    ACQ_PROMPT_TEST_INPUT="QUIT" acq_prompt_multiselect 0 "" "a" "d" >/dev/null 2>&1
+    echo "after-quit:"; trap -p INT; trap -p TERM
+  '
+  assert_success
+  assert_output "after-enter:
+after-quit:"
+}
+
+@test "prompt: Ctrl-C in multiselect runs the prior INT handler once, then re-raises" {
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    handler() { echo "HANDLER_RAN args=[$*]"; }
+    trap "handler ok" INT
+    # Simulate the user pressing Ctrl-C while the widget waits for a key.
+    _acq_prompt_read_key() { kill -s INT $$; _ACQ_PROMPT_KEY=ENTER; }
+    ACQ_PROMPT_TEST_INPUT="x" acq_prompt_multiselect 0 "" "a" "d" 2>/dev/null
+    echo NOT_REACHED
+  '
+  assert_equal "$status" 130
+  assert_output 'HANDLER_RAN args=[ok]'
+}
+
+@test "prompt: Ctrl-C resets INT before the prior handler, so a re-raise cannot recurse" {
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    # The prior handler re-raises INT itself (bounded, so a regression cannot
+    # loop forever). It must run exactly once: the re-raise has to hit the
+    # default disposition, not the widget trap again.
+    count="'"$STUBDIR"'/prior-count"
+    prior() { echo ran >> "$count"; [ "$(wc -l < "$count")" -ge 3 ] || kill -s INT $$; }
+    trap prior INT
+    _acq_prompt_read_key() { kill -s INT $$; _ACQ_PROMPT_KEY=ENTER; }
+    ACQ_PROMPT_TEST_INPUT="x" acq_prompt_multiselect 0 "" "a" "d" 2>/dev/null
+    echo NOT_REACHED
+  '
+  assert_equal "$status" 130
+  refute_output --partial 'NOT_REACHED'
+  assert_equal "$(wc -l < "$STUBDIR/prior-count" | tr -d ' ')" 1
+}
+
+# A prompt can run in a subshell or `$(...)`, where `$$` is still the PARENT's
+# PID. The re-raise must end the subshell running the widget (status 130), not
+# signal the parent while the widget carries on and returns a selection. Bash
+# itself re-raises SIGINT in a parent whose `$(...)` died of SIGINT, so the
+# parent here traps INT (as acq's own callers do) to stay running.
+@test "prompt: Ctrl-C inside \$(...) ends the subshell with 130, parent keeps running" {
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    set +e  # acq runs under set -e; keep going to report the status
+    trap "echo PARENT_INT" INT
+    # Interrupt the process running the widget (the command substitution).
+    _acq_prompt_read_key() {
+      kill -s INT "$(exec sh -c '"'"'echo "$PPID"'"'"')"; _ACQ_PROMPT_KEY=ENTER
+    }
+    out=$(ACQ_PROMPT_TEST_INPUT="x" acq_prompt_multiselect 0 "" "a" "d" 2>/dev/null
+      echo NOT_REACHED)
+    echo "SUB_RC=$?"
+    printf "OUT=[%s]\n" "$out"
+    echo PARENT_ALIVE
+  '
+  assert_success
+  assert_line 'SUB_RC=130'
+  assert_line 'PARENT_ALIVE'
+  refute_output --partial 'NOT_REACHED'
+}
+
+@test "prompt: Ctrl-C inside ( ... ) ends only the subshell, with status 130" {
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    set +e  # acq runs under set -e; keep going to report the status
+    # A re-raise aimed at $$ would land here and run this trap.
+    trap "echo PARENT_INT" INT
+    _acq_prompt_read_key() {
+      kill -s INT "$(exec sh -c '"'"'echo "$PPID"'"'"')"; _ACQ_PROMPT_KEY=ENTER
+    }
+    ( ACQ_PROMPT_TEST_INPUT="x" acq_prompt_multiselect 0 "" "a" "d" >/dev/null 2>&1
+      echo NOT_REACHED )
+    echo "SUB_RC=$?"
+    echo PARENT_ALIVE
+  '
+  assert_success
+  assert_line 'SUB_RC=130'
+  assert_line 'PARENT_ALIVE'
+  refute_line 'PARENT_INT'
+  refute_output --partial 'NOT_REACHED'
+}
+
+# progress.sh and prompt.sh each carry a copy of the current-PID signal helper
+# (each file can be sourced without the other); the bodies must not drift.
+@test "prompt: the signal-self helper matches its progress.sh twin" {
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    a=$(declare -f _acq_signal_self | sed 1d)
+    b=$(declare -f _acq_prompt_signal_self | sed 1d)
+    [ -n "$a" ] && [ "$a" = "$b" ] && echo SAME
+  '
+  assert_output 'SAME'
+}
+
+# On bash 3.2 BASHPID is an ordinary variable, so the environment can point it
+# at another process. The helpers must ignore it there and signal only the
+# current shell. (On bash 4+ the variable cannot be overridden, so this holds.)
+@test "prompt: signal-self helpers ignore a decoy BASHPID from the environment" {
+  local helper
+  for helper in _acq_signal_self _acq_prompt_signal_self; do
+    run bash -c '
+      ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+      set +e
+      got="'"$STUBDIR"'/decoy-got"; rm -f "$got"
+      sh -c "trap \"echo TERM > $got; exit 0\" TERM; while :; do sleep 0.1; done" &
+      decoy=$!
+      BASHPID=$decoy
+      ( '"$helper"' TERM; echo NOT_REACHED )
+      echo "SUB_RC=$?"
+      sleep 0.5
+      kill -0 "$decoy" 2>/dev/null && echo DECOY_ALIVE
+      [ -e "$got" ] && echo DECOY_SIGNALLED
+      kill -KILL "$decoy" 2>/dev/null
+      wait "$decoy" 2>/dev/null
+      echo DONE
+    '
+    assert_line 'SUB_RC=143'
+    assert_line 'DECOY_ALIVE'
+    refute_line 'DECOY_SIGNALLED'
+    refute_line 'NOT_REACHED'
+    assert_line 'DONE'
+  done
+}
+
+@test "prompt: Ctrl-C runs the prior INT handler with default word splitting" {
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    words() { set -- $1; echo "WORDS=$#"; }
+    trap "words \"a b c\"" INT
+    # IFS changed in the widget scope when Ctrl-C lands (as during its
+    # comma-split of the defaults list) must not leak into the prior handler.
+    _acq_prompt_read_key() { IFS=,; kill -s INT $$; _ACQ_PROMPT_KEY=ENTER; }
+    ACQ_PROMPT_TEST_INPUT="x" acq_prompt_multiselect 0 "" "a" "d" 2>/dev/null
+  '
+  assert_equal "$status" 130
+  assert_output 'WORDS=3'
 }
 
 @test "prompt: locked rows are frozen — cursor skips them, result excludes them" {

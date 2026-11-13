@@ -1,0 +1,91 @@
+{
+  "schema": 1,
+  "id": "cli/lifecycle-sbx-create",
+  "oracle": "ADR-0040m sbx provision capability: create a sandbox end to end against the sbx stub and record host-authoritative state (shell selects no agent kit, so only the built-in support kits are passed to sbx create) (sbx's own table holds a usai key: the default provider kit is selected, and acq refuses a create whose provider key sbx cannot inject)",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{python}",
+      "-I",
+      "test/vectors/drivers/seeded-run.py",
+      "[{\"git_repos\":{}},[[\"--backend\",\"sbx\",\"create\",\"shell\",\"{workspace}\",\"--name\",\"sbx-life-test\",\"--json\"],false,null]]",
+      "{acq}"
+    ],
+    "env": {
+      "ACQ_SBX_BIN": "__stub__",
+      "ACQ_SBX_VERSION": "0.39.0",
+      "ACQ_SBX_INSTALLED": "1",
+      "ACQ_MSB_INSTALLED": "0",
+      "ACQ_SBX_STUB_CUSTOM_SECRETS": "[{\"scope\": \"global\", \"env\": \"USAI_API_KEY\", \"placeholder\": \"sbx-cs-usai\", \"targets\": [\"api.gsa.usai.gov\"]}]"
+    },
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "MSB_HOME",
+      "SBX_HOME",
+      "ACQ_IMAGE",
+      "ACQ_MSB_IMAGE",
+      "ACQ_SBX_READY_TIMEOUT",
+      "ACQ_SBX_STUB_CATALOG",
+      "ACQ_SBX_STUB_FAIL",
+      "ACQ_SBX_STUB_SECRETS",
+      "ACQ_SBX_STUB_SECRET_LS_RAW",
+      "ACQ_SBX_STUB_RAW_PLACEHOLDERS",
+      "ACQ_SBX_STUB_ALLOWED_SOURCES",
+      "ACQ_SBX_STUB_ROTATE",
+      "ACQ_MSB_STUB_CATALOG",
+      "ACQ_MSB_STUB_FAIL",
+      "ACQ_MSB_STUB_SECRETS",
+      "ACQ_MSB_STUB_SECRET_LS_RAW",
+      "ACQ_MSB_STUB_ROTATE",
+      "ACQ_SBX_STUB_PROBE",
+      "ACQ_PROVIDER_KITS",
+      "ACQ_PROVIDER_CREDENTIAL_BINDINGS",
+      "ACQ_PROVIDER_CREDENTIAL_SEED"
+    ],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "create",
+        "data": {
+          "name": "sbx-life-test",
+          "backend": "sbx",
+          "agent": "shell",
+          "state": "running",
+          "kit": null,
+          "kits": [
+            "zscaler-ca-certificate",
+            "usai-provider",
+            "agentic-coding-playbook",
+            "git-ssh-sign"
+          ]
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME"
+    ]
+  }
+}

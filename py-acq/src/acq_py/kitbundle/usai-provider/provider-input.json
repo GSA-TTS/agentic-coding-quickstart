@@ -1,0 +1,9 @@
+{
+  "schemaVersion": "acq-provider-input-bundle/v2",
+  "providerId": "usai",
+  "factsPath": "provider-input/facts.json",
+  "normalizerPath": "scripts/normalize-catalog.mjs",
+  "snapshotPath": "files/home/usai-config/model-catalog-snapshot.json",
+  "providerPath": "models/providers/usai",
+  "credentialEnvNames": ["USAI_API_KEY"]
+}

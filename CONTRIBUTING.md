@@ -78,7 +78,7 @@ This project operates under professional standards of conduct. All contributors:
 | ----------------------------------- | ---------------------------------------------------------- |
 | `acq`                               | Entry point — pluggable-backend wrapper (msb by default, or sbx) |
 | `acq.backends/`                     | Backend adapters (`common.sh`, `sbx.sh`, `msb.sh`, `kit-translate.sh`, `secret-store.sh`, `progress.sh`, `prompt.sh`) |
-| `install.sh`                        | One-line `curl \| sh` installer (auto-selects brew/npm/clone; direct `sh install.sh` still installs the default release tag from the repo, not the current checkout) |
+| `install.sh`, `install.ps1`         | acq v1 installers (ADR-0042m): install a checksum-verified per-platform release archive and `provenance.json` (or an offline asset set with `--source`/`-Source`), link `acq` (`and acq-python` on POSIX), check sandbox prerequisites, and interactively offer to install the pinned `msb`; they never install from the current checkout or pick brew/npm/clone (see `docs/howto/acq.md`, "acq v1 installers") |
 | `scripts/rotate-apikey`             | Rotate your USAi API key secret (`acq usai-rotate-api-key`) |
 | `scripts/test-acq-bats`             | Offline unit suite for acq (bats-core) |
 | `scripts/test-acq-bash32`           | Same suite, or a syntax preflight, under a verified Bash 3.2.57 (helpers: `scan-heredoc-subst.py`, `fetch-bash32-oci.py`) |
@@ -293,7 +293,7 @@ inside a sandbox (no nested sandboxes).
 Focused live checks for specific fixes (also require a sandbox-capable host):
 
 ```bash
-./scripts/verify-issue-320          # sbx 0.38 re-attach heal loop (#320)
+./scripts/verify-issue-320          # sbx 0.38 re-attach heal loop
 ./scripts/verify-sbx-startup-barrier # sbx startup barrier before attach
 ./scripts/verify-ports-live         # msb post-hoc port publish (ADR-0015)
 ./scripts/verify-net-default-egress # msb create-time published port (ADR-0019)
@@ -497,10 +497,13 @@ All code must comply with:
 
 ### Architecture Decision Records (ADRs)
 
+For the Python implementation handoff, start with
+[Upstream handoff](docs/UPSTREAM-HANDOFF.md).
+
 Major architectural changes require an ADR before implementation:
 
 - Format: MADR (Markdown Architecture Decision Record)
-- Location: `docs/adr/`
+- Location: [ADR index](docs/adr/README.md)
 - Naming: `NNNN-title-of-decision.md`
 - See: `docs/adr/0002-version-management-and-release-automation.md` for template
 

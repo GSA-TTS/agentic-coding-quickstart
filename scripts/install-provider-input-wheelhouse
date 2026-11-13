@@ -24,7 +24,14 @@ esac
 
 asset="provider-input-validator-wheelhouse-${platform}.tar.gz"
 base="https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v${version}"
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/acq-validator-wheelhouse.XXXXXXXX")
+# TMPDIR only when it is absolute, else /tmp, as acq_tmp_dir in
+# acq.backends/userdirs.sh does: a relative TMPDIR would put the download under
+# the current directory.
+case "${TMPDIR:-}" in
+  /*) tmp_base=$TMPDIR ;;
+  *) tmp_base=/tmp ;;
+esac
+tmp=$(mktemp -d "$tmp_base/acq-validator-wheelhouse.XXXXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 
 curl --fail --location --silent --show-error "$base/SHA256SUMS" -o "$tmp/SHA256SUMS"

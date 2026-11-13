@@ -1,0 +1,88 @@
+{
+  "schema": 1,
+  "id": "cli/github-scope-sbx",
+  "oracle": "ADR-0013 / ADR-0040m github-scope on the sbx backend: with a one-owner workspace the token is stored for that sandbox only (sbx secret set --sandbox), never globally and never in output",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{python}",
+      "-I",
+      "test/vectors/drivers/seeded-run.py",
+      "[{\"git_repos\":{\"app\":\"https://github.com/alpha/app.git\"}},[[\"--backend\",\"sbx\",\"github-scope\",\"mybox\",\"{workspace}\",\"--json\"],true,null],[[\"--backend\",\"sbx\",\"secret\",\"has\",\"mybox\",\"github\"],false,0],[[\"--backend\",\"sbx\",\"secret\",\"has\",\"-g\",\"github\"],false,1]]",
+      "{acq}"
+    ],
+    "env": {
+      "ACQ_SBX_BIN": "__stub__",
+      "ACQ_SBX_VERSION": "0.39.0",
+      "ACQ_SBX_INSTALLED": "1",
+      "ACQ_MSB_INSTALLED": "0"
+    },
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "ACQ_SECRET_NO_LIVE_REFEED",
+      "ACQ_PROVIDER_CREDENTIAL_BINDINGS",
+      "ACQ_PROVIDER_CREDENTIAL_SEED",
+      "USAI_API_KEY",
+      "GITHUB_TOKEN",
+      "GH_TOKEN",
+      "GITLAB_TOKEN",
+      "GIT_DIR",
+      "GIT_WORK_TREE",
+      "GIT_CEILING_DIRECTORIES",
+      "MSB_HOME",
+      "SBX_HOME",
+      "ACQ_IMAGE",
+      "ACQ_MSB_IMAGE",
+      "ACQ_SBX_STUB_CATALOG",
+      "ACQ_SBX_STUB_FAIL",
+      "ACQ_SBX_STUB_SECRETS",
+      "ACQ_SBX_STUB_SECRET_LS_RAW",
+      "ACQ_SBX_STUB_RAW_PLACEHOLDERS",
+      "ACQ_SBX_STUB_ALLOWED_SOURCES",
+      "ACQ_SBX_STUB_ROTATE"
+    ],
+    "stdin": "ghp_synthetic-scoped-token-5678\n",
+    "timeout_ms": 15000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "github-scope",
+        "data": {
+          "sandbox": "mybox",
+          "backend": "sbx",
+          "scope": "sandbox",
+          "owner": "alpha",
+          "repos": [
+            "alpha/app"
+          ],
+          "stored": true
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME",
+      "ACQ_SECRET_STORE_DIR"
+    ]
+  }
+}

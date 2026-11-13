@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "id": "sentinel/transform-timing-micro",
+  "oracle": "ADR-0043m normalisation transform: timing (microsecond suffix µs)",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{python}", "-c", "import sys; sys.stdout.buffer.write('elapsed 150µs\\n'.encode())"],
+    "env": {},
+    "unset": [],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "exact",
+      "value": "elapsed <timing>\n",
+      "normalize": ["timing"]
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": []
+  }
+}

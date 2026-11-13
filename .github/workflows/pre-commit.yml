@@ -25,7 +25,9 @@ permissions:
 jobs:
   pre-commit:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The bats suite alone takes 9-14 minutes on a hosted runner, and the upstream
+    # sync added three suites; 15 minutes cancelled runs that were still passing.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -86,6 +88,11 @@ jobs:
           [ "$(git -C "$patterns_dir" rev-parse HEAD)" = "$patterns_ref" ]
           test -z "$(git -C "$patterns_dir" status --porcelain)"
           chmod -R a-w "$patterns_dir"
+      # The Python acq ships the built-in kits as package data. Every file's git
+      # blob id in its MANIFEST.json must equal the blob at the same path in the
+      # pinned Patterns tree checked out above (scripts/refresh-kitbundle).
+      - name: Check the packaged kit bundle against the pinned Patterns tree
+        run: python scripts/refresh-kitbundle --check --checkout "$RUNNER_TEMP/agentic-coding-patterns"
       - name: Install markdown linter dependencies
         run: npm ci --prefix .github/linters
       - name: Run pre-commit

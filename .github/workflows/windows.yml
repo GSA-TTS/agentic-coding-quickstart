@@ -1,0 +1,466 @@
+# Windows CI: the Windows-only surface that the Linux and macOS lanes never run.
+#
+#   windows           pytest on py-acq (native Python 3.12); acq.cmd and acq.ps1
+#                     smoke tests for the default (ACQ_IMPL unset: the Python
+#                     implementation, ADR-0048m), ACQ_IMPL=python and the
+#                     ACQ_IMPL=bash opt-in; install.ps1 -DryRun under
+#                     PowerShell 7 and Windows PowerShell 5.1; and the managed
+#                     runtime staged with scripts/stage-windows-runtime, as the
+#                     release job does, then run through acq.cmd by default.
+#   windows-git-bash  the bats files that exercise Windows behaviour, run under
+#                     Git Bash: 55-version (the Bash acq), 06-windows-install,
+#                     117-msys-path-forms (the host-form and guest-form paths
+#                     acq hands msb) and 163-provider-input-windows-native (the
+#                     Bash provider-input transaction with native Windows
+#                     Python).
+#                     It checks out with the runner's default core.autocrlf=true,
+#                     like a plain Git for Windows clone.
+#
+# The kit-fetch lifecycle files (103, 106) are not in the Git Bash subset. Both
+# drive the guardian from Python with POSIX-only facilities (pty, process
+# groups, /proc), which native Windows Python cannot run, and 106 emulates the
+# MSYS procfs from a Linux /proc rather than reading the real one.
+#
+# Runs on pull requests and merge groups that touch Windows-relevant paths (see
+# the `changes` job). Like bash32-compat.yml, the workflow has no `paths:`
+# filter: a cheap `changes` job decides relevance, and the always-on `gate` job
+# posts one stable "Windows" status, so this can become a required check without
+# leaving irrelevant pull requests waiting for a status that never arrives
+# (docs/KNOWN_FAILURE_MODES.md has the background).
+#
+# Runner: windows-2022, the image the release job's Windows wheelhouse and
+# managed-runtime smoke step use.
+#
+# Security hardening per NIST SR-3 (actions pinned by SHA, the embeddable Python
+# verified against release.yml's pinned SHA-256) and AC-6 (read-only token, no
+# persisted credentials).
+
+name: Windows
+
+on:
+  pull_request:
+    branches:
+      - main
+  merge_group:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: windows-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  changes:
+    name: Determine Windows relevance
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      relevant: ${{ steps.filter.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Fails closed: an error computing the diff fails this job, and the gate
+      # treats that as a failure, never as "nothing relevant changed".
+      #
+      # The list names every path the Windows jobs read: the launchers, both
+      # installers and their manifests, py-acq (source, tests, pytest config and
+      # the hashed tool pins), the scripts and the qualification package the
+      # tests execute or load, the vectors and their fixtures, the bats subset
+      # with its runner, and the workflows and repo files the tests grep.
+      # py-acq/tests/test_windows_relevance.py fails when a tracked file is in
+      # neither this list nor its NOT_INPUTS, or when an entry goes stale.
+      - name: Compute relevance from the PR or merge-group diff
+        id: filter
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "relevant=true" >>"$GITHUB_OUTPUT"
+            echo "Manual run: running every Windows job."
+            exit 0
+          fi
+          if [[ ! "$BASE_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "::error::event did not supply a valid base commit SHA."
+            exit 1
+          fi
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          changed="$(git diff --name-only "$BASE_SHA" -- \
+            'acq.cmd' \
+            'acq.ps1' \
+            'acq' \
+            'acq-python' \
+            'acq.backends' \
+            'install.ps1' \
+            'install.sh' \
+            'installer' \
+            'py-acq/src' \
+            'py-acq/tests' \
+            'py-acq/pyproject.toml' \
+            'py-acq/requirements-quality.txt' \
+            'scripts/stage-windows-runtime' \
+            'scripts/gen-install-assets' \
+            'scripts/qualify-backend-cell' \
+            'scripts/setup-provider-input-validator' \
+            'scripts/test-acq-lib.sh' \
+            'scripts/refresh-kitbundle' \
+            'qualification' \
+            'docs/qualification-ledger.json' \
+            'test/bats/06-windows-install.bats' \
+            'test/bats/55-version.bats' \
+            'test/bats/117-msys-path-forms.bats' \
+            'test/bats/163-provider-input-windows-native.bats' \
+            'test/bats/165-config-lock.bats' \
+            'test/bats/helper.bash' \
+            'test/vendor' \
+            '.gitmodules' \
+            'test/vectors' \
+            'test/fixtures' \
+            '.gitattributes' \
+            '.github/CODEOWNERS' \
+            '.github/workflows/build-assets.yml' \
+            'scripts/assemble-release' \
+            'scripts/gen-provenance' \
+            '.github/workflows/release.yml' \
+            '.github/workflows/tier3-release-gate.yml' \
+            '.github/workflows/windows.yml')"
+          if [ -n "$changed" ]; then
+            echo "relevant=true" >>"$GITHUB_OUTPUT"
+            echo "Relevant paths changed:"
+            printf '  %s\n' "$changed"
+          else
+            echo "relevant=false" >>"$GITHUB_OUTPUT"
+            echo "No Windows-relevant paths changed; the Windows jobs will be skipped."
+          fi
+
+  windows:
+    name: Windows (pytest, launchers, installer, managed runtime)
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      # The release archive is assembled on Linux, so every file in it has LF
+      # endings. Check out the same bytes, so pytest and the smoke tests see
+      # exactly what users install. (.gitattributes pins the shell scripts to LF
+      # in any case; the windows-git-bash job checks a default autocrlf=true
+      # checkout.)
+      - name: Check out with LF line endings
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      # Git Bash scripts (scripts/stage-windows-runtime among them) call python3.
+      # A Windows Python install has no python3.exe, and PATH can reach the
+      # Microsoft Store alias stub instead. Add one beside setup-python's
+      # python.exe, whose directory is first on PATH.
+      - name: Provide python3
+        run: |
+          $py3 = Join-Path $env:pythonLocation 'python3.exe'
+          if (-not (Test-Path -LiteralPath $py3)) {
+            Copy-Item -LiteralPath (Join-Path $env:pythonLocation 'python.exe') -Destination $py3
+          }
+
+      - name: Check python3 under Git Bash
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v python3
+          python3 -c 'import sys; assert sys.version_info[:2] == (3, 12), sys.version'
+
+      # Only the hash-locked test tools (ADR-0049m): pytest, with colorama for
+      # win32, from wheels only. acq-py itself is not installed: pytest imports it
+      # from py-acq/src through the pyproject `pythonpath`, the tests' child
+      # processes get the same PYTHONPATH from conftest.py, and acq.ps1 sets
+      # PYTHONPATH to py-acq\src. That also avoids building a wheel with the
+      # unpinned setuptools build dependency. The tools go into a throwaway venv:
+      # the runner's Python already has some of them (colorama, packaging), and
+      # pip treats an installed package as satisfied without checking its hash,
+      # so installing into that interpreter would skip --require-hashes for them.
+      - name: Install pinned test tools
+        run: |
+          $venv = Join-Path $env:RUNNER_TEMP 'acq-test-tools'
+          python -m venv --clear $venv
+          if ($LASTEXITCODE -ne 0) { throw "python -m venv exited $LASTEXITCODE" }
+          & (Join-Path $venv 'Scripts\python.exe') -m pip install --require-hashes --no-deps --only-binary :all: -r py-acq/requirements-quality.txt
+          if ($LASTEXITCODE -ne 0) { throw "pip install exited $LASTEXITCODE" }
+
+      # The launcher tests also run acq.ps1 under PowerShell 7 (the pwsh this
+      # step runs in); ACQ_TEST_REQUIRE_PWSH makes them fail rather than skip if
+      # the runner image ever stops providing it.
+      - name: pytest (py-acq, Python 3.12)
+        env:
+          ACQ_TEST_REQUIRE_PWSH: '1'
+        run: |
+          Write-Host "PowerShell $($PSVersionTable.PSVersion) at $((Get-Command pwsh).Source)"
+          & (Join-Path $env:RUNNER_TEMP 'acq-test-tools\Scripts\python.exe') -m pytest py-acq/tests -q
+          if ($LASTEXITCODE -ne 0) { throw "pytest exited $LASTEXITCODE" }
+
+      # acq.cmd runs acq.ps1 under Windows PowerShell 5.1, as users run it; acq.ps1
+      # invoked directly runs under PowerShell 7. No backend is installed on the
+      # runner, so each verb reports none, but it must exit 0 and emit a
+      # well-formed envelope for that verb. An unset ACQ_IMPL is the Windows
+      # default (ADR-0048m) and must select the Python implementation, as
+      # ACQ_IMPL=python does. The checkout has no managed runtime, so both find
+      # setup-python's interpreter on PATH.
+      - name: Smoke-test acq.cmd and acq.ps1 (ACQ_IMPL unset and python)
+        run: |
+          foreach ($impl in @('', 'python')) {
+            if ($impl) { $env:ACQ_IMPL = $impl } else { Remove-Item Env:ACQ_IMPL -ErrorAction SilentlyContinue }
+            $label = if ($impl) { "ACQ_IMPL=$impl" } else { 'ACQ_IMPL unset' }
+            foreach ($launcher in @('.\acq.cmd', '.\acq.ps1')) {
+              foreach ($verb in @('version', 'doctor', 'backend list')) {
+                $verbArgs = @($verb -split ' ') + '--json'
+                $out = & $launcher @verbArgs
+                $code = $LASTEXITCODE
+                if ($code -ne 0) { throw "${launcher} ${verb} --json (${label}) exited ${code}" }
+                $doc = ($out -join "`n") | ConvertFrom-Json
+                if ($doc.command -ne $verb) { throw "${launcher} ${verb} (${label}): envelope command is '$($doc.command)'" }
+                if ($verb -eq 'version' -and $doc.data.impl -ne 'python') {
+                  throw "${launcher} version (${label}): impl is '$($doc.data.impl)', expected python"
+                }
+                Write-Host "ok: ${launcher} ${verb} (${label})"
+              }
+            }
+          }
+
+      - name: Smoke-test an unknown ACQ_IMPL (fails closed with exit 2)
+        env:
+          ACQ_IMPL: bogus
+        run: |
+          foreach ($launcher in @('.\acq.cmd', '.\acq.ps1')) {
+            $null = & $launcher version 2>$null
+            $code = $LASTEXITCODE
+            if ($code -ne 2) { throw "${launcher} with ACQ_IMPL=bogus exited ${code}, expected 2" }
+            Write-Host "ok: ${launcher} refuses ACQ_IMPL=bogus"
+          }
+          # The runner exits a pwsh step with the last native exit code (2 here).
+          exit 0
+
+      # ACQ_IMPL=bash, the explicit opt-in: the launchers find Git for Windows'
+      # bash.exe and run the Bash acq.
+      - name: Smoke-test acq.cmd and acq.ps1 (ACQ_IMPL=bash)
+        env:
+          ACQ_IMPL: bash
+        run: |
+          foreach ($launcher in @('.\acq.cmd', '.\acq.ps1')) {
+            $out = & $launcher version
+            $code = $LASTEXITCODE
+            $text = $out -join "`n"
+            Write-Host $text
+            if ($code -ne 0) { throw "${launcher} version exited ${code}" }
+            if ($text -notmatch 'patterns kit ref: [0-9a-f]{40}') { throw "${launcher} version: no patterns kit ref in the output" }
+            Write-Host "ok: ${launcher} version (Bash)"
+          }
+
+      # -DryRun promises no writes and no network: check that nothing appears at
+      # the default install location and that the user PATH is unchanged.
+      - name: install.ps1 -DryRun (PowerShell 7 and Windows PowerShell 5.1)
+        run: |
+          $target = Join-Path $env:LOCALAPPDATA 'Programs\acq'
+          $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+          $winPs = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+          foreach ($ps in @((Get-Command pwsh).Source, $winPs)) {
+            $out = & $ps -NoLogo -NoProfile -File .\install.ps1 -DryRun
+            $code = $LASTEXITCODE
+            $text = $out -join "`n"
+            Write-Host $text
+            if ($code -ne 0) { throw "install.ps1 -DryRun under ${ps} exited ${code}" }
+            if ($text -notmatch '\[dry-run\]') { throw "install.ps1 -DryRun under ${ps} printed no [dry-run] actions" }
+          }
+          if (Test-Path -LiteralPath $target) { throw "install.ps1 -DryRun created ${target}" }
+          if ([Environment]::GetEnvironmentVariable('Path', 'User') -ne $userPath) { throw 'install.ps1 -DryRun changed the user PATH' }
+
+      # The release job's smoke step, run on pull requests too: release jobs are
+      # gated on vars.ENABLE_RELEASES and never run on the fork. The embeddable
+      # Python version and SHA-256 are read from release.yml, so the two cannot
+      # drift.
+      - name: Stage the managed Windows runtime and smoke-test it
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The release job checks out with autocrlf=true and relies on this pin
+          # to keep the script LF; fail if the pin is dropped.
+          eol=$(git ls-files --eol scripts/stage-windows-runtime)
+          case "$eol" in
+            *'attr/text eol=lf'*) ;;
+            *) echo "::error::scripts/stage-windows-runtime is not pinned LF in .gitattributes: $eol"; exit 1 ;;
+          esac
+          # The pin lives in build-assets.yml's windows-x86_64 matrix entry (the
+          # release build uses the same runtime), so this smoke test cannot drift.
+          url=$(sed -n 's/^ *runtime_url: \(https:\/\/www\.python\.org\/ftp\/python\/[0-9.]*\/python-[0-9.]*-embed-amd64\.zip\)$/\1/p' .github/workflows/build-assets.yml)
+          sha=$(sed -n '/runtime_url: https:\/\/www\.python\.org\//{n;s/^ *runtime_sha256: *\([0-9a-f]\{64\}\)$/\1/p;}' .github/workflows/build-assets.yml)
+          if [ -z "$url" ] || [ -z "$sha" ]; then
+            echo "::error::could not read the Windows embed runtime pin from build-assets.yml"
+            exit 1
+          fi
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error "$url" \
+            -o acq-python-embed.zip
+          mkdir acq-runtime-smoke
+          # The launchers go beside py-acq\ as in the release archive, so the next
+          # step can check that acq.ps1 finds the managed runtime.
+          cp acq.cmd acq.ps1 acq-runtime-smoke/
+          scripts/stage-windows-runtime acq-python-embed.zip "$sha" acq-runtime-smoke
+          rt=acq-runtime-smoke/py-acq/runtime/python.exe
+          # Isolated, safe-path, and importing acq from ..\src only.
+          PYTHONPATH="$PWD" "$rt" -c "import sys; assert sys.flags.isolated == 1 and sys.flags.safe_path, sys.flags; assert len(sys.path) == 3 and sys.path[2].endswith('src'), sys.path"
+          "$rt" -P -m acq_py version --json > acq-version.json
+          python3 -c "import json; d = json.load(open('acq-version.json')); assert d['data']['impl'] == 'python', d"
+
+      # ACQ_IMPL unset, as an installed acq runs by default: acq.cmd must pick the
+      # managed runtime beside it over setup-python's interpreter on PATH.
+      - name: Smoke-test the staged layout through acq.cmd (default, managed runtime)
+        run: |
+          Remove-Item Env:ACQ_IMPL -ErrorAction SilentlyContinue
+          $out = & .\acq-runtime-smoke\acq.cmd version --json
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { throw "staged acq.cmd version --json exited ${code}" }
+          $doc = ($out -join "`n") | ConvertFrom-Json
+          if ($doc.data.impl -ne 'python') { throw "staged acq.cmd version: impl is '$($doc.data.impl)', expected python" }
+          $out = & .\acq-runtime-smoke\acq.cmd doctor --json
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { throw "staged acq.cmd doctor --json exited ${code}" }
+          $doc = ($out -join "`n") | ConvertFrom-Json
+          $runtime = @($doc.data.checks | Where-Object { $_.id -eq 'runtime' })
+          if ($runtime.Count -ne 1 -or $runtime[0].message -notlike 'app-private runtime present*') {
+            throw "staged acq.cmd doctor: runtime check is '$($runtime.message)', expected the app-private runtime"
+          }
+          Write-Host "ok: staged acq.cmd uses the managed runtime ($($runtime[0].message))"
+
+  windows-git-bash:
+    name: Windows (Git Bash bats subset)
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # This job keeps the runner's default core.autocrlf=true for the
+      # repository, as a plain Git for Windows clone does, and relies on the
+      # .gitattributes LF pins to keep its shell scripts runnable.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # bats-core, bats-support and bats-assert are vendored submodules, pinned
+      # by SHA (ADR-0025). This repository's .gitattributes does not reach into
+      # them: bats-support and bats-assert have none, and bats-core pins only
+      # *.sh and libexec/, so with autocrlf=true its bin/bats and lib/*.bash come
+      # out CRLF. Check them out as committed (LF) instead.
+      #
+      # Two settings are needed. core.autocrlf=false alone still leaves
+      # bats-core's `* text=auto` files to core.eol, whose default (native) is
+      # CRLF on Windows, so core.eol=lf as well. And `git -c ... submodule
+      # update` is not enough: Git for Windows 2.56 did not pass the -c setting
+      # to the submodule checkouts. The settings go in through the environment,
+      # which those child processes inherit, and each submodule then records
+      # them locally and re-checks out its files from the index (`git rm
+      # --cached` first, so git cannot keep a CRLF file it thinks is unchanged).
+      # The second half makes the result LF whatever the git version does with
+      # the first.
+      - name: Check out the bats submodules with LF line endings
+        env:
+          GIT_CONFIG_COUNT: '2'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+          GIT_CONFIG_KEY_1: core.eol
+          GIT_CONFIG_VALUE_1: lf
+        run: |
+          set -euo pipefail
+          git submodule update --init --recursive
+          git submodule foreach --quiet --recursive \
+            'git config core.autocrlf false && git config core.eol lf && git rm -rq --cached . && git reset -q --hard'
+
+      # Fails if a pinned shell script in the repository, or any file at all in
+      # the submodules, was checked out with CRLF endings.
+      - name: Check the shell scripts were checked out with LF endings
+        run: |
+          set -euo pipefail
+          echo "core.autocrlf=$(git config --get core.autocrlf || echo unset)"
+          crlf=$(git ls-files --eol | awk '$2 == "w/crlf" && (/attr\/text eol=lf/ || $NF ~ /\.(sh|bash|bats)$/ || $NF == "acq" || $NF == "acq-python") {print $NF}')
+          # Each line: "<submodule>: i/<index> w/<worktree> attr/... <path>".
+          sub_eol=$(git submodule foreach --quiet --recursive 'git ls-files --eol | sed "s|^|$displaypath: |"')
+          [ -n "$sub_eol" ] || { echo "::error::no submodule files listed; is the bats checkout missing?"; exit 1; }
+          sub_crlf=$(printf '%s\n' "$sub_eol" | awk '$3 == "w/crlf" {print $1 " " $NF}')
+          if [ -n "$crlf" ] || [ -n "$sub_crlf" ]; then
+            echo "::error::files checked out with CRLF endings:"
+            printf '%s\n' "$crlf" "$sub_crlf"
+            exit 1
+          fi
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      # The stub library and the Bash acq call python3; see the windows job.
+      - name: Provide python3
+        shell: pwsh
+        run: |
+          $py3 = Join-Path $env:pythonLocation 'python3.exe'
+          if (-not (Test-Path -LiteralPath $py3)) {
+            Copy-Item -LiteralPath (Join-Path $env:pythonLocation 'python.exe') -Destination $py3
+          }
+
+      - name: Run the bats subset under Git Bash
+        run: |
+          set -euo pipefail
+          bash --version | head -1
+          test/vendor/bats-core/bin/bats test/bats/55-version.bats test/bats/06-windows-install.bats \
+            test/bats/117-msys-path-forms.bats test/bats/163-provider-input-windows-native.bats \
+            test/bats/165-config-lock.bats
+
+  # The status to require. It always runs, and fails unless `changes` succeeded
+  # and each Windows job either passed or was skipped as irrelevant.
+  gate:
+    name: Windows
+    needs: [changes, windows, windows-git-bash]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Evaluate upstream results
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          WINDOWS_RESULT: ${{ needs.windows.result }}
+          GIT_BASH_RESULT: ${{ needs.windows-git-bash.result }}
+        run: |
+          set -euo pipefail
+          echo "changes:          $CHANGES_RESULT"
+          echo "windows:          $WINDOWS_RESULT"
+          echo "windows-git-bash: $GIT_BASH_RESULT"
+          if [ "$CHANGES_RESULT" != "success" ]; then
+            echo "::error::relevance detection did not succeed ($CHANGES_RESULT); failing closed."
+            exit 1
+          fi
+          for result in "$WINDOWS_RESULT" "$GIT_BASH_RESULT"; do
+            case "$result" in
+              success|skipped) ;;
+              *)
+                echo "::error::a Windows job did not pass (result: $result)."
+                exit 1
+                ;;
+            esac
+          done
+          echo "Gate passes."

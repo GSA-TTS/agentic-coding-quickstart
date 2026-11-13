@@ -1,0 +1,339 @@
+"""Orchestrator-owned sandbox state records (ADR-0041m).
+
+acq owns the migration of acq-hosted records; each durable record carries its own
+integer state-schema version as the FIRST field (``schema=N``, reusing the legacy
+provenance ``schema=1``). This slice writes schema=1 records; the full forward-only
+migration machinery (generation marker, OS advisory lock, refusal of
+newer/unparseable records) lands with the state-migration slice.
+
+The record is host-authoritative (ADR-0040m §trust ownership, ADR-0035): acq
+writes it on the host, keyed by backend + sandbox name, and never reads
+guest-writable state back to configure a sandbox. Backend-native state (the msb
+catalog) is never migrated or treated as authority here.
+
+The on-disk format is internal (non-public); only the ``schema`` marker and the
+semantic fields below are stable. ``schema`` is always the first key so a
+consumer can read the version marker before touching any other field.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import tempfile
+from pathlib import Path
+
+from . import userdirs
+
+# State-schema version of the records this slice writes (ADR-0041m). Distinct
+# from the structured-output ``schema_version`` in ``envelope.py``.
+STATE_SCHEMA = 1
+
+
+class StateSchemaError(Exception):
+    """A record carries a state-schema this reader cannot read (ADR-0041m).
+
+    Raised for a newer-than-this-reader or non-integer schema, or an unparseable
+    record. The reader refuses rather than misreads; a schema-less (legacy v0)
+    record is the one tolerated case and is reported as absent (forward migration
+    is the state-migration slice's job).
+    """
+
+
+# The sandbox name reaches a filesystem path, so it is sanitized to a safe
+# filename charset (defense-in-depth). A short checksum of the RAW name is
+# appended so two distinct names that sanitize to the same string (e.g. "a/b" and
+# "a_b") never alias onto one record.
+_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def state_dir() -> Path:
+    """Resolve the acq state root (host-side).
+
+    Precedence: ``ACQ_STATE_DIR``, else ``XDG_STATE_HOME``, else
+    ``$HOME/.local/state``, under an ``acq`` subdirectory (ADR-0041m:
+    orchestrator-owned records; the layout is not constrained by the legacy
+    implementation).
+
+    An empty ``ACQ_STATE_DIR`` counts as unset. A relative one is refused with
+    :class:`userdirs.UserDirError`: it is an explicit override, so silently
+    replacing it with the default would hide the misconfiguration, and honoring
+    it would resolve the state root against the current directory (normally the
+    agent-writable workspace). An empty or relative ``XDG_STATE_HOME`` is ignored
+    as the XDG Base Directory specification requires (see :mod:`userdirs`).
+    """
+    override = os.environ.get("ACQ_STATE_DIR", "")
+    if override:
+        if not userdirs.is_absolute(override):
+            raise userdirs.UserDirError(
+                f"ACQ_STATE_DIR must be an absolute path, got {override!r}",
+                "set ACQ_STATE_DIR to an absolute path, or unset it to use "
+                "$XDG_STATE_HOME/acq (default ~/.local/state/acq)",
+            )
+        return Path(override)
+    return userdirs.xdg_base("XDG_STATE_HOME", ".local", "state") / "acq"
+
+
+def provenance_dir() -> Path:
+    """Bash acq's provenance root (host-side).
+
+    ``ACQ_PROVENANCE_DIR``, else ``$XDG_STATE_HOME/acq/provenance`` (default
+    ``~/.local/state/acq/provenance``); like Bash's ``_acq_provenance_dir`` it
+    does not follow ``ACQ_STATE_DIR``. A relative ``ACQ_PROVENANCE_DIR`` is
+    refused and a relative ``XDG_STATE_HOME`` or ``HOME`` is ignored (see
+    :mod:`userdirs`), so the root never resolves against the current directory.
+    """
+    override = userdirs.path_override("ACQ_PROVENANCE_DIR")
+    if override is not None:
+        return override
+    return userdirs.xdg_base("XDG_STATE_HOME", ".local", "state") / "acq" / "provenance"
+
+
+def _safe(token: str) -> str:
+    return _SAFE_RE.sub("_", token)
+
+
+def _checksum(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:8]
+
+
+def safe_token(token: str) -> str:
+    """``token`` reduced to the safe filename charset (for per-sandbox paths)."""
+    return _safe(token)
+
+
+def record_key(name: str) -> str:
+    """The per-sandbox filename stem: sanitized name plus a checksum of the raw name."""
+    return f"{_safe(name)}.{_checksum(name)}"
+
+
+def record_path(backend: str, name: str) -> Path:
+    """Path to one sandbox's state record, keyed by backend + sandbox name."""
+    return backend_dir(backend) / f"{record_key(name)}.json"
+
+
+def atomic_write_text(path: Path, data: str) -> None:
+    """Write ``data`` to ``path`` atomically: unique temp file, fsync, rename.
+
+    The temp file gets a unique name in the target directory, so two writers of
+    the same record (or of two records in one directory) never share a temp file,
+    and a failed write removes its own temp file. A crash cannot leave a
+    half-written record (ADR-0041m atomic, non-destructive).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def atomic_create_text(path: Path, data: str) -> bool:
+    """Create ``path`` holding ``data`` only if it does not exist yet; True when created.
+
+    The data goes to a unique temp file (fsynced) that is then hard-linked into
+    place, so the record appears whole or not at all, and a record another
+    command wrote first (even moments earlier) is never replaced. A filesystem
+    without hard links falls back to an existence check and a rename, which
+    still never replaces a record that was already there when it looked.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            return False
+        except OSError:
+            if os.path.lexists(path):
+                return False
+            os.replace(tmp, path)
+        return True
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def backend_dir(backend: str) -> Path:
+    """The state subdirectory holding one backend's sandbox records.
+
+    Sandbox-state records live directly under ``state_dir()/<backend>/``; sibling
+    directories (``kit-sources/``, ``provenance/``, ``kit-consent/``) hold other
+    record types with their own schema number space and are never sandbox state.
+    """
+    return state_dir() / _safe(backend)
+
+
+def record_write(
+    backend: str,
+    name: str,
+    *,
+    agent: str | None,
+    workspace: str | None,
+    image: str | None = None,
+    created_at: str | None = None,
+    ro_host_config: bool | None = None,
+    kits_unconfirmed: bool | None = None,
+    clone: bool | None = None,
+    guest_workspace: str | None = None,
+    extra_workspaces: list[str] | None = None,
+    workspace_read_only: bool = False,
+) -> dict:
+    """Write (atomically) a sandbox's host-authoritative state record.
+
+    Call ONLY after the backend reports the sandbox created and exec-ready. The
+    write is temp-file + fsync + rename so a crash cannot leave a half-written
+    record (ADR-0041m atomic, non-destructive). ``schema`` is the first field.
+    ``ro_host_config`` records that the create passed the ADR-0035 read-only
+    trusted-config mount (host key ``ro-host-config``); it is preserved across the
+    security-exception recreation so the sandbox keeps requiring the guarantee.
+    ``kits_unconfirmed`` marks a guest whose kit startup acq has not yet seen
+    finish; every verb that attaches to a sandbox refuses one so marked.
+    ``clone`` records that the guest mounts a disposable clone of ``workspace``
+    (ADR-0027); ``workspace`` itself stays the real checkout.
+    ``guest_workspace`` is an optional guest start directory; it never changes
+    the host workspace used for mounts and socket isolation checks.
+    """
+    doc: dict = {
+        "schema": STATE_SCHEMA,
+        "name": name,
+        "backend": backend,
+        "agent": agent,
+        "workspace": workspace,
+    }
+    if extra_workspaces:
+        doc["extra_workspaces"] = extra_workspaces
+    if workspace_read_only:
+        doc["workspace_read_only"] = True
+    if image:
+        doc["image"] = image
+    if guest_workspace:
+        doc["guest_workspace"] = guest_workspace
+    if created_at:
+        doc["created_at"] = created_at
+    if ro_host_config:
+        doc["ro_host_config"] = True
+    if kits_unconfirmed:
+        doc["kits_unconfirmed"] = True
+    if clone:
+        doc["clone"] = True
+
+    atomic_write_text(record_path(backend, name), json.dumps(doc, indent=2, sort_keys=False) + "\n")
+    return doc
+
+
+def record_import(backend: str, name: str, fields: dict) -> bool:
+    """Create a sandbox's record from another implementation's state; True when written.
+
+    Used by the forward migration to adopt a sandbox the Bash acq created. It
+    never replaces a record that already exists (readable or not): the Python
+    record is the authority once present. ``fields`` are added after the
+    ``schema``/``name``/``backend`` header and must not repeat those keys.
+    """
+    doc: dict = {"schema": STATE_SCHEMA, "name": name, "backend": backend}
+    doc.update({k: v for k, v in fields.items() if k not in doc})
+    return atomic_create_text(record_path(backend, name), json.dumps(doc, indent=2, sort_keys=False) + "\n")
+
+
+def _record_from_path(path: Path, *, strict: bool, label: str) -> dict | None:
+    """Read one record from ``path``.
+
+    Returns the record dict when its ``schema`` is exactly ``STATE_SCHEMA``.
+
+    * ``strict=True`` raises :class:`StateSchemaError` for a newer/unknown schema
+      or unparseable content (the re-attach path refuses rather than misread).
+    * ``strict=False`` returns ``None`` for anything unreadable, so a read-only
+      diagnostic (``ls``) skips it rather than surfacing it as understood.
+
+    A schema-less record is legacy v0 in both modes: it returns ``None`` (forward
+    migration is the state-migration slice's job).
+    """
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        doc = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        if strict:
+            raise StateSchemaError(f"state record for {label!r} is not valid JSON") from exc
+        return None
+    if not isinstance(doc, dict):
+        if strict:
+            raise StateSchemaError(f"state record for {label!r} is not a JSON object")
+        return None
+    schema = doc.get("schema")
+    if schema is None:
+        return None  # legacy v0 (no marker)
+    if not isinstance(schema, int) or isinstance(schema, bool) or schema != STATE_SCHEMA:
+        if strict:
+            raise StateSchemaError(
+                f"state record for {label!r} carries schema {schema!r}; "
+                f"this reader understands schema {STATE_SCHEMA}"
+            )
+        return None
+    # A record may declare a minimum reader schema (ADR-0041m): a reader below it
+    # must refuse rather than misread, even though the record's own schema is one
+    # this reader can parse.
+    min_reader = doc.get("min_reader")
+    if isinstance(min_reader, int) and not isinstance(min_reader, bool) and min_reader > STATE_SCHEMA:
+        if strict:
+            raise StateSchemaError(
+                f"state record for {label!r} requires min_reader {min_reader}; "
+                f"this reader understands schema {STATE_SCHEMA}"
+            )
+        return None
+    return doc
+
+
+def record_read(backend: str, name: str) -> dict | None:
+    """Read a sandbox's state record (strict).
+
+    Returns the record when its schema is ``STATE_SCHEMA``, or ``None`` when the
+    record is absent or legacy v0. Raises :class:`StateSchemaError` for a
+    newer/unknown schema or unparseable content (ADR-0041m fail-closed).
+    """
+    return _record_from_path(record_path(backend, name), strict=True, label=name)
+
+
+def record_remove(backend: str, name: str) -> None:
+    """Remove a sandbox's state record (best-effort; a missing record is a no-op)."""
+    try:
+        record_path(backend, name).unlink()
+    except OSError:
+        pass
+
+
+def list_records(backend: str) -> list[dict]:
+    """List every readable (schema ``STATE_SCHEMA``) record for a backend.
+
+    Sorted by record path. Newer/unknown-schema and unparseable records are
+    skipped (ADR-0041m: read-only diagnostics may report ``unknown`` rather than
+    misread); a schema-less legacy record is likewise skipped.
+    """
+    root = backend_dir(backend)
+    out: list[dict] = []
+    if not root.is_dir():
+        return out
+    for path in sorted(root.glob("*.json")):
+        label = f"{backend}/{path.stem}"
+        record = _record_from_path(path, strict=False, label=label)
+        if record is not None:
+            out.append(record)
+    return out

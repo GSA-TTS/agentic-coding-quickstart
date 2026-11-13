@@ -1,0 +1,78 @@
+{
+  "schema": 1,
+  "id": "cli/run-kit-substrate-provision",
+  "oracle": "ADR-0030 bring-your-own image contract: addressable substrate gaps (nix + agent-user) are provisioned in-guest rather than rejected, then the agent kit is applied (a usai key is stored first: the default provider kit is selected, and acq refuses an msb create whose provider has no stored key)",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{python}",
+      "-I",
+      "test/vectors/drivers/seeded-run.py",
+      "[[[\"--backend\",\"msb\",\"secret\",\"set\",\"-g\",\"usai\"],true,0],[[\"--backend\",\"msb\",\"run\",\"opencode\",\".\",\"--name\",\"oc-box\",\"--image\",\"docker.io/docker/sandbox-templates:shell-docker\",\"--json\"],false,null]]",
+      "{acq}"
+    ],
+    "env": {
+      "ACQ_MSB_BIN": "__stub__",
+      "ACQ_MSB_VERSION": "0.7.7",
+      "ACQ_MSB_INSTALLED": "1",
+      "ACQ_SBX_INSTALLED": "0",
+      "ACQ_SUBSTRATE_STATE": "{\"docker.io/docker/sandbox-templates:shell-docker\": [\"nix\", \"agent-user\"]}"
+    },
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "MSB_HOME",
+      "ACQ_IMAGE",
+      "ACQ_MSB_IMAGE",
+      "ACQ_MSB_STUB_CATALOG",
+      "ACQ_MSB_READY_TIMEOUT",
+      "ACQ_MSB_STUB_FAIL",
+      "ACQ_KIT_APPLIED_SEED",
+      "USAI_API_KEY",
+      "ACQ_PROVIDER_CREDENTIAL_BINDINGS",
+      "ACQ_PROVIDER_CREDENTIAL_SEED",
+      "ACQ_MSB_STUB_PROBE"
+    ],
+    "stdin": "vector-usai-sentinel-77f9",
+    "timeout_ms": 15000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "run",
+        "data": {
+          "name": "oc-box",
+          "backend": "msb",
+          "agent": "opencode",
+          "action": "created",
+          "image": "docker.io/docker/sandbox-templates:shell-docker",
+          "kit": "opencode",
+          "entrypoint": "opencode"
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "contains",
+      "value": "[stub exec]",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME",
+      "ACQ_SECRET_STORE_DIR"
+    ]
+  }
+}
