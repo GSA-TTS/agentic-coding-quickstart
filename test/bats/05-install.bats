@@ -730,6 +730,32 @@ _no_package_manager_path() {
   refute_output --partial 'msb is already installed'
 }
 
+@test "install: non-interactive environment declines without using a terminal" {
+  _write_npm_stub
+  _write_msb_stub "$STUBDIR/bin/msb" 0.7.1
+
+  run env ACQ_INSTALL_NON_INTERACTIVE=1 PATH="$STUBDIR/bin:$(_acq_coreutils_path)" \
+    sh "$REPO_ROOT/install.sh" --method npm
+
+  assert_success
+  assert_output --partial 'Skipping msb'
+  refute_output --partial 'Fix the active msb now?'
+}
+
+@test "install: non-interactive mode bypasses Command Line Tools prompts" {
+  local ensure_git
+  ensure_git=$(awk '/^ensure_git\(\)/,/^}/' "$REPO_ROOT/install.sh")
+  assert_regex "$ensure_git" '"\$NON_INTERACTIVE" != 1'
+  assert_regex "$ensure_git" '--non-interactive, or no terminal'
+}
+
+@test "install: --yes does not borrow a terminal for catalog rollback" {
+  local recovery
+  recovery=$(awk '/^recover_migrated_catalog\(\)/,/^}/' "$REPO_ROOT/install.sh")
+  assert_regex "$recovery" '"\$ASSUME_YES" -eq 1'
+  assert_regex "$recovery" "msb's own plan"
+}
+
 @test "install: duplicate msb paths are reported with active marker" {
   _write_npm_stub
   _write_msb_stub "$STUBDIR/bin/msb" 0.7.7

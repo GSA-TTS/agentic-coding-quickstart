@@ -30,6 +30,34 @@ teardown() { acq_teardown_stubs; }
 load 'helper'
 
 FIXER_REL='scripts/fix-exec-bits'
+INDEX_VALIDATOR_REL='scripts/validate-git-executable-modes'
+
+EXPECTED_EXECUTABLES='acq
+scripts/bats-shard
+scripts/diagnose-tls-intercept
+scripts/fetch-bash32-oci.py
+scripts/fix-exec-bits
+scripts/install-provider-input-wheelhouse
+scripts/probe-msb-node-startup
+scripts/probe-msb-posthoc-ports
+scripts/probe-msb-startup
+scripts/rotate-apikey
+scripts/run-shellcheck
+scripts/scan-heredoc-subst.py
+scripts/setup-provider-input-validator
+scripts/summarize-bats-timing
+scripts/test-acq-bash32
+scripts/test-acq-bats
+scripts/test-probe-msb-node-startup.py
+scripts/test-probe-msb-startup.py
+scripts/validate-git-executable-modes
+scripts/verify-backends
+scripts/verify-git-https-secret-msb
+scripts/verify-host-authority-live
+scripts/verify-image-override
+scripts/verify-issue-320
+scripts/verify-net-default-egress
+scripts/verify-ports-live'
 
 # _mkrepo — build a throwaway git repo mimicking the real layout: an executable
 # entry point, a sourced library and a bats file (both correctly non-executable),
@@ -58,6 +86,25 @@ _mkrepo() {
   git commit -qm init
   # The setting that creates the blind spot.
   git config core.fileMode false
+}
+
+_make_index_fixture() {
+  REPO="$STUBDIR/index-fixture"
+  mkdir -p "$REPO"
+  cd "$REPO" || return 1
+  git init -q .
+  git config user.email t@example.com
+  git config user.name t
+  git config commit.gpgsign false
+  local path
+  for path in $EXPECTED_EXECUTABLES; do
+    mkdir -p "$(dirname "$path")"
+    printf '#!/usr/bin/env sh\nexit 0\n' > "$path"
+    chmod 755 "$path"
+  done
+  git add -A
+  git commit -qm init
+  BASE_BRANCH=$(git symbolic-ref --short HEAD)
 }
 
 @test "exec-bits: git with core.fileMode=false is BLIND to a lost exec bit" {
@@ -148,6 +195,86 @@ _mkrepo() {
     printf 'not executable: %s\n' "$missing" >&2
     return 1
   }
+}
+
+@test "exec-bits: Git-index validator accepts stage-0 100755 despite disk mode drift" {
+  _make_index_fixture
+  chmod 644 acq
+  run bash "$REPO_ROOT/$INDEX_VALIDATOR_REL" --root "$REPO"
+  assert_success
+  assert_output --partial 'OK - 26 intended executables are stage-0 100755'
+}
+
+@test "exec-bits: Git-index validator rejects a staged 100644 entry point" {
+  _make_index_fixture
+  chmod 644 acq
+  git add acq
+  run bash "$REPO_ROOT/$INDEX_VALIDATOR_REL" --root "$REPO"
+  assert_failure
+  assert_output --partial 'acq must have one stage-0 100755 index entry'
+  assert_output --partial 'got: 100644 0'
+}
+
+@test "exec-bits: Git-index validator rejects an untracked or unmerged entry point" {
+  _make_index_fixture
+  git rm --cached acq
+  run bash "$REPO_ROOT/$INDEX_VALIDATOR_REL" --root "$REPO"
+  assert_failure
+  assert_output --partial 'got: missing or untracked'
+
+  git reset --hard -q HEAD
+  git checkout -q -b other
+  printf '# other\n' >> acq
+  git add acq
+  git commit -qm other
+  git checkout -q "$BASE_BRANCH"
+  printf '# master\n' >> acq
+  git add acq
+  git commit -qm master
+  git merge other >/dev/null 2>&1 || true
+  run bash "$REPO_ROOT/$INDEX_VALIDATOR_REL" --root "$REPO"
+  assert_failure
+  assert_output --partial 'got: 100755 1'
+}
+
+@test "exec-bits: Git-index validator reports command errors" {
+  _make_index_fixture
+  run bash "$REPO_ROOT/$INDEX_VALIDATOR_REL" --root "$REPO/absent"
+  assert_failure 2
+  assert_output --partial 'not a git worktree'
+}
+
+@test "exec-bits: this repo's intended executables are 100755 in the Git index" {
+  run bash "$REPO_ROOT/$INDEX_VALIDATOR_REL" --root "$REPO_ROOT"
+  assert_success
+}
+
+@test "exec-bits: Git-index manifest covers every tracked executable entry point" {
+  local expected actual
+  expected=$(bash "$REPO_ROOT/$INDEX_VALIDATOR_REL" --print-expected | sort)
+  actual=$(git -C "$REPO_ROOT" ls-files --stage | awk '$1 == "100755" { print $4 }' | sort)
+  assert_equal "$actual" "$expected"
+}
+
+@test "exec-bits: vendored Bats runtime modes come from its submodule index" {
+  # The superproject records bats-core as a gitlink, so its internal executables
+  # belong to its own index. fix-exec-bits recursively checks that index; the
+  # top-level release-entrypoint validator must not guess at vendored internals.
+  run git -C "$REPO_ROOT" ls-files --stage -- test/vendor/bats-core
+  assert_success
+  assert_output --regexp '^160000 '
+
+  run git -C "$REPO_ROOT/test/vendor/bats-core" ls-files --stage -- \
+    bin/bats libexec/bats-core/bats libexec/bats-core/bats-exec-suite
+  assert_success
+  assert_output --partial $'100755 '
+  assert_output --partial $'\tbin/bats'
+  assert_output --partial $'\tlibexec/bats-core/bats'
+  assert_output --partial $'\tlibexec/bats-core/bats-exec-suite'
+
+  run bash "$REPO_ROOT/$INDEX_VALIDATOR_REL" --print-expected
+  assert_success
+  refute_output --partial 'test/vendor/'
 }
 
 @test "exec-bits: the bats runner points a lost bit at the fixer, not at submodule init" {

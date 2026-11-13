@@ -2,7 +2,7 @@
 # Provider inputs are validated as one set, published as immutable generations,
 # and mounted without exposing the shared host-config directory.
 
-setup() { acq_setup_stubs; unset ACQ_PROVIDER_INPUT_PYTHON; load_acq; }
+setup() { acq_setup_stubs; load_acq; }
 teardown() { acq_teardown_stubs; }
 
 load 'helper'
@@ -10,9 +10,12 @@ load 'helper'
 _provider_release() {
   local root="$1"
   mkdir -p "$root/scripts" "$root/integrations/isolation/schemas"
-  cat > "$root/provider-python" <<'PYTHON'
+cat > "$root/provider-python" <<'PYTHON'
 #!/bin/sh
-if [ "$1" = -c ]; then exit 0; fi
+if [ "$1" = -c ]; then
+  case "${2:-}" in *sys.version_info*) printf '3.12\n' ;; esac
+  exit 0
+fi
 exec /usr/bin/python3 "$@"
 PYTHON
   chmod +x "$root/provider-python"
@@ -49,6 +52,51 @@ _use_release() {
   _acq_provider_input_control_plane() { printf '%s\n' "$1"; }
 }
 
+_fixture_validator_path() { # FAKEBIN
+  local fakebin="$1" safe="$fakebin/safe-bin" tool target ln_path
+  mkdir -p "$safe"
+  ln_path=$(PATH=/usr/bin:/bin command -v ln) || return 1
+  for tool in bash basename cp cut dirname ln mkdir mktemp mv readlink rm sha256sum shasum; do
+    target=$(PATH=/usr/bin:/bin command -v "$tool" 2>/dev/null) || continue
+    case "$target" in
+      /*) "$ln_path" -sf "$target" "$safe/$tool" ;;
+    esac
+  done
+  cat > "$safe/python3" <<'PYTHON'
+#!/bin/sh
+# The fake bootstrap interpreters use only Python's os.replace(link, target)
+# shape. Keep that test behavior self-contained; macOS need not ship python3.
+if [ "${1:-}" = - ] && [ "$#" -eq 3 ]; then
+  # Test-only substitute for the bootstrap Python os.replace(source, target)
+  # call. POSIX mv follows a destination symlink-to-directory, so remove only
+  # the fixture's current-link path first; production still uses os.replace.
+  rm -f "$3"
+  exec mv "$2" "$3"
+fi
+exit 0
+PYTHON
+  chmod +x "$safe/python3"
+  printf '%s:%s\n' "$fakebin" "$safe"
+}
+
+@test "validator fixture path excludes inherited msb and brew" {
+  local fakebin="$STUBDIR/fixture-bin" hostile="$STUBDIR/hostile-bin" fixture_path tool
+  mkdir -p "$fakebin" "$hostile"
+  printf '#!/bin/sh\nexit 97\n' > "$hostile/msb"
+  printf '#!/bin/sh\nexit 97\n' > "$hostile/brew"
+  chmod +x "$hostile/msb" "$hostile/brew"
+
+  PATH="$hostile:$PATH" fixture_path=$(_fixture_validator_path "$fakebin")
+  run "$BASH" -c 'PATH="$1"; command -v bash; command -v msb; command -v brew' _ "$fixture_path"
+  assert_failure
+  assert_output --partial "$fakebin/safe-bin/bash"
+  refute_output --partial "$hostile"
+  for tool in basename cp cut dirname ln mkdir mktemp mv python3 readlink rm; do
+    PATH="$fixture_path" "$BASH" -c 'command -v "$1" >/dev/null' _ "$tool" \
+      || fail "validator fixture path lacks $tool"
+  done
+}
+
 @test "projection selects a configured validator runtime and rejects a missing one" {
   local python="$STUBDIR/provider-python" log="$STUBDIR/provider-python.log"
   cat > "$python" <<EOF
@@ -68,8 +116,65 @@ EOF
   assert_output --partial 'configured provider-input Python is not executable'
 }
 
+@test "provider path security fails before projection mutation without Python" {
+  local empty="$STUBDIR/no-python-bin" root saved_path
+  mkdir -p "$empty"
+  root=$(acq_provider_input_root sbx no-python)
+  unset ACQ_PROVIDER_INPUT_PYTHON
+  saved_path=$PATH
+  export PATH="$empty"
+  run acq_provider_input_prepare sbx no-python
+  export PATH="$saved_path"
+  assert_failure 2
+  assert_output --partial 'Python 3.12+ is required for provider path security'
+  [ ! -e "$root" ]
+}
+
+@test "provider path security accepts an explicit supported interpreter" {
+  local python="$STUBDIR/path-python"
+  cat > "$python" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = -c ]; then printf '3.12\n'; fi
+EOF
+  chmod +x "$python"
+  ACQ_PROVIDER_INPUT_PYTHON="$python" run _acq_provider_input_path_python
+  assert_success
+  assert_output "$python"
+}
+
+@test "provider path security rejects relative optional interpreters" {
+  local python="$STUBDIR/relative-python"
+  printf '#!/bin/sh\nprintf "3.12\\n"\n' > "$python"
+  chmod +x "$python"
+  run _acq_provider_input_safe_mkdir "$STUBDIR/relative-path" ./relative-python
+  assert_failure 2
+  assert_output --partial 'Python 3.12+ is required for provider path security'
+  [ ! -e "$STUBDIR/relative-path" ]
+}
+
+@test "provider path security accepts a drive-qualified interpreter on Windows runtimes" {
+  run _acq_provider_input_absolute_path 'C:/provider/python.exe' MINGW64_NT-10.0
+  assert_success
+
+  run _acq_provider_input_absolute_path 'C:/provider/python.exe' Linux
+  assert_failure
+}
+
+@test "validator runtime resolver accepts a drive-qualified path on Windows runtimes" {
+  cat > "$STUBDIR/uname" <<'EOF'
+#!/bin/sh
+printf 'MINGW64_NT-10.0\n'
+EOF
+  chmod +x "$STUBDIR/uname"
+  PATH="$STUBDIR:$PATH" ACQ_PROVIDER_INPUT_PYTHON='C:/provider/python.exe' \
+    run _acq_provider_input_python
+  assert_failure
+  refute_output --partial 'must be an absolute path'
+}
+
 @test "projection prefers the user-data validator runtime over a read-only install root" {
   local original_data_dir="${ACQ_PROVIDER_INPUT_DATA_DIR:-}" install_root="$STUBDIR/homebrew/libexec"
+  unset ACQ_PROVIDER_INPUT_PYTHON
   export ACQ_PROVIDER_INPUT_DATA_DIR="$STUBDIR/user-data"
   mkdir -p "$install_root"; chmod 555 "$install_root"
   local runtime="$ACQ_PROVIDER_INPUT_DATA_DIR/provider-input-validator.current/bin"
@@ -98,8 +203,9 @@ EOF
 }
 
 @test "setup validator honors explicit bootstrap Python and online hash install" {
-  local tools="$STUBDIR/online-data" fakebin="$STUBDIR/online-bin" log="$STUBDIR/online.log"
+  local tools="$STUBDIR/online-data" fakebin="$STUBDIR/online-bin" log="$STUBDIR/online.log" fixture_path
   mkdir -p "$fakebin"
+  fixture_path=$(_fixture_validator_path "$fakebin")
   cat > "$fakebin/python-custom" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$VALIDATOR_SETUP_LOG"
@@ -108,7 +214,7 @@ if [ "$1" = -m ] && [ "$2" = venv ]; then
   mkdir -p "$3/bin"; cp "$0" "$3/bin/python3"; exit 0
 fi
 if [ "$1" = -m ] && [ "$2" = pip ]; then exit 0; fi
-if [ "$1" = - ] && [ "$#" -eq 3 ]; then exec /usr/bin/python3 "$@"; fi
+if [ "$1" = - ] && [ "$#" -eq 3 ]; then exec "${0%/*}/safe-bin/python3" "$@"; fi
 if [ "$1" = - ]; then exit 0; fi
 exit 0
 EOF
@@ -121,7 +227,7 @@ EOF
   ACQ_PROVIDER_INPUT_BOOTSTRAP_PYTHON="$fakebin/python-custom" \
     ACQ_PROVIDER_INPUT_HOST_OS=Darwin ACQ_PROVIDER_INPUT_HOST_ARCH=arm64 \
     ACQ_PROVIDER_INPUT_DATA_DIR="$tools" VALIDATOR_SETUP_LOG="$log" \
-    PATH="$fakebin:/usr/bin" run "$REPO_ROOT/scripts/setup-provider-input-validator" --apply --online
+    PATH="$fixture_path" run "$REPO_ROOT/scripts/setup-provider-input-validator" --apply --online
   assert_success
   [ -L "$tools/provider-input-validator.current" ]
   grep -Fq -- '--require-hashes' "$log"
@@ -129,8 +235,9 @@ EOF
 }
 
 @test "setup validator prefers a supported versioned Python before python3" {
-  local fakebin="$STUBDIR/versioned-bin" log="$STUBDIR/versioned.log" tools="$STUBDIR/versioned-data"
+  local fakebin="$STUBDIR/versioned-bin" log="$STUBDIR/versioned.log" tools="$STUBDIR/versioned-data" fixture_path
   mkdir -p "$fakebin"
+  fixture_path=$(_fixture_validator_path "$fakebin")
   cat > "$fakebin/python3.14" <<'EOF'
 #!/bin/sh
 printf 'selected-3.14 %s\n' "$*" >> "$VALIDATOR_SETUP_LOG"
@@ -139,7 +246,7 @@ if [ "$1" = -m ] && [ "$2" = venv ]; then
   mkdir -p "$3/bin"; cp "$0" "$3/bin/python3"; exit 0
 fi
 if [ "$1" = -m ] && [ "$2" = pip ]; then exit 0; fi
-if [ "$1" = - ] && [ "$#" -eq 3 ]; then exec /usr/bin/python3 "$@"; fi
+if [ "$1" = - ] && [ "$#" -eq 3 ]; then exec "${0%/*}/safe-bin/python3" "$@"; fi
 if [ "$1" = - ]; then exit 0; fi
 exit 0
 EOF
@@ -157,7 +264,7 @@ EOF
   ACQ_PROVIDER_INPUT_HOST_OS=Darwin ACQ_PROVIDER_INPUT_HOST_ARCH=arm64 \
     ACQ_PROVIDER_INPUT_BOOTSTRAP_CANDIDATES=python3.14 \
     ACQ_PROVIDER_INPUT_DATA_DIR="$tools" VALIDATOR_SETUP_LOG="$log" \
-    PATH="$fakebin:/usr/bin" run "$REPO_ROOT/scripts/setup-provider-input-validator" --apply --online
+    PATH="$fixture_path" run "$REPO_ROOT/scripts/setup-provider-input-validator" --apply --online
   assert_success
   [ -L "$tools/provider-input-validator.current" ]
   grep -Fq 'selected-3.14' "$log"
@@ -165,8 +272,9 @@ EOF
 }
 
 @test "setup validator skips unsupported newer Python on Linux" {
-  local fakebin="$STUBDIR/linux-versioned-bin" log="$STUBDIR/linux-versioned.log" tools="$STUBDIR/linux-data"
+  local fakebin="$STUBDIR/linux-versioned-bin" log="$STUBDIR/linux-versioned.log" tools="$STUBDIR/linux-data" fixture_path
   mkdir -p "$fakebin"
+  fixture_path=$(_fixture_validator_path "$fakebin")
   cat > "$fakebin/python3.14" <<'EOF'
 #!/bin/sh
 printf 'wrong-3.14\n' >> "$VALIDATOR_SETUP_LOG"
@@ -180,7 +288,7 @@ if [ "$1" = -m ] && [ "$2" = venv ]; then
   mkdir -p "$3/bin"; cp "$0" "$3/bin/python3"; exit 0
 fi
 if [ "$1" = -m ] && [ "$2" = pip ]; then exit 0; fi
-if [ "$1" = - ] && [ "$#" -eq 3 ]; then exec /usr/bin/python3 "$@"; fi
+if [ "$1" = - ] && [ "$#" -eq 3 ]; then exec "${0%/*}/safe-bin/python3" "$@"; fi
 if [ "$1" = - ]; then exit 0; fi
 exit 0
 EOF
@@ -188,7 +296,7 @@ EOF
 
   ACQ_PROVIDER_INPUT_HOST_OS=Linux ACQ_PROVIDER_INPUT_HOST_ARCH=x86_64 \
     ACQ_PROVIDER_INPUT_DATA_DIR="$tools" VALIDATOR_SETUP_LOG="$log" \
-    PATH="$fakebin:/usr/bin" run "$REPO_ROOT/scripts/setup-provider-input-validator" --apply --online
+    PATH="$fixture_path" run "$REPO_ROOT/scripts/setup-provider-input-validator" --apply --online
   assert_success
   grep -Fq 'selected-3.12' "$log"
   ! grep -Fq 'wrong-3.14' "$log"
@@ -205,9 +313,10 @@ EOF
 
 @test "setup validator atomically replaces only a validated temporary runtime" {
   local tools="$STUBDIR/user-data" target="$STUBDIR/user-data/provider-input-validator.current"
-  local fakebin="$STUBDIR/python-bin" log="$STUBDIR/python.log"
+  local fakebin="$STUBDIR/python-bin" log="$STUBDIR/python.log" fixture_path
   local first_runtime second_runtime
   mkdir -p "$fakebin"
+  fixture_path=$(_fixture_validator_path "$fakebin")
   mkdir -p "$STUBDIR/wheelhouse"
   : > "$STUBDIR/wheelhouse/placeholder.whl"
   (cd "$STUBDIR/wheelhouse" && sha256sum placeholder.whl > SHA256SUMS)
@@ -227,27 +336,27 @@ if [ "$1" = -m ] && [ "$2" = pip ]; then
   [ "${VALIDATOR_SETUP_FAIL:-}" != 1 ]
   exit
 fi
- if [ "$1" = - ] && [ "$#" -eq 3 ]; then exec /usr/bin/python3 "$@"; fi
+ if [ "$1" = - ] && [ "$#" -eq 3 ]; then exec "${0%/*}/safe-bin/python3" "$@"; fi
   if [ "$1" = - ]; then [ "${VALIDATOR_VALIDATE_FAIL:-}" != 1 ]; exit; fi
 exit 0
 EOF
   chmod +x "$fakebin/python3"
 
-  ACQ_PROVIDER_INPUT_BOOTSTRAP_PYTHON="$fakebin/python3" ACQ_PROVIDER_INPUT_HOST_OS=Darwin ACQ_PROVIDER_INPUT_HOST_ARCH=arm64 ACQ_PROVIDER_INPUT_DATA_DIR="$tools" ACQ_PROVIDER_INPUT_WHEELHOUSE="$STUBDIR/wheelhouse" VALIDATOR_SETUP_LOG="$log" PATH="$fakebin:/usr/bin" run "$REPO_ROOT/scripts/setup-provider-input-validator" --apply
+  ACQ_PROVIDER_INPUT_BOOTSTRAP_PYTHON="$fakebin/python3" ACQ_PROVIDER_INPUT_HOST_OS=Darwin ACQ_PROVIDER_INPUT_HOST_ARCH=arm64 ACQ_PROVIDER_INPUT_DATA_DIR="$tools" ACQ_PROVIDER_INPUT_WHEELHOUSE="$STUBDIR/wheelhouse" VALIDATOR_SETUP_LOG="$log" PATH="$fixture_path" run "$REPO_ROOT/scripts/setup-provider-input-validator" --apply
   assert_success
   [ -L "$target" ]
   [ -x "$target/bin/python3" ]
   grep -Fq -- '--require-hashes' "$log"
   first_runtime=$(readlink "$target")
 
-  ACQ_PROVIDER_INPUT_BOOTSTRAP_PYTHON="$fakebin/python3" ACQ_PROVIDER_INPUT_HOST_OS=Darwin ACQ_PROVIDER_INPUT_HOST_ARCH=arm64 ACQ_PROVIDER_INPUT_DATA_DIR="$tools" ACQ_PROVIDER_INPUT_WHEELHOUSE="$STUBDIR/wheelhouse" VALIDATOR_SETUP_LOG="$log" PATH="$fakebin:/usr/bin" run "$REPO_ROOT/scripts/setup-provider-input-validator" --apply
+  ACQ_PROVIDER_INPUT_BOOTSTRAP_PYTHON="$fakebin/python3" ACQ_PROVIDER_INPUT_HOST_OS=Darwin ACQ_PROVIDER_INPUT_HOST_ARCH=arm64 ACQ_PROVIDER_INPUT_DATA_DIR="$tools" ACQ_PROVIDER_INPUT_WHEELHOUSE="$STUBDIR/wheelhouse" VALIDATOR_SETUP_LOG="$log" PATH="$fixture_path" run "$REPO_ROOT/scripts/setup-provider-input-validator" --apply
   assert_success
   second_runtime=$(readlink "$target")
   [ "$second_runtime" != "$first_runtime" ]
   [ -x "$target/bin/python3" ]
   [ ! -e "$tools/$first_runtime" ]
 
-  ACQ_PROVIDER_INPUT_BOOTSTRAP_PYTHON="$fakebin/python3" ACQ_PROVIDER_INPUT_HOST_OS=Darwin ACQ_PROVIDER_INPUT_HOST_ARCH=arm64 ACQ_PROVIDER_INPUT_DATA_DIR="$tools" ACQ_PROVIDER_INPUT_WHEELHOUSE="$STUBDIR/wheelhouse" VALIDATOR_SETUP_LOG="$log" VALIDATOR_VALIDATE_FAIL=1 PATH="$fakebin:/usr/bin" run "$REPO_ROOT/scripts/setup-provider-input-validator" --apply
+  ACQ_PROVIDER_INPUT_BOOTSTRAP_PYTHON="$fakebin/python3" ACQ_PROVIDER_INPUT_HOST_OS=Darwin ACQ_PROVIDER_INPUT_HOST_ARCH=arm64 ACQ_PROVIDER_INPUT_DATA_DIR="$tools" ACQ_PROVIDER_INPUT_WHEELHOUSE="$STUBDIR/wheelhouse" VALIDATOR_SETUP_LOG="$log" VALIDATOR_VALIDATE_FAIL=1 PATH="$fixture_path" run "$REPO_ROOT/scripts/setup-provider-input-validator" --apply
   assert_failure
   [ "$second_runtime" = "$(readlink "$target")" ]
   [ -x "$target/bin/python3" ]
@@ -256,6 +365,7 @@ EOF
 
 @test "runtime resolver recognizes Windows venv layout" {
   local original_data_dir="${ACQ_PROVIDER_INPUT_DATA_DIR:-}" runtime
+  unset ACQ_PROVIDER_INPUT_PYTHON
   export ACQ_PROVIDER_INPUT_DATA_DIR="$STUBDIR/windows-user-data"
   runtime="$ACQ_PROVIDER_INPUT_DATA_DIR/provider-input-validator.current/Scripts"
   mkdir -p "$runtime"
@@ -334,6 +444,7 @@ EOF
 
 @test "projection prepares immutable generation without changing current" {
   local release="$STUBDIR/release" root current
+  export ACQ_PROVIDER_INPUT_PYTHON="$STUBDIR/provider-python"
   _provider_release "$release"; _provider_kit "$release" alpha; _provider_kit "$release" beta
   export VALIDATOR_LOG="$STUBDIR/validator.log"
   _acq_provider_input_control_plane() { printf '%s\n' "$release"; }
@@ -680,6 +791,7 @@ EOF
 
 @test "rejected replacement preserves prior current generation" {
   local release="$STUBDIR/release" root before after
+  export ACQ_PROVIDER_INPUT_PYTHON="$STUBDIR/provider-python"
   _provider_release "$release"; _provider_kit "$release" alpha
   export VALIDATOR_LOG="$STUBDIR/validator.log"
   _acq_provider_input_control_plane() { printf '%s\n' "$release"; }
@@ -943,9 +1055,6 @@ export ACQ_STATE_DIR="$STUBDIR/state3"
 ACQ_SCRIPT_DIR="$REPO_ROOT" ACQ_SOURCE_ONLY=1 . "$REPO_ROOT/acq"
 . "$REPO_ROOT/acq.backends/msb.sh"
 KITS=()
-# Current main does not contain the macOS alias helper until the approved path
-# fix merges; this adapter-focused test supplies its pass-through contract.
-_acq_provider_input_canonical_path() { printf '%s\n' "\$1"; }
 # Stub the complex provision helpers so execution reaches the msb create call.
 acq_backend_exists() { return 1; }
 _acq_msb_confirm_absent() { return 0; }
@@ -1118,7 +1227,7 @@ EOF
   mkdir -p "$real_dir/acq/state"
 
   # Real directory under STUBDIR succeeds — no symlinks involved.
-  ACQ_TEST_HOST_OS=linux _acq_provider_input_safe_mkdir "$real_dir/new_child"
+  _acq_provider_input_safe_mkdir "$real_dir/new_child"
 
   # A path through a user-owned symlink must still fail regardless of platform.
   # bats run does not propagate inline env= prefix, so export then restore.
@@ -1196,6 +1305,17 @@ EOF
   run _acq_provider_input_safe_dir "$alias_sym/acq/state"
   unset ACQ_TEST_HOST_OS ACQ_TEST_ALIAS_TABLE
   assert_success
+}
+
+@test "Darwin custom alias keeps the native /var canonicalization" {
+  [ "$(uname -s)" = Darwin ] || skip "requires macOS kernel aliases"
+  local alias="$STUBDIR/custom-alias"
+  export ACQ_TEST_HOST_OS=darwin
+  export ACQ_TEST_ALIAS_TABLE="${alias}"$'\t'"/var/provider-fixture"
+  run _acq_provider_input_canonical_path "$alias/state"
+  unset ACQ_TEST_HOST_OS ACQ_TEST_ALIAS_TABLE
+  assert_success
+  assert_output "/private/var/provider-fixture/state"
 }
 
 @test "safe_mkdir rejects user-controlled symlink not in Darwin alias table" {
@@ -1389,7 +1509,7 @@ EOF
   local sbx_generation="${sbx_root}/generations/generation.test" msb_generation="${msb_root}/generations/generation.test"
   assert_equal "$(acq_provider_input_sbx_mount mountbox "$sbx_generation")" "${sbx_generation}:ro"
   assert_equal "$(acq_provider_input_guest_root sbx mountbox "$sbx_generation")" "$sbx_generation"
-  assert_equal "$(acq_provider_input_msb_mount mountbox "$msb_generation")" "${msb_generation}:${ACQ_PROVIDER_INPUT_GUEST_DIR}/generation.test:ro"
+  assert_equal "$(acq_provider_input_msb_mount mountbox "$msb_generation")" "$(_acq_provider_input_canonical_path "$msb_generation"):${ACQ_PROVIDER_INPUT_GUEST_DIR}/generation.test:ro"
   assert_equal "$(acq_provider_input_guest_root msb mountbox "$msb_generation")" "${ACQ_PROVIDER_INPUT_GUEST_DIR}/generation.test"
   [[ "$sbx_root" != "$hcfg" ]]
   [[ "$msb_root" != *".config" ]]
