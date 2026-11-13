@@ -41,7 +41,10 @@ _provider_release() {
   mkdir -p "$root/scripts" "$root/integrations/isolation/schemas"
   cat > "$root/provider-python" <<'PYTHON'
 #!/bin/sh
-if [ "$1" = -c ]; then exit 0; fi
+if [ "$1" = -c ]; then
+  case "${2:-}" in *sys.version_info*) printf '3.12\n' ;; esac
+  exit 0
+fi
 exec /usr/bin/python3 "$@"
 PYTHON
   chmod +x "$root/provider-python"
@@ -431,8 +434,11 @@ _provider_kit() {
   generation=$(_make_generation alpha ALPHA_KEY)
   record="$generation/models/providers/alpha/facts.json"
 
-  cat > "$wrapper" <<'PYTHON'
+cat > "$wrapper" <<'PYTHON'
 #!/bin/sh
+if [ "${1:-}" = -c ]; then
+  case "${2:-}" in *sys.version_info*) printf '3.12\n'; exit 0 ;; esac
+fi
 exec /usr/bin/python3 "$@"
 PYTHON
   chmod +x "$wrapper"

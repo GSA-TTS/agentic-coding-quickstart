@@ -24,6 +24,7 @@
     "lint:secrets": "pre-commit run gitleaks --all-files",
     "lint": "npm run lint:md",
     "fix:exec-bits": "bash scripts/fix-exec-bits",
+    "validate:exec-bits": "bash scripts/validate-git-executable-modes",
     "check": "pre-commit run --all-files"
   },
   "repository": {

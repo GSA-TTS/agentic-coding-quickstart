@@ -21,6 +21,17 @@ STUB
 
 teardown() { acq_teardown_stubs; }
 
+@test "runner: exports installer explicit-decline mode" {
+  cat > "$RUNNER_ROOT/test/vendor/bats-core/bin/bats" <<'STUB'
+#!/bin/sh
+printf 'installer-mode:%s\n' "${ACQ_INSTALL_NON_INTERACTIVE:-unset}"
+STUB
+  chmod +x "$RUNNER_ROOT/test/vendor/bats-core/bin/bats"
+  run bash "$RUNNER_ROOT/scripts/test-acq-bats" --count one
+  assert_success
+  assert_output 'installer-mode:1'
+}
+
 @test "runner: explicit arguments preserve timing and failure status" {
   run env ACQ_BATS_TIMING=1 TEST_BATS_STATUS=7 bash "$RUNNER_ROOT/scripts/test-acq-bats" --count 'a path.bats'
   assert_failure 7
@@ -42,9 +53,11 @@ teardown() { acq_teardown_stubs; }
 }
 
 @test "runner: serial execution has no implicit timing or jobs flags" {
+  local suite_dir
+  suite_dir=$(CDPATH='' cd "$RUNNER_ROOT/test/bats" && pwd)
   run env ACQ_BATS_TIMING=0 ACQ_BATS_JOBS=1 bash "$RUNNER_ROOT/scripts/test-acq-bats"
   assert_success
-  assert_output "bats-arg:$RUNNER_ROOT/test/bats"
+  assert_output "bats-arg:$suite_dir"
 }
 
 @test "runner: macOS CPU fallback selects file-level parallelism" {
@@ -60,6 +73,8 @@ teardown() { acq_teardown_stubs; }
 }
 
 @test "runner: xargs fallback retains timing, runs every file and propagates failure" {
+  local suite_dir
+  suite_dir=$(CDPATH='' cd "$RUNNER_ROOT/test/bats" && pwd)
   cat > "$RUNNER_ROOT/test/vendor/bats-core/bin/bats" <<'STUB'
 #!/bin/sh
 printf 'bats-arg:%s\n' "$@"
@@ -76,26 +91,30 @@ STUB
     exec bash "$1/scripts/test-acq-bats"
   ' _ "$RUNNER_ROOT"
   assert_failure 1
-  assert_line "bats-arg:$RUNNER_ROOT/test/bats/a.bats"
-  assert_line "bats-arg:$RUNNER_ROOT/test/bats/b.bats"
+  assert_line "bats-arg:$suite_dir/a.bats"
+  assert_line "bats-arg:$suite_dir/b.bats"
   assert_line 'bats-arg:--timing'
 }
 
 @test "runner: ACQ_BATS_SHARD runs only the selected files (serial path)" {
+  local suite_dir
+  suite_dir=$(CDPATH='' cd "$RUNNER_ROOT/test/bats" && pwd)
   printf '@test "x" {\n true\n}\n' > "$RUNNER_ROOT/test/bats/a.bats"
   printf '@test "y" {\n true\n}\n@test "z" {\n true\n}\n' > "$RUNNER_ROOT/test/bats/b.bats"
   run env ACQ_BATS_JOBS=1 ACQ_BATS_SHARD=1/2 bash "$RUNNER_ROOT/scripts/test-acq-bats"
   assert_success
-  assert_line "bats-arg:$RUNNER_ROOT/test/bats/b.bats"
-  refute_line "bats-arg:$RUNNER_ROOT/test/bats/a.bats"
-  refute_line "bats-arg:$RUNNER_ROOT/test/bats"
+  assert_line "bats-arg:$suite_dir/b.bats"
+  refute_line "bats-arg:$suite_dir/a.bats"
+  refute_line "bats-arg:$suite_dir"
   run env ACQ_BATS_JOBS=1 ACQ_BATS_SHARD=2/2 bash "$RUNNER_ROOT/scripts/test-acq-bats"
   assert_success
-  assert_line "bats-arg:$RUNNER_ROOT/test/bats/a.bats"
-  refute_line "bats-arg:$RUNNER_ROOT/test/bats/b.bats"
+  assert_line "bats-arg:$suite_dir/a.bats"
+  refute_line "bats-arg:$suite_dir/b.bats"
 }
 
 @test "runner: ACQ_BATS_SHARD xargs fallback runs only the selected files" {
+  local suite_dir
+  suite_dir=$(CDPATH='' cd "$RUNNER_ROOT/test/bats" && pwd)
   printf '@test "x" {\n true\n}\n' > "$RUNNER_ROOT/test/bats/a.bats"
   printf '@test "y" {\n true\n}\n@test "z" {\n true\n}\n' > "$RUNNER_ROOT/test/bats/b.bats"
   run env ACQ_BATS_JOBS=2 ACQ_BATS_SHARD=1/2 bash -c '
@@ -109,8 +128,8 @@ STUB
     exec bash "$1/scripts/test-acq-bats"
   ' _ "$RUNNER_ROOT"
   assert_success
-  assert_line "bats-arg:$RUNNER_ROOT/test/bats/b.bats"
-  refute_line "bats-arg:$RUNNER_ROOT/test/bats/a.bats"
+  assert_line "bats-arg:$suite_dir/b.bats"
+  refute_line "bats-arg:$suite_dir/a.bats"
 }
 
 @test "runner: invalid ACQ_BATS_SHARD fails closed before running any test" {
@@ -173,7 +192,14 @@ STUB
 }
 
 @test "transport fixture: real projection is offline and local Git still works" {
-  run acq_provider_input_prepare sbx offlinebox
+  local stage_root
+  stage_root=$(env -u TMPDIR mktemp -d "${TMPDIR_DEFAULT:-/tmp}/acq-offline-stage.XXXXXX")
+  if git -C "$stage_root" rev-parse --show-toplevel >/dev/null 2>&1; then
+    rm -rf "$stage_root"
+    fail "offline fixture staging directory must be outside the repository"
+  fi
+  TMPDIR="$stage_root" run acq_provider_input_prepare sbx offlinebox
+  rm -rf "$stage_root"
   assert_success
   [ -d "$output/models/providers" ]
   git init -q "$STUBDIR/local-repo"

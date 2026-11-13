@@ -3572,34 +3572,7 @@ acq_provider_recorded_facts() {
 # ACQ_PROVIDER_INPUT_PYTHON and the installed validator runtime first, so
 # Windows (`Scripts/python.exe`) and custom interpreters work; only then PATH.
 _acq_provider_facts_python() {
-  local python="${ACQ_PROVIDER_INPUT_PYTHON:-}" runtime data_home
-  if [ -n "$python" ] && [ -x "$python" ]; then
-    printf '%s\n' "$python"
-    return 0
-  fi
-  if [ -n "${LOCALAPPDATA:-}" ] && [ "$(uname -s 2>/dev/null)" != "Linux" ]; then
-    data_home="$LOCALAPPDATA/acq"
-  else
-    data_home="${XDG_DATA_HOME:-${HOME:-}/.local/share}/acq"
-  fi
-  runtime="${ACQ_PROVIDER_INPUT_DATA_DIR:-$data_home/provider-input-validator}.current"
-  if [ -x "$runtime/bin/python3" ]; then
-    printf '%s\n' "$runtime/bin/python3"
-    return 0
-  fi
-  if [ -x "$runtime/Scripts/python.exe" ]; then
-    printf '%s\n' "$runtime/Scripts/python.exe"
-    return 0
-  fi
-  if [ -x "$runtime/python.exe" ]; then
-    printf '%s\n' "$runtime/python.exe"
-    return 0
-  fi
-  if command -v python3 >/dev/null 2>&1; then
-    printf '%s\n' "python3"
-    return 0
-  fi
-  return 1
+  _acq_provider_input_path_python
 }
 
 # acq_provider_facts_json_fields FILE — echo one TAB-separated record:
@@ -4161,8 +4134,13 @@ ACQ_PROVIDER_INPUT_GUEST_DIR="${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provi
 # set).  Status 2 means the host cannot run the released validator and is a
 # provisioning blocker, never an empty-set fallback.
 _acq_provider_input_python() {
-  local python="${ACQ_PROVIDER_INPUT_PYTHON:-}" version_check runtime data_home tools_dir setup
+  local python="${1:-${ACQ_PROVIDER_INPUT_PYTHON:-}}" version_check runtime data_home tools_dir setup host_os
+  host_os=$(uname -s 2>/dev/null || true)
   if [ -n "$python" ]; then
+    _acq_provider_input_absolute_path "$python" "$host_os" || {
+      echo "acq: provider-input Python must be an absolute path: $python" >&2
+      return 2
+    }
     [ -x "$python" ] || {
       echo "acq: configured provider-input Python is not executable: $python" >&2
       return 2
@@ -4227,12 +4205,15 @@ if actual != required:
 }
 
 acq_provider_input_prepare() {
-  local backend="$1" name="$2" root kitref kitdir manifest release_root="" python=""
+  local backend="$1" name="$2" root kitref kitdir manifest release_root="" python="" path_python=""
   local validator="" schema_dir="" bindings="" merged_bindings="" token stage generation manifests=() kitdirs=()
   [ -n "$backend" ] && [ -n "$name" ] || return 1
   command -v kit_translate_fetch >/dev/null 2>&1 || return 2
+  path_python="${3:-}"
+  if [ -n "$path_python" ]; then _acq_provider_input_validate_path_python "$path_python" || return 2
+  else path_python=$(_acq_provider_input_path_python) || return 2; fi
   root=$(acq_provider_input_root "$backend" "$name") || return 1
-  _acq_provider_input_safe_mkdir "$root/generations" || return 1
+  _acq_provider_input_safe_mkdir "$root/generations" "$path_python" || return 1
   chmod 755 "$root" "$root/generations" || return 1
   stage=$(mktemp -d "${TMPDIR:-/tmp}/acq-provider-input.XXXXXXXX") || return 1
   chmod 700 "$stage" || { rm -rf "$stage"; return 1; }
@@ -4242,16 +4223,16 @@ acq_provider_input_prepare() {
     manifest="$kitdir/provider-input.json"
     [ -e "$manifest" ] || continue
     [ -f "$manifest" ] && [ ! -L "$manifest" ] || { echo "acq: unsafe provider input manifest: $manifest" >&2; rm -rf "$stage"; return 1; }
-    _acq_provider_input_snapshot "$kitdir" "$stage/candidate-$token" || { rm -rf "$stage"; return 1; }
+    _acq_provider_input_snapshot "$kitdir" "$stage/candidate-$token" "$path_python" || { rm -rf "$stage"; return 1; }
     manifests+=("$stage/candidate-$token/provider-input.json")
     kitdirs+=("$stage/candidate-$token")
   done
   # A generation is complete and immutable before an adapter mounts it. It is not
   # visible through current until that adapter reports a successful create.
   generation=$(mktemp -d "$root/generations/generation.XXXXXXXX") || { _acq_provider_input_cleanup_stage "$stage"; return 1; }
-  chmod 755 "$generation" || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
-  _acq_provider_input_safe_mkdir "$generation/models/providers" || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
-  chmod 755 "$generation/models" "$generation/models/providers" || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
+  chmod 755 "$generation" || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation" "$path_python"; return 1; }
+  _acq_provider_input_safe_mkdir "$generation/models/providers" "$path_python" || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation" "$path_python"; return 1; }
+  chmod 755 "$generation/models" "$generation/models/providers" || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation" "$path_python"; return 1; }
   # A present empty generation is authoritative; it replaces current atomically.
   if [ "${#manifests[@]}" -eq 0 ]; then
     _acq_provider_input_cleanup_stage "$stage"
@@ -4261,15 +4242,15 @@ acq_provider_input_prepare() {
   # The validator and its control-plane inputs come from the fixed, pinned
   # Patterns bundle, never from a provider-controlled candidate kit.
   release_root=$(_acq_provider_input_control_plane "$stage/control-plane") || {
-    _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 2; }
+    _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation" "$path_python"; return 2; }
   validator="$release_root/scripts/validate_provider_input_contract.py"
   schema_dir="$release_root/integrations/isolation/schemas"
   bindings="$schema_dir/provider-credential-bindings.json"
   [ -f "$validator" ] && [ ! -L "$validator" ] && [ -d "$schema_dir" ] && [ ! -L "$schema_dir" ] \
     && [ -f "$bindings" ] && [ ! -L "$bindings" ] || {
-    echo "acq: pinned Patterns provider-input validator is unavailable" >&2; _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 2; }
-  python=$(_acq_provider_input_python) || {
-    _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 2; }
+    echo "acq: pinned Patterns provider-input validator is unavailable" >&2; _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation" "$path_python"; return 2; }
+  python=$(_acq_provider_input_python "$path_python") || {
+    _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation" "$path_python"; return 2; }
   # acq owns the provider -> KEY_ENV registry, layered over the pinned Patterns
   # defaults (its trust anchor) and then per-invocation config/env overrides, so
   # a provider kit hosted outside the pinned release validates without editing
@@ -4278,13 +4259,13 @@ acq_provider_input_prepare() {
   # closed here — before the validator runs — rather than binding the wrong key.
   merged_bindings="$stage/provider-credential-bindings.json"
   acq_provider_credential_merge_json "$bindings" "$merged_bindings" "$python" || {
-    _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
+    _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation" "$path_python"; return 1; }
   local validator_args=(--schema-dir "$schema_dir" --credential-bindings "$merged_bindings")
   local i
   for i in "${!manifests[@]}"; do validator_args+=(--bundle "${manifests[$i]}"); done
-  "$python" "$validator" "${validator_args[@]}" >&2 || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
+  "$python" "$validator" "${validator_args[@]}" >&2 || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation" "$path_python"; return 1; }
   for i in "${!manifests[@]}"; do
-    _acq_provider_input_materialize "${manifests[$i]}" "${kitdirs[$i]}" "$generation/models/providers" || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
+    _acq_provider_input_materialize "${manifests[$i]}" "${kitdirs[$i]}" "$generation/models/providers" "$path_python" || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation" "$path_python"; return 1; }
   done
   _acq_provider_input_cleanup_stage "$stage"
   printf '%s\n' "$generation"
@@ -4294,14 +4275,15 @@ acq_provider_input_prepare() {
 # Adapters must use prepare, mount the returned generation, and publish only
 # after their backend create succeeds.
 acq_provider_input_project() {
-  local backend="$1" name="$2" generation root
-  generation=$(acq_provider_input_prepare "$backend" "$name") || return $?
+  local backend="$1" name="$2" generation root python
+  python=$(_acq_provider_input_path_python) || return 2
+  generation=$(acq_provider_input_prepare "$backend" "$name" "$python") || return $?
   root=$(acq_provider_input_root "$backend" "$name") || {
-    _acq_provider_input_cleanup_generation "${generation%/generations/*}" "$generation" || true
+    _acq_provider_input_cleanup_generation "${generation%/generations/*}" "$generation" "$python" || true
     return 1
   }
-  _acq_provider_input_publish "$root" "$generation" || {
-    _acq_provider_input_cleanup_generation "$root" "$generation" || true
+  _acq_provider_input_publish "$root" "$generation" "$python" || {
+    _acq_provider_input_cleanup_generation "$root" "$generation" "$python" || true
     return 1
   }
 }
@@ -4346,9 +4328,87 @@ acq_provider_input_msb_mount() {
 }
 
 acq_provider_input_discard() {
-  local backend="$1" name="$2" generation="$3" root
+  local backend="$1" name="$2" generation="$3" python="${4:-}" root
   root=$(acq_provider_input_root "$backend" "$name") || return 1
-  _acq_provider_input_cleanup_generation "$root" "$generation"
+  _acq_provider_input_cleanup_generation "$root" "$generation" "$python"
+}
+
+# _acq_provider_input_path_python — resolve an interpreter for the local
+# path-security helpers before the validator runtime can be bootstrapped. It
+# never installs software or contacts the network. The later validator resolver
+# still verifies the required Python packages before provider content is used.
+_acq_provider_input_path_python() {
+  local explicit="${ACQ_PROVIDER_INPUT_PYTHON:-}" runtime data_home host_os candidate resolved
+  host_os=$(uname -s 2>/dev/null || true)
+  if [ -n "$explicit" ]; then
+    _acq_provider_input_absolute_path "$explicit" "$host_os" || {
+      echo "acq: configured provider-input Python must be an absolute path: $explicit" >&2
+      return 2
+    }
+    [ -x "$explicit" ] || {
+      echo "acq: configured provider-input Python is not executable: $explicit" >&2
+      return 2
+    }
+    candidate="$explicit"
+  else
+    if [ -n "${LOCALAPPDATA:-}" ] && [[ "$(uname -s 2>/dev/null)" = MINGW* || "$(uname -s 2>/dev/null)" = MSYS* || "$(uname -s 2>/dev/null)" = CYGWIN* ]]; then
+      data_home="$LOCALAPPDATA/acq"
+    else
+      data_home="${XDG_DATA_HOME:-${HOME:-}/.local/share}/acq"
+    fi
+    runtime="${ACQ_PROVIDER_INPUT_DATA_DIR:-$data_home/provider-input-validator}/provider-input-validator.current"
+    _acq_provider_input_absolute_path "$runtime" "$host_os" || runtime=""
+    if [ -n "$runtime" ] && [ -x "$runtime/bin/python3" ]; then candidate="$runtime/bin/python3"
+    elif [ -x "$runtime/Scripts/python.exe" ]; then candidate="$runtime/Scripts/python.exe"
+    elif [ -x "$runtime/python.exe" ]; then candidate="$runtime/python.exe"
+    else
+      case "$host_os" in Darwin) set -- python3.14 python3.13 python3.12 python3 ;; *) set -- python3.12 python3 ;; esac
+      for resolved in "$@"; do
+        candidate=$(command -v "$resolved" 2>/dev/null || true)
+        if _acq_provider_input_absolute_path "$candidate" "$host_os"; then break; else candidate=""; fi
+      done
+    fi
+  fi
+  _acq_provider_input_validate_path_python "$candidate" || return 2
+  printf '%s\n' "$candidate"
+}
+
+_acq_provider_input_validate_path_python() {
+  local candidate="${1:-}" host_os version
+  host_os=$(uname -s 2>/dev/null || true)
+  _acq_provider_input_absolute_path "$candidate" "$host_os" || {
+    echo "acq: Python 3.12+ is required for provider path security." >&2
+    echo "     Set ACQ_PROVIDER_INPUT_PYTHON or run: scripts/setup-provider-input-validator --apply" >&2
+    return 2
+  }
+  [ -x "$candidate" ] || {
+    echo "acq: provider path security Python is not executable: $candidate" >&2
+    return 2
+  }
+  version=$("$candidate" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null) || {
+    echo "acq: provider path security could not determine Python version." >&2
+    return 2
+  }
+  version=$(printf '%s\n' "$version" | awk 'NF { print; exit }')
+  case "$host_os:$version" in
+    Darwin:3.12|Darwin:3.13|Darwin:3.14|Linux:3.12|MINGW*:3.12|MSYS*:3.12|CYGWIN*:3.12)
+      return 0 ;;
+    *)
+      echo "acq: provider path security requires a supported Python; found $version." >&2
+      return 2 ;;
+  esac
+}
+
+# _acq_provider_input_absolute_path PATH HOST_OS — accept POSIX absolute paths
+# everywhere and drive-qualified paths only under Windows POSIX runtimes.
+_acq_provider_input_absolute_path() {
+  case "${1:-}" in
+    /*) return 0 ;;
+    [A-Za-z]:/*)
+      case "${2:-}" in MINGW*|MSYS*|CYGWIN*) return 0 ;; esac
+      ;;
+  esac
+  return 1
 }
 
 # Normalize the three macOS kernel-managed path aliases to their canonical
@@ -4360,13 +4420,17 @@ acq_provider_input_discard() {
 # unaffected.  Echoes the canonical path on stdout.
 #
 # ACQ_TEST_HOST_OS overrides sys.platform for offline CI testing only.
-# ACQ_TEST_ALIAS_TABLE (offline CI only) overrides the alias pair table for
-# isolated-filesystem tests.  Format: tab-separated "alias<TAB>target" pairs,
-# one per line.  When set, ACQ_TEST_HOST_OS=darwin must also be set.  Production
+# ACQ_TEST_ALIAS_TABLE (offline CI only) adds alias pairs ahead of the standard
+# macOS aliases for isolated-filesystem tests. Format: tab-separated
+# "alias<TAB>target" pairs, one per line. On an actual Darwin host the standard
+# aliases remain available after a test alias rewrites into /var. Production
 # builds never set this variable; it is documented alongside ACQ_TEST_HOST_OS as
 # a test-seam-only override.
 _acq_provider_input_canonical_path() {
-  python3 - "$1" <<'PY'
+  local python="${2:-}"
+  if [ -n "$python" ]; then _acq_provider_input_validate_path_python "$python" || return 2
+  else python=$(_acq_provider_input_path_python) || return 2; fi
+  "$python" - "$1" <<'PY'
 import os, re, sys
 path = sys.argv[1]
 # Collapse harmless absolute spelling variants before alias matching.
@@ -4376,14 +4440,18 @@ path = sys.argv[1]
 path = re.sub(r'^/+(?:\./+)*', '/', path)
 _platform = os.environ.get('ACQ_TEST_HOST_OS', sys.platform)
 if _platform == 'darwin':
+    _standard_aliases = [('/var', '/private/var'), ('/tmp', '/private/tmp'), ('/etc', '/private/etc')]
     _alias_table_raw = os.environ.get('ACQ_TEST_ALIAS_TABLE', '')
-    if _alias_table_raw:
-        _alias_pairs = [tuple(line.split('\t', 1)) for line in _alias_table_raw.split('\n') if '\t' in line]
-    else:
-        _alias_pairs = (('/var', '/private/var'), ('/tmp', '/private/tmp'), ('/etc', '/private/etc'))
-    for _alias, _target in _alias_pairs:
-        if path == _alias or path.startswith(_alias + '/'):
-            path = _target + path[len(_alias):]
+    _test_aliases = [tuple(line.split('\t', 1)) for line in _alias_table_raw.split('\n') if '\t' in line]
+    # Linux CI simulates Darwin through ACQ_TEST_HOST_OS. Its temporary paths are
+    # real /tmp paths, not macOS kernel aliases, so retain its isolated test map.
+    _alias_pairs = _test_aliases + (_standard_aliases if sys.platform == 'darwin' or not _test_aliases else [])
+    for _ in range(len(_alias_pairs) + 1):
+        for _alias, _target in _alias_pairs:
+            if path == _alias or path.startswith(_alias + '/'):
+                path = _target + path[len(_alias):]
+                break
+        else:
             break
 print(path, end='')
 PY
@@ -4400,9 +4468,11 @@ PY
 # including every user-influenced one — still traverse with O_NOFOLLOW.
 # Linux is unaffected.
 _acq_provider_input_safe_mkdir() {
-  local _canon
-  _canon=$(_acq_provider_input_canonical_path "$1") || return 1
-  python3 - "$_canon" <<'PY'
+  local _canon python="${2:-}"
+  if [ -n "$python" ]; then _acq_provider_input_validate_path_python "$python" || return 2
+  else python=$(_acq_provider_input_path_python) || return 2; fi
+  _canon=$(_acq_provider_input_canonical_path "$1" "$python") || return 1
+  "$python" - "$_canon" <<'PY'
 import os, stat, sys
 path = sys.argv[1]
 if not os.path.isabs(path): raise SystemExit('provider-input path must be absolute')
@@ -4422,9 +4492,11 @@ PY
 }
 
 _acq_provider_input_safe_dir() {
-  local _canon
-  _canon=$(_acq_provider_input_canonical_path "$1") || return 1
-  python3 - "$_canon" <<'PY'
+  local _canon python="${2:-}"
+  if [ -n "$python" ]; then _acq_provider_input_validate_path_python "$python" || return 2
+  else python=$(_acq_provider_input_path_python) || return 2; fi
+  _canon=$(_acq_provider_input_canonical_path "$1" "$python") || return 1
+  "$python" - "$_canon" <<'PY'
 import os, stat, sys
 path = sys.argv[1]
 if not os.path.isabs(path): raise SystemExit(1)
@@ -4444,11 +4516,11 @@ _acq_provider_input_cleanup_stage() {
 }
 
 _acq_provider_input_cleanup_generation() {
-  local root="$1" generation="$2"
+  local root="$1" generation="$2" python="${3:-}"
   case "$root" in ""|/|/*/) return 1 ;; esac
   case "$generation" in
     "$root"/generations/generation.*)
-      _acq_provider_input_safe_dir "$root/generations" || return 1
+      _acq_provider_input_safe_dir "$root/generations" "$python" || return 1
       [ -d "$generation" ] && [ ! -L "$generation" ] || return 1
       chmod -R u+w "$generation" 2>/dev/null || true
       rm -rf -- "$generation"
@@ -4463,17 +4535,22 @@ _acq_provider_input_remove_tree() {
 }
 
 _acq_provider_input_atomic_replace() {
-  python3 - "$1" "$2" <<'PY'
+  local python="${3:-}"
+  if [ -n "$python" ]; then _acq_provider_input_validate_path_python "$python" || return 2
+  else python=$(_acq_provider_input_path_python) || return 2; fi
+  "$python" - "$1" "$2" <<'PY'
 import os, sys
 os.replace(sys.argv[1], sys.argv[2])
 PY
 }
 
 _acq_provider_input_publish() {
-  local root="$1" generation="$2" base temp current
+  local root="$1" generation="$2" python="${3:-}" base temp current
+  if [ -n "$python" ]; then _acq_provider_input_validate_path_python "$python" || return 2
+  else python=$(_acq_provider_input_path_python) || return 2; fi
   case "$root" in ""|/|/*/) return 1 ;; esac
   case "$generation" in "$root"/generations/generation.*) ;; *) return 1 ;; esac
-  _acq_provider_input_safe_dir "$root/generations" || return 1
+  _acq_provider_input_safe_dir "$root/generations" "$python" || return 1
   [ -d "$generation" ] && [ ! -L "$generation" ] || return 1
   chmod -R a-w "$generation" || return 1
   base=${generation##*/}
@@ -4481,7 +4558,7 @@ _acq_provider_input_publish() {
   current="$root/current"
   ln -s "generations/$base" "$temp" || return 1
   # rename is atomic within root; do not remove current first.
-  _acq_provider_input_atomic_replace "$temp" "$current" || { rm -f "$temp"; return 1; }
+  _acq_provider_input_atomic_replace "$temp" "$current" "$python" || { rm -f "$temp"; return 1; }
   # Retain prior generations. A sandbox created by an older acq may still mount
   # current, and a failed concurrent create must never make that sandbox lose its
   # inputs. New sandboxes mount an exact generation and are unaffected by swaps.
@@ -4707,7 +4784,10 @@ _acq_provider_input_control_plane() {
 # reads. Validation and later materialization therefore cannot observe a changed
 # candidate manifest, symlink, or path outside the fetched kit.
 _acq_provider_input_snapshot() {
-  python3 - "$1" "$2" <<'PY'
+  local python="${3:-}"
+  if [ -n "$python" ]; then _acq_provider_input_validate_path_python "$python" || return 2
+  else python=$(_acq_provider_input_path_python) || return 2; fi
+  "$python" - "$1" "$2" <<'PY'
 import json, os, stat, sys
 kit, target = sys.argv[1:]
 def open_relative(root, value):
@@ -4753,7 +4833,10 @@ PY
 
 # Copy only validator-approved regular files into the backend-owned readonly tree.
 _acq_provider_input_materialize() {
-  python3 - "$1" "$2" "$3" <<'PY'
+  local python="${4:-}"
+  if [ -n "$python" ]; then _acq_provider_input_validate_path_python "$python" || return 2
+  else python=$(_acq_provider_input_path_python) || return 2; fi
+  "$python" - "$1" "$2" "$3" <<'PY'
 import json, os, shutil, sys
 manifest, kit, target_root = sys.argv[1:]
 bundle = json.load(open(manifest, encoding="utf-8"))
