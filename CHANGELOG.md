@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.3.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v4.2.1...v4.3.0) (2026-11-13)
+
+
+### Features
+
+* **test:** add local bash 3.2 test runner ([#653](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/653)) ([3b0faa8](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/3b0faa8f0d3114ec47029e612f9faff38ce167bb))
+
+
+### Bug Fixes
+
+* **test:** isolate git fixtures from hook-exported GIT_* state ([#596](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/596)) ([cabea7e](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/cabea7e383e2b2b27fbc8166b5156c49573d8e7f))
+
 ## [4.2.1](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v4.2.0...v4.2.1) (2026-11-05)
 
 
