@@ -264,3 +264,20 @@ override and an empty `HOME` loses its login and secrets; its shared state is do
 and acq does not touch other sbx sandboxes. Consequence: every msb run pulls the image
 again (about 2 GB). Because `scripts/qualify-backend-cell` is on the Tier-3 surface,
 merging this expires the recorded cells, which are then re-qualified with the same command.
+
+## Amendment (2026-11-14): the ledger PR goes to the upstream repository
+
+**Status of this amendment:** proposed. Promote it to accepted before it merges to `main`.
+
+`python -m qualification.host` was written for a personal fork: it pushed only to a
+non-upstream remote and hardcoded the whole `GSA-TTS` organisation as off-limits. With the
+fork retired and `main` upstream, no remote was valid, and a run could not be recorded.
+
+Decision: the default publish remote is the one whose every URL is
+`GSA-TTS/agentic-coding-quickstart` (normally `origin`), and a personal fork is still
+accepted with `--remote`. The safety rules that remain: the only ref pushed is a new
+`chore/ledger-*` branch, never `main` or a tag; every fetch and push URL of the remote must
+name the same one github.com repository; any other `GSA-TTS` repository is refused; the
+checkout is never touched; and HEAD must be on that remote's `main`. The ledger's integrity
+still rests on review of the ledger PR (CODEOWNERS, `docs/howto/release-gate-setup.md`);
+this amendment changes where the branch is pushed, not who reviews the PR.

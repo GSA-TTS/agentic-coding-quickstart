@@ -196,8 +196,10 @@ workflow steps exist (ADR-0050m) but have never run with real credentials.
    and `@GSA-TTS/agentic-coding-admins` team access for
    [`.github/CODEOWNERS`](../.github/CODEOWNERS), configure the `main` branch
    ruleset and required check contexts (see [release gate setup](howto/release-gate-setup.md)),
-   and decide whether `qualification/publish.py` should keep its `GSA-TTS/*`
-   personal-fork guard or permit direct maintainer ledger branches.
+   and confirm that `qualification/publish.py` may push `chore/ledger-*` branches to
+   `GSA-TTS/agentic-coding-quickstart` (it now does; ADR-0044m, "Amendment (2026-11-14)"),
+   whether an agent may run it without per-run approval (`AGENTS.md` still requires approval
+   for pushes), and whether upstream workflows should run on those branches.
 4. **Live Tier-3 hardware qualification (mogul/agentic-coding-quickstart#60):**
    Run `PYTHONPATH=. python3 -P -m qualification.host` on the remaining six
    claimed cells (`msb/macos-arm64`, `sbx/macos-arm64`, `msb/windows-x64`,

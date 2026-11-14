@@ -1,12 +1,13 @@
-"""Git side of ``python -m qualification.host`` (ADR-0044m): checkout checks, fork
-remote selection, and the ledger PR.
+"""Git side of ``python -m qualification.host`` (ADR-0044m): checkout checks, remote
+selection, and the ledger PR.
 
-Safety rules, all enforced here: only a fork remote is ever pushed to (every fetch
-and push URL of a remote must be a non-upstream repo and name the same repo); the
-only ref pushed is a new ``chore/ledger-*`` branch; the user's checkout is never
-switched or edited (the ledger change is made in a throwaway worktree). The
-upstream ``GSA-TTS`` repository is hardcoded as off-limits; update ``UPSTREAM`` if
-it is ever renamed.
+Safety rules, all enforced here: the only remote ever pushed to is the upstream
+repository itself or a personal fork (every fetch and push URL of a remote must name
+the same one github.com repository, and any other ``GSA-TTS`` repository is
+refused); the only ref pushed is a new ``chore/ledger-*`` branch, never ``main``;
+the user's checkout is never switched or edited (the ledger change is made in a
+throwaway worktree). The upstream repository is named once, in ``_UPSTREAM_REPO``;
+update it if it is ever renamed.
 
 Python >= 3.12, standard library only.
 """
@@ -25,10 +26,16 @@ from typing import Callable
 from . import hostexec
 from .ledger import DEFAULT_LEDGER
 
-UPSTREAM = re.compile(r"github\.com[:/]GSA-TTS/agentic-coding-quickstart(\.git)?/?$", re.I)
-_SLUG = re.compile(r"github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?/?$", re.I)
+# One github.com repository, over https (optionally with user-info) or ssh, and nothing
+# else: the pattern is anchored at the start so that "evil.example/github.com/..." and
+# plain http://, git:// or file:// URLs are not recognised as GitHub at all.
+_GITHUB = r"(?:https://(?:[^/@\s]+@)?github\.com/|ssh://git@github\.com/|git@github\.com:)"
+_UPSTREAM_REPO = "GSA-TTS/agentic-coding-quickstart"
+UPSTREAM_SLUG = _UPSTREAM_REPO.lower()
+_OFF_LIMITS_OWNERS = {_UPSTREAM_REPO.split("/")[0].lower()}  # the upstream org: only the upstream repository is allowed
+UPSTREAM = re.compile(rf"^{_GITHUB}{re.escape(_UPSTREAM_REPO)}(\.git)?/?$", re.I)
+_SLUG = re.compile(rf"^{_GITHUB}([^/\s@]+/[^/\s]+?)(?:\.git)?/?$", re.I)
 _REMOTE_MAIN = re.compile(r"[^/]+/main")
-_OFF_LIMITS_OWNERS = {"gsa-tts"}  # the whole upstream org, not just the one repository
 
 
 class HostError(Exception):
@@ -74,12 +81,20 @@ def artifact_sha256(root: Path) -> str:
     return digest.hexdigest()
 
 
-def choose_remote(root: Path, explicit: str | None) -> tuple[str, str]:
-    """``(remote name, owner/repo)`` of the fork to publish to; never the upstream.
+def _without_userinfo(url: str) -> str:
+    """``url`` with any ``user:password@`` removed, for messages (a remote URL can carry a token)."""
+    return re.sub(r"^(\w+://)[^/@\s]*@", r"\1", url)
 
+
+def choose_remote(root: Path, explicit: str | None) -> tuple[str, str]:
+    """``(remote name, owner/repo)`` the ledger branch is pushed to and the PR opened in.
+
+    Without ``explicit`` it is the one remote whose every URL is the upstream
+    repository (normally ``origin``); a personal fork is chosen with ``--remote``.
     Every fetch and push URL of a remote is considered (``git remote get-url --all``,
-    with ``insteadOf`` rewrites applied): one upstream URL disqualifies the remote,
-    and all URLs must name the same repository.
+    with ``insteadOf`` rewrites applied): they must all name the same github.com
+    repository, which must be the upstream repository or outside the upstream
+    organisation. A fetch URL naming one repository and a push URL another is refused.
     """
     urls = {}
     for name in git(root, "remote").split():
@@ -87,26 +102,27 @@ def choose_remote(root: Path, explicit: str | None) -> tuple[str, str]:
             git(root, "remote", "get-url", "--all", name).split()
             + git(root, "remote", "get-url", "--push", "--all", name).split()
         )
-    forks = {n: u for n, u in urls.items() if not any(UPSTREAM.search(x) for x in u)}
     if explicit:
         if explicit not in urls:
             raise HostError(f"no git remote named {explicit!r}")
-        if explicit not in forks:
-            raise HostError(f"{explicit!r} is (or also pushes to) the upstream repository; this tooling only publishes to a fork")
         name = explicit
-    elif len(forks) == 1:
-        name = next(iter(forks))
     else:
-        raise HostError(f"cannot pick a fork remote from {sorted(forks) or 'none'}; pass --remote NAME")
-    slugs = [None if re.search(r"[?#]", x) else _SLUG.search(x) for x in forks[name]]
+        upstream = [n for n, u in urls.items() if u and all(UPSTREAM.search(x) for x in u)]
+        if len(upstream) != 1:
+            raise HostError(f"cannot pick a remote from {sorted(urls) or 'none'}; pass --remote NAME "
+                            "(the upstream remote, normally origin, or your personal fork)")
+        name = upstream[0]
+    slugs = [None if re.search(r"[?#]", x) else _SLUG.search(x) for x in urls[name]]
     if not slugs or None in slugs or len({m.group(1).lower() for m in slugs}) != 1:
         raise HostError(
             f"remote {name!r} does not name exactly one github.com repository over a plain https/ssh URL "
-            f"(ssh host aliases, enterprise hosts, query strings and paths with spaces are not supported): {forks[name]}"
+            f"(ssh host aliases, enterprise hosts, query strings and paths with spaces are not supported): "
+            f"{[_without_userinfo(u) for u in urls[name]]}"
         )
     slug = slugs[0].group(1)
-    if slug.split("/")[0].lower() in _OFF_LIMITS_OWNERS:
-        raise HostError(f"remote {name!r} is in the upstream organisation ({slug}); this tooling only publishes to a personal fork")
+    if slug.split("/")[0].lower() in _OFF_LIMITS_OWNERS and slug.lower() != UPSTREAM_SLUG:
+        raise HostError(f"remote {name!r} is {slug}, another repository in the upstream organisation; "
+                        "this tooling pushes only to the upstream repository itself or a personal fork")
     return name, slug
 
 
@@ -151,7 +167,7 @@ def publish(
     root: Path, *, remote: str, slug: str, rev: str, platform: str, title: str, body: str,
     edit: Callable[[Path], None], verify: Callable[[Path], str | None],
 ) -> str:
-    """Commit an edited ledger on a new branch of the fork and open a PR; return its branch.
+    """Commit an edited ledger on a new branch of ``remote`` and open a PR; return its branch.
 
     The branch is cut from the **remote's current** ``main``, not from ``rev``: two
     hosts recording at the same time (or one recording while another's ledger PR
@@ -175,7 +191,7 @@ def publish(
             print(f"branching from {remote}/main {base[:12]} (tested {rev[:12]})")
         edit(worktree / DEFAULT_LEDGER)
         # Re-resolve the remote from the worktree (includeIf can differ per worktree)
-        # and require it to still be the same fork before anything is pushed.
+        # and require it to still be the same repository before anything is pushed.
         if choose_remote(worktree, remote) != (remote, slug):
             raise HostError(f"remote {remote!r} resolves differently inside the worktree; refusing to push")
         why = verify(worktree)

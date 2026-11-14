@@ -144,36 +144,51 @@ def test_artifact_sha256_is_stable_and_tracks_content(tmp_path):
     assert pub.artifact_sha256(work) != first
 
 
+UPSTREAM_URL = "https://github.com/GSA-TTS/agentic-coding-quickstart.git"
+UPSTREAM_PAIR = ("origin", "gsa-tts/agentic-coding-quickstart")
+
+
 @pytest.mark.parametrize(
     "remotes,explicit,expected",
     [
-        ({"origin": "https://github.com/GSA-TTS/agentic-coding-quickstart.git", "mogul": "https://github.com/mogul/agentic-coding-quickstart"}, None, ("mogul", "mogul/agentic-coding-quickstart")),
-        ({"fork": "git@github.com:me/agentic-coding-quickstart.git"}, None, ("fork", "me/agentic-coding-quickstart")),
+        # by default the upstream remote, even when a personal fork is also configured
+        ({"origin": UPSTREAM_URL, "me": "https://github.com/me/agentic-coding-quickstart"}, None, ("origin", "GSA-TTS/agentic-coding-quickstart")),
+        ({"origin": UPSTREAM_URL}, "origin", ("origin", "GSA-TTS/agentic-coding-quickstart")),
+        # a personal fork only when named
+        ({"origin": UPSTREAM_URL, "me": "https://github.com/me/agentic-coding-quickstart"}, "me", ("me", "me/agentic-coding-quickstart")),
         ({"a": "https://github.com/x/r.git", "b": "https://github.com/y/r.git"}, "b", ("b", "y/r")),
+        ({"fork": "git@github.com:me/agentic-coding-quickstart.git"}, "fork", ("fork", "me/agentic-coding-quickstart")),
     ],
 )
-def test_choose_remote_never_the_upstream(tmp_path, remotes, explicit, expected):
+def test_choose_remote_picks_the_upstream_by_default_and_a_fork_when_named(tmp_path, remotes, explicit, expected):
     run(tmp_path, "init", "-q")
     for name, url in remotes.items():
         run(tmp_path, "remote", "add", name, url)
     assert pub.choose_remote(tmp_path, explicit) == expected
 
 
-def test_choose_remote_refuses_upstream_and_ambiguity(tmp_path):
+def test_choose_remote_refuses_ambiguity_and_unknown_remotes(tmp_path):
     run(tmp_path, "init", "-q")
-    run(tmp_path, "remote", "add", "origin", "https://github.com/GSA-TTS/agentic-coding-quickstart.git")
     with pytest.raises(pub.HostError, match="cannot pick"):
-        pub.choose_remote(tmp_path, None)
-    with pytest.raises(pub.HostError, match="upstream"):
-        pub.choose_remote(tmp_path, "origin")
-    with pytest.raises(pub.HostError, match="no git remote"):
-        pub.choose_remote(tmp_path, "nope")
-    run(tmp_path, "remote", "add", "sneaky", "https://github.com/me/r")
-    run(tmp_path, "remote", "set-url", "--push", "sneaky", "https://github.com/GSA-TTS/agentic-coding-quickstart.git")
-    with pytest.raises(pub.HostError, match="upstream"):
-        pub.choose_remote(tmp_path, "sneaky")  # a fork-looking fetch URL that pushes to the upstream
+        pub.choose_remote(tmp_path, None)  # no remote at all
     run(tmp_path, "remote", "add", "a", "https://github.com/x/r")
     run(tmp_path, "remote", "add", "b", "https://github.com/y/r")
+    with pytest.raises(pub.HostError, match="cannot pick"):
+        pub.choose_remote(tmp_path, None)  # neither is the upstream: a fork must be named
+    with pytest.raises(pub.HostError, match="no git remote"):
+        pub.choose_remote(tmp_path, "nope")
+    run(tmp_path, "remote", "add", "origin", UPSTREAM_URL)
+    run(tmp_path, "remote", "add", "mirror", "git@github.com:GSA-TTS/agentic-coding-quickstart.git")
+    with pytest.raises(pub.HostError, match="cannot pick"):
+        pub.choose_remote(tmp_path, None)  # two upstream remotes: do not guess
+    assert pub.choose_remote(tmp_path, "mirror")[1].lower() == UPSTREAM_PAIR[1]
+
+
+def test_choose_remote_refuses_another_repository_in_the_upstream_organisation(tmp_path):
+    run(tmp_path, "init", "-q")
+    run(tmp_path, "remote", "add", "other", "https://github.com/GSA-TTS/agentic-coding-playbook.git")
+    with pytest.raises(pub.HostError, match="another repository in the upstream organisation"):
+        pub.choose_remote(tmp_path, "other")
     with pytest.raises(pub.HostError, match="cannot pick"):
         pub.choose_remote(tmp_path, None)
 
@@ -346,12 +361,12 @@ def test_the_gate_check_in_the_publish_worktree_ignores_the_callers_pythonpath(t
 
 # ---- publish.py safety --------------------------------------------------------
 
-def test_choose_remote_rejects_a_remote_with_any_upstream_push_url(tmp_path):
+def test_choose_remote_rejects_a_remote_that_pushes_to_a_second_repository(tmp_path):
     run(tmp_path, "init", "-q")
     run(tmp_path, "remote", "add", "multi", "https://github.com/me/r")
     run(tmp_path, "remote", "set-url", "--add", "--push", "multi", "https://github.com/GSA-TTS/agentic-coding-quickstart.git")
     run(tmp_path, "remote", "set-url", "--add", "--push", "multi", "https://github.com/me/r")
-    with pytest.raises(pub.HostError, match="upstream"):
+    with pytest.raises(pub.HostError, match="exactly one"):  # a fork fetch URL that also pushes to the upstream
         pub.choose_remote(tmp_path, "multi")
     with pytest.raises(pub.HostError, match="cannot pick"):
         pub.choose_remote(tmp_path, None)
@@ -364,8 +379,51 @@ def test_choose_remote_rejects_a_remote_with_any_upstream_push_url(tmp_path):
 def test_choose_remote_recognises_every_upstream_url_form(tmp_path, url):
     run(tmp_path, "init", "-q")
     run(tmp_path, "remote", "add", "up", url)
+    name, slug = pub.choose_remote(tmp_path, None)  # the slug keeps the URL's own case
+    assert (name, slug.lower()) == ("up", UPSTREAM_PAIR[1])
+
+
+@pytest.mark.parametrize("url", [
+    "https://evil.example/github.com/GSA-TTS/agentic-coding-quickstart",
+    "https://notgithub.com/GSA-TTS/agentic-coding-quickstart",
+    "http://github.com/GSA-TTS/agentic-coding-quickstart",
+    "git://github.com/GSA-TTS/agentic-coding-quickstart",
+    "file:///tmp/github.com/GSA-TTS/agentic-coding-quickstart",
+    "/tmp/github.com/gsa-tts/agentic-coding-quickstart",
+    "https://github.com/GSA-TTS/agentic-coding-quickstart-evil",
+    "https://github.com/GSA-TTS/agentic-coding-quickstart/extra",
+])
+def test_choose_remote_does_not_take_a_lookalike_for_the_upstream(tmp_path, url):
+    run(tmp_path, "init", "-q")
+    run(tmp_path, "remote", "add", "evil", url)
     with pytest.raises(pub.HostError):
-        pub.choose_remote(tmp_path, "up")
+        pub.choose_remote(tmp_path, None)
+    with pytest.raises(pub.HostError):
+        pub.choose_remote(tmp_path, "evil")
+
+
+def test_choose_remote_never_picks_a_remote_without_a_url(tmp_path):
+    run(tmp_path, "init", "-q")
+    run(tmp_path, "remote", "add", "origin", UPSTREAM_URL)
+    run(tmp_path, "config", "--unset-all", "remote.origin.url")
+    with pytest.raises(pub.HostError, match="cannot pick"):
+        pub.choose_remote(tmp_path, None)
+
+
+def test_a_refusal_never_echoes_credentials_from_a_remote_url(tmp_path):
+    run(tmp_path, "init", "-q")
+    run(tmp_path, "remote", "add", "x", "https://user:SECRETVALUE@github.com/me/r")
+    run(tmp_path, "remote", "set-url", "--push", "x", "https://other:SECRETVALUE@github.com/me/other")
+    with pytest.raises(pub.HostError) as err:
+        pub.choose_remote(tmp_path, "x")
+    assert "SECRETVALUE" not in str(err.value)
+
+
+def test_pr_text_names_the_remote_the_branch_was_pushed_to(tmp_path):
+    recorded = [make_transcript(tmp_path, "msb")]
+    for remote in ("origin", "me"):
+        _title, body = host.pr_text(macos(), recorded, "a" * 40, remote=remote)
+        assert f"git fetch {remote}`" in body and f"git merge-base {remote}/main HEAD" in body
 
 
 def test_choose_remote_rejects_a_remote_whose_urls_name_different_repos(tmp_path):
@@ -380,8 +438,14 @@ def test_choose_remote_applies_insteadof_rewrites(tmp_path):
     run(tmp_path, "init", "-q")
     run(tmp_path, "config", "url.https://github.com/GSA-TTS/.insteadOf", "gh:")
     run(tmp_path, "remote", "add", "alias", "gh:agentic-coding-quickstart")
-    with pytest.raises(pub.HostError, match="upstream"):
-        pub.choose_remote(tmp_path, "alias")
+    # without the rewrite "gh:..." is no github.com URL at all; with it, this is the upstream
+    name, slug = pub.choose_remote(tmp_path, None)
+    assert (name, slug.lower()) == ("alias", UPSTREAM_PAIR[1])
+    run(tmp_path, "config", "--unset-all", "url.https://github.com/GSA-TTS/.insteadOf")
+    run(tmp_path, "config", "url.https://github.com/someone-else/.insteadOf", "gh:")
+    with pytest.raises(pub.HostError, match="cannot pick"):
+        pub.choose_remote(tmp_path, None)  # the rewrite is what makes it (not) the upstream
+    assert pub.choose_remote(tmp_path, "alias")[1] == "someone-else/agentic-coding-quickstart"
 
 
 def test_check_checkout_without_remote_matches_main_exactly(tmp_path):
@@ -564,6 +628,16 @@ def test_dry_run_runs_nothing_and_shows_the_target(tmp_path, monkeypatch, capsys
     run(work, "remote", "add", "other", "https://github.com/y/z")
     assert host.main(["--dry-run"]) == 2
     assert "cannot pick" in capsys.readouterr().err
+
+
+def test_dry_run_targets_the_upstream_remote_by_default(tmp_path, monkeypatch, capsys):
+    work, fork, head = setup_cli(tmp_path, monkeypatch, ledger_doc())
+    run(work, "remote", "set-url", "origin", UPSTREAM_URL)  # origin/main already holds HEAD
+    monkeypatch.setattr(host, "backend_version", lambda b: "0.7.7" if b == "msb" else "0.51.0")
+    monkeypatch.setattr(host, "run_backend", lambda *a, **k: pytest.fail("must not run"))
+    assert host.main(["--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "publish: origin (GSA-TTS/agentic-coding-quickstart) -> PR into GSA-TTS/agentic-coding-quickstart:main" in out
 
 
 def test_dirty_tree_and_missing_main_fail_before_anything_runs(tmp_path, monkeypatch, capsys):

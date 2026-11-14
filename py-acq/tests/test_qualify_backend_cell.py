@@ -39,6 +39,14 @@ qbc = _load()
 NONCE = "0a1b2c3d"
 
 
+def _needs_free_tmp():
+    free = shutil.disk_usage(qbc.MSB_HOME_PARENT).free if os.path.isdir(qbc.MSB_HOME_PARENT) else 0
+    # With a gigabyte of margin: the oracle checks again when it runs, and a test that
+    # starts just above the limit must not fail if the free space dips under it.
+    return pytest.mark.skipif(free < qbc.MSB_HOME_MIN_FREE_BYTES + (1 << 30),
+                              reason=f"the oracle needs {qbc.MSB_HOME_MIN_FREE_BYTES >> 30} GiB (and a margin) free under {qbc.MSB_HOME_PARENT}")
+
+
 # ---- names and isolation ------------------------------------------------------
 
 
@@ -508,7 +516,7 @@ def test_sbx_without_a_usai_key_in_its_table_is_blocked_before_create(tmp_path):
 
 @pytest.mark.skipif(os.name == "nt", reason="the stub shims are POSIX shell scripts")
 @pytest.mark.skipif(sys.version_info < (3, 11), reason="the oracle runs the CLI under python -P")
-@pytest.mark.parametrize("backend,version", [("msb", "0.7.11"), ("sbx", "0.51.0")])
+@pytest.mark.parametrize("backend,version", [pytest.param("msb", "0.7.11", marks=_needs_free_tmp()), ("sbx", "0.51.0")])
 def test_the_script_leaves_the_callers_acq_state_alone_and_a_stub_cannot_pass(tmp_path, backend, version):
     caller = tmp_path / "caller"
     dirs = {v: caller / v.lower() for v in ("HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME",
@@ -551,6 +559,7 @@ def test_the_script_leaves_the_callers_acq_state_alone_and_a_stub_cannot_pass(tm
 
 @pytest.mark.skipif(os.name == "nt", reason="the stub shims are POSIX shell scripts")
 @pytest.mark.skipif(sys.version_info < (3, 11), reason="the oracle runs the CLI under python -P")
+@_needs_free_tmp()
 def test_sigterm_mid_create_still_tears_the_sandbox_down(tmp_path):
     # The harness sends SIGTERM when a run outlives its timeout. The oracle must turn
     # it into SystemExit and run teardown, which removes the nonce-named sandbox even
@@ -601,7 +610,7 @@ def test_sigterm_mid_create_still_tears_the_sandbox_down(tmp_path):
 
 @pytest.mark.skipif(os.name == "nt", reason="MSB_HOME is not redirected on Windows")
 def test_private_msb_home_is_short_empty_and_real():
-    home = qbc.private_msb_home("/tmp")  # pytest's own tmp_path is already too long for msb
+    home = qbc.private_msb_home("/tmp", min_free=0)  # pytest's own tmp_path is already too long for msb
     try:
         assert home is not None and home.is_dir() and list(home.iterdir()) == []
         assert home == home.resolve() and home.parent == Path("/tmp").resolve()
@@ -615,9 +624,9 @@ def test_private_msb_home_is_short_empty_and_real():
 def test_private_msb_home_refuses_a_path_too_long_or_a_missing_parent(tmp_path):
     deep = tmp_path / ("d" * 60)
     deep.mkdir()
-    assert qbc.private_msb_home(str(deep)) is None
+    assert qbc.private_msb_home(str(deep), min_free=0) is None
     assert list(deep.iterdir()) == []  # the too-long directory is not left behind
-    assert qbc.private_msb_home(str(tmp_path / "missing")) is None
+    assert qbc.private_msb_home(str(tmp_path / "missing"), min_free=0) is None
 
 
 @pytest.fixture
@@ -711,12 +720,13 @@ def test_remove_tree_does_not_repair_the_shared_parent(tmp_path, monkeypatch):
 def test_a_stop_signal_after_the_directory_is_made_does_not_leave_it_behind(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "resolve", lambda self, *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()))
     with pytest.raises(KeyboardInterrupt):
-        qbc.private_msb_home(str(tmp_path))
+        qbc.private_msb_home(str(tmp_path), min_free=0)
     assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.skipif(os.name == "nt", reason="the stub shims are POSIX shell scripts")
 @pytest.mark.skipif(sys.version_info < (3, 11), reason="the oracle runs the CLI under python -P")
+@_needs_free_tmp()
 def test_an_msb_run_never_touches_the_callers_running_sandboxes_and_removes_its_own_state(tmp_path):
     # A caller whose own msb already has a running sandbox: msb keeps its catalog under
     # MSB_HOME, and acq's credential steps re-feed every running sandbox in it.
