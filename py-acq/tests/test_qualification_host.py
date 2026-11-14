@@ -392,6 +392,12 @@ def test_choose_remote_recognises_every_upstream_url_form(tmp_path, url):
     "/tmp/github.com/gsa-tts/agentic-coding-quickstart",
     "https://github.com/GSA-TTS/agentic-coding-quickstart-evil",
     "https://github.com/GSA-TTS/agentic-coding-quickstart/extra",
+    # a GitHub URL that only appears inside something else: the patterns are anchored
+    "/tmp/https://github.com/GSA-TTS/agentic-coding-quickstart",
+    "file:///x/https://github.com/GSA-TTS/agentic-coding-quickstart",
+    "evilhttps://github.com/GSA-TTS/agentic-coding-quickstart",
+    "xgit@github.com:GSA-TTS/agentic-coding-quickstart",
+    "/srv/git@github.com:GSA-TTS/agentic-coding-quickstart",
 ])
 def test_choose_remote_does_not_take_a_lookalike_for_the_upstream(tmp_path, url):
     run(tmp_path, "init", "-q")
