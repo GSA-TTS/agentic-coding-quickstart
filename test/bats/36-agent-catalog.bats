@@ -78,7 +78,7 @@ load 'helper'
   assert_success
 }
 
-@test "agents: prime-agent is not in the known agent catalog (retired in patterns#584)" {
+@test "agents: prime-agent is not in the known agent catalog" {
   run bash -c '. "'"$REPO_ROOT"'/acq.backends/agents.sh"; acq_is_known_agent prime-agent'
   assert_failure
 }

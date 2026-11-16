@@ -164,7 +164,7 @@ _cfg_src() {
   assert_output --partial 'dir=integrations/isolation/acq-kits/oci-engine'
 }
 
-@test "catalog: prime-agent is NOT offered (retired in patterns#584)" {
+@test "catalog: prime-agent is not offered in the opt-in kit picker" {
   run bash -c '
     ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
     printf "%s\n" "${ACQ_OPTIN_KIT_NAMES[@]}"

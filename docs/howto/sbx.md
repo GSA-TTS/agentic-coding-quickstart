@@ -295,8 +295,8 @@ acq run kiro .          # Kiro
 acq run shell .         # Just a shell (no agent)
 ```
 
-This list is sourced from `acq.backends/agents.sh` (`prime-agent` was retired in
-`GSA-TTS/agentic-coding-patterns#584`).
+The supported agent tokens are defined in `acq.backends/agents.sh`;
+`prime-agent` is intentionally omitted from that catalog.
 
 ### Create with Custom Name
 
