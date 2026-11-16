@@ -274,6 +274,56 @@ class ProbeTests(unittest.TestCase):
                 except ProcessLookupError:
                     pass
 
+    def test_shim_sigterm_during_popen_is_forwarded_and_child_reaped(self):
+        children = []
+        real_popen = subprocess.Popen
+        previous_int = signal.getsignal(signal.SIGINT)
+        # Keep a regressed shim from terminating the test runner itself.
+        unexpected_term = mock.Mock()
+        previous_term = signal.signal(signal.SIGTERM, unexpected_term)
+        def spawn_then_signal(*args, **kwargs):
+            child = real_popen(*args, **kwargs)
+            children.append(child)
+            real_wait = child.wait
+            # A lost signal fails within five seconds, rather than hanging.
+            child.wait = lambda timeout=None: real_wait(timeout=5 if timeout is None else timeout)
+            os.kill(os.getpid(), signal.SIGTERM)
+            return child
+        try:
+            with mock.patch.dict(os.environ, ACQ_PROBE_DIR=str(self.directory),
+                                 ACQ_PROBE_MSB=shutil.which("sleep")), \
+                    mock.patch.object(probe.subprocess, "Popen", side_effect=spawn_then_signal):
+                self.assertEqual(probe.shim(["60"]), 143)
+            unexpected_term.assert_not_called()
+            self.assertIs(signal.getsignal(signal.SIGINT), previous_int)
+            self.assertIs(signal.getsignal(signal.SIGTERM), unexpected_term)
+            self.assertEqual(children[0].returncode, -signal.SIGTERM)
+            with self.assertRaises(ChildProcessError):
+                os.waitpid(children[0].pid, os.WNOHANG)
+            events, _ = probe.read_events(self.directory)
+            self.assertEqual(events[-1]["rc"], -signal.SIGTERM)
+        finally:
+            signal.signal(signal.SIGINT, previous_int)
+            signal.signal(signal.SIGTERM, previous_term)
+            for child in children:
+                if child.poll() is None:
+                    child.kill()
+                child.wait(timeout=5)
+
+    def test_shim_restores_signal_handlers_when_spawn_fails(self):
+        previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+        try:
+            with mock.patch.dict(os.environ, ACQ_PROBE_DIR=str(self.directory),
+                                 ACQ_PROBE_MSB="/real/msb"), \
+                    mock.patch.object(probe.subprocess, "Popen", side_effect=OSError("injected")), \
+                    self.assertRaises(OSError):
+                probe.shim(["exec"])
+            for sig, handler in previous.items():
+                self.assertIs(signal.getsignal(sig), handler)
+        finally:
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
+
     def test_relay_error_kills_resistant_descendant_after_leader_exits(self):
         reader, writer = os.pipe()
         os.set_inheritable(writer, True)

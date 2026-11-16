@@ -84,23 +84,33 @@ def shim(args):
     if label == "interactive-exec":
         emit(directory, "attach", "interactive-handoff")
     previous = signal.signal(signal.SIGINT, lambda *_: None)
-    before_spawn = time.monotonic()
-    child = subprocess.Popen([real, *args])
+    child = None
+    pending_term = False
     def terminate(_sig, _frame):
-        child.terminate()
+        nonlocal pending_term
+        if child is None:
+            pending_term = True
+        else:
+            child.terminate()
     previous_term = signal.signal(signal.SIGTERM, terminate)
     try:
+        before_spawn = time.monotonic()
+        child = subprocess.Popen([real, *args])
+        # SIGTERM may arrive after OS spawn but before Popen returns to us.
+        if pending_term:
+            child.terminate()
         emit(directory, "spawned", label, spawn_seconds=time.monotonic() - before_spawn)
         # Both processes receive foreground terminal signals; reap before exiting.
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         rc = child.wait()
     except BaseException:
-        child.terminate()
-        try:
-            child.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            child.kill()
-            child.wait()
+        if child is not None:
+            child.terminate()
+            try:
+                child.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
         raise
     finally:
         signal.signal(signal.SIGINT, previous)
