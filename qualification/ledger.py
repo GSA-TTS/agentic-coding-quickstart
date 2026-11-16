@@ -30,8 +30,9 @@ audit of the transcript the ledger PR inlines against ``transcript_sha256``.
 
 That audit works from the PR alone. ``record`` accepts only a transcript written in
 the harness's canonical byte form with no host-local path in it
-(:func:`publication_problem`), and ``qualification.host`` publishes exactly those
-bytes, so the hash of the published block is the recorded ``transcript_sha256``.
+(:func:`publication_problem`). The source integration's ``qualification.host``
+publisher is not included here; future publication must preserve those exact
+bytes so the block's hash remains the recorded ``transcript_sha256``.
 :func:`verify_evidence` (``python -m qualification.gate verify-evidence``) checks a
 PR body's blocks against the ledger.
 

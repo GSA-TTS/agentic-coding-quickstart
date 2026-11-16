@@ -63,7 +63,8 @@ QUALIFIED = {
 # >= 0.7.7); sbx requires >= 0.39.0. The cell oracle exercises oracles 1-3, so a
 # Tier-3 run is evidence only at or above ``ORACLE_FLOORS`` as well. The gate blocks
 # a cell whose entry or accepted version fails :func:`version_problem`, the ledger
-# refuses to accept such a version, and ``qualification.host`` refuses to run on one.
+# refuses to accept such a version. The source integration's qualification.host
+# run-time refusal is not included here and must be retained by future integration.
 VERSION_FLOORS = {
     MSB: "0.6.9",
     SBX: "0.39.0",
