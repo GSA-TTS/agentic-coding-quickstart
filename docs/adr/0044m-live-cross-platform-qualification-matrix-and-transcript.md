@@ -267,7 +267,7 @@ merging this expires the recorded cells, which are then re-qualified with the sa
 
 ## Amendment (2026-11-14): the ledger PR goes to the upstream repository
 
-**Status of this amendment:** proposed. Promote it to accepted before it merges to `main`.
+**Status of this amendment:** accepted (2026-11-16), by Bret Mogilefsky.
 
 `python -m qualification.host` was written for a personal fork: it pushed only to a
 non-upstream remote and hardcoded the whole `GSA-TTS` organisation as off-limits. With the
