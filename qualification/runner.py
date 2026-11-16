@@ -172,12 +172,11 @@ def _single_run(
         _stop(proc, grace)
         raise
 
-    verdict = classify_exit(proc.returncode)
     # Digest only: raw stdout/stderr is discarded so a secret it may have printed
     # is never persisted.
     output_sha256 = sha256_hex(stdout + stderr)
     detail = f"exit {proc.returncode}"
-    return Transcript(verdict, environment, tuple(command), output_sha256, detail, _now())
+    return Transcript(classify_exit(proc.returncode), environment, tuple(command), output_sha256, detail, _now())
 
 
 def run_cell(
