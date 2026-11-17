@@ -37,6 +37,11 @@ uninstall_remove_root() {
     cd -P -- "$(dirname "$1")" || exit 1
     [ "$(pwd -P)" = "$(dirname "$1")" ] || exit 1
     [ ! -L "${1##*/}" ] || exit 1
+    # Published generations are intentionally read-only. Change only owned real
+    # directories, never symlink targets, before bounded recursive removal.
+    if [ -d "${1##*/}" ]; then
+      find "${1##*/}" -type d -user "$(id -u)" -exec chmod u+rwx {} + || exit 1
+    fi
     rm -rf -- "${1##*/}"
   ) || { uninstall_error "could not remove $1"; return 1; }
   [ ! -e "$1" ] || uninstall_error "still present: $1"
@@ -66,8 +71,38 @@ uninstall_clone_remotes() {
     [ -n "$scratch" ] && [ "$url" = "$scratch" ] || {
       uninstall_error "temporary remote was changed in $origin; inspect sandbox-$name manually."; return 1; }
     uninstall_validate_root "$config" config || return 1
+    uninstall_tracking_refs "$origin" "sandbox-$name" "${1:-remove}" || return 1
+    [ "${1:-remove}" != check ] || continue
     git config --file "$config" --no-includes --remove-section "remote.sandbox-$name" || return 1
   done
+}
+
+# Delete only tracking names, never dereference a symbolic tracking ref into a
+# local branch. Disable config-driven hooks and fsmonitor in the original repo.
+uninstall_tracking_refs() {
+  local origin="$1" remote="$2" mode="$3" refs ref hooks
+  hooks="$uninstall_state/.git-hooks-disabled"
+  [ ! -e "$hooks" ] && [ ! -L "$hooks" ] || return 1
+  refs=$(uninstall_git "$origin" "$hooks" for-each-ref --format='%(refname)' "refs/remotes/$remote/") || return 1
+  [ "$mode" != check ] || return 0
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    case "$ref" in "refs/remotes/$remote/"*) ;; *) return 1 ;; esac
+    uninstall_git "$origin" "$hooks" update-ref --no-deref -d "$ref" || return 1
+  done <<< "$refs"
+}
+
+uninstall_git() {
+  local origin="$1" hooks="$2" variable
+  shift 2
+  (
+    # Repository-location and command-config environment must not redirect the
+    # original checkout operation or re-enable hooks supplied by a guest.
+    for variable in ${!GIT_@}; do unset "$variable"; done
+    export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+    git --no-pager -c core.fsmonitor=false -c "core.hooksPath=$hooks" \
+      -c protocol.allow=never -c protocol.file.allow=always -C "$origin" "$@"
+  )
 }
 
 # Linked worktrees store a gitdir pointer and a relative commondir pointer.
@@ -112,7 +147,7 @@ uninstall_helpers() {
         fi
       done
     done < "$file"
-    rm -f -- "$file" || return 1
+    [ "${1:-remove}" = check ] || rm -f -- "$file" || return 1
   done
 }
 
@@ -153,12 +188,12 @@ uninstall_linux_secrets() {
       while IFS= read -r key || [ -n "$key" ]; do
         case "$key" in acq.*) ;; *) return 1 ;; esac
         case "$key" in *[!A-Za-z0-9._-]*) return 1 ;; esac
-        uninstall_secret_tool clear acq_key "$key" || return 1
+        [ "${1:-remove}" = check ] || uninstall_secret_tool clear acq_key "$key" || return 1
       done < "$file"
     else
       key="${file##*/}"
       case "$key" in *[!A-Za-z0-9._-]*) return 1 ;; esac
-      uninstall_secret_tool clear acq_key "$key" || return 1
+      [ "${1:-remove}" = check ] || uninstall_secret_tool clear acq_key "$key" || return 1
     fi
   done
 }
@@ -166,7 +201,7 @@ uninstall_linux_secrets() {
 # Only unlink launchers whose target is one of the inventoried installations.
 uninstall_links() {
   local link target name
-  for name in acq msb microsandbox; do
+  for name in acq acq-python msb microsandbox; do
     link="$uninstall_bin/$name"
     if [ ! -L "$link" ]; then
       [ ! -e "$link" ] || { uninstall_error "unrecognized launcher: $link"; return 1; }
@@ -174,8 +209,8 @@ uninstall_links() {
     fi
     target=$(readlink "$link") || return 1
     case "$target" in
-      "$uninstall_clone/acq"|"$uninstall_msb_home/bin/msb"|"$uninstall_msb_home/bin/microsandbox")
-        rm -f -- "$link" || return 1 ;;
+      "$uninstall_install/acq"|"$uninstall_install/acq-python"|"$uninstall_msb_home/bin/msb"|"$uninstall_msb_home/bin/microsandbox")
+        [ "${1:-remove}" = check ] || rm -f -- "$link" || return 1 ;;
       *) uninstall_error "unrecognized launcher target: $link"; return 1 ;;
     esac
   done
@@ -208,7 +243,7 @@ uninstall_shell_config() {
       rm -f -- "$tmp"
       uninstall_error "unmatched installer markers in $file; review manually."; return 1
     fi
-    if ! cmp -s "$file" "$tmp"; then
+    if [ "${1:-remove}" != check ] && ! cmp -s "$file" "$tmp"; then
       uninstall_validate_root "$file" "${file##*/}" || { rm -f -- "$tmp"; return 1; }
       cat "$tmp" > "$file" || { rm -f -- "$tmp"; return 1; }
     fi

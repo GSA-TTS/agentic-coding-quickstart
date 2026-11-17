@@ -72,7 +72,7 @@ from .commands import common, configure, creds, kit, lifecycle, secret, session
 # and ADR-0038m §1).
 KNOWN_COMMANDS = frozenset(
     "version doctor help backend configure create run ls stop start restart rm exec attach shell cp ports "
-    "secret kit kit-source provider-credential github-scope usai-rotate-api-key".split()
+    "secret kit kit-source provider-credential github-scope usai-rotate-api-key uninstall".split()
 )
 
 
@@ -262,6 +262,9 @@ def build_parser() -> _Parser:
     doctor_p.add_argument("name", nargs="?", default=None, help="sandbox to inspect (requires a backend)")
     doctor_p.add_argument("extra_names", nargs="*", help=argparse.SUPPRESS)
     sub.add_parser("help", help="show help")
+    uninstall_parser = sub.add_parser("uninstall", help="remove ACQ and all local MSB data")
+    uninstall_parser.add_argument("--dry-run", action="store_true", help="preview without removing files")
+    uninstall_parser.add_argument("--yes", "-y", action="store_true", help="confirm permanent removal")
 
     backend_parser = sub.add_parser(
         "backend", help="detect, inspect and select the sandbox backends (sbx, msb)"
@@ -972,6 +975,10 @@ def _boundary_label(parsed) -> str:
 
 def _dispatch(parser: _Parser, parsed, emit_json: bool, backend_override: str | None) -> int:
     """Route a parsed command line to its handler; ``main`` owns the error boundary."""
+    if parsed.command == "uninstall":
+        from .commands import uninstall
+
+        return uninstall.run_uninstall(parsed, emit_json, backend_override)
     if parsed.version or parsed.command == "version":
         # The `version` command lives in version_info.py (data + output), imported
         # lazily so a break there affects only `acq version`, never the oracle's

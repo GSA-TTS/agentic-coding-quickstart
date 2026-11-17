@@ -51,6 +51,8 @@ on:
       - install.ps1
       - scripts/assemble-release
       - scripts/gen-install-assets
+      - scripts/build-uninstaller
+      - acq.backends/uninstall*.sh
       - scripts/gen-provenance
       - scripts/stage-posix-runtime
       - scripts/stage-windows-runtime
@@ -319,6 +321,7 @@ jobs:
       - name: Complete and verify the enumerated dist
         run: |
           cp install.sh dist/
+          bash scripts/build-uninstaller dist/uninstall.command
           test -f dist/install.ps1
           scripts/gen-provenance dist
           scripts/gen-install-assets dist

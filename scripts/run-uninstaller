@@ -1,0 +1,19 @@
+#!/bin/bash
+# Source-checkout entry point; release distributions use the generated script.
+set -uo pipefail
+# Never search the current workspace for host programs.
+safe_path=""; rest="${PATH-}:"
+while [ -n "$rest" ]; do
+  entry="${rest%%:*}"; rest="${rest#*:}"
+  case "$entry" in /*) safe_path="${safe_path:+$safe_path:}$entry" ;; esac
+done
+[ -n "$safe_path" ] || { echo 'Uninstaller: PATH has no absolute directories.' >&2; exit 1; }
+export PATH="$safe_path"
+root=$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P) || exit 1
+# shellcheck source=acq.backends/uninstall-files.sh
+. "$root/acq.backends/uninstall-files.sh"
+# shellcheck source=acq.backends/uninstall-installation.sh
+. "$root/acq.backends/uninstall-installation.sh"
+# shellcheck source=acq.backends/uninstall.sh
+. "$root/acq.backends/uninstall.sh"
+uninstall_main "$@"

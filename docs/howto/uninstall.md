@@ -69,8 +69,19 @@ inspect it before running. Release `SHA256SUMS` includes its checksum.
 
 ## What is removed
 
+On the Python implementation, `acq-python uninstall` uses the same wizard.
+`acq uninstall` reaches recovery before selecting Bash/Python, so a broken
+private runtime does not prevent launching the recovery flow. For Python JSON
+state, an existing system Python parser must validate schema versions;
+if none works, the wizard stops before deleting files. It never installs a
+parser or migrates state during removal.
+
 - Installed ACQ packages found through Homebrew and the current npm global prefix.
 - ACQ's managed clone and launcher under `~/.local/share/acq` and `~/.local/bin`.
+- Python release-owned files from `.acq-v1-install`, the app-private runtime,
+  and the `acq-python` launcher. Unowned files in that directory are preserved,
+  including across repeated removal. Custom Python installation roots stop for
+  manual ownership review. System Python is kept.
 - ACQ settings, state, and caches under `~/.config/acq`, `~/.local/state/acq`,
   and `~/.cache/acq`, including its offline validator runtime.
 - All MSB sandboxes, volumes, images, credentials, and files under

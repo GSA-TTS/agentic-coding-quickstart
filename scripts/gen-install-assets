@@ -38,7 +38,7 @@ command -v python3 >/dev/null 2>&1 || die "python3 is required"
 assets="$(python3 -I -c '
 import json, sys
 a = json.load(open("installer/assets.json", encoding="utf-8"))
-names = [a["provenance"]] + sorted(p["archive"] for p in a["platforms"].values()) + sorted(a.get("wheelhouses", []))
+names = [a["provenance"]] + sorted(p["archive"] for p in a["platforms"].values()) + sorted(a.get("wheelhouses", [])) + sorted(a.get("recovery", []))
 sys.stdout.buffer.write(("\n".join(names) + "\n").encode("ascii"))
 ')"
 

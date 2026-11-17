@@ -71,6 +71,26 @@ remaining sandbox data blocks removal rather than guessing that no VM is running
 
 ## Verification
 
+### Python migration integration
+
+The Python command registers uninstall as an owned verb and dispatches before
+state migration or backend resolution. POSIX release archives embed the generated
+recovery script beside the Python package. The source checkout delegates through
+`scripts/run-uninstaller`; neither entry point inherits relative PATH entries.
+Windows removal remains unsupported and returns an explicit refusal.
+
+The `.acq-v1-install` manifest authorizes individual top-level release entries,
+including the private runtime and `acq-python` launcher. Unknown entries, empty
+manifests, and custom roots fail closed. A remaining unowned file keeps its
+ownership manifest across repeated runs. System Python is never removed.
+
+Schema-versioned sandbox/provider/GitHub-scope records are validated by a local
+isolated system Python parser before deletion; no runtime is installed or state migrated.
+If no parser is available, removal blocks rather than guessing. The recovery
+wizard can run without ACQ's runtime when a system parser is available, and
+legacy state requires no parser. Tracking refs are removed with `--no-deref`,
+preserving symbolic targets and local branches.
+
 Offline regression tests cover cancellation, unsafe paths, command dispatch,
 partial failure, installation discovery, and standalone packaging. Live Mac
 acceptance must cover Homebrew and standalone installs, Keychain prompts,

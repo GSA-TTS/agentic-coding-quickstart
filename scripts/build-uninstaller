@@ -5,7 +5,16 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 output="${1:?Usage: bash scripts/build-uninstaller OUTPUT.command}"
 {
   printf '#!/bin/bash\n# Self-contained ACQ uninstaller; see ADR-0036.\nset -uo pipefail\n'
-  cat "$root/acq.backends/uninstall-files.sh" "$root/acq.backends/uninstall.sh"
+  cat <<'PATH_GUARD'
+safe_path=""; rest="${PATH-}:"
+while [ -n "$rest" ]; do
+  entry="${rest%%:*}"; rest="${rest#*:}"
+  case "$entry" in /*) safe_path="${safe_path:+$safe_path:}$entry" ;; esac
+done
+[ -n "$safe_path" ] || { echo 'Uninstaller: PATH has no absolute directories.' >&2; exit 1; }
+export PATH="$safe_path"
+PATH_GUARD
+  cat "$root/acq.backends/uninstall-files.sh" "$root/acq.backends/uninstall-installation.sh" "$root/acq.backends/uninstall.sh"
   cat <<'FOOTER'
 uninstall_main "$@"
 result=$?

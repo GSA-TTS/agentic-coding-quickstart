@@ -1,6 +1,8 @@
 #!/bin/bash
 # Offline, backend-independent uninstall entry point. See ADR-0036.
 # The release builder embeds uninstall-files.sh; do not source host state.
+# Installation root is initialized by uninstall-installation.sh.
+# shellcheck disable=SC2154
 
 uninstall_paths() {
   [ -n "${HOME:-}" ] && [ -d "$HOME" ] && [ ! -L "$HOME" ] && [ -O "$HOME" ] || {
@@ -66,9 +68,11 @@ uninstall_inventory() {
   uninstall_os=$(uname -s)
   case "$uninstall_os" in Darwin|Linux) ;; *) uninstall_error 'This uninstaller supports macOS and Linux only.'; return 1 ;; esac
   uninstall_paths || return 1
+  uninstall_installation_inventory || return 1
+  uninstall_migrated_state || return 1
   # This wizard is deliberately MSB-only: shared ACQ state may still be required
   # by existing SBX sandboxes, even if MSB is also installed.
-  if command -v sbx >/dev/null 2>&1 || [ -d "$uninstall_state/provenance/sbx" ]; then
+  if command -v sbx >/dev/null 2>&1 || [ -d "$uninstall_state/provenance/sbx" ] || [ -d "$uninstall_state/sbx" ]; then
     uninstall_error 'SBX was detected. This MSB-only uninstaller will not remove shared ACQ state.'; return 1
   fi
   uninstall_msb=$(command -v msb || true)
@@ -99,6 +103,11 @@ $uninstall_running"
       [ ! -e "$path" ] || { uninstall_error 'MSB is missing but sandbox data remains. Restore MSB to stop and remove it safely.'; return 1; }
     done
   fi
+  uninstall_helpers check || return 1
+  uninstall_clone_remotes check || return 1
+  uninstall_links check || return 1
+  uninstall_shell_config check || return 1
+  [ "$uninstall_os" != Linux ] || uninstall_linux_secrets check || return 1
 }
 
 uninstall_preview() {
@@ -175,7 +184,9 @@ uninstall_cleanup() {
   uninstall_remove_root "$uninstall_meta" secret-meta || return 1
   uninstall_remove_root "$uninstall_index" secret-index || return 1
   uninstall_remove_root "$uninstall_msb_home" '.microsandbox/microsandbox' || return 1
+  uninstall_installation_remove || return 1
   for path in "$uninstall_data" "$uninstall_state" "$uninstall_config" "$uninstall_cache" "$uninstall_clone"; do
+    [ "$path" != "$uninstall_install" ] || continue
     uninstall_remove_root "$path" acq || return 1
   done
   printf '✓ Removed ACQ and Microsandbox settings, stored files, and caches.\n'
@@ -184,7 +195,7 @@ uninstall_cleanup() {
 uninstall_verify() {
   local command_name formulas root formula
   hash -r
-  for command_name in acq msb microsandbox; do
+  for command_name in acq acq-python acq-py msb microsandbox; do
     if command -v "$command_name" >/dev/null 2>&1; then
       uninstall_error "$command_name is still available at $(command -v "$command_name"). Remove that additional installation and retry."; return 1
     fi
