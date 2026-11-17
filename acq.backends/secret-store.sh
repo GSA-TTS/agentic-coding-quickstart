@@ -991,30 +991,44 @@ acq_secret_unreadable() {
 # a fully silent prompt makes users think nothing happened and re-paste). Never
 # echoes the actual characters and never places the value in argv.
 #
-# Reads character-by-character from STDIN in silent mode (the caller only takes
-# this path when stdin is a TTY). Handles Backspace/Delete (erase one star), and
-# finishes on Enter (newline) or EOF. Falls back to a plain silent line read if
-# per-char reads are unavailable, then to a visible read as a last resort
-# (matching the prior behavior) so a secret can always be entered.
-_acq_read_secret_masked() {
-  local value="" char
-
-  # Fallback path: if the shell can't do a 1-char silent read, use the previous
-  # behavior (silent line read, else visible). Detected by trying it once.
-  if ! IFS= read -rsn1 char 2>/dev/null; then
-    local v
-    # shellcheck disable=SC2162
-    read -rs v 2>/dev/null || read -r v
-    printf '%s' "$v"
-    return 0
+# Hold echo off for the WHOLE entry, not one read at a time: fast pastes can
+# otherwise echo between reads. A subshell owns cleanup traps without replacing
+# the caller's traps. Invoke through command substitution (as below), which
+# owns the cleanup process. Non-TTY input remains useful for offline tests.
+_acq_read_secret_masked() (
+  local value="" char saved="" prompt="${1:-}" rc
+  local read_flags=(-rn1)
+  # Bash 3.2 conflates timed-read EOF and timeout; do not guess from elapsed time.
+  if [ "${BASH_VERSINFO[0]}" -ge 4 ]; then read_flags+=(-t 1); fi
+  if [ -t 0 ]; then
+    exec 8<&0
+    saved=$(stty -g) || { echo 'acq: cannot save terminal settings; refusing secret input.' >&2; return 1; }
+    # Embed the stty snapshot: function locals are out of scope when the
+    # command-substitution shell finally runs its EXIT trap.
+    # shellcheck disable=SC2064 # snapshot intentionally captured before locals expire
+    trap "trap '' INT TERM HUP; stty '$saved' <&8 || { echo 'acq: failed to restore terminal settings.' >&2; exit 1; }" EXIT
+    trap 'trap "" INT TERM HUP; exit 130' INT
+    trap 'trap "" INT TERM HUP; exit 143' TERM
+    trap 'trap "" INT TERM HUP; exit 129' HUP
+    # Keep ISIG enabled so Ctrl-C interrupts; disable canonical editing because
+    # the reader handles backspace and Ctrl-D explicitly.
+    stty -echo -echonl -icanon min 1 time 0 || {
+      echo 'acq: cannot disable terminal echo; refusing secret input.' >&2
+      return 1
+    }
   fi
-
-  # `char` now holds the first character (empty if Enter was pressed first).
+  printf '%s' "$prompt" >&2
   while :; do
+    rc=0
+    IFS= read "${read_flags[@]}" char || rc=$?
+    if [ "$rc" -gt 128 ]; then continue; fi
+    [ "$rc" -eq 0 ] || return 1
     case "$char" in
       ""|$'\r')  # Enter/newline (or a bare CR from an exotic pty) terminates.
-        break
+        printf '%s' "$value"
+        return 0
         ;;
+      $'\004') return 1 ;;  # Ctrl-D: abort, do not store a partial paste.
       $'\177'|$'\b')  # Backspace / Delete: drop last char, erase a star.
         if [ -n "$value" ]; then
           value="${value%?}"
@@ -1026,10 +1040,9 @@ _acq_read_secret_masked() {
         printf '*' >&2
         ;;
     esac
-    IFS= read -rsn1 char 2>/dev/null || break
   done
-  printf '%s' "$value"
-}
+  return 1  # EOF or read failure: never fall back to visible input.
+)
 
 # ---------------------------------------------------------------------------
 # acq_secret_set_interactive SERVICE [SANDBOX] [HOST] [ENV]
@@ -1044,7 +1057,7 @@ _acq_read_secret_masked() {
 # acq_secret_meta_store) so both backends can bind the service generically at
 # provision. HOST/ENV are metadata only — never the value.
 acq_secret_set_interactive() {
-  local service="$1" sandbox="${2:-}" host="${3:-}" env="${4:-}" key value
+  local service="$1" sandbox="${2:-}" host="${3:-}" env="${4:-}" key value prompt
   # _acq_secret_key fails closed on unsafe service/sandbox names before reading a
   # value, so nothing is stored under an aliased or command-stream-breaking key.
   if ! key=$(_acq_secret_key "$service" "$sandbox"); then
@@ -1066,11 +1079,14 @@ acq_secret_set_interactive() {
     # "secret" (which in this project means the sbx/msb credential-injection
     # concept). Prompt with the friendlier term for the well-known services.
     case "$service" in
-      usai)   printf 'Enter USAi API key: ' >&2 ;;
-      github) printf 'Enter GitHub token: ' >&2 ;;
-      *)      printf 'Enter %s API key: ' "$service" >&2 ;;
+      usai)   prompt='Enter USAi API key: ' ;;
+      github) prompt='Enter GitHub token: ' ;;
+      *)      prompt="Enter $service API key: " ;;
     esac
-    value=$(_acq_read_secret_masked)
+    value=$(_acq_read_secret_masked "$prompt") || {
+      echo 'acq: secure secret input aborted; nothing stored.' >&2
+      return 1
+    }
     printf '\n' >&2
   fi
 
