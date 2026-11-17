@@ -287,6 +287,26 @@ def is_current(transcript: Transcript, **kwargs) -> bool:
     return staleness(transcript, **kwargs) is None
 
 
+def _matches_cell(transcript: Transcript, backend: str, platform: str) -> bool:
+    """A caller's cell key cannot relabel the host recorded by a transcript."""
+    environment = transcript.environment
+    expected_os = {"linux": "Linux", "macos": "Darwin", "windows": "Windows"}.get(
+        platform.split("-", 1)[0]
+    )
+    actual_backend = getattr(environment, "backend", None)
+    actual_os = getattr(environment, "os", None)
+    arch = getattr(environment, "arch", None)
+    hypervisor = getattr(environment, "hypervisor", None)
+    return (
+        expected_os is not None
+        and actual_backend == backend
+        and actual_os == expected_os
+        and isinstance(arch, str)
+        and isinstance(hypervisor, str)
+        and host_mismatch(platform, arch, hypervisor) is None
+    )
+
+
 def cell_state(
     backend: str,
     platform: str,
@@ -300,7 +320,7 @@ def cell_state(
 
     Unclaimed cells are unqualified (honest reporting — never claimed, never a
     pass). A claimed cell is qualified only when it holds a green *current*
-    transcript recorded at, and accepted at, a backend version that meets the
+    transcript from that backend and host, recorded at and accepted at a version meeting the
     floors (:func:`version_problem`); otherwise blocked (holds the gate).
     """
     if not is_claimed(backend, platform):
@@ -308,6 +328,7 @@ def cell_state(
     if (
         transcript is not None
         and transcript.verdict is Verdict.PASS
+        and _matches_cell(transcript, backend, platform)
         and version_problem(backend, transcript.environment.backend_version) is None
         and (backend_version is None or version_problem(backend, backend_version) is None)
         and is_current(
