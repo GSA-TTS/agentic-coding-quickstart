@@ -81,9 +81,39 @@ STUB
 }
 
 @test "noninteractive removal requires explicit confirmation" {
-  run uninstall_main
+  run uninstall_main </dev/null
   [ "$status" = 1 ]
   [[ "$output" == *'No interactive terminal'* ]]
+}
+
+@test "historical SBX records allow preview but yes alone never authorizes deletion" {
+  mkdir -p "$HOME/.local/state/acq/provenance/sbx"
+  printf 'historical record\n' > "$HOME/.local/state/acq/provenance/sbx/old.env"
+  run uninstall_main --dry-run </dev/null
+  [ "$status" = 0 ]
+  [[ "$output" == *'These are ACQ records, not sandbox disks.'* ]]
+  run uninstall_main --yes </dev/null
+  [ "$status" = 1 ]
+  [ -f "$HOME/.local/state/acq/provenance/sbx/old.env" ]
+  run uninstall_main --yes --confirm-no-sbx-sandboxes </dev/null
+  [ "$status" = 0 ]
+  [ ! -e "$HOME/.local/state/acq" ]
+}
+
+@test "installed SBX is not bypassed by sandbox-absence assertion" {
+  printf '#!/bin/bash\nexit 0\n' > "$FIXTURE/bin/sbx"
+  chmod +x "$FIXTURE/bin/sbx"
+  run uninstall_main --yes --confirm-no-sbx-sandboxes </dev/null
+  [ "$status" = 1 ]
+  [[ "$output" == *'SBX is installed at'* ]]
+  [[ "$output" == *"sbx ls"* ]]
+}
+
+@test "Python SBX state also requires explicit absence confirmation" {
+  mkdir -p "$HOME/.local/state/acq/sbx"
+  run uninstall_main --yes </dev/null
+  [ "$status" = 1 ]
+  [ -d "$HOME/.local/state/acq/sbx" ]
 }
 
 @test "custom clone named acq never authorizes deletion of a project" {

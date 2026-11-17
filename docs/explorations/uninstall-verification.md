@@ -43,6 +43,18 @@ Final credential-isolation review reported no remaining actionable findings.
 
 ## Local Commands and Observed Results
 
+Host follow-up: the original 29 isolated tests passed on macOS after redirecting
+stdin. Test 4 inherited Terminal stdin and waited at a captured prompt; the test
+now redirects its own stdin. A successful empty SBX inventory followed by SBX
+package removal left historical ACQ provenance that incorrectly blocked preview.
+Preview now identifies those records; deletion requires a separate sandbox-absence
+assertion. A sub-agent adversarial review reported no actionable blockers.
+
+Follow-up verification passed: 32 focused tests with disconnected stdin and again
+under a real pseudo-terminal (`script -q -e -c 'bash scripts/test-acq-bats
+test/bats/07-uninstall.bats'`), ShellCheck, Markdown lint, and Gitleaks on the
+changed cleanup module. Live macOS destructive acceptance remains pending.
+
 | Command | Observed result |
 | --- | --- |
 | `ACQ_BATS_JOBS=2 bash scripts/test-acq-bats` | PASS: 882 tests reported OK, zero failures, 8 environment-dependent skips; final fixture-isolation addition separately reverified below |

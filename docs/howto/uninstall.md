@@ -113,8 +113,19 @@ local component removal, not forensic secure erasure.
 
 Installer-marked MSB shell blocks are removed. ACQ's exact installer-added PATH
 line is removed only when its bin directory has no remaining tools; user-added
-PATH lines are kept. If SBX is detected, this MSB-only wizard stops to avoid
-deleting shared ACQ state that SBX still needs.
+PATH lines are kept. If SBX is still installed, this MSB-only wizard stops and
+names its executable. Check `sbx ls` before removing SBX; do not remove shared
+ACQ state while SBX sandboxes still need it. This wizard does not remove SBX's
+native storage or daemon.
+
+After SBX is uninstalled, historical ACQ records may remain in
+`~/.local/state/acq/provenance/sbx` or `~/.local/state/acq/sbx`. These records are
+not sandbox disks. The preview identifies them without blocking, but removal
+requires a separate confirmation that no SBX sandboxes remain. If you already
+verified an empty SBX inventory before uninstalling it, answer that confirmation
+in the wizard. For unattended use, `--confirm-no-sbx-sandboxes` explicitly asserts
+the same verification; `--yes` alone does not. Do not make this assertion if the
+sandbox inventory is unknown. Restore SBX to check it first.
 
 After success, open a new Terminal window before reinstalling or checking
 commands. A missing `acq` command alone is not proof that all state was removed;
