@@ -6137,16 +6137,21 @@ _acq_msb_parse_secret_scope() {
 _acq_msb_parse_host_env() {
   local _host_out="$1" _env_out="$2"
   shift 2
-  local _host="" _env_var="" _prev="" _arg
-  for _arg in "$@"; do
-    if [ "$_prev" = "--host" ]; then _host="$_arg"; _prev=""; continue
-    elif [ "$_prev" = "--env" ]; then _env_var="$_arg"; _prev=""; continue; fi
+  local _host="" _env_var="" _arg _value
+  while [ "$#" -gt 0 ]; do
+    _arg="$1"; shift
     case "$_arg" in
-      --host=*) _host="${_arg#--host=}" ;;
-      --env=*)  _env_var="${_arg#--env=}" ;;
-      --host)   _prev="--host" ;;
-      --env)    _prev="--env" ;;
+      --restart) _ACQ_MSB_SECRET_RESTART=1; continue ;;
+      --host|--env)
+        _value="${1:-}"
+        case "$_value" in ''|-*) echo "acq(msb): $_arg requires a value." >&2; return 1 ;; esac
+        shift ;;
+      --host=*|--env=*)
+        _value="${_arg#*=}"
+        case "$_value" in ''|-*) echo "acq(msb): ${_arg%%=*} requires a value." >&2; return 1 ;; esac ;;
+      *) echo 'acq(msb): unsupported secret set option.' >&2; return 1 ;;
     esac
+    case "$_arg" in --host*) _host="$_value" ;; --env*) _env_var="$_value" ;; esac
   done
   eval "$_host_out=\$_host"
   eval "$_env_out=\$_env_var"
@@ -6165,7 +6170,7 @@ _acq_msb_parse_host_env() {
 # unset immediately after the sweep.
 _acq_msb_secret_refeed() {
   local service="$1" scope_name="$2" _env="$3" _host="$4"
-  local val applied=0 sb
+  local applied=0 failed=0 sb targets
   [ -n "$_env" ] && [ -n "$_host" ] || { printf '0\n'; return 0; }
   # OPT-OUT of the live-refeed sweep. A GLOBAL `acq secret set -g <svc>` normally
   # re-feeds EVERY running sandbox so a rotated key takes effect without recreate.
@@ -6179,30 +6184,66 @@ _acq_msb_secret_refeed() {
     acq_debug "msb modify: live refeed suppressed (ACQ_SECRET_NO_LIVE_REFEED)"
     printf '0\n'; return 0
   fi
-  val=$(acq_secret_resolve "$service" "$scope_name" 2>/dev/null) && [ -n "$val" ] || { printf '0\n'; return 0; }
-  # shellcheck disable=SC2163  # dynamic export of the resolved binding env var
-  export "$_env=$val"
   if [ -n "$scope_name" ]; then
-    if acq_backend_exists "$scope_name"; then
-      _acq_msb_cli modify "$scope_name" --secret "${_env}@${_host}" </dev/null >/dev/null 2>&1 \
-        && applied=$((applied + 1))
-    fi
+    acq_backend_exists "$scope_name" || { echo "acq(msb): sandbox '$scope_name' not found; secret stored only." >&2; return 1; }
+    targets="$scope_name"
   else
-    # stdin from /dev/null so `msb modify` can't consume the `while read`
-    # heredoc (else only the first sandbox is processed — a real msb drains
-    # stdin). Same trap guarded in acq_backend_secret_rm's sweep.
-    while IFS= read -r sb; do
-      [ -n "$sb" ] || continue
-      _acq_msb_cli modify "$sb" --secret "${_env}@${_host}" </dev/null >/dev/null 2>&1 \
-        && applied=$((applied + 1))
-    done <<EOF
-$(_acq_msb_cli list -q 2>/dev/null)
-EOF
+    targets=$(_acq_msb_cli list -q 2>/dev/null) || { echo 'acq(msb): cannot list sandboxes; secret stored only.' >&2; return 1; }
   fi
-  unset "$_env"
-  val=""
+  while IFS= read -r sb; do
+    [ -n "$sb" ] || continue
+    if _acq_msb_secret_apply_one "$service" "$sb"; then
+      applied=$((applied + 1))
+    else
+      failed=$((failed + 1))
+      echo "acq(msb): secret stored, but failed to apply '$service' to '$sb'." >&2
+      echo "     If MSB requires a restart, run: acq --backend msb secret set $sb $service --restart" >&2
+      echo '     Restart interrupts running processes; no sandbox is recreated.' >&2
+    fi
+  done <<EOF
+$targets
+EOF
   [ "$applied" -gt 0 ] && acq_debug "msb modify: re-fed $service (${_env}@${_host}) to $applied sandbox(es)"
   printf '%s\n' "$applied"
+  [ "$failed" -eq 0 ]
+}
+
+# Resolve each sandbox separately: a global rotation must not overwrite a
+# sandbox-scoped credential or endpoint. Subshell keeps transient exports local.
+_acq_msb_secret_apply_one() (
+  local service="$1" sb="$2" binding env_name host val
+  binding=$(_acq_msb_service_binding "$service" "$sb") || return 1
+  env_name=$(printf '%s' "$binding" | cut -f1)
+  host=$(printf '%s' "$binding" | cut -f2)
+  [ -n "$env_name" ] && [ -n "$host" ] || return 1
+  val=$(acq_secret_resolve "$service" "$sb") && [ -n "$val" ] || return 1
+  local flags=() names=() restart=()
+  if [ "${_ACQ_MSB_SECRET_RESTART:-0}" = 1 ]; then
+    _acq_msb_bind_secrets_into flags names "$sb" || return 1
+    restart=(--restart)
+  fi
+  # shellcheck disable=SC2163
+  export "$env_name=$val"
+  # Backend output is not trusted to redact values. Report safe context upstream.
+  _acq_msb_cli modify "$sb" --secret "${env_name}@${host}" ${restart[@]+"${restart[@]}"} </dev/null >/dev/null 2>&1 || return 1
+  local secret_name
+  for secret_name in ${names[@]+"${names[@]}"}; do unset "$secret_name"; done
+  unset "$env_name"
+  val=""
+  if [ "${_ACQ_MSB_SECRET_RESTART:-0}" = 1 ]; then
+    _acq_msb_secret_restore_startup "$sb" || return 1
+  fi
+)
+
+_acq_msb_secret_restore_startup() {
+  local sb="$1"
+  if ! _acq_msb_wait_for_exec_ready "$sb" >/dev/null 2>&1 \
+    || ! _acq_msb_start_ssh_agent_bridge "$sb" \
+    || ! acq_cli_kits_load msb "$sb" >/dev/null 2>&1 \
+    || ! acq_backend_ensure_kits_applied "$sb" >/dev/null 2>&1; then
+    echo "acq(msb): modification succeeded, but startup restoration failed for '$sb'." >&2
+    return 1
+  fi
 }
 
 # _acq_msb_secret_set_guidance SERVICE ENV HOST APPLIED — print a concise
@@ -6257,8 +6298,12 @@ acq_backend_secret_set() {
   # as a non-secret sidecar so the provision path can bind the service generically
   # via `msb --secret ENV@HOST`. Built-ins (usai, github) need no
   # flags — their mapping is compiled in.
-  local host env_var
-  _acq_msb_parse_host_env host env_var "$@"
+  local host env_var _ACQ_MSB_SECRET_RESTART=0
+  _acq_msb_parse_host_env host env_var "$@" || return 1
+  if [ "$_ACQ_MSB_SECRET_RESTART" = 1 ] && [ -z "$scope_name" ]; then
+    echo 'acq(msb): --restart requires a named sandbox; refusing a global restart.' >&2
+    return 1
+  fi
 
   if ! command -v acq_secret_set_interactive >/dev/null 2>&1; then
     echo "acq(msb): internal error: secret store not loaded" >&2
@@ -6276,7 +6321,7 @@ acq_backend_secret_set() {
   _binding=$(_acq_msb_service_binding "$service" "$scope_name")
   _env=$(printf '%s' "$_binding" | cut -f1)
   _host=$(printf '%s' "$_binding" | cut -f2)
-  applied=$(_acq_msb_secret_refeed "$service" "$scope_name" "$_env" "$_host")
+  applied=$(_acq_msb_secret_refeed "$service" "$scope_name" "$_env" "$_host") || return 1
 
   _acq_msb_secret_set_guidance "$service" "$_env" "$_host" "$applied"
   return 0
@@ -6291,11 +6336,14 @@ acq_backend_secret_propagate() {
     echo "acq(msb): secret propagate: missing service name" >&2
     return 1
   fi
+  local targets
+  targets=$(_acq_msb_cli list -q 2>/dev/null) || {
+    echo "acq(msb): cannot list sandboxes to propagate '$service'." >&2
+    return 1
+  }
   if [ -n "$scope_name" ]; then
-    acq_backend_exists "$scope_name" || return 0
-  elif [ -z "$(_acq_msb_cli list -q 2>/dev/null)" ]; then
-    return 0
-  fi
+    printf '%s\n' "$targets" | grep -Fxq -- "$scope_name" || return 0
+  elif [ -z "$targets" ]; then return 0; fi
 
   local _env _host _binding applied eligible=0 _probe_val sb
   _binding=$(_acq_msb_service_binding "$service" "$scope_name")
@@ -6317,7 +6365,7 @@ acq_backend_secret_propagate() {
 $(_acq_msb_cli list -q 2>/dev/null)
 EOF
   fi
-  applied=$(_acq_msb_secret_refeed "$service" "$scope_name" "$_env" "$_host")
+  applied=$(_acq_msb_secret_refeed "$service" "$scope_name" "$_env" "$_host") || return 1
   if [ "$applied" -gt 0 ]; then
     echo "acq(msb): applied '$service' to $applied running sandbox(es)." >&2
   elif [ "$eligible" -gt 0 ]; then

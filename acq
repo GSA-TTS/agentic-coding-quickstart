@@ -207,6 +207,7 @@ acq secret — manage sandbox secrets (via acq's own backend-neutral store)
 
 Usage:
   acq secret set [-g | SANDBOX] SERVICE [--host HOST --env ENV]
+  acq --backend msb secret set SANDBOX SERVICE --restart
   acq secret rm  [-g | SANDBOX] SERVICE      # remove an acq-managed secret
   acq secret rm  [-g | SANDBOX] <placeholder>  # (sbx only: raw placeholder → passthrough)
   acq secret ls  [-g | SANDBOX]              # list acq-managed secrets

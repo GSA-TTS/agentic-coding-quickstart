@@ -664,7 +664,16 @@ PYSTUB
     # for the ADR-0022 terminate volume-cleanup matrix.
     [ "${STUB_MSB_RM_FAIL:-0}" = "1" ] && exit 1 || : ;;
   copy|cp) : ;;
-  modify) : ;;
+  modify)
+    if [ "${STUB_MSB_MODIFY_FAIL:-}" = "${2:-}" ]; then
+      echo 'synthetic backend: restart required; no changes applied' >&2
+      exit 1
+    fi
+    if [ "${STUB_MSB_MODIFY_RESTART_REQUIRED:-0}" = 1 ]; then
+      case " $* " in *' --restart '*) ;; *) exit 1 ;; esac
+      [ -n "${GITHUB_TOKEN:-}" ] || exit 1
+    fi
+    : ;;
   volume)
     # ADR-0022 derived-volume cleanup: `msb volume ls -q` lists names from the
     # fixture a test plants; `msb volume rm NAME` is logged (above) and no-ops.
