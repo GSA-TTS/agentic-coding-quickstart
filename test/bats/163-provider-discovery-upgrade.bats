@@ -27,7 +27,7 @@ while [ "${1:-}" = -c ]; do shift 2; done
 if [ "${1:-}" = fetch ]; then
   printf 'fetch\n' >> "$FETCH_LOG"
   [ "${FAIL_FETCH:-0}" != 1 ] || exit 1
-  exec "$ACQ_TEST_REAL_GIT" -c protocol.file.allow=always fetch --depth 1 "$SOURCE_REPO" "${@: -1}"
+  GIT_ALLOW_PROTOCOL=file exec "$ACQ_TEST_REAL_GIT" -c protocol.file.allow=always fetch --depth 1 "$SOURCE_REPO" "${@: -1}"
 fi
 exec "$ACQ_TEST_REAL_GIT" "${args[@]}"
 GIT

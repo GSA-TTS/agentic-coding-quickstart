@@ -1,0 +1,144 @@
+# Python acq v1 vectors — runs the language-neutral test-vector corpus (ADR-0043m)
+# through both runners and validates the coverage manifest.
+#
+# The managed runtime (ADR-0042m) is pinned here to Python 3.12 via setup-python
+# (the "IT-approved base interpreter" fallback; the app-private bundle is laid
+# down by the installer slice). jq is pinned to an exact release and
+# SHA256-verified so the Bash runner's dependency is declared, not opportunistic.
+# acq-py has no runtime dependencies and is run from py-acq/src, not installed;
+# only the hash-locked test tools are installed, so ordinary operation never
+# downloads acq's own assets and no unhashed build dependency is fetched.
+
+name: Python vectors
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  merge_group:
+    branches: [main]
+
+concurrency:
+  group: python-vectors-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  vectors:
+    runs-on: ubuntu-latest
+    # The corpus runs under both runners plus the pytest it drives; at 270+ vectors
+    # that passed the old 15-minute cap and was cancelled after every vector passed.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      # jq, pinned to 1.7.1 and SHA256-verified (declared in CI per ADR-0043m).
+      - name: Install jq (pinned, SHA256-verified)
+        run: |
+          set -euo pipefail
+          jq_sha="5942c9b0934e510ee61eb3e30273f1b3fe2590df93933a93d7c58b81d19c8ff5"
+          curl -fsSL -o jq https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64
+          echo "${jq_sha}  jq" | sha256sum -c -
+          chmod +x jq
+          sudo mv jq /usr/local/bin/jq
+          jq --version
+
+      # acq-py itself is not installed, as in windows.yml: pytest imports it from
+      # py-acq/src through the pyproject `pythonpath`, the tests' child
+      # processes get the same PYTHONPATH from conftest.py, and the Bash runner
+      # step sets it below. Installing would build a wheel, and pip's build
+      # isolation would download setuptools without a hash check. The test
+      # tools are the hash-locked set (ADR-0049m), wheels only, so every
+      # package installed here is hash-verified; pytest has the same pin as
+      # requirements-dev.txt and pyproject.toml.
+      - name: Install pinned test tools
+        run: |
+          python -m pip install --require-hashes --no-deps --only-binary :all: -r py-acq/requirements-quality.txt
+
+      # A checkout of Patterns at the kits' pinned ref, for the tests that compare
+      # acq's copies against the real pinned tree: the kit egress allowlist
+      # (KIT_NETWORK_ALLOW) and the packaged kit bundle. A pin bump that changes
+      # a kit's allowlist without re-deriving the table then fails here. The ref
+      # is read from acq.backends/common.sh, which py-acq's tests keep equal to
+      # acq_py.kits.CONTROL_PLANE_REF.
+      - name: Read the pinned Patterns ref
+        id: patterns-pin
+        run: |
+          set -euo pipefail
+          patterns_ref=$(sed -n 's/^PATTERNS_KIT_REF="\([0-9a-f]\{40\}\)"$/\1/p' acq.backends/common.sh)
+          [ -n "$patterns_ref" ]
+          printf 'ref=%s\n' "$patterns_ref" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: GSA-TTS/agentic-coding-patterns
+          ref: ${{ steps.patterns-pin.outputs.ref }}
+          path: .ci/agentic-coding-patterns
+          persist-credentials: false
+
+      # Confirm the checkout is exactly the pin and unmodified, then make its
+      # tree read-only so no test can change it. .git stays writable for the
+      # checkout action's post-job cleanup. Symlinks are skipped: chmod follows
+      # them, so one in a future pin could reach files outside the checkout.
+      - name: Verify the pinned Patterns checkout
+        env:
+          PATTERNS_REF: ${{ steps.patterns-pin.outputs.ref }}
+        run: |
+          set -euo pipefail
+          patterns_dir=.ci/agentic-coding-patterns
+          [ "$(git -C "$patterns_dir" rev-parse HEAD)" = "$PATTERNS_REF" ]
+          test -z "$(git -C "$patterns_dir" status --porcelain)"
+          find "$patterns_dir" -path "$patterns_dir/.git" -prune -o ! -type l -exec chmod a-w {} +
+
+      # Tier-1 vectors + sentinel coverage + coverage-manifest validation, plus
+      # the pinned-tree checks above. Those checks skip when they cannot see the
+      # checkout, which would pass silently, so a skip on that reason fails the
+      # step.
+      - name: Run pytest vector runner
+        env:
+          ACQ_TEST_PATTERNS_REPO: ${{ github.workspace }}/.ci/agentic-coding-patterns
+        run: |
+          set -euo pipefail
+          python -m pytest py-acq/tests -q -rs | tee "$RUNNER_TEMP/pytest.log"
+          if grep -q 'pinned Patterns checkout is provided' "$RUNNER_TEMP/pytest.log"; then
+            echo "::error::the pinned Patterns checks were skipped; ACQ_TEST_PATTERNS_REPO did not reach them"
+            exit 1
+          fi
+
+      # The independent Bash runner over the same corpus; must agree with pytest
+      # on the sentinel golden set.
+      - name: Run Bash vector runner
+        env:
+          PYTHONPATH: ${{ github.workspace }}/py-acq/src
+        run: scripts/run-vectors --acq "python -m acq_py"
+
+      # The steps above run acq from py-acq/src, so they cannot see a file the
+      # wheel fails to ship (the kit bundle, its hidden .config files,
+      # msb-balanced-hosts.txt). Build the wheel with the hash-locked setuptools
+      # (no build isolation, so pip fetches nothing unhashed), install it into a
+      # throwaway venv, and run the cli vectors against the installed console
+      # script. PYTHONPATH stays unset so nothing is imported from the checkout.
+      - name: Build, install and test the wheel
+        run: |
+          set -euo pipefail
+          build="$RUNNER_TEMP/acq-wheel-build"
+          python -m venv --clear "$build"
+          "$build/bin/python" -m pip install --require-hashes --no-deps --only-binary :all: -r py-acq/requirements-build.txt
+          "$build/bin/python" -m pip wheel --no-build-isolation --no-deps --no-index -w "$RUNNER_TEMP/wheel" ./py-acq
+          run="$RUNNER_TEMP/acq-wheel-run"
+          python -m venv --clear "$run"
+          "$run/bin/python" -m pip install --no-deps --no-index "$RUNNER_TEMP"/wheel/acq_py-*.whl
+          (cd "$RUNNER_TEMP" && "$run/bin/python" -c 'import acq_py, sys; sys.exit("site-packages" not in acq_py.__file__)')
+          (cd "$RUNNER_TEMP" && ACQ_SBX_INSTALLED=0 ACQ_MSB_INSTALLED=0 "$run/bin/acq-py" version --json)
+          scripts/run-vectors --acq "$run/bin/acq-py" --section cli

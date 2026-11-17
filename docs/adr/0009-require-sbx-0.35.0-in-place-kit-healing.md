@@ -49,8 +49,7 @@ supersedes: []
 > recreate discards the sandbox's session/context, so it stays a deliberate,
 > user-consented action (safety > convenience). The "not yet" in the upstream
 > error suggests sbx may restore startup support in the kit-add flow; if it does,
-> in-place healing can be re-enabled. This limitation drove
-> [quickstart#320](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/320).
+> in-place healing can be re-enabled. This limitation requires explicit recreation for startup-bearing kits.
 
 ## Context and Problem Statement
 
@@ -69,7 +68,7 @@ does. A sandbox without the USAi provider config is unusable, so `qsbx`:
   (`migrate_or_halt`: export sanitized sessions → `sbx rm` the old sandbox →
   recreate with kits → import), or halted with manual options.
 
-sbx **0.35.0** (2026-07-10) fixes #133: `sbx kit add` now **recreates the
+sbx **0.35.0** (2026-07-10) fixes the static-file kit-add failure: `sbx kit add` now **recreates the
 sandbox container with the augmented kit set and preserves state**. It also
 fixes `sbx cp` on a kit-added sandbox and lets `sbx run --name` re-attach to a
 `--kit` sandbox without re-passing `--kit`. This removes the reason for both the
@@ -82,7 +81,7 @@ The question: adopt 0.35.0 as the floor and delete the workaround, given that
 
 - **Simplicity / least code:** the workaround (disable flag + a destructive,
   fail-closed export/recreate/import path + a pre-kit detector) exists solely to
-  route around #133. With #133 fixed, it is dead weight and extra risk surface.
+  route around the static-file kit-add failure. With that fixed, it is dead weight and extra risk surface.
 - **Non-destructive healing:** `sbx kit add` on 0.35.0 preserves state, so a
   pre-kit sandbox is repaired in place — no `sbx rm`, no session export/import.
 - **Correctness / integrity (SI-7):** kits stay SHA-pinned; healing composes the
@@ -119,7 +118,7 @@ The question: adopt 0.35.0 as the floor and delete the workaround, given that
   helpers are retained** — they remain route 1 of the unrelated ADR-0008
   stale-placeholder recovery (`offer_update_stale_placeholder`), a problem
   (delete + re-add of the global USAi secret) that still exists on 0.35.0 and is
-  independent of #133.
+  independent of the static-file kit-add failure.
 
 ## Consequences
 
@@ -134,7 +133,7 @@ The question: adopt 0.35.0 as the floor and delete the workaround, given that
   a configuration-management decision (CM-2/CM-3/CM-6) with no new attack surface.
 - **Docs:** README (Step 2, "Staying Current") and
   `docs/KNOWN_FAILURE_MODES.md` §19 are updated to describe in-place healing; the
-  #133 history is kept as a note.
+  static-file kit-add failure history is kept as a note.
 - **Superseding scope:** this narrows ADR-0005's healing description (which said
   `ensure_kit_applied` heals a sandbox missing a kit) to "unconditional, via
   0.35.0 `sbx kit add`"; ADR-0005 otherwise stands.

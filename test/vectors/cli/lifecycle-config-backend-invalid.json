@@ -1,0 +1,71 @@
+{
+  "schema": 1,
+  "id": "cli/lifecycle-config-backend-invalid",
+  "oracle": "ADR-0038m / Bash acq_resolve_backend parity: an unknown backend persisted in config.yaml is never skipped for auto-detect; a verb that needs a backend fails closed (backend_not_found, exit 1) before touching any sandbox",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{acq}",
+      "rm",
+      "nope",
+      "--json"
+    ],
+    "env": {
+      "ACQ_SBX_BIN": "__stub__",
+      "ACQ_SBX_VERSION": "0.51.0",
+      "ACQ_MSB_BIN": "__stub__",
+      "ACQ_MSB_VERSION": "0.7.7",
+      "ACQ_CONFIG_SEED": "backend: podman"
+    },
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "MSB_HOME",
+      "SBX_HOME",
+      "ACQ_IMAGE",
+      "ACQ_MSB_IMAGE",
+      "ACQ_SBX_READY_TIMEOUT",
+      "ACQ_SBX_STUB_CATALOG",
+      "ACQ_SBX_STUB_FAIL",
+      "ACQ_MSB_STUB_CATALOG",
+      "ACQ_MSB_STUB_FAIL",
+      "ACQ_SBX_INSTALLED",
+      "ACQ_MSB_INSTALLED",
+      "ACQ_MIGRATION_LOCK_TIMEOUT"
+    ],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 1,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "rm",
+        "error": {
+          "code": "backend_not_found"
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME"
+    ]
+  }
+}

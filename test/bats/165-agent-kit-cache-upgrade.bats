@@ -36,7 +36,7 @@ while [ "${1:-}" = -c ]; do shift 2; done
 if [ "${1:-}" = fetch ]; then
   printf 'fetch\n' >> "$FETCH_LOG"
   [ "${FAIL_FETCH:-0}" != 1 ] || exit 1
-  exec "$ACQ_TEST_REAL_GIT" -c protocol.file.allow=always fetch --depth 1 "$SOURCE_REPO" "${@: -1}"
+  GIT_ALLOW_PROTOCOL=file exec "$ACQ_TEST_REAL_GIT" -c protocol.file.allow=always fetch --depth 1 "$SOURCE_REPO" "${@: -1}"
 fi
 exec "$ACQ_TEST_REAL_GIT" "${args[@]}"
 GIT
@@ -232,11 +232,13 @@ SPEC
   _agent_upgrade_assert_legacy
 }
 
-@test "agent upgrade: unset state directory uses the versioned temporary fallback" {
+@test "agent upgrade: unset state directory uses the versioned per-user state fallback" {
   export TMPDIR="$STUBDIR/tmp"
   mkdir -p "$TMPDIR"
-  # Seed the same old layout under the documented fallback, then unset the knob.
-  ACQ_STATE_DIR="$TMPDIR/acq"
+  # Seed the old layout under the resolved user state root, then unset the knob.
+  export XDG_STATE_HOME="$STUBDIR/state-fallback"
+  unset ACQ_STATE_DIR
+  ACQ_STATE_DIR=$(acq_state_dir)
   _agent_upgrade_legacy
   unset ACQ_STATE_DIR
   _agent_upgrade_ready first

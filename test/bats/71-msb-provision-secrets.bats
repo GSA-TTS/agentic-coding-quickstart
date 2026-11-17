@@ -55,7 +55,8 @@ _provision() { # NAME PRE_SNIPPET
   assert_regex "$log" "--volume ${wshost}:${ws}"
   refute_regex "$log" "--volume ${ws}:/home/agent/workspace"
   assert_regex "$log" 'msb create --name provbox'
-  assert_regex "$log" 'docker\.io/docker/sandbox-templates:shell-docker'
+  assert_regex "$log" 'ghcr\.io/gsa-tts/agentic-coding-patterns/devenv-shell@sha256:0b5f4cc95c8fa7dd7f3ffd02b56e63d0caf9b151421ff6ea3cb34b2139e3966c'
+  refute_regex "$log" 'docker\.io/docker/sandbox-templates:shell-docker'
   refute_regex "$log" 'docker\.io/library/node:22-bookworm'
 }
 
@@ -100,6 +101,7 @@ _provision() { # NAME PRE_SNIPPET
   '
   local log; log=$(cat "$CALLS")
   assert_regex "$log" 'docker\.io/library/node:22-bookworm'
+  refute_regex "$log" 'ghcr\.io/gsa-tts/agentic-coding-patterns/devenv-shell@sha256:0b5f4cc95c8fa7dd7f3ffd02b56e63d0caf9b151421ff6ea3cb34b2139e3966c'
   refute_regex "$log" 'docker\.io/docker/sandbox-templates:shell-docker'
 }
 
@@ -161,6 +163,7 @@ _provision() { # NAME PRE_SNIPPET
 @test "msb#226: setting a custom endpoint (msb) live-binds a running sandbox, no value on argv" {
   load_acq
   printf 'genrunbox\n' > "$STUBDIR/.msb_sandbox_list"
+  printf 'genrunbox\n' > "$STUBDIR/.msb_running_list"
   : > "$CALLS"
   run bash -c '
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/genrun-secrets"
@@ -259,4 +262,189 @@ LIST
   run env ACQ_SECRET_STORE_DIR="$STUBDIR/empty-ls-secrets" ACQ_BACKEND=msb "$ACQ" secret ls
   assert_success
   assert_output --partial 'SCOPE'
+}
+
+@test "secret set(msb): a global set leaves a sandbox's own credential bound" {
+  printf 'ownbox\nplainbox\n' > "$STUBDIR/.msb_sandbox_list"
+  printf 'ownbox\nplainbox\n' > "$STUBDIR/.msb_running_list"
+  mkdir -p "$STUBDIR/secrets"
+  printf 'own-token\n' > "$STUBDIR/secrets/acq.ownbox.github"
+  : > "$CALLS"
+  run env ACQ_SECRET_TEST_VALUE="global-token" ACQ_BACKEND=msb "$ACQ" secret set -g github
+  assert_success
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'msb modify plainbox --secret GITHUB_TOKEN@'
+  refute_regex "$log" 'msb modify ownbox'
+}
+
+@test "secret rm(msb): a global rm keeps a sandbox's own credential bound" {
+  printf 'ownbox\nplainbox\n' > "$STUBDIR/.msb_sandbox_list"
+  printf 'ownbox\nplainbox\n' > "$STUBDIR/.msb_running_list"
+  mkdir -p "$STUBDIR/secrets"
+  printf 'own-token\n' > "$STUBDIR/secrets/acq.ownbox.github"
+  printf 'global-token\n' > "$STUBDIR/secrets/acq.github"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb "$ACQ" secret rm -g github
+  assert_success
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'msb modify plainbox --secret-rm GITHUB_TOKEN'
+  refute_regex "$log" 'msb modify ownbox --secret-rm'
+  # Its own value is re-asserted under the same name (never on argv).
+  assert_regex "$log" 'msb modify ownbox --secret GITHUB_TOKEN@'
+  refute_regex "$log" 'own-token'
+  assert [ -f "$STUBDIR/secrets/acq.ownbox.github" ]
+  refute [ -f "$STUBDIR/secrets/acq.github" ]
+}
+
+@test "secret rm(msb): a global rm warns when a sandbox's own value cannot be kept" {
+  printf 'ownbox\n' > "$STUBDIR/.msb_sandbox_list"
+  mkdir -p "$STUBDIR/secrets"
+  # Stored but unreadable here: a DPAPI envelope under the file backend.
+  printf 'acq-dpapi-v1\nAAAA\n' > "$STUBDIR/secrets/acq.ownbox.github"
+  printf 'global-token\n' > "$STUBDIR/secrets/acq.github"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb "$ACQ" secret rm -g github
+  assert_success
+  assert_output --partial "has its own 'github' value, but it cannot be read"
+  refute_regex "$(cat "$CALLS")" 'msb modify ownbox --secret GITHUB_TOKEN@'
+  # A readable own value whose re-bind fails is reported too.
+  printf 'own-token\n' > "$STUBDIR/secrets/acq.ownbox.github"
+  printf 'global-token\n' > "$STUBDIR/secrets/acq.github"
+  mv "$STUBDIR/msb" "$STUBDIR/msb.real"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'case " $* " in *" modify ownbox --secret "*) exit 1 ;; esac' \
+    "exec \"$STUBDIR/msb.real\" \"\$@\"" > "$STUBDIR/msb"
+  chmod +x "$STUBDIR/msb"
+  run env ACQ_BACKEND=msb "$ACQ" secret rm -g github
+  assert_success
+  assert_output --partial "could not re-bind sandbox 'ownbox''s own 'github' value"
+  refute_output --partial 'own-token'
+}
+
+@test "secret set(msb): renaming a service's env var unbinds the old name first" {
+  : > "$STUBDIR/.msb_sandbox_list"
+  run env ACQ_SECRET_TEST_VALUE="v1" ACQ_BACKEND=msb "$ACQ" secret set -g myapi --host api.example.com --env OLD_KEY
+  assert_success
+  printf 'runbox\n' > "$STUBDIR/.msb_sandbox_list"
+  printf 'runbox\n' > "$STUBDIR/.msb_running_list"
+  : > "$CALLS"
+  run env ACQ_SECRET_TEST_VALUE="v2" ACQ_BACKEND=msb "$ACQ" secret set -g myapi --host api.example.com --env NEW_KEY
+  assert_success
+  local log rm_line add_line
+  log=$(cat "$CALLS")
+  assert_regex "$log" 'msb modify runbox --secret-rm OLD_KEY'
+  assert_regex "$log" 'msb modify runbox --secret NEW_KEY@api\.example\.com'
+  rm_line=$(grep -n -- '--secret-rm OLD_KEY' "$CALLS" | head -1 | cut -d: -f1)
+  add_line=$(grep -n -- '--secret NEW_KEY@' "$CALLS" | head -1 | cut -d: -f1)
+  assert [ "$rm_line" -lt "$add_line" ]
+  # An unchanged binding is rotated in place, with no unbind.
+  : > "$CALLS"
+  run env ACQ_SECRET_TEST_VALUE="v3" ACQ_BACKEND=msb "$ACQ" secret set -g myapi --host api.example.com --env NEW_KEY
+  assert_success
+  refute_regex "$(cat "$CALLS")" 'secret-rm'
+}
+
+@test "rotate(msb): the re-feed skips a sandbox whose provider selection excludes usai" {
+  printf 'nousai\nwithusai\n' > "$STUBDIR/.msb_sandbox_list"
+  printf 'nousai\nwithusai\n' > "$STUBDIR/.msb_running_list"
+  # nousai was created with --no-provider-kits (an explicit, empty selection).
+  (
+    # shellcheck disable=SC2034 # acq_provenance_write reads these globals
+    ACQ_PROVIDER_KITS=""
+    # shellcheck disable=SC2034
+    ACQ_PROVIDER_KITS_FROM_ENV=1
+    acq_provenance_write msb nousai
+  )
+  acq_provenance_write msb withusai
+  assert_equal "$(acq_provenance_field msb nousai provider_selection)" "explicit"
+  : > "$CALLS"
+  run env ACQ_SECRET_TEST_VALUE="new-usai-key" ACQ_BACKEND=msb "$ACQ" usai-rotate-api-key
+  assert_success
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'msb modify withusai --secret USAI_API_KEY@api\.gsa\.usai\.gov'
+  refute_regex "$log" 'msb modify nousai'
+  # A record that exists but cannot be read or parsed fails closed: reading it as
+  # empty would look like a legacy (default-selection) record.
+  local nf; nf=$(_acq_provenance_file msb nousai)
+  printf 'provider_selection=sideways\n' > "$nf"
+  : > "$CALLS"
+  run env ACQ_SECRET_TEST_VALUE="k2" ACQ_BACKEND=msb "$ACQ" usai-rotate-api-key
+  assert_success
+  refute_regex "$(cat "$CALLS")" 'msb modify nousai'
+  mv -f "$nf" "$nf.saved"
+  mkdir -p "$nf"
+  : > "$CALLS"
+  run env ACQ_SECRET_TEST_VALUE="k3" ACQ_BACKEND=msb "$ACQ" usai-rotate-api-key
+  assert_success
+  refute_regex "$(cat "$CALLS")" 'msb modify nousai'
+  assert_output --partial "provenance record cannot be read"
+  rmdir "$nf"
+  mv -f "$nf.saved" "$nf"
+  if [ "$(id -u)" != 0 ]; then
+    chmod 000 "$nf"
+    : > "$CALLS"
+    run env ACQ_SECRET_TEST_VALUE="k4" ACQ_BACKEND=msb "$ACQ" usai-rotate-api-key
+    chmod 600 "$nf"
+    assert_success
+    refute_regex "$(cat "$CALLS")" 'msb modify nousai'
+    assert_regex "$(cat "$CALLS")" 'msb modify withusai --secret'
+  fi
+  # A non-provider service still reaches every sandbox.
+  : > "$CALLS"
+  run env ACQ_SECRET_TEST_VALUE="gh" ACQ_BACKEND=msb "$ACQ" secret set -g github
+  assert_success
+  assert_regex "$(cat "$CALLS")" 'msb modify nousai --secret GITHUB_TOKEN@'
+}
+
+@test "msb: refeed binds stopped sandboxes, counts what applied, and explains a running one" {
+  # msb binds a secret on a stopped sandbox (idle) and rotates a bound one live
+  # (live), but refuses to add a new one to a running sandbox (fresh).
+  run bash -c '
+    export ACQ_SCRIPT_DIR="$1"
+    . "$1/acq.backends/common.sh"
+    . "$1/acq.backends/msb.sh"
+    acq_secret_resolve() { printf "%s\n" sentinel; }
+    _acq_msb_refeed_eligible() { return 0; }
+    _acq_msb_cli() {
+      printf "%s\n" "$*" >> "$CALLS"
+      case "$*" in
+        "list -q") printf "%s\n" live fresh idle ;;
+        "modify live --secret API_KEY@api.example.gov") return 0 ;;
+        "modify idle --secret API_KEY@api.example.gov") return 0 ;;
+        *) return 1 ;;
+      esac
+    }
+    applied=$(_acq_msb_secret_refeed custom "" API_KEY api.example.gov)
+    _acq_msb_secret_set_guidance custom API_KEY api.example.gov "$applied"
+    [ "$applied" = 2 ] || exit 1
+    # A named, stopped sandbox is bound too: msb accepts a new secret there.
+    [ "$(_acq_msb_secret_refeed custom idle API_KEY api.example.gov)" = 1 ]
+  ' _ "$REPO_ROOT"
+  assert_success
+  assert_regex "$output" 'Applied to 2 sandbox'
+  assert_regex "$output" "could not apply the credential to sandbox 'fresh'"
+  assert_regex "$output" 'cannot add a new secret to a running sandbox'
+  assert_regex "$(cat "$CALLS")" 'modify idle --secret API_KEY@api.example.gov'
+}
+
+@test "msb: rm count includes stopped targets and excludes failed removes" {
+  run bash -c '
+    export ACQ_SCRIPT_DIR="$1"
+    . "$1/acq.backends/common.sh"
+    . "$1/acq.backends/msb.sh"
+    acq_secret_delete() { return 0; }
+    acq_secret_meta_delete() { return 0; }
+    _acq_msb_has_own_value() { return 1; }
+    _acq_msb_cli() {
+      case "$*" in
+        "list -q") printf "%s\n" live idle broken ;;
+        "modify broken --secret-rm USAI_API_KEY") return 1 ;;
+        *) return 0 ;;
+      esac
+    }
+    acq_backend_secret_rm -g usai
+  ' _ "$REPO_ROOT"
+  assert_success
+  assert_regex "$output" 'Confirmed it unbound from 2 sandbox'
+  refute_regex "$output" '2 running sandbox'
 }

@@ -1,0 +1,86 @@
+{
+  "schema": 1,
+  "id": "cli/create-clone-not-a-repo",
+  "oracle": "Clone mode refuses a workspace that is not a git repository before any backend call (Bash _acq_msb_clone_repo_root, same message and advice): exit 1, validation_failed",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{python}",
+      "-I",
+      "test/vectors/drivers/seeded-run.py",
+      "[{\"git_repos\":{}},[[\"--backend\",\"msb\",\"secret\",\"set\",\"-g\",\"usai\"],true,0],[[\"--backend\",\"msb\",\"create\",\"shell\",\"{workspace}\",\"--name\",\"clone-box\",\"--clone\",\"--json\"],false,null]]",
+      "{acq}"
+    ],
+    "env": {
+      "ACQ_MSB_BIN": "__stub__",
+      "ACQ_MSB_VERSION": "0.7.7",
+      "ACQ_MSB_INSTALLED": "1",
+      "ACQ_SBX_INSTALLED": "0"
+    },
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "MSB_HOME",
+      "ACQ_IMAGE",
+      "ACQ_MSB_IMAGE",
+      "ACQ_MSB_READY_TIMEOUT",
+      "ACQ_MSB_STUB_CATALOG",
+      "ACQ_MSB_STUB_FAIL",
+      "ACQ_SECRET_NO_LIVE_REFEED",
+      "ACQ_PROVIDER_CREDENTIAL_BINDINGS",
+      "ACQ_PROVIDER_CREDENTIAL_SEED",
+      "ACQ_MSB_CLONES_DIR",
+      "USAI_API_KEY",
+      "GITHUB_TOKEN",
+      "GH_TOKEN",
+      "GITLAB_TOKEN",
+      "GIT_DIR",
+      "GIT_WORK_TREE",
+      "GIT_CONFIG_PARAMETERS",
+      "GIT_CONFIG_COUNT"
+    ],
+    "stdin": "vector-clone-sentinel-5d2e",
+    "timeout_ms": 30000
+  },
+  "expect": {
+    "exit": 1,
+    "stdout": [
+      {
+        "mode": "json",
+        "value": {
+          "schema_version": 1,
+          "command": "create",
+          "error": {
+            "code": "validation_failed",
+            "remediation": "--clone runs the agent on a clone of the primary workspace's repo."
+          }
+        },
+        "normalize": []
+      },
+      {
+        "mode": "contains",
+        "value": "\"message\": \"--clone: workspace is not a git repository: ",
+        "normalize": []
+      }
+    ],
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME",
+      "ACQ_SECRET_STORE_DIR"
+    ]
+  }
+}

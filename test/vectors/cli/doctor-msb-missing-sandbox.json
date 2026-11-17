@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "id": "cli/doctor-msb-missing-sandbox",
+  "oracle": "Backend doctor preserves Bash diagnostic and refusal behavior in the Python JSON envelope",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{acq}",
+      "--backend",
+      "msb",
+      "doctor",
+      "missing",
+      "--json"
+    ],
+    "env": {
+      "ACQ_SBX_INSTALLED": "0",
+      "ACQ_MSB_INSTALLED": "1",
+      "ACQ_MSB_BIN": "__stub__",
+      "ACQ_MSB_VERSION": "0.7.7"
+    },
+    "unset": [
+      "ACQ_RUNTIME"
+    ],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 1,
+    "stdout": {
+      "mode": "contains",
+      "value": "doctor: no such sandbox 'missing'.",
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME"
+    ]
+  }
+}

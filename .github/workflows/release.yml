@@ -1,5 +1,17 @@
 # Release assets include an offline, exact-hash validator wheelhouse for each
 # supported host. Runtime creation never downloads Python packages.
+#
+# RELEASES ARE UPSTREAM'S JOB. This fork cuts none: the acq v1 rewrite merges into
+# GSA-TTS/agentic-coding-quickstart, and upstream's release-please numbers it there,
+# so upstream users keep an unbroken SemVer line. A fork release would be a second,
+# conflicting version line for the same tool -- and the fork carries no release tags,
+# so release-please here walks all history and proposes a *downgrade*.
+#
+# Every job below is therefore gated on `vars.ENABLE_RELEASES == 'true'`, a
+# repository variable that is unset on the fork. The workflow stays in place,
+# exercised by its own structure and by the Tier-3 gate's own workflow, and is what
+# gets contributed upstream; upstream sets the variable (or drops the condition).
+# See docs/howto/release-gate-setup.md.
 name: Release
 
 on:
@@ -14,12 +26,84 @@ concurrency:
 permissions: {}
 
 jobs:
-  release-please:
-    name: Release Please
+  # release-please is split in two so the Tier-3 gate can sit between the release PR
+  # and the tag/Release it would otherwise create in the same step (ADR-0044m).
+  #
+  #   release-pr   keeps the release PR up to date, always (skip-github-release)
+  #   tier3-gate   every claimed cell holds a current green transcript or a waiver
+  #   release-tag  creates the tag and the GitHub Release (skip-github-pull-request)
+  #
+  # A failing gate therefore leaves no tag and no Release, only an open release PR
+  # carrying a red check. Gating only the asset jobs would be an illusion: the
+  # Release would already be published by the time they ran.
+  release-pr:
+    name: Release PR
+    if: ${{ vars.ENABLE_RELEASES == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
       pull-requests: write
+    steps:
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          # RELEASE_PLEASE_TOKEN (a PAT or GitHub App token) is optional but
+          # recommended: a release PR opened with the default GITHUB_TOKEN does not
+          # trigger pull_request workflows, so the Tier-3 release gate never reports
+          # on the release PR and cannot be a required check. With the fallback,
+          # Settings > Actions > General > "Allow GitHub Actions to create and
+          # approve pull requests" must be enabled.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          skip-github-release: true
+
+  # Evaluated from the committed ledger alone (docs/qualification-ledger.json), so no
+  # live backend run happens here and the job needs no credentials.
+  tier3-gate:
+    name: Tier-3 release gate (release)
+    if: ${{ vars.ENABLE_RELEASES == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history: the gate diffs each transcript's recorded revision against
+          # HEAD to see whether the Tier-3 surface changed since it was recorded.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Evaluate the gate
+        run: |
+          rc=0
+          python -m qualification.gate check > gate.md 2>&1 || rc=$?
+          cat gate.md
+          {
+            echo '### Tier-3 release gate'
+            echo
+            cat gate.md
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+  release-tag:
+    name: Release Tag
+    needs: tier3-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      # Tagging needs more than `contents`: after creating the Release,
+      # release-please comments on the release PR and swaps its
+      # `autorelease: pending` label for `autorelease: tagged`. Without write
+      # access to those, the Release is published and the job then fails, leaving
+      # it with no assets. (A PAT in RELEASE_PLEASE_TOKEN bypasses these job
+      # permissions, so the gap only appears on the default-token path.)
+      contents: write
+      pull-requests: write
+      issues: write
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
@@ -27,133 +111,63 @@ jobs:
       - id: release
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+          skip-github-pull-request: true
 
-  wheelhouse:
-    name: Validator Wheelhouse (${{ matrix.platform }})
-    needs: release-please
-    if: ${{ needs.release-please.outputs.release_created == 'true' }}
-    runs-on: ${{ matrix.runner }}
-    defaults:
-      run:
-        shell: bash
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            platform: linux-x86_64
-            pip_platform: manylinux_2_17_x86_64
-            lock: scripts/provider-input-validator-requirements-linux.txt
-            python_versions: "312"
-          - runner: ubuntu-24.04-arm
-            platform: linux-aarch64
-            pip_platform: manylinux_2_17_aarch64
-            lock: scripts/provider-input-validator-requirements-linux.txt
-            python_versions: "312"
-          - runner: macos-15
-            platform: macos-arm64
-            pip_platform: macosx_11_0_arm64
-            lock: scripts/provider-input-validator-requirements-macos.txt
-            python_versions: "312 313 314"
-          - runner: macos-15-intel
-            platform: macos-x86_64
-            pip_platform: macosx_10_13_x86_64
-            lock: scripts/provider-input-validator-requirements-macos.txt
-            python_versions: "312 313 314"
-          - runner: windows-2022
-            platform: windows-x86_64
-            pip_platform: win_amd64
-            lock: scripts/provider-input-validator-requirements-windows.txt
-            python_versions: "312"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
-          persist-credentials: false
-      - name: Build exact wheelhouse
-        run: |
-          set -euo pipefail
-          for py in ${{ matrix.python_versions }}; do
-            python3 -m pip download --only-binary=:all: --require-hashes \
-              --requirement "${{ matrix.lock }}" --platform "${{ matrix.pip_platform }}" \
-              --implementation cp --python-version "$py" --abi "cp$py" --dest wheelhouse
-          done
-          (cd wheelhouse && python3 -c "import hashlib,pathlib; print(''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\\n' for p in sorted(pathlib.Path('.').glob('*.whl')) if p.is_file()), end='')" > SHA256SUMS)
-          tar -czf "provider-input-validator-wheelhouse-${{ matrix.platform }}.tar.gz" -C wheelhouse .
-      - name: Build Windows embedded validator runtime
-        if: ${{ matrix.platform == 'windows-x86_64' }}
-        env:
-          PYTHON_EMBED_URL: https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip
-          PYTHON_EMBED_SHA256: 4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3
-        run: |
-          set -euo pipefail
-          curl --fail --location --silent --show-error "$PYTHON_EMBED_URL" -o python-embed.zip
-          actual="$(python3 -c "import hashlib; print(hashlib.sha256(open('python-embed.zip', 'rb').read()).hexdigest())")"
-          [ "$actual" = "$PYTHON_EMBED_SHA256" ] || { echo "embedded Python checksum mismatch" >&2; exit 1; }
-          mkdir runtime
-          unzip -q python-embed.zip -d runtime
-          python3 -m pip install --no-index --find-links wheelhouse --require-hashes --requirement scripts/provider-input-validator-requirements-windows.txt --target runtime/Lib/site-packages
-          printf 'python312.zip\n.\nLib/site-packages\nimport site\n' > runtime/python312._pth
-          test -f runtime/LICENSE.txt
-          mv runtime validator-runtime
-          python3 -c "import shutil; shutil.make_archive('provider-input-validator-runtime-windows-x86_64', 'zip', 'validator-runtime')"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: provider-input-validator-wheelhouse-${{ matrix.platform }}
-          path: provider-input-validator-wheelhouse-${{ matrix.platform }}.tar.gz
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: ${{ matrix.platform == 'windows-x86_64' }}
-        with:
-          name: provider-input-validator-runtime-windows-x86_64
-          path: provider-input-validator-runtime-windows-x86_64.zip
+  build-assets:
+    needs: release-tag
+    if: ${{ vars.ENABLE_RELEASES == 'true' && needs.release-tag.outputs.release_created == 'true' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-assets.yml
+    with:
+      ref: ${{ needs.release-tag.outputs.tag_name }}
+      sign: true
+    secrets:
+      AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+      AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+      AZURE_CERTIFICATE_PROFILE: ${{ secrets.AZURE_CERTIFICATE_PROFILE }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+      MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+      MACOS_KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+      APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
 
-  release-assets:
-    name: Release Assets
-    needs: [release-please, wheelhouse]
-    if: ${{ needs.release-please.outputs.release_created == 'true' }}
-    runs-on: ubuntu-latest
+  publish:
+    needs: [release-tag, build-assets]
+    if: ${{ vars.ENABLE_RELEASES == 'true' && needs.release-tag.outputs.release_created == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: write
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
-          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          path: wheelhouse-artifacts
-      - name: Build release assets
-        run: |
-          set -euo pipefail
-          release_sha="$(git rev-parse HEAD)"
-          mkdir -p dist/acq-windows-x64/scripts/provider-input-validator-wheelhouse/windows-x86_64
-          cp install.sh dist/install.sh
-          cp install.ps1 dist/install.ps1
-          sed -i "s/^DEFAULT_RELEASE_SHA=.*/DEFAULT_RELEASE_SHA=\"${release_sha}\"/" dist/install.sh
-          chmod 0755 dist/install.sh
-          cp acq acq.cmd acq.ps1 install.ps1 LICENSE README.md package.json dist/acq-windows-x64/
-          cp -R acq.backends dist/acq-windows-x64/
-          cp scripts/setup-provider-input-validator scripts/provider-input-validator-requirements*.txt dist/acq-windows-x64/scripts/
-          tar -xzf wheelhouse-artifacts/provider-input-validator-wheelhouse-windows-x86_64/provider-input-validator-wheelhouse-windows-x86_64.tar.gz -C dist/acq-windows-x64/scripts/provider-input-validator-wheelhouse/windows-x86_64
-          cp wheelhouse-artifacts/provider-input-validator-runtime-windows-x86_64/provider-input-validator-runtime-windows-x86_64.zip dist/acq-windows-x64/scripts/
-          (cd dist/acq-windows-x64/scripts && sha256sum provider-input-validator-runtime-windows-x86_64.zip > provider-input-validator-runtime-windows-x86_64.sha256)
-          (cd dist && zip -qr acq-windows-x64.zip acq-windows-x64)
-          find wheelhouse-artifacts -name '*.tar.gz' -exec cp {} dist/ \;
-          (cd dist && sha256sum install.sh install.ps1 acq-windows-x64.zip provider-input-validator-wheelhouse-*.tar.gz > SHA256SUMS)
+          name: dist
+          path: dist
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        if: ${{ vars.ENABLE_COSIGN_SIGNING == 'true' && github.event_name != 'pull_request' }}
+        with:
+          cosign-release: v3.1.4
+      - name: Sign checksums (Sigstore keyless)
+        if: ${{ vars.ENABLE_COSIGN_SIGNING == 'true' && github.event_name != 'pull_request' }}
+        working-directory: dist
+        run: cosign sign-blob --yes --bundle SHA256SUMS.sigstore.json SHA256SUMS
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: |
-            dist/install.sh
-            dist/install.ps1
-            dist/acq-windows-x64.zip
-            dist/SHA256SUMS
-            dist/provider-input-validator-wheelhouse-*.tar.gz
-      - name: Upload release assets
+          subject-path: 'dist/**/*'
+      - name: Upload every attested asset
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
-        run: gh release upload "$RELEASE_TAG" dist/install.sh dist/install.ps1 dist/acq-windows-x64.zip dist/provider-input-validator-wheelhouse-*.tar.gz dist/SHA256SUMS --clobber
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.release-tag.outputs.tag_name }}
+        run: gh release upload "$RELEASE_TAG" dist/* --clobber

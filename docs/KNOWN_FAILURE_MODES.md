@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-11-05"
+last_updated: "2026-11-13"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -11,111 +11,6 @@ keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 # Known Failure Modes
 
 This document captures real-world failure patterns when using Docker SBX + USAi + agent frameworks. If you're hitting something weird, it's probably in here.
-
----
-
-## Read-only host-config probe misclassifies a denied write
-
-### Symptoms and cause
-
-Readonly kit staging reports that the host-config mount looks writable even
-though host `msb inspect` records a read-only bind and direct writes fail with
-`Read-only file system`. A POSIX shell can exit with status 2 when redirection
-on the special builtin `:` fails. The original probe used that same status to
-signal a successful write, confusing denial with writability.
-
-`acq.backends/msb.sh::_acq_msb_host_config_mount_probe` now isolates the write
-attempt in a subshell. Only an actual successful write selects status 2;
-denial returns 0, while missing/inaccessible mounts and transport errors remain
-refusals. Host mount-record, version and platform checks still apply. The
-real-shell regression is in `test/bats/84-msb-ro-mount-qualification.bats`.
-
-Measured with MSB 0.7.11 on macOS ARM64: the root guest write to a readonly
-canary was denied, a writable control succeeded, and the host sentinel remained
-unchanged. With the fixed probe, the existing OCI kit installed Podman and
-passed its rootless startup self-test. This does not qualify all inner-container
-isolation controls or prove general read-only enforcement across platforms.
-
-## Rootless nested Podman lacks cgroup delegation
-
-The OCI kit may install successfully and pass its storage self-test while an
-inner container with explicit memory/CPU/PID limits still cannot start. In the
-measured MSB 0.7.11 guest, Podman 5.7.0 reported cgroup v2, cgroupfs and an empty
-delegated controller list. The bounded network-off test was refused:
-
-```text
-unable to apply cgroup configuration: rootless needs no limits + no cgrouppath
-when no permission is granted for cgroups
-```
-
-Do not remove mandatory limits to label this a successful isolated runner.
-The outer sandbox owner must provide a reviewed cgroup-delegation path, or use
-another qualified backend, before rootless inner containers can satisfy that
-resource contract. Reopen qualification when delegation is available; verify
-effective memory, CPU and PID enforcement alongside network/source/credential
-separation and cleanup. Kit installation and rootless storage readiness alone
-are insufficient evidence. No host engine socket or privileged-host workaround
-is required or authorized by this guidance.
-
-## Provider-input validator dependencies are missing
-
-### Symptoms
-
-- `acq create` stops before backend creation.
-- The error requires exact `PyYAML` and `jsonschema` versions.
-
-### Fix: release install (Homebrew, npm, `install.sh --release`)
-
-`--apply` alone uses the offline wheelhouse bundled with the release:
-
-```bash
-scripts/setup-provider-input-validator --apply
-```
-
-The runtime is stored under `$XDG_DATA_HOME/acq/provider-input-validator` (or
-`~/.local/share/acq/provider-input-validator`) and does not modify global Python
-packages. The default invocation is a dry run; `--apply` builds a fresh,
-hash-verified environment and only replaces a working runtime after validation
-succeeds. Re-run the command after changing Quickstart versions if the pinned
-requirements change.
-
-### Fix: git checkout / development install (no wheelhouse)
-
-A working-tree clone (`install.sh --clone`, or running `./acq` directly from a
-`git checkout`) has no release wheelhouse. Use the `--online` flag, which
-downloads the same hash-locked packages from PyPI instead:
-
-```bash
-scripts/setup-provider-input-validator --apply --online
-```
-
-Network access is restricted to this explicit setup call; `acq create` itself
-remains fully offline after the runtime is installed.
-
-If the error message already names this command, that means `acq` detected a git
-checkout with no wheelhouse and surfaced the hint automatically.
-
-### Alternative: `ACQ_PROVIDER_INPUT_PYTHON`
-
-If you already have a Python interpreter with the exact required versions
-(`PyYAML 6.0.3` and `jsonschema 4.26.0`), point `acq` at it directly:
-
-```bash
-export ACQ_PROVIDER_INPUT_PYTHON=/path/to/python3
-acq create opencode .
-```
-
-`acq` validates the dependency versions at startup and exits with a clear error
-if they do not match. This is useful when a system-managed environment already
-carries the right packages, or when the setup script cannot run (restricted
-network, air-gapped lab). It is not a substitute for the pinned runtime in
-production; the venv created by `setup-provider-input-validator` is preferred
-because it is isolated from system upgrades.
-
-The lock supports Linux x86_64/aarch64 with Python 3.12, macOS x86_64/arm64 with
-Python 3.12-3.14, and Windows x86_64/arm64 with
-Python 3.12. An unsupported OS, architecture, or Python version fails before
-installation; use one of the supported runtimes rather than bypassing hashes.
 
 ---
 
@@ -536,9 +431,12 @@ The raw value only reaches the container if you deliberately bypass the
 sanctioned flow:
 
 - Passing `sbx secret set-custom … --value <the-secret>` on the command line
-  puts the value in argv (and shell history). `acq` never does this — it prompts
-  interactively or stores the value in the acq store and prints the manual
-  command as a last resort; it does not echo the value on argv.
+  puts the value in argv (and shell history). `acq` never does this — on sbx
+  **0.51.0+** the Python acq v1 adapter pipes the value via `--value-stdin`
+  (never argv, gated by a per-capability version floor of sbx ≥ 0.51.0, below
+  which it fails closed with `backend_version_unsupported`); the Bash adapter
+  prompts interactively or stores the value in the acq store and prints the
+  manual command as a last resort. Neither echoes the value on argv.
 - A hand-rolled setup that exports the raw key into the container env (e.g.
   `export USAI_API_KEY=<real-key>` in a profile, or `--value` in a script)
   defeats the placeholder mechanism.
@@ -564,6 +462,9 @@ acq secret set usai
 
 # Equivalent raw sbx command (interactive prompt for the value — no --value):
 sbx secret set-custom --host api.gsa.usai.gov --env USAI_API_KEY
+
+# On sbx 0.51.0+, you can pipe the value on stdin instead (keeps it off argv):
+printf '%s' "$USAI_API_KEY" | sbx secret set-custom --host api.gsa.usai.gov --env USAI_API_KEY --value-stdin
 ```
 
 Your `opencode.jsonc` should use variable substitution:
@@ -954,7 +855,7 @@ failure modes, see the kit's
 
 > The end-to-end verification/identity gap in the kits themselves is tracked
 > upstream in
-> [agentic-coding-patterns#211](https://github.com/GSA-TTS/agentic-coding-patterns/issues/211);
+> the [agentic-coding-patterns issue on commit verification identity](https://github.com/GSA-TTS/agentic-coding-patterns/issues/211);
 > the quickstart-side decision (docs + advisory) is recorded in
 > [ADR-0007](adr/0007-commit-verification-identity-guidance.md).
 >
@@ -1068,6 +969,8 @@ sbx secret set-custom <sandbox-name> --host api.gsa.usai.gov \
 
 - Rotate with `acq usai-rotate-api-key`, which preserves the placeholder so
   existing sandboxes keep working. Avoid deleting + re-adding the global secret.
+  When sbx holds more than one global USAi entry, rotation refuses and names
+  each placeholder instead of picking one (see section 90).
 - Remove any `export USAI_API_KEY=...` from your shell profile — the sandbox gets
   its value from sbx injection, and a host env var only causes confusion.
 
@@ -1194,7 +1097,7 @@ git config --global --get-regexp 'url\..*insteadOf'
 
 ### Prevention
 
-As of #207, acq's kit fetch is **non-interactive**: it sets `GIT_TERMINAL_PROMPT=0`
+The acq kit fetch is **non-interactive**: it sets `GIT_TERMINAL_PROMPT=0`
 and first attempts an anonymous fetch with any inherited credential helper /
 `github.com` `insteadOf` rewrite neutralized (so an unauthenticated fetch
 proceeds without prompting), then retries once with your system git config
@@ -1202,9 +1105,85 @@ proceeds without prompting), then retries once with your system git config
 It can no longer hang on a
 prompt; a genuine failure now prints this remedy.
 
+On sbx, a failed kit fetch stops the operation: acq prints
+`acq(sbx): error: could not fetch kit; not applying: …`, `acq run`/`acq create`
+does not create the sandbox, and `acq kit apply` or the re-attach heal skips
+that kit. Older acq versions passed the raw ref to sbx so that sbx could try its
+own fetch. That skipped acq's checks (no credentials in the URL, a safe `dir=`,
+the fetched commit matching the pin, and the payload checks), and sbx could not
+parse acq's neutral built-in kits anyway. Fix the fetch (above) and run the
+command again; on msb a failed fetch has always stopped the same way.
+
 ### Related
 
-- Issue #207 (non-interactive fetch), #208 (docs + loud fallback).
+- Kit fetch disables credential prompts and reports fallback failures explicitly.
+
+---
+
+## 26. macOS Gatekeeper Blocks `mkfs.erofs` at `sbx policy init` (PATH shadowing)
+
+### Symptoms
+
+On macOS (seen on **Tahoe / macOS 26**, Apple Silicon), `sbx policy init balanced`
+— the first command that builds a sandbox filesystem — fails when macOS blocks a
+helper binary:
+
+```
+"mkfs.erofs" cannot be opened because the developer cannot be verified.
+macOS cannot verify that this app is free from malware.
+```
+
+`xattr -d com.apple.quarantine /opt/homebrew/bin/mkfs.erofs` does **not** clear
+it — even run with `sudo`. It only happens on machines that also have Homebrew
+`erofs-utils` installed; users without it never see the block.
+
+### Root Cause
+
+This is an **`sbx` PATH-resolution bug**, **not** a Quickstart / `acq` / `msb`
+issue, and **not** a supply-chain compromise. sbx ships its own **notarized**
+`mkfs.erofs`, but invokes it via `$PATH`, so a Homebrew `erofs-utils` shadows the
+bundled copy:
+
+- sbx v0.37.1 bundles a notarized `mkfs.erofs` at
+  `/opt/homebrew/Caskroom/sbx/<version>/libexec/mkfs.erofs`
+  (`spctl` → *accepted*; Developer ID: **Docker Inc (9BNSXJN65R)**).
+- If Homebrew `erofs-utils` is also installed, `/opt/homebrew/bin/mkfs.erofs`
+  (a symlink into `Cellar/erofs-utils/…`) is earlier on `$PATH`. That binary is
+  **ad-hoc-signed / not notarized** (`spctl` → *rejected*, `Signature=adhoc`,
+  no TeamIdentifier).
+- sbx resolves `mkfs.erofs` from `$PATH`, picks up the unnotarized Homebrew
+  binary instead of its own, and macOS Gatekeeper rejects it.
+- There is **no `com.apple.quarantine` xattr** on the rejected binary — the block
+  is the code-signing / AMFI (`syspolicyd`) assessment, which is why removing the
+  xattr does nothing.
+
+The `erofs-utils` Homebrew formula itself is fine (kernel.org source,
+SHA256-pinned bottles). The problem is purely that sbx's PATH lookup picks the
+unnotarized system copy over its own notarized bundled one.
+
+### Fix
+
+Make sbx use its own notarized binary — remove the shadowing Homebrew copy from
+PATH:
+
+```bash
+brew uninstall erofs-utils    # if nothing else needs it; sbx then uses its bundled, notarized mkfs.erofs
+```
+
+If you cannot remove it, approve the Homebrew binary via **System Settings →
+Privacy & Security → "Allow Anyway"**, then re-run the command and click **"Open"**
+on the pop-up. Do **not** rely on `xattr -d com.apple.quarantine` — it does not
+satisfy the code-signing gate on an unnotarized binary.
+
+### Prevention / Status
+
+- The durable fix is upstream in `sbx`: invoke the bundled
+  `libexec/mkfs.erofs` by absolute path rather than resolving `mkfs.erofs` from
+  `$PATH`. The bundled binary is already notarized, so no notarization change is
+  needed. Tracked at
+  [docker/sbx-releases#392](https://github.com/docker/sbx-releases/issues/392).
+- Until sbx pins the path, `brew uninstall erofs-utils` (or the "Allow Anyway"
+  fallback) unblocks affected machines.
 
 ---
 
@@ -1594,73 +1573,6 @@ Signature 1 (stale state) or Signature 2 (split-horizon DNS).
   guest a resolver that can see internal zones, are host/network-configuration
   matters — resolve them with your network/endpoint administrators where acq's
   tunables don't cover your environment.
-
----
-
-## 26. macOS Gatekeeper Blocks `mkfs.erofs` at `sbx policy init` (PATH shadowing)
-
-### Symptoms
-
-On macOS (seen on **Tahoe / macOS 26**, Apple Silicon), `sbx policy init balanced`
-— the first command that builds a sandbox filesystem — fails when macOS blocks a
-helper binary:
-
-```
-"mkfs.erofs" cannot be opened because the developer cannot be verified.
-macOS cannot verify that this app is free from malware.
-```
-
-`xattr -d com.apple.quarantine /opt/homebrew/bin/mkfs.erofs` does **not** clear
-it — even run with `sudo`. It only happens on machines that also have Homebrew
-`erofs-utils` installed; users without it never see the block.
-
-### Root Cause
-
-This is an **`sbx` PATH-resolution bug**, **not** a Quickstart / `acq` / `msb`
-issue, and **not** a supply-chain compromise. sbx ships its own **notarized**
-`mkfs.erofs`, but invokes it via `$PATH`, so a Homebrew `erofs-utils` shadows the
-bundled copy:
-
-- sbx v0.37.1 bundles a notarized `mkfs.erofs` at
-  `/opt/homebrew/Caskroom/sbx/<version>/libexec/mkfs.erofs`
-  (`spctl` → *accepted*; Developer ID: **Docker Inc (9BNSXJN65R)**).
-- If Homebrew `erofs-utils` is also installed, `/opt/homebrew/bin/mkfs.erofs`
-  (a symlink into `Cellar/erofs-utils/…`) is earlier on `$PATH`. That binary is
-  **ad-hoc-signed / not notarized** (`spctl` → *rejected*, `Signature=adhoc`,
-  no TeamIdentifier).
-- sbx resolves `mkfs.erofs` from `$PATH`, picks up the unnotarized Homebrew
-  binary instead of its own, and macOS Gatekeeper rejects it.
-- There is **no `com.apple.quarantine` xattr** on the rejected binary — the block
-  is the code-signing / AMFI (`syspolicyd`) assessment, which is why removing the
-  xattr does nothing.
-
-The `erofs-utils` Homebrew formula itself is fine (kernel.org source,
-SHA256-pinned bottles). The problem is purely that sbx's PATH lookup picks the
-unnotarized system copy over its own notarized bundled one.
-
-### Fix
-
-Make sbx use its own notarized binary — remove the shadowing Homebrew copy from
-PATH:
-
-```bash
-brew uninstall erofs-utils    # if nothing else needs it; sbx then uses its bundled, notarized mkfs.erofs
-```
-
-If you cannot remove it, approve the Homebrew binary via **System Settings →
-Privacy & Security → "Allow Anyway"**, then re-run the command and click **"Open"**
-on the pop-up. Do **not** rely on `xattr -d com.apple.quarantine` — it does not
-satisfy the code-signing gate on an unnotarized binary.
-
-### Prevention / Status
-
-- The durable fix is upstream in `sbx`: invoke the bundled
-  `libexec/mkfs.erofs` by absolute path rather than resolving `mkfs.erofs` from
-  `$PATH`. The bundled binary is already notarized, so no notarization change is
-  needed. Tracked at
-  [docker/sbx-releases#392](https://github.com/docker/sbx-releases/issues/392).
-- Until sbx pins the path, `brew uninstall erofs-utils` (or the "Allow Anyway"
-  fallback) unblocks affected machines.
 
 ---
 
@@ -2171,7 +2083,7 @@ Three issues compounded:
    "Recover with: sbx kit add …" hint that could never succeed.
 2. **A stale playbook feature-probe.** The heal probed the playbook with
    `test -e "$HOME/.agentic-coding-playbook/.git"`. Since patterns v1.8.0 moved
-   playbook delivery from a git clone to a REST tarball (the #203 fix), the tree
+   playbook delivery from a git clone to a REST tarball, the tree
    has **no `.git`**, so the probe reported the playbook absent on every re-attach,
    forever — re-triggering the (now-refused) add each time.
 3. **The `~/.acq-extra-kits` marker was never written at create.** The re-attach
@@ -2363,6 +2275,8 @@ Notes:
   reachable, so a rebase with `SSH_AUTH_SOCK` set does not need a separate
   `--amend -S` pass.
 
+---
+
 ## 39. Spurious `M` (modified) diffs on scripts across the host/sandbox mount
 
 ### Symptoms
@@ -2446,12 +2360,15 @@ amending the wrong branch.
 
 ### Fix
 
-- `acq.ps1` and `install.ps1` prefer known Git-for-Windows locations first and
-  reject the WSL shim (`System32\bash.exe`, `SysWOW64\bash.exe`) when falling back
-  to a PATH lookup.
-- `install.ps1` probes WHP with `WHvCreatePartition` (the same call `msb` relies
-  on) instead of gating on the feature flag; when the state stays undetermined it
-  warns and defers to `msb doctor`, which `acq` surfaces before provisioning.
+- `acq.ps1` (and the upstream release `install.ps1`) prefer known
+  Git-for-Windows locations first and reject the WSL shim (`System32\bash.exe`,
+  `SysWOW64\bash.exe`) when falling back to a PATH lookup.
+- The upstream release `install.ps1` probes WHP with `WHvCreatePartition` (the
+  same call `msb` relies on) instead of gating on the feature flag; when the
+  state stays undetermined it warns and defers to `msb doctor`, which `acq`
+  surfaces before provisioning. The in-repo `install.ps1` (the acq v1
+  installer) neither probes WHP nor installs Git Bash or `msb`; see
+  `docs/howto/acq.md`, "acq v1 installers".
 - Treat `msb doctor` as the authoritative readiness signal on Windows.
 - The execution-policy requirement is documented (README "First-Run Snags",
   `docs/howto/acq.md`); allow local scripts with
@@ -2553,8 +2470,8 @@ structurally never created satisfies nothing, so the PR sits blocked
 indefinitely — even for changes entirely unrelated to what the workflow tests.
 This is a documented GitHub failure mode ("Handling skipped but required
 checks" in GitHub's required-status-checks troubleshooting docs), not specific
-to this repo, but it hit real CI here: agentic-coding-quickstart#449 (a routine
-dependabot bump) needed an admin-bypass merge to get past it.
+to this repo, but it hit real CI here: a routine
+dependabot bump needed an admin-bypass merge to get past it.
 
 ### Fix
 
@@ -2717,8 +2634,7 @@ brew install GSA-TTS/tap/microsandbox-acq@0.7.3
 ```
 
 **If every catalog-opening msb command reports `self_downgrade_recovery_required`,**
-the only exit is removing that one operation directory. `install.sh` detects this
-and offers to do it; by hand:
+the only exit is removing that one operation directory by hand:
 
 ```bash
 rm -rf ~/.microsandbox/db/self-downgrade/<id>
@@ -2756,15 +2672,13 @@ or adjust `PATH` so the intended `msb` appears first.
 - `acq_backend_check_version` fails closed on the blocked range before any
   command that opens the catalog — including state-touching verbs like `acq ls`,
   which previously reached `msb` unguarded and surfaced the raw upstream error.
-- `install.sh` installs the pinned `0.7.7` from a checksum-verified release
-  bundle, prompts before replacing a too-old, unparseable, or blocked active
-  version, offers the forward path first when the catalog was already migrated,
-  refuses to drive a rollback with a binary that would wedge the install, and
-  fails closed when another blocked `msb` earlier on `PATH` would still shadow
-  the install.
-- `install.ps1` applies the same policy on Windows, which previously had none.
-  The Windows-specific logic has been smoke-tested on a real Windows host, but
-  remains lower-confidence than the POSIX path.
+- After installing `acq`, the v1 `install.sh` and `install.ps1` probe any
+  existing `msb` on `PATH` against the policy (`0.6.9` through `0.6.18` or
+  `>= 0.7.3`) and report out-of-policy versions with remediation commands without
+  replacing an active binary. When `msb` is not on `PATH` and the session is
+  interactive without `--yes`/`-Yes`, both installers offer to install the
+  pinned `0.7.7` from a checksum-verified release bundle (or Homebrew's pinned
+  formula on POSIX).
 - `scripts/verify-msb-pin` verifies the 0.7.7 install pin plus recovery behavior
   against real 0.6.18 / 0.7.2 / 0.7.3 binaries in a throwaway `MSB_HOME`. It
   boots no VM, so it needs no virtualization and runs inside a sandbox.
@@ -2996,6 +2910,8 @@ the fix), and covers a transient and a persistent inspect failure via the stub's
 `STUB_MSB_INSPECT_FAIL_TIMES` knob. In new code, do not pipe into `grep -q`
 (or `head`) under `pipefail` when the writer may still be producing output.
 
+---
+
 ## 46. `acq kit-source rm` Refuses to Finish (Backend Allowlist Still Permits the Owner)
 
 ### Symptoms
@@ -3025,7 +2941,11 @@ idempotent). `acq kit-source ls` shows the source until the removal completes.
 ### Prevention
 
 Regression tests in `test/bats/149-kit-source.bats` cover shared-prefix removal
-and the read/write/`jq` failure paths.
+and the read/write/`jq` failure paths. For the Python acq, the vectors
+`cli/kit-source-rm-sbx-write-fails` and `cli/kit-source-rm-sbx-readback-fails`
+cover a refused write and a setting that cannot be read back after the write
+(reported as such, not as "still lists it"). The printed recovery command is
+shell-quoted, so it can be pasted as-is even when an entry holds a `'`.
 
 ---
 
@@ -3327,19 +3247,1204 @@ it is a musl build and is content-pinned rather than signer-authenticated.
 
 ---
 
-## Contributing
+## 53. After Upgrading, `acq run AGENT` Creates a Second Sandbox for a Workspace With Non-ASCII Letters
 
-When you discover a new failure mode:
+**Status:** Expected after the sandbox-name hardening. Bash `acq` only; the
+Python implementation always derived names this way.
 
-1. Document the symptoms clearly
-2. Identify the root cause
-3. Provide a minimal fix
-4. Add it to this document
-5. Consider if it indicates a gap in AGENTS.md rules
+### Symptoms
+
+- In a workspace whose directory name contains lowercase accented letters (for
+  example `~/café`), `acq run opencode` creates a new sandbox instead of
+  re-attaching to the one created before the upgrade.
+- `acq ls` shows both: the old name keeps the letters (`opencode-café`), the
+  new one drops them (`opencode-caf`; a letter in the middle of the name becomes
+  a hyphen).
+- Only sandboxes created while acq ran under a glibc locale such as
+  `en_US.UTF-8` are affected. Under `C`, `C.UTF-8` or `POSIX` the old slug
+  already turned these letters into hyphens.
+
+### Root Cause
+
+The derived name is `<agent>-<slug of the workspace directory name>`. Under a
+glibc locale such as `en_US.UTF-8`, the old slug kept lowercase accented letters
+(uppercase ones, such as `Ü`, were already dropped), and in any locale it kept a
+newline. It now keeps only ASCII `a-z` and `0-9` and turns every other run of
+characters into one hyphen, the same as the Python implementation, so names are
+always a single line of a fixed character set (`slugify` in
+`acq.backends/common.sh`). The old sandbox is not renamed or removed; it keeps
+running under its old name.
+
+### Fix
+
+- To keep using the old sandbox, address it by name: `acq run opencode-café`
+  (or `acq shell`, `acq exec`, `acq stop` with that name).
+- To move to the new name, remove the old sandbox with `acq rm opencode-café`
+  once anything you need from it is saved, then `acq run opencode` again.
+
+Related checks added at the same time: an explicit `--name` must use only ASCII
+letters, digits, `_` and `-` and not start with `-`; a workspace path containing
+`:` (other than the `:ro` suffix) or a control character is refused at create;
+and `rm`, `stop`, `exec` and the other verbs that take an existing sandbox's
+name refuse names that are empty, `.` or `..`, or contain `/`, `\` or control
+characters.
+
+### Also Affected: Workspace Paths Ending in `.`, `..` or `/`
+
+A later change made Bash `derive_name` fold the workspace path the way the
+Python implementation does, so both derive the same name. Bash used to take the
+last component of the path as typed, so some paths derived a different name:
+
+| Typed path | Old Bash name | New name |
+|---|---|---|
+| `/` | `opencode-` | `opencode-workspace` |
+| `..` | `opencode-` | `opencode-<parent directory>` |
+| `src/.` | `opencode-<current directory>` | `opencode-src` |
+| `src/..` | `opencode-` | `opencode-<current directory>` |
+
+At the same time the Python slug was limited to lowering ASCII letters. As a
+result `İ` (U+0130) and the Kelvin sign (U+212A) now become hyphens, as they always did in
+Bash. On POSIX a trailing `\` is now part of the directory name.
+
+A sandbox created under an old name keeps running under it. Reach it with
+`acq run NAME` (or `acq shell`, `acq exec`, `acq stop`), or remove it with
+`acq rm NAME` and run `acq run AGENT PATH` again to create it under the new
+name.
 
 ---
 
-## Default OpenCode Generic Base Requires Recreation
+## 54. Python acq: No Read-Only Trusted-Config Mount on Windows
+
+**Status:** Accepted limitation (msb, Windows hosts, Python `acq`).
+
+### Symptoms
+
+On Windows, `acq create`/`acq run` report `"ro_host_config": false`, and the msb
+create command carries no `--volume …:/var/lib/acq/host:ro`. A sandbox whose host
+record says `ro_host_config: true` (one seeded by a test, or recorded by an
+earlier build) fails trusted operations with `security_exception`, and the reason
+reads "this platform's msb filesystem backend was not reviewed for read-only
+enforcement". `acq create --recreate NAME --yes` then succeeds and prints a note
+that the mount was not established.
+
+### Root Cause
+
+ADR-0035's guarantee rests on msb enforcing `:ro` on the host. Only msb's POSIX
+filesystem backend was reviewed for that, which is why the Bash adapter never
+relies on the mount on Windows either (`_acq_msb_ro_mount_platform_ok`). The Python
+acq therefore never asks for the mount on Windows, and its probe reports the
+guarantee as `unknown` there.
+
+### Fix
+
+Nothing to fix on the host. Recreate rebuilds the sandbox exactly as a fresh create
+on this host would: without the mount, and with a record that does not claim it,
+so the next `acq run` takes the legacy path instead of failing again. Refusing
+instead would only force `acq rm` and `acq create` for the same result, and
+recording the mount would make recreate loop. An msb older than 0.7.7 on Linux or
+macOS is different: there recreate refuses with "upgrade msb", because upgrading
+does establish the guarantee. Readonly kit files on Windows are copied into the
+guest with a warning (none of the built-in kits declares one today).
+
+The provider-input generation (what OpenCode's renderer reads at
+`ACQ_PROVIDER_INPUT_ROOT`) is not mounted on Windows either, since it would be a
+writable host path without that review, and no warning is printed for it. The
+provider facts are still recorded, the credential gate still runs and keys are
+still probed before attach, but OpenCode keeps its existing provider config.
+The Bash acq does mount it there.
+
+### Prevention / Status
+
+Re-review when msb's Windows filesystem backend is assessed for read-only
+enforcement; enabling it is the `security.WINDOWS` platform check in
+`py-acq/src/acq_py/security.py` and its Bash counterpart.
+
+---
+
+## 55. Python acq on sbx: Kit Gaps Still Open
+
+**Status:** Tracked follow-ups (sbx, Python `acq`).
+
+### Symptoms
+
+The Python acq creates sbx sandboxes with the built-in kits and the bundled
+agent kit (`acq run opencode .` works), and `acq run NAME` re-attaches with the
+sbx heal (for its remaining differences from Bash, see "Python acq: `run`
+Re-Attach Heal Differs From Bash in Two Places" near the end of this file). On
+Linux and macOS it also mounts the provider-input generation read-only, so the
+bundled `opencode` kit's startup renderer points OpenCode at USAi, and it fetches
+kits outside the bundle at their pinned commit. Compared with the Bash acq:
+
+- On Windows the provider-input generation is not staged or mounted, so the
+  renderer reports `not-ready` and leaves `opencode.jsonc` alone there. sbx
+  mounts an extra workspace at its host path in the guest, but how it spells a
+  Windows host path in the guest has not been verified, so
+  `ACQ_PROVIDER_INPUT_ROOT` could not name it. (msb does not mount it on Windows
+  either, see section 54.) The provider facts are still recorded, and the
+  credential gate and the attach-time key probe still run.
+- Kit-delivered `~/.rc.d/*.sh` snippets are not sourced at login: the post-create
+  bridge Bash writes (`_acq_sbx_ensure_rc_bridge`) is not ported.
+- A kit outside the bundle is applied from a `git+https` ref pinned to a full
+  40-hex commit (`py-acq/src/acq_py/kit_fetch.py`, as on msb), or from a local
+  kit directory, which is copied into acq's private kit cache first and checked
+  there (`kit_fetch.copy_local`, on both backends). A branch or tag ref
+  (`kit_ref_not_pinned`; Bash fetches it unverified), a local directory that
+  does not exist (`validation_failed`) and a kit that is not neutral `hybrid/v1`
+  (Bash passes an sbx-native kit through) are refused before create. A fetch
+  that fails, including for lack of network, refuses the create; a commit
+  fetched once is reused offline by later commands.
+- A local kit differs from Bash in what it may hold. The copy follows no link:
+  a link in the kit is copied as a link and must resolve inside the copy, so an
+  absolute link (even to a file of the same kit) is refused. On Windows a link
+  or junction anywhere in a local kit is refused outright. A FIFO, socket or
+  device file is refused, and so is a tree of more than 10000 entries,
+  256 MiB, or directories nested more than 64 deep. A `spec.yaml` saved with
+  CRLF line endings (a Windows editor's default) is refused with that reason:
+  the spec reader, like Bash's, would read each value with a trailing CR. A
+  local kit's later changes reach a sandbox only through a heal or recreate,
+  which copies it again.
+- A regular file with more than one hard link (link count above 1) anywhere in
+  a local kit is refused, by both the Python and the Bash acq, with the file's
+  path relative to the kit and the remedy: make a plain copy of the kit (for
+  example `cp -R KIT KIT-copy`, which gives each file one link) and use the
+  copy. A hard link cannot point across file systems or at a directory, but
+  whoever can write to the kit directory could hard-link a file they can read
+  from elsewhere on the same file system into it. Directories are exempt:
+  their link count is naturally above 1. The Python acq checks the link count
+  of each file it opens for the copy (`os.fstat`, which reports NTFS hard links
+  on Windows too), so the file checked is the file copied.
+- Bash limit: Bash reads a local kit in place, so its check (one
+  `find KIT -type f -links +1` in `kit_translate_fetch`, POSIX on Linux and
+  macOS) is a check before use, not a guarantee. A hard link created in the
+  kit after the check and before the backend reads the file is not seen.
+  Keep local kits in a directory only you can write, or use the Python acq,
+  which applies only its checked private copy.
+
+### Root Cause
+
+The Windows guest path and the login-profile bridge belong to other parts of the
+port. Bash reads a local kit directory in place, where anyone who can write
+there can change it between acq's checks and the backend reading it (the
+residual race section 61 describes for Bash on Windows). The Python acq reads a
+kit only from its private cache, which only acq writes, so it copies a local
+kit there first (option 1 in section 61) and checks the copy. On POSIX the copy
+opens every directory and file relative to its parent with `O_NOFOLLOW`, so a
+link swapped in during the copy is never followed out of the kit. Windows has
+no such opens, so there the copy refuses every reparse point, checks that each
+file is still the one listed, and checks that the path Windows reports for the
+opened handle (`GetFinalPathNameByHandleW`) lies under the kit, so a file
+reached through a directory swapped for a junction after it was listed is
+refused. The
+Python acq passes sbx only local, translated kit directories, so it does not
+need the `kit.allowedSources` update Bash makes before create.
+
+### Fix
+
+Use the Bash acq (`ACQ_IMPL=bash`) for an unpinned kit ref, a local kit that
+needs an absolute link (or any link, on Windows), or a Windows host where
+OpenCode must be configured for USAi. Pin a remote kit ref to its commit
+(`#ref=<40-hex sha>`) to apply it with the Python acq; a local kit directory
+works as it is.
+
+### Prevention / Status
+
+Tracked follow-ups:
+
+- **Windows provider input on sbx.** Unblock trigger: a live sbx run on Windows
+  that shows where an extra workspace `C:\…\generation.X:ro` appears in the guest
+  (and that sbx accepts that argument). Then stage and mount it there as on
+  POSIX; `provider_input.publish` already writes Bash's Windows pointer file.
+- **Local kit directories.** Done: the Python acq copies a local kit into its
+  private cache with the no-link checks (option 1 in section 61) and applies
+  the copy, on Windows checking each opened file's final path as well. Both
+  acq implementations refuse a hard-linked file in a local kit; the Bash
+  check-then-use limit above is a known residual. Nothing further is tracked
+  here.
+- **The rc bridge.** Port `_acq_sbx_ensure_rc_bridge` with the msb login-shell
+  work.
+- **Kit fetch on Windows.** The fetch itself has no POSIX-only step, but its
+  repository-fixture tests (`py-acq/tests/test_kit_fetch.py`) commit symlinks and
+  executable modes, so they skip on Windows, where only the ref-grammar tests
+  run. Unblock trigger: the Windows default flip (ADR-0048m) or the first
+  report of a fetched kit on Windows; then add a fixture without links and run
+  it in the Windows lane. The flip took effect on 2026-11-10, so this is now
+  due.
+
+Re-verify live on a host with sbx 0.51 or later: the guest has the kit files, the
+Zscaler CA and OpenCode configured for USAi, the provider-input mount is
+read-only in the guest (a write to it as guest root fails), the startup barrier
+is reached, a fetched extra kit applies, and `acq kit update` reports the
+recreate notice.
+
+The same live run must confirm that sbx keeps what it read at create. The
+Python acq deletes the per-create startup-barrier kit as soon as `sbx create`
+returns and prunes translated kits under `<state>/sbx-kits/` that have not been
+used for a week, while Bash keeps its kit directories forever. So: create a
+sandbox, delete `<state>/sbx-kits/` entirely, `sbx stop` it, start it again
+(`acq run NAME` or `sbx exec`), and confirm the kits' startup commands still
+run (`/tmp/opencode` exists again, and `/tmp/acq/startup-complete` holds the
+create's token). If they do not, keep the kit directories for the sandbox's
+lifetime and remove them in `acq rm`.
+
+One narrow window is left when a translated kit directory is replaced because
+it is damaged: create A moves create B's fresh copy aside on a stale verdict,
+create C takes the kit's name before A can rename B's copy back, and A then
+deletes B's tree (`_move_damaged_aside` in `py-acq/src/acq_py/kit_sbx.py`).
+The name ends up holding a valid copy (C's, with the same content), but B's
+create can fail if sbx reads the kit while the name is briefly empty or being
+swapped. It needs a damaged directory plus three concurrent creates of the
+same kit; re-running B's create recovers it.
+
+---
+
+## 56. Python acq: Stricter Provider-Credential Gate Than Bash
+
+**Status:** Intended difference (Python `acq`); revisit if a CI flow depends on it.
+
+### Symptoms
+
+- On `sbx`, `acq create`/`acq run` fails with `secret_missing` when `$USAI_API_KEY`
+  is only exported in the host environment and not stored (on `msb`, both Bash
+  and Python accept and bind a host-exported key when no stored value resolves;
+  see §97).
+- A provider with no pin fails with `validation_failed` ("is not pinned to a
+  host") even though the Bash acq would accept the host recorded for that
+  sandbox at an earlier create.
+- `acq run NAME` fails with `validation_failed` when the sandbox's recorded
+  provider facts no longer match the provider's pin (a re-pin to another host,
+  or an edited record).
+- Without a terminal on stdin, any selected provider with no available key fails
+  closed; nothing is prompted. On sbx, a key that is in the acq store or host
+  environment but not in sbx's own proxy table fails the same way, asking for it
+  to be stored.
+
+### Root Cause
+
+Each backend takes its credentials at create: msb binds `--secret ENV@HOST`
+from the acq secret store (falling back to a host-exported value when no stored
+value resolves), while sbx injects from the proxy table it snapshots at create
+(so on sbx, accepting a host-exported value that is not in sbx's store would
+create a sandbox with a dead credential). The recorded-host
+fallback was not ported: refusing is the safe direction, since acq never lets a
+kit choose where a credential goes. That holds for a provider kit the Python acq
+fetches from a registered kit source too (`py-acq/src/acq_py/kit_fetch.py`): its
+facts are read from the fetched, pinned commit and checked against the
+provider's pin exactly like the bundled kit's, so a fetched kit naming another
+host or key variable is refused before create.
+
+### Fix
+
+Store the key (`printf '%s' "$KEY" | acq secret set -g usai`) and pin any
+non-default provider (`acq provider-credential set ID KEY_ENV --host HOST`).
+
+### Prevention / Status
+
+Documented in `docs/BACKEND_GUIDE.md` (host pinning) and `py-acq/README.md`.
+The Python acq takes Bash's `--no-provider-kits` flag on `create` and `run`,
+ahead of `ACQ_PROVIDER_KITS` and config.yaml `provider_kit`, as Bash does.
+
+Like Bash, it records the selection a sandbox was created with
+(`provider_selection` and `provider_kits` in its provenance record), and
+`start`, `create --recreate` and `kit update` use the recorded selection, so a
+sandbox created without provider kits is never bound with a provider key or
+given a provider kit later. The selection is recorded even when a kit did not
+apply at create. One difference remains: a sandbox with no recorded selection
+(from before it was recorded) uses the selection current at the time, as the
+Python acq always did, where Bash uses the default one. The first `start` or
+`kit update` that completes then records the selection it used, so run it with
+the intended `ACQ_PROVIDER_KITS` (an empty value for none).
+
+---
+
+## 57. Python acq: sbx Key Rotation Not Yet Verified Against a Real sbx
+
+**Status:** Deferred live check (sbx, Python `acq`).
+
+### Symptoms
+
+None observed yet. The risk: after `acq usai-rotate-api-key` on sbx, a running
+sandbox keeps getting `401` from USAi because sbx gave its custom secret a new
+placeholder, or added a second entry, instead of updating the existing one.
+
+### Root Cause
+
+sbx has no `rotate` subcommand. The Python acq re-sets each custom secret that
+carries the USAi key with `sbx secret set-custom --host H --env E --placeholder P
+--value-stdin`, so the key goes on stdin. The Bash adapter uses `--placeholder P`
+too, but lets sbx prompt for the value. That `--placeholder` with `--value-stdin`
+updates the entry in place and keeps `P` is modelled by the bundled sbx stub and
+has not been run against a real sbx.
+
+### Fix
+
+The Python acq does not trust it. After each `set-custom` it re-reads `sbx secret
+ls --json` and requires exactly one entry for that scope, env and hosts carrying
+the same placeholder (a secret for the same env on other hosts is a different
+one). If sbx minted a new placeholder or a duplicate, the entry is
+reported as not re-fed and the command exits 1. To recover a sandbox left with a
+placeholder sbx no longer maps, use the ADR-0008 rebind or recreate it, then
+re-run the rotation.
+
+### Prevention / Status
+
+**Unblock trigger:** the next sbx live qualification run (sbx >= 0.51.0) with a
+host USAi key. Run `acq usai-rotate-api-key` with `ACQ_IMPL=python` against a
+sandbox created with the old key, confirm `sbx secret ls --json` still shows one
+entry with the same placeholder, and that the sandbox reaches USAi with the new
+key on its next attach. Record the transcript, then close this entry.
+
+---
+
+## 58. Bash acq: Stray `Terminated` After a Group SIGTERM
+
+**Status:** Fixed — the kit-fetch guardian's stderr goes to `/dev/null`, and a
+failed parent lookup no longer ends the guardian.
+
+### Symptoms
+
+A SIGTERM sent to acq's whole process group, rather than to acq alone,
+sometimes leaves a bare `Terminated` line on acq's stderr.
+acq still exits with the signal and its kit-fetch root is still removed. The
+`foreground` SIGTERM sub-case of `test/bats/103-kit-fetch-lifecycle.bats`
+(driven by `test/bats/kit-fetch-lifecycle.py`) asserts an empty stderr, so it
+fails now and then. It is seen more on loaded CI runners (pre-commit and the
+bash 3.2 shards) and passes on re-run.
+
+### Root Cause
+
+This describes `acq` before the fix below. The line did not come from acq's
+shell or its foreground child. It came from the kit-fetch guardian that
+`_acq_kit_fetch_start` in `acq` starts in the background:
+
+1. The guardian runs `sh -c '…'` with HUP, INT and TERM ignored, in acq's
+   process group, and kept acq's stderr.
+2. Each one-second tick it looks up its own parent with `proc_info`. On Linux and
+   macOS that runs `ps -o ppid= -p PID` inside a command substitution.
+3. procps `ps` (Linux) installs its own SIGTERM and SIGHUP handlers at startup,
+   even when it inherits them as ignored (`strace -e trace=rt_sigaction ps …`
+   shows it with procps-ng 4.0.4). It leaves SIGINT alone. A group SIGTERM that
+   arrives while that `ps` runs makes its handler re-raise the signal, so `ps`
+   dies from SIGTERM. A group SIGHUP does not: `ps` 4.0.4 handles it with
+   `exit_group(1)`, so it exits with status 1 and nothing is printed. Whether
+   the macOS `ps` behaves the same has not been checked.
+4. The command-substitution subshell (dash on Ubuntu) waited for `ps` in the
+   foreground and reports its death by signal on stderr: `Terminated`. After a
+   SIGHUP there is no death by signal to report, so the line never appears.
+
+So the race is between the group signal and the guardian's short `ps` window.
+The first `ps` runs right as acq starts, which is where the test signals, and
+CPU load makes the window longer. The guardian then exited through
+`parent=$(proc_info "$$") || exit 1` and removed the root. A group SIGHUP
+that hits the same window takes that exit too (`ps` exits 1), but silently.
+Either way this is harmless here, because acq is dying from the same signal.
+SIGINT, from a terminal's Ctrl-C, does not trigger any of this.
+
+A forced reproduction, run without load: put a `ps` wrapper first on `PATH`
+that resets SIGTERM to its default, sleeps three seconds, then execs the real
+`ps`. Start `acq` (the harness's generated script, `foreground` mode) in its
+own session and `killpg` it with SIGTERM after one second. You get
+`Terminated` on stderr every time. With the real `ps` and no load, stderr is
+empty. (A wrapper that also resets SIGHUP prints `Hangup` for a group SIGHUP;
+that comes from the wrapper, not from the real `ps`.)
+
+### Fix
+
+`_acq_kit_fetch_start` in `acq` now sends the guardian's stderr to `/dev/null`
+along with its stdin and stdout (`) </dev/null >/dev/null 2>&1 &`). The guardian
+never needs to print, so the stray line cannot appear whatever its helpers do.
+
+A failed `proc_info` now skips only that tick's parent comparison instead of
+ending the guardian, so a lookup killed by a signal no longer deletes the root
+while acq still runs. The tick still runs the `kill -0 "$owner"` liveness check,
+so a `ps` that keeps failing, together with an acq killed by SIGKILL (which runs
+no EXIT trap), still ends the guardian and removes its root.
+
+### Prevention / Status
+
+`test/bats/kit-fetch-lifecycle.py` (run by
+`test/bats/103-kit-fetch-lifecycle.bats`) covers both parts without load or
+stress loops. Its slow `ps` wrapper resets SIGTERM, holds the guardian's lookup
+open for three seconds and leaves a marker file, and the case sends the group
+SIGTERM once the marker exists, so the signal lands inside the lookup every time
+and acq's stderr must stay empty. A `ps` wrapper that always fails checks that
+acq's root survives a failed lookup, and that the guardian still removes the
+root after acq is killed by SIGKILL.
+
+---
+
+## 59. sbx: The Recreate Notice Repeats on Every Start for a Relative `ACQ_EXTRA_KITS` Entry
+
+**Status:** Known, migration by recreate (sbx, Bash `acq`). Affects only sandboxes
+created by an older acq.
+
+### Symptoms
+
+You created an sbx sandbox with a relative local extra kit, for example
+`ACQ_EXTRA_KITS=./my-kit acq run opencode .`, using an acq release from before
+local kit refs were recorded as absolute paths. After upgrading acq, every
+`acq run NAME` (or other re-attach) with the same `ACQ_EXTRA_KITS=./my-kit`
+prints:
+
+```
+acq: applying extra kit to 'NAME': /abs/path/to/my-kit
+acq: sbx >= 0.38 cannot extend a live sandbox with startup-bearing kits
+     ...
+       acq rm 'NAME' && acq run opencode /path/to/your/project
+```
+
+The kit applied at create is still in the sandbox; only the notice is new.
+
+### Root Cause
+
+The re-attach heal (`acq_backend_ensure_kits_applied` step 4 in
+`acq.backends/sbx.sh`) skips an extra kit only when its ref matches a line in
+the sandbox's host record (`extra-kits`) exactly. acq now turns a relative
+local kit ref into an absolute path as soon as it reads `ACQ_EXTRA_KITS` or
+`--kit` (`_acq_kit_refs_make_absolute` in `acq.backends/common.sh`), so a
+relative ref names the same kit wherever a later start runs. The older acq
+recorded the relative spelling (`./my-kit`), which never matches the absolute
+one, so the heal tries `sbx kit add` again. sbx 0.38 and later refuse to add a
+kit with startup commands to a live sandbox; acq prints the recreate notice and
+does not update the record, so the same thing happens on the next start.
+
+acq does not re-resolve the old relative record against the current directory:
+it cannot know which directory the older acq resolved it from, the same reason
+the start/restart kit record skips relative entries with a warning.
+
+A kit without startup commands is added once and its absolute ref recorded,
+so it stops after one start.
+
+### Fix
+
+Recreate the sandbox so its record is written with absolute refs (this discards
+the sandbox's session and context):
+
+```bash
+acq rm NAME && ACQ_EXTRA_KITS=./my-kit acq run opencode /path/to/your/project
+```
+
+Until then the notice is harmless. Leaving `ACQ_EXTRA_KITS` unset for that
+sandbox also stops it, since the kit is already applied.
+
+### Prevention / Status
+
+New sandboxes record absolute refs (`test/bats/101-kit-source-confinement.bats`,
+"cli-kits and the sbx extra-kits record agree on an absolute ref"), so this
+affects only sandboxes created before that change.
+
+---
+
+## 60. Windows: DLL Search Can Reach the Workspace
+
+**Status:** Investigated, not hardened in code. Deferred until a Windows host
+check shows a program acq starts probing the current directory for a DLL.
+
+### Symptoms
+
+None observed. The risk: a DLL planted in the workspace is loaded by a native
+program acq starts on the host, the way a planted `git.exe` would have run before
+programs were resolved from absolute `PATH` entries only.
+
+### Root Cause
+
+acq resolves every program it starts to an absolute path, and the launchers set
+`NoDefaultCurrentDirectoryInExePath=1`, but neither changes how Windows finds a
+program's **DLLs**. With safe DLL search mode (the default), `LoadLibrary` looks
+in the program's own directory, then the system directories, then the **current
+directory**, then `PATH`. Every process acq starts inherits acq's current
+directory, which is normally the workspace: the Python acq never passes `cwd=`
+to a child, and the Bash acq runs in the caller's directory. So a DLL that a
+program loads by bare name, and that is in neither its own directory nor the
+system directories, is looked for in the workspace before `PATH`.
+
+What was checked (statically, from the code and the shipped layouts):
+
+- acq's own Python process loads nothing by bare name. Its only `ctypes` use is
+  `kernel32`, a KnownDLL, and CPython 3.8+ loads extension-module dependencies
+  without searching the current directory or `PATH`.
+- The managed runtime's `python.exe`, Git for Windows' `bash.exe`/`git.exe` (with
+  `msys-2.0.dll`) and `powershell.exe` keep their DLLs in their own or the
+  system directories.
+- Not checked: `msb.exe`, `sbx.exe` and anything they start. A phantom DLL (one
+  a program probes for but nobody ships) or a dependency expected on `PATH`
+  would be found in the workspace first. This needs a Windows host to observe.
+
+### Fix
+
+No code change yet: removing the current directory from a child's DLL search
+order would mean starting each child from a directory outside the workspace
+(several commands take workspace-relative paths) or relying on how
+`SetDllDirectoryW("")` is inherited by child processes, and neither can be
+verified without a Windows host. An administrator can close it for every process
+now with the documented `CWDIllegalInDllSearch` setting (system-wide under
+`HKLM\SYSTEM\CurrentControlSet\Control\Session Manager`, or per program under
+`Image File Execution Options\<program>.exe`); `0xFFFFFFFF` removes the current
+directory from the DLL search order.
+
+### Prevention / Status
+
+**Unblock trigger:** the next Windows live check. Run `acq --backend msb run
+shell .` and `acq --backend sbx run shell .` from a workspace under Process
+Monitor, filtered to `.dll` paths inside the workspace (any result, including
+`NAME NOT FOUND`), for `msb.exe`, `sbx.exe`, `git.exe`, `bash.exe` and
+`python.exe` and their children. If none probes the workspace, record that and
+close this entry. If one does, harden that launch (start it from a trusted
+directory, or confirm `SetDllDirectoryW("")` in the launching process reaches
+it) and add a Windows test that plants the DLL.
+
+---
+
+## 61. Bash acq on Windows: Provider-Input `current` Is a Pointer File, Not a Symlink
+
+**Status:** Fixed for the Bash `acq` under Git Bash (`ACQ_IMPL=bash`; it was the
+Windows default until ADR-0048m made the Python implementation the default on
+2026-11-10). Verified on Windows 11 with
+stub backends and a stand-in for the pinned validator: the provider-input
+transaction, provider facts read back through the pointer file, and a stubbed
+`acq create` and `acq rm`. A create against the real pinned Patterns validator
+has not yet been run on Windows. Two follow-ups are tracked: see Prevention /
+Status.
+
+### Symptoms
+
+Before the fix, every Bash `acq create`, `acq run` and `acq rm` under Git Bash
+failed in the provider-input transaction:
+
+- `Python was not found; run without arguments to install from the Microsoft
+  Store …`: the snapshot, materialize and swap helpers ran `python3`, which on
+  Windows is missing or is the App Execution Alias stub.
+- `rm: cannot remove '…/.current.NNNN.NNNN': Is a directory`, then `acq(msb):
+  error: sandbox 'NAME' was created but provider inputs could not be published.`
+- With a provider kit, `acq: invalid provider facts: …/facts.json`: native
+  Windows Python wrote the facts reader's output with CRLF line endings, so each
+  value ended in a carriage return and failed validation.
+
+After the fix, `current` under a sandbox's provider-input root
+(`…/provider-input/<backend>/<name>.<sum>/current`) is a small text file holding
+`generations/generation.XXXXXXXX` on Windows, where Linux and macOS have a
+symlink with that same target.
+
+### Root Cause
+
+The helpers in `acq.backends/common.sh` assumed a POSIX Python. Native Windows
+CPython has no `O_NOFOLLOW`, `O_DIRECTORY`, `dir_fd` or `os.fchmod` (before 3.13).
+Publishing used `ln -s`, and Git Bash's default `ln -s` copies the target
+directory rather than linking it, so the temporary name was a directory that
+`rm -f` cannot remove.
+
+### Fix
+
+- `_acq_provider_input_snapshot`, `_acq_provider_input_materialize` and
+  `_acq_provider_input_atomic_replace` run through the same interpreter probe as
+  the directory helpers (`python3`, `python`, `py -3`, skipping the Store stub),
+  with paths mapped to Windows form by `_acq_provider_input_nt_path`. On native
+  Windows Python the snapshot walks each artifact path with `os.lstat`, refuses
+  symlinks and every reparse point (junctions included), checks that the opened
+  handle is the file it checked, and refuses names Win32 would rewrite
+  (trailing dot or space, `:` streams, device names such as `NUL` or `COM¹`).
+  On every platform the snapshot refuses a file with more than one hard link,
+  which could otherwise bring a file from outside the kit into it.
+- `_acq_provider_input_publish` writes `current` as a pointer file and renames it
+  over the old one with `os.replace`. The POSIX path, a relative symlink, is
+  unchanged.
+- `acq_provider_sandbox_facts`, the one reader of `current`, resolves it through
+  `_acq_provider_input_current_generation`, which accepts the symlink, the
+  pointer file and a real directory. A link or pointer counts only when its text
+  is exactly `generations/generation.<suffix>` and that directory passes the
+  no-link walk; otherwise the reader falls back to the facts recorded in host
+  config, as if `current` were absent.
+- `acq_provider_facts_json_fields` has its Python write bare LF line endings.
+
+The options considered for Windows publish:
+
+| Option | Admin or Developer Mode | Atomic switch | Why not chosen |
+|--------|-------------------------|---------------|----------------|
+| Directory junction (`mklink /J`, `New-Item -ItemType Junction`) | No | No | `MoveFileEx` cannot replace an existing directory, so a swap is remove-then-create. A junction needs an absolute target, so it breaks if the state directory moves, and it puts a reparse point in the tree that the walk is built to refuse and that recursive removal must not follow. |
+| `MSYS=winsymlinks:nativestrict` | Yes | Yes for a file symlink | Fails on a default Windows 11 client. |
+| **Pointer file** | No | Yes (`os.replace` of a file) | Chosen. |
+
+No sandbox mounts `current`. Both backends mount the exact generation
+(`acq_provider_input_sbx_mount`, `acq_provider_input_msb_mount`), and the msb
+mount source is the drive-form path `host_path` produces. On the host, `current`
+has one reader, `acq_provider_sandbox_facts`, which supplies the provider ids
+for the attach-time key check and the credential bindings; it reads the pointer
+file as described above. A sandbox created by an older acq, which mounted the
+whole root, would follow `current` inside the guest, but no such sandbox exists
+on Windows because the Bash transaction never completed there before. The
+Python acq's `provider_input.publish` writes the same pointer file on Windows
+(`generations/generation.<suffix>` and a newline, renamed over `current` with
+`os.replace`), so both implementations leave the same state. Like Bash, it
+removes a link left at `current` (never its target) and retries, and refuses a
+real directory there.
+
+If `current` is a link the Python acq left (a directory symlink or a junction,
+which `os.replace` cannot overwrite), Bash removes that link, never its target,
+and retries, so `current` is absent for that moment and a reader in that moment
+gets the recorded facts. A real directory named
+`current`, such as a copy left by an older Bash acq, is refused (`it is a
+directory, not a file or a link`) and kept; remove it, or run `acq rm NAME`, and
+recreate.
+
+### Residual risk: a parent directory swapped for a junction (Windows)
+
+The opt-in Bash implementation (`ACQ_IMPL=bash`) checks each component of an
+artifact path with `os.lstat`, then opens the file by name. A writable parent
+replaced with a junction after its check can redirect later lookups outside the
+kit. The leaf's volume/file-index comparison does not catch this if both the
+leaf lookup and open occur through the replacement parent. The directory walk
+`_acq_provider_input_nt_dir` has the same check/use window, including during
+creation. Local kits are especially exposed because Bash reads them in place;
+remote checkouts are in acq's private staging directory. The POSIX snapshot
+opens components relative to directory descriptors with `O_NOFOLLOW`.
+
+**Status:** This residual remains on the supported Windows Bash opt-in path.
+A second path walk after opening does not close it: a writer can restore the
+original parent before that walk. Copying into private staging also needs a
+safe source open. Closing it requires a native Windows handle check (such as
+`GetFinalPathNameByHandleW` containment on every opened source) and directory
+handles held against replacement during traversal and creation. That is not a
+small, portable Bash correction, so no path-based recheck is presented as a fix.
+The deterministic parent-swap regression in
+`test/bats/147-provider-input-projection.bats` records the current exposure.
+
+`ACQ_IMPL=python`, the Windows default under ADR-0048m, is not affected by this
+Bash snapshot race: `py-acq/src/acq_py/kit_fetch.py` copies local kits into a
+private cache and checks each opened source handle's final path remains inside
+the kit before copying. It does not invoke Bash's directory walker or snapshot.
+
+**Tracked:** implement native Windows handle-based source and directory
+traversal before claiming the Bash opt-in path is safe against concurrent
+parent-junction replacement. This entry remains the durable tracking record;
+the Windows default flip does not resolve the Bash residual.
+
+### Prevention / Status
+
+`test/bats/147-provider-input-projection.bats` covers the Windows code paths on
+Linux with an emulated native Python (links, junctions, a leaf swapped after its
+lstat, hard links, Win32 names, the pointer swap, a full transaction, provider
+facts read through every form of `current`, and an interpreter that writes
+CRLF). `test/bats/163-provider-input-windows-native.bats` runs on Git Bash with
+native Windows Python, in the Windows CI Git Bash subset: real junctions and
+hard links, a native symlink when one can be made, the pointer file and its
+fallback, provider facts read from native Python, the transaction from lock to
+unlock with a mount source Windows resolves, and a stubbed `acq create` and
+`acq rm`.
+
+The Python acq writes the same pointer file on Windows
+(`py-acq/tests/test_sbx_provider_input.py` covers the pointer, the swap over a
+link left at `current`, and the refusal of a real directory). It does not yet
+stage a generation on Windows for either backend (sections 54 and 55), so
+today the pointer is written only once that lands.
+
+---
+
+## 62. Deferred: live offline-install completeness transcript (Tier-3)
+
+**Status:** deferred (tracked per AGENTS.md "Track Deferred Work").
+
+The acq v1 installer (ADR-0042m) enforces the enumerated offline asset set at
+install time: it checksum-verifies the release archive against `SHA256SUMS` and
+fails closed before publishing if the archive is missing the launcher, the
+bundled runtime, the source tree, or the wheelhouse, or if the provenance
+manifest is absent. It does **not** yet prove the set is *complete enough to run
+acq end-to-end from a blocked network*: that is a Tier-3 live transcript, not a
+unit assertion, and it has not been fabricated.
+
+**What the deferred transcript must assert:**
+
+1. On a network-blocked host, `install.sh --source <offline-set>` (and
+   `install.ps1 -Source <offline-set>` on Windows x64) installs from the
+   enumerated asset set alone — no network is reached for acq's own assets.
+2. After install, `acq version` reports the baked `acq_version` and
+   `source_revision` on a non-git install.
+3. A sandbox starts and runs a smoke command (e.g. `acq run opencode <dir>`).
+
+**Unblock trigger:** `.github/workflows/build-assets.yml` and
+`.github/workflows/release.yml` (ADR-0050m) now assemble and publish all five
+per-platform archives carrying the bundled managed runtime (Python.org embedded
+on Windows; python-build-standalone install-only archives on macOS/Linux), the
+exact-hash validator `wheelhouse/`, `provenance.json`, and `SHA256SUMS`, and
+verify offline installs in CI. Recording the live Tier-3 transcript against a
+published release on a network-blocked host with a live backend remains open
+until the first v1 release tag is published.
+
+---
+
+## 63. Deferred: Tier-3 oracle facets the cell oracle cannot check unattended
+
+**Status:** deferred (tracked per AGENTS.md "Track Deferred Work").
+
+`scripts/qualify-backend-cell` checks the boot contract, credential binding and
+in-guest non-exposure, built-in kit application, host-side secret non-exposure,
+and (msb) the read-only trusted-config mount, including the committed
+`scripts/qualify-msb-ro-mount` canary. Four ADR-0044m facets have specific limits:
+
+1. **Swap-on-the-wire substitution.** Showing that the real credential (not the
+   placeholder) reaches the bound host needs an endpoint that reports what it
+   received, and the oracle must not send even a throwaway value to a host that is
+   not on the approved endpoint list, or open a listener on the host. **Unblock
+   trigger:** the maintainer names an approved echo endpoint (or an in-repo test
+   service the backends can reach); then add a step that binds the throwaway
+   value to it and compares what it saw.
+2. **Attach.** Needs a terminal; covered by the Tier-2 tests
+   (`py-acq/tests/test_exec.py`) until a PTY-driving step is added.
+3. **Version fail-closed against a real older backend.** Covered offline by the
+   Tier-1 vectors; a live check needs a second, older backend install on the host.
+4. **Remount attempts in the cell's own guest and Windows `ro_mount`.** On POSIX
+   `msb` cells, the Python implementation stages the host-config tree and enforces
+   the read-only mount gate (`py-acq/src/acq_py/security.py`), and the cell oracle
+   checks `ro` in `/proc/mounts`, an EROFS write, and an unchanged host directory
+   in its own guest (passing live on `msb/linux-x86_64`), while attempts to
+   remount read-write are made by the canary in a sandbox of its own. On Windows,
+   where `acq` does not request a read-only trusted-config mount (ADR-0048m),
+   `scripts/qualify-backend-cell` detects `"platform": "windows"` in
+   `acq doctor --json` and reports the `ro_mount` facet as `BLOCKED`.
+
+---
+
+## 64. Deferred: Windows launcher argv and Bash UNC mount need live Windows checks
+
+**Status:** deferred (tracked per AGENTS.md "Track Deferred Work").
+
+Four Windows fixes were made and unit-tested; the launcher changes were then
+reviewed live on Windows 11 under Windows PowerShell 5.1:
+
+- **acq.cmd forwards argv exactly on the Python branch.** `acq.cmd` starts
+  `acq.ps1` with `powershell.exe -NoLogo -NoProfile -File`. That path keeps a
+  bare `--` in `$args` (Windows PowerShell 5.1 does not remove it there), but
+  5.1's call operator then dropped empty arguments, left embedded double quotes
+  unescaped and mishandled a backslash run before a quote when it started
+  Python. `acq.ps1` now recognises that exact launch shape, takes the arguments
+  from its own process argv (`[Environment]::GetCommandLineArgs()`), and starts
+  Python with an MSVCRT-quoted command line through
+  `System.Diagnostics.Process`. The child inherits the console and standard
+  handles and starts in the current PowerShell location.
+- **The Bash branch refuses what it cannot forward.** The Bash branch
+  (`ACQ_IMPL=bash`; before ADR-0048m it was also the default) still starts `bash.exe`
+  through the call operator. Where that passes arguments the legacy way
+  (Windows PowerShell 5.1, PowerShell before 7.3, or
+  `$PSNativeCommandArgumentPassing = 'Legacy'`), an argument that is empty or
+  contains a double quote now exits 2 with a message pointing to
+  `ACQ_IMPL=python`, instead of reaching Bash silently changed (an empty
+  argument used to vanish, and `say "hi"` arrived as `say hi`).
+- **`ACQ_IMPL` is compared case-sensitively** in `acq.ps1` (`-cne`), as the Bash
+  `acq` compares it: `PYTHON` or `Bash` exits 2.
+- **Bash msb UNC workspace.** `host_path` maps the `/unc/server/share/...` guest
+  form back to the UNC host path `//server/share/...` instead of passing it to
+  `cygpath -m`, which put it under the MSYS root. The msb `--volume` source and
+  the recorded host workspace are the UNC path again (ADR-0029 amendment).
+
+`py-acq/tests/test_windows_launchers.py` runs the launchers on the Windows CI
+job: the argv round trip through `acq.cmd`, the exit status, the working
+directory, case-sensitive `ACQ_IMPL`, and the Bash branch's refusal.
+`test/bats/117-msys-path-forms.bats` covers the UNC mount with a simulated
+`cygpath`.
+
+**Live checks still needed (Windows x64):**
+
+1. **Attach to a real msb guest through `acq.cmd`.** The TTY, Ctrl-C and the
+   exit status were verified live through `acq.cmd` with `ACQ_IMPL=python`; an
+   `acq.cmd run shell <dir>` attach into a real msb guest has not been run yet.
+2. **Bash msb with a UNC workspace.** Under Git Bash with msb,
+   `ACQ_IMPL=bash ACQ_DEBUG=1 acq run shell '\\server\share\proj'` (or a
+   mapped drive whose realpath is UNC) must log
+   `msb volume: //server/share/proj (host) -> /unc/server/share/proj (guest)`, and
+   msb must mount it. The Python adapter's UNC mount was verified live; nothing
+   yet shows msb accepting the forward-slash `//server/share` source the Bash
+   adapter passes.
+
+**Known limitations (not fixed):**
+
+- **`acq.ps1` run from PowerShell.** In PowerShell, `acq` resolves to `acq.ps1`
+  before `acq.cmd`, and PowerShell parses the line itself, so the first bare `--`
+  never reaches acq. Quote it (`acq exec box '--' echo --json`), or run
+  `acq.cmd`. Windows PowerShell 5.1 also drops an empty argument passed to Python
+  there. Recovering the original text from `$MyInvocation` would need the
+  PowerShell parser and `Invoke-Expression`, which is too fragile to adopt
+  without a Windows host to test it. **Unblock trigger:** a Windows host or CI
+  job that can drive an interactive PowerShell session.
+- **Bash branch quoting.** The Bash branch refuses an empty argument or one
+  containing a double quote rather than forward it; use `ACQ_IMPL=python` for
+  such a command. MSYS globs unquoted arguments, so switching this branch to an
+  exact command line needs its own analysis. ADR-0048m (default flipped on
+  2026-11-10) keeps `ACQ_IMPL=bash` as an explicit opt-in during the
+  transition, so the branch stays supported and this limitation stands.
+  **Unblock trigger:** a decision to retire `ACQ_IMPL=bash` on Windows, or a
+  report that needs such an argument on the Bash branch.
+- **PowerShell 7 coverage.** The launcher tests run under portable PowerShell
+  7.4.22 on the Windows test VM, alongside Windows PowerShell 5.1 (which
+  `acq.cmd` always uses). CI's Windows runner also has PowerShell 7 and requires
+  the `pwsh` launcher cases. These cover `--`, empty arguments, embedded quotes
+  and trailing backslashes on both implementation branches, including the
+  Bash branch's refusal when `$PSNativeCommandArgumentPassing` is `Legacy`.
+
+---
+
+## 65. Deferred: Python session parity gaps (attach, shell, exec)
+
+**Status:** deferred (tracked per AGENTS.md "Track Deferred Work").
+
+The Python `attach`, `shell`, `run` and `exec` give the session a PTY when stdin
+is a terminal (`msb exec -t`, `sbx exec -it`), pass `HOME`, `TERM`/`COLORTERM`,
+the host git identity and (msb) `SHELL`, map a signal death to `128+N`, and
+leave Ctrl-C to the child (`py-acq/src/acq_py/hostexec.py` `run_foreground`).
+"Stdin is a terminal" is `hostexec.stdin_is_tty`, which on Windows also needs a
+real console, so `acq attach NAME < NUL` gets no `-t`. On msb every session also
+replays the kit environment recorded when the kits were applied (the `kit-env`
+host-config key, last value wins, as Bash's `_acq_msb_kit_env_flags_into`), and
+first writes the host's global git `user.name`/`user.email` into the guest's
+global git config (as Bash's `_acq_msb_apply_host_git_global_config`); see
+`prepare_session` in `py-acq/src/acq_py/commands/session.py`. On sbx the kits
+carry their own environment and the git identity kit sets the config. These
+values are not secrets (a kit's `environment` is non-secret configuration), so
+they go on the `msb exec` command line as `-e NAME=value`, as in Bash. Some parts
+of the Bash session differ or are not ported yet (the numbering below keeps its
+earlier order; the kit environment, ssh-agent and guest git config items are done):
+
+1. *(Done: kit `environment[]` replay on msb.)*
+2. *(Done: ssh-agent forwarding, ADR-0021. The Python acq creates the route
+   and the bridge and restarts them as Bash does; its differences and the live
+   checks still owed are in §93.)*
+3. *(Done: guest git config on msb.)*
+4. **`ACQ_ACTIVATE_PROJECT_ENV`.** With it set to `1`, Bash passes
+   `ACQ_WORKSPACE` and wraps the session in its guest script
+   (`acq_guest_exec_script`, `acq_guest_shell_script` in `acq.backends/common.sh`),
+   which changes into the workspace and loads its `.envrc` through `direnv` before
+   the command runs. Python ignores the variable and starts the command directly.
+   **Unblock trigger:** the Python substrate reliably provides `direnv` in the
+   guest; then port the two scripts into the adapters' session commands.
+5. **sbx attach uses `sbx exec -it`, not `sbx run --name`.** Bash re-attaches with
+   `sbx run --name NAME`, which relaunches the agent baked into the sandbox and
+   reads its launch mode from the `generic-opencode` host record. Python has no
+   such record, and `sbx run` takes no `-e`, so it could not pass the session
+   environment above. Python therefore runs the recorded agent (or kit entrypoint)
+   with `sbx exec -it NAME -- AGENT` from host state, as it does on msb.
+   The reader for Bash's state tree has landed
+   (`legacy_bash.host_config_read("sbx", NAME, "generic-opencode")` in
+   `py-acq/src/acq_py/legacy_bash.py`), so the record is available.
+   **Unblock trigger:** the sbx kit and attach work; decide then whether a
+   Bash-created generic-OpenCode sandbox needs `sbx run` to attach.
+6. **Live check.** A TUI attach, an interactive shell and Ctrl-C have been tested
+   only against a fake backend under a PTY (`py-acq/tests/test_session_fidelity.py`);
+   the tests check the argv and environment acq builds, not what a real backend
+   does with them. Still to confirm on real hosts:
+   * msb (Linux, macOS): `acq attach` renders the opencode TUI through
+     `msb exec -t`; `acq shell` is an interactive login shell; Ctrl-C cancels
+     the agent's step without ending acq; a kit's `environment` (for example
+     `OPENCODE_CONFIG`) is visible in `acq exec NAME -- env`; and
+     `git config --global user.name` in the guest prints the host's value.
+   * sbx 0.51+: `sbx exec -it` gives the agent a PTY and stdin, and `-e` reaches
+     the session.
+   * Windows (Python is the default there, ADR-0048m): from Windows Terminal and
+     from a legacy console, `msb exec -t` gets a working PTY, and Ctrl-C reaches
+     the guest; `acq attach NAME < NUL` exits instead of waiting for keys. A
+     Windows console sets no `TERM`, so the guest gets msb's default terminal
+     type and a TUI may fall back to 16 colours. If it does, the fix is to pass
+     a `TERM` when the host console supports virtual-terminal sequences, which
+     acq does not do today because `terminal_env` never invents a value.
+   **Unblock trigger:** the next Tier-3 run on an msb host, on an sbx 0.51+
+   host for `sbx exec -it`, and on the Windows qualification cell.
+
+---
+
+## 66. Deferred: limits of the Python acq's import of Bash state
+
+**Status:** deferred (tracked per AGENTS.md "Track Deferred Work").
+
+The Python acq imports the Bash acq's state once per state tree, in the
+generation-2 step of the migration that runs before the first mutating verb
+(ADR-0041m; `py-acq/src/acq_py/legacy_bash.py`, `migration.py`). Four limits
+remain:
+
+1. **Once per tree.** State the Bash acq writes after that step (a sandbox it
+   creates while both implementations are in use, a `kit-source add` or a
+   `provider-credential set`) is not imported. (A `kit_sources` or
+   `provider_credential_bindings` list that Bash itself would refuse is the
+   exception: it stays pending, retried on each mutating verb, until it is
+   fixed. Its warning is printed on the first such verb, and again only when
+   what is pending, or why, changes; meanwhile `acq doctor` reports it, with
+   that warning, in its `bash-import` check.) Kit sources without a full commit SHA are never imported; add them
+   again with `acq kit-source add REPO --ref <full-sha>`. Running the import every time
+   would bring back records removed with the Python acq, including kit sources
+   whose trust the user withdrew. **Mitigation:** create such sandboxes with
+   the Python acq, or re-register the source or binding with it.
+   **Unblock trigger:** the Bash implementation is retired, or a ledger of
+   imported records is needed.
+2. **Read-only verbs do not import.** `acq ls` and `acq doctor` never migrate,
+   so until the first mutating verb (`run`, `create`, `exec`, ...) a Bash
+   sandbox is listed without its agent and workspace, or not at all.
+   **Unblock trigger:** a report that this confuses users; then have `doctor`
+   warn when Bash state is waiting to be imported.
+3. **Workspaces in MSYS form on Windows.** A workspace Git Bash recorded as
+   `/c/Users/...` is not an absolute native path, so it is dropped and
+   re-attach uses the path typed on the command line. **Unblock trigger:** a
+   Windows host shows Bash recording that form; then translate it.
+4. **Names acq did not generate.** A sandbox name that the Bash key sanitizer
+   changed (any character outside `A-Za-z0-9._-`) cannot be recovered from the
+   file name, so that sandbox is skipped. acq's own names are never affected.
+   **Unblock trigger:** none expected.
+
+---
+
+## 67. Resolved: the Python acq has clone mode (`--clone`, `ACQ_CLONE`)
+
+**Status:** resolved (2026-11-10). Kept for the history of the fail-closed
+refusal it replaced.
+
+Until 2026-11-10 the Python acq had no clone mode: `--clone` was an
+unrecognized argument, and `ACQ_CLONE=1` made `create` and `run` refuse with a
+usage error before any state, config or backend access, because before that
+refusal the variable was silently ignored and a user expecting isolation got
+the real workspace mounted read/write.
+
+Clone mode is now ported (`py-acq/src/acq_py/msb_clone.py`, ADR-0027):
+
+- `create`/`run AGENT PATH --clone`, or `ACQ_CLONE` set to exactly `1` (as in
+  Bash; any other value is off), runs the agent on a disposable clone. On msb
+  it is the Bash adapter's host-side scratch clone, with the same host-side git
+  isolation, layout checks, refusals and messages; on sbx it is
+  `sbx create --clone`. Both backends set `ACQ_WORKSPACE` on every create and
+  `ACQ_CLONE=1` under clone mode.
+- The `<clones>/<sandbox>/.origin` and scratch layout and the hooks path are
+  Bash's, so either implementation removes (`acq rm`) a clone sandbox the
+  other created. Python's `create --recreate` (Bash has none) rebuilds a
+  clone sandbox, including one Bash created, on its existing scratch, and
+  refuses when that scratch is missing, damaged or names another checkout
+  rather than mount the real checkout.
+- A re-attach (`run AGENT PATH` on an existing sandbox) prints Bash's note that
+  the flag applies only at create and continues; `run NAME` ignores it, as in
+  Bash.
+- Stricter than Bash: an inherited `GIT_ALLOW_PROTOCOL` is removed from the
+  host-side git calls (it would override `protocol.allow=never`), a workspace
+  holding `ACQ_MSB_CLONES_DIR` is refused like acq's other directories, a
+  leftover link at `<clones>/<sandbox>` is refused as a stale scratch, the
+  guest-writable scratch is removed without ever changing a link or anything
+  outside it, and the uncommitted-changes note uses plumbing that never runs
+  a filter (`git diff-index --cached` and `git ls-files --others`), so an
+  unstaged edit to a tracked file is not reported. A scratch the guest made
+  unreadable never blocks `acq rm` (its commits are reported as possibly
+  unfetched, and the sandbox is still removed), and each host-side git call
+  against the workspace other than the clone is bounded at 60 seconds, so a
+  FIFO where git reads a file cannot hang acq.
+
+Tests: `py-acq/tests/test_clone_mode.py` (a one-to-one port of
+`test/bats/116-clone-option.bats`), `py-acq/tests/test_clone_predicate.py`, and
+the vectors `cli/create-clone-flag-msb`, `cli/create-clone-env-msb` and
+`cli/create-clone-not-a-repo`.
+
+**Open follow-up:** clone mode has not been exercised against a live msb or sbx
+from the Python acq; see the qualification checklist in `docs/howto/acq.md`.
+
+---
+
+## 68. Qualification oracle: stopping a step can stop a backend daemon the step started
+
+**Status:** known limitation, tracked for a fix (per AGENTS.md "Track Deferred Work").
+
+### Symptoms and cause
+
+`scripts/qualify-backend-cell` runs each step in its own process group, and on
+Windows also in a Job object of its own (`StepJob`). When a step outlives its
+timeout, or the oracle is stopped, the group gets a polite stop (SIGTERM;
+CTRL_BREAK on Windows) and a grace period. Only if the grace period expires is
+the step force-killed (`run_process` / `stop_process` / `_signal_group`):
+`killpg(SIGKILL)` on POSIX, `TerminateJobObject` on Windows. If the oracle itself
+is killed outright on Windows, its job handles close and the jobs' kill-on-close
+limit takes the steps' processes down too.
+
+A backend daemon that a step's command auto-starts (for example an `msb`
+server) as a child, without detaching it into its own session or process group,
+is in the step's group, and on Windows in the step's job. So:
+
+- **The polite stop reaches it.** The group SIGTERM (CTRL_BREAK on Windows) goes
+  to every process in the group, the daemon included, and a daemon that honours
+  it exits.
+- **The forced kill kills it.** `killpg(SIGKILL)` and `TerminateJobObject` both
+  cover the daemon, as does the kill-on-close of a killed oracle's jobs.
+
+Later steps, and other sandboxes on the host that use the same daemon, then lose
+it. A step that ends on its own does not affect the daemon: on Windows the job's
+kill-on-close limit is lifted before its handle is closed.
+
+The forced kill no longer reaches unrelated processes on Windows. It used to be
+`taskkill /F /T`, which walks parent process ids without a creation-time check
+and, after a pid was reused, could kill a process that had nothing to do with the
+run. Job membership is fixed when a process is created, so `TerminateJobObject`
+kills the step's processes and nothing else.
+
+One exception is intended: a process that a step starts with
+`CREATE_BREAKAWAY_FROM_JOB` leaves the job (the job sets
+`JOB_OBJECT_LIMIT_BREAKAWAY_OK`, so a backend that detaches its daemon that way is
+not refused) and survives the forced kill, like a POSIX process that left the
+step's group with `setsid`. The job is a cleanup tool, not a security boundary: it
+does not contain a step that sets out to escape it.
+
+### Mitigation today
+
+Start the backend daemon before a qualification run, so no timed step starts it.
+That protects it from the polite stop and from the forced kill alike. Leave the
+grace periods (`STOP_GRACE`, `CANARY_GRACE`) at their defaults so the forced
+kill stays a last resort.
+
+### Proposed fix
+
+Before the first timed step, start the backend daemon (or check that it is
+already running) outside any step's process group and job. **Deferred:** it needs
+each backend's own command to start and probe its daemon (msb and sbx differ, and
+acq does not manage either daemon today), verified live on every platform.
+**Unblock trigger:** the next live qualification round on a host where a step is
+seen to start the daemon, or a backend release that documents a daemon
+start/status command.
+
+---
+
+## 69. Python acq on msb: `secret rm` on an unrecorded sandbox fails closed if `msb modify` errors
+
+**Status:** Verified against live `msb 0.7.11` (fail-closed).
+
+### Symptoms and cause
+
+The Python msb adapter records host-side which secret bindings each sandbox it
+creates holds (`<state>/msb-secret-bindings/`), because msb gives acq no binding
+listing to rely on. `secret rm` unbinds exactly what those records show. A
+sandbox msb lists without a record is unknown: one created by the Bash `acq`, by
+`msb` directly, or before the records existed. For each unknown sandbox,
+`secret rm` runs `msb modify NAME --secret-rm ENV`. Live verification against
+`msb 0.7.11` confirmed that `msb modify NAME --secret-rm ENV` exits `0` both
+when `ENV` was never bound and when `NAME` is stopped (`_stub_msb.py` models
+this idempotence). If `msb modify --secret-rm` still returns a non-zero exit
+(for example, a genuine backend error, or on a global removal when re-adding an
+unrecorded running sandbox's own scoped secret via `msb modify --secret` for a
+variable that was not already bound on that running sandbox), `acq` keeps the
+secret in the acq store and exits 1 with `unbind_failed`, naming the sandbox.
+
+### Mitigation today
+
+Remove or stop the named unrecorded sandbox (`acq rm NAME`, `acq stop NAME`, or
+`msb remove NAME` for one acq did not create), then retry `acq secret rm`. If
+you know a named sandbox never had the secret (or accept that it may keep it),
+retry with `acq secret rm ... --accept-unconfirmed NAME[,NAME]`: only the named
+unrecorded sandboxes are accepted, the JSON data lists them under `unconfirmed`,
+and a stderr note repeats that they may still hold the binding. Sandboxes the
+Python acq creates always have a record and never block it.
+
+On a global removal, an unrecorded sandbox that also has its own stored value is
+not assumed safe: the Bash `acq`'s global set overwrites a sandbox's own binding,
+so acq removes the binding and re-adds the sandbox's own value in a separate
+call, and reports the sandbox as unconfirmed if either call fails.
+
+---
+
+## 70. Read-only host-config probe misclassifies a denied write
+
+### Symptoms and cause
+
+Readonly kit staging reports that the host-config mount looks writable even
+though host `msb inspect` records a read-only bind and direct writes fail with
+`Read-only file system`. A POSIX shell can exit with status 2 when redirection
+on the special builtin `:` fails. The original probe used that same status to
+signal a successful write, confusing denial with writability.
+
+`acq.backends/msb.sh::_acq_msb_host_config_mount_probe` now isolates the write
+attempt in a subshell. Only an actual successful write selects status 2;
+denial returns 0, while missing/inaccessible mounts and transport errors remain
+refusals. Host mount-record, version and platform checks still apply. The
+real-shell regression is in `test/bats/84-msb-ro-mount-qualification.bats`.
+
+Measured with MSB 0.7.11 on macOS ARM64: the root guest write to a readonly
+canary was denied, a writable control succeeded, and the host sentinel remained
+unchanged. With the fixed probe, the existing OCI kit installed Podman and
+passed its rootless startup self-test. This does not qualify all inner-container
+isolation controls or prove general read-only enforcement across platforms.
+
+---
+
+## 71. Rootless nested Podman lacks cgroup delegation
+
+The OCI kit may install successfully and pass its storage self-test while an
+inner container with explicit memory/CPU/PID limits still cannot start. In the
+measured MSB 0.7.11 guest, Podman 5.7.0 reported cgroup v2, cgroupfs and an empty
+delegated controller list. The bounded network-off test was refused:
+
+```text
+unable to apply cgroup configuration: rootless needs no limits + no cgrouppath
+when no permission is granted for cgroups
+```
+
+Do not remove mandatory limits to label this a successful isolated runner.
+The outer sandbox owner must provide a reviewed cgroup-delegation path, or use
+another qualified backend, before rootless inner containers can satisfy that
+resource contract. Reopen qualification when delegation is available; verify
+effective memory, CPU and PID enforcement alongside network/source/credential
+separation and cleanup. Kit installation and rootless storage readiness alone
+are insufficient evidence. No host engine socket or privileged-host workaround
+is required or authorized by this guidance.
+
+---
+
+## 72. Provider-input validator dependencies are missing
+
+### Symptoms
+
+- `acq create` stops before backend creation.
+- The error requires exact `PyYAML` and `jsonschema` versions.
+
+### Fix: release install (Homebrew, npm, or the upstream release installer)
+
+`--apply` alone uses the offline wheelhouse bundled with the release:
+
+```bash
+scripts/setup-provider-input-validator --apply
+```
+
+The runtime is stored under `$XDG_DATA_HOME/acq/provider-input-validator` (or
+`~/.local/share/acq/provider-input-validator`) and does not modify global Python
+packages. The default invocation is a dry run; `--apply` builds a fresh,
+hash-verified environment and only replaces a working runtime after validation
+succeeds. Re-run the command after changing Quickstart versions if the pinned
+requirements change.
+
+### Fix: git checkout / development install (no wheelhouse)
+
+A working-tree clone (the upstream release installer's clone method, or running
+`./acq` directly from a `git checkout`) has no release wheelhouse. Use the `--online` flag, which
+downloads the same hash-locked packages from PyPI instead:
+
+```bash
+scripts/setup-provider-input-validator --apply --online
+```
+
+Network access is restricted to this explicit setup call; `acq create` itself
+remains fully offline after the runtime is installed.
+
+If the error message already names this command, that means `acq` detected a git
+checkout with no wheelhouse and surfaced the hint automatically.
+
+### Alternative: `ACQ_PROVIDER_INPUT_PYTHON`
+
+If you already have a Python interpreter with the exact required versions
+(`PyYAML 6.0.3` and `jsonschema 4.26.0`), point `acq` at it directly:
+
+```bash
+export ACQ_PROVIDER_INPUT_PYTHON=/path/to/python3
+acq create opencode .
+```
+
+`acq` validates the dependency versions at startup and exits with a clear error
+if they do not match. This is useful when a system-managed environment already
+carries the right packages, or when the setup script cannot run (restricted
+network, air-gapped lab). It is not a substitute for the pinned runtime in
+production; the venv created by `setup-provider-input-validator` is preferred
+because it is isolated from system upgrades.
+
+The lock supports Linux x86_64/aarch64 with Python 3.12, macOS x86_64/arm64 with
+Python 3.12-3.14, and Windows x86_64/arm64 with
+Python 3.12. An unsupported OS, architecture, or Python version fails before
+installation; use one of the supported runtimes rather than bypassing hashes.
+
+---
+
+## 73. Default OpenCode Generic Base Requires Recreation
 
 **Symptom:** An existing OpenCode sandbox still starts through an older
 OpenCode-specific template or does not receive the pinned kit behavior.
@@ -3359,3 +4464,1096 @@ The new default uses the pinned generic `devenv-shell` image and validates the
 pinned OpenCode kit before provisioning. If that validation fails, correct the
 pinned kit availability or metadata rather than falling back to an unpinned npm
 installation.
+
+---
+
+## 74. Python acq on msb: Egress Policy Requires Recreation
+
+**Symptom:** An msb sandbox created by the Python acq (`acq-python`, or `acq`
+with `ACQ_IMPL=python`) can still reach any host, even though acq now applies a
+deny-by-default egress policy. `msb inspect <sandbox>` shows no
+`default_egress: deny`, and a fetch to a host outside the allowlist (for
+example `curl -sS -o /dev/null -w '%{http_code}' https://example.com/` from
+inside the sandbox) succeeds instead of being refused.
+
+**Cause:** Before the policy was added, the Python acq created msb sandboxes
+with no egress flags at all, so their egress was unrestricted. It now passes the
+same policy the Bash acq does: `--net-default-egress deny`, gateway DNS, the
+built-in kits' hosts and, under the default `balanced` tier, the balanced
+baseline (see `ACQ_NETWORK_TIER` in `docs/BACKEND_GUIDE.md`). msb fixes a
+sandbox's network rules when it is created and gives acq no way to change them
+afterwards, so `start`, `restart` and `run NAME` keep whatever rules the
+sandbox was created with. Only a sandbox created after the upgrade gets the
+policy. Sandboxes created by the Bash acq are not affected, because the Bash
+acq already applied this policy at create (ADR-0018).
+
+**Resolution:** Recreate each such sandbox after upgrading. Save anything
+outside the mounted project directory first, because the guest filesystem is
+discarded (the project directory itself lives on the host and is kept):
+
+```bash
+acq-python rm opencode-your-project
+acq-python run opencode /path/to/your/project
+```
+
+`acq create --recreate` does not apply here: it rebuilds only a sandbox that is
+missing its read-only trusted-config mount, and refuses any other. After
+recreating, `msb inspect <sandbox>` shows `default_egress: deny` (unless
+`ACQ_NETWORK_TIER=open` was confirmed on purpose).
+
+---
+
+## 75. Python acq: a Global `secret rm` Can Still Race a `create`
+
+**Status:** fixed in the Python acq; the Bash acq still has the race.
+
+**Symptom:** While `acq create` (or `acq run`) of a new msb sandbox is binding
+its secrets, a concurrent `acq secret rm -g SERVICE` succeeds, but the new
+sandbox ends up holding the removed value. A retried `secret rm -g` then
+reports `secret_missing`, because the store entry is already gone. A
+concurrent `secret set -g`, `provider-credential set` or key rotation can
+likewise leave the new sandbox with the old value.
+
+**Cause:** A sandbox-scoped `secret set` or `rm` holds that sandbox's lifecycle
+lock, so it waits for a create of the same sandbox. A global change cannot use
+that lock: it would have to lock every sandbox, including ones not created yet.
+The Bash acq takes no lock for `secret set` or `rm` at all, so it has the same
+race for every scope.
+
+**Resolution:** The Python acq now has a store-wide secret-store lock. A create
+holds it, shared, from before it reads the store for the new guest's secrets
+until the guest runs; a global `secret set`/`rm`, `secret import` of a global
+value, `provider-credential set`/`rm` and `usai-rotate-api-key` hold it
+exclusively. `acq start` and `acq restart` on msb also hold it, shared, while
+`msb start` binds the stored values and while what the store gained meanwhile
+is bound. So a global change waits for the creates and starts binding
+secrets, and they wait for a global change in progress. Either side gives up
+with `timeout` after `ACQ_SANDBOX_LOCK_TIMEOUT` seconds (default 300), having
+changed nothing. On sbx the create holds the lock for the whole `sbx create`,
+which installs the kits and may pull the image; on msb it holds it for the
+provider gate, `msb create` and the wait for the guest to accept `exec`. The
+prompt that offers to store a missing provider key comes before the lock, and
+the gate checks again under it without asking. On
+Windows the lock has no shared mode, so creates there also wait for each other
+for that whole time. The order in which acq takes its locks, which keeps them
+from deadlocking, is documented in `py-acq/src/acq_py/lock.py`. With the Bash
+acq, do not run a global `secret rm` while a create is in flight; if it
+happened, recreate the new sandbox (`acq rm NAME`, then `acq create`).
+
+---
+
+## 76. Python acq: No Recorded Provider Selection Means the Current One
+
+**Symptom:** A sandbox whose provenance record carries no provider selection (a
+Python-created sandbox from before the selection was recorded, or a Bash
+sandbox whose record predates it) is started, recreated or kit-updated with the
+selection in effect now (`ACQ_PROVIDER_KITS`, `--no-provider-kits`, or
+config.yaml `provider_kit`). The Bash acq treats such a record as the
+historical default selection instead (`acq_provider_selection_load`), so the
+two implementations can bind different providers for the same sandbox.
+
+**Cause:** `kits.recorded_provider_selection` keeps the current selection when
+nothing is recorded, by design, so a pre-existing sandbox follows today's
+default. The secret re-feeds (`secret set -g`, provider-credential set, usai
+rotation) skip only a sandbox whose recorded selection excludes the provider,
+so they keep re-feeding such a sandbox as before. A record that exists but
+cannot be read is refused (`validation_failed`), never read as "nothing
+recorded".
+
+**Resolution:** Recreate the sandbox (`acq rm NAME`, then `acq create`) so its
+selection is recorded. Whether the Python acq should adopt Bash's "legacy means
+the default" rule is an open decision; revisit it with the Bash/Python parity
+review of provider selection.
+
+---
+
+## 77. Python acq: A Workspace That Holds acq's Own Directories Is Refused
+
+**Symptom:** `acq create` or `acq run` fails with `validation_failed` and a
+message such as `workspace /home/you contains acq's state directory
+(/home/you/.local/state/acq)`. A typical trigger is `acq run opencode ~`. `acq
+run NAME`, `acq run AGENT PATH --name NAME` re-attaching to an existing
+sandbox, and `acq create --recreate NAME` refuse the same way when the
+sandbox's recorded workspace is such a directory.
+
+**Cause:** acq mounts the workspace into the sandbox writable. acq's state tree
+holds the host records acq trusts, and its provenance tree holds each sandbox's
+host-config directory, which acq mounts read-only into the guest as trusted
+configuration (ADR-0035). If the workspace contains either of them, the guest
+can rewrite them through the writable workspace mount, which defeats the
+read-only mount entirely. The config directory and the secret store are
+refused for the same reason. A workspace inside one of those directories is
+refused too. Both paths are compared after symbolic links are resolved.
+
+**Resolution:** Run acq on the project directory itself, not on your home
+directory or another directory above acq's state, for example
+`acq run opencode ~/code/my-project`. If a sandbox was already created on such a
+workspace, remove it (`acq rm NAME`) and create it again on the project
+directory. Moving acq's directories with `XDG_STATE_HOME`, `XDG_CONFIG_HOME` or
+`XDG_DATA_HOME` also works, but it hides the sandboxes and secrets recorded at
+the old location.
+
+---
+
+## 78. Python acq: `run` Re-Attach Heal Differs From Bash in Two Places
+
+**Symptom:** (1) `acq run NAME` on a stopped msb sandbox prints `sandbox 'NAME'
+is not running, so its kits were not re-applied`, where the Bash acq starts the
+sandbox and heals it. (2) In a sandbox the Python acq created, the agent user's
+login shell stays `/bin/sh` and no `~/.profile` bridge to `~/.bashrc` is
+written, even when the image ships bash.
+
+**Cause:** Like the Bash acq, the Python acq now re-applies a sandbox's kits and
+sets up its agent user whenever `run` re-attaches. Two parts of Bash's heal are
+not ported yet. Bash's heal starts a stopped msb sandbox first; the Python acq
+leaves starting to `acq start`, which also binds secrets stored while the
+sandbox was stopped. And the Python agent-user setup ports
+`_acq_msb_ensure_agent_user` but not the login-shell sync and profile bridge in
+`_acq_msb_ensure_agent_shell`.
+
+**Resolution:** For (1), run `acq start NAME` first; it resumes the sandbox and
+re-applies its kits. (2) has no workaround in the Python acq beyond running
+`chsh -s /bin/bash agent` in the guest as root. Both are tracked as follow-up
+work: port the start-if-stopped step into the re-attach heal, and port the
+login-shell sync into the agent-user setup.
+
+---
+
+## 79. Lock Directory Without an Owner Is Never Removed Automatically
+
+**Symptom:** One of these, with no other acq command running:
+
+- Every acq command on one sandbox (`create`, `run`, `rm`, `start`) waits and
+  then fails with `timeout`, or Bash acq stops at once with `provider-input
+  lock has no valid owner metadata`. The message names a directory ending in
+  `.lock` under `.../acq/provenance/provider-input/<backend>/`.
+- Every change to `config.yaml` (`backend set`/`unset`, `configure`,
+  `kit-source` and `provider-credential` in Bash acq, and in the Python acq
+  every mutating command, whose schema migration takes the same lock) fails
+  with `could not take the config.yaml lock` (Bash) or `could not acquire the
+  config.yaml lock` (Python, as `migration_failed`). The message names
+  `.../acq/locks/config.lock.d` under the acq state directory, which holds an
+  empty `owner` file.
+
+**Cause:** Both the Bash and the Python acq take these `mkdir` locks and write
+`PID IDENTITY` into the lock's `owner` file; the Python acq takes the
+`config.yaml` one while it holds its own OS lock on `locks/config.lock`, which
+Bash cannot take portably (see `_acq_config_lock_acquire` in
+`acq.backends/common.sh` and `ConfigDirLock` in `py-acq/src/acq_py/lock.py`).
+A lock whose owner process is gone, or whose PID now belongs to another process,
+is recovered automatically. A per-sandbox lock directory with no readable owner
+line is not: the same state exists, briefly, while another command is between
+its `mkdir` and its owner write, so removing it automatically could break a
+live lock. Such a directory is left only when an acq process died in exactly
+that moment, or the directory was made by hand.
+
+The `config.yaml` lock is decided by the exclusive create of its `owner` file
+(section 92), so a `config.lock.d` directory with no `owner` file heals itself:
+the next writer takes it. What it cannot heal is an `owner` file that exists but
+is empty, which is a writer between creating the file and writing its token;
+one is left only if a writer died in exactly that moment. (A writer that fails
+to write its token, on a full disk say, removes the file it created.)
+
+On Windows neither Git Bash nor native Python can check the other's process
+IDs, so the `config.yaml` lock directory counts as held for 60 seconds after it
+was made and is recovered after that (a `config.yaml` write takes well under a
+second); the per-sandbox lock counts as held for 15 minutes and the Python acq
+never removes it.
+
+**Resolution:** Make sure no acq command is running, then remove the directory
+the message names and retry. Every such message prints the command with the
+path filled in:
+
+```bash
+rm -f -- '<lock dir>/owner' && rmdir -- '<lock dir>'
+```
+
+In PowerShell: `Remove-Item -LiteralPath '<lock dir>' -Recurse -Force`. See also
+[Removing a leftover lock](howto/acq.md#removing-a-leftover-lock).
+
+---
+
+## 80. Windows: Bash and Python acq Choose Different Secret Backends in Two Cases
+
+**Symptom:** On Windows (Git Bash), a secret stored by one implementation reads
+as "not set" in the other. `acq secret ls` from the Bash acq lists the key, but
+the Python acq (`acq-python`) reports it absent or unreadable, or the reverse.
+
+**Cause:** Both implementations normally store Windows secrets as DPAPI
+envelopes (`acq-dpapi-v1`) through in-box PowerShell, including when
+`ACQ_SECRET_STORE_DIR` is set: that variable only relocates the DPAPI files on
+Windows (`acq.backends/secret-store.sh`, `py-acq/src/acq_py/secretstore.py`).
+They still differ in two cases:
+
+- `ACQ_SECRET_FORCE_FILE=1` makes the Bash acq write plaintext files. The Python
+  acq ignores the variable on Windows and keeps using DPAPI.
+- When Windows PowerShell cannot be found, the Bash acq falls back to its
+  plaintext file backend (ADR-0028), while the Python acq refuses to store the
+  secret.
+
+A plaintext value written by the Bash acq is still read by the Python acq and
+re-encrypted in place, so the first case loses no data. A DPAPI envelope written
+by the Python acq can be read by the Bash acq only when its DPAPI backend is
+active.
+
+**Resolution:** On Windows, leave `ACQ_SECRET_FORCE_FILE` unset and make sure
+`%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe` exists, so both
+implementations use DPAPI. Aligning the two remaining cases (whether Windows
+should ever fall back to plaintext) needs a decision that amends ADR-0028.
+
+---
+
+## 81. Workspace Refused Because It Contains acq's Own Directories
+
+**Symptom:** `acq create` or `acq run` stops before creating anything with:
+
+```text
+acq: error: workspace /home/you contains acq's own directory /home/you/.local/state/acq.
+```
+
+or `... is inside acq's own directory ...`. The usual trigger is
+`acq run opencode ~`, or `acq run opencode` with no path while the current
+directory is your home directory.
+
+**Cause:** The workspace is mounted into the sandbox, and the Bash acq now
+refuses a workspace that is, contains, or lies inside one of acq's own host
+directories (`_acq_workspace_trusted_safe` in `acq.backends/common.sh`). These
+are the state dir and provenance dir (`~/.local/state/acq`, or `ACQ_STATE_DIR`
+and `ACQ_PROVENANCE_DIR`), the config dir (`~/.config/acq`), the data dir and
+secret store (`~/.local/share/acq`, or `ACQ_SECRET_STORE_DIR` and the
+`ACQ_SECRET_*` overrides), the provider-input data dir, and the kit caches
+(`~/.cache/acq`, `ACQ_SBX_KIT_CACHE`, `ACQ_MSB_KIT_CACHE`). Such a mount let the
+agent read a file-backed secret store and rewrite acq's records, its kit
+payloads and the trusted config acq otherwise mounts read-only. A read-only
+(`:ro`) workspace is refused as well, because the guest could still read the
+secret store. The paths are compared both as given and with symlinks resolved.
+Under Git Bash or Cygwin the comparison ignores the case of ASCII letters,
+because Windows filesystems are case-insensitive (`/c/USERS/you` is
+`/c/Users/you`); POSIX hosts compare exactly. The Python acq compares through
+`os.path.normcase`, which folds case on Windows.
+
+**Resolution:** Run the agent on a project directory:
+
+```bash
+acq run opencode /path/to/your/project
+```
+
+If acq's directories must live somewhere else, move them with `ACQ_STATE_DIR`
+and the `XDG_STATE_HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `XDG_CACHE_HOME`
+variables.
+
+Re-attaching to an existing sandbox (`acq run NAME`, `acq run AGENT` for an
+existing name, `start`, `restart`) does not re-mount the workspace, so there the
+check runs on the workspace recorded when the sandbox was created
+(`acq_recorded_workspace_safe`). A sandbox created on `~` by an older acq is
+refused with the same message, plus a line naming the sandbox. msb records the
+workspace in drive form (`C:/...`) under Git Bash; that record is converted
+with `cygpath -u` before the comparison, and one that cannot be converted is
+refused with the same remove-and-recreate line:
+
+```text
+     Sandbox NAME was created on that workspace: remove it ('acq rm NAME') and create it again on a project directory.
+```
+
+A sandbox with no recorded host workspace (created before acq recorded it) is
+not checked. Recreate a refused sandbox on a project directory. Save anything
+outside the mounted workspace first, because the guest filesystem is discarded:
+
+```bash
+acq ls                 # find the sandbox created on your home directory
+acq rm NAME
+acq run opencode /path/to/your/project
+```
+
+The Python acq has its own version of this check, which also runs on
+re-attach (`run NAME`, and `create --recreate`, which the Bash acq does not
+have: there it is refused with a usage error, exit 2); see
+[§77](#77-python-acq-a-workspace-that-holds-acqs-own-directories-is-refused).
+The Python `start` and `restart`, and its `run AGENT PATH` re-attach (which
+checks the typed path instead), do not check the recorded workspace yet, where
+the Bash ones do. Tracked: add the recorded-workspace check to those Python
+paths (`py-acq/src/acq_py/commands/lifecycle.py`: `_start_locked`,
+`_reattach_workspace`) with the same refusal.
+
+---
+
+## 82. Bash acq: The Anonymous Kit Fetch Attempt Rewrites Every URL to github.com
+
+**Status:** Fixed. Earlier builds behave as described below.
+
+**Symptom:** None visible. Every remote kit fetch by the Bash acq takes its
+second, authenticated attempt (with the user's git config); the first attempt,
+meant to be anonymous, always fails.
+
+**Cause:** `kit_translate_fetch` (`acq.backends/kit-translate.sh`) ran the
+first attempt with `-c credential.helper= -c url.https://github.com/.insteadOf=`
+to neutralize a user's `github.com` URL rewrite. An `insteadOf` value is a URL
+prefix, and an empty prefix matches every URL, so git rewrites
+`https://github.com/GSA-TTS/agentic-coding-patterns.git` to
+`https://github.com/https://github.com/GSA-TTS/agentic-coding-patterns.git`
+(checked with git 2.53: `git -c "url.file:///A/.insteadOf=" ls-remote
+file:///B/repo` reports `'/A/file:///B/repo' does not appear to be a git
+repository`). The request goes to github.com without credentials, so nothing
+leaks, but the fallback runs with the user's credential helpers on every fetch.
+The bats tests replace `git fetch` with a stub, so they never saw it.
+
+**Resolution:** Nothing to do as a user. The first attempt
+(`_kit_git_fetch_into anon`) now reads no git config file at all, as the Python
+acq's does (`py-acq/src/acq_py/kit_fetch.py`): `GIT_CONFIG_NOSYSTEM=1`,
+`GIT_CONFIG_GLOBAL` on the null device, `GIT_ALLOW_PROTOCOL=https` (narrowed
+further by an inherited `GIT_ALLOW_PROTOCOL`), and no URL rewrite of its own.
+Both attempts set `core.hooksPath` to the null device, so a hook from the
+user's config never runs in the kit cache. So an unauthenticated fetch of a
+public kit no longer consults the user's credential helpers, and a kit URL
+starting `git+http://` (not https) now succeeds only through the retry. A bats
+test (`test/bats/100-kit-translate.bats`) runs a real `git fetch` from a local
+repository through the anonymous attempt, with `file://` allowed only in the
+test environment.
+
+---
+
+## 83. A Signal Sent Only to acq's PID Does Not Interrupt `create`
+
+**Symptom:** `kill <acq pid>` (SIGTERM or SIGHUP to the Bash acq's own process
+only) during `acq create` or the create step of `acq run` does not stop the
+backend create. acq keeps running until the provisioning step finishes, then
+prints `acq: stopped by SIGTERM after the provisioning step finished` and exits
+143 (129 for SIGHUP). The sandbox is created; `run` does not go on to attach.
+`acq rm` behaves the same way around the backend remove (`... after the removal
+step finished`).
+
+**Cause:** This is a deliberate choice (`acq_run_signal_deferred` in
+`acq.backends/progress.sh`). The provisioning step runs in a foreground
+subshell that holds the sandbox lock and the backend child and has its own
+signal cleanup. acq's shell now traps SIGTERM and SIGHUP around that step, so a
+signal to the whole process group (a terminal's Ctrl-C, `timeout`, a service
+manager) reaches the subshell, and acq exits only after the subshell has
+released the lock and discarded an uncreated sandbox. Bash runs a trap only once
+a foreground child exits, so a signal for acq alone waits for the step to
+finish. Forwarding it would need the step to run in the background, and a
+background child of a non-interactive Bash 3.2 starts with SIGINT ignored, so
+it could no longer clean up after Ctrl-C.
+
+**Resolution:** Signal the process group instead: `kill -TERM -<pgid>` (the
+negative process-group ID, which is acq's PID when acq was started from a
+shell), or press Ctrl-C in acq's terminal. The Python acq handles SIGTERM in its
+own process, runs the same cleanup and exits 143. A second SIGTERM or SIGHUP to
+the Python acq within 10 seconds of the first is ignored so it cannot cut that
+cleanup short; a later one ends acq at once by that signal, so a hung cleanup
+can still be stopped with `kill`.
+
+---
+
+## 84. Bash 5.2: Ctrl-C During `create` Could Hang acq
+
+**Status:** Fixed. Earlier builds behave as described below.
+
+**Symptom:** Under Bash 5.2, pressing Ctrl-C while `acq create` (or the create
+step of `acq run`) showed its "Creating sandbox" spinner sometimes left acq
+hanging: the spinner stopped after its current frame, the cursor stayed
+hidden, nothing more was printed, and acq never exited until it was killed. The
+backend create kept running. In CI this showed as the sbx Ctrl-C case of
+`test/bats/161-create-signal.bats` timing out after about 90 seconds in the
+parallel pre-commit job (Ubuntu 24.04, Bash 5.2.21). It never happened under
+Bash 5.3 or 3.2.
+
+**Cause:** The provisioning subshell's Ctrl-C cleanup
+(`_acq_spin_cleanup_signal` in `acq.backends/progress.sh`) stopped the spinner's
+animator with `kill` and then the `wait` builtin. Bash 5.2 can lose track of a
+child that exits while a trap runs: the animator exited and was reaped, but
+`wait` never returned, so the cleanup never reached the backend child, the lock
+or the exit. Instrumenting the cleanup confirmed it stopped between the `kill`
+and the end of the `wait`, with the animator already gone. It is a Bash 5.2
+behaviour, not a harness artefact, and any real Ctrl-C could hit it; the test
+only made it likely by running six cases at once under load. Driving the sbx
+Ctrl-C case six at a time on four CPUs reproduced it in 5 of 80 runs under Bash
+5.2.21 and 0 of 60 under 5.3; the full `161` file alone, run 20 times under the
+same load, never did. Only the sbx case failed in CI, presumably because of the
+timing of its create path; the msb case runs the same cleanup.
+
+**Resolution:** Nothing to do as a user. The spinner no longer waits for its
+animator with the `wait` builtin (`_acq_spin_end_animator`): it polls with
+`kill -0`, which cannot hang that way. With that change, the same load
+reproduced no hang in 120 runs under Bash 5.2.21. The provisioning subshell's
+EXIT trap still stops the provider-input guardian with `kill` and `wait`; no
+hang was seen there in those runs. Tracked: if a Bash 5.2 hang ever shows in
+`_acq_provider_input_guardian_stop`, replace its `wait` with the same bounded
+poll.
+
+A later change, not covered by that measurement, closed a gap the first
+version of the poll left: it sent TERM and gave up after about two seconds, so
+an animator not scheduled for that long could still draw one frame over an
+attached session. The animator now draws only while holding a draw lock (an
+`mkdir` directory) and only when no stop marker exists, and quits by itself at
+its next check once the marker is set; it is no longer sent TERM. The stop sets
+the marker and returns once it holds that lock or the animator is gone, then
+waits at most about two seconds more for the animator to exit. Waiting for the
+lock is capped at about 30 seconds, for an animator suspended (SIGSTOP) while
+holding it; such an animator, if resumed after that, can still draw one frame.
+
+---
+
+## 85. Windows: A Forced Kill of the Python acq Left the Session Child Running
+
+**Status:** Fixed. Earlier builds behave as described below.
+
+**Symptom:** On Windows, ending the Python acq from outside during `acq attach`,
+`acq shell`, `acq exec` or `acq run` (Task Manager's End task, `taskkill /F
+/PID <acq pid>`, or `Stop-Process`) ended acq at once, while the backend session
+(`msb.exe exec` or `sbx.exe exec`) kept running in the console and holding it.
+
+**Cause:** On POSIX a SIGTERM or SIGHUP to acq during a session is passed on to
+the session child, which gets ten seconds to exit before acq kills it, and acq
+exits `128+N` only once the child is gone (`run_foreground` in
+`py-acq/src/acq_py/hostexec.py`). Windows has no catchable termination signal
+from another process: those tools call `TerminateProcess`, which no handler
+sees, so acq could not pass anything on.
+
+**Resolution:** Nothing to do as a user. The session child now runs in a Job
+object that kills its processes when the last handle to it closes
+(`_start_session` in `hostexec.py`, reusing the `StepJob` that bounded backend
+calls already use). acq holds the only handle, and a forced kill closes it, so
+the session and everything it started end with acq. The child is created
+suspended and resumed only once it is in the job. The job does not change the
+console, so the PTY, Ctrl-C and Ctrl-Break behave as before: a Ctrl-Break
+reaches acq and the child alike, acq waits up to ten seconds for the child,
+ends it if needed, and exits 149 (128 plus SIGBREAK's number) without a
+`--json` envelope. When the session exits normally, or after a Ctrl-Break, the
+job is released first, so a process the session left running on purpose keeps
+running. Where the job cannot be created or the child cannot be assigned to it,
+the session is started without one, as before.
+
+Checked on Windows 11 with msb 0.7.7 and a real guest: `taskkill /F` of the
+acq interpreter (or of the venv launcher above it) during `acq exec` ended
+`msb.exe exec` within three seconds, where the previous build left it running;
+`acq shell` kept its PTY, Ctrl-C reached the guest (`sleep` exited 130 and the
+shell carried on), and a console Ctrl-Break ended acq with 149 and left no
+`msb.exe exec` behind. `msb.exe exec` starts no helper process of its own, and
+it does not start a stopped sandbox (the guest's `msb.exe machine` process is
+started by `create` or `start`, outside the session), so a forced kill no
+longer leaves anything running there.
+
+**Trade-off:** a process the session starts and that is still running when acq
+is force-killed now ends with acq, unless it was started with
+`CREATE_BREAKAWAY_FROM_JOB` (the job allows breakaway). For msb nothing does
+this. For sbx it was not checked, because sbx was not installed on the test
+host: if `sbx.exe exec`, or a command acq passes through to sbx, starts sbx's
+background service on demand as its own child, a forced kill of acq during
+that session also ends the service, and the next sbx command has to start it
+again. An ordinary exit, Ctrl-C or Ctrl-Break does not. Tracked: check this
+with a real `sbx.exe` on Windows at the next re-verification.
+
+---
+
+## 86. Windows: A Non-ASCII Secret Could Read Back Changed
+
+**Status:** Fixed. Earlier builds behave as described below.
+
+**Symptom:** After upgrading, on Windows, **every** secret containing
+characters outside ASCII (an accented letter, CJK text, an emoji) that an
+earlier build stored reads back changed, whatever code page it was stored
+under. Under the default code page 437, `café` now reads back as `caf├⌐`, so
+the sandbox is bound a value that does not work. Earlier builds themselves
+also read such a secret back changed when the console code page was a
+double-byte one (such as 932), or when it was stored and read under different
+code pages (for example `chcp 65001` in one window and 437 in another). ASCII
+values, including ones with quotes, backslashes, `$` or backticks, are not
+affected, before or after the upgrade.
+
+**Cause:** Both implementations encrypt with DPAPI through Windows PowerShell
+5.1, passing the value on stdin and reading the result on stdout. PowerShell
+decodes `[Console]::In` and encodes `[Console]::Out` with the console's code
+page, so the UTF-8 bytes acq sent were reinterpreted on the way in and out.
+Under the 437 default this happened to round-trip, but what DPAPI protected
+was not the value's UTF-8, and any other code page lost or changed bytes.
+Checked on Windows 11 with Python 3.12: under 932 three of eleven test values
+came back wrong, and values stored under 65001 or 932 came back wrong under
+437.
+
+**Resolution:** Nothing to do for new values. Both one-liners now carry only
+base64 over the pipes: the value goes in as base64 of its UTF-8 bytes and comes
+back the same way (`_PS_ENCRYPT` and `_PS_DECRYPT` in
+`py-acq/src/acq_py/secretstore.py`, `_acq_secret_windows_encrypt` and
+`_acq_secret_windows_decrypt` in `acq.backends/secret-store.sh`, still byte
+for byte the same). What an earlier build encrypted was the code-page-decoded
+text, not the value, and that is what now comes back, so after upgrading set
+every non-ASCII secret again, under the service and scope it was stored under:
+
+```bash
+acq secret set -g usai      # repeat for each non-ASCII secret
+```
+
+The stored envelope carries no marker telling the two formats apart: a new
+envelope header would be read as a plaintext value by earlier builds, which
+compare the header exactly, so a mixed install would bind the ciphertext as
+the secret. acq therefore cannot detect or warn about an old non-ASCII value.
+
+ASCII secrets stored by earlier builds read back unchanged.
+
+---
+
+## 87. Windows: Python acq and Git Bash Use Different Stores When USERPROFILE and HOMEPATH Differ
+
+**Symptom:** On Windows, with `HOME` unset, a secret or record written by the
+Python acq is not found by the Bash acq under Git Bash, or the reverse. It
+happens when `USERPROFILE` and `HOMEDRIVE`+`HOMEPATH` name different
+directories: `USERPROFILE` was changed, or the account's home directory is not
+its profile (a domain home share on `HOMEDRIVE`).
+
+**Cause:** With `HOME` unset, the two implementations take the home directory
+from the same variables in the opposite order. The Python acq uses
+`Path.home()` (`py-acq/src/acq_py/userdirs.py`), which reads `USERPROFILE`
+first and falls back to `HOMEDRIVE`+`HOMEPATH`. Git Bash sets `HOME` from
+`HOMEDRIVE`+`HOMEPATH` first and falls back to `USERPROFILE`. Checked on
+Windows 11 with Git for Windows 2.56 and Python 3.12:
+
+| Environment (`HOME` unset) | Python home | Git Bash `HOME` |
+|---|---|---|
+| `USERPROFILE`, `HOMEDRIVE`+`HOMEPATH` all the account profile | profile | profile |
+| `USERPROFILE` changed to a scratch directory | scratch | profile (from `HOMEPATH`) |
+| `HOMEPATH` changed as well | scratch | the new `HOMEPATH` |
+| `HOMEDRIVE` and `HOMEPATH` unset | scratch | scratch (from `USERPROFILE`) |
+
+The secret store, state and config all live under that home, so the two
+implementations then use different directories.
+
+**Resolution:** Set `HOME` (or the `XDG_*` variables) to the same absolute
+path for both implementations whenever `USERPROFILE` and
+`HOMEDRIVE`+`HOMEPATH` differ. Both honour an absolute `HOME` before anything
+else.
+
+---
+
+## 88. Windows: A Bash Provider-Input Lock Holds Off the Python acq for 15 Minutes
+
+**Symptom:** On Windows, a Python acq command on one sandbox (`create`, `run`,
+`rm`, `start`) waits and then fails with `timeout` although no other acq
+command is running. The remediation names a directory ending in `.lock` under
+`.../acq/provenance/provider-input/<backend>/` and says that a lock left by
+Bash acq counts as held for 15 minutes after it was taken.
+
+**Cause:** The Bash acq locks a sandbox by creating that directory and writing
+`PID IDENTITY` into its `owner` file. On POSIX the Python acq checks that the
+PID is still the same process and recovers a lock whose owner is gone
+(see [§79](#79-lock-directory-without-an-owner-is-never-removed-automatically)).
+On Windows it cannot: Git Bash PIDs are not Windows PIDs, and `os.kill` there
+terminates a process rather than probing it. So the Python acq treats a Bash
+lock directory as held for 15 minutes after it was last modified (when its
+owner was written), then ignores it (`_BashLock._recent_on_windows` and
+`_BASH_WINDOWS_FRESH_S` in `py-acq/src/acq_py/lock.py`). A Bash command killed
+mid-create leaves the directory behind and blocks Python commands on that
+sandbox for the rest of the 15 minutes. For the same reason the Python acq
+never takes this directory on Windows, so a Bash command started while a
+Python command works on the same sandbox is not held back by it.
+
+**Resolution:**
+
+1. Make sure no acq command (Bash or Python) is running: in Git Bash, `ps`
+   lists no `acq` script; in PowerShell, `Get-Process bash, python
+   -ErrorAction SilentlyContinue` shows none started for acq.
+2. Remove the directory the message names, with its `owner` file:
+
+   ```powershell
+   Remove-Item -Recurse -LiteralPath '<the .lock directory from the message>'
+   ```
+
+3. Retry. Waiting until 15 minutes after the lock was taken also works.
+
+Do not run the Bash and the Python acq against the same sandbox at the same
+time on Windows.
+
+---
+
+## 89. Windows: Bash `acq create` Fails Validation of a Provider Kit's Normalizer
+
+**Symptom:** Under Git Bash on Windows, a Bash `acq create` (or `acq run`)
+whose provider kit carries provider input stops before the backend create
+with:
+
+```text
+provider input contract: C:\...\candidate-<n>\provider-input.json: normalizerPath must be an executable file
+acq(msb): error: provider input projection failed for '<name>'.
+```
+
+**Cause:** The pinned Patterns validator
+(`scripts/validate_provider_input_contract.py`, run by
+`acq_provider_input_prepare` in `acq.backends/common.sh`) requires an execute
+bit on the normalizer (`st_mode & 0o111`). Windows has no execute bit:
+CPython reports one only for `.exe`, `.bat`, `.cmd` and `.com` files, and the
+USAi kit's normalizer is `scripts/normalize-catalog.mjs`, so every Windows
+host fails. The bats suite replaces the validator with a stand-in, so it never
+saw this. Found by running a Bash create on Windows 11 (Git for Windows 2.56,
+Python 3.12) against the real validator with stubbed msb and sbx. A second
+fault on the same path is fixed: once the validator passed, reading the
+provider facts looked for the validator runtime at
+`<data dir>/provider-input-validator.current` instead of
+`<data dir>/provider-input-validator/provider-input-validator.current` (where
+`scripts/setup-provider-input-validator` puts it), fell back to a bare
+`python3` and, on Windows, reached the Microsoft Store alias
+(`_acq_provider_facts_python`). With both faults worked around, create,
+validate, materialize, publish, the backend create with the provider-input
+mount, and `acq rm` all completed for msb and sbx.
+
+**Resolution:** `acq.backends/common.sh` now runs the pinned validator through
+`_acq_provider_input_validate`. On native Windows Python only, this launcher
+reports execute bits for the regular normalizer files declared in the private
+snapshots. It preserves the real file type, other stat attributes, and all
+other validation. POSIX retains the original execute-bit and access checks.
+The materializer still sets the guest normalizer mode explicitly. The Bats
+regression exercises a non-executable script, an unrelated data file, a
+non-file normalizer, and the strict POSIX path. Native Windows verification
+against the released validator remains required; Linux platform emulation does
+not establish a successful Windows create.
+
+Use `ACQ_IMPL=python` (the Windows default under ADR-0048m) to avoid the Bash
+validator path. Separate bootstrap problems remain tracked here:
+`scripts/setup-provider-input-validator` under Git Bash can pick the Microsoft
+Store `python3` alias, installs under `XDG_DATA_HOME` while acq on Windows looks
+under `LOCALAPPDATA`, and its `ln -s` makes a full copy of the runtime that a
+second run cannot replace. Revisit these before claiming the Bash Windows
+bootstrap works from scratch.
+
+---
+
+## 90. sbx: More Than One Global USAi Custom Secret Is Refused
+
+**Status:** By design (both the Bash and the Python `acq`).
+
+### Symptoms
+
+`acq secret set -g usai`, `acq secret rm -g usai`, `acq usai-rotate-api-key`
+on sbx, or a USAi change made on msb that acq passes on to sbx sandboxes, stops
+with exit 1:
+
+```text
+acq(sbx): sbx holds 2 custom secrets for USAI_API_KEY on api.gsa.usai.gov in the global scope,
+          so acq cannot tell which one your sandboxes use; nothing was changed.
+          Placeholders: sbx-cs-AAAA sbx-cs-BBBB
+          Warning: a running sandbox may hold one of these placeholders. ...
+            sbx secret rm --placeholder sbx-cs-AAAA -f
+            sbx secret rm --placeholder sbx-cs-BBBB -f
+```
+
+The Python `acq` gives the same facts in one error and remediation (or
+`--json` envelope). Nothing is stored, removed or re-set. A placeholder with
+characters outside letters, digits, `.`, `_` and `-` is never printed as a
+command; inspect it with `sbx secret ls`.
+
+### Root Cause
+
+sbx can hold several custom secrets for the same env var and host, for example
+after a rotation from before ADR-0008 or a manual `sbx secret set-custom`. Each
+sbx sandbox was injected with one placeholder when it was created, and sbx does
+not say which. Updating whichever entry sbx lists first, or removing them all
+and creating one (what the Bash rotation used to do), can leave running
+sandboxes with a placeholder sbx no longer maps, so they get `401` from USAi
+(see section 23). acq therefore refuses and lets you choose. Rows are matched
+by scope, env var **and** host: a secret for `USAI_API_KEY` on another host is
+a different secret and is not counted.
+
+### Fix
+
+1. Decide which entry your sandboxes use. If you do not know, keep the oldest
+   and plan to recreate any sandbox that then fails with `401`.
+2. Remove the others with the printed commands, one per entry
+   (`sbx secret rm --placeholder P -f`).
+3. With one entry left, run `acq usai-rotate-api-key`: it updates that entry
+   in place and keeps its placeholder. Do not re-run `acq secret set -g usai`
+   on sbx (or `acq --backend sbx secret set -g usai`): it refuses because an
+   entry exists. For a change made on msb, re-running the msb command
+   (`acq --backend msb secret set -g usai`) re-feeds the kept entry too. For
+   `acq secret rm`, re-run it. A sandbox whose placeholder you removed is
+   recovered by the rebind in section 23 (ADR-0008) or by recreating it.
+
+### Prevention / Status
+
+Rotate with `acq usai-rotate-api-key` rather than deleting and re-adding the
+secret. The refusal is covered by `test/bats/40-secret-set.bats`,
+`test/bats/77-usai-rotate.bats`, `py-acq/tests/test_sbx.py` and the vectors
+`cli/secret-set-sbx-duplicate-usai` and `cli/sbx-duplicate-usai-nothing-removed`.
+
+---
+
+## 91. Remote Kit Ref With a Query String or an Extra `#` Parameter Is Refused
+
+**Status:** By design (both the Bash and the Python `acq`).
+
+### Symptoms
+
+`acq run`, `acq create`, `acq kit list` or a heal stops before anything is
+fetched:
+
+```text
+acq: --kit: remote kit ref refused: its URL has a query string ('?' before the '#').
+```
+
+or `... its '#' fragment has a parameter other than ref= and dir=.`,
+`... repeats ref= or dir=.` or `... has a ref= or dir= value that is empty,
+starts with '-' or holds a character outside [A-Za-z0-9._/-].` (with `ACQ_EXTRA_KITS:` or
+`ACQ_PROVIDER_KITS:` in place of `--kit` for an entry of that variable). The
+message does not repeat the ref. A refused `--kit` ref stops `run` or `create`
+at once. A refused `ACQ_EXTRA_KITS` or `ACQ_PROVIDER_KITS` ref is enforced only
+where kits are selected or applied (`run`/`create` of a new sandbox,
+`kit list`, and the heal on `start`, `restart` or a re-attach, which skips the
+kits with a warning and attaches anyway), so other commands such as `acq ls`
+or `acq secret rm` keep working. A sandbox whose kit record holds such a ref
+from an older `acq` prints `ignoring a recorded remote kit ref ... that acq now
+refuses` on start; that kit is no longer applied, and recreating the sandbox
+clears it from the record.
+
+### Root Cause
+
+A remote kit ref is `git+https://HOST/REPO.git#ref=<sha>&dir=<path>`, and acq
+uses no other part. A query string (`?private_token=…`), an extra fragment
+parameter (`&token=…`), a second `ref=`/`dir=`, or a value carrying `?`, `;`,
+`#`, a space or a non-ASCII letter is where a credential would ride (and a
+value starting with `-` would reach git as an option; the Bash fetch also
+passes `--` before the ref), and acq used to carry the ref
+verbatim into its debug output, its `.kits` and sbx `extra-kits` records and,
+after a fetch, its messages. acq now refuses such a ref where it enters
+(`--kit`, `ACQ_EXTRA_KITS`, `ACQ_PROVIDER_KITS`), again before any fetch
+(`kit_ref_shape_check` in `acq.backends/kit-translate.sh`,
+`kits.remote_ref_problem` in `py-acq/src/acq_py/kits.py`), and skips it when a
+record is reloaded. Message helpers show only the first plain `ref=` and
+`dir=` and hide the rest (`kit_ref_display`, `kits.ref_display`).
+`test/fixtures/kit-ref-probes.tsv` lists probe refs both implementations must
+judge and display alike.
+
+`%3F` in the URL path is not a query string: git sends it as part of the path,
+so acq does not refuse it at input (the Python acq refuses any percent escape
+when it fetches).
+
+### Fix
+
+Remove the query string, the extra parameter or the repeat, and keep `ref=`
+and `dir=` values to ASCII letters, digits, `.`, `_`, `/` and `-`, not starting
+with `-`. For a kit source
+that needs authentication, configure a git credential helper that does not
+prompt (for GitHub, `gh auth setup-git`); never put a token in the ref. A local
+kit path is not affected: `?` and `#` are ordinary characters in a directory
+name.
+
+### Prevention / Status
+
+Covered by `test/bats/170-kit-ref-shape.bats`, `py-acq/tests/test_kit_fetch.py`,
+`py-acq/tests/test_kits.py`, `py-acq/tests/test_configure.py` and
+`py-acq/tests/test_legacy_bash.py`.
+
+---
+
+## 92. uutils coreutils: `mkdir` Is Not Exclusive, So Bash's `mkdir` Locks Decide by Their Owner File
+
+**Symptom:** Before the fix, on a host whose `mkdir` is uutils coreutils
+(Ubuntu 25.10 and later ship it as `/usr/bin/mkdir`; `mkdir --version` prints
+`uutils coreutils`), two Bash acq commands on the same sandbox at the same
+moment (two `create`, or `create` and `rm`) could both proceed instead of one
+waiting for the other.
+
+**Cause:** Bash acq took its `mkdir` locks by running `mkdir DIR` and treating
+success as ownership. GNU and BSD `mkdir` fail with "File exists" for all but
+one of several concurrent callers. uutils `mkdir` 0.10.0 does not: in 300
+three-way races on one host it reported success 466 times. The Python acq's own
+`mkdir` is atomic, but a racing Bash command could overwrite a Python holder's
+owner line in the same way.
+
+**Status:** Fixed. No Bash lock treats a successful `mkdir` as ownership any
+more. Each one decides by an exclusive create of a file: noclobber in Bash,
+which makes Bash open the file with `O_EXCL` itself, and `O_EXCL` in Python.
+
+- **`config.yaml` lock** (`_acq_config_lock_take` in `acq.backends/common.sh`,
+  `ConfigDirLock` in `py-acq/src/acq_py/lock.py`): whoever creates the `owner`
+  file holds it. A taker that loses never removes the winner's owner file, and
+  an existing directory without an owner file is taken (section 79).
+- **Per-sandbox provider-input lock** (`acq_provider_input_lock_acquire` and
+  `_acq_provider_input_lock_take` in `acq.backends/common.sh`, `_BashLock` in
+  `py-acq/src/acq_py/lock.py`): the same rule, except that an existing
+  directory is never taken, so one with no owner file is still left for the
+  user (section 79). A taker whose own owner-file create fails for another
+  reason removes the directory only while it is empty. Bash works out its
+  owner line (`PID IDENTITY`, unchanged) before it makes the directory, which
+  keeps the moment in which the lock has no owner line short. A lock released
+  between a failed take and the look at it is taken again rather than
+  reported as unsafe. Missing or empty owner metadata in a directory younger
+  than five seconds is retried once per second within the normal retry budget.
+  The token is written during the exclusive create, and symlinked owner files
+  are refused before and after it. The owner format, the stale-owner recovery
+  and the Windows rule (section 88) are unchanged: when Python acq inspects a Bash
+  lock on Windows, Python applies the 15-minute freshness rule, measured from
+  the directory modification when the owner file is created. Bash itself
+  checks the recorded process identity; it does not apply that freshness rule.
+- **Progress spinner draw lock** (`acq.backends/progress.sh`): the lock is the
+  file `$dir/draw` instead of a directory. The animator creates it in its own
+  shell with noclobber set, so a frame costs no extra fork (Git Bash forks
+  slowly); releasing it costs one `rm`, as the `rmdir` it replaces did. Before
+  the fix the effect was cosmetic, at most one stray spinner frame after the
+  spinner was stopped.
+
+**Residual stale-recovery race:** Bash and Python re-read the owner line
+immediately before removing it and remove it only if the line is unchanged.
+Release likewise checks the holder's own token. This narrows the recovery race
+from the entire process/identity check to the gap between the re-read and the
+unlink; it does not close it. The old holder must exit after a waiter reads its
+line, and a new holder must take the lock in the microsecond-scale window
+before the waiter's unlink. That waiter can then remove the new holder's owner
+file. Two holders of one sandbox lock can result, allowing overlapping
+provisioning on that sandbox. This requires concurrent acq commands on the same
+sandbox while another acq exits.
+
+Neither portable Bash nor a shared-file protocol provides atomic
+compare-and-delete. A mutex released on process death (`flock` or `fcntl`)
+would avoid this recovery protocol, but is not available to Bash on macOS.
+The residual race remains open; serializing acq commands on each sandbox
+avoids it. Deterministic owner-swap tests cover changes before the final
+re-read, not the remaining gap after it.
+
+`test/bats/147-provider-input-projection.bats` runs parallel Bash takers, and
+Bash and Python takers together, with a `mkdir` that reports success for an
+existing directory, and asserts that no two ever hold the lock at once.
+
+**Resolution:** Update acq. On an older acq, avoid running two Bash acq
+commands on the same sandbox at once on such a host, or put GNU `mkdir` first
+on `PATH` (for example the `gnu` coreutils package where the distribution
+offers it).
+
+## 93. Python acq: Host ssh-agent Forwarding Differences and Live Checks
+
+**Status:** deferred (tracked per AGENTS.md "Track Deferred Work").
+
+The Python acq forwards the host ssh-agent into an msb guest as the Bash acq does
+(ADR-0021, `py-acq/src/acq_py/ssh_agent.py`): the `--vsock` route through the
+per-sandbox link under `$ACQ_STATE_DIR/msb/ssh-agent/`, the in-guest `socat`
+bridge, the `ssh-auth-sock` host-config key that sessions read, the liveness
+probe, the bridge restart after `acq start`/`acq restart`, the re-drive in the
+`start`, `restart`, `run` re-attach and `kit update` heals, link removal on
+`acq rm`, the one-time trust-boundary notice on msb and sbx, and the checks of
+the 2026-11-10 ADR-0021 amendment (the opt-out at start or re-attach, the link
+target and owner checks, the refusal of a socket inside the workspace). The
+messages are Bash's. These parts differ on purpose:
+
+- **Windows never forwards.** On a Windows host the Python acq treats no path
+  as a socket (an MSYS ssh-agent's socket is an emulation file, the OpenSSH for
+  Windows agent is a named pipe, and the route link would need a symlink
+  privilege), so a set `SSH_AUTH_SOCK` gets the "is set but not a socket;
+  skipping ssh-agent forwarding" warning and the create goes on without a route
+  (checked on Windows 11 with Python 3.12 against the stub msb). The Bash acq
+  under Git Bash treats the MSYS emulation file as a socket and hands its
+  drive-form path to msb, which no one has run live. **Unblock trigger:** an msb
+  release whose `--vsock` is documented for Windows host sockets.
+- **"could not verify the ssh-agent --vsock route"** names the failed
+  `msb inspect` but not msb's own error text, which the Python acq never
+  surfaces (ADR-0040m).
+- **Overrides are checked where they are used.** A bad
+  `ACQ_MSB_SSH_AGENT_GUEST_SOCK` gets Bash's warning only when a forward runs
+  (Bash warns on every msb command). An invalid `ACQ_MSB_SSH_AGENT_VSOCK_PORT`
+  stops the bridge with a warning instead of reaching the guest `sh -c`, and a
+  recorded `ssh-auth-sock` value outside the word-safe charset is ignored. A
+  relative `ACQ_FORWARD_HOST_SOCKETS` path is skipped with a warning; Bash
+  refuses it before any command runs.
+- **`acq start` on a running sandbox** does not restart the bridge from the
+  recorded key (there was no resume); the heal's re-drive still restarts it when
+  `SSH_AUTH_SOCK` names a socket. A `run` re-attach to a *stopped* sandbox does
+  not heal at all (see §78), so it does not re-drive the forward either; use
+  `acq start NAME` first.
+- Each guest call of the forward is bounded at 60 seconds (Bash has no bound).
+
+Both implementations share two limits. The route link's target (a socket owned
+by you, in your own real directory, outside the workspace) is checked only when
+acq runs (`start`, `restart`, `run`), while msb dials the route on every guest
+connection, so a socket replaced between those times is not noticed until the
+next start or re-attach. And a sandbox whose route names the raw agent socket
+rather than acq's link stays connected to that agent after the opt-out until it
+is removed and recreated; acq says so when `SSH_AUTH_SOCK` is unset.
+
+**Live checks still owed.** Every behaviour above is covered against the stub
+msb only (`py-acq/tests/test_ssh_agent_forward.py`, which also compares the guest
+argv, the link path and the emitted routes and warnings with the Bash adapter's).
+On a KVM or HVF host with msb, still to run (both implementations for the
+2026-11-10 checks, the Python acq for the rest): the opt-out and reconnect at
+`acq start`; `scripts/verify-backends`-style create with a throwaway agent (in-guest
+`ssh-add -L` shows its key); a re-point after the host agent moves (stop, new
+agent at a new path, `acq start`); the running re-attach re-drive; `acq rm`
+removing the link; and a sandbox created by one implementation and resumed by
+the other. **Unblock trigger:** access to a host with msb.
+
+---
+
+## 94. Bash acq: `acq ports NAME --publish` Accepts an Over-Long Port Number
+
+**Symptom:** `./acq --backend msb ports box --publish 99999999999999999999:80`
+is not refused as out of range. Bash prints `[: 99999999999999999999: integer
+expected` twice, then goes on to generate and authorize the tunnel key, start
+`msb ssh serve`, and hand the value to `ssh -L`, which rejects it. The publish
+then fails with `ssh -L ... failed to establish`.
+
+**Cause:** `_acq_msb_valid_publish` in `acq.backends/msb.sh` checks the range
+with `[ "$p" -lt 1 ] || [ "$p" -gt 65535 ]`. For a digit string too long for
+the shell's integer type, `[` reports an error (status 2) instead of a
+comparison result. Inside the `if`, both tests then read as false, so the value
+passes. The create-time validator (`_acq_validate_publish_pair` in
+`acq.backends/common.sh`) caps the length at five digits before it compares,
+so `acq create/run --publish` refuses the same value. Found while porting the
+post-hoc publish to the Python acq. The Python acq refuses the value before
+anything runs (`ports: port '...' out of range`).
+
+**Resolution:** No harm follows: `ssh` refuses the port, and nothing is
+recorded. Use the Python acq (`ACQ_IMPL=python`) or give a valid port. Tracked
+as a Bash fix: add the same five-digit length check before the comparison in
+`_acq_msb_valid_publish`, with a bats case for an over-long value.
+
+---
+
+## 95. Python 3.12: An Optional Flag Between `create`/`run` Positionals Is Refused
+
+**Status:** resolved by the Python CLI-form port. `create`/`run` collect remaining
+workspace positionals after parsing known options, retaining their order.
+`py-acq/tests/test_cli_forms.py` covers flags between the agent, primary and
+extra workspaces. The symptoms and workaround below describe older revisions.
+
+### Symptoms
+
+On Python 3.12 (seen on 3.12.3; fixed in 3.13), `acq-py create shell --clone ~/proj` or
+`acq-py run opencode --image REF ~/proj` fails with
+`unrecognized arguments: ~/proj` (exit 2). The same command with the flags after
+the positionals (`acq-py run opencode ~/proj --clone`) works, and Bash accepts
+either order.
+
+### Root Cause
+
+`create` and `run` declare their positionals with `nargs="?"`. Before the
+argparse fix that shipped in Python 3.13, an optional flag between two such
+positionals ends positional matching, so the second one is left over. Python
+3.13 and 3.14 parse both orders.
+
+### Workaround
+
+Put every flag after the positionals, as the Python acq's help and README show.
+
+**Unblock trigger:** the supported Python floor moves to 3.13, or the parser
+switches to `parse_intermixed_args` for `create`/`run` (with a test of each flag
+in each position).
+
+## 96. Parallel Bash Tests Intermittently Fail to Materialize an Offline Kit
+
+**Symptom:** Otherwise unrelated bats tests fail with
+`kit-translate: failed to materialize remote kit`, followed by a provider input
+projection error for either backend, then pass on rerun.
+
+**Cause:** `scripts/test-acq-lib.sh` used to publish offline kit specs under
+`BATS_RUN_TMPDIR` every time a test loaded the helper. These fixtures escaped
+the per-test HOME and cache isolation. The offline Git stub implements
+`checkout-index` by copying the shared spec. GNU `cp` can refuse a source
+replaced between its metadata check and open, even when the replacement uses
+an atomic rename: `skipping file ... as it was replaced while being copied`.
+`_kit_fetch_materialize` suppresses checkout stderr and emits the generic
+failure. Replacing the shared fixture concurrently reproduced that exact
+materialization error on the fifth iteration locally. No shared kit cache or
+lock timeout is needed to trigger it.
+
+**Resolution:** Create both offline kit fixtures inside each `make_stubs`
+call's private `STUBDIR`, which `cleanup_stubs` already removes. Tests cannot
+replace or customize another test's fixture. The regression in
+`test/bats/107-offline-kit-isolation.bats` checks fixture ownership and runs
+eight workers materializing distinct fixture contents twenty times each; it
+fails against the old harness. Product materialization behavior is unchanged.
+
+---
+
+## 97. Python Provider-Kit Facts Bypassed the Pinned Validator's URL Rules
+
+**Symptoms:** Python accepted provider-kit facts with an IP literal destination
+or an explicit HTTPS port that Bash rejects through the pinned Patterns
+validator. Invalid URL schemes and host mismatches shared a generic diagnostic
+and incorrectly suggested reinstalling acq. Python also refused an exported
+provider key on MSB even though Bash binds it at create.
+
+**Resolution:** `py-acq/src/acq_py/provider_input.py` checks kit destinations
+for IP literals, HTTPS, explicit ports and declared-host equality, with a
+diagnostic for each refusal and remediation directed at the kit's input.
+Credential registry hosts retain the grammar in
+`acq.backends/common.sh` (`_acq_provider_credential_host_ok`); that registry
+alone permits IPv4 literals, while provider-kit facts must pass stricter checks.
+The MSB gate and binding builder accept exported provider keys when no stored
+value resolves, matching `_acq_provider_credentials_gate_one` and
+`_acq_msb_bind_secrets_into` in the Bash implementation.
+Starting a sandbox with an exported provider key uses that same resolver only
+when the resulting service, variable and host match its recorded binding.
+
+**Verification:** `py-acq/tests/test_provider_input.py` covers the individual
+refusals and compares credential-host and exported-key acceptance with real
+Bash helpers, without contacting a provider. The pinned-validator comparison
+uses the existing `pinned_patterns_repo` fixture and skips when its checkout is
+unavailable. Re-run that comparison when `ACQ_TEST_PATTERNS_REPO` supplies the
+pinned release and its validator dependencies are installed; this is the
+remaining full-validator acceptance check for an offline checkout without it.
+
+---
+
+## 98. Tier-3 Qualification Fails on msb When Other msb Sandboxes Are Running
+
+**Symptoms:** `qualify-backend-cell --backend msb` printed `FAIL: provider-credential set: exit 1`,
+`FAIL: guest credential: no credential was bound` and `FAIL: secret set: exit 1` on a host that
+already had running msb sandboxes.
+
+**Root cause:** the oracle kept the operator's `HOME`, so `msb` used the operator's `MSB_HOME`, and
+acq's credential steps re-feed every running sandbox in that catalog. msb 0.7.7 refuses to add a new
+secret binding to a running sandbox (it needs a restart), so those steps exit 1. A rotation of an
+existing binding is accepted, so a run could also leave a throwaway `USAI_API_KEY` in your sandboxes:
+stop and start them, or run `acq usai-rotate-api-key`, to bind the real key again.
+
+**Resolution:** an msb run now uses a private `MSB_HOME` and sets `ACQ_SECRET_NO_LIVE_REFEED=1`
+(ADR-0044m, "Amendment (2026-11-13)"; `docs/howto/qualification.md`). The private directory must be
+short: msb derives a unix socket path about 48 bytes below it and macOS allows fewer than 104 bytes, so
+a path under the default `$TMPDIR` fails with `sandbox runtime socket path is too long`. It costs a
+fresh image pull (about 2 GB) per run, so a create that times out on a slow network is BLOCKED, not
+FAIL. Only macOS arm64 has been verified; on Linux the run also requires 6 GB free under `/tmp` and
+an executable `/tmp`, and is BLOCKED where it cannot be made.
+
+**Not isolated:** sbx has no state override, and an empty `HOME` loses `sbx login` and the secret table
+the oracle requires, so an sbx run shares them with the operator. acq does not touch other sbx sandboxes.
+
+---
+
+## 99. sbx: v3 Built-in Agent Kits Break Creates Under the Bash Implementation
+
+**Symptoms:** On a current sbx (0.51.0/0.53.0), every `acq create` under the Bash
+implementation (`ACQ_IMPL=bash`, the default on macOS/Linux) fails at create:
+
+```text
+error: resolve kits: cannot mix v3 kits with v1/v2 kits in one sandbox; compositions are single-format
+(v3: shell; v1/v2: …)
+```
+
+`sbx kit inspect docker.io/sbx/shell:latest` reports `"schemaVersion": "3"`, and
+every published `sbx/shell` tag back to 2026-10-26 is v3.
+
+**Root Cause:** sbx's built-in agents are now v3 kits. acq's neutral kits are
+translated to v2, and sbx refuses to mix kit formats in one sandbox. The Bash
+adapter still passes the built-in agent (`shell` / the agent name) as `sbx create`'s
+first positional and layers the v2 mixins on top. The Python implementation is
+fixed (ADR-0051m): it generates a v2 `kind: sandbox` base kit from acq's own image
+and passes it as that positional. Downgrading the sbx CLI does not help — the agent
+is a floating `:latest` kit, so 0.51.0 resolves the same v3 shell kit as 0.53.0.
+
+**Fix:** Port the base-kit generation and positional to `acq.backends/sbx.sh`, or
+make the POSIX default the Python implementation. Until then, use
+`ACQ_IMPL=python`.
+
+**Prevention / Status:** Python is fixed and covered by
+`py-acq/tests/test_kit_sbx.py`. The Bash gap and the agents acq has no install kit
+for (`claude`, `codex`, …) are tracked in
+`mogul/agentic-coding-quickstart#250`. The offline suite stubs `ACQ_SBX_BIN`, so it
+cannot catch a real format mix; re-run the live cell
+(`scripts/qualify-backend-cell`) after an sbx upgrade.
+
+---
+
+## Contributing
+
+When you discover a new failure mode:
+
+1. Document the symptoms clearly
+2. Identify the root cause
+3. Provide a minimal fix
+4. Add it to this document as the next numbered section, just before this one,
+   so links to it stay stable
+5. Consider if it indicates a gap in AGENTS.md rules

@@ -55,7 +55,7 @@
 #   ./scripts/verify-msb-pin --keep       # keep the scratch dir for inspection
 #
 # Needs ~1.2GB of scratch (three msb bundles plus a staged downgrade target per
-# check). It uses $TMPDIR, and checks up front that there is room — a small /tmp
+# check). It uses an absolute $TMPDIR (else /tmp), and checks up front that there is room — a small /tmp
 # tmpfs otherwise surfaces as a bogus `msb self downgrade` failure rather than as
 # an out-of-space error. Point it elsewhere if needed:
 #   TMPDIR=~/scratch ./scripts/verify-msb-pin
@@ -83,6 +83,38 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+# resolve_install_targets — set REAL_HOME and REAL_BIN for --install, with acq's
+# user-directory rules (acq.backends/userdirs.sh): HOME counts only when
+# absolute (else the account's home), and a relative MSB_HOME or
+# ACQ_INSTALL_BIN_DIR is refused rather than resolved against the current
+# directory. Returns 1 with a message on stderr.
+resolve_install_targets() {
+  local var home=""
+  for var in MSB_HOME ACQ_INSTALL_BIN_DIR; do
+    if [ -n "${!var:-}" ] && ! acq_path_is_absolute "${!var}"; then
+      echo "verify-msb-pin: $var must be an absolute path, got $(acq_quote_value "${!var}")" >&2
+      return 1
+    fi
+  done
+  if [ -z "${MSB_HOME:-}" ] || [ -z "${ACQ_INSTALL_BIN_DIR:-}" ]; then
+    home=$(acq_home_dir) || {
+      echo "verify-msb-pin: cannot determine an absolute home directory; set HOME to an absolute path" >&2
+      return 1
+    }
+  fi
+  REAL_HOME="${MSB_HOME:-$home/.microsandbox}"
+  REAL_BIN="${ACQ_INSTALL_BIN_DIR:-$home/.local/bin}"
+}
+
+# Resolved before anything is fetched, so a bad target fails in seconds.
+REAL_HOME=""
+REAL_BIN=""
+if [ "$DO_INSTALL" -eq 1 ]; then
+  # shellcheck source=acq.backends/userdirs.sh
+  . "$SCRIPT_DIR/acq.backends/userdirs.sh"
+  resolve_install_targets || exit 2
+fi
+
 PASS=0; FAIL=0; BLOCKED=0
 ok()    { PASS=$((PASS+1));       printf '  \033[32mok  \033[0m %s\n' "$1"; }
 bad()   { FAIL=$((FAIL+1));       printf '  \033[31mBAD \033[0m %s\n' "$1"
@@ -91,7 +123,11 @@ block() { BLOCKED=$((BLOCKED+1)); printf '  \033[33mskip\033[0m %s\n' "$1"; }
 info()  { printf '\n== %s ==\n' "$1"; }
 note()  { printf '        %s\n' "$1"; }
 
-SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/msb-pin-verify.XXXXXX")
+# TMPDIR only when it is absolute, else /tmp, as acq_tmp_dir in
+# acq.backends/userdirs.sh does: a relative TMPDIR would put the scratch under
+# the current directory.
+case "${TMPDIR:-}" in /*) TMP_BASE="$TMPDIR" ;; *) TMP_BASE=/tmp ;; esac
+SCRATCH=$(mktemp -d "$TMP_BASE/msb-pin-verify.XXXXXX")
 cleanup() {
   if [ "$KEEP" -eq 1 ]; then
     printf '\nscratch kept at %s\n' "$SCRATCH"
@@ -587,8 +623,8 @@ if [ "$DO_INSTALL" -eq 1 ]; then
   # Everything above ran isolated. This step deliberately does not: it places the
   # already-verified pinned bundle into the real MSB_HOME, which is the documented
   # way to get a supported msb without the unpinnable upstream installer.
-  real_home="${MSB_HOME:-$HOME/.microsandbox}"
-  real_bin="${ACQ_INSTALL_BIN_DIR:-$HOME/.local/bin}"
+  real_home="$REAL_HOME"
+  real_bin="$REAL_BIN"
 
   existing=""
   command -v msb >/dev/null 2>&1 && existing=$(msb --version 2>/dev/null | head -1)

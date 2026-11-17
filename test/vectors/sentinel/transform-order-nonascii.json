@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "id": "sentinel/transform-order-nonascii",
+  "oracle": "ADR-0043m normalisation transform: order (non-ASCII collation matches codepoint)",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{python}", "-c", "import sys; sys.stdout.buffer.write('é\\nb\\na\\n'.encode())"],
+    "env": {},
+    "unset": [],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "exact",
+      "value": "a\nb\né\n",
+      "normalize": ["order"]
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": []
+  }
+}

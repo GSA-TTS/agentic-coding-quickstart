@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "note": "Provenance manifest template for acq v1 (ADR-0042m). Release automation fills the concrete supplier, versions, and SHA256SUMS entries; the shape is the contract. acq owns patching and provenance for the app-private runtime and the dependency wheelhouse.",
+  "acq": {
+    "acq_version": "<semver>",
+    "source_revision": "<release commit sha>"
+  },
+  "runtime": {
+    "supplier": "<python.org-embedded | python-build-standalone>",
+    "version": "<cpython version>",
+    "patch_owner": "acq",
+    "cadence": "quarterly re-verify plus out-of-band patch for critical/high CVEs (see py-acq/README.md)",
+    "notices": "retained supplier notices alongside the runtime in the release archive"
+  },
+  "wheelhouse": {
+    "path": "wheelhouse/",
+    "hashes": "exact-hash, listed in SHA256SUMS",
+    "lockfiles": "scripts/provider-input-validator-requirements-*.txt"
+  },
+  "verification": {
+    "sha256sums": "SHA256SUMS",
+    "attestation": "GitHub artifact attestations (signed build provenance)"
+  },
+  "runtimes": {
+    "windows-x86_64": {
+      "supplier": "python.org-embedded",
+      "version": "<cpython version>"
+    },
+    "macos-arm64": {
+      "supplier": "python-build-standalone",
+      "version": "<cpython version>"
+    },
+    "macos-x86_64": {
+      "supplier": "python-build-standalone",
+      "version": "<cpython version>"
+    },
+    "linux-x86_64": {
+      "supplier": "python-build-standalone",
+      "version": "<cpython version>"
+    },
+    "linux-aarch64": {
+      "supplier": "python-build-standalone",
+      "version": "<cpython version>"
+    }
+  }
+}

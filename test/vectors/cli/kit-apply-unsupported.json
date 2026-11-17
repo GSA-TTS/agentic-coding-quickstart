@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "id": "cli/kit-apply-unsupported",
+  "oracle": "ADR-0040m unsupported-capability fail-closed: kit apply on sbx adds the kit with sbx kit add, and a kit with startup commands, which sbx 0.38 and later refuse mid-life, fails closed with unsupported_capability (recreate the sandbox)",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{acq}", "--backend", "sbx", "kit", "apply", "mybox", "opencode", "--json"],
+    "env": {
+      "ACQ_SBX_BIN": "__stub__",
+      "ACQ_SBX_VERSION": "0.39.0",
+      "ACQ_SBX_INSTALLED": "1",
+      "ACQ_MSB_INSTALLED": "0",
+      "ACQ_SBX_STUB_CATALOG": "{\"mybox\": \"running\"}"
+    },
+    "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "MSB_HOME", "SBX_HOME", "ACQ_IMAGE", "ACQ_MSB_IMAGE", "ACQ_SBX_STUB_FAIL", "ACQ_KIT_APPLIED_SEED"],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 1,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "kit apply",
+        "error": {"code": "unsupported_capability"}
+      },
+      "normalize": []
+    },
+    "stderr": {"mode": "exact", "value": "", "normalize": []}
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+  }
+}

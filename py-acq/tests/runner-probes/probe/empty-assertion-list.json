@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "id": "probe/empty-assertion-list",
+  "oracle": "an empty assertion list is invalid",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{python}",
+      "-c",
+      "import sys; sys.stdout.buffer.write(b'x')"
+    ],
+    "env": {},
+    "unset": [],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": []
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": []
+  }
+}

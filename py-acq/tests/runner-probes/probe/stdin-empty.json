@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "id": "probe/stdin-empty",
+  "oracle": "an empty stdin is an empty pipe, never the runner's own",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{python}",
+      "-c",
+      "import sys; sys.stdout.write(repr(sys.stdin.buffer.read()))"
+    ],
+    "env": {},
+    "unset": [],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "exact",
+      "value": "b''",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": []
+  }
+}

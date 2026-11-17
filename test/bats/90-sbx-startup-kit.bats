@@ -315,7 +315,7 @@ SPEC
 @test "provision(sbx): ACQ_EXTRA_KITS is recorded in host config at create" {
   : > "$CALLS"
   # Subshell, NOT `bash -c`: acq_backend_provision is a sourced function, which
-  # a fresh bash never sees (the pre-#381 suite masked the resulting 127).
+  # a fresh bash never sees, causing a command-not-found failure.
   (
     export ACQ_EXTRA_KITS="git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=deadbeef&dir=some-extra-kit"
     acq_test_stub_provider_input_boundary

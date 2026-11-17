@@ -7,7 +7,7 @@
 # serve` + `ssh -L`), liveness failure handling, key-authorize-once, distinct
 # serve ports, SI-10 validation, teardown, traversal guards, and LIST mode.
 # Because acq BACKGROUNDS the serve/ssh children, every publish body runs in a
-# `run bash -c '... ; wait'` so the stubbed children finish appending to $CALLS
+# `run bash -c '... ; ports_finish'` so the stubbed children finish appending to $CALLS
 # before we read it (avoids the concurrency flake the legacy suite guarded).
 #
 # shellcheck shell=bats
@@ -16,10 +16,58 @@ setup() {
   acq_setup_stubs
   load_acq
   command -v python3 >/dev/null 2>&1 || skip "python3 unavailable for ssh listener stub"
+  # Keep background stubs alive until assertions have observed their records.
+  # A short lifetime can expire while the publishing shell is descheduled.
+  local stub
+  for stub in msb ssh; do
+    sed 's/sleep "${STUB_MSB_SERVE_ALIVE:-0.6}"/"$STUBDIR\/hold-port-child"/; s/sleep "${STUB_SSH_ALIVE:-0.6}"/"$STUBDIR\/hold-port-child"/' \
+      "$STUBDIR/$stub" > "$STUBDIR/$stub.new"
+    mv "$STUBDIR/$stub.new" "$STUBDIR/$stub"
+    chmod +x "$STUBDIR/$stub"
+  done
+  cat > "$STUBDIR/hold-port-child" <<'HOLD'
+#!/usr/bin/env bash
+tries=0
+while [ ! -e "$STUBDIR/ports-release" ] && [ "$tries" -lt 600 ]; do
+  sleep 0.1
+  tries=$((tries + 1))
+done
+HOLD
+  chmod +x "$STUBDIR/hold-port-child"
+  # The listener must live for the same protocol as its ssh stub.
+  sed 's/end = time.time() + 5/end = time.time() + 60/; s/while time.time() < end:/while time.time() < end and not __import__("os").path.exists(__import__("os").environ["STUBDIR"] + "\/ports-release"):/' \
+    "$STUBDIR/ssh" > "$STUBDIR/ssh.new"
+  mv "$STUBDIR/ssh.new" "$STUBDIR/ssh"
+  chmod +x "$STUBDIR/ssh"
+  export ACQ_MSB_FORWARD_PROBE_ATTEMPTS=600
+  export -f ports_finish ports_wait_records
 }
-teardown() { acq_teardown_stubs; }
+# Release any held port children first, so a test that failed before its own
+# release does not leave them polling for up to a minute.
+teardown() {
+  [ -z "${STUBDIR:-}" ] || touch "$STUBDIR/ports-release" 2>/dev/null || true
+  acq_teardown_stubs
+}
 
 load 'helper'
+
+# Release only after the publishing shell has finished observing the children.
+ports_finish() {
+  touch "$STUBDIR/ports-release"
+  wait
+  rm -f "$STUBDIR/ports-release"
+}
+
+ports_wait_records() {
+  local file="$STUBDIR/state/ports/$1.pids" count="$2" tries=0
+  while [ "$tries" -lt 600 ]; do
+    if [ -f "$file" ] && [ "$(wc -l < "$file")" -eq "$count" ]; then return 0; fi
+    command sleep 0.1
+    tries=$((tries + 1))
+  done
+  echo "timed out waiting for $count port records in $file" >&2
+  return 1
+}
 
 free_tcp_port() {
   python3 - <<'PY'
@@ -39,7 +87,7 @@ PY
     . "'"$REPO_ROOT"'/acq.backends/common.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     acq_backend_ports pbox --publish "$1:3000" >/dev/null 2>&1
-    wait
+    ports_finish
   ' _ "$hport"
   local log; log=$(cat "$CALLS")
   assert_regex "$log" "ssh-keygen -t ed25519 -N  -f $STUBDIR/state/ssh/msb_id_ed25519"
@@ -75,6 +123,12 @@ MSBPIDSTUB
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     _acq_msb_serve_start pbox 54321 || exit 2
     pid="$_ACQ_MSB_LAST_BG_PID"
+    tries=0
+    while [ ! -s "$STUBDIR/state/serve.pid" ] && [ "$tries" -lt 600 ]; do
+      command sleep 0.1
+      tries=$((tries + 1))
+    done
+    [ -s "$STUBDIR/state/serve.pid" ] || { kill "$pid"; exit 3; }
     child=$(cat "'"$STUBDIR"'/state/serve.pid")
     printf "pid=%s child=%s\n" "$pid" "$child"
     [ "$pid" = "$child" ] && echo "pid-is-real-process" || echo "pid-is-wrapper"
@@ -94,7 +148,7 @@ MSBPIDSTUB
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     acq_backend_ports pbox --publish "$1:3000" 2>&1
     echo "RC=$?"
-    wait
+    ports_finish
   ' _ "$hport"
   assert_output --partial 'RC=1'
   refute_output --partial 'published host'
@@ -108,7 +162,7 @@ MSBPIDSTUB
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     acq_backend_ports pbox --publish "$1:3000" 2>&1
     echo "RC=$?"
-    wait
+    ports_finish
   ' _ "$hport"
   assert_output --partial 'RC=1'
   refute_output --partial 'published host'
@@ -123,7 +177,7 @@ MSBPIDSTUB
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     acq_backend_ports pbox --publish "$1:3000" 2>&1
     echo "RC=$?"
-    wait
+    ports_finish
   ' _ "$hport"
   assert_output --partial 'RC=1'
   assert_output --partial "did not open host listener 127.0.0.1:${hport}"
@@ -138,10 +192,10 @@ MSBPIDSTUB
   run bash -c '
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     acq_backend_ports pbox --publish "$1:3000" >/dev/null 2>&1
-    wait
+    ports_finish
     : > "'"$CALLS"'"
     acq_backend_ports pbox --publish "$2:4000" >/dev/null 2>&1
-    wait
+    ports_finish
   ' _ "$hport1" "$hport2"
   local log; log=$(cat "$CALLS")
   refute_regex "$log" 'ssh-keygen'
@@ -156,22 +210,27 @@ MSBPIDSTUB
   run bash -c '
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     acq_backend_ports pbox --publish "$1:3000" >/dev/null 2>&1
-    wait
+    ports_finish
   ' _ "$hport"
   local log; log=$(cat "$CALLS")
   assert_regex "$log" 'msb ssh authorize'
 }
 
 @test "msb ports: two publishes in one process get distinct serve ports" {
-  local hport1 hport2
-  hport1=$(free_tcp_port)
-  hport2=$(free_tcp_port)
+  # This case checks records and distinct serve ports; listener readiness has
+  # separate coverage. Avoid binding real sockets for the bookkeeping check.
+  local hport1=18080 hport2=18081
   run bash -c '
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
-    acq_backend_ports mpbox --publish "$1:3000" >/dev/null 2>&1
-    acq_backend_ports mpbox --publish "$2:4000" >/dev/null 2>&1
-    wait
+    export STUB_SSH_NO_LISTENER=1
+    _acq_msb_forward_listener_ready() { return 0; }
+    acq_backend_ports mpbox --publish "$1:3000" || { ports_finish; exit 1; }
+    ports_wait_records mpbox 1 || { ports_finish; exit 1; }
+    acq_backend_ports mpbox --publish "$2:4000" || { ports_finish; exit 1; }
+    ports_wait_records mpbox 2 || { ports_finish; exit 1; }
+    ports_finish
   ' _ "$hport1" "$hport2"
+  assert_success
   local lines ports
   lines=$(wc -l < "$STUBDIR/state/ports/mpbox.pids" | tr -d ' ')
   ports=$(awk '{print $3}' "$STUBDIR/state/ports/mpbox.pids" | sort -u | wc -l | tr -d ' ')
@@ -204,12 +263,15 @@ MSBPIDSTUB
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     acq_backend_ports rmbox --publish "$1:3000" >/dev/null 2>&1
     [ -f "'"$STUBDIR"'/state/ports/rmbox.pids" ] || exit 3
+    touch "$STUBDIR/ports-release"
     acq_backend_terminate rmbox >/dev/null 2>&1
   ' _ "$hport1"
   assert [ ! -f "$STUBDIR/state/ports/rmbox.pids" ]
+  rm -f "$STUBDIR/ports-release"
   run bash -c '
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     acq_backend_ports stopbox --publish "$1:7000" >/dev/null 2>&1
+    touch "$STUBDIR/ports-release"
     acq_backend_stop stopbox >/dev/null 2>&1
     acq_backend_terminate neverbox >/dev/null 2>&1
   ' _ "$hport2"

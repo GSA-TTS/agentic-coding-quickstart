@@ -1,0 +1,107 @@
+{
+  "schema": 1,
+  "id": "cli/doctor-sbx-sandbox",
+  "oracle": "Named sandbox diagnostics run as agent with nonfatal image warnings and JSON check records",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{acq}",
+      "--backend",
+      "sbx",
+      "doctor",
+      "box",
+      "--json"
+    ],
+    "env": {
+      "ACQ_SBX_INSTALLED": "1",
+      "ACQ_MSB_INSTALLED": "0",
+      "ACQ_SBX_BIN": "__stub__",
+      "ACQ_SBX_VERSION": "0.51.0",
+      "ACQ_SBX_STUB_CATALOG": "{\"box\":\"running\"}",
+      "ACQ_SBX_STUB_IMAGE_CONTRACT": "missing"
+    },
+    "unset": [
+      "ACQ_RUNTIME"
+    ],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "doctor",
+        "data": {
+          "status": "warn",
+          "checks": [
+            {
+              "id": "image-home",
+              "status": "pass"
+            },
+            {
+              "id": "image-user",
+              "status": "pass"
+            },
+            {
+              "id": "image-nix-store",
+              "status": "pass"
+            },
+            {
+              "id": "image-nix-writable",
+              "status": "pass"
+            },
+            {
+              "id": "image-tool-nix",
+              "status": "pass"
+            },
+            {
+              "id": "image-tool-direnv",
+              "status": "pass"
+            },
+            {
+              "id": "image-home-writable",
+              "status": "pass"
+            },
+            {
+              "id": "image-sudo",
+              "status": "pass"
+            },
+            {
+              "id": "image-rc-directory",
+              "status": "pass"
+            },
+            {
+              "id": "image-tool-devenv",
+              "status": "warn"
+            },
+            {
+              "id": "image-rc-hook",
+              "status": "warn"
+            }
+          ]
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME"
+    ]
+  }
+}

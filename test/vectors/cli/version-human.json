@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "id": "cli/version-human",
+  "oracle": "ADR-0038m §2 human output by default on stdout: every version field, with no backend installed reported as none and the pinned control-plane commit, and nothing on stderr",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{acq}", "version"],
+    "env": {
+      "ACQ_VERSION": "0.1.0",
+      "ACQ_SOURCE_REVISION": "0000000000000000000000000000000000000000",
+      "ACQ_SBX_INSTALLED": "0",
+      "ACQ_MSB_INSTALLED": "0"
+    },
+    "unset": ["ACQ_BACKEND", "ACQ_SBX_BIN", "ACQ_MSB_BIN", "ACQ_SBX_VERSION", "ACQ_MSB_VERSION"],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "exact",
+      "value": "acq v1 (Python skeleton)\n  acq version:       0.1.0\n  impl:              python\n  source revision:   0000000000000000000000000000000000000000\n  backend:           none\n  backend version:   none\n  kit control plane: 941a286f912b99475429c3c00db49a99af5b241e\n",
+      "normalize": ["crlf"]
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+  }
+}

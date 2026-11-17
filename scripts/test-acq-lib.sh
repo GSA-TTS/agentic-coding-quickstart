@@ -99,11 +99,13 @@ acq_test_stub_provider_input_boundary() {
     parent=${root%/*}
     mkdir -p "$parent" || return 1
     lock="${root}.lock"
+    # As the real lock: the exclusive owner-file create decides, not mkdir.
     mkdir "$lock" 2>/dev/null || return 1
+    ( set -C; printf '%s\n' "$$" > "$lock/owner" ) 2>/dev/null || return 1
     printf '%s\n' "$lock"
   }
   acq_provider_input_lock_release() {
-    case "${1:-}" in "$ACQ_PROVENANCE_DIR"/provider-input/*/*.lock) rmdir "$1" 2>/dev/null || true ;; *) return 1 ;; esac
+    case "${1:-}" in "$ACQ_PROVENANCE_DIR"/provider-input/*/*.lock) rm -f -- "$1/owner"; rmdir "$1" 2>/dev/null || true ;; *) return 1 ;; esac
   }
   acq_provider_input_msb_mount() {
     local generation="$2" host_generation
@@ -142,27 +144,30 @@ export -f acq_test_stub_provider_input_boundary
 # pass. On a CI host with git + network this prevents a real fetch that would
 # otherwise hang.
 #
-# bats sources this helper once per @test (each in its own process), so a plain
-# `mktemp -d` here would leak one dir per test with no single EXIT trap to clean
-# them. Instead root a SINGLE shared offline-kit dir under bats' run-scoped
-# temp dir (BATS_RUN_TMPDIR, which bats removes at the end of the run); fall back
-# to a per-process mktemp only when run outside bats. The dir holds a stub spec
-# with no secrets. Publish each complete spec atomically: parallel workers can
-# read these paths while another worker sources this helper.
-if [ -n "${BATS_RUN_TMPDIR:-}" ]; then
-  _ACQ_MSB_OFFLINE_KIT_DIR="${BATS_RUN_TMPDIR}/acq-offline-kit"
-  mkdir -p "$_ACQ_MSB_OFFLINE_KIT_DIR"
-else
-  _ACQ_MSB_OFFLINE_KIT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/acq-nokit.XXXXXX")
-fi
-printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "$_ACQ_MSB_OFFLINE_KIT_DIR/spec.yaml.$$" \
-  && mv -f "$_ACQ_MSB_OFFLINE_KIT_DIR/spec.yaml.$$" "$_ACQ_MSB_OFFLINE_KIT_DIR/spec.yaml" || return 1
-_ACQ_AGENT_OFFLINE_KIT_DIR="${BATS_RUN_TMPDIR:-$_ACQ_MSB_OFFLINE_KIT_DIR}/acq-opencode-kit"
-mkdir -p "$_ACQ_AGENT_OFFLINE_KIT_DIR"
-printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: opencode\ndisplayName: OpenCode\ndescription: offline agent kit\nagent:\n  name: opencode\n  entrypoint: opencode\n' > "$_ACQ_AGENT_OFFLINE_KIT_DIR/spec.yaml.$$" \
-  && mv -f "$_ACQ_AGENT_OFFLINE_KIT_DIR/spec.yaml.$$" "$_ACQ_AGENT_OFFLINE_KIT_DIR/spec.yaml" || return 1
-export ACQ_MSB_KIT_LOCAL_DIR="$_ACQ_MSB_OFFLINE_KIT_DIR"
-export ACQ_TEST_AGENT_KIT="$_ACQ_AGENT_OFFLINE_KIT_DIR"
+# Create offline fixtures with make_stubs, under the private STUBDIR. A shared
+# run-scoped spec, even when published by rename, can make GNU cp refuse it
+# as replaced while being copied by another test's checkout-index stub.
+# _acq_test_tmp_base — where scratch directories go: TMPDIR only when it is
+# absolute, else /tmp, as acq_tmp_dir in acq.backends/userdirs.sh does. A
+# relative TMPDIR would put them under the current directory, and every stub
+# path on PATH would stop resolving after a cd.
+_acq_test_tmp_base() {
+  case "${TMPDIR:-}" in
+    /*) printf '%s\n' "$TMPDIR" ;;
+    *) printf '/tmp\n' ;;
+  esac
+}
+
+_acq_test_offline_kits() {
+  _ACQ_MSB_OFFLINE_KIT_DIR="$STUBDIR/acq-offline-kit"
+  mkdir -p "$_ACQ_MSB_OFFLINE_KIT_DIR" || return 1
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "$_ACQ_MSB_OFFLINE_KIT_DIR/spec.yaml" || return 1
+  _ACQ_AGENT_OFFLINE_KIT_DIR="$STUBDIR/acq-opencode-kit"
+  mkdir -p "$_ACQ_AGENT_OFFLINE_KIT_DIR" || return 1
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: opencode\ndisplayName: OpenCode\ndescription: offline agent kit\nagent:\n  name: opencode\n  entrypoint: opencode\n' > "$_ACQ_AGENT_OFFLINE_KIT_DIR/spec.yaml" || return 1
+  export ACQ_MSB_KIT_LOCAL_DIR="$_ACQ_MSB_OFFLINE_KIT_DIR"
+  export ACQ_TEST_AGENT_KIT="$_ACQ_AGENT_OFFLINE_KIT_DIR"
+}
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +181,8 @@ export ACQ_TEST_AGENT_KIT="$_ACQ_AGENT_OFFLINE_KIT_DIR"
 # corrupted line under that concurrency (a source of the concurrency flake this avoids).
 
 make_stubs() {
-  STUBDIR=$(mktemp -d "${TMPDIR:-/tmp}/acq-test.XXXXXX")
+  STUBDIR=$(mktemp -d "$(_acq_test_tmp_base)/acq-test.XXXXXX")
+  _acq_test_offline_kits || return 1
   CALLS="$STUBDIR/calls.log"
   : >"$CALLS"
   # Preserve the base PATH (with coreutils etc.) but prepend the stub dir.
@@ -225,8 +231,15 @@ case "${1:-}" in
     fi
     ;;
   fetch)
-    if [ "${GIT_ALLOW_PROTOCOL:-}" != none ] \
-        && [ "$*" = "fetch --depth 1 origin $ACQ_TEST_PATTERNS_REF" ] \
+    # Model git's transport check: an https URL is fetched only when
+    # GIT_ALLOW_PROTOCOL is unset or lists https (acq's anonymous attempt
+    # narrows it, e.g. to a name no transport has).
+    case ":${GIT_ALLOW_PROTOCOL-https}:" in
+      *:https:*) _https_allowed=1 ;;
+      *) _https_allowed=0 ;;
+    esac
+    if [ "$_https_allowed" = 1 ] \
+        && [ "$*" = "fetch --depth 1 origin -- $ACQ_TEST_PATTERNS_REF" ] \
         && [ "$("$ACQ_TEST_REAL_GIT" config --get remote.origin.url)" = https://github.com/GSA-TTS/agentic-coding-patterns.git ]; then
       IFS= read -r path < .git/info/sparse-checkout || exit 1
       path=${path%/\*}
@@ -378,7 +391,11 @@ case "${1:-}" in
     # `secret ls` returns the optional fixture (to simulate existing secrets);
     # everything else is logged (must NOT contain actual key values) and no-ops.
     if [ "${2:-}" = "ls" ]; then
-      [ -n "${SBX_LS_FIXTURE:-}" ] && [ -f "$SBX_LS_FIXTURE" ] && cat "$SBX_LS_FIXTURE"
+      if [ -n "${SBX_LS_FIXTURE:-}" ] && [ -f "$SBX_LS_FIXTURE" ]; then
+        cat "$SBX_LS_FIXTURE"
+      else
+        printf 'SCOPE TYPE NAME SECRET\n\nCUSTOM SECRETS\nSCOPE TARGETS ENV PLACEHOLDER SECRET\n'
+      fi
       exit 0
     fi
     exit 0 ;;
@@ -804,11 +821,13 @@ acq_provider_input_lock_acquire() {
   parent=${root%/*}
   mkdir -p "$parent" || return 1
   lock="${root}.lock"
+  # As the real lock: the exclusive owner-file create decides, not mkdir.
   mkdir "$lock" 2>/dev/null || return 1
+  ( set -C; printf '%s\n' "$$" > "$lock/owner" ) 2>/dev/null || return 1
   printf '%s\n' "$lock"
 }
 acq_provider_input_lock_release() {
-  case "${1:-}" in "$ACQ_PROVENANCE_DIR"/provider-input/*/*.lock) rmdir "$1" 2>/dev/null || true ;; *) return 1 ;; esac
+  case "${1:-}" in "$ACQ_PROVENANCE_DIR"/provider-input/*/*.lock) rm -f -- "$1/owner"; rmdir "$1" 2>/dev/null || true ;; *) return 1 ;; esac
 }
   acq_provider_input_msb_mount() {
     local generation="$2" host_generation
@@ -849,17 +868,30 @@ BASH_ENV
   # Export ACQ_SCRIPT_DIR so acq can locate its backends.
   export ACQ_SCRIPT_DIR="$REPO_ROOT"
   # Force the acq secret store to a throwaway file backend (never touch the real
-  # OS keychain in tests).
+  # OS keychain in tests). On Windows ACQ_SECRET_STORE_DIR alone only relocates
+  # the DPAPI files, so the file backend is forced explicitly; tests of the
+  # keychain and DPAPI backends unset it.
   export ACQ_SECRET_STORE_DIR="$STUBDIR/secrets"
+  export ACQ_SECRET_FORCE_FILE=1
   # Force acq's state dir (ssh keys, port PIDs — ADR-0015) under the throwaway
   # STUBDIR so tests never write to the real ~/.local/state/acq.
   export ACQ_STATE_DIR="$STUBDIR/state"
   # Isolate the host-side kit-bundle provenance store to this
   # test's temp dir so provenance reads/writes never touch the real XDG state.
   export ACQ_PROVENANCE_DIR="$STUBDIR/provenance"
+  # The XDG cache and the two kit caches go under the stub home too (the bats
+  # helper points HOME at "$STUBDIR/home"). A developer who exports
+  # XDG_CACHE_HOME or a kit-cache path would otherwise have the suite write
+  # generated kits (for example sbx startup-barrier specs) into their real
+  # ~/.cache. Each value is what acq derives from that HOME with nothing set,
+  # so tests of the default paths still see the defaults; a test of the
+  # fallback itself unsets the variable it exercises.
+  export XDG_CACHE_HOME="$STUBDIR/home/.cache"
+  export ACQ_SBX_KIT_CACHE="$XDG_CACHE_HOME/acq/sbx-kits"
+  export ACQ_MSB_KIT_CACHE="$XDG_CACHE_HOME/acq/kits"
   # Neutralize the developer's real kit customizations: an inherited
-  # ACQ_EXTRA_KITS changes _build_kit_list's output (and, pre-#381, triggered
-  # the split_noglob errexit loss), making local test runs diverge from CI.
+  # ACQ_EXTRA_KITS changes _build_kit_list's output, making local test runs
+  # diverge from CI.
   # Tests that exercise extras set these themselves.
   unset ACQ_EXTRA_KITS ACQ_EXTRA_KIT_SOURCES
 }
@@ -878,7 +910,7 @@ load_acq() {
   _build_kit_list
   # Do NOT `set +e` here (the pre-ADR-0025 bespoke runner did): bats detects a
   # failing command via errexit inherited into the @test body, so disabling it
-  # in setup() makes every assertion in the suite pass vacuously (#381 review).
+  # in setup() makes every assertion in the suite pass vacuously.
 }
 
 # Seed host-authoritative config values for session-path tests. Unset knobs model

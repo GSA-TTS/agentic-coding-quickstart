@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "id": "cli/lifecycle-rm-orphan",
+  "oracle": "ADR-0040m msb remove capability: rm of a sandbox removed outside acq clears its host-authoritative record (exit 0, backend_absent true) instead of refusing it as sandbox_not_found",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{acq}", "--backend", "msb", "rm", "ghost", "--json"],
+    "env": {
+      "ACQ_MSB_BIN": "__stub__",
+      "ACQ_MSB_VERSION": "0.7.7",
+      "ACQ_MSB_INSTALLED": "1",
+      "ACQ_SBX_INSTALLED": "0",
+      "ACQ_MSB_STUB_CATALOG": "{}",
+      "ACQ_STATE_SEED": "{\"msb/ghost\":{\"schema\":1,\"name\":\"ghost\",\"backend\":\"msb\",\"agent\":\"opencode\",\"workspace\":\"/w\"}}"
+    },
+    "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "MSB_HOME", "ACQ_IMAGE", "ACQ_MSB_IMAGE", "ACQ_MSB_READY_TIMEOUT", "ACQ_MSB_STUB_FAIL", "ACQ_KIT_APPLIED_SEED", "ACQ_SANDBOX_LOCK_TIMEOUT"],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "rm",
+        "data": {"name": "ghost", "backend": "msb", "removed": true, "backend_absent": true}
+      },
+      "normalize": []
+    },
+    "stderr": {"mode": "exact", "value": "", "normalize": []}
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+  }
+}

@@ -1,0 +1,96 @@
+[build-system]
+# An exact pin, as for every other dependency (AGENTS.md: exact versions only).
+# The release must be 77 or later, the first setuptools with PEP 639 metadata:
+# an SPDX `license` expression and `license-files` under [project]. CI builds the
+# wheel with this exact release, hash-locked in requirements-build.txt.
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "acq-py"
+version = "0.1.0"
+description = "Python implementation of the acq v1 replacement (in progress, not at parity with Bash)"
+readme = "README.md"
+requires-python = ">=3.12"
+# acq is CC0-1.0. The bundled git-ssh-sign kit (src/acq_py/kitbundle) is
+# Apache-2.0; its LICENSE and NOTICE ship with the package.
+license = "CC0-1.0 AND Apache-2.0"
+license-files = [
+  "src/acq_py/kitbundle/git-ssh-sign/LICENSE",
+  "src/acq_py/kitbundle/git-ssh-sign/NOTICE",
+]
+# No runtime dependencies: acq v1's managed runtime stays app-private and
+# offline (ADR-0042m). The CLI uses the Python standard library only, so
+# ordinary operation never installs or downloads anything.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest==9.2.0"]
+
+[project.scripts]
+# The console script is named acq-py during coexistence with the repo-root Bash
+# `acq`. It becomes `acq` at the cutover slice (see py-acq/README.md).
+acq-py = "acq_py.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+# The msb balanced egress baseline (a copy of acq.backends/msb-balanced-hosts.txt),
+# and the built-in kit bundle pinned at the control-plane ref (kitspec.py). The
+# bundle globs name the dot directory explicitly because setuptools' globs skip
+# hidden paths; tests/test_kitspec.py checks that they cover every bundled file.
+acq_py = [
+  "msb-balanced-hosts.txt",
+  "kitbundle/MANIFEST.json",
+  "kitbundle/*/*",
+  "kitbundle/*/**/*",
+  "kitbundle/*/files/home/.config/git/*",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+markers = ["provider_key: store a throwaway usai key so msb creates pass the provider credential gate"]
+
+# Python quality gates (.github/workflows/python-quality.yml): ruff, mypy and
+# bandit on src/, plus a branch-coverage floor on the pytest run. The tool
+# versions are pinned in requirements-quality.txt. tests/ is not linted yet.
+[tool.ruff]
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# Explicit rule set, so a ruff upgrade that changes its defaults cannot change
+# the gate on its own: pyflakes, the pycodestyle error subset that ruff enables
+# by default, import order, pyupgrade and bugbear. Security lint is bandit's job.
+select = ["E4", "E7", "E9", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src"]
+mypy_path = "src"
+explicit_package_bases = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+[tool.bandit]
+exclude_dirs = ["tests"]
+# B404 (imports subprocess) and B603 (subprocess without a shell) flag what acq is
+# for: it runs the backend CLIs. Every call passes an argv list resolved through
+# hostexec. The checks that matter here stay on: B602/B604/B605 (a shell) and
+# B607 (an executable found by a partial path).
+skips = ["B404", "B603"]
+
+[tool.coverage.run]
+branch = true
+source = ["acq_py"]
+# The backend stubs and the __main__ shim only ever run in a child process
+# (ACQ_*_BIN=__stub__ / python -m acq_py), which in-process coverage cannot see.
+omit = ["*/acq_py/_stub_*.py", "*/acq_py/__main__.py"]
+
+[tool.coverage.report]
+skip_covered = true
+# In-process branch coverage was 77% when this gate was added. The floor sits a
+# little below it to absorb noise; raise it as coverage improves.
+fail_under = 75

@@ -1,0 +1,4 @@
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: valid-kit
+displayName: Valid Kit

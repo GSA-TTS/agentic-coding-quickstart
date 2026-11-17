@@ -1,0 +1,609 @@
+"""Qualification harness tests (ADR-0044m) — the transcript RESULT signature,
+the BLOCKED first-class verdict, the 3-attempt reproduction rule, and the
+qualified/unqualified/blocked matrix.
+
+These are Tier-2 implementation tests (non-contract); the subprocess-boundary
+evidence for the same guarantees lives in ``test/vectors/qualification/``. Each
+guard is written so that mutating it (dropping a divergence check, reporting a
+one-off FAIL as definitive, or treating an unqualified cell as a pass) fails the
+suite.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+# The harness is repo-root tooling (not part of the acq_py package); make it
+# importable alongside the py-acq/src path conftest already adds.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT))
+
+from qualification import (  # noqa: E402
+    BINDING_FIELDS,
+    Environment,
+    MatrixState,
+    Outcome,
+    Transcript,
+    Verdict,
+    cell_state,
+    classify_exit,
+    format_result_line,
+    is_claimed,
+    is_current,
+    report_matrix,
+    reproduce,
+    run_cell,
+    sha256_hex,
+    touches_surface,
+    transcript_document,
+)
+
+
+def make_env(**overrides) -> Environment:
+    base = dict(
+        os="Linux",
+        os_build="6.1.0",
+        arch="x86_64",
+        hypervisor="native",
+        backend="msb",
+        backend_version="0.7.7",
+        image="img",
+        rev="a" * 40,
+        artifact_sha256="b" * 64,
+        transcript_dir="/tmp/qualify-test",
+    )
+    base.update(overrides)
+    return Environment(**base)
+
+
+NOW = datetime(2026, 11, 7, 12, 0, tzinfo=timezone.utc)
+
+
+def make_transcript(
+    verdict: Verdict, env: Environment | None = None, recorded_at: datetime | None = None
+) -> Transcript:
+    return Transcript(
+        verdict,
+        env or make_env(),
+        ("cmd",),
+        "c" * 64,
+        "detail",
+        (recorded_at or NOW - timedelta(days=1)).isoformat(),
+    )
+
+
+# --- verbatim RESULT signature ------------------------------------------------
+
+def test_result_line_matches_adr_signature_msb():
+    env = make_env(backend="msb", backend_version="0.7.7", os="Linux", arch="x86_64")
+    line = format_result_line("PASS", env)
+    assert line == (
+        "RESULT PASS msb=0.7.7 image=img host=Linux x86_64 "
+        f"rev={'a' * 40} dir=/tmp/qualify-test"
+    )
+
+
+def test_result_line_generalises_backend_token_to_sbx():
+    env = make_env(backend="sbx", backend_version="0.39.0", os="Linux", arch="x86_64")
+    assert format_result_line("FAIL", env).startswith("RESULT FAIL sbx=0.39.0 ")
+
+
+def test_result_line_host_is_os_and_arch_with_space():
+    env = make_env(os="Darwin", arch="arm64")
+    assert "host=Darwin arm64" in format_result_line("PASS", env)
+
+
+def test_result_line_verdict_is_restricted_to_pass_fail_blocked():
+    for verdict in ("PASS", "FAIL", "BLOCKED"):
+        line = format_result_line(verdict, make_env())
+        assert line.startswith(f"RESULT {verdict} ")
+    # The RESULT line never carries the escalation token directly.
+    assert not format_result_line("FAIL", make_env()).startswith("RESULT FLAKY")
+
+
+# --- BLOCKED is first-class, never a pass -------------------------------------
+
+def test_classify_exit_maps_zero_to_pass_two_to_blocked_else_fail():
+    assert classify_exit(0) is Verdict.PASS
+    assert classify_exit(2) is Verdict.BLOCKED
+    assert classify_exit(1) is Verdict.FAIL
+    assert classify_exit(3) is Verdict.FAIL
+    assert classify_exit(127) is Verdict.FAIL
+
+
+def test_missing_command_records_blocked_never_pass():
+    result = run_cell(
+        ["definitely-not-a-real-command-xyz"], make_env(), timeout=5.0
+    )
+    assert result.outcome is Outcome.BLOCKED
+    assert result.attempts[0].verdict is Verdict.BLOCKED
+    assert result.attempts[0].verdict is not Verdict.PASS
+
+
+def test_unqualified_cell_records_blocked_never_pass():
+    result = run_cell(
+        ["/bin/true"], make_env(), unqualified=True, timeout=5.0
+    )
+    assert result.outcome is Outcome.BLOCKED
+    assert result.attempts[0].verdict is Verdict.BLOCKED
+    assert result.attempts[0].detail == "unqualified cell: not claimed"
+
+
+def test_exit_two_records_blocked_never_pass():
+    result = run_cell(
+        [sys.executable, "-c", "raise SystemExit(2)"], make_env(), timeout=5.0
+    )
+    assert result.outcome is Outcome.BLOCKED
+    assert result.attempts[0].verdict is Verdict.BLOCKED
+
+
+# --- 3-attempt reproduction rule ----------------------------------------------
+
+def _always(transcript: Transcript):
+    def run_once(_attempt: int) -> Transcript:
+        return transcript
+
+    return run_once
+
+
+def test_fail_reproduces_within_three_attempts_is_fail():
+    result = reproduce(_always(make_transcript(Verdict.FAIL)))
+    assert result.outcome is Outcome.FAIL
+    assert len(result.attempts) == 3
+    assert all(a.verdict is Verdict.FAIL for a in result.attempts)
+
+
+def test_one_off_fail_without_reproduction_evidence_is_flaky():
+    # max_attempts=1 leaves no reproduction evidence: never a definitive FAIL.
+    result = reproduce(_always(make_transcript(Verdict.FAIL)), max_attempts=1)
+    assert result.outcome is Outcome.FLAKY
+
+
+def test_diverging_verdicts_across_attempts_is_flaky():
+    outcomes = [Verdict.FAIL, Verdict.PASS, Verdict.FAIL]
+
+    def run_once(attempt: int) -> Transcript:
+        return make_transcript(outcomes[attempt - 1])
+
+    result = reproduce(run_once)
+    assert result.outcome is Outcome.FLAKY
+    assert len(result.attempts) == 2  # stops at the first divergence
+
+
+def test_diverging_binding_identity_is_flaky():
+    def run_once(attempt: int) -> Transcript:
+        env = make_env(backend_version="0.7.7" if attempt == 1 else "0.8.0")
+        return make_transcript(Verdict.FAIL, env)
+
+    result = reproduce(run_once)
+    assert result.outcome is Outcome.FLAKY
+
+
+def test_non_binding_fields_may_differ_without_flaky():
+    # transcript_dir is not a binding field (ADR-0044m): it may differ.
+    def run_once(attempt: int) -> Transcript:
+        env = make_env(transcript_dir=f"/tmp/qualify-{attempt}")
+        return make_transcript(Verdict.FAIL, env)
+
+    result = reproduce(run_once)
+    assert result.outcome is Outcome.FAIL
+    assert len(result.attempts) == 3
+
+
+def test_binding_fields_exactly_match_adr_list():
+    assert BINDING_FIELDS == (
+        "rev",
+        "artifact_sha256",
+        "backend_version",
+        "os_build",
+        "hypervisor",
+    )
+    assert "transcript_dir" not in BINDING_FIELDS
+
+
+def test_pass_and_blocked_on_first_attempt_are_final():
+    assert reproduce(_always(make_transcript(Verdict.PASS))).outcome is Outcome.PASS
+    blocked = reproduce(_always(make_transcript(Verdict.BLOCKED)))
+    assert blocked.outcome is Outcome.BLOCKED
+    assert len(blocked.attempts) == 1
+
+
+# --- matrix states ------------------------------------------------------------
+
+def test_matrix_reports_unqualified_cells_honestly():
+    reports = report_matrix({}, now=NOW)
+    by_cell = {(r.backend, r.platform): r for r in reports}
+
+    # Windows ARM64 and musl are unqualified for every backend.
+    for backend in ("msb", "sbx"):
+        assert by_cell[(backend, "windows-arm64")].state is MatrixState.UNQUALIFIED
+        assert by_cell[(backend, "windows-arm64")].claimed is False
+        assert by_cell[(backend, "linux-musl")].state is MatrixState.UNQUALIFIED
+
+    # macOS x86_64 (every backend) and sbx on Linux aarch64 are unqualified.
+    assert by_cell[("msb", "macos-x86_64")].state is MatrixState.UNQUALIFIED
+    assert by_cell[("sbx", "macos-x86_64")].state is MatrixState.UNQUALIFIED
+    assert by_cell[("sbx", "linux-aarch64")].state is MatrixState.UNQUALIFIED
+
+    # Claimed cells without a green transcript are blocked (hold the gate).
+    assert by_cell[("msb", "linux-x86_64")].claimed is True
+    assert by_cell[("msb", "linux-x86_64")].state is MatrixState.BLOCKED
+    assert by_cell[("sbx", "windows-x64")].claimed is True
+    assert by_cell[("sbx", "windows-x64")].state is MatrixState.BLOCKED
+
+
+def test_claimed_cell_is_qualified_only_with_green_current_transcript():
+    green = make_transcript(Verdict.PASS)
+    state = cell_state("msb", "linux-x86_64", transcript=green, now=NOW)
+    assert state is MatrixState.QUALIFIED
+
+
+def test_commit_and_artifact_do_not_expire_a_transcript():
+    # A release commit changes the SHA and artifact hash but not behaviour; the
+    # transcript recorded for another rev/artifact stays current.
+    green = make_transcript(Verdict.PASS, make_env(rev="a" * 40, artifact_sha256="b" * 64))
+    assert is_current(green, now=NOW)
+    assert cell_state("msb", "linux-x86_64", transcript=green, now=NOW) is MatrixState.QUALIFIED
+
+
+def test_transcript_older_than_the_window_is_stale():
+    old = make_transcript(Verdict.PASS, recorded_at=NOW - timedelta(days=91))
+    assert not is_current(old, now=NOW)
+    assert cell_state("msb", "linux-x86_64", transcript=old, now=NOW) is MatrixState.BLOCKED
+    edge = make_transcript(Verdict.PASS, recorded_at=NOW - timedelta(days=90))
+    assert is_current(edge, now=NOW)
+
+
+def test_backend_minor_change_is_stale_patch_is_not():
+    green = make_transcript(Verdict.PASS, make_env(backend_version="0.7.7"))
+    assert is_current(green, now=NOW, backend_version="0.7.11")
+    assert not is_current(green, now=NOW, backend_version="0.8.0")
+    assert not is_current(green, now=NOW, backend_version="1.7.7")
+    assert is_current(green, now=NOW)  # no version under acceptance -> not checked
+
+
+def test_tier3_surface_change_is_stale():
+    green = make_transcript(Verdict.PASS)
+    assert not is_current(green, now=NOW, surface_changed=True)
+    state = cell_state("msb", "linux-x86_64", transcript=green, now=NOW, surface_changed=True)
+    assert state is MatrixState.BLOCKED
+
+
+def test_unparseable_backend_versions_fail_closed():
+    for recorded in ("unknown", "", "0.7.7-rc1", "0.7.7+build", "v0.7.7", "msb 0.7.7"):
+        t = make_transcript(Verdict.PASS, make_env(backend_version=recorded))
+        assert not is_current(t, now=NOW, backend_version="0.7.7"), recorded
+    green = make_transcript(Verdict.PASS, make_env(backend_version="0.7.7"))
+    for under_acceptance in ("unknown", "", "0.7.7-rc1", "garbage"):
+        assert not is_current(green, now=NOW, backend_version=under_acceptance), under_acceptance
+    both = make_transcript(Verdict.PASS, make_env(backend_version="unknown"))
+    assert not is_current(both, now=NOW, backend_version="garbage")
+
+
+def test_future_dated_transcript_is_never_current():
+    future = make_transcript(Verdict.PASS, recorded_at=NOW + timedelta(days=1))
+    assert not is_current(future, now=NOW)
+
+
+def test_naive_now_is_a_programming_error():
+    import pytest
+
+    with pytest.raises(ValueError):
+        is_current(make_transcript(Verdict.PASS), now=datetime(2026, 11, 7, 12, 0))
+
+
+def test_report_matrix_propagates_version_and_surface_inputs():
+    green = make_transcript(Verdict.PASS, make_env(backend_version="0.7.7"))
+    cells = {("msb", "linux-x86_64"): green}
+
+    def state(**kw):
+        reports = report_matrix(cells, now=NOW, **kw)
+        return {(r.backend, r.platform): r.state for r in reports}[("msb", "linux-x86_64")]
+
+    assert state() is MatrixState.QUALIFIED
+    assert state(backend_versions={"msb": "0.7.11"}) is MatrixState.QUALIFIED
+    assert state(backend_versions={"msb": "0.8.0"}) is MatrixState.BLOCKED
+    assert state(surface_changed=True) is MatrixState.BLOCKED
+
+
+def test_unknown_or_naive_recorded_at_is_never_current():
+    green = make_transcript(Verdict.PASS)
+    for bad in ("", "not-a-date", "2026-11-06T12:00:00"):
+        t = Transcript(Verdict.PASS, green.environment, green.commands, green.output_sha256, "", bad)
+        assert not is_current(t, now=NOW)
+
+
+def test_touches_surface_distinguishes_release_commits():
+    release_commit = [
+        ".release-please-manifest.json", "CHANGELOG.md", "README.md",
+        "docs/howto/acq.md", "install.sh", "install.ps1", "package.json",
+    ]
+    assert not touches_surface(release_commit)
+    assert not touches_surface(["py-acq/tests/test_lifecycle.py", ".github/workflows/release.yml"])
+    assert touches_surface(["py-acq/src/acq_py/cli.py"])
+    assert touches_surface(["scripts/qualify-backend-cell"])
+    assert touches_surface(["qualification/runner.py", "README.md"])
+    assert touches_surface(["qualification/cli.py"])
+    # The matrix, ledger and gate only read transcripts; they are not the surface.
+    assert not touches_surface(["qualification/matrix.py", "qualification/ledger.py", "qualification/gate.py"])
+    assert not touches_surface(["py-acq/src_other/x.py"])
+    assert not touches_surface(["scripts/qualify-backend-cell-x"])
+
+
+def test_touches_surface_version_output_is_not_surface():
+    # ADR-0044m: the `version` command is off the surface — its data + human/JSON
+    # output live together in version_info.py (run_version split out of cli.py and
+    # imported lazily). A version-output-only change must not expire a transcript.
+    assert not touches_surface(["py-acq/src/acq_py/version_info.py"])
+    # doctor/runtime and the deterministic test backends are likewise off-surface.
+    assert not touches_surface(["py-acq/src/acq_py/doctor.py", "py-acq/src/acq_py/runtime.py"])
+    assert not touches_surface(["py-acq/src/acq_py/_stub_msb.py", "py-acq/src/acq_py/_stub_sbx.py"])
+
+
+def test_touches_surface_contract_modules_are_surface():
+    # A diff to a contract-bearing module must still trigger the surface. __init__.py
+    # is on-surface: it is the always-loaded package marker, and release-please bumps
+    # package.json (not this file), so it is not a release-only path.
+    for module in (
+        "__init__.py", "__main__.py", "backends.py", "cli.py", "config.py",
+        "envelope.py", "errors.py", "kits.py", "lock.py", "migration.py",
+        "msb.py", "provider_creds.py", "sbx.py", "security.py", "state.py",
+    ):
+        assert touches_surface([f"py-acq/src/acq_py/{module}"]), module
+
+
+def test_touches_surface_new_files_default_on_surface():
+    # The surface fails CLOSED: a new module, subpackage, or data file under
+    # py-acq/src/acq_py/ defaults to on-surface (no whitelist to forget to extend).
+    assert touches_surface(["py-acq/src/acq_py/adapters/openshell.py"])
+    assert touches_surface(["py-acq/src/acq_py/kits.json"])
+
+
+def test_failed_transcript_is_blocked_in_matrix():
+    red = make_transcript(Verdict.FAIL)
+    assert cell_state("msb", "linux-x86_64", transcript=red, now=NOW) is MatrixState.BLOCKED
+
+
+def test_unqualified_cell_is_never_qualified_even_with_green_transcript():
+    green = make_transcript(Verdict.PASS)
+    assert cell_state("sbx", "macos-x86_64", transcript=green, now=NOW) is MatrixState.UNQUALIFIED
+    assert cell_state("msb", "macos-x86_64", transcript=green, now=NOW) is MatrixState.UNQUALIFIED
+
+
+def test_is_claimed_matches_adr_qualified_matrix():
+    assert is_claimed("msb", "linux-x86_64")
+    assert is_claimed("msb", "linux-aarch64")
+    assert is_claimed("msb", "macos-arm64")
+    assert not is_claimed("msb", "macos-x86_64")
+    assert is_claimed("msb", "windows-x64")
+    assert not is_claimed("msb", "windows-arm64")
+    assert not is_claimed("msb", "linux-musl")
+    assert is_claimed("sbx", "linux-x86_64")
+    assert is_claimed("sbx", "macos-arm64")
+    assert is_claimed("sbx", "windows-x64")
+    assert not is_claimed("sbx", "macos-x86_64")
+    assert not is_claimed("sbx", "linux-aarch64")
+
+
+# --- no secret value ----------------------------------------------------------
+
+SECRET = "QUALIFY_TOP_SECRET_MARKER"
+
+
+def test_transcript_never_records_the_environment(monkeypatch):
+    # A secret present only in the process environment never appears anywhere in
+    # the transcript document or the RESULT line: the environment is never dumped.
+    monkeypatch.setenv("FAKE_TOKEN", SECRET)
+    result = run_cell([sys.executable, "-c", "pass"], make_env(), timeout=5.0)
+    doc = transcript_document(result)
+    serialized = json.dumps(doc)
+    assert SECRET not in serialized
+    # The recorded "environment" is the whitelisted identity only, never a dump of
+    # os.environ: the secret's env var name is not among the recorded keys.
+    recorded_env = doc["attempts"][0]["environment"]
+    assert "FAKE_TOKEN" not in recorded_env
+    assert set(recorded_env) == {
+        "os", "os_build", "arch", "hypervisor", "backend", "backend_version",
+        "image", "glibc_floor", "rev", "artifact_sha256", "transcript_dir",
+    }
+    assert doc["attempts"][0]["recorded_at"]
+    assert SECRET not in format_result_line("PASS", result.environment)
+
+
+def test_transcript_digests_output_never_persists_raw_output(monkeypatch):
+    # The command prints the secret to stdout (drawn from the environment, so the
+    # secret value is not in argv either). The harness keeps only the digest.
+    monkeypatch.setenv("FAKE_TOKEN", SECRET)
+    command = [
+        sys.executable,
+        "-c",
+        "import os,sys; sys.stdout.buffer.write(os.environ['FAKE_TOKEN'].encode())",
+    ]
+    result = run_cell(command, make_env(), timeout=5.0)
+    doc = transcript_document(result)
+    assert result.attempts[0].verdict is Verdict.PASS
+    # The digest proves the raw output was captured then reduced, never persisted.
+    assert doc["attempts"][0]["output_sha256"] == sha256_hex(SECRET.encode())
+    serialized = json.dumps(doc)
+    assert SECRET not in serialized  # only the digest, never the raw value
+
+
+# --- timeouts: SIGTERM, a grace period, then SIGKILL; and an exported deadline ---
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+def test_a_timed_out_command_gets_sigterm_and_a_grace_period_to_tear_down(tmp_path, monkeypatch):
+    from qualification import runner
+
+    monkeypatch.setattr(runner, "_grace", lambda timeout: 10.0)
+    done = tmp_path / "tore-down"
+    script = (
+        "import signal, sys, time\n"
+        f"def stop(*_):\n    open({str(done)!r}, 'w').write('yes')\n    sys.exit(143)\n"
+        "signal.signal(signal.SIGTERM, stop)\n"
+        "time.sleep(60)\n"
+    )
+    t = runner._single_run([sys.executable, "-c", script], make_env(), 1, timeout=1.0)
+    assert t.verdict is Verdict.BLOCKED and t.detail == "command timed out"
+    assert done.read_text() == "yes"  # it was asked to stop, not killed outright
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+def test_a_command_that_ignores_sigterm_is_killed_after_the_grace_period(monkeypatch):
+    import time
+
+    from qualification import runner
+
+    monkeypatch.setattr(runner, "_grace", lambda timeout: 0.5)
+    script = "import signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\ntime.sleep(60)\n"
+    started = time.monotonic()
+    t = runner._single_run([sys.executable, "-c", script], make_env(), 1, timeout=1.0)
+    assert t.verdict is Verdict.BLOCKED and time.monotonic() - started < 30
+
+
+def test_the_command_gets_a_deadline_that_ends_before_the_timeout(tmp_path):
+    import time
+
+    from qualification import runner
+
+    out = tmp_path / "deadline"
+    script = f"import os; open({str(out)!r}, 'w').write(os.environ[{runner.DEADLINE_ENV!r}])"
+    before = time.time()
+    runner._single_run([sys.executable, "-c", script], make_env(), 1, timeout=400.0)
+    deadline = int(out.read_text())
+    assert before + 400 - runner._grace(400) - 2 <= deadline <= time.time() + 400 - runner._grace(400)
+    assert runner._grace(400) == 100 and runner._grace(1800) == runner.TERMINATE_GRACE
+
+
+def test_matrix_cell_state_applies_the_version_floors():
+    for version in ("0.7.1", "0.6.0", "0.7.5"):
+        refused = make_transcript(Verdict.PASS, make_env(backend_version=version))
+        assert cell_state("msb", "linux-x86_64", transcript=refused, now=NOW) is MatrixState.BLOCKED
+    green = make_transcript(Verdict.PASS, make_env(backend_version="0.7.7"))
+    assert cell_state("msb", "linux-x86_64", transcript=green, now=NOW) is MatrixState.QUALIFIED
+    assert cell_state("msb", "linux-x86_64", transcript=green, now=NOW, backend_version="0.7.1") is MatrixState.BLOCKED
+
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+def test_ctrl_c_on_the_harness_reaches_the_command_and_waits_for_its_teardown(tmp_path, monkeypatch):
+    # A SIGINT sent to the harness alone (a supervisor's ``kill -INT``) must still
+    # reach the command, which then gets its grace period to tear down rather than
+    # being killed. Simulated with SIGALRM: KeyboardInterrupt in the harness only.
+    import signal
+
+    from qualification import runner
+
+    monkeypatch.setattr(runner, "_grace", lambda timeout: 10.0)
+    log, ready, done = tmp_path / "signals", tmp_path / "pid", tmp_path / "done"
+    script = (
+        "import os, signal, sys, time\n"
+        f"def note(sig, _):\n    open({str(log)!r}, 'a').write(signal.Signals(sig).name + '\\n')\n"
+        "signal.signal(signal.SIGTERM, note)\n"
+        f"open({str(ready)!r}, 'w').write(str(os.getpid()))\n"
+        "end = time.monotonic() + 60\n"
+        f"while time.monotonic() < end and not os.path.exists({str(log)!r}):\n    time.sleep(0.05)\n"
+        "time.sleep(1.0)  # tearing down\n"
+        f"open({str(done)!r}, 'w').write('yes')\n"
+        "sys.exit(143)\n"
+    )
+
+    def interrupt(*_):
+        raise KeyboardInterrupt
+
+    old = signal.signal(signal.SIGALRM, interrupt)
+    signal.setitimer(signal.ITIMER_REAL, 1.0)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            runner._single_run([sys.executable, "-c", script], make_env(), 1, timeout=60.0)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+    assert ready.exists()
+    assert log.read_text().splitlines() == ["SIGTERM"]  # the stop was passed on
+    assert done.read_text() == "yes"  # and it was allowed to finish tearing down
+
+
+def test_the_harness_waits_on_the_command_in_short_slices(monkeypatch):
+    # Each wait returns within WAIT_SLICE, so a Ctrl+C on Windows (which does not
+    # interrupt a wait) is handled promptly; the command still gets its whole timeout.
+    import time
+
+    from qualification import runner
+
+    waits = []
+
+    class Spy(subprocess.Popen):
+        def communicate(self, input=None, timeout=None):
+            waits.append(timeout)
+            return super().communicate(input, timeout=timeout)
+
+    monkeypatch.setattr(runner.subprocess, "Popen", Spy)
+    monkeypatch.setattr(runner, "_grace", lambda timeout: 0.5)
+    started = time.monotonic()
+    t = runner._single_run([sys.executable, "-c", "import time; time.sleep(30)"], make_env(), 1, timeout=2.5)
+    elapsed = time.monotonic() - started
+    assert t.verdict is Verdict.BLOCKED and t.detail == "command timed out"
+    assert 2.5 <= elapsed < 2.5 + 0.5 + 3.0  # the timeout, then at most the grace and a reap
+    assert len(waits) >= 3 and all(w is not None and w <= runner.WAIT_SLICE for w in waits)
+
+
+def test_the_harness_keeps_all_output_of_a_command_slower_than_one_slice(tmp_path):
+    from qualification import runner
+    from qualification.model import sha256_hex
+
+    script = (
+        "import sys, time\n"
+        "for i in range(3):\n"
+        "    print(f'line {i} ' + 'x' * 50000, flush=True)\n"
+        "    time.sleep(0.6)\n"
+    )
+    t = runner._single_run([sys.executable, "-c", script], make_env(), 1, timeout=30.0)
+    expected = "".join(f"line {i} " + "x" * 50000 + "\n" for i in range(3)).encode()
+    if os.name == "nt":
+        expected = expected.replace(b"\n", b"\r\n")
+    assert t.verdict is Verdict.PASS and t.output_sha256 == sha256_hex(expected)
+
+
+@pytest.mark.parametrize("platform", ["nt", "posix"])
+def test_ctrl_c_is_forwarded_to_the_command_on_every_platform(monkeypatch, platform):
+    from qualification import runner
+
+    seen = []
+
+    class Proc:
+        pid = 4242
+        returncode = None
+
+        def communicate(self, timeout=None):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(runner.subprocess, "Popen", lambda *a, **k: Proc())
+    monkeypatch.setattr(runner.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
+    monkeypatch.setattr(runner, "_stop", lambda proc, grace, ask=True: seen.append(ask))
+    monkeypatch.setattr(runner.os, "name", platform)
+    with pytest.raises(KeyboardInterrupt):
+        runner._single_run(["oracle"], make_env(), 1, timeout=60.0)
+    assert seen == [True]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
+def test_a_killed_command_whose_pipes_outlive_it_does_not_hang_the_harness(monkeypatch):
+    import shutil
+    import time
+
+    from qualification import runner
+
+    if shutil.which("setsid") is None:
+        pytest.skip("setsid is not available")
+    monkeypatch.setattr(runner, "_grace", lambda timeout: 1.0)
+    started = time.monotonic()
+    t = runner._single_run(["sh", "-c", "setsid sleep 8 & exec sleep 30"], make_env(), 1, timeout=1.0)
+    assert t.verdict is Verdict.BLOCKED and time.monotonic() - started < 6

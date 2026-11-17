@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "id": "sentinel/transform-tmpdir",
+  "oracle": "ADR-0043m normalisation transform: tmpdir (temporary directory path)",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{python}", "-c", "import sys, tempfile; sys.stdout.buffer.write(tempfile.gettempdir().encode() + b'\\n')"],
+    "env": {},
+    "unset": [],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "exact",
+      "value": "<tmpdir>\n",
+      "normalize": ["tmpdir"]
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": []
+  }
+}

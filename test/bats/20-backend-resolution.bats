@@ -177,3 +177,159 @@ _resolve() { # ADAPTER EXPLICIT  -> prints "<resolved>|<stderr-note>"
   assert_equal "$resolved_shadow" "no"
   assert_equal "$(command -v msb)" "$STUBDIR/msb"
 }
+
+# The backend name selects a file under acq.backends/ that acq SOURCES, so a
+# name from --backend, ACQ_BACKEND or config.yaml must be one of the shipped
+# adapters before any file is read. A traversal-shaped name would otherwise
+# source an arbitrary .sh file from elsewhere on disk.
+_evil_backend() { # -> prints a name that resolves to $STUBDIR/evil.sh
+  cat >"$STUBDIR/evil.sh" <<EVIL
+: >"$STUBDIR/evil-sourced"
+EVIL
+  printf '%s%s/evil' "$(printf '../%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30)" "${STUBDIR#/}"
+}
+
+@test "backend: an unknown --backend name is refused before any adapter is sourced" {
+  local evil; evil=$(_evil_backend)
+  [ -f "${REPO_ROOT}/acq.backends/${evil}.sh" ]   # the traversal really resolves
+  run "$ACQ" --backend "$evil" ls
+  assert_failure
+  assert_output --partial 'unknown backend'
+  assert_output --partial 'expected sbx or msb'
+  [ ! -e "$STUBDIR/evil-sourced" ]
+}
+
+@test "backend: an unknown ACQ_BACKEND value is refused before any adapter is sourced" {
+  local evil; evil=$(_evil_backend)
+  run env ACQ_BACKEND="$evil" "$ACQ" ls
+  assert_failure
+  assert_output --partial 'unknown backend'
+  assert_output --partial 'ACQ_BACKEND'
+  [ ! -e "$STUBDIR/evil-sourced" ]
+}
+
+@test "backend: an unknown backend in config.yaml is refused before any adapter is sourced" {
+  local evil; evil=$(_evil_backend)
+  unset ACQ_BACKEND
+  export XDG_CONFIG_HOME="$STUBDIR/config"
+  mkdir -p "$XDG_CONFIG_HOME/acq"
+  printf 'backend: %s\n' "$evil" > "$XDG_CONFIG_HOME/acq/config.yaml"
+  run "$ACQ" ls
+  assert_failure
+  assert_output --partial 'unknown backend'
+  assert_output --partial 'config.yaml'
+  [ ! -e "$STUBDIR/evil-sourced" ]
+}
+
+@test "backend: _load_backend_adapter itself refuses a name outside sbx|msb" {
+  local evil; evil=$(_evil_backend)
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    _load_backend_adapter "$1"
+  ' _ "$evil"
+  assert_failure
+  assert_output --partial 'unknown backend'
+  [ ! -e "$STUBDIR/evil-sourced" ]
+}
+
+@test "backend set: an unknown backend name is refused and nothing is persisted" {
+  export XDG_CONFIG_HOME="$STUBDIR/setcfg"
+  run "$ACQ" backend set ../x
+  assert_failure
+  assert_output --partial 'unknown backend'
+  [ ! -e "$XDG_CONFIG_HOME/acq/config.yaml" ]
+}
+
+# The best-effort verbs resolve the backend with its diagnostics silenced, so
+# that "nothing installed" can be reported as unknown. An unknown backend pinned
+# in config.yaml still ends help and version, and must say why instead of a bare
+# exit 1.
+@test "best-effort verbs: an unknown backend in config.yaml is reported, not swallowed" {
+  local verb
+  unset ACQ_BACKEND
+  export XDG_CONFIG_HOME="$STUBDIR/config"
+  mkdir -p "$XDG_CONFIG_HOME/acq"
+  printf 'backend: bogus\n' > "$XDG_CONFIG_HOME/acq/config.yaml"
+  for verb in --help version; do
+    run "$ACQ" "$verb" </dev/null
+    assert_failure
+    assert_output --partial "unknown backend 'bogus'"
+    assert_output --partial 'config.yaml'
+  done
+}
+
+# doctor and configure complete instead, as Python's do: doctor reports a failed
+# config-backend check and configure shows the problem, both exiting 0 with
+# config.yaml left as it was.
+@test "doctor and configure: an unknown backend in config.yaml is reported and they complete" {
+  unset ACQ_BACKEND
+  export XDG_CONFIG_HOME="$STUBDIR/config"
+  mkdir -p "$XDG_CONFIG_HOME/acq"
+  printf 'backend: bogus\n' > "$XDG_CONFIG_HOME/acq/config.yaml"
+
+  run "$ACQ" doctor </dev/null
+  assert_success
+  assert_output --partial "[fail] config-backend: config.yaml sets an unknown backend: 'bogus'"
+  assert_output --partial "acq backend set msb"
+
+  run "$ACQ" configure </dev/null
+  assert_success
+  assert_output --partial "unknown backend 'bogus'"
+  assert_output --partial 'configuration unchanged'
+  grep -Fxq 'backend: bogus' "$XDG_CONFIG_HOME/acq/config.yaml"
+
+  # Inspecting a sandbox needs its backend, so `doctor NAME` still refuses.
+  run "$ACQ" doctor some-sandbox </dev/null
+  assert_failure
+  assert_output --partial "unknown backend 'bogus'"
+
+  # An explicit --backend or ACQ_BACKEND value is still refused up front.
+  run "$ACQ" --backend bogus doctor </dev/null
+  assert_failure
+  assert_output --partial "unknown backend 'bogus'"
+  run env ACQ_BACKEND=bogus "$ACQ" configure </dev/null
+  assert_failure
+  assert_output --partial "unknown backend 'bogus'"
+}
+
+# With --backend or ACQ_BACKEND set, resolution never reads config.yaml, but the
+# broken pin still breaks every invocation without the override, so doctor
+# reports it as Python's does (its check always reads config.yaml). It still
+# exits 0 and does not offer to overwrite the pin.
+@test "doctor: an unknown backend in config.yaml is reported under a valid override" {
+  unset ACQ_BACKEND
+  export XDG_CONFIG_HOME="$STUBDIR/config"
+  mkdir -p "$XDG_CONFIG_HOME/acq"
+  printf 'backend: bogus\n' > "$XDG_CONFIG_HOME/acq/config.yaml"
+
+  run "$ACQ" --backend msb doctor </dev/null
+  assert_success
+  assert_output --partial "[fail] config-backend: config.yaml sets an unknown backend: 'bogus'"
+  assert_output --partial "acq backend set msb"
+  refute_output --partial 'as the default backend to'
+  grep -Fxq 'backend: bogus' "$XDG_CONFIG_HOME/acq/config.yaml"
+
+  run env ACQ_BACKEND=sbx "$ACQ" doctor </dev/null
+  assert_success
+  assert_output --partial "[fail] config-backend: config.yaml sets an unknown backend: 'bogus'"
+  refute_output --partial 'as the default backend to'
+
+  # A valid pin under an override is not a failure.
+  printf 'backend: sbx\n' > "$XDG_CONFIG_HOME/acq/config.yaml"
+  run "$ACQ" --backend msb doctor </dev/null
+  assert_success
+  refute_output --partial '[fail] config-backend'
+}
+
+@test "best-effort verbs: no backend installed stays silent and succeeds" {
+  unset ACQ_BACKEND
+  export XDG_CONFIG_HOME="$STUBDIR/empty-config"
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "$1" >/dev/null 2>&1
+    _auto_detect_backend() { return 1; }
+    acq_resolve_backend_best_effort ""
+    echo "resolved=[${ACQ_RESOLVED_BACKEND:-}]"
+  ' _ "$ACQ"
+  assert_success
+  assert_output 'resolved=[]'
+}

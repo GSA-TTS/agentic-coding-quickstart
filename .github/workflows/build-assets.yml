@@ -1,0 +1,397 @@
+# Dry-run contract (ADR-0042m): build and verify the complete offline asset set.
+# Only workflow artifacts are uploaded; this workflow never tags or publishes.
+name: Build assets
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: Source ref; an empty value uses the triggering ref
+        type: string
+        default: ''
+      sign:
+        description: Allow optional platform signing on trusted release calls
+        type: boolean
+        default: false
+    secrets:
+      AZURE_SIGNING_ENDPOINT:
+        required: false
+      AZURE_SIGNING_ACCOUNT:
+        required: false
+      AZURE_CERTIFICATE_PROFILE:
+        required: false
+      AZURE_TENANT_ID:
+        required: false
+      AZURE_CLIENT_ID:
+        required: false
+      AZURE_CLIENT_SECRET:
+        required: false
+      MACOS_CERTIFICATE_BASE64:
+        required: false
+      MACOS_CERTIFICATE_PASSWORD:
+        required: false
+      MACOS_SIGNING_IDENTITY:
+        required: false
+      MACOS_KEYCHAIN_PASSWORD:
+        required: false
+      APPLE_API_KEY_BASE64:
+        required: false
+      APPLE_API_KEY_ID:
+        required: false
+      APPLE_API_ISSUER:
+        required: false
+  # Run the dry run on changes to what it builds, so packaging regressions show
+  # up on the pull request rather than at release time.
+  pull_request:
+    paths:
+      - .github/workflows/build-assets.yml
+      - installer/**
+      - install.sh
+      - install.ps1
+      - scripts/assemble-release
+      - scripts/gen-install-assets
+      - scripts/gen-provenance
+      - scripts/stage-posix-runtime
+      - scripts/stage-windows-runtime
+      - scripts/provider-input-validator-requirements-*.txt
+      - py-acq/src/acq_py/version_info.py
+
+concurrency:
+  group: build-assets-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # The CPython version every pinned runtime below carries; gen-provenance
+  # records it, so bump it together with the runtime pins.
+  ACQ_BUILD_RUNTIME_VERSION: 3.14.10
+
+jobs:
+  build:
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-24.04
+            pip_platform: manylinux_2_17_x86_64
+            lock: scripts/provider-input-validator-requirements-linux.txt
+            python_versions: "312"
+            runtime_url: https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.14.10%2B20261026-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz
+            runtime_sha256: 4d3c16c59ed0802a3d1d34d8bce504b15ceeaff39d62dadecc6a9fa803412aed
+          - platform: linux-aarch64
+            runner: ubuntu-24.04-arm
+            pip_platform: manylinux_2_17_aarch64
+            lock: scripts/provider-input-validator-requirements-linux.txt
+            python_versions: "312"
+            runtime_url: https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.14.10%2B20261026-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz
+            runtime_sha256: 90f48337bc3dd4ae6eda81e001e4c981236d403b6b5a07778bbdf94ee423dc00
+          # Cross-built on Linux: packing the archive never runs the target
+          # runtime, and Apple-silicon runners did not start on the fork. This
+          # leg checks the runtime statically; smoke-macos-arm64 runs it.
+          - platform: macos-arm64
+            # Signed release calls build natively (codesign and notarytool need
+            # macOS); other runs cross-build on Linux because Apple-silicon
+            # runners did not start on the fork.
+            runner: ${{ inputs.sign && 'macos-15' || 'ubuntu-24.04' }}
+            cross_built: ${{ !inputs.sign }}
+            pip_platform: macosx_11_0_arm64
+            lock: scripts/provider-input-validator-requirements-macos.txt
+            python_versions: "312 313 314"
+            runtime_url: https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.14.10%2B20261026-aarch64-apple-darwin-install_only_stripped.tar.gz
+            runtime_sha256: 95eb8c87d16af37c54e9765e31d8c56c0d8ffa9968ea0f704f73a9b83f84e9f9
+          - platform: macos-x86_64
+            runner: macos-15-intel
+            pip_platform: macosx_10_13_x86_64
+            lock: scripts/provider-input-validator-requirements-macos.txt
+            python_versions: "312 313 314"
+            runtime_url: https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.14.10%2B20261026-x86_64-apple-darwin-install_only_stripped.tar.gz
+            runtime_sha256: 2fd8becd48cf0ff5f0a15df3c0db7cae7aa708dcaacf901bd30d6cdd6229370b
+          - platform: windows-x86_64
+            runner: windows-2022
+            pip_platform: win_amd64
+            lock: scripts/provider-input-validator-requirements-windows.txt
+            python_versions: "312"
+            runtime_url: https://www.python.org/ftp/python/3.14.10/python-3.14.10-embed-amd64.zip
+            runtime_sha256: 90905e64a840557d8c1bc4f5b74db3d7ee85e3ffb217611cac1c7813acea4159
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      # The scripts call python3, and a Windows Python install has no
+      # python3.exe (PATH may reach the Microsoft Store alias stub instead).
+      # Add one beside setup-python's python.exe, as windows.yml does.
+      - name: Provide python3 (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $py3 = Join-Path $env:pythonLocation 'python3.exe'
+          if (-not (Test-Path -LiteralPath $py3)) {
+            Copy-Item -LiteralPath (Join-Path $env:pythonLocation 'python.exe') -Destination $py3
+          }
+      - name: Build exact-hash validator wheelhouse
+        run: |
+          set -euo pipefail
+          for py in ${{ matrix.python_versions }}; do
+            python3 -I -m pip download --only-binary=:all: --require-hashes \
+              --requirement "${{ matrix.lock }}" --platform "${{ matrix.pip_platform }}" \
+              --implementation cp --python-version "$py" --abi "cp$py" --dest wheelhouse
+          done
+          (cd wheelhouse && python3 -I -c "import hashlib,pathlib; print(''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n' for p in sorted(pathlib.Path('.').glob('*.whl'))), end='')" > SHA256SUMS)
+      - name: Fetch and verify pinned runtime, then stage
+        env:
+          RUNTIME_URL: ${{ matrix.runtime_url }}
+          RUNTIME_SHA256: ${{ matrix.runtime_sha256 }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error "$RUNTIME_URL" -o runtime.archive
+          # The matching stage script verifies the pinned digest before extraction.
+          scripts/assemble-release "$PLATFORM" runtime.archive "$RUNTIME_SHA256" wheelhouse dist --stage release-tree
+      # Secrets are scoped to signing steps, never PR build steps.
+      - name: Check optional Windows credentials
+        id: windows-signing
+        if: ${{ inputs.sign && vars.ENABLE_WINDOWS_SIGNING == 'true' && github.event_name != 'pull_request' && runner.os == 'Windows' }}
+        env:
+          AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          AZURE_CERTIFICATE_PROFILE: ${{ secrets.AZURE_CERTIFICATE_PROFILE }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+        run: |
+          if [ -n "$AZURE_SIGNING_ENDPOINT" ] && [ -n "$AZURE_SIGNING_ACCOUNT" ] && [ -n "$AZURE_CERTIFICATE_PROFILE" ] && [ -n "$AZURE_TENANT_ID" ] && [ -n "$AZURE_CLIENT_ID" ] && [ -n "$AZURE_CLIENT_SECRET" ]; then
+            echo 'ready=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Stage standalone PowerShell installer
+        if: runner.os == 'Windows'
+        run: cp install.ps1 release-tree/install.ps1
+      - name: Authenticode PowerShell files
+        if: ${{ inputs.sign && vars.ENABLE_WINDOWS_SIGNING == 'true' && github.event_name != 'pull_request' && steps.windows-signing.outputs.ready == 'true' }}
+        uses: Azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_CERTIFICATE_PROFILE }}
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          files-folder: release-tree
+          files-folder-filter: ps1
+          files-folder-recurse: false
+      - name: Verify Authenticode signatures
+        if: ${{ inputs.sign && vars.ENABLE_WINDOWS_SIGNING == 'true' && github.event_name != 'pull_request' && steps.windows-signing.outputs.ready == 'true' }}
+        shell: pwsh
+        run: |
+          foreach ($file in @('release-tree/install.ps1', 'release-tree/acq.ps1')) {
+            if ((Get-AuthenticodeSignature -LiteralPath $file).Status -ne 'Valid') {
+              throw "Authenticode signature is invalid: $file"
+            }
+          }
+      - name: Check optional macOS credentials
+        id: macos-signing
+        if: ${{ inputs.sign && vars.ENABLE_MACOS_SIGNING == 'true' && github.event_name != 'pull_request' && runner.os == 'macOS' }}
+        env:
+          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          MACOS_KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          if [ -n "$MACOS_CERTIFICATE_BASE64" ] && [ -n "$MACOS_CERTIFICATE_PASSWORD" ] && [ -n "$MACOS_SIGNING_IDENTITY" ] && [ -n "$MACOS_KEYCHAIN_PASSWORD" ] && [ -n "$APPLE_API_KEY_BASE64" ] && [ -n "$APPLE_API_KEY_ID" ] && [ -n "$APPLE_API_ISSUER" ]; then
+            echo 'ready=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Sign and notarize macOS runtime
+        if: ${{ inputs.sign && vars.ENABLE_MACOS_SIGNING == 'true' && github.event_name != 'pull_request' && steps.macos-signing.outputs.ready == 'true' }}
+        env:
+          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          MACOS_KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/acq-signing.keychain-db"
+          python3 -I -c 'import base64,os,pathlib; pathlib.Path(os.environ["RUNNER_TEMP"],"certificate.p12").write_bytes(base64.b64decode(os.environ["MACOS_CERTIFICATE_BASE64"])); pathlib.Path(os.environ["RUNNER_TEMP"],"notary.p8").write_bytes(base64.b64decode(os.environ["APPLE_API_KEY_BASE64"]))'
+          security create-keychain -p "$MACOS_KEYCHAIN_PASSWORD" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$MACOS_KEYCHAIN_PASSWORD" "$keychain"
+          security import "$RUNNER_TEMP/certificate.p12" -P "$MACOS_CERTIFICATE_PASSWORD" -k "$keychain" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$MACOS_KEYCHAIN_PASSWORD" "$keychain" >/dev/null
+          while IFS= read -r -d '' binary; do
+            if file -b "$binary" | grep -q 'Mach-O'; then
+              codesign --force --options runtime --timestamp --keychain "$keychain" --sign "$MACOS_SIGNING_IDENTITY" "$binary"
+            fi
+          done < <(find release-tree/py-acq/runtime -type f -print0)
+          ditto -c -k --keepParent release-tree/py-acq/runtime "$RUNNER_TEMP/notary.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notary.zip" --wait --key "$RUNNER_TEMP/notary.p8" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER" --output-format json > "$RUNNER_TEMP/notary-result.json"
+          python3 -I -c 'import json,os,pathlib; result=json.loads(pathlib.Path(os.environ["RUNNER_TEMP"],"notary-result.json").read_text()); assert result["status"] == "Accepted", result'
+      - name: Clean up signing keychain and credentials
+        if: ${{ always() && inputs.sign && vars.ENABLE_MACOS_SIGNING == 'true' && github.event_name != 'pull_request' && steps.macos-signing.outputs.ready == 'true' }}
+        run: |
+          keychain="$RUNNER_TEMP/acq-signing.keychain-db"
+          rc=0
+          if [ -f "$keychain" ]; then security delete-keychain "$keychain" || rc=$?; fi
+          rm -f "$RUNNER_TEMP/certificate.p12" "$RUNNER_TEMP/notary.p8" "$RUNNER_TEMP/notary.zip" "$RUNNER_TEMP/notary-result.json"
+          exit "$rc"
+      - name: Pack staged bytes and validator wheelhouse
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          RUNTIME_SHA256: ${{ matrix.runtime_sha256 }}
+        run: |
+          set -euo pipefail
+          scripts/assemble-release "$PLATFORM" runtime.archive "$RUNTIME_SHA256" wheelhouse dist --pack release-tree
+          tar -czf "dist/provider-input-validator-wheelhouse-${PLATFORM}.tar.gz" -C wheelhouse .
+          if [ "$PLATFORM" = windows-x86_64 ]; then cp release-tree/install.ps1 dist/install.ps1; fi
+      - name: Check the cross-built runtime statically (not executed on this host)
+        if: ${{ matrix.cross_built == true }}
+        env:
+          ARCHIVE: acq-macos-arm64.tar.gz
+        run: |
+          set -euo pipefail
+          mkdir unpacked
+          tar -xzf "dist/$ARCHIVE" -C unpacked
+          # A 64-bit little-endian Mach-O header (cf fa ed fe) for ARM64 (cputype
+          # 0x0100000c) catches a wrong-architecture runtime pin without running it.
+          python3 -I - unpacked <<'PY'
+          import json, pathlib, subprocess, sys
+          root = pathlib.Path(sys.argv[1])
+          head = (root / "py-acq/runtime/bin/python3").resolve().read_bytes()[:8]
+          assert head[:4] == bytes.fromhex("cffaedfe") and head[4:8] == bytes.fromhex("0c000001"), head.hex()
+          ident = {}
+          exec((root / "py-acq/src/acq_py/_build_info.py").read_text(), ident)
+          assert ident["ACQ_VERSION"] == json.load(open("package.json"))["version"], ident
+          assert ident["SOURCE_REVISION"] == subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(), ident
+          print("arm64 Mach-O runtime and baked identity verified statically")
+          PY
+      - name: Smoke-test the runtime and baked identity from the unpacked archive
+        if: ${{ matrix.cross_built != true }}
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          mkdir unpacked
+          if [ "$PLATFORM" = windows-x86_64 ]; then
+            python3 -I -m zipfile -e dist/acq-windows-x64.zip unpacked
+            unpacked/py-acq/runtime/python.exe -I -m acq_py version --json > version.json
+          else
+            archive="$(python3 -I -c 'import json,os; print(json.load(open("installer/assets.json"))["platforms"][os.environ["PLATFORM"]]["archive"])')"
+            tar -xzf "dist/$archive" -C unpacked
+            unpacked/py-acq/runtime/bin/python3 -I -c 'import pathlib,runpy,sys; sys.path.insert(0,str(pathlib.Path("unpacked/py-acq/src").resolve())); sys.argv=["acq_py","version","--json"]; runpy.run_module("acq_py",run_name="__main__")' > version.json
+          fi
+          python3 -I -c 'import json,subprocess; d=json.load(open("version.json"))["data"]; assert d["impl"]=="python"; assert d["acq_version"]==json.load(open("package.json"))["version"]; assert d["source_revision"]==subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip(), d'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: archive-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
+  assemble:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: archive-*
+          merge-multiple: true
+          path: dist
+      - name: Complete and verify the enumerated dist
+        run: |
+          cp install.sh dist/
+          test -f dist/install.ps1
+          scripts/gen-provenance dist
+          scripts/gen-install-assets dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  verify-install:
+    needs: assemble
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # Apple-silicon runners (macos-15) did not start on the fork, so the
+        # macOS install runs on Intel; smoke-macos-arm64 covers Apple silicon on
+        # dispatched and release runs.
+        runner: [ubuntu-24.04, macos-15-intel, windows-2022]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+      - name: Offline install and installed identity (POSIX)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sh dist/install.sh --source "$PWD/dist" --install-dir "$RUNNER_TEMP/acq-installed" --bin-dir "$RUNNER_TEMP/acq-bin" --yes
+          ACQ_IMPL=python "$RUNNER_TEMP/acq-installed/acq" version --json > version.json
+          python3 -I -c 'import json; d=json.load(open("version.json"))["data"]; assert d["impl"]=="python"; assert d["acq_version"]==json.load(open("package.json"))["version"], d'
+      - name: Offline install and installed identity (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./dist/install.ps1 -Source "$PWD/dist" -InstallDir "$env:RUNNER_TEMP/acq-installed" -Yes
+          $data = (& "$env:RUNNER_TEMP/acq-installed/acq.cmd" version --json | ConvertFrom-Json).data
+          if ($LASTEXITCODE -ne 0) { throw 'installed launcher failed' }
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($data.impl -ne 'python' -or $data.acq_version -ne $version) { throw 'installed identity mismatch' }
+
+  # Runs the cross-built Apple-silicon archive's runtime natively. It is not a
+  # dependency of assemble and does not run on pull requests (Apple-silicon
+  # runners did not start on the fork); it must pass on a dispatched or release
+  # run before a release is cut.
+  smoke-macos-arm64:
+    needs: build
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The baked identity is compared with this checkout's HEAD, so it
+          # must be the ref the archive was built from.
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: archive-macos-arm64
+          path: dist
+      - name: Run the arm64 runtime and check the baked identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir unpacked
+          tar -xzf dist/acq-macos-arm64.tar.gz -C unpacked
+          unpacked/py-acq/runtime/bin/python3 -I -c 'import pathlib,runpy,sys; sys.path.insert(0,str(pathlib.Path("unpacked/py-acq/src").resolve())); sys.argv=["acq_py","version","--json"]; runpy.run_module("acq_py",run_name="__main__")' > version.json
+          python3 -I -c 'import json,subprocess; d=json.load(open("version.json"))["data"]; assert d["impl"]=="python"; assert d["acq_version"]==json.load(open("package.json"))["version"]; assert d["source_revision"]==subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip(), d'

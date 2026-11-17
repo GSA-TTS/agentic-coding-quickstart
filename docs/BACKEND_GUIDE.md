@@ -164,8 +164,12 @@ brew install GSA-TTS/tap/microsandbox-acq    # version-pinned formula
 ./scripts/verify-msb-pin --install           # verified pinned release bundle
 ```
 
-`./install.sh` does this for you, and also detects and repairs a blocked,
-too-old, unparseable, or PATH-shadowed `msb`. If an already-installed
+The upstream release installer (the README one-liner) does this for you, and
+also detects and repairs a blocked, too-old, unparseable, or PATH-shadowed
+`msb`. After installing `acq`, the acq v1 `install.sh` and `install.ps1`
+check `msb` against the version policy and, when `msb` is missing in an
+interactive terminal without `--yes`/`-Yes`, offer to install the pinned `msb`
+(defaulting to No; see [acq v1 installers](howto/acq.md#acq-v1-installers)). If an already-installed
 0.7.0-0.7.2 has migrated your sandbox state, the recovery is `msb self update`
 (forward to 0.7.3 or newer) — see §43 of
 [`KNOWN_FAILURE_MODES.md`](KNOWN_FAILURE_MODES.md) and
@@ -213,6 +217,20 @@ Tunables:
 | `ACQ_MSB_SSH_AGENT_VSOCK_PORT` | `3552` | Guest `AF_VSOCK` port the host ssh-agent is forwarded to (`--vsock`; avoids msb's reserved 123). Host ssh-agent forwarding, [ADR-0021](adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md) |
 | `ACQ_MSB_SSH_AGENT_GUEST_SOCK` | `/home/agent/.acq/ssh-agent.sock` | In-guest unix socket the `socat` bridge exposes and exports as `SSH_AUTH_SOCK` (git signing) |
 | `ACQ_FORWARD_HOST_SOCKETS` | (unset) | General host-socket forwarding: `PATH:PORT[/stream|/dgram][,...]` emitted as `--vsock` routes. The host ssh-agent forward is the automatic special case built on this vocab (ADR-0021) |
+
+Host path overrides must be absolute. This covers the paths in the table above
+(`ACQ_MSB_KIT_CACHE`, `ACQ_MSB_SSH_DIR`, `ACQ_MSB_SSH_KEY`,
+`ACQ_MSB_SSH_KNOWN_HOSTS`, `ACQ_MSB_PORTS_DIR`, `ACQ_MSB_BALANCED_HOSTS_FILE`),
+each path in `ACQ_MSB_UPSTREAM_CA_CERT` and `ACQ_FORWARD_HOST_SOCKETS`, and the
+other overrides `_acq_userdirs_override_problem` in `acq.backends/userdirs.sh`
+lists (for example `ACQ_PROVENANCE_DIR`, `ACQ_PROVIDER_INPUT_PYTHON` and
+`ACQ_SBX_KIT_CACHE`). `ACQ_MSB_UPSTREAM_CA_CERT` is split on `:`, so on Git Bash
+give a Windows path in its POSIX form (`/c/certs/ca.pem`, not `C:/certs/ca.pem`). A relative value would
+resolve against the current directory, which is usually the workspace the agent
+can write to. acq refuses it before any verb touches state, with
+`acq: <VAR> must be an absolute path, got '<value>'`, and `acq doctor` reports
+it as a failed `state` check. The in-guest paths (`ACQ_MSB_SSH_AGENT_GUEST_SOCK`
+and similar) are not host paths and are not checked this way.
 
 ### DNS / name resolution
 
@@ -420,7 +438,9 @@ msb has no native clone mode, so the neutral `--clone`
   scratch dir. `git fetch sandbox-<name>` pulls agent branches back as
   hash-verified objects; hooks and config never transfer over a fetch.
 - `acq rm` warns when the scratch still holds unfetched commits, then deletes
-  it and removes the remote. `acq stop`/restart preserve both.
+  it and removes the remote. Removing the remote also deletes the checkout's
+  `refs/remotes/sandbox-<name>/*`, so keep fetched work on a branch of your
+  own. `acq stop`/restart preserve both.
 
 **Divergence from sbx (deliberate, per ADR-0027):** a git clone carries
 committed state only. Gitignored/untracked files (sbx copies these — the known
@@ -438,6 +458,25 @@ rationale.
 The scratch clone lives on host disk (unlike sbx's in-guest clone), confined to
 the acq-managed state dir — disposable by construction and never executed by
 the host's git.
+
+Both implementations (`ACQ_IMPL=bash` and `ACQ_IMPL=python`) emulate it the same
+way, with the same refusals, the same `<clones>/<sandbox>/.origin` and scratch
+layout (`ACQ_MSB_CLONES_DIR`, else `<acq state dir>/clones`) and the same hooks
+path, so `acq rm` in either removes a clone the other created
+(`acq.backends/msb.sh` `_acq_msb_clone_*`, `py-acq/src/acq_py/msb_clone.py`).
+The Python acq also records `"clone": true` in its state record and reports
+`data.clone` on `create`/`run`, and its `create --recreate` rebuilds a clone
+sandbox, including one Bash created, on its existing scratch clone, never on
+the real checkout (it refuses when that scratch is missing, damaged or names
+another checkout). It is stricter than Bash: an inherited
+`GIT_ALLOW_PROTOCOL` is removed from its host-side git calls, a workspace
+containing `ACQ_MSB_CLONES_DIR` is refused like acq's other directories, a
+leftover link at `<clones>/<sandbox>` counts as a stale scratch, the scratch is
+removed without changing any link or anything outside it, and its
+uncommitted-changes note reports staged changes and untracked files only
+(plumbing that never runs a filter). A scratch the guest made unreadable never
+blocks `acq rm`, and its host-side git calls other than the clone time out
+after 60 seconds.
 
 Note the async-boot caveat:
 
@@ -755,6 +794,15 @@ or `acq.<sandbox>.<service>` (sandbox-scoped); a sandbox-scoped key takes preced
 over the global one for the same service (supporting USAi per-sandbox
 billing-code keys).
 
+A secret typed at a prompt is read without echo. One exception on Windows: in
+Git Bash's terminal (mintty), the Python `acq` sees its input as a pipe rather
+than a console and cannot hide what you type, so it prints a warning first. Pipe
+the value there instead (`printf '%s' "$TOKEN" | acq secret set -g usai`), or run
+`acq` from a native console such as Windows Terminal, PowerShell or cmd. The
+Python `acq` always runs its Windows DPAPI helper as
+`%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`, never found on
+`PATH`, so a `powershell.exe` planted in a workspace is never used.
+
 At `acq run`/`create`, the **msb** backend reads the value from the store,
 exports it into a transient host env var, and binds it with
 `msb --secret ENV@HOST`. msb puts a **placeholder** (`$MSB_<env>`) in the guest;
@@ -762,7 +810,10 @@ when the guest sends that placeholder to an allowed host over **intercepted TLS*
 (`--tls-intercept`, which acq enables), msb swaps in the real value on the wire —
 so the credential **never enters the guest** and **never appears in argv**.
 `acq secret set` also re-feeds running sandboxes with `msb modify --secret` so a
-rotated key takes effect without recreating the sandbox.
+rotation of an existing binding takes effect live. msb cannot add a new
+credential to a running sandbox: stop it first (`acq stop NAME`), then set the
+credential, which binds it to the stopped sandbox for its next start. The Python
+implementation (`ACQ_IMPL=python`) also binds stored credentials at `acq start`.
 
 - **USAi** binds to `api.gsa.usai.gov`. The USAi provider sends the key as an
   `Authorization: Bearer` header, which msb substitutes correctly.
@@ -785,13 +836,31 @@ Feeding the **sbx** proxy depends on the sbx secret type (per the sbx CLI):
   exists, `acq` stops and prints the exact `sbx secret rm …` command rather than
   answering sbx's overwrite prompt.
 - **Custom endpoints** (`usai` and any `--host/--env` service): `sbx secret
-  set-custom` has **no stdin input** — the value would have to go on argv via
-  `--value` (visible in shell history), which violates the no-argv rule. So
-  `acq` stores the value in the acq store and then, from a **terminal**, runs
-  `sbx secret set-custom` interactively so you enter it once at sbx's own
-  prompt. When piped non-interactively (or on the msb backend), `acq` stores the
-  value and prints the exact `sbx secret set-custom …` command for you to run.
-  (On msb no sbx step is needed — msb reads the acq store directly.)
+  set-custom` gained a `--value-stdin` flag in sbx **0.51.0**, so the value can
+  be piped on stdin (never argv). The Python acq v1 adapter uses
+  `--value-stdin` for `provider-credential set`, gated by a per-capability
+  version floor of **sbx ≥ 0.51.0** (below it, the command fails closed with
+  `backend_version_unsupported`). On older sbx the Bash adapter has no stdin
+  path — the value would have to go on argv via `--value` (visible in shell
+  history), which violates the no-argv rule — so it stores the value in the acq
+  store and then, from a **terminal**, runs `sbx secret set-custom` interactively
+  so you enter it once at sbx's own prompt. When piped non-interactively (or on
+  the msb backend), `acq` stores the value and prints the exact `sbx secret
+  set-custom …` command for you to run. (On msb no sbx step is needed — msb reads
+  the acq store directly.)
+
+**Per-sandbox GitHub token at create.** Before `acq create` or `acq run`
+provisions a sandbox, and when `acq run` re-attaches, acq looks for GitHub
+repositories in the workspace. If it finds some and the sandbox has no GitHub
+token of its own, it says so and, at a terminal, offers to scope one now (the
+`acq github-scope` steps, [ADR-0013](adr/0013-per-sandbox-github-token-downscoping.md)).
+The token is stored before the create, so msb binds it and sbx's proxy has it.
+The default answer is `scope_github_token:` in config.yaml, which
+`acq configure` sets; unset means no. Declining never stops the create. Both
+implementations do this, and without a terminal on stdin both print only the
+`acq github-scope` command to run later. The Python acq does the same under
+`--json`, and when `ACQ_NO_PROMPT` or `ACQ_NO_PROGRESS` is set at a terminal,
+where the Bash acq takes the configured answer and, on yes, reads a token.
 
 This is the bash subset of the design's §7.5 unified secret model; the full
 Go/keychain MITM component (age fallback, `CredentialRewriteRule`,
@@ -833,13 +902,19 @@ route as a unix socket at `/home/agent/.acq/ssh-agent.sock` and exports it as
   recreate; acq's warning says which case applies.
 
 - **Needs msb >= 0.6.9** (the release that adds `--vsock`) **and `socat` in the
-  base image** (the default `docker/sandbox-templates:shell-docker` ships it). On
+  base image** (acq's default devenv base ships it, as does
+  `docker/sandbox-templates:shell-docker`). On
   a guest without `socat`, acq **warns and skips** the forward (fail-soft); the
   runtime floor already excludes older msb versions.
 - **It widens the host↔microVM trust boundary:** guest code can exercise every
   key the host agent holds while the socket is reachable. It is **opt-in** via
-  `SSH_AUTH_SOCK` — **unset it to disable** — and only agent *operations* (not key
-  material) traverse the socket. Where your agent supports it, use `ssh-add -c` /
+  `SSH_AUTH_SOCK` — **unset it to disable**, which also disconnects an existing
+  sandbox at its next `acq start`, `acq restart` or `acq run` (acq removes its
+  route link and stops passing `SSH_AUTH_SOCK` to its sessions; set it again and
+  re-run to reconnect) — and only agent *operations* (not key material) traverse
+  the socket. acq refuses to forward a socket inside the sandbox's writable
+  workspace, warns when the socket belongs to another user, and removes a route
+  link whose target is no longer your own socket. Where your agent supports it, use `ssh-add -c` /
   `ssh-add -h` to constrain use. Because a set `SSH_AUTH_SOCK` is the *only*
   trigger, acq prints a **one-time startup notice** (on both backends) when the
   forward is active — naming the `unset SSH_AUTH_SOCK` opt-out and the `ssh-add -c`
@@ -848,6 +923,14 @@ route as a unix socket at `/home/agent/.acq/ssh-agent.sock` and exports it as
   `scripts/verify-backends`: the guest's forwarded agent exposes the verifier's
   hermetic throwaway key over the `--vsock` + socat path. It cannot run in CI or
   inside a sandbox (no nested sandboxes); re-run on the ADR-0011 cadence.
+- **Both implementations.** The Python acq (`py-acq/src/acq_py/ssh_agent.py`)
+  wires the same route, link, bridge, re-drive and teardown, with the same
+  warnings, so a sandbox either one created keeps its forward under the other
+  (both read the `ssh-auth-sock` host-config key and the same link). It has not
+  been run against a live msb yet, and it differs in two places: it never
+  forwards from a Windows host (`SSH_AUTH_SOCK` gets the "not a socket" skip), and
+  its "could not verify the route" warning leaves out msb's own error text. See
+  [KNOWN_FAILURE_MODES §93](KNOWN_FAILURE_MODES.md#93-python-acq-host-ssh-agent-forwarding-differences-and-live-checks).
 
 See [ADR-0021](adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md) for the full
 rationale, the fixed vsock port (3552), and the trust-boundary discussion.
@@ -889,7 +972,7 @@ rationale, the fixed vsock port (3552), and the trust-boundary discussion.
 | Git commit signing / ssh-agent | host SSH agent forwarded implicitly by the sbx CLI (when SSH_AUTH_SOCK set) | host SSH agent forwarded via `--vsock` + an in-guest socat bridge when SSH_AUTH_SOCK set, msb >= 0.6.9 (ADR-0021) |
 | Secret binding breadth | 7 built-in services + any custom `--host/--env` endpoint | usai + github + **any** custom `--host/--env` endpoint bound generically via `--secret ENV@HOST` (shipped) |
 | Snapshots | not supported (`SUPPORTS_SNAPSHOTS=0`) | `msb snapshot` verb exists but **not surfaced by `acq`** (beyond-parity; `SUPPORTS_SNAPSHOTS=0`) |
-| Port forwarding | `acq ports` (post-hoc) | create/run (`-p`) via neutral `publishedPorts` now (shipped); **plus** post-hoc `acq ports --publish` via `msb ssh serve` + `ssh -L` now implemented (ADR-0015) — live end-to-end verification pending a KVM host |
+| Port forwarding | `acq ports` (post-hoc) | create/run (`-p`) via neutral `publishedPorts` (shipped); **plus** post-hoc `acq ports --publish` via `msb ssh serve` + `ssh -L` (ADR-0015, live-verified via `scripts/verify-ports-live`) |
 | Kit volumes | neutral `volumes:` passed through 1:1 to kit-spec v2 §5.7 (sized block device / tmpfs, mounted at create; dies with the sandbox) | neutral `volumes:` unioned across kits (last wins by path) and mapped to a derived named disk volume (`--mount-named acq-<sandbox>-<pathslug>-<crc>:<path>:kind=disk,size=<size>`) or `--tmpfs <path>:<size>`; derived volumes removed on `acq rm` (ADR-0023) |
 | Agent binary | supplied by the sbx agent template | supplied by the selected agent kit or the base image, then launched on attach |
 | OpenCode web UI | `openchamber` acq kit (publishes port 4096) | same kit once it declares `backends: [sbx, msb]` against the released patterns schema (neutral port/background vocab consumed by both backends; the patterns repo's openchamber kit) |
@@ -897,7 +980,7 @@ rationale, the fixed vsock port (3552), and the trust-boundary discussion.
 
 ### Known limitations
 
-- **Ports: create/run publish shipped; post-hoc implemented (live e2e pending).**
+- **Ports: create/run publish and post-hoc tunnel shipped.**
   Kits declare ports in the **neutral top-level `publishedPorts`** vocabulary
   (`{guest, host?, protocol?, name?}`), which both backends now consume — on msb
   each entry maps to a create/run-time `-p HOST:GUEST`
@@ -915,11 +998,9 @@ rationale, the fixed vsock port (3552), and the trust-boundary discussion.
   ed25519 key (never the user's `~/.ssh`) and tearing the serve/ssh pair down on
   `acq stop`/`rm`
   ([ADR-0015](adr/0015-msb-post-hoc-port-publish-via-ssh.md)); this
-  is what flips `SUPPORTS_PORT_FORWARD=1`. **Live end-to-end verification is
-  still pending** — the real forward needs a KVM-capable host, so run
-  `scripts/verify-backends` on such a host per the ADR-0011 periodic-validation
-  cadence (see the live end-to-end note below) before treating it as verified
-  working. (`msb -p` also accepts `BIND_ADDR:HOST:GUEST` and `/udp`, but acq
+  is what flips `SUPPORTS_PORT_FORWARD=1` (live-verified on a KVM host via
+  `scripts/verify-ports-live`; re-run on the ADR-0011 periodic-validation
+  cadence). (`msb -p` also accepts `BIND_ADDR:HOST:GUEST` and `/udp`, but acq
   stays TCP + loopback for sbx parity.)
   **Loopback-only guest services need the post-hoc path or a wider bind.** The
   host-side bind for `-p HOST:GUEST` is loopback by default, but the msb publisher
@@ -939,6 +1020,15 @@ rationale, the fixed vsock port (3552), and the trust-boundary discussion.
   to choose the host side yourself; a host port already in use **fails the
   create** rather than being substituted. See
   [ADR-0034](adr/0034-host-port-selection-and-publish-override.md).
+  The Python acq (`ACQ_IMPL=python`) does the same, with the same validation and
+  messages, and shares the post-hoc tunnel record (`ACQ_STATE_DIR/ports/NAME.pids`)
+  with the Bash acq, so either one lists and tears down the other's tunnels. It
+  differs in three ways: a repeated `acq ports NAME --publish` opens every
+  mapping, all or nothing, where Bash keeps only the last; it claims explicit
+  host ports before it chooses free ones; and `create --recreate` prefers the
+  old guest's host ports where a kit leaves the host side open. At teardown it
+  signals a recorded process only once it is confirmed to be an `msb` or `ssh`
+  process. See `py-acq/README.md`.
 - **No state-preserving in-place kit add.** `acq_backend_ensure_kits_applied`
   re-applies kits idempotently; for a clean rebuild use `acq rm && acq run`.
 - **Agent binaries come from templates, images, or agent kits.** `acq` no longer
@@ -1070,7 +1160,10 @@ under `integrations/isolation/acq-kits/`) and translated per backend by
 - **sbx** — the neutral spec is synthesized into an sbx-v2 kit directory
   (`spec.yaml` + `files/`), then applied via `sbx --kit` / `sbx kit add`. The
   synthesizer maps neutral fields onto the strict sbx-v2 grammar
-  (`permissions.network`, `setup`, `ports`, and `agentInstructions`).
+  (`permissions.network`, `setup`, `ports`, and `agentInstructions`). acq
+  fetches every kit itself first, with its ref and payload checks. If the
+  fetch or a check fails, that kit is not applied (create stops), and sbx is
+  never handed the raw ref to fetch on its own.
 - **msb** — the neutral spec is fetched and driven directly: network allows
   become `--net-rule` flags, files are `msb copy`'d in, and `commands` run via
   `msb exec`. A `backend_shortcuts.msb` (e.g. zscaler `trust_host_cas`) uses the
@@ -1139,9 +1232,9 @@ workspace-less create; `ACQ_CLONE` is never set to any value but `1`.
 > **Note (cross-repo, satisfied):** the authoritative `environment` schema
 > property and its field-level validator live in the patterns repo
 > (`schemas/kit-hybrid-v1.schema.json`, `validate-kits.py`), shipped in patterns
-> **v1.7.0**. `PATTERNS_KIT_REF` is pinned to the patterns **v1.8.0**
-> release commit (`f5fb887`); the pin is only advanced to a tagged release,
-> per the fail-closed cross-repo gating.
+> **v1.7.0**. `PATTERNS_KIT_REF` is pinned to the patterns **v1.19.0**
+> release commit (`941a286f912b99475429c3c00db49a99af5b241e`); the pin is only
+> advanced to a tagged release, per the fail-closed cross-repo gating.
 
 **`volumes` (sized guest storage, [ADR-0023](adr/0023-neutral-volumes-kit-vocabulary.md)).**
 A top-level list of `{path, type?, size}` entries — `path` required, absolute,
@@ -1200,6 +1293,34 @@ The merged table is written into the prepare staging directory and passed to the
 validator; it is removed with that stage. Malformed ids, reserved ENV names, or
 malformed hosts fail closed before validation runs.
 
+**Which provider kits a create selects.** In order: `--no-provider-kits` on
+`acq create`/`acq run` selects none; otherwise a set `ACQ_PROVIDER_KITS` is the
+list (an empty value selects none); otherwise `provider_kit:` in config.yaml
+(`acq configure`); otherwise the shipped `usai-provider`. Opt-in extra kits work
+the same way: a non-empty `ACQ_EXTRA_KITS` replaces config.yaml `extra_kits:`,
+and `--kit` refs are added after either (at a terminal, the Bash acq's
+create-time picker can still change the extras for one sandbox). The Python acq
+follows the same order, picker included. A kit outside its pinned built-in
+bundle (every catalog extra kit, a provider kit from a registered source) it
+fetches at its pinned commit and verifies, and a local kit directory it copies
+into its private cache and checks there; it refuses a ref not pinned to a full
+40-hex commit, and points to `ACQ_IMPL=bash` (see
+`py-acq/README.md`, "Kits outside the bundle"). Both implementations refuse,
+before anything is fetched or recorded, a remote ref with a query string, or a
+`#` part other than one plain `ref=` and one plain `dir=` (KNOWN_FAILURE_MODES
+section 91),
+and a local kit holding a regular file with more than one hard link (section
+55; make a plain copy of the kit, for example with `cp -R`).
+
+The create records which provider selection applied (`provider_selection` and
+`provider_kits` in the sandbox's provenance record). `acq start`,
+`acq create --recreate` and `acq kit update` use that record, not the
+selection current at the time, so a sandbox created with `--no-provider-kits`
+never gains a provider kit or key later; the Bash acq also reloads it when
+`acq run` re-attaches. With no recorded selection (a sandbox from before it was
+recorded), the Bash acq uses the default selection and the Python acq the
+current one.
+
 **Host pinning.** A kit can declare any `providerId` and allow-list any host, so
 the registry also pins the destination host(s) per providerId
 (`--host` is required by `acq provider-credential set`). Before acq binds a
@@ -1210,12 +1331,26 @@ existing record **fails closed**; moving a credential to a new host is an
 explicit re-pin. The gate prompt and `acq provider-credential ls` both show the
 destination host.
 
+> **Python acq is stricter on host pinning.** The Python implementation
+> (`py-acq/src/acq_py/provider_input.py`) has no recorded-host fallback: a
+> provider with no pin (other than the shipped `usai` trust anchor) is refused
+> even if a host was recorded for the sandbox, so pin it with
+> `acq provider-credential set`. It also refuses a pin whose `KEY_ENV` differs
+> from the kit's `facts.keyEnv`, and re-checks the recorded facts against the pin
+> before every attach. It enforces the `provider-input-v1.schema.json` contract
+> directly in stdlib Python (for both the built-in bundle and fetched/local
+> provider kits) instead of shelling out to the external Patterns validator.
+
 Injection is then data-driven per backend — no provider-specific `acq` code:
 
 | Backend | How `keyEnv@host` is bound at create |
 |---------|--------------------------------------|
 | sbx | a custom proxy secret (`sbx secret set-custom --host … --env …`) derived from the provider's facts; create snapshots the table, so a host-exported value cannot be bound and acq fails closed instead |
-| msb | `--secret ENV@HOST` from the same facts, value resolved out of the acq store (or from a host-exported value, for CI) |
+| msb | `--secret ENV@HOST` from the same facts, value resolved out of the acq store (or, when no stored value resolves, from a host-exported value, for CI) |
+
+On sbx, both implementations require a stored value and refuse a host-exported
+key (`secret_missing`, naming `acq secret set -g <providerId>`); in CI on sbx,
+store the key first (`printf '%s' "$KEY" | acq secret set -g usai`).
 
 `acq secret set -g <providerId>` stores the value under that provider; the
 injected `providerId`/`keyEnv`/`host`/`modelsUrl` are recorded in the sandbox's
@@ -1278,6 +1413,8 @@ override with `ACQ_PROVENANCE_DIR`). It compares that against the **local**
   interactive, default No, EOF declines, and it **never blocks** a launch. A
   non-interactive run prints one advisory and continues.
 - Opt out with `ACQ_UPDATE_CHECK=0` or `acq run --no-update-check`.
+- The Python acq (`ACQ_IMPL=python`) makes the same offer with the same rules,
+  and never asks under `--json`.
 
 Backend behavior: **sbx** injects any absent built-in kits during the heal pass;
 **msb** re-applies all built-in kits idempotently. Both rewrite provenance only
@@ -1309,9 +1446,8 @@ See [ADR-0016](adr/0016-kit-bundle-provenance-and-stale-refresh.md).
 - Post-hoc port publish on msb — `acq ports <sandbox> --publish HOST:GUEST`
   via `msb ssh serve` + OpenSSH `-L` against a running sandbox (acq-managed ed25519
   key, serve/ssh teardown on `acq stop`/`rm`); flips `SUPPORTS_PORT_FORWARD=1`
-  ([ADR-0015](adr/0015-msb-post-hoc-port-publish-via-ssh.md)). **Implemented,
-  not yet live-verified** — live end-to-end run needs a KVM host per the ADR-0011
-  `scripts/verify-backends` cadence
+  ([ADR-0015](adr/0015-msb-post-hoc-port-publish-via-ssh.md)). **Live-verified**
+  on a KVM-capable host via `scripts/verify-ports-live`
 - Neutral top-level `volumes` vocab consumed by **both** backends (sbx: 1:1
   into kit-spec v2 §5.7; msb: derived named disk volume / `--tmpfs`, with
   derived-volume cleanup on `acq rm`)
@@ -1329,13 +1465,6 @@ See [ADR-0016](adr/0016-kit-bundle-provenance-and-stale-refresh.md).
 
 ## Still deferred
 
-- Live end-to-end verification of msb **post-hoc port publish**
-  (`acq ports --publish` via `msb ssh serve` + `ssh -L`) on a KVM-capable host —
-  code is implemented and the review's liveness fix landed, but the real
-  forward has not yet been exercised end-to-end (`scripts/verify-backends` covers
-  the kit/agent/USAi rows, not `--publish`), so run it per the
-  [ADR-0011](adr/0011-msb-backend-and-neutral-kits.md) periodic-validation
-  cadence before treating the tunnel as verified working
 - `acq snapshot` verb (beyond sbx parity; msb's own `msb snapshot` verb is not
   surfaced)
 - Full Go/keychain swap-on-access secret component of design §7.5 (age fallback,

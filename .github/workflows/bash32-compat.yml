@@ -180,6 +180,19 @@ jobs:
             '.gitmodules' \
             '.github/keys/chet-ramey-bash-release-signing-key.asc' \
             '.github/workflows/release.yml' \
+            'scripts/run-vectors' \
+            'scripts/gen-install-assets' \
+            'scripts/stage-posix-runtime' \
+            'scripts/stage-windows-runtime' \
+            'scripts/assemble-release' \
+            'scripts/gen-provenance' \
+            'installer' \
+            'package.json' \
+            'test/vectors' \
+            'acq-python' \
+            'py-acq/src' \
+            'qualification' \
+            'test/fixtures' \
             '.github/workflows/bash32-compat.yml')"
           if [ -n "$changed" ]; then
             echo "relevant=true" >>"$GITHUB_OUTPUT"
@@ -450,6 +463,26 @@ jobs:
           path: ${{ runner.temp }}/bats-timing/timing.json
           if-no-files-found: ignore
           retention-days: 30
+
+      # The vector runner is itself a bash script that macOS developers run with
+      # the system bash 3.2, so exercise it under 3.2 against the Python CLI.
+      # Shard-independent, so run it on one leg only.
+      - name: Run vector corpus under bash 3.2
+        if: matrix.shard == 1
+        run: |
+          set -euo pipefail
+          PYTHONPATH="$PWD/py-acq/src" PATH="/opt/bash32/bin:$PATH" \
+            /opt/bash32/bin/bash scripts/run-vectors --acq "python -m acq_py"
+
+      # macOS /bin/sh is bash 3.2 in POSIX mode: the POSIX entry points must parse there.
+      # Shard-independent, so run it on one leg only.
+      - name: Parse POSIX entry points under bash 3.2 --posix
+        if: matrix.shard == 1
+        run: |
+          set -euo pipefail
+          for f in acq-python install.sh scripts/gen-install-assets; do
+            /opt/bash32/bin/bash --posix -n "$f"
+          done
 
   # Always-posting gate: this is what branch protection actually requires,
   # under the ORIGINAL required-check name ("acq offline suite under bash

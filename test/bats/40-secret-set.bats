@@ -306,3 +306,133 @@ LS
   assert_equal "$status" "2"
   assert_output --partial 'missing service name'
 }
+
+# Two global custom secrets for the USAi env var and host: acq cannot tell which
+# placeholder the running sandboxes hold, so every path refuses, names each
+# placeholder with its removal command, and removes nothing.
+_seed_duplicate_usai() {
+  printf 'CUSTOM SECRETS\nSCOPE TARGETS ENV PLACEHOLDER SECRET\n(global) api.gsa.usai.gov USAI_API_KEY sbx-cs-dupa ****\n(global) api.gsa.usai.gov USAI_API_KEY sbx-cs-dupb ****\n' > "$STUBDIR/sbx_ls"
+}
+
+@test "secret set(sbx): -g usai with duplicate global entries is refused before storing" {
+  _seed_duplicate_usai
+  run bash -c 'printf "k\n" | SBX_LS_FIXTURE="$1" ACQ_BACKEND=sbx "$2" secret set -g usai' _ "$STUBDIR/sbx_ls" "$ACQ"
+  assert_failure
+  assert_output --partial 'sbx holds 2 custom secrets for USAI_API_KEY on api.gsa.usai.gov'
+  assert_output --partial 'sbx secret rm --placeholder sbx-cs-dupa -f'
+  assert_output --partial 'sbx secret rm --placeholder sbx-cs-dupb -f'
+  assert_output --partial 'a running sandbox may hold one of these placeholders'
+  assert_output --partial 'nothing was stored'
+  refute_regex "$(cat "$CALLS")" 'sbx secret (rm|set)'
+  assert [ ! -e "$STUBDIR/secrets/acq.usai" ]
+}
+
+@test "secret set(sbx): a same-env entry on another host is not a duplicate" {
+  printf 'CUSTOM SECRETS\n(global) api.gsa.usai.gov USAI_API_KEY sbx-cs-dupa ****\n(global) usai.alt.example.gov USAI_API_KEY sbx-cs-alt ****\n' > "$STUBDIR/sbx_ls"
+  run bash -c 'printf "k\n" | SBX_LS_FIXTURE="$1" ACQ_BACKEND=sbx "$2" secret set -g usai' _ "$STUBDIR/sbx_ls" "$ACQ"
+  assert_failure
+  refute_output --partial 'custom secrets for USAI_API_KEY'
+  assert_output --partial 'already has'
+}
+
+@test "secret set(msb): usai propagation to sbx refuses duplicate global entries" {
+  printf 'runningbox\n' > "$STUBDIR/.msb_sandbox_list"
+  printf 'legacy-sbx\n' > "$STUBDIR/.sandbox_list"
+  _seed_duplicate_usai
+  run bash -c 'printf "k\n" | SBX_LS_FIXTURE="$2" ACQ_SECRET_TEST_VALUE="k" ACQ_BACKEND=msb "$1" secret set -g usai' _ "$ACQ" "$STUBDIR/sbx_ls"
+  assert_failure
+  assert_output --partial 'sbx-cs-dupa'
+  assert_output --partial 'sbx-cs-dupb'
+  assert_output --partial 'sbx secret rm --placeholder sbx-cs-dupb -f'
+  assert_output --partial 'the sbx sandboxes were not updated'
+  # The advice must not be `acq --backend sbx secret set`, which would refuse on
+  # the entry that is kept.
+  assert_output --partial 'then re-run: acq usai-rotate-api-key to update the entry you keep'
+  refute_output --partial 'acq --backend sbx secret set'
+  refute_regex "$(cat "$CALLS")" 'sbx secret (rm|set)'
+}
+
+@test "secret rm(sbx): duplicate usai entries are refused and nothing is removed" {
+  mkdir -p "$STUBDIR/secrets"; printf 'k\n' > "$STUBDIR/secrets/acq.usai"
+  printf 'CUSTOM SECRETS\n(global) other.example.gov USAI_API_KEY sbx-cs-other ****\n(global) api.gsa.usai.gov USAI_API_KEY sbx-cs-dupa ****\n(global) api.gsa.usai.gov USAI_API_KEY sbx-cs-dupb ****\n' > "$STUBDIR/sbx_ls"
+  run env SBX_LS_FIXTURE="$STUBDIR/sbx_ls" ACQ_BACKEND=sbx "$ACQ" secret rm -g usai
+  assert_failure
+  assert_output --partial 'sbx holds 2 custom secrets for USAI_API_KEY on api.gsa.usai.gov'
+  assert_output --partial 'sbx secret rm --placeholder sbx-cs-dupa -f'
+  assert_output --partial 'sbx secret rm --placeholder sbx-cs-dupb -f'
+  assert_output --partial 'nothing was removed'
+  refute_output --partial 'sbx-cs-other'
+  refute_regex "$(cat "$CALLS")" 'sbx secret rm'
+  assert [ -f "$STUBDIR/secrets/acq.usai" ]
+}
+
+@test "secret rm(sbx): removes only the usai entry on the usai host" {
+  mkdir -p "$STUBDIR/secrets"; printf 'k\n' > "$STUBDIR/secrets/acq.usai"
+  printf 'CUSTOM SECRETS\n(global) other.example.gov USAI_API_KEY sbx-cs-other ****\n(global) api.gsa.usai.gov USAI_API_KEY sbx-cs-main ****\n' > "$STUBDIR/sbx_ls"
+  run env SBX_LS_FIXTURE="$STUBDIR/sbx_ls" ACQ_BACKEND=sbx "$ACQ" secret rm -g usai
+  assert_success
+  assert_regex "$(cat "$CALLS")" 'sbx secret rm --placeholder sbx-cs-main -f'
+  refute_regex "$(cat "$CALLS")" 'sbx-cs-other'
+  assert [ ! -e "$STUBDIR/secrets/acq.usai" ]
+}
+
+@test "secret rm(sbx): a failed sbx listing preserves the credential and sidecar" {
+  load_acq
+  mkdir -p "$STUBDIR/secrets"; printf 'k\n' > "$STUBDIR/secrets/acq.usai"
+  acq_secret_meta_store usai "" api.gsa.usai.gov USAI_API_KEY
+  local meta
+  meta=$(cat "$ACQ_SECRET_META_DIR/acq.usai")
+  sbx() { if [ "${1:-} ${2:-}" = "secret ls" ]; then return 1; fi; command sbx "$@"; }
+  run acq_backend_secret_rm -g usai
+  assert_failure
+  assert_output --partial "sbx's secret list could not be read; nothing was removed"
+  assert_equal "$(cat "$STUBDIR/secrets/acq.usai")" k
+  assert_equal "$(cat "$ACQ_SECRET_META_DIR/acq.usai")" "$meta"
+  refute_regex "$(cat "$CALLS")" 'sbx secret rm'
+
+}
+
+@test "secret set(sbx): the existing-entry hint names the real placeholder" {
+  printf 'CUSTOM SECRETS\n(global) api.gsa.usai.gov USAI_API_KEY sbx-cs-real1 ****\n' > "$STUBDIR/sbx_ls"
+  run bash -c 'printf "k\n" | SBX_LS_FIXTURE="$1" ACQ_BACKEND=sbx "$2" secret set -g usai' _ "$STUBDIR/sbx_ls" "$ACQ"
+  assert_failure
+  assert_output --partial 'sbx secret rm --placeholder sbx-cs-real1 -f'
+  refute_output --partial '<placeholder'
+}
+
+@test "secret set(sbx): a placeholder with unexpected characters is never printed as a command" {
+  printf 'CUSTOM SECRETS\n(global) api.gsa.usai.gov USAI_API_KEY sbx-cs-ok1 ****\n(global) api.gsa.usai.gov USAI_API_KEY $(touch;x) ****\n' > "$STUBDIR/sbx_ls"
+  run bash -c 'printf "k\n" | SBX_LS_FIXTURE="$1" ACQ_BACKEND=sbx "$2" secret set -g usai' _ "$STUBDIR/sbx_ls" "$ACQ"
+  assert_failure
+  assert_output --partial 'sbx secret rm --placeholder sbx-cs-ok1 -f'
+  assert_output --partial 'one placeholder holds unexpected characters'
+  refute_output --partial '$(touch'
+}
+
+@test "secret rm(sbx): unparseable listings preserve the credential and sidecar" {
+  load_acq
+  mkdir -p "$STUBDIR/secrets"; printf 'k\n' > "$STUBDIR/secrets/acq.usai"
+  acq_secret_meta_store usai "" api.gsa.usai.gov USAI_API_KEY
+  local listing meta
+  meta=$(cat "$ACQ_SECRET_META_DIR/acq.usai")
+  for listing in '' 'unexpected output' $'CUSTOM SECRETS\n(global) truncated' $'CUSTOM SECRETS\n(global) host 123 placeholder masked'; do
+    printf '%s\n' "$listing" > "$STUBDIR/sbx_ls"
+    SBX_LS_FIXTURE="$STUBDIR/sbx_ls" run acq_backend_secret_rm -g usai
+    assert_failure
+    assert_output --partial 'nothing was removed'
+    assert_equal "$(cat "$STUBDIR/secrets/acq.usai")" k
+    assert_equal "$(cat "$ACQ_SECRET_META_DIR/acq.usai")" "$meta"
+    refute_regex "$(cat "$CALLS")" 'sbx secret rm'
+  done
+}
+
+@test "secret rm(sbx): a builtin credential survives an unreadable listing" {
+  load_acq
+  mkdir -p "$STUBDIR/secrets"; printf 'k\n' > "$STUBDIR/secrets/acq.github"
+  sbx() { if [ "${1:-} ${2:-}" = "secret ls" ]; then return 1; fi; command sbx "$@"; }
+  run acq_backend_secret_rm -g github
+  assert_failure
+  assert_output --partial 'nothing was removed'
+  assert_equal "$(cat "$STUBDIR/secrets/acq.github")" k
+  refute_regex "$(cat "$CALLS")" 'sbx secret rm'
+}

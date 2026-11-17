@@ -12,3 +12,14 @@
 /.github/workflows/ @GSA-TTS/agentic-coding-admins
 /AGENTS.md @GSA-TTS/agentic-coding-admins
 /SECURITY.md @GSA-TTS/agentic-coding-admins
+# The Tier-3 ledger is self-reported evidence for the release gate, so changes to it
+# (entries, waivers, accepted backend versions) need an admin's review.
+/docs/qualification-ledger.json @GSA-TTS/agentic-coding-admins
+# The release gate's own rules (claimed cells, the Tier-3 surface and its carve-outs,
+# the ledger entry checks) and the committed oracles whose runs are the evidence.
+# CI judges a PR by the base branch's copy of these, so loosening them is always a
+# PR of its own; this makes that PR need an admin too.
+/qualification/ @GSA-TTS/agentic-coding-admins
+/scripts/qualify-backend-cell @GSA-TTS/agentic-coding-admins
+/scripts/qualify-msb-ro-mount @GSA-TTS/agentic-coding-admins
+/.github/CODEOWNERS @GSA-TTS/agentic-coding-admins

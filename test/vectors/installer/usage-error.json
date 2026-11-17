@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "id": "installer/usage-error",
+  "oracle": "ADR-0042m installer usage error: an unknown option exits 2 with a diagnostic",
+  "tier": 1,
+  "backend": null,
+  "platform": "linux",
+  "invoke": {
+    "argv": ["sh", "install.sh", "--bogus"],
+    "env": {},
+    "unset": [],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 2,
+    "stderr": {
+      "mode": "contains",
+      "value": "unknown option",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": []
+  }
+}

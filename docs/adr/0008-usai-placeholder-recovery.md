@@ -19,7 +19,7 @@ USAi is injected into sandboxes as a **custom secret** (`sbx secret set-custom`)
 which is **not** proxied. sbx bakes a **placeholder token** into each sandbox's
 `USAI_API_KEY` at creation time and resolves that placeholder to the real global
 secret value at request time (see
-[KNOWN_FAILURE_MODES.md §14](../KNOWN_FAILURE_MODES.md#14-sbx-proxy-doesnt-work-with-custom-baseurl-security-implication)).
+[KNOWN_FAILURE_MODES.md §14](../KNOWN_FAILURE_MODES.md#14-sbx-built-in-proxy-doesnt-auto-cover-usais-custom-baseurl-use-set-custom)).
 
 `scripts/rotate-apikey` (`qsbx usai-rotate-api-key`) deliberately **preserves**
 the placeholder across rotation, so existing sandboxes keep resolving. But a user
@@ -126,7 +126,7 @@ never done.
 
 - Failure mode: [KNOWN_FAILURE_MODES.md §23](../KNOWN_FAILURE_MODES.md#23-usai-401-in-an-existing-sandbox-after-deletingrecreating-the-global-secret)
 - Related: [ADR-0005](0005-kits-from-patterns-and-agent-trust-model.md) (kits by
-  pinned reference), [KNOWN_FAILURE_MODES.md §14](../KNOWN_FAILURE_MODES.md#14-sbx-proxy-doesnt-work-with-custom-baseurl-security-implication)
+  pinned reference), [KNOWN_FAILURE_MODES.md §14](../KNOWN_FAILURE_MODES.md#14-sbx-built-in-proxy-doesnt-auto-cover-usais-custom-baseurl-use-set-custom)
   (custom-secret injection), [§20](../KNOWN_FAILURE_MODES.md#20-authentication-failed-after-copying-a-new-key)
 - Rotation helper that preserves the placeholder: `scripts/rotate-apikey`
   (now a thin shim; the placeholder-preserving logic moved into

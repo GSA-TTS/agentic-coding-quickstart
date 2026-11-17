@@ -16,7 +16,7 @@
 #   - Storage in the OS keychain when available (macOS `security -i`, Linux
 #     `secret-tool`), Windows DPAPI (Keychain-equivalent, user-scoped) via
 #     in-box PowerShell, and a 0600 file fallback under
-#     $XDG_DATA_HOME/acq/secrets/ when no protected backend exists. The Windows
+#     $XDG_DATA_HOME/acq/secrets/ on POSIX when no protected backend exists. The Windows
 #     backend wraps each value in a versioned envelope and migrates a legacy
 #     plaintext value on first read, so switching backends never mis-reads the
 #     shared file path in either direction (see the keychain-windows notes).
@@ -55,14 +55,35 @@ ACQ_KEYCHAIN_LABEL="acq-secret-store"
 # envelope format ever changes.
 ACQ_SECRET_DPAPI_HEADER="acq-dpapi-v1"
 
-# File-fallback location (used only when no OS keychain tool is present).
-ACQ_SECRET_FILE_DIR="${ACQ_SECRET_FILE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/acq/secrets}"
+# Absolute-only XDG/HOME resolution. common.sh normally sources this first, but
+# unit tests source this file on its own.
+if ! command -v acq_xdg_dir >/dev/null 2>&1; then
+  # shellcheck source=acq.backends/userdirs.sh
+  . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/userdirs.sh"
+fi
 
-# Offline-test escape hatch: when ACQ_SECRET_STORE_DIR is set, force the file
-# backend rooted there (no real keychain touched). Used by the offline test suite.
+# File-fallback location (used only when no OS keychain tool is present). A
+# relative XDG_DATA_HOME or HOME is ignored (see userdirs.sh), so secret files
+# can never land under the current directory.
+# The resolver runs outside the expansion: a failing command substitution in an
+# assignment would trip errexit while this file is being sourced.
+_acq_ud=$(acq_xdg_dir XDG_DATA_HOME .local/share) || _acq_ud=""
+# With no absolute data dir the default stays empty, never root-anchored.
+ACQ_SECRET_FILE_DIR="${ACQ_SECRET_FILE_DIR:-${_acq_ud:+$_acq_ud/acq/secrets}}"
+unset _acq_ud
+
+# Offline-test escape hatch: when ACQ_SECRET_STORE_DIR is set, root the store
+# there. Outside Windows it also forces the file backend (no real keychain
+# touched). On Windows (Git Bash, MSYS, Cygwin) it only relocates the DPAPI
+# files, as in the Python acq: the plaintext file backend would leave secrets in
+# cleartext on NTFS, and the two implementations could not read each other's
+# entries. ACQ_SECRET_FORCE_FILE applies only outside Windows.
 if [ -n "${ACQ_SECRET_STORE_DIR:-}" ]; then
   ACQ_SECRET_FILE_DIR="$ACQ_SECRET_STORE_DIR"
-  ACQ_SECRET_FORCE_FILE=1
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) ;;
+    *) ACQ_SECRET_FORCE_FILE=1 ;;
+  esac
 fi
 
 # ---------------------------------------------------------------------------
@@ -111,22 +132,40 @@ _acq_secret_powershell_bin() {
     printf '%s\n' "$ACQ_SECRET_POWERSHELL_BIN"
     return 0
   fi
-  printf 'powershell.exe\n'
+  local root="${SystemRoot:-${SYSTEMROOT:-}}" powershell
+  # A drive-relative or rooted-without-drive path can resolve under the caller's
+  # directory. Only a fully qualified Windows directory may select DPAPI code.
+  case "$root" in
+    [a-zA-Z]:[\\/]*|\\\\?*\\?*) ;;
+    *) return 1 ;;
+  esac
+  powershell="${root%[\\/]}/System32/WindowsPowerShell/v1.0/powershell.exe"
+  if command -v cygpath >/dev/null 2>&1; then
+    powershell=$(cygpath -u "$powershell") || return 1
+  fi
+  [ -f "$powershell" ] && [ -x "$powershell" ] || return 1
+  printf '%s\n' "$powershell"
 }
 
 _acq_secret_backend() {
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      # Windows cannot enforce the plaintext store's POSIX permissions. Even
+      # FORCE_FILE must not turn a missing DPAPI runtime into a plaintext write.
+      local powershell
+      if powershell=$(_acq_secret_powershell_bin) && [ -f "$powershell" ] && [ -x "$powershell" ]; then
+        printf 'keychain-windows\n'; return 0
+      fi
+      echo "acq: Windows DPAPI is unavailable: Windows PowerShell was not found under %SystemRoot%; secrets are never stored in plaintext on Windows." >&2
+      echo "     Set SystemRoot to an absolute Windows directory (e.g. C:\Windows) and retry." >&2
+      return 1 ;;
+  esac
   if [ -n "${ACQ_SECRET_FORCE_FILE:-}" ]; then
     printf 'file\n'; return 0
   fi
   case "$(uname -s 2>/dev/null)" in
     Darwin) [ -x "$(_acq_secret_security_bin)" ] && { printf 'keychain-macos\n'; return 0; } ;;
-    MINGW*|MSYS*|CYGWIN*)
-      # Git Bash on Windows has neither a keychain nor secret-tool, so the plain
-      # file fallback would leave secrets in cleartext on NTFS (which cannot
-      # enforce 0600). Use Windows DPAPI via in-box PowerShell instead
-      # (ADR-0028); fall back to the file backend only if PowerShell is absent.
-      command -v "$(_acq_secret_powershell_bin)" >/dev/null 2>&1 && { printf 'keychain-windows\n'; return 0; } ;;
-    *)      command -v secret-tool >/dev/null 2>&1 && { printf 'keychain-linux\n'; return 0; } ;;
+    *) command -v secret-tool >/dev/null 2>&1 && { printf 'keychain-linux\n'; return 0; } ;;
   esac
   printf 'file\n'
 }
@@ -172,6 +211,7 @@ _acq_secret_key() {
 # Sanitize a key into a filesystem-safe filename for the file backend.
 _acq_secret_file_for() {
   local key="$1"
+  [ -n "$ACQ_SECRET_FILE_DIR" ] || return 1   # no absolute data dir (userdirs.sh)
   printf '%s/%s\n' "$ACQ_SECRET_FILE_DIR" "$(printf '%s' "$key" | tr -c 'A-Za-z0-9._-' '_')"
 }
 
@@ -225,15 +265,30 @@ _acq_secret_store_keychain_macos() {
 #     upgrade neither loses the secret nor leaves the plaintext at rest.
 #   - `file` reading a MARKED file = ciphertext it cannot decrypt; it fails
 #     closed (_acq_secret_get_file) rather than exporting the blob as the secret.
+#
+# TRANSPORT: both pipes carry base64 only. Windows PowerShell decodes stdin and
+# encodes stdout with the console's code page, so raw UTF-8 across them is
+# altered whenever that code page is not a lossless single-byte one (932 drops
+# bytes) or differs between the write and the read. The value goes in as base64
+# of its bytes and comes back the same way, so DPAPI always protects the
+# value's own UTF-8 bytes. The one-liners match the Python acq's byte for byte
+# (py-acq/src/acq_py/secretstore.py).
 # ---------------------------------------------------------------------------
 _acq_secret_windows_encrypt() {
-  local ps; ps=$(_acq_secret_powershell_bin)
-  "$ps" -NoLogo -NoProfile -Command '$ErrorActionPreference="Stop"; Add-Type -AssemblyName System.Security; $i=[Console]::In.ReadToEnd(); $b=[Text.Encoding]::UTF8.GetBytes($i); [Console]::Out.Write([Convert]::ToBase64String([Security.Cryptography.ProtectedData]::Protect($b,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser)))' 2>/dev/null
+  local ps b64; ps=$(_acq_secret_powershell_bin)
+  # A failed or empty encoding must not reach PowerShell: it would protect an
+  # empty value.
+  # base64 is captured on its own so its exit status, not tr's, decides.
+  b64=$(base64) || return 1
+  b64=$(printf '%s' "$b64" | tr -d '\r\n')
+  [ -n "$b64" ] || return 1
+  printf '%s' "$b64" | "$ps" -NoLogo -NoProfile -Command '$ErrorActionPreference="Stop"; Add-Type -AssemblyName System.Security; $i=[Console]::In.ReadToEnd(); $b=[Convert]::FromBase64String($i.Trim()); [Console]::Out.Write([Convert]::ToBase64String([Security.Cryptography.ProtectedData]::Protect($b,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser)))' 2>/dev/null
 }
 
 _acq_secret_windows_decrypt() {
-  local ps; ps=$(_acq_secret_powershell_bin)
-  "$ps" -NoLogo -NoProfile -Command '$ErrorActionPreference="Stop"; Add-Type -AssemblyName System.Security; $i=[Console]::In.ReadToEnd(); $e=[Convert]::FromBase64String($i.Trim()); [Console]::Out.Write([Text.Encoding]::UTF8.GetString([Security.Cryptography.ProtectedData]::Unprotect($e,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser)))' 2>/dev/null
+  local ps out; ps=$(_acq_secret_powershell_bin)
+  out=$("$ps" -NoLogo -NoProfile -Command '$ErrorActionPreference="Stop"; Add-Type -AssemblyName System.Security; $i=[Console]::In.ReadToEnd(); $e=[Convert]::FromBase64String($i.Trim()); [Console]::Out.Write([Convert]::ToBase64String([Security.Cryptography.ProtectedData]::Unprotect($e,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser)))' 2>/dev/null) || return 1
+  printf '%s' "$out" | tr -d '\r\n' | base64 -d 2>/dev/null
 }
 
 # _acq_secret_file_is_dpapi_envelope FILE -> 0 if FILE's first line is the DPAPI
@@ -404,7 +459,7 @@ acq_secret_store() {
   fi
 
   local backend
-  backend=$(_acq_secret_backend)
+  backend=$(_acq_secret_backend) || { value=""; return 1; }
   acq_debug "secret store: key=$key backend=$backend"
 
   case "$backend" in
@@ -470,7 +525,7 @@ _acq_secret_store_file() {
 # ---------------------------------------------------------------------------
 acq_secret_get() {
   local key="$1" backend value security_bin
-  backend=$(_acq_secret_backend)
+  backend=$(_acq_secret_backend) || return 1
   case "$backend" in
     keychain-macos)
       # Prefer the Keychain. Fall back to the old 0600 file location so existing
@@ -527,7 +582,7 @@ _acq_secret_get_file() {
 # BACKWARD COMPATIBILITY: absence of a sidecar => no metadata => callers fall
 # back to their existing built-in table / prior behavior. Existing stored
 # secrets (value-only, no sidecar) are unaffected.
-ACQ_SECRET_META_DIR="${ACQ_SECRET_META_DIR:-${ACQ_SECRET_FILE_DIR%/secrets}/secret-meta}"
+ACQ_SECRET_META_DIR="${ACQ_SECRET_META_DIR:-${ACQ_SECRET_FILE_DIR:+${ACQ_SECRET_FILE_DIR%/secrets}/secret-meta}}"
 if [ -n "${ACQ_SECRET_STORE_DIR:-}" ]; then
   # Offline-test escape hatch: keep metadata beside the forced file store.
   ACQ_SECRET_META_DIR="${ACQ_SECRET_STORE_DIR%/}/meta"
@@ -542,7 +597,7 @@ fi
 # no hosts) and is a plain 0600 file, not the keychain. The file backend does NOT
 # use this index — its file directory is already the authoritative on-disk
 # listing.
-ACQ_SECRET_INDEX_FILE="${ACQ_SECRET_INDEX_FILE:-${ACQ_SECRET_FILE_DIR%/secrets}/secret-index}"
+ACQ_SECRET_INDEX_FILE="${ACQ_SECRET_INDEX_FILE:-${ACQ_SECRET_FILE_DIR:+${ACQ_SECRET_FILE_DIR%/secrets}/secret-index}}"
 if [ -n "${ACQ_SECRET_STORE_DIR:-}" ]; then
   # Offline-test escape hatch: keep the index beside the forced file store.
   ACQ_SECRET_INDEX_FILE="${ACQ_SECRET_STORE_DIR%/}/index"
@@ -553,6 +608,7 @@ fi
 # update the index never fails the store — it only degrades later enumeration.
 _acq_secret_index_add() {
   local key="$1" dir line
+  [ -n "$ACQ_SECRET_INDEX_FILE" ] || return 0   # no data dir: best-effort skip
   dir=$(dirname "$ACQ_SECRET_INDEX_FILE")
   ( umask 077; mkdir -p "$dir" ) || return 0
   # Already present? Nothing to do (keeps the file deduplicated).
@@ -583,6 +639,7 @@ _acq_secret_index_remove() {
 
 _acq_secret_meta_file_for() {
   local key="$1"
+  [ -n "$ACQ_SECRET_META_DIR" ] || return 1   # no absolute data dir (userdirs.sh)
   printf '%s/%s\n' "$ACQ_SECRET_META_DIR" "$(printf '%s' "$key" | tr -c 'A-Za-z0-9._-' '_')"
 }
 
@@ -644,7 +701,7 @@ acq_secret_meta_resolve() {
 
 # acq_secret_meta_resolve_exact SERVICE [SANDBOX] -> "HOST<TAB>ENV" on STDOUT
 # EXACT-scope variant of acq_secret_meta_resolve: no sandbox->global fallback.
-# The sbx rm path uses it (#384 review): a GLOBAL sidecar must never steer a
+# The sbx rm path uses it: a GLOBAL sidecar must never steer a
 # sandbox-scoped DESTRUCTIVE placeholder removal toward an entry the sidecar
 # never described.
 acq_secret_meta_resolve_exact() {
@@ -752,7 +809,7 @@ acq_secret_meta_list() {
 #     fails `ls`.
 acq_secret_list_keys() {
   local backend
-  backend=$(_acq_secret_backend)
+  backend=$(_acq_secret_backend) || return 1
   case "$backend" in
     keychain-macos|keychain-linux) _acq_secret_list_keys_keychain ;;
     *)                            _acq_secret_list_keys_file ;;
@@ -871,7 +928,7 @@ _acq_secret_decode_key() {
 # file backend on macOS (see the acq_secret_store note about avoiding argv).
 acq_secret_delete() {
   local key="$1" backend rc=0 security_bin
-  backend=$(_acq_secret_backend)
+  backend=$(_acq_secret_backend) || return 1
   acq_debug "secret delete: key=$key backend=$backend"
   case "$backend" in
     keychain-macos)

@@ -45,7 +45,7 @@
 #
 # Usage:
 #   ./scripts/verify-backends [WORKDIR]
-#     WORKDIR  optional workspace path (default: a temp git repo under $TMPDIR).
+#     WORKDIR  optional workspace path (default: a git repo under the acq cache dir).
 #
 #   Flags / env:
 #     -v | --verbose | VERIFY_VERBOSE=1   Stream every acq command and its full
@@ -124,6 +124,10 @@ fi
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 ACQ="$REPO_ROOT/acq"
+# acq's user-directory rules (functions only): relative XDG_* / HOME values are
+# ignored, never resolved against the current directory.
+# shellcheck source=acq.backends/userdirs.sh
+. "$REPO_ROOT/acq.backends/userdirs.sh"
 
 VERBOSE="${VERIFY_VERBOSE:-}"
 KEEP="${VERIFY_KEEP:-}"
@@ -233,7 +237,8 @@ if [ "$_VERIFY_BACKENDS_SOURCED" -eq 0 ]; then
 
   # Keep acq's per-run state hermetic. The verifier should not read the user's
   # default backend, acq-owned secret store, provenance cache, or port/ssh state.
-  VERIFY_STATE=$(mktemp -d "${TMPDIR:-/tmp}/acq-verify-state.XXXXXX") || exit 1
+  # acq_tmp_dir (userdirs.sh): TMPDIR only when it is absolute, else /tmp.
+  VERIFY_STATE=$(mktemp -d "$(acq_tmp_dir)/acq-verify-state.XXXXXX") || exit 1
   export XDG_CONFIG_HOME="$VERIFY_STATE/config"
   export ACQ_SECRET_FORCE_FILE=1
   export ACQ_SECRET_STORE_DIR="$VERIFY_STATE/secrets"
@@ -428,12 +433,24 @@ run_acq() {
 # shallow guest target (verified on msb 0.6.6). A real directory under $HOME
 # mounts fine. So the verify workspace lives under a stable cache dir, and we
 # resolve it to its canonical (symlink-free) path before mounting.
+# _verify_workspace_base — the default workspace parent, under the user's cache
+# directory as acq resolves it (an absolute XDG_CACHE_HOME, else the absolute
+# home's .cache). Fails when no absolute directory exists.
+_verify_workspace_base() {
+  local base
+  base=$(acq_xdg_dir XDG_CACHE_HOME .cache) || return 1
+  printf '%s/acq/verify\n' "$base"
+}
+
 WORKDIR=""
 if [ "$_VERIFY_BACKENDS_SOURCED" -eq 0 ]; then
   WORKDIR="${1:-}"
 fi
 if [ "$_VERIFY_BACKENDS_SOURCED" -eq 0 ] && [ -z "$WORKDIR" ]; then
-  _verify_base="${XDG_CACHE_HOME:-$HOME/.cache}/acq/verify"
+  _verify_base=$(_verify_workspace_base) || {
+    echo "verify-backends: cannot determine an absolute cache directory; set HOME or XDG_CACHE_HOME to an absolute path, or pass WORKDIR" >&2
+    exit 2
+  }
   mkdir -p "$_verify_base"
   WORKDIR=$(mktemp -d "${_verify_base}/ws.XXXXXX")
   ( cd "$WORKDIR" && git init -q && git config user.email test@example.com \
@@ -473,7 +490,7 @@ load_provider_facts() {
   # (acq source-mode is chatty on stdout). Bound the capture to 4 KB, then emit
   # only a diagnostic category. Never replay arbitrary source stderr because a
   # future dependency could include environment-derived sensitive text.
-  _diag_file=$(mktemp "${TMPDIR:-/tmp}/vb-load-diag.XXXXXX") || _diag_file=""
+  _diag_file=$(mktemp "$(acq_tmp_dir)/vb-load-diag.XXXXXX") || _diag_file=""
   # shellcheck disable=SC1090
   if ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$ACQ" >/dev/null \
        2>"${_diag_file:-/dev/null}"; then
@@ -959,8 +976,7 @@ verify_backend() {
   # 4) playbook fetch appears (AGENTS.md present in the tree AND linked into the
   #    OpenCode config). The kit fetches the repo SOURCE TARBALL via the REST API
   #    (api.github.com), which BOTH backends substitute the github token for
-  #    (msb 0.6.7 verified) — so given a token this is a hard requirement on both
-  #    (quickstart#203 is resolved by the tarball approach). We seed a
+  #    (msb 0.6.7 verified) — so given a token this is a hard requirement on both. We seed a
   #    sandbox-scoped token from `gh` before create; if `gh` was unavailable
   #    (GH_SEEDED_FOR empty) there is no token and we SKIP rather than fail — a
   #    token-less run still passes.
@@ -1166,7 +1182,7 @@ _start_ephemeral_agent() {
   # Key material under VERIFY_STATE; socket under a SHORT /tmp root (sun_path).
   EPHEMERAL_AGENT_DIR=$(mktemp -d "${VERIFY_STATE}/ssh-agent.XXXXXX") || return 1
   EPHEMERAL_AGENT_SOCKDIR=$(mktemp -d "/tmp/acq-va.XXXXXX" 2>/dev/null) \
-    || EPHEMERAL_AGENT_SOCKDIR=$(mktemp -d "${TMPDIR:-/tmp}/acq-va.XXXXXX") \
+    || EPHEMERAL_AGENT_SOCKDIR=$(mktemp -d "$(acq_tmp_dir)/acq-va.XXXXXX") \
     || { _stop_ephemeral_agent; return 1; }
   EPHEMERAL_AGENT_SOCK="${EPHEMERAL_AGENT_SOCKDIR}/s"
   local key="${EPHEMERAL_AGENT_DIR}/id_ed25519"
@@ -1587,8 +1603,8 @@ verify_agent_install() {
   fi
 
   # The guest must have enough RAM to actually RUN a Node.js agent TUI. msb's
-  # 512 MiB default OOM-kills opencode on launch (quickstart#228 follow-up: it
-  # started, then the terminal died with "Killed"). Assert a generous ceiling
+  # 512 MiB default OOM-kills opencode on launch (the terminal dies
+  # with "Killed"). Assert a generous ceiling
   # (>= ~2 GiB) so a regression that drops the sizing flags is caught live, not
   # just at exec-present. MemTotal is in kB; 2 GiB ~= 2000000 kB.
   local memkb

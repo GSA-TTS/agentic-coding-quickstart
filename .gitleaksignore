@@ -1,0 +1,9 @@
+# Exact historical findings for synthetic redaction/import fixtures only.
+# test_legacy_bash uses a fixed S3NTINEL value to assert redaction; the four
+# secret-import vectors use a fixed vector-usai value in isolated offline envs.
+# Other commits, paths, rules and values remain subject to scanning.
+841b80d9b00a6ffae5cc2fd5fd01d10bc22581a6:py-acq/tests/test_legacy_bash.py:generic-api-key:476
+c392f63e70250a327bacaa35877b2c1c3aea8d72:test/vectors/cli/secret-import-unknown-flag.json:generic-api-key:20
+c392f63e70250a327bacaa35877b2c1c3aea8d72:test/vectors/cli/secret-import-all.json:generic-api-key:19
+c392f63e70250a327bacaa35877b2c1c3aea8d72:test/vectors/cli/secret-import-dry-run.json:generic-api-key:19
+c392f63e70250a327bacaa35877b2c1c3aea8d72:test/vectors/cli/secret-import-noninteractive-skip.json:generic-api-key:18

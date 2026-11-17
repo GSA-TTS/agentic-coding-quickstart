@@ -1,0 +1,72 @@
+# Python quality gates for py-acq: ruff (lint), mypy (types) and bandit
+# (security lint) on py-acq/src, plus pytest with a branch-coverage floor.
+#
+# Configuration lives in py-acq/pyproject.toml ([tool.ruff], [tool.mypy],
+# [tool.bandit], [tool.coverage.*]). The tools are CI-only and pinned with hashes,
+# transitive dependencies included, in py-acq/requirements-quality.txt; acq
+# itself still installs nothing at runtime (ADR-0042m). ADR-0049m records the
+# tool choice, the pinning and cooldown policy, and how the pins are updated.
+#
+# The gates start at zero findings: the existing findings were fixed when the
+# gates were added, so there is no baseline file and any new finding fails.
+#
+# Security hardening per NIST SR-3 (actions pinned by SHA, hash-locked tools)
+# and AC-6 (read-only token, no persisted credentials).
+
+name: Python quality
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  merge_group:
+    branches: [main]
+
+concurrency:
+  group: python-quality-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  quality:
+    name: ruff, mypy, bandit and coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: py-acq
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      # --no-deps with --require-hashes: the file lists every transitive
+      # dependency, so pip resolves nothing on its own. --only-binary: wheels
+      # only, so no sdist build step runs code at install time.
+      - name: Install pinned quality tools
+        run: |
+          python -m pip install --require-hashes --no-deps --only-binary :all: -r requirements-quality.txt
+
+      - name: ruff
+        run: python -m ruff check --no-cache --output-format=github src
+
+      - name: mypy
+        run: python -m mypy --no-incremental
+
+      - name: bandit
+        run: python -m bandit -c pyproject.toml -r src
+
+      # In-process branch coverage of acq_py; the floor is fail_under in
+      # pyproject.toml. The vector suite's subprocess runs are not measured.
+      - name: pytest with coverage
+        run: python -m pytest -q --cov --cov-report=term

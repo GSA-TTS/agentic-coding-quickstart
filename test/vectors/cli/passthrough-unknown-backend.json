@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "id": "cli/passthrough-unknown-backend",
+  "oracle": "ADR-0038m §1 passthrough: an unknown --backend value is a usage error (exit 2), matching the other verbs, not a traceback",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{acq}",
+      "--backend",
+      "bogus",
+      "--json",
+      "foo"
+    ],
+    "env": {},
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "ACQ_MSB_BIN",
+      "ACQ_SBX_BIN",
+      "ACQ_MSB_INSTALLED",
+      "ACQ_SBX_INSTALLED"
+    ],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 2,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "foo",
+        "error": {
+          "code": "usage"
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME"
+    ]
+  }
+}

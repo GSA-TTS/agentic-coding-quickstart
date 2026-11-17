@@ -93,9 +93,10 @@ _create_line() { printf '%s\n' "$(cat "$CALLS")" | grep "^$1 create"; }
   assert_output --partial 'most-specific wins'
 }
 
-@test "image(msb): shell agent defaults to shell-docker image" {
+@test "image(msb): shell agent uses acq's pinned devenv base, not Docker's template" {
   _msb_create -- create shell "$IMGPROJ"
-  assert_regex "$(_create_line msb)" 'docker\.io/docker/sandbox-templates:shell-docker'
+  assert_regex "$(_create_line msb)" 'ghcr\.io/gsa-tts/agentic-coding-patterns/devenv-shell@sha256:0b5f4cc95c8fa7dd7f3ffd02b56e63d0caf9b151421ff6ea3cb34b2139e3966c'
+  refute_regex "$(_create_line msb)" 'docker\.io/docker/sandbox-templates:shell-docker'
 }
 
 @test "image(msb): default opencode uses the pinned generic devenv base" {
