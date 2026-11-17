@@ -52,6 +52,11 @@ on:
       - scripts/assemble-release
       - scripts/gen-install-assets
       - scripts/build-uninstaller
+      - scripts/run-uninstaller
+      - py-acq/setup.py
+      - py-acq/MANIFEST.in
+      - py-acq/recovery_build.py
+      - py-acq/tests/test_recovery_build.py
       - acq.backends/uninstall*.sh
       - scripts/gen-provenance
       - scripts/stage-posix-runtime
