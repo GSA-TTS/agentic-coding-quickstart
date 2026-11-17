@@ -265,6 +265,8 @@ def build_parser() -> _Parser:
     uninstall_parser = sub.add_parser("uninstall", help="remove ACQ and all local MSB data")
     uninstall_parser.add_argument("--dry-run", action="store_true", help="preview without removing files")
     uninstall_parser.add_argument("--yes", "-y", action="store_true", help="confirm permanent removal")
+    uninstall_parser.add_argument("--confirm-no-sbx-sandboxes", action="store_true",
+                                  help="assert verified absence of SBX sandboxes for historical records")
 
     backend_parser = sub.add_parser(
         "backend", help="detect, inspect and select the sandbox backends (sbx, msb)"

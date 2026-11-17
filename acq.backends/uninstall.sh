@@ -72,8 +72,13 @@ uninstall_inventory() {
   uninstall_migrated_state || return 1
   # This wizard is deliberately MSB-only: shared ACQ state may still be required
   # by existing SBX sandboxes, even if MSB is also installed.
-  if command -v sbx >/dev/null 2>&1 || [ -d "$uninstall_state/provenance/sbx" ] || [ -d "$uninstall_state/sbx" ]; then
-    uninstall_error 'SBX was detected. This MSB-only uninstaller will not remove shared ACQ state.'; return 1
+  if command -v sbx >/dev/null 2>&1; then
+    uninstall_error "SBX is installed at $(command -v sbx). Check its sandbox inventory with 'sbx ls' before removing SBX. This wizard does not remove SBX or its native storage."; return 1
+  fi
+  uninstall_sbx_records=0
+  if [ -e "$uninstall_state/provenance/sbx" ] || [ -L "$uninstall_state/provenance/sbx" ] ||
+    [ -e "$uninstall_state/sbx" ] || [ -L "$uninstall_state/sbx" ]; then
+    uninstall_sbx_records=1
   fi
   uninstall_msb=$(command -v msb || true)
   [ -n "$uninstall_msb" ] || { [ ! -x "$uninstall_msb_home/bin/msb" ] || uninstall_msb="$uninstall_msb_home/bin/msb"; }
@@ -115,6 +120,10 @@ uninstall_preview() {
   printf '\nACQ Uninstaller\n\n'
   printf 'Removes ACQ, Microsandbox, ALL MSB sandboxes, saved ACQ credentials,\nsettings, caches, and temporary project clones. SBX is not removed.\n\n'
   printf 'Your original project folders, Homebrew, npm, and Git will be kept.\nWork saved only in a sandbox or temporary clone will be LOST.\nQuit your coding-agent sessions before continuing.\n\n'
+  if [ "$uninstall_sbx_records" = 1 ]; then
+    printf 'Historical ACQ records for SBX were found under:\n  %s\n  %s\n' "$uninstall_state/provenance/sbx" "$uninstall_state/sbx"
+    printf 'These are ACQ records, not sandbox disks. SBX is missing, so sandbox\nstatus cannot be checked. Confirm there are no remaining SBX sandboxes\nbefore removal. SBX native storage and daemon are NOT removed.\n\n'
+  fi
   if [ -n "$uninstall_names" ]; then printf 'Sandboxes found:\n%s\n\n' "$uninstall_names"; fi
   for path in "$uninstall_clones"/*; do
     [ -d "$path" ] || continue
@@ -128,6 +137,13 @@ uninstall_preview() {
 
 uninstall_confirm() {
   local answer
+  if [ "$uninstall_sbx_records" = 1 ] && [ "$uninstall_sbx_confirmed" = 0 ]; then
+    [ -t 0 ] && [ "$uninstall_yes" = 0 ] || {
+      uninstall_error 'SBX sandbox absence is unverified. After verifying no SBX sandboxes remain, use --confirm-no-sbx-sandboxes; --yes alone is not sufficient.'; return 1; }
+    printf '\nHave you confirmed there are no remaining SBX sandboxes? [y/N]: '
+    IFS= read -r answer || return 1
+    case "$answer" in y|Y|yes|YES) ;; *) printf 'Cancelled. Nothing removed.\n'; return 2 ;; esac
+  fi
   [ "$uninstall_yes" = 0 ] || return 0
   [ -t 0 ] || { uninstall_error 'No interactive terminal. Use --yes only after reviewing --dry-run.'; return 1; }
   printf '\nPermanently remove ACQ and Microsandbox? [y/N]: '
@@ -215,12 +231,13 @@ uninstall_verify() {
 
 uninstall_main() {
   local arg rc
-  uninstall_yes=0; uninstall_dry=0
+  uninstall_yes=0; uninstall_dry=0; uninstall_sbx_confirmed=0
   for arg in "$@"; do
     case "$arg" in
       --yes|-y) uninstall_yes=1 ;;
       --dry-run) uninstall_dry=1 ;;
-      --help|-h) printf 'Usage: acq uninstall [--dry-run] [--yes]\nRemove ACQ and all local MSB sandboxes, credentials, and installation files.\nSBX and original project folders are kept. No network downloads or sudo.\n'; return 0 ;;
+      --confirm-no-sbx-sandboxes) uninstall_sbx_confirmed=1 ;;
+      --help|-h) printf 'Usage: acq uninstall [--dry-run] [--yes] [--confirm-no-sbx-sandboxes]\nRemove ACQ and all local MSB sandboxes, credentials, and installation files.\nSBX and original project folders are kept. No network downloads or sudo.\n--confirm-no-sbx-sandboxes asserts you verified no SBX sandboxes remain\nwhen only historical ACQ records remain. It does not bypass installed SBX.\n'; return 0 ;;
       *) uninstall_error "unknown option: $arg"; return 2 ;;
     esac
   done

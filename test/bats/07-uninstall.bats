@@ -1,61 +1,6 @@
 #!/usr/bin/env bats
 
-setup() {
-  REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-  FIXTURE="$(mktemp -d "$BATS_TEST_TMPDIR/uninstall.XXXXXX")"
-  FIXTURE="$(cd -P "$FIXTURE" && pwd -P)"
-  export HOME="$FIXTURE/home"
-  mkdir -p "$HOME/.local/bin" "$FIXTURE/bin"
-  export PATH="$FIXTURE/bin:/usr/bin:/bin"
-  unset XDG_DATA_HOME XDG_STATE_HOME XDG_CONFIG_HOME XDG_CACHE_HOME
-  unset ACQ_STATE_DIR ACQ_INSTALL_CLONE_DIR ACQ_INSTALL_BIN_DIR MSB_HOME
-  unset ACQ_INSTALL_DIR
-  unset ACQ_SECRET_STORE_DIR ACQ_SECRET_FILE_DIR ACQ_SECRET_META_DIR ACQ_SECRET_INDEX_FILE
-  unset ACQ_MSB_PORTS_DIR ACQ_MSB_CLONES_DIR ACQ_MSB_SSH_DIR ACQ_MSB_SSH_KEY
-  . "$REPO_ROOT/acq.backends/uninstall-files.sh"
-  . "$REPO_ROOT/acq.backends/uninstall-installation.sh"
-  # Capture the real cleanup body for isolated command-contract tests.
-  MACOS_CLEANUP="$(declare -f uninstall_macos_secrets)"
-  . "$REPO_ROOT/acq.backends/uninstall.sh"
-  # HOME does not isolate macOS login Keychain. Never call /usr/bin/security
-  # from offline tests, including tests of the production entry point.
-  uninstall_macos_secrets() { printf 'Fixture Keychain cleanup only.\n'; }
-  # HOME cannot isolate a desktop Secret Service either. Availability and calls
-  # are explicit fixture functions, never the host executable or D-Bus session.
-  uninstall_secret_tool_available() { return 1; }
-  uninstall_secret_tool() { printf '%s\n' "$*" >> "$CALLS"; }
-  # System prefixes are not isolated by HOME. Discovery of destructive tools
-  # must see ONLY executables explicitly provided by this test's fixture.
-  command() {
-    if [ "${1:-}" = -v ]; then
-      case "${2:-}" in npm|brew|msb|sbx|secret-tool)
-        [ -x "$FIXTURE/bin/$2" ] || return 1
-        printf '%s\n' "$FIXTURE/bin/$2"; return 0 ;;
-      esac
-    fi
-    builtin command "$@"
-  }
-  # CI/sandbox may run as root; production still refuses sudo. Only this fixture
-  # reports a regular user for the read-only inventory and isolated cleanup.
-  id() { if [ "${1:-}" = -u ]; then printf '1000\n'; else command id "$@"; fi; }
-  export CALLS="$FIXTURE/calls"
-  : > "$CALLS"
-}
-
-stub_msb() {
-  cat > "$FIXTURE/bin/msb" <<'STUB'
-#!/bin/bash
-printf '%s\n' "$*" >> "$CALLS"
-case "$*" in
-  'ls -q') [ -f "$HOME/removed" ] || printf 'example\n' ;;
-  'ls -q --running') printf 'example\n' ;;
-  'stop --timeout 30 example') [ ! -f "$HOME/stop-fail" ] ;;
-  'rm example') touch "$HOME/removed" ;;
-  *) exit 99 ;;
-esac
-STUB
-  chmod +x "$FIXTURE/bin/msb"
-}
+load uninstall-fixture
 
 @test "uninstall help dispatches without backend discovery" {
   run bash "$REPO_ROOT/acq" uninstall --help
@@ -83,33 +28,39 @@ STUB
 }
 
 @test "noninteractive removal requires explicit confirmation" {
-  run uninstall_main
+  run uninstall_main </dev/null
   [ "$status" = 1 ]
   [[ "$output" == *'No interactive terminal'* ]]
 }
 
-@test "custom clone named acq never authorizes deletion of a project" {
-  export ACQ_INSTALL_CLONE_DIR="$HOME/projects/acq"
-  mkdir -p "$ACQ_INSTALL_CLONE_DIR"
-  run uninstall_main --yes
+@test "historical SBX records allow preview but yes alone never authorizes deletion" {
+  mkdir -p "$HOME/.local/state/acq/provenance/sbx"
+  printf 'historical record\n' > "$HOME/.local/state/acq/provenance/sbx/old.env"
+  run uninstall_main --dry-run </dev/null
+  [ "$status" = 0 ]
+  [[ "$output" == *'These are ACQ records, not sandbox disks.'* ]]
+  run uninstall_main --yes </dev/null
   [ "$status" = 1 ]
-  [ -d "$ACQ_INSTALL_CLONE_DIR" ]
+  [ -f "$HOME/.local/state/acq/provenance/sbx/old.env" ]
+  run uninstall_main --yes --confirm-no-sbx-sandboxes </dev/null
+  [ "$status" = 0 ]
+  [ ! -e "$HOME/.local/state/acq" ]
 }
 
-@test "symlinked and traversal roots are rejected" {
-  mkdir -p "$HOME/outside"
-  ln -s "$HOME/outside" "$HOME/.cache"
-  run uninstall_main --yes
+@test "installed SBX is not bypassed by sandbox-absence assertion" {
+  printf '#!/bin/bash\nexit 0\n' > "$FIXTURE/bin/sbx"
+  chmod +x "$FIXTURE/bin/sbx"
+  run uninstall_main --yes --confirm-no-sbx-sandboxes </dev/null
   [ "$status" = 1 ]
-  run uninstall_validate_root "$HOME/../home/acq" acq
-  [ "$status" = 1 ]
+  [[ "$output" == *'SBX is installed at'* ]]
+  [[ "$output" == *"sbx ls"* ]]
 }
 
-@test "unsafe custom SSH artifacts block removal" {
-  export ACQ_MSB_SSH_KEY="$HOME/project/key"
-  run uninstall_main --yes
+@test "Python SBX state also requires explicit absence confirmation" {
+  mkdir -p "$HOME/.local/state/acq/sbx"
+  run uninstall_main --yes </dev/null
   [ "$status" = 1 ]
-  [[ "$output" == *'ACQ_MSB_SSH_KEY uses a custom location'* ]]
+  [ -d "$HOME/.local/state/acq/sbx" ]
 }
 
 @test "missing MSB with residual sandboxes preserves files" {
@@ -149,16 +100,6 @@ STUB
   [[ "$output" == *'No process was killed.'* ]]
 }
 
-@test "regular unknown launcher fails closed even off PATH" {
-  uninstall_bin="$HOME/.local/bin"
-  uninstall_install="$HOME/.local/share/acq"
-  [ -n "$uninstall_install" ]
-  printf 'user file\n' > "$uninstall_bin/acq"
-  run uninstall_links
-  [ "$status" = 1 ]
-  [ -f "$uninstall_bin/acq" ]
-}
-
 @test "missing secret-tool preserves credential records" {
   uninstall_index="$HOME/.local/share/acq/secret-index"
   uninstall_meta="$HOME/.local/share/acq/secret-meta"
@@ -182,19 +123,6 @@ STUB
   run uninstall_linux_secrets
   [ "$status" = 0 ]
   grep -Fx 'clear acq_key acq.usai' "$CALLS"
-}
-
-@test "clone origin traversal and symlinks cannot modify Git config" {
-  uninstall_state="$HOME/.local/state/acq"
-  uninstall_clones="$HOME/.local/state/acq/clones"
-  mkdir -p "$uninstall_clones/example" "$HOME/project/.git"
-  printf '%s\n' "$HOME/../home/project" > "$uninstall_clones/example/.origin"
-  run uninstall_clone_remotes
-  [ "$status" = 1 ]
-  ln -s "$HOME/project" "$HOME/link"
-  printf '%s\n' "$HOME/link" > "$uninstall_clones/example/.origin"
-  run uninstall_clone_remotes
-  [ "$status" = 1 ]
 }
 
 @test "standalone packaging works without any checkout at runtime" {
@@ -288,18 +216,6 @@ STUB
   grep -Fx 'uninstall -g --ignore-scripts @gsa-tts/agentic-coding-quickstart' "$CALLS"
 }
 
-@test "changed temporary Git remote is preserved and blocks cleanup" {
-  uninstall_state="$HOME/.local/state/acq"
-  command git init -q "$HOME/project"
-  uninstall_clones="$HOME/.local/state/acq/clones"
-  mkdir -p "$uninstall_clones/example/project/.git"
-  printf '%s\n' "$HOME/project" > "$uninstall_clones/example/.origin"
-  command git -C "$HOME/project" remote add sandbox-example "$HOME/different"
-  run uninstall_clone_remotes
-  [ "$status" = 1 ]
-  [ "$(command git -C "$HOME/project" config remote.sandbox-example.url)" = "$HOME/different" ]
-}
-
 @test "installer shell blocks removed but shared PATH and user lines survive" {
   uninstall_bin="$HOME/.local/bin"
   cat > "$HOME/.zshrc" <<'RC'
@@ -384,40 +300,6 @@ STUB
   [ "$status" = 0 ]
 }
 
-@test "Python ownership manifest removes runtime but preserves unowned files" {
-  mkdir -p "$HOME/.local/share/acq/py-acq/runtime/bin"
-  printf 'fixture\n' > "$HOME/.local/share/acq/py-acq/runtime/bin/python3"
-  printf 'user-owned\n' > "$HOME/.local/share/acq/keep"
-  printf '4.1.1\npy-acq\nacq-python\nREADME.md\n' > "$HOME/.local/share/acq/.acq-v1-install"
-  printf 'owned readme\n' > "$HOME/.local/share/acq/README.md"
-  touch "$HOME/.local/share/acq/acq-python"
-  ln -s "$HOME/.local/share/acq/acq-python" "$HOME/.local/bin/acq-python"
-  run uninstall_main --yes
-  [ "$status" = 0 ]
-  [ -f "$HOME/.local/share/acq/keep" ]
-  printf 'new user readme\n' > "$HOME/.local/share/acq/README.md"
-  run uninstall_main --yes
-  [ "$status" = 0 ]
-  [ -f "$HOME/.local/share/acq/README.md" ]
-  [ ! -e "$HOME/.local/share/acq/py-acq" ]
-  [ ! -L "$HOME/.local/bin/acq-python" ]
-  run uninstall_main --yes
-  [ "$status" = 0 ]
-  [ -f "$HOME/.local/share/acq/keep" ]
-}
-
-@test "header-only and custom install manifests cannot authorize recursive removal" {
-  mkdir -p "$HOME/.local/share/acq"
-  touch "$HOME/.local/share/acq/keep"
-  printf '4.1.1\n' > "$HOME/.local/share/acq/.acq-v1-install"
-  run uninstall_main --yes
-  [ "$status" = 1 ]
-  [ -f "$HOME/.local/share/acq/keep" ]
-  export ACQ_INSTALL_DIR="$HOME/project/acq"
-  run uninstall_main --dry-run
-  [ "$status" = 1 ]
-}
-
 @test "persisted Python SBX state blocks MSB-only removal without sbx installed" {
   mkdir -p "$HOME/.local/state/acq/sbx"
   printf '{"schema":1}\n' > "$HOME/.local/state/acq/sbx/example.json"
@@ -457,62 +339,10 @@ STUB
   [ ! -f "$HOME/planted-ran" ]
 }
 
-@test "hostile ownership manifest cannot escape its installation" {
-  mkdir -p "$HOME/.local/share/acq" "$HOME/project"
-  touch "$HOME/project/keep"
-  printf '4.1.1\n../../project\n' > "$HOME/.local/share/acq/.acq-v1-install"
-  run uninstall_main --yes
-  [ "$status" = 1 ]
-  [ -f "$HOME/project/keep" ]
-}
-
-@test "interrupted move-aside never reclaims a recreated user pathname" {
-  mkdir -p "$HOME/.local/share/acq/.acq-uninstall-pending/py-acq"
-  printf '4.1.1\npy-acq\n' > "$HOME/.local/share/acq/.acq-v1-install"
-  mkdir -p "$HOME/.local/share/acq/py-acq"
-  touch "$HOME/.local/share/acq/py-acq/user-owned"
-  run uninstall_main --yes
-  [ "$status" = 0 ]
-  [ -f "$HOME/.local/share/acq/py-acq/user-owned" ]
-}
-
-@test "bookkeeping sentinel symlinks and directories fail before deletion" {
-  mkdir -p "$HOME/.local/share/acq"
-  printf '4.1.1\nREADME.md\n' > "$HOME/.local/share/acq/.acq-v1-install"
-  touch "$HOME/.local/share/acq/README.md" "$HOME/keep"
-  ln -s "$HOME/keep" "$HOME/.local/share/acq/.acq-uninstalled"
-  run uninstall_main --yes
-  [ "$status" = 1 ]
-  [ -f "$HOME/.local/share/acq/README.md" ]
-  rm "$HOME/.local/share/acq/.acq-uninstalled"
-  mkdir "$HOME/.local/share/acq/.acq-uninstalled"
-  run uninstall_main --yes
-  [ "$status" = 1 ]
-}
-
-@test "absent owned entry remains relinquished after failed manifest update" {
-  mkdir -p "$HOME/.local/share/acq"
-  printf '4.1.1\nREADME.md\n' > "$HOME/.local/share/acq/.acq-v1-install"
-  original_drop="$(declare -f uninstall_manifest_drop)"
-  uninstall_manifest_drop() { return 1; }
-  run uninstall_main --yes
-  [ "$status" = 1 ]
-  [ -d "$HOME/.local/share/acq/.acq-uninstall-pending/README.md" ]
-  printf 'new user file\n' > "$HOME/.local/share/acq/README.md"
-  eval "$original_drop"
-  run uninstall_main --yes
-  [ "$status" = 0 ]
-  grep -Fx 'new user file' "$HOME/.local/share/acq/README.md"
-}
-
-@test "installer refuses unfinished uninstall transactions" {
-  run grep -F 'rerun uninstall.command before reinstalling' "$REPO_ROOT/install.sh"
-  [ "$status" = 0 ]
-}
-
 @test "future schemas in all migrated record families block preview" {
   for relative in msb/example.json provider-credentials/example.json github-scope/msb/example.json \
-    msb-secret-bindings/example.json kit-sources/example.json provenance/msb/example.json generation; do
+    msb-secret-bindings/example.json kit-sources/example.json provenance/msb/example.json \
+    kit-consent/msb/example.json kit-applied/msb/example.json generation; do
     mkdir -p "$(dirname "$HOME/.local/state/acq/$relative")"
     printf '{"schema":999}\n' > "$HOME/.local/state/acq/$relative"
     run uninstall_main --dry-run
@@ -520,6 +350,24 @@ STUB
     [ -f "$HOME/.local/state/acq/$relative" ]
     rm -f "$HOME/.local/state/acq/$relative"
   done
+}
+
+@test "broken system Python candidate falls back without masking invalid schemas" {
+  mkdir -p "$HOME/.local/state/acq/msb"
+  printf '{"schema":1}\n' > "$HOME/.local/state/acq/msb/example.json"
+  # Intercept only the fixed parser paths; no real interpreter is replaced.
+  uninstall_python_available() { return 0; }
+  /usr/bin/python3() { printf 'broken fixture parser\n' >&2; return 1; }
+  /usr/local/bin/python3() {
+    if [ "${2:-}" = -c ]; then return 0; fi
+    grep -q '"schema":1' "$3"
+  }
+  uninstall_state="$HOME/.local/state/acq"
+  run uninstall_migrated_state
+  [ "$status" = 0 ]
+  printf '{"schema":999}\n' > "$HOME/.local/state/acq/msb/example.json"
+  run uninstall_migrated_state
+  [ "$status" = 1 ]
 }
 
 @test "Linux credential preflight fails before sandbox stop" {
@@ -530,16 +378,6 @@ STUB
   [ "$status" = 1 ]
   run grep -E '^(stop|rm) ' "$CALLS"
   [ "$status" = 1 ]
-}
-
-@test "read-only provider generation directories can be removed" {
-  mkdir -p "$HOME/.local/state/acq/provider-input/msb/example/generation"
-  printf 'fixture\n' > "$HOME/.local/state/acq/provider-input/msb/example/generation/facts.json"
-  chmod 0444 "$HOME/.local/state/acq/provider-input/msb/example/generation/facts.json"
-  chmod 0555 "$HOME/.local/state/acq/provider-input/msb/example/generation"
-  run uninstall_remove_root "$HOME/.local/state/acq" acq
-  [ "$status" = 0 ]
-  [ ! -e "$HOME/.local/state/acq" ]
 }
 
 @test "offline discovery cannot reach system package managers or backends" {

@@ -12,6 +12,11 @@ uninstall_installation_inventory() {
   uninstall_owned=()
   uninstall_marked=0
   marker="$uninstall_install/.acq-v1-install"
+  if { [ -e "$uninstall_install/.acq-uninstalled" ] || [ -L "$uninstall_install/.acq-uninstalled" ] ||
+    [ -e "$uninstall_install/.acq-uninstall-pending" ] || [ -L "$uninstall_install/.acq-uninstall-pending" ]; } &&
+    [ ! -f "$marker" ]; then
+    uninstall_error 'Uninstall transaction ownership manifest is missing. Review the installation manually; no files removed.'; return 1
+  fi
   if [ -e "$uninstall_install/.acq-uninstalled" ] || [ -L "$uninstall_install/.acq-uninstalled" ]; then
     uninstall_validate_root "$uninstall_install/.acq-uninstalled" .acq-uninstalled || return 1
     [ -f "$uninstall_install/.acq-uninstalled" ] || return 1
@@ -19,6 +24,7 @@ uninstall_installation_inventory() {
   if [ -e "$uninstall_install/.acq-uninstall-pending" ] || [ -L "$uninstall_install/.acq-uninstall-pending" ]; then
     uninstall_validate_root "$uninstall_install/.acq-uninstall-pending" .acq-uninstall-pending || return 1
     [ -d "$uninstall_install/.acq-uninstall-pending" ] || return 1
+    uninstall_pending_inventory || return 1
   fi
   if [ -e "$marker" ] || [ -L "$marker" ]; then
     uninstall_validate_root "$marker" .acq-v1-install || return 1
@@ -42,7 +48,7 @@ uninstall_installation_inventory() {
 }
 
 uninstall_installation_remove() {
-  local name entry unowned=0
+  local name entry
   if [ "$uninstall_marked" = 1 ]; then
     for name in ${uninstall_owned[@]+"${uninstall_owned[@]}"}; do
       # Top-level symlinks are unlinked, never traversed; directories are removed
@@ -68,24 +74,38 @@ uninstall_installation_remove() {
       uninstall_pending_remove "${entry##*/}" || return 1
     done
     [ ! -d "$uninstall_install/.acq-uninstall-pending" ] || rmdir "$uninstall_install/.acq-uninstall-pending" || return 1
-    # Unowned contents belong to the user. Do not remove them with the install.
-    for entry in "$uninstall_install"/* "$uninstall_install"/.[!.]* "$uninstall_install"/..?*; do
-      [ -e "$entry" ] || [ -L "$entry" ] || continue
-      case "${entry##*/}" in .acq-v1-install|.acq-uninstalled) ;; *) unowned=1 ;; esac
-    done
-    if [ "$unowned" = 0 ]; then
-      rm -f -- "$uninstall_install/.acq-uninstalled" || return 1
-      rm -f -- "$uninstall_install/.acq-v1-install" || return 1
-      rmdir "$uninstall_install" || return 1
-    fi
+    # Keep exhausted ownership evidence even when no user files remain. Removing
+    # it before rmdir creates an interruption window that authorizes legacy rm.
+    printf 'Retained exhausted ownership markers in %s for safe retries.\n' "$uninstall_install"
   else
     uninstall_remove_root "$uninstall_install" acq || return 1
   fi
 }
 
+uninstall_pending_inventory() {
+  local entry name
+  for entry in "$uninstall_install/.acq-uninstall-pending"/* \
+    "$uninstall_install/.acq-uninstall-pending"/.[!.]* "$uninstall_install/.acq-uninstall-pending"/..?*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    name="${entry##*/}"
+    uninstall_owned_name "$name" || { uninstall_error "Unknown pending installation entry: $name"; return 1; }
+    # Payload symlinks are unlinked, never followed; other payloads must be
+    # regular files or directories accepted by the same removal path checks.
+    [ ! -L "$entry" ] || continue
+    uninstall_validate_root "$entry" "$name" || return 1
+    [ -f "$entry" ] || [ -d "$entry" ] || { uninstall_error "Unsupported pending entry: $name"; return 1; }
+  done
+}
+
+uninstall_owned_name() {
+  case "$1" in acq|acq-python|acq.cmd|acq.ps1|acq.backends|py-acq|wheelhouse|LICENSE|README.md|provenance.json|install.ps1|uninstall.command) return 0 ;; *) return 1 ;; esac
+}
+
+uninstall_python_available() { [ -x "$1" ]; }
+
 uninstall_pending_remove() {
   local target="$uninstall_install/.acq-uninstall-pending/$1"
-  case "$1" in acq|acq-python|acq.cmd|acq.ps1|acq.backends|py-acq|wheelhouse|LICENSE|README.md|provenance.json|install.ps1|uninstall.command) ;; *) return 1 ;; esac
+  uninstall_owned_name "$1" || return 1
   if [ -L "$target" ]; then rm -f -- "$target" || return 1
   else uninstall_remove_root "$target" "$1" || return 1; fi
 }
@@ -106,15 +126,22 @@ uninstall_migrated_state() {
   for file in "$uninstall_state/msb"/*.json "$uninstall_state/sbx"/*.json \
     "$uninstall_state/provider-credentials"/*.json "$uninstall_state/github-scope"/*/*.json \
     "$uninstall_state/msb-secret-bindings"/*.json "$uninstall_state/kit-sources"/*.json \
-    "$uninstall_state/provenance"/*/*.json "$uninstall_state/generation"; do
+    "$uninstall_state/provenance"/*/*.json "$uninstall_state/kit-consent"/*/*.json \
+    "$uninstall_state/kit-applied"/*/*.json "$uninstall_state/generation"; do
     [ -e "$file" ] || continue
     uninstall_validate_root "$file" "${file##*/}" || return 1
     # System parsers are independent of the user-writable installation being
     # removed. Never execute its private runtime during destructive inventory.
-    for candidate in /usr/bin/python3 /usr/local/bin/python3 /opt/homebrew/bin/python3; do
-      [ ! -x "$candidate" ] || { python="$candidate"; break; }
-    done
-    [ -n "$python" ] || { uninstall_error 'JSON state needs an existing Python parser. Restore ACQ runtime before removal; no files removed.'; return 1; }
+    if [ -z "$python" ]; then
+      for candidate in /usr/bin/python3 /usr/local/bin/python3 /opt/homebrew/bin/python3; do
+        uninstall_python_available "$candidate" || continue
+        if "$candidate" -I -c 'import json, sys; assert json.loads("{\"schema\":1}")["schema"] == 1' </dev/null; then
+          python="$candidate"; break
+        fi
+        uninstall_error "Python parser failed at $candidate; trying the next system parser."
+      done
+    fi
+    [ -n "$python" ] || { uninstall_error 'JSON state needs a working system Python 3 parser at /usr/bin/python3, /usr/local/bin/python3, or /opt/homebrew/bin/python3. Repair or install one before retrying; no files removed.'; return 1; }
     "$python" -I - "$file" <<'PY' || { uninstall_error "Unknown or invalid migrated state: $file"; return 1; }
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as stream:

@@ -42,5 +42,7 @@ def run_uninstall(parsed, emit_json: bool, backend_override: str | None) -> int:
         args.append("--dry-run")
     if parsed.yes:
         args.append("--yes")
+    if parsed.confirm_no_sbx_sandboxes:
+        args.append("--confirm-no-sbx-sandboxes")
     # Foreground output and terminal prompts belong to the shared wizard.
     return hostexec.exit_status(subprocess.run(args, check=False).returncode)

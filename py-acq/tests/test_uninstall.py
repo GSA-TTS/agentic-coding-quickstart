@@ -23,8 +23,8 @@ def test_dispatch_precedes_migration_and_backend(monkeypatch, tmp_path):
     monkeypatch.setattr(uninstall.subprocess, "run", lambda args, **kw: seen.append(args) or SimpleNamespace(returncode=0))
     monkeypatch.setattr(cli, "_migration_pre_step", lambda *a: (_ for _ in ()).throw(AssertionError("migration")))
     monkeypatch.setattr(cli, "_user_dirs_pre_step", lambda *a: (_ for _ in ()).throw(AssertionError("user dirs")))
-    assert cli.main(["uninstall", "--dry-run"]) == 0
-    assert seen == [["/fixture/bash", str(script), "--dry-run"]]
+    assert cli.main(["uninstall", "--dry-run", "--confirm-no-sbx-sandboxes"]) == 0
+    assert seen == [["/fixture/bash", str(script), "--dry-run", "--confirm-no-sbx-sandboxes"]]
 
 
 def test_json_and_backend_flags_refused_without_cleanup(monkeypatch):

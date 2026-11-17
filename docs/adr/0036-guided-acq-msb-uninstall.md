@@ -58,6 +58,13 @@ remaining sandbox data blocks removal rather than guessing that no VM is running
 
 ## Consequences
 
+Installed SBX blocks removal of shared ACQ state. Historical ACQ SBX records
+alone do not block a dry run: they are metadata, not proof that sandboxes remain.
+When SBX is missing, destructive removal requires a separate human assertion
+that no SBX sandboxes remain. `--yes` does not supply that assertion; the explicit
+`--confirm-no-sbx-sandboxes` option does. SBX native storage and daemon remain
+outside scope. Unknown inventory requires restoring SBX to check it, not guessing.
+
 - A partially removed ACQ installation can be cleaned without reinstalling ACQ.
 - The scope is local ACQ/MSB-owned components, not forensic erasure or remote
   credential revocation. Backups, manually copied checkouts, package-manager
