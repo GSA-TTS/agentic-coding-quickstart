@@ -307,7 +307,10 @@ npm install -g github:GSA-TTS/agentic-coding-quickstart   # if you use Node/npm
 brew install GSA-TTS/tap/acq                              # if you use Homebrew
 ```
 
-Package-manager installs give you `upgrade`/`uninstall` for free.
+Package-manager installs give you `upgrade`/`uninstall` for free. Package removal
+alone does not remove sandboxes or saved credentials. For complete local ACQ/MSB
+removal, use `acq uninstall`; see [the removal guide](uninstall.md), including
+the standalone Mac wizard for broken installations.
 
 ### Windows preview install
 

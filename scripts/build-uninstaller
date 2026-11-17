@@ -1,0 +1,19 @@
+#!/bin/bash
+# Package the shared wizard without runtime sourcing or network requests.
+set -euo pipefail
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+output="${1:?Usage: bash scripts/build-uninstaller OUTPUT.command}"
+{
+  printf '#!/bin/bash\n# Self-contained ACQ uninstaller; see ADR-0036.\nset -uo pipefail\n'
+  cat "$root/acq.backends/uninstall-files.sh" "$root/acq.backends/uninstall.sh"
+  cat <<'FOOTER'
+uninstall_main "$@"
+result=$?
+if [ -t 0 ]; then
+  printf '\nPress Return to exit.\n'
+  IFS= read -r _answer || true
+fi
+exit "$result"
+FOOTER
+} > "$output"
+chmod 0755 "$output"
