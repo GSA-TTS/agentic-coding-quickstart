@@ -27,6 +27,28 @@ export ACQ_SCRIPT_DIR
 # The resolved path of this acq script (for version output).
 ACQ_RESOLVED_PATH="${ACQ_SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
 
+# Uninstall must work before normal backend/config discovery, even with a broken
+# installation. Load all cleanup functions before removing their source files.
+_acq_uninstall_offset=0
+case "${1:-}" in
+  --backend=*) [ "${2:-}" != uninstall ] || _acq_uninstall_offset=1 ;;
+  --backend) [ "${3:-}" != uninstall ] || _acq_uninstall_offset=2 ;;
+esac
+if [ "${1:-}" = uninstall ] || [ "$_acq_uninstall_offset" -gt 0 ]; then
+  if [ "$_acq_uninstall_offset" -gt 0 ]; then
+    echo 'acq: uninstall is backend-independent; use acq uninstall without --backend.' >&2
+    exit 2
+  fi
+  shift
+  set +e
+  # shellcheck source=acq.backends/uninstall-files.sh
+  . "${ACQ_SCRIPT_DIR}/acq.backends/uninstall-files.sh"
+  # shellcheck source=acq.backends/uninstall.sh
+  . "${ACQ_SCRIPT_DIR}/acq.backends/uninstall.sh"
+  uninstall_main "$@"
+  exit "$?"
+fi
+
 # Source common backend-agnostic logic.
 # shellcheck disable=SC1091
 . "${ACQ_SCRIPT_DIR}/acq.backends/common.sh"
@@ -78,6 +100,7 @@ Usage:
   acq [--backend sbx|msb] <subcommand> [args...]
 
 Subcommands:
+  uninstall [--dry-run] [--yes]             Remove ACQ and all MSB data (not SBX).
   run AGENT PATH [...] [-- AGENT_ARGS...]  Create+attach a sandbox, or re-attach
                                            an existing one, and launch AGENT
                                            (e.g. opencode) or a shell.
@@ -1523,7 +1546,7 @@ case "$subcommand" in
       _shell_ws=$(acq_backend_workspace_for "$local_name" 2>/dev/null || true)
     fi
     advise_project_env_activation "$_shell_ws"
-    ACQ_SESSION_KIND="shell"
+    export ACQ_SESSION_KIND="shell"
     acq_backend_shell "$local_name"
     ;;
 

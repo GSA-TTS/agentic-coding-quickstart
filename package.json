@@ -11,6 +11,7 @@
     "acq",
     "acq.backends/",
     "scripts/setup-provider-input-validator",
+    "scripts/build-uninstaller",
     "scripts/install-provider-input-wheelhouse",
     "scripts/provider-input-validator-requirements.txt",
     "scripts/provider-input-validator-requirements-linux.txt",
