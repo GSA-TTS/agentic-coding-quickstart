@@ -1,9 +1,22 @@
 # Upstream handoff
 
-This branch offers the additions from `mogul/agentic-coding-quickstart` to
+This branch brings the Python `acq` implementation and its supporting work, developed
+in a personal fork that has since been retired, into
 `GSA-TTS/agentic-coding-quickstart`. It records review inputs, not an acceptance
 decision. Repository settings described here are checkout records, not a live
-GitHub settings audit. The `m`-suffix ADR identifiers are retained.
+GitHub settings audit.
+
+**Tracking.** What remains to land this work (the other PRs it depends on or
+conflicts with, the checklist, and who decides what) is coordinated in
+GSA-TTS/agentic-coding-quickstart#709, not in this file. This file keeps only the
+review inputs below.
+
+**ADR identifiers.** The fork's decisions carry an `m` suffix (`0038m` to `0052m`) so
+they could be issued there without colliding with upstream numbers. They are renamed
+to the next free upstream numbers, with every reference updated, right before this
+branch merges; until then the `m` form is the identifier in all text and links, and
+the mapping table below is the key. The old-to-new table will be added to the merge
+PR description.
 
 ## What is included
 
@@ -41,7 +54,7 @@ GitHub settings audit. The `m`-suffix ADR identifiers are retained.
 ## Suggested review order
 
 1. Read [`docs/spec/acq-v1.md`](spec/acq-v1.md), its approval-status note,
-   [`GLOSSARY.md`](../GLOSSARY.md), and ADR-0038m through ADR-0045m.
+   [`GLOSSARY.md`](../GLOSSARY.md), and ADR-0038m through ADR-0045m (then 0051m and 0052m, the acq-owned sbx base kit and msb base image).
 2. Review migration and trust boundaries against ADR-0032/0035/0037, then the
    adapter capability contract and Python implementation notes. Read corrections
    and amendments in ADR-0046m/0047m/0048m as well as their original decisions.
@@ -56,7 +69,7 @@ GitHub settings audit. The `m`-suffix ADR identifiers are retained.
 5. Resolve the governance and administration choices below before relying on
    the proposed gates. All ADRs are linked in the [ADR index](adr/README.md).
 
-## Fork ADR mapping
+## Fork ADR mapping (`m` identifiers, renamed before merge)
 
 Statuses below are the recorded frontmatter statuses, not upstream approvals.
 “None” means no upstream ADR is explicitly extended or superseded by this
@@ -77,6 +90,8 @@ record; sibling fork decisions are cited in the records themselves.
 | [0048m — Windows defaults to the Python implementation with acq's managed runtime](adr/0048m-windows-defaults-to-the-python-implementation.md) | accepted | Changes the Windows default and records gates still owed after the approved flip. | None; amends ADR-0047m's Windows default. |
 | [0049m — CI-only Python quality tools, pinned with hashes](adr/0049m-ci-only-python-quality-tools.md) | accepted | Pins lint, typing, security and coverage tooling outside the runtime. | None. |
 | [0050m — Release signing scaffolding](adr/0050m-release-signing-scaffolding.md) | accepted | Secret-gated Sigstore, Authenticode and macOS signing that is a no-op until upstream configures credentials. | None; extends ADR-0042m's release provenance. |
+| [0051m — acq supplies the sbx sandbox base kit instead of a built-in agent](adr/0051m-sbx-base-kit-is-acq-owned.md) | accepted | Passes acq's own base kit to `sbx create` so a change in sbx's built-in agent kit format cannot break create. | Builds on ADR-0030 (acq's devenv base image). |
+| [0052m — msb's shell agent and the ro-mount canary use acq's base image](adr/0052m-msb-base-image-is-acq-owned.md) | accepted | The Bash msb backend and the canary use the same base image as the Python backend. | Builds on ADR-0030. |
 
 ## Governance facts for upstream decision
 
@@ -91,8 +106,8 @@ record; sibling fork decisions are cited in the records themselves.
 - **Fork precedence:** [`AGENTS.fork.md`](../AGENTS.fork.md) overrides AGENTS.md
   for fork authorization, attribution, approval boundaries and ADR lifecycle.
   Its authorization is fork-only; it does not grant upstream write authority.
-  Upstream decides its disposition and any replacement policy. Its historical
-  suffix-removal instruction is not applied in this handoff.
+  Upstream decides its disposition and any replacement policy. Its `m`-suffix
+  rule is applied as described under "ADR identifiers" above: renumber at merge.
 - **ADR-0045m gates:** distinct-agent review, human-only merging and fresh live
   evidence are recorded policy. Required checks and reviews are not enforced
   in the fork. The dated ADR note records PR-only, signed-commit, no-delete and
@@ -100,11 +115,11 @@ record; sibling fork decisions are cited in the records themselves.
   approvals. The proposed release ruleset and CODEOWNERS review are not enforced;
   upstream chooses rulesets, owners, required checks and review requirements.
 - **Ledger waivers:** two waivers for msb/Linux aarch64 and sbx/Linux x86_64
-  expire on 2027-02-05 and point to mogul/agentic-coding-quickstart#60 (the
+  expire on 2027-02-05 and cite the retired fork's qualification issue (the
   earlier msb/Linux x86_64 waiver was retired by a live PASS run). They are
-  retained as evidence metadata, not silently transferred acceptance. Upstream
-  decides ownership and any replacement tracking; new live runs can replace the
-  waivers.
+  retained as evidence metadata, not silently transferred acceptance. Live
+  qualification is tracked in GSA-TTS/agentic-coding-quickstart#709; new live runs
+  can replace the waivers.
 - **Releases and tokens:** `ENABLE_RELEASES` is recorded as unset in the fork.
   A fork experiment exercised the PR/gate/tag sequence but proposed `4.0.1`
   against a `4.1.1` manifest without release tags; that PR was closed. Upstream
@@ -152,66 +167,26 @@ gate and satisfying it are separate reviews.
 own paths in the personal fork. Upstream must confirm team eligibility and
 choose whether to require their reviews.
 
-Qualification publishing currently rejects `GSA-TTS`-owned repositories,
-including upstream, and publishes `chore/ledger-*` branches and PRs to a
-contributor's personal fork `main`. Upstream decides whether to retain that
-contributor flow or support maintainer publishing; this docs change does not
-alter the restriction.
+`qualification.host` publishes a `chore/ledger-*` branch and PR to the upstream
+repository (the remote whose URLs are all `GSA-TTS/agentic-coding-quickstart`,
+normally `origin`), or to a personal fork named with `--remote` (ADR-0044m, amendment
+of 2026-11-14). It never pushes `main` or a tag and refuses any other `GSA-TTS`
+repository. Whether an agent may run it without per-run approval, and whether
+workflows should run on those branches, are maintainer decisions tracked in
+GSA-TTS/agentic-coding-quickstart#709.
 
-## Open work requiring hosts or credentials
+## Open work and the merge checklist
 
-The live re-qualification checklist is mogul/agentic-coding-quickstart#60;
-Windows gate details are retained in ADR-0048m. At handoff, `msb/Linux x86_64`
-holds a current `PASS` transcript in `docs/qualification-ledger.json`. Re-run
-the remaining cells with historical `PASS` entries (`macos-arm64` and
-`windows-x64` on both `msb` and `sbx`) against the offered revision, and qualify
-the two waived cells (`msb/Linux aarch64` and `sbx/Linux x86_64`); a historical
-`PASS` is not proof of currency after Tier-3 surface edits. macOS Intel and
-sbx/Linux aarch64 remain unqualified rather than implicitly supported live
-cells. These runs need the appropriate virtualization hosts; credential
-substitution needs a suitable endpoint and injected credentials.
+Moved to GSA-TTS/agentic-coding-quickstart#709, so there is one place to update:
+landing the qualification evaluator (#699) first, reconciling this branch onto it,
+renumbering the `m` ADRs, removing fork leftovers, repository settings and
+CODEOWNERS, live Tier-3 qualification on each host, release and signing enablement,
+and the cross-repository follow-ups. Two constraints from that checklist matter when
+reading this branch:
 
-Windows still owes the default-launcher Tier-3 transcript and sandbox-control
-assertions, and a qualification decision about the launcher/runtime surface
-(ADR-0048m gates 3, 5b and 5c). Offline-install completeness needs the assembled
-release set and a network-blocked host (mogul/agentic-coding-quickstart#61).
-Code signing and macOS notarization need signing credentials and platform
-validation before managed-fleet execution can be claimed (ADR-0042m); the
-workflow steps exist (ADR-0050m) but have never run with real credentials.
-
-## Upstream migration and post-merge checklist
-
-1. **Merge preserving ancestry (`--no-ff`):** Merge the handoff branch into
-   `GSA-TTS/agentic-coding-quickstart` with a merge commit (`git merge --no-ff`
-   or GitHub's *Create a merge commit*) rather than squash or rebase, so the
-   revisions recorded in `docs/qualification-ledger.json` remain ancestors of
-   `HEAD` (`PYTHONPATH=. python3 -P -m qualification.gate check`).
-2. **Fork governance and ADR disposition:** Decide whether to remove or
-   supersede [`AGENTS.fork.md`](../AGENTS.fork.md) (and its callout at the top
-   of [`AGENTS.md`](../AGENTS.md)), and whether to retain the `0038m`–`0050m`
-   ADR identifiers or renumber them (noting that `0038` and `0039` already exist
-   for the Bash 3.2 test runner and CI shard matrix).
-3. **Rulesets, required checks and `CODEOWNERS`
-   (mogul/agentic-coding-quickstart#117):** Confirm `@GSA-TTS/agentic-coding-team`
-   and `@GSA-TTS/agentic-coding-admins` team access for
-   [`.github/CODEOWNERS`](../.github/CODEOWNERS), configure the `main` branch
-   ruleset and required check contexts (see [release gate setup](howto/release-gate-setup.md)),
-   and confirm that `qualification/publish.py` may push `chore/ledger-*` branches to
-   `GSA-TTS/agentic-coding-quickstart` (it now does; ADR-0044m, "Amendment (2026-11-14)"),
-   whether an agent may run it without per-run approval (`AGENTS.md` still requires approval
-   for pushes), and whether upstream workflows should run on those branches.
-4. **Live Tier-3 hardware qualification (mogul/agentic-coding-quickstart#60):**
-   Run `PYTHONPATH=. python3 -P -m qualification.host` on the remaining six
-   claimed cells (`msb/macos-arm64`, `sbx/macos-arm64`, `msb/windows-x64`,
-   `sbx/windows-x64`, `msb/linux-aarch64`, and `sbx/linux-x86_64`;
-   `msb/linux-x86_64` is already current at handoff) and close out ADR-0048m
-   Windows gates 3, 5b and 5c.
-5. **Release enablement, signing and offline-install oracle
-   (mogul/agentic-coding-quickstart#61):** Set `ENABLE_RELEASES=true` (plus
-   optional `RELEASE_PLEASE_TOKEN` and ADR-0050m signing variables/secrets per
-   [release signing](howto/release-signing.md)) when ready to cut a release;
-   then record the live offline-install completeness transcript against the
-   published release archive set on a network-blocked host.
-6. **Cross-repo Patterns tracking (mogul/agentic-coding-quickstart#240):**
-   Coordinate with `GSA-TTS/agentic-coding-patterns` on the upstream `opencode`
-   kit renderer and any future custom-provider secret UX follow-ups.
+- Merge with a merge commit, not squash or rebase, so revisions recorded in
+  `docs/qualification-ledger.json` stay ancestors of `HEAD`; recorded entries cannot
+  carry over a Tier-3 surface change or an ADR-renaming commit and are re-recorded
+  after merge, on a commit that is on `main`.
+- Offline tests, and local runs of the oracles that are not recorded as transcripts,
+  are not live qualification evidence.
