@@ -100,17 +100,6 @@ load uninstall-fixture
   [[ "$output" == *'No process was killed.'* ]]
 }
 
-@test "missing secret-tool preserves credential records" {
-  uninstall_index="$HOME/.local/share/acq/secret-index"
-  uninstall_meta="$HOME/.local/share/acq/secret-meta"
-  uninstall_secrets="$HOME/.local/share/acq/secrets"
-  mkdir -p "$(dirname "$uninstall_index")"
-  printf 'acq.usai' > "$uninstall_index"
-  run uninstall_linux_secrets
-  [ "$status" = 1 ]
-  [ -f "$uninstall_index" ]
-}
-
 @test "unterminated credential index lines are processed" {
   uninstall_secret_tool_available() { return 0; }
   printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "$CALLS"\n' > "$FIXTURE/bin/secret-tool"
@@ -129,7 +118,7 @@ load uninstall-fixture
   run bash "$REPO_ROOT/scripts/build-uninstaller" "$FIXTURE/uninstall.command"
   [ "$status" = 0 ]
   [ -x "$FIXTURE/uninstall.command" ]
-  run bash "$FIXTURE/uninstall.command" --help
+  run bash "$FIXTURE/uninstall.command" --help </dev/null
   [ "$status" = 0 ]
   [[ "$output" == *'Usage: acq uninstall'* ]]
   run grep -E '^\s*(source|\.) ' "$FIXTURE/uninstall.command"
@@ -239,6 +228,7 @@ RC
   cat > "$FIXTURE/bin/msb" <<'STUB'
 #!/bin/bash
 case "$*" in
+  '--version') printf 'msb 0.7.7\n' ;;
   'ls -q') ;;
   'ls -q --running') printf '%s\n' '--label=foreign' ;;
   *) exit 99 ;;

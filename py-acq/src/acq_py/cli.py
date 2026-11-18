@@ -895,6 +895,8 @@ def _main(argv: list[str] | None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
 
     flags, args = _scan_globals(args)
+    if args[:1] == ["uninstall"] and flags.image is not None:
+        return common._usage_failure("uninstall", "Use uninstall without global image options.", flags.emit_json)
     emit_json = flags.emit_json
     backend_override = flags.backend
     if flags.image_missing:

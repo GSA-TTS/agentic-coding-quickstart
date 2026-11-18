@@ -13,7 +13,7 @@ def generate_recovery(project: Path, target: Path) -> None:
         builder = builder_path.read_text(encoding="utf-8")
         guard = builder.split("<<'PATH_GUARD'\n", 1)[1].split("\nPATH_GUARD", 1)[0]
         footer = builder.split("<<'FOOTER'\n", 1)[1].split("\nFOOTER", 1)[0]
-        modules = ("uninstall-files.sh", "uninstall-installation.sh", "uninstall.sh")
+        modules = ("uninstall-files.sh", "msb-version-policy.sh", "uninstall-installation.sh", "uninstall.sh")
         text = "#!/bin/bash\n# Self-contained ACQ uninstaller; see ADR-0036.\nset -uo pipefail\n"
         text += guard + "\n"
         text += "".join((root / "acq.backends" / name).read_text(encoding="utf-8") for name in modules)

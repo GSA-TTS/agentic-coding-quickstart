@@ -47,10 +47,10 @@ uninstall_remove_root() {
   [ ! -e "$1" ] || uninstall_error "still present: $1"
 }
 
-# Read only the specific URL from the original checkout's config; never run Git
+# Read only URLs from the original checkout's config; never run Git
 # in guest-writable clones or enable config includes/hooks/fsmonitor.
 uninstall_clone_remotes() {
-  local dir origin config scratch url name child
+  local dir origin config scratch name child rc
   for dir in "$uninstall_clones"/*; do
     [ -d "$dir" ] || continue
     [ ! -L "$dir" ] && [ ! -L "$dir/.origin" ] || return 1
@@ -62,19 +62,47 @@ uninstall_clone_remotes() {
     [ -d "$origin" ] || continue
     config=$(uninstall_git_config "$origin") || return 1
     command -v git >/dev/null 2>&1 || { uninstall_error 'Git is needed to remove temporary project remotes.'; return 1; }
-    url=$(git config --file "$config" --no-includes --get "remote.sandbox-$name.url")
-    case "$?" in 0) ;; 1) continue ;; *) return 1 ;; esac
+    if git config --file "$config" --no-includes --get-regexp "^remote\\.sandbox-$name\\." >/dev/null; then
+      :
+    else
+      rc=$?
+      [ "$rc" = 1 ] && continue
+      return 1
+    fi
     scratch=""
     for child in "$dir"/*; do
-      [ -d "$child/.git" ] && scratch="$child"
+      [ -d "$child/.git" ] || continue
+      [ -z "$scratch" ] && [ ! -L "$child" ] && [ ! -L "$child/.git" ] || {
+        uninstall_error "ambiguous scratch clone in $dir; inspect sandbox-$name manually."; return 1; }
+      scratch="$child"
     done
-    [ -n "$scratch" ] && [ "$url" = "$scratch" ] || {
+    [ -n "$scratch" ] &&
+      uninstall_remote_urls_match "$config" "remote.sandbox-$name.url" "$scratch" required &&
+      uninstall_remote_urls_match "$config" "remote.sandbox-$name.pushurl" "$scratch" optional || {
       uninstall_error "temporary remote was changed in $origin; inspect sandbox-$name manually."; return 1; }
     uninstall_validate_root "$config" config || return 1
     uninstall_tracking_refs "$origin" "sandbox-$name" "${1:-remove}" || return 1
     [ "${1:-remove}" != check ] || continue
     git config --file "$config" --no-includes --remove-section "remote.sandbox-$name" || return 1
   done
+}
+
+# NUL records preserve embedded/trailing newlines. The final record carries Git's
+# status so a failed config read cannot be mistaken for an absent optional URL.
+uninstall_remote_urls_match() {
+  local config="$1" key="$2" scratch="$3" required="$4" record previous="" count=0
+  while IFS= read -r -d '' record; do
+    if [ "$count" -gt 0 ]; then
+      [ "$previous" = "$scratch" ] || return 1
+    fi
+    previous="$record"
+    count=$((count + 1))
+  done < <(git config --file "$config" --no-includes --null --get-all "$key"; printf '%s\0' "$?")
+  case "$previous" in
+    0) [ "$count" -gt 1 ] ;;
+    1) [ "$count" = 1 ] && [ "$required" = optional ] ;;
+    *) return 1 ;;
+  esac
 }
 
 # Delete only tracking names, never dereference a symbolic tracking ref into a
@@ -170,32 +198,52 @@ uninstall_macos_secrets() {
 uninstall_secret_tool_available() { command -v secret-tool >/dev/null 2>&1; }
 uninstall_secret_tool() { secret-tool "$@"; }
 
+uninstall_linux_secret_clear() {
+  local rc
+  if uninstall_secret_tool clear acq_key "$1" >/dev/null 2>&1; then return 0; else rc=$?; fi
+  # A no-match clear is success only after an empty, successful search. Consume
+  # all output (including locked-item records) without retaining secret values.
+  if [ "$rc" = 1 ] && (
+    set -o pipefail
+    uninstall_secret_tool search --all acq_key "$1" 2>/dev/null | awk 'END { exit NR != 0 }'
+  ); then return 0; fi
+  uninstall_error 'Credential deletion or absence verification failed. Unlock the secret store and retry.'
+}
+
 uninstall_linux_secrets() {
-  local key file
-  if ! uninstall_secret_tool_available; then
-    [ ! -s "$uninstall_index" ] || { uninstall_error 'Credential index remains but secret-tool is missing. Restore it before removal.'; return 1; }
-    for file in "$uninstall_meta"/acq.*; do
-      [ -f "$file" ] || continue
-      [ -f "$uninstall_secrets/${file##*/}" ] && [ ! -L "$uninstall_secrets/${file##*/}" ] || {
-        uninstall_error 'An unresolved credential record remains but secret-tool is missing. Restore it before removal.'; return 1; }
-    done
-    return 0
-  fi
+  local key file seen=$'\n' available=0 mode="${1:-remove}"
+  uninstall_secret_tool_available && available=1
   for file in "$uninstall_index" "$uninstall_meta"/acq.*; do
-    [ -f "$file" ] || continue
     [ ! -L "$file" ] || return 1
+    [ -f "$file" ] || continue
     if [ "$file" = "$uninstall_index" ]; then
       while IFS= read -r key || [ -n "$key" ]; do
         case "$key" in acq.*) ;; *) return 1 ;; esac
         case "$key" in *[!A-Za-z0-9._-]*) return 1 ;; esac
-        [ "${1:-remove}" = check ] || uninstall_secret_tool clear acq_key "$key" || return 1
+        case "$seen" in *$'\n'"$key"$'\n'*) continue ;; esac
+        seen="$seen$key"$'\n'
+        uninstall_linux_secret_record "$key" "$available" indexed "$mode" || return 1
       done < "$file"
     else
       key="${file##*/}"
       case "$key" in *[!A-Za-z0-9._-]*) return 1 ;; esac
-      [ "${1:-remove}" = check ] || uninstall_secret_tool clear acq_key "$key" || return 1
+      case "$seen" in *$'\n'"$key"$'\n'*) continue ;; esac
+      seen="$seen$key"$'\n'
+      uninstall_linux_secret_record "$key" "$available" metadata "$mode" || return 1
     fi
   done
+}
+
+uninstall_linux_secret_record() {
+  # Indexed migration evidence requires keyring cleanup even with an older file
+  # fallback. Only metadata-only fallback records bypass Secret Service cleanup.
+  if [ "$3" = metadata ] && { [ -e "$uninstall_secrets/$1" ] || [ -L "$uninstall_secrets/$1" ]; }; then
+    [ -f "$uninstall_secrets/$1" ] && [ ! -L "$uninstall_secrets/$1" ] || return 1
+    return 0
+  fi
+  [ "$2" = 1 ] || {
+    uninstall_error 'An unresolved credential record remains but secret-tool is missing. Restore it before removal.'; return 1; }
+  [ "$4" = check ] || uninstall_linux_secret_clear "$1"
 }
 
 # Only unlink launchers whose target is one of the inventoried installations.

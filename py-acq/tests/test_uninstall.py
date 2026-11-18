@@ -31,6 +31,9 @@ def test_json_and_backend_flags_refused_without_cleanup(monkeypatch):
     monkeypatch.setattr(uninstall, "recovery_script", lambda: (_ for _ in ()).throw(AssertionError("cleanup")))
     assert cli.main(["--json", "uninstall"]) == 2
     assert cli.main(["--backend", "msb", "uninstall"]) == 2
+    assert cli.main(["--image", "example", "uninstall", "--dry-run"]) == 2
+    assert cli.main(["--image=example", "uninstall", "--yes"]) == 2
+    assert cli.main(["--image=example", "--image=second", "uninstall", "--yes"]) == 2
 
 
 def test_missing_script_fails_closed(monkeypatch, tmp_path):

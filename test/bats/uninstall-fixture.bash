@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Bats supplies status; the loaded production module consumes fixture variables.
+# shellcheck disable=SC2154
 
 setup() {
   REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -13,6 +15,7 @@ setup() {
   unset ACQ_SECRET_STORE_DIR ACQ_SECRET_FILE_DIR ACQ_SECRET_META_DIR ACQ_SECRET_INDEX_FILE
   unset ACQ_MSB_PORTS_DIR ACQ_MSB_CLONES_DIR ACQ_MSB_SSH_DIR ACQ_MSB_SSH_KEY
   . "$REPO_ROOT/acq.backends/uninstall-files.sh"
+  . "$REPO_ROOT/acq.backends/msb-version-policy.sh"
   . "$REPO_ROOT/acq.backends/uninstall-installation.sh"
   # Capture the real cleanup body for isolated command-contract tests.
   # Consumed by the Keychain tests in 07-uninstall.bats.
@@ -39,9 +42,58 @@ setup() {
   }
   # CI/sandbox may run as root; production still refuses sudo. Only this fixture
   # reports a regular user for the read-only inventory and isolated cleanup.
-  id() { if [ "${1:-}" = -u ]; then printf '1000\n'; else command id "$@"; fi; }
+  if [ "$(id -u)" = 0 ]; then
+    id() { if [ "${1:-}" = -u ]; then printf '1000\n'; else command id "$@"; fi; }
+  fi
   export CALLS="$FIXTURE/calls"
   : > "$CALLS"
+}
+
+remote_fixture() {
+  uninstall_state="$HOME/.local/state/acq"
+  uninstall_clones="$uninstall_state/clones"
+  origin="$HOME/project"
+  scratch="$uninstall_clones/example/project"
+  config="$origin/.git/config"
+  command git init -q "$origin"
+  command git -C "$origin" -c user.name=Fixture -c user.email=fixture@example.invalid commit --allow-empty -qm initial
+  command git -C "$origin" update-ref refs/heads/keep HEAD
+  cp "$origin/.git/refs/heads/keep" "$FIXTURE/keep-before"
+  command git -C "$origin" symbolic-ref refs/remotes/sandbox-example/alias refs/heads/keep
+  mkdir -p "$scratch/.git"
+  printf '%s\n' "$origin" > "$uninstall_clones/example/.origin"
+  command git config --file "$config" remote.sandbox-example.url "$scratch"
+}
+
+assert_remote_preserved() {
+  cp "$config" "$FIXTURE/config-before"
+  run uninstall_clone_remotes check
+  [ "$status" = 1 ]
+  run uninstall_clone_remotes
+  [ "$status" = 1 ]
+  cmp "$config" "$FIXTURE/config-before"
+  cmp "$origin/.git/refs/heads/keep" "$FIXTURE/keep-before"
+  # Malformed config is deliberately unparseable, so inspect the loose ref file.
+  grep -Fx 'ref: refs/heads/keep' "$origin/.git/refs/remotes/sandbox-example/alias"
+}
+
+linux_secret_fixture() {
+  uninstall_index="$HOME/secret-index"
+  uninstall_meta="$HOME/secret-meta"
+  uninstall_secrets="$HOME/secrets"
+  mkdir -p "$uninstall_meta" "$uninstall_secrets"
+  unset CLEAR_RC SEARCH_RC SEARCH_OUTPUT
+  uninstall_secret_tool_available() { return 0; }
+  uninstall_secret_tool() {
+    printf '%s\n' "$*" >> "$CALLS"
+    case "$1" in
+      clear) return "${CLEAR_RC:-0}" ;;
+      search)
+        [ "${SEARCH_OUTPUT:-}" = '' ] || printf '%s\n' "$SEARCH_OUTPUT"
+        return "${SEARCH_RC:-0}" ;;
+      *) return 99 ;;
+    esac
+  }
 }
 
 stub_msb() {
@@ -49,6 +101,7 @@ stub_msb() {
 #!/bin/bash
 printf '%s\n' "$*" >> "$CALLS"
 case "$*" in
+  '--version') printf 'msb 0.7.7\n' ;;
   'ls -q') [ -f "$HOME/removed" ] || printf 'example\n' ;;
   'ls -q --running') printf 'example\n' ;;
   'stop --timeout 30 example') [ ! -f "$HOME/stop-fail" ] ;;

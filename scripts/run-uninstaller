@@ -12,6 +12,8 @@ export PATH="$safe_path"
 root=$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P) || exit 1
 # shellcheck source=acq.backends/uninstall-files.sh
 . "$root/acq.backends/uninstall-files.sh"
+# shellcheck source=acq.backends/msb-version-policy.sh
+. "$root/acq.backends/msb-version-policy.sh"
 # shellcheck source=acq.backends/uninstall-installation.sh
 . "$root/acq.backends/uninstall-installation.sh"
 # shellcheck source=acq.backends/uninstall.sh

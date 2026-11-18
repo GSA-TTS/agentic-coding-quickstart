@@ -3,7 +3,7 @@ title: "Remove ACQ and Microsandbox"
 description: "Guided local removal, standalone Mac recovery, and verification."
 status: canonical
 tier: 2
-last_updated: 2026-11-17
+last_updated: 2026-11-18
 related_files: ["../../acq", "../../acq.backends/uninstall.sh", "../adr/0036-guided-acq-msb-uninstall.md"]
 ---
 
@@ -62,7 +62,8 @@ safety checks. Only use it after reviewing the preview.
 5. Read the warning about sandbox-only work, then type `y` and press Return to
    confirm. macOS may request Keychain access to remove saved ACQ credentials.
 6. Leave Terminal open until the result appears. The standalone wizard waits
-   for Return before exiting so its results stay visible.
+    for Return before exiting so its results stay visible. `--help` exits
+    immediately, including when launched from a terminal.
 
 The download is a shell script, not a signed/notarized Mac application. You may
 inspect it before running. Release `SHA256SUMS` includes its checksum.
@@ -76,6 +77,11 @@ state, an existing system Python parser must validate schema versions;
 if none works, the wizard stops before deleting files. It never installs a
 parser or migrates state during removal.
 
+Before listing any sandbox, the wizard checks MSB's version using the shared
+policy in `acq.backends/msb-version-policy.sh` (ADR-0032). Unsupported, unknown,
+prerelease, and build-suffixed versions stop before opening the catalog, even for
+`--dry-run`. Run `acq uninstall` without global backend or image options.
+
 - Installed ACQ packages found through Homebrew and the current npm global prefix.
 - ACQ's managed clone and launcher under `~/.local/share/acq` and `~/.local/bin`.
 - Python release-owned files from `.acq-v1-install`, the app-private runtime,
@@ -88,8 +94,15 @@ parser or migrates state during removal.
   `~/.microsandbox`, plus recognized MSB Homebrew packages and command links.
 - Saved ACQ credentials in macOS Keychain, including entries whose on-disk
   index was already removed. No credential values are displayed.
-- Temporary `sandbox-NAME` Git remotes whose URLs still match ACQ's recorded
-  clone locations. Changed or ambiguous remotes block cleanup for manual review.
+- Temporary `sandbox-NAME` Git remotes whose fetch URLs and any push URLs all
+  exactly match ACQ's recorded clone location. Changed or ambiguous remotes block
+  cleanup for manual review; symbolic tracking refs never delete local branches.
+
+On Linux, indexed credentials require Secret Service cleanup even if an older
+file fallback remains. Metadata-only file fallbacks do not require Secret
+Service. A no-match deletion succeeds only after a successful empty search;
+errors or surviving items preserve credential records for retry. Preview only
+validates these records and tool availability; it does not delete credentials.
 
 Custom locations are detected but **not recursively deleted**. A custom path
 could be an original project rather than disposable state, so the wizard stops

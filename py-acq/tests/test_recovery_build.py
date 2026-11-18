@@ -19,6 +19,8 @@ def test_generator_matches_shell_builder(tmp_path):
     generate(ROOT / "py-acq", actual)
     assert actual.read_bytes() == expected.read_bytes()
     assert b"\r\n" not in actual.read_bytes()
+    assert b"acq_msb_check_catalog_version" in actual.read_bytes()
+    assert b"MSB_BLOCKED_VERSION_MAX=\"0.7.2\"" in actual.read_bytes()
 
 
 def test_generator_does_not_launch_any_subprocess(monkeypatch, tmp_path):
