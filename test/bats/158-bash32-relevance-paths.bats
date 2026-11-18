@@ -92,6 +92,8 @@ PENDING_PATHSPECS='
 #   repo metadata / lint config       not read by any @test
 #   other scripts/verify-* and probes live or manual tools, never run by the suite
 NOT_INPUTS='
+qualification/
+py-acq/src/acq_py/hostexec.py
 docs/
 checklists/
 governance/
