@@ -124,9 +124,8 @@ fi
 #
 # Parallel arrays (bash 3.2 safe — no associative arrays): NAME[i] is the kit
 # directory under PATTERNS_KIT_DIR; DESC[i] is the one-line picker description.
-# `prime-agent` is intentionally omitted: it is a skeleton at the current pin
-# (see the patterns kits.yaml parity note) and would be non-functional if
-# offered. Add it here once it is functional. Heavier kits such as `oci-engine`
+# `prime-agent` is intentionally omitted from this picker and the supported
+# agent catalog in acq.backends/agents.sh. Heavier kits such as `oci-engine`
 # still belong here when they are functional; the picker description must make
 # their create-time cost clear.
 # shellcheck disable=SC2034  # consumed by `acq configure` (cross-function reader)

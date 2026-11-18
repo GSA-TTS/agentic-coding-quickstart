@@ -93,6 +93,8 @@ PENDING_PATHSPECS='
 #   repo metadata / lint config       not read by any @test
 #   other scripts/verify-* and probes live or manual tools, never run by the suite
 NOT_INPUTS='
+qualification/
+py-acq/src/acq_py/hostexec.py
 docs/
 checklists/
 governance/
@@ -110,7 +112,6 @@ governance/
 .gitleaks.repo.toml
 .gitleaks.toml
 .markdown-link-check.json
-.markdownlint-cli2.yaml
 .markdownlint.jsonc
 .markdownlintignore
 .pre-commit-config.yaml

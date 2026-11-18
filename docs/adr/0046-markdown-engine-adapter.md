@@ -1,7 +1,10 @@
 ---
 title: "ADR-0046: Repository-owned Markdown engine adapter"
+description: "Why npm, CI and pre-commit share one repository-owned Markdown lint adapter instead of invoking markdownlint-cli directly"
 status: proposed
+tier: 2
 date: "2026-11-17"
+last_updated: "2026-11-18"
 ---
 
 # ADR-0046: Repository-owned Markdown engine adapter
