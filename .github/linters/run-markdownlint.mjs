@@ -83,7 +83,9 @@ export function run(args = process.argv.slice(2)) {
     const files = markdownFiles();
     if (!files.length) throw new Error("markdownlint matched no files");
     if (args.includes("--count-only")) {
-      console.log(files.length);
+      // Plain stdout, not console.log: with FORCE_COLOR (pre-commit --color=always)
+      // console.log colors a bare number, which breaks callers that compare the count.
+      process.stdout.write(`${files.length}\n`);
       return 0;
     }
     const result = diagnostics(lintFiles(files, { fix: args.includes("--fix") }));
