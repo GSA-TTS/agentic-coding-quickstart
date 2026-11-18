@@ -12,3 +12,5 @@
 /.github/workflows/ @GSA-TTS/agentic-coding-admins
 /AGENTS.md @GSA-TTS/agentic-coding-admins
 /SECURITY.md @GSA-TTS/agentic-coding-admins
+/qualification/ @GSA-TTS/agentic-coding-admins
+/py-acq/src/acq_py/hostexec.py @GSA-TTS/agentic-coding-admins

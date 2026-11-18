@@ -1,0 +1,256 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2034  # globals are read by the sourced runner and step files
+# verify-host-authority-live — HOST-RUN live validation of the host-authoritative
+# sandbox configuration work (ADR-0035 msb, ADR-0037 sbx). It walks the checklist of
+# items that offline tests cannot prove ("Still unverified on a real host") and prints
+# PASS / FAIL / BLOCKED per step, with the tested acq revision and backend version.
+#
+# It does NOT repeat what is already validated live: the msb 0.7.7 read-only mount
+# canary (scripts/qualify-msb-ro-mount), the msb inspect mount shape on a default
+# sandbox, or the provider-adoption gate (scripts/verify-backends).
+#
+# Steps that cannot be automated safely (interactive attach, a live ssh-agent forward,
+# the ADR-0037 mount experiments, other hosts) are printed as numbered MANUAL
+# instructions with the exact commands and what to observe. They are never scored.
+#
+# Usage:  scripts/verify-host-authority-live [options]
+#   --backend msb|sbx|both  backends to exercise (default both; a missing CLI makes
+#                           that backend's steps BLOCKED)
+#   --only ID[,ID...]       run only these step ids (see --dry-run for the list); steps
+#                           that reuse an earlier step's sandbox report BLOCKED alone
+#   --out DIR               transcript directory (default <repo>/tmp/verify-host-authority-live-<stamp>)
+#   --step-timeout SECS     per command timeout (default 120)
+#   --create-timeout SECS   timeout for sandbox creation (default 1200)
+#   --step-budget SECS      wall-clock budget for one whole step (default 2*create-timeout
+#                           + 10*step-timeout); an exhausted budget is BLOCKED(timeout)
+#   --no-hang-diagnostics   do not capture ps / msb ls / sbx ls when a command times out
+#                           (the capture is ON by default and goes into the transcript)
+#   --keep                  keep throwaway sandboxes when a step fails
+#   --dry-run               print the plan and the MANUAL instructions; touch no backend
+#   -h, --help              show this help
+#   EXPECT_SHA=<prefix>     abort unless this checkout's HEAD starts with it
+#
+# Exit: 0 all automated steps PASS, 1 any FAIL, 2 no FAIL but some BLOCKED, 130 interrupted.
+# Every command writes to a file, never to a pipe a descendant could hold open; a command
+# that outlives its timeout (plus HAL_KILL_GRACE, default 10s) is KILLed with its children,
+# and the summary always prints, also after an interrupt.
+# Uses your normal acq state and credentials (nothing is seeded or printed). msb steps
+# create shell sandboxes with --no-provider-kits; sbx steps create an opencode sandbox and use your existing USAi setup (a
+# create that fails for lack of it makes the sbx steps BLOCKED). Only throwaway
+# lowercase-named sandboxes are created, and they are removed on exit or interrupt.
+# Run it OUTSIDE any sandbox, on a host that can create sandboxes. Bash 3.2 compatible.
+set -uo pipefail
+
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+REPO=$(cd "$HERE/.." && pwd -P)
+ACQ_LIB="$REPO/acq"
+ACQ="${HAL_ACQ_BIN:-$ACQ_LIB}"   # HAL_ACQ_BIN: offline test seam only
+
+BACKENDS=both
+ONLY=""
+OUT=""
+STEP_TIMEOUT=120
+CREATE_TIMEOUT=1200
+STEP_BUDGET=""
+HANG_DIAG=1
+KILL_GRACE="${HAL_KILL_GRACE:-10}"   # HAL_KILL_GRACE: also an offline test seam
+KEEP=0
+DRY=0
+STAMP=$(date -u +%Y%m%dt%H%M%Sz)
+RUN_ID="${HAL_RUN_ID:-$(date -u +%d%H%M%S)-$$-$RANDOM}"   # HAL_RUN_ID: offline test seam
+
+usage() { sed -n '3,/^set -uo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; }
+die_usage() { echo "verify-host-authority-live: $1" >&2; echo "try --help" >&2; exit 2; }
+
+is_uint() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; *) [ "$1" -gt 0 ] ;; esac; }
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --backend) [ "$#" -ge 2 ] || die_usage "--backend needs a value"; BACKENDS="$2"; shift ;;
+    --backend=*) BACKENDS="${1#--backend=}" ;;
+    --only) [ "$#" -ge 2 ] || die_usage "--only needs a value"; ONLY="$2"; shift ;;
+    --only=*) ONLY="${1#--only=}" ;;
+    --out) [ "$#" -ge 2 ] || die_usage "--out needs a value"; OUT="$2"; shift ;;
+    --out=*) OUT="${1#--out=}" ;;
+    --step-timeout) [ "$#" -ge 2 ] || die_usage "--step-timeout needs a value"; STEP_TIMEOUT="$2"; shift ;;
+    --step-timeout=*) STEP_TIMEOUT="${1#--step-timeout=}" ;;
+    --create-timeout) [ "$#" -ge 2 ] || die_usage "--create-timeout needs a value"; CREATE_TIMEOUT="$2"; shift ;;
+    --create-timeout=*) CREATE_TIMEOUT="${1#--create-timeout=}" ;;
+    --step-budget) [ "$#" -ge 2 ] || die_usage "--step-budget needs a value"; STEP_BUDGET="$2"; shift ;;
+    --step-budget=*) STEP_BUDGET="${1#--step-budget=}" ;;
+    --hang-diagnostics) HANG_DIAG=1 ;;
+    --no-hang-diagnostics) HANG_DIAG=0 ;;
+    --keep) KEEP=1 ;;
+    --dry-run) DRY=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) die_usage "unknown argument: $1" ;;
+  esac
+  shift
+done
+
+case "$BACKENDS" in msb|sbx|both) ;; *) die_usage "--backend must be msb, sbx or both (got '$BACKENDS')" ;; esac
+is_uint "$STEP_TIMEOUT" || die_usage "--step-timeout must be a positive integer"
+is_uint "$CREATE_TIMEOUT" || die_usage "--create-timeout must be a positive integer"
+is_uint "$KILL_GRACE" || die_usage "HAL_KILL_GRACE must be a positive integer"
+[ -n "$STEP_BUDGET" ] || STEP_BUDGET=$((2 * CREATE_TIMEOUT + 10 * STEP_TIMEOUT))
+is_uint "$STEP_BUDGET" || die_usage "--step-budget must be a positive integer"
+
+# --- step table -------------------------------------------------------------
+# id|backend|title (order = execution order; dependents of a failed setup step are BLOCKED)
+STEP_TABLE='msb-ro-kit-create|msb|readonly kit file used end to end on create (fixture kit)
+msb-inspect-shape|msb|msb inspect output shape: .active_config.mounts and .config.mounts
+msb-exit-code|msb|msb exec passes a guest exit code of 2 through unchanged
+msb-ro-kit-heal|msb|readonly kit file on heal after acq restart (stop + msb start)
+msb-forged-markers|msb|forged legacy guest markers change no session behavior
+msb-install-gate|msb|deleting host install keys makes the heal re-run the install command
+msb-ro-oci|msb|readonly files of the shipped oci-engine kit (Patterns v1.19.0) on create
+sbx-baseline|sbx|create a throwaway sandbox and read the host builtin-kits record
+sbx-forged-heal|sbx|forged-probe heal: removed guest files are not re-applied
+sbx-record-change|sbx|altering the host builtin-kits record triggers kit add
+sbx-stale-refresh|sbx|stale-bundle refresh re-applies all built-in kits
+sbx-legacy-reseed|sbx|legacy sandbox (no builtin-kits) notice, then rm + fresh create re-seeds'
+
+step_ids() { printf '%s\n' "$STEP_TABLE" | cut -d'|' -f1; }
+step_backend() { printf '%s\n' "$STEP_TABLE" | awk -F'|' -v id="$1" '$1 == id { print $2 }'; }
+step_title() { printf '%s\n' "$STEP_TABLE" | awk -F'|' -v id="$1" '$1 == id { print $3 }'; }
+
+validate_only() {
+  local want id found
+  [ -n "$ONLY" ] || return 0
+  for want in $(printf '%s' "$ONLY" | tr ',' ' '); do
+    found=0
+    for id in $(step_ids); do [ "$id" = "$want" ] && found=1; done
+    [ "$found" -eq 1 ] || die_usage "--only: unknown step id '$want' (see --dry-run for the list)"
+  done
+}
+validate_only
+
+step_selected() { # ID -> 0 if it should run
+  local id="$1" b want
+  b=$(step_backend "$id")
+  case "$BACKENDS" in both) ;; *) [ "$BACKENDS" = "$b" ] || return 1 ;; esac
+  [ -n "$ONLY" ] || return 0
+  for want in $(printf '%s' "$ONLY" | tr ',' ' '); do
+    [ "$want" = "$id" ] && return 0
+  done
+  return 1
+}
+
+TRANSCRIPT=""
+say() { printf '%s\n' "$*"; if [ -n "$TRANSCRIPT" ]; then printf '%s\n' "$*" >>"$TRANSCRIPT"; fi; }
+
+print_plan() {
+  local id n=0
+  say "automated steps (backend: $BACKENDS)"
+  for id in $(step_ids); do
+    if step_selected "$id"; then
+      n=$((n + 1))
+      say "  $(printf '%2d' "$n")  $id [$(step_backend "$id")]  $(step_title "$id")"
+    fi
+  done
+  [ "$n" -gt 0 ] || say "  (none selected)"
+}
+
+# --- MANUAL instructions (never scored; printed after the automated steps) ----
+# The text lives in scripts/verify-host-authority-live-manual.txt (placeholders @RUN@, @REPO@).
+MANUAL_FILE="$HERE/verify-host-authority-live-manual.txt"
+print_manual() {
+  if [ ! -r "$MANUAL_FILE" ]; then echo "MANUAL instructions unavailable: cannot read $MANUAL_FILE"; return 0; fi
+  sed -e "s/@RUN@/$RUN_ID/g" -e "s|@REPO@|$REPO|g" "$MANUAL_FILE"
+}
+
+if [ "$DRY" -eq 1 ]; then
+  echo "verify-host-authority-live: DRY RUN (no backend is touched, nothing is created)"
+  echo "revision : $(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)"
+  echo "backends : $BACKENDS    step timeout: ${STEP_TIMEOUT}s    create timeout: ${CREATE_TIMEOUT}s"
+  echo "out dir  : ${OUT:-$REPO/tmp/verify-host-authority-live-<stamp>}"
+  echo
+  print_plan
+  echo
+  print_manual
+  exit 0
+fi
+
+# --- runtime (live mode only) ------------------------------------------------
+REVISION=$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)
+DIRTY=""
+if [ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ]; then DIRTY=" (dirty tree)"; fi
+RUN_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+TO=()
+if command -v timeout >/dev/null 2>&1; then TO=(timeout --foreground)
+elif command -v gtimeout >/dev/null 2>&1; then TO=(gtimeout --foreground); fi
+
+if [ -n "${EXPECT_SHA:-}" ]; then
+  case "$REVISION" in
+    "$EXPECT_SHA"*) ;;
+    *) echo "verify-host-authority-live: BLOCKED: HEAD $REVISION does not match EXPECT_SHA=$EXPECT_SHA" >&2; exit 2 ;;
+  esac
+fi
+[ "${#TO[@]}" -gt 0 ] || { echo "verify-host-authority-live: BLOCKED: neither timeout nor gtimeout is on PATH (macOS: brew install coreutils)" >&2; exit 2; }
+
+[ -n "$OUT" ] || OUT="$REPO/tmp/verify-host-authority-live-$STAMP"
+mkdir -p "$OUT" || { echo "verify-host-authority-live: cannot create $OUT" >&2; exit 2; }
+OUT=$(cd "$OUT" && pwd -P)
+TRANSCRIPT="$OUT/transcript.log"
+RESULTS="$OUT/results.tsv"
+CAP="$OUT/.last-output"
+: >"$TRANSCRIPT"; : >"$CAP"
+printf 'id\tbackend\tbackend_version\trevision\tdate\tresult\tdetail\ttranscript\n' >"$RESULTS"
+
+export ACQ_NO_PROMPT=1 ACQ_UPDATE_CHECK=0 GIT_TERMINAL_PROMPT=0
+CREATED=""
+LAST_RC=0
+# Scratch workspaces: a fresh mktemp -d directory inside the output directory, verified
+# before use. Cleanup removes only this directory, and only if it is inside $OUT.
+WS_ROOT=$(mktemp -d "$OUT/ws.XXXXXX") || { echo "verify-host-authority-live: cannot create a scratch directory under $OUT" >&2; exit 2; }
+WS_ROOT=$(cd "$WS_ROOT" && pwd -P)
+case "$WS_ROOT" in "$OUT"/ws.?*) ;; *) echo "verify-host-authority-live: unexpected scratch directory $WS_ROOT" >&2; exit 2 ;; esac
+
+sandbox_name() { printf 'hal-%s-%s' "$RUN_ID" "$1"; }
+
+# The runner and the step functions live in sibling files (sourced; bash 3.2 safe).
+for _hal_f in lib.sh steps.sh; do
+  [ -r "$HERE/verify-host-authority-live-$_hal_f" ] || { echo "verify-host-authority-live: cannot read $HERE/verify-host-authority-live-$_hal_f (run the script from its checkout path, not through a symlink)" >&2; exit 2; }
+done
+# shellcheck source=verify-host-authority-live-lib.sh
+. "$HERE/verify-host-authority-live-lib.sh"
+# shellcheck source=verify-host-authority-live-steps.sh
+. "$HERE/verify-host-authority-live-steps.sh"
+
+# --- driver -------------------------------------------------------------------
+say "verify-host-authority-live"
+say "revision : $REVISION$DIRTY"
+say "date     : $RUN_DATE"
+say "host     : $(uname -srm 2>/dev/null || echo unknown)"
+say "out dir  : $OUT"
+say "run from OUTSIDE any sandbox; transcript: $TRANSCRIPT"
+msb_preflight
+sbx_preflight
+say "msb      : ${MSB_VER:-not available} (ready: $MSB_READY)"
+say "sbx      : ${SBX_VER:-not available} (ready: $SBX_READY)"
+say ""
+print_plan
+
+run_step() { # ID FUNCTION
+  step_selected "$1" || return 0
+  say ""
+  say "--- $1: $(step_title "$1") ---"
+  STEP_TIMED_OUT=0; STEP_DEADLINE=$((SECONDS + STEP_BUDGET))
+  "$2"
+  STEP_DEADLINE=0
+  if [ "$STEP_TIMED_OUT" -eq 1 ]; then say "!! BLOCKED(timeout): $1 had a command time out (budget ${STEP_BUDGET}s per step); see the transcript above"; fi
+}
+run_step msb-ro-kit-create step_msb_ro_kit_create
+run_step msb-inspect-shape step_msb_inspect_shape
+run_step msb-exit-code step_msb_exit_code
+run_step msb-ro-kit-heal step_msb_ro_kit_heal
+run_step msb-forged-markers step_msb_forged_markers
+run_step msb-install-gate step_msb_install_gate
+run_step msb-ro-oci step_msb_ro_oci
+run_step sbx-baseline step_sbx_baseline
+run_step sbx-forged-heal step_sbx_forged_heal
+run_step sbx-record-change step_sbx_record_change
+run_step sbx-stale-refresh step_sbx_stale_refresh
+run_step sbx-legacy-reseed step_sbx_legacy_reseed
+
+exit 0

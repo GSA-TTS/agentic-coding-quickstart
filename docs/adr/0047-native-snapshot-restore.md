@@ -11,7 +11,7 @@ risk_treatment: accept
 supersedes: []
 ---
 
-# ADR-0036: Expose disk-state snapshot/restore through acq
+# ADR-0047: Expose disk-state snapshot/restore through acq
 
 ## Context
 

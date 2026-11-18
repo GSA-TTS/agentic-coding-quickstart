@@ -1,0 +1,4 @@
+# Compatibility index for tooling that expects this historic filename. The setup
+# script selects a host-specific fully resolved lock and never installs this file.
+# Supported combinations are Linux x86_64/aarch64 Python 3.12, macOS arm64 Python
+# 3.12, macOS x86_64 Python 3.13, and Windows x86_64/arm64 Python 3.12.

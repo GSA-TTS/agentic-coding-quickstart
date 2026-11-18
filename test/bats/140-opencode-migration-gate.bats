@@ -67,6 +67,29 @@ _create_line() { printf '%s\n' "$(cat "$CALLS")" | grep "^$1 create"; }
   assert_equal "${KITS[7]}" "/extra/cli-two"
 }
 
+@test "provider omission(msb): skips USAi gate and binds no USAi secret before create" {
+  local proj="$STUBDIR/no-provider-project"
+  mkdir -p "$proj"
+
+  run env ACQ_BACKEND=msb ACQ_NO_PROMPT=1 "$ACQ" create opencode --no-provider-kits "$proj"
+
+  assert_success
+  refute_output --partial 'no USAi API key stored'
+  refute_regex "$(cat "$CALLS")" 'USAI_API_KEY@api\.gsa\.usai\.gov'
+  refute_regex "$(cat "$CALLS")" 'acq-kits/usai-provider'
+}
+
+@test "provider omission: invalid selection fails before either backend create" {
+  local proj="$STUBDIR/invalid-provider-project"
+  mkdir -p "$proj"
+
+  run env ACQ_BACKEND=msb ACQ_PROVIDER_KITS="$STUBDIR/invalid-provider-kit" ACQ_NO_PROMPT=1 "$ACQ" create shell "$proj"
+
+  assert_failure
+  assert_output --partial 'could not fetch kit'
+  refute_regex "$(cat "$CALLS")" '^msb create'
+}
+
 _mk_opencode_agent_kit() { # PATH [schema] [kit-name] [agent-name] [entrypoint]
   mkdir -p "$1"
   cat >"$1/spec.yaml" <<SPEC
@@ -294,7 +317,7 @@ SPEC
   acq_host_config_write() { return 1; }
 
   run env ACQ_MSB_KIT_PASSTHROUGH=1 \
-    bash -c '. "$1/acq.backends/common.sh"; . "$1/acq.backends/msb.sh"; acq_host_config_write() { return 1; }; acq_backend_provision msbgenericstatefail opencode "$2"' \
+    bash -c '. "$1/acq.backends/common.sh"; . "$1/acq.backends/msb.sh"; acq_test_stub_provider_input_boundary; acq_host_config_write() { return 1; }; acq_backend_provision msbgenericstatefail opencode "$2"' \
     _ "$REPO_ROOT" "$proj"
 
   assert_failure
@@ -307,7 +330,7 @@ SPEC
   _mk_repo "$proj"
 
   run env ACQ_MSB_KIT_PASSTHROUGH=1 \
-    bash -c '. "$1/acq.backends/common.sh"; . "$1/acq.backends/msb.sh"; _acq_msb_apply_kit_dir() { return 1; }; acq_backend_provision msbgenerickitfail opencode "$2"' \
+    bash -c '. "$1/acq.backends/common.sh"; . "$1/acq.backends/msb.sh"; acq_test_stub_provider_input_boundary; _acq_msb_apply_kit_dir() { return 1; }; acq_backend_provision msbgenerickitfail opencode "$2"' \
     _ "$REPO_ROOT" "$proj"
 
   assert_failure
@@ -341,15 +364,15 @@ SPEC
     bash -c '. "$1/acq.backends/common.sh"; acq_host_config_write msb migbox workspace /workspace; exec "$2" shell migbox' \
     _ "$REPO_ROOT" "$ACQ"
   assert_success
-  assert_regex "$(cat "$CALLS")" 'msb exec -t -u agent -w /workspace -e TERM=xterm-256color -e SHELL=/bin/bash migbox -- /bin/bash -l'
+  assert_regex "$(cat "$CALLS")" 'msb exec -t -u agent -w /workspace -e TERM=xterm-256color -e (COLORTERM=truecolor -e )?SHELL=/bin/bash migbox -- /bin/bash -l'
 }
 
 @test "migration gate(sbx): run opencode keeps native clone, workspace markers, image template, and kit order" {
-  local proj="$STUBDIR/sbxproj"
-  _mk_repo "$proj"
+  local proj="$STUBDIR/sbxproj" env1="$STUBDIR/env-one" env2="$STUBDIR/env-two" cli1="$STUBDIR/cli-one"
+  _mk_repo "$proj"; mkdir -p "$env1" "$env2" "$cli1"
   _seed_sbx_usai
-  run env ACQ_BACKEND=sbx ACQ_EXTRA_KITS="/extra/env-one /extra/env-two" ACQ_IMAGE=ghcr.io/acq/migration:v1 \
-    STUB_KEY_STATUS=200 STUB_OPENCODE_OK=1 "$ACQ" run opencode --clone --kit /extra/cli-one "$proj" -- --version
+  run env ACQ_BACKEND=sbx ACQ_EXTRA_KITS="$env1 $env2" ACQ_IMAGE=ghcr.io/acq/migration:v1 \
+    STUB_KEY_STATUS=200 STUB_OPENCODE_OK=1 "$ACQ" run opencode --clone --kit "$cli1" "$proj" -- --version
   assert_success
 
   local line logical
@@ -359,7 +382,7 @@ SPEC
   assert_regex "$line" "--env ACQ_WORKSPACE=${logical}( |$)"
   assert_regex "$line" '--env ACQ_CLONE=1( |$)'
   assert_regex "$line" '--template ghcr\.io/acq/migration:v1'
-  assert_regex "$line" '--kit /extra/env-one .*--kit /extra/env-two .*--kit /extra/cli-one'
+  assert_regex "$line" "--kit $env1 .*--kit $env2 .*--kit $cli1"
   assert_regex "$(cat "$CALLS")" 'sbx run --name opencode-sbxproj opencode -- --version'
 }
 
@@ -381,6 +404,7 @@ SPEC
 }
 
 @test "migration gate(sbx): generic default attach launches kit entrypoint and preserves -- escape" {
+  export STUB_SBX_FEATURES_PRESENT=1
   local proj="$STUBDIR/sbx-generic-attach"
   _mk_repo "$proj"
   _seed_sbx_usai
@@ -390,7 +414,7 @@ SPEC
   printf 'genericattach\n' >"$STUBDIR/.sandbox_list"
   local create_line
   create_line=$(_create_line sbx)
-  assert_regex "$create_line" " shell ${proj}$"
+  assert_regex "$create_line" " shell ${proj} .+:ro$"
   assert_equal "$(printf '%s\n' "$create_line" | grep -o 'acq-opencode-kit' | wc -l | tr -d ' ')" "1"
 
   : >"$CALLS"
@@ -444,6 +468,7 @@ SPEC
 }
 
 @test "migration gate(sbx): lost generic launch mode refuses legacy attach grammar" {
+  export STUB_SBX_FEATURES_PRESENT=1
   local proj="$STUBDIR/sbx-generic-mode-lost"
   _mk_repo "$proj"
   _seed_sbx_usai
@@ -463,6 +488,7 @@ SPEC
 }
 
 @test "migration gate(sbx): prior generic launch-mode record keeps the shell launcher" {
+  export STUB_SBX_FEATURES_PRESENT=1
   local proj="$STUBDIR/sbx-generic-mode-prior"
   _mk_repo "$proj"
   _seed_sbx_usai
@@ -493,7 +519,7 @@ SPEC
   refute_regex "$(cat "$CALLS")" '^sbx create '
 }
 
-@test "migration gate(sbx): unavailable name lookup and failed create retain launch mode" {
+@test "migration gate(sbx): unavailable name lookup blocks create and retains launch mode" {
   local proj="$STUBDIR/sbx-generic-mode-ls-fail"
   _mk_repo "$proj"
   acq_host_config_write sbx genericmodelsfail generic-opencode generic-opencode
@@ -503,8 +529,9 @@ SPEC
     _ "$REPO_ROOT" "$proj"
 
   assert_failure
+  assert_output --partial "could not confirm sandbox 'genericmodelsfail' is absent"
   assert_equal "$(acq_host_config_read sbx genericmodelsfail generic-opencode)" generic-opencode
-  assert_regex "$(cat "$CALLS")" 'sbx create --name genericmodelsfail'
+  refute_regex "$(cat "$CALLS")" 'sbx create --name genericmodelsfail'
   refute_regex "$(cat "$CALLS")" 'sbx rm --force genericmodelsfail'
 }
 

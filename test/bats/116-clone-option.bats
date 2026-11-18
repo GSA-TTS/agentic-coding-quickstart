@@ -247,13 +247,25 @@ _refute_backend_create() {
   # Sandbox still exists: the scratch is its live mount source, so the advice
   # must be 'acq rm' (warns + cleans up), never manual directory deletion.
   printf 'shell-cloneproj\n' > "$STUBDIR/.msb_sandbox_list"
-  _msb_clone -- create shell --clone "$CLONEPROJ"
+  run bash -c '
+    export ACQ_STATE_DIR="'"$STUBDIR"'/state" ACQ_MSB_CLONES_DIR="'"$STUBDIR"'/state/clones"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_test_stub_provider_input_boundary
+    _acq_msb_clone_setup shell-cloneproj "$1"
+  ' _ "$CLONEPROJ"
   assert_failure
   assert_output --partial "acq rm shell-cloneproj"
   refute_output --partial 'remove the directory'
   # Sandbox gone, scratch orphaned: manual recovery advice applies.
   rm -f "$STUBDIR/.msb_sandbox_list"
-  _msb_clone -- create shell --clone "$CLONEPROJ"
+  run bash -c '
+    export ACQ_STATE_DIR="'"$STUBDIR"'/state" ACQ_MSB_CLONES_DIR="'"$STUBDIR"'/state/clones"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_test_stub_provider_input_boundary
+    _acq_msb_clone_setup shell-cloneproj "$1"
+  ' _ "$CLONEPROJ"
   assert_failure
   assert_output --partial 'remove the directory'
 }

@@ -9,7 +9,7 @@
 #
 # shellcheck shell=bats
 
-setup() { acq_setup_stubs; load_acq; }
+setup() { acq_setup_stubs; }
 teardown() { acq_teardown_stubs; }
 
 load 'helper'
@@ -42,6 +42,20 @@ _seed_stale_provenance() { # BACKEND NAME
   assert_equal "$(acq_provenance_field sbx agentbox agent)" "opencode"
   acq_provenance_write sbx agentbox
   assert_equal "$(acq_provenance_field sbx agentbox agent)" "opencode"
+}
+
+@test "provenance: distinguishes default providers from an explicit empty set" {
+  acq_provenance_write sbx defaultproviders
+  assert_equal "$(acq_provenance_field sbx defaultproviders provider_selection)" "default"
+
+  # shellcheck disable=SC2034 # acq_provenance_write reads these globals dynamically
+  ACQ_PROVIDER_KITS=""
+  # shellcheck disable=SC2034 # acq_provenance_write reads these globals dynamically
+  ACQ_PROVIDER_KITS_FROM_ENV=1
+  acq_provenance_write sbx emptyproviders
+  assert_equal "$(acq_provenance_field sbx emptyproviders provider_selection)" "explicit"
+  acq_provider_selection_load sbx emptyproviders
+  refute acq_usai_provider_selected
 }
 
 @test "provenance: recorded agent can rebuild an enabled agent kit list" {
@@ -209,6 +223,8 @@ STUB
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/note-secrets"
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/sbx.sh"
+    acq_test_stub_provider_input_boundary
+    unset _ACQ_SBX_SSH_AGENT_NOTICE_SHOWN
     printf "sk\n" | acq_secret_store "$(_acq_secret_key usai)"
     export SSH_AUTH_SOCK="'"$STUBDIR"'/does-not-matter.sock"
     acq_backend_provision notebox shell /tmp 2>&1 >/dev/null
@@ -223,6 +239,8 @@ STUB
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/quiet-secrets"
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/sbx.sh"
+    acq_test_stub_provider_input_boundary
+    unset _ACQ_SBX_SSH_AGENT_NOTICE_SHOWN
     printf "sk\n" | acq_secret_store "$(_acq_secret_key usai)"
     unset SSH_AUTH_SOCK
     acq_backend_provision quietbox shell /tmp 2>&1 >/dev/null

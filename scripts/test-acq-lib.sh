@@ -58,6 +58,80 @@ MSB_GITHUB_SECRET_BINDING="GITHUB_TOKEN@github.com,api.github.com,codeload.githu
 # translation itself is exercised separately (see the kit-translate section).
 export ACQ_SBX_KIT_PASSTHROUGH=1
 
+# Adapter-only subprocess tests intentionally avoid loading common.sh. Provide
+# their projection boundary explicitly so they exercise the adapter behavior
+# without fetching a release or invoking a host Python runtime.
+acq_test_stub_provider_input_boundary() {
+  # Keep adapter-only in-process shells on the production root shape. In
+  # particular, names must never become raw path components before cleanup.
+  acq_provider_input_root() {
+    local backend="${1:-}" name="${2:-}" safe_backend safe_name name_sum
+    [ -n "$backend" ] && [ -n "$name" ] || return 1
+    safe_backend=$(printf '%s' "$backend" | tr -c 'A-Za-z0-9._-' '_')
+    safe_name=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')
+    name_sum=$(printf '%s' "$name" | cksum 2>/dev/null | cut -d' ' -f1 2>/dev/null || echo 0)
+    printf '%s/provider-input/%s/%s.%s\n' "$ACQ_PROVENANCE_DIR" "$safe_backend" "$safe_name" "$name_sum"
+  }
+  acq_provider_input_prepare() {
+    local root generation
+    root=$(acq_provider_input_root "$1" "$2") || return 1
+    mkdir -p "$root/generations" || return 1
+    generation=$(mktemp -d "$root/generations/generation.test.XXXXXXXX") || return 1
+    mkdir -p "$generation/models/providers" || return 1
+    printf '%s\n' "$generation"
+  }
+  acq_provider_input_project() { acq_provider_input_prepare "$@" >/dev/null; }
+  acq_provider_input_discard() { rm -rf -- "$3"; }
+  acq_provider_input_remove() {
+    local backend="$1" name="$2" root parent expected_parent
+    root=$(acq_provider_input_root "$backend" "$name") || return 1
+    expected_parent="$ACQ_PROVENANCE_DIR/provider-input/$(printf '%s' "$backend" | tr -c 'A-Za-z0-9._-' '_')"
+    parent=${root%/*}
+    [ "$parent" = "$expected_parent" ] || return 1
+    case "$root" in "$expected_parent"/*.*) ;; *) return 1 ;; esac
+    [ ! -L "$root" ] || return 1
+    [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+    rm -rf -- "$root"
+  }
+  acq_provider_input_lock_acquire() {
+    local root lock parent
+    root=$(acq_provider_input_root "$1" "$2") || return 1
+    parent=${root%/*}
+    mkdir -p "$parent" || return 1
+    lock="${root}.lock"
+    mkdir "$lock" 2>/dev/null || return 1
+    printf '%s\n' "$lock"
+  }
+  acq_provider_input_lock_release() {
+    case "${1:-}" in "$ACQ_PROVENANCE_DIR"/provider-input/*/*.lock) rmdir "$1" 2>/dev/null || true ;; *) return 1 ;; esac
+  }
+  acq_provider_input_msb_mount() {
+    local generation="$2" host_generation
+    if command -v host_path >/dev/null 2>&1; then
+      host_generation=$(host_path "$generation") || return 1
+    else
+      host_generation="$generation"
+    fi
+    printf '%s:%s/%s:ro\n' "$host_generation" "${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provider-input}" "${generation##*/}"
+  }
+  acq_provider_input_guest_root() {
+    local backend="$1" generation="$3"
+    case "$backend" in
+      sbx) printf '%s\n' "$generation" ;;
+      msb) printf '%s/%s\n' "${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provider-input}" "${generation##*/}" ;;
+      *) return 1 ;;
+    esac
+  }
+  acq_provider_input_sbx_mount() { printf '%s:ro\n' "$2"; }
+  # Guardian stubs: adapter-only tests do not exercise the guardian mechanism
+  # (no real subshell lifetime tracking needed); use $$ as a live PID placeholder
+  # so the lock_acquire signature change does not break callers in this context.
+  _acq_provider_input_guardian_start() { _ACQ_PROVIDER_INPUT_GUARDIAN_PID=$$; export _ACQ_PROVIDER_INPUT_GUARDIAN_PID; }
+  _acq_provider_input_guardian_stop() { _ACQ_PROVIDER_INPUT_GUARDIAN_PID=''; }
+  _acq_provider_input_guardian_signal_children() { return 0; }
+}
+export -f acq_test_stub_provider_input_boundary
+
 # msb equivalent: resolve every REMOTE kit ref to a local empty spec dir instead
 # of a real git fetch. This keeps the suite network-free for the msb
 # heal/provision paths (acq_backend_provision / acq_backend_ensure_kits_applied),
@@ -73,17 +147,20 @@ export ACQ_SBX_KIT_PASSTHROUGH=1
 # them. Instead root a SINGLE shared offline-kit dir under bats' run-scoped
 # temp dir (BATS_RUN_TMPDIR, which bats removes at the end of the run); fall back
 # to a per-process mktemp only when run outside bats. The dir holds a stub spec
-# with no secrets, so sharing it across tests is safe.
+# with no secrets. Publish each complete spec atomically: parallel workers can
+# read these paths while another worker sources this helper.
 if [ -n "${BATS_RUN_TMPDIR:-}" ]; then
   _ACQ_MSB_OFFLINE_KIT_DIR="${BATS_RUN_TMPDIR}/acq-offline-kit"
   mkdir -p "$_ACQ_MSB_OFFLINE_KIT_DIR"
 else
   _ACQ_MSB_OFFLINE_KIT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/acq-nokit.XXXXXX")
 fi
-printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "$_ACQ_MSB_OFFLINE_KIT_DIR/spec.yaml"
+printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "$_ACQ_MSB_OFFLINE_KIT_DIR/spec.yaml.$$" \
+  && mv -f "$_ACQ_MSB_OFFLINE_KIT_DIR/spec.yaml.$$" "$_ACQ_MSB_OFFLINE_KIT_DIR/spec.yaml" || return 1
 _ACQ_AGENT_OFFLINE_KIT_DIR="${BATS_RUN_TMPDIR:-$_ACQ_MSB_OFFLINE_KIT_DIR}/acq-opencode-kit"
 mkdir -p "$_ACQ_AGENT_OFFLINE_KIT_DIR"
-printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: opencode\ndisplayName: OpenCode\ndescription: offline agent kit\nagent:\n  name: opencode\n  entrypoint: opencode\n' > "$_ACQ_AGENT_OFFLINE_KIT_DIR/spec.yaml"
+printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: opencode\ndisplayName: OpenCode\ndescription: offline agent kit\nagent:\n  name: opencode\n  entrypoint: opencode\n' > "$_ACQ_AGENT_OFFLINE_KIT_DIR/spec.yaml.$$" \
+  && mv -f "$_ACQ_AGENT_OFFLINE_KIT_DIR/spec.yaml.$$" "$_ACQ_AGENT_OFFLINE_KIT_DIR/spec.yaml" || return 1
 export ACQ_MSB_KIT_LOCAL_DIR="$_ACQ_MSB_OFFLINE_KIT_DIR"
 export ACQ_TEST_AGENT_KIT="$_ACQ_AGENT_OFFLINE_KIT_DIR"
 
@@ -104,6 +181,90 @@ make_stubs() {
   : >"$CALLS"
   # Preserve the base PATH (with coreutils etc.) but prepend the stub dir.
   _STUB_BASE_PATH="${PATH}"
+
+  # Keep real Git for local fixture repositories, but model the pinned kit
+  # transport offline. Projection fetches kits directly (not through the MSB
+  # adapter), so ACQ_MSB_KIT_LOCAL_DIR alone does not cover CLI creation tests.
+  # Tests of fetch failures replace this executable or set GIT_ALLOW_PROTOCOL.
+  export ACQ_TEST_REAL_GIT
+  ACQ_TEST_REAL_GIT=$(command -v git)
+  mkdir -p "$STUBDIR/transport"
+  cat >"$STUBDIR/transport/git" <<'GITSTUB'
+#!/usr/bin/env bash
+original=("$@")
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -c) shift 2 ;;
+    -C) cd "$2" || exit 1; shift 2 ;;
+    *) break ;;
+  esac
+done
+case "${1:-}" in
+  rev-parse)
+    if [ "$*" = 'rev-parse HEAD' ] && [ -f .git/acq-offline-fetch ]; then
+      printf '%s\n' "$ACQ_TEST_PATTERNS_REF"
+      exit 0
+    fi
+    ;;
+  cat-file)
+    if [ -f .git/acq-offline-fetch ]; then
+      printf 'tree\n'
+      exit 0
+    fi
+    ;;
+  read-tree)
+    if [ -f .git/acq-offline-fetch ]; then
+      exit 0
+    fi
+    ;;
+  checkout-index)
+    if [ -f .git/acq-offline-fetch ]; then
+      path=${3#--prefix=}
+      cp "$ACQ_MSB_KIT_LOCAL_DIR/spec.yaml" "$path/spec.yaml" || exit 1
+      exit 0
+    fi
+    ;;
+  fetch)
+    if [ "${GIT_ALLOW_PROTOCOL:-}" != none ] \
+        && [ "$*" = "fetch --depth 1 origin $ACQ_TEST_PATTERNS_REF" ] \
+        && [ "$("$ACQ_TEST_REAL_GIT" config --get remote.origin.url)" = https://github.com/GSA-TTS/agentic-coding-patterns.git ]; then
+      IFS= read -r path < .git/info/sparse-checkout || exit 1
+      path=${path%/\*}
+      case "$path" in
+        *..*|*[!A-Za-z0-9._/-]*) exit 1 ;;
+        integrations/isolation/acq-kits/*) ;;
+        *) exit 1 ;;
+      esac
+      mkdir -p "$path" || exit 1
+      cp "$ACQ_MSB_KIT_LOCAL_DIR/spec.yaml" "$path/spec.yaml" || exit 1
+      : > .git/acq-offline-fetch
+      exit 0
+    fi
+    ;;
+  checkout)
+    if [ "$*" = 'checkout -q FETCH_HEAD' ] && [ -f .git/acq-offline-fetch ]; then
+      exit 0
+    fi
+    ;;
+esac
+# A missing fixture must fail locally rather than silently contact a network.
+GIT_ALLOW_PROTOCOL="${GIT_ALLOW_PROTOCOL:-file}" exec "$ACQ_TEST_REAL_GIT" "${original[@]}"
+GITSTUB
+  chmod +x "$STUBDIR/transport/git"
+
+  # Executable-dispatch tests exercise routing rather than the released Python
+  # validator. Keep them deterministic with an explicit test-only interpreter;
+  # test 147 unsets this and supplies its own validator runtime.
+  cat >"$STUBDIR/provider-python" <<'PYTHON'
+#!/bin/sh
+case "${1:-}" in
+  -c) exit 0 ;;
+  */validate_provider_input_contract.py) exit 0 ;;
+  *) exec /usr/bin/python3 "$@" ;;
+esac
+PYTHON
+  chmod +x "$STUBDIR/provider-python"
+  export ACQ_PROVIDER_INPUT_PYTHON="$STUBDIR/provider-python"
 
   cat >"$STUBDIR/sbx" <<'STUB'
 #!/usr/bin/env bash
@@ -166,6 +327,9 @@ case "${1:-}" in
     case "$snippet" in
       *"startup-complete"*) printf 'ready\n' ;;
       *"echo ok"*) printf 'ok\n' ;;
+      *present*)
+        [ "${STUB_SBX_FEATURES_PRESENT:-0}" = 1 ] && printf 'present\n'
+        exit 0 ;;
       *'%{http_code}'*)
         # check_key runs `curl … -w '%{http_code}'; printf '|%s' "$?"`, so the
         # real probe emits `<http_code>|<curl_exit>`. Model that shape.
@@ -272,6 +436,67 @@ case "$_msb_sub" in
       echo "error: stub inspect failure" >&2
       exit 1
     fi
+    # A bare `msb inspect NAME` is acq's existence probe (acq_backend_exists falls
+    # back to it): like the real CLI it succeeds only for a sandbox that exists, so
+    # a mode fixture meant for `--format json` must not make every name "exist".
+    _want_json=0
+    for a in "$@"; do [ "$a" = "--format" ] && _want_json=1; done
+    if [ "$_want_json" = "0" ] && [ -n "${STUB_MSB_INSPECT_MODE:-}" ]; then
+      if [ -f "$STUBDIR/.msb_inspect_json" ]; then cat "$STUBDIR/.msb_inspect_json"; exit 0; fi
+      if [ -f "$STUBDIR/.msb_sandbox_list" ] && grep -Fxq -- "${2:-}" "$STUBDIR/.msb_sandbox_list"; then
+        exit 0
+      fi
+      exit 1
+    fi
+    # STUB_MSB_INSPECT_MODE serves the real observed `msb inspect --format json` shape
+    # for a sandbox created by acq (msb 0.7.7): `.active_config.mounts[]` with
+    # {type, guest, host, options:{readonly,...}}. Modes: ro-ok (host-config mount is
+    # the read-only Bind of acq's host config dir), rw (readonly false), missing (no
+    # host-config mount), dup (two mounts at the guest path), overlap-rw (a writable
+    # mount above the guest path), wrong-host (read-only Bind of another directory),
+    # not-bind (type is not Bind), null (active_config null; STUB_MSB_INSPECT_NULL_TIMES=N
+    # makes only the first N answers null), badjson, noshape (mounts is not a list).
+    if [ -n "${STUB_MSB_INSPECT_MODE:-}" ]; then
+      _sb="${2:-}"
+      _sum=$(printf '%s' "$_sb" | cksum | cut -d' ' -f1)
+      _safe=$(printf '%s' "$_sb" | tr -c 'A-Za-z0-9._-' '_')
+      _cfg="${ACQ_PROVENANCE_DIR}/msb/${_safe}.${_sum}.config"
+      _mode="$STUB_MSB_INSPECT_MODE"
+      if [ "$_mode" = "null" ] || [ -n "${STUB_MSB_INSPECT_NULL_TIMES:-}" ]; then
+        _nulls=$(cat "$STUBDIR/.msb_inspect_nulls" 2>/dev/null || echo 0)
+        if [ "$_mode" = "null" ] || [ "$_nulls" -lt "${STUB_MSB_INSPECT_NULL_TIMES:-0}" ]; then
+          echo $((_nulls + 1)) >"$STUBDIR/.msb_inspect_nulls"
+          printf '{"name":"%s","config":{"spec":{"mounts":null}},"active_config":null}\n' "$_sb"
+          exit 0
+        fi
+        [ "$_mode" = "null" ] && _mode=ro-ok
+      fi
+      [ "$_mode" = "badjson" ] && { printf 'this is not json {{\n'; exit 0; }
+      python3 - "$_mode" "$_sb" "$_cfg" "${ACQ_HOST_CONFIG_GUEST_DIR:-/var/lib/acq/host}" <<'PYSTUB'
+import json, sys
+mode, name, cfg, guest = sys.argv[1:5]
+def mount(g, h, ro, typ="Bind"):
+    return {"type": typ, "guest": g, "host": h,
+            "options": {"readonly": ro, "noexec": False, "nosuid": False, "nodev": False},
+            "follow_root_symlinks": False, "host_permissions": "private",
+            "stat_virtualization": "strict", "quota_mib": None}
+ws = mount("/tmp/ws", "/tmp/ws", False)
+prov = mount("/var/lib/acq/provider-input", "/tmp/prov", True)
+hcfg = mount(guest, cfg, True)
+mounts = [ws, prov, hcfg]
+if mode == "rw": mounts = [ws, prov, mount(guest, cfg, False)]
+elif mode == "missing": mounts = [ws, prov]
+elif mode == "dup": mounts = [ws, prov, hcfg, mount(guest, cfg, True)]
+elif mode == "overlap-rw": mounts = [ws, prov, hcfg, mount("/var/lib/acq", "/tmp/other", False)]
+elif mode == "wrong-host": mounts = [ws, prov, mount(guest, "/tmp/some/other/dir", True)]
+elif mode == "not-bind": mounts = [ws, prov, mount(guest, cfg, True, typ="Named")]
+elif mode == "noshape": mounts = {"unexpected": True}
+d = {"name": name, "config": {"spec": {"mounts": None}, "mounts": mounts},
+     "active_config": {"mounts": mounts}}
+print(json.dumps(d))
+PYSTUB
+      exit 0
+    fi
     if [ -f "$STUBDIR/.msb_inspect_json" ]; then
       cat "$STUBDIR/.msb_inspect_json"
       exit 0
@@ -369,7 +594,7 @@ case "$_msb_sub" in
       *"test -d '/var/lib/acq/host'"*)
         [ "${STUB_HOST_CONFIG_MOUNT:-1}" = "0" ] && exit 1 || exit 0 ;;
       *".acq-ro-probe"*)
-        [ "${STUB_HOST_CONFIG_WRITABLE:-0}" = "1" ] && exit 1 || exit 0 ;;
+        [ "${STUB_HOST_CONFIG_WRITABLE:-0}" = "1" ] && exit 2 || exit 0 ;;
       # `command -v <agent>` (agent-presence probe): controllable so the install
       # path can be exercised. By default the agent is ABSENT (exit 1) so install
       # runs; STUB_AGENT_PRESENT=1 makes it "present" (skips install). The prereq
@@ -537,9 +762,10 @@ s.close()
 PY
   _pid="$!"
 fi
+trap '[ -z "$_pid" ] || { kill "$_pid" 2>/dev/null || true; wait "$_pid" 2>/dev/null || true; }; exit 0' TERM INT HUP
 exec >/dev/null 2>&1
 sleep "${STUB_SSH_ALIVE:-0.6}"
-[ -n "$_pid" ] && kill "$_pid" 2>/dev/null || true
+[ -z "$_pid" ] || { kill "$_pid" 2>/dev/null || true; wait "$_pid" 2>/dev/null || true; }
 exit 0
 SSHSTUB
   chmod +x "$STUBDIR/ssh"
@@ -573,12 +799,83 @@ exit 0
 KEYGENSTUB
   chmod +x "$STUBDIR/ssh-keygen"
 
-  PATH="$STUBDIR:$PATH"
+  PATH="$STUBDIR:$STUBDIR/transport:$PATH"
   export PATH CALLS STUBDIR
-  # Keep acq's post-background liveness probe fast in tests (real default is 1s):
-  # the stubbed serve/ssh children stay alive ~3s (STUB_*_ALIVE), comfortably
-  # past this settle window, so a healthy publish is observed without slow tests.
-  export ACQ_MSB_SERVE_SETTLE="0.3" ACQ_MSB_FORWARD_SETTLE="0.3"
+  # Adapter-only child shells source a backend without common.sh, but provisioning
+  # still crosses the provider-input boundary. BASH_ENV sources a self-contained
+  # definition rather than relying on Bash's exported-function import behavior.
+  cat > "$STUBDIR/provider-input-boundary.sh" <<'BOUNDARY'
+acq_provider_input_root() {
+  local backend="${1:-}" name="${2:-}" safe_backend safe_name name_sum
+  [ -n "$backend" ] && [ -n "$name" ] || return 1
+  safe_backend=$(printf '%s' "$backend" | tr -c 'A-Za-z0-9._-' '_')
+  safe_name=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')
+  name_sum=$(printf '%s' "$name" | cksum 2>/dev/null | cut -d' ' -f1 2>/dev/null || echo 0)
+  printf '%s/provider-input/%s/%s.%s\n' "$ACQ_PROVENANCE_DIR" "$safe_backend" "$safe_name" "$name_sum"
+}
+  acq_provider_input_prepare() {
+     local root generation
+     root=$(acq_provider_input_root "$1" "$2") || return 1
+     mkdir -p "$root/generations" || return 1
+     generation=$(mktemp -d "$root/generations/generation.test.XXXXXXXX") || return 1
+     mkdir -p "$generation/models/providers" || return 1
+     printf '%s\n' "$generation"
+  }
+  acq_provider_input_project() { acq_provider_input_prepare "$@" >/dev/null; }
+  acq_provider_input_discard() { rm -rf -- "$3"; }
+acq_provider_input_remove() {
+  local backend="$1" name="$2" root parent expected_parent
+  root=$(acq_provider_input_root "$backend" "$name") || return 1
+  expected_parent="$ACQ_PROVENANCE_DIR/provider-input/$(printf '%s' "$backend" | tr -c 'A-Za-z0-9._-' '_')"
+  parent=${root%/*}
+  [ "$parent" = "$expected_parent" ] || return 1
+  case "$root" in "$expected_parent"/*.*) ;; *) return 1 ;; esac
+  [ ! -L "$root" ] || return 1
+  [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+  rm -rf -- "$root"
+}
+acq_provider_input_lock_acquire() {
+  local root lock parent
+  root=$(acq_provider_input_root "$1" "$2") || return 1
+  parent=${root%/*}
+  mkdir -p "$parent" || return 1
+  lock="${root}.lock"
+  mkdir "$lock" 2>/dev/null || return 1
+  printf '%s\n' "$lock"
+}
+acq_provider_input_lock_release() {
+  case "${1:-}" in "$ACQ_PROVENANCE_DIR"/provider-input/*/*.lock) rmdir "$1" 2>/dev/null || true ;; *) return 1 ;; esac
+}
+  acq_provider_input_msb_mount() {
+    local generation="$2" host_generation
+    if command -v host_path >/dev/null 2>&1; then
+      host_generation=$(host_path "$generation") || return 1
+    else
+      host_generation="$generation"
+    fi
+    printf '%s:%s/%s:ro\n' "$host_generation" "${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provider-input}" "${generation##*/}"
+  }
+  acq_provider_input_guest_root() {
+    local backend="$1" generation="$3"
+    case "$backend" in
+      sbx) printf '%s\n' "$generation" ;;
+      msb) printf '%s/%s\n' "${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provider-input}" "${generation##*/}" ;;
+      *) return 1 ;;
+    esac
+  }
+  acq_provider_input_sbx_mount() { printf '%s:ro\n' "$2"; }
+_acq_provider_input_guardian_start() { _ACQ_PROVIDER_INPUT_GUARDIAN_PID=$$; export _ACQ_PROVIDER_INPUT_GUARDIAN_PID; }
+_acq_provider_input_guardian_stop() { _ACQ_PROVIDER_INPUT_GUARDIAN_PID=''; }
+_acq_provider_input_guardian_signal_children() { return 0; }
+BOUNDARY
+  cat > "$STUBDIR/bash-env" <<BASH_ENV
+. "$STUBDIR/provider-input-boundary.sh"
+BASH_ENV
+  export BASH_ENV="$STUBDIR/bash-env"
+  # Keep acq's post-background liveness probe fast in tests (real default is 1s).
+  # The stubbed serve/ssh children outlive this window; failure tests still model
+  # a dead child or absent listener explicitly.
+  export ACQ_MSB_SERVE_SETTLE="0.1" ACQ_MSB_FORWARD_SETTLE="0.1"
   # Make the create-time host-port contention probe (ADR-0034) deterministic and
   # socket-free: every port reports FREE unless a test names it in
   # ACQ_MSB_HOST_PORTS_BUSY. Without this the verdict would depend on what the
@@ -603,12 +900,13 @@ KEYGENSTUB
   unset ACQ_EXTRA_KITS ACQ_EXTRA_KIT_SOURCES
 }
 
-cleanup_stubs() { [ -n "${STUBDIR:-}" ] && rm -rf "$STUBDIR"; }
+cleanup_stubs() { [ -n "${STUBDIR:-}" ] && { chmod -R u+w "$STUBDIR" 2>/dev/null || true; rm -rf "$STUBDIR"; }; }
 
 # Source acq for its functions (ACQ_SOURCE_ONLY guard).
 # shellcheck disable=SC1090
 load_acq() {
   ACQ_SOURCE_ONLY=1 . "$ACQ"
+  export ACQ_TEST_PATTERNS_REF="$PATTERNS_KIT_REF"
   # Also load the sbx adapter since acq_resolve_backend would normally do it.
   # shellcheck source=acq.backends/sbx.sh
   . "${REPO_ROOT}/acq.backends/sbx.sh"
@@ -632,12 +930,3 @@ seed_host_config() {
   return 0
 }
 export -f seed_host_config 2>/dev/null || true
-
-# Seed the host-side agent-user gate for a pre-provisioned sandbox test fixture.
-seed_host_config_gates() {
-  local backend="${1:-msb}" name="${2:-}"
-  [ -n "$name" ] || return 0
-  command -v acq_host_config_write >/dev/null 2>&1 || return 0
-  [ "${STUB_AGENT_USER_READY:-0}" = "1" ] && acq_host_config_write "$backend" "$name" agent-user-ready 1
-}
-export -f seed_host_config_gates 2>/dev/null || true

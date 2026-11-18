@@ -35,9 +35,13 @@ case "$1" in
   clone)
     # shellcheck disable=SC2124
     dest=${@: -1}
-    mkdir -p "$dest/.git"
+    mkdir -p "$dest/.git" "$dest/scripts"
     printf '#!/bin/sh\n' >"$dest/acq"
     chmod +x "$dest/acq"
+    # install_provider_validator_wheelhouse in install.sh calls this script
+    # from the clone; stub it out so clone-path tests don't fail on an absent file.
+    printf '#!/bin/sh\nexit 0\n' >"$dest/scripts/install-provider-input-wheelhouse"
+    chmod +x "$dest/scripts/install-provider-input-wheelhouse"
     ;;
   -C)
     repo=$2
@@ -471,9 +475,12 @@ _no_package_manager_path() {
 @test "install: existing shallow clone deepens before failing pinned sha" {
   export GIT_STUB_LOG="$BATS_TEST_TMPDIR/git.log"
   _write_git_stub
-  mkdir -p "$ACQ_INSTALL_CLONE_DIR/.git"
+  mkdir -p "$ACQ_INSTALL_CLONE_DIR/.git" "$ACQ_INSTALL_CLONE_DIR/scripts"
   printf '#!/bin/sh\n' >"$ACQ_INSTALL_CLONE_DIR/acq"
   chmod +x "$ACQ_INSTALL_CLONE_DIR/acq"
+  # stub the wheelhouse installer so install.sh doesn't fail looking for it
+  printf '#!/bin/sh\nexit 0\n' >"$ACQ_INSTALL_CLONE_DIR/scripts/install-provider-input-wheelhouse"
+  chmod +x "$ACQ_INSTALL_CLONE_DIR/scripts/install-provider-input-wheelhouse"
   release_sha=abcdef0123456789abcdef0123456789abcdef01
 
   run env GIT_STUB_FAIL_FIRST_CHECKOUT_SHA="$release_sha" \

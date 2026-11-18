@@ -3,7 +3,7 @@ title: "acq Concepts"
 description: "Backend-neutral concepts for working with acq sandboxes (workspaces, mounts, published ports)"
 status: canonical
 tier: 2
-last_updated: "2026-10-03"
+last_updated: "2026-10-22"
 audience: "developers"
 keywords: ["acq", "concepts", "workspace", "mount", "ports", "publish", "backend-neutral", "sbx", "msb"]
 related_files: ["docs/howto/acq.md", "docs/BACKEND_GUIDE.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md", "docs/adr/0034-host-port-selection-and-publish-override.md"]
@@ -17,6 +17,26 @@ Cross-cutting concepts for working with `acq` sandboxes. These apply to **both**
 backends (sbx and msb) because `acq` presents one neutral interface over both.
 For per-backend strengths, tradeoffs, and caveats, see the
 [Backend Guide](BACKEND_GUIDE.md).
+
+## Provider Validator Runtime
+
+Provider-input validation uses an isolated runtime in user data
+(`$XDG_DATA_HOME/acq/provider-input-validator`, or `~/.local/share` by default).
+Normal official, npm, and Homebrew installations acquire a release-built,
+checksummed wheelhouse at installation time. On first provider-backed create,
+acq atomically creates the runtime from that local wheelhouse with
+`pip --no-index --require-hashes`.
+It never installs packages globally or downloads packages during creation.
+The macOS wheelhouse supports the pinned closure on Python 3.12-3.14, including
+Homebrew Python 3.14 on Apple Silicon. A failed refresh leaves the previous
+published runtime intact; a missing or invalid wheelhouse fails validation closed.
+Windows x64 releases additionally include CPython 3.12.10's embedded
+distribution, downloaded and SHA-256 verified by release CI from python.org,
+then packaged with the existing exact locked wheelhouse. The installer verifies
+the nested archive and atomically publishes it under `%LOCALAPPDATA%\acq`; it
+does not install Python globally or use WinGet. The embedded distribution is
+covered by the [Python Software Foundation License Version 2](https://docs.python.org/3/license.html);
+the release includes its notice as `PYTHON-NOTICE.txt`.
 
 ---
 
@@ -231,6 +251,34 @@ catalog, kept in sync with the USAi `/models` API so new projects start from a
 current baseline. See the kit definition in the agentic-coding-patterns
 repository for details.
 
+### Provider input projection
+
+Provider input validation uses exact Python dependency versions. Normal installs
+bootstrap the user-data runtime automatically and offline on first use. To
+prepare it explicitly, run:
+
+```bash
+scripts/setup-provider-input-validator --apply
+```
+
+The command creates `$XDG_DATA_HOME/acq/provider-input-validator` and installs
+only the versions pinned in the selected lock file from the shipped checksum-
+verified wheelhouse. `acq` prefers this isolated runtime when
+`ACQ_PROVIDER_INPUT_PYTHON` is not set. It never modifies the global Python
+environment or downloads packages during sandbox creation.
+
+Provider-role kits may publish versioned provider facts, a normalizer, and a
+model snapshot. Before a sandbox is created, acq discovers every selected
+provider-role kit, validates the full set with the pinned Patterns validator,
+and projects only approved regular files into a backend-owned read-only mount.
+
+Consumers receive `ACQ_PROVIDER_INPUT_ROOT`; compose each provider directory as
+`$ACQ_PROVIDER_INPUT_ROOT/models/providers/<providerId>`. A missing root is not
+ready, while a present `models/providers` directory with no entries is an
+authoritative empty provider set. This is the durable neutral interface for
+Patterns provider consumers; it does not assume a provider allowlist, USAi, or
+an OpenCode configuration.
+
 ---
 
 ## Customizing your setup
@@ -303,6 +351,15 @@ is used verbatim.
 Extras are applied **after** the built-in kits (so they win on any overlapping
 config). They also work when re-running against an existing sandbox: adding a new
 entry and re-running `acq run <existing-sandbox>` injects just the new kit.
+
+### Provider input projection
+
+Provider-role kits may declare model facts, a normalizer, and a catalog snapshot.
+Before sandbox creation, `acq` validates the complete set with the validator and
+schemas from the pinned Patterns release, then mounts only the approved artifacts
+read-only at `ACQ_PROVIDER_INPUT_ROOT`. These projected facts and catalogs are
+guest-readable metadata, not secrets. Credentials remain in backend secret
+bindings and must never be included in a provider-input bundle.
 
 If an extra kit is hosted somewhere other than `github.com/GSA-TTS/`, add its
 scheme-less prefix so `acq` allowlists it:

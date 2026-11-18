@@ -10,7 +10,7 @@
 #
 # shellcheck shell=bats
 
-setup() { acq_setup_stubs; load_acq; }
+setup() { acq_setup_stubs; }
 teardown() { acq_teardown_stubs; }
 
 load 'helper'

@@ -7,7 +7,10 @@ on:
       - '.markdownlint.jsonc'
       - '.markdownlintignore'
       - '.markdown-link-check.json'
-      - '.github/linters/package*.json'
+      - '.github/linters/**'
+      - '.github/workflows/markdown-quality.yml'
+      - '.pre-commit-config.yaml'
+      - 'package.json'
   push:
     branches:
       - main
@@ -16,7 +19,10 @@ on:
       - '.markdownlint.jsonc'
       - '.markdownlintignore'
       - '.markdown-link-check.json'
-      - '.github/linters/package*.json'
+      - '.github/linters/**'
+      - '.github/workflows/markdown-quality.yml'
+      - '.pre-commit-config.yaml'
+      - 'package.json'
 
 concurrency:
   group: markdown-${{ github.head_ref || github.ref }}
@@ -36,7 +42,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
           cache: 'npm'
@@ -48,41 +54,24 @@ jobs:
           npm ci
           npm audit --audit-level=high
 
-      # File selection comes from the same command used by `npm run lint:md` and
-      # pre-commit, so none of the three can select a different set. The version
-      # comes from .github/linters/package-lock.json (installed above), so there
-      # is no second version pin to drift.
-      #
-      # --dot is required: markdownlint's globber skips dot-directories by
-      # default, which silently excluded .github/**/*.md (e.g.
-      # .github/pull_request_template.md) from every invocation.
+      - name: Test Markdown adapter
+        run: npm run test:markdownlint
+
+      # The wrapper shares selection, config and engine with npm and pre-commit,
+      # including hidden Markdown and fail-closed empty selection (ADR-0046).
       - name: Run markdownlint
         shell: bash
         run: |
           set -euo pipefail
-          .github/linters/node_modules/.bin/markdownlint --config .markdownlint.jsonc --ignore-path .markdownlintignore --dot "**/*.md"
+          node .github/linters/run-markdownlint.mjs
 
-      # A markdownlint run that matched no files can still exit 0, so assert the
-      # repository has tracked markdown files after applying .markdownlintignore.
-      #
-      # The ignore set is evaluated by GIT's gitignore engine via --exclude-from,
-      # not by hand-translating .markdownlintignore into `:!` pathspecs. Those are
-      # different matchers: a bare `test/vendor` pathspec matches only that exact
-      # path, so a naive translation left vendored files in the count and the
-      # assertion drifted above the set markdownlint actually linted. Reusing the
-      # same gitignore semantics markdownlint applies keeps them in agreement.
+      # Count the actual lexical selection, not a separate tracked-file estimate.
       - name: Assert markdownlint actually linted files
         shell: bash
         run: |
           set -euo pipefail
-          total=$(git ls-files -- '*.md' | wc -l | tr -d ' ')
-          ignored=$(git ls-files -c -i --exclude-from=.markdownlintignore -- '*.md' | wc -l | tr -d ' ')
-          count=$((total - ignored))
-          echo "markdownlint linted ${count} file(s) (${total} tracked, ${ignored} ignored)"
-          if [ "${count}" -lt 1 ]; then
-            echo "::error::markdownlint matched no files - check .markdownlintignore" >&2
-            exit 1
-          fi
+          count=$(node .github/linters/run-markdownlint.mjs --count-only)
+          echo "markdownlint linted ${count} file(s)"
 
   link-check:
     name: Link Check

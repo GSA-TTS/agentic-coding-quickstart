@@ -66,7 +66,7 @@ PY
 if [ "\${1:-}" = "ssh" ] && [ "\${2:-}" = "serve" ]; then
   printf '%s' "\$\$" > "$STUBDIR/state/serve.pid"
   exec >/dev/null 2>&1
-  sleep 30
+  exec sleep 30
 fi
 MSBPIDSTUB
   chmod +x "$STUBDIR/msb"
@@ -79,7 +79,7 @@ MSBPIDSTUB
     printf "pid=%s child=%s\n" "$pid" "$child"
     [ "$pid" = "$child" ] && echo "pid-is-real-process" || echo "pid-is-wrapper"
     kill "$pid" 2>/dev/null
-    sleep 0.5
+    wait "$pid" 2>/dev/null
     if kill -0 "$child" 2>/dev/null; then echo "child-survived"; else echo "child-gone"; fi
   '
   assert_output --partial 'pid-is-real-process'
@@ -118,7 +118,8 @@ MSBPIDSTUB
 @test "msb ports(S2): a forward with no host listener fails the publish, no state recorded" {
   local hport; hport=$(free_tcp_port)
   run bash -c '
-    export ACQ_MSB_FORCE_SERVE_PORT=54321 STUB_SSH_NO_LISTENER=1
+    export ACQ_MSB_FORCE_SERVE_PORT=54321 STUB_SSH_NO_LISTENER=1 \
+      ACQ_MSB_FORWARD_PROBE_ATTEMPTS=1 ACQ_MSB_FORWARD_PROBE_DELAY=0
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     acq_backend_ports pbox --publish "$1:3000" 2>&1
     echo "RC=$?"
@@ -244,6 +245,25 @@ MSBPIDSTUB
   assert_output --partial 'sandbox 3000 -> host 127.0.0.1:3000 (create-time -p)'
   assert_output --partial 'sandbox 8443 -> host 127.0.0.1:8443 (create-time -p)'
   refute_output --regexp '127\.0\.0\.1:(1|9|16|00|256)( |$)'
+}
+
+@test "msb ports: LIST mode lists every port when jq emits CRLF line endings (Windows)" {
+  printf '%s\n' '{"active_config":{"network":{"ports":[{"guest_port":3000,"host_port":3000},{"guest_port":4096,"host_port":4096},{"guest_port":8443,"host_port":8443}]}}}' \
+    >"$STUBDIR/.msb_inspect_json"
+  cat >"$STUBDIR/jq" <<'CRLFJQ'
+#!/bin/sh
+cat >/dev/null
+printf '3000:3000\r\n4096:4096\r\n8443:8443\r\n'
+CRLFJQ
+  chmod +x "$STUBDIR/jq"
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_backend_ports listbox
+  '
+  assert_success
+  assert_output --partial 'sandbox 3000 -> host 127.0.0.1:3000 (create-time -p)'
+  assert_output --partial 'sandbox 4096 -> host 127.0.0.1:4096 (create-time -p)'
+  assert_output --partial 'sandbox 8443 -> host 127.0.0.1:8443 (create-time -p)'
 }
 
 @test "msb ports: LIST mode with zero ports exits 0 (empty list, not an error)" {

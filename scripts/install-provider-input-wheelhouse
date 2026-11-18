@@ -1,0 +1,66 @@
+#!/bin/sh
+# Install a release-built, hash-verified wheelhouse. This runs at install time,
+# never during `acq create`, so provider validation remains offline at runtime.
+set -eu
+
+target=""
+version=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --target) target=$2; shift 2 ;;
+    --version) version=$2; shift 2 ;;
+    *) echo "usage: $0 --target DIR --version VERSION" >&2; exit 2 ;;
+  esac
+done
+[ -n "$target" ] && [ -n "$version" ] || { echo "--target and --version are required" >&2; exit 2; }
+
+case "$(uname -s)-$(uname -m)" in
+  Darwin-arm64) platform=macos-arm64 ;;
+  Darwin-x86_64) platform=macos-x86_64 ;;
+  Linux-x86_64) platform=linux-x86_64 ;;
+  Linux-aarch64) platform=linux-aarch64 ;;
+  *) echo "unsupported host for provider-input validator wheelhouse" >&2; exit 2 ;;
+esac
+
+asset="provider-input-validator-wheelhouse-${platform}.tar.gz"
+base="https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v${version}"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/acq-validator-wheelhouse.XXXXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+curl --fail --location --silent --show-error "$base/SHA256SUMS" -o "$tmp/SHA256SUMS"
+curl --fail --location --silent --show-error "$base/$asset" -o "$tmp/$asset"
+expected=$(grep " $asset$" "$tmp/SHA256SUMS" | cut -d' ' -f1)
+[ -n "$expected" ] || { echo "release checksum manifest lacks $asset" >&2; exit 2; }
+if command -v sha256sum >/dev/null 2>&1; then
+  actual=$(sha256sum "$tmp/$asset" | cut -d' ' -f1)
+else
+  actual=$(shasum -a 256 "$tmp/$asset" | cut -d' ' -f1)
+fi
+[ "$actual" = "$expected" ] || { echo "checksum mismatch for $asset" >&2; exit 2; }
+# setup-provider-input-validator looks for wheels under <wheelhouse>/<platform>/
+# so the extracted contents must land one level deeper than the base --target.
+target="${target}/${platform}"
+stage="${target}.stage.$$"
+backup="${target}.previous.$$"
+rm -rf "$stage"
+mkdir -p "$stage"
+if ! tar -xzf "$tmp/$asset" -C "$stage"; then
+  rm -rf "$stage"
+  echo "could not extract $asset" >&2
+  exit 2
+fi
+[ -f "$stage/SHA256SUMS" ] || { rm -rf "$stage"; echo "wheelhouse archive lacks SHA256SUMS" >&2; exit 2; }
+if command -v sha256sum >/dev/null 2>&1; then
+  (cd "$stage" && sha256sum -c SHA256SUMS) || { rm -rf "$stage"; echo "wheelhouse contents failed checksum verification" >&2; exit 2; }
+else
+  (cd "$stage" && shasum -a 256 -c SHA256SUMS) || { rm -rf "$stage"; echo "wheelhouse contents failed checksum verification" >&2; exit 2; }
+fi
+if [ -e "$target" ]; then mv "$target" "$backup"; fi
+if mv "$stage" "$target"; then
+  rm -rf "$backup"
+else
+  [ ! -e "$backup" ] || mv "$backup" "$target"
+  rm -rf "$stage"
+  echo "could not publish $asset" >&2
+  exit 2
+fi

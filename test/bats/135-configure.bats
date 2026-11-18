@@ -160,11 +160,11 @@ _cfg_src() {
   '
   assert_success
   assert_line 'oci-engine'
-  assert_output --partial 'ref=d2674db8b424402e912e95254d6b194a062deb73'
+   assert_output --partial 'ref=941a286f912b99475429c3c00db49a99af5b241e'
   assert_output --partial 'dir=integrations/isolation/acq-kits/oci-engine'
 }
 
-@test "catalog: prime-agent is intentionally NOT offered (skeleton at pin)" {
+@test "catalog: prime-agent is not offered in the opt-in kit picker" {
   run bash -c '
     ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
     printf "%s\n" "${ACQ_OPTIN_KIT_NAMES[@]}"

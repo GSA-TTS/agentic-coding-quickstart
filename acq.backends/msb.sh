@@ -116,6 +116,17 @@ _acq_msb_safe_agent_token() {
 # off MSYS, so POSIX hosts are unaffected. `msb` is invoked WITHOUT `command` so
 # a shell-function shim (tests) or the PATH executable is honored as before; the
 # env assignment still reaches the real process either way. See ADR-0029.
+#
+# IMPORTANT — background (provider-input lock) call sites:
+# The three background call sites (create × 2, remove × 1) that register with the
+# provider-input guardian use the MSYS2_ARG_CONV_EXCL='*' prefix INLINE rather
+# than going through this function. That causes bash to fork + exec-optimize into
+# the actual `msb` binary in one step, so $! is the backend executable's own PID.
+# Using _acq_msb_cli() in background would interpose an extra bash subshell level,
+# leaving the real binary as an unreachable grandchild that survives TERM sent to
+# the wrapper PID — the parent process the guardian registered would die but the
+# actual backend executable could outlive it and keep the lock ambiguous.
+# All synchronous (foreground) call sites continue to use _acq_msb_cli() normally.
 _acq_msb_cli() {
   MSYS2_ARG_CONV_EXCL='*' msb "$@"
 }
@@ -160,6 +171,16 @@ MSB_ROLLBACK_VERSION="0.6.18"
 # (it owns the rollback metadata), and can be refused outright when grouped or
 # duplicate snapshots exist. See ADR-0032.
 MSB_FIXED_VERSION="0.7.3"
+
+# Lowest msb version on which acq relies on a `:ro` host-config mount for trusted
+# `readonly: true` kit code (ADR-0035 Mechanism 2). 0.7.7 is the version the mount
+# behavior was verified on, live (a host-side canary, scripts/qualify-msb-ro-mount) and
+# in the upstream source: msb's host-side virtiofs server denies every mutating
+# operation on a mount whose `ro` option is set, independent of the guest. Older
+# versions were not checked and are refused; prerelease or unparsable versions are
+# refused too. This is a floor, not a guarantee: the per-sandbox `msb inspect` check
+# below is what confirms THIS sandbox's mount was created read-only.
+MSB_RO_MOUNT_MIN_VERSION="0.7.7"
 
 # Default OCI image for provisioned non-OpenCode sandboxes. We default to the SAME image
 # family sbx uses: `docker/sandbox-templates:shell-docker`, an Ubuntu-based
@@ -323,9 +344,21 @@ _acq_msb_service_binding() {
     fi
   fi
   case "$_service" in
-    usai)   printf '%s\t%s\n' "$USAI_PROVIDER_KEY_ENV" "$ACQ_MSB_USAI_HOST"; return 0 ;;
     github) printf '%s\t%s\n' "GITHUB_TOKEN" "$ACQ_MSB_GITHUB_HOST"; return 0 ;;
   esac
+  # Providers (the default one included) are resolved from acq's registry + the
+  # validated facts, never from a compiled-in table: there is no `usai` branch.
+  if command -v acq_provider_binding_host_env >/dev/null 2>&1; then
+    _meta=$(acq_provider_binding_host_env "$_service" "$_sandbox" 2>/dev/null) || _meta=""
+    if [ -n "$_meta" ]; then
+      _host=$(printf '%s' "$_meta" | cut -f1)
+      _env=$(printf '%s' "$_meta" | cut -f2)
+      if [ -n "$_host" ] && [ -n "$_env" ]; then
+        printf '%s\t%s\n' "$_env" "$_host"
+        return 0
+      fi
+    fi
+  fi
   printf '\t\n'
 }
 
@@ -590,6 +623,22 @@ ACQ_MSB_SNAPSHOT_DIR="${ACQ_MSB_SNAPSHOT_DIR:-${ACQ_STATE_DIR}/msb-snapshots}"
 # always defined even if provision is not the entry point.
 _ACQ_MSB_STARTUP_STAGE_FILES=()
 _ACQ_MSB_STARTUP_STAGED=""
+_ACQ_MSB_ATTEMPT_GENERATION=""
+_ACQ_MSB_ATTEMPT_CLONE=""
+_ACQ_MSB_ATTEMPT_ACTIVE=""
+_ACQ_MSB_CREATE_STARTED=""
+
+_acq_msb_cleanup_uncreated_attempt() {
+  [ -n "${_ACQ_MSB_ATTEMPT_ACTIVE:-}" ] || return 0
+  if [ -z "${_ACQ_MSB_CREATE_STARTED:-}" ] || _acq_msb_confirm_absent "${_ACQ_MSB_ATTEMPT_NAME:-}"; then
+    [ -z "${_ACQ_MSB_ATTEMPT_CLONE:-}" ] || _acq_msb_clone_cleanup "$_ACQ_MSB_ATTEMPT_NAME"
+    acq_provider_input_discard msb "$_ACQ_MSB_ATTEMPT_NAME" "$_ACQ_MSB_ATTEMPT_GENERATION" || true
+  fi
+  _ACQ_MSB_ATTEMPT_GENERATION=""
+  _ACQ_MSB_ATTEMPT_CLONE=""
+  _ACQ_MSB_ATTEMPT_ACTIVE=""
+  _ACQ_MSB_CREATE_STARTED=""
+}
 # Per-kit readonly-file rewrite table: declared guest path -> read-only mount
 # path. Trusted startup code is never executed from a guest-writable copy.
 _ACQ_MSB_RO_REWRITE_FROM=()
@@ -882,6 +931,13 @@ _acq_msb_is_running() {
 # The real value moves via a TRANSIENT exported env var, never argv.
 _acq_msb_bind_one() {
   local _arrn="$1" _namesn="$2" _svc="$3" _name="$4" _env="$5" _host="$6" _val
+  # These fields can originate from a facts.json or a host-config record, so they
+  # are validated BEFORE they reach eval/export/argv: only a bare ENV identifier
+  # and a bare DNS name can ever be interpolated below.
+  case "$_env" in
+    ''|*[!A-Z0-9_]*|[!A-Z]*) acq_debug "msb secret: refusing unsafe env name for '$_svc'"; return 1 ;;
+  esac
+  _acq_provider_fact_safe_host "$_host" || { acq_debug "msb secret: refusing unsafe host for '$_svc'"; return 1; }
   _val=$(acq_secret_resolve "$_svc" "$_name" 2>/dev/null) && [ -n "$_val" ] || return 1
   # shellcheck disable=SC2163  # dynamic export of the resolved binding env var
   export "$_env=$_val"; _val=""
@@ -920,22 +976,13 @@ _acq_msb_bind_secrets_into() {
   local _arrn="$1" _namesn="$2" _name="$3"
 
   if command -v acq_secret_resolve >/dev/null 2>&1; then
-    # usai/github hosts resolve through the SAME binding table set/rm/refeed use
-    # (_acq_msb_service_binding), so a `--host` sidecar recorded at `acq secret
-    # set` overrides the compiled-in endpoint here too (#384) instead of being
-    # written-but-ignored at provision.
-    local _usai_binding _usai_env _usai_host
-    _usai_binding=$(_acq_msb_service_binding usai "$_name")
-    _usai_env=$(printf '%s' "$_usai_binding" | cut -f1)
-    _usai_host=$(printf '%s' "$_usai_binding" | cut -f2)
-
-    # USAi: acq store first, else a pre-exported USAI_API_KEY (e.g. CI).
-    if ! _acq_msb_bind_one "$_arrn" "$_namesn" usai "$_name" "$_usai_env" "$_usai_host"; then
-      if [ -n "${USAI_API_KEY:-}" ]; then
-        eval "$_arrn+=(--secret \"\${_usai_env}@\${_usai_host}\")"
-        acq_debug "msb secret: binding ${_usai_env}@${_usai_host} (from env)"
-      fi
-    fi
+    # github hosts resolve through the SAME binding table set/rm/refeed use
+    # (_acq_msb_service_binding), so a `--host` sidecar recorded at
+    # `acq secret set` overrides the compiled-in endpoint here too (#384) instead
+    # of being written-but-ignored at provision.
+    #
+    # Providers (the default one included) are bound by the generic provider loop
+    # below; only the github HOST service keeps a compiled-in branch.
 
     # GitHub: bind the token to the API and git-transport hosts. acq store first,
     # then a pre-exported GITHUB_TOKEN, then GH_TOKEN (CI). Absent token => no
@@ -979,8 +1026,60 @@ _acq_msb_bind_secrets_into() {
 $(acq_secret_meta_list "$_name")
 EOF
     fi
-  elif [ -n "${USAI_API_KEY:-}" ]; then
-    eval "$_arrn+=(--secret \"${USAI_PROVIDER_KEY_ENV}@\${ACQ_MSB_USAI_HOST}\")"
+
+    # Provider kits: every provider id acq knows for this sandbox (the
+    # credential-bindings registry unioned with the facts recorded at create)
+    # resolves its (env, host) from validated facts, so a provider kit hosted
+    # outside the pinned Patterns release binds with no per-provider code here.
+    # A value pre-exported by CI is bound from the host environment, matching the
+    # USAi/GitHub fallbacks — otherwise a CI run would pass the gate and create a
+    # sandbox with a dead credential.
+    if command -v acq_provider_binding_host_env >/dev/null 2>&1; then
+      local _pid _pbinding _penv _phost _pnames _pexported
+      while IFS= read -r _pid; do
+        [ -n "$_pid" ] || continue
+        # `github` is bound above from the compiled-in host table; every provider
+        # (the default one included) comes through this loop.
+        case "$_pid" in github) continue ;; esac
+        # _acq_msb_service_binding is the single source for provision, rotate and
+        # unbind: an explicit `acq secret set <id> --host H --env E` sidecar (written
+        # by the user on the host, never by a kit) wins, else the registry/facts
+        # binding. Provisioning from the registry alone would bind a different
+        # host than the one rotate and `secret rm` act on.
+        _pbinding=$(_acq_msb_service_binding "$_pid" "$_name" 2>/dev/null) || continue
+        _penv=$(printf '%s' "$_pbinding" | cut -f1)
+        _phost=$(printf '%s' "$_pbinding" | cut -f2)
+        [ -n "$_penv" ] && [ -n "$_phost" ] || continue
+        eval "_pnames=\" \${${_namesn}[*]-} \""
+        case "$_pnames" in *" $_penv "*) continue ;; esac
+        if ! _acq_msb_bind_one "$_arrn" "$_namesn" "$_pid" "$_name" "$_penv" "$_phost"; then
+          # Indirect expansion, never eval: `_penv` is validated by
+          # _acq_msb_bind_one but this runs before that guard for the env branch.
+          case "$_penv" in
+            ''|*[!A-Z0-9_]*|[!A-Z]*) _pexported="" ;;
+            *) _pexported=$(_acq_provider_env_value "$_penv") ;;
+          esac
+          if [ -n "$_pexported" ]; then
+            eval "$_arrn+=(--secret \"\${_penv}@\${_phost}\")"
+            acq_debug "msb secret: binding ${_penv}@${_phost} for '$_pid' (from env)"
+          fi
+          _pexported=""
+        fi
+      done <<PROVIDERS
+$(acq_provider_delivery_ids "$_name")
+PROVIDERS
+    fi
+  elif acq_provider_selection_active 2>/dev/null || ! command -v acq_provider_selection_active >/dev/null 2>&1; then
+    # No secret store loaded (e.g. a minimal harness): fall back to a host-exported
+    # value for the DEFAULT provider, derived from the same registry data. This is
+    # the facts-free fallback that keeps a pre-merge sandbox resumable.
+    local _default_env _default_host
+    _default_env=$(acq_provider_credential_key_env "$(acq_provider_default_id 2>/dev/null)" 2>/dev/null) || _default_env=""
+    _default_host=$(acq_provider_credential_hosts "$(acq_provider_default_id 2>/dev/null)" 2>/dev/null) || _default_host=""
+    if [ -n "$_default_env" ] && [ -n "$_default_host" ] \
+        && [ -n "$(_acq_provider_env_value "$_default_env")" ]; then
+      eval "$_arrn+=(--secret \"\${_default_env}@\${_default_host}\")"
+    fi
   fi
 }
 
@@ -1033,9 +1132,12 @@ EOF
 # matter for start.
 acq_backend_start() {
   local _name="$1"
-  if command -v acq_provider_facts_load_from_kit_or_fallback >/dev/null 2>&1; then
-    acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
+  if command -v acq_provider_selection_load >/dev/null 2>&1; then
+    acq_provider_selection_load msb "$_name" || return 1
   fi
+  # Provider facts are resolved from the sandbox's own generation/record (see
+  # acq_provider_binding), and the DEFAULT provider falls back to the shipped
+  # trust-anchor data — so a pre-merge sandbox still resumes with no facts file.
   local _start_secret_flags=() _start_secret_names=()
   _acq_msb_bind_secrets_into _start_secret_flags _start_secret_names "$_name"
   local _start_rc=0
@@ -1336,10 +1438,14 @@ acq_backend_restore() {
   if _hcfg_dir=$(acq_host_config_dir msb "$_name"); then
     mkdir -p "$_hcfg_dir" 2>/dev/null || { rm -f "$_staged_snapshot"; return 1; }
     chmod 711 "$_hcfg_dir" 2>/dev/null || { rm -f "$_staged_snapshot"; return 1; }
-    _hcfg_mount="$_hcfg_dir"
-    if command -v canonicalize_path >/dev/null 2>&1; then
-      _hcfg_mount=$(canonicalize_path "$_hcfg_mount") || { rm -f "$_staged_snapshot"; return 1; }
-    fi
+    # Same trusted canonicalizer as create, so the recorded mount source matches
+    # what the read-only mount verification later compares against.
+    command -v _acq_provider_input_canonical_path >/dev/null 2>&1 || {
+      echo "acq(msb): error: trusted host-path canonicalizer is unavailable." >&2
+      rm -f "$_staged_snapshot"
+      return 1
+    }
+    _hcfg_mount=$(_acq_provider_input_canonical_path "$_hcfg_dir") || { rm -f "$_staged_snapshot"; return 1; }
     if command -v host_path >/dev/null 2>&1; then
       _hcfg_host=$(host_path "$_hcfg_mount") || { rm -f "$_staged_snapshot"; return 1; }
     else
@@ -1363,9 +1469,6 @@ acq_backend_restore() {
     _host_snapshot=$(host_path "$_staged_snapshot")
   fi
 
-  if command -v acq_provider_facts_load_from_kit_or_fallback >/dev/null 2>&1; then
-    acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
-  fi
   local _restore_secret_flags=() _restore_secret_names=()
   _acq_msb_bind_secrets_into _restore_secret_flags _restore_secret_names "$_name"
   local _restore_rc=0
@@ -1519,7 +1622,7 @@ _acq_msb_wait_for_exec_ready() {
 
 # Fetch a kit ref into the cache and echo its local dir. Returns 1 on failure.
 _acq_msb_fetch_kit() {
-  local kitref="$1" slug dest
+  local kitref="$1" slug dest namespace
   # Offline/test escape hatch: when ACQ_MSB_KIT_LOCAL_DIR is set, resolve REMOTE
   # (git+) kit refs to that local directory instead of fetching. Mirrors the sbx
   # adapter's ACQ_SBX_KIT_PASSTHROUGH: it keeps the offline unit harness fully
@@ -1533,14 +1636,19 @@ _acq_msb_fetch_kit() {
       git+*|*://*) printf '%s\n' "$ACQ_MSB_KIT_LOCAL_DIR"; return 0 ;;
     esac
   fi
-  # Derive a stable cache subdir from the ref (sha + dir tail).
+  # Legacy slug directories contain Git repositories. Leave them untouched;
+  # only materialize metadata-free payloads in the versioned namespace.
+  namespace="${ACQ_MSB_KIT_CACHE}/payload-v2"
+  case "$kitref" in
+    git+http*)
+      if [ -L "$namespace" ]; then
+        echo 'acq(msb): refusing a symlink kit cache namespace' >&2
+        return 1
+      fi
+      ;;
+  esac
   slug=$(printf '%s' "$kitref" | tr -c 'A-Za-z0-9._-' '_' )
-  dest="${ACQ_MSB_KIT_CACHE}/${slug}"
-  if [ -d "$dest/.git" ]; then
-    # Already fetched — recompute the kit subdir path from the ref's dir=.
-    kit_translate_fetch "$kitref" "$dest"
-    return $?
-  fi
+  dest="${namespace}/${slug}"
   kit_translate_fetch "$kitref" "$dest"
 }
 
@@ -2096,8 +2204,10 @@ EOF
   local path mode phase source _readonly src _i
   _ACQ_MSB_RO_REWRITE_FROM=()
   _ACQ_MSB_RO_REWRITE_TO=()
-  local _hcfg_mount_ok=0
-  _acq_msb_host_config_mount_available "$name" && _hcfg_mount_ok=1
+  # The mount gate (record, version, msb's own mount record, guest probe) is evaluated
+  # lazily, once, at the first readonly file this kit declares, so kits without readonly
+  # files pay none of its cost (an inspect, a python3 spawn and the probes).
+  local _hcfg_mount_ok=0 _hcfg_rc=0 _hcfg_done=0
   for _i in ${_frecs[@]+"${!_frecs[@]}"}; do
     fline="${_frecs[$_i]}"
     path=$(printf '%s' "$fline" | cut -f1)
@@ -2110,19 +2220,43 @@ EOF
     if [ -n "$source" ]; then
       src="${kitdir}/${source}"
     fi
+    if [ "$_readonly" = "true" ] && [ -n "$src" ] && [ -f "$src" ] && [ "$_hcfg_done" -eq 0 ]; then
+      _hcfg_done=1
+      _acq_msb_host_config_mount_available "$name" || _hcfg_rc=$?
+      [ "$_hcfg_rc" -eq 0 ] && _hcfg_mount_ok=1
+    fi
+    if [ "$_readonly" = "true" ] && [ -n "$src" ] && [ -f "$src" ] && [ "$_hcfg_rc" -ge 2 ]; then
+      # Recorded read-only create, but the mount is not confirmed read-only. Never
+      # stage or run trusted code from it and never degrade to a guest copy.
+      if [ "$_hcfg_rc" -eq 4 ]; then
+        echo "acq(msb): error: cannot place read-only kit file '$path' for '$name': msb ${_ACQ_MSB_RO_MOUNT_VERSION:-<unknown version>} is below acq's minimum (${MSB_RO_MOUNT_MIN_VERSION}) for relying on a read-only mount, or its version could not be read as a final release." >&2
+        echo "acq(msb):   Update msb (acq installs ${MSB_PINNED_VERSION}), or see ADR-0035." >&2
+      elif [ "$_hcfg_rc" -eq 5 ]; then
+        echo "acq(msb): error: cannot place read-only kit file '$path' for '$name': ${_ACQ_MSB_RO_MOUNT_REASON:-the msb record does not show a read-only host-config mount}." >&2
+        echo "acq(msb):   acq will not run trusted code from a mount msb does not report as read-only. Recreate the sandbox, or see KNOWN_FAILURE_MODES 49." >&2
+      elif [ "$_hcfg_rc" -eq 2 ]; then
+        echo "acq(msb): error: cannot place read-only kit file '$path' for '$name': the host-config mount looks WRITABLE from the guest, so code staged there would not be trusted." >&2
+      else
+        echo "acq(msb): error: cannot place read-only kit file '$path' for '$name': the host-config mount is not a confirmed read-only mount (the guest probe did not confirm it)." >&2
+      fi
+      echo "acq(msb):   No guest-copy fallback is taken because the sandbox was created with a read-only host config; recreate the sandbox." >&2
+      return 1
+    fi
     if [ "$_readonly" = "true" ] && [ -n "$src" ] && [ -f "$src" ] && [ "$_hcfg_mount_ok" -eq 1 ]; then
       local _ro_guest
       if _ro_guest=$(_acq_msb_stage_readonly_file "$name" "$path" "$src"); then
         _ACQ_MSB_RO_REWRITE_FROM+=("$path")
         _ACQ_MSB_RO_REWRITE_TO+=("$_ro_guest")
       else
-        echo "acq(msb): warning: could not stage read-only kit file '$path' for '$name'; falling back to the legacy guest copy." >&2
-        _readonly=""
+        # Recorded read-only create: never degrade to a guest-writable copy.
+        echo "acq(msb): error: could not stage read-only kit file '$path' for '$name'." >&2
+        echo "acq(msb):   No guest-copy fallback is taken because the sandbox was created with a read-only host config; fix the host state directory and re-run, or recreate the sandbox." >&2
+        return 1
       fi
     fi
     if { [ "$_readonly" != "true" ] || [ "$_hcfg_mount_ok" -ne 1 ]; } && [ -n "$src" ] && [ -f "$src" ]; then
       if [ "$_readonly" = "true" ]; then
-        echo "acq(msb): warning: sandbox '$name' has no readable or read-only ADR-0035 host-config mount; copying readonly kit file '$path' into the guest for compatibility. Recreate the sandbox to get tamper-resistant readonly startup code." >&2
+        echo "acq(msb): warning: sandbox '$name' has no ADR-0035 read-only host-config record (older sandbox, or its create did not complete); copying readonly kit file '$path' into the guest for compatibility. Recreate the sandbox to get tamper-resistant readonly startup code." >&2
       fi
       _acq_msb_copy_file_verified "$name" "$src" "$path" "$mode" || {
         echo "acq(msb): error: could not place kit file at ${name}:${path}" >&2
@@ -2183,13 +2317,218 @@ _acq_msb_reset_kit_env() {
   acq_host_config_clear msb "$1" kit-env
 }
 
+# True iff the installed msb is a final X.Y.Z release at or above
+# MSB_RO_MOUNT_MIN_VERSION. Prerelease, build-suffixed, unparsable or older versions
+# are refused. Sets _ACQ_MSB_RO_MOUNT_VERSION to what was seen, for the caller's message.
+_ACQ_MSB_RO_MOUNT_VERSION=""
+_acq_msb_ro_mount_version_ok() {
+  local _v
+  _v=$(_acq_msb_version)
+  _ACQ_MSB_RO_MOUNT_VERSION="$_v"
+  [ -n "$_v" ] || return 1
+  _acq_msb_version_is_final "$_v" || return 1
+  case "$_v" in
+    [0-9]*.[0-9]*.[0-9]*) ;;
+    *) return 1 ;;
+  esac
+  [ "$(_acq_msb_version_ge "$_v" "$MSB_RO_MOUNT_MIN_VERSION")" -eq 0 ]
+}
+
+# The backend-recorded check below was reviewed for the POSIX msb backend. msb on
+# Windows uses a different filesystem backend that was not reviewed, so acq does not
+# rely on the mount there.
+_acq_msb_ro_mount_platform_ok() {
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) return 1 ;;
+  esac
+  return 0
+}
+
+# Python 3, required for the structured parse of `msb inspect` JSON (a security
+# decision must not rest on grep/sed heuristics). Absent => the check fails closed.
+_acq_msb_ro_python() {
+  command -v python3 2>/dev/null
+}
+
+# Reads `msb inspect --format json` on stdin; argv: GUEST_DIR HOST_DIR... Exit 0 and
+# prints "ok" only if exactly one mount sits at GUEST_DIR, is type Bind, has
+# options.readonly == true, its host path is (after realpath) one of HOST_DIR..., and
+# no OTHER mount at, above or below GUEST_DIR is writable. Exit 3 (retriable) if
+# .active_config is null; exit 1 with a reason for anything else, including an
+# unexpected shape. Never prints the JSON.
+IFS= read -r -d '' _ACQ_MSB_RO_INSPECT_PY <<'PYEOF' || true
+import json, os, posixpath, sys
+
+def out(code, msg):
+    print(msg)
+    sys.exit(code)
+
+guest = sys.argv[1]
+expected = [e for e in sys.argv[2:] if e]
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    out(1, "msb inspect output is not valid JSON")
+if not isinstance(data, dict):
+    out(1, "msb inspect output has an unexpected shape (not an object)")
+ac = data.get("active_config")
+if ac is None:
+    out(3, "msb reports no active config for the sandbox yet (active_config is null)")
+if not isinstance(ac, dict):
+    out(1, "msb inspect active_config has an unexpected shape")
+mounts = ac.get("mounts")
+if not isinstance(mounts, list):
+    out(1, "msb inspect active_config has no mounts list")
+
+def norm(p):
+    if not isinstance(p, str) or not p.startswith("/"):
+        return None
+    return posixpath.normpath("/" + p.lstrip("/"))
+
+target = norm(guest)
+entries = []
+for m in mounts:
+    if not isinstance(m, dict):
+        out(1, "msb inspect lists a mount with an unexpected shape")
+    if m.get("guest") is None:
+        continue
+    if norm(m.get("guest")) is None:
+        out(1, "msb inspect lists a mount with an unexpected guest path")
+    entries.append((norm(m.get("guest")), m))
+same = [m for g, m in entries if g == target]
+if not same:
+    out(1, "msb lists no mount at %s" % guest)
+if len(same) > 1:
+    out(1, "msb lists more than one mount at %s" % guest)
+m = same[0]
+if m.get("type") != "Bind":
+    out(1, "the mount at %s is not a Bind mount" % guest)
+opts = m.get("options")
+if not isinstance(opts, dict) or opts.get("readonly") is not True:
+    out(1, "msb does not record the mount at %s as read-only" % guest)
+host = m.get("host")
+if not isinstance(host, str) or not host:
+    out(1, "the mount at %s has no host path" % guest)
+if os.path.realpath(host) not in [os.path.realpath(e) for e in expected]:
+    out(1, "the mount at %s is not backed by this sandbox's acq host config directory" % guest)
+for g, o in entries:
+    if o is m:
+        continue
+    if g == "/" or target.startswith(g + "/") or g.startswith(target + "/"):
+        oo = o.get("options")
+        if not isinstance(oo, dict) or oo.get("readonly") is not True:
+            out(1, "another mount (%s) that is not read-only overlaps %s" % (g, guest))
+out(0, "ok")
+PYEOF
+
+# Ask msb itself, from the host, what it recorded for NAME's host-config mount. This is
+# what the backend was told to enforce for THIS sandbox; a guest cannot alter it.
+# Returns 0 if the recorded mount is the read-only Bind of acq's host config dir; else
+# non-zero with a human reason in _ACQ_MSB_RO_MOUNT_REASON. A null active_config right
+# after boot is retried a few times (ACQ_MSB_RO_INSPECT_RETRIES, default 3, one second
+# apart); everything else fails closed at once.
+_ACQ_MSB_RO_MOUNT_REASON=""
+_acq_msb_ro_mount_recorded_readonly() {
+  local name="$1" py hcfg hcfg_canon hcfg_host json res rc tries max
+  _ACQ_MSB_RO_MOUNT_REASON=""
+  if ! _acq_msb_ro_mount_platform_ok; then
+    _ACQ_MSB_RO_MOUNT_REASON="this platform's msb filesystem backend was not reviewed for read-only enforcement"
+    return 1
+  fi
+  py=$(_acq_msb_ro_python) || py=""
+  if [ -z "$py" ]; then
+    _ACQ_MSB_RO_MOUNT_REASON="python3 is required to read msb's mount record and was not found"
+    return 1
+  fi
+  hcfg=$(acq_host_config_dir msb "$name") || hcfg=""
+  if [ -z "$hcfg" ]; then
+    _ACQ_MSB_RO_MOUNT_REASON="acq has no host config directory for this sandbox"
+    return 1
+  fi
+  hcfg_canon="$hcfg"
+  if command -v _acq_provider_input_canonical_path >/dev/null 2>&1; then
+    hcfg_canon=$(_acq_provider_input_canonical_path "$hcfg" 2>/dev/null) || hcfg_canon="$hcfg"
+  fi
+  hcfg_host="$hcfg_canon"
+  if command -v host_path >/dev/null 2>&1; then
+    hcfg_host=$(host_path "$hcfg_canon" 2>/dev/null) || hcfg_host="$hcfg_canon"
+  fi
+  max="${ACQ_MSB_RO_INSPECT_RETRIES:-3}"
+  case "$max" in ""|*[!0-9]*) max=3 ;; esac
+  [ "$max" -ge 1 ] || max=1
+  tries=0
+  while :; do
+    tries=$((tries + 1))
+    if ! json=$(_acq_msb_cli inspect "$name" --format json 2>/dev/null </dev/null); then
+      _ACQ_MSB_RO_MOUNT_REASON="'msb inspect' failed, so the recorded mount could not be read"
+      return 1
+    fi
+    rc=0
+    res=$(printf '%s' "$json" | "$py" -c "$_ACQ_MSB_RO_INSPECT_PY" "$ACQ_HOST_CONFIG_GUEST_DIR" "$hcfg" "$hcfg_canon" "$hcfg_host" 2>/dev/null) || rc=$?
+    case "$rc" in
+      0) [ "$res" = "ok" ] && return 0
+         _ACQ_MSB_RO_MOUNT_REASON="the mount record check returned an unexpected result"; return 1 ;;
+      3) if [ "$tries" -lt "$max" ]; then sleep "${ACQ_MSB_RO_INSPECT_RETRY_SLEEP:-1}"; continue; fi
+         _ACQ_MSB_RO_MOUNT_REASON="$res"; return 1 ;;
+      *) _ACQ_MSB_RO_MOUNT_REASON="${res:-the mount record check failed}"; return 1 ;;
+    esac
+  done
+}
+
+# Whether sandbox NAME's trusted :ro host-config mount may be relied on for
+# readonly kit code. Return codes:
+#   0  all hold: a host ro-host-config record; msb at or above the version floor;
+#      msb's own `inspect` record shows the host-config mount as the one read-only
+#      Bind of acq's host config directory; and the guest probe did not contradict it
+#   1  no host record (legacy sandbox, or a create that never completed): the caller
+#      takes the compatibility path and copies the file into the guest, with its warning
+#   2  all of the above but the guest probe finds the mount WRITABLE
+#   3  all of the above but the guest probe does not confirm the mount (absent,
+#      unreadable, or the probe could not run)
+#   4  recorded, but the msb version is below the floor, a prerelease, or unparsable
+#   5  recorded, but msb's own record does not show the read-only host-config mount
+#      (reason in _ACQ_MSB_RO_MOUNT_REASON)
+# Authority: enforcement of `:ro` is msb's, on the host: its virtiofs server denies
+# mutating operations on a read-only mount whatever the guest does (a guest root can
+# even relabel its own mount flags). What acq checks is that msb RECORDED this
+# sandbox's mount as read-only, read from the host with `msb inspect`, which a guest
+# cannot forge. That confirms the setting msb was asked to enforce; it is not
+# independent proof of enforcement, so a future upstream regression would not be
+# caught here (scripts/qualify-msb-ro-mount is the optional re-check). The create-time
+# record (key ro-host-config) proves only that acq asked for the mount. The guest
+# probe is a diagnostic that can only make acq stricter: a guest with root controls
+# `test`/`sh` and can answer a probe however it likes, so a zero exit proves nothing,
+# while a "writable" answer is always taken at face value (fail closed).
 _acq_msb_host_config_mount_available() {
+  local name="$1" _probe_rc=0
+  [ "$(acq_host_config_read msb "$name" ro-host-config)" = "1" ] || return 1
+  _acq_msb_ro_mount_version_ok || return 4
+  _acq_msb_ro_mount_recorded_readonly "$name" || return 5
+  _acq_msb_host_config_mount_probe "$name" || _probe_rc=$?
+  case "$_probe_rc" in
+    0) return 0 ;;
+    2) return 2 ;;
+    *) return 3 ;;
+  esac
+}
+
+# DIAGNOSTIC ONLY. Exit 0: the guest reports a present mount that it could not write;
+# 1: mount absent/unreadable; 2: guest root could write to it. A zero exit is the
+# guest's own claim and is NOT proof of anything (see the authority note above); only
+# the non-zero answers carry weight, and they can only make acq stricter. Exit 2
+# relies on `msb exec` passing the guest exit code through unchanged, which is not
+# live-verified; if a different code is returned the writable case is reported as
+# "not confirmed" (code 3). Both fail closed, so only the message differs.
+_acq_msb_host_config_mount_probe() {
   local name="$1"
   _acq_msb_cli exec "$name" -u agent -- sh -c \
     "test -d '$ACQ_HOST_CONFIG_GUEST_DIR' && test -x '$ACQ_HOST_CONFIG_GUEST_DIR'" \
     </dev/null >/dev/null 2>&1 || return 1
+  # A failed redirection on the special builtin ':' terminates some POSIX
+  # shells with status 2. Contain it in a subshell so only a successful write
+  # selects our explicit WRITABLE status; denial returns the probe's status 0.
   _acq_msb_cli exec "$name" -u 0 -- sh -c \
-    '_dir=$1; _tmp="$_dir/.acq-ro-probe.$$"; if : > "$_tmp" 2>/dev/null; then rm -f "$_tmp" 2>/dev/null; exit 1; fi; exit 0' \
+    '_dir=$1; _tmp="$_dir/.acq-ro-probe.$$"; if ( : > "$_tmp" ) 2>/dev/null; then rm -f "$_tmp" 2>/dev/null; exit 2; fi; exit 0' \
     sh "$ACQ_HOST_CONFIG_GUEST_DIR" </dev/null >/dev/null 2>&1
 }
 
@@ -2288,7 +2627,10 @@ _acq_msb_copy_file_verified() {
     esac
   fi
   if [ -n "$mode" ]; then
-    _acq_msb_cli exec "$name" -u 0 -- chmod "$mode" "$path" >/dev/null 2>&1 || true
+    # Host measurements show a multi-second penalty for direct permission argv,
+    # absent when the same operation runs through a guest shell. Keep the shell
+    # program fixed and pass all command/data tokens as positional arguments.
+    _acq_msb_cli exec "$name" -u 0 -- sh -c '"$@"' sh chmod "$mode" "$path" >/dev/null 2>&1 || true
   fi
   case "$path" in
     /home/agent/*)
@@ -2316,7 +2658,7 @@ _acq_msb_copy_file_verified() {
           # cannot be redirected to chown files OUTSIDE /home/agent. Defense in
           # depth — the tree is inside the ephemeral guest and the top component
           # is already ../. guarded above.
-          _acq_msb_cli exec "$name" -u 0 -- chown -R -P agent "/home/agent/$top" >/dev/null 2>&1 || true
+          _acq_msb_cli exec "$name" -u 0 -- sh -c '"$@"' sh chown -R -P agent "/home/agent/$top" >/dev/null 2>&1 || true
           ;;
       esac
       ;;
@@ -2551,10 +2893,31 @@ _acq_msb_exec_flags_into() {
   done
 }
 
+# Foreground kit execution only. A fixed waiting shell avoids the measured MSB
+# direct-Node startup cost; argv stays positional, never shell source (ADR-0036).
+# Keep wrapping here, AFTER install marker hashing and background dispatch.
+# Args: NAME [MSB EXEC FLAGS...] -- ARGV... (the delimiter is caller-supplied).
+_acq_msb_exec_foreground() {
+  local _fg_prefix=(exec)
+  while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
+    _fg_prefix+=("$1")
+    shift
+  done
+  [ "$1" = "--" ] && shift
+  if [ "${1:-}" = node ]; then
+    set -- sh -c '"$@"' sh "$@"
+  fi
+  _acq_msb_cli "${_fg_prefix[@]}" -- "$@" </dev/null
+}
+
 # _acq_msb_exec_install NAME USER UFLAG_ARRVAR EFLAG_ARRVAR -- ARGV... — run an
 # install-phase command, gated by a per-command marker (hash of argv) so it runs
-# once per sandbox even across re-applies. The marker is held in host config so
-# a passwordless-sudo guest cannot forge it to suppress the command.
+# once per sandbox even across re-applies. The marker is held in host config, so a
+# guest cannot plant it, but it records only that the guest REPORTED a zero exit:
+# the host cannot verify what an install command did, and a guest that lies about
+# one run could suppress later ones. It is therefore a cache, not an integrity
+# fact, and an explicit forced re-apply (ACQ_FORCE_KIT_REAPPLY=1, as set by
+# `acq kit update`) bypasses it. Install commands are expected to be idempotent.
 _acq_msb_exec_install() {
   local _name="$1" _user="$2" _uflagn="$3" _eflagn="$4"
   shift 4
@@ -2568,12 +2931,12 @@ _acq_msb_exec_install() {
 
   local marker
   marker="install-$(printf '%s\0' "$@" | cksum | cut -d' ' -f1)"
-  if acq_host_config_has msb "$_name" "$marker"; then
+  if [ "${ACQ_FORCE_KIT_REAPPLY:-0}" != "1" ] && acq_host_config_has msb "$_name" "$marker"; then
     acq_debug "msb cmd[install] already done (marker hit): $*"
     return 0
   fi
   acq_debug "msb cmd[install] START (user=${_user:-0}): $*"
-  _acq_msb_cli exec "$_name" "${_uf[@]}" ${_ef[@]+"${_ef[@]}"} -- "$@" </dev/null || {
+  _acq_msb_exec_foreground "$_name" "${_uf[@]}" ${_ef[@]+"${_ef[@]}"} -- "$@" || {
     acq_debug "msb cmd[install] FAILED: $*"
     echo "acq(msb): warning: install command failed for '$_name'" >&2
     return 0
@@ -2607,7 +2970,7 @@ _acq_msb_exec_run() {
     acq_debug "msb cmd[startup:background] LAUNCHED: $*"
   else
     acq_debug "msb cmd[${_phase}] START (user=${_user:-0}): $*"
-    _acq_msb_cli exec "$_name" "${_uf[@]}" ${_ef[@]+"${_ef[@]}"} -- "$@" </dev/null || {
+    _acq_msb_exec_foreground "$_name" "${_uf[@]}" ${_ef[@]+"${_ef[@]}"} -- "$@" || {
       acq_debug "msb cmd[${_phase}] FAILED: $*"
       echo "acq(msb): warning: ${_phase} command failed for '$_name'" >&2
     }
@@ -2876,9 +3239,17 @@ _acq_msb_startup_body_into() {
 
   # The create-time script is assembled before the normal apply path stages the
   # files, so derive the same readonly path rewrite locally.
-  local _ro_from=() _ro_to=() _frec _fpath _fsource _freadonly _fslug _fcrc
+  local _ro_from=() _ro_to=() _frec _fpath _fsource _freadonly _fslug _fcrc _ro_ok=0
+  _acq_msb_ro_mount_version_ok && _acq_msb_ro_mount_platform_ok && _ro_ok=1
   while IFS= read -r _frec; do
     [ -n "$_frec" ] || continue
+    # Version below the floor (or an unreviewed platform): leave argv at the declared
+    # guest path. The sandbox does not exist yet, so the per-sandbox msb record cannot
+    # be read here; the apply step re-checks it and refuses the readonly file when it
+    # does not show a read-only mount, so nothing is staged on, or run from, the mount.
+    # The registered startup script is inert at boot and is only run through acq's
+    # apply/heal path, which performs that check first.
+    [ "$_ro_ok" -eq 1 ] || continue
     _freadonly=$(printf '%s' "$_frec" | cut -f5)
     [ "$_freadonly" = "true" ] || continue
     _fpath=$(printf '%s' "$_frec" | cut -f1)
@@ -3443,7 +3814,7 @@ acq_backend_snapshot_safe() {
 # is translated to msb's --volume mounts. Network allow-lists and the zscaler
 # --trust-host-cas shortcut are collected across all kits and applied at create.
 
-acq_backend_provision() {
+_acq_backend_provision_unlocked() {
   local name="$1"
   shift
 
@@ -3454,6 +3825,14 @@ acq_backend_provision() {
   local agent
   agent=$(first_positional "$@")
   [ -n "$agent" ] || agent="shell"
+  if acq_backend_exists "$name"; then
+    echo "acq(msb): error: sandbox '$name' already exists; refusing to alter its provider inputs." >&2
+    return 1
+  fi
+  if ! _acq_msb_confirm_absent "$name"; then
+    echo "acq(msb): error: could not confirm sandbox '$name' is absent; preserving provider inputs." >&2
+    return 1
+  fi
 
   # Collect create-time flags: net rules (union of all kit caps), --trust-host-cas
   # (if any kit declares the msb zscaler shortcut), volume mounts (from paths),
@@ -3512,13 +3891,14 @@ acq_backend_provision() {
   # validation) succeed behind a TLS-intercepting proxy (e.g. Zscaler).
   local kitref kitdir
   _acq_msb_select_kits "$agent" || return 1
-  local kits=("${KITS[@]}")
+  local kits=()
+  for kitref in ${KITS[@]+"${KITS[@]}"}; do kits+=("$kitref"); done
   local _generic_opencode_kit=""
   if [ "$_msb_image_source" = "generic-opencode-default" ]; then
     _generic_opencode_kit=$(_acq_agent_builtin_kit_ref opencode) || return 1
   fi
 
-  for kitref in "${kits[@]}"; do
+  for kitref in ${kits[@]+"${kits[@]}"}; do
     kitdir=$(_acq_msb_fetch_kit "$kitref") || {
       echo "acq(msb): error: could not fetch kit: $kitref" >&2
       exit 1
@@ -3556,6 +3936,26 @@ $(kit_spec_published_ports "$spec")"
     _volrecs="${_volrecs}
 $(kit_spec_volumes "$spec")"
   done
+
+  # Prepare the complete selected-provider set before the host config directory is
+  # mounted. It stays unpublished until this create succeeds; the guest receives
+  # the exact immutable generation rather than the mutable current symlink.
+  local _provider_generation
+  if ! _provider_generation=$(acq_provider_input_prepare msb "$name"); then
+    echo "acq(msb): error: provider input projection failed for '$name'." >&2
+    return 1
+  fi
+  _ACQ_MSB_ATTEMPT_NAME="$name"
+  _ACQ_MSB_ATTEMPT_GENERATION="$_provider_generation"
+  _ACQ_MSB_ATTEMPT_ACTIVE=1
+  # msb binds secrets only at create (--secret ENV@HOST), so a provider
+  # credential must resolve now. USAi keeps its own pre-create gate; this covers
+  # every other provider selected from the credential-bindings registry, using
+  # the facts of the generation prepared above.
+  if ! acq_provider_credentials_gate msb "$name" "$_provider_generation"; then
+    echo "acq(msb): error: provider credentials are not ready for '$name'." >&2
+    return 1
+  fi
 
   # Merged kit env, computed ONCE now that every kit is fetched and BEFORE any kit
   # is applied — see _acq_msb_merge_kit_env_into for why it must be a pre-pass.
@@ -3857,6 +4257,7 @@ EOF
       return 1
     fi
     _clone_src="$_ACQ_MSB_CLONE_DIR"
+    _ACQ_MSB_ATTEMPT_CLONE="$_clone_src"
   fi
 
   ACQ_MSB_GUEST_WORKSPACE=""
@@ -3952,26 +4353,42 @@ EOF
   _acq_msb_vsock_flags_into _vsock_flags "$name"
   [ "${#_vsock_flags[@]}" -gt 0 ] && create_flags+=("${_vsock_flags[@]}")
 
-  # Mount per-sandbox trusted configuration read-only. The guest can consume
-  # declared code and data here but cannot make acq trust a modified replacement.
-  local _hcfg_dir _hcfg_mount _hcfg_host
-  if _hcfg_dir=$(acq_host_config_dir msb "$name"); then
-    mkdir -p "$_hcfg_dir" 2>/dev/null || true
-    chmod 711 "$_hcfg_dir" 2>/dev/null || true
-    # msb rejects bind-mount sources reached through a host symlink. Host config
-    # commonly lives below macOS $TMPDIR (/var -> /private/var), so canonicalize
-    # this source just as we do workspace mounts above.
-    _hcfg_mount="$_hcfg_dir"
-    if command -v canonicalize_path >/dev/null 2>&1; then
-      _hcfg_mount=$(canonicalize_path "$_hcfg_mount")
-    fi
-    if command -v host_path >/dev/null 2>&1; then
-      _hcfg_host=$(host_path "$_hcfg_mount")
-    else
-      _hcfg_host="$_hcfg_mount"
-    fi
-    create_flags+=(--volume "${_hcfg_host}:${ACQ_HOST_CONFIG_GUEST_DIR}:ro")
+  # Preserve the existing trusted host-config mount used by read-only startup
+  # kit files and host-authoritative lifecycle state.
+  local _hcfg_dir _hcfg_host
+  _hcfg_dir=$(acq_host_config_dir msb "$name") || return 1
+  mkdir -p "$_hcfg_dir" || return 1
+  chmod 711 "$_hcfg_dir" || return 1
+  # Canonicalize to the real, symlink-free path before mounting. msb cannot
+  # mount a symlinked host path (same constraint as the workspace mount above,
+  # diagnosed at lines 3574-3579). On macOS the config dir sits under
+  # $HOME/.local/state/acq/..., which on some installs resolves through the
+  # /var -> /private/var alias (e.g. when $HOME or XDG_STATE_HOME itself lies
+  # under /var/folders/...); passing the un-resolved path causes msb to fail
+  # with "mount ...: Not a directory (os error 20)". Resolving to the canonical
+  # /private/... form fixes it. Require the trusted provider-input canonicalizer
+  # and fail closed if it is unavailable; do not follow arbitrary user symlinks.
+  command -v _acq_provider_input_canonical_path >/dev/null 2>&1 || {
+    echo "acq(msb): error: trusted host-path canonicalizer is unavailable." >&2
+    return 1
+  }
+  _hcfg_dir=$(_acq_provider_input_canonical_path "$_hcfg_dir") || return 1
+  if command -v host_path >/dev/null 2>&1; then
+    _hcfg_host=$(host_path "$_hcfg_dir") || return 1
+  else
+    _hcfg_host="$_hcfg_dir"
   fi
+  create_flags+=(--volume "${_hcfg_host}:${ACQ_HOST_CONFIG_GUEST_DIR}:ro")
+
+  # Provider metadata has its own guest mount. It must never expose the shared
+  # host config directory, which contains workspace, SSH, and kit state.
+  local _provider_mount
+  _provider_mount=$(acq_provider_input_msb_mount "$name" "$_provider_generation") || {
+    _acq_msb_cleanup_uncreated_attempt
+    return 1
+  }
+  create_flags+=(--volume "$_provider_mount")
+  create_flags+=(--env "ACQ_PROVIDER_INPUT_ROOT=$(acq_provider_input_guest_root msb "$name" "$_provider_generation")")
 
   # Credentials: read from the acq-owned secret store (keychain/file), scoped to
   # this sandbox first, then global. The real value is read into a TRANSIENT env
@@ -4003,16 +4420,26 @@ EOF
   # function on failure BEFORE the error block and the transient-secret scrub
   # below ever run.
   acq_debug "msb create --name $name ${create_flags[*]} $_msb_image"
-  local _create_rc=0
-  local _create_output=""
+  local _create_rc=0 _create_pid
+  local _create_output="" _create_output_file
   acq_debug "msb create: invoking (this returns fast; guest boots in background)"
   acq_spin_start "Creating sandbox '$name'"
-  _create_output=$(_acq_msb_cli create --name "$name" "${create_flags[@]}" "$_msb_image" 2>&1) || _create_rc=$?
+  _ACQ_MSB_CREATE_STARTED=1
+  _create_output_file=$(mktemp "${TMPDIR:-/tmp}/acq-msb-create.XXXXXX") || return 1
+  # Inline the env assignment so the fork exec-optimizes into the actual msb binary
+  # (or test-stub script), making $! the backend executable's own PID.  An extra
+  # shell wrapper (_acq_msb_cli) would interpose another fork level, leaving the
+  # real binary as an unreachable grandchild that survives TERM to the wrapper.
+  MSYS2_ARG_CONV_EXCL='*' msb create --name "$name" "${create_flags[@]}" "$_msb_image" >"$_create_output_file" 2>&1 &
+  _create_pid=$!
+  _acq_provider_input_guardian_register_if_active "$_create_pid" || { kill "$_create_pid" 2>/dev/null || true; wait "$_create_pid" 2>/dev/null || true; rm -f -- "$_create_output_file"; return 1; }
+  wait "$_create_pid" || _create_rc=$?
+  _create_output=$(cat "$_create_output_file"); rm -f -- "$_create_output_file"
   acq_spin_stop "Creating sandbox '$name'"
   [ -z "$_create_output" ] || printf '%s\n' "$_create_output" >&2
   if [ "$_create_rc" -ne 0 ] && [ "$_msb_image_source" = "agent-default" ] \
      && _acq_msb_image_not_found_error "$_create_output" \
-     && ! acq_backend_exists "$name"; then
+     && _acq_msb_confirm_absent "$name"; then
     echo "acq(msb): agent-specific image '$_msb_image' was not found;" >&2
     echo "acq(msb):   falling back to '$_ACQ_MSB_DEFAULT_IMAGE'." >&2
     _msb_image="$_ACQ_MSB_DEFAULT_IMAGE"
@@ -4021,7 +4448,13 @@ EOF
     _create_output=""
     acq_debug "msb create --name $name ${create_flags[*]} $_msb_image"
     acq_spin_start "Creating sandbox '$name'"
-    _create_output=$(_acq_msb_cli create --name "$name" "${create_flags[@]}" "$_msb_image" 2>&1) || _create_rc=$?
+    _create_output_file=$(mktemp "${TMPDIR:-/tmp}/acq-msb-create.XXXXXX") || return 1
+    # Same inline-env pattern as above: expose the msb executable PID directly.
+    MSYS2_ARG_CONV_EXCL='*' msb create --name "$name" "${create_flags[@]}" "$_msb_image" >"$_create_output_file" 2>&1 &
+    _create_pid=$!
+    _acq_provider_input_guardian_register_if_active "$_create_pid" || { kill "$_create_pid" 2>/dev/null || true; wait "$_create_pid" 2>/dev/null || true; rm -f -- "$_create_output_file"; return 1; }
+    wait "$_create_pid" || _create_rc=$?
+    _create_output=$(cat "$_create_output_file"); rm -f -- "$_create_output_file"
     acq_spin_stop "Creating sandbox '$name'"
     [ -z "$_create_output" ] || printf '%s\n' "$_create_output" >&2
   fi
@@ -4054,11 +4487,23 @@ EOF
       acq_registry_auth_hint msb "$_msb_image"
     fi
     echo "acq(msb):   (re-run with ACQ_DEBUG=1 for the full command trace)" >&2
-    # A fresh --clone scratch can hold no agent work yet — remove it (and the
-    # fetch-back remote) so the next create doesn't refuse on a stale dir.
-    [ -n "$_clone_src" ] && _acq_msb_clone_cleanup "$name"
+    if _acq_msb_confirm_absent "$name"; then
+      # A confirmed absence proves this attempt never created a sandbox. Only
+      # then is it safe to remove this attempt's scratch clone and generation.
+      _acq_msb_cleanup_uncreated_attempt
+    fi
     return 1
   fi
+
+  # msb create returned success. Its async readiness can still fail, but the
+  # backend may own a live or inspectable sandbox, so preserve this attempt.
+  _ACQ_MSB_ATTEMPT_ACTIVE=""
+
+  # A same-named sandbox removed outside acq can leave host state behind. Clear
+  # instance-scoped values as soon as this create is known to have produced a
+  # fresh instance, so a stale ro-host-config record cannot survive a boot that
+  # never becomes exec-ready; replacement values are recorded further below.
+  acq_host_config_clear_instance_state msb "$name"
 
   # CRITICAL: `msb create` returns 0 even when the sandbox later FAILS TO START
   # (e.g. a bad mount): the boot is asynchronous. So a zero rc from create does
@@ -4085,9 +4530,18 @@ EOF
   _acq_msb_restore_resources_write "$name" \
     ${_restore_volume_specs[@]+"${_restore_volume_specs[@]}"} || return 1
 
-  # A same-named sandbox removed outside acq can leave host state behind. Clear
-  # instance-scoped values before this fresh provision records replacement values.
-  acq_host_config_clear_instance_state msb "$name"
+  if ! _acq_provider_input_publish "$(acq_provider_input_root msb "$name")" "$_provider_generation"; then
+    echo "acq(msb): error: sandbox '$name' was created but provider inputs could not be published." >&2
+    return 1
+  fi
+
+  # Host-recorded create fact for ADR-0035 Mechanism 2: the create passed the
+  # host-config :ro volume flag and the sandbox became exec-ready. This does not
+  # prove the guest mount works. Written only here so a failed create records
+  # nothing; heal consults this key instead of a guest probe. A write failure
+  # leaves it absent (the safe legacy path).
+  acq_host_config_write msb "$name" ro-host-config 1 || \
+    echo "acq(msb): warning: could not record the read-only host-config mount for '$name'; readonly kit files will use the guest-copy compatibility path." >&2
 
   # Verify the kits' runtime prerequisites are present in the base image
   # (node/git/curl/update-ca-certificates). We do NOT install them: the kit
@@ -4166,7 +4620,7 @@ EOF
         acq_spin_stop "Applying configuration kits"
         echo "acq(msb): error: required OpenCode kit did not fully apply for '$name'." >&2
         echo "          Removing the new sandbox because its generic image has no OpenCode binary." >&2
-        acq_backend_terminate "$name" >/dev/null 2>&1 || \
+        _acq_backend_terminate_unlocked "$name" >/dev/null 2>&1 || \
           echo "acq(msb): warning: could not remove '$name'; run 'acq rm $name' before retrying." >&2
         return 1
       fi
@@ -4180,7 +4634,7 @@ EOF
         || ! acq_host_config_write msb "$name" generic-opencode generic-opencode; }; then
     echo "acq(msb): error: could not record completed generic OpenCode state for '$name'." >&2
     echo "          Removing the new sandbox to avoid an unpinned postinstall fallback." >&2
-    acq_backend_terminate "$name" >/dev/null 2>&1 || \
+    _acq_backend_terminate_unlocked "$name" >/dev/null 2>&1 || \
       echo "acq(msb): warning: could not remove '$name'; run 'acq rm $name' before retrying." >&2
     return 1
   fi
@@ -4220,26 +4674,34 @@ EOF
 #   - HTTP proxy env (HTTP_PROXY/HTTPS_PROXY/NO_PROXY) PRESERVED ACROSS SUDO
 #   - the agent binary (baked in, or installed via commands.install)
 # The default image satisfies the first three already, so this step is a
-# short-circuit there (the marker/`id agent` check returns early, and the
-# sudoers block merely re-asserts NOPASSWD, which is harmless). A plain OCI base
+# no-op there (`id agent` succeeds, and the sudoers block merely re-asserts
+# NOPASSWD, which is harmless). A plain OCI base
 # override (e.g. node:22-bookworm, which ships `node` at uid 1000 and no `agent`,
 # and no sudoers rule) meets NONE of the first three. The msb adapter therefore
 # synthesizes them here so both the kits (which run as `-u 1000`) and the agent
-# behave as they do on sbx. Idempotent + marker-gated; runs fully offline
+# behave as they do on sbx. Idempotent and re-run on every call; runs fully offline
 # (useradd/adduser/sudoers edits need no network). The uid defaults to 1000; if
 # 1000 is taken (e.g. by `node` on a plain base), `agent` is created at the next
 # free uid and the kits' `-u 1000` commands still map to it by NAME (see
 # _acq_msb_exec_command) with HOME exported.
+acq_backend_provision() {
+  ( local lock rc
+    _acq_provider_input_guardian_start || exit 1
+    lock=$(acq_provider_input_lock_acquire msb "$1" "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID") || { _acq_provider_input_guardian_stop; exit 1; }
+    trap 'rc=$?; _acq_msb_cleanup_uncreated_attempt; acq_provider_input_lock_release "${lock:-}" || true; _acq_provider_input_guardian_stop; exit "$rc"' EXIT
+    trap '_acq_provider_input_signal_exit 128' HUP
+    trap '_acq_provider_input_signal_exit 130' INT
+    trap '_acq_provider_input_signal_exit 143' TERM
+    _acq_backend_provision_unlocked "$@"; rc=$?; exit "$rc" )
+}
+
 _acq_msb_ensure_agent_user() {
   local name="$1"
-  local marker="agent-user-ready"
-  if acq_host_config_has msb "$name" "$marker"; then
-    # The user exists from an earlier run, but its login shell may predate the
-    # passwd-shell setup: re-sync it so an existing /bin/sh agent user
-    # is healed to bash on its next run, not left behind.
-    _acq_msb_ensure_agent_shell "$name"
-    return 0
-  fi
+  # Not gated on any recorded marker: the setup below is idempotent and cheap, and
+  # a "done" record could only ever say the guest reported a zero exit, which a
+  # guest could fake once and so suppress the check forever. Re-running it on every
+  # provision and heal keeps the base-image contract verified rather than
+  # remembered. No agent-user-ready key is written any more.
 
   acq_debug "msb: ensuring agent user + /home/agent + passwordless sudo + proxy-preserve in $name"
   # Idempotent, distro-agnostic. If an `agent` user already exists, reuse it
@@ -4317,7 +4779,6 @@ _acq_msb_ensure_agent_user() {
     return 1
   }
   _acq_msb_ensure_agent_shell "$name"
-  acq_host_config_write msb "$name" "$marker" 1 || true
 }
 
 # _acq_msb_ensure_agent_shell NAME — align the agent's login shell with what
@@ -4334,8 +4795,8 @@ _acq_msb_ensure_agent_user() {
 # `export SHELL=/bin/sh` line earlier acq versions appended is removed wherever
 # it appears (it stopped a login bash cold); a ~/.profile with any other content
 # is left alone (image/user-owned — Debian's own skel already bridges).
-# Idempotent and re-run on every provision AND heal (even on an agent-user-ready
-# marker hit), which is what upgrades sandboxes created before this setup.
+# Idempotent and re-run on every provision AND heal, which is what upgrades
+# sandboxes created before this setup.
 # Fail-soft: a sync failure leaves sessions on the /bin/sh fallback, never blocks
 # the run.
 _acq_msb_ensure_agent_shell() {
@@ -5338,15 +5799,7 @@ acq_backend_stop() {
   _acq_msb_cli stop "$1"
 }
 
-acq_backend_terminate() {
-  _acq_msb_terminate_impl "$1" cleanup
-}
-
-acq_backend_terminate_for_restore() {
-  _acq_msb_terminate_impl "$1" keep-resources
-}
-
-_acq_msb_terminate_impl() {
+_acq_backend_terminate_unlocked() {
   local _name="$1" _mode="${2:-cleanup}"
   # Tear down any post-hoc published-port tunnels (serve + ssh PIDs, state file)
   # before removing the sandbox (ADR-0015). Killing a dead PID / missing state
@@ -5367,8 +5820,12 @@ _acq_msb_terminate_impl() {
   # --clone (ADR-0027): surface unfetched agent commits BEFORE anything is deleted
   # (sbx-parity warning; rm proceeds — the scratch is disposable by contract).
   _acq_msb_clone_warn_unfetched "$_name"
-  local _rc=0
-  _acq_msb_cli remove --force "$_name" || _rc=$?
+  local _rc=0 _remove_pid
+  # Inline env assignment: $! is the msb binary's own PID (exec-optimized fork),
+  # so the guardian can terminate and wait for the actual backend process.
+  MSYS2_ARG_CONV_EXCL='*' msb remove --force "$_name" & _remove_pid=$!
+  _acq_provider_input_guardian_register_if_active "$_remove_pid" || { kill "$_remove_pid" 2>/dev/null || true; wait "$_remove_pid" 2>/dev/null || true; return 1; }
+  wait "$_remove_pid" || _rc=$?
   if [ "$_rc" -ne 0 ]; then
     if acq_backend_exists "$_name" || ! _acq_msb_confirm_absent "$_name"; then
       return "$_rc"
@@ -5386,10 +5843,33 @@ _acq_msb_terminate_impl() {
     # Remove host-authoritative config only after the sandbox is confirmed gone;
     # otherwise a failed removal could discard state still mounted by a live guest.
     acq_host_config_remove msb "$_name" || true
+    acq_provider_input_remove msb "$_name" || true
     acq_provenance_remove msb "$_name" || true
     acq_cli_kits_remove msb "$_name" || true
   fi
   return "$_rc"
+}
+
+_acq_msb_terminate_locked() {
+  local _mode="$1" _name="$2"
+  ( local lock rc
+    _acq_provider_input_guardian_start || exit 1
+    lock=$(acq_provider_input_lock_acquire msb "$_name" "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID") || { _acq_provider_input_guardian_stop; exit 1; }
+    trap 'rc=$?; acq_provider_input_lock_release "${lock:-}" || true; _acq_provider_input_guardian_stop; exit "$rc"' EXIT
+    trap '_acq_provider_input_signal_exit 128' HUP
+    trap '_acq_provider_input_signal_exit 130' INT
+    trap '_acq_provider_input_signal_exit 143' TERM
+    _acq_backend_terminate_unlocked "$_name" "$_mode"; rc=$?; exit "$rc" )
+}
+
+acq_backend_terminate() {
+  _acq_msb_terminate_locked cleanup "$1"
+}
+
+# `acq recreate` removes the VM but must keep derived host resources and trusted
+# state so the immediately following restore can inherit them.
+acq_backend_terminate_for_restore() {
+  _acq_msb_terminate_locked keep-resources "$1"
 }
 
 acq_backend_list() {
@@ -5787,6 +6267,8 @@ _acq_msb_ports_from_inspect() {
     # `?//empty` keeps a missing path from erroring; each port -> "H:G".
     # `|| true`: acq runs under `set -euo pipefail`; a jq that emits nothing (no
     # ports) can still exit non-zero and would otherwise abort this query.
+    # `tr -d '\r'`: a native Windows jq (used from Git Bash) ends each line with
+    # CRLF; a trailing CR would fail the digit guard below and drop the port.
     lines=$(printf '%s' "$json" | jq -r '
       [ ((.active_config.network.ports?) // (.config.network.ports?)
           // .ports? // .portMappings? // .publishedPorts? // [])[]?
@@ -5795,7 +6277,7 @@ _acq_msb_ports_from_inspect() {
             (((.host_port // .hostPort // .host)|tostring) + ":" +
              ((.guest_port // .guestPort // .guest // .container)|tostring))
           else empty end ]
-      | .[]?' 2>/dev/null) || true
+      | .[]?' 2>/dev/null | tr -d '\r') || true
   fi
   if [ -z "$lines" ]; then
     # jq absent/failed: dependency-free. Read the ports array as flat key:value
@@ -5918,11 +6400,15 @@ _acq_msb_heal_kit_set() {
 # msb sandboxes are recreated cheaply and msb has no in-place kit-add that
 # preserves state guarantees the way sbx 0.35.0 does. Rather than silently
 # destroy state, re-apply the neutral kits idempotently (files are overwritten,
-# commands are idempotent / install-marker-gated). If a caller needs a clean
+# commands are idempotent / install-marker-gated unless a forced re-apply is
+# requested). If a caller needs a clean
 # rebuild, they can `acq rm && acq run`.
 
 acq_backend_ensure_kits_applied() {
   local name="$1"
+  if command -v acq_provider_selection_load >/dev/null 2>&1; then
+    acq_provider_selection_load msb "$name" || return 1
+  fi
   # START-IF-STOPPED (ADR-0017). This heal loop drives `msb exec` against
   # the guest for every kit (feature-probe, file drops, startup re-run). Those
   # exec calls FAIL against a STOPPED guest, so a stopped sandbox must be started
@@ -5955,10 +6441,11 @@ acq_backend_ensure_kits_applied() {
   # present — the reported "have to export SSH_AUTH_SOCK by hand" symptom. Cheap
   # no-op when no host forward is requested or the sandbox has no vsock route.
   _acq_msb_ensure_ssh_agent_forward "$name"
-  # Re-run the agent-user setup. It is idempotent and marker-gated, and its
-  # login-shell sync deliberately runs even on a marker hit — that is
-  # what heals a sandbox whose agent user was created with /bin/sh before the
-  # passwd-shell setup existed. Best-effort like the rest of the heal.
+  # Re-run the agent-user setup. It is idempotent and not gated on any recorded
+  # marker (a guest-reported success is not trusted to skip it), and it includes
+  # the login-shell sync that heals a sandbox whose agent user was created with
+  # /bin/sh before the passwd-shell setup existed. Best-effort like the rest of
+  # the heal.
   _acq_msb_ensure_agent_user "$name" || \
     echo "acq(msb): warning: agent-user heal failed for '$name'." >&2
   # Rebuild after any persisted refs were loaded by the dispatcher. CLI-supplied
@@ -5967,14 +6454,15 @@ acq_backend_ensure_kits_applied() {
   local agent
   agent=$(acq_backend_recorded_agent "$name")
   _acq_msb_select_kits "$agent"
-  local kits=("${KITS[@]}")
+  local kits=()
+  for kitref in ${KITS[@]+"${KITS[@]}"}; do kits+=("$kitref"); done
   local builtin_count="${ACQ_BUILTIN_KIT_COUNT:-4}"
   local kitref kitdir i=0 ok=1
   acq_spin_start "Refreshing configuration kits"
   if [ "${ACQ_STRICT_KIT_HEAL:-0}" = "1" ]; then
-    _acq_msb_heal_kit_set "$name" "$builtin_count" --strict "${kits[@]}" || ok=0
+    _acq_msb_heal_kit_set "$name" "$builtin_count" --strict ${kits[@]+"${kits[@]}"} || ok=0
   else
-    _acq_msb_heal_kit_set "$name" "$builtin_count" "${kits[@]}" || ok=0
+    _acq_msb_heal_kit_set "$name" "$builtin_count" ${kits[@]+"${kits[@]}"} || ok=0
   fi
   acq_spin_stop "Refreshing configuration kits"
   # Record host-side bundle provenance ONLY when every built-in kit applied.
@@ -6444,42 +6932,12 @@ acq_backend_rotate_key() {
     return 1
   }
 
-  # Validate the new key in a fresh throwaway sandbox (backend-neutral helper).
-  # NOTE: on msb the throwaway sandbox is NOT the sandbox the agent attaches to.
-  # The real running sandbox is re-fed via `msb modify --secret`, which can apply
-  # to 0 sandboxes if the real one is still booting. So a throwaway "HTTP 200"
-  # here does NOT prove the real sandbox will authenticate — printing it would
-  # reproduce the exact 200-then-401 split this change set out to kill. We only
-  # use the throwaway to surface a hard-negative early (invalid key / network),
-  # and leave the authoritative "validated" verdict to ensure_valid_key's
-  # real-sandbox check_key on next attach.
-  local status=""
-  if command -v check_fresh_sandbox_key >/dev/null 2>&1; then
-    acq_spin_start "Validating the new key in a temporary sandbox"
-    status=$(check_fresh_sandbox_key)
-    acq_spin_stop "Validating the new key in a temporary sandbox"
-  fi
-
-  if [ -z "$status" ] || [ "$status" = "200" ]; then
-    # No throwaway result, or the throwaway accepted the key. Do NOT claim the
-    # real sandbox is validated — the re-feed may not have reached it yet.
-    echo "Key stored. It will be validated against the running sandbox on next attach." >&2
-    return 0
-  fi
-  if [ "$status" = "unreachable" ]; then
-    # The validation request never reached USAi — a network/egress problem, not
-    # the key. Report it as such (no "double-check the key") via the shared
-    # helper when available.
-    if command -v _report_usai_unreachable >/dev/null 2>&1; then
-      _report_usai_unreachable
-    else
-      echo "acq(msb): could not reach the USAi API to validate — a network/egress" >&2
-      echo "      problem (proxy/Zscaler/DNS/offline), not the key itself." >&2
-    fi
-    return 1
-  fi
-  echo "acq(msb): key validation failed (HTTP ${status}). Double-check the key and rotate again." >&2
-  return 1
+  # The throwaway-sandbox probe is gone with the USAi-specific key subsystem: the
+  # authoritative verdict is the generic `ensure_valid_provider_keys` check on
+  # next attach (it probes the provider's own facts.modelsUrl in the REAL
+  # sandbox), so a 200 here could never prove the real sandbox authenticates.
+  echo "Key stored. It will be validated against the running sandbox on next attach." >&2
+  return 0
 }
 
 # ---------------------------------------------------------------------------
