@@ -237,6 +237,21 @@ _make_index_fixture() {
   assert_output --partial 'got: 100755 1'
 }
 
+@test "exec-bits: Git-index validator rejects a directory replacing an entry point despite an executable descendant" {
+  _make_index_fixture
+  git rm -q --cached scripts/bats-shard
+  rm scripts/bats-shard
+  mkdir scripts/bats-shard
+  printf '#!/usr/bin/env sh\nexit 0\n' > scripts/bats-shard/helper
+  chmod 755 scripts/bats-shard/helper
+  git add scripts/bats-shard/helper
+  [ "$(git ls-files --stage -- scripts/bats-shard | awk '{ print $1 " " $3 }')" = '100755 0' ]
+  run bash "$REPO_ROOT/$INDEX_VALIDATOR_REL" --root "$REPO"
+  assert_failure 1
+  assert_output --partial 'scripts/bats-shard must have one stage-0 100755 index entry'
+  assert_output --partial 'got: missing or untracked'
+}
+
 @test "exec-bits: Git-index validator reports command errors" {
   _make_index_fixture
   run bash "$REPO_ROOT/$INDEX_VALIDATOR_REL" --root "$REPO/absent"

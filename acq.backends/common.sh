@@ -4133,7 +4133,7 @@ ACQ_PROVIDER_INPUT_GUEST_DIR="${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provi
 # set).  Status 2 means the host cannot run the released validator and is a
 # provisioning blocker, never an empty-set fallback.
 _acq_provider_input_python() {
-  local python="${1:-${ACQ_PROVIDER_INPUT_PYTHON:-}}" version_check runtime data_home tools_dir setup host_os
+  local python="${ACQ_PROVIDER_INPUT_PYTHON:-}" version_check runtime data_home tools_dir setup host_os
   host_os=$(uname -s 2>/dev/null || true)
   if [ -n "$python" ]; then
     _acq_provider_input_absolute_path "$python" "$host_os" || {
@@ -4248,7 +4248,11 @@ acq_provider_input_prepare() {
   [ -f "$validator" ] && [ ! -L "$validator" ] && [ -d "$schema_dir" ] && [ ! -L "$schema_dir" ] \
     && [ -f "$bindings" ] && [ ! -L "$bindings" ] || {
     echo "acq: pinned Patterns provider-input validator is unavailable" >&2; _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation" "$path_python"; return 2; }
-  python=$(_acq_provider_input_python "$path_python") || {
+  # Only an explicit ACQ_PROVIDER_INPUT_PYTHON overrides validator discovery.
+  # The path-helper interpreter ($path_python) is just a bare host Python; it
+  # must not stand in for the validator runtime, or a first create would skip
+  # the wheelhouse bootstrap and fail the package check.
+  python=$(_acq_provider_input_python) || {
     _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation" "$path_python"; return 2; }
   # acq owns the provider -> KEY_ENV registry, layered over the pinned Patterns
   # defaults (its trust anchor) and then per-invocation config/env overrides, so

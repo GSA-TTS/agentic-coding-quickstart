@@ -121,7 +121,7 @@ repos:
         entry: bash scripts/test-acq-bats
         language: system
         pass_filenames: false
-        files: '^(acq|acq\.backends/.*|scripts/(test-acq-lib\.sh|test-acq-bats|test-acq-bash32|fetch-bash32-oci\.py|scan-heredoc-subst\.py|bats-shard|run-shellcheck|probe-msb-node-startup|test-probe-msb-node-startup\.py|fix-exec-bits|verify-backends|verify-host-authority-live(-lib\.sh|-steps\.sh|-manual\.txt)?|summarize-bats-timing|bats_timing_(core|render)\.py)|test/bats/.*|\.github/workflows/bash32-compat\.yml)$'
+        files: '^(acq|acq\.backends/.*|scripts/(test-acq-lib\.sh|test-acq-bats|test-acq-bash32|fetch-bash32-oci\.py|scan-heredoc-subst\.py|bats-shard|run-shellcheck|probe-msb-node-startup|test-probe-msb-node-startup\.py|fix-exec-bits|validate-git-executable-modes|verify-backends|verify-host-authority-live(-lib\.sh|-steps\.sh|-manual\.txt)?|summarize-bats-timing|bats_timing_(core|render)\.py)|test/bats/.*|\.github/workflows/bash32-compat\.yml)$'
 
       # Offline evaluator unit/regression tests, not release qualification.
       # Hosted pre-commit runs --all-files, so this is also a standard CI gate.

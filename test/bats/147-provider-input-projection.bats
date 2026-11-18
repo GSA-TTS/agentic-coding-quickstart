@@ -52,8 +52,19 @@ _use_release() {
   _acq_provider_input_control_plane() { printf '%s\n' "$1"; }
 }
 
+# _fixture_real_python — explicitly resolve a real interpreter for the one
+# operation the fake bootstrap Pythons must not fake: the production os.replace
+# publication program. Fails closed when none is available.
+_fixture_real_python() {
+  local real="${ACQ_TEST_PROVIDER_INPUT_PYTHON:-}"
+  [ -n "$real" ] && [ -x "$real" ] || real=$(PATH=/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin command -v python3 2>/dev/null) || true
+  [ -n "$real" ] || { echo "a real python3 is required to run the production os.replace program" >&2; return 1; }
+  printf '%s\n' "$real"
+}
+
 _fixture_validator_path() { # FAKEBIN
-  local fakebin="$1" safe="$fakebin/safe-bin" tool target ln_path
+  local fakebin="$1" safe="$fakebin/safe-bin" tool target ln_path real_python
+  real_python=$(_fixture_real_python) || return 1
   mkdir -p "$safe"
   ln_path=$(PATH=/usr/bin:/bin command -v ln) || return 1
   for tool in bash basename cp cut dirname ln mkdir mktemp mv readlink rm sha256sum shasum; do
@@ -62,17 +73,12 @@ _fixture_validator_path() { # FAKEBIN
       /*) "$ln_path" -sf "$target" "$safe/$tool" ;;
     esac
   done
-  cat > "$safe/python3" <<'PYTHON'
+  # The setup script publishes the runtime link with a stdin program run as
+  # `python3 - SOURCE TARGET`. Run that production program with a real
+  # interpreter; every other invocation stays inert, so installation is stubbed.
+  cat > "$safe/python3" <<PYTHON
 #!/bin/sh
-# The fake bootstrap interpreters use only Python's os.replace(link, target)
-# shape. Keep that test behavior self-contained; macOS need not ship python3.
-if [ "${1:-}" = - ] && [ "$#" -eq 3 ]; then
-  # Test-only substitute for the bootstrap Python os.replace(source, target)
-  # call. POSIX mv follows a destination symlink-to-directory, so remove only
-  # the fixture's current-link path first; production still uses os.replace.
-  rm -f "$3"
-  exec mv "$2" "$3"
-fi
+if [ "\${1:-}" = - ] && [ "\$#" -eq 3 ]; then exec "$real_python" "\$@"; fi
 exit 0
 PYTHON
   chmod +x "$safe/python3"
@@ -128,6 +134,58 @@ EOF
   assert_failure 2
   assert_output --partial 'Python 3.12+ is required for provider path security'
   [ ! -e "$root" ]
+}
+
+@test "first provider-backed prepare bootstraps the validator runtime from a local wheelhouse" {
+  local release="$STUBDIR/release" fakebin="$STUBDIR/first-bin" tools="$STUBDIR/first-data"
+  local fixture_path real_python root
+  real_python=$(_fixture_real_python)
+  mkdir -p "$fakebin" "$STUBDIR/wheelhouse"
+  fixture_path=$(_fixture_validator_path "$fakebin")
+  : > "$STUBDIR/wheelhouse/placeholder.whl"
+  (cd "$STUBDIR/wheelhouse" && { sha256sum placeholder.whl 2>/dev/null || shasum -a 256 placeholder.whl; } > SHA256SUMS)
+  _provider_release "$release"; _provider_kit "$release" alpha
+  # A bare supported host Python: it has neither PyYAML nor jsonschema, so only
+  # the shipped-wheelhouse bootstrap can produce a runtime that passes the
+  # package check. Installation is stubbed; the validator program runs for real.
+  cat > "$fakebin/python3" <<PYTHON
+#!/bin/sh
+case "\${1:-}" in
+  -c)
+    case "\${2:-}" in
+      *sys.version_info*) printf '3.12\n'; exit 0 ;;
+      *importlib.metadata*)
+        [ "\${0%/*}" != "$fakebin" ] || { echo "acq: provider-input validation requires PyYAML 6.0.3 and jsonschema 4.26.0; found PyYAML=missing" >&2; exit 2; }
+        exit 0 ;;
+    esac ;;
+  -m)
+    if [ "\${2:-}" = venv ]; then mkdir -p "\$3/bin"; cp "\$0" "\$3/bin/python3"; exit 0; fi
+    [ "\${2:-}" = pip ] && exit 0 ;;
+  -)
+    # Setup's dependency check (stdin only) is stubbed; its os.replace
+    # publication (three args) and the path helpers run the real program.
+    [ "\$#" -ne 1 ] || exit 0
+    [ "\$#" -ne 3 ] || exec "${fakebin}/safe-bin/python3" "\$@" ;;
+esac
+exec "$real_python" "\$@"
+PYTHON
+  chmod +x "$fakebin/python3"
+  unset ACQ_PROVIDER_INPUT_PYTHON
+  export ACQ_PROVIDER_INPUT_DATA_DIR="$tools"
+  export ACQ_PROVIDER_INPUT_WHEELHOUSE="$STUBDIR/wheelhouse"
+  export VALIDATOR_LOG="$STUBDIR/validator.log"
+  _acq_provider_input_control_plane() { printf '%s\n' "$release"; }
+  KITS=("$release/integrations/isolation/acq-kits/alpha")
+  [ ! -e "$tools/provider-input-validator.current" ]
+
+  ACQ_PROVIDER_INPUT_BOOTSTRAP_PYTHON="$fakebin/python3" PATH="$fixture_path:$PATH" \
+    run acq_provider_input_prepare sbx firstcreate
+  assert_success
+  [ -L "$tools/provider-input-validator.current" ]
+  [ -x "$tools/provider-input-validator.current/bin/python3" ]
+  grep -Fq -- '--bundle' "$VALIDATOR_LOG"
+  root=$(acq_provider_input_root sbx firstcreate)
+  case "${output##*$'\n'}" in "$root"/generations/generation.*) ;; *) false ;; esac
 }
 
 @test "provider path security accepts an explicit supported interpreter" {
@@ -319,7 +377,7 @@ EOF
   fixture_path=$(_fixture_validator_path "$fakebin")
   mkdir -p "$STUBDIR/wheelhouse"
   : > "$STUBDIR/wheelhouse/placeholder.whl"
-  (cd "$STUBDIR/wheelhouse" && sha256sum placeholder.whl > SHA256SUMS)
+  (cd "$STUBDIR/wheelhouse" && { sha256sum placeholder.whl 2>/dev/null || shasum -a 256 placeholder.whl; } > SHA256SUMS)
   cat > "$fakebin/python3" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$VALIDATOR_SETUP_LOG"
@@ -361,6 +419,46 @@ EOF
   [ "$second_runtime" = "$(readlink "$target")" ]
   [ -x "$target/bin/python3" ]
 
+}
+
+@test "setup validator keeps the previous current runtime when atomic replacement fails" {
+  local tools="$STUBDIR/replace-data" target="$STUBDIR/replace-data/provider-input-validator.current"
+  local fakebin="$STUBDIR/replace-bin" inject="$STUBDIR/replace-inject" fixture_path first_runtime
+  mkdir -p "$fakebin" "$inject" "$STUBDIR/wheelhouse"
+  fixture_path=$(_fixture_validator_path "$fakebin")
+  : > "$STUBDIR/wheelhouse/placeholder.whl"
+  (cd "$STUBDIR/wheelhouse" && { sha256sum placeholder.whl 2>/dev/null || shasum -a 256 placeholder.whl; } > SHA256SUMS)
+  # Fault injection for the REAL os.replace: the production program still runs.
+  cat > "$inject/sitecustomize.py" <<'PY'
+import os
+if os.environ.get("VALIDATOR_REPLACE_FAIL") == "1":
+    def _fail(*args, **kwargs):
+        raise OSError("injected os.replace failure")
+    os.replace = _fail
+PY
+  cat > "$fakebin/python3" <<'EOF'
+#!/bin/sh
+if [ "$1" = -c ]; then printf '3.12\n'; exit 0; fi
+if [ "$1" = -m ] && [ "$2" = venv ]; then mkdir -p "$3/bin"; cp "$0" "$3/bin/python3"; exit 0; fi
+if [ "$1" = - ] && [ "$#" -eq 3 ]; then exec "${0%/*}/safe-bin/python3" "$@"; fi
+exit 0
+EOF
+  chmod +x "$fakebin/python3"
+  local env_prefix=(env ACQ_PROVIDER_INPUT_BOOTSTRAP_PYTHON="$fakebin/python3" ACQ_PROVIDER_INPUT_HOST_OS=Darwin
+    ACQ_PROVIDER_INPUT_HOST_ARCH=arm64 ACQ_PROVIDER_INPUT_DATA_DIR="$tools"
+    ACQ_PROVIDER_INPUT_WHEELHOUSE="$STUBDIR/wheelhouse" PATH="$fixture_path")
+
+  run "${env_prefix[@]}" "$REPO_ROOT/scripts/setup-provider-input-validator" --apply
+  assert_success
+  first_runtime=$(readlink "$target")
+  [ -x "$target/bin/python3" ]
+
+  run "${env_prefix[@]}" PYTHONPATH="$inject" VALIDATOR_REPLACE_FAIL=1 \
+    "$REPO_ROOT/scripts/setup-provider-input-validator" --apply
+  assert_failure
+  [ -L "$target" ]
+  assert_equal "$(readlink "$target")" "$first_runtime"
+  [ -x "$target/bin/python3" ]
 }
 
 @test "runtime resolver recognizes Windows venv layout" {
