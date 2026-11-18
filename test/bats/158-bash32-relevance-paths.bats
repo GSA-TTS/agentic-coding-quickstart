@@ -66,6 +66,7 @@ scripts/provider-input-validator-requirements-linux.txt
 scripts/provider-input-validator-requirements-macos.txt
 scripts/provider-input-validator-requirements-windows.txt
 test/bats
+test/secret-terminal.py
 test/vendor
 .gitmodules
 .github/keys/chet-ramey-bash-release-signing-key.asc
