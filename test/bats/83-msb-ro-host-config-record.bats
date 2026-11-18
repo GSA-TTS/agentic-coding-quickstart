@@ -1,0 +1,282 @@
+#!/usr/bin/env bats
+#
+# 83-msb-ro-host-config-record.bats — ADR-0035 Mechanism 2: whether the :ro
+# host-config mount may carry readonly kit code is a HOST-recorded create fact
+# (host key ro-host-config), never the answer of a guest-executed probe. The
+# record means "the create passed the :ro volume flag and the sandbox became
+# exec-ready"; it does not prove the guest mount works (a disagreeing probe only
+# warns, and acq never degrades to a guest copy on that disagreement).
+#
+# A passwordless-sudo guest controls `sh`/`test`, so a probe result must not be
+# able to flip the staged-:ro path to the guest-writable copy (or the reverse).
+# The stubs below answer the guest probe CONTRARY to the host record.
+#
+# shellcheck shell=bats
+# NOTE: these cases exercise the staged-mount path itself, so each gives the stub msb a
+# floor-satisfying version and an `msb inspect` record showing the host-config mount as
+# the read-only Bind of acq's host config dir. Whether the gate trusts that record is
+# covered in 84-msb-ro-mount-qualification.bats; before the gate existed, a recorded
+# sandbox was unlocked by the guest probe alone.
+
+setup() { acq_setup_stubs; }
+teardown() { acq_teardown_stubs; }
+
+load 'helper'
+
+_ro_kit() { # DIR
+  local k="$1"; mkdir -p "$k/files"
+  printf 'console.log("merge");\n' > "$k/files/merge.mjs"
+  cat >"$k/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: ro-code-kit
+displayName: RO Code Kit
+description: trusted startup code
+files:
+  - path: /home/agent/cfg/merge.mjs
+    mode: "0755"
+    source: files/merge.mjs
+    readonly: true
+commands:
+  - phase: startup
+    user: "1000"
+    command:
+      - node
+      - /home/agent/cfg/merge.mjs
+SPEC
+}
+
+# Apply KITDIR to NAME; extra env (KEY=VAL ...) precedes "--"; set RECORD=1 to
+# seed the host record first.
+_apply() { # NAME KITDIR RECORD [ENV...]
+  local name="$1" kit="$2" record="$3"; shift 3
+  : > "$CALLS"
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/sec-'"$name"'"
+    for kv in '"${*:-:}"'; do export "$kv" 2>/dev/null || true; done
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    export STUB_MSB_VERSION="${STUB_MSB_VERSION:-0.7.7}" STUB_MSB_INSPECT_MODE="${STUB_MSB_INSPECT_MODE:-ro-ok}"
+    acq_test_stub_provider_input_boundary
+    [ "'"$record"'" = 1 ] && acq_host_config_write msb "'"$name"'" ro-host-config 1
+    _acq_msb_apply_kit_dir "'"$name"'" "'"$kit"'" 2>&1
+  '
+}
+
+# Deliberate change: these two cases used to assert warn-and-continue (stage and
+# run from the mount despite a probe that did not confirm it read-only). A recorded
+# sandbox whose mount does not look read-only now fails closed: nothing is staged,
+# copied into the guest, or executed.
+@test "ro record: a probe that does not confirm the mount fails closed (missing)" {
+  local k="$STUBDIR/k1"; _ro_kit "$k"
+  _apply recmissing "$k" 1 STUB_HOST_CONFIG_MOUNT=0
+  assert_failure
+  assert_output --partial "'/home/agent/cfg/merge.mjs'"
+  assert_output --partial 'not a confirmed read-only mount'
+  assert_output --partial 'No guest-copy fallback is taken'
+  local log; log=$(cat "$CALLS")
+  refute_regex "$log" 'node '
+  refute_regex "$log" 'msb copy .*recmissing:/home/agent/cfg/merge\.mjs'
+  run bash -c 'ls "'"$ACQ_PROVENANCE_DIR"'"/msb/recmissing.*.config/kit-files 2>&1'
+  assert_failure
+}
+
+@test "ro record: a probe that finds the mount writable fails closed and stages and runs nothing" {
+  local k="$STUBDIR/k2"; _ro_kit "$k"
+  _apply recwritable "$k" 1 STUB_HOST_CONFIG_WRITABLE=1
+  assert_failure
+  assert_output --partial "'/home/agent/cfg/merge.mjs'"
+  assert_output --partial 'WRITABLE'
+  assert_output --partial 'No guest-copy fallback is taken'
+  local log; log=$(cat "$CALLS")
+  refute_regex "$log" 'node '
+  refute_regex "$log" 'msb copy .*recwritable:/home/agent/cfg/merge\.mjs'
+  run bash -c 'ls "'"$ACQ_PROVENANCE_DIR"'"/msb/recwritable.*.config/kit-files 2>&1'
+  assert_failure
+}
+
+@test "ro record: a writable mount does not block a kit with no readonly files" {
+  local k="$STUBDIR/k2b"; mkdir -p "$k/files"
+  printf '{}\n' > "$k/files/data.jsonc"
+  cat >"$k/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: plain-kit
+displayName: Plain Kit
+description: data only
+files:
+  - path: /home/agent/cfg/data.jsonc
+    mode: "0644"
+    source: files/data.jsonc
+SPEC
+  _apply plainwritable "$k" 1 STUB_HOST_CONFIG_WRITABLE=1
+  assert_success
+  assert_regex "$(cat "$CALLS")" 'msb copy .*plainwritable:/home/agent/cfg/data\.jsonc'
+}
+
+@test "ro record: a confirming probe is silent" {
+  local k="$STUBDIR/k3"; _ro_kit "$k"
+  _apply recquiet "$k" 1
+  assert_success
+  refute_output --partial 'host-config mount but a guest probe'
+  assert_regex "$(cat "$CALLS")" 'node /var/lib/acq/host/kit-files/'
+}
+
+@test "ro record: no record takes the safe path even when the guest probe says read-only" {
+  local k="$STUBDIR/k4"; _ro_kit "$k"
+  _apply norecord "$k" 0
+  assert_success
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'msb copy .*norecord:/home/agent/cfg/merge\.mjs'
+  refute_regex "$log" '/var/lib/acq/host/kit-files'
+  assert_output --partial 'has no ADR-0035 read-only host-config record'
+}
+
+@test "ro record: a value other than 1 is not a record" {
+  local k="$STUBDIR/k5"; _ro_kit "$k"
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/sec-badval"
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    export STUB_MSB_VERSION="${STUB_MSB_VERSION:-0.7.7}" STUB_MSB_INSPECT_MODE="${STUB_MSB_INSPECT_MODE:-ro-ok}"
+    acq_test_stub_provider_input_boundary
+    acq_host_config_write msb badval ro-host-config 0
+    _acq_msb_apply_kit_dir badval "'"$k"'" 2>&1
+  '
+  assert_success
+  refute_regex "$(cat "$CALLS")" '/var/lib/acq/host/kit-files'
+}
+
+@test "ro record: successful create plus exec-ready records ro-host-config" {
+  local k="$STUBDIR/k6"; _ro_kit "$k"
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/sec-prov"
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    export STUB_MSB_VERSION="${STUB_MSB_VERSION:-0.7.7}" STUB_MSB_INSPECT_MODE="${STUB_MSB_INSPECT_MODE:-ro-ok}"
+    acq_test_stub_provider_input_boundary
+    _acq_msb_fetch_kit() { printf "%s\n" "'"$k"'"; }
+    acq_backend_provision recprov shell /tmp >/dev/null 2>&1
+  '
+  local cfg; cfg=$(ls -d "$ACQ_PROVENANCE_DIR"/msb/recprov.*.config | head -n1)
+  assert_equal "$(cat "$cfg/ro-host-config")" "1"
+}
+
+@test "ro record: a failed create records nothing" {
+  local k="$STUBDIR/k7"; _ro_kit "$k"
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/sec-fail"
+    export STUB_MSB_CREATE_FAIL_IMAGE=docker.io/docker/sandbox-templates:shell-docker
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    export STUB_MSB_VERSION="${STUB_MSB_VERSION:-0.7.7}" STUB_MSB_INSPECT_MODE="${STUB_MSB_INSPECT_MODE:-ro-ok}"
+    acq_test_stub_provider_input_boundary
+    _acq_msb_fetch_kit() { printf "%s\n" "'"$k"'"; }
+    acq_backend_provision recfail shell /tmp >/dev/null 2>&1
+  '
+  assert_failure
+  assert_regex "$(cat "$CALLS")" 'msb create '
+  run bash -c 'ls "'"$ACQ_PROVENANCE_DIR"'"/msb/recfail.*.config/ro-host-config 2>&1'
+  assert_failure
+}
+
+@test "ro record: clear_instance_state helper removes a stale record" {
+  local k="$STUBDIR/k8"; _ro_kit "$k"
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/sec-stale"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    acq_host_config_write msb stalebox ro-host-config 1
+    acq_host_config_clear_instance_state msb stalebox
+    acq_host_config_has msb stalebox ro-host-config
+  '
+  assert_failure
+}
+
+# Provision-level pins: the record is written only after exec-ready, and a fresh
+# provision clears stale instance state itself (not just the helper in isolation).
+_prov_msb() { # NAME KITDIR [ENV...]  (runs provision with a seeded stale record)
+  local name="$1" kit="$2"; shift 2
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/sec-'"$name"'"
+    export ACQ_MSB_EXEC_READY_TIMEOUT=1
+    for kv in '"${*:-:}"'; do export "$kv" 2>/dev/null || true; done
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    export STUB_MSB_VERSION="${STUB_MSB_VERSION:-0.7.7}" STUB_MSB_INSPECT_MODE="${STUB_MSB_INSPECT_MODE:-ro-ok}"
+    acq_test_stub_provider_input_boundary
+    acq_host_config_write msb "'"$name"'" ro-host-config 1
+    acq_host_config_write msb "'"$name"'" install-stale 1
+    _acq_msb_fetch_kit() { printf "%s\n" "'"$kit"'"; }
+    acq_backend_provision "'"$name"'" shell /tmp >/dev/null 2>&1
+  '
+}
+
+@test "ro record: create ok but never exec-ready leaves no ro-host-config record" {
+  local k="$STUBDIR/k9"; _ro_kit "$k"
+  # Replace the stub msb with one whose create succeeds and exec never does.
+  cat >"$STUBDIR/msb" <<'MSBSTUB'
+#!/usr/bin/env bash
+{ printf 'msb'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+case "${1:-}" in
+  --version|-V) printf 'msb %s\n' "${STUB_MSB_VERSION:-0.7.7}" ;;
+  create) exit 0 ;;
+  exec) exit 1 ;;
+  *) exit 0 ;;
+esac
+MSBSTUB
+  chmod +x "$STUBDIR/msb"
+  _prov_msb notready "$k"
+  assert_failure
+  assert_regex "$(cat "$CALLS")" 'msb create '
+  run bash -c 'ls "'"$ACQ_PROVENANCE_DIR"'"/msb/notready.*.config/ro-host-config 2>&1'
+  assert_failure
+}
+
+@test "ro record: provision itself clears stale instance state before recording" {
+  local k="$STUBDIR/k10"; _ro_kit "$k"
+  _prov_msb staleprov "$k"
+  local cfg; cfg=$(ls -d "$ACQ_PROVENANCE_DIR"/msb/staleprov.*.config | head -n1)
+  assert_equal "$(cat "$cfg/ro-host-config")" "1"
+  [ ! -e "$cfg/install-stale" ]
+}
+
+# Staging failure after a RECORDED read-only create must fail closed: no silent
+# downgrade to a guest-writable copy. Without a record the legacy copy remains.
+_apply_stage_fail() { # NAME KITDIR RECORD
+  local name="$1" kit="$2" record="$3"
+  : > "$CALLS"
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/sec-'"$name"'"
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    export STUB_MSB_VERSION="${STUB_MSB_VERSION:-0.7.7}" STUB_MSB_INSPECT_MODE="${STUB_MSB_INSPECT_MODE:-ro-ok}"
+    acq_test_stub_provider_input_boundary
+    _acq_msb_stage_readonly_file() { return 1; }
+    [ "'"$record"'" = 1 ] && acq_host_config_write msb "'"$name"'" ro-host-config 1
+    _acq_msb_apply_kit_dir "'"$name"'" "'"$kit"'" 2>&1
+  '
+}
+
+@test "ro record: stage failure with a record fails closed and copies nothing into the guest" {
+  local k="$STUBDIR/k11"; _ro_kit "$k"
+  _apply_stage_fail stagefailrec "$k" 1
+  assert_failure
+  assert_output --partial "could not stage read-only kit file '/home/agent/cfg/merge.mjs'"
+  assert_output --partial 'No guest-copy fallback is taken'
+  refute_regex "$(cat "$CALLS")" 'msb copy .*stagefailrec:/home/agent/cfg/merge\.mjs'
+  refute_regex "$(cat "$CALLS")" 'node /home/agent/cfg/merge\.mjs'
+}
+
+@test "ro record: stage failure without a record keeps the legacy guest copy and its warning" {
+  local k="$STUBDIR/k12"; _ro_kit "$k"
+  _apply_stage_fail stagefailnorec "$k" 0
+  assert_success
+  assert_output --partial 'has no ADR-0035 read-only host-config record'
+  assert_regex "$(cat "$CALLS")" 'msb copy .*stagefailnorec:/home/agent/cfg/merge\.mjs'
+}

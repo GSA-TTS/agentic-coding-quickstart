@@ -11,9 +11,9 @@
 # shellcheck disable=SC2034
 ACQ_KNOWN_AGENTS=" claude codex copilot cursor docker-agent droid gemini kiro opencode shell "
 
-# Derived from ghcr.io/gsa-tts/agentic-coding-patterns/devenv-shell:2.0.0 on
-# 2026-10-14; covers published Linux amd64 and arm64 manifests.
-ACQ_DEFAULT_OPENCODE_DEVENV_IMAGE="ghcr.io/gsa-tts/agentic-coding-patterns/devenv-shell@sha256:7b923fb5e722ad27c751ead836f24145c4cea3fac015a3ba753bd7473891e1e7"
+# Derived from ghcr.io/gsa-tts/agentic-coding-patterns/devenv-shell:2.1.0 on
+# 2026-10-30; covers published Linux amd64 and arm64 manifests.
+ACQ_DEFAULT_OPENCODE_DEVENV_IMAGE="ghcr.io/gsa-tts/agentic-coding-patterns/devenv-shell@sha256:0b5f4cc95c8fa7dd7f3ffd02b56e63d0caf9b151421ff6ea3cb34b2139e3966c"
 
 acq_known_agents() {
   printf '%s\n' claude codex copilot cursor docker-agent droid gemini kiro opencode shell

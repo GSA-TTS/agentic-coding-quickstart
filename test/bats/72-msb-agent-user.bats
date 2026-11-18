@@ -35,7 +35,6 @@ _provision() { # NAME AGENT PRE_SNIPPET [KITDIR]
     # NOTE: the stub must NOT read a variable named "kitdir" — provision declares
     # a `local kitdir`, which dynamically shadows it at stub-call time.
     _acq_msb_fetch_kit() { printf "%s\n" "$stub_kitdir"; }
-    seed_host_config_gates msb "$name"
     acq_backend_provision "$name" "$agent" /tmp 2>&1
     printf "PROVISION_RC=%s\n" "$?"
   ' _ "$name" "$agent" "$pre" "$kitdir"
@@ -111,7 +110,6 @@ _attach() { # PRE_SNIPPET NAME
     eval "$pre"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     seed_host_config msb "$name"
-    seed_host_config_gates msb "$name"
     acq_backend_attach "$name" 2>&1
   ' _ "$1" "$2"
 }
@@ -196,7 +194,7 @@ _attach() { # PRE_SNIPPET NAME
   local log; log=$(cat "$CALLS")
   refute_regex "$log" 'PODMAN_PKGS='
   refute_regex "$log" '/usr/local/bin/docker'
-  refute_regex "$log" 'oci-ready'
+  refute_regex "$log" 'oci-engine-ready'
   refute_regex "$log" '/etc/containers/storage\.conf'
   refute_regex "$log" 'acq-oci-selftest'
   refute_regex "$log" '/dev/net/tun'
@@ -389,23 +387,21 @@ _attach() { # PRE_SNIPPET NAME
   assert_equal "$(grep -c -- '-w /tmp/myrepo cachebox' "$CALLS")" "2"
 }
 
-@test "msb #426: heal upgrades an existing /bin/sh agent user (marker hit still syncs the shell)" {
+@test "msb #426: heal upgrades an existing /bin/sh agent user (the shell sync runs on every heal)" {
   : > "$CALLS"
   printf 'healshbox\n' > "$STUBDIR/.msb_sandbox_list"
   printf 'healshbox\n' > "$STUBDIR/.msb_running_list"
   run bash -c '
-    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/healsh-secrets" STUB_AGENT_USER_READY=1
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/healsh-secrets"
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
-    seed_host_config_gates msb healshbox
     # shellcheck disable=SC2034  # consumed by the sourced acq_backend_ensure_kits_applied
     ACQ_CLI_KITS=()
     acq_backend_ensure_kits_applied healshbox >/dev/null 2>&1
   '
   local log; log=$(cat "$CALLS")
   assert_regex "$log" 'acq-login-profile.* sh /bin/bash'
-  refute_regex "$log" 'useradd'
 }
 
 @test "msb #426: shell and attach exec the agent passwd shell and set SHELL to match" {

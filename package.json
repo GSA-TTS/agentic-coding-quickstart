@@ -1,7 +1,7 @@
 {
   "name": "@gsa-tts/agentic-coding-quickstart",
   "//version": "Managed by release-please via extra-files in release-please-config.json; do not edit by hand.",
-  "version": "4.1.1",
+  "version": "4.2.1",
   "description": "acq — run AI coding agents inside a federally-configured sandbox (SBX or MSB) with USAi endpoints",
   "type": "module",
   "bin": {
@@ -21,7 +21,8 @@
   ],
   "scripts": {
     "postinstall": "scripts/install-provider-input-wheelhouse --target scripts/provider-input-validator-wheelhouse --version $npm_package_version",
-    "lint:md": ".github/linters/node_modules/.bin/markdownlint --config .markdownlint.jsonc --ignore-path .markdownlintignore --dot \"**/*.md\"",
+    "lint:md": "node .github/linters/run-markdownlint.mjs",
+    "test:markdownlint": "node --test .github/linters/tests/*.test.mjs",
     "lint:secrets": "pre-commit run gitleaks --all-files",
     "lint": "npm run lint:md",
     "fix:exec-bits": "bash scripts/fix-exec-bits",

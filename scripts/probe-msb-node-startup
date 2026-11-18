@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""Host-only Node invocation comparison (macOS/Linux, Python 3.9+, stdlib).
+
+Usage: python3 scripts/probe-msb-node-startup EXISTING_SANDBOX
+Uses the real MSB executable, with no per-call probe wrapper or PTY. Both cases
+run the identical scratch script as agent with HOME=/home/agent. Two passes
+reverse order to expose warming effects. No live configuration is modified.
+Artifacts go under repository tmp/; guest scratch files are retained.
+Only timing/status/validation metadata is saved, never raw stdout/stderr or env.
+This microbenchmark measures invocation cost, not actual USAi merge duration.
+"""
+
+import argparse
+import datetime
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import tempfile
+import time
+from pathlib import Path
+
+EXPECTED = b"acq-node-probe-ok\n"
+
+
+def execute(command, timeout):
+    """Bound each real CLI invocation and reap its process on interruption."""
+    start = time.monotonic()
+    child, cancelled = None, None
+    def cancel(signum, _frame):
+        nonlocal cancelled
+        cancelled = signum
+        if child is not None:
+            raise SystemExit(128 + signum)
+    signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+    previous = {sig: signal.signal(sig, cancel) for sig in signals}
+    try:
+        child = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, start_new_session=True)
+        if cancelled is not None:
+            raise SystemExit(128 + cancelled)
+        output, _ = child.communicate(timeout=timeout)
+    except BaseException:
+        for sig in signals:
+            signal.signal(sig, signal.SIG_IGN)
+        if child is not None:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass  # The child can exit just before cleanup.
+            child.communicate()
+        raise
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+    return child.returncode, output, time.monotonic() - start
+
+
+def measure(command, destination, label, repeat=0, expected=None):
+    utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    try:
+        rc, output, elapsed = execute(command, timeout=60)
+        status = "ok" if rc == 0 and (expected is None or output == expected) else "failed"
+    except subprocess.TimeoutExpired:
+        rc, elapsed, status = None, None, "timeout"
+    row = {"utc": utc, "label": label, "repeat": repeat, "rc": rc,
+           "seconds": elapsed, "status": status}
+    with (destination / "timings.jsonl").open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(row) + "\n")
+    duration = f"{elapsed:.3f}s" if elapsed is not None else ">60s"
+    print(f"{label:16} pass={repeat} {duration:>10} {status} rc={rc}", flush=True)
+    if status != "ok":
+        raise RuntimeError("Command failed, timed out, or returned unexpected output; stopped.")
+    return elapsed
+
+
+def compare(msb, sandbox, destination):
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", destination.name):
+        raise ValueError("invalid scratch name")
+    scratch = "/home/agent/" + destination.name
+    target = scratch + "/probe.mjs"
+    root = [msb, "exec", sandbox, "-u", "0", "--"]
+    source = destination / "probe.mjs"
+    source.write_text('process.stdout.write("acq-node-probe-ok\\n");\n', encoding="utf-8")
+    print(f"Guest scratch (retained): {scratch}", flush=True)
+    # Refuse collisions before copying or modifying permissions.
+    measure([*root, "mkdir", "-m", "755", scratch], destination, "scratch-create")
+    measure([msb, "copy", str(source), sandbox + ":" + target], destination, "copy")
+    setup = 'chmod 644 "$1" && chown agent "$1"'
+    measure([*root, "sh", "-c", setup, "sh", target], destination, "permissions")
+    prefix = [msb, "exec", sandbox, "-u", "agent", "-e", "HOME=/home/agent", "--"]
+    modes = [("direct", ["node", target]),
+             ("fixed-shell", ["sh", "-c", '"$@"', "sh", "node", target])]
+    totals = []
+    for repeat in (1, 2):
+        for label, args in modes[::1 if repeat == 1 else -1]:
+            elapsed = measure([*prefix, *args], destination, label, repeat, EXPECTED)
+            totals.append({"repeat": repeat, "label": label, "seconds": elapsed})
+    (destination / "results.json").write_text(json.dumps(totals, indent=2) + "\n", encoding="utf-8")
+    print(f"Completed: {destination / 'results.json'}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("sandbox")
+    args = parser.parse_args()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", args.sandbox):
+        parser.error("supply a valid existing sandbox name")
+    msb = shutil.which("msb")
+    if not msb:
+        parser.error("msb is not on PATH; run on the host")
+    base = Path(__file__).resolve().parent.parent / "tmp"
+    base.mkdir(exist_ok=True)
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    destination = Path(tempfile.mkdtemp(prefix=f"msb-node-{stamp}-", dir=base))
+    print(f"Artifacts: {destination}", flush=True)
+    compare(msb, args.sandbox, destination)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError, RuntimeError) as error:
+        # Exception payloads can include command arguments; emit only the category.
+        print(f"Node probe stopped: {type(error).__name__}; inspect timing statuses.")
+        raise SystemExit(1) from None

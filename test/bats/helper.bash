@@ -39,8 +39,11 @@ load "${REPO_ROOT}/test/vendor/bats-assert/load"
 # assertion locally while CI stayed green). Tests that need a knob set it
 # explicitly per invocation.
 acq_setup_stubs() {
-  unset ACQ_BACKEND ACQ_IMAGE ACQ_CLONE ACQ_EXTRA_KITS ACQ_UPDATE_CHECK \
-        ACQ_STATE_DIR ACQ_SECRET_STORE_DIR ACQ_NETWORK_TIER \
+  unset ACQ_BACKEND ACQ_IMAGE ACQ_CLONE ACQ_EXTRA_KITS ACQ_PROVIDER_KITS \
+        ACQ_PROVIDER_KITS_FROM_ENV ACQ_PROVIDER_KITS_FROM_CLI ACQ_UPDATE_CHECK \
+        ACQ_PROVIDER_CREDENTIAL_BINDINGS ACQ_PROVIDER_INPUT_PYTHON \
+        ACQ_PROVIDER_BINDINGS_GENERATION ACQ_KIT_SOURCES \
+        ACQ_STATE_DIR ACQ_SECRET_STORE_DIR ACQ_NETWORK_TIER ACQ_BATS_SHARD \
         ACQ_NETWORK_TIER_CONFIRM_OPEN ACQ_MSB_BALANCED_EGRESS ACQ_MSB_IMAGE \
         ACQ_MSB_PULL ACQ_MSB_WORKSPACE ACQ_MSB_CLONES_DIR \
         EMAIL GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME \
@@ -54,11 +57,38 @@ acq_setup_stubs() {
   export HOME="$STUBDIR/home"
   export XDG_CONFIG_HOME="$STUBDIR/xdg"
   unset GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
+  acq_clear_git_local_env
   # Git for Windows sets core.autocrlf=true system-wide, which rewrites LF->CRLF
   # in the stub repos and breaks byte-exact fixture assertions on Windows hosts.
   # Isolate the stub git from that host default so line endings are deterministic.
   git config --global core.autocrlf false 2>/dev/null || true
   load_acq
+}
+
+# acq_clear_git_local_env — drop Git's repository-local environment so a fixture
+# repo created by this suite can never be redirected at another repository.
+#
+# `git -C <dir>` does not override hook-inherited GIT_DIR. Clear Git's documented
+# local-env-vars before fixture operations. Capture the list first so unsets run
+# in the current shell, not a pipeline subshell that discards them on Bash 3.2.
+acq_clear_git_local_env() {
+  local _vars _v
+  _vars=$(git rev-parse --local-env-vars 2>/dev/null) || return 0
+  for _v in $_vars; do
+    unset "$_v"
+  done
+}
+
+# acq_untrace_subshell — call first inside a ( ... ) subshell that provisions a
+# sandbox in-process. bats runs every @test under `set -T` with a DEBUG trap that
+# captures a stack trace before EVERY simple command, and subshells inherit both.
+# A provision runs tens of thousands of commands, so the trap alone made it ~2.5x
+# slower than the same code outside bats (measured 12s vs 2.3s locally, with no
+# change in what runs). The subshell's output is already discarded or captured to a
+# file by the caller, so bats' failure-location tracing adds nothing there.
+acq_untrace_subshell() {
+  set +T
+  trap - DEBUG
 }
 
 # bats teardown(): remove this test's stub dir. Safe if setup partially ran.
