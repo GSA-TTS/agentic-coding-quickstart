@@ -127,3 +127,24 @@ _provision_hcfg() { # NAME PRE_SNIPPET WS_ARGS...
   assert_failure
   refute_regex "$(cat "$CALLS")" '^msb create '
 }
+
+@test "594(c): undefined host-config canonicalizer fails closed before backend create" {
+  local real_cfgdir ws
+  real_cfgdir=$(mktemp -d "${TMPDIR:-/tmp}/594c-real.XXXXXX")
+  ws=$(mktemp -d "${TMPDIR:-/tmp}/594c-ws.XXXXXX")
+
+  _provision_hcfg hcfgundef594c '
+    acq_host_config_dir() {
+      printf "%s\n" "'"$real_cfgdir"'"
+    }
+    unset -f _acq_provider_input_canonical_path
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/594c-secrets"
+  ' "$ws"
+  rm -rf "$ws" "$real_cfgdir"
+
+  assert_failure
+  assert_output --partial "acq(msb): error: trusted host-path canonicalizer is unavailable."
+  # Line-anchored: $CALLS is multi-line, so a bare ^ would only match its start.
+  run grep -c '^msb create ' "$CALLS"
+  assert_failure 1
+}
