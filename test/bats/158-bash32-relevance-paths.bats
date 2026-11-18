@@ -57,6 +57,7 @@ scripts/fix-exec-bits
 scripts/verify-backends
 scripts/qualify-msb-ro-mount
 scripts/rotate-apikey
+scripts/build-uninstaller
 scripts/probe-msb-node-startup
 scripts/test-probe-msb-node-startup.py
 scripts/setup-provider-input-validator
