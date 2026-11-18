@@ -44,6 +44,8 @@ REQUIRED = {
     "acq.cmd", "acq.ps1", "acq", "acq-python", "acq.backends",
     "install.ps1", "install.sh", "installer",
     "py-acq/src", "py-acq/tests", "py-acq/pyproject.toml", "py-acq/requirements-quality.txt",
+    "py-acq/setup.py", "py-acq/MANIFEST.in", "py-acq/recovery_build.py",
+    "scripts/build-uninstaller", "scripts/run-uninstaller",
     "scripts/stage-windows-runtime", "scripts/gen-install-assets",
     ".github/workflows/build-assets.yml", "scripts/assemble-release", "scripts/gen-provenance",
     "scripts/qualify-backend-cell", "scripts/setup-provider-input-validator",

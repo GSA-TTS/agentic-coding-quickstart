@@ -41,6 +41,7 @@ where = ["src"]
 # bundle globs name the dot directory explicitly because setuptools' globs skip
 # hidden paths; tests/test_kitspec.py checks that they cover every bundled file.
 acq_py = [
+  "uninstall.command",
   "msb-balanced-hosts.txt",
   "kitbundle/MANIFEST.json",
   "kitbundle/*/*",

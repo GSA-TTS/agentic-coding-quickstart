@@ -134,6 +134,22 @@ def _install_dir(tmp_path: Path) -> Path:
     return tmp_path / "home" / ".local" / "share" / "acq"
 
 
+@supported_platform_only
+def test_pending_uninstall_refuses_reinstall_before_mutation(tmp_path):
+    release = _make_release(tmp_path / "assets")
+    target = _install_dir(tmp_path)
+    (target / ".acq-uninstall-pending").mkdir(parents=True)
+    marker = target / ".acq-v1-install"
+    marker.write_text("4.1.1\nacq\n")
+    launcher = target / "acq"
+    launcher.write_text("user fixture launcher\n")
+    proc = _run_installer(tmp_path, "--source", str(release), "--yes", "--no-prereq-check")
+    assert proc.returncode != 0
+    assert b"unfinished uninstall" in proc.stderr
+    assert marker.read_text() == "4.1.1\nacq\n"
+    assert launcher.read_text() == "user fixture launcher\n"
+
+
 def _bin_dir(tmp_path: Path) -> Path:
     return tmp_path / "home" / ".local" / "bin"
 
@@ -397,6 +413,7 @@ _GEN_ASSETS = (
     "acq-macos-x86_64.tar.gz",
     "acq-windows-x64.zip",
     *json.loads((REPO_ROOT / "installer/assets.json").read_text())["wheelhouses"],
+    *json.loads((REPO_ROOT / "installer/assets.json").read_text())["recovery"],
 )
 # The only line form SHA256SUMS may contain: "HASH  name", two spaces, no "*".
 _SUMS_LINE = re.compile(r"[0-9a-f]{64}  [^ *][^\r]*")

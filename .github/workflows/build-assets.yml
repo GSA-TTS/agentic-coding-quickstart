@@ -51,6 +51,13 @@ on:
       - install.ps1
       - scripts/assemble-release
       - scripts/gen-install-assets
+      - scripts/build-uninstaller
+      - scripts/run-uninstaller
+      - py-acq/setup.py
+      - py-acq/MANIFEST.in
+      - py-acq/recovery_build.py
+      - py-acq/tests/test_recovery_build.py
+      - acq.backends/uninstall*.sh
       - scripts/gen-provenance
       - scripts/stage-posix-runtime
       - scripts/stage-windows-runtime
@@ -319,6 +326,7 @@ jobs:
       - name: Complete and verify the enumerated dist
         run: |
           cp install.sh dist/
+          bash scripts/build-uninstaller dist/uninstall.command
           test -f dist/install.ps1
           scripts/gen-provenance dist
           scripts/gen-install-assets dist

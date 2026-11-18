@@ -104,9 +104,14 @@ jobs:
             'py-acq/src' \
             'py-acq/tests' \
             'py-acq/pyproject.toml' \
+            'py-acq/setup.py' \
+            'py-acq/MANIFEST.in' \
+            'py-acq/recovery_build.py' \
             'py-acq/requirements-quality.txt' \
             'scripts/stage-windows-runtime' \
             'scripts/gen-install-assets' \
+            'scripts/build-uninstaller' \
+            'scripts/run-uninstaller' \
             'scripts/qualify-backend-cell' \
             'scripts/setup-provider-input-validator' \
             'scripts/test-acq-lib.sh' \
