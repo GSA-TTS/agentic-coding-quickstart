@@ -37,6 +37,11 @@ uninstall_remove_root() {
     cd -P -- "$(dirname "$1")" || exit 1
     [ "$(pwd -P)" = "$(dirname "$1")" ] || exit 1
     [ ! -L "${1##*/}" ] || exit 1
+    # Published generations are intentionally read-only. Change only owned real
+    # directories, never symlink targets, before bounded recursive removal.
+    if [ -d "${1##*/}" ]; then
+      find "${1##*/}" -type d -user "$(id -u)" -exec chmod u+rwx {} + || exit 1
+    fi
     rm -rf -- "${1##*/}"
   ) || { uninstall_error "could not remove $1"; return 1; }
   [ ! -e "$1" ] || uninstall_error "still present: $1"

@@ -416,3 +416,33 @@ STUB
   [ "$status" = 0 ]
   [ ! -s "$CALLS" ]
 }
+
+@test "Homebrew uninstall disables autoremove and skips packages already gone" {
+  uninstall_formulas=(acq microsandbox-acq)
+  uninstall_npm=0
+  brew() {
+    case "$*" in
+      'list --formula') [ -f "$HOME/brew-gone" ] || printf 'acq\nmicrosandbox-acq\n' ;;
+      'uninstall acq')
+        [ "${HOMEBREW_NO_AUTOREMOVE:-}" = 1 ] || return 99
+        touch "$HOME/brew-gone" ;;
+      *) return 99 ;;
+    esac
+  }
+  run uninstall_packages
+  [ "$status" = 0 ]
+}
+
+@test "owned read-only state is removed without touching symlink targets" {
+  mkdir -p "$HOME/.local/state/acq/provenance/provider-input/generation/models" "$HOME/keep"
+  touch "$HOME/.local/state/acq/provenance/provider-input/generation/models/facts.json"
+  chmod 0555 "$HOME/keep"
+  ln -s "$HOME/keep" "$HOME/.local/state/acq/provenance/provider-input/generation/link"
+  chmod 0555 "$HOME/.local/state/acq/provenance/provider-input/generation/models"
+  run uninstall_remove_root "$HOME/.local/state/acq" acq
+  [ "$status" = 0 ]
+  [ ! -e "$HOME/.local/state/acq" ]
+  [ -d "$HOME/keep" ]
+  [ ! -w "$HOME/keep" ]
+  chmod 0755 "$HOME/keep"
+}
