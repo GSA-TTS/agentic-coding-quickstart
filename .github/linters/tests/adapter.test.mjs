@@ -86,6 +86,15 @@ test("Quickstart selection includes hidden files, aliases, Unicode, templates an
   assert.equal(run(root).status, 0);
 });
 
+test("--count-only prints a plain number even when color is forced", (t) => {
+  const root = fixture(t, { "a.md": "ok\n", "b.md": "ok\n" });
+  const result = spawnSync(process.execPath, [wrapper, "--count-only"], {
+    cwd: root, encoding: "utf8", timeout: 15000, env: { ...process.env, FORCE_COLOR: "1" },
+  });
+  assert.ifError(result.error);
+  assert.equal(result.stdout, "2\n");
+});
+
 test("extension follows CLI platform policy without Patterns fixture exclusions", (t) => {
   const root = fixture(t, { "upper.MD": "ok\n", "lower.md": "ok\n", "Fixtures/yes.md": "ok\n" });
   assert.deepEqual(markdownFiles(root, "linux"), ["Fixtures/yes.md", "lower.md"]);
