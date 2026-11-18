@@ -5,11 +5,15 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 output="${1:?Usage: bash scripts/build-uninstaller OUTPUT.command}"
 {
   printf '#!/bin/bash\n# Self-contained ACQ uninstaller; see ADR-0036.\nset -uo pipefail\n'
-  cat "$root/acq.backends/uninstall-files.sh" "$root/acq.backends/uninstall.sh"
+  cat "$root/acq.backends/uninstall-files.sh" "$root/acq.backends/msb-version-policy.sh" "$root/acq.backends/uninstall.sh"
   cat <<'FOOTER'
 uninstall_main "$@"
 result=$?
-if [ -t 0 ]; then
+pause=1
+for argument in "$@"; do
+  case "$argument" in --help|-h) pause=0 ;; esac
+done
+if [ "$pause" = 1 ] && [ -t 0 ]; then
   printf '\nPress Return to exit.\n'
   IFS= read -r _answer || true
 fi

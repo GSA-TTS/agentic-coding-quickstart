@@ -12,6 +12,7 @@ setup() {
   unset ACQ_SECRET_STORE_DIR ACQ_SECRET_FILE_DIR ACQ_SECRET_META_DIR ACQ_SECRET_INDEX_FILE
   unset ACQ_MSB_PORTS_DIR ACQ_MSB_CLONES_DIR ACQ_MSB_SSH_DIR ACQ_MSB_SSH_KEY
   . "$REPO_ROOT/acq.backends/uninstall-files.sh"
+  . "$REPO_ROOT/acq.backends/msb-version-policy.sh"
   # Capture the real cleanup body for isolated command-contract tests.
   MACOS_CLEANUP="$(declare -f uninstall_macos_secrets)"
   . "$REPO_ROOT/acq.backends/uninstall.sh"
@@ -35,7 +36,9 @@ setup() {
   }
   # CI/sandbox may run as root; production still refuses sudo. Only this fixture
   # reports a regular user for the read-only inventory and isolated cleanup.
-  id() { if [ "${1:-}" = -u ]; then printf '1000\n'; else command id "$@"; fi; }
+  if [ "$(id -u)" = 0 ]; then
+    id() { if [ "${1:-}" = -u ]; then printf '1000\n'; else command id "$@"; fi; }
+  fi
   export CALLS="$FIXTURE/calls"
   : > "$CALLS"
 }
@@ -45,6 +48,7 @@ stub_msb() {
 #!/bin/bash
 printf '%s\n' "$*" >> "$CALLS"
 case "$*" in
+  '--version') printf 'msb 0.7.7\n' ;;
   'ls -q') [ -f "$HOME/removed" ] || printf 'example\n' ;;
   'ls -q --running') printf 'example\n' ;;
   'stop --timeout 30 example') [ ! -f "$HOME/stop-fail" ] ;;
@@ -84,6 +88,13 @@ STUB
   run uninstall_main </dev/null
   [ "$status" = 1 ]
   [[ "$output" == *'No interactive terminal'* ]]
+}
+
+@test "production inventory refuses root without weakening directory ownership" {
+  id() { if [ "${1:-}" = -u ]; then printf '0\n'; else command id "$@"; fi; }
+  run uninstall_main --dry-run
+  [ "$status" = 1 ]
+  [[ "$output" == *'not with sudo'* ]]
 }
 
 @test "historical SBX records allow preview but yes alone never authorizes deletion" {
@@ -226,7 +237,7 @@ STUB
   run bash "$REPO_ROOT/scripts/build-uninstaller" "$FIXTURE/uninstall.command"
   [ "$status" = 0 ]
   [ -x "$FIXTURE/uninstall.command" ]
-  run bash "$FIXTURE/uninstall.command" --help
+  run bash "$FIXTURE/uninstall.command" --help </dev/null
   [ "$status" = 0 ]
   [[ "$output" == *'Usage: acq uninstall'* ]]
   run grep -E '^\s*(source|\.) ' "$FIXTURE/uninstall.command"
@@ -434,6 +445,7 @@ STUB
 }
 
 @test "owned read-only state is removed without touching symlink targets" {
+  [ "$(command id -u)" != 0 ] || skip 'requires actual nonroot ownership'
   mkdir -p "$HOME/.local/state/acq/provenance/provider-input/generation/models" "$HOME/keep"
   touch "$HOME/.local/state/acq/provenance/provider-input/generation/models/facts.json"
   chmod 0555 "$HOME/keep"
@@ -445,4 +457,48 @@ STUB
   [ -d "$HOME/keep" ]
   [ ! -w "$HOME/keep" ]
   chmod 0755 "$HOME/keep"
+}
+
+@test "combined repeated globals cannot forward uninstall to a backend" {
+  for args in '--backend msb --image example' '--image=example --backend=msb' '--backend msb --backend msb'; do
+    # These fixed fixture arguments contain no paths or user data.
+    # shellcheck disable=SC2086
+    run bash "$REPO_ROOT/acq" $args uninstall --dry-run
+    [ "$status" = 2 ]
+    [[ "$output" == *'without global options'* ]]
+  done
+}
+
+@test "blocked unknown and prerelease MSB never opens catalog even for preview" {
+  for version in 0.7.0 0.7.1 0.7.2 0.6.8 0.7.7-rc1 unknown; do
+    printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "$CALLS"\nif [ "$1" = --version ]; then printf "msb %s\\n"; else exit 99; fi\n' "$version" > "$FIXTURE/bin/msb"
+    chmod +x "$FIXTURE/bin/msb"
+    : > "$CALLS"
+    run uninstall_main --dry-run
+    [ "$status" = 1 ]
+    [ "$(cat "$CALLS")" = --version ]
+  done
+}
+
+@test "standalone help exits under a real terminal without Return" {
+  command -v python3 >/dev/null || skip 'PTY regression needs Python3'
+  run bash "$REPO_ROOT/scripts/build-uninstaller" "$FIXTURE/uninstall.command"
+  [ "$status" = 0 ]
+  run python3 - "$FIXTURE/uninstall.command" <<'PY'
+import os, pty, subprocess, sys
+master, slave = pty.openpty()
+try:
+    process = subprocess.Popen(['/bin/bash', sys.argv[1], '--help'], stdin=slave,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, err = process.communicate(timeout=5)
+    assert process.returncode == 0, err
+    assert b'Press Return' not in out
+finally:
+    if process.poll() is None:
+        process.kill()
+        process.wait()
+    os.close(master)
+    os.close(slave)
+PY
+  [ "$status" = 0 ]
 }

@@ -29,20 +29,26 @@ ACQ_RESOLVED_PATH="${ACQ_SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
 
 # Uninstall must work before normal backend/config discovery, even with a broken
 # installation. Load all cleanup functions before removing their source files.
+_acq_uninstall_args=("$@")
 _acq_uninstall_offset=0
-case "${1:-}" in
-  --backend=*) [ "${2:-}" != uninstall ] || _acq_uninstall_offset=1 ;;
-  --backend) [ "${3:-}" != uninstall ] || _acq_uninstall_offset=2 ;;
-esac
-if [ "${1:-}" = uninstall ] || [ "$_acq_uninstall_offset" -gt 0 ]; then
+while [ "$_acq_uninstall_offset" -lt "$#" ]; do
+  case "${_acq_uninstall_args[$_acq_uninstall_offset]}" in
+    --backend|--image) _acq_uninstall_offset=$((_acq_uninstall_offset + 2)) ;;
+    --backend=*|--image=*) _acq_uninstall_offset=$((_acq_uninstall_offset + 1)) ;;
+    *) break ;;
+  esac
+done
+if [ "${_acq_uninstall_args[$_acq_uninstall_offset]:-}" = uninstall ]; then
   if [ "$_acq_uninstall_offset" -gt 0 ]; then
-    echo 'acq: uninstall is backend-independent; use acq uninstall without --backend.' >&2
+    echo 'acq: uninstall is backend-independent; use acq uninstall without global options.' >&2
     exit 2
   fi
   shift
   set +e
   # shellcheck source=acq.backends/uninstall-files.sh
   . "${ACQ_SCRIPT_DIR}/acq.backends/uninstall-files.sh"
+  # shellcheck source=acq.backends/msb-version-policy.sh
+  . "${ACQ_SCRIPT_DIR}/acq.backends/msb-version-policy.sh"
   # shellcheck source=acq.backends/uninstall.sh
   . "${ACQ_SCRIPT_DIR}/acq.backends/uninstall.sh"
   uninstall_main "$@"

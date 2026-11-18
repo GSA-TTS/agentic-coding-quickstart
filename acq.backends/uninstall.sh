@@ -92,6 +92,7 @@ uninstall_inventory() {
   fi
   uninstall_names=""; uninstall_running=""
   if [ -n "$uninstall_msb" ]; then
+    acq_msb_check_catalog_version "$uninstall_msb" || return 1
     uninstall_names=$("$uninstall_msb" ls -q) || { uninstall_error 'MSB cannot list sandboxes. Repair its catalog before removal.'; return 1; }
     uninstall_running=$("$uninstall_msb" ls -q --running) || return 1
     while IFS= read -r path; do

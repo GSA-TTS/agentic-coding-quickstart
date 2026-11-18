@@ -15,6 +15,22 @@ VM shutdown, or host credential deletion was executed by the agent.
 
 ## Adversarial Review
 
+Human review follow-up requires shared MSB version gating before catalog access,
+complete fetch/push destination validation before removing a temporary remote,
+full pre-command global-option handling, deduplicated retry-safe Linux credential
+cleanup, actual nonroot fixture identity, and terminal-backed help-exit coverage.
+Native destructive acceptance remains a separate gate; isolated passes do not
+certify actual credential-store, package-manager, or VM removal.
+
+Follow-up verification: 68 isolated uninstall/review regressions pass under the
+default Bash and verified Bash 3.2.57, including a PTY-backed immediate help exit,
+combined globals, blocked versions, customized fetch/push URLs, actual nonroot
+directory ownership, and mixed fallback/keyring credential migration. ShellCheck
+and module secrets scanning pass. Adversarial review identified the mixed-store
+case and it was corrected before submission. Linux no-match verification consumes
+`secret-tool search` output without logging or retaining it; the tool can emit
+secret values, so suppression is mandatory. Native removal acceptance is pending.
+
 Repeated read-only agent reviews identified and resolved:
 
 - Custom roots named `acq` could authorize project deletion: nondefault overrides

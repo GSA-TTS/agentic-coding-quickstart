@@ -34,6 +34,12 @@ acq uninstall
 It lists the locations and packages found and asks you to confirm. Pressing
 Return without answering cancels. Do not run it with `sudo`.
 
+Before listing sandboxes, the wizard checks MSB's shared catalog-version policy.
+Blocked migration releases, prereleases, and unknown builds stop even a preview
+before opening the catalog. Restore a supported final MSB version before retrying.
+Standalone `--help` exits immediately; other interactive results stay visible
+until you press Return.
+
 For an unattended removal, `acq uninstall --yes` skips the confirmation, not
 safety checks. Only use it after reviewing the preview.
 
