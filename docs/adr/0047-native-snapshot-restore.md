@@ -75,3 +75,13 @@ backend supports disk-state snapshot with acq-managed host-resource re-plumbing.
   agent sandbox, snapshot it, remove/recreate through restore, verify agent
   history is present on the restored cold-boot disk, and verify SSH signing works
   with the restored vsock route.
+- Provider selection (default, explicit kit set, or disabled) is recorded in the
+  snapshot state sidecar and re-applied to the restored sandbox's provenance, so
+  a restore or recreate does not silently reset the provider kit set.
+- Not yet verified live: restoring after a full `acq rm --snapshot`. Full removal
+  also deletes the sandbox's host-side provider-input generation, which the
+  source sandbox mounted read-only. `acq recreate` keeps it, but whether msb
+  restore tolerates the missing mount source, and whether the restored agent
+  still finds its provider inputs, must be confirmed with
+  `scripts/verify-native-snapshot-restore` against an opencode sandbox on an
+  msb-capable host.

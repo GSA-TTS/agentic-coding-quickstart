@@ -140,7 +140,7 @@ _sha256() {
   run env ACQ_BACKEND=msb ACQ_PROVENANCE_DIR="$STUBDIR/provenance" SSH_AUTH_SOCK="$STUBDIR/agent.sock" "$ACQ" restore restored "$STUBDIR/saved.msb"
   assert_success
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" "msb restore $STUBDIR/state/msb-snapshots/\.restore\.[[:alnum:]]{6} --name restored --dangerously-inherit-resources --volume $REAL_STUBDIR/provenance/msb/restored\\.[0-9]+\\.config:$ACQ_HOST_CONFIG_GUEST_DIR:ro --volume $STUBDIR/ws:$STUBDIR/ws --vsock ${sock_path}:3552/stream --secret USAI_API_KEY@api.gsa.usai.gov"
+  assert_regex "$log" "msb restore $STUBDIR/state/msb-snapshots/\.restore\.[[:alnum:]]{6} --name restored --dangerously-inherit-resources --volume $REAL_STUBDIR/provenance/msb/restored\\.[0-9]+\\.config:$ACQ_HOST_CONFIG_GUEST_DIR:ro --volume $STUBDIR/ws:$STUBDIR/ws --vsock $STUBDIR/state/msb/ssh-agent/restored\.sock:3552/stream --secret USAI_API_KEY@api.gsa.usai.gov"
   assert_regex "$log" 'USAI_API_KEY=present'
   assert_regex "$log" 'socat UNIX-LISTEN:'
   assert_regex "$log" 'msb inspect restored --format json'
@@ -317,7 +317,7 @@ _sha256() {
   assert_regex "$log" "msb snapshot create --from-sandbox mybox --guest-flush auto -o $STUBDIR/recreate\.msb"
   assert_regex "$log" 'msb remove --force mybox'
   refute_regex "$log" 'msb volume rm'
-  assert_regex "$log" "msb restore $STUBDIR/state/msb-snapshots/\.restore\.[[:alnum:]]{6} --name mybox --dangerously-inherit-resources --volume $REAL_STUBDIR/provenance/msb/mybox\\.[0-9]+\\.config:$ACQ_HOST_CONFIG_GUEST_DIR:ro --volume $STUBDIR/ws:$STUBDIR/ws --vsock ${sock_path}:3552/stream"
+  assert_regex "$log" "msb restore $STUBDIR/state/msb-snapshots/\.restore\.[[:alnum:]]{6} --name mybox --dangerously-inherit-resources --volume $REAL_STUBDIR/provenance/msb/mybox\\.[0-9]+\\.config:$ACQ_HOST_CONFIG_GUEST_DIR:ro --volume $STUBDIR/ws:$STUBDIR/ws --vsock $STUBDIR/state/msb/ssh-agent/mybox\.sock:3552/stream"
   assert_regex "$log" 'msb inspect mybox --format json'
   assert_output --partial "kit startup re-applied"
 }
@@ -552,4 +552,33 @@ _sha256() {
   run bash -c 'ACQ_SECRET_TEST_VALUE="ghp_x" ACQ_BACKEND=msb "$1" secret set -g github' _ "$ACQ"
   assert_output --partial 'acq secret store'
   assert [ -f "$STUBDIR/secrets/acq.github" ]
+}
+
+@test "msb: restore carries an explicit provider selection into the healed provenance" {
+  mkdir -p "$STUBDIR/secrets" "$STUBDIR/state/msb-snapshots"
+  : > "$STUBDIR/psel.msb"
+  printf 'agent\topencode\nprovider-selection\texplicit\nprovider-kits\t%s\n' "$STUBDIR/prov-kit" \
+    > "$STUBDIR/state/msb-snapshots/$(_sha256 "$STUBDIR/psel.msb").state"
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _acq_msb_snapshot_state_adopt restored "'"$STUBDIR"'/psel.msb" || exit 1
+    printf "%s|%s|%s\n" "$ACQ_PROVIDER_KITS" "${ACQ_PROVIDER_KITS_FROM_ENV:-}" "${ACQ_PROVIDER_KITS_FROM_CLI:-}"
+  '
+  assert_success
+  assert_output "$STUBDIR/prov-kit|1|"
+}
+
+@test "msb: snapshot sidecar records the provider selection of the source sandbox" {
+  mkdir -p "$STUBDIR/provenance/msb" "$STUBDIR/ws"
+  local record
+  record=$(printf '%s' selbox | cksum | cut -d' ' -f1)
+  printf 'schema=1\nbackend=msb\nprovider_selection=explicit\nprovider_kits=%s\nagent=opencode\n' "$STUBDIR/prov-kit" \
+    > "$STUBDIR/provenance/msb/selbox.${record}.env"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb ACQ_PROVENANCE_DIR="$STUBDIR/provenance" "$ACQ" snapshot selbox "$STUBDIR/sel.msb"
+  assert_success
+  local state; state=$(cat "$STUBDIR/state/msb-snapshots/$(_sha256 "$STUBDIR/sel.msb").state")
+  assert_regex "$state" $'provider-selection\texplicit'
+  assert_regex "$state" $'provider-kits\t'"$STUBDIR/prov-kit"
 }

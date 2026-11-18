@@ -2138,7 +2138,7 @@ See [ADR-0021](adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md)
 ("Amendment (2026-10-06): reboot-proof route via a managed host symlink") for the
 full mechanism. Use the old `acq rm <sandbox>; acq run ...` path only when you do
 not need to preserve live agent context. See
-[ADR-0036](adr/0036-native-snapshot-restore.md) for native snapshot restore.
+[ADR-0047](adr/0047-native-snapshot-restore.md) for native snapshot restore.
 
 ---
 

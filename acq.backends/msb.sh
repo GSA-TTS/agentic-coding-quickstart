@@ -1221,8 +1221,10 @@ _acq_msb_snapshot_state_file() {
 }
 
 _acq_msb_snapshot_state_copy() {
-  local name="$1" snapshot="$2" target agent workspace generic host_workspace
+  local name="$1" snapshot="$2" target agent workspace generic host_workspace psel pkits
   target=$(_acq_msb_snapshot_state_file "$snapshot") || return 1
+  psel=$(acq_provenance_field msb "$name" provider_selection)
+  pkits=$(acq_provenance_field msb "$name" provider_kits)
   agent=$(acq_host_config_read msb "$name" agent 2>/dev/null || true)
   [ -n "$agent" ] || agent=$(acq_provenance_field msb "$name" agent)
   workspace=$(acq_host_config_read msb "$name" workspace 2>/dev/null || true)
@@ -1236,12 +1238,15 @@ _acq_msb_snapshot_state_copy() {
     printf 'workspace\t%s\n' "$workspace"
     printf 'generic-opencode\t%s\n' "$generic"
     printf 'host-workspace\t%s\n' "$host_workspace"
+    printf 'provider-selection\t%s\n' "$psel"
+    printf 'provider-kits\t%s\n' "$pkits"
   } >"$target" 2>/dev/null || return 1
   chmod 600 "$target" 2>/dev/null || return 1
 }
 
 _acq_msb_snapshot_state_adopt() {
   local name="$1" snapshot="$2" source kind value agent="" workspace="" generic="" host_workspace=""
+  local psel="" pkits="" have_psel=0
   source=$(_acq_msb_snapshot_state_file "$snapshot") || return 0
   [ -f "$source" ] || return 0
   while IFS=$'\t' read -r kind value; do
@@ -1250,9 +1255,21 @@ _acq_msb_snapshot_state_adopt() {
       workspace) workspace="$value" ;;
       generic-opencode) generic="$value" ;;
       host-workspace) host_workspace="$value" ;;
+      provider-selection) psel="$value"; have_psel=1 ;;
+      provider-kits) pkits="$value" ;;
     esac
   done <"$source"
   case "$agent" in ""|*[!a-z-]*) return 1 ;; esac
+  case "$psel" in ""|default|explicit) ;; *) return 1 ;; esac
+  # Provenance is cleared above; carry the recorded provider selection into the
+  # process state the restore heal rewrites provenance from, so a sandbox created
+  # with an explicit or disabled provider kit set is not silently reset to default.
+  if [ "$have_psel" = "1" ]; then
+    case "$psel" in
+      explicit) ACQ_PROVIDER_KITS="$pkits"; ACQ_PROVIDER_KITS_FROM_ENV=1; ACQ_PROVIDER_KITS_FROM_CLI="" ;;
+      *) ACQ_PROVIDER_KITS=""; ACQ_PROVIDER_KITS_FROM_ENV=""; ACQ_PROVIDER_KITS_FROM_CLI="" ;;
+    esac
+  fi
   # A restore's sidecar is authoritative. Never retain a removed sandbox's
   # name-keyed state when this snapshot omits a field.
   acq_host_config_clear msb "$name" agent
@@ -1461,7 +1478,7 @@ acq_backend_restore() {
   if [ "${#_resource_flags[@]}" -gt 0 ]; then
     _restore_flags+=("${_resource_flags[@]}")
   fi
-  _acq_msb_vsock_flags_into _vsock_flags
+  _acq_msb_vsock_flags_into _vsock_flags "$_name"
   [ "${#_vsock_flags[@]}" -gt 0 ] && _restore_flags+=("${_vsock_flags[@]}")
 
   local _host_snapshot="$_staged_snapshot"
