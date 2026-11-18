@@ -4,7 +4,7 @@ description: "Guided local removal, standalone Mac recovery, and verification."
 status: canonical
 tier: 2
 last_updated: 2026-11-17
-related_files: ["../../acq", "../../acq.backends/uninstall.sh", "../adr/0036-guided-acq-msb-uninstall.md"]
+related_files: ["../../acq", "../../acq.backends/uninstall.sh", "../adr/0042-guided-acq-msb-uninstall.md"]
 ---
 
 # Remove ACQ and Microsandbox
@@ -161,4 +161,4 @@ sandboxes and credentials, never valuable project work. Exercise:
 
 Record actual output. Offline tests cannot prove macOS Keychain, Homebrew, VM
 shutdown, or downloaded-file opening behavior. See
-[ADR-0036](../adr/0036-guided-acq-msb-uninstall.md) for the safety boundary.
+[ADR-0042](../adr/0042-guided-acq-msb-uninstall.md) for the safety boundary.

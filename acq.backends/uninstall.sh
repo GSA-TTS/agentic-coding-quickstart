@@ -1,5 +1,5 @@
 #!/bin/bash
-# Offline, backend-independent uninstall entry point. See ADR-0036.
+# Offline, backend-independent uninstall entry point. See ADR-0042.
 # The release builder embeds uninstall-files.sh; do not source host state.
 
 uninstall_paths() {

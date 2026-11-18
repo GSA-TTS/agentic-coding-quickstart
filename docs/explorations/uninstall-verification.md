@@ -4,7 +4,7 @@ description: "AI-assisted review findings, local checks, and live macOS acceptan
 status: draft
 tier: 2
 last_updated: 2026-11-17
-related_files: ["../howto/uninstall.md", "../adr/0036-guided-acq-msb-uninstall.md", "../../test/bats/07-uninstall.bats"]
+related_files: ["../howto/uninstall.md", "../adr/0042-guided-acq-msb-uninstall.md", "../../test/bats/07-uninstall.bats"]
 ---
 
 # Guided Uninstaller Verification Transcript

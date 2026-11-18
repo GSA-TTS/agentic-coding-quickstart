@@ -1,5 +1,5 @@
 #!/bin/bash
-# Narrow filesystem and credential cleanup for the offline wizard (ADR-0036).
+# Narrow filesystem and credential cleanup for the offline wizard (ADR-0042).
 # Variables are initialized by uninstall_paths in the companion module.
 # shellcheck disable=SC2154
 

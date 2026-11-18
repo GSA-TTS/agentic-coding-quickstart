@@ -12,7 +12,7 @@ ato_relevance: no
 risk_treatment: mitigate
 ---
 
-# ADR-0036: Use a Shared Offline ACQ and MSB Uninstaller
+# ADR-0042: Use a Shared Offline ACQ and MSB Uninstaller
 
 ## Context and Problem Statement
 
