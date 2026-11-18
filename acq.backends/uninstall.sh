@@ -173,9 +173,12 @@ uninstall_sandboxes() {
 }
 
 uninstall_packages() {
-  local formula
+  local formula installed
   for formula in ${uninstall_formulas[@]+"${uninstall_formulas[@]}"}; do
-    HOMEBREW_NO_AUTO_UPDATE=1 brew uninstall "$formula" || return 1
+    installed=$(HOMEBREW_NO_AUTO_UPDATE=1 brew list --formula) || return 1
+    if printf '%s\n' "$installed" | grep -Fx -- "$formula" >/dev/null; then
+      HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_AUTOREMOVE=1 brew uninstall "$formula" || return 1
+    fi
   done
   if [ "$uninstall_npm" = 1 ]; then
     npm uninstall -g --ignore-scripts @gsa-tts/agentic-coding-quickstart || return 1
