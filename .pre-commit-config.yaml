@@ -58,6 +58,16 @@ repos:
         types: [markdown]
         pass_filenames: false
         stages: [manual]
+      # `types: [markdown]` above skips commits that touch only the adapter, its
+      # tests or the linter manifest, so those would never run the adapter tests
+      # locally. This hook covers exactly those inputs (ADR-0046); the hosted
+      # Markdown Quality workflow runs the same npm script.
+      - id: markdownlint-adapter-tests
+        name: markdownlint adapter tests
+        entry: bash -c 'npm ci --prefix .github/linters --prefer-offline --no-audit --no-fund >/dev/null && npm run test:markdownlint' --
+        language: system
+        files: '^(\.github/linters/.*|\.markdownlint\.jsonc|\.markdownlintignore|package\.json)$'
+        pass_filenames: false
 
   # Shell script linting via the system shellcheck binary
   # (`brew install shellcheck` / `apt install shellcheck`; preinstalled on CI).
