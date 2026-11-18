@@ -1244,9 +1244,27 @@ _acq_msb_snapshot_state_copy() {
   chmod 600 "$target" 2>/dev/null || return 1
 }
 
+# Restore re-seeds only the provider selection into a minimal provenance record.
+# The post-restore heal loads the selection from provenance (an absent record
+# means "default") and rewrites the full record, so an explicit or disabled
+# provider kit set survives snapshot/restore instead of resetting to default.
+_acq_msb_restore_provider_selection() { # NAME AGENT SELECTION KITS
+  local name="$1" agent="$2" psel="$3" pkits="$4" file tmp
+  [ "$psel" = "explicit" ] || return 0
+  file=$(_acq_provenance_file msb "$name") || return 1
+  mkdir -p "$(dirname "$file")" 2>/dev/null || return 1
+  tmp="${file}.tmp.$$"
+  {
+    printf 'schema=1\nbackend=msb\nprovider_selection=explicit\n'
+    [ -z "$pkits" ] || printf 'provider_kits=%s\n' "$pkits"
+    printf 'agent=%s\n' "$agent"
+  } >"$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$file" 2>/dev/null || { rm -f "$tmp"; return 1; }
+}
+
 _acq_msb_snapshot_state_adopt() {
   local name="$1" snapshot="$2" source kind value agent="" workspace="" generic="" host_workspace=""
-  local psel="" pkits="" have_psel=0
+  local psel="" pkits=""
   source=$(_acq_msb_snapshot_state_file "$snapshot") || return 0
   [ -f "$source" ] || return 0
   while IFS=$'\t' read -r kind value; do
@@ -1255,27 +1273,19 @@ _acq_msb_snapshot_state_adopt() {
       workspace) workspace="$value" ;;
       generic-opencode) generic="$value" ;;
       host-workspace) host_workspace="$value" ;;
-      provider-selection) psel="$value"; have_psel=1 ;;
+      provider-selection) psel="$value" ;;
       provider-kits) pkits="$value" ;;
     esac
   done <"$source"
   case "$agent" in ""|*[!a-z-]*) return 1 ;; esac
   case "$psel" in ""|default|explicit) ;; *) return 1 ;; esac
-  # Provenance is cleared above; carry the recorded provider selection into the
-  # process state the restore heal rewrites provenance from, so a sandbox created
-  # with an explicit or disabled provider kit set is not silently reset to default.
-  if [ "$have_psel" = "1" ]; then
-    case "$psel" in
-      explicit) ACQ_PROVIDER_KITS="$pkits"; ACQ_PROVIDER_KITS_FROM_ENV=1; ACQ_PROVIDER_KITS_FROM_CLI="" ;;
-      *) ACQ_PROVIDER_KITS=""; ACQ_PROVIDER_KITS_FROM_ENV=""; ACQ_PROVIDER_KITS_FROM_CLI="" ;;
-    esac
-  fi
   # A restore's sidecar is authoritative. Never retain a removed sandbox's
   # name-keyed state when this snapshot omits a field.
   acq_host_config_clear msb "$name" agent
   acq_host_config_clear msb "$name" workspace
   acq_host_config_clear msb "$name" generic-opencode
   acq_provenance_remove msb "$name"
+  _acq_msb_restore_provider_selection "$name" "$agent" "$psel" "$pkits" || return 1
   acq_host_config_write msb "$name" agent "$agent" || return 1
   [ -z "$workspace" ] || acq_host_config_write msb "$name" workspace "$workspace" || return 1
   case "$generic" in

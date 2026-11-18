@@ -554,19 +554,27 @@ _sha256() {
   assert [ -f "$STUBDIR/secrets/acq.github" ]
 }
 
-@test "msb: restore carries an explicit provider selection into the healed provenance" {
-  mkdir -p "$STUBDIR/secrets" "$STUBDIR/state/msb-snapshots"
+@test "msb: restore keeps an explicit provider selection through the kit heal" {
+  mkdir -p "$STUBDIR/secrets" "$STUBDIR/ws" "$STUBDIR/provenance/msb" "$STUBDIR/state/msb-snapshots" "$STUBDIR/prov-kit"
   : > "$STUBDIR/psel.msb"
   printf 'agent\topencode\nprovider-selection\texplicit\nprovider-kits\t%s\n' "$STUBDIR/prov-kit" \
     > "$STUBDIR/state/msb-snapshots/$(_sha256 "$STUBDIR/psel.msb").state"
-  run bash -c '
-    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
-    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
-    _acq_msb_snapshot_state_adopt restored "'"$STUBDIR"'/psel.msb" || exit 1
-    printf "%s|%s|%s\n" "$ACQ_PROVIDER_KITS" "${ACQ_PROVIDER_KITS_FROM_ENV:-}" "${ACQ_PROVIDER_KITS_FROM_CLI:-}"
-  '
-  assert_success
-  assert_output "$STUBDIR/prov-kit|1|"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb ACQ_PROVENANCE_DIR="$STUBDIR/provenance" "$ACQ" restore pselbox "$STUBDIR/psel.msb"
+  local prov; prov=$(cat "$STUBDIR/provenance/msb/pselbox."*.env)
+  assert_regex "$prov" 'provider_selection=explicit'
+  assert_regex "$prov" "provider_kits=$STUBDIR/prov-kit"
+}
+
+@test "msb: restore of a default-selection snapshot heals to the default selection" {
+  mkdir -p "$STUBDIR/provenance/msb" "$STUBDIR/state/msb-snapshots"
+  : > "$STUBDIR/pdef.msb"
+  printf 'agent\topencode\nprovider-selection\tdefault\nprovider-kits\t\n' \
+    > "$STUBDIR/state/msb-snapshots/$(_sha256 "$STUBDIR/pdef.msb").state"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb ACQ_PROVENANCE_DIR="$STUBDIR/provenance" "$ACQ" restore pdefbox "$STUBDIR/pdef.msb"
+  local prov; prov=$(cat "$STUBDIR/provenance/msb/pdefbox."*.env 2>/dev/null || true)
+  refute_regex "$prov" 'provider_selection=explicit'
 }
 
 @test "msb: snapshot sidecar records the provider selection of the source sandbox" {
