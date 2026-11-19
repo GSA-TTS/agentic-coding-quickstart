@@ -78,8 +78,11 @@ Chosen: **option 2**.
   fails on it; a repeat run; the SBX-record refusal and both confirmation routes; and an
   optional Homebrew stage. Each asserts what was removed, that the Keychain item is gone
   (`security find-generic-password` exits 44), that an original project (including a
-  symlink into it) and unrelated files are byte-identical, and that no secret-like
-  placeholder text appears in output.
+  symlink into it) and unrelated files are byte-identical. Every wizard run, whichever
+  route, is also checked for secret-like placeholder text in both captured streams.
+- The helper that runs the wizard gives it its own session and process group, applies the
+  timeout to the whole run (including waiting for exit after the terminal closes), and ends
+  anything left in the group on every exit path, so cleanup never races a surviving child.
 - Reporting: `results.tsv`, `results.json` and a Markdown step summary list the tested
   commit, runner image, macOS and bash versions, and each stage as PASS, FAIL, BLOCKED
   (an earlier stage failed), ABORTED, or NOT-EXERCISED. The verdict is PASS only when

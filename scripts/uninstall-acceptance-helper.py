@@ -110,12 +110,12 @@ def stop_group(pgid):
     """
     try:
         os.killpg(pgid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
+    except (ProcessLookupError, PermissionError):
+        return  # macOS reports EPERM for a group holding only zombies
     time.sleep(TERM_GRACE)
     try:
         os.killpg(pgid, signal.SIGKILL)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         pass
 
 
