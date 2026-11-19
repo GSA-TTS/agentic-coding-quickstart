@@ -111,22 +111,46 @@ run_stage() {
 
 # ------------------------------------------------------------------ cleanup
 
-cleanup() {
-  [ "$CLEANED" = 0 ] || return 0
-  CLEANED=1
-  [ -z "$FAKE_HOME" ] || keychain_destroy
+# Removes the throwaway work directory, then proves it is gone. A directory outside
+# RUNNER_TEMP is never removed, and is reported if present.
+remove_work() {
+  [ -n "$WORK" ] || return 0
   case "$WORK" in
     "${RUNNER_TEMP_REAL:-/nonexistent}"/acq-uninstall-accept.*)
       find "$WORK" -type d -exec chmod u+rwx {} + 2>/dev/null
-      rm -rf "$WORK" ;;
+      rm -rf "$WORK"
+      path_missing "$WORK" || { cleanup_fail "work directory still present: $WORK"; return 1; } ;;
+    *) path_missing "$WORK" || { cleanup_fail "refused to remove a work directory outside RUNNER_TEMP: $WORK"; return 1; } ;;
   esac
+}
+
+# Runs every step even when an earlier one fails, and returns nonzero (with the reasons
+# in CLEANUP_FAILS) if any step failed or could not be verified.
+cleanup() {
+  if [ "$CLEANED" = 1 ]; then [ -z "$CLEANUP_FAILS" ]; return; fi
+  CLEANED=1
+  [ -z "$FAKE_HOME" ] || keychain_destroy || true
+  remove_work || true
+  [ -z "$CLEANUP_FAILS" ]
+}
+
+# A failed cleanup is its own FAIL stage, which also makes the report's verdict FAIL.
+record_cleanup() {
+  if cleanup; then
+    [ ! -d "$OUT" ] || record cleanup PASS ''
+    return 0
+  fi
+  ANY_FAIL=1
+  CLEANUP_FAILS=${CLEANUP_FAILS:-cleanup returned nonzero without naming a step}
+  printf 'test-uninstall-macos: cleanup failed: %s\n' "$CLEANUP_FAILS" >&2
+  [ ! -d "$OUT" ] || record cleanup FAIL "$CLEANUP_FAILS"
 }
 
 finish() {
   local rc=$?
   trap - EXIT
   [ -z "$CURRENT_STAGE" ] || { record "$CURRENT_STAGE" ABORTED "script exited (status $rc) during the stage"; ANY_FAIL=1; }
-  cleanup
+  record_cleanup
   if [ -n "$OUT" ] && [ -d "$OUT" ]; then write_report || rc=1; fi
   [ "$ANY_FAIL" -eq 0 ] || rc=1
   exit "$rc"
@@ -139,7 +163,7 @@ write_report() {
   collect_meta
   for item in ${META[@]+"${META[@]}"}; do meta+=(--meta "$item"); done
   [ -f "$OUT/results.tsv" ] || : > "$OUT/results.tsv"
-  local required=$REQUIRED_STAGES
+  local required="$REQUIRED_STAGES,cleanup"
   [ "$RUN_HOMEBREW" != 1 ] || required="$required,homebrew"
   python3 "$HELPER" report --require "$required" --tsv "$OUT/results.tsv" --json "$OUT/results.json" --md "$OUT/summary.md" \
     --not-exercised "$OUT/not-exercised.txt" ${meta[@]+"${meta[@]}"}

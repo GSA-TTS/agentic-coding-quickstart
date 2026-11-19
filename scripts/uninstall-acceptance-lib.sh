@@ -12,7 +12,8 @@ WZ_TIMEOUT=300
 BASE_PATH=/usr/bin:/bin:/usr/sbin:/sbin
 WORK=''; FAKE_HOME=''; KC=''; WENV=(); WZ_PATH=''
 WZ_OUT=''; WZ_ERR=''; WZ_RC=0
-ORIG_REAL_KCS=''; ORIG_FAKE_KCS=''; ORIG_REAL_DEF=''; ORIG_FAKE_DEF=''
+ORIG_REAL_KCS=''; ORIG_FAKE_KCS=''; ORIG_REAL_DEF=''; ORIG_FAKE_DEF=''; ORIG_SAVED=0
+CLEANUP_FAILS=''
 
 has_text() { grep -F -- "$1" "$2" >/dev/null 2>&1; }
 path_missing() { [ ! -e "$1" ] && [ ! -L "$1" ]; }
@@ -39,12 +40,29 @@ kc_status() { sec find-generic-password -s acq-secret-store >/dev/null 2>&1; ech
 kc_default_of() { "$@" default-keychain -d user 2>/dev/null | sed -e 's/^[[:space:]]*"//' -e 's/"[[:space:]]*$//'; }
 kc_list_of() { "$@" list-keychains -d user 2>/dev/null | sed -e 's/^[[:space:]]*"//' -e 's/"[[:space:]]*$//'; }
 
+cleanup_fail() { CLEANUP_FAILS="${CLEANUP_FAILS}${CLEANUP_FAILS:+; }$1"; }
+
+# Like kc_list_of / kc_default_of, but fails when security itself fails, so an
+# unreadable state is never mistaken for an empty or unchanged one.
+kc_read() { # runner subcommand
+  local out
+  out=$("$1" "$2" -d user 2>/dev/null) || return 1
+  printf '%s\n' "$out" | sed -e 's/^[[:space:]]*"//' -e 's/"[[:space:]]*$//'
+}
+
+# A state that cannot be read before the run (for example a default keychain that does
+# not exist yet under the throwaway HOME) is recorded as such: there is then nothing to
+# restore or compare, and that is reported by the absence of a check, not a pass.
+UNREADABLE='<unreadable>'
+kc_read_or_unreadable() { kc_read "$@" || printf '%s\n' "$UNREADABLE"; }
+
 keychain_create() {
   gate_passed
   KC="$WORK/keychains/$KC_NAME"
   mkdir -p "$WORK/keychains" "$FAKE_HOME/Library/Preferences" "$FAKE_HOME/Library/Keychains" || return 1
-  ORIG_REAL_KCS=$(kc_list_of sec_real); ORIG_FAKE_KCS=$(kc_list_of sec)
-  ORIG_REAL_DEF=$(kc_default_of sec_real); ORIG_FAKE_DEF=$(kc_default_of sec)
+  ORIG_REAL_KCS=$(kc_read_or_unreadable sec_real list-keychains); ORIG_FAKE_KCS=$(kc_read_or_unreadable sec list-keychains)
+  ORIG_REAL_DEF=$(kc_read_or_unreadable sec_real default-keychain); ORIG_FAKE_DEF=$(kc_read_or_unreadable sec default-keychain)
+  ORIG_SAVED=1
   sec create-keychain -p "$KC_PW" "$KC" || return 1
   sec set-keychain-settings "$KC" || return 1
   sec unlock-keychain -p "$KC_PW" "$KC" || return 1
@@ -68,21 +86,54 @@ keychain_add_items() {
   sec set-generic-password-partition-list -S 'apple-tool:,apple:' -s acq-secret-store -k "$KC_PW" "$KC" >/dev/null 2>&1 || true
 }
 
-# Put back whatever search list existed before, in whichever environment changed it.
-keychain_restore() { # runner-fn original-list original-default
-  local line
+# Put back whatever search list and default keychain existed before, in whichever
+# environment changed them, then read the state back and compare it with the saved
+# original. A failed command and a state that still differs are both cleanup failures;
+# neither is swallowed. A state that already matches is left untouched.
+keychain_restore() { # runner label original-list original-default
+  local line rc=0
   local -a args=()
-  while IFS= read -r line; do [ -z "$line" ] || args+=("$line"); done <<< "$2"
-  [ "${#args[@]}" -eq 0 ] || "$1" list-keychains -d user -s "${args[@]}" >/dev/null 2>&1 || true
-  [ -z "$3" ] || "$1" default-keychain -d user -s "$3" >/dev/null 2>&1 || true
+  while IFS= read -r line; do [ -z "$line" ] || args+=("$line"); done <<< "$3"
+  if [ "$3" != "$UNREADABLE" ] && [ "$(kc_read "$1" list-keychains)" != "$3" ]; then
+    "$1" list-keychains -d user -s ${args[@]+"${args[@]}"} >/dev/null 2>&1 || { cleanup_fail "$2 keychain search list restore command failed"; rc=1; }
+  fi
+  if [ "$4" != "$UNREADABLE" ] && [ -n "$4" ] && [ "$(kc_read "$1" default-keychain)" != "$4" ]; then
+    "$1" default-keychain -d user -s "$4" >/dev/null 2>&1 || { cleanup_fail "$2 default keychain restore command failed"; rc=1; }
+  fi
+  return "$rc"
 }
 
+keychain_verify_restored() { # runner label original-list original-default
+  local now rc=0
+  if [ "$3" != "$UNREADABLE" ]; then
+    now=$(kc_read "$1" list-keychains) || { cleanup_fail "cannot read the $2 keychain search list to verify it"; return 1; }
+    [ "$now" = "$3" ] || { cleanup_fail "$2 keychain search list was not restored"; rc=1; }
+  fi
+  if [ "$4" != "$UNREADABLE" ] && [ -n "$4" ]; then
+    now=$(kc_read "$1" default-keychain) || { cleanup_fail "cannot read the $2 default keychain to verify it"; return 1; }
+    [ "$now" = "$4" ] || { cleanup_fail "$2 default keychain was not restored"; rc=1; }
+  fi
+  return "$rc"
+}
+
+# Every step runs even if an earlier one fails; failures accumulate in CLEANUP_FAILS.
 keychain_destroy() {
+  local rc=0
   [ -n "$KC" ] || return 0
-  keychain_restore sec_real "$ORIG_REAL_KCS" "$ORIG_REAL_DEF"
-  keychain_restore sec "$ORIG_FAKE_KCS" "$ORIG_FAKE_DEF"
-  sec delete-keychain "$KC" >/dev/null 2>&1 || true
+  if [ "$ORIG_SAVED" = 1 ]; then
+    keychain_restore sec_real real "$ORIG_REAL_KCS" "$ORIG_REAL_DEF" || rc=1
+    keychain_restore sec fake "$ORIG_FAKE_KCS" "$ORIG_FAKE_DEF" || rc=1
+  fi
+  if ! path_missing "$KC"; then
+    sec delete-keychain "$KC" >/dev/null 2>&1 || { cleanup_fail 'temporary keychain delete command failed'; rc=1; }
+    path_missing "$KC" || { cleanup_fail 'temporary keychain still exists after delete'; rc=1; }
+  fi
+  if [ "$ORIG_SAVED" = 1 ]; then
+    keychain_verify_restored sec_real real "$ORIG_REAL_KCS" "$ORIG_REAL_DEF" || rc=1
+    keychain_verify_restored sec fake "$ORIG_FAKE_KCS" "$ORIG_FAKE_DEF" || rc=1
+  fi
   KC=''
+  return "$rc"
 }
 
 make_readonly_tree() {

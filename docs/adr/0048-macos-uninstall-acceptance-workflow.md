@@ -89,6 +89,13 @@ Chosen: **option 2**.
   on stderr and exits 128 plus the signal number. The harness therefore sees a nonzero status and
   fails the stage, and the command cannot write after the helper has gone. A later signal during
   that cleanup is ignored so cleanup is never cut short.
+- Cleanup is part of the result, not best-effort-and-forget. Every cleanup step always runs
+  (restore the search list and default keychain in each environment that changed them, delete
+  the temporary keychain, remove the work directory), but none is trusted on its exit code:
+  the search list and default keychain are read back and compared with the saved originals,
+  and the keychain file and work directory are checked to be gone. Any failure is recorded as
+  a `cleanup` stage with status FAIL naming the step; `cleanup` is a required stage, so the
+  verdict is FAIL and the script exits nonzero even when every other stage passed.
 - Reporting: `results.tsv`, `results.json` and a Markdown step summary list the tested
   commit, runner image, macOS and bash versions, and each stage as PASS, FAIL, BLOCKED
   (an earlier stage failed), ABORTED, or NOT-EXERCISED. The verdict is PASS only when

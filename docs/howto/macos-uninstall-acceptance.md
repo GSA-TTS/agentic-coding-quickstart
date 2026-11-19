@@ -53,6 +53,11 @@ with the list of behaviors this workflow cannot check. The artifact
 `macos-uninstall-acceptance-<runner>` holds `results.json`, the built uninstaller and
 each wizard run's output (`logs/*.out`, plus `logs/*.err` command traces), kept for 14 days.
 
+The last row, `cleanup`, covers putting the keychain search list and default keychain back,
+deleting the temporary keychain and removing the working directory. Each is verified rather
+than assumed. If any step fails or cannot be verified the row is FAIL and names the step, the
+verdict is FAIL and the job fails, even when every other stage passed.
+
 If a run is cancelled while a wizard is running, the helper that runs it stops the
 wizard's whole process group before it exits (status 128 plus the signal number) and
 notes `interrupted by SIG...` in that run's `logs/*.out` and on stderr. An interrupted run

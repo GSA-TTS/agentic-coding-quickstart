@@ -411,6 +411,166 @@ run_route() {
   assert_output --partial "$LEAK_MSG preview.err"
 }
 
+# ---- cleanup failures reach the result (runs on Linux)
+#
+# The real finish, cleanup, keychain_* helpers and report run against a file-backed
+# stand-in for /usr/bin/security that lives only in $SCRATCH (nothing is installed on
+# the host). It keeps a search list, a default keychain and the temporary keychain's
+# existence in files, so restoration is really read back and compared. Failures are
+# injected per environment ("real" is the runner user's keychain state, "fake" is the
+# throwaway HOME's):
+#   fail-set-list / fail-set-default / fail-delete   the command exits 1 and changes nothing
+#   noop-set-list / noop-delete                      the command exits 0 and changes nothing
+
+make_fake_security() {
+  cat > "$SCRATCH/fake-security" <<'SEC'
+#!/bin/bash
+S=$FAKESEC_STATE
+printf '%s\n' "$*" >> "$S/calls"
+cmd=$1; shift
+flag() { [ -e "$S/inject-$1" ]; }
+case "$cmd" in
+  list-keychains)
+    if [ "${1:-}" = -d ] && [ "${3:-}" = -s ]; then
+      flag fail-set-list && exit 1
+      flag noop-set-list && exit 0
+      shift 3; : > "$S/list"; for k in "$@"; do printf '%s\n' "$k" >> "$S/list"; done
+    else
+      while IFS= read -r k; do printf '    "%s"\n' "$k"; done < "$S/list"
+    fi ;;
+  default-keychain)
+    if [ "${3:-}" = -s ]; then
+      flag fail-set-default && exit 1
+      printf '%s\n' "$4" > "$S/default"
+    else
+      printf '    "%s"\n' "$(cat "$S/default")"
+    fi ;;
+  create-keychain) : > "${3:-$2}" ;;
+  delete-keychain)
+    flag fail-delete && exit 1
+    flag noop-delete && exit 0
+    rm -f "$1" ;;
+  *) exit 0 ;;
+esac
+SEC
+  chmod +x "$SCRATCH/fake-security"
+}
+
+# $1 label, then injections "env:flag" ... Runs a whole run through the real finish.
+# Prints nothing; leaves the exit status in CL_RC and the files under $SCRATCH/cl-$1.
+run_cleanup_case() {
+  local label=$1; shift
+  local dir=$SCRATCH/cl-$label
+  CL_RC=0
+  mkdir -p "$dir/rt" "$dir/state-real" "$dir/state-fake" "$dir/out"
+  make_fake_security
+  printf '%s\n' /orig/a.keychain-db /orig/b.keychain-db > "$dir/state-real/list"
+  printf '%s\n' /orig/a.keychain-db > "$dir/state-real/default"
+  printf '%s\n' /orig/home.keychain-db > "$dir/state-fake/list"
+  printf '%s\n' /orig/home.keychain-db > "$dir/state-fake/default"
+  CL_DIR=$dir CL_REPO=$REPO_ROOT CL_FAKE=$SCRATCH/fake-security CL_INJECT="$*" \
+    bash -c '
+      . "$CL_REPO/scripts/test-uninstall-macos"
+      . "$LIB"
+      OUT=$CL_DIR/out; RUNNER_TEMP_REAL=$CL_DIR/rt; RUN_HOMEBREW=0
+      WORK=$(mktemp -d "$RUNNER_TEMP_REAL/acq-uninstall-accept.XXXXXX")
+      FAKE_HOME=$WORK/home; mkdir -p "$FAKE_HOME" "$WORK/tmp" "$OUT/logs"
+      printf "item\n" > "$OUT/not-exercised.txt"; : > "$OUT/results.tsv"
+      set_wenv /usr/bin:/bin
+      sec()      { FAKESEC_STATE=$CL_DIR/state-fake "$CL_FAKE" "$@"; }
+      sec_real() { FAKESEC_STATE=$CL_DIR/state-real "$CL_FAKE" "$@"; }
+      keychain_create || exit 9
+      for item in $CL_INJECT; do
+        case "$item" in
+          rm:fail) rm() { return 1; } ;;
+          cleanup:return1) cleanup() { return 1; } ;;
+          real:drift) printf "%s\n" /changed/by/wizard.keychain-db > "$CL_DIR/state-real/list" ;;
+          *) : > "$CL_DIR/state-${item%%:*}/inject-${item#*:}" ;;
+        esac
+      done
+      for stage in ${REQUIRED_STAGES//,/ }; do record "$stage" PASS ""; done
+      trap finish EXIT
+      exit 0
+    ' >"$dir/stdout" 2>"$dir/stderr" || CL_RC=$?
+}
+
+cl_verdict() { sed -n 's/.*"verdict": "\([A-Z]*\)".*/\1/p' "$SCRATCH/cl-$1/out/results.json"; }
+cl_row() { grep -P '^cleanup\t' "$SCRATCH/cl-$1/out/results.tsv"; }
+
+@test "cleanup: a clean run restores everything, removes the work directory and reports PASS" {
+  run_cleanup_case clean
+  [ "$CL_RC" -eq 0 ] || fail "exit $CL_RC: $(cat "$SCRATCH/cl-clean/stderr")"
+  [ "$(cl_verdict clean)" = PASS ] || fail "verdict $(cl_verdict clean)"
+  [ "$(cl_row clean)" = "$(printf 'cleanup\tPASS\t')" ] || fail "cleanup row: $(cl_row clean)"
+  [ "$(cat "$SCRATCH/cl-clean/state-fake/list")" = /orig/home.keychain-db ]
+  [ -z "$(ls "$SCRATCH/cl-clean/rt")" ] || fail 'work directory left behind'
+  grep -q 'verdict: PASS\|: PASS' "$SCRATCH/cl-clean/out/summary.md"
+}
+
+# Each of these must exit nonzero, report a FAIL verdict and a FAIL cleanup row naming the step.
+assert_cleanup_fails() { # label expected-text injections...
+  local label=$1 want=$2; shift 2
+  run_cleanup_case "$label" "$@"
+  [ "$CL_RC" -ne 0 ] || fail "$label: exited 0 although cleanup failed"
+  [ "$(cl_verdict "$label")" = FAIL ] || fail "$label: verdict $(cl_verdict "$label"), want FAIL"
+  case "$(cl_row "$label")" in *$'\tFAIL\t'*"$want"*) ;; *) fail "$label: cleanup row does not name '$want': $(cl_row "$label")" ;; esac
+  grep -q '^## macOS uninstall acceptance: FAIL' "$SCRATCH/cl-$label/out/summary.md" || fail "$label: summary is not FAIL"
+  grep -q "$want" "$SCRATCH/cl-$label/stderr" || fail "$label: stderr does not name '$want'"
+}
+
+@test "cleanup failure: the search-list restore command failing is a FAIL" {
+  assert_cleanup_fails restore 'search list restore command failed' fake:fail-set-list
+}
+
+@test "cleanup failure: the default-keychain restore command failing is a FAIL" {
+  assert_cleanup_fails restore-default 'default keychain restore command failed' fake:fail-set-default
+}
+
+@test "cleanup failure: the temporary keychain delete command failing is a FAIL" {
+  assert_cleanup_fails delete 'temporary keychain delete command failed' fake:fail-delete
+}
+
+@test "cleanup failure: a delete that exits 0 but leaves the keychain is a FAIL" {
+  assert_cleanup_fails delete-noop 'temporary keychain still exists after delete' fake:noop-delete
+}
+
+@test "cleanup failure: failing to remove the work directory is a FAIL" {
+  assert_cleanup_fails rmwork 'work directory still present' rm:fail
+}
+
+@test "cleanup failure: a restore that exits 0 but leaves a different search list is a FAIL" {
+  assert_cleanup_fails differs 'search list was not restored' fake:noop-set-list
+}
+
+@test "cleanup failure: a cleanup that returns nonzero without a reason is still a FAIL" {
+  assert_cleanup_fails bare 'cleanup returned nonzero' cleanup:return1
+}
+
+@test "cleanup failure: every step still runs after an earlier one fails" {
+  assert_cleanup_fails all 'search list restore command failed' fake:fail-set-list fake:fail-delete rm:fail
+  local row; row=$(cl_row all)
+  case "$row" in *'temporary keychain delete command failed'*) ;; *) fail "delete failure not reported: $row" ;; esac
+  case "$row" in *'work directory still present'*) ;; *) fail "work directory failure not reported: $row" ;; esac
+}
+
+@test "cleanup: the runner user's own keychain state is read, never rewritten, when it is unchanged" {
+  run_cleanup_case untouched real:fail-set-list real:fail-set-default
+  [ "$CL_RC" -eq 0 ] || fail "exit $CL_RC: $(cat "$SCRATCH/cl-untouched/stderr")"
+  [ "$(cl_verdict untouched)" = PASS ]
+  ! grep -Eq -- '-s' "$SCRATCH/cl-untouched/state-real/calls" || fail "the real keychain state was written: $(cat "$SCRATCH/cl-untouched/state-real/calls")"
+}
+
+@test "cleanup: a runner-user search list the run changed is restored and verified" {
+  run_cleanup_case drift real:drift
+  [ "$CL_RC" -eq 0 ] || fail "exit $CL_RC: $(cat "$SCRATCH/cl-drift/stderr")"
+  [ "$(cl_verdict drift)" = PASS ]
+  [ "$(cat "$SCRATCH/cl-drift/state-real/list")" = "$(printf '%s\n%s' /orig/a.keychain-db /orig/b.keychain-db)" ] || fail 'real search list not restored'
+}
+
+@test "cleanup failure: a runner-user search list the run changed and that cannot be restored is a FAIL" {
+  assert_cleanup_fails driftfail 'real keychain search list restore command failed' real:drift real:fail-set-list
+}
+
 # ---- helper behavior (pure Python; runs on Linux)
 
 helper() { python3 -B "$REPO_ROOT/$HELPER_REL" "$@"; }
@@ -501,13 +661,13 @@ INT_DESC='(sleep 1.0; echo late > "$MARK") & echo started > "$START"; sleep 30'
 
 # $1 mode (pipe|tty) $2 signal name $3 optional shell prefix for the command.
 interrupt_helper() {
-  local mode=$1 sig=$2 prefix=${3:-} flag='' pid i
+  local mode=$1 sig=$2 prefix=${3:-} flag='' pid
   [ "$mode" = pipe ] && flag=--no-tty
   rm -f "$SCRATCH/mark" "$SCRATCH/started"
   MARK="$SCRATCH/mark" START="$SCRATCH/started" python3 -B "$REPO_ROOT/$HELPER_REL" run "$SCRATCH/o" 60 $flag -- \
     sh -c "trap '' HUP; $prefix $INT_DESC" 2>"$SCRATCH/err" 3>&- &
   pid=$!
-  for i in $(seq 1 200); do [ -e "$SCRATCH/started" ] && break; command sleep 0.05; done
+  for _ in $(seq 1 200); do [ -e "$SCRATCH/started" ] && break; command sleep 0.05; done
   [ -e "$SCRATCH/started" ] || { kill -KILL "$pid" 2>/dev/null; fail 'the command never started'; }
   kill -"$sig" "$pid"
   INT_RC=0; wait "$pid" || INT_RC=$?
@@ -563,8 +723,8 @@ assert_interruption_stops_command() {
   rm -f "$SCRATCH/mark" "$SCRATCH/started"
   MARK="$SCRATCH/mark" START="$SCRATCH/started" python3 -B "$REPO_ROOT/$HELPER_REL" run "$SCRATCH/o" 60 --no-tty -- \
     sh -c "trap '' TERM; $INT_DESC" 2>/dev/null 3>&- &
-  local pid=$! i
-  for i in $(seq 1 200); do [ -e "$SCRATCH/started" ] && break; command sleep 0.05; done
+  local pid=$!
+  for _ in $(seq 1 200); do [ -e "$SCRATCH/started" ] && break; command sleep 0.05; done
   kill -TERM "$pid"; command sleep 0.1; kill -HUP "$pid"; kill -INT "$pid"
   local rc=0; wait "$pid" || rc=$?
   command sleep 1.4
