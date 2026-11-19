@@ -159,12 +159,24 @@ STUB
 }
 
 @test "failed MSB listing cannot become an empty success" {
-  printf '#!/bin/bash\nexit 1\n' > "$FIXTURE/bin/msb"
+  cat > "$FIXTURE/bin/msb" <<'STUB'
+#!/bin/bash
+printf '%s\n' "$*" >> "$CALLS"
+case "$*" in
+  '--version') printf 'msb 0.7.7\n' ;;
+  'ls -q') exit 1 ;;
+  *) exit 99 ;;
+esac
+STUB
   chmod +x "$FIXTURE/bin/msb"
   mkdir -p "$HOME/.local/state/acq"
   run uninstall_main --yes
   [ "$status" = 1 ]
+  [[ "$output" == *'MSB cannot list sandboxes'* ]]
   [ -d "$HOME/.local/state/acq" ]
+  grep -Fx -- 'ls -q' "$CALLS"
+  run grep -E '^(stop|rm) ' "$CALLS"
+  [ "$status" = 1 ]
 }
 
 @test "failed graceful stop prevents sandbox or state deletion" {
@@ -358,14 +370,22 @@ RC
 @test "running sandbox names are validated too" {
   cat > "$FIXTURE/bin/msb" <<'STUB'
 #!/bin/bash
+printf '%s\n' "$*" >> "$CALLS"
 case "$*" in
+  '--version') printf 'msb 0.7.7\n' ;;
   'ls -q') ;;
   'ls -q --running') printf '%s\n' '--label=foreign' ;;
   *) exit 99 ;;
 esac
 STUB
   chmod +x "$FIXTURE/bin/msb"
+  mkdir -p "$HOME/.local/state/acq"
   run uninstall_main --yes
+  [ "$status" = 1 ]
+  [[ "$output" == *'MSB returned an unsafe sandbox name'* ]]
+  [ -d "$HOME/.local/state/acq" ]
+  grep -Fx -- 'ls -q --running' "$CALLS"
+  run grep -E '^(stop|rm) ' "$CALLS"
   [ "$status" = 1 ]
 }
 
