@@ -12,7 +12,7 @@ impact_level: low
 ato_relevance: no
 risk_treatment: mitigate
 supersedes: []
-related_files: [".github/workflows/macos-uninstall-acceptance.yml", "scripts/test-uninstall-macos", "scripts/uninstall-acceptance-lib.sh", "scripts/uninstall-acceptance-helper.py", "test/bats/166-macos-uninstall-acceptance.bats", "docs/howto/macos-uninstall-acceptance.md", "docs/adr/0039-bash32-ci-shard-matrix-and-interpreter-handoff.md"]
+related_files: [".github/workflows/macos-uninstall-acceptance.yml", "scripts/test-uninstall-macos", "scripts/uninstall-acceptance-lib.sh", "scripts/uninstall-acceptance-helper.py", "test/bats/167-macos-uninstall-acceptance.bats", "docs/howto/macos-uninstall-acceptance.md", "docs/adr/0039-bash32-ci-shard-matrix-and-interpreter-handoff.md"]
 ---
 
 # ADR-0048: Run the guided uninstaller's macOS acceptance on GitHub-hosted runners
@@ -123,7 +123,7 @@ Compliance:
 
 - No new action, no secret, read-only token, credentials not persisted (SR-3, AC-6,
   CM-5). Expression injection is avoided by passing inputs through `env:`, pinned by
-  `test/bats/166-macos-uninstall-acceptance.bats`, which also checks each of those
+  `test/bats/167-macos-uninstall-acceptance.bats`, which also checks each of those
   properties against mutated copies of the workflow (SA-11).
 
 ## Links

@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 #
-# 166-macos-uninstall-acceptance.bats - offline guards for the macOS uninstall
+# 167-macos-uninstall-acceptance.bats - offline guards for the macOS uninstall
 # acceptance workflow and its harness (ADR-0048).
 #
 # WHY THIS EXISTS
@@ -23,7 +23,7 @@ LIB_REL='scripts/uninstall-acceptance-lib.sh'
 HELPER_REL='scripts/uninstall-acceptance-helper.py'
 WORKFLOW_REL='.github/workflows/macos-uninstall-acceptance.yml'
 
-setup() { SCRATCH=$(mktemp -d "${BATS_TMPDIR:-/tmp}/acq-166.XXXXXX"); }
+setup() { SCRATCH=$(mktemp -d "${BATS_TMPDIR:-/tmp}/acq-167.XXXXXX"); }
 teardown() { [ -z "${SCRATCH:-}" ] || rm -rf "$SCRATCH"; }
 
 # ---- workflow checks: each prints a reason and fails when the property is lost

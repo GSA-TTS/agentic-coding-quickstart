@@ -34,7 +34,7 @@ WORKFLOW_REL='.github/workflows/bash32-compat.yml'
 #   .github/keys/...asc   the key that authenticates the bash 3.2.57 source
 #   release.yml           read by 06-windows-install.bats
 #   macos-uninstall-acceptance.yml, scripts/test-uninstall-macos and its
-#                         helper/lib  read and executed by 166-macos-uninstall-acceptance.bats
+#                         helper/lib  read and executed by 167-macos-uninstall-acceptance.bats
 #   bash32-compat.yml     the job itself
 REQUIRED_PATHSPECS='
 acq
