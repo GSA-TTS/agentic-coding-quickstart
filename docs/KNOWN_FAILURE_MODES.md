@@ -83,7 +83,7 @@ the restart and lets MSB restart if needed; running processes may be interrupted
 but the sandbox is not recreated. Global `--restart` is refused. If MSB still
 rejects the change, acq returns failure with the target's name; check installed
 MSB version and non-secret binding metadata rather than dumping credentials.
-See [ADR-0040](adr/0040-explicit-msb-secret-update-recovery.md).
+See [ADR-0043](adr/0043-explicit-msb-secret-update-recovery.md).
 
 ## Provider-input validator dependencies are missing
 

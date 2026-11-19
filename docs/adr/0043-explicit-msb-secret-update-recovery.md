@@ -13,7 +13,7 @@ risk_treatment: mitigate
 related_files: ["acq.backends/msb.sh", "docs/KNOWN_FAILURE_MODES.md"]
 ---
 
-# ADR-0040: Explicit MSB secret-update recovery
+# ADR-0043: Explicit MSB secret-update recovery
 
 ## Context and Problem Statement
 
