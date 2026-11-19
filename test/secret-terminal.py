@@ -3,6 +3,7 @@
 import os
 import fcntl
 import pty
+import re
 import select
 import signal
 import subprocess
@@ -67,18 +68,79 @@ def expected_transcript(mode):
     return PROMPT + MASK * len(SECRET)
 
 
-def check_transcript(mode, observed):
+# Group-signal modes (`kill -TERM -pgid`) hit the wrapper, the command-substitution
+# shell and the reader subshell at once. Bash can then print one of its OWN
+# diagnostics while it tears down: it re-enters its trap machinery with a trap
+# list that is already being freed. These are bash defects, not output of the
+# reader, and they differ by interpreter, so they are allowed only in the exact
+# forms below, only at the END of the transcript, only after the full permitted
+# prefix, and only a handful of times. Nothing else may trail the transcript.
+#
+# 1. Both interpreters (bash 5.x observed, bash 3.2.57 as "warning: ..."):
+#      "<script>: [line N: ]warning: run_pending_traps: bad value in trap_list[K]: 0x1\r\n"
+#    Bash found a trap slot already freed by the other signalled process.
+# 2. bash 3.2.57 (musl build observed): the freed trap string is executed as a
+#    command, so a fragment of the reader's own trap text is reported:
+#      "<script>: line N: <fragment of the trap text>: command not found\r\n"
+#    The fragment may be empty or span a line break ("...exit 143\r\ntrap"),
+#    because the corrupted string is cut at arbitrary bytes.
+# A fragment is accepted only if it is a substring of the trap text found in the
+# production source and is NOT a substring of the synthetic secret, so a leaked
+# input fragment cannot pass as a diagnostic. If a legitimate fragment ever
+# collides with the secret the test fails closed (a visible flake), never open.
+MAX_DIAGNOSTICS = 4
+TRAP_WARNING = re.compile(
+    rb"(?:line [0-9]+: )?warning: run_pending_traps: bad value in trap_list\[[0-9]+\]: 0x1\r\n")
+TRAP_COMMAND = re.compile(rb"line [0-9]+: (.*?): command not found\r\n", re.DOTALL)
+
+
+def trap_text(root):
+    """Every `trap ...` line of the production reader, also with its quotes
+    removed (bash reports the trap string after quote removal)."""
+    source = (Path(root) / "acq.backends" / "secret-store.sh").read_bytes()
+    lines = re.findall(rb"^[ \t]*(trap .*)$", source, re.MULTILINE)
+    assert lines, "no trap lines found in the production reader"
+    text = b"\n".join(lines)
+    return text + b"\n" + text.replace(b'"', b"").replace(b"'", b"")
+
+
+def fragment_is_trap_text(fragment, traps, secret):
+    pieces = fragment.split(b"\r\n")
+    return all(not piece or (piece in traps and piece not in secret) for piece in pieces)
+
+
+def strip_group_diagnostics(tail, root):
+    """Return the part of `tail` left after removing allowed bash diagnostics."""
+    script = str(Path(root) / "acq.backends" / "secret-store.sh").encode() + b": "
+    traps = trap_text(root)
+    count = 0
+    while tail.startswith(script):
+        rest = tail[len(script):]
+        match = TRAP_WARNING.match(rest)
+        if match is None:
+            match = TRAP_COMMAND.match(rest)
+            if match is None or not fragment_is_trap_text(match.group(1), traps, SECRET):
+                break
+        count += 1
+        if count > MAX_DIAGNOSTICS:
+            break
+        tail = rest[match.end():]
+    return tail
+
+
+def check_transcript(mode, observed, root):
     expected = expected_transcript(mode)
     overlap = set(PAYLOADS.get(mode, b"")) & set(expected)
     assert not overlap, (mode, "payload overlaps allow-list", sorted(overlap))
-    if mode.endswith("-group"):
-        # Killing the whole group can make bash itself print a diagnostic (e.g.
-        # "run_pending_traps") nondeterministically: require the exact permitted
-        # transcript as a prefix and leave the rest to the echo-token checks.
-        observed = bytes(observed)[: len(expected)]
-    assert bytes(observed) == expected, (
+    observed = bytes(observed)
+    if mode.endswith("-group") and observed.startswith(expected):
+        # The WHOLE transcript is judged: only allowed diagnostics may follow.
+        remainder = strip_group_diagnostics(observed[len(expected):], root)
+        if not remainder:
+            observed = expected
+    assert observed == expected, (
         mode, "TRANSCRIPT MISMATCH: differs from the exact permitted output",
-        "expected", expected, "observed", bytes(observed))
+        "expected", expected, "observed", observed)
 
 
 def reader_pid(parent):
@@ -200,7 +262,7 @@ def exercise(root, scratch, mode):
             except OSError:
                 break
         assert not any(token in observed for token in (b"synthetic", b"partial", CLASSES[:3])), (mode, "INPUT ECHOED")
-        check_transcript(mode, observed)
+        check_transcript(mode, observed, root)
         if mode in ("paste", "typing", "paused", "delayed", "backspace", "empty"):
             assert rc == 0, mode
             assert result.read_bytes() == (b"" if mode == "empty" else SECRET)
@@ -245,6 +307,54 @@ LEAKS = (
 )
 
 
+LEAKS += (
+    ("terminate-group-handler-appends-fragment", "terminate-group", "exit 143' TERM",
+     "printf s >&2; exit 143' TERM", "TRANSCRIPT"),
+    ("hangup-group-handler-appends-fragment", "hangup-group", "exit 129' HUP",
+     "printf s >&2; exit 129' HUP", "TRANSCRIPT"),
+)
+
+
+def transcript_controls(root):
+    """Drive check_transcript directly with group-mode transcripts: appended
+    bytes must be rejected, the documented bash diagnostics accepted."""
+    script = str(Path(root) / "acq.backends" / "secret-store.sh").encode()
+    warning = script + b": line 1: warning: run_pending_traps: bad value in trap_list[1]: 0x1\r\n"
+    command = script + b": line 1022: TERM: command not found\r\n"
+    for mode in ("terminate-group", "hangup-group"):
+        expected = expected_transcript(mode)
+        for suffix in (b"", warning, command, warning + command):
+            check_transcript(mode, expected + suffix, root)
+        rejected = (
+            ("single-char", b"s"),
+            ("secret-suffix", b"secret"),
+            ("secret-prefix-part", SECRET[:3]),
+            ("mask-extra", b"*"),
+            ("diagnostic-then-char", warning + b"s"),
+            ("diagnostic-then-secret", command + b"secret"),
+            ("char-then-diagnostic", b"s" + warning),
+            ("diagnostic-extra-bytes", warning[:-2] + b"s\r\n"),
+            ("secret-as-trap-fragment", script + b": line 1022: secret: command not found\r\n"),
+            ("secret-char-as-trap-fragment", script + b": line 1022: s: command not found\r\n"),
+            ("unknown-fragment", script + b": line 1022: hello: command not found\r\n"),
+            ("diagnostic-too-many", warning * (MAX_DIAGNOSTICS + 1)),
+            ("wrong-script", b"/tmp/other.sh: line 1: warning: run_pending_traps: bad value in trap_list[1]: 0x1\r\n"),
+            ("missing-prefix", warning[len(script) + 2:]),
+        )
+        for name, suffix in rejected:
+            try:
+                check_transcript(mode, expected + suffix, root)
+            except AssertionError as error:
+                assert "TRANSCRIPT MISMATCH" in str(error), (mode, name, "wrong reason", str(error))
+                continue
+            raise AssertionError((mode, name, "appended bytes were accepted by the oracle"))
+        try:
+            check_transcript(mode, expected[:-1], root)
+        except AssertionError:
+            continue
+        raise AssertionError((mode, "truncated transcript was accepted"))
+
+
 def negative_controls(root, scratch):
     source = (root / "acq.backends" / "secret-store.sh").read_text()
     for name, mode, old, new, marker in LEAKS:
@@ -252,17 +362,27 @@ def negative_controls(root, scratch):
         copy = scratch / ("leak-" + name)
         (copy / "acq.backends").mkdir(parents=True)
         (copy / "acq.backends" / "secret-store.sh").write_text(source.replace(old, new))
-        try:
-            exercise(copy, copy, mode)
-        except AssertionError as error:
-            assert marker in str(error), (name, "rejected for the wrong reason", str(error))
-            continue
-        raise AssertionError((name, "leaky variant was accepted by the oracle"))
+        # A signal delivered to the whole foreground group (Ctrl-C, killpg) races
+        # the wrapper against the reader's trap, so a leaky handler does not run
+        # on every attempt: retry until it is observed. An
+        # unrelated failure (e.g. a timing flake) is not a rejection for the
+        # stated reason and is never counted as one.
+        errors = []
+        for _ in range(40 if mode in SIGNAL_MODES else 1):
+            try:
+                exercise(copy, copy, mode)
+            except AssertionError as error:
+                if marker in str(error):
+                    break
+                errors.append(str(error))
+        else:
+            raise AssertionError((name, "leaky variant not rejected for the stated reason", errors[-1:]))
 
 
 if __name__ == "__main__":
     root, scratch = map(Path, sys.argv[1:])
     for mode in ("paste", "typing", "paused", "delayed", "backspace", "empty", "eof", "interrupt", "terminate", "hangup", "terminate-group", "hangup-group", "stty-failure"):
         exercise(root, scratch, mode)
+    transcript_controls(root)
     negative_controls(root, scratch)
     print("terminal checks passed")
