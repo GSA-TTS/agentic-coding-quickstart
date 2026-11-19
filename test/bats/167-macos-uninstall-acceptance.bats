@@ -491,6 +491,87 @@ DESC='(sleep 0.8; echo late > "$MARK") & sleep 30'
   [ ! -e "$SCRATCH/mark" ] || fail 'a background descendant outlived a finished tty command'
 }
 
+# Interrupting the helper itself (as a cancelled job or a parent cleanup does) is not a
+# command timeout: Python's default SIGTERM/SIGHUP action ends it without unwinding, so
+# the separately sessioned command survives. The command here announces that it started,
+# leaves a delayed marker writer behind, and the helper is signalled once it is running.
+# The marker must never appear and the helper must exit 128+signal. The tty cases ignore
+# SIGHUP in the command so the terminal closing cannot end it by accident.
+INT_DESC='(sleep 1.0; echo late > "$MARK") & echo started > "$START"; sleep 30'
+
+# $1 mode (pipe|tty) $2 signal name $3 optional shell prefix for the command.
+interrupt_helper() {
+  local mode=$1 sig=$2 prefix=${3:-} flag='' pid i
+  [ "$mode" = pipe ] && flag=--no-tty
+  rm -f "$SCRATCH/mark" "$SCRATCH/started"
+  MARK="$SCRATCH/mark" START="$SCRATCH/started" python3 -B "$REPO_ROOT/$HELPER_REL" run "$SCRATCH/o" 60 $flag -- \
+    sh -c "trap '' HUP; $prefix $INT_DESC" 2>"$SCRATCH/err" 3>&- &
+  pid=$!
+  for i in $(seq 1 200); do [ -e "$SCRATCH/started" ] && break; command sleep 0.05; done
+  [ -e "$SCRATCH/started" ] || { kill -KILL "$pid" 2>/dev/null; fail 'the command never started'; }
+  kill -"$sig" "$pid"
+  INT_RC=0; wait "$pid" || INT_RC=$?
+  command sleep 1.4
+}
+
+signal_number() { case "$1" in HUP) echo 1 ;; INT) echo 2 ;; TERM) echo 15 ;; esac; }
+
+# $1 mode $2 signal: the helper exits 128+signal, says so, and the command never writes.
+assert_interruption_stops_command() {
+  local want=$((128 + $(signal_number "$2")))
+  interrupt_helper "$1" "$2"
+  [ "$INT_RC" -eq "$want" ] || fail "$1/$2: helper exited $INT_RC, want $want"
+  [ ! -e "$SCRATCH/mark" ] || fail "$1/$2: the command outlived the interrupted helper and wrote its marker"
+  grep -q "interrupted by SIG$2" "$SCRATCH/err" || fail "$1/$2: interruption not reported on stderr: $(cat "$SCRATCH/err")"
+  grep -q "interrupted by SIG$2" "$SCRATCH/o" || fail "$1/$2: interruption not recorded in the output file"
+}
+
+@test "helper interruption: SIGTERM in pipe mode stops the command and its descendants" {
+  assert_interruption_stops_command pipe TERM
+}
+
+@test "helper interruption: SIGTERM in tty mode stops the command and its descendants" {
+  assert_interruption_stops_command tty TERM
+}
+
+@test "helper interruption: SIGHUP in pipe mode stops the command and its descendants" {
+  assert_interruption_stops_command pipe HUP
+}
+
+@test "helper interruption: SIGHUP in tty mode stops the command and its descendants" {
+  assert_interruption_stops_command tty HUP
+}
+
+@test "helper interruption: SIGINT in pipe mode stops the command and its descendants" {
+  assert_interruption_stops_command pipe INT
+}
+
+@test "helper interruption: SIGINT in tty mode stops the command and its descendants" {
+  assert_interruption_stops_command tty INT
+}
+
+@test "helper interruption: a command that ignores SIGTERM is still killed, in both modes" {
+  local mode
+  for mode in pipe tty; do
+    interrupt_helper "$mode" TERM "trap '' TERM;"
+    [ "$INT_RC" -eq 143 ] || fail "$mode: helper exited $INT_RC, want 143"
+    [ ! -e "$SCRATCH/mark" ] || fail "$mode: a TERM-ignoring command outlived the interrupted helper"
+  done
+}
+
+@test "helper interruption: a repeated signal during cleanup still ends with the command stopped" {
+  rm -f "$SCRATCH/mark" "$SCRATCH/started"
+  MARK="$SCRATCH/mark" START="$SCRATCH/started" python3 -B "$REPO_ROOT/$HELPER_REL" run "$SCRATCH/o" 60 --no-tty -- \
+    sh -c "trap '' TERM; $INT_DESC" 2>/dev/null 3>&- &
+  local pid=$! i
+  for i in $(seq 1 200); do [ -e "$SCRATCH/started" ] && break; command sleep 0.05; done
+  kill -TERM "$pid"; command sleep 0.1; kill -HUP "$pid"; kill -INT "$pid"
+  local rc=0; wait "$pid" || rc=$?
+  command sleep 1.4
+  [ "$rc" -eq 143 ] || fail "helper exited $rc, want the first signal's 143"
+  [ ! -e "$SCRATCH/mark" ] || fail 'a repeated signal cut cleanup short'
+}
+
 @test "helper: the deadline holds when the tty child closes its terminal early" {
   local start=$SECONDS
   run python3 -B "$REPO_ROOT/$HELPER_REL" run "$SCRATCH/o" 0.5 -- sh -c 'exec 0<&- 1>&- 2>&-; sleep 6'

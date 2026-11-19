@@ -53,6 +53,11 @@ with the list of behaviors this workflow cannot check. The artifact
 `macos-uninstall-acceptance-<runner>` holds `results.json`, the built uninstaller and
 each wizard run's output (`logs/*.out`, plus `logs/*.err` command traces), kept for 14 days.
 
+If a run is cancelled while a wizard is running, the helper that runs it stops the
+wizard's whole process group before it exits (status 128 plus the signal number) and
+notes `interrupted by SIG...` in that run's `logs/*.out` and on stderr. An interrupted run
+is never recorded as a pass.
+
 ## Reproduce a failure
 
 The harness refuses to run unless it is on a GitHub-hosted macOS runner, so it cannot

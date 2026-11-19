@@ -10,7 +10,10 @@
       shown cannot look like a pass. CMD runs in its own session/process group;
       the timeout covers the whole run including waiting for CMD to exit after
       its terminal closes, and on every exit path any process CMD left behind is
-      sent SIGTERM and then SIGKILL, so nothing outlives the call.
+      sent SIGTERM and then SIGKILL, so nothing outlives the call. If the helper
+      itself receives SIGTERM, SIGHUP or SIGINT it stops CMD's group the same way,
+      appends "[uninstall-acceptance-helper interrupted by SIGxxx]" to OUTPUT, says so
+      on stderr and exits 128+signal, so an interrupted run can never look like success.
   manifest PATH...
       Print one line per entry at or under each PATH (symlinks are never
       followed): absolute path, type, permission bits, size and a content digest or link
@@ -73,13 +76,38 @@ def parse_run(args):
     return out, timeout, opts, rest[1:]
 
 
+# A signal handler that raised could fire inside a cleanup block and abandon it, so the
+# handler only records the first signal and every wait loop polls for it. Cleanup then
+# always runs to completion; later signals are ignored.
+INTERRUPT = {"signum": 0}
+POLL = 0.2
+INTERRUPT_MARK = "[uninstall-acceptance-helper interrupted by %s]"
+
+
+def on_signal(signum, frame):
+    if not INTERRUPT["signum"]:
+        INTERRUPT["signum"] = signum
+
+
+def interrupted():
+    return INTERRUPT["signum"] != 0
+
+
+def install_handlers():
+    INTERRUPT["signum"] = 0
+    for name in ("SIGTERM", "SIGHUP", "SIGINT"):
+        signal.signal(getattr(signal, name), on_signal)
+
+
 def pump(fd, sink, replies, deadline):
     buf, pos = b"", 0
     while True:
+        if interrupted():
+            return "interrupted"
         left = deadline - time.time()
         if left <= 0:
             return "timeout"
-        ready, _, _ = select.select([fd], [], [], min(left, 1.0))
+        ready, _, _ = select.select([fd], [], [], min(left, POLL))
         if fd not in ready:
             continue
         try:
@@ -120,12 +148,12 @@ def stop_group(pgid):
 
 
 def reap(pid, deadline):
-    """Wait for PID until DEADLINE. Returns its wait status, or None on timeout."""
+    """Wait for PID until DEADLINE. Returns its wait status, or None on timeout or interruption."""
     while True:
         done, status = os.waitpid(pid, os.WNOHANG)
         if done:
             return status
-        if time.time() >= deadline:
+        if interrupted() or time.time() >= deadline:
             return None
         time.sleep(0.02)
 
@@ -145,12 +173,14 @@ def run_tty(out, timeout, replies, cmd):
         if outcome == "eof":
             status = reap(pid, deadline)
             reaped = status is not None
-            outcome = "exited" if reaped else "timeout"
+            outcome = "exited" if reaped else ("interrupted" if interrupted() else "timeout")
     finally:
         os.close(fd)
         stop_group(pid)
         if not reaped:
             _, status = os.waitpid(pid, 0)
+    if outcome == "interrupted":
+        return 1
     if outcome == "timeout":
         return 124
     if replies:
@@ -162,31 +192,56 @@ def run_tty(out, timeout, replies, cmd):
 
 
 def run_pipe(out, err, timeout, cmd):
+    deadline = time.time() + timeout
+    rc = None
     with open(out, "wb") as sink:
         errsink = open(err, "wb") if err else sink
         proc = None
         try:
             proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=sink, stderr=errsink,
                                     start_new_session=True)
-            try:
-                return proc.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                stop_group(proc.pid)
-                proc.wait()
-                return 124
+            while rc is None and not interrupted():
+                left = deadline - time.time()
+                if left <= 0:
+                    rc = 124
+                    break
+                try:
+                    rc = proc.wait(timeout=min(left, POLL))
+                except subprocess.TimeoutExpired:
+                    pass
         finally:
             if proc is not None:
                 stop_group(proc.pid)
                 proc.wait()
             if err:
                 errsink.close()
+    if rc is None:
+        return 1
+    return 128 - rc if rc < 0 else rc
+
+
+def note_interruption(out):
+    name = signal.Signals(INTERRUPT["signum"]).name
+    message = INTERRUPT_MARK % name
+    sys.stderr.write(message + "\n")
+    try:
+        with open(out, "ab") as sink:
+            sink.write(("\n" + message + "\n").encode())
+    except OSError as exc:
+        sys.stderr.write("cannot record the interruption in %s: %s\n" % (out, exc))
 
 
 def cmd_run(args):
     out, timeout, opts, cmd = parse_run(args)
+    install_handlers()
     if opts["no_tty"]:
-        return run_pipe(out, opts["stderr"], timeout, cmd)
-    return run_tty(out, timeout, opts["replies"], cmd)
+        rc = run_pipe(out, opts["stderr"], timeout, cmd)
+    else:
+        rc = run_tty(out, timeout, opts["replies"], cmd)
+    if interrupted():
+        note_interruption(out)
+        return 128 + INTERRUPT["signum"]
+    return rc
 
 
 def digest(path):

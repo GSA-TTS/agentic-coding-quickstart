@@ -83,6 +83,12 @@ Chosen: **option 2**.
 - The helper that runs the wizard gives it its own session and process group, applies the
   timeout to the whole run (including waiting for exit after the terminal closes), and ends
   anything left in the group on every exit path, so cleanup never races a surviving child.
+- If the helper itself is interrupted (SIGTERM, SIGHUP or SIGINT, for example a cancelled job),
+  it records the first signal, stops the command's group the same way (SIGTERM, a short grace,
+  SIGKILL) and closes the pseudo-terminal, then notes the interruption in the captured output and
+  on stderr and exits 128 plus the signal number. The harness therefore sees a nonzero status and
+  fails the stage, and the command cannot write after the helper has gone. A later signal during
+  that cleanup is ignored so cleanup is never cut short.
 - Reporting: `results.tsv`, `results.json` and a Markdown step summary list the tested
   commit, runner image, macOS and bash versions, and each stage as PASS, FAIL, BLOCKED
   (an earlier stage failed), ABORTED, or NOT-EXERCISED. The verdict is PASS only when
