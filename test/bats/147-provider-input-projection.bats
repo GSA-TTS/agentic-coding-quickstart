@@ -520,12 +520,22 @@ EOF
 }
 
 @test "failed validator dependency probe publishes nothing" {
-  local release="$STUBDIR/release" root python="$STUBDIR/incompatible-python"
+  local release="$STUBDIR/release" root python="$STUBDIR/incompatible-python" real_python
+  real_python=$(_fixture_real_python)
   _provider_release "$release"; _provider_kit "$release" alpha
+  # The version query must succeed (path security accepts the interpreter) so
+  # that only the package-dependency query can fail; each query is recorded.
   cat > "$python" <<EOF
 #!/bin/sh
-if [ "\$1" = -c ]; then exit 2; fi
-printf 'validator unexpectedly invoked\n' >> "$STUBDIR/validator-invoked"
+if [ "\$1" = -c ]; then
+  case "\$2" in
+    *sys.version_info*) printf '3.12\\n'; exit 0 ;;
+    *importlib.metadata*) printf 'dependency\\n' >> "$STUBDIR/dependency-probed"; exit 2 ;;
+  esac
+  printf 'unexpected -c query\\n' >> "$STUBDIR/unexpected-query"; exit 3
+fi
+if [ "\$1" = - ]; then exec "$real_python" "\$@"; fi
+printf 'validator unexpectedly invoked\\n' >> "$STUBDIR/validator-invoked"
 exit 0
 EOF
   chmod +x "$python"
@@ -535,9 +545,12 @@ EOF
 
   run acq_provider_input_prepare sbx incompatiblebox
   assert_failure 2
+  [ -s "$STUBDIR/dependency-probed" ]
+  [ ! -e "$STUBDIR/unexpected-query" ]
   root=$(acq_provider_input_root sbx incompatiblebox)
   [ ! -e "$root/current" ]
   [ ! -e "$STUBDIR/validator-invoked" ]
+  [ -z "$(find "$root/generations" -mindepth 1 -maxdepth 1 2>/dev/null)" ]
 }
 
 @test "projection prepares immutable generation without changing current" {
