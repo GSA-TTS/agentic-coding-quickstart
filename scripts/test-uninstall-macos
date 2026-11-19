@@ -215,8 +215,6 @@ assert_removed() { # label
   has_text 'user line: keep me' "$FAKE_HOME/.zshrc" || fail_note 'user line removed from .zshrc'
   ! has_text 'microsandbox >>>' "$FAKE_HOME/.zshrc" || fail_note 'installer block left in .zshrc'
   has_text '.local/bin' "$FAKE_HOME/.zshrc" || fail_note 'shared PATH line removed although other tools remain'
-  expect_no_out "$PLACEHOLDER" "$WZ_OUT"
-  [ -z "$WZ_ERR" ] || expect_no_out "$PLACEHOLDER" "$WZ_ERR"
   [ -z "$(find "$FAKE_HOME" -maxdepth 1 -name '.acq-uninstall-shell.*')" ] || fail_note 'temporary shell-config file left behind'
 }
 
@@ -318,4 +316,5 @@ npm package removal (npm is kept off the wizard PATH)
 refusal when SBX is installed
 opening a browser-downloaded uninstall.command (Gatekeeper and quarantine)'
 
-main "$@"
+# Sourcing (the offline tests load the stage functions) defines them and runs nothing.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi

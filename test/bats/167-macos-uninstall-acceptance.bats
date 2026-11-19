@@ -321,6 +321,96 @@ mutate_after() { # name exact-line-to-find text-to-insert-after-its-first-occurr
   [ -z "$bad" ] || fail "references the real HOME: $bad"
 }
 
+# ---- credential-output checks on every wizard route (runs on Linux)
+#
+# The stage functions are loaded from the real script (sourcing runs nothing) and run
+# against a fake uninstaller that prints the seeded placeholder on one stream. Only the
+# keychain and seeding helpers are replaced; the runners, the leak check and the stage
+# bodies are the real ones. Each route must record a credential-output failure.
+
+LEAK_MSG='synthetic credential text appeared in'
+
+# route -> "stage-function stream-kind"; tty routes merge stderr into stdout.
+route_stage() {
+  case "$1" in
+    preview) echo stage_preview ;;
+    cancel) echo stage_cancel ;;
+    sbx-refusal) echo stage_sbx_refusal ;;
+    destructive) echo stage_destructive ;;
+    repeat) echo stage_repeat ;;
+    sbx-removal) echo stage_sbx_removal ;;
+    homebrew) echo stage_homebrew ;;
+  esac
+}
+
+# $1 route, $2 leak: none|out|err. Prints the STAGE_FAILS the stage recorded.
+run_route() {
+  local route=$1 leak=$2 fake=$SCRATCH/uninstaller.sh
+  {
+    printf '%s\n' '#!/bin/bash'
+    printf '%s\n' 'printf "Dry run. Nothing removed.\nCancelled. Nothing removed.\n"'
+    case "$route" in
+      cancel) printf '%s\n' 'printf "Remove? [y/N]: "; read -r _ || true' ;;
+      sbx-removal)
+        printf '%s\n' 'printf "remaining SBX sandboxes? [y/N]: "; read -r _ || true'
+        printf '%s\n' 'printf "Microsandbox? [y/N]: "; read -r _ || true' ;;
+    esac
+    printf '%s\n' 'printf "Press Return to exit.\n"; read -r _ || true'
+    case "$leak" in
+      out) printf '%s\n' 'printf "%s\n" SYNTHETIC-PLACEHOLDER-NOT-A-SECRET' ;;
+      err) printf '%s\n' 'printf "%s\n" SYNTHETIC-PLACEHOLDER-NOT-A-SECRET >&2' ;;
+    esac
+    printf '%s\n' 'exit 0'
+  } > "$fake"
+  RT_STAGE=$(route_stage "$route") RT_FAKE=$fake RT_DIR=$SCRATCH RT_REPO=$REPO_ROOT RT_ROUTE=$route \
+    bash -c '
+      . "$RT_REPO/scripts/test-uninstall-macos"
+      . "$LIB"
+      OUT=$RT_DIR/out; WORK=$RT_DIR/work; FAKE_HOME=$WORK/home; UNINSTALLER=$RT_FAKE
+      RUN_HOMEBREW=1; WZ_TIMEOUT=30
+      mkdir -p "$OUT/logs" "$WORK/tmp" "$FAKE_HOME"
+      set_wenv /usr/bin:/bin
+      kc_status() { echo 0; }
+      keychain_add_items() { return 0; }
+      seed_files() { return 0; }
+      reseed_with_sbx_record() { return 0; }
+      brew_prepare() { return 0; }
+      brew_listed() { return 1; }
+      BEFORE_SEEDED=; BEFORE_PROTECTED=
+      STAGE_FAILS=
+      "$RT_STAGE" >/dev/null 2>&1
+      printf "%s\n" "$STAGE_FAILS"
+    '
+}
+
+@test "credential output: every route rejects a placeholder on stdout or stderr" {
+  local route leak missed=''
+  for route in preview cancel sbx-refusal destructive repeat sbx-removal homebrew; do
+    for leak in out err; do
+      run run_route "$route" "$leak"
+      [ "$status" -eq 0 ] || fail "$route/$leak: driver failed: $output"
+      case "$output" in *"$LEAK_MSG"*) ;; *) missed="$missed $route/$leak" ;; esac
+    done
+  done
+  [ -z "$missed" ] || fail "placeholder in output was not rejected on:$missed"
+}
+
+@test "credential output: a clean run is not reported as a leak on any route" {
+  local route
+  for route in preview cancel sbx-refusal destructive repeat sbx-removal homebrew; do
+    run run_route "$route" none
+    [ "$status" -eq 0 ] || fail "$route: driver failed: $output"
+    case "$output" in *"$LEAK_MSG"*) fail "$route: false leak report: $output" ;; esac
+  done
+}
+
+@test "credential output: the leak check names the stream that leaked" {
+  run run_route preview out
+  assert_output --partial "$LEAK_MSG preview.out"
+  run run_route preview err
+  assert_output --partial "$LEAK_MSG preview.err"
+}
+
 # ---- helper behavior (pure Python; runs on Linux)
 
 helper() { python3 -B "$REPO_ROOT/$HELPER_REL" "$@"; }

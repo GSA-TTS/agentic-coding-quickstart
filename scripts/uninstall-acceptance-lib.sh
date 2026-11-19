@@ -163,7 +163,7 @@ wiz_pipe() { # label args...
   python3 "$HELPER" run "$WZ_OUT" "$WZ_TIMEOUT" --no-tty --stderr "$WZ_ERR" -- \
     "${WENV[@]}" /bin/bash -x "$UNINSTALLER" "$@"
   WZ_RC=$?
-  no_sudo
+  wizard_output_checks
 }
 
 # Interactive run on a pseudo-terminal. TTY_REPLIES holds "--reply EXPECT ANSWER"
@@ -177,8 +177,21 @@ wiz_tty() { # label args...
   python3 "$HELPER" run "$WZ_OUT" "$WZ_TIMEOUT" ${TTY_REPLIES[@]+"${TTY_REPLIES[@]}"} \
     --reply 'Press Return to exit.' '' -- "${WENV[@]}" /bin/bash "$UNINSTALLER" "$@"
   WZ_RC=$?
-  no_sudo
+  wizard_output_checks
 }
+
+# Every wizard route (preview, cancel, refusal, removal, Homebrew) ends here, so the
+# synthetic credential text cannot appear in either captured stream on any of them.
+no_credential_output() {
+  local file
+  for file in "$WZ_OUT" "$WZ_ERR"; do
+    [ -n "$file" ] || continue
+    [ -f "$file" ] || { fail_note "cannot check ${file##*/}: no such log"; continue; }
+    ! has_text "$PLACEHOLDER" "$file" || fail_note "synthetic credential text appeared in ${file##*/}"
+  done
+}
+
+wizard_output_checks() { no_credential_output; no_sudo; }
 
 no_sudo() {
   [ ! -e "$WORK/priv-shim-called" ] || fail_note 'a privilege-escalation stand-in was invoked'
