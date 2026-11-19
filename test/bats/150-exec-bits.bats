@@ -50,6 +50,7 @@ scripts/test-acq-bash32
 scripts/test-acq-bats
 scripts/test-probe-msb-node-startup.py
 scripts/test-probe-msb-startup.py
+scripts/test-uninstall-macos
 scripts/validate-git-executable-modes
 scripts/verify-backends
 scripts/verify-git-https-secret-msb
@@ -202,7 +203,7 @@ _make_index_fixture() {
   chmod 644 acq
   run bash "$REPO_ROOT/$INDEX_VALIDATOR_REL" --root "$REPO"
   assert_success
-  assert_output --partial 'OK - 26 intended executables are stage-0 100755'
+  assert_output --partial 'OK - 27 intended executables are stage-0 100755'
 }
 
 @test "exec-bits: Git-index validator rejects a staged 100644 entry point" {

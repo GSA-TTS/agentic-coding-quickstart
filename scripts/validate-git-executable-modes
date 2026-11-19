@@ -81,6 +81,7 @@ scripts/test-acq-bash32
 scripts/test-acq-bats
 scripts/test-probe-msb-node-startup.py
 scripts/test-probe-msb-startup.py
+scripts/test-uninstall-macos
 scripts/validate-git-executable-modes
 scripts/verify-backends
 scripts/verify-git-https-secret-msb
