@@ -40,8 +40,10 @@ Repeated read-only agent reviews identified and resolved:
 - Stored PIDs lacked start identity: never signal a process based on legacy PID
   records; preserve records and require closing sessions/restarting instead.
 - Credential and PID final lines could be skipped: process unterminated records.
-- Linux file fallback metadata was mistaken for a keyring-only record: distinguish
-  fallback files from unresolved OS-store indexes/metadata.
+- Linux file fallback metadata was mistaken for proof that no keyring copy exists
+  (migration keeps the old file and index writes can fail): every known key is
+  cleared or verified absent in Secret Service, and records are preserved when it
+  is unavailable.
 - Unknown launchers returned success: fail closed and preserve them.
 - Backend flags bypassed early dispatch: explicitly reject globals for uninstall.
 - Empty arrays broke Bash 3.2 nounset: use guarded array expansion.

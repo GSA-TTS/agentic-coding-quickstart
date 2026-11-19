@@ -193,25 +193,26 @@ uninstall_linux_secrets() {
         case "$key" in *[!A-Za-z0-9._-]*) return 1 ;; esac
         case "$seen" in *$'\n'"$key"$'\n'*) continue ;; esac
         seen="$seen$key"$'\n'
-        uninstall_linux_secret_record "$key" "$available" indexed || return 1
+        uninstall_linux_secret_record "$key" "$available" || return 1
       done < "$file"
     else
       key="${file##*/}"
       case "$key" in *[!A-Za-z0-9._-]*) return 1 ;; esac
       case "$seen" in *$'\n'"$key"$'\n'*) continue ;; esac
       seen="$seen$key"$'\n'
-      uninstall_linux_secret_record "$key" "$available" metadata || return 1
+      uninstall_linux_secret_record "$key" "$available" || return 1
     fi
   done
 }
 
 uninstall_linux_secret_record() {
-  # Indexed items may coexist with an older fallback after migration to the
-  # keyring. Only metadata-only file records can bypass Secret Service cleanup.
-  # Never read the file's credential contents.
-  if [ "$3" = metadata ] && { [ -e "$uninstall_secrets/$1" ] || [ -L "$uninstall_secrets/$1" ]; }; then
+  # A fallback file never proves the keyring copy is gone: migration keeps the
+  # old file and the index write may have failed. Every known key (indexed or
+  # metadata) is cleared or verified absent in Secret Service. Without the
+  # service, the record is ambiguous and is preserved. The file's contents are
+  # never read.
+  if [ -e "$uninstall_secrets/$1" ] || [ -L "$uninstall_secrets/$1" ]; then
     [ -f "$uninstall_secrets/$1" ] && [ ! -L "$uninstall_secrets/$1" ] || return 1
-    return 0
   fi
   [ "$2" = 1 ] || {
     uninstall_error 'An unresolved credential record remains but secret-tool is missing. Restore it before removal.'; return 1; }

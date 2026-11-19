@@ -157,19 +157,41 @@ assert_remote_preserved() {
   [ "$(grep -c '^clear acq_key acq.gitlab$' "$CALLS")" -eq 1 ]
 }
 
-@test "Linux metadata-only file fallback is skipped even when secret-tool is available" {
+@test "Linux migrated credential with a missing index is cleared from the keyring" {
   touch "$uninstall_meta/acq.usai" "$uninstall_secrets/acq.usai"
+  [ ! -e "$uninstall_index" ]
   run uninstall_linux_secrets
   [ "$status" = 0 ]
-  [ ! -s "$CALLS" ]
+  [ "$(cat "$CALLS")" = 'clear acq_key acq.usai' ]
   [ -f "$uninstall_secrets/acq.usai" ]
 }
 
-@test "Linux metadata-only file fallback is skipped when secret-tool is unavailable" {
+@test "Linux metadata plus fallback with a missing index verifies absence after a no-match" {
+  touch "$uninstall_meta/acq.usai" "$uninstall_secrets/acq.usai"
+  CLEAR_RC=1
+  run uninstall_linux_secrets
+  [ "$status" = 0 ]
+  [ "$(cat "$CALLS")" = $'clear acq_key acq.usai\nsearch --all acq_key acq.usai' ]
+}
+
+@test "Linux metadata plus fallback with a missing index preserves records on service errors" {
+  touch "$uninstall_meta/acq.usai" "$uninstall_secrets/acq.usai"
+  CLEAR_RC=1 SEARCH_RC=1 SEARCH_OUTPUT='fixture output sentinel'
+  run uninstall_linux_secrets
+  [ "$status" = 1 ]
+  [[ "$output" != *'fixture output sentinel'* ]]
+  [ -f "$uninstall_meta/acq.usai" ]
+  [ -f "$uninstall_secrets/acq.usai" ]
+  [ "$(cat "$CALLS")" = $'clear acq_key acq.usai\nsearch --all acq_key acq.usai' ]
+}
+
+@test "Linux metadata plus fallback with a missing index fails closed without secret-tool" {
   uninstall_secret_tool_available() { return 1; }
   touch "$uninstall_meta/acq.usai" "$uninstall_secrets/acq.usai"
   run uninstall_linux_secrets
-  [ "$status" = 0 ]
+  [ "$status" = 1 ]
+  [ -f "$uninstall_meta/acq.usai" ]
+  [ -f "$uninstall_secrets/acq.usai" ]
   [ ! -s "$CALLS" ]
 }
 

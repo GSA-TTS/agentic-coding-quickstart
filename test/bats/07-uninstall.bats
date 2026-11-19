@@ -266,7 +266,7 @@ STUB
   [ "$status" = 0 ]
 }
 
-@test "Linux file fallback metadata does not require secret-tool" {
+@test "Linux file fallback metadata without secret-tool is ambiguous and preserved" {
   uninstall_index="$HOME/.local/share/acq/secret-index"
   uninstall_meta="$HOME/.local/share/acq/secret-meta"
   uninstall_secrets="$HOME/.local/share/acq/secrets"
@@ -274,7 +274,9 @@ STUB
   printf 'synthetic-fixture\n' > "$uninstall_secrets/acq.custom"
   printf 'example.invalid\tEXAMPLE\n' > "$uninstall_meta/acq.custom"
   run uninstall_linux_secrets
-  [ "$status" = 0 ]
+  [ "$status" = 1 ]
+  [ -f "$uninstall_secrets/acq.custom" ]
+  [ -f "$uninstall_meta/acq.custom" ]
 }
 
 @test "matching remote from a linked worktree is safely removed" {
