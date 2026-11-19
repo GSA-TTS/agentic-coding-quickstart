@@ -87,8 +87,8 @@ Chosen: **option 2**.
 
 ### What it cannot prove
 
-Real MSB sandboxes (hosted macOS runners are not assumed to allow nested
-virtualization, and none is created); Keychain denial and retry (needs an interactive
+Real MSB sandboxes (GitHub documents nested virtualization as unsupported on
+arm64 macOS runners and is silent for Intel, so none is created); Keychain denial and retry (needs an interactive
 prompt); a forwarding process surviving until a reboot; temporary clone remote cleanup;
 npm removal; refusal when SBX is installed; and opening a browser-downloaded
 `uninstall.command` (Gatekeeper, quarantine). Those remain manual acceptance, which

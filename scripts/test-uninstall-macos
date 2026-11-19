@@ -310,7 +310,7 @@ main() {
 }
 
 REQUIRED_STAGES='preflight,build,seed,preview,cancel,destructive,repeat,sbx-record-refusal,sbx-record-removal'
-NOT_EXERCISED_TEXT='real MSB sandboxes (running or stopped); nested virtualization is assumed unavailable on hosted macOS runners and was not verified
+NOT_EXERCISED_TEXT='real MSB sandboxes (running or stopped); GitHub documents nested virtualization as unsupported on arm64 macOS runners and says nothing for Intel, so none is attempted
 Keychain denial and retry (needs an interactive permission prompt)
 forwarding-process refusal and retry across a reboot
 temporary clone remote cleanup

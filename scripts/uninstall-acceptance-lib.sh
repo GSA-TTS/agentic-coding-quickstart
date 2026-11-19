@@ -192,7 +192,7 @@ no_sudo() {
 brew_run() { # label timeout args...
   local label=$1 limit=$2; shift 2
   python3 "$HELPER" run "$OUT/logs/$label.out" "$limit" --no-tty -- "${WENV[@]}" \
-    HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_ENV_HINTS=1 HOMEBREW_NO_INSTALL_CLEANUP=1 "$@"
+    HOMEBREW_NO_ASK=1 HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_ENV_HINTS=1 HOMEBREW_NO_INSTALL_CLEANUP=1 "$@"
 }
 
 # 0 = listed, 1 = not listed, 2 = brew itself failed (never read as "not listed").

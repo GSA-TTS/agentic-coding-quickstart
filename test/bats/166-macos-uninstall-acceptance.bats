@@ -247,6 +247,10 @@ mutate_after() { # name exact-line-to-find text-to-insert-after-its-first-occurr
   grep -Eq 'RUN_HOMEBREW" != 1 \] \|\| required="\$required,homebrew"' "$REPO_ROOT/$SCRIPT_REL"
 }
 
+@test "harness: Homebrew commands run non-interactively (ask mode off, no auto-update)" {
+  grep -q 'HOMEBREW_NO_ASK=1 HOMEBREW_NO_AUTO_UPDATE=1' "$REPO_ROOT/$LIB_REL"
+}
+
 @test "harness: a self-hosted runner is refused even with CI variables set" {
   run env -i PATH="$PATH" CI=true GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=self-hosted \
     RUNNER_TEMP="$SCRATCH" GITHUB_WORKSPACE="$SCRATCH" \
