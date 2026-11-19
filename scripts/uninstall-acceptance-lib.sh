@@ -50,9 +50,9 @@ kc_read() { # runner subcommand
   printf '%s\n' "$out" | sed -e 's/^[[:space:]]*"//' -e 's/"[[:space:]]*$//'
 }
 
-# A state that cannot be read before the run (for example a default keychain that does
-# not exist yet under the throwaway HOME) is recorded as such: there is then nothing to
-# restore or compare, and that is reported by the absence of a check, not a pass.
+# The throwaway HOME may have no readable keychain state before the run (for example no
+# default keychain yet); that is recorded as such and nothing is compared for it. The
+# runner user's own state must be readable: keychain_create refuses to proceed otherwise.
 UNREADABLE='<unreadable>'
 kc_read_or_unreadable() { kc_read "$@" || printf '%s\n' "$UNREADABLE"; }
 
@@ -60,8 +60,9 @@ keychain_create() {
   gate_passed
   KC="$WORK/keychains/$KC_NAME"
   mkdir -p "$WORK/keychains" "$FAKE_HOME/Library/Preferences" "$FAKE_HOME/Library/Keychains" || return 1
-  ORIG_REAL_KCS=$(kc_read_or_unreadable sec_real list-keychains); ORIG_FAKE_KCS=$(kc_read_or_unreadable sec list-keychains)
-  ORIG_REAL_DEF=$(kc_read_or_unreadable sec_real default-keychain); ORIG_FAKE_DEF=$(kc_read_or_unreadable sec default-keychain)
+  ORIG_REAL_KCS=$(kc_read sec_real list-keychains) && ORIG_REAL_DEF=$(kc_read sec_real default-keychain) ||
+    { echo 'cannot read the runner user keychain state, so it could not be restored or verified' >&2; return 1; }
+  ORIG_FAKE_KCS=$(kc_read_or_unreadable sec list-keychains); ORIG_FAKE_DEF=$(kc_read_or_unreadable sec default-keychain)
   ORIG_SAVED=1
   sec create-keychain -p "$KC_PW" "$KC" || return 1
   sec set-keychain-settings "$KC" || return 1

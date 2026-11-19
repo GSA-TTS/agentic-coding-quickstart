@@ -560,6 +560,22 @@ assert_cleanup_fails() { # label expected-text injections...
   ! grep -Eq -- '-s' "$SCRATCH/cl-untouched/state-real/calls" || fail "the real keychain state was written: $(cat "$SCRATCH/cl-untouched/state-real/calls")"
 }
 
+@test "cleanup: an unreadable runner-user keychain state stops the run before anything is created" {
+  CL_RC=0
+  mkdir -p "$SCRATCH/u/rt" "$SCRATCH/u/state-real" "$SCRATCH/u/state-fake"
+  make_fake_security
+  CL_DIR=$SCRATCH/u CL_REPO=$REPO_ROOT CL_FAKE=$SCRATCH/fake-security bash -c '
+    . "$CL_REPO/scripts/test-uninstall-macos"; . "$LIB"
+    WORK=$CL_DIR/rt; FAKE_HOME=$WORK/home; mkdir -p "$FAKE_HOME"; set_wenv /usr/bin:/bin
+    sec()      { return 1; }
+    sec_real() { return 1; }
+    keychain_create
+  ' >"$SCRATCH/u/stdout" 2>"$SCRATCH/u/stderr" || CL_RC=$?
+  [ "$CL_RC" -ne 0 ] || fail 'keychain_create succeeded without a readable runner keychain state'
+  grep -q 'cannot read the runner user keychain state' "$SCRATCH/u/stderr"
+  [ -z "$(ls "$SCRATCH/u/rt/keychains" 2>/dev/null)" ] || fail "a keychain was created"
+}
+
 @test "cleanup: a runner-user search list the run changed is restored and verified" {
   run_cleanup_case drift real:drift
   [ "$CL_RC" -eq 0 ] || fail "exit $CL_RC: $(cat "$SCRATCH/cl-drift/stderr")"
