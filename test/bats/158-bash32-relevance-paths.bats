@@ -130,6 +130,7 @@ scripts/diagnose-host-egress-diff
 scripts/diagnose-tls-intercept
 scripts/probe-macos-keychain-stdin
 scripts/probe-msb-posthoc-ports
+scripts/probe-msb-snapshot-restore
 scripts/probe-msb-startup
 scripts/test-probe-msb-startup.py
 scripts/verify-git-https-secret-msb
@@ -139,7 +140,9 @@ scripts/verify-host-authority-live-manual.txt
 scripts/verify-host-authority-live-steps.sh
 scripts/verify-image-override
 scripts/verify-issue-320
+scripts/verify-msb-host-config-mount
 scripts/verify-msb-pin
+scripts/verify-native-snapshot-restore
 scripts/verify-net-default-egress
 scripts/verify-ports-live
 scripts/verify-sbx-startup-barrier
