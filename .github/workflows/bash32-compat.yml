@@ -169,6 +169,9 @@ jobs:
             'scripts/qualify-msb-ro-mount' \
             'scripts/rotate-apikey' \
             'scripts/probe-msb-node-startup' \
+            'scripts/test-uninstall-macos' \
+            'scripts/uninstall-acceptance-helper.py' \
+            'scripts/uninstall-acceptance-lib.sh' \
             'scripts/test-probe-msb-node-startup.py' \
             'scripts/setup-provider-input-validator' \
             'scripts/install-provider-input-wheelhouse' \
@@ -181,6 +184,7 @@ jobs:
             '.gitmodules' \
             '.github/keys/chet-ramey-bash-release-signing-key.asc' \
             '.github/workflows/release.yml' \
+            '.github/workflows/macos-uninstall-acceptance.yml' \
             '.github/workflows/bash32-compat.yml')"
           if [ -n "$changed" ]; then
             echo "relevant=true" >>"$GITHUB_OUTPUT"
