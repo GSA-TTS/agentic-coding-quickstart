@@ -495,7 +495,108 @@ run_cleanup_case() {
 }
 
 cl_verdict() { sed -n 's/.*"verdict": "\([A-Z]*\)".*/\1/p' "$SCRATCH/cl-$1/out/results.json"; }
-cl_row() { grep -P '^cleanup\t' "$SCRATCH/cl-$1/out/results.tsv"; }
+TAB=$(printf '\t')
+cl_row() { grep "^cleanup${TAB}" "$SCRATCH/cl-$1/out/results.tsv"; }
+
+# ---- stock macOS tool portability
+# portability-scan-begin  (this section spells the forbidden forms out, so the scan skips it)
+#
+# The hosted runners and a maintainer's Mac have BSD grep/sed/xargs, which lack several
+# GNU options. The shims below stand in for them on PATH: they reject the GNU-only forms
+# the way the BSD tools do, then hand a valid call to the real tool. Running the cleanup
+# assertions under them catches a test or harness line that works on Linux only.
+
+make_bsd_shims() {
+  local dir=$SCRATCH/bsd tool real
+  mkdir -p "$dir"
+  for tool in grep sed xargs readlink date; do
+    real=$(command -v "$tool") || continue
+    cat > "$dir/$tool" <<SHIM
+#!/bin/bash
+tool=$tool
+real=$real
+SHIM
+    cat >> "$dir/$tool" <<'SHIM'
+reject() { printf '%s: %s\n' "$tool" "$1" >&2; exit 2; }
+past_opts=0; prev=''
+for a in "$@"; do
+  if [ "$past_opts" = 0 ]; then
+    case "$tool:$a" in
+      *:--) past_opts=1 ;;
+      grep:--perl-regexp|grep:-P*|grep:-[A-Za-z]*P*) reject 'invalid option -- P' ;;
+      sed:-r|sed:--regexp-extended|sed:--in-place*|sed:--null-data) reject "illegal option $a" ;;
+      xargs:-r|xargs:--no-run-if-empty) reject "illegal option $a" ;;
+      readlink:-f|readlink:--canonicalize*) reject "illegal option $a" ;;
+      date:-d|date:--date*) reject "illegal option $a" ;;
+    esac
+    if [ "$tool" = sed ] && [ "$a" = -i ] && [ "$prev" != -e ]; then reject 'sed -i needs a suffix argument on BSD'; fi
+  fi
+  case "$tool:$a" in
+    grep:*'\t'*|grep:*'\d'*|grep:*'\s'*|sed:*'\t'*|sed:*'\d'*|sed:*'\s'*) reject "backslash escape in a pattern is not portable: $a" ;;
+  esac
+  prev=$a
+done
+exec "$real" "$@"
+SHIM
+    chmod +x "$dir/$tool"
+  done
+}
+
+@test "portability: the BSD stand-ins reject the GNU-only forms they exist to catch" {
+  make_bsd_shims
+  printf 'a\tb\n' > "$SCRATCH/f"
+  run env PATH="$SCRATCH/bsd:$PATH" grep -P '^a' "$SCRATCH/f"
+  assert_failure 2
+  run env PATH="$SCRATCH/bsd:$PATH" grep '^a\tb' "$SCRATCH/f"
+  assert_failure 2
+  run env PATH="$SCRATCH/bsd:$PATH" sed -r 's/a/b/' "$SCRATCH/f"
+  assert_failure 2
+  run env PATH="$SCRATCH/bsd:$PATH" grep -q "^a$(printf '\t')b" "$SCRATCH/f"
+  assert_success
+}
+
+@test "portability: the cleanup assertions use only options stock macOS grep and sed accept" {
+  make_bsd_shims
+  PATH="$SCRATCH/bsd:$PATH"
+  run_cleanup_case bsd
+  [ "$CL_RC" -eq 0 ] || fail "exit $CL_RC: $(cat "$SCRATCH/cl-bsd/stderr")"
+  [ "$(cl_verdict bsd)" = PASS ] || fail "verdict $(cl_verdict bsd)"
+  [ "$(cl_row bsd)" = "$(printf 'cleanup\tPASS\t')" ] || fail "cleanup row: $(cl_row bsd)"
+  assert_cleanup_fails bsdfail 'search list restore command failed' fake:fail-set-list
+}
+
+# Static scan of the harness and this file for forms that break on stock macOS (BSD
+# userland, Bash 3.2).
+PORTABILITY_PATTERNS='grep +(-[A-Za-z]+ +)*(-[A-Za-z]*P|--perl-regexp)|sed +(-[A-Za-z]+ +)*(-[A-Za-z]*r[A-Za-z]* |--regexp-extended|--in-place)|sed +-i +[^ ]|sed +-i$|readlink +-f|date +-d|xargs +-r|--no-run-if-empty|find [^|]*-printf|stat +-c|sort +-V|(grep|sed)[^|]*\\[tdsw]|declare +-A|mapfile|readarray|\|&|&>>|\$\{[A-Za-z_]+(,,|\^\^)'
+portability_scan() { # file...
+  local f
+  for f in "$@"; do
+    awk '/portability-scan-be[g]in/ { skip = 1 } !skip { print FILENAME ":" FNR ": " $0 } /portability-scan-e[n]d/ { skip = 0 }' "$f"
+  done | grep -E -- "$PORTABILITY_PATTERNS" | grep -Ev '^[^:]+:[0-9]+: *#' || true
+}
+
+@test "portability: no GNU-only grep/sed/xargs/readlink/date forms or Bash 4 features in the harness or its tests" {
+  local hits
+  hits=$(portability_scan "$REPO_ROOT/$SCRIPT_REL" "$REPO_ROOT/$LIB_REL" "$REPO_ROOT/$HELPER_REL" "$REPO_ROOT/test/bats/167-macos-uninstall-acceptance.bats")
+  [ -z "$hits" ] || fail "non-portable usage: $hits"
+}
+
+@test "portability: the static scan flags each GNU-only form it is meant to catch" {
+  local line n=0
+  for line in "grep -P 'x' f" "grep -oP x f" "grep -q -P x f" "sed -n -r p f" "sed -r 's/a/b/' f" "sed -i 's/a/b/' f" "readlink -f x" "date -d yesterday" \
+    "xargs -r rm" "find . -printf x" "stat -c %s f" "grep '^a\\t' f" "declare -A m" "mapfile -t a" 'x=${v,,}' 'x=${v^^}' "cmd |& tee f"; do
+    printf '%s\n' "$line" > "$SCRATCH/probe"
+    [ -n "$(portability_scan "$SCRATCH/probe")" ] || fail "scan missed: $line"
+    n=$((n + 1))
+  done
+  for line in "grep -Eq 'a|b' f" "sed -e 's/a/b/' f" "sed -i.bak 's/a/b/' f" "mktemp -d \"\$T/x.XXXXXX\"" "readlink x"; do
+    printf '%s\n' "$line" > "$SCRATCH/probe"
+    [ -z "$(portability_scan "$SCRATCH/probe")" ] || fail "scan flagged a portable form: $line"
+  done
+  [ "$n" -eq 17 ]
+}
+
+# portability-scan-end
 
 @test "cleanup: a clean run restores everything, removes the work directory and reports PASS" {
   run_cleanup_case clean
@@ -504,7 +605,7 @@ cl_row() { grep -P '^cleanup\t' "$SCRATCH/cl-$1/out/results.tsv"; }
   [ "$(cl_row clean)" = "$(printf 'cleanup\tPASS\t')" ] || fail "cleanup row: $(cl_row clean)"
   [ "$(cat "$SCRATCH/cl-clean/state-fake/list")" = /orig/home.keychain-db ]
   [ -z "$(ls "$SCRATCH/cl-clean/rt")" ] || fail 'work directory left behind'
-  grep -q 'verdict: PASS\|: PASS' "$SCRATCH/cl-clean/out/summary.md"
+  grep -q '^## macOS uninstall acceptance: PASS' "$SCRATCH/cl-clean/out/summary.md"
 }
 
 # Each of these must exit nonzero, report a FAIL verdict and a FAIL cleanup row naming the step.
