@@ -54,6 +54,7 @@ scripts/bats_timing_render.py
 scripts/summarize-bats-timing
 scripts/run-shellcheck
 scripts/fix-exec-bits
+scripts/validate-git-executable-modes
 scripts/verify-backends
 scripts/qualify-msb-ro-mount
 scripts/rotate-apikey

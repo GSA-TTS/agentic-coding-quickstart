@@ -39,6 +39,11 @@
 # (exit 2). Ignored when explicit file arguments are given.
 set -uo pipefail
 
+# The offline suite never authorizes installer side effects. install.sh normally
+# consults /dev/tty after stdin is detached; force its documented explicit-decline
+# mode so a pre-commit hook cannot consume a developer's terminal response.
+export ACQ_INSTALL_NON_INTERACTIVE=1
+
 _dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${_dir}/.." && pwd)"
 BATS="${REPO_ROOT}/test/vendor/bats-core/bin/bats"
