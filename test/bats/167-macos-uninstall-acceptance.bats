@@ -354,6 +354,78 @@ helper() { python3 -B "$REPO_ROOT/$HELPER_REL" "$@"; }
   grep -q notty "$SCRATCH/o"
 }
 
+# The shared stub library defines sleep() as a no-op, so waits below use
+# `command sleep`. The tty cases ignore SIGHUP in the descendant: a hangup when
+# the terminal closes would otherwise end it by accident and hide the leak.
+#
+# A timed-out or finished command must leave nothing running that could touch the
+# fixture while the harness cleans up. DESC starts a delayed marker writer that
+# survives its parent unless the whole process group is stopped.
+DESC='(sleep 0.8; echo late > "$MARK") & sleep 30'
+
+@test "helper: a pipe-mode timeout also stops descendants of the command" {
+  run env MARK="$SCRATCH/mark" python3 -B "$REPO_ROOT/$HELPER_REL" run "$SCRATCH/o" 0.15 --no-tty -- sh -c "$DESC"
+  assert_failure 124
+  command sleep 1.3
+  [ ! -e "$SCRATCH/mark" ] || fail 'a descendant outlived the timeout and wrote its marker'
+}
+
+@test "helper: a pipe-mode timeout stops descendants that ignore SIGTERM" {
+  run env MARK="$SCRATCH/mark" python3 -B "$REPO_ROOT/$HELPER_REL" run "$SCRATCH/o" 0.15 --no-tty -- \
+    sh -c "trap '' TERM; $DESC"
+  assert_failure 124
+  command sleep 1.3
+  [ ! -e "$SCRATCH/mark" ] || fail 'a TERM-ignoring descendant outlived the timeout'
+}
+
+@test "helper: a pipe-mode command that exits leaves no descendant behind" {
+  run env MARK="$SCRATCH/mark" python3 -B "$REPO_ROOT/$HELPER_REL" run "$SCRATCH/o" 20 --no-tty -- \
+    sh -c '(sleep 0.8; echo late > "$MARK") & exit 0'
+  assert_success
+  command sleep 1.3
+  [ ! -e "$SCRATCH/mark" ] || fail 'a background descendant outlived a finished command'
+}
+
+@test "helper: a tty-mode timeout also stops descendants of the command" {
+  run env MARK="$SCRATCH/mark" python3 -B "$REPO_ROOT/$HELPER_REL" run "$SCRATCH/o" 0.3 -- sh -c "trap '' HUP; $DESC"
+  assert_failure 124
+  command sleep 1.3
+  [ ! -e "$SCRATCH/mark" ] || fail 'a descendant outlived the tty timeout'
+}
+
+@test "helper: a tty-mode command that exits leaves no descendant behind" {
+  run env MARK="$SCRATCH/mark" python3 -B "$REPO_ROOT/$HELPER_REL" run "$SCRATCH/o" 20 -- \
+    sh -c "trap '' HUP; (sleep 0.8; echo late > \"\$MARK\") >/dev/null 2>&1 </dev/null & exit 0"
+  assert_success
+  command sleep 1.3
+  [ ! -e "$SCRATCH/mark" ] || fail 'a background descendant outlived a finished tty command'
+}
+
+@test "helper: the deadline holds when the tty child closes its terminal early" {
+  local start=$SECONDS
+  run python3 -B "$REPO_ROOT/$HELPER_REL" run "$SCRATCH/o" 0.5 -- sh -c 'exec 0<&- 1>&- 2>&-; sleep 6'
+  assert_failure 124
+  [ $((SECONDS - start)) -le 3 ] || fail "returned after $((SECONDS - start))s, past the 0.5s deadline"
+}
+
+@test "helper: a tty run releases its pseudo-terminal descriptor on every outcome" {
+  run python3 -B - "$REPO_ROOT/$HELPER_REL" "$SCRATCH/o" <<'PY'
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("acc_helper", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+count = lambda: len(os.listdir("/dev/fd"))
+base = count()
+cases = [(5, [], ["true"]), (0.3, [], ["sleep", "5"]), (5, [(b"never", b"x")], ["true"])]
+got = [mod.run_tty(sys.argv[2], t, r, c) for t, r, c in cases]
+if got != [0, 124, 125]:
+    sys.exit("unexpected statuses %r" % (got,))
+if count() != base:
+    sys.exit("descriptor leak: %d open before, %d after" % (base, count()))
+PY
+  assert_success
+}
+
 @test "helper: manifest detects content, mode and link-target changes and a missing path" {
   mkdir -p "$SCRATCH/d" && printf 'a\n' > "$SCRATCH/d/f" && ln -s /nonexistent "$SCRATCH/d/l"
   helper manifest "$SCRATCH/d" "$SCRATCH/absent" > "$SCRATCH/m1"

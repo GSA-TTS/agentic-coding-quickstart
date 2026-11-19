@@ -7,7 +7,10 @@
       ANSWER and Return. With --no-tty, stdin is /dev/null, stdout goes to
       OUTPUT and stderr to --stderr FILE (default: OUTPUT). Exit status is
       CMD's, except 124 (timed out) and 125 (a reply's prompt never appeared), so a prompt that was never
-      shown cannot look like a pass.
+      shown cannot look like a pass. CMD runs in its own session/process group;
+      the timeout covers the whole run including waiting for CMD to exit after
+      its terminal closes, and on every exit path any process CMD left behind is
+      sent SIGTERM and then SIGKILL, so nothing outlives the call.
   manifest PATH...
       Print one line per entry at or under each PATH (symlinks are never
       followed): absolute path, type, permission bits, size and a content digest or link
@@ -97,18 +100,57 @@ def pump(fd, sink, replies, deadline):
                 replies.pop(0)
 
 
+TERM_GRACE = 0.3
+
+
+def stop_group(pgid):
+    """End every process still in group PGID: SIGTERM, a short grace, then SIGKILL.
+
+    Returns at once when the group is already empty, so the normal case costs nothing.
+    """
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    time.sleep(TERM_GRACE)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def reap(pid, deadline):
+    """Wait for PID until DEADLINE. Returns its wait status, or None on timeout."""
+    while True:
+        done, status = os.waitpid(pid, os.WNOHANG)
+        if done:
+            return status
+        if time.time() >= deadline:
+            return None
+        time.sleep(0.02)
+
+
 def run_tty(out, timeout, replies, cmd):
+    deadline = time.time() + timeout
     pid, fd = pty.fork()
     if pid == 0:
         try:
             os.execvp(cmd[0], cmd)
         finally:
             os._exit(127)
-    with open(out, "wb") as sink:
-        outcome = pump(fd, sink, replies, time.time() + timeout)
-    if outcome == "timeout":
-        os.kill(pid, signal.SIGKILL)
-    _, status = os.waitpid(pid, 0)
+    status, reaped = None, False
+    try:
+        with open(out, "wb") as sink:
+            outcome = pump(fd, sink, replies, deadline)
+        if outcome == "eof":
+            status = reap(pid, deadline)
+            reaped = status is not None
+            outcome = "exited" if reaped else "timeout"
+    finally:
+        os.close(fd)
+        stop_group(pid)
+        if not reaped:
+            _, status = os.waitpid(pid, 0)
     if outcome == "timeout":
         return 124
     if replies:
@@ -122,15 +164,20 @@ def run_tty(out, timeout, replies, cmd):
 def run_pipe(out, err, timeout, cmd):
     with open(out, "wb") as sink:
         errsink = open(err, "wb") if err else sink
+        proc = None
         try:
-            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=sink, stderr=errsink)
+            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=sink, stderr=errsink,
+                                    start_new_session=True)
             try:
                 return proc.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                stop_group(proc.pid)
                 proc.wait()
                 return 124
         finally:
+            if proc is not None:
+                stop_group(proc.pid)
+                proc.wait()
             if err:
                 errsink.close()
 
