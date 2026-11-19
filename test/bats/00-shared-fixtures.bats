@@ -33,12 +33,13 @@ load 'helper'
 @test "shared fixtures: helper reload preserves published file identity and bytes" {
   run bash -c '
     for dir in acq-offline-kit acq-opencode-kit; do
-      ln "$BATS_RUN_TMPDIR/$dir/spec.yaml" "$BATS_TEST_TMPDIR/$dir.before"
+      ln "$BATS_RUN_TMPDIR/$dir/spec.yaml" "$BATS_TEST_TMPDIR/$dir.before" || exit 95
+      cp "$BATS_RUN_TMPDIR/$dir/spec.yaml" "$BATS_TEST_TMPDIR/$dir.bytes" || exit 96
     done
-    source "$1/scripts/test-acq-lib.sh"
+    source "$1/scripts/test-acq-lib.sh" || exit 97
     for dir in acq-offline-kit acq-opencode-kit; do
       [ "$BATS_RUN_TMPDIR/$dir/spec.yaml" -ef "$BATS_TEST_TMPDIR/$dir.before" ] || exit 92
-      cmp "$BATS_RUN_TMPDIR/$dir/spec.yaml" "$BATS_TEST_TMPDIR/$dir.before" || exit 93
+      cmp "$BATS_RUN_TMPDIR/$dir/spec.yaml" "$BATS_TEST_TMPDIR/$dir.bytes" || exit 93
     done
   ' _ "$REPO_ROOT"
   assert_success
