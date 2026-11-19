@@ -313,6 +313,7 @@ case "${1:-}" in
   --version|-V) printf 'msb %s\n' "${STUB_MSB_VERSION:-0.6.9}" ;;
   create) exit 0 ;;
   exec)   exit 1 ;;
+  inspect) exit 1 ;;
   *) exit 0 ;;
 esac
 MSBSTUB
