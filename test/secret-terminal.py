@@ -307,11 +307,18 @@ LEAKS = (
 )
 
 
+# Group-mode handler leaks write WITNESS to the terminal. Any unallowlisted bash
+# diagnostic also yields a TRANSCRIPT MISMATCH, so the marker alone cannot show
+# the injected handler ran; the witness bytes in the collected transcript can.
+# The handler emits it through printf formatting so it only exists contiguously
+# as output: a bash diagnostic quoting the mutated trap text shows the source form.
+WITNESS = "HANDLER-LEAK-WITNESS"
+WITNESS_PRINTF = "printf HANDLER-%s LEAK-WITNESS >&2"
 LEAKS += (
     ("terminate-group-handler-appends-fragment", "terminate-group", "exit 143' TERM",
-     "printf s >&2; exit 143' TERM", "TRANSCRIPT"),
+     WITNESS_PRINTF + "; exit 143' TERM", "TRANSCRIPT"),
     ("hangup-group-handler-appends-fragment", "hangup-group", "exit 129' HUP",
-     "printf s >&2; exit 129' HUP", "TRANSCRIPT"),
+     WITNESS_PRINTF + "; exit 129' HUP", "TRANSCRIPT"),
 )
 
 
@@ -355,9 +362,18 @@ def transcript_controls(root):
         raise AssertionError((mode, "truncated transcript was accepted"))
 
 
-def negative_controls(root, scratch):
+def rejected_for_stated_reason(error, mode, marker):
+    """True only if `error` carries the marker and, for group modes, the witness
+    bytes the injected handler wrote to the transcript."""
+    text = str(error)
+    if marker not in text:
+        return False
+    return not mode.endswith("-group") or WITNESS in text
+
+
+def negative_controls(root, scratch, run=exercise, leaks=None):
     source = (root / "acq.backends" / "secret-store.sh").read_text()
-    for name, mode, old, new, marker in LEAKS:
+    for name, mode, old, new, marker in (LEAKS if leaks is None else leaks):
         assert source.count(old) == 1, (name, "patch target not found exactly once")
         copy = scratch / ("leak-" + name)
         (copy / "acq.backends").mkdir(parents=True)
@@ -365,18 +381,46 @@ def negative_controls(root, scratch):
         # A signal delivered to the whole foreground group (Ctrl-C, killpg) races
         # the wrapper against the reader's trap, so a leaky handler does not run
         # on every attempt: retry until it is observed. An
-        # unrelated failure (e.g. a timing flake) is not a rejection for the
-        # stated reason and is never counted as one.
+        # unrelated failure (e.g. a timing flake, or a bash diagnostic that merely
+        # mismatches the transcript) is not a rejection for the stated reason and
+        # is never counted as one.
         errors = []
         for _ in range(40 if mode in SIGNAL_MODES else 1):
             try:
-                exercise(copy, copy, mode)
+                run(copy, copy, mode)
             except AssertionError as error:
-                if marker in str(error):
+                if rejected_for_stated_reason(error, mode, marker):
                     break
                 errors.append(str(error))
         else:
             raise AssertionError((name, "leaky variant not rejected for the stated reason", errors[-1:]))
+
+
+def mutation_witness_controls(root, scratch):
+    """Drive negative_controls with a substitute for exercise: an unrelated
+    transcript failure must not credit a group mutation whose handler never ran,
+    while a failure carrying the handler's witness must."""
+    group = tuple(entry for entry in LEAKS if entry[1].endswith("-group"))
+    assert group and all(WITNESS_PRINTF in entry[3] for entry in group)
+
+    def unrelated(copy, where, mode):
+        raise AssertionError((mode, "TRANSCRIPT MISMATCH: unrelated bash diagnostic"))
+
+    def quoted_trap(copy, where, mode):
+        text = f": line 1: {WITNESS_PRINTF}; exit 143': command not found\r\n"
+        raise AssertionError((mode, "TRANSCRIPT MISMATCH", "observed", text.encode()))
+
+    def witnessed(copy, where, mode):
+        raise AssertionError((mode, "TRANSCRIPT MISMATCH", "observed", WITNESS.encode()))
+
+    for label, run in (("unrelated", unrelated), ("quoted-trap", quoted_trap)):
+        try:
+            negative_controls(root, scratch / label, run, group)
+        except AssertionError as error:
+            assert "not rejected for the stated reason" in str(error), (label, str(error))
+        else:
+            raise AssertionError((label, "failure credited a mutation that never ran"))
+    negative_controls(root, scratch / "witnessed", witnessed, group)
 
 
 if __name__ == "__main__":
@@ -384,5 +428,6 @@ if __name__ == "__main__":
     for mode in ("paste", "typing", "paused", "delayed", "backspace", "empty", "eof", "interrupt", "terminate", "hangup", "terminate-group", "hangup-group", "stty-failure"):
         exercise(root, scratch, mode)
     transcript_controls(root)
+    mutation_witness_controls(root, scratch)
     negative_controls(root, scratch)
     print("terminal checks passed")
