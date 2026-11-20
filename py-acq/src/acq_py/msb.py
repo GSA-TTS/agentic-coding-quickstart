@@ -29,6 +29,7 @@ internal test seam, never a secret, never written to acq output.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import ntpath
@@ -38,12 +39,13 @@ import re
 import subprocess
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
 from . import (
+    apply_record,
     errors,
     hostexec,
     kits,
@@ -637,7 +639,7 @@ def create(
             "check msb logs and retry",
         )
     try:
-        _held_write(HeldRecord(name, {b.binding.env: b.entry() for b in planned}, complete=True))
+        held_save(HeldRecord(name, {b.binding.env: b.entry() for b in planned}, complete=True))
     except MsbError:
         # Untracked bindings could never be revoked by `secret rm`: do not keep
         # a sandbox acq cannot account for.
@@ -1251,7 +1253,9 @@ NO_LIVE_REFEED_ENV = "ACQ_SECRET_NO_LIVE_REFEED"
 # `_acq_provider_fact_safe_host` accepts: no scheme, path, wildcard or `..`.
 _BIND_HOST_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.:-]*")
 
-HELD_SCHEMA = 1
+HELD_SCHEMA = 2
+# Records an older acq wrote carry no instance or apply evidence; they still read (as unknown).
+HELD_READ_SCHEMAS = (1, 2)
 _HELD_UNSAFE_RE = re.compile(r"[^A-Za-z0-9._-]")
 
 
@@ -1324,12 +1328,19 @@ def service_binding(service: str, sandbox: str | None = None) -> SecretBinding |
 
 @dataclass
 class HeldRecord:
-    """What acq knows about the bindings sandbox ``name`` holds (no values)."""
+    """What acq knows about the bindings sandbox ``name`` holds (no values).
+
+    ``instance`` is acq's own token for this incarnation of the sandbox and
+    ``apply`` its per-service delivery evidence (ADR-0053); both stay empty on a
+    record written before they existed, which reads as unknown.
+    """
 
     name: str
     bindings: dict[str, dict] = field(default_factory=dict)
     complete: bool = False
     services: list[str] = field(default_factory=list)
+    instance: str | None = None
+    apply: dict[str, dict] = field(default_factory=dict)
 
     def knows(self, service: str) -> bool:
         """True when acq knows whether this sandbox holds ``service``."""
@@ -1340,7 +1351,7 @@ class HeldRecord:
             self.services.append(service)
 
     def save(self) -> None:
-        _held_write(self)
+        held_save(self)
 
 
 def held_path(name: str) -> Path:
@@ -1358,28 +1369,37 @@ def _held_entry_ok(env: object, entry: object) -> bool:
 def held_read(name: str) -> HeldRecord:
     """The record for ``name``; an unknown (not complete, empty) one when absent.
 
-    A record that exists but cannot be read, or carries an invalid env name,
-    raises :class:`MsbError`: treating it as known-empty would let ``secret rm``
-    skip a sandbox that still holds a credential.
+    A record that exists but cannot be read, or carries an invalid env name or
+    apply entry, raises :class:`MsbError`: treating it as known-empty would let
+    ``secret rm`` skip a sandbox that still holds a credential, and a malformed
+    apply entry must never become reusable evidence. Nothing is repaired here.
     """
     try:
         raw = held_path(name).read_text(encoding="utf-8")
     except FileNotFoundError:
         return HeldRecord(name)
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         raise _held_unreadable(name) from exc
     try:
         doc = json.loads(raw)
     except ValueError as exc:
         raise _held_unreadable(name) from exc
-    if not isinstance(doc, dict) or doc.get("schema") != HELD_SCHEMA or doc.get("sandbox") != name:
+    schema = doc.get("schema") if isinstance(doc, dict) else None
+    if type(schema) is not int or schema not in HELD_READ_SCHEMAS or doc.get("sandbox") != name:
         raise _held_unreadable(name)
     bindings, complete, services = doc.get("bindings"), doc.get("complete"), doc.get("services")
     if not isinstance(bindings, dict) or not isinstance(complete, bool) or not isinstance(services, list):
         raise _held_unreadable(name)
     if not all(_held_entry_ok(k, v) for k, v in bindings.items()) or not all(isinstance(s, str) for s in services):
         raise _held_unreadable(name)
-    return HeldRecord(name, bindings, complete, services)
+    instance, apply = None, {}
+    if schema == 2:
+        instance, apply = doc.get("instance"), doc.get("apply")
+        if not apply_record.instance_ok(instance) or not isinstance(apply, dict) or not all(
+            secretstore.name_ok(k) and apply_record.entry_problem(v) is None for k, v in apply.items()
+        ):
+            raise _held_unreadable(name)
+    return HeldRecord(name, bindings, complete, services, instance, apply)
 
 
 def _held_unreadable(name: str) -> MsbError:
@@ -1404,11 +1424,17 @@ def _fsync_dir(directory: Path) -> None:
 
 
 def _held_write(rec: HeldRecord) -> None:
-    """Write ``rec`` durably (temp file, fsync, rename, fsync the directory)."""
+    """Write ``rec`` durably (temp file, fsync, rename, fsync the directory).
+
+    The caller holds the record's lock (:func:`held_locked`), except for a record
+    no other command can reach yet. A record without an instance gets a new one.
+    """
     path = held_path(rec.name)
     tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}")
-    doc = {"schema": HELD_SCHEMA, "sandbox": rec.name, "complete": rec.complete,
-           "services": rec.services, "bindings": rec.bindings}
+    if rec.instance is None:
+        rec.instance = apply_record.new_instance()
+    doc = {"schema": HELD_SCHEMA, "sandbox": rec.name, "instance": rec.instance, "complete": rec.complete,
+           "services": rec.services, "bindings": rec.bindings, "apply": rec.apply}
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -1427,12 +1453,163 @@ def _held_write(rec: HeldRecord) -> None:
     _fsync_dir(path.parent)
 
 
+@contextlib.contextmanager
+def held_locked(name: str) -> Iterator[None]:
+    """Hold the sandbox's binding-record lock (last in the lock order), as an adapter error."""
+    try:
+        with lock.held_record_lock(name):
+            yield
+    except lock.HeldRecordLockTimeout as exc:
+        raise MsbError(errors.TIMEOUT, str(exc), "retry once the other acq command finishes") from None
+
+
+def held_save(rec: HeldRecord) -> None:
+    """Write ``rec`` under its lock. It replaces the whole record: callers that
+    must not lose a concurrent change use :func:`held_update` instead."""
+    with held_locked(rec.name):
+        _held_write(rec)
+
+
+def held_update(name: str, mutate, *, expect_instance: str | None = None) -> HeldRecord | None:
+    """Read the record fresh under its lock, apply ``mutate`` and write it back.
+
+    With ``expect_instance`` the update happens only while the record still
+    names that instance: a record that was removed or recreated meanwhile is
+    left alone and None is returned, so a late completion can neither resurrect
+    a deleted record nor write into a new sandbox's. Raises :class:`MsbError`.
+    """
+    with held_locked(name):
+        rec = held_read(name)
+        if expect_instance is not None and rec.instance != expect_instance:
+            return None
+        mutate(rec)
+        _held_write(rec)
+        return rec
+
+
 def held_forget(name: str) -> None:
     """Drop ``name``'s record (the sandbox is gone)."""
     try:
-        held_path(name).unlink(missing_ok=True)
-    except OSError:
+        with held_locked(name):
+            held_path(name).unlink(missing_ok=True)
+    except (OSError, MsbError):
         pass
+
+
+# --- effective identity and the read-only apply snapshot (ADR-0053) -----------
+
+EffectiveIdentity = apply_record.EffectiveIdentity
+ApplySnapshot = apply_record.ApplySnapshot
+apply_entry = apply_record.apply_entry
+
+
+def _pin_layer_records(service: str) -> bool:
+    """True when a provider pin (recorded, seeded or from the environment layer) names ``service``.
+
+    A pin's own authority is not established yet, so an endpoint taken from one
+    reads as unknown; an unreadable registry counts as pinned.
+    """
+    try:
+        return any(b.get("provider") == service for b in provider_creds.list_bindings())
+    except (ValueError, OSError, state.StateSchemaError):
+        return True
+
+
+def _endpoint_evidence(service: str, sandbox: str | None, value_key: str) -> tuple[object, str | None] | None:
+    """``(endpoint authority, extra revision)`` for the endpoint the binding will use, or None.
+
+    The sandbox's own recorded endpoint wins, then the global one (each revisioned
+    by its own key); otherwise a fixed built-in destination. A destination that
+    comes from a provider pin is unknown. ``extra revision`` is only set when
+    the endpoint's key differs from the value's.
+    """
+    for scope in ([sandbox] if sandbox else []) + [None]:
+        if secretstore.meta_resolve_exact(service, scope) is None:
+            continue
+        key = secretstore.key_for(service, scope)
+        found = secretstore.current_evidence(key, value=False)
+        if found is None:
+            return None
+        return found[1]["metadata"], (None if key == value_key else found[0])
+    if service == "github" or (service == provider_creds.USAI_PROVIDER_ID and not _pin_layer_records(service)):
+        return apply_record.BUILTIN_ENDPOINT, None
+    return None
+
+
+def _stored_value_source(service: str, sandbox: str | None) -> tuple[str, str | None, str] | None:
+    """``(source, scope, key)`` of the store entry that supplies the value, or None.
+
+    Mirrors :func:`secretstore.resolve` (sandbox first, then global) without
+    repairing anything while reading.
+    """
+    for scope in ([sandbox] if sandbox else []) + [None]:
+        key = secretstore.key_for(service, scope)
+        if secretstore.get(key, repair=False):
+            return ("sandbox", scope, key) if scope else ("global", None, key)
+    return None
+
+
+def effective_identity(service: str, sandbox: str) -> EffectiveIdentity | None:
+    """What a delivery of ``service`` to ``sandbox`` would use now, without its value.
+
+    Source, scope, store authority, revision and ENV@HOST come from one resolution.
+    None means nothing injectable. A pending, unmarked, legacy, keychain-backed or
+    mismatched store gives a revision of None (unknown), never an unchanged one.
+    """
+    binding = service_binding(service, sandbox)
+    if binding is None:
+        return None
+    found = _stored_value_source(service, sandbox)
+    if found is None:
+        try:
+            providers = provider_input.delivery_ids("msb", sandbox)
+        except provider_input.ProviderInputError:
+            return None
+        if service in providers and service not in provider_input.HOST_SERVICES and os.environ.get(binding.env):
+            return EffectiveIdentity("environment", None, binding.env, binding.host,
+                                     {"value": None, "endpoint": None}, None)
+        return None
+    source, scope, key = found
+    value = secretstore.current_evidence(key)
+    endpoint = _endpoint_evidence(service, sandbox, key)
+    if value is None or endpoint is None:
+        return EffectiveIdentity(source, scope, binding.env, binding.host, {"value": None, "endpoint": None}, None)
+    authority = {"value": value[1]["value"], "endpoint": endpoint[0]}
+    revision = value[0] if endpoint[1] is None else f"{value[0]}+{endpoint[1]}"
+    return EffectiveIdentity(source, scope, binding.env, binding.host, authority, revision)
+
+
+def held_apply_snapshot(name: str, *, store_locked: bool = False) -> ApplySnapshot:
+    """The validated, read-only credential-application view of sandbox ``name``.
+
+    Per service: the current effective identity beside what was last delivered,
+    with a status that only says ``applied`` while that identity is unchanged.
+    Missing or schema-1 evidence is ``unknown``; malformed evidence raises
+    :class:`MsbError` (``state_schema_unsupported``), and nothing is repaired.
+    ``reuse_eligible`` is always False. Reads under the shared store lock unless
+    the caller already holds one (``store_locked``); a record is read by one
+    atomic file read, so a concurrent writer is seen whole or not at all.
+    """
+    with contextlib.nullcontext() if store_locked else _store_shared():
+        rec = held_read(name)
+        services = sorted({entry["service"] for entry in rec.bindings.values()} | set(rec.apply))
+        out = {}
+        for service in services:
+            current = effective_identity(service, name)
+            entry = rec.apply.get(service)
+            out[service] = apply_record.ServiceApply(
+                service, apply_record.derive_status(entry, current), current, entry
+            )
+    return ApplySnapshot(name, rec.instance, out)
+
+
+@contextlib.contextmanager
+def _store_shared() -> Iterator[None]:
+    try:
+        with lock.secret_store_lock(shared=True):
+            yield
+    except lock.SecretStoreLockTimeout as exc:
+        raise MsbError(errors.TIMEOUT, str(exc), "retry once the other acq command finishes") from None
 
 
 # --- create ------------------------------------------------------------------

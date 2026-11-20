@@ -593,7 +593,7 @@ def _get_file(layout: _Layout, key: str) -> str | None:
     return text.rstrip("\n")
 
 
-def _get_windows(layout: _Layout, key: str) -> str | None:
+def _get_windows(layout: _Layout, key: str, *, repair: bool = True) -> str | None:
     path = _file_for(layout.file_dir, key)
     text = _read_text(path)
     if text is None:
@@ -603,7 +603,8 @@ def _get_windows(layout: _Layout, key: str) -> str | None:
         value = dpapi_decrypt(parts[1] if len(parts) > 1 else "")
     else:
         value = text.rstrip("\n")
-        _migrate_windows(key, path, value)
+        if repair:
+            _migrate_windows(key, path, value)
     return value or None
 
 
@@ -685,9 +686,9 @@ def _store_value(key: str, value: str) -> None:
         _store_file(layout, key, value)
 
 
-def get(key: str) -> str | None:
+def get(key: str, *, repair: bool = True) -> str | None:
     """The value stored under ``key`` (possibly empty), or None when absent or
-    unreadable."""
+    unreadable. ``repair=False`` never rewrites the store (no Windows migration)."""
     layout = _layout()
     backend = backend_name()
     if backend == "keychain-macos":
@@ -695,7 +696,7 @@ def get(key: str) -> str | None:
     if backend == "keychain-linux":
         return _get_linux(key)
     if backend == "keychain-windows":
-        return _get_windows(layout, key)
+        return _get_windows(layout, key, repair=repair)
     return _get_file(layout, key)
 
 
@@ -996,25 +997,33 @@ def store_locked(key: str, value: str) -> None:
     _revision_change(key, lambda: _store_value(key, value))
 
 
-def current_revision(key: str) -> str | None:
-    """The committed revision for ``key`` only when both current stores match it.
+def current_evidence(key: str, *, value: bool = True) -> tuple[str, dict] | None:
+    """``(revision, authority)`` committed for ``key`` while both current stores match it.
 
-    Pending, missing, legacy, keychain-backed or mismatched authority is unknown.
-    This read never creates markers or rewrites revision state.
+    Pending, missing, legacy, keychain-backed or mismatched authority is unknown
+    (None). ``value=False`` asks only about the endpoint metadata, which is all an
+    endpoint-only scope contributes. This read never creates markers or rewrites
+    revision state, and never reads a credential value.
     """
     try:
         record = secret_revision.read(key)
-        layout = _layout()
-        backend = backend_name()
         if record["pending"] is not None or record["committed"] is None:
             return None
         stored = record["authority"]
-        current = _revision_authority(layout, backend, establish=False)
-        if stored["value"] is None or stored["metadata"] is None or stored != current:
+        current = _revision_authority(_layout(), backend_name(), establish=False)
+        if stored["metadata"] is None or stored["metadata"] != current["metadata"]:
             return None
-        return record["committed"]
+        if value and (stored["value"] is None or stored["value"] != current["value"]):
+            return None
+        return record["committed"], stored
     except state.StateSchemaError:
         raise SecretStoreError(errors.STATE_SCHEMA_UNSUPPORTED, "invalid credential revision or authority record") from None
+
+
+def current_revision(key: str) -> str | None:
+    """The committed revision for ``key`` when its value and endpoint authority are current."""
+    found = current_evidence(key)
+    return None if found is None else found[0]
 
 
 def store(key: str, value: str) -> None:
