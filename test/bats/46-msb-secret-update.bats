@@ -127,3 +127,96 @@ teardown() { acq_teardown_stubs; }
   assert_failure
   assert_output --partial "failed to apply 'usai' to 'boxA'"
 }
+
+# Reviewer counterexample: a global value whose endpoint exists only as a
+# sandbox-scoped mapping. The old sweep gated on the GLOBAL mapping and returned
+# success having discovered no target at all.
+_seed_scoped_only_endpoint() {
+  printf 'boxA\n' > "$STUBDIR/.msb_sandbox_list"
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="$2"
+    . "$1/acq.backends/secret-store.sh"
+    acq_secret_meta_store custom boxA scoped.example.gov SCOPED_KEY
+  ' _ "$REPO_ROOT" "$STUBDIR/secrets"
+  assert_success
+}
+
+@test "MSB global set reaches a sandbox whose endpoint is scoped-only" {
+  _seed_scoped_only_endpoint
+  : > "$CALLS"
+  run bash -c 'printf "synthetic-key\n" | ACQ_BACKEND=msb "$1" secret set -g custom' _ "$ACQ"
+  assert_success
+  assert_output --partial 'Applied to 1 running sandbox'
+  refute_output --partial 'no endpoint'
+  assert_regex "$(cat "$CALLS")" 'msb modify boxA --secret SCOPED_KEY@scoped\.example\.gov'
+  refute_regex "$(cat "$CALLS")" 'synthetic-key'
+}
+
+@test "MSB propagate reaches a sandbox whose endpoint is scoped-only" {
+  _seed_scoped_only_endpoint
+  mkdir -p "$STUBDIR/secrets"
+  printf 'synthetic-key' > "$STUBDIR/secrets/acq.custom"
+  : > "$CALLS"
+  run env ACQ_PROPAGATING_SECRET=1 ACQ_BACKEND=msb "$ACQ" secret _propagate -g custom
+  assert_success
+  assert_regex "$(cat "$CALLS")" 'msb modify boxA --secret SCOPED_KEY@scoped\.example\.gov'
+}
+
+@test "MSB global set of a mapping-less service skips unmapped sandboxes quietly" {
+  printf 'boxA\n' > "$STUBDIR/.msb_sandbox_list"
+  : > "$CALLS"
+  run bash -c 'printf "synthetic-key\n" | ACQ_BACKEND=msb "$1" secret set -g custom' _ "$ACQ"
+  assert_success
+  assert_output --partial 'no endpoint'
+  refute_regex "$(cat "$CALLS")" 'msb modify'
+}
+
+# Incomplete or malformed endpoint mappings must be refused BEFORE the value is
+# read or stored, and must never fall back to an old/default mapping.
+@test "MSB secret set refuses incomplete or invalid endpoint mappings before storing" {
+  local args
+  for args in '--host alternate.example' '--env CUSTOM_KEY' \
+              '--host invalid/host --env CUSTOM_KEY' \
+              '--host alternate.example --env 1BAD' \
+              '--host alternate.example --env BAD-NAME' \
+              '--host a,,b --env CUSTOM_KEY'; do
+    : > "$CALLS"
+    # shellcheck disable=SC2086
+    run bash -c 'printf "synthetic-key\n" | ACQ_BACKEND=msb "$1" secret set -g usai $2' _ "$ACQ" "$args"
+    assert_failure
+    assert [ ! -e "$STUBDIR/secrets/acq.usai" ]
+    refute_regex "$(cat "$CALLS")" 'msb modify'
+  done
+}
+
+@test "MSB refused mapping leaves a previously stored value untouched" {
+  printf 'boxA\n' > "$STUBDIR/.msb_sandbox_list"
+  mkdir -p "$STUBDIR/secrets"
+  printf 'old-value' > "$STUBDIR/secrets/acq.usai"
+  : > "$CALLS"
+  run bash -c 'printf "new-value\n" | ACQ_BACKEND=msb "$1" secret set -g usai --host alternate.example' _ "$ACQ"
+  assert_failure
+  assert [ "$(cat "$STUBDIR/secrets/acq.usai")" = old-value ]
+  refute_regex "$(cat "$CALLS")" 'msb modify'
+}
+
+@test "MSB mapping persistence failure is reported and never applies a stale mapping" {
+  [ "$(id -u)" -ne 0 ] || skip "root bypasses the read-only mapping file"
+  printf 'boxA\n' > "$STUBDIR/.msb_sandbox_list"
+  # An OLD scoped-or-global mapping exists but cannot be overwritten (read-only).
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="$2"
+    . "$1/acq.backends/secret-store.sh"
+    acq_secret_meta_store usai "" old.example.gov OLD_KEY
+    chmod 444 "$ACQ_SECRET_META_DIR"/*
+  ' _ "$REPO_ROOT" "$STUBDIR/secrets"
+  assert_success
+  : > "$CALLS"
+  run bash -c 'printf "new-value\n" | ACQ_BACKEND=msb "$1" secret set -g usai --host usai.alt.example.gov --env USAI_API_KEY' _ "$ACQ"
+  assert_failure
+  assert_output --partial 'value was stored'
+  assert_output --partial 'endpoint mapping could not be saved'
+  refute_output --partial 'new-value'
+  assert [ "$(cat "$STUBDIR/secrets/acq.usai")" = new-value ]
+  refute_regex "$(cat "$CALLS")" 'msb modify|OLD_KEY|old\.example'
+}
