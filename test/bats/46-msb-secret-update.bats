@@ -220,3 +220,126 @@ _seed_scoped_only_endpoint() {
   assert [ "$(cat "$STUBDIR/secrets/acq.usai")" = new-value ]
   refute_regex "$(cat "$CALLS")" 'msb modify|OLD_KEY|old\.example'
 }
+
+# The post-store check must read the REQUESTED scope only. A global mapping that
+# happens to equal the requested pair must not mask a failed scoped write.
+_seed_meta_then_lock() {
+  # $1 scope ("" = global), $2 host, $3 env: seed one sidecar, then make the
+  # metadata directory non-writable so a later write cannot succeed.
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="$2"
+    . "$1/acq.backends/secret-store.sh"
+    acq_secret_meta_store usai "$3" "$4" "$5"
+    chmod 555 "$ACQ_SECRET_META_DIR"
+  ' _ "$REPO_ROOT" "$STUBDIR/secrets" "$1" "$2" "$3"
+  assert_success
+}
+
+_unlock_meta() { chmod 755 "$STUBDIR/secrets/meta" 2>/dev/null || true; }
+
+@test "MSB scoped mapping write failure is not masked by an equal global mapping" {
+  [ "$(id -u)" -ne 0 ] || skip "root bypasses the read-only metadata directory"
+  printf 'boxA\n' > "$STUBDIR/.msb_sandbox_list"
+  _seed_meta_then_lock "" usai.alt.example.gov USAI_API_KEY
+  : > "$CALLS"
+  run bash -c 'printf "new-value\n" | ACQ_BACKEND=msb "$1" secret set boxA usai --host usai.alt.example.gov --env USAI_API_KEY' _ "$ACQ"
+  _unlock_meta
+  assert_failure
+  assert_output --partial 'endpoint mapping could not be saved'
+  assert_output --partial 'value was stored'
+  refute_output --partial 'new-value'
+  refute_output --partial 'Applied to'
+  refute_regex "$(cat "$CALLS")" 'msb modify'
+}
+
+@test "MSB scoped mapping write failure is not masked by a different existing scoped pair" {
+  [ "$(id -u)" -ne 0 ] || skip "root bypasses the read-only metadata directory"
+  printf 'boxA\n' > "$STUBDIR/.msb_sandbox_list"
+  _seed_meta_then_lock boxA old.example.gov OLD_KEY
+  chmod 444 "$STUBDIR"/secrets/meta/*
+  : > "$CALLS"
+  run bash -c 'printf "new-value\n" | ACQ_BACKEND=msb "$1" secret set boxA usai --host usai.alt.example.gov --env USAI_API_KEY' _ "$ACQ"
+  _unlock_meta
+  assert_failure
+  assert_output --partial 'endpoint mapping could not be saved'
+  refute_regex "$(cat "$CALLS")" 'msb modify|OLD_KEY|old\.example'
+}
+
+@test "MSB scoped mapping that was saved is verified and applied" {
+  printf 'boxA\n' > "$STUBDIR/.msb_sandbox_list"
+  : > "$CALLS"
+  run bash -c 'printf "new-value\n" | ACQ_BACKEND=msb "$1" secret set boxA usai --host usai.alt.example.gov --env USAI_API_KEY' _ "$ACQ"
+  assert_success
+  assert_regex "$(cat "$CALLS")" 'msb modify boxA --secret USAI_API_KEY@usai\.alt\.example\.gov'
+}
+
+# Endpoint env names must be kept separate from the implementation's own
+# variables: a name equal to one of them must be refused before storage, and the
+# synthetic value must never reach the recorded backend argv or any output.
+@test "MSB secret set refuses env names that collide with implementation variables" {
+  local name
+  printf 'boxA\n' > "$STUBDIR/.msb_sandbox_list"
+  for name in sb host val env_name service binding names flags restart PATH IFS BASH_ENV LD_PRELOAD ACQ_STATE_DIR MSB_HOME lowercase; do
+    : > "$CALLS"
+    run bash -c 'printf "canary-synthetic-9137\n" | ACQ_BACKEND=msb "$1" secret set boxA collide --host collide.example.gov --env "$2"' _ "$ACQ" "$name"
+    assert_failure
+    refute_output --partial 'canary-synthetic-9137'
+    refute_regex "$(cat "$CALLS")" 'canary-synthetic-9137'
+    assert [ ! -e "$STUBDIR/secrets/acq.boxA.collide" ]
+    refute_regex "$(cat "$CALLS")" 'msb modify'
+  done
+}
+
+@test "MSB apply path refuses pre-existing mappings whose env name collides with implementation variables" {
+  local name
+  for name in sb host val env_name service binding restart flags names PATH IFS BASH_ENV LD_PRELOAD ACQ_STATE_DIR; do
+    run bash -c '
+      export ACQ_SECRET_STORE_DIR="$2"
+      . "$1/acq.backends/secret-store.sh"
+      . "$1/acq.backends/msb.sh"
+      acq_secret_meta_store collide boxA collide.example.gov "$3"
+      printf "canary-synthetic-9137" | acq_secret_store "$(_acq_secret_key collide boxA)"
+      argv_log="$4"
+      : > "$argv_log"
+      _acq_msb_cli() { printf "%s\n" "$*" >> "$argv_log"; }
+      if _acq_msb_secret_apply_one collide boxA; then echo APPLIED; fi
+      if grep -q canary-synthetic-9137 "$argv_log"; then echo LEAKED; fi
+    ' _ "$REPO_ROOT" "$STUBDIR/secrets-$name" "$name" "$STUBDIR/argv-$name"
+    refute_output --partial LEAKED
+    refute_output --partial APPLIED
+    refute_regex "$(cat "$STUBDIR/argv-$name")" 'modify'
+  done
+}
+
+@test "MSB legitimate credential names sharing a prefix with control names are accepted" {
+  run bash -c '
+    . "$1/acq.backends/msb.sh"
+    for n in MAILGUN_API_KEY MAILCHIMP_API_KEY BASHO_KEY USAI_API_KEY GITHUB_TOKEN GITLAB_TOKEN; do
+      _acq_msb_env_name_ok "$n" || echo "REJECTED $n"
+    done
+    for n in MAIL MAILPATH BASH_ENV BASHOPTS LD_PRELOAD PATH; do
+      _acq_msb_env_name_ok "$n" && echo "ACCEPTED $n"
+    done
+    echo checked
+  ' _ "$REPO_ROOT"
+  assert_success
+  assert_output 'checked'
+}
+
+@test "MSB apply path still applies a well-formed mapping (control)" {
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="$2"
+    . "$1/acq.backends/secret-store.sh"
+    . "$1/acq.backends/msb.sh"
+    acq_secret_meta_store collide boxA collide.example.gov COLLIDE_KEY
+    printf "canary-synthetic-9137" | acq_secret_store "$(_acq_secret_key collide boxA)"
+    argv_log="$3"
+    : > "$argv_log"
+    _acq_msb_cli() { printf "%s\n" "$*" >> "$argv_log"; }
+    _acq_msb_secret_apply_one collide boxA && echo APPLIED
+    if grep -q canary-synthetic-9137 "$argv_log"; then echo LEAKED; fi
+  ' _ "$REPO_ROOT" "$STUBDIR/secrets-ok" "$STUBDIR/argv-ok"
+  assert_output --partial APPLIED
+  refute_output --partial LEAKED
+  assert_regex "$(cat "$STUBDIR/argv-ok")" 'modify boxA --secret COLLIDE_KEY@collide.example.gov'
+}

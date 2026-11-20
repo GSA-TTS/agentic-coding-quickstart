@@ -6157,6 +6157,18 @@ _acq_msb_parse_host_env() {
   eval "$_env_out=\$_env_var"
 }
 
+# _acq_msb_env_name_ok NAME — a user-chosen credential env name is exported
+# dynamically, so it must never be able to alias this adapter's own variables or
+# the process/loader/shell control variables. Same shape provisioning enforces
+# (upper-case identifier), minus a reserved set and the acq/msb/shell namespaces.
+_acq_msb_env_name_ok() {
+  case "$1" in
+    ''|*[!A-Z0-9_]*|[!A-Z]*) return 1 ;;
+    PATH|IFS|HOME|SHELL|ENV|USER|LOGNAME|PWD|OLDPWD|SHLVL|TMPDIR|CDPATH|GLOBIGNORE|PROMPT_COMMAND|PS1|PS2|PS4|TERM|LANG|SSH_*|BASH|BASH_*|BASHOPTS|BASHPID|LD_*|DYLD_*|ACQ_*|MSB_*|MICROSANDBOX_*|LC_*|FUNCNEST|SHELLOPTS|POSIXLY_CORRECT|MAIL|MAILPATH|MAILCHECK|TZ|HISTFILE) return 1 ;;
+  esac
+  return 0
+}
+
 # _acq_msb_validate_endpoint_mapping HOST ENV — an accepted mapping is either
 # absent (both empty) or a complete, well-formed HOST/ENV pair. Checked before the
 # credential is read or stored, so a half-specified or malformed mapping can never
@@ -6169,13 +6181,11 @@ _acq_msb_validate_endpoint_mapping() {
     echo 'acq(msb): --host and --env must be given together.' >&2
     return 1
   fi
-  case "$_env" in
-    [A-Za-z_]*) ;;
-    *) echo 'acq(msb): invalid --env name (must match [A-Za-z_][A-Za-z0-9_]*).' >&2; return 1 ;;
-  esac
-  case "$_env" in
-    *[!A-Za-z0-9_]*) echo 'acq(msb): invalid --env name (must match [A-Za-z_][A-Za-z0-9_]*).' >&2; return 1 ;;
-  esac
+  if ! _acq_msb_env_name_ok "$_env"; then
+    echo 'acq(msb): invalid --env name (use an upper-case name matching [A-Z][A-Z0-9_]*' >&2
+    echo '     that is not a shell, loader, acq or msb control variable).' >&2
+    return 1
+  fi
   case "$_host" in
     *[!A-Za-z0-9.,*_-]*|,*|*,|*,,*)
       echo 'acq(msb): invalid --host (use DNS names or wildcards, comma-separated).' >&2
@@ -6249,6 +6259,7 @@ _acq_msb_secret_apply_one() (
   env_name=$(printf '%s' "$binding" | cut -f1)
   host=$(printf '%s' "$binding" | cut -f2)
   [ -n "$env_name" ] && [ -n "$host" ] || return 2
+  _acq_msb_env_name_ok "$env_name" || return 1
   val=$(acq_secret_resolve "$service" "$sb") && [ -n "$val" ] || return 1
   local flags=() names=() restart=()
   if [ "${_ACQ_MSB_SECRET_RESTART:-0}" = 1 ]; then
@@ -6355,7 +6366,7 @@ acq_backend_secret_set() {
   # refuse to apply through stale metadata if it did not.
   if [ -n "$host" ] && [ -n "$env_var" ]; then
     local _stored
-    _stored=$(acq_secret_meta_resolve "$service" "$scope_name" 2>/dev/null) || _stored=""
+    _stored=$(acq_secret_meta_resolve_exact "$service" "$scope_name" 2>/dev/null) || _stored=""
     if [ "$_stored" != "$(printf '%s\t%s' "$host" "$env_var")" ]; then
       echo "acq(msb): '$service' value was stored, but its endpoint mapping could not be saved;" >&2
       echo '     no sandbox was modified. Fix the secret store and rerun the same command.' >&2
