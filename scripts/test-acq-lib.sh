@@ -694,6 +694,13 @@ PYSTUB
   restore)
     { [ -n "${USAI_API_KEY:-}" ] && printf 'USAI_API_KEY=present\n' >>"$CALLS"; } || true
     { [ -n "${GITHUB_TOKEN:-}" ] && printf 'GITHUB_TOKEN=present\n' >>"$CALLS"; } || true
+    # Record which archive the backend was handed, and whether the lifecycle lock
+    # was held while it ran (STUB_MSB_RESTORE_LOCK_DIR names the lock directory).
+    [ -f "${2:-}" ] && printf 'restore-archive=%s\n' "$(head -c 64 "$2")" >>"$CALLS"
+    { [ -n "${STUB_MSB_RESTORE_LOCK_DIR:-}" ] && [ -d "$STUB_MSB_RESTORE_LOCK_DIR" ] \
+        && printf 'restore-lock-held\n' >>"$CALLS"; } || true
+    # STUB_MSB_RESTORE_FAIL=N models the backend rejecting the archive with rc N.
+    [ -z "${STUB_MSB_RESTORE_FAIL:-}" ] || exit "$STUB_MSB_RESTORE_FAIL"
     : ;;
   remove|rm)
     # STUB_MSB_RM_FAIL=1 models a failed `msb remove` (e.g. sandbox not found)

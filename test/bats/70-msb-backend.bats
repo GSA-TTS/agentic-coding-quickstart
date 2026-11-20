@@ -275,16 +275,18 @@ _sha256() {
 @test "msb: restore without a snapshot picks the newest date-stamped snapshot for the sandbox" {
   _mk_unix_socket "$STUBDIR/agent.sock" || skip "python3 AF_UNIX socket unavailable"
   mkdir -p "$STUBDIR/snapshots" "$STUBDIR/ws2"
-  : > "$STUBDIR/snapshots/mybox-20260920T010203Z.msb"
-  : > "$STUBDIR/snapshots/mybox-20260921T010203Z.msb"
+  printf 'older-archive\n' > "$STUBDIR/snapshots/mybox-20260920T010203Z.msb"
+  printf 'newest-archive\n' > "$STUBDIR/snapshots/mybox-20260921T010203Z.msb"
   mkdir -p "$STUBDIR/state/msb-snapshots"
   printf 'volume\t%s:%s\n' "$STUBDIR/ws2" "$STUBDIR/ws2" > "$STUBDIR/state/msb-snapshots/$(_sha256 "$STUBDIR/snapshots/mybox-20260921T010203Z.msb").resources"
-  : > "$STUBDIR/snapshots/mybox-z-not-a-date.msb"
-  : > "$STUBDIR/snapshots/other-20260922T010203Z.msb"
+  printf 'not-a-date-archive\n' > "$STUBDIR/snapshots/mybox-z-not-a-date.msb"
+  printf 'other-sandbox-archive\n' > "$STUBDIR/snapshots/other-20260922T010203Z.msb"
   : > "$CALLS"
   run env ACQ_BACKEND=msb ACQ_SNAPSHOT_DIR="$STUBDIR/snapshots" SSH_AUTH_SOCK="$STUBDIR/agent.sock" "$ACQ" restore mybox
   assert_success
   assert_regex "$(cat "$CALLS")" "msb restore $STUBDIR/state/msb-snapshots/\.restore\.[[:alnum:]]{6} --name mybox"
+  assert_regex "$(cat "$CALLS")" 'restore-archive=newest-archive'
+  refute_regex "$(cat "$CALLS")" 'restore-archive=(older|not-a-date|other-sandbox)'
 }
 
 @test "sbx: snapshot/restore/recreate are acq-owned unsupported verbs, not backend passthrough" {
@@ -556,11 +558,14 @@ _sha256() {
 
 @test "msb: restore keeps an explicit provider selection through the kit heal" {
   mkdir -p "$STUBDIR/secrets" "$STUBDIR/ws" "$STUBDIR/provenance/msb" "$STUBDIR/state/msb-snapshots" "$STUBDIR/prov-kit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: prov-kit\ndisplayName: Prov\ndescription: prov\n' > "$STUBDIR/prov-kit/spec.yaml"
   : > "$STUBDIR/psel.msb"
   printf 'agent\topencode\nprovider-selection\texplicit\nprovider-kits\t%s\n' "$STUBDIR/prov-kit" \
     > "$STUBDIR/state/msb-snapshots/$(_sha256 "$STUBDIR/psel.msb").state"
   : > "$CALLS"
   run env ACQ_BACKEND=msb ACQ_PROVENANCE_DIR="$STUBDIR/provenance" "$ACQ" restore pselbox "$STUBDIR/psel.msb"
+  assert_success
+  assert_regex "$(cat "$CALLS")" 'msb restore .* --name pselbox '
   local prov; prov=$(cat "$STUBDIR/provenance/msb/pselbox."*.env)
   assert_regex "$prov" 'provider_selection=explicit'
   assert_regex "$prov" "provider_kits=$STUBDIR/prov-kit"
@@ -573,8 +578,132 @@ _sha256() {
     > "$STUBDIR/state/msb-snapshots/$(_sha256 "$STUBDIR/pdef.msb").state"
   : > "$CALLS"
   run env ACQ_BACKEND=msb ACQ_PROVENANCE_DIR="$STUBDIR/provenance" "$ACQ" restore pdefbox "$STUBDIR/pdef.msb"
-  local prov; prov=$(cat "$STUBDIR/provenance/msb/pdefbox."*.env 2>/dev/null || true)
+  assert_success
+  assert_regex "$(cat "$CALLS")" 'msb restore .* --name pdefbox '
+  local prov
+  prov=$(cat "$STUBDIR"/provenance/msb/pdefbox.*.env 2>/dev/null) || prov=""
   refute_regex "$prov" 'provider_selection=explicit'
+}
+
+# Seed the four kinds of name-scoped metadata a previous incarnation of the
+# destination can leave behind (resources, CLI kits, provenance, host config).
+_seed_retained_restore_metadata() { # NAME
+  local n="$1" sum
+  sum=$(printf '%s' "$n" | cksum | cut -d' ' -f1)
+  mkdir -p "$STUBDIR/state/msb-restore" "$STUBDIR/provenance/msb"
+  printf 'volume\t%s:%s\n' "$STUBDIR/old-ws" "$STUBDIR/old-ws" > "$STUBDIR/state/msb-restore/$n.resources"
+  printf 'schema=1\nkit=/retained/kit\n' > "$STUBDIR/provenance/msb/$n.$sum.kits"
+  printf 'schema=1\nbackend=msb\nagent=opencode\nretained=yes\n' > "$STUBDIR/provenance/msb/$n.$sum.env"
+  acq_host_config_write msb "$n" agent opencode
+}
+
+@test "msb: backend rejection of the archive preserves retained destination metadata" {
+  : > "$STUBDIR/rejected.msb"
+  mkdir -p "$STUBDIR/provenance/msb"
+  export ACQ_PROVENANCE_DIR="$STUBDIR/provenance"
+  _seed_retained_restore_metadata rejbox
+  local sum; sum=$(printf '%s' rejbox | cksum | cut -d' ' -f1)
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb STUB_MSB_RESTORE_FAIL=17 "$ACQ" restore rejbox "$STUBDIR/rejected.msb"
+  assert_failure 17
+  assert_regex "$(cat "$CALLS")" 'msb restore .* --name rejbox '
+  assert [ -f "$STUBDIR/state/msb-restore/rejbox.resources" ]
+  assert_regex "$(cat "$STUBDIR/state/msb-restore/rejbox.resources")" "$STUBDIR/old-ws"
+  assert_regex "$(cat "$STUBDIR/provenance/msb/rejbox.$sum.kits")" '/retained/kit'
+  assert_regex "$(cat "$STUBDIR/provenance/msb/rejbox.$sum.env")" 'retained=yes'
+  assert_equal "$(acq_host_config_read msb rejbox agent)" opencode
+  # No staged archive is left behind either.
+  run bash -c 'ls -A "$1"/state/msb-snapshots 2>/dev/null | grep -c "^\.restore\."' _ "$STUBDIR"
+  assert_output 0
+}
+
+@test "msb: restore runs the backend under the destination lifecycle lock" {
+  : > "$STUBDIR/locked.msb"
+  mkdir -p "$STUBDIR/provenance/msb"
+  local sum; sum=$(printf '%s' lockrest | cksum | cut -d' ' -f1)
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb ACQ_PROVENANCE_DIR="$STUBDIR/provenance" \
+    STUB_MSB_RESTORE_LOCK_DIR="$STUBDIR/provenance/provider-input/msb/lockrest.$sum.lock" \
+    "$ACQ" restore lockrest "$STUBDIR/locked.msb"
+  assert_success
+  assert_regex "$(cat "$CALLS")" 'restore-lock-held'
+  assert [ ! -e "$STUBDIR/provenance/provider-input/msb/lockrest.$sum.lock" ]
+}
+
+@test "msb: restore refuses while another lifecycle operation holds the destination lock" {
+  : > "$STUBDIR/busy.msb"
+  mkdir -p "$STUBDIR/provenance/msb"
+  _seed_retained_restore_metadata busybox
+  local sum lock
+  sum=$(printf '%s' busybox | cksum | cut -d' ' -f1)
+  lock="$STUBDIR/provenance/provider-input/msb/busybox.$sum.lock"
+  mkdir -p "$lock"
+  printf '%s %s\n' "$$" "$(ps -o lstart= -p $$ | tr -d '[:space:]')" > "$lock/owner"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb ACQ_PROVENANCE_DIR="$STUBDIR/provenance" ACQ_PROVIDER_INPUT_LOCK_RETRIES=1 \
+    "$ACQ" restore busybox "$STUBDIR/busy.msb"
+  rm -f "$lock/owner"; rmdir "$lock"
+  assert_failure
+  refute_regex "$(cat "$CALLS")" 'msb restore'
+  assert [ -f "$STUBDIR/state/msb-restore/busybox.resources" ]
+}
+
+@test "msb: restore binds credentials from the snapshot selection, not the caller's, when disabled" {
+  mkdir -p "$STUBDIR/secrets" "$STUBDIR/state/msb-snapshots"
+  printf 'sk-stored\n' > "$STUBDIR/secrets/acq.usai"
+  : > "$STUBDIR/off.msb"
+  printf 'agent\topencode\nprovider-selection\texplicit\nprovider-kits\t\n' \
+    > "$STUBDIR/state/msb-snapshots/$(_sha256 "$STUBDIR/off.msb").state"
+  : > "$CALLS"
+  # The caller's environment selects the default provider; the snapshot saved "none".
+  run env ACQ_BACKEND=msb ACQ_PROVENANCE_DIR="$STUBDIR/provenance" "$ACQ" restore offbox "$STUBDIR/off.msb"
+  assert_success
+  assert_regex "$(cat "$CALLS")" 'msb restore .* --name offbox '
+  refute_regex "$(cat "$CALLS")" 'msb restore .*--secret USAI_API_KEY@'
+  refute_regex "$(cat "$CALLS")" 'USAI_API_KEY=present'
+}
+
+@test "msb: restore ignores retained destination provider facts when the snapshot disabled providers" {
+  mkdir -p "$STUBDIR/secrets" "$STUBDIR/state/msb-snapshots" "$STUBDIR/provenance/msb"
+  printf 'sk-stored\n' > "$STUBDIR/secrets/acq.usai"
+  : > "$STUBDIR/off2.msb"
+  printf 'agent\topencode\nprovider-selection\texplicit\nprovider-kits\t\n' \
+    > "$STUBDIR/state/msb-snapshots/$(_sha256 "$STUBDIR/off2.msb").state"
+  # A retained provider-credentials record from the destination's previous life.
+  export ACQ_PROVENANCE_DIR="$STUBDIR/provenance"
+  acq_host_config_write msb factbox provider-credentials \
+    "$(printf 'usai\tUSAI_API_KEY\tapi.gsa.usai.gov\thttps://api.gsa.usai.gov/api/v1/models\topenai')"
+  assert [ -n "$(acq_host_config_read msb factbox provider-credentials)" ]
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb "$ACQ" restore factbox "$STUBDIR/off2.msb"
+  assert_success
+  assert_regex "$(cat "$CALLS")" 'msb restore .* --name factbox '
+  refute_regex "$(cat "$CALLS")" 'msb restore .*--secret USAI_API_KEY@'
+  refute_regex "$(cat "$CALLS")" 'USAI_API_KEY=present'
+}
+
+@test "msb: restore binds the default provider from a default snapshot despite a disabling caller" {
+  mkdir -p "$STUBDIR/secrets" "$STUBDIR/state/msb-snapshots"
+  printf 'sk-stored\n' > "$STUBDIR/secrets/acq.usai"
+  : > "$STUBDIR/on.msb"
+  printf 'agent\topencode\nprovider-selection\tdefault\nprovider-kits\t\n' \
+    > "$STUBDIR/state/msb-snapshots/$(_sha256 "$STUBDIR/on.msb").state"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb ACQ_PROVIDER_KITS= ACQ_PROVENANCE_DIR="$STUBDIR/provenance" "$ACQ" restore onbox "$STUBDIR/on.msb"
+  assert_success
+  assert_regex "$(cat "$CALLS")" 'msb restore .* --name onbox .*--secret USAI_API_KEY@api\.gsa\.usai\.gov'
+}
+
+@test "msb: restore with no stored or environment credentials works under set -u" {
+  : > "$STUBDIR/nocred.msb"
+  : > "$CALLS"
+  # Explicit `bash` so the Bash 3.2 runner's PATH shim, not the shebang, decides
+  # the interpreter; bash 3.2 rejects an unguarded empty-array expansion.
+  run env -u USAI_API_KEY -u GITHUB_TOKEN -u GH_TOKEN ACQ_BACKEND=msb bash "$ACQ" restore nocredbox "$STUBDIR/nocred.msb"
+  assert_success
+  refute_output --partial 'unbound variable'
+  assert_regex "$(cat "$CALLS")" 'msb restore .* --name nocredbox '
+  refute_regex "$(cat "$CALLS")" 'msb restore .*--secret'
 }
 
 @test "msb: snapshot sidecar records the provider selection of the source sandbox" {

@@ -1262,38 +1262,47 @@ _acq_msb_restore_provider_selection() { # NAME AGENT SELECTION KITS
   mv -f "$tmp" "$file" 2>/dev/null || { rm -f "$tmp"; return 1; }
 }
 
-_acq_msb_snapshot_state_adopt() {
-  local name="$1" snapshot="$2" source kind value agent="" workspace="" generic="" host_workspace=""
-  local psel="" pkits=""
-  source=$(_acq_msb_snapshot_state_file "$snapshot") || return 0
+# Parse and validate the snapshot's saved state into invocation-local variables
+# (_ACQ_MSB_RS_*) without touching any destination metadata. A snapshot with no
+# sidecar yields all-empty values, i.e. the default provider selection.
+_acq_msb_snapshot_state_load() { # SNAPSHOT
+  local source kind value
+  _ACQ_MSB_RS_AGENT="" _ACQ_MSB_RS_WORKSPACE="" _ACQ_MSB_RS_GENERIC=""
+  _ACQ_MSB_RS_HOSTWS="" _ACQ_MSB_RS_PSEL="" _ACQ_MSB_RS_PKITS="" _ACQ_MSB_RS_PRESENT=0
+  source=$(_acq_msb_snapshot_state_file "$1") || return 0
   [ -f "$source" ] || return 0
+  _ACQ_MSB_RS_PRESENT=1
   while IFS=$'\t' read -r kind value; do
     case "$kind" in
-      agent) agent="$value" ;;
-      workspace) workspace="$value" ;;
-      generic-opencode) generic="$value" ;;
-      host-workspace) host_workspace="$value" ;;
-      provider-selection) psel="$value" ;;
-      provider-kits) pkits="$value" ;;
+      agent) _ACQ_MSB_RS_AGENT="$value" ;;
+      workspace) _ACQ_MSB_RS_WORKSPACE="$value" ;;
+      generic-opencode) _ACQ_MSB_RS_GENERIC="$value" ;;
+      host-workspace) _ACQ_MSB_RS_HOSTWS="$value" ;;
+      provider-selection) _ACQ_MSB_RS_PSEL="$value" ;;
+      provider-kits) _ACQ_MSB_RS_PKITS="$value" ;;
     esac
   done <"$source"
-  case "$agent" in ""|*[!a-z-]*) return 1 ;; esac
-  case "$psel" in ""|default|explicit) ;; *) return 1 ;; esac
+  case "$_ACQ_MSB_RS_AGENT" in ""|*[!a-z-]*) return 1 ;; esac
+  case "$_ACQ_MSB_RS_PSEL" in ""|default|explicit) ;; *) return 1 ;; esac
+  case "$_ACQ_MSB_RS_GENERIC" in ""|generic-opencode|1) ;; *) return 1 ;; esac
+}
+
+# Write the values _acq_msb_snapshot_state_load parsed. Called only after the
+# backend accepted the archive, so a rejected restore never loses retained state.
+_acq_msb_snapshot_state_adopt() { # NAME
+  local name="$1"
+  [ "$_ACQ_MSB_RS_PRESENT" = 1 ] || return 0
   # A restore's sidecar is authoritative. Never retain a removed sandbox's
   # name-keyed state when this snapshot omits a field.
   acq_host_config_clear msb "$name" agent
   acq_host_config_clear msb "$name" workspace
   acq_host_config_clear msb "$name" generic-opencode
   acq_provenance_remove msb "$name"
-  _acq_msb_restore_provider_selection "$name" "$agent" "$psel" "$pkits" || return 1
-  acq_host_config_write msb "$name" agent "$agent" || return 1
-  [ -z "$workspace" ] || acq_host_config_write msb "$name" workspace "$workspace" || return 1
-  case "$generic" in
-    "") ;;
-    generic-opencode|1) acq_host_config_write msb "$name" generic-opencode generic-opencode || return 1 ;;
-    *) return 1 ;;
-  esac
-  [ -z "$host_workspace" ] || acq_workspace_record_write msb "$name" "$host_workspace" || return 1
+  _acq_msb_restore_provider_selection "$name" "$_ACQ_MSB_RS_AGENT" "$_ACQ_MSB_RS_PSEL" "$_ACQ_MSB_RS_PKITS" || return 1
+  acq_host_config_write msb "$name" agent "$_ACQ_MSB_RS_AGENT" || return 1
+  [ -z "$_ACQ_MSB_RS_WORKSPACE" ] || acq_host_config_write msb "$name" workspace "$_ACQ_MSB_RS_WORKSPACE" || return 1
+  [ -z "$_ACQ_MSB_RS_GENERIC" ] || acq_host_config_write msb "$name" generic-opencode generic-opencode || return 1
+  [ -z "$_ACQ_MSB_RS_HOSTWS" ] || acq_workspace_record_write msb "$name" "$_ACQ_MSB_RS_HOSTWS" || return 1
 }
 
 _acq_msb_restore_resources_write() {
@@ -1350,7 +1359,13 @@ _acq_msb_restore_clear_stale_state() {
   rm -f "$resource_file" 2>/dev/null || return 1
   acq_cli_kits_remove msb "$name"
   acq_provenance_remove msb "$name"
-  acq_host_config_remove msb "$name"
+  # Empty the host-config directory but keep it: the accepted restore already
+  # mounts this exact directory read-only, and replacing it would orphan that mount.
+  local _hcfg
+  _hcfg=$(acq_host_config_dir msb "$name") || return 0
+  case "$_hcfg" in
+    *.config) [ ! -d "$_hcfg" ] || find "$_hcfg" -mindepth 1 -delete 2>/dev/null || return 1 ;;
+  esac
 }
 
 _acq_msb_snapshot_kits_adopt_trusted() {
@@ -1410,7 +1425,7 @@ acq_backend_snapshot() {
 # acq_backend_restore SNAPSHOT --name NAME — restore and re-plumb resources
 # ---------------------------------------------------------------------------
 acq_backend_restore() {
-  local _snapshot="${1:-}" _name="" _arg _staged_snapshot
+  local _snapshot="${1:-}" _name="" _arg
   [ -n "$_snapshot" ] || { echo "acq(msb): restore: missing snapshot reference" >&2; return 1; }
   shift || true
   while [ "$#" -gt 0 ]; do
@@ -1437,6 +1452,38 @@ acq_backend_restore() {
       return 2 ;;
   esac
 
+  # The same lifecycle transaction as provision and terminate: a concurrent
+  # create/remove of this name cannot interleave with the absence check, the
+  # backend restore, or the metadata swap that follows acceptance.
+  ACQ_BACKEND_RESTORE_NEEDS_KIT_HEAL=0
+  local _rc=0
+  ( local lock rc
+    _acq_provider_input_guardian_start || exit 1
+    lock=$(acq_provider_input_lock_acquire msb "$_name" "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID") || { _acq_provider_input_guardian_stop; exit 1; }
+    trap 'rc=$?; _acq_msb_restore_cleanup_tmp; acq_provider_input_lock_release "${lock:-}" || true; _acq_provider_input_guardian_stop; exit "$rc"' EXIT
+    trap '_acq_provider_input_signal_exit 128' HUP
+    trap '_acq_provider_input_signal_exit 130' INT
+    trap '_acq_provider_input_signal_exit 143' TERM
+    _acq_msb_restore_unlocked "$_snapshot" "$_name"; rc=$?; exit "$rc" ) || _rc=$?
+  [ "$_rc" -eq 0 ] || return "$_rc"
+  ACQ_BACKEND_RESTORE_NEEDS_KIT_HEAL=1
+}
+
+# Temp artifacts of one restore transaction, removed on every exit path.
+_ACQ_MSB_RESTORE_STAGED=""
+_ACQ_MSB_RESTORE_FACTS_DIR=""
+_acq_msb_restore_cleanup_tmp() {
+  [ -z "$_ACQ_MSB_RESTORE_STAGED" ] || rm -f "$_ACQ_MSB_RESTORE_STAGED"
+  [ -z "$_ACQ_MSB_RESTORE_FACTS_DIR" ] || rm -rf "$_ACQ_MSB_RESTORE_FACTS_DIR"
+  _ACQ_MSB_RESTORE_STAGED=""
+  _ACQ_MSB_RESTORE_FACTS_DIR=""
+}
+
+# Phase 1 (read-only on the destination): confirm absence, stage the archive and
+# validate the snapshot's saved state into invocation-local variables. Nothing
+# name-scoped is modified, so every failure here leaves retained metadata intact.
+_acq_msb_restore_prepare() { # SNAPSHOT NAME
+  local _snapshot="$1" _name="$2"
   if acq_backend_exists "$_name"; then
     echo "acq(msb): restore: destination sandbox '$_name' already exists." >&2
     echo "     Remove it first or restore under a different name; existing state was left unchanged." >&2
@@ -1447,74 +1494,106 @@ acq_backend_restore() {
     echo "     Existing state was left unchanged; retry when MSB is reachable." >&2
     return 1
   fi
-
-  _staged_snapshot=$(_acq_msb_snapshot_stage "$_snapshot") || {
+  _ACQ_MSB_RESTORE_STAGED=$(_acq_msb_snapshot_stage "$_snapshot") || {
+    _ACQ_MSB_RESTORE_STAGED=""
     echo "acq(msb): restore: could not stage snapshot privately." >&2
     return 1
   }
-
-  # Restore metadata is name-scoped. Remove stale state before collecting the
-  # trusted snapshot sidecars, then remount a fresh trusted host-config dir.
-  _acq_msb_restore_clear_stale_state "$_name" || {
-    rm -f "$_staged_snapshot"
+  _acq_msb_snapshot_state_load "$_ACQ_MSB_RESTORE_STAGED" || {
+    echo "acq(msb): restore: the snapshot's saved state is invalid; existing state was left unchanged." >&2
     return 1
   }
+  # The snapshot's provider selection, not the caller's, decides which credentials
+  # are bound (the post-restore heal loads the same selection from provenance).
+  case "$_ACQ_MSB_RS_PSEL" in
+    explicit) ACQ_PROVIDER_KITS="$_ACQ_MSB_RS_PKITS"; ACQ_PROVIDER_KITS_FROM_ENV=1; ACQ_PROVIDER_KITS_FROM_CLI="" ;;
+    *) ACQ_PROVIDER_KITS=""; ACQ_PROVIDER_KITS_FROM_ENV=""; ACQ_PROVIDER_KITS_FROM_CLI="" ;;
+  esac
+  # Retained facts of a previous same-named sandbox are still on disk (they are
+  # replaced only after acceptance) and must not widen what the snapshot selected:
+  # an empty facts generation makes the binding come from the selection alone.
+  _ACQ_MSB_RESTORE_FACTS_DIR=$(mktemp -d "$ACQ_MSB_SNAPSHOT_DIR/.restore-facts.XXXXXX") || return 1
+  ACQ_PROVIDER_BINDINGS_GENERATION="$_ACQ_MSB_RESTORE_FACTS_DIR"
+}
 
-  local _restore_flags=(--name "$_name" --dangerously-inherit-resources)
-  local _resource_flags=() _vsock_flags=() _hcfg_dir _hcfg_mount _hcfg_host
+# Build the restore flags into the array named by $1. Sets _ACQ_MSB_RESTORE_HCFG_NEW=1
+# when the host-config mount directory had to be created (so a rejected restore can
+# remove only what this attempt added). Existing contents are never touched here.
+_acq_msb_restore_flags_into() { # ARRVAR NAME STAGED
+  local _arr="$1" _name="$2" _staged="$3" _hcfg_dir _hcfg_mount _hcfg_host
+  local _resource_flags=() _vsock_flags=()
+  _ACQ_MSB_RESTORE_HCFG_NEW=0
+  _ACQ_MSB_RESTORE_HCFG_DIR=""
+  eval "$_arr=(--name \"\$_name\" --dangerously-inherit-resources)"
   if _hcfg_dir=$(acq_host_config_dir msb "$_name"); then
-    mkdir -p "$_hcfg_dir" 2>/dev/null || { rm -f "$_staged_snapshot"; return 1; }
-    chmod 711 "$_hcfg_dir" 2>/dev/null || { rm -f "$_staged_snapshot"; return 1; }
+    [ -d "$_hcfg_dir" ] || _ACQ_MSB_RESTORE_HCFG_NEW=1
+    _ACQ_MSB_RESTORE_HCFG_DIR="$_hcfg_dir"
+    mkdir -p "$_hcfg_dir" 2>/dev/null || return 1
+    chmod 711 "$_hcfg_dir" 2>/dev/null || return 1
     # Same trusted canonicalizer as create, so the recorded mount source matches
     # what the read-only mount verification later compares against.
     command -v _acq_provider_input_canonical_path >/dev/null 2>&1 || {
       echo "acq(msb): error: trusted host-path canonicalizer is unavailable." >&2
-      rm -f "$_staged_snapshot"
       return 1
     }
-    _hcfg_mount=$(_acq_provider_input_canonical_path "$_hcfg_dir") || { rm -f "$_staged_snapshot"; return 1; }
+    _hcfg_mount=$(_acq_provider_input_canonical_path "$_hcfg_dir") || return 1
+    _hcfg_host="$_hcfg_mount"
     if command -v host_path >/dev/null 2>&1; then
-      _hcfg_host=$(host_path "$_hcfg_mount") || { rm -f "$_staged_snapshot"; return 1; }
-    else
-      _hcfg_host="$_hcfg_mount"
+      _hcfg_host=$(host_path "$_hcfg_mount") || return 1
     fi
-    _restore_flags+=(--volume "${_hcfg_host}:${ACQ_HOST_CONFIG_GUEST_DIR}:ro")
+    eval "$_arr+=(--volume \"\${_hcfg_host}:\${ACQ_HOST_CONFIG_GUEST_DIR}:ro\")"
   fi
-  ACQ_BACKEND_RESTORE_NEEDS_KIT_HEAL=0
-  _acq_msb_restore_resource_flags_into _resource_flags "$_staged_snapshot"
   # The exported archive is MSB's disk snapshot format. It restores through the
   # ordinary archive path, re-binding only acq-owned external resources.
-  ACQ_BACKEND_RESTORE_NEEDS_KIT_HEAL=1
+  _acq_msb_restore_resource_flags_into _resource_flags "$_staged"
   if [ "${#_resource_flags[@]}" -gt 0 ]; then
-    _restore_flags+=("${_resource_flags[@]}")
+    eval "$_arr+=(\"\${_resource_flags[@]}\")"
   fi
   _acq_msb_vsock_flags_into _vsock_flags "$_name"
-  [ "${#_vsock_flags[@]}" -gt 0 ] && _restore_flags+=("${_vsock_flags[@]}")
+  if [ "${#_vsock_flags[@]}" -gt 0 ]; then
+    eval "$_arr+=(\"\${_vsock_flags[@]}\")"
+  fi
+}
 
-  local _host_snapshot="$_staged_snapshot"
+# Run `msb restore` registered with the transaction guardian so a handled signal
+# cannot release the lifecycle lock while the backend is still running.
+_acq_msb_restore_backend() { # NAME STAGED FLAGS...
+  local _name="$1" _staged="$2" _host_snapshot _secret_flags=() _secret_names=() _pid _rc=0 _v
+  shift 2
+  _host_snapshot="$_staged"
   if command -v host_path >/dev/null 2>&1; then
-    _host_snapshot=$(host_path "$_staged_snapshot")
+    _host_snapshot=$(host_path "$_staged")
   fi
-
-  local _restore_secret_flags=() _restore_secret_names=()
-  _acq_msb_bind_secrets_into _restore_secret_flags _restore_secret_names "$_name"
-  local _restore_rc=0
-  _acq_msb_cli restore "$_host_snapshot" "${_restore_flags[@]}" "${_restore_secret_flags[@]}" || _restore_rc=$?
-  local _rev
-  for _rev in ${_restore_secret_names[@]+"${_restore_secret_names[@]}"}; do
-    unset "$_rev"
+  _acq_msb_bind_secrets_into _secret_flags _secret_names "$_name"
+  MSYS2_ARG_CONV_EXCL='*' msb restore "$_host_snapshot" "$@" ${_secret_flags[@]+"${_secret_flags[@]}"} & _pid=$!
+  _acq_provider_input_guardian_register_if_active "$_pid" || { kill "$_pid" 2>/dev/null || true; wait "$_pid" 2>/dev/null || true; return 1; }
+  wait "$_pid" || _rc=$?
+  for _v in ${_secret_names[@]+"${_secret_names[@]}"}; do
+    unset "$_v"
   done
-  if [ "$_restore_rc" -ne 0 ]; then
-    rm -f "$_staged_snapshot"
-    return "$_restore_rc"
-  fi
-  if ! _acq_msb_restore_resources_adopt_trusted "$_name" "$_staged_snapshot" \
-      || ! _acq_msb_snapshot_kits_adopt_trusted "$_name" "$_staged_snapshot" \
-      || ! _acq_msb_snapshot_state_adopt "$_name" "$_staged_snapshot"; then
-    rm -f "$_staged_snapshot"
+  return "$_rc"
+}
+
+_acq_msb_restore_unlocked() { # SNAPSHOT NAME
+  local _snapshot="$1" _name="$2" _restore_flags=() _rc=0
+  _acq_msb_restore_prepare "$_snapshot" "$_name" || return 1
+  _acq_msb_restore_flags_into _restore_flags "$_name" "$_ACQ_MSB_RESTORE_STAGED" || {
+    [ "$_ACQ_MSB_RESTORE_HCFG_NEW" != 1 ] || rmdir "$_ACQ_MSB_RESTORE_HCFG_DIR" 2>/dev/null || true
     return 1
+  }
+  _acq_msb_restore_backend "$_name" "$_ACQ_MSB_RESTORE_STAGED" "${_restore_flags[@]}" || _rc=$?
+  if [ "$_rc" -ne 0 ]; then
+    # Rejected: retained destination metadata stays exactly as it was; only the
+    # mount directory this attempt created is removed.
+    [ "$_ACQ_MSB_RESTORE_HCFG_NEW" != 1 ] || rmdir "$_ACQ_MSB_RESTORE_HCFG_DIR" 2>/dev/null || true
+    return "$_rc"
   fi
-  rm -f "$_staged_snapshot"
+  # Accepted: only now replace the name-scoped metadata with the snapshot's.
+  _acq_msb_restore_clear_stale_state "$_name" \
+    && _acq_msb_restore_resources_adopt_trusted "$_name" "$_ACQ_MSB_RESTORE_STAGED" \
+    && _acq_msb_snapshot_kits_adopt_trusted "$_name" "$_ACQ_MSB_RESTORE_STAGED" \
+    && _acq_msb_snapshot_state_adopt "$_name" || return 1
+  rm -f "$_ACQ_MSB_RESTORE_STAGED"; _ACQ_MSB_RESTORE_STAGED=""
   if ! _acq_msb_wait_for_exec_ready "$_name"; then
     echo "acq(msb): restore: $_name did not become exec-ready." >&2
     return 1

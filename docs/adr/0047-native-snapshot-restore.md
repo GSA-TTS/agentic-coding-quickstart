@@ -47,6 +47,13 @@ backend supports disk-state snapshot with acq-managed host-resource re-plumbing.
   restores the newest date-stamped archive for NAME. Every restore re-applies kits
   via the exec-heal path. acq supplies current host-resource
   bindings internally.
+- Restore is transactional per destination name. It runs under the same lifecycle
+  lock as create and remove; confirms the destination is absent; validates the
+  snapshot's saved state and adopts its provider selection into invocation-local
+  state (so credentials are bound from the snapshot's selection, not the caller's);
+  and only after `msb restore` accepts the archive replaces the name-scoped
+  resources, CLI-kit record, provenance and host config with the snapshot's.
+  A rejected archive leaves any retained destination metadata untouched.
 - sbx is unsupported for these verbs. It fails closed with a clear unsupported
   message rather than offering a disk-only degraded mode.
 - Restore does not expose user-facing `--vsock`, `--volume`, or `--port` flags.
