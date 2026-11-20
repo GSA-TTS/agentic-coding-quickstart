@@ -79,6 +79,7 @@ SPEC
 
 
 @test "secret: scoped non-USAi command does not fetch provider facts" {
+  printf 'usai\n' > "$STUBDIR/.msb_sandbox_list"
   run bash -c '
     printf "%s\n" "github-token-stub" \
       | ACQ_BACKEND=msb ACQ_DEBUG=1 GIT_ALLOW_PROTOCOL=none \
