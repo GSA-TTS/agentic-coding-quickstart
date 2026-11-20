@@ -59,7 +59,7 @@ def instance_ok(value: object) -> bool:
     return isinstance(value, str) and _INSTANCE.fullmatch(value) is not None
 
 
-def _utc_now() -> str:
+def utc_now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -144,7 +144,7 @@ def apply_entry(identity: EffectiveIdentity, *, status: str, attempt: str | None
         "applied_revision": identity.revision if status == "applied" else None,
         "attempt": attempt or new_attempt(),
         "status": status,
-        "status_at": _utc_now(),
+        "status_at": utc_now(),
     }
 
 

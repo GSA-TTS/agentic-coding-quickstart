@@ -858,6 +858,20 @@ def _fresh_guest(backend: str, adapter, name: str, *, ro_mount: bool) -> None:
         kit_msb.clear_instance_state(name)
         if ro_mount:
             _confirm_ro_mount(adapter, name)
+        _confirm_delivery(name)
+
+
+def _confirm_delivery(name: str) -> None:
+    """Promote the credential deliveries a create or start has proven (ADR-0053).
+
+    Called only once the guest is exec-ready and its trust gate passed. A record
+    that cannot be written leaves the pending evidence in place, which is never
+    read as applied, so this is a warning and never a failure.
+    """
+    try:
+        msb.confirm_delivery(name)
+    except msb.MsbError as exc:
+        _warn(f"could not record that the credentials reached sandbox '{name}': {exc.message}")
 
 
 def _write_record(backend: str, name: str, *, agent: str, workspace: str, image: str, ro_host_config: bool,
@@ -2405,6 +2419,9 @@ def _start_locked(command: str, name: str, emit_json: bool) -> int:
     if not was_running:
         # The bridge process died with the stopped guest; the route persisted (ADR-0021).
         ssh_agent.start_bridge(name)
+        # A real start delivered every held binding; a sandbox that was already
+        # running proves nothing about a binding added while it ran.
+        _confirm_delivery(name)
     try:
         with _store_reading(msb.MsbError, "nothing new was bound"):
             unbound = msb.reconcile_bindings(name) if was_running else []

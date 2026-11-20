@@ -94,10 +94,15 @@ def _store_dir() -> Path:
 
 
 def _snapshot(root: Path) -> dict[str, bytes]:
+    # The non-secret authority markers beside the store and the revision sidecars
+    # and locks under the acq state directory (ADR-0053) are Python-only: Bash
+    # neither reads nor writes them, and the dot-name keeps the markers out of
+    # every listing of acq.* keys.
     return {
         p.relative_to(root).as_posix(): p.read_bytes()
         for p in sorted(root.rglob("*"))
-        if p.is_file() and not p.name.endswith(".log")
+        if p.is_file() and not p.name.endswith(".log") and not p.name.startswith(".acq-authority-")
+        and "xdg_state_home" not in p.relative_to(root).parts
     }
 
 
