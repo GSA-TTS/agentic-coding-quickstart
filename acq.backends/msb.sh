@@ -624,6 +624,7 @@ ACQ_MSB_SNAPSHOT_DIR="${ACQ_MSB_SNAPSHOT_DIR:-${ACQ_STATE_DIR}/msb-snapshots}"
 _ACQ_MSB_STARTUP_STAGE_FILES=()
 _ACQ_MSB_STARTUP_STAGED=""
 _ACQ_MSB_ATTEMPT_GENERATION=""
+_ACQ_MSB_ATTEMPT_PYTHON=""
 _ACQ_MSB_ATTEMPT_CLONE=""
 _ACQ_MSB_ATTEMPT_ACTIVE=""
 _ACQ_MSB_CREATE_STARTED=""
@@ -632,9 +633,10 @@ _acq_msb_cleanup_uncreated_attempt() {
   [ -n "${_ACQ_MSB_ATTEMPT_ACTIVE:-}" ] || return 0
   if [ -z "${_ACQ_MSB_CREATE_STARTED:-}" ] || _acq_msb_confirm_absent "${_ACQ_MSB_ATTEMPT_NAME:-}"; then
     [ -z "${_ACQ_MSB_ATTEMPT_CLONE:-}" ] || _acq_msb_clone_cleanup "$_ACQ_MSB_ATTEMPT_NAME"
-    acq_provider_input_discard msb "$_ACQ_MSB_ATTEMPT_NAME" "$_ACQ_MSB_ATTEMPT_GENERATION" || true
+    acq_provider_input_discard msb "$_ACQ_MSB_ATTEMPT_NAME" "$_ACQ_MSB_ATTEMPT_GENERATION" "$_ACQ_MSB_ATTEMPT_PYTHON" || true
   fi
   _ACQ_MSB_ATTEMPT_GENERATION=""
+  _ACQ_MSB_ATTEMPT_PYTHON=""
   _ACQ_MSB_ATTEMPT_CLONE=""
   _ACQ_MSB_ATTEMPT_ACTIVE=""
   _ACQ_MSB_CREATE_STARTED=""
@@ -4047,12 +4049,15 @@ $(kit_spec_volumes "$spec")"
   # mounted. It stays unpublished until this create succeeds; the guest receives
   # the exact immutable generation rather than the mutable current symlink.
   local _provider_generation
-  if ! _provider_generation=$(acq_provider_input_prepare msb "$name"); then
+  local _provider_python
+  _provider_python=$(_acq_provider_input_path_python) || return 2
+  if ! _provider_generation=$(acq_provider_input_prepare msb "$name" "$_provider_python"); then
     echo "acq(msb): error: provider input projection failed for '$name'." >&2
     return 1
   fi
   _ACQ_MSB_ATTEMPT_NAME="$name"
   _ACQ_MSB_ATTEMPT_GENERATION="$_provider_generation"
+  _ACQ_MSB_ATTEMPT_PYTHON="$_provider_python"
   _ACQ_MSB_ATTEMPT_ACTIVE=1
   # msb binds secrets only at create (--secret ENV@HOST), so a provider
   # credential must resolve now. USAi keeps its own pre-create gate; this covers
@@ -4636,7 +4641,7 @@ EOF
   _acq_msb_restore_resources_write "$name" \
     ${_restore_volume_specs[@]+"${_restore_volume_specs[@]}"} || return 1
 
-  if ! _acq_provider_input_publish "$(acq_provider_input_root msb "$name")" "$_provider_generation"; then
+  if ! _acq_provider_input_publish "$(acq_provider_input_root msb "$name")" "$_provider_generation" "$_provider_python"; then
     echo "acq(msb): error: sandbox '$name' was created but provider inputs could not be published." >&2
     return 1
   fi

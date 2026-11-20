@@ -1,0 +1,344 @@
+#!/usr/bin/env bash
+# test-uninstall-macos - acceptance run of the guided uninstaller on a
+# GitHub-hosted macOS runner (ADR-0048).
+#
+# DESTRUCTIVE BY DESIGN. It builds the uninstaller from a subject checkout,
+# seeds synthetic state under a throwaway HOME, creates a temporary macOS
+# keychain, and runs the real wizard against them. It therefore refuses to run
+# unless it is on a GitHub-hosted macOS runner. It never escalates privileges.
+# UNINSTALLER and TTY_REPLIES are read by the sourced library.
+# shellcheck disable=SC2154,SC2034
+set -u -o pipefail
+
+SELF_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+HELPER="$SELF_DIR/uninstall-acceptance-helper.py"
+LIB="$SELF_DIR/uninstall-acceptance-lib.sh"
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/test-uninstall-macos --subject DIR --out DIR [--homebrew] [--expect-sha SHA]
+
+Run the macOS acceptance stages for the guided uninstaller found in the checkout
+DIR (it must contain scripts/build-uninstaller). Results go to --out:
+results.tsv, results.json, summary.md, not-exercised.txt, uninstall.command, logs/.
+
+  --homebrew        also run the Homebrew stage (installs real formulae)
+  --expect-sha SHA  fail unless DIR's HEAD is exactly this commit
+
+Refuses to run unless CI=true, GITHUB_ACTIONS=true, RUNNER_ENVIRONMENT=github-hosted
+and the host is macOS. It is destructive: never run it on a developer machine.
+USAGE
+}
+
+arg_error() { printf 'test-uninstall-macos: %s\n' "$*" >&2; usage >&2; exit 2; }
+
+refuse() {
+  printf 'test-uninstall-macos: refusing to run: %s\n' "$*" >&2
+  printf 'This script is destructive and only runs on GitHub-hosted macOS runners.\n' >&2
+  exit 3
+}
+
+parse_args() {
+  SUBJECT=''; OUT=''; RUN_HOMEBREW=0; EXPECT_SHA=''
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -h|--help) usage; exit 0 ;;
+      --subject) [ "$#" -ge 2 ] || arg_error '--subject needs a directory'; SUBJECT=$2; shift 2 ;;
+      --out) [ "$#" -ge 2 ] || arg_error '--out needs a directory'; OUT=$2; shift 2 ;;
+      --expect-sha) [ "$#" -ge 2 ] || arg_error '--expect-sha needs a commit'; EXPECT_SHA=$2; shift 2 ;;
+      --homebrew) RUN_HOMEBREW=1; shift ;;
+      *) arg_error "unknown argument: $1" ;;
+    esac
+  done
+  [ -n "$SUBJECT" ] && [ -n "$OUT" ] || arg_error '--subject and --out are required'
+}
+
+require_hosted_ci() {
+  [ "${CI:-}" = true ] || refuse 'CI is not "true"'
+  [ "${GITHUB_ACTIONS:-}" = true ] || refuse 'GITHUB_ACTIONS is not "true"'
+  [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] || refuse 'RUNNER_ENVIRONMENT is not "github-hosted"'
+  [ -n "${GITHUB_RUN_ID:-}" ] || refuse 'GITHUB_RUN_ID is not set'
+  [ -n "${ImageOS:-}" ] || refuse 'ImageOS is not set (not a GitHub-provided runner image)'
+  [ "$(uname -s)" = Darwin ] || refuse 'this host is not macOS'
+  [ "$(id -u)" != 0 ] || refuse 'running as root'
+  [ -n "${RUNNER_TEMP:-}" ] && [ -d "$RUNNER_TEMP" ] || refuse 'RUNNER_TEMP is not a directory'
+  [ -n "${GITHUB_WORKSPACE:-}" ] && [ -d "$GITHUB_WORKSPACE" ] || refuse 'GITHUB_WORKSPACE is not a directory'
+}
+
+# Subject must be inside the workspace and the output inside RUNNER_TEMP, as
+# canonical paths, so a crafted argument cannot aim the run elsewhere.
+resolve_paths() {
+  local ws tmp
+  ws=$(cd "$GITHUB_WORKSPACE" && pwd -P) || return 1
+  tmp=$(cd "$RUNNER_TEMP" && pwd -P) || return 1
+  SUBJECT=$(cd "$SUBJECT" 2>/dev/null && pwd -P) || refuse "subject directory does not exist: $SUBJECT"
+  mkdir -p "$OUT" || return 1
+  OUT=$(cd "$OUT" && pwd -P) || return 1
+  case "$SUBJECT" in "$ws"/*) ;; *) refuse 'subject is not inside GITHUB_WORKSPACE' ;; esac
+  case "$OUT" in "$tmp"/*) ;; *) refuse 'output directory is not inside RUNNER_TEMP' ;; esac
+  RUNNER_TEMP_REAL=$tmp
+}
+
+# ---------------------------------------------------------------- recording
+
+STAGE_FAILS=''; STAGE_NOTEX=''; BLOCKED=0; ANY_FAIL=0; CURRENT_STAGE=''
+CLEANED=0; REPORTED=0; SUBJECT_SHA=''; UNINSTALLER=''; UNINSTALLER_SHA=''; META=()
+
+record() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$OUT/results.tsv"; }
+fail_note() { STAGE_FAILS="${STAGE_FAILS}${STAGE_FAILS:+; }$1"; }
+check() { local desc=$1; shift; "$@" >/dev/null 2>&1 || fail_note "$desc"; }
+expect_out() { has_text "$1" "$2" || fail_note "missing in ${2##*/}: $1"; }
+expect_no_out() {
+  [ -f "$2" ] || { fail_note "cannot check ${2##*/}: no such log"; return 0; }
+  ! has_text "$1" "$2" || fail_note "unexpected in ${2##*/}: $1"
+}
+
+run_stage() {
+  local name=$1 fn=$2 rc status
+  if [ "$BLOCKED" = 1 ]; then record "$name" BLOCKED 'an earlier stage failed'; return 0; fi
+  CURRENT_STAGE=$name; STAGE_FAILS=''; STAGE_NOTEX=''
+  "$fn"; rc=$?
+  if [ "$rc" -ne 0 ] || [ -n "$STAGE_FAILS" ]; then
+    status=FAIL; record "$name" FAIL "${STAGE_FAILS:-stage returned $rc}"; ANY_FAIL=1; BLOCKED=1
+  elif [ -n "$STAGE_NOTEX" ]; then
+    status=NOT-EXERCISED; record "$name" NOT-EXERCISED "$STAGE_NOTEX"
+  else
+    status=PASS; record "$name" PASS ''
+  fi
+  CURRENT_STAGE=''
+  printf 'stage %-24s %s\n' "$name" "$status"
+}
+
+# ------------------------------------------------------------------ cleanup
+
+# Removes the throwaway work directory, then proves it is gone. A directory outside
+# RUNNER_TEMP is never removed, and is reported if present.
+remove_work() {
+  [ -n "$WORK" ] || return 0
+  case "$WORK" in
+    "${RUNNER_TEMP_REAL:-/nonexistent}"/acq-uninstall-accept.*)
+      find "$WORK" -type d -exec chmod u+rwx {} + 2>/dev/null
+      rm -rf "$WORK"
+      path_missing "$WORK" || { cleanup_fail "work directory still present: $WORK"; return 1; } ;;
+    *) path_missing "$WORK" || { cleanup_fail "refused to remove a work directory outside RUNNER_TEMP: $WORK"; return 1; } ;;
+  esac
+}
+
+# Runs every step even when an earlier one fails, and returns nonzero (with the reasons
+# in CLEANUP_FAILS) if any step failed or could not be verified.
+cleanup() {
+  if [ "$CLEANED" = 1 ]; then [ -z "$CLEANUP_FAILS" ]; return; fi
+  CLEANED=1
+  [ -z "$FAKE_HOME" ] || keychain_destroy || true
+  remove_work || true
+  [ -z "$CLEANUP_FAILS" ]
+}
+
+# A failed cleanup is its own FAIL stage, which also makes the report's verdict FAIL.
+record_cleanup() {
+  if cleanup; then
+    [ ! -d "$OUT" ] || record cleanup PASS ''
+    return 0
+  fi
+  ANY_FAIL=1
+  CLEANUP_FAILS=${CLEANUP_FAILS:-cleanup returned nonzero without naming a step}
+  printf 'test-uninstall-macos: cleanup failed: %s\n' "$CLEANUP_FAILS" >&2
+  [ ! -d "$OUT" ] || record cleanup FAIL "$CLEANUP_FAILS"
+}
+
+finish() {
+  local rc=$?
+  trap - EXIT
+  [ -z "$CURRENT_STAGE" ] || { record "$CURRENT_STAGE" ABORTED "script exited (status $rc) during the stage"; ANY_FAIL=1; }
+  record_cleanup
+  if [ -n "$OUT" ] && [ -d "$OUT" ]; then write_report || rc=1; fi
+  [ "$ANY_FAIL" -eq 0 ] || rc=1
+  exit "$rc"
+}
+
+write_report() {
+  [ "$REPORTED" = 0 ] || return 0
+  REPORTED=1
+  local meta=() item
+  collect_meta
+  for item in ${META[@]+"${META[@]}"}; do meta+=(--meta "$item"); done
+  [ -f "$OUT/results.tsv" ] || : > "$OUT/results.tsv"
+  local required="$REQUIRED_STAGES,cleanup"
+  [ "$RUN_HOMEBREW" != 1 ] || required="$required,homebrew"
+  python3 "$HELPER" report --require "$required" --tsv "$OUT/results.tsv" --json "$OUT/results.json" --md "$OUT/summary.md" \
+    --not-exercised "$OUT/not-exercised.txt" ${meta[@]+"${meta[@]}"}
+}
+
+# ------------------------------------------------------------------- stages
+
+stage_preflight() {
+  local v
+  v=$(/bin/bash -c 'printf %s "$BASH_VERSION"') || { fail_note '/bin/bash does not run'; return 0; }
+  case "$v" in 3.2.*) ;; *) fail_note "/bin/bash is $v, not the macOS system bash 3.2" ;; esac
+  local tool
+  for tool in acq msb microsandbox sbx; do
+    ! PATH=$WZ_PATH command -v "$tool" >/dev/null 2>&1 || fail_note "$tool is already on the wizard PATH"
+  done
+  check 'git missing' command -v git
+  check 'python3 missing' command -v python3
+  check '/usr/bin/security missing' test -x /usr/bin/security
+  [ -f "$SUBJECT/scripts/build-uninstaller" ] || fail_note 'subject lacks scripts/build-uninstaller'
+  SUBJECT_SHA=$(git -C "$SUBJECT" rev-parse HEAD 2>/dev/null) || { fail_note 'subject is not a git checkout'; return 0; }
+  [ -z "$EXPECT_SHA" ] || [ "$SUBJECT_SHA" = "$EXPECT_SHA" ] || fail_note "subject HEAD $SUBJECT_SHA is not the expected $EXPECT_SHA"
+  probe_readonly_reproduces || fail_note 'read-only fixture does not reproduce the plain-rm permission failure'
+}
+
+stage_build() {
+  local file=$OUT/uninstall.command
+  "${WENV[@]}" /bin/bash "$SUBJECT/scripts/build-uninstaller" "$file" >"$OUT/logs/build.out" 2>&1 || fail_note 'build-uninstaller failed'
+  [ -x "$file" ] || fail_note 'built file is not executable'
+  /bin/bash -n "$file" || fail_note 'built file does not parse under /bin/bash'
+  has_text 'uninstall_main "$@"' "$file" || fail_note 'built file lacks the uninstall_main call'
+  UNINSTALLER=$file
+  UNINSTALLER_SHA=$(shasum -a 256 "$file" | awk '{print $1}')
+}
+
+stage_seed() {
+  keychain_create || { fail_note 'cannot create the temporary keychain'; return 0; }
+  keychain_add_items || { fail_note 'cannot add synthetic keychain items'; return 0; }
+  seed_files 0 || { fail_note 'cannot seed synthetic files'; return 0; }
+  [ "$(kc_status)" = 0 ] || fail_note 'seeded keychain item is not visible to the wizard environment'
+  keychain_only_ours || fail_note "keychain search list is not exactly the temporary keychain (saw: $(kc_list_of sec | tr '\n' ' '))"
+  BEFORE_SEEDED=$(seeded_manifest); BEFORE_PROTECTED=$(protected_manifest)
+  [ "$(printf '%s\n' "$BEFORE_PROTECTED" | grep -c MISSING)" = 0 ] || fail_note 'protected fixtures missing'
+}
+
+stage_preview() {
+  wiz_pipe preview --dry-run
+  [ "$WZ_RC" = 0 ] || fail_note "dry run exited $WZ_RC"
+  expect_out 'Dry run. Nothing removed.' "$WZ_OUT"
+  local root
+  for root in $(seeded_roots); do expect_out "$root" "$WZ_OUT"; done
+  [ "$(seeded_manifest)" = "$BEFORE_SEEDED" ] || fail_note 'dry run changed the seeded state'
+  [ "$(kc_status)" = 0 ] || fail_note 'dry run removed the keychain item'
+}
+
+stage_cancel() {
+  TTY_REPLIES=(--reply '[y/N]: ' '')
+  wiz_tty cancel
+  [ "$WZ_RC" = 0 ] || fail_note "cancel run exited $WZ_RC"
+  expect_out 'Cancelled. Nothing removed.' "$WZ_OUT"
+  expect_no_out 'have been removed' "$WZ_OUT"
+  [ "$(seeded_manifest)" = "$BEFORE_SEEDED" ] || fail_note 'cancel changed the seeded state'
+  [ "$(kc_status)" = 0 ] || fail_note 'cancel removed the keychain item'
+}
+
+assert_removed() { # label
+  local root
+  for root in $(seeded_roots) "$FAKE_HOME/.local/bin/acq" "$FAKE_HOME/.local/bin/msb"; do
+    path_missing "$root" || fail_note "still present: ${root#"$FAKE_HOME"/}"
+  done
+  [ "$(kc_status)" = 44 ] || fail_note 'keychain item still present (find-generic-password did not exit 44)'
+  [ "$(protected_manifest)" = "$BEFORE_PROTECTED" ] || fail_note 'original project or unrelated files changed'
+  [ "$(cat "$FAKE_HOME/projects/myapp/keep.txt" 2>/dev/null)" = 'original project work' ] || fail_note 'original project file changed'
+  has_text 'user line: keep me' "$FAKE_HOME/.zshrc" || fail_note 'user line removed from .zshrc'
+  ! has_text 'microsandbox >>>' "$FAKE_HOME/.zshrc" || fail_note 'installer block left in .zshrc'
+  has_text '.local/bin' "$FAKE_HOME/.zshrc" || fail_note 'shared PATH line removed although other tools remain'
+  [ -z "$(find "$FAKE_HOME" -maxdepth 1 -name '.acq-uninstall-shell.*')" ] || fail_note 'temporary shell-config file left behind'
+}
+
+stage_destructive() {
+  wiz_pipe destructive --yes
+  [ "$WZ_RC" = 0 ] || fail_note "removal exited $WZ_RC"
+  expect_out 'ACQ and Microsandbox have been removed.' "$WZ_OUT"
+  assert_removed destructive
+}
+
+stage_repeat() {
+  wiz_pipe repeat --yes
+  [ "$WZ_RC" = 0 ] || fail_note "second removal exited $WZ_RC"
+  expect_out 'ACQ and Microsandbox have been removed.' "$WZ_OUT"
+  expect_no_out 'Removal incomplete' "$WZ_ERR"
+  assert_removed repeat
+}
+
+reseed_with_sbx_record() {
+  seed_files 1 && keychain_add_items || return 1
+  [ "$(kc_status)" = 0 ] || return 1
+  BEFORE_SEEDED=$(seeded_manifest); BEFORE_PROTECTED=$(protected_manifest)
+}
+
+stage_sbx_refusal() {
+  reseed_with_sbx_record || { fail_note 'cannot reseed with an sbx provenance record'; return 0; }
+  wiz_pipe sbx-refusal --yes
+  [ "$WZ_RC" != 0 ] || fail_note '--yes alone succeeded despite an unverified sbx record'
+  expect_out 'Removal incomplete: SBX sandbox absence is unverified' "$WZ_ERR"
+  [ "$(seeded_manifest)" = "$BEFORE_SEEDED" ] || fail_note 'refused run changed the seeded state'
+  [ "$(kc_status)" = 0 ] || fail_note 'refused run removed the keychain item'
+}
+
+stage_sbx_removal() {
+  wiz_pipe sbx-flag --yes --confirm-no-sbx-sandboxes
+  [ "$WZ_RC" = 0 ] || fail_note "removal with the sbx confirmation flag exited $WZ_RC"
+  expect_out 'ACQ and Microsandbox have been removed.' "$WZ_OUT"
+  assert_removed sbx-flag
+  reseed_with_sbx_record || { fail_note 'cannot reseed for the interactive run'; return 0; }
+  TTY_REPLIES=(--reply 'remaining SBX sandboxes? [y/N]: ' y --reply 'Microsandbox? [y/N]: ' y)
+  wiz_tty sbx-interactive
+  [ "$WZ_RC" = 0 ] || fail_note "interactive removal exited $WZ_RC"
+  expect_out 'ACQ and Microsandbox have been removed.' "$WZ_OUT"
+  assert_removed sbx-interactive
+}
+
+stage_homebrew() {
+  if [ "$RUN_HOMEBREW" != 1 ]; then STAGE_NOTEX='homebrew input was false'; return 0; fi
+  brew_stage
+}
+
+run_all() {
+  run_stage preflight stage_preflight
+  run_stage build stage_build
+  run_stage seed stage_seed
+  run_stage preview stage_preview
+  run_stage cancel stage_cancel
+  run_stage destructive stage_destructive
+  run_stage repeat stage_repeat
+  run_stage sbx-record-refusal stage_sbx_refusal
+  run_stage sbx-record-removal stage_sbx_removal
+  run_stage homebrew stage_homebrew
+}
+
+collect_meta() {
+  META=("tested commit=${SUBJECT_SHA:-unknown}" "runner image=${ImageOS:-unknown} ${ImageVersion:-unknown}"
+    "macOS=$(sw_vers -productName 2>/dev/null) $(sw_vers -productVersion 2>/dev/null) ($(sw_vers -buildVersion 2>/dev/null))"
+    "architecture=$(uname -m)" "runner bash=${BASH_VERSION}" "wizard shell=/bin/bash $(/bin/bash -c 'printf %s "$BASH_VERSION"')"
+    "uninstaller sha256=${UNINSTALLER_SHA:-not built}" "hypervisor (sysctl kern.hv_support)=$(sysctl -n kern.hv_support 2>/dev/null || echo unknown)" "homebrew stage requested=$RUN_HOMEBREW")
+}
+
+main() {
+  parse_args "$@"
+  require_hosted_ci
+  resolve_paths || exit 3
+  # shellcheck source=scripts/uninstall-acceptance-lib.sh
+  . "$LIB"
+  mkdir -p "$OUT/logs" || exit 3
+  : > "$OUT/results.tsv"
+  printf '%s\n' "$NOT_EXERCISED_TEXT" > "$OUT/not-exercised.txt"
+  WORK=$(mktemp -d "$RUNNER_TEMP_REAL/acq-uninstall-accept.XXXXXX") || exit 3
+  FAKE_HOME=$WORK/home
+  mkdir -p "$FAKE_HOME" "$WORK/tmp" || exit 3
+  trap finish EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM HUP
+  python3 "$HELPER" make-shims "$WORK/shims" "$WORK/priv-shim-called" || exit 3
+  set_wenv "$WORK/shims:$BASE_PATH"
+  run_all
+  [ "$ANY_FAIL" = 0 ]
+}
+
+REQUIRED_STAGES='preflight,build,seed,preview,cancel,destructive,repeat,sbx-record-refusal,sbx-record-removal'
+NOT_EXERCISED_TEXT='real MSB sandboxes (running or stopped); GitHub documents nested virtualization as unsupported on arm64 macOS runners and says nothing for Intel, so none is attempted
+Keychain denial and retry (needs an interactive permission prompt)
+forwarding-process refusal and retry across a reboot
+temporary clone remote cleanup
+npm package removal (npm is kept off the wizard PATH)
+refusal when SBX is installed
+opening a browser-downloaded uninstall.command (Gatekeeper and quarantine)'
+
+# Sourcing (the offline tests load the stage functions) defines them and runs nothing.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi
