@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.3.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v4.2.1...v4.3.0) (2026-11-20)
+
+
+### Features
+
+* **qualification:** introduce base-branch evaluator for review ([#699](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/699)) ([fd104b5](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/fd104b51ef91aa12e3b09d365ded5fdeac0014d0))
+* **test:** add local bash 3.2 test runner ([#653](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/653)) ([3b0faa8](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/3b0faa8f0d3114ec47029e612f9faff38ce167bb))
+
+
+### Bug Fixes
+
+* **lint:** run markdown adapter tests in pre-commit and fix colored --count-only ([#718](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/718)) ([6c4526c](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/6c4526cc79694cf26cccddf07ebd46caf8487aa1))
+* **test:** harden portable offline test integrity ([#694](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/694)) ([f2e1276](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/f2e1276807a3d9fc72c631643c6366a45b2a0ca6))
+* **test:** isolate git fixtures from hook-exported GIT_* state ([#596](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/596)) ([cabea7e](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/cabea7e383e2b2b27fbc8166b5156c49573d8e7f))
+* **test:** keep shared kit fixture identities stable ([#721](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/721)) ([8564621](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/85646219af5457010d65d01fb7b8e666f8bf33ba))
+
 ## [4.2.1](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v4.2.0...v4.2.1) (2026-11-05)
 
 
