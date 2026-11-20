@@ -29,8 +29,7 @@ related_files:
 Approved for implementation by the user through the coordinator, including the
 authority amendment below; AI-assisted authorship by OpenCode. Frontmatter stays
 proposed until the integration review accepts the record. The number is
-provisional pending integration renumbering. Index registration belongs to the
-documentation delivery slice.
+provisional pending integration renumbering.
 
 ## Context and Problem Statement
 
@@ -138,9 +137,9 @@ For file/DPAPI stores, put a schema-1 marker containing that authority object in
 `<meta_dir>/.acq-authority-metadata.json`. Marker kind and location must match
 the current resolver's backend and real directory, including independently
 selected metadata directories. Do not identify the value store from its index.
-For persisted provider pins use `.acq-authority-provider-pin.json` beside the
-pin records. Built-in endpoints use a fixed versioned authority tag plus exact
-ENV@HOST; environment/seeded pin layers have unknown endpoint authority.
+Built-in endpoints (github, an unpinned usai) use a fixed `builtin-v1` tag plus
+exact ENV@HOST. Clarification made during implementation: provider-pin records get
+no marker yet, so an endpoint taken from any pin layer reads unknown.
 
 Reads never mint markers. A missing marker or mismatched kind/location yields
 unknown; malformed/unreadable marker contents fail explicitly without echoing
