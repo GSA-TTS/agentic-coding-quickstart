@@ -26,11 +26,11 @@ related_files:
 
 ## Status and approval boundary
 
-Proposed for human review; AI-assisted authorship by OpenCode. The listed decision
-makers have not approved this record. This gate delivers only this ADR and its
-embedded test plan. Implementation starts after the coordinator communicates
-human approval. The number is provisional pending integration renumbering.
-Index registration belongs to the documentation delivery slice.
+Approved for implementation by the user through the coordinator, including the
+authority amendment below; AI-assisted authorship by OpenCode. Frontmatter stays
+proposed until the integration review accepts the record. The number is
+provisional pending integration renumbering. Index registration belongs to the
+documentation delivery slice.
 
 ## Context and Problem Statement
 
@@ -44,12 +44,14 @@ Names, scopes, successful configuration changes, and credential delivery are
 different facts. A store-only import can change a value without contacting MSB;
 MSB can retain side effects after a nonzero exit; a same-name recreation is a new
 instance. Even schema-2 records cannot fence Bash writes to the shared store.
+Independent value/metadata location overrides or a backend switch can select a
+different authority without changing the state directory or credential key.
 
 ## Decision Drivers
 
 - Persist neither credential values nor hashes or any other derivation of them
   in revision sidecars or binding records, including temporary files and errors.
-- Resolve source, scope, revision and the actual delivered endpoint together.
+- Resolve source, scope, authority, revision and the actual delivered endpoint together.
 - Make incomplete store writes and unconfirmed backend changes explicit.
 - Preserve revocation knowledge and prevent stale writers from overwriting it.
 - Use the existing portable advisory locks and atomic-write conventions, with
@@ -59,29 +61,29 @@ instance. Even schema-2 records cannot fence Bash writes to the shared store.
 
 ## Considered Options
 
-1. **Separate credential-application file.** Duplicates sandbox binding ownership
-   and adds a second per-sandbox record to synchronize and remove.
-2. **Add fields to schema 1.** Older Python writers silently discard unknown
-   fields on rewrite; their reads cannot validate the stronger contract.
-3. **Extend `HeldRecord` with schema 2 and add per-key revision sidecars.** Keeps
-   binding ownership together, makes older Python readers refuse the new record,
-   and distinguishes committed store changes from incomplete ones.
+1. **Separate apply file:** duplicates binding ownership and synchronization.
+2. **Add fields to schema 1:** older writers silently discard unknown fields.
+3. **HeldRecord schema 2 plus revision sidecars:** keeps binding ownership together,
+   rejects older readers, and distinguishes committed from incomplete changes.
 
 ## Decision Outcome
 
-Choose option 3. This is a proposed Python-first implementation with reuse
-unconditionally disabled, including after an apparently successful apply.
+Choose option 3, Python-first, with reuse unconditionally disabled even after apply.
 
 ### Store revision transaction
 
 Write `<state>/secret-rev/<key>.json`, where `<state>` is `state.state_dir()` and
 `key` is a validated `acq.<service>` or `acq.<sandbox>.<service>` store key. Tests
-must isolate this root separately from the value-store override. The record has
-exactly `committed` and `pending`, each null or an opaque `r:` token generated
+must isolate this root separately from the value-store override. Sidecar schema 1
+has exactly `schema`, `committed`, `pending`, and `authority`. The schema is the
+integer 1; committed/pending are each null or an opaque `r:` token generated
 independently of the credential using at least 128 random bits. A missing record
 means unknown; malformed or unreadable state is an explicit validation/read
 failure. No reader repairs it. A committed deletion leaves a non-secret revision
 tombstone; remove/re-add of the identical value still produces a new token.
+`authority` identifies the committed revision's value and exact-scope metadata
+stores as described below. Pending never changes that committed identity. A
+two-field sidecar from the original proposal is legacy unknown, not schema 1.
 
 All Python value and endpoint mutations pass through revision-aware choke points
 in `store`, `delete`, `meta_store`, `meta_delete`, and `set_secret`:
@@ -92,8 +94,9 @@ in `store`, `delete`, `meta_store`, `meta_delete`, and `set_secret`:
 3. Persist the requested value/deletion and endpoint changes. `set_secret` is one
    composite transaction: it cannot commit between its value and metadata writes.
    Composite deletion likewise covers both the value and endpoint removal.
-4. Only after confirmed persistence, atomically write `committed = new_token`
-   and `pending = null`. Never infer successful deletion from a discarded
+4. Only after confirmed persistence and rechecking authority markers, atomically
+   write `committed = new_token`, its `authority`, and `pending = null`.
+   Never infer successful deletion from a discarded
    keychain-tool return code or swallowed metadata-unlink failure.
 
 Each direct choke-point call is protected too; a caller already holding the store
@@ -119,14 +122,70 @@ rename is not a cross-backend power-loss transaction, Windows directory fsync is
 not assumed, and native keychain persistence is only as strong as its confirmed
 operation. No stronger host-power-loss guarantee is claimed.
 
+### Authority amendment: identify the actual stores
+
+An authority is null (unknown) or an object with `kind`, `id`, and `location`.
+`id` is an independent random `a:` token of 128 bits. `location` is SHA-256 of
+the normalized absolute real directory path, never of credential data; paths
+and environment values are not persisted. `kind` distinguishes `file`, `dpapi`,
+`metadata`, and `provider-pin`. Path fingerprints are not secret protection.
+The revision sidecar's `authority` is `{value: authority-or-null,
+metadata: authority-or-null}` for its exact key; the apply identity additionally
+records the endpoint actually selected, which may come from another scope.
+
+For file/DPAPI stores, put a schema-1 marker containing that authority object in
+`<file_dir>/.acq-authority-<kind>.json`; use a separate metadata marker in
+`<meta_dir>/.acq-authority-metadata.json`. Marker kind and location must match
+the current resolver's backend and real directory, including independently
+selected metadata directories. Do not identify the value store from its index.
+For persisted provider pins use `.acq-authority-provider-pin.json` beside the
+pin records. Built-in endpoints use a fixed versioned authority tag plus exact
+ENV@HOST; environment/seeded pin layers have unknown endpoint authority.
+
+Reads never mint markers. A missing marker or mismatched kind/location yields
+unknown; malformed/unreadable marker contents fail explicitly without echoing
+contents. Only a successful explicit store/pin write establishes a usable marker
+and committed revision. A marker can be published before the value write, but
+cannot legitimize an old revision: a crash still leaves the revision pending or
+its authority absent/mismatched. A write can replace a location-mismatched marker
+with a fresh identity after invalidation, never reuse its old token. All existing
+keys without matching revision evidence remain unknown after marker creation.
+
+The current macOS and Linux keychain helpers do not report the selected keychain
+or collection identity. A marker beside the index cannot establish that identity.
+Consequently their value authority is null and snapshots report unknown revision
+even after a successful write; no native directory or marker is invented. This is
+a deliberate refinement of the coordinator's per-backend marker suggestion.
+macOS legacy-file fallback and Windows legacy-plaintext fallback likewise report
+unknown, even if a file marker exists. DPAPI encrypted-file reads use the actual
+file directory marker; a failed decrypt establishes no value identity.
+
+Selecting pre-existing store B with state S formerly used for A never inherits
+A's revision: B's missing marker or different identity yields unknown. A backend
+switch is also unknown until that backend's authority can be established and a
+new write commits it. Endpoint-directory switches, including absent metadata
+falling through to a pin, cannot preserve evidence from the previous endpoint
+authority. Returning to A after B overwrote the sidecar remains unknown until a
+new write. Copying A's marker to a different real directory fails location match.
+
+Marker creation and validation run within store exclusion before the held-record
+lock. Use the private atomic-write protocol above; re-read markers before commit
+and promotion. A missing marker is not repaired by snapshot, metadata-only writes
+cannot establish an unknown value authority, and authority changes cannot clear
+an interrupted transaction. Cooperating invocations use the same state-root lock;
+different state roots sharing stores and out-of-band marker/value replacements
+are unversioned writers, covered by the unconditional reuse prohibition.
+
 ### Effective source and endpoint
 
 One resolver supplies an in-memory value separately from its non-secret identity:
-`(source, scope, revision, env, host)`. Source is `sandbox`, `global`, or
+`(source, scope, authority, revision, env, host)`. Source is `sandbox`, `global`, or
 `environment`; scope is the actual sandbox name for a sandbox source and null
 otherwise, so a sandbox named `global` is unambiguous. Value selection preserves
 sandbox-over-global precedence and the existing restricted provider-environment
 fallback. Environment source always has null revision and unknown apply status.
+The effective `authority` has `value` and `endpoint` identities. Endpoint identity
+includes its layer, exact scope and store marker (or the built-in version tag).
 
 Endpoint selection preserves the existing metadata and provider-pin rules.
 Value scope and endpoint scope need not coincide: a sandbox endpoint may accompany
@@ -135,6 +194,9 @@ the selected endpoint as well as the selected value, and captures exact ENV@HOST
 Endpoint-only changes therefore invalidate equality even when the value's own
 revision did not change. Unreadable candidates must not turn into positive
 unchanged evidence. The old `BoundSecret.own` Boolean is not source evidence.
+Recompute authority from the same value/endpoint reads; never trust the sidecar's
+authority without matching the current stores. Any missing, mismatched or unknown
+participating authority yields null effective revision and unknown status.
 
 ### HeldRecord schema 2
 
@@ -146,7 +208,7 @@ Keep `<state>/msb-secret-bindings/<existing-name-key>.json` and its existing
   adopted legacy record starts with unknown evidence under a fresh local token;
   this is acq identity, not proof of an MSB-native instance identifier.
 - `apply`: a service-keyed object. Each entry contains `source`, `scope`, `env`,
-  `host`, `revision`, `applied_revision`, `attempt`, `status`, and `status_at`.
+  `host`, `authority`, `revision`, `applied_revision`, `attempt`, `status`, and `status_at`.
   Tokens are opaque random identities; `status_at` is UTC display information
   only and is never an ordering or reuse authority.
 
@@ -192,7 +254,7 @@ Apply uses this protocol:
    failed pending write prevents the backend call. Keep outer exclusion during
    the operation; no interactive session is included in that exclusion.
 3. On confirmed delivery, reload under the leaf lock and compare instance and
-   attempt tokens. Also compare the captured source/scope/revision/endpoint to
+   attempt tokens. Also compare the captured source/scope/authority/revision/endpoint to
    the current committed effective identity. Only a matching, non-pending store
    identity can become applied, with `applied_revision` equal to the captured
    delivered revision. Never replace it with a newer revision merely read at
@@ -225,6 +287,8 @@ missing/legacy evidence or pending store state reports unknown. Failed evidence
 does not become applied through equality alone. Store-only writes invalidate
 inheritors on read without eagerly editing each record, and unchanged scoped
 bindings retain their identity after an unrelated global change.
+Unknown or mismatched authority also reports unknown, not merely pending, and
+cannot promote applied evidence from store A as evidence for store B.
 
 `reuse_eligible` is **False unconditionally**. Bash and older writers can mutate
 the shared store without reading schema 2 or advancing revision sidecars. This
@@ -237,6 +301,10 @@ inside low-level exec helpers.
 Both `secret-rev/` (including tombstones) and `msb-secret-bindings/` are acq-owned
 state. Uninstall owns their removal according to its existing scope/retention
 contract; deleting a revision sidecar otherwise means unknown, never unchanged.
+Authority markers are acq-owned metadata beside their respective stores, including
+override locations. Uninstall follows those stores' ownership/retention policy;
+it must not recursively remove an operator-selected store directory. Marker
+removal invalidates evidence and never deletes credentials by itself.
 
 ### Corrections to the initial coordinator draft
 
@@ -263,29 +331,23 @@ identified these necessary corrections, accepted by the coordinator for this ADR
    reconciliation, remove/fallback, and prompt cleanup. Import is store-only;
    it invalidates through revision comparison and never claims backend apply.
 
-The coordinator also corrected the inherited Python 3.9 instruction: this work
-targets the declared Python 3.12 runtime and quality gates.
+The coordinator confirmed the declared Python 3.12 runtime and quality gates.
 
 ## Consequences
 
-- Positive: secret-independent identity, explicit uncertainty, strict schema
-  validation and source-correct snapshots support the preparation boundary.
-- Negative: exclusive scoped store transactions reduce mutation concurrency;
-  schema 2 prevents older Python builds from operating on these records.
-- Conservative false negatives are deliberate: interrupted writes require
-  explicit recovery, and delivery without sufficient backend proof stays pending.
-- IA-5/AC-6 credential handling and SI-10 record validation are supported by this
-  design; tests under SA-11 must establish implementation evidence. This local
-  development tool is not an authorized production/hosted environment.
-- Rollback does not downgrade schema or resurrect applied evidence. Use a reader
-  that understands schema 2, or explicitly remove/recreate affected sandboxes.
+- Secret-independent identity and strict validation support preparation snapshots.
+- Exclusive transactions reduce concurrency; schema 2 rejects older readers.
+- Interrupted writes require recovery; unproven delivery stays pending.
+- Keychain values, fallback reads and unmarked legacy stores have unknown
+  authority; file/DPAPI markers prove cooperative location identity only.
+- IA-5/AC-6/SI-10 guide the design; SA-11 tests establish implementation evidence.
+- This is a local development tool, not an authorized hosted environment.
+- Rollback requires a schema-2 reader or explicit sandbox removal/recreation.
 
 ## Short implementation test plan
 
-For every behavior: failing test first, implementation, passing test, then a
-targeted guard mutation that makes the test fail; restore and re-run. Record
-commands, observed exits and assertions. Tests must prove the relevant write or
-backend call ran; absence of execution is not success.
+For every behavior: red, implement, green, mutate its guard to prove red, restore
+and re-run. Record commands, exits and assertions proving the relevant operation ran.
 
 1. **Store/crash:** run a real child process through pending, value, metadata and
    commit writes; handshake at each boundary, kill the child, and inspect actual
@@ -307,13 +369,21 @@ backend call ran; absence of execution is not success.
    versus delayed completion, and crash lock release. Assert backend ordering,
    no lost binding updates and no record resurrection. Do not rely on sleeps
    alone. Run native Windows/macOS lock cases on their hosts.
-5. **Exposure:** use synthetic sentinel credentials with the value store outside
+5. **Authority:** real two-store A-then-B test with a fixed state root, B both
+   unmarked and previously marked; copied-marker/different-location refusal;
+   backend switch; macOS file fallback; Windows legacy fallback; missing marker
+   and legacy sidecar; independently switched endpoint metadata; pin-layer change.
+   Assert old apply evidence never equals B's identity. Each gets a guard
+   mutation; include crash during marker creation and marker change before commit.
+6. **Exposure:** use synthetic sentinel credentials with the value store outside
    the isolated state root. Scan every state file, including temporary and lock
    files, for sentinels and representative encodings/digests; assert neither
    records nor snapshots, errors, stdout/stderr or argv contain them. Mutation
    deliberately writes the sentinel/hash to prove the scan detects it; code
-   review verifies tokens have no dependency on value data.
-6. **Verification:** focused `py-acq/tests` suites for store, MSB bindings, locks,
+   review verifies tokens have no dependency on value data. Also scan every
+   authority marker and its temporary files outside state, leaving actual value
+   files out of that non-secret scan; prove injected leaks there are detected.
+7. **Verification:** focused `py-acq/tests` suites for store, MSB bindings, locks,
    secrets, provider credentials and lifecycle; repo-pinned ruff, mypy, bandit,
    Markdown and secrets checks for touched artifacts. Hosted CI runs the full
    suite. Two blocker-only read-only adversarial passes before push: general and
@@ -325,9 +395,6 @@ backend call ran; absence of execution is not success.
 - [State migration contract](0041m-configuration-and-state-migration-behavior.md)
 - [Backend adapter contract](0040m-backend-adapter-capability-contract.md)
 - [Python implementation guide](../../py-acq/README.md)
-- Tracking: GSA-TTS/agentic-coding-quickstart#695; authoritative requirements in
-  wz-gsa's 2026-11-20 17:08 UTC comment. Integration target:
-  GSA-TTS/agentic-coding-quickstart#697.
-- Coordinated ownership outside this implementation: stopped exec/shell in
-  GSA-TTS/agentic-coding-quickstart#723; uninstall in
-  GSA-TTS/agentic-coding-quickstart#712 and GSA-TTS/agentic-coding-quickstart#713.
+- Requirements: GSA-TTS/agentic-coding-quickstart#695, wz-gsa's 2026-11-20 17:08 UTC comment.
+- Integration: GSA-TTS/agentic-coding-quickstart#697; stopped exec/shell: GSA-TTS/agentic-coding-quickstart#723.
+- Uninstall ownership: GSA-TTS/agentic-coding-quickstart#712 and GSA-TTS/agentic-coding-quickstart#713.
