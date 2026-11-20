@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+#
+# Host-only MSB snapshot/restore capability probe.
+#
+# This deliberately bypasses acq to establish the installed MSB CLI's supported
+# archive/restore pairings before acq translates them. It creates no host mounts
+# or secrets, and uses only disposable probe sandboxes.
+
+set -u
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  scripts/probe-msb-snapshot-restore [IMAGE]
+
+Environment:
+  MSB_PROBE_IMAGE=<image>    default: alpine
+  VERIFY_KEEP=1              retain probe sandboxes and artifacts under tmp/
+
+The probe tests each pairing independently:
+  1. default archive -> ordinary restore
+  2. full archive -> ordinary restore
+  3. full archive -> --disk-only restore
+  4. local full snapshot -> ordinary restore
+  5. local full snapshot -> --disk-only restore
+USAGE
+}
+
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+  usage
+  exit 0
+fi
+
+command -v msb >/dev/null 2>&1 || {
+  echo "ERROR: msb is not on PATH" >&2
+  exit 1
+}
+
+IMAGE="${1:-${MSB_PROBE_IMAGE:-alpine}}"
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+PREFIX="msb-snapshot-probe-$$"
+ARTIFACT_ROOT="$ROOT/tmp"
+WORKDIR="$ARTIFACT_ROOT/$PREFIX"
+mkdir -p "$WORKDIR" || exit 1
+SENTINEL="/root/msb-snapshot-probe-sentinel"
+VALUE="${PREFIX}-$(date -u +%Y%m%dT%H%M%SZ)"
+PASS=0
+FAIL=0
+
+say() { printf '\n==> %s\n' "$*" >&2; }
+LOG="$WORKDIR/probe.log"
+exec > >(tee -a "$LOG") 2>&1
+
+cleanup() {
+  [ "${VERIFY_KEEP:-0}" = "1" ] && {
+    say "Retaining probe sandboxes and archives"
+    printf 'Archive directory: %s\n' "$WORKDIR" >&2
+    return
+  }
+  for name in "$PREFIX-disk" "$PREFIX-disk-restored" "$PREFIX-full" \
+    "$PREFIX-full-restored" "$PREFIX-full-disk" "$PREFIX-full-disk-restored" \
+    "$PREFIX-local-full" "$PREFIX-local-full-restored" "$PREFIX-local-disk" \
+    "$PREFIX-local-disk-restored"; do
+    msb remove --force "$name" >/dev/null 2>&1 || true
+  done
+  rm -rf "$WORKDIR"
+}
+trap cleanup EXIT
+
+create_source() {
+  local name="$1"
+  msb remove --force "$name" >/dev/null 2>&1 || true
+  if ! msb create --name "$name" "$IMAGE"; then
+    echo "FAIL: msb create failed for $name" >&2
+    return 1
+  fi
+  if ! msb exec "$name" -- sh -c "set -eu; printf '%s\\n' '$VALUE' >'$SENTINEL'; test -s '$SENTINEL'; sync '$SENTINEL' 2>/dev/null || sync"; then
+    echo "FAIL: writing source sentinel failed for $name" >&2
+    return 1
+  fi
+  if ! verify_sentinel "$name"; then
+    echo "FAIL: reading source sentinel failed for $name" >&2
+    return 1
+  fi
+  printf 'Source sentinel verified before capture.\n'
+  msb exec "$name" -- sh -c "ls -l '$SENTINEL'; df -T '$SENTINEL' 2>/dev/null || df '$SENTINEL'; mount 2>/dev/null | grep -F ' / ' || true"
+}
+
+verify_sentinel() {
+  local name="$1"
+  local actual
+  actual=$(msb exec "$name" -- sh -c "cat '$SENTINEL'") || return 1
+  # MSB 0.7.7's host-side exec transport appends CR to guest line output.
+  actual=${actual%$'\r'}
+  if [ "$actual" != "$VALUE" ]; then
+    printf 'Sentinel mismatch for %s: expected=%q actual=%q\n' "$name" "$VALUE" "$actual" >&2
+    return 1
+  fi
+}
+
+run_case() {
+  local label="$1" create_args="$2" restore_args="$3" source="$4" target="$5" archive="$6"
+  local rc=0
+  say "$label"
+  if ! create_source "$source"; then
+    echo "FAIL: source creation failed" >&2
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  # shellcheck disable=SC2086 # Probe supplies fixed option groups, not user input.
+  if ! msb snapshot create --from-sandbox "$source" $create_args -o "$archive"; then
+    echo "FAIL: snapshot creation failed" >&2
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  msb remove --force "$source" || { echo "FAIL: source removal failed" >&2; FAIL=$((FAIL + 1)); return; }
+  # shellcheck disable=SC2086 # Probe supplies fixed option groups, not user input.
+  msb restore "$archive" --name "$target" $restore_args || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf 'FAIL: restore exited %s\n' "$rc" >&2
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  if verify_sentinel "$target"; then
+    echo "PASS: restore succeeded and preserved the sentinel" >&2
+    PASS=$((PASS + 1))
+  else
+    echo "FAIL: restore succeeded but the sentinel was not preserved" >&2
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+run_local_case() {
+  local label="$1" create_args="$2" restore_args="$3" source="$4" target="$5"
+  local checkpoint="recovery" snapshot rc=0
+  say "$label"
+  if ! create_source "$source"; then
+    echo "FAIL: source creation failed" >&2
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  # shellcheck disable=SC2086 # Probe supplies fixed option groups, not user input.
+  # A named member gives restore a stable group:member selector. The CLI's
+  # human-readable creation output is intentionally not treated as a selector.
+  msb snapshot create --from-sandbox "$source" "$checkpoint" $create_args || {
+    echo "FAIL: local snapshot creation failed" >&2
+    FAIL=$((FAIL + 1))
+    return
+  }
+  snapshot="$source:$checkpoint"
+  printf '%s\n' "$snapshot" >"$WORKDIR/${target}.snapshot-ref"
+  printf 'Local snapshot reference: %s\n' "$snapshot"
+  msb remove --force "$source" || { echo "FAIL: source removal failed" >&2; FAIL=$((FAIL + 1)); return; }
+  # shellcheck disable=SC2086 # Probe supplies fixed option groups, not user input.
+  msb restore "$snapshot" --name "$target" $restore_args || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf 'FAIL: restore exited %s\n' "$rc" >&2
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  if verify_sentinel "$target"; then
+    echo "PASS: restore succeeded and preserved the sentinel" >&2
+    PASS=$((PASS + 1))
+  else
+    echo "FAIL: restore succeeded but the sentinel was not preserved" >&2
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+say "MSB version"
+msb --version
+say "Installed snapshot create help"
+msb snapshot create --help
+say "Installed restore help"
+msb restore --help
+say "Testing image: $IMAGE"
+say "Probe archive directory: $WORKDIR"
+
+run_case "default archive -> ordinary restore" \
+  "--guest-flush required" "" \
+  "$PREFIX-disk" "$PREFIX-disk-restored" "$WORKDIR/default.msb"
+run_case "full archive -> ordinary restore" \
+  "--full --guest-flush required" "" \
+  "$PREFIX-full" "$PREFIX-full-restored" "$WORKDIR/full.msb"
+run_case "full archive -> disk-only restore" \
+  "--full --guest-flush required" "--disk-only" \
+  "$PREFIX-full-disk" "$PREFIX-full-disk-restored" "$WORKDIR/full-disk-only.msb"
+run_local_case "local full snapshot -> ordinary restore" \
+  "--full --guest-flush required" "" \
+  "$PREFIX-local-full" "$PREFIX-local-full-restored"
+run_local_case "local full snapshot -> disk-only restore" \
+  "--full --guest-flush required" "--disk-only" \
+  "$PREFIX-local-disk" "$PREFIX-local-disk-restored"
+
+say "Probe summary: $PASS passed, $FAIL failed"
+[ "$FAIL" -eq 0 ]

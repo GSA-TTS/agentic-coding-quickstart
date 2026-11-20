@@ -71,6 +71,7 @@ scripts/fix-exec-bits
 scripts/install-provider-input-wheelhouse
 scripts/probe-msb-node-startup
 scripts/probe-msb-posthoc-ports
+scripts/probe-msb-snapshot-restore
 scripts/probe-msb-startup
 scripts/rotate-apikey
 scripts/run-shellcheck
@@ -88,6 +89,8 @@ scripts/verify-git-https-secret-msb
 scripts/verify-host-authority-live
 scripts/verify-image-override
 scripts/verify-issue-320
+scripts/verify-msb-host-config-mount
+scripts/verify-native-snapshot-restore
 scripts/verify-net-default-egress
 scripts/verify-ports-live'
 
