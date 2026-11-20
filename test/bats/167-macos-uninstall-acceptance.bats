@@ -26,23 +26,46 @@ WORKFLOW_REL='.github/workflows/macos-uninstall-acceptance.yml'
 setup() { SCRATCH=$(mktemp -d "${BATS_TMPDIR:-/tmp}/acq-167.XXXXXX"); }
 teardown() { [ -z "${SCRATCH:-}" ] || rm -rf "$SCRATCH"; }
 
+# grep for a pattern that may legitimately be absent: no match (status 1) is fine and
+# prints nothing, but a real failure (status 2+: unreadable or missing input, bad
+# pattern) is an error and is never read as "no match".
+grep_ok() {
+  local rc=0
+  grep "$@" || rc=$?
+  [ "$rc" -le 1 ] || { printf 'grep failed (status %s): %s\n' "$rc" "$*" >&2; return "$rc"; }
+}
+
+# An input a check depends on must be a readable regular file, or the check proves nothing.
+need_file() {
+  [ -f "$1" ] && [ -r "$1" ] || { printf 'cannot read input file: %s\n' "$1"; return 1; }
+}
+
+# A stand-in earlier on PATH that exits 2 like a broken tool.
+failing_tool_path() { # tool
+  mkdir -p "$SCRATCH/broken"
+  printf '#!/bin/sh\necho "%s: injected failure" >&2\nexit 2\n' "$1" > "$SCRATCH/broken/$1"
+  chmod +x "$SCRATCH/broken/$1"
+}
+
 # ---- workflow checks: each prints a reason and fails when the property is lost
 
 # Top-level keys other than the trigger must not add events.
 check_trigger_only_dispatch() {
+  need_file "$1" || return 1
   awk '
     /^on:/ { on = 1; next }
     on && /^[^ #]/ { on = 0 }
     on && /^  [A-Za-z_]+:/ { sub(/^  /, ""); sub(/:.*/, ""); print }
   ' "$1" | grep -qx 'workflow_dispatch' || { echo 'workflow_dispatch trigger missing'; return 1; }
-  local extra
+  local extra inline
   extra=$(awk '
     /^on:/ { on = 1; next }
     on && /^[^ #]/ { on = 0 }
     on && /^  [A-Za-z_]+:/ { sub(/^  /, ""); sub(/:.*/, ""); print }
-  ' "$1" | grep -vx 'workflow_dispatch' || true)
+  ' "$1" | grep_ok -vx 'workflow_dispatch') || { echo 'cannot list the triggers'; return 1; }
   [ -z "$extra" ] || { echo "extra trigger(s): $extra"; return 1; }
-  ! grep -Eq '^on: *(\[|[A-Za-z])' "$1" || { echo 'inline on: form'; return 1; }
+  inline=$(grep_ok -E '^on: *(\[|[A-Za-z])' "$1") || { echo 'cannot check for an inline on: form'; return 1; }
+  [ -z "$inline" ] || { echo 'inline on: form'; return 1; }
 }
 
 check_empty_top_permissions() {
@@ -56,8 +79,10 @@ check_job_permissions_read_only() {
 }
 
 check_actions_pinned() {
-  local bad
-  bad=$(grep -E '^[[:space:]-]*uses:' "$1" | grep -Ev 'uses: *[A-Za-z0-9._-]+/[A-Za-z0-9._/-]+@[0-9a-f]{40} +# +v[0-9]' || true)
+  local bad uses
+  need_file "$1" || return 1
+  uses=$(grep_ok -E '^[[:space:]-]*uses:' "$1") || { echo 'cannot scan the uses: lines'; return 1; }
+  bad=$(printf '%s\n' "$uses" | grep_ok -Ev 'uses: *[A-Za-z0-9._-]+/[A-Za-z0-9._/-]+@[0-9a-f]{40} +# +v[0-9]|^$') || { echo 'cannot filter the uses: lines'; return 1; }
   [ -z "$bad" ] || { echo "action not pinned to a 40-hex SHA with a version comment: $bad"; return 1; }
   grep -Eq '^[[:space:]-]*uses:' "$1" || { echo 'no uses: lines found (parser would be vacuous)'; return 1; }
 }
@@ -88,13 +113,18 @@ check_no_expressions_in_run() {
 }
 
 check_ref_input_only_via_env_or_with() {
-  local hits
-  hits=$(grep -n 'inputs\.' "$1" | grep -Ev '^[0-9]+:[[:space:]]+(SUBJECT_REF|RUN_HOMEBREW): \$\{\{ inputs\.(ref|homebrew) \}\}$|^[0-9]+:[[:space:]]+ref: \$\{\{ inputs\.ref \}\}$' || true)
+  local hits all
+  need_file "$1" || return 1
+  all=$(grep_ok -n 'inputs\.' "$1") || { echo 'cannot scan for inputs.*'; return 1; }
+  hits=$(printf '%s\n' "$all" | grep_ok -Ev '^[0-9]+:[[:space:]]+(SUBJECT_REF|RUN_HOMEBREW): \$\{\{ inputs\.(ref|homebrew) \}\}$|^[0-9]+:[[:space:]]+ref: \$\{\{ inputs\.ref \}\}$|^$') || { echo 'cannot filter inputs.* uses'; return 1; }
   [ -z "$hits" ] || { echo "inputs.* used outside env:/with: ref: $hits"; return 1; }
 }
 
 check_no_privilege_words() {
-  ! grep -Eiw 'sudo|doas' "$1" >/dev/null || { echo 'privilege escalation word present'; return 1; }
+  local hits
+  need_file "$1" || return 1
+  hits=$(grep_ok -Eiw 'sudo|doas' "$1") || { echo 'cannot scan for privilege words'; return 1; }
+  [ -z "$hits" ] || { echo 'privilege escalation word present'; return 1; }
 }
 
 all_workflow_checks() {
@@ -315,9 +345,11 @@ mutate_after() { # name exact-line-to-find text-to-insert-after-its-first-occurr
 }
 
 @test "harness: every seeded path is under the throwaway HOME, never the real one" {
-  local bad
+  local bad all
+  need_file "$REPO_ROOT/$LIB_REL" && need_file "$REPO_ROOT/$SCRIPT_REL" || fail 'a harness file is unreadable'
   # Text inside single-quoted printf formats is written into the fake rc file, not expanded.
-  bad=$(grep -nE '\$HOME|~/' "$REPO_ROOT/$LIB_REL" "$REPO_ROOT/$SCRIPT_REL" | grep -Ev ":[0-9]+:[[:space:]]*(#|printf ')" || true)
+  all=$(grep_ok -nE '\$HOME|~/' "$REPO_ROOT/$LIB_REL" "$REPO_ROOT/$SCRIPT_REL") || fail 'cannot scan the harness for $HOME'
+  bad=$(printf '%s\n' "$all" | grep_ok -Ev ":[0-9]+:[[:space:]]*(#|printf ')|^$") || fail 'cannot filter the $HOME scan'
   [ -z "$bad" ] || fail "references the real HOME: $bad"
 }
 
@@ -508,6 +540,7 @@ cl_row() { grep "^cleanup${TAB}" "$SCRATCH/cl-$1/out/results.tsv"; }
 
 make_bsd_shims() {
   local dir=$SCRATCH/bsd tool real
+  [ ! -e "$dir/grep" ] || return 0
   mkdir -p "$dir"
   for tool in grep sed xargs readlink date; do
     real=$(command -v "$tool") || continue
@@ -567,18 +600,39 @@ SHIM
 
 # Static scan of the harness and this file for forms that break on stock macOS (BSD
 # userland, Bash 3.2).
+# `sed -i ''` (the BSD spelling) is flagged on purpose: the harness and its tests run on both
+# Linux and macOS, and only `sed -i.bak` works on both.
 PORTABILITY_PATTERNS='grep +(-[A-Za-z]+ +)*(-[A-Za-z]*P|--perl-regexp)|sed +(-[A-Za-z]+ +)*(-[A-Za-z]*r[A-Za-z]* |--regexp-extended|--in-place)|sed +-i +[^ ]|sed +-i$|readlink +-f|date +-d|xargs +-r|--no-run-if-empty|find [^|]*-printf|stat +-c|sort +-V|(grep|sed)[^|]*\\[tdsw]|declare +-A|mapfile|readarray|\|&|&>>|\$\{[A-Za-z_]+(,,|\^\^)'
+# Prints one line per hit and returns 0 (no hits is an empty output and still 0). Any
+# read or tool failure prints a reason on stderr and returns 2, so a scan that could not
+# run is never read as "nothing found". grep's no-match status 1 is the only tolerated
+# nonzero status.
+scan_grep() { # grep-args... (input on stdin)
+  local rc=0
+  grep "$@" || rc=$?
+  [ "$rc" -le 1 ] || { printf 'portability scan: grep failed (status %s)\n' "$rc" >&2; return 2; }
+}
+
 portability_scan() { # file...
-  local f
+  local f numbered all='' hits
+  [ "$#" -gt 0 ] || { echo 'portability scan: no input files' >&2; return 2; }
   for f in "$@"; do
-    awk '/portability-scan-be[g]in/ { skip = 1 } !skip { print FILENAME ":" FNR ": " $0 } /portability-scan-e[n]d/ { skip = 0 }' "$f"
-  done | grep -E -- "$PORTABILITY_PATTERNS" | grep -Ev '^[^:]+:[0-9]+: *#' || true
+    if [ ! -f "$f" ] || [ ! -r "$f" ]; then
+      printf 'portability scan: cannot read input file: %s\n' "$f" >&2; return 2
+    fi
+    numbered=$(awk '/portability-scan-be[g]in/ { skip = 1 } !skip { print FILENAME ":" FNR ": " $0 } /portability-scan-e[n]d/ { skip = 0 }' "$f") ||
+      { printf 'portability scan: awk failed on %s\n' "$f" >&2; return 2; }
+    all="$all$numbered"$'\n'
+  done
+  hits=$(printf '%s' "$all" | scan_grep -E -- "$PORTABILITY_PATTERNS") || return 2
+  printf '%s' "$hits" | scan_grep -Ev '^[^:]+:[0-9]+: *#' || return 2
+  printf '\n'
 }
 
 @test "portability: no GNU-only grep/sed/xargs/readlink/date forms or Bash 4 features in the harness or its tests" {
-  local hits
-  hits=$(portability_scan "$REPO_ROOT/$SCRIPT_REL" "$REPO_ROOT/$LIB_REL" "$REPO_ROOT/$HELPER_REL" "$REPO_ROOT/test/bats/167-macos-uninstall-acceptance.bats")
-  [ -z "$hits" ] || fail "non-portable usage: $hits"
+  run portability_scan "$REPO_ROOT/$SCRIPT_REL" "$REPO_ROOT/$LIB_REL" "$REPO_ROOT/$HELPER_REL" "$REPO_ROOT/test/bats/167-macos-uninstall-acceptance.bats"
+  [ "$status" -eq 0 ] || fail "the portability scan could not run: $output"
+  [ -z "$output" ] || fail "non-portable usage: $output"
 }
 
 @test "portability: the static scan flags each GNU-only form it is meant to catch" {
@@ -586,14 +640,108 @@ portability_scan() { # file...
   for line in "grep -P 'x' f" "grep -oP x f" "grep -q -P x f" "sed -n -r p f" "sed -r 's/a/b/' f" "sed -i 's/a/b/' f" "readlink -f x" "date -d yesterday" \
     "xargs -r rm" "find . -printf x" "stat -c %s f" "grep '^a\\t' f" "declare -A m" "mapfile -t a" 'x=${v,,}' 'x=${v^^}' "cmd |& tee f"; do
     printf '%s\n' "$line" > "$SCRATCH/probe"
-    [ -n "$(portability_scan "$SCRATCH/probe")" ] || fail "scan missed: $line"
+    run portability_scan "$SCRATCH/probe"
+    [ "$status" -eq 0 ] || fail "scan could not run on: $line: $output"
+    [ -n "$output" ] || fail "scan missed: $line"
     n=$((n + 1))
   done
   for line in "grep -Eq 'a|b' f" "sed -e 's/a/b/' f" "sed -i.bak 's/a/b/' f" "mktemp -d \"\$T/x.XXXXXX\"" "readlink x"; do
     printf '%s\n' "$line" > "$SCRATCH/probe"
-    [ -z "$(portability_scan "$SCRATCH/probe")" ] || fail "scan flagged a portable form: $line"
+    run portability_scan "$SCRATCH/probe"
+    [ "$status" -eq 0 ] || fail "scan could not run on: $line: $output"
+    [ -z "$output" ] || fail "scan flagged a portable form: $line"
   done
   [ "$n" -eq 17 ]
+}
+
+# A scan that cannot read or run must fail loudly, never report "no hits".
+@test "workflow checks: a missing or unreadable workflow file fails every check instead of passing" {
+  local check
+  for check in check_trigger_only_dispatch check_empty_top_permissions check_job_permissions_read_only \
+    check_actions_pinned check_checkouts_drop_credentials check_no_expressions_in_run \
+    check_ref_input_only_via_env_or_with check_no_privilege_words; do
+    run "$check" "$SCRATCH/no-such-workflow.yml"
+    [ "$status" -ne 0 ] || fail "$check passed on a missing file"
+    run "$check" "$SCRATCH"
+    [ "$status" -ne 0 ] || fail "$check passed on a directory"
+  done
+}
+
+@test "workflow checks: a failing grep is an error, not a clean result" {
+  failing_tool_path grep
+  local old=$PATH check
+  PATH="$SCRATCH/broken:$PATH"
+  for check in check_actions_pinned check_ref_input_only_via_env_or_with check_trigger_only_dispatch; do
+    run "$check" "$REPO_ROOT/$WORKFLOW_REL"
+    [ "$status" -ne 0 ] || { PATH=$old; fail "$check passed although grep failed"; }
+  done
+  PATH=$old
+}
+
+@test "portability scan: a missing input file is an error, not an empty result" {
+  run portability_scan "$SCRATCH/does-not-exist"
+  [ "$status" -eq 2 ] || fail "status $status, output: $output"
+  case "$output" in *'cannot read input file'*) ;; *) fail "reason not given: $output" ;; esac
+}
+
+@test "portability scan: a directory or dangling link as input is an error" {
+  mkdir "$SCRATCH/adir"; ln -s "$SCRATCH/nowhere" "$SCRATCH/dangling"
+  run portability_scan "$SCRATCH/adir"
+  [ "$status" -eq 2 ] || fail "directory: status $status, output: $output"
+  run portability_scan "$SCRATCH/dangling"
+  [ "$status" -eq 2 ] || fail "dangling link: status $status, output: $output"
+}
+
+@test "portability scan: an unreadable file is an error (skipped as root, where chmod 000 still reads)" {
+  [ "$(id -u)" != 0 ] || skip 'root can read a mode 000 file; the directory case covers this'
+  printf 'x\n' > "$SCRATCH/locked"; chmod 000 "$SCRATCH/locked"
+  run portability_scan "$SCRATCH/locked"
+  chmod 600 "$SCRATCH/locked"
+  [ "$status" -eq 2 ] || fail "status $status, output: $output"
+}
+
+@test "portability scan: an input list with one bad file fails even when the others are clean" {
+  printf 'echo ok\n' > "$SCRATCH/clean"
+  run portability_scan "$SCRATCH/clean" "$SCRATCH/does-not-exist"
+  [ "$status" -eq 2 ] || fail "status $status, output: $output"
+  run portability_scan
+  [ "$status" -eq 2 ] || fail "no inputs: status $status"
+}
+
+@test "portability scan: an awk failure is an error, not an empty result" {
+  printf 'echo ok\n' > "$SCRATCH/clean"; failing_tool_path awk
+  local old=$PATH; PATH="$SCRATCH/broken:$PATH"
+  run portability_scan "$SCRATCH/clean"
+  PATH=$old
+  [ "$status" -eq 2 ] || fail "status $status, output: $output"
+  case "$output" in *'awk failed'*) ;; *) fail "reason not given: $output" ;; esac
+}
+
+@test "portability scan: a grep failure is an error, not an empty result" {
+  printf 'echo ok\n' > "$SCRATCH/clean"; failing_tool_path grep
+  local old=$PATH; PATH="$SCRATCH/broken:$PATH"
+  run portability_scan "$SCRATCH/clean"
+  PATH=$old
+  [ "$status" -eq 2 ] || fail "status $status, output: $output"
+  case "$output" in *'grep failed'*) ;; *) fail "reason not given: $output" ;; esac
+}
+
+@test "portability scan: grep's ordinary no-match status is not an error" {
+  printf 'echo ok\n' > "$SCRATCH/clean"
+  run portability_scan "$SCRATCH/clean"
+  [ "$status" -eq 0 ] || fail "status $status, output: $output"
+  [ -z "$output" ] || fail "unexpected hits: $output"
+}
+
+@test "portability: creating the BSD stand-ins twice does not make a stand-in call itself" {
+  local real_grep tool
+  real_grep=$(command -v grep)
+  make_bsd_shims
+  PATH="$SCRATCH/bsd:$PATH"
+  make_bsd_shims
+  for tool in grep sed xargs readlink date; do
+    ! "$real_grep" -q "^real=$SCRATCH/bsd/" "$SCRATCH/bsd/$tool" || fail "the $tool stand-in would exec itself"
+  done
 }
 
 # portability-scan-end
@@ -674,7 +822,8 @@ assert_cleanup_fails() { # label expected-text injections...
   ' >"$SCRATCH/u/stdout" 2>"$SCRATCH/u/stderr" || CL_RC=$?
   [ "$CL_RC" -ne 0 ] || fail 'keychain_create succeeded without a readable runner keychain state'
   grep -q 'cannot read the runner user keychain state' "$SCRATCH/u/stderr"
-  [ -z "$(ls "$SCRATCH/u/rt/keychains" 2>/dev/null)" ] || fail "a keychain was created"
+  [ -d "$SCRATCH/u/rt/keychains" ] || fail 'the keychain directory is missing, so "nothing was created" proves nothing'
+  [ -z "$(ls "$SCRATCH/u/rt/keychains")" ] || fail "a keychain was created"
 }
 
 @test "cleanup: a runner-user search list the run changed is restored and verified" {
