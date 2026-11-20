@@ -13,11 +13,12 @@ teardown() { acq_teardown_stubs; }
 
 load 'helper'
 
-@test "help: acq help shows the banner, --backend list, and appends backend help" {
+@test "help: acq help shows the banner, registered backends, and appends backend help" {
   run env ACQ_BACKEND=sbx "$ACQ" help
   assert_success
   assert_output --partial 'acq — agentic coding quickstart wrapper'
-  assert_output --partial '--backend sbx|msb'
+  assert_output --partial '--backend NAME'
+  assert_output --partial 'Registered: sbx, msb, openshell'
   assert_output --partial 'microsandbox (msb)'
   assert_output --partial 'SBX-TOPLEVEL-HELP'
 }
