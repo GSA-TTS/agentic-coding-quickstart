@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-11-05"
+last_updated: "2026-11-17"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -56,6 +56,21 @@ effective memory, CPU and PID enforcement alongside network/source/credential
 separation and cleanup. Kit installation and rootless storage readiness alone
 are insufficient evidence. No host engine socket or privileged-host workaround
 is required or authorized by this guidance.
+
+## Secret input intermittently appears on the host terminal
+
+Earlier masked input used one silent read per character. Terminal echo could
+resume between reads during a paste, and read failure could fall back to visible
+input. Treat a credential that appeared in terminal output as potentially
+exposed and rotate it; do not attach terminal recordings containing values.
+
+The reader in `acq.backends/secret-store.sh` now holds echo off for the entire
+entry and shows the prompt only after secure terminal setup succeeds. EOF and
+Ctrl-D abort without storing a partial value. Setup failure aborts rather than
+falling back to visible input. Saved terminal settings are restored on completion
+and handled signals. If an untrappable termination leaves echo disabled, run
+`stty sane` on the host terminal. See
+[ADR-0041](adr/0041-hold-terminal-echo-off-during-secret-entry.md).
 
 ## Provider-input validator dependencies are missing
 
