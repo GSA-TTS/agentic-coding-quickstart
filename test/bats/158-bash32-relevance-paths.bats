@@ -60,6 +60,7 @@ scripts/validate-git-executable-modes
 scripts/verify-backends
 scripts/qualify-msb-ro-mount
 scripts/rotate-apikey
+scripts/build-uninstaller
 scripts/probe-msb-node-startup
 scripts/test-uninstall-macos
 scripts/uninstall-acceptance-helper.py

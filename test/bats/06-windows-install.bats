@@ -264,7 +264,7 @@ teardown() {
   assert_regex "$workflow" 'PYTHON_EMBED_SHA256'
   assert_regex "$workflow" 'provider-input-validator-runtime-windows-x86_64\.zip'
   assert_regex "$workflow" 'test -f runtime/LICENSE\.txt'
-  assert_regex "$workflow" 'sha256sum install\.sh install\.ps1 acq-windows-x64\.zip provider-input-validator-wheelhouse-\*\.tar\.gz > SHA256SUMS'
+  assert_regex "$workflow" 'sha256sum install\.sh install\.ps1 uninstall\.command acq-windows-x64\.zip provider-input-validator-wheelhouse-\*\.tar\.gz > SHA256SUMS'
   assert_regex "$workflow" 'dist/acq-windows-x64\.zip'
 }
 
