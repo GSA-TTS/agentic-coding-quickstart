@@ -128,12 +128,18 @@ def strip_group_diagnostics(tail, root):
     return tail
 
 
+# Ctrl-C is delivered by the line discipline to the whole foreground process group,
+# exactly like `kill -pgid`, so "interrupt" can show the same bash teardown
+# diagnostics as the -group modes (observed on bash 3.2.57 with the unmodified reader).
+GROUP_DELIVERED = ("interrupt", "terminate-group", "hangup-group")
+
+
 def check_transcript(mode, observed, root):
     expected = expected_transcript(mode)
     overlap = set(PAYLOADS.get(mode, b"")) & set(expected)
     assert not overlap, (mode, "payload overlaps allow-list", sorted(overlap))
     observed = bytes(observed)
-    if mode.endswith("-group") and observed.startswith(expected):
+    if mode in GROUP_DELIVERED and observed.startswith(expected):
         # The WHOLE transcript is judged: only allowed diagnostics may follow.
         remainder = strip_group_diagnostics(observed[len(expected):], root)
         if not remainder:
@@ -160,6 +166,30 @@ def reader_pid(parent):
         node = children[node][0]
     assert node != parent, "reader subshell not found"
     return node
+
+
+def process_state(pid):
+    result = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, check=False)
+    return result.stdout.strip()
+
+
+def wait_reader_blocked(parent, timeout=5):
+    """Return once the reader subshell is asleep, i.e. blocked in its next read.
+
+    After the last mask the reader only runs non-blocking builtins before it
+    reads again, so a sleeping state means it is blocked in read(2). A signal
+    sent earlier can land between the loop test and the read: bash 3.2 then
+    defers the trap until a byte arrives, stranding the reader (and the
+    terminal settings) with no timed read to recover it. That is a property of
+    the interleaving, not of the restoration under test, so the signal is only
+    sent once the reader has been seen asleep on two polls in a row."""
+    pid = reader_pid(parent)
+    deadline = time.monotonic() + timeout
+    asleep = 0
+    while asleep < 2:
+        assert time.monotonic() < deadline, "reader never blocked in read"
+        asleep = asleep + 1 if process_state(pid).startswith("S") else 0
+        time.sleep(0.01)
 
 
 def collect(fd, process, timeout=5):
@@ -224,6 +254,8 @@ def exercise(root, scratch, mode):
                     assert time.monotonic() < deadline, "mask echo timed out"
                     if select.select([master], [], [], 0.05)[0]:
                         observed.extend(os.read(master, 65536))
+            if mode in SIGNAL_MODES:
+                wait_reader_blocked(process.pid)
             if mode == "interrupt":
                 os.write(master, b"\x03")
             elif mode == "terminate-group":
@@ -328,7 +360,7 @@ def transcript_controls(root):
     script = str(Path(root) / "acq.backends" / "secret-store.sh").encode()
     warning = script + b": line 1: warning: run_pending_traps: bad value in trap_list[1]: 0x1\r\n"
     command = script + b": line 1022: TERM: command not found\r\n"
-    for mode in ("terminate-group", "hangup-group"):
+    for mode in GROUP_DELIVERED:
         expected = expected_transcript(mode)
         for suffix in (b"", warning, command, warning + command):
             check_transcript(mode, expected + suffix, root)
@@ -396,6 +428,75 @@ def negative_controls(root, scratch, run=exercise, leaks=None):
             raise AssertionError((name, "leaky variant not rejected for the stated reason", errors[-1:]))
 
 
+def reader_sync_controls(root, scratch):
+    """The signal must wait for the reader to be blocked in read(2).
+
+    bash 3.2 can lose a signal that lands between its pending-trap check and the
+    read(2) call: the trap then waits for the next byte and the reader (and the
+    terminal settings it must restore) is stranded. That window cannot be forced
+    from outside, so the two halves of the synchronization contract are pinned:
+    (1) wait_reader_blocked does not return while the reader is still running;
+    (2) exercise() calls it before it sends any signal, in every signal mode."""
+    flag = scratch / "reader-may-block"
+    holder = subprocess.Popen(
+        ["bash", "-c", '( while [ ! -e "$1" ]; do :; done; read -r x ); :', "_", str(flag)],
+        stdin=subprocess.PIPE, start_new_session=True)
+    try:
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                reader_pid(holder.pid)
+                break
+            except AssertionError:
+                assert time.monotonic() < deadline, "sync fixture reader never started"
+                time.sleep(0.01)
+        try:
+            wait_reader_blocked(holder.pid, timeout=0.5)
+        except AssertionError as error:
+            assert "never blocked" in str(error), str(error)
+        else:
+            raise AssertionError("wait_reader_blocked returned while the reader was still running")
+        flag.write_bytes(b"")
+        wait_reader_blocked(holder.pid, timeout=5)
+    finally:
+        os.killpg(holder.pid, signal.SIGKILL)
+        holder.wait()
+        holder.stdin.close()
+
+    events = []
+    real_write, real_killpg, real_kill = os.write, os.killpg, os.kill
+    real_wait = wait_reader_blocked
+
+    def write(fd, data):
+        if data == b"\x03":
+            events.append("signal")
+        return real_write(fd, data)
+
+    def killpg(pgid, sig):
+        events.append("signal")
+        return real_killpg(pgid, sig)
+
+    def kill(pid, sig):
+        if sig != 0:
+            events.append("signal")
+        return real_kill(pid, sig)
+
+    def waited(pid, timeout=5):
+        events.append("wait")
+        return real_wait(pid, timeout)
+
+    try:
+        os.write, os.killpg, os.kill = write, killpg, kill
+        globals()["wait_reader_blocked"] = waited
+        for mode in SIGNAL_MODES:
+            del events[:]
+            exercise(root, scratch, mode)
+            assert events == ["wait", "signal"], (mode, "signal not preceded by the blocked-reader wait", events)
+    finally:
+        os.write, os.killpg, os.kill = real_write, real_killpg, real_kill
+        globals()["wait_reader_blocked"] = real_wait
+
+
 def mutation_witness_controls(root, scratch):
     """Drive negative_controls with a substitute for exercise: an unrelated
     transcript failure must not credit a group mutation whose handler never ran,
@@ -429,5 +530,6 @@ if __name__ == "__main__":
         exercise(root, scratch, mode)
     transcript_controls(root)
     mutation_witness_controls(root, scratch)
+    reader_sync_controls(root, scratch)
     negative_controls(root, scratch)
     print("terminal checks passed")
