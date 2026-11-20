@@ -187,8 +187,7 @@ def _credential_locks(lock_backends: list[str], scope: secretstore.Scope, servic
                 stack.enter_context(lock.sandbox_lock(backend, scope.sandbox))
         if service == provider_creds.USAI_PROVIDER_ID:
             stack.enter_context(lock.provider_credential_lock(service))
-        if scope.sandbox is None:
-            stack.enter_context(lock.secret_store_lock())
+        stack.enter_context(lock.secret_store_lock())
         yield
 
 
@@ -201,7 +200,7 @@ def _set_apply(backend: str, scope: secretstore.Scope, service: str, value: str,
     try:
         if preflight is not None:
             preflight(scope, service, host, env)
-        secretstore.set_secret(service, scope.sandbox, value, host, env)
+        secretstore.set_secret_locked(service, scope.sandbox, value, host, env)
     except common._ADAPTER_ERRORS as exc:
         return common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
     try:
@@ -330,8 +329,7 @@ def _rm_apply(adapter, scope: secretstore.Scope, service: str, accept: list[str]
             accepted = adapter.secret_unbind(scope, service, accept_unconfirmed=accept) or []
         elif in_backend is not False:
             adapter.secret_unbind(scope, service)
-        secretstore.delete(secretstore.key_for(service, scope.sandbox))
-        secretstore.meta_delete(service, scope.sandbox)
+        secretstore.remove_secret_locked(service, scope.sandbox)
     except common._ADAPTER_ERRORS as exc:
         return common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
     data: dict = {"scope": scope.label, "scope_kind": _scope_kind(scope), "service": service, "value_state": "unset"}
@@ -592,7 +590,7 @@ def _import_one(svc: str, envvar: str, opts: _ImportArgs, scope: secretstore.Sco
         if reason is not None:
             return {**entry, "outcome": "skipped", "reason": reason}
     with _import_write_lock(svc, scope):
-        secretstore.store(secretstore.key_for(svc, scope.sandbox), value)
+        secretstore.store_locked(secretstore.key_for(svc, scope.sandbox), value)
     say(f"acq: imported '{svc}' ({desc}) from ${envvar}.")
     return {**entry, "outcome": "imported"}
 

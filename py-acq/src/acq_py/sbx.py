@@ -39,7 +39,16 @@ import subprocess
 import sys
 from typing import NamedTuple
 
-from . import backends, errors, hostexec, kits, provider_creds, secretstore, timeouts
+from . import (
+    backends,
+    errors,
+    hostexec,
+    kits,
+    lock,
+    provider_creds,
+    secretstore,
+    timeouts,
+)
 from .secretstore import Scope
 
 STUB_SENTINEL = "__stub__"
@@ -1254,6 +1263,11 @@ def provider_credential_set(provider: str, key_env: str, hosts: list[str], value
         )
 
 
+def provider_credential_set_locked(provider: str, key_env: str, hosts: list[str], value: str) -> None:
+    """SBX stores natively; the command already owns provider/store exclusion."""
+    provider_credential_set(provider, key_env, hosts, value)
+
+
 def custom_secret_placeholders(scope: Scope | str, env: str) -> list[str]:
     """Placeholders of the custom secrets sbx still lists for ``env`` in exactly
     ``scope``, for any host (an ambiguous ``global`` label included; ``""`` for
@@ -1273,9 +1287,10 @@ def github_scope(sandbox: str, value: str) -> None:
     :class:`secretstore.SecretStoreError`.
     """
     scope = secretstore.sandbox_scope(sandbox)
-    secret_preflight(scope, "github")
-    secretstore.set_secret("github", sandbox, value)
-    secret_feed(scope, "github", value)
+    with lock.secret_store_lock():
+        secret_preflight(scope, "github")
+        secretstore.set_secret_locked("github", sandbox, value)
+        secret_feed(scope, "github", value)
 
 
 # --- usai-rotate-api-key (ADR-0012, ADR-0008) ---------------------------------

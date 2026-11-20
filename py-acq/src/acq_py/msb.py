@@ -47,6 +47,7 @@ from . import (
     errors,
     hostexec,
     kits,
+    lock,
     msb_options,
     provider_creds,
     provider_input,
@@ -1982,8 +1983,9 @@ def secret_set(scope: Scope | str, service: str, value: str, *, timeout: float |
     del timeout
     sc = secretstore.as_scope(scope)
     secret_preflight(sc, service)
-    secretstore.set_secret(service, sc.sandbox, value)
-    secret_feed(sc, service, "")
+    with lock.secret_store_lock():
+        secretstore.set_secret_locked(service, sc.sandbox, value)
+        secret_feed(sc, service, "")
 
 
 def secret_has(scope: Scope | str, service: str) -> bool:
@@ -2001,9 +2003,9 @@ def secret_has(scope: Scope | str, service: str) -> bool:
 def secret_rm(scope: Scope | str, service: str) -> None:
     """Unbind from the sandboxes holding it, then delete the store value and endpoint."""
     sc = secretstore.as_scope(scope)
-    secret_unbind(sc, service)
-    secretstore.delete(secretstore.key_for(service, sc.sandbox))
-    secretstore.meta_delete(service, sc.sandbox)
+    with lock.secret_store_lock():
+        secret_unbind(sc, service)
+        secretstore.remove_secret_locked(service, sc.sandbox)
 
 
 # --- secret ls -------------------------------------------------------------------
@@ -2052,7 +2054,7 @@ def secret_ls(scope: Scope | str | None = None) -> list[dict]:
 # per-sandbox scope are host-side authority (``provider_creds``).
 # ---------------------------------------------------------------------------
 
-def provider_credential_set(provider: str, key_env: str, hosts: list[str], value: str) -> None:
+def provider_credential_set_locked(provider: str, key_env: str, hosts: list[str], value: str) -> None:
     """Pin a provider's destination, store its credential, and bind it.
 
     The pin is recorded first, so create, re-feed and ``secret rm`` all resolve
@@ -2085,8 +2087,13 @@ def provider_credential_set(provider: str, key_env: str, hosts: list[str], value
             str(exc),
             f"remove or repair the unreadable provider-credential binding for '{provider}', then retry",
         ) from exc
-    secretstore.store(secretstore.key_for(provider), value)
+    secretstore.store_locked(secretstore.key_for(provider), value)
     _refeed(provider, secretstore.GLOBAL)
+
+
+def provider_credential_set(provider: str, key_env: str, hosts: list[str], value: str) -> None:
+    with lock.provider_credential_lock(provider), lock.secret_store_lock():
+        provider_credential_set_locked(provider, key_env, hosts, value)
 
 
 def github_scope(sandbox: str, value: str) -> None:

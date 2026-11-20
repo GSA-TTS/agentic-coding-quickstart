@@ -53,7 +53,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
 
-from . import errors, hostexec, userdirs
+from . import errors, hostexec, lock, secret_revision, state, userdirs
 
 # The constant keychain "service" label; the full acq key is the account.
 KEYCHAIN_LABEL = "acq-secret-store"
@@ -665,7 +665,7 @@ def _index_remove(layout: _Layout, key: str) -> None:
 # Public value API (mirrors acq_secret_store/get/delete/resolve/has).
 # ---------------------------------------------------------------------------
 
-def store(key: str, value: str) -> None:
+def _store_value(key: str, value: str) -> None:
     """Store ``value`` under ``key`` in the active backend, overwriting."""
     problem = value_problem(value)
     if problem is not None:
@@ -714,17 +714,19 @@ def _delete_file(layout: _Layout, key: str) -> None:
         raise _store_failed(key, "file remove") from None
 
 
-def delete(key: str) -> None:
+def _delete_value(key: str) -> None:
     """Remove ``key`` from the active backend. Idempotent."""
     layout = _layout()
     backend = backend_name()
     if backend == "keychain-macos":
-        _run_tool([_security_bin(layout), "delete-generic-password", "-s", KEYCHAIN_LABEL, "-a", key])
+        rc, _ = _run_tool([_security_bin(layout), "delete-generic-password", "-s", KEYCHAIN_LABEL, "-a", key])
+        if rc not in (0, 44):  # security's item-not-found result is idempotent absence
+            raise _store_failed(key, "macOS keychain remove")
         _index_remove(layout, key)
     elif backend == "keychain-linux":
         tool = hostexec.which("secret-tool")
-        if tool is not None:
-            _run_tool([tool, "clear", "acq_key", key])
+        if tool is None or _run_tool([tool, "clear", "acq_key", key])[0] != 0:
+            raise _store_failed(key, "keychain remove")
         _index_remove(layout, key)
     _delete_file(layout, key)
 
@@ -793,7 +795,7 @@ def _check_binding(service: str, host: str, env: str) -> None:
         )
 
 
-def meta_store(service: str, sandbox: str | None, host: str, env: str) -> None:
+def _meta_store(service: str, sandbox: str | None, host: str, env: str) -> None:
     """Persist the endpoint mapping. Empty host or env stores nothing."""
     if not host or not env:
         return
@@ -833,10 +835,10 @@ def meta_resolve_exact(service: str, sandbox: str | None = None) -> Binding | No
     return _meta_read(_layout(), _try_key(service, sandbox))
 
 
-def meta_delete(service: str, sandbox: str | None = None) -> None:
+def _meta_delete(service: str, sandbox: str | None = None) -> None:
     key = _try_key(service, sandbox)
     if key is not None:
-        _unlink_quiet(_file_for(_layout().meta_dir, key))
+        _file_for(_layout().meta_dir, key).unlink(missing_ok=True)
 
 
 def _dir_names(directory: Path) -> list[str]:
@@ -915,12 +917,132 @@ def list_entries() -> list[dict]:
 # reading the value).
 # ---------------------------------------------------------------------------
 
-def set_secret(service: str, sandbox: str | None, value: str, host: str = "", env: str = "") -> str:
+def set_secret_locked(service: str, sandbox: str | None, value: str, host: str = "", env: str = "") -> str:
     """Store ``value`` for ``(service, sandbox)`` and, when both are given, the
     non-secret ``host``/``env`` endpoint mapping. Returns the key."""
     key = key_for(service, sandbox)
     if host and env:
         _check_binding(service, host, env)  # before the value, so nothing is half-written
-    store(key, value)
-    meta_store(service, sandbox, host, env)
+    problem = value_problem(value)
+    if problem is not None:
+        raise SecretStoreError(errors.VALIDATION_FAILED, "invalid credential value; nothing stored")
+    _layout(), backend_name()
+
+    def mutation():
+        _store_value(key, value)
+        _meta_store(service, sandbox, host, env)
+
+    _revision_change(key, mutation)
     return key
+
+
+def set_secret(service: str, sandbox: str | None, value: str, host: str = "", env: str = "") -> str:
+    with lock.secret_store_lock():
+        return set_secret_locked(service, sandbox, value, host, env)
+
+
+def meta_store(service: str, sandbox: str | None, host: str, env: str) -> None:
+    if not host or not env:
+        return
+    _check_binding(service, host, env)
+    with lock.secret_store_lock():
+        _revision_change(key_for(service, sandbox), lambda: _meta_store(service, sandbox, host, env), complete=False)
+
+
+def meta_delete(service: str, sandbox: str | None = None) -> None:
+    with lock.secret_store_lock():
+        _revision_change(key_for(service, sandbox), lambda: _meta_delete(service, sandbox), complete=False)
+
+
+def _revision_authority(layout: _Layout, backend: str, *, establish: bool, value_write: bool = True) -> dict:
+    kind = {"file": "file", "keychain-windows": "dpapi"}.get(backend)
+    return {
+        "value": secret_revision.authority(layout.file_dir, kind, establish=establish and value_write) if kind else None,
+        "metadata": secret_revision.authority(layout.meta_dir, "metadata", establish=establish),
+    }
+
+
+def _revision_change(key: str, mutation, *, complete: bool = True) -> None:
+    """Run one mutation under caller-owned exclusive store exclusion."""
+    try:
+        previous = secret_revision.read(key)
+        new = secret_revision.token("r")
+        secret_revision.write(secret_revision.path_for(key), {**previous, "pending": new})
+        layout, backend = _layout(), backend_name()
+        authority = _revision_authority(layout, backend, establish=True, value_write=complete)
+        mutation()
+        if authority != _revision_authority(layout, backend_name(), establish=False):
+            raise _store_failed(key, "authority changed during write")
+        if not complete and authority["value"] != previous["authority"]["value"]:
+            authority["value"] = None
+        if complete or previous["pending"] is None:
+            secret_revision.write(secret_revision.path_for(key), {
+                "schema": 1, "committed": new, "pending": None, "authority": authority,
+            })
+    except state.StateSchemaError:
+        raise SecretStoreError(errors.STATE_SCHEMA_UNSUPPORTED, "invalid credential revision or authority record") from None
+    except OSError:
+        raise _store_failed(key, "revision write") from None
+
+
+def store_locked(key: str, value: str) -> None:
+    """Store under the caller's exclusive store lock (no lock reacquisition)."""
+    problem = value_problem(value)
+    if problem is not None:
+        raise SecretStoreError(errors.VALIDATION_FAILED, "invalid credential value; nothing stored")
+    layout, _backend = _layout(), backend_name()
+    if layout.file_dir.exists() and not layout.file_dir.is_dir():
+        raise _store_failed(key, "file write")
+    _revision_change(key, lambda: _store_value(key, value))
+
+
+def current_revision(key: str) -> str | None:
+    """The committed revision for ``key`` only when both current stores match it.
+
+    Pending, missing, legacy, keychain-backed or mismatched authority is unknown.
+    This read never creates markers or rewrites revision state.
+    """
+    try:
+        record = secret_revision.read(key)
+        layout = _layout()
+        backend = backend_name()
+        if record["pending"] is not None or record["committed"] is None:
+            return None
+        stored = record["authority"]
+        current = _revision_authority(layout, backend, establish=False)
+        if stored["value"] is None or stored["metadata"] is None or stored != current:
+            return None
+        return record["committed"]
+    except state.StateSchemaError:
+        raise SecretStoreError(errors.STATE_SCHEMA_UNSUPPORTED, "invalid credential revision or authority record") from None
+
+
+def store(key: str, value: str) -> None:
+    """Store a value with a new, secret-independent revision."""
+    with lock.secret_store_lock():
+        store_locked(key, value)
+
+
+def delete_locked(key: str) -> None:
+    """Remove a value under the caller's exclusive store lock."""
+    _revision_change(key, lambda: _delete_value(key))
+
+
+def delete(key: str) -> None:
+    """Remove a value and retain its non-secret revision tombstone."""
+    with lock.secret_store_lock():
+        delete_locked(key)
+
+
+def remove_secret_locked(service: str, sandbox: str | None) -> None:
+    """Delete value and endpoint in one revision transaction; caller owns lock."""
+    def mutation():
+        _delete_value(key_for(service, sandbox))
+        _meta_delete(service, sandbox)
+
+    _revision_change(key_for(service, sandbox), mutation)
+
+
+def remove_secret(service: str, sandbox: str | None) -> None:
+    with lock.secret_store_lock():
+        remove_secret_locked(service, sandbox)

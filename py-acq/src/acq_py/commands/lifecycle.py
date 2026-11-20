@@ -951,7 +951,7 @@ def _store_provider_key(adapter, provider: str, value: str) -> None:
         preflight = getattr(adapter, "secret_preflight", None)
         if preflight is not None:
             preflight(secretstore.GLOBAL, provider, "", "")
-        secretstore.set_secret(provider, None, value)
+        secretstore.set_secret_locked(provider, None, value)
         adapter.secret_feed(secretstore.GLOBAL, provider, value, "", "")
 
 
@@ -1323,8 +1323,7 @@ def _forget_scoped_token(backend: str, name: str) -> None:
     scope = secretstore.sandbox_scope(name)
     try:
         common._adapter(backend).secret_rm(scope, "github")
-        secretstore.delete(secretstore.key_for("github", name))
-        secretstore.meta_delete("github", name)
+        secretstore.remove_secret("github", name)
         provider_creds._scope_path(backend, name).unlink(missing_ok=True)
     except (*common._ADAPTER_ERRORS, OSError):
         print(f"acq: warning: could not remove the GitHub token stored for '{name}'; "
