@@ -171,24 +171,17 @@ def test_starting_an_already_running_sandbox_promotes_nothing(monkeypatch, tmp_p
 def test_a_stale_attempt_cannot_promote(monkeypatch, tmp_path, capsys):
     _env(monkeypatch, tmp_path)
     _create(capsys, tmp_path)
-    _set(capsys, monkeypatch, "-g", "usai", value=ROTATED)
-    held = msb.held_read("box")
-    stale = dict(held.apply["usai"])
-
-    def newer(rec):
-        rec.apply["usai"]["attempt"] = "t:" + "9" * 32
-
-    msb.held_update("box", newer)
-    # confirm_delivery re-reads: only the attempt it saw may be promoted.
+    secretstore.set_secret("usai", None, ROTATED)
+    msb._begin_start_attempts("box")  # a start's own attempt, which a later one replaces mid-confirmation
     real = msb.held_update
 
-    def racing(name, mutate, *, expect_instance=None):
+    def racing(name, mutate, **kwargs):
         real(name, lambda rec: rec.apply["usai"].update(attempt="t:" + "8" * 32))
-        return real(name, mutate, expect_instance=expect_instance)
+        return real(name, mutate, **kwargs)
 
     monkeypatch.setattr(msb, "held_update", racing)
-    msb.confirm_delivery("box")
-    assert _apply()["status"] == "pending" and stale["attempt"] != _apply()["attempt"]
+    assert msb.confirm_delivery("box") == ["usai"]  # it saw the begun attempt as ready...
+    assert _apply()["status"] == "pending" and _apply()["applied_revision"] is None  # ...but the CAS refused
 
 
 def test_a_completion_for_a_removed_record_cannot_resurrect_it(monkeypatch, tmp_path, capsys):
@@ -342,3 +335,86 @@ def test_concurrent_scoped_and_global_sets_lose_no_binding_or_evidence(monkeypat
         assert _status(service=service) in ("pending", "failed", "unknown")
     assert ROTATED.encode() not in b"".join(p.read_bytes() for p in state.state_dir().rglob("*") if p.is_file())
     assert os.listdir(state.state_dir() / "locks")
+
+
+def test_a_refeed_attempt_made_while_a_start_proves_delivery_is_not_promoted_by_it(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path)
+    _create(capsys, tmp_path)
+    assert _acq(capsys, "stop", "box", "--json")[0] == 0
+    secretstore.set_secret("usai", None, ROTATED)
+    msb._begin_start_attempts("box")  # what a start does just before `msb start`
+    begun = _apply()["attempt"]
+    # A concurrent global change re-feeds the (now running) guest: its own attempt, still unproven.
+    secretstore.set_secret("usai", None, VALUE)
+    rec = msb.held_read("box")
+    assert msb._put(rec, msb.BoundSecret("usai", msb.service_binding("usai"), False), VALUE)
+    assert _apply()["attempt"] != begun and _apply()["status"] == "pending"
+    assert msb.confirm_delivery("box") == []
+    assert _apply()["status"] == "pending" and _apply()["applied_revision"] is None
+
+
+def test_a_late_write_cannot_resurrect_a_removed_legacy_or_absent_record():
+    secretstore.set_secret("usai", None, VALUE)
+    path = msb.held_path("old")
+    path.parent.mkdir(parents=True)
+    binding = {"service": "usai", "host": "api.gsa.usai.gov", "scope": "global"}
+    path.write_text(json.dumps({"schema": 1, "sandbox": "old", "complete": True, "services": [],
+                                "bindings": {"USAI_API_KEY": binding}}), encoding="utf-8")
+    legacy = msb.held_read("old")
+    assert legacy.present and legacy.instance is None
+    path.unlink()  # `acq rm` between the read and the write
+    with pytest.raises(msb.MsbError):
+        msb._held_apply(legacy, lambda r: r.note("usai"))
+    assert not path.exists()
+    absent = msb.held_read("never-created")
+    assert not absent.present
+    msb.HeldRecord("never-created", complete=True).save()  # created by someone else meanwhile
+    with pytest.raises(msb.MsbError):
+        msb._held_apply(absent, lambda r: r.note("usai"))
+    assert "usai" not in msb.held_read("never-created").services
+
+
+def test_a_value_only_write_does_not_clear_an_interrupted_endpoint_write(monkeypatch):
+    key = secretstore.key_for("example")
+    secretstore.set_secret("example", None, "first", "api.example.com", "EXAMPLE_KEY")
+    original = secretstore._stage_atomic
+
+    def fail_metadata(path, content):
+        if path.parent.name == "meta":
+            raise OSError("synthetic metadata failure")
+        return original(path, content)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(secretstore, "_stage_atomic", fail_metadata)
+        with pytest.raises(secretstore.SecretStoreError):
+            secretstore.set_secret("example", None, "second", "new.example.com", "EXAMPLE_KEY")
+    secretstore.store(key, "third")  # an import or rotation: value only
+    record = json.loads((state.state_dir() / "secret-rev" / f"{key}.json").read_text())
+    assert record["pending"] is not None
+    assert secretstore.current_revision(key) is None
+    secretstore.set_secret("example", None, "fourth", "new.example.com", "EXAMPLE_KEY")
+    assert secretstore.current_revision(key) is not None
+
+
+def test_a_malformed_revision_record_breaks_neither_create_nor_a_rewrite(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path)
+    (state.state_dir() / "secret-rev").mkdir(parents=True, exist_ok=True)
+    (state.state_dir() / "secret-rev" / "acq.usai.json").write_text("{not json")
+    _create(capsys, tmp_path)  # evidence is simply unknown
+    assert _apply()["status"] == "unknown" and _status() == "unknown"
+    assert _set(capsys, monkeypatch, "-g", "usai", value=ROTATED)[0] == 0  # the write replaces it
+    assert secretstore.current_revision("acq.usai") is not None
+
+
+def test_secret_tool_clear_of_an_absent_item_is_not_a_failure(monkeypatch):
+    calls = []
+
+    def tool(argv, stdin=None):
+        calls.append(argv[1])
+        return (1, "") if argv[1] in ("clear", "lookup") else (0, "")
+
+    monkeypatch.setattr(secretstore, "backend_name", lambda: "keychain-linux")
+    monkeypatch.setattr(secretstore.hostexec, "which", lambda name: "/bin/secret-tool")
+    monkeypatch.setattr(secretstore, "_run_tool", tool)
+    secretstore.delete("acq.absent")  # nonzero clear, item confirmed absent by lookup
+    assert calls == ["clear", "lookup"]

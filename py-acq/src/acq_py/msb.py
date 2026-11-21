@@ -634,6 +634,7 @@ def create(
         if identity is not None
     })
     held_save(begun)
+    _BEGUN[name] = {service: entry["attempt"] for service, entry in begun.apply.items()}
     try:
         proc = _run(argv, secret_env=secret_env)
     except BaseException:
@@ -1354,6 +1355,9 @@ class HeldRecord:
     services: list[str] = field(default_factory=list)
     instance: str | None = None
     apply: dict[str, dict] = field(default_factory=dict)
+    # True when this was read from (or written to) a record file: a fence for a
+    # late writer must tell "no record" from a record with no instance (schema 1).
+    present: bool = False
 
     def knows(self, service: str) -> bool:
         """True when acq knows whether this sandbox holds ``service``."""
@@ -1412,7 +1416,7 @@ def held_read(name: str) -> HeldRecord:
             secretstore.name_ok(k) and apply_record.entry_problem(v) is None for k, v in apply.items()
         ):
             raise _held_unreadable(name)
-    return HeldRecord(name, bindings, complete, services, instance, apply)
+    return HeldRecord(name, bindings, complete, services, instance, apply, present=True)
 
 
 def _held_unreadable(name: str) -> MsbError:
@@ -1463,6 +1467,7 @@ def _held_write(rec: HeldRecord) -> None:
             f"could not record the secrets bound to sandbox '{rec.name}'",
             "check that the acq state directory is writable, then retry",
         ) from exc
+    rec.present = True
     _fsync_dir(path.parent)
 
 
@@ -1483,17 +1488,23 @@ def held_save(rec: HeldRecord) -> None:
         _held_write(rec)
 
 
-def held_update(name: str, mutate, *, expect_instance: str | None = None) -> HeldRecord | None:
+def held_update(
+    name: str, mutate, *, expect_instance: str | None = None, expect_present: bool | None = None
+) -> HeldRecord | None:
     """Read the record fresh under its lock, apply ``mutate`` and write it back.
 
     With ``expect_instance`` the update happens only while the record still
-    names that instance: a record that was removed or recreated meanwhile is
-    left alone and None is returned, so a late completion can neither resurrect
-    a deleted record nor write into a new sandbox's. Raises :class:`MsbError`.
+    names that instance, and with ``expect_present`` only while a record file
+    still exists (or still does not): a record that was removed or recreated
+    meanwhile, schema 1 or absent ones included, is left alone and None is
+    returned, so a late completion can neither resurrect a deleted record nor
+    write into a new sandbox's. Raises :class:`MsbError`.
     """
     with held_locked(name):
         rec = held_read(name)
         if expect_instance is not None and rec.instance != expect_instance:
+            return None
+        if expect_present is not None and rec.present != expect_present:
             return None
         mutate(rec)
         _held_write(rec)
@@ -1583,8 +1594,11 @@ def effective_identity(service: str, sandbox: str) -> EffectiveIdentity | None:
                                      {"value": None, "endpoint": None}, None)
         return None
     source, scope, key = found
-    value = secretstore.current_evidence(key)
-    endpoint = _endpoint_evidence(service, sandbox, key)
+    try:
+        value = secretstore.current_evidence(key)
+        endpoint = _endpoint_evidence(service, sandbox, key)
+    except secretstore.SecretStoreError:
+        value = endpoint = None  # an unreadable revision record is unknown, never a failed create or re-feed
     if value is None or endpoint is None:
         return EffectiveIdentity(source, scope, binding.env, binding.host, {"value": None, "endpoint": None}, None)
     authority = {"value": value[1]["value"], "endpoint": endpoint[0]}
@@ -1630,7 +1644,7 @@ def store_shared() -> Iterator[None]:
 
 def _sync(rec: HeldRecord, fresh: HeldRecord) -> None:
     rec.bindings, rec.services, rec.apply = fresh.bindings, fresh.services, fresh.apply
-    rec.instance, rec.complete = fresh.instance, fresh.complete
+    rec.instance, rec.complete, rec.present = fresh.instance, fresh.complete, fresh.present
 
 
 def _held_apply(rec: HeldRecord, mutate) -> None:
@@ -1640,7 +1654,7 @@ def _held_apply(rec: HeldRecord, mutate) -> None:
     ``rec`` was read is left alone and the caller's operation fails, so a late
     completion can neither resurrect a deleted record nor write into a new one.
     """
-    fresh = held_update(rec.name, mutate, expect_instance=rec.instance)
+    fresh = held_update(rec.name, mutate, expect_instance=rec.instance, expect_present=rec.present)
     if fresh is None:
         raise MsbError(
             errors.FAILURE,
@@ -1723,6 +1737,12 @@ def _commit_created(name: str, instance: str | None, planned: list) -> None:
         )
 
 
+# The attempts this process began for a create or a real start, per sandbox name:
+# only these may be promoted when that create or start proves delivery. A change
+# made meanwhile (a re-feed's own attempt) never matches, so it stays pending.
+_BEGUN: dict[str, dict[str, str]] = {}
+
+
 def _begin_start_attempts(name: str) -> None:
     """Before ``msb start``: every held binding gets a pending attempt at its current identity.
 
@@ -1735,28 +1755,38 @@ def _begin_start_attempts(name: str) -> None:
         for service in sorted({entry["service"] for entry in rec.bindings.values()})
     }
 
+    begun: dict[str, str] = {}
+
     def mutate(r):
         for service, identity in pending.items():
-            _set_pending(r, service, identity)
+            attempt = _set_pending(r, service, identity)
+            if attempt is not None:
+                begun[service] = attempt
 
     _held_apply(rec, mutate)
+    _BEGUN[name] = begun
 
 
 def confirm_delivery(name: str) -> list[str]:
     """After a create or a real start passed its readiness and trust checks: promote what it delivered.
 
-    A pending entry becomes ``applied`` only when its binding is recorded as
-    held and the committed effective identity is still exactly the one the
+    A pending entry becomes ``applied`` only when it is the very attempt this
+    process began for that create or start (a re-feed's own attempt, made while
+    the guest was coming up, is never promoted by it), its binding is recorded
+    as held and the committed effective identity is still exactly the one the
     attempt captured, with ``applied_revision`` set to that captured revision
     (never to whatever is current). Anything else stays pending. Returns the
     promoted services. Raises :class:`MsbError` when the record cannot be written.
     """
+    begun = _BEGUN.pop(name, {})
     with store_shared():
         rec = held_read(name)
         ready = []
         for service, entry in rec.apply.items():
             held = rec.bindings.get(entry["env"])
             if entry["status"] != "pending" or held is None or held["service"] != service:
+                continue
+            if begun.get(service) != entry["attempt"]:
                 continue
             current = effective_identity(service, name)
             if current is not None and held["host"] == entry["host"] and apply_record.same_target(entry, current):
@@ -1770,7 +1800,7 @@ def confirm_delivery(name: str) -> list[str]:
                 entry["applied_revision"] = entry["revision"]
                 entry["status_at"] = apply_record.utc_now()
 
-    if ready and held_update(name, mutate, expect_instance=rec.instance) is None:
+    if ready and held_update(name, mutate, expect_instance=rec.instance, expect_present=rec.present) is None:
         return []
     return [service for service, _attempt in ready]
 

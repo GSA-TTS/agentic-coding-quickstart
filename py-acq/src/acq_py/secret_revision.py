@@ -97,10 +97,14 @@ def authority(directory: Path, kind: str, *, establish: bool = False) -> dict | 
     return found
 
 
+def _unknown() -> dict:
+    return {"schema": 1, "committed": None, "pending": None, "authority": {"value": None, "metadata": None}}
+
+
 def read(key: str) -> dict:
     """Missing and pre-authority records are unknown; malformed records refuse."""
     doc = _read(path_for(key))
-    unknown = {"schema": 1, "committed": None, "pending": None, "authority": {"value": None, "metadata": None}}
+    unknown = _unknown()
     if doc is None:
         return unknown
     if set(doc) == {"committed", "pending"}:

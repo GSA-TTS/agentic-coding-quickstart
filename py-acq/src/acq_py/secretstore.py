@@ -726,8 +726,10 @@ def _delete_value(key: str) -> None:
         _index_remove(layout, key)
     elif backend == "keychain-linux":
         tool = hostexec.which("secret-tool")
-        if tool is None or _run_tool([tool, "clear", "acq_key", key])[0] != 0:
+        if tool is None:
             raise _store_failed(key, "keychain remove")
+        if _run_tool([tool, "clear", "acq_key", key])[0] != 0 and _run_tool([tool, "lookup", "acq_key", key])[0] == 0:
+            raise _store_failed(key, "keychain remove")  # nonzero and the item is still there
         _index_remove(layout, key)
     _delete_file(layout, key)
 
@@ -933,7 +935,7 @@ def set_secret_locked(service: str, sandbox: str | None, value: str, host: str =
         _store_value(key, value)
         _meta_store(service, sandbox, host, env)
 
-    _revision_change(key, mutation)
+    _revision_change(key, mutation, covers_endpoint=bool(host and env))
     return key
 
 
@@ -963,10 +965,19 @@ def _revision_authority(layout: _Layout, backend: str, *, establish: bool, value
     }
 
 
-def _revision_change(key: str, mutation, *, complete: bool = True) -> None:
-    """Run one mutation under caller-owned exclusive store exclusion."""
+def _revision_change(key: str, mutation, *, complete: bool = True, covers_endpoint: bool = False) -> None:
+    """Run one mutation under caller-owned exclusive store exclusion.
+
+    A pending state left by an interrupted write is cleared only by a complete
+    write that also covers the endpoint, or when no endpoint record exists for the
+    key (there is nothing left uncertain on that side). A malformed revision
+    record is replaced by this write, which is its own covering transaction.
+    """
     try:
-        previous = secret_revision.read(key)
+        try:
+            previous = secret_revision.read(key)
+        except state.StateSchemaError:
+            previous = secret_revision._unknown()
         new = secret_revision.token("r")
         secret_revision.write(secret_revision.path_for(key), {**previous, "pending": new})
         layout, backend = _layout(), backend_name()
@@ -976,7 +987,9 @@ def _revision_change(key: str, mutation, *, complete: bool = True) -> None:
             raise _store_failed(key, "authority changed during write")
         if not complete and authority["value"] != previous["authority"]["value"]:
             authority["value"] = None
-        if complete or previous["pending"] is None:
+        uncertain = previous["pending"] is not None
+        recovers = complete and (covers_endpoint or not _file_for(layout.meta_dir, key).exists())
+        if not uncertain or recovers:
             secret_revision.write(secret_revision.path_for(key), {
                 "schema": 1, "committed": new, "pending": None, "authority": authority,
             })
@@ -1049,7 +1062,7 @@ def remove_secret_locked(service: str, sandbox: str | None) -> None:
         _delete_value(key_for(service, sandbox))
         _meta_delete(service, sandbox)
 
-    _revision_change(key_for(service, sandbox), mutation)
+    _revision_change(key_for(service, sandbox), mutation, covers_endpoint=True)
 
 
 def remove_secret(service: str, sandbox: str | None) -> None:
