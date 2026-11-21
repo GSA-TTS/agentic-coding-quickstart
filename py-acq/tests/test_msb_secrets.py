@@ -624,7 +624,8 @@ def test_ls_reports_bindings_and_filters_by_scope_kind(monkeypatch, tmp_path, ca
     _set(capsys, monkeypatch, "-g", "usai")
     _set(capsys, monkeypatch, "global", "github", value=SCOPED)
     secretstore.store(secretstore.key_for("orphan"), VALUE)
-    secretstore.store("acq.a.b.c", VALUE)  # a legacy multi-dot key
+    # Legacy keys are read-only; seed one as an older writer would have done.
+    (Path(os.environ["ACQ_SECRET_STORE_DIR"]) / "acq.a.b.c").write_text(VALUE)
     rc, doc, out, _err = _invoke(capsys, "--backend", "msb", "secret", "ls", "--json")
     assert rc == 0 and VALUE not in out and SCOPED not in out
     assert doc["data"]["secrets"] == [
@@ -875,7 +876,7 @@ def test_sandbox_scoped_set_and_rm_take_the_sandbox_lock(monkeypatch, tmp_path, 
     (["secret", "set", "-g", "github"], True),
     (["secret", "rm", "-g", "github"], True),
     (["secret", "set", "-g", "usai"], True),
-    (["secret", "set", "b", "github"], False),  # the sandbox lock covers a create of 'b'
+    (["secret", "set", "b", "github"], True),  # excludes global refeed as well
 ])
 def test_global_set_and_rm_take_the_secret_store_lock(monkeypatch, tmp_path, capsys, children, argv, takes_lock):
     # A create holds the store lock (shared) while it reads the store to bind the

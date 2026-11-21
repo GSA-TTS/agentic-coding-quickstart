@@ -746,7 +746,7 @@ of 0 is also ignored, because it would fail the call at once instead of meaning
 | `ACQ_MSB_KIT_TIMEOUT` | `1800` | One in-guest kit-install or substrate step on msb. |
 | `ACQ_MSB_READY_TIMEOUT`, `ACQ_SBX_READY_TIMEOUT` | `30` | The wait for a new sandbox to accept `exec`. |
 | `ACQ_SBX_STARTUP_BARRIER_TIMEOUT` | `60` | The wait for an sbx sandbox's kit startup commands to finish. |
-| `ACQ_SANDBOX_LOCK_TIMEOUT` | `300` | The wait for a sandbox's lifecycle lock, a provider-credential lock, or the secret-store lock that global secret changes and creates share. |
+| `ACQ_SANDBOX_LOCK_TIMEOUT` | `300` | The wait for a sandbox's lifecycle lock, a provider-credential lock, the secret-store lock that secret changes and creates share, or a sandbox's binding-record lock. |
 | `ACQ_MIGRATION_LOCK_TIMEOUT` | `5` | The wait for the state-migration lock and the config lock. |
 
 A command that has waited about two seconds for any of these locks prints one
@@ -755,6 +755,56 @@ and keeps waiting. It never writes that line to stdout, so `--json` output is
 unchanged. While a global secret change waits for the secret-store lock, new
 creates and starts wait behind it, so a steady stream of them cannot keep it
 out until it times out.
+
+## Credential revisions and the apply record (ADR-0053)
+
+Every credential write the Python acq makes (`secret set`/`rm`/`import`,
+`provider-credential set`/`rm`, `github-scope`, `usai-rotate-api-key`, and a
+key stored at the create prompt) is a transaction with the store's own
+non-secret revision: `<state>/secret-rev/<key>.json` holds `schema`, `committed`,
+`pending` and `authority`. A fresh random `r:` token is written as `pending`
+before the value or endpoint changes and promoted to `committed` only after both
+are confirmed, so a crash leaves it pending, which reads as unknown. A removal
+leaves a tombstone, and remove-then-re-add of an identical value is a new
+revision. Tokens are random, never derived from a value, and no state file holds
+a value or anything computed from one.
+
+A revision only means something for the store it was written for. `authority` is
+a random token kept in a marker beside the value store
+(`.acq-authority-file.json` or `-dpapi.json`) and the endpoint metadata
+(`secret-meta`), bound to the store's kind and real path. Selecting another store,
+backend, or metadata directory, copying a marker elsewhere, or deleting it reads
+as unknown, never as unchanged. A keychain backend (macOS `security`, Linux
+`secret-tool`) cannot be identified by acq, so its revisions are always unknown;
+so is a value read from a legacy fallback file, and an endpoint that comes from a
+provider pin. Unknown is safe: it can only make a consumer prepare again.
+
+On msb the per-sandbox record `msb-secret-bindings/<name>.json` is schema 2: it
+adds an `instance` token (a recreate of a name starts a new one) and, per service,
+an `apply` entry naming the source, scope, authority, ENV@HOST, revision, attempt
+and status of the last delivery attempt. An attempt is written as `pending`
+before msb is asked to create, start, add or remove the binding, settles as
+`failed` when msb refuses, and becomes `applied` only after a created or started
+guest is exec-ready and trusted and the store still holds the revision the
+attempt captured. A modify against a running guest never promotes (a new binding
+needs a restart), and a timeout or interruption stays pending. Removing a binding
+drops its evidence first. Schema 1 records still read, as unknown; a malformed
+`apply` entry is `state_schema_unsupported`, with no reader-side repair.
+
+`msb.held_apply_snapshot(name)` is the read-only view: per service it compares
+the persisted evidence with the current committed revision (so a global change
+invalidates inheriting sandboxes and leaves scoped bindings alone) and reports
+`applied`, `pending`, `failed` or `unknown`. `reuse_eligible` is always `False`:
+Bash and older builds write the shared store without these revisions, so nothing
+here proves a credential is unchanged across invocations. `status_at` is for
+display and never decides anything.
+
+Lock order is lifecycle, provider-credential, secret-store, then one
+binding-record lock, taken last and never across an msb call. Every Python store
+change, scoped or global, holds the store lock exclusively through its re-feed.
+Uninstall treats `secret-rev/`, `msb-secret-bindings/` and the authority markers
+beside a store as acq-owned state; removing a marker or sidecar makes revisions
+unknown and never deletes a credential.
 
 ## Testing
 
