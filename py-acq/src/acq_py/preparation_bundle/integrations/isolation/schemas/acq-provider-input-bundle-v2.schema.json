@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "acq-provider-input-bundle/v2",
+  "title": "ACQ Provider Input Bundle v2",
+  "description": "Host-time manifest for a provider kit. Version 2 fixes the provider-relative layout while the backend supplies the authoritative read-only guest root. Every materializer MUST invoke scripts/validate_provider_input_contract.py; JSON Schema cannot enforce cross-field, file, symlink, or executable invariants.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "providerId", "factsPath", "normalizerPath", "snapshotPath", "providerPath", "credentialEnvNames"],
+  "properties": {
+    "schemaVersion": {"const": "acq-provider-input-bundle/v2"},
+    "providerId": {"type": "string", "pattern": "^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?(?![\\s\\S])"},
+    "factsPath": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))[A-Za-z0-9][A-Za-z0-9._/-]*(?![\\s\\S])"},
+    "normalizerPath": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))[A-Za-z0-9][A-Za-z0-9._/-]*(?![\\s\\S])"},
+    "snapshotPath": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))[A-Za-z0-9][A-Za-z0-9._/-]*(?![\\s\\S])"},
+    "providerPath": {"type": "string", "pattern": "^models/providers/[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?(?![\\s\\S])"},
+    "credentialEnvNames": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*(?![\\s\\S])"}}
+  }
+}

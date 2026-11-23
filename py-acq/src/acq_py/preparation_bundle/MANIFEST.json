@@ -1,0 +1,47 @@
+{
+  "files": {
+    "LICENSE": {
+      "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499",
+      "size": 7048
+    },
+    "PROVENANCE.md": {
+      "sha256": "7921927db365a7673f1c8389be94daa06c9150de1a54ffe69fce5cc0fa482750",
+      "size": 3108
+    },
+    "integrations/isolation/acq-kits/opencode/files/home/opencode-config/runtime-model-preparation.mjs": {
+      "sha256": "7c89c365332e1c308290489ccf9d823d76c7c95d37ac96e340516d0f26ae18e0",
+      "size": 105317
+    },
+    "integrations/isolation/schemas/acq-neutral-model-catalog.schema.json": {
+      "sha256": "15ef81c6cf2c607c71b7c2bffa24251e7c31710c6a3cea239cd9d8c261bf014b",
+      "size": 11320
+    },
+    "integrations/isolation/schemas/acq-provider-facts.schema.json": {
+      "sha256": "43ab3ed0ae4862a0898684646f4bf020ab766bdf6c882d7fb3032c8a51cb89af",
+      "size": 5098
+    },
+    "integrations/isolation/schemas/acq-provider-input-bundle-v2.schema.json": {
+      "sha256": "9aa1d6f530b407ce6154a1f4c7d864f8a6ebe8d9dbcf3e2eff2a0bc4e21d43c5",
+      "size": 1634
+    },
+    "integrations/isolation/schemas/acq-provider-input-bundle-v3.schema.json": {
+      "sha256": "8ec1bd3da977f20c0b1cede228eba3599e62fc7d0570e463bbf2685957263848",
+      "size": 1624
+    },
+    "integrations/isolation/schemas/acq-provider-input-bundle.schema.json": {
+      "sha256": "ca5a9254ccfd9a54ef2967433262f11a9c8fe2582356f7faea2e88246db852eb",
+      "size": 1371
+    },
+    "integrations/isolation/schemas/provider-credential-bindings.json": {
+      "sha256": "9cdebb8c32a84c5e7367e1002f85773864b4a600b5c5573319ebe3b0b1a1e9f5",
+      "size": 86
+    },
+    "scripts/validate_provider_input_contract.py.txt": {
+      "sha256": "9bdb9696e773594ee3ad37572e3d85a53d5574003e5f31d12ff01d72de6787cb",
+      "size": 18773
+    }
+  },
+  "source_repository": "https://github.com/GSA-TTS/agentic-coding-patterns",
+  "source_revision": "83c254a743f4b6fa539cafb1a453361a85e0691b",
+  "version": 1
+}

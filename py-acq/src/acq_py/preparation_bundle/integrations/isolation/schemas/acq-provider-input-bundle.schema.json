@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "acq-provider-input-bundle/v1",
+  "title": "ACQ Provider Input Bundle",
+  "description": "Host-time manifest for a provider kit. Artifact paths are package-relative; the host projects the validated artifacts read-only at the stable projectedPath. credentialEnvNames declares credential names only; it never assigns values in the guest environment. This manifest contains no credentials or harness configuration.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "providerId", "factsPath", "normalizerPath", "snapshotPath", "projectedPath", "credentialEnvNames"],
+  "properties": {
+    "schemaVersion": {"const": "acq-provider-input-bundle/v1"},
+    "providerId": {"type": "string", "pattern": "^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?(?![\\s\\S])"},
+    "factsPath": {"type": "string", "minLength": 1, "maxLength": 256},
+    "normalizerPath": {"type": "string", "minLength": 1, "maxLength": 256},
+    "snapshotPath": {"type": "string", "minLength": 1, "maxLength": 256},
+    "projectedPath": {"type": "string", "pattern": "^/var/lib/acq/host/models/providers/[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?(?![\\s\\S])"},
+    "credentialEnvNames": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*(?![\\s\\S])"}}
+  }
+}
