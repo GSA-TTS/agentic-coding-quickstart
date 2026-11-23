@@ -18,6 +18,14 @@ packaged preparation assets and a **preinstalled, host-trusted** interpreter.
   Neither operation searches the repository for manifests.
 - The caller creates private snapshots first, including the referenced files,
   and keeps them immutable through validation and subsequent materialization.
+  Snapshot roots and their ancestors are host-trusted and must also remain
+  unchanged. Within each snapshot, artifact paths must be strict relative ASCII
+  paths matching the v3 alphabet, at most 256 characters, without empty, dot or
+  parent components, backslashes, NUL or control characters. Intermediate
+  components must be non-symlink directories; final files must be non-symlink
+  regular files. Missing referenced files fail closed. Adjacent `spec.yaml` may
+  be absent, but an existing symlink (including a dangling one), directory, FIFO
+  or other nonregular spec is refused rather than treated as absent.
   This adapter does not make arbitrary mutable provider directories safe against
   races, nor does its path preflight replace the pinned contract validator.
 - `verify_assets()` is mandatory before interpreter probing. No user-authored
@@ -35,6 +43,37 @@ packaged preparation assets and a **preinstalled, host-trusted** interpreter.
   provider normalizer execution, state write or lifecycle change is introduced.
 
 ## Runtime resolution and bounds
+
+Before either subprocess, the adapter preflights every provider file the pinned
+v3 CLI consumes, including its implicit adjacent `spec.yaml` read:
+
+| Input | Maximum bytes per file |
+| --- | ---: |
+| Manifest | 1 MiB (1,048,576) |
+| Credential bindings (packaged default or override) | 1 MiB (1,048,576) |
+| Referenced facts | 64 KiB (65,536) |
+| Referenced snapshot catalog | 4 MiB (4,194,304) |
+| Optional adjacent `spec.yaml` | 64 KiB (65,536) |
+
+Facts and catalog caps match the pinned runtime preparation artifact's facts
+read limit and `RUNTIME_LIMITS.resultBytes`; the spec cap is a conservative local
+allowlist-document budget. A separate **16 MiB (16,777,216) aggregate budget**
+counts all selected manifests, each facts/catalog reference, each present spec
+and the one bindings file. Repeated references and shared specs count again per
+manifest, matching repeated CLI consumption rather than deduplicated disk use.
+The maximum remains eight providers; eight individually legal inputs may still
+exceed the aggregate budget. Exact byte limits are inclusive.
+
+Files are opened nonblocking and no-follow, checked with `fstat` before reading,
+and read with an explicit cap plus one overflow byte. Oversized sparse files are
+rejected by logical size before their contents are read. Reads must agree with
+the inspected size. Only the manifest is parsed during preflight; full content
+validation remains with the pinned CLI. Verified packaged schemas and validator
+code remain under asset verification, not this provider-data budget. These are
+**input byte budgets, not a process RSS bound**: JSON/YAML parsing and validation
+can allocate more memory than source size. No memory-limit or `preexec` framework
+is introduced, and the caller's immutable snapshot/ancestor contract is required
+because the CLI later reopens paths.
 
 The explicit `python_override` or `ACQ_PROVIDER_INPUT_PYTHON` must be one absolute
 executable filename; it is not a shell command and never searches PATH. The
@@ -69,20 +108,33 @@ Diagnostics are fixed refusals: neither raw subprocess output, candidate paths,
 package metadata strings nor validator tracebacks are surfaced. Captured output
 is bounded and discarded by the public API, including on successful validation.
 
-## Validation status and handoff
+## Validation and cancellation contract
 
 `py-acq/tests/test_provider_validator.py` contains real bounded subprocess tests
 using explicitly synthetic executables and synthetic distribution metadata, plus
 negative manifest/path checks and a set-wide argument assertion. These establish
 adapter behavior, not upstream validator/schema qualification. Asset tests check
 the fail-before-probe seam and tampering with a private copy of the real packaged
-validator; the asset lane owns the full inventory/digest tamper suite.
+validator; `test_preparation_assets.py` covers the full inventory/digest tamper suite.
 Additional fixtures exercise the minimal-environment canary, default and explicit
 host binding arguments, invalid binding paths, the eight-provider bound and input
-inspection consuming the shared deadline. SIGTERM cancellation cleanup remains a
-review/qualification question; no signal-handling framework is added here.
+inspection consuming the shared deadline and sanitized interpreter-inspection
+errors, including an inaccessible directory under a non-root account.
+Input-budget fixtures provide real referenced files to the existing synthetic
+process tests. They cover exact per-file limits and one-byte overflow for all
+five input roles, huge sparse-file refusal, unsafe relative paths and symlink
+components, missing references, unsafe optional specs, nested regular artifacts,
+read growth after `fstat`, and aggregate boundaries including repeated references,
+shared specs and bindings. Synthetic fixtures do not certify schema validity.
 
-No tests or commands were executed on the host during implementation. The primary
-must combine the preparation-assets lane and run this suite and the repository's
-applicable quality gates in its reviewed isolated environment before acceptance.
+Cleanup runs when collection unwinds through an exception. The existing CLI
+termination handler supplies that behavior for ordinary SIGTERM and SIGHUP;
+direct callers must establish their own equivalent handler if they require it.
+Default signal termination does not unwind Python cleanup. Abrupt parent death
+and escaped child process groups remain outside this helper's guarantee.
+
+Isolated installed-package qualification must exercise the real pinned validator
+and ordinary pip compilation for both a wheel and a wheel rebuilt from its sdist.
+Cancellation qualification must observe child reaping under the caller's actual
+termination handler rather than treating a parent exit as cleanup evidence.
 This slice does not enable v3 manifests in existing lifecycle paths.

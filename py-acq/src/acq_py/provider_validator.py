@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import selectors
 import signal
 import stat
@@ -23,6 +24,12 @@ from . import userdirs
 _OUTPUT_LIMIT = 64 * 1024
 _MANIFEST_LIMIT = 1024 * 1024
 _BINDINGS_LIMIT = 1024 * 1024
+# Match the pinned runtime's facts read cap and RUNTIME_LIMITS.resultBytes.
+_FACTS_LIMIT = 64 * 1024
+_CATALOG_LIMIT = 4 * 1024 * 1024
+_SPEC_LIMIT = 64 * 1024
+# Count every consumed reference, including repeated files, plus bindings.
+_INPUT_LIMIT = 16 * 1024 * 1024
 # Matches the pinned Patterns runtime artifact's RUNTIME_LIMITS.providers.
 _PROVIDER_LIMIT = 8
 _REAP_SECONDS = 1.0
@@ -77,9 +84,12 @@ def resolve_python(override: str | None = None) -> Path:
     else:
         root = _runtime_root() / "provider-input-validator.current"
         candidates = [root / part for part in ("bin/python3", "Scripts/python.exe", "python.exe")]
-    for candidate in candidates:
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return candidate  # Do not resolve: a venv commonly symlinks its interpreter.
+    try:
+        for candidate in candidates:
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return candidate  # Do not resolve: a venv commonly symlinks its interpreter.
+    except OSError:
+        raise ValidatorError("preinstalled provider validator Python is unavailable") from None
     raise ValidatorError("preinstalled provider validator Python is unavailable")
 
 
@@ -166,23 +176,75 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
-def _manifest_identity(path: Path) -> tuple[int, int]:
-    # O_NONBLOCK prevents an attacker-controlled FIFO from blocking before fstat.
+class _InputBudget:
+    """Byte budget only, not a parser allocation or process RSS bound."""
+
+    def __init__(self) -> None:
+        self.remaining = _INPUT_LIMIT
+
+
+def _read_input(
+    path: Path, limit: int, budget: _InputBudget, deadline: float, label: str,
+) -> tuple[bytes, os.stat_result]:
+    _remaining(deadline)
+    # Trusted immutable ancestors are a caller obligation. The final component
+    # cannot be a symlink, and a FIFO cannot block before the regular-file check.
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, "rb") as stream:
         info = os.fstat(stream.fileno())
-        if not stat.S_ISREG(info.st_mode) or info.st_size > _MANIFEST_LIMIT:
-            raise ValidatorError("provider manifest must be a bounded regular file")
-        raw = stream.read(_MANIFEST_LIMIT + 1)
-    if len(raw) > _MANIFEST_LIMIT:
-        raise ValidatorError("provider manifest must be a bounded regular file")
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            raise ValidatorError(f"{label} must be a bounded regular file")
+        if info.st_size > budget.remaining:
+            raise ValidatorError("provider validation aggregate input byte limit exceeded")
+        raw = stream.read(min(limit, budget.remaining) + 1)
+    if len(raw) > limit or len(raw) != info.st_size:
+        raise ValidatorError(f"{label} must be a bounded immutable regular file")
+    if len(raw) > budget.remaining:
+        raise ValidatorError("provider validation aggregate input byte limit exceeded")
+    budget.remaining -= len(raw)
+    _remaining(deadline)
+    return raw, info
+
+
+def _relative_input(root: Path, value: object) -> Path:
+    # Validate before Path normalizes dot/empty components. Use the v3 schema's
+    # ASCII alphabet, with no empty components, traversal or control characters.
+    if (not isinstance(value, str) or not 0 < len(value) <= 256
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", value) is None
+            or any(part in ("", ".", "..") for part in value.split("/"))):
+        raise ValidatorError("provider artifact path must be a strict relative path")
+    path = root
+    parts = value.split("/")
+    for part in parts[:-1]:
+        path /= part
+        if not stat.S_ISDIR(path.lstat().st_mode):
+            raise ValidatorError("provider artifact path components must be non-symlink directories")
+    return path / parts[-1]
+
+
+def _manifest_identity(path: Path, budget: _InputBudget, deadline: float) -> tuple[int, int]:
+    raw, info = _read_input(path, _MANIFEST_LIMIT, budget, deadline, "provider manifest")
     value = json.loads(raw, object_pairs_hook=_unique_object)
     if not isinstance(value, dict) or value.get("schemaVersion") != _V3:
         raise ValidatorError("fresh provider validation requires v3 manifests")
+    for field, limit in (("factsPath", _FACTS_LIMIT), ("snapshotPath", _CATALOG_LIMIT)):
+        artifact = _relative_input(path.parent, value.get(field))
+        _read_input(artifact, limit, budget, deadline, "provider artifact")
+    # The pinned CLI also reads this undeclared adjacent YAML file if present.
+    # Only absence is optional: dangling symlinks and nonregular files fail closed.
+    spec = path.parent / "spec.yaml"
+    try:
+        spec.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        _read_input(spec, _SPEC_LIMIT, budget, deadline, "provider spec")
     return info.st_dev, info.st_ino
 
 
-def _explicit_paths(manifests: Sequence[str | Path], deadline: float) -> list[Path]:
+def _explicit_paths(
+    manifests: Sequence[str | Path], deadline: float, budget: _InputBudget,
+) -> list[Path]:
     if not isinstance(manifests, (list, tuple)) or not manifests:
         raise ValidatorError("provide a nonempty explicit manifest list or confirm empty selection")
     if len(manifests) > _PROVIDER_LIMIT:
@@ -197,31 +259,26 @@ def _explicit_paths(manifests: Sequence[str | Path], deadline: float) -> list[Pa
             path = Path(item)
             if not path.is_absolute():
                 raise ValidatorError("provider manifest paths must be explicit and absolute")
-            identity = _manifest_identity(path)
+            identity = _manifest_identity(path, budget, deadline)
             _remaining(deadline)
             if identity in identities:
                 raise ValidatorError("duplicate provider manifest path")
             identities.add(identity)
             paths.append(path)
     except (OSError, ValueError, RecursionError):
-        raise ValidatorError("provider manifest is missing, unreadable or malformed") from None
+        raise ValidatorError("provider input is missing, unreadable, unsafe or malformed") from None
     return paths
 
 
-def _credential_bindings(value: str | Path, deadline: float) -> Path:
+def _credential_bindings(value: str | Path, deadline: float, budget: _InputBudget) -> Path:
     """Check a host-owned data snapshot; the pinned CLI validates its content."""
     _remaining(deadline)
     if not isinstance(value, (str, Path)) or not Path(value).is_absolute():
         raise ValidatorError("credential bindings must name an absolute regular snapshot")
     path = Path(value)
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        with os.fdopen(fd, "rb") as stream:
-            info = os.fstat(stream.fileno())
-            if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= _BINDINGS_LIMIT:
-                raise ValidatorError("credential bindings must be a bounded nonempty regular snapshot")
-            raw = stream.read(_BINDINGS_LIMIT + 1)
-        if not raw or len(raw) > _BINDINGS_LIMIT:
+        raw, _ = _read_input(path, _BINDINGS_LIMIT, budget, deadline, "credential bindings")
+        if not raw:
             raise ValidatorError("credential bindings must be a bounded nonempty regular snapshot")
     except (OSError, ValueError):
         raise ValidatorError("credential bindings snapshot is missing, unreadable or unsafe") from None
@@ -254,7 +311,8 @@ def validate_bundles(
             or not math.isfinite(timeout) or not 0 < timeout <= 300):
         raise ValidatorError("provider validation timeout must be finite and within 300 seconds")
     deadline = time.monotonic() + timeout
-    paths = _explicit_paths(manifests, deadline)
+    budget = _InputBudget()
+    paths = _explicit_paths(manifests, deadline, budget)
     # Lazy import keeps the adapter importable independently of packaged assets;
     # there is deliberately no production fallback when verification is absent.
     from .preparation_assets import verify_assets
@@ -262,7 +320,8 @@ def validate_bundles(
     assets = verify_assets()
     _remaining(deadline)
     bindings = _credential_bindings(
-        assets.credential_bindings if credential_bindings is None else credential_bindings, deadline,
+        assets.credential_bindings if credential_bindings is None else credential_bindings,
+        deadline, budget,
     )
     python = resolve_python(python_override)
     status, _ = _run_bounded([str(python), "-I", "-c", _PROBE], deadline)

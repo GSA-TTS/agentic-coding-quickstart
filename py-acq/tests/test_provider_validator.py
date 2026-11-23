@@ -21,11 +21,24 @@ from acq_py import provider_validator as validator
 POSIX = pytest.mark.skipif(os.name != "posix", reason="POSIX bounded execution only")
 
 
+def write_manifest(path):
+    """Real referenced files for adapter tests, not upstream schema fixtures."""
+    facts = path.with_name(f"{path.stem}-facts.json")
+    catalog = path.with_name(f"{path.stem}-catalog.json")
+    facts.write_text('{"synthetic": "facts"}')
+    catalog.write_text('{"synthetic": "catalog"}')
+    path.write_text(json.dumps({
+        "schemaVersion": "acq-provider-input-bundle/v3",
+        "factsPath": facts.name, "snapshotPath": catalog.name,
+    }))
+    return facts, catalog
+
+
 @pytest.fixture
 def manifests(tmp_path):
     paths = [tmp_path / "first.json", tmp_path / "second.json"]
     for path in paths:
-        path.write_text(json.dumps({"schemaVersion": "acq-provider-input-bundle/v3"}))
+        write_manifest(path)
     return paths
 
 
@@ -144,6 +157,40 @@ def test_override_preserves_venv_symlink_and_spaces(tmp_path, monkeypatch):
     monkeypatch.setenv("ACQ_PROVIDER_INPUT_PYTHON", str(path))
     assert validator.resolve_python() == path
     assert validator.resolve_python(str(path)) == path
+
+
+@POSIX
+@pytest.mark.parametrize("inspection", ["is_file", "access"])
+def test_interpreter_inspection_errors_are_sanitized(tmp_path, monkeypatch, inspection):
+    path = tmp_path / "private-interpreter-path"
+
+    def inaccessible(*args, **kwargs):
+        raise PermissionError(f"private diagnostic: {path}")
+
+    if inspection == "is_file":
+        monkeypatch.setattr(Path, "is_file", inaccessible)
+    else:
+        monkeypatch.setattr(Path, "is_file", lambda self: True)
+        monkeypatch.setattr(validator.os, "access", inaccessible)
+    with pytest.raises(validator.ValidatorError) as error:
+        validator.resolve_python(str(path))
+    assert str(error.value) == "preinstalled provider validator Python is unavailable"
+    assert error.value.__suppress_context__
+
+
+@POSIX
+@pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                    reason="requires enforced POSIX directory permissions")
+def test_inaccessible_interpreter_directory_is_fixed_refusal(tmp_path):
+    directory = tmp_path / "private-directory"
+    directory.mkdir()
+    directory.chmod(0)
+    try:
+        with pytest.raises(validator.ValidatorError) as error:
+            validator.resolve_python(str(directory / "python"))
+        assert str(error.value) == "preinstalled provider validator Python is unavailable"
+    finally:
+        directory.chmod(0o700)
 
 
 @POSIX
@@ -368,7 +415,7 @@ def test_provider_count_limit_before_file_inspection(manifests, monkeypatch):
 def test_eight_explicit_manifests_accepted(tmp_path, synthetic_assets):
     paths = [tmp_path / f"manifest-{i}.json" for i in range(8)]
     for path in paths:
-        path.write_text('{"schemaVersion":"acq-provider-input-bundle/v3"}')
+        write_manifest(path)
     python = executable(tmp_path, "raise SystemExit(0)\n")
     validator.validate_bundles(paths, python_override=str(python))
 
@@ -379,8 +426,8 @@ def test_input_inspection_consumes_shared_deadline(manifests, monkeypatch):
     monkeypatch.setattr(validator.time, "monotonic", lambda: clock[0])
     inspect = validator._manifest_identity
 
-    def slow_inspection(path):
-        result = inspect(path)
+    def slow_inspection(path, budget, deadline):
+        result = inspect(path, budget, deadline)
         clock[0] += 2
         return result
 
@@ -388,3 +435,189 @@ def test_input_inspection_consumes_shared_deadline(manifests, monkeypatch):
     monkeypatch.setattr(validator, "_run_bounded", lambda *args: pytest.fail("executed"))
     with pytest.raises(validator.ValidatorError, match="deadline"):
         validator.validate_bundles(manifests, timeout=1)
+
+
+def input_files(manifest, bindings):
+    value = json.loads(manifest.read_text())
+    return {
+        "manifest": (manifest, validator._MANIFEST_LIMIT),
+        "facts": (manifest.parent / value["factsPath"], validator._FACTS_LIMIT),
+        "catalog": (manifest.parent / value["snapshotPath"], validator._CATALOG_LIMIT),
+        "spec": (manifest.parent / "spec.yaml", validator._SPEC_LIMIT),
+        "bindings": (bindings, validator._BINDINGS_LIMIT),
+    }
+
+
+@POSIX
+@pytest.mark.parametrize("role", ["manifest", "facts", "catalog", "spec", "bindings"])
+def test_input_file_exact_limit_and_one_byte_over(
+    tmp_path, manifests, synthetic_assets, monkeypatch, role,
+):
+    path, limit = input_files(manifests[0], synthetic_assets.credential_bindings)[role]
+    initial = path.read_bytes() if path.exists() else b"caps: {}\n"
+    path.write_bytes(initial + b" " * (limit - len(initial)))
+    python = executable(tmp_path, "raise SystemExit(0)\n")
+    validator.validate_bundles([manifests[0]], python_override=str(python))
+    with path.open("ab") as stream:
+        stream.write(b" ")
+    monkeypatch.setattr(validator, "_run_bounded", lambda *args: pytest.fail("executed"))
+    with pytest.raises(validator.ValidatorError, match="bounded regular file"):
+        validator.validate_bundles([manifests[0]], python_override=str(python))
+
+
+@POSIX
+@pytest.mark.parametrize("role", ["manifest", "facts", "catalog", "spec", "bindings"])
+def test_sparse_huge_input_refused_before_probe(manifests, synthetic_assets, monkeypatch, role):
+    path, _ = input_files(manifests[0], synthetic_assets.credential_bindings)[role]
+    # Logical size, not allocated blocks, must be checked before read allocation.
+    with path.open("wb") as stream:
+        stream.truncate(16 * 1024 * 1024 * 1024)
+    monkeypatch.setattr(validator, "_run_bounded", lambda *args: pytest.fail("executed"))
+    with pytest.raises(validator.ValidatorError, match="bounded regular file"):
+        validator.validate_bundles([manifests[0]])
+
+
+@POSIX
+@pytest.mark.parametrize("field", ["factsPath", "snapshotPath"])
+@pytest.mark.parametrize("relative", [
+    None, 1, [], "", ".", "..", "../outside.json", "sub/../facts.json",
+    "/absolute.json", "//absolute.json", "./facts.json", "sub/./facts.json",
+    "sub//facts.json", "facts.json/", "sub\\facts.json", "facts\x00.json",
+    "facts\n.json", "facts\t.json", "facts\x7f.json", "facts\x85.json", "a" * 257,
+])
+def test_unsafe_artifact_paths_refused(manifests, monkeypatch, field, relative):
+    value = json.loads(manifests[0].read_text())
+    value[field] = relative
+    manifests[0].write_text(json.dumps(value))
+    monkeypatch.setattr(validator, "_run_bounded", lambda *args: pytest.fail("executed"))
+    with pytest.raises(validator.ValidatorError, match="strict relative path"):
+        validator.validate_bundles([manifests[0]])
+
+
+@POSIX
+@pytest.mark.parametrize("field", ["factsPath", "snapshotPath"])
+@pytest.mark.parametrize("kind", ["missing", "directory", "fifo", "symlink", "dangling", "parent-link"])
+def test_unsafe_referenced_files_refused(tmp_path, manifests, monkeypatch, field, kind):
+    path = tmp_path / "unsafe.json"
+    if kind == "directory":
+        path.mkdir()
+    elif kind == "fifo":
+        os.mkfifo(path)
+    elif kind == "symlink":
+        path.symlink_to(manifests[1])
+    elif kind == "dangling":
+        path.symlink_to(tmp_path / "absent")
+    elif kind == "parent-link":
+        path.symlink_to(tmp_path, target_is_directory=True)
+    value = json.loads(manifests[0].read_text())
+    value[field] = path.name + ("/second.json" if kind == "parent-link" else "")
+    manifests[0].write_text(json.dumps(value))
+    monkeypatch.setattr(validator, "_run_bounded", lambda *args: pytest.fail("executed"))
+    with pytest.raises(validator.ValidatorError):
+        validator.validate_bundles([manifests[0]])
+
+
+@POSIX
+@pytest.mark.parametrize("kind", ["directory", "fifo", "symlink", "dangling"])
+def test_existing_unsafe_optional_spec_is_not_absent(tmp_path, manifests, monkeypatch, kind):
+    spec = tmp_path / "spec.yaml"
+    if kind == "directory":
+        spec.mkdir()
+    elif kind == "fifo":
+        os.mkfifo(spec)
+    else:
+        spec.symlink_to(manifests[0] if kind == "symlink" else tmp_path / "absent")
+    monkeypatch.setattr(validator, "_run_bounded", lambda *args: pytest.fail("executed"))
+    with pytest.raises(validator.ValidatorError):
+        validator.validate_bundles(manifests)
+
+
+@POSIX
+@pytest.mark.parametrize("spec_present", [False, True])
+def test_aggregate_exact_limit_and_one_byte_over(
+    tmp_path, manifests, synthetic_assets, monkeypatch, spec_present,
+):
+    # Share facts/catalog across manifests: the budget must count each consumption,
+    # just as it counts the adjacent shared spec once for each manifest.
+    manifests[1].write_bytes(manifests[0].read_bytes())
+    if spec_present:
+        (tmp_path / "spec.yaml").write_text("caps: {}\n")
+    total = synthetic_assets.credential_bindings.stat().st_size
+    for manifest in manifests:
+        for role, (path, _) in input_files(manifest, synthetic_assets.credential_bindings).items():
+            if role != "bindings" and (role != "spec" or spec_present):
+                total += path.stat().st_size
+    monkeypatch.setattr(validator, "_INPUT_LIMIT", total)
+    python = executable(tmp_path, "raise SystemExit(0)\n")
+    validator.validate_bundles(manifests, python_override=str(python))
+    monkeypatch.setattr(validator, "_INPUT_LIMIT", total - 1)
+    monkeypatch.setattr(validator, "_run_bounded", lambda *args: pytest.fail("executed"))
+    with pytest.raises(validator.ValidatorError, match="aggregate input byte limit"):
+        validator.validate_bundles(manifests, python_override=str(python))
+
+
+@POSIX
+def test_aggregate_rejects_individually_legal_catalogs(tmp_path, synthetic_assets, monkeypatch):
+    paths = [tmp_path / f"manifest-{i}.json" for i in range(4)]
+    for path in paths:
+        _, catalog = write_manifest(path)
+        with catalog.open("wb") as stream:
+            stream.truncate(validator._CATALOG_LIMIT)
+    monkeypatch.setattr(validator, "_run_bounded", lambda *args: pytest.fail("executed"))
+    with pytest.raises(validator.ValidatorError, match="aggregate input byte limit"):
+        validator.validate_bundles(paths)
+
+
+@POSIX
+def test_nested_regular_artifacts_accepted(tmp_path, manifests, synthetic_assets):
+    directory = tmp_path / "nested/data"
+    directory.mkdir(parents=True)
+    value = json.loads(manifests[0].read_text())
+    for field in ("factsPath", "snapshotPath"):
+        target = directory / value[field]
+        (tmp_path / value[field]).rename(target)
+        value[field] = target.relative_to(tmp_path).as_posix()
+    manifests[0].write_text(json.dumps(value))
+    python = executable(tmp_path, "raise SystemExit(0)\n")
+    validator.validate_bundles([manifests[0]], python_override=str(python))
+
+
+@POSIX
+@pytest.mark.parametrize("file_limit,budget_limit", [(32, 64), (64, 32)])
+def test_bounded_read_rejects_growth_after_stat(tmp_path, monkeypatch, file_limit, budget_limit):
+    path = tmp_path / "growing-input"
+    path.write_bytes(b"x" * 33)
+    original_stat = validator.os.fstat
+    original_fdopen = validator.os.fdopen
+    reads = []
+
+    def old_size(fd):
+        info = original_stat(fd)
+        return SimpleNamespace(st_mode=info.st_mode, st_size=32)
+
+    class ObservedStream:
+        def __init__(self, fd, mode):
+            self.stream = original_fdopen(fd, mode)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.stream.close()
+
+        def fileno(self):
+            return self.stream.fileno()
+
+        def read(self, size):
+            reads.append(size)
+            assert size == 33  # Smaller of the per-file and remaining budget, plus one.
+            return self.stream.read(size)
+
+    monkeypatch.setattr(validator.os, "fstat", old_size)
+    monkeypatch.setattr(validator.os, "fdopen", ObservedStream)
+    monkeypatch.setattr(validator, "_INPUT_LIMIT", budget_limit)
+    with pytest.raises(validator.ValidatorError, match="bounded immutable regular file"):
+        validator._read_input(
+            path, file_limit, validator._InputBudget(), time.monotonic() + 5, "provider artifact",
+        )
+    assert reads == [33]
