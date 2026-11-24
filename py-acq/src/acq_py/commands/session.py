@@ -4,6 +4,7 @@ backend passthrough: the verbs that act on an existing sandbox (ADR-0038m §4).
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -14,6 +15,7 @@ from .. import (
     backends,
     envelope,
     errors,
+    fresh_launch,
     gitrepos,
     hostexec,
     kit_msb,
@@ -166,6 +168,8 @@ def run_exec(parsed, emit_json: bool, backend: str) -> int:
             f"exec requires a command after '--' (usage: acq exec {name} -- CMD...)",
             emit_json,
         )
+    if backend == "msb":
+        return fresh_attach(name, emit_json, command="exec", guest_command=command)
     if not adapter.exists(name):
         return common._operational_failure(
             "exec",
@@ -207,6 +211,8 @@ def run_attach(parsed, emit_json: bool, backend: str) -> int:
     """
     adapter = common._adapter(backend)
     name = parsed.name
+    if backend == "msb":
+        return fresh_attach(name, emit_json, agent_args=getattr(parsed, "agent_args", []))
     if not adapter.exists(name):
         return common._operational_failure(
             "attach",
@@ -262,6 +268,8 @@ def run_shell(parsed, emit_json: bool, backend: str) -> int:
     """
     adapter = common._adapter(backend)
     name = parsed.name
+    if backend == "msb":
+        return fresh_attach(name, emit_json, command="shell")
     if not adapter.exists(name):
         return common._operational_failure(
             "shell",
@@ -288,6 +296,92 @@ def run_shell(parsed, emit_json: bool, backend: str) -> int:
     if emit_json:
         print(json.dumps(envelope.success("shell", {"name": name, "backend": backend, "exit_code": rc})))
     return rc
+
+
+def fresh_attach(name: str, emit_json: bool, *, command: str = "attach", agent_args=None,
+                  guest_command: list[str] | None = None) -> int:
+    """Qualified MSB dispatcher; select under lock, acknowledge, then wait outside."""
+    with fresh_launch.own_launch(name) as ownership:
+        return _fresh_attach_owned(name, emit_json, ownership, command=command, agent_args=agent_args,
+                                    guest_command=guest_command)
+
+
+def _fresh_attach_owned(name: str, emit_json: bool, ownership: fresh_launch.LaunchOwnership,
+                        *, command: str, agent_args=None, guest_command: list[str] | None = None) -> int:
+    try:
+        fresh_launch.require_session_backend()
+        with lock.sandbox_lock("msb", name):
+            if not msb.exists(name):
+                return common._operational_failure(command, errors.SANDBOX_NOT_FOUND,
+                    f"sandbox '{name}' not found", "create the sandbox before opening a session", emit_json)
+            record = state.record_read("msb", name)
+            proc, refusal = admit_session_locked(name, record, emit_json, ownership,
+                command=command, agent_args=agent_args, guest_command=guest_command)
+            if proc is None:
+                return refusal
+    except (msb.MsbError, state.StateSchemaError, lock.SandboxLockTimeout) as exc:
+        fallback = errors.STATE_SCHEMA_UNSUPPORTED if isinstance(exc, state.StateSchemaError) else errors.VALIDATION_FAILED
+        return common._operational_failure(command, getattr(exc, "code", fallback),
+                                           getattr(exc, "message", str(exc)),
+                                           getattr(exc, "remediation", "retry after verifying the sandbox"), emit_json)
+    rc = fresh_launch.wait_admitted(proc)
+    if emit_json:
+        data = {"name": name, "backend": "msb", "agent": (record or {}).get("agent"), "exit_code": rc}
+        if command == "exec":
+            data = {"name": name, "exit_code": rc}
+        elif command == "shell":
+            data = {"name": name, "backend": "msb", "exit_code": rc}
+        print(json.dumps(envelope.success(command, data)))
+    return rc
+
+
+def admit_session_locked(name: str, record: dict | None, emit_json: bool,
+                         ownership: fresh_launch.LaunchOwnership, *, command: str,
+                         agent_args=None, guest_command: list[str] | None = None,
+                         workspace: str | None = None, launch_entrypoint: str | None = None):
+    """Caller qualified MSB and holds lifecycle lock from this read through ack."""
+    expected_record = copy.deepcopy(record)
+    expected_instance = fresh_launch._session_instance(name)
+
+    def selection_check():
+        if (state.record_read("msb", name) != expected_record
+                or fresh_launch._session_instance(name) != expected_instance
+                or kit_msb.hc_has(name, "fresh-quarantine")):
+            raise fresh_launch._refuse("selected session record or instance changed")
+
+    fresh_launch.session_guard_locked(name)
+    if command in ("attach", "run") and not (record or {}).get("agent"):
+        return None, common._operational_failure(command, errors.VALIDATION_FAILED,
+            f"sandbox '{name}' has no readable host agent record",
+            "create or recreate the sandbox before attaching", emit_json)
+    gate = common._trusted_gate(record, "msb", command, name, emit_json)
+    if gate is not None:
+        return None, gate
+    if record is not None:
+        overlap = common._recorded_workspaces_failure(command, record, emit_json)
+        if overlap is not None:
+            return None, overlap
+    fresh = (record or {}).get("agent") == "opencode"
+    if fresh and record is not None:
+        fresh_launch.existing_profile(name, record)
+        if agent_args:
+            raise fresh_launch.terminal_refusal()
+    payload = [msb.agent_shell(name), "-l"] if command == "shell" else guest_command
+    workspace = workspace or (record or {}).get("workspace") or common.DEFAULT_GUEST_WORKSPACE
+    env = prepare_session("msb", name, record)
+    selection_check()
+    if fresh:
+        return fresh_launch.admit_locked(name, workspace, env, json_mode=emit_json,
+            ownership=ownership, guest_command=payload, tty=False if command == "exec" else None,
+            selection_check=selection_check), None
+    if payload is None:
+        launch_entrypoint = launch_entrypoint or common._launch_token("msb", name, (record or {}).get("agent"))
+        payload = ([launch_entrypoint, *(agent_args or [])] if launch_entrypoint and launch_entrypoint != "shell"
+                   else [msb.agent_shell(name), "-l"])
+    return fresh_launch.admit_legacy_locked(name, record, workspace, env,
+        ownership=ownership, json_mode=emit_json, guest_command=payload,
+        tty=False if command == "exec" else None, shell_env=command != "exec",
+        selection_check=selection_check), None
 
 
 def run_cp(parsed, emit_json: bool, backend: str) -> int:

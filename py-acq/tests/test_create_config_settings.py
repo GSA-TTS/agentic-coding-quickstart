@@ -23,18 +23,21 @@ import pytest
 from acq_py import cli, config, msb, provider_creds, secretstore, security, state
 from acq_py.commands import common, configure, creds
 from gitfixtures import git_repo
+from fresh_fixture import fresh_fixture, jobs, qualified_session_fixture
 
 TOKEN = "ghp_THROWAWAY-SCOPED-TOKEN"
 UNBUNDLED = "git+https://example.invalid/provider-kit.git#ref=main&dir=kit"
 
 
-def _msb_env(monkeypatch, tmp_path):
+def _msb_env(monkeypatch, tmp_path, *, fresh=False):
     monkeypatch.setenv("ACQ_MSB_BIN", "__stub__")
     monkeypatch.setenv("ACQ_MSB_VERSION", "0.7.7")
     monkeypatch.setenv("ACQ_MSB_INSTALLED", "1")
     monkeypatch.setenv("ACQ_SBX_INSTALLED", "0")
     monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("MSB_HOME", str(tmp_path / "msb-home"))
+    if fresh:
+        fresh_fixture(monkeypatch, tmp_path)
 
 
 def _sbx_env(monkeypatch, tmp_path):
@@ -98,11 +101,12 @@ def _terminal(monkeypatch, *, answer: str, token: str | None = None) -> list[str
 
 def test_no_provider_kits_beats_an_exported_provider_kit(monkeypatch, tmp_path, capsys):
     # An unbundled provider kit not pinned to a commit cannot be fetched, so it is refused...
-    _msb_env(monkeypatch, tmp_path)
+    _msb_env(monkeypatch, tmp_path, fresh=True)
     monkeypatch.setenv("ACQ_PROVIDER_KITS", UNBUNDLED)
     ws = _plain_ws(tmp_path)
     rc, doc, _, _ = _main(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "np1", "--json")
-    assert rc == 1 and doc["error"]["code"] == "kit_ref_not_pinned"
+    # Custom providers are outside the admitted plain profile, even before fetch.
+    assert rc == 1 and doc["error"]["code"] == "unsupported_capability"
     # ...and --no-provider-kits wins over it: no provider kit, no key required.
     rc, doc, _, err = _main(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "np1",
                             "--no-provider-kits", "--json")
@@ -112,7 +116,7 @@ def test_no_provider_kits_beats_an_exported_provider_kit(monkeypatch, tmp_path, 
 
 
 def test_no_provider_kits_beats_config_provider_kit(monkeypatch, tmp_path, capsys):
-    _msb_env(monkeypatch, tmp_path)
+    _msb_env(monkeypatch, tmp_path, fresh=True)
     monkeypatch.delenv("ACQ_PROVIDER_KITS", raising=False)
     _write_config("provider_kit: no-such-source/some-kit\n")
     ws = _plain_ws(tmp_path)
@@ -136,7 +140,7 @@ def test_default_provider_kit_still_needs_its_key(monkeypatch, tmp_path, capsys)
 
 
 def test_run_accepts_no_provider_kits(monkeypatch, tmp_path, capsys):
-    _msb_env(monkeypatch, tmp_path)
+    _msb_env(monkeypatch, tmp_path, fresh=True)
     monkeypatch.setenv("ACQ_PROVIDER_KITS", UNBUNDLED)
     ws = _plain_ws(tmp_path)
     rc, doc, _, err = _main(capsys, "--backend", "msb", "run", "opencode", str(ws), "--name", "np4",
@@ -152,7 +156,7 @@ def test_run_accepts_no_provider_kits(monkeypatch, tmp_path, capsys):
 
 @pytest.mark.provider_key
 def test_create_without_a_terminal_only_advises(monkeypatch, tmp_path, capsys):
-    _msb_env(monkeypatch, tmp_path)
+    _msb_env(monkeypatch, tmp_path, fresh=True)
     ws = _github_ws(monkeypatch, tmp_path)
     _write_config("scope_github_token: yes\n")
     stdin = io.StringIO(TOKEN + "\n")
@@ -168,7 +172,7 @@ def test_create_without_a_terminal_only_advises(monkeypatch, tmp_path, capsys):
 
 @pytest.mark.provider_key
 def test_no_prompt_env_only_advises_even_at_a_terminal(monkeypatch, tmp_path, capsys):
-    _msb_env(monkeypatch, tmp_path)
+    _msb_env(monkeypatch, tmp_path, fresh=True)
     ws = _github_ws(monkeypatch, tmp_path)
     _write_config("scope_github_token: yes\n")
     monkeypatch.setenv("ACQ_NO_PROMPT", "1")
@@ -182,7 +186,7 @@ def test_no_prompt_env_only_advises_even_at_a_terminal(monkeypatch, tmp_path, ca
 @pytest.mark.provider_key
 def test_json_create_notes_but_never_prompts(monkeypatch, tmp_path, capsys):
     # Even at a terminal and with the default answer yes: --json never prompts.
-    _msb_env(monkeypatch, tmp_path)
+    _msb_env(monkeypatch, tmp_path, fresh=True)
     ws = _github_ws(monkeypatch, tmp_path)
     _write_config("scope_github_token: yes\n")
     shown = _terminal(monkeypatch, answer="y\n")
@@ -199,7 +203,7 @@ def test_json_create_notes_but_never_prompts(monkeypatch, tmp_path, capsys):
 def test_configured_yes_scopes_before_the_msb_create_binds(monkeypatch, tmp_path, capsys):
     # A bare ENTER takes the configured default (yes), so the token is stored for
     # this sandbox before msb creates it, and the create binds it.
-    _msb_env(monkeypatch, tmp_path)
+    _msb_env(monkeypatch, tmp_path, fresh=True)
     ws = _github_ws(monkeypatch, tmp_path)
     _write_config("scope_github_token: yes\n")
     shown = _terminal(monkeypatch, answer="\n", token=TOKEN)
@@ -218,7 +222,7 @@ def test_configured_yes_scopes_before_the_msb_create_binds(monkeypatch, tmp_path
 
 @pytest.mark.provider_key
 def test_unset_default_declines_on_enter(monkeypatch, tmp_path, capsys):
-    _msb_env(monkeypatch, tmp_path)
+    _msb_env(monkeypatch, tmp_path, fresh=True)
     ws = _github_ws(monkeypatch, tmp_path)
     shown = _terminal(monkeypatch, answer="\n")
     rc, _, _, err = _main(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "adv")
@@ -230,7 +234,7 @@ def test_unset_default_declines_on_enter(monkeypatch, tmp_path, capsys):
 
 @pytest.mark.provider_key
 def test_configured_no_still_lets_the_user_say_yes(monkeypatch, tmp_path, capsys):
-    _msb_env(monkeypatch, tmp_path)
+    _msb_env(monkeypatch, tmp_path, fresh=True)
     ws = _github_ws(monkeypatch, tmp_path)
     _write_config("scope_github_token: no\n")
     _terminal(monkeypatch, answer="y\n", token=TOKEN)
@@ -241,7 +245,7 @@ def test_configured_no_still_lets_the_user_say_yes(monkeypatch, tmp_path, capsys
 
 @pytest.mark.provider_key
 def test_an_empty_token_skips_without_failing_the_create(monkeypatch, tmp_path, capsys):
-    _msb_env(monkeypatch, tmp_path)
+    _msb_env(monkeypatch, tmp_path, fresh=True)
     ws = _github_ws(monkeypatch, tmp_path)
     _write_config("scope_github_token: yes\n")
     _terminal(monkeypatch, answer="\n", token="")
@@ -254,7 +258,7 @@ def test_an_empty_token_skips_without_failing_the_create(monkeypatch, tmp_path, 
 
 @pytest.mark.provider_key
 def test_multi_owner_workspace_is_refused_without_failing_the_create(monkeypatch, tmp_path, capsys):
-    _msb_env(monkeypatch, tmp_path)
+    _msb_env(monkeypatch, tmp_path, fresh=True)
     ws = _github_ws(monkeypatch, tmp_path, "https://github.com/alpha/a.git", "https://github.com/beta/b.git")
     _write_config("scope_github_token: yes\n")
     shown = _terminal(monkeypatch, answer="\n")
@@ -265,7 +269,7 @@ def test_multi_owner_workspace_is_refused_without_failing_the_create(monkeypatch
 
 @pytest.mark.provider_key
 def test_a_sandbox_with_its_own_token_is_not_nudged(monkeypatch, tmp_path, capsys):
-    _msb_env(monkeypatch, tmp_path)
+    _msb_env(monkeypatch, tmp_path, fresh=True)
     ws = _github_ws(monkeypatch, tmp_path)
     secretstore.set_secret("github", "adv", TOKEN)
     rc, _, _, err = _main(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "adv")
@@ -275,7 +279,7 @@ def test_a_sandbox_with_its_own_token_is_not_nudged(monkeypatch, tmp_path, capsy
 
 @pytest.mark.provider_key
 def test_a_global_token_is_named_as_broader(monkeypatch, tmp_path, capsys):
-    _msb_env(monkeypatch, tmp_path)
+    _msb_env(monkeypatch, tmp_path, fresh=True)
     ws = _github_ws(monkeypatch, tmp_path)
     secretstore.set_secret("github", None, TOKEN)
     rc, _, out, err = _main(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "adv")
@@ -286,7 +290,7 @@ def test_a_global_token_is_named_as_broader(monkeypatch, tmp_path, capsys):
 
 @pytest.mark.provider_key
 def test_a_workspace_without_github_repos_is_not_nudged(monkeypatch, tmp_path, capsys):
-    _msb_env(monkeypatch, tmp_path)
+    _msb_env(monkeypatch, tmp_path, fresh=True)
     ws = _plain_ws(tmp_path)
     rc, _, _, err = _main(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "adv")
     assert rc == 0, err
@@ -297,13 +301,16 @@ def test_a_workspace_without_github_repos_is_not_nudged(monkeypatch, tmp_path, c
 def test_run_reattach_is_nudged_too(monkeypatch, tmp_path, capsys):
     _msb_env(monkeypatch, tmp_path)
     ws = _github_ws(monkeypatch, tmp_path)
-    rc, _, _, _ = _main(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "adv", "--json")
+    # Generic legacy reattach advice; fresh OpenCode has a separate admission path.
+    rc, _, _, _ = _main(capsys, "--backend", "msb", "create", "shell", str(ws), "--name", "adv", "--json")
     assert rc == 0
+    qualified_session_fixture(monkeypatch)  # session gate must not hide reattach advice
     monkeypatch.setattr(sys, "stdin", io.StringIO(""))
-    monkeypatch.setattr(msb, "launch", lambda *a, **k: 0)
-    rc, _, _, err = _main(capsys, "--backend", "msb", "run", "opencode", str(ws), "--name", "adv")
+    rc, _, _, err = _main(capsys, "--backend", "msb", "run", "shell", str(ws), "--name", "adv")
     assert rc == 0, err
     assert "To scope it later: acq github-scope adv" in err
+    assert len(jobs("adv")) == 1
+    assert jobs("adv")[0]["status"]["command"][3].startswith("acq-launch-")
 
 
 @pytest.mark.provider_key
@@ -316,7 +323,7 @@ def test_security_recreate_is_nudged_too(monkeypatch, tmp_path, capsys):
     catalog.write_text(json.dumps({"sec": "running"}), encoding="utf-8")
     record = state.record_path("msb", "sec")
     record.parent.mkdir(parents=True, exist_ok=True)
-    record.write_text(json.dumps({"schema": 1, "name": "sec", "backend": "msb", "agent": "opencode",
+    record.write_text(json.dumps({"schema": 1, "name": "sec", "backend": "msb", "agent": "shell",
                                   "workspace": str(ws), "ro_host_config": True}), encoding="utf-8")
     monkeypatch.setenv("ACQ_SECURITY_MOUNT_STATE", json.dumps({"sec": "missing"}))
     monkeypatch.setattr(security, "WINDOWS", False)
@@ -355,6 +362,10 @@ def test_a_token_the_prompt_stored_is_removed_when_the_msb_create_fails(monkeypa
     # Left behind, the token would be bound to the next sandbox created under
     # this name, whatever workspace it mounts.
     _msb_env(monkeypatch, tmp_path)
+    if verb == "run":
+        # Only run requires qualified session support; retain the original
+        # create fixture and all token cleanup/non-disclosure assertions.
+        qualified_session_fixture(monkeypatch)
     ws = _github_ws(monkeypatch, tmp_path)
     _write_config("scope_github_token: yes\n")
     _terminal(monkeypatch, answer="\n", token=TOKEN)
@@ -435,7 +446,7 @@ def test_the_scope_prompt_does_not_hold_the_sandbox_lock(monkeypatch, tmp_path, 
     # that takes the lock would wait on itself).
     from acq_py import lock
 
-    _msb_env(monkeypatch, tmp_path)
+    _msb_env(monkeypatch, tmp_path, fresh=True)
     ws = _github_ws(monkeypatch, tmp_path)
     _terminal(monkeypatch, answer="n\n")
     monkeypatch.setenv("ACQ_SANDBOX_LOCK_TIMEOUT", "0.2")
