@@ -37,11 +37,10 @@ boot_id = "boot_" + "2" * 32
 state_path = root / "job"
 
 def publish_job(job):
-    # Killing the host attach transport must not truncate authoritative backend
-    # state. Native MSB owns that state outside the attach client process.
+    # Killing the host stream transport must not truncate backend state.
     pending = root / ("job.pending." + str(os.getpid()))
     with pending.open("w") as stream:
-        if mode == "stdout-cap-interrupted-publication" and verb == "attach":
+        if mode == "stdout-cap-interrupted-publication" and verb == "exec" and job["state"] == "exited":
             stream.write('{"version":')
             stream.flush()
             os.write(1, b"X" * 2048)
@@ -56,11 +55,12 @@ if args == ["--version"]:
 if args[-1] == "--help":
     if mode == "help-cap":
         os.write(1, b"X" * 300000)
-    print("--detach --no-stdin --timeout --user --all --limit --format --job --signal"
-          + ("" if mode == "missing-capability" else " --read-only"))
+    print("--no-stdin --timeout --user --all --limit --format --job --signal"
+          + ("" if mode == "missing-capability" else " --stream"))
     sys.exit(0)
 if verb == "exec":
-    assert "--no-stdin" in args and "--detach" in args and "--timeout" in args
+    assert "--no-stdin" in args and "--stream" in args and "--timeout" in args
+    assert "--detach" not in args
     assert "-t" not in args and "--tty" not in args
     assert args[args.index("--user") + 1] == "agent"
     assert args[args.index("--timeout") + 1].endswith("ms")
@@ -69,14 +69,15 @@ if verb == "exec":
                command=args[args.index("--") + 1:], state="running", tty=False,
                stdin_closed=True, pid=123, created_at=100, started_at=101,
                finished_at=None, exit_code=None, failure=None, error=None, timed_out=False)
-    publish_job(job)
     if mode == "exec-refused":
         sys.exit(1)
-    if mode == "bad-id":
-        print(job_id + "\n" + job_id)
-    else:
-        print(job_id)
-    sys.exit(0)
+    if mode == "spawn-unacknowledged":
+        (root / "spawn-ready").touch()
+        time.sleep(20)
+    publish_job(job)
+    if mode == "spawn-acknowledged":
+        (root / "spawn-ready").touch()
+        time.sleep(20)
 if verb in ("jobs", "inspect"):
     if verb == "jobs":
         limit = int(args[args.index("--limit") + 1])
@@ -95,12 +96,21 @@ if verb in ("jobs", "inspect"):
         print('{"items": [], "items": [], "next_cursor": null}')
         sys.exit(0)
     items = [json.loads(state_path.read_text())] if state_path.exists() else []
+    if verb == "jobs" and items and mode == "fast-complete":
+        # Deterministic ordering: acknowledgment cannot return until exec has
+        # published terminal state AND emitted all output. No attach can replay.
+        until = time.monotonic() + 5
+        while not (root / "emitted").exists():
+            assert time.monotonic() < until
+            time.sleep(0.001)
+        items = [json.loads(state_path.read_text())]
+        assert items[0]["state"] == "exited"
     if items:
         if mode == "wrong-id":
             items[0]["id"] = "job_" + "4" * 32
         if mode == "wrong-command":
             items[0]["command"] = ["/unrelated"]
-        if mode == "wrong-boot" and (root / "attached").exists():
+        if mode == "wrong-boot" and verb == "inspect":
             items[0]["runtime_boot_id"] = "boot_" + "3" * 32
         if mode == "unknown-state":
             items[0]["state"] = "mystery"
@@ -122,6 +132,8 @@ if verb in ("jobs", "inspect"):
             # At the explicit cap pre-launch; the new job adds another page.
             items = [dict(id="job_" + format(i, "032x")) for i in range(100)]
             cursor = "opaque" if state_path.exists() else None
+        if mode == "last-slot":
+            items = [dict(id="job_" + format(i, "032x")) for i in range(99)] + items
         print(json.dumps(dict(items=items, next_cursor=cursor)))
     sys.exit(0)
 if verb in ("signal", "kill"):
@@ -134,9 +146,11 @@ if verb in ("signal", "kill"):
     job.update(state="exited", exit_code=-1, finished_at=102)
     publish_job(job)
     sys.exit(0)
-if verb == "attach":
-    assert args == ["attach", "--read-only", "--job", job_id, "sandbox"]
-    (root / "attached").touch()
+if verb == "exec":
+    if mode == "fast-invalid-prefix":
+        os.write(1, b"discarding this would falsely accept the valid suffix\n")
+    if mode == "fast-oversize-prefix":
+        os.write(1, b"X" * 2048)
     if mode in ("attach-hang", "term-ignored", "cleanup-refused"):
         time.sleep(20)
     if mode in ("stdout-cap", "page-boundary-cleanup"):
@@ -163,6 +177,8 @@ if verb == "attach":
                              stage="membership", reason="connection", failureClass="transient")))
     else:
         print('{"sourceOutcome":"live","metadataOutcome":"not-requested"}')
+    sys.stdout.flush()
+    (root / "emitted").touch()
     sys.exit(1 if mode in ("signal-exit", "native-timeout", "attach-refused", "typed-failure") else 0)
 sys.exit(99)
 '''
@@ -206,16 +222,48 @@ def test_success_uses_real_pipes_exact_argv_and_host_identity(fake, identity):
     assert result.identity is identity
     assert result.metadata_outcome == "not-requested"
     recorded = calls(fake)
-    assert [args[0] for args in recorded] == [
-        "--version", "exec", "attach", "jobs", "inspect", "signal", "kill", "jobs",
-        "exec", "inspect", "attach", "inspect",
-    ]
-    launched = next(args for args in recorded if args[0] == "exec" and "--detach" in args)
-    assert launched[launched.index("--") + 1:] == [
+    assert not any(args[0] in ("attach", "logs") for args in recorded)
+    launched = next(args for args in recorded if "--stream" in args)
+    guest = launched[launched.index("--") + 1:]
+    assert guest[:3] == ["/bin/sh", "-c", 'exec "$@"']
+    assert guest[3].startswith("acq-preparation-")
+    assert guest[4:] == [
         "/usr/local/bin/node", "/trusted/preparation.mjs", "--provider-root", "/trusted/provider",
         "--global-dir", "/home/agent/.config/opencode", "--base-config", "/trusted/base.jsonc",
         "--mode", "live-required",
     ]
+
+
+def test_fast_job_finishes_and_emits_before_acknowledgment(fake, identity):
+    mode(fake, "fast-complete")
+    assert run(identity).source_outcome == "live"
+    assert (fake / "emitted").exists()
+    assert not any(args[0] in ("attach", "logs") for args in calls(fake))
+
+
+@pytest.mark.parametrize("value", ["fast-invalid-prefix", "fast-oversize-prefix"])
+def test_pre_acknowledgment_prefix_cannot_be_discarded_to_accept_suffix(fake, identity, value):
+    mode(fake, value)
+    with pytest.raises(PreparationError):
+        run(identity)
+    assert not any(args[0] in ("attach", "logs") for args in calls(fake))
+
+
+def test_last_inventory_slot_acknowledged_then_only_exact_inspection(fake, identity):
+    mode(fake, "last-slot")
+    assert run(identity).identity is identity
+    recorded = [args for args in calls(fake) if "--help" not in args]
+    inspected = next(i for i, args in enumerate(recorded) if args[0] == "inspect")
+    assert not any(args[0] == "jobs" for args in recorded[inspected:])
+
+
+def test_attempt_argv_is_unique_even_for_repeated_host_identity(fake, identity):
+    run(identity)
+    (fake / "job").unlink()  # fixture allocates one fixed job ID
+    run(identity)
+    launched = [args for args in calls(fake) if "--stream" in args]
+    markers = [args[args.index("--") + 4] for args in launched]
+    assert len(markers) == 2 and markers[0] != markers[1]
 
 
 @pytest.mark.parametrize("value", [
@@ -226,7 +274,7 @@ def test_preflight_refusal_never_launches(fake, identity, value):
     mode(fake, value)
     with pytest.raises(runner.ManagedJobError):
         run(identity)
-    assert not any("--detach" in args for args in calls(fake))
+    assert not any("--stream" in args for args in calls(fake))
 
 
 @pytest.mark.parametrize("limit", [0, 101, 256])
@@ -234,14 +282,14 @@ def test_synthetic_cli_enforces_native_inventory_limit_range(fake, identity, mon
     monkeypatch.setattr(runner, "MAX_JOBS", limit)
     with pytest.raises(runner.ManagedJobError, match="control refused"):
         run(identity)
-    assert not any("--detach" in args for args in calls(fake))
+    assert not any("--stream" in args for args in calls(fake))
 
 
-@pytest.mark.parametrize("value", ["exec-refused", "bad-id"])
+@pytest.mark.parametrize("value", ["exec-refused"])
 def test_uncertain_launch_requires_quarantine_without_guessing_job(fake, identity, value):
     mode(fake, value)
     with pytest.raises(runner.CleanupUnconfirmed, match="launch identity unavailable"):
-        run(identity)
+        run(identity, timeout=2)
     assert not any(args[0] in ("signal", "kill") and "--help" not in args for args in calls(fake))
 
 
@@ -255,7 +303,7 @@ def test_output_and_terminal_failures_clean_exact_guest_job(fake, identity, valu
         run(identity)
     assert not isinstance(error.value, runner.CleanupUnconfirmed)
     assert "sourceOutcome" not in str(error.value)
-    assert any(args[:3] == ["signal", "--job", "job_" + "1" * 32] for args in calls(fake))
+    assert any(args[:3] == ["inspect", "--job", "job_" + "1" * 32] for args in calls(fake))
     assert json.loads((fake / "job").read_text())["state"] == "exited"
 
 
@@ -264,7 +312,7 @@ def test_output_cap_during_fixture_publication_preserves_cleanup_evidence(fake, 
     with pytest.raises(runner.ManagedJobError, match="output limit exceeded") as error:
         run(identity)
     assert not isinstance(error.value, runner.CleanupUnconfirmed)
-    # Prove the attach process was interrupted during a partial write, not merely
+    # Prove the stream process was interrupted during a partial write, not merely
     # before or after it. The running record remained available to guest TERM.
     pending = list(fake.glob("job.pending.*"))
     assert len(pending) == 1
@@ -281,8 +329,7 @@ def test_corrupted_authoritative_state_still_requires_quarantine(fake, identity)
     with pytest.raises(runner.CleanupUnconfirmed, match="quarantine"):
         run(identity)
     assert (fake / "job").read_text() == '{"version":'
-    assert ["signal", "--job", "job_" + "1" * 32, "--signal", "TERM", "sandbox"] in calls(fake)
-    assert ["kill", "--job", "job_" + "1" * 32, "sandbox"] in calls(fake)
+    assert not any(args[0] in ("signal", "kill") and "--help" not in args for args in calls(fake))
 
 
 @pytest.mark.parametrize("value", [
@@ -292,7 +339,7 @@ def test_corrupted_authoritative_state_still_requires_quarantine(fake, identity)
 def test_invalid_exact_job_cannot_confirm_cleanup(fake, identity, value):
     mode(fake, value)
     with pytest.raises(runner.CleanupUnconfirmed):
-        run(identity)
+        run(identity, timeout=2)
 
 
 def test_shared_deadline_and_guest_timeout(fake, identity):
@@ -301,7 +348,7 @@ def test_shared_deadline_and_guest_timeout(fake, identity):
     with pytest.raises(runner.ManagedJobError, match="deadline"):
         run(identity, timeout=2)
     assert time.monotonic() - start < 4
-    launched = next(args for args in calls(fake) if "--detach" in args)
+    launched = next(args for args in calls(fake) if "--stream" in args)
     assert 0 < int(launched[launched.index("--timeout") + 1][:-2]) < 2000
     assert json.loads((fake / "job").read_text())["state"] == "exited"
 
@@ -323,40 +370,32 @@ def test_unconfirmed_guest_cleanup_is_not_success(fake, identity):
 
 
 def test_keyboard_interrupt_cleans_up_and_propagates(fake, identity, monkeypatch):
-    capture = runner._capture
+    completed = runner._completed
 
-    def interrupt(command, args, deadline, stdout_limit=runner.CONTROL_BYTES):
-        if args[0] == "attach" and "--help" not in args:
-            raise KeyboardInterrupt
-        return capture(command, args, deadline, stdout_limit)
+    def interrupt(*args):
+        completed(*args)
+        raise KeyboardInterrupt
 
-    monkeypatch.setattr(runner, "_capture", interrupt)
+    monkeypatch.setattr(runner, "_completed", interrupt)
     with pytest.raises(KeyboardInterrupt):
-        run(identity)
+        run(identity, timeout=2)
     assert json.loads((fake / "job").read_text())["state"] == "exited"
 
 
 def test_retained_job_cannot_be_reused_as_new_invocation(fake, identity):
     run(identity)
     with pytest.raises(runner.CleanupUnconfirmed, match="launch identity unavailable"):
-        run(identity)
+        run(identity, timeout=2)
 
 
 @pytest.mark.parametrize("value", ["page-boundary", "page-boundary-cleanup"])
-def test_new_job_crossing_inventory_page_uses_direct_inspection(fake, identity, value):
+def test_full_inventory_refuses_before_foreground_launch(fake, identity, value):
     mode(fake, value)
-    if value == "page-boundary":
-        assert run(identity).identity is identity
-    else:
-        with pytest.raises(runner.ManagedJobError, match="output limit exceeded") as error:
-            run(identity)
-        assert not isinstance(error.value, runner.CleanupUnconfirmed)
-        assert json.loads((fake / "job").read_text())["state"] == "exited"
+    with pytest.raises(runner.ManagedJobError, match="no room"):
+        run(identity)
     recorded = [args for args in calls(fake) if "--help" not in args]
     assert sum(args[0] == "jobs" for args in recorded) == 1
-    launch = next(i for i, args in enumerate(recorded) if "--detach" in args)
-    assert any(args[0] == "inspect" for args in recorded[launch + 1:])
-    assert not any(args[0] == "jobs" for args in recorded[launch + 1:])
+    assert not any("--stream" in args for args in recorded)
 
 
 @pytest.mark.parametrize("timeout", [0, -1, True, float("inf"), float("nan"), 301])
@@ -374,8 +413,8 @@ def test_rejects_numeric_user_before_cli(fake, identity):
 
 def test_clean_parent_environment_is_constructed_before_node(fake, identity):
     assert run(identity, ca_bundle="/var/lib/acq/host/guest-ca.pem").identity is identity
-    launched = next(args for args in calls(fake) if "--detach" in args)
-    argv = launched[launched.index("--") + 1:]
+    launched = next(args for args in calls(fake) if "--stream" in args)
+    argv = launched[launched.index("--") + 5:]
     assert argv[:4] == ["/bin/sh", "-c", runner._CLEAN_LAUNCH, "acq-preparation"]
     assert argv[4:7] == ["/var/lib/acq/host/guest-ca.pem", "usai", "/usr/local/bin/node"]
     entries = [launched[i + 1] for i, token in enumerate(launched) if token == "-e"]
@@ -400,8 +439,8 @@ def test_clean_launch_never_runs_as_root(fake, identity):
 
 def test_none_clean_launch_does_not_require_or_forward_usai(fake, identity):
     assert run(identity, ca_bundle="/var/lib/acq/host/guest-ca.pem", usai=False).identity is identity
-    launched = next(args for args in calls(fake) if "--detach" in args)
-    argv = launched[launched.index("--") + 1:]
+    launched = next(args for args in calls(fake) if "--stream" in args)
+    argv = launched[launched.index("--") + 5:]
     assert argv[5] == "none"
     assert 'if test "$provider" = usai; then test -n "${USAI_API_KEY:-}"; fi' in argv[2]
     assert 'if test "$provider" = usai; then set -- "USAI_API_KEY=$USAI_API_KEY" "$@"; fi' in argv[2]
@@ -442,3 +481,59 @@ def test_parent_hup_during_control_capture_survives_host_reap_failure(fake, monk
         runner._capture(tuple(runner.msb.msb_command()), ["jobs", "--all", "--limit", "100",
                                                        "--format", "json", "sandbox"], time.monotonic() + 5)
     assert caught.value is interruption
+
+
+@pytest.mark.parametrize("signame", ["SIGTERM", "SIGHUP"])
+@pytest.mark.parametrize("acknowledged", [False, True])
+def test_created_preparation_child_is_owned_before_spawn_signal_unwinds(
+        fake, identity, monkeypatch, signame, acknowledged):
+    import signal
+    from acq_py import cli
+
+    mode(fake, "spawn-acknowledged" if acknowledged else "spawn-unacknowledged")
+    signum = getattr(signal, signame)
+    previous = signal.getsignal(signum)
+    monkeypatch.setattr(cli, "_terminating_since", None)
+    signal.signal(signum, cli._raise_terminated)
+    popen = runner.subprocess.Popen
+    children = []
+
+    def spawn(argv, **kwargs):
+        child = popen(argv, **kwargs)
+        if "--stream" not in argv:
+            return child
+        children.append(child)
+        deadline = time.monotonic() + 5
+        while not (fake / "spawn-ready").exists():
+            assert child.poll() is None
+            assert time.monotonic() < deadline
+            time.sleep(0.001)
+        # Real child exists and is alive, but the caller has not received its
+        # handle. The first handler exception must be deferred, not lost.
+        signal.getsignal(signum)(signum, None)
+        assert cli._terminating_since is not None
+        signal.getsignal(signum)(signum, None)  # existing CLI repeat grace
+        assert child.poll() is None
+        return child
+
+    monkeypatch.setattr(runner.subprocess, "Popen", spawn)
+    try:
+        expected = cli._Terminated if acknowledged else runner.CleanupUnconfirmed
+        with pytest.raises(expected) as caught:
+            run(identity, timeout=10)
+        assert len(children) == 1 and children[0].poll() is not None
+        assert children[0].stdout.closed and children[0].stderr.closed
+        assert signal.getsignal(signum) is cli._raise_terminated
+        if acknowledged:
+            assert caught.value.signum == signum
+            assert json.loads((fake / "job").read_text())["state"] == "exited"
+            assert ["signal", "--job", "job_" + "1" * 32, "--signal", "TERM", "sandbox"] in calls(fake)
+        else:
+            assert "launch identity unavailable" in str(caught.value)
+            assert not any(args[0] in ("signal", "kill") and "--help" not in args for args in calls(fake))
+    finally:
+        signal.signal(signum, previous)
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=2)

@@ -13,9 +13,14 @@ import re
 import selectors
 import signal
 import subprocess
+import threading
 import time
+import uuid
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import PurePosixPath
+from types import FrameType
 
 from . import msb
 from .runtime_preparation import (
@@ -30,7 +35,7 @@ from .runtime_preparation import (
 CONTROL_BYTES = 262144
 STDERR_BYTES = 16384
 # MSB 0.7.16 accepts --limit only in 1..100. Refuse an incomplete page before
-# launch; supervise the acknowledged job directly rather than enumerating again.
+# launch, reserving one slot for acknowledgment; then inspect the exact job.
 MAX_JOBS = 100
 CLEANUP_SECONDS = 5.0
 # Host-selected provisioned devenv runtime. Never resolve this with guest PATH
@@ -107,22 +112,58 @@ def _reap_host(proc: subprocess.Popen[bytes]) -> None:
         raise ManagedJobError("MSB host transport cleanup unconfirmed") from None
 
 
-def _capture(command: tuple[str, ...], args: list[str], deadline: float,
-             stdout_limit: int = CONTROL_BYTES) -> _Output:
-    _remaining(deadline)
+@contextmanager
+def _defer_spawn_termination() -> Iterator[None]:
+    """Defer handler exceptions, not signals/masks, until Popen is registered.
+
+    Delegating immediately preserves the CLI's repeat-signal grace clock. Caught
+    dispositions reset at exec; no blocked mask or SIG_IGN leaks into the child.
+    The caller must enclose this context in its owned-process cleanup block.
+    """
+    saved: dict[int, Callable[[int, FrameType | None], object]] = {}
+    pending: BaseException | None = None
+
+    def defer(signum: int, frame: FrameType | None) -> None:
+        nonlocal pending
+        try:
+            saved[signum](signum, frame)
+        except BaseException as exc:
+            if pending is None:
+                pending = exc
+
     try:
-        proc = subprocess.Popen(
-            [*command, *args], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, start_new_session=True,
-        )
-    except OSError:
-        raise ManagedJobError("MSB transport unavailable") from None
-    if proc.stdout is None or proc.stderr is None:
-        _reap_host(proc)
-        raise ManagedJobError("MSB transport pipes unavailable")
+        if threading.current_thread() is threading.main_thread():
+            for signum in (signal.SIGTERM, signal.SIGHUP):
+                previous = signal.getsignal(signum)
+                if callable(previous):
+                    saved[signum] = previous
+                    signal.signal(signum, defer)
+        yield
+    finally:
+        for saved_signal, previous in saved.items():
+            signal.signal(saved_signal, previous)
+        if pending is not None:
+            raise pending
+
+
+def _capture(command: tuple[str, ...], args: list[str], deadline: float,
+             stdout_limit: int = CONTROL_BYTES,
+             observe: Callable[[], None] | None = None) -> _Output:
+    _remaining(deadline)
+    proc: subprocess.Popen[bytes] | None = None
     buffers = [bytearray(), bytearray()]
     limits = (stdout_limit, STDERR_BYTES)
     try:
+        try:
+            with _defer_spawn_termination():
+                proc = subprocess.Popen(
+                    [*command, *args], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, start_new_session=True,
+                )
+        except OSError:
+            raise ManagedJobError("MSB transport unavailable") from None
+        if proc.stdout is None or proc.stderr is None:
+            raise ManagedJobError("MSB transport pipes unavailable")
         with selectors.DefaultSelector() as selector:
             for index, stream in enumerate((proc.stdout, proc.stderr)):
                 os.set_blocking(stream.fileno(), False)
@@ -137,6 +178,8 @@ def _capture(command: tuple[str, ...], args: list[str], deadline: float,
                         raise ManagedJobError("MSB preparation output limit exceeded")
                     else:
                         buffers[index].extend(chunk)
+                if observe is not None:
+                    observe()
             try:
                 code = proc.wait(timeout=_remaining(deadline))
             except subprocess.TimeoutExpired:
@@ -144,7 +187,8 @@ def _capture(command: tuple[str, ...], args: list[str], deadline: float,
         return _Output(code, bytes(buffers[0]))
     except BaseException as exc:
         try:
-            _reap_host(proc)
+            if proc is not None:
+                _reap_host(proc)
         except BaseException:
             if isinstance(exc, Exception):
                 raise
@@ -153,8 +197,10 @@ def _capture(command: tuple[str, ...], args: list[str], deadline: float,
             # The launch owner retains durable guest-cleanup exclusion.
         raise
     finally:
-        proc.stdout.close()
-        proc.stderr.close()
+        if proc is not None:
+            for pipe in (proc.stdout, proc.stderr):
+                if pipe is not None:
+                    pipe.close()
 
 
 def _control(command: tuple[str, ...], args: list[str], deadline: float) -> bytes:
@@ -170,8 +216,7 @@ def _capabilities(command: tuple[str, ...], deadline: float) -> None:
     if version != b"msb 0.7.16":
         raise ManagedJobError("unsupported MSB managed-job version")
     required = {
-        "exec": (b"--detach", b"--no-stdin", b"--timeout", b"--user"),
-        "attach": (b"--job", b"--read-only"),
+        "exec": (b"--stream", b"--no-stdin", b"--timeout", b"--user"),
         "jobs": (b"--all", b"--format", b"--limit"),
         "inspect": (b"--job", b"--format"),
         "signal": (b"--job", b"--signal"),
@@ -271,8 +316,14 @@ def _cleanup(command: tuple[str, ...], name: str, job: str, argv: tuple[str, ...
     # A refused signal can mean the job already exited. Only status confirms it.
     for args, grace in ((["signal", "--job", job, "--signal", "TERM", name],
                          min(1.0, CLEANUP_SECONDS / 3)),
-                        (["kill", "--job", job, name], CLEANUP_SECONDS)):
+                         (["kill", "--job", job, name], CLEANUP_SECONDS)):
         try:
+            status = _status(command, name, job, argv, boot,
+                             min(deadline, time.monotonic() + 0.5))
+            if boot is None:
+                boot = status.boot
+            if status.state == "exited":
+                return
             _control(command, args, min(deadline, time.monotonic() + 0.5))
         except ManagedJobError:
             pass
@@ -305,33 +356,57 @@ def _run_job(command: tuple[str, ...], name: str, identity: InvocationIdentity,
              previous: set[str], env: tuple[str, ...] = ()) -> PreparationResult:
     job: str | None = None
     boot: str | None = None
+    def acknowledge(until: float) -> None:
+        nonlocal job, boot
+        if job is not None:
+            return
+        items = _inventory(_control(command, ["jobs", "--all", "--limit", str(MAX_JOBS),
+                                              "--format", "json", name], until))
+        matches = [item for item in items if item["id"] not in previous
+                   and item.get("command") == list(argv)]
+        if len(matches) > 1:
+            raise ManagedJobError("ambiguous MSB launch acknowledgment")
+        if matches:
+            # Retain an exact candidate even if its status is malformed. Cleanup
+            # still validates its command/boot before sending any guest signal.
+            job = matches[0]["id"]
+            boot = _job_fields(matches[0], argv, None).boot
+
     try:
-        # Floor to milliseconds: never round a guest deadline up beyond the host budget.
+        # Floor to milliseconds: never round the CLI timeout above the host budget.
         milliseconds = math.floor(_remaining(deadline) * 1000)
         if milliseconds < 1:
             raise ManagedJobError("MSB preparation deadline exceeded")
         flags = [part for entry in env for part in ("-e", entry)]
-        detached = _control(command, ["exec", "--detach", "--no-stdin", "--timeout",
-                            f"{milliseconds}ms", "--user", guest_user, *flags, name, "--", *argv], deadline)
-        if re.fullmatch(rb"job_[0-9a-f]{32}\n?", detached) is None:
-            raise ManagedJobError("invalid MSB detached job identity")
-        candidate = detached.decode("ascii").rstrip("\n")
-        if candidate in previous:
-            raise ManagedJobError("MSB detached job identity was reused")
-        job = candidate
-        initial = _status(command, name, job, argv, None, deadline)
-        boot = initial.boot
-        attached = _capture(command, ["attach", "--read-only", "--job", job, name],
-                            deadline, MAX_OUTPUT_BYTES)
+        # --stream is essential: without it the native CLI buffers unbounded
+        # output internally. Pipes exist before exec; no attach/log replay race.
+        # Native foreground --timeout belongs to the CLI, NOT a guest watchdog.
+        captured = _capture(command, ["exec", "--stream", "--no-stdin", "--timeout",
+                            f"{milliseconds}ms", "--user", guest_user, *flags, name, "--", *argv],
+                            deadline, MAX_OUTPUT_BYTES,
+                            lambda: acknowledge(min(deadline, time.monotonic() + 1)))
+        while job is None:
+            acknowledge(deadline)
+            if job is None:
+                time.sleep(min(0.05, _remaining(deadline)))
+        if boot is None:
+            raise ManagedJobError("MSB preparation boot acknowledgment missing")
         final = _completed(command, name, job, argv, boot, deadline)
         if final.timed_out or final.failed:
             raise ManagedJobError("MSB preparation job failed or timed out")
-        if final.code == 0 and attached.code != 0:
-            raise ManagedJobError("MSB preparation attach failed")
+        if final.code == 0 and captured.code != 0:
+            raise ManagedJobError("MSB preparation foreground transport failed")
         if final.code is None:
             raise ManagedJobError("MSB preparation terminal status missing")
-        return parse_result(identity, returncode=final.code, stdout=attached.stdout)
+        return parse_result(identity, returncode=final.code, stdout=captured.stdout)
     except BaseException:
+        if job is None:
+            # Output overflow/termination can precede acknowledgment. Reconcile
+            # by the unique exact argv, never by name or an unrelated new job.
+            try:
+                acknowledge(time.monotonic() + CLEANUP_SECONDS)
+            except BaseException:
+                raise CleanupUnconfirmed("MSB launch identity unavailable; quarantine required") from None
         if job is None:
             raise CleanupUnconfirmed("MSB launch identity unavailable; quarantine required") from None
         try:
@@ -375,6 +450,9 @@ def run_preparation(name: str, identity: InvocationIdentity, *, node: str,
             raise ManagedJobError("clean preparation requires the unprivileged agent user")
         argv = ("/bin/sh", "-c", _CLEAN_LAUNCH, "acq-preparation", ca_bundle, "usai" if usai else "none", *argv)
         env = _INITIAL_ENV
+    # Fixed shell source; a host-generated nonce is only argv[0] for the shell.
+    # The inner clean launcher and all protocol arguments remain unchanged.
+    argv = ("/bin/sh", "-c", 'exec "$@"', "acq-preparation-" + uuid.uuid4().hex, *argv)
     deadline = time.monotonic() + timeout
     try:
         command = tuple(msb.msb_command())
@@ -387,4 +465,6 @@ def run_preparation(name: str, identity: InvocationIdentity, *, node: str,
     previous = {item["id"] for item in _inventory(
         _control(command, ["jobs", "--all", "--limit", str(MAX_JOBS),
                            "--format", "json", name], deadline))}
+    if len(previous) >= MAX_JOBS:
+        raise ManagedJobError("MSB job inventory has no room for launch acknowledgment")
     return _run_job(command, name, identity, argv, guest_user, deadline, previous, env)

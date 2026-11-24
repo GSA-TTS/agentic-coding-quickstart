@@ -1,10 +1,8 @@
 """Explicit fresh-profile fixtures; synthetic outcomes, never live qualification.
 
-Subprocess tests require pytest --basetemp under a sandbox-local private mount
-with non-symlink, non-group/world-writable ancestors owned by root or the test
-uid. The runner must provision it; we never chmod shared /tmp or relax the
-subprocess CA policy. In-process tests retain the narrowly modeled ancestor
-metadata seam while exercising the actual CA file read and parser.
+Subprocess tests provision their own directory below a validated private base,
+even when pytest uses /tmp. No shared ancestor is chmodded and the real CA
+validator remains enabled. In-process tests retain their modeled metadata seam.
 """
 
 from __future__ import annotations
@@ -13,21 +11,49 @@ import json
 import os
 import stat
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
 
+# Capture before the autouse fixture replaces HOME with a directory under /tmp.
+_TEST_HOME = Path.home()
+
+
+def _trusted_base(root):
+    try:
+        if not root.is_absolute() or root != root.resolve(strict=True):
+            return False
+        for path in (root, *root.parents):
+            info = path.lstat()
+            if (not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o022
+                    or info.st_uid not in (0, os.getuid())):
+                return False
+        return True
+    except OSError:
+        return False
+
 
 @pytest.fixture
-def trusted_fresh_root(tmp_path):
-    root = tmp_path
-    assert root.is_absolute() and root == root.resolve(strict=True)
-    for path in (root, *root.parents):
-        info = path.lstat()
-        assert stat.S_ISDIR(info.st_mode) and not info.st_mode & 0o022, (
-            f"fresh subprocess tests need --basetemp under a trusted private sandbox mount: {path}")
-        assert info.st_uid in (0, os.getuid()), path
-    return root
+def trusted_fresh_root(tmp_path, pytestconfig):
+    for base in (tmp_path, Path(pytestconfig.rootpath), _TEST_HOME):
+        if not _trusted_base(base):
+            continue
+        try:
+            temporary = tempfile.TemporaryDirectory(prefix="acq-fresh-test-", dir=base)
+        except OSError:
+            continue
+        with temporary as directory:
+            root = Path(directory)
+            # Only our exclusively created directory; guest mount traversal may
+            # require read/execute for the unprivileged guest uid.
+            root.chmod(0o755)
+            assert _trusted_base(root)
+            yield root
+        return
+    pytest.fail("fresh subprocess tests require a writable trusted checkout or HOME with "
+                "root/test-uid-owned, non-symlink, non-group/world-writable ancestors; "
+                "provision e.g. HOME=/validation/home before pytest (not /tmp/home)")
 
 
 def fresh_fixture(monkeypatch, tmp_path, *, real_ancestors=False):
@@ -50,6 +76,17 @@ def fresh_fixture(monkeypatch, tmp_path, *, real_ancestors=False):
     ca.chmod(0o444)
     if not real_ancestors:
         _model_ancestors(monkeypatch, tmp_path)
+
+
+def qualified_session_fixture(monkeypatch):
+    """Opt in only session tests; never fabricate a provider preparation result."""
+    from acq_py import _stub_msb
+
+    monkeypatch.setenv("ACQ_MSB_VERSION", "0.7.16")
+    monkeypatch.setenv("ACQ_MSB_STUB_FRESH", "1")
+    for name in _stub_msb._load():
+        if name not in _stub_msb._fixture_read("fresh-instances"):
+            _stub_msb._fresh_created(name, ["synthetic-legacy-image"])
 
 
 def _model_ancestors(monkeypatch, tmp_path):

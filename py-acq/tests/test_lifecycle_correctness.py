@@ -33,7 +33,7 @@ import pytest
 
 from acq_py import cli, errors, kit_msb, kits, lock, msb, security, state
 from acq_py.commands import common
-from fresh_fixture import fresh_fixture, trusted_fresh_root as trusted_fresh_root
+from fresh_fixture import fresh_fixture, qualified_session_fixture, trusted_fresh_root as trusted_fresh_root
 
 pytestmark = pytest.mark.provider_key  # creates msb sandboxes: needs a stored provider key
 
@@ -287,6 +287,7 @@ raise SystemExit(_stub_msb.main(["msb", *args]))
 
 @pytest.mark.skipif(os.name == "nt", reason="the slow-stub wrapper is a POSIX command line")
 def test_concurrent_create_and_rm_are_serialized(monkeypatch, tmp_path, trusted_fresh_root):
+    tmp_path = trusted_fresh_root
     ws = tmp_path / "ws"
     ws.mkdir()
     gate = tmp_path / "gate"
@@ -779,6 +780,7 @@ def test_run_waits_for_the_sandbox_lock(monkeypatch, tmp_path, capsys):
     ws = tmp_path / "ws"
     ws.mkdir()
     _env(monkeypatch, tmp_path)
+    qualified_session_fixture(monkeypatch)
     monkeypatch.setenv("ACQ_SANDBOX_LOCK_TIMEOUT", "0.3")
     with lock.sandbox_lock("msb", "box"):
         rc, doc = _invoke(capsys, "--backend", "msb", "run", "opencode", str(ws), "--name", "box", "--json")

@@ -194,14 +194,154 @@ def test_lifecycle_failure_with_old_config_emits_no_success(operational, monkeyp
 
 
 @pytest.mark.parametrize("command", ["exec", "shell"])
-def test_public_commands_refuse_missing_record_before_guest_effects(monkeypatch, capsys, command):
+def test_public_commands_refuse_unqualified_backend_before_guest_effects(monkeypatch, capsys, command):
+    monkeypatch.setenv("ACQ_MSB_BIN", "__stub__")
+    monkeypatch.setenv("ACQ_MSB_VERSION", "0.7.7")
     monkeypatch.setattr(msb, "exists", lambda name: True)
-    records = iter([{"agent": "opencode"}, None])
-    monkeypatch.setattr(session.state, "record_read", lambda *args: next(records))
+    monkeypatch.setattr(session.state, "record_read", lambda *args: pytest.fail("unqualified session read state"))
     monkeypatch.setattr(session, "prepare_session", lambda *args: pytest.fail("public bypass reached guest setup"))
     parsed = SimpleNamespace(name="box", cmd=["anything"])
     rc = getattr(session, "run_" + command)(parsed, True, "msb")
     assert rc != 0 and "unsupported" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("route", ["exec", "shell", "attach", "typed-run", "named-run"])
+@pytest.mark.parametrize("replacement", ["before-lock", "quarantined", "during-ack"])
+def test_all_session_routes_select_and_acknowledge_under_one_lock(
+        operational, monkeypatch, capsys, route, replacement):
+    from acq_py import kits, lock
+    import copy
+
+    current = {"agent": "shell", "workspace": "/work"}
+    held = False
+    calls = []
+    job_argv = []
+    child = None
+    instance = operational.snapshot.instance
+
+    def replace_instance():
+        current.update(agent="opencode", image=common.OPENCODE_DEVENV_IMAGE)
+        operational.snapshot.instance = "i:" + "2" * 32
+        if replacement == "quarantined":
+            kit_msb.hc_write("box", "fresh-quarantine", "1")
+
+    @contextmanager
+    def locked(*args):
+        nonlocal held
+        assert not held
+        if not calls and replacement != "during-ack":
+            replace_instance()
+        calls.append("lock")
+        held = True
+        try:
+            yield
+        finally:
+            held = False
+            calls.append("unlock")
+
+    def read(*args):
+        assert held, "session route selected a record outside the lifecycle lock"
+        return copy.deepcopy(current)
+
+    class Child:
+        ended = False
+
+        def poll(self):
+            return 0 if self.ended else None
+
+        def wait(self, timeout=None):
+            if timeout is None:
+                assert not held, "interactive wait retained lifecycle lock"
+                calls.append("wait")
+            self.ended = True
+            return 0
+
+        def send_signal(self, sig):
+            self.ended = True
+
+    def spawn(argv, **kwargs):
+        nonlocal child
+        assert held
+        job_argv.extend(argv[argv.index("--") + 1:])
+        calls.append("spawn")
+        child = Child()
+        return child
+
+    def inventory(*args):
+        assert held
+        if not job_argv:
+            return []
+        calls.append("ack")
+        if replacement == "during-ack":
+            replace_instance()
+        return [{"id": "job_" + "a" * 32, "runtime_boot_id": "boot_" + "b" * 32,
+                 "version": 1, "command": job_argv, "tty": False, "state": "running",
+                 "failure": None, "error": None, "timed_out": False}]
+
+    def terminal(owner, deadline):
+        assert held
+        return child is not None and child.ended
+
+    def prepare(*args):
+        assert held
+        assert not kit_msb.hc_has("box", "fresh-quarantine")
+        calls.append("setup")
+        return []
+
+    def typed_prepare(*args):
+        assert held
+        read()
+        return {"name": "box", "workspace": "/work", "agent": current["agent"],
+                "entrypoint": current["agent"]}, None
+
+    monkeypatch.setattr(lock, "sandbox_lock", locked)
+    @contextmanager
+    def selected(*args):
+        yield
+    monkeypatch.setattr(kits, "recorded_provider_selection", selected)
+    monkeypatch.setattr(kit_msb, "cli_kits_read", lambda name: ([], []))
+    monkeypatch.setattr(session.state, "record_read", read)
+    monkeypatch.setattr(msb, "exists", lambda name: True)
+    monkeypatch.setattr(msb, "start_directory", lambda name: None)
+    monkeypatch.setattr(msb, "agent_shell", lambda name: "/bin/sh")
+    monkeypatch.setattr(session, "prepare_session", prepare)
+    monkeypatch.setattr(common, "_trusted_gate", lambda *args: None)
+    monkeypatch.setattr(common, "_recorded_workspaces_failure", lambda *args: None)
+    monkeypatch.setattr(common, "_launch_token", lambda *args: "shell")
+    monkeypatch.setattr(fresh_launch.hostexec, "stdin_is_tty", lambda: False)
+    monkeypatch.setattr(fresh_launch, "_launch_inventory", inventory)
+    monkeypatch.setattr(fresh_launch, "_terminal_job", terminal)
+    monkeypatch.setattr(fresh_launch.subprocess, "Popen", spawn)
+    monkeypatch.setattr(lifecycle, "_create_opts", lambda *args: (lifecycle._NO_OPTS, None))
+    monkeypatch.setattr(lifecycle, "_scope_advice", lambda *args: False)
+    monkeypatch.setattr(lifecycle, "_offer_msb_refresh", lambda *args: None)
+    monkeypatch.setattr(lifecycle, "_run_prepare_locked", typed_prepare)
+    monkeypatch.setattr(lifecycle, "_attach_key_check", lambda *args: None)
+    monkeypatch.setattr(lifecycle, "_by_name_locked", lambda *args: (read(), None))
+    parsed = SimpleNamespace(name="box", target="shell" if replacement == "during-ack" else "opencode", path="/work", kit=[], image=None,
+                             agent_args=[], cmd=["printf", "%s", "a; $(opaque)", ""])
+    if route == "typed-run":
+        rc = lifecycle._run_run(parsed, True, "msb")
+    elif route == "named-run":
+        rc = lifecycle._run_by_name("msb", "box", True, parsed)
+    else:
+        rc = getattr(session, "run_" + route)(parsed, True, "msb")
+    assert operational.snapshot.instance != instance
+    if replacement == "before-lock":
+        assert rc == 0
+        assert "producer" in operational.events  # replacement cannot take legacy path
+        ack = calls.index("ack")
+        assert calls.index("spawn") < ack < calls.index("unlock", ack) < calls.index("wait")
+    else:
+        assert rc != 0
+        assert "wait" not in calls
+        if replacement == "quarantined":
+            assert "setup" not in calls and "spawn" not in calls
+        else:
+            assert child.ended
+            assert "producer" not in operational.events
+            assert not kit_msb.hc_has("box", "fresh-quarantine")  # replacement untouched
+    capsys.readouterr()
 
 
 @pytest.mark.parametrize("ending", ["normal", "term", "hup", "handoff", "uncertain", "ack-refused", "preparation-failed", "interrupt-ack",
@@ -268,8 +408,10 @@ def test_attach_dispatch_prepares_acknowledges_under_locks_then_waits(operationa
             assert events[-2] == "inspect"  # actual identity recheck immediately before spawn
             assert "producer" in events and "store-exit" not in events
             assert kwargs == {"stdout": 2}  # stdin/stderr inherited, no capture/replay
-            assert ("--tty" in argv) is expected_tty and "--no-stdin" not in argv
+            assert ("--tty" in argv) is expected_tty
+            assert ("--no-stdin" in argv) is not expected_tty  # fixture host stdin is a terminal
             assert ("--no-tty" in argv) is not expected_tty
+            assert ("--stream" in argv) is not expected_tty
             entries = [argv[i + 1] for i, token in enumerate(argv) if token == "-e"]
             ca = next(entry.split("=", 1)[1] for entry in entries if entry.startswith("NODE_EXTRA_CA_CERTS="))
             assert "SSL_CERT_FILE=" + ca in entries
@@ -459,14 +601,23 @@ def test_start_negative_profile_precedes_resume_or_stop(selection, monkeypatch, 
     assert "error" in json.loads(capsys.readouterr().out)
 
 
-def test_trust_refusal_precedes_legacy_profile_and_all_guest_effects(monkeypatch, capsys):
+def test_trust_refusal_precedes_legacy_profile_and_all_guest_effects(monkeypatch, tmp_path, capsys):
     from acq_py import lock
+    from fresh_fixture import qualified_session_fixture
+
+    # Isolate the trust gate after successful session qualification. The
+    # old-version refusal has separate coverage and must not mask this gate.
+    monkeypatch.setenv("ACQ_MSB_BIN", "__stub__")
+    monkeypatch.setenv("MSB_HOME", str(tmp_path / "msb-home"))
+    monkeypatch.setenv("ACQ_MSB_STUB_CATALOG", json.dumps({"box": "running"}))
+    qualified_session_fixture(monkeypatch)
 
     @contextmanager
     def sandbox(*args):
         yield
 
     monkeypatch.setattr(lock, "sandbox_lock", sandbox)
+    monkeypatch.setattr(msb, "exists", lambda name: True)
     monkeypatch.setattr(session.state, "record_read", lambda *args: {"agent": "opencode", "ro_host_config": True})
     monkeypatch.setattr(security, "mount_check", lambda *args, **kwargs: ("missing", "fixture missing mount"))
     monkeypatch.setattr(security, "ro_mount_version_problem", lambda: None)
@@ -514,6 +665,7 @@ def test_other_agent_token_cannot_reattach_recorded_opencode(monkeypatch, tmp_pa
         yield
 
     monkeypatch.setattr(lock, "sandbox_lock", sandbox)
+    monkeypatch.setattr(fresh_launch, "require_session_backend", lambda: None)
     monkeypatch.setattr(msb, "exists", lambda name: True)
     monkeypatch.setattr(lifecycle.state, "record_read", lambda *args: {"agent": "opencode"})
     monkeypatch.setattr(lifecycle, "_scope_advice", lambda *args: pytest.fail("mismatch reached effects"))
@@ -578,6 +730,7 @@ def test_run_early_record_schema_refusal_uses_structured_boundary(monkeypatch, t
         raise state.StateSchemaError("synthetic unsupported record schema")
 
     monkeypatch.setattr(msb, "exists", lambda name: True)
+    monkeypatch.setattr(fresh_launch, "require_session_backend", lambda: None)
     monkeypatch.setattr(lifecycle.state, "record_read", unreadable)
     monkeypatch.setattr(lifecycle, "_create_opts", lambda *args: (lifecycle._NO_OPTS, None))
     monkeypatch.setattr(lifecycle, "_scope_advice", lambda *args: pytest.fail("schema refusal reached effects"))
@@ -616,7 +769,7 @@ def test_none_profile_runs_real_runner_and_empty_inventory_not_usai(operational,
     operational.snapshot.services = {}
 
     def producer(command, name, identity, argv, user, deadline, previous, env):
-        assert argv[5] == "none"
+        assert argv[9] == "none"
         assert argv[argv.index("--provider-root") + 1] == inputs.guest_root
         assert list((inputs.generation / "models/providers").iterdir()) == []
         assert user == "agent" and tuple(env) == msb_preparation._INITIAL_ENV
@@ -691,6 +844,44 @@ def test_durable_active_attempt_allows_live_owner_but_refuses_abandoned(operatio
         fresh_launch._admission_attempts("box")
 
 
+def test_two_healthy_legacy_sessions_coexist_without_provider_preparation(operational, monkeypatch):
+    import os
+
+    record = {"agent": "shell", "workspace": "/work"}
+    monkeypatch.setattr(session.state, "record_read", lambda *args: dict(record))
+    monkeypatch.setattr(common, "_trusted_gate", lambda *args: None)
+    monkeypatch.setattr(common, "_recorded_workspaces_failure", lambda *args: None)
+    monkeypatch.setattr(session, "prepare_session", lambda *args: [])
+    monkeypatch.setattr(fresh_launch, "_terminal_job", lambda *args: False)
+    monkeypatch.setattr(fresh_launch, "admit_locked", lambda *args, **kwargs: pytest.fail("legacy ran fresh preparation"))
+    owners = []
+
+    def acknowledge(name, workspace, env, recheck, *, ownership, **kwargs):
+        recheck()
+        ownership.argv = ("/bin/sh", "-c", 'exec "$@"', "attempt-" + str(len(owners)))
+        ownership.job = "job_" + format(len(owners) + 1, "032x")
+        ownership.boot = "boot_" + "b" * 32
+        fresh_launch._begin_attempt(ownership)
+        fresh_launch._write_attempt(ownership, "active")
+
+    monkeypatch.setattr(fresh_launch, "_acknowledge_foreground", acknowledge)
+    try:
+        for _ in range(2):
+            owner = fresh_launch.LaunchOwnership("box")
+            owners.append(owner)
+            admitted, refusal = session.admit_session_locked("box", record, False, owner,
+                command="exec", guest_command=["opaque", "", "a;$(x)"])
+            assert admitted is owner and refusal is None
+        fresh_launch._admission_attempts("box")
+        assert len(list(fresh_launch._attempts("box").glob("*.json"))) == 2
+        assert "producer" not in operational.events
+    finally:
+        for owner in owners:
+            if owner.attempt_fd is not None:
+                os.close(owner.attempt_fd)
+                owner.attempt_fd = None
+
+
 def test_spawned_process_without_job_id_still_retains_exclusion_and_ca(operational, monkeypatch):
     from acq_py import lock
 
@@ -719,6 +910,103 @@ def test_spawned_process_without_job_id_still_retains_exclusion_and_ca(operation
     assert kit_msb.hc_has("box", "fresh-quarantine")
     with pytest.raises(msb.MsbError, match="abandoned"):
         fresh_launch._admission_attempts("box")
+
+
+@pytest.mark.parametrize("signame", ["SIGTERM", "SIGHUP"])
+def test_signal_inside_popen_return_defers_until_handle_owned(operational, monkeypatch, signame):
+    import signal
+    from acq_py import cli, lock
+
+    signum = getattr(signal, signame)
+    events = []
+    saved = signal.getsignal(signum)
+    monkeypatch.setattr(cli, "_terminating_since", None)
+    signal.signal(signum, cli._raise_terminated)
+
+    @contextmanager
+    def locked(*args):
+        yield
+
+    class Child:
+        def poll(self):
+            return None
+
+        def send_signal(self, delivered):
+            assert delivered == signum
+            events.append("terminated")
+            # Existing CLI repeat-signal grace still applies during cleanup.
+            signal.getsignal(signum)(signum, None)
+
+        def wait(self, timeout):
+            assert timeout == 1
+            events.append("reaped")
+            return -signum
+
+    child = Child()
+
+    def spawn(*args, **kwargs):
+        events.append("created")
+        assert owner.proc is None
+        signal.getsignal(signum)(signum, None)
+        signal.getsignal(signum)(signum, None)
+        events.append("returning-handle")
+        return child
+
+    monkeypatch.setattr(lock, "sandbox_lock", locked)
+    monkeypatch.setattr(fresh_launch, "_launch_inventory", lambda *args: [])
+    monkeypatch.setattr(msb, "start_directory", lambda name: None)
+    monkeypatch.setattr(msb, "agent_shell", lambda name: "/bin/sh")
+    monkeypatch.setattr(fresh_launch.subprocess, "Popen", spawn)
+    try:
+        with pytest.raises(cli._Terminated) as caught:
+            with fresh_launch.own_launch("box") as owner:
+                owner.ca_path = operational.host / "spawn-ca.crt"
+                owner.ca_path.write_bytes(b"public fixture")
+                fresh_launch._acknowledge_foreground("box", None, [], lambda: None,
+                    json_mode=False, ownership=owner, tty=False)
+        assert caught.value is owner.termination
+        assert caught.value.signum == signum
+        assert owner.proc is child
+        assert events == ["created", "returning-handle", "terminated", "reaped"]
+        assert owner.attempt_path.exists() and owner.ca_path.exists()
+        assert not owner.completed
+        assert signal.getsignal(signum) is cli._raise_terminated
+    finally:
+        signal.signal(signum, saved)
+
+
+def test_cleanup_lock_refusal_reaps_live_owned_host_only(operational, monkeypatch):
+    import subprocess
+    import sys
+    from acq_py import lock
+
+    @contextmanager
+    def refused(*args):
+        raise lock.SandboxLockTimeout("synthetic lock refusal")
+        yield
+
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+    try:
+        with fresh_launch.own_launch("box") as owner:
+            fresh_launch._begin_attempt(owner)
+            before = owner.attempt_path.read_bytes()
+            owner.ca_path = operational.host / "lock-refusal-ca.crt"
+            owner.ca_path.write_bytes(b"public fixture")
+            owner.proc, owner.spawned = child, True
+            monkeypatch.setattr(lock, "sandbox_lock", refused)
+            monkeypatch.setattr(fresh_launch, "_release_locked", lambda *args: pytest.fail("name-state mutation"))
+            monkeypatch.setattr(fresh_launch, "_end_guest", lambda *args: pytest.fail("guest mutation"))
+            monkeypatch.setattr(kit_msb, "hc_write", lambda *args: pytest.fail("quarantine mutation"))
+        assert child.poll() is not None
+        assert owner.attempt_path.read_bytes() == before
+        assert owner.ca_path.read_bytes() == b"public fixture"
+        assert owner.attempt_fd is None and not owner.completed
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=2)
 
 
 def test_pending_persistence_failure_never_spawns_and_blocks_next_admission(operational, monkeypatch):

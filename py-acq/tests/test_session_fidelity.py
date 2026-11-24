@@ -29,7 +29,7 @@ from pathlib import Path
 import pytest
 
 from acq_py import hostexec, msb, sbx, state
-from fresh_fixture import fresh_fixture, jobs, trusted_fresh_root as trusted_fresh_root
+from fresh_fixture import fresh_fixture, jobs, qualified_session_fixture, trusted_fresh_root as trusted_fresh_root
 
 posix_only = pytest.mark.skipif(sys.platform == "win32", reason="POSIX terminals and signals")
 
@@ -46,16 +46,33 @@ def record(**fields):
         handle.write(json.dumps({"argv": args, **fields}) + "\n")
 
 
-if os.environ.get("ACQ_MSB_STUB_FRESH") == "1":
+if os.environ.get("ACQ_MSB_STUB_FRESH") == "1" or os.environ.get("FAKE_QUALIFIED") == "1":
     from acq_py import _stub_msb
     import contextlib, io
+    fresh = os.environ.get("ACQ_MSB_STUB_FRESH") == "1"
+    if not fresh:
+        # Legacy session qualification is explicit in this fixture, not a global
+        # change to the old-version stub or an implicit fresh-provider success.
+        if not _stub_msb._fixture_read("fresh-instances"):
+            _stub_msb._fixture_write("fresh-instances", {"box": {
+                "boot": "boot_" + "b" * 32, "created_at": "legacy-instance"}})
+        if args == ["--version"]:
+            print("msb 0.7.16")
+            sys.exit(0)
+        if args[:2] == ["inspect", "box"]:
+            print(json.dumps({"name": "box", "created_at": "legacy-instance"}))
+            sys.exit(0)
+        handled = _stub_msb._fresh_control(args, {"box": "running"})
+        if handled is not None:
+            sys.exit(handled)
     command = args[args.index("--") + 1:] if "--" in args else []
     foreground = len(command) > 3 and command[3].startswith("acq-launch-")
     if foreground:
         # Register a real fixture job for the production acknowledgment loop,
         # then model foreground stdio/signals below, not a detached guest tool.
         with contextlib.redirect_stdout(io.StringIO()):
-            rc = _stub_msb.main(["msb", *args])
+            rc = (_stub_msb.main(["msb", *args]) if fresh else
+                  _stub_msb._fresh_exec("box", args[1:args.index("--")], command))
         if rc:
             sys.exit(rc)
         if os.environ.get("FAKE_MODE"):
@@ -72,7 +89,7 @@ if os.environ.get("ACQ_MSB_STUB_FRESH") == "1":
                 _stub_msb._fixture_write("fresh-jobs", records)
 
             atexit.register(finished)
-    elif not (args[:1] == ["exec"] and "getent passwd agent" in " ".join(args)):
+    elif fresh and not (args[:1] == ["exec"] and "getent passwd agent" in " ".join(args)):
         if any("git config --global" in token for token in args):
             record(tty=os.isatty(0))
         sys.exit(_stub_msb.main(["msb", *args]))
@@ -100,6 +117,31 @@ elif args[:1] == ["exec"] and "getent passwd agent" in " ".join(args):
 elif args[:1] == ["exec"]:
     record(tty=os.isatty(0))
     mode = os.environ.get("FAKE_MODE", "")
+    if mode == "early-output":
+        from pathlib import Path
+        release = Path(os.environ["FAKE_OUTPUT_RELEASE"])
+        # Model the native guest-stdin mapping, not a read of the host terminal.
+        # --no-stdin opens an EOF source; otherwise consume the real pipe bytes.
+        if "--no-stdin" in args:
+            with open(os.devnull, "rb") as guest_stdin:
+                received = guest_stdin.read()
+        else:
+            received = sys.stdin.buffer.read()
+        record(event="guest-input", data_hex=received.hex())
+        # Model the native contract: non-stream mode withholds output until
+        # completion. The test will only release completion after seeing bytes.
+        if "--stream" in args:
+            os.write(1, b"before-completion\n")
+        deadline = time.monotonic() + 15
+        while not release.exists():
+            if time.monotonic() >= deadline:
+                final_code = 3
+                sys.exit(3)
+            time.sleep(0.005)
+        if "--stream" not in args:
+            os.write(1, b"before-completion\n")
+        final_code = 0
+        sys.exit(0)
     if mode == "sigterm":
         os.kill(os.getpid(), signal.SIGTERM)
         time.sleep(5)
@@ -155,6 +197,8 @@ def fake(tmp_path, monkeypatch):
     monkeypatch.setenv("ACQ_MSB_BIN", str(script))
     monkeypatch.setenv("ACQ_SBX_BIN", str(script))
     monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("MSB_HOME", str(tmp_path / "msb-home"))
+    monkeypatch.setenv("FAKE_QUALIFIED", "1")
     for var in ("TERM", "COLORTERM", "EMAIL", "SSH_AUTH_SOCK", "FAKE_MODE", "FAKE_GETENT_DIR", "FAKE_SHELL_STDOUT_HEX"):
         monkeypatch.delenv(var, raising=False)
     for var in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
@@ -173,6 +217,7 @@ def fresh_fake(fake, monkeypatch, tmp_path, trusted_fresh_root, capsys):
     """Actual public create plus real admission/transport, synthetic guest only."""
     from acq_py import cli, secretstore
 
+    tmp_path = trusted_fresh_root
     monkeypatch.setenv("MSB_HOME", str(tmp_path / "msb-home"))
     monkeypatch.setenv("ACQ_MSB_INSTALLED", "1")
     monkeypatch.setenv("ACQ_SBX_INSTALLED", "0")
@@ -310,7 +355,7 @@ def test_msb_shell_with_a_tty_gets_a_pty_and_terminal_env(fake, monkeypatch):
     assert rc == 0, out
     [session] = _sessions(fake())
     argv = session["argv"]
-    assert argv[:2] == ["exec", "-t"]
+    assert argv[:2] == ["exec", "--tty"]
     assert session["tty"] is True
     env = _env_flags(argv)
     assert env["TERM"] == "xterm-256color"
@@ -318,7 +363,7 @@ def test_msb_shell_with_a_tty_gets_a_pty_and_terminal_env(fake, monkeypatch):
     assert env["HOME"] == "/home/agent"
     # The agent's passwd shell, run as a login shell and exported as SHELL.
     assert env["SHELL"] == "/bin/bash"
-    assert argv[argv.index("--") + 1 :] == ["/bin/bash", "-l"]
+    assert argv[argv.index("--") + 5 :] == ["/bin/bash", "-l"]
 
 
 @posix_only
@@ -936,6 +981,40 @@ def _main(capsys, *argv: str) -> tuple[int, dict | None, str]:
     return rc, (json.loads(out.splitlines()[-1]) if out.startswith("{") else None), captured.out + captured.err
 
 
+@pytest.mark.parametrize("version", ["0.7.7", "0.7.17"])
+@pytest.mark.parametrize("command", [["exec", "box", "--", "true"], ["attach", "box"],
+    ["shell", "box"], ["run", "box"], ["run", "shell", "--name", "box"]])
+def test_all_msb_session_routes_refuse_unqualified_version_before_effects(
+        monkeypatch, tmp_path, capfd, version, command):
+    from acq_py import fresh_launch
+    from acq_py.commands import session, lifecycle
+
+    _stub_msb(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_MSB_VERSION", version)
+    monkeypatch.setattr(state, "record_read", lambda *args: pytest.fail("version refusal read session record"))
+    monkeypatch.setattr(session, "prepare_session", lambda *args: pytest.fail("version refusal ran guest setup"))
+    monkeypatch.setattr(lifecycle, "_onboarding", lambda *args: pytest.fail("version refusal prompted"))
+    monkeypatch.setattr(fresh_launch, "_begin_attempt", lambda *args: pytest.fail("version refusal persisted attempt"))
+    rc, doc, output = _main(capfd, "--backend", "msb", "--json", *command)
+    assert rc != 0 and doc["error"]["code"] == "unsupported_capability"
+    assert "0.7.16" in output and "upgrade" in output
+    assert "[stub exec]" not in output
+
+
+@pytest.mark.parametrize("verb", ["exec", "attach", "shell"])
+def test_sbx_session_dispatch_never_enters_msb_qualification(fake, monkeypatch, capfd, verb):
+    from acq_py import fresh_launch
+    from acq_py.commands import session
+    from types import SimpleNamespace
+
+    _record("sbx")
+    monkeypatch.setattr(fresh_launch, "require_session_backend",
+                        lambda: pytest.fail("SBX inherited MSB qualification"))
+    parsed = SimpleNamespace(name="box", cmd=["true"], agent_args=[])
+    assert getattr(session, "run_" + verb)(parsed, False, "sbx") == 0
+    capfd.readouterr()
+
+
 @pytest.mark.parametrize("argv", [["--backend"], ["--json", "--backend"], ["--json", "ls", "--backend"]])
 def test_backend_flag_without_a_value_is_a_usage_error(capsys, argv):
     rc, doc, output = _main(capsys, *argv)
@@ -963,10 +1042,14 @@ def test_guest_command_flags_before_separator_still_pass_through(monkeypatch, tm
     # Only a run of acq flags is refused: once the command has started, a later
     # --json belongs to it. (capfd: the backend child writes to fd 1 directly.)
     _stub_msb(monkeypatch, tmp_path)
+    # The executable stub and jobs() must inspect the same explicit home.
+    monkeypatch.setenv("MSB_HOME", str(tmp_path / "msb-home"))
+    qualified_session_fixture(monkeypatch)
     rc, doc, output = _main(capfd, "--backend", "msb", "exec", "box", "grep", "--json", "--", "x")
     assert rc == 0
     assert doc is None
-    assert "[stub exec] grep --json -- x" in output
+    assert "[stub exec]" in output
+    assert jobs("box")[-1]["status"]["command"][4:] == ["grep", "--json", "--", "x"]
 
 
 @posix_only
@@ -1018,6 +1101,7 @@ def test_fresh_attach_preserves_terminal_and_identity(fresh_fake, monkeypatch, t
     argv = session["argv"]
     assert session["tty"] is tty
     assert argv[:2] == ["exec", "--tty" if tty else "--no-tty"]
+    assert ("--stream" in argv) is not tty
     env = _env_flags(argv)
     assert env["GIT_AUTHOR_NAME"] == "Ada Lovelace"
     assert env["GIT_COMMITTER_EMAIL"] == "ada@example.gov"
@@ -1057,7 +1141,75 @@ def test_legacy_exec_keeps_opaque_guest_argv(fake):
     proc = _run_no_tty(["--backend", "msb", "exec", "box", "--", *command])
     assert proc.returncode == 0, proc.stderr
     [session] = _sessions(fake())
-    assert session["argv"][session["argv"].index("--") + 1:] == command
+    assert session["argv"][session["argv"].index("--") + 5:] == command
+
+
+@posix_only
+@pytest.mark.parametrize("terminal_stdin", [False, True])
+def test_non_tty_session_output_is_visible_before_completion(session_profile, monkeypatch, tmp_path, terminal_stdin):
+    import pty
+
+    fake, command = session_profile
+    if terminal_stdin:
+        # Exec is deliberately non-TTY even when invoked from a terminal.
+        command = ["exec", "box", "--", "printf", "opaque"]
+    release = tmp_path / "release-output-job"
+    monkeypatch.setenv("FAKE_MODE", "early-output")
+    monkeypatch.setenv("FAKE_OUTPUT_RELEASE", str(release))
+    master, slave = pty.openpty() if terminal_stdin else (None, None)
+    proc = None
+    try:
+        proc = subprocess.Popen(_acq("--backend", "msb", *command),
+            stdin=slave if terminal_stdin else subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if terminal_stdin:
+            os.write(master, b"terminal input must not reach noninteractive exec\n")
+        else:
+            proc.stdin.write(b"piped input must survive\n")
+            proc.stdin.close()
+            proc.stdin = None
+        ready, _, _ = select.select([proc.stdout], [], [], 10)
+        assert ready, "session output was withheld until guest completion"
+        assert os.read(proc.stdout.fileno(), 4096) == b"before-completion\n"
+        assert proc.poll() is None and not release.exists()
+        running = jobs("box")
+        assert any(entry["status"]["state"] == "running" for entry in running)
+        [launched] = _sessions(fake())
+        assert "--stream" in launched["argv"] and "--no-tty" in launched["argv"]
+        assert ("--no-stdin" in launched["argv"]) is terminal_stdin
+        assert launched["tty"] is terminal_stdin
+        [received] = [entry for entry in fake() if entry.get("event") == "guest-input"]
+        assert bytes.fromhex(received["data_hex"]) == (b"" if terminal_stdin else b"piped input must survive\n")
+        release.touch()
+        out, err = proc.communicate(timeout=15)
+        assert proc.returncode == 0, err
+        assert out == b""
+        from acq_py import kit_msb
+        assert not kit_msb.hc_has("box", "fresh-quarantine")
+    finally:
+        release.touch()
+        if proc is not None:
+            if proc.poll() is None:
+                proc.terminate()
+            try:
+                proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate(timeout=2)
+        for fd in (master, slave):
+            if fd is not None:
+                os.close(fd)
+
+
+def test_session_fixture_rejects_streaming_terminal_input_before_job_creation(monkeypatch, capsys):
+    from acq_py import _stub_msb
+
+    monkeypatch.setattr(_stub_msb.os, "isatty", lambda fd: True)
+    monkeypatch.setattr(_stub_msb, "_fixture_read", lambda *args: pytest.fail("invalid flags reached job state"))
+    rc = _stub_msb._fresh_exec("box", ["--stream", "--no-tty"],
+                              ["/bin/sh", "-c", 'exec "$@"', "acq-launch-test", "true"])
+    assert rc == 1
+    assert "requires --no-stdin" in capsys.readouterr().err
 
 
 @posix_only
@@ -1087,10 +1239,12 @@ def test_fresh_exec_and_shell_prepare_before_preserving_guest_command(fresh_fake
     assert guest[:3] == ["/bin/sh", "-c", 'exec "$@"']
     assert guest[4:] == (command if verb == "exec" else ["/bin/bash", "-l"])
     assert argv[:2] == ["exec", "--no-tty" if verb == "exec" else "--tty"]
+    assert ("--stream" in argv) is (verb == "exec")
+    assert ("--no-stdin" in argv) is (verb == "exec")
     assert ("TERM" in _env_flags(argv)) is (verb == "shell")
     new = jobs("box")[before:]
     assert len(new) == 2
-    assert new[0]["status"]["command"][3] == "acq-preparation"
+    assert new[0]["status"]["command"][3].startswith("acq-preparation-")
     assert new[1]["status"]["command"] == guest
 
 

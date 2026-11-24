@@ -8,8 +8,10 @@ native qualification.
 
 The candidate is limited to the exact packaged USAi provider or explicit provider
 NONE, with plain OpenCode on POSIX MSB. It does not claim SBX, Windows, custom image or kit,
-daemon, team, or cached-preparation parity. Unrelated agents and backends retain
-their existing behavior. Unsupported OpenCode profiles must be refused before
+daemon, team, or cached-preparation parity. Unrelated agents retain their provider
+and command behavior, but all MSB sessions now require the exact qualified 0.7.16
+acknowledgment contract. SBX and non-session lifecycle version policy are unchanged.
+Unsupported OpenCode profiles must be refused before
 startup or other mutations, not after a competing renderer has run.
 
 Public create, recreate, start, restart, run and attach must reach fresh live
@@ -18,6 +20,28 @@ exec and shell on this profile pass the same fresh admission; internal
 setup/readiness probes must not recurse into public admission.
 
 ## Proposed architecture
+
+### Session qualification and replacement exclusion
+
+The explicit compatibility decision is to refuse MSB run/attach/exec/shell on
+older or unqualified future CLI versions with upgrade guidance, rather than
+retain an unsafe unlocked legacy launch. Both typed and by-name run participate.
+All session routes select the current host record under the lifecycle lock and
+retain that lock through exact-job acknowledgment; foreground waiting occurs
+outside it. Non-OpenCode sessions share narrow ownership/acknowledgment only,
+without fresh provider preparation. A held instance token, or native creation
+identity for older tokenless records, binds cleanup to the selected incarnation.
+Quarantine and abandoned attempts exclude both fresh and legacy admission.
+Migration is to the qualified MSB version, not a silent rewrite of old records.
+Rollback must not restore unlocked name-based admission; use explicit refusal
+until a replacement acknowledgment contract is qualified.
+
+The implementation and new replacement-race fixtures require fixed-head isolated
+validation; a version/help check is a compatibility gate, not native qualification
+of each new Python revision. See the transport exploration for timeout/output
+limitations and validation ownership.
+
+### Fresh preparation sequence
 
 1. Check the exact selected profile before effects. Adapt selected command lists
    in memory to suppress the legacy renderer; never modify the pinned bundle.

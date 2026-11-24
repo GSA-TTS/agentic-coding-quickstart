@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from acq_py import cli, migration, state
-from fresh_fixture import fresh_fixture as _fresh_fixture
+from fresh_fixture import fresh_fixture as _fresh_fixture, qualified_session_fixture
 
 pytestmark = pytest.mark.provider_key  # creates msb sandboxes: needs a stored provider key
 
@@ -203,6 +203,7 @@ def test_record_read_legacy_v0_is_absent(monkeypatch, tmp_path):
 
 def test_run_reattach_missing_record_fails_closed(monkeypatch, tmp_path, capsys):
     _env(monkeypatch, tmp_path, catalog={"orphan": "running"})
+    qualified_session_fixture(monkeypatch)
 
     rc, doc = _invoke(capsys, "--backend", "msb", "run", "orphan", "--json")
     assert rc == 1
@@ -211,6 +212,7 @@ def test_run_reattach_missing_record_fails_closed(monkeypatch, tmp_path, capsys)
 
 def test_run_reattach_newer_schema_fails_closed(monkeypatch, tmp_path, capsys):
     _env(monkeypatch, tmp_path, catalog={"future": "running"})
+    qualified_session_fixture(monkeypatch)
     _write_record(
         "msb",
         "future",
@@ -383,6 +385,7 @@ def test_run_reattach_launches_in_the_recorded_workspace(monkeypatch, tmp_path, 
 def test_run_opencode_reattach_without_a_record_fails_closed(monkeypatch, tmp_path, capsys):
     _link, real = _symlinked_workspace(tmp_path)
     _env(monkeypatch, tmp_path, catalog={"orphan": "running"})
+    qualified_session_fixture(monkeypatch)
     launched = {}
     monkeypatch.setattr(cli.msb, "launch", lambda name, workspace, agent, **kw: launched.update(workspace=workspace) or 0)
 
@@ -423,6 +426,7 @@ def test_run_typed_path_reattach_refuses_missing_trusted_mount(monkeypatch, tmp_
     ws = tmp_path / "ws"
     ws.mkdir()
     _env(monkeypatch, tmp_path, catalog={"sec": "running"})
+    qualified_session_fixture(monkeypatch)
     monkeypatch.setenv("ACQ_MSB_VERSION", "0.7.16")
     _seed_record(_SEC_RECORD)
     monkeypatch.setenv("ACQ_SECURITY_MOUNT_STATE", json.dumps({"sec": mount}))
@@ -437,22 +441,21 @@ def test_run_typed_path_reattach_allowed_when_trusted_mount_ok(monkeypatch, tmp_
     ws = tmp_path / "ws"
     ws.mkdir()
     _env(monkeypatch, tmp_path, catalog={"sec": "running"})
+    qualified_session_fixture(monkeypatch)
     monkeypatch.setenv("ACQ_MSB_VERSION", "0.7.16")
     # Mount trust alone admits legacy shell, NOT the fresh OpenCode profile.
     _seed_record({**_SEC_RECORD, "agent": "shell"})
     monkeypatch.setenv("ACQ_SECURITY_MOUNT_STATE", json.dumps({"sec": "ok"}))
-    launched = {}
-    monkeypatch.setattr(cli.msb, "launch", lambda name, workspace, agent, **kw: launched.update(workspace=workspace) or 0)
-
     rc, doc = _invoke(capsys, "--backend", "msb", "run", "shell", str(ws), "--name", "sec", "--json")
     assert rc == 0
-    assert launched["workspace"] == "/w"
+    assert _jobs(tmp_path, "sec")[-1]["workspace"] == "/w"
 
 
 def test_run_typed_path_reattach_fails_closed_on_newer_schema(monkeypatch, tmp_path, capsys):
     ws = tmp_path / "ws"
     ws.mkdir()
     _env(monkeypatch, tmp_path, catalog={"future": "running"})
+    qualified_session_fixture(monkeypatch)
     # Mark the tree migrated so the migration pre-step does not trip on the record
     # first; this test must reach the typed-path reattach's own schema check.
     migration.write_generation(migration.TARGET_GENERATION)
@@ -479,6 +482,10 @@ def _assert_overlap_refused(rc, doc, relation, what):
 @pytest.mark.parametrize("verb", ["create", "run"])
 def test_a_workspace_containing_the_state_dir_is_refused(monkeypatch, tmp_path, capsys, verb):
     _env(monkeypatch, tmp_path)  # ACQ_STATE_DIR is tmp_path/state
+    if verb == "run":
+        # Exercise the workspace guard, not the separately tested session floor.
+        # create deliberately retains the old-version lifecycle fixture.
+        qualified_session_fixture(monkeypatch)
     _forbid_launch(monkeypatch)
     rc, doc = _invoke(capsys, "--backend", "msb", verb, "opencode", str(tmp_path), "--name", "box", "--json")
     _assert_overlap_refused(rc, doc, "contains", "state directory")
@@ -625,6 +632,7 @@ def test_a_workspace_reached_through_a_link_is_compared_canonically(monkeypatch,
 
 def test_run_by_name_refuses_a_recorded_workspace_holding_acq_state(monkeypatch, tmp_path, capsys):
     _env(monkeypatch, tmp_path, catalog={"old": "running"})
+    qualified_session_fixture(monkeypatch)
     _seed_record({"schema": 1, "name": "old", "backend": "msb", "agent": "shell", "workspace": str(tmp_path)})
     _forbid_launch(monkeypatch)
     rc, doc = _invoke(capsys, "--backend", "msb", "run", "old", "--json")
@@ -636,6 +644,7 @@ def test_run_typed_path_reattach_refuses_a_recorded_workspace_holding_acq_state(
     ws = tmp_path / "ws"
     ws.mkdir()
     _env(monkeypatch, tmp_path, catalog={"old": "running"})
+    qualified_session_fixture(monkeypatch)
     _seed_record({"schema": 1, "name": "old", "backend": "msb", "agent": "shell", "workspace": str(tmp_path)})
     _forbid_launch(monkeypatch)
     rc, doc = _invoke(capsys, "--backend", "msb", "run", "shell", str(ws), "--name", "old", "--json")
@@ -666,8 +675,9 @@ def test_fresh_stub_is_explicit_and_has_no_implicit_live_success(monkeypatch, tm
     assert _stub_msb.main(["msb", "--version"]) == 0
     assert capsys.readouterr().out == "msb 0.7.16\n"
     assert _stub_msb.main(["msb", "create", "--name", "box", "synthetic-image"]) == 0
-    assert _stub_msb.main(["msb", "exec", "--detach", "--no-stdin", "--timeout", "1s",
-                           "--user", "agent", "box", "--", "/bin/sh", "-c", "synthetic", "acq-preparation"]) == 1
+    assert _stub_msb.main(["msb", "exec", "--stream", "--no-stdin", "--timeout", "1s",
+                           "--user", "agent", "box", "--", "/bin/sh", "-c", 'exec "$@"',
+                           "acq-preparation-test", "/bin/sh", "-c", "synthetic", "acq-preparation"]) == 1
     assert _jobs(tmp_path, "box") == []
 
 
@@ -713,7 +723,7 @@ def test_public_fresh_lifecycle_uses_managed_preparation(monkeypatch, tmp_path, 
     assert rc == 0, doc
     assert "error" not in doc and doc["command"] == verb
     jobs = _jobs(tmp_path, "fresh")
-    preparation = [job for job in jobs if job["status"]["command"][3] == "acq-preparation"]
+    preparation = [job for job in jobs if job["status"]["command"][3].startswith("acq-preparation-")]
     foreground = [job for job in jobs if job["status"]["command"][3].startswith("acq-launch-")]
     assert len(preparation) == (2 if verb == "run" else 1)
     assert len(foreground) == (1 if verb == "run" else 0)
@@ -735,7 +745,7 @@ def test_public_fresh_lifecycle_uses_managed_preparation(monkeypatch, tmp_path, 
     assert rc == 0, doc
     new = [job for job in _jobs(tmp_path, "fresh") if job["status"]["id"] not in previous]
     assert len(new) == 2
-    assert new[0]["status"]["command"][3] == "acq-preparation"
+    assert new[0]["status"]["command"][3].startswith("acq-preparation-")
     assert new[1]["status"]["command"][3].startswith("acq-launch-")
 
 
@@ -926,7 +936,7 @@ def test_fresh_start_and_restart_require_new_preparation(monkeypatch, tmp_path, 
     assert ("error" in doc) is not success
     after = _jobs(tmp_path, "fresh")
     assert len(after) == len(before) + 1
-    assert after[-1]["status"]["command"][3] == "acq-preparation"
+    assert after[-1]["status"]["command"][3].startswith("acq-preparation-")
     assert after[-1]["status"]["id"] not in {job["status"]["id"] for job in before}
     assert not any(job["status"]["command"][3].startswith("acq-launch-") for job in after)
 

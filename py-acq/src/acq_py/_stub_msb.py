@@ -427,7 +427,7 @@ def _fresh_inspect(name: str, status: str, active: dict) -> dict:
 
 
 _FRESH_HELP = {
-    "exec": "--detach --no-stdin --timeout --user --tty --no-tty",
+    "exec": "--detach --stream --no-stdin --timeout --user --tty --no-tty",
     "attach": "--job --read-only", "jobs": "--all --format --limit",
     "inspect": "--job --format", "signal": "--job --signal", "kill": "--job",
 }
@@ -478,17 +478,24 @@ def _fresh_control(args: list[str], catalog: dict[str, str]) -> int | None:
 
 def _fresh_exec(name: str, head: list[str], command: list[str]) -> int | None:
     detached = "--detach" in head
+    preparation = (len(command) > 3 and command[:3] == ["/bin/sh", "-c", 'exec "$@"']
+                   and command[3].startswith("acq-preparation-"))
     foreground = (len(command) > 3 and command[:3] == ["/bin/sh", "-c", 'exec "$@"']
                   and command[3].startswith("acq-launch-"))
-    if not detached and not foreground:
+    if not preparation and not foreground:
         return None
+    # Qualified native ExecArgs rejects this combination before creating a job.
+    if "--stream" in head and os.isatty(0) and "--no-stdin" not in head:
+        print("msb: --stream with terminal stdin requires --no-stdin", file=sys.stderr)
+        return 1
     instance = _fixture_read("fresh-instances").get(name)
     if instance is None:
         return 1
-    if detached:
-        if ("--no-stdin" not in head or _arg_after(head, "--user") != "agent"
-                or _arg_after(head, "--timeout") is None or len(command) < 4
-                or command[3] != "acq-preparation"
+    if preparation:
+        if (detached or "--stream" not in head or "--no-stdin" not in head
+                or _arg_after(head, "--user") != "agent"
+                or _arg_after(head, "--timeout") is None or len(command) < 8
+                or command[7] != "acq-preparation"
                 or "ACQ_MSB_STUB_PREPARATION_STDOUT" not in os.environ
                 or "ACQ_MSB_STUB_PREPARATION_EXIT" not in os.environ):
             return 1  # no implicit claim that live preparation succeeded
@@ -511,8 +518,8 @@ def _fresh_exec(name: str, head: list[str], command: list[str]) -> int | None:
     records.setdefault(name, {})[job] = {"status": status, "stdout": output,
                                        "workspace": _arg_after(head, "-w")}
     _fixture_write("fresh-jobs", records)
-    print(job if detached else output, end="\n" if detached else "")
-    return 0 if detached else code
+    print(output, end="")
+    return code
 
 
 def main(argv: list[str]) -> int:

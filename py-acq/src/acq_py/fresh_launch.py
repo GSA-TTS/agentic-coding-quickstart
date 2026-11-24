@@ -36,6 +36,7 @@ from . import (
     msb_preparation,
     provider_input,
     security,
+    state,
 )
 from .runtime_preparation import InvocationIdentity, PreparationError, require_current
 
@@ -69,6 +70,7 @@ class LaunchOwnership:
     termination: BaseException | None = None
     interrupt_handler: hostexec._Handler | None = None
     interrupt_held: bool = False
+    registering: bool = False
 
 
 @contextmanager
@@ -86,6 +88,10 @@ def own_launch(name: str) -> Iterator[LaunchOwnership]:
             if owner.termination is None:
                 owner.termination = exc
                 owner.ending_signal = signum
+            if owner.registering:
+                # Invoke the CLI policy now (including its repeat-signal clock),
+                # but defer its exception until the child handle is registered.
+                return
             raise
 
     try:
@@ -177,9 +183,7 @@ def _begin_attempt(owner: LaunchOwnership) -> None:
     import fcntl
 
     root = _attempts(owner.name)
-    owner.sandbox_instance = msb.held_read(owner.name).instance
-    if owner.sandbox_instance is None:
-        raise _refuse("foreground attempt requires a current sandbox instance")
+    owner.sandbox_instance = _session_instance(owner.name)
     provider_input._safe_dir(root)
     # Sync every containing directory, including parents created by _safe_dir.
     # Syncing only root would not persist its own entry after first creation.
@@ -222,7 +226,7 @@ def _admission_attempts(name: str) -> None:
                 doc = json.loads(raw, object_pairs_hook=msb_preparation._unique)
                 if (not isinstance(doc, dict) or set(doc) != {"version", "phase", "instance", "job", "boot", "argv", "tty"}
                         or doc["version"] != 1 or doc["phase"] != "active"
-                        or not isinstance(doc["instance"], str) or doc["instance"] != msb.held_read(name).instance
+                        or not isinstance(doc["instance"], str) or doc["instance"] != _session_instance(name)
                         or not isinstance(doc["argv"], list) or type(doc["tty"]) is not bool
                         or not all(isinstance(arg, str) for arg in doc["argv"])
                         or not isinstance(doc["job"], str) or msb_preparation._JOB.fullmatch(doc["job"]) is None
@@ -307,8 +311,10 @@ def _release_launch(owner: LaunchOwnership) -> None:
             owner.ca_path.unlink(missing_ok=True)
         owner.completed = True
         return
+    acquired = False
     try:
         with lock.sandbox_lock("msb", owner.name):
+            acquired = True
             try:
                 _release_locked(owner)
             finally:
@@ -319,6 +325,10 @@ def _release_launch(owner: LaunchOwnership) -> None:
                     os.close(owner.attempt_fd)
                     owner.attempt_fd = None
     except BaseException:
+        # Even without the lifecycle lock we own this exact host process handle.
+        # Reap it, but never address a guest/name or delete retained CA/attempts.
+        if not acquired:
+            _end_host(owner)
         if owner.attempt_fd is not None:
             os.close(owner.attempt_fd)
             owner.attempt_fd = None
@@ -337,7 +347,7 @@ def _owns_current_attempt(owner: LaunchOwnership) -> bool:
         current = owner.attempt_path.lstat()
         return (stat.S_ISREG(current.st_mode) and opened.st_nlink == current.st_nlink == 1
                 and (opened.st_dev, opened.st_ino) == (current.st_dev, current.st_ino)
-                and msb.held_read(owner.name).instance == owner.sandbox_instance)
+                and _session_instance(owner.name) == owner.sandbox_instance)
     except (OSError, msb.MsbError):
         return False
 
@@ -403,7 +413,73 @@ def existing_profile(name: str, record: dict) -> None:
 def terminal_refusal() -> msb.MsbError:
     return msb.MsbError(errors.UNSUPPORTED,
                         "this command is unsupported for the fresh plain OpenCode profile",
-                        "use plain acq run or attach without daemon/subcommand arguments; exec/shell also require fresh admission")
+                         "use plain acq run or attach without daemon/subcommand arguments; exec/shell also require fresh admission")
+
+
+def require_session_backend() -> None:
+    """Session-only qualification; no new floor for create/start/stop or SBX."""
+    try:
+        msb_preparation._capabilities(tuple(msb.msb_command()), time.monotonic() + 15)
+    except (PreparationError, OSError):
+        raise msb.MsbError(errors.UNSUPPORTED,
+            "MSB sessions require the qualified MSB 0.7.16 acknowledgment contract",
+            "upgrade to MSB 0.7.16; older and unqualified newer versions cannot run sessions") from None
+
+
+def _session_instance(name: str) -> str:
+    held = msb.held_read(name).instance
+    if held is not None:
+        return held
+    # Old host records need not be rewritten merely to open a legacy session.
+    # Native creation identity supplies the replacement guard when the acq-held
+    # token is absent. Read under the same lifecycle lock as selection/cleanup.
+    try:
+        raw = msb_preparation._control(tuple(msb.msb_command()),
+            ["inspect", name, "--format", "json"], time.monotonic() + 15)
+        doc = json.loads(raw, object_pairs_hook=msb_preparation._unique,
+                         parse_constant=msb_preparation._constant)
+        if (not isinstance(doc, dict) or doc.get("name") != name
+                or not isinstance(doc.get("created_at"), str) or not doc["created_at"]):
+            raise ValueError
+        return "native:" + doc["created_at"]
+    except (ValueError, TypeError, OSError):
+        raise _refuse("foreground session instance identity is unavailable") from None
+
+
+def session_guard_locked(name: str) -> None:
+    """Reject quarantine/abandonment before any guest setup, including legacy."""
+    try:
+        _admission_attempts(name)
+    except (PreparationError, OSError, ValueError, TypeError, KeyError):
+        raise _refuse("foreground attempt admission could not be verified") from None
+    if kit_msb.hc_has(name, "fresh-quarantine"):
+        raise _refuse("session is quarantined; remove and recreate the sandbox")
+
+
+def admit_legacy_locked(name: str, record: dict | None, workspace: str | None,
+                        env: list[str], *, ownership: LaunchOwnership, json_mode: bool,
+                        guest_command: list[str], tty: bool | None, shell_env: bool,
+                        selection_check: Callable[[], None]) -> LaunchOwnership:
+    """Only foreground ownership/ack; no provider/profile/CA preparation."""
+    session_guard_locked(name)
+    expected_record = copy.deepcopy(record)
+    expected_instance = _session_instance(name)
+
+    def recheck() -> None:
+        selection_check()
+        if (state.record_read("msb", name) != expected_record
+                or _session_instance(name) != expected_instance
+                or kit_msb.hc_has(name, "fresh-quarantine")):
+            raise _refuse("foreground session record or instance changed")
+
+    try:
+        _acknowledge_foreground(name, workspace, env, recheck, json_mode=json_mode,
+            ownership=ownership, guest_command=guest_command, tty=tty, shell_env=shell_env)
+        return ownership
+    except (PreparationError, OSError, ValueError, KeyError, TypeError):
+        if ownership.termination is not None:
+            raise ownership.termination from None
+        raise _refuse("foreground session acknowledgment failed") from None
 
 
 def _inspect(name: str) -> dict:
@@ -563,9 +639,7 @@ def prepare_locked(name: str) -> None:
 
 @contextmanager
 def _prepare_locked(name: str) -> Iterator[tuple[Callable[[], None], str]]:
-    _admission_attempts(name)
-    if kit_msb.hc_has(name, "fresh-quarantine"):
-        raise _refuse("fresh launch is quarantined; remove and recreate the sandbox")
+    session_guard_locked(name)
     before = _inspect(name)
     inputs = _mounted_inputs(name, before)
     _active_binding(before, usai=inputs.usai)
@@ -610,8 +684,9 @@ def _prepare_locked(name: str) -> Iterator[tuple[Callable[[], None], str]]:
 
 
 def admit_locked(name: str, workspace: str | None, env: list[str], *, json_mode: bool,
-                 ownership: LaunchOwnership, agent_args: list[str] | None = None,
-                 guest_command: list[str] | None = None, tty: bool | None = None) -> LaunchOwnership:
+                  ownership: LaunchOwnership, agent_args: list[str] | None = None,
+                  guest_command: list[str] | None = None, tty: bool | None = None,
+                  selection_check: Callable[[], None] | None = None) -> LaunchOwnership:
     """Prepare then acknowledge foreground launch while both locks are held.
 
     Foreground stdio is connected before the harness can emit anything. The
@@ -624,6 +699,10 @@ def admit_locked(name: str, workspace: str | None, env: list[str], *, json_mode:
     try:
         with msb.store_shared():
             with _prepare_locked(name) as (recheck, ca):
+                def checked() -> None:
+                    if selection_check is not None:
+                        selection_check()
+                    recheck()
                 # A distinct attempt-private public copy survives the preparation
                 # context until foreground completion. Never hand the harness
                 # the backend's inaccessible/writable runtime-state CA path.
@@ -636,7 +715,7 @@ def admit_locked(name: str, workspace: str | None, env: list[str], *, json_mode:
                                ("NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "NODE_TLS_REJECT_UNAUTHORIZED")]
                 session_env += ["NODE_EXTRA_CA_CERTS=" + session_ca, "SSL_CERT_FILE=" + session_ca,
                                 "NODE_TLS_REJECT_UNAUTHORIZED=1"]
-                _acknowledge_foreground(name, workspace, session_env, recheck,
+                _acknowledge_foreground(name, workspace, session_env, checked,
                                         json_mode=json_mode, ownership=ownership,
                                         guest_command=guest_command, tty=tty)
                 return ownership
@@ -661,8 +740,9 @@ def _launch_inventory(command: tuple[str, ...], name: str, deadline: float) -> l
 
 
 def _acknowledge_foreground(name: str, workspace: str | None, env: list[str], recheck: Callable[[], None],
-                            *, json_mode: bool, ownership: LaunchOwnership,
-                            guest_command: list[str] | None = None, tty: bool | None = None) -> None:
+                             *, json_mode: bool, ownership: LaunchOwnership,
+                             guest_command: list[str] | None = None, tty: bool | None = None,
+                             shell_env: bool = True) -> None:
     command = tuple(msb.msb_command())
     deadline = time.monotonic() + 15
     previous = _launch_inventory(command, name, deadline)
@@ -675,14 +755,26 @@ def _acknowledge_foreground(name: str, workspace: str | None, env: list[str], re
     if not payload or any(not isinstance(arg, str) or "\0" in arg for arg in payload):
         raise _refuse("invalid foreground guest command")
     guest = ["/bin/sh", "-c", 'exec "$@"', nonce, *payload]
-    tty = hostexec.stdin_is_tty() if tty is None else tty
+    host_stdin_tty = hostexec.stdin_is_tty()
+    tty = host_stdin_tty if tty is None else tty
     flags = ["exec", "--tty" if tty else "--no-tty", "-u", "agent"]
+    if not tty:
+        # Native non-TTY exec otherwise buffers output until exit, even with
+        # inherited host fds. Native streaming rejects terminal stdin unless
+        # explicitly closed; noninteractive exec historically supplies EOF in
+        # that case. Keep actual piped input connected.
+        flags += ["--stream"]
+        if host_stdin_tty:
+            flags += ["--no-stdin"]
     directory = msb.start_directory(name) or workspace
     if directory:
-        flags += ["-w", directory]
-    entries = ["HOME=/home/agent", "SHELL=" + msb.agent_shell(name), *env]
+        flags += ["-w", msb._guest_path(directory)]
+    entries = ["HOME=/home/agent"]
+    if shell_env:
+        entries += ["SHELL=" + msb.agent_shell(name)]
     if tty:
         entries += hostexec.terminal_env()
+    entries += env  # Preserve legacy precedence: explicit/kit entries are last.
     for entry in entries:
         flags += ["-e", entry]
     recheck()
@@ -695,7 +787,13 @@ def _acknowledge_foreground(name: str, workspace: str | None, env: list[str], re
     ownership.interrupt_held = ownership.interrupt_handler is not None
     ownership.spawned = True
     try:
-        ownership.proc = subprocess.Popen([*command, *flags, name, "--", *guest], stdout=2 if json_mode else None)
+        ownership.registering = True
+        try:
+            ownership.proc = subprocess.Popen([*command, *flags, name, "--", *guest], stdout=2 if json_mode else None)
+        finally:
+            # Caught signals reset to default at exec; blocked masks would be
+            # inherited. Defer exceptions only until handle registration ends.
+            ownership.registering = False
     except OSError:
         # Synchronous Popen failure returned no process and cannot have admitted
         # a guest job. Retire the pending attempt while the caller STILL owns
@@ -705,6 +803,9 @@ def _acknowledge_foreground(name: str, workspace: str | None, env: list[str], re
         ownership.spawned = False
         _release_locked(ownership)
         raise
+    finally:
+        if ownership.termination is not None:
+            raise ownership.termination
     old = {item["id"] for item in previous}
     while time.monotonic() < deadline:
         matches = [item for item in _launch_inventory(command, name, deadline)

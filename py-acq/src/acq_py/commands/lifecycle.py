@@ -1780,6 +1780,8 @@ def _run_run(parsed, emit_json: bool, backend: str) -> int:
     # Ownership spans post-admission lock release and every handoff statement,
     # not just wait(): parent-only termination must not orphan an admitted job.
     try:
+        if backend == "msb":
+            fresh_launch.require_session_backend()
         with contextlib.ExitStack() as launches:
             return _run_run_owned(parsed, emit_json, backend, launches)
     except state.StateSchemaError as exc:
@@ -1788,6 +1790,8 @@ def _run_run(parsed, emit_json: bool, backend: str) -> int:
     except lock.SandboxLockTimeout as exc:
         name = getattr(parsed, "name", None) or parsed.target
         return _lock_failure("run", name, exc, emit_json)
+    except msb.MsbError as exc:
+        return common._operational_failure("run", exc.code, exc.message, exc.remediation, emit_json)
 
 
 def _run_run_owned(parsed, emit_json: bool, backend: str, launches: contextlib.ExitStack) -> int:
@@ -1813,15 +1817,10 @@ def _run_run_owned(parsed, emit_json: bool, backend: str, launches: contextlib.E
             if backend == "msb":
                 with lock.sandbox_lock(backend, name):
                     existing = state.record_read(backend, name)
-                    mismatch = existing and existing.get("agent") == "opencode" and target != "opencode"
-                if mismatch:
-                    exc = fresh_launch.terminal_refusal()
-                    return common._operational_failure("run", exc.code, exc.message, exc.remediation, emit_json)
-            if backend == "msb" and target == "opencode":
-                if parsed.kit or opts.publish or opts.extras:
-                    exc = fresh_launch.terminal_refusal()
-                    return common._operational_failure("run", exc.code, exc.message, exc.remediation, emit_json)
-                return session.fresh_attach(name, emit_json, command="run", agent_args=getattr(parsed, "agent_args", []))
+                    fresh_launch.session_guard_locked(name)
+                    if ((existing or {}).get("agent") == "opencode" and target != "opencode"
+                            or target == "opencode" and not (existing or {}).get("agent")):
+                        raise fresh_launch.terminal_refusal()
             # A re-attach uses existing mounts, so only the recorded paths are checked.
             workspace = common._mount_workspace(backend, typed)
         else:
@@ -1851,19 +1850,34 @@ def _run_run_owned(parsed, emit_json: bool, backend: str, launches: contextlib.E
                 return exit_code
         # Before the lock (it may prompt), and on a re-attach too: a running
         # sandbox can still take a token (msb re-feeds it, sbx's proxy is updated).
+        if backend == "msb":
+            _offer_msb_refresh(name, emit_json, parsed)
         stored_token = _scope_advice(backend, name, workspace, emit_json)
-        ownership = launches.enter_context(fresh_launch.own_launch(name)) if backend == "msb" and target == "opencode" else None
+        ownership = launches.enter_context(fresh_launch.own_launch(name)) if backend == "msb" else None
         try:
             with lock.sandbox_lock(backend, name):
+                instance = None
+                if backend == "msb" and msb.exists(name):
+                    fresh_launch.session_guard_locked(name)
+                    instance = fresh_launch._session_instance(name)
                 data, exit_code = _run_prepare_locked(parsed, emit_json, backend, target, name, workspace, cli_kits,
                                                       stored_token, opts)
                 admitted = None
-                if data is not None and backend == "msb" and target == "opencode":
+                if data is not None and backend == "msb":
                     if ownership is None:
-                        raise RuntimeError("missing fresh launch ownership")
-                    admitted = fresh_launch.admit_locked(name, data["workspace"],
-                                                        session.session_env_for(backend, name), json_mode=emit_json,
-                                                        ownership=ownership)
+                        raise RuntimeError("missing foreground launch ownership")
+                    if instance is not None and instance != fresh_launch._session_instance(name):
+                        raise fresh_launch._refuse("session instance changed during run preparation")
+                    record = state.record_read(backend, name)
+                    if (record or {}).get("agent") != "opencode":
+                        exit_code = _attach_key_check(backend, name, emit_json)
+                        if exit_code is not None:
+                            return exit_code
+                    admitted, exit_code = session.admit_session_locked(name, record, emit_json, ownership,
+                        command="run", agent_args=getattr(parsed, "agent_args", []),
+                        workspace=data["workspace"], launch_entrypoint=data.get("entrypoint") or target)
+                    if admitted is None:
+                        return exit_code
         except msb.MsbError as exc:
             return common._operational_failure("run", exc.code, exc.message, exc.remediation, emit_json)
         except lock.SandboxLockTimeout as exc:
@@ -1873,6 +1887,7 @@ def _run_run_owned(parsed, emit_json: bool, backend: str, launches: contextlib.E
         if data is None:
             return exit_code if exit_code is not None else errors.EXIT_FAILURE
         if admitted is not None:
+            data.pop(_PRE_HEAL, None)
             rc = fresh_launch.wait_admitted(admitted)
             if emit_json:
                 print(json.dumps(envelope.success("run", {**data, "exit_code": rc})))
@@ -1906,15 +1921,10 @@ def _run_run_owned(parsed, emit_json: bool, backend: str, launches: contextlib.E
 def _run_by_name(backend: str, target: str, emit_json: bool, parsed=None) -> int:
     """``run NAME``: re-attach an existing sandbox from its host record.
 
-    The record checks and the kit heal hold the lifecycle lock; the launch does not.
+    MSB holds the lifecycle lock through acknowledgment, never interactive wait.
     """
     if backend == "msb":
-        record = state.record_read(backend, target)
-        if (record or {}).get("agent") == "opencode":
-            if getattr(parsed, "kit", None) or getattr(parsed, "publish", None):
-                exc = fresh_launch.terminal_refusal()
-                return common._operational_failure("run", exc.code, exc.message, exc.remediation, emit_json)
-            return session.fresh_attach(target, emit_json, command="run", agent_args=getattr(parsed, "agent_args", []))
+        return _run_msb_by_name(target, emit_json, parsed)
     try:
         with lock.sandbox_lock(backend, target):
             record, exit_code = _by_name_locked(backend, target, emit_json)
@@ -1938,7 +1948,63 @@ def _run_by_name(backend: str, target: str, emit_json: bool, parsed=None) -> int
             )
         )
     return _launch_after_envelope(backend, target, workspace, common._launch_token(backend, target, agent), emit_json,
-                                  getattr(parsed, "agent_args", []))
+                                   getattr(parsed, "agent_args", []))
+
+
+def _run_msb_by_name(name: str, emit_json: bool, parsed) -> int:
+    """No unlock-to-name-resolution gap between legacy heal and session launch."""
+    try:
+        fresh_launch.require_session_backend()
+        _offer_msb_refresh(name, emit_json, parsed)
+        with fresh_launch.own_launch(name) as ownership:
+            with lock.sandbox_lock("msb", name):
+                if not msb.exists(name):
+                    raise fresh_launch._refuse("session sandbox no longer exists")
+                record = state.record_read("msb", name)
+                fresh_launch.session_guard_locked(name)
+                instance = fresh_launch._session_instance(name)
+                if record is not None and record.get("agent") == "opencode":
+                    if getattr(parsed, "kit", None) or getattr(parsed, "publish", None):
+                        raise fresh_launch.terminal_refusal()
+                else:
+                    record, refusal = _by_name_locked("msb", name, emit_json)
+                    if record is None:
+                        return refusal if refusal is not None else errors.EXIT_FAILURE
+                    record.pop(_PRE_HEAL, None)
+                    refusal = _attach_key_check("msb", name, emit_json)
+                    if refusal is not None:
+                        return refusal
+                if instance != fresh_launch._session_instance(name):
+                    raise fresh_launch._refuse("session instance changed during run preparation")
+                admitted, refusal = session.admit_session_locked(name, record, emit_json, ownership,
+                    command="run", agent_args=getattr(parsed, "agent_args", []))
+                if admitted is None:
+                    return refusal
+            rc = fresh_launch.wait_admitted(admitted)
+            if emit_json:
+                print(json.dumps(envelope.success("run", {"name": name, "backend": "msb",
+                    "agent": record.get("agent"), "workspace": record.get("workspace"),
+                    "state": "running", "action": "reattached", "exit_code": rc})))
+            return rc
+    except (msb.MsbError, state.StateSchemaError, lock.SandboxLockTimeout) as exc:
+        fallback = (errors.STATE_SCHEMA_UNSUPPORTED if isinstance(exc, state.StateSchemaError)
+                    else errors.TIMEOUT if isinstance(exc, lock.SandboxLockTimeout) else errors.VALIDATION_FAILED)
+        return common._operational_failure("run", getattr(exc, "code", fallback),
+            getattr(exc, "message", str(exc)), getattr(exc, "remediation", "verify the sandbox and retry"), emit_json)
+
+
+def _offer_msb_refresh(name: str, emit_json: bool, parsed) -> None:
+    # A prompt must not hold the lifecycle lock. This read is advisory only:
+    # final record selection, heal and launch still occur in a new locked phase.
+    with lock.sandbox_lock("msb", name):
+        if not msb.exists(name):
+            return
+        record = state.record_read("msb", name)
+        fresh_launch.session_guard_locked(name)
+        if record is None or record.get("agent") == "opencode":
+            return
+        status = kits.provenance_status("msb", name)
+    offer_bundle_refresh("msb", name, status, emit_json, parsed)
 
 
 def _by_name_locked(backend: str, target: str, emit_json: bool) -> tuple[dict | None, int | None]:
@@ -2042,6 +2108,12 @@ def _refresh_bundle(backend: str, name: str) -> None:
     print(f"acq: refreshing the built-in kit bundle in '{name}' (in place; state preserved)...", file=sys.stderr)
     try:
         with lock.sandbox_lock(backend, name), contextlib.redirect_stdout(sys.stderr):
+            if backend == "msb":
+                fresh_launch.session_guard_locked(name)
+                if (state.record_read(backend, name) or {}).get("agent") == "opencode":
+                    # A legacy refresh prompt is not authority to mutate a
+                    # same-name replacement selected while the lock was free.
+                    return
             rc = common.with_recorded_selection(
                 "run", backend, name, False, lambda: kit_cmd._kit_update_locked(name, False, backend)
             )

@@ -23,7 +23,7 @@ import pytest
 from acq_py import cli, config, msb, provider_creds, secretstore, security, state
 from acq_py.commands import common, configure, creds
 from gitfixtures import git_repo
-from fresh_fixture import fresh_fixture
+from fresh_fixture import fresh_fixture, jobs, qualified_session_fixture
 
 TOKEN = "ghp_THROWAWAY-SCOPED-TOKEN"
 UNBUNDLED = "git+https://example.invalid/provider-kit.git#ref=main&dir=kit"
@@ -304,11 +304,13 @@ def test_run_reattach_is_nudged_too(monkeypatch, tmp_path, capsys):
     # Generic legacy reattach advice; fresh OpenCode has a separate admission path.
     rc, _, _, _ = _main(capsys, "--backend", "msb", "create", "shell", str(ws), "--name", "adv", "--json")
     assert rc == 0
+    qualified_session_fixture(monkeypatch)  # session gate must not hide reattach advice
     monkeypatch.setattr(sys, "stdin", io.StringIO(""))
-    monkeypatch.setattr(msb, "launch", lambda *a, **k: 0)
     rc, _, _, err = _main(capsys, "--backend", "msb", "run", "shell", str(ws), "--name", "adv")
     assert rc == 0, err
     assert "To scope it later: acq github-scope adv" in err
+    assert len(jobs("adv")) == 1
+    assert jobs("adv")[0]["status"]["command"][3].startswith("acq-launch-")
 
 
 @pytest.mark.provider_key
@@ -360,6 +362,10 @@ def test_a_token_the_prompt_stored_is_removed_when_the_msb_create_fails(monkeypa
     # Left behind, the token would be bound to the next sandbox created under
     # this name, whatever workspace it mounts.
     _msb_env(monkeypatch, tmp_path)
+    if verb == "run":
+        # Only run requires qualified session support; retain the original
+        # create fixture and all token cleanup/non-disclosure assertions.
+        qualified_session_fixture(monkeypatch)
     ws = _github_ws(monkeypatch, tmp_path)
     _write_config("scope_github_token: yes\n")
     _terminal(monkeypatch, answer="\n", token=TOKEN)
