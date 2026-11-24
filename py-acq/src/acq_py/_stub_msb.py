@@ -59,6 +59,15 @@ none of them: any such token is an "unrecognized subcommand" (exit 1), matching 
 real CLI. The catalog is backend-native state, not acq authority: acq never reads
 it as configuration (ADR-0040m §trust ownership). It is never a secret and never
 written to acq output.
+
+``ACQ_MSB_STUB_FRESH=1`` explicitly opts into the narrow 0.7.16 fresh-launch
+fixture: create-derived inspect metadata and managed jobs. The legacy default
+version/surface is unchanged. Detached preparation requires explicit synthetic
+``ACQ_MSB_STUB_PREPARATION_STDOUT`` and ``ACQ_MSB_STUB_PREPARATION_EXIT``;
+no guest program, validator, TLS handshake or provider service is executed.
+Job records contain commands and synthetic outcomes, never credential values.
+Like native 0.7.16, ``jobs --limit`` accepts only 1 through 100. A truncated
+fixture inventory has a non-null synthetic cursor, never a false complete page.
 """
 
 from __future__ import annotations
@@ -66,12 +75,14 @@ from __future__ import annotations
 import json
 import os
 import sys
+import uuid
 from pathlib import Path
 
 CATALOG_ENV = "ACQ_MSB_STUB_CATALOG"
 VERSION_ENV = "ACQ_MSB_STUB_VERSION"
 PORTS_ENV = "ACQ_MSB_STUB_PORTS"
 INSPECT_RAW_ENV = "ACQ_MSB_STUB_INSPECT_RAW"
+FRESH_ENV = "ACQ_MSB_STUB_FRESH"
 
 # ``exec`` prints this marker to its own stdout to simulate a real agent writing
 # to stdout; the adapter's json-mode launch must route it to acq's stderr so the
@@ -360,6 +371,150 @@ def _start(args: list[str], catalog: dict[str, str]) -> int:
     return 0
 
 
+def _fresh() -> bool:
+    return os.environ.get(FRESH_ENV) == "1"
+
+
+def _fixture_read(kind: str) -> dict:
+    try:
+        return json.loads(_catalog_path().with_name(kind + ".json").read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+
+
+def _fixture_write(kind: str, records: dict) -> None:
+    path = _catalog_path().with_name(kind + ".json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + "." + uuid.uuid4().hex)
+    temporary.write_text(json.dumps(records), encoding="utf-8")
+    temporary.replace(path)  # inventory polling must not see a partial write
+
+
+def _fresh_created(name: str, args: list[str]) -> None:
+    records = _fixture_read("fresh-instances")
+    records[name] = {
+        "created_at": uuid.uuid4().hex, "boot": "boot_" + uuid.uuid4().hex,
+        "image": args[-1],
+        "env": [{"key": key, "value": value} for key, _, value in
+                (entry.partition("=") for entry in _flag_values(args, "--env"))],
+        "tls": "--tls-intercept" in args,
+    }
+    _fixture_write("fresh-instances", records)
+
+
+def _fresh_inspect(name: str, status: str, active: dict) -> dict:
+    instance = _fixture_read("fresh-instances").get(name)
+    if instance is None:
+        # A seeded orphan has no create metadata; never invent trusted mounts.
+        return {"active_config": active}
+    bindings = _load_secrets().get(name, {})
+    active.update(image={"Oci": {"reference": instance["image"]}},
+                  deployment_profile="single_tenant", env=instance["env"])
+    active["network"].update(
+        tls={"enabled": instance["tls"], "verify_upstream": True, "bypass": [],
+             "scoped_verify_upstream": [], "intercept_ca": {"cert_path": None}},
+        secrets={"secrets": [
+            {"env_var": env, "allowed_hosts": [{"exact": host} for host in binding["host"].split(",")],
+             "require_tls_identity": True, "placeholder": "$MSB_" + env,
+             "source": {"kind": "env", "var": env}, "passthrough_hosts": [],
+             "substitution": {"headers": True, "body": False, "query": False}}
+            for env, binding in bindings.items()]},
+    )
+    home = _catalog_path().parent.parent
+    return {"name": name, "status": status.title(), "pending_changes": [],
+            "created_at": instance["created_at"], "active_config": active,
+            "storage": {"path": str(home / "sandboxes" / name)}}
+
+
+_FRESH_HELP = {
+    "exec": "--detach --no-stdin --timeout --user --tty --no-tty",
+    "attach": "--job --read-only", "jobs": "--all --format --limit",
+    "inspect": "--job --format", "signal": "--job --signal", "kill": "--job",
+}
+
+
+def _fresh_control(args: list[str], catalog: dict[str, str]) -> int | None:
+    cmd = args[0]
+    if args[1:] == ["--help"] and cmd in _FRESH_HELP:
+        print(_FRESH_HELP[cmd])
+        return 0
+    if cmd not in ("jobs", "attach", "signal", "kill") and not (cmd == "inspect" and "--job" in args):
+        return None
+    if _should_fail(cmd) or args[-1] not in catalog:
+        return 1
+    records = _fixture_read("fresh-jobs")
+    jobs = records.get(args[-1], {})
+    if cmd == "jobs":
+        raw_limit = _arg_after(args, "--limit")
+        try:
+            limit = int(raw_limit) if raw_limit is not None else 100
+        except ValueError:
+            limit = 0
+        if not 1 <= limit <= 100:
+            print("job page size must be between 1 and 100", file=sys.stderr)
+            return 1
+        items = [entry["status"] for entry in jobs.values()]
+        print(json.dumps({"items": items[:limit],
+                          "next_cursor": "synthetic-next-page" if len(items) > limit else None}))
+        return 0
+    entry = jobs.get(_arg_after(args, "--job"))
+    if entry is None:
+        return 1
+    if cmd == "inspect":
+        print(json.dumps(entry["status"]))
+    elif cmd == "attach":
+        if "--read-only" not in args:
+            return 1
+        print(entry["stdout"], end="")
+        return entry["status"]["exit_code"]
+    elif cmd in ("signal", "kill"):
+        # A session fixture may hold a synthetic running acknowledgment. Model
+        # cancellation in job metadata only; never signal a host PID from here.
+        entry["status"].update(state="exited", exit_code=143 if cmd == "signal" else 137,
+                               finished_at=2)
+        _fixture_write("fresh-jobs", records)
+    return 0
+
+
+def _fresh_exec(name: str, head: list[str], command: list[str]) -> int | None:
+    detached = "--detach" in head
+    foreground = (len(command) > 3 and command[:3] == ["/bin/sh", "-c", 'exec "$@"']
+                  and command[3].startswith("acq-launch-"))
+    if not detached and not foreground:
+        return None
+    instance = _fixture_read("fresh-instances").get(name)
+    if instance is None:
+        return 1
+    if detached:
+        if ("--no-stdin" not in head or _arg_after(head, "--user") != "agent"
+                or _arg_after(head, "--timeout") is None or len(command) < 4
+                or command[3] != "acq-preparation"
+                or "ACQ_MSB_STUB_PREPARATION_STDOUT" not in os.environ
+                or "ACQ_MSB_STUB_PREPARATION_EXIT" not in os.environ):
+            return 1  # no implicit claim that live preparation succeeded
+        output = os.environ["ACQ_MSB_STUB_PREPARATION_STDOUT"]
+        try:
+            code = int(os.environ["ACQ_MSB_STUB_PREPARATION_EXIT"])
+        except ValueError:
+            return 1
+        if not 0 <= code <= 255:
+            return 1
+    else:
+        output, code = EXEC_MARKER + "\n", _exit_code(EXEC_EXIT_ENV)
+    job = "job_" + uuid.uuid4().hex
+    status = {"version": 1, "id": job, "runtime_boot_id": instance["boot"],
+              "command": command, "state": "exited", "tty": "--tty" in head,
+              "stdin_closed": "--no-stdin" in head, "pid": 1, "created_at": 1,
+              "started_at": 1, "finished_at": 2, "exit_code": code,
+              "failure": None, "error": None, "timed_out": False}
+    records = _fixture_read("fresh-jobs")
+    records.setdefault(name, {})[job] = {"status": status, "stdout": output,
+                                       "workspace": _arg_after(head, "-w")}
+    _fixture_write("fresh-jobs", records)
+    print(job if detached else output, end="\n" if detached else "")
+    return 0 if detached else code
+
+
 def main(argv: list[str]) -> int:
     args = argv[1:]
     if not args:
@@ -367,10 +522,14 @@ def main(argv: list[str]) -> int:
     cmd = args[0]
 
     if cmd in ("--version", "-V"):
-        print(f"msb {os.environ.get(VERSION_ENV, '0.7.7')}")
+        print(f"msb {os.environ.get(VERSION_ENV, '0.7.16' if _fresh() else '0.7.7')}")
         return 0
 
     catalog = _load()
+    if _fresh():
+        handled = _fresh_control(args, catalog)
+        if handled is not None:
+            return handled
 
     if cmd in ("list", "ls"):
         if _should_fail("list"):
@@ -407,6 +566,8 @@ def main(argv: list[str]) -> int:
         mounts = _load_mounts()
         mounts[name] = _volume_mounts(args)
         _save_mounts(mounts)
+        if _fresh():
+            _fresh_created(name, args)
         published = _load_ports()
         published[name] = _published(args)
         _save_ports(published)
@@ -465,7 +626,7 @@ def main(argv: list[str]) -> int:
         i = 0
         while i < len(head):
             token = head[i]
-            if token in ("-u", "-w", "-e") and i + 1 < len(head):
+            if token in ("-u", "-w", "-e", "--user", "--timeout") and i + 1 < len(head):
                 i += 2
                 continue
             if token.startswith("-"):
@@ -478,9 +639,13 @@ def main(argv: list[str]) -> int:
             return 1
         if any(".acq-ro-probe" in token for token in command) and _named(RO_WRITABLE_ENV, name):
             return 2
-        if _arg_after(head, "-u") == "agent" and _named(NO_AGENT_USER_ENV, name):
+        if (_arg_after(head, "-u") or _arg_after(head, "--user")) == "agent" and _named(NO_AGENT_USER_ENV, name):
             print("msb: unable to find user agent", file=sys.stderr)
             return 1
+        if _fresh():
+            handled = _fresh_exec(name, head, command)
+            if handled is not None:
+                return handled
         if any("%{http_code}" in token for token in command):
             return _answer_probe()
         forward = _answer_forward_probe(name, command)
@@ -532,7 +697,8 @@ def main(argv: list[str]) -> int:
         declared_routes = _load_vsock().get(name)
         if declared_routes:
             active["vsock"] = {"routes": declared_routes}
-        print(json.dumps({"active_config": active}))
+        document = _fresh_inspect(name, catalog[name], active) if _fresh() else {"active_config": active}
+        print(json.dumps(document))
         return 0
 
     if cmd == "ssh" and args[1:2] == ["authorize"]:
@@ -588,6 +754,11 @@ def main(argv: list[str]) -> int:
         vsock = _load_vsock()
         if vsock.pop(name, None) is not None:
             _save_vsock(vsock)
+        if _fresh():
+            for kind in ("fresh-instances", "fresh-jobs"):
+                records = _fixture_read(kind)
+                records.pop(name, None)
+                _fixture_write(kind, records)
         return 0
 
     print(f"msb: unrecognized subcommand '{cmd}'", file=sys.stderr)

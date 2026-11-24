@@ -10,15 +10,18 @@ from __future__ import annotations
 
 import json
 import os
+import sys
+from pathlib import Path
 
 import pytest
 
 from acq_py import cli, migration, state
+from fresh_fixture import fresh_fixture as _fresh_fixture
 
 pytestmark = pytest.mark.provider_key  # creates msb sandboxes: needs a stored provider key
 
 
-def _env(monkeypatch, tmp_path, *, catalog=None):
+def _env(monkeypatch, tmp_path, *, catalog=None, fresh=False):
     monkeypatch.setenv("ACQ_MSB_BIN", "__stub__")
     monkeypatch.setenv("ACQ_MSB_VERSION", "0.7.7")
     monkeypatch.setenv("ACQ_MSB_INSTALLED", "1")
@@ -29,19 +32,27 @@ def _env(monkeypatch, tmp_path, *, catalog=None):
         monkeypatch.delenv(name, raising=False)
     if catalog is not None:
         monkeypatch.setenv("ACQ_MSB_STUB_CATALOG", json.dumps(catalog))
+    if fresh:
+        _fresh_fixture(monkeypatch, tmp_path)
+
+
+def _jobs(tmp_path, name):
+    path = tmp_path / "msb-home/.microsandbox/fresh-jobs.json"
+    return list(json.loads(path.read_text(encoding="utf-8")).get(name, {}).values()) if path.exists() else []
 
 
 def _invoke(capsys, *argv):
     rc = cli.main(list(argv))
     out = capsys.readouterr().out.strip()
-    doc = json.loads(out.splitlines()[-1]) if out else None
+    # Refuse an earlier success envelope followed by a failure, too.
+    doc = json.loads(out) if out else None
     return rc, doc
 
 
 def test_create_writes_schema_first_record(monkeypatch, tmp_path, capsys):
     ws = tmp_path / "workspace"
     ws.mkdir()
-    _env(monkeypatch, tmp_path)
+    _env(monkeypatch, tmp_path, fresh=True)
 
     rc, doc = _invoke(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "e2e", "--json")
     assert rc == 0
@@ -61,7 +72,7 @@ def test_create_writes_schema_first_record(monkeypatch, tmp_path, capsys):
 def test_lifecycle_end_to_end(monkeypatch, tmp_path, capsys):
     ws = tmp_path / "workspace"
     ws.mkdir()
-    _env(monkeypatch, tmp_path)
+    _env(monkeypatch, tmp_path, fresh=True)
 
     assert _invoke(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "e2e", "--json")[0] == 0
 
@@ -261,7 +272,7 @@ def _symlinked_workspace(tmp_path):
 
 def test_msb_create_mounts_and_records_the_real_workspace_path(monkeypatch, tmp_path, capsys):
     link, real = _symlinked_workspace(tmp_path)
-    _env(monkeypatch, tmp_path)
+    _env(monkeypatch, tmp_path, fresh=True)
 
     rc, doc = _invoke(capsys, "--backend", "msb", "create", "opencode", str(link), "--name", "linked", "--json")
     assert rc == 0
@@ -271,7 +282,7 @@ def test_msb_create_mounts_and_records_the_real_workspace_path(monkeypatch, tmp_
 
 def test_msb_sandbox_name_derives_from_the_path_as_typed(monkeypatch, tmp_path, capsys):
     link, real = _symlinked_workspace(tmp_path)
-    _env(monkeypatch, tmp_path)
+    _env(monkeypatch, tmp_path, fresh=True)
 
     rc, doc = _invoke(capsys, "--backend", "msb", "create", "opencode", str(link), "--json")
     assert rc == 0
@@ -337,7 +348,7 @@ def test_msb_83_case_name_derives_from_typed_path():
 
 def test_msb_adapter_receives_the_real_workspace_path(monkeypatch, tmp_path, capsys):
     link, real = _symlinked_workspace(tmp_path)
-    _env(monkeypatch, tmp_path)
+    _env(monkeypatch, tmp_path, fresh=True)
     seen = {}
     original = cli.msb.create
 
@@ -353,30 +364,35 @@ def test_msb_adapter_receives_the_real_workspace_path(monkeypatch, tmp_path, cap
 
 def test_run_reattach_launches_in_the_recorded_workspace(monkeypatch, tmp_path, capsys):
     link, real = _symlinked_workspace(tmp_path)
-    _env(monkeypatch, tmp_path)
+    _env(monkeypatch, tmp_path, fresh=True)
     assert _invoke(capsys, "--backend", "msb", "create", "opencode", str(real), "--name", "legacy", "--json")[0] == 0
     # An older build recorded the symlink form of the workspace.
     legacy = str(link)
-    state.record_write("msb", "legacy", agent="opencode", workspace=legacy, image=None)
-    launched = {}
-    monkeypatch.setattr(cli.msb, "launch", lambda name, workspace, agent, **kw: launched.update(workspace=workspace) or 0)
+    record = state.record_read("msb", "legacy")
+    _write_record("msb", "legacy", {**record, "workspace": legacy})
 
     rc, doc = _invoke(capsys, "--backend", "msb", "run", "opencode", str(link), "--name", "legacy", "--json")
     assert rc == 0
-    assert doc["data"]["action"] == "reattached"
-    assert launched["workspace"] == legacy
-    assert doc["data"]["workspace"] == legacy
+    assert doc["data"]["exit_code"] == 0
+    launched = [job for job in _jobs(tmp_path, "legacy") if job["status"]["command"][3].startswith("acq-launch-")]
+    assert len(launched) == 1
+    assert launched[0]["workspace"] == legacy
+    assert state.record_read("msb", "legacy")["workspace"] == legacy
 
 
-def test_run_reattach_without_a_record_falls_back_to_the_typed_path(monkeypatch, tmp_path, capsys):
+def test_run_opencode_reattach_without_a_record_fails_closed(monkeypatch, tmp_path, capsys):
     _link, real = _symlinked_workspace(tmp_path)
     _env(monkeypatch, tmp_path, catalog={"orphan": "running"})
     launched = {}
     monkeypatch.setattr(cli.msb, "launch", lambda name, workspace, agent, **kw: launched.update(workspace=workspace) or 0)
 
     rc, doc = _invoke(capsys, "--backend", "msb", "run", "opencode", str(real), "--name", "orphan", "--json")
-    assert rc == 0
-    assert launched["workspace"] == str(real.resolve())
+    assert rc == 1
+    assert doc["error"]["code"] == "unsupported_capability"
+    assert "data" not in doc
+    assert launched == {}
+    assert _jobs(tmp_path, "orphan") == []
+    assert state.record_read("msb", "orphan") is None
 
 
 _SEC_RECORD = {
@@ -407,6 +423,7 @@ def test_run_typed_path_reattach_refuses_missing_trusted_mount(monkeypatch, tmp_
     ws = tmp_path / "ws"
     ws.mkdir()
     _env(monkeypatch, tmp_path, catalog={"sec": "running"})
+    monkeypatch.setenv("ACQ_MSB_VERSION", "0.7.16")
     _seed_record(_SEC_RECORD)
     monkeypatch.setenv("ACQ_SECURITY_MOUNT_STATE", json.dumps({"sec": mount}))
     _forbid_launch(monkeypatch)
@@ -420,12 +437,14 @@ def test_run_typed_path_reattach_allowed_when_trusted_mount_ok(monkeypatch, tmp_
     ws = tmp_path / "ws"
     ws.mkdir()
     _env(monkeypatch, tmp_path, catalog={"sec": "running"})
-    _seed_record(_SEC_RECORD)
+    monkeypatch.setenv("ACQ_MSB_VERSION", "0.7.16")
+    # Mount trust alone admits legacy shell, NOT the fresh OpenCode profile.
+    _seed_record({**_SEC_RECORD, "agent": "shell"})
     monkeypatch.setenv("ACQ_SECURITY_MOUNT_STATE", json.dumps({"sec": "ok"}))
     launched = {}
     monkeypatch.setattr(cli.msb, "launch", lambda name, workspace, agent, **kw: launched.update(workspace=workspace) or 0)
 
-    rc, doc = _invoke(capsys, "--backend", "msb", "run", "opencode", str(ws), "--name", "sec", "--json")
+    rc, doc = _invoke(capsys, "--backend", "msb", "run", "shell", str(ws), "--name", "sec", "--json")
     assert rc == 0
     assert launched["workspace"] == "/w"
 
@@ -521,7 +540,7 @@ def test_a_workspace_holding_the_balanced_hosts_file_is_refused(monkeypatch, tmp
 
 def test_an_acq_location_at_the_filesystem_root_does_not_refuse_every_workspace(monkeypatch, tmp_path, capsys):
     # As in Bash: every workspace lies inside '/', so that is not a refusal.
-    _env(monkeypatch, tmp_path)
+    _env(monkeypatch, tmp_path, fresh=True)
     ws = tmp_path / "ws"
     ws.mkdir()
     monkeypatch.setenv("ACQ_MSB_KIT_CACHE", os.path.abspath(os.sep))
@@ -619,7 +638,7 @@ def test_run_typed_path_reattach_refuses_a_recorded_workspace_holding_acq_state(
     _env(monkeypatch, tmp_path, catalog={"old": "running"})
     _seed_record({"schema": 1, "name": "old", "backend": "msb", "agent": "shell", "workspace": str(tmp_path)})
     _forbid_launch(monkeypatch)
-    rc, doc = _invoke(capsys, "--backend", "msb", "run", "opencode", str(ws), "--name", "old", "--json")
+    rc, doc = _invoke(capsys, "--backend", "msb", "run", "shell", str(ws), "--name", "old", "--json")
     _assert_overlap_refused(rc, doc, "contains", "state directory")
 
 
@@ -633,3 +652,293 @@ def test_recreate_refuses_a_recorded_workspace_holding_acq_state(monkeypatch, tm
     _assert_overlap_refused(rc, doc, "contains", "state directory")
     assert removed == []
     assert state.record_read("msb", "sec")["ro_host_config"] is True
+
+
+def test_fresh_stub_is_explicit_and_has_no_implicit_live_success(monkeypatch, tmp_path, capsys):
+    from acq_py import _stub_msb
+
+    _env(monkeypatch, tmp_path)
+    assert _stub_msb.main(["msb", "--version"]) == 0
+    assert capsys.readouterr().out == "msb 0.7.7\n"
+    assert _stub_msb.main(["msb", "jobs", "--help"]) == 1
+    capsys.readouterr()
+    monkeypatch.setenv("ACQ_MSB_STUB_FRESH", "1")
+    assert _stub_msb.main(["msb", "--version"]) == 0
+    assert capsys.readouterr().out == "msb 0.7.16\n"
+    assert _stub_msb.main(["msb", "create", "--name", "box", "synthetic-image"]) == 0
+    assert _stub_msb.main(["msb", "exec", "--detach", "--no-stdin", "--timeout", "1s",
+                           "--user", "agent", "box", "--", "/bin/sh", "-c", "synthetic", "acq-preparation"]) == 1
+    assert _jobs(tmp_path, "box") == []
+
+
+@pytest.mark.parametrize("limit", [1, 100, 0, 101, 256])
+def test_fresh_stub_enforces_native_job_page_limit(monkeypatch, tmp_path, capsys, limit):
+    from acq_py import _stub_msb
+
+    _env(monkeypatch, tmp_path, catalog={"box": "running"})
+    monkeypatch.setenv("ACQ_MSB_STUB_FRESH", "1")
+    rc = _stub_msb.main(["msb", "jobs", "--all", "--limit", str(limit), "--format", "json", "box"])
+    captured = capsys.readouterr()
+    if 1 <= limit <= 100:
+        assert rc == 0
+        assert json.loads(captured.out) == {"items": [], "next_cursor": None}
+        assert captured.err == ""
+    else:
+        assert rc == 1
+        assert captured.out == ""
+        assert captured.err.strip() == "job page size must be between 1 and 100"
+
+
+def test_fresh_stub_does_not_claim_truncated_inventory_is_complete(monkeypatch, tmp_path, capsys):
+    from acq_py import _stub_msb
+
+    _env(monkeypatch, tmp_path, catalog={"box": "running"})
+    monkeypatch.setenv("ACQ_MSB_STUB_FRESH", "1")
+    _stub_msb._fixture_write("fresh-jobs", {"box": {
+        str(index): {"status": {"id": "job_" + f"{index:032x}"}} for index in range(101)}})
+    assert _stub_msb.main(["msb", "jobs", "--all", "--limit", "100", "--format", "json", "box"]) == 0
+    page = json.loads(capsys.readouterr().out)
+    assert len(page["items"]) == 100
+    assert page["next_cursor"] is not None
+
+
+@pytest.mark.parametrize("verb", ["create", "run"])
+def test_public_fresh_lifecycle_uses_managed_preparation(monkeypatch, tmp_path, capsys, verb):
+    from acq_py import fresh_inputs, security
+
+    _env(monkeypatch, tmp_path, fresh=True)
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    rc, doc = _invoke(capsys, "--backend", "msb", verb, "opencode", str(ws), "--name", "fresh", "--json")
+    assert rc == 0, doc
+    assert "error" not in doc and doc["command"] == verb
+    jobs = _jobs(tmp_path, "fresh")
+    preparation = [job for job in jobs if job["status"]["command"][3] == "acq-preparation"]
+    foreground = [job for job in jobs if job["status"]["command"][3].startswith("acq-launch-")]
+    assert len(preparation) == (2 if verb == "run" else 1)
+    assert len(foreground) == (1 if verb == "run" else 0)
+    assert len({job["status"]["id"] for job in jobs}) == len(jobs)
+    for job in preparation:
+        assert job["status"]["stdin_closed"] is True
+        assert job["status"]["tty"] is False
+        assert job["status"]["command"][-2:] == ["--mode", "live-required"]
+    mounts = json.loads((tmp_path / "msb-home/.microsandbox/mounts.json").read_text())["fresh"]
+    mounted = next(m for m in mounts if Path(m["host"]).name.startswith("generation."))
+    assert mounted["options"]["readonly"] is True
+    inputs = fresh_inputs.read_existing("fresh", Path(mounted["host"]))
+    assert inputs.guest_root == mounted["guest"]
+    assert not list(security.host_config_dir("fresh").glob("preparation-ca-*"))
+    # Both guest terminal status and reported result were consumed, not cached
+    # as authority for the next public run.
+    previous = {job["status"]["id"] for job in jobs}
+    rc, doc = _invoke(capsys, "--backend", "msb", "run", "fresh", "--json")
+    assert rc == 0, doc
+    new = [job for job in _jobs(tmp_path, "fresh") if job["status"]["id"] not in previous]
+    assert len(new) == 2
+    assert new[0]["status"]["command"][3] == "acq-preparation"
+    assert new[1]["status"]["command"][3].startswith("acq-launch-")
+
+
+@pytest.mark.parametrize("verb", ["create", "run"])
+@pytest.mark.parametrize("output,code", [
+    ('{"sourceOutcome":"snapshot","metadataOutcome":"not-requested"}', "0"),
+    ('{"sourceOutcome":"live","metadataOutcome":"not-requested"}', "1"),
+    ('{"schemaVersion":"acq-runtime-model-outcome/v1","outcome":"failure",'
+     '"stage":"membership","reason":"connection","failureClass":"transient"}', "1"),
+    ("not-json", "0"),
+])
+def test_public_fresh_lifecycle_refuses_guest_failure(monkeypatch, tmp_path, capsys, verb, output, code):
+    from acq_py import msb_preparation
+
+    _env(monkeypatch, tmp_path, fresh=True)
+    monkeypatch.setenv("ACQ_MSB_STUB_PREPARATION_STDOUT", output)
+    monkeypatch.setenv("ACQ_MSB_STUB_PREPARATION_EXIT", code)
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    attempted = []
+    original = msb_preparation.run_preparation
+
+    def observe(*args, **kwargs):
+        attempted.append(args[0])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(msb_preparation, "run_preparation", observe)
+    rc, doc = _invoke(capsys, "--backend", "msb", verb, "opencode", str(ws), "--name", "failed", "--json")
+    assert rc == 1, doc
+    assert doc["error"]["code"] == "validation_failed"
+    assert "data" not in doc
+    assert attempted == ["failed"]
+    assert not any(job["status"]["command"][3].startswith("acq-launch-") for job in _jobs(tmp_path, "failed"))
+
+
+@pytest.mark.parametrize("change", ["result", "generation", "binding", "readonly", "ca-content", "ca-mode"])
+def test_public_fresh_reattach_rechecks_inputs_and_result(monkeypatch, tmp_path, capsys, change):
+    _env(monkeypatch, tmp_path, fresh=True)
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    rc, doc = _invoke(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "fresh", "--json")
+    assert rc == 0, doc
+    native = tmp_path / "msb-home/.microsandbox"
+    jobs_before = _jobs(tmp_path, "fresh")
+    if change == "result":
+        monkeypatch.setenv("ACQ_MSB_STUB_PREPARATION_STDOUT", '{"sourceOutcome":"snapshot","metadataOutcome":"not-requested"}')
+    elif change == "generation":
+        mounts = json.loads((native / "mounts.json").read_text())["fresh"]
+        generation = Path(next(m["host"] for m in mounts if Path(m["host"]).name.startswith("generation.")))
+        artifact = generation / "runtime-model-preparation.mjs"
+        artifact.chmod(0o600)
+        artifact.write_text("synthetic corruption")
+    elif change == "binding":
+        bindings = json.loads((native / "secrets.json").read_text())
+        bindings["fresh"]["USAI_API_KEY"]["host"] = "wrong.invalid"
+        (native / "secrets.json").write_text(json.dumps(bindings))
+    elif change == "readonly":
+        monkeypatch.setenv("ACQ_MSB_STUB_MOUNT_RW", "fresh")
+    else:
+        ca = tmp_path / "msb-home/tls/ca.crt"
+        ca.chmod(0o666 if change == "ca-mode" else 0o600)
+        if change == "ca-content":
+            ca.write_text("not a public certificate")
+    rc, doc = _invoke(capsys, "--backend", "msb", "run", "fresh", "--json")
+    assert rc == 1, doc
+    assert "error" in doc and "data" not in doc
+    jobs = _jobs(tmp_path, "fresh")
+    assert len(jobs) == len(jobs_before) + (1 if change == "result" else 0)
+    assert not any(job["status"]["command"][3].startswith("acq-launch-") for job in jobs)
+
+
+def test_trusted_mount_alone_does_not_admit_legacy_opencode(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path, catalog={"sec": "running"})
+    monkeypatch.setenv("ACQ_MSB_VERSION", "0.7.16")
+    monkeypatch.setenv("ACQ_SECURITY_MOUNT_STATE", json.dumps({"sec": "ok"}))
+    _seed_record(_SEC_RECORD)
+    _forbid_launch(monkeypatch)
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    rc, doc = _invoke(capsys, "--backend", "msb", "run", "opencode", str(ws), "--name", "sec", "--json")
+    assert rc == 1
+    assert "error" in doc and "data" not in doc
+    assert _jobs(tmp_path, "sec") == []
+
+
+@pytest.mark.parametrize("change", ["generation-writable", "binding-missing"])
+def test_fresh_reattach_refuses_input_defects_with_trusted_host_config(monkeypatch, tmp_path, capsys, change):
+    from acq_py import msb_preparation, security
+
+    _env(monkeypatch, tmp_path, fresh=True)
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    rc, doc = _invoke(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "fresh", "--json")
+    assert rc == 0, doc
+    native = tmp_path / "msb-home/.microsandbox"
+    jobs_before = _jobs(tmp_path, "fresh")
+    assert jobs_before
+    mounts = json.loads((native / "mounts.json").read_text())
+    host_config = next(m for m in mounts["fresh"] if m["guest"] == security.HOST_CONFIG_GUEST_DIR)
+    assert host_config["options"]["readonly"] is True
+    if change == "generation-writable":
+        generation = next(m for m in mounts["fresh"] if Path(m["host"]).name.startswith("generation."))
+        assert generation["options"]["readonly"] is True
+        generation["options"]["readonly"] = False
+        (native / "mounts.json").write_text(json.dumps(mounts))
+    else:
+        bindings = json.loads((native / "secrets.json").read_text())
+        del bindings["fresh"]["USAI_API_KEY"]
+        (native / "secrets.json").write_text(json.dumps(bindings))
+    # The established host-config gate must still pass: otherwise it hides the
+    # fresh generation/binding check this negative is intended to exercise.
+    assert security.mount_check("msb", "fresh")[0] == "ok"
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid fresh inputs reached another preparation attempt")
+
+    monkeypatch.setattr(msb_preparation, "run_preparation", forbidden)
+    rc, doc = _invoke(capsys, "--backend", "msb", "run", "fresh", "--json")
+    assert rc == 1, doc
+    assert "error" in doc and "data" not in doc
+    assert _jobs(tmp_path, "fresh") == jobs_before
+    assert not any(job["status"]["command"][3].startswith("acq-launch-") for job in jobs_before)
+
+
+def test_public_fresh_create_refuses_preinstalled_validator_failure(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path, fresh=True)
+    validator = Path(os.environ["ACQ_PROVIDER_INPUT_PYTHON"])
+    validator.write_text(f"#!{sys.executable}\nraise SystemExit(2)\n", encoding="utf-8")
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    rc, doc = _invoke(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "failed", "--json")
+    assert rc == 1
+    assert doc["error"]["code"] == "validation_failed"
+    assert "data" not in doc
+    assert not cli.msb.exists("failed")
+    assert state.record_read("msb", "failed") is None
+    assert _jobs(tmp_path, "failed") == []
+
+
+def test_public_fresh_create_refuses_bundle_validation_after_successful_probe(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path, fresh=True)
+    validator = Path(os.environ["ACQ_PROVIDER_INPUT_PYTHON"])
+    calls = tmp_path / "validator-calls.jsonl"
+    validator.write_text(f"#!{sys.executable}\n" + f'''import json
+import sys
+from pathlib import Path
+args = sys.argv[1:]
+with Path({str(calls)!r}).open("a", encoding="utf-8") as stream:
+    stream.write(json.dumps(args) + "\\n")
+assert args[0] == "-I"
+if args[1] == "-c":
+    raise SystemExit(0)
+assert "--bundle" in args
+raise SystemExit(2)
+''', encoding="utf-8")
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    rc, doc = _invoke(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "failed", "--json")
+    assert rc == 1, doc
+    assert doc["error"]["code"] == "validation_failed"
+    assert "data" not in doc
+    recorded = [json.loads(line) for line in calls.read_text(encoding="utf-8").splitlines()]
+    assert len(recorded) == 2
+    assert recorded[0][:2] == ["-I", "-c"]
+    assert recorded[1][0] == "-I" and recorded[1][1] != "-c"
+    assert recorded[1].count("--bundle") == 1
+    assert "--schema-dir" in recorded[1] and "--credential-bindings" in recorded[1]
+    assert not cli.msb.exists("failed")
+    assert state.record_read("msb", "failed") is None
+    assert _jobs(tmp_path, "failed") == []
+
+
+@pytest.mark.parametrize("verb", ["start", "restart"])
+@pytest.mark.parametrize("success", [True, False])
+def test_fresh_start_and_restart_require_new_preparation(monkeypatch, tmp_path, capsys, verb, success):
+    _env(monkeypatch, tmp_path, fresh=True)
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    rc, doc = _invoke(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "fresh", "--json")
+    assert rc == 0, doc
+    assert _invoke(capsys, "--backend", "msb", "stop", "fresh", "--json")[0] == 0
+    before = _jobs(tmp_path, "fresh")
+    if not success:
+        monkeypatch.setenv("ACQ_MSB_STUB_PREPARATION_STDOUT", '{"sourceOutcome":"snapshot","metadataOutcome":"not-requested"}')
+    rc, doc = _invoke(capsys, "--backend", "msb", verb, "fresh", "--json")
+    assert rc == (0 if success else 1), doc
+    assert ("data" in doc) is success
+    assert ("error" in doc) is not success
+    after = _jobs(tmp_path, "fresh")
+    assert len(after) == len(before) + 1
+    assert after[-1]["status"]["command"][3] == "acq-preparation"
+    assert after[-1]["status"]["id"] not in {job["status"]["id"] for job in before}
+    assert not any(job["status"]["command"][3].startswith("acq-launch-") for job in after)
+
+
+def test_fresh_old_managed_job_version_is_not_silently_upgraded(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path, fresh=True)
+    # Enough for legacy read-only mounts, but not the qualified managed API.
+    monkeypatch.setenv("ACQ_MSB_VERSION", "0.7.11")
+    monkeypatch.setenv("ACQ_MSB_STUB_VERSION", "0.7.11")
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    rc, doc = _invoke(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "old", "--json")
+    assert rc == 1, doc
+    assert "error" in doc and "data" not in doc
+    assert _jobs(tmp_path, "old") == []

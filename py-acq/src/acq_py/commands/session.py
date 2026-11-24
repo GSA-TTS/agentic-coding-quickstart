@@ -14,6 +14,7 @@ from .. import (
     backends,
     envelope,
     errors,
+    fresh_launch,
     gitrepos,
     hostexec,
     kit_msb,
@@ -184,6 +185,8 @@ def run_exec(parsed, emit_json: bool, backend: str) -> int:
             f"recreate the sandbox with 'acq create', or remove it with 'acq rm {name}'",
             emit_json,
         )
+    if backend == "msb" and (record or {}).get("agent") == "opencode":
+        return fresh_attach(name, emit_json, command="exec", guest_command=command)
     gate = common._trusted_gate(record, backend, "exec", name, emit_json)
     if gate is not None:
         return gate
@@ -233,6 +236,8 @@ def run_attach(parsed, emit_json: bool, backend: str) -> int:
             f"create it with 'acq create', or remove it with 'acq rm {name}'",
             emit_json,
         )
+    if backend == "msb" and record.get("agent") == "opencode":
+        return fresh_attach(name, emit_json, agent_args=getattr(parsed, "agent_args", []))
     gate = common._trusted_gate(record, backend, "attach", name, emit_json)
     if gate is not None:
         return gate
@@ -280,6 +285,8 @@ def run_shell(parsed, emit_json: bool, backend: str) -> int:
             f"recreate the sandbox with 'acq create', or remove it with 'acq rm {name}'",
             emit_json,
         )
+    if backend == "msb" and (record or {}).get("agent") == "opencode":
+        return fresh_attach(name, emit_json, command="shell")
     gate = common._trusted_gate(record, backend, "shell", name, emit_json)
     if gate is not None:
         return gate
@@ -287,6 +294,55 @@ def run_shell(parsed, emit_json: bool, backend: str) -> int:
     rc = adapter.launch(name, workspace, "shell", json_mode=emit_json, env=prepare_session(backend, name, record))
     if emit_json:
         print(json.dumps(envelope.success("shell", {"name": name, "backend": backend, "exit_code": rc})))
+    return rc
+
+
+def fresh_attach(name: str, emit_json: bool, *, command: str = "attach", agent_args=None,
+                 guest_command: list[str] | None = None) -> int:
+    """The supported foreground terminal path; acknowledge under lock, wait outside."""
+    with fresh_launch.own_launch(name) as ownership:
+        return _fresh_attach_owned(name, emit_json, ownership, command=command, agent_args=agent_args,
+                                    guest_command=guest_command)
+
+
+def _fresh_attach_owned(name: str, emit_json: bool, ownership: fresh_launch.LaunchOwnership,
+                        *, command: str, agent_args=None, guest_command: list[str] | None = None) -> int:
+    try:
+        with lock.sandbox_lock("msb", name):
+            record = state.record_read("msb", name)
+            if record is None or record.get("agent") != "opencode":
+                raise fresh_launch.terminal_refusal()
+            # Preserve the established security-exception diagnostic before a
+            # legacy record's absent image can trigger profile refusal. Both
+            # gates remain ahead of session setup and preparation effects.
+            gate = common._trusted_gate(record, "msb", command, name, emit_json)
+            if gate is not None:
+                return gate
+            fresh_launch.existing_profile(name, record)
+            if agent_args:
+                raise fresh_launch.terminal_refusal()
+            overlap = common._recorded_workspaces_failure(command, record, emit_json)
+            if overlap is not None:
+                return overlap
+            payload = [msb.agent_shell(name), "-l"] if command == "shell" else guest_command
+            workspace = record.get("workspace") or common.DEFAULT_GUEST_WORKSPACE
+            proc = fresh_launch.admit_locked(name, workspace,
+                                              prepare_session("msb", name, record), json_mode=emit_json,
+                                              ownership=ownership, guest_command=payload,
+                                              tty=False if command == "exec" else None)
+    except (msb.MsbError, state.StateSchemaError, lock.SandboxLockTimeout) as exc:
+        fallback = errors.STATE_SCHEMA_UNSUPPORTED if isinstance(exc, state.StateSchemaError) else errors.VALIDATION_FAILED
+        return common._operational_failure(command, getattr(exc, "code", fallback),
+                                           getattr(exc, "message", str(exc)),
+                                           getattr(exc, "remediation", "retry after verifying the sandbox"), emit_json)
+    rc = fresh_launch.wait_admitted(proc)
+    if emit_json:
+        data = {"name": name, "backend": "msb", "agent": "opencode", "exit_code": rc}
+        if command == "exec":
+            data = {"name": name, "exit_code": rc}
+        elif command == "shell":
+            data = {"name": name, "backend": "msb", "exit_code": rc}
+        print(json.dumps(envelope.success(command, data)))
     return rc
 
 

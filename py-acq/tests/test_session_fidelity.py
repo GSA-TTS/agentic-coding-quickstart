@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import select
+import shlex
 import signal
 import subprocess
 import sys
@@ -28,6 +29,7 @@ from pathlib import Path
 import pytest
 
 from acq_py import hostexec, msb, sbx, state
+from fresh_fixture import fresh_fixture, jobs, trusted_fresh_root as trusted_fresh_root
 
 posix_only = pytest.mark.skipif(sys.platform == "win32", reason="POSIX terminals and signals")
 
@@ -36,11 +38,44 @@ import json, os, signal, sys, time
 
 args = sys.argv[1:]
 log = os.environ["FAKE_LOG"]
+final_code = 0
 
 
 def record(**fields):
     with open(log, "a", encoding="utf-8") as handle:
         handle.write(json.dumps({"argv": args, **fields}) + "\n")
+
+
+if os.environ.get("ACQ_MSB_STUB_FRESH") == "1":
+    from acq_py import _stub_msb
+    import contextlib, io
+    command = args[args.index("--") + 1:] if "--" in args else []
+    foreground = len(command) > 3 and command[3].startswith("acq-launch-")
+    if foreground:
+        # Register a real fixture job for the production acknowledgment loop,
+        # then model foreground stdio/signals below, not a detached guest tool.
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = _stub_msb.main(["msb", *args])
+        if rc:
+            sys.exit(rc)
+        if os.environ.get("FAKE_MODE"):
+            records = _stub_msb._fixture_read("fresh-jobs")
+            entry = list(records["box"].values())[-1]["status"]
+            entry.update(state="running", exit_code=None, finished_at=None, pid=os.getpid())
+            _stub_msb._fixture_write("fresh-jobs", records)
+            import atexit
+            job_id = entry["id"]
+
+            def finished():
+                records = _stub_msb._fixture_read("fresh-jobs")
+                records["box"][job_id]["status"].update(state="exited", exit_code=final_code, finished_at=2)
+                _stub_msb._fixture_write("fresh-jobs", records)
+
+            atexit.register(finished)
+    elif not (args[:1] == ["exec"] and "getent passwd agent" in " ".join(args)):
+        if any("git config --global" in token for token in args):
+            record(tty=os.isatty(0))
+        sys.exit(_stub_msb.main(["msb", *args]))
 
 
 if args[:1] == ["--version"]:
@@ -70,8 +105,10 @@ elif args[:1] == ["exec"]:
         time.sleep(5)
     if mode == "trap-term":
         def on_end(signum, _frame):
+            global final_code
             time.sleep(0.5)  # a short cleanup: acq must still be waiting when it finishes
             record(event="ended", signum=signum)
+            final_code = 9
             sys.exit(9)
 
         signal.signal(signal.SIGTERM, on_end)
@@ -79,23 +116,28 @@ elif args[:1] == ["exec"]:
         record(event="ready", pid=os.getpid())
         time.sleep(20)
         record(event="timed-out")
+        final_code = 3
         sys.exit(3)
     if mode == "die-on-int":
         signal.signal(signal.SIGINT, signal.SIG_DFL)
         record(event="ready", pid=os.getpid())
         time.sleep(20)
+        final_code = 3
         sys.exit(3)
     if mode == "trap":
         def on_interrupt(_signum, _frame):
+            global final_code
             # Take a while to clean up: a parent that SIGKILLs on Ctrl-C (after
             # subprocess.run's 0.25 s grace) never sees "cleaned-up".
             time.sleep(1.0)
             record(event="cleaned-up")
+            final_code = 7
             sys.exit(7)
 
         signal.signal(signal.SIGINT, on_interrupt)
         record(event="ready")
         time.sleep(20)
+        final_code = 3
         sys.exit(3)
 else:
     sys.exit(0)
@@ -124,6 +166,36 @@ def fake(tmp_path, monkeypatch):
         return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
 
     return entries
+
+
+@pytest.fixture
+def fresh_fake(fake, monkeypatch, tmp_path, trusted_fresh_root, capsys):
+    """Actual public create plus real admission/transport, synthetic guest only."""
+    from acq_py import cli, secretstore
+
+    monkeypatch.setenv("MSB_HOME", str(tmp_path / "msb-home"))
+    monkeypatch.setenv("ACQ_MSB_INSTALLED", "1")
+    monkeypatch.setenv("ACQ_SBX_INSTALLED", "0")
+    fresh_fixture(monkeypatch, tmp_path, real_ancestors=True)
+    secretstore.set_secret("usai", None, "test-usai-key-not-a-secret")
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    rc = cli.main(["--backend", "msb", "create", "opencode", str(ws), "--name", "box", "--json"])
+    captured = capsys.readouterr()
+    assert rc == 0, captured.out + captured.err
+    assert len(jobs("box")) == 1
+    Path(os.environ["FAKE_LOG"]).write_text("", encoding="utf-8")
+    return fake
+
+
+@pytest.fixture(params=["legacy", "fresh-attach", "fresh-exec", "fresh-shell"])
+def session_profile(request):
+    """Exercise unchanged exec and fresh admission with identical signal rules."""
+    if request.param.startswith("fresh-"):
+        verb = request.param.removeprefix("fresh-")
+        command = [verb, "box", "--", "agent"] if verb == "exec" else [verb, "box"]
+        return request.getfixturevalue("fresh_fake"), command
+    return request.getfixturevalue("fake"), ["exec", "box", "--", "agent"]
 
 
 def _is_git_config_exec(entry: dict) -> bool:
@@ -213,7 +285,10 @@ def _run_no_tty(argv: list[str]) -> subprocess.CompletedProcess:
     )
 
 
-def _record(backend: str, *, agent: str = "opencode", ssh_auth_sock: str | None = None) -> None:
+def _record(backend: str, *, agent: str | None = None, ssh_auth_sock: str | None = None) -> None:
+    # Generic exec/shell fidelity uses a legacy shell profile on MSB. Fresh
+    # OpenCode must prepare before these verbs and is exercised by fresh_fake.
+    agent = agent or ("shell" if backend == "msb" else "opencode")
     state.record_write(backend, "box", agent=agent, workspace="/work")
     if ssh_auth_sock is not None:
         path = state.record_path(backend, "box")
@@ -552,13 +627,14 @@ def test_child_killed_by_sigterm_gives_143(fake, monkeypatch, backend):
 
 
 @posix_only
-def test_ctrl_c_reaches_the_child_and_is_not_turned_into_sigkill(fake, monkeypatch, tmp_path):
+def test_ctrl_c_reaches_the_child_and_is_not_turned_into_sigkill(session_profile, monkeypatch, tmp_path):
+    fake, command = session_profile
     monkeypatch.setenv("FAKE_MODE", "trap")
 
     def child_ready() -> bool:
         return any(e.get("event") == "ready" for e in fake())
 
-    rc, out = _run_in_pty(_acq("--backend", "msb", "exec", "box", "--", "agent"), interrupt_when=child_ready)
+    rc, out = _run_in_pty(_acq("--backend", "msb", *command), interrupt_when=child_ready)
     events = [e.get("event") for e in fake()]
     # The child handled SIGINT itself, finished its cleanup and chose its status.
     assert "cleaned-up" in events, out
@@ -611,7 +687,8 @@ def test_exec_never_gets_a_pty_even_with_a_terminal(fake, monkeypatch):
 
 
 @posix_only
-def test_ctrl_c_in_a_shell_loop_stops_the_loop(fake, monkeypatch):
+def test_ctrl_c_in_a_shell_loop_stops_the_loop(session_profile, monkeypatch):
+    fake, command = session_profile
     # The child dies of SIGINT, so acq must die of SIGINT too: a calling shell
     # that also got the interrupt then stops its loop. An ordinary exit 130
     # tells the shell the child handled it, and the loop would carry on.
@@ -621,7 +698,7 @@ def test_ctrl_c_in_a_shell_loop_stops_the_loop(fake, monkeypatch):
     monkeypatch.setenv("FAKE_MODE", "die-on-int")
     monkeypatch.setenv("FAKE_PY", sys.executable)
     script = (
-        'for i in 1 2; do "$FAKE_PY" -m acq_py --backend msb exec box -- agent; echo "after $?"; done; '
+        'for i in 1 2; do "$FAKE_PY" -m acq_py --backend msb ' + shlex.join(command) + '; echo "after $?"; done; '
         "echo finished"
     )
 
@@ -646,13 +723,13 @@ def _pid_alive(pid: int) -> bool:
 
 @posix_only
 @pytest.mark.parametrize("name", ["SIGTERM", "SIGHUP"])
-def test_a_signal_for_acq_alone_ends_the_session_child_before_acq_exits(fake, monkeypatch, name):
+def test_a_signal_for_acq_alone_ends_the_session_child_before_acq_exits(session_profile, monkeypatch, name):
+    fake, command = session_profile
     # kill <acq pid> during a session: acq passes the signal on, waits for the
     # child, then exits 128+N; the child no longer runs or holds the terminal.
     sig = getattr(signal, name)
     monkeypatch.setenv("FAKE_MODE", "trap-term")
-    _record("msb")
-    proc = subprocess.Popen(_acq("--backend", "msb", "--json", "exec", "box", "--", "agent"),
+    proc = subprocess.Popen(_acq("--backend", "msb", "--json", *command),
                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         deadline = time.monotonic() + 20
@@ -893,12 +970,13 @@ def test_guest_command_flags_before_separator_still_pass_through(monkeypatch, tm
 
 
 @posix_only
-def test_sigint_aimed_only_at_the_child_gives_130_with_the_envelope(fake, monkeypatch):
+def test_sigint_aimed_only_at_the_child_gives_130_with_the_envelope(session_profile, monkeypatch):
+    fake, command = session_profile
     # acq itself was not interrupted, so it must not die of SIGINT: it reports
     # the child's 130 and, under --json, still prints its one envelope.
     monkeypatch.setenv("FAKE_MODE", "die-on-int")
     acq = subprocess.Popen(
-        _acq("--backend", "msb", "--json", "exec", "box", "--", "agent"),
+        _acq("--backend", "msb", "--json", *command),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -918,3 +996,136 @@ def test_sigint_aimed_only_at_the_child_gives_130_with_the_envelope(fake, monkey
             acq.kill()
     assert acq.returncode == 130, err
     assert json.loads(out)["data"]["exit_code"] == 130
+
+
+@posix_only
+@pytest.mark.parametrize("tty", [False, True])
+def test_fresh_attach_preserves_terminal_and_identity(fresh_fake, monkeypatch, tty):
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setenv("COLORTERM", "truecolor")
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "Ada Lovelace")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "ada@example.gov")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "bad\nvalue")
+    monkeypatch.setenv("EMAIL", "ada@example.gov")
+    before = len(jobs("box"))
+    if tty:
+        rc, output = _run_in_pty(_acq("--backend", "msb", "attach", "box"))
+    else:
+        proc = _run_no_tty(["--backend", "msb", "attach", "box"])
+        rc, output = proc.returncode, proc.stderr
+    assert rc == 0, output
+    [session] = _sessions(fresh_fake())
+    argv = session["argv"]
+    assert session["tty"] is tty
+    assert argv[:2] == ["exec", "--tty" if tty else "--no-tty"]
+    env = _env_flags(argv)
+    assert env["GIT_AUTHOR_NAME"] == "Ada Lovelace"
+    assert env["GIT_COMMITTER_EMAIL"] == "ada@example.gov"
+    assert env["EMAIL"] == "ada@example.gov" and "GIT_AUTHOR_EMAIL" not in env
+    assert env["HOME"] == "/home/agent" and env["SHELL"] == "/bin/bash"
+    assert (env.get("TERM"), env.get("COLORTERM")) == (("xterm-256color", "truecolor") if tty else (None, None))
+    assert env["SSL_CERT_FILE"] == env["NODE_EXTRA_CA_CERTS"]
+    assert env["NODE_TLS_REJECT_UNAUTHORIZED"] == "1"
+    command = argv[argv.index("--") + 1:]
+    assert command[:3] == ["/bin/sh", "-c", 'exec "$@"']
+    assert command[3].startswith("acq-launch-")
+    assert command[4:] == ["/usr/local/bin/opencode", "--standalone"]
+    assert len(jobs("box")) == before + 2
+
+
+@posix_only
+def test_fresh_attach_only_forwards_recorded_safe_ssh_socket(fresh_fake, monkeypatch):
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/host-agent.sock")
+    path = state.record_path("msb", "box")
+    original = json.loads(path.read_text())
+    for sock in (None, "/home/agent/.acq/ssh-agent.sock", "/home/agent/x;rm -rf ~"):
+        record = dict(original)
+        if sock is not None:
+            record["ssh_auth_sock"] = sock
+        path.write_text(json.dumps(record))
+        proc = _run_no_tty(["--backend", "msb", "attach", "box"])
+        assert proc.returncode == 0, proc.stderr
+    without, forwarded, unsafe = (_env_flags(s["argv"]) for s in _sessions(fresh_fake()))
+    assert "SSH_AUTH_SOCK" not in without and "SSH_AUTH_SOCK" not in unsafe
+    assert forwarded["SSH_AUTH_SOCK"] == "/home/agent/.acq/ssh-agent.sock"
+
+
+@posix_only
+def test_legacy_exec_keeps_opaque_guest_argv(fake):
+    _record("msb", agent="shell")
+    command = ["printf", "%s", "space value", "$(not-a-command)", "--json", "a;b", ""]
+    proc = _run_no_tty(["--backend", "msb", "exec", "box", "--", *command])
+    assert proc.returncode == 0, proc.stderr
+    [session] = _sessions(fake())
+    assert session["argv"][session["argv"].index("--") + 1:] == command
+
+
+@posix_only
+@pytest.mark.parametrize("command", [["run", "box", "--", "serve"],
+                                     ["run", "opencode", "--name", "box", "--", "serve"]])
+def test_fresh_profile_refuses_agent_arguments_before_jobs(fresh_fake, command):
+    before = jobs("box")
+    proc = _run_no_tty(["--backend", "msb", "--json", *command])
+    assert proc.returncode == 1, proc.stderr
+    assert json.loads(proc.stdout)["error"]["code"] == "unsupported_capability"
+    assert jobs("box") == before
+    assert _sessions(fresh_fake()) == []
+
+
+@posix_only
+@pytest.mark.parametrize("verb", ["exec", "shell"])
+def test_fresh_exec_and_shell_prepare_before_preserving_guest_command(fresh_fake, monkeypatch, verb):
+    monkeypatch.setenv("TERM", "xterm-256color")
+    command = ["printf", "%s", "space value", "$(not-a-command)", "--json", "a;b", ""]
+    args = [verb, "box", "--", *command] if verb == "exec" else [verb, "box"]
+    before = len(jobs("box"))
+    rc, output = _run_in_pty(_acq("--backend", "msb", *args))
+    assert rc == 0, output
+    [session] = _sessions(fresh_fake())
+    argv = session["argv"]
+    guest = argv[argv.index("--") + 1:]
+    assert guest[:3] == ["/bin/sh", "-c", 'exec "$@"']
+    assert guest[4:] == (command if verb == "exec" else ["/bin/bash", "-l"])
+    assert argv[:2] == ["exec", "--no-tty" if verb == "exec" else "--tty"]
+    assert ("TERM" in _env_flags(argv)) is (verb == "shell")
+    new = jobs("box")[before:]
+    assert len(new) == 2
+    assert new[0]["status"]["command"][3] == "acq-preparation"
+    assert new[1]["status"]["command"] == guest
+
+
+@posix_only
+@pytest.mark.parametrize("verb", ["exec", "shell", "attach"])
+def test_fresh_session_keeps_kit_environment_after_admission(fresh_fake, monkeypatch, verb):
+    monkeypatch.setenv("EMAIL", "ada@example.gov")
+    _persist_kit_env(["FIXTURE_VALUE=first", "BAD-NAME=x", "XDG_X=1", "FIXTURE_VALUE=last"])
+    command = [verb, "box", "--", "true"] if verb == "exec" else [verb, "box"]
+    proc = _run_no_tty(["--backend", "msb", *command])
+    assert proc.returncode == 0, proc.stderr
+    [session] = _sessions(fresh_fake())
+    pairs = _env_pairs(session["argv"])
+    assert "FIXTURE_VALUE=last" in pairs and "FIXTURE_VALUE=first" not in pairs
+    assert not any(pair.startswith("BAD-NAME") for pair in pairs)
+    assert pairs.index("FIXTURE_VALUE=last") < pairs.index("XDG_X=1")
+    assert "EMAIL=ada@example.gov" in pairs
+
+
+@posix_only
+@pytest.mark.parametrize("verb", ["exec", "shell", "attach"])
+def test_fresh_session_failure_cannot_bypass_preparation(fresh_fake, monkeypatch, verb):
+    monkeypatch.setenv("ACQ_MSB_STUB_PREPARATION_STDOUT", '{"sourceOutcome":"snapshot","metadataOutcome":"not-requested"}')
+    command = [verb, "box", "--", "true"] if verb == "exec" else [verb, "box"]
+    before = len(jobs("box"))
+    proc = _run_no_tty(["--backend", "msb", "--json", *command])
+    assert proc.returncode == 1, proc.stderr
+    assert json.loads(proc.stdout)["error"]["code"] == "validation_failed"
+    assert len(jobs("box")) == before + 1
+    assert _sessions(fresh_fake()) == []
+
+
+@posix_only
+def test_fresh_child_killed_by_sigterm_gives_143(fresh_fake, monkeypatch):
+    monkeypatch.setenv("FAKE_MODE", "sigterm")
+    proc = _run_no_tty(["--backend", "msb", "--json", "attach", "box"])
+    assert proc.returncode == 143, proc.stderr
+    assert json.loads(proc.stdout)["data"]["exit_code"] == 143

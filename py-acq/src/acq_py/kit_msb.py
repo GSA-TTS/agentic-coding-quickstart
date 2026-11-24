@@ -35,7 +35,7 @@ import stat
 import sys
 import tempfile
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from . import (
@@ -66,7 +66,7 @@ _KEY = re.compile(r"[A-Za-z0-9._-]+")
 # guest is created under a name, so a stale marker from a sandbox removed outside
 # acq never suppresses an install (Bash acq_host_config_clear_instance_state).
 _INSTANCE_KEYS = ("agent-user-ready", "workspace", "ssh-auth-sock", "generic-opencode",
-                  "extra-kits", "builtin-kits", "ro-host-config")
+                  "extra-kits", "builtin-kits", "ro-host-config", "fresh-quarantine")
 _INSTANCE_PREFIXES = ("install-", "agent-installed-")
 
 
@@ -189,7 +189,62 @@ def select(agent: str, cli_kits: list[str], *, image_is_default: bool, extras: l
     See :func:`selection_for` for how ``extras`` decides between a new and an
     existing sandbox. Raises :class:`kitspec.KitSelectionError` or :class:`msb.MsbError`.
     """
-    return resolve(selection_for(agent, cli_kits, image_is_default=image_is_default, extras=extras))
+    selection = selection_for(agent, cli_kits, image_is_default=image_is_default, extras=extras)
+    if agent == "opencode":
+        require_fresh_profile(selection, image_is_default=image_is_default)
+    resolved = resolve(selection)
+    return fresh_commands(resolved) if agent == "opencode" else resolved
+
+
+_FRESH_PROFILE = (
+    ("zscaler-ca-certificate", "support"), ("usai-provider", "provider"),
+    ("agentic-coding-playbook", "support"), ("git-ssh-sign", "support"),
+    ("opencode", "agent"),
+)
+_FRESH_NONE_PROFILE = tuple(entry for entry in _FRESH_PROFILE if entry[1] != "provider")
+_LEGACY_RENDERER = (
+    "node", "/home/agent/opencode-config/render-provider-config.mjs",
+    "--global-dir", "/home/agent/.config/opencode", "--base-config",
+    "/home/agent/opencode-config/base-config.jsonc",
+)
+
+
+def require_fresh_profile(selection: kitspec.KitSelection, *, image_is_default: bool) -> None:
+    """Refuse custom/daemon/team OpenCode selections before resolving or fetching.
+
+    The exact plain packaged selection is the only fresh-preparation profile.
+    Other agents and the SBX selector are deliberately not changed.
+    """
+    actual = tuple((entry.bundled, entry.role) for entry in selection.kits)
+    if (WINDOWS or not image_is_default or actual not in (_FRESH_PROFILE, _FRESH_NONE_PROFILE)
+            or any(entry.ref != kitspec.builtin_kit_ref(entry.bundled or "")
+                   for entry in selection.kits)):
+        raise msb.MsbError(errors.UNSUPPORTED,
+                           "fresh preparation supports only the plain packaged OpenCode MSB profile with USAi or no provider kits",
+                           "use the default image and packaged selection without extra or custom kits")
+
+
+def fresh_commands(selected: list[Kit]) -> list[Kit]:
+    """Remove exactly the verified competing renderer, never mutate bundle/specs."""
+    result = []
+    for kit in selected:
+        if kit.name != "opencode":
+            result.append(kit)
+            continue
+        renderer = [cmd for cmd in kit.spec.commands if cmd.argv == _LEGACY_RENDERER]
+        if len(renderer) != 1 or renderer[0].phase != "startup" or renderer[0].background:
+            raise msb.MsbError(errors.VALIDATION_FAILED, "packaged OpenCode renderer shape changed",
+                               "review the installed bundle before preparing this profile")
+        spec = replace(kit.spec, commands=tuple(cmd for cmd in kit.spec.commands if cmd not in renderer))
+        result.append(replace(kit, spec=spec))
+    return result
+
+
+def is_fresh_profile(selected: list[Kit]) -> bool:
+    """Recognize only the exact in-memory adapted selection, not another agent's CLI kit."""
+    return (tuple((kit.name, kit.role) for kit in selected) in (_FRESH_PROFILE, _FRESH_NONE_PROFILE)
+            and all(cmd.argv != _LEGACY_RENDERER for kit in selected if kit.name == "opencode"
+                    for cmd in kit.spec.commands))
 
 
 # ---------------------------------------------------------------------------
@@ -299,6 +354,7 @@ def hc_append(name: str, key: str, line: str) -> bool:
 
 def clear_instance_state(name: str) -> None:
     """Drop the keys that describe a previous guest of the same name."""
+    _remove_launch_attempts(name)
     root = security.host_config_dir(name)
     if not root.is_dir():
         return
@@ -316,11 +372,21 @@ def remove_host_config(name: str) -> None:
     Best-effort. The directory is acq's own (its name is derived from the
     sandbox name), so removing it never follows a symlink out of the state tree.
     """
+    _remove_launch_attempts(name)
     path = security.host_config_dir(name)
     if path.is_symlink():
         path.unlink(missing_ok=True)
     elif path.is_dir():
         shutil.rmtree(path, ignore_errors=True)
+
+
+def _remove_launch_attempts(name: str) -> None:
+    """Only lifecycle replacement/removal retires abandoned foreground attempts."""
+    path = security.host_config_dir(name).with_suffix(".fresh-launches")
+    if path.is_symlink():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
 
 
 def mount_flags(name: str) -> list[str]:
@@ -776,6 +842,10 @@ def apply_single(name: str, kit: Kit, *, ro_required: bool) -> bool:
     layered last. Raises :class:`KitApplyFailed` or :class:`msb.MsbError` like
     :func:`apply_kit`.
     """
+    record = state.record_read("msb", name)
+    if (record or {}).get("agent") == "opencode":
+        raise msb.MsbError(errors.UNSUPPORTED, "single-kit apply is unsupported for the fresh OpenCode profile",
+                           "use lifecycle preparation rather than replacing configuration during a session")
     if kit.spec.volumes:
         print("acq(msb): note: this kit declares volumes:, which apply at CREATE time only;", file=sys.stderr)
         print("acq(msb):   this apply skips them. Recreate the sandbox (acq rm && acq run) to mount them.",
@@ -897,6 +967,9 @@ def ensure_kits_applied(name: str, kits: list[Kit], *, ro_required: bool, force:
     is rebuilt from the current kits only. ``ssh_auth_sock`` is the forwarded
     agent's guest socket while the forward is wired (see :func:`exec_flags`).
     """
+    if force and is_fresh_profile(kits):
+        _warn("kit update is unsupported for the fresh OpenCode profile; no guest files or configuration were changed")
+        return ApplyResult(incomplete=[kit.name for kit in kits])
     result = ApplyResult(agent_user=ensure_agent_user(name))
     merged = merge_env(kits)
     hc_clear(name, "kit-env")

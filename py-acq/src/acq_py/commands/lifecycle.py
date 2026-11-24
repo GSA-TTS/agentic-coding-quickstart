@@ -23,6 +23,8 @@ from pathlib import Path
 from .. import (
     envelope,
     errors,
+    fresh_inputs,
+    fresh_launch,
     kit_msb,
     kit_sbx,
     kits,
@@ -297,6 +299,13 @@ def _apply_msb_kits(
             command, errors.FAILURE, f"could not apply kit '{plan.agent_kit}' to sandbox '{name}'",
             "check network access from the sandbox and the warnings above, then retry", emit_json,
         )
+    if kit_msb.is_fresh_profile(plan.kits):
+        try:
+            if set(result.incomplete) & {"opencode", "usai-provider", "zscaler-ca-certificate"}:
+                raise msb.MsbError(errors.FAILURE, "fresh profile kit application is incomplete", "repair the kits before retrying")
+            fresh_launch.prepare_locked(name)
+        except msb.MsbError as exc:
+            return None, common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
     # The forwarded host ssh-agent's in-guest bridge, once the kits are in (ADR-0021).
     ssh_agent.provision_bridge(name)
     try:
@@ -1052,6 +1061,9 @@ def _provider_prepare(name: str, kit_set: list[kit_msb.Kit], *, ro_mount: bool):
         facts = [f for _kit, _manifest, f in selected]
         provider_input.record_write("msb", name, facts)
         if not ro_mount:
+            if kit_msb.is_fresh_profile(kit_set):
+                raise msb.MsbError(errors.UNSUPPORTED, "fresh OpenCode preparation requires read-only mounts",
+                                   "use a supported POSIX MSB with read-only mounts")
             # Only an old msb is worth a warning (upgrading fixes it). On Windows
             # the mount is never requested, a documented platform limit
             # (KNOWN_FAILURE_MODES section 54), so every create would warn.
@@ -1059,6 +1071,8 @@ def _provider_prepare(name: str, kit_set: list[kit_msb.Kit], *, ro_mount: bool):
                 print("acq: warning: provider input is not mounted without the read-only host-config mount; "
                       "OpenCode keeps its existing provider config", file=sys.stderr)
             return None
+        if kit_msb.is_fresh_profile(kit_set):
+            return fresh_inputs.prepare(name, usai=any(kit.role == "provider" for kit in kit_set)).generation
         return provider_input.prepare("msb", name, selected)
     except provider_input.ProviderInputError as exc:
         raise msb.MsbError(exc.code, exc.message, exc.remediation) from exc
@@ -1249,6 +1263,11 @@ def _run_create(parsed, emit_json: bool, backend: str) -> int:
     workspace = common._mount_workspace(backend, workspace)
     stored_token = False
     if not _exists_quietly(backend, name):  # an existing sandbox is refused below; no prompt for it
+        if backend == "msb" and parsed.agent == "opencode":
+            exit_code = _preflight_new(backend, parsed.agent, cli_kits, parsed.image, "create", emit_json,
+                                       opts.extra_refs())
+            if exit_code is not None:
+                return exit_code
         opts, exit_code = _onboarding(backend, opts, emit_json)
         if opts is None:
             return exit_code if exit_code is not None else errors.EXIT_FAILURE
@@ -1449,6 +1468,14 @@ def run_recreate(parsed, emit_json: bool, backend: str) -> int:
                 print("cancelled.")
             return errors.EXIT_SUCCESS
     if backend == "msb" and record.get("workspace"):
+        overlap = common._recorded_workspaces_failure("create", record, emit_json)
+        if overlap is not None:
+            return overlap
+        if record.get("agent") == "opencode":
+            try:
+                fresh_launch.existing_profile(name, record)
+            except msb.MsbError as exc:
+                return common._operational_failure("create", exc.code, exc.message, exc.remediation, emit_json)
         # The new guest binds its secrets at create; the prompt runs before the lock.
         _scope_advice(backend, name, common._mount_workspace(backend, record["workspace"]), emit_json)
     try:
@@ -1709,6 +1736,15 @@ def _run_prepare_locked(
     if found is None:
         return None, exit_code
     record, recorded = found
+    # Recheck under the transaction lock: a typed agent must not bypass the
+    # recorded OpenCode profile after a concurrent replacement of the instance.
+    if backend == "msb" and record is not None and record.get("agent") == "opencode":
+        if target != "opencode" or parsed.kit or opts.publish or opts.extras:
+            exc = fresh_launch.terminal_refusal()
+            return None, common._operational_failure("run", exc.code, exc.message, exc.remediation, emit_json)
+        fresh_launch.existing_profile(name, record)
+        return {"name": name, "backend": backend, "agent": "opencode", "workspace": recorded,
+                "state": "running", "action": "reattached", "entrypoint": "opencode"}, None
     if parsed.image or os.environ.get("ACQ_IMAGE"):
         print("acq: note: --image/ACQ_IMAGE is ignored when re-attaching an existing "
               f"sandbox ('{name}'); it applies only at create (ADR-0022). Remove the "
@@ -1741,6 +1777,20 @@ def run_run(parsed, emit_json: bool, backend: str) -> int:
 
 
 def _run_run(parsed, emit_json: bool, backend: str) -> int:
+    # Ownership spans post-admission lock release and every handoff statement,
+    # not just wait(): parent-only termination must not orphan an admitted job.
+    try:
+        with contextlib.ExitStack() as launches:
+            return _run_run_owned(parsed, emit_json, backend, launches)
+    except state.StateSchemaError as exc:
+        return common._operational_failure("run", errors.STATE_SCHEMA_UNSUPPORTED, str(exc),
+                                           "recreate or remove the unreadable sandbox record", emit_json)
+    except lock.SandboxLockTimeout as exc:
+        name = getattr(parsed, "name", None) or parsed.target
+        return _lock_failure("run", name, exc, emit_json)
+
+
+def _run_run_owned(parsed, emit_json: bool, backend: str, launches: contextlib.ExitStack) -> int:
     """Create (if missing) then launch, or re-attach an existing sandbox by name.
 
     In ``--json`` mode the create/attach result is emitted as one JSON envelope on
@@ -1750,6 +1800,9 @@ def _run_run(parsed, emit_json: bool, backend: str) -> int:
     """
     adapter = common._adapter(backend)
     target = parsed.target
+    if backend == "msb" and target == "opencode" and getattr(parsed, "agent_args", []):
+        exc = fresh_launch.terminal_refusal()
+        return common._operational_failure("run", exc.code, exc.message, exc.remediation, emit_json)
     opts, exit_code = _create_opts(parsed, "run", backend, emit_json)
     if opts is None:
         return exit_code if exit_code is not None else errors.EXIT_FAILURE
@@ -1757,6 +1810,18 @@ def _run_run(parsed, emit_json: bool, backend: str) -> int:
         typed = common._logical_abspath((parsed.path or ".").removesuffix(":ro"))
         name = parsed.name or common._derive_name(target, typed)
         if _exists_quietly(backend, name):
+            if backend == "msb":
+                with lock.sandbox_lock(backend, name):
+                    existing = state.record_read(backend, name)
+                    mismatch = existing and existing.get("agent") == "opencode" and target != "opencode"
+                if mismatch:
+                    exc = fresh_launch.terminal_refusal()
+                    return common._operational_failure("run", exc.code, exc.message, exc.remediation, emit_json)
+            if backend == "msb" and target == "opencode":
+                if parsed.kit or opts.publish or opts.extras:
+                    exc = fresh_launch.terminal_refusal()
+                    return common._operational_failure("run", exc.code, exc.message, exc.remediation, emit_json)
+                return session.fresh_attach(name, emit_json, command="run", agent_args=getattr(parsed, "agent_args", []))
             # A re-attach uses existing mounts, so only the recorded paths are checked.
             workspace = common._mount_workspace(backend, typed)
         else:
@@ -1772,6 +1837,11 @@ def _run_run(parsed, emit_json: bool, backend: str) -> int:
             workspace = common._mount_workspace(backend, resolved)
         cli_kits = _cli_kit_refs(parsed.kit)
         if not _exists_quietly(backend, name):
+            if backend == "msb" and target == "opencode":
+                exit_code = _preflight_new(backend, target, cli_kits, parsed.image, "run", emit_json,
+                                           opts.extra_refs())
+                if exit_code is not None:
+                    return exit_code
             opts, exit_code = _onboarding(backend, opts, emit_json)
             if opts is None:
                 return exit_code if exit_code is not None else errors.EXIT_FAILURE
@@ -1782,16 +1852,31 @@ def _run_run(parsed, emit_json: bool, backend: str) -> int:
         # Before the lock (it may prompt), and on a re-attach too: a running
         # sandbox can still take a token (msb re-feeds it, sbx's proxy is updated).
         stored_token = _scope_advice(backend, name, workspace, emit_json)
+        ownership = launches.enter_context(fresh_launch.own_launch(name)) if backend == "msb" and target == "opencode" else None
         try:
             with lock.sandbox_lock(backend, name):
                 data, exit_code = _run_prepare_locked(parsed, emit_json, backend, target, name, workspace, cli_kits,
                                                       stored_token, opts)
+                admitted = None
+                if data is not None and backend == "msb" and target == "opencode":
+                    if ownership is None:
+                        raise RuntimeError("missing fresh launch ownership")
+                    admitted = fresh_launch.admit_locked(name, data["workspace"],
+                                                        session.session_env_for(backend, name), json_mode=emit_json,
+                                                        ownership=ownership)
+        except msb.MsbError as exc:
+            return common._operational_failure("run", exc.code, exc.message, exc.remediation, emit_json)
         except lock.SandboxLockTimeout as exc:
             # A stored token is kept: the command holding the lock may be a
             # create of this same sandbox that binds it, and a retry reuses it.
             return _lock_failure("run", name, exc, emit_json)
         if data is None:
             return exit_code if exit_code is not None else errors.EXIT_FAILURE
+        if admitted is not None:
+            rc = fresh_launch.wait_admitted(admitted)
+            if emit_json:
+                print(json.dumps(envelope.success("run", {**data, "exit_code": rc})))
+            return rc
         if _PRE_HEAL in data:
             offer_bundle_refresh(backend, name, data.pop(_PRE_HEAL), emit_json, parsed)
         exit_code = _attach_key_check(backend, name, emit_json)
@@ -1823,6 +1908,13 @@ def _run_by_name(backend: str, target: str, emit_json: bool, parsed=None) -> int
 
     The record checks and the kit heal hold the lifecycle lock; the launch does not.
     """
+    if backend == "msb":
+        record = state.record_read(backend, target)
+        if (record or {}).get("agent") == "opencode":
+            if getattr(parsed, "kit", None) or getattr(parsed, "publish", None):
+                exc = fresh_launch.terminal_refusal()
+                return common._operational_failure("run", exc.code, exc.message, exc.remediation, emit_json)
+            return session.fresh_attach(target, emit_json, command="run", agent_args=getattr(parsed, "agent_args", []))
     try:
         with lock.sandbox_lock(backend, target):
             record, exit_code = _by_name_locked(backend, target, emit_json)
@@ -1880,6 +1972,11 @@ def _by_name_locked(backend: str, target: str, emit_json: bool) -> tuple[dict | 
         overlap = common._recorded_workspaces_failure("run", record, emit_json)
         if overlap is not None:
             return None, overlap
+    if backend == "msb" and record.get("agent") == "opencode":
+        # A replacement between the initial by-name routing read and this
+        # locked read must never fall through to the legacy launcher.
+        refusal = fresh_launch.terminal_refusal()
+        return None, common._operational_failure("run", refusal.code, refusal.message, refusal.remediation, emit_json)
     pre_heal = kits.provenance_status(backend, target)  # before the heal records it current
     _heal_on_reattach(backend, target, record, None)
     return {**record, _PRE_HEAL: pre_heal}, None
@@ -2398,6 +2495,8 @@ def _start_locked(command: str, name: str, emit_json: bool) -> int:
     if exit_code is not None:
         return exit_code
     try:
+        if record is not None and record.get("agent") == "opencode":
+            fresh_launch.existing_profile(name, record)
         previous_bindings = set(msb.held_flags(name))
         was_running = _resume(command, name, record)
     except (*common._ADAPTER_ERRORS, security.SecurityException) as exc:
@@ -2432,6 +2531,11 @@ def _start_locked(command: str, name: str, emit_json: bool) -> int:
     applied, exit_code = _heal_after_start(command, name, record, emit_json)
     if applied is None:
         return exit_code if exit_code is not None else errors.EXIT_FAILURE
+    if (record or {}).get("agent") == "opencode":
+        try:
+            fresh_launch.prepare_locked(name)
+        except msb.MsbError as exc:
+            return common._operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
     return _finish_start(command, name, applied, unbound, was_running, emit_json)
 
 

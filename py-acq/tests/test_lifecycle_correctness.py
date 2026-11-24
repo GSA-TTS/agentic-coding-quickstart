@@ -33,6 +33,7 @@ import pytest
 
 from acq_py import cli, errors, kit_msb, kits, lock, msb, security, state
 from acq_py.commands import common
+from fresh_fixture import fresh_fixture, trusted_fresh_root as trusted_fresh_root
 
 pytestmark = pytest.mark.provider_key  # creates msb sandboxes: needs a stored provider key
 
@@ -41,13 +42,15 @@ _INSTALL = ["sh", "/home/agent/opencode-install.sh"]
 _INSTALL_MARK = "OPENCODE_SHA256_LINUX_X64="
 
 
-def _env(monkeypatch, tmp_path):
+def _env(monkeypatch, tmp_path, *, fresh=False, real_ancestors=False):
     monkeypatch.setenv("ACQ_MSB_BIN", "__stub__")
     monkeypatch.setenv("ACQ_MSB_VERSION", "0.7.7")
     monkeypatch.setenv("ACQ_MSB_INSTALLED", "1")
     monkeypatch.setenv("ACQ_SBX_INSTALLED", "0")
     monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("MSB_HOME", str(tmp_path / "msb-home"))
+    if fresh:
+        fresh_fixture(monkeypatch, tmp_path, real_ancestors=real_ancestors)
 
 
 def _invoke(capsys, *argv):
@@ -92,7 +95,7 @@ def _kit_record_path(backend: str, name: str) -> Path:
 def test_rm_then_create_reinstalls_the_agent_kit(monkeypatch, tmp_path, capsys):
     ws = tmp_path / "ws"
     ws.mkdir()
-    _env(monkeypatch, tmp_path)
+    _env(monkeypatch, tmp_path, fresh=True)
     installs = _spy_installs(monkeypatch)
 
     rc, _ = _invoke(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "box", "--json")
@@ -115,7 +118,7 @@ def test_rm_then_create_reinstalls_the_agent_kit(monkeypatch, tmp_path, capsys):
 def test_create_ignores_a_stale_kit_record_left_by_an_out_of_band_removal(monkeypatch, tmp_path, capsys):
     ws = tmp_path / "ws"
     ws.mkdir()
-    _env(monkeypatch, tmp_path)
+    _env(monkeypatch, tmp_path, fresh=True)
     installs = _spy_installs(monkeypatch)
     # A record left behind by a sandbox removed outside acq (no guest, no state).
     kits.kit_applied_write("msb", "box", "opencode", "opencode")
@@ -126,11 +129,7 @@ def test_create_ignores_a_stale_kit_record_left_by_an_out_of_band_removal(monkey
 
 
 def test_rm_clears_orphaned_host_records(monkeypatch, tmp_path, capsys):
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    _env(monkeypatch, tmp_path)
-    rc, _ = _invoke(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "box", "--json")
-    assert rc == 0
+    _created_box(monkeypatch, tmp_path, capsys)
     _write_catalog(tmp_path, {})  # the guest is removed outside acq
 
     rc, doc = _invoke(capsys, "--backend", "msb", "rm", "box", "--json")
@@ -165,11 +164,7 @@ def test_rm_clears_an_unreadable_orphaned_record(monkeypatch, tmp_path, capsys):
 
 
 def test_rm_cleans_up_when_remove_fails_because_the_guest_is_already_gone(monkeypatch, tmp_path, capsys):
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    _env(monkeypatch, tmp_path)
-    rc, _ = _invoke(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "box", "--json")
-    assert rc == 0
+    _created_box(monkeypatch, tmp_path, capsys)
 
     def remove_races_an_external_removal(name):
         _write_catalog(tmp_path, {})
@@ -191,7 +186,7 @@ _SEC_RECORD = {
     "schema": 1,
     "name": "sec",
     "backend": "msb",
-    "agent": "opencode",
+    "agent": "shell",
     "workspace": "/w",
     "ro_host_config": True,
 }
@@ -199,12 +194,13 @@ _SEC_RECORD = {
 
 @pytest.mark.parametrize("windows", [False, True], ids=["posix", "windows"])
 def test_recreate_kit_failure_keeps_the_host_record_for_a_retry(monkeypatch, tmp_path, capsys, windows):
-    _env(monkeypatch, tmp_path)
+    _env(monkeypatch, tmp_path, fresh=not windows)
+    monkeypatch.setattr(kit_msb, "WINDOWS", windows)
     monkeypatch.setattr(security, "WINDOWS", windows)  # Windows never gets the read-only mount
     _write_catalog(tmp_path, {"sec": "running"})
     path = state.record_path("msb", "sec")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(_SEC_RECORD), encoding="utf-8")
+    path.write_text(json.dumps({**_SEC_RECORD, "agent": "opencode", "image": common.OPENCODE_DEVENV_IMAGE}), encoding="utf-8")
     monkeypatch.setenv("ACQ_SECURITY_MOUNT_STATE", json.dumps({"sec": "missing"}))
 
     real_apply = kit_msb.apply_kit
@@ -217,6 +213,14 @@ def test_recreate_kit_failure_keeps_the_host_record_for_a_retry(monkeypatch, tmp
     monkeypatch.setattr(kit_msb, "apply_kit", failing_apply)
     rc, doc = _invoke(capsys, "--backend", "msb", "create", "--recreate", "sec", "--yes", "--json")
     assert rc == 1
+    if windows:
+        # Fresh OpenCode is explicitly POSIX-only: refusal must precede removal
+        # or attempted application, not masquerade as a retryable kit failure.
+        assert doc["error"]["code"] == errors.UNSUPPORTED
+        assert json.loads(path.read_text())["agent"] == "opencode"
+        assert _catalog_path(tmp_path).exists()
+        assert json.loads(_catalog_path(tmp_path).read_text()) == {"sec": "running"}
+        return
     assert doc["error"]["code"] == errors.FAILURE
     record = state.record_read("msb", "sec")
     assert record is not None
@@ -240,7 +244,7 @@ def test_dot_derives_the_name_from_the_logical_working_directory(monkeypatch, tm
     real.mkdir()
     link = tmp_path / "my-proj"
     link.symlink_to(real, target_is_directory=True)
-    _env(monkeypatch, tmp_path)
+    _env(monkeypatch, tmp_path, fresh=True)
     monkeypatch.chdir(link)  # os.getcwd() now reports the physical real-target
     monkeypatch.setenv("PWD", str(link))  # the shell's logical $PWD
 
@@ -282,14 +286,14 @@ raise SystemExit(_stub_msb.main(["msb", *args]))
 
 
 @pytest.mark.skipif(os.name == "nt", reason="the slow-stub wrapper is a POSIX command line")
-def test_concurrent_create_and_rm_are_serialized(monkeypatch, tmp_path):
+def test_concurrent_create_and_rm_are_serialized(monkeypatch, tmp_path, trusted_fresh_root):
     ws = tmp_path / "ws"
     ws.mkdir()
     gate = tmp_path / "gate"
     gate.mkdir()
     script = tmp_path / "slow_msb.py"
     script.write_text(_SLOW_STUB, encoding="utf-8")
-    _env(monkeypatch, tmp_path)
+    _env(monkeypatch, tmp_path, fresh=True, real_ancestors=True)
     monkeypatch.setenv("ACQ_MSB_BIN", f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}")
     monkeypatch.setenv("SLOW_GATE", str(gate))
     base = [sys.executable, "-m", "acq_py", "--backend", "msb"]
@@ -691,11 +695,13 @@ def test_substrate_plan_creates_the_agent_user_first_as_root(gaps):
 # ---------------------------------------------------------------------------
 
 def _created_box(monkeypatch, tmp_path, capsys):
+    """Removal-only fixture: seed records without depending on a new create."""
     ws = tmp_path / "ws"
     ws.mkdir()
     _env(monkeypatch, tmp_path)
-    rc, _ = _invoke(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "box", "--json")
-    assert rc == 0
+    _write_catalog(tmp_path, {"box": "running"})
+    state.record_write("msb", "box", agent="opencode", workspace=str(ws))
+    kits.kit_applied_write("msb", "box", "opencode", "opencode")
     assert _kit_record_path("msb", "box").exists()
 
 

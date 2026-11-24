@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from acq_py import cli, errors, kit_msb, kits, kitspec, msb, security, state
+from fresh_fixture import fresh_fixture
 
 pytestmark = pytest.mark.provider_key  # creates msb sandboxes: needs a stored provider key
 
@@ -35,7 +36,7 @@ needs_bash = pytest.mark.skipif(
 )
 
 
-def _env(monkeypatch, tmp_path, *, version="0.7.7", catalog=None, windows=False):
+def _env(monkeypatch, tmp_path, *, version="0.7.7", catalog=None, windows=False, fresh=False):
     # The read-only mount is requested on POSIX hosts only. In-process tests
     # choose the host class through the module seam, so the POSIX path is also
     # exercised on a Windows runner (and the Windows path on POSIX).
@@ -49,6 +50,8 @@ def _env(monkeypatch, tmp_path, *, version="0.7.7", catalog=None, windows=False)
     monkeypatch.setenv("ACQ_MSB_RO_INSPECT_RETRY_SLEEP", "0")
     if catalog is not None:
         monkeypatch.setenv("ACQ_MSB_STUB_CATALOG", json.dumps(catalog))
+    if fresh:
+        fresh_fixture(monkeypatch, tmp_path)
     ws = tmp_path / "ws"
     ws.mkdir(exist_ok=True)
     return ws
@@ -118,7 +121,7 @@ class _Guest:
 
 
 def test_run_opencode_applies_every_builtin_kit_then_the_agent_kit(monkeypatch, tmp_path, capsys):
-    ws = _env(monkeypatch, tmp_path)
+    ws = _env(monkeypatch, tmp_path, fresh=True)
     seen = _spy(monkeypatch)
     rc, doc = _invoke(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "box", "--json")
     assert rc == 0, doc
@@ -197,7 +200,7 @@ def test_configured_unknown_extra_kit_fails_selection(monkeypatch, tmp_path, cap
 
 
 def test_a_failed_builtin_kit_warns_and_withholds_provenance(monkeypatch, tmp_path, capsys):
-    ws = _env(monkeypatch, tmp_path)
+    ws = _env(monkeypatch, tmp_path, fresh=True)
     real = kit_msb.apply_kit
     monkeypatch.setattr(kit_msb, "apply_kit", lambda n, kit, *a, **k: False if kit.name == "git-ssh-sign" else real(n, kit, *a, **k))
     rc = cli.main(["--backend", "msb", "create", "opencode", str(ws), "--name", "box", "--json"])
@@ -211,7 +214,7 @@ def test_a_failed_builtin_kit_warns_and_withholds_provenance(monkeypatch, tmp_pa
 
 
 def test_a_failed_agent_kit_fails_the_create_and_removes_the_guest(monkeypatch, tmp_path, capsys):
-    ws = _env(monkeypatch, tmp_path)
+    ws = _env(monkeypatch, tmp_path, fresh=True)
     real = kit_msb.apply_kit
     monkeypatch.setattr(kit_msb, "apply_kit", lambda n, kit, *a, **k: False if kit.name == "opencode" else real(n, kit, *a, **k))
     rc, doc = _invoke(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "box", "--json")
@@ -255,7 +258,7 @@ def test_create_below_the_ro_floor_asks_for_no_mount_and_records_none(monkeypatc
 
 @pytest.mark.parametrize("knob", ["ACQ_MSB_STUB_MOUNT_RW", "ACQ_MSB_STUB_RO_WRITABLE"])
 def test_an_unconfirmed_mount_removes_the_new_sandbox(monkeypatch, tmp_path, capsys, knob):
-    ws = _env(monkeypatch, tmp_path)
+    ws = _env(monkeypatch, tmp_path, fresh=True)
     monkeypatch.setenv(knob, "box")
     rc, doc = _invoke(capsys, "--backend", "msb", "create", "opencode", str(ws), "--name", "box", "--json")
     assert rc == 1 and doc["error"]["code"] == errors.SECURITY_EXCEPTION
@@ -841,7 +844,7 @@ def test_startup_script_quotes_kit_data_and_only_the_first_kit_stakes_it(tmp_pat
 
 
 def test_create_registers_the_startup_script_and_removes_the_staged_file(monkeypatch, tmp_path, capsys):
-    ws = _env(monkeypatch, tmp_path)
+    ws = _env(monkeypatch, tmp_path, fresh=True)
     seen = _spy(monkeypatch)
     bodies = {}
     real = msb.create
