@@ -5,6 +5,7 @@ in each ADR; corrections and amendments are part of the record.
 
 | ADR | Title | Status |
 |---|---|---|
+| [0053m](0053m-quiescent-byte-key-transition.md) | Refuse ambiguous legacy mutations and preserve existing state | proposed |
 | [0001](0001-sbx-usai-agent-execution-architecture.md) | Use Docker SBX as Isolation Layer for USAi Agent Execution | accepted |
 | [0002](0002-version-management-and-release-automation.md) | Adopt Semantic Versioning, Conventional Commits, and release-please for Release Automation | accepted |
 | [0003](0003-usai-model-sync-and-default-selection.md) | Automate USAI Model Sync and Default Selection for OpenCode Templates | superseded |

@@ -56,6 +56,9 @@ REQUIRED = {
     "test/vendor", ".gitmodules", "test/vectors", "test/fixtures",
     ".gitattributes", ".github/CODEOWNERS",
     ".github/workflows/release.yml", ".github/workflows/tier3-release-gate.yml",
+    ".github/workflows/python-quality.yml", ".github/workflows/python-vectors.yml",
+    ".github/workflows/pre-commit.yml", ".github/workflows/bash32-compat.yml",
+    ".github/workflows/macos.yml",
     ".github/workflows/windows.yml",
 }
 
@@ -81,9 +84,7 @@ NOT_INPUTS = {
     # GitHub configuration and the other workflows
     ".github/ISSUE_TEMPLATE/", ".github/linters/", ".github/keys/",
     ".github/dependabot.yml", ".github/pull_request_template.md", ".github/release.yml",
-    ".github/workflows/bash32-compat.yml", ".github/workflows/markdown-quality.yml",
-    ".github/workflows/pr-lint.yml", ".github/workflows/pre-commit.yml",
-    ".github/workflows/python-quality.yml", ".github/workflows/python-vectors.yml",
+    ".github/workflows/markdown-quality.yml", ".github/workflows/pr-lint.yml",
     # the dispatch-only macOS uninstall acceptance workflow and the scripts only it runs
     ".github/workflows/macos-uninstall-acceptance.yml", "scripts/test-uninstall-macos",
     "scripts/uninstall-acceptance-helper.py", "scripts/uninstall-acceptance-lib.sh",

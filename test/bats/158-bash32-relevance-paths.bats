@@ -145,6 +145,7 @@ scripts/refresh-kitbundle
 .github/workflows/python-vectors.yml
 .github/workflows/tier3-release-gate.yml
 .github/workflows/windows.yml
+.github/workflows/macos.yml
 .github/workflows/build-assets.yml
 docs/
 checklists/

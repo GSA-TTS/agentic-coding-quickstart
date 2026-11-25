@@ -228,3 +228,10 @@ def test_store_failure_is_an_operational_error(monkeypatch, capsys):
     rc, doc, _ = _run(capsys, "--all")
     assert rc == 1 and doc["error"]["code"] == "failure"
     assert "failed to store 'usai' (global)" in doc["error"]["message"]
+def test_store_only_import_never_lists_backend_targets(monkeypatch, capsys):
+    from acq_py import backends
+    monkeypatch.setattr(backends, "detect_all", lambda: pytest.fail("store-only import detected backends"))
+    monkeypatch.setenv("GITHUB_TOKEN", "fixture-value-not-a-secret")
+    rc = cli.main(["secret", "import", "github", "--all", "--json"])
+    assert rc == 0
+    capsys.readouterr()

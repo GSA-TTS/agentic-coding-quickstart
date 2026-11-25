@@ -15,14 +15,16 @@ on:
   pull_request:
     branches:
       - main
+      - migration/python-cross-platform
   push:
     branches:
       - main
+      - migration/python-cross-platform
   merge_group:
     branches: [main]
 
 concurrency:
-  group: python-vectors-${{ github.head_ref || github.ref }}
+  group: python-vectors-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:

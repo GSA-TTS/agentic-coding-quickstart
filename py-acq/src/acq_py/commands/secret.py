@@ -130,7 +130,9 @@ def run_secret_set(parsed, emit_json: bool, backend: str) -> int:
     if problem is not None:
         return common._operational_failure(command, errors.VALIDATION_FAILED, problem, _SET_USAGE, emit_json)
 
-    value = common._read_secret_value(_prompt_for(service))
+    value = getattr(parsed, "preflight_secret_value", None)
+    if value is None:
+        value = common._read_secret_value(_prompt_for(service))
     if not value.strip():
         # Empty (or whitespace-only) input is a validation failure (exit 1), not
         # a usage error (exit 2): the invocation was well-formed but supplied no
