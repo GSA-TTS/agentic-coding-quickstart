@@ -769,7 +769,7 @@ def _legacy_targets_pre_step(parsed, emit_json: bool) -> int | None:
         names.append(parsed.target)
     if cmd == "cp":
         names.extend(ref[0] for token in (parsed.src, parsed.dst) if (ref := common._sandbox_ref(token)))
-    fanout = cmd in ("usai-rotate-api-key", "provider-credential")
+    fanout = cmd == "provider-credential"
     if cmd == "secret":
         subcommand = getattr(parsed, "secret_command", None)
         if subcommand == "import":
@@ -777,7 +777,7 @@ def _legacy_targets_pre_step(parsed, emit_json: bool) -> int | None:
             if problem:
                 return common._usage_failure("secret import", problem, emit_json)
             names.append(opts.sandbox)
-            fanout = opts.sandbox is None and not opts.dry_run
+            fanout = False  # import stores only; no backend fanout
         else:
             positionals, _, _, _ = common._split_host_env(parsed.args)
             scope, service = common._parse_secret_scope_service(parsed.global_scope, positionals)
@@ -1092,7 +1092,9 @@ def _dispatch(parser: _Parser, parsed, emit_json: bool, backend_override: str | 
         target_check = _legacy_targets_pre_step(parsed, emit_json)
         if target_check is not None:
             return target_check
-        pre_step = _migration_pre_step(emit_json, _command_label(parsed))
+        # Rotation owns a version/budget-aware target preflight. It migrates
+        # only after that preflight, before storing the validated credential.
+        pre_step = None if parsed.command == "usai-rotate-api-key" else _migration_pre_step(emit_json, _command_label(parsed))
         if pre_step is not None:
             return pre_step
 

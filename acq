@@ -1043,7 +1043,8 @@ _acq_early_legacy_target_check() {
         import)
           parsed=$(_acq_import_parse_args "${@:2}") || return 1
           scope=$(printf '%s' "$parsed" | cut -f4)
-          case "$scope" in ""|global) fanout=1 ;; *) acq_legacy_mutation_name_check "$scope" || return 1 ;; esac ;;
+          # Import writes the host store only; it never re-feeds a backend.
+          case "$scope" in "") : ;; *) acq_legacy_mutation_name_check "$scope" || return 1 ;; esac ;;
         set|rm)
           case "${2:-}" in ""|-g|--global) fanout=1 ;; -*) : ;; *)
             case "${3:-}" in ""|-*) fanout=1 ;; *) acq_legacy_mutation_name_check "$2" || return 1 ;; esac ;;

@@ -46,7 +46,11 @@ name; an unavailable listing refuses rather than partially processing targets.
 The listing is read-only. It deliberately includes inactive/unbound candidates
 instead of guessing which binding a later fanout may use.
 
-Import uses its parsed sandbox scope; copy uses its actual sandbox-reference
+Import uses its parsed sandbox scope and writes only the host store, so it does
+not enumerate backend targets. Rotation performs version- and budget-aware
+target validation in adapter preflight before tree migration and credential
+storage; an unavailable backend retains its established not-re-fed result and
+is not mutated. Copy uses its actual sandbox-reference
 semantics. Plain port queries and provider-credential listing remain read-only.
 Invalid secret syntax/value refusals retain their no-backend-access ordering.
 Validated secret input is passed directly to the handler in memory, never logged

@@ -1189,9 +1189,6 @@ acq_sandbox_name_check() {
 # '/' or '\', or a control character. Unlike acq_sandbox_name_check this accepts
 # every other character, so a sandbox created outside acq stays reachable.
 acq_name_form_check() {
-  if [ "$1" != "kit check" ] && [ "$1" != "ports query" ]; then
-    acq_legacy_mutation_name_check "$2" || return 1
-  fi
   case "$2" in
     ''|.|..|*/*|*\\*|*[[:cntrl:]]*)
       echo "acq: $1: refusing sandbox name '$(acq_printable "$2")'." >&2

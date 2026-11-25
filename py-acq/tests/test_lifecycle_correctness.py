@@ -642,8 +642,14 @@ def test_non_ascii_target_refused_before_migration_or_backend(monkeypatch, tmp_p
     assert list(tmp_path.rglob("*")) == before
 
 
+def test_copy_drive_classification_requires_ascii_drive_letter(monkeypatch):
+    monkeypatch.setattr(os, "name", "nt")
+    assert common._sandbox_ref("C:/guest") is None
+    assert common._sandbox_ref("é:/guest") == ("é", "/guest")
+
+
 @pytest.mark.parametrize("argv", [["secret", "rm", "-g", "github"], ["secret", "set", "-g", "github"],
-                                  ["secret", "import", "--all"], ["usai-rotate-api-key"]])
+                                  ])
 def test_global_mixed_targets_refused_before_first_write(monkeypatch, tmp_path, capsys, argv):
     _env(monkeypatch, tmp_path)
     monkeypatch.setattr(msb, "list_names", lambda: ["ascii-first", "café"])
@@ -672,8 +678,7 @@ def test_bash_command_non_ascii_refusal_precedes_fetch_or_backend(monkeypatch, t
 
 @_POSIX_ONLY
 @pytest.mark.parametrize("argv", [["secret", "rm", "-g", "github"],
-                                  ["secret", "set", "github", "--host", "github.com", "--env", "GITHUB_TOKEN"],
-                                  ["secret", "import", "--all"]])
+                                  ["secret", "set", "github", "--host", "github.com", "--env", "GITHUB_TOKEN"]])
 def test_bash_global_mixed_targets_refused_before_writes(monkeypatch, tmp_path, argv):
     tools = tmp_path / "tools"
     tools.mkdir()
