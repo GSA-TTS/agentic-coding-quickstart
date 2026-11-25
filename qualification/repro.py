@@ -1,4 +1,4 @@
-"""The 3-attempt reproduction rule (ADR-0044m).
+"""The reproduction rule, with a default budget of three attempts (ADR-0040).
 
 A ``FAIL`` is confirmed real only by reproducing on the same environment within
 three attempts. The binding identity fields (``BINDING_FIELDS``) must match

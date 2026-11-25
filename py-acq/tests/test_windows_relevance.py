@@ -76,7 +76,7 @@ NOT_INPUTS = {
     "py-acq/requirements-build.txt",
     # lint and hook configuration
     ".gitignore", ".gitleaksignore", ".gitleaks.repo.toml", ".gitleaks.toml", ".markdown-link-check.json",
-    ".markdownlint-cli2.yaml", ".markdownlint.jsonc", ".markdownlintignore",
+    ".markdownlint.jsonc", ".markdownlintignore",
     ".pre-commit-config.yaml", ".prettierrc", ".shellcheckrc",
     # GitHub configuration and the other workflows
     ".github/ISSUE_TEMPLATE/", ".github/linters/", ".github/keys/",
@@ -84,6 +84,10 @@ NOT_INPUTS = {
     ".github/workflows/bash32-compat.yml", ".github/workflows/markdown-quality.yml",
     ".github/workflows/pr-lint.yml", ".github/workflows/pre-commit.yml",
     ".github/workflows/python-quality.yml", ".github/workflows/python-vectors.yml",
+    # the dispatch-only macOS uninstall acceptance workflow and the scripts only it runs
+    ".github/workflows/macos-uninstall-acceptance.yml", "scripts/test-uninstall-macos",
+    "scripts/uninstall-acceptance-helper.py", "scripts/uninstall-acceptance-lib.sh",
+    "scripts/validate-git-executable-modes",
     # the rest of the bats suite, which the Windows jobs do not run
     "test/bats/",
     # scripts no Windows job or test runs, sources or reads

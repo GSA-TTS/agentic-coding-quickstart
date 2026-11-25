@@ -1,31 +1,46 @@
 #!/usr/bin/env bats
-# Shared specs must stay readable while another worker initializes its fixtures.
+# Each test owns its offline kit specs (under its private stub dir), published once
+# and never replaced, so a concurrent copy never sees a changed file (#721).
 # shellcheck shell=bats
 
 load 'helper'
 
-@test "shared fixtures: readers see complete specs during another worker's writes" {
+@test "shared fixtures: a repeated publication keeps the stub's file identity and bytes" {
   run bash -c '
-    printf() {
-      case "$1" in
-        *hybrid/v1*)
-          local spec
-          for spec in "$BATS_RUN_TMPDIR/acq-offline-kit/spec.yaml" \
-                      "$BATS_RUN_TMPDIR/acq-opencode-kit/spec.yaml"; do
-            if ! grep -q "schemaVersion:" "$spec"; then
-              echo "reader observed an incomplete shared spec" >&2
-              exit 91
-            fi
-          done
-          ;;
-      esac
-      builtin printf "$@"
-    }
-    # Redirection happens before printf: inspect the published paths at the
-    # exact write boundary instead of relying on scheduler timing to hit it.
-    source "$1/scripts/test-acq-lib.sh"
+    source "$1/scripts/test-acq-lib.sh" || exit 97
+    make_stubs || exit 98
+    trap cleanup_stubs EXIT
+    for dir in acq-offline-kit acq-opencode-kit; do
+      ln "$STUBDIR/$dir/spec.yaml" "$BATS_TEST_TMPDIR/$dir.before" || exit 95
+      cp "$STUBDIR/$dir/spec.yaml" "$BATS_TEST_TMPDIR/$dir.bytes" || exit 96
+    done
+    _acq_test_offline_kits || exit 99
+    for dir in acq-offline-kit acq-opencode-kit; do
+      [ "$STUBDIR/$dir/spec.yaml" -ef "$BATS_TEST_TMPDIR/$dir.before" ] || exit 92
+      cmp "$STUBDIR/$dir/spec.yaml" "$BATS_TEST_TMPDIR/$dir.bytes" || exit 93
+    done
   ' _ "$REPO_ROOT"
   assert_success
+}
+
+@test "shared fixtures: conflicting existing content is refused without replacement" {
+  local target="$BATS_TEST_TMPDIR/conflicting-spec"
+  printf 'original\n' > "$target"
+  run _acq_test_publish_spec "$target" $'different\n'
+  assert_failure
+  [ "$(cat "$target")" = original ]
+}
+
+@test "shared fixtures: directory and symlink destinations are refused without writes" {
+  local directory="$BATS_TEST_TMPDIR/destination" link="$BATS_TEST_TMPDIR/link"
+  mkdir "$directory"
+  ln -s "$directory" "$link"
+  run _acq_test_publish_spec "$directory" $'content\n'
+  assert_failure
+  run _acq_test_publish_spec "$link" $'content\n'
+  assert_failure
+  [ -z "$(ls -A "$directory")" ]
+  [ -L "$link" ]
 }
 
 # The stub setup must keep acq's caches away from the developer's own, even when

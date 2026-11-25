@@ -80,6 +80,7 @@ _create_line() { printf '%s\n' "$(cat "$CALLS")" | grep "^$1 create"; }
 
 @test "image(msb): global --image=<ref> equals form is intercepted" {
   _msb_create -- --backend msb --image=localhost/acq-globaleq:test create shell --name gimgeq "$IMGPROJ"
+  assert_success
   local line; line=$(_create_line msb)
   assert_regex "$line" 'localhost/acq-globaleq:test'
   refute_regex "$line" '--image='

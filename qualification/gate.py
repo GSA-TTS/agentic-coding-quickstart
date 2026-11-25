@@ -1,4 +1,4 @@
-"""The Tier-3 release gate and ledger recorder (ADR-0044m).
+"""The inactive Tier-3 release-gate foundation and ledger recorder (ADR-0040).
 
 ``python -m qualification.gate check`` decides, from the committed ledger alone,
 whether every claimed cell holds a current green transcript, so a release can be
@@ -29,18 +29,18 @@ The ledger is self-reported and committed: beyond those checks its integrity is 
 review control (CODEOWNERS on the ledger file), not a technical one.
 ``transcript_sha256`` helps that review because the ledger PR inlines each
 transcript byte for byte; ``verify-evidence`` recomputes it from the PR body. An
-entry, or the accepted version, below the ADR-0044m version floors blocks its cell
+entry, or the accepted version, below the imported version floors blocks its cell
 (:func:`qualification.matrix.version_problem`). A recorded ``rev`` must be an ancestor of the commit the gate
 evaluates (otherwise the cell is blocked), so record a run at a commit that is on
 ``main`` (a squash-merged branch commit is not).
 
 The rules this module applies (the claimed cells, the Tier-3 surface and its
 carve-outs, the entry checks) live in this package, so they must not come from the
-change under test: on a pull request the ``Tier-3 release gate`` workflow runs this
-package from the base branch against the PR's ledger and history (``python -P`` with
-``PYTHONPATH`` at a base-branch worktree). A PR therefore cannot loosen the rules it
-is judged by; loosening them takes a PR of its own, which CODEOWNERS sends to an
-admin.
+change under test. A future Tier-3 workflow must run this package from the base
+branch against the PR's ledger and history, following BOOTSTRAP.md's trusted
+startup contract. No release qualification workflow is activated here. With that
+integration, a PR cannot loosen its own rules; loosening them takes a separately
+reviewed change to the base evaluator.
 """
 
 from __future__ import annotations
@@ -58,6 +58,7 @@ from typing import Callable, Iterable
 from . import hostexec
 from .ledger import (
     DEFAULT_LEDGER,
+    Entry,
     Ledger,
     LedgerError,
     append_entry,
@@ -140,7 +141,7 @@ def _why_not_current(
     version = ledger.accepted_backend_versions.get(entry.backend)
     if version is None:
         return f"accepted_backend_versions has no entry for {entry.backend}"
-    # The ADR-0044m floors and the msb refused range: a run on such a version is not
+    # The imported floors and the msb refused range: a run on such a version is not
     # evidence, and accepting such a version cannot make one current.
     for which, candidate in (("recorded", entry.backend_version), ("accepted", version)):
         floor = version_problem(entry.backend, candidate)
@@ -231,8 +232,8 @@ def _cmd_record(args: argparse.Namespace) -> int:
     return 0
 
 
-def base_entries(ledger_path: str, rev: str, cwd=None) -> set[str]:
-    """The ``transcript_sha256`` of every entry in the ledger as committed at ``rev``."""
+def base_entries(ledger_path: str, rev: str, cwd=None) -> dict[str, Entry]:
+    """Complete entries, keyed by transcript hash, in the ledger committed at ``rev``."""
     if not rev or rev.startswith("-"):
         raise LedgerError(f"--base {rev!r} is not a revision")
     git = hostexec.command("git")
@@ -246,7 +247,18 @@ def base_entries(ledger_path: str, rev: str, cwd=None) -> set[str]:
     shown = subprocess.run([*git, "show", f"{rev}:{rel}"], capture_output=True, cwd=cwd)
     if shown.returncode != 0:
         raise LedgerError(f"cannot read {rel} at {rev}")
-    return {e.transcript_sha256 for e in parse_ledger(json.loads(shown.stdout.decode("utf-8"))).entries}
+    return {e.transcript_sha256: e for e in parse_ledger(json.loads(shown.stdout.decode("utf-8"))).entries}
+
+
+def _new_entries(ledger: Ledger, old: dict[str, Entry]) -> list[Entry]:
+    """Enforce append-only evidence identities before selecting new transcripts."""
+    current = {e.transcript_sha256: e for e in ledger.entries}
+    for digest, entry in old.items():
+        if digest not in current:
+            raise LedgerError(f"existing entry {digest} was removed; entries are append-only")
+        if current[digest] != entry:
+            raise LedgerError(f"existing entry {digest} was changed; entries are immutable")
+    return [e for e in ledger.entries if e.transcript_sha256 not in old]
 
 
 def _cmd_verify_evidence(args: argparse.Namespace) -> int:
@@ -254,7 +266,7 @@ def _cmd_verify_evidence(args: argparse.Namespace) -> int:
     required = None
     if args.base is not None:
         old = base_entries(args.ledger, args.base)
-        required = [e for e in ledger.entries if e.transcript_sha256 not in old]
+        required = _new_entries(ledger, old)
     if args.body == "-":
         data = sys.stdin.buffer.read()
     else:

@@ -1,6 +1,6 @@
-"""Value types for the qualification harness (ADR-0044m).
+"""Value types for the qualification harness foundation (ADR-0040).
 
-The ADR defines three things this module owns as data:
+This imported module owns three pieces of data:
 
 * the verbatim ``RESULT`` transcript signature line, whose verdict is one of
   ``PASS``/``FAIL``/``BLOCKED`` (never a secret, never a raw output dump);
@@ -36,7 +36,7 @@ class Outcome(str, Enum):
     """The final disposition after the reproduction rule.
 
     ``FLAKY`` is the escalation of a ``FAIL`` that did not reproduce on the same
-    environment within three attempts (ADR-0044m). It is never softened into a
+    environment within the attempt budget. It is never softened into a
     pass and never reported as a definitive ``FAIL``.
     """
 
@@ -47,7 +47,7 @@ class Outcome(str, Enum):
 
 
 # Identity fields that must match across reproduction attempts for a FAIL to be
-# confirmed real (ADR-0044m). Wall-clock time, the transcript directory, a nonce,
+# confirmed real (ADR-0040). Wall-clock time, the transcript directory, a nonce,
 # and the sandbox name may differ and are therefore not binding.
 BINDING_FIELDS = (
     "rev",
@@ -111,7 +111,7 @@ def sha256_hex(data: bytes) -> str:
 
 
 def format_result_line(verdict: str, environment: Environment) -> str:
-    """The canonical one-pasteable signature line (ADR-0044m).
+    """The canonical one-pasteable signature line (ADR-0040).
 
     ``RESULT <PASS|FAIL|BLOCKED> <backend>=<ver> image=<image> host=<os arch>
     rev=<sha> dir=<abs path>`` — the backend token is ``msb=`` or ``sbx=``. The

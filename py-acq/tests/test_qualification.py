@@ -51,7 +51,7 @@ def make_env(**overrides) -> Environment:
         os="Linux",
         os_build="6.1.0",
         arch="x86_64",
-        hypervisor="native",
+        hypervisor="kvm",  # a Linux x86_64 host reports kvm; the cell check refuses other hosts
         backend="msb",
         backend_version="0.7.7",
         image="img",

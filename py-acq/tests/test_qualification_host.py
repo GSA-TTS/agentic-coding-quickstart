@@ -233,9 +233,11 @@ def make_transcript(tmp_path, backend, outcome="PASS", rev=None):
     # the interpreter (its directory tokenized), then the oracle.
     attempt = {"verdict": outcome, "environment": env,
                "commands": publishable_argv([sys.executable, ORACLE, "--backend", backend]),
-               "output_sha256": "", "detail": "", "recorded_at": datetime.now(timezone.utc).isoformat()}
+               "output_sha256": "f" * 64, "detail": "", "recorded_at": datetime.now(timezone.utc).isoformat()}
+    # A FAIL is confirmed only when it reproduces, so a recorded FAIL has two attempts.
+    attempts = [attempt, dict(attempt)] if outcome == "FAIL" else [attempt]
     path = out / "transcript.json"
-    path.write_bytes(canonical_transcript_bytes({"schema_version": 1, "outcome": outcome, "attempts": [attempt]}))
+    path.write_bytes(canonical_transcript_bytes({"schema_version": 1, "outcome": outcome, "attempts": attempts}))
     return host.Result(backend, outcome, "", f"RESULT {outcome} {backend}=1", path)
 
 
@@ -617,7 +619,8 @@ def fake_runner(tmp_path, head, outcomes):
         t = make_transcript(tmp_path, backend, status, rev=head)
         doc = json.loads(t.transcript.read_text())
         # a real run records the installed backend version, which is on its command line
-        doc["attempts"][0]["environment"]["backend_version"] = command[command.index("--backend-version") + 1]
+        for attempt in doc["attempts"]:
+            attempt["environment"]["backend_version"] = command[command.index("--backend-version") + 1]
         (out / "transcript.json").write_bytes(canonical_transcript_bytes(doc))
         return host.Result(backend, status, "", f"RESULT {status} {backend}=1 dir={out}", out / "transcript.json")
     return fake_run
