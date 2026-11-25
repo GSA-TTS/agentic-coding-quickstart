@@ -339,11 +339,12 @@ def test_secret_set_writes_the_acq_store_only_when_the_backend_accepts(monkeypat
     assert not (_store_dir() / "acq.box.github").exists()
     # msb refuses a service it could never inject (no endpoint mapping) before
     # the store is touched.
+    before = {p.relative_to(_store_dir()): p.read_bytes() for p in _store_dir().rglob("*") if p.is_file()}
     _env_msb(monkeypatch, tmp_path)
     monkeypatch.setattr(sys, "stdin", io.StringIO("MSB-VALUE\n"))
     rc, doc = _invoke(capsys, "--backend", "msb", "secret", "set", "mybox", "orphan", "--json")
     assert rc == 1 and doc["error"]["code"] == "validation_failed"
-    assert sorted(p.name for p in _store_dir().iterdir()) == ["acq.usai"]
+    assert {p.relative_to(_store_dir()): p.read_bytes() for p in _store_dir().rglob("*") if p.is_file()} == before
 
 
 def test_sandbox_named_global_is_a_sandbox_scope(monkeypatch, tmp_path, capsys):

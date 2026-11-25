@@ -364,7 +364,14 @@ def provider_credential_lock(provider: str) -> Iterator[None]:
 #   1. a sandbox's lifecycle lock (:func:`sandbox_lock`); ``secret import`` takes
 #      one per backend, in the order of ``backends.BACKENDS``;
 #   2. one provider-credential lock (:func:`provider_credential_lock`);
-#   3. the secret-store lock (:func:`secret_store_lock`).
+#   3. the secret-store lock (:func:`secret_store_lock`);
+#   4. one held-record lock (:func:`held_record_lock`), a leaf taken last, only
+#      around a fresh read-modify-write of one sandbox's binding record, and
+#      never across an msb call or while waiting for any earlier lock.
+#
+# Every Python store mutation (scoped or global) takes 3 exclusively and keeps it
+# through the re-feed it triggers, so two backend writes for one credential never
+# overlap; a snapshot read takes 3 shared.
 #
 # Who takes what: create, run and recreate take 1, then 3 shared around the
 # backend create (where the store is read to bind the new guest's secrets);
@@ -412,6 +419,34 @@ def secret_store_lock(*, shared: bool = False) -> Iterator[None]:
         retry_s=_SANDBOX_RETRY_S,
         shared=shared,
         writer_preference=True,
+    ):
+        yield
+
+
+class HeldRecordLockTimeout(LockTimeout):
+    """Another acq command is rewriting the same sandbox's binding record."""
+
+
+def held_record_lock_path(name: str) -> Path:
+    """The lock file for one sandbox's binding record; it outlives the record."""
+    return state.state_dir() / "locks" / "held-records" / f"{state.record_key(name)}.lock"
+
+
+@contextmanager
+def held_record_lock(name: str) -> Iterator[None]:
+    """Serialize read-modify-writes of one sandbox's binding record (last in the lock order).
+
+    Held only around reading the record fresh, changing it and writing it back,
+    so it is never held across a backend call. The wait is the lifecycle lock's
+    (``$ACQ_SANDBOX_LOCK_TIMEOUT``). Raises :class:`HeldRecordLockTimeout`.
+    """
+    timeout_s = timeouts.env_seconds(SANDBOX_TIMEOUT_ENV, DEFAULT_SANDBOX_TIMEOUT_S)
+    with exclusive_lock(
+        held_record_lock_path(name),
+        timeout_s,
+        what=f"the binding-record lock for sandbox '{name}' (another acq command is changing it)",
+        timeout_cls=HeldRecordLockTimeout,
+        retry_s=_SANDBOX_RETRY_S,
     ):
         yield
 

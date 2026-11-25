@@ -85,7 +85,7 @@ def test_all_skips_existing_force_overwrites(monkeypatch, capsys):
     (("provider", "usai"), ["github", "--all"], False),
     (("provider", "usai"), ["usai", "box", "--all"], True),
     (("store", ""), ["github", "--all"], True),
-    (("store", ""), ["github", "box", "--all"], False),
+    (("store", ""), ["github", "box", "--all"], True),
 ])
 def test_import_takes_the_lock_secret_set_takes(monkeypatch, capsys, held, argv, blocked):
     # A sandbox-scoped import waits for a create of that sandbox on either

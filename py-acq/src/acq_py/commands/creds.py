@@ -103,7 +103,7 @@ def _set_locked(adapter, provider: str, key_env: str, hosts: list[str], value: s
             emit_json,
         )
     try:
-        adapter.provider_credential_set(provider, key_env, hosts, value)
+        adapter.provider_credential_set_locked(provider, key_env, hosts, value)
     except common._ADAPTER_ERRORS as exc:
         after = _stored_digest(provider)
         if before is _UNREADABLE or after is _UNREADABLE or before != after:
@@ -277,8 +277,7 @@ def _remove_credential(
             outcome.accepted = adapter.secret_unbind(secretstore.GLOBAL, provider, accept_unconfirmed=accept) or []
         elif in_backend is not False:
             adapter.secret_unbind(secretstore.GLOBAL, provider)
-        secretstore.delete(secretstore.key_for(provider))
-        secretstore.meta_delete(provider, None)
+        secretstore.remove_secret_locked(provider, None)
     except common._ADAPTER_ERRORS as exc:
         return _rm_failed(provider, exc, outcome, emit_json)
     outcome.removed = True
@@ -821,7 +820,7 @@ def _rotate_locked(backend: str, value: str, emit_json: bool) -> int:
     except migration.MigrationError as exc:
         return common._operational_failure(_ROTATE, exc.code, exc.message, exc.remediation, emit_json)
     try:
-        secretstore.store(secretstore.key_for(provider_creds.USAI_PROVIDER_ID), value)
+        secretstore.store_locked(secretstore.key_for(provider_creds.USAI_PROVIDER_ID), value)
     except common._ADAPTER_ERRORS as exc:
         return common._operational_failure(_ROTATE, exc.code, exc.message, exc.remediation, emit_json)
     return _rotate_report(_rotate_refeed_all(ready, backend, value) + skipped, emit_json)

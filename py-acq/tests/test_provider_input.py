@@ -252,7 +252,7 @@ def test_a_key_entered_at_the_prompt_is_stored_under_the_provider_and_store_lock
     monkeypatch.setattr(sys, "stdin", io.StringIO("y\n"))
     monkeypatch.setattr(common, "_read_secret_tty", lambda prompt: VALUE)
     held: list[tuple[bool, bool]] = []
-    real = secretstore.set_secret
+    real = secretstore.set_secret_locked
 
     def free(path, cls, *, shared=False) -> bool:
         try:  # at once: fails while another holder excludes this mode
@@ -269,7 +269,7 @@ def test_a_key_entered_at_the_prompt_is_stored_under_the_provider_and_store_lock
         ))
         return real(service, scope, value)
 
-    monkeypatch.setattr(secretstore, "set_secret", store)
+    monkeypatch.setattr(secretstore, "set_secret_locked", store)
     rc, doc, _out, err = _create(capsys, tmp_path)
     assert rc == 0, (doc, err)
     assert held == [(True, True)]
