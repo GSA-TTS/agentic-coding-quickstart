@@ -121,7 +121,7 @@ repos:
         entry: bash scripts/test-acq-bats
         language: system
         pass_filenames: false
-        files: '^(acq|acq\.backends/.*|scripts/(test-acq-lib\.sh|test-acq-bats|test-acq-bash32|fetch-bash32-oci\.py|scan-heredoc-subst\.py|bats-shard|run-shellcheck|probe-msb-node-startup|test-probe-msb-node-startup\.py|fix-exec-bits|verify-backends|verify-host-authority-live(-lib\.sh|-steps\.sh|-manual\.txt)?|summarize-bats-timing|bats_timing_(core|render)\.py)|test/bats/.*|\.github/workflows/bash32-compat\.yml)$'
+        files: '^(acq|acq\.backends/.*|scripts/(test-acq-lib\.sh|test-acq-bats|test-acq-bash32|fetch-bash32-oci\.py|scan-heredoc-subst\.py|bats-shard|run-shellcheck|probe-msb-node-startup|test-probe-msb-node-startup\.py|test-uninstall-macos|uninstall-acceptance-(helper\.py|lib\.sh)|fix-exec-bits|validate-git-executable-modes|verify-backends|verify-host-authority-live(-lib\.sh|-steps\.sh|-manual\.txt)?|summarize-bats-timing|bats_timing_(core|render)\.py)|test/bats/.*|\.github/workflows/(bash32-compat|macos-uninstall-acceptance)\.yml)$'
 
       # Offline evaluator unit/regression tests, not release qualification.
       # Hosted pre-commit runs --all-files, so this is also a standard CI gate.
@@ -165,6 +165,16 @@ repos:
   # stay correctly non-executable; a shebang is not the criterion.
   - repo: local
     hooks:
+      # A fresh checkout uses the Git index's modes, not mount-reported disk
+      # modes. Keep this read-only gate separate from fix-exec-bits, which may
+      # repair local worktree drift for developer convenience.
+      - id: git-executable-modes
+        name: intended executables are 100755 in the Git index
+        entry: bash scripts/validate-git-executable-modes
+        language: system
+        pass_filenames: false
+        always_run: true
+
       - id: fix-exec-bits
         name: executable bits match the git index
         entry: bash scripts/fix-exec-bits --check

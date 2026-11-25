@@ -33,6 +33,8 @@ WORKFLOW_REL='.github/workflows/bash32-compat.yml'
 #   .gitmodules           where `submodules: true` takes the bats URLs from
 #   .github/keys/...asc   the key that authenticates the bash 3.2.57 source
 #   release.yml           read by 06-windows-install.bats
+#   macos-uninstall-acceptance.yml, scripts/test-uninstall-macos and its
+#                         helper/lib  read and executed by 167-macos-uninstall-acceptance.bats
 #   bash32-compat.yml     the job itself
 REQUIRED_PATHSPECS='
 acq
@@ -54,11 +56,15 @@ scripts/bats_timing_render.py
 scripts/summarize-bats-timing
 scripts/run-shellcheck
 scripts/fix-exec-bits
+scripts/validate-git-executable-modes
 scripts/verify-backends
 scripts/qualify-msb-ro-mount
 scripts/rotate-apikey
 scripts/build-uninstaller
 scripts/probe-msb-node-startup
+scripts/test-uninstall-macos
+scripts/uninstall-acceptance-helper.py
+scripts/uninstall-acceptance-lib.sh
 scripts/test-probe-msb-node-startup.py
 scripts/setup-provider-input-validator
 scripts/install-provider-input-wheelhouse
@@ -71,6 +77,7 @@ test/vendor
 .gitmodules
 .github/keys/chet-ramey-bash-release-signing-key.asc
 .github/workflows/release.yml
+.github/workflows/macos-uninstall-acceptance.yml
 .github/workflows/bash32-compat.yml
 '
 
