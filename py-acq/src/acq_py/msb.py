@@ -271,6 +271,12 @@ def _run(
     # become U+FFFD. Input is checked strictly first (see
     # hostexec.utf8_input_ok), because replacing a character would silently
     # send a different value.
+    if secret_env and not all(provider_creds.key_env_ok(key) for key in secret_env):
+        raise MsbError(
+            errors.VALIDATION_FAILED,
+            "refusing a credential environment mapping containing a host process-control or invalid name",
+            "use a credential-specific env name and repair the binding before retrying",
+        )
     env = {**os.environ, **secret_env} if secret_env else None
     if not hostexec.utf8_input_ok(input_text):
         raise MsbError(
@@ -1300,15 +1306,38 @@ def service_binding(service: str, sandbox: str | None = None) -> SecretBinding |
     """
     meta = secretstore.meta_resolve(service, sandbox)
     if meta is not None and meta.host and meta.env:
+        if not provider_creds.key_env_ok(meta.env):
+            raise _unsafe_credential_env(service)
         found: SecretBinding | None = SecretBinding(meta.env, meta.host)
     elif service == "github":
         found = SecretBinding(GITHUB_TOKEN_ENV, GITHUB_HOSTS)
     else:
+        # Keep absent/invalid-host resolution unchanged, but never silently
+        # discard an inherited process-control credential pin during create.
+        try:
+            pin = next((p for p in reversed(provider_creds._env_bindings()) if p["provider"] == service), None)
+            if pin is None:
+                pin = provider_creds.get_binding(service)
+        except ValueError as exc:
+            raise _unsafe_credential_env(service) from exc
+        except (OSError, state.StateSchemaError):
+            pin = None  # preserve the existing unreadable-pin resolver contract
+        key = pin.get("key_env") if pin is not None else None
+        if isinstance(key, str) and not provider_creds.key_env_ok(key):
+            raise _unsafe_credential_env(service)
         pinned = provider_creds.provider_env_hosts(service)
         found = SecretBinding(*pinned) if pinned else None
     if found is None or not _binding_ok(found.env, found.host):
         return None
     return found
+
+
+def _unsafe_credential_env(service: str) -> MsbError:
+    return MsbError(
+        errors.VALIDATION_FAILED,
+        f"'{service}' has an invalid or host process-control credential env name",
+        "repair its endpoint or provider-credential binding with a credential-specific env name, then retry",
+    )
 
 
 # --- host-side record of the bindings each sandbox holds -------------------

@@ -57,10 +57,20 @@ USAI_PROVIDER_ID = "usai"
 USAI_PROVIDER_KEY_ENV = "USAI_API_KEY"
 USAI_PROVIDER_HOST = "api.gsa.usai.gov"
 
-# Process-critical variable names a provider credential must never occupy
-# (mirrors the legacy ACQ_PROVIDER_FORBIDDEN_KEY_ENVS).
+# Credential names must not configure the host process that reads them. Reserve
+# consumer-owned namespaces rather than chasing each new runtime/backend option:
+# acq/backend state and dispatch, desktop paths, loaders, Python, Git, shell and
+# locale. This policy applies to credentials, not ordinary inherited host config.
+_CONTROL_KEY_ENV_PREFIXES = (
+    "ACQ_", "MSB_", "SBX_", "XDG_", "LD_", "DYLD_", "PYTHON", "GIT_", "BASH_", "LC_",
+)
+# Standard process identity, shell, temporary-path and network trust controls.
+# Network controls matter because msb is the destination-pinning transport.
 FORBIDDEN_KEY_ENVS = frozenset(
-    "PATH IFS LD_PRELOAD LD_LIBRARY_PATH BASH_ENV ENV HOME SHELLOPTS PS4 CDPATH TMPDIR".split()
+    "PATH IFS ENV HOME SHELLOPTS BASHOPTS PS4 CDPATH TMPDIR TMP TEMP SHELL USER LOGNAME "
+    "LANG LANGUAGE COMSPEC SYSTEMROOT WINDIR PATHEXT USERPROFILE HOMEDRIVE HOMEPATH "
+    "APPDATA LOCALAPPDATA PROGRAMDATA HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY "
+    "SSL_CERT_FILE SSL_CERT_DIR REQUESTS_CA_BUNDLE CURL_CA_BUNDLE".split()
 )
 
 # Environment-variable names reserved for the built-in services; a provider may
@@ -120,7 +130,11 @@ def provider_id_ok(provider: str) -> bool:
 
 
 def key_env_ok(key_env: str) -> bool:
-    return key_env not in FORBIDDEN_KEY_ENVS and bool(_KEY_ENV_RE.fullmatch(key_env))
+    return (
+        key_env not in FORBIDDEN_KEY_ENVS
+        and not key_env.startswith(_CONTROL_KEY_ENV_PREFIXES)
+        and bool(_KEY_ENV_RE.fullmatch(key_env))
+    )
 
 
 def key_env_owner(key_env: str) -> str | None:
@@ -146,7 +160,8 @@ def validate_binding(provider: str, key_env: str, hosts: list[str]) -> str | Non
     if not key_env_ok(key_env):
         return (
             f"invalid KEY_ENV {key_env!r} for provider {provider!r}; want an "
-            "upper-case env var name (for example: OPENCODE_GO_API_KEY)"
+            "upper-case credential env var name outside host process-control namespaces "
+            "(for example: OPENCODE_GO_API_KEY)"
         )
     owner = key_env_owner(key_env)
     if owner is not None and owner != provider:

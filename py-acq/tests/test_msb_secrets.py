@@ -119,13 +119,15 @@ def test_service_binding_refuses_unsafe_mappings(monkeypatch, tmp_path):
     _env(monkeypatch, tmp_path)
     # A process-critical env name would hand the value to the msb child as PATH.
     secretstore.meta_store("svc", None, "api.example.gov", "PATH")
-    assert msb.service_binding("svc") is None
+    with pytest.raises(msb.MsbError, match="credential env name"):
+        msb.service_binding("svc")
     # Lower-case env names and wildcard hosts are not bindable either; an unsafe
     # recorded endpoint never falls back to the fixed table.
     secretstore.meta_store("github", None, "*.example.gov", "GITHUB_TOKEN")
     assert msb.service_binding("github") is None
     secretstore.meta_store("svc2", None, "api.example.gov", "lower_env")
-    assert msb.service_binding("svc2") is None
+    with pytest.raises(msb.MsbError, match="credential env name"):
+        msb.service_binding("svc2")
 
 
 def test_provider_pin_resolution(monkeypatch, tmp_path):
@@ -141,7 +143,8 @@ def test_provider_pin_resolution(monkeypatch, tmp_path):
     assert msb.service_binding("usai") == ("USAI_API_KEY", "usai.example.gov")
     # A malformed pin binds nothing: it never falls back to the anchor.
     monkeypatch.setenv("ACQ_PROVIDER_CREDENTIAL_BINDINGS", "usai=not-an-env")
-    assert msb.service_binding("usai") is None
+    with pytest.raises(msb.MsbError, match="credential env name"):
+        msb.service_binding("usai")
     assert provider_creds.provider_ids() == ["usai"]
     monkeypatch.delenv("ACQ_PROVIDER_CREDENTIAL_BINDINGS")
     # An unreadable (newer-schema) record also binds nothing.
