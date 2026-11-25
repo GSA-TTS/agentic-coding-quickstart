@@ -77,11 +77,15 @@ on:
   pull_request:
     branches:
       - main
+      - migration/python-cross-platform
+  push:
+    branches:
+      - migration/python-cross-platform
   merge_group:
     branches: [main]
 
 concurrency:
-  group: bash32-compat-${{ github.head_ref || github.ref }}
+  group: bash32-compat-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -123,9 +127,17 @@ jobs:
       - name: Compute relevance from the PR or merge-group diff
         id: filter
         env:
+          EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
+          # Pushes have no PR base. Run everything rather than risk a false skip
+          # on a new branch, a multi-commit push, or an unavailable before SHA.
+          if [ "$EVENT_NAME" = "push" ]; then
+            echo "relevant=true" >>"$GITHUB_OUTPUT"
+            echo "Push run: running the complete bash 3.2 suite."
+            exit 0
+          fi
           # Fail CLOSED on any error in this step: if the diff can't be
           # computed for any reason, fail rather than silently skipping the
           # real check. An error here must surface as a

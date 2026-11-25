@@ -41,12 +41,16 @@ on:
   pull_request:
     branches:
       - main
+      - migration/python-cross-platform
+  push:
+    branches:
+      - migration/python-cross-platform
   merge_group:
     branches: [main]
   workflow_dispatch:
 
 concurrency:
-  group: windows-${{ github.head_ref || github.ref }}
+  group: windows-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions: {}
@@ -82,9 +86,9 @@ jobs:
           BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] || [ "$EVENT_NAME" = "push" ]; then
             echo "relevant=true" >>"$GITHUB_OUTPUT"
-            echo "Manual run: running every Windows job."
+            echo "Manual or push run: running every Windows job (no PR base required)."
             exit 0
           fi
           if [[ ! "$BASE_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
@@ -130,6 +134,11 @@ jobs:
             'scripts/gen-provenance' \
             '.github/workflows/release.yml' \
             '.github/workflows/tier3-release-gate.yml' \
+            '.github/workflows/python-quality.yml' \
+            '.github/workflows/python-vectors.yml' \
+            '.github/workflows/pre-commit.yml' \
+            '.github/workflows/bash32-compat.yml' \
+            '.github/workflows/macos.yml' \
             '.github/workflows/windows.yml')"
           if [ -n "$changed" ]; then
             echo "relevant=true" >>"$GITHUB_OUTPUT"

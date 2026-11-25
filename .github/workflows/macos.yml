@@ -1,0 +1,189 @@
+# Native Apple Silicon coverage, independent of every required job.
+# timeout-minutes bounds execution, NOT GitHub's runner queue. If no runner
+# starts, the queued job must be investigated on GitHub; it is never skipped
+# merely because runner capacity is unavailable.
+name: macOS
+
+on:
+  pull_request:
+    branches: [main, migration/python-cross-platform]
+  push:
+    branches: [main, migration/python-cross-platform]
+  merge_group:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: macos-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  macos:
+    name: macOS (arm64 pytest and offline install)
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Require native Apple Silicon
+        run: |
+          set -euo pipefail
+          [ "$(uname -m)" = arm64 ] || { echo '::error::macos-15 must provide an arm64 runner'; exit 1; }
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Like Windows, diff the actual event base, not origin/main. Push/manual
+      # runs have no PR base and run everything. Invalid PR bases fail closed.
+      # Include all workflows and scripts: the full pytest suite reads them.
+      - name: Determine macOS relevance
+        id: filter
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = push ] || [ "$EVENT_NAME" = workflow_dispatch ]; then
+            echo 'relevant=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          [[ "$BASE_SHA" =~ ^[0-9a-fA-F]{40}$ ]] || { echo '::error::event did not supply a valid base SHA'; exit 1; }
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          changed="$(git diff --name-only "$BASE_SHA" -- \
+            'acq' 'acq-python' 'acq.cmd' 'acq.ps1' 'acq.backends' \
+            'install.sh' 'install.ps1' 'installer' 'py-acq' 'scripts' \
+            'qualification' 'docs/qualification-ledger.json' 'test' \
+            'package.json' '.github/workflows' '.github/CODEOWNERS' \
+            '.gitattributes' '.gitmodules')"
+          if [ -n "$changed" ]; then
+            echo 'relevant=true' >> "$GITHUB_OUTPUT"
+            printf 'Relevant paths changed:\n%s\n' "$changed"
+          else
+            echo 'relevant=false' >> "$GITHUB_OUTPUT"
+            echo 'No macOS inputs changed; native tests and installation skipped.'
+          fi
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: steps.filter.outputs.relevant == 'true'
+        with:
+          python-version: '3.12'
+
+      - name: Create isolated test and install area
+        id: area
+        if: steps.filter.outputs.relevant == 'true'
+        run: |
+          set -euo pipefail
+          area="$(mktemp -d "$RUNNER_TEMP/acq-macos.XXXXXX")"
+          printf 'path=%s\n' "$area" >> "$GITHUB_OUTPUT"
+
+      - name: Install pinned test tools
+        if: steps.filter.outputs.relevant == 'true'
+        env:
+          AREA: ${{ steps.area.outputs.path }}
+        run: |
+          set -euo pipefail
+          python -m venv "$AREA/tools"
+          "$AREA/tools/bin/python" -m pip install --require-hashes --no-deps --only-binary :all: -r py-acq/requirements-quality.txt
+
+      # Same full invocation as Windows, with skip reasons retained. conftest
+      # isolates state and substitutes secret-store fakes: macOS security argv,
+      # stdin and Bash/Python keychain parity run without a login keychain.
+      # Windows-only facilities and unavailable optional tools retain their
+      # existing reasoned skips; real backend/live credential tests are not here.
+      - name: pytest (py-acq, Python 3.12, macOS)
+        if: steps.filter.outputs.relevant == 'true'
+        env:
+          AREA: ${{ steps.area.outputs.path }}
+        run: '"$AREA/tools/bin/python" -m pytest py-acq/tests -q -rs'
+
+      # Build the host asset set with the same assembler, wheel hashes, runtime
+      # pin and baked identity as build-assets.yml. No workflow_run, remote
+      # artifacts, signing inputs or secrets are involved.
+      - name: Read build-assets macOS pins
+        if: steps.filter.outputs.relevant == 'true'
+        run: |
+          python -I - <<'PY'
+          import os, pathlib, re
+          text = pathlib.Path('.github/workflows/build-assets.yml').read_text()
+          block = text.split('- platform: macos-arm64\n', 1)[1].split('- platform:', 1)[0]
+          fields = {key: re.search(r'^\s+' + key + r': (.+)$', block, re.M).group(1) for key in ('runtime_url', 'runtime_sha256', 'python_versions')}
+          assert re.fullmatch(r'https://github.com/astral-sh/python-build-standalone/releases/download/[^\s]+/cpython-[^\s]+-aarch64-apple-darwin-install_only_stripped.tar.gz', fields['runtime_url'])
+          assert re.fullmatch(r'[0-9a-f]{64}', fields['runtime_sha256'])
+          assert fields['python_versions'] == '"312 313 314"'
+          version = re.search(r'^  ACQ_BUILD_RUNTIME_VERSION: ([0-9.]+)$', text, re.M).group(1)
+          with open(os.environ['GITHUB_ENV'], 'a') as out:
+              for key, value in {'RUNTIME_URL': fields['runtime_url'], 'RUNTIME_SHA256': fields['runtime_sha256'], 'ACQ_BUILD_RUNTIME_VERSION': version}.items():
+                  out.write(f'{key}={value}\n')
+          PY
+
+      - name: Assemble hash-verified macOS arm64 offline assets
+        if: steps.filter.outputs.relevant == 'true'
+        env:
+          AREA: ${{ steps.area.outputs.path }}
+        run: |
+          set -euo pipefail
+          mkdir "$AREA/wheelhouse" "$AREA/dist"
+          for py in 312 313 314; do
+            python -I -m pip download --only-binary=:all: --require-hashes \
+              --requirement scripts/provider-input-validator-requirements-macos.txt \
+              --platform macosx_11_0_arm64 --implementation cp --python-version "$py" --abi "cp$py" --dest "$AREA/wheelhouse"
+          done
+          python -I - <<'PY'
+          import hashlib, os, pathlib
+          root = pathlib.Path(os.environ['AREA'], 'wheelhouse')
+          (root / 'SHA256SUMS').write_text(''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n' for p in sorted(root.glob('*.whl'))))
+          PY
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+            --connect-timeout 20 --max-time 300 "$RUNTIME_URL" -o "$AREA/runtime.archive"
+          sh scripts/assemble-release macos-arm64 "$AREA/runtime.archive" "$RUNTIME_SHA256" "$AREA/wheelhouse" "$AREA/dist"
+          cp install.sh "$AREA/dist/"
+          sh scripts/gen-provenance "$AREA/dist"
+          # This host-only set needs no other platform's archives. Hash exactly
+          # the actual files; the installer verifies archive and provenance.
+          python -I - <<'PY'
+          import hashlib, os, pathlib
+          root = pathlib.Path(os.environ['AREA'], 'dist')
+          (root / 'SHA256SUMS').write_text(''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n' for p in sorted(root.iterdir()) if p.is_file()))
+          PY
+
+      - name: Offline install, packaged identity, help and read-only command
+        if: steps.filter.outputs.relevant == 'true'
+        env:
+          AREA: ${{ steps.area.outputs.path }}
+          ACQ_IMPL: python
+        run: |
+          set -euo pipefail
+          # Isolated HOME prevents shell-profile or existing user-state changes.
+          mkdir "$AREA/home"
+          export HOME="$AREA/home"
+          export XDG_CONFIG_HOME="$HOME/.config" XDG_DATA_HOME="$HOME/.local/share" XDG_STATE_HOME="$HOME/.local/state"
+          sh "$AREA/dist/install.sh" --source "$AREA/dist" --install-dir "$AREA/installed" --bin-dir "$AREA/bin" --yes
+          "$AREA/bin/acq" version --json > "$AREA/installed.json"
+          python -I - <<'PY'
+          import json, os, pathlib, subprocess
+          d = json.loads(pathlib.Path(os.environ['AREA'], 'installed.json').read_text())['data']
+          assert d['impl'] == 'python', d
+          assert d['acq_version'] == json.load(open('package.json'))['version'], d
+          assert d['source_revision'] == subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(), d
+          PY
+          "$AREA/bin/acq" --help
+          "$AREA/bin/acq" backend list --json > "$AREA/backends.json"
+          python -I -c 'import json,os,pathlib; d=json.loads(pathlib.Path(os.environ["AREA"],"backends.json").read_text()); assert d["command"] == "backend list", d'
+          "$AREA/installed/py-acq/runtime/bin/python3" -I -c 'import platform; assert platform.machine() == "arm64"'
+
+      - name: Clean only the area created by this job (no uninstall)
+        if: always() && steps.area.outputs.path != ''
+        env:
+          AREA: ${{ steps.area.outputs.path }}
+        run: |
+          set -euo pipefail
+          case "$AREA" in
+            "$RUNNER_TEMP"/acq-macos.*) rm -rf -- "$AREA" ;;
+            *) echo '::error::refusing cleanup outside the job-owned area'; exit 1 ;;
+          esac

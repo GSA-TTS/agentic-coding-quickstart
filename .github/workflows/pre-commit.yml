@@ -9,14 +9,16 @@ on:
   pull_request:
     branches:
       - main
+      - migration/python-cross-platform
   push:
     branches:
       - main
+      - migration/python-cross-platform
   merge_group:
     branches: [main]
 
 concurrency:
-  group: pre-commit-${{ github.head_ref || github.ref }}
+  group: pre-commit-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
