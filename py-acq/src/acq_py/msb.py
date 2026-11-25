@@ -850,7 +850,7 @@ _SAFE_SHELL = re.compile(r"/[A-Za-z0-9._/-]*")
 # of the entry (the comment field in particular) may hold any bytes at all.
 _AGENT_SHELL_SCRIPT = (
     '{ getent passwd agent 2>/dev/null || grep "^agent:" /etc/passwd 2>/dev/null; }'
-    " | head -n1 | cut -d: -f7"
+    " | LC_ALL=C head -n1 | LC_ALL=C cut -d: -f7"
 )
 
 

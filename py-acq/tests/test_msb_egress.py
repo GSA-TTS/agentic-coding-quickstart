@@ -333,8 +333,14 @@ def test_hostile_baseline_line_is_refused(monkeypatch, tmp_path, capsys, calls, 
     _assert_refused_before_create(*_create(capsys, tmp_path), calls)
 
 
-def test_every_emitted_rule_is_one_well_formed_token(monkeypatch, tmp_path, capsys, calls):
+@pytest.mark.parametrize("with_upstream_ca", [False, True])
+def test_every_emitted_rule_is_one_well_formed_token(monkeypatch, tmp_path, capsys, calls, with_upstream_ca):
     _env(monkeypatch, tmp_path)
+    # Exporting host CAs is covered separately. Keep this argv test deterministic
+    # on macOS too, and verify the legitimate CA flag's paired path explicitly.
+    from acq_py import msb_options
+    ca = str(tmp_path / "fixture-ca.pem")
+    monkeypatch.setattr(msb_options, "upstream_ca_flags", lambda: ["--tls-upstream-ca-cert", ca] if with_upstream_ca else [])
     assert _create(capsys, tmp_path)[0] == 0
     argv = _create_argv(calls)
     token = re.compile(r"allow@(dns|(\*\.)?[A-Za-z0-9_.-]+(:tcp:[1-9][0-9]*)?)")
@@ -344,8 +350,11 @@ def test_every_emitted_rule_is_one_well_formed_token(monkeypatch, tmp_path, caps
     flags = [t for t in argv[1:-1] if t.startswith("-")]
     assert set(flags) <= {
         "--name", "--volume", "-w", "-m", "-c", "--net-rule", "--net-default-egress", "--tls-intercept",
-        "--script-path", "--trust-host-cas", "--env", "--secret",
+        "--script-path", "--trust-host-cas", "--env", "--secret", "--tls-upstream-ca-cert",
     }
+    assert argv.count("--tls-upstream-ca-cert") == int(with_upstream_ca)
+    if with_upstream_ca:
+        assert argv[argv.index("--tls-upstream-ca-cert") + 1] == ca
 
 
 # ---------------------------------------------------------------------------

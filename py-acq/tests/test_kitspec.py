@@ -17,7 +17,9 @@ import os
 import random
 import re
 import shutil
+import shlex
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -776,7 +778,10 @@ _HOST_DEPENDENT_SOURCES = ["files/a/."]
 
 @needs_bash
 @pytest.mark.parametrize("via_link", [False, True])
-def test_source_confinement_parity(tmp_path, via_link):
+@pytest.mark.parametrize("strict_host_resolver", [False, True])
+def test_source_confinement_parity(tmp_path, via_link, strict_host_resolver, monkeypatch):
+    if strict_host_resolver:
+        _strict_host_resolver(tmp_path, monkeypatch)
     kit = _confinement_kit(tmp_path)
     kit_arg = kit
     if via_link:
@@ -829,7 +834,10 @@ def _tree_cases(tmp_path: Path) -> dict[str, tuple[Path, Path]]:
 
 
 @needs_bash
-def test_tree_symlink_parity(tmp_path):
+@pytest.mark.parametrize("strict_host_resolver", [False, True])
+def test_tree_symlink_parity(tmp_path, strict_host_resolver, monkeypatch):
+    if strict_host_resolver:
+        _strict_host_resolver(tmp_path, monkeypatch)
     script = '. "$1"; kit_tree_symlinks_within "$2" "$3"; echo "rc=$?" >&2'
     assert BASH is not None
     for name, (kit, tree) in _tree_cases(tmp_path).items():
@@ -846,6 +854,52 @@ def test_tree_symlink_parity(tmp_path):
     sibling = tmp_path / "sibling"
     assert kitspec.tree_symlinks_within(sibling, sibling / "files") == [
         "kit-translate: kit payload symlink points outside the kit: files/evil"]
+
+
+def _strict_host_resolver(tmp_path, monkeypatch):
+    """Model macOS realpath's strict missing-target and trailing-slash behavior."""
+    tools = tmp_path / "strict-resolver"
+    tools.mkdir()
+    real_readlink = shutil.which("readlink")
+    assert real_readlink is not None
+    (tools / "realpath").write_text(
+        f"#!{sys.executable}\nimport os, sys\n"
+        "try:\n    print(os.path.realpath(sys.argv[-1].rstrip('/'), strict=True))\n"
+        "except OSError:\n    sys.exit(1)\n", encoding="utf-8", newline="\n",
+    )
+    (tools / "readlink").write_text(
+        f"#!/bin/sh\n[ \"$1\" = -f ] && exit 1\nexec {shlex.quote(real_readlink)} \"$@\"\n",
+        encoding="utf-8", newline="\n",
+    )
+    for name in ("realpath", "readlink"):
+        (tools / name).chmod(0o755)
+    monkeypatch.setenv("PATH", str(tools) + os.pathsep + os.environ["PATH"])
+
+
+@needs_bash
+@pytest.mark.parametrize("absolute", [False, True])
+@pytest.mark.parametrize("suffix", ["/", "///"])
+def test_tree_confinement_follows_slash_aliases_outside_scanned_tree(tmp_path, monkeypatch, absolute, suffix):
+    _strict_host_resolver(tmp_path, monkeypatch)
+    kit = tmp_path / "kit"
+    files = kit / "files"
+    files.mkdir(parents=True)
+    # The alias is outside the scanned files tree; only resolving every hop
+    # prevents the payload link from being mistaken for an inside-kit path.
+    outside = tmp_path / "outside" / "missing"
+    outside.parent.mkdir()
+    (kit / "alias").symlink_to(outside)
+    target = str(kit / "alias") if absolute else "../alias"
+    (files / "link").symlink_to(target + suffix)
+    expected = ["kit-translate: kit payload symlink points outside the kit: files/link"]
+    assert kitspec.tree_symlinks_within(kit, files) == expected
+    proc = subprocess.run(
+        [BASH, "-c", '. "$1"; kit_tree_symlinks_within "$2" "$3"', "x",
+         str(KIT_TRANSLATE), str(kit), str(files)],
+        env={"PATH": os.environ["PATH"], "LC_ALL": "C"}, capture_output=True, text=True,
+    )
+    assert proc.returncode == 1
+    assert proc.stderr.splitlines() == expected
 
 
 def test_tree_warnings_name_entries_kit_relative_with_slashes(monkeypatch):
