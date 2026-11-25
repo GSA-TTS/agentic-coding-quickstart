@@ -1011,6 +1011,78 @@ _acq_kit_fetch_start() {
   done
   trap - HUP INT TERM
 }
+# Explicit affected targets are checked before even starting the temporary
+# fetch lifecycle. Paths and inner-command arguments are not sandbox names.
+_acq_early_legacy_target_check() {
+  local verb="" prev="" arg parsed scope fanout=0 listed tool
+  for arg in "$@"; do
+    [ "$arg" != -- ] || break
+    case "$arg" in --help|-h) return 0 ;; esac
+  done
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --backend|--image) shift 2 ;;
+      --backend=*|--image=*) shift ;;
+      *) verb="$1"; shift; break ;;
+    esac
+  done
+  case "$verb" in
+    stop|start|restart|rm|exec|shell)
+      [ "$#" -eq 0 ] || acq_legacy_mutation_name_check "$1" || return 1 ;;
+    ports)
+      for arg in "$@"; do
+        case "$arg" in --publish|--publish=*) acq_legacy_mutation_name_check "${1:-}" || return 1 ;; esac
+      done ;;
+    run)
+      [ "$#" -eq 0 ] || acq_is_known_agent "$1" || acq_legacy_mutation_name_check "$1" || return 1 ;;
+    kit)
+      case "${1:-}" in apply|update) [ "$#" -lt 2 ] || acq_legacy_mutation_name_check "$2" || return 1 ;; esac ;;
+    github-scope) [ "$#" -eq 0 ] || acq_legacy_mutation_name_check "$1" || return 1 ;;
+    secret)
+      case "${1:-}" in
+        import)
+          parsed=$(_acq_import_parse_args "${@:2}") || return 1
+          scope=$(printf '%s' "$parsed" | cut -f4)
+          case "$scope" in ""|global) fanout=1 ;; *) acq_legacy_mutation_name_check "$scope" || return 1 ;; esac ;;
+        set|rm)
+          case "${2:-}" in ""|-g|--global) fanout=1 ;; -*) : ;; *)
+            case "${3:-}" in ""|-*) fanout=1 ;; *) acq_legacy_mutation_name_check "$2" || return 1 ;; esac ;;
+          esac ;;
+      esac ;;
+    provider-credential) case "${1:-}" in set|rm) fanout=1 ;; esac ;;
+    usai-rotate-api-key) fanout=1 ;;
+    attach)
+      for arg in "$@"; do
+        case "$arg" in -*) : ;; *) acq_legacy_mutation_name_check "$arg" || return 1; break ;; esac
+      done ;;
+    cp)
+      for arg in "$@"; do
+        case "$arg" in [A-Za-z]:*|/*|\\*) : ;; *:*) acq_legacy_mutation_name_check "${arg%%:*}" || return 1 ;; esac
+      done ;;
+  esac
+  if [ "$fanout" -eq 1 ]; then
+    for tool in msb sbx; do
+      command -v "$tool" >/dev/null 2>&1 || continue
+      case "$tool" in
+        msb) listed=$(msb list -q) || return 1 ;;
+        sbx) listed=$(sbx ls -q) || return 1 ;;
+      esac
+      while IFS= read -r scope; do
+        [ -z "$scope" ] || acq_legacy_mutation_name_check "$scope" || return 1
+      done <<< "$listed"
+    done
+  fi
+  case "$verb" in
+    create|run|attach)
+      for arg in "$@"; do
+        [ "$arg" != -- ] || break
+        case "$prev" in --name|--recreate) acq_legacy_mutation_name_check "$arg" || return 1 ;; esac
+        case "$arg" in --name=*|--recreate=*) acq_legacy_mutation_name_check "${arg#*=}" || return 1 ;; esac
+        prev="$arg"
+      done ;;
+  esac
+}
+_acq_early_legacy_target_check "$@" || exit 1
 _acq_kit_fetch_start
 
 # ---------------------------------------------------------------------------
@@ -2005,7 +2077,7 @@ case "$subcommand" in
     acq_backend_guard_version
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: ports: missing sandbox name" >&2; exit 1; }
-    acq_name_form_check ports "$local_name" || exit 1
+    acq_name_form_check "ports query" "$local_name" || exit 1
     shift
     acq_backend_ports "$local_name" "$@"
     ;;
