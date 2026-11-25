@@ -4,7 +4,7 @@ description: "A dispatch-only workflow that exercises the guided uninstaller aga
 status: proposed
 tier: 2
 date: 2026-11-19
-last_updated: "2026-11-19"
+last_updated: "2026-11-25"
 decision_makers: ["Bret Mogilefsky"]
 category: development-process
 nist_controls: ["SA-11", "SA-15", "CM-3", "CM-5", "AC-6", "SI-7"]
@@ -141,6 +141,22 @@ Compliance:
   CM-5). Expression injection is avoided by passing inputs through `env:`, pinned by
   `test/bats/167-macos-uninstall-acceptance.bats`, which also checks each of those
   properties against mutated copies of the workflow (SA-11).
+
+## Amendment (2026-11-25): the Intel runner leg is removed
+
+**Status of this amendment:** proposed (2026-11-25), by Bret Mogilefsky.
+
+The matrix above described two legs, `macos-15` (Apple Silicon) and
+`macos-15-intel`. Intel Macs are not a supported acq host: the local sandbox
+runtime needs Apple Silicon virtualization and Rosetta does not change that
+(`docs/howto/acq.md`), the qualification matrix never claimed a macOS x86_64
+cell, and the Python rewrite no longer builds a `macos-x86_64` release archive —
+its installer refuses that host before fetching anything. Acceptance on a host
+no release can be installed on proves nothing, so the workflow now runs the
+`macos-15` leg only. Everything else in this decision — dispatch-only, the two
+checkouts, the validated `ref`, the report's verdict rules, and what it cannot
+prove — is unchanged. The note about nested virtualization being "silent for
+Intel" is therefore moot.
 
 ## Links
 

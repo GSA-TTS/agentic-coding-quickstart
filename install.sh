@@ -235,9 +235,12 @@ fi
 # ---------------------------------------------------------------------------
 # Platform -> release archive name (the enumerated offline asset set, ADR-0042m).
 #
-# Supported (ADR-0042m §platform matrix): macOS arm64 + x86_64, Linux x86_64 +
-# aarch64. Windows x64 is served by install.ps1; Windows ARM64 and musl are out of
-# scope. The archive name for each cell is mirrored in installer/assets.json.
+# Supported: macOS arm64 (Apple Silicon), Linux x86_64 + aarch64. Windows x64 is
+# served by install.ps1; Windows ARM64 and musl are out of scope. Intel Macs are
+# NOT supported: acq's local runtime needs Apple Silicon virtualization, and
+# Rosetta does not change that (docs/howto/acq.md), so there is no macos-x86_64
+# archive and that host is refused before anything is fetched or read. The
+# archive name for each cell is mirrored in installer/assets.json.
 # ---------------------------------------------------------------------------
 
 platform_key() {
@@ -247,7 +250,9 @@ platform_key() {
     Darwin)
       case "$arch" in
         arm64) printf 'macos-arm64\n' ;;
-        x86_64) printf 'macos-x86_64\n' ;;
+        # An Intel Mac is refused by name, not reported as an unknown platform:
+        # status 2 tells the caller to print the Intel-specific message.
+        x86_64) return 2 ;;
         *) return 1 ;;
       esac ;;
     Linux)
@@ -264,7 +269,6 @@ archive_name() {
   key="$1"
   case "$key" in
     macos-arm64)    printf 'acq-macos-arm64.tar.gz\n' ;;
-    macos-x86_64)   printf 'acq-macos-x86_64.tar.gz\n' ;;
     linux-x86_64)   printf 'acq-linux-x86_64.tar.gz\n' ;;
     linux-aarch64)  printf 'acq-linux-aarch64.tar.gz\n' ;;
     *) return 1 ;;
@@ -522,7 +526,18 @@ rc_file_for_shell() {
 
 step "Checking your system"
 
-KEY="$(platform_key)" || die "unsupported platform '$(uname -s 2>/dev/null)/$(uname -m 2>/dev/null)' (ADR-0042m supports macOS arm64/x86_64 and Linux x86_64/aarch64)"
+# Before any source is resolved, read or fetched: an unusable host is refused
+# here, not after a download it cannot run.
+platform_status=0
+KEY="$(platform_key)" || platform_status=$?
+case "$platform_status" in
+  0) ;;
+  2) die "Intel Macs (x86_64) are not supported by acq.
+acq's local sandbox runtime needs Apple Silicon virtualization, and running the
+installer under Rosetta does not change that. See the host requirements in
+docs/howto/acq.md. Nothing was downloaded or installed." ;;
+  *) die "unsupported platform '$(uname -s 2>/dev/null)/$(uname -m 2>/dev/null)' (supported: macOS arm64, Linux x86_64/aarch64; Windows x64 uses install.ps1)" ;;
+esac
 ARCHIVE="$(archive_name "$KEY")" || die "no release archive for platform '$KEY'"
 
 # Resolve the source: a URL (default), or a local directory holding the offline

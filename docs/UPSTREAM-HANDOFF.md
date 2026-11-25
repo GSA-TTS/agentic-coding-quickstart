@@ -38,12 +38,12 @@ PR description.
   [`qualification-ledger.json`](qualification-ledger.json) implement three tiers
   of evidence. Supported platforms and currently qualified cells are different
   claims; offline tests do not establish live enforcement.
-- **Release asset build:** `.github/workflows/build-assets.yml` builds all five
-  per-platform archives from pinned runtimes (python-build-standalone for POSIX,
+- **Release asset build:** `.github/workflows/build-assets.yml` builds every
+  per-platform archive from pinned runtimes (python-build-standalone for POSIX,
   the python.org embed for Windows) and the exact-hash validator `wheelhouse/`
   as `installer/assets.json` enumerates them, generates `provenance.json`,
   enumerates the complete set with `scripts/gen-install-assets`, and installs it
-  offline on Linux, macOS and Windows. On pull requests it runs as a dry run
+  offline on Linux and Windows. On pull requests it runs as a dry run
   (uploading workflow artifacts only, cross-building `macos-arm64` on Linux
   because Apple-silicon runners did not start on the fork);
   `.github/workflows/release.yml` calls it at the release tag with `sign: true`

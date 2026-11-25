@@ -89,7 +89,7 @@ records were merged to the most complete definition rather than kept twice.
 
 - **Structured result** — An explicitly requested, versioned JSON document on stdout, with human diagnostics kept on stderr. *(Source: ADR-0038m)*
 
-- **Supported platform** — an OS/arch cell the install decision commits to ship for (Windows x64, macOS arm64, macOS x86_64, Linux x86_64, Linux aarch64). Fixed; not reopened here. *(Source: ADR-0044m)*
+- **Supported platform** — an OS/arch cell the install decision commits to ship for (Windows x64, macOS arm64, Linux x86_64, Linux aarch64). macOS x86_64 was dropped: Intel Macs cannot run the local sandbox runtime (ADR-0042m amendment 2026-11-25). *(Source: ADR-0044m)*
 
 - **Test vector** — one immutable, self-describing JSON record of a single CLI invocation and its expected observable result, plus the isolation it requires. Data, never behaviour. *(Source: ADR-0039m, ADR-0043m)*
 

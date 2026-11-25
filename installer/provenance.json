@@ -30,10 +30,6 @@
       "supplier": "python-build-standalone",
       "version": "<cpython version>"
     },
-    "macos-x86_64": {
-      "supplier": "python-build-standalone",
-      "version": "<cpython version>"
-    },
     "linux-x86_64": {
       "supplier": "python-build-standalone",
       "version": "<cpython version>"

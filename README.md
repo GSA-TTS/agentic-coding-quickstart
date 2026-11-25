@@ -52,7 +52,8 @@ Open a terminal — **Terminal** (macOS) or **PowerShell** (Windows). You'll typ
 (or paste) the commands below into this window.
 
 > **Before you start:** the sandbox runs on your machine's hardware
-> virtualization. Apple Silicon Macs are ready to go. Windows 11 needs the
+> virtualization. Apple Silicon Macs are ready to go; Intel Macs are not
+> supported. Windows 11 needs the
 > **Windows Hypervisor Platform** enabled — see the box below. Linux needs KVM
 > (`/dev/kvm`). For the full platform requirements, see
 > [supported hosts](docs/howto/acq.md#msb-host-setup).
