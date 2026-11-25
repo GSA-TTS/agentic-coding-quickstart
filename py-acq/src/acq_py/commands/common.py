@@ -383,9 +383,9 @@ def _stdin_is_mintty() -> bool:
 
 
 _MINTTY_HINT = (
-    "acq: warning: this terminal (Git Bash/mintty) cannot hide what you type, so the secret "
-    "will be visible. Press Ctrl-C and pipe it instead (printf '%s' \"$TOKEN\" | acq ...), "
-    "or run acq from a native console (Windows Terminal, PowerShell, cmd)."
+    "this terminal (Git Bash/mintty) cannot hide what you type; refusing to read the secret. "
+    "Use a native Windows console (PowerShell or cmd, including in Windows Terminal), "
+    "or explicitly pipe the secret or redirect a protected input file on stdin."
 )
 
 
@@ -419,19 +419,17 @@ def _read_secret_value(prompt: str = "Enter secret value: ") -> str:
 
     Bytes that are not valid UTF-8 fail closed with a fixed
     ``validation_failed`` message that quotes nothing from the input. Under
-    Git Bash/mintty, where typed input cannot be hidden, a warning and the
-    prompt go to stderr first.
+    Git Bash/mintty, where typed input cannot be hidden, input is refused before
+    prompting or reading. Explicit non-terminal pipes and files remain accepted.
 
     The value is returned to the caller and must never be printed, logged, or
     placed on argv. An empty result signals "no value was piped".
     """
     if _stdin_is_terminal():
         return _read_secret_tty(prompt)
-    mintty = _stdin_is_mintty()
-    if mintty:
-        print(_MINTTY_HINT, file=sys.stderr)
-        print(prompt, end="", file=sys.stderr, flush=True)
-    data = _read_piped_secret(one_line=mintty)
+    if _stdin_is_mintty():
+        raise SecretInputError(_MINTTY_HINT)
+    data = _read_piped_secret()
     if data.endswith("\n"):
         data = data[:-1]  # strip exactly one terminal newline
         if data.endswith("\r"):  # optional preceding CR (CRLF terminator)

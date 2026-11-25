@@ -690,16 +690,49 @@ def test_mintty_pipe_names():
         assert common._stdin_is_mintty() is False
 
 
-def test_mintty_stdin_warns_that_input_is_visible_and_reads_one_line(monkeypatch, capsys):
+@pytest.mark.parametrize("backend", ["sbx", "msb"])
+@pytest.mark.parametrize("emit_json", [False, True])
+def test_mintty_secret_set_refuses_before_read_store_or_backend(monkeypatch, tmp_path, capsys, backend, emit_json):
+    from acq_py import secretstore
     from acq_py.commands import common
 
+    if backend == "sbx":
+        _env_sbx(monkeypatch, tmp_path, version="0.51.0")
+    else:
+        _env_msb(monkeypatch, tmp_path)
+    adapter = common._adapter(backend)
+    def forbidden(*_a, **_k):
+        pytest.fail("refused terminal input must not be read, stored or fed")
+
+    monkeypatch.setattr(common, "_stdin_is_terminal", lambda: False)
     monkeypatch.setattr(common, "_stdin_is_mintty", lambda: True)
-    monkeypatch.setattr(sys, "stdin", io.StringIO("TYPED-VALUE\nlater input\n"))
-    assert common._read_secret_value("Enter USAi API key: ") == "TYPED-VALUE"
-    err = capsys.readouterr().err
-    assert "Git Bash/mintty" in err and "will be visible" in err
-    assert err.endswith("Enter USAi API key: ")
-    assert "TYPED-VALUE" not in err
+    stream = io.StringIO("UNREAD-INPUT\n")
+    monkeypatch.setattr(stream, "read", forbidden)
+    monkeypatch.setattr(stream, "readline", forbidden)
+    monkeypatch.setattr(sys, "stdin", stream)
+    monkeypatch.setattr(secretstore, "set_secret", forbidden)
+    monkeypatch.setattr(adapter, "secret_preflight", forbidden)
+    monkeypatch.setattr(adapter, "secret_feed", forbidden)
+    argv = ["--backend", backend, "secret", "set", "-g", "usai"]
+    rc = cli.main([*argv, "--json"] if emit_json else argv)
+    out, err = capsys.readouterr()
+    assert rc == 1
+    if emit_json:
+        doc = json.loads(out)
+        assert doc["error"]["code"] == "validation_failed"
+        diagnostic = doc["error"]["message"] + " " + doc["error"]["remediation"]
+        assert err == ""
+    else:
+        assert out == ""
+        diagnostic = err
+    assert "Git Bash/mintty" in diagnostic
+    assert "cannot hide" in diagnostic
+    assert "PowerShell" in diagnostic and "cmd" in diagnostic
+    assert "pipe" in diagnostic
+    assert "Enter USAi API key:" not in out + err
+    assert "UNREAD-INPUT" not in out + err
+    assert stream.tell() == 0
+    assert not _store_dir().exists()
 
 
 @pytest.mark.parametrize("backend", ["sbx", "msb"])

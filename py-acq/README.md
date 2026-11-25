@@ -1,3 +1,11 @@
+---
+title: "acq-py — Python implementation of acq v1"
+description: "Implementation, usage, and verification of the Python acq wrapper"
+status: canonical
+tier: 2
+last_updated: "2026-11-25"
+---
+
 # acq-py — Python implementation of acq v1
 
 This directory is the Python implementation of the `acq` wrapper (ADR-0038m).
@@ -318,9 +326,15 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   scope is refused too (sbx would prompt to overwrite and eat the piped value).
   **Typing a secret:** on a terminal the value is read with echo off after a
   prompt on stderr. Under Git Bash/mintty, native Windows Python sees a pipe
-  rather than a console, so typed input cannot be hidden: acq prints a warning
-  first. There, pipe the value instead (`printf '%s' "$TOKEN" | acq-py secret
-  set -g usai`) or run from a native console (Windows Terminal, PowerShell, cmd).
+  rather than a console, so typed input cannot be hidden: acq refuses with
+  `validation_failed` before prompting, reading, storing, or feeding the value.
+  Use a native Windows console (PowerShell or cmd, including in Windows Terminal;
+  a Git Bash tab is still mintty), or explicitly pipe the value from a trusted
+  source or redirect a protected UTF-8 input file on stdin. Do not put a literal
+  secret in a command or shell history. Ordinary input pipes/files remain
+  accepted even when launched from Git Bash; the stdin handle identifies the
+  terminal, not the shell name. Simulated Windows tests are not live native
+  Windows qualification; native-console input still needs live verification.
 * `acq-py secret import [SERVICE] [-g | SANDBOX] [--all] [--force] [--dry-run]
   [--json]` — copy known tokens from the host environment (`USAI_API_KEY`,
   `GITHUB_TOKEN`/`GH_TOKEN`, `GITLAB_TOKEN`, registered provider KEY_ENVs) into the
