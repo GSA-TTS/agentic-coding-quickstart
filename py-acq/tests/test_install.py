@@ -343,11 +343,12 @@ def _host_stub(tmp_path, os_name: str, machine: str) -> Path:
     uname = stub / "uname"
     uname.write_text(
         f'#!/bin/sh\ncase "$1" in\n  -s) echo {os_name} ;;\n  -m) echo {machine} ;;\n'
-        f'  *) echo unknown ;;\nesac\n'
+        f'  *) echo unknown ;;\nesac\n', encoding="utf-8", newline="\n"
     )
     uname.chmod(0o755)
     curl = stub / "curl"
-    curl.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> {str(tmp_path / "curl.log")!r}\nexit 1\n')
+    curl.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$ACQ_TEST_CURL_LOG"\nexit 1\n',
+                    encoding="utf-8", newline="\n")
     curl.chmod(0o755)
     return stub
 
@@ -358,12 +359,17 @@ def _run_on_host(tmp_path, stub: Path, *args: str) -> subprocess.CompletedProces
     home.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env["HOME"] = str(home)
-    env["PATH"] = str(stub) + os.pathsep + env.get("PATH", "")
+    env["ACQ_TEST_CURL_LOG"] = (tmp_path / "curl.log").as_posix()
     for name in ("XDG_DATA_HOME", "ACQ_INSTALL_DIR", "ACQ_INSTALL_BIN_DIR", "ACQ_INSTALL_SOURCE",
                  "ACQ_INSTALL_CHANNEL"):
         env.pop(name, None)
     return subprocess.run(
-        ["sh", str(INSTALL_SH), *args],
+        # Python's Windows PATH uses semicolons; Git Bash needs colons and a
+        # shell-native directory. Let that shell resolve the fixture path before
+        # prepending it, and avoid a Windows backslash path in shell source.
+        [shutil.which("sh"), "-c",
+         'stub=$(cd "$1" && pwd -P) || exit; shift; PATH="$stub:$PATH"; export PATH; exec sh "$@"',
+         "installer-host", stub.as_posix(), "./install.sh", *args],
         cwd=str(REPO_ROOT),
         env=env,
         capture_output=True,

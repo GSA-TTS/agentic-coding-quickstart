@@ -1,7 +1,9 @@
 """Offline contracts for rewrite CI triggers and the independent macOS lane."""
 
 from pathlib import Path
+import os
 import re
+import shutil
 import subprocess
 
 import pytest
@@ -52,10 +54,16 @@ def test_relevance_uses_actual_event_base_and_push_runs_everything(name, tmp_pat
     script = text.split(marker, 1)[1].split('        run: |\n', 1)[1].split('\n\n', 1)[0]
     script = '\n'.join(line[10:] for line in script.splitlines())
     output = tmp_path / 'output'
-    result = subprocess.run(['bash', '-c', script], env={
-        'PATH': '/usr/bin:/bin', 'EVENT_NAME': 'push', 'BASE_SHA': '',
-        'GITHUB_OUTPUT': str(output),
-    }, capture_output=True, text=True)
+    # On Windows a bare bash can resolve to the WSL launcher. The POSIX sh
+    # toolchain used elsewhere in this suite supplies the real Bash alongside it.
+    shell = shutil.which('sh')
+    assert shell is not None, 'the workflow execution contract needs a POSIX shell'
+    bash = shutil.which('bash', path=str(Path(shell).parent))
+    assert bash is not None, 'the POSIX shell toolchain must supply Bash'
+    result = subprocess.run([bash, '-c', script], env={
+        **os.environ, 'EVENT_NAME': 'push', 'BASE_SHA': '',
+        'GITHUB_OUTPUT': output.name,
+    }, cwd=tmp_path, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert output.read_text() == 'relevant=true\n'
 
