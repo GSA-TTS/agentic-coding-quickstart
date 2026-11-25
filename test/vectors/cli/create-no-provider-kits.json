@@ -1,0 +1,80 @@
+{
+  "schema": 1,
+  "id": "cli/create-no-provider-kits",
+  "oracle": "Bash provider-kit precedence (--no-provider-kits, then ACQ_PROVIDER_KITS, then config.yaml provider_kit): --no-provider-kits is authoritative over an exported ACQ_PROVIDER_KITS. Here that export names a kit the Python acq would have to fetch, which it refuses on its own (cli/run-extra-kit-unfetchable-refused), and no provider key is stored, which the default provider kit requires (cli/run-missing-key-noninteractive); with the flag the create selects no provider kit and succeeds",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{python}",
+      "-I",
+      "test/vectors/drivers/seeded-run.py",
+      "[{\"git_repos\":{}},[[\"--backend\",\"msb\",\"create\",\"opencode\",\"{workspace}\",\"--name\",\"np-box\",\"--no-provider-kits\",\"--json\"],false,null]]",
+      "{acq}"
+    ],
+    "env": {
+      "ACQ_MSB_BIN": "__stub__",
+      "ACQ_MSB_VERSION": "0.7.7",
+      "ACQ_MSB_INSTALLED": "1",
+      "ACQ_SBX_INSTALLED": "0",
+      "ACQ_PROVIDER_KITS": "git+https://example.invalid/provider-kit.git#ref=main&dir=kit"
+    },
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "MSB_HOME",
+      "ACQ_IMAGE",
+      "ACQ_MSB_IMAGE",
+      "ACQ_MSB_STUB_CATALOG",
+      "ACQ_MSB_READY_TIMEOUT",
+      "ACQ_MSB_STUB_FAIL",
+      "ACQ_MSB_STUB_PROBE",
+      "ACQ_EXTRA_KITS",
+      "ACQ_CONFIG_SEED",
+      "USAI_API_KEY",
+      "ACQ_PROVIDER_CREDENTIAL_BINDINGS",
+      "ACQ_PROVIDER_CREDENTIAL_SEED",
+      "ACQ_SECURITY_MOUNT_STATE",
+      "ACQ_KIT_APPLIED_SEED",
+      "ACQ_MIGRATION_LOCK_TIMEOUT"
+    ],
+    "stdin": "",
+    "timeout_ms": 15000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "create",
+        "data": {
+          "name": "np-box",
+          "backend": "msb",
+          "agent": "opencode",
+          "state": "running",
+          "kits": ["zscaler-ca-certificate", "agentic-coding-playbook", "git-ssh-sign", "opencode"]
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME",
+      "ACQ_SECRET_STORE_DIR"
+    ]
+  }
+}

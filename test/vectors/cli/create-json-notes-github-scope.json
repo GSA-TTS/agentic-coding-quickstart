@@ -1,0 +1,78 @@
+{
+  "schema": 1,
+  "id": "cli/create-json-notes-github-scope",
+  "oracle": "Bash advise_github_scope (ADR-0013): a create in a workspace holding a GitHub repository, for a sandbox with no GitHub token of its own, notes it on stderr with the command to scope one later; under --json too, which never prompts and keeps stdout one document (a usai key is stored first, as the default provider kit requires)",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{python}",
+      "-I",
+      "test/vectors/drivers/seeded-run.py",
+      "[{\"git_repos\":{\"app\":\"https://github.com/alpha/app.git\"}},[[\"--backend\",\"msb\",\"secret\",\"set\",\"-g\",\"usai\"],true,0],[[\"--backend\",\"msb\",\"create\",\"shell\",\"{workspace}\",\"--name\",\"gh-box\",\"--json\"],false,null]]",
+      "{acq}"
+    ],
+    "env": {
+      "ACQ_MSB_BIN": "__stub__",
+      "ACQ_MSB_VERSION": "0.7.7",
+      "ACQ_MSB_INSTALLED": "1",
+      "ACQ_SBX_INSTALLED": "0"
+    },
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "MSB_HOME",
+      "ACQ_IMAGE",
+      "ACQ_MSB_IMAGE",
+      "ACQ_MSB_READY_TIMEOUT",
+      "ACQ_MSB_STUB_CATALOG",
+      "ACQ_MSB_STUB_FAIL",
+      "ACQ_PROVIDER_CREDENTIAL_BINDINGS",
+      "ACQ_PROVIDER_CREDENTIAL_SEED",
+      "ACQ_CONFIG_SEED",
+      "ACQ_EXTRA_KITS",
+      "ACQ_PROVIDER_KITS",
+      "ACQ_NO_PROMPT",
+      "ACQ_NO_PROGRESS",
+      "USAI_API_KEY",
+      "GITHUB_TOKEN",
+      "GH_TOKEN"
+    ],
+    "stdin": "vector-gh-note-sentinel-4e7a",
+    "timeout_ms": 20000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "create",
+        "data": {
+          "name": "gh-box",
+          "backend": "msb",
+          "state": "running"
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "contains",
+      "value": "this sandbox has no repo-scoped GitHub token.\n      No GitHub token is set for this sandbox.\n      For least privilege, scope a token to just the mounted repo(s).\n      To scope it later: acq github-scope gh-box ",
+      "normalize": ["crlf"]
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME",
+      "ACQ_SECRET_STORE_DIR"
+    ]
+  }
+}

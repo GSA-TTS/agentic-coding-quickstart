@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "id": "cli/ls-list-failure-sbx",
+  "oracle": "ADR-0038m §48 drop inspection-failure-as-empty: ls whose sbx listing exits non-zero fails closed (failure, stable prose on stderr, no raw backend text), never 'no sandboxes'",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{acq}", "--backend", "sbx", "ls"],
+    "env": {
+      "ACQ_SBX_BIN": "__stub__",
+      "ACQ_SBX_VERSION": "0.39.0",
+      "ACQ_SBX_INSTALLED": "1",
+      "ACQ_MSB_INSTALLED": "0",
+      "ACQ_SBX_STUB_CATALOG": "{\"alpha\":\"running\"}",
+      "ACQ_SBX_STUB_FAIL": "ls"
+    },
+    "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "MSB_HOME", "SBX_HOME", "ACQ_IMAGE", "ACQ_MSB_IMAGE", "ACQ_SBX_READY_TIMEOUT"],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 1,
+    "stdout": {"mode": "exact", "value": "", "normalize": []},
+    "stderr": {
+      "mode": "exact",
+      "value": "acq: could not list sandboxes\ncheck that sbx works ('sbx ls'), then retry\n",
+      "normalize": ["crlf"]
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+  }
+}

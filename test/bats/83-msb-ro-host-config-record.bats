@@ -169,7 +169,7 @@ SPEC
   local k="$STUBDIR/k7"; _ro_kit "$k"
   run bash -c '
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/sec-fail"
-    export STUB_MSB_CREATE_FAIL_IMAGE=docker.io/docker/sandbox-templates:shell-docker
+    export STUB_MSB_CREATE_FAIL_IMAGE=ghcr.io/gsa-tts/agentic-coding-patterns/devenv-shell@sha256:0b5f4cc95c8fa7dd7f3ffd02b56e63d0caf9b151421ff6ea3cb34b2139e3966c
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"

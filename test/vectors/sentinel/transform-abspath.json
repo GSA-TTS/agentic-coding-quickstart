@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "id": "sentinel/transform-abspath",
+  "oracle": "ADR-0043m normalisation transform: abspath (POSIX absolute path)",
+  "tier": 1,
+  "backend": null,
+  "platform": "linux",
+  "invoke": {
+    "argv": ["{python}", "-c", "import os, sys; sys.stdout.buffer.write(os.path.abspath('.').encode() + b'\\n')"],
+    "env": {},
+    "unset": [],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "exact",
+      "value": "<abspath>\n",
+      "normalize": ["abspath"]
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": []
+  }
+}

@@ -1,0 +1,76 @@
+{
+  "schema": 1,
+  "id": "cli/create-publish-host-busy",
+  "oracle": "ADR-0034 an explicitly requested host port that is in use fails the create (failure, exit 1); acq never substitutes another port",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{python}",
+      "-I",
+      "test/vectors/drivers/seeded-run.py",
+      "[{\"git_repos\":{}},[[\"--backend\",\"msb\",\"secret\",\"set\",\"-g\",\"usai\"],true,0],[[\"--backend\",\"msb\",\"create\",\"shell\",\"{workspace}\",\"--name\",\"busy\",\"--publish\",\"6868:6767\",\"--json\"],false,null],[[\"--backend\",\"msb\",\"ls\",\"--json\"],false,0]]",
+      "{acq}"
+    ],
+    "env": {
+      "ACQ_MSB_BIN": "__stub__",
+      "ACQ_MSB_VERSION": "0.7.7",
+      "ACQ_MSB_INSTALLED": "1",
+      "ACQ_SBX_INSTALLED": "0",
+      "ACQ_MSB_HOST_PROBE_STUB": "1",
+      "ACQ_MSB_HOST_PORTS_BUSY": "6868"
+    },
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "MSB_HOME",
+      "ACQ_IMAGE",
+      "ACQ_MSB_IMAGE",
+      "ACQ_MSB_STUB_CATALOG",
+      "ACQ_MSB_READY_TIMEOUT",
+      "ACQ_MSB_STUB_FAIL",
+      "ACQ_MSB_STUB_PORTS",
+      "ACQ_MSB_HOST_PORTS_BUSY",
+      "ACQ_MSB_HOST_PROBE_UNKNOWN",
+      "ACQ_MSB_FORCE_SERVE_PORT",
+      "USAI_API_KEY",
+      "ACQ_PROVIDER_CREDENTIAL_BINDINGS",
+      "ACQ_PROVIDER_CREDENTIAL_SEED",
+      "ACQ_MSB_STUB_PROBE"
+    ],
+    "stdin": "vector-usai-sentinel-p0b2",
+    "timeout_ms": 15000
+  },
+  "expect": {
+    "exit": 1,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "create",
+        "error": {
+          "code": "failure"
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "contains",
+      "value": "acq(msb): note: --publish 6868:6767: no applied kit declares guest port 6767; publishing it anyway.",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME",
+      "ACQ_SECRET_STORE_DIR"
+    ]
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "id": "cli/workspace-colon-refused",
+  "oracle": "Bash parity (_acq_workspace_path_safe): a workspace path with ':' is refused (validation_failed) before the existence check, since the backends split mount specs on ':'. Linux-only: on Windows '/no/such:dir' is drive-relative, so the message also names its absolute D:\\ form; the Windows drive-letter rule is covered by py-acq/tests/test_naming.py",
+  "tier": 1,
+  "backend": null,
+  "platform": "linux",
+  "invoke": {
+    "argv": ["{acq}", "--backend", "msb", "create", "opencode", "/no/such:dir", "--name", "box", "--json"],
+    "env": {
+      "ACQ_MSB_BIN": "__stub__",
+      "ACQ_MSB_VERSION": "0.7.7",
+      "ACQ_MSB_INSTALLED": "1",
+      "ACQ_SBX_INSTALLED": "0"
+    },
+    "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "MSB_HOME", "ACQ_IMAGE", "ACQ_MSB_IMAGE", "ACQ_MSB_STUB_CATALOG", "ACQ_MSB_READY_TIMEOUT", "ACQ_MSB_STUB_FAIL"],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 1,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "create",
+        "error": {
+          "code": "validation_failed",
+          "message": "workspace path contains ':': /no/such:dir"
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "ACQ_SECRET_STORE_DIR"]
+  }
+}

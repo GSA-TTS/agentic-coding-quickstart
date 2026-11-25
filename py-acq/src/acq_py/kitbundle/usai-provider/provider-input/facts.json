@@ -1,0 +1,9 @@
+{
+  "schemaVersion": "acq-provider-facts/v1",
+  "providerId": "usai",
+  "apiProtocol": "openai-compatible",
+  "host": "api.gsa.usai.gov",
+  "baseUrl": "https://api.gsa.usai.gov/api/v1",
+  "modelsUrl": "https://api.gsa.usai.gov/api/v1/models",
+  "keyEnv": "USAI_API_KEY"
+}

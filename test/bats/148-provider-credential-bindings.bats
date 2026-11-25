@@ -41,6 +41,7 @@ _provider_release() {
   mkdir -p "$root/scripts" "$root/integrations/isolation/schemas"
   cat > "$root/provider-python" <<'PYTHON'
 #!/bin/sh
+[ "${1:-}" = -I ] && shift  # acq runs python -I (no cwd/env on sys.path)
 if [ "$1" = -c ]; then
   case "${2:-}" in *sys.version_info*) printf '3.12\n' ;; esac
   exit 0

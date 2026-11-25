@@ -4,7 +4,8 @@
 # scripts/test-acq.d/50-kit-list-completeness.sh (ADR-0025)
 #
 # Verifies the built-in kit set (KITS / ACQ_KIT_NAMES, populated by load_acq),
-# the zscaler-first ordering invariant, and the doc count-drift guard (#278).
+# the zscaler-first ordering invariant, and the guard against documented kit
+# counts drifting from the arrays.
 # In-process: reads the arrays acq builds, so no `run` for those.
 #
 # shellcheck shell=bats

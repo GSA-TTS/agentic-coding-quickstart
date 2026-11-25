@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "id": "negative/isolation-ssh-stubs",
+  "oracle": "ADR-0043m isolation fail-closed: ssh_stubs=true is refused by the runner",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{acq}", "version"],
+    "env": {},
+    "unset": [],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 1
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": true,
+    "redirect": []
+  }
+}

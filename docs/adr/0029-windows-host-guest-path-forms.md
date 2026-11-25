@@ -148,8 +148,60 @@ is defined there too.
   `common.sh` degrades to the identity form rather than erroring; production
   always loads `common.sh` first.
 
+## Amendment (2026-11-07) — UNC and extended-length host forms
+
+The native Python adapter (``py-acq/src/acq_py/msb.py``) resolves a Windows
+workspace with ``os.path.realpath`` before deriving its guest form. On Windows
+that ``realpath`` can return four prefix families, classified with
+``ntpath.splitroot``:
+
+| host form | guest form | note |
+|---|---|---|
+| `C:\Users\me\proj` | `/c/Users/me/proj` | drive |
+| `\\server\share\proj` | `/unc/server/share/proj` | UNC, namespaced |
+| `\\?\C:\Users\me\proj` | `/c/Users/me/proj` | extended-length drive |
+| `\\?\UNC\server\share\proj` | `/unc/server/share/proj` | extended-length UNC |
+| `\\.\PIPE\x` | *(fails closed)* | device path, no guest form |
+
+The UNC guest form is **namespaced** under `/unc` rather than emitted at the
+guest root: `/server/share/...` would let a server (or alias) named `home`,
+`etc`, or `usr` mount over a guest system directory — `\\home\agent\proj` would
+become `/home/agent/proj`, the agent HOME (`DEFAULT_GUEST_WORKSPACE`). The
+`/unc` prefix avoids both that collision and a leading `//`, whose meaning is
+implementation-defined in the Linux guest.
+
+The extended-length (`\\?\`) prefix is a Win32 signal (for >MAX_PATH and
+trailing-dot/space paths), not a path component; it is stripped before the
+drive/UNC translation. A device path (`\\.\...`) names a device, not a
+filesystem directory, so the adapter fails closed with ``validation_failed``
+rather than emitting a bogus mount.
+
+**Resolved for ``acq cp`` (2026-11-07):** ``acq cp`` no longer refuses a host
+UNC path. Its host side is forwarded verbatim to the backend (``msb copy`` /
+``sbx cp``), which resolves it natively on the host; there is no host→guest
+translation on the ``cp`` host side, so a UNC/network host path
+(``\\server\share\...`` / ``//server/share/...``) is accepted the same way a
+plain-drive path is. This removes the asymmetry where ``--volume``/``-w``
+accepted a UNC workspace but ``cp`` refused its host side: a UNC workspace can
+now be created, recorded, launched, *and* copied into/out of through ``cp``.
+
+The Bash adapter also agrees on the UNC guest form: ``common.sh``
+``canonicalize_path`` re-namespaces ``cygpath -u``'s ``//server/share/...`` UNC
+output to ``/unc/server/share/...`` (single leading slash, ``unc`` namespace),
+matching the Python adapter. ``host_path`` is its inverse: a ``/unc/...`` value
+maps back to the UNC ``//server/share/...`` host form instead of going through
+``cygpath -m``, which would place it under the MSYS root
+(``C:/Program Files/Git/unc/...``), so the msb ``--volume`` source and the
+recorded host workspace stay the real UNC path. The UNC bypass of the
+``realpath`` step applies to the ``//server`` form only where ``cygpath``
+exists; on a POSIX host a leading ``//`` is an ordinary absolute path and is
+still resolved, so the POSIX behaviour is unchanged.
+
 ## Links
 
+- mogul/agentic-coding-quickstart#85 — Bash adapter UNC divergence (resolved by
+  the ``/unc/`` re-namespacing above).
+- mogul/agentic-coding-quickstart#86 — `acq cp` UNC asymmetry (resolved by this amendment).
 - GSA-TTS/agentic-coding-quickstart#463 — the review that surfaced the
   single-form bug and the MSYS rewriting behavior.
 - [ADR-0011: msb backend and neutral kits](0011-msb-backend-and-neutral-kits.md)

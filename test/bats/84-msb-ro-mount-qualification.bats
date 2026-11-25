@@ -351,6 +351,7 @@ case "${1:-}" in
     shift
     while [ "$#" -gt 0 ]; do
       case "$1" in
+        --name) printf '%s\n' "$2" >"$STUBDIR/.qual_name"; shift ;;
         --volume) case "$2" in
                     *:/mnt/qual-ro:ro) printf '%s\n' "${2%%:/mnt/qual-ro:ro}" >"$STUBDIR/.qual_ro" ;;
                     *:/mnt/qual-rw) printf '%s\n' "${2%%:/mnt/qual-rw}" >"$STUBDIR/.qual_rw" ;;
@@ -440,6 +441,25 @@ _run_canary() { # [ENV...]
   assert_failure 2
   assert_output --partial 'RESULT: BLOCKED'
   assert_output --partial 'positive control failed'
+}
+
+@test "canary: uses the sandbox name the cell oracle passes, so the oracle can remove it" {
+  _plant_canary_msb
+  _run_canary STUB_RO_ENFORCED=1 QUALIFY_SANDBOX_NAME=acq-qual-ro-0a1b2c3d
+  assert_success
+  [ "$(cat "$STUBDIR/.qual_name")" = acq-qual-ro-0a1b2c3d ]
+}
+
+@test "canary: a sandbox name outside acq-qual-ro-<[a-z0-9-]> => BLOCKED before create" {
+  _plant_canary_msb
+  local bad
+  for bad in 'acq-qual-ro-' 'acq-qual-ro-A' 'acq-qual-ro-x;rm' 'someone-else' 'acq-qual-ro-a b'; do
+    rm -f "$STUBDIR/.qual_name"
+    _run_canary STUB_RO_ENFORCED=1 QUALIFY_SANDBOX_NAME="$bad"
+    assert_failure 2
+    assert_output --partial 'QUALIFY_SANDBOX_NAME must be'
+    [ ! -e "$STUBDIR/.qual_name" ]
+  done
 }
 
 @test "canary: msb missing => BLOCKED" {

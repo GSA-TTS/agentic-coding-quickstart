@@ -77,11 +77,15 @@ on:
   pull_request:
     branches:
       - main
+      - migration/python-cross-platform
+  push:
+    branches:
+      - migration/python-cross-platform
   merge_group:
     branches: [main]
 
 concurrency:
-  group: bash32-compat-${{ github.head_ref || github.ref }}
+  group: bash32-compat-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -123,9 +127,17 @@ jobs:
       - name: Compute relevance from the PR or merge-group diff
         id: filter
         env:
+          EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
+          # Pushes have no PR base. Run everything rather than risk a false skip
+          # on a new branch, a multi-commit push, or an unavailable before SHA.
+          if [ "$EVENT_NAME" = "push" ]; then
+            echo "relevant=true" >>"$GITHUB_OUTPUT"
+            echo "Push run: running the complete bash 3.2 suite."
+            exit 0
+          fi
           # Fail CLOSED on any error in this step: if the diff can't be
           # computed for any reason, fail rather than silently skipping the
           # real check. An error here must surface as a
@@ -185,6 +197,19 @@ jobs:
             '.github/keys/chet-ramey-bash-release-signing-key.asc' \
             '.github/workflows/release.yml' \
             '.github/workflows/macos-uninstall-acceptance.yml' \
+            'scripts/run-vectors' \
+            'scripts/gen-install-assets' \
+            'scripts/stage-posix-runtime' \
+            'scripts/stage-windows-runtime' \
+            'scripts/assemble-release' \
+            'scripts/gen-provenance' \
+            'installer' \
+            'package.json' \
+            'test/vectors' \
+            'acq-python' \
+            'py-acq/src' \
+            'qualification' \
+            'test/fixtures' \
             '.github/workflows/bash32-compat.yml')"
           if [ -n "$changed" ]; then
             echo "relevant=true" >>"$GITHUB_OUTPUT"
@@ -455,6 +480,26 @@ jobs:
           path: ${{ runner.temp }}/bats-timing/timing.json
           if-no-files-found: ignore
           retention-days: 30
+
+      # The vector runner is itself a bash script that macOS developers run with
+      # the system bash 3.2, so exercise it under 3.2 against the Python CLI.
+      # Shard-independent, so run it on one leg only.
+      - name: Run vector corpus under bash 3.2
+        if: matrix.shard == 1
+        run: |
+          set -euo pipefail
+          PYTHONPATH="$PWD/py-acq/src" PATH="/opt/bash32/bin:$PATH" \
+            /opt/bash32/bin/bash scripts/run-vectors --acq "python -m acq_py"
+
+      # macOS /bin/sh is bash 3.2 in POSIX mode: the POSIX entry points must parse there.
+      # Shard-independent, so run it on one leg only.
+      - name: Parse POSIX entry points under bash 3.2 --posix
+        if: matrix.shard == 1
+        run: |
+          set -euo pipefail
+          for f in acq-python install.sh scripts/gen-install-assets; do
+            /opt/bash32/bin/bash --posix -n "$f"
+          done
 
   # Always-posting gate: this is what branch protection actually requires,
   # under the ORIGINAL required-check name ("acq offline suite under bash

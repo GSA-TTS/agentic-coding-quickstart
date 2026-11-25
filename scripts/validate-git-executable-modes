@@ -63,19 +63,30 @@ fi
 # This allowlist is based on supported user commands, distribution/package
 # entrypoints, and CI/local verification dispatch. Sourced adapters, Bats files,
 # and install.sh (documented as `sh install.sh`) intentionally do not belong here.
+# The Python rewrite adds acq-python and its release-staging, vector and
+# qualification scripts; they are direct entry points for CI and packaging.
 EXPECTED='acq
+acq-python
+scripts/assemble-release
 scripts/bats-shard
 scripts/diagnose-tls-intercept
 scripts/fetch-bash32-oci.py
 scripts/fix-exec-bits
+scripts/gen-install-assets
+scripts/gen-provenance
 scripts/install-provider-input-wheelhouse
 scripts/probe-msb-node-startup
 scripts/probe-msb-posthoc-ports
 scripts/probe-msb-startup
+scripts/qualify-backend-cell
+scripts/refresh-kitbundle
 scripts/rotate-apikey
 scripts/run-shellcheck
+scripts/run-vectors
 scripts/scan-heredoc-subst.py
 scripts/setup-provider-input-validator
+scripts/stage-posix-runtime
+scripts/stage-windows-runtime
 scripts/summarize-bats-timing
 scripts/test-acq-bash32
 scripts/test-acq-bats

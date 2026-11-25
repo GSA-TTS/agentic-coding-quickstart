@@ -1,0 +1,73 @@
+# spec.yaml — git-ssh-sign (a neutral acq mixin kit, hybrid/v1)
+#
+# Configures git inside the sandbox to sign commits and tags with the SSH key
+# forwarded from the host's SSH agent — the private key never leaves the host.
+#
+# Vendored from docker/sbx-kits-contrib (git-ssh-sign) at commit
+# d259d157af15649d1f90902cae397ebe1f2b1e3d, Apache-2.0 (see NOTICE), ported from
+# that kit's schemaVersion "1" -> "2", then to the neutral acq "hybrid/v1" in
+# Phase 2. See integrations/isolation/docs/decisions/0001-neutral-hybrid-v1-acq-kits.md
+# and docs/decisions/.
+#
+# Two-part design (unchanged):
+#   - commands (phase install, root): write the SSH-signing config to the SYSTEM
+#     gitconfig at create time. System config is read at git startup and is not
+#     overwritten by the sandbox, so the signing config is always present.
+#   - files (phase initFiles): drop a key-resolution command that git runs at
+#     SIGNING time (gpg.ssh.defaultKeyCommand). It reads the first public key
+#     from `ssh-add -L`, so no key material is written at create/startup time,
+#     when the forwarded agent may not be connected yet.
+#
+# If no SSH agent / key is available, git signing fails with a clear error
+# (fail-closed). No backend shortcut: SSH-agent forwarding is the shared
+# mechanism. `acq` forwards the host SSH agent into the sandbox (whenever the
+# host SSH_AUTH_SOCK is set); how it does so per backend is acq's concern, not
+# this kit's — documented in the acq wrapper, not a spec shortcut.
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: git-ssh-sign
+displayName: Git SSH Commit Signing
+description: >
+  Configures git to sign commits and tags using the SSH key forwarded from the
+  host's SSH agent. Works with any base agent kit. The private key stays on the
+  host; signing config is written to the system gitconfig and the signing key is
+  resolved from the SSH agent at signing time.
+
+files:
+  - path: /home/agent/.config/git/ssh-signing-key-command
+    mode: "0755"
+    phase: initFiles
+    source: files/home/.config/git/ssh-signing-key-command
+    description: Resolve the forwarded SSH agent key for Git SSH signing
+
+commands:
+  - phase: install
+    user: "0"
+    description: Configure SSH commit signing with a dynamic key command
+    command:
+      - sh
+      - -c
+      - |
+        git config --system gpg.format ssh
+        git config --system --unset-all user.signingKey || true
+        git config --system commit.gpgSign true
+        git config --system tag.gpgSign true
+        git config --system gpg.ssh.defaultKeyCommand /home/agent/.config/git/ssh-signing-key-command
+        git config --system gpg.ssh.allowedSignersFile /home/agent/.config/git/allowed_signers
+        if [ "$(git config --system --get core.hooksPath || true)" = "/home/agent/.config/git/hooks" ]; then
+            git config --system --unset-all core.hooksPath
+        fi
+
+agentContext: |
+  ## Git commit signing
+
+  This sandbox is configured to sign git commits with your host's SSH key.
+  Commits and tags are signed automatically. Use `git log --show-signature`
+  to verify signatures on existing commits.
+
+# No backend shortcuts: SSH-agent forwarding is the shared mechanism, resolved
+# at signing time. `acq` forwards the host SSH agent into the sandbox on each
+# backend (documented in the acq wrapper, not a spec shortcut).
+backend_shortcuts:
+  sbx: {}
+  msb: {}

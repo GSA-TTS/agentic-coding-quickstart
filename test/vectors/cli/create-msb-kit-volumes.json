@@ -1,0 +1,82 @@
+{
+  "schema": 1,
+  "id": "cli/create-msb-kit-volumes",
+  "oracle": "ADR-0023 msb accepts neutral kits declaring named disk and tmpfs volumes at create time; Tier-2 tests compare the emitted flags to Bash",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{python}",
+      "-I",
+      "test/vectors/drivers/seeded-run.py",
+      "[{\"git_repos\": {}}, [[\"--backend\", \"msb\", \"secret\", \"set\", \"-g\", \"usai\"], true, 0], [[\"--backend\", \"msb\", \"create\", \"shell\", \"{workspace}\", \"--name\", \"volbox\", \"--kit\", \"test/fixtures/kit-volumes\", \"--json\"], false, null]]",
+      "{acq}"
+    ],
+    "env": {
+      "ACQ_MSB_BIN": "__stub__",
+      "ACQ_MSB_VERSION": "0.7.7",
+      "ACQ_MSB_INSTALLED": "1",
+      "ACQ_SBX_INSTALLED": "0",
+      "ACQ_MSB_HOST_PROBE_STUB": "1"
+    },
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "MSB_HOME",
+      "ACQ_IMAGE",
+      "ACQ_MSB_IMAGE",
+      "ACQ_MSB_STUB_CATALOG",
+      "ACQ_MSB_READY_TIMEOUT",
+      "ACQ_MSB_STUB_FAIL",
+      "ACQ_MSB_STUB_PORTS",
+      "ACQ_MSB_HOST_PORTS_BUSY",
+      "ACQ_MSB_HOST_PROBE_UNKNOWN",
+      "ACQ_MSB_FORCE_SERVE_PORT",
+      "USAI_API_KEY",
+      "ACQ_PROVIDER_CREDENTIAL_BINDINGS",
+      "ACQ_PROVIDER_CREDENTIAL_SEED",
+      "ACQ_MSB_STUB_PROBE"
+    ],
+    "stdin": "vector-usai-sentinel-p0b1",
+    "timeout_ms": 15000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "create",
+        "data": {
+          "name": "volbox",
+          "kits": [
+            "zscaler-ca-certificate",
+            "usai-provider",
+            "agentic-coding-playbook",
+            "git-ssh-sign",
+            "volume-kit"
+          ]
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME",
+      "ACQ_SECRET_STORE_DIR"
+    ]
+  }
+}

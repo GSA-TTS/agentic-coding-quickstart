@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "id": "probe/tmpdir-trailing-slash",
+  "oracle": "tmpdir drops TMPDIR's trailing slashes (the runner's TMPDIR ends in two)",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{python}",
+      "-c",
+      "import sys, tempfile; sys.stdout.write(tempfile.gettempdir() + '/f\\n')"
+    ],
+    "env": {},
+    "unset": [],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "exact",
+      "value": "<tmpdir>/f\n",
+      "normalize": [
+        "tmpdir"
+      ]
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": []
+  }
+}

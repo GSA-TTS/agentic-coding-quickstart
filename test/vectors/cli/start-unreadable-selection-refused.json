@@ -1,0 +1,80 @@
+{
+  "schema": 1,
+  "id": "cli/start-unreadable-selection-refused",
+  "oracle": "Bash acq_provider_selection_load refuses a recorded selection it cannot use. A sandbox created with --no-provider-kits whose provenance record is then damaged (not valid JSON) is not started under the current selection, which would bind the stored usai key the create left out: start fails closed with validation_failed before msb runs, naming the sandbox and how to record a valid selection",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{python}",
+      "-I",
+      "test/vectors/drivers/seeded-run.py",
+      "[{\"git_repos\":{}},[[\"--backend\",\"msb\",\"secret\",\"set\",\"-g\",\"usai\"],true,0],[[\"--backend\",\"msb\",\"create\",\"shell\",\"{workspace}\",\"--name\",\"bad-sel\",\"--no-provider-kits\",\"--json\"],false,0],[[\"--backend\",\"msb\",\"stop\",\"bad-sel\"],false,0],{\"bash_state\":\"msb/bad-sel.5ae490e9.json\",\"text\":\"{not json\"},[[\"--backend\",\"msb\",\"start\",\"bad-sel\",\"--json\"],false,null]]",
+      "{acq}"
+    ],
+    "env": {
+      "ACQ_MSB_BIN": "__stub__",
+      "ACQ_MSB_VERSION": "0.7.7",
+      "ACQ_MSB_INSTALLED": "1",
+      "ACQ_SBX_INSTALLED": "0"
+    },
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "ACQ_PROVENANCE_DIR",
+      "MSB_HOME",
+      "ACQ_IMAGE",
+      "ACQ_MSB_IMAGE",
+      "ACQ_MSB_READY_TIMEOUT",
+      "ACQ_MSB_STUB_CATALOG",
+      "ACQ_MSB_STUB_FAIL",
+      "ACQ_SECRET_NO_LIVE_REFEED",
+      "ACQ_PROVIDER_CREDENTIAL_BINDINGS",
+      "ACQ_PROVIDER_CREDENTIAL_SEED",
+      "ACQ_CONFIG_SEED",
+      "ACQ_EXTRA_KITS",
+      "ACQ_PROVIDER_KITS",
+      "ACQ_KIT_PROVENANCE_SEED",
+      "USAI_API_KEY",
+      "GITHUB_TOKEN",
+      "GH_TOKEN",
+      "GITLAB_TOKEN"
+    ],
+    "stdin": "vector-bad-sel-sentinel-3d70",
+    "timeout_ms": 20000
+  },
+  "expect": {
+    "exit": 1,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "start",
+        "error": {
+          "code": "validation_failed",
+          "message": "sandbox 'bad-sel' has an unreadable recorded provider selection",
+          "remediation": "recreate the sandbox ('acq rm bad-sel', then 'acq create') so a valid selection is recorded"
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME",
+      "ACQ_SECRET_STORE_DIR"
+    ]
+  }
+}

@@ -1,0 +1,97 @@
+{
+  "schema": 1,
+  "id": "cli/create-no-first-run-offer-without-terminal",
+  "oracle": "ADR-0031 first-run offer (Bash maybe_first_run_configure): without a terminal on stdin, a first create never prompts and writes no config.yaml, so configure then reports the backend from its default layer, not config",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{python}",
+      "-I",
+      "test/vectors/drivers/seeded-run.py",
+      "[{\"git_repos\":{}},[[\"--backend\",\"msb\",\"secret\",\"set\",\"-g\",\"usai\"],true,0],[[\"--backend\",\"msb\",\"create\",\"shell\",\"{workspace}\",\"--name\",\"fresh\"],false,0],[[\"configure\",\"--json\"],false,null]]",
+      "{acq}"
+    ],
+    "env": {
+      "ACQ_MSB_BIN": "__stub__",
+      "ACQ_MSB_VERSION": "0.7.7",
+      "ACQ_MSB_INSTALLED": "1",
+      "ACQ_SBX_INSTALLED": "0"
+    },
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "MSB_HOME",
+      "ACQ_IMAGE",
+      "ACQ_MSB_IMAGE",
+      "ACQ_MSB_STUB_CATALOG",
+      "ACQ_MSB_READY_TIMEOUT",
+      "ACQ_MSB_STUB_FAIL",
+      "USAI_API_KEY",
+      "ACQ_PROVIDER_CREDENTIAL_BINDINGS",
+      "ACQ_PROVIDER_CREDENTIAL_SEED",
+      "ACQ_MSB_STUB_PROBE",
+      "ACQ_NO_PROMPT",
+      "ACQ_NO_PROGRESS",
+      "ACQ_EXTRA_KITS"
+    ],
+    "stdin": "vector-usai-sentinel-f1r5",
+    "timeout_ms": 20000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "configure",
+        "data": {
+          "settings": [
+            {
+              "key": "backend",
+              "value": null,
+              "source": "default"
+            },
+            {
+              "key": "extra_kits",
+              "source": "default"
+            },
+            {
+              "key": "scope_github_token",
+              "source": "default"
+            },
+            {
+              "key": "provider_credential_bindings"
+            },
+            {
+              "key": "provider_kit",
+              "source": "default"
+            },
+            {
+              "key": "kit_sources"
+            }
+          ]
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME",
+      "ACQ_SECRET_STORE_DIR"
+    ]
+  }
+}

@@ -1,0 +1,228 @@
+"""``acq doctor`` check assembly (ADR-0038m §doctor).
+
+``doctor`` reports an overall ``status`` and a list of checks, each carrying a
+stable ``id``, a per-check ``status``, a human ``message``, and an optional
+``remediation``. The compatibility contract fixes the *shape* — overall status
+plus per-check id/status/message/remediation, stable IDs, actionable
+remediation — but not the concrete list of checks; that inventory grows as the
+backend adapters land (ADR-0040m ``doctor``).
+
+Status vocabulary (stable tokens, one scale for both overall and per-check):
+    * ``pass`` — healthy
+    * ``warn`` — degraded
+    * ``fail`` — failed
+
+The overall ``status`` is derived from the checks: ``fail`` (any fail) outranks
+``warn`` (any warn) outranks ``pass``.
+
+The checks cover the runtime, active adapter, both backend version policies,
+MSB readiness, state migration, configuration and pending Bash-state imports.
+Host checks never run repairs. Named diagnostics execute the ADR-0030 guest
+probe; a terminal-only offer can persist the selected default backend.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+
+from . import backends, config, hostexec, migration, runtime, userdirs
+
+PASS = "pass"  # nosec B105 # a check status
+WARN = "warn"
+FAIL = "fail"
+
+
+def runtime_check() -> dict:
+    """Report whether acq can resolve the runtime it executes subprocesses with.
+
+    Valid resolution records the supplier (ADR-0042m). An invalid explicit
+    ACQ_RUNTIME fails the check instead of falling back to another interpreter.
+    """
+    try:
+        rt = runtime.resolve_runtime()
+    except runtime.RuntimeResolutionError as exc:
+        return {"id": "runtime", "status": FAIL, "message": exc.message, "remediation": exc.remediation}
+    if rt.managed:
+        message = f"app-private runtime present ({rt.supplier})"
+    else:
+        message = "using the IT-approved base interpreter (no app-private runtime bundle present)"
+    return {"id": "runtime", "status": PASS, "message": message}
+
+
+def backend_check(active: str | None = None) -> dict:
+    """Report the active adapter without requiring one to be installed."""
+    return {
+        "id": "backend", "status": PASS if active else WARN,
+        "message": f"active backend: {active}" if active else "no sandbox backend adapter is available",
+        **({} if active else {"remediation": "install msb or sbx, or select one with --backend"}),
+    }
+
+
+def backend_checks() -> list[dict]:
+    """Report both installed backends and their accepted version policy."""
+    checks = []
+    for name in backends.BACKEND_ORDER:
+        spec = backends.BACKENDS[name]
+        status = backends.detect(spec)
+        problem = backends.check_version(spec)
+        version = f"v{status.version}" if status.version != "unknown" else "unknown version"
+        message = f"{name}: installed {version}" if status.installed else f"{name}: not found"
+        check: dict = {"id": f"backend-{name}", "status": PASS, "message": message}
+        if problem:
+            check.update(status=FAIL if status.installed else WARN,
+                         message=message + "; " + problem.message, remediation=problem.remediation)
+        else:
+            check["message"] += f" (>= {spec.min_version.string})"
+        checks.append(check)
+    return checks
+
+
+def readiness_check(active: str | None) -> list[dict]:
+    """Probe MSB host readiness without running its potentially installing repair."""
+    if active != "msb" or os.environ.get("ACQ_SKIP_MSB_DOCTOR"):
+        return []
+    if backends.check_version(backends.BACKENDS["msb"]) is not None:
+        return []
+    try:
+        result = hostexec.run_captured(
+            [*backends._adapter_command(backends.BACKENDS["msb"]), "doctor"], timeout=30)
+        ready = result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if ready:
+        return [{"id": "backend-msb-readiness", "status": PASS, "message": "host ready for microVMs"}]
+    return [{"id": "backend-msb-readiness", "status": WARN,
+             "message": "your machine isn't ready to run microVMs yet.",
+             "remediation": "run 'msb doctor' for details; run 'msb doctor --fix' yourself "
+             "(may install software; acq does not run it). See docs/howto/acq.md#msb-host-setup "
+             "or ask agentic-coding@gsa.gov. Set ACQ_SKIP_MSB_DOCTOR=1 to skip."}]
+
+
+def doctor_checks(active: str | None = None) -> list[dict]:
+    """Return the ordered check list for the current build."""
+    with backends.detection_cache():
+        return [runtime_check(), backend_check(active), *backend_checks(), *readiness_check(active),
+                state_check(), config.doctor_check(), persisted_backend_check(), bash_import_check()]
+
+
+def bash_import_check() -> dict:
+    """Report an import of the Bash acq's state that ran and is not finished (ADR-0041m).
+
+    A pending part is retried on every mutating command, but its warnings are
+    printed only when they change, so after the first time nothing says the
+    import is stuck. This check says so, with the warnings it last printed.
+    An import that has not run yet (no mutating command since this acq was
+    installed) runs with the next one, and passes. Read-only, like every check.
+    """
+    try:
+        generation = migration.read_generation()
+        started = migration.import_started()
+        done = migration.read_import_done()
+        warnings = migration.read_import_warnings()
+    except userdirs.UserDirError as exc:
+        return {"id": "bash-import", "status": FAIL, "message": exc.message, "remediation": exc.remediation}
+    if generation >= migration.TARGET_GENERATION:
+        return {"id": "bash-import", "status": PASS, "message": "the Bash acq's state is imported (or there was none)"}
+    if generation < migration.RECORDS_GENERATION or not started:
+        return {"id": "bash-import", "status": PASS,
+                "message": "the Bash acq's state is imported by the next mutating acq command"}
+    pending = [part for part in migration.import_parts() if part not in done]
+    message = f"the import of the Bash acq's state is not finished ({', '.join(pending) or 'unknown'} pending)"
+    if warnings:
+        message += ": " + "; ".join(warnings)
+    return {
+        "id": "bash-import",
+        "status": WARN,
+        "message": message,
+        "remediation": "fix what the message names, then run any mutating acq command (create, rm, secret set) "
+        "to import the rest",
+    }
+
+
+def persisted_backend_check() -> dict:
+    """Report the ``backend:`` value ``backend set`` persists in config.yaml.
+
+    An unknown value fails the check: every verb that needs a backend refuses
+    while it is there (it is never skipped in favour of auto-detect).
+    """
+    value = config.read_field("backend")  # an unresolvable config path reads as None
+    if value is None:
+        return {"id": "config-backend", "status": PASS, "message": "no persisted backend; acq auto-detects"}
+    if value not in backends.BACKENDS:
+        return {
+            "id": "config-backend",
+            "status": FAIL,
+            "message": f"config.yaml sets an unknown backend: {value!r} (expected sbx or msb)",
+            "remediation": "run 'acq backend set msb' or 'acq backend set sbx' (or 'acq backend unset' to auto-detect)",
+        }
+    return {"id": "config-backend", "status": PASS, "message": f"persisted backend: {value}"}
+
+
+def state_check() -> dict:
+    """Report state-tree migration health (read-only; ADR-0041m).
+
+    ``doctor`` is a diagnostic and does NOT migrate: it reports the current tree
+    state so a newer/unparseable record is surfaced (``fail``) and a legacy v0
+    record is flagged (``warn``) as "will migrate forward on the next mutating
+    verb", rather than being silently skipped. An unresolvable state root (a
+    relative ``ACQ_STATE_DIR``, or no absolute home to fall back to) or a relative
+    path override is reported as a failed check rather than raised, so the
+    diagnostic still completes.
+    """
+    try:
+        generation = migration.read_generation()
+        records = list(migration.iter_records())
+        userdirs.check_path_overrides()
+    except userdirs.UserDirError as exc:
+        return {"id": "state", "status": FAIL, "message": exc.message, "remediation": exc.remediation}
+    newer: list[str] = []
+    legacy: list[str] = []
+    for path in records:
+        try:
+            doc = migration._load_record(path)
+        except migration.MigrationError:
+            newer.append(path.name)
+            continue
+        schema = doc.get("schema")
+        if schema is None:
+            legacy.append(path.name)
+        elif isinstance(schema, int) and not isinstance(schema, bool) and schema > migration.TARGET_SCHEMA:
+            newer.append(path.name)
+    if newer:
+        return {
+            "id": "state",
+            "status": FAIL,
+            "message": f"state tree has {len(newer)} record(s) this reader cannot read "
+            f"(generation {generation})",
+            "remediation": "upgrade acq, or remove the offending record(s) and recreate "
+            "the sandboxes they describe",
+        }
+    if legacy:
+        return {
+            "id": "state",
+            "status": WARN,
+            "message": f"state tree has {len(legacy)} legacy v0 record(s) to migrate forward "
+            f"(generation {generation})",
+            "remediation": "run any mutating acq command; records migrate forward in place",
+        }
+    return {"id": "state", "status": PASS, "message": f"state tree migrated (generation {generation})"}
+
+
+def overall_status(checks: list[dict]) -> str:
+    """Derive the overall status from per-check statuses.
+
+    ``fail`` (any fail) outranks ``warn`` (any warn) outranks ``pass``.
+    """
+    statuses = {check["status"] for check in checks}
+    if FAIL in statuses:
+        return FAIL
+    if WARN in statuses:
+        return WARN
+    return PASS
+
+
+def doctor_data(active: str | None = None) -> dict:
+    """Assemble the ``doctor`` command's required result data (ADR-0038m)."""
+    checks = doctor_checks(active)
+    return {"status": overall_status(checks), "checks": checks}

@@ -1,0 +1,91 @@
+{
+  "schema": 1,
+  "id": "cli/agent-args-msb",
+  "oracle": "Bash CLI parity: multiple PATH[:ro] mounts, pre-verb image selection, and opaque run tails use the backend adapter semantics. Detailed argv and state evidence is in test_cli_forms.py.",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{acq}",
+      "--backend",
+      "msb",
+      "--json",
+      "run",
+      "opencode",
+      ".",
+      "--name",
+      "forms-box",
+      "--no-provider-kits",
+      "--",
+      "--json",
+      "a b",
+      "a'b",
+      "$(echo literal)",
+      ""
+    ],
+    "env": {
+      "ACQ_MSB_BIN": "__stub__",
+      "ACQ_MSB_VERSION": "0.7.7",
+      "ACQ_MSB_INSTALLED": "1",
+      "ACQ_SBX_INSTALLED": "1",
+      "ACQ_PROVIDER_KITS": "",
+      "ACQ_SBX_BIN": "__stub__",
+      "ACQ_SBX_VERSION": "0.51.0"
+    },
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "MSB_HOME",
+      "ACQ_IMAGE",
+      "ACQ_MSB_IMAGE",
+      "ACQ_MSB_STUB_CATALOG",
+      "ACQ_MSB_READY_TIMEOUT",
+      "ACQ_MSB_STUB_FAIL",
+      "ACQ_MSB_STUB_PROBE",
+      "ACQ_EXTRA_KITS",
+      "ACQ_CONFIG_SEED",
+      "USAI_API_KEY",
+      "ACQ_PROVIDER_CREDENTIAL_BINDINGS",
+      "ACQ_PROVIDER_CREDENTIAL_SEED",
+      "ACQ_SECURITY_MOUNT_STATE",
+      "ACQ_KIT_APPLIED_SEED",
+      "ACQ_MIGRATION_LOCK_TIMEOUT"
+    ],
+    "stdin": "",
+    "timeout_ms": 15000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "run",
+        "data": {
+          "name": "forms-box",
+          "backend": "msb",
+          "state": "running"
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "contains",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME",
+      "ACQ_SECRET_STORE_DIR"
+    ]
+  }
+}

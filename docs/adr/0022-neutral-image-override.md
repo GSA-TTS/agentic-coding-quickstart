@@ -90,7 +90,9 @@ convention as sbx for known agent tokens:
 `docker.io/docker/sandbox-templates:<agent>-docker`. Two agents are exceptions —
 Docker publishes them under a longer product name than the short acq token, so
 `claude` maps to `claude-code-docker` and `cursor` to `cursor-agent-docker` (all
-other known agents follow `<agent>-docker` verbatim). If that derived image is
+other known agents follow `<agent>-docker` verbatim). The `shell` agent is now a
+third exception on the msb backend: it uses acq's own base image, not a Docker
+template (ADR-0052m). If that derived image is
 not found, acq retries once with
 `docker.io/docker/sandbox-templates:shell-docker`. Explicit image failures do not
 fall back silently.

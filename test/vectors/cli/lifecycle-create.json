@@ -1,0 +1,73 @@
+{
+  "schema": 1,
+  "id": "cli/lifecycle-create",
+  "oracle": "ADR-0040m msb provision capability: create a sandbox end to end and record host-authoritative state (a usai key is stored first: the default provider kit is selected, and acq refuses an msb create whose provider has no stored key)",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{python}",
+      "-I",
+      "test/vectors/drivers/seeded-run.py",
+      "[{\"git_repos\":{}},[[\"--backend\",\"msb\",\"secret\",\"set\",\"-g\",\"usai\"],true,0],[[\"--backend\",\"msb\",\"create\",\"opencode\",\"{workspace}\",\"--name\",\"life-test\",\"--json\"],false,null]]",
+      "{acq}"
+    ],
+    "env": {
+      "ACQ_MSB_BIN": "__stub__",
+      "ACQ_MSB_VERSION": "0.7.7",
+      "ACQ_MSB_INSTALLED": "1",
+      "ACQ_SBX_INSTALLED": "0"
+    },
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "MSB_HOME",
+      "ACQ_IMAGE",
+      "ACQ_MSB_IMAGE",
+      "ACQ_MSB_STUB_CATALOG",
+      "ACQ_MSB_READY_TIMEOUT",
+      "ACQ_MSB_STUB_FAIL",
+      "USAI_API_KEY",
+      "ACQ_PROVIDER_CREDENTIAL_BINDINGS",
+      "ACQ_PROVIDER_CREDENTIAL_SEED",
+      "ACQ_MSB_STUB_PROBE"
+    ],
+    "stdin": "vector-usai-sentinel-f0d3",
+    "timeout_ms": 15000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "create",
+        "data": {
+          "name": "life-test",
+          "backend": "msb",
+          "agent": "opencode",
+          "state": "running"
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME",
+      "ACQ_SECRET_STORE_DIR"
+    ]
+  }
+}

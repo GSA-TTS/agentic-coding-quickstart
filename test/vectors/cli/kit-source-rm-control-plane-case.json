@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "id": "cli/kit-source-rm-control-plane-case",
+  "oracle": "ADR-0038m §46 kit-source rm refuses the pinned control-plane trust anchor under any owner/repo letter case (GitHub ignores case, so a case variant names the same repository); the case variant is seeded, so an rm that compared exact spellings would remove it and exit 0",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{acq}", "kit-source", "rm", "github.com/gsa-tts/Agentic-Coding-Patterns", "--json"],
+    "env": {
+      "ACQ_KIT_SOURCE_SEED": "[{\"repository\": \"github.com/gsa-tts/Agentic-Coding-Patterns\", \"ref\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"directory\": \"integrations/isolation/acq-kits\"}]",
+      "ACQ_SBX_INSTALLED": "0",
+      "ACQ_MSB_INSTALLED": "0"
+    },
+    "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "ACQ_MSB_BIN", "ACQ_SBX_BIN", "ACQ_SBX_VERSION", "ACQ_MSB_VERSION", "SBX_HOME", "MSB_HOME", "ACQ_KIT_SOURCE_DISCOVERY"],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 1,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "kit-source rm",
+        "error": {
+          "code": "validation_failed",
+          "message": "the built-in control-plane source cannot be removed",
+          "remediation": "team/personal sources can be removed; the control plane is the pinned trust anchor"
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {"mode": "exact", "value": "", "normalize": []}
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+  }
+}

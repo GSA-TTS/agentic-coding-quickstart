@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "id": "cli/msb-ca-list-drive",
+  "oracle": "Bash userdirs upstream-CA preflight refuses unsafe paths before any backend call; same diagnostics and exit 1",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{acq}",
+      "ls"
+    ],
+    "env": {
+      "ACQ_MSB_UPSTREAM_CA_CERT": "C:/certs/ca.pem"
+    },
+    "unset": [
+      "ACQ_IMPL",
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "ACQ_SECRET_STORE_DIR",
+      "ACQ_SECRET_FILE_DIR"
+    ],
+    "stdin": "",
+    "timeout_ms": 10000
+  },
+  "expect": {
+    "exit": 1,
+    "stdout": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "acq: ACQ_MSB_UPSTREAM_CA_CERT entries must be absolute POSIX paths (the list is split on ':'), got 'C:/certs/ca.pem'\nuse the POSIX form of a Windows path in ACQ_MSB_UPSTREAM_CA_CERT, e.g. '/c/certs/ca.pem'\n",
+      "normalize": [
+        "crlf"
+      ]
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME"
+    ]
+  }
+}

@@ -1,45 +1,23 @@
 #!/usr/bin/env bats
-# Shared specs must stay readable while another worker initializes its fixtures.
+# Each test owns its offline kit specs (under its private stub dir), published once
+# and never replaced, so a concurrent copy never sees a changed file (#721).
 # shellcheck shell=bats
 
 load 'helper'
 
-@test "shared fixtures: readers see complete specs during another worker's writes" {
+@test "shared fixtures: a repeated publication keeps the stub's file identity and bytes" {
   run bash -c '
-    printf() {
-      case "$*" in
-        *hybrid/v1*)
-          : > "$BATS_TEST_TMPDIR/write-intercepted"
-          local spec
-          for spec in "$BATS_RUN_TMPDIR/acq-offline-kit/spec.yaml" \
-                      "$BATS_RUN_TMPDIR/acq-opencode-kit/spec.yaml"; do
-            if ! grep -q "schemaVersion:" "$spec"; then
-              echo "reader observed an incomplete shared spec" >&2
-              exit 91
-            fi
-          done
-          ;;
-      esac
-      builtin printf "$@"
-    }
-    # Redirection happens before printf: inspect the published paths at the
-    # exact write boundary instead of relying on scheduler timing to hit it.
-    source "$1/scripts/test-acq-lib.sh"
-    [ -f "$BATS_TEST_TMPDIR/write-intercepted" ] || exit 94
-  ' _ "$REPO_ROOT"
-  assert_success
-}
-
-@test "shared fixtures: helper reload preserves published file identity and bytes" {
-  run bash -c '
-    for dir in acq-offline-kit acq-opencode-kit; do
-      ln "$BATS_RUN_TMPDIR/$dir/spec.yaml" "$BATS_TEST_TMPDIR/$dir.before" || exit 95
-      cp "$BATS_RUN_TMPDIR/$dir/spec.yaml" "$BATS_TEST_TMPDIR/$dir.bytes" || exit 96
-    done
     source "$1/scripts/test-acq-lib.sh" || exit 97
+    make_stubs || exit 98
+    trap cleanup_stubs EXIT
     for dir in acq-offline-kit acq-opencode-kit; do
-      [ "$BATS_RUN_TMPDIR/$dir/spec.yaml" -ef "$BATS_TEST_TMPDIR/$dir.before" ] || exit 92
-      cmp "$BATS_RUN_TMPDIR/$dir/spec.yaml" "$BATS_TEST_TMPDIR/$dir.bytes" || exit 93
+      ln "$STUBDIR/$dir/spec.yaml" "$BATS_TEST_TMPDIR/$dir.before" || exit 95
+      cp "$STUBDIR/$dir/spec.yaml" "$BATS_TEST_TMPDIR/$dir.bytes" || exit 96
+    done
+    _acq_test_offline_kits || exit 99
+    for dir in acq-offline-kit acq-opencode-kit; do
+      [ "$STUBDIR/$dir/spec.yaml" -ef "$BATS_TEST_TMPDIR/$dir.before" ] || exit 92
+      cmp "$STUBDIR/$dir/spec.yaml" "$BATS_TEST_TMPDIR/$dir.bytes" || exit 93
     done
   ' _ "$REPO_ROOT"
   assert_success
@@ -63,4 +41,23 @@ load 'helper'
   assert_failure
   [ -z "$(ls -A "$directory")" ]
   [ -L "$link" ]
+}
+
+# The stub setup must keep acq's caches away from the developer's own, even when
+# their shell exports cache locations: generated kits (sbx startup-barrier specs)
+# otherwise pile up in the real ~/.cache.
+@test "stub setup: the XDG cache and both kit caches are inside the stub dir" {
+  run env XDG_CACHE_HOME=/nonexistent/dev-cache ACQ_SBX_KIT_CACHE=/nonexistent/dev-sbx-kits \
+    ACQ_MSB_KIT_CACHE=/nonexistent/dev-msb-kits bash -c '
+      source "$1/scripts/test-acq-lib.sh"
+      make_stubs
+      printf "%s\n" "$STUBDIR" "$XDG_CACHE_HOME" "$ACQ_SBX_KIT_CACHE" "$ACQ_MSB_KIT_CACHE"
+      cleanup_stubs
+    ' _ "$REPO_ROOT"
+  assert_success
+  local stub="${lines[0]}"
+  [ -n "$stub" ]
+  assert_line --index 1 "$stub/home/.cache"
+  assert_line --index 2 "$stub/home/.cache/acq/sbx-kits"
+  assert_line --index 3 "$stub/home/.cache/acq/kits"
 }

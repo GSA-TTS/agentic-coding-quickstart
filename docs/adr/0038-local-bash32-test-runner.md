@@ -1,7 +1,7 @@
 ---
 title: "Local Bash 3.2.57 test runner and its provisioning"
 description: "Why scripts/test-acq-bash32 resolves a verified interpreter via an override, a signature-verified source build, or a digest-pinned OCI fetch, instead of requiring Nix or mise"
-status: proposed
+status: accepted
 tier: 2
 date: 2026-10-29
 last_updated: "2026-10-29"

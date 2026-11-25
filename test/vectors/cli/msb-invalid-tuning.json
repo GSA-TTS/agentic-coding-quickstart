@@ -1,0 +1,90 @@
+{
+  "schema": 1,
+  "id": "cli/msb-invalid-tuning",
+  "oracle": "Bash invalid memory, CPUs and pull policy warn and omit the flags while create succeeds; backend argv and DNS/CA autodetection are additionally covered by pytest",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{python}",
+      "-I",
+      "test/vectors/drivers/seeded-run.py",
+      "[{\"git_repos\":{}},[[\"--backend\",\"msb\",\"create\",\"opencode\",\"{workspace}\",\"--name\",\"np-box\",\"--no-provider-kits\",\"--json\"],false,null]]",
+      "{acq}"
+    ],
+    "env": {
+      "ACQ_MSB_BIN": "__stub__",
+      "ACQ_MSB_VERSION": "0.7.7",
+      "ACQ_MSB_INSTALLED": "1",
+      "ACQ_SBX_INSTALLED": "0",
+      "ACQ_PROVIDER_KITS": "git+https://example.invalid/provider-kit.git#ref=main&dir=kit",
+      "ACQ_MSB_MEMORY": "4GiB",
+      "ACQ_MSB_CPUS": "0",
+      "ACQ_MSB_PULL": "NEVER",
+      "ACQ_MSB_DNS_REBIND_PROTECTION": "1",
+      "ACQ_MSB_UPSTREAM_CA_AUTODETECT": "0"
+    },
+    "unset": [
+      "ACQ_BACKEND",
+      "ACQ_STATE_DIR",
+      "MSB_HOME",
+      "ACQ_IMAGE",
+      "ACQ_MSB_IMAGE",
+      "ACQ_MSB_STUB_CATALOG",
+      "ACQ_MSB_READY_TIMEOUT",
+      "ACQ_MSB_STUB_FAIL",
+      "ACQ_MSB_STUB_PROBE",
+      "ACQ_EXTRA_KITS",
+      "ACQ_CONFIG_SEED",
+      "USAI_API_KEY",
+      "ACQ_PROVIDER_CREDENTIAL_BINDINGS",
+      "ACQ_PROVIDER_CREDENTIAL_SEED",
+      "ACQ_SECURITY_MOUNT_STATE",
+      "ACQ_KIT_APPLIED_SEED",
+      "ACQ_MIGRATION_LOCK_TIMEOUT"
+    ],
+    "stdin": "",
+    "timeout_ms": 15000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "create",
+        "data": {
+          "name": "np-box",
+          "backend": "msb",
+          "agent": "opencode",
+          "state": "running",
+          "kits": [
+            "zscaler-ca-certificate",
+            "agentic-coding-playbook",
+            "git-ssh-sign",
+            "opencode"
+          ]
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "acq(msb): ignoring invalid ACQ_MSB_PULL='NEVER' (expected: always | if-missing | never)\nacq(msb): warning: ignoring invalid ACQ_MSB_MEMORY='4GiB' (expected e.g. 4G, 4096, 512M).\nacq(msb): warning: ignoring invalid ACQ_MSB_CPUS='0' (expected a positive integer).\n",
+      "normalize": ["crlf"]
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME",
+      "ACQ_SECRET_STORE_DIR"
+    ]
+  }
+}

@@ -13,6 +13,10 @@ review_cycle: "quarterly"
 
 # AGENTS.md — Agentic Coding Quickstart
 
+> **Fork history:** [`AGENTS.fork.md`](AGENTS.fork.md) preserves the development
+> rules for `mogul/agentic-coding-quickstart`. Those fork-only permissions do not
+> apply to this upstream integration branch or authorize upstream actions.
+
 > **System:** Agentic Coding Quickstart | **Environment:** Local development (build Low/Moderate-impact code) | **Agency:** GSA
 >
 > **Last Updated:** 2026-08-18 | **Reviewed By:** William Zujkowski

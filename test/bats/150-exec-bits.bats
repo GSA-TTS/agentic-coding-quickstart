@@ -33,18 +33,27 @@ FIXER_REL='scripts/fix-exec-bits'
 INDEX_VALIDATOR_REL='scripts/validate-git-executable-modes'
 
 EXPECTED_EXECUTABLES='acq
+acq-python
+scripts/assemble-release
 scripts/bats-shard
 scripts/diagnose-tls-intercept
 scripts/fetch-bash32-oci.py
 scripts/fix-exec-bits
+scripts/gen-install-assets
+scripts/gen-provenance
 scripts/install-provider-input-wheelhouse
 scripts/probe-msb-node-startup
 scripts/probe-msb-posthoc-ports
 scripts/probe-msb-startup
+scripts/qualify-backend-cell
+scripts/refresh-kitbundle
 scripts/rotate-apikey
 scripts/run-shellcheck
+scripts/run-vectors
 scripts/scan-heredoc-subst.py
 scripts/setup-provider-input-validator
+scripts/stage-posix-runtime
+scripts/stage-windows-runtime
 scripts/summarize-bats-timing
 scripts/test-acq-bash32
 scripts/test-acq-bats
@@ -203,7 +212,7 @@ _make_index_fixture() {
   chmod 644 acq
   run bash "$REPO_ROOT/$INDEX_VALIDATOR_REL" --root "$REPO"
   assert_success
-  assert_output --partial 'OK - 27 intended executables are stage-0 100755'
+  assert_output --partial 'OK - 36 intended executables are stage-0 100755'
 }
 
 @test "exec-bits: Git-index validator rejects a staged 100644 entry point" {

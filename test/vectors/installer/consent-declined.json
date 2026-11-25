@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "id": "installer/consent-declined",
+  "oracle": "ADR-0042m installer consent: PATH is never modified without an explicit yes (non-interactive declines)",
+  "tier": 1,
+  "backend": null,
+  "platform": "linux",
+  "invoke": {
+    "argv": ["sh", "install.sh", "--source", "test/fixtures/installer"],
+    "env": {},
+    "unset": [],
+    "stdin": "",
+    "timeout_ms": 10000
+  },
+  "expect": {
+    "exit": 0,
+    "stderr": {
+      "mode": "contains",
+      "value": "Not changing your PATH",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": []
+  }
+}

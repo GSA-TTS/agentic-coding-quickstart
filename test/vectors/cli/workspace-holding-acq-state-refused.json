@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "id": "cli/workspace-holding-acq-state-refused",
+  "oracle": "ADR-0035 read-only trusted config: a workspace that contains acq's own state, config or secret-store directories is refused (validation_failed) before anything is created, since the guest could otherwise rewrite acq's host records and the read-only trusted configuration through the writable workspace mount. The filesystem root contains every one of them. Linux-only: on Windows '/' names the current drive's root, which need not hold the redirected directories",
+  "tier": 1,
+  "backend": null,
+  "platform": "linux",
+  "invoke": {
+    "argv": ["{acq}", "--backend", "msb", "create", "opencode", "/", "--name", "box", "--json"],
+    "env": {
+      "ACQ_MSB_BIN": "__stub__",
+      "ACQ_MSB_VERSION": "0.7.7",
+      "ACQ_MSB_INSTALLED": "1",
+      "ACQ_SBX_INSTALLED": "0"
+    },
+    "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "MSB_HOME", "ACQ_IMAGE", "ACQ_MSB_IMAGE", "ACQ_MSB_STUB_CATALOG", "ACQ_MSB_READY_TIMEOUT", "ACQ_MSB_STUB_FAIL"],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 1,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "create",
+        "error": {
+          "code": "validation_failed",
+          "remediation": "use a project directory that holds none of acq's state, config or secret-store directories (not your home directory itself), then re-run"
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "ACQ_SECRET_STORE_DIR"]
+  }
+}

@@ -5,7 +5,7 @@
 #
 # kit-translate: neutral hybrid/v1 -> sbx-v2 synthesis (offline). Translates
 # local neutral kits and asserts the synthesized sbx-v2 spec; also the
-# non-interactive git+https fetch hardening (#207) and the environment
+# non-interactive git+https fetch hardening and the environment
 # vocabulary. Helpers run in isolated subshells.
 #
 # shellcheck shell=bats
@@ -75,10 +75,10 @@ SPEC
   assert_regex "$spec" 'line two'
   assert_regex "$spec" 'agentInstructions:'
   assert_regex "$spec" 'Translate kit context\.'
-  # #220: wildcard + host:port allow entries must be YAML-quoted.
+  # Wildcard + host:port allow entries must be YAML-quoted to stay strings.
   assert_regex "$spec" "- '\*\.example\.com'"
   assert_regex "$spec" "- 'api\.example\.com:443'"
-  # #224: neutral publishedPorts -> sbx-v2 ports (keyed on container).
+  # Translate neutral publishedPorts to sbx-v2 ports, keyed on container.
   assert_regex "$spec" 'ports:'
   refute_regex "$spec" 'publishedPorts:'
   assert_regex "$spec" '- container: 3000'
@@ -226,11 +226,15 @@ SPEC
   refute_regex "$spec" "chmod 0755 '/workspace/w\.sh'"
 }
 
+# Transport and metadata assertions target the private fetch helper. Public
+# fetch destinations contain no Git metadata; reuse/publication is covered in
+# 102-kit-fetch-reuse.bats.
 @test "#207: a git+https kit fetch is non-interactive and neutralizes credentials" {
   local gitlog="$STUBDIR/git-invocations.log"; : >"$gitlog"
   cat >"$STUBDIR/git" <<GITSTUB
 #!/usr/bin/env bash
-printf 'PROMPT=%s ARGS=%s\n' "\${GIT_TERMINAL_PROMPT:-UNSET}" "\$*" >>"$gitlog"
+printf 'PROMPT=%s NOSYSTEM=%s GLOBAL=%s PROTO=%s ARGS=%s\n' "\${GIT_TERMINAL_PROMPT:-UNSET}" \
+  "\${GIT_CONFIG_NOSYSTEM:-UNSET}" "\${GIT_CONFIG_GLOBAL:-UNSET}" "\${GIT_ALLOW_PROTOCOL:-UNSET}" "\$*" >>"$gitlog"
 case "\$*" in
   *fetch*) exit 0 ;;
   *checkout*) mkdir -p "integrations/isolation/acq-kits/usai-provider"; exit 0 ;;
@@ -238,16 +242,113 @@ case "\$*" in
 esac
 GITSTUB
   chmod +x "$STUBDIR/git"
-  run bash -c '
+  run env -u GIT_ALLOW_PROTOCOL bash -c '
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
-    kit_translate_fetch "git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=deadbeef&dir=integrations/isolation/acq-kits/usai-provider" "'"$STUBDIR"'/kitdest"
+    mkdir -p "'"$STUBDIR"'/kitdest"
+    _kit_git_fetch_into anon "'"$STUBDIR"'/kitdest" "https://github.com/GSA-TTS/agentic-coding-patterns.git" "deadbeef" "integrations/isolation/acq-kits/usai-provider"
   ' >/dev/null 2>&1 || true
-  local fetchline anonline
-  fetchline=$(grep 'fetch' "$gitlog" | head -1)
-  assert_regex "$fetchline" 'PROMPT=0'
-  anonline=$(grep -m1 'credential.helper=' "$gitlog" || true)
-  assert_regex "$anonline" 'credential\.helper='
-  assert_regex "$anonline" 'insteadOf='
+  local fetchline
+  # The anonymous attempt succeeded, so it is the only fetch: no prompt, no git
+  # config file, https only, and no URL rewrite of its own (an empty
+  # url.<base>.insteadOf would rewrite every URL and make it always fail).
+  assert_equal "$(grep -c 'fetch' "$gitlog")" 1
+  fetchline=$(grep 'fetch' "$gitlog")
+  assert_regex "$fetchline" 'PROMPT=0 NOSYSTEM=1 GLOBAL=/dev/null PROTO=https '
+  assert_regex "$fetchline" 'credential\.helper= '
+  assert_regex "$fetchline" 'core\.hooksPath=/dev/null'
+  refute_regex "$fetchline" 'insteadOf'
+}
+
+# The anonymous attempt's allowlist is https, which an inherited
+# GIT_ALLOW_PROTOCOL can only narrow; no environment variable widens it, under
+# bats or not.
+@test "kit fetch: the anonymous allowlist is https and only ever narrowed" {
+  run env -u GIT_ALLOW_PROTOCOL BATS_TEST_NAME=x ACQ_TEST_KIT_ANON_PROTOCOLS=file bash -c '
+    . "$1/acq.backends/kit-translate.sh"
+    _kit_anon_protocols
+    GIT_ALLOW_PROTOCOL=ssh:https _kit_anon_protocols
+    GIT_ALLOW_PROTOCOL=file _kit_anon_protocols
+    GIT_ALLOW_PROTOCOL= _kit_anon_protocols
+  ' _ "$REPO_ROOT"
+  assert_success
+  assert_output $'https\nhttps\nacq-none\nacq-none'
+}
+
+# The anonymous attempt end to end, with a real git against a local repository.
+# The attempt allows only https, so a git wrapper on PATH records that and swaps
+# that one value for file before running the real git; nothing else about the
+# attempt changes. The user's global config rewrites every file:// URL to a missing path and names a
+# hooks directory whose post-checkout hook leaves a marker; the anonymous
+# attempt must read neither, and the authenticated retry must still run no hook.
+@test "kit fetch: the anonymous attempt really fetches, reading no git config file and running no hook" {
+  local src="$STUBDIR/kitsrc" hooks="$STUBDIR/userhooks" marker="$STUBDIR/hook-ran" sha
+  mkdir -p "$src/kits/demo" "$hooks"
+  printf 'name: demo\n' >"$src/kits/demo/spec.yaml"
+  git -C "$src" init -q
+  git -C "$src" add kits
+  git -C "$src" -c user.name=t -c user.email=t@example.test commit -q -m kit
+  sha=$(git -C "$src" rev-parse HEAD)
+  printf '#!/bin/sh\necho ran >>"%s"\n' "$marker" >"$hooks/post-checkout"
+  chmod +x "$hooks/post-checkout"
+  git config --global core.hooksPath "$hooks"
+  # The hook is live for an ordinary git command, so its absence below means
+  # something.
+  git -C "$src" checkout -q -b probe
+  [ -f "$marker" ]
+  rm -f "$marker"
+  git config --global "url.file://$STUBDIR/missing-acq-repo/.insteadOf" "file://"
+
+  local realgit wrap="$STUBDIR/anon-git" protolog="$STUBDIR/anon-protocols"
+  realgit=$(command -v git)
+  mkdir -p "$wrap"
+  cat >"$wrap/git" <<GITWRAP
+#!/usr/bin/env bash
+if [ "\${GIT_ALLOW_PROTOCOL-unset}" = https ]; then
+  printf '%s\n' "\$*" >>"$protolog"
+  export GIT_ALLOW_PROTOCOL=file
+fi
+exec "$realgit" "\$@"
+GITWRAP
+  chmod +x "$wrap/git"
+  run env -u GIT_ALLOW_PROTOCOL PATH="$wrap:$PATH" bash -c '
+    . "$1/acq.backends/kit-translate.sh"
+    mkdir -p "$2"
+    _kit_git_fetch_into anon "$2" "file://$3" "$4" kits/demo >/dev/null || exit 1
+    git -C "$2" rev-parse HEAD
+  ' _ "$REPO_ROOT" "$STUBDIR/anon" "$src" "$sha"
+  assert_success
+  assert_output "$sha"
+  assert [ -f "$STUBDIR/anon/kits/demo/spec.yaml" ]
+  assert [ ! -e "$marker" ]
+  # The fetch itself ran under the https-only allowlist.
+  grep -q -- '--depth 1 origin' "$protolog"
+
+  # Without the wrapper only https is allowed, so the same fetch fails.
+  run env -u GIT_ALLOW_PROTOCOL bash -c '
+    . "$1/acq.backends/kit-translate.sh"
+    mkdir -p "$2"
+    _kit_git_fetch_into anon "$2" "file://$3" "$4" kits/demo
+  ' _ "$REPO_ROOT" "$STUBDIR/https-only" "$src" "$sha"
+  assert_failure
+
+  # The authenticated retry reads the user's config: the rewrite applies (and
+  # breaks this URL); without it the fetch succeeds and the hook still never runs.
+  run bash -c '
+    . "$1/acq.backends/kit-translate.sh"
+    mkdir -p "$2"
+    _kit_git_fetch_into user "$2" "file://$3" "$4" kits/demo
+  ' _ "$REPO_ROOT" "$STUBDIR/user-rewritten" "$src" "$sha"
+  assert_failure
+  git config --global --unset "url.file://$STUBDIR/missing-acq-repo/.insteadOf"
+  run bash -c '
+    . "$1/acq.backends/kit-translate.sh"
+    mkdir -p "$2"
+    _kit_git_fetch_into user "$2" "file://$3" "$4" kits/demo >/dev/null || exit 1
+    git -C "$2" rev-parse HEAD
+  ' _ "$REPO_ROOT" "$STUBDIR/user" "$src" "$sha"
+  assert_success
+  assert_output "$sha"
+  assert [ ! -e "$marker" ]
 }
 
 @test "#207: authenticated retry diagnostics never expose credential-bearing URLs" {
@@ -456,7 +557,7 @@ SPEC
 # Debian/Ubuntu — has no interval-expression support, so that form matches
 # NOTHING under mawk and every kit's files are silently dropped (parser site)
 # or every valid mode is reported invalid (kit_validate raw-scan site, whose
-# stricter leading-zero pattern is /^0[0-7][0-7][0-7]$/ — #381). All mode
+# stricter leading-zero pattern is /^0[0-7][0-7][0-7]$/). All mode
 # validator sites must stay longhand. This source-level check catches a
 # regression regardless of which awk the test runner ships (gawk/BSD-awk would
 # not reproduce the failure at runtime).
@@ -470,4 +571,157 @@ SPEC
 @test "kit-translate: longhand octal mode pattern accepts valid, rejects junk" {
   run bash -c 'printf "0755\n755\nabc\n07555\n" | awk "\$0 ~ /^[0-7][0-7][0-7][0-7]?\$/ {print}"'
   assert_output $'0755\n755'
+}
+
+# The kit cache directory sits under the user's state/cache tree, which may be
+# inside some other git repository. If `git init` fails there, the following
+# remote/config/fetch calls would act on that enclosing repository, so the fetch
+# must stop at the failed init with a clear message.
+@test "kit fetch: a failed git init stops before any remote/config/fetch call" {
+  local gitlog="$STUBDIR/git-init-fail.log"; : >"$gitlog"
+  cat >"$STUBDIR/git" <<GITSTUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$gitlog"
+case "\$*" in
+  *init*) echo 'fatal: cannot init' >&2; exit 1 ;;
+  *) exit 0 ;;
+esac
+GITSTUB
+  chmod +x "$STUBDIR/git"
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    mkdir -p "'"$STUBDIR"'/initdest"
+    _kit_git_fetch_into anon "'"$STUBDIR"'/initdest" "https://github.com/x/y.git" "deadbeef" "kit" 2>&1
+  '
+  assert_failure
+  assert_output --partial 'git init failed'
+  refute_regex "$(cat "$gitlog")" '(^|[[:space:]])(remote|config|fetch|checkout)([[:space:]]|$)'
+}
+
+@test "kit fetch: a failed git remote stops before config/fetch" {
+  local gitlog="$STUBDIR/git-remote-fail.log"; : >"$gitlog"
+  cat >"$STUBDIR/git" <<GITSTUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$gitlog"
+case "\$*" in
+  remote*) exit 1 ;;
+  *) exit 0 ;;
+esac
+GITSTUB
+  chmod +x "$STUBDIR/git"
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    mkdir -p "'"$STUBDIR"'/remotedest"
+    _kit_git_fetch_into anon "'"$STUBDIR"'/remotedest" "https://github.com/x/y.git" "deadbeef" "kit" 2>&1
+  '
+  assert_failure
+  refute_regex "$(cat "$gitlog")" '(^|[[:space:]])(config|fetch|checkout)([[:space:]]|$)'
+}
+
+@test "kit fetch: a failed git config stops before fetch" {
+  local gitlog="$STUBDIR/git-config-fail.log"; : >"$gitlog"
+  cat >"$STUBDIR/git" <<GITSTUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$gitlog"
+case "\$*" in
+  config*) exit 1 ;;
+  *) exit 0 ;;
+esac
+GITSTUB
+  chmod +x "$STUBDIR/git"
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    mkdir -p "'"$STUBDIR"'/configdest"
+    _kit_git_fetch_into anon "'"$STUBDIR"'/configdest" "https://github.com/x/y.git" deadbeef kit 2>&1
+  '
+  assert_failure
+  refute_regex "$(cat "$gitlog")" '(^|[[:space:]])(fetch|checkout)([[:space:]]|$)'
+}
+
+# An inherited GIT_DIR (or similar) must never redirect the kit cache's git
+# commands into another repository.
+@test "kit fetch: an inherited GIT_DIR leaves that repository's config untouched" {
+  local other="$STUBDIR/other-repo"
+  "$ACQ_TEST_REAL_GIT" init -q "$other"
+  local before; before=$(cat "$other/.git/config")
+  run env GIT_DIR="$other/.git" GIT_WORK_TREE="$other" GIT_INDEX_FILE="$other/.git/index" \
+    bash -c '
+      . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+      mkdir -p "'"$STUBDIR"'/gitdirdest"
+      _kit_git_fetch_into anon "'"$STUBDIR"'/gitdirdest" "https://example.test/x/y.git" "deadbeef" "kit" 2>&1
+    '
+  assert_equal "$(cat "$other/.git/config")" "$before"
+  [ -d "$STUBDIR/gitdirdest/.git" ]
+}
+
+@test "kit git isolation: every git local-env var and config-injection var is cleared" {
+  local vars
+  vars=$("$ACQ_TEST_REAL_GIT" rev-parse --local-env-vars)
+  [ -n "$vars" ]
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    for v in $1 GIT_NAMESPACE GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_KEY_12 GIT_CONFIG_VALUE_12; do
+      export "$v=set-by-test"
+    done
+    _kit_git_isolate
+    env | grep "=set-by-test\$" || true
+  ' _ "$vars"
+  assert_success
+  assert_output ''
+}
+
+@test "kit git isolation: the repo-only variant clears the rest but keeps the command scope" {
+  local vars
+  vars=$("$ACQ_TEST_REAL_GIT" rev-parse --local-env-vars)
+  [ -n "$vars" ]
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    for v in $1 GIT_NAMESPACE GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
+      export "$v=set-by-test"
+    done
+    _kit_git_isolate_repo
+    env | grep "=set-by-test\$" | sed "s/=.*//" | sort
+  ' _ "$vars"
+  assert_success
+  assert_output "$(printf '%s\n' GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_PARAMETERS GIT_CONFIG_VALUE_0)"
+}
+
+@test "kit fetch: an inherited GIT_CONFIG is never written to" {
+  local fake="$STUBDIR/fake-global-config"
+  : >"$fake"
+  run env GIT_CONFIG="$fake" bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    mkdir -p "'"$STUBDIR"'/gitconfigdest"
+    _kit_git_fetch_into anon "'"$STUBDIR"'/gitconfigdest" "https://example.test/x/y.git" "deadbeef" "kit" 2>&1
+  '
+  assert_equal "$(cat "$fake")" ""
+  grep -q 'sparseCheckout = true' "$STUBDIR/gitconfigdest/.git/config"
+}
+
+@test "provider-input control plane: an inherited GIT_DIR leaves that repository's config untouched" {
+  local other="$STUBDIR/other-cp-repo" before
+  "$ACQ_TEST_REAL_GIT" init -q "$other"
+  before=$(cat "$other/.git/config")
+  run env GIT_DIR="$other/.git" GIT_WORK_TREE="$other" bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    _acq_provider_input_control_plane "'"$STUBDIR"'/control-plane" 2>&1
+  '
+  assert_equal "$(cat "$other/.git/config")" "$before"
+  grep -q '\[remote "origin"\]' "$STUBDIR/control-plane/.git/config"
+}
+
+@test "fetch refuses percent-escaped local kit paths even when the directory exists" {
+  local name
+  for name in kit%3F kit%25 kit%zz; do
+    mkdir -p "$STUBDIR/$name"
+    run bash -c '. "$1/acq.backends/kit-translate.sh"; kit_translate_fetch "$2" "$3"' _ \
+      "$REPO_ROOT" "$STUBDIR/$name" "$STUBDIR/dest"
+    assert_failure
+    assert_output --partial 'percent escapes are not allowed'
+    [ ! -e "$STUBDIR/dest" ]
+  done
+  run bash -c '. "$1/acq.backends/kit-translate.sh"; kit_translate_fetch "$2" "$3"' _ \
+    "$REPO_ROOT" "$STUBDIR" "$STUBDIR/dest"
+  assert_success
+  assert_output "$STUBDIR"
 }

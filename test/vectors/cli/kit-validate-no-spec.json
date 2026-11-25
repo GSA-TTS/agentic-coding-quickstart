@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "id": "cli/kit-validate-no-spec",
+  "oracle": "ADR-0038m §1 kit validate fails closed (validation_failed) on a directory without a spec.yaml",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{acq}", "kit", "validate", "test/fixtures/empty-kit", "--json"],
+    "env": {},
+    "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "ACQ_MSB_BIN", "ACQ_MSB_INSTALLED", "ACQ_SBX_INSTALLED"],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 1,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "kit validate",
+        "error": {"code": "validation_failed"}
+      },
+      "normalize": []
+    },
+    "stderr": {"mode": "exact", "value": "", "normalize": []}
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+  }
+}

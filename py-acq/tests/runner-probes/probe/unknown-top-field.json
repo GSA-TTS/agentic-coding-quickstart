@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "id": "probe/unknown-top-field",
+  "oracle": "a field the schema does not define is invalid",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{python}",
+      "-c",
+      "import sys; sys.stdout.buffer.write(b'x')"
+    ],
+    "env": {},
+    "unset": [],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "exact",
+      "value": "x",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": []
+  },
+  "side_effects": {
+    "files_absent": [
+      "~/.profile"
+    ]
+  }
+}

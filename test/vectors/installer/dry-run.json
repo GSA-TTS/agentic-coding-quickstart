@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "id": "installer/dry-run",
+  "oracle": "ADR-0042m installer dry-run: prints a plan, performs no writes, no network",
+  "tier": 1,
+  "backend": null,
+  "platform": "linux",
+  "invoke": {
+    "argv": ["sh", "install.sh", "--dry-run"],
+    "env": {},
+    "unset": [],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "contains",
+      "value": "[dry-run]",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": []
+  }
+}
