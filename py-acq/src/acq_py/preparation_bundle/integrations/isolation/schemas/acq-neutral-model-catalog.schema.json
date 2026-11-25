@@ -1,0 +1,201 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "acq-neutral-model-catalog/v1",
+  "title": "ACQ Neutral Model Catalog",
+  "description": "Per-provider, harness-neutral model catalog produced by a provider normalizer or shipped as its vendored fallback snapshot. Consumed by the models orchestrator kit (Layer 2) and harness kits (Layer 3). Carries model metadata only — no routing or credential fields. See integrations/isolation/docs/decisions/0004-neutral-model-provider-discovery.md §Neutral catalog schema.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "providerId",
+    "models"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "const": "acq-neutral-model-catalog/v1",
+      "description": "Schema identifier and version. Consumers MUST reject a document whose schemaVersion they do not recognise."
+    },
+    "providerId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?(?![\\s\\S])",
+      "description": "Identifies which provider kit produced this catalog. MUST equal the providerId in the co-located facts.json. Follows the same safe-slug rules as acq-provider-facts/v1: lowercase ASCII alphanumerics and internal hyphens, 1-32 characters. Uses (?![\\s\\S]) instead of $ to enforce fullmatch semantics; see acq-provider-facts.schema.json for the rationale."
+    },
+    "models": {
+      "type": "array",
+      "description": "Model entries available through this provider. MAY be empty — a provider that legitimately exposes no models is valid. Consumers MUST tolerate an empty array.",
+      "maxItems": 500,
+      "items": {
+        "$ref": "#/$defs/model"
+      }
+    },
+     "recommendations": {
+       "type": "object",
+       "description": "Optional, advisory-only model role suggestions from the provider. Roles are neutral functional tiers — primary, small, compaction, summary, title — not harness-native keys. Each value MUST reference an id present in this catalog's own models[]. Final role selection, conflict resolution, and harness-native vocabulary (e.g. OpenCode's model/small_model/compaction.model) remain in each agent kit. Consumers that do not understand a role MUST silently ignore it.",
+       "additionalProperties": false,
+       "properties": {
+         "primary": {
+           "type": "string",
+           "minLength": 1,
+           "maxLength": 128,
+           "pattern": "^[^\\u0000-\\u001F\\u007F\\u2028\\u2029]+(?![\\s\\S])",
+           "description": "Advisory default model id for general-purpose tasks. MUST reference a model id present in models[]. JSON Schema cannot enforce this cross-reference constraint; implementations MUST validate it separately (see _validate_recommendations in scripts/tests/test_provider_input_contract.py)."
+         },
+         "small": {
+           "type": "string",
+           "minLength": 1,
+           "maxLength": 128,
+           "pattern": "^[^\\u0000-\\u001F\\u007F\\u2028\\u2029]+(?![\\s\\S])",
+           "description": "Advisory default model id for lightweight, fast, or low-cost tasks. MUST reference a model id present in models[]. JSON Schema cannot enforce this cross-reference constraint; implementations MUST validate it separately."
+         },
+         "compaction": {
+           "type": "string",
+           "minLength": 1,
+           "maxLength": 128,
+           "pattern": "^[^\\u0000-\\u001F\\u007F\\u2028\\u2029]+(?![\\s\\S])",
+           "description": "Advisory default model id for context-compaction or summarisation tasks. MUST reference a model id present in models[]. JSON Schema cannot enforce this cross-reference constraint; implementations MUST validate it separately."
+         },
+         "summary": {
+           "type": "string",
+           "minLength": 1,
+           "maxLength": 128,
+           "pattern": "^[^\\u0000-\\u001F\\u007F\\u2028\\u2029]+(?![\\s\\S])",
+           "description": "Advisory default model id for session-summary tasks. MUST reference a model id present in models[]. JSON Schema cannot enforce this cross-reference constraint; implementations MUST validate it separately."
+         },
+         "title": {
+           "type": "string",
+           "minLength": 1,
+           "maxLength": 128,
+           "pattern": "^[^\\u0000-\\u001F\\u007F\\u2028\\u2029]+(?![\\s\\S])",
+           "description": "Advisory default model id for session-title generation tasks. MUST reference a model id present in models[]. JSON Schema cannot enforce this cross-reference constraint; implementations MUST validate it separately."
+         }
+       }
+     }
+  },
+  "$defs": {
+    "model": {
+      "type": "object",
+      "description": "Single model entry. Carries metadata only — no routing or credential fields. Host, baseUrl, modelsUrl, and keyEnv MUST NOT appear here.",
+      "additionalProperties": false,
+      "required": [
+        "id"
+      ],
+      "dependentRequired": {
+        "releaseDate": ["releaseDateSource"],
+        "releaseDateSource": ["releaseDate"]
+      },
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000-\\u001F\\u007F\\u2028\\u2029]+(?![\\s\\S])",
+          "description": "Model identifier as used by the provider. Disallowed: ASCII control characters (U+0000-U+001F, U+007F) and Unicode line/paragraph separators (U+2028, U+2029). The pattern uses (?![\\s\\S]) in place of $ to avoid the $ trailing-newline bypass ($ in ECMA and Python re matches before \\n)."
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001F\\u007F\\u2028\\u2029]+(?![\\s\\S])",
+          "description": "Optional human-readable display name for this model. Disallowed: ASCII control characters and Unicode line/paragraph separators. When absent, consumers SHOULD fall back to the model id."
+        },
+        "contextWindow": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum input context window in tokens."
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum output tokens per response."
+        },
+        "cost": {
+          "$ref": "#/$defs/cost",
+          "description": "Base per-million-token pricing."
+        },
+        "costAbove200kContext": {
+          "$ref": "#/$defs/cost",
+          "description": "Optional tiered pricing that applies when the input context window exceeds 200 000 tokens. Same per-million-token fields as cost. Consumers that do not support tiered pricing MUST fall back to cost."
+        },
+        "releaseDate": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 10,
+          "format": "date",
+          "pattern": "^(?!0000)(?:[0-9]{4}-(?:(?:01|03|05|07|08|10|12)-(?:0[1-9]|[12][0-9]|3[01])|(?:04|06|09|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|1[0-9]|2[0-8]))|(?:[0-9]{2}(?:0[48]|[2468][048]|[13579][26])|(?:[02468][048]|[13579][26])00)-02-29)(?![\\s\\S])",
+          "description": "Optional upstream model release day, not gateway deployment or catalog update time. Must accompany releaseDateSource. Producers MUST omit both fields when missing, invalid, or later than their explicit asOf day; a static schema cannot enforce that clock bound. Never infer from an ID, last_updated, or discovery time. Does not establish quality, availability, capabilities, or a default."
+        },
+        "releaseDateSource": {
+          "$ref": "#/$defs/releaseDateSource"
+        },
+        "reasoning": {
+          "type": "boolean",
+          "description": "Optional capability flag: whether the PROVIDER's gateway supports reasoning for this model. Absent means UNKNOWN (consumers MUST NOT assume either value); false means known-unsupported; true means known-supported. Producers MUST NOT infer it from the model id or name, and MUST NOT populate it from upstream-vendor data unless the gateway's behavior has been verified. The one sanctioned exception is a producer tool that copies upstream data only behind an explicit opt-in flag and labels the output's provenance as unverified; such output MUST NOT be committed or shipped until verified. It is a capability statement only: producers and the renderer emit no reasoning effort, budget, or other request setting, although a consuming harness may derive selectable options (for example OpenCode 1.x derives reasoning-effort variants from reasoning:true for openai-compatible models)."
+        },
+        "inputModalities": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": ["text", "image", "audio", "video", "pdf"]
+          },
+          "description": "Optional capability list: input modalities the PROVIDER's gateway accepts for this model. Absent means UNKNOWN (consumers MUST NOT assume text-only or image-capable); [\"text\"] means known text-only. Producers MUST NOT infer it from the model id or name, and MUST NOT populate it from upstream-vendor data unless the gateway's behavior has been verified. The one sanctioned exception is a producer tool that copies upstream data only behind an explicit opt-in flag and labels the output's provenance as unverified; such output MUST NOT be committed or shipped until verified. The enum is a closed allowlist; a new modality requires a schema change."
+        }
+      }
+    },
+    "releaseDateSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "providerId", "modelId"],
+      "description": "Identity of the exact models.dev entry selected by the shared precision matcher in backend preference order. Provider identity is the upstream map key, not the gateway providerId. Data-only provenance, not a fetch target or verification claim.",
+      "properties": {
+        "source": {
+          "type": "string",
+          "const": "models.dev"
+        },
+        "providerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32,
+          "pattern": "^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?(?![\\s\\S])"
+        },
+        "modelId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*(?::[0-9]+)?(?![\\s\\S])"
+        }
+      }
+    },
+    "cost": {
+      "type": "object",
+      "description": "Per-million-token pricing. All fields optional. Values are in USD.",
+      "additionalProperties": false,
+      "properties": {
+        "input": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Cost per million input tokens."
+        },
+        "output": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Cost per million output tokens."
+        },
+        "cacheRead": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Cost per million cache-read tokens."
+        },
+        "cacheWrite": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Cost per million cache-write tokens."
+        }
+      }
+    }
+  }
+}

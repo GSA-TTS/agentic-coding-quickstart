@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "acq-provider-facts/v1",
+  "title": "ACQ Provider Facts",
+  "description": "Host-materialised, read-only self-registration record for a provider kit. With legacy bundle v1, the resulting directory is mounted at /var/lib/acq/host/models/providers/<providerId>/. With bundle v2, it is at the validated provider-relative path models/providers/<providerId> beneath the backend-supplied root. The backend materializer owns root injection, read-only mounting, and materialized-directory identity checks. See integrations/isolation/docs/decisions/0004-neutral-model-provider-discovery.md §Layer 1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "providerId",
+    "apiProtocol",
+    "host",
+    "baseUrl",
+    "modelsUrl",
+    "keyEnv"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "const": "acq-provider-facts/v1",
+      "description": "Schema identifier and version. Consumers MUST reject a document whose schemaVersion they do not recognise."
+    },
+    "providerId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?(?![\\s\\S])",
+      "description": "Stable, lowercase slug used as the final materialized provider directory. Bundle v1 uses the legacy fixed root; bundle v2 uses a backend-supplied root plus models/providers/<providerId>. The backend materializer enforces that the materialized directory name equals this value. Allowed: lowercase ASCII alphanumerics and internal hyphens, 1-32 characters total. Disallowed: path separators, dots, underscores, uppercase, non-ASCII, leading/trailing hyphens, whitespace, and control characters. The pattern ends with (?![\\s\\S]) — a zero-width assertion that matches only at the true end of the string — rather than $ because JSON Schema (ECMA regex) and Python re both allow $ to match before a trailing newline, which would permit 'usai\\n' as a path segment. The (?![\\s\\S]) lookahead has no such exception and enforces fullmatch semantics portably."
+    },
+    "apiProtocol": {
+      "type": "string",
+      "enum": ["openai-compatible"],
+      "description": "Wire protocol spoken by this provider's API. Harness renderers map this bounded value through a harness-owned static allowlist without branching on providerId. Version 1 supports only the OpenAI-compatible REST protocol used by the providers proven in this milestone; additional protocols require their own neutral authentication/routing facts and concrete renderer support before this enum expands."
+    },
+    "host": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 253,
+      "pattern": "^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\\.)*(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)(?![\\s\\S])",
+      "description": "Authoritative DNS hostname for the provider's API endpoint, without a scheme or port. Used by the orchestrator for SSRF containment: modelsUrl MUST have the same host as this field. Each DNS label rejects empty labels and leading/trailing hyphens. The host-time validator rejects IP literals and verifies this host against the kit network allowlist. The pattern uses (?![\\s\\S]) instead of $ for the same newline-bypass reason as providerId."
+    },
+    "baseUrl": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "pattern": "^https://",
+      "format": "uri",
+      "description": "Full base URL for the provider's API (https:// required). Informational; consumers MUST NOT fetch arbitrary paths under this URL without host cross-check against the `host` field. Note: the `format: uri` keyword is not enforced by default in all JSON Schema implementations (including Python jsonschema); the `pattern: ^https://` is the load-bearing constraint."
+    },
+    "modelsUrl": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "pattern": "^https://",
+      "format": "uri",
+      "description": "Full URL the orchestrator fetches to obtain the live model list (https:// required). The schema does NOT enforce that modelsUrl's hostname equals the `host` field — that cross-check is the orchestrator's responsibility (ADR 0004 §Layer 2 SSRF containment). A mismatch is a hard failure for that provider at the orchestrator level, not at schema-parse time. Note: `format: uri` is advisory only in most implementations; the `pattern` is the binding constraint."
+    },
+    "keyEnv": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Z][A-Z0-9_]*(?![\\s\\S])",
+      "description": "NAME of the environment variable holding the provider API key — never the key value itself. acq validates host-side that this name matches a variable in the same kit's own spec.yaml environment: block (env-var ownership check). Only the bounded-fetch helper reads this credential; it is never passed to the provider's normalizer. Uses (?![\\s\\S]) instead of $ for the same newline-bypass reason as providerId."
+    }
+  }
+}

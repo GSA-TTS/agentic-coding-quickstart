@@ -18,6 +18,7 @@ license = "CC0-1.0 AND Apache-2.0"
 license-files = [
   "src/acq_py/kitbundle/git-ssh-sign/LICENSE",
   "src/acq_py/kitbundle/git-ssh-sign/NOTICE",
+  "src/acq_py/preparation_bundle/LICENSE",
 ]
 # No runtime dependencies: acq v1's managed runtime stays app-private and
 # offline (ADR-0042m). The CLI uses the Python standard library only, so
@@ -34,6 +35,7 @@ acq-py = "acq_py.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+exclude = ["acq_py.preparation_bundle*"]
 
 [tool.setuptools.package-data]
 # The msb balanced egress baseline (a copy of acq.backends/msb-balanced-hosts.txt),
@@ -46,6 +48,12 @@ acq_py = [
   "kitbundle/*/*",
   "kitbundle/*/**/*",
   "kitbundle/*/files/home/.config/git/*",
+  # Explicit depths cover the closed preparation tree in both wheel and sdist.
+  "preparation_bundle/*",
+  # Keep the byte-exact validator as data: installer bytecode is not a bundle asset.
+  "preparation_bundle/scripts/*.py.txt",
+  "preparation_bundle/integrations/isolation/schemas/*.json",
+  "preparation_bundle/integrations/isolation/acq-kits/opencode/files/home/opencode-config/*.mjs",
 ]
 
 [tool.pytest.ini_options]
@@ -59,6 +67,8 @@ markers = ["provider_key: store a throwaway usai key so msb creates pass the pro
 [tool.ruff]
 target-version = "py312"
 src = ["src", "tests"]
+# Vendored source is byte-exact; lint the application wrapper, not upstream code.
+extend-exclude = ["src/acq_py/preparation_bundle"]
 
 [tool.ruff.lint]
 # Explicit rule set, so a ruff upgrade that changes its defaults cannot change
@@ -69,13 +79,14 @@ select = ["E4", "E7", "E9", "F", "I", "UP", "B"]
 [tool.mypy]
 python_version = "3.12"
 files = ["src"]
+exclude = ["^src/acq_py/preparation_bundle/"]
 mypy_path = "src"
 explicit_package_bases = true
 warn_unused_ignores = true
 warn_redundant_casts = true
 
 [tool.bandit]
-exclude_dirs = ["tests"]
+exclude_dirs = ["tests", "src/acq_py/preparation_bundle"]
 # B404 (imports subprocess) and B603 (subprocess without a shell) flag what acq is
 # for: it runs the backend CLIs. Every call passes an argv list resolved through
 # hostexec. The checks that matter here stay on: B602/B604/B605 (a shell) and
@@ -87,7 +98,7 @@ branch = true
 source = ["acq_py"]
 # The backend stubs and the __main__ shim only ever run in a child process
 # (ACQ_*_BIN=__stub__ / python -m acq_py), which in-process coverage cannot see.
-omit = ["*/acq_py/_stub_*.py", "*/acq_py/__main__.py"]
+omit = ["*/acq_py/_stub_*.py", "*/acq_py/__main__.py", "*/acq_py/preparation_bundle/*"]
 
 [tool.coverage.report]
 skip_covered = true
