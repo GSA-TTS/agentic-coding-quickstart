@@ -46,14 +46,17 @@ in each ADR; corrections and amendments are part of the record.
 | [0038m](0038m-portable-acq-v1-compatibility-contract.md) | Portable acq v1 compatibility contract | accepted |
 | [0039](0039-bash32-ci-shard-matrix-and-interpreter-handoff.md) | Shard the bash 3.2 CI suite and hand the interpreter to the shards | accepted |
 | [0039m](0039m-rewrite-verification-and-test-retirement-strategy.md) | Rewrite verification and test-retirement strategy | accepted |
+| [0040](0040-qualification-evaluator-introduction.md) | Qualification evaluator introduction | proposed |
 | [0040m](0040m-backend-adapter-capability-contract.md) | Backend adapter capability contract | accepted |
 | [0041m](0041m-configuration-and-state-migration-behavior.md) | Configuration and state migration behavior | accepted |
 | [0042m](0042m-installation-runtime-ownership-and-update-channels.md) | v1 installation, runtime ownership, and update channels | accepted |
 | [0043m](0043m-language-neutral-test-vector-format-and-runners.md) | Language-neutral test-vector format and runners | accepted |
 | [0044m](0044m-live-cross-platform-qualification-matrix-and-transcript.md) | Live cross-platform qualification matrix and transcript | accepted |
 | [0045m](0045m-home-agent-handoff-and-bounded-autonomy-contract.md) | Home-agent handoff and bounded autonomy contract | accepted |
+| [0046](0046-markdown-engine-adapter.md) | Repository-owned Markdown engine adapter | proposed |
 | [0046m](0046m-cli-dispatch-and-command-modules.md) | CLI dispatch layer and command modules | accepted |
 | [0047m](0047m-acq-coexistence-mechanism.md) | acq coexistence mechanism (ACQ_IMPL runtime switch and --channel installer seam) | accepted |
+| [0048](0048-macos-uninstall-acceptance-workflow.md) | macOS uninstall acceptance workflow | proposed |
 | [0048m](0048m-windows-defaults-to-the-python-implementation.md) | Windows defaults to the Python implementation with acq's managed runtime | accepted |
 | [0049m](0049m-ci-only-python-quality-tools.md) | CI-only Python quality tools, pinned with hashes | accepted |
 | [0050m](0050m-release-signing-scaffolding.md) | Release signing scaffolding | accepted |

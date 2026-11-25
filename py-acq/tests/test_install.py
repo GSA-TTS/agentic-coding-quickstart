@@ -63,13 +63,14 @@ _COMPONENTS = {
 }
 
 
+# Intel Macs are not supported, so there is no macos-x86_64 archive (install.sh
+# refuses that host outright).
 _ARCHIVES = (
     "acq-macos-arm64.tar.gz",
-    "acq-macos-x86_64.tar.gz",
     "acq-linux-x86_64.tar.gz",
     "acq-linux-aarch64.tar.gz",
 )
-_VERIFIED = re.compile(r"verified acq-(macos|linux)-(arm64|x86_64|aarch64)\.tar\.gz")
+_VERIFIED = re.compile(r"verified acq-(macos-arm64|linux-(x86_64|aarch64))\.tar\.gz")
 
 
 def _make_release(
@@ -333,25 +334,98 @@ def test_consent_is_not_inferred_when_noninteractive(tmp_path):
     assert not any(p.exists() for p in rc_files)
 
 
-def test_unsupported_platform_fails_closed(tmp_path):
+def _host_stub(tmp_path, os_name: str, machine: str) -> Path:
+    """A stub directory whose ``uname`` reports ``os_name``/``machine``, and whose
+    ``curl`` only records that it was called (so a refusal can be shown to happen
+    before any download)."""
     stub = tmp_path / "stub"
-    stub.mkdir()
+    stub.mkdir(exist_ok=True)
     uname = stub / "uname"
     uname.write_text(
-        '#!/bin/sh\ncase "$1" in\n  -s) echo SunOS ;;\n  -m) echo sparc ;;\n  *) echo unknown ;;\nesac\n'
+        f'#!/bin/sh\ncase "$1" in\n  -s) echo {os_name} ;;\n  -m) echo {machine} ;;\n'
+        f'  *) echo unknown ;;\nesac\n'
     )
     uname.chmod(0o755)
+    curl = stub / "curl"
+    curl.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> {str(tmp_path / "curl.log")!r}\nexit 1\n')
+    curl.chmod(0o755)
+    return stub
+
+
+def _run_on_host(tmp_path, stub: Path, *args: str) -> subprocess.CompletedProcess:
+    """Run the installer with ``stub`` first on PATH, in this test's own HOME."""
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
+    env["HOME"] = str(home)
     env["PATH"] = str(stub) + os.pathsep + env.get("PATH", "")
-    proc = subprocess.run(
-        ["sh", str(INSTALL_SH), "--dry-run"],
+    for name in ("XDG_DATA_HOME", "ACQ_INSTALL_DIR", "ACQ_INSTALL_BIN_DIR", "ACQ_INSTALL_SOURCE",
+                 "ACQ_INSTALL_CHANNEL"):
+        env.pop(name, None)
+    return subprocess.run(
+        ["sh", str(INSTALL_SH), *args],
         cwd=str(REPO_ROOT),
         env=env,
         capture_output=True,
         timeout=30,
     )
+
+
+def test_unsupported_platform_fails_closed(tmp_path):
+    stub = _host_stub(tmp_path, "SunOS", "sparc")
+    proc = _run_on_host(tmp_path, stub, "--dry-run")
     assert proc.returncode == 1
     assert "unsupported platform" in proc.stderr.decode()
+
+
+# The exact refusal an Intel Mac must get. Intel Macs cannot run acq's local
+# microVM runtime (docs/howto/acq.md), so the installer refuses before it reads
+# or fetches anything, rather than installing an archive the host cannot use.
+INTEL_REFUSAL = "Intel Macs (x86_64) are not supported"
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        pytest.param((), id="online"),
+        pytest.param(("--dry-run",), id="dry-run"),
+        pytest.param(("--source", "test/fixtures/installer", "--yes"), id="offline-source"),
+    ],
+)
+def test_intel_mac_is_refused_before_anything_is_fetched_or_read(tmp_path, args):
+    stub = _host_stub(tmp_path, "Darwin", "x86_64")
+    proc = _run_on_host(tmp_path, stub, *args)
+    stderr = proc.stderr.decode()
+    assert proc.returncode == 1, (proc.returncode, stderr)
+    assert INTEL_REFUSAL in stderr
+    # The refusal points at the host requirements, and names Rosetta, which is
+    # the thing users reach for next.
+    assert "docs/howto/acq.md" in stderr
+    assert "Rosetta" in stderr
+    # Nothing was downloaded, and nothing was installed.
+    assert not (tmp_path / "curl.log").exists(), "the installer reached the network"
+    assert not _install_dir(tmp_path).exists()
+    assert not _bin_dir(tmp_path).exists()
+
+
+def test_the_intel_refusal_is_a_mutation_proof():
+    # Removing the guard must make the test above fail: it is the only thing
+    # standing between an Intel Mac and an archive it cannot run.
+    source = INSTALL_SH.read_text(encoding="utf-8")
+    assert INTEL_REFUSAL in source
+    # No Intel platform key or archive is selectable (the one remaining mention
+    # is the comment that explains why).
+    assert "'macos-x86_64\\n'" not in source
+    assert "acq-macos-x86_64.tar.gz" not in source
+
+
+def test_apple_silicon_is_still_accepted(tmp_path):
+    # The Intel guard must not catch the supported Mac.
+    stub = _host_stub(tmp_path, "Darwin", "arm64")
+    proc = _run_on_host(tmp_path, stub, "--source", "test/fixtures/installer", "--yes")
+    assert proc.returncode == 0, proc.stderr.decode()
+    assert INTEL_REFUSAL not in proc.stderr.decode()
+    assert (_install_dir(tmp_path) / "acq").exists()
 
 
 def test_installer_never_elevates():
@@ -394,7 +468,6 @@ _GEN_ASSETS = (
     "acq-linux-x86_64.tar.gz",
     "acq-linux-aarch64.tar.gz",
     "acq-macos-arm64.tar.gz",
-    "acq-macos-x86_64.tar.gz",
     "acq-windows-x64.zip",
     *json.loads((REPO_ROOT / "installer/assets.json").read_text())["wheelhouses"],
 )

@@ -1,4 +1,4 @@
-"""The Tier-3 transcript ledger (ADR-0044m).
+"""The Tier-3 transcript ledger foundation (ADR-0040).
 
 A committed JSON file of metadata and hashes about recorded live runs: never the
 transcripts themselves (those are attached to a release, not committed) and never
@@ -30,8 +30,9 @@ audit of the transcript the ledger PR inlines against ``transcript_sha256``.
 
 That audit works from the PR alone. ``record`` accepts only a transcript written in
 the harness's canonical byte form with no host-local path in it
-(:func:`publication_problem`), and ``qualification.host`` publishes exactly those
-bytes, so the hash of the published block is the recorded ``transcript_sha256``.
+(:func:`publication_problem`). The source integration's ``qualification.host``
+publisher is not included here; future publication must preserve those exact
+bytes so the block's hash remains the recorded ``transcript_sha256``.
 :func:`verify_evidence` (``python -m qualification.gate verify-evidence``) checks a
 PR body's blocks against the ledger.
 
@@ -45,21 +46,24 @@ import hashlib
 import json
 import re
 import subprocess
-from dataclasses import asdict, dataclass
-from datetime import date, datetime, timezone
+from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
 from . import hostexec
-from .matrix import CELL_ORACLE, MSB, PLATFORMS, SBX, host_mismatch, is_claimed, version_problem
+from .evidence import EvidenceBlock, audit_evidence, evidence_blocks, verify_evidence
+from .matrix import CELL_ORACLE, MSB, SBX, host_mismatch, version_problem
+from .ledger_schema import (
+    Entry, Ledger, LedgerError, Waiver, SCHEMA_VERSION, VERDICTS,
+    _cell, _parse_entry, parse_ledger,
+)
 from .model import TRANSCRIPT_DIR_TOKEN, canonical_transcript_bytes, publishable_argv
+from .transcript_validation import validated_attempts
 
-SCHEMA_VERSION = 1
 DEFAULT_LEDGER = "docs/qualification-ledger.json"
-VERDICTS = ("PASS", "FAIL", "BLOCKED", "FLAKY")
 # ASCII digits only: ``\d`` also matches other scripts' digits, which int() accepts.
 _FINAL_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
-_SHA256 = re.compile(r"[0-9a-f]{64}")
 # A full commit id (SHA-1 or SHA-256 object format): an abbreviation can become
 # ambiguous, so a recorded revision is never one.
 _REV = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
@@ -162,141 +166,12 @@ _PLATFORM_TOKENS = {
 }
 
 
-class LedgerError(ValueError):
-    """The ledger (or a transcript offered to it) is malformed. The gate fails closed."""
-
-
-@dataclass(frozen=True)
-class Entry:
-    backend: str
-    platform: str
-    verdict: str
-    backend_version: str
-    os_build: str
-    arch: str
-    hypervisor: str
-    rev: str
-    artifact_sha256: str
-    recorded_at: str
-    transcript_sha256: str
-    oracle: str = ""
-    oracle_sha256: str = ""
-
-
-_BINDING = ("oracle", "oracle_sha256")
-
-
-@dataclass(frozen=True)
-class Waiver:
-    backend: str
-    platform: str
-    reason: str
-    expires: date
-    issue: str = ""
-
-
-@dataclass(frozen=True)
-class Ledger:
-    entries: tuple[Entry, ...]
-    waivers: tuple[Waiver, ...]
-    accepted_backend_versions: dict
-
-
 def platform_token(os_name: str, arch: str) -> str:
     """The matrix platform token for a harness ``os``/``arch`` pair."""
     try:
         return _PLATFORM_TOKENS[(os_name, arch)]
     except KeyError:
         raise LedgerError(f"cannot derive a platform from os={os_name!r} arch={arch!r}; pass --platform") from None
-
-
-def _list(doc: dict, key: str) -> list:
-    value = doc.get(key, [])
-    if not isinstance(value, list):
-        raise LedgerError(f"{key!r} must be a list")
-    return value
-
-
-def _text(doc: dict, key: str, where: str) -> str:
-    value = doc.get(key)
-    if not isinstance(value, str) or not value:
-        raise LedgerError(f"{where}: {key!r} must be a non-empty string")
-    return value
-
-
-def _cell(doc: dict, where: str) -> tuple[str, str]:
-    backend, platform = _text(doc, "backend", where), _text(doc, "platform", where)
-    if backend not in (MSB, SBX) or platform not in PLATFORMS:
-        raise LedgerError(f"{where}: unknown cell {backend}/{platform}")
-    return backend, platform
-
-
-def _parse_entry(doc: dict, index: int) -> Entry:
-    where = f"entries[{index}]"
-    if not isinstance(doc, dict):
-        raise LedgerError(f"{where}: must be an object")
-    _cell(doc, where)
-    present = [field for field in _BINDING if field in doc]
-    if present and len(present) != len(_BINDING):
-        raise LedgerError(f"{where}: oracle and oracle_sha256 must be given together")
-    fields = [f for f in Entry.__dataclass_fields__ if f not in _BINDING or present]
-    entry = Entry(**{field: _text(doc, field, where) for field in fields})
-    if not _REV.fullmatch(entry.rev):
-        raise LedgerError(f"{where}: rev must be a full 40- or 64-hex commit id")
-    # One spelling per hash: the duplicate check in parse_ledger compares strings, so
-    # an uppercase copy of a recorded hash must not count as a different transcript.
-    if not _SHA256.fullmatch(entry.transcript_sha256):
-        raise LedgerError(f"{where}: transcript_sha256 must be 64 lowercase hex digits")
-    if present and not _SHA256.fullmatch(entry.oracle_sha256):
-        raise LedgerError(f"{where}: oracle_sha256 must be 64 lowercase hex digits")
-    if entry.verdict not in VERDICTS:
-        raise LedgerError(f"{where}: verdict must be one of {VERDICTS}")
-    try:
-        if datetime.fromisoformat(entry.recorded_at).tzinfo is None:
-            raise ValueError
-    except ValueError:
-        raise LedgerError(f"{where}: recorded_at must be ISO 8601 with a timezone") from None
-    return entry
-
-
-def _parse_waiver(doc: dict, index: int) -> Waiver:
-    where = f"waivers[{index}]"
-    if not isinstance(doc, dict):
-        raise LedgerError(f"{where}: must be an object")
-    backend, platform = _cell(doc, where)
-    if not is_claimed(backend, platform):
-        raise LedgerError(f"{where}: {backend}/{platform} is not a claimed cell; nothing to waive")
-    try:
-        expires = date.fromisoformat(_text(doc, "expires", where))
-    except ValueError:
-        raise LedgerError(f"{where}: expires must be YYYY-MM-DD") from None
-    return Waiver(backend, platform, _text(doc, "reason", where), expires, str(doc.get("issue") or ""))
-
-
-def parse_ledger(doc: object) -> Ledger:
-    """Validate a decoded ledger document; raise :class:`LedgerError` if malformed."""
-    if not isinstance(doc, dict) or doc.get("schema_version") != SCHEMA_VERSION:
-        raise LedgerError(f"schema_version must be {SCHEMA_VERSION}")
-    versions = doc.get("accepted_backend_versions", {})
-    if not isinstance(versions, dict) or not all(
-        k in (MSB, SBX) and isinstance(v, str) and _FINAL_VERSION.fullmatch(v) for k, v in versions.items()
-    ):
-        raise LedgerError("accepted_backend_versions must map msb/sbx to final X.Y.Z versions")
-    entries = tuple(_parse_entry(e, i) for i, e in enumerate(_list(doc, "entries")))
-    seen: dict[str, int] = {}
-    for i, e in enumerate(entries):
-        if e.transcript_sha256 in seen:
-            # One transcript is one run of one cell; filing it twice would let a single
-            # run (msb and sbx on one host share arch, hypervisor and oracle) count for two.
-            raise LedgerError(
-                f"entries[{i}]: transcript_sha256 is already recorded by entries[{seen[e.transcript_sha256]}]"
-            )
-        seen[e.transcript_sha256] = i
-    return Ledger(
-        entries,
-        tuple(_parse_waiver(w, i) for i, w in enumerate(_list(doc, "waivers"))),
-        dict(versions),
-    )
 
 
 def load_ledger(path: str | Path) -> Ledger:
@@ -411,6 +286,22 @@ def publication_problem(doc: object, raw: bytes) -> str | None:
     return None
 
 
+def _transcript_binding(attempts, platform, oracle_digest):
+    env = asdict(attempts[0].environment)
+    derived = "linux-musl" if platform == "linux-musl" and env["os"] == "Linux" else platform_token(env["os"], env["arch"])
+    if platform and platform != derived:
+        raise LedgerError(f"--platform {platform} is not the transcript's host ({env['os']} {env['arch']} is {derived})")
+    if not all(_oracle_run(list(a.commands), str(env["backend"])) for a in attempts):
+        raise LedgerError(
+            f"transcript did not run the committed cell oracle: every attempt's command must be "
+            f"'{CELL_ORACLE} --backend {env['backend']}' (optionally after the Python interpreter)"
+        )
+    digest = (oracle_digest or git_oracle_digest)(str(env["rev"]), CELL_ORACLE)
+    if digest is None:
+        raise LedgerError(f"{CELL_ORACLE} is not committed at revision {str(env['rev'])[:12]} in this repository")
+    return env, derived, digest
+
+
 def entry_from_transcript(
     doc: dict,
     raw: bytes,
@@ -427,51 +318,28 @@ def entry_from_transcript(
     ``oracle_digest`` reads the oracle as committed at the transcript's ``rev``
     (default: git in the current directory).
     """
-    attempts = doc.get("attempts") if isinstance(doc, dict) else None
-    if not isinstance(attempts, list) or not attempts or not all(isinstance(a, dict) for a in attempts):
-        raise LedgerError("transcript has no attempts")
+    try:
+        attempts, outcome = validated_attempts(doc)
+    except (ValueError, TypeError) as exc:
+        raise LedgerError(str(exc)) from None
     unpublishable = publication_problem(doc, raw)
     if unpublishable:
         raise LedgerError(unpublishable)
-    env, last = attempts[0].get("environment"), attempts[-1]
-    if not isinstance(env, dict):
-        raise LedgerError("transcript attempt has no environment")
-    stamp = recorded_at or last.get("recorded_at")
+    env, derived, digest = _transcript_binding(attempts, platform, oracle_digest)
+    stamp = recorded_at or attempts[-1].recorded_at
     if not stamp:
         raise LedgerError("transcript has no recorded_at (older harness); pass --recorded-at")
-    missing = [k for k in ("backend", "os", "arch", "backend_version", "os_build", "hypervisor", "rev", "artifact_sha256") if k not in env]
-    if missing:
-        raise LedgerError(f"transcript environment is missing {', '.join(missing)}")
-    if not _REV.fullmatch(str(env["rev"])) or set(str(env["rev"])) == {"0"}:
-        raise LedgerError(
-            "transcript rev is not a real commit; run the cell with --rev $(git rev-parse HEAD)"
-        )
-    derived = "linux-musl" if platform == "linux-musl" and env["os"] == "Linux" else platform_token(env["os"], env["arch"])
-    if platform and platform != derived:
-        raise LedgerError(f"--platform {platform} is not the transcript's host ({env['os']} {env['arch']} is {derived})")
-    if not all(_oracle_run(a.get("commands"), str(env["backend"])) for a in attempts):
-        raise LedgerError(
-            f"transcript did not run the committed cell oracle: every attempt's command must be "
-            f"'{CELL_ORACLE} --backend {env['backend']}' (optionally after the Python interpreter)"
-        )
-    digest = (oracle_digest or git_oracle_digest)(str(env["rev"]), CELL_ORACLE)
-    if digest is None:
-        raise LedgerError(f"{CELL_ORACLE} is not committed at revision {str(env['rev'])[:12]} in this repository")
-    entry = {
-        "backend": env["backend"],
+    entry = {key: env[key] for key in (
+        "backend", "backend_version", "os_build", "arch", "hypervisor", "rev", "artifact_sha256"
+    )}
+    entry.update({
         "platform": derived,
-        "verdict": str(doc.get("outcome", "")),
-        "backend_version": env["backend_version"],
-        "os_build": env["os_build"],
-        "arch": env["arch"],
-        "hypervisor": env["hypervisor"],
-        "rev": env["rev"],
-        "artifact_sha256": env["artifact_sha256"],
+        "verdict": outcome,
         "recorded_at": stamp,
         "transcript_sha256": hashlib.sha256(raw).hexdigest(),
         "oracle": CELL_ORACLE,
         "oracle_sha256": digest,
-    }
+    })
     _cell(entry, "transcript")
     parsed = _parse_entry(entry, 0)
     problem = binding_problem(parsed, lambda rev, path: digest)
@@ -516,101 +384,3 @@ def set_accepted_version(path: str | Path, backend: str, version: str) -> None:
     if problem:
         raise LedgerError(f"cannot accept {problem}")
     _rewrite(Path(path), lambda doc: doc.setdefault("accepted_backend_versions", {}).__setitem__(backend, version))
-
-
-@dataclass(frozen=True)
-class EvidenceBlock:
-    """One ```` ```json ```` block of a PR body: its exact bytes, and whether a reviewer sees it."""
-
-    raw: bytes
-    hidden: bool  # inside an HTML comment, so GitHub does not render it
-
-
-_HTML_COMMENT = re.compile(r"<!--.*?(?:-->|\Z)", re.S)
-
-
-def evidence_blocks(text: str) -> list[EvidenceBlock]:
-    """The transcripts a ledger PR body inlines, as the exact bytes they stand for.
-
-    Each is a fenced block opened by a line that is exactly ```` ```json ```` and
-    closed by a line that is exactly ```` ``` ````; its bytes are the lines between
-    the fences, each followed by a newline. CRLF in the text is read as LF (a copied
-    PR body may carry either; a canonical transcript has no CR). A block inside an
-    HTML comment (an unterminated one runs to the end) is returned as ``hidden``.
-    """
-    text = text.replace("\r\n", "\n")
-    comments = [m.span() for m in _HTML_COMMENT.finditer(text)]
-    blocks: list[EvidenceBlock] = []
-    current: list[str] | None = None
-    opened = offset = 0
-    for line in text.split("\n"):
-        if current is None:
-            if line == "```json":
-                current, opened = [], offset
-        elif line == "```":
-            hidden = any(start <= opened < end for start, end in comments)
-            blocks.append(EvidenceBlock("".join(f"{x}\n" for x in current).encode("utf-8"), hidden))
-            current = None
-        else:
-            current.append(line)
-        offset += len(line) + 1
-    return blocks
-
-
-def verify_evidence(ledger: Ledger, blocks: list[bytes]) -> list[tuple[str, str | None]]:
-    """Check each published transcript against the ledger: ``[(sha256, problem or None)]``.
-
-    A block verifies when the ledger has an entry with its SHA-256 and rebuilding an
-    entry from the block reproduces that entry field for field. The oracle hash is
-    taken from the entry here; the gate checks it against git.
-    """
-    by_hash = {e.transcript_sha256: e for e in ledger.entries}
-    results = []
-    for raw in blocks:
-        digest = hashlib.sha256(raw).hexdigest()
-        entry = by_hash.get(digest)
-        if entry is None:
-            results.append((digest, "no ledger entry records this transcript_sha256"))
-            continue
-        try:
-            doc = json.loads(raw)
-            rebuilt = entry_from_transcript(
-                doc, raw, platform=entry.platform, oracle_digest=lambda rev, path: entry.oracle_sha256 or None
-            )
-        except (LedgerError, ValueError) as exc:
-            results.append((digest, f"{entry.backend}/{entry.platform}: {exc}"))
-            continue
-        differ = [f for f in Entry.__dataclass_fields__ if getattr(rebuilt, f) != getattr(entry, f)]
-        results.append((digest, f"{entry.backend}/{entry.platform}: entry differs in {', '.join(differ)}" if differ else None))
-    return results
-
-
-def audit_evidence(
-    ledger: Ledger, blocks: list[EvidenceBlock], required: list[Entry] | None = None
-) -> tuple[list[tuple[str, str | None]], list[str]]:
-    """Check a PR body's blocks: per-block results, then problems with the set as a whole.
-
-    Every shown block must verify (:func:`verify_evidence`); no block may be hidden
-    in an HTML comment or appear twice. With ``required`` (the entries the PR adds),
-    each of those must have exactly one verifying block, and no block may stand for
-    any other entry.
-    """
-    results = verify_evidence(ledger, [b.raw for b in blocks if not b.hidden])
-    problems: list[str] = []
-    seen: dict[str, int] = {}
-    for b in blocks:
-        digest = hashlib.sha256(b.raw).hexdigest()
-        seen[digest] = seen.get(digest, 0) + 1
-        if b.hidden:
-            problems.append(f"HIDDEN {digest}: a transcript block inside an HTML comment is not shown to reviewers")
-    problems += [f"DUPLICATE {d}: the same transcript appears {n} times" for d, n in seen.items() if n > 1]
-    if required is not None:
-        verified = {d for d, problem in results if problem is None}
-        wanted = {e.transcript_sha256 for e in required}
-        problems += [
-            f"MISSING {e.transcript_sha256}: the {e.backend}/{e.platform} entry added since the base has no "
-            "verifying transcript block"
-            for e in required if e.transcript_sha256 not in verified
-        ]
-        problems += [f"EXTRA {d}: not an entry added since the base" for d in sorted(verified - wanted)]
-    return results, problems

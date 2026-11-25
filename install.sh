@@ -24,7 +24,8 @@
 #   sh install.sh --source DIR --install-dir DIR --yes   # offline / non-interactive
 #
 #   sh install.sh [--install-dir DIR] [--bin-dir DIR] [--source URL|DIR]
-#                 [--ref VER] [--dry-run] [--yes] [--help] [--version|-V]
+#                 [--ref VER] [--dry-run] [--yes] [--non-interactive]
+#                 [--help] [--version|-V]
 
 set -eu
 
@@ -94,6 +95,7 @@ NEED_PATH_HELP=0
 SHA256_PIN=""
 SHA256_PIN_GIVEN=0
 NO_PREREQ_CHECK=0
+NON_INTERACTIVE="${ACQ_INSTALL_NON_INTERACTIVE:-0}"
 
 # ---------------------------------------------------------------------------
 # Output helpers (no color when not a TTY)
@@ -150,12 +152,14 @@ Options:
   --no-prereq-check     Skip the post-install sandbox prerequisite report.
   --dry-run             Print what would happen; make no changes, no network.
   --yes, -y             Assume "yes" to the PATH prompt (non-interactive/CI).
+  --non-interactive     Decline consent-gated actions without reading /dev/tty.
   --help                Show this help.
   --version, -V         Show the installer version.
 
 Environment overrides:
   ACQ_INSTALL_VERSION, ACQ_INSTALL_SOURCE, ACQ_INSTALL_DIR, ACQ_INSTALL_BIN_DIR,
-  ACQ_INSTALL_CHANNEL, ACQ_INSTALL_NO_ATTESTATION=1 (skip attestation)
+  ACQ_INSTALL_CHANNEL, ACQ_INSTALL_NON_INTERACTIVE=1 (same as --non-interactive),
+  ACQ_INSTALL_NO_ATTESTATION=1 (skip attestation)
 
 This installer uses no sudo, installs only under your home directory, and never
 changes your PATH without asking.
@@ -183,6 +187,7 @@ while [ $# -gt 0 ]; do
     --no-prereq-check) NO_PREREQ_CHECK=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --yes|-y) ASSUME_YES=1; shift ;;
+    --non-interactive) NON_INTERACTIVE=1; shift ;;
     --help|-h) usage; exit 0 ;;
     --version|-V) printf 'acq install.sh %s\n' "$VERSION"; exit 0 ;;
     *) usage_err "unknown option: $1 (try --help)" ;;
@@ -197,6 +202,11 @@ fi
 
 # The `--channel` flag is the update-channel seam (ADR-0047m). On this fork the
 # only channel is `python` (the default), so any other value fails closed.
+case "$NON_INTERACTIVE" in
+  0|1) : ;;
+  *) usage_err "ACQ_INSTALL_NON_INTERACTIVE must be 0 or 1" ;;
+esac
+
 case "$CHANNEL" in
   python) ;;
   *) usage_err "unknown channel '$CHANNEL' (only 'python' is supported on this fork)" ;;
@@ -225,9 +235,12 @@ fi
 # ---------------------------------------------------------------------------
 # Platform -> release archive name (the enumerated offline asset set, ADR-0042m).
 #
-# Supported (ADR-0042m §platform matrix): macOS arm64 + x86_64, Linux x86_64 +
-# aarch64. Windows x64 is served by install.ps1; Windows ARM64 and musl are out of
-# scope. The archive name for each cell is mirrored in installer/assets.json.
+# Supported: macOS arm64 (Apple Silicon), Linux x86_64 + aarch64. Windows x64 is
+# served by install.ps1; Windows ARM64 and musl are out of scope. Intel Macs are
+# NOT supported: acq's local runtime needs Apple Silicon virtualization, and
+# Rosetta does not change that (docs/howto/acq.md), so there is no macos-x86_64
+# archive and that host is refused before anything is fetched or read. The
+# archive name for each cell is mirrored in installer/assets.json.
 # ---------------------------------------------------------------------------
 
 platform_key() {
@@ -237,7 +250,9 @@ platform_key() {
     Darwin)
       case "$arch" in
         arm64) printf 'macos-arm64\n' ;;
-        x86_64) printf 'macos-x86_64\n' ;;
+        # An Intel Mac is refused by name, not reported as an unknown platform:
+        # status 2 tells the caller to print the Intel-specific message.
+        x86_64) return 2 ;;
         *) return 1 ;;
       esac ;;
     Linux)
@@ -254,7 +269,6 @@ archive_name() {
   key="$1"
   case "$key" in
     macos-arm64)    printf 'acq-macos-arm64.tar.gz\n' ;;
-    macos-x86_64)   printf 'acq-macos-x86_64.tar.gz\n' ;;
     linux-x86_64)   printf 'acq-linux-x86_64.tar.gz\n' ;;
     linux-aarch64)  printf 'acq-linux-aarch64.tar.gz\n' ;;
     *) return 1 ;;
@@ -298,6 +312,7 @@ confirm() {
   if [ "$ASSUME_YES" -eq 1 ]; then
     return 0
   fi
+  [ "$NON_INTERACTIVE" = 1 ] && return 1
   if [ -t 0 ]; then
     printf '%s [y/N] ' "$prompt"
     read -r ans || return 1
@@ -511,7 +526,18 @@ rc_file_for_shell() {
 
 step "Checking your system"
 
-KEY="$(platform_key)" || die "unsupported platform '$(uname -s 2>/dev/null)/$(uname -m 2>/dev/null)' (ADR-0042m supports macOS arm64/x86_64 and Linux x86_64/aarch64)"
+# Before any source is resolved, read or fetched: an unusable host is refused
+# here, not after a download it cannot run.
+platform_status=0
+KEY="$(platform_key)" || platform_status=$?
+case "$platform_status" in
+  0) ;;
+  2) die "Intel Macs (x86_64) are not supported by acq.
+acq's local sandbox runtime needs Apple Silicon virtualization, and running the
+installer under Rosetta does not change that. See the host requirements in
+docs/howto/acq.md. Nothing was downloaded or installed." ;;
+  *) die "unsupported platform '$(uname -s 2>/dev/null)/$(uname -m 2>/dev/null)' (supported: macOS arm64, Linux x86_64/aarch64; Windows x64 uses install.ps1)" ;;
+esac
 ARCHIVE="$(archive_name "$KEY")" || die "no release archive for platform '$KEY'"
 
 # Resolve the source: a URL (default), or a local directory holding the offline

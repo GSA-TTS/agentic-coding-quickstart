@@ -217,7 +217,7 @@ def transcript(outcome="PASS", commands=None, **env_over):
     }
     env.update(env_over)
     argv = oracle_argv(env["backend"]) if commands is None else commands
-    attempt = {"verdict": outcome, "environment": env, "commands": argv, "output_sha256": "", "detail": "",
+    attempt = {"verdict": outcome, "environment": env, "commands": argv, "output_sha256": "f" * 64, "detail": "",
                "recorded_at": "2026-11-07T07:04:20+00:00"}
     return {"schema_version": 1, "outcome": outcome, "attempts": [attempt]}
 
@@ -242,7 +242,7 @@ def test_record_rejects_unusable_transcripts():
     with pytest.raises(LedgerError):
         entry_from_transcript({}, raw)
     old = transcript()
-    del old["attempts"][0]["recorded_at"]
+    old["attempts"][0]["recorded_at"] = ""  # the old runner's explicit "unknown" value
     with pytest.raises(LedgerError):
         entry_from_transcript(old, canon(old), oracle_digest=committed_oracle)
     ok = entry_from_transcript(old, canon(old), recorded_at="2026-11-07T07:00:00+00:00",
@@ -342,7 +342,7 @@ def test_bad_ledger_bytes_exit_2_not_a_traceback(tmp_path):
 
 def test_record_refuses_the_all_zero_default_rev_and_malformed_transcripts(tmp_path):
     zero = transcript(rev="0" * 40)
-    with pytest.raises(LedgerError, match="real commit"):
+    with pytest.raises(LedgerError, match="nonzero full commit id"):
         entry_from_transcript(zero, canon(zero))
     for bad in ({"attempts": ["x"]}, {"attempts": [{}]}, {"attempts": [{"environment": {"backend": "msb"}}]}):
         with pytest.raises(LedgerError):
@@ -398,7 +398,8 @@ def test_every_harness_module_is_classified_as_surface_or_read_only():
     from qualification.matrix import TIER3_SURFACE
 
     read_only = {"qualification/matrix.py", "qualification/ledger.py", "qualification/gate.py", "qualification/host.py",
-                 "qualification/publish.py", "qualification/hostexec.py"}
+                 "qualification/publish.py", "qualification/hostexec.py", "qualification/evidence.py",
+                 "qualification/ledger_schema.py", "qualification/transcript_validation.py"}
     for path in sorted((REPO_ROOT / "qualification").glob("*.py")):
         rel = f"qualification/{path.name}"
         assert rel in TIER3_SURFACE or rel in read_only, f"{rel} is not classified"
@@ -452,7 +453,6 @@ def unbound(e):
 @pytest.mark.parametrize(
     "commands",
     [
-        [],
         ["true"],  # a no-op exits 0, which the harness classifies PASS
         ["/usr/bin/python3", "-c", "pass"],
         ["/usr/bin/python3", "-c", "pass", ORACLE, "--backend", "msb"],
@@ -469,8 +469,15 @@ def test_record_refuses_a_transcript_that_did_not_run_the_committed_oracle(comma
         entry_from_transcript(t, canon(t), oracle_digest=committed_oracle)
 
 
+def test_record_refuses_a_transcript_with_no_commands():
+    t = transcript(commands=[])
+    with pytest.raises(LedgerError, match="commands must be a non-empty list"):
+        entry_from_transcript(t, canon(t), oracle_digest=committed_oracle)
+
+
 def test_record_refuses_when_any_attempt_did_not_run_the_oracle():
-    t = transcript()
+    # Attempts after the first exist only to reproduce a FAIL, so build a reproduced FAIL.
+    t = transcript("FAIL")
     t["attempts"].append({**t["attempts"][0], "commands": ["true"]})
     with pytest.raises(LedgerError, match="did not run the committed cell oracle"):
         entry_from_transcript(t, canon(t), oracle_digest=committed_oracle)
@@ -632,7 +639,7 @@ def test_a_duplicated_transcript_makes_the_gate_exit_2(tmp_path):
 
 def test_record_refuses_an_abbreviated_revision():
     t = transcript(rev="c" * 12)
-    with pytest.raises(LedgerError, match="real commit"):
+    with pytest.raises(LedgerError, match="nonzero full commit id"):
         entry_from_transcript(t, canon(t), oracle_digest=committed_oracle)
 
 

@@ -85,7 +85,8 @@ case "$HOST_OS-$HOST_ARCH" in
   Linux-x86_64) REQUIREMENTS="$ROOT/scripts/provider-input-validator-requirements-linux.txt"; [ -n "$WHEELHOUSE" ] || WHEELHOUSE="$ROOT/scripts/provider-input-validator-wheelhouse/linux-x86_64" ;;
   Linux-aarch64) REQUIREMENTS="$ROOT/scripts/provider-input-validator-requirements-linux.txt"; [ -n "$WHEELHOUSE" ] || WHEELHOUSE="$ROOT/scripts/provider-input-validator-wheelhouse/linux-aarch64" ;;
   Darwin-arm64) REQUIREMENTS="$ROOT/scripts/provider-input-validator-requirements-macos.txt"; [ -n "$WHEELHOUSE" ] || WHEELHOUSE="$ROOT/scripts/provider-input-validator-wheelhouse/macos-arm64" ;;
-  Darwin-x86_64) REQUIREMENTS="$ROOT/scripts/provider-input-validator-requirements-macos.txt"; [ -n "$WHEELHOUSE" ] || WHEELHOUSE="$ROOT/scripts/provider-input-validator-wheelhouse/macos-x86_64" ;;
+  # Intel Macs are not supported, so no macos-x86_64 wheelhouse is published.
+  Darwin-x86_64) echo "Intel Macs (x86_64) are not supported by acq; see docs/howto/acq.md" >&2; exit 2 ;;
   MINGW*|MSYS*|CYGWIN*) REQUIREMENTS="$ROOT/scripts/provider-input-validator-requirements-windows.txt"; [ -n "$WHEELHOUSE" ] || WHEELHOUSE="$ROOT/scripts/provider-input-validator-wheelhouse/windows-x86_64" ;;
   *) echo "unsupported host for provider-input validator lock: $(uname -s)-$(uname -m)" >&2; exit 2 ;;
 esac

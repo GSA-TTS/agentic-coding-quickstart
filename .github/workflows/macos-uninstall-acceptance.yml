@@ -1,0 +1,130 @@
+# macOS acceptance for the guided uninstaller (ADR-0048).
+#
+# Dispatch-only and destructive by design: it builds the uninstaller from an
+# arbitrary `ref` of this repository, seeds synthetic state under a throwaway HOME
+# on a GitHub-hosted macOS runner, creates a temporary keychain, and runs the real
+# wizard against them. The harness (scripts/test-uninstall-macos) comes from the
+# ref this workflow was dispatched on; the subject under test comes from the `ref`
+# input and is checked out into a separate path, so one workflow run can validate
+# a branch that does not contain this workflow.
+#
+# Run:  gh workflow run macos-uninstall-acceptance.yml -f ref=<sha-or-branch>
+
+name: macOS uninstall acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Commit SHA or branch of the checkout to test (must contain scripts/build-uninstaller)'
+        required: true
+        type: string
+      homebrew:
+        description: 'Also run the Homebrew stage (installs the real GSA-TTS/tap formulae)'
+        required: false
+        type: boolean
+        default: false
+
+permissions: {}
+
+jobs:
+  acceptance:
+    name: uninstall acceptance (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            label: macos-15 arm64
+            slug: macos-15
+    defaults:
+      run:
+        shell: bash
+    env:
+      SUBJECT_REF: ${{ inputs.ref }}
+      RUN_HOMEBREW: ${{ inputs.homebrew }}
+    steps:
+      - name: Validate the ref input
+        run: |
+          set -euo pipefail
+          if [[ ! "$SUBJECT_REF" =~ ^[A-Za-z0-9._/-]{1,200}$ ]] || [[ "$SUBJECT_REF" == -* ]] || [[ "$SUBJECT_REF" == *..* ]]; then
+            echo "::error::ref must be a commit SHA or branch name (letters, digits, . _ / - only)"
+            exit 1
+          fi
+
+      - name: Check out the harness (this workflow's own ref)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: harness
+          persist-credentials: false
+
+      - name: Check out the subject under test
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          path: subject
+          persist-credentials: false
+
+      - name: Record the tested commit
+        id: subject
+        env:
+          MATRIX_LABEL: ${{ matrix.label }}
+        run: |
+          set -euo pipefail
+          sha=$(git -C subject rev-parse HEAD)
+          harness_sha=$(git -C harness rev-parse HEAD)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Run details ($MATRIX_LABEL)"
+            echo
+            echo "- Tested commit: \`$sha\` (requested ref: \`$SUBJECT_REF\`)"
+            echo "- Harness commit: \`$harness_sha\`"
+            echo "- Runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}"
+            echo "- macOS: $(sw_vers -productVersion) ($(uname -m))"
+            echo "- System bash: $(/bin/bash -c 'printf %s "$BASH_VERSION"')"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ ! -f subject/scripts/build-uninstaller ]; then
+            echo "::error::the requested ref has no scripts/build-uninstaller; refusing to run"
+            echo "- Result: **FAIL**, scripts/build-uninstaller is missing at this ref" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: Run the acceptance stages
+        env:
+          SUBJECT_SHA: ${{ steps.subject.outputs.sha }}
+        run: |
+          set -euo pipefail
+          expect=()
+          if [[ "$SUBJECT_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            expect=(--expect-sha "$SUBJECT_REF")
+          fi
+          extra=()
+          if [ "$RUN_HOMEBREW" = true ]; then
+            extra=(--homebrew)
+          fi
+          /bin/bash harness/scripts/test-uninstall-macos \
+            --subject "$GITHUB_WORKSPACE/subject" \
+            --out "$RUNNER_TEMP/acceptance" \
+            ${expect[@]+"${expect[@]}"} ${extra[@]+"${extra[@]}"}
+
+      - name: Publish the stage summary
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/acceptance/summary.md" ]; then
+            cat "$RUNNER_TEMP/acceptance/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No summary was produced; the acceptance script did not run to completion." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload logs and results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos-uninstall-acceptance-${{ matrix.slug }}
+          path: ${{ runner.temp }}/acceptance
+          if-no-files-found: warn
+          retention-days: 14

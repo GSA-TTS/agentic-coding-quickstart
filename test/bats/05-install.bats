@@ -1029,6 +1029,39 @@ _prereq_missing_path() {
   done
 }
 
+@test "installer: --non-interactive declines the PATH prompt without reading the terminal" {
+  command -v python3 >/dev/null 2>&1 || skip "python3 is required to drive a pseudo-terminal"
+  run env SHELL=/bin/sh python3 "$BATS_TEST_DIRNAME/install-tty.py" tty y "$REPO_ROOT/install.sh" \
+    --source "$REPO_ROOT/test/fixtures/installer" --install-dir "$STUBDIR/inst" \
+    --bin-dir "$STUBDIR/acq-bin" --non-interactive
+  assert_success
+  assert_line 'PROMPTS=0'
+  assert_output --partial 'Not changing your PATH'
+  [ ! -e "$HOME/.profile" ]
+}
+
+@test "installer: --non-interactive never offers msb on a terminal," {
+  command -v python3 >/dev/null 2>&1 || skip "python3 is required to drive a pseudo-terminal"
+  local python
+  python=$(python3 -c 'import sys; print(sys.executable)')
+  _prereq_missing_path
+  mkdir -p "$STUBDIR/acq-bin"
+  PATH="$STUBDIR/acq-bin:$STUBDIR/only-tools" run "$python" "$BATS_TEST_DIRNAME/install-tty.py" tty y \
+    "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --bin-dir "$STUBDIR/acq-bin" --non-interactive
+  assert_success
+  assert_line 'PROMPTS=0'
+  refute_output --partial 'Install pinned msb?'
+  [ ! -e "$STUBDIR/brew.log" ]
+}
+
+@test "installer: ACQ_INSTALL_NON_INTERACTIVE accepts 0 or 1 and refuses other values" {
+  run env ACQ_INSTALL_NON_INTERACTIVE=1 sh "$REPO_ROOT/install.sh" --dry-run
+  assert_success
+  run env ACQ_INSTALL_NON_INTERACTIVE=maybe sh "$REPO_ROOT/install.sh" --dry-run
+  assert_failure 2
+  assert_output --partial 'ACQ_INSTALL_NON_INTERACTIVE must be 0 or 1'
+}
+
 @test "installer: --yes on a terminal never offers or installs msb" {
   command -v python3 >/dev/null 2>&1 || skip "python3 is required to drive a pseudo-terminal"
   local python

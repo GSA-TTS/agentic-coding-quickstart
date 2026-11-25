@@ -1,4 +1,4 @@
-"""Qualification harness for the Python acq v1 replacement (ADR-0044m).
+"""Qualification evaluator foundation for the Python acq replacement (ADR-0040).
 
 Tier-3 transcript tooling, not CLI code: it emits the verbatim ``RESULT``
 signature line, reports the qualified/unqualified/blocked matrix honestly, and
@@ -6,7 +6,7 @@ enforces the 3-attempt reproduction rule for a ``FAIL``. The live Tier-3 run is
 a downstream consumer; this package builds the tooling and makes it testable
 offline against a fake backend.
 
-Run ``python -m qualification --help`` for the CLI surface.
+Run ``python -m qualification.gate --help`` for the included CLI surface.
 
 No secret value ever appears in a transcript, the harness, or its fixtures: a
 transcript records hashes, versions, and the command line, plus a SHA-256 digest

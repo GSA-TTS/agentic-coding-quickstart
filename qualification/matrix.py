@@ -1,6 +1,6 @@
-"""The qualified/unqualified/blocked matrix (ADR-0044m).
+"""The imported qualified/unqualified/blocked matrix foundation (ADR-0040).
 
-The ADR claims a specific set of platform/backend cells; every other cell is
+The imported policy names a set of platform/backend cells; every other cell is
 unqualified (not claimed). Windows ARM64 and musl are explicitly unqualified.
 Each cell is in exactly one of three states: ``qualified`` (green current
 transcript), ``unqualified`` (not claimed), or ``blocked`` (attempted, no green
@@ -32,7 +32,7 @@ class MatrixState(str, Enum):
 
 
 # Platform cells. ``linux-musl`` (musl libc) and ``windows-arm64`` are
-# explicitly unqualified for every backend (ADR-0044m; spec §Out of scope).
+# explicitly unqualified for every backend in this imported policy.
 PLATFORMS = (
     "linux-x86_64",
     "linux-aarch64",
@@ -59,11 +59,12 @@ QUALIFIED = {
     }),
 }
 
-# Version floors (ADR-0044m). msb also refuses 0.7.0..0.7.2 (oracles 1-3 require
+# Imported version floors. msb also refuses 0.7.0..0.7.2 (oracles 1-3 require
 # >= 0.7.7); sbx requires >= 0.39.0. The cell oracle exercises oracles 1-3, so a
 # Tier-3 run is evidence only at or above ``ORACLE_FLOORS`` as well. The gate blocks
 # a cell whose entry or accepted version fails :func:`version_problem`, the ledger
-# refuses to accept such a version, and ``qualification.host`` refuses to run on one.
+# refuses to accept such a version. The source integration's qualification.host
+# run-time refusal is not included here and must be retained by future integration.
 VERSION_FLOORS = {
     MSB: "0.6.9",
     SBX: "0.39.0",
@@ -81,7 +82,7 @@ def _version_tuple(version: str) -> tuple[int, int, int] | None:
 
 
 def version_problem(backend: str, version: str) -> str | None:
-    """Why ``version`` of ``backend`` cannot carry Tier-3 evidence (ADR-0044m floors), or ``None``."""
+    """Why ``version`` cannot carry Tier-3 evidence under the imported floors, or ``None``."""
     found = _version_tuple(version)
     if found is None:
         return f"{backend} {version!r} is not a final X.Y.Z version"
@@ -145,9 +146,9 @@ MAX_AGE_DAYS = 90
 # path only (the ``run`` command, its model, runner and reproduction rule): the
 # matrix, ledger and gate read transcripts and do not affect a run, so editing
 # them must not expire the evidence they evaluate. Being off the surface does not
-# let a change loosen them for itself: on a pull request CI runs the gate from the
-# base branch (see ``qualification.gate``), so this list and its exclusions are
-# always the ones already on ``main``. Narrow or widen this list when
+# let a change loosen them for itself: future integration must run the gate from
+# the base branch (see ``qualification.gate``), so this list and its exclusions
+# come from the reviewed base. No such workflow is activated here. Review this list when
 # the oracle's reach changes. The default image is a mutable tag, so an upstream
 # image change is bounded only by the age limit.
 #
@@ -176,16 +177,16 @@ TIER3_SURFACE = (
 
 # Modules under ``py-acq/src/acq_py/`` that are OFF the surface. To be here a
 # module must satisfy BOTH:
-#   (a) no committed oracle asserts its behaviour — of ADR-0044m's six oracles,
-#       the two committed ones are the cell oracle (boot contract + secret/
+#   (a) no oracle in the source integration asserts its behaviour — in that policy,
+#       the two implemented ones are the cell oracle (boot contract + secret/
 #       provider-credential non-exposure) and the ro-mount oracle; #4 (offline
 #       completeness) is deferred and #5 (security-exception recreation) is a
 #       manual sequence, neither of which drives ``acq version``/``acq doctor``;
 #   (b) it is genuinely unreachable from the oracle's commands — ``cli.py`` must
 #       NOT import it at startup, or a break there would kill create/ls/exec/rm/
 #       secret/provider-credential while ``touches_surface`` says False.
-# ``test_off_surface_modules_are_not_loaded_by_cli`` enforces (b) by asserting
-# importing ``acq_py.cli`` loads none of these.
+# The source integration's CLI import tests enforce (b). That CLI is not part of
+# this evaluator introduction; revalidate these exclusions before activation.
 TIER3_SURFACE_EXCLUSIONS = (
     "py-acq/src/acq_py/version_info.py",  # `acq version` data + output (lazy import)
     "py-acq/src/acq_py/doctor.py",        # `acq doctor` (lazy import)
@@ -286,6 +287,26 @@ def is_current(transcript: Transcript, **kwargs) -> bool:
     return staleness(transcript, **kwargs) is None
 
 
+def _matches_cell(transcript: Transcript, backend: str, platform: str) -> bool:
+    """A caller's cell key cannot relabel the host recorded by a transcript."""
+    environment = transcript.environment
+    expected_os = {"linux": "Linux", "macos": "Darwin", "windows": "Windows"}.get(
+        platform.split("-", 1)[0]
+    )
+    actual_backend = getattr(environment, "backend", None)
+    actual_os = getattr(environment, "os", None)
+    arch = getattr(environment, "arch", None)
+    hypervisor = getattr(environment, "hypervisor", None)
+    return (
+        expected_os is not None
+        and actual_backend == backend
+        and actual_os == expected_os
+        and isinstance(arch, str)
+        and isinstance(hypervisor, str)
+        and host_mismatch(platform, arch, hypervisor) is None
+    )
+
+
 def cell_state(
     backend: str,
     platform: str,
@@ -299,7 +320,7 @@ def cell_state(
 
     Unclaimed cells are unqualified (honest reporting — never claimed, never a
     pass). A claimed cell is qualified only when it holds a green *current*
-    transcript recorded at, and accepted at, a backend version that meets the
+    transcript from that backend and host, recorded at and accepted at a version meeting the
     floors (:func:`version_problem`); otherwise blocked (holds the gate).
     """
     if not is_claimed(backend, platform):
@@ -307,6 +328,7 @@ def cell_state(
     if (
         transcript is not None
         and transcript.verdict is Verdict.PASS
+        and _matches_cell(transcript, backend, platform)
         and version_problem(backend, transcript.environment.backend_version) is None
         and (backend_version is None or version_problem(backend, backend_version) is None)
         and is_current(

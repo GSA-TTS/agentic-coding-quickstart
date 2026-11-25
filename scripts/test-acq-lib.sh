@@ -144,6 +144,28 @@ export -f acq_test_stub_provider_input_boundary
 # pass. On a CI host with git + network this prevents a real fetch that would
 # otherwise hang.
 #
+# Publish each complete spec once, never by replacement: replacing even a complete
+# file races GNU cp's source-identity checks in the offline transport fixture
+# (#721). Every test now owns its fixture directory, so only the test itself
+# republishes; the helper keeps a repeated call a no-op rather than a rewrite.
+_acq_test_publish_spec() {
+  local target="$1" contents="$2" temporary
+  # ln treats directory operands (including symlinks) as destination directories.
+  # Cooperative fixture writers only create regular files; reject other shapes.
+  [ ! -L "$target" ] && { [ ! -e "$target" ] || [ -f "$target" ]; } || return 1
+  temporary=$(mktemp "${target}.XXXXXXXX") || return 1
+  if ! printf '%s' "$contents" > "$temporary"; then
+    rm -f -- "$temporary"; return 1
+  fi
+  # link() publishes complete bytes without replacing an existing winner.
+  if ! ln "$temporary" "$target" 2>/dev/null; then
+    if [ -L "$target" ] || [ ! -f "$target" ] || ! cmp -s "$temporary" "$target"; then
+      rm -f -- "$temporary"; return 1
+    fi
+  fi
+  rm -f -- "$temporary"
+}
+
 # Create offline fixtures with make_stubs, under the private STUBDIR. A shared
 # run-scoped spec, even when published by rename, can make GNU cp refuse it
 # as replaced while being copied by another test's checkout-index stub.
@@ -161,10 +183,10 @@ _acq_test_tmp_base() {
 _acq_test_offline_kits() {
   _ACQ_MSB_OFFLINE_KIT_DIR="$STUBDIR/acq-offline-kit"
   mkdir -p "$_ACQ_MSB_OFFLINE_KIT_DIR" || return 1
-  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "$_ACQ_MSB_OFFLINE_KIT_DIR/spec.yaml" || return 1
+  _acq_test_publish_spec "$_ACQ_MSB_OFFLINE_KIT_DIR/spec.yaml" $'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' || return 1
   _ACQ_AGENT_OFFLINE_KIT_DIR="$STUBDIR/acq-opencode-kit"
   mkdir -p "$_ACQ_AGENT_OFFLINE_KIT_DIR" || return 1
-  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: opencode\ndisplayName: OpenCode\ndescription: offline agent kit\nagent:\n  name: opencode\n  entrypoint: opencode\n' > "$_ACQ_AGENT_OFFLINE_KIT_DIR/spec.yaml" || return 1
+  _acq_test_publish_spec "$_ACQ_AGENT_OFFLINE_KIT_DIR/spec.yaml" $'schemaVersion: "hybrid/v1"\nkind: mixin\nname: opencode\ndisplayName: OpenCode\ndescription: offline agent kit\nagent:\n  name: opencode\n  entrypoint: opencode\n' || return 1
   export ACQ_MSB_KIT_LOCAL_DIR="$_ACQ_MSB_OFFLINE_KIT_DIR"
   export ACQ_TEST_AGENT_KIT="$_ACQ_AGENT_OFFLINE_KIT_DIR"
 }
@@ -270,8 +292,9 @@ GITSTUB
   # test 147 unsets this and supplies its own validator runtime.
   cat >"$STUBDIR/provider-python" <<'PYTHON'
 #!/bin/sh
+[ "${1:-}" = -I ] && shift  # acq runs python -I (no cwd/env on sys.path)
 case "${1:-}" in
-  -c) exit 0 ;;
+  -c) printf '3.12\n'; exit 0 ;;
   */validate_provider_input_contract.py) exit 0 ;;
   *) exec /usr/bin/python3 "$@" ;;
 esac

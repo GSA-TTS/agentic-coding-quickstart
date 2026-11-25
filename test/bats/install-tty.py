@@ -111,6 +111,10 @@ def run_captured(script: str, args: list[str]) -> int:
 
 
 def main(argv: list[str]) -> int:
+    # The offline runner exports ACQ_INSTALL_NON_INTERACTIVE=1 so no test borrows a
+    # human's terminal. These runs model a human at a pseudo-terminal, so start from
+    # an unset variable; a test that wants the decline passes --non-interactive.
+    os.environ.pop("ACQ_INSTALL_NON_INTERACTIVE", None)
     if len(argv) >= 3 and argv[0] == "tty":
         return run_tty(argv[1], argv[2], argv[3:])
     if len(argv) >= 2 and argv[0] == "notty":

@@ -625,9 +625,10 @@ your user lacks access to the device, add yourself to the `kvm` group once:
 sudo usermod -aG kvm "$USER" && newgrp kvm
 ```
 
-**macOS** — Apple Silicon (M-series). Intel Macs are **not supported** for the
-local runtime, and Rosetta does not change that. Nothing to enable ahead of
-time: Apple Silicon Macs include the hypervisor support msb uses.
+**macOS** — Apple Silicon (M-series). Intel Macs are **not supported**, and
+Rosetta does not change that: there is no Intel release archive, and the
+installer refuses an Intel Mac before it downloads anything. Nothing to enable
+ahead of time: Apple Silicon Macs include the hypervisor support msb uses.
 
 **Windows 11** — Windows support is in **preview**. Local sandboxes need the
 **Windows Hypervisor Platform** feature (this is separate from the

@@ -82,6 +82,20 @@ cannot execute on a fleet enforcing default AppLocker/WDAC rules or Gatekeeper,
 so deployment there is unproven until signing lands. Windows ARM64 and musl
 users are not served by v1.
 
+## Amendment (2026-11-25): macOS x86_64 is dropped
+
+**Status of this amendment:** proposed (2026-11-25), by Bret Mogilefsky.
+
+The platform matrix above listed `macOS arm64 + x86_64`. It is now **macOS arm64
+only**. Intel Macs cannot run acq's local sandbox runtime (it needs Apple
+Silicon virtualization; Rosetta does not change that), and the qualification
+matrix never claimed a macOS x86_64 cell, so shipping an installable Intel
+archive offered an install that could not work. No `acq-macos-x86_64.tar.gz`
+archive or `macos-x86_64` validator wheelhouse is built, and `install.sh`
+refuses an Intel Mac by name before it reads or fetches anything. Windows x64,
+Linux x86_64 and Linux aarch64 are unchanged; Windows ARM64 and musl remain out
+of scope.
+
 ## Verification
 
 A Tier-1 vector asserts each installer entry option and its fail-closed

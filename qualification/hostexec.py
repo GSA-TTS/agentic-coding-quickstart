@@ -10,7 +10,7 @@ entries would put the current directory back on ``sys.path``.
 
 The resolver is acq's own (``acq_py.hostexec``), loaded by file path from this
 checkout's ``py-acq/src``. The package is often imported without that directory
-on ``sys.path`` (the CI gate sets ``PYTHONPATH`` to a base-branch worktree only),
+on ``sys.path`` (future gate integration must set ``PYTHONPATH`` to the base only),
 and loading by path pins it to the copy that sits beside this package.
 """
 

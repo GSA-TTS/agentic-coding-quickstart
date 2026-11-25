@@ -42,7 +42,8 @@ PY
 
 _build_dist() {
   local platform
-  for platform in linux-x86_64 linux-aarch64 macos-arm64 macos-x86_64 windows-x86_64; do
+  # No macos-x86_64: Intel Macs are not supported, so no such archive is built.
+  for platform in linux-x86_64 linux-aarch64 macos-arm64 windows-x86_64; do
     if [ "$platform" = windows-x86_64 ]; then
       scripts/assemble-release "$platform" "$WORK/runtime.zip" "$WINDOWS_SHA" "$WORK/wheelhouse" "$WORK/dist"
     else
@@ -170,11 +171,18 @@ assert provenance['acq'] == {'acq_version': '8.7.6', 'source_revision': '0123456
 assert provenance['runtimes'].keys() == assets['platforms'].keys()
 for platform, spec in assets['platforms'].items():
     assert provenance['runtimes'][platform] == {'supplier': spec['components']['runtime']['supplier'], 'version': '3.14.10'}
+# Intel Macs are not supported, so neither the archive nor its wheelhouse exists,
+# and nothing in the manifests names them.
+assert 'macos-x86_64' not in assets['platforms']
+assert not any('macos-x86_64' in w for w in assets.get('wheelhouses', []))
+assert not (root / 'acq-macos-x86_64.tar.gz').exists()
+assert not (root / 'provider-input-validator-wheelhouse-macos-x86_64.tar.gz').exists()
 lines = (root / 'SHA256SUMS').read_text().splitlines()
 # install.sh, install.ps1 and provenance.json, plus every archive and wheelhouse.
 assert len(lines) == 3 + len(assets['platforms']) + len(assets.get('wheelhouses', []))
 for line in lines:
     digest, name = line.split('  ')
+    assert 'macos-x86_64' not in name
     assert hashlib.sha256((root / name).read_bytes()).hexdigest() == digest
 PY
 }
