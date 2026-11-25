@@ -48,6 +48,7 @@ REQUIRED = {
     ".github/workflows/build-assets.yml", "scripts/assemble-release", "scripts/gen-provenance",
     "scripts/qualify-backend-cell", "scripts/setup-provider-input-validator",
     "scripts/test-acq-lib.sh", "scripts/refresh-kitbundle",
+    "scripts/pytest_shard.py",
     "qualification", "docs/qualification-ledger.json",
     "test/bats/06-windows-install.bats", "test/bats/55-version.bats",
     "test/bats/117-msys-path-forms.bats",
