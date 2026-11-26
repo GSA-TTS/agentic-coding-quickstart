@@ -461,7 +461,7 @@ def _macos_identity(pid: int, program: str, option: str, value: str) -> bool | N
 
 
 def _windows_identity(pid: int) -> bool | None:  # pragma: no cover - Windows only
-    if sys.platform != "win32":
+    if _platform() != "win32":
         return None
     import ctypes
     from ctypes import wintypes
@@ -495,9 +495,9 @@ def process_is_tunnel(pid: int, program: str, option: str, value: str) -> bool |
     the image name (``QueryFullProcessImageNameW``). ``False`` also covers a
     process that no longer exists.
     """
-    if sys.platform.startswith("linux"):
+    if _platform().startswith("linux"):
         return _linux_identity(pid, program, option, value)
-    if sys.platform == "darwin":
+    if _platform() == "darwin":
         return _macos_identity(pid, program, option, value)
     if os.name == "nt":
         try:
@@ -792,3 +792,8 @@ def forget_host_key(name: str) -> None:
                        timeout=5, check=False)  # nosec B603 # argv list, no shell
     except (OSError, subprocess.TimeoutExpired):
         pass
+
+
+def _platform() -> str:
+    """Platform seam; tests must not mutate process-global ``sys.platform``."""
+    return sys.platform

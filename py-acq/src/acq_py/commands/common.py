@@ -834,7 +834,7 @@ def _sandbox_ref(token: str) -> tuple[str, str] | None:
         return None
     if not name or any(ch in name for ch in "/\\:"):
         return None
-    if os.name == "nt" and len(name) == 1 and name in string.ascii_letters:
+    if WINDOWS and len(name) == 1 and name in string.ascii_letters:
         return None
     return (name, rest)
 

@@ -511,7 +511,7 @@ EOF
 exit 1
 EOF
   chmod +x "$fakebin/python3.14"
-  PATH="$fakebin:$PATH" run bash -c "source '$REPO_ROOT/acq.backends/common.sh'; _acq_provider_input_path_python"
+  run env PATH="$fakebin:$PATH" ACQ_PROVIDER_INPUT_PYTHON= bash -c "source '$REPO_ROOT/acq.backends/common.sh'; _acq_provider_input_path_python"
   assert_success
   assert_output "$fakebin/python3.14"
 }
