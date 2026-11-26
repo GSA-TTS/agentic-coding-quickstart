@@ -437,6 +437,21 @@ _fixture_with_extra_entry() {
   [ -z "$(find "$XDG_DATA_HOME" -maxdepth 1 -name '.acq-stage.*')" ]
 }
 
+@test "preview: a failed link enumeration refuses publication" {
+  local shim; shim="$STUBDIR/find-failure"; mkdir -p "$shim"
+  cat > "$shim/find" <<'SHIM'
+#!/bin/sh
+case " $* " in *' -type l '*) printf 'injected link enumeration failure\n' >&2; exit 1 ;; esac
+exec /usr/bin/find "$@"
+SHIM
+  chmod +x "$shim/find"
+  PATH="$shim:$PATH" run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_failure
+  assert_output --partial 'could not enumerate preview archive links'
+  [ ! -e "$(_install_dir)" ]
+  [ ! -e "$HOME/.local/bin/acq-python" ]
+}
+
 # --- remote sources: HTTPS with TLS 1.2+ only; local sets stay offline ----------
 
 # A curl stand-in that logs its arguments and serves the named file from the

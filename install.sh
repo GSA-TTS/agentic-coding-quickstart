@@ -2369,12 +2369,20 @@ preview_check_files() {
   done < "$PREVIEW_MANIFEST"
 }
 if [ -e "$INSTALL_DIR" ]; then preview_check_files; fi
-if find "$staging" -type l -print | while IFS= read -r link; do
+# Capture the complete link list before validating members. The prior pipeline
+# did not reliably surface a failed `find` to this shell, which does not enable
+# pipefail. A malformed or inaccessible extracted tree must fail closed instead
+# of looking like an archive with no links.
+find "$staging" -type l -print > "$tmpdir/preview-links" \
+  || die "could not enumerate preview archive links"
+links_ok=1
+while IFS= read -r link; do
   rel="${link#"$staging"/}"
-  case "$rel" in py-acq/runtime/bin/python3) [ "$(readlink "$link")" = python3.14 ] || exit 1 ;;
-    *) exit 1 ;;
+  case "$rel" in py-acq/runtime/bin/python3) [ "$(readlink "$link")" = python3.14 ] || links_ok=0 ;;
+    *) links_ok=0 ;;
   esac
-done; then :; else die "preview archive contains unsupported links"; fi
+done < "$tmpdir/preview-links"
+[ "$links_ok" -eq 1 ] || die "preview archive contains unsupported links"
 find "$staging" -type f -print | while IFS= read -r file; do
   rel="${file#"$staging"/}"
   case "$rel" in *[!A-Za-z0-9_./+-]*|*../*) die "invalid preview archive filename" ;; esac

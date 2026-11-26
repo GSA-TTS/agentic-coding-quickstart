@@ -173,6 +173,76 @@ def test_failed_owned_update_restores_old_root(tmp_path):
     assert (tmp_path / "home/.local/bin/acq-python").exists()
 
 
+def test_runtime_symlink_in_release_is_allowed_without_find_pipeline_failure(tmp_path):
+    release = _make_release(tmp_path)
+    # The managed POSIX runtime legitimately uses python3 -> python3.14.
+    # A detector must examine every link; `grep -q` closes early and makes
+    # `find` fail under pipefail on a normal release archive.
+    archive = next(release.glob("acq-linux-*.tar.gz"))
+    unpacked = tmp_path / "runtime-link"
+    import tarfile
+
+    with tarfile.open(archive, "r:gz") as tf:
+        tf.extractall(unpacked, filter="data")
+    runtime = unpacked / "py-acq/runtime/bin"
+    (runtime / "python3").unlink()
+    (runtime / "python3.14").write_text("runtime\n")
+    (runtime / "python3").symlink_to("python3.14")
+    with tarfile.open(archive, "w:gz") as tf:
+        for item in sorted(unpacked.rglob("*")):
+            tf.add(item, item.relative_to(unpacked).as_posix(), recursive=False)
+    import hashlib
+
+    sums = release / "SHA256SUMS"
+    sums.write_text(
+        "\n".join(
+            f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}"
+            if line.endswith(f"  {archive.name}")
+            else line
+            for line in sums.read_text().splitlines()
+        )
+        + "\n"
+    )
+    result = _run_installer(
+        tmp_path, "--channel", "python", "--ref", "5.0.0-rc.1", "--source", str(release)
+    )
+    assert result.returncode == 0, result.stderr.decode()
+    assert (tmp_path / "home/.local/share/acq-python-preview/py-acq/runtime/bin/python3").exists()
+
+
+def test_unsupported_release_symlink_fails_closed(tmp_path):
+    release = _make_release(tmp_path)
+    archive = next(release.glob("acq-linux-*.tar.gz"))
+    unpacked = tmp_path / "unpacked"
+    import tarfile
+
+    with tarfile.open(archive, "r:gz") as tf:
+        tf.extractall(unpacked, filter="data")
+    (unpacked / "unexpected-link").symlink_to("py-acq/runtime/bin/python3.14")
+    with tarfile.open(archive, "w:gz") as tf:
+        for item in sorted(unpacked.rglob("*")):
+            tf.add(item, item.relative_to(unpacked).as_posix(), recursive=False)
+    import hashlib
+
+    sums = release / "SHA256SUMS"
+    lines = sums.read_text().splitlines()
+    sums.write_text(
+        "\n".join(
+            f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}"
+            if line.endswith(f"  {archive.name}")
+            else line
+            for line in lines
+        )
+        + "\n"
+    )
+    result = _run_installer(
+        tmp_path, "--channel", "python", "--ref", "5.0.0-rc.1", "--source", str(release)
+    )
+    assert result.returncode == 1
+    assert b"unsupported links" in result.stderr
+    assert not (tmp_path / "home/.local/share/acq-python-preview").exists()
+
+
 @pytest.mark.parametrize("args", [
     ("--method", "brew", "--dry-run", "--no-msb"),
     ("--method", "npm", "--ref", "v4.2.0", "--dry-run", "--no-msb"),
