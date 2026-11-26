@@ -337,6 +337,24 @@ STUB
   assert_output --partial "ACQ_BASH32=$ACQ_BASH32_PREFIX/bin/bash"
 }
 
+@test "bash32: the suite receives a PATH launcher for nested interpreter children" {
+  local root="$STUBDIR/launcher-root" fake
+  mkdir -p "$root/scripts" "$root/test/vendor/bats-core/bin"
+  cp "$RUNNER" "$root/scripts/test-acq-bash32"
+  cp "$REPO_ROOT/scripts/test-acq-bats" "$root/scripts/test-acq-bats"
+  cat > "$root/test/vendor/bats-core/bin/bats" <<'STUB'
+#!/bin/sh
+printf 'launcher:%s\n' "${ACQ_BASH32_LAUNCHER:-<unset>}"
+"$ACQ_BASH32_LAUNCHER" -c 'printf "nested:%s\n" "$BASH_VERSION"'
+STUB
+  chmod +x "$root/test/vendor/bats-core/bin/bats"
+  fake="$(make_fake_bash 3.2.57)"
+  run env ACQ_BASH32="$fake" "$root/scripts/test-acq-bash32" x.bats
+  assert_success
+  assert_output --regexp 'launcher:.*/bash'
+  assert_line '3.2.57(1)-release'
+}
+
 @test "bash32: the PATH shim directory is removed after a successful and after a failing run" {
   local root="$STUBDIR/root" fake tmp="$STUBDIR/tmp"
   mkdir -p "$root/scripts" "$root/test/vendor/bats-core/bin" "$tmp"

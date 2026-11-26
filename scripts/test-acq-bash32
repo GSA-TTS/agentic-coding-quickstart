@@ -246,4 +246,9 @@ fi
 # Hand the resolved interpreter to the suite: the tests repoint HOME, so they could
 # not rediscover one installed in the default cache.
 export ACQ_BASH32="$INTERP"
+# `$BASH` is the raw binary when an OCI interpreter needs a musl loader. Tests
+# that intentionally re-exec their shell therefore use this PATH-resolved
+# launcher, which preserves the verified interpreter configuration on every
+# nested lifecycle child.
+export ACQ_BASH32_LAUNCHER="${SHIM}/bash"
 "$INTERP" "${_dir}/test-acq-bats" "$@"
