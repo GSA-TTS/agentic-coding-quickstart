@@ -15,7 +15,12 @@ import sys
 import time
 
 repo, scratch = (Path(p).resolve() for p in sys.argv[1:3])
-shell = sys.argv[3]
+shell = os.environ.get("ACQ_BASH32_LAUNCHER", sys.argv[3])
+# A loader-backed Bash cannot be executed directly through $BASH: it needs the
+# private PATH launcher installed by test-acq-bash32. Keep the direct-shell
+# behavior for ordinary runs, while allowing that runner to propagate a portable
+# configured launcher to every nested lifecycle child.
+launcher = os.environ.get("ACQ_BASH32_LAUNCHER", shell)
 # A runner started in the background by a non-interactive shell hands every
 # child SIGINT ignored (and `nohup` does the same for SIGHUP), and a shell cannot
 # trap a signal that was ignored on entry, so the signal cases would hang. Undo
@@ -36,13 +41,13 @@ case "$1" in
   clear) trap - EXIT; exit 23 ;;
   stdin) IFS= read -r value; printf 'INPUT %s\n' "$value" ;;
   tty) [ -t 0 ] && [ -t 1 ]; IFS= read -r value; printf 'TTY %s\n' "$value" ;;
-  nested) "$BASH" "$0" success; [ -d "$_ACQ_KIT_FETCH_ROOT" ]; printf 'OUTER-LIVE\n' ;;
+   nested) "$ACQ_BASH32_LAUNCHER" "$0" success; [ -d "$_ACQ_KIT_FETCH_ROOT" ]; printf 'OUTER-LIVE\n' ;;
   spinner) _acq_spin_install_traps; printf 'ARMED\n'; IFS= read -r value ;;
   prompt) trap 'trap - INT; kill -s INT $$' INT; printf 'ARMED\n'; IFS= read -r value ;;
   foreground) printf 'ARMED\n'; sleep 30; printf 'UNEXPECTED\n' ;;
   survive) sleep 2; [ -d "$_ACQ_KIT_FETCH_ROOT" ]; printf 'ROOT-LIVE\n' ;;
   exec)
-    exec "$BASH" -c 'printf "EXEC %s\n" "$$"; IFS= read -r value'
+    exec "$ACQ_BASH32_LAUNCHER" -c 'printf "EXEC %s\n" "$$"; IFS= read -r value'
     ;;
   signal) printf 'ARMED\n'; IFS= read -r value ;;
 esac
@@ -55,6 +60,7 @@ def environment(path=None):
         if key.startswith(("ACQ_", "_ACQ_", "BASH_FUNC_")) or key == "BASH_ENV":
             del env[key]
     env.update(TMPDIR=str(scratch), HOME=str(scratch), XDG_CONFIG_HOME=str(scratch))
+    env["ACQ_BASH32_LAUNCHER"] = launcher
     # A stale inherited root must never be adopted by a new invocation.
     env["_ACQ_KIT_FETCH_ROOT"] = str(scratch / "unrelated")
     if path is not None:

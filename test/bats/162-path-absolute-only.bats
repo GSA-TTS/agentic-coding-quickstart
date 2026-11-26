@@ -61,7 +61,7 @@ _assert_not_hijacked() {
 
 @test "acq refuses to start when PATH has no absolute entry" {
   cd "$WS"
-  run env PATH=".:bin" "$BASH" "$REPO_ROOT/acq" version
+  run env PATH=".:bin" "${ACQ_BASH32_LAUNCHER:-$BASH}" "$REPO_ROOT/acq" version
   assert_failure 1
   assert_output --partial "PATH has no absolute directory"
   _assert_not_hijacked
@@ -69,7 +69,7 @@ _assert_not_hijacked() {
 
 @test "acq ignores programs in the current directory reached by an empty PATH entry" {
   cd "$WS"
-  run env PATH=":$PATH" "$BASH" "$REPO_ROOT/acq" version
+  run env PATH=":$PATH" "${ACQ_BASH32_LAUNCHER:-$BASH}" "$REPO_ROOT/acq" version
   _assert_not_hijacked
   assert_success
   assert_output --partial "clone dir:"
@@ -77,14 +77,14 @@ _assert_not_hijacked() {
 
 @test "acq ignores programs reached by '.' and relative PATH entries" {
   cd "$WS"
-  run env PATH=".:bin:$PATH:" "$BASH" "$REPO_ROOT/acq" version
+  run env PATH=".:bin:$PATH:" "${ACQ_BASH32_LAUNCHER:-$BASH}" "$REPO_ROOT/acq" version
   _assert_not_hijacked
   assert_success
 }
 
 @test "ACQ_IMPL=python does not run a python3 from the current directory" {
   cd "$WS"
-  run env PATH=":$PATH" ACQ_IMPL=python "$BASH" "$REPO_ROOT/acq" version --json
+  run env PATH=":$PATH" ACQ_IMPL=python "${ACQ_BASH32_LAUNCHER:-$BASH}" "$REPO_ROOT/acq" version --json
   _assert_not_hijacked
   assert_success
   assert_output --partial '"impl": "python"'

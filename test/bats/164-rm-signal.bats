@@ -20,7 +20,7 @@ teardown() { acq_teardown_stubs; }
 load 'helper'
 
 @test "rm: a group SIGTERM, SIGHUP or Ctrl-C exits only after the terminate cleanup, with 128+N" {
-  run python3 "$BATS_TEST_DIRNAME/rm-signal.py" "$REPO_ROOT" "$STUBDIR" "$BASH"
+  run python3 "$BATS_TEST_DIRNAME/rm-signal.py" "$REPO_ROOT" "$STUBDIR" "${ACQ_BASH32_LAUNCHER:-$BASH}"
   printf '%s\n' "$output"
   assert_success
   local backend

@@ -226,12 +226,12 @@ PYTHON
   chmod +x "$hostile/msb" "$hostile/brew"
 
   PATH="$hostile:$PATH" fixture_path=$(_fixture_validator_path "$fakebin")
-  run "$BASH" -c 'PATH="$1"; command -v bash; command -v msb; command -v brew' _ "$fixture_path"
+  run "${ACQ_BASH32_LAUNCHER:-$BASH}" -c 'PATH="$1"; command -v bash; command -v msb; command -v brew' _ "$fixture_path"
   assert_failure
   assert_output --partial "$fakebin/safe-bin/bash"
   refute_output --partial "$hostile"
   for tool in basename cp cut dirname ln mkdir mktemp mv python3 readlink rm; do
-    PATH="$fixture_path" "$BASH" -c 'command -v "$1" >/dev/null' _ "$tool" \
+    PATH="$fixture_path" "${ACQ_BASH32_LAUNCHER:-$BASH}" -c 'command -v "$1" >/dev/null' _ "$tool" \
       || fail "validator fixture path lacks $tool"
   done
 }

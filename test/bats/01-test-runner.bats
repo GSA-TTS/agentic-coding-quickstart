@@ -96,6 +96,28 @@ STUB
   assert_line 'bats-arg:--timing'
 }
 
+@test "runner: xargs fallback fails closed when a worker dies before recording status" {
+  cat > "$RUNNER_ROOT/test/vendor/bats-core/bin/bats" <<'STUB'
+#!/bin/sh
+case "$*" in *b.bats) kill -TERM $$ ;; esac
+printf 'bats-arg:%s\n' "$@"
+STUB
+  chmod +x "$RUNNER_ROOT/test/vendor/bats-core/bin/bats"
+  run env ACQ_BATS_JOBS=2 bash -c '
+    command() {
+      case "$*" in
+        "-v parallel"|"-v rush") return 1 ;;
+        *) builtin command "$@" ;;
+      esac
+    }
+    export -f command
+    exec bash "$1/scripts/test-acq-bats"
+  ' _ "$RUNNER_ROOT"
+  assert_failure
+  assert_output --partial 'test-acq-bats: started a.bats'
+  assert_output --partial 'test-acq-bats: started b.bats'
+}
+
 @test "runner: ACQ_BATS_SHARD runs only the selected files (serial path)" {
   local suite_dir
   suite_dir=$(CDPATH='' cd "$RUNNER_ROOT/test/bats" && pwd)
