@@ -113,6 +113,7 @@ def test_macos_is_independent_native_offline_and_hash_pinned():
 def test_product_test_interpreters_match_the_shipped_runtime_version():
     """Hosted Python supplies test tools; its version must match shipped Python."""
     build = _text('build-assets')
+    quality = _text('python-quality')
     shipped = re.search(r'^  ACQ_BUILD_RUNTIME_VERSION: ([0-9.]+)$', build, re.M)
     assert shipped is not None
     pinned_versions = re.findall(r'cpython-([0-9.]+)(?:%2B|\+)', build)
@@ -128,3 +129,8 @@ def test_product_test_interpreters_match_the_shipped_runtime_version():
     assert "python-version: '3.12'" not in ''.join(_text(name) for name in (
         'python-quality', 'python-vectors', 'windows', 'macos'
     ))
+    coverage = re.search(
+        r"- name: pytest with coverage \(Python 3\.14\.10\)\n        run: (.+)$", quality, re.M
+    )
+    assert coverage is not None
+    assert 'python -m pytest -q --cov --cov-report=term -m "$(python ../scripts/pytest_platform_selection.py linux-neutral)"' in coverage.group(1)

@@ -75,4 +75,4 @@ jobs:
       # In-process branch coverage of acq_py; the floor is fail_under in
       # pyproject.toml. The vector suite's subprocess runs are not measured.
       - name: pytest with coverage (Python 3.14.10)
-        run: python -c 'import sys; assert sys.version_info[:3] == (3, 14, 10), sys.version' && python -m pytest -q --cov --cov-report=term -m "$(../scripts/pytest_platform_selection.py linux-neutral)"
+        run: python -c 'import sys; assert sys.version_info[:3] == (3, 14, 10), sys.version' && python -m pytest -q --cov --cov-report=term -m "$(python ../scripts/pytest_platform_selection.py linux-neutral)"
