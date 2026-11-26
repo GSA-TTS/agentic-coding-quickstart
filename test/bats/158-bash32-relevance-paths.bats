@@ -144,6 +144,7 @@ py-acq/tests/
 scripts/qualify-backend-cell
 scripts/refresh-kitbundle
 scripts/pytest_shard.py
+scripts/pytest_platform_selection.py
 .github/workflows/python-quality.yml
 .github/workflows/python-vectors.yml
 .github/workflows/tier3-release-gate.yml
@@ -235,6 +236,15 @@ _workflow_pathspecs() {
   specs=$(_workflow_pathspecs)
   if printf '%s\n' "$specs" | grep -qx 'scripts/pytest_shard.py'; then
     fail 'pytest-only plugin must not be a Bash relevance input'
+  fi
+}
+
+@test "relevance: the CI-only pytest platform selector is not a Bash suite input" {
+  [[ "$NOT_INPUTS" == *$'\nscripts/pytest_platform_selection.py\n'* ]]
+  local specs
+  specs=$(_workflow_pathspecs)
+  if printf '%s\n' "$specs" | grep -qx 'scripts/pytest_platform_selection.py'; then
+    fail 'pytest-only selector must not be a Bash relevance input'
   fi
 }
 

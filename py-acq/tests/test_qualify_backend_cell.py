@@ -1132,7 +1132,7 @@ def windows(monkeypatch):
     monkeypatch.setattr(qbc.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
     monkeypatch.setattr(qbc.signal, "CTRL_BREAK_EVENT", 1, raising=False)
     monkeypatch.setattr(qbc.StepJob, "adopt", staticmethod(adopt))
-    monkeypatch.setattr(qbc.os, "name", "nt")
+    monkeypatch.setattr(qbc, "_is_windows", lambda: True)
     return state
 
 

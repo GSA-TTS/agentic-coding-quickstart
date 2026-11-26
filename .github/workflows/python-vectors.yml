@@ -30,6 +30,10 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Must match build-assets.yml: product tests execute at the shipped version.
+  ACQ_BUILD_RUNTIME_VERSION: 3.14.10
+
 jobs:
   pytest-shards:
     runs-on: ubuntu-latest
@@ -45,7 +49,7 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: '3.12'
+          python-version: ${{ env.ACQ_BUILD_RUNTIME_VERSION }}
 
       # jq, pinned to 1.7.1 and SHA256-verified (declared in CI per ADR-0043m).
       - name: Install jq (pinned, SHA256-verified)
@@ -114,6 +118,7 @@ jobs:
           ACQ_TEST_PATTERNS_REPO: ${{ github.workspace }}/.ci/agentic-coding-patterns
         run: |
           set -euo pipefail
+          python -c 'import sys; assert sys.version_info[:3] == (3, 14, 10), sys.version'
           python -m pytest -p scripts.pytest_shard py-acq/tests --acq-shard '${{ matrix.shard }}' -v --tb=short -ra --show-capture=no | tee "$RUNNER_TEMP/pytest.log"
           if grep -q 'pinned Patterns checkout is provided' "$RUNNER_TEMP/pytest.log"; then
             echo "::error::the pinned Patterns checks were skipped; ACQ_TEST_PATTERNS_REPO did not reach them"
@@ -133,7 +138,7 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: '3.12'
+          python-version: ${{ env.ACQ_BUILD_RUNTIME_VERSION }}
 
       - name: Install jq (pinned, SHA256-verified)
         run: |

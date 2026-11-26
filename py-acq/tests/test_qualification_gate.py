@@ -265,7 +265,8 @@ def test_git_changed_paths_against_a_real_repository(tmp_path, monkeypatch):
     import subprocess
 
     def git(*args):
-        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+            subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                            "-c", "commit.gpgsign=false", *args],
                        cwd=tmp_path, check=True, capture_output=True)
 
     git("init", "-q")
@@ -287,7 +288,8 @@ def test_git_changed_paths_sees_moves_and_non_ascii_paths(tmp_path, monkeypatch)
     import subprocess
 
     def git(*args):
-        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                        "-c", "commit.gpgsign=false", *args],
                        cwd=tmp_path, check=True, capture_output=True)
 
     surface = tmp_path / "py-acq" / "src" / "acq_py"
@@ -363,7 +365,8 @@ def oracle_repo(tmp_path, content=b"#!/usr/bin/env python3\nraise SystemExit(0)\
     (repo / "scripts").mkdir(parents=True)
     (repo / ORACLE).write_bytes(content)
     for args in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "oracle"]):
-        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                        "-c", "commit.gpgsign=false", *args],
                        cwd=repo, check=True, capture_output=True)
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True).stdout.strip()
     return repo, head, hashlib.sha256(content).hexdigest()
@@ -710,7 +713,8 @@ def test_codeowners_protects_the_gate_rules_and_the_oracles():
 def _git(cwd, *args):
     import subprocess
 
-    return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+    return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                           "-c", "commit.gpgsign=false", *args],
                           cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
 
 
@@ -941,7 +945,8 @@ def test_run_rejects_a_non_positive_attempt_count_with_a_usage_error(attempts):
 def _git(repo, *args):
     import subprocess
 
-    return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args], cwd=repo,
+    return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                           "-c", "commit.gpgsign=false", *args], cwd=repo,
                           check=True, capture_output=True, text=True).stdout.strip()
 
 

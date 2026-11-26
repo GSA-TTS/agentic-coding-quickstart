@@ -501,6 +501,21 @@ EOF
   ! grep -Fq 'wrong-3.14' "$log"
 }
 
+@test "provider path security discovers Python 3.14 on Linux" {
+  local fakebin="$STUBDIR/path-security-linux"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/python3.14" <<'EOF'
+#!/bin/sh
+[ "${1:-}" = -I ] && shift
+[ "${1:-}" = -c ] && { printf '3.14\n'; exit 0; }
+exit 1
+EOF
+  chmod +x "$fakebin/python3.14"
+  run env PATH="$fakebin:$PATH" ACQ_PROVIDER_INPUT_PYTHON= bash -c "source '$REPO_ROOT/acq.backends/common.sh'; _acq_provider_input_path_python"
+  assert_success
+  assert_output "$fakebin/python3.14"
+}
+
 @test "setup validator rejects invalid arguments without changing a runtime" {
   local target="$STUBDIR/user-data/provider-input-validator.current"
   mkdir -p "$target"

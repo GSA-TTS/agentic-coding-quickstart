@@ -411,7 +411,7 @@ def _signal_group(proc: subprocess.Popen, kill: bool, job: StepJob | None = None
 
     On Windows the kill terminates the step's Job object (``job``).
     """
-    if os.name == "nt":
+    if _is_windows():
         if not kill:
             proc.send_signal(signal.CTRL_BREAK_EVENT)
         elif job is not None:
@@ -518,6 +518,11 @@ def run_process(argv: list[str], *, env: dict[str, str], stdin: str | None = Non
     return subprocess.CompletedProcess(list(argv), proc.returncode, out, err)
 
 
+def _is_windows() -> bool:
+    """Platform seam for process creation; tests must not mutate ``os.name`` globally."""
+    return os.name == "nt"
+
+
 def _spawn(argv: list[str], *, env: dict[str, str], cwd: str | None, stdin: bool):
     """Start ``argv`` in its own process group (and, on Windows, its own Job object).
 
@@ -526,7 +531,7 @@ def _spawn(argv: list[str], *, env: dict[str, str], cwd: str | None, stdin: bool
     once it is in the job; if that fails it is killed instead, so a step never
     runs where it could not be stopped completely.
     """
-    windows = os.name == "nt"
+    windows = _is_windows()
     group = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | CREATE_SUSPENDED} if windows
              else {"start_new_session": True})
     try:

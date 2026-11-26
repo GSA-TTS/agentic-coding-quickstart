@@ -172,7 +172,7 @@ def test_ca_unsafe_inputs(monkeypatch, tmp_path, kind):
 
 @pytest.fixture
 def mac_ca(monkeypatch, tmp_path):
-    monkeypatch.setattr(opts.sys, "platform", "darwin")
+    monkeypatch.setattr(opts, "_platform", lambda: "darwin")
     monkeypatch.setattr(hostexec, "which", lambda _: "/usr/bin/security")
     monkeypatch.setenv("ACQ_MSB_UPSTREAM_CA_CERT", "")
     monkeypatch.delenv("ACQ_MSB_NO_UPSTREAM_CA", raising=False)
@@ -212,7 +212,7 @@ def test_ca_explicit_wins_and_missing_falls_back(mac_ca, monkeypatch, tmp_path, 
     # macOS-only fallback. A simulated Darwin platform cannot read /c/... on NT.
     with monkeypatch.context() as native:
         if os.name == "nt":
-            native.setattr(opts.sys, "platform", "win32")
+            native.setattr(opts, "_platform", lambda: "win32")
         value = msb._guest_path(str(pem))
         native.setenv("ACQ_MSB_UPSTREAM_CA_CERT", value)
         assert opts.upstream_ca_flags() == ["--tls-upstream-ca-cert", opts.ca_host_path(value)]
@@ -321,7 +321,7 @@ def test_debug_wired_to_captured_and_foreground(monkeypatch, capsys):
                                           ("//server/share/root.pem", "//server/share/root.pem")])
 @pytest.mark.parametrize("unsafe", [None, "symlink", "junction"])
 def test_ca_windows_host_form(monkeypatch, source, target, unsafe):
-    monkeypatch.setattr(opts.sys, "platform", "win32")
+    monkeypatch.setattr(opts, "_platform", lambda: "win32")
     monkeypatch.setenv("ACQ_MSB_UPSTREAM_CA_CERT", source)
     monkeypatch.delenv("ACQ_MSB_NO_UPSTREAM_CA", raising=False)
     checked = []
@@ -354,7 +354,7 @@ def test_ca_unreadable_file(monkeypatch, tmp_path):
 @pytest.mark.parametrize("platform,tool", [("linux", "/usr/bin/security"), ("darwin", None)])
 def test_ca_autodetect_platform_and_tool(monkeypatch, platform, tool):
     monkeypatch.setenv("ACQ_MSB_UPSTREAM_CA_CERT", "")
-    monkeypatch.setattr(opts.sys, "platform", platform)
+    monkeypatch.setattr(opts, "_platform", lambda: platform)
     monkeypatch.setattr(hostexec, "which", lambda _: tool)
     assert opts.upstream_ca_flags() == []
 
@@ -434,7 +434,7 @@ def test_debug_cpu_count_and_shell_scripts(monkeypatch, capsys, argv, visible):
 @pytest.mark.parametrize("root", ["/var", "/tmp", "/etc"])
 @pytest.mark.parametrize("unsafe", [None, "file", "parent"])
 def test_ca_macos_system_aliases(monkeypatch, root, unsafe):
-    monkeypatch.setattr(opts.sys, "platform", "darwin")
+    monkeypatch.setattr(opts, "_platform", lambda: "darwin")
     alias = Path(root)
     canonical = Path("/private") / alias.name
     path = alias / "acq-certs" / "root.pem"

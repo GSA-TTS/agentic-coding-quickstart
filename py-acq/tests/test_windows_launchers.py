@@ -50,9 +50,12 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-pytestmark = pytest.mark.skipif(
-    sys.platform != "win32", reason="runs acq.cmd and acq.ps1, which need cmd.exe and Windows PowerShell"
-)
+pytestmark = [
+    pytest.mark.platform_windows,
+    pytest.mark.skipif(
+        sys.platform != "win32", reason="runs acq.cmd and acq.ps1, which need cmd.exe and Windows PowerShell"
+    ),
+]
 
 FAKE_MAIN = """\
 import json, os, sys

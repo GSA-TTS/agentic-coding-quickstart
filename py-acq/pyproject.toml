@@ -51,7 +51,12 @@ acq_py = [
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
-markers = ["provider_key: store a throwaway usai key so msb creates pass the provider credential gate"]
+markers = [
+  "provider_key: store a throwaway usai key so msb creates pass the provider credential gate",
+  "platform_windows: requires a real Windows host API, launcher, or filesystem behavior",
+  "platform_macos: requires a real macOS host behavior",
+  "platform_shared: requires the same real behavior on more than one native platform",
+]
 
 # Python quality gates (.github/workflows/python-quality.yml): ruff, mypy and
 # bandit on src/, plus a branch-coverage floor on the pytest run. The tool

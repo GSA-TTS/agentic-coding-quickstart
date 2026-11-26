@@ -643,9 +643,11 @@ def test_non_ascii_target_refused_before_migration_or_backend(monkeypatch, tmp_p
 
 
 def test_copy_drive_classification_requires_ascii_drive_letter(monkeypatch):
-    monkeypatch.setattr(os, "name", "nt")
+    before = os.name
+    monkeypatch.setattr(common, "WINDOWS", True)
     assert common._sandbox_ref("C:/guest") is None
     assert common._sandbox_ref("é:/guest") == ("é", "/guest")
+    assert os.name == before  # pytest's own cache/reporting path stays native
 
 
 @pytest.mark.parametrize("argv", [["secret", "rm", "-g", "github"], ["secret", "set", "-g", "github"],
