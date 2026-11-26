@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "id": "installer/checksum-fail-closed",
+  "oracle": "ADR-0042m installer: a checksum mismatch fails closed (exit 1) before any write",
+  "tier": 1,
+  "backend": null,
+  "platform": "linux",
+  "invoke": {
+    "argv": ["sh", "install.sh", "--source", "test/fixtures/installer-bad", "--yes"],
+    "env": {},
+    "unset": [],
+    "stdin": "",
+    "timeout_ms": 10000
+  },
+  "expect": {
+    "exit": 1,
+    "stderr": {
+      "mode": "contains",
+      "value": "checksum mismatch",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": []
+  }
+}

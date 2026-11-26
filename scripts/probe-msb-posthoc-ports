@@ -212,7 +212,12 @@ main() {
     echo "invalid HOST:GUEST mapping: $MAPPING" >&2
     exit 2
   fi
-  TMPDIR_PROBE=$(mktemp -d "${TMPDIR:-/tmp}/acq-msb-ports-probe.XXXXXX") || exit 1
+  # TMPDIR only when it is absolute, else /tmp, as acq_tmp_dir in
+  # acq.backends/userdirs.sh does: a relative TMPDIR would put the probe's files
+  # under the current directory.
+  local tmp_base="/tmp"
+  case "${TMPDIR:-}" in /*) tmp_base="$TMPDIR" ;; esac
+  TMPDIR_PROBE=$(mktemp -d "$tmp_base/acq-msb-ports-probe.XXXXXX") || exit 1
   local hport gport inspect_json port serve_ok=0
   hport="${MAPPING%%:*}"
   gport="${MAPPING#*:}"

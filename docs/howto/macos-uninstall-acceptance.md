@@ -36,7 +36,7 @@ fail if the checkout is any other commit.
 
 ## Read the result
 
-Each runner (`macos-15` and `macos-15-intel`) has its own job summary. It starts with
+The `macos-15` (Apple Silicon) runner has its own job summary. It starts with
 the tested commit, the runner image, the macOS and bash versions, and the SHA-256 of
 the built `uninstall.command`. A table follows, with one row per stage:
 

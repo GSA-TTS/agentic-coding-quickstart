@@ -337,6 +337,24 @@ STUB
   assert_output --partial "ACQ_BASH32=$ACQ_BASH32_PREFIX/bin/bash"
 }
 
+@test "bash32: the suite receives a PATH launcher for nested interpreter children" {
+  local root="$STUBDIR/launcher-root" fake
+  mkdir -p "$root/scripts" "$root/test/vendor/bats-core/bin"
+  cp "$RUNNER" "$root/scripts/test-acq-bash32"
+  cp "$REPO_ROOT/scripts/test-acq-bats" "$root/scripts/test-acq-bats"
+  cat > "$root/test/vendor/bats-core/bin/bats" <<'STUB'
+#!/bin/sh
+printf 'launcher:%s\n' "${ACQ_BASH32_LAUNCHER:-<unset>}"
+"$ACQ_BASH32_LAUNCHER" -c 'printf "nested:%s\n" "$BASH_VERSION"'
+STUB
+  chmod +x "$root/test/vendor/bats-core/bin/bats"
+  fake="$(make_fake_bash 3.2.57)"
+  run env ACQ_BASH32="$fake" "$root/scripts/test-acq-bash32" x.bats
+  assert_success
+  assert_output --regexp 'launcher:.*/bash'
+  assert_line '3.2.57(1)-release'
+}
+
 @test "bash32: the PATH shim directory is removed after a successful and after a failing run" {
   local root="$STUBDIR/root" fake tmp="$STUBDIR/tmp"
   mkdir -p "$root/scripts" "$root/test/vendor/bats-core/bin" "$tmp"
@@ -355,6 +373,28 @@ STUB
   run env TMPDIR="$tmp" TEST_BATS_STATUS=5 ACQ_BASH32="$fake" "$root/scripts/test-acq-bash32" x.bats
   assert_failure 5
   [ -z "$(ls -A "$tmp")" ]
+}
+
+# As acq_tmp_dir does, the runner puts its PATH shim under TMPDIR only when it is
+# absolute, else /tmp. A shim made under a relative TMPDIR would be a relative
+# PATH entry, so `bash` would stop resolving after a cd.
+@test "bash32: the PATH shim ignores a relative TMPDIR" {
+  local root="$STUBDIR/root" fake work="$STUBDIR/work"
+  mkdir -p "$root/scripts" "$root/test/vendor/bats-core/bin" "$work/rel-tmp"
+  cp "$RUNNER" "$root/scripts/test-acq-bash32"
+  cp "$REPO_ROOT/scripts/test-acq-bats" "$root/scripts/test-acq-bats"
+  cat > "$root/test/vendor/bats-core/bin/bats" <<'STUB'
+#!/bin/sh
+command -v bash > "$SHIM_RECORD"
+STUB
+  chmod +x "$root/test/vendor/bats-core/bin/bats"
+  fake="$(make_fake_bash 3.2.57)"
+  cd "$work" || return 1
+  run env TMPDIR=rel-tmp SHIM_RECORD="$STUBDIR/shim" ACQ_BASH32="$fake" "$root/scripts/test-acq-bash32" x.bats
+  assert_success
+  run cat "$STUBDIR/shim"
+  assert_output --regexp '^/tmp/acq-bash32-path\.[^/]+/bash$'
+  [ -z "$(ls -A "$work/rel-tmp")" ]
 }
 
 @test "bash32: a relative ACQ_BASH32_PREFIX is rejected" {
@@ -396,3 +436,19 @@ STUB
 
 # CI relevance coverage of these scripts is enforced (fail, never skip) by
 # 158-bash32-relevance-paths.bats; the OCI launcher and scanner tests live in 159.
+
+@test "bash32: a relative XDG_CACHE_HOME or HOME never roots the default prefix" {
+  local work="$STUBDIR/work" fake
+  fake="$(make_fake_bash 3.2.57)"
+  mkdir -p "$work/rel-cache/acq/bash-3.2.57/bin" "$work/relhome/.cache/acq/bash-3.2.57/bin" \
+    "$HOME/.cache/acq/bash-3.2.57/bin"
+  cp "$fake" "$work/rel-cache/acq/bash-3.2.57/bin/bash"
+  cp "$fake" "$work/relhome/.cache/acq/bash-3.2.57/bin/bash"
+  cp "$fake" "$HOME/.cache/acq/bash-3.2.57/bin/bash"
+  cd "$work" || return 1
+  run env -u ACQ_BASH32_PREFIX XDG_CACHE_HOME=rel-cache "$RUNNER" --which
+  assert_success
+  assert_output "$HOME/.cache/acq/bash-3.2.57/bin/bash (3.2.57)"
+  run env -u ACQ_BASH32_PREFIX -u XDG_CACHE_HOME HOME=relhome "$RUNNER" --which
+  refute_output --partial 'relhome'
+}

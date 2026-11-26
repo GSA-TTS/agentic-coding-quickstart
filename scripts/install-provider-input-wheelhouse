@@ -16,7 +16,8 @@ done
 
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64) platform=macos-arm64 ;;
-  Darwin-x86_64) platform=macos-x86_64 ;;
+  # Intel Macs are not supported (no macos-x86_64 release asset exists).
+  Darwin-x86_64) echo "Intel Macs (x86_64) are not supported by acq; see docs/howto/acq.md" >&2; exit 2 ;;
   Linux-x86_64) platform=linux-x86_64 ;;
   Linux-aarch64) platform=linux-aarch64 ;;
   *) echo "unsupported host for provider-input validator wheelhouse" >&2; exit 2 ;;
@@ -24,7 +25,14 @@ esac
 
 asset="provider-input-validator-wheelhouse-${platform}.tar.gz"
 base="https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v${version}"
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/acq-validator-wheelhouse.XXXXXXXX")
+# TMPDIR only when it is absolute, else /tmp, as acq_tmp_dir in
+# acq.backends/userdirs.sh does: a relative TMPDIR would put the download under
+# the current directory.
+case "${TMPDIR:-}" in
+  /*) tmp_base=$TMPDIR ;;
+  *) tmp_base=/tmp ;;
+esac
+tmp=$(mktemp -d "$tmp_base/acq-validator-wheelhouse.XXXXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 
 curl --fail --location --silent --show-error "$base/SHA256SUMS" -o "$tmp/SHA256SUMS"

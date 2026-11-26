@@ -1,0 +1,117 @@
+#!/bin/sh
+# acq-python — launcher for the Python acq v1 implementation (coexistence seam,
+# ADR-0047m).
+#
+# The Python implementation has a distinct, resolvable identity so it never
+# collides with the Bash `acq` name on a user's PATH. The Bash `acq` dispatcher
+# execs this launcher when ACQ_IMPL=python (see the resolver in `acq`), and the
+# installer links it as `acq-python` beside `acq`. It can also be invoked
+# directly (`acq-python version`) to run the Python implementation explicitly.
+#
+# Interpreter resolution order (mirrors acq_py/runtime.py):
+#   1. ACQ_RUNTIME                       explicit interpreter path (tests, fleet)
+#   2. <dir>/py-acq/runtime/bin/python3   managed runtime (POSIX), or
+#      <dir>/py-acq/runtime/python.exe    managed runtime (Windows)
+#   3. python3 / python on PATH           IT-approved base fallback
+#
+# The source is run from <dir>/py-acq/src via `python -m acq_py`; argv and the
+# exit status are forwarded verbatim.
+
+set -eu
+
+# Keep only the absolute PATH entries, before anything else runs. An empty entry
+# (a leading, trailing or doubled ':') or a relative one such as '.' makes the
+# shell search the current directory, normally the workspace a sandboxed agent
+# can write to, so `python3` (or dirname/readlink below) could run a planted
+# copy on the host. The same rule as the Bash acq and acq_py.hostexec; only
+# shell builtins are used. With no absolute entry left, refuse rather than
+# search the current directory.
+_abs_path="" _rest="${PATH-}:"
+while [ -n "$_rest" ]; do
+  _entry=${_rest%%:*}
+  _rest=${_rest#*:}
+  case "$_entry" in
+    /*) _abs_path="${_abs_path:+$_abs_path:}$_entry" ;;
+  esac
+done
+if [ -z "$_abs_path" ]; then
+  echo "acq-python: PATH has no absolute directory, so python3 cannot be found without searching the current directory" >&2
+  exit 1
+fi
+PATH=$_abs_path
+export PATH
+unset _abs_path _rest _entry
+
+# Resolve the absolute directory containing this script, following symlinks.
+_self_dir() {
+  src="$1" dir=""
+  while [ -h "$src" ]; do
+    dir=$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd) || exit 1
+    src=$(readlink "$src") || exit 1
+    case "$src" in
+      /*) ;;
+      *) src="$dir/$src" ;;
+    esac
+  done
+  cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd
+}
+
+SELF_DIR=$(_self_dir "$0") || { echo "acq-python: could not resolve script directory" >&2; exit 1; }
+
+# An ACQ_RUNTIME override must be absolute, as acq.ps1 requires on Windows: a
+# relative value would be resolved against the current directory, normally the
+# workspace, so a planted interpreter there would run on the host. Under Git Bash
+# or Cygwin a drive-rooted C:/... or C:\... value is absolute too.
+_bad_runtime=""
+if [ -n "${ACQ_RUNTIME:-}" ]; then
+  case "$ACQ_RUNTIME" in
+    /*) ;;
+    [A-Za-z]:/*|[A-Za-z]:\\*)
+      case "$(uname -s 2>/dev/null)" in
+        MINGW*|MSYS*|CYGWIN*) ;;
+        *) _bad_runtime=1 ;;
+      esac ;;
+    *) _bad_runtime=1 ;;
+  esac
+  if [ -n "$_bad_runtime" ]; then
+    echo "acq-python: ACQ_RUNTIME must be an absolute path to a Python interpreter, got '$(printf '%s' "$ACQ_RUNTIME" | LC_ALL=C tr -c '[:print:]' '?')'" >&2
+    exit 1
+  fi
+fi
+
+py=""
+if [ -n "${ACQ_RUNTIME:-}" ] && [ -x "${ACQ_RUNTIME}" ]; then
+  py="$ACQ_RUNTIME"
+elif [ -x "$SELF_DIR/py-acq/runtime/bin/python3" ]; then
+  py="$SELF_DIR/py-acq/runtime/bin/python3"
+elif [ -x "$SELF_DIR/py-acq/runtime/python.exe" ]; then
+  py="$SELF_DIR/py-acq/runtime/python.exe"
+elif command -v python3 >/dev/null 2>&1; then
+  py="$(command -v python3)"
+elif command -v python >/dev/null 2>&1; then
+  py="$(command -v python)"
+else
+  echo "acq-python: no Python interpreter found (set ACQ_RUNTIME, install the runtime, or put python3 on PATH)" >&2
+  exit 1
+fi
+
+# `python -m` puts the current directory first on sys.path, so a workspace file
+# named like a module acq imports (json.py, argparse.py, ...) would run on the
+# host before any sandbox exists. Run with -P (Python 3.11+: no unsafe path
+# entry) and refuse interpreters older than the required 3.12, which may not
+# honour -P. The version probe runs isolated (-I) and imports only the builtin
+# sys module, so the probe itself cannot be hijacked.
+if ! "$py" -I -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' >/dev/null 2>&1; then
+  echo "acq-python: $py is not Python 3.12 or newer, which acq requires" >&2
+  echo "            (set ACQ_RUNTIME, install the managed runtime, or put python3 >= 3.12 on PATH)" >&2
+  exit 1
+fi
+
+# acq is stdlib-only, so the user's PYTHONPATH is never inherited: an empty or
+# relative entry in it (e.g. "PYTHONPATH=:/opt/x") would put the current
+# directory back on sys.path despite -P.
+if [ -d "$SELF_DIR/py-acq/src" ]; then
+  PYTHONPATH="$SELF_DIR/py-acq/src" exec "$py" -P -m acq_py "$@"
+fi
+unset PYTHONPATH
+exec "$py" -P -m acq_py "$@"

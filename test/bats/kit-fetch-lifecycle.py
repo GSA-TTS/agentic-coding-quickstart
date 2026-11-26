@@ -8,13 +8,26 @@ import os
 from pathlib import Path
 import pty
 import select
+import shutil
 import signal
 import subprocess
 import sys
 import time
 
 repo, scratch = (Path(p).resolve() for p in sys.argv[1:3])
-shell = sys.argv[3]
+shell = os.environ.get("ACQ_BASH32_LAUNCHER", sys.argv[3])
+# A loader-backed Bash cannot be executed directly through $BASH: it needs the
+# private PATH launcher installed by test-acq-bash32. Keep the direct-shell
+# behavior for ordinary runs, while allowing that runner to propagate a portable
+# configured launcher to every nested lifecycle child.
+launcher = os.environ.get("ACQ_BASH32_LAUNCHER", shell)
+# A runner started in the background by a non-interactive shell hands every
+# child SIGINT ignored (and `nohup` does the same for SIGHUP), and a shell cannot
+# trap a signal that was ignored on entry, so the signal cases would hang. Undo
+# that here: a handler, unlike SIG_IGN, is reset to the default across exec.
+signal.signal(signal.SIGINT, signal.default_int_handler)
+signal.signal(signal.SIGHUP, signal.SIG_DFL)
+signal.signal(signal.SIGTERM, signal.SIG_DFL)
 source = (repo / "acq").read_text()
 prefix = source.split("# Pre-parse global flags", 1)[0]
 script = scratch / "acq"
@@ -28,27 +41,55 @@ case "$1" in
   clear) trap - EXIT; exit 23 ;;
   stdin) IFS= read -r value; printf 'INPUT %s\n' "$value" ;;
   tty) [ -t 0 ] && [ -t 1 ]; IFS= read -r value; printf 'TTY %s\n' "$value" ;;
-  nested) "$BASH" "$0" success; [ -d "$_ACQ_KIT_FETCH_ROOT" ]; printf 'OUTER-LIVE\n' ;;
+   nested) "$ACQ_BASH32_LAUNCHER" "$0" success; [ -d "$_ACQ_KIT_FETCH_ROOT" ]; printf 'OUTER-LIVE\n' ;;
   spinner) _acq_spin_install_traps; printf 'ARMED\n'; IFS= read -r value ;;
   prompt) trap 'trap - INT; kill -s INT $$' INT; printf 'ARMED\n'; IFS= read -r value ;;
   foreground) printf 'ARMED\n'; sleep 30; printf 'UNEXPECTED\n' ;;
+  survive) sleep 2; [ -d "$_ACQ_KIT_FETCH_ROOT" ]; printf 'ROOT-LIVE\n' ;;
   exec)
-    exec "$BASH" -c 'printf "EXEC %s\n" "$$"; IFS= read -r value'
+    exec "$ACQ_BASH32_LAUNCHER" -c 'printf "EXEC %s\n" "$$"; IFS= read -r value'
     ;;
   signal) printf 'ARMED\n'; IFS= read -r value ;;
 esac
 ''')
 
 
-def environment():
+def environment(path=None):
     env = os.environ.copy()
     for key in tuple(env):
         if key.startswith(("ACQ_", "_ACQ_", "BASH_FUNC_")) or key == "BASH_ENV":
             del env[key]
     env.update(TMPDIR=str(scratch), HOME=str(scratch), XDG_CONFIG_HOME=str(scratch))
+    env["ACQ_BASH32_LAUNCHER"] = launcher
     # A stale inherited root must never be adopted by a new invocation.
     env["_ACQ_KIT_FETCH_ROOT"] = str(scratch / "unrelated")
+    if path is not None:
+        env["PATH"] = f"{path}{os.pathsep}{env.get('PATH', '')}"
     return env
+
+
+def ps_wrapper(name, body):
+    # A `ps` placed first on PATH reaches only the guardian's parent lookups: the
+    # harness's own ps calls run with the harness's PATH.
+    directory = scratch / name
+    directory.mkdir()
+    wrapper = directory / "ps"
+    wrapper.write_text(f"#!{sys.executable} -I\n" + body)
+    wrapper.chmod(0o755)
+    return directory
+
+
+# Like procps ps, the slow wrapper dies from SIGTERM even though the guardian
+# ignores it, and it holds the guardian's lookup open long enough for a group
+# SIGTERM to land inside it every time. The marker says the window is open.
+REAL_PS = shutil.which("ps")
+SLOW_PS = ps_wrapper("slow-ps", f"""import os, signal, sys, time
+signal.signal(signal.SIGTERM, signal.SIG_DFL)
+open({str(scratch / "slow-ps.started")!r}, "a").close()
+time.sleep(3)
+os.execv({REAL_PS!r}, [{REAL_PS!r}] + sys.argv[1:])
+""")
+FAILING_PS = ps_wrapper("failing-ps", "import sys\nsys.exit(1)\n")
 
 
 def assert_clean(output):
@@ -60,9 +101,9 @@ def assert_clean(output):
     assert (scratch / "unrelated").is_dir()
 
 
-def run_case(mode, expected, data=""):
+def run_case(mode, expected, data="", path=None):
     result = subprocess.run([shell, str(script), mode], input=data, capture_output=True,
-                            text=True, env=environment(), timeout=30)
+                            text=True, env=environment(path), timeout=30)
     assert result.returncode == expected, (mode, result.returncode, result.stdout, result.stderr)
     assert not result.stderr, result.stderr
     assert_clean(result.stdout)
@@ -117,10 +158,17 @@ def diagnostics(process):
     return "process tree:\n" + "\n".join(tree) + "\nstderr tail: " + repr(errors[-500:])
 
 
-def signal_case(mode, sig, group=False):
+def wait_for_file(path):
+    deadline = time.monotonic() + 15
+    while not path.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert path.exists(), ("never created", path)
+
+
+def signal_case(mode, sig, group=False, path=None, marker=None):
     process = subprocess.Popen([shell, str(script), mode], stdin=subprocess.PIPE,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               env=environment(), start_new_session=True)
+                               env=environment(path), start_new_session=True)
     output = ""
     try:
         output = until(process, b"EXEC " if mode == "exec" else b"ARMED")
@@ -138,6 +186,8 @@ def signal_case(mode, sig, group=False):
                 time.sleep(0.02)
             else:
                 raise AssertionError("foreground child did not start")
+            if marker is not None:
+                wait_for_file(marker)
             os.killpg(process.pid, sig)
         else:
             process.send_signal(sig)
@@ -150,7 +200,8 @@ def signal_case(mode, sig, group=False):
         assert "UNEXPECTED" not in output, output
         assert not errors, errors
         assert_clean(output)
-        print("PASS", mode, signal.Signals(sig).name, "group" if group else "pid")
+        print("PASS", mode, signal.Signals(sig).name, "group" if group else "pid",
+              "" if path is None else path.name)
     except (AssertionError, subprocess.TimeoutExpired) as error:
         raise AssertionError(f"{error!r}\n{diagnostics(process)}") from None
     finally:
@@ -196,6 +247,12 @@ def nested_case():
     assert len(set(roots)) == 2 and "OUTER-LIVE" in nested, nested
 
 
+def failed_lookup_case():
+    # A failed parent lookup must not end the guardian and delete the root
+    # while acq is still running.
+    assert "ROOT-LIVE" in run_case("survive", 0, path=FAILING_PS)
+
+
 # Every case owns a private process tree and kit-fetch root, and the acq exit path
 # waits ~1s on the cleanup guardian, so cases are wall-clock bound rather than CPU
 # bound. Run them concurrently (4 at a time, with generous per-step failure
@@ -209,6 +266,13 @@ cases += [(signal_case, (mode, sig)) for mode in ("signal", "exec", "spinner")
 cases += [(signal_case, ("foreground", sig, True))
           for sig in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)]
 cases += [(signal_case, ("prompt", signal.SIGINT)), (signal_case, ("signal", signal.SIGKILL))]
+# A group SIGTERM that kills the guardian's parent lookup must leave acq's stderr
+# empty. With every lookup failing, the owner check alone must still end the
+# guardian and remove the root after a SIGKILL, which runs no EXIT trap.
+cases += [(failed_lookup_case, ()),
+          (signal_case, ("foreground", signal.SIGTERM, True, SLOW_PS,
+                         scratch / "slow-ps.started")),
+          (signal_case, ("signal", signal.SIGKILL, False, FAILING_PS))]
 
 with ThreadPoolExecutor(max_workers=4) as pool:
     futures = [pool.submit(fn, *args) for fn, args in cases]

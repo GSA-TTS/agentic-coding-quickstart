@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "id": "cli/version-json",
+  "oracle": "ADR-0038m §2 structured output success envelope and version required data fields: with no backend installed, backend and backend_version are null and kit_control_plane_ref is the pinned control-plane commit",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{acq}", "version", "--json"],
+    "env": {
+      "ACQ_VERSION": "0.1.0",
+      "ACQ_SOURCE_REVISION": "0000000000000000000000000000000000000000",
+      "ACQ_SBX_INSTALLED": "0",
+      "ACQ_MSB_INSTALLED": "0"
+    },
+    "unset": ["ACQ_BACKEND", "ACQ_SBX_BIN", "ACQ_MSB_BIN", "ACQ_SBX_VERSION", "ACQ_MSB_VERSION"],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "version",
+        "data": {
+          "impl": "python",
+          "acq_version": "0.1.0",
+          "source_revision": "0000000000000000000000000000000000000000",
+          "backend": null,
+          "backend_version": null,
+          "kit_control_plane_ref": "941a286f912b99475429c3c00db49a99af5b241e"
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+  }
+}

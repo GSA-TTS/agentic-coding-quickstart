@@ -72,6 +72,35 @@ _common() { # FUNC ARGS...
   GIT_CEILING_DIRECTORIES="$STUBDIR" _common detect_workspace_repos "$GWT/empty"; assert_output ''
 }
 
+# An inherited GIT_DIR/GIT_WORK_TREE (from a hook, an editor or a parent git
+# command) must not make detection read another repository's remotes.
+@test "gh-detect: an inherited GIT_DIR does not redirect workspace repo detection" {
+  export GIT_DIR="$GWT/wsGL/.git" GIT_WORK_TREE="$GWT/wsGL"
+  _common detect_workspace_repos "$GWT/repoGH"
+  assert_success
+  assert_output 'GSA-TTS/quickstart'
+  _common detect_workspace_repos "$GWT/wsMulti"
+  assert_success
+  assert_line 'orgOne/repo1'
+  assert_line 'orgTwo/repo2'
+  refute_output --partial 'gitlab'
+}
+
+# Command-scope config (git -c, GIT_CONFIG_COUNT/KEY_n/VALUE_n) must not inject
+# a remote into the scope decision.
+@test "gh-detect: command-scope git config cannot inject a remote" {
+  export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.url \
+    GIT_CONFIG_VALUE_0=https://github.com/evil/injected.git
+  _common detect_workspace_repos "$GWT/wsGL"
+  assert_success
+  assert_output ''
+  unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+  export GIT_CONFIG_PARAMETERS="'remote.origin.url'='https://github.com/evil/injected.git'"
+  _common detect_workspace_repos "$GWT/repoGH"
+  assert_success
+  assert_output 'GSA-TTS/quickstart'
+}
+
 @test "gh-scope: refuses workspaces spanning multiple GitHub owners" {
   run env ACQ_SECRET_TEST_VALUE=ghp_fake bash -c '
     export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"

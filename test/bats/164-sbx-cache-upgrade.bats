@@ -31,7 +31,7 @@ while [ "${1:-}" = -c ]; do shift 2; done
 if [ "${1:-}" = fetch ]; then
   printf 'fetch\n' >> "$FETCH_LOG"
   [ "${FAIL_FETCH:-0}" != 1 ] || exit 1
-  exec "$ACQ_TEST_REAL_GIT" -c protocol.file.allow=always fetch --depth 1 "$SOURCE_REPO" "${@: -1}"
+  GIT_ALLOW_PROTOCOL=file exec "$ACQ_TEST_REAL_GIT" -c protocol.file.allow=always fetch --depth 1 "$SOURCE_REPO" "${@: -1}"
 fi
 exec "$ACQ_TEST_REAL_GIT" "${args[@]}"
 GIT
@@ -85,12 +85,11 @@ _sbx_upgrade_translate() {
   _sbx_upgrade_assert_legacy
 }
 
-_sbx_upgrade_fallback() {
-  # Keep the existing SBX fallback contract: stdout is the original reference.
-  _acq_sbx_translate_kit "$REF" > "$STUBDIR/result" 2> "$STUBDIR/diagnostic"
-  assert_equal "$(cat "$STUBDIR/result")" "$REF"
-  run cat "$STUBDIR/diagnostic"
-  assert_output --partial 'Passing the ref through to sbx'
+_sbx_upgrade_refused() {
+  # A failed fetch must never hand SBX a ref that bypasses acq validation.
+  run _acq_sbx_translate_kit "$REF" > "$STUBDIR/result" 2> "$STUBDIR/diagnostic"
+  assert_failure
+  assert_output --partial "not applying"
   _sbx_upgrade_assert_legacy
 }
 
@@ -122,7 +121,7 @@ _sbx_upgrade_fallback() {
   printf 'second\n' > "$SOURCE_REPO/kits/one/files/config"
   _sbx_upgrade_commit second
   export FAIL_FETCH=1
-  _sbx_upgrade_fallback
+  _sbx_upgrade_refused
   assert_equal "$(cat "$PAYLOAD/kits/one/files/config")" first
   assert_equal "$(cat "$TRANSLATED/files/config")" first
   unset FAIL_FETCH
@@ -147,7 +146,7 @@ _sbx_upgrade_fallback() {
   REF="${REF/HEAD/$PIN}"
   _sbx_upgrade_legacy
   export FAIL_FETCH=1
-  _sbx_upgrade_fallback
+  _sbx_upgrade_refused
   assert_equal "$(find "$_ACQ_KIT_FETCH_ROOT" -mindepth 1 -print)" ''
   assert [ ! -e "$TRANSLATED" ]
   unset FAIL_FETCH
@@ -161,7 +160,7 @@ _sbx_upgrade_fallback() {
   mkdir -p "$target/$SLUG/kits/one"
   printf 'preserve\n' > "$target/$SLUG/kits/one/keep"
   ln -s "$target" "$ACQ_SBX_KIT_CACHE/fetch-payload-v2"
-  _sbx_upgrade_fallback
+  _sbx_upgrade_refused
   assert [ -L "$ACQ_SBX_KIT_CACHE/fetch-payload-v2" ]
   assert_equal "$(cat "$target/$SLUG/kits/one/keep")" preserve
   assert [ ! -e "$target/$SLUG/kits/one/spec.yaml" ]
@@ -171,7 +170,7 @@ _sbx_upgrade_fallback() {
 @test "sbx upgrade: symlink leaf preserves its legacy repository target" {
   mkdir -p "$(dirname "$PAYLOAD")"
   ln -s "$LEGACY" "$PAYLOAD"
-  _sbx_upgrade_fallback
+  _sbx_upgrade_refused
   assert [ -L "$PAYLOAD" ]
   assert_equal "$(readlink "$PAYLOAD")" "$LEGACY"
   assert [ ! -e "$FETCH_LOG" ]
@@ -180,7 +179,7 @@ _sbx_upgrade_fallback() {
 @test "sbx upgrade: repository obstructing the new namespace is preserved" {
   local namespace="$ACQ_SBX_KIT_CACHE/fetch-payload-v2"
   cp -R "$LEGACY" "$namespace"
-  _sbx_upgrade_fallback
+  _sbx_upgrade_refused
   diff -r "$SNAPSHOT" "$namespace"
   assert [ ! -e "$PAYLOAD" ]
   assert [ ! -e "$FETCH_LOG" ]
@@ -189,7 +188,7 @@ _sbx_upgrade_fallback() {
 @test "sbx upgrade: repository obstructing the new payload leaf is preserved" {
   mkdir -p "$(dirname "$PAYLOAD")"
   cp -R "$LEGACY" "$PAYLOAD"
-  _sbx_upgrade_fallback
+  _sbx_upgrade_refused
   diff -r "$SNAPSHOT" "$PAYLOAD"
   assert [ ! -e "$FETCH_LOG" ]
 }

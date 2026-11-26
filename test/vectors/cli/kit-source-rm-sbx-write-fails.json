@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "id": "cli/kit-source-rm-sbx-write-fails",
+  "oracle": "ADR-0040m sbx kit_source_revoked fails closed when sbx refuses the allowlist write: kit-source rm exits 1, keeps the source registered, and prints a shell-quoted 'sbx settings set kit.allowedSources' recovery command that round-trips an entry containing a single quote",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{acq}", "--backend", "sbx", "kit-source", "rm", "github.com/acme/team-kits", "--json"],
+    "env": {
+      "ACQ_SBX_BIN": "__stub__",
+      "ACQ_SBX_VERSION": "0.39.0",
+      "ACQ_SBX_INSTALLED": "1",
+      "ACQ_MSB_INSTALLED": "0",
+      "ACQ_KIT_SOURCE_SEED": "[{\"repository\":\"github.com/acme/team-kits\",\"ref\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"directory\":\"kits\"}]",
+      "ACQ_SBX_STUB_ALLOWED_SOURCES": "[\"docker.io/\",\"github.com/acme/\",\"example.com/it's/\"]",
+      "ACQ_SBX_STUB_FAIL": "settings set"
+    },
+    "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "MSB_HOME", "SBX_HOME", "ACQ_IMAGE", "ACQ_MSB_IMAGE", "ACQ_SBX_STUB_CATALOG", "ACQ_SBX_STUB_SECRETS", "ACQ_SBX_STUB_SECRET_LS_RAW", "ACQ_SBX_STUB_RAW_PLACEHOLDERS", "ACQ_SBX_STUB_ROTATE", "ACQ_SBX_STUB_ALLOWED_SOURCES_READBACK", "ACQ_MSB_STUB_CATALOG", "ACQ_MSB_STUB_FAIL", "ACQ_MSB_STUB_SECRETS", "ACQ_MSB_STUB_SECRET_LS_RAW", "ACQ_MSB_STUB_ROTATE", "ACQ_KIT_SOURCE_DISCOVERY", "ACQ_EXTRA_KIT_SOURCES"],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 1,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "kit-source rm",
+        "error": {
+          "code": "failure",
+          "message": "could not write kit.allowedSources, so sbx kit.allowedSources still permits 'github.com/acme/'; kit source 'github.com/acme/team-kits' was not removed",
+          "remediation": "run: sbx settings set kit.allowedSources '[\"docker.io/\", \"example.com/it'\"'\"'s/\"]'; then re-run: acq kit-source rm github.com/acme/team-kits"
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {"mode": "exact", "value": "", "normalize": []}
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+  }
+}

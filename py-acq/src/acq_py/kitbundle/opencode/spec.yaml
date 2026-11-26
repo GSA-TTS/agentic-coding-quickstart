@@ -1,0 +1,171 @@
+# spec.yaml — opencode (a neutral acq mixin kit, hybrid/v1)
+#
+# AGENT-HARNESS KIT: installs the pinned, SHA-256-verified OpenCode CLI binary
+# into the sandbox at create time from OpenCode v2's npm platform tarballs,
+# replacing acq's older unpinned MSB fallback (`npm install -g opencode-ai`,
+# which resolves to the legacy 1.x line). This is the first harness-agent kit
+# in the family — see the
+# top-level `agent:` block below, which declares this kit as providing the
+# `opencode` agent token so acq's built-in agent-kit readiness gate
+# (acq_validate_agent_builtin_kit_dir / kit_spec_agent_field, in the sibling
+# quickstart repo's acq.backends/common.sh) can confirm this kit genuinely
+# matches the agent it's about to enable, before enabling it. This is the
+# reusable, declarative replacement for acq's older backend-specific fallback
+# installer.
+#
+# WHY THIS KIT EXISTS (not just "nice to have a pin"): the older MSB install
+# path has two independent problems this kit closes together: (1) no version
+# pin at all — a sandbox created today and one created next month can run
+# materially different OpenCode releases with no record of which; (2) a real,
+# already-documented bug (the sibling quickstart repo's own
+# docs/KNOWN_FAILURE_MODES.md, "opencode-ai npm postinstall intermittently
+# fails to fetch its own binary"): opencode-ai's own npm postinstall step
+# fetches the real binary separately and intermittently fails, which acq
+# already carries a bespoke `ensure_opencode_postinstall` remediation for.
+# This kit's install method has no postinstall step to fail — the platform
+# package tarball already contains the real binary — so the failure mode doesn't
+# exist here at all, independent of the pin.
+#
+# INSTALL METHOD DECISION (nixpkgs vs. npm wrapper vs. pinned platform tarball):
+# the project's devenv sandbox image (integrations/isolation/images/devenv/) pins
+# nixpkgs at a fixed revision (`NIXPKGS_REV`, see that Dockerfile). At that
+# pinned rev, nixpkgs' own `opencode` package resolves to v0.3.112, built from
+# the pre-rename upstream repository (`sst/opencode`) — far behind current
+# OpenCode. The stable 2.x CLI is now published as @opencode/cli, whose wrapper
+# package uses a postinstall script to copy an optional platform binary package
+# (including a baseline x64 build for hosts without AVX2). This kit avoids that
+# lifecycle-script path by downloading the exact @opencode/cli-linux-<arch>
+# package tarball, verifying its SHA-256, and extracting its binary directly.
+#
+# INTEGRITY POSTURE (deliberately NOT fail-soft like every other kit in this
+# family): see docs/decisions/fail-closed-on-integrity.md. A SHA-256 mismatch
+# refuses to install the mismatched bytes rather than falling back to any
+# unpinned path — this kit's whole purpose is retiring an unpinned fallback,
+# so silently degrading TO one on a hash mismatch would defeat the kit.
+#
+# NEUTRAL (backend-agnostic) form, structured like the sibling `openchamber` /
+# `pi-coding-agent` / `prime-agent` kits. acq's kit-translate layer maps the
+# declarative caps/files/commands/agent below onto whichever isolation backend
+# acq has active (sbx, msb) — this kit carries no backend-specific config.
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: opencode
+displayName: OpenCode (terminal AI coding agent)
+description: >
+  Installs a pinned, SHA-256-verified OpenCode v2 CLI binary into the sandbox
+  at create time (root, install phase) by fetching the architecture-specific
+  @opencode/cli-linux-* npm tarball directly — no npm install, no native build,
+  no lifecycle script. Replaces acq's older unpinned MSB fallback
+  (`npm install -g opencode-ai`, resolves to the legacy 1.x line). Declares the
+  `agent:` block so acq's built-in agent-kit readiness gate can confirm this kit
+  genuinely provides the `opencode` agent before enabling it. Fails soft (agent
+  absent, sandbox stays up) on any availability failure, but fails CLOSED
+  (refuses to install) on a SHA-256 mismatch — see
+  docs/decisions/fail-closed-on-integrity.md.
+
+agent:
+  name: opencode
+  entrypoint: opencode
+
+caps:
+  network:
+    allow:
+      # The install script fetches the pinned @opencode/cli-linux-<arch>
+      # platform tarball directly from npm's registry. The wrapper package's
+      # postinstall path is deliberately not used.
+      - registry.npmjs.org
+
+files:
+  - path: /home/agent/opencode-install.sh
+    mode: "0755"
+    source: files/home/opencode-install.sh
+    description: Fetch, SHA-256-verify, and install the pinned OpenCode CLI binary (create-time, root)
+  - path: /home/agent/opencode-config/render-provider-config.mjs
+    mode: "0755"
+    source: files/home/opencode-config/render-provider-config.mjs
+    description: Render the authoritative provider-input generation into global OpenCode config
+  - path: /home/agent/opencode-config/base-config.jsonc
+    mode: "0644"
+    source: files/home/opencode-config/base-config.jsonc
+    description: Base OpenCode policy consumed only by the startup renderer
+
+commands:
+  # INSTALL phase, as root, create-time once — matching goose-server's
+  # rationale (a single prebuilt binary tarball needs no toolchain, so there is
+  # no create-vs-startup safety tension the way there is for openchamber's
+  # native-module npm dependency). The version/hash pins below are this kit's ONLY
+  # copy of the pin (the install script has no literal fallback values, unlike
+  # pi-coding-agent-install.sh's pattern — see that script's own header for
+  # why not duplicating the pin here matters); bump all version/hash values
+  # together, after independently re-deriving hashes from the real npm tarballs,
+  # to adopt a newer release.
+  - phase: install
+    user: "0"
+    description: Fetch, SHA-256-verify, and install the pinned OpenCode CLI binary
+    command:
+      - sh
+      - -c
+      - |
+        OPENCODE_VERSION="2.0.30" \
+        OPENCODE_SHA256_LINUX_X64="fbbefd86fcd42f03d6253bd1a5a1e532558274679b669f829f3dd921ffa33205" \
+        OPENCODE_SHA256_LINUX_X64_BASELINE="c32f6fa1164ed09287519252f0c2d52ae356aec6dd5e32522e46c8fecba1bfcc" \
+        OPENCODE_SHA256_LINUX_ARM64="96ead471c33ad1486c271d40486c438ff44eadabc25c1b65ee1437941e6ec9ce" \
+          sh /home/agent/opencode-install.sh
+  # Root's install-time --version probe can create OpenCode's scratch directory.
+  # Prepare it on every start (including when /tmp was cleared), without
+  # recursively changing existing contents or following a pre-existing symlink.
+  - phase: startup
+    user: "0"
+    description: Prepare private OpenCode scratch directory for the agent user
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        # Resolve ownership by name: acq may provision `agent` at a uid other
+        # than the default (for example when that uid is already taken on an MSB image).
+        if ! agent_uid=$(id -u agent 2>/dev/null) || ! agent_gid=$(id -g agent 2>/dev/null); then
+          echo "opencode-kit(startup): user 'agent' not found; cannot prepare /tmp/opencode" >&2
+          exit 1
+        fi
+        if [ -L /tmp/opencode ]; then
+          echo "opencode-kit(startup): refusing symlink at /tmp/opencode" >&2
+          exit 1
+        fi
+        if [ -e /tmp/opencode ] && [ ! -d /tmp/opencode ]; then
+          echo "opencode-kit(startup): refusing non-directory at /tmp/opencode" >&2
+          exit 1
+        fi
+        install -d -o "$agent_uid" -g "$agent_gid" -m 0700 /tmp/opencode
+  # acq supplies ACQ_PROVIDER_INPUT_ROOT. It resolves to the same read-only
+  # models/providers layout for every backend. This is the sole acq-owned writer
+  # of OpenCode's global config after the cutover.
+  - phase: startup
+    user: "1000"
+    description: Render current provider inputs into the global OpenCode config
+    command:
+      - node
+      - /home/agent/opencode-config/render-provider-config.mjs
+      - --global-dir
+      - /home/agent/.config/opencode
+      - --base-config
+      - /home/agent/opencode-config/base-config.jsonc
+
+# No publishedPorts: opencode is a TUI, not a web UI (same as pi-coding-agent /
+# prime-agent). Nothing to publish to the host.
+
+agentContext: |
+  ## OpenCode (terminal AI coding agent)
+
+  This sandbox has **OpenCode** installed via a pinned, SHA-256-verified
+  OpenCode v2 platform package tarball. The kit's `opencode-install.sh` fetched
+  the exact pinned npm tarball, verified its SHA-256, and installed the binary
+  at `/usr/local/bin/opencode` at sandbox creation.
+
+  There is no startup supervisor and no published port: `opencode` is a plain
+  terminal command you run directly, the same as any other locally-installed
+  CLI.
+
+# No backend_shortcuts / backend_extras: this kit is written entirely in the
+# neutral vocabulary (caps / files / commands / agent), which acq's kit
+# translation feeds to whatever backend it has active (sbx, msb).

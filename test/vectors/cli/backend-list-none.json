@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "id": "cli/backend-list-none",
+  "oracle": "ADR-0038m §2 backend list required data: installed/name/version records with no backend installed",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{acq}", "backend", "list", "--json"],
+    "env": {
+      "ACQ_SBX_INSTALLED": "0",
+      "ACQ_MSB_INSTALLED": "0"
+    },
+    "unset": ["ACQ_SBX_VERSION", "ACQ_MSB_VERSION", "ACQ_BACKEND"],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "backend list",
+        "data": {
+          "active_backend": null,
+          "backends": [
+            {"name": "sbx", "installed": false, "version": null},
+            {"name": "msb", "installed": false, "version": null}
+          ]
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {"mode": "exact", "value": "", "normalize": []}
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+  }
+}

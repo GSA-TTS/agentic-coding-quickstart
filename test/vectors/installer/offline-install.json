@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "id": "installer/offline-install",
+  "oracle": "ADR-0042m installer: installs from the enumerated offline asset set alone (no network)",
+  "tier": 1,
+  "backend": null,
+  "platform": "linux",
+  "invoke": {
+    "argv": ["sh", "install.sh", "--source", "test/fixtures/installer", "--yes"],
+    "env": {},
+    "unset": [],
+    "stdin": "",
+    "timeout_ms": 10000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "contains",
+      "value": "verified acq-",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": []
+  }
+}

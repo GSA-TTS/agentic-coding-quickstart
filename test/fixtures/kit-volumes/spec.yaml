@@ -1,0 +1,10 @@
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: volume-kit
+displayName: Volume Kit
+volumes:
+  - path: /data
+    size: 1G
+  - path: /scratch
+    type: tmpfs
+    size: 128M

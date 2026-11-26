@@ -33,9 +33,13 @@ ACQ="$SCRIPT_DIR/acq"
 BE=(--backend msb)
 
 # Throwaway workspace + kit dirs (a create needs a real workspace path, and the
-# published port is declared by a kit's neutral `publishedPorts:` block).
-WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/nde-ws.XXXXXX")
-KITDIR=$(mktemp -d "${TMPDIR:-/tmp}/nde-kit.XXXXXX")
+# published port is declared by a kit's neutral `publishedPorts:` block). They
+# go under TMPDIR only when it is absolute, else /tmp, as acq_tmp_dir in
+# acq.backends/userdirs.sh does: a relative TMPDIR would put them under the
+# current directory.
+case "${TMPDIR:-}" in /*) TMP_BASE="$TMPDIR" ;; *) TMP_BASE=/tmp ;; esac
+WORKDIR=$(mktemp -d "$TMP_BASE/nde-ws.XXXXXX")
+KITDIR=$(mktemp -d "$TMP_BASE/nde-kit.XXXXXX")
 
 # An egress host that is NOT in the balanced allowlist. example.com/.org/.net are
 # reserved-for-documentation domains and are deliberately absent from the sbx

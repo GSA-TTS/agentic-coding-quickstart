@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "id": "cli/backend-check-blocked",
+  "oracle": "ADR-0040m version floor fail-closed: a blocked msb version is refused with backend_version_unsupported",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{acq}", "backend", "check", "msb", "--json"],
+    "env": {
+      "ACQ_MSB_BIN": "__stub__",
+      "ACQ_MSB_VERSION": "0.7.1"
+    },
+    "unset": ["ACQ_SBX_INSTALLED", "ACQ_SBX_VERSION", "ACQ_MSB_INSTALLED", "ACQ_BACKEND"],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 1,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "backend check",
+        "error": {"code": "backend_version_unsupported"}
+      },
+      "normalize": []
+    },
+    "stderr": {"mode": "exact", "value": "", "normalize": []}
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+  }
+}

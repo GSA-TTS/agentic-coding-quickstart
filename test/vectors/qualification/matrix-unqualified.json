@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "id": "qualification/matrix-unqualified",
+  "oracle": "ADR-0044m the matrix reports unqualified cells honestly (Windows ARM64, musl, and other unclaimed cells) and each claimed cell's gate verdict from the ledger (here an empty one: every claimed cell blocked)",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{python}", "-m", "qualification", "matrix", "--json", "--ledger", "test/vectors/qualification/fixtures/empty-ledger.json"],
+    "env": {},
+    "unset": [],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "matrix",
+        "data": {
+          "cells": [
+            {"backend": "msb", "platform": "linux-x86_64", "claimed": true, "state": "blocked", "reason": "no transcript recorded"},
+            {"backend": "msb", "platform": "linux-aarch64", "claimed": true, "state": "blocked", "reason": "no transcript recorded"},
+            {"backend": "msb", "platform": "linux-musl", "claimed": false, "state": "unqualified", "reason": ""},
+            {"backend": "msb", "platform": "macos-arm64", "claimed": true, "state": "blocked", "reason": "no transcript recorded"},
+            {"backend": "msb", "platform": "macos-x86_64", "claimed": false, "state": "unqualified", "reason": ""},
+            {"backend": "msb", "platform": "windows-x64", "claimed": true, "state": "blocked", "reason": "no transcript recorded"},
+            {"backend": "msb", "platform": "windows-arm64", "claimed": false, "state": "unqualified", "reason": ""},
+            {"backend": "sbx", "platform": "linux-x86_64", "claimed": true, "state": "blocked", "reason": "no transcript recorded"},
+            {"backend": "sbx", "platform": "linux-aarch64", "claimed": false, "state": "unqualified", "reason": ""},
+            {"backend": "sbx", "platform": "linux-musl", "claimed": false, "state": "unqualified", "reason": ""},
+            {"backend": "sbx", "platform": "macos-arm64", "claimed": true, "state": "blocked", "reason": "no transcript recorded"},
+            {"backend": "sbx", "platform": "macos-x86_64", "claimed": false, "state": "unqualified", "reason": ""},
+            {"backend": "sbx", "platform": "windows-x64", "claimed": true, "state": "blocked", "reason": "no transcript recorded"},
+            {"backend": "sbx", "platform": "windows-arm64", "claimed": false, "state": "unqualified", "reason": ""}
+          ]
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": []
+  }
+}

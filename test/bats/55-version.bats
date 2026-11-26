@@ -28,3 +28,27 @@ load 'helper'
   )
   assert_output --partial "$want_ref"
 }
+
+# The banner's git line reports on acq's own clone, even when the caller's
+# environment exports a GIT_DIR naming another repository.
+@test "version: an inherited GIT_DIR does not change the reported clone" {
+  local other="$STUBDIR/other"
+  mkdir -p "$other"
+  (
+    cd "$other" && git init -q -b other-branch-marker &&
+      git config --local commit.gpgsign false &&
+      printf '[commit]\n gpgsign = true\n[gpg]\n program = nonexistent-fixture-signer\n' >"$STUBDIR/signing.gitconfig" &&
+      GIT_CONFIG_GLOBAL="$STUBDIR/signing.gitconfig" git -c user.email=t@example.gov -c user.name=t commit -q --allow-empty -m x
+  )
+  # Synthetic history is unsigned even under an inherited signing policy;
+  # this repository's real commits and signing settings are not changed.
+  run git -C "$other" cat-file commit HEAD
+  assert_success
+  refute_line --regexp '^gpgsig '
+  run env ACQ_BACKEND=sbx GIT_DIR="$other/.git" GIT_WORK_TREE="$other" "$ACQ" version
+  assert_success
+  refute_output --partial 'other-branch-marker'
+  if git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    assert_output --partial "@$(git -C "$REPO_ROOT" rev-parse --short HEAD)"
+  fi
+}

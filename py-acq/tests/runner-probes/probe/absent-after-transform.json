@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "id": "probe/absent-after-transform",
+  "oracle": "each assertion starts from the raw stream: an earlier transform does not hide a later absent check (expected to FAIL)",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{python}",
+      "-c",
+      "import sys; sys.stdout.buffer.write(b'/tmp/sentinel-9f2c\\n')"
+    ],
+    "env": {},
+    "unset": [],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": [
+      {
+        "mode": "exact",
+        "value": "<abspath>\n",
+        "normalize": [
+          "abspath"
+        ]
+      },
+      {
+        "mode": "absent",
+        "value": "sentinel-9f2c",
+        "normalize": []
+      }
+    ]
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": []
+  }
+}

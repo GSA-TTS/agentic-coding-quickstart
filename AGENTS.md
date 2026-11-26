@@ -13,6 +13,10 @@ review_cycle: "quarterly"
 
 # AGENTS.md — Agentic Coding Quickstart
 
+> **Fork history:** [`AGENTS.fork.md`](AGENTS.fork.md) preserves the development
+> rules for `mogul/agentic-coding-quickstart`. Those fork-only permissions do not
+> apply to this upstream integration branch or authorize upstream actions.
+
 > **System:** Agentic Coding Quickstart | **Environment:** Local development (build Low/Moderate-impact code) | **Agency:** GSA
 >
 > **Last Updated:** 2026-08-18 | **Reviewed By:** William Zujkowski
@@ -506,6 +510,16 @@ prose still avoid tracker numbers entirely, qualified or not); it governs the
 > Rationale: this is enforcement of the existing "docs-as-code" / self-contained
 > repository discipline. Doing this continuously means no later "de-reference" or
 > "re-qualify" cleanup pass is ever needed.
+
+### GitHub Relationship Metadata and PR Readability
+
+- Use GitHub’s structured relationship metadata as the source of truth:
+  - Link an implementation PR to its issue through GitHub’s issue-to-PR/development relationship, not only a prose reference.
+  - Add real sub-issue, blocking and dependency relationships between issues; prose explains the relationship but does not replace it.
+- Keep PR descriptions to **1,000 words or fewer**.
+- Lead PR bodies with the decision, change and merge guard. Put verification transcripts and rollback instructions in `<details>` blocks with descriptive `<summary>` text so they remain available without obscuring the human review path.
+
+Security impact and active merge blockers must stay visible, not hidden in collapsed details.
 
 ---
 

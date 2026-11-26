@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+"""Regenerate or check the Python acq's built-in kit bundle (py-acq/src/acq_py/kitbundle).
+
+The bundle is a byte-exact copy of the built-in kits in the Patterns control
+plane at the pinned ref (CONTROL_PLANE_REF in py-acq/src/acq_py/kits.py, which
+must equal PATTERNS_KIT_REF in acq.backends/common.sh). MANIFEST.json records
+the ref and, for every file, its git blob id, size and upstream mode.
+
+Regenerate after bumping the pin:
+
+    scripts/refresh-kitbundle                      # read the pinned tree through `gh api`
+    scripts/refresh-kitbundle --checkout DIR       # read it from a Patterns clone that has the pin
+
+then run the py-acq tests and commit the bundle with the pin bump.
+
+Check the manifest against the pinned tree (CI does this in the networked
+pre-commit job, which checks out Patterns at the pin):
+
+    scripts/refresh-kitbundle --check --checkout DIR
+
+The check fails when a manifest entry's blob id or mode differs from
+`git ls-tree -r <ref>`, or when the pinned tree has a bundled file the manifest
+lacks or lacks one it lists. That the bundled files match the manifest is
+checked offline by the py-acq tests (kitspec.verify_bundle).
+
+Per kit, the bundle holds spec.yaml, the files/ payload tree, provider-input.json
+and provider-input/ (provider facts), and LICENSE/NOTICE (git-ssh-sign is
+Apache-2.0). Docs, scripts and tests stay upstream. Only regular files are
+accepted; a symlink or submodule in a bundled path is an error.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import json
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+KITS_PY = REPO_ROOT / "py-acq" / "src" / "acq_py" / "kits.py"
+BUNDLE_DIR = REPO_ROOT / "py-acq" / "src" / "acq_py" / "kitbundle"
+REPOSITORY = "github.com/GSA-TTS/agentic-coding-patterns"
+GH_REPO = "GSA-TTS/agentic-coding-patterns"
+DIRECTORY = "integrations/isolation/acq-kits"
+# The four built-in kits in apply order (kits.BUILTIN_KIT_NAMES), then the opencode agent kit.
+KITS = ("zscaler-ca-certificate", "usai-provider", "agentic-coding-playbook", "git-ssh-sign", "opencode")
+TOP_FILES = ("spec.yaml", "provider-input.json", "LICENSE", "NOTICE")
+TREES = ("files/", "provider-input/")
+SHA_RE = re.compile(r"[0-9a-f]{40}")
+
+
+class RefreshError(Exception):
+    pass
+
+
+def pinned_ref() -> str:
+    match = re.search(r'^CONTROL_PLANE_REF = "([0-9a-f]{40})"', KITS_PY.read_text(encoding="utf-8"), re.MULTILINE)
+    if not match:
+        raise RefreshError(f"no CONTROL_PLANE_REF in {KITS_PY}")
+    return match.group(1)
+
+
+def wanted(inner: str) -> bool:
+    return inner in TOP_FILES or inner.startswith(TREES)
+
+
+def blob_id(data: bytes) -> str:
+    return hashlib.sha1(b"blob %d\0" % len(data) + data, usedforsecurity=False).hexdigest()
+
+
+def _run(argv: list[str]) -> bytes:
+    proc = subprocess.run(argv, capture_output=True, check=False)
+    if proc.returncode != 0:
+        raise RefreshError(f"{' '.join(argv[:4])} failed: {proc.stderr.decode('utf-8', 'replace').strip()}")
+    return proc.stdout
+
+
+def tree_from_checkout(checkout: Path, ref: str) -> list[tuple[str, str, str, str]]:
+    """``(mode, type, blob, path)`` for every entry under the kits directory at ``ref``."""
+    out = _run(["git", "-C", str(checkout), "ls-tree", "-r", "-z", ref, "--", DIRECTORY])
+    entries = []
+    for record in out.split(b"\0"):
+        if record:
+            meta, _, path = record.decode("utf-8").partition("\t")
+            mode, kind, sha = meta.split()
+            entries.append((mode, kind, sha, path))
+    return entries
+
+
+def tree_from_gh(ref: str) -> list[tuple[str, str, str, str]]:
+    doc = json.loads(_run(["gh", "api", f"repos/{GH_REPO}/git/trees/{ref}?recursive=1"]))
+    if doc.get("truncated"):
+        raise RefreshError("the GitHub tree listing is truncated; use --checkout")
+    return [(e["mode"], e["type"], e["sha"], e["path"]) for e in doc["tree"] if e["path"].startswith(DIRECTORY + "/")]
+
+
+def select(entries: list[tuple[str, str, str, str]]) -> dict[str, dict[str, tuple[str, str]]]:
+    """Bundled files per kit: ``{kit: {inner_path: (blob, mode)}}``."""
+    chosen: dict[str, dict[str, tuple[str, str]]] = {kit: {} for kit in KITS}
+    for mode, kind, sha, path in entries:
+        kit, _, inner = path[len(DIRECTORY) + 1:].partition("/")
+        if kit not in chosen or kind == "tree" or not wanted(inner):
+            continue
+        if kind != "blob" or mode not in ("100644", "100755"):
+            raise RefreshError(f"{kit}/{inner} is not a regular file upstream (mode {mode})")
+        chosen[kit][inner] = (sha, mode)
+    for kit, files in chosen.items():
+        if "spec.yaml" not in files:
+            raise RefreshError(f"{kit} has no spec.yaml at the pinned ref")
+    return chosen
+
+
+def read_blob(sha: str, checkout: Path | None) -> bytes:
+    if checkout is not None:
+        data = _run(["git", "-C", str(checkout), "cat-file", "blob", sha])
+    else:
+        doc = json.loads(_run(["gh", "api", f"repos/{GH_REPO}/git/blobs/{sha}"]))
+        data = base64.b64decode(doc["content"])
+    if blob_id(data) != sha:
+        raise RefreshError(f"blob {sha} does not hash to its id")
+    return data
+
+
+def manifest_doc(ref: str, chosen: dict[str, dict[str, tuple[str, str]]], sizes: dict[str, int]) -> dict:
+    kits = {}
+    for kit in KITS:
+        files = {}
+        for inner in sorted(chosen[kit]):
+            sha, mode = chosen[kit][inner]
+            files[inner] = {"git_blob": sha, "size": sizes[f"{kit}/{inner}"], "upstream_mode": mode}
+        kits[kit] = {"files": files}
+    return {"schema": 1, "repository": REPOSITORY, "ref": ref, "directory": DIRECTORY, "kits": kits}
+
+
+def regenerate(ref: str, checkout: Path | None, out: Path) -> None:
+    entries = tree_from_checkout(checkout, ref) if checkout is not None else tree_from_gh(ref)
+    chosen = select(entries)
+    staging = Path(tempfile.mkdtemp(prefix=".kitbundle-", dir=out.parent))
+    try:
+        sizes = {}
+        for kit, files in chosen.items():
+            for inner, (sha, _mode) in files.items():
+                data = read_blob(sha, checkout)
+                dest = staging / kit / inner
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(data)
+                sizes[f"{kit}/{inner}"] = len(data)
+        doc = manifest_doc(ref, chosen, sizes)
+        (staging / "MANIFEST.json").write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+        if out.exists():
+            shutil.rmtree(out)
+        staging.rename(out)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
+
+
+def check(ref: str, checkout: Path, bundle: Path) -> list[str]:
+    doc = json.loads((bundle / "MANIFEST.json").read_text(encoding="utf-8"))
+    problems = []
+    if doc.get("ref") != ref:
+        problems.append(f"MANIFEST.json is pinned to {doc.get('ref')!r}, not {ref}")
+    if (doc.get("repository"), doc.get("directory")) != (REPOSITORY, DIRECTORY):
+        problems.append("MANIFEST.json names a different repository or directory")
+    upstream = select(tree_from_checkout(checkout, ref))
+    listed = doc.get("kits") or {}
+    if list(listed) != list(KITS):
+        problems.append(f"MANIFEST.json lists kits {list(listed)}, expected {list(KITS)}")
+    for kit in KITS:
+        files = (listed.get(kit) or {}).get("files") or {}
+        for inner in sorted(set(files) | set(upstream[kit])):
+            if inner not in upstream[kit]:
+                problems.append(f"{kit}/{inner} is in MANIFEST.json but not in the pinned tree")
+            elif inner not in files:
+                problems.append(f"{kit}/{inner} is in the pinned tree but not in MANIFEST.json")
+            elif (files[inner].get("git_blob"), files[inner].get("upstream_mode")) != upstream[kit][inner]:
+                problems.append(f"{kit}/{inner} differs from the pinned tree")
+    return problems
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--checkout", type=Path, help="a Patterns clone containing the pinned commit")
+    parser.add_argument("--check", action="store_true", help="check MANIFEST.json against the pinned tree")
+    parser.add_argument("--ref", help="the ref to use (default: CONTROL_PLANE_REF)")
+    parser.add_argument("--bundle", type=Path, default=BUNDLE_DIR, help="the bundle directory")
+    args = parser.parse_args(argv)
+    try:
+        ref = args.ref or pinned_ref()
+        if not SHA_RE.fullmatch(ref):
+            raise RefreshError(f"not a full commit SHA: {ref!r}")
+        if args.check:
+            if args.checkout is None:
+                raise RefreshError("--check needs --checkout")
+            problems = check(ref, args.checkout, args.bundle)
+            for problem in problems:
+                print(f"refresh-kitbundle: {problem}", file=sys.stderr)
+            if problems:
+                return 1
+            print(f"refresh-kitbundle: MANIFEST.json matches {REPOSITORY} at {ref}")
+            return 0
+        regenerate(ref, args.checkout, args.bundle)
+        print(f"refresh-kitbundle: wrote {args.bundle} from {REPOSITORY} at {ref}")
+        return 0
+    except RefreshError as exc:
+        print(f"refresh-kitbundle: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

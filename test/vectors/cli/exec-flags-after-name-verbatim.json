@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "id": "cli/exec-flags-after-name-verbatim",
+  "oracle": "ADR-0038m §4: exec takes acq's global flags only before the sandbox name; flags after NAME (even --json and --backend) are part of the guest command, forwarded verbatim",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{acq}", "--backend", "msb", "exec", "box", "grep", "--backend", "sbx", "--json", "file"],
+    "env": {
+      "ACQ_MSB_BIN": "__stub__",
+      "ACQ_MSB_VERSION": "0.7.7",
+      "ACQ_MSB_INSTALLED": "1",
+      "ACQ_SBX_INSTALLED": "0",
+      "ACQ_MSB_STUB_CATALOG": "{\"box\":\"running\"}"
+    },
+    "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "MSB_HOME", "ACQ_IMAGE", "ACQ_MSB_IMAGE", "ACQ_MSB_STUB_CATALOG", "ACQ_MSB_READY_TIMEOUT", "ACQ_MSB_STUB_FAIL", "ACQ_MSB_STUB_EXEC_EXIT", "ACQ_MSB_STUB_COPY_EXIT", "ACQ_MSB_STUB_EXIT_CODE", "ACQ_MSB_STUB_PORTS"],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {"mode": "exact", "value": "[stub exec] grep --backend sbx --json file\n", "normalize": ["crlf"]},
+    "stderr": {"mode": "exact", "value": "", "normalize": []}
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+  }
+}

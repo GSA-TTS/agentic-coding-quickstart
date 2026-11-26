@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "id": "probe/stdin-bytes",
+  "oracle": "stdin is fed byte-exact, with no added newline",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{python}",
+      "-c",
+      "import sys; sys.stdout.write(repr(sys.stdin.buffer.read()))"
+    ],
+    "env": {},
+    "unset": [],
+    "stdin": "abc",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "exact",
+      "value": "b'abc'",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": []
+  }
+}
