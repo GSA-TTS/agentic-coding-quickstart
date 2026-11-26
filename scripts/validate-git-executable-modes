@@ -65,6 +65,7 @@ fi
 # and install.sh (documented as `sh install.sh`) intentionally do not belong here.
 EXPECTED='acq
 scripts/bats-shard
+scripts/build-uninstaller
 scripts/diagnose-tls-intercept
 scripts/fetch-bash32-oci.py
 scripts/fix-exec-bits
