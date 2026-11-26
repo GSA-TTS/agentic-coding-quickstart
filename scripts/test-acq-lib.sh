@@ -298,6 +298,7 @@ case "${1:-}" in
   create)
     [ "${STUB_SBX_CREATE_FAIL:-0}" = "1" ] && exit 1
     : >"$STUBDIR/.created"; exit 0 ;;
+  snapshot|restore) exit 64 ;;
   exec)
     snippet=""; prev=""
     for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
@@ -440,13 +441,26 @@ case "$_msb_sub" in
   inspect)
     # `msb inspect <name> --format json` — emit a create-time published-ports
     # JSON fixture if the test planted one, else nothing (models an absent field
-    # / no ports so _acq_msb_ports_from_inspect must degrade gracefully).
+    # / no ports so _acq_msb_ports_from_inspect must degrade gracefully). When no
+    # fixture exists, require the sandbox to exist like real `msb inspect`.
     # STUB_MSB_INSPECT_FAIL_TIMES=N fails the first N inspects (with a stderr
     # line) and then succeeds, modelling a transient inspect failure.
     _inspect_fails=$(cat "$STUBDIR/.msb_inspect_fails" 2>/dev/null || echo 0)
     if [ "$_inspect_fails" -lt "${STUB_MSB_INSPECT_FAIL_TIMES:-0}" ]; then
       echo $((_inspect_fails + 1)) >"$STUBDIR/.msb_inspect_fails"
       echo "error: stub inspect failure" >&2
+      exit 1
+    fi
+    # A bare `msb inspect NAME` is acq's existence probe (acq_backend_exists falls
+    # back to it): like the real CLI it succeeds only for a sandbox that exists, so
+    # a mode fixture meant for `--format json` must not make every name "exist".
+    _want_json=0
+    for a in "$@"; do [ "$a" = "--format" ] && _want_json=1; done
+    if [ "$_want_json" = "0" ] && [ -n "${STUB_MSB_INSPECT_MODE:-}" ]; then
+      if [ -f "$STUBDIR/.msb_inspect_json" ]; then cat "$STUBDIR/.msb_inspect_json"; exit 0; fi
+      if [ -f "$STUBDIR/.msb_sandbox_list" ] && grep -Fxq -- "${2:-}" "$STUBDIR/.msb_sandbox_list"; then
+        exit 0
+      fi
       exit 1
     fi
     # STUB_MSB_INSPECT_MODE serves the real observed `msb inspect --format json` shape
@@ -498,7 +512,14 @@ print(json.dumps(d))
 PYSTUB
       exit 0
     fi
-    [ -f "$STUBDIR/.msb_inspect_json" ] && cat "$STUBDIR/.msb_inspect_json" ;;
+    if [ -f "$STUBDIR/.msb_inspect_json" ]; then
+      cat "$STUBDIR/.msb_inspect_json"
+      exit 0
+    fi
+    if [ -f "$STUBDIR/.msb_sandbox_list" ] && grep -Fxq -- "${2:-}" "$STUBDIR/.msb_sandbox_list"; then
+      exit 0
+    fi
+    exit 1 ;;
   list|ls)
     [ "${STUB_MSB_LIST_FAIL:-0}" = "1" ] && exit 1
     # `msb list --running -q` (running-state probe, ADR-0017 stopped detection):
@@ -513,6 +534,7 @@ PYSTUB
       [ -f "$STUBDIR/.msb_sandbox_list" ] && cat "$STUBDIR/.msb_sandbox_list"
     fi ;;
   exec)
+    [ "${STUB_MSB_EXEC_FAIL:-0}" = "1" ] && exit 1
     snippet=""; prev=""
     for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
     # `opencode --version` postinstall functionality probe (bare argv). Default
@@ -673,6 +695,27 @@ PYSTUB
     # time so a test can assert acq_backend_start exported them before starting.
     { [ -n "${USAI_API_KEY:-}" ] && printf 'USAI_API_KEY=present\n' >>"$CALLS"; } || true
     { [ -n "${GITHUB_TOKEN:-}" ] && printf 'GITHUB_TOKEN=present\n' >>"$CALLS"; } || true
+    : ;;
+  snapshot)
+    _out=""
+    while [ "$#" -gt 0 ]; do
+      [ "$1" = "-o" ] && { shift; _out="${1:-}"; }
+      shift || true
+    done
+    [ -n "$_out" ] && : >"$_out"
+    { [ -n "${USAI_API_KEY:-}" ] && printf 'USAI_API_KEY=present\n' >>"$CALLS"; } || true
+    { [ -n "${GITHUB_TOKEN:-}" ] && printf 'GITHUB_TOKEN=present\n' >>"$CALLS"; } || true
+    : ;;
+  restore)
+    { [ -n "${USAI_API_KEY:-}" ] && printf 'USAI_API_KEY=present\n' >>"$CALLS"; } || true
+    { [ -n "${GITHUB_TOKEN:-}" ] && printf 'GITHUB_TOKEN=present\n' >>"$CALLS"; } || true
+    # Record which archive the backend was handed, and whether the lifecycle lock
+    # was held while it ran (STUB_MSB_RESTORE_LOCK_DIR names the lock directory).
+    [ -f "${2:-}" ] && printf 'restore-archive=%s\n' "$(head -c 64 "$2")" >>"$CALLS"
+    { [ -n "${STUB_MSB_RESTORE_LOCK_DIR:-}" ] && [ -d "$STUB_MSB_RESTORE_LOCK_DIR" ] \
+        && printf 'restore-lock-held\n' >>"$CALLS"; } || true
+    # STUB_MSB_RESTORE_FAIL=N models the backend rejecting the archive with rc N.
+    [ -z "${STUB_MSB_RESTORE_FAIL:-}" ] || exit "$STUB_MSB_RESTORE_FAIL"
     : ;;
   remove|rm)
     # STUB_MSB_RM_FAIL=1 models a failed `msb remove` (e.g. sandbox not found)

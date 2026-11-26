@@ -32,9 +32,10 @@ load 'helper'
   load_acq
   ACQ_CLI_KITS=(); ACQ_EXTRA_KITS=""
   acq_cli_kits_write msb emptybox
-  ACQ_CLI_KITS=("/stale/leftover")
+  ACQ_CLI_KITS=("/stale/leftover"); ACQ_EXTRA_KITS="/stale/extra"
   acq_cli_kits_load msb emptybox
   assert_equal "${#ACQ_CLI_KITS[@]}" "0"
+  assert_equal "$ACQ_EXTRA_KITS" ""
 }
 
 @test "cli-kits: no record at all is a no-op (in-memory set untouched)" {

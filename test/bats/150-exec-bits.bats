@@ -40,6 +40,7 @@ scripts/fix-exec-bits
 scripts/install-provider-input-wheelhouse
 scripts/probe-msb-node-startup
 scripts/probe-msb-posthoc-ports
+scripts/probe-msb-snapshot-restore
 scripts/probe-msb-startup
 scripts/rotate-apikey
 scripts/run-shellcheck
@@ -57,6 +58,8 @@ scripts/verify-git-https-secret-msb
 scripts/verify-host-authority-live
 scripts/verify-image-override
 scripts/verify-issue-320
+scripts/verify-msb-host-config-mount
+scripts/verify-native-snapshot-restore
 scripts/verify-net-default-egress
 scripts/verify-ports-live'
 
@@ -203,7 +206,7 @@ _make_index_fixture() {
   chmod 644 acq
   run bash "$REPO_ROOT/$INDEX_VALIDATOR_REL" --root "$REPO"
   assert_success
-  assert_output --partial 'OK - 27 intended executables are stage-0 100755'
+  assert_output --partial 'OK - 30 intended executables are stage-0 100755'
 }
 
 @test "exec-bits: Git-index validator rejects a staged 100644 entry point" {

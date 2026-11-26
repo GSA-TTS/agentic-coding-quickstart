@@ -107,7 +107,10 @@ kits, validates your USAi key, and attaches the agent.
 | `./acq create opencode /proj` | Create detached (no attach) |
 | `./acq ls` | List your sandboxes |
 | `./acq stop NAME` | Stop a sandbox |
-| `./acq rm NAME` | Remove a sandbox |
+| `./acq snapshot NAME [OUT]` | Save durable disk state for a sandbox (msb only) |
+| `./acq restore NAME [SNAPSHOT]` | Restore a disk-state snapshot as a cold boot, newest for NAME when omitted (msb only) |
+| `./acq recreate NAME [OUT]` | Save disk state, remove, then cold-boot restore a sandbox (msb only) |
+| `./acq rm NAME` | Remove a sandbox (`--snapshot` snapshots first on msb) |
 | `./acq shell NAME` | Open an interactive shell in a sandbox |
 | `./acq exec NAME -- CMD` | Run a command inside a sandbox |
 | `./acq cp SRC DST` | Copy files in/out (NAME:path syntax) |
