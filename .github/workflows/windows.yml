@@ -55,6 +55,10 @@ concurrency:
 
 permissions: {}
 
+env:
+  # Must match build-assets.yml: product tests execute at the shipped version.
+  ACQ_BUILD_RUNTIME_VERSION: 3.14.10
+
 jobs:
   changes:
     name: Determine Windows relevance
@@ -176,7 +180,7 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: '3.12'
+          python-version: ${{ env.ACQ_BUILD_RUNTIME_VERSION }}
 
       # Git Bash scripts (scripts/stage-windows-runtime among them) call python3.
       # A Windows Python install has no python3.exe, and PATH can reach the
@@ -194,7 +198,7 @@ jobs:
         run: |
           set -euo pipefail
           command -v python3
-          python3 -c 'import sys; assert sys.version_info[:2] == (3, 12), sys.version'
+          python3 -c 'import sys; assert sys.version_info[:3] == (3, 14, 10), sys.version'
 
       # Only the hash-locked test tools (ADR-0049m): pytest, with colorama for
       # win32, from wheels only. acq-py itself is not installed: pytest imports it
@@ -216,12 +220,13 @@ jobs:
       # The launcher tests also run acq.ps1 under PowerShell 7 (the pwsh this
       # step runs in); ACQ_TEST_REQUIRE_PWSH makes them fail rather than skip if
       # the runner image ever stops providing it.
-      - name: pytest (py-acq, Python 3.12)
+      - name: pytest (py-acq, Python 3.14.10)
         env:
           ACQ_TEST_REQUIRE_PWSH: '1'
         run: |
           Write-Host "PowerShell $($PSVersionTable.PSVersion) at $((Get-Command pwsh).Source)"
-          & (Join-Path $env:RUNNER_TEMP 'acq-test-tools\Scripts\python.exe') -m pytest py-acq/tests -q
+          & (Join-Path $env:RUNNER_TEMP 'acq-test-tools\Scripts\python.exe') -c "import sys; assert sys.version_info[:3] == (3, 14, 10), sys.version"
+          & (Join-Path $env:RUNNER_TEMP 'acq-test-tools\Scripts\python.exe') -m pytest py-acq/tests -q -m "$(python scripts/pytest_platform_selection.py windows-native)"
           if ($LASTEXITCODE -ne 0) { throw "pytest exited $LASTEXITCODE" }
 
       # acq.cmd runs acq.ps1 under Windows PowerShell 5.1, as users run it; acq.ps1
@@ -422,7 +427,7 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: '3.12'
+          python-version: ${{ env.ACQ_BUILD_RUNTIME_VERSION }}
 
       # The stub library and the Bash acq call python3; see the windows job.
       - name: Provide python3
