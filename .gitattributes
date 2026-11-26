@@ -15,6 +15,7 @@ acq text eol=lf
 acq-python text eol=lf
 # Extensionless shell scripts under scripts/ (the others there are Python).
 scripts/bats-shard text eol=lf
+scripts/build-uninstaller text eol=lf
 scripts/diagnose-host-egress-diff text eol=lf
 scripts/diagnose-tls-intercept text eol=lf
 scripts/fix-exec-bits text eol=lf
@@ -25,6 +26,7 @@ scripts/probe-msb-posthoc-ports text eol=lf
 scripts/qualify-msb-ro-mount text eol=lf
 scripts/rotate-apikey text eol=lf
 scripts/run-shellcheck text eol=lf
+scripts/run-uninstaller text eol=lf
 scripts/refresh-kitbundle text eol=lf
 scripts/run-vectors text eol=lf
 scripts/setup-provider-input-validator text eol=lf

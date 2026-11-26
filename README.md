@@ -371,6 +371,12 @@ symlinks these into `~/.agents/skills` so your agent discovers them automaticall
 
 ---
 
+## Removing ACQ
+
+To remove ACQ, Microsandbox, sandboxes, and saved credentials, use
+`acq uninstall`. If ACQ is broken, the standalone Mac uninstaller works without
+it. See [the removal guide](docs/howto/uninstall.md) before deleting sandbox work.
+
 ## Getting Help
 
 1. **Troubleshooting:** [docs/KNOWN_FAILURE_MODES.md](docs/KNOWN_FAILURE_MODES.md)

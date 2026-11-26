@@ -810,6 +810,9 @@ cp "$tmpdir/$PROVENANCE_NAME" "$staging/$PROVENANCE_NAME"
 
 mkdir -p "$INSTALL_DIR"
 marker="$INSTALL_DIR/$OWNED_MARKER"
+if [ -e "$INSTALL_DIR/.acq-uninstall-pending" ] || [ -L "$INSTALL_DIR/.acq-uninstall-pending" ]; then
+  die "an unfinished uninstall exists in $INSTALL_DIR; rerun uninstall.command before reinstalling"
+fi
 was_marked=0
 [ -f "$marker" ] && was_marked=1
 

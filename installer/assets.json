@@ -12,6 +12,7 @@
   },
   "sha256sums": "SHA256SUMS",
   "provenance": "provenance.json",
+  "recovery": ["uninstall.command"],
   "platforms": {
     "windows-x86_64": {
       "archive": "acq-windows-x64.zip",

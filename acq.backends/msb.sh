@@ -161,32 +161,8 @@ _acq_msb_cli() {
 #      emitter now uses `allow@dns` directly (see ADR-0018), which requires 0.6.9.
 # Fail closed on the floor instead (acq_backend_prepare) so the failure mode is a
 # clear version message, not a raw clap error or DNS parse failure mid-create.
-MIN_MSB_VERSION="0.6.9"
-
-# msb 0.7.0 through 0.7.2 migrate 0.6.x sandbox state one-way, into a form the
-# 0.6.x line cannot read (`database schema is newer than this msb binary`).
-# Refuse exactly that range: 0.7.3 carries the upstream cross-version
-# compatibility fix and is accepted.
-MSB_BLOCKED_VERSION_MIN="0.7.0"
-MSB_BLOCKED_VERSION_MAX="0.7.2"
-
-# Version acq's own tooling installs by default: latest release known to carry
-# the upstream 0.7.3+ cross-version compatibility fix. See ADR-0032.
-MSB_PINNED_VERSION="0.7.7"
-
-# Rollback target for catalogs already migrated by blocked 0.7.0-0.7.2 releases.
-# This stays on the newest 0.6.x release because `msb self downgrade` is a state
-# rollback to the last catalog format the 0.6.x line understands, not an install
-# default.
-MSB_ROLLBACK_VERSION="0.6.18"
-
-# First release with the upstream fix. Moving FORWARD to this is the preferred
-# recovery for a host that already ran a blocked version: the migration sets are
-# additive, so this line reads an already-migrated catalog with no rollback and no
-# state rewrite. Rolling back needs `msb self downgrade` run BY the blocked binary
-# (it owns the rollback metadata), and can be refused outright when grouped or
-# duplicate snapshots exist. See ADR-0032.
-MSB_FIXED_VERSION="0.7.3"
+# shellcheck source=acq.backends/msb-version-policy.sh
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/msb-version-policy.sh"
 
 # Lowest msb version on which acq relies on a `:ro` host-config mount for trusted
 # `readonly: true` kit code (ADR-0035 Mechanism 2). 0.7.7 is the version the mount
@@ -768,34 +744,8 @@ _ACQ_MSB_PORT_SEQ_FILE="${ACQ_MSB_PORTS_DIR:+$ACQ_MSB_PORTS_DIR/.port-seq}"
 _ACQ_MSB_PORT_BASE="${_ACQ_MSB_PORT_BASE:-$(( ($$ + ${RANDOM:-0} + $(date +%s 2>/dev/null || echo 0)) % 40000 ))}"
 
 # ---------------------------------------------------------------------------
-# Version comparison (shared shape with sbx.sh; kept local to avoid coupling)
+# Version parsing (comparison and constants live in msb-version-policy.sh)
 # ---------------------------------------------------------------------------
-
-_acq_msb_version_ge() {
-  local a="$1" b="$2" i a_part b_part
-  local -a a_arr b_arr
-  IFS='.' read -r -a a_arr <<EOF
-$a
-EOF
-  IFS='.' read -r -a b_arr <<EOF
-$b
-EOF
-  for i in 0 1 2; do
-    a_part=${a_arr[i]:-0}; b_part=${b_arr[i]:-0}
-    a_part=${a_part%%[!0-9]*}; b_part=${b_part%%[!0-9]*}
-    a_part=${a_part:-0}; b_part=${b_part:-0}
-    if [ "$a_part" -gt "$b_part" ]; then echo 0; return; fi
-    if [ "$a_part" -lt "$b_part" ]; then echo 1; return; fi
-  done
-  echo 0
-}
-
-_acq_msb_version_blocked() {
-  local v="$1"
-  [ "$(_acq_msb_version_ge "$v" "$MSB_BLOCKED_VERSION_MIN")" -eq 0 ] || return 1
-  [ "$(_acq_msb_version_ge "$MSB_BLOCKED_VERSION_MAX" "$v")" -eq 0 ] || return 1
-  return 0
-}
 
 # Parse `msb --version` → bare X.Y.Z. Only final releases are accepted:
 # prerelease/build-suffixed output such as 0.7.3-rc1 must fail closed rather

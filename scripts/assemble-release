@@ -7,6 +7,7 @@ python3 -I - "$repo_root" "$@" <<'PY'
 import json
 import os
 from pathlib import Path
+import runpy
 import shutil
 import subprocess
 import sys
@@ -39,6 +40,8 @@ with tempfile.TemporaryDirectory(prefix='.assemble-', dir=out) as tmp:
         for name in [*spec['components']['launchers'], 'LICENSE', 'README.md']:
             shutil.copy2(repo / name, tree / name)
         shutil.copytree(repo / 'acq.backends', tree / 'acq.backends')
+        generator = runpy.run_path(str(repo / 'py-acq/recovery_build.py'))['generate_recovery']
+        generator(repo / 'py-acq', tree / 'py-acq/src/acq_py/uninstall.command')
         shutil.copytree(wheels, tree / 'wheelhouse')
         (tree / 'py-acq/src/acq_py/_build_info.py').write_text(
             f'# Generated release identity (ADR-0042m).\nACQ_VERSION = {version!r}\nSOURCE_REVISION = {revision!r}\n',
