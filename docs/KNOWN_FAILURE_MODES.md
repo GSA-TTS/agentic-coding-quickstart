@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-11-05"
+last_updated: "2026-11-17"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -56,6 +56,34 @@ effective memory, CPU and PID enforcement alongside network/source/credential
 separation and cleanup. Kit installation and rootless storage readiness alone
 are insufficient evidence. No host engine socket or privileged-host workaround
 is required or authorized by this guidance.
+
+## MSB still fails authentication after saving a new USAi key
+
+`acq secret ls` shows the host store, not a sandbox's active binding. Earlier
+versions hid rejected `msb modify --secret` calls and returned success after
+saving the key. MSB may require a restart to apply a secret change. Rotation
+through `acq usai-rotate-api-key` uses the same application path.
+
+Check variable presence without printing its value or expanding it on the host:
+
+```bash
+acq exec SANDBOX -- sh -c \
+  'if [ -n "${USAI_API_KEY:-}" ]; then echo present; else echo missing; fi'
+```
+
+Presence alone does not prove the key is valid or the binding is active. For a
+failed application, explicitly permit a named sandbox to restart:
+
+```bash
+acq --backend msb secret set SANDBOX usai --restart
+```
+
+Enter the new key at the prompt. This supplies other acq-managed credentials for
+the restart and lets MSB restart if needed; running processes may be interrupted,
+but the sandbox is not recreated. Global `--restart` is refused. If MSB still
+rejects the change, acq returns failure with the target's name; check installed
+MSB version and non-secret binding metadata rather than dumping credentials.
+See [ADR-0043](adr/0043-explicit-msb-secret-update-recovery.md).
 
 ## Provider-input validator dependencies are missing
 
