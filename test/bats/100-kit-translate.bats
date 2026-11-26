@@ -286,7 +286,14 @@ GITSTUB
   printf 'name: demo\n' >"$src/kits/demo/spec.yaml"
   git -C "$src" init -q
   git -C "$src" add kits
-  git -C "$src" -c user.name=t -c user.email=t@example.test commit -q -m kit
+  git -C "$src" config --local commit.gpgsign false
+  printf '[commit]\n gpgsign = true\n[gpg]\n program = nonexistent-fixture-signer\n' >"$STUBDIR/signing.gitconfig"
+  # Only synthetic fixture history opts out; inherited signing policy cannot
+  # invoke a signer outside the confined fixture or affect the real repository.
+  GIT_CONFIG_GLOBAL="$STUBDIR/signing.gitconfig" git -C "$src" -c user.name=t -c user.email=t@example.test commit -q -m kit
+  run git -C "$src" cat-file commit HEAD
+  assert_success
+  refute_line --regexp '^gpgsig '
   sha=$(git -C "$src" rev-parse HEAD)
   printf '#!/bin/sh\necho ran >>"%s"\n' "$marker" >"$hooks/post-checkout"
   chmod +x "$hooks/post-checkout"

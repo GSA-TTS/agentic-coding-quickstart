@@ -111,6 +111,7 @@ jobs:
             'scripts/setup-provider-input-validator' \
             'scripts/test-acq-lib.sh' \
             'scripts/refresh-kitbundle' \
+            'scripts/pytest_shard.py' \
             'qualification' \
             'docs/qualification-ledger.json' \
             'test/bats/06-windows-install.bats' \
