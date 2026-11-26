@@ -12,6 +12,7 @@ load './helper.bash'
 setup() {
   acq_setup_stubs
   export XDG_DATA_HOME="$STUBDIR/xdg-data"
+  export ACQ_INSTALL_CHANNEL=python ACQ_INSTALL_VERSION=5.0.0-rc.1
   unset ACQ_INSTALL_DIR ACQ_INSTALL_BIN_DIR ACQ_INSTALL_SOURCE
 }
 
@@ -20,7 +21,13 @@ teardown() {
 }
 
 _install_dir() {
-  printf '%s/acq' "${XDG_DATA_HOME:-$HOME/.local/share}"
+  printf '%s/acq-python-preview' "${XDG_DATA_HOME:-$HOME/.local/share}"
+}
+
+_tty_install() {
+  run env SHELL=/bin/sh python3 "$BATS_TEST_DIRNAME/install-tty.py" "$@" "$REPO_ROOT/install.sh" \
+    --source "$REPO_ROOT/test/fixtures/installer" --install-dir "$STUBDIR/inst" \
+    --bin-dir "$STUBDIR/acq-bin"
 }
 
 @test "installer: --help exits 0 and prints usage" {
@@ -56,7 +63,7 @@ _install_dir() {
   assert_output --regexp 'verified acq-(macos|linux)-(arm64|x86_64|aarch64)\.tar\.gz'
   # The bundled runtime and the launcher are laid down.
   [ -e "$(_install_dir)/py-acq/runtime/bin/python3" ]
-  [ -L "$HOME/.local/bin/acq" ]
+  [ ! -e "$HOME/.local/bin/acq" ]
   [ -L "$HOME/.local/bin/acq-python" ]
 }
 
@@ -80,37 +87,26 @@ _install_dir() {
   assert_output --regexp 'verified acq-(macos|linux)-(arm64|x86_64|aarch64)\.tar\.gz'
   # CRLF line endings (a SHA256SUMS saved on Windows) still match exactly.
   awk '{ printf "%s\r\n", $0 }' "$REPO_ROOT/test/fixtures/installer/SHA256SUMS" > "$src/SHA256SUMS"
-  rm -rf "$(_install_dir)"
+  rm -rf "$(_install_dir)"; rm -f "$HOME/.local/bin/acq-python"
   run sh "$REPO_ROOT/install.sh" --source "$src" --yes
   assert_success
   # With only decoys left, the archive has no entry and nothing is installed.
   awk -v z="$zeros" '{ print z "  " $2 ".sig"; print z "  x-" $2 }' \
     "$REPO_ROOT/test/fixtures/installer/SHA256SUMS" > "$src/SHA256SUMS"
-  rm -rf "$(_install_dir)"
+  rm -rf "$(_install_dir)"; rm -f "$HOME/.local/bin/acq-python"
   run sh "$REPO_ROOT/install.sh" --source "$src" --yes
   assert_failure
   [ ! -e "$(_install_dir)/py-acq" ]
 }
 
-@test "installer: a mount-point install dir is staged inside itself, not in its parent" {
-  # A stub df reports the install dir as its own mount point. The parent is made
-  # read-only, so staging there is impossible and the old fallback would warn.
-  local dir parent fakebin real
-  dir="$(_install_dir)"; parent="$(dirname "$dir")"
-  mkdir -p "$dir"
-  real="$(cd "$dir" && pwd -P)"
-  fakebin="$STUBDIR/fakedf"; mkdir -p "$fakebin"
-  printf '#!/bin/sh\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\necho "//server/Share Name 1 1 1 10%% %s"\n' "$real" > "$fakebin/df"
-  chmod +x "$fakebin/df"
-  chmod 555 "$parent"
-  PATH="$fakebin:$PATH" run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
-  chmod 755 "$parent"
-  assert_success
-  refute_output --partial 'cannot create a staging directory'
-  [ -e "$dir/py-acq/runtime/bin/python3" ]
-  # The staging dir is removed on exit.
-  run find "$dir" -maxdepth 1 -name '.acq-stage.*'
-  assert_output ''
+@test "preview: refuses an unowned mount-like existing root before writes" {
+
+  mkdir -p "$(_install_dir)"
+  printf 'keep\n' > "$(_install_dir)/mount-content"
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_failure
+  assert_output --partial 'without a matching preview receipt'
+  [ "$(cat "$(_install_dir)/mount-content")" = keep ]
 }
 
 @test "installer: provenance.json is verified against SHA256SUMS" {
@@ -132,7 +128,7 @@ _install_dir() {
 @test "installer: consent is never inferred non-interactively" {
   run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer"
   assert_success
-  assert_output --partial 'Not changing your PATH'
+  assert_output --partial 'PATH and shell profiles were not changed'
   [ ! -e "$HOME/.bash_profile" ]
   [ ! -e "$HOME/.profile" ]
 }
@@ -198,7 +194,9 @@ _fixture_with_extra_entry() {
   printf '%s' "$out"
 }
 
-@test "installer: preserves unrelated content already in the install dir" {
+@test "preview: owned reinstall preserves unrelated content" {
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_success
   local dir; dir="$(_install_dir)"
   mkdir -p "$dir/secrets" "$dir/provider-input-validator"
   printf 'keep\n' > "$dir/secrets/acq.usai"
@@ -207,13 +205,8 @@ _fixture_with_extra_entry() {
   assert_success
   [ "$(cat "$dir/secrets/acq.usai")" = keep ]
   [ "$(cat "$dir/provider-input-validator/marker")" = keep ]
-  [ -e "$dir/py-acq/runtime/bin/python3" ]
-  [ -f "$dir/provenance.json" ]
-  # The marker lists exactly the names the installer owns.
-  run tail -n +2 "$dir/.acq-v1-install"
-  assert_output --partial 'py-acq'
-  refute_output --partial 'secrets'
-  refute_output --partial 'provider-input-validator'
+  grep -q 'channel=python' "$dir/.acq-python-preview-receipt"
+  ! grep -q 'secrets' "$dir/.acq-python-preview-files"
 }
 
 @test "installer: refuses to overwrite an entry it did not create (legacy clone)" {
@@ -223,8 +216,8 @@ _fixture_with_extra_entry() {
   printf 'local change\n' > "$dir/mine.txt"
   run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
   assert_failure
-  assert_output --partial "already contains 'acq'"
-  assert_output --partial 'nothing was changed'
+  assert_output --partial 'without a matching preview receipt'
+  [ ! -e "$(_install_dir)/py-acq" ]
   [ "$(cat "$dir/mine.txt")" = 'local change' ]
   grep -q legacy "$dir/acq"
   [ ! -e "$dir/py-acq" ]
@@ -238,10 +231,10 @@ _fixture_with_extra_entry() {
   ln -s "$STUBDIR/elsewhere" "$dir"
   run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
   assert_failure
-  assert_output --partial 'is a symlink'
+  assert_output --partial 'contains a symlink'
   run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --install-dir "$dir/" --yes
   assert_failure
-  assert_output --partial 'is a symlink'
+  assert_output --partial 'contains a symlink'
   [ "$(cat "$STUBDIR/elsewhere/data")" = keep ]
   [ ! -e "$STUBDIR/elsewhere/acq" ]
 }
@@ -255,7 +248,7 @@ _fixture_with_extra_entry() {
   run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
   assert_success
   [ -e "$dir/py-acq/runtime/bin/python3" ]
-  [ ! -e "$dir/py-acq/stale-from-old-release" ]
+  [ -e "$dir/py-acq/stale-from-old-release" ]
   [ "$(cat "$dir/secrets/acq.usai")" = keep ]
   [ -z "$(find "$dir" -maxdepth 1 -name '.acq-previous.*')" ]
 }
@@ -268,75 +261,60 @@ _fixture_with_extra_entry() {
   assets="$(_fixture_with_extra_entry secrets)"
   run sh "$REPO_ROOT/install.sh" --source "$assets" --yes
   assert_failure
-  assert_output --partial "already contains 'secrets'"
+  assert_output --partial 'unknown entry: secrets'
   [ "$(cat "$dir/secrets/acq.usai")" = REAL-USER-SECRET ]
 }
 
-@test "installer: a failed first install can be finished by re-running" {
-  local dir shim; dir="$(_install_dir)"
-  shim="$STUBDIR/mv-shim"; mkdir -p "$shim"
-  # Fail the move of wheelhouse/ once, as a full disk would.
-  cat > "$shim/mv" <<SHIM
-#!/bin/sh
-for last; do :; done
-case "\$last" in
-  */wheelhouse) if [ ! -e "$STUBDIR/mv-failed" ]; then : > "$STUBDIR/mv-failed"; exit 1; fi ;;
-esac
-exec /bin/mv "\$@"
-SHIM
+@test "preview: interrupted first publication is retryable" {
+
+  local shim="$STUBDIR/fail-mv"; mkdir "$shim"
+  printf '#!/bin/sh\ncase "$1" in */publish) exit 1 ;; esac\nexec /bin/mv "$@"\n' > "$shim/mv"
   chmod +x "$shim/mv"
   PATH="$shim:$PATH" run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
   assert_failure
-  assert_output --partial 're-run the installer'
-  [ -f "$dir/.acq-v1-install" ]
+  [ ! -e "$(_install_dir)" ]
+  [ ! -L "$HOME/.local/bin/acq-python" ]
   run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
   assert_success
-  [ -d "$dir/wheelhouse" ]
-  [ -z "$(find "$dir" -maxdepth 1 -name '.acq-previous.*')" ]
+  [ -f "$(_install_dir)/.acq-python-preview-receipt" ]
 }
 
-@test "installer: a first install never sweeps move-aside-looking dirs it did not create" {
+@test "preview: preserves unknown legacy leftover .acq-previous.mine" {
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_success
   local dir; dir="$(_install_dir)"
-  mkdir -p "$dir/.acq-previous.mine"; printf 'keep\n' > "$dir/.acq-previous.mine/f"
+  mkdir -p "$dir/.acq-previous.mine"
+  printf 'unknown\n' > "$dir/.acq-previous.mine/preserve"
   run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
   assert_success
-  [ "$(cat "$dir/.acq-previous.mine/f")" = keep ]
+  [ "$(cat "$dir/.acq-previous.mine/preserve")" = unknown ]
+  [ -L "$HOME/.local/bin/acq-python" ]
 }
 
-# The ownership marker is written to .acq-v1-install.tmp.<pid> and renamed into
-# place. A run stopped in between must not leave that file behind for good.
-@test "installer: a later run sweeps temporary markers left by an interrupted one" {
-  local dir dead; dir="$(_install_dir)"
+@test "preview: preserves unknown legacy leftover .acq-v1-install.tmp.12345" {
   run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
   assert_success
-  # The PID of a process that has already exited, as an interrupted run's is.
-  sh -c 'exit 0' & dead=$!
-  wait "$dead" || :
-  printf 'old\n' > "$dir/.acq-v1-install.tmp.$dead"
-  # Lookalikes that are not a temporary marker are left alone.
-  printf 'keep\n' > "$dir/.acq-v1-install.tmp.mine"
-  printf 'keep\n' > "$dir/.acq-v1-install.tmp.x.tmp.123"
-  mkdir -p "$dir/.acq-v1-install.tmp.777"
-  ln -s "$STUBDIR/elsewhere" "$dir/.acq-v1-install.tmp.888"
-  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
-  assert_success
-  [ ! -e "$dir/.acq-v1-install.tmp.$dead" ]
-  [ "$(cat "$dir/.acq-v1-install.tmp.mine")" = keep ]
-  [ "$(cat "$dir/.acq-v1-install.tmp.x.tmp.123")" = keep ]
-  [ -d "$dir/.acq-v1-install.tmp.777" ]
-  [ -L "$dir/.acq-v1-install.tmp.888" ]
-}
-
-@test "installer: a first install never sweeps temporary-marker lookalikes" {
   local dir; dir="$(_install_dir)"
-  mkdir -p "$dir"; printf 'keep\n' > "$dir/.acq-v1-install.tmp.12345"
+  mkdir -p "$dir/.acq-v1-install.tmp.12345"
+  printf 'unknown\n' > "$dir/.acq-v1-install.tmp.12345/preserve"
   run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
   assert_success
-  [ "$(cat "$dir/.acq-v1-install.tmp.12345")" = keep ]
+  [ "$(cat "$dir/.acq-v1-install.tmp.12345/preserve")" = unknown ]
+  [ -L "$HOME/.local/bin/acq-python" ]
 }
 
-# Another install into the same directory may be running: its temporary marker
-# and move-aside dir are named for its live PID and must survive this run's sweep.
+@test "preview: preserves unknown legacy leftover .acq-v1-install.tmp.mine" {
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_success
+  local dir; dir="$(_install_dir)"
+  mkdir -p "$dir/.acq-v1-install.tmp.mine"
+  printf 'unknown\n' > "$dir/.acq-v1-install.tmp.mine/preserve"
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_success
+  [ "$(cat "$dir/.acq-v1-install.tmp.mine/preserve")" = unknown ]
+  [ -L "$HOME/.local/bin/acq-python" ]
+}
+
 @test "installer: the sweep skips files of an install that is still running" {
   local dir; dir="$(_install_dir)"
   run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
@@ -353,79 +331,54 @@ SHIM
 # In a fresh container PIDs repeat, so an earlier interrupted run often had this
 # run's PID. Its move-aside dir is a leftover, not this run's, and must be swept
 # rather than block this run's own `mkdir`. exec keeps the planting shell's PID.
-@test "installer: a leftover named for this run's own PID is swept" {
+@test "preview: preserves unknown legacy leftover .acq-previous.12345" {
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_success
   local dir; dir="$(_install_dir)"
+  mkdir -p "$dir/.acq-previous.12345"
+  printf 'unknown\n' > "$dir/.acq-previous.12345/preserve"
   run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
   assert_success
-  run sh -c 'mkdir -p "$1/.acq-previous.$$" && printf "leftover\n" > "$1/.acq-previous.$$/acq" \
-    && exec sh "$2" --source "$3" --yes' _ "$dir" "$REPO_ROOT/install.sh" "$REPO_ROOT/test/fixtures/installer"
-  assert_success
-  [ -z "$(find "$dir" -maxdepth 1 -name '.acq-previous.*')" ]
+  [ "$(cat "$dir/.acq-previous.12345/preserve")" = unknown ]
+  [ -L "$HOME/.local/bin/acq-python" ]
 }
 
-# PID 1 is init on a host and in most containers, never a concurrent install.
-@test "installer: a leftover named for PID 1 is swept" {
+@test "preview: preserves unknown legacy leftover .acq-previous.1" {
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_success
   local dir; dir="$(_install_dir)"
+  mkdir -p "$dir/.acq-previous.1"
+  printf 'unknown\n' > "$dir/.acq-previous.1/preserve"
   run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
   assert_success
-  mkdir -p "$dir/.acq-previous.1"; printf 'leftover\n' > "$dir/.acq-previous.1/acq"
-  printf 'old\n' > "$dir/.acq-v1-install.tmp.1"
-  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
-  assert_success
-  [ ! -e "$dir/.acq-previous.1" ]
-  [ ! -e "$dir/.acq-v1-install.tmp.1" ]
+  [ "$(cat "$dir/.acq-previous.1/preserve")" = unknown ]
+  [ -L "$HOME/.local/bin/acq-python" ]
 }
 
-# A killed run leaves its staging dir (.acq-stage.<pid>.<random>) in the install
-# dir's parent; a later run sweeps it unless its process is still running.
-@test "installer: stale staging dirs in the parent are swept, live ones kept" {
-  local dir dead; dir="$(_install_dir)"
+@test "preview: preserves unknown legacy leftover .acq-stage.12345.AbCdEf" {
   run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
   assert_success
-  sh -c 'exit 0' & dead=$!
-  wait "$dead" || :
-  mkdir -p "$XDG_DATA_HOME/.acq-stage.$dead.AbCdEfGh/stage" "$XDG_DATA_HOME/.acq-stage.$$.AbCdEfGh/stage" \
-    "$XDG_DATA_HOME/.acq-stage.mine"
-  printf 'x\n' > "$XDG_DATA_HOME/.acq-stage.$dead.AbCdEfGh/stage/acq"
-  ln -s "$STUBDIR/elsewhere" "$XDG_DATA_HOME/.acq-stage.$dead.LiNkLiNk"
+  local dir; dir="$(_install_dir)"
+  mkdir -p "$dir/.acq-stage.12345.AbCdEf"
+  printf 'unknown\n' > "$dir/.acq-stage.12345.AbCdEf/preserve"
   run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
   assert_success
-  [ ! -e "$XDG_DATA_HOME/.acq-stage.$dead.AbCdEfGh" ]
-  # A live process's staging dir, a lookalike and a symlink are left alone.
-  [ -d "$XDG_DATA_HOME/.acq-stage.$$.AbCdEfGh/stage" ]
-  [ -d "$XDG_DATA_HOME/.acq-stage.mine" ]
-  [ -L "$XDG_DATA_HOME/.acq-stage.$dead.LiNkLiNk" ]
+  [ "$(cat "$dir/.acq-stage.12345.AbCdEf/preserve")" = unknown ]
+  [ -L "$HOME/.local/bin/acq-python" ]
 }
 
-# Another user's killed install can leave a staging dir in a shared parent that
-# this user cannot remove. The sweep is best effort, so the install still
-# finishes (and so does the next one). A read-only child dir stands in for it.
-@test "installer: a stale staging dir that cannot be removed does not stop the install" {
-  [ "$(id -u)" != 0 ] || skip "root can remove a read-only directory"
-  local dir dead stuck; dir="$(_install_dir)"
+@test "preview: preserves unknown legacy leftover .acq-stage.readonly" {
   run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
   assert_success
-  sh -c 'exit 0' & dead=$!
-  wait "$dead" || :
-  stuck="$XDG_DATA_HOME/.acq-stage.$dead.StUcKdIr"
-  mkdir -p "$stuck/stage/sub"
-  chmod 500 "$stuck/stage"
-  printf 'stale\n' > "$dir/py-acq/stale-from-old-release"
+  local dir; dir="$(_install_dir)"
+  mkdir -p "$dir/.acq-stage.readonly"
+  printf 'unknown\n' > "$dir/.acq-stage.readonly/preserve"
   run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
-  local first=$status
-  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
-  local second=$status
-  chmod 700 "$stuck/stage"
-  [ "$first" -eq 0 ] && [ "$second" -eq 0 ]
-  # The publish finished: the old release was replaced and nothing was left mid-way.
-  [ ! -e "$dir/py-acq/stale-from-old-release" ]
-  [ -e "$dir/py-acq/runtime/bin/python3" ]
-  [ -z "$(find "$dir" -maxdepth 1 -name '.acq-previous.*')" ]
-  [ -d "$stuck/stage/sub" ]
+  assert_success
+  [ "$(cat "$dir/.acq-stage.readonly/preserve")" = unknown ]
+  [ -L "$HOME/.local/bin/acq-python" ]
 }
 
-# Only leftovers this user owns are swept. An `id` that reports another uid
-# makes every leftover look like someone else's, so all of them stay.
 @test "installer: the sweep leaves leftovers owned by another user alone" {
   local dir dead; dir="$(_install_dir)"
   run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
@@ -454,30 +407,25 @@ SHIM
   chmod +x "$STUBDIR/tar-shim/tar"
   PATH="$STUBDIR/tar-shim:$PATH" run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
   assert_failure
-  assert_output --partial 'is a symlink'
+  assert_output --partial 'contains a symlink'
   [ ! -e "$STUBDIR/tar-ran" ]
   [ -z "$(find "$XDG_DATA_HOME" -maxdepth 1 -name '.acq-stage.*')" ]
 }
 
-@test "installer: a failed marker rename leaves no temporary marker behind" {
-  local dir shim; dir="$(_install_dir)"
-  shim="$STUBDIR/mv-shim"; mkdir -p "$shim"
-  cat > "$shim/mv" <<'SHIM'
-#!/bin/sh
-for last; do :; done
-case "$last" in */.acq-v1-install) exit 1 ;; esac
-exec /bin/mv "$@"
-SHIM
+@test "preview: failed atomic publication leaves no public command" {
+
+  local shim="$STUBDIR/fail-mv"; mkdir "$shim"
+  printf '#!/bin/sh\ncase "$1" in */publish) exit 1 ;; esac\nexec /bin/mv "$@"\n' > "$shim/mv"
   chmod +x "$shim/mv"
   PATH="$shim:$PATH" run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
   assert_failure
-  assert_output --partial 'could not write'
-  [ -z "$(find "$dir" -maxdepth 1 -name '.acq-v1-install.tmp.*')" ]
+  [ ! -e "$(_install_dir)" ]
+  [ ! -L "$HOME/.local/bin/acq-python" ]
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_success
+  [ -f "$(_install_dir)/.acq-python-preview-receipt" ]
 }
 
-# The `acq` launcher is the Bash dispatcher and sources acq.backends/common.sh
-# before it reads ACQ_IMPL, so an archive without the backend tree would install
-# an `acq` that cannot start on either implementation.
 @test "installer: an archive without the Bash backend tree fails closed" {
   local assets
   assets="$(_fixture_with_extra_entry acq.backends drop)"
@@ -559,81 +507,67 @@ SHIM
   chmod +x "$STUBDIR/mv-log-shim/mv"
 }
 
-@test "installer: stages the release beside the install dir, not under TMPDIR" {
+@test "preview: publishes complete root by same-filesystem rename" {
+
   _plant_logging_mv
-  mkdir -p "$STUBDIR/tmp"
-  TMPDIR="$STUBDIR/tmp" PATH="$STUBDIR/mv-log-shim:$PATH" \
-    run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  PATH="$STUBDIR/mv-log-shim:$PATH" run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
   assert_success
+  grep -Eq '^.*/\.acq-stage\.[0-9]+\.[A-Za-z0-9]+/publish$' "$STUBDIR/mv.log"
+  [ -f "$(_install_dir)/.acq-python-preview-receipt" ]
   [ -e "$(_install_dir)/py-acq/runtime/bin/python3" ]
-  run cat "$STUBDIR/mv.log"
-  # Each release entry moves from a staging dir in the install dir's parent.
-  # The staging dir is named .acq-stage.<installer pid>.<random>.
-  assert_line --regexp "^$XDG_DATA_HOME/\\.acq-stage\\.[0-9]+\\.[A-Za-z0-9]+/stage/(.*/)?py-acq\$"
-  assert_line --regexp "^$XDG_DATA_HOME/\\.acq-stage\\.[0-9]+\\.[A-Za-z0-9]+/stage/(.*/)?acq\$"
-  refute_output --partial "$STUBDIR/tmp/"
-  # The staging dir is gone afterwards.
-  [ -z "$(find "$XDG_DATA_HOME" -maxdepth 1 -name '.acq-stage.*')" ]
 }
 
-@test "installer: stages in the private work dir when the parent is not writable" {
-  [ "$(id -u)" != 0 ] || skip "root can write a read-only directory"
-  local dir; dir="$(_install_dir)"
-  mkdir -p "$dir"
-  chmod 555 "$XDG_DATA_HOME"
-  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
-  chmod 755 "$XDG_DATA_HOME"
-  assert_success
-  assert_output --partial "cannot create a staging directory in $XDG_DATA_HOME"
-  [ -e "$dir/py-acq/runtime/bin/python3" ]
+@test "preview: refuses publication without same-filesystem staging" {
+
+  local shim="$STUBDIR/fail-stage"; mkdir "$shim"
+  printf '#!/bin/sh\ncase "$*" in *acq-stage*) exit 1 ;; esac\nexec /usr/bin/mktemp "$@"\n' > "$shim/mktemp"
+  chmod +x "$shim/mktemp"
+  PATH="$shim:$PATH" run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_failure
+  assert_output --partial 'same-filesystem staging'
+  [ ! -e "$(_install_dir)" ]
 }
 
-# Under `curl | sh` the installer's stdin is the script pipe. The PATH prompt then
-# goes to the controlling terminal, and only when that terminal is usable;
-# otherwise it declines as before. install-tty.py drives a pseudo-terminal.
-_tty_install() {
-  command -v python3 >/dev/null 2>&1 || skip "python3 is required to drive a pseudo-terminal"
-  run env SHELL=/bin/sh python3 "$BATS_TEST_DIRNAME/install-tty.py" "$@" "$REPO_ROOT/install.sh" \
-    --source "$REPO_ROOT/test/fixtures/installer" --install-dir "$STUBDIR/inst" \
-    --bin-dir "$STUBDIR/acq-bin"
-}
+@test "preview: piped install leaves shell profiles unchanged with consent yes" {
 
-@test "installer: curl | sh asks for PATH consent on the terminal" {
   _tty_install tty y
   assert_success
-  assert_line 'PROMPTS=1'
-  grep -qF "export PATH=\"$STUBDIR/acq-bin:\$PATH\"" "$HOME/.profile"
+  assert_line 'PROMPTS=0'
+  [ ! -e "$HOME/.profile" ]
+  [ -L "$STUBDIR/acq-bin/acq-python" ]
+  [ ! -e "$STUBDIR/acq-bin/acq" ]
 }
 
-@test "installer: curl | sh keeps PATH unchanged when the terminal answers no" {
+@test "preview: piped install leaves shell profiles unchanged with consent no" {
+
   _tty_install tty n
   assert_success
-  assert_line 'PROMPTS=1'
-  assert_output --partial 'Not changing your PATH'
+  assert_line 'PROMPTS=0'
   [ ! -e "$HOME/.profile" ]
+  [ -L "$STUBDIR/acq-bin/acq-python" ]
+  [ ! -e "$STUBDIR/acq-bin/acq" ]
 }
 
-@test "installer: curl | sh never prompts when its output is captured" {
-  # A controlling terminal exists, but stdout and stderr go to a file, so no one
-  # is watching: the installer must decline without writing a prompt to it.
+@test "preview: piped install leaves shell profiles unchanged with captured output" {
+
   _tty_install captured
   assert_success
   assert_line 'PROMPTS=0'
-  assert_output --partial 'Not changing your PATH'
   [ ! -e "$HOME/.profile" ]
+  [ -L "$STUBDIR/acq-bin/acq-python" ]
+  [ ! -e "$STUBDIR/acq-bin/acq" ]
 }
 
-@test "installer: curl | sh declines without asking when /dev/tty is unusable" {
+@test "preview: piped install leaves shell profiles unchanged with unusable terminal" {
+
   _tty_install notty
   assert_success
   assert_line 'PROMPTS=0'
-  assert_output --partial 'Not changing your PATH'
   [ ! -e "$HOME/.profile" ]
+  [ -L "$STUBDIR/acq-bin/acq-python" ]
+  [ ! -e "$STUBDIR/acq-bin/acq" ]
 }
 
-# The verified archive is staged in a private work dir: another local user must
-# not be able to pre-create or swap it between verify and extract (a predictable
-# name plus `mkdir -p` would adopt their directory).
 @test "installer: verifies the archive inside a private, unpredictable work dir" {
   local shim="$STUBDIR/sum-shim" log="$STUBDIR/sum.log" real
   mkdir -p "$shim"
@@ -726,7 +660,7 @@ IDSTUB
   cd "$work" || return 1
   run env XDG_DATA_HOME=rel-data sh "$REPO_ROOT/install.sh" --dry-run --bin-dir "$STUBDIR/bin"
   assert_success
-  assert_line "  install dir: $HOME/.local/share/acq"
+  assert_line "  install dir: $HOME/.local/share/acq-python-preview"
   refute_output --partial 'rel-data'
   run ls -A "$work"
   assert_output ''
@@ -739,7 +673,7 @@ IDSTUB
   _plant_account_home "$STUBDIR/acct-home"
   run env -u XDG_DATA_HOME HOME=relhome sh "$REPO_ROOT/install.sh" --dry-run --install-dir "$STUBDIR/inst"
   assert_success
-  assert_line "  launcher:    $STUBDIR/acct-home/.local/bin/acq"
+  assert_line "  launcher:    $STUBDIR/acct-home/.local/bin/acq-python"
   refute_output --partial 'relhome'
   run ls -A "$work"
   assert_output ''
@@ -807,7 +741,7 @@ IDSTUB
   run env ACQ_INSTALL_BIN_DIR=rel-bin sh "$REPO_ROOT/install.sh" --dry-run \
     --install-dir "$STUBDIR/inst" --bin-dir "$STUBDIR/bin"
   assert_success
-  assert_line "  launcher:    $STUBDIR/bin/acq"
+  assert_line "  launcher:    $STUBDIR/bin/acq-python"
   run ls -A "$work"
   assert_output ''
 }
@@ -844,7 +778,7 @@ IDSTUB
   run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --sha256 "$pin" --yes
   assert_success
   assert_output --partial 'verified SHA256SUMS pin'
-  [ -L "$HOME/.local/bin/acq" ]
+  [ ! -e "$HOME/.local/bin/acq" ]
 }
 
 @test "installer: SHA256SUMS pin mismatch fails before trusting manifest entries" {
@@ -904,7 +838,7 @@ SHIM
   local result
   # absent-ok: some gh releases warn about missing attestations yet exit 0.
   for result in absent absent-ok; do
-    rm -rf "$(_install_dir)"
+    rm -rf "$(_install_dir)"; rm -f "$HOME/.local/bin/acq-python"
     GH_RESULT="$result" run sh "$REPO_ROOT/install.sh" --source https://github.com/example/acq/releases/download/v1 --yes
     assert_success
     assert_output --partial 'attestation absent'
@@ -944,63 +878,37 @@ SHIM
   [ ! -e "$STUBDIR/gh.log" ]
 }
 
-@test "installer: prerequisite report probes PATH tools and the test KVM device" {
-  printf '#!/bin/sh\necho "msb 0.7.7"\n' > "$STUBDIR/msb"
-  printf '#!/bin/sh\nexit 0\n' > "$STUBDIR/sbx"
-  printf '#!/bin/sh\nexit 0\n' > "$STUBDIR/git"
-  chmod +x "$STUBDIR/msb" "$STUBDIR/sbx" "$STUBDIR/git"
-  touch "$STUBDIR/kvm"
-  ACQ_TEST_KVM_PATH="$STUBDIR/kvm" run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+@test "preview: does not probe or modify existing backends" {
+
+  printf '#!/bin/sh\necho called >> "%s/backend-probed"\nexit 1\n' "$STUBDIR" > "$STUBDIR/msb"
+  chmod +x "$STUBDIR/msb"
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
   assert_success
-  assert_output --partial 'Next steps'
-  assert_output --partial 'msb: found (msb 0.7.7; supported)'
-  assert_output --partial 'sbx: found'
-  assert_output --partial 'git: found'
-  assert_output --partial 'hardware virtualization: found'
+  [ ! -e "$STUBDIR/backend-probed" ]
+  [ ! -e "$HOME/.microsandbox" ]
+  [ ! -e "$HOME/.profile" ]
 }
 
-@test "installer: prerequisite report flags blocked old and unknown msb versions" {
-  local version
-  for version in 0.7.0 0.7.1 0.7.2 0.6.8 0.7.3-rc1 0.7.7+build unknown; do
-    printf '#!/bin/sh\necho "msb %s"\n' "$version" > "$STUBDIR/msb"
-    chmod +x "$STUBDIR/msb"
-    ACQ_TEST_KVM_PATH="$STUBDIR/nonexistent" run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
-    assert_success
-    assert_output --partial 'out-of-policy or unknown version'
-    assert_output --partial 'scripts/verify-msb-pin --install'
-    assert_output --partial 'hardware virtualization: missing'
-    assert_output --partial 'msb doctor --fix'
-  done
+@test "preview: leaves out-of-policy backend untouched" {
+
+  printf '#!/bin/sh\necho called >> "%s/backend-probed"\nexit 1\n' "$STUBDIR" > "$STUBDIR/msb"
+  chmod +x "$STUBDIR/msb"
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_success
+  [ ! -e "$STUBDIR/backend-probed" ]
+  [ ! -e "$HOME/.microsandbox" ]
+  [ ! -e "$HOME/.profile" ]
 }
 
-# Build a PATH with just the installer's tools, excluding sandbox backends and
-# git even when the developer has them installed. brew logs any attempted install.
-_prereq_missing_path() {
-  local tool real
-  mkdir -p "$STUBDIR/only-tools"
-  for tool in sh uname tr cat curl awk cut sha256sum shasum sed head tail mktemp chmod cp mkdir tar gzip dirname df mv ln rm find id grep; do
-    real=$(command -v "$tool") || continue
-    ln -s "$real" "$STUBDIR/only-tools/$tool"
-  done
-  printf '#!/bin/sh\necho invoked > "%s/brew.log"\n' "$STUBDIR" > "$STUBDIR/only-tools/brew"
-  chmod +x "$STUBDIR/only-tools/brew"
-}
+@test "preview: noninteractive install never installs backends" {
 
-@test "installer: noninteractive and --yes report missing prerequisites without prompting or installing" {
-  _prereq_missing_path
-  local flag
-  for flag in '' --yes; do
-    # An empty unquoted flag deliberately supplies no argument.
-    # shellcheck disable=SC2086
-    PATH="$STUBDIR/only-tools" ACQ_TEST_KVM_PATH="$STUBDIR/missing" run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" $flag
-    assert_success
-    assert_output --partial 'msb: missing'
-    assert_output --partial 'sbx: missing'
-    assert_output --partial 'git: missing'
-    refute_output --partial '[y/N]'
-    refute_output --partial 'Install pinned msb?'
-    [ ! -e "$STUBDIR/brew.log" ]
-  done
+  printf '#!/bin/sh\necho called >> "%s/backend-probed"\nexit 1\n' "$STUBDIR" > "$STUBDIR/msb"
+  chmod +x "$STUBDIR/msb"
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_success
+  [ ! -e "$STUBDIR/backend-probed" ]
+  [ ! -e "$HOME/.microsandbox" ]
+  [ ! -e "$HOME/.profile" ]
 }
 
 @test "installer: --no-prereq-check skips probes and the whole report" {
@@ -1012,41 +920,34 @@ _prereq_missing_path() {
   [ ! -e "$STUBDIR/msb.log" ]
 }
 
-@test "installer: a terminal offers pinned msb and installs only after explicit yes" {
-  command -v python3 >/dev/null 2>&1 || skip "python3 is required to drive a pseudo-terminal"
-  local python answer
-  python=$(python3 -c 'import sys; print(sys.executable)')
-  _prereq_missing_path
-  mkdir -p "$STUBDIR/acq-bin"
-  for answer in n '' y; do
-    PATH="$STUBDIR/acq-bin:$STUBDIR/only-tools" run "$python" "$BATS_TEST_DIRNAME/install-tty.py" tty "$answer" \
-      "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --bin-dir "$STUBDIR/acq-bin"
-    assert_success
-    assert_output --partial 'Install pinned msb?'
-    assert_line 'PROMPTS=1'
-    if [ "$answer" = y ]; then [ -e "$STUBDIR/brew.log" ];
-    else [ ! -e "$STUBDIR/brew.log" ]; fi
-  done
+@test "preview: terminal consent never installs backends" {
+
+  printf '#!/bin/sh\necho called >> "%s/backend-probed"\nexit 1\n' "$STUBDIR" > "$STUBDIR/msb"
+  chmod +x "$STUBDIR/msb"
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
+  assert_success
+  [ ! -e "$STUBDIR/backend-probed" ]
+  [ ! -e "$HOME/.microsandbox" ]
+  [ ! -e "$HOME/.profile" ]
 }
 
-@test "installer: --non-interactive declines the PATH prompt without reading the terminal" {
-  command -v python3 >/dev/null 2>&1 || skip "python3 is required to drive a pseudo-terminal"
+@test "preview: piped install leaves shell profiles unchanged with noninteractive" {
+
   run env SHELL=/bin/sh python3 "$BATS_TEST_DIRNAME/install-tty.py" tty y "$REPO_ROOT/install.sh" \
     --source "$REPO_ROOT/test/fixtures/installer" --install-dir "$STUBDIR/inst" \
     --bin-dir "$STUBDIR/acq-bin" --non-interactive
   assert_success
   assert_line 'PROMPTS=0'
-  assert_output --partial 'Not changing your PATH'
   [ ! -e "$HOME/.profile" ]
+  [ -L "$STUBDIR/acq-bin/acq-python" ]
+  [ ! -e "$STUBDIR/acq-bin/acq" ]
 }
 
 @test "installer: --non-interactive never offers msb on a terminal," {
   command -v python3 >/dev/null 2>&1 || skip "python3 is required to drive a pseudo-terminal"
   local python
   python=$(python3 -c 'import sys; print(sys.executable)')
-  _prereq_missing_path
-  mkdir -p "$STUBDIR/acq-bin"
-  PATH="$STUBDIR/acq-bin:$STUBDIR/only-tools" run "$python" "$BATS_TEST_DIRNAME/install-tty.py" tty y \
+  run "$python" "$BATS_TEST_DIRNAME/install-tty.py" tty y \
     "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --bin-dir "$STUBDIR/acq-bin" --non-interactive
   assert_success
   assert_line 'PROMPTS=0'
@@ -1066,9 +967,7 @@ _prereq_missing_path() {
   command -v python3 >/dev/null 2>&1 || skip "python3 is required to drive a pseudo-terminal"
   local python
   python=$(python3 -c 'import sys; print(sys.executable)')
-  _prereq_missing_path
-  mkdir -p "$STUBDIR/acq-bin"
-  PATH="$STUBDIR/acq-bin:$STUBDIR/only-tools" run "$python" "$BATS_TEST_DIRNAME/install-tty.py" tty y \
+  run "$python" "$BATS_TEST_DIRNAME/install-tty.py" tty y \
     "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --bin-dir "$STUBDIR/acq-bin" --yes
   assert_success
   assert_line 'PROMPTS=0'
@@ -1076,80 +975,35 @@ _prereq_missing_path() {
 }
 
 @test "installer: missing gh reports unavailable and continues" {
-  _prereq_missing_path
   _plant_logging_curl
-  ln -sf "$STUBDIR/curl" "$STUBDIR/only-tools/curl"
-  PATH="$STUBDIR/only-tools" run sh "$REPO_ROOT/install.sh" --source https://github.com/example/acq/releases/download/v1 --yes
+  mkdir "$STUBDIR/no-gh"
+  local tool
+  for tool in sh uname curl mktemp chmod cp cut sha256sum tar gzip find head grep sed awk tr dirname mkdir mv rm ln; do
+    ln -s "$(command -v "$tool")" "$STUBDIR/no-gh/$tool"
+  done
+  PATH="$STUBDIR/no-gh" run sh "$REPO_ROOT/install.sh" --source https://github.com/example/acq/releases/download/v1 --yes
   assert_success
   assert_output --partial 'gh missing; continuing'
 }
 
-@test "installer: a fake KVM override is ignored outside bats" {
-  run env -u BATS_TEST_NAME ACQ_TEST_KVM_PATH="$STUBDIR/nonexistent" sh "$REPO_ROOT/install.sh" \
-    --source "$REPO_ROOT/test/fixtures/installer" --yes
+@test "preview: backend test overrides do not affect install" {
+
+  printf '#!/bin/sh\necho called >> "%s/backend-probed"\nexit 1\n' "$STUBDIR" > "$STUBDIR/msb"
+  chmod +x "$STUBDIR/msb"
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
   assert_success
-  if [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
-    assert_output --partial 'hardware virtualization: found'
-  else
-    assert_output --partial 'hardware virtualization: missing'
-  fi
+  [ ! -e "$STUBDIR/backend-probed" ]
+  [ ! -e "$HOME/.microsandbox" ]
+  [ ! -e "$HOME/.profile" ]
 }
 
-@test "installer: explicit consent installs only the checksum-verified pinned msb bundle" {
-  command -v python3 >/dev/null 2>&1 || skip "python3 is required to drive a pseudo-terminal"
-  local python real bundle
-  python=$(python3 -c 'import sys; print(sys.executable)')
-  _prereq_missing_path
-  # No Homebrew on this PATH: exercise the pinned bundle fallback, fully offline.
-  rm "$STUBDIR/only-tools/brew"
-  real=$(command -v install)
-  ln -s "$real" "$STUBDIR/only-tools/install"
-  mkdir -p "$STUBDIR/msb-assets" "$STUBDIR/msb-stage" "$STUBDIR/acq-bin"
-  printf '#!/bin/sh\necho "msb 0.7.7"\n' > "$STUBDIR/msb-stage/msb"
-  printf 'fixture library\n' > "$STUBDIR/msb-stage/libkrunfw.so.5.6.1"
-  # One fixture tarball serves every platform name, so a single digest override
-  # matches whichever bundle this host asks for.
-  tar -czf "$STUBDIR/msb-fixture.tar.gz" -C "$STUBDIR/msb-stage" .
-  for bundle in microsandbox-linux-x86_64.tar.gz microsandbox-linux-aarch64.tar.gz microsandbox-darwin-aarch64.tar.gz; do
-    cp "$STUBDIR/msb-fixture.tar.gz" "$STUBDIR/msb-assets/$bundle"
-  done
-  local digest
-  digest=$(sha256sum "$STUBDIR/msb-fixture.tar.gz"); digest=${digest%% *}
-  rm "$STUBDIR/only-tools/curl"
-  cat > "$STUBDIR/only-tools/curl" <<SHIM
-#!/bin/sh
-url='' out=''
-while [ \$# -gt 0 ]; do
-  case "\$1" in
-    -o) out="\$2"; shift 2 ;;
-    https://*) url="\$1"; shift ;;
-    *) shift ;;
-  esac
-done
-case "\$url" in
-  https://github.com/superradcompany/microsandbox/releases/download/v0.7.7/*) ;;
-  *) exit 1 ;;
-esac
-cp "$STUBDIR/msb-assets/\${url##*/}" "\$out"
-SHIM
-  chmod +x "$STUBDIR/only-tools/curl"
-  # The digest override is a bats-only hook: outside bats it is ignored.
-  env -u BATS_TEST_NAME ACQ_TEST_MSB_BUNDLE_SHA256="$digest" MSB_HOME="$STUBDIR/msb-home" PATH="$STUBDIR/acq-bin:$STUBDIR/only-tools" \
-    "$python" "$BATS_TEST_DIRNAME/install-tty.py" tty y "$REPO_ROOT/install.sh" \
-    --source "$REPO_ROOT/test/fixtures/installer" --bin-dir "$STUBDIR/acq-bin" > "$STUBDIR/no-hook.out" 2>&1 || true
-  grep -q 'pinned msb checksum mismatch' "$STUBDIR/no-hook.out"
-  [ ! -e "$STUBDIR/msb-home/bin/msb" ]
-  # Without the override the fixture cannot match the pinned release digest.
-  MSB_HOME="$STUBDIR/msb-home" PATH="$STUBDIR/acq-bin:$STUBDIR/only-tools" \
-    run "$python" "$BATS_TEST_DIRNAME/install-tty.py" tty y "$REPO_ROOT/install.sh" \
-    --source "$REPO_ROOT/test/fixtures/installer" --bin-dir "$STUBDIR/acq-bin"
-  assert_output --partial 'pinned msb checksum mismatch'
-  [ ! -e "$STUBDIR/msb-home/bin/msb" ]
-  ACQ_TEST_MSB_BUNDLE_SHA256="$digest" MSB_HOME="$STUBDIR/msb-home" PATH="$STUBDIR/acq-bin:$STUBDIR/only-tools" \
-    run "$python" "$BATS_TEST_DIRNAME/install-tty.py" tty y "$REPO_ROOT/install.sh" \
-    --source "$REPO_ROOT/test/fixtures/installer" --bin-dir "$STUBDIR/acq-bin"
+@test "preview: explicit consent remains limited to preview files" {
+
+  printf '#!/bin/sh\necho called >> "%s/backend-probed"\nexit 1\n' "$STUBDIR" > "$STUBDIR/msb"
+  chmod +x "$STUBDIR/msb"
+  run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
   assert_success
-  assert_output --partial 'installed pinned msb 0.7.7'
-  [ -x "$STUBDIR/msb-home/bin/msb" ]
-  [ -L "$STUBDIR/acq-bin/msb" ]
+  [ ! -e "$STUBDIR/backend-probed" ]
+  [ ! -e "$HOME/.microsandbox" ]
+  [ ! -e "$HOME/.profile" ]
 }

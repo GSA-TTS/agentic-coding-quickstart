@@ -1,9 +1,7 @@
 # acq.ps1 - Windows launcher for acq.
 #
-# On Windows an unset ACQ_IMPL selects the Python implementation, run natively by
-# acq's managed runtime (ADR-0048m). ACQ_IMPL=bash is the explicit opt-in to the
-# Bash implementation: this launcher then finds Git for Windows' bash.exe and
-# delegates to the repository-local Bash entry point.
+# M1 keeps the ordinary Windows launcher on Bash. The preview-named launcher
+# explicitly selects Python without changing the caller's implementation choice.
 
 $ErrorActionPreference = "Stop"
 
@@ -75,7 +73,11 @@ function Get-AcqLauncherArgs {
     catch {
         return $null
     }
-    if (-not [string]::Equals($named, $mine, [System.StringComparison]::OrdinalIgnoreCase)) {
+    $preview = Join-Path $PSScriptRoot 'acq-python.ps1'
+    $previewBin = Join-Path $PSScriptRoot 'bin\acq-python.ps1'
+    if (-not [string]::Equals($named, $mine, [System.StringComparison]::OrdinalIgnoreCase) -and
+        -not [string]::Equals($named, $preview, [System.StringComparison]::OrdinalIgnoreCase) -and
+        -not [string]::Equals($named, $previewBin, [System.StringComparison]::OrdinalIgnoreCase)) {
         return $null
     }
     $rest = @()
@@ -143,16 +145,16 @@ function Invoke-AcqProcess {
 $launcherArgs = Get-AcqLauncherArgs -Self $PSCommandPath
 
 # ACQ_IMPL runtime switch — the coexistence seam (ADR-0047m), with the Windows
-# default from ADR-0048m. Unset (or empty) and `python` run the Python
-# implementation natively, with the interpreter resolved below. `bash` is the
-# explicit opt-in to the Git Bash path further down; nothing falls back to it
+# M1 default from ADR-0053. Unset (or empty) runs Bash; `python` runs the Python
+# implementation natively, with the interpreter resolved below. Nothing falls back
+# from an explicitly selected Python implementation
 # when no interpreter qualifies. Any other value fails closed (exit 2). argv and
 # the exit status are forwarded verbatim. The value is compared case-sensitively
 # (-cne), as the Bash `acq` compares it, so `PYTHON` or `Bash` fails closed here
 # too instead of selecting a branch.
 $acqImpl = $env:ACQ_IMPL
 if (-not $acqImpl) {
-    $acqImpl = "python"
+    $acqImpl = "bash"
 }
 if ($acqImpl -cne "bash") {
     if ($acqImpl -cne "python") {

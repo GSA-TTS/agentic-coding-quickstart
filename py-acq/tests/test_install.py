@@ -114,7 +114,7 @@ def _make_release(
     return release
 
 
-def _run_installer(tmp_path: Path, *args: str, stdin: bytes = b"") -> subprocess.CompletedProcess:
+def _run_raw_installer(tmp_path: Path, *args: str, stdin: bytes = b"") -> subprocess.CompletedProcess:
     home = tmp_path / "home"
     home.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
@@ -131,8 +131,13 @@ def _run_installer(tmp_path: Path, *args: str, stdin: bytes = b"") -> subprocess
     )
 
 
+def _run_installer(tmp_path: Path, *args: str, stdin: bytes = b"") -> subprocess.CompletedProcess:
+    """Existing archive tests exercise the explicit preview, not Bash's default."""
+    return _run_raw_installer(tmp_path, "--channel", "python", "--ref", "5.0.0-rc.1", *args, stdin=stdin)
+
+
 def _install_dir(tmp_path: Path) -> Path:
-    return tmp_path / "home" / ".local" / "share" / "acq"
+    return tmp_path / "home" / ".local" / "share" / "acq-python-preview"
 
 
 def _bin_dir(tmp_path: Path) -> Path:
@@ -213,7 +218,7 @@ def test_channel_python_offline_install_succeeds(tmp_path):
     proc = _run_installer(tmp_path, "--source", str(release), "--channel", "python", "--yes")
     assert proc.returncode == 0
     assert _VERIFIED.search(proc.stdout.decode())
-    assert (_bin_dir(tmp_path) / "acq").is_symlink()
+    assert not (_bin_dir(tmp_path) / "acq").exists()
     # The coexistence seam also links the Python implementation's distinct
     # identity (ADR-0047m).
     assert (_bin_dir(tmp_path) / "acq-python").is_symlink()
@@ -237,14 +242,12 @@ def test_offline_install_succeeds(tmp_path):
     assert _VERIFIED.search(proc.stdout.decode())
     # The bundled runtime and the launcher are laid down.
     assert (_install_dir(tmp_path) / "py-acq" / "runtime" / "bin" / "python3").exists()
-    assert (_bin_dir(tmp_path) / "acq").is_symlink()
+    assert not (_bin_dir(tmp_path) / "acq").exists()
     # The coexistence seam links the Python implementation's distinct identity
     # (ADR-0047m): `acq-python` points at its OWN launcher, never an alias of
     # `acq`. The two installed names must resolve to distinct files.
     assert (_bin_dir(tmp_path) / "acq-python").is_symlink()
-    assert (_bin_dir(tmp_path) / "acq").resolve() == (_install_dir(tmp_path) / "acq").resolve()
     assert (_bin_dir(tmp_path) / "acq-python").resolve() == (_install_dir(tmp_path) / "acq-python").resolve()
-    assert (_bin_dir(tmp_path) / "acq").resolve() != (_bin_dir(tmp_path) / "acq-python").resolve()
 
 
 @supported_platform_only
@@ -325,7 +328,7 @@ def test_consent_is_not_inferred_when_noninteractive(tmp_path):
     # No --yes and a non-interactive stdin: consent must decline (fail closed).
     proc = _run_installer(tmp_path, "--source", str(release), stdin=b"")
     assert proc.returncode == 0  # the install itself still succeeds
-    assert "Not changing your PATH" in proc.stderr.decode()
+    assert "PATH and shell profiles were not changed" in proc.stdout.decode()
     # No rc file was written.
     rc_files = [f for f in (tmp_path / "home").glob(".*rc")] + [
         tmp_path / "home" / ".profile",
@@ -369,7 +372,7 @@ def _run_on_host(tmp_path, stub: Path, *args: str) -> subprocess.CompletedProces
         # prepending it, and avoid a Windows backslash path in shell source.
         [shutil.which("sh"), "-c",
          'stub=$(cd "$1" && pwd -P) || exit; shift; PATH="$stub:$PATH"; export PATH; exec sh "$@"',
-         "installer-host", stub.as_posix(), "./install.sh", *args],
+         "installer-host", stub.as_posix(), "./install.sh", "--channel", "python", "--ref", "5.0.0-rc.1", *args],
         cwd=str(REPO_ROOT),
         env=env,
         capture_output=True,
