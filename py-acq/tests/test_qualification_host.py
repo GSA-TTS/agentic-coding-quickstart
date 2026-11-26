@@ -50,7 +50,8 @@ def test_canary_default_image_is_acq_default_base_image():
 
 
 def run(cwd, *args):
-    return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+    return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                           "-c", "commit.gpgsign=false", *args],
                           cwd=cwd, check=True, capture_output=True, text=True).stdout
 
 
@@ -59,6 +60,10 @@ def make_remote_repo(tmp_path, *, push=True):
     run(tmp_path, "init", "-q", "--bare", "-b", "main", str(origin))
     work = tmp_path / "work"
     run(tmp_path, "clone", "-q", str(origin), str(work))
+    # Fixtures publish from a linked worktree. Keep them independent of a
+    # developer's global signing policy; signing behavior is not under test.
+    run(work, "config", "commit.gpgsign", "false")
+    run(work, "config", "tag.gpgSign", "false")
     (work / "docs").mkdir()
     (work / "docs" / "qualification-ledger.json").write_text("{}")
     (work / ".gitignore").write_text("tmp/\n")  # as in the real repo: run evidence lives in tmp/

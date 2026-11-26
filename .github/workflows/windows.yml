@@ -120,6 +120,7 @@ jobs:
             'scripts/test-acq-lib.sh' \
             'scripts/refresh-kitbundle' \
             'scripts/pytest_shard.py' \
+            'scripts/pytest_platform_selection.py' \
             'qualification' \
             'docs/qualification-ledger.json' \
             'test/bats/06-windows-install.bats' \
