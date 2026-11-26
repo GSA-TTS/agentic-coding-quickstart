@@ -25,8 +25,9 @@ def run_suite(root, spec=None, collect=False):
         args += ["--acq-shard", spec]
     if collect:
         args += ["--collect-only"]
+    pytest_root = str(Path(pytest.__file__).resolve().parents[1])
     return subprocess.run(args, cwd=root, text=True, capture_output=True, timeout=30,
-                          env={**os.environ, "PYTHONPATH": str(ROOT / "scripts"),
+                          env={**os.environ, "PYTHONPATH": os.pathsep.join((str(ROOT / "scripts"), pytest_root)),
                                "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"})
 
 

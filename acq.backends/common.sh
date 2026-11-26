@@ -5508,7 +5508,7 @@ _acq_provider_input_path_python() {
       fi
     fi
     if [ -z "$candidate" ]; then
-      case "$host_os" in Darwin) set -- python3.14 python3.13 python3.12 python3 ;; *) set -- python3.12 python3 ;; esac
+      case "$host_os" in Darwin) set -- python3.14 python3.13 python3.12 python3 ;; *) set -- python3.14 python3.12 python3 ;; esac
       for resolved in "$@"; do
         candidate=$(command -v "$resolved" 2>/dev/null || true)
         if _acq_provider_input_absolute_path "$candidate" "$host_os"; then break; else candidate=""; fi
@@ -5537,7 +5537,7 @@ _acq_provider_input_validate_path_python() {
   }
   version=$(printf '%s\n' "$version" | awk 'NF { print; exit }')
   case "$host_os:$version" in
-    Darwin:3.12|Darwin:3.13|Darwin:3.14|Linux:3.12|MINGW*:3.12|MSYS*:3.12|CYGWIN*:3.12)
+    Darwin:3.12|Darwin:3.13|Darwin:3.14|Linux:3.12|Linux:3.14|MINGW*:3.12|MSYS*:3.12|CYGWIN*:3.12)
       return 0 ;;
     *)
       echo "acq: provider path security requires a supported Python; found $version." >&2

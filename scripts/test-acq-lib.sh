@@ -294,7 +294,7 @@ GITSTUB
 #!/bin/sh
 [ "${1:-}" = -I ] && shift  # acq runs python -I (no cwd/env on sys.path)
 case "${1:-}" in
-  -c) printf '3.12\n'; exit 0 ;;
+  -c) printf '3.14\n'; exit 0 ;;
   */validate_provider_input_contract.py) exit 0 ;;
   *) exec /usr/bin/python3 "$@" ;;
 esac

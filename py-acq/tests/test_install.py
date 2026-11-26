@@ -425,6 +425,7 @@ def test_the_intel_refusal_is_a_mutation_proof():
     assert "acq-macos-x86_64.tar.gz" not in source
 
 
+@pytest.mark.platform_macos
 def test_apple_silicon_is_still_accepted(tmp_path):
     # The Intel guard must not catch the supported Mac.
     stub = _host_stub(tmp_path, "Darwin", "arm64")
