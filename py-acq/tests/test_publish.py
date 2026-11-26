@@ -821,6 +821,13 @@ def test_macos_identity_reads_the_recorded_command(monkeypatch, command, program
     assert calls == [["/bin/ps", "-o", "command=", "-p", "4321"]]
 
 
+def test_windows_identity_is_indeterminate_without_windows_ctypes(monkeypatch):
+    before = sys.platform
+    monkeypatch.setattr(publish, "_platform", lambda: "win32")
+    assert publish._windows_identity(4321) is None
+    assert sys.platform == before
+
+
 @pytest.mark.skipif(os.name != "nt", reason="QueryFullProcessImageNameW")
 def test_windows_identity_reads_the_image_name(tmp_path):
     import shutil
