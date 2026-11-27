@@ -707,16 +707,25 @@ def test_36_a_non_clone_create_exports_acq_workspace_but_never_acq_clone(env, mo
     assert "clone" not in state.record_read("msb", NAME)
 
 
-def test_37_acq_workspace_stays_on_the_clones_mount_root(env, monkeypatch, capsys):
+@pytest.mark.parametrize("canonical_override", ["/tmp/elsewhere", "/private/tmp/elsewhere"])
+def test_37_acq_workspace_stays_on_the_clones_mount_root(env, monkeypatch, capsys, canonical_override):
     # The start-directory override must never change the clone mount or marker.
     monkeypatch.setenv("ACQ_MSB_WORKSPACE", "/tmp/elsewhere")
+    # Model both Linux and macOS canonical paths deterministically. Windows
+    # keeps a guest POSIX override unchanged, independent of host realpath.
+    realpath = os.path.realpath
+    monkeypatch.setattr(os.path, "realpath", lambda path, *a, **kw:
+                        canonical_override if path == "/tmp/elsewhere" else realpath(path, *a, **kw))
     seen = _msb_spy(monkeypatch)
     assert _create(capsys, str(env), "--clone")[0] == 0
     argv = _create_argv(seen)
     target = [argv[i + 1] for i, a in enumerate(argv) if a == "--volume" and "clones" in argv[i + 1]]
     assert target == [f"{os.path.realpath(_scratch_of(argv))}:{_guest(env)}"]
     assert f"ACQ_WORKSPACE={_guest(env)}" in argv and "ACQ_WORKSPACE=/tmp/elsewhere" not in argv
-    assert argv[argv.index("-w") + 1] == "/tmp/elsewhere" and "ACQ_CLONE=1" in argv
+    # The override is canonicalized on the host (macOS /tmp is /private/tmp).
+    expected = "/tmp/elsewhere" if msb.WINDOWS else canonical_override
+    assert argv[argv.index("-w") + 1] == expected
+    assert "ACQ_CLONE=1" in argv
 
 
 def _scratch_of(argv: list[str]) -> str:

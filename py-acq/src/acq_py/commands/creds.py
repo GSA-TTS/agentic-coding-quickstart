@@ -814,6 +814,12 @@ def _rotate_locked(backend: str, value: str, emit_json: bool) -> int:
             ready.append(name)
         else:
             skipped.insert(0, unfed)
+    from .. import migration
+
+    try:
+        migration.migrate_tree()
+    except migration.MigrationError as exc:
+        return common._operational_failure(_ROTATE, exc.code, exc.message, exc.remediation, emit_json)
     try:
         secretstore.store(secretstore.key_for(provider_creds.USAI_PROVIDER_ID), value)
     except common._ADAPTER_ERRORS as exc:

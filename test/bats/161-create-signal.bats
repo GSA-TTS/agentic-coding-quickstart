@@ -22,7 +22,7 @@ teardown() { acq_teardown_stubs; }
 load 'helper'
 
 @test "create: Ctrl-C, SIGTERM and SIGHUP with the spinner active clean up once and exit 130/143/129" {
-  run python3 "$BATS_TEST_DIRNAME/create-signal.py" "$REPO_ROOT" "$STUBDIR" "$BASH"
+  run python3 "$BATS_TEST_DIRNAME/create-signal.py" "$REPO_ROOT" "$STUBDIR" "${ACQ_BASH32_LAUNCHER:-$BASH}"
   printf '%s\n' "$output"
   assert_success
   assert_line 'PASS sbx-sigint status 130'
@@ -44,7 +44,7 @@ load 'helper'
 # Each must leave no animator running and the cursor visible; the signal cases
 # must also run the caller's INT and EXIT handlers exactly once and exit 130.
 @test "spinner start: a signal at any point leaves no animator and restores the cursor" {
-  run python3 "$BATS_TEST_DIRNAME/spin-signal-window.py" "$REPO_ROOT" "$BASH" "$STUBDIR"
+  run python3 "$BATS_TEST_DIRNAME/spin-signal-window.py" "$REPO_ROOT" "${ACQ_BASH32_LAUNCHER:-$BASH}" "$STUBDIR"
   printf '%s\n' "$output"
   assert_success
   local point

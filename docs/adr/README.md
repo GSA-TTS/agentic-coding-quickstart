@@ -5,6 +5,8 @@ in each ADR; corrections and amendments are part of the record.
 
 | ADR | Title | Status |
 |---|---|---|
+| [0054m](0054m-python-vector-pytest-shards.md) | Shard collected Python tests by whole file and retain the vectors gate | proposed |
+| [0053m](0053m-quiescent-byte-key-transition.md) | Refuse ambiguous legacy mutations and preserve existing state | proposed |
 | [0001](0001-sbx-usai-agent-execution-architecture.md) | Use Docker SBX as Isolation Layer for USAi Agent Execution | accepted |
 | [0002](0002-version-management-and-release-automation.md) | Adopt Semantic Versioning, Conventional Commits, and release-please for Release Automation | accepted |
 | [0003](0003-usai-model-sync-and-default-selection.md) | Automate USAI Model Sync and Default Selection for OpenCode Templates | superseded |
@@ -62,3 +64,4 @@ in each ADR; corrections and amendments are part of the record.
 | [0050m](0050m-release-signing-scaffolding.md) | Release signing scaffolding | accepted |
 | [0051m](0051m-sbx-base-kit-is-acq-owned.md) | acq supplies the sbx sandbox base kit instead of a built-in agent | accepted |
 | [0052m](0052m-msb-base-image-is-acq-owned.md) | msb's shell agent and the ro-mount canary use acq's base image | accepted |
+| [0053](0053-opt-in-python-prerelease-channel.md) | Use an isolated Python prerelease channel while Bash remains the default | approved |

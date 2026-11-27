@@ -461,12 +461,16 @@ def _macos_identity(pid: int, program: str, option: str, value: str) -> bool | N
 
 
 def _windows_identity(pid: int) -> bool | None:  # pragma: no cover - Windows only
-    if sys.platform != "win32":
+    if _platform() != "win32":
         return None
     import ctypes
     from ctypes import wintypes
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    loader = getattr(ctypes, "WinDLL", None)
+    last_error = getattr(ctypes, "get_last_error", None)
+    if loader is None or last_error is None:
+        return None
+    kernel32 = loader("kernel32", use_last_error=True)
     kernel32.OpenProcess.restype = wintypes.HANDLE
     kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
     kernel32.QueryFullProcessImageNameW.argtypes = (wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
@@ -475,7 +479,7 @@ def _windows_identity(pid: int) -> bool | None:  # pragma: no cover - Windows on
     handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
     if not handle:
         # ERROR_INVALID_PARAMETER: no process has that id.
-        return False if ctypes.get_last_error() == 87 else None
+        return False if last_error() == 87 else None
     try:
         size = wintypes.DWORD(32768)
         buf = ctypes.create_unicode_buffer(size.value)
@@ -495,11 +499,11 @@ def process_is_tunnel(pid: int, program: str, option: str, value: str) -> bool |
     the image name (``QueryFullProcessImageNameW``). ``False`` also covers a
     process that no longer exists.
     """
-    if sys.platform.startswith("linux"):
+    if _platform().startswith("linux"):
         return _linux_identity(pid, program, option, value)
-    if sys.platform == "darwin":
+    if _platform() == "darwin":
         return _macos_identity(pid, program, option, value)
-    if os.name == "nt":
+    if _platform() == "win32":
         try:
             return _windows_identity(pid)
         except (OSError, AttributeError, ValueError):
@@ -792,3 +796,8 @@ def forget_host_key(name: str) -> None:
                        timeout=5, check=False)  # nosec B603 # argv list, no shell
     except (OSError, subprocess.TimeoutExpired):
         pass
+
+
+def _platform() -> str:
+    """Platform seam; tests must not mutate process-global ``sys.platform``."""
+    return sys.platform

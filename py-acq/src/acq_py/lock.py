@@ -303,6 +303,8 @@ def sandbox_lock(backend: str, name: str) -> Iterator[None]:
     seconds (default 300).
     """
     timeout_s = timeouts.env_seconds(SANDBOX_TIMEOUT_ENV, DEFAULT_SANDBOX_TIMEOUT_S)
+    legacy_mutation_name_check(backend)
+    legacy_mutation_name_check(name)
     bash = _BashLock(backend, name)
     try:
         with exclusive_lock(
@@ -438,6 +440,19 @@ def posix_cksum(data: bytes) -> int:
 def _bash_safe(token: str) -> str:
     """Bash's ``tr -c 'A-Za-z0-9._-' '_'``: every other UTF-8 byte becomes ``_``."""
     return "".join(chr(b) if b in _BASH_SAFE_BYTES else "_" for b in token.encode("utf-8"))
+
+
+LEGACY_NAME_REFUSAL = "non-ASCII sandbox mutations are unsupported: legacy locale-dependent state keys cannot be coordinated safely"
+LEGACY_NAME_REMEDIATION = (
+    "Leave existing state untouched. Use a new ASCII sandbox name, or arrange explicit "
+    "operator-managed maintenance; acq does not rename or migrate this state."
+)
+
+
+def legacy_mutation_name_check(name: str) -> None:
+    """Refuse ambiguous target keys before creating any lock or changing state."""
+    if not name.isascii():
+        raise SandboxLockUnsafe(LEGACY_NAME_REFUSAL, LEGACY_NAME_REMEDIATION)
 
 
 def bash_provenance_dir() -> Path:

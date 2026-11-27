@@ -19,17 +19,23 @@ on:
   pull_request:
     branches:
       - main
+      - migration/python-cross-platform
   push:
     branches:
       - main
+      - migration/python-cross-platform
   merge_group:
     branches: [main]
 
 concurrency:
-  group: python-quality-${{ github.head_ref || github.ref }}
+  group: python-quality-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions: {}
+
+env:
+  # Must match build-assets.yml: product tests execute at the shipped version.
+  ACQ_BUILD_RUNTIME_VERSION: 3.14.10
 
 jobs:
   quality:
@@ -48,7 +54,7 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: '3.12'
+          python-version: ${{ env.ACQ_BUILD_RUNTIME_VERSION }}
 
       # --no-deps with --require-hashes: the file lists every transitive
       # dependency, so pip resolves nothing on its own. --only-binary: wheels
@@ -68,5 +74,5 @@ jobs:
 
       # In-process branch coverage of acq_py; the floor is fail_under in
       # pyproject.toml. The vector suite's subprocess runs are not measured.
-      - name: pytest with coverage
-        run: python -m pytest -q --cov --cov-report=term
+      - name: pytest with coverage (Python 3.14.10)
+        run: python -c 'import sys; assert sys.version_info[:3] == (3, 14, 10), sys.version' && python -m pytest -q --cov --cov-report=term -m "$(python ../scripts/pytest_platform_selection.py linux-neutral)"

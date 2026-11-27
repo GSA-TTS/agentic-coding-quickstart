@@ -1200,6 +1200,18 @@ acq_name_form_check() {
   return 0
 }
 
+# Refuse ambiguous legacy locale keys before any mutating target operation.
+# Read-only path/key helpers retain the legacy spelling; no state is renamed.
+acq_legacy_mutation_name_check() {
+  local LC_ALL=C
+  case "$1" in
+    *[![:ascii:]]*)
+      echo "acq: non-ASCII sandbox mutations are unsupported: legacy locale-dependent state keys cannot be coordinated safely." >&2
+      echo "     Leave existing state untouched. Use a new ASCII sandbox name, or arrange explicit operator-managed maintenance; acq does not rename or migrate this state." >&2
+      return 1 ;;
+  esac
+}
+
 # True if PREV is a flag that consumes the next argument as its value.
 _takes_value() {
   case "$1" in
@@ -5496,7 +5508,7 @@ _acq_provider_input_path_python() {
       fi
     fi
     if [ -z "$candidate" ]; then
-      case "$host_os" in Darwin) set -- python3.14 python3.13 python3.12 python3 ;; *) set -- python3.12 python3 ;; esac
+      case "$host_os" in Darwin) set -- python3.14 python3.13 python3.12 python3 ;; *) set -- python3.14 python3.12 python3 ;; esac
       for resolved in "$@"; do
         candidate=$(command -v "$resolved" 2>/dev/null || true)
         if _acq_provider_input_absolute_path "$candidate" "$host_os"; then break; else candidate=""; fi
@@ -5525,7 +5537,7 @@ _acq_provider_input_validate_path_python() {
   }
   version=$(printf '%s\n' "$version" | awk 'NF { print; exit }')
   case "$host_os:$version" in
-    Darwin:3.12|Darwin:3.13|Darwin:3.14|Linux:3.12|MINGW*:3.12|MSYS*:3.12|CYGWIN*:3.12)
+    Darwin:3.12|Darwin:3.13|Darwin:3.14|Linux:3.12|Linux:3.14|MINGW*:3.12|MSYS*:3.12|CYGWIN*:3.12)
       return 0 ;;
     *)
       echo "acq: provider path security requires a supported Python; found $version." >&2
@@ -6026,6 +6038,7 @@ _acq_provider_input_publish() {
 # freshness rule (section 88); Bash itself checks the recorded process identity.
 acq_provider_input_lock_acquire() {
   local backend="$1" name="$2" tx_pid="${3:-$$}" root parent lock owner tries=0 pid identity actual_identity token rc age line
+  acq_legacy_mutation_name_check "$backend" && acq_legacy_mutation_name_check "$name" || return 1
   root=$(acq_provider_input_root "$backend" "$name") || return 1
   parent=${root%/*}
   _acq_provider_input_safe_mkdir "$parent" || return 1

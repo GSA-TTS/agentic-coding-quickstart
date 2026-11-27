@@ -780,7 +780,7 @@ def test_linux_identity_matches_the_recorded_command(monkeypatch, tmp_path, argv
     from pathlib import Path
 
     monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
-    monkeypatch.setattr(publish.sys, "platform", "linux")
+    monkeypatch.setattr(publish, "_platform", lambda: "linux")
     path = _record_pids(tmp_path, 4321, 4322)
     reads = []
 
@@ -815,10 +815,17 @@ def test_macos_identity_reads_the_recorded_command(monkeypatch, command, program
         calls.append(argv)
         return SimpleNamespace(returncode=0, stdout=command + "\n")
 
-    monkeypatch.setattr(publish.sys, "platform", "darwin")
+    monkeypatch.setattr(publish, "_platform", lambda: "darwin")
     monkeypatch.setattr(publish.subprocess, "run", ps)
     assert publish.process_is_tunnel(4321, program, option, value) is accepted
     assert calls == [["/bin/ps", "-o", "command=", "-p", "4321"]]
+
+
+def test_windows_identity_is_indeterminate_without_windows_ctypes(monkeypatch):
+    before = sys.platform
+    monkeypatch.setattr(publish, "_platform", lambda: "win32")
+    assert publish._windows_identity(4321) is None
+    assert sys.platform == before
 
 
 @pytest.mark.skipif(os.name != "nt", reason="QueryFullProcessImageNameW")

@@ -511,6 +511,16 @@ prose still avoid tracker numbers entirely, qualified or not); it governs the
 > repository discipline. Doing this continuously means no later "de-reference" or
 > "re-qualify" cleanup pass is ever needed.
 
+### GitHub Relationship Metadata and PR Readability
+
+- Use GitHub’s structured relationship metadata as the source of truth:
+  - Link an implementation PR to its issue through GitHub’s issue-to-PR/development relationship, not only a prose reference.
+  - Add real sub-issue, blocking and dependency relationships between issues; prose explains the relationship but does not replace it.
+- Keep PR descriptions to **1,000 words or fewer**.
+- Lead PR bodies with the decision, change and merge guard. Put verification transcripts and rollback instructions in `<details>` blocks with descriptive `<summary>` text so they remain available without obscuring the human review path.
+
+Security impact and active merge blockers must stay visible, not hidden in collapsed details.
+
 ---
 
 ## Dependencies

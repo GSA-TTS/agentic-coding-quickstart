@@ -36,8 +36,15 @@ load 'helper'
   mkdir -p "$other"
   (
     cd "$other" && git init -q -b other-branch-marker &&
-      git -c user.email=t@example.gov -c user.name=t commit -q --allow-empty -m x
+      git config --local commit.gpgsign false &&
+      printf '[commit]\n gpgsign = true\n[gpg]\n program = nonexistent-fixture-signer\n' >"$STUBDIR/signing.gitconfig" &&
+      GIT_CONFIG_GLOBAL="$STUBDIR/signing.gitconfig" git -c user.email=t@example.gov -c user.name=t commit -q --allow-empty -m x
   )
+  # Synthetic history is unsigned even under an inherited signing policy;
+  # this repository's real commits and signing settings are not changed.
+  run git -C "$other" cat-file commit HEAD
+  assert_success
+  refute_line --regexp '^gpgsig '
   run env ACQ_BACKEND=sbx GIT_DIR="$other/.git" GIT_WORK_TREE="$other" "$ACQ" version
   assert_success
   refute_output --partial 'other-branch-marker'

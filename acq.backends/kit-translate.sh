@@ -638,6 +638,9 @@ kit_source_resolve() {
   local kitdir="${1:-}" src="${2:-}" root target
   case "$src" in "" | /*) return 1 ;; esac
   case "/$src/" in */../*) return 1 ;; esac
+  # Test the original spelling before a host resolver can strip a trailing
+  # slash from a regular file (macOS realpath does); file/ is not a file source.
+  [ -f "$kitdir/$src" ] || return 1
   root=$(_kit_resolve_path "$kitdir") || return 1
   target=$(_kit_resolve_path "$kitdir/$src") || return 1
   case "$target" in
@@ -656,6 +659,8 @@ kit_source_within() {
 # containment check use one resolver. It prefers realpath, then readlink -f, and
 # otherwise follows links with plain readlink and resolves directories with
 # cd -P (older macOS has neither realpath nor readlink -f). CDPATH is ignored.
+# Like GNU realpath, an absent final component is allowed for tree containment;
+# missing parents and paths through regular files are still unresolvable.
 _kit_resolve_path() {
   local p="${1:-}" out="" link dir base n=0
   [ -n "$p" ] || return 1
@@ -667,7 +672,11 @@ _kit_resolve_path() {
     printf '%s\n' "$out"
     return 0
   fi
-  while [ -L "$p" ]; do
+  while :; do
+    # Normalize on every hop before -L: alias/ may hide a final-component
+    # symlink whose missing target lies outside the scanned payload tree.
+    while [ "$p" != / ] && [ "${p%/}" != "$p" ]; do p="${p%/}"; done
+    [ -L "$p" ] || break
     n=$((n + 1))
     [ "$n" -le 40 ] || return 1
     link=$(readlink -- "$p") || return 1
@@ -676,7 +685,6 @@ _kit_resolve_path() {
       *) p="$(dirname -- "$p")/$link" ;;
     esac
   done
-  [ -e "$p" ] || return 1
   if [ -d "$p" ]; then
     (CDPATH='' cd -P -- "$p" 2>/dev/null && pwd -P)
     return
@@ -1724,10 +1732,10 @@ _kit_sbx_emit_setup() {
             fi
             # Decode the base64 argv tokens back to raw strings.
             local decoded=() b
-            for b in "${argv[@]}"; do
+            for b in ${argv[@]+"${argv[@]}"}; do
               decoded+=("$(printf '%s' "$b" | base64 -d)")
             done
-            _kit_sbx_emit_one_setup_command "$cur_phase" "$cur_user" "$cur_bg" "$tmp" "${decoded[@]}"
+            _kit_sbx_emit_one_setup_command "$cur_phase" "$cur_user" "$cur_bg" "$tmp" ${decoded[@]+"${decoded[@]}"}
           fi
           ;;
         *)
