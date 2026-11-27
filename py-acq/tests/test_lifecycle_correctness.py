@@ -525,8 +525,8 @@ def test_owner_pid_rejects_anything_but_ascii_digits(token):
 @pytest.mark.skipif(not shutil.which("bash"), reason="needs bash")
 def test_bash_waits_for_a_python_held_sandbox_lock(monkeypatch, tmp_path):
     _env(monkeypatch, tmp_path)
-    with lock.sandbox_lock("msb", "café box"):
-        held = _bash_lock("café box")
+    with lock.sandbox_lock("msb", "ascii box"):
+        held = _bash_lock("ascii box")
         owner = (held / "owner").read_text(encoding="utf-8").split()
         assert owner[0] == str(os.getpid())
         expected = subprocess.run(
@@ -536,7 +536,7 @@ def test_bash_waits_for_a_python_held_sandbox_lock(monkeypatch, tmp_path):
         assert " ".join(owner[1:]) == expected
         # Bash's own acquire refuses: the Python owner is live.
         proc = _bash(
-            'ACQ_PROVIDER_INPUT_LOCK_RETRIES=1 acq_provider_input_lock_acquire msb "$1" $$', "café box"
+            'ACQ_PROVIDER_INPUT_LOCK_RETRIES=1 acq_provider_input_lock_acquire msb "$1" $$', "ascii box"
         )
         assert proc.returncode == 1
         assert "owned by live pid" in proc.stderr
@@ -569,7 +569,8 @@ def test_python_waits_for_a_bash_held_sandbox_lock_and_recovers_it_when_stale(mo
 def test_bash_lock_key_matches_tr_and_cksum_for_a_non_ascii_name():
     name = "café box/ü"
     safe = subprocess.run(
-        ["tr", "-c", "A-Za-z0-9._-", "_"], input=name.encode("utf-8"), capture_output=True
+        ["tr", "-c", "A-Za-z0-9._-", "_"], input=name.encode("utf-8"), capture_output=True,
+        env={**os.environ, "LC_ALL": "C"},
     ).stdout.decode("ascii")
     total = subprocess.run(["cksum"], input=name.encode("utf-8"), capture_output=True).stdout.split()[0]
     assert lock._bash_safe(name) == safe == "caf___box___"
@@ -578,11 +579,141 @@ def test_bash_lock_key_matches_tr_and_cksum_for_a_non_ascii_name():
 
 @_POSIX_ONLY
 @pytest.mark.skipif(not shutil.which("bash"), reason="needs bash")
+def test_unicode_lock_refusal_precedes_character_based_legacy_key_writes(monkeypatch, tmp_path):
+    """Ambiguous legacy targets fail before creating either lock variant."""
+    _env(monkeypatch, tmp_path)
+    # Model the observed BSD UTF-8 complement behavior on Linux too. C locale
+    # delegates to the real byte-based tool; this is not native BSD evidence.
+    tools = tmp_path / "bsd-tools"
+    tools.mkdir()
+    tr = tools / "tr"
+    real_tr = shutil.which("tr")
+    assert real_tr is not None
+    tr.write_text(
+        f"#!{sys.executable}\nimport os, re, sys\n"
+        "if sys.argv[1:] == ['-c', 'A-Za-z0-9._-', '_'] and os.environ.get('LC_ALL') != 'C':\n"
+        "    print(re.sub(r'[^A-Za-z0-9._-]', '_', sys.stdin.buffer.read().decode('utf-8')), end='')\n"
+        f"else:\n    os.execv({real_tr!r}, [{real_tr!r}, *sys.argv[1:]])\n",
+        encoding="utf-8", newline="\n",
+    )
+    tr.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tools) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("LC_ALL", "C.UTF-8")
+    name = "café box/ü"
+    root = lock.bash_provenance_dir()
+    before = sorted(root.rglob("*")) if root.exists() else []
+    with pytest.raises(lock.SandboxLockUnsafe, match="non-ASCII sandbox mutations"):
+        with lock.sandbox_lock("msb", name):
+            pytest.fail("an ambiguous legacy lock was acquired")
+    proc = _bash('ACQ_PROVIDER_INPUT_LOCK_RETRIES=1 acq_provider_input_lock_acquire msb "$1" $$', name)
+    assert proc.returncode == 1
+    assert "non-ASCII sandbox mutations" in proc.stderr
+    assert (sorted(root.rglob("*")) if root.exists() else []) == before
+    # Read-only legacy spelling remains unchanged, and witnesses why refusal
+    # replaced the unrestricted byte-key parity claim.
+    proc = _bash('acq_provider_input_root msb "$1"', name)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() + ".lock" != str(lock._bash_lock_dir("msb", name))
+
+
+@_POSIX_ONLY
+@pytest.mark.skipif(not shutil.which("bash"), reason="needs bash")
 def test_bash_lock_dir_matches_bash_provider_input_root(monkeypatch, tmp_path):
-    for name in ("box", "café box/ü"):
+    for name in ("box", "ascii box"):
         proc = _bash('acq_provider_input_root msb "$1"', name)
         assert proc.returncode == 0, proc.stderr
         assert str(lock._bash_lock_dir("msb", name)) == proc.stdout.strip() + ".lock"
+
+
+@pytest.mark.parametrize("argv", [["rm", "café"], ["start", "café"], ["run", "café"],
+                                  ["kit", "apply", "café", "opencode"], ["create", "shell", "--recreate", "café"],
+                                  ["secret", "set", "café", "github"], ["github-scope", "café"],
+                                  ["cp", "café:/guest", "local"], ["cp", "é:/guest", "local"],
+                                  ["secret", "import", "github", "café", "--all"],
+                                  ["secret", "import", "--all", "github", "café"]])
+def test_non_ascii_target_refused_before_migration_or_backend(monkeypatch, tmp_path, capsys, argv):
+    _env(monkeypatch, tmp_path)
+    before = list(tmp_path.rglob("*"))
+    monkeypatch.setattr(cli.migration, "migrate_tree", lambda: pytest.fail("migration ran"))
+    monkeypatch.setattr(msb, "_run", lambda *a, **kw: pytest.fail("backend ran"))
+    rc, doc = _invoke(capsys, "--backend", "msb", *argv, "--json")
+    assert rc == 1
+    assert "non-ASCII sandbox mutations" in doc["error"]["message"]
+    assert list(tmp_path.rglob("*")) == before
+
+
+def test_copy_drive_classification_requires_ascii_drive_letter(monkeypatch):
+    before = os.name
+    monkeypatch.setattr(common, "WINDOWS", True)
+    assert common._sandbox_ref("C:/guest") is None
+    assert common._sandbox_ref("é:/guest") == ("é", "/guest")
+    assert os.name == before  # pytest's own cache/reporting path stays native
+
+
+@pytest.mark.parametrize("argv", [["secret", "rm", "-g", "github"], ["secret", "set", "-g", "github"],
+                                  ])
+def test_global_mixed_targets_refused_before_first_write(monkeypatch, tmp_path, capsys, argv):
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setattr(msb, "list_names", lambda: ["ascii-first", "café"])
+    monkeypatch.setattr(cli.migration, "migrate_tree", lambda: pytest.fail("migration wrote"))
+    monkeypatch.setattr(cli.secret.secretstore, "store", lambda *a: pytest.fail("credential wrote"))
+    monkeypatch.setattr(common, "_read_secret_value", lambda *a: "fixture-value-not-a-secret")
+    before = list(tmp_path.rglob("*"))
+    rc, doc = _invoke(capsys, "--backend", "msb", *argv, "--json")
+    assert rc == 1 and "non-ASCII sandbox mutations" in doc["error"]["message"]
+    assert list(tmp_path.rglob("*")) == before
+
+
+@_POSIX_ONLY
+@pytest.mark.parametrize("argv", [["rm", "café"], ["run", "café"], ["attach", "café"],
+                                  ["secret", "set", "café", "github"], ["cp", "café:/guest", "local"]])
+def test_bash_command_non_ascii_refusal_precedes_fetch_or_backend(monkeypatch, tmp_path, argv):
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    before = list(tmp_path.rglob("*"))
+    proc = subprocess.run([shutil.which("bash"), str(_REPO / "acq"), "--backend", "msb", *argv],
+                          capture_output=True, text=True, timeout=10)
+    assert proc.returncode == 1
+    assert "non-ASCII sandbox mutations" in proc.stderr
+    assert list(tmp_path.rglob("*")) == before
+
+
+@_POSIX_ONLY
+@pytest.mark.parametrize("argv", [["secret", "rm", "-g", "github"],
+                                  ["secret", "set", "github", "--host", "github.com", "--env", "GITHUB_TOKEN"]])
+def test_bash_global_mixed_targets_refused_before_writes(monkeypatch, tmp_path, argv):
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    msb_bin = tools / "msb"
+    msb_bin.write_text('#!/bin/sh\n[ "$1" = list ] || exit 97\nprintf "ascii-first\\ncafé\\n"\n',
+                       encoding="utf-8", newline="\n")
+    msb_bin.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tools) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    before = list(tmp_path.rglob("*"))
+    proc = subprocess.run([shutil.which("bash"), str(_REPO / "acq"), "--backend", "msb", *argv],
+                          capture_output=True, text=True, timeout=10)
+    assert proc.returncode == 1
+    assert "non-ASCII sandbox mutations" in proc.stderr
+    assert list(tmp_path.rglob("*")) == before
+
+
+@_POSIX_ONLY
+@pytest.mark.parametrize("argv", [["provider-credential", "rm", "usai", "--help"],
+                                  ["secret", "rm", "-g", "github", "--help"]])
+def test_bash_help_never_lists_mutation_targets(monkeypatch, tmp_path, argv):
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    marker = tmp_path / "listed"
+    msb_bin = tools / "msb"
+    msb_bin.write_text(f'#!/bin/sh\nif [ "$1" = list ]; then touch "{marker}"; exit 97; fi\nexit 0\n',
+                       encoding="utf-8", newline="\n")
+    msb_bin.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tools) + os.pathsep + os.environ["PATH"])
+    proc = subprocess.run([shutil.which("bash"), str(_REPO / "acq"), "--backend", "msb", *argv],
+                          capture_output=True, text=True, timeout=10)
+    assert proc.returncode == 0
+    assert not marker.exists()
 
 
 def test_posix_cksum_matches_the_bash_lock_key():

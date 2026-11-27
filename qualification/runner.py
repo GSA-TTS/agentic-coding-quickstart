@@ -64,6 +64,11 @@ def _grace(timeout: float) -> float:
     return min(TERMINATE_GRACE, timeout / 4)
 
 
+def _is_windows() -> bool:
+    """Platform seam for process handling; tests must not mutate global ``os.name``."""
+    return os.name == "nt"
+
+
 def _communicate(proc: subprocess.Popen, timeout: float) -> tuple[bytes, bytes]:
     """``proc.communicate(timeout=timeout)``, waiting in ``WAIT_SLICE`` slices.
 
@@ -84,7 +89,7 @@ def _stop(proc: subprocess.Popen, grace: float, *, ask: bool = True) -> None:
     """Ask ``proc`` to stop (unless ``ask`` is false), wait ``grace`` seconds, then kill it."""
     try:
         if ask:
-            proc.send_signal(signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGTERM)
+            proc.send_signal(signal.CTRL_BREAK_EVENT if _is_windows() else signal.SIGTERM)
         proc.communicate(timeout=grace)
     except (subprocess.TimeoutExpired, OSError):
         proc.kill()
@@ -143,7 +148,7 @@ def _single_run(
     child_env[ATTEMPT_ENV] = str(attempt)
     child_env[DEADLINE_ENV] = str(int(time.time() + timeout - grace))
     # Its own process group on Windows, so CTRL_BREAK reaches only the command.
-    flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+    flags = subprocess.CREATE_NEW_PROCESS_GROUP if _is_windows() else 0
     try:
         proc = subprocess.Popen(
             list(command), env=child_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=flags

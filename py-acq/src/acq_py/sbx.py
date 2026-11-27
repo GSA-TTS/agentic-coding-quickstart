@@ -39,7 +39,16 @@ import subprocess
 import sys
 from typing import NamedTuple
 
-from . import backends, errors, hostexec, kits, provider_creds, secretstore, timeouts
+from . import (
+    backends,
+    errors,
+    hostexec,
+    kits,
+    lock,
+    provider_creds,
+    secretstore,
+    timeouts,
+)
 from .secretstore import Scope
 
 STUB_SENTINEL = "__stub__"
@@ -1394,6 +1403,9 @@ def rotate_preflight(*, primary: bool = True) -> dict | None:
         globals_, sandbox_rows = _rotate_plan(
             hosts, env, listing, budget, outcome=_NOTHING_CHANGED if primary else _SBX_NOT_REFED
         )
+        for row in sandbox_rows:
+            if not row.label.isascii():
+                raise SbxError(errors.UNSUPPORTED, lock.LEGACY_NAME_REFUSAL, lock.LEGACY_NAME_REMEDIATION)
         if primary or globals_ or sandbox_rows:
             _require_set_custom()
     except SbxError as exc:

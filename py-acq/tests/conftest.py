@@ -52,6 +52,9 @@ TEST_LOCK_TIMEOUT_S = 30.0
 _USER_DIR_VARS = ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME")
 # Backend-stub homes are consulted before HOME; a developer's export must not leak in.
 _BACKEND_HOME_VARS = ("MSB_HOME", "SBX_HOME")
+# Product tests model credentials explicitly. A CI-injected provider key must
+# not select a different gate branch or reach a child process.
+_PROVIDER_KEY_VARS = ("USAI_API_KEY",)
 
 
 @pytest.fixture
@@ -93,6 +96,8 @@ def isolate_user_dirs(tmp_path_factory, monkeypatch):
         path.mkdir()
         monkeypatch.setenv(var, str(path))
     for var in [v for v in os.environ if v.startswith("ACQ_")] + list(_BACKEND_HOME_VARS):
+        monkeypatch.delenv(var, raising=False)
+    for var in _PROVIDER_KEY_VARS:
         monkeypatch.delenv(var, raising=False)
     # A developer's real ssh-agent must never be forwarded into a stub sandbox
     # (or change what a create prints): SSH_AUTH_SOCK is the forward's opt-in

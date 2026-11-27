@@ -48,6 +48,8 @@ REQUIRED = {
     ".github/workflows/build-assets.yml", "scripts/assemble-release", "scripts/gen-provenance",
     "scripts/qualify-backend-cell", "scripts/setup-provider-input-validator",
     "scripts/test-acq-lib.sh", "scripts/refresh-kitbundle",
+    "scripts/pytest_shard.py",
+    "scripts/pytest_platform_selection.py",
     "qualification", "docs/qualification-ledger.json",
     "test/bats/06-windows-install.bats", "test/bats/55-version.bats",
     "test/bats/117-msys-path-forms.bats",
@@ -56,6 +58,9 @@ REQUIRED = {
     "test/vendor", ".gitmodules", "test/vectors", "test/fixtures",
     ".gitattributes", ".github/CODEOWNERS",
     ".github/workflows/release.yml", ".github/workflows/tier3-release-gate.yml",
+    ".github/workflows/python-quality.yml", ".github/workflows/python-vectors.yml",
+    ".github/workflows/pre-commit.yml", ".github/workflows/bash32-compat.yml",
+    ".github/workflows/macos.yml",
     ".github/workflows/windows.yml",
 }
 
@@ -81,9 +86,7 @@ NOT_INPUTS = {
     # GitHub configuration and the other workflows
     ".github/ISSUE_TEMPLATE/", ".github/linters/", ".github/keys/",
     ".github/dependabot.yml", ".github/pull_request_template.md", ".github/release.yml",
-    ".github/workflows/bash32-compat.yml", ".github/workflows/markdown-quality.yml",
-    ".github/workflows/pr-lint.yml", ".github/workflows/pre-commit.yml",
-    ".github/workflows/python-quality.yml", ".github/workflows/python-vectors.yml",
+    ".github/workflows/markdown-quality.yml", ".github/workflows/pr-lint.yml",
     # the dispatch-only macOS uninstall acceptance workflow and the scripts only it runs
     ".github/workflows/macos-uninstall-acceptance.yml", "scripts/test-uninstall-macos",
     "scripts/uninstall-acceptance-helper.py", "scripts/uninstall-acceptance-lib.sh",

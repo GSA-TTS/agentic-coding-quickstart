@@ -141,10 +141,13 @@ py-acq/requirements-quality.txt
 py-acq/tests/
 scripts/qualify-backend-cell
 scripts/refresh-kitbundle
+scripts/pytest_shard.py
+scripts/pytest_platform_selection.py
 .github/workflows/python-quality.yml
 .github/workflows/python-vectors.yml
 .github/workflows/tier3-release-gate.yml
 .github/workflows/windows.yml
+.github/workflows/macos.yml
 .github/workflows/build-assets.yml
 docs/
 checklists/
@@ -223,6 +226,24 @@ _workflow_pathspecs() {
   local cmd
   cmd=$(_relevance_command) || return 1
   printf '%s\n' "$cmd" | grep -o "'[^']*'" | tr -d "'"
+}
+
+@test "relevance: the CI-only pytest shard plugin is not a Bash suite input" {
+  [[ "$NOT_INPUTS" == *$'\nscripts/pytest_shard.py\n'* ]]
+  local specs
+  specs=$(_workflow_pathspecs)
+  if printf '%s\n' "$specs" | grep -qx 'scripts/pytest_shard.py'; then
+    fail 'pytest-only plugin must not be a Bash relevance input'
+  fi
+}
+
+@test "relevance: the CI-only pytest platform selector is not a Bash suite input" {
+  [[ "$NOT_INPUTS" == *$'\nscripts/pytest_platform_selection.py\n'* ]]
+  local specs
+  specs=$(_workflow_pathspecs)
+  if printf '%s\n' "$specs" | grep -qx 'scripts/pytest_platform_selection.py'; then
+    fail 'pytest-only selector must not be a Bash relevance input'
+  fi
 }
 
 @test "relevance: the pathspec list can be parsed from the workflow" {

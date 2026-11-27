@@ -294,6 +294,31 @@ def test_every_msb_call_in_a_rotation_is_bounded(monkeypatch, tmp_path, capsys, 
     assert {t for _argv, t in refeed} == {7.0}
 
 
+def test_rotation_mixed_targets_refused_before_store(monkeypatch, tmp_path, capsys, msb_children):
+    _msb_running(monkeypatch, tmp_path, "ascii-first", "café")
+    monkeypatch.setattr(cli.migration, "migrate_tree", lambda: pytest.fail("migration ran before target refusal"))
+    rc, doc, _out, _err = _rotate(capsys, monkeypatch, "msb")
+    assert rc == 1 and doc["error"]["code"] == errors.UNSUPPORTED
+    assert "non-ASCII sandbox mutations" in doc["error"]["message"]
+    assert secretstore.resolve("usai") == OLD
+    assert _modified(msb_children) == {}
+
+
+def test_msb_running_list_failure_reports_not_refed(monkeypatch, tmp_path, capsys, msb_children):
+    _msb_running(monkeypatch, tmp_path, "a")
+    real = msb._run
+    def fail_running(argv, **kwargs):
+        if argv[:3] == ["list", "--running", "-q"]:
+            return subprocess.CompletedProcess(argv, 1, "", "")
+        return real(argv, **kwargs)
+    monkeypatch.setattr(msb, "_run", fail_running)
+    rc, doc, _out, _err = _rotate(capsys, monkeypatch, "msb")
+    assert rc == 1
+    assert doc["error"]["backends"][0]["not_refed"]
+    assert secretstore.resolve("usai") == NEW
+    assert _modified(msb_children) == {}
+
+
 def test_msb_modify_timeout_fails_only_that_sandbox(monkeypatch, tmp_path, capsys, msb_children):
     _msb_running(monkeypatch, tmp_path, "a", "b")
     monkeypatch.setenv("ACQ_ROTATE_TIMEOUT", "7")

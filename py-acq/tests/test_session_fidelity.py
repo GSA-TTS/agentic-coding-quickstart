@@ -833,6 +833,19 @@ def test_agent_shell_survives_non_utf8_passwd_entries(fake, monkeypatch, tmp_pat
     getent = getent_dir / "getent"
     getent.write_text(f"#!/bin/sh\ncat '{entry}'\n", encoding="utf-8")
     getent.chmod(0o755)
+    # Model BSD cut rejecting non-text input outside the C locale. The real
+    # guest cut still runs for byte mode; this is not native macOS execution.
+    import shutil
+    real_cut = shutil.which("cut")
+    assert real_cut is not None
+    cut = getent_dir / "cut"
+    cut.write_text(
+        f"#!{sys.executable}\nimport os, sys\n"
+        "if os.environ.get('LC_ALL') != 'C':\n    sys.exit(1)\n"
+        f"os.execv({real_cut!r}, [{real_cut!r}, *sys.argv[1:]])\n",
+        encoding="utf-8", newline="\n",
+    )
+    cut.chmod(0o755)
     monkeypatch.setenv("FAKE_GETENT_DIR", str(getent_dir))
     assert msb.agent_shell("box") == "/bin/bash"
     # A guest whose output is not text at all falls back instead of crashing.

@@ -165,6 +165,12 @@ def test_golden_random_corpus(tmp_path):
     assert assert_translation_parity(tmp_path, _kit_dirs_from_specs(tmp_path, specs)) < len(specs) // 10
 
 
+@needs_bash
+def test_empty_install_command_matches_bash_under_nounset(tmp_path):
+    specs = {"empty-command": b"commands:\n  - phase: install\n    command:\n"}
+    assert assert_translation_parity(tmp_path, _kit_dirs_from_specs(tmp_path, specs)) == 0
+
+
 _SPECIAL_SPEC = """\
 schemaVersion: "hybrid/v1"
 kind: mixin

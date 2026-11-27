@@ -588,10 +588,12 @@ def test_ctrl_c_is_forwarded_to_the_command_on_every_platform(monkeypatch, platf
     monkeypatch.setattr(runner.subprocess, "Popen", lambda *a, **k: Proc())
     monkeypatch.setattr(runner.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
     monkeypatch.setattr(runner, "_stop", lambda proc, grace, ask=True: seen.append(ask))
-    monkeypatch.setattr(runner.os, "name", platform)
+    before = os.name
+    monkeypatch.setattr(runner, "_is_windows", lambda: platform == "nt")
     with pytest.raises(KeyboardInterrupt):
         runner._single_run(["oracle"], make_env(), 1, timeout=60.0)
     assert seen == [True]
+    assert os.name == before
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")

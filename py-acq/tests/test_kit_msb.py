@@ -927,7 +927,10 @@ def test_exec_flags_match_bash(tmp_path, user, own):
     script = (
         '_u="$1"; _n="$2"; shift 2; _o=(); _m=();'
         ' while [ "$_n" -gt 0 ]; do _o+=("$1"); shift; _n=$((_n-1)); done; _m=("$@");'
-        ' _acq_msb_exec_flags_into uf ef "$_u" _m _o; printf "%s\\n" "${uf[@]}" "${ef[@]}"'
+        # Bash 3.2 treats an empty array as unset under nounset. Keep the real
+        # oracle's flags intact while expanding an absent user flag safely.
+        ' _acq_msb_exec_flags_into uf ef "$_u" _m _o;'
+        ' printf "%s\\n" ${uf[@]+"${uf[@]}"} ${ef[@]+"${ef[@]}"}'
     )
     bash = _bash(tmp_path, script, user, str(len(own)), *own, *merged).splitlines()
     assert kit_msb.exec_flags(user, kit_msb.command_env(merged, own)) == bash

@@ -15,25 +15,33 @@ on:
   pull_request:
     branches:
       - main
+      - migration/python-cross-platform
   push:
     branches:
       - main
+      - migration/python-cross-platform
   merge_group:
     branches: [main]
 
 concurrency:
-  group: python-vectors-${{ github.head_ref || github.ref }}
+  group: python-vectors-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
+env:
+  # Must match build-assets.yml: product tests execute at the shipped version.
+  ACQ_BUILD_RUNTIME_VERSION: 3.14.10
+
 jobs:
-  vectors:
+  pytest-shards:
     runs-on: ubuntu-latest
-    # The corpus runs under both runners plus the pytest it drives; at 270+ vectors
-    # that passed the old 15-minute cap and was cancelled after every vector passed.
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ['1/4', '2/4', '3/4', '4/4']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -41,7 +49,7 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: '3.12'
+          python-version: ${{ env.ACQ_BUILD_RUNTIME_VERSION }}
 
       # jq, pinned to 1.7.1 and SHA256-verified (declared in CI per ADR-0043m).
       - name: Install jq (pinned, SHA256-verified)
@@ -110,11 +118,37 @@ jobs:
           ACQ_TEST_PATTERNS_REPO: ${{ github.workspace }}/.ci/agentic-coding-patterns
         run: |
           set -euo pipefail
-          python -m pytest py-acq/tests -q -rs | tee "$RUNNER_TEMP/pytest.log"
+          python -c 'import sys; assert sys.version_info[:3] == (3, 14, 10), sys.version'
+          python -m pytest -p scripts.pytest_shard py-acq/tests --acq-shard '${{ matrix.shard }}' -v --tb=short -ra --show-capture=no | tee "$RUNNER_TEMP/pytest.log"
           if grep -q 'pinned Patterns checkout is provided' "$RUNNER_TEMP/pytest.log"; then
             echo "::error::the pinned Patterns checks were skipped; ACQ_TEST_PATTERNS_REPO did not reach them"
             exit 1
           fi
+
+  corpus:
+    # The independent source and installed-wheel corpora run once, and only
+    # after every pytest worker succeeded (ADR-0054m).
+    needs: [pytest-shards]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.ACQ_BUILD_RUNTIME_VERSION }}
+
+      - name: Install jq (pinned, SHA256-verified)
+        run: |
+          set -euo pipefail
+          jq_sha="5942c9b0934e510ee61eb3e30273f1b3fe2590df93933a93d7c58b81d19c8ff5"
+          curl -fsSL -o jq https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64
+          echo "${jq_sha}  jq" | sha256sum -c -
+          chmod +x jq
+          sudo mv jq /usr/local/bin/jq
+          jq --version
 
       # The independent Bash runner over the same corpus; must agree with pytest
       # on the sentinel golden set.
@@ -142,3 +176,20 @@ jobs:
           (cd "$RUNNER_TEMP" && "$run/bin/python" -c 'import acq_py, sys; sys.exit("site-packages" not in acq_py.__file__)')
           (cd "$RUNNER_TEMP" && ACQ_SBX_INSTALLED=0 ACQ_MSB_INSTALLED=0 "$run/bin/acq-py" version --json)
           scripts/run-vectors --acq "$run/bin/acq-py" --section cli
+
+  vectors:
+    # Keep the required check name stable. always() prevents a failed, cancelled
+    # or skipped prerequisite from turning into a successful skipped gate.
+    needs: [pytest-shards, corpus]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every pytest shard and both corpora
+        env:
+          PYTEST_RESULT: ${{ needs.pytest-shards.result }}
+          CORPUS_RESULT: ${{ needs.corpus.result }}
+        run: |
+          set -euo pipefail
+          test "$PYTEST_RESULT" = success
+          test "$CORPUS_RESULT" = success

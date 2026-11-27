@@ -59,6 +59,7 @@ from . import (  # noqa: F401
     envelope,
     errors,
     hostexec,
+    lock,
     migration,
     msb,
     state,
@@ -741,6 +742,8 @@ def _is_mutating(parsed) -> bool:
     trigger migration (ADR-0041m: read-only diagnostics may report ``unknown``).
     """
     cmd = parsed.command
+    if cmd == "ports":
+        return bool(parsed.publish)
     if cmd in ("create", "run", "stop", "start", "restart", "rm", "exec", "attach", "shell", "cp", "ports"):
         return True
     if cmd == "secret":
@@ -756,6 +759,65 @@ def _is_mutating(parsed) -> bool:
     if cmd == "kit-source":
         return parsed.kit_source_command in ("add", "rm")
     return False
+
+
+def _legacy_targets_pre_step(parsed, emit_json: bool) -> int | None:
+    """Validate explicit and whole-fanout targets before migration or writes."""
+    names = [getattr(parsed, field, None) for field in ("name", "recreate", "sandbox")]
+    cmd = parsed.command
+    if cmd == "run" and parsed.target not in KNOWN_AGENTS:
+        names.append(parsed.target)
+    if cmd == "cp":
+        names.extend(ref[0] for token in (parsed.src, parsed.dst) if (ref := common._sandbox_ref(token)))
+    fanout = cmd == "provider-credential"
+    if cmd == "secret":
+        subcommand = getattr(parsed, "secret_command", None)
+        if subcommand == "import":
+            opts, problem = secret._parse_import(parsed)
+            if problem:
+                return common._usage_failure("secret import", problem, emit_json)
+            names.append(opts.sandbox)
+            fanout = False  # import stores only; no backend fanout
+        else:
+            positionals, _, _, _ = common._split_host_env(parsed.args)
+            scope, service = common._parse_secret_scope_service(parsed.global_scope, positionals)
+            if scope is not None and scope.sandbox is not None and not scope.sandbox.isascii():
+                return common._operational_failure(_command_label(parsed), errors.UNSUPPORTED,
+                    lock.LEGACY_NAME_REFUSAL, lock.LEGACY_NAME_REMEDIATION, emit_json)
+            if scope is None or service is None or common._secret_names_problem(scope, service):
+                return None  # the handler's existing usage refusal runs without access
+            if subcommand == "set":
+                hosts = list(getattr(parsed, "hosts", None) or [])
+                _, extra_hosts, env_flag, flag_error = common._split_host_env(parsed.args)
+                _, _, problem = secret._resolve_binding(service, hosts + extra_hosts,
+                                                        env_flag or getattr(parsed, "env_name", None))
+                if flag_error or problem:
+                    return None
+                value = common._read_secret_value(secret._prompt_for(service))
+                parsed.preflight_secret_value = value
+                if not value.strip() or secret.secretstore.value_problem(value):
+                    return None
+            names.append(scope.sandbox)
+            fanout = scope.sandbox is None
+    try:
+        for name in names:
+            if name:
+                lock.legacy_mutation_name_check(name)
+        if fanout:
+            # Detection/listing are read-only; no credential read or write here.
+            for status in backends.detect_all():
+                if not status.installed:
+                    continue
+                targets = common._adapter(status.name).list_names()
+                if targets is None:
+                    return common._operational_failure(_command_label(parsed), errors.FAILURE,
+                        "cannot validate the complete global sandbox target set", "restore backend listing before retrying; nothing was changed", emit_json)
+                for target in targets:
+                    lock.legacy_mutation_name_check(target)
+    except lock.SandboxLockUnsafe as exc:
+        return common._operational_failure(_command_label(parsed), errors.UNSUPPORTED,
+                                           str(exc), exc.remediation, emit_json)
+    return None
 
 
 def _migration_pre_step(emit_json: bool, command: str) -> int | None:
@@ -1027,7 +1089,12 @@ def _dispatch(parser: _Parser, parsed, emit_json: bool, backend_override: str | 
             return name_check
 
     if _is_mutating(parsed):
-        pre_step = _migration_pre_step(emit_json, _command_label(parsed))
+        target_check = _legacy_targets_pre_step(parsed, emit_json)
+        if target_check is not None:
+            return target_check
+        # Rotation owns a version/budget-aware target preflight. It migrates
+        # only after that preflight, before storing the validated credential.
+        pre_step = None if parsed.command == "usai-rotate-api-key" else _migration_pre_step(emit_json, _command_label(parsed))
         if pre_step is not None:
             return pre_step
 

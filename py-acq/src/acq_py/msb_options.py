@@ -83,7 +83,7 @@ def dns_flags() -> list[str]:
 def _safe_path(path: Path) -> bool:
     """Reject symlinks except for macOS's standard root directory aliases."""
     try:
-        if sys.platform == "darwin" and len(path.parts) > 1 and path.parts[1] in ("var", "tmp", "etc"):
+        if _platform() == "darwin" and len(path.parts) > 1 and path.parts[1] in ("var", "tmp", "etc"):
             root = Path(path.anchor) / path.parts[1]
             canonical = Path("/private") / path.parts[1]
             # Only trust the OS alias to its standard destination. All remaining
@@ -106,7 +106,7 @@ def _readable_pem(path: Path) -> bool:
 
 def ca_host_path(value: str) -> str:
     """Translate the CA list's POSIX vocabulary for the native Windows CLI."""
-    if sys.platform != "win32":
+    if _platform() != "win32":
         return value
     if value.startswith("/unc/"):
         return "//" + value[5:]
@@ -125,7 +125,7 @@ def upstream_ca_flags() -> list[str]:
         if not value:
             continue
         host = ca_host_path(value)
-        absolute = ntpath.isabs(host) and bool(ntpath.splitdrive(host)[0]) if sys.platform == "win32" else userdirs.is_absolute(host)
+        absolute = ntpath.isabs(host) and bool(ntpath.splitdrive(host)[0]) if _platform() == "win32" else userdirs.is_absolute(host)
         if not absolute:
             print("acq(msb): warning: ACQ_MSB_UPSTREAM_CA_CERT path is not absolute, "
                   f"skipping: {value}", file=sys.stderr)
@@ -137,7 +137,7 @@ def upstream_ca_flags() -> list[str]:
     if flags:
         return flags
     auto = os.environ.get("ACQ_MSB_UPSTREAM_CA_AUTODETECT", "1").lower()
-    if auto in ("", "0", "false", "no", "off") or sys.platform != "darwin":
+    if auto in ("", "0", "false", "no", "off") or _platform() != "darwin":
         return []
     security = hostexec.which("security")
     if not security:
@@ -189,5 +189,10 @@ def _export_note() -> None:
     print("acq(msb): note: could not export host CAs for the TLS-intercept upstream verifier;\n"
           "acq(msb):   msb will fall back to its own native-cert loading. If egress fails with\n"
           "acq(msb):   a TLS 'unexpected eof' behind a corporate proxy that terminates the\n"
-          "acq(msb):   endpoint, set ACQ_MSB_UPSTREAM_CA_CERT to your proxy's root CA PEM.\n"
-          "acq(msb):   See docs/KNOWN_FAILURE_MODES.md §30.", file=sys.stderr)
+           "acq(msb):   endpoint, set ACQ_MSB_UPSTREAM_CA_CERT to your proxy's root CA PEM.\n"
+           "acq(msb):   See docs/KNOWN_FAILURE_MODES.md §30.", file=sys.stderr)
+
+
+def _platform() -> str:
+    """Platform seam; tests must not mutate process-global ``sys.platform``."""
+    return sys.platform

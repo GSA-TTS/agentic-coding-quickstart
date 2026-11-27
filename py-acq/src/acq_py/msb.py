@@ -47,6 +47,7 @@ from . import (
     errors,
     hostexec,
     kits,
+    lock,
     msb_options,
     provider_creds,
     provider_input,
@@ -856,7 +857,7 @@ _SAFE_SHELL = re.compile(r"/[A-Za-z0-9._/-]*")
 # of the entry (the comment field in particular) may hold any bytes at all.
 _AGENT_SHELL_SCRIPT = (
     '{ getent passwd agent 2>/dev/null || grep "^agent:" /etc/passwd 2>/dev/null; }'
-    " | head -n1 | cut -d: -f7"
+    " | LC_ALL=C head -n1 | LC_ALL=C cut -d: -f7"
 )
 
 
@@ -2148,6 +2149,20 @@ def rotate_preflight(*, primary: bool = True) -> dict | None:
             "the USAi key has no usable msb binding (its recorded endpoint or provider pin is invalid)",
             "check it with 'acq secret ls -g' and 'acq provider-credential ls'; nothing was changed",
         )
+    if not _live_refeed_off():
+        budget = timeouts.rotate_timeout_s()
+        try:
+            targets = _running_targets(secretstore.GLOBAL, budget)
+        except subprocess.TimeoutExpired:
+            return {"backend": "msb", "refed": [], "kept_own": [],
+                    "not_refed": [f"every sandbox ({_rotate_timed_out('msb list', budget)})"],
+                    "remediation": f"check msb list; set {timeouts.ROTATE_TIMEOUT_ENV} or re-run 'acq usai-rotate-api-key'"}
+        except MsbError as exc:
+            return {"backend": "msb", "refed": [], "kept_own": [],
+                    "not_refed": [f"every sandbox ({exc.message})"], "remediation": exc.remediation}
+        for target in targets:
+            if not target.isascii():
+                raise MsbError(errors.UNSUPPORTED, lock.LEGACY_NAME_REFUSAL, lock.LEGACY_NAME_REMEDIATION)
     return None
 
 

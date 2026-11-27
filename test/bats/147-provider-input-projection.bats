@@ -226,12 +226,12 @@ PYTHON
   chmod +x "$hostile/msb" "$hostile/brew"
 
   PATH="$hostile:$PATH" fixture_path=$(_fixture_validator_path "$fakebin")
-  run "$BASH" -c 'PATH="$1"; command -v bash; command -v msb; command -v brew' _ "$fixture_path"
+  run "${ACQ_BASH32_LAUNCHER:-$BASH}" -c 'PATH="$1"; command -v bash; command -v msb; command -v brew' _ "$fixture_path"
   assert_failure
   assert_output --partial "$fakebin/safe-bin/bash"
   refute_output --partial "$hostile"
   for tool in basename cp cut dirname ln mkdir mktemp mv python3 readlink rm; do
-    PATH="$fixture_path" "$BASH" -c 'command -v "$1" >/dev/null' _ "$tool" \
+    PATH="$fixture_path" "${ACQ_BASH32_LAUNCHER:-$BASH}" -c 'command -v "$1" >/dev/null' _ "$tool" \
       || fail "validator fixture path lacks $tool"
   done
 }
@@ -499,6 +499,21 @@ EOF
   assert_success
   grep -Fq 'selected-3.12' "$log"
   ! grep -Fq 'wrong-3.14' "$log"
+}
+
+@test "provider path security discovers Python 3.14 on Linux" {
+  local fakebin="$STUBDIR/path-security-linux"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/python3.14" <<'EOF'
+#!/bin/sh
+[ "${1:-}" = -I ] && shift
+[ "${1:-}" = -c ] && { printf '3.14\n'; exit 0; }
+exit 1
+EOF
+  chmod +x "$fakebin/python3.14"
+  run env PATH="$fakebin:$PATH" ACQ_PROVIDER_INPUT_PYTHON= bash -c "source '$REPO_ROOT/acq.backends/common.sh'; _acq_provider_input_path_python"
+  assert_success
+  assert_output "$fakebin/python3.14"
 }
 
 @test "setup validator rejects invalid arguments without changing a runtime" {
