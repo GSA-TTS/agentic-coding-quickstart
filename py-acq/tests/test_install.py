@@ -197,10 +197,9 @@ def test_unknown_option_is_a_usage_error(tmp_path):
 
 
 @supported_platform_only
-def test_channel_python_dry_run_surfaces_channel(tmp_path):
-    # ADR-0047m: --channel python is the only (and default) channel; it parses,
-    # surfaces the channel in the plan, and installs exactly what the no-flag
-    # default installs today.
+def test_explicit_pinned_python_channel_dry_run_surfaces_channel(tmp_path):
+    # ADR-0053: the helper supplies the required explicit RC pin. Python parses
+    # and surfaces the preview channel; Bash remains the no-channel default.
     proc = _run_installer(tmp_path, "--channel", "python", "--dry-run")
     assert proc.returncode == 0
     assert "channel:" in proc.stdout.decode()

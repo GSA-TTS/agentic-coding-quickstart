@@ -102,6 +102,8 @@ jobs:
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
           changed="$(git diff --name-only "$BASE_SHA" -- \
             'acq.cmd' \
+            'acq-python.cmd' \
+            'acq-python.ps1' \
             'acq.ps1' \
             'acq' \
             'acq-python' \

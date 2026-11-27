@@ -1,12 +1,12 @@
 {
   "schema": 1,
   "id": "installer/dry-run",
-  "oracle": "ADR-0042m installer dry-run: prints a plan, performs no writes, no network",
+  "oracle": "ADR-0053 preview installer dry-run: explicit pinned preview prints a plan and performs no writes or network",
   "tier": 1,
   "backend": null,
   "platform": "linux",
   "invoke": {
-    "argv": ["sh", "install.sh", "--dry-run"],
+    "argv": ["sh", "install.sh", "--channel", "python", "--ref", "5.0.0-rc.1", "--dry-run"],
     "env": {},
     "unset": [],
     "stdin": "",

@@ -28,7 +28,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 # Paths the Windows jobs must react to, and why.
-#   launchers and installers  acq.cmd/acq.ps1 run acq; the smoke steps run both
+#   launchers and installers  acq.cmd/acq.ps1 and acq-python.* run acq; smoke steps run both
 #                             installers' entry points; installer/ holds the
 #                             asset manifest the install tests read
 #   py-acq                    the code, its tests, the pytest config and the
@@ -41,7 +41,7 @@ pytestmark = pytest.mark.skipif(
 #   repo files                .gitattributes (the CRLF guard), CODEOWNERS and
 #                             the workflows the tests grep, and windows.yml
 REQUIRED = {
-    "acq.cmd", "acq.ps1", "acq", "acq-python", "acq.backends",
+    "acq.cmd", "acq.ps1", "acq-python.cmd", "acq-python.ps1", "acq", "acq-python", "acq.backends",
     "install.ps1", "install.sh", "installer",
     "py-acq/src", "py-acq/tests", "py-acq/pyproject.toml", "py-acq/requirements-quality.txt",
     "scripts/stage-windows-runtime", "scripts/gen-install-assets",

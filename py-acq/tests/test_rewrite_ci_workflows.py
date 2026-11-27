@@ -104,8 +104,8 @@ def test_macos_is_independent_native_offline_and_hash_pinned():
     assert '--source "$AREA/dist"' in text
     assert 'version --json' in text and "d['impl'] == 'python'" in text
     assert "d['acq_version']" in text and "d['source_revision']" in text
-    assert '"$AREA/bin/acq" --help' in text
-    assert '"$AREA/bin/acq" backend list --json' in text
+    assert '"$AREA/bin/acq-python" --help' in text
+    assert '"$AREA/bin/acq-python" backend list --json' in text
     assert 'if: always() && steps.area.outputs.path' in text
     assert '"$RUNNER_TEMP"/acq-macos.*) rm -rf -- "$AREA"' in text
 

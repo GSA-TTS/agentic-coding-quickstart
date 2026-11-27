@@ -536,8 +536,12 @@
       "vectors": ["coexistence/impl-unknown"]
     },
     {
-      "contract": "ADR-0047m installer --channel: --channel python parses and dry-runs unchanged (the only channel, also the default)",
+      "contract": "ADR-0053 preview installer: explicit pinned --channel python parses and dry-runs unchanged while Bash remains the default",
       "vectors": ["installer/channel-python-dry-run"]
+    },
+    {
+      "contract": "ADR-0053 preview installer: offline, dry-run, consent and checksum contracts require an explicit pinned Python channel",
+      "vectors": ["installer/checksum-fail-closed", "installer/consent-declined", "installer/dry-run", "installer/offline-install"]
     },
     {
       "contract": "ADR-0047m installer --channel: an unknown channel fails closed with exit 2",
