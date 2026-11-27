@@ -56,6 +56,7 @@ AGENTS.md
 scripts/test-acq-lib.sh
 scripts/test-acq-bats
 scripts/test-acq-bash32
+scripts/test-py-acq-sharded
 scripts/bats-shard
 scripts/fetch-bash32-oci.py
 scripts/scan-heredoc-subst.py

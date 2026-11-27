@@ -100,6 +100,7 @@ NOT_INPUTS = {
     "scripts/rotate-apikey", "scripts/run-shellcheck", "scripts/run-vectors",
     "scripts/scan-heredoc-subst.py", "scripts/summarize-bats-timing",
     "scripts/test-acq-bash32", "scripts/test-acq-bats",
+    "scripts/test-py-acq-sharded",
     "scripts/test-probe-msb-node-startup.py", "scripts/test-probe-msb-startup.py",
     "scripts/verify-backends", "scripts/verify-git-https-secret-msb",
     "scripts/verify-host-authority-live", "scripts/verify-host-authority-live-lib.sh",

@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+#
+# test-py-acq-sharded — run the complete py-acq pytest suite in CI-equivalent,
+# whole-file shards.  Give pytest arguments to run one focused test or file
+# instead; focused invocations deliberately do not add sharding.
+#
+# The CI plugin (scripts.pytest_shard) derives the partition from the collected
+# files, so a newly collected test file joins exactly one shard without a table
+# update.  Each shard's output is buffered and replayed by shard number after
+# every child exits, keeping concurrent diagnostics readable.
+#
+# Usage:
+#   scripts/test-py-acq-sharded
+#   ACQ_PYTEST_JOBS=2 scripts/test-py-acq-sharded
+#   scripts/test-py-acq-sharded py-acq/tests/test_cli.py -k version
+#
+# Bash 3.2 compatible: do not use wait -n, mapfile, or associative arrays.
+set -uo pipefail
+
+_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_root="$(cd "${_dir}/.." && pwd)"
+_python="${ACQ_PYTEST_PYTHON:-python3}"
+
+# Focused pytest is intentionally direct: it is the fast bug-loop interface.
+if [ "$#" -gt 0 ]; then
+  exec "$_python" -m pytest "$@"
+fi
+
+_shards="${ACQ_PYTEST_SHARDS:-4}"
+_jobs="${ACQ_PYTEST_JOBS:-$( (command -v nproc >/dev/null 2>&1 && nproc) || sysctl -n hw.ncpu 2>/dev/null || echo 1 )}"
+for _value in "$_shards" "$_jobs"; do
+  case "$_value" in
+    ''|*[!0-9]*|0*)
+      echo 'test-py-acq-sharded: shard and worker counts must be positive integers without leading zeros' >&2
+      exit 2
+      ;;
+  esac
+  if ! [ "$_value" -ge 1 ] 2>/dev/null; then
+    echo 'test-py-acq-sharded: shard or worker count exceeds the supported integer range' >&2
+    exit 2
+  fi
+done
+
+if [ "$_jobs" -gt "$_shards" ]; then
+  _jobs="$_shards"
+fi
+
+case "${TMPDIR:-}" in /*) _tmp_base="$TMPDIR" ;; *) _tmp_base=/tmp ;; esac
+_tmp="$(mktemp -d "$_tmp_base/acq-pytest-shards.XXXXXX")" || exit 2
+_pids=()
+_pid_shards=()
+_next=1
+_active=0
+_failed=0
+_cleanup() {
+  rm -rf "$_tmp"
+}
+_on_signal() {
+  _status="$1"
+  # A signal can land after `cmd &` but before `_start_shard` records `$!`.
+  # `jobs -p` is already aware of that child, so it closes that registration
+  # window. Ignore repeat signals until every known child is reaped.
+  trap '' HUP INT TERM
+  _signal_pids="$(jobs -p 2>/dev/null || true)"
+  for _pid in $_signal_pids; do
+    kill -TERM "$_pid" 2>/dev/null || true
+  done
+  for _pid in $_signal_pids; do
+    wait "$_pid" 2>/dev/null || true
+  done
+  trap - EXIT HUP INT TERM
+  _cleanup
+  exit "$_status"
+}
+trap _cleanup EXIT
+trap '_on_signal 129' HUP
+trap '_on_signal 130' INT
+trap '_on_signal 143' TERM
+
+echo "test-py-acq-sharded: ${_shards} shard(s), ${_jobs} worker(s)" >&2
+
+_start_shard() {
+  _number="$1"
+  (
+    cd "$_root" || exit 2
+    exec "$_python" -m pytest -p scripts.pytest_shard py-acq/tests \
+      --acq-shard "${_number}/${_shards}" -v --tb=short -ra --show-capture=no
+  ) >"$_tmp/${_number}.log" 2>&1 &
+  _pids+=("$!")
+  _pid_shards+=("$_number")
+  _active=$((_active + 1))
+}
+
+_reap_first() {
+  _pid="${_pids[0]}"
+  _number="${_pid_shards[0]}"
+  if ! wait "$_pid"; then
+    _failed=1
+  fi
+  unset '_pids[0]' '_pid_shards[0]'
+  _active=$((_active - 1))
+  if [ "$_active" -eq 0 ]; then
+    _pids=()
+    _pid_shards=()
+  else
+    _pids=("${_pids[@]}")
+    _pid_shards=("${_pid_shards[@]}")
+  fi
+}
+
+while [ "$_next" -le "$_shards" ]; do
+  _start_shard "$_next"
+  _next=$((_next + 1))
+  if [ "$_active" -ge "$_jobs" ]; then
+    _reap_first
+  fi
+done
+while [ "$_active" -gt 0 ]; do
+  _reap_first
+done
+
+_number=1
+while [ "$_number" -le "$_shards" ]; do
+  printf '\n===== pytest shard %s/%s =====\n' "$_number" "$_shards"
+  cat "$_tmp/${_number}.log"
+  _number=$((_number + 1))
+done
+
+exit "$_failed"
