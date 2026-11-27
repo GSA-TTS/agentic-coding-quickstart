@@ -1,11 +1,11 @@
 ---
 title: "Use an isolated Python prerelease channel while Bash remains the default"
 description: "Approved Python preview decisions, with Bash remaining the default and publication separately authorized"
-status: approved
+status: accepted
 tier: 2
 date: 2026-11-25
-last_updated: "2026-11-25"
-decision_makers: ["Peter (repository admin)", "Bret Mogilefsky", "William Zujkowski"]
+last_updated: "2026-11-27"
+decision_makers: ["Peter Burkholder (repository admin and approver)", "Bret Mogilefsky", "William Zujkowski"]
 category: deployment
 nist_controls: ["CM-3", "CM-5", "SA-11", "SI-7", "SR-3", "AC-6"]
 impact_level: low
@@ -69,6 +69,24 @@ Bret approved all four recommendations:
 These are approved human decisions, not completed implementation or release
 authorization. Packaging, access verification and evidence collection remain
 prerequisites; publication requires separate explicit authorization.
+
+**Peter Burkholder's acceptance — 2026-11-27**
+
+Peter accepted decisions 1–3 above and assigned **Bret Mogilefsky** as owner
+for integration, per-PR main fix carry-forward, preview releases and runtime
+security patches. **Peter Burkholder** is the approver. This acceptance retains
+decision 4's M2 prerequisites: native migration/backout, credential refresh,
+ownership-aware uninstall and current qualification evidence, followed by
+separate explicit approval before changing the default.
+
+The accepted design preserves a non-breaking opt-in M1 and a separately
+approved breaking M2. It approves the channel-scoped gate design and main-bound
+evidence sequencing, not changes to required-check settings, release activation,
+signing identities, credentials or evidence-ledger custody. Those administrative
+actions and publication of any exact release asset set require separate explicit
+authorization from Peter. Tap/npm routes remain blocked until publishing
+authority, stable registry availability and channel-specific packaging are
+verified. Acceptance is not a claim that implementation or live tests have passed.
 
 ## Alternatives and Tradeoffs
 
