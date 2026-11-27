@@ -304,7 +304,18 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   stored. Service and sandbox names must match `[A-Za-z0-9_-]+` and not start
   with `-`; a sandbox named `global` is a sandbox scope. `--host`/`--env` record
   a custom endpoint and must be given together (`--host` alone works for a
-  service with a known env var).
+   service with a known env var).
+   Credential env names are uppercase identifiers (`[A-Z][A-Z0-9_]*`), but must
+   not configure the host process that reads the credential. The `ACQ_`, `MSB_`,
+   `SBX_`, `XDG_`, `LD_`, `DYLD_`, `PYTHON`, `GIT_`, `BASH_`, and `LC_` namespaces
+   are reserved, as are standard shell, identity, locale, temporary-directory,
+   Windows process-path, proxy, and certificate-trust controls (for example
+   `PATH`, `HOME`, `SHELL`, `LANG`, `COMSPEC`, and `HTTPS_PROXY`). This policy
+   also covers provider-credential pins and inherited MSB binding records.
+   Safe custom names such as `API_KEY` and `OPENCODE_GO_API_KEY` remain valid;
+   `USAI_API_KEY`, `GITHUB_TOKEN`/`GH_TOKEN`, and `GITLAB_TOKEN` remain valid for
+   their respective services. Invalid credential names fail before injection;
+   ordinary inherited host configuration is not removed or rewritten.
   **On sbx:** only sbx's built-in services (`anthropic`, `github`, `gitlab`,
   `google-cloud`, `openai`, `aws`, `azure`) go through `sbx secret set
   [--sandbox S] SERVICE`. Every other endpoint is a custom secret bound to its
