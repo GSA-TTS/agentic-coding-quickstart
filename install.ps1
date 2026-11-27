@@ -1613,7 +1613,6 @@ else {
 }
 
 Write-Step "Installing acq"
-$null = Resolve-Source
 Test-PreviewOwnership
 if ($RemovePreview) {
     if (-not $previewFiles.Count) { throw 'no matching preview receipt for backout' }
@@ -1627,6 +1626,7 @@ if ($RemovePreview) {
     Write-Host 'Preview backout complete; unknown files, receipts and PATH preserved.'
     exit 0
 }
+$null = Resolve-Source
 Install-AcqZip
 Write-Host "Preview PATH directory: $InstallDir\bin (PATH was not changed)"
 

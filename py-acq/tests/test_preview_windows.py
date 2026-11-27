@@ -39,6 +39,15 @@ foreach ($node in $ast.EndBlock.Statements) {{
     return subprocess.run([str(powershell), "-NoLogo", "-NoProfile", "-File", str(script)], capture_output=True, timeout=60)
 
 
+def _installer_entry(root: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
+    powershell = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
+    return subprocess.run(
+        [str(powershell), "-NoLogo", "-NoProfile", "-File", str(ROOT / "install.ps1"), *args],
+        capture_output=True,
+        timeout=60,
+    )
+
+
 def _release(tmp_path):
     release = tmp_path / "release"
     release.mkdir()
@@ -188,3 +197,28 @@ if (Test-Path (Join-Path $InstallDir 'bin\\acq-python.cmd')) { throw 'backout di
 """
     result = _ps(tmp_path, code)
     assert result.returncode == 0, result.stderr.decode(errors="replace")
+
+
+def test_windows_preview_backout_never_resolves_release_source(tmp_path):
+    release = _release(tmp_path)
+    root = tmp_path / "preview"
+    code = _variables(root, release) + """
+Test-PreviewOwnership; Install-AcqZip
+"""
+    result = _ps(tmp_path, code)
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    # A plaintext source is rejected by Resolve-Source. Successful backout proves
+    # the top-level -RemovePreview path exits before it attempts resolution.
+    result = _installer_entry(
+        root,
+        "-Channel",
+        "python",
+        "-RemovePreview",
+        "-InstallDir",
+        str(root),
+        "-Source",
+        "http://example.invalid/release",
+    )
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    assert b"plaintext" not in result.stderr
+    assert not (root / "bin/acq-python.cmd").exists()
