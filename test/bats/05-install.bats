@@ -253,16 +253,16 @@ _fixture_with_extra_entry() {
   [ -z "$(find "$dir" -maxdepth 1 -name '.acq-previous.*')" ]
 }
 
-@test "installer: a marked dir still refuses a new release name it does not own" {
+@test "preview: a new archive directory preserves unknown existing contents" {
   local dir assets; dir="$(_install_dir)"
   run sh "$REPO_ROOT/install.sh" --source "$REPO_ROOT/test/fixtures/installer" --yes
   assert_success
   mkdir -p "$dir/secrets"; printf 'REAL-USER-SECRET\n' > "$dir/secrets/acq.usai"
   assets="$(_fixture_with_extra_entry secrets)"
   run sh "$REPO_ROOT/install.sh" --source "$assets" --yes
-  assert_failure
-  assert_output --partial 'unknown entry: secrets'
+  assert_success
   [ "$(cat "$dir/secrets/acq.usai")" = REAL-USER-SECRET ]
+  [ "$(cat "$dir/secrets/README")" = shipped ]
 }
 
 @test "preview: interrupted first publication is retryable" {

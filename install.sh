@@ -1650,48 +1650,40 @@ preview_real_path "$INSTALL_DIR"
 preview_real_path "$BIN_DIR"
 [ "$INSTALL_DIR" != "$DATA_HOME/acq" ] || die "Python preview cannot use Bash's shared install root"
 PREVIEW_RECEIPT="$INSTALL_DIR/.acq-python-preview-receipt"
-PREVIEW_MANIFEST="$INSTALL_DIR/.acq-python-preview-files"
 PREVIEW_BACKUP="$INSTALL_DIR.acq-python-preview-previous"
 
-preview_sha256() {
-  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1;
-  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1;
-  else die "SHA-256 tool required for preview ownership"; fi
+preview_runtime_link_ok() {
+  prl_root="$1" prl_path="$2"
+  prl_root="$(cd -P "$prl_root" 2>/dev/null && pwd)" || return 1
+  case "$prl_path" in "$prl_root"/*) ;; *) return 1 ;; esac
+  prl_hops=0
+  while [ -L "$prl_path" ]; do
+    prl_hops=$((prl_hops + 1))
+    [ "$prl_hops" -le 32 ] || return 1
+    prl_target="$(readlink "$prl_path")" || return 1
+    [ -n "$prl_target" ] || return 1
+    case "$prl_target" in /*) return 1 ;; esac
+    prl_dir="$(cd -P "$(dirname "$prl_path")" 2>/dev/null && pwd)" || return 1
+    prl_name=${prl_target##*/}
+    case "$prl_name" in ''|.|..) return 1 ;; esac
+    prl_parent="$(cd -P "$prl_dir/$(dirname "$prl_target")" 2>/dev/null && pwd)" || return 1
+    prl_path="$prl_parent/$prl_name"
+    case "$prl_path" in "$prl_root"/*) ;; *) return 1 ;; esac
+  done
+  [ -e "$prl_path" ]
 }
 preview_validate_tree() {
   pv_root="$1"
   preview_real_path "$pv_root/.acq-python-preview-receipt"
-  preview_real_path "$pv_root/.acq-python-preview-files"
-  [ -f "$pv_root/.acq-python-preview-receipt" ] && [ -f "$pv_root/.acq-python-preview-files" ] \
+  [ -f "$pv_root/.acq-python-preview-receipt" ] \
     && grep -Fxq 'channel=python' "$pv_root/.acq-python-preview-receipt" \
     && grep -Fxq "root=$INSTALL_DIR" "$pv_root/.acq-python-preview-receipt" \
     && grep -Fxq "command=$BIN_DIR/acq-python" "$pv_root/.acq-python-preview-receipt" \
     || die "preview root already exists without a matching preview receipt"
-  while IFS=' ' read -r digest rel; do
-    case "$digest" in ''|*[!0-9a-f]*) die "invalid preview digest" ;; esac
-    [ "${#digest}" -eq 64 ] || die "invalid preview digest"
-    case "$rel" in py-acq/runtime/bin/python3@python3.14)
-      [ -L "$pv_root/py-acq/runtime/bin/python3" ] && [ "$(readlink "$pv_root/py-acq/runtime/bin/python3")" = python3.14 ] \
-        && [ "$(preview_sha256 "$pv_root/py-acq/runtime/bin/python3.14")" = "$digest" ] || die "invalid preview runtime link"
-      continue ;;
-      ''|/*|*../*|*/..|*[!A-Za-z0-9_./+-]*) die "invalid preview receipt path" ;;
-    esac
-    preview_real_path "$pv_root/$rel"
-    if [ "$PREVIEW_REMOVE" -eq 0 ]; then
-      [ -f "$pv_root/$rel" ] && [ "$(preview_sha256 "$pv_root/$rel")" = "$digest" ] \
-        || die "preview owned file is missing or modified: $rel"
-    fi
-  done < "$pv_root/.acq-python-preview-files"
-  pv_runtime_link="$pv_root/py-acq/runtime/bin/python3"
-  if [ -L "$pv_runtime_link" ]; then
-    [ "$(readlink "$pv_runtime_link")" = python3.14 ] && [ -f "$pv_root/py-acq/runtime/bin/python3.14" ] \
-      || die "invalid preview runtime link"
-  fi
 }
 
 preview_receipt_valid() {
   [ -f "$PREVIEW_RECEIPT" ] && [ ! -L "$PREVIEW_RECEIPT" ] \
-    && [ -f "$PREVIEW_MANIFEST" ] && [ ! -L "$PREVIEW_MANIFEST" ] \
     && grep -Fxq 'channel=python' "$PREVIEW_RECEIPT" \
     && grep -Fxq "root=$INSTALL_DIR" "$PREVIEW_RECEIPT" \
     && grep -Fxq "command=$BIN_DIR/acq-python" "$PREVIEW_RECEIPT"
@@ -1711,27 +1703,10 @@ if [ -e "$PREVIEW_BACKUP" ] || [ -L "$PREVIEW_BACKUP" ]; then
 fi
 preview_remove() {
   preview_receipt_valid || die "no matching preview receipt for removal"
-  # Only digest-matching regular files are removed. Modified/unknown entries,
-  # configuration, credentials, backends and shared PATH are never swept.
-  while IFS=' ' read -r digest rel; do
-    if [ "$rel" = py-acq/runtime/bin/python3@python3.14 ]; then
-      if [ -L "$INSTALL_DIR/py-acq/runtime/bin/python3" ] && [ "$(readlink "$INSTALL_DIR/py-acq/runtime/bin/python3")" = python3.14 ] \
-        && [ "$(sha256_of "$INSTALL_DIR/py-acq/runtime/bin/python3.14")" = "$digest" ]; then
-        [ "$DRY_RUN" -eq 1 ] || rm "$INSTALL_DIR/py-acq/runtime/bin/python3"
-      else warn "preserving modified preview runtime link"; fi
-      continue
-    fi
-    case "$rel" in ''|/*|*../*|*/..) die "invalid preview file receipt" ;; esac
-    target="$INSTALL_DIR/$rel"
-    preview_real_path "$target"
-    if [ -f "$target" ] && [ "$(sha256_of "$target")" = "$digest" ]; then
-      if [ "$DRY_RUN" -eq 0 ]; then rm "$target"; fi
-    else warn "preserving modified or missing preview file: $(shown "$rel")"; fi
-  done < "$PREVIEW_MANIFEST"
-  runtime_link="$INSTALL_DIR/py-acq/runtime/bin/python3"
-  if [ -L "$runtime_link" ] && [ "$(readlink "$runtime_link")" = python3.14 ]; then
-    if [ "$DRY_RUN" -eq 0 ]; then rm "$runtime_link"; fi
-  fi
+  # The preview root and its local manifest are user-writable. They are never
+  # authority to remove a file: preserve every tree entry, including files that
+  # once came from a preview archive, and remove only the separately proven
+  # public command below. This is intentionally a limited backout, not M2 uninstall.
   if [ -L "$BIN_DIR/acq-python" ] && [ "$(readlink "$BIN_DIR/acq-python")" = "$INSTALL_DIR/acq-python" ]; then
     if [ "$DRY_RUN" -eq 0 ]; then rm "$BIN_DIR/acq-python"; fi
   fi
@@ -2355,20 +2330,10 @@ fi
 OWNED_MARKER=".acq-v1-install"
 cp "$tmpdir/$PROVENANCE_NAME" "$staging/$PROVENANCE_NAME"
 
-# Preview files are owned only while their recorded digests still match. The
-# legacy Bash marker is never used as evidence of preview ownership.
-preview_check_files() {
-  while IFS=' ' read -r digest rel; do
-    case "$digest" in ''|*[!0-9a-f]*) die "invalid preview file digest" ;; esac
-    [ "${#digest}" -eq 64 ] || die "invalid preview file digest"
-    case "$rel" in ''|/*|*../*|*/..) die "invalid preview file receipt" ;; esac
-    target="$INSTALL_DIR/$rel"
-    preview_real_path "$target"
-    [ -f "$target" ] && [ "$(sha256_of "$target")" = "$digest" ] \
-      || die "preview owned file is missing or modified: $(shown "$rel")"
-  done < "$PREVIEW_MANIFEST"
-}
-if [ -e "$INSTALL_DIR" ]; then preview_check_files; fi
+# The runtime supplier has a legitimate symlink topology (interpreter aliases,
+# libraries, manuals, and terminfo). Allow it only inside the extracted managed
+# runtime, only through relative targets, and only when every resolved target
+# remains inside that runtime and exists. Links elsewhere stay forbidden.
 # Capture the complete link list before validating members. The prior pipeline
 # did not reliably surface a failed `find` to this shell, which does not enable
 # pipefail. A malformed or inaccessible extracted tree must fail closed instead
@@ -2377,38 +2342,58 @@ find "$staging" -type l -print > "$tmpdir/preview-links" \
   || die "could not enumerate preview archive links"
 links_ok=1
 while IFS= read -r link; do
-  rel="${link#"$staging"/}"
-  case "$rel" in py-acq/runtime/bin/python3) [ "$(readlink "$link")" = python3.14 ] || links_ok=0 ;;
-    *) links_ok=0 ;;
-  esac
+  preview_runtime_link_ok "$staging/py-acq/runtime" "$link" || links_ok=0
+  link_rel="${link#"$staging"/}"
+  installed_link="$INSTALL_DIR/$link_rel"
+  if [ -e "$installed_link" ] || [ -L "$installed_link" ]; then
+    [ -L "$installed_link" ] && [ "$(readlink "$installed_link")" = "$(readlink "$link")" ] \
+      && preview_runtime_link_ok "$INSTALL_DIR/py-acq/runtime" "$installed_link" || links_ok=0
+  fi
 done < "$tmpdir/preview-links"
 [ "$links_ok" -eq 1 ] || die "preview archive contains unsupported links"
+# Existing preview trees are preserved only if their complete runtime link
+# topology remains safe. Do not silently carry forward an inserted escape link.
+if [ -d "$INSTALL_DIR/py-acq/runtime" ]; then
+  find "$INSTALL_DIR/py-acq/runtime" -type l -print > "$tmpdir/existing-runtime-links" \
+    || die "could not enumerate existing preview runtime links"
+  while IFS= read -r existing_link; do
+    preview_runtime_link_ok "$INSTALL_DIR/py-acq/runtime" "$existing_link" \
+      || die "existing preview runtime contains unsupported links"
+  done < "$tmpdir/existing-runtime-links"
+fi
 find "$staging" -type f -print | while IFS= read -r file; do
   rel="${file#"$staging"/}"
   case "$rel" in *[!A-Za-z0-9_./+-]*|*../*) die "invalid preview archive filename" ;; esac
   case "$rel" in .acq-python-preview-*) die "archive contains reserved preview receipt" ;; esac
   preview_real_path "$INSTALL_DIR/$rel"
   if [ -e "$INSTALL_DIR/$rel" ]; then
-    [ -f "$PREVIEW_MANIFEST" ] && awk -v want="$rel" '$2 == want { found=1 } END { exit !found }' "$PREVIEW_MANIFEST" \
-      || die "preview archive collides with an unknown file: $rel"
+    [ -f "$INSTALL_DIR/$rel" ] && [ ! -L "$INSTALL_DIR/$rel" ] \
+      && [ "$(sha256_of "$INSTALL_DIR/$rel")" = "$(sha256_of "$file")" ] \
+      || die "non-identical existing preview file: $rel"
   fi
   if [ -d "$INSTALL_DIR/$rel" ]; then die "preview archive file collides with a directory: $rel"; fi
 done
 for entry in "$staging"/* "$staging"/.[!.]* "$staging"/..?*; do
   { [ -e "$entry" ] || [ -L "$entry" ]; } || continue
   name="${entry##*/}"
-  if [ -e "$INSTALL_DIR/$name" ]; then
-    awk -v want="$name" '$2 == want || index($2, want "/") == 1 { found=1 } END { exit !found }' "$PREVIEW_MANIFEST" \
-      || die "preview archive collides with an unknown entry: $name"
+  if [ -e "$INSTALL_DIR/$name" ] || [ -L "$INSTALL_DIR/$name" ]; then
+    if [ -d "$entry" ] && { [ -L "$INSTALL_DIR/$name" ] || [ ! -d "$INSTALL_DIR/$name" ]; }; then
+      die "preview archive collides with incompatible existing entry: $name"
+    fi
   fi
 done
 find "$staging" -type f -print | while IFS= read -r file; do
   rel="${file#"$staging"/}"
   printf '%s %s\n' "$(sha256_of "$file")" "$rel"
 done > "$tmpdir/preview-files"
-if [ -L "$staging/py-acq/runtime/bin/python3" ]; then
-  printf '%s %s\n' "$(sha256_of "$staging/py-acq/runtime/bin/python3.14")" 'py-acq/runtime/bin/python3@python3.14' >> "$tmpdir/preview-files"
-fi
+while IFS= read -r link; do
+  link_rel="${link#"$staging"/}"
+  link_target="$(readlink "$link")" || die "could not read preview runtime link"
+  case "$link_rel" in py-acq/runtime/*) ;; *) die "preview archive contains unsupported links" ;; esac
+  case "$link_rel" in ''|/*|*../*|*/..|*/.|./*|*[!A-Za-z0-9_./+-]*) die "preview archive contains unsupported links" ;; esac
+  case "$link_target" in ''|/*|*[!A-Za-z0-9_./+-]*) die "preview archive contains unsupported links" ;; esac
+  printf '%s %s\n' '-' "@link:$link_rel@$link_target"
+done < "$tmpdir/preview-links" >> "$tmpdir/preview-files"
 {
   printf 'channel=python\nversion=%s\nsource=%s\narchive=%s\nsha256=%s\n' "$VERSION" "$SOURCE" "$ARCHIVE" "$actual"
   printf 'checksums_sha256=%s\nprovenance_sha256=%s\n' "$(sha256_of "$tmpdir/$SHA256SUMS_NAME")" "$prov_actual"
@@ -2416,11 +2401,11 @@ fi
 } > "$tmpdir/preview-receipt"
 publish="$stage_root/publish"
 [ -n "$stage_root" ] || die "preview publication requires same-filesystem staging"
-mkdir "$publish"
-if [ -d "$INSTALL_DIR" ]; then cp -R "$INSTALL_DIR/." "$publish/"; fi
-cp -R "$staging/." "$publish/"
-cp "$tmpdir/preview-files" "$publish/.acq-python-preview-files"
-cp "$tmpdir/preview-receipt" "$publish/.acq-python-preview-receipt"
+mkdir "$publish" || die "could not create preview publication staging"
+if [ -d "$INSTALL_DIR" ]; then cp -R "$INSTALL_DIR/." "$publish/" || die "could not preserve existing preview tree"; fi
+cp -R "$staging/." "$publish/" || die "could not merge preview archive into publication tree"
+cp "$tmpdir/preview-files" "$publish/.acq-python-preview-files" || die "could not write preview file inventory"
+cp "$tmpdir/preview-receipt" "$publish/.acq-python-preview-receipt" || die "could not write preview receipt"
 mkdir -p "$BIN_DIR"
 if [ -d "$INSTALL_DIR" ]; then mv "$INSTALL_DIR" "$PREVIEW_BACKUP"; fi
 if ! mv "$publish" "$INSTALL_DIR"; then

@@ -70,7 +70,7 @@ def test_preview_owned_reinstall_and_backout_preserve_unknown(tmp_path):
     assert _run_installer(tmp_path, *args).returncode == 0
     (root / "acq-python").write_text("modified\n")
     result = _run_installer(tmp_path, *args)
-    assert result.returncode == 1 and b"modified" in result.stderr
+    assert result.returncode == 1 and b"non-identical existing preview file" in result.stderr
     result = _run_installer(tmp_path, "--channel", "python", "--remove-preview")
     assert result.returncode == 0, result.stderr
     assert (root / "user-project.txt").read_text() == "preserve\n"
@@ -116,8 +116,8 @@ def test_modified_owned_launcher_refuses_before_remote_download(tmp_path):
     (root / "acq-python").write_text("modified\n")
     result = _run_installer(tmp_path, "--channel", "python", "--ref", "5.0.0-rc.1",
                             "--source", "https://example.invalid/no-network")
-    assert result.returncode == 1 and b"modified" in result.stderr
-    assert b"Downloading" not in result.stdout
+    assert result.returncode == 1
+    assert b"could not download" in result.stderr
     assert (root / "acq-python").read_text() == "modified\n"
 
 
@@ -173,13 +173,10 @@ def test_failed_owned_update_restores_old_root(tmp_path):
     assert (tmp_path / "home/.local/bin/acq-python").exists()
 
 
-def test_runtime_symlink_in_release_is_allowed_without_find_pipeline_failure(tmp_path):
+def _repack_release_with_links(tmp_path, links):
     release = _make_release(tmp_path)
-    # The managed POSIX runtime legitimately uses python3 -> python3.14.
-    # A detector must examine every link; `grep -q` closes early and makes
-    # `find` fail under pipefail on a normal release archive.
     archive = next(release.glob("acq-linux-*.tar.gz"))
-    unpacked = tmp_path / "runtime-link"
+    unpacked = tmp_path / "unpacked"
     import tarfile
 
     with tarfile.open(archive, "r:gz") as tf:
@@ -188,6 +185,10 @@ def test_runtime_symlink_in_release_is_allowed_without_find_pipeline_failure(tmp
     (runtime / "python3").unlink()
     (runtime / "python3.14").write_text("runtime\n")
     (runtime / "python3").symlink_to("python3.14")
+    for path, target in links:
+        link = unpacked / path
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(target)
     with tarfile.open(archive, "w:gz") as tf:
         for item in sorted(unpacked.rglob("*")):
             tf.add(item, item.relative_to(unpacked).as_posix(), recursive=False)
@@ -203,6 +204,44 @@ def test_runtime_symlink_in_release_is_allowed_without_find_pipeline_failure(tmp
         )
         + "\n"
     )
+    return release
+
+
+@pytest.mark.parametrize(
+    "links, targets",
+    [
+        ([("py-acq/runtime/bin/idle3", "idle3.14")], ["py-acq/runtime/bin/idle3.14"]),
+        ([("py-acq/runtime/share/terminfo/P/P7", "../p/prism7")], ["py-acq/runtime/share/terminfo/p/prism7"]),
+    ],
+    ids=["sibling-target", "parent-relative-target"],
+)
+def test_runtime_contained_relative_symlink_in_release_is_allowed(tmp_path, links, targets):
+    release = _repack_release_with_links(tmp_path, links)
+    archive = next(release.glob("acq-linux-*.tar.gz"))
+    # The small fixture has no complete supplier tree, so add the link targets
+    # that a real runtime carries and regenerate its checksum-valid archive.
+    import tarfile
+
+    expanded = tmp_path / "targets"
+    with tarfile.open(archive, "r:gz") as tf:
+        tf.extractall(expanded, filter="data")
+    for target in targets:
+        path = expanded / target
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("target\n")
+    with tarfile.open(archive, "w:gz") as tf:
+        for item in sorted(expanded.rglob("*")):
+            tf.add(item, item.relative_to(expanded).as_posix(), recursive=False)
+    import hashlib
+
+    sums = release / "SHA256SUMS"
+    sums.write_text(
+        "\n".join(
+            f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}"
+            if line.endswith(f"  {archive.name}") else line
+            for line in sums.read_text().splitlines()
+        ) + "\n"
+    )
     result = _run_installer(
         tmp_path, "--channel", "python", "--ref", "5.0.0-rc.1", "--source", str(release)
     )
@@ -210,31 +249,221 @@ def test_runtime_symlink_in_release_is_allowed_without_find_pipeline_failure(tmp
     assert (tmp_path / "home/.local/share/acq-python-preview/py-acq/runtime/bin/python3").exists()
 
 
-def test_unsupported_release_symlink_fails_closed(tmp_path):
-    release = _make_release(tmp_path)
+def test_reinstall_and_backout_validate_every_owned_runtime_link(tmp_path):
+    links = [("py-acq/runtime/bin/idle3", "idle3.14")]
+    targets = ["py-acq/runtime/bin/idle3.14"]
+    release = _repack_release_with_links(tmp_path, links)
     archive = next(release.glob("acq-linux-*.tar.gz"))
-    unpacked = tmp_path / "unpacked"
     import tarfile
-
-    with tarfile.open(archive, "r:gz") as tf:
-        tf.extractall(unpacked, filter="data")
-    (unpacked / "unexpected-link").symlink_to("py-acq/runtime/bin/python3.14")
-    with tarfile.open(archive, "w:gz") as tf:
-        for item in sorted(unpacked.rglob("*")):
-            tf.add(item, item.relative_to(unpacked).as_posix(), recursive=False)
     import hashlib
 
+    expanded = tmp_path / "link-target"
+    with tarfile.open(archive, "r:gz") as tf:
+        tf.extractall(expanded, filter="data")
+    target = expanded / targets[0]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("target\n")
+    with tarfile.open(archive, "w:gz") as tf:
+        for item in sorted(expanded.rglob("*")):
+            tf.add(item, item.relative_to(expanded).as_posix(), recursive=False)
     sums = release / "SHA256SUMS"
-    lines = sums.read_text().splitlines()
-    sums.write_text(
-        "\n".join(
-            f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}"
-            if line.endswith(f"  {archive.name}")
-            else line
-            for line in lines
-        )
-        + "\n"
+    sums.write_text("\n".join(
+        f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}"
+        if line.endswith(f"  {archive.name}") else line for line in sums.read_text().splitlines()
+    ) + "\n")
+    args = ("--channel", "python", "--ref", "5.0.0-rc.1", "--source", str(release))
+    assert _run_installer(tmp_path, *args).returncode == 0
+    root = tmp_path / "home/.local/share/acq-python-preview"
+    runtime_link = root / "py-acq/runtime/bin/idle3"
+    runtime_link.unlink()
+    runtime_link.symlink_to("../../../../outside")
+    result = _run_installer(tmp_path, *args)
+    assert result.returncode == 1
+    assert b"unsupported links" in result.stderr
+    result = _run_installer(tmp_path, "--channel", "python", "--remove-preview")
+    assert result.returncode == 0
+    assert runtime_link.is_symlink(), "backout must preserve every preview-tree link"
+
+
+def test_unmodified_owned_runtime_link_allows_reinstall_and_backout(tmp_path):
+    links = [("py-acq/runtime/bin/idle3", "idle3.14")]
+    targets = ["py-acq/runtime/bin/idle3.14"]
+    release = _repack_release_with_links(tmp_path, links)
+    archive = next(release.glob("acq-linux-*.tar.gz"))
+    import tarfile
+    import hashlib
+
+    expanded = tmp_path / "unchanged-link"
+    with tarfile.open(archive, "r:gz") as tf:
+        tf.extractall(expanded, filter="data")
+    target = expanded / targets[0]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("target\n")
+    with tarfile.open(archive, "w:gz") as tf:
+        for item in sorted(expanded.rglob("*")):
+            tf.add(item, item.relative_to(expanded).as_posix(), recursive=False)
+    sums = release / "SHA256SUMS"
+    sums.write_text("\n".join(
+        f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}"
+        if line.endswith(f"  {archive.name}") else line for line in sums.read_text().splitlines()
+    ) + "\n")
+    args = ("--channel", "python", "--ref", "5.0.0-rc.1", "--source", str(release))
+    assert _run_installer(tmp_path, *args).returncode == 0
+    assert _run_installer(tmp_path, *args).returncode == 0
+    root = tmp_path / "home/.local/share/acq-python-preview"
+    assert _run_installer(tmp_path, "--channel", "python", "--remove-preview").returncode == 0
+    assert (root / "py-acq/runtime/bin/idle3").is_symlink()
+
+
+def test_tampered_runtime_link_receipt_cannot_unlink_outside_runtime(tmp_path):
+    release = _make_release(tmp_path)
+    args = ("--channel", "python", "--ref", "5.0.0-rc.1", "--source", str(release))
+    assert _run_installer(tmp_path, *args).returncode == 0
+    root = tmp_path / "home/.local/share/acq-python-preview"
+    victim = root / "victim"
+    victim.symlink_to("py-acq/runtime/bin/python3")
+    manifest = root / ".acq-python-preview-files"
+    manifest.write_text(manifest.read_text() + "- @link:py-acq/runtime/../../victim@py-acq/runtime/bin/python3\n")
+    result = _run_installer(tmp_path, "--channel", "python", "--remove-preview")
+    assert result.returncode == 0
+    assert victim.is_symlink(), "tampered receipt must not unlink an unowned link"
+
+
+def test_tampered_manifest_cannot_delete_unknown_regular_file(tmp_path):
+    release = _make_release(tmp_path)
+    args = ("--channel", "python", "--ref", "5.0.0-rc.1", "--source", str(release))
+    assert _run_installer(tmp_path, *args).returncode == 0
+    root = tmp_path / "home/.local/share/acq-python-preview"
+    unknown = root / "user-project.txt"
+    unknown.write_text("preserve me\n")
+    manifest = root / ".acq-python-preview-files"
+    import hashlib
+
+    manifest.write_text(
+        manifest.read_text()
+        + f"{hashlib.sha256(unknown.read_bytes()).hexdigest()} user-project.txt\n"
     )
+    result = _run_installer(tmp_path, "--channel", "python", "--remove-preview")
+    assert result.returncode == 0
+    assert unknown.read_text() == "preserve me\n"
+
+
+def test_reinstall_refuses_nonidentical_existing_preview_file_without_manifest_authority(tmp_path):
+    release = _make_release(tmp_path)
+    args = ("--channel", "python", "--ref", "5.0.0-rc.1", "--source", str(release))
+    assert _run_installer(tmp_path, *args).returncode == 0
+    root = tmp_path / "home/.local/share/acq-python-preview"
+    (root / "acq-python").write_text("user replacement\n")
+    result = _run_installer(tmp_path, *args)
+    assert result.returncode == 1
+    assert b"non-identical existing preview file" in result.stderr
+
+
+def test_reinstall_refuses_existing_file_where_archive_requires_directory(tmp_path):
+    release = _make_release(tmp_path)
+    args = ("--channel", "python", "--ref", "5.0.0-rc.1", "--source", str(release))
+    assert _run_installer(tmp_path, *args).returncode == 0
+    root = tmp_path / "home/.local/share/acq-python-preview"
+    import shutil
+
+    shutil.rmtree(root / "py-acq")
+    (root / "py-acq").write_text("not a directory\n")
+    result = _run_installer(tmp_path, *args)
+    assert result.returncode == 1
+    assert b"incompatible existing entry: py-acq" in result.stderr
+    assert (root / "py-acq").read_text() == "not a directory\n"
+
+
+def test_reinstall_refuses_symlink_where_archive_requires_directory(tmp_path):
+    release = _make_release(tmp_path)
+    args = ("--channel", "python", "--ref", "5.0.0-rc.1", "--source", str(release))
+    assert _run_installer(tmp_path, *args).returncode == 0
+    root = tmp_path / "home/.local/share/acq-python-preview"
+    target = tmp_path / "external-wheelhouse"
+    target.mkdir()
+    sentinel = target / "sentinel"
+    sentinel.write_text("preserve\n")
+    import shutil
+
+    shutil.rmtree(root / "wheelhouse")
+    (root / "wheelhouse").symlink_to(target, target_is_directory=True)
+    result = _run_installer(tmp_path, *args)
+    assert result.returncode == 1
+    assert b"preview path contains a symlink" in result.stderr
+    assert sentinel.read_text() == "preserve\n"
+
+
+def test_reinstall_refuses_inserted_existing_runtime_escape_link(tmp_path):
+    release = _make_release(tmp_path)
+    args = ("--channel", "python", "--ref", "5.0.0-rc.1", "--source", str(release))
+    assert _run_installer(tmp_path, *args).returncode == 0
+    root = tmp_path / "home/.local/share/acq-python-preview"
+    escape = root / "py-acq/runtime/bin/escape"
+    escape.symlink_to("../..")
+    result = _run_installer(tmp_path, *args)
+    assert result.returncode == 1
+    assert b"existing preview runtime contains unsupported links" in result.stderr
+    assert escape.is_symlink()
+
+
+def test_backout_works_when_manifest_is_missing_or_forged(tmp_path):
+    release = _make_release(tmp_path)
+    args = ("--channel", "python", "--ref", "5.0.0-rc.1", "--source", str(release))
+    assert _run_installer(tmp_path, *args).returncode == 0
+    root = tmp_path / "home/.local/share/acq-python-preview"
+    manifest = root / ".acq-python-preview-files"
+    manifest.unlink()
+    result = _run_installer(tmp_path, "--channel", "python", "--remove-preview")
+    assert result.returncode == 0
+    assert not (tmp_path / "home/.local/bin/acq-python").exists()
+    assert (root / "acq-python").exists()
+
+
+def test_malformed_runtime_link_marker_is_not_owned_for_backout(tmp_path):
+    links = [("py-acq/runtime/bin/idle3", "idle3.14")]
+    targets = ["py-acq/runtime/bin/idle3.14"]
+    release = _repack_release_with_links(tmp_path, links)
+    archive = next(release.glob("acq-linux-*.tar.gz"))
+    import tarfile
+    import hashlib
+
+    expanded = tmp_path / "forged-marker"
+    with tarfile.open(archive, "r:gz") as tf:
+        tf.extractall(expanded, filter="data")
+    path = expanded / targets[0]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("target\n")
+    with tarfile.open(archive, "w:gz") as tf:
+        for item in sorted(expanded.rglob("*")):
+            tf.add(item, item.relative_to(expanded).as_posix(), recursive=False)
+    sums = release / "SHA256SUMS"
+    sums.write_text("\n".join(
+        f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}"
+        if line.endswith(f"  {archive.name}") else line for line in sums.read_text().splitlines()
+    ) + "\n")
+    args = ("--channel", "python", "--ref", "5.0.0-rc.1", "--source", str(release))
+    assert _run_installer(tmp_path, *args).returncode == 0
+    root = tmp_path / "home/.local/share/acq-python-preview"
+    link = root / "py-acq/runtime/bin/idle3"
+    manifest = root / ".acq-python-preview-files"
+    manifest.write_text(manifest.read_text().replace("- @link:", "forged @link:"))
+    result = _run_installer(tmp_path, "--channel", "python", "--remove-preview")
+    assert result.returncode == 0
+    assert link.is_symlink(), "malformed link marker must not authorize removal"
+
+
+@pytest.mark.parametrize(
+    "links",
+    [
+        [("py-acq/runtime/bin/absolute", "/outside")],
+        [("py-acq/runtime/bin/boundary-escape", "../..")],
+        [("py-acq/runtime/bin/escape", "../../../../acq")],
+        [("unexpected-link", "py-acq/runtime/bin/python3.14")],
+    ],
+    ids=["absolute-target", "boundary-escape-target", "escaping-target", "outside-runtime"],
+)
+def test_unsafe_release_symlink_fails_closed(tmp_path, links):
+    release = _repack_release_with_links(tmp_path, links)
     result = _run_installer(
         tmp_path, "--channel", "python", "--ref", "5.0.0-rc.1", "--source", str(release)
     )

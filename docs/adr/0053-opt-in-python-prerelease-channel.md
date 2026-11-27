@@ -57,9 +57,12 @@ The preview initially requires an explicit `X.Y.Z-rc.N` version pin and uses
 `acq-python`; Windows exposes only preview-named commands in a dedicated `bin`
 directory. Preview installation and backout do not edit PATH or shell profiles.
 Separate receipts record channel, version, source, archive and checksum identity.
-Removal is restricted to matching owned file digests; modified and unknown files
-and shared configuration remain in place. Native acceptance remains a separate
-qualification requirement.
+The preview root is user-writable, so local receipt/manifest data is not treated
+as authority to delete or overwrite tree entries. Reinstall accepts an existing
+archive file only when it exactly matches the incoming pinned asset; otherwise it
+fails closed. Backout removes only the proven `acq-python` public command and
+preserves the preview tree, modified and unknown content, and shared
+configuration. Native acceptance remains a separate qualification requirement.
 
 1. **Release line:** use `v5.0.0-rc.N` for Python previews, published manually
    from an accepted `main` SHA. Bash's stable 4.x line and release-please
