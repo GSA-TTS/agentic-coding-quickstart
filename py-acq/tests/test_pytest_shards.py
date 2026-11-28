@@ -25,8 +25,12 @@ def run_suite(root, spec=None, collect=False):
         args += ["--acq-shard", spec]
     if collect:
         args += ["--collect-only"]
+    plugin_path = str(ROOT / "scripts")
+    pytest_path = str(Path(pytest.__file__).resolve().parent.parent)
+    inherited_pythonpath = os.environ.get("PYTHONPATH")
     return subprocess.run(args, cwd=root, text=True, capture_output=True, timeout=30,
-                          env={**os.environ, "PYTHONPATH": str(ROOT / "scripts"),
+                          env={**os.environ, "PYTHONPATH": plugin_path + os.pathsep + pytest_path + (
+                              os.pathsep + inherited_pythonpath if inherited_pythonpath else ""),
                                "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"})
 
 

@@ -21,10 +21,34 @@ _dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _root="$(cd "${_dir}/.." && pwd)"
 _python="${ACQ_PYTEST_PYTHON:-python3}"
 
+_require_ci_evidence() {
+  "$_python" -c 'import sys; raise SystemExit(sys.version_info[:2] != (3, 12))' || {
+    echo 'test-py-acq-sharded: BLOCKED: need Python 3.12 (the Python-vectors CI runtime)' >&2
+    return 2
+  }
+  command -v setsid >/dev/null 2>&1 || {
+    echo 'test-py-acq-sharded: BLOCKED: setsid is required for bounded shard cleanup' >&2
+    return 2
+  }
+  _patterns="${ACQ_TEST_PATTERNS_REPO:-}"
+  [ -n "$_patterns" ] && [ -d "$_patterns/.git" ] || {
+    echo 'test-py-acq-sharded: BLOCKED: set ACQ_TEST_PATTERNS_REPO to the pinned Patterns checkout' >&2
+    return 2
+  }
+  _pin="$(sed -n 's/^PATTERNS_KIT_REF="\([0-9a-f]\{40\}\)"$/\1/p' "$_root/acq.backends/common.sh")"
+  [ -n "$_pin" ] && [ "$(git -C "$_patterns" rev-parse HEAD 2>/dev/null)" = "$_pin" ] \
+    && test -z "$(git -C "$_patterns" status --porcelain 2>/dev/null)" || {
+    echo 'test-py-acq-sharded: BLOCKED: Patterns checkout is not the clean pinned ref' >&2
+    return 2
+  }
+}
+
 # Focused pytest is intentionally direct: it is the fast bug-loop interface.
 if [ "$#" -gt 0 ]; then
   exec "$_python" -m pytest "$@"
 fi
+
+_require_ci_evidence || exit $?
 
 _shards="${ACQ_PYTEST_SHARDS:-4}"
 _jobs="${ACQ_PYTEST_JOBS:-$( (command -v nproc >/dev/null 2>&1 && nproc) || sysctl -n hw.ncpu 2>/dev/null || echo 1 )}"
@@ -63,11 +87,20 @@ _on_signal() {
   trap '' HUP INT TERM
   _signal_pids="$(jobs -p 2>/dev/null || true)"
   for _pid in $_signal_pids; do
-    kill -TERM "$_pid" 2>/dev/null || true
+    kill -TERM -- "-$_pid" 2>/dev/null || true
   done
-  for _pid in $_signal_pids; do
-    wait "$_pid" 2>/dev/null || true
+  # A child that ignores TERM must not survive the interrupted runner. The
+  # shard command runs in its own session, so the group kill covers descendants.
+  _wait=0
+  while [ "$_wait" -lt 5 ]; do
+    _alive=0
+    for _pid in $_signal_pids; do kill -0 -- "-$_pid" 2>/dev/null && _alive=1; done
+    [ "$_alive" -eq 0 ] && break
+    sleep 1
+    _wait=$((_wait + 1))
   done
+  for _pid in $_signal_pids; do kill -KILL -- "-$_pid" 2>/dev/null || true; done
+  for _pid in $_signal_pids; do wait "$_pid" 2>/dev/null || true; done
   trap - EXIT HUP INT TERM
   _cleanup
   exit "$_status"
@@ -83,7 +116,7 @@ _start_shard() {
   _number="$1"
   (
     cd "$_root" || exit 2
-    exec "$_python" -m pytest -p scripts.pytest_shard py-acq/tests \
+    exec setsid "$_python" -m pytest -p scripts.pytest_shard py-acq/tests \
       --acq-shard "${_number}/${_shards}" -v --tb=short -ra --show-capture=no
   ) >"$_tmp/${_number}.log" 2>&1 &
   _pids+=("$!")
@@ -118,6 +151,14 @@ done
 while [ "$_active" -gt 0 ]; do
   _reap_first
 done
+
+# A supplied checkout alone is not evidence: the tests deliberately skip their
+# pinned-Patterns comparisons when their dependencies are unavailable. Never
+# report a local run as CI-equivalent if any shard reports that skip reason.
+if grep -q 'pinned Patterns checkout is provided' "$_tmp"/*.log; then
+  echo 'test-py-acq-sharded: pinned Patterns checks were skipped; failing closed' >&2
+  _failed=1
+fi
 
 _number=1
 while [ "$_number" -le "$_shards" ]; do

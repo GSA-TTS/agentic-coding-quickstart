@@ -471,7 +471,6 @@ def test_a_models_url_on_another_host_is_refused(tmp_path):
     ("api.example.gov", "https://127.0.0.1/models", "models URL: IP address literals are not permitted"),
     ("api.example.gov", "https://[::1]/models", "models URL: IP address literals are not permitted"),
     ("api.example.gov", "http://api.example.gov/models", "scheme must be https"),
-    ("api.example.gov", "https://api.example.gov:443/models", "explicit port"),
     ("api.example.gov", "https://api.example.gov:8443/models", "explicit port"),
     ("api.example.gov", "https://other.example.gov/models", "host does not match its declared host"),
     ("api.example.gov", "https://user:pass@api.example.gov/models", "must not contain user information"),
@@ -499,7 +498,7 @@ def test_provider_kit_facts_refusals_explain_the_problem(tmp_path, host, url, me
     ("127.0.0.1", "https://127.0.0.1/v1/models", False),
     ("api.example.gov", "https://127.0.0.1/v1/models", False),
     ("api.example.gov", "http://api.example.gov/v1/models", False),
-    ("api.example.gov", "https://api.example.gov:443/v1/models", False),
+    ("api.example.gov", "https://api.example.gov:443/v1/models", True),
     ("api.example.gov", "https://other.example.gov/v1/models", False),
 ])
 def test_provider_facts_match_bash_pinned_validator(pinned_patterns_repo, tmp_path, host, url, accepted):

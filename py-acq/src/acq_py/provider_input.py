@@ -119,7 +119,8 @@ def _ip_literal(host: str) -> bool:
 
 def _models_url_problem(url: str, host: str) -> str | None:
     # Bash validates kit facts with the pinned Patterns contract before its
-    # shell-safe URL check; that contract also excludes IPs and explicit ports.
+    # shell-safe URL check. The contract excludes IPs and permits HTTPS's
+    # default port only when it is explicitly written as 443.
     try:
         parsed = urlsplit(url)
         if parsed.scheme != "https":
@@ -128,14 +129,15 @@ def _models_url_problem(url: str, host: str) -> str | None:
             return "models URL: IP address literals are not permitted"
         if parsed.username is not None or parsed.password is not None:
             return "models URL must not contain user information"
-        if ":" in parsed.netloc:
-            return "models URL must not contain an explicit port"
+        if parsed.port not in (None, 443):
+            return "models URL must not contain a non-default explicit port"
         if parsed.hostname != host:
             return f"models URL host does not match its declared host ({host})"
     except ValueError:
         return "models URL is malformed"
-    if (not _URL_RE.fullmatch(url) or parsed.netloc != host
-            or not (url == f"https://{host}" or url.startswith(f"https://{host}/"))):
+    authority = host if parsed.port is None else f"{host}:443"
+    if (not _URL_RE.fullmatch(url) or parsed.netloc != authority
+            or not (url == f"https://{authority}" or url.startswith(f"https://{authority}/"))):
         return "models URL contains unsafe characters or an invalid authority"
     return None
 
