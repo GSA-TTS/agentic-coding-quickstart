@@ -4,7 +4,7 @@ description: "Approved Python preview decisions, with Bash remaining the default
 status: approved
 tier: 2
 date: 2026-11-25
-last_updated: "2026-11-25"
+last_updated: "2026-11-26"
 decision_makers: ["Peter (repository admin)", "Bret Mogilefsky", "William Zujkowski"]
 category: deployment
 nist_controls: ["CM-3", "CM-5", "SA-11", "SI-7", "SR-3", "AC-6"]
@@ -43,6 +43,26 @@ that publishing access, authority or qualification evidence is already in place.
 **Decision record — 2026-11-25**
 
 Bret approved all four recommendations:
+
+### Authorized installer-core implementation
+
+The scoped M1 installer work retains the stable Bash installer bodies inline in
+the dual installers. Downloaded or piped installers must remain self-contained;
+a second fetched helper would introduce another identity and trust contract.
+Maintainer authorization grants a file-size exception only for `install.sh` and
+`install.ps1`. This implementation choice does not authorize publication or M2.
+
+The preview initially requires an explicit `X.Y.Z-rc.N` version pin and uses
+`acq-python-preview` rather than Bash's shared data root. POSIX publishes only
+`acq-python`; Windows exposes only preview-named commands in a dedicated `bin`
+directory. Preview installation and backout do not edit PATH or shell profiles.
+Separate receipts record channel, version, source, archive and checksum identity.
+The preview root is user-writable, so local receipt/manifest data is not treated
+as authority to delete or overwrite tree entries. Reinstall accepts an existing
+archive file only when it exactly matches the incoming pinned asset; otherwise it
+fails closed. Backout removes only the proven `acq-python` public command and
+preserves the preview tree, modified and unknown content, and shared
+configuration. Native acceptance remains a separate qualification requirement.
 
 1. **Release line:** use `v5.0.0-rc.N` for Python previews, published manually
    from an accepted `main` SHA. Bash's stable 4.x line and release-please

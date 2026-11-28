@@ -102,6 +102,8 @@ jobs:
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
           changed="$(git diff --name-only "$BASE_SHA" -- \
             'acq.cmd' \
+            'acq-python.cmd' \
+            'acq-python.ps1' \
             'acq.ps1' \
             'acq' \
             'acq-python' \
@@ -233,16 +235,15 @@ jobs:
       # acq.cmd runs acq.ps1 under Windows PowerShell 5.1, as users run it; acq.ps1
       # invoked directly runs under PowerShell 7. No backend is installed on the
       # runner, so each verb reports none, but it must exit 0 and emit a
-      # well-formed envelope for that verb. An unset ACQ_IMPL is the Windows
-      # default (ADR-0048m) and must select the Python implementation, as
-      # ACQ_IMPL=python does. The checkout has no managed runtime, so both find
-      # setup-python's interpreter on PATH.
-      - name: Smoke-test acq.cmd and acq.ps1 (ACQ_IMPL unset and python)
+      # well-formed envelope for that verb. M1 keeps ordinary Windows launchers
+      # on Bash; this step explicitly selects Python. The checkout has no managed
+      # runtime, so the explicit Python route finds setup-python on PATH.
+      - name: Smoke-test ordinary and preview launchers (explicit Python)
         run: |
-          foreach ($impl in @('', 'python')) {
+          foreach ($impl in @('python')) {
             if ($impl) { $env:ACQ_IMPL = $impl } else { Remove-Item Env:ACQ_IMPL -ErrorAction SilentlyContinue }
             $label = if ($impl) { "ACQ_IMPL=$impl" } else { 'ACQ_IMPL unset' }
-            foreach ($launcher in @('.\acq.cmd', '.\acq.ps1')) {
+            foreach ($launcher in @('.\acq.cmd', '.\acq.ps1', '.\acq-python.cmd', '.\acq-python.ps1')) {
               foreach ($verb in @('version', 'doctor', 'backend list')) {
                 $verbArgs = @($verb -split ' ') + '--json'
                 $out = & $launcher @verbArgs
@@ -271,12 +272,11 @@ jobs:
           # The runner exits a pwsh step with the last native exit code (2 here).
           exit 0
 
-      # ACQ_IMPL=bash, the explicit opt-in: the launchers find Git for Windows'
-      # bash.exe and run the Bash acq.
-      - name: Smoke-test acq.cmd and acq.ps1 (ACQ_IMPL=bash)
-        env:
-          ACQ_IMPL: bash
+      # Bash is the M1 default; the ordinary launchers also accept explicit Bash.
+      - name: Smoke-test acq.cmd and acq.ps1 (Bash default and explicit)
         run: |
+          foreach ($impl in @('', 'bash')) {
+          if ($impl) { $env:ACQ_IMPL = $impl } else { Remove-Item Env:ACQ_IMPL -ErrorAction SilentlyContinue }
           foreach ($launcher in @('.\acq.cmd', '.\acq.ps1')) {
             $out = & $launcher version
             $code = $LASTEXITCODE
@@ -286,16 +286,18 @@ jobs:
             if ($text -notmatch 'patterns kit ref: [0-9a-f]{40}') { throw "${launcher} version: no patterns kit ref in the output" }
             Write-Host "ok: ${launcher} version (Bash)"
           }
+          }
 
       # -DryRun promises no writes and no network: check that nothing appears at
       # the default install location and that the user PATH is unchanged.
       - name: install.ps1 -DryRun (PowerShell 7 and Windows PowerShell 5.1)
         run: |
-          $target = Join-Path $env:LOCALAPPDATA 'Programs\acq'
+          $target = Join-Path $env:LOCALAPPDATA 'Programs\acq-python-preview'
           $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
           $winPs = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
           foreach ($ps in @((Get-Command pwsh).Source, $winPs)) {
-            $out = & $ps -NoLogo -NoProfile -File .\install.ps1 -DryRun
+            $fixtureVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version + '-rc.0'
+            $out = & $ps -NoLogo -NoProfile -File .\install.ps1 -Channel python -Version $fixtureVersion -DryRun
             $code = $LASTEXITCODE
             $text = $out -join "`n"
             Write-Host $text
@@ -333,7 +335,7 @@ jobs:
           mkdir acq-runtime-smoke
           # The launchers go beside py-acq\ as in the release archive, so the next
           # step can check that acq.ps1 finds the managed runtime.
-          cp acq.cmd acq.ps1 acq-runtime-smoke/
+          cp acq.cmd acq.ps1 acq-python.cmd acq-python.ps1 acq-runtime-smoke/
           scripts/stage-windows-runtime acq-python-embed.zip "$sha" acq-runtime-smoke
           rt=acq-runtime-smoke/py-acq/runtime/python.exe
           # Isolated, safe-path, and importing acq from ..\src only.
@@ -341,17 +343,17 @@ jobs:
           "$rt" -P -m acq_py version --json > acq-version.json
           python3 -c "import json; d = json.load(open('acq-version.json')); assert d['data']['impl'] == 'python', d"
 
-      # ACQ_IMPL unset, as an installed acq runs by default: acq.cmd must pick the
-      # managed runtime beside it over setup-python's interpreter on PATH.
-      - name: Smoke-test the staged layout through acq.cmd (default, managed runtime)
+      # The preview-named command must pick the managed runtime beside it over
+      # setup-python's interpreter on PATH.
+      - name: Smoke-test the staged layout through acq-python.cmd (explicit preview, managed runtime)
         run: |
           Remove-Item Env:ACQ_IMPL -ErrorAction SilentlyContinue
-          $out = & .\acq-runtime-smoke\acq.cmd version --json
+          $out = & .\acq-runtime-smoke\acq-python.cmd version --json
           $code = $LASTEXITCODE
           if ($code -ne 0) { throw "staged acq.cmd version --json exited ${code}" }
           $doc = ($out -join "`n") | ConvertFrom-Json
           if ($doc.data.impl -ne 'python') { throw "staged acq.cmd version: impl is '$($doc.data.impl)', expected python" }
-          $out = & .\acq-runtime-smoke\acq.cmd doctor --json
+          $out = & .\acq-runtime-smoke\acq-python.cmd doctor --json
           $code = $LASTEXITCODE
           if ($code -ne 0) { throw "staged acq.cmd doctor --json exited ${code}" }
           $doc = ($out -join "`n") | ConvertFrom-Json

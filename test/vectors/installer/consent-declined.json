@@ -1,12 +1,12 @@
 {
   "schema": 1,
   "id": "installer/consent-declined",
-  "oracle": "ADR-0042m installer consent: PATH is never modified without an explicit yes (non-interactive declines)",
+  "oracle": "ADR-0053 preview installer: PATH and profiles remain unchanged without consent",
   "tier": 1,
   "backend": null,
   "platform": "linux",
   "invoke": {
-    "argv": ["sh", "install.sh", "--source", "test/fixtures/installer"],
+    "argv": ["sh", "install.sh", "--channel", "python", "--ref", "5.0.0-rc.1", "--source", "test/fixtures/installer"],
     "env": {},
     "unset": [],
     "stdin": "",
@@ -14,9 +14,9 @@
   },
   "expect": {
     "exit": 0,
-    "stderr": {
+    "stdout": {
       "mode": "contains",
-      "value": "Not changing your PATH",
+      "value": "PATH and shell profiles were not changed",
       "normalize": []
     }
   },

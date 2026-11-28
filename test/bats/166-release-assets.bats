@@ -7,7 +7,7 @@ setup() {
   export WORK="$BATS_TEST_TMPDIR/work"
   mkdir -p "$WORK/tree" "$WORK/wheelhouse" "$WORK/dist" "$WORK/home"
   export HOME="$WORK/home" ACQ_BUILD_VERSION=8.7.6 ACQ_BUILD_REVISION=0123456789abcdef0123456789abcdef01234567
-  unset ACQ_RUNTIME ACQ_VERSION ACQ_SOURCE_REVISION ACQ_IMPL ACQ_INSTALL_SOURCE ACQ_INSTALL_DIR ACQ_INSTALL_BIN_DIR
+  unset ACQ_RUNTIME ACQ_VERSION ACQ_SOURCE_REVISION ACQ_IMPL ACQ_INSTALL_SOURCE ACQ_INSTALL_DIR ACQ_INSTALL_BIN_DIR ACQ_INSTALL_CHANNEL ACQ_INSTALL_VERSION
   python3 -I - "$WORK" <<'PY'
 import hashlib
 from pathlib import Path
@@ -42,6 +42,7 @@ PY
 
 _build_dist() {
   local platform
+  export ACQ_BUILD_VERSION=8.7.6-rc.0
   # No macos-x86_64: Intel Macs are not supported, so no such archive is built.
   for platform in linux-x86_64 linux-aarch64 macos-arm64 windows-x86_64; do
     if [ "$platform" = windows-x86_64 ]; then
@@ -54,7 +55,7 @@ _build_dist() {
     tar -czf "$WORK/dist/provider-input-validator-wheelhouse-$platform.tar.gz" -C "$WORK/wheelhouse" .
   done
   cp install.sh install.ps1 "$WORK/dist/"
-  scripts/gen-provenance "$WORK/dist"
+  ACQ_BUILD_VERSION=8.7.6-rc.0 scripts/gen-provenance "$WORK/dist"
   scripts/gen-install-assets "$WORK/dist"
 }
 
@@ -162,12 +163,12 @@ for platform, spec in assets['platforms'].items():
         assert name in names, (platform, name)
     identity = {}
     exec(baked, identity)
-    assert identity['ACQ_VERSION'] == '8.7.6'
+    assert identity['ACQ_VERSION'] == '8.7.6-rc.0'
     assert identity['SOURCE_REVISION'] == '0123456789abcdef0123456789abcdef01234567'
 provenance = json.loads((root / 'provenance.json').read_text())
 template = json.loads(Path('installer/provenance.json').read_text())
 assert provenance.keys() == template.keys()
-assert provenance['acq'] == {'acq_version': '8.7.6', 'source_revision': '0123456789abcdef0123456789abcdef01234567'}
+assert provenance['acq'] == {'acq_version': '8.7.6-rc.0', 'source_revision': '0123456789abcdef0123456789abcdef01234567'}
 assert provenance['runtimes'].keys() == assets['platforms'].keys()
 for platform, spec in assets['platforms'].items():
     assert provenance['runtimes'][platform] == {'supplier': spec['components']['runtime']['supplier'], 'version': '3.14.10'}
@@ -221,11 +222,11 @@ PY
 
 @test "release assets: fake complete dist installs offline and reports the baked Python identity" {
   _build_dist
-  run sh "$WORK/dist/install.sh" --source "$WORK/dist" --install-dir "$WORK/installed" --bin-dir "$WORK/bin" --yes
+  run sh "$WORK/dist/install.sh" --channel python --ref 8.7.6-rc.0 --source "$WORK/dist" --install-dir "$WORK/installed" --bin-dir "$WORK/bin" --yes
   assert_success
   run "$WORK/installed/acq-python" version --json
   assert_success
-  run env ACQ_IMPL=python "$WORK/installed/acq" version --json
+  run "$WORK/bin/acq-python" version --json
   assert_success
   printf '%s\n' "$output" > "$WORK/version.json"
   python3 -I - "$WORK/version.json" <<'PY'
@@ -233,7 +234,7 @@ import json
 import sys
 d = json.load(open(sys.argv[1]))['data']
 assert d['impl'] == 'python'
-assert d['acq_version'] == '8.7.6'
+assert d['acq_version'] == '8.7.6-rc.0'
 assert d['source_revision'] == '0123456789abcdef0123456789abcdef01234567'
 PY
 }

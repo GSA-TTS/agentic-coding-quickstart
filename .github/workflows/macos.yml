@@ -143,6 +143,7 @@ jobs:
           PY
           curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
             --connect-timeout 20 --max-time 300 "$RUNTIME_URL" -o "$AREA/runtime.archive"
+          export ACQ_BUILD_VERSION="$(python3 -I -c 'import json; print(json.load(open("package.json"))["version"] + "-rc.0")')"
           sh scripts/assemble-release macos-arm64 "$AREA/runtime.archive" "$RUNTIME_SHA256" "$AREA/wheelhouse" "$AREA/dist"
           cp install.sh "$AREA/dist/"
           sh scripts/gen-provenance "$AREA/dist"
@@ -165,17 +166,18 @@ jobs:
           mkdir "$AREA/home"
           export HOME="$AREA/home"
           export XDG_CONFIG_HOME="$HOME/.config" XDG_DATA_HOME="$HOME/.local/share" XDG_STATE_HOME="$HOME/.local/state"
-          sh "$AREA/dist/install.sh" --source "$AREA/dist" --install-dir "$AREA/installed" --bin-dir "$AREA/bin" --yes
-          "$AREA/bin/acq" version --json > "$AREA/installed.json"
+          fixture_version="$(python3 -I -c 'import json; print(json.load(open("package.json"))["version"] + "-rc.0")')"
+          sh "$AREA/dist/install.sh" --channel python --ref "$fixture_version" --source "$AREA/dist" --install-dir "$AREA/installed" --bin-dir "$AREA/bin" --yes
+          "$AREA/bin/acq-python" version --json > "$AREA/installed.json"
           python -I - <<'PY'
           import json, os, pathlib, subprocess
           d = json.loads(pathlib.Path(os.environ['AREA'], 'installed.json').read_text())['data']
           assert d['impl'] == 'python', d
-          assert d['acq_version'] == json.load(open('package.json'))['version'], d
+          assert d['acq_version'] == json.load(open('package.json'))['version'] + '-rc.0', d
           assert d['source_revision'] == subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(), d
           PY
-          "$AREA/bin/acq" --help
-          "$AREA/bin/acq" backend list --json > "$AREA/backends.json"
+          "$AREA/bin/acq-python" --help
+          "$AREA/bin/acq-python" backend list --json > "$AREA/backends.json"
           python -I -c 'import json,os,pathlib; d=json.loads(pathlib.Path(os.environ["AREA"],"backends.json").read_text()); assert d["command"] == "backend list", d'
           "$AREA/installed/py-acq/runtime/bin/python3" -I -c 'import platform; assert platform.machine() == "arm64"'
 

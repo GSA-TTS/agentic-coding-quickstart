@@ -1,12 +1,12 @@
 {
   "schema": 1,
   "id": "installer/usage-error",
-  "oracle": "ADR-0042m installer usage error: an unknown option exits 2 with a diagnostic",
+  "oracle": "ADR-0053 preview installer: an unknown option exits 2 with a diagnostic",
   "tier": 1,
   "backend": null,
   "platform": "linux",
   "invoke": {
-    "argv": ["sh", "install.sh", "--bogus"],
+    "argv": ["sh", "install.sh", "--channel", "python", "--ref", "5.0.0-rc.1", "--bogus"],
     "env": {},
     "unset": [],
     "stdin": "",

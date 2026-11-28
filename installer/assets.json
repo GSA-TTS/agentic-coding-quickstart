@@ -21,7 +21,7 @@
         "runtime": { "supplier": "python.org-embedded", "path": "py-acq/runtime/python.exe" },
         "wheelhouse": "wheelhouse/",
         "backends": "acq.backends/",
-        "launchers": ["acq.cmd", "acq.ps1", "acq"]
+        "launchers": ["acq.cmd", "acq.ps1", "acq", "acq-python.cmd", "acq-python.ps1"]
       }
     },
     "macos-arm64": {

@@ -1,12 +1,12 @@
 {
   "schema": 1,
   "id": "installer/checksum-fail-closed",
-  "oracle": "ADR-0042m installer: a checksum mismatch fails closed (exit 1) before any write",
+  "oracle": "ADR-0053 preview installer: a checksum mismatch fails closed before any write",
   "tier": 1,
   "backend": null,
   "platform": "linux",
   "invoke": {
-    "argv": ["sh", "install.sh", "--source", "test/fixtures/installer-bad", "--yes"],
+    "argv": ["sh", "install.sh", "--channel", "python", "--ref", "5.0.0-rc.1", "--source", "test/fixtures/installer-bad", "--yes"],
     "env": {},
     "unset": [],
     "stdin": "",

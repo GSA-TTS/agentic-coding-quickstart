@@ -2,8 +2,8 @@
 
 ADR-0047m promises that the Windows launchers forward argv verbatim and fail
 closed (exit 2) on any ACQ_IMPL other than ``bash`` or ``python``, compared as
-the Bash ``acq`` compares it. ADR-0048m makes an unset ACQ_IMPL mean ``python``
-on Windows, with a fixed interpreter order (an absolute ``ACQ_RUNTIME``, the
+the Bash ``acq`` compares it. M1 leaves an unset ACQ_IMPL on Bash; explicitly
+selected Python uses a fixed interpreter order (an absolute ``ACQ_RUNTIME``, the
 managed ``py-acq\\runtime\\python.exe``, then a drive-rooted or UNC ``PATH``
 entry that passes an isolated 3.12+ probe), ``-P``, and a fail-closed error
 that never falls back to Bash. These tests copy the launchers into a scratch
@@ -135,7 +135,7 @@ def launcher_tree(tmp_path: Path) -> Path:
     root = Path(os.path.realpath(tmp_path)) / "acq-launchers"
     package = root / "py-acq" / "src" / "acq_py"
     package.mkdir(parents=True)
-    for name in ("acq.cmd", "acq.ps1"):
+    for name in ("acq.cmd", "acq.ps1", "acq-python.cmd", "acq-python.ps1"):
         shutil.copyfile(REPO_ROOT / name, root / name)
     (package / "__init__.py").write_bytes(b"")
     (package / "__main__.py").write_bytes(FAKE_MAIN.encode())
@@ -188,6 +188,29 @@ def test_acq_cmd_forwards_no_arguments_and_the_exit_status(launcher_tree: Path, 
     result = _run(_via_cmd(launcher_tree, []), _env("python", ACQ_FAKE_EXIT="7"), tmp_path)
     assert result.returncode == 7, result.stderr
     assert json.loads(result.stdout)["argv"] == []
+
+
+@pytest.mark.parametrize("name", ["acq-python.cmd", "acq-python.ps1", "bin/acq-python.ps1"])
+def test_explicit_preview_preserves_raw_windows_arguments(launcher_tree, tmp_path, name):
+    if name.startswith("bin/"):
+        command = launcher_tree / name
+        command.parent.mkdir()
+        command.write_text('& (Join-Path $PSScriptRoot "..\\acq-python.ps1") @args; exit $LASTEXITCODE')
+    else:
+        command = launcher_tree / name
+    argv = ([str(command), *ARGV] if name.endswith(".cmd") else
+            [_windows_powershell(), "-NoLogo", "-NoProfile", "-File", str(command), *ARGV])
+    result = _run(argv, _env("bash", ACQ_FAKE_EXIT="7"), tmp_path)
+    assert result.returncode == 7, result.stderr
+    assert json.loads(result.stdout)["argv"] == ARGV
+
+
+def test_ordinary_windows_command_defaults_to_bash(launcher_tree, tmp_path):
+    if _git_bash() is None:
+        pytest.skip("Git for Windows required to execute the stable default")
+    result = _run(_via_cmd(launcher_tree, ["version"]), _env(None), tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "[version]"
 
 
 def test_acq_ps1_started_otherwise_forwards_its_args(launcher_tree: Path, tmp_path: Path) -> None:
@@ -245,9 +268,10 @@ def _system_path() -> list[str]:
 
 
 def _default_env(path: list[str] | None = None, **extra: str) -> dict[str, str]:
-    """ACQ_IMPL and ACQ_RUNTIME unset; ``path`` (plus Windows' own directories)
+    """Python explicitly selected and ACQ_RUNTIME unset; ``path`` (plus Windows' own directories)
     replaces PATH when given."""
-    env = _env(None, **extra)
+    # These runtime resolution tests explicitly opt in to Python during M1.
+    env = _env("python", **extra)
     if "ACQ_RUNTIME" not in extra:
         env.pop("ACQ_RUNTIME", None)
     if path is not None:

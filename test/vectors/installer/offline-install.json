@@ -1,12 +1,12 @@
 {
   "schema": 1,
   "id": "installer/offline-install",
-  "oracle": "ADR-0042m installer: installs from the enumerated offline asset set alone (no network)",
+  "oracle": "ADR-0053 preview installer: installs the explicit pinned preview from the offline asset set alone",
   "tier": 1,
   "backend": null,
   "platform": "linux",
   "invoke": {
-    "argv": ["sh", "install.sh", "--source", "test/fixtures/installer", "--yes"],
+    "argv": ["sh", "install.sh", "--channel", "python", "--ref", "5.0.0-rc.1", "--source", "test/fixtures/installer", "--yes"],
     "env": {},
     "unset": [],
     "stdin": "",

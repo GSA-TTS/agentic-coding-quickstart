@@ -152,6 +152,8 @@ jobs:
           set -euo pipefail
           curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error "$RUNTIME_URL" -o runtime.archive
           # The matching stage script verifies the pinned digest before extraction.
+          # Nonpublished qualification fixture identity, not a release/tag claim.
+          export ACQ_BUILD_VERSION="$(python3 -I -c 'import json; print(json.load(open("package.json"))["version"] + "-rc.0")')"
           scripts/assemble-release "$PLATFORM" runtime.archive "$RUNTIME_SHA256" wheelhouse dist --stage release-tree
       # Secrets are scoped to signing steps, never PR build steps.
       - name: Check optional Windows credentials
@@ -269,7 +271,7 @@ jobs:
           assert head[:4] == bytes.fromhex("cffaedfe") and head[4:8] == bytes.fromhex("0c000001"), head.hex()
           ident = {}
           exec((root / "py-acq/src/acq_py/_build_info.py").read_text(), ident)
-          assert ident["ACQ_VERSION"] == json.load(open("package.json"))["version"], ident
+          assert ident["ACQ_VERSION"] == json.load(open("package.json"))["version"] + "-rc.0", ident
           assert ident["SOURCE_REVISION"] == subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(), ident
           print("arm64 Mach-O runtime and baked identity verified statically")
           PY
@@ -288,7 +290,7 @@ jobs:
             tar -xzf "dist/$archive" -C unpacked
             unpacked/py-acq/runtime/bin/python3 -I -c 'import pathlib,runpy,sys; sys.path.insert(0,str(pathlib.Path("unpacked/py-acq/src").resolve())); sys.argv=["acq_py","version","--json"]; runpy.run_module("acq_py",run_name="__main__")' > version.json
           fi
-          python3 -I -c 'import json,subprocess; d=json.load(open("version.json"))["data"]; assert d["impl"]=="python"; assert d["acq_version"]==json.load(open("package.json"))["version"]; assert d["source_revision"]==subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip(), d'
+          python3 -I -c 'import json,subprocess; d=json.load(open("version.json"))["data"]; assert d["impl"]=="python"; assert d["acq_version"]==json.load(open("package.json"))["version"]+"-rc.0"; assert d["source_revision"]==subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip(), d'
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: archive-${{ matrix.platform }}
@@ -313,7 +315,8 @@ jobs:
         run: |
           cp install.sh dist/
           test -f dist/install.ps1
-          scripts/gen-provenance dist
+          # Match the nonpublished preview qualification fixture embedded in archives.
+          ACQ_BUILD_VERSION="$(python3 -I -c 'import json; print(json.load(open("package.json"))["version"] + "-rc.0")')" scripts/gen-provenance dist
           scripts/gen-install-assets dist
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -347,18 +350,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sh dist/install.sh --source "$PWD/dist" --install-dir "$RUNNER_TEMP/acq-installed" --bin-dir "$RUNNER_TEMP/acq-bin" --yes
-          ACQ_IMPL=python "$RUNNER_TEMP/acq-installed/acq" version --json > version.json
-          python3 -I -c 'import json; d=json.load(open("version.json"))["data"]; assert d["impl"]=="python"; assert d["acq_version"]==json.load(open("package.json"))["version"], d'
+          fixture_version="$(python3 -I -c 'import json; print(json.load(open("package.json"))["version"] + "-rc.0")')"
+          sh dist/install.sh --channel python --ref "$fixture_version" --source "$PWD/dist" --install-dir "$RUNNER_TEMP/acq-installed" --bin-dir "$RUNNER_TEMP/acq-bin" --yes
+          "$RUNNER_TEMP/acq-bin/acq-python" version --json > version.json
+          python3 -I -c 'import json; d=json.load(open("version.json"))["data"]; assert d["impl"]=="python"; assert d["acq_version"]==json.load(open("package.json"))["version"]+"-rc.0", d'
       - name: Offline install and installed identity (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          & ./dist/install.ps1 -Source "$PWD/dist" -InstallDir "$env:RUNNER_TEMP/acq-installed" -Yes
-          $data = (& "$env:RUNNER_TEMP/acq-installed/acq.cmd" version --json | ConvertFrom-Json).data
+          $fixtureVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version + '-rc.0'
+          & ./dist/install.ps1 -Channel python -Version $fixtureVersion -Source "$PWD/dist" -InstallDir "$env:RUNNER_TEMP/acq-installed" -Yes
+          $data = (& "$env:RUNNER_TEMP/acq-installed/bin/acq-python.cmd" version --json | ConvertFrom-Json).data
           if ($LASTEXITCODE -ne 0) { throw 'installed launcher failed' }
-          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $version = $fixtureVersion
           if ($data.impl -ne 'python' -or $data.acq_version -ne $version) { throw 'installed identity mismatch' }
 
   # The only macOS coverage: it installs the complete offline asset set the way a
@@ -388,9 +393,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sh dist/install.sh --source "$PWD/dist" --install-dir "$RUNNER_TEMP/acq-installed" --bin-dir "$RUNNER_TEMP/acq-bin" --yes
-          ACQ_IMPL=python "$RUNNER_TEMP/acq-installed/acq" version --json > installed.json
-          python3 -I -c 'import json; d=json.load(open("installed.json"))["data"]; assert d["impl"]=="python"; assert d["acq_version"]==json.load(open("package.json"))["version"], d'
+          fixture_version="$(python3 -I -c 'import json; print(json.load(open("package.json"))["version"] + "-rc.0")')"
+          sh dist/install.sh --channel python --ref "$fixture_version" --source "$PWD/dist" --install-dir "$RUNNER_TEMP/acq-installed" --bin-dir "$RUNNER_TEMP/acq-bin" --yes
+          "$RUNNER_TEMP/acq-bin/acq-python" version --json > installed.json
+          python3 -I -c 'import json; d=json.load(open("installed.json"))["data"]; assert d["impl"]=="python"; assert d["acq_version"]==json.load(open("package.json"))["version"]+"-rc.0", d'
       - name: Run the arm64 runtime and check the baked identity
         shell: bash
         run: |
@@ -398,4 +404,4 @@ jobs:
           mkdir unpacked
           tar -xzf dist/acq-macos-arm64.tar.gz -C unpacked
           unpacked/py-acq/runtime/bin/python3 -I -c 'import pathlib,runpy,sys; sys.path.insert(0,str(pathlib.Path("unpacked/py-acq/src").resolve())); sys.argv=["acq_py","version","--json"]; runpy.run_module("acq_py",run_name="__main__")' > version.json
-          python3 -I -c 'import json,subprocess; d=json.load(open("version.json"))["data"]; assert d["impl"]=="python"; assert d["acq_version"]==json.load(open("package.json"))["version"]; assert d["source_revision"]==subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip(), d'
+          python3 -I -c 'import json,subprocess; d=json.load(open("version.json"))["data"]; assert d["impl"]=="python"; assert d["acq_version"]==json.load(open("package.json"))["version"]+"-rc.0"; assert d["source_revision"]==subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip(), d'

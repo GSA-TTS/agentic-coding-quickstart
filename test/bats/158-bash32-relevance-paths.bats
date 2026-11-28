@@ -22,7 +22,7 @@ load 'helper'
 WORKFLOW_REL='.github/workflows/bash32-compat.yml'
 
 # Every path the build + suite job reads, and why it is required.
-#   acq acq.backends acq.cmd acq.ps1 install.* README.md AGENTS.md
+#   acq acq-python.* acq.backends acq.cmd acq.ps1 install.* README.md AGENTS.md
 #                         the code under test, and files the suite reads directly
 #   scripts/test-acq-*    the runner, the stub library, and the 3.2 launcher
 #   scripts/bats*         bats sharding and timing helpers exercised by tests
@@ -48,6 +48,8 @@ WORKFLOW_REL='.github/workflows/bash32-compat.yml'
 #                         release-assets.bats builds the enumerated offline dist
 REQUIRED_PATHSPECS='
 acq
+acq-python.cmd
+acq-python.ps1
 acq.backends
 acq.cmd
 acq.ps1

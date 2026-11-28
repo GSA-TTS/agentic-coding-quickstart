@@ -158,6 +158,8 @@ jobs:
           # pins (a gitlink change reports as the submodule path).
           changed="$(git diff --name-only "$BASE_SHA" -- \
             'acq' \
+            'acq-python.cmd' \
+            'acq-python.ps1' \
             'acq.backends' \
             'acq.cmd' \
             'acq.ps1' \
