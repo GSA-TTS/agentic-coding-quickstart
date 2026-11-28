@@ -68,6 +68,59 @@ def test_relevance_uses_actual_event_base_and_push_runs_everything(name, tmp_pat
     assert output.read_text() == 'relevant=true\n'
 
 
+def test_bash32_skips_only_python_target_prs_but_always_posts_its_gate(tmp_path):
+    """Python migration PRs skip the costly suite, not its required context."""
+    text = _text('bash32-compat')
+    changes = text.split('  changes:\n', 1)[1].split('\n  prepare-bash32:', 1)[0]
+    gate = text.split('  gate:\n', 1)[1]
+
+    assert 'PR_BASE_REF: ${{ github.event.pull_request.base.ref }}' in changes
+    assert '[ "$EVENT_NAME" = "pull_request" ] && [ "$PR_BASE_REF" = "migration/python-cross-platform" ]' in changes
+    assert "relevant=false" in changes
+    assert 'Python-target PR: skipping the bash 3.2 offline suite.' in changes
+
+    # Main-target PRs and merge groups must force the complete suite rather than
+    # reaching the relevance-skip path; only the exact target gets the early skip.
+    assert 'if [ "$EVENT_NAME" = "push" ]' in changes
+    assert 'if [ "$EVENT_NAME" = "pull_request" ] || [ "$EVENT_NAME" = "merge_group" ]' in changes
+    assert 'Main-target PR or merge-group run: running the complete bash 3.2 suite.' in changes
+    assert 'merge_group.base_sha || github.event.pull_request.base.sha' in changes
+
+    # No workflow-level branch/path filter may suppress the required context.
+    assert 'if: always()' in gate
+    assert 'name: acq offline suite under bash 3.2' in gate
+    assert 'Gate passes: Python-target PR; bash-3.2 suite skipped by policy.' in gate
+
+    # Execute the workflow's actual early-return branch. An absent base SHA proves
+    # the policy happens before diff/fetch and cannot accidentally invoke the
+    # long-running legacy suite.
+    marker = 'id: filter\n'
+    script = text.split(marker, 1)[1].split('        run: |\n', 1)[1].split('\n\n', 1)[0]
+    script = '\n'.join(line[10:] for line in script.splitlines())
+    output = tmp_path / 'output'
+    result = subprocess.run(['bash', '-c', script], env={
+        **os.environ,
+        'EVENT_NAME': 'pull_request',
+        'PR_BASE_REF': REWRITE,
+        'BASE_SHA': '',
+        'GITHUB_OUTPUT': str(output),
+    }, cwd=tmp_path, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert output.read_text() == 'relevant=false\nskip_reason=python-target-pr\n'
+
+    for event in ('pull_request', 'merge_group'):
+        output.unlink(missing_ok=True)
+        result = subprocess.run(['bash', '-c', script], env={
+            **os.environ,
+            'EVENT_NAME': event,
+            'PR_BASE_REF': 'main',
+            'BASE_SHA': '',
+            'GITHUB_OUTPUT': str(output),
+        }, cwd=tmp_path, capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        assert output.read_text() == 'relevant=true\n'
+
+
 def test_diff_dry_run_is_relative_to_each_actual_base(tmp_path):
     """Real Git diff: a rewrite-only input is not a change against its own base."""
     def git(*args):

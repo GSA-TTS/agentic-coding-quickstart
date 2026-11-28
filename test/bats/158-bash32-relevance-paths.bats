@@ -248,6 +248,19 @@ _workflow_pathspecs() {
   fi
 }
 
+@test "relevance: Python-target PRs skip only the suite, never its required gate" {
+  local workflow
+  workflow=$(cat "$REPO_ROOT/$WORKFLOW_REL")
+  [[ "$workflow" == *'PR_BASE_REF: ${{ github.event.pull_request.base.ref }}'* ]]
+  [[ "$workflow" == *'"$PR_BASE_REF" = "migration/python-cross-platform"'* ]]
+  [[ "$workflow" == *'Python-target PR: skipping the bash 3.2 offline suite.'* ]]
+  [[ "$workflow" == *'if [ "$EVENT_NAME" = "pull_request" ] || [ "$EVENT_NAME" = "merge_group" ]'* ]]
+  [[ "$workflow" == *'Main-target PR or merge-group run: running the complete bash 3.2 suite.'* ]]
+  [[ "$workflow" == *'name: acq offline suite under bash 3.2'* ]]
+  [[ "$workflow" == *'if: always()'* ]]
+  [[ "$workflow" == *'Gate passes: Python-target PR; bash-3.2 suite skipped by policy.'* ]]
+}
+
 @test "relevance: the pathspec list can be parsed from the workflow" {
   run _relevance_command
   [ "$status" -eq 0 ] || fail "no complete 'git diff --name-only \"\$BASE_SHA\" -- ...' command in $WORKFLOW_REL"
