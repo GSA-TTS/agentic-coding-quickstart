@@ -77,6 +77,7 @@ on:
   pull_request:
     branches:
       - main
+      - migration/python-cross-platform
   merge_group:
     branches: [main]
 
@@ -115,6 +116,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       relevant: ${{ steps.filter.outputs.relevant }}
+      skip_reason: ${{ steps.filter.outputs.skip_reason }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -123,9 +125,29 @@ jobs:
       - name: Compute relevance from the PR or merge-group diff
         id: filter
         env:
+          EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           set -euo pipefail
+          # The Python migration branch replaces the Bash implementation; its
+          # PRs still receive the always-posted required gate below, but do not
+          # spend runner time on the legacy Bash 3.2 offline suite. Main-target
+          # PRs and merge-group runs retain complete, fail-closed validation.
+          if [ "$EVENT_NAME" = "pull_request" ] && [ "$PR_BASE_REF" = "migration/python-cross-platform" ]; then
+            echo "relevant=false" >>"$GITHUB_OUTPUT"
+            echo "skip_reason=python-target-pr" >>"$GITHUB_OUTPUT"
+            echo "Python-target PR: skipping the bash 3.2 offline suite."
+            exit 0
+          fi
+          # Main-target PRs and the main merge queue protect the supported Bash
+          # implementation. Always run their complete, fail-closed validation;
+          # relevance filtering is only for the migration-target policy above.
+          if [ "$EVENT_NAME" = "pull_request" ] || [ "$EVENT_NAME" = "merge_group" ]; then
+            echo "relevant=true" >>"$GITHUB_OUTPUT"
+            echo "Main-target PR or merge-group run: running the complete bash 3.2 suite."
+            exit 0
+          fi
           # Fail CLOSED on any error in this step: if the diff can't be
           # computed for any reason, fail rather than silently skipping the
           # real check. An error here must surface as a
@@ -519,6 +541,7 @@ jobs:
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
           RELEVANT: ${{ needs.changes.outputs.relevant }}
+          SKIP_REASON: ${{ needs.changes.outputs.skip_reason }}
           PREPARE_RESULT: ${{ needs.prepare-bash32.result }}
           TEST_RESULT: ${{ needs.test-acq-bash32.result }}
         run: |
@@ -543,7 +566,12 @@ jobs:
               ;;
             false)
               if [ "$PREPARE_RESULT" = "skipped" ] && [ "$TEST_RESULT" = "skipped" ]; then
-                echo "Gate passes: no bash-3.2-relevant paths changed; suite skipped."
+                if [ "$SKIP_REASON" = "python-target-pr" ]; then
+                  echo "Gate passes: Python-target PR; bash-3.2 suite skipped by policy."
+                else
+                  echo "::error::skipped suite without the Python-target policy reason (reason='${SKIP_REASON:-<none>}') — failing closed."
+                  exit 1
+                fi
               else
                 echo "::error::irrelevant diff but prepare=$PREPARE_RESULT, offline suite=$TEST_RESULT (expected both skipped)."
                 exit 1
